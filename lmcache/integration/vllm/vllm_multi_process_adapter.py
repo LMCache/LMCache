@@ -144,6 +144,10 @@ class LoadStoreOp:
     end: int = 0
     """End token index"""
 
+    skip_first_n_tokens: int = 0
+    """Number of tokens to skip writing at the beginning of the retrieve
+    range. Used to avoid overwriting APC-shared GPU blocks during retrieve."""
+
     def __len__(self) -> int:
         return len(self.block_ids)
 
@@ -162,6 +166,7 @@ class LMCacheMPSchedulerAdapter:
         world_size: int,
         kv_rank: int,
         vllm_block_size: int,
+        tp_size: int = 1,
     ):
         """
         Args:
@@ -172,14 +177,17 @@ class LMCacheMPSchedulerAdapter:
             world_size: The world size used for LMCache keys
             kv_rank: The kv rank used for LMCache keys
             vllm_block_size: The block size used in vLLM
+            tp_size: Tensor-parallel size for MLA
+                multi-reader locking (default 1).
         """
         self.mq_client = MessageQueueClient(server_url, context)
 
-        # Request futures
-        self.lookup_futures: dict[str, MessagingFuture[LookupResult]] = {}
+        # Two-phase lookup state: request_id -> server prefetch job ID
+        self._lookup_job_ids: dict[str, int] = {}
 
         self.model_name = model_name
         self.world_size = world_size
+        self.tp_size = tp_size
 
         # Read chunk size from lmcache
         try:
@@ -220,6 +228,10 @@ class LMCacheMPSchedulerAdapter:
         """
         Submit a new lookup request to LMCache if there is no ongoing request.
 
+        Sends a LOOKUP request to the server and blocks until a prefetch
+        job ID is returned.  The actual prefetch result can then be polled
+        via ``check_lookup_result``.
+
         Args:
             request_id: The ID of the lookup request. The same ID indicates it's
                 from the same request
@@ -238,7 +250,7 @@ class LMCacheMPSchedulerAdapter:
         if not self.is_healthy:
             return
 
-        if request_id in self.lookup_futures:
+        if request_id in self._lookup_job_ids:
             # Skip if there is already a lookup request
             return
 
@@ -254,14 +266,28 @@ class LMCacheMPSchedulerAdapter:
         future = send_lmcache_request(
             self.mq_client,
             RequestType.LOOKUP,
-            [key],
+            [key, self.tp_size],
         )
-        self.lookup_futures[request_id] = future
+        try:
+            job_id = future.result(timeout=self._mq_timeout)
+        except TimeoutError:
+            logger.warning(
+                "LOOKUP request timed out after %ss. "
+                "Marking server as unhealthy.",
+                self._mq_timeout,
+            )
+            self._health_event.clear()
+            return
+        self._lookup_job_ids[request_id] = job_id
 
     @_lmcache_nvtx_annotate
     def check_lookup_result(self, request_id: str) -> int | None:
         """
         Check the result of a previously submitted lookup request.
+
+        Sends a QUERY_PREFETCH_STATUS request to the server and blocks
+        until the server responds.  Returns the matched token count
+        when the prefetch is complete, or None if still in progress.
 
         Args:
             request_id: The ID of the lookup request submitted in
@@ -272,21 +298,36 @@ class LMCacheMPSchedulerAdapter:
             in LMCache (prefix matching), or
             None if the lookup request is not finished yet.
         """
-        if request_id not in self.lookup_futures:
-            # No future — either unhealthy at submit time or already cleaned up
+        if request_id not in self._lookup_job_ids:
+            # No job — either unhealthy at submit time or already cleaned up
             return 0
 
-        future = self.lookup_futures[request_id]
-        if not future.query():
-            if not self.is_healthy:
-                # Server went down — give up on this lookup
-                self.lookup_futures.pop(request_id)
-                return 0
+        if not self.is_healthy:
+            # Server went down — give up on this lookup
+            self._lookup_job_ids.pop(request_id, None)
+            return 0
+
+        job_id = self._lookup_job_ids[request_id]
+        try:
+            result = send_lmcache_request(
+                self.mq_client,
+                RequestType.QUERY_PREFETCH_STATUS,
+                [job_id],
+            ).result(timeout=self._mq_timeout)
+        except TimeoutError:
+            logger.warning(
+                "QUERY_PREFETCH_STATUS timed out after %ss. "
+                "Marking server as unhealthy.",
+                self._mq_timeout,
+            )
+            self._health_event.clear()
+            self._lookup_job_ids.pop(request_id, None)
+            return 0
+
+        if result is None:
             return None
 
-        result = future.result()
-        num_chunks = result
-        return num_chunks * self.chunk_size
+        return result * self.chunk_size
 
     def num_blocks_per_chunk(self) -> int:
         """
@@ -297,11 +338,11 @@ class LMCacheMPSchedulerAdapter:
 
     def cleanup_lookup_result(self, request_id: str) -> None:
         """
-        Clean up lookup future for a finished request to prevent memory leak.
+        Clean up lookup state for a finished request to prevent memory leak.
         Args:
             request_id: The ID of the finished request.
         """
-        self.lookup_futures.pop(request_id, None)
+        self._lookup_job_ids.pop(request_id, None)
 
     def free_lookup_locks(
         self,
@@ -338,7 +379,7 @@ class LMCacheMPSchedulerAdapter:
         send_lmcache_request(
             self.mq_client,
             RequestType.FREE_LOOKUP_LOCKS,
-            [key],
+            [key, self.tp_size],
         )
 
     def end_session(self, request_id: str) -> None:
@@ -535,7 +576,13 @@ class LMCacheMPWorkerAdapter:
         future = send_lmcache_request(
             self.mq_client,
             RequestType.RETRIEVE,
-            [key, self.instance_id, op.block_ids, event.ipc_handle()],
+            [
+                key,
+                self.instance_id,
+                op.block_ids,
+                event.ipc_handle(),
+                op.skip_first_n_tokens,
+            ],
         ).to_cuda_future()
         self.retrieve_futures[request_id] = (future, list(op.block_ids))
 
