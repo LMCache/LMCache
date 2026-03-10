@@ -55,5 +55,6 @@ LMCache ships three server entry points:
    configuration
    l2_storage
    deployment
+   operator
    observability
    architecture

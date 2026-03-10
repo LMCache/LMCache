@@ -193,109 +193,187 @@ Expected output:
 CRD Spec Reference
 -------------------
 
+Image
+~~~~~
+
 .. list-table::
    :header-rows: 1
-   :widths: 30 15 55
+   :widths: 35 20 45
 
    * - Field
      - Default
      - Description
-   * - ``spec.image.repository``
+   * - ``image.repository``
      - ``lmcache/vllm-openai``
      - Container image repository.
-   * - ``spec.image.tag``
+   * - ``image.tag``
      - ``latest``
      - Container image tag.
-   * - ``spec.image.pullPolicy``
+   * - ``image.pullPolicy``
      - ``IfNotPresent``
-     - Image pull policy (``Always``, ``Never``, ``IfNotPresent``).
-   * - ``spec.imagePullSecrets``
+     - ``Always``, ``Never``, or ``IfNotPresent``.
+   * - ``imagePullSecrets``
      - --
-     - List of image pull secret references.
-   * - ``spec.server.port``
+     - Image pull secret references.
+
+Server
+~~~~~~
+
+.. list-table::
+   :header-rows: 1
+   :widths: 35 20 45
+
+   * - Field
+     - Default
+     - Description
+   * - ``server.port``
      - ``5555``
-     - ZMQ server listening port (1024--65535).
-   * - ``spec.server.chunkSize``
+     - ZMQ listening port (1024--65535).
+   * - ``server.chunkSize``
      - ``256``
-     - Token chunk size for KV cache operations.
-   * - ``spec.server.maxWorkers``
+     - Token chunk size.
+   * - ``server.maxWorkers``
      - ``1``
-     - Number of worker threads for ZMQ requests.
-   * - ``spec.server.hashAlgorithm``
+     - Worker threads for ZMQ requests.
+   * - ``server.hashAlgorithm``
      - ``blake3``
-     - Hash algorithm (``builtin``, ``sha256_cbor``, ``blake3``).
-   * - ``spec.l1.sizeGB``
+     - ``builtin``, ``sha256_cbor``, or ``blake3``.
+
+L1 Cache
+~~~~~~~~
+
+.. list-table::
+   :header-rows: 1
+   :widths: 35 20 45
+
+   * - Field
+     - Default
+     - Description
+   * - ``l1.sizeGB``
      - *required*
      - L1 cache size in GB.  Must be > 0.
-   * - ``spec.eviction.policy``
+
+Eviction
+~~~~~~~~
+
+.. list-table::
+   :header-rows: 1
+   :widths: 35 20 45
+
+   * - Field
+     - Default
+     - Description
+   * - ``eviction.policy``
      - ``LRU``
-     - Eviction policy.  Currently only ``LRU`` is supported.
-   * - ``spec.eviction.triggerWatermark``
+     - Only ``LRU`` is supported.
+   * - ``eviction.triggerWatermark``
      - ``0.8``
-     - Cache usage ratio (0.0--1.0] that triggers eviction.
-   * - ``spec.eviction.evictionRatio``
+     - Usage ratio (0.0--1.0] to trigger eviction.
+   * - ``eviction.evictionRatio``
      - ``0.2``
-     - Fraction of cache to evict when triggered (0.0--1.0].
-   * - ``spec.prometheus.enabled``
+     - Fraction to evict (0.0--1.0].
+
+Prometheus
+~~~~~~~~~~
+
+.. list-table::
+   :header-rows: 1
+   :widths: 35 20 45
+
+   * - Field
+     - Default
+     - Description
+   * - ``prometheus.enabled``
      - ``true``
-     - Whether to expose Prometheus metrics.
-   * - ``spec.prometheus.port``
+     - Expose Prometheus metrics.
+   * - ``prometheus.port``
      - ``9090``
-     - Prometheus ``/metrics`` endpoint port.
-   * - ``spec.prometheus.serviceMonitor.enabled``
+     - ``/metrics`` endpoint port.
+   * - ``prometheus.serviceMonitor.enabled``
      - ``false``
-     - Create a Prometheus Operator ServiceMonitor CR.
-   * - ``spec.prometheus.serviceMonitor.interval``
+     - Create a ServiceMonitor CR.
+   * - ``prometheus.serviceMonitor.interval``
      - ``30s``
-     - Prometheus scrape interval.
-   * - ``spec.prometheus.serviceMonitor.labels``
+     - Scrape interval.
+   * - ``prometheus.serviceMonitor.labels``
      - --
-     - Additional labels on the ServiceMonitor (e.g.,
-       ``release: kube-prometheus-stack``).
-   * - ``spec.l2Backends``
+     - Extra labels on the ServiceMonitor.
+
+L2 Storage
+~~~~~~~~~~
+
+.. list-table::
+   :header-rows: 1
+   :widths: 35 20 45
+
+   * - Field
+     - Default
+     - Description
+   * - ``l2Backends``
      - --
-     - List of L2 storage backends.  Each entry has ``type`` and ``config``.
-       See :doc:`l2_storage` for adapter types.
-   * - ``spec.logLevel``
-     - ``INFO``
-     - Log level (``DEBUG``, ``INFO``, ``WARNING``, ``ERROR``).
-   * - ``spec.nodeSelector``
-     - ``nvidia.com/gpu.present: "true"``
-     - Node selector for DaemonSet scheduling.
-   * - ``spec.affinity``
+     - List of L2 backends (``type`` + ``config``).
+       See :doc:`l2_storage`.
+
+Scheduling
+~~~~~~~~~~
+
+.. list-table::
+   :header-rows: 1
+   :widths: 35 20 45
+
+   * - Field
+     - Default
+     - Description
+   * - ``nodeSelector``
+     - GPU nodes
+     - Defaults to ``nvidia.com/gpu.present: "true"``.
+   * - ``affinity``
      - --
-     - Pod scheduling affinity rules.
-   * - ``spec.tolerations``
+     - Pod affinity rules.
+   * - ``tolerations``
      - --
      - Pod tolerations.
-   * - ``spec.resourceOverrides``
-     - --
-     - Override auto-computed resource requests/limits.
-   * - ``spec.env``
-     - --
-     - Additional environment variables for the container.
-   * - ``spec.volumes``
-     - --
-     - Additional volumes.
-   * - ``spec.volumeMounts``
-     - --
-     - Additional volume mounts.
-   * - ``spec.podAnnotations``
-     - --
-     - Additional annotations on pods.
-   * - ``spec.podLabels``
-     - --
-     - Additional labels on pods.
-   * - ``spec.serviceAccountName``
-     - --
-     - ServiceAccount to use for pods.
-   * - ``spec.priorityClassName``
+   * - ``priorityClassName``
      - --
      - Priority class for pods.
-   * - ``spec.extraArgs``
+
+Overrides & Extras
+~~~~~~~~~~~~~~~~~~
+
+.. list-table::
+   :header-rows: 1
+   :widths: 35 20 45
+
+   * - Field
+     - Default
+     - Description
+   * - ``logLevel``
+     - ``INFO``
+     - ``DEBUG``, ``INFO``, ``WARNING``, ``ERROR``.
+   * - ``resourceOverrides``
      - --
-     - Additional CLI flags appended last (can override any auto-generated
-       flag).
+     - Override auto-computed resources.
+   * - ``env``
+     - --
+     - Extra environment variables.
+   * - ``volumes``
+     - --
+     - Extra volumes.
+   * - ``volumeMounts``
+     - --
+     - Extra volume mounts.
+   * - ``podAnnotations``
+     - --
+     - Extra pod annotations.
+   * - ``podLabels``
+     - --
+     - Extra pod labels.
+   * - ``serviceAccountName``
+     - --
+     - ServiceAccount for pods.
+   * - ``extraArgs``
+     - --
+     - Extra CLI flags (appended last, can override).
 
 Auto-Computed Resources
 ~~~~~~~~~~~~~~~~~~~~~~~
