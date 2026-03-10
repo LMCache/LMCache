@@ -24,8 +24,11 @@ from lmcache.v1.periodic_thread import PeriodicThread, ThreadLevel, ThreadRunSum
 
 logger = init_logger(__name__)
 
-LMCACHE_MQ_TIMEOUT = float(os.getenv("LMCACHE_MQ_TIMEOUT", "30"))
-LMCACHE_HEARTBEAT_INTERVAL = float(os.getenv("LMCACHE_HEARTBEAT_INTERVAL", "10"))
+# Timeout (seconds) for blocking MQ requests: initial chunk-size query,
+# KV cache registration/unregistration, and other synchronous operations.
+DEFAULT_MQ_TIMEOUT: float = 30.0
+# Interval (seconds) between periodic heartbeat pings to the server.
+DEFAULT_HEARTBEAT_INTERVAL: float = 10.0
 
 
 def wrap_kv_caches(kv_caches: dict[str, torch.Tensor]) -> KVCache:
@@ -69,31 +72,31 @@ def get_lmcache_chunk_size(
         An integer representing the LMCache chunk size
     """
     future = send_lmcache_request(mq_client, RequestType.GET_CHUNK_SIZE, [])
-    chunk_size = future.result(timeout=LMCACHE_MQ_TIMEOUT)
+    chunk_size = future.result(timeout=DEFAULT_MQ_TIMEOUT)
     return chunk_size
 
 
-def send_health_check(
+def send_ping(
     mq_client: MessageQueueClient,
     timeout: float,
 ) -> bool:
-    """Send a HEALTH_CHECK request and return the result.
+    """Send a PING request and return the result.
 
     Returns:
-        True if server is healthy, False on unhealthy or timeout.
+        True if server is healthy, False on timeout or error.
     """
     try:
-        future = send_lmcache_request(mq_client, RequestType.HEALTH_CHECK, [])
+        future = send_lmcache_request(mq_client, RequestType.PING, [])
         return future.result(timeout=timeout)
     except TimeoutError:
         return False
     except Exception:
-        logger.debug("Health check failed with exception", exc_info=True)
+        logger.debug("Ping failed with exception", exc_info=True)
         return False
 
 
 class HeartbeatThread(PeriodicThread):
-    """Periodically checks server health via HEALTH_CHECK.
+    """Periodically checks server health via PING.
 
     Manages a threading.Event that adapters use to gate operations.
     When unhealthy, the adapter enters degraded mode; if the server
@@ -104,18 +107,29 @@ class HeartbeatThread(PeriodicThread):
         self,
         mq_client: MessageQueueClient,
         health_event: threading.Event,
+        interval: float = DEFAULT_HEARTBEAT_INTERVAL,
     ):
+        """
+        Args:
+            mq_client: The message queue client used to send PING requests.
+            health_event: A threading.Event shared with the adapter.
+                Set when the server is healthy, cleared when unhealthy.
+                Adapters check this event to decide whether to proceed
+                with operations or enter degraded mode.
+            interval: Seconds between heartbeat pings and ping timeout.
+        """
         super().__init__(
             name="lmcache-heartbeat",
-            interval=LMCACHE_HEARTBEAT_INTERVAL,
+            interval=interval,
             level=ThreadLevel.CRITICAL,
         )
         self._mq_client = mq_client
         self._health_event = health_event
+        self._interval = interval
 
     def _execute(self) -> ThreadRunSummary:
         was_healthy = self._health_event.is_set()
-        healthy = send_health_check(self._mq_client, timeout=LMCACHE_HEARTBEAT_INTERVAL)
+        healthy = send_ping(self._mq_client, timeout=self._interval)
 
         if healthy:
             self._health_event.set()
@@ -167,20 +181,24 @@ class LMCacheMPSchedulerAdapter:
         kv_rank: int,
         vllm_block_size: int,
         tp_size: int = 1,
+        mq_timeout: float = DEFAULT_MQ_TIMEOUT,
+        heartbeat_interval: float = DEFAULT_HEARTBEAT_INTERVAL,
     ):
         """
         Args:
             server_url: The server URL for the LMCache message queue
             context: The ZMQ context
-
             model_name: The model name used for LMCache keys
             world_size: The world size used for LMCache keys
             kv_rank: The kv rank used for LMCache keys
             vllm_block_size: The block size used in vLLM
             tp_size: Tensor-parallel size for MLA
                 multi-reader locking (default 1).
+            mq_timeout: Timeout in seconds for message queue requests.
+            heartbeat_interval: Interval in seconds between heartbeat pings.
         """
         self.mq_client = MessageQueueClient(server_url, context)
+        self._mq_timeout = mq_timeout
 
         # Two-phase lookup state: request_id -> server prefetch job ID
         self._lookup_job_ids: dict[str, int] = {}
@@ -195,7 +213,7 @@ class LMCacheMPSchedulerAdapter:
         except TimeoutError:
             self.mq_client.close()
             raise ConnectionError(
-                f"LMCache server did not respond within {LMCACHE_MQ_TIMEOUT}s. "
+                f"LMCache server did not respond within {mq_timeout}s. "
                 "Is the server running?"
             ) from None
         assert self.chunk_size % vllm_block_size == 0, (
@@ -211,6 +229,7 @@ class LMCacheMPSchedulerAdapter:
         self._heartbeat = HeartbeatThread(
             mq_client=self.mq_client,
             health_event=self._health_event,
+            interval=heartbeat_interval,
         )
         self._heartbeat.start()
 
@@ -272,8 +291,7 @@ class LMCacheMPSchedulerAdapter:
             job_id = future.result(timeout=self._mq_timeout)
         except TimeoutError:
             logger.warning(
-                "LOOKUP request timed out after %ss. "
-                "Marking server as unhealthy.",
+                "LOOKUP request timed out after %ss. Marking server as unhealthy.",
                 self._mq_timeout,
             )
             self._health_event.clear()
@@ -428,8 +446,11 @@ class LMCacheMPWorkerAdapter:
         world_size: int,
         kv_rank: int,
         vllm_block_size: int,
+        mq_timeout: float = DEFAULT_MQ_TIMEOUT,
+        heartbeat_interval: float = DEFAULT_HEARTBEAT_INTERVAL,
     ):
         self.mq_client = MessageQueueClient(server_url, context)
+        self._mq_timeout = mq_timeout
 
         # Instance id for GPU worker
         self.instance_id = os.getpid()
@@ -463,7 +484,7 @@ class LMCacheMPWorkerAdapter:
         except TimeoutError:
             self.mq_client.close()
             raise ConnectionError(
-                f"LMCache server did not respond within {LMCACHE_MQ_TIMEOUT}s. "
+                f"LMCache server did not respond within {mq_timeout}s. "
                 "Is the server running?"
             ) from None
         assert chunk_size % vllm_block_size == 0, (
@@ -479,6 +500,7 @@ class LMCacheMPWorkerAdapter:
         self._heartbeat = HeartbeatThread(
             mq_client=self.mq_client,
             health_event=self._health_event,
+            interval=heartbeat_interval,
         )
         self._heartbeat.start()
 
@@ -522,11 +544,11 @@ class LMCacheMPWorkerAdapter:
             ],
         )
         try:
-            future.result(timeout=LMCACHE_MQ_TIMEOUT)
+            future.result(timeout=self._mq_timeout)
         except TimeoutError:
             raise ConnectionError(
                 "LMCache server did not respond to register_kv_caches "
-                f"within {LMCACHE_MQ_TIMEOUT}s. Is the server running?"
+                f"within {self._mq_timeout}s. Is the server running?"
             ) from None
 
     @_lmcache_nvtx_annotate
@@ -626,6 +648,22 @@ class LMCacheMPWorkerAdapter:
         for request_id, op in zip(request_ids, ops, strict=False):
             self.submit_retrieve_request(request_id, op, event)
 
+    def _process_finished_stores(
+        self,
+        finished_req_ids_from_lmcache: set[str],
+        finished_req_ids_from_engine: set[str],
+    ) -> set[str]:
+        """Merge LMCache-side and engine-side finished store info."""
+        self.finished_stores.update(finished_req_ids_from_lmcache)
+        ret_stores = set()
+        for req_id in finished_req_ids_from_engine:
+            if req_id in self.finished_stores or req_id in self.store_futures:
+                self.previously_finished.add(req_id)
+            else:
+                ret_stores.add(req_id)
+        ret_stores.update(self._update_and_get_finished_store())
+        return ret_stores
+
     @_lmcache_nvtx_annotate
     def get_finished(
         self, finished_req_ids_from_engine: set[str]
@@ -663,14 +701,9 @@ class LMCacheMPWorkerAdapter:
             self.store_futures.clear()
             self.retrieve_futures.clear()
 
-            self.finished_stores.update(finished_stores)
-            ret_stores = set()
-            for req_id in finished_req_ids_from_engine:
-                if req_id in self.finished_stores:
-                    self.previously_finished.add(req_id)
-                else:
-                    ret_stores.add(req_id)
-            ret_stores.update(self._update_and_get_finished_store())
+            ret_stores = self._process_finished_stores(
+                finished_stores, finished_req_ids_from_engine
+            )
             return ret_stores, finished_retrieves
 
         finished_stores = set()
@@ -711,17 +744,9 @@ class LMCacheMPWorkerAdapter:
             self.retrieve_futures.pop(request_id, None)
 
         # Update the internal states
-        self.finished_stores.update(finished_stores)
-
-        ret_stores = set()
-        for req_id in finished_req_ids_from_engine:
-            if req_id in self.finished_stores or req_id in self.store_futures:
-                self.previously_finished.add(req_id)
-            else:
-                ret_stores.add(req_id)
-
-        # Calculate the final finished stores
-        ret_stores.update(self._update_and_get_finished_store())
+        ret_stores = self._process_finished_stores(
+            finished_stores, finished_req_ids_from_engine
+        )
 
         # the invocation of `get_finished` means that
         # these requests' KV caches are already fully stored.
@@ -762,12 +787,12 @@ class LMCacheMPWorkerAdapter:
                 self.mq_client,
                 RequestType.UNREGISTER_KV_CACHE,
                 [self.instance_id],
-            ).result(timeout=LMCACHE_MQ_TIMEOUT)
+            ).result(timeout=self._mq_timeout)
         except TimeoutError:
             logger.warning(
                 "LMCache server did not respond to unregister within %ss. "
                 "Proceeding with shutdown.",
-                LMCACHE_MQ_TIMEOUT,
+                self._mq_timeout,
             )
 
         self.mq_client.close()

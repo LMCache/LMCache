@@ -719,14 +719,14 @@ class MPCacheEngine:
     # Utility methods
     # =========================================================================
 
-    def health_check(self) -> bool:
+    def ping(self) -> bool:
         """
-        Check if the server is healthy by running a memory check.
+        Respond to a ping request.
 
         Returns:
-            bool: True if the server memory is healthy.
+            bool: Always True.
         """
-        return self.storage_manager.memcheck()
+        return True
 
     def get_chunk_size(self) -> int:
         """
@@ -864,7 +864,7 @@ def run_cache_server(
     add_handler_helper(server, RequestType.RETRIEVE, engine.retrieve)
     add_handler_helper(server, RequestType.CLEAR, engine.clear)
     add_handler_helper(server, RequestType.GET_CHUNK_SIZE, engine.get_chunk_size)
-    add_handler_helper(server, RequestType.HEALTH_CHECK, engine.health_check)
+    add_handler_helper(server, RequestType.PING, engine.ping)
     add_handler_helper(server, RequestType.END_SESSION, engine.end_session)
     add_handler_helper(server, RequestType.NOOP, engine.debug)
 

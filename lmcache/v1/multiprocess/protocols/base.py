@@ -51,7 +51,7 @@ class RequestType(enum.Enum):
     # Controller operations
     CLEAR = enum.auto()
     GET_CHUNK_SIZE = enum.auto()
-    HEALTH_CHECK = enum.auto()
+    PING = enum.auto()
 
     # Debug operations
     NOOP = enum.auto()
