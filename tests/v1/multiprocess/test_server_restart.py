@@ -213,8 +213,11 @@ def test_mq_store_path_with_unregistered_instance():
             get_response_class(RequestType.STORE),
         )
         result = future.result(timeout=5)
-        # Mock handler returns (b"\x01"*64, True).
-        assert result == (b"\x01" * 64, True)
+        # Mock handler returns (b"\x01"*64, OperationStatus.SUCCESS).
+        assert result == (
+            b"\x01" * 64,
+            OperationStatus.SUCCESS,
+        )
     finally:
         client.close()
         shutdown_event.set()
@@ -330,7 +333,7 @@ class TestServerRestart:
                 .to_cuda_future()
                 .result(timeout=DEFAULT_TIMEOUT)
             )
-            assert result2 is False, (
+            assert result2 is not OperationStatus.SUCCESS, (
                 "Store should fail on restarted server without re-registration"
             )
 
@@ -359,7 +362,9 @@ class TestServerRestart:
                 .to_cuda_future()
                 .result(timeout=DEFAULT_TIMEOUT)
             )
-            assert result3 is True, "Store should succeed after re-registration"
+            assert result3 == OperationStatus.SUCCESS, (
+                "Store should succeed after re-registration"
+            )
 
             client.close()
         finally:
