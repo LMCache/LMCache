@@ -874,7 +874,7 @@ void single_layer_kv_transfer_sgl(
     // [num_blocks, block_size, num_heads, head_size]
     // key_cache/value_cache must be on gpu
     torch::Tensor& slot_mapping,  // [num_tokens]
-    const TransferDirection direction,
+    const TransferDirection direction, const GPUKVFormat gpu_kv_format,
     const bool token_major  // true: lmc_key_value_cache is
                             // [num_tokens, 2, num_heads*head_size]
                             // false: lmc_key_value_cache is
@@ -886,7 +886,7 @@ void single_layer_kv_transfer_sgl(
   int64_t* lmc_key_value_cache_ptr =
       get_kernel_ptr<int64_t, torch::Tensor>(lmc_key_value_cache);
 
-  const bool use_mla = (sgl_key_value_cache.size() == 1);
+  const bool use_mla = lmc::is_mla(gpu_kv_format);
 
   torch::Tensor& sgl_key_cache = sgl_key_value_cache[0];
   int64_t* sgl_key_cache_ptr =
