@@ -176,6 +176,7 @@ def test_adapter_free_lookup_locks_sends_request():
     adapter._health_event = threading.Event()
     adapter._health_event.set()
     adapter.tp_size = 1
+    adapter._mq_timeout = 30.0
 
     mock_client = MagicMock(spec=MessageQueueClient)
     mock_future = MagicMock()
@@ -226,6 +227,7 @@ def test_adapter_free_lookup_locks_key_matches_lookup():
     adapter._health_event = threading.Event()
     adapter._health_event.set()
     adapter.tp_size = 1
+    adapter._mq_timeout = 30.0
 
     mock_client = MagicMock(spec=MessageQueueClient)
     mock_future = MagicMock()
