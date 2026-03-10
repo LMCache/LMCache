@@ -1613,7 +1613,7 @@ def test_cb_store_final_v2_then_normal_lookup(
     )
     # Phase 1: LOOKUP returns a prefetch job ID, not the chunk count
     job_id = client.submit_request(
-        RequestType.LOOKUP, [lookup_key], get_response_class(RequestType.LOOKUP)
+        RequestType.LOOKUP, [lookup_key, 1], get_response_class(RequestType.LOOKUP)
     ).result(timeout=DEFAULT_TIMEOUT)
 
     # Phase 2: Poll QUERY_PREFETCH_STATUS until the result is ready
