@@ -1020,7 +1020,6 @@ class LMCacheEngine:
         next(mem_obj_consumer)
 
         retrieved_tokens = torch.sum(ret_mask)
-        # Set per-tier hit tokens based on which backend served this request
         if location is not None:
             total = int(retrieved_tokens)
             if location == "LocalCPUBackend":
@@ -1291,17 +1290,15 @@ class LMCacheEngine:
 
             # Get memory objects from the future result
             memory_objs = future.result()
-            # Flatten nested lists (each backend returns (name, [(key, memobj)]))
-            memory_objs_flat = [mm for _name, m in memory_objs for mm in m]
-
             # Release each memory object
-            for _key, memory_obj in memory_objs_flat:
-                try:
-                    logger.debug("Releasing memory object for lookup_id=%s", lookup_id)
-                    memory_obj.unpin()
-                    memory_obj.ref_count_down()
-                except Exception as e:
-                    logger.error(f"Error releasing memory object: {e}")
+            for _backend_name, backend_results in memory_objs:
+                for _key, memory_obj in backend_results:
+                    try:
+                        logger.debug("Releasing memory object for lookup_id=%s", lookup_id)
+                        memory_obj.unpin()
+                        memory_obj.ref_count_down()
+                    except Exception as e:
+                        logger.error(f"Error releasing memory object: {e}")
         except Exception as e:
             logger.error(
                 f"Error during cleanup_memory_objs for lookup_id={lookup_id}: {e}"
@@ -1586,7 +1583,6 @@ class LMCacheEngine:
             if key not in used_keys:
                 mem_obj.ref_count_down()
 
-        # Propagate per-backend hit counts to retrieve stats
         retrieve_stats = self.stats_monitor.get_current_retrieve_stats()
         if retrieve_stats is not None:
             per_backend_tokens: Dict[str, int] = {}
@@ -1685,7 +1681,6 @@ class LMCacheEngine:
                 if end < last_failed_block_start
             ]
 
-        # Propagate per-backend hit counts to retrieve stats
         retrieve_stats = self.stats_monitor.get_current_retrieve_stats()
         if retrieve_stats is not None:
             for loc, ranges in per_backend_ranges.items():

@@ -445,7 +445,6 @@ class LMCStatsMonitor:
                 self.per_tier_get_latencies["disk"].append(latency)
             elif "Remote" in backend:
                 self.per_tier_get_latencies["remote"].append(latency)
-        # Per-request tier attribution
         cpu = retrieve_stats.cpu_hit_tokens
         disk = retrieve_stats.disk_hit_tokens
         remote = retrieve_stats.remote_hit_tokens
@@ -1130,7 +1129,6 @@ class PrometheusLogger:
             labelnames=labelnames,
         )
 
-        # Local disk I/O metrics (mirrors remote_* pattern)
         self.counter_local_disk_read_bytes = self._create_counter(
             name="lmcache:local_disk_read_bytes_total",
             documentation="Total bytes read from local disk backend",
@@ -1165,7 +1163,6 @@ class PrometheusLogger:
             labelnames=labelnames,
         )
 
-        # Per-tier retrieve get latency histograms
         self.histogram_tier_get_latency = self._create_histogram(
             name="lmcache:tier_get_latency",
             documentation="Per-tier batched_get latency (seconds)",
@@ -1173,7 +1170,6 @@ class PrometheusLogger:
             buckets=disk_latency_buckets,
         )
 
-        # Per-request tier attribution
         self.counter_request_tier_served = self._create_counter(
             name="lmcache:request_tier_served",
             documentation="Number of retrieve requests served by each tier",
@@ -1828,7 +1824,6 @@ class PrometheusLogger:
         self._log_counter(
             self.counter_num_requested_tokens, stats.interval_requested_tokens
         )
-        # Per-tier hit token logging
         if stats.interval_cpu_hit_tokens > 0:
             self.counter_num_hit_tokens.labels(**self.labels, tier="cpu").inc(
                 stats.interval_cpu_hit_tokens
