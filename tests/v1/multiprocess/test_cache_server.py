@@ -223,7 +223,7 @@ def retrieve_keys(
             get_response_class(RequestType.RETRIEVE),
         )
         result = future.to_cuda_future().result(timeout=timeout)
-        results.append(result)
+        results.append(result == OperationStatus.SUCCESS)
     return results
 
 
