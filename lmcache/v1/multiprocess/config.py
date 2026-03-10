@@ -28,6 +28,11 @@ class MPServerConfig:
     hash_algorithm: str = "blake3"
     """Hash algorithm for token-based operations (builtin, sha256_cbor, blake3)."""
 
+    engine_type: str = "default"
+    """Cache engine backend type 
+    ('default' for MPCacheEngine, 'blend' for BlendEngineV2).
+    """
+
 
 DEFAULT_MP_SERVER_CONFIG = MPServerConfig()
 
@@ -92,6 +97,15 @@ def add_mp_server_args(
         help="Hash algorithm for token-based operations "
         "(builtin, sha256_cbor, blake3). Default is blake3.",
     )
+    mp_group.add_argument(
+        "--engine-type",
+        type=str,
+        default="default",
+        choices=["default", "blend"],
+        help="Cache engine backend type. 'default' uses MPCacheEngine, "
+        "'blend' uses BlendEngineV2 for cross-request KV reuse. "
+        "Default is 'default'.",
+    )
     return parser
 
 
@@ -113,6 +127,7 @@ def parse_args_to_mp_server_config(
         chunk_size=args.chunk_size,
         max_workers=args.max_workers,
         hash_algorithm=args.hash_algorithm,
+        engine_type=args.engine_type,
     )
 
 

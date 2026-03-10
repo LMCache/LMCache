@@ -44,8 +44,8 @@ Required Docker flags:
 
 **HTTP server variant:**
 
-For health-check support (useful with container orchestrators), use the HTTP
-server entry point:
+For health-check and cache management API support (useful with container
+orchestrators), use the HTTP server entry point:
 
 .. code-block:: bash
 

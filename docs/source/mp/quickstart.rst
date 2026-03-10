@@ -127,9 +127,8 @@ Docker Quick Start
 HTTP Server Quick Start
 -----------------------
 
-The HTTP server wraps the ZMQ server with a FastAPI frontend, adding an
-``/api/healthcheck`` endpoint suitable for Kubernetes liveness and readiness
-probes.
+The HTTP server wraps the ZMQ server with a FastAPI frontend, adding HTTP
+management endpoints for health checking and cache administration.
 
 .. code-block:: bash
 
@@ -139,12 +138,43 @@ probes.
 The HTTP server listens on ``0.0.0.0:8000`` by default (configurable with
 ``--http-host`` and ``--http-port``).
 
-Health check:
+**Endpoints:**
+
+.. list-table::
+   :header-rows: 1
+   :widths: 15 25 60
+
+   * - Method
+     - Path
+     - Description
+   * - GET
+     - ``/api/healthcheck``
+     - Returns ``{"status": "healthy"}`` when the engine is initialized and
+       memory checks pass. Suitable for Kubernetes liveness/readiness probes.
+   * - POST
+     - ``/api/clear-cache``
+     - Force-clears all KV cache data stored in L1 (CPU) memory, including
+       objects with active read/write locks. Returns ``{"status": "ok"}`` on
+       success.
+   * - GET
+     - ``/api/status``
+     - Returns detailed internal state of all MP components including L1 cache,
+       L2 adapters, controllers, registered GPUs, and active sessions.
+
+Examples:
 
 .. code-block:: bash
 
+    # Health check
     curl http://localhost:8000/api/healthcheck
     # {"status": "healthy"}
+
+    # Clear all KV cache data in L1 (CPU) memory
+    curl -X POST http://localhost:8000/api/clear-cache
+    # {"status": "ok"}
+
+    # Inspect detailed internal state
+    curl http://localhost:8000/api/status
 
 The ZMQ server runs on the same default port (5555) and accepts vLLM
 connections exactly as in the local quick start.
