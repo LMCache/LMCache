@@ -111,6 +111,21 @@ async def healthcheck(request: Request):
     return {"status": "healthy"}
 
 
+@app.get("/api/status")
+async def status(request: Request):
+    """
+    Detailed status endpoint for inspecting internal state of all
+    MP components (L1 cache, L2 adapters, controllers, sessions).
+    """
+    engine = getattr(request.app.state, "engine", None)
+    if engine is None:
+        return JSONResponse(
+            status_code=503,
+            content={"error": "engine not initialized"},
+        )
+    return engine.report_status()
+
+
 def run_http_server(
     http_config: HTTPFrontendConfig,
     mp_config: MPServerConfig,

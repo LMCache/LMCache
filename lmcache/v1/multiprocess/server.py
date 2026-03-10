@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
+from dataclasses import dataclass
 import argparse
 import threading
 import time
@@ -22,7 +23,7 @@ from lmcache.v1.distributed.config import (
     add_storage_manager_args,
     parse_args_to_config,
 )
-from lmcache.v1.distributed.storage_manager import StorageManager
+from lmcache.v1.distributed.storage_manager import PrefetchHandle, StorageManager
 from lmcache.v1.gpu_connector.gpu_ops import (
     lmcache_memcpy_async_d2h,
     lmcache_memcpy_async_h2d,
@@ -131,6 +132,46 @@ def resolve_key(
     ]
 
 
+def compute_extra_count(
+    tp_size: int,
+    world_size: int,
+) -> int:
+    """Compute extra count for MLA multi-reader locking.
+
+    Non-MLA: each TP worker owns a distinct KV shard,
+      so each ObjectKey is retrieved by exactly 1
+      worker -> extra_count = 0.
+    MLA: TP does not split KV caches, all TP workers
+      share the same object. vLLM passes world_size
+      already divided by tp_size (e.g. world_size=1
+      for TP=4 PP=1), so ipc_keys_to_object_keys
+      only produces 1 ObjectKey per chunk.  All TP
+      workers retrieve that same ObjectKey, hence
+      extra_count = tp_size - 1.
+
+    Detection: tp > world_size means MLA (world_size
+    was divided by tp on the vLLM side).
+
+    Fallback: old vLLM (<= 0.8.5) does not send
+    tp_size (defaults to 1); we fall back to
+    world_size which gives extra_count = 0
+    (safe but may under-lock for MLA).
+
+    TODO: world_size currently carries an overloaded
+    meaning (total ranks for non-MLA vs total/tp for
+    MLA). Consider a dedicated field in the future.
+
+    Args:
+        tp_size: Tensor-parallel size from the client.
+        world_size: World size from the cache key.
+
+    Returns:
+        Number of extra count (0 for non-MLA).
+    """
+    tp = tp_size if tp_size > 1 else world_size
+    return tp - 1 if tp > world_size else 0
+
+
 def get_layout_desc(gpu_context: GPUCacheContext, num_tokens: int) -> MemoryLayoutDesc:
     """Get the memory layout description for a given GPU context and number of tokens.
 
@@ -144,6 +185,13 @@ def get_layout_desc(gpu_context: GPUCacheContext, num_tokens: int) -> MemoryLayo
     shape = gpu_context.get_kv_buffer_shape(num_tokens)
     dtype = gpu_context.dtype
     return MemoryLayoutDesc(shapes=[shape], dtypes=[dtype])
+
+
+@dataclass
+class _PrefetchJob:
+    handle: PrefetchHandle
+    world_size: int
+    request_id: str
 
 
 # Main class for the mp cache engine
@@ -177,6 +225,13 @@ class MPCacheEngine:
             chunk_size=chunk_size, hash_algorithm=hash_algorithm
         )
         self.session_manager = SessionManager(self.token_hasher)
+
+        # Prefetch job tracking for two-phase lookup
+        # TODO: implement periodic cleanup of stale _prefetch_jobs entries
+        # for crash resilience (e.g., client calls lookup but never queries)
+        self._prefetch_jobs: dict[int, _PrefetchJob] = {}
+        self._next_prefetch_job_id: int = 0
+        self._prefetch_job_lock = threading.Lock()
 
         # FIX: fix the problem of telemetry logging in cupy stream
         # Need to log a retrieve operation before logging any store
@@ -483,100 +538,168 @@ class MPCacheEngine:
         self._can_log_store = True
         return event.ipc_handle(), True
 
+    def _find_layout_desc(
+        self,
+        model_name: str,
+        world_size: int,
+    ) -> MemoryLayoutDesc | None:
+        """Find layout desc from a matching GPU context.
+
+        Returns:
+            The layout descriptor, or None if no context
+            matches (model_name, world_size).
+        """
+        for gpu_id, (m, w) in self.gpu_context_meta.items():
+            if m == model_name and w == world_size:
+                return get_layout_desc(
+                    self.gpu_contexts[gpu_id],
+                    self.chunk_size,
+                )
+        return None
+
     def lookup(
         self,
         key: IPCCacheEngineKey,
+        tp_size: int,
     ) -> int:
-        """Lookup prefix cache hits for the given keys.
+        """Submit a prefix lookup and return a prefetch job ID.
+
+        Hashes the key, submits a prefetch task to the storage manager,
+        and returns a job ID that can be polled via query_prefetch_status.
 
         Args:
-            keys: List of cache keys.
-                  request_id is embedded in each key.
+            key: Cache key with request_id embedded.
 
         Returns:
-            Number of matched chunks (prefix match count).
+            Prefetch job ID for polling via query_prefetch_status.
         """
         ipc_keys: list[IPCCacheEngineKey] = []
         model_name, world_size = key.model_name, key.world_size
-        log_telemetry(make_start_event("lookup", key.request_id))
+        log_telemetry(make_start_event("lookup_and_prefetch", key.request_id))
 
-        # Find the gpu context and calculate the layout desc
-        layout_desc: MemoryLayoutDesc | None = None
-        for gpu_id, (m_name, w_size) in self.gpu_context_meta.items():
-            if m_name == model_name and w_size == world_size:
-                layout_desc = get_layout_desc(
-                    self.gpu_contexts[gpu_id], self.chunk_size
-                )
-                break
-
+        layout_desc = self._find_layout_desc(model_name, world_size)
         if layout_desc is None:
             logger.error(
                 "No GPU context found for model %s with world size %d during lookup!",
                 model_name,
                 world_size,
             )
-            log_telemetry(
-                make_end_event(
-                    "lookup",
-                    key.request_id,
-                    error="no_gpu_context_found",
+            return self._register_prefetch_job(
+                _PrefetchJob(
+                    handle=PrefetchHandle(
+                        request_id=-1,
+                        l1_prefix_hit_count=0,
+                        total_requested_keys=0,
+                        submit_time=time.monotonic(),
+                    ),
+                    world_size=1,
+                    request_id=key.request_id,
                 )
             )
-            return 0
+
+        extra_count = compute_extra_count(tp_size, world_size)
 
         # Prepare for the obj keys
         ipc_keys.extend(key.to_hash_keys(self.token_hasher))
         if not ipc_keys:
-            log_telemetry(
-                make_end_event(
-                    "lookup",
-                    key.request_id,
-                    error="no_ipc_keys_generated",
+            return self._register_prefetch_job(
+                _PrefetchJob(
+                    handle=PrefetchHandle(
+                        request_id=-1,
+                        l1_prefix_hit_count=0,
+                        total_requested_keys=0,
+                        submit_time=time.monotonic(),
+                    ),
+                    world_size=1,
+                    request_id=key.request_id,
                 )
             )
-            return 0
 
         obj_keys = ipc_keys_to_object_keys(ipc_keys)
 
-        handle = self.storage_manager.submit_prefetch_task(obj_keys, layout_desc)
-        while True:
-            found_count = self.storage_manager.query_prefetch_status(handle)
-            if found_count is not None:
-                break
+        handle = self.storage_manager.submit_prefetch_task(
+            obj_keys, layout_desc, extra_count=extra_count
+        )
+        return self._register_prefetch_job(
+            _PrefetchJob(
+                handle=handle,
+                world_size=ipc_keys[0].world_size,
+                request_id=key.request_id,
+            )
+        )
 
-            time.sleep(0.001)
+    def _register_prefetch_job(self, job: _PrefetchJob) -> int:
+        with self._prefetch_job_lock:
+            job_id = self._next_prefetch_job_id
+            self._next_prefetch_job_id += 1
+            self._prefetch_jobs[job_id] = job
+        return job_id
+
+    def query_prefetch_status(
+        self,
+        prefetch_job_id: int,
+    ) -> int | None:
+        """Poll the status of a prefetch job.
+
+        Returns the chunk count when the prefetch is complete, or None
+        if it is still in progress.  The job entry is automatically
+        removed once a non-None result is returned (exactly-once
+        semantics).
+
+        Args:
+            prefetch_job_id: Job ID returned by lookup().
+
+        Returns:
+            Chunk count (int) when done, None if still in progress,
+            or 0 if the job ID is unknown.
+        """
+        with self._prefetch_job_lock:
+            job = self._prefetch_jobs.get(prefetch_job_id)
+        if job is None:
+            logger.warning(
+                "Prefetch job %d not found (already completed or invalid)",
+                prefetch_job_id,
+            )
+            return 0
+
+        found_count = self.storage_manager.query_prefetch_status(job.handle)
+        if found_count is None:
+            return None
+
         # NOTE(Kuntai): this assumes two things:
         # 1. the world size is the same between keys
-        # 2. the lookup sort the keys in prefix order and breaks at the first failure
-        found_count = found_count // ipc_keys[0].world_size
+        # 2. the lookup sort the keys in prefix order and breaks at the
+        #    first failure
+        found_count = found_count // job.world_size
 
         log_telemetry(
             make_end_event(
-                "lookup",
-                key.request_id,
+                "lookup_and_prefetch",
+                job.request_id,
                 found_count=found_count,
             )
         )
+
+        with self._prefetch_job_lock:
+            self._prefetch_jobs.pop(prefetch_job_id, None)
+
         return found_count
 
     def free_lookup_locks(
         self,
         key: IPCCacheEngineKey,
+        tp_size: int,
     ) -> None:
-        """Release read locks acquired during lookup without performing a
-        full retrieve.  This is used when a request is cancelled or aborted
-        after LOOKUP but before RETRIEVE.
+        """Release read locks acquired during lookup.
 
-        ``to_hash_keys`` always expands over the entire ``token_ids``
-        sequence, so we slice the result to only include the chunks that
-        overlap with the key's ``[start, end)`` range.
-        This means when ``start`` or ``end`` is not aligned to ``chunk_size``, the
-        entire chunk containing ``start`` boundary is freed but the one containing
-        ``end`` boundary will not be freed.  It caller's responsibility to align
-        the boundaries as desired.
+        Computes the extra reader count from ``tp_size`` and
+        ``world_size`` the same way :meth:`lookup` does, so
+        the correct number of locks is released.
 
         Args:
-            keys: List of cache keys whose read locks should be released.
+            key: Cache key whose read locks should be released.
+            tp_size: Tensor-parallel size for MLA
+                multi-reader locking.
         """
         ipc_keys: list[IPCCacheEngineKey] = []
         all_hash_keys = key.to_hash_keys(self.token_hasher)
@@ -587,7 +710,10 @@ class MPCacheEngine:
         if not ipc_keys:
             return
         obj_keys = ipc_keys_to_object_keys(ipc_keys)
-        self.storage_manager.finish_read_prefetched(obj_keys)
+
+        extra_count = compute_extra_count(tp_size, key.world_size)
+
+        self.storage_manager.finish_read_prefetched(obj_keys, extra_count=extra_count)
 
     # =========================================================================
     # Utility methods
@@ -609,6 +735,23 @@ class MPCacheEngine:
             request_id: The request ID whose session should be removed.
         """
         self.session_manager.remove(request_id)
+
+    def report_status(self) -> dict:
+        """Return a status dict for the entire cache engine."""
+        sm = self.storage_manager.report_status()
+        return {
+            "is_healthy": sm["is_healthy"],
+            "engine_type": "MPCacheEngine",
+            "chunk_size": self.chunk_size,
+            "hash_algorithm": self.token_hasher.hash_algorithm_name,
+            "registered_gpu_ids": list(self.gpu_contexts.keys()),
+            "gpu_context_meta": {
+                str(gpu_id): {"model_name": meta[0], "world_size": meta[1]}
+                for gpu_id, meta in self.gpu_context_meta.items()
+            },
+            "active_sessions": self.session_manager.active_count(),
+            "storage_manager": sm,
+        }
 
     def debug(self) -> str:
         return "OK"
@@ -705,6 +848,9 @@ def run_cache_server(
     )
     add_handler_helper(server, RequestType.STORE, engine.store)
     add_handler_helper(server, RequestType.LOOKUP, engine.lookup)
+    add_handler_helper(
+        server, RequestType.QUERY_PREFETCH_STATUS, engine.query_prefetch_status
+    )
     add_handler_helper(server, RequestType.FREE_LOOKUP_LOCKS, engine.free_lookup_locks)
     add_handler_helper(server, RequestType.RETRIEVE, engine.retrieve)
     add_handler_helper(server, RequestType.CLEAR, engine.clear)
