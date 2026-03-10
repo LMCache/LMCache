@@ -229,7 +229,7 @@ def create_config_class(
         if not hasattr(self, "_user_set_keys"):
             object.__setattr__(self, "_user_set_keys", set())
         # Generate instance ID if not set
-        if not hasattr(self, "lmcache_instance_id"):
+        if not getattr(self, "lmcache_instance_id", None):
             self.lmcache_instance_id = f"{config_name.lower()}_{uuid.uuid4().hex}"
 
     def _from_env(cls):
