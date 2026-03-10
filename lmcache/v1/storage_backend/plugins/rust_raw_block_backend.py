@@ -331,8 +331,10 @@ class RustRawBlockBackend(StoragePluginInterface):
 
     def _touch(self, key: CacheEngineKey) -> None:
         """Update LRU: move key to most-recently-used position."""
-        self._lru.pop(key, None)
-        self._lru[key] = None
+        if key in self._lru:
+            self._lru.move_to_end(key)
+        else:
+            self._lru[key] = None
 
     def _evict_one(self) -> bool:
         """Evict least recently used chunk that is not pinned or in-flight."""
