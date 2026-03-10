@@ -73,6 +73,7 @@ from lmcache.v1.mp_observability.telemetry import (
     TelemetryConfig,
     get_telemetry_controller,
     init_telemetry_controller,
+    parse_args_to_telemetry_config,
 )
 from lmcache.v1.mp_observability.telemetry.config import (
     DEFAULT_TELEMETRY_CONFIG,
@@ -853,8 +854,10 @@ if __name__ == "__main__":
     mp_config = parse_args_to_mp_server_config(args)
     storage_manager_config = parse_args_to_config(args)
     prometheus_config = parse_args_to_prometheus_config(args)
+    telemetry_config = parse_args_to_telemetry_config(args)
     run_cache_server(
         mp_config=mp_config,
         storage_manager_config=storage_manager_config,
         prometheus_config=prometheus_config,
+        telemetry_config=telemetry_config,
     )
