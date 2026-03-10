@@ -11,6 +11,7 @@ from concurrent.futures import ThreadPoolExecutor, TimeoutError
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Optional, Union
 import time
+import traceback
 
 # Third Party
 import torch
@@ -107,11 +108,11 @@ class LMCacheManager:
             self._init_components()
         except Exception as e:
             self._init_failed = True
-            self._init_failed_reason = str(e)
+            self._init_failed_reason = traceback.format_exc()
             logger.error(
                 "Failed to initialize LMCacheManager components: %s. "
                 "System will operate in degraded mode (recompute).",
-                e,
+                self._init_failed_reason,
             )
 
     def _init_components(self) -> None:
@@ -480,13 +481,13 @@ class LMCacheManager:
             e: The exception that caused the failure
         """
         self._init_failed = True
-        self._init_failed_reason = str(e)
+        self._init_failed_reason = traceback.format_exc()
         if self._lmcache_engine is not None:
-            self._lmcache_engine.mark_init_failed(str(e))
+            self._lmcache_engine.mark_init_failed(self._init_failed_reason)
         logger.error(
             "Failed during post_init: %s. "
             "System will operate in degraded mode (recompute).",
-            e,
+            self._init_failed_reason,
         )
 
     def post_init(self) -> None:
