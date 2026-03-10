@@ -40,7 +40,6 @@ from lmcache.v1.multiprocess.custom_types import (
     CudaIPCWrapper,
     IPCCacheEngineKey,
     KVCache,
-    OperationStatus,
 )
 from lmcache.v1.multiprocess.mq import MessageQueueClient
 from lmcache.v1.multiprocess.protocol import (
@@ -973,9 +972,7 @@ def test_cb_lookup_cannot_find_normal_store(
             get_response_class(RequestType.STORE),
         )
         store_result = store_future.to_cuda_future().result(timeout=DEFAULT_TIMEOUT)
-        assert store_result == OperationStatus.SUCCESS, (
-            f"Normal store should succeed for key {i}"
-        )
+        assert store_result is True, f"Normal store should succeed for key {i}"
 
     # Now try CB lookup with same token pattern
     # Use same hash value converted to token_ids pattern
@@ -1354,7 +1351,7 @@ def test_cb_store_final_then_normal_lookup_retrieve(
         get_response_class(RequestType.RETRIEVE),
     )
     retrieve_result = retrieve_future.to_cuda_future().result(timeout=DEFAULT_TIMEOUT)
-    assert retrieve_result == OperationStatus.SUCCESS, "Retrieve should succeed"
+    assert retrieve_result is True, "Retrieve should succeed"
 
     # Verify the correctness
     torch.cuda.synchronize()

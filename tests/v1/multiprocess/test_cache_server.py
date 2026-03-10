@@ -23,7 +23,6 @@ from lmcache.v1.multiprocess.custom_types import (
     CudaIPCWrapper,
     IPCCacheEngineKey,
     KVCache,
-    OperationStatus,
 )
 from lmcache.v1.multiprocess.mq import MessageQueueClient
 from lmcache.v1.multiprocess.protocol import (
@@ -200,7 +199,7 @@ def store_keys(
             get_response_class(RequestType.STORE),
         )
         result = future.to_cuda_future().result(timeout=timeout)
-        assert result == OperationStatus.SUCCESS, f"Store should succeed for key {i}"
+        assert result is True, f"Store should succeed for key {i}"
 
 
 def retrieve_keys(
@@ -223,7 +222,7 @@ def retrieve_keys(
             get_response_class(RequestType.RETRIEVE),
         )
         result = future.to_cuda_future().result(timeout=timeout)
-        results.append(result == OperationStatus.SUCCESS)
+        results.append(result)
     return results
 
 
