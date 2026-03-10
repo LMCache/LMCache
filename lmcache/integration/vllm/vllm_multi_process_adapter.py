@@ -16,6 +16,7 @@ from lmcache.v1.multiprocess.custom_types import (
     CudaIPCWrapper,
     IPCCacheEngineKey,
     KVCache,
+    OperationStatus,
 )
 from lmcache.v1.multiprocess.mq import MessageQueueClient, MessagingFuture
 from lmcache.v1.multiprocess.protocol import RequestType, get_response_class
@@ -90,8 +91,8 @@ class LoadStoreOp:
         return len(self.block_ids)
 
 
-StoreResult = bool
-RetrieveResult = bool
+StoreResult = int
+RetrieveResult = int
 LookupResult = int
 
 
@@ -512,13 +513,15 @@ class LMCacheMPWorkerAdapter:
             s_result = s_future.result()
             finished_stores.add(request_id)
 
-            if not s_result:
+            if s_result != OperationStatus.SUCCESS:
                 logger.error(
                     "Something went wrong when processing the "
-                    "store request for request_id=%s",
+                    "store request for request_id=%s, status=%s",
                     request_id,
+                    s_result,
                 )
-                need_reregister = True
+                if s_result == OperationStatus.NOT_REGISTERED:
+                    need_reregister = True
 
         for request_id, r_future in self.retrieve_futures.items():
             if not r_future.query():
@@ -527,14 +530,16 @@ class LMCacheMPWorkerAdapter:
             r_result = r_future.result()
             finished_retrieves.add(request_id)
 
-            if not r_result:
+            if r_result != OperationStatus.SUCCESS:
                 logger.error(
                     "Something went wrong when processing the "
-                    "retrieve request for request_id=%s, result=%s",
+                    "retrieve request for request_id=%s, "
+                    "status=%s",
                     request_id,
                     r_result,
                 )
-                need_reregister = True
+                if r_result == OperationStatus.NOT_REGISTERED:
+                    need_reregister = True
 
         # Auto re-register after server restart
         if need_reregister and self.kv_caches:
