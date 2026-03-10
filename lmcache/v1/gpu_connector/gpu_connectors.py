@@ -1686,6 +1686,7 @@ class SGLangLayerwiseGPUConnector(GPUConnectorInterface):
                             [self.kvcaches[layer_id].view(*self.kv_shape)],
                             slot_mapping[start:end],
                             lmc_ops.TransferDirection.H2D,
+                            self.gpu_kv_format,
                             token_major=True,
                         )
                     else:
@@ -1697,6 +1698,7 @@ class SGLangLayerwiseGPUConnector(GPUConnectorInterface):
                             ],
                             slot_mapping[start:end],
                             lmc_ops.TransferDirection.H2D,
+                            self.gpu_kv_format,
                             token_major=True,
                         )
 
@@ -1707,6 +1709,7 @@ class SGLangLayerwiseGPUConnector(GPUConnectorInterface):
                         [self.kvcaches[layer_id].view(*self.kv_shape)],
                         slot_mapping_full,
                         lmc_ops.TransferDirection.H2D,
+                        self.gpu_kv_format,
                         token_major=True,
                     )
                 else:
@@ -1718,6 +1721,7 @@ class SGLangLayerwiseGPUConnector(GPUConnectorInterface):
                         ],
                         slot_mapping_full,
                         lmc_ops.TransferDirection.H2D,
+                        self.gpu_kv_format,
                         token_major=True,
                     )
         yield
@@ -1807,6 +1811,7 @@ class SGLangLayerwiseGPUConnector(GPUConnectorInterface):
                         [self.kvcaches[layer_id].view(*self.kv_shape)],
                         slot_mapping_full,
                         lmc_ops.TransferDirection.D2H,
+                        self.gpu_kv_format,
                         token_major=True,
                     )
                 else:
@@ -1818,6 +1823,7 @@ class SGLangLayerwiseGPUConnector(GPUConnectorInterface):
                         ],
                         slot_mapping_full,
                         lmc_ops.TransferDirection.D2H,
+                        self.gpu_kv_format,
                         token_major=True,
                     )
 
@@ -1841,6 +1847,7 @@ class SGLangLayerwiseGPUConnector(GPUConnectorInterface):
                             [self.kvcaches[layer_id].view(*self.kv_shape)],
                             slot_mapping[start:end],
                             lmc_ops.TransferDirection.D2H,
+                            self.gpu_kv_format,
                             token_major=True,
                         )
                     else:
@@ -1852,6 +1859,7 @@ class SGLangLayerwiseGPUConnector(GPUConnectorInterface):
                             ],
                             slot_mapping[start:end],
                             lmc_ops.TransferDirection.D2H,
+                            self.gpu_kv_format,
                             token_major=True,
                         )
 
