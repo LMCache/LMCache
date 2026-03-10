@@ -59,6 +59,7 @@ from lmcache.v1.multiprocess.config import (
 from lmcache.v1.multiprocess.custom_types import (
     IPCCacheEngineKey,
     KVCache,
+    OperationStatus,
 )
 from lmcache.v1.multiprocess.gpu_context import (
     GPUCacheContext,
@@ -285,7 +286,7 @@ class MPCacheEngine:
         instance_id: int,
         gpu_block_ids: list[int],
         event_ipc_handle: bytes,
-    ) -> tuple[bytes, bool]:
+    ) -> tuple[bytes, int]:
         """
         Stores the GPU KV cache blocks to CPU.
 
@@ -297,9 +298,9 @@ class MPCacheEngine:
             event_ipc_handle (bytes): The IPC handle of the event to wait on.
 
         Returns:
-            tuple[bytes, bool]: The first element is the IPC handle of the event
-                that signals the completion of the store operation. The second
-                element indicates whether the store operation was successful.
+            tuple[bytes, int]: The first element is the IPC handle of the
+                event that signals the completion of the store operation.
+                The second element is an OperationStatus code.
         """
         update_session_for_key(key, self.session_manager)
         ipc_keys = resolve_key(key, self.session_manager)
@@ -311,9 +312,12 @@ class MPCacheEngine:
         )
         obj_keys = ipc_keys_to_object_keys(ipc_keys)
 
-        assert instance_id in self.gpu_contexts, (
-            f"KV cache not registered for GPU ID {instance_id}"
-        )
+        if instance_id not in self.gpu_contexts:
+            logger.warning(
+                "KV cache not registered for GPU ID %d, client should re-register",
+                instance_id,
+            )
+            return b"", OperationStatus.NOT_REGISTERED
         gpu_context = self.gpu_contexts[instance_id]
 
         with (
@@ -396,7 +400,7 @@ class MPCacheEngine:
                 length * self.chunk_size,
                 ed - st,
             )
-        return event.ipc_handle(), True
+        return event.ipc_handle(), OperationStatus.SUCCESS
 
     @_lmcache_nvtx_annotate
     def retrieve(
@@ -406,7 +410,7 @@ class MPCacheEngine:
         gpu_block_ids: list[int],
         event_ipc_handle: bytes,
         skip_first_n_tokens: int = 0,
-    ) -> tuple[bytes, bool]:
+    ) -> tuple[bytes, int]:
         """
         Retrieves the CPU KV cache and put into GPU blocks.
 
@@ -422,9 +426,9 @@ class MPCacheEngine:
                 requests.
 
         Returns:
-            tuple[bytes, bool]: The first element is the IPC handle of the event
-                that signals the completion of the retrieve operation. The second
-                element indicates whether the key was successfully retrieved.
+            tuple[bytes, int]: The first element is the IPC handle of the
+                event that signals the completion of the retrieve
+                operation. The second element is an OperationStatus code.
         """
         update_session_for_key(key, self.session_manager)
         ipc_keys = resolve_key(key, self.session_manager)
@@ -436,9 +440,12 @@ class MPCacheEngine:
         )
         obj_keys = ipc_keys_to_object_keys(ipc_keys)
 
-        assert instance_id in self.gpu_contexts, (
-            f"KV cache not registered for GPU ID {instance_id}"
-        )
+        if instance_id not in self.gpu_contexts:
+            logger.warning(
+                "KV cache not registered for GPU ID %d, client should re-register",
+                instance_id,
+            )
+            return b"", OperationStatus.NOT_REGISTERED
         gpu_context = self.gpu_contexts[instance_id]
 
         if get_telemetry_controller().is_enabled():
@@ -503,13 +510,13 @@ class MPCacheEngine:
                 ) as memory_objs:
                     if not memory_objs or len(memory_objs) != len(obj_keys):
                         logger.error("Some keys not found during retrieve!")
-                        return event.ipc_handle(), False
+                        return event.ipc_handle(), OperationStatus.DATA_NOT_FOUND
 
                     prefetched_keys = obj_keys[: len(memory_objs)]
                     _retrieve_loop(obj_keys, memory_objs)
             except Exception as e:
                 logger.warning("Cannot retrieve keys due to exception: %s", str(e))
-                return event.ipc_handle(), False
+                return event.ipc_handle(), OperationStatus.INTERNAL_ERROR
             finally:
                 event.record()
                 gpu_context.cupy_stream.launch_host_func(
@@ -536,7 +543,7 @@ class MPCacheEngine:
         )
 
         self._can_log_store = True
-        return event.ipc_handle(), True
+        return event.ipc_handle(), OperationStatus.SUCCESS
 
     def _find_layout_desc(
         self,

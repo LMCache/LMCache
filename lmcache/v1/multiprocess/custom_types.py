@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from dataclasses import dataclass, field
+from enum import IntEnum
 from typing import TYPE_CHECKING, Any, Callable
 import pickle
 import threading
@@ -261,6 +262,19 @@ class IPCCacheEngineKey:
 
 # Type exports
 KVCache = list[CudaIPCWrapper]
+
+
+class OperationStatus(IntEnum):
+    """Status codes returned by server store/retrieve operations.
+
+    Used to distinguish between different failure modes so the
+    client can decide whether re-registration is needed.
+    """
+
+    SUCCESS = 0
+    NOT_REGISTERED = 1
+    DATA_NOT_FOUND = 2
+    INTERNAL_ERROR = 3
 
 
 @dataclass

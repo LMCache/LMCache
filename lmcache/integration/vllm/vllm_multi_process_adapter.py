@@ -16,6 +16,7 @@ from lmcache.v1.multiprocess.custom_types import (
     CudaIPCWrapper,
     IPCCacheEngineKey,
     KVCache,
+    OperationStatus,
 )
 from lmcache.v1.multiprocess.mq import MessageQueueClient, MessagingFuture
 from lmcache.v1.multiprocess.protocol import RequestType, get_response_class
@@ -90,8 +91,8 @@ class LoadStoreOp:
         return len(self.block_ids)
 
 
-StoreResult = bool
-RetrieveResult = bool
+StoreResult = int
+RetrieveResult = int
 LookupResult = int
 
 
@@ -318,6 +319,7 @@ class LMCacheMPWorkerAdapter:
 
         # Registered kv caches from vLLM
         self.kv_caches: dict[str, torch.Tensor] = {}
+        self.registered: bool = False
 
         # Request futures
         # request_id -> future
@@ -364,18 +366,28 @@ class LMCacheMPWorkerAdapter:
         """
         # Register kv cache and send the request
         self.kv_caches = kv_caches
+        self._do_register()
+
+    def _do_register(self) -> None:
+        """Send the REGISTER_KV_CACHE request to the server.
+
+        This is idempotent and can be called multiple times
+        (e.g. after a server restart).
+        """
         logger.info("Registering kv caches")
         future = send_lmcache_request(
             self.mq_client,
             RequestType.REGISTER_KV_CACHE,
             [
                 self.instance_id,
-                wrap_kv_caches(kv_caches),
+                wrap_kv_caches(self.kv_caches),
                 self.model_name,
                 self.world_size,
             ],
         )
-        future.result()
+        timeout = float(os.getenv("LMCACHE_REGISTER_TIMEOUT", "5.0"))
+        future.result(timeout=timeout)
+        self.registered = True
 
     @_lmcache_nvtx_annotate
     def submit_store_request(
@@ -493,6 +505,7 @@ class LMCacheMPWorkerAdapter:
         """
         finished_stores = set()
         finished_retrieves = set()
+        need_reregister = False
         for request_id, s_future in self.store_futures.items():
             if not s_future.query():
                 continue
@@ -500,13 +513,15 @@ class LMCacheMPWorkerAdapter:
             s_result = s_future.result()
             finished_stores.add(request_id)
 
-            if not s_result:
-                # TODO: add error handling here
+            if s_result != OperationStatus.SUCCESS:
                 logger.error(
                     "Something went wrong when processing the "
-                    "store request for request_id=%s",
+                    "store request for request_id=%s, status=%s",
                     request_id,
+                    s_result,
                 )
+                if s_result == OperationStatus.NOT_REGISTERED:
+                    need_reregister = True
 
         for request_id, r_future in self.retrieve_futures.items():
             if not r_future.query():
@@ -515,13 +530,26 @@ class LMCacheMPWorkerAdapter:
             r_result = r_future.result()
             finished_retrieves.add(request_id)
 
-            if not r_result:
-                # TODO: add error handing here
+            if r_result != OperationStatus.SUCCESS:
                 logger.error(
                     "Something went wrong when processing the "
-                    "retrieve request for request_id=%s, result=%s",
+                    "retrieve request for request_id=%s, "
+                    "status=%s",
                     request_id,
                     r_result,
+                )
+                if r_result == OperationStatus.NOT_REGISTERED:
+                    need_reregister = True
+
+        # Auto re-register after server restart
+        if need_reregister and self.kv_caches:
+            logger.warning("Detected unregistered instance, re-registering kv caches")
+            try:
+                self._do_register()
+            except Exception as e:
+                logger.error(
+                    "Failed to re-register kv caches: %s. Will retry on next failure.",
+                    e,
                 )
 
         # Remove the finished requests from the tracking dicts
