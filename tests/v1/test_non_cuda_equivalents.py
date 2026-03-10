@@ -1,11 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from typing import Any
+from typing import Any, Union
 import unittest.mock
 
 # Third Party
 import pytest
 import torch
+
+# First Party
+import lmcache.non_cuda_equivalents as _py_ops
 
 # ==========================================
 # 0. utils functions.
@@ -44,12 +47,15 @@ def _build_backend_params() -> list:
     """Build pytest parameter list for the backend fixture.
 
     Returns one entry per available backend configuration:
-    - cuda_ops: uses lmcache.c_ops (requires CUDA and the CUDA extension)
-    - non_cuda_gpu: uses lmcache.non_cuda_equivalents with GPU visible
-    - non_cuda_no_gpu: uses lmcache.non_cuda_equivalents with GPU mocked away
+    - cuda_c_ops: uses lmcache.c_ops (requires CUDA and the CUDA extension)
+    - cuda_py_ops: uses lmcache.non_cuda_equivalents with GPU visible
+    - cpy_py_ops: uses lmcache.non_cuda_equivalents with GPU mocked away
+    - xpu_py_ops: uses lmcache.non_cuda_equivalents with XPU visible
     """
     params = []
     cuda_available = torch.cuda.is_available()
+
+    params.append(pytest.param(("cpu_py_ops", _py_ops, "cpu"), id="cpu_py_ops"))
 
     if cuda_available:
         try:
@@ -62,21 +68,18 @@ def _build_backend_params() -> list:
         except ImportError:
             pass
 
-        # First Party
-        import lmcache.non_cuda_equivalents as _py_ops
-
-        params.append(pytest.param(("cuda_py_ops", _py_ops, "cuda"), id="cuda_py_ops"))
+        if _py_ops._get_copy_lib() is not None:
+            params.append(
+                pytest.param(("cuda_py_ops", _py_ops, "cuda"), id="cuda_cuda_py_ops")
+            )
+        else:
+            params.append(
+                pytest.param(("cuda_py_ops", _py_ops, "cpu"), id="cuda_cpu_py_ops")
+            )
 
     if hasattr(torch, "xpu") and torch.xpu.is_available():
-        # First Party
-        import lmcache.non_cuda_equivalents as _py_ops
-
         params.append(pytest.param(("xpu_py_ops", _py_ops, "xpu"), id="xpu_py_ops"))
 
-    # First Party
-    import lmcache.non_cuda_equivalents as _py_ops
-
-    params.append(pytest.param(("cpu_py_ops", _py_ops, "cpu"), id="cpu_py_ops"))
     return params
 
 
@@ -90,11 +93,11 @@ _results: dict[tuple[str, str], dict[str, Any]] = {}
 def backend(request: pytest.FixtureRequest) -> Any:
     """Yield (backend_id, ops_module, device) for each backend config.
 
-    For the non_cuda_no_gpu variant, torch.cuda.is_available is patched to
+    For the cpu_py_ops variant, torch.cuda.is_available is patched to
     return False so the scenario code behaves as if no GPU is present.
     """
     backend_id, ops, device = request.param
-    if backend_id == "non_cuda_no_gpu":
+    if backend_id == "cpu_py_ops":
         with unittest.mock.patch("torch.cuda.is_available", return_value=False):
             yield backend_id, ops, device
     else:
@@ -110,18 +113,24 @@ def scenario_get_gpu_pci_bus_id(ops: Any, device: str) -> dict[str, torch.Tensor
     """Test get_gpu_pci_bus_id returns a valid string on CUDA backends."""
     res = ops.get_gpu_pci_bus_id(0)
 
-    if device == "cuda" and torch.cuda.is_available():
-        assert res is not None, "get_gpu_pci_bus_id returned None"
-        assert isinstance(res, str) and len(res) > 0
+    is_valid = isinstance(res, str) and len(res) > 0
 
     # 1 = PASS (call succeeded without crash)
-    return {"get_gpu_pci_bus_id": torch.tensor([1], dtype=torch.int32)}
+    # 0 = FAIL
+    return {
+        "get_gpu_pci_bus_id": torch.tensor([1 if is_valid else 0], dtype=torch.int32)
+    }
 
 
 def scenario_calculate_cdf(ops: Any, device: str) -> dict[str, torch.Tensor]:
     """Test calculate_cdf for multiple bin counts."""
     num_bins_list = [1, 2, 5, 11, 15, 31, 32, 63]
     results: dict[str, torch.Tensor] = {}
+
+    # all bins should be smaller than 64 -> align with C ops
+    assert all(n < 64 for n in num_bins_list), (
+        f"All num_bins must be < 64, got {[n for n in num_bins_list if n >= 64]}"
+    )
 
     for num_bins in num_bins_list:
         torch.manual_seed(42)
@@ -255,13 +264,15 @@ def scenario_lmcache_memcpy_async(ops: Any, device: str) -> dict[str, torch.Tens
         dst_host.zero_()
         expected = src_host[offset : offset + nbytes].clone()
 
+        device_sync(device)
+
         if use_tensor_mode:
             ops.lmcache_memcpy_async(
                 gpu_buffer[offset : offset + nbytes],
                 src_host[offset : offset + nbytes],
                 nbytes,
                 h2d_dir,
-                offset,
+                0,
                 alignment,
             )
             device_sync(device)
@@ -270,7 +281,7 @@ def scenario_lmcache_memcpy_async(ops: Any, device: str) -> dict[str, torch.Tens
                 gpu_buffer[offset : offset + nbytes],
                 nbytes,
                 d2h_dir,
-                offset,
+                0,
                 alignment,
             )
         else:
@@ -406,8 +417,10 @@ def scenario_load_and_reshape_flash(ops: Any, device: str) -> dict[str, torch.Te
                     f"max diff={v_diff}"
                 )
 
-    # 5. Return extracted data for cross-backend comparison
-    return {"load_and_reshape_flash": extracted_chunks[0].cpu()}
+    # 5. Return ALL extracted chunks concatenated for cross-backend comparison
+    return {
+        "load_and_reshape_flash": torch.cat([c.cpu() for c in extracted_chunks], dim=2)
+    }
 
 
 def scenario_reshape_and_cache_back_flash(
@@ -584,9 +597,9 @@ def scenario_encode_fast_new(ops: Any, device: str) -> dict[str, torch.Tensor]:
     assert (lengths_cpu > 0).all(), "Encoding produced zero-length output!"
     assert (lengths_cpu <= max_buf_len).all(), "Buffer overflow detected!"
 
-    # 6. Return: first 20 bytes of layer 0, channel 0
-    valid_len = lengths_cpu[0, 0].item()
-    res = output_buffer[0, 0, : min(valid_len, 20)].cpu()
+    # 6. Return: first 200 bytes of layer 0, channel 0
+    valid_len = int(lengths_cpu[0, 0].item())
+    res = output_buffer[0, 0, : min(valid_len, 200)].cpu()
     return {"encode_fast_new": res}
 
 
@@ -1220,6 +1233,7 @@ def scenario_multi_layer_kv_transfer(ops: Any, device: str) -> dict[str, torch.T
                 page_buffers.append(pb)
 
             # ── 3. Prepare key_value_ptrs (pointer mode or tensor list mode) ──
+            key_value_ptrs: Union[list[torch.Tensor], torch.Tensor]
             if use_tensor_list:
                 # Tensor list mode: pass the tensor objects directly
                 key_value_ptrs = page_buffers
@@ -1249,7 +1263,7 @@ def scenario_multi_layer_kv_transfer(ops: Any, device: str) -> dict[str, torch.T
 
             # ── 5. Verify (internal, per-format) ──
             for t_id in range(num_tokens):
-                s_idx = slot_mapping[t_id].item()
+                s_idx = int(slot_mapping[t_id].item())
                 for ly in range(num_layers):
                     for kv in range(k_or_v_size):
                         lmc_val = key_value[kv, ly, t_id]
@@ -1397,6 +1411,7 @@ def scenario_multi_layer_kv_transfer_unilateral(
                             lmc_tensor[kv, ly, t] = val
 
             # ── 2. Paged Buffers ──
+            key_value_ptrs: Union[list[torch.Tensor], torch.Tensor]
             if is_mla:
                 # MLA delegates to multi_layer_kv_transfer
                 # ptrs: [layer0, layer1, ...], each -> [page_buffer_size, head_size]
@@ -1487,7 +1502,7 @@ def scenario_multi_layer_kv_transfer_unilateral(
 
             # ── 4. Verify ──
             for t_id in range(num_tokens):
-                s_idx = slot_mapping[t_id].item()
+                s_idx = int(slot_mapping[t_id].item())
                 for ly in range(num_layers):
                     for kv in range(k_or_v_size):
                         lmc_val = lmc_tensor[kv, ly, t_id]
@@ -1548,6 +1563,7 @@ def scenario_multi_layer_kv_transfer_unilateral(
                         pb[s] = val
                 buffers[(kv, ly)] = pb
 
+        key_value_ptrs: Union[list[torch.Tensor], torch.Tensor]  # type: ignore[no-redef]
         if use_tensor_list:
             # Tensor list mode: [K_l0, K_l1, ..., V_l0, V_l1, ...]
             tensor_list = []
@@ -1709,81 +1725,114 @@ SCENARIO_REGISTRY = {
 # ==========================================
 
 
-@pytest.mark.parametrize("name,fn", list(SCENARIO_REGISTRY.items()))
-def test_scenario(
-    backend: tuple,
-    name: str,
-    fn: Any,
-) -> None:
-    """Run a single scenario with a specific backend configuration.
+class TestScenarios:
+    """Test class to ensure test_scenario runs before test_compare.
 
-    Each (scenario, backend) pair is a separate pytest test case, giving
-    per-scenario per-backend failure reporting without subprocess indirection.
+    **Execution Order Guarantee:**
+    By grouping tests in a class and using alphabetically ordered method names
+    (test_1_scenario, test_2_compare), pytest will execute all scenario tests
+    before any compare tests, ensuring _results dict is fully populated.
 
-    Results are stored in the module-level _results dict for later comparison
-    by test_compare.
+    **Why this is necessary:**
+    - test_1_scenario: runs each scenario function with each backend and stores
+      results in the module-level _results dictionary
+    - test_2_compare: reads from _results to compare outputs across backends
+
+    Without explicit ordering, pytest might interleave test_1_scenario and
+    test_2_compare executions, causing test_2_compare to fail when it tries to
+    access results that haven't been stored yet.
+
+    **How pytest ordering works:**
+    Within a test class, pytest collects and executes test methods in the order
+    they appear in the class definition. By naming them test_1_* and test_2_*,
+    we ensure that all test_1_scenario parametrized tests complete before any
+    test_2_compare tests begin.
+
+    **Alternative solutions considered:**
+    - pytest-ordering plugin: requires external dependency
+    - pytest-dependency plugin: requires external dependency
+    - Single test function: would lose per-scenario test granularity
+    - Fixtures: cannot easily guarantee ordering across parametrized tests
     """
-    backend_id, ops, device = backend
-    result = fn(ops, device)
-    if result is not None:
-        _results[(name, backend_id)] = result
 
+    @pytest.mark.parametrize("name,fn", list(SCENARIO_REGISTRY.items()))
+    def test_1_scenario(
+        self,
+        backend: tuple,
+        name: str,
+        fn: Any,
+    ) -> None:
+        """Run a single scenario with a specific backend configuration.
 
-@pytest.mark.parametrize("name", list(SCENARIO_REGISTRY.keys()))
-def test_compare(name: str) -> None:
-    """Compare results across backends for a single scenario.
+        Each (scenario, backend) pair is a separate pytest test case, giving
+        per-scenario per-backend failure reporting without subprocess indirection.
 
-    When multiple backends ran (CUDA available), asserts that non_cuda
-    equivalents produce numerically identical results to cuda_ops.
-    When only one backend ran (no CUDA), simply verifies results were stored.
-    """
-    available = [p.values[0][0] for p in _BACKEND_PARAMS]  # list of backend_ids
-    backend_results = {
-        bid: _results[(name, bid)] for bid in available if (name, bid) in _results
-    }
+        Results are stored in the module-level _results dict for later comparison
+        by test_2_compare.
+        """
+        backend_id, ops, device = backend
+        result = fn(ops, device)
+        if result is not None:
+            _results[(name, backend_id)] = result
 
-    assert len(backend_results) >= 1, (
-        f"{name}: no results collected — were all test_scenario tests skipped?"
-    )
+    @pytest.mark.parametrize("name", list(SCENARIO_REGISTRY.keys()))
+    def test_2_compare(self, name: str) -> None:
+        """Compare results across backends for a single scenario.
 
-    if len(backend_results) < 2:
-        # Only one backend available (no CUDA); just verify results exist
-        return
+        When multiple backends ran (CUDA available), asserts that non_cuda
+        equivalents produce numerically identical results to cuda_ops.
+        When only one backend ran (no CUDA), simply verifies results were stored.
 
-    # Collect all result keys across all backends for this scenario
-    all_keys: set[str] = set()
-    for res in backend_results.values():
-        all_keys.update(res.keys())
+        This test runs after test_1_scenario due to alphabetical ordering of
+        method names within the TestScenarios class.
+        """
+        available = [p.values[0][0] for p in _BACKEND_PARAMS]  # list of backend_ids
+        backend_results = {
+            bid: _results[(name, bid)] for bid in available if (name, bid) in _results
+        }
 
-    base_bid = next(iter(backend_results))  # first available backend as reference
+        assert len(backend_results) >= 1, (
+            f"{name}: no results collected — were all test_1_scenario tests skipped?"
+        )
 
-    for key in sorted(all_keys):
-        base_val = backend_results[base_bid].get(key)
-        if base_val is None:
-            continue
+        if len(backend_results) < 2:
+            # Only one backend available (no CUDA); just verify results exist
+            return
 
-        for bid, res in backend_results.items():
-            if bid == base_bid:
+        # Collect all result keys across all backends for this scenario
+        all_keys: set[str] = set()
+        for res in backend_results.values():
+            all_keys.update(res.keys())
+
+        base_bid = next(iter(backend_results))  # first available backend as reference
+
+        for key in sorted(all_keys):
+            base_val = backend_results[base_bid].get(key)
+            if base_val is None:
                 continue
-            val = res.get(key)
-            if val is None:
-                pytest.fail(
-                    f"{name}/{key}: backend '{bid}' has no result "
-                    f"(reference backend '{base_bid}' does)"
-                )
-                continue
 
-            if isinstance(val, torch.Tensor):
-                v_current = val.detach().cpu().float()
-                v_base = base_val.detach().cpu().float()
-                if not torch.allclose(v_current, v_base, rtol=1e-4, atol=1e-4):
-                    max_diff = (v_current - v_base).abs().max().item()
+            for bid, res in backend_results.items():
+                if bid == base_bid:
+                    continue
+                val = res.get(key)
+                if val is None:
                     pytest.fail(
-                        f"{name}/{key}: '{bid}' vs '{base_bid}' mismatch, "
-                        f"max diff = {max_diff:.2e}"
+                        f"{name}/{key}: backend '{bid}' has no result "
+                        f"(reference backend '{base_bid}' does)"
                     )
-            else:
-                if val != base_val:
-                    pytest.fail(
-                        f"{name}/{key}: '{bid}'={val} != '{base_bid}'={base_val}"
-                    )
+                    continue
+
+                if isinstance(val, torch.Tensor):
+                    v_current = val.detach().cpu().float()
+                    v_base = base_val.detach().cpu().float()
+                    if not torch.allclose(v_current, v_base, rtol=1e-4, atol=1e-4):
+                        max_diff = (v_current - v_base).abs().max().item()
+                        pytest.fail(
+                            f"{name}/{key}: '{bid}' vs '{base_bid}' mismatch, "
+                            f"max diff = {max_diff:.2e}"
+                        )
+                else:
+                    if val != base_val:
+                        pytest.fail(
+                            f"{name}/{key}: '{bid}'={val} != '{base_bid}'={base_val}"
+                        )
