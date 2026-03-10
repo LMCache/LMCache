@@ -722,7 +722,7 @@ class LMCacheMPWorkerAdapter:
                     request_id,
                 )
 
-        for request_id, (r_future, r_block_ids) in self.retrieve_futures.items():
+        for request_id, (r_future, _) in self.retrieve_futures.items():
             if not r_future.query():
                 continue
 
