@@ -20,7 +20,7 @@ check_gpu_health() {
 
     # Parse GPU info into a temp file to avoid subshell variable scoping issues
     local gpu_info
-    gpu_info=$(nvidia-smi --query-gpu=index,memory.total,memory.used,memory.free --format=csv,noheader,nounits 2>/dev/null)
+    gpu_info=$(nvidia-smi --query-gpu=index,memory.total,memory.used,memory.free --format=csv,noheader,nounits 2>/dev/null | sed 's/ //g')
 
     if [[ -z "$gpu_info" ]]; then
         echo "  No GPUs detected, skipping"
@@ -29,11 +29,6 @@ check_gpu_health() {
 
     local has_problem=false
     while IFS=, read -r idx total used free; do
-        # Trim whitespace
-        idx=$(echo "$idx" | xargs)
-        total=$(echo "$total" | xargs)
-        used=$(echo "$used" | xargs)
-        free=$(echo "$free" | xargs)
 
         if [[ "$total" -eq 0 ]]; then
             continue

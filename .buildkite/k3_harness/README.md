@@ -132,7 +132,7 @@ This runs `gpu-monitor.sh` every 10 minutes. It distinguishes K8s pod processes 
 tail -f /var/log/gpu-monitor.log
 
 # Remove the cron job
-crontab -l | grep -v gpu-monitor.sh | crontab -
+crontab -l 2>/dev/null | grep -v gpu-monitor.sh | crontab -
 ```
 
 ## Teardown

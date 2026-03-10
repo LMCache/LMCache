@@ -11,6 +11,8 @@
 set -euo pipefail
 
 LOG_PREFIX="[gpu-monitor $(date '+%Y-%m-%d %H:%M:%S')]"
+K8S_PIDS_FILE=$(mktemp)
+trap 'rm -f "$K8S_PIDS_FILE"' EXIT
 
 if ! command -v nvidia-smi &>/dev/null; then
     echo "$LOG_PREFIX ERROR: nvidia-smi not found"
@@ -38,7 +40,7 @@ fi
         fi
     done
     shopt -u nullglob
-} | sort -u > /tmp/.gpu_monitor_k8s_pids 2>/dev/null || true
+} | sort -u > "$K8S_PIDS_FILE" 2>/dev/null || true
 
 # Also check via crictl if available (more reliable)
 if command -v crictl &>/dev/null; then
@@ -46,8 +48,8 @@ if command -v crictl &>/dev/null; then
         pid=$(crictl inspect --output go-template --template '{{.info.pid}}' "$container_id" 2>/dev/null || true)
         if [[ -n "$pid" && "$pid" != "0" ]]; then
             # Include the container PID and all its descendants
-            echo "$pid" >> /tmp/.gpu_monitor_k8s_pids
-            pgrep -P "$pid" --ns "$pid" 2>/dev/null >> /tmp/.gpu_monitor_k8s_pids || true
+            echo "$pid" >> "$K8S_PIDS_FILE"
+            pgrep -P "$pid" --ns "$pid" 2>/dev/null >> "$K8S_PIDS_FILE" || true
         fi
     done
 fi
@@ -58,7 +60,7 @@ for pid in "${GPU_PIDS[@]}"; do
     [[ -z "$pid" ]] && continue
 
     # Is this PID a K8s process?
-    if grep -qw "$pid" /tmp/.gpu_monitor_k8s_pids 2>/dev/null; then
+    if grep -qw "$pid" "$K8S_PIDS_FILE" 2>/dev/null; then
         continue
     fi
 
@@ -70,8 +72,6 @@ for pid in "${GPU_PIDS[@]}"; do
     # This is a non-K8s process using a GPU
     STALE_FOUND=true
     local_cmdline=$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null | head -c 200 || echo "<unknown>")
-    gpu_mem=$(nvidia-smi --query-compute-apps=pid,gpu_name,used_memory --format=csv,noheader -i 2>/dev/null \
-        | grep "^${pid}," || echo "$pid, unknown, unknown")
 
     echo "$LOG_PREFIX STALE GPU PROCESS: PID=$pid cmd='$local_cmdline'"
     nvidia-smi --query-compute-apps=pid,gpu_bus_id,used_memory --format=csv,noheader 2>/dev/null \
@@ -91,8 +91,6 @@ for pid in "${GPU_PIDS[@]}"; do
         fi
     fi
 done
-
-rm -f /tmp/.gpu_monitor_k8s_pids
 
 if [[ "$STALE_FOUND" == "true" ]]; then
     echo "$LOG_PREFIX"
