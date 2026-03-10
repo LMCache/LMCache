@@ -7,7 +7,10 @@ and passed between processes during multiprocessing tests.
 """
 
 # First Party
-from lmcache.v1.multiprocess.custom_types import KVCache
+from lmcache.v1.multiprocess.custom_types import (
+    KVCache,
+    OperationStatus,
+)
 from lmcache.v1.multiprocess.protocol import KeyType
 
 # ==============================================================================
@@ -86,7 +89,7 @@ def unregister_kv_cache_handler(gpu_id: int) -> None:
 
 def store_handler(
     key: KeyType, gpu_id: int, gpu_block_ids: list[int], ipc_handle: bytes
-) -> tuple[bytes, bool]:
+) -> tuple[bytes, int]:
     """
     Dummy handler for STORE requests.
 
@@ -97,7 +100,7 @@ def store_handler(
         ipc_handle: CUDA event IPC handle
 
     Returns:
-        tuple[bytes, bool]: (event handle, success flag)
+        tuple[bytes, int]: (event handle, OperationStatus code)
     """
     assert isinstance(key, KeyType), f"Expected key to be KeyType, got {type(key)}"
     assert isinstance(gpu_id, int), f"Expected gpu_id to be int, got {type(gpu_id)}"
@@ -107,7 +110,7 @@ def store_handler(
     assert isinstance(ipc_handle, bytes), (
         f"Expected ipc_handle to be bytes, got {type(ipc_handle)}"
     )
-    return b"\x01" * 64, True
+    return b"\x01" * 64, OperationStatus.SUCCESS
 
 
 # ==============================================================================
@@ -121,7 +124,7 @@ def retrieve_handler(
     gpu_block_ids: list[int],
     event_handler: bytes,
     skip_first_n_tokens: int = 0,
-) -> tuple[bytes, bool]:
+) -> tuple[bytes, int]:
     """
     Dummy handler for RETRIEVE requests.
 
@@ -133,7 +136,7 @@ def retrieve_handler(
         skip_first_n_tokens: Number of tokens to skip at retrieve start
 
     Returns:
-        tuple[bytes, bool]: (event handle, success flag)
+        tuple[bytes, int]: (event handle, OperationStatus code)
     """
     assert isinstance(key, KeyType), f"Expected key to be KeyType, got {type(key)}"
     assert isinstance(gpu_id, int), f"Expected gpu_id to be int, got {type(gpu_id)}"
@@ -146,7 +149,7 @@ def retrieve_handler(
     assert isinstance(skip_first_n_tokens, int), (
         f"Expected skip_first_n_tokens to be int, got {type(skip_first_n_tokens)}"
     )
-    return b"\x01" * 64, True
+    return b"\x01" * 64, OperationStatus.SUCCESS
 
 
 # ==============================================================================

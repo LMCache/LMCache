@@ -12,7 +12,11 @@ import torch
 import zmq
 
 # First Party
-from lmcache.v1.multiprocess.custom_types import CudaIPCWrapper, IPCCacheEngineKey
+from lmcache.v1.multiprocess.custom_types import (
+    CudaIPCWrapper,
+    IPCCacheEngineKey,
+    OperationStatus,
+)
 from lmcache.v1.multiprocess.mq import (
     MessageQueueClient,
     MessageQueueServer,
@@ -425,7 +429,7 @@ def test_mq_store():
     """
     Test MessageQueue with STORE request type.
     STORE takes (key: KeyType, gpu_id: int, gpu_block_ids: list[int],
-    event_ipc_handle: bytes) and returns (bytes, bool).
+    event_ipc_handle: bytes) and returns (bytes, int).
     """
     # Create test key
     key = create_cache_key(0)
@@ -441,7 +445,7 @@ def test_mq_store():
     helper.run_test(
         request_type=RequestType.STORE,
         payloads=[key, gpu_id, gpu_block_ids, test_handle],
-        expected_response=(b"\x01" * 64, True),
+        expected_response=(b"\x01" * 64, OperationStatus.SUCCESS),
         num_requests=1,
     )
 
@@ -450,7 +454,7 @@ def test_mq_retrieve():
     """
     Test MessageQueue with RETRIEVE request type.
     RETRIEVE takes (key: KeyType, gpu_id: int, gpu_block_ids: list[int],
-    event_ipc_handle: bytes) and returns (bytes, bool).
+    event_ipc_handle: bytes) and returns (bytes, int).
     """
     # Create test key
     key = create_cache_key(0)
@@ -468,7 +472,7 @@ def test_mq_retrieve():
     helper.run_test(
         request_type=RequestType.RETRIEVE,
         payloads=[key, gpu_id, gpu_block_ids, test_handle, 0],
-        expected_response=(b"\x01" * 64, True),
+        expected_response=(b"\x01" * 64, OperationStatus.SUCCESS),
         num_requests=1,
     )
 
