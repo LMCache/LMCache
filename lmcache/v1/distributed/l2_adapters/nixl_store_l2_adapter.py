@@ -563,6 +563,31 @@ class NixlStoreL2Adapter(L2AdapterInterface):
         os.close(self._lookup_efd)
         os.close(self._load_efd)
 
+    #####################
+    # Status Interface
+    #####################
+
+    def report_status(self) -> dict:
+        """Return a status dict for the Nixl L2 adapter."""
+        with self._lock:
+            stored_object_count = len(self._memory_objects)
+            pinned_object_count = sum(
+                1 for obj in self._memory_objects.values() if obj.pin_count > 0
+            )
+        pool = self.nixl_agent.pool
+        with pool._lock:
+            pool_free_slots = len(pool.indices)
+        return {
+            "is_healthy": self._loop_thread.is_alive(),
+            "type": "NixlStoreL2Adapter",
+            "backend": self._config.backend,
+            "stored_object_count": stored_object_count,
+            "pinned_object_count": pinned_object_count,
+            "pool_size": self._config.pool_size,
+            "pool_free_slots": pool_free_slots,
+            "event_loop_alive": self._loop_thread.is_alive(),
+        }
+
     ##################
     # Helper functions
     ##################

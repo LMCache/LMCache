@@ -101,6 +101,13 @@ class CUDAMessagingFuture(MessagingFuture[T]):
         """
         event_bytes, result = self.raw_future_.result()
         self.result_ = result
+        self.is_done_.set()
+
+        if not event_bytes:
+            # Server returned empty handle (e.g. unregistered
+            # instance after restart). Skip CUDA event creation
+            # so that query/wait can still return the failure.
+            return
 
         # Deserialize the CUDA event
         self.event_ = torch.cuda.Event.from_ipc_handle(self.device_, event_bytes)
@@ -128,14 +135,19 @@ class CUDAMessagingFuture(MessagingFuture[T]):
             self.event_.synchronize()
             return True
 
+        if self.is_done_.is_set():
+            # Completed without a CUDA event (e.g. server
+            # returned failure with empty handle).
+            return True
+
         flag = self.raw_future_.wait(timeout)
         if not flag:
             return False
 
         self._on_raw_future_complete()
 
-        assert self.event_ is not None
-        self.event_.synchronize()
+        if self.event_ is not None:
+            self.event_.synchronize()
 
         return True
 
@@ -174,10 +186,16 @@ class CUDAMessagingFuture(MessagingFuture[T]):
         if self.event_:
             return self.event_.query()
 
+        if self.is_done_.is_set():
+            # Completed without a CUDA event (e.g. server
+            # returned failure with empty handle).
+            return True
+
         if self.raw_future_.query():
             self._on_raw_future_complete()
-            assert self.event_ is not None
-            return self.event_.query()
+            if self.event_ is not None:
+                return self.event_.query()
+            return True
 
         return False
 
