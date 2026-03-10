@@ -90,7 +90,13 @@ Documentation
    kv_cache/async_loading
    kv_cache/caching_policies
    kv_cache/p2p_sharing
-   kv_cache/multiprocess_mode
+:raw-html:`<br />`
+
+.. toctree::
+   :maxdepth: 3
+   :caption: Multiprocess Mode
+
+   mp/index
 
 :raw-html:`<br />`
 
