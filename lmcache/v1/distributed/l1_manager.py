@@ -83,6 +83,38 @@ def l1_mgr_synchronized(func):
 
 L1OperationResult = tuple[L1Error, MemoryObj | None]
 
+# Upper bound for the count parameter in reserve_read / finish_read
+# to prevent a single call from holding the global lock for too long.
+MAX_READ_LOCK_COUNT = 128
+
+
+def _validate_extra_count(extra_count: int) -> int:
+    """Validate and clamp extra_count.
+
+    Args:
+        extra_count: Extra lock count on top of the
+            default 1 lock.
+
+    Returns:
+        Clamped value in [0, MAX_READ_LOCK_COUNT - 1].
+    """
+    if extra_count < 0:
+        logger.warning(
+            "L1Manager: extra_count=%d is invalid, clamping to 0",
+            extra_count,
+        )
+        return 0
+    upper = MAX_READ_LOCK_COUNT - 1
+    if extra_count > upper:
+        logger.warning(
+            "L1Manager: extra_count=%d exceeds limit=%d, clamping",
+            extra_count,
+            upper,
+        )
+        return upper
+    return extra_count
+
+
 # Main classes
 
 
@@ -159,20 +191,30 @@ class L1Manager:
     def reserve_read(
         self,
         keys: list[ObjectKey],
+        extra_count: int = 0,
     ) -> dict[ObjectKey, L1OperationResult]:
         """Reserve read access for the given keys.
 
         Args:
-            keys: The list of object keys to reserve read access for.
+            keys: The list of object keys to reserve
+                read access for.
+            extra_count: Extra read locks on top of the
+                default 1 lock.  Total locks acquired per
+                key = 1 + extra_count.  Useful when multiple
+                workers each consume one read lock for the
+                same key (e.g. MLA models with TP > 1).
 
         Returns:
-            A dictionary mapping each object key to a tuple of
-            (L1Error, Optional[MemoryObj]).
+            A dictionary mapping each object key to a tuple
+            of (L1Error, Optional[MemoryObj]).
 
         Errors:
             KEY_NOT_EXIST: The key does not exist.
-            KEY_NOT_READABLE: The key exists but is not readable.
+            KEY_NOT_READABLE: The key exists but is not
+                readable.
         """
+        extra_count = _validate_extra_count(extra_count)
+        total = 1 + extra_count
         ret: dict[ObjectKey, L1OperationResult] = {}
         successful_keys: list[ObjectKey] = []
         for key in keys:
@@ -185,7 +227,11 @@ class L1Manager:
                 ret[key] = (L1Error.KEY_NOT_READABLE, None)
                 continue
 
-            entry.read_lock.lock()
+            # TODO(perf): support a count argument in
+            # TTLLock.lock() to avoid Python for-loop
+            # overhead (TTLLock is C++ std::atomic).
+            for _ in range(total):
+                entry.read_lock.lock()
             ret[key] = (L1Error.SUCCESS, entry.memory_obj)
             successful_keys.append(key)
 
@@ -232,22 +278,36 @@ class L1Manager:
         return ret
 
     @l1_mgr_synchronized
-    def finish_read(self, keys: list[ObjectKey]) -> dict[ObjectKey, L1Error]:
+    def finish_read(
+        self,
+        keys: list[ObjectKey],
+        extra_count: int = 0,
+    ) -> dict[ObjectKey, L1Error]:
         """Finish read access for the given keys.
 
-        Will delete the object if it is temporary and read count reaches zero.
+        Will delete the object if it is temporary and read
+        count reaches zero.
 
         Args:
-            keys: The list of object keys to finish read access for.
+            keys: The list of object keys to finish read
+                access for.
+            extra_count: Extra read locks to release on top
+                of the default 1.  Must match the
+                ``extra_count`` used in the corresponding
+                ``reserve_read`` call.
 
         Returns:
-            A dictionary mapping each object key to an L1Error.
+            A dictionary mapping each object key to an
+            L1Error.
 
         Errors:
             KEY_NOT_EXIST: The key does not exist.
-            KEY_IN_WRONG_STATE: The key is write-locked or non-read-locked,
-                which means the reader may read inconsistent data.
+            KEY_IN_WRONG_STATE: The key is write-locked or
+                non-read-locked, which means the reader may
+                read inconsistent data.
         """
+        extra_count = _validate_extra_count(extra_count)
+        total = 1 + extra_count
         need_to_free: list[MemoryObj] = []
         need_to_free_keys: list[ObjectKey] = []
         ret: dict[ObjectKey, L1Error] = {}
@@ -282,7 +342,11 @@ class L1Manager:
                 ret[key] = L1Error.KEY_IN_WRONG_STATE
                 continue
 
-            entry.read_lock.unlock()
+            # TODO(perf): support a count argument in
+            # TTLLock.unlock() to avoid Python for-loop
+            # overhead (TTLLock is C++ std::atomic).
+            for _ in range(total):
+                entry.read_lock.unlock()
             if entry.is_temporary and not entry.read_lock.is_locked():
                 # NOTE: temporary objects shouldn't have write-locks
                 need_to_free.append(entry.memory_obj)
@@ -623,6 +687,34 @@ class L1Manager:
             self._objects.clear()
 
         self._memory_manager.close()
+
+    # Status reporting
+    @l1_mgr_synchronized
+    def report_status(self) -> dict:
+        """Return a status dict describing L1 cache state."""
+        write_locked = 0
+        read_locked = 0
+        temporary = 0
+        for entry in self._objects.values():
+            if entry.write_lock.is_locked():
+                write_locked += 1
+            if entry.read_lock.is_locked():
+                read_locked += 1
+            if entry.is_temporary:
+                temporary += 1
+        used, total = self._memory_manager.get_memory_usage()
+        return {
+            "is_healthy": self._memory_manager.memcheck(),
+            "total_object_count": len(self._objects),
+            "write_locked_count": write_locked,
+            "read_locked_count": read_locked,
+            "temporary_count": temporary,
+            "memory_used_bytes": used,
+            "memory_total_bytes": total,
+            "memory_usage_ratio": used / total if total > 0 else 0.0,
+            "write_ttl_seconds": self._write_ttl_seconds,
+            "read_ttl_seconds": self._read_ttl_seconds,
+        }
 
     # Debugging APIs
     @l1_mgr_synchronized
