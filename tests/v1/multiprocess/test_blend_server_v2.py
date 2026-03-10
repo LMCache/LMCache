@@ -47,7 +47,6 @@ from lmcache.v1.multiprocess.custom_types import (
     CudaIPCWrapper,
     IPCCacheEngineKey,
     KVCache,
-    OperationStatus,
 )
 from lmcache.v1.multiprocess.mq import MessageQueueClient
 from lmcache.v1.multiprocess.protocol import (
@@ -414,7 +413,14 @@ def server_process_runner_v2(
     """Entry point for the server process running BlendEngineV2."""
     # First Party
     from lmcache.v1.multiprocess.blend_server_v2 import run_cache_server
+    from lmcache.v1.multiprocess.config import MPServerConfig
 
+    mp_config = MPServerConfig(
+        host=host,
+        port=port,
+        chunk_size=chunk_size,
+        engine_type="blend",
+    )
     storage_manager_config = StorageManagerConfig(
         l1_manager_config=L1ManagerConfig(
             memory_config=L1MemoryManagerConfig(
@@ -425,11 +431,9 @@ def server_process_runner_v2(
         eviction_config=EvictionConfig(eviction_policy="LRU"),
     )
     run_cache_server(
+        mp_config=mp_config,
         storage_manager_config=storage_manager_config,
         prometheus_config=DEFAULT_PROMETHEUS_CONFIG,
-        host=host,
-        port=port,
-        chunk_size=chunk_size,
     )
 
 
@@ -1650,7 +1654,7 @@ def test_cb_store_final_v2_then_normal_lookup(
         .to_cuda_future()
         .result(timeout=DEFAULT_TIMEOUT)
     )
-    assert retrieve_result == OperationStatus.SUCCESS
+    assert retrieve_result is True
 
     torch.cuda.synchronize()
     for layer in range(client_context.num_layers):
