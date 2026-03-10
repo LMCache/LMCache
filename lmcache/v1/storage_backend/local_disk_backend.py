@@ -3,6 +3,7 @@
 from concurrent.futures import Future
 from typing import TYPE_CHECKING, Any, Callable, List, Optional, Sequence
 import asyncio
+import json
 import os
 import threading
 import time
@@ -13,7 +14,12 @@ import torch
 # First Party
 from lmcache.logging import init_logger
 from lmcache.observability import LMCStatsMonitor
-from lmcache.utils import CacheEngineKey, DiskCacheMetadata, _lmcache_nvtx_annotate
+from lmcache.utils import (
+    CacheEngineKey,
+    DiskCacheMetadata,
+    _lmcache_nvtx_annotate,
+    parse_cache_key,
+)
 from lmcache.v1.cache_controller.message import OpType
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_management import MemoryFormat, MemoryObj
@@ -95,6 +101,8 @@ class LocalDiskWorker:
 
 
 class LocalDiskBackend(StorageBackendInterface):
+    MANIFEST_VERSION = 1
+
     def __init__(
         self,
         config: LMCacheEngineConfig,
@@ -109,6 +117,9 @@ class LocalDiskBackend(StorageBackendInterface):
         else:
             super().__init__("cpu")
 
+        self.config = config
+        self.metadata = metadata if metadata is not None else local_cpu_backend.metadata
+        self.cache_policy_name = config.cache_policy.upper()
         self.cache_policy = get_cache_policy(config.cache_policy)
         self.dict = self.cache_policy.init_mutable_mapping()
 
@@ -153,6 +164,7 @@ class LocalDiskBackend(StorageBackendInterface):
         self.instance_id = config.lmcache_instance_id
         self.stats_monitor = LMCStatsMonitor.GetOrCreate()
         self.usage = 0
+        self.manifest_path = self._get_manifest_path()
 
         # Batched message sender for controller communication
         self.batched_msg_sender: Optional[BatchedMessageSender] = None
@@ -168,6 +180,8 @@ class LocalDiskBackend(StorageBackendInterface):
         else:
             logger.warning("Controller message sender is not initialized")
 
+        self._restore_disk_cache_state()
+
     def __str__(self):
         return "LocalDiskBackend"
 
@@ -176,6 +190,403 @@ class LocalDiskBackend(StorageBackendInterface):
         key: CacheEngineKey,
     ) -> str:
         return os.path.join(self.path, key.to_string().replace("/", "-") + ".pt")
+
+    def _get_manifest_path(self) -> str:
+        if self.metadata is None:
+            namespace = self.instance_id or "default"
+        else:
+            namespace = (
+                f"{self.metadata.model_name}@{self.metadata.world_size}"
+                f"@{self.metadata.worker_id}"
+            )
+
+        return os.path.join(
+            self.path,
+            f".lmcache-local-disk-manifest-{namespace.replace('/', '-')}.json",
+        )
+
+    def _get_legacy_namespace_prefix(self) -> Optional[str]:
+        if self.metadata is None:
+            return None
+
+        return (
+            f"{self.metadata.model_name}@{self.metadata.world_size}"
+            f"@{self.metadata.worker_id}@"
+        ).replace("/", "-")
+
+    def _serialize_cached_positions(
+        self, cached_positions: Optional[torch.Tensor]
+    ) -> Optional[list[int]]:
+        if cached_positions is None:
+            return None
+        return cached_positions.detach().cpu().tolist()
+
+    def _deserialize_cached_positions(
+        self, cached_positions: Any
+    ) -> Optional[torch.Tensor]:
+        if cached_positions is None:
+            return None
+        if not isinstance(cached_positions, list):
+            return None
+        try:
+            return torch.tensor(cached_positions, dtype=torch.long)
+        except (TypeError, ValueError):
+            return None
+
+    def _serialize_policy_state_locked(self) -> dict[str, Any]:
+        ordered_keys = [key.to_string() for key in self.dict.keys()]
+        policy_state: dict[str, Any] = {"ordered_keys": ordered_keys}
+
+        if self.cache_policy_name == "LFU":
+            key_freqs = {
+                key.to_string(): int(freq)
+                for key, freq in self.cache_policy.key_to_freq.items()
+            }
+
+            ordered_keys = []
+            for freq, keys in self.cache_policy.freq_to_keys.items():
+                for key in keys.keys():
+                    key_str = key.to_string()
+                    ordered_keys.append(key_str)
+                    key_freqs.setdefault(key_str, int(freq))
+
+            policy_state["ordered_keys"] = ordered_keys
+            policy_state["key_freqs"] = key_freqs
+
+        return policy_state
+
+    def _build_manifest_data_locked(self) -> dict[str, Any]:
+        entries = {}
+        for key, meta in self.dict.items():
+            entries[key.to_string()] = {
+                "path": os.path.relpath(meta.path, self.path),
+                "size": meta.size,
+                "shape": list(meta.shape) if meta.shape is not None else None,
+                "dtype": key._dtype_str,
+                "fmt": (
+                    meta.fmt.name
+                    if meta.fmt is not None and hasattr(meta.fmt, "name")
+                    else None
+                ),
+                "cached_positions": self._serialize_cached_positions(
+                    meta.cached_positions
+                ),
+            }
+
+        data: dict[str, Any] = {
+            "version": self.MANIFEST_VERSION,
+            "cache_policy": self.cache_policy_name,
+            "entries": entries,
+            "policy_state": self._serialize_policy_state_locked(),
+        }
+        if self.metadata is not None:
+            data["namespace"] = {
+                "model_name": self.metadata.model_name,
+                "world_size": self.metadata.world_size,
+                "worker_id": self.metadata.worker_id,
+            }
+
+        return data
+
+    def _write_manifest_data(self, data: dict[str, Any]) -> None:
+        tmp_path = self.manifest_path + ".tmp"
+        try:
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(data, f)
+            os.replace(tmp_path, self.manifest_path)
+        except Exception as e:
+            logger.warning("Failed to persist local disk manifest: %s", e)
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+
+    def _save_manifest(self) -> None:
+        with self.disk_lock:
+            data = self._build_manifest_data_locked()
+        self._write_manifest_data(data)
+
+    def _reset_policy_state_locked(self) -> None:
+        if self.cache_policy_name == "LFU":
+            self.cache_policy.key_to_freq.clear()
+            self.cache_policy.freq_to_keys.clear()
+
+        if hasattr(self.cache_policy, "chunk_hash_to_init_timestamp"):
+            self.cache_policy.chunk_hash_to_init_timestamp.clear()
+
+    def _recompute_usage_locked(self) -> None:
+        self.current_cache_size = sum(meta.size for meta in self.dict.values())
+        self.usage = 0
+        for meta in self.dict.values():
+            if os.path.exists(meta.path):
+                self.usage += os.path.getsize(meta.path)
+
+    def _get_restored_key_order(
+        self,
+        key_by_string: dict[str, CacheEngineKey],
+        policy_state: dict[str, Any],
+    ) -> list[CacheEngineKey]:
+        ordered_keys: list[CacheEngineKey] = []
+        seen_keys: set[CacheEngineKey] = set()
+
+        for key_str in policy_state.get("ordered_keys", []):
+            key = key_by_string.get(key_str)
+            if key is None or key in seen_keys:
+                continue
+            ordered_keys.append(key)
+            seen_keys.add(key)
+
+        for key in key_by_string.values():
+            if key in seen_keys:
+                continue
+            ordered_keys.append(key)
+            seen_keys.add(key)
+
+        return ordered_keys
+
+    def _restore_policy_state_locked(
+        self,
+        saved_policy_name: str,
+        policy_state: dict[str, Any],
+        ordered_keys: list[CacheEngineKey],
+    ) -> None:
+        self._reset_policy_state_locked()
+
+        if saved_policy_name != self.cache_policy_name:
+            for key in ordered_keys:
+                self.cache_policy.update_on_put(key)
+            return
+
+        if self.cache_policy_name != "LFU":
+            return
+
+        key_freqs = policy_state.get("key_freqs", {})
+        if not isinstance(key_freqs, dict):
+            key_freqs = {}
+
+        for key in ordered_keys:
+            freq = int(key_freqs.get(key.to_string(), 1))
+            self.cache_policy.key_to_freq[key] = freq
+            if freq not in self.cache_policy.freq_to_keys:
+                self.cache_policy.freq_to_keys[freq] = {}
+            self.cache_policy.freq_to_keys[freq][key] = None
+
+    def _load_manifest(self) -> bool:
+        if not os.path.exists(self.manifest_path):
+            return False
+
+        try:
+            with open(self.manifest_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception as e:
+            logger.warning(
+                "Failed to load local disk manifest %s: %s", self.manifest_path, e
+            )
+            return False
+
+        if not isinstance(data, dict) or data.get("version") != self.MANIFEST_VERSION:
+            logger.warning(
+                "Ignoring incompatible local disk manifest: %s", self.manifest_path
+            )
+            return False
+
+        entries = data.get("entries", {})
+        if not isinstance(entries, dict):
+            logger.warning(
+                "Ignoring malformed local disk manifest: %s", self.manifest_path
+            )
+            return False
+
+        policy_state = data.get("policy_state", {})
+        if not isinstance(policy_state, dict):
+            policy_state = {}
+
+        saved_policy_name = str(
+            data.get("cache_policy", self.cache_policy_name)
+        ).upper()
+        restored_entries: dict[str, DiskCacheMetadata] = {}
+        key_by_string: dict[str, CacheEngineKey] = {}
+
+        for key_str, entry in entries.items():
+            if not isinstance(entry, dict):
+                continue
+
+            try:
+                key = parse_cache_key(key_str)
+            except ValueError:
+                continue
+
+            rel_path = entry.get("path")
+            if not isinstance(rel_path, str):
+                continue
+
+            path = os.path.join(self.path, rel_path)
+            if not os.path.isfile(path):
+                continue
+
+            shape_list = entry.get("shape")
+            if not isinstance(shape_list, list):
+                continue
+
+            try:
+                shape = torch.Size([int(v) for v in shape_list])
+            except (TypeError, ValueError):
+                continue
+
+            fmt_name = entry.get("fmt")
+            if (
+                not isinstance(fmt_name, str)
+                or fmt_name not in MemoryFormat.__members__
+            ):
+                continue
+
+            try:
+                size = int(entry.get("size", os.path.getsize(path)))
+            except (OSError, TypeError, ValueError):
+                continue
+
+            canonical_key = key.to_string()
+            key_by_string[canonical_key] = key
+            restored_entries[canonical_key] = DiskCacheMetadata(
+                path=path,
+                size=size,
+                shape=shape,
+                dtype=key.dtype,
+                cached_positions=self._deserialize_cached_positions(
+                    entry.get("cached_positions")
+                ),
+                fmt=MemoryFormat[fmt_name],
+                pin_count=0,
+            )
+
+        ordered_keys = self._get_restored_key_order(key_by_string, policy_state)
+
+        with self.disk_lock:
+            self.dict = self.cache_policy.init_mutable_mapping()
+            for key in ordered_keys:
+                self.dict[key] = restored_entries[key.to_string()]
+
+            self._restore_policy_state_locked(
+                saved_policy_name,
+                policy_state,
+                ordered_keys,
+            )
+            self._recompute_usage_locked()
+
+        self.stats_monitor.update_local_storage_usage(self.usage)
+        logger.info(
+            "Loaded %d local disk entries from manifest %s",
+            len(ordered_keys),
+            self.manifest_path,
+        )
+        return True
+
+    def _get_legacy_restore_defaults(
+        self,
+    ) -> Optional[tuple[torch.Size, torch.dtype, MemoryFormat, int]]:
+        if self.metadata is None:
+            return None
+
+        shapes = self.metadata.get_shapes()
+        dtypes = self.metadata.get_dtypes()
+        if not shapes or not dtypes:
+            return None
+
+        if self.metadata.use_mla:
+            fmt = MemoryFormat.KV_MLA_FMT
+        elif self.local_cpu_backend.layerwise:
+            fmt = (
+                MemoryFormat.KV_2TD
+                if self.local_cpu_backend.enable_blending
+                else MemoryFormat.KV_T2D
+            )
+        else:
+            fmt = MemoryFormat.KV_2LTD
+
+        return (
+            shapes[0],
+            dtypes[0],
+            fmt,
+            self.local_cpu_backend.get_full_chunk_size_bytes(),
+        )
+
+    def _scan_legacy_disk_cache_locked(self) -> int:
+        prefix = self._get_legacy_namespace_prefix()
+        restore_defaults = self._get_legacy_restore_defaults()
+        if prefix is None or restore_defaults is None:
+            return 0
+
+        shape, dtype, fmt, expected_size = restore_defaults
+        migrated_keys: list[CacheEngineKey] = []
+        skipped_count = 0
+
+        self.dict = self.cache_policy.init_mutable_mapping()
+        self._reset_policy_state_locked()
+
+        for entry in os.scandir(self.path):
+            if not entry.is_file() or not entry.name.endswith(".pt"):
+                continue
+
+            if not entry.name.startswith(prefix):
+                continue
+
+            try:
+                file_size = entry.stat().st_size
+            except OSError:
+                skipped_count += 1
+                continue
+
+            if file_size != expected_size:
+                skipped_count += 1
+                continue
+
+            tail = entry.name[len(prefix) : -3]
+            if not tail:
+                skipped_count += 1
+                continue
+
+            try:
+                key = parse_cache_key(
+                    f"{self.metadata.model_name}@{self.metadata.world_size}"
+                    f"@{self.metadata.worker_id}@{tail}"
+                )
+            except (AttributeError, ValueError):
+                skipped_count += 1
+                continue
+
+            self.dict[key] = DiskCacheMetadata(
+                path=entry.path,
+                size=file_size,
+                shape=shape,
+                dtype=dtype,
+                cached_positions=None,
+                fmt=fmt,
+                pin_count=0,
+            )
+            self.cache_policy.update_on_put(key)
+            migrated_keys.append(key)
+
+        self._recompute_usage_locked()
+        self.stats_monitor.update_local_storage_usage(self.usage)
+
+        if migrated_keys:
+            logger.info(
+                "Migrated %d legacy local disk entries from %s (skipped=%d)",
+                len(migrated_keys),
+                self.path,
+                skipped_count,
+            )
+
+        return len(migrated_keys)
+
+    def _restore_disk_cache_state(self) -> None:
+        if self._load_manifest():
+            self._save_manifest()
+            return
+
+        with self.disk_lock:
+            migrated_entries = self._scan_legacy_disk_cache_locked()
+
+        if migrated_entries > 0:
+            self._save_manifest()
 
     def contains(self, key: CacheEngineKey, pin: bool = False) -> bool:
         with self.disk_lock:
@@ -227,28 +638,39 @@ class LocalDiskBackend(StorageBackendInterface):
         if force:
             self.disk_lock.acquire()
 
-        if not (meta := self.dict.pop(key, None)):
+        manifest_data = None
+        try:
+            if not (meta := self.dict.pop(key, None)):
+                return False
+
+            path = meta.path
+            size = meta.size
+            if force:
+                self.current_cache_size = max(self.current_cache_size - size, 0)
+            self.usage = max(self.usage - size, 0)
+            self.stats_monitor.update_local_storage_usage(self.usage)
+
+            # NOTE: The following code will cause deadlock
+            # res = asyncio.run_coroutine_threadsafe(
+            #     self.disk_worker.submit_task("delete", os.remove, path),
+            #     self.loop,
+            # )
+            # res.result()
+            try:
+                os.remove(path)
+            except FileNotFoundError:
+                logger.warning("File already missing on disk: %s", path)
+
+            if force:
+                self.cache_policy.update_on_force_evict(key)
+
+            manifest_data = self._build_manifest_data_locked()
+        finally:
             if force:
                 self.disk_lock.release()
-            return False
 
-        path = meta.path
-        size = meta.size
-        self.usage -= size
-        self.stats_monitor.update_local_storage_usage(self.usage)
-
-        # NOTE: The following code will cause deadlock
-        # res = asyncio.run_coroutine_threadsafe(
-        #     self.disk_worker.submit_task("delete", os.remove, path),
-        #     self.loop,
-        # )
-        # res.result()
-
-        os.remove(path)
-
-        if force:
-            self.cache_policy.update_on_force_evict(key)
-            self.disk_lock.release()
+        if manifest_data is not None:
+            self._write_manifest_data(manifest_data)
 
         # Push kv evict msg with batching
         if self.batched_msg_sender is not None:
@@ -517,6 +939,7 @@ class LocalDiskBackend(StorageBackendInterface):
         memory_obj.ref_count_down()
 
         self.insert_key(key, size, shape, dtype, fmt, cached_positions=cached_positions)
+        self._save_manifest()
 
         self.disk_worker.remove_put_task(key)
 
@@ -616,8 +1039,18 @@ class LocalDiskBackend(StorageBackendInterface):
                     fdo.readinto(buffer)
         except FileNotFoundError:
             logger.warning(f"File not found on disk: {path}")
-            if self.dict.get(key, None):
-                self.dict.pop(key)
+            manifest_data = None
+            with self.disk_lock:
+                if disk_meta := self.dict.pop(key, None):
+                    self.current_cache_size = max(
+                        self.current_cache_size - disk_meta.size, 0
+                    )
+                    self.usage = max(self.usage - disk_meta.size, 0)
+                    self.cache_policy.update_on_force_evict(key)
+                    manifest_data = self._build_manifest_data_locked()
+            self.stats_monitor.update_local_storage_usage(self.usage)
+            if manifest_data is not None:
+                self._write_manifest_data(manifest_data)
             return
 
         disk_read_time = time.time() - start_time
@@ -633,3 +1066,4 @@ class LocalDiskBackend(StorageBackendInterface):
         if self.batched_msg_sender is not None:
             self.batched_msg_sender.close()
         self.disk_worker.close()
+        self._save_manifest()
