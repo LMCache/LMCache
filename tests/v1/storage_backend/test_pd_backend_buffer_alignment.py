@@ -76,16 +76,19 @@ def test_buffer_size_exact_alignment(_mock_ctx, _mock_channel, _mock_receiver):
     )
 
     backend = PDBackend(config, metadata)
-    # Get the actual buffer size used
-    allocator = _get_allocator(backend, config)
-    actual_buffer_size = allocator.buffer_size
-    align_bytes = allocator.align_bytes
+    try:
+        # Get the actual buffer size used
+        allocator = _get_allocator(backend, config)
+        actual_buffer_size = allocator.buffer_size
+        align_bytes = allocator.align_bytes
 
-    assert align_bytes == expected_chunk_size, (
-        f"Expected chunk size {expected_chunk_size}, got {align_bytes}"
-    )
+        assert align_bytes == expected_chunk_size, (
+            f"Expected chunk size {expected_chunk_size}, got {align_bytes}"
+        )
 
-    assert actual_buffer_size == expected_aligned_size, (
-        f"Expected exact aligned size {expected_aligned_size}, "
-        f"but got {actual_buffer_size}"
-    )
+        assert actual_buffer_size == expected_aligned_size, (
+            f"Expected exact aligned size {expected_aligned_size}, "
+            f"but got {actual_buffer_size}"
+        )
+    finally:
+        backend.close()
