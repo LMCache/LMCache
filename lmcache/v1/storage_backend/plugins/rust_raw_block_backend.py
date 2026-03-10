@@ -338,18 +338,34 @@ class RustRawBlockBackend(StoragePluginInterface):
 
     def _evict_one(self) -> bool:
         """Evict least recently used chunk that is not pinned or in-flight."""
-        for victim in list(self._lru.keys()):
+        stale_victims = []
+        victim_to_evict = None
+        entry_to_evict = None
+
+        for victim in self._lru:
             if victim in self._pinned or victim in self._inflight:
                 continue
-            entry = self._index.pop(victim, None)
+
+            entry = self._index.get(victim)
             if entry is None:
-                self._lru.pop(victim, None)
+                stale_victims.append(victim)
                 continue
+
+            victim_to_evict = victim
+            entry_to_evict = entry
+            break
+
+        for victim in stale_victims:
             self._lru.pop(victim, None)
-            self._pinned.discard(victim)
-            self._free_slots.append(int(entry.offset // self.slot_bytes))
-            return True
-        return False
+
+        if victim_to_evict is None:
+            return False
+
+        self._index.pop(victim_to_evict, None)
+        self._lru.pop(victim_to_evict, None)
+        self._pinned.discard(victim_to_evict)
+        self._free_slots.append(int(entry_to_evict.offset // self.slot_bytes))
+        return True
 
     def contains(self, key: CacheEngineKey, pin: bool = False) -> bool:
         with self._lock:
