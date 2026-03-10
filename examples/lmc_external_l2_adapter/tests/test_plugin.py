@@ -35,6 +35,19 @@ from lmcache.v1.memory_management import TensorMemoryObj
 if TYPE_CHECKING:
     pass
 
+try:
+    # Third Party
+    import lmc_external_l2_adapter  # noqa: F401
+
+    _HAS_PLUGIN = True
+except ModuleNotFoundError:
+    _HAS_PLUGIN = False
+
+_skip_unless_plugin = pytest.mark.skipif(
+    not _HAS_PLUGIN,
+    reason="lmc_external_l2_adapter is not installed",
+)
+
 # -- helpers --------------------------------------------------
 
 # Default object size: 1024 float32 = 4 KB
@@ -187,6 +200,7 @@ class TestPluginConfigParsing:
 # -- import / subclass tests ---------------------------------
 
 
+@_skip_unless_plugin
 class TestPluginImport:
     """Verify the class is importable and correct."""
 
@@ -207,6 +221,7 @@ class TestPluginImport:
 # -- full round-trip tests (Linux only) ----------------------
 
 
+@_skip_unless_plugin
 @_skip_unless_linux
 class TestPluginRoundTrip:
     """End-to-end tests that create the adapter via the
