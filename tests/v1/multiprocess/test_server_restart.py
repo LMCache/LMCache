@@ -23,6 +23,7 @@ from lmcache.v1.multiprocess.custom_types import (
     CudaIPCWrapper,
     IPCCacheEngineKey,
     KVCache,
+    OperationStatus,
 )
 from lmcache.v1.multiprocess.mq import (
     MessageQueueClient,
@@ -298,7 +299,9 @@ class TestServerRestart:
                 .to_cuda_future()
                 .result(timeout=DEFAULT_TIMEOUT)
             )
-            assert result is True, "Store should succeed when registered"
+            assert result == OperationStatus.SUCCESS, (
+                "Store should succeed when registered"
+            )
 
             client.close()
         finally:

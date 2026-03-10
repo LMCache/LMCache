@@ -47,6 +47,7 @@ from lmcache.v1.multiprocess.custom_types import (
     CudaIPCWrapper,
     IPCCacheEngineKey,
     KVCache,
+    OperationStatus,
 )
 from lmcache.v1.multiprocess.mq import MessageQueueClient
 from lmcache.v1.multiprocess.protocol import (
@@ -1649,7 +1650,7 @@ def test_cb_store_final_v2_then_normal_lookup(
         .to_cuda_future()
         .result(timeout=DEFAULT_TIMEOUT)
     )
-    assert retrieve_result is True
+    assert retrieve_result == OperationStatus.SUCCESS
 
     torch.cuda.synchronize()
     for layer in range(client_context.num_layers):
