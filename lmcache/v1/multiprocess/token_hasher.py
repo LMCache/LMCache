@@ -61,6 +61,7 @@ class TokenHasher:
 
     def __init__(self, chunk_size: int = 256, hash_algorithm: str = "blake3"):
         self.chunk_size = chunk_size
+        self.hash_algorithm_name = hash_algorithm
         self.hash_func = self._get_hash_func(hash_algorithm)
         self.none_hash = self._init_none_hash()
         logger.info(
