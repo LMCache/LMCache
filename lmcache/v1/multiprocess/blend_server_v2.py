@@ -1,16 +1,52 @@
 # SPDX-License-Identifier: Apache-2.0
+"""
+Overview
+--------
+This server enables KV cache reuse across requests that share token
+sub-sequences at *arbitrary positions*, not only at a common prefix.
+
+Workflow (example: chunk_size = 3)
+-----------------------------------
+1. cb_store_pre_computed([1,2,3,4,5,6])
+   Tokens are split into full chunks ([1,2,3] and [4,5,6]).  Each chunk
+   is stored in the underlying storage under its normal rolling prefix
+   hash, and the chunk fingerprints are registered in
+   BlendTokenRangeMatcher for fast sub-sequence lookup.  Because normal
+   hashes are used, these chunks are also accessible via the standard
+   lookup/retrieve path.
+
+2. cb_lookup_pre_computed([x,y,z, a,b,c, 4,5,6, m,n,p])
+   BlendTokenRangeMatcher slides a rolling polynomial hash over the new
+   request's tokens and detects that the window at positions [6, 9)
+   matches the stored chunk [4,5,6].  A prefetch task is submitted for
+   that chunk using its stored hash as the storage key.  Only chunks
+   confirmed present in storage are returned as CBMatchResult objects
+   (with cur_st/cur_ed pointing to their location in the new request).
+
+3. cb_retrieve_pre_computed(...)
+   The (prefetched) KV cache for each matched chunk is copied (CPU→GPU)
+   into the correct slot of the new request's KV cache buffer (at
+   cur_st + offset), so the LLM can skip recomputing those tokens.
+
+4. cb_store_final([x,y,z, a,b,c, 4,5,6, m,n,p])
+   After inference completes on the new request, all its chunks are
+   stored under normal prefix hashes.  Future requests sharing
+   any prefix of the new request will get standard prefix-cache hits.
+   Future requests sharing any prefix of the first request will also
+   get hits because cb_store_pre_computed already stored those chunks
+   under normal hashes.
+"""
+
 # Standard
-import itertools
-import os
 import time
 
 # Third Party
+import numpy as np
 import torch
 import zmq
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.native_storage_ops import RangePatternMatcher
 from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
     ObjectKey,
@@ -25,7 +61,6 @@ from lmcache.v1.gpu_connector.gpu_ops import (
     lmcache_memcpy_async_d2h,
     lmcache_memcpy_async_h2d,
 )
-from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.mp_observability.config import (
     PrometheusConfig,
     parse_args_to_prometheus_config,
@@ -34,20 +69,8 @@ from lmcache.v1.mp_observability.prometheus_controller import (
     get_prometheus_controller,
     init_prometheus_controller,
 )
-from lmcache.v1.mp_observability.telemetry import (
-    TelemetryConfig,
-    get_telemetry_controller,
-    init_telemetry_controller,
-    parse_args_to_telemetry_config,
-)
-from lmcache.v1.mp_observability.telemetry.config import (
-    DEFAULT_TELEMETRY_CONFIG,
-)
-from lmcache.v1.multiprocess.config import (
-    MPServerConfig,
-    parse_args_to_mp_server_config,
-)
 from lmcache.v1.multiprocess.custom_types import (
+    CBMatchResult,
     IPCCacheEngineKey,
     KVCache,
 )
@@ -61,70 +84,166 @@ from lmcache.v1.multiprocess.protocol import (
     get_payload_classes,
 )
 from lmcache.v1.multiprocess.server import MPCacheEngine, parse_args
+from lmcache.v1.multiprocess.token_hasher import (
+    chunk_hash_windows_numba,
+    rolling_hash_windows_numba,
+    unique_hits_direct_id_numba,
+    update_table_id_numba,
+)
 
 logger = init_logger(__name__)
 
 
-# Helper functions
-def create_ipc_key_with_hashes(
-    key: IPCCacheEngineKey, hashes: list[bytes]
-) -> list[IPCCacheEngineKey]:
+class BlendTokenRangeMatcher:
+    # TODO(Jiayi): Needs thread-safety for this class.
+    # TODO(Jiayi): Currently, the table size is fixed. We need to support
+    # dynamic expanding or eviction.
+    """Fast token-range matcher using polynomial rolling/chunk hashes and a
+    direct-address lookup table.
+
+    Table layout: poly_chunk_hash (u64) → compact_chunk_id (i64, sequential 0…N-1).
+
+    Because compact IDs are bounded by _TABLE_SIZE, unique_hits_direct_id_numba
+    can use a fixed `seen` array of _TABLE_SIZE bytes (~1 MB) rather than one
+    sized by an arbitrary max hash — no memory explosion.
+
+    Auxiliary storage:
+      _chunk_token_hash[i] : caller-supplied token_hash for chunk i
+      _token_hash_to_start : token_hash → start position in the registered seq
+
+    on_new_token_hashes  – register a sequence; chunk_hash_windows_numba(token_hashes)
+                        builds fingerprints, update_table_id_numba writes compact IDs.
+    match_sub_sequence – rolling_hash_windows_numba + unique_hits_direct_id_numba
+                         (num_ids=_TABLE_SIZE) → compact IDs → token_hash → start.
     """
-    Create the list of IPCCacheEngineKey with specific hash.
-    """
-    ipc_keys: list[IPCCacheEngineKey] = []
-    for hash_bytes in hashes:
-        ipc_keys.append(
-            IPCCacheEngineKey(
-                model_name=key.model_name,
-                world_size=key.world_size,
-                worker_id=key.worker_id,
-                token_ids=key.token_ids,
-                start=key.start,
-                end=key.end,
-                request_id=key.request_id,
-                chunk_hash=hash_bytes,
-            )
+
+    _TABLE_BITS: int = 20  # 2^20 ≈ 1 M entries
+    _TABLE_SIZE: int = 1 << _TABLE_BITS
+    _BASE: np.uint64 = np.uint64(0x9E3779B97F4A7C15)  # Fibonacci-hashing constant
+
+    def __init__(self, chunk_size: int = 256):
+        self.chunk_size = chunk_size
+        # poly_chunk_hash → compact_chunk_id; -1 = empty
+        self._table_id = np.full(self._TABLE_SIZE, -1, dtype=np.int64)
+        self._mask = np.uint64(self._TABLE_SIZE - 1)
+        # compact_chunk_id → caller-supplied token_hash (full bytes)
+        self._chunk_token_hash: list[bytes] = []
+        # token_hash → start position in its registered sequence
+        self._token_hash_to_start: dict[bytes, int] = {}
+
+    def on_new_token_hashes(
+        self,
+        token_ids: list[int],
+        token_hashes: list[bytes],
+    ):
+        """Register a new token sequence and index its non-overlapping chunks.
+
+        Args:
+            token_ids: Raw token IDs for the full sequence (num_tokens elements).
+                       Used to compute polynomial chunk fingerprints that match
+                       the rolling hashes computed in match_sub_sequence.
+            token_hashes: Per-chunk bytes hashes supplied by the caller
+                          (one per complete chunk of chunk_size tokens).
+                          Stored as the storage key returned in CBMatchResult.hash.
+        """
+        arr = np.array(token_ids, dtype=np.uint64)
+        # Polynomial fingerprints for non-overlapping chunks, built from raw token IDs
+        # so they match the sliding-window rolling hashes in match_sub_sequence
+        chunk_hashes = chunk_hash_windows_numba(arr, self.chunk_size, self._BASE)
+        n = int(chunk_hashes.shape[0])
+        if n == 0:
+            return
+
+        # Compact sequential IDs: bounded by _TABLE_SIZE, safe for seen-array sizing
+        base_id = len(self._chunk_token_hash)
+        compact_ids = np.arange(base_id, base_id + n, dtype=np.int64)
+
+        # Write table: poly_chunk_hash → compact_chunk_id
+        update_table_id_numba(chunk_hashes, self._table_id, compact_ids)
+
+        # Persist compact_id → token_hash and token_hash → start
+        for i in range(n):
+            th = token_hashes[i]
+            self._chunk_token_hash.append(th)
+            self._token_hash_to_start[th] = i * self.chunk_size
+
+    def match_sub_sequence(
+        self,
+        token_ids: list[int],
+    ) -> list[CBMatchResult]:
+        """Find stored chunks whose fingerprints appear anywhere in token_ids.
+
+        Uses a sliding-window rolling hash so matches need not be aligned to
+        chunk_size boundaries in the query.
+
+        Args:
+            token_ids: Query token sequence to probe (raw token IDs as uint64).
+
+        Returns:
+            One CBMatchResult per unique stored chunk that was hit.
+              old_st/old_ed : positions in the originally registered sequence
+              cur_st/cur_ed : positions in the query (token_ids) where
+                              the match was found
+              hash          : token_hash bytes (from registration) for cache key lookup
+        """
+        if not self._chunk_token_hash or len(token_ids) < self.chunk_size:
+            return []
+
+        arr = np.array(token_ids, dtype=np.uint64)
+
+        # Sliding-window polynomial hashes over the query
+        rolling = rolling_hash_windows_numba(arr, self.chunk_size, self._BASE)
+
+        # Probe table; seen array is _TABLE_SIZE bytes (~1 MB), fixed and safe
+        hit_ids = unique_hits_direct_id_numba(
+            rolling, self._table_id, self._mask, self._TABLE_SIZE
         )
 
-    return ipc_keys
+        if hit_ids.shape[0] == 0:
+            return []
 
+        # For each hit compact_id, find the first query position where it matched
+        hit_id_set = set(int(cid) for cid in hit_ids)
+        cid_to_query_pos: dict[int, int] = {}
+        for q_pos in range(rolling.shape[0]):
+            idx = int(rolling[q_pos]) & int(self._mask)
+            cid = int(self._table_id[idx])
+            if cid in hit_id_set and cid not in cid_to_query_pos:
+                cid_to_query_pos[cid] = q_pos
+                if len(cid_to_query_pos) == len(hit_id_set):
+                    break
 
-def create_temp_ipc_key_by_range(
-    key: IPCCacheEngineKey,
-    start: int,
-    end: int,
-) -> IPCCacheEngineKey:
-    """
-    Create a temporary IPCCacheEngineKey for the specific token range. This is used
-    for the lookup of each paragraph when doing the separate lookup for blend engine.
-
-    Note that this function is only used for lookup, and the hash value in the key is
-    not used and can be set to empty bytes.
-    """
-    return IPCCacheEngineKey(
-        model_name=key.model_name,
-        world_size=key.world_size,
-        worker_id=key.worker_id,
-        token_ids=key.token_ids[start:end],
-        start=start,
-        end=end,
-        request_id=key.request_id,
-        chunk_hash=bytes(),
-    )
+        results: list[CBMatchResult] = []
+        for cid in hit_ids:
+            cid_int = int(cid)
+            th = self._chunk_token_hash[cid_int]
+            old_st = self._token_hash_to_start.get(th)
+            cur_st = cid_to_query_pos.get(cid_int)
+            if old_st is None or cur_st is None:
+                continue
+            results.append(
+                CBMatchResult(
+                    old_st=old_st,
+                    old_ed=old_st + self.chunk_size,
+                    cur_st=cur_st,
+                    cur_ed=cur_st + self.chunk_size,
+                    hash=th,
+                )
+            )
+        return results
 
 
 # Main class and main functions
-class BlendEngine(MPCacheEngine):
-    BLEND_HASH_PREFIX = 0xB1ED
-
+class BlendEngineV2(MPCacheEngine):
     def __init__(
         self,
-        sep_tokens: tuple[list[int], list[int]],
         storage_manager_config: StorageManagerConfig,
         chunk_size: int = 256,
+        hash_algorithm: str = "blake3",
     ):
-        super().__init__(storage_manager_config, chunk_size, hash_algorithm="blake3")
+        super().__init__(
+            storage_manager_config, chunk_size, hash_algorithm=hash_algorithm
+        )
 
         self._cb_gpu_contexts: dict[int, PlainGPUCacheContext] = {}
 
@@ -132,20 +251,8 @@ class BlendEngine(MPCacheEngine):
         # NOTE: This is mainly for determining the layout desc during prefetch
         self._cb_gpu_context_meta: dict[int, tuple[str, int]] = {}
 
-        # self._sep_token_len = len(sep_tokens)
-        # self._token_matcher = ParallelPatternMatcher(sep_tokens)
-        self._token_matcher = RangePatternMatcher(sep_tokens[0], sep_tokens[1])
-
-    def report_status(self) -> dict:
-        """Return a status dict for the blend engine."""
-        status = super().report_status()
-        status["engine_type"] = "BlendEngine"
-        status["cb_registered_gpu_ids"] = list(self._cb_gpu_contexts.keys())
-        status["cb_gpu_context_meta"] = {
-            str(gpu_id): {"model_name": meta[0], "world_size": meta[1]}
-            for gpu_id, meta in self._cb_gpu_context_meta.items()
-        }
-        return status
+        # Fast local matcher: indexes pre-computed chunk hashes for sub-sequence lookup
+        self._token_range_matcher = BlendTokenRangeMatcher(chunk_size)
 
     def cb_register_kv_cache(
         self,
@@ -189,27 +296,38 @@ class BlendEngine(MPCacheEngine):
                 instance_id,
             )
 
-    def cb_lookup_pre_computed(self, key: IPCCacheEngineKey) -> list[tuple[int, int]]:
+    def cb_lookup_pre_computed(self, key: IPCCacheEngineKey) -> list[CBMatchResult]:
         """
-        Lookup the pre-computed chunks in the underly storage that was stored as
-        pre-computed.
+        Lookup the pre-computed chunks in the underlying storage.
 
-        The tokens will be split to paragraphs by the sep_tokens. Then, we do
-        a lookup for each paragraph in the storage, and return the match ranges for
-        the pre-computed chunks.
+        Uses BlendTokenRangeMatcher for a fast local pre-filter, then submits
+        prefetch tasks for matched chunks using their stored hashes directly.
 
         Args:
             key: IPCCacheEngineKey containing the token ids to lookup
 
         Returns:
-            List of tuples (start, end) indicating the match ranges for the
-            pre-computed token ranges
+            List of CBMatchResult for chunks that were actually found in storage,
+            ready to be passed to cb_retrieve_pre_computed.
         """
-        # Match and split the token ids into paragraphs
+        # Fast local pre-filter: find which stored chunks appear in this query
+        cb_match_result = self._token_range_matcher.match_sub_sequence(
+            list(key.token_ids)
+        )
+        if not cb_match_result:
+            return []
+
+        # Sort by query position and group consecutive matched chunks
+        cb_match_result.sort(key=lambda r: r.cur_st)
+        groups: list[list[CBMatchResult]] = []
+        for result in cb_match_result:
+            if groups and groups[-1][-1].cur_ed == result.cur_st:
+                groups[-1].append(result)
+            else:
+                groups.append([result])
+
         prefetch_handles: list[PrefetchHandle] = []
-        expected_found_count: list[int] = []
-        found_ranges: list[tuple[int, int]] = []
-        ranges = self._separate_tokens_by_pattern(key.token_ids)
+        found_cb_match_result: list[CBMatchResult] = []
         model_name, world_size = key.model_name, key.world_size
 
         # Find the cb gpu context and calculate the layout desc
@@ -232,69 +350,68 @@ class BlendEngine(MPCacheEngine):
             )
             return []
 
-        # Submit Lookup for each paragraph
-        for start, end in ranges:
-            temp_ipc_key = create_temp_ipc_key_by_range(key, start, end)
-            ipc_keys = temp_ipc_key.to_hash_keys(
-                hasher=self.token_hasher,
-                full_chunk_only=True,
-                prefix_hash=self.BLEND_HASH_PREFIX,
+        # Submit prefetch for each group using CBMatchResult.hash directly
+        for group in groups:
+            obj_keys = ipc_keys_to_object_keys(
+                [
+                    IPCCacheEngineKey(
+                        model_name=key.model_name,
+                        world_size=key.world_size,
+                        worker_id=key.worker_id,
+                        token_ids=key.token_ids[r.cur_st : r.cur_ed],
+                        start=r.cur_st,
+                        end=r.cur_ed,
+                        request_id=key.request_id,
+                        chunk_hash=r.hash,
+                    )
+                    for r in group
+                ]
             )
-
-            obj_keys = ipc_keys_to_object_keys(ipc_keys)
             handle = self.storage_manager.submit_prefetch_task(obj_keys, layout_desc)
-
             prefetch_handles.append(handle)
-            expected_found_count.append(len(ipc_keys))
 
             logger.debug(
-                "DEBUG: Submitted prefetch for obj keys %s for range (%d, %d), ",
-                obj_keys,
-                start,
-                end,
+                "DEBUG: Submitted prefetch for %d chunks starting at %d",
+                len(group),
+                group[0].cur_st,
             )
 
-        # Query the prefetch handle
-        for handle, exp_count, (start, end) in zip(
-            prefetch_handles, expected_found_count, ranges, strict=False
-        ):
+        # TODO(Jiayi): We need to follow how lookup is handled in server.py
+        # to optimize performance.
+        # Collect only the CBMatchResults for chunks actually found in storage
+        for handle, group in zip(prefetch_handles, groups, strict=False):
             found_count = None
             while True:
                 found_count = self.storage_manager.query_prefetch_status(handle)
                 if found_count is not None:
                     break
 
+                # Standard
+                import time
+
+                time.sleep(0.001)
+
             # Real found count after dedup the TP
             found_count = found_count // world_size
 
-            # All found or not
-            # if found_count == exp_count:
-            #    found_ranges.append((start, end))
-            #    logger.debug(
-            #        "Found all pre-computed chunks for paragraph with range (%d, %d)",
-            #        start,
-            #        end,
-            #    )
-            # elif found_count > 0:
+            start = group[0].cur_st
+            end = group[-1].cur_ed
             if found_count > 0:
-                found_ranges.append((start, start + found_count * self.chunk_size))
+                found_cb_match_result.extend(group[:found_count])
                 logger.debug(
-                    "Partially found pre-computed chunks for paragraph with range "
-                    "(%d, %d), found chunk count: %d, real range (%d, %d)",
-                    start,
-                    end,
+                    "Found %d pre-computed chunks for range (%d, %d)",
                     found_count,
                     start,
-                    start + found_count * self.chunk_size,
+                    end,
                 )
             else:
                 logger.debug(
-                    "No pre-computed chunks found for paragraph with range (%d, %d)",
+                    "No pre-computed chunks found for range (%d, %d)",
                     start,
                     end,
                 )
 
-        return found_ranges
+        return found_cb_match_result
 
     def _cb_store_gpu_copy(
         self,
@@ -358,7 +475,7 @@ class BlendEngine(MPCacheEngine):
                     tmp_buffer.copy_(gpu_kv_slice, non_blocking=True)
                     lmcache_memcpy_async_d2h(tmp_buffer, memory_obj)
 
-                event.record()
+            event.record()
 
         # Call finish_write after the copy is done
         gpu_context.cupy_stream.launch_host_func(
@@ -399,11 +516,12 @@ class BlendEngine(MPCacheEngine):
             This function will discard the last partial chunk and only store the full
             chunks
         """
-        # Compute blend-only hash for the keys
+        # Compute normal prefix hashes so these chunks are accessible both via
+        # the CB lookup path and via the standard lookup/retrieve path.
         hashed_ipc_keys = key.to_hash_keys(
             hasher=self.token_hasher,
             full_chunk_only=True,
-            prefix_hash=self.BLEND_HASH_PREFIX,
+            prefix_hash=None,
         )
         # convert to object key
         obj_keys = ipc_keys_to_object_keys(hashed_ipc_keys)
@@ -417,6 +535,19 @@ class BlendEngine(MPCacheEngine):
             obj_keys, gpu_context, offset, event_ipc_handle
         )
 
+        # Register chunk hashes with the local matcher for fast sub-sequence lookup
+        token_hashes = []
+        for k in hashed_ipc_keys:
+            assert k.chunk_hash is not None
+            token_hashes.append(k.chunk_hash)
+
+        # NOTE(Jiayi): We only register the token hashes for worker_id 0 or None to
+        # avoid duplicate registration across workers.
+        if key.worker_id in [0, None]:
+            self._token_range_matcher.on_new_token_hashes(
+                list(key.token_ids), token_hashes
+            )
+
         logger.info(
             "Stored pre-computed doc with %d tokens, num stored chunks: %d",
             key.end - key.start,
@@ -427,7 +558,7 @@ class BlendEngine(MPCacheEngine):
     def cb_retrieve_pre_computed(
         self,
         key: IPCCacheEngineKey,
-        ranges: list[tuple[int, int]],
+        cb_match_result: list[CBMatchResult],
         offset: int,
         instance_id: int,
         event_ipc_handle: bytes,
@@ -439,8 +570,8 @@ class BlendEngine(MPCacheEngine):
         Args:
             key: IPCCacheEngineKey containing the token ids for which the pre-computed
                 chunks are retrieved.
-            ranges: List of tuples (start, end) indicating the match ranges for the
-                pre-computed chunks to retrieve.
+            cb_match_result: List of CBMatchResult returned by cb_lookup_pre_computed,
+                containing the per-chunk hashes and query positions.
             offset: The starting offset in the CB KV cache buffer to copy the retrieved
                 chunks to.
             instance_id: The instance_id of the blend engine instance to retrieve the
@@ -456,78 +587,57 @@ class BlendEngine(MPCacheEngine):
         Note:
             We must call `cb_lookup_pre_computed` first before calling this function
         """
-        obj_keys_for_paragraphs: list[list[ObjectKey]] = []
-
         assert instance_id in self._cb_gpu_contexts, (
             f"Instance ID {instance_id} not registered for CB KV cache"
         )
         gpu_context = self._cb_gpu_contexts[instance_id]
 
-        # We already have the token range, so can directly start from the obj keys
-        for start, end in ranges:
-            temp_ipc_key = create_temp_ipc_key_by_range(key, start, end)
-            hash_ipc_keys = temp_ipc_key.to_hash_keys(
-                hasher=self.token_hasher,
-                full_chunk_only=True,
-                prefix_hash=self.BLEND_HASH_PREFIX,
-            )
-            obj_keys = ipc_keys_to_object_keys(hash_ipc_keys)
-            obj_keys_for_paragraphs.append(obj_keys)
-
-        logger.debug("DEBUG object keys to retrieve: %s", obj_keys_for_paragraphs)
-
-        # Now, do the real retrieval job
-        def _retrieve_one_paragraph(
-            obj_keys: list[ObjectKey],
-            memory_objs: list[MemoryObj],
-            gpu_offset: int,
-        ):
-            for idx, (key, memory_obj) in enumerate(
-                zip(obj_keys, memory_objs, strict=False)
-            ):
-                offset_start = gpu_offset + idx * self.chunk_size
-                offset_end = offset_start + self.chunk_size
-
-                # Copy from CPU to GPU
-                tmp_buffer = gpu_context.get_tmp_gpu_buffer(offset_end - offset_start)
-                target_buffer = gpu_context.slice_kv_cache_on_tokens(
-                    offset_start, offset_end
+        # One obj_key per match_result, in cur_st order
+        cb_match_result = sorted(cb_match_result, key=lambda r: r.cur_st)
+        all_obj_keys = ipc_keys_to_object_keys(
+            [
+                IPCCacheEngineKey(
+                    model_name=key.model_name,
+                    world_size=key.world_size,
+                    worker_id=key.worker_id,
+                    token_ids=key.token_ids[r.cur_st : r.cur_ed],
+                    start=r.cur_st,
+                    end=r.cur_ed,
+                    request_id=key.request_id,
+                    chunk_hash=r.hash,
                 )
+                for r in cb_match_result
+            ]
+        )
 
-                with self.lock:
-                    lmcache_memcpy_async_h2d(memory_obj, tmp_buffer)
-                    target_buffer.copy_(
-                        tmp_buffer,
-                        non_blocking=True,
-                    )
+        logger.debug("DEBUG object keys to retrieve: %s", all_obj_keys)
 
         with (
             torch.cuda.device(gpu_context.device),
             torch.cuda.stream(gpu_context.stream),
         ):
             event = torch.cuda.Event(interprocess=True)
-            retrieved_paragraph_objects: list[list[MemoryObj]] = []
 
             try:
-                # Populate the objects first
-                for obj_keys in obj_keys_for_paragraphs:
-                    with self.storage_manager.read_prefetched_results(
-                        obj_keys
-                    ) as memory_objs:
-                        if memory_objs is None:
-                            logger.error("Some keys not found during CB retrieve!")
-                            return event.ipc_handle(), False
-                        retrieved_paragraph_objects.append(memory_objs)
+                with self.storage_manager.read_prefetched_results(
+                    all_obj_keys
+                ) as memory_objs:
+                    if memory_objs is None:
+                        logger.error("Some keys not found during CB retrieve!")
+                        return event.ipc_handle(), False
 
-                # Then do to-gpu
-                for obj_keys, memory_objs, (start, end) in zip(
-                    obj_keys_for_paragraphs,
-                    retrieved_paragraph_objects,
-                    ranges,
-                    strict=False,
-                ):
-                    gpu_offset = start + offset
-                    _retrieve_one_paragraph(obj_keys, memory_objs, gpu_offset)
+                    for r, memory_obj in zip(
+                        cb_match_result, memory_objs, strict=False
+                    ):
+                        gpu_st = r.cur_st + offset
+                        gpu_ed = gpu_st + self.chunk_size
+                        tmp_buffer = gpu_context.get_tmp_gpu_buffer(self.chunk_size)
+                        target_buffer = gpu_context.slice_kv_cache_on_tokens(
+                            gpu_st, gpu_ed
+                        )
+                        with self.lock:
+                            lmcache_memcpy_async_h2d(memory_obj, tmp_buffer)
+                            target_buffer.copy_(tmp_buffer, non_blocking=True)
 
             except Exception as e:
                 logger.error("Error during retrieving prefetched results: %s", e)
@@ -539,14 +649,13 @@ class BlendEngine(MPCacheEngine):
                 # double-unlock if error happens during read_prefetched_results.
                 # We should consider not unlocking objects in read_prefetched_results
                 # if error happens.
-                all_keys = list(itertools.chain.from_iterable(obj_keys_for_paragraphs))
                 gpu_context.cupy_stream.launch_host_func(
-                    self.storage_manager.finish_read_prefetched, all_keys
+                    self.storage_manager.finish_read_prefetched, all_obj_keys
                 )
 
         logger.info(
-            "Retrieved pre-computed with ranges %s to GPU offset starting at %d",
-            ranges,
+            "Retrieved pre-computed for %d match results to GPU offset starting at %d",
+            len(cb_match_result),
             offset,
         )
         return event.ipc_handle(), True
@@ -603,57 +712,6 @@ class BlendEngine(MPCacheEngine):
         )
         return event.ipc_handle(), True
 
-    # Helper functions
-    def _separate_tokens_by_pattern(
-        self, token_ids: tuple[int, ...]
-    ) -> list[tuple[int, int]]:
-        """
-        Separate the input token ids into paragraphs based on the separator tokens.
-
-        Args:
-            token_ids: List of input token ids to separate
-
-        Returns:
-            List of tuples (start, end) indicating the start and end indices of each
-            paragraph in the input token ids.
-        """
-        matches = self._token_matcher.match(list(token_ids))
-        logger.debug(
-            "Separated tokens into %d paragraphs with ranges: %s", len(matches), matches
-        )
-        return matches
-
-
-def get_sep_tokens() -> tuple[list[int], list[int]]:
-    """
-    Get the separator tokens used for splitting input sequences into paragraphs.
-
-    Returns:
-        The start pattern and the end pattern in token ids for separating paragraphs.
-
-    Environment variables:
-    - `LMCACHE_BLEND_MODEL_NAME`: the model name to load the tokenizer, default
-        is "openai/gpt-oss-120b"
-    """
-    model_name = os.getenv("LMCACHE_BLEND_MODEL_NAME", "openai/gpt-oss-120b")
-    start_end_family = {
-        "openai/gpt-oss-20b": ([200006], [200007]),
-        "openai/gpt-oss-120b": ([200006], [200007]),
-        "nvidia/Llama-3_3-Nemotron-Super-49B-v1": ([128006], [128009]),
-    }
-    if model_name not in start_end_family:
-        logger.error(
-            "Model name %s not recognized for blend engine. Supported models: %s",
-            model_name,
-            list(start_end_family.keys()),
-        )
-        raise ValueError(
-            f"Model name {model_name} not recognized for blend engine. "
-            f"Supported models: {list(start_end_family.keys())}"
-        )
-
-    return start_end_family[model_name]
-
 
 def add_handler_helper(
     server: MessageQueueServer, request_type: RequestType, handler_function
@@ -669,22 +727,28 @@ def add_handler_helper(
 
 
 def run_cache_server(
-    mp_config: MPServerConfig,
     storage_manager_config: StorageManagerConfig,
     prometheus_config: PrometheusConfig,
-    telemetry_config: TelemetryConfig = DEFAULT_TELEMETRY_CONFIG,
+    host: str = "localhost",
+    port: int = 5555,
+    chunk_size: int = 256,
+    max_workers: int = 1,
     return_engine: bool = False,
+    hash_algorithm: str = "blake3",
 ):
     """
     Run the LMCache cache server with ZMQ message queue.
 
     Args:
-        mp_config: Configuration for the ZMQ multiprocess server
         storage_manager_config: Configuration for the storage manager
         prometheus_config: Configuration for the Prometheus observability stack
-        telemetry_config: Configuration for the telemetry event system
+        host: ZMQ server host
+        port: ZMQ server port
+        chunk_size: Chunk size for KV cache operations
+        max_workers: Maximum number of worker threads for ZMQ server
         return_engine: If True, return (server, engine) after starting;
                        if False, run blocking loop to keep server alive
+        hash_algorithm: Hash algorithm for token-based operations
 
     Returns:
         If return_engine is True: tuple of (MessageQueueServer, MPCacheEngine)
@@ -693,24 +757,17 @@ def run_cache_server(
     # Initialize global prometheus controller
     init_prometheus_controller(prometheus_config)
 
-    # Initialize global telemetry controller
-    init_telemetry_controller(telemetry_config)
-
-    sep_tokens = get_sep_tokens()
-
     # Initialize the engine (loggers self-register with the global controller)
-    engine = BlendEngine(
-        sep_tokens=sep_tokens,
+    engine = BlendEngineV2(
         storage_manager_config=storage_manager_config,
-        chunk_size=mp_config.chunk_size,
+        chunk_size=chunk_size,
+        hash_algorithm=hash_algorithm,
     )
 
     # Initialize the message queue server
     context = zmq.Context.instance()
     server = MessageQueueServer(
-        bind_url=f"tcp://{mp_config.host}:{mp_config.port}",
-        context=context,
-        max_workers=mp_config.max_workers,
+        bind_url=f"tcp://{host}:{port}", context=context, max_workers=max_workers
     )
 
     # Add handlers for original server
@@ -723,6 +780,7 @@ def run_cache_server(
     add_handler_helper(
         server, RequestType.QUERY_PREFETCH_STATUS, engine.query_prefetch_status
     )
+    add_handler_helper(server, RequestType.FREE_LOOKUP_LOCKS, engine.free_lookup_locks)
     add_handler_helper(server, RequestType.RETRIEVE, engine.retrieve)
     add_handler_helper(server, RequestType.CLEAR, engine.clear)
     add_handler_helper(server, RequestType.GET_CHUNK_SIZE, engine.get_chunk_size)
@@ -737,31 +795,24 @@ def run_cache_server(
         server, RequestType.CB_UNREGISTER_KV_CACHE, engine.cb_unregister_kv_cache
     )
     add_handler_helper(
-        server, RequestType.CB_LOOKUP_PRE_COMPUTED, engine.cb_lookup_pre_computed
+        server, RequestType.CB_LOOKUP_PRE_COMPUTED_V2, engine.cb_lookup_pre_computed
     )
     add_handler_helper(
         server, RequestType.CB_STORE_PRE_COMPUTED, engine.cb_store_pre_computed
     )
     add_handler_helper(
-        server, RequestType.CB_RETRIEVE_PRE_COMPUTED, engine.cb_retrieve_pre_computed
+        server, RequestType.CB_RETRIEVE_PRE_COMPUTED_V2, engine.cb_retrieve_pre_computed
     )
     add_handler_helper(server, RequestType.CB_STORE_FINAL, engine.cb_store_final)
 
-    logger.info(
-        "LMCache ZMQ cache server is running on tcp://%s:%d",
-        mp_config.host,
-        mp_config.port,
-    )
+    logger.info("LMCache ZMQ cache server is running on tcp://%s:%d", host, port)
     # Start the ZMQ server
     torch.cuda.init()
     server.start()
 
     # Start prometheus controller after engine creation (loggers are registered)
     get_prometheus_controller().start()
-
-    # Start telemetry controller
-    get_telemetry_controller().start()
-    logger.info("LMCache cache blend server is running...")
+    logger.info("LMCache cache blend v2 server is running...")
 
     # Return server and engine if requested (for HTTP server integration)
     if return_engine:
@@ -773,7 +824,6 @@ def run_cache_server(
             time.sleep(1)
     except KeyboardInterrupt:
         logger.info("Shutting down server...")
-        get_telemetry_controller().stop()
         get_prometheus_controller().stop()
         server.close()
         engine.close()
@@ -781,13 +831,14 @@ def run_cache_server(
 
 if __name__ == "__main__":
     args = parse_args()
-    mp_config = parse_args_to_mp_server_config(args)
     storage_manager_config = parse_args_to_config(args)
     prometheus_config = parse_args_to_prometheus_config(args)
-    telemetry_config = parse_args_to_telemetry_config(args)
     run_cache_server(
-        mp_config=mp_config,
         storage_manager_config=storage_manager_config,
         prometheus_config=prometheus_config,
-        telemetry_config=telemetry_config,
+        host=args.host,
+        port=args.port,
+        chunk_size=args.chunk_size,
+        max_workers=args.max_workers,
+        hash_algorithm=args.hash_algorithm,
     )

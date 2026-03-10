@@ -736,6 +736,23 @@ class MPCacheEngine:
         """
         self.session_manager.remove(request_id)
 
+    def report_status(self) -> dict:
+        """Return a status dict for the entire cache engine."""
+        sm = self.storage_manager.report_status()
+        return {
+            "is_healthy": sm["is_healthy"],
+            "engine_type": "MPCacheEngine",
+            "chunk_size": self.chunk_size,
+            "hash_algorithm": self.token_hasher.hash_algorithm_name,
+            "registered_gpu_ids": list(self.gpu_contexts.keys()),
+            "gpu_context_meta": {
+                str(gpu_id): {"model_name": meta[0], "world_size": meta[1]}
+                for gpu_id, meta in self.gpu_context_meta.items()
+            },
+            "active_sessions": self.session_manager.active_count(),
+            "storage_manager": sm,
+        }
+
     def debug(self) -> str:
         return "OK"
 
