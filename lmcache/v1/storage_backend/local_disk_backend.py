@@ -120,9 +120,12 @@ class LocalDiskBackend(StorageBackendInterface):
 
         assert config.local_disk is not None
         self.path: str = config.local_disk
-        if not os.path.exists(self.path):
+        try:
             os.makedirs(self.path, exist_ok=True)
-            logger.info(f"Created local disk cache directory: {self.path}")
+            logger.info(f"Local disk cache directory initialized at: {self.path}")
+        except Exception as e:
+            logger.error(f"Failed to create local disk cache directory {self.path}: {e}")
+            raise
 
         self.loop = loop
 

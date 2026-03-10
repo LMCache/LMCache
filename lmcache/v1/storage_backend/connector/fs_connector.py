@@ -102,9 +102,13 @@ class FSConnector(RemoteConnector):
         )
         # Create directories for all paths
         for path in self.base_paths:
-            path.mkdir(parents=True, exist_ok=True)
-            if self.relative_tmp_dir is not None:
-                (path / self.relative_tmp_dir).mkdir(parents=False, exist_ok=True)
+            try:
+                path.mkdir(parents=True, exist_ok=True)
+                if self.relative_tmp_dir is not None:
+                    (path / self.relative_tmp_dir).mkdir(parents=False, exist_ok=True)
+            except Exception as e:
+                logger.error(f"Failed to initialize storage directory {path}: {e}")
+                raise
 
     def _get_base_path(self, key: CacheEngineKey) -> Path:
         """Get file base path for the given key"""
