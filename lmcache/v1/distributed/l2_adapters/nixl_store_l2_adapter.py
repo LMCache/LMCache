@@ -537,6 +537,15 @@ class NixlStoreL2Adapter(L2AdapterInterface):
         with self._lock:
             return self._completed_load_tasks.pop(task_id, None)
 
+    def report_status(self) -> dict:
+        """Return a status dict for the Nixl L2 adapter."""
+        with self._lock:
+            return {
+                "is_healthy": True,
+                "type": "NixlStoreL2Adapter",
+                "stored_object_count": len(self._memory_objects),
+            }
+
     def close(self):
         # Stop the event loop and wait for the thread to finish
         async def _stop_tasks():
