@@ -56,7 +56,9 @@ which adds CacheBlend operations (``CB_REGISTER_KV_CACHE``,
 cache reuse across document paragraphs.
 
 **``http_server.py``** -- Wraps ``run_cache_server()`` (from ``server.py``)
-inside a FastAPI application.  Adds ``/api/healthcheck`` for Kubernetes probes.
+inside a FastAPI application.  Adds ``/api/healthcheck`` for Kubernetes probes,
+``POST /api/clear-cache`` for clearing all KV cache data in L1 (CPU) memory,
+and ``/api/status`` for inspecting detailed internal state.
 The ZMQ server runs as part of the same process.
 
 ZMQ Protocol
@@ -343,7 +345,7 @@ Key Source Files
    * - ``lmcache/v1/multiprocess/blend_server.py``
      - BlendEngine (extends MPCacheEngine)
    * - ``lmcache/v1/multiprocess/http_server.py``
-     - FastAPI wrapper with healthcheck
+     - FastAPI wrapper with health check and many other useful APIs
    * - ``lmcache/v1/multiprocess/protocols/base.py``
      - RequestType, HandlerType, ProtocolDefinition
    * - ``lmcache/v1/distributed/storage_manager.py``
