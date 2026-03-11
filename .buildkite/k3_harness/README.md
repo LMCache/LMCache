@@ -102,14 +102,37 @@ REBUILD_IMAGE=1 .buildkite/k3_harness/setup-cluster.sh
 
 ```
 k3_harness/
-├── ci-base.Dockerfile     # CI base image definition
-├── setup-cluster.sh       # One-time: K3s + GPU Operator + base image
-├── install-agent-stack.sh # One-time: Buildkite agent (needs token + GitHub token)
-├── values.yaml            # Reference Helm values (documentation only)
-├── setup-env.sh           # Per-job: install vLLM + LMCache
-├── smoke-test.sh          # Verify: GPU pod runs in K3s
-├── teardown.sh            # Remove everything (preserves /data/*)
+├── ci-base.Dockerfile      # CI base image definition
+├── setup-cluster.sh        # One-time: K3s + GPU Operator + base image
+├── install-agent-stack.sh  # One-time: Buildkite agent (needs token + GitHub token)
+├── values.yaml             # Reference Helm values (documentation only)
+├── setup-env.sh            # Per-job: install vLLM + LMCache (includes GPU health check)
+├── smoke-test.sh           # Verify: GPU pod runs in K3s
+├── gpu-monitor.sh          # Host-level: detect stale non-K8s GPU processes
+├── setup-gpu-monitor.sh    # Install gpu-monitor.sh as a cron job
+├── teardown.sh             # Remove everything (preserves /data/*)
 └── README.md
+```
+
+## GPU monitoring
+
+CI jobs automatically check GPU health at startup (via `check_gpu_health` in `setup-env.sh`). If a GPU assigned to a pod has less than 80% free memory — usually due to a stale host process — the job fails immediately with a clear message instead of wasting time on setup and then getting a cryptic CUDA OOM.
+
+For **host-level monitoring**, install the GPU monitor cron job:
+
+```bash
+# Install cron job that checks every 10 minutes for stale non-K8s GPU processes
+sudo bash .buildkite/k3_harness/setup-gpu-monitor.sh
+```
+
+This runs `gpu-monitor.sh` every 10 minutes. It distinguishes K8s pod processes (in `kubepods` cgroups) from stale host processes and logs warnings to `/var/log/gpu-monitor.log` with PID, command, GPU, memory usage, and process age.
+
+```bash
+# View monitor logs
+tail -f /var/log/gpu-monitor.log
+
+# Remove the cron job
+crontab -l 2>/dev/null | grep -v gpu-monitor.sh | crontab -
 ```
 
 ## Teardown
