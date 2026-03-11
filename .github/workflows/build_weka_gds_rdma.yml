@@ -1,0 +1,123 @@
+name: Build Weka Wheels
+
+# Triggered on:
+#   - Any push/merge to feat/weka-gds-rdma (the main Weka integration branch)
+#   - PRs from feat/weka* branches targeting feat/weka-gds-rdma (as a gating check)
+on:
+  push:
+    branches:
+      - feat/weka-gds-rdma
+  pull_request:
+    branches:
+      - feat/weka-gds-rdma
+
+env:
+  LC_ALL: en_US.UTF-8
+  # Pass the computed Weka version into the cibuildwheel Docker container
+  CIBW_ENVIRONMENT_PASS_LINUX: SETUPTOOLS_SCM_PRETEND_VERSION
+
+defaults:
+  run:
+    shell: bash
+
+permissions:
+  contents: read
+
+jobs:
+  build-wheels:
+    name: Build CUDA ARM64 wheels (CUDA 12.8)
+    runs-on: self-hosted
+
+    # For pull_request events: only run if the source branch is a feat/weka* branch.
+    # For push events: github.head_ref is empty, so the condition passes through.
+    if: |
+      github.event_name == 'push' ||
+      startsWith(github.head_ref, 'feat/weka')
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Fetch upstream tags for version detection
+        # Fetches from two remotes:
+        #   1. origin (weka/lmcache) — picks up weka-v* base tags
+        #   2. upstream (LMCache/LMCache) — gets canonical v0.x.y release tags
+        #      Only tags are fetched (refs/tags/*:refs/tags/*), no branches,
+        #      so upstream/dev never conflicts with origin/dev.
+        #
+        # Tagging convention — after each rebase onto upstream vX.Y.Z, run:
+        #   git tag weka-v0.3.14 && git push origin weka-v0.3.14
+        # The workflow then produces version: 0.3.14+weka.<commits-since-tag>
+        run: |
+          git fetch origin --tags
+          git remote add upstream https://github.com/LMCache/LMCache.git
+          git fetch upstream 'refs/tags/*:refs/tags/*' --no-recurse-submodules
+
+      - name: Compute Weka version
+        id: version
+        run: |
+          # Find the most recent weka-v* tag reachable from HEAD.
+          # This tag is created manually after each upstream rebase (see above).
+          WEKA_BASE_TAG=$(git describe --tags --match "weka-v*" --abbrev=0 2>/dev/null || echo "")
+
+          if [ -n "$WEKA_BASE_TAG" ]; then
+            # Strip "weka-v" prefix to get the upstream version number (e.g. "0.3.14")
+            UPSTREAM_VERSION="${WEKA_BASE_TAG#weka-v}"
+            # Count commits added by Weka on top of this tag
+            WEKA_COMMITS=$(git rev-list "${WEKA_BASE_TAG}..HEAD" --count)
+          else
+            # Fallback: no weka-v* tag found — use 0.0.0 and total commit count
+            echo "::warning::No weka-v* tag found. Create one after each upstream rebase (e.g. git tag weka-v0.3.14)."
+            UPSTREAM_VERSION="0.0.0"
+            WEKA_COMMITS=$(git rev-list HEAD --count)
+          fi
+
+          WEKA_VERSION="${UPSTREAM_VERSION}+weka.${WEKA_COMMITS}"
+          echo "weka_version=${WEKA_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "SETUPTOOLS_SCM_PRETEND_VERSION=${WEKA_VERSION}" >> "$GITHUB_ENV"
+          echo "Building version: ${WEKA_VERSION}"
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
+        with:
+          python-version: "3.12"
+
+      - name: Install build tooling
+        run: |
+          python -m pip install --upgrade pip
+          pip install build cibuildwheel
+
+      - name: Build CUDA wheels (manylinux_aarch64, CUDA 12.8)
+        # Base config is in pyproject.toml [tool.cibuildwheel] (targets x86_64 for the
+        # upstream publish workflow). The env vars below override it for this ARM64 runner.
+        # SETUPTOOLS_SCM_PRETEND_VERSION is injected into the container via
+        # CIBW_ENVIRONMENT_PASS_LINUX, overriding automatic version detection.
+        env:
+          SETUPTOOLS_SCM_PRETEND_VERSION: ${{ env.SETUPTOOLS_SCM_PRETEND_VERSION }}
+          # Override build target: only Python 3.12, aarch64
+          CIBW_BUILD: "cp312-manylinux_aarch64"
+          # PyTorch manylinux aarch64 builder image with CUDA 12.8
+          CIBW_MANYLINUX_AARCH64_IMAGE: "docker.io/pytorch/manylinuxaarch64-builder:cuda12.8"
+          # Repair wheel for aarch64 (mirrors pyproject.toml but with aarch64 plat)
+          CIBW_REPAIR_WHEEL_COMMAND_LINUX: >-
+            auditwheel repair
+            --plat manylinux_2_28_aarch64
+            --exclude libtorch.so
+            --exclude libtorch_cuda.so
+            --exclude libtorch_python.so
+            --exclude libtorch_cpu.so
+            --exclude libc10.so
+            --exclude libc10_cuda.so
+            --exclude libcudart.so.12
+            -w {dest_dir} {wheel}
+        run: |
+          python -m cibuildwheel --output-dir dist
+
+      - name: Upload wheel artifacts
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: weka-wheels-${{ steps.version.outputs.weka_version }}-${{ github.run_id }}
+          path: dist/*.whl
+          retention-days: 30
