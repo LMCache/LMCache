@@ -23,14 +23,16 @@ GPU_FOR_BASELINE=1
 echo "Using GPU $GPU_FOR_VLLM for vLLM with LMCache"
 echo "Using GPU $GPU_FOR_BASELINE for vLLM baseline"
 
-# Check GPU memory and set gpu-memory-utilization if > 100GB
+# Check GPU memory and set gpu-memory-utilization for very large GPUs.
+# Without this, vLLM allocates so much KV cache that APC covers all prefixes
+# and LMCache's cache path is never exercised, making the test pass vacuously.
 GPU_MEMORY_UTIL_ARG=""
 GPU_MEMORY_MB=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits -i "${GPU_FOR_VLLM}" | tr -d ' ')
 GPU_MEMORY_GB=$((GPU_MEMORY_MB / 1024))
 echo "Detected GPU memory: ${GPU_MEMORY_GB}GB (${GPU_MEMORY_MB}MB)"
 
 if [ "$GPU_MEMORY_GB" -gt 90 ]; then
-    echo "GPU memory > 100GB, adding --gpu-memory-utilization 0.5"
+    echo "GPU memory > 90GB, adding --gpu-memory-utilization 0.5"
     GPU_MEMORY_UTIL_ARG="--gpu-memory-utilization 0.5"
 fi
 
