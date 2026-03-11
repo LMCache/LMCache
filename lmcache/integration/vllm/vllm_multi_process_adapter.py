@@ -26,7 +26,7 @@ logger = init_logger(__name__)
 
 # Timeout (seconds) for blocking MQ requests: initial chunk-size query,
 # KV cache registration/unregistration, and other synchronous operations.
-DEFAULT_MQ_TIMEOUT: float = 30.0
+DEFAULT_MQ_TIMEOUT: float = 300.0
 # Interval (seconds) between periodic heartbeat pings to the server.
 DEFAULT_HEARTBEAT_INTERVAL: float = 10.0
 
