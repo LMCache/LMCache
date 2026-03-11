@@ -305,6 +305,7 @@ class StorageManager:
             request_id = self._prefetch_controller.submit_prefetch_request(
                 remaining_keys,
                 layout_desc,
+                extra_count=extra_count,
             )
 
         submit_time = time.monotonic()
@@ -389,6 +390,24 @@ class StorageManager:
             adapter.close()
 
         self._l1_manager.close()
+
+    def report_status(self) -> dict:
+        """Return a status dict aggregating all sub-component statuses."""
+        l1 = self._l1_manager.report_status()
+        store = self._store_controller.report_status()
+        prefetch = self._prefetch_controller.report_status()
+        eviction = self._eviction_controller.report_status()
+        adapters = [a.report_status() for a in self._l2_adapters]
+        children = [l1, store, prefetch, eviction] + adapters
+        return {
+            "is_healthy": all(c["is_healthy"] for c in children),
+            "l1_manager": l1,
+            "store_controller": store,
+            "prefetch_controller": prefetch,
+            "eviction_controller": eviction,
+            "l2_adapters": adapters,
+            "num_l2_adapters": len(self._l2_adapters),
+        }
 
     # Functions for debugging and testing
     def memcheck(self) -> bool:

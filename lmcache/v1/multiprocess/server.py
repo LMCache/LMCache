@@ -233,11 +233,6 @@ class MPCacheEngine:
         self._next_prefetch_job_id: int = 0
         self._prefetch_job_lock = threading.Lock()
 
-        # FIX: fix the problem of telemetry logging in cupy stream
-        # Need to log a retrieve operation before logging any store
-        # operation in the cupy stream
-        self._can_log_store = False
-
     def register_kv_cache(
         self,
         instance_id: int,
@@ -329,7 +324,7 @@ class MPCacheEngine:
             )
             vllm_event.wait(stream=gpu_context.stream)
 
-            if get_telemetry_controller().is_enabled() and self._can_log_store:
+            if get_telemetry_controller().is_enabled():
                 gpu_context.cupy_stream.launch_host_func(
                     log_telemetry,
                     make_start_event(
@@ -378,7 +373,7 @@ class MPCacheEngine:
             list(reserved_dict.keys()),
         )
 
-        if get_telemetry_controller().is_enabled() and self._can_log_store:
+        if get_telemetry_controller().is_enabled():
             self.gpu_contexts[instance_id].cupy_stream.launch_host_func(
                 log_telemetry,
                 make_end_event(
@@ -535,7 +530,6 @@ class MPCacheEngine:
             ed - st,
         )
 
-        self._can_log_store = True
         return event.ipc_handle(), True
 
     def _find_layout_desc(
@@ -650,8 +644,8 @@ class MPCacheEngine:
             prefetch_job_id: Job ID returned by lookup().
 
         Returns:
-            Chunk count (int) when done, None if still in progress,
-            or 0 if the job ID is unknown.
+            Chunk count (int) when done, None if still in progress
+            or the job ID is unknown.
         """
         with self._prefetch_job_lock:
             job = self._prefetch_jobs.get(prefetch_job_id)
@@ -660,7 +654,7 @@ class MPCacheEngine:
                 "Prefetch job %d not found (already completed or invalid)",
                 prefetch_job_id,
             )
-            return 0
+            return None
 
         found_count = self.storage_manager.query_prefetch_status(job.handle)
         if found_count is None:
@@ -735,6 +729,23 @@ class MPCacheEngine:
             request_id: The request ID whose session should be removed.
         """
         self.session_manager.remove(request_id)
+
+    def report_status(self) -> dict:
+        """Return a status dict for the entire cache engine."""
+        sm = self.storage_manager.report_status()
+        return {
+            "is_healthy": sm["is_healthy"],
+            "engine_type": "MPCacheEngine",
+            "chunk_size": self.chunk_size,
+            "hash_algorithm": self.token_hasher.hash_algorithm_name,
+            "registered_gpu_ids": list(self.gpu_contexts.keys()),
+            "gpu_context_meta": {
+                str(gpu_id): {"model_name": meta[0], "world_size": meta[1]}
+                for gpu_id, meta in self.gpu_context_meta.items()
+            },
+            "active_sessions": self.session_manager.active_count(),
+            "storage_manager": sm,
+        }
 
     def debug(self) -> str:
         return "OK"

@@ -136,6 +136,17 @@ class BlendEngine(MPCacheEngine):
         # self._token_matcher = ParallelPatternMatcher(sep_tokens)
         self._token_matcher = RangePatternMatcher(sep_tokens[0], sep_tokens[1])
 
+    def report_status(self) -> dict:
+        """Return a status dict for the blend engine."""
+        status = super().report_status()
+        status["engine_type"] = "BlendEngine"
+        status["cb_registered_gpu_ids"] = list(self._cb_gpu_contexts.keys())
+        status["cb_gpu_context_meta"] = {
+            str(gpu_id): {"model_name": meta[0], "world_size": meta[1]}
+            for gpu_id, meta in self._cb_gpu_context_meta.items()
+        }
+        return status
+
     def cb_register_kv_cache(
         self,
         instance_id: int,

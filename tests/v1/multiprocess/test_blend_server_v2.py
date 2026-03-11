@@ -413,7 +413,14 @@ def server_process_runner_v2(
     """Entry point for the server process running BlendEngineV2."""
     # First Party
     from lmcache.v1.multiprocess.blend_server_v2 import run_cache_server
+    from lmcache.v1.multiprocess.config import MPServerConfig
 
+    mp_config = MPServerConfig(
+        host=host,
+        port=port,
+        chunk_size=chunk_size,
+        engine_type="blend",
+    )
     storage_manager_config = StorageManagerConfig(
         l1_manager_config=L1ManagerConfig(
             memory_config=L1MemoryManagerConfig(
@@ -424,11 +431,9 @@ def server_process_runner_v2(
         eviction_config=EvictionConfig(eviction_policy="LRU"),
     )
     run_cache_server(
+        mp_config=mp_config,
         storage_manager_config=storage_manager_config,
         prometheus_config=DEFAULT_PROMETHEUS_CONFIG,
-        host=host,
-        port=port,
-        chunk_size=chunk_size,
     )
 
 
@@ -1613,7 +1618,7 @@ def test_cb_store_final_v2_then_normal_lookup(
     )
     # Phase 1: LOOKUP returns a prefetch job ID, not the chunk count
     job_id = client.submit_request(
-        RequestType.LOOKUP, [lookup_key], get_response_class(RequestType.LOOKUP)
+        RequestType.LOOKUP, [lookup_key, 1], get_response_class(RequestType.LOOKUP)
     ).result(timeout=DEFAULT_TIMEOUT)
 
     # Phase 2: Poll QUERY_PREFETCH_STATUS until the result is ready
