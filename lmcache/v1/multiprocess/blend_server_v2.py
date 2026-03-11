@@ -117,14 +117,20 @@ class BlendTokenRangeMatcher:
                          (num_ids=_TABLE_SIZE) → compact IDs → token_hash → start.
     """
 
-    _TABLE_BITS: int = 20  # 2^20 ≈ 1 M entries
+    _TABLE_BITS: int = 20  # 2^20 ≈ 1 M buckets
     _TABLE_SIZE: int = 1 << _TABLE_BITS
+    _SLOTS_PER_BUCKET: int = 4  # K slots per bucket for collision handling
     _BASE: np.uint64 = np.uint64(0x9E3779B97F4A7C15)  # Fibonacci-hashing constant
 
     def __init__(self, chunk_size: int = 256):
         self.chunk_size = chunk_size
-        # poly_chunk_hash → compact_chunk_id; -1 = empty
-        self._table_id = np.full(self._TABLE_SIZE, -1, dtype=np.int64)
+        # Multi-slot table: each bucket has K slots storing (full_hash, compact_id)
+        self._table_hashes = np.zeros(
+            (self._TABLE_SIZE, self._SLOTS_PER_BUCKET), dtype=np.uint64
+        )
+        self._table_ids = np.full(
+            (self._TABLE_SIZE, self._SLOTS_PER_BUCKET), -1, dtype=np.int64
+        )
         self._mask = np.uint64(self._TABLE_SIZE - 1)
         # compact_chunk_id → caller-supplied token_hash (full bytes)
         self._chunk_token_hash: list[bytes] = []
@@ -158,8 +164,10 @@ class BlendTokenRangeMatcher:
         base_id = len(self._chunk_token_hash)
         compact_ids = np.arange(base_id, base_id + n, dtype=np.int64)
 
-        # Write table: poly_chunk_hash → compact_chunk_id
-        update_table_id_numba(chunk_hashes, self._table_id, compact_ids)
+        # Write table: poly_chunk_hash → compact_chunk_id (multi-slot)
+        update_table_id_numba(
+            chunk_hashes, self._table_hashes, self._table_ids, compact_ids
+        )
 
         # Persist compact_id → token_hash and token_hash → start
         for i in range(n):
@@ -194,9 +202,10 @@ class BlendTokenRangeMatcher:
         # Sliding-window polynomial hashes over the query
         rolling = rolling_hash_windows_numba(arr, self.chunk_size, self._BASE)
 
-        # Probe table; seen array is _TABLE_SIZE bytes (~1 MB), fixed and safe
+        # Probe multi-slot table; seen array is _TABLE_SIZE bytes (~1 MB)
         hit_ids = unique_hits_direct_id_numba(
-            rolling, self._table_id, self._mask, self._TABLE_SIZE
+            rolling, self._table_hashes, self._table_ids,
+            self._mask, self._TABLE_SIZE,
         )
 
         if hit_ids.shape[0] == 0:
@@ -206,12 +215,19 @@ class BlendTokenRangeMatcher:
         hit_id_set = set(int(cid) for cid in hit_ids)
         cid_to_query_pos: dict[int, int] = {}
         for q_pos in range(rolling.shape[0]):
-            idx = int(rolling[q_pos]) & int(self._mask)
-            cid = int(self._table_id[idx])
-            if cid in hit_id_set and cid not in cid_to_query_pos:
-                cid_to_query_pos[cid] = q_pos
-                if len(cid_to_query_pos) == len(hit_id_set):
+            h = rolling[q_pos]
+            bucket = int(h) & int(self._mask)
+            for s in range(self._SLOTS_PER_BUCKET):
+                cid = int(self._table_ids[bucket, s])
+                if cid == -1:
                     break
+                if (self._table_hashes[bucket, s] == h
+                        and cid in hit_id_set
+                        and cid not in cid_to_query_pos):
+                    cid_to_query_pos[cid] = q_pos
+                    break
+            if len(cid_to_query_pos) == len(hit_id_set):
+                break
 
         results: list[CBMatchResult] = []
         for cid in hit_ids:

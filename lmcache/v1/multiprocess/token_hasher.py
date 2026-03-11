@@ -335,97 +335,105 @@ def chunk_hash_windows_numba(arr_u64, k, base):
 @njit(cache=True)
 def update_table_id_numba(
     hashes_u64: np.ndarray,
-    table_id_i64: np.ndarray,
+    table_hashes_u64: np.ndarray,
+    table_ids_i64: np.ndarray,
     vals_to_update: np.ndarray,
 ):
     """
-    Update the direct-address table with new ID values for given hashes.
+    Update the multi-slot direct-address table with new ID values.
 
-    For each hash in `hashes_u64`, compute the index as:
-
-        idx = hash & (table_id_i64.size - 1)
-
-    and update `table_id_i64[idx]` with the corresponding value from
-    `vals_to_update`.
+    Each bucket has K slots (table_ids_i64.shape[1]).  For each hash we
+    find the first empty slot (id == -1) or slot with a matching full
+    hash.  If all K slots are occupied by different hashes the oldest
+    slot (index 0) is evicted.
 
     Parameters
     ----------
     hashes_u64 : np.ndarray[np.uint64]
-        Array of hash values to update.
+        Array of full 64-bit hash values to insert.
 
-    table_id_i64 : np.ndarray[np.int64]
-        Direct-address lookup table mapping index → ID. This array is
-        modified in-place.
+    table_hashes_u64 : np.ndarray[np.uint64, (num_buckets, K)]
+        Per-slot stored full hashes.  Modified in-place.
+
+    table_ids_i64 : np.ndarray[np.int64, (num_buckets, K)]
+        Per-slot stored compact chunk IDs (-1 = empty).  Modified in-place.
 
     vals_to_update : np.ndarray[np.int64]
-        Array of new ID values to write into the table. Must have the same
-        length as `hashes_u64`.
+        Compact chunk IDs to write.  Same length as *hashes_u64*.
     """
     n = hashes_u64.shape[0]
-    m = table_id_i64.shape[0]
+    num_buckets = table_hashes_u64.shape[0]
+    K = table_ids_i64.shape[1]
 
     for i in range(n):
-        idx = hashes_u64[i] & (m - 1)  # Assuming m is a power of 2
-        table_id_i64[idx] = vals_to_update[i]
+        h = hashes_u64[i]
+        bucket = int(h) & (num_buckets - 1)  # power-of-2 mask
+        placed = False
+        for s in range(K):
+            if table_ids_i64[bucket, s] == -1 or table_hashes_u64[bucket, s] == h:
+                table_hashes_u64[bucket, s] = h
+                table_ids_i64[bucket, s] = vals_to_update[i]
+                placed = True
+                break
+        if not placed:
+            # Evict slot 0 (simple FIFO)
+            table_hashes_u64[bucket, 0] = h
+            table_ids_i64[bucket, 0] = vals_to_update[i]
 
 
 @njit(cache=True)
 def unique_hits_direct_id_numba(
-    hashes_u64: np.ndarray, table_id_i64: np.ndarray, mask_u64: np.uint64, num_ids: int
+    hashes_u64: np.ndarray,
+    table_hashes_u64: np.ndarray,
+    table_ids_i64: np.ndarray,
+    mask_u64: np.uint64,
+    num_ids: int,
 ) -> np.ndarray:
     """
-    Perform direct-address lookup with deduplication of results.
+    Multi-slot direct-address lookup with deduplication.
 
-    This function looks up each hash in a direct-address table using
-    the lower bits of the hash:
-
-        idx = hash & mask
-
-    The lookup table maps each index to an integer ID.
-
-    The function returns **unique IDs only**, meaning that if the same
-    ID appears multiple times across the hash stream it will be returned
-    only once.
+    For each rolling hash, probe all K slots in the bucket and return
+    the compact ID only when the **full 64-bit hash matches**.  This
+    eliminates false positives from bucket collisions.
 
     Parameters
     ----------
     hashes_u64 : np.ndarray[np.uint64]
-        Array of rolling hash values.
+        Array of rolling hash values from the query.
 
-    table_id_i64 : np.ndarray[np.int64]
-        Direct-address lookup table mapping index → ID.
-        Values of -1 represent "no entry".
+    table_hashes_u64 : np.ndarray[np.uint64, (num_buckets, K)]
+        Per-slot stored full hashes.
+
+    table_ids_i64 : np.ndarray[np.int64, (num_buckets, K)]
+        Per-slot stored compact chunk IDs.  -1 = empty.
 
     mask_u64 : np.uint64
-        Bitmask used to compute the index:
-
-            idx = hash & mask_u64
-
-        Typically mask = (2^bits - 1).
+        Bitmask for bucket index: ``bucket = hash & mask``.
 
     num_ids : int
-        Maximum possible ID value + 1. This determines the size of the
-        internal `seen` array used for deduplication.
+        Upper bound on compact IDs (for the ``seen`` dedup array).
 
     Returns
     -------
     np.ndarray[np.int64]
-        Array containing the unique IDs encountered in the lookup stream.
-        Length ≤ len(hashes_u64).
+        Unique compact IDs whose full hash matched a rolling-hash window.
     """
-
-    # TODO(Jiayi): These allocations can be avoided by pre-allocations
-    seen = np.zeros(num_ids, dtype=np.uint8)  # 1 byte per possible id
+    seen = np.zeros(num_ids, dtype=np.uint8)
     out = np.empty(hashes_u64.shape[0], dtype=np.int64)
+    K = table_ids_i64.shape[1]
 
     m = 0
     for i in range(hashes_u64.shape[0]):
-        idx = hashes_u64[i] & mask_u64
-        hit = table_id_i64[idx]
-
-        if hit != -1 and seen[hit] == 0:
-            seen[hit] = 1
-            out[m] = hit
-            m += 1
+        h = hashes_u64[i]
+        bucket = int(h) & int(mask_u64)
+        for s in range(K):
+            cid = table_ids_i64[bucket, s]
+            if cid == -1:
+                break  # remaining slots in bucket are empty
+            if table_hashes_u64[bucket, s] == h and seen[cid] == 0:
+                seen[cid] = 1
+                out[m] = cid
+                m += 1
+                break
 
     return out[:m]

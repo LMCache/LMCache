@@ -214,126 +214,203 @@ class TestChunkHashWindowsNumba:
 
 
 class TestUpdateTableIdNumba:
-    def _empty_table(self, size: int = 8) -> np.ndarray:
-        return np.full(size, -1, dtype=np.int64)
+    """Tests for the multi-slot update_table_id_numba."""
+
+    K = 4  # slots per bucket
+
+    def _empty_tables(self, num_buckets: int = 8):
+        table_hashes = np.zeros((num_buckets, self.K), dtype=np.uint64)
+        table_ids = np.full((num_buckets, self.K), -1, dtype=np.int64)
+        return table_hashes, table_ids
 
     def test_basic_update(self) -> None:
-        table = self._empty_table()
-        hashes = np.array([0], dtype=np.uint64)  # 0 & 7 = 0
+        table_hashes, table_ids = self._empty_tables()
+        hashes = np.array([0], dtype=np.uint64)
         vals = np.array([99], dtype=np.int64)
-        update_table_id_numba(hashes, table, vals)
-        assert table[0] == 99
+        update_table_id_numba(hashes, table_hashes, table_ids, vals)
+        assert table_ids[0, 0] == 99
+        assert table_hashes[0, 0] == 0
 
     def test_index_from_hash_lower_bits(self) -> None:
-        """idx = hash & (table_size - 1)."""
-        table = self._empty_table(8)  # mask = 7
+        """bucket = hash & (num_buckets - 1)."""
+        table_hashes, table_ids = self._empty_tables(8)  # mask = 7
         hashes = np.array([9], dtype=np.uint64)  # 9 & 7 = 1
         vals = np.array([42], dtype=np.int64)
-        update_table_id_numba(hashes, table, vals)
-        assert table[1] == 42
-        assert all(table[i] == -1 for i in range(8) if i != 1)
+        update_table_id_numba(hashes, table_hashes, table_ids, vals)
+        assert table_ids[1, 0] == 42
+        # All other buckets should be empty
+        for i in range(8):
+            if i != 1:
+                assert all(table_ids[i, s] == -1 for s in range(self.K))
 
     def test_multiple_updates(self) -> None:
-        table = self._empty_table()
+        table_hashes, table_ids = self._empty_tables()
         hashes = np.array([0, 1, 2], dtype=np.uint64)
         vals = np.array([10, 20, 30], dtype=np.int64)
-        update_table_id_numba(hashes, table, vals)
-        assert table[0] == 10
-        assert table[1] == 20
-        assert table[2] == 30
+        update_table_id_numba(hashes, table_hashes, table_ids, vals)
+        assert table_ids[0, 0] == 10
+        assert table_ids[1, 0] == 20
+        assert table_ids[2, 0] == 30
 
-    def test_collision_last_write_wins(self) -> None:
-        """When two hashes map to the same slot, the last value is stored."""
-        table = self._empty_table()
-        # hash 0 → idx 0, hash 8 → idx 0 (8 & 7 = 0)
+    def test_collision_both_stored(self) -> None:
+        """Two hashes mapping to the same bucket occupy different slots."""
+        table_hashes, table_ids = self._empty_tables()
+        # hash 0 → bucket 0, hash 8 → bucket 0 (8 & 7 = 0)
         hashes = np.array([0, 8], dtype=np.uint64)
         vals = np.array([10, 20], dtype=np.int64)
-        update_table_id_numba(hashes, table, vals)
-        assert table[0] == 20
+        update_table_id_numba(hashes, table_hashes, table_ids, vals)
+        # Both should be stored in bucket 0, different slots
+        assert table_ids[0, 0] == 10
+        assert table_ids[0, 1] == 20
+
+    def test_same_hash_overwrites_slot(self) -> None:
+        """Same full hash updates the existing slot (not a new one)."""
+        table_hashes, table_ids = self._empty_tables()
+        hashes = np.array([5], dtype=np.uint64)
+        vals = np.array([10], dtype=np.int64)
+        update_table_id_numba(hashes, table_hashes, table_ids, vals)
+        assert table_ids[5, 0] == 10
+
+        # Update with same hash → same slot
+        vals2 = np.array([20], dtype=np.int64)
+        update_table_id_numba(hashes, table_hashes, table_ids, vals2)
+        assert table_ids[5, 0] == 20
+        assert table_ids[5, 1] == -1  # no spillover
 
     def test_modifies_in_place(self) -> None:
-        table = self._empty_table()
-        ptr = table.ctypes.data
+        table_hashes, table_ids = self._empty_tables()
+        ptr = table_ids.ctypes.data
         hashes = np.array([3], dtype=np.uint64)
         vals = np.array([7], dtype=np.int64)
-        update_table_id_numba(hashes, table, vals)
-        assert table.ctypes.data == ptr  # same buffer
-        assert table[3] == 7
+        update_table_id_numba(hashes, table_hashes, table_ids, vals)
+        assert table_ids.ctypes.data == ptr  # same buffer
+        assert table_ids[3, 0] == 7
 
     def test_empty_hashes_no_change(self) -> None:
-        table = self._empty_table()
+        table_hashes, table_ids = self._empty_tables()
         hashes = np.empty(0, dtype=np.uint64)
         vals = np.empty(0, dtype=np.int64)
-        update_table_id_numba(hashes, table, vals)
-        assert all(v == -1 for v in table)
+        update_table_id_numba(hashes, table_hashes, table_ids, vals)
+        assert np.all(table_ids == -1)
+
+    def test_overflow_evicts_slot_zero(self) -> None:
+        """When all K slots are full with different hashes, slot 0 is evicted."""
+        table_hashes, table_ids = self._empty_tables(8)
+        # Fill all K slots of bucket 0 with distinct hashes
+        for s in range(self.K):
+            h = np.array([np.uint64(s * 8)], dtype=np.uint64)  # all map to bucket 0
+            v = np.array([s], dtype=np.int64)
+            update_table_id_numba(h, table_hashes, table_ids, v)
+
+        # All K slots should be full
+        assert all(table_ids[0, s] != -1 for s in range(self.K))
+
+        # Insert one more → should evict slot 0
+        h = np.array([np.uint64(self.K * 8)], dtype=np.uint64)  # bucket 0
+        v = np.array([100], dtype=np.int64)
+        update_table_id_numba(h, table_hashes, table_ids, v)
+        assert table_ids[0, 0] == 100  # slot 0 was evicted
 
 
 class TestUniqueHitsDirectIdNumba:
-    def _table(self, size: int = 8) -> np.ndarray:
-        return np.full(size, -1, dtype=np.int64)
+    """Tests for the multi-slot unique_hits_direct_id_numba."""
+
+    K = 4
+
+    def _empty_tables(self, num_buckets: int = 8):
+        table_hashes = np.zeros((num_buckets, self.K), dtype=np.uint64)
+        table_ids = np.full((num_buckets, self.K), -1, dtype=np.int64)
+        return table_hashes, table_ids
 
     def test_no_hits_all_empty(self) -> None:
-        table = self._table()
+        table_hashes, table_ids = self._empty_tables()
         hashes = np.array([0, 1, 2], dtype=np.uint64)
-        out = unique_hits_direct_id_numba(hashes, table, np.uint64(7), 4)
+        out = unique_hits_direct_id_numba(hashes, table_hashes, table_ids, np.uint64(7), 4)
         assert len(out) == 0
 
     def test_single_hit(self) -> None:
-        table = self._table()
-        table[1] = 5
-        hashes = np.array([1], dtype=np.uint64)  # 1 & 7 = 1 → ID 5
-        out = unique_hits_direct_id_numba(hashes, table, np.uint64(7), 10)
+        table_hashes, table_ids = self._empty_tables()
+        table_hashes[1, 0] = 1
+        table_ids[1, 0] = 5
+        hashes = np.array([1], dtype=np.uint64)  # bucket 1 → ID 5
+        out = unique_hits_direct_id_numba(hashes, table_hashes, table_ids, np.uint64(7), 10)
         assert len(out) == 1
         assert out[0] == 5
 
+    def test_full_hash_verification(self) -> None:
+        """A hash that maps to the right bucket but has wrong full hash is NOT a hit."""
+        table_hashes, table_ids = self._empty_tables()
+        # Store hash=1 at bucket 1
+        table_hashes[1, 0] = 1
+        table_ids[1, 0] = 5
+        # Query with hash=9 which also maps to bucket 1 (9 & 7 = 1) but differs
+        hashes = np.array([9], dtype=np.uint64)
+        out = unique_hits_direct_id_numba(hashes, table_hashes, table_ids, np.uint64(7), 10)
+        assert len(out) == 0  # no false positive!
+
     def test_deduplication(self) -> None:
-        """Same ID reached via two different hashes is returned only once."""
-        table = self._table()
-        table[1] = 3  # index 1 → ID 3
-        # hash 1 and hash 9 both map to index 1 (& 7 == 1)
-        hashes = np.array([1, 9], dtype=np.uint64)
-        out = unique_hits_direct_id_numba(hashes, table, np.uint64(7), 5)
+        """Same full hash queried twice returns the ID only once."""
+        table_hashes, table_ids = self._empty_tables()
+        table_hashes[1, 0] = 1
+        table_ids[1, 0] = 3
+        hashes = np.array([1, 1], dtype=np.uint64)
+        out = unique_hits_direct_id_numba(hashes, table_hashes, table_ids, np.uint64(7), 5)
         assert len(out) == 1
         assert out[0] == 3
 
     def test_multiple_unique_ids(self) -> None:
-        table = self._table()
-        table[0] = 0
-        table[1] = 1
-        table[2] = 2
+        table_hashes, table_ids = self._empty_tables()
+        for i in range(3):
+            table_hashes[i, 0] = np.uint64(i)
+            table_ids[i, 0] = i
         hashes = np.array([0, 1, 2], dtype=np.uint64)
-        out = unique_hits_direct_id_numba(hashes, table, np.uint64(7), 5)
+        out = unique_hits_direct_id_numba(hashes, table_hashes, table_ids, np.uint64(7), 5)
         assert len(out) == 3
         assert set(out) == {0, 1, 2}
 
     def test_mixed_hits_and_misses(self) -> None:
-        table = self._table()
-        table[2] = 10
-        # indices 0 (miss), 2 (hit → 10), 5 (miss)
+        table_hashes, table_ids = self._empty_tables()
+        table_hashes[2, 0] = 2
+        table_ids[2, 0] = 10
         hashes = np.array([0, 2, 5], dtype=np.uint64)
-        out = unique_hits_direct_id_numba(hashes, table, np.uint64(7), 15)
+        out = unique_hits_direct_id_numba(hashes, table_hashes, table_ids, np.uint64(7), 15)
         assert len(out) == 1
         assert out[0] == 10
 
     def test_order_of_first_encounter_preserved(self) -> None:
         """IDs appear in the order they are first seen in the hash stream."""
-        table = self._table()
-        table[0] = 2
-        table[1] = 0
-        table[2] = 1
+        table_hashes, table_ids = self._empty_tables()
+        for i, cid in [(0, 2), (1, 0), (2, 1)]:
+            table_hashes[i, 0] = np.uint64(i)
+            table_ids[i, 0] = cid
         hashes = np.array([0, 1, 2], dtype=np.uint64)
-        out = unique_hits_direct_id_numba(hashes, table, np.uint64(7), 3)
+        out = unique_hits_direct_id_numba(hashes, table_hashes, table_ids, np.uint64(7), 3)
         np.testing.assert_array_equal(out, [2, 0, 1])
 
     def test_empty_hashes(self) -> None:
-        table = self._table()
+        table_hashes, table_ids = self._empty_tables()
         hashes = np.empty(0, dtype=np.uint64)
-        out = unique_hits_direct_id_numba(hashes, table, np.uint64(7), 4)
+        out = unique_hits_direct_id_numba(hashes, table_hashes, table_ids, np.uint64(7), 4)
         assert len(out) == 0
 
     def test_output_dtype(self) -> None:
-        table = self._table()
-        table[0] = 0
+        table_hashes, table_ids = self._empty_tables()
+        table_hashes[0, 0] = 0
+        table_ids[0, 0] = 0
         hashes = np.array([0], dtype=np.uint64)
-        out = unique_hits_direct_id_numba(hashes, table, np.uint64(7), 1)
+        out = unique_hits_direct_id_numba(hashes, table_hashes, table_ids, np.uint64(7), 1)
         assert out.dtype == np.int64
+
+    def test_multi_slot_lookup(self) -> None:
+        """Two entries in the same bucket are both found by their full hashes."""
+        table_hashes, table_ids = self._empty_tables()
+        # Both map to bucket 0 (0 & 7 = 0, 8 & 7 = 0)
+        table_hashes[0, 0] = 0
+        table_ids[0, 0] = 10
+        table_hashes[0, 1] = 8
+        table_ids[0, 1] = 20
+        # Query for hash=8 → should find ID 20 (not 10)
+        hashes = np.array([8], dtype=np.uint64)
+        out = unique_hits_direct_id_numba(hashes, table_hashes, table_ids, np.uint64(7), 25)
+        assert len(out) == 1
+        assert out[0] == 20
