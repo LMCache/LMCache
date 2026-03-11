@@ -14,7 +14,7 @@ import torch
 # First Party
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.memory_management import AdHocMemoryAllocator, MemoryFormat
+from lmcache.v1.memory_management import MemoryFormat
 from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 from lmcache.v1.storage_backend.local_disk_backend import LocalDiskBackend
@@ -43,14 +43,12 @@ class MockLMCacheWorker:
 def create_test_config(
     disk_path: str,
     max_disk_size: float = 1.0,
-    cache_policy: str = "LRU",
 ):
     """Create a test configuration for LocalDiskBackend."""
     config = LMCacheEngineConfig.from_defaults(
         chunk_size=256,
         local_disk=disk_path,
         max_local_disk_size=max_disk_size,
-        cache_policy=cache_policy,
         lmcache_instance_id="test_instance",
     )
     return config
@@ -81,18 +79,14 @@ def create_test_key(key_id: int = 0) -> CacheEngineKey:
 
 
 def create_memory_obj(
+    local_cpu_backend: LocalCPUBackend,
     shape: torch.Size,
     dtype: torch.dtype,
     fill_value: int,
     fmt: MemoryFormat = MemoryFormat.KV_2LTD,
-    local_cpu_backend: LocalCPUBackend | None = None,
 ):
     """Create a CPU memory object filled with a deterministic value."""
-    if local_cpu_backend is None:
-        allocator = AdHocMemoryAllocator(device="cpu")
-        memory_obj = allocator.allocate([shape], [dtype], fmt=fmt)
-    else:
-        memory_obj = local_cpu_backend.allocate(shape, dtype, fmt=fmt)
+    memory_obj = local_cpu_backend.allocate(shape, dtype, fmt=fmt)
     assert memory_obj is not None
     assert memory_obj.tensor is not None
     memory_obj.tensor.fill_(fill_value)
@@ -268,11 +262,11 @@ class TestLocalDiskBackend:
         )
         key = create_test_key(11)
         memory_obj = create_memory_obj(
+            local_cpu_backend,
             metadata.get_shapes()[0],
             metadata.get_dtypes()[0],
             fill_value=7,
             fmt=MemoryFormat.KV_2LTD,
-            local_cpu_backend=local_cpu_backend,
         )
         expected = bytes(memory_obj.byte_array)
 
@@ -299,164 +293,4 @@ class TestLocalDiskBackend:
             finally:
                 backend2.close()
         finally:
-            local_cpu_backend.memory_allocator.close()
-
-    @pytest.mark.parametrize("cache_policy", ["LRU", "FIFO", "MRU", "LFU"])
-    def test_restart_preserves_cache_policy_state(
-        self, temp_disk_path, loop_in_thread, memory_allocator, cache_policy
-    ):
-        """Test eviction behavior remains stable after a restart."""
-        metadata = create_test_metadata()
-        shape = metadata.get_shapes()[0]
-        dtype = metadata.get_dtypes()[0]
-        chunk_size_bytes = shape.numel() * dtype.itemsize
-        max_disk_size = ((2 * chunk_size_bytes) + 4096) / 1024**3
-        config = create_test_config(
-            temp_disk_path,
-            max_disk_size=max_disk_size,
-            cache_policy=cache_policy,
-        )
-        local_cpu_backend = LocalCPUBackend(
-            config=config,
-            metadata=metadata,
-            dst_device="cpu",
-            memory_allocator=memory_allocator,
-        )
-        backend1 = LocalDiskBackend(
-            config=config,
-            loop=loop_in_thread,
-            local_cpu_backend=local_cpu_backend,
-            dst_device="cpu",
-            metadata=metadata,
-        )
-        key1 = create_test_key(21)
-        key2 = create_test_key(22)
-        key3 = create_test_key(23)
-        obj1 = create_memory_obj(
-            shape,
-            dtype,
-            fill_value=1,
-            local_cpu_backend=local_cpu_backend,
-        )
-        obj2 = create_memory_obj(
-            shape,
-            dtype,
-            fill_value=2,
-            local_cpu_backend=local_cpu_backend,
-        )
-        obj3 = create_memory_obj(
-            shape,
-            dtype,
-            fill_value=3,
-            local_cpu_backend=local_cpu_backend,
-        )
-
-        try:
-            backend1.submit_put_task(key1, obj1)
-            wait_for_disk_store(backend1, key1)
-            obj1.ref_count_down()
-            backend1.submit_put_task(key2, obj2)
-            wait_for_disk_store(backend1, key2)
-            obj2.ref_count_down()
-
-            if cache_policy == "LRU":
-                restored = backend1.get_blocking(key1)
-                assert restored is not None
-                restored.ref_count_down()
-                evicted_key = key2
-            elif cache_policy == "MRU":
-                restored = backend1.get_blocking(key2)
-                assert restored is not None
-                restored.ref_count_down()
-                evicted_key = key2
-            elif cache_policy == "LFU":
-                restored = backend1.get_blocking(key1)
-                assert restored is not None
-                restored.ref_count_down()
-                restored = backend1.get_blocking(key1)
-                assert restored is not None
-                restored.ref_count_down()
-                evicted_key = key2
-            else:
-                evicted_key = key1
-
-            backend1.close()
-
-            backend2 = LocalDiskBackend(
-                config=config,
-                loop=loop_in_thread,
-                local_cpu_backend=local_cpu_backend,
-                dst_device="cpu",
-                metadata=metadata,
-            )
-            try:
-                backend2.submit_put_task(key3, obj3)
-                wait_for_disk_store(backend2, key3)
-                obj3.ref_count_down()
-
-                assert backend2.contains(key3)
-                assert not backend2.contains(evicted_key)
-                remaining_keys = {key1, key2, key3} - {evicted_key}
-                for remaining_key in remaining_keys:
-                    assert backend2.contains(remaining_key)
-            finally:
-                backend2.close()
-        finally:
-            local_cpu_backend.memory_allocator.close()
-
-    def test_legacy_disk_files_are_migrated_on_startup(
-        self, temp_disk_path, loop_in_thread, memory_allocator
-    ):
-        """Test best-effort migration for pre-manifest local disk files."""
-        config = create_test_config(temp_disk_path)
-        metadata = create_test_metadata()
-        local_cpu_backend = LocalCPUBackend(
-            config=config,
-            metadata=metadata,
-            dst_device="cpu",
-            memory_allocator=memory_allocator,
-        )
-
-        shape = metadata.get_shapes()[0]
-        dtype = metadata.get_dtypes()[0]
-        memory_obj = create_memory_obj(
-            shape,
-            dtype,
-            fill_value=9,
-            local_cpu_backend=local_cpu_backend,
-        )
-        key = create_test_key(31)
-        bad_key = create_test_key(32)
-        good_path = os.path.join(
-            temp_disk_path,
-            key.to_string().replace("/", "-") + ".pt",
-        )
-        bad_path = os.path.join(
-            temp_disk_path,
-            bad_key.to_string().replace("/", "-") + ".pt",
-        )
-        with open(good_path, "wb") as f:
-            f.write(memory_obj.byte_array)
-        with open(bad_path, "wb") as f:
-            f.write(memory_obj.byte_array[:-128])
-        memory_obj.ref_count_down()
-
-        backend = LocalDiskBackend(
-            config=config,
-            loop=loop_in_thread,
-            local_cpu_backend=local_cpu_backend,
-            dst_device="cpu",
-            metadata=metadata,
-        )
-        try:
-            assert os.path.exists(backend.manifest_path)
-            assert backend.contains(key)
-            assert not backend.contains(bad_key)
-
-            restored = backend.get_blocking(key)
-            assert restored is not None
-            assert bytes(restored.byte_array) == bytes(memory_obj.byte_array)
-            restored.ref_count_down()
-        finally:
-            backend.close()
             local_cpu_backend.memory_allocator.close()

@@ -398,17 +398,6 @@ Check out your KV Cache in your SSD:
 Tips:
 -----
 
-- Restart reuse is automatic when you restart the same LMCache/vLLM worker with
-  the same model and ``local_disk`` path. LMCache writes a local manifest next
-  to the ``.pt`` payload files and rebuilds the disk index from that manifest
-  on startup.
-
-- If your disk directory already contains legacy ``.pt`` files from an older
-  LMCache version, LMCache will try to migrate matching full-chunk files into
-  the new manifest on first startup. Files that do not match the current model,
-  worker, or expected chunk layout are skipped and will be regenerated on the
-  next warm run.
-
 - If you want to run the ``query-twice.py`` script multiple times, you'll need to either restart the vLLM LMCache server or change the prefix of the context you pass in since you've already warmed LMCache.
 
 - The max model length here was decided by running an L4 with only 23GB of GPU memory. If you have more memory, you can increase the max model length and modify ``query-twice.py`` to use more of the long context. LMCache TTFT improvement becomes more pronounced as the context length increases!
