@@ -571,8 +571,16 @@ class L1Manager:
             ret[key] = (L1Error.SUCCESS, entry.memory_obj)
             successful_keys.append(key)
 
+        # NOTE: We intentionally do NOT fire
+        # on_l1_keys_write_finished here.  This method is used
+        # by the prefetch controller to transition L2-loaded
+        # (temporary) objects from write-locked to read-locked.
+        # Firing the write-finished event would cause the
+        # StoreController to re-store these objects back to L2,
+        # which is both wasteful and introduces a race where
+        # the store controller's later finish_read can release
+        # a read lock that belongs to a TP worker.
         for listener in self._registered_listeners:
-            listener.on_l1_keys_write_finished(successful_keys)
             listener.on_l1_keys_reserved_read(successful_keys)
         return ret
 
