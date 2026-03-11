@@ -79,60 +79,7 @@ if torch.cuda.is_available():
 logger = init_logger(__name__)
 
 
-
 # Helper functions
-def update_session_for_key(
-    key: IPCCacheEngineKey,
-    session_manager: SessionManager,
-) -> None:
-    """Update session state for a token-mode key.
-
-    Sets the token sequence on the session and computes hashes so they
-    are cached for resolve_keys.
-
-    Args:
-        key: An IPC cache engine key.
-        session_manager: The session manager to use.
-    """
-    session = session_manager.get_or_create(key.request_id)
-    session.set_tokens(list(key.token_ids))
-    session.get_hashes(key.start, key.end)
-
-
-def resolve_key(
-    key: IPCCacheEngineKey,
-    session_manager: SessionManager,
-) -> list[IPCCacheEngineKey]:
-    """Convert a token-mode key to hash-mode keys.
-
-    Uses session to retrieve pre-computed rolling hashes, then creates
-    hash-mode IPCCacheEngineKey instances.
-    update_session_for_key must be called before this function.
-
-    Args:
-        key: An IPC cache engine key.
-        session_manager: The session manager to use.
-
-    Returns:
-        List of IPCCacheEngineKey with hash, one per chunk.
-    """
-    session = session_manager.get_or_create(key.request_id)
-    hashes = session.get_hashes(key.start, key.end)
-    return [
-        IPCCacheEngineKey(
-            model_name=key.model_name,
-            world_size=key.world_size,
-            worker_id=key.worker_id,
-            token_ids=key.token_ids,
-            start=key.start,
-            end=key.end,
-            request_id=key.request_id,
-            chunk_hash=TokenHasher.hash_to_bytes(h),
-        )
-        for h in hashes
-    ]
-
-
 def compute_extra_count(
     tp_size: int,
     world_size: int,
@@ -171,7 +118,6 @@ def compute_extra_count(
     """
     tp = tp_size if tp_size > 1 else world_size
     return tp - 1 if tp > world_size else 0
-
 
 
 def get_layout_desc(gpu_context: GPUCacheContext, num_tokens: int) -> MemoryLayoutDesc:
