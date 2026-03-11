@@ -412,24 +412,20 @@ class MPCacheEngine:
         full retrieve.  This is used when a request is cancelled or aborted
         after LOOKUP but before RETRIEVE.
 
-        Hashes are computed over the entire ``token_ids`` sequence, then
-        sliced to only include chunks that overlap with ``[start, end)``.
-        When ``start`` or ``end`` is not aligned to ``chunk_size``, the
-        entire chunk containing ``start`` boundary is freed but the one
-        containing ``end`` boundary will not be freed.  It is the caller's
-        responsibility to align the boundaries as desired.
+        Hashes are computed only for chunks in ``[start, end)`` to avoid
+        unnecessary work on tokens outside that range.
+        ``start`` and ``end`` must be aligned to ``chunk_size``; it is the
+        caller's responsibility to align the boundaries as desired.
 
         Args:
             key: Cache key whose read locks should be released.
         """
-        all_chunk_hashes = [
+        chunk_hashes = [
             TokenHasher.hash_to_bytes(h)
-            for h in self.token_hasher.compute_chunk_hashes(list(key.token_ids), True)
+            for h in self.token_hasher.compute_chunk_hashes(
+                list(key.token_ids), True, start=key.start, end=key.end
+            )
         ]
-        chunk_size = self.token_hasher.chunk_size
-        start_chunk = key.start // chunk_size
-        end_chunk = key.end // chunk_size
-        chunk_hashes = all_chunk_hashes[start_chunk:end_chunk]
         if not chunk_hashes:
             return
         obj_keys = ipc_key_to_object_keys(key, chunk_hashes)

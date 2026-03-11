@@ -119,7 +119,8 @@ def test_server_free_lookup_locks_no_matching_chunks():
     engine = MagicMock()
     engine.token_hasher = MagicMock()
     engine.token_hasher.chunk_size = 256
-    engine.token_hasher.compute_chunk_hashes.return_value = [b"hash0"]
+    # start=end=0 is passed to compute_chunk_hashes, which returns no hashes
+    engine.token_hasher.compute_chunk_hashes.return_value = []
 
     # Key with start == end means no chunks to free
     key = IPCCacheEngineKey(
