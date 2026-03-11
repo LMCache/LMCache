@@ -98,7 +98,6 @@ from lmcache.v1.multiprocess.protocol import (
 )
 from lmcache.v1.multiprocess.server import MPCacheEngine, parse_args
 from lmcache.v1.multiprocess.token_hasher import (
-    TokenHasher,
     chunk_hash_windows_numba,
     rolling_hash_windows_numba,
     unique_hits_direct_id_numba,
@@ -519,10 +518,9 @@ class BlendEngineV2(MPCacheEngine):
         """
         # Compute normal prefix hashes so these chunks are accessible both via
         # the CB lookup path and via the standard lookup/retrieve path.
-        chunk_hashes = [
-            TokenHasher.hash_to_bytes(h)
-            for h in self.token_hasher.compute_chunk_hashes(list(key.token_ids), True)
-        ]
+        chunk_hashes = self.token_hasher.compute_chunk_hashes(
+            list(key.token_ids), True, as_bytes=True
+        )
         # convert to object key
         obj_keys = ipc_key_to_object_keys(key, chunk_hashes)
 
@@ -670,10 +668,9 @@ class BlendEngineV2(MPCacheEngine):
             final chunks, and a boolean flag indicating if the store is successful.
         """
         # Compute normal hash for the keys
-        chunk_hashes = [
-            TokenHasher.hash_to_bytes(h)
-            for h in self.token_hasher.compute_chunk_hashes(list(key.token_ids), True)
-        ]
+        chunk_hashes = self.token_hasher.compute_chunk_hashes(
+            list(key.token_ids), True, as_bytes=True
+        )
 
         # convert to object key
         obj_keys = ipc_key_to_object_keys(key, chunk_hashes)

@@ -187,6 +187,7 @@ class TokenHasher:
         prefix_hash: Any = None,
         start: int = 0,
         end: int | None = None,
+        as_bytes: bool = False,
     ) -> list:
         """Compute rolling prefix hashes for chunks in a token range.
 
@@ -207,11 +208,14 @@ class TokenHasher:
                 Chunks before this index are computed but not returned.
             end: Token-level end index (must be chunk-aligned). When
                 provided, hashing stops at this index.
+            as_bytes: If True, convert each hash to bytes via
+                :meth:`hash_to_bytes` before returning.
 
         Returns:
             List of hash values for chunks in ``[start, end)``.
+            If ``as_bytes`` is True, each element is ``bytes``.
         """
-        hashes = []
+        hashes: list = []
         prefix_hash = self.none_hash if prefix_hash is None else prefix_hash
         effective_len = min(len(token_ids), end) if end is not None else len(token_ids)
         num_complete = (
@@ -224,7 +228,9 @@ class TokenHasher:
                 token_ids[i : i + self.chunk_size], prefix_hash
             )
             if i >= start:
-                hashes.append(prefix_hash)
+                hashes.append(
+                    self.hash_to_bytes(prefix_hash) if as_bytes else prefix_hash
+                )
         return hashes
 
     @staticmethod

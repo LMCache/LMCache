@@ -543,10 +543,9 @@ class MPCacheEngine:
         extra_count = compute_extra_count(tp_size, world_size)
 
         # Compute chunk hashes for all full chunks
-        chunk_hashes = [
-            TokenHasher.hash_to_bytes(h)
-            for h in self.token_hasher.compute_chunk_hashes(list(key.token_ids), True)
-        ]
+        chunk_hashes = self.token_hasher.compute_chunk_hashes(
+            list(key.token_ids), True, as_bytes=True
+        )
         if not chunk_hashes:
             return self._register_prefetch_job(
                 _PrefetchJob(
@@ -651,12 +650,9 @@ class MPCacheEngine:
             tp_size: Tensor-parallel size for MLA
                 multi-reader locking.
         """
-        chunk_hashes = [
-            TokenHasher.hash_to_bytes(h)
-            for h in self.token_hasher.compute_chunk_hashes(
-                list(key.token_ids), True, start=key.start, end=key.end
-            )
-        ]
+        chunk_hashes = self.token_hasher.compute_chunk_hashes(
+            list(key.token_ids), True, start=key.start, end=key.end, as_bytes=True
+        )
         if not chunk_hashes:
             return
         obj_keys = ipc_key_to_object_keys(key, chunk_hashes)
