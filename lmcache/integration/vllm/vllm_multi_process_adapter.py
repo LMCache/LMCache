@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Any
 import os
 import threading
+import time
 
 # Third Party
 import torch
@@ -467,6 +468,154 @@ class LMCacheMPSchedulerAdapter:
             end=end,
             request_id=request_id,
         )
+
+
+class LMCacheMPPollingSchedulerAdapter(LMCacheMPSchedulerAdapter):
+    """LMCacheMPSchedulerAdapter subclass that overrides check_lookup_result
+    to block until the prefetch job is complete.
+
+    Unlike the base class which returns None immediately when the result is
+    not yet available, this class polls the server in a loop and only returns
+    once the prefetch job has finished.  This avoids the need for the caller
+    to repeatedly invoke check_lookup_result across multiple scheduling steps.
+    """
+
+    def __init__(
+        self,
+        server_url: str,
+        context: zmq.Context,
+        model_name: str,
+        world_size: int,
+        kv_rank: int,
+        vllm_block_size: int,
+        tp_size: int = 1,
+        poll_interval: float = 0.005,
+        lookup_timeout: float = 5.0,
+        mq_timeout: float = DEFAULT_MQ_TIMEOUT,
+        heartbeat_interval: float = DEFAULT_HEARTBEAT_INTERVAL,
+    ):
+        """
+        Args:
+            server_url: The server URL for the LMCache message queue.
+            context: The ZMQ context.
+            model_name: The model name used for LMCache keys.
+            world_size: The world size used for LMCache keys.
+            kv_rank: The kv rank used for LMCache keys.
+            vllm_block_size: The block size used in vLLM.
+            tp_size: Tensor-parallel size for MLA multi-reader locking.
+            poll_interval: Interval in seconds between polling attempts
+                (default 5ms).
+            lookup_timeout: Maximum time in seconds to wait for a prefetch
+                job to complete before giving up (default 5s). When the
+                timeout is exceeded, 0 is returned so the request proceeds
+                with normal inference without any KV cache hit.
+            mq_timeout: Timeout in seconds for message queue requests.
+            heartbeat_interval: Interval in seconds between heartbeat pings.
+        """
+        super().__init__(
+            server_url=server_url,
+            context=context,
+            model_name=model_name,
+            world_size=world_size,
+            kv_rank=kv_rank,
+            vllm_block_size=vllm_block_size,
+            tp_size=tp_size,
+            mq_timeout=mq_timeout,
+            heartbeat_interval=heartbeat_interval,
+        )
+        self._poll_interval = poll_interval
+        self._lookup_timeout = lookup_timeout
+
+    @_lmcache_nvtx_annotate
+    def check_lookup_result(self, request_id: str) -> int:
+        """Block until the prefetch job for request_id is complete and return
+        the matched token count.
+
+        Overrides the base class non-blocking implementation: instead of
+        returning None when the result is not yet available, this method
+        polls the server repeatedly until the prefetch job finishes.
+
+        Args:
+            request_id: The ID of the lookup request submitted in
+                ``maybe_submit_lookup_request``.
+
+        Returns:
+            An integer representing the total number of tokens matched
+            in LMCache (prefix matching).
+        """
+        if request_id not in self._lookup_job_ids:
+            # No job — either unhealthy at submit time or already cleaned up
+            return 0
+
+        job_id = self._lookup_job_ids[request_id]
+
+        if job_id in self._finished_lookup_jobs:
+            return self._finished_lookup_jobs[job_id] * self.chunk_size
+
+        deadline = time.monotonic() + self._lookup_timeout
+        # Keep a single in-flight future and reuse it across poll iterations.
+        # Sending a new request every iteration is unsafe: the server uses
+        # exactly-once semantics and pops the job after returning a non-None
+        # result.  If an earlier request's response arrives *after* we already
+        # timed out on its future and sent a new one, the job is gone and all
+        # subsequent requests return None — silently losing the result.
+        #
+        # Strategy:
+        #   1. Send one request and wait up to _poll_interval for a response.
+        #   2. On TimeoutError the request is still in-flight; keep waiting on
+        #      the *same* future (don't send a new one).
+        #   3. Only send a new request when the server explicitly returned None
+        #      (prefetch still in progress) — meaning the previous request was
+        #      fully processed and the job still exists.
+        inflight_future = send_lmcache_request(
+            self.mq_client,
+            RequestType.QUERY_PREFETCH_STATUS,
+            [job_id],
+        )
+        while True:
+            if not self.is_healthy:
+                self._lookup_job_ids.pop(request_id, None)
+                self._finished_lookup_jobs.pop(job_id, None)
+                return 0
+            try:
+                result = inflight_future.result(timeout=self._poll_interval)
+            except TimeoutError:
+                # The request is still in-flight — do NOT send a new one.
+                # Just check the deadline and keep waiting on the same future.
+                if time.monotonic() >= deadline:
+                    logger.warning(
+                        "Lookup timeout (%.1fs) exceeded for request_id=%s, "
+                        "job_id=%s. Returning 0 matched tokens.",
+                        self._lookup_timeout,
+                        request_id,
+                        job_id,
+                    )
+                    self._lookup_job_ids.pop(request_id, None)
+                    self._finished_lookup_jobs.pop(job_id, None)
+                    return 0
+                continue
+            if result is not None:
+                self._finished_lookup_jobs[job_id] = result
+                return result * self.chunk_size
+            # result is None: server confirmed prefetch is still in progress.
+            # It is now safe to send a new request.
+            if time.monotonic() >= deadline:
+                logger.warning(
+                    "Lookup timeout (%.1fs) exceeded for request_id=%s, "
+                    "job_id=%s. Returning 0 matched tokens.",
+                    self._lookup_timeout,
+                    request_id,
+                    job_id,
+                )
+                self._lookup_job_ids.pop(request_id, None)
+                self._finished_lookup_jobs.pop(job_id, None)
+                return 0
+            time.sleep(self._poll_interval)
+            inflight_future = send_lmcache_request(
+                self.mq_client,
+                RequestType.QUERY_PREFETCH_STATUS,
+                [job_id],
+            )
 
 
 class LMCacheMPWorkerAdapter:
