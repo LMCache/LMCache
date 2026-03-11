@@ -23,6 +23,7 @@ REQUEST_NAMES = [
     "STORE",
     "RETRIEVE",
     "LOOKUP",
+    "SYNC_LOOKUP",
     "QUERY_PREFETCH_STATUS",
     "FREE_LOOKUP_LOCKS",
     "END_SESSION",
@@ -94,6 +95,18 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
         #       MLA multi-reader locking
         # Returns: int - Prefetch job ID for polling via QUERY_PREFETCH_STATUS
         "LOOKUP": ProtocolDefinition(
+            payload_classes=[KeyType, int],
+            response_class=int,
+            handler_type=HandlerType.BLOCKING,
+        ),
+        # Synchronous prefix lookup — returns hit count directly
+        # (no job ID, no polling).
+        # Payload:
+        #   - key: KeyType - Cache key to look up
+        #   - tp_size: int - Tensor-parallel size for
+        #       MLA multi-reader locking
+        # Returns: int - Number of matched chunks (prefix hit count)
+        "SYNC_LOOKUP": ProtocolDefinition(
             payload_classes=[KeyType, int],
             response_class=int,
             handler_type=HandlerType.BLOCKING,

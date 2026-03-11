@@ -33,6 +33,7 @@ from lmcache.v1.distributed.storage_controllers.store_policy import (
     AdapterDescriptor,
     DefaultStorePolicy,
 )
+from lmcache.native_storage_ops import Bitmap
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.mp_observability.logger.storage_manager_stats_logger import (
     StorageManagerStatsLogger,
@@ -365,6 +366,137 @@ class StorageManager:
                 handle.request_id,
             )
         return total_hits
+
+    # =========================================================================
+    # Synchronous lookup / load API (for SYNC_LOOKUP protocol)
+    # =========================================================================
+
+    def synchronous_lookup_and_lock(
+        self,
+        keys: list[ObjectKey],
+        layout_desc: MemoryLayoutDesc,
+        extra_count: int = 0,
+    ) -> tuple[int, list[ObjectKey], dict[int, Bitmap] | None]:
+        """Synchronous prefix lookup across L1 and L2.
+
+        Checks L1 first (immediate), then synchronously queries L2
+        adapters (blocking until all respond).  L2 objects that are
+        found are pinned (pin_count incremented) to prevent eviction
+        before the subsequent load.
+
+        Does **not** perform L2-to-L1 data movement.
+
+        Args:
+            keys: Object keys to look up.
+            layout_desc: Memory layout descriptor (passed through for
+                later use by the load phase).
+            extra_count: Extra MLA reader locks for L1.
+
+        Returns:
+            Tuple of:
+            - total prefix hit count (L1 + L2)
+            - remaining keys not found in L1 (subset of *keys*)
+            - L2 lookup results (dict[adapter_idx, Bitmap]) or None if
+              no L2 adapters or no remaining keys
+        """
+        # -- L1 prefix scan (same logic as submit_prefetch_task) ---------------
+        l1_read_result = self._l1_manager.reserve_read(keys, extra_count=extra_count)
+        l1_hit_count = 0
+        for key in keys:
+            entry = l1_read_result.get(key, None)
+            if entry is None:
+                break
+            err, obj = entry
+            if err != L1Error.SUCCESS:
+                break
+            l1_hit_count += 1
+
+        # Release non-prefix L1 read locks
+        skipped_keys = []
+        for key in keys[l1_hit_count:]:
+            if key in l1_read_result and l1_read_result[key][1] is not None:
+                skipped_keys.append(key)
+        if skipped_keys:
+            self._l1_manager.finish_read(skipped_keys, extra_count=extra_count)
+
+        for listener in self._registered_listeners:
+            listener.on_sm_read_prefetched(keys[:l1_hit_count], keys[l1_hit_count:])
+
+        # -- L2 synchronous lookup (blocking) ----------------------------------
+        remaining_keys = keys[l1_hit_count:]
+        l2_lookup_results: dict[int, Bitmap] | None = None
+        l2_prefix_hits = 0
+
+        if remaining_keys and self._l2_adapters:
+            l2_lookup_results = self._prefetch_controller.synchronous_lookup(
+                remaining_keys,
+            )
+            if l2_lookup_results:
+                # Merge all adapter bitmaps and count contiguous prefix
+                merged = Bitmap(len(remaining_keys))
+                for bitmap in l2_lookup_results.values():
+                    merged = merged | bitmap
+                l2_prefix_hits = merged.count_leading_ones()
+
+        total_hits = l1_hit_count + l2_prefix_hits
+
+        if total_hits > 0:
+            logger.info(
+                "Synchronous lookup completed (L1+L2): "
+                "%d/%d prefix hits (%d L1, %d L2)",
+                total_hits,
+                len(keys),
+                l1_hit_count,
+                l2_prefix_hits,
+            )
+
+        return total_hits, remaining_keys, l2_lookup_results
+
+    def execute_prefetch_load(
+        self,
+        keys: list[ObjectKey],
+        layout_desc: MemoryLayoutDesc,
+        lookup_results: dict[int, Bitmap],
+    ) -> int:
+        """Execute L2-to-L1 data movement for previously looked-up keys.
+
+        Called from the RETRIEVE path after a prior
+        :meth:`synchronous_lookup_and_lock`.  The L2 objects must still
+        be pinned from the lookup.  Pins are released during the load
+        phase (phase-1 and phase-2 unlocks).
+
+        Args:
+            keys: The remaining keys not in L1 (from
+                ``synchronous_lookup_and_lock``).
+            layout_desc: Memory layout for L1 buffer allocation.
+            lookup_results: L2 lookup results from
+                ``synchronous_lookup_and_lock``.
+
+        Returns:
+            Number of prefix hits loaded into L1 (with read locks held).
+        """
+        return self._prefetch_controller.execute_load_phase(
+            keys, layout_desc, lookup_results,
+        )
+
+    def unlock_l2_lookups(
+        self,
+        keys: list[ObjectKey],
+        lookup_results: dict[int, Bitmap],
+    ) -> None:
+        """Release L2 pins without loading.
+
+        Use when a request is cancelled after
+        :meth:`synchronous_lookup_and_lock` but before
+        :meth:`execute_prefetch_load`.
+
+        Args:
+            keys: The remaining keys (from
+                ``synchronous_lookup_and_lock``).
+            lookup_results: L2 lookup results (from
+                ``synchronous_lookup_and_lock``).
+        """
+        self._prefetch_controller.unlock_lookup_results(keys, lookup_results)
 
     def clear(self, force: bool = False):
         """

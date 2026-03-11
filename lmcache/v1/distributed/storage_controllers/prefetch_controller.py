@@ -19,6 +19,7 @@ import enum
 import os
 import select
 import threading
+import time
 
 # First Party
 from lmcache.logging import init_logger
@@ -321,6 +322,226 @@ class PrefetchController(StorageControllerInterface):
             "completed_results_count": completed_results_count,
             "num_l2_adapters": len(self._l2_adapters),
         }
+
+    # =========================================================================
+    # Synchronous API (thread-safe, bypasses background loop)
+    # =========================================================================
+
+    # Poll interval for busy-waiting on adapter results (seconds).
+    _SYNC_POLL_INTERVAL = 0.0001  # 0.1 ms
+
+    def synchronous_lookup(
+        self,
+        keys: list[ObjectKey],
+    ) -> dict[int, Bitmap]:
+        """Submit lookup_and_lock to all L2 adapters and block until done.
+
+        Thread-safe. Callable from any thread (e.g. a BLOCKING handler
+        thread).  Does **not** go through the background prefetch loop.
+
+        The eventfd signals fired by the adapters may wake the background
+        loop, but it will find no matching pending task — this is harmless.
+
+        Args:
+            keys: Object keys to look up and lock in L2.
+
+        Returns:
+            Mapping from adapter index to Bitmap of found (and pinned) keys.
+            Adapters that found nothing are omitted.
+        """
+        if not self._l2_adapters:
+            return {}
+
+        # Fan out to all adapters
+        pending: dict[int, L2TaskId] = {}
+        for i, adapter in enumerate(self._l2_adapters):
+            task_id = adapter.submit_lookup_and_lock_task(keys)
+            pending[i] = task_id
+
+        # Busy-poll until all adapters respond
+        results: dict[int, Bitmap] = {}
+        while pending:
+            for adapter_idx in list(pending):
+                task_id = pending[adapter_idx]
+                result = self._l2_adapters[adapter_idx].query_lookup_and_lock_result(
+                    task_id
+                )
+                if result is not None:
+                    results[adapter_idx] = result
+                    del pending[adapter_idx]
+            if pending:
+                time.sleep(self._SYNC_POLL_INTERVAL)
+
+        return results
+
+    def execute_load_phase(
+        self,
+        keys: list[ObjectKey],
+        layout_desc: MemoryLayoutDesc,
+        lookup_results: dict[int, Bitmap],
+    ) -> int:
+        """Execute the L2-to-L1 load phase synchronously.
+
+        Thread-safe. Callable from any thread.  Reuses the same plan /
+        trim / reserve / load / finalize logic as the background loop
+        but executes it inline.
+
+        The *lookup_results* must come from a prior
+        :meth:`synchronous_lookup` call — the corresponding L2 pins are
+        still held and will be released here (phase-1 and phase-2 unlocks).
+
+        Args:
+            keys: Object keys (same list passed to ``synchronous_lookup``).
+            layout_desc: Memory layout for L1 buffer allocation.
+            lookup_results: Adapter-index → Bitmap from ``synchronous_lookup``.
+
+        Returns:
+            Number of prefix hits successfully loaded into L1 (with read
+            locks held).  The caller is responsible for eventually
+            releasing those read locks.
+        """
+        num_keys = len(keys)
+
+        # -- Step 1: compute load plan ----------------------------------------
+        load_plan = self._policy.select_load_plan(
+            keys, lookup_results, self._adapter_descriptors,
+        )
+        trimmed_plan = trim_load_plan_to_prefix(load_plan, num_keys)
+
+        if not trimmed_plan:
+            # Nothing to load — unlock everything
+            self._unlock_results(keys, lookup_results)
+            return 0
+
+        # -- Step 2: reserve L1 write buffers ----------------------------------
+        merged_bitmap = merge_bitmaps(trimmed_plan.values(), num_keys)
+        keys_to_reserve = merged_bitmap.gather(keys)
+        l1_mgr = self.get_l1_manager()
+
+        write_results = l1_mgr.reserve_write(
+            keys=keys_to_reserve,
+            is_temporary=[True] * len(keys_to_reserve),
+            layout_desc=layout_desc,
+            mode="new",
+        )
+
+        write_reserved_keys: list[ObjectKey] = []
+        write_reserved_objs: dict[ObjectKey, MemoryObj] = {}
+        reserved_key_set: set[ObjectKey] = set()
+        for key, (err, mem_obj) in write_results.items():
+            if err == L1Error.SUCCESS and mem_obj is not None:
+                write_reserved_keys.append(key)
+                write_reserved_objs[key] = mem_obj
+                reserved_key_set.add(key)
+
+        # -- Step 3: recompute plan excluding failed reservations ---------------
+        reserved_bitmap = Bitmap(num_keys)
+        for i, key in enumerate(keys):
+            if key in reserved_key_set:
+                reserved_bitmap.set(i)
+
+        prefix_length = reserved_bitmap.count_leading_ones()
+        trimmed_plan = trim_load_plan_to_first_n_keys(
+            load_plan, num_keys, prefix_length
+        )
+
+        # Phase 1 unlock: keys locked in lookup but not in the final plan
+        for adapter_idx, lookup_bitmap in lookup_results.items():
+            plan_bitmap = trimmed_plan.get(adapter_idx, Bitmap(num_keys))
+            to_unlock_bitmap = lookup_bitmap & (~plan_bitmap)
+            unlock_keys = to_unlock_bitmap.gather(keys)
+            if unlock_keys:
+                self._l2_adapters[adapter_idx].submit_unlock(unlock_keys)
+
+        if not trimmed_plan:
+            if write_reserved_keys:
+                l1_mgr.finish_write(write_reserved_keys)
+                l1_mgr.delete(write_reserved_keys)
+            return 0
+
+        # -- Step 4: submit load tasks and busy-poll ---------------------------
+        pending_loads: dict[int, L2TaskId] = {}
+        for adapter_idx, bitmap in trimmed_plan.items():
+            per_adapter_keys = bitmap.gather(keys)
+            per_adapter_objs = [
+                write_reserved_objs[k] for k in per_adapter_keys
+            ]
+            task_id = self._l2_adapters[adapter_idx].submit_load_task(
+                per_adapter_keys, per_adapter_objs
+            )
+            pending_loads[adapter_idx] = task_id
+
+        load_results: dict[int, Bitmap] = {}
+        while pending_loads:
+            for adapter_idx in list(pending_loads):
+                task_id = pending_loads[adapter_idx]
+                result = self._l2_adapters[adapter_idx].query_load_result(task_id)
+                if result is not None:
+                    load_results[adapter_idx] = result
+                    del pending_loads[adapter_idx]
+            if pending_loads:
+                time.sleep(self._SYNC_POLL_INTERVAL)
+
+        # -- Step 5: finalize — same logic as _finalize_load -------------------
+        result_bitmap = Bitmap(num_keys)
+        for adapter_idx, plan_bitmap in trimmed_plan.items():
+            load_bitmap = load_results.get(adapter_idx)
+            if load_bitmap is None:
+                continue
+            plan_indices = plan_bitmap.get_indices_list()
+            for global_i in load_bitmap.gather(plan_indices):
+                result_bitmap.set(global_i)
+
+        loaded_keys: list[ObjectKey] = result_bitmap.gather(keys)
+        loaded_set = set(loaded_keys)
+        failed_keys = [k for k in write_reserved_keys if k not in loaded_set]
+
+        # Phase 2 unlock: release L2 locks for all keys in the load plan
+        for adapter_idx, plan_bitmap in trimmed_plan.items():
+            unlock_keys = plan_bitmap.gather(keys)
+            self._l2_adapters[adapter_idx].submit_unlock(unlock_keys)
+
+        if loaded_keys:
+            l1_mgr.finish_write_and_reserve_read(loaded_keys)
+        if failed_keys:
+            l1_mgr.finish_write(failed_keys)
+            l1_mgr.delete(failed_keys)
+
+        prefix_hits = result_bitmap.count_leading_ones()
+        prefix_mask = Bitmap(num_keys, prefix_hits)
+        non_prefix_loaded_bitmap = result_bitmap & (~prefix_mask)
+        non_prefix_loaded = non_prefix_loaded_bitmap.gather(keys)
+        if non_prefix_loaded:
+            l1_mgr.finish_read(non_prefix_loaded)
+
+        return prefix_hits
+
+    def unlock_lookup_results(
+        self,
+        keys: list[ObjectKey],
+        lookup_results: dict[int, Bitmap],
+    ) -> None:
+        """Release L2 pins from a prior synchronous_lookup without loading.
+
+        Thread-safe. Use this when the caller decides not to proceed with
+        the load phase (e.g. request cancelled after lookup).
+
+        Args:
+            keys: Object keys (same list passed to ``synchronous_lookup``).
+            lookup_results: Adapter-index → Bitmap from ``synchronous_lookup``.
+        """
+        self._unlock_results(keys, lookup_results)
+
+    def _unlock_results(
+        self,
+        keys: list[ObjectKey],
+        lookup_results: dict[int, Bitmap],
+    ) -> None:
+        """Internal helper: release all L2 pins from lookup results."""
+        for adapter_idx, bitmap in lookup_results.items():
+            unlock_keys = bitmap.gather(keys)
+            if unlock_keys:
+                self._l2_adapters[adapter_idx].submit_unlock(unlock_keys)
 
     # =========================================================================
     # Lifecycle

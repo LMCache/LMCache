@@ -12,6 +12,7 @@ import zmq
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.native_storage_ops import Bitmap
 from lmcache.utils import _lmcache_nvtx_annotate
 from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
@@ -142,6 +143,26 @@ class _PrefetchJob:
     request_id: str
 
 
+@dataclass
+class _PendingLookupState:
+    """State saved between SYNC_LOOKUP and RETRIEVE for L2 prefetch."""
+
+    remaining_keys: list[ObjectKey]
+    """Keys not found in L1 at lookup time (candidates for L2 load)."""
+
+    l2_lookup_results: dict[int, Bitmap] | None
+    """Per-adapter bitmaps of L2 hits (and pinned objects), or None."""
+
+    layout_desc: MemoryLayoutDesc
+    """Memory layout needed by the L2-to-L1 load phase."""
+
+    extra_count: int
+    """MLA extra reader count."""
+
+    world_size: int
+    """World size for normalizing hit counts."""
+
+
 # Main class for the mp cache engine
 class MPCacheEngine:
     def __init__(
@@ -180,6 +201,17 @@ class MPCacheEngine:
         self._prefetch_jobs: dict[int, _PrefetchJob] = {}
         self._next_prefetch_job_id: int = 0
         self._prefetch_job_lock = threading.Lock()
+
+        # Pending lookup state for SYNC_LOOKUP -> RETRIEVE handoff
+        # Keyed by request_id; written by sync_lookup(), consumed by
+        # retrieve() or free_lookup_locks().
+        self._pending_lookups: dict[str, _PendingLookupState] = {}
+        self._pending_lookups_lock = threading.Lock()
+
+        # FIX: fix the problem of telemetry logging in cupy stream
+        # Need to log a retrieve operation before logging any store
+        # operation in the cupy stream
+        self._can_log_store = False
 
     def register_kv_cache(
         self,
@@ -385,6 +417,26 @@ class MPCacheEngine:
             f"KV cache not registered for GPU ID {instance_id}"
         )
         gpu_context = self.gpu_contexts[instance_id]
+
+        # If a prior SYNC_LOOKUP left pending L2 state, execute the
+        # L2-to-L1 prefetch now (blocking) before the L1-to-GPU copy.
+        with self._pending_lookups_lock:
+            pending = self._pending_lookups.pop(key.request_id, None)
+        if (
+            pending is not None
+            and pending.l2_lookup_results
+            and pending.remaining_keys
+        ):
+            l2_loaded = self.storage_manager.execute_prefetch_load(
+                pending.remaining_keys,
+                pending.layout_desc,
+                pending.l2_lookup_results,
+            )
+            logger.debug(
+                "RETRIEVE for %s: loaded %d L2 prefix hits into L1",
+                key.request_id,
+                l2_loaded,
+            )
 
         if get_telemetry_controller().is_enabled():
             gpu_context.cupy_stream.launch_host_func(
@@ -631,12 +683,84 @@ class MPCacheEngine:
 
         return found_count
 
+    @_lmcache_nvtx_annotate
+    def sync_lookup(
+        self,
+        key: IPCCacheEngineKey,
+        tp_size: int,
+    ) -> int:
+        """Synchronous prefix lookup — returns hit count directly.
+
+        Blocks until both L1 and L2 existence checks complete.  Does
+        **not** perform L2-to-L1 data movement; that happens later in
+        :meth:`retrieve`.  L2 objects found during lookup are pinned to
+        prevent eviction.
+
+        Args:
+            key: Cache key with request_id embedded.
+            tp_size: Tensor-parallel size for MLA multi-reader locking.
+
+        Returns:
+            Number of matched chunks (prefix hit count).
+        """
+        model_name, world_size = key.model_name, key.world_size
+        log_telemetry(make_start_event("sync_lookup", key.request_id))
+
+        layout_desc = self._find_layout_desc(model_name, world_size)
+        if layout_desc is None:
+            logger.error(
+                "No GPU context found for model %s with world size %d "
+                "during sync_lookup!",
+                model_name,
+                world_size,
+            )
+            return 0
+
+        extra_count = compute_extra_count(tp_size, world_size)
+
+        ipc_keys = key.to_hash_keys(self.token_hasher)
+        if not ipc_keys:
+            return 0
+
+        obj_keys = ipc_keys_to_object_keys(ipc_keys)
+
+        hit_count, remaining_keys, l2_lookup_results = (
+            self.storage_manager.synchronous_lookup_and_lock(
+                obj_keys, layout_desc, extra_count=extra_count,
+            )
+        )
+
+        # Save state for the RETRIEVE or FREE_LOOKUP_LOCKS that follows
+        with self._pending_lookups_lock:
+            self._pending_lookups[key.request_id] = _PendingLookupState(
+                remaining_keys=remaining_keys,
+                l2_lookup_results=l2_lookup_results,
+                layout_desc=layout_desc,
+                extra_count=extra_count,
+                world_size=ipc_keys[0].world_size,
+            )
+
+        found_count = hit_count // ipc_keys[0].world_size
+
+        log_telemetry(
+            make_end_event(
+                "sync_lookup",
+                key.request_id,
+                found_count=found_count,
+            )
+        )
+
+        return found_count
+
     def free_lookup_locks(
         self,
         key: IPCCacheEngineKey,
         tp_size: int,
     ) -> None:
         """Release read locks acquired during lookup.
+
+        Handles both the old two-phase LOOKUP path (L1 read locks only)
+        and the new SYNC_LOOKUP path (L1 read locks + L2 pins).
 
         Hashes are computed only for chunks in ``[start, end)`` to avoid
         unnecessary work on tokens outside that range.
@@ -652,6 +776,15 @@ class MPCacheEngine:
             tp_size: Tensor-parallel size for MLA
                 multi-reader locking.
         """
+        # Release any pending L2 pins from SYNC_LOOKUP
+        with self._pending_lookups_lock:
+            pending = self._pending_lookups.pop(key.request_id, None)
+        if pending is not None and pending.l2_lookup_results:
+            self.storage_manager.unlock_l2_lookups(
+                pending.remaining_keys, pending.l2_lookup_results,
+            )
+
+        # Release L1 read locks
         chunk_hashes = self.token_hasher.compute_chunk_hashes(
             list(key.token_ids), start=key.start, end=key.end
         )
@@ -805,6 +938,7 @@ def run_cache_server(
     )
     add_handler_helper(server, RequestType.STORE, engine.store)
     add_handler_helper(server, RequestType.LOOKUP, engine.lookup)
+    add_handler_helper(server, RequestType.SYNC_LOOKUP, engine.sync_lookup)
     add_handler_helper(
         server, RequestType.QUERY_PREFETCH_STATUS, engine.query_prefetch_status
     )
