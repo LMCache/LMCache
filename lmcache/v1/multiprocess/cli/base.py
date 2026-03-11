@@ -95,6 +95,7 @@ def send_request(
 
     url = "tcp://%s:%d" % (args.host, args.port)
     ctx = zmq.Context()
+    ctx.linger = 0
     client = MessageQueueClient(url, ctx)
 
     try:
@@ -109,4 +110,8 @@ def send_request(
         return future.result()
     finally:
         client.close()
-        ctx.term()
+        # NOTE: skip ctx.term() — MessageQueueClient.close()
+        # does not close internal inproc sockets
+        # (task_notifier / task_waiter), so ctx.term()
+        # blocks forever.  The CLI process exits right
+        # after, letting the OS reclaim all resources.
