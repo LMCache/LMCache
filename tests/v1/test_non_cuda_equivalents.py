@@ -141,15 +141,19 @@ def scenario_calculate_cdf(ops: Any, device: str) -> dict[str, torch.Tensor]:
         )
 
         raw_output = ops.calculate_cdf(input_tensor, num_bins)
-        out_cpu = raw_output.flatten().cpu()
 
-        if torch.is_floating_point(out_cpu):
-            # non-cuda equivalents return normalized floats; use directly
-            final_result = out_cpu.float()
-        else:
-            out_int32 = out_cpu.to(torch.int32)
-            out_uint16 = torch.where(out_int32 < 0, out_int32 + 65536, out_int32)
-            final_result = out_uint16.float() / 65536.0
+        # Both CUDA and non-CUDA return int16 with shape
+        # [nlayers, nchannels, num_bins + 1]
+        nlayers, _, nchannels = input_tensor.shape
+        assert raw_output.shape == (nlayers, nchannels, num_bins + 1), (
+            f"Expected shape ({nlayers}, {nchannels}, {num_bins + 1}), "
+            f"got {raw_output.shape}"
+        )
+
+        out_cpu = raw_output.flatten().cpu()
+        out_int32 = out_cpu.to(torch.int32)
+        out_uint16 = torch.where(out_int32 < 0, out_int32 + 65536, out_int32)
+        final_result = out_uint16.float() / 65536.0
 
         results[f"calculate_cdf_bins{num_bins}"] = final_result
 
@@ -1173,7 +1177,7 @@ def scenario_multi_layer_kv_transfer(ops: Any, device: str) -> dict[str, torch.T
 
             # ── 1. LMCache Tensor ──
             lmc_shape = (k_or_v_size, num_layers, num_tokens, head_size)
-            key_value = torch.zeros(lmc_shape, dtype=dtype, device=device)
+            key_value = torch.zeros(lmc_shape, dtype=dtype, device="cpu").pin_memory()
 
             if not direction:  # LMC → Paged
                 for kv in range(k_or_v_size):
@@ -1279,8 +1283,8 @@ def scenario_multi_layer_kv_transfer(ops: Any, device: str) -> dict[str, torch.T
                             paged_val = page_buffers[ly][kv, s_idx]
 
                         torch.testing.assert_close(
-                            lmc_val,
-                            paged_val,
+                            lmc_val.to("cpu"),
+                            paged_val.to("cpu"),
                             msg=(
                                 f"Mismatch: {fmt_name} {dir_tag} "
                                 f"(tensor_list={use_tensor_list}), "
@@ -1396,7 +1400,7 @@ def scenario_multi_layer_kv_transfer_unilateral(
 
             # ── 1. LMCache Tensor ──
             lmc_shape = (k_or_v_size, num_layers, num_tokens, head_size)
-            lmc_tensor = torch.zeros(lmc_shape, dtype=dtype, device=device)
+            lmc_tensor = torch.zeros(lmc_shape, dtype=dtype, device="cpu").pin_memory()
 
             if not direction:  # LMC → Paged
                 for kv in range(k_or_v_size):
@@ -1513,8 +1517,8 @@ def scenario_multi_layer_kv_transfer_unilateral(
                             paged_val = buffers[(kv, ly)][s_idx]
 
                         torch.testing.assert_close(
-                            lmc_val,
-                            paged_val,
+                            lmc_val.to("cpu"),
+                            paged_val.to("cpu"),
                             msg=(
                                 f"Mismatch: {gpu_kv_format} {dir_tag} "
                                 f"(tensor_list={use_tensor_list}), "
@@ -1733,26 +1737,6 @@ class TestScenarios:
     (test_1_scenario, test_2_compare), pytest will execute all scenario tests
     before any compare tests, ensuring _results dict is fully populated.
 
-    **Why this is necessary:**
-    - test_1_scenario: runs each scenario function with each backend and stores
-      results in the module-level _results dictionary
-    - test_2_compare: reads from _results to compare outputs across backends
-
-    Without explicit ordering, pytest might interleave test_1_scenario and
-    test_2_compare executions, causing test_2_compare to fail when it tries to
-    access results that haven't been stored yet.
-
-    **How pytest ordering works:**
-    Within a test class, pytest collects and executes test methods in the order
-    they appear in the class definition. By naming them test_1_* and test_2_*,
-    we ensure that all test_1_scenario parametrized tests complete before any
-    test_2_compare tests begin.
-
-    **Alternative solutions considered:**
-    - pytest-ordering plugin: requires external dependency
-    - pytest-dependency plugin: requires external dependency
-    - Single test function: would lose per-scenario test granularity
-    - Fixtures: cannot easily guarantee ordering across parametrized tests
     """
 
     @pytest.mark.parametrize("name,fn", list(SCENARIO_REGISTRY.items()))

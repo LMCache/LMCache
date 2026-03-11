@@ -4,15 +4,17 @@
 # CUDA-specific operations.
 #
 # Standard
+from concurrent.futures import ThreadPoolExecutor
 from enum import Enum, IntEnum
 from multiprocessing import shared_memory
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Optional, Tuple
 import ctypes
 import ctypes.util
 import subprocess
 
 # Third Party
+from numba import njit
 import numpy as np
 import torch
 
@@ -28,16 +30,26 @@ _copy_lib: Optional[ctypes.CDLL] = _copy_lib_NOT_LOADED  # type: ignore
 
 
 def _get_copy_lib() -> Optional[ctypes.CDLL]:
-    """Lazily load and cache the CUDA runtime library, or None for CPU fallback."""
+    """Lazily load and cache the CUDA/ROCm runtime library, or None for CPU fallback."""
     global _copy_lib
     if _copy_lib is _copy_lib_NOT_LOADED:
-        try:
-            libcudart_path = ctypes.util.find_library("cudart")
-            if libcudart_path:
-                _copy_lib = ctypes.CDLL(libcudart_path)
-            else:
-                _copy_lib = ctypes.CDLL("libcudart.so")
-        except OSError:
+        # Try to load GPU runtime libraries in priority order: CUDA first, then ROCm
+        # TODO: ROCm path to be validated on real device
+        for name, fallback in [
+            ("cudart", "libcudart.so"),  # NVIDIA CUDA Runtime
+            ("amdhip64", "libamdhip64.so"),  # AMD ROCm HIP Runtime
+        ]:
+            try:
+                path = ctypes.util.find_library(name)
+                if path:
+                    _copy_lib = ctypes.CDLL(path)
+                else:
+                    _copy_lib = ctypes.CDLL(fallback)
+                break  # Successfully loaded, stop trying
+            except OSError:
+                continue  # Current library not available, try next
+        else:
+            # All GPU libraries failed to load, fall back to CPU
             _copy_lib = None
     return _copy_lib
 
@@ -139,8 +151,6 @@ def _tensor_from_cpu_ptr(
 # ====================================================================== #
 #  CUDA implementation                                                   #
 # ====================================================================== #
-
-
 def _tensor_from_cuda_ptr(
     ptr: int,
     shape: tuple[int, ...],
@@ -149,90 +159,58 @@ def _tensor_from_cuda_ptr(
     numel: int,
     total_bytes: int,
 ) -> torch.Tensor:
-    """
-    Zero-copy CUDA tensor from a raw device pointer.
+    """Zero-copy CUDA tensor from a raw device pointer."""
 
-    Tries three strategies in order of preference:
-      1. torch._C._construct_storage_from_data_pointer  (PyTorch >= 2.0)
-      2. __cuda_array_interface__ protocol               (any modern PyTorch)
-      3. cudaMemcpy D2D fallback                         (always correct, copies)
-    """
-    # ------------------------------------------------------------------ #
-    # Strategy 1: torch._C._construct_storage_from_data_pointer          #
-    # Used internally by PyTorch's cudagraph_trees. Zero-copy.           #
-    # ------------------------------------------------------------------ #
     try:
-        storage = torch._C._construct_storage_from_data_pointer(
-            ptr, device, total_bytes
-        )
-        t = torch.empty(0, dtype=dtype, device=device)
-        t.set_(storage, storage_offset=0, size=(numel,), stride=(1,))
-        return t.view(*shape)
-    except (AttributeError, RuntimeError, TypeError):
-        pass
-
-    # ------------------------------------------------------------------ #
-    # Strategy 2: __cuda_array_interface__                               #
-    # Standard CUDA array interchange protocol. Zero-copy.               #
-    # bfloat16 is not a valid numpy dtype, so we smuggle it as int16 and #
-    # view back.                                                         #
-    # ------------------------------------------------------------------ #
-    try:
-        # Third Party
-
-        _DTYPE_TO_NUMPY: dict[torch.dtype, str] = {
-            torch.float16: "float16",
-            torch.float32: "float32",
-            torch.float64: "float64",
-            torch.int8: "int8",
-            torch.int16: "int16",
-            torch.int32: "int32",
-            torch.int64: "int64",
-            torch.uint8: "uint8",
-            torch.bool: "bool",
+        _DTYPE_TO_TYPESTR = {
+            torch.float16: "<f2",
+            torch.float32: "<f4",
+            torch.float64: "<f8",
+            torch.int8: "|i1",
+            torch.int16: "<i2",
+            torch.int32: "<i4",
+            torch.int64: "<i8",
+            torch.uint8: "|u1",
+            torch.bool: "|b1",
         }
         is_bf16 = dtype == torch.bfloat16
 
+        # Determine the correct typestr, smuggle bfloat16 as int16
+        typestr = "<i2" if is_bf16 else _DTYPE_TO_TYPESTR.get(dtype, "|u1")
+
         class _CudaArrayWrapper:
-            """Minimal __cuda_array_interface__ carrier."""
+            def __init__(self, ptr_int: int, shape_tuple: tuple, type_str: str):
+                self.__cuda_array_interface__ = {
+                    "data": (ptr_int, False),
+                    "shape": shape_tuple,
+                    "typestr": type_str,
+                    "version": 3,
+                }
 
-            __cuda_array_interface__: Dict[str, Any] = {}
-
-        t = torch.as_tensor(_CudaArrayWrapper(), device=device)
+        t = torch.as_tensor(_CudaArrayWrapper(ptr, (numel,), typestr), device=device)
         if is_bf16:
             t = t.view(torch.bfloat16)
+
         return t.view(*shape)
     except Exception:
         pass
 
-    # ------------------------------------------------------------------ #
-    # Strategy 3: cudaMemcpy Device-to-Device (fallback, copies data)    #
-    # Used when neither internal API nor the array interface is available. #
-    # ------------------------------------------------------------------ #
-
-    # load libcudart with fallback mechanisms
+    # Strategy 2: cudaMemcpy Device-to-Device (Fallback)
     libcudart = _get_copy_lib()
-
     if libcudart is None:
-        raise RuntimeError(
-            "Failed to load libcudart. All three strategies for "
-            "wrapping a CUDA pointer failed."
-        )
+        raise RuntimeError("Failed to load libcudart/libamdhip")
 
     cudaMemcpy = libcudart.cudaMemcpy
     cudaMemcpy.restype = ctypes.c_int
     cudaMemcpy.argtypes = [
-        ctypes.c_void_p,  # dst
-        ctypes.c_void_p,  # src
-        ctypes.c_size_t,  # count
-        ctypes.c_int,  # kind
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_size_t,
+        ctypes.c_int,
     ]
     _MEMCPY_D2D = 3
 
     dst = torch.empty(numel, dtype=dtype, device=device)
-
-    # Synchronize the stream to prevent race conditions during raw memcpy
-    torch.cuda.synchronize(device)
 
     err = cudaMemcpy(
         ctypes.c_void_p(dst.data_ptr()),
@@ -241,10 +219,8 @@ def _tensor_from_cuda_ptr(
         ctypes.c_int(_MEMCPY_D2D),
     )
     if err != 0:
-        raise RuntimeError(
-            f"cudaMemcpy D2D failed with error code {err}. "
-            "All three strategies for wrapping a CUDA pointer failed."
-        )
+        raise RuntimeError(f"cudaMemcpy D2D failed with error code {err}.")
+
     return dst.view(*shape)
 
 
@@ -408,128 +384,105 @@ def multi_layer_kv_transfer(
     block_size: int,
 ):
     """
-    Python fallback for multi_layer_kv_transfer.
-
-    key_value layout:
-        - Standard: [2, num_layers, num_tokens, hidden_size]
-        - MLA:      [1, num_layers, num_tokens, hidden_size]
-
-    key_value_ptrs:
-        - If torch.Tensor: int64 tensor containing raw memory pointers (one per layer).
-          Used for CUDA/CPU devices where we create tensor views from pointers.
-        - If list[torch.Tensor]: list of tensor objects (one per layer).
-          Used for non-CUDA/CPU devices where we operate on tensor objects directly.
-
-    Each paged buffer (one per layer) layout depends on gpu_kv_format:
-        - NB_NL_TWO_BS_NH_HS / NL_X_TWO_NB_BS_NH_HS:
-              [2, page_buffer_size, hidden_size]
-        - NL_X_NB_TWO_BS_NH_HS (flash infer):
-              [num_blocks, 2, block_size, hidden_size]
-        - NL_X_NB_BS_HS / NL_X_NBBS_ONE_HS (MLA):
-              [page_buffer_size, hidden_size]
-
-    direction:
-        H2D  = LMCache  -> PagedBuffer
-        D2H  = PagedBuffer -> LMCache
+    Fully vectorized Python fallback for multi_layer_kv_transfer.
+    Eliminates ALL token- and KV-level Python loops.
     """
+    if not isinstance(key_value_ptrs, (torch.Tensor, list)):
+        raise TypeError(
+            f"Expected torch.Tensor or list, but got {type(key_value_ptrs).__name__}"
+        )
+
+    # 1. Filter out invalid slots.
+    #    valid_mask_kv:  on key_value.device, used to index key_value
+    #    valid_slots:    on paged_memory_device, used to index paged_tensor
+    kv_device = key_value.device
+    slots_kv = slot_mapping.to(dtype=torch.long).to(kv_device)
+    valid_mask_kv = slots_kv >= 0
+    if not valid_mask_kv.any():
+        return
+
+    valid_slots = slots_kv[valid_mask_kv].to(paged_memory_device)
+
+    # 2. Determine architecture variant and tensor dimensions.
     is_mla = gpu_kv_format in (
         GPUKVFormat.NL_X_NB_BS_HS,
         GPUKVFormat.NL_X_NBBS_ONE_HS,
     )
+    is_flash_infer = gpu_kv_format == GPUKVFormat.NL_X_NB_TWO_BS_NH_HS
 
     num_layers = key_value.size(1)
     hidden_size = key_value.size(3)
-    k_or_v_size = 1 if is_mla else 2
-    device = key_value.device
 
-    slots = slot_mapping.to(dtype=torch.long)
-    valid_mask = slots >= 0
-    if not torch.any(valid_mask):
-        return
-    valid_tokens = torch.nonzero(valid_mask, as_tuple=True)[0]
-    valid_slots = slots[valid_tokens]
+    # For the flash_infer interleaved layout, pre-compute block-level indices.
+    if is_flash_infer:
+        block_indices = valid_slots // block_size
+        block_offsets = valid_slots % block_size
 
-    # Handle both tensor (pointer) mode and list (tensor) mode
-    use_tensor_mode = isinstance(key_value_ptrs, list)
-    if not use_tensor_mode:
-        assert isinstance(key_value_ptrs, torch.Tensor)
-        ptr_list = key_value_ptrs.tolist()
+    # Determine the physical shape of the underlying paged tensor
+    # (used when wrapping a raw pointer).
+    layer_shape: Tuple[int, ...]
 
+    if is_mla:
+        layer_shape = (page_buffer_size, hidden_size)
+    elif is_flash_infer:
+        num_blocks = page_buffer_size // block_size
+        layer_shape = (num_blocks, 2, block_size, hidden_size)
+    else:
+        layer_shape = (2, page_buffer_size, hidden_size)
+
+    # 3. Iterate over layers — the only remaining Python-level loop.
     for layer_id in range(num_layers):
-        # Get the paged buffer for this layer
-        if use_tensor_mode:
-            # Direct tensor mode: use the tensor object directly
-            paged = key_value_ptrs[layer_id]
+        # --- A. Obtain the physical device-memory view for this layer. ---
+        if isinstance(key_value_ptrs, list):
+            paged_tensor = key_value_ptrs[layer_id]
         else:
-            # Pointer mode: create tensor view from pointer
-            paged_ptr = int(ptr_list[layer_id])
+            ptr = int(key_value_ptrs[layer_id].item())
+            # Convert a raw device pointer into a PyTorch tensor view.
+            paged_tensor = _tensor_from_ptr(
+                ptr, layer_shape, key_value.dtype, paged_memory_device
+            )
 
-            if gpu_kv_format in (
-                GPUKVFormat.NB_NL_TWO_BS_NH_HS,
-                GPUKVFormat.NL_X_TWO_NB_BS_NH_HS,
-                GPUKVFormat.TWO_X_NL_X_NBBS_NH_HS,
-            ):
-                paged = _tensor_from_ptr(
-                    paged_ptr,
-                    (k_or_v_size, page_buffer_size, hidden_size),
-                    key_value.dtype,
-                    device,
-                )
-            elif gpu_kv_format == GPUKVFormat.NL_X_NB_TWO_BS_NH_HS:
-                num_blocks = max(
-                    int(torch.max(valid_slots).item() // block_size + 1), 1
-                )
-                paged = _tensor_from_ptr(
-                    paged_ptr,
-                    (num_blocks, 2, block_size, hidden_size),
-                    key_value.dtype,
-                    device,
-                )
-            elif gpu_kv_format in (
-                GPUKVFormat.NL_X_NB_BS_HS,
-                GPUKVFormat.NL_X_NBBS_ONE_HS,
-            ):
-                paged = _tensor_from_ptr(
-                    paged_ptr, (page_buffer_size, hidden_size), key_value.dtype, device
-                )
-            else:
-                raise ValueError(f"Unsupported GPUKVFormat: {gpu_kv_format}")
-
-        # Perform the transfer based on format
-        if gpu_kv_format in (
-            GPUKVFormat.NB_NL_TWO_BS_NH_HS,
-            GPUKVFormat.NL_X_TWO_NB_BS_NH_HS,
-            GPUKVFormat.TWO_X_NL_X_NBBS_NH_HS,
-        ):
-            src = key_value[:, layer_id, valid_tokens]
+        # --- B. Vectorized bulk data transfer. ---
+        if is_mla:
+            # Paged layout : [page_buffer_size, hidden_size]
+            # key_value layout: [1, num_layers, num_tokens, hidden_size]
             if direction == TransferDirection.H2D:
-                paged.index_copy_(1, valid_slots, src)
+                lmc_valid = key_value[0, layer_id, valid_mask_kv, :]
+                paged_tensor.index_copy_(
+                    0, valid_slots, lmc_valid.to(paged_tensor.device)
+                )
             else:
-                gathered = paged.index_select(1, valid_slots)
-                key_value[:, layer_id, valid_tokens] = gathered
-
-        elif gpu_kv_format == GPUKVFormat.NL_X_NB_TWO_BS_NH_HS:
-            blk_idx = torch.div(valid_slots, block_size, rounding_mode="floor")
-            blk_off = valid_slots % block_size
-
+                gathered = paged_tensor.index_select(0, valid_slots)
+                key_value[0, layer_id, valid_mask_kv, :] = gathered.to(
+                    kv_device, non_blocking=False
+                )
+        elif is_flash_infer:
+            # Paged layout : [num_blocks, 2, block_size, hidden_size]
+            # key_value layout: [2, num_layers, num_tokens, hidden_size]
             if direction == TransferDirection.H2D:
-                src = key_value[:, layer_id, valid_tokens].permute(1, 0, 2)
-                paged[blk_idx, :, blk_off] = src
+                lmc_valid = key_value[:, layer_id, valid_mask_kv, :]
+                src_data = lmc_valid.transpose(0, 1).to(paged_memory_device)
+                # src_data: [num_valid, 2, hidden_size]
+                paged_tensor[block_indices, :, block_offsets, :] = src_data
             else:
-                fetched = paged[blk_idx, :, blk_off].permute(1, 0, 2)
-                key_value[:, layer_id, valid_tokens] = fetched
-
-        elif gpu_kv_format in (
-            GPUKVFormat.NL_X_NB_BS_HS,
-            GPUKVFormat.NL_X_NBBS_ONE_HS,
-        ):
-            if direction == TransferDirection.H2D:
-                paged[valid_slots] = key_value[0, layer_id, valid_tokens]
-            else:
-                key_value[0, layer_id, valid_tokens] = paged[valid_slots]
-
+                gathered = paged_tensor[block_indices, :, block_offsets, :]
+                # gathered: [num_valid, 2, hidden_size]
+                key_value[:, layer_id, valid_mask_kv, :] = gathered.to(
+                    kv_device, non_blocking=False
+                ).transpose(0, 1)
         else:
-            raise ValueError(f"Unsupported GPUKVFormat: {gpu_kv_format}")
+            # Paged layout : [2, page_buffer_size, hidden_size]
+            # key_value layout: [2, num_layers, num_tokens, hidden_size]
+            if direction == TransferDirection.H2D:
+                lmc_valid = key_value[:, layer_id, valid_mask_kv, :]
+                paged_tensor.index_copy_(
+                    1, valid_slots, lmc_valid.to(paged_memory_device)
+                )
+            else:
+                gathered = paged_tensor.index_select(1, valid_slots)
+                key_value[:, layer_id, valid_mask_kv, :] = gathered.to(
+                    kv_device, non_blocking=False
+                )
 
 
 def multi_layer_kv_transfer_unilateral(
@@ -562,8 +515,6 @@ def multi_layer_kv_transfer_unilateral(
         H2D = LMCache  -> PagedBuffer
         D2H = PagedBuffer -> LMCache
     """
-    device = key_value.device
-
     is_mla = gpu_kv_format in (
         GPUKVFormat.NL_X_NB_BS_HS,
         GPUKVFormat.NL_X_NBBS_ONE_HS,
@@ -586,44 +537,35 @@ def multi_layer_kv_transfer_unilateral(
     # ── Non-MLA path: unilateral (separate K/V buffers per layer) ──
     num_layers = key_value.size(1)
     hidden_size = key_value.size(3)
+    layer_shape = (page_buffer_size, hidden_size)
 
-    slots = slot_mapping.to(dtype=torch.long)
-    valid_mask = slots >= 0
-    if not torch.any(valid_mask):
+    kv_device = key_value.device
+    slots_kv = slot_mapping.to(dtype=torch.long).to(kv_device)
+    valid_mask_kv = slots_kv >= 0
+    if not valid_mask_kv.any():
         return
-    valid_tokens = torch.nonzero(valid_mask, as_tuple=True)[0]
-    valid_slots = slots[valid_tokens]
 
-    # Handle both tensor (pointer) mode and list (tensor) mode
-    use_tensor_mode = isinstance(key_value_ptrs, list)
-    if not use_tensor_mode:
-        assert isinstance(key_value_ptrs, torch.Tensor)
-        ptr_list = key_value_ptrs.tolist()
+    valid_slots = slots_kv[valid_mask_kv].to(paged_memory_device)
 
     for layer_id in range(num_layers):
-        # Get K and V buffers for this layer
-        if use_tensor_mode:
-            # Direct tensor mode: use the tensor objects directly
-            k_buf = key_value_ptrs[layer_id]
-            v_buf = key_value_ptrs[layer_id + num_layers]
-        else:
-            # Pointer mode: create tensor views from pointers
-            k_ptr = int(ptr_list[layer_id])
-            v_ptr = int(ptr_list[layer_id + num_layers])
+        for kv_idx in range(2):  # 0 = K, 1 = V
+            buffer_idx = layer_id + kv_idx * num_layers
+            if isinstance(key_value_ptrs, list):
+                paged_tensor = key_value_ptrs[buffer_idx]
+            else:
+                ptr = int(key_value_ptrs[buffer_idx].item())
+                paged_tensor = _tensor_from_ptr(
+                    ptr, layer_shape, key_value.dtype, paged_memory_device
+                )
 
-            k_buf = _tensor_from_ptr(
-                k_ptr, (page_buffer_size, hidden_size), key_value.dtype, device
-            )
-            v_buf = _tensor_from_ptr(
-                v_ptr, (page_buffer_size, hidden_size), key_value.dtype, device
-            )
-
-        if direction == TransferDirection.H2D:
-            k_buf[valid_slots] = key_value[0, layer_id, valid_tokens]
-            v_buf[valid_slots] = key_value[1, layer_id, valid_tokens]
-        else:
-            key_value[0, layer_id, valid_tokens] = k_buf[valid_slots]
-            key_value[1, layer_id, valid_tokens] = v_buf[valid_slots]
+            if direction == TransferDirection.H2D:
+                lmc_valid = key_value[kv_idx, layer_id, valid_mask_kv, :]
+                paged_tensor.index_copy_(
+                    0, valid_slots, lmc_valid.to(paged_memory_device)
+                )
+            else:
+                gathered = paged_tensor.index_select(0, valid_slots)
+                key_value[kv_idx, layer_id, valid_mask_kv, :] = gathered.to(kv_device)
 
 
 def single_layer_kv_transfer(
@@ -635,7 +577,8 @@ def single_layer_kv_transfer(
     token_major: bool,
 ):
     """
-    Python fallback for single_layer_kv_transfer
+    Vectorized Python fallback for single_layer_kv_transfer
+    (eliminates per-token loops).
 
     Transfers KV data between LMCache buffer
     and a single vLLM paged KV cache layer.
@@ -657,38 +600,40 @@ def single_layer_kv_transfer(
         H2D = LMCache  -> vLLM GPU
         D2H = vLLM GPU -> LMCache
     """
+    kv_device = lmc_key_value_cache.device
+    paged_memory_device = vllm_key_value_cache.device
+    slots_kv = slot_mapping.to(dtype=torch.long).to(kv_device)
+    valid_mask_kv = slots_kv >= 0
+
+    if not valid_mask_kv.any():
+        return
+
+    valid_token_indices = torch.nonzero(valid_mask_kv, as_tuple=True)[0]
+    valid_slots = slots_kv[valid_mask_kv].to(paged_memory_device)
+
     is_mla = gpu_kv_format in (
         GPUKVFormat.NL_X_NB_BS_HS,
         GPUKVFormat.NL_X_NBBS_ONE_HS,
     )
-
-    num_tokens = slot_mapping.size(0)
-    slots = slot_mapping.tolist()
 
     if is_mla:
         # ── MLA format ──
         # vllm: [num_blocks, block_size, head_size]
         # lmc:  [num_tokens, aligned_head_size]
         block_size = vllm_key_value_cache.size(1)
+        block_indices = valid_slots // block_size
+        block_offsets = valid_slots % block_size
 
-        for token_idx in range(num_tokens):
-            slot_idx = slots[token_idx]
-            if slot_idx < 0:
-                continue
-
-            block_idx = slot_idx // block_size
-            block_offset = slot_idx % block_size
-
-            if direction == TransferDirection.D2H:
-                # vLLM -> LMCache
-                lmc_key_value_cache[token_idx] = vllm_key_value_cache[
-                    block_idx, block_offset
-                ]
-            else:
-                # LMCache -> vLLM
-                vllm_key_value_cache[block_idx, block_offset] = lmc_key_value_cache[
-                    token_idx
-                ]
+        if direction == TransferDirection.D2H:
+            # vLLM -> LMCache
+            lmc_key_value_cache[valid_token_indices] = vllm_key_value_cache[
+                block_indices, block_offsets
+            ].to(lmc_key_value_cache.device)
+        else:
+            # LMCache -> vLLM
+            vllm_key_value_cache[block_indices, block_offsets] = lmc_key_value_cache[
+                valid_token_indices
+            ].to(paged_memory_device)
 
     else:
         # ── Non-MLA format ──
@@ -703,45 +648,40 @@ def single_layer_kv_transfer(
         block_size = vllm_key_value_cache.size(2)
         num_heads = vllm_key_value_cache.size(3)
         head_size = vllm_key_value_cache.size(4)
+        block_indices = valid_slots // block_size
+        block_offsets = valid_slots % block_size
 
-        for token_idx in range(num_tokens):
-            slot_idx = slots[token_idx]
-            if slot_idx < 0:
-                continue
-
-            block_idx = slot_idx // block_size
-            block_offset = slot_idx % block_size
-
-            for kv in range(2):  # 0=Key, 1=Value
-                # ── Read vLLM side: [num_heads, head_size] ──
+        for kv in range(2):
+            if direction == TransferDirection.D2H:
                 if is_two_major:
-                    # [2, num_blocks, block_size, num_heads, head_size]
-                    vllm_slice = vllm_key_value_cache[
-                        kv, block_idx, block_offset
-                    ]  # [num_heads, head_size]
+                    gathered = vllm_key_value_cache[kv, block_indices, block_offsets]
                 else:
-                    # [num_blocks, 2, block_size, num_heads, head_size]
-                    vllm_slice = vllm_key_value_cache[
-                        block_idx, kv, block_offset
-                    ]  # [num_heads, head_size]
+                    gathered = vllm_key_value_cache[block_indices, kv, block_offsets]
 
-                vllm_flat = vllm_slice.reshape(-1)  # [num_heads * head_size]
-
-                # ── Read/write LMC side ──
+                gathered_flat = gathered.reshape(-1, num_heads * head_size).to(
+                    lmc_key_value_cache.device
+                )
                 if token_major:
-                    # [num_tokens, 2, num_heads * head_size]
-                    lmc_flat = lmc_key_value_cache[token_idx, kv]
+                    lmc_key_value_cache[valid_token_indices, kv] = gathered_flat
                 else:
-                    # [2, num_tokens, num_heads * head_size]
-                    lmc_flat = lmc_key_value_cache[kv, token_idx]
+                    lmc_key_value_cache[kv, valid_token_indices] = gathered_flat
+            else:
+                if token_major:
+                    lmc_src = lmc_key_value_cache[valid_token_indices, kv]
+                else:
+                    lmc_src = lmc_key_value_cache[kv, valid_token_indices]
+                lmc_reshaped = lmc_src.reshape(-1, num_heads, head_size).to(
+                    vllm_key_value_cache.device
+                )
 
-                # ── Transfer ──
-                if direction == TransferDirection.D2H:
-                    # vLLM -> LMCache
-                    lmc_flat.copy_(vllm_flat)
+                if is_two_major:
+                    vllm_key_value_cache[kv, block_indices, block_offsets] = (
+                        lmc_reshaped
+                    )
                 else:
-                    # LMCache -> vLLM
-                    vllm_slice.copy_(lmc_flat.reshape(num_heads, head_size))
+                    vllm_key_value_cache[block_indices, kv, block_offsets] = (
+                        lmc_reshaped
+                    )
 
 
 def single_layer_kv_transfer_sgl(
@@ -765,6 +705,12 @@ def single_layer_kv_transfer_sgl(
         direction: False for LMCache -> SGLang, True for SGLang -> LMCache
         token_major: Boolean to determine the layout of lmc_key_value_cache
     """
+    kv_device = lmc_key_value_cache.device
+    paged_memory_device = sgl_key_cache.device
+    slots_kv = slot_mapping.to(dtype=torch.long).to(kv_device)
+    valid_mask_kv = slots_kv >= 0
+    if not valid_mask_kv.any():
+        return
 
     # 1. Get basic dimensions
     block_size = sgl_key_cache.size(1)
@@ -773,8 +719,7 @@ def single_layer_kv_transfer_sgl(
 
     # 2. Calculate block indices and offsets within the blocks from slot_mapping
     # In SGLang/vLLM, slot_idx = block_idx * block_size + block_offset
-    valid_mask = slot_mapping >= 0
-    valid_slots = slot_mapping[valid_mask]
+    valid_slots = slots_kv[valid_mask_kv].to(paged_memory_device)
     block_indices = valid_slots // block_size
     block_offsets = valid_slots % block_size
 
@@ -792,8 +737,16 @@ def single_layer_kv_transfer_sgl(
     if direction == TransferDirection.H2D:
         # --- Direction: LMCache to SGLang (Paged Buffer) ---
         # Reshape LMC flat tensors to match SGL [num_heads, head_size]
-        src_k_reshaped = lmc_k[valid_mask].view(-1, num_heads, head_size)
-        src_v_reshaped = lmc_v[valid_mask].view(-1, num_heads, head_size)
+        src_k_reshaped = (
+            lmc_k[valid_mask_kv]
+            .reshape(-1, num_heads, head_size)
+            .to(paged_memory_device)
+        )
+        src_v_reshaped = (
+            lmc_v[valid_mask_kv]
+            .reshape(-1, num_heads, head_size)
+            .to(paged_memory_device)
+        )
 
         # Advanced indexing: update specific slots in the paged cache
         sgl_key_cache[block_indices, block_offsets] = src_k_reshaped
@@ -802,12 +755,12 @@ def single_layer_kv_transfer_sgl(
     else:
         # --- Direction: SGLang (Paged Buffer) to LMCache ---
         # Gather tensors from paged cache based on mapping
-        sampled_k = sgl_key_cache[block_indices, block_offsets]
-        sampled_v = sgl_value_cache[block_indices, block_offsets]
+        sampled_k = sgl_key_cache[block_indices, block_offsets].to(kv_device)
+        sampled_v = sgl_value_cache[block_indices, block_offsets].to(kv_device)
 
         # Flatten the head dimensions and copy into LMC tensors
-        lmc_k[valid_mask] = sampled_k.reshape(-1, num_heads * head_size)
-        lmc_v[valid_mask] = sampled_v.reshape(-1, num_heads * head_size)
+        lmc_k[valid_mask_kv] = sampled_k.reshape(-1, num_heads * head_size)
+        lmc_v[valid_mask_kv] = sampled_v.reshape(-1, num_heads * head_size)
 
 
 def load_and_reshape_flash(
@@ -955,14 +908,24 @@ def lmcache_memcpy_async(
     if direction not in (TransferDirection.H2D, TransferDirection.D2H):
         raise ValueError(f"Unsupported direction: {direction}")
 
-    # 3. Tensor mode for non-CUDA devices (HPU, XPU, etc.)
-    if isinstance(dest, torch.Tensor) and isinstance(src, torch.Tensor):
-        # .to(device) creates a new tensor on dest's device — always works
-        # even across device boundaries without raw-pointer constraints.
-        num_elements = nbytes // src.element_size()
+    # 3. Tensor-backed mode.
+    # Mixed pointer/tensor are not allowed
+    if isinstance(dest, torch.Tensor) or isinstance(src, torch.Tensor):
+        if not (isinstance(dest, torch.Tensor) and isinstance(src, torch.Tensor)):
+            raise TypeError(
+                "Mixed types are not allowed: both dest and src must be torch.Tensor "
+                "if either of them is a tensor."
+            )
+        if nbytes % dest.element_size() != 0:
+            raise ValueError("nbytes must align with tensor element size")
+
+        num_elements = nbytes // dest.element_size()
+
+        dest_slice = dest.flatten()[:num_elements]
         src_slice = src.flatten()[:num_elements]
-        copied = src_slice.to(dest.device)
-        dest.flatten()[:num_elements].copy_(copied)
+
+        copied = src_slice.to(dest_slice.device)
+        dest_slice.copy_(copied)
         return
 
     # 4. Pointer mode
@@ -974,107 +937,139 @@ def lmcache_memcpy_async(
 
     libcudart = _get_copy_lib()
     if libcudart is not None and hasattr(libcudart, "cudaMemcpy"):
-        # Synchronous cudaMemcpy handles cross-cudaHostRegister boundaries
-        # internally — no manual alignment splitting needed.
-        ret = libcudart.cudaMemcpy(
-            ctypes.c_void_p(dest),
-            ctypes.c_void_p(src),
-            ctypes.c_size_t(nbytes),
-            ctypes.c_int(4),  # cudaMemcpyDefault
-        )
-        if ret != 0:
-            raise RuntimeError(f"cudaMemcpy failed with error code {ret}")
+        try:
+            # Synchronous cudaMemcpy handles cross-cudaHostRegister boundaries
+            # internally — no manual alignment splitting needed.
+            ret = libcudart.cudaMemcpy(
+                ctypes.c_void_p(dest),
+                ctypes.c_void_p(src),
+                ctypes.c_size_t(nbytes),
+                ctypes.c_int(4),  # cudaMemcpyDefault
+            )
+            if ret != 0:
+                raise RuntimeError(f"cudaMemcpy failed with error code {ret}")
+        except AttributeError:
+            raise
     else:
         # Pure CPU copy — no alignment constraints.
         _copy_bytes_with_tensor(dest, src, nbytes)
 
 
+@njit(cache=True)
+def _encode_single_channel(
+    cdf_layer_c,  # np.uint32 [lp]
+    sym_channel,  # np.uint8 [n_tokens]
+    out_buf_lc,  # np.uint8 [buffer_size]
+):
+    """Core arithmetic encoding for a single (layer, channel).
+    Returns number of bytes written."""
+    MASK32 = 0xFFFFFFFF
+    precision = 16
+    max_symbol = len(cdf_layer_c) - 2
+    n_tokens = len(sym_channel)
+
+    low, high = 0, MASK32
+    pending_bits = 0
+    output_reg, output_reg_len = 0, 0
+    ptr = 0
+    buf_size = len(out_buf_lc)
+
+    # Inline flush_bit to avoid closure (numba does not support nonlocal)
+    for token_idx in range(n_tokens):
+        sym = int(sym_channel[token_idx])
+        c_low = int(cdf_layer_c[sym])
+        c_high = 0x10000 if sym == max_symbol else int(cdf_layer_c[sym + 1])
+
+        span = (high - low + 1) & MASK32
+        if span == 0:
+            span = 0x100000000
+
+        high = (low + ((span * c_high) >> precision) - 1) & MASK32
+        low = (low + ((span * c_low) >> precision)) & MASK32
+
+        while True:
+            if (high & 0x80000000) == (low & 0x80000000):
+                # flush_bit(bit)
+                bit = (high >> 31) & 1
+                output_reg = (output_reg << 1) | bit
+                output_reg_len += 1
+                if output_reg_len == 8:
+                    if ptr < buf_size:
+                        out_buf_lc[ptr] = output_reg & 0xFF
+                        ptr += 1
+                    output_reg, output_reg_len = 0, 0
+                # flush pending bits
+                for _ in range(pending_bits):
+                    output_reg = (output_reg << 1) | (1 - bit)
+                    output_reg_len += 1
+                    if output_reg_len == 8:
+                        if ptr < buf_size:
+                            out_buf_lc[ptr] = output_reg & 0xFF
+                            ptr += 1
+                        output_reg, output_reg_len = 0, 0
+                pending_bits = 0
+                low = (low << 1) & MASK32
+                high = ((high << 1) | 1) & MASK32
+            elif (low & 0x40000000) != 0 and (high & 0x40000000) == 0:
+                pending_bits += 1
+                low = (low << 1) & 0x7FFFFFFF
+                high = ((high << 1) | 0x80000001) & MASK32
+            else:
+                break
+
+    # Final flushing sequence
+    pending_bits += 1
+    bit = 1 if (low & 0x40000000) != 0 else 0
+    output_reg = (output_reg << 1) | bit
+    output_reg_len += 1
+    if output_reg_len == 8:
+        if ptr < buf_size:
+            out_buf_lc[ptr] = output_reg & 0xFF
+            ptr += 1
+        output_reg, output_reg_len = 0, 0
+    for _ in range(pending_bits):
+        output_reg = (output_reg << 1) | (1 - bit)
+        output_reg_len += 1
+        if output_reg_len == 8:
+            if ptr < buf_size:
+                out_buf_lc[ptr] = output_reg & 0xFF
+                ptr += 1
+            output_reg, output_reg_len = 0, 0
+    pending_bits = 0  # noqa: F841
+
+    if output_reg_len > 0:
+        if ptr < buf_size:
+            out_buf_lc[ptr] = (output_reg << (8 - output_reg_len)) & 0xFF
+            ptr += 1
+
+    return ptr
+
+
 def encode_fast_new(cdf, input_sym, output_buffer, output_lengths):
     """
     Python equivalent of C++ Arithmetic Encoder.
-    FIXED:
-    1. Renamed 'l' to 'layer_idx' to fix Ruff E741.
-    2. Used default arguments in flush_bit to fix Ruff B023 (Late Binding).
-    3. Strictly emulates 32-bit unsigned overflow for high/low.
+    Strictly emulates 32-bit unsigned overflow for high/low.
     """
-    # 💡 View as uint16 to treat bit-patterns correctly
     cdf_np = cdf.cpu().numpy().view(np.uint16).astype(np.uint32)
     sym_np = input_sym.cpu().numpy().astype(np.uint8)
 
     n_layers, n_tokens, n_channels = sym_np.shape
-    lp = cdf_np.shape[2]
-    max_symbol = lp - 2
-    precision = 16
-    MASK32 = 0xFFFFFFFF
-
     out_buf_np = np.zeros(output_buffer.shape, dtype=np.uint8)
     out_len_np = np.zeros(output_lengths.shape, dtype=np.int32)
 
-    for layer_idx in range(n_layers):
-        for channel_idx in range(n_channels):
-            low, high = 0, MASK32
-            pending_bits = 0
-            output_reg, output_reg_len = 0, 0
-            ptr = 0
+    def encode_one(args):
+        layer_idx, c = args
+        length = _encode_single_channel(
+            cdf_np[layer_idx, c],
+            sym_np[layer_idx, :, c],
+            out_buf_np[layer_idx, c],
+        )
+        out_len_np[layer_idx, c] = length
 
-            def flush_bit(bit, l_idx=layer_idx, c_idx=channel_idx):
-                nonlocal output_reg, output_reg_len, ptr
-                output_reg = (output_reg << 1) | (int(bit) & 1)
-                output_reg_len += 1
-                if output_reg_len == 8:
-                    if ptr < out_buf_np.shape[2]:
-                        out_buf_np[l_idx, c_idx, ptr] = output_reg & 0xFF
-                        ptr += 1
-                    output_reg, output_reg_len = 0, 0
+    tasks = [(layer_idx, c) for layer_idx in range(n_layers) for c in range(n_channels)]
 
-            for token_idx in range(n_tokens):
-                sym = sym_np[layer_idx, token_idx, channel_idx]
-                c_low = int(cdf_np[layer_idx, channel_idx, sym])
-                c_high = (
-                    0x10000
-                    if sym == max_symbol
-                    else int(cdf_np[layer_idx, channel_idx, sym + 1])
-                )
-
-                # 💡 CRITICAL: Span must be uint64 equivalent in Python
-                span = (high - low + 1) & MASK32
-                if span == 0:
-                    span = 0x100000000  # 2^32
-
-                high = (low + ((span * c_high) >> precision) - 1) & MASK32
-                low = (low + ((span * c_low) >> precision)) & MASK32
-
-                # Renormalization loop (32-bit state machine)
-                while True:
-                    if (high & 0x80000000) == (low & 0x80000000):
-                        bit = (high >> 31) & 1
-                        flush_bit(bit)
-                        while pending_bits > 0:
-                            flush_bit(1 - bit)
-                            pending_bits -= 1
-                        low = (low << 1) & MASK32
-                        high = ((high << 1) | 1) & MASK32
-                    elif (low & 0x40000000) and not (high & 0x40000000):
-                        pending_bits += 1
-                        low = (low << 1) & 0x7FFFFFFF
-                        high = ((high << 1) | 0x80000001) & MASK32
-                    else:
-                        break
-
-            # Final flushing sequence
-            pending_bits += 1
-            bit = 1 if (low & 0x40000000) else 0
-            flush_bit(bit)
-            while pending_bits > 0:
-                flush_bit(1 - bit)
-                pending_bits -= 1
-
-            if output_reg_len > 0:
-                out_buf_np[layer_idx, channel_idx, ptr] = (
-                    output_reg << (8 - output_reg_len)
-                ) & 0xFF
-                ptr += 1
-            out_len_np[layer_idx, channel_idx] = ptr
+    with ThreadPoolExecutor() as executor:
+        executor.map(encode_one, tasks)
 
     output_buffer.copy_(torch.from_numpy(out_buf_np))
     output_lengths.copy_(torch.from_numpy(out_len_np))
@@ -1084,122 +1079,127 @@ def uint32_val(val):
     return int(val & 0xFFFFFFFF)
 
 
+@njit(cache=True)
+def _decode_single_channel(
+    cdf_layer_c,
+    bs_np,
+    start_off,
+    end_off,
+    n_tokens,
+    out_layer_c,
+):
+    MASK32 = 0xFFFFFFFF
+    precision = 16
+    max_symbol = len(cdf_layer_c) - 2
+
+    v_val = 0
+    if start_off + 4 <= len(bs_np):
+        v_val = (
+            (int(bs_np[start_off]) << 24)
+            | (int(bs_np[start_off + 1]) << 16)
+            | (int(bs_np[start_off + 2]) << 8)
+            | int(bs_np[start_off + 3])
+        ) & MASK32
+
+    low, high = 0, MASK32
+    byte_buffer_offset = start_off + 4
+    bit_idx = 1
+    byte_buffer = int(bs_np[byte_buffer_offset]) if byte_buffer_offset < end_off else 0
+
+    for i in range(n_tokens):
+        span = (high - low + 1) & MASK32
+        if span == 0:
+            span = 0x100000000
+
+        v_minus_l = (v_val - low) & MASK32
+        count = ((v_minus_l + 1) * 0x10000 - 1) // span
+        count = count & 0xFFFF
+
+        left = 0
+        right = max_symbol + 1
+        while left + 1 < right:
+            m = (left + right) // 2
+            if int(cdf_layer_c[m]) < count:
+                left = m
+            elif int(cdf_layer_c[m]) > count:
+                right = m
+            else:
+                left = m
+                break
+
+        out_layer_c[i] = left
+
+        if i == n_tokens - 1:
+            break
+
+        sym_i = left
+        c_low = int(cdf_layer_c[sym_i])
+        c_high = 0x10000 if sym_i == max_symbol else int(cdf_layer_c[sym_i + 1])
+
+        high = (low + ((span * c_high) >> precision) - 1) & MASK32
+        low = (low + ((span * c_low) >> precision)) & MASK32
+
+        while True:
+            if low >= 0x80000000 or high < 0x80000000:
+                v_val = ((v_val << 1) | ((byte_buffer >> (8 - bit_idx)) & 1)) & MASK32
+                low = (low << 1) & MASK32
+                high = ((high << 1) | 1) & MASK32
+                bit_idx += 1
+            elif low >= 0x40000000 and high < 0xC0000000:
+                v_val = (v_val - 0x40000000) & MASK32
+                v_val = ((v_val << 1) | ((byte_buffer >> (8 - bit_idx)) & 1)) & MASK32
+                low = (low << 1) & 0x7FFFFFFF
+                high = ((high << 1) | 0x80000001) & MASK32
+                bit_idx += 1
+            else:
+                break
+
+            if bit_idx == 9:
+                bit_idx = 1
+                byte_buffer_offset += 1
+                byte_buffer = (
+                    int(bs_np[byte_buffer_offset])
+                    if byte_buffer_offset < end_off
+                    else 0
+                )
+
+
+# Standard
+
+
 def decode_fast_new(cdf, bytestreams, lengths, output):
     """
     Python implementation of Arithmetic Decoding.
     Strictly aligned with CUDA decode_with_accessor_kernel.
+    bytestreams shape: [nlayers, nchannels, buffer_size]
     """
-    # Reinterpret raw bytes of cdf as uint16 bit-patterns, then widen to uint32
-    # for arithmetic. This matches encode_fast_new and decode_fast_prefsum.
     cdf_np = cdf.cpu().numpy().view(np.uint16).astype(np.uint32)
     bs_np = bytestreams.cpu().numpy().astype(np.uint8)
     len_np = lengths.cpu().numpy().astype(np.int32)
 
     n_layers, n_tokens, n_channels = output.shape
-    _, _, lp = cdf_np.shape
-    max_symbol = lp - 2
-    precision = 16
-
     out_np = np.zeros(output.shape, dtype=np.uint8)
 
-    # Use layer_idx to avoid Ruff E741
-    for layer_idx in range(n_layers):
-        for c in range(n_channels):
-            curr_len = int(len_np[layer_idx, c])
-            channel_bs = bs_np[layer_idx, c]
+    def decode_one(args):
+        layer_idx, c = args
+        curr_len = int(len_np[layer_idx, c])
+        # For decode_fast_new, each channel has its own contiguous buffer,
+        # so start_off=0 and end_off=curr_len within channel_bs
+        channel_bs = bs_np[layer_idx, c]  # shape [buffer_size]
+        _decode_single_channel(
+            cdf_np[layer_idx, c],
+            channel_bs,
+            0,
+            curr_len,
+            n_tokens,
+            out_np[layer_idx, :, c],
+        )
 
-            v_val = 0
-            if curr_len >= 4:
-                v_val = (
-                    int(channel_bs[0]) << 24
-                    | int(channel_bs[1]) << 16
-                    | int(channel_bs[2]) << 8
-                    | int(channel_bs[3])
-                )
-                v_val = uint32_val(v_val)
+    tasks = [(layer_idx, c) for layer_idx in range(n_layers) for c in range(n_channels)]
 
-            byte_buffer_offset = 4
-            byte_buffer = (
-                int(channel_bs[byte_buffer_offset])
-                if byte_buffer_offset < curr_len
-                else 0
-            )
-            bit_idx = 1
+    with ThreadPoolExecutor() as executor:
+        executor.map(decode_one, tasks)
 
-            l_val = 0
-            h_val = 0xFFFFFFFF
-
-            current_cdf_slice = cdf_np[layer_idx, c]
-            for i in range(n_tokens):
-                # Calculate span and count for symbol search
-                MASK32 = 0xFFFFFFFF
-                span = (int(h_val) - int(l_val) + 1) & MASK32
-                if span == 0:
-                    span = 0x100000000  # 2^32
-                v_minus_l = uint32_val(v_val - l_val)
-                count = ((int(v_minus_l) + 1) * 65536 - 1) // span
-                count = int(count & 0xFFFF)
-
-                # Binary search for the symbol in CDF
-                left, right = 0, max_symbol + 1
-                while left + 1 < right:
-                    m = (left + right) // 2
-                    if int(current_cdf_slice[m]) < count:
-                        left = m
-                    elif int(current_cdf_slice[m]) > count:
-                        right = m
-                    else:
-                        left = m
-                        break
-
-                sym_i = left
-                out_np[layer_idx, i, c] = sym_i
-
-                if i == n_tokens - 1:
-                    break
-
-                c_low = int(current_cdf_slice[sym_i])
-                c_high = (
-                    0x10000
-                    if sym_i == max_symbol
-                    else int(current_cdf_slice[sym_i + 1])
-                )
-
-                # Update range
-                h_val = uint32_val((l_val - 1) + ((span * c_high) >> precision))
-                l_val = uint32_val(l_val + ((span * c_low) >> precision))
-
-                # Renormalization
-                while True:
-                    if (l_val >= 0x80000000) or (h_val < 0x80000000):
-                        l_val = uint32_val(l_val << 1)
-                        h_val = uint32_val((h_val << 1) | 1)
-
-                        v_val = uint32_val(v_val << 1)
-                        v_val |= (byte_buffer >> (8 - bit_idx)) & 1
-                        bit_idx += 1
-
-                    elif (l_val >= 0x40000000) and (h_val < 0xC0000000):
-                        l_val = uint32_val((l_val << 1) & 0x7FFFFFFF)
-                        h_val = uint32_val((h_val << 1) | 0x80000001)
-                        v_val = uint32_val(v_val - 0x40000000)
-
-                        v_val = uint32_val(v_val << 1)
-                        v_val |= (byte_buffer >> (8 - bit_idx)) & 1
-                        bit_idx += 1
-                    else:
-                        break
-
-                    # Update bit index and byte buffer
-                    if bit_idx == 9:
-                        bit_idx = 1
-                        byte_buffer_offset += 1
-                        if byte_buffer_offset < curr_len:
-                            byte_buffer = int(channel_bs[byte_buffer_offset])
-                        else:
-                            byte_buffer = 0
-
-    # Mypy: Validate output is not None before copying
     if output is not None:
         output.copy_(torch.from_numpy(out_np))
 
@@ -1207,129 +1207,91 @@ def decode_fast_new(cdf, bytestreams, lengths, output):
 def decode_fast_prefsum(cdf, bytestreams, lengths_prefsum, output):
     """
     Python equivalent of C++ decode_fast_prefsum.
-    Fixed: Range calculation and ZeroDivisionError handling to match CUDA kernel.
+    bytestreams shape: [total_bytes] (1D, all channels packed)
     """
     cdf_np = cdf.cpu().numpy().view(np.uint16).astype(np.uint32)
-    bs_np = bytestreams.cpu().numpy().astype(np.uint8)
     pref_np = lengths_prefsum.cpu().numpy().astype(np.int64).flatten()
 
+    # WA: CUDA kernel reads out-of-bound in two ways:
+    # 1. max(prefsum) may equal len(bytestreams) (off-by-one on exclusive-end)
+    # 2. v_val init reads 4 bytes starting at start_off, may exceed bytestreams
+    # Pad with zeros to make all reads safe.
+    max_prefsum = int(pref_np.max())
+    pad_size = max(0, max_prefsum + 4 - bytestreams.shape[0])
+    if pad_size > 0:
+        bytestreams = torch.nn.functional.pad(bytestreams, (0, pad_size), value=0)
+
+    bs_np = bytestreams.cpu().numpy().astype(np.uint8)  # must be after padding
+
     n_layers, n_tokens, n_channels = output.shape
-    max_symbol = cdf_np.shape[2] - 2
-    precision, c_count, MASK32 = 16, 0x10000, 0xFFFFFFFF
     out_np = np.zeros(output.shape, dtype=np.uint8)
 
-    for layer_idx in range(n_layers):
-        for c in range(n_channels):
-            cid = layer_idx * n_channels + c
-            start_off = 0 if cid == 0 else int(pref_np[cid - 1])
+    def decode_one(args):
+        layer_idx, c = args
+        cid = layer_idx * n_channels + c
+        start_off = 0 if cid == 0 else int(pref_np[cid - 1])
+        end_off = int(pref_np[cid])
+        _decode_single_channel(
+            cdf_np[layer_idx, c],
+            bs_np,
+            start_off,
+            end_off,
+            n_tokens,
+            out_np[layer_idx, :, c],
+        )
 
-            v_val = 0
-            if start_off + 4 <= bs_np.size:
-                v_val = (
-                    int(bs_np[start_off]) << 24
-                    | int(bs_np[start_off + 1]) << 16
-                    | int(bs_np[start_off + 2]) << 8
-                    | int(bs_np[start_off + 3])
-                ) & MASK32
+    tasks = [(layer_idx, c) for layer_idx in range(n_layers) for c in range(n_channels)]
 
-            low, high = 0, MASK32
-            byte_buffer_offset, bit_idx = start_off + 4, 1
-            byte_buffer = (
-                int(bs_np[byte_buffer_offset]) if byte_buffer_offset < bs_np.size else 0
-            )
-
-            for i in range(n_tokens):
-                # 💡 FIX: Emulate 32-bit overflow for span.
-                # In C++, 0xFFFFFFFF - 0 + 1 == 0.
-                # But for division, we must treat it as 2^32.
-                span = (high - low + 1) & MASK32
-                if span == 0:
-                    span = 0x100000000  # 2^32
-
-                v_minus_l = (v_val - low) & MASK32
-                count = ((v_minus_l + 1) * c_count - 1) // span
-                count = int(count & 0xFFFF)
-
-                left, right = 0, max_symbol + 1
-                current_cdf = cdf_np[layer_idx, c]
-                while left + 1 < right:
-                    m = (left + right) // 2
-                    if int(current_cdf[m]) < count:
-                        left = m
-                    elif int(current_cdf[m]) > count:
-                        right = m
-                    else:
-                        left = m
-                        break
-
-                sym_i = left
-                out_np[layer_idx, i, c] = sym_i
-                if i == n_tokens - 1:
-                    break
-
-                c_low = int(current_cdf[sym_i])
-                c_high = 0x10000 if sym_i == max_symbol else int(current_cdf[sym_i + 1])
-
-                # Update interval
-                high = (low + ((span * c_high) >> precision) - 1) & MASK32
-                low = (low + ((span * c_low) >> precision)) & MASK32
-
-                # Renormalization
-                while True:
-                    if low >= 0x80000000 or high < 0x80000000:
-                        v_val = (
-                            (v_val << 1) | ((byte_buffer >> (8 - bit_idx)) & 1)
-                        ) & MASK32
-                        low, high = (low << 1) & MASK32, ((high << 1) | 1) & MASK32
-                        bit_idx += 1
-                    elif low >= 0x40000000 and high < 0xC0000000:
-                        v_val = (v_val - 0x40000000) & MASK32
-                        v_val = (
-                            (v_val << 1) | ((byte_buffer >> (8 - bit_idx)) & 1)
-                        ) & MASK32
-                        low, high = (
-                            (low << 1) & 0x7FFFFFFF,
-                            ((high << 1) | 0x80000001) & MASK32,
-                        )
-                        bit_idx += 1
-                    else:
-                        break
-
-                    if bit_idx == 9:
-                        bit_idx, byte_buffer_offset = 1, byte_buffer_offset + 1
-                        byte_buffer = (
-                            int(bs_np[byte_buffer_offset])
-                            if byte_buffer_offset < bs_np.size
-                            else 0
-                        )
+    with ThreadPoolExecutor() as executor:
+        executor.map(decode_one, tasks)
 
     output.copy_(torch.from_numpy(out_np))
 
 
 def calculate_cdf(input_tensor: torch.Tensor, num_bins: int) -> torch.Tensor:
+    """Equivalent to CUDA calculate_cdf.
+
+    Calculates the CDF across tokens for each (layer, channel) pair.
+
+    Args:
+        input_tensor: 3D tensor with shape [nlayers, ntokens, nchannels].
+        num_bins: Maximum number of bins (i.e., Lp - 1).
+
+    Returns:
+        int16 tensor with shape [nlayers, nchannels, num_bins + 1]
+        containing normalized CDF values.
     """
-    Equivalent to CUDA calculate_cdf.
-    Input: Expects a 3D tensor (e.g., [1, N, 1]).
-    num_bins: Total number of bins (max_val + 1).
-    Returns: Tensor of length (num_bins + 1) with CDF values.
-    """
-    # Force flattening to match bincount expectation
-    flat_input = input_tensor.flatten().long()
+    nlayers, ntokens, nchannels = input_tensor.shape
+    device = input_tensor.device
 
-    # Use num_bins directly to match the CUDA kernel's 'Alphabet Size'
-    counts = torch.bincount(flat_input, minlength=num_bins)
+    # Compute per-(layer, channel) histogram via scatter_add.
+    # Permute to [nlayers, nchannels, ntokens] then flatten first two dims.
+    input_perm = input_tensor.permute(0, 2, 1).reshape(-1, ntokens).long()
+    src = torch.ones_like(input_perm)
+    counts = torch.zeros(nlayers * nchannels, num_bins, dtype=torch.long, device=device)
+    counts.scatter_add_(1, input_perm.clamp(0, num_bins - 1), src)
+    counts = counts.reshape(nlayers, nchannels, num_bins)
 
-    # Slice to ensure output length is exactly num_bins
-    counts = counts[:num_bins]
+    # Build CDF: cdf[..., 0] = 0, cdf[..., i] = sum(counts[..., 0:i])
+    cdf = torch.zeros(nlayers, nchannels, num_bins + 1, dtype=torch.long, device=device)
+    cdf[:, :, 1:] = torch.cumsum(counts, dim=2)
 
-    cdf = torch.cumsum(counts, dim=0).float()
+    # Total count per (layer, channel)
+    total = cdf[:, :, -1:]  # [nlayers, nchannels, 1]
 
-    if cdf[-1] > 0:
-        cdf = cdf / cdf[-1]
+    # Normalize: (0xFFFF - num_bins) * cdf / total + bin_index
+    max_uint16_value = 0xFFFF - num_bins
+    bin_offsets = torch.arange(num_bins + 1, dtype=torch.long, device=device)
 
-    cdf = torch.cat([torch.tensor([0.0], device=cdf.device), cdf])
+    safe_total = total.clamp(min=1)
+    normalized = (max_uint16_value * cdf) // safe_total + bin_offsets
 
-    return cdf
+    # Where total is 0, use just the bin offsets
+    normalized = torch.where(
+        total > 0, normalized, bin_offsets.unsqueeze(0).unsqueeze(0)
+    )
+
+    return normalized.to(torch.int16)
 
 
 def rotary_embedding_k_fused(
