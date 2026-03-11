@@ -223,6 +223,7 @@ class StorageManager:
                 "Exception occurred while processing read prefetched results: %s",
                 str(e),
             )
+            raise
         finally:
             # Decrease the read lock for all successfully read memory objects
             # if None is yielded or exception occurs during caller's processing
