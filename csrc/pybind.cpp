@@ -29,7 +29,8 @@ PYBIND11_MODULE(c_ops, m) {
         py::arg("slot_mapping"), py::arg("paged_memory_device"),
         py::arg("page_buffer_size"), py::arg("direction"),
         py::arg("gpu_kv_format"), py::arg("block_size") = 0,
-        py::arg("skip_prefix_n_tokens") = 0);
+        py::arg("skip_prefix_n_tokens") = 0,
+        py::call_guard<py::gil_scoped_release>());
   m.def("multi_layer_kv_transfer_unilateral",
         &multi_layer_kv_transfer_unilateral);
   m.def("single_layer_kv_transfer", &single_layer_kv_transfer,
@@ -42,7 +43,8 @@ PYBIND11_MODULE(c_ops, m) {
         py::arg("direction"), py::arg("token_major") = false);
   m.def("load_and_reshape_flash", &load_and_reshape_flash);
   m.def("reshape_and_cache_back_flash", &reshape_and_cache_back_flash);
-  m.def("lmcache_memcpy_async", &lmcache_memcpy_async);
+  m.def("lmcache_memcpy_async", &lmcache_memcpy_async,
+        py::call_guard<py::gil_scoped_release>());
   m.def("encode_fast_new", &encode_cuda_new);
   m.def("decode_fast_new", &decode_cuda_new);
   m.def("decode_fast_prefsum", &decode_cuda_prefsum);

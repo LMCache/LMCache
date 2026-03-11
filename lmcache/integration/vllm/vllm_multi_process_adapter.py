@@ -120,8 +120,12 @@ class LMCacheMPSchedulerAdapter:
         """
         self.mq_client = MessageQueueClient(server_url, context)
 
-        # Two-phase lookup state: request_id -> server prefetch job ID
+        # Two-phase lookup state:
+        # - phase 1: request_id -> server prefetch job ID
+        # - phase 2: job_id -> matched chunk count (will be cached)
+        # The cached lookup result will be cleared by `cleanup_lookup_result`
         self._lookup_job_ids: dict[str, int] = {}
+        self._finished_lookup_jobs: dict[int, int] = {}
 
         self.model_name = model_name
         self.world_size = world_size
@@ -206,6 +210,11 @@ class LMCacheMPSchedulerAdapter:
         )
 
         job_id = self._lookup_job_ids[request_id]
+
+        if job_id in self._finished_lookup_jobs:
+            # Return cached result if the job is already finished
+            return self._finished_lookup_jobs[job_id] * self.chunk_size
+
         result = send_lmcache_request(
             self.mq_client,
             RequestType.QUERY_PREFETCH_STATUS,
@@ -214,6 +223,8 @@ class LMCacheMPSchedulerAdapter:
 
         if result is None:
             return None
+
+        self._finished_lookup_jobs[job_id] = result
 
         return result * self.chunk_size
 
@@ -230,7 +241,9 @@ class LMCacheMPSchedulerAdapter:
         Args:
             request_id: The ID of the finished request.
         """
-        self._lookup_job_ids.pop(request_id, None)
+        job_id = self._lookup_job_ids.pop(request_id, None)
+        if job_id is not None:
+            self._finished_lookup_jobs.pop(job_id, None)
 
     def free_lookup_locks(
         self,
