@@ -138,6 +138,10 @@ class InFlightPrefetchRequest:
     keys: list[ObjectKey]
     layout_desc: MemoryLayoutDesc
     phase: PrefetchPhase
+    extra_count: int = 0
+    """Extra read locks per key (on top of the default 1) to acquire when
+    transitioning from write-locked to read-locked.  Must match the
+    ``extra_count`` used in the corresponding ``submit_prefetch_task`` call."""
 
     # Lookup phase: adapter_idx -> task_id (removed as results arrive)
     pending_lookup_tasks: dict[int, L2TaskId] = field(default_factory=dict)
@@ -202,7 +206,7 @@ class PrefetchController(StorageControllerInterface):
         # In-flight request tracking (background thread only)
         self._in_flight_requests: dict[PrefetchRequestId, InFlightPrefetchRequest] = {}
         self._pending_queue: list[
-            tuple[PrefetchRequestId, list[ObjectKey], MemoryLayoutDesc]
+            tuple[PrefetchRequestId, list[ObjectKey], MemoryLayoutDesc, int]
         ] = []
 
         # Shadow counters for status reporting (updated in background loop)
@@ -214,7 +218,7 @@ class PrefetchController(StorageControllerInterface):
         # Thread-safe submission queue (external -> background)
         self._submission_lock = threading.Lock()
         self._submission_queue: list[
-            tuple[PrefetchRequestId, list[ObjectKey], MemoryLayoutDesc]
+            tuple[PrefetchRequestId, list[ObjectKey], MemoryLayoutDesc, int]
         ] = []
         self._next_request_id: PrefetchRequestId = 0
         self._submission_efd = os.eventfd(0, os.EFD_NONBLOCK | os.EFD_CLOEXEC)
@@ -247,6 +251,7 @@ class PrefetchController(StorageControllerInterface):
         self,
         keys: list[ObjectKey],
         layout_desc: MemoryLayoutDesc,
+        extra_count: int = 0,
     ) -> PrefetchRequestId:
         """
         Submit a prefetch request for the given keys.
@@ -264,6 +269,11 @@ class PrefetchController(StorageControllerInterface):
             keys: List of object keys to prefetch from L2 into L1.
                 The ordering defines the prefix: index 0 is the first key.
             layout_desc: Memory layout for L1 write buffer allocation.
+            extra_count: Extra read locks per key (on top of the default 1)
+                to acquire when transitioning loaded keys from write-locked
+                to read-locked.  Must match the ``extra_count`` used in the
+                corresponding ``submit_prefetch_task`` call so that all TP
+                workers can each consume one read lock.
 
         Returns:
             A request ID for tracking via query_prefetch_result.
@@ -271,7 +281,7 @@ class PrefetchController(StorageControllerInterface):
         with self._submission_lock:
             request_id = self._next_request_id
             self._next_request_id += 1
-            self._submission_queue.append((request_id, keys, layout_desc))
+            self._submission_queue.append((request_id, keys, layout_desc, extra_count))
         os.eventfd_write(self._submission_efd, 1)
         return request_id
 
@@ -389,9 +399,9 @@ class PrefetchController(StorageControllerInterface):
         while (
             self._pending_queue and len(self._in_flight_requests) < self._max_in_flight
         ):
-            request_id, keys, layout_desc = self._pending_queue.pop(0)
+            request_id, keys, layout_desc, extra_count = self._pending_queue.pop(0)
             self._status_pending_count -= 1
-            self._start_lookup_phase(request_id, keys, layout_desc)
+            self._start_lookup_phase(request_id, keys, layout_desc, extra_count)
 
     # =========================================================================
     # Lookup phase
@@ -402,6 +412,7 @@ class PrefetchController(StorageControllerInterface):
         request_id: PrefetchRequestId,
         keys: list[ObjectKey],
         layout_desc: MemoryLayoutDesc,
+        extra_count: int = 0,
     ) -> None:
         """Submit lookup_and_lock to all adapters for a new request."""
         if not self._l2_adapters:
@@ -418,6 +429,7 @@ class PrefetchController(StorageControllerInterface):
             keys=keys,
             layout_desc=layout_desc,
             phase=PrefetchPhase.LOOKUP,
+            extra_count=extra_count,
             pending_lookup_tasks=pending_lookup_tasks,
         )
         self._in_flight_requests[request_id] = request
@@ -603,8 +615,11 @@ class PrefetchController(StorageControllerInterface):
         l1_mgr = self.get_l1_manager()
 
         # Transition loaded keys: write-locked -> read-locked
+        # Use extra_count so that all TP workers each get their own read lock.
         if loaded_keys:
-            l1_mgr.finish_write_and_reserve_read(loaded_keys)
+            l1_mgr.finish_write_and_reserve_read(
+                loaded_keys, extra_count=request.extra_count
+            )
 
         # Clean up failed keys
         if failed_keys:
@@ -618,7 +633,7 @@ class PrefetchController(StorageControllerInterface):
         non_prefix_loaded_bitmap = result_bitmap & (~prefix_mask)
         non_prefix_loaded = non_prefix_loaded_bitmap.gather(request.keys)
         if non_prefix_loaded:
-            l1_mgr.finish_read(non_prefix_loaded)
+            l1_mgr.finish_read(non_prefix_loaded, extra_count=request.extra_count)
 
         self._complete_request(request.request_id, prefix_hits)
 

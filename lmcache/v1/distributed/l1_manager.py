@@ -512,6 +512,7 @@ class L1Manager:
     def finish_write_and_reserve_read(
         self,
         keys: list[ObjectKey],
+        extra_count: int = 0,
     ) -> dict[ObjectKey, L1OperationResult]:
         """Atomically finish write and acquire read lock for the given keys.
 
@@ -522,6 +523,10 @@ class L1Manager:
 
         Args:
             keys: Keys to transition from write-locked to read-locked.
+            extra_count: Extra read locks on top of the default 1 lock.
+                Total locks acquired per key = 1 + extra_count.  Useful
+                when multiple TP workers each consume one read lock for
+                the same key (e.g. MLA models with TP > 1).
 
         Returns:
             A dictionary mapping each object key to a tuple of
@@ -532,6 +537,8 @@ class L1Manager:
             KEY_IN_WRONG_STATE: The key is not write-locked, or it already
                 has read locks.
         """
+        extra_count = _validate_extra_count(extra_count)
+        total = 1 + extra_count
         ret: dict[ObjectKey, L1OperationResult] = {}
         successful_keys: list[ObjectKey] = []
 
@@ -559,7 +566,8 @@ class L1Manager:
                 continue
 
             entry.write_lock.unlock()
-            entry.read_lock.lock()
+            for _ in range(total):
+                entry.read_lock.lock()
             ret[key] = (L1Error.SUCCESS, entry.memory_obj)
             successful_keys.append(key)
 

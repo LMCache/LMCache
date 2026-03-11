@@ -305,6 +305,7 @@ class StorageManager:
             request_id = self._prefetch_controller.submit_prefetch_request(
                 remaining_keys,
                 layout_desc,
+                extra_count=extra_count,
             )
 
         submit_time = time.monotonic()
