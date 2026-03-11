@@ -34,6 +34,9 @@ func BuildDaemonSet(engine *lmcachev1alpha1.LMCacheEngine) *appsv1.DaemonSet {
 	podLabels := MergeLabels(StandardLabels(engine.Name), spec.PodLabels)
 	podAnnotations := spec.PodAnnotations
 
+	nvidiaRuntime := "nvidia"
+	privileged := true
+
 	serverPort := derefInt32(getServerPort(spec), 5555)
 	imgRepo := "lmcache/vllm-openai"
 	imgTag := "latest"
@@ -62,6 +65,10 @@ func BuildDaemonSet(engine *lmcachev1alpha1.LMCacheEngine) *appsv1.DaemonSet {
 			// Expose all GPUs without consuming device plugin resources.
 			// LMCache needs GPU visibility for CUDA IPC, not compute ownership.
 			Name:  "NVIDIA_VISIBLE_DEVICES",
+			Value: "all",
+		},
+		corev1.EnvVar{
+			Name:  "NVIDIA_DRIVER_CAPABILITIES",
 			Value: "all",
 		},
 	)
@@ -145,6 +152,7 @@ func BuildDaemonSet(engine *lmcachev1alpha1.LMCacheEngine) *appsv1.DaemonSet {
 				},
 				Spec: corev1.PodSpec{
 					HostIPC:            true,
+					RuntimeClassName:   &nvidiaRuntime,
 					ServiceAccountName: spec.ServiceAccountName,
 					PriorityClassName:  spec.PriorityClassName,
 					NodeSelector:       spec.NodeSelector,
@@ -156,15 +164,22 @@ func BuildDaemonSet(engine *lmcachev1alpha1.LMCacheEngine) *appsv1.DaemonSet {
 							Name:            "lmcache",
 							Image:           fmt.Sprintf("%s:%s", imgRepo, imgTag),
 							ImagePullPolicy: imgPullPolicy,
-							Command:         []string{"/opt/venv/bin/python3", "-m", "lmcache.v1.multiprocess.server"},
-							Args:            containerArgs,
-							Ports:           containerPorts,
-							Env:             envVars,
-							Resources:       ComputeResources(spec),
-							VolumeMounts:    volumeMounts,
-							StartupProbe:    startupProbe,
-							LivenessProbe:   livenessProbe,
-							ReadinessProbe:  readinessProbe,
+							Command: []string{
+								"/opt/venv/bin/python3",
+								"-m",
+								"lmcache.v1.multiprocess.server",
+							},
+							Args:      containerArgs,
+							Ports:     containerPorts,
+							Env:       envVars,
+							Resources: ComputeResources(spec),
+							SecurityContext: &corev1.SecurityContext{
+								Privileged: &privileged,
+							},
+							VolumeMounts:   volumeMounts,
+							StartupProbe:   startupProbe,
+							LivenessProbe:  livenessProbe,
+							ReadinessProbe: readinessProbe,
 						},
 					},
 					Volumes: volumes,

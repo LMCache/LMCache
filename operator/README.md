@@ -8,7 +8,10 @@ See [DESIGN.md](DESIGN.md) for architecture details, reconciliation logic, and C
 
 - Kubernetes 1.20+
 - `kubectl` configured to access your cluster
+- NVIDIA GPU Operator with the `nvidia` RuntimeClass available on GPU nodes
 - (Optional) [Prometheus Operator](https://github.com/prometheus-operator/prometheus-operator) for ServiceMonitor support
+
+> **Note:** The operator runs LMCache pods with `runtimeClassName: nvidia` and `privileged: true` to gain GPU visibility without consuming GPU resources via the device plugin. This allows the serving engine (e.g., vLLM) to claim all GPUs on the node. Clusters using Pod Security Standards must allow the `privileged` profile for the LMCache namespace.
 
 ## Quick Start
 
@@ -56,7 +59,7 @@ spec:
 kubectl apply -f lmcache-engine.yaml
 ```
 
-The operator automatically handles `hostIPC`, node-local service routing, resource sizing, and Prometheus metrics — see [DESIGN.md](DESIGN.md) for details.
+The operator automatically handles `hostIPC`, GPU visibility (`runtimeClassName: nvidia`, `privileged: true`), node-local service routing, resource sizing, and Prometheus metrics — see [DESIGN.md](DESIGN.md) for details.
 
 ### 3. Connect vLLM to LMCache
 
