@@ -1022,7 +1022,9 @@ def test_batched_layerwise_sglang_connector_with_gpu_and_mla(use_gpu, use_mla):
         memory_objs_multi_layer = []
         for layer_id in range(num_layers):
             mem_obj_single_layer = allocator.allocate(
-                shape_single_layer, dtype, fmt=MemoryFormat.KV_T2D
+                shape_single_layer,
+                dtype,
+                fmt=MemoryFormat.KV_MLA_FMT if use_mla else MemoryFormat.KV_T2D,
             )
             memory_objs_multi_layer.append(mem_obj_single_layer)
         starts.append(start)

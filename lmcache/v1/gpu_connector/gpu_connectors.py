@@ -1520,7 +1520,6 @@ class SGLangGPUConnector(GPUConnectorInterface):
             self.from_gpu(memory_obj, start, end, **kwargs)
 
 
-# TODO: support MLA
 class SGLangLayerwiseGPUConnector(GPUConnectorInterface):
     """
     The GPU KV cache should be a list of tensors, one for each layer,
@@ -1573,6 +1572,18 @@ class SGLangLayerwiseGPUConnector(GPUConnectorInterface):
         self.num_heads = get_num_heads(kv_caches, self.gpu_kv_format)
         self.head_size = get_head_size(kv_caches, self.gpu_kv_format)
         self.kv_shape = [self.page_buffer_size, 1, self.num_heads, self.head_size]
+        if self.use_mla:
+            for layer_id in range(len(self.kvcaches)):
+                self.kvcaches[layer_id] = self.kvcaches[layer_id].view(*self.kv_shape)
+        else:
+            for layer_id in range(len(self.kvcaches[0])):
+                self.kvcaches[0][layer_id] = self.kvcaches[0][layer_id].view(
+                    *self.kv_shape
+                )
+                self.kvcaches[1][layer_id] = self.kvcaches[1][layer_id].view(
+                    *self.kv_shape
+                )
+
         if self.use_gpu and self.gpu_buffer_allocator is None:
             self.tokens_per_layer = get_tokens_per_layer(kv_caches, self.gpu_kv_format)
             self.elements_per_layer = get_elements_per_layer(
@@ -1683,7 +1694,7 @@ class SGLangLayerwiseGPUConnector(GPUConnectorInterface):
                     if self.use_mla:
                         lmc_ops.single_layer_kv_transfer_sgl(
                             memory_obj.tensor,
-                            [self.kvcaches[layer_id].view(*self.kv_shape)],
+                            [self.kvcaches[layer_id]],
                             slot_mapping[start:end],
                             lmc_ops.TransferDirection.H2D,
                             self.gpu_kv_format,
@@ -1693,8 +1704,8 @@ class SGLangLayerwiseGPUConnector(GPUConnectorInterface):
                         lmc_ops.single_layer_kv_transfer_sgl(
                             memory_obj.tensor,
                             [
-                                self.kvcaches[0][layer_id].view(*self.kv_shape),
-                                self.kvcaches[1][layer_id].view(*self.kv_shape),
+                                self.kvcaches[0][layer_id],
+                                self.kvcaches[1][layer_id],
                             ],
                             slot_mapping[start:end],
                             lmc_ops.TransferDirection.H2D,
@@ -1706,7 +1717,7 @@ class SGLangLayerwiseGPUConnector(GPUConnectorInterface):
                 if self.use_mla:
                     lmc_ops.single_layer_kv_transfer_sgl(
                         tmp_gpu_buffer_obj.tensor,
-                        [self.kvcaches[layer_id].view(*self.kv_shape)],
+                        [self.kvcaches[layer_id]],
                         slot_mapping_full,
                         lmc_ops.TransferDirection.H2D,
                         self.gpu_kv_format,
@@ -1716,8 +1727,8 @@ class SGLangLayerwiseGPUConnector(GPUConnectorInterface):
                     lmc_ops.single_layer_kv_transfer_sgl(
                         tmp_gpu_buffer_obj.tensor,
                         [
-                            self.kvcaches[0][layer_id].view(*self.kv_shape),
-                            self.kvcaches[1][layer_id].view(*self.kv_shape),
+                            self.kvcaches[0][layer_id],
+                            self.kvcaches[1][layer_id],
                         ],
                         slot_mapping_full,
                         lmc_ops.TransferDirection.H2D,
@@ -1808,7 +1819,7 @@ class SGLangLayerwiseGPUConnector(GPUConnectorInterface):
                 if self.use_mla:
                     lmc_ops.single_layer_kv_transfer_sgl(
                         tmp_gpu_buffer_obj.tensor,
-                        [self.kvcaches[layer_id].view(*self.kv_shape)],
+                        [self.kvcaches[layer_id]],
                         slot_mapping_full,
                         lmc_ops.TransferDirection.D2H,
                         self.gpu_kv_format,
@@ -1818,8 +1829,8 @@ class SGLangLayerwiseGPUConnector(GPUConnectorInterface):
                     lmc_ops.single_layer_kv_transfer_sgl(
                         tmp_gpu_buffer_obj.tensor,
                         [
-                            self.kvcaches[0][layer_id].view(*self.kv_shape),
-                            self.kvcaches[1][layer_id].view(*self.kv_shape),
+                            self.kvcaches[0][layer_id],
+                            self.kvcaches[1][layer_id],
                         ],
                         slot_mapping_full,
                         lmc_ops.TransferDirection.D2H,
@@ -1844,7 +1855,7 @@ class SGLangLayerwiseGPUConnector(GPUConnectorInterface):
                     if self.use_mla:
                         lmc_ops.single_layer_kv_transfer_sgl(
                             memory_obj.tensor,
-                            [self.kvcaches[layer_id].view(*self.kv_shape)],
+                            [self.kvcaches[layer_id]],
                             slot_mapping[start:end],
                             lmc_ops.TransferDirection.D2H,
                             self.gpu_kv_format,
@@ -1854,8 +1865,8 @@ class SGLangLayerwiseGPUConnector(GPUConnectorInterface):
                         lmc_ops.single_layer_kv_transfer_sgl(
                             memory_obj.tensor,
                             [
-                                self.kvcaches[0][layer_id].view(*self.kv_shape),
-                                self.kvcaches[1][layer_id].view(*self.kv_shape),
+                                self.kvcaches[0][layer_id],
+                                self.kvcaches[1][layer_id],
                             ],
                             slot_mapping[start:end],
                             lmc_ops.TransferDirection.D2H,
