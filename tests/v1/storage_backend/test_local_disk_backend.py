@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 import asyncio
+import json
 import os
 import shutil
 import tempfile
@@ -293,4 +294,78 @@ class TestLocalDiskBackend:
             finally:
                 backend2.close()
         finally:
+            local_cpu_backend.memory_allocator.close()
+
+    def test_close_skips_manifest_write_when_cache_dir_missing(
+        self, temp_disk_path, loop_in_thread, memory_allocator, capsys
+    ):
+        """Test close() skips manifest persistence after cache dir deletion."""
+        config = create_test_config(temp_disk_path)
+        metadata = create_test_metadata()
+        local_cpu_backend = LocalCPUBackend(
+            config=config,
+            metadata=metadata,
+            dst_device="cpu",
+            memory_allocator=memory_allocator,
+        )
+        backend = LocalDiskBackend(
+            config=config,
+            loop=loop_in_thread,
+            local_cpu_backend=local_cpu_backend,
+            dst_device="cpu",
+            metadata=metadata,
+        )
+
+        try:
+            shutil.rmtree(temp_disk_path)
+            backend.close()
+            captured = capsys.readouterr()
+            assert "Failed to persist local disk manifest" not in captured.err
+        finally:
+            local_cpu_backend.memory_allocator.close()
+
+    def test_get_blocking_prunes_missing_file(
+        self, temp_disk_path, loop_in_thread, memory_allocator
+    ):
+        """Test missing disk files degrade to a cache miss and manifest prune."""
+        config = create_test_config(temp_disk_path)
+        metadata = create_test_metadata()
+        local_cpu_backend = LocalCPUBackend(
+            config=config,
+            metadata=metadata,
+            dst_device="cpu",
+            memory_allocator=memory_allocator,
+        )
+        backend = LocalDiskBackend(
+            config=config,
+            loop=loop_in_thread,
+            local_cpu_backend=local_cpu_backend,
+            dst_device="cpu",
+            metadata=metadata,
+        )
+        key = create_test_key(12)
+        memory_obj = create_memory_obj(
+            local_cpu_backend,
+            metadata.get_shapes()[0],
+            metadata.get_dtypes()[0],
+            fill_value=9,
+            fmt=MemoryFormat.KV_2LTD,
+        )
+
+        try:
+            backend.submit_put_task(key, memory_obj)
+            wait_for_disk_store(backend, key)
+            memory_obj.ref_count_down()
+
+            path = backend.dict[key].path
+            os.remove(path)
+
+            assert backend.get_blocking(key) is None
+            assert key not in backend.dict
+
+            with open(backend.manifest_path, encoding="utf-8") as f:
+                manifest_data = json.load(f)
+            assert key.to_string() not in manifest_data["entries"]
+        finally:
+            backend.close()
             local_cpu_backend.memory_allocator.close()

@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, Any, Callable, List, Optional, Sequence
 import asyncio
 import json
 import os
+import tempfile
 import threading
 import time
 
@@ -247,14 +248,39 @@ class LocalDiskBackend(StorageBackendInterface):
         return data
 
     def _write_manifest_data(self, data: dict[str, Any]) -> None:
-        tmp_path = self.manifest_path + ".tmp"
+        manifest_dir = os.path.dirname(self.manifest_path)
+        if not manifest_dir or not os.path.isdir(manifest_dir):
+            logger.debug(
+                (
+                    "Skipping local disk manifest persistence because cache dir "
+                    "is missing: %s"
+                ),
+                manifest_dir,
+            )
+            return
+
+        tmp_path: Optional[str] = None
         try:
-            with open(tmp_path, "w", encoding="utf-8") as f:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                dir=manifest_dir,
+                prefix=os.path.basename(self.manifest_path) + ".",
+                suffix=".tmp",
+                delete=False,
+            ) as f:
                 json.dump(data, f)
+                tmp_path = f.name
             os.replace(tmp_path, self.manifest_path)
+        except FileNotFoundError:
+            if os.path.isdir(manifest_dir):
+                logger.warning(
+                    "Failed to persist local disk manifest: manifest path disappeared"
+                )
         except Exception as e:
             logger.warning("Failed to persist local disk manifest: %s", e)
-            if os.path.exists(tmp_path):
+        finally:
+            if tmp_path is not None and os.path.exists(tmp_path):
                 os.remove(tmp_path)
 
     def _save_manifest(self) -> None:
@@ -602,12 +628,18 @@ class LocalDiskBackend(StorageBackendInterface):
         dtype = disk_meta.dtype
         shape = disk_meta.shape
         fmt = disk_meta.fmt
+        cached_positions = disk_meta.cached_positions
         assert dtype is not None
         assert shape is not None
 
         self.disk_lock.release()
         memory_obj = self.load_bytes_from_disk(
-            key, path, dtype=dtype, shape=shape, fmt=fmt
+            key,
+            path,
+            dtype=dtype,
+            shape=shape,
+            fmt=fmt,
+            cached_positions=cached_positions,
         )
 
         return memory_obj
@@ -620,6 +652,7 @@ class LocalDiskBackend(StorageBackendInterface):
     ) -> list[MemoryObj]:
         mem_objs: list[MemoryObj] = []
         paths: list[str] = []
+        cached_positions_list: list[Optional[torch.Tensor]] = []
 
         logger.debug(f"lookup_id: {lookup_id}; Prefetching {len(keys)} keys from disk.")
         for key in keys:
@@ -630,6 +663,7 @@ class LocalDiskBackend(StorageBackendInterface):
             dtype = self.dict[key].dtype
             shape = self.dict[key].shape
             fmt = self.dict[key].fmt
+            cached_positions = self.dict[key].cached_positions
 
             assert dtype is not None
             assert shape is not None
@@ -655,6 +689,7 @@ class LocalDiskBackend(StorageBackendInterface):
             memory_obj.pin()
             mem_objs.append(memory_obj)
             paths.append(path)
+            cached_positions_list.append(cached_positions)
 
         return await self.disk_worker.submit_task(
             "prefetch",
@@ -662,6 +697,7 @@ class LocalDiskBackend(StorageBackendInterface):
             paths=paths,
             keys=keys,
             memory_objs=mem_objs,
+            cached_positions_list=cached_positions_list,
         )
 
     async def batched_async_contains(
@@ -738,6 +774,7 @@ class LocalDiskBackend(StorageBackendInterface):
         paths: list[str],
         keys: list[CacheEngineKey],
         memory_objs: list[MemoryObj],
+        cached_positions_list: list[Optional[torch.Tensor]],
         write_back: bool = False,
     ) -> list[MemoryObj]:
         """
@@ -745,21 +782,26 @@ class LocalDiskBackend(StorageBackendInterface):
         """
 
         logger.debug("Executing `async_load_bytes` from disk.")
-        # TODO (Jiayi): handle the case where loading fails.
-        for path, key, mem_obj in zip(paths, keys, memory_objs, strict=False):
+        loaded_mem_objs: list[MemoryObj] = []
+        for idx, (path, key, mem_obj, cached_positions) in enumerate(
+            zip(paths, keys, memory_objs, cached_positions_list, strict=False)
+        ):
             buffer = mem_obj.byte_array
-            self.read_file(key, buffer, path)
+            if not self.read_file(key, buffer, path):
+                self._release_prefetch_resources([key], [mem_obj])
+                self._release_prefetch_resources(
+                    keys[idx + 1 :], memory_objs[idx + 1 :]
+                )
+                break
 
-            # TODO(Jiayi): Please recover the metadata in a more
-            # elegant way in the future.
-            cached_positions = self.dict[key].cached_positions
             mem_obj.metadata.cached_positions = cached_positions
 
             self.disk_lock.acquire()
             self.dict[key].unpin()
             self.disk_lock.release()
+            loaded_mem_objs.append(mem_obj)
 
-        return memory_objs
+        return loaded_mem_objs
 
     def load_bytes_from_disk(
         self,
@@ -768,6 +810,7 @@ class LocalDiskBackend(StorageBackendInterface):
         dtype: torch.dtype,
         shape: torch.Size,
         fmt: MemoryFormat,
+        cached_positions: Optional[torch.Tensor],
     ) -> Optional[MemoryObj]:
         """
         Load bytearray from disk.
@@ -777,11 +820,10 @@ class LocalDiskBackend(StorageBackendInterface):
         assert memory_obj is not None, "Memory allocation failed during disk load."
 
         buffer = memory_obj.byte_array
-        self.read_file(key, buffer, path)
+        if not self.read_file(key, buffer, path):
+            memory_obj.ref_count_down()
+            return None
 
-        # TODO(Jiayi): Please recover the metadata in a more
-        # elegant way in the future.
-        cached_positions = self.dict[key].cached_positions
         memory_obj.metadata.cached_positions = cached_positions
 
         return memory_obj
@@ -802,7 +844,7 @@ class LocalDiskBackend(StorageBackendInterface):
             f"Bandwidth: {size / disk_write_time / 1e6:.2f} MB/s"
         )
 
-    def read_file(self, key, buffer, path):
+    def read_file(self, key, buffer, path) -> bool:
         start_time = time.time()
         size = len(buffer)
         fblock_aligned = size % self.os_disk_bs == 0
@@ -834,16 +876,29 @@ class LocalDiskBackend(StorageBackendInterface):
             self.stats_monitor.update_local_storage_usage(self.usage)
             if manifest_data is not None:
                 self._write_manifest_data(manifest_data)
-            return
+            return False
 
         disk_read_time = time.time() - start_time
         logger.debug(
             f"Disk read size: {size} bytes, "
             f"Bandwidth: {size / disk_read_time / 1e6:.2f} MB/s"
         )
+        return True
 
     def get_allocator_backend(self):
         return self.local_cpu_backend
+
+    def _release_prefetch_resources(
+        self,
+        keys: Sequence[CacheEngineKey],
+        memory_objs: Sequence[MemoryObj],
+    ) -> None:
+        for key, memory_obj in zip(keys, memory_objs, strict=False):
+            with self.disk_lock:
+                if key in self.dict:
+                    self.dict[key].unpin()
+            memory_obj.unpin()
+            memory_obj.ref_count_down()
 
     def close(self) -> None:
         if self.batched_msg_sender is not None:
