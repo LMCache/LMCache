@@ -51,6 +51,10 @@ from lmcache.v1.mp_observability.telemetry import (
 from lmcache.v1.mp_observability.telemetry.config import (
     DEFAULT_TELEMETRY_CONFIG,
 )
+from lmcache.v1.multiprocess.audit import (
+    get_current_audit_context,
+    set_audit_enabled,
+)
 from lmcache.v1.multiprocess.config import (
     MPServerConfig,
     add_mp_server_args,
@@ -311,6 +315,15 @@ class MPCacheEngine:
         )
         gpu_context = self.gpu_contexts[instance_id]
 
+        # Enrich audit context if active
+        audit_ctx = get_current_audit_context()
+        if audit_ctx is not None:
+            audit_ctx.add(
+                request_id=key.request_id,
+                instance_id=instance_id,
+                num_obj_keys=len(obj_keys),
+            )
+
         with (
             torch.cuda.device(gpu_context.device),
             torch.cuda.stream(gpu_context.stream),
@@ -435,6 +448,16 @@ class MPCacheEngine:
             f"KV cache not registered for GPU ID {instance_id}"
         )
         gpu_context = self.gpu_contexts[instance_id]
+
+        # Enrich audit context if active
+        audit_ctx = get_current_audit_context()
+        if audit_ctx is not None:
+            audit_ctx.add(
+                request_id=key.request_id,
+                instance_id=instance_id,
+                num_obj_keys=len(obj_keys),
+                skip_first_n_tokens=skip_first_n_tokens,
+            )
 
         if get_telemetry_controller().is_enabled():
             gpu_context.cupy_stream.launch_host_func(
@@ -570,6 +593,16 @@ class MPCacheEngine:
         ipc_keys: list[IPCCacheEngineKey] = []
         model_name, world_size = key.model_name, key.world_size
         log_telemetry(make_start_event("lookup_and_prefetch", key.request_id))
+
+        # Enrich audit context if active
+        audit_ctx = get_current_audit_context()
+        if audit_ctx is not None:
+            audit_ctx.add(
+                request_id=key.request_id,
+                model_name=model_name,
+                world_size=world_size,
+                tp_size=tp_size,
+            )
 
         layout_desc = self._find_layout_desc(model_name, world_size)
         if layout_desc is None:
@@ -750,6 +783,13 @@ class MPCacheEngine:
     def debug(self) -> str:
         return "OK"
 
+    def toggle_audit(self, enabled: bool) -> str:
+        """Dynamically toggle audit logging on/off."""
+        set_audit_enabled(enabled)
+        state = "enabled" if enabled else "disabled"
+        logger.info("Audit logging %s via RPC", state)
+        return state
+
     def clear(self) -> None:
         """
         Clears all stored KV cache data from the storage manager.
@@ -820,6 +860,11 @@ def run_cache_server(
             prometheus_config.port,
         )
 
+    # Initialize audit logging
+    set_audit_enabled(mp_config.audit_enabled)
+    if mp_config.audit_enabled:
+        logger.info("Audit logging is ENABLED")
+
     # Initialize the engine (loggers self-register with the global controller)
     engine = MPCacheEngine(
         storage_manager_config=storage_manager_config,
@@ -851,6 +896,11 @@ def run_cache_server(
     add_handler_helper(server, RequestType.GET_CHUNK_SIZE, engine.get_chunk_size)
     add_handler_helper(server, RequestType.END_SESSION, engine.end_session)
     add_handler_helper(server, RequestType.NOOP, engine.debug)
+    add_handler_helper(
+        server,
+        RequestType.SET_AUDIT_ENABLED,
+        engine.toggle_audit,
+    )
 
     logger.info(
         "LMCache ZMQ cache server is running on tcp://%s:%d",

@@ -14,6 +14,10 @@ import zmq
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.multiprocess.audit import (
+    AuditContext,
+    is_audit_enabled,
+)
 from lmcache.v1.multiprocess.custom_types import (
     CudaIPCWrapper,
     get_customized_decoder,
@@ -365,6 +369,8 @@ class MessageQueueServer:
         handler_entry: SyncRequestHandler[Any],
         payloads: list[bytes],
         prefix_frames: list[bytes],
+        request_type: RequestType | None = None,
+        identity: bytes = b"",
     ) -> Any:
         """
         Call the sync handler and send the response back to the client.
@@ -373,8 +379,21 @@ class MessageQueueServer:
             handler_entry (SyncRequestHandler[Any]): The handler entry.
             payloads (list[bytes]): The payloads of the request.
             prefix_frames (list[bytes]): The prefix frames to send back.
+            request_type: Optional request type for audit.
+            identity: Client identity for audit source.
         """
-        response = handler_entry(payloads)
+        audit_ctx = self._make_audit_context(
+            handler_entry,
+            payloads,
+            request_type,
+            identity,
+        )
+        if audit_ctx is not None:
+            with audit_ctx:
+                response = handler_entry(payloads)
+                audit_ctx.set_result(response)
+        else:
+            response = handler_entry(payloads)
         response_cls = handler_entry.get_response_class()
         b_response = msgspec_encode(response, cls=response_cls)
         if response is not None:
@@ -387,6 +406,8 @@ class MessageQueueServer:
         handler_entry: BlockingRequestHandler[Any],
         payloads: list[bytes],
         prefix_frames: list[bytes],
+        request_type: RequestType | None = None,
+        identity: bytes = b"",
     ) -> Any:
         """
         Call the blocking handler in a separate thread and send the response
@@ -396,12 +417,22 @@ class MessageQueueServer:
             handler_entry (BlockingRequestHandler[Any]): The handler entry.
             payloads (list[bytes]): The payloads of the request.
             prefix_frames (list[bytes]): The prefix frames to send back.
+            request_type: Optional request type for audit.
+            identity: Client identity for audit source.
         """
+        audit_ctx = self._make_audit_context(
+            handler_entry,
+            payloads,
+            request_type,
+            identity,
+        )
         future = handler_entry(payloads)
 
         def _notify_response(fut: Future):
             try:
                 response = fut.result()
+                if audit_ctx is not None:
+                    audit_ctx.set_result(response)
                 response_cls = handler_entry.get_response_class()
                 b_response = msgspec_encode(response, cls=response_cls)
                 frames_to_send = (
@@ -414,7 +445,18 @@ class MessageQueueServer:
                 self.output_notifier.send(b"1")
 
             except Exception as e:
+                if audit_ctx is not None:
+                    audit_ctx.set_error(str(e))
                 logger.error("Error in blocking handler: %s", e)
+            finally:
+                if audit_ctx is not None:
+                    # Manually emit audit since we are outside
+                    # the with-block (thread callback).
+                    audit_ctx.__exit__(None, None, None)
+
+        # Enter audit context before the callback fires
+        if audit_ctx is not None:
+            audit_ctx.__enter__()
 
         # TODO: HERE'S A BUG: WE CANNOT SEND RESPONSE IN THE FUTURE THREAD
         # BECAUSE THE OUTPUT ZMQ SOCKET IS NOT THREAD-SAFE.
@@ -422,19 +464,67 @@ class MessageQueueServer:
         # RESPONSE AND USE THE THREAD-QUEUE TO PASS THE RESPONSE DATA
         future.add_done_callback(_notify_response)
 
+    @staticmethod
+    def _make_audit_context(
+        handler_entry: RequestHandlerBase[Any],
+        payloads: list[bytes],
+        request_type: RequestType | None,
+        identity: bytes,
+    ) -> AuditContext | None:
+        """Build an :class:`AuditContext` if auditing is on."""
+        if not is_audit_enabled():
+            return None
+
+        param_names: list[str] = []
+        if isinstance(handler_entry, SyncRequestHandler):
+            clss = handler_entry.payload_clss
+        elif isinstance(handler_entry, BlockingRequestHandler):
+            clss = handler_entry.payload_clss
+        else:
+            clss = []
+        param_names = [c.__name__ for c in clss]
+
+        params: dict[str, str] = {}
+        for idx, name in enumerate(param_names):
+            if idx < len(payloads):
+                # Only keep the first 120 chars to
+                # avoid huge binary blobs in logs.
+                raw = repr(payloads[idx][:64])
+                params[name] = raw[:120] + "..." if len(raw) > 120 else raw
+
+        return AuditContext(
+            request_type=(request_type.name if request_type is not None else "UNKNOWN"),
+            source=identity.hex() if identity else "",
+            params=params,
+        )
+
     def _call_handler(
         self,
         handler_entry: RequestHandlerBase[Any],
         payloads: list[bytes],
         prefix_frames: list[bytes],
+        request_type: RequestType | None = None,
+        identity: bytes = b"",
     ) -> Any:
         match handler_entry.get_handler_type():
             case HandlerType.SYNC:
                 assert isinstance(handler_entry, SyncRequestHandler)
-                self._call_sync_handler(handler_entry, payloads, prefix_frames)
+                self._call_sync_handler(
+                    handler_entry,
+                    payloads,
+                    prefix_frames,
+                    request_type,
+                    identity,
+                )
             case HandlerType.BLOCKING:
                 assert isinstance(handler_entry, BlockingRequestHandler)
-                self._call_blocking_handler(handler_entry, payloads, prefix_frames)
+                self._call_blocking_handler(
+                    handler_entry,
+                    payloads,
+                    prefix_frames,
+                    request_type,
+                    identity,
+                )
             case HandlerType.NON_BLOCKING:
                 raise NotImplementedError("Non-blocking handler is not supported yet")
             case _:
@@ -463,6 +553,8 @@ class MessageQueueServer:
                             handler_entry=handler_entry,
                             payloads=payloads,
                             prefix_frames=[identity, b_request_uid, b_request_type],
+                            request_type=request_type,
+                            identity=identity,
                         )
                     except Exception as e:
                         logger.error("Error handling request %s: %s", request_type, e)

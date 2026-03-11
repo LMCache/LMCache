@@ -54,6 +54,7 @@ class RequestType(enum.Enum):
 
     # Debug operations
     NOOP = enum.auto()
+    SET_AUDIT_ENABLED = enum.auto()
 
     # Blend operations
     CB_REGISTER_KV_CACHE = enum.auto()

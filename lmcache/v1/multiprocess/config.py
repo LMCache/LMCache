@@ -1,12 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 
-"""
-Configuration for the multiprocess (ZMQ) server and HTTP frontend.
-"""
+"""Configuration for the multiprocess (ZMQ) server and HTTP frontend."""
 
 # Standard
 from dataclasses import dataclass
 import argparse
+import os
 
 
 @dataclass
@@ -31,6 +30,12 @@ class MPServerConfig:
     engine_type: str = "default"
     """Cache engine backend type 
     ('default' for MPCacheEngine, 'blend' for BlendEngineV2).
+    """
+
+    audit_enabled: bool = False
+    """Enable RPC audit logging.
+
+    Can also be turned on via ``LMCACHE_AUDIT_LOG=1``.
     """
 
 
@@ -106,6 +111,14 @@ def add_mp_server_args(
         "'blend' uses BlendEngineV2 for cross-request KV reuse. "
         "Default is 'default'.",
     )
+    mp_group.add_argument(
+        "--enable-audit-log",
+        action="store_true",
+        default=False,
+        help="Enable RPC audit logging. "
+        "Can also be enabled via LMCACHE_AUDIT_LOG=1. "
+        "Default is disabled.",
+    )
     return parser
 
 
@@ -121,6 +134,8 @@ def parse_args_to_mp_server_config(
     Returns:
         MPServerConfig: The configuration object.
     """
+    audit_from_env = os.environ.get("LMCACHE_AUDIT_LOG", "0") == "1"
+    audit_from_arg = getattr(args, "enable_audit_log", False)
     return MPServerConfig(
         host=args.host,
         port=args.port,
@@ -128,6 +143,7 @@ def parse_args_to_mp_server_config(
         max_workers=args.max_workers,
         hash_algorithm=args.hash_algorithm,
         engine_type=args.engine_type,
+        audit_enabled=audit_from_arg or audit_from_env,
     )
 
 

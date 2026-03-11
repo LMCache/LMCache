@@ -12,6 +12,7 @@ from lmcache.v1.multiprocess.protocols.base import HandlerType, ProtocolDefiniti
 # Define request names for this protocol group
 REQUEST_NAMES = [
     "NOOP",
+    "SET_AUDIT_ENABLED",
 ]
 
 
@@ -28,6 +29,14 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
         # Returns: str - A confirmation message
         "NOOP": ProtocolDefinition(
             payload_classes=[],
+            response_class=str,
+            handler_type=HandlerType.SYNC,
+        ),
+        # Toggle audit logging at runtime
+        # Payload: bool - True to enable, False to disable
+        # Returns: str - Confirmation message
+        "SET_AUDIT_ENABLED": ProtocolDefinition(
+            payload_classes=[bool],
             response_class=str,
             handler_type=HandlerType.SYNC,
         ),

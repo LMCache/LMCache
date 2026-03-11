@@ -728,6 +728,11 @@ def run_cache_server(
     add_handler_helper(server, RequestType.GET_CHUNK_SIZE, engine.get_chunk_size)
     add_handler_helper(server, RequestType.END_SESSION, engine.end_session)
     add_handler_helper(server, RequestType.NOOP, engine.debug)
+    add_handler_helper(
+        server,
+        RequestType.SET_AUDIT_ENABLED,
+        engine.toggle_audit,
+    )
 
     # Add handler for blend operations
     add_handler_helper(
