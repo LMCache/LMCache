@@ -118,7 +118,8 @@ class LMCacheMPSchedulerAdapter:
             tp_size: Tensor-parallel size for MLA
                 multi-reader locking (default 1).
         """
-        self.mq_client = MessageQueueClient(server_url, context)
+        identity = "sched-%d-%d" % (kv_rank, os.getpid())
+        self.mq_client = MessageQueueClient(server_url, context, identity=identity)
 
         # Two-phase lookup state:
         # - phase 1: request_id -> server prefetch job ID
@@ -324,10 +325,10 @@ class LMCacheMPWorkerAdapter:
         kv_rank: int,
         vllm_block_size: int,
     ):
-        self.mq_client = MessageQueueClient(server_url, context)
-
         # Instance id for GPU worker
         self.instance_id = os.getpid()
+        identity = "worker-%d-%d" % (kv_rank, self.instance_id)
+        self.mq_client = MessageQueueClient(server_url, context, identity=identity)
 
         # Registered kv caches from vLLM
         self.kv_caches: dict[str, torch.Tensor] = {}

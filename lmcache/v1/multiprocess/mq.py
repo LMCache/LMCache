@@ -117,10 +117,17 @@ class MessageQueueClient:
         request_type: RequestType
         request_payloads: list[Any]
 
-    def __init__(self, server_url: str, context: zmq.Context):
+    def __init__(
+        self,
+        server_url: str,
+        context: zmq.Context,
+        identity: str | None = None,
+    ):
         # Socket
         self.ctx = context
         self.socket = self.ctx.socket(zmq.DEALER)
+        if identity:
+            self.socket.setsockopt(zmq.IDENTITY, identity.encode("utf-8"))
         self.socket.connect(server_url)
 
         # Input queue
@@ -465,6 +472,24 @@ class MessageQueueServer:
         future.add_done_callback(_notify_response)
 
     @staticmethod
+    def _decode_identity(identity: bytes) -> str:
+        """Decode ZMQ identity to a human-readable string.
+
+        If the client set a custom UTF-8 identity it is returned
+        as-is; otherwise the raw bytes are shown in hex.
+        ZMQ auto-generated identities always start with ``\\x00``.
+        """
+        if not identity:
+            return ""
+        # Auto-generated identities start with \x00
+        if identity[0:1] == b"\x00":
+            return identity.hex()
+        try:
+            return identity.decode("utf-8")
+        except (UnicodeDecodeError, ValueError):
+            return identity.hex()
+
+    @staticmethod
     def _make_audit_context(
         handler_entry: RequestHandlerBase[Any],
         payloads: list[bytes],
@@ -494,7 +519,7 @@ class MessageQueueServer:
 
         return AuditContext(
             request_type=(request_type.name if request_type is not None else "UNKNOWN"),
-            source=identity.hex() if identity else "",
+            source=MessageQueueServer._decode_identity(identity),
             params=params,
         )
 
