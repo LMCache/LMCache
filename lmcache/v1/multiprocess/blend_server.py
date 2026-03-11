@@ -34,6 +34,15 @@ from lmcache.v1.mp_observability.prometheus_controller import (
     get_prometheus_controller,
     init_prometheus_controller,
 )
+from lmcache.v1.mp_observability.telemetry import (
+    TelemetryConfig,
+    get_telemetry_controller,
+    init_telemetry_controller,
+    parse_args_to_telemetry_config,
+)
+from lmcache.v1.mp_observability.telemetry.config import (
+    DEFAULT_TELEMETRY_CONFIG,
+)
 from lmcache.v1.multiprocess.config import (
     MPServerConfig,
     parse_args_to_mp_server_config,
@@ -99,6 +108,17 @@ class BlendEngine(MPCacheEngine):
         # self._sep_token_len = len(sep_tokens)
         # self._token_matcher = ParallelPatternMatcher(sep_tokens)
         self._token_matcher = RangePatternMatcher(sep_tokens[0], sep_tokens[1])
+
+    def report_status(self) -> dict:
+        """Return a status dict for the blend engine."""
+        status = super().report_status()
+        status["engine_type"] = "BlendEngine"
+        status["cb_registered_gpu_ids"] = list(self._cb_gpu_contexts.keys())
+        status["cb_gpu_context_meta"] = {
+            str(gpu_id): {"model_name": meta[0], "world_size": meta[1]}
+            for gpu_id, meta in self._cb_gpu_context_meta.items()
+        }
+        return status
 
     def cb_register_kv_cache(
         self,
@@ -626,6 +646,7 @@ def run_cache_server(
     mp_config: MPServerConfig,
     storage_manager_config: StorageManagerConfig,
     prometheus_config: PrometheusConfig,
+    telemetry_config: TelemetryConfig = DEFAULT_TELEMETRY_CONFIG,
     return_engine: bool = False,
 ):
     """
@@ -635,6 +656,7 @@ def run_cache_server(
         mp_config: Configuration for the ZMQ multiprocess server
         storage_manager_config: Configuration for the storage manager
         prometheus_config: Configuration for the Prometheus observability stack
+        telemetry_config: Configuration for the telemetry event system
         return_engine: If True, return (server, engine) after starting;
                        if False, run blocking loop to keep server alive
 
@@ -644,6 +666,9 @@ def run_cache_server(
     """
     # Initialize global prometheus controller
     init_prometheus_controller(prometheus_config)
+
+    # Initialize global telemetry controller
+    init_telemetry_controller(telemetry_config)
 
     sep_tokens = get_sep_tokens()
 
@@ -669,6 +694,9 @@ def run_cache_server(
     )
     add_handler_helper(server, RequestType.STORE, engine.store)
     add_handler_helper(server, RequestType.LOOKUP, engine.lookup)
+    add_handler_helper(
+        server, RequestType.QUERY_PREFETCH_STATUS, engine.query_prefetch_status
+    )
     add_handler_helper(server, RequestType.RETRIEVE, engine.retrieve)
     add_handler_helper(server, RequestType.CLEAR, engine.clear)
     add_handler_helper(server, RequestType.GET_CHUNK_SIZE, engine.get_chunk_size)
@@ -704,6 +732,9 @@ def run_cache_server(
 
     # Start prometheus controller after engine creation (loggers are registered)
     get_prometheus_controller().start()
+
+    # Start telemetry controller
+    get_telemetry_controller().start()
     logger.info("LMCache cache blend server is running...")
 
     # Return server and engine if requested (for HTTP server integration)
@@ -716,6 +747,7 @@ def run_cache_server(
             time.sleep(1)
     except KeyboardInterrupt:
         logger.info("Shutting down server...")
+        get_telemetry_controller().stop()
         get_prometheus_controller().stop()
         server.close()
         engine.close()
@@ -726,8 +758,10 @@ if __name__ == "__main__":
     mp_config = parse_args_to_mp_server_config(args)
     storage_manager_config = parse_args_to_config(args)
     prometheus_config = parse_args_to_prometheus_config(args)
+    telemetry_config = parse_args_to_telemetry_config(args)
     run_cache_server(
         mp_config=mp_config,
         storage_manager_config=storage_manager_config,
         prometheus_config=prometheus_config,
+        telemetry_config=telemetry_config,
     )
