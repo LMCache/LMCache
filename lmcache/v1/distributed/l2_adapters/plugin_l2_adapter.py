@@ -126,7 +126,7 @@ def _create_plugin_adapter(
             "L2AdapterInterface" % (config.module_path, config.class_name)
         )
 
-    return adapter_cls(**kwargs, **config.adapter_params)
+    return adapter_cls(config.adapter_params, **kwargs)  # type: ignore[call-arg]
 
 
 # Self-register config type and adapter factory
