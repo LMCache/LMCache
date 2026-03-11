@@ -9,6 +9,7 @@ reference implementation for third-party plugin authors.
 
 # Standard
 from collections import defaultdict
+from typing import Any
 import asyncio
 import copy
 import os
@@ -51,8 +52,10 @@ def _clone_tensor_memory_obj(
 class InMemoryL2Adapter(L2AdapterInterface):
     """In-memory L2 adapter loaded as an external plugin.
 
-    Constructor keyword arguments (forwarded from
-    ``adapter_params`` in the JSON config):
+    Constructor receives the ``adapter_params`` dict from
+    the JSON config as its first positional argument.
+
+    Recognised keys inside *adapter_params*:
 
     - **max_size_gb** (*float*) -- maximum cache size in
       GiB.  Default ``0.5``.
@@ -67,10 +70,12 @@ class InMemoryL2Adapter(L2AdapterInterface):
 
     def __init__(
         self,
-        max_size_gb: float = 0.5,
-        mock_bandwidth_gb: float = 10.0,
+        adapter_params: dict[str, Any] | None = None,
         **_kwargs: object,
     ):
+        params = adapter_params or {}
+        max_size_gb = float(params.get("max_size_gb", 0.5))
+        mock_bandwidth_gb = float(params.get("mock_bandwidth_gb", 10.0))
         cap = int(max_size_gb * (1024**3))
         bw = int(mock_bandwidth_gb * (1024**3))
 

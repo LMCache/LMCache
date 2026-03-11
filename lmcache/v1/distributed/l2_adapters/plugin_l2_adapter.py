@@ -39,8 +39,8 @@ class PluginL2AdapterConfig(L2AdapterConfigBase):
         containing the adapter class.
     - class_name: Name of the class inside *module_path*
         that implements ``L2AdapterInterface``.
-    - adapter_params: Arbitrary dict of keyword arguments
-        forwarded to the adapter class constructor.
+    - adapter_params: Arbitrary dict passed as the first
+        positional argument to the adapter class constructor.
     """
 
     def __init__(
@@ -82,9 +82,9 @@ class PluginL2AdapterConfig(L2AdapterConfigBase):
             "(required)\n"
             "- class_name (str): name of the adapter "
             "class inside the module (required)\n"
-            "- adapter_params (dict): keyword arguments "
-            "forwarded to the adapter constructor "
-            "(optional, default {})\n"
+            "- adapter_params (dict): passed as the first "
+            "positional argument to the adapter "
+            "constructor (optional, default {})\n"
             "\n"
             "Example JSON:\n"
             '{"type": "plugin", '
@@ -126,7 +126,9 @@ def _create_plugin_adapter(
             "L2AdapterInterface" % (config.module_path, config.class_name)
         )
 
-    return adapter_cls(**kwargs, **config.adapter_params)
+    return adapter_cls(  # type: ignore[call-arg]
+        config.adapter_params, **kwargs
+    )
 
 
 # Self-register config type and adapter factory
