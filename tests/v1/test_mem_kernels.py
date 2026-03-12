@@ -599,58 +599,77 @@ def test_lmcache_memcpy_async():
         (13 * chunk_size) // 4,
         chunk_size * num_chunks,
     ]
+    host_offset_biases = [0, 1 << 40]
 
     # H2D copy
-    for start, end in zip(starts, ends, strict=False):
-        # should not be equal before copy
-        with pytest.raises(AssertionError):
+    for host_offset_bias in host_offset_biases:
+        for start, end in zip(starts, ends, strict=False):
+            # should not be equal before copy
+            with pytest.raises(AssertionError):
+                check_gpu_and_cpu_equal(
+                    big_gpu_tensor[start // dtype.itemsize : end // dtype.itemsize],
+                    big_cpu_tensor[start // dtype.itemsize : end // dtype.itemsize],
+                )
+
+            lmc_ops.lmcache_memcpy_async(
+                big_gpu_tensor.data_ptr() + start,
+                big_cpu_tensor.data_ptr() + start,
+                end - start,
+                lmc_ops.TransferDirection.H2D,
+                host_offset_bias + start,
+                chunk_size,
+            )
+            torch.cuda.synchronize()
+
             check_gpu_and_cpu_equal(
                 big_gpu_tensor[start // dtype.itemsize : end // dtype.itemsize],
                 big_cpu_tensor[start // dtype.itemsize : end // dtype.itemsize],
             )
 
-        lmc_ops.lmcache_memcpy_async(
-            big_gpu_tensor.data_ptr() + start,
-            big_cpu_tensor.data_ptr() + start,
-            end - start,
-            lmc_ops.TransferDirection.H2D,
-            start,
-            chunk_size,
-        )
-        torch.cuda.synchronize()
-
-        check_gpu_and_cpu_equal(
-            big_gpu_tensor[start // dtype.itemsize : end // dtype.itemsize],
-            big_cpu_tensor[start // dtype.itemsize : end // dtype.itemsize],
-        )
+            big_gpu_tensor[
+                start // dtype.itemsize : end // dtype.itemsize
+            ] = torch.rand(
+                end // dtype.itemsize - start // dtype.itemsize,
+                dtype=dtype,
+                device="cuda",
+            )
 
     # Reset the data in gpu
     big_gpu_tensor = torch.rand(
         elements_per_chunk * num_chunks, dtype=dtype, device="cuda"
     )
     # D2H copy
-    for start, end in zip(starts, ends, strict=False):
-        # copy from gpu to cpu
-        with pytest.raises(AssertionError):
+    for host_offset_bias in host_offset_biases:
+        for start, end in zip(starts, ends, strict=False):
+            # copy from gpu to cpu
+            with pytest.raises(AssertionError):
+                check_gpu_and_cpu_equal(
+                    big_gpu_tensor[start // dtype.itemsize : end // dtype.itemsize],
+                    big_cpu_tensor[start // dtype.itemsize : end // dtype.itemsize],
+                )
+
+            lmc_ops.lmcache_memcpy_async(
+                big_cpu_tensor.data_ptr() + start,
+                big_gpu_tensor.data_ptr() + start,
+                end - start,
+                lmc_ops.TransferDirection.D2H,
+                host_offset_bias + start,
+                chunk_size,
+            )
+            torch.cuda.synchronize()
+
             check_gpu_and_cpu_equal(
                 big_gpu_tensor[start // dtype.itemsize : end // dtype.itemsize],
                 big_cpu_tensor[start // dtype.itemsize : end // dtype.itemsize],
             )
 
-        lmc_ops.lmcache_memcpy_async(
-            big_cpu_tensor.data_ptr() + start,
-            big_gpu_tensor.data_ptr() + start,
-            end - start,
-            lmc_ops.TransferDirection.D2H,
-            start,
-            chunk_size,
-        )
-        torch.cuda.synchronize()
-
-        check_gpu_and_cpu_equal(
-            big_gpu_tensor[start // dtype.itemsize : end // dtype.itemsize],
-            big_cpu_tensor[start // dtype.itemsize : end // dtype.itemsize],
-        )
+            big_cpu_tensor[
+                start // dtype.itemsize : end // dtype.itemsize
+            ] = torch.rand(
+                end // dtype.itemsize - start // dtype.itemsize,
+                dtype=dtype,
+                device="cpu",
+            )
 
     # Unregister the cpu memory
     ptr = big_cpu_tensor.data_ptr()

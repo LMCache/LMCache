@@ -77,15 +77,15 @@ enum class GPUKVFormat : int {
 void multi_layer_kv_transfer(
     torch::Tensor& key_value, const torch::Tensor& key_value_ptrs,
     const torch::Tensor& slot_mapping, const torch::Device& paged_memory_device,
-    const int page_buffer_size, const TransferDirection direction,
-    const GPUKVFormat gpu_kv_format, const int block_size = 0,
-    const int skip_prefix_n_tokens = 0);
+    const int64_t page_buffer_size, const TransferDirection direction,
+    const GPUKVFormat gpu_kv_format, const int64_t block_size = 0,
+    const int64_t skip_prefix_n_tokens = 0);
 
 // collapses to multi_layer_kv_transfer for MLA
 void multi_layer_kv_transfer_unilateral(
     torch::Tensor& key_value, const torch::Tensor& key_value_ptrs,
     const torch::Tensor& slot_mapping, const torch::Device& paged_memory_device,
-    const int page_buffer_size, const TransferDirection direction,
+    const int64_t page_buffer_size, const TransferDirection direction,
     const GPUKVFormat gpu_kv_format);
 
 void single_layer_kv_transfer(torch::Tensor& lmc_key_value_cache,
