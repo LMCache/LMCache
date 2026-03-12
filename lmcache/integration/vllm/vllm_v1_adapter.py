@@ -135,6 +135,9 @@ class RequestTracker:
     # Whether the request cache should be saved
     skip_save: bool = False
 
+    # The number of tokens that are cached in LMCache for this request
+    num_lmcache_cached_tokens: int = 0
+
     @_lmcache_nvtx_annotate
     @staticmethod
     def from_new_request(
@@ -194,6 +197,7 @@ class RequestTracker:
             mm_positions=mm_positions,
             skip_save=skip_save,
             request_configs=request_configs,
+            num_lmcache_cached_tokens=lmcache_cached_tokens,
         )
 
     def update(
@@ -1578,6 +1582,36 @@ class LMCacheConnectorV1Impl:
                     f"{max(lmcache_cached_tokens, vllm_cached_tokens)}"
                 )
 
+            # When retrieve fail, vllm will call _handle_invalid_blocks to
+            # reset request.num_computed_tokens, this will lead to
+            # request_tracker.token_ids being not matched with vllm
+            if num_current_tokens < len(request_tracker.token_ids):
+                logger.warning(
+                    "Request %s rolled back from %d to %d tokens; "
+                    "truncating tracker state.",
+                    req_id,
+                    len(request_tracker.token_ids),
+                    num_current_tokens,
+                )
+                num_token_slots = (
+                    len(request_tracker.allocated_block_ids) * self._block_size
+                )
+                tokens_to_keep = num_current_tokens
+                if num_token_slots < num_current_tokens:
+                    logger.warning(
+                        "Request %s tracker has %d token slots but %d tokens; "
+                        "capping token_ids to slot capacity.",
+                        req_id,
+                        num_token_slots,
+                        num_current_tokens,
+                    )
+                    tokens_to_keep = num_token_slots
+
+                request_tracker.token_ids = list(request.all_token_ids[:tokens_to_keep])
+                request_tracker.num_saved_tokens = min(
+                    request_tracker.num_saved_tokens, tokens_to_keep
+                )
+
             # Pass all_token_ids for preempted requests to restore
             # token_ids correctly for chunk key computation
             all_token_ids = list(request.all_token_ids) if preempted else None
@@ -1623,9 +1657,7 @@ class LMCacheConnectorV1Impl:
             # Cancel any ongoing async lookup and prefetch tasks on workers
             lookup_id = request.request_id
             assert self.lookup_client is not None
-            self.lookup_client.cancel_lookup(  # type: ignore[attr-defined]
-                lookup_id
-            )
+            self.lookup_client.cancel_lookup(lookup_id)  # type: ignore[attr-defined]
 
         params = (
             request.kv_transfer_params
@@ -1640,6 +1672,16 @@ class LMCacheConnectorV1Impl:
             return_params = {
                 "first_tok": request._output_token_ids[0],
             }
+
+        if self.config.get_extra_config_value(
+            "enable_cache_usage_details_in_response", False
+        ):
+            request_tracker = self._request_trackers.get(request.request_id)
+            if request_tracker:
+                return_params = return_params or {}
+                return_params["num_lmcache_cached_tokens"] = (
+                    request_tracker.num_lmcache_cached_tokens
+                )
 
         return False, return_params
 

@@ -356,6 +356,137 @@ class TestStorageManagerBasic:
 
 
 # =============================================================================
+# Tests for multi-reader (count / num_readers) support
+# =============================================================================
+
+
+class TestStorageManagerMultiReader:
+    """Tests for the num_readers / count parameters.
+
+    These parameters allow multiple workers (e.g. MLA with
+    TP > 1) to each hold an independent read lock on the same
+    prefetched object.
+    """
+
+    def test_prefetch_with_extra_count(
+        self, basic_storage_manager_config, basic_layout
+    ):
+        """submit_prefetch_task(extra_count=N-1) acquires N locks."""
+        sm = StorageManager(basic_storage_manager_config)
+        keys = [make_object_key(i) for i in range(3)]
+
+        # Write keys
+        ret = sm.reserve_write(keys, basic_layout, mode="new")
+        assert len(ret) == len(keys)
+        sm.finish_write(list(ret.keys()))
+
+        extra_count = 2  # total = 1 + 2 = 3 locks
+        handle = sm.submit_prefetch_task(keys, basic_layout, extra_count=extra_count)
+        hit = sm.query_prefetch_status(handle)
+        assert hit == len(keys)
+
+        # Release with matching extra_count
+        sm.finish_read_prefetched(keys, extra_count=extra_count)
+
+        # All locks released -> objects writable again
+        ret = sm.reserve_write(keys, basic_layout, mode="update")
+        assert len(ret) == len(keys)
+
+        sm.close()
+
+    def test_finish_read_prefetched_partial_extra_count(
+        self, basic_storage_manager_config, basic_layout
+    ):
+        """Partial extra_count release leaves locks held."""
+        sm = StorageManager(basic_storage_manager_config)
+        keys = [make_object_key(i) for i in range(2)]
+
+        ret = sm.reserve_write(keys, basic_layout, mode="new")
+        sm.finish_write(list(ret.keys()))
+
+        extra_count = 3  # total = 1 + 3 = 4 locks
+        handle = sm.submit_prefetch_task(keys, basic_layout, extra_count=extra_count)
+        hit = sm.query_prefetch_status(handle)
+        assert hit == len(keys)
+
+        # Release 2 of 4 (1 + extra_count=1)
+        sm.finish_read_prefetched(keys, extra_count=1)
+
+        # Objects should NOT be writable (2 locks remain)
+        ret = sm.reserve_write(keys, basic_layout, mode="update")
+        assert len(ret) == 0
+
+        # Release remaining 2 (1 + extra_count=1)
+        sm.finish_read_prefetched(keys, extra_count=1)
+
+        # Now writable
+        ret = sm.reserve_write(keys, basic_layout, mode="update")
+        assert len(ret) == len(keys)
+
+        sm.close()
+
+    def test_prefetch_skipped_keys_released_with_extra(
+        self, basic_storage_manager_config, basic_layout
+    ):
+        """Non-prefix L1 hits are released with correct extra.
+
+        Keys {0,1,3,4} exist, key 2 is missing.  The prefix
+        hits are {0,1}; keys {3,4} must have their N locks
+        released to avoid dangling locks.
+        """
+        sm = StorageManager(basic_storage_manager_config)
+        all_keys = [make_object_key(i) for i in range(5)]
+        existing = [all_keys[i] for i in [0, 1, 3, 4]]
+
+        ret = sm.reserve_write(existing, basic_layout, mode="new")
+        sm.finish_write(list(ret.keys()))
+
+        extra_count = 1  # total = 1 + 1 = 2 locks
+        handle = sm.submit_prefetch_task(
+            all_keys, basic_layout, extra_count=extra_count
+        )
+        hit = sm.query_prefetch_status(handle)
+        # Only prefix {0,1} count as hits
+        assert hit is not None
+        assert hit == 2
+
+        # Finish the prefix hits
+        sm.finish_read_prefetched(all_keys[:2], extra_count=extra_count)
+
+        # Keys {3,4} should be writable (skipped locks released)
+        ret = sm.reserve_write(
+            [all_keys[3], all_keys[4]],
+            basic_layout,
+            mode="update",
+        )
+        assert len(ret) == 2
+
+        sm.close()
+
+    def test_extra_count_default_is_zero(
+        self, basic_storage_manager_config, basic_layout
+    ):
+        """Default extra_count=0 behaves same as before."""
+        sm = StorageManager(basic_storage_manager_config)
+        keys = [make_object_key(i) for i in range(3)]
+
+        ret = sm.reserve_write(keys, basic_layout, mode="new")
+        sm.finish_write(list(ret.keys()))
+
+        handle = sm.submit_prefetch_task(keys, basic_layout)
+        hit = sm.query_prefetch_status(handle)
+        assert hit == len(keys)
+
+        # Single finish is enough
+        sm.finish_read_prefetched(keys)
+
+        ret = sm.reserve_write(keys, basic_layout, mode="update")
+        assert len(ret) == len(keys)
+
+        sm.close()
+
+
+# =============================================================================
 # L2 Prefetch Integration Tests
 # =============================================================================
 

@@ -467,7 +467,7 @@ def test_mq_retrieve():
     # Run test with RETRIEVE request
     helper.run_test(
         request_type=RequestType.RETRIEVE,
-        payloads=[key, gpu_id, gpu_block_ids, test_handle],
+        payloads=[key, gpu_id, gpu_block_ids, test_handle, 0],
         expected_response=(b"\x01" * 64, True),
         num_requests=1,
     )
@@ -491,7 +491,7 @@ def test_mq_lookup():
     # Run test with LOOKUP request
     helper.run_test(
         request_type=RequestType.LOOKUP,
-        payloads=[key],
+        payloads=[key, 1],
         expected_response=expected_response,
         num_requests=1,
     )
@@ -515,7 +515,7 @@ def test_mq_lookup_with_different_key():
     # Run test with LOOKUP request
     helper.run_test(
         request_type=RequestType.LOOKUP,
-        payloads=[key],
+        payloads=[key, 1],
         expected_response=expected_response,
         num_requests=1,
     )

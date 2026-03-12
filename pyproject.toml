@@ -144,6 +144,10 @@ warn_return_any = false
 
 follow_imports = "silent"
 
+[tool.codespell]
+ignore-words-list = "afterall,allready,notin"
+skip = "operator/config/crd/bases/*"
+
 [tool.cibuildwheel]
 build = "cp3*-manylinux_x86_64"
 
