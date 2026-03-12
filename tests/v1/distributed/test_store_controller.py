@@ -20,6 +20,9 @@ import torch
 # First Party
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.config import L1ManagerConfig, L1MemoryManagerConfig
+from lmcache.v1.distributed.eviction_policy.noop import (
+    NoOpEvictionPolicy,
+)
 from lmcache.v1.distributed.l1_manager import L1Manager
 from lmcache.v1.distributed.l2_adapters.mock_l2_adapter import (
     MockL2Adapter,
@@ -31,6 +34,7 @@ from lmcache.v1.distributed.storage_controllers.store_controller import (
 )
 from lmcache.v1.distributed.storage_controllers.store_policy import (
     AdapterDescriptor,
+    BufferOnlyStorePolicy,
     DefaultStorePolicy,
     StorePolicy,
 )
@@ -589,3 +593,98 @@ class TestStoreControllerCustomPolicy:
         ctrl.stop()
         for a in adapters:
             a.close()
+
+
+class TestBufferOnlyMode:
+    """Test buffer-only mode: BufferOnlyStorePolicy + NoOpEvictionPolicy."""
+
+    def test_l1_cleaned_after_l2_store(self, l1_manager):
+        """L1 data should be deleted after successful L2 store."""
+        adapter = make_adapter()
+        noop_policy = NoOpEvictionPolicy()
+        l1_manager.register_listener(noop_policy)
+
+        ctrl = StoreController(
+            l1_manager=l1_manager,
+            l2_adapters=[adapter],
+            adapter_descriptors=[make_descriptor(0)],
+            policy=BufferOnlyStorePolicy(),
+        )
+        ctrl.start()
+
+        layout = make_layout()
+        keys = [make_object_key(0)]
+        write_keys_to_l1(l1_manager, keys, layout)
+
+        # Wait for L2 store
+        ok = wait_for_condition(
+            lambda: adapter.debug_has_key(keys[0]),
+            timeout=5.0,
+        )
+        assert ok, "Object should be stored in L2"
+
+        # L1 should be cleaned: re-create with mode='new' succeeds
+        ok = wait_for_condition(
+            lambda: l1_manager.reserve_write(
+                keys=keys,
+                is_temporary=[False],
+                layout_desc=layout,
+                mode="new",
+            )[keys[0]][1]
+            is not None,
+            timeout=5.0,
+        )
+        assert ok, "Key should be re-creatable after L1 deletion in buffer-only mode"
+
+        ctrl.stop()
+        adapter.close()
+
+    def test_noop_eviction_never_evicts(self):
+        """NoOpEvictionPolicy should never return eviction actions."""
+        noop = NoOpEvictionPolicy()
+        noop.on_keys_created([make_object_key(i) for i in range(10)])
+        assert noop.get_eviction_actions(1.0) == []
+
+    def test_buffer_only_multiple_keys(self, l1_manager):
+        """Multiple keys should all flow to L2 and be removed
+        from L1."""
+        adapter = make_adapter()
+        noop_policy = NoOpEvictionPolicy()
+        l1_manager.register_listener(noop_policy)
+
+        ctrl = StoreController(
+            l1_manager=l1_manager,
+            l2_adapters=[adapter],
+            adapter_descriptors=[make_descriptor(0)],
+            policy=BufferOnlyStorePolicy(),
+        )
+        ctrl.start()
+
+        layout = make_layout()
+        keys = [make_object_key(i) for i in range(5)]
+        write_keys_to_l1(l1_manager, keys, layout)
+
+        ok = wait_for_condition(
+            lambda: adapter.debug_get_stored_object_count() == 5,
+            timeout=5.0,
+        )
+        assert ok, "All 5 objects should be stored in L2"
+
+        # All keys should be removable from L1 (re-create)
+        ok = wait_for_condition(
+            lambda: all(
+                l1_manager.reserve_write(
+                    keys=[k],
+                    is_temporary=[False],
+                    layout_desc=layout,
+                    mode="new",
+                )[k][1]
+                is not None
+                for k in keys
+            ),
+            timeout=5.0,
+        )
+        assert ok, "All keys should be re-creatable after buffer-only L1 cleanup"
+
+        ctrl.stop()
+        adapter.close()

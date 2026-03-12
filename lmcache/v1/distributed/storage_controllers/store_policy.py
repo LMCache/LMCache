@@ -180,4 +180,49 @@ class DefaultStorePolicy(StorePolicy):
         return []
 
 
+class BufferOnlyStorePolicy(StorePolicy):
+    """
+    Buffer-only store policy: store all keys to all adapters,
+    then delete them from L1 immediately.
+
+    Use this with NoOpEvictionPolicy to avoid useless LRU
+    tracking overhead when L1 is a pure write buffer.
+    """
+
+    def select_store_targets(
+        self,
+        keys: list[ObjectKey],
+        adapters: list[AdapterDescriptor],
+    ) -> dict[int, list[ObjectKey]]:
+        """
+        Store all keys to all adapters.
+
+        Args:
+            keys: Keys that were just written to L1.
+            adapters: Descriptors of available L2 adapters.
+
+        Returns:
+            Mapping from every adapter index to the full
+            list of keys.
+        """
+        return {ad.index: list(keys) for ad in adapters}
+
+    def select_l1_deletions(
+        self,
+        keys: list[ObjectKey],
+    ) -> list[ObjectKey]:
+        """
+        Delete all keys from L1 after successful L2 store.
+
+        Args:
+            keys: Keys that were successfully stored to L2.
+
+        Returns:
+            All keys (remove everything from L1).
+        """
+        return list(keys)
+
+
 register_store_policy("default", DefaultStorePolicy)
+register_store_policy("noop", BufferOnlyStorePolicy)
+
