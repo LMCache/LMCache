@@ -5,6 +5,7 @@
 #include "mem_kernels.cuh"
 #include <ATen/ATen.h>
 #include <ATen/cuda/CUDAContext.h>
+#include <limits>
 #ifdef USE_ROCM
   #include <hip/hip_fp8.h>
 #else
@@ -24,6 +25,34 @@
       }                                                                     \
     } while (0)
 #endif
+
+unsigned int checked_cuda_dim_component(const int64_t value,
+                                        const int64_t limit,
+                                        const char* const name) {
+  TORCH_CHECK(value >= 0, name, " must be non-negative, got ", value);
+  TORCH_CHECK(value <= limit, name, " exceeds the active CUDA device limit (",
+              limit, "), got ", value);
+  TORCH_CHECK(
+      value <= static_cast<int64_t>(std::numeric_limits<unsigned int>::max()),
+      name, " exceeds the dim3 component range, got ", value);
+  return static_cast<unsigned int>(value);
+}
+
+dim3 make_grid_dim3(const int64_t x, const int64_t y = 1, const int64_t z = 1) {
+  const auto* const props = at::cuda::getCurrentDeviceProperties();
+  return dim3(checked_cuda_dim_component(x, props->maxGridSize[0], "grid.x"),
+              checked_cuda_dim_component(y, props->maxGridSize[1], "grid.y"),
+              checked_cuda_dim_component(z, props->maxGridSize[2], "grid.z"));
+}
+
+dim3 make_block_dim3(const int64_t x, const int64_t y = 1,
+                     const int64_t z = 1) {
+  const auto* const props = at::cuda::getCurrentDeviceProperties();
+  return dim3(
+      checked_cuda_dim_component(x, props->maxThreadsDim[0], "block.x"),
+      checked_cuda_dim_component(y, props->maxThreadsDim[1], "block.y"),
+      checked_cuda_dim_component(z, props->maxThreadsDim[2], "block.z"));
+}
 
 namespace lmc {
 
@@ -475,10 +504,9 @@ void multi_layer_kv_transfer_templated(
 
   int64_t k_or_v_size = lmc::is_mla(gpu_kv_format) ? 1 : 2;
 
-  dim3 grid(num_transfer_tokens, num_layers, k_or_v_size);
-  dim3 block(std::min<int64_t>(num_xwords, 128));
-
   const at::cuda::OptionalCUDAGuard device_guard(paged_memory_device);
+  dim3 grid = make_grid_dim3(num_transfer_tokens, num_layers, k_or_v_size);
+  dim3 block = make_block_dim3(std::min<int64_t>(num_xwords, 128));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
   if (direction == TransferDirection::H2D) {
@@ -616,10 +644,9 @@ void multi_layer_kv_transfer_unilateral(
 
   int64_t k_or_v_size = 2;
 
-  dim3 grid(key_value.size(2), key_value.size(1), k_or_v_size);
-  dim3 block(std::min<int64_t>(num_qwords, 128));
-
   const at::cuda::OptionalCUDAGuard device_guard(paged_memory_device);
+  dim3 grid = make_grid_dim3(key_value.size(2), key_value.size(1), k_or_v_size);
+  dim3 block = make_block_dim3(std::min<int64_t>(num_qwords, 128));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
   if (direction == TransferDirection::H2D) {
@@ -734,10 +761,11 @@ void single_layer_kv_transfer(
   // int block_stride_in_64bit = vllm_key_cache.stride(0) / elements_per_entry;
   // TORCH_CHECK(vllm_key_cache.stride(0) == vllm_value_cache.stride(0));
 
-  dim3 grid(num_tokens);
-  dim3 block(std::min<int64_t>(num_heads * head_size_in_64bit, 128));
   const at::cuda::OptionalCUDAGuard device_guard(
       device_of(vllm_key_value_cache));
+  dim3 grid = make_grid_dim3(num_tokens);
+  dim3 block =
+      make_block_dim3(std::min<int64_t>(num_heads * head_size_in_64bit, 128));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
   // Dispatch to the appropriate template specialization based on use_mla
@@ -797,9 +825,10 @@ void load_and_reshape_flash(
   int64_t block_stride_in_64bit = key_cache.stride(0) / elements_per_entry;
   TORCH_CHECK(key_cache.stride(0) == value_cache.stride(0));
 
-  dim3 grid(num_tokens);
-  dim3 block(std::min<int64_t>(num_heads * head_size_in_64bit, 128));
   const at::cuda::OptionalCUDAGuard device_guard(device_of(key_cache));
+  dim3 grid = make_grid_dim3(num_tokens);
+  dim3 block =
+      make_block_dim3(std::min<int64_t>(num_heads * head_size_in_64bit, 128));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
   lmc::load_and_reshape_flash_kernel<int64_t><<<grid, block, 0, stream>>>(
@@ -847,9 +876,10 @@ void reshape_and_cache_back_flash(
   int64_t block_stride_in_64bit = key_cache.stride(0) / elements_per_entry;
   TORCH_CHECK(key_cache.stride(0) == value_cache.stride(0));
 
-  dim3 grid(num_tokens);
-  dim3 block(std::min<int64_t>(num_heads * head_size_in_64bit, 128));
   const at::cuda::OptionalCUDAGuard device_guard(device_of(key_cache));
+  dim3 grid = make_grid_dim3(num_tokens);
+  dim3 block =
+      make_block_dim3(std::min<int64_t>(num_heads * head_size_in_64bit, 128));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
   lmc::reshape_and_cache_back_flash_kernel<int64_t><<<grid, block, 0, stream>>>(
@@ -914,9 +944,10 @@ void single_layer_kv_transfer_sgl(
   int64_t block_stride_in_64bit = sgl_key_cache.stride(0) / elements_per_entry;
   TORCH_CHECK(sgl_key_cache.stride(0) == sgl_value_cache.stride(0));
 
-  dim3 grid(num_tokens);
-  dim3 block(std::min<int64_t>(num_heads * head_size_in_64bit, 128));
   const at::cuda::OptionalCUDAGuard device_guard(device_of(sgl_key_cache));
+  dim3 grid = make_grid_dim3(num_tokens);
+  dim3 block =
+      make_block_dim3(std::min<int64_t>(num_heads * head_size_in_64bit, 128));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
   lmc::single_layer_kv_transfer_sgl_kernel<int64_t><<<grid, block, 0, stream>>>(
