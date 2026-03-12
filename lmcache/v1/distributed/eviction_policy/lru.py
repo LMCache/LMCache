@@ -77,7 +77,10 @@ class LRUEvictionPolicy(EvictionPolicy):
             keys (list[ObjectKey]): The keys that have been created
         """
         with self._lock:
-            for key in keys:
+            # NOTE: for the request, the later keys should be evicted first.
+            # For example, the request has (key1, key2, key3), if we first
+            # evict key1, due to prefix match, key2 and key3 will not be hit.
+            for key in reversed(keys):
                 # If key already exists, move it to the end (most recently used)
                 if key in self._order:
                     self._order.move_to_end(key)
@@ -94,7 +97,9 @@ class LRUEvictionPolicy(EvictionPolicy):
             keys (list[ObjectKey]): The keys that have been accessed
         """
         with self._lock:
-            for key in keys:
+            # NOTE: for the request, the later keys should be evicted first.
+            # The example is the same as `on_keys_created`.
+            for key in reversed(keys):
                 if key in self._order:
                     # Move to end (most recently used)
                     self._order.move_to_end(key)
