@@ -20,6 +20,8 @@ from lmcache.v1.distributed.l2_adapters.base import (
 )
 from lmcache.v1.distributed.l2_adapters.config import (
     L2AdapterConfigBase,
+)
+from lmcache.v1.distributed.l2_adapters.factory import (
     create_l2_adapter_from_registry,
 )
 

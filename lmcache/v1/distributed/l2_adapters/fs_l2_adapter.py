@@ -7,12 +7,20 @@ header).  Each ObjectKey maps to a separate ``.data`` file whose
 name encodes all key fields so it can be reversed on startup.
 """
 
+# Future
+from __future__ import annotations
+
 # Standard
 from pathlib import Path
-from typing import Optional, Union
+from typing import TYPE_CHECKING, Optional, Union
 import asyncio
 import os
 import threading
+
+if TYPE_CHECKING:
+    from lmcache.v1.distributed.internal_api import (
+        L1MemoryDesc,
+    )
 
 # Third Party
 import aiofiles
@@ -28,8 +36,10 @@ from lmcache.v1.distributed.l2_adapters.base import (
 )
 from lmcache.v1.distributed.l2_adapters.config import (
     L2AdapterConfigBase,
-    register_l2_adapter_factory,
     register_l2_adapter_type,
+)
+from lmcache.v1.distributed.l2_adapters.factory import (
+    register_l2_adapter_factory,
 )
 from lmcache.v1.memory_management import MemoryObj
 
@@ -350,6 +360,20 @@ class FSL2Adapter(L2AdapterInterface):
             return self._completed_load_tasks.pop(task_id, None)
 
     # ------------------------------------------------------------------
+    # Status Interface
+    # ------------------------------------------------------------------
+
+    def report_status(self) -> dict:
+        """Return a status dict for the FS L2 adapter."""
+        return {
+            "is_healthy": self._loop_thread.is_alive(),
+            "type": "FSL2Adapter",
+            "base_path": str(self._base_path),
+            "use_odirect": self._use_odirect,
+            "event_loop_alive": self._loop_thread.is_alive(),
+        }
+
+    # ------------------------------------------------------------------
     # Cleanup
     # ------------------------------------------------------------------
 
@@ -667,7 +691,14 @@ class FSL2Adapter(L2AdapterInterface):
 
 # Self-register config type and adapter factory
 register_l2_adapter_type("fs", FSL2AdapterConfig)
-register_l2_adapter_factory(
-    "fs",
-    lambda config, l1_memory_desc=None: FSL2Adapter(config),
-)
+
+
+def _create_fs_adapter(
+    config: L2AdapterConfigBase,
+    l1_memory_desc: "Optional[L1MemoryDesc]" = None,
+) -> L2AdapterInterface:
+    """Create an FSL2Adapter from config."""
+    return FSL2Adapter(config)  # type: ignore[arg-type]
+
+
+register_l2_adapter_factory("fs", _create_fs_adapter)

@@ -1,12 +1,21 @@
 # SPDX-License-Identifier: Apache-2.0
 
+# Future
+from __future__ import annotations
+
 # Standard
 from collections import defaultdict
+from typing import TYPE_CHECKING, Optional
 import asyncio
 import copy
 import os
 import threading
 import time
+
+if TYPE_CHECKING:
+    from lmcache.v1.distributed.internal_api import (
+        L1MemoryDesc,
+    )
 
 # First Party
 from lmcache.native_storage_ops import Bitmap
@@ -14,8 +23,10 @@ from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface, L2TaskId
 from lmcache.v1.distributed.l2_adapters.config import (
     L2AdapterConfigBase,
-    register_l2_adapter_factory,
     register_l2_adapter_type,
+)
+from lmcache.v1.distributed.l2_adapters.factory import (
+    register_l2_adapter_factory,
 )
 from lmcache.v1.memory_management import MemoryObj, TensorMemoryObj
 
@@ -475,7 +486,14 @@ class MockL2Adapter(L2AdapterInterface):
 
 # Self-register config type and adapter factory
 register_l2_adapter_type("mock", MockL2AdapterConfig)
-register_l2_adapter_factory(
-    "mock",
-    lambda config, l1_memory_desc=None: MockL2Adapter(config),
-)
+
+
+def _create_mock_adapter(
+    config: L2AdapterConfigBase,
+    l1_memory_desc: "Optional[L1MemoryDesc]" = None,
+) -> L2AdapterInterface:
+    """Create a MockL2Adapter from config."""
+    return MockL2Adapter(config)  # type: ignore[arg-type]
+
+
+register_l2_adapter_factory("mock", _create_mock_adapter)
