@@ -287,6 +287,11 @@ class GdsBackend(AllocatorBackendInterface):
         asyncio.run_coroutine_threadsafe(self._scan_metadata(), self.loop)
         self.save_metadata_tasks: set[asyncio.Task] = set()
 
+        # flag for extra assertions to catch bugs but harm performance
+        self._debug_asserts = False
+        # flag to use O_NOATIME during metadata file read for performance improvement
+        self._use_noatime = True
+
     async def _scan_metadata(self):
         # TODO: even though we only run it once on startup, this is still
         # not super scalable - test whether Rust code will be faster here, or
@@ -348,11 +353,44 @@ class GdsBackend(AllocatorBackendInterface):
                                 f"{fentry.path}, ignoring"
                             )
 
-    def _read_metadata(self, key, filename, subdir_key):
-        with open(filename, "rb") as f:
-            buf = f.read(_METADATA_MAX_SIZE)
+    def _read_metadata_info(self, filename: str):
+        # Use O_NOATIME to prevent updating access time and improve performance
+        # Instead of using Python's open() and read(), we use the OS's open() and
+        # read() because it is faster - the metadata file is small and we don't
+        # need any buffering.
+        # Additionally, we use O_NOATIME to improve performance
+        if self._use_noatime:
+            try:
+                fd = os.open(filename, os.O_RDONLY | os.O_NOATIME)
+            except (
+                # PermissionError: User doesn't own the file
+                # AttributeError: O_NOATIME not available on this platform
+                # OSError: Filesystem doesn't support O_NOATIME (EINVAL)
+                PermissionError,
+                AttributeError,
+                OSError,
+            ):  # fallback to normal open if O_NOATIME is not supported
+                self._use_noatime = False
+                logger.info(
+                    "O_NOATIME flag not supported during metadata file read, "
+                    "falling back to normal open"
+                )
+                fd = os.open(filename, os.O_RDONLY)
+        else:
+            fd = os.open(filename, os.O_RDONLY)
+        try:
+            buf = os.read(fd, _METADATA_MAX_SIZE)
+        finally:
+            os.close(fd)
+        return unpack_metadata(buf)
 
-        shape, dtype, size, fmt, extra_metadata = unpack_metadata(buf)
+    def _read_metadata(
+        self,
+        key: CacheEngineKey,
+        filename: str,
+        subdir_key: str,
+    ):
+        shape, dtype, size, fmt, extra_metadata = self._read_metadata_info(filename)
         if extra_metadata["lmcache_version"] != str(_METADATA_VERSION):
             raise RuntimeError("unhandled lmcache metadata")
         logger.debug(
@@ -617,9 +655,12 @@ class GdsBackend(AllocatorBackendInterface):
         if memory_obj is None:
             logger.debug("Memory allocation failed during sync disk load.")
             return None
-        assert memory_obj.tensor is not None
-        assert memory_obj.tensor.is_cuda
-        assert torch.device(self.dst_device) == torch.device(memory_obj.tensor.device)
+        if self._debug_asserts:
+            assert memory_obj.tensor is not None
+            assert memory_obj.tensor.is_cuda
+            assert torch.device(self.dst_device) == torch.device(
+                memory_obj.tensor.device
+            )
 
         return self._load_bytes_from_disk_with_memory(key, path, memory_obj)
 
@@ -640,14 +681,17 @@ class GdsBackend(AllocatorBackendInterface):
         Returns:
             The memory object with loaded data, or None if loading failed
         """
-        if memory_obj is None or memory_obj.tensor is None:
+        if memory_obj is None or not memory_obj.is_valid():
             return None
-        assert memory_obj.tensor.is_cuda
-        assert torch.device(self.dst_device) == torch.device(memory_obj.tensor.device)
 
         offset = _METADATA_MAX_SIZE
         if self.cufile_base_pointer is None:
-            addr = ctypes.c_void_p(memory_obj.tensor.data_ptr())
+            tensor = memory_obj.tensor
+            assert tensor is not None
+            if self._debug_asserts:
+                assert tensor.is_cuda
+                assert torch.device(self.dst_device) == torch.device(tensor.device)
+            addr = ctypes.c_void_p(tensor.data_ptr())
             dev_offset = 0
         else:
             addr = ctypes.c_void_p(self.cufile_base_pointer)
