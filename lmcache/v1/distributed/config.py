@@ -127,8 +127,8 @@ def add_storage_manager_args(
     memory_group.add_argument(
         "--l1-use-lazy",
         action="store_true",
-        default=True,
-        help="Whether to use lazy loading for L1 memory. (Default is True)",
+        default=False,
+        help="Whether to use lazy loading for L1 memory. (Default is False)",
     )
     memory_group.add_argument(
         "--l1-init-size-gb",
