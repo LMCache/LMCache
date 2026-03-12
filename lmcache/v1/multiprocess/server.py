@@ -713,6 +713,15 @@ class MPCacheEngine:
     # Utility methods
     # =========================================================================
 
+    def ping(self) -> bool:
+        """
+        Respond to a ping request.
+
+        Returns:
+            bool: Always True.
+        """
+        return True
+
     def get_chunk_size(self) -> int:
         """
         Returns the chunk size used for KV cache operations.
@@ -849,6 +858,7 @@ def run_cache_server(
     add_handler_helper(server, RequestType.RETRIEVE, engine.retrieve)
     add_handler_helper(server, RequestType.CLEAR, engine.clear)
     add_handler_helper(server, RequestType.GET_CHUNK_SIZE, engine.get_chunk_size)
+    add_handler_helper(server, RequestType.PING, engine.ping)
     add_handler_helper(server, RequestType.END_SESSION, engine.end_session)
     add_handler_helper(server, RequestType.NOOP, engine.debug)
 

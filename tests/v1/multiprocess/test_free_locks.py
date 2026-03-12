@@ -6,6 +6,7 @@ message-queue round-trip, server handler, and client-side adapter API.
 
 # Standard
 from unittest.mock import MagicMock, patch
+import threading
 
 # First Party
 from lmcache.v1.multiprocess.custom_types import IPCCacheEngineKey
@@ -172,7 +173,10 @@ def test_adapter_free_lookup_locks_sends_request():
     adapter.worker_id = 0
     adapter.chunk_size = 256
     adapter.blocks_in_chunk = 16
+    adapter._health_event = threading.Event()
+    adapter._health_event.set()
     adapter.tp_size = 1
+    adapter._mq_timeout = 30.0
 
     mock_client = MagicMock(spec=MessageQueueClient)
     mock_future = MagicMock()
@@ -220,7 +224,10 @@ def test_adapter_free_lookup_locks_key_matches_lookup():
     adapter.worker_id = 0
     adapter.chunk_size = 256
     adapter.blocks_in_chunk = 16
+    adapter._health_event = threading.Event()
+    adapter._health_event.set()
     adapter.tp_size = 1
+    adapter._mq_timeout = 30.0
 
     mock_client = MagicMock(spec=MessageQueueClient)
     mock_future = MagicMock()
