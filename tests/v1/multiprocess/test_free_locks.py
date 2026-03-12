@@ -6,6 +6,7 @@ message-queue round-trip, server handler, and client-side adapter API.
 
 # Standard
 from unittest.mock import MagicMock, patch
+import threading
 
 # First Party
 from lmcache.v1.multiprocess.custom_types import IPCCacheEngineKey
@@ -37,10 +38,11 @@ def test_free_locks_in_request_type():
 
 
 def test_free_locks_payload_classes():
-    """FREE_LOOKUP_LOCKS payload should be a single IPCCacheEngineKey."""
+    """FREE_LOOKUP_LOCKS payload should be [IPCCacheEngineKey, int]."""
     payload_classes = get_payload_classes(RequestType.FREE_LOOKUP_LOCKS)
-    assert len(payload_classes) == 1
-    assert payload_classes[0] == IPCCacheEngineKey
+    assert len(payload_classes) == 2
+    assert payload_classes[0] is IPCCacheEngineKey
+    assert payload_classes[1] is int
 
 
 def test_free_locks_response_class():
@@ -74,7 +76,7 @@ def test_mq_free_locks():
 
     helper.run_test(
         request_type=RequestType.FREE_LOOKUP_LOCKS,
-        payloads=[key],
+        payloads=[key, 1],
         expected_response=None,
         num_requests=1,
     )
@@ -94,25 +96,21 @@ def test_server_free_lookup_locks_calls_finish_read_prefetched():
     engine = MagicMock()
     engine.token_hasher = MagicMock()
     engine.token_hasher.chunk_size = 256
+    engine.token_hasher.compute_chunk_hashes.return_value = [b"hash0"]
 
-    # Build a key that to_hash_keys can operate on
+    # Build a key
     key = create_cache_key(0).no_worker_id_version()
 
-    # Set up the mock: to_hash_keys returns a list of hash-mode keys
-    hash_key = create_cache_key(0)
     sentinel_obj_keys = [MagicMock()]
-    with (
-        patch.object(IPCCacheEngineKey, "to_hash_keys", return_value=[hash_key]),
-        patch(
-            "lmcache.v1.multiprocess.server.ipc_keys_to_object_keys",
-            return_value=sentinel_obj_keys,
-        ),
+    with patch(
+        "lmcache.v1.multiprocess.server.ipc_key_to_object_keys",
+        return_value=sentinel_obj_keys,
     ):
         # Call the real method on the mock
-        MPCacheEngine.free_lookup_locks(engine, key)
+        MPCacheEngine.free_lookup_locks(engine, key, 1)
 
     engine.storage_manager.finish_read_prefetched.assert_called_once_with(
-        sentinel_obj_keys
+        sentinel_obj_keys, extra_count=0
     )
 
 
@@ -124,6 +122,8 @@ def test_server_free_lookup_locks_no_matching_chunks():
     engine = MagicMock()
     engine.token_hasher = MagicMock()
     engine.token_hasher.chunk_size = 256
+    # start=end=0 is passed to compute_chunk_hashes, which returns no hashes
+    engine.token_hasher.compute_chunk_hashes.return_value = []
 
     # Key with start == end means no chunks to free
     key = IPCCacheEngineKey(
@@ -136,8 +136,7 @@ def test_server_free_lookup_locks_no_matching_chunks():
         request_id="req-empty",
     )
 
-    with patch.object(IPCCacheEngineKey, "to_hash_keys", return_value=[MagicMock()]):
-        MPCacheEngine.free_lookup_locks(engine, key)
+    MPCacheEngine.free_lookup_locks(engine, key, 1)
 
     engine.storage_manager.finish_read_prefetched.assert_not_called()
 
@@ -171,12 +170,16 @@ def test_adapter_free_lookup_locks_sends_request():
     adapter.worker_id = 0
     adapter.chunk_size = 256
     adapter.blocks_in_chunk = 16
+    adapter._health_event = threading.Event()
+    adapter._health_event.set()
+    adapter.tp_size = 1
+    adapter._mq_timeout = 30.0
 
     mock_client = MagicMock(spec=MessageQueueClient)
     mock_future = MagicMock()
     mock_client.submit_request.return_value = mock_future
     adapter.mq_client = mock_client
-    adapter.lookup_futures = {}
+    adapter._lookup_job_ids = {}
 
     token_ids = list(range(512))
     adapter.free_lookup_locks(
@@ -192,15 +195,16 @@ def test_adapter_free_lookup_locks_sends_request():
     payloads = call_args[0][1]
     assert req_type == RequestType.FREE_LOOKUP_LOCKS
 
-    # Payload should be a single-element list containing the key
+    # Payload should be [key, tp_size]
     assert isinstance(payloads, list)
-    assert len(payloads) == 1
+    assert len(payloads) == 2
 
     key = payloads[0]
     assert isinstance(key, IPCCacheEngineKey)
     assert key.worker_id is None
     assert key.model_name == "test_model"
     assert key.request_id == "req-1"
+    assert payloads[1] == 1  # tp_size
 
 
 def test_adapter_free_lookup_locks_key_matches_lookup():
@@ -217,13 +221,17 @@ def test_adapter_free_lookup_locks_key_matches_lookup():
     adapter.worker_id = 0
     adapter.chunk_size = 256
     adapter.blocks_in_chunk = 16
+    adapter._health_event = threading.Event()
+    adapter._health_event.set()
+    adapter.tp_size = 1
+    adapter._mq_timeout = 30.0
 
     mock_client = MagicMock(spec=MessageQueueClient)
     mock_future = MagicMock()
-    mock_future.query.return_value = False
+    mock_future.result.return_value = 42  # mock job_id
     mock_client.submit_request.return_value = mock_future
     adapter.mq_client = mock_client
-    adapter.lookup_futures = {}
+    adapter._lookup_job_ids = {}
 
     token_ids = list(range(512))
 
@@ -245,7 +253,9 @@ def test_adapter_free_lookup_locks_key_matches_lookup():
     )
     free_call = mock_client.submit_request.call_args
     free_payloads = free_call[0][1]
+    assert len(free_payloads) == 2
     free_key = free_payloads[0]
+    assert free_payloads[1] == 1  # tp_size
 
     # Keys should be identical
     assert lookup_key.model_name == free_key.model_name

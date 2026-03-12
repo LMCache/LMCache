@@ -699,3 +699,260 @@ class TestMultipleRequests:
         l1_manager.finish_read(keys2)
         ctrl.stop()
         adapter.close()
+
+
+# =============================================================================
+# extra_count Path
+# =============================================================================
+
+
+class TestExtraCountPrefetch:
+    """Test that extra_count is correctly propagated through the prefetch path.
+
+    When extra_count=N is passed to submit_prefetch_request, the controller
+    must acquire 1 + N read locks per key (one for the prefetch controller
+    itself, plus N for additional TP workers).  Each consumer must call
+    finish_read (or finish_read_prefetched) once to release its lock.
+
+    These tests verify:
+    1. Keys remain accessible after the first finish_read when extra_count > 0.
+    2. Keys are evictable only after ALL 1 + N locks are released.
+    3. extra_count=0 (default) behaves identically to the original single-lock
+       path.
+    4. Prefix trimming still works correctly with extra_count > 0.
+    5. Non-prefix loaded keys have all extra locks released by _finalize_load.
+    """
+
+    def test_extra_count_zero_default_behavior(self, l1_manager):
+        """extra_count=0 (default): single read lock, key freed after one
+        finish_read."""
+        adapter = make_adapter()
+        layout = make_layout()
+        keys = [make_object_key(i) for i in range(3)]
+        store_keys_in_l2(adapter, keys, layout)
+
+        ctrl = PrefetchController(
+            l1_manager=l1_manager,
+            l2_adapters=[adapter],
+            adapter_descriptors=[make_descriptor(0)],
+            policy=DefaultPrefetchPolicy(),
+        )
+        ctrl.start()
+
+        req_id = ctrl.submit_prefetch_request(keys, layout, extra_count=0)
+        result = wait_for_prefetch_result(ctrl, req_id)
+        assert result == 3
+
+        # Keys should be readable immediately after prefetch
+        read_results = l1_manager.unsafe_read(keys)
+        for key in keys:
+            assert read_results[key][0] == L1Error.SUCCESS
+
+        # Release the single read lock — keys should become unlocked
+        finish_results = l1_manager.finish_read(keys, extra_count=0)
+        for key in keys:
+            assert finish_results[key] == L1Error.SUCCESS
+
+        ctrl.stop()
+        adapter.close()
+
+    def test_extra_count_one_requires_two_finish_reads(self, l1_manager):
+        """extra_count=1: two read locks acquired; key stays locked after
+        first finish_read and is released after second."""
+        adapter = make_adapter()
+        layout = make_layout()
+        keys = [make_object_key(i) for i in range(3)]
+        store_keys_in_l2(adapter, keys, layout)
+
+        ctrl = PrefetchController(
+            l1_manager=l1_manager,
+            l2_adapters=[adapter],
+            adapter_descriptors=[make_descriptor(0)],
+            policy=DefaultPrefetchPolicy(),
+        )
+        ctrl.start()
+
+        # extra_count=1 → 2 read locks per key
+        req_id = ctrl.submit_prefetch_request(keys, layout, extra_count=1)
+        result = wait_for_prefetch_result(ctrl, req_id)
+        assert result == 3
+
+        # Keys must be readable right after prefetch
+        read_results = l1_manager.unsafe_read(keys)
+        for key in keys:
+            assert read_results[key][0] == L1Error.SUCCESS
+
+        # Release lock #1 (the "prefetch controller" lock, extra_count=0)
+        finish_results = l1_manager.finish_read(keys, extra_count=0)
+        for key in keys:
+            assert finish_results[key] == L1Error.SUCCESS
+
+        # Keys must STILL be readable — lock #2 (the TP worker lock) is held
+        read_results2 = l1_manager.unsafe_read(keys)
+        for key in keys:
+            assert read_results2[key][0] == L1Error.SUCCESS, (
+                f"Key {key} should still be read-locked after first finish_read"
+            )
+
+        # Release lock #2 (the TP worker lock, extra_count=0)
+        finish_results2 = l1_manager.finish_read(keys, extra_count=0)
+        for key in keys:
+            assert finish_results2[key] == L1Error.SUCCESS
+
+        ctrl.stop()
+        adapter.close()
+
+    def test_extra_count_three_requires_four_finish_reads(self, l1_manager):
+        """extra_count=3 (TP=4): four read locks; key stays locked until all
+        four are released."""
+        adapter = make_adapter()
+        layout = make_layout()
+        keys = [make_object_key(i) for i in range(2)]
+        store_keys_in_l2(adapter, keys, layout)
+
+        ctrl = PrefetchController(
+            l1_manager=l1_manager,
+            l2_adapters=[adapter],
+            adapter_descriptors=[make_descriptor(0)],
+            policy=DefaultPrefetchPolicy(),
+        )
+        ctrl.start()
+
+        # extra_count=3 → 4 read locks per key
+        req_id = ctrl.submit_prefetch_request(keys, layout, extra_count=3)
+        result = wait_for_prefetch_result(ctrl, req_id)
+        assert result == 2
+
+        # Release locks one by one; key must remain readable until the last
+        for release_idx in range(3):
+            finish_results = l1_manager.finish_read(keys, extra_count=0)
+            for key in keys:
+                assert finish_results[key] == L1Error.SUCCESS
+
+            # Still readable — remaining locks are held
+            read_results = l1_manager.unsafe_read(keys)
+            for key in keys:
+                assert read_results[key][0] == L1Error.SUCCESS, (
+                    f"Key {key} should still be locked after {release_idx + 1} "
+                    f"finish_read calls"
+                )
+
+        # Release the final lock
+        finish_results = l1_manager.finish_read(keys, extra_count=0)
+        for key in keys:
+            assert finish_results[key] == L1Error.SUCCESS
+
+        ctrl.stop()
+        adapter.close()
+
+    def test_extra_count_with_prefix_trim(self, l1_manager):
+        """extra_count=1 with a gap in L2: only prefix keys get 2 locks;
+        non-prefix keys are never loaded."""
+        adapter = make_adapter()
+        layout = make_layout()
+        all_keys = [make_object_key(i) for i in range(5)]
+        # Store keys 0, 1, 3, 4 — gap at index 2
+        stored_keys = [all_keys[i] for i in [0, 1, 3, 4]]
+        store_keys_in_l2(adapter, stored_keys, layout)
+
+        ctrl = PrefetchController(
+            l1_manager=l1_manager,
+            l2_adapters=[adapter],
+            adapter_descriptors=[make_descriptor(0)],
+            policy=DefaultPrefetchPolicy(),
+        )
+        ctrl.start()
+
+        req_id = ctrl.submit_prefetch_request(all_keys, layout, extra_count=1)
+        result = wait_for_prefetch_result(ctrl, req_id)
+        assert result == 2, f"Expected 2 prefix hits (gap at index 2), got {result}"
+
+        prefix_keys = all_keys[:2]
+
+        # Prefix keys must be readable
+        read_results = l1_manager.unsafe_read(prefix_keys)
+        for key in prefix_keys:
+            assert read_results[key][0] == L1Error.SUCCESS
+
+        # Release lock #1 — prefix keys still held by lock #2
+        l1_manager.finish_read(prefix_keys, extra_count=0)
+
+        read_results2 = l1_manager.unsafe_read(prefix_keys)
+        for key in prefix_keys:
+            assert read_results2[key][0] == L1Error.SUCCESS, (
+                f"Prefix key {key} should still be locked after first finish_read"
+            )
+
+        # Release lock #2
+        l1_manager.finish_read(prefix_keys, extra_count=0)
+
+        # Non-prefix keys must NOT be in L1
+        non_prefix_keys = all_keys[2:]
+        reserve_results = l1_manager.reserve_read(non_prefix_keys)
+        for key in non_prefix_keys:
+            assert reserve_results[key][0] == L1Error.KEY_NOT_EXIST, (
+                f"Non-prefix key {key} should not be in L1"
+            )
+
+        ctrl.stop()
+        adapter.close()
+
+    def test_extra_count_non_prefix_loaded_keys_fully_released(self, l1_manager):
+        """Keys loaded beyond the prefix (due to partial load failure) must
+        have ALL extra locks released by _finalize_load so they can be evicted.
+
+        We simulate this by storing keys {0, 1, 2} in L2 but making key 1
+        fail to reserve in L1 (by pre-occupying it), creating a gap so that
+        key 2 is loaded but lies beyond the prefix.  _finalize_load must
+        release 1 + extra_count locks for key 2.
+        """
+        adapter = make_adapter()
+        layout = make_layout()
+        keys = [make_object_key(i) for i in range(3)]
+        store_keys_in_l2(adapter, keys, layout)
+
+        # Pre-occupy key[1] in L1 with a write lock so reserve_write fails for it.
+        # This forces a gap: key 0 is prefix (hit), key 1 fails reservation
+        # (gap), key 2 is loaded but beyond the prefix.
+        pre_write_results = l1_manager.reserve_write(
+            keys=[keys[1]],
+            is_temporary=[False],
+            layout_desc=layout,
+            mode="new",
+        )
+        assert pre_write_results[keys[1]][0] == L1Error.SUCCESS
+
+        ctrl = PrefetchController(
+            l1_manager=l1_manager,
+            l2_adapters=[adapter],
+            adapter_descriptors=[make_descriptor(0)],
+            policy=DefaultPrefetchPolicy(),
+        )
+        ctrl.start()
+
+        req_id = ctrl.submit_prefetch_request(keys, layout, extra_count=1)
+        result = wait_for_prefetch_result(ctrl, req_id)
+        # Only key 0 is in the prefix (key 1 reservation failed → gap)
+        assert result == 1, f"Expected 1 prefix hit, got {result}"
+
+        # key[0] should be in L1 with 2 read locks (1 + extra_count=1)
+        read_results = l1_manager.unsafe_read([keys[0]])
+        assert read_results[keys[0]][0] == L1Error.SUCCESS
+
+        # key[2] was loaded but is beyond the prefix; _finalize_load must have
+        # released all 1 + extra_count=2 locks, so it should be gone from L1
+        # (it's a temporary object and its lock count should be 0).
+        reserve_results = l1_manager.reserve_read([keys[2]])
+        assert reserve_results[keys[2]][0] == L1Error.KEY_NOT_EXIST, (
+            "Non-prefix loaded key[2] should have all locks released and be "
+            "evicted from L1"
+        )
+
+        # Clean up: release key[0]'s 2 locks and key[1]'s write lock
+        l1_manager.finish_read([keys[0]], extra_count=0)
+        l1_manager.finish_read([keys[0]], extra_count=0)
+        l1_manager.finish_write([keys[1]])
+        l1_manager.delete([keys[1]])
+
+        ctrl.stop()
+        adapter.close()
