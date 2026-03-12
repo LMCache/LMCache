@@ -16,7 +16,7 @@ from lmcache.utils import _lmcache_nvtx_annotate
 from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
     ObjectKey,
-    ipc_keys_to_object_keys,
+    ipc_key_to_object_keys,
 )
 from lmcache.v1.distributed.config import (
     StorageManagerConfig,
@@ -80,58 +80,6 @@ logger = init_logger(__name__)
 
 
 # Helper functions
-def update_session_for_key(
-    key: IPCCacheEngineKey,
-    session_manager: SessionManager,
-) -> None:
-    """Update session state for a token-mode key.
-
-    Sets the token sequence on the session and computes hashes so they
-    are cached for resolve_keys.
-
-    Args:
-        key: An IPC cache engine key.
-        session_manager: The session manager to use.
-    """
-    session = session_manager.get_or_create(key.request_id)
-    session.set_tokens(list(key.token_ids))
-    session.get_hashes(key.start, key.end)
-
-
-def resolve_key(
-    key: IPCCacheEngineKey,
-    session_manager: SessionManager,
-) -> list[IPCCacheEngineKey]:
-    """Convert a token-mode key to hash-mode keys.
-
-    Uses session to retrieve pre-computed rolling hashes, then creates
-    hash-mode IPCCacheEngineKey instances.
-    update_session_for_key must be called before this function.
-
-    Args:
-        key: An IPC cache engine key.
-        session_manager: The session manager to use.
-
-    Returns:
-        List of IPCCacheEngineKey with hash, one per chunk.
-    """
-    session = session_manager.get_or_create(key.request_id)
-    hashes = session.get_hashes(key.start, key.end)
-    return [
-        IPCCacheEngineKey(
-            model_name=key.model_name,
-            world_size=key.world_size,
-            worker_id=key.worker_id,
-            token_ids=key.token_ids,
-            start=key.start,
-            end=key.end,
-            request_id=key.request_id,
-            chunk_hash=TokenHasher.hash_to_bytes(h),
-        )
-        for h in hashes
-    ]
-
-
 def compute_extra_count(
     tp_size: int,
     world_size: int,
@@ -296,15 +244,16 @@ class MPCacheEngine:
                 that signals the completion of the store operation. The second
                 element indicates whether the store operation was successful.
         """
-        update_session_for_key(key, self.session_manager)
-        ipc_keys = resolve_key(key, self.session_manager)
+        session = self.session_manager.get_or_create(key.request_id)
+        session.set_tokens(list(key.token_ids))
+        chunk_hashes = [
+            TokenHasher.hash_to_bytes(h) for h in session.get_hashes(key.start, key.end)
+        ]
 
         st = time.perf_counter()
 
-        assert all(k.worker_id is not None for k in ipc_keys), (
-            "Must store with worker_id != None"
-        )
-        obj_keys = ipc_keys_to_object_keys(ipc_keys)
+        assert key.worker_id is not None, "Must store with worker_id != None"
+        obj_keys = ipc_key_to_object_keys(key, chunk_hashes)
 
         assert instance_id in self.gpu_contexts, (
             f"KV cache not registered for GPU ID {instance_id}"
@@ -421,15 +370,16 @@ class MPCacheEngine:
                 that signals the completion of the retrieve operation. The second
                 element indicates whether the key was successfully retrieved.
         """
-        update_session_for_key(key, self.session_manager)
-        ipc_keys = resolve_key(key, self.session_manager)
+        session = self.session_manager.get_or_create(key.request_id)
+        session.set_tokens(list(key.token_ids))
+        chunk_hashes = [
+            TokenHasher.hash_to_bytes(h) for h in session.get_hashes(key.start, key.end)
+        ]
 
         st = time.perf_counter()
 
-        assert all(k.worker_id is not None for k in ipc_keys), (
-            "Must retrieve with worker_id != None"
-        )
-        obj_keys = ipc_keys_to_object_keys(ipc_keys)
+        assert key.worker_id is not None, "Must retrieve with worker_id != None"
+        obj_keys = ipc_key_to_object_keys(key, chunk_hashes)
 
         assert instance_id in self.gpu_contexts, (
             f"KV cache not registered for GPU ID {instance_id}"
@@ -567,7 +517,6 @@ class MPCacheEngine:
         Returns:
             Prefetch job ID for polling via query_prefetch_status.
         """
-        ipc_keys: list[IPCCacheEngineKey] = []
         model_name, world_size = key.model_name, key.world_size
         log_telemetry(make_start_event("lookup_and_prefetch", key.request_id))
 
@@ -593,9 +542,9 @@ class MPCacheEngine:
 
         extra_count = compute_extra_count(tp_size, world_size)
 
-        # Prepare for the obj keys
-        ipc_keys.extend(key.to_hash_keys(self.token_hasher))
-        if not ipc_keys:
+        # Compute chunk hashes for all full chunks
+        chunk_hashes = self.token_hasher.compute_chunk_hashes(list(key.token_ids))
+        if not chunk_hashes:
             return self._register_prefetch_job(
                 _PrefetchJob(
                     handle=PrefetchHandle(
@@ -608,8 +557,7 @@ class MPCacheEngine:
                     request_id=key.request_id,
                 )
             )
-
-        obj_keys = ipc_keys_to_object_keys(ipc_keys)
+        obj_keys = ipc_key_to_object_keys(key, chunk_hashes)
 
         handle = self.storage_manager.submit_prefetch_task(
             obj_keys, layout_desc, extra_count=extra_count
@@ -617,7 +565,7 @@ class MPCacheEngine:
         return self._register_prefetch_job(
             _PrefetchJob(
                 handle=handle,
-                world_size=ipc_keys[0].world_size,
+                world_size=key.world_size,
                 request_id=key.request_id,
             )
         )
@@ -686,6 +634,11 @@ class MPCacheEngine:
     ) -> None:
         """Release read locks acquired during lookup.
 
+        Hashes are computed only for chunks in ``[start, end)`` to avoid
+        unnecessary work on tokens outside that range.
+        ``start`` and ``end`` must be aligned to ``chunk_size``; it is the
+        caller's responsibility to align the boundaries as desired.
+
         Computes the extra reader count from ``tp_size`` and
         ``world_size`` the same way :meth:`lookup` does, so
         the correct number of locks is released.
@@ -695,15 +648,12 @@ class MPCacheEngine:
             tp_size: Tensor-parallel size for MLA
                 multi-reader locking.
         """
-        ipc_keys: list[IPCCacheEngineKey] = []
-        all_hash_keys = key.to_hash_keys(self.token_hasher)
-        chunk_size = self.token_hasher.chunk_size
-        start_chunk = key.start // chunk_size
-        end_chunk = key.end // chunk_size
-        ipc_keys.extend(all_hash_keys[start_chunk:end_chunk])
-        if not ipc_keys:
+        chunk_hashes = self.token_hasher.compute_chunk_hashes(
+            list(key.token_ids), start=key.start, end=key.end
+        )
+        if not chunk_hashes:
             return
-        obj_keys = ipc_keys_to_object_keys(ipc_keys)
+        obj_keys = ipc_key_to_object_keys(key, chunk_hashes)
 
         extra_count = compute_extra_count(tp_size, key.world_size)
 
