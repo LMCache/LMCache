@@ -108,7 +108,7 @@ class LMCacheManager:
             self._init_components()
         except Exception as e:
             self._init_failed = True
-            self._init_failed_reason = traceback.format_exc()
+            self._init_failed_reason = "".join(traceback.format_exception(e))
             logger.error(
                 "Failed to initialize LMCacheManager components: %s. "
                 "System will operate in degraded mode (recompute).",
@@ -481,7 +481,7 @@ class LMCacheManager:
             e: The exception that caused the failure
         """
         self._init_failed = True
-        self._init_failed_reason = traceback.format_exc()
+        self._init_failed_reason = "".join(traceback.format_exception(e))
         if self._lmcache_engine is not None:
             self._lmcache_engine.mark_init_failed(self._init_failed_reason)
         logger.error(
