@@ -24,6 +24,15 @@ from lmcache.v1.mp_observability.config import (
 from lmcache.v1.mp_observability.prometheus_controller import (
     get_prometheus_controller,
 )
+from lmcache.v1.mp_observability.telemetry import (
+    TelemetryConfig,
+    add_telemetry_args,
+    get_telemetry_controller,
+    parse_args_to_telemetry_config,
+)
+from lmcache.v1.mp_observability.telemetry.config import (
+    DEFAULT_TELEMETRY_CONFIG,
+)
 from lmcache.v1.multiprocess.config import (
     HTTPFrontendConfig,
     MPServerConfig,
@@ -69,6 +78,7 @@ async def lifespan(app: FastAPI):
         mp_config=mp_config,
         storage_manager_config=_configs["storage_manager"],
         prometheus_config=_configs["prometheus"],
+        telemetry_config=_configs["telemetry"],
         return_engine=True,
     )
     app.state.zmq_server = zmq_server
@@ -79,6 +89,7 @@ async def lifespan(app: FastAPI):
 
     # Shutdown
     logger.info("Shutting down LMCache HTTP server...")
+    get_telemetry_controller().stop()
     get_prometheus_controller().stop()
     if hasattr(app.state, "zmq_server") and app.state.zmq_server is not None:
         app.state.zmq_server.close()
@@ -152,6 +163,7 @@ def run_http_server(
     mp_config: MPServerConfig,
     storage_manager_config: StorageManagerConfig,
     prometheus_config: PrometheusConfig,
+    telemetry_config: TelemetryConfig = DEFAULT_TELEMETRY_CONFIG,
 ) -> None:
     """
     Run the LMCache HTTP server with integrated MP (ZMQ) server.
@@ -161,10 +173,12 @@ def run_http_server(
         mp_config: Configuration for the ZMQ multiprocess server
         storage_manager_config: Configuration for the storage manager
         prometheus_config: Configuration for the Prometheus observability stack
+        telemetry_config: Configuration for the telemetry event system
     """
     _configs["mp"] = mp_config
     _configs["storage_manager"] = storage_manager_config
     _configs["prometheus"] = prometheus_config
+    _configs["telemetry"] = telemetry_config
 
     config = uvicorn.Config(
         app=app,
@@ -191,6 +205,7 @@ def parse_args():
     add_mp_server_args(parser)
     add_storage_manager_args(parser)
     add_prometheus_args(parser)
+    add_telemetry_args(parser)
     return parser.parse_args()
 
 
@@ -200,9 +215,11 @@ if __name__ == "__main__":
     mp_config = parse_args_to_mp_server_config(args)
     storage_manager_config = parse_args_to_config(args)
     prometheus_config = parse_args_to_prometheus_config(args)
+    telemetry_config = parse_args_to_telemetry_config(args)
     run_http_server(
         http_config=http_config,
         mp_config=mp_config,
         storage_manager_config=storage_manager_config,
         prometheus_config=prometheus_config,
+        telemetry_config=telemetry_config,
     )

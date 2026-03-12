@@ -36,6 +36,12 @@ Source: ``lmcache/v1/multiprocess/config.py``
      - ``blake3``
      - Hash algorithm for token-based operations.
        Choices: ``builtin``, ``sha256_cbor``, ``blake3``.
+   * - ``--engine-type``
+     - ``default``
+     - Cache engine backend type.
+       ``default`` uses MPCacheEngine; ``blend`` uses BlendEngineV2
+       for cross-request KV reuse.
+       Choices: ``default``, ``blend``.
 
 HTTP Frontend
 -------------
@@ -283,12 +289,13 @@ Full Example
 
 .. code-block:: bash
 
-    python3 -m lmcache.v1.multiprocess.server \
+    python3 -m lmcache.v1.multiprocess.http_server \
         --host 0.0.0.0 \
         --port 6555 \
         --chunk-size 512 \
         --max-workers 4 \
         --hash-algorithm blake3 \
+        --engine-type default \
         --l1-size-gb 100 \
         --l1-use-lazy \
         --l1-init-size-gb 20 \
