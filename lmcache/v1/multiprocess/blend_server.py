@@ -14,7 +14,7 @@ from lmcache.native_storage_ops import RangePatternMatcher
 from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
     ObjectKey,
-    ipc_keys_to_object_keys,
+    ipc_key_to_object_keys,
 )
 from lmcache.v1.distributed.config import (
     StorageManagerConfig,
@@ -66,30 +66,6 @@ logger = init_logger(__name__)
 
 
 # Helper functions
-def create_ipc_key_with_hashes(
-    key: IPCCacheEngineKey, hashes: list[bytes]
-) -> list[IPCCacheEngineKey]:
-    """
-    Create the list of IPCCacheEngineKey with specific hash.
-    """
-    ipc_keys: list[IPCCacheEngineKey] = []
-    for hash_bytes in hashes:
-        ipc_keys.append(
-            IPCCacheEngineKey(
-                model_name=key.model_name,
-                world_size=key.world_size,
-                worker_id=key.worker_id,
-                token_ids=key.token_ids,
-                start=key.start,
-                end=key.end,
-                request_id=key.request_id,
-                chunk_hash=hash_bytes,
-            )
-        )
-
-    return ipc_keys
-
-
 def create_temp_ipc_key_by_range(
     key: IPCCacheEngineKey,
     start: int,
@@ -98,9 +74,6 @@ def create_temp_ipc_key_by_range(
     """
     Create a temporary IPCCacheEngineKey for the specific token range. This is used
     for the lookup of each paragraph when doing the separate lookup for blend engine.
-
-    Note that this function is only used for lookup, and the hash value in the key is
-    not used and can be set to empty bytes.
     """
     return IPCCacheEngineKey(
         model_name=key.model_name,
@@ -110,7 +83,6 @@ def create_temp_ipc_key_by_range(
         start=start,
         end=end,
         request_id=key.request_id,
-        chunk_hash=bytes(),
     )
 
 
@@ -235,17 +207,16 @@ class BlendEngine(MPCacheEngine):
         # Submit Lookup for each paragraph
         for start, end in ranges:
             temp_ipc_key = create_temp_ipc_key_by_range(key, start, end)
-            ipc_keys = temp_ipc_key.to_hash_keys(
-                hasher=self.token_hasher,
-                full_chunk_only=True,
-                prefix_hash=self.BLEND_HASH_PREFIX,
+            chunk_hashes = self.token_hasher.compute_chunk_hashes(
+                list(temp_ipc_key.token_ids),
+                self.BLEND_HASH_PREFIX,
             )
 
-            obj_keys = ipc_keys_to_object_keys(ipc_keys)
+            obj_keys = ipc_key_to_object_keys(temp_ipc_key, chunk_hashes)
             handle = self.storage_manager.submit_prefetch_task(obj_keys, layout_desc)
 
             prefetch_handles.append(handle)
-            expected_found_count.append(len(ipc_keys))
+            expected_found_count.append(len(chunk_hashes))
 
             logger.debug(
                 "DEBUG: Submitted prefetch for obj keys %s for range (%d, %d), ",
@@ -400,13 +371,10 @@ class BlendEngine(MPCacheEngine):
             chunks
         """
         # Compute blend-only hash for the keys
-        hashed_ipc_keys = key.to_hash_keys(
-            hasher=self.token_hasher,
-            full_chunk_only=True,
-            prefix_hash=self.BLEND_HASH_PREFIX,
+        chunk_hashes = self.token_hasher.compute_chunk_hashes(
+            list(key.token_ids), self.BLEND_HASH_PREFIX
         )
-        # convert to object key
-        obj_keys = ipc_keys_to_object_keys(hashed_ipc_keys)
+        obj_keys = ipc_key_to_object_keys(key, chunk_hashes)
 
         assert instance_id in self._cb_gpu_contexts, (
             f"Instance ID {instance_id} not registered for CB KV cache"
@@ -466,12 +434,11 @@ class BlendEngine(MPCacheEngine):
         # We already have the token range, so can directly start from the obj keys
         for start, end in ranges:
             temp_ipc_key = create_temp_ipc_key_by_range(key, start, end)
-            hash_ipc_keys = temp_ipc_key.to_hash_keys(
-                hasher=self.token_hasher,
-                full_chunk_only=True,
-                prefix_hash=self.BLEND_HASH_PREFIX,
+            chunk_hashes = self.token_hasher.compute_chunk_hashes(
+                list(temp_ipc_key.token_ids),
+                self.BLEND_HASH_PREFIX,
             )
-            obj_keys = ipc_keys_to_object_keys(hash_ipc_keys)
+            obj_keys = ipc_key_to_object_keys(temp_ipc_key, chunk_hashes)
             obj_keys_for_paragraphs.append(obj_keys)
 
         logger.debug("DEBUG object keys to retrieve: %s", obj_keys_for_paragraphs)
@@ -577,14 +544,8 @@ class BlendEngine(MPCacheEngine):
             final chunks, and a boolean flag indicating if the store is successful.
         """
         # Compute normal hash for the keys
-        hashed_ipc_keys = key.to_hash_keys(
-            hasher=self.token_hasher,
-            full_chunk_only=True,
-            prefix_hash=None,
-        )
-
-        # convert to object key
-        obj_keys = ipc_keys_to_object_keys(hashed_ipc_keys)
+        chunk_hashes = self.token_hasher.compute_chunk_hashes(list(key.token_ids), None)
+        obj_keys = ipc_key_to_object_keys(key, chunk_hashes)
 
         # Get GPU context
         assert instance_id in self._cb_gpu_contexts, (

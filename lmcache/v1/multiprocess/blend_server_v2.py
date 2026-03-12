@@ -50,7 +50,7 @@ from lmcache.logging import init_logger
 from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
     ObjectKey,
-    ipc_keys_to_object_keys,
+    ipc_key_to_object_keys,
 )
 from lmcache.v1.distributed.config import (
     StorageManagerConfig,
@@ -68,6 +68,19 @@ from lmcache.v1.mp_observability.config import (
 from lmcache.v1.mp_observability.prometheus_controller import (
     get_prometheus_controller,
     init_prometheus_controller,
+)
+from lmcache.v1.mp_observability.telemetry import (
+    TelemetryConfig,
+    get_telemetry_controller,
+    init_telemetry_controller,
+    parse_args_to_telemetry_config,
+)
+from lmcache.v1.mp_observability.telemetry.config import (
+    DEFAULT_TELEMETRY_CONFIG,
+)
+from lmcache.v1.multiprocess.config import (
+    MPServerConfig,
+    parse_args_to_mp_server_config,
 )
 from lmcache.v1.multiprocess.custom_types import (
     CBMatchResult,
@@ -352,21 +365,8 @@ class BlendEngineV2(MPCacheEngine):
 
         # Submit prefetch for each group using CBMatchResult.hash directly
         for group in groups:
-            obj_keys = ipc_keys_to_object_keys(
-                [
-                    IPCCacheEngineKey(
-                        model_name=key.model_name,
-                        world_size=key.world_size,
-                        worker_id=key.worker_id,
-                        token_ids=key.token_ids[r.cur_st : r.cur_ed],
-                        start=r.cur_st,
-                        end=r.cur_ed,
-                        request_id=key.request_id,
-                        chunk_hash=r.hash,
-                    )
-                    for r in group
-                ]
-            )
+            chunk_hashes = [r.hash for r in group]
+            obj_keys = ipc_key_to_object_keys(key, chunk_hashes)
             handle = self.storage_manager.submit_prefetch_task(obj_keys, layout_desc)
             prefetch_handles.append(handle)
 
@@ -518,13 +518,9 @@ class BlendEngineV2(MPCacheEngine):
         """
         # Compute normal prefix hashes so these chunks are accessible both via
         # the CB lookup path and via the standard lookup/retrieve path.
-        hashed_ipc_keys = key.to_hash_keys(
-            hasher=self.token_hasher,
-            full_chunk_only=True,
-            prefix_hash=None,
-        )
+        chunk_hashes = self.token_hasher.compute_chunk_hashes(list(key.token_ids))
         # convert to object key
-        obj_keys = ipc_keys_to_object_keys(hashed_ipc_keys)
+        obj_keys = ipc_key_to_object_keys(key, chunk_hashes)
 
         assert instance_id in self._cb_gpu_contexts, (
             f"Instance ID {instance_id} not registered for CB KV cache"
@@ -536,10 +532,7 @@ class BlendEngineV2(MPCacheEngine):
         )
 
         # Register chunk hashes with the local matcher for fast sub-sequence lookup
-        token_hashes = []
-        for k in hashed_ipc_keys:
-            assert k.chunk_hash is not None
-            token_hashes.append(k.chunk_hash)
+        token_hashes = list(chunk_hashes)
 
         # NOTE(Jiayi): We only register the token hashes for worker_id 0 or None to
         # avoid duplicate registration across workers.
@@ -594,21 +587,8 @@ class BlendEngineV2(MPCacheEngine):
 
         # One obj_key per match_result, in cur_st order
         cb_match_result = sorted(cb_match_result, key=lambda r: r.cur_st)
-        all_obj_keys = ipc_keys_to_object_keys(
-            [
-                IPCCacheEngineKey(
-                    model_name=key.model_name,
-                    world_size=key.world_size,
-                    worker_id=key.worker_id,
-                    token_ids=key.token_ids[r.cur_st : r.cur_ed],
-                    start=r.cur_st,
-                    end=r.cur_ed,
-                    request_id=key.request_id,
-                    chunk_hash=r.hash,
-                )
-                for r in cb_match_result
-            ]
-        )
+        chunk_hashes = [r.hash for r in cb_match_result]
+        all_obj_keys = ipc_key_to_object_keys(key, chunk_hashes)
 
         logger.debug("DEBUG object keys to retrieve: %s", all_obj_keys)
 
@@ -686,14 +666,10 @@ class BlendEngineV2(MPCacheEngine):
             final chunks, and a boolean flag indicating if the store is successful.
         """
         # Compute normal hash for the keys
-        hashed_ipc_keys = key.to_hash_keys(
-            hasher=self.token_hasher,
-            full_chunk_only=True,
-            prefix_hash=None,
-        )
+        chunk_hashes = self.token_hasher.compute_chunk_hashes(list(key.token_ids))
 
         # convert to object key
-        obj_keys = ipc_keys_to_object_keys(hashed_ipc_keys)
+        obj_keys = ipc_key_to_object_keys(key, chunk_hashes)
 
         # Get GPU context
         assert instance_id in self._cb_gpu_contexts, (
@@ -727,47 +703,46 @@ def add_handler_helper(
 
 
 def run_cache_server(
+    mp_config: MPServerConfig,
     storage_manager_config: StorageManagerConfig,
     prometheus_config: PrometheusConfig,
-    host: str = "localhost",
-    port: int = 5555,
-    chunk_size: int = 256,
-    max_workers: int = 1,
+    telemetry_config: TelemetryConfig = DEFAULT_TELEMETRY_CONFIG,
     return_engine: bool = False,
-    hash_algorithm: str = "blake3",
 ):
     """
     Run the LMCache cache server with ZMQ message queue.
 
     Args:
+        mp_config: Configuration for the ZMQ multiprocess server
         storage_manager_config: Configuration for the storage manager
         prometheus_config: Configuration for the Prometheus observability stack
-        host: ZMQ server host
-        port: ZMQ server port
-        chunk_size: Chunk size for KV cache operations
-        max_workers: Maximum number of worker threads for ZMQ server
+        telemetry_config: Configuration for the telemetry event system
         return_engine: If True, return (server, engine) after starting;
                        if False, run blocking loop to keep server alive
-        hash_algorithm: Hash algorithm for token-based operations
 
     Returns:
-        If return_engine is True: tuple of (MessageQueueServer, MPCacheEngine)
+        If return_engine is True: tuple of (MessageQueueServer, BlendEngineV2)
         If return_engine is False: None (blocks until interrupted)
     """
     # Initialize global prometheus controller
     init_prometheus_controller(prometheus_config)
 
+    # Initialize global telemetry controller
+    init_telemetry_controller(telemetry_config)
+
     # Initialize the engine (loggers self-register with the global controller)
     engine = BlendEngineV2(
         storage_manager_config=storage_manager_config,
-        chunk_size=chunk_size,
-        hash_algorithm=hash_algorithm,
+        chunk_size=mp_config.chunk_size,
+        hash_algorithm=mp_config.hash_algorithm,
     )
 
     # Initialize the message queue server
     context = zmq.Context.instance()
     server = MessageQueueServer(
-        bind_url=f"tcp://{host}:{port}", context=context, max_workers=max_workers
+        bind_url=f"tcp://{mp_config.host}:{mp_config.port}",
+        context=context,
+        max_workers=mp_config.max_workers,
     )
 
     # Add handlers for original server
@@ -805,13 +780,20 @@ def run_cache_server(
     )
     add_handler_helper(server, RequestType.CB_STORE_FINAL, engine.cb_store_final)
 
-    logger.info("LMCache ZMQ cache server is running on tcp://%s:%d", host, port)
+    logger.info(
+        "LMCache ZMQ cache server is running on tcp://%s:%d",
+        mp_config.host,
+        mp_config.port,
+    )
     # Start the ZMQ server
     torch.cuda.init()
     server.start()
 
     # Start prometheus controller after engine creation (loggers are registered)
     get_prometheus_controller().start()
+
+    # Start telemetry controller
+    get_telemetry_controller().start()
     logger.info("LMCache cache blend v2 server is running...")
 
     # Return server and engine if requested (for HTTP server integration)
@@ -824,6 +806,7 @@ def run_cache_server(
             time.sleep(1)
     except KeyboardInterrupt:
         logger.info("Shutting down server...")
+        get_telemetry_controller().stop()
         get_prometheus_controller().stop()
         server.close()
         engine.close()
@@ -831,14 +814,13 @@ def run_cache_server(
 
 if __name__ == "__main__":
     args = parse_args()
+    mp_config = parse_args_to_mp_server_config(args)
     storage_manager_config = parse_args_to_config(args)
     prometheus_config = parse_args_to_prometheus_config(args)
+    telemetry_config = parse_args_to_telemetry_config(args)
     run_cache_server(
+        mp_config=mp_config,
         storage_manager_config=storage_manager_config,
         prometheus_config=prometheus_config,
-        host=args.host,
-        port=args.port,
-        chunk_size=args.chunk_size,
-        max_workers=args.max_workers,
-        hash_algorithm=args.hash_algorithm,
+        telemetry_config=telemetry_config,
     )
