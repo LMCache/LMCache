@@ -475,4 +475,7 @@ class MockL2Adapter(L2AdapterInterface):
 
 # Self-register config type and adapter factory
 register_l2_adapter_type("mock", MockL2AdapterConfig)
-register_l2_adapter_factory("mock", lambda config, **kwargs: MockL2Adapter(config))
+register_l2_adapter_factory(
+    "mock",
+    lambda config, l1_memory_desc=None: MockL2Adapter(config),
+)

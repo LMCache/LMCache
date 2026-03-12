@@ -14,11 +14,14 @@ from __future__ import annotations
 # Standard
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Callable, TypeVar
+from typing import TYPE_CHECKING, Any, Callable, Optional, TypeVar
 import argparse
 import json
 
 if TYPE_CHECKING:
+    from lmcache.v1.distributed.internal_api import (
+        L1MemoryDesc,
+    )
     from lmcache.v1.distributed.l2_adapters.base import (
         L2AdapterInterface,
     )
@@ -35,7 +38,15 @@ T = TypeVar("T", bound="L2AdapterConfigBase")
 # -----------------------------------------------------------------------------
 
 _L2_ADAPTER_CONFIG_REGISTRY: dict[str, type[L2AdapterConfigBase]] = {}
-_L2_ADAPTER_FACTORY_REGISTRY: dict[str, Callable[..., Any]] = {}
+# Factory signature:
+#   (config, l1_memory_desc) -> L2AdapterInterface
+_L2_ADAPTER_FACTORY_REGISTRY: dict[
+    str,
+    Callable[
+        ["L2AdapterConfigBase", "Optional[L1MemoryDesc]"],
+        "L2AdapterInterface",
+    ],
+] = {}
 
 
 def register_l2_adapter_type(
@@ -72,8 +83,8 @@ def register_l2_adapter_factory(
     Args:
         name: Adapter type name (must match the name used
             in ``register_l2_adapter_type``).
-        factory: A callable that accepts a config instance
-            and returns an ``L2AdapterInterface``.
+        factory: A callable ``(config, l1_memory_desc)``
+            that returns an ``L2AdapterInterface``.
     """
     if name in _L2_ADAPTER_FACTORY_REGISTRY:
         raise ValueError(f"L2 adapter factory already registered: {name!r}")
@@ -82,7 +93,7 @@ def register_l2_adapter_factory(
 
 def create_l2_adapter_from_registry(
     config: L2AdapterConfigBase,
-    **kwargs: Any,
+    l1_memory_desc: "Optional[L1MemoryDesc]" = None,
 ) -> "L2AdapterInterface":
     """
     Create an L2 adapter using the factory registry.
@@ -92,8 +103,9 @@ def create_l2_adapter_from_registry(
 
     Args:
         config: An adapter config instance.
-        **kwargs: Extra arguments forwarded to the factory
-            (e.g. ``l1_memory_desc`` for Nixl adapters).
+        l1_memory_desc: Optional L1 memory descriptor,
+            required by adapters that register L1 memory
+            with an external backend (e.g. Nixl).
 
     Returns:
         A new ``L2AdapterInterface`` instance.
@@ -110,7 +122,7 @@ def create_l2_adapter_from_registry(
             f"{name!r}. Make sure the adapter module is "
             f"imported."
         )
-    return factory(config, **kwargs)
+    return factory(config, l1_memory_desc)
 
 
 def get_registered_l2_adapter_types() -> list[str]:
@@ -404,14 +416,16 @@ class NixlStoreL2AdapterConfig(L2AdapterConfigBase):
 register_l2_adapter_type("nixl_store", NixlStoreL2AdapterConfig)
 
 
-def _create_nixl_store_adapter(config: NixlStoreL2AdapterConfig, **kwargs: Any) -> Any:
+def _create_nixl_store_adapter(
+    config: NixlStoreL2AdapterConfig,
+    l1_memory_desc: "Optional[L1MemoryDesc]" = None,
+) -> Any:
     """Lazy-import and create a NixlStoreL2Adapter."""
     # First Party
     from lmcache.v1.distributed.l2_adapters.nixl_store_l2_adapter import (
         NixlStoreL2Adapter,
     )
 
-    l1_memory_desc = kwargs.get("l1_memory_desc")
     if l1_memory_desc is None:
         raise ValueError("l1_memory_desc is required to create a NixlStoreL2Adapter.")
     return NixlStoreL2Adapter(config, l1_memory_desc)
