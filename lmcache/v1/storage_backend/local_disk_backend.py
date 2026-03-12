@@ -112,6 +112,7 @@ class LocalDiskBackend(StorageBackendInterface):
         # SSD wear metrics
         self.disk_write_ops = 0
         self.disk_write_bytes = 0
+        self.disk_metrics_lock = threading.Lock()
 
         self.cache_policy = get_cache_policy(config.cache_policy)
         self.dict = self.cache_policy.init_mutable_mapping()
@@ -589,8 +590,9 @@ class LocalDiskBackend(StorageBackendInterface):
         size = len(buffer)
 
         # SSD wear metrics
-        self.disk_write_ops += 1
-        self.disk_write_bytes += size
+        with self.disk_metrics_lock:
+            self.disk_write_ops += 1
+            self.disk_write_bytes += size
 
         if size % self.os_disk_bs != 0 or not self.use_odirect:
             with open(path, "wb") as f:
