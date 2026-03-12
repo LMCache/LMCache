@@ -213,6 +213,17 @@ class TestStoreListener:
         assert len(popped) == 3
         listener.close()
 
+    def test_finish_write_and_reserve_read_does_not_enqueue(self):
+        """on_l1_keys_finish_write_and_reserve_read should not enqueue keys."""
+        listener = StoreListener()
+        keys = [make_object_key(i) for i in range(3)]
+
+        listener.on_l1_keys_finish_write_and_reserve_read(keys)
+
+        assert listener.pop_pending_keys() == []
+        assert listener.pending_count() == 0
+        listener.close()
+
 
 # =============================================================================
 # StoreController Integration Tests

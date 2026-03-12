@@ -95,6 +95,10 @@ class L1ManagerStatsLogger(L1ManagerListener, PrometheusLogger):
     def on_l1_keys_deleted_by_manager(self, keys: list[ObjectKey]):
         self.stats.interval_l1_evicted_keys += len(keys)
 
+    @stats_safe
+    def on_l1_keys_finish_write_and_reserve_read(self, keys: list[ObjectKey]):
+        self.stats.interval_l1_write_keys += len(keys)
+
     def log_prometheus(self) -> None:
         """Log accumulated stats to Prometheus and reset internal counters."""
         with _stats_lock:
