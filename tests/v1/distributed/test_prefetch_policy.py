@@ -9,7 +9,7 @@ prefetch_policy.py.
 # First Party
 from lmcache.native_storage_ops import Bitmap
 from lmcache.v1.distributed.api import ObjectKey
-from lmcache.v1.distributed.l2_adapters.config import MockL2AdapterConfig
+from lmcache.v1.distributed.l2_adapters.mock_l2_adapter import MockL2AdapterConfig
 from lmcache.v1.distributed.storage_controllers.prefetch_policy import (
     DefaultPrefetchPolicy,
 )
