@@ -219,6 +219,19 @@ class LocalDiskBackend(StorageBackendInterface):
             else:
                 return False
 
+    def clear(self) -> int:
+        num_cleared_tokens = 0
+        with self.disk_lock:
+            for key, memory_obj in list(self.dict.items()):
+                if not memory_obj.can_evict:
+                    continue
+                self.current_cache_size -= memory_obj.size
+                num_cleared_tokens += memory_obj.get_num_tokens()
+                self.remove(key, force=False)
+
+        logger.info(f"Cleared {num_cleared_tokens} tokens from local disk cache.")
+        return num_cleared_tokens
+
     def remove(
         self,
         key: CacheEngineKey,

@@ -10,7 +10,8 @@ import pytest
 import torch
 
 # First Party
-from lmcache.utils import CacheEngineKey
+from lmcache.v1.memory_management import MemoryFormat
+from lmcache.utils import CacheEngineKey, DiskCacheMetadata
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
@@ -116,6 +117,24 @@ def local_disk_backend(temp_disk_path, async_loop, local_cpu_backend):
 class TestLocalDiskBackend:
     """Test cases for LocalDiskBackend."""
 
+    def test_disk_cache_metadata_get_num_tokens(self):
+        """Test DiskCacheMetadata.get_num_tokens()."""
+        metadata = DiskCacheMetadata(
+            path="/tmp/test.pt",
+            size=128,
+            shape=torch.Size((2, 16, 8, 128)),
+            dtype=torch.bfloat16,
+            fmt=MemoryFormat.KV_T2D,
+        )
+
+        assert metadata.get_num_tokens() == 16
+
+    def test_disk_cache_metadata_get_num_tokens_missing_fmt_or_shape(self, capsys):
+        """Test DiskCacheMetadata.get_num_tokens() without shape/fmt metadata."""
+        metadata = DiskCacheMetadata(path="/tmp/test.pt", size=128)
+
+        assert metadata.get_num_tokens() == 0
+
     def test_init(self, temp_disk_path, async_loop, local_cpu_backend):
         """Test LocalDiskBackend initialization."""
         config = create_test_config(temp_disk_path)
@@ -185,5 +204,52 @@ class TestLocalDiskBackend:
         result = local_disk_backend.get_blocking(key)
 
         assert result is None
+
+        local_disk_backend.local_cpu_backend.memory_allocator.close()
+    
+    def test_clear_removes_only_evictable_entries_and_counts_tokens(
+        self, local_disk_backend, monkeypatch
+    ):
+        """Test clear() only removes evictable entries and sums token counts."""
+        evictable_key = create_test_key(3)
+        pinned_key = create_test_key(4)
+
+        evictable_meta = DiskCacheMetadata(
+            path="/tmp/evictable.pt",
+            size=64,
+            shape=torch.Size((2, 11, 8, 128)),
+            dtype=torch.bfloat16,
+            fmt=MemoryFormat.KV_T2D,
+        )
+        pinned_meta = DiskCacheMetadata(
+            path="/tmp/pinned.pt",
+            size=32,
+            shape=torch.Size((2, 7, 8, 128)),
+            dtype=torch.bfloat16,
+            fmt=MemoryFormat.KV_T2D,
+            pin_count=1,
+        )
+
+        local_disk_backend.dict[evictable_key] = evictable_meta
+        local_disk_backend.dict[pinned_key] = pinned_meta
+        local_disk_backend.current_cache_size = evictable_meta.size + pinned_meta.size
+
+        removed_keys = []
+
+        def fake_remove(key, force=True):
+            # do not remove real pt file
+            removed_keys.append((key, force))
+            local_disk_backend.dict.pop(key, None)
+            return True
+
+        monkeypatch.setattr(local_disk_backend, "remove", fake_remove)
+
+        num_cleared_tokens = local_disk_backend.clear()
+
+        assert num_cleared_tokens == 11
+        assert removed_keys == [(evictable_key, False)]
+        assert evictable_key not in local_disk_backend.dict
+        assert pinned_key in local_disk_backend.dict
+        assert local_disk_backend.current_cache_size == pinned_meta.size
 
         local_disk_backend.local_cpu_backend.memory_allocator.close()

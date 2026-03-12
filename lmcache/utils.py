@@ -284,6 +284,12 @@ class DiskCacheMetadata:
         """
         return not self.is_pinned
 
+    def get_num_tokens(self) -> int:
+        if self.fmt is None or self.shape is None:
+            logger.warning("Cannot get number of tokens because fmt or shape is not set.")
+            return 0
+        token_dim = self.fmt.token_dim()
+        return self.shape[token_dim]
 
 TORCH_DTYPE_TO_STR_DTYPE = {
     torch.half: "half",
