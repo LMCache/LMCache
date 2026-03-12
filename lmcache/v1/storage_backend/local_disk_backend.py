@@ -108,6 +108,10 @@ class LocalDiskBackend(StorageBackendInterface):
             super().__init__(dst_device)
         else:
             super().__init__("cpu")
+        
+        # SSD wear metrics
+        self.disk_write_ops = 0
+        self.disk_write_bytes = 0
 
         self.cache_policy = get_cache_policy(config.cache_policy)
         self.dict = self.cache_policy.init_mutable_mapping()
@@ -583,6 +587,11 @@ class LocalDiskBackend(StorageBackendInterface):
     def write_file(self, buffer, path):
         start_time = time.time()
         size = len(buffer)
+
+        # SSD wear metrics
+        self.disk_write_ops += 1
+        self.disk_write_bytes += size
+
         if size % self.os_disk_bs != 0 or not self.use_odirect:
             with open(path, "wb") as f:
                 f.write(buffer)
@@ -594,6 +603,10 @@ class LocalDiskBackend(StorageBackendInterface):
         logger.debug(
             f"Disk write size: {size} bytes, "
             f"Bandwidth: {size / disk_write_time / 1e6:.2f} MB/s"
+        )
+        logger.debug(
+            f"SSD metrics → writes: {self.disk_write_ops}, "
+            f"bytes_written: {self.disk_write_bytes}"
         )
 
     def read_file(self, key, buffer, path):
