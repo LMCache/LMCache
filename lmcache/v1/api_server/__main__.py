@@ -208,7 +208,26 @@ def create_app(
         num_tokens: int
 
     @app.post("/clear", response_model=ClearResponse)
-    async def clear(req: ClearRequest):
+    async def clear(req: ClearRequest, request: Request):
+        # Role-based access control: verify admin privileges
+        import os
+        expected_admin_key = os.environ.get("LMCACHE_ADMIN_KEY")
+        
+        # Check if admin authentication is configured
+        if not expected_admin_key:
+            raise HTTPException(
+                status_code=503,
+                detail="Admin authentication not configured. Set LMCACHE_ADMIN_KEY environment variable."
+            )
+        
+        # Verify admin credentials from request headers
+        provided_admin_key = request.headers.get("x-admin-key")
+        if not provided_admin_key or provided_admin_key != expected_admin_key:
+            raise HTTPException(
+                status_code=403,
+                detail="Forbidden: Administrative privileges required for this operation"
+            )
+        
         try:
             event_id = "Clear" + str(uuid.uuid4())
             msg = ClearMsg(
