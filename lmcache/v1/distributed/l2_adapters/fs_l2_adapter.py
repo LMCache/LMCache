@@ -162,6 +162,20 @@ class FSL2AdapterConfig(L2AdapterConfigBase):
         read_ahead_size: Optional[int] = None,
         use_odirect: bool = False,
     ):
+        """Initialize FSL2AdapterConfig.
+
+        Args:
+            base_path: Directory for storing KV cache files.
+            relative_tmp_dir: Relative sub-dir under
+                base_path for temp files during writes.
+            read_ahead_size: If set, trigger filesystem
+                readahead by issuing a small initial read
+                of this many bytes before reading the rest.
+            use_odirect: If True, bypass the OS page cache
+                using O_DIRECT for both reads and writes.
+                Requires buffer sizes aligned to the
+                filesystem block size.
+        """
         self.base_path = base_path
         self.relative_tmp_dir = relative_tmp_dir
         self.read_ahead_size = read_ahead_size
