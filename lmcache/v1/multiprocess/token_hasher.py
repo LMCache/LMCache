@@ -183,13 +183,11 @@ class TokenHasher:
     def compute_chunk_hashes(
         self,
         token_ids: list[int],
-        full_chunk_only: bool = True,
         prefix_hash: Any = None,
         start: int = 0,
         end: int | None = None,
-        as_bytes: bool = False,
-    ) -> list:
-        """Compute rolling prefix hashes for chunks in a token range.
+    ) -> list[bytes]:
+        """Compute rolling prefix hashes for complete chunks in a token range.
 
         The rolling hash is always computed from the beginning of
         ``token_ids`` (since each chunk's hash depends on all previous
@@ -197,40 +195,29 @@ class TokenHasher:
         returned, and hashing stops at ``end`` to avoid unnecessary work.
 
         ``start`` and ``end`` are token-level indices and must be
-        multiples of ``chunk_size``.
+        multiples of ``chunk_size``. Partial chunks are discarded.
 
         Args:
             token_ids: Full token sequence.
-            full_chunk_only: If True, only consider complete chunks.
-                Else, also include the final partial chunk (if any).
             prefix_hash: Optional initial prefix hash (defaults to none_hash).
             start: Token-level start index (must be chunk-aligned).
                 Chunks before this index are computed but not returned.
             end: Token-level end index (must be chunk-aligned). When
                 provided, hashing stops at this index.
-            as_bytes: If True, convert each hash to bytes via
-                :meth:`hash_to_bytes` before returning.
 
         Returns:
-            List of hash values for chunks in ``[start, end)``.
-            If ``as_bytes`` is True, each element is ``bytes``.
+            List of ``bytes`` hash values for chunks in ``[start, end)``.
         """
-        hashes: list = []
+        hashes: list[bytes] = []
         prefix_hash = self.none_hash if prefix_hash is None else prefix_hash
         effective_len = min(len(token_ids), end) if end is not None else len(token_ids)
-        num_complete = (
-            effective_len - effective_len % self.chunk_size
-            if full_chunk_only
-            else effective_len
-        )
+        num_complete = effective_len - effective_len % self.chunk_size
         for i in range(0, num_complete, self.chunk_size):
             prefix_hash = self.hash_tokens(
                 token_ids[i : i + self.chunk_size], prefix_hash
             )
             if i >= start:
-                hashes.append(
-                    self.hash_to_bytes(prefix_hash) if as_bytes else prefix_hash
-                )
+                hashes.append(self.hash_to_bytes(prefix_hash))
         return hashes
 
     @staticmethod

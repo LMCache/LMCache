@@ -543,9 +543,7 @@ class MPCacheEngine:
         extra_count = compute_extra_count(tp_size, world_size)
 
         # Compute chunk hashes for all full chunks
-        chunk_hashes = self.token_hasher.compute_chunk_hashes(
-            list(key.token_ids), True, as_bytes=True
-        )
+        chunk_hashes = self.token_hasher.compute_chunk_hashes(list(key.token_ids))
         if not chunk_hashes:
             return self._register_prefetch_job(
                 _PrefetchJob(
@@ -651,7 +649,7 @@ class MPCacheEngine:
                 multi-reader locking.
         """
         chunk_hashes = self.token_hasher.compute_chunk_hashes(
-            list(key.token_ids), True, start=key.start, end=key.end, as_bytes=True
+            list(key.token_ids), start=key.start, end=key.end
         )
         if not chunk_hashes:
             return

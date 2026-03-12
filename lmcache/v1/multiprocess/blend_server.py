@@ -209,9 +209,7 @@ class BlendEngine(MPCacheEngine):
             temp_ipc_key = create_temp_ipc_key_by_range(key, start, end)
             chunk_hashes = self.token_hasher.compute_chunk_hashes(
                 list(temp_ipc_key.token_ids),
-                True,
                 self.BLEND_HASH_PREFIX,
-                as_bytes=True,
             )
 
             obj_keys = ipc_key_to_object_keys(temp_ipc_key, chunk_hashes)
@@ -374,7 +372,7 @@ class BlendEngine(MPCacheEngine):
         """
         # Compute blend-only hash for the keys
         chunk_hashes = self.token_hasher.compute_chunk_hashes(
-            list(key.token_ids), True, self.BLEND_HASH_PREFIX, as_bytes=True
+            list(key.token_ids), self.BLEND_HASH_PREFIX
         )
         obj_keys = ipc_key_to_object_keys(key, chunk_hashes)
 
@@ -438,9 +436,7 @@ class BlendEngine(MPCacheEngine):
             temp_ipc_key = create_temp_ipc_key_by_range(key, start, end)
             chunk_hashes = self.token_hasher.compute_chunk_hashes(
                 list(temp_ipc_key.token_ids),
-                True,
                 self.BLEND_HASH_PREFIX,
-                as_bytes=True,
             )
             obj_keys = ipc_key_to_object_keys(temp_ipc_key, chunk_hashes)
             obj_keys_for_paragraphs.append(obj_keys)
@@ -548,9 +544,7 @@ class BlendEngine(MPCacheEngine):
             final chunks, and a boolean flag indicating if the store is successful.
         """
         # Compute normal hash for the keys
-        chunk_hashes = self.token_hasher.compute_chunk_hashes(
-            list(key.token_ids), True, None, as_bytes=True
-        )
+        chunk_hashes = self.token_hasher.compute_chunk_hashes(list(key.token_ids), None)
         obj_keys = ipc_key_to_object_keys(key, chunk_hashes)
 
         # Get GPU context
