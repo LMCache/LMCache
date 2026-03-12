@@ -197,8 +197,7 @@ __global__ void single_layer_kv_transfer_kernel(
 template <GPUKVFormat format>
 __device__ __forceinline__ int64_t
 page_buffer_offset(const int64_t k_or_v, const int64_t token_idx,
-                   const int64_t scalar_offset,
-                   const int64_t scalars_per_token,
+                   const int64_t scalar_offset, const int64_t scalars_per_token,
                    const int64_t page_buffer_size, const int64_t block_size) {
   // vllm cross layer
   if constexpr (format == GPUKVFormat::NB_NL_TWO_BS_NH_HS) {
@@ -231,11 +230,10 @@ __device__ __forceinline__ int64_t page_buffer_offset_unilateral(
   return token_idx * scalars_per_token + scalar_offset;
 }
 
-__device__ __forceinline__ int64_t
-key_value_offset(const int64_t k_or_v, const int64_t layer_idx,
-                 const int64_t token_idx, const int64_t scalar_offset,
-                 const int64_t scalars_per_token, const int64_t num_tokens,
-                 const int64_t num_layers) {
+__device__ __forceinline__ int64_t key_value_offset(
+    const int64_t k_or_v, const int64_t layer_idx, const int64_t token_idx,
+    const int64_t scalar_offset, const int64_t scalars_per_token,
+    const int64_t num_tokens, const int64_t num_layers) {
   return k_or_v * num_layers * num_tokens * scalars_per_token +
          layer_idx * num_tokens * scalars_per_token +
          token_idx * scalars_per_token + scalar_offset;
@@ -459,8 +457,7 @@ void multi_layer_kv_transfer_templated(
                     // for MLA.
     const torch::Tensor& key_value_ptrs,  // [num_layers]
     const torch::Tensor& slot_mapping,    // [num_tokens],
-    const torch::Device& paged_memory_device,
-    const int64_t page_buffer_size,
+    const torch::Device& paged_memory_device, const int64_t page_buffer_size,
     const TransferDirection direction, const GPUKVFormat gpu_kv_format,
     const int64_t block_size, const int64_t skip_prefix_n_tokens) {
   T* key_value_ptr = get_kernel_ptr<T, torch::Tensor>(key_value);
@@ -594,8 +591,7 @@ void multi_layer_kv_transfer_unilateral(
 
     const torch::Tensor& key_value_ptrs,  // [num_layers*2]
     const torch::Tensor& slot_mapping,    // [num_tokens],
-    const torch::Device& paged_memory_device,
-    const int64_t page_buffer_size,
+    const torch::Device& paged_memory_device, const int64_t page_buffer_size,
     const TransferDirection direction, const GPUKVFormat gpu_kv_format) {
   const bool use_mla = lmc::is_mla(gpu_kv_format);
   // MLA case collapses back to multi_layer_kv_transfer

@@ -626,12 +626,12 @@ def test_lmcache_memcpy_async():
                 big_cpu_tensor[start // dtype.itemsize : end // dtype.itemsize],
             )
 
-            big_gpu_tensor[
-                start // dtype.itemsize : end // dtype.itemsize
-            ] = torch.rand(
-                end // dtype.itemsize - start // dtype.itemsize,
-                dtype=dtype,
-                device="cuda",
+            big_gpu_tensor[start // dtype.itemsize : end // dtype.itemsize] = (
+                torch.rand(
+                    end // dtype.itemsize - start // dtype.itemsize,
+                    dtype=dtype,
+                    device="cuda",
+                )
             )
 
     # Reset the data in gpu
@@ -663,12 +663,12 @@ def test_lmcache_memcpy_async():
                 big_cpu_tensor[start // dtype.itemsize : end // dtype.itemsize],
             )
 
-            big_cpu_tensor[
-                start // dtype.itemsize : end // dtype.itemsize
-            ] = torch.rand(
-                end // dtype.itemsize - start // dtype.itemsize,
-                dtype=dtype,
-                device="cpu",
+            big_cpu_tensor[start // dtype.itemsize : end // dtype.itemsize] = (
+                torch.rand(
+                    end // dtype.itemsize - start // dtype.itemsize,
+                    dtype=dtype,
+                    device="cpu",
+                )
             )
 
     # Unregister the cpu memory
