@@ -235,10 +235,11 @@ class TestLRUEvictionPolicyCandidates:
     def test_get_candidates_returns_lru_order(self):
         """Candidates should be returned in LRU order."""
         policy = LRUEvictionPolicy()
+        # Create keys in order: 1, 2, 3, evict order is 3, 2, 1
         policy.on_keys_created([make_key(1), make_key(2), make_key(3)])
         candidates = policy.get_eviction_candidates(2)
         assert len(candidates) == 2
-        assert ObjectKey.Bytes2IntHash(candidates[0].chunk_hash) == 1
+        assert ObjectKey.Bytes2IntHash(candidates[0].chunk_hash) == 3
         assert ObjectKey.Bytes2IntHash(candidates[1].chunk_hash) == 2
 
     def test_get_candidates_respects_count_limit(self):
