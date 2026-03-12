@@ -1,5 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
+# Future
+from __future__ import annotations
+
 # Standard
 from dataclasses import dataclass, field
 from typing import Optional
@@ -23,7 +26,13 @@ from lmcache.native_storage_ops import Bitmap
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.internal_api import L1MemoryDesc
 from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface, L2TaskId
-from lmcache.v1.distributed.l2_adapters.config import NixlStoreL2AdapterConfig
+from lmcache.v1.distributed.l2_adapters.config import (
+    L2AdapterConfigBase,
+    register_l2_adapter_type,
+)
+from lmcache.v1.distributed.l2_adapters.factory import (
+    register_l2_adapter_factory,
+)
 from lmcache.v1.memory_management import MemoryObj
 
 logger = init_logger(__name__)
@@ -782,3 +791,116 @@ class NixlStoreL2Adapter(L2AdapterInterface):
         with self._lock:
             self._completed_load_tasks[task_id] = bitmap
         self._signal_load_event()
+
+
+# ---------------------------------------------------------------------
+# Config and self-registration
+# ---------------------------------------------------------------------
+
+_VALID_NIXL_BACKENDS = (
+    "GDS",
+    "GDS_MT",
+    "POSIX",
+    "HF3FS",
+    "OBJ",
+)
+_FILE_BACKENDS = ("GDS", "GDS_MT", "POSIX", "HF3FS")
+
+
+class NixlStoreL2AdapterConfig(L2AdapterConfigBase):
+    """
+    Config for a Nixl-store-based L2 adapter.
+
+    Fields:
+    - backend: Nixl storage backend
+      (GDS, GDS_MT, POSIX, HF3FS, OBJ).
+    - backend_params: Backend-specific parameters as a
+      dict of string key-value pairs. For file-based
+      backends (GDS, GDS_MT, POSIX, HF3FS), must include
+      ``file_path``. May also include ``use_direct_io``
+      (default ``"false"``) and other backend-specific
+      keys.
+    - pool_size: Number of storage descriptors to
+      pre-allocate (must be > 0).
+    """
+
+    def __init__(
+        self,
+        backend: str,
+        backend_params: dict[str, str],
+        pool_size: int,
+    ):
+        if backend in _FILE_BACKENDS:
+            if "file_path" not in backend_params:
+                raise ValueError(
+                    "backend_params must include "
+                    "'file_path' for file-based "
+                    "backend %r" % backend
+                )
+            if "use_direct_io" not in backend_params:
+                raise ValueError(
+                    "backend_params must include "
+                    "'use_direct_io' for file-based "
+                    "backend %r" % backend
+                )
+        self.backend = backend
+        self.backend_params = backend_params
+        self.pool_size = pool_size
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "NixlStoreL2AdapterConfig":
+        backend = d.get("backend")
+        if backend not in _VALID_NIXL_BACKENDS:
+            raise ValueError(
+                "backend must be one of %s, got %r" % (_VALID_NIXL_BACKENDS, backend)
+            )
+
+        backend_params = d.get("backend_params", {})
+        if not isinstance(backend_params, dict):
+            raise ValueError("backend_params must be a dict of string key-value pairs")
+
+        pool_size = d.get("pool_size")
+        if not isinstance(pool_size, int) or pool_size <= 0:
+            raise ValueError("pool_size must be a positive integer")
+
+        return cls(
+            backend=backend,
+            backend_params=backend_params,
+            pool_size=pool_size,
+        )
+
+    @classmethod
+    def help(cls) -> str:
+        return (
+            "Nixl store L2 adapter config fields:\n"
+            "- backend (str): Nixl storage backend, "
+            "one of %s (required)\n"
+            "- backend_params (dict): backend-specific "
+            "string key-value pairs (optional, "
+            "default empty). File-based backends "
+            "require file_path. Optional keys include "
+            "'use_direct_io' (default 'false') and "
+            "'file_size' (int, size in bytes of each "
+            "storage file slot; defaults to the L1 "
+            "page size if not set).\n"
+            "- pool_size (int): number of storage "
+            "descriptors to pre-allocate (required, "
+            ">0)" % (_VALID_NIXL_BACKENDS,)
+        )
+
+
+# Self-register config type and adapter factory
+register_l2_adapter_type("nixl_store", NixlStoreL2AdapterConfig)
+
+
+def _create_nixl_store_adapter(
+    config: L2AdapterConfigBase,
+    l1_memory_desc: Optional[L1MemoryDesc] = None,
+) -> L2AdapterInterface:
+    """Create a NixlStoreL2Adapter from config."""
+    if l1_memory_desc is None:
+        raise ValueError("l1_memory_desc is required to create a NixlStoreL2Adapter.")
+    return NixlStoreL2Adapter(config, l1_memory_desc)  # type: ignore[arg-type]
+
+
+register_l2_adapter_factory("nixl_store", _create_nixl_store_adapter)
