@@ -97,6 +97,17 @@ class TestL1CounterCallbacks:
         logger.on_l1_keys_deleted_by_manager(make_keys(4, offset=10))
         assert logger.stats.interval_l1_evicted_keys == 7
 
+    def test_finish_write_and_reserve_read_increments_write_counter(self, logger):
+        logger.on_l1_keys_finish_write_and_reserve_read(make_keys(4))
+        assert logger.stats.interval_l1_write_keys == 4
+
+    def test_finish_write_and_reserve_read_accumulates_with_write_finished(
+        self, logger
+    ):
+        logger.on_l1_keys_write_finished(make_keys(3))
+        logger.on_l1_keys_finish_write_and_reserve_read(make_keys(5, offset=10))
+        assert logger.stats.interval_l1_write_keys == 8
+
 
 # ---------------------------------------------------------------------------
 # log_prometheus(): stats swap and Prometheus metric forwarding
