@@ -110,8 +110,6 @@ object is stored as a raw ``.data`` file whose name encodes the full
 
 - ``relative_tmp_dir``: Relative sub-directory for temporary files during
   writes (atomic rename on completion).
-- ``scan_on_startup``: ``true`` or ``false`` (default ``false``) -- scan
-  existing files at startup to rebuild the in-memory index.
 - ``read_ahead_size``: Trigger file-system read-ahead by reading this many
   bytes first (positive integer, optional).
 - ``use_odirect``: ``true`` or ``false`` (default ``false``) -- bypass the
@@ -124,8 +122,8 @@ object is stored as a raw ``.data`` file whose name encodes the full
     # Basic FS adapter
     --l2-adapter '{"type": "fs", "base_path": "/data/lmcache/l2"}'
 
-    # With startup scan and temp directory
-    --l2-adapter '{"type": "fs", "base_path": "/data/lmcache/l2", "scan_on_startup": true, "relative_tmp_dir": ".tmp"}'
+    # With temp directory
+    --l2-adapter '{"type": "fs", "base_path": "/data/lmcache/l2", "relative_tmp_dir": ".tmp"}'
 
     # With O_DIRECT for bypassing page cache
     --l2-adapter '{"type": "fs", "base_path": "/data/lmcache/l2", "use_odirect": true}'

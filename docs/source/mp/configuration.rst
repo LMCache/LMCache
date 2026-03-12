@@ -174,13 +174,12 @@ Examples:
 ``fs`` -- File-system backed storage
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-A pure file-system L2 adapter using async I/O.  Does not require NIXL.
+A pure file-system L2 adapter using async I/O.
 
 Fields:
 
 - ``base_path`` *(required)*: Directory for storing KV cache files.
 - ``relative_tmp_dir`` *(optional)*: Relative sub-dir for temp files.
-- ``scan_on_startup`` *(optional)*: Scan existing files on startup (default ``false``).
 - ``read_ahead_size`` *(optional)*: Trigger read-ahead by reading this many bytes first.
 - ``use_odirect`` *(optional)*: Bypass page cache via ``O_DIRECT`` (default ``false``).
 
@@ -191,8 +190,8 @@ Examples:
     # Basic FS adapter
     --l2-adapter '{"type": "fs", "base_path": "/data/lmcache/l2"}'
 
-    # With startup scan and temp directory
-    --l2-adapter '{"type": "fs", "base_path": "/data/lmcache/l2", "scan_on_startup": true, "relative_tmp_dir": ".tmp"}'
+    # With temp directory
+    --l2-adapter '{"type": "fs", "base_path": "/data/lmcache/l2", "relative_tmp_dir": ".tmp"}'
 
 ``mock`` -- Mock adapter for testing
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

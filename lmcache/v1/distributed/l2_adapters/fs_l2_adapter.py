@@ -8,7 +8,6 @@ name encodes all key fields so it can be reversed on startup.
 """
 
 # Standard
-from collections import defaultdict
 from pathlib import Path
 from typing import Optional, Union
 import asyncio
@@ -144,21 +143,17 @@ class FSL2AdapterConfig(L2AdapterConfigBase):
     - base_path: directory for storing KV cache files.
     - relative_tmp_dir: optional relative sub-dir for
       temp files (same as fs_connector_relative_tmp_dir).
-    - scan_on_startup: scan existing files on startup
-      to populate the in-memory index. Default False.
     """
 
     def __init__(
         self,
         base_path: str,
         relative_tmp_dir: Optional[str] = None,
-        scan_on_startup: bool = False,
         read_ahead_size: Optional[int] = None,
         use_odirect: bool = False,
     ):
         self.base_path = base_path
         self.relative_tmp_dir = relative_tmp_dir
-        self.scan_on_startup = scan_on_startup
         self.read_ahead_size = read_ahead_size
         self.use_odirect = use_odirect
 
@@ -171,9 +166,6 @@ class FSL2AdapterConfig(L2AdapterConfigBase):
         if relative_tmp_dir is not None:
             if not isinstance(relative_tmp_dir, str):
                 raise ValueError("relative_tmp_dir must be a string")
-        scan_on_startup = d.get("scan_on_startup", False)
-        if not isinstance(scan_on_startup, bool):
-            raise ValueError("scan_on_startup must be a boolean")
         read_ahead_size = d.get("read_ahead_size", None)
         if read_ahead_size is not None:
             if not isinstance(read_ahead_size, int) or read_ahead_size <= 0:
@@ -184,7 +176,6 @@ class FSL2AdapterConfig(L2AdapterConfigBase):
         return cls(
             base_path=base_path,
             relative_tmp_dir=relative_tmp_dir,
-            scan_on_startup=scan_on_startup,
             read_ahead_size=read_ahead_size,
             use_odirect=use_odirect,
         )
@@ -198,8 +189,6 @@ class FSL2AdapterConfig(L2AdapterConfigBase):
             "- relative_tmp_dir (str): relative sub-dir "
             "for temp files (optional, same as "
             "fs_connector_relative_tmp_dir)\n"
-            "- scan_on_startup (bool): scan existing "
-            "files on startup (optional, default false)\n"
             "- read_ahead_size (int): trigger fs "
             "readahead by reading this many bytes first "
             "(optional)\n"
@@ -254,10 +243,6 @@ class FSL2Adapter(L2AdapterInterface):
         self._lookup_efd = os.eventfd(0, os.EFD_NONBLOCK | os.EFD_CLOEXEC)
         self._load_efd = os.eventfd(0, os.EFD_NONBLOCK | os.EFD_CLOEXEC)
 
-        # In-memory index: which keys are on disk
-        self._known_keys: set[ObjectKey] = set()
-        self._locked_keys: dict[ObjectKey, int] = defaultdict(int)
-
         # Task bookkeeping
         self._next_task_id: L2TaskId = 0
         self._completed_store_tasks: dict[L2TaskId, bool] = {}
@@ -270,21 +255,14 @@ class FSL2Adapter(L2AdapterInterface):
         self._loop_thread = threading.Thread(target=self._run_event_loop, daemon=True)
         self._loop_thread.start()
 
-        # Scan existing files to populate _known_keys
-        if config.scan_on_startup:
-            self._scan_existing_files()
-
         logger.info(
             "Initialized FSL2Adapter with base_path=%s, "
-            "relative_tmp_dir=%s, scan_on_startup=%s, "
-            "read_ahead_size=%s, use_odirect=%s, "
-            "found %d existing files",
+            "relative_tmp_dir=%s, "
+            "read_ahead_size=%s, use_odirect=%s",
             self._base_path,
             self._relative_tmp_dir,
-            config.scan_on_startup,
             self._read_ahead_size,
             self._use_odirect,
-            len(self._known_keys),
         )
 
     # ------------------------------------------------------------------
@@ -334,7 +312,10 @@ class FSL2Adapter(L2AdapterInterface):
         with self._lock:
             task_id = self._get_next_task_id()
 
-        self._loop.call_soon_threadsafe(self._execute_lookup, keys, task_id)
+        asyncio.run_coroutine_threadsafe(
+            self._execute_lookup(keys, task_id),
+            self._loop,
+        )
         return task_id
 
     def query_lookup_and_lock_result(self, task_id: L2TaskId) -> Bitmap | None:
@@ -342,16 +323,9 @@ class FSL2Adapter(L2AdapterInterface):
             return self._completed_lookup_tasks.pop(task_id, None)
 
     def submit_unlock(self, keys: list[ObjectKey]) -> None:
-        def _unlock(ks: list[ObjectKey]) -> None:
-            for k in ks:
-                if k not in self._locked_keys:
-                    continue
-                if self._locked_keys[k] <= 1:
-                    del self._locked_keys[k]
-                else:
-                    self._locked_keys[k] -= 1
-
-        self._loop.call_soon_threadsafe(_unlock, keys)
+        # No-op: FS adapter has no eviction, so locking
+        # between lookup and load is unnecessary.
+        pass
 
     # ------------------------------------------------------------------
     # Load Interface
@@ -422,6 +396,19 @@ class FSL2Adapter(L2AdapterInterface):
     def _key_to_path(self, key: ObjectKey) -> Path:
         return self._base_path / _object_key_to_filename(key)
 
+    async def _key_exists_on_disk(
+        self,
+        key: ObjectKey,
+    ) -> bool:
+        """Check whether the file for *key* exists on disk.
+
+        Uses ``aiofiles.os.path.exists`` so the check is
+        non-blocking and always reflects the real FS state,
+        which is critical for multi-node shared-FS setups.
+        """
+        path = self._key_to_path(key)
+        return await aiofiles.os.path.exists(path)
+
     def _key_to_file_and_tmp_path(self, key: ObjectKey) -> tuple[Path, Path]:
         """Return ``(final_path, tmp_path)``.
 
@@ -437,21 +424,6 @@ class FSL2Adapter(L2AdapterInterface):
         else:
             tmp = final.with_suffix(".tmp")
         return final, tmp
-
-    def _scan_existing_files(self) -> None:
-        """Populate _known_keys from ``.data`` files on disk.
-
-        File names are reversible so we can reconstruct the
-        original ``ObjectKey`` for each file.
-        """
-        for entry in self._base_path.iterdir():
-            if not entry.is_file():
-                continue
-            if not entry.name.endswith(_FILE_EXT):
-                continue
-            key = _filename_to_object_key(entry.name)
-            if key is not None:
-                self._known_keys.add(key)
 
     # ---- O_DIRECT helpers -----------------------------------------------
 
@@ -528,11 +500,11 @@ class FSL2Adapter(L2AdapterInterface):
         success = True
         try:
             for key, obj in zip(keys, objects, strict=True):
-                # Skip if already stored
-                if key in self._known_keys:
-                    continue
-
                 file_path, tmp_path = self._key_to_file_and_tmp_path(key)
+
+                # Skip if already stored on disk
+                if await aiofiles.os.path.exists(file_path):
+                    continue
                 buf = obj.byte_array
                 size = len(buf)
 
@@ -564,7 +536,6 @@ class FSL2Adapter(L2AdapterInterface):
                             await f.write(buf)
 
                     await aiofiles.os.replace(tmp_path, file_path)
-                    self._known_keys.add(key)
                     logger.debug(
                         "FSL2Adapter stored key %s (%d bytes)",
                         file_path.name,
@@ -591,17 +562,16 @@ class FSL2Adapter(L2AdapterInterface):
 
     # ---- lookup ---------------------------------------------------------
 
-    def _execute_lookup(
+    async def _execute_lookup(
         self,
         keys: list[ObjectKey],
         task_id: L2TaskId,
     ) -> None:
         bitmap = Bitmap(len(keys))
         for i, key in enumerate(keys):
-            if key not in self._known_keys:
+            if not await self._key_exists_on_disk(key):
                 continue
             bitmap.set(i)
-            self._locked_keys[key] += 1
 
         with self._lock:
             self._completed_lookup_tasks[task_id] = bitmap
