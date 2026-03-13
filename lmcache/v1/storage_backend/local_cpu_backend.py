@@ -3,7 +3,6 @@
 from concurrent.futures import Future
 from typing import TYPE_CHECKING, Any, Callable, List, Optional, Sequence, Union
 import threading
-import time
 
 # Third Party
 import torch
@@ -564,18 +563,7 @@ class LocalCPUBackend(AllocatorBackendInterface):
                     )
                     break
 
-                # TODO: make time_to_wait a config
-                time_to_wait = 0.1
-                logger.warning(
-                    "No eviction candidates found in local cpu backend. "
-                    "Local cpu memory is under pressure. "
-                    f"Waiting for {time_to_wait} seconds before retrying."
-                )
-                # self.memory_allocator.memcheck()
-                # do not hold the lock during sleep
-                time.sleep(time_to_wait)
-
-            memory_obj = self.memory_allocator.allocate(shapes, dtypes, fmt)
+            memory_obj = self._allocate_once(shapes, dtypes, fmt, busy_loop)
             if memory_obj is not None:
                 break
 
@@ -688,19 +676,8 @@ class LocalCPUBackend(AllocatorBackendInterface):
                     )
                     break
 
-                # TODO: make time_to_wait a config
-                time_to_wait = 0.1
-                logger.warning(
-                    "No eviction candidates found in local cpu backend. "
-                    "Local cpu memory is under pressure. "
-                    f"Waiting for {time_to_wait} seconds before retrying."
-                )
-                # self.memory_allocator.memcheck()
-                # do not hold the lock during sleep
-                time.sleep(time_to_wait)
-
-            memory_objs = self.memory_allocator.batched_allocate(
-                shapes, dtypes, batch_size, fmt
+            memory_objs = self._batched_allocate_once(
+                shapes, dtypes, batch_size, fmt, busy_loop
             )
             if memory_objs:
                 break
@@ -802,6 +779,52 @@ class LocalCPUBackend(AllocatorBackendInterface):
 
     def get_memory_allocator(self):
         return self.memory_allocator
+
+    def _allocate_once(
+        self,
+        shapes: Union[torch.Size, list[torch.Size]],
+        dtypes: Union[torch.dtype, list[torch.dtype]],
+        fmt: MemoryFormat,
+        busy_loop: bool,
+    ) -> Optional[MemoryObj]:
+        """
+        One allocation attempt; uses allocator's allocate_with_retry when
+        available so that wait/retry (busy loop) lives in the allocator.
+        """
+        allocator = self.memory_allocator
+        if isinstance(allocator, MixedMemoryAllocator):
+            return allocator.allocate_with_retry(
+                shapes,
+                dtypes,
+                fmt=fmt,
+                busy_loop=busy_loop,
+                time_to_wait=0.1,
+            )
+        return allocator.allocate(shapes, dtypes, fmt)
+
+    def _batched_allocate_once(
+        self,
+        shapes: Union[torch.Size, list[torch.Size]],
+        dtypes: Union[torch.dtype, list[torch.dtype]],
+        batch_size: int,
+        fmt: MemoryFormat,
+        busy_loop: bool,
+    ) -> Optional[List[MemoryObj]]:
+        """
+        One batched allocation attempt; uses allocator's
+        batched_allocate_with_retry when available.
+        """
+        allocator = self.memory_allocator
+        if isinstance(allocator, MixedMemoryAllocator):
+            return allocator.batched_allocate_with_retry(
+                shapes,
+                dtypes,
+                batch_size,
+                fmt=fmt,
+                busy_loop=busy_loop,
+                time_to_wait=0.1,
+            )
+        return allocator.batched_allocate(shapes, dtypes, batch_size, fmt)
 
     def close(self) -> None:
         if self.batched_msg_sender is not None:

@@ -10,6 +10,7 @@ import abc
 import ctypes
 import os
 import threading
+import time
 
 # Third Party
 from sortedcontainers import SortedList
@@ -2045,6 +2046,83 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
                 )
         else:
             raise ValueError(f"Unsupported memory format: {fmt}")
+
+    @_lmcache_nvtx_annotate
+    def allocate_with_retry(
+        self,
+        shapes: Union[torch.Size, list[torch.Size]],
+        dtypes: Union[torch.dtype, list[torch.dtype]],
+        fmt: MemoryFormat = MemoryFormat.KV_2LTD,
+        allocator_type: Optional[str] = None,
+        busy_loop: bool = True,
+        time_to_wait: float = 0.1,
+    ) -> Optional[MemoryObj]:
+        """
+        Allocate memory; if allocation fails and busy_loop is True, wait and
+        retry once. This moves the wait/retry policy into the allocator so
+        the backend does not need to busy-loop or sleep.
+
+        :param shapes: Shape(s) of the tensor to allocate.
+        :param dtypes: Dtype(s) of the tensor to allocate.
+        :param fmt: Memory format.
+        :param allocator_type: Optional allocator type hint.
+        :param busy_loop: If True and allocation fails, sleep time_to_wait
+            and try again before returning.
+        :param time_to_wait: Seconds to sleep before retry when busy_loop is True.
+        :return: MemoryObj if allocation succeeded, None otherwise.
+        """
+        memory_obj = self.allocate(shapes, dtypes, fmt, allocator_type)
+        if memory_obj is not None:
+            return memory_obj
+        if not busy_loop:
+            return None
+        logger.warning(
+            "No free blocks in allocator; waiting %.2f s before retry.",
+            time_to_wait,
+        )
+        time.sleep(time_to_wait)
+        return self.allocate(shapes, dtypes, fmt, allocator_type)
+
+    @_lmcache_nvtx_annotate
+    def batched_allocate_with_retry(
+        self,
+        shapes: Union[torch.Size, list[torch.Size]],
+        dtypes: Union[torch.dtype, list[torch.dtype]],
+        batch_size: int,
+        fmt: MemoryFormat = MemoryFormat.KV_2LTD,
+        allocator_type: Optional[str] = None,
+        busy_loop: bool = True,
+        time_to_wait: float = 0.1,
+    ) -> Optional[List[MemoryObj]]:
+        """
+        Batched allocate; if allocation fails and busy_loop is True, wait and
+        retry once. Same policy as allocate_with_retry for the allocator layer.
+
+        :param shapes: Shape(s) of the tensor to allocate.
+        :param dtypes: Dtype(s) of the tensor to allocate.
+        :param batch_size: Number of blocks to allocate.
+        :param fmt: Memory format.
+        :param allocator_type: Optional allocator type hint.
+        :param busy_loop: If True and allocation fails, sleep time_to_wait
+            and try again before returning.
+        :param time_to_wait: Seconds to sleep before retry when busy_loop is True.
+        :return: List of MemoryObjs if allocation succeeded, None otherwise.
+        """
+        memory_objs = self.batched_allocate(
+            shapes, dtypes, batch_size, fmt, allocator_type
+        )
+        if memory_objs is not None:
+            return memory_objs
+        if not busy_loop:
+            return None
+        logger.warning(
+            "No free blocks in allocator; waiting %.2f s before retry.",
+            time_to_wait,
+        )
+        time.sleep(time_to_wait)
+        return self.batched_allocate(
+            shapes, dtypes, batch_size, fmt, allocator_type
+        )
 
     @_lmcache_nvtx_annotate
     def free(self, memory_obj: MemoryObj, allocator_type: Optional[str] = None):
