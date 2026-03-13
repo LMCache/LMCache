@@ -126,7 +126,7 @@ stop_vllm
 
 echo "[INFO] Preparing LMCache config (cpu.yaml)..."
 cat <<EOF > cpu.yaml
-chunk_size: 16
+chunk_size: 256
 local_cpu: true
 max_local_cpu_size: 50
 EOF
