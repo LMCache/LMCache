@@ -512,6 +512,7 @@ class L1Manager:
     def finish_write_and_reserve_read(
         self,
         keys: list[ObjectKey],
+        extra_count: int = 0,
     ) -> dict[ObjectKey, L1OperationResult]:
         """Atomically finish write and acquire read lock for the given keys.
 
@@ -522,6 +523,10 @@ class L1Manager:
 
         Args:
             keys: Keys to transition from write-locked to read-locked.
+            extra_count: Extra read locks on top of the default 1 lock.
+                Total locks acquired per key = 1 + extra_count.  Useful
+                when multiple TP workers each consume one read lock for
+                the same key (e.g. MLA models with TP > 1).
 
         Returns:
             A dictionary mapping each object key to a tuple of
@@ -532,6 +537,8 @@ class L1Manager:
             KEY_IN_WRONG_STATE: The key is not write-locked, or it already
                 has read locks.
         """
+        extra_count = _validate_extra_count(extra_count)
+        total = 1 + extra_count
         ret: dict[ObjectKey, L1OperationResult] = {}
         successful_keys: list[ObjectKey] = []
 
@@ -559,13 +566,13 @@ class L1Manager:
                 continue
 
             entry.write_lock.unlock()
-            entry.read_lock.lock()
+            for _ in range(total):
+                entry.read_lock.lock()
             ret[key] = (L1Error.SUCCESS, entry.memory_obj)
             successful_keys.append(key)
 
         for listener in self._registered_listeners:
-            listener.on_l1_keys_write_finished(successful_keys)
-            listener.on_l1_keys_reserved_read(successful_keys)
+            listener.on_l1_keys_finish_write_and_reserve_read(successful_keys)
         return ret
 
     @l1_mgr_synchronized
@@ -687,6 +694,34 @@ class L1Manager:
             self._objects.clear()
 
         self._memory_manager.close()
+
+    # Status reporting
+    @l1_mgr_synchronized
+    def report_status(self) -> dict:
+        """Return a status dict describing L1 cache state."""
+        write_locked = 0
+        read_locked = 0
+        temporary = 0
+        for entry in self._objects.values():
+            if entry.write_lock.is_locked():
+                write_locked += 1
+            if entry.read_lock.is_locked():
+                read_locked += 1
+            if entry.is_temporary:
+                temporary += 1
+        used, total = self._memory_manager.get_memory_usage()
+        return {
+            "is_healthy": self._memory_manager.memcheck(),
+            "total_object_count": len(self._objects),
+            "write_locked_count": write_locked,
+            "read_locked_count": read_locked,
+            "temporary_count": temporary,
+            "memory_used_bytes": used,
+            "memory_total_bytes": total,
+            "memory_usage_ratio": used / total if total > 0 else 0.0,
+            "write_ttl_seconds": self._write_ttl_seconds,
+            "read_ttl_seconds": self._read_ttl_seconds,
+        }
 
     # Debugging APIs
     @l1_mgr_synchronized

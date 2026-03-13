@@ -51,6 +51,7 @@ class RequestType(enum.Enum):
     # Controller operations
     CLEAR = enum.auto()
     GET_CHUNK_SIZE = enum.auto()
+    PING = enum.auto()
 
     # Debug operations
     NOOP = enum.auto()
@@ -62,6 +63,10 @@ class RequestType(enum.Enum):
     CB_LOOKUP_PRE_COMPUTED = enum.auto()
     CB_RETRIEVE_PRE_COMPUTED = enum.auto()
     CB_STORE_FINAL = enum.auto()
+
+    # Blend V2 operations (use CBMatchResult instead of list[tuple[int, int]])
+    CB_LOOKUP_PRE_COMPUTED_V2 = enum.auto()
+    CB_RETRIEVE_PRE_COMPUTED_V2 = enum.auto()
 
 
 @dataclass

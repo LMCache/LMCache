@@ -13,6 +13,7 @@ export VLLM_BASELINE_CONTAINER_NAME="vllm-baseline-test-$$"
 export LMCACHE_PORT="${LMCACHE_PORT:-6555}"
 export VLLM_PORT="${VLLM_PORT:-8000}"
 export VLLM_BASELINE_PORT="${VLLM_BASELINE_PORT:-9000}"
+export LMCACHE_HTTP_PORT="${LMCACHE_HTTP_PORT:-6556}"
 export MAX_WAIT_SECONDS="${MAX_WAIT_SECONDS:-300}"
 export BUILD_ID="${BUILD_ID:-local_$$}"
 
@@ -109,9 +110,17 @@ if ! "$SCRIPT_DIR/run-long-doc-qa.sh"; then
 fi
 echo ""
 
+
+# Step 7: Query LMCache server status
+echo "============================================"
+echo "=== Step 7: LMCache server status ==="
+echo "============================================"
+curl -s "http://localhost:${LMCACHE_HTTP_PORT}/api/status" | python3 -m json.tool || echo "⚠️ Failed to query LMCache status"
+echo ""
+
 echo "============================================"
 echo "=== ✅ All tests passed! ==="
 echo "============================================"
 
-# Step 7: Cleanup runs automatically via trap
+# Step 8: Cleanup runs automatically via trap
 
