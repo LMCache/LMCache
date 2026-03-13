@@ -466,3 +466,32 @@ class PrefetchHandle:
 
 10. **L2 adapters are thread-safe.** Concurrent calls from the StoreController
     thread and PrefetchController thread are expected.
+
+## Implementing a New L2 Adapter
+
+### Pure-Python Adapters
+
+Implement `L2AdapterInterface` directly. See `mock_l2_adapter.py` for a
+reference implementation. Register a config class in `config.py` and add a
+factory branch in `__init__.py`.
+
+### Native (C++/Rust) Storage Backends
+
+For high-performance backends written in C++ or Rust, use the shared native
+connector framework. A single C++ connector implementation works in **both**
+non-MP mode (via `ConnectorClientBase`) and MP mode (via
+`NativeConnectorL2Adapter`).
+
+**Full guide:** [`csrc/storage_backends/README.md`](../../../../csrc/storage_backends/README.md)
+
+The `NativeConnectorL2Adapter` (`native_connector_l2_adapter.py`) bridges any
+pybind-wrapped `IStorageConnector` to the `L2AdapterInterface`:
+
+- Creates 3 Python eventfds from the connector's single eventfd
+- Runs a background demux thread that routes completions by operation type
+- Handles `ObjectKey` serialization and `MemoryObj` buffer extraction
+- Implements client-side locking (refcount dict) for remote backends
+
+**Reference implementation:** The Redis (RESP) connector in
+`csrc/storage_backends/redis/` demonstrates all 5 steps of the integration
+guide.
