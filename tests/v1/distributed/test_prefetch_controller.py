@@ -22,8 +22,10 @@ from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.config import L1ManagerConfig, L1MemoryManagerConfig
 from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.l1_manager import L1Manager
-from lmcache.v1.distributed.l2_adapters.config import MockL2AdapterConfig
-from lmcache.v1.distributed.l2_adapters.mock_l2_adapter import MockL2Adapter
+from lmcache.v1.distributed.l2_adapters.mock_l2_adapter import (
+    MockL2Adapter,
+    MockL2AdapterConfig,
+)
 from lmcache.v1.distributed.storage_controllers.prefetch_controller import (
     PrefetchController,
 )
