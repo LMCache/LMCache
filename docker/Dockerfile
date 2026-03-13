@@ -19,6 +19,8 @@ ARG PYTHON_VERSION=3.12
 ARG UBUNTU_VERSION
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PATH="/opt/venv/bin:${PATH}"
+# Ensure native extensions can resolve torch shared libraries from the venv.
+ENV LD_LIBRARY_PATH="/opt/venv/lib/python${PYTHON_VERSION}/site-packages/torch/lib:${LD_LIBRARY_PATH}"
 
 # Install Python and other dependencies
 RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
@@ -42,7 +44,10 @@ COPY ./requirements/common.txt common.txt
 COPY ./requirements/cuda.txt cuda.txt
 RUN --mount=type=cache,target=/root/.cache/pip \
     . /opt/venv/bin/activate && \
-    uv pip install -r cuda.txt
+    # Defer torch-family packages to vLLM install to avoid ABI mismatches.
+    awk '!/^(torch|torchvision|xformers)([[:space:]]|[<>=!~]|$)/' common.txt > common.no_torch.txt && \
+    awk '!/^-r[[:space:]]+common.txt([[:space:]]|$)/ && !/^(torch|torchvision|xformers)([[:space:]]|[<>=!~]|$)/' cuda.txt > cuda.no_torch.txt && \
+    uv pip install -r common.no_torch.txt -r cuda.no_torch.txt
 
 # CUDA arch list used by torch
 ARG torch_cuda_arch_list='7.0 7.5 8.0 8.6 8.9 9.0 10.0+PTX'
@@ -108,9 +113,11 @@ FROM base AS image-release
 # Install LMCache and vLLM stable releases.
 # It is imperative that LMCache uses the same torch version as the 
 # vLLM stable release.
+COPY --from=image-build /workspace/LMCache/dist_lmcache/*.whl /tmp/dist_lmcache/
 RUN . /opt/venv/bin/activate && \
     uv pip install --prerelease=allow vllm[runai,tensorizer,flashinfer] && \
-    uv pip install lmcache --verbose
+    uv pip install /tmp/dist_lmcache/lmcache-*.whl --verbose && \
+    python3 -c 'import torch, lmcache.c_ops as c_ops; print("TORCH=", torch.__version__, "C_OPS=", c_ops.__file__)'
 
 WORKDIR /workspace
 ENTRYPOINT ["/opt/venv/bin/vllm", "serve"]
