@@ -218,11 +218,11 @@ class StorageManager:
         try:
             yield good_objs if all_good else None
             successfully_yielded = True
-        except Exception as e:
-            logger.warning(
-                "Exception occurred while processing read prefetched results: %s",
-                str(e),
+        except Exception:
+            logger.exception(
+                "Exception occurred while processing read prefetched results",
             )
+            raise
         finally:
             # Decrease the read lock for all successfully read memory objects
             # if None is yielded or exception occurs during caller's processing
