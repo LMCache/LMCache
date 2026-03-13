@@ -19,6 +19,8 @@ from lmcache.v1.distributed.config import (
 )
 from lmcache.v1.distributed.l2_adapters.config import (
     L2AdaptersConfig,
+)
+from lmcache.v1.distributed.l2_adapters.mock_l2_adapter import (
     MockL2AdapterConfig,
 )
 
