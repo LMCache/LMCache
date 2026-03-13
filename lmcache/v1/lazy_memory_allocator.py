@@ -80,6 +80,7 @@ class LazyMemoryAllocator(MemoryAllocatorInterface):
         final_size: int,
         align_bytes: int = AddressManager.ALIGN_BYTES,
         numa_mapping: NUMAMapping | None = None,
+        contiguous_alloc: bool = True,
     ):
         """
         Args:
@@ -121,6 +122,7 @@ class LazyMemoryAllocator(MemoryAllocatorInterface):
             tensor=self._buffer,
             align_bytes=align_bytes,
             init_address_space=self._curr_size,
+            contiguous_alloc=contiguous_alloc,
         )
 
         # Get the address manager

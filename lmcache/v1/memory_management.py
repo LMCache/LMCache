@@ -1184,6 +1184,7 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
         tensor: torch.Tensor,
         align_bytes: int = AddressManager.ALIGN_BYTES,
         init_address_space: int | None = None,
+        contiguous_alloc: bool = True,
     ):
         """
         Args:
@@ -1191,6 +1192,9 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
             align_bytes: The alignment requirement for allocations.
             init_address_space: Initial size of the address space. If None,
                 use the size of the provided tensor.
+            contiguous_alloc: Whether to allocate memory contiguously in
+                batched_allocate. If True, a single large block is allocated
+                and split; if False, each block is allocated individually.
 
         Note:
             The `init_address_space` is used for lazy memory allocation.
@@ -1204,6 +1208,8 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
             self.buffer.numel() if init_address_space is None else init_address_space,
             align_bytes,
         )
+
+        self.contiguous_alloc = contiguous_alloc
 
         # For debugging purposes
         self.num_active_allocations = 0
@@ -1277,6 +1283,21 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
         """
         Batched allocate tensor memory objs with equal sizes.
         """
+        # if contiguous_alloc is False, we will allocate memory objs one by one
+        if not self.contiguous_alloc:
+            tensor_mem_objs: List[TensorMemoryObj] = []
+            for i in range(batch_size):
+                tensor_mem_obj = self.allocate(shapes, dtypes, fmt, allocator_type)
+                if tensor_mem_obj is None:
+                    # if any of the allocation failed,
+                    # free all the allocated memory objs and return None
+                    self.batched_free(tensor_mem_objs)
+                    return None
+                else:
+                    tensor_mem_objs.append(tensor_mem_obj)
+            return tensor_mem_objs
+
+        # allocate a single large block and then split into multi blocks
         shapes, dtypes = self._adapt_shapes_and_dtypes(shapes, dtypes)
 
         # Calculate the size of the tensor
@@ -1997,7 +2018,9 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
             )
         else:
             self.pin_allocator = TensorMemoryAllocator(
-                self.buffer, align_bytes=self.align_bytes
+                self.buffer,
+                align_bytes=self.align_bytes,
+                contiguous_alloc=kwargs.get("contiguous_alloc", True),
             )
 
         self.host_mem_lock = threading.Lock() if not use_paging else nullcontext()

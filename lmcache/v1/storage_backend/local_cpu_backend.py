@@ -430,11 +430,13 @@ class LocalCPUBackend(AllocatorBackendInterface):
                     cpu_size_bytes,
                     numa_mapping=numa_mapping,
                     align_bytes=allocator_align_bytes,
+                    contiguous_alloc=config.contiguous_alloc,
                 )
             return MixedMemoryAllocator(
                 cpu_size_bytes,
                 numa_mapping=numa_mapping,
                 config=config,
+                contiguous_alloc=config.contiguous_alloc,
             )
 
     @staticmethod

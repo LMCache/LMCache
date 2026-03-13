@@ -35,6 +35,9 @@ class L1MemoryManagerConfig:
     align_bytes: int = field(default=0x1000)
     """ The alignment size in bytes. Default is 4KB. """
 
+    contiguous_alloc: bool = field(default=True)
+    """ Whether to use contiguous allocation. Default is True. """
+
     def __post_init__(self):
         self.init_size_in_bytes = min(self.init_size_in_bytes, self.size_in_bytes)
 
@@ -147,6 +150,12 @@ def add_storage_manager_args(
         type=int,
         default=4096,
         help="The alignment size in bytes. Default is 4KB (4096 bytes).",
+    )
+    memory_group.add_argument(
+        "--l1-contiguous-alloc",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Whether to use contiguous allocation for L1 memory. Default is True.",
     )
 
     # L1 Manager Config (TTL settings)
@@ -268,6 +277,7 @@ def parse_args_to_config(
         use_lazy=args.l1_use_lazy,
         init_size_in_bytes=int(args.l1_init_size_gb * (1 << 30)),
         align_bytes=args.l1_align_bytes,
+        contiguous_alloc=args.l1_contiguous_alloc,
     )
 
     l1_manager_config = L1ManagerConfig(

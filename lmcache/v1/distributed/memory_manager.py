@@ -28,13 +28,32 @@ def create_memory_allocator(config: L1MemoryManagerConfig) -> MemoryAllocatorInt
         MemoryAllocatorInterface: An instance of a memory allocator.
     """
     if config.use_lazy:
+        logger.info(
+            "use lazy memory allocator, init size is %d bytes, "
+            "final size is %d bytes, align bytes is %d bytes, contiguous alloc is %s",
+            config.init_size_in_bytes,
+            config.size_in_bytes,
+            config.align_bytes,
+            config.contiguous_alloc,
+        )
         return LazyMemoryAllocator(
-            config.init_size_in_bytes, config.size_in_bytes, config.align_bytes
+            init_size=config.init_size_in_bytes,
+            final_size=config.size_in_bytes,
+            align_bytes=config.align_bytes,
+            contiguous_alloc=config.contiguous_alloc,
         )
     else:
+        logger.info(
+            "use mixed memory allocator, total size is %d bytes, "
+            "align bytes is %d bytes, contiguous alloc is %s",
+            config.size_in_bytes,
+            config.align_bytes,
+            config.contiguous_alloc,
+        )
         return MixedMemoryAllocator(
             config.size_in_bytes,
             align_bytes=config.align_bytes,
+            contiguous_alloc=config.contiguous_alloc,
         )
 
 
