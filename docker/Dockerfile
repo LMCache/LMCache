@@ -45,8 +45,8 @@ COPY ./requirements/cuda.txt cuda.txt
 RUN --mount=type=cache,target=/root/.cache/pip \
     . /opt/venv/bin/activate && \
     # Defer torch-family packages to vLLM install to avoid ABI mismatches.
-    awk '!/^(torch|torchvision|xformers)([[:space:]]|[<>=!~]|$)/' common.txt > common.no_torch.txt && \
-    awk '!/^-r[[:space:]]+common.txt([[:space:]]|$)/ && !/^(torch|torchvision|xformers)([[:space:]]|[<>=!~]|$)/' cuda.txt > cuda.no_torch.txt && \
+    grep -vE '^(torch|torchvision|xformers)($|[[:space:]<>=!~])' common.txt > common.no_torch.txt && \
+    grep -vE '^-r[[:space:]]+common.txt|^(torch|torchvision|xformers)($|[[:space:]<>=!~])' cuda.txt > cuda.no_torch.txt && \
     uv pip install -r common.no_torch.txt -r cuda.no_torch.txt
 
 # CUDA arch list used by torch
@@ -113,8 +113,8 @@ FROM base AS image-release
 # Install LMCache and vLLM stable releases.
 # It is imperative that LMCache uses the same torch version as the 
 # vLLM stable release.
-COPY --from=image-build /workspace/LMCache/dist_lmcache/*.whl /tmp/dist_lmcache/
-RUN . /opt/venv/bin/activate && \
+RUN --mount=type=bind,from=image-build,source=/workspace/LMCache/dist_lmcache,target=/tmp/dist_lmcache \
+    . /opt/venv/bin/activate && \
     uv pip install --prerelease=allow vllm[runai,tensorizer,flashinfer] && \
     uv pip install /tmp/dist_lmcache/lmcache-*.whl --verbose && \
     python3 -c 'import torch, lmcache.c_ops as c_ops; print("TORCH=", torch.__version__, "C_OPS=", c_ops.__file__)'
