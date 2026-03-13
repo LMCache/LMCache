@@ -10,7 +10,7 @@ and verifies that:
 """
 
 # Standard
-from typing import Any, List, Optional, Sequence
+from typing import Any, Callable, List, Optional, Sequence
 import asyncio
 
 # Third Party
@@ -18,7 +18,6 @@ import pytest
 import torch
 
 # First Party
-from lmcache.config import LMCacheEngineMetadata
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.event_manager import EventManager
@@ -26,6 +25,7 @@ from lmcache.v1.memory_management import (
     AdHocMemoryAllocator,
     MemoryObj,
 )
+from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.storage_backend import CreateStorageBackends
 from lmcache.v1.storage_backend.abstract_backend import (
     AllocatorBackendInterface,
@@ -83,6 +83,7 @@ class MockStoragePlugin(StoragePluginInterface):
         keys: Sequence[CacheEngineKey],
         objs: List[MemoryObj],
         transfer_spec: Any = None,
+        on_complete_callback: Optional[Callable[[CacheEngineKey], None]] = None,
     ) -> None:
         """Submit a batched put task."""
         for key, obj in zip(keys, objs, strict=True):
@@ -137,12 +138,11 @@ MOCK_BACKEND_STORAGE_PLUGINS = ["mock_backend"]
 def create_test_key(key_id: int = 0) -> CacheEngineKey:
     """Create a test CacheEngineKey."""
     return CacheEngineKey(
-        "vllm",
-        "test_model",
-        1,  # world_size
-        0,  # worker_id
-        key_id,  # chunk_hash
-        torch.bfloat16,
+        model_name="test_model",
+        world_size=1,
+        worker_id=0,
+        chunk_hash=key_id,
+        dtype=torch.bfloat16,
     )
 
 
@@ -166,11 +166,12 @@ def create_test_config(
 
 def create_test_metadata():
     """Create test metadata for testing."""
-    return LMCacheEngineMetadata(
+    return LMCacheMetadata(
         model_name="test_model",
         world_size=1,
+        local_world_size=1,
         worker_id=0,
-        fmt="vllm",
+        local_worker_id=0,
         kv_dtype=torch.bfloat16,
         kv_shape=(
             4,

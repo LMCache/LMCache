@@ -3,6 +3,7 @@
 from typing import Optional
 from unittest.mock import MagicMock
 import asyncio
+import ctypes
 import inspect
 import random
 import socket
@@ -14,11 +15,56 @@ import uuid
 import torch
 
 # First Party
-from lmcache.config import LMCacheEngineMetadata
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.gpu_connector import VLLMPagedMemGPUConnectorV2
+from lmcache.v1.gpu_connector.gpu_connectors import VLLMPagedMemGPUConnectorV2
 from lmcache.v1.memory_management import AdHocMemoryAllocator, MemoryFormat, MemoryObj
+from lmcache.v1.metadata import LMCacheMetadata
+
+# Conditional import for CUDA-only operations
+if torch.cuda.is_available():
+    try:
+        # First Party
+        import lmcache.c_ops as lmc_ops
+    except ImportError:
+        # If c_ops is not built, create a mock
+        lmc_ops = None
+else:
+    # Mock c_ops when CUDA is not available
+    lmc_ops = None
+
+# Define mock GPUKVFormat enum if c_ops is not available
+if lmc_ops is None:
+
+    class MockGPUKVFormat:
+        NL_X_TWO_NB_BS_NH_HS = 0
+        NL_X_NB_TWO_BS_NH_HS = 1
+        NL_X_NB_BS_HS = 2
+
+    class MockCOps:
+        GPUKVFormat = MockGPUKVFormat
+
+    lmc_ops = MockCOps()
+
+
+def has_cufile() -> bool:
+    """
+    True only when NVIDIA cuFile is available:
+    - python package `cufile` importable
+    - dynamic library `libcufile.so` loadable
+    """
+    try:
+        # Third Party
+        import cufile  # noqa: F401
+    except Exception:
+        return False
+
+    try:
+        ctypes.CDLL("libcufile.so")
+    except OSError:
+        return False
+
+    return True
 
 
 def recover_engine_states(engine):
@@ -29,18 +75,38 @@ def recover_gpu_connector_states(gpu_connector):
     gpu_connector.kv_cache_pointers_on_gpu = {}
 
 
-def dumb_metadata(fmt="vllm", kv_shape=(32, 2, 256, 8, 128)):
-    return LMCacheEngineMetadata("test_model", 3, 123, fmt, torch.bfloat16, kv_shape)
+def dumb_metadata(kv_shape=(32, 2, 256, 8, 128)):
+    return LMCacheMetadata(
+        model_name="test_model",
+        world_size=3,
+        local_world_size=3,
+        worker_id=1,
+        local_worker_id=1,
+        kv_dtype=torch.bfloat16,
+        kv_shape=kv_shape,
+    )
 
 
-def dumb_metadata_with_model_name(
-    model_name: str, fmt="vllm", kv_shape=(32, 2, 256, 8, 128)
-):
-    return LMCacheEngineMetadata(model_name, 3, 123, fmt, torch.bfloat16, kv_shape)
+def dumb_metadata_with_model_name(model_name: str, kv_shape=(32, 2, 256, 8, 128)):
+    return LMCacheMetadata(
+        model_name=model_name,
+        world_size=3,
+        local_world_size=3,
+        worker_id=1,
+        local_worker_id=1,
+        kv_dtype=torch.bfloat16,
+        kv_shape=kv_shape,
+    )
 
 
 def dumb_cache_engine_key(id: int = 0) -> CacheEngineKey:
-    return CacheEngineKey("vllm", "test_model", 3, 123, id, torch.bfloat16)
+    return CacheEngineKey(
+        model_name="test_model",
+        world_size=3,
+        worker_id=1,
+        chunk_hash=id,
+        dtype=torch.bfloat16,
+    )
 
 
 def random_string(N):
@@ -56,9 +122,28 @@ def init_asyncio_loop():
 
 def close_asyncio_loop(async_loop, async_thread):
     if async_loop.is_running():
+        # First, cancel all pending tasks
+        try:
+            # Get all tasks and cancel them
+            pending = asyncio.all_tasks(async_loop)
+            for task in pending:
+                if not task.done():
+                    task.cancel()
+        except Exception as e:
+            print(f"Error during close pending tasks: - {e}")
+
+        # Then stop the loop
         async_loop.call_soon_threadsafe(async_loop.stop)
+
     if async_thread.is_alive():
-        async_thread.join()
+        async_thread.join(timeout=2.0)
+
+    # Close the loop to release resources
+    if not async_loop.is_closed():
+        async_loop.close()
+
+    # Set event loop to None
+    asyncio.set_event_loop(None)
 
 
 def get_available_port(host: str = "127.0.0.1") -> int:
@@ -95,17 +180,13 @@ def get_available_ports(count: int, host: str = "127.0.0.1") -> list[int]:
     return ports
 
 
-def generate_kv_cache(num_tokens, fmt, device):
+def generate_kv_cache(num_tokens, device):
     ret = []
     num_layers = 32
     num_heads = 8
     head_size = 128
-    shape = (
-        [num_tokens, num_heads, head_size]
-        if fmt == "vllm"
-        else [num_heads, num_tokens, head_size]
-    )
-    dtype = torch.bfloat16 if fmt == "vllm" else torch.float16
+    shape = [num_tokens, num_heads, head_size]
+    dtype = torch.bfloat16
 
     for i in range(num_layers):
         k = torch.rand(shape, dtype=dtype, device=device)
@@ -120,21 +201,26 @@ def generate_kv_cache_paged_list_tensors(
     device,
     block_size=16,
     dtype=torch.bfloat16,
-    use_mla=False,
     num_layers=32,
     head_size=128,
+    # default vllm non-MLA flash attention
+    gpu_kv_format=lmc_ops.GPUKVFormat.NL_X_TWO_NB_BS_NH_HS,
 ):
     """
     Instead of Tuple[Tuple[Tensor, Tensor]], return List[Tensor]
     where KV are in the same tensor
     """
     ret = []
+    # only support vllm MLA format for now
+    use_mla = gpu_kv_format == lmc_ops.GPUKVFormat.NL_X_NB_BS_HS
     num_heads = 1 if use_mla else 8
-    shape = (
-        [num_blocks, block_size, head_size]
-        if use_mla
-        else [2, num_blocks, block_size, num_heads, head_size]
-    )
+    if use_mla:
+        shape = [num_blocks, block_size, head_size]
+    else:
+        if gpu_kv_format == lmc_ops.GPUKVFormat.NL_X_TWO_NB_BS_NH_HS:
+            shape = [2, num_blocks, block_size, num_heads, head_size]
+        elif gpu_kv_format == lmc_ops.GPUKVFormat.NL_X_NB_TWO_BS_NH_HS:
+            shape = [num_blocks, 2, block_size, num_heads, head_size]
 
     for i in range(num_layers):
         # TODO(chunxiaozheng): support more dtypes
@@ -160,6 +246,9 @@ def generate_sglang_kv_cache_paged_list_tensors(
     """
     Instead of Tuple[Tuple[Tensor, Tensor]], return List[Tensor]
     where KV are in the same tensor
+
+    For MLA: List[num_layers] of [page_buffer_size, 1, head_size]
+    For MHA: List[2] -> List[num_layers] of [page_buffer_size, num_heads, head_size]
     """
     shape = (
         [num_blocks * block_size, 1, head_size]
@@ -171,35 +260,15 @@ def generate_sglang_kv_cache_paged_list_tensors(
             torch.rand(shape, dtype=dtype, device=device) for i in range(num_layers)
         ]
     else:
+        # MHA: List[2] -> List[num_layers]
         k_cache = [
             torch.rand(shape, dtype=dtype, device=device) for i in range(num_layers)
         ]
         v_cache = [
             torch.rand(shape, dtype=dtype, device=device) for i in range(num_layers)
         ]
-        kv_cache = k_cache + v_cache
+        kv_cache = [k_cache, v_cache]
     return kv_cache
-
-
-def generate_mla_kv_cache_paged_list_tensors(
-    num_blocks,
-    device,
-    block_size=64,
-    dtype=torch.bfloat16,
-    num_layers=32,
-    head_size=576,
-):
-    """
-    return KV cache of MLA
-    """
-    ret = []
-    shape = [num_blocks, block_size, head_size]
-
-    for i in range(num_layers):
-        kv = torch.rand(shape, dtype=dtype, device=device)
-        ret.append(kv)
-
-    return ret
 
 
 def generate_kv_cache_paged(num_blocks, device, block_size=16, dtype=torch.bfloat16):
@@ -225,8 +294,8 @@ def generate_tokens(num_tokens, device, fixed=False):
         return torch.randint(0, 10000, size=[num_tokens]).to(device)
 
 
-def concatenate_kv_caches(kv_chunks, fmt):
-    dim = 1 if fmt == "huggingface" else 0
+def concatenate_kv_caches(kv_chunks):
+    dim = 0
     ret = []
     for kv_layer in zip(*kv_chunks, strict=False):
         klist, vlist = zip(*kv_layer, strict=False)
@@ -273,30 +342,66 @@ def check_mem_obj_equal(left, right, use_mla: bool = False):
             assert (left_v[:, :, :] == right_v[:, :, :]).all()
 
 
-def check_paged_kv_cache_equal(left, right, slot_mapping, num_heads=8, head_size=128):
+# default checks for vllm non-MLA flash attention
+def check_paged_kv_cache_equal(
+    left,
+    right,
+    slot_mapping,
+    num_heads=8,
+    head_size=128,
+    gpu_kv_format=lmc_ops.GPUKVFormat.NL_X_TWO_NB_BS_NH_HS,
+):
     """
     check whether two paged kv caches are the same at slot_mapping
     """
-    token_dim = 0
-    num_tokens = slot_mapping.shape[0]
-    for left_kv, right_kv in zip(left, right, strict=False):
-        left_k = left_kv[0].reshape(-1, num_heads, head_size)
-        left_v = left_kv[1].reshape(-1, num_heads, head_size)
-        right_k = right_kv[0].reshape(-1, num_heads, head_size)
-        right_v = right_kv[1].reshape(-1, num_heads, head_size)
 
-        assert len(left_k.shape) == 3
-        assert len(left_v.shape) == 3
-        assert len(right_k.shape) == 3
-        assert len(right_v.shape) == 3
+    if gpu_kv_format == lmc_ops.GPUKVFormat.NL_X_TWO_NB_BS_NH_HS:
+        token_dim = 0
+        num_tokens = slot_mapping.shape[0]
+        for left_kv_layer, right_kv_layer in zip(left, right, strict=False):
+            left_k = left_kv_layer[0].reshape(-1, num_heads, head_size)
+            left_v = left_kv_layer[1].reshape(-1, num_heads, head_size)
+            right_k = right_kv_layer[0].reshape(-1, num_heads, head_size)
+            right_v = right_kv_layer[1].reshape(-1, num_heads, head_size)
 
-        assert left_k.shape[token_dim] >= num_tokens
-        assert left_v.shape[token_dim] >= num_tokens
-        assert right_k.shape[token_dim] >= num_tokens
-        assert right_v.shape[token_dim] >= num_tokens
+            assert len(left_k.shape) == 3
+            assert len(left_v.shape) == 3
+            assert len(right_k.shape) == 3
+            assert len(right_v.shape) == 3
 
-        assert (left_k[slot_mapping, :, :] == right_k[slot_mapping, :, :]).all()
-        assert (left_v[slot_mapping, :, :] == right_v[slot_mapping, :, :]).all()
+            assert left_k.shape[token_dim] >= num_tokens
+            assert left_v.shape[token_dim] >= num_tokens
+            assert right_k.shape[token_dim] >= num_tokens
+            assert right_v.shape[token_dim] >= num_tokens
+
+            assert (left_k[slot_mapping, :, :] == right_k[slot_mapping, :, :]).all()
+            assert (left_v[slot_mapping, :, :] == right_v[slot_mapping, :, :]).all()
+
+    elif gpu_kv_format == lmc_ops.GPUKVFormat.NL_X_NB_TWO_BS_NH_HS:
+        token_dim = 0
+        num_tokens = slot_mapping.shape[0]
+        for left_kv_layer, right_kv_layer in zip(left, right, strict=False):
+            left_k = left_kv_layer[:, 0].contiguous().reshape(-1, num_heads, head_size)
+            left_v = left_kv_layer[:, 1].contiguous().reshape(-1, num_heads, head_size)
+            right_k = (
+                right_kv_layer[:, 0].contiguous().reshape(-1, num_heads, head_size)
+            )
+            right_v = (
+                right_kv_layer[:, 1].contiguous().reshape(-1, num_heads, head_size)
+            )
+
+            assert len(left_k.shape) == 3
+            assert len(left_v.shape) == 3
+            assert len(right_k.shape) == 3
+            assert len(right_v.shape) == 3
+
+            assert left_k.shape[token_dim] >= num_tokens
+            assert left_v.shape[token_dim] >= num_tokens
+            assert right_k.shape[token_dim] >= num_tokens
+            assert right_v.shape[token_dim] >= num_tokens
+
+            assert (left_k[slot_mapping, :, :] == right_k[slot_mapping, :, :]).all()
+            assert (left_v[slot_mapping, :, :] == right_v[slot_mapping, :, :]).all()
 
 
 def check_sglang_paged_kv_cache_equal(
@@ -304,20 +409,32 @@ def check_sglang_paged_kv_cache_equal(
 ):
     """
     check whether two paged kv caches are the same at slot_mapping
+
+    Format: List[2] -> List[num_layers] of [page_buffer_size, num_heads, head_size]
     """
     token_dim = 0
     num_tokens = slot_mapping.shape[0]
-    for left_kv, right_kv in zip(left, right, strict=False):
-        _left_kv = left_kv.reshape(-1, num_heads, head_size)
-        _right_kv = right_kv.reshape(-1, num_heads, head_size)
 
-        assert len(_left_kv.shape) == 3
-        assert len(_right_kv.shape) == 3
+    # left and right are [k_list, v_list]
+    assert len(left) == 2, "Expected [k_list, v_list]"
+    assert len(right) == 2, "Expected [k_list, v_list]"
 
-        assert _left_kv.shape[token_dim] >= num_tokens
-        assert _right_kv.shape[token_dim] >= num_tokens
+    # Check K and V separately
+    for kv_idx in range(2):  # 0 for K, 1 for V
+        left_kv_list = left[kv_idx]
+        right_kv_list = right[kv_idx]
 
-        assert (_left_kv[slot_mapping, :, :] == _right_kv[slot_mapping, :, :]).all()
+        for left_kv, right_kv in zip(left_kv_list, right_kv_list, strict=False):
+            _left_kv = left_kv.reshape(-1, num_heads, head_size)
+            _right_kv = right_kv.reshape(-1, num_heads, head_size)
+
+            assert len(_left_kv.shape) == 3
+            assert len(_right_kv.shape) == 3
+
+            assert _left_kv.shape[token_dim] >= num_tokens
+            assert _right_kv.shape[token_dim] >= num_tokens
+
+            assert (_left_kv[slot_mapping, :, :] == _right_kv[slot_mapping, :, :]).all()
 
 
 def check_paged_kv_cache_equal_with_mla(left, right, slot_mapping, head_size=128):
@@ -487,19 +604,18 @@ def create_test_metadata(
     world_size: int = 1,
     kv_shape: tuple = (4, 2, 256, 8, 128),
     engine_id: Optional[str] = "test_engine",
-    num_ranks: int = 1,
     kv_connector_extra_config: Optional[dict] = None,
-) -> LMCacheEngineMetadata:
+) -> LMCacheMetadata:
     """Create test metadata for LMCacheEngine."""
-    return LMCacheEngineMetadata(
+    return LMCacheMetadata(
         model_name="test_model",
         world_size=world_size,
+        local_world_size=world_size,
         worker_id=worker_id,
-        fmt="vllm",
+        local_worker_id=worker_id,
         kv_dtype=torch.bfloat16,
         kv_shape=kv_shape,
         engine_id=engine_id,
-        num_ranks=num_ranks,
         kv_connector_extra_config=kv_connector_extra_config,
     )
 

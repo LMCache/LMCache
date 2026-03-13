@@ -17,7 +17,6 @@ import pytest
 import torch
 
 # First Party
-from lmcache.config import LMCacheEngineMetadata
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.health_monitor.base import HealthMonitor
@@ -26,6 +25,7 @@ from lmcache.v1.health_monitor.checks.remote_backend_check import (
 )
 from lmcache.v1.health_monitor.constants import FallbackPolicy
 from lmcache.v1.memory_management import MemoryObj
+from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.storage_backend.connector.base_connector import RemoteConnector
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 from lmcache.v1.storage_backend.remote_backend import RemoteBackend
@@ -123,11 +123,12 @@ def test_config():
 
 @pytest.fixture
 def test_metadata():
-    return LMCacheEngineMetadata(
+    return LMCacheMetadata(
         model_name="test_model",
         world_size=1,
+        local_world_size=1,
         worker_id=0,
-        fmt="vllm",
+        local_worker_id=0,
         kv_dtype=torch.bfloat16,
         kv_shape=(4, 2, 256, 8, 128),
         role="worker",
@@ -147,7 +148,7 @@ def mock_remote_backend(event_loop_thread, test_config, controllable_connector):
     backend.connection = controllable_connector
     backend.config = test_config
     backend.init_connection = MagicMock()
-    backend.get_and_clear_interval_get_blocking_failed_count.return_value = 0
+    backend.get_blocking_failed_count = 0
     return backend
 
 
@@ -340,7 +341,7 @@ class TestRemoteBackendHealthCheckFallbackRecovery:
         backend_a.connection = connector_a
         backend_a.config = test_config
         backend_a.init_connection = MagicMock()
-        backend_a.get_and_clear_interval_get_blocking_failed_count.return_value = 0
+        backend_a.get_blocking_failed_count = 0
 
         backend_b = MagicMock(spec=RemoteBackend)
         backend_b.remote_url = "controllable://test_b:1234"
@@ -348,7 +349,7 @@ class TestRemoteBackendHealthCheckFallbackRecovery:
         backend_b.connection = connector_b
         backend_b.config = test_config
         backend_b.init_connection = MagicMock()
-        backend_b.get_and_clear_interval_get_blocking_failed_count.return_value = 0
+        backend_b.get_blocking_failed_count = 0
 
         # Update storage manager to have two remote backends
         mock_storage_manager.storage_backends = {
@@ -444,7 +445,7 @@ class TestRemoteBackendHealthCheckEdgeCases:
         backend.connection = connector
         backend.init_connection = MagicMock()
         backend.config = test_config
-        backend.get_and_clear_interval_get_blocking_failed_count.return_value = 0
+        backend.get_blocking_failed_count = 0
 
         check = RemoteBackendHealthCheck(backend=backend)
         check._backend_name = "RemoteBackend"
@@ -487,7 +488,7 @@ class TestRemoteBackendHealthCheckEdgeCases:
         backend.connection = SlowPingConnector()
         backend.init_connection = MagicMock()
         backend.config = config
-        backend.get_and_clear_interval_get_blocking_failed_count.return_value = 0
+        backend.get_blocking_failed_count = 0
 
         check = RemoteBackendHealthCheck(backend=backend)
         check._backend_name = "RemoteBackend"
@@ -625,7 +626,11 @@ class TestFallbackIntegrationWithRealStorageManager:
         """Test contains operation respects bypass mode."""
         sm = real_storage_manager
         test_key = CacheEngineKey(
-            "vllm", "test_model", 1, 0, hash("test"), torch.bfloat16
+            model_name="test_model",
+            world_size=1,
+            worker_id=0,
+            chunk_hash=hash("test"),
+            dtype=torch.bfloat16,
         )
 
         # Test with LocalCPUBackend bypass

@@ -2,7 +2,7 @@
 # Standard
 from collections import OrderedDict
 from concurrent.futures import Future, ThreadPoolExecutor
-from typing import Any, List, Optional, Sequence, Tuple, Union
+from typing import Any, Callable, List, Optional, Sequence, Tuple, Union
 import asyncio
 import ctypes
 import json
@@ -20,7 +20,6 @@ import numpy as np
 import torch
 
 # First Party
-from lmcache.config import LMCacheEngineMetadata
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey, DiskCacheMetadata, _lmcache_nvtx_annotate
 from lmcache.v1.config import LMCacheEngineConfig
@@ -29,6 +28,7 @@ from lmcache.v1.memory_management import (
     MemoryFormat,
     MemoryObj,
 )
+from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.storage_backend.abstract_backend import AllocatorBackendInterface
 
 logger = init_logger(__name__)
@@ -182,7 +182,7 @@ class GdsBackend(AllocatorBackendInterface):
     def __init__(
         self,
         config: LMCacheEngineConfig,
-        metadata: LMCacheEngineMetadata,
+        metadata: LMCacheMetadata,
         loop: asyncio.AbstractEventLoop,
         dst_device: str = "cuda",
     ):
@@ -287,6 +287,11 @@ class GdsBackend(AllocatorBackendInterface):
         asyncio.run_coroutine_threadsafe(self._scan_metadata(), self.loop)
         self.save_metadata_tasks: set[asyncio.Task] = set()
 
+        # flag for extra assertions to catch bugs but harm performance
+        self._debug_asserts = False
+        # flag to use O_NOATIME during metadata file read for performance improvement
+        self._use_noatime = True
+
     async def _scan_metadata(self):
         # TODO: even though we only run it once on startup, this is still
         # not super scalable - test whether Rust code will be faster here, or
@@ -348,11 +353,44 @@ class GdsBackend(AllocatorBackendInterface):
                                 f"{fentry.path}, ignoring"
                             )
 
-    def _read_metadata(self, key, filename, subdir_key):
-        with open(filename, "rb") as f:
-            buf = f.read(_METADATA_MAX_SIZE)
+    def _read_metadata_info(self, filename: str):
+        # Use O_NOATIME to prevent updating access time and improve performance
+        # Instead of using Python's open() and read(), we use the OS's open() and
+        # read() because it is faster - the metadata file is small and we don't
+        # need any buffering.
+        # Additionally, we use O_NOATIME to improve performance
+        if self._use_noatime:
+            try:
+                fd = os.open(filename, os.O_RDONLY | os.O_NOATIME)
+            except (
+                # PermissionError: User doesn't own the file
+                # AttributeError: O_NOATIME not available on this platform
+                # OSError: Filesystem doesn't support O_NOATIME (EINVAL)
+                PermissionError,
+                AttributeError,
+                OSError,
+            ):  # fallback to normal open if O_NOATIME is not supported
+                self._use_noatime = False
+                logger.info(
+                    "O_NOATIME flag not supported during metadata file read, "
+                    "falling back to normal open"
+                )
+                fd = os.open(filename, os.O_RDONLY)
+        else:
+            fd = os.open(filename, os.O_RDONLY)
+        try:
+            buf = os.read(fd, _METADATA_MAX_SIZE)
+        finally:
+            os.close(fd)
+        return unpack_metadata(buf)
 
-        shape, dtype, size, fmt, extra_metadata = unpack_metadata(buf)
+    def _read_metadata(
+        self,
+        key: CacheEngineKey,
+        filename: str,
+        subdir_key: str,
+    ):
+        shape, dtype, size, fmt, extra_metadata = self._read_metadata_info(filename)
         if extra_metadata["lmcache_version"] != str(_METADATA_VERSION):
             raise RuntimeError("unhandled lmcache metadata")
         logger.debug(
@@ -424,7 +462,18 @@ class GdsBackend(AllocatorBackendInterface):
         with self.put_lock:
             return key in self.put_tasks
 
-    def submit_put_task(self, key: CacheEngineKey, memory_obj: MemoryObj) -> Future:
+    def submit_put_task(
+        self,
+        key: CacheEngineKey,
+        memory_obj: MemoryObj,
+        on_complete_callback: Optional[Callable[[CacheEngineKey], None]] = None,
+    ) -> Future:
+        """
+        Submit a put task to store KV cache to GDS asynchronously.
+
+        :param on_complete_callback: Optional callback invoked after the GDS
+            write completes. Callback exceptions are caught and logged.
+        """
         assert memory_obj.tensor is not None
         memory_obj.ref_count_up()
 
@@ -432,7 +481,8 @@ class GdsBackend(AllocatorBackendInterface):
             self.put_tasks.add(key)
 
         future = asyncio.run_coroutine_threadsafe(
-            self._async_save_bytes_to_disk(key, memory_obj), self.loop
+            self._async_save_bytes_to_disk(key, memory_obj, on_complete_callback),
+            self.loop,
         )
         return future
 
@@ -441,10 +491,19 @@ class GdsBackend(AllocatorBackendInterface):
         keys: Sequence[CacheEngineKey],
         memory_objs: List[MemoryObj],
         transfer_spec: Any = None,
+        on_complete_callback: Optional[Callable[[CacheEngineKey], None]] = None,
     ) -> Union[List[Future], None]:
+        """
+        Submit batched put tasks to store KV caches to GDS asynchronously.
+
+        :param on_complete_callback: Optional callback invoked once per key
+            after that key's write completes (not once per batch).
+        """
         futures = []
         for key, memory_obj in zip(keys, memory_objs, strict=False):
-            future = self.submit_put_task(key, memory_obj)
+            future = self.submit_put_task(
+                key, memory_obj, on_complete_callback=on_complete_callback
+            )
             futures.append(future)
         return futures
 
@@ -452,9 +511,13 @@ class GdsBackend(AllocatorBackendInterface):
         self,
         key: CacheEngineKey,
         memory_obj: MemoryObj,
+        on_complete_callback: Optional[Callable[[CacheEngineKey], None]] = None,
     ) -> None:
         """
         Convert KV to bytes and async store bytes to disk.
+
+        :param on_complete_callback: Optional callback invoked after the GDS
+            write completes for this key. Callback exceptions are caught.
         """
         kv_chunk = memory_obj.tensor
         assert kv_chunk is not None
@@ -491,6 +554,13 @@ class GdsBackend(AllocatorBackendInterface):
         task.add_done_callback(self.save_metadata_tasks.discard)
         with self.put_lock:
             self.put_tasks.discard(key)
+
+        # Call the completion callback if provided
+        if on_complete_callback is not None:
+            try:
+                on_complete_callback(key)
+            except Exception as e:
+                logger.warning(f"on_complete_callback failed for key {key}: {e}")
 
     def insert_key(self, key: CacheEngineKey, memory_obj: MemoryObj) -> None:
         path, _, _, _ = self._key_to_path(key)
@@ -585,9 +655,12 @@ class GdsBackend(AllocatorBackendInterface):
         if memory_obj is None:
             logger.debug("Memory allocation failed during sync disk load.")
             return None
-        assert memory_obj.tensor is not None
-        assert memory_obj.tensor.is_cuda
-        assert torch.device(self.dst_device) == torch.device(memory_obj.tensor.device)
+        if self._debug_asserts:
+            assert memory_obj.tensor is not None
+            assert memory_obj.tensor.is_cuda
+            assert torch.device(self.dst_device) == torch.device(
+                memory_obj.tensor.device
+            )
 
         return self._load_bytes_from_disk_with_memory(key, path, memory_obj)
 
@@ -608,14 +681,17 @@ class GdsBackend(AllocatorBackendInterface):
         Returns:
             The memory object with loaded data, or None if loading failed
         """
-        if memory_obj is None or memory_obj.tensor is None:
+        if memory_obj is None or not memory_obj.is_valid():
             return None
-        assert memory_obj.tensor.is_cuda
-        assert torch.device(self.dst_device) == torch.device(memory_obj.tensor.device)
 
         offset = _METADATA_MAX_SIZE
         if self.cufile_base_pointer is None:
-            addr = ctypes.c_void_p(memory_obj.tensor.data_ptr())
+            tensor = memory_obj.tensor
+            assert tensor is not None
+            if self._debug_asserts:
+                assert tensor.is_cuda
+                assert torch.device(self.dst_device) == torch.device(tensor.device)
+            addr = ctypes.c_void_p(tensor.data_ptr())
             dev_offset = 0
         else:
             addr = ctypes.c_void_p(self.cufile_base_pointer)
@@ -838,7 +914,7 @@ class GdsBackend(AllocatorBackendInterface):
         raise NotImplementedError("Remote backend does not support remove now.")
 
     def initialize_allocator(
-        self, config: LMCacheEngineConfig, metadata: LMCacheEngineMetadata
+        self, config: LMCacheEngineConfig, metadata: LMCacheMetadata
     ) -> CuFileMemoryAllocator:
         assert config.cufile_buffer_size is not None
         return CuFileMemoryAllocator(config.cufile_buffer_size * 1024**2)
