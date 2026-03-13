@@ -153,6 +153,11 @@ class PDBackend(AllocatorBackendInterface):
             config, metadata, self.tp_rank
         )
 
+        self.corrected_device = get_correct_device(
+            config.pd_buffer_device,
+            metadata.worker_id,
+        )
+
         # NOTE(Jiayi): sender/prefiller will not use this pool;
         # only receiver/decoder will.
         self.data: dict[CacheEngineKey, MemoryObj] = {}
@@ -179,16 +184,22 @@ class PDBackend(AllocatorBackendInterface):
                 self.pd_config.peer_init_port
             )
 
+        allocator = (
+            self.memory_allocator.cpu_allocator
+            if self.corrected_device == "cpu"
+            else self.memory_allocator.gpu_allocator
+        )
         self.transfer_channel = CreateTransferChannel(
             async_mode=False,
             channel_type=config.transfer_channel,
             role=self.pd_config.role,
-            buffer_ptr=self.memory_allocator.gpu_allocator.buffer_ptr,
-            buffer_size=self.memory_allocator.gpu_allocator.buffer_size,
-            align_bytes=self.memory_allocator.gpu_allocator.align_bytes,
+            buffer_ptr=allocator.buffer_ptr,
+            buffer_size=allocator.buffer_size,
+            align_bytes=allocator.align_bytes,
             tp_rank=self.tp_rank,
             peer_init_url=peer_init_url,
             backends=config.nixl_backends,
+            device=self.corrected_device,
         )
 
         if self.pd_config.role == "sender":
@@ -200,7 +211,7 @@ class PDBackend(AllocatorBackendInterface):
         else:
             raise ValueError("Invalid PD role.")
 
-        self.full_chunk_size = config.chunk_size
+        self.full_chunk_size_bytes = config.chunk_size
 
     def __str__(self):
         return self.__class__.__name__
@@ -209,24 +220,24 @@ class PDBackend(AllocatorBackendInterface):
         self, config: LMCacheEngineConfig, metadata: LMCacheMetadata
     ) -> PagedCpuGpuMemoryAllocator:
         # First Party
-        from lmcache.v1.transfer_channel.transfer_utils import (
-            get_correct_device,
-        )
 
-        corrected_device = get_correct_device(
-            config.pd_buffer_device,
-            metadata.worker_id,
-        )
-        logger.info(f"Setting cuda device to {corrected_device} ")
-        torch.cuda.set_device(corrected_device)
+        if self.corrected_device != "cpu":
+            logger.info(f"Setting cuda device to {self.corrected_device} ")
+            torch.cuda.set_device(self.corrected_device)
 
         paged_mem_allocator = PagedCpuGpuMemoryAllocator()
-        paged_mem_allocator.init_gpu_memory_allocator(
+
+        init_func = (
+            paged_mem_allocator.init_cpu_memory_allocator
+            if self.corrected_device == "cpu"
+            else paged_mem_allocator.init_gpu_memory_allocator
+        )
+
+        init_func(
             config.pd_buffer_size,
             [torch.Size(metadata.kv_shape)],
             [metadata.kv_dtype],
             MemoryFormat.KV_2LTD,  # TODO: remove this hardcode
-            corrected_device,
         )
 
         return paged_mem_allocator
@@ -248,8 +259,9 @@ class PDBackend(AllocatorBackendInterface):
         if fmt is None:
             fmt = MemoryFormat.KV_2LTD
         # NOTE: no eviction and busy_loop in PD
+        alloc_type = "cpu" if self.corrected_device == "cpu" else "gpu"
         return self.memory_allocator.allocate(
-            shapes, dtypes, fmt=fmt, allocator_type="gpu"
+            shapes, dtypes, fmt=fmt, allocator_type=alloc_type
         )
 
     # TODO(Jiayi): Please implement batched allocate to reduce memory
@@ -265,8 +277,9 @@ class PDBackend(AllocatorBackendInterface):
     ):
         if fmt is None:
             fmt = MemoryFormat.KV_2LTD
+        alloc_type = "cpu" if self.corrected_device == "cpu" else "gpu"
         return self.memory_allocator.batched_allocate(
-            shapes, dtypes, batch_size, fmt, allocator_type="gpu"
+            shapes, dtypes, batch_size, fmt, allocator_type=alloc_type
         )
 
     # NOTE(Jiayi): If two requests have overlapped keys, will
@@ -345,7 +358,7 @@ class PDBackend(AllocatorBackendInterface):
         Let's say there are N memory objects in total.
         We have the following assumptions:
         - The first N-1 memory objects are full chunks, each with
-        `full_chunk_size` tokens.
+        `full_chunk_size_bytes` tokens.
         - The last memory object can be a partial chunk, which has
         `last_chunk_toks` tokens.
         """
@@ -492,7 +505,7 @@ class PDBackend(AllocatorBackendInterface):
                 token_dim = fmt.token_dim()
                 shape[token_dim] = num_alloc_tokens
             else:
-                num_alloc_tokens = self.full_chunk_size
+                num_alloc_tokens = self.full_chunk_size_bytes
 
             mem_obj = self.allocate(torch.Size(shape), dtype, fmt)
 

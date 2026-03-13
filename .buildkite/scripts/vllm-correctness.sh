@@ -49,25 +49,11 @@ uv pip install -U vllm \
 
 # override previous lmcache from previous jobs
 # the source installation is from this PR
-uv pip install -e . --reinstall-package lmcache
+uv pip install -e . --reinstall-package lmcache --no-build-isolation
 
 # additional dependencies (please update manually if needed)
 # these packages are pretty stable so should not need to
 uv pip install aiohttp tqdm pandas huggingface_hub
-
-# 2. the model weights already exist on the CI machine
-export HF_HUB_OFFLINE=1 # this forces the model weights to be local
-unset HF_HOME
-unset HF_HUB_CACHE
-unset HF_ASSETS_CACHE
-unset HF_XET_CACHE
-unset XDG_CACHE_HOME
-echo "[INFO] Verifying model weights exist in global cache on the CI machine..."
-if ! hf download "$MODEL" --quiet; then
-    echo "[ERROR] Model weights for '$MODEL' not found in ~/.cache/huggingface"
-    echo "[FIX] Please manually download the model weights on the CI machine"
-    exit 1
-fi
 
 # 3. the sharegpt dataset already exists on the CI machine
 # wget -q \
@@ -134,7 +120,7 @@ echo "=== DIAGNOSTICS: GPU STATE before CI ==="
 nvidia-smi
 
 echo "[INFO] Selecting free GPU for this build..."
-source .buildkite/scripts/pick-free-gpu.sh 120000 1
+source .buildkite/scripts/pick-free-gpu.sh 90000 1
 echo "[INFO] Using GPU(s): ${CUDA_VISIBLE_DEVICES}"
 
 echo "[INFO] Converting ShareGPT dataset to OpenAI format..."
@@ -154,7 +140,6 @@ vllm serve "${MODEL}" \
     --enforce-eager \
     --attention-backend FLASH_ATTN \
     --gpu-memory-utilization 0.8 \
-    -cc.level=0 \
     >"${VLLM_LOG}" 2>&1 &
 VLLM_PID=$!
 
@@ -188,8 +173,8 @@ stop_vllm
 #######################################
 echo "[INFO] Preparing LMCache config (cpu.yaml)..."
 cat <<EOF > cpu.yaml
-chunk_size: 16
-local_cpu: true 
+chunk_size: 256
+local_cpu: true
 max_local_cpu_size: 50
 EOF
 
@@ -205,7 +190,6 @@ vllm serve "${MODEL}" \
     --enforce-eager \
     --attention-backend FLASH_ATTN \
     --gpu-memory-utilization 0.8 \
-    -cc.level=0 \
     --kv-transfer-config '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}' \
     >>"${VLLM_LOG}" 2>&1 &
 VLLM_PID=$!

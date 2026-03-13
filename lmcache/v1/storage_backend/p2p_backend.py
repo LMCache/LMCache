@@ -219,6 +219,9 @@ class P2PBackend(StorageBackendInterface):
         )
         self.chunk_size = config.chunk_size
 
+        device_type = (
+            "cpu" if config.nixl_buffer_device is None else config.nixl_buffer_device
+        )
         self.transfer_channel = CreateTransferChannel(
             channel_type=config.transfer_channel,
             async_mode=True,
@@ -231,6 +234,7 @@ class P2PBackend(StorageBackendInterface):
             peer_lookup_url=self.peer_lookup_url,
             backends=config.nixl_backends,
             event_loop=loop,
+            device=device_type,
         )
 
         self.running = asyncio.Event()
@@ -640,6 +644,8 @@ class P2PBackend(StorageBackendInterface):
             num_hit_chunks = ret_msg.num_hit_chunks
 
         hit_mem_objs = mem_objs[:num_hit_chunks]
+        for hit_mem_obj in hit_mem_objs:
+            hit_mem_obj.pin()
         for missed_mem_obj in mem_objs[num_hit_chunks:]:
             missed_mem_obj.ref_count_down()
         return hit_mem_objs

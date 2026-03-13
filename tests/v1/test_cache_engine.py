@@ -29,6 +29,7 @@ from .utils import (
     dumb_metadata,
     generate_kv_cache_paged_list_tensors,
     generate_tokens,
+    has_cufile,
     recover_engine_states,
 )
 
@@ -1282,7 +1283,7 @@ def test_force_store_wait(autorelease_v1):
             engine.store(t, kvcaches=kv_cache, slot_mapping=s)
 
         # Sleep 10 seconds for the last request
-        time.sleep(10)
+        time.sleep(20)
 
         # No KV cache should be skipped
         # With default save_unfull_chunk=False, we expect chunk-aligned count
@@ -1405,6 +1406,11 @@ def test_builder_destroy_multiple_instances(autorelease_v1):
 @pytest.mark.skipif(
     not torch.cuda.is_available(),
     reason="Requires CUDA for test_multi_device_backends",
+)
+@pytest.mark.skipif(
+    not has_cufile(),
+    reason="Requires NVIDIA cuFile (libcufile.so). "
+    "Skipping on systems without GDS/cuFile (e.g., AMD ROCm).",
 )
 def test_multi_device_backends(save_unfull_chunk, autorelease_v1):
     """Test running GPU-related backend with local CPU backends

@@ -1,5 +1,6 @@
 aiofile
 aiofiles
+blake3
 aiohttp
 awscrt
 cufile-python
@@ -10,6 +11,7 @@ msgspec
 nixl; python_version < "3.13"
 # nixl uses numba which requires numpy<=2.2.6
 numpy<=2.2.6
+numba
 nvtx
 prometheus_client >= 0.18.0
 psutil
