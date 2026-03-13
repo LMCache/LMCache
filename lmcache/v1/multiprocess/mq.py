@@ -641,6 +641,9 @@ class MessageQueueServer:
                 )
 
         # Pass 2: create pool and assign
+        if not request_types:
+            return
+
         pool = ThreadPoolExecutor(
             max_workers=max_workers,
             thread_name_prefix=f"dedicated-pool-{len(self.dedicated_pools)}",
