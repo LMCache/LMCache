@@ -379,6 +379,7 @@ class PrefetchController(StorageControllerInterface):
         keys: list[ObjectKey],
         layout_desc: MemoryLayoutDesc,
         lookup_results: dict[int, Bitmap],
+        extra_count: int = 0,
     ) -> int:
         """Execute the L2-to-L1 load phase synchronously.
 
@@ -502,7 +503,7 @@ class PrefetchController(StorageControllerInterface):
             self._l2_adapters[adapter_idx].submit_unlock(unlock_keys)
 
         if loaded_keys:
-            l1_mgr.finish_write_and_reserve_read(loaded_keys)
+            l1_mgr.finish_write_and_reserve_read(loaded_keys, extra_count=extra_count)
         if failed_keys:
             l1_mgr.finish_write(failed_keys)
             l1_mgr.delete(failed_keys)

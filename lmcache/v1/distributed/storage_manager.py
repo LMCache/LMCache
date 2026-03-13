@@ -457,6 +457,7 @@ class StorageManager:
         keys: list[ObjectKey],
         layout_desc: MemoryLayoutDesc,
         lookup_results: dict[int, Bitmap],
+        extra_count: int = 0,
     ) -> int:
         """Execute L2-to-L1 data movement for previously looked-up keys.
 
@@ -471,12 +472,15 @@ class StorageManager:
             layout_desc: Memory layout for L1 buffer allocation.
             lookup_results: L2 lookup results from
                 ``synchronous_lookup_and_lock``.
+            extra_count: Extra read locks to acquire per key
+                (on top of the default 1) so that each TP worker
+                can independently release its own lock.
 
         Returns:
             Number of prefix hits loaded into L1 (with read locks held).
         """
         return self._prefetch_controller.execute_load_phase(
-            keys, layout_desc, lookup_results,
+            keys, layout_desc, lookup_results, extra_count=extra_count,
         )
 
     def unlock_l2_lookups(

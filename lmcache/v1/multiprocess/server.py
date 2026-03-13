@@ -431,6 +431,7 @@ class MPCacheEngine:
                 pending.remaining_keys,
                 pending.layout_desc,
                 pending.l2_lookup_results,
+                extra_count=pending.extra_count,
             )
             logger.debug(
                 "RETRIEVE for %s: loaded %d L2 prefix hits into L1",
