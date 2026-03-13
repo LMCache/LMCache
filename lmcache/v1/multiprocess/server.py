@@ -435,7 +435,7 @@ class MPCacheEngine:
 
         with (
             torch.cuda.device(gpu_context.device),
-            torch.cuda.stream(gpu_context.stream),
+            torch.cuda.stream(gpu_context.high_priority_stream),
         ):
             slot_mapping_tensor = gpu_context.get_slot_mapping_tensor(gpu_block_ids)
 
