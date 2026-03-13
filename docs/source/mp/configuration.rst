@@ -79,9 +79,11 @@ Source: ``lmcache/v1/distributed/config.py``
    * - ``--l1-size-gb``
      - *required*
      - Size of L1 memory in GB.
-   * - ``--l1-use-lazy``
+   * - ``--l1-use-lazy`` / ``--no-l1-use-lazy``
      - ``True``
-     - Use lazy allocation for L1 memory.
+     - Enable or disable lazy allocation for L1 memory.
+       Pass ``--l1-use-lazy`` to enable (default) or
+       ``--no-l1-use-lazy`` to explicitly disable.
    * - ``--l1-init-size-gb``
      - ``20``
      - Initial allocation size (GB) when using lazy allocation.
@@ -139,7 +141,7 @@ L2 adapters are configured via repeatable ``--l2-adapter <JSON>`` arguments.
 Each JSON object must include a ``"type"`` field that selects the adapter type.
 The order of ``--l2-adapter`` arguments determines the adapter order (cascade).
 
-Registered adapter types: ``nixl_store``, ``mock``.
+Registered adapter types: ``nixl_store``, ``fs``, ``mock``.
 
 ``nixl_store`` -- NIXL-based persistent storage
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -170,6 +172,28 @@ Examples:
 
     # OBJ backend (object store -- no file_path needed)
     --l2-adapter '{"type": "nixl_store", "backend": "OBJ", "backend_params": {}, "pool_size": 32}'
+
+``fs`` -- File-system backed storage
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+A pure file-system L2 adapter using async I/O.
+
+Fields:
+
+- ``base_path`` *(required)*: Directory for storing KV cache files.
+- ``relative_tmp_dir`` *(optional)*: Relative sub-dir for temp files.
+- ``read_ahead_size`` *(optional)*: Trigger read-ahead by reading this many bytes first.
+- ``use_odirect`` *(optional)*: Bypass page cache via ``O_DIRECT`` (default ``false``).
+
+Examples:
+
+.. code-block:: bash
+
+    # Basic FS adapter
+    --l2-adapter '{"type": "fs", "base_path": "/data/lmcache/l2"}'
+
+    # With temp directory
+    --l2-adapter '{"type": "fs", "base_path": "/data/lmcache/l2", "relative_tmp_dir": ".tmp"}'
 
 ``mock`` -- Mock adapter for testing
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
