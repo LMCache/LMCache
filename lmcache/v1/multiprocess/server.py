@@ -442,6 +442,7 @@ class MPCacheEngine:
             event = torch.cuda.Event(interprocess=True)
 
             prefetched_keys: list[ObjectKey] = []
+            retrieve_succeeded = False
             try:
                 with self.storage_manager.read_prefetched_results(
                     obj_keys
@@ -452,15 +453,18 @@ class MPCacheEngine:
 
                     prefetched_keys = obj_keys[: len(memory_objs)]
                     _retrieve_loop(obj_keys, memory_objs)
+                # Only set True when with-block exits normally
+                retrieve_succeeded = True
             except Exception as e:
                 logger.warning("Cannot retrieve keys due to exception: %s", str(e))
                 return event.ipc_handle(), False
             finally:
                 event.record()
-                gpu_context.cupy_stream.launch_host_func(
-                    self.storage_manager.finish_read_prefetched,
-                    prefetched_keys,
-                )
+                if retrieve_succeeded:
+                    gpu_context.cupy_stream.launch_host_func(
+                        self.storage_manager.finish_read_prefetched,
+                        prefetched_keys,
+                    )
                 if get_telemetry_controller().is_enabled():
                     gpu_context.cupy_stream.launch_host_func(
                         log_telemetry,
