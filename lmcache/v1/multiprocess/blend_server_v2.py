@@ -50,7 +50,7 @@ from lmcache.logging import init_logger
 from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
     ObjectKey,
-    ipc_keys_to_object_keys,
+    ipc_key_to_object_keys,
 )
 from lmcache.v1.distributed.config import (
     StorageManagerConfig,
@@ -365,21 +365,8 @@ class BlendEngineV2(MPCacheEngine):
 
         # Submit prefetch for each group using CBMatchResult.hash directly
         for group in groups:
-            obj_keys = ipc_keys_to_object_keys(
-                [
-                    IPCCacheEngineKey(
-                        model_name=key.model_name,
-                        world_size=key.world_size,
-                        worker_id=key.worker_id,
-                        token_ids=key.token_ids[r.cur_st : r.cur_ed],
-                        start=r.cur_st,
-                        end=r.cur_ed,
-                        request_id=key.request_id,
-                        chunk_hash=r.hash,
-                    )
-                    for r in group
-                ]
-            )
+            chunk_hashes = [r.hash for r in group]
+            obj_keys = ipc_key_to_object_keys(key, chunk_hashes)
             handle = self.storage_manager.submit_prefetch_task(obj_keys, layout_desc)
             prefetch_handles.append(handle)
 
@@ -531,13 +518,9 @@ class BlendEngineV2(MPCacheEngine):
         """
         # Compute normal prefix hashes so these chunks are accessible both via
         # the CB lookup path and via the standard lookup/retrieve path.
-        hashed_ipc_keys = key.to_hash_keys(
-            hasher=self.token_hasher,
-            full_chunk_only=True,
-            prefix_hash=None,
-        )
+        chunk_hashes = self.token_hasher.compute_chunk_hashes(list(key.token_ids))
         # convert to object key
-        obj_keys = ipc_keys_to_object_keys(hashed_ipc_keys)
+        obj_keys = ipc_key_to_object_keys(key, chunk_hashes)
 
         assert instance_id in self._cb_gpu_contexts, (
             f"Instance ID {instance_id} not registered for CB KV cache"
@@ -549,10 +532,7 @@ class BlendEngineV2(MPCacheEngine):
         )
 
         # Register chunk hashes with the local matcher for fast sub-sequence lookup
-        token_hashes = []
-        for k in hashed_ipc_keys:
-            assert k.chunk_hash is not None
-            token_hashes.append(k.chunk_hash)
+        token_hashes = list(chunk_hashes)
 
         # NOTE(Jiayi): We only register the token hashes for worker_id 0 or None to
         # avoid duplicate registration across workers.
@@ -607,21 +587,8 @@ class BlendEngineV2(MPCacheEngine):
 
         # One obj_key per match_result, in cur_st order
         cb_match_result = sorted(cb_match_result, key=lambda r: r.cur_st)
-        all_obj_keys = ipc_keys_to_object_keys(
-            [
-                IPCCacheEngineKey(
-                    model_name=key.model_name,
-                    world_size=key.world_size,
-                    worker_id=key.worker_id,
-                    token_ids=key.token_ids[r.cur_st : r.cur_ed],
-                    start=r.cur_st,
-                    end=r.cur_ed,
-                    request_id=key.request_id,
-                    chunk_hash=r.hash,
-                )
-                for r in cb_match_result
-            ]
-        )
+        chunk_hashes = [r.hash for r in cb_match_result]
+        all_obj_keys = ipc_key_to_object_keys(key, chunk_hashes)
 
         logger.debug("DEBUG object keys to retrieve: %s", all_obj_keys)
 
@@ -699,14 +666,10 @@ class BlendEngineV2(MPCacheEngine):
             final chunks, and a boolean flag indicating if the store is successful.
         """
         # Compute normal hash for the keys
-        hashed_ipc_keys = key.to_hash_keys(
-            hasher=self.token_hasher,
-            full_chunk_only=True,
-            prefix_hash=None,
-        )
+        chunk_hashes = self.token_hasher.compute_chunk_hashes(list(key.token_ids))
 
         # convert to object key
-        obj_keys = ipc_keys_to_object_keys(hashed_ipc_keys)
+        obj_keys = ipc_key_to_object_keys(key, chunk_hashes)
 
         # Get GPU context
         assert instance_id in self._cb_gpu_contexts, (

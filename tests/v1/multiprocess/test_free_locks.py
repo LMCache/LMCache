@@ -96,19 +96,15 @@ def test_server_free_lookup_locks_calls_finish_read_prefetched():
     engine = MagicMock()
     engine.token_hasher = MagicMock()
     engine.token_hasher.chunk_size = 256
+    engine.token_hasher.compute_chunk_hashes.return_value = [b"hash0"]
 
-    # Build a key that to_hash_keys can operate on
+    # Build a key
     key = create_cache_key(0).no_worker_id_version()
 
-    # Set up the mock: to_hash_keys returns a list of hash-mode keys
-    hash_key = create_cache_key(0)
     sentinel_obj_keys = [MagicMock()]
-    with (
-        patch.object(IPCCacheEngineKey, "to_hash_keys", return_value=[hash_key]),
-        patch(
-            "lmcache.v1.multiprocess.server.ipc_keys_to_object_keys",
-            return_value=sentinel_obj_keys,
-        ),
+    with patch(
+        "lmcache.v1.multiprocess.server.ipc_key_to_object_keys",
+        return_value=sentinel_obj_keys,
     ):
         # Call the real method on the mock
         MPCacheEngine.free_lookup_locks(engine, key, 1)
@@ -126,6 +122,8 @@ def test_server_free_lookup_locks_no_matching_chunks():
     engine = MagicMock()
     engine.token_hasher = MagicMock()
     engine.token_hasher.chunk_size = 256
+    # start=end=0 is passed to compute_chunk_hashes, which returns no hashes
+    engine.token_hasher.compute_chunk_hashes.return_value = []
 
     # Key with start == end means no chunks to free
     key = IPCCacheEngineKey(
@@ -138,8 +136,7 @@ def test_server_free_lookup_locks_no_matching_chunks():
         request_id="req-empty",
     )
 
-    with patch.object(IPCCacheEngineKey, "to_hash_keys", return_value=[MagicMock()]):
-        MPCacheEngine.free_lookup_locks(engine, key, 1)
+    MPCacheEngine.free_lookup_locks(engine, key, 1)
 
     engine.storage_manager.finish_read_prefetched.assert_not_called()
 
