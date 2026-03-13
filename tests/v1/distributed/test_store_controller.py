@@ -623,18 +623,12 @@ class TestBufferOnlyMode:
         )
         assert ok, "Object should be stored in L2"
 
-        # L1 should be cleaned: re-create with mode='new' succeeds
+        # L1 should be cleaned: check key is gone
         ok = wait_for_condition(
-            lambda: l1_manager.reserve_write(
-                keys=keys,
-                is_temporary=[False],
-                layout_desc=layout,
-                mode="new",
-            )[keys[0]][1]
-            is not None,
+            lambda: l1_manager.get_object_state(keys[0]) is None,
             timeout=5.0,
         )
-        assert ok, "Key should be re-creatable after L1 deletion in buffer-only mode"
+        assert ok, "Key should be deleted from L1 in buffer-only mode"
 
         ctrl.stop()
         adapter.close()
@@ -670,21 +664,12 @@ class TestBufferOnlyMode:
         )
         assert ok, "All 5 objects should be stored in L2"
 
-        # All keys should be removable from L1 (re-create)
+        # All keys should be gone from L1
         ok = wait_for_condition(
-            lambda: all(
-                l1_manager.reserve_write(
-                    keys=[k],
-                    is_temporary=[False],
-                    layout_desc=layout,
-                    mode="new",
-                )[k][1]
-                is not None
-                for k in keys
-            ),
+            lambda: all(l1_manager.get_object_state(k) is None for k in keys),
             timeout=5.0,
         )
-        assert ok, "All keys should be re-creatable after buffer-only L1 cleanup"
+        assert ok, "All keys should be deleted from L1 after buffer-only cleanup"
 
         ctrl.stop()
         adapter.close()
