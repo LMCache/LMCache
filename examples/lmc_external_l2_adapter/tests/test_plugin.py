@@ -26,8 +26,10 @@ import torch
 # First Party
 from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.distributed.l2_adapters.config import (
-    create_l2_adapter_from_registry,
     parse_args_to_l2_adapters_config,
+)
+from lmcache.v1.distributed.l2_adapters.factory import (
+    create_l2_adapter_from_registry,
 )
 from lmcache.v1.distributed.l2_adapters.plugin_l2_adapter import PluginL2AdapterConfig
 from lmcache.v1.memory_management import TensorMemoryObj
@@ -159,6 +161,20 @@ ADAPTER_JSON = json.dumps(
     }
 )
 
+# Config-class mode: adapter receives a real config object
+ADAPTER_JSON_CFG = json.dumps(
+    {
+        "type": "plugin",
+        "module_path": "lmc_external_l2_adapter",
+        "class_name": "InMemoryL2Adapter",
+        "config_class_name": "InMemoryL2AdapterConfig",
+        "adapter_params": {
+            "max_size_gb": 10240 / (1024**3),
+            "mock_bandwidth_gb": 10.0,
+        },
+    }
+)
+
 _LINUX = platform.system() == "Linux"
 _skip_unless_linux = pytest.mark.skipif(
     not _LINUX,
@@ -176,6 +192,13 @@ class TestPluginConfigParsing:
         cfg = PluginL2AdapterConfig.from_dict(json.loads(ADAPTER_JSON))
         assert cfg.module_path == "lmc_external_l2_adapter"
         assert cfg.class_name == "InMemoryL2Adapter"
+        assert cfg.config_class_name is None
+
+    def test_from_dict_with_config_class(self):
+        cfg = PluginL2AdapterConfig.from_dict(json.loads(ADAPTER_JSON_CFG))
+        assert cfg.module_path == "lmc_external_l2_adapter"
+        assert cfg.class_name == "InMemoryL2Adapter"
+        assert cfg.config_class_name == "InMemoryL2AdapterConfig"
 
     def test_parse_args(self):
         """Simulate --l2-adapter CLI argument."""
@@ -228,9 +251,10 @@ class TestPluginRoundTrip:
     external factory and exercise store/lookup/load with
     realistic 4 KB objects."""
 
-    @pytest.fixture()
-    def adapter(self):
-        cfg = PluginL2AdapterConfig.from_dict(json.loads(ADAPTER_JSON))
+    @pytest.fixture(params=["dict", "config_class"])
+    def adapter(self, request):
+        spec = ADAPTER_JSON if request.param == "dict" else ADAPTER_JSON_CFG
+        cfg = PluginL2AdapterConfig.from_dict(json.loads(spec))
         inst = create_l2_adapter_from_registry(cfg)
         yield inst
         inst.close()

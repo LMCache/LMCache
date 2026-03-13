@@ -8,20 +8,26 @@ class from a user-supplied Python module.
 from __future__ import annotations
 
 # Standard
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Optional
 import importlib
 
 if TYPE_CHECKING:
     # First Party
+    from lmcache.v1.distributed.internal_api import (
+        L1MemoryDesc,
+    )
     from lmcache.v1.distributed.l2_adapters.base import (
         L2AdapterInterface,
     )
 
 # First Party
+from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface as _L2AI
 from lmcache.v1.distributed.l2_adapters.config import (
     L2AdapterConfigBase,
-    register_l2_adapter_factory,
     register_l2_adapter_type,
+)
+from lmcache.v1.distributed.l2_adapters.factory import (
+    register_l2_adapter_factory,
 )
 
 # Config class
@@ -39,8 +45,14 @@ class PluginL2AdapterConfig(L2AdapterConfigBase):
         containing the adapter class.
     - class_name: Name of the class inside *module_path*
         that implements ``L2AdapterInterface``.
-    - adapter_params: Arbitrary dict passed as the first
-        positional argument to the adapter class constructor.
+    - adapter_params: Arbitrary dict forwarded to the
+        adapter class constructor.
+    - config_class_name: Optional name of a config class
+        inside *module_path* that subclasses
+        ``L2AdapterConfigBase``.  When set, the factory
+        builds a config instance via ``from_dict()`` and
+        passes it (instead of a raw dict) to the adapter
+        constructor -- matching the built-in convention.
     """
 
     def __init__(
@@ -48,10 +60,12 @@ class PluginL2AdapterConfig(L2AdapterConfigBase):
         module_path: str,
         class_name: str,
         adapter_params: dict[str, Any] | None = None,
+        config_class_name: str | None = None,
     ):
         self.module_path = module_path
         self.class_name = class_name
         self.adapter_params = adapter_params or {}
+        self.config_class_name = config_class_name
 
     @classmethod
     def from_dict(cls, d: dict) -> "PluginL2AdapterConfig":
@@ -67,10 +81,15 @@ class PluginL2AdapterConfig(L2AdapterConfigBase):
         if not isinstance(adapter_params, dict):
             raise ValueError("adapter_params must be a dict")
 
+        config_class_name = d.get("config_class_name")
+        if config_class_name is not None and not isinstance(config_class_name, str):
+            raise ValueError("config_class_name must be a string")
+
         return cls(
             module_path=module_path,
             class_name=class_name,
             adapter_params=adapter_params,
+            config_class_name=config_class_name,
         )
 
     @classmethod
@@ -82,14 +101,24 @@ class PluginL2AdapterConfig(L2AdapterConfigBase):
             "(required)\n"
             "- class_name (str): name of the adapter "
             "class inside the module (required)\n"
-            "- adapter_params (dict): passed as the first "
-            "positional argument to the adapter "
-            "constructor (optional, default {})\n"
+            "- adapter_params (dict): forwarded to the "
+            "adapter constructor "
+            "(optional, default {})\n"
+            "- config_class_name (str): explicit config "
+            "class name; when omitted the factory "
+            "auto-discovers it (see plugin.md)\n"
             "\n"
-            "Example JSON:\n"
+            "Example JSON (raw dict):\n"
             '{"type": "plugin", '
             '"module_path": "my_plugin.l2", '
             '"class_name": "MyL2Adapter", '
+            '"adapter_params": {"host": "localhost"}}\n'
+            "\n"
+            "Example JSON (with config class):\n"
+            '{"type": "plugin", '
+            '"module_path": "my_plugin.l2", '
+            '"class_name": "MyL2Adapter", '
+            '"config_class_name": "MyL2AdapterConfig", '
             '"adapter_params": {"host": "localhost"}}'
         )
 
@@ -98,12 +127,11 @@ class PluginL2AdapterConfig(L2AdapterConfigBase):
 
 
 def _create_plugin_adapter(
-    config: PluginL2AdapterConfig,
-    **kwargs: object,
+    config: L2AdapterConfigBase,
+    l1_memory_desc: "Optional[L1MemoryDesc]" = None,
 ) -> "L2AdapterInterface":
     """Dynamically load and create a plugin L2 adapter."""
-    # First Party
-    from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface as _L2AI
+    assert isinstance(config, PluginL2AdapterConfig)
 
     try:
         module = importlib.import_module(config.module_path)
@@ -126,9 +154,52 @@ def _create_plugin_adapter(
             "L2AdapterInterface" % (config.module_path, config.class_name)
         )
 
-    return adapter_cls(  # type: ignore[call-arg]
-        config.adapter_params, **kwargs
+    cfg_cls = _resolve_config_class(
+        module,
+        config,
+        adapter_cls,
     )
+    if cfg_cls is not None:
+        return adapter_cls(  # type: ignore[call-arg]
+            cfg_cls.from_dict(config.adapter_params),
+        )
+
+    return adapter_cls(  # type: ignore[call-arg]
+        config.adapter_params,
+    )
+
+
+def _resolve_config_class(
+    module: object,
+    config: PluginL2AdapterConfig,
+    adapter_cls: type,
+) -> type[L2AdapterConfigBase] | None:
+    """Resolve the config class for a plugin adapter.
+
+    Discovery order:
+    1. Explicit ``config.config_class_name`` field.
+    2. Convention: ``config.class_name`` + ``"Config"``.
+    3. ``config_class_name`` attribute on the adapter
+       class itself.
+    4. ``None`` -- fall back to raw dict mode.
+    """
+    candidates: list[str | None] = [
+        config.config_class_name,
+        config.class_name + "Config",
+        getattr(adapter_cls, "config_class_name", None),
+    ]
+    for name in candidates:
+        if not name:
+            continue
+        cls = getattr(module, name, None)
+        if cls is None:
+            continue
+        if isinstance(cls, type) and issubclass(
+            cls,
+            L2AdapterConfigBase,
+        ):
+            return cls
+    return None
 
 
 # Self-register config type and adapter factory

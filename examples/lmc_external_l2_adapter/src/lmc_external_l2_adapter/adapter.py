@@ -9,7 +9,7 @@ reference implementation for third-party plugin authors.
 
 # Standard
 from collections import defaultdict
-from typing import Any
+from typing import Any, Union
 import asyncio
 import copy
 import os
@@ -26,6 +26,9 @@ from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.distributed.l2_adapters.base import (
     L2AdapterInterface,
     L2TaskId,
+)
+from lmcache.v1.distributed.l2_adapters.config import (
+    L2AdapterConfigBase,
 )
 from lmcache.v1.memory_management import (
     MemoryObj,
@@ -49,19 +52,47 @@ def _clone_tensor_memory_obj(
     )
 
 
+class InMemoryL2AdapterConfig(L2AdapterConfigBase):
+    """Config for the in-memory L2 adapter.
+
+    Fields:
+    - max_size_gb: Maximum cache size in GiB.
+    - mock_bandwidth_gb: Simulated bandwidth in GiB/s.
+    """
+
+    def __init__(
+        self,
+        max_size_gb: float = 0.5,
+        mock_bandwidth_gb: float = 10.0,
+    ):
+        self.max_size_gb = max_size_gb
+        self.mock_bandwidth_gb = mock_bandwidth_gb
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "InMemoryL2AdapterConfig":
+        return cls(
+            max_size_gb=float(d.get("max_size_gb", 0.5)),
+            mock_bandwidth_gb=float(d.get("mock_bandwidth_gb", 10.0)),
+        )
+
+    @classmethod
+    def help(cls) -> str:
+        return (
+            "InMemoryL2Adapter config fields:\n"
+            "- max_size_gb (float): max cache size "
+            "in GiB (default 0.5)\n"
+            "- mock_bandwidth_gb (float): simulated "
+            "bandwidth in GiB/s (default 10.0)\n"
+        )
+
+
 class InMemoryL2Adapter(L2AdapterInterface):
     """In-memory L2 adapter loaded as an external plugin.
 
-    Constructor receives the ``adapter_params`` dict from
-    the JSON config as its first positional argument.
-
-    Recognised keys inside *adapter_params*:
-
-    - **max_size_gb** (*float*) -- maximum cache size in
-      GiB.  Default ``0.5``.
-    - **mock_bandwidth_gb** (*float*) -- simulated
-      bandwidth in GiB/s for artificial delay.
-      Default ``10.0``.
+    Constructor accepts either an
+    ``InMemoryL2AdapterConfig`` instance (matching
+    the built-in adapter convention) **or** a plain
+    dict (legacy plugin mode) for backward compatibility.
 
     Any extra ``**kwargs`` that come from the framework
     (e.g. ``l1_memory_desc``) are silently ignored so the
@@ -70,12 +101,16 @@ class InMemoryL2Adapter(L2AdapterInterface):
 
     def __init__(
         self,
-        adapter_params: dict[str, Any] | None = None,
+        config: Union[
+            InMemoryL2AdapterConfig,
+            dict[str, Any],
+        ],
         **_kwargs: object,
     ):
-        params = adapter_params or {}
-        max_size_gb = float(params.get("max_size_gb", 0.5))
-        mock_bandwidth_gb = float(params.get("mock_bandwidth_gb", 10.0))
+        if isinstance(config, dict):
+            config = InMemoryL2AdapterConfig.from_dict(config)
+        max_size_gb = config.max_size_gb
+        mock_bandwidth_gb = config.mock_bandwidth_gb
         cap = int(max_size_gb * (1024**3))
         bw = int(mock_bandwidth_gb * (1024**3))
 

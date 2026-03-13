@@ -9,6 +9,9 @@ the ``PluginL2AdapterConfig`` mechanism.
 """
 
 # Third Party
-from lmc_external_l2_adapter.adapter import InMemoryL2Adapter
+from lmc_external_l2_adapter.adapter import (
+    InMemoryL2Adapter,
+    InMemoryL2AdapterConfig,
+)
 
-__all__ = ["InMemoryL2Adapter"]
+__all__ = ["InMemoryL2Adapter", "InMemoryL2AdapterConfig"]

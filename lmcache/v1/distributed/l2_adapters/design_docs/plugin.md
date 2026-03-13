@@ -36,10 +36,31 @@ Factory function that:
 1. Calls `importlib.import_module(config.module_path)` to load the user module.
 2. Retrieves `config.class_name` from the module via `getattr`.
 3. Validates it is a subclass of `L2AdapterInterface`.
-4. Instantiates it with `adapter_cls(**kwargs, **config.adapter_params)`.
+4. Resolves a config class via `_resolve_config_class` (see below).
+5. If a config class is found, builds a config instance via `from_dict()`
+   and passes it to the adapter constructor (built-in convention).
+   Otherwise falls back to passing the raw `adapter_params` dict.
 
-Any framework-level kwargs (e.g. `l1_memory_desc`) are passed through as
-keyword arguments so the plugin can optionally consume or ignore them.
+### Config Class Auto-Discovery (`_resolve_config_class`)
+
+The factory automatically resolves the adapter's config class using
+the following priority chain (first match wins):
+
+| Priority | Strategy | Example |
+|---|---|---|
+| 1 | Explicit `config_class_name` field in JSON config | `"config_class_name": "MyConfig"` |
+| 2 | Convention: adapter class name + `"Config"` suffix | `MyL2Adapter` → looks for `MyL2AdapterConfig` |
+| 3 | `config_class_name` attribute on the adapter class | `class MyAdapter: config_class_name = "MyConfig"` |
+| 4 | No config class found — pass raw `adapter_params` dict | legacy / simple plugins |
+
+Each candidate name is looked up in the loaded module and validated as
+an `L2AdapterConfigBase` subclass.  Non-existent or invalid names are
+silently skipped, moving to the next candidate.
+
+This means most plugins that follow the naming convention (e.g.
+`InMemoryL2Adapter` + `InMemoryL2AdapterConfig` in the same module)
+will **automatically** receive a typed config instance without any
+extra configuration.
 
 ---
 
@@ -64,14 +85,25 @@ create_l2_adapter_from_registry(config, **kwargs)
   │  looks up factory for "plugin"
   │
   ▼
-_create_plugin_adapter(config, **kwargs)
+_create_plugin_adapter(config, ...)
   │
   ├─ importlib.import_module(config.module_path)
   ├─ getattr(module, config.class_name)
   ├─ issubclass check against L2AdapterInterface
-  └─ adapter_cls(**kwargs, **config.adapter_params)
-      │
-      ▼
+  │
+  ├─ _resolve_config_class(module, config, adapter_cls)
+  │   ├─ 1. config.config_class_name (explicit)
+  │   ├─ 2. class_name + "Config" (convention)
+  │   ├─ 3. adapter_cls.config_class_name (attribute)
+  │   └─ 4. None (fall back to raw dict)
+  │
+  ├─ [if config class found]
+  │   └─ adapter_cls(cfg_cls.from_dict(adapter_params))
+  │
+  └─ [otherwise]
+      └─ adapter_cls(adapter_params)
+          │
+          ▼
   L2AdapterInterface instance (ready for use)
 ```
 
