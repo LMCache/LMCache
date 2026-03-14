@@ -229,8 +229,14 @@ class RemoteBackend(StorageBackendInterface):
         with self.lock:
             self.put_tasks.add(key)
 
-        compressed_memory_obj = self.serializer.serialize(memory_obj)
-        memory_obj.ref_count_down()
+        try:
+            compressed_memory_obj = self.serializer.serialize(memory_obj)
+        except Exception:
+            with self.lock:
+                self.put_tasks.discard(key)
+            raise
+        finally:
+            memory_obj.ref_count_down()
 
         def put_done_callback(f: Future) -> None:
             self.put_callback(f, key)
