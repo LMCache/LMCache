@@ -79,9 +79,11 @@ Source: ``lmcache/v1/distributed/config.py``
    * - ``--l1-size-gb``
      - *required*
      - Size of L1 memory in GB.
-   * - ``--l1-use-lazy``
+   * - ``--l1-use-lazy`` / ``--no-l1-use-lazy``
      - ``True``
-     - Use lazy allocation for L1 memory.
+     - Enable or disable lazy allocation for L1 memory.
+       Pass ``--l1-use-lazy`` to enable (default) or
+       ``--no-l1-use-lazy`` to explicitly disable.
    * - ``--l1-init-size-gb``
      - ``20``
      - Initial allocation size (GB) when using lazy allocation.
