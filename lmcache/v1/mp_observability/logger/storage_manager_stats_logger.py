@@ -45,12 +45,12 @@ class StorageManagerStatsLogger(StorageManagerListener, PrometheusLogger):
         )
         self._sm_read_succeed_keys_counter = self.create_counter(
             "lmcache_mp:sm_read_succeed_keys",
-            "Total number of keys that were cache hits in SM read",
+            "Total number of keys that were succeed in reading from LMCache",
             labelnames,
         )
         self._sm_read_failed_keys_counter = self.create_counter(
             "lmcache_mp:sm_read_failed_keys",
-            "Total number of keys that were cache misses in SM read",
+            "Total number of keys that were cache failed in reading LMCache",
             labelnames,
         )
         self._sm_write_requests_counter = self.create_counter(
