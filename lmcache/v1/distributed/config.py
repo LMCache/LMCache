@@ -15,6 +15,12 @@ from lmcache.v1.distributed.l2_adapters.config import (
     add_l2_adapters_args,
     parse_args_to_l2_adapters_config,
 )
+from lmcache.v1.distributed.storage_controllers.prefetch_policy import (
+    get_registered_prefetch_policies,
+)
+from lmcache.v1.distributed.storage_controllers.store_policy import (
+    get_registered_store_policies,
+)
 
 
 @dataclass
@@ -87,6 +93,12 @@ class StorageManagerConfig:
         default_factory=lambda: L2AdaptersConfig([])
     )
     """ The configuration for L2 adapters. """
+
+    store_policy: str = "default"
+    """ The L2 store policy name. """
+
+    prefetch_policy: str = "default"
+    """ The L2 prefetch policy name. """
 
 
 def add_storage_manager_args(
@@ -186,6 +198,29 @@ def add_storage_manager_args(
         "Default is 0.2.",
     )
 
+    # L2 Policies
+    policy_group = parser.add_argument_group(
+        "L2 Policies", "Store and prefetch policy selection for L2 adapters"
+    )
+    policy_group.add_argument(
+        "--l2-store-policy",
+        type=str,
+        choices=get_registered_store_policies(),
+        default="default",
+        help="L2 store policy. Determines which adapters receive each key "
+        "and whether keys are deleted from L1 after L2 store. "
+        "Default is 'default' (store all keys to all adapters, keep L1).",
+    )
+    policy_group.add_argument(
+        "--l2-prefetch-policy",
+        type=str,
+        choices=get_registered_prefetch_policies(),
+        default="default",
+        help="L2 prefetch policy. Determines which adapter loads each key "
+        "when multiple adapters have it. "
+        "Default is 'default' (pick the first adapter by index).",
+    )
+
     # Adapter config
     add_l2_adapters_args(parser)
     return parser
@@ -246,6 +281,8 @@ def parse_args_to_config(
         l1_manager_config=l1_manager_config,
         eviction_config=eviction_config,
         l2_adapter_config=l2_adapter_config,
+        store_policy=args.l2_store_policy,
+        prefetch_policy=args.l2_prefetch_policy,
     )
 
 
