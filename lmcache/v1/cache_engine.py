@@ -1570,11 +1570,6 @@ class LMCacheEngine:
             ret_mask[start:end] = True
             used_keys.add(key)
 
-        # NOTE: free the memory objects that are not hit.
-        for key, mem_obj in memory_obj_map.items():
-            if key not in used_keys:
-                mem_obj.ref_count_down()
-
         return chunks, tot_kv_size
 
     def _process_tokens_internal(
