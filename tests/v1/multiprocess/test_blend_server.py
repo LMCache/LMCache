@@ -35,6 +35,7 @@ from lmcache.v1.distributed.config import (
 )
 from lmcache.v1.mp_observability.config import DEFAULT_PROMETHEUS_CONFIG
 from lmcache.v1.multiprocess.blend_server import get_sep_tokens
+from lmcache.v1.multiprocess.config import MPServerConfig
 from lmcache.v1.multiprocess.custom_types import (
     CudaIPCWrapper,
     IPCCacheEngineKey,
@@ -254,6 +255,7 @@ def server_process_runner(
     # First Party
     from lmcache.v1.multiprocess.blend_server import run_cache_server
 
+    mp_config = MPServerConfig(host=host, port=port, chunk_size=chunk_size)
     storage_manager_config = StorageManagerConfig(
         l1_manager_config=L1ManagerConfig(
             memory_config=L1MemoryManagerConfig(
@@ -264,11 +266,9 @@ def server_process_runner(
         eviction_config=EvictionConfig(eviction_policy="LRU"),
     )
     run_cache_server(
+        mp_config=mp_config,
         storage_manager_config=storage_manager_config,
         prometheus_config=DEFAULT_PROMETHEUS_CONFIG,
-        host=host,
-        port=port,
-        chunk_size=chunk_size,
     )
 
 
@@ -1313,12 +1313,23 @@ def test_cb_store_final_then_normal_lookup_retrieve(
         token_ids, request_id="final-lookup-test", worker_id=None
     )
 
-    lookup_future = client.submit_request(
+    # Phase 1: Get prefetch job ID
+    job_id = client.submit_request(
         RequestType.LOOKUP,
-        [lookup_key],
+        [lookup_key, 1],
         get_response_class(RequestType.LOOKUP),
-    )
-    lookup_result = lookup_future.result(timeout=DEFAULT_TIMEOUT)
+    ).result(timeout=DEFAULT_TIMEOUT)
+
+    # Phase 2: Poll until done
+    lookup_result = None
+    while True:
+        lookup_result = client.submit_request(
+            RequestType.QUERY_PREFETCH_STATUS,
+            [job_id],
+            get_response_class(RequestType.QUERY_PREFETCH_STATUS),
+        ).result(timeout=DEFAULT_TIMEOUT)
+        if lookup_result is not None:
+            break
 
     # Expected: lookup_result should be > 0 (chunks found)
     assert isinstance(lookup_result, int), "Lookup should return an int"
@@ -1336,7 +1347,7 @@ def test_cb_store_final_then_normal_lookup_retrieve(
     event2.record()
     retrieve_future = client.submit_request(
         RequestType.RETRIEVE,
-        [retrieve_key, registered_instance, gpu_block_ids, event2.ipc_handle()],
+        [retrieve_key, registered_instance, gpu_block_ids, event2.ipc_handle(), 0],
         get_response_class(RequestType.RETRIEVE),
     )
     retrieve_result = retrieve_future.to_cuda_future().result(timeout=DEFAULT_TIMEOUT)

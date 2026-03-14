@@ -27,7 +27,7 @@ class L1MemoryManagerConfig:
     """ The size of L1 memory in bytes. """
 
     use_lazy: bool
-    """ Whether to use lazy loading for L1 memory. """
+    """ Whether to use lazy initialization for L1 memory. """
 
     init_size_in_bytes: int = field(default=20 << 30)
     """ The initial size when using lazy allocation. Default is 20GB. """
@@ -126,7 +126,7 @@ def add_storage_manager_args(
     )
     memory_group.add_argument(
         "--l1-use-lazy",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
         default=True,
         help="Whether to use lazy loading for L1 memory. (Default is True)",
     )

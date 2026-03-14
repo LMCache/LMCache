@@ -12,6 +12,17 @@ import enum
 from lmcache.v1.distributed.api import ObjectKey
 
 
+@dataclass(frozen=True)
+class L1MemoryDesc:
+    """
+    Describes the L1 memory buffer registered with an external backend (e.g. Nixl).
+    """
+
+    ptr: int
+    size: int
+    align_bytes: int
+
+
 class EventListener(ABC):  # noqa: B024
     pass
 
@@ -127,6 +138,22 @@ class L1ManagerListener(EventListener):
         Args:
             keys (list[ObjectKey]): The keys that have been successfully written
         """
+        pass
+
+    @abstractmethod
+    def on_l1_keys_finish_write_and_reserve_read(self, keys: list[ObjectKey]):
+        """
+        Notify the listener that keys have been finished for writing
+        and reserved for read on L1.
+
+        This will only be trigger by the prefetch operation now.
+
+        Args:
+            keys (list[ObjectKey]): The keys that have been successfully
+                finished for writing and reserved for read
+        """
+        # NOTE (ApostaC): may consider renaming this to `on_l1_keys_finish_prefetch`
+        # for better clarity
         pass
 
     @abstractmethod
