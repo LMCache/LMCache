@@ -21,6 +21,7 @@ from lmcache.v1.distributed.storage_controllers.prefetch_policy import (
 from lmcache.v1.distributed.storage_controllers.store_policy import (
     get_registered_store_policies,
 )
+import lmcache.v1.distributed.storage_controllers  # noqa: F401
 
 
 @dataclass
