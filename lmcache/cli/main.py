@@ -1,0 +1,39 @@
+# SPDX-License-Identifier: Apache-2.0
+"""LMCache CLI entry point.
+
+Subcommands are explicitly registered in
+``lmcache.cli.commands.ALL_COMMANDS``.
+"""
+
+# Standard
+import argparse
+import sys
+
+# First Party
+from lmcache.cli.commands import ALL_COMMANDS
+
+
+def main() -> None:
+    """CLI entry point registered as ``lmcache`` in *pyproject.toml*."""
+    parser = argparse.ArgumentParser(
+        prog="lmcache",
+        description="LMCache — KV cache management for LLM serving",
+    )
+    subparsers = parser.add_subparsers(dest="command")
+
+    for cmd in ALL_COMMANDS:
+        cmd.register(subparsers)
+
+    args = parser.parse_args()
+
+    if not hasattr(args, "func"):
+        parser.print_help()
+        sys.exit(1)
+
+    try:
+        args.func(args)
+    except KeyboardInterrupt:
+        sys.exit(130)
+    except Exception as exc:  # noqa: BLE001
+        print(f"error: {exc}", file=sys.stderr)
+        sys.exit(1)
