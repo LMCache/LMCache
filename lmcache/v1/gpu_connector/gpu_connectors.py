@@ -280,6 +280,12 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
 
         kv_cache_pointers = self._initialize_pointers(self.kvcaches)
 
+        # avoid read/write stream race condition for shared block
+        # this will only be potentially non-zero for the first
+        # block lmcache is transferring back
+        vllm_cached = kwargs.get("vllm_cached_tokens", 0)
+        skip_prefix_n_tokens = min(end - start, max(0, vllm_cached - start))
+
         lmc_ops.multi_layer_kv_transfer(
             memory_obj.tensor,
             kv_cache_pointers,
@@ -289,6 +295,7 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
             lmc_ops.TransferDirection.H2D,
             self.gpu_kv_format,
             self.block_size,
+            skip_prefix_n_tokens,
         )
 
     @_lmcache_nvtx_annotate
@@ -465,6 +472,13 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
         assert self.kvcaches[0].device == self.device
         self._initialize_kv_cache_pointers()
         assert self.group_kv_cache_pointers_on_gpu is not None
+
+        # avoid read/write stream race condition for shared block
+        # this will only be potentially non-zero for the first
+        # block lmcache is transferring back
+        vllm_cached = kwargs.get("vllm_cached_tokens", 0)
+        skip_prefix_n_tokens = min(end - start, max(0, vllm_cached - start))
+
         for i, kv_cache_pointer in enumerate(self.group_kv_cache_pointers_on_gpu):
             memory_obj_tensor = memory_obj.get_tensor(i)
             assert memory_obj_tensor is not None
@@ -477,6 +491,7 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
                 lmc_ops.TransferDirection.H2D,
                 self.gpu_kv_format,
                 self.block_size,
+                skip_prefix_n_tokens,
             )
 
     @_lmcache_nvtx_annotate
