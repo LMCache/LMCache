@@ -30,11 +30,6 @@ struct WorkerFSConn {
   // If > 0, trigger filesystem readahead by issuing a small
   // initial read of this many bytes before reading the rest.
   size_t read_ahead_size = 0;
-
-  // Reusable buffer for building file paths
-  std::string path_buf;
-
-  WorkerFSConn() { path_buf.reserve(512); }
 };
 
 class FSConnector : public ConnectorBase<WorkerFSConn> {
