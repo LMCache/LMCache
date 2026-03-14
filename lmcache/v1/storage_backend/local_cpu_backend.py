@@ -564,8 +564,7 @@ class LocalCPUBackend(AllocatorBackendInterface):
                     )
                     break
 
-                # TODO: make time_to_wait a config
-                time_to_wait = 0.1
+                time_to_wait = self.config.eviction_retry_interval_sec
                 logger.warning(
                     "No eviction candidates found in local cpu backend. "
                     "Local cpu memory is under pressure. "
@@ -688,8 +687,7 @@ class LocalCPUBackend(AllocatorBackendInterface):
                     )
                     break
 
-                # TODO: make time_to_wait a config
-                time_to_wait = 0.1
+                time_to_wait = self.config.eviction_retry_interval_sec
                 logger.warning(
                     "No eviction candidates found in local cpu backend. "
                     "Local cpu memory is under pressure. "

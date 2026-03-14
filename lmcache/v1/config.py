@@ -277,6 +277,16 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
         "default": "LRU",
         "env_converter": str,
     },
+    "eviction_retry_interval_sec": {
+        "type": float,
+        "default": 0.1,
+        "env_converter": float,
+        "description": (
+            "Time in seconds to wait before retrying memory allocation "
+            "when local CPU memory is under pressure and no eviction "
+            "candidates are available. Default is 0.1 seconds."
+        ),
+    },
     "numa_mode": {
         "type": Optional[str],
         "default": None,
@@ -517,6 +527,12 @@ def _validate_config(self):
     if self.min_retrieve_tokens < 0:
         raise ValueError(
             "min_retrieve_tokens must be >= 0, got %d" % self.min_retrieve_tokens
+        )
+
+    if self.eviction_retry_interval_sec <= 0:
+        raise ValueError(
+            "eviction_retry_interval_sec must be non-negative, got %s"
+            % self.eviction_retry_interval_sec
         )
 
     if self.enable_blending:

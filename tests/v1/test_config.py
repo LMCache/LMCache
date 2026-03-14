@@ -681,3 +681,9 @@ class TestValidateAndSetConfigValueTypeConversion:
         config = LMCacheEngineConfig.from_defaults()
         result = validate_and_set_config_value(config, "extra_config", "{invalid_json")
         assert result is False
+
+    def test_eviction_retry_interval_sec_validation_rejects_negative(self):
+        """Test that eviction_retry_interval_sec rejects negative values."""
+        config = LMCacheEngineConfig.from_defaults(eviction_retry_interval_sec=-0.1)
+        with pytest.raises(ValueError, match="eviction_retry_interval_sec"):
+            config.validate()

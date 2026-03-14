@@ -542,6 +542,29 @@ class TestLocalCPUBackend:
         assert memory_obj.get_ref_count() == initial_ref_count + 1
         local_cpu_backend.memory_allocator.close()
 
+    def test_eviction_retry_interval_default(self, memory_allocator):
+        """Test that eviction_retry_interval_sec defaults to 0.1."""
+        config = create_test_config()
+        assert config.eviction_retry_interval_sec == 0.1
+        memory_allocator.close()
+
+    def test_eviction_retry_interval_custom(self, memory_allocator):
+        """Test that eviction_retry_interval_sec accepts a custom value."""
+        config = LMCacheEngineConfig.from_defaults(
+            chunk_size=256,
+            local_cpu=True,
+            lmcache_instance_id="test_instance",
+            eviction_retry_interval_sec=0.05,
+        )
+        assert config.eviction_retry_interval_sec == 0.05
+
+        PinMonitor.GetOrCreate(config)
+        backend = LocalCPUBackend(config=config, memory_allocator=memory_allocator)
+        assert backend.config.eviction_retry_interval_sec == 0.05
+
+        PinMonitor.DestroyInstance()
+        memory_allocator.close()
+
 
 class TestLocalCPUBackendAllocatorAlignment:
     def test_rust_odirect_auto_alignment_for_mixed_allocator(self, monkeypatch):
