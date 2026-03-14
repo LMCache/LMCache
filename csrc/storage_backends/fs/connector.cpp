@@ -108,12 +108,14 @@ static size_t read_all(int fd, void* buf, size_t len) {
 // ---------------------------------------------------------------
 
 FSConnector::FSConnector(std::string base_path, int num_workers,
-                         std::string relative_tmp_dir, bool use_odirect)
+                         std::string relative_tmp_dir, bool use_odirect,
+                         size_t read_ahead_size)
     : ConnectorBase(num_workers),
       base_path_(std::move(base_path)),
       relative_tmp_dir_(std::move(relative_tmp_dir)),
       use_odirect_(use_odirect),
-      disk_block_size_(0) {
+      disk_block_size_(0),
+      read_ahead_size_(read_ahead_size) {
   // Create base directory
   std::filesystem::create_directories(base_path_);
 
@@ -144,6 +146,7 @@ WorkerFSConn FSConnector::create_connection() {
   }
   conn.use_odirect = use_odirect_;
   conn.disk_block_size = disk_block_size_;
+  conn.read_ahead_size = read_ahead_size_;
   return conn;
 }
 
@@ -172,7 +175,23 @@ void FSConnector::do_single_get(WorkerFSConn& conn, const std::string& key,
   }
 
   try {
-    size_t n = read_all(fd, buf, len);
+    size_t n;
+    if (conn.read_ahead_size > 0 && len > conn.read_ahead_size) {
+      // Trigger filesystem readahead with a small initial
+      // read, then read the remainder.
+      size_t ra = conn.read_ahead_size;
+      size_t n_head = read_all(fd, buf, ra);
+      if (n_head < ra) {
+        // Short read on the head portion — treat as
+        // incomplete
+        n = n_head;
+      } else {
+        size_t n_tail = read_all(fd, static_cast<char*>(buf) + ra, len - ra);
+        n = n_head + n_tail;
+      }
+    } else {
+      n = read_all(fd, buf, len);
+    }
     if (n != len) {
       throw std::runtime_error("incomplete read for " + file_path.string() +
                                ": expected " + std::to_string(len) + ", got " +
