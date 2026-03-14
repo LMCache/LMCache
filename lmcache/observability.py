@@ -1507,6 +1507,56 @@ class PrometheusLogger:
             multiprocess_mode="livemostrecent",
         ).labels(**self.labels)
 
+        # SSD wear / local disk metrics (for SSD wear mitigation observability)
+        self.disk_write_ops = self._gauge_cls(
+            name="lmcache:disk_write_ops",
+            documentation="Total number of disk write operations (SSD wear)",
+            labelnames=labelnames,
+            multiprocess_mode="livemostrecent",
+        ).labels(**self.labels)
+        self.disk_write_bytes = self._gauge_cls(
+            name="lmcache:disk_write_bytes",
+            documentation="Total bytes written to disk (SSD wear)",
+            labelnames=labelnames,
+            multiprocess_mode="livemostrecent",
+        ).labels(**self.labels)
+        self.disk_remove_ops = self._gauge_cls(
+            name="lmcache:disk_remove_ops",
+            documentation="Total number of disk remove (evict) operations",
+            labelnames=labelnames,
+            multiprocess_mode="livemostrecent",
+        ).labels(**self.labels)
+        self.disk_gated_count = self._gauge_cls(
+            name="lmcache:disk_gated_count",
+            documentation="Writes gated (not written to SSD) by gating policy",
+            labelnames=labelnames,
+            multiprocess_mode="livemostrecent",
+        ).labels(**self.labels)
+        self.disk_gated_by_length_count = self._gauge_cls(
+            name="lmcache:disk_gated_by_length_count",
+            documentation="Writes gated by length (chunk size < min_size_bytes)",
+            labelnames=labelnames,
+            multiprocess_mode="livemostrecent",
+        ).labels(**self.labels)
+        self.disk_gated_by_frequency_count = self._gauge_cls(
+            name="lmcache:disk_gated_by_frequency_count",
+            documentation="Writes gated by frequency (access count < min_access_count)",
+            labelnames=labelnames,
+            multiprocess_mode="livemostrecent",
+        ).labels(**self.labels)
+        self.disk_write_avg_size_bytes = self._gauge_cls(
+            name="lmcache:disk_write_avg_size_bytes",
+            documentation="Average size in bytes per disk write (0 if no writes)",
+            labelnames=labelnames,
+            multiprocess_mode="livemostrecent",
+        ).labels(**self.labels)
+        self.disk_evict_bytes = self._gauge_cls(
+            name="lmcache:disk_evict_bytes",
+            documentation="Total bytes evicted (removed) from disk",
+            labelnames=labelnames,
+            multiprocess_mode="livemostrecent",
+        ).labels(**self.labels)
+
         event_statuses = ["ongoing", "done", "not_found"]
         for status in event_statuses:
             metric_name = f"storage_events_{status}_count"

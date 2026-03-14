@@ -12,7 +12,7 @@ import torch
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.observability import LMCStatsMonitor
+from lmcache.observability import LMCStatsMonitor, PrometheusLogger
 from lmcache.utils import CacheEngineKey, DiskCacheMetadata, _lmcache_nvtx_annotate
 from lmcache.v1.cache_controller.message import OpType
 from lmcache.v1.config import LMCacheEngineConfig
@@ -168,6 +168,62 @@ class LocalDiskBackend(StorageBackendInterface):
         else:
             logger.warning("Controller message sender is not initialized")
 
+        # Disk metrics for Prometheus
+        self._disk_metrics_lock = threading.Lock()
+        self._disk_write_ops = 0
+        self._disk_write_bytes = 0
+        self._disk_remove_ops = 0
+        self._disk_evict_bytes = 0
+        self._disk_gated_count = 0
+        self._disk_gated_by_length_count = 0
+        self._disk_gated_by_frequency_count = 0
+
+        # SSD gating policy (defaults 0 = no gating). From extra_config.
+        self._ssd_gate_min_size_bytes: int = 0
+        self._ssd_gate_min_access_count: int = 0
+        if config.extra_config is not None:
+            self._ssd_gate_min_size_bytes = int(
+                config.extra_config.get("ssd_gate_min_size_bytes", 0)
+            )
+            self._ssd_gate_min_access_count = int(
+                config.extra_config.get("ssd_gate_min_access_count", 0)
+            )
+        # Access count per chunk (for frequency-based gating). Key: chunk_hash.
+        self._chunk_access_count: dict = {}
+
+        self._setup_metrics()
+
+    def _setup_metrics(self) -> None:
+        """Register disk metrics (SSD wear) with PrometheusLogger."""
+        prometheus_logger = PrometheusLogger.GetInstanceOrNone()
+        if prometheus_logger is not None:
+            prometheus_logger.disk_write_ops.set_function(lambda: self._disk_write_ops)
+            prometheus_logger.disk_write_bytes.set_function(
+                lambda: self._disk_write_bytes
+            )
+            prometheus_logger.disk_remove_ops.set_function(
+                lambda: self._disk_remove_ops
+            )
+            prometheus_logger.disk_evict_bytes.set_function(
+                lambda: self._disk_evict_bytes
+            )
+            prometheus_logger.disk_gated_count.set_function(
+                lambda: self._disk_gated_count
+            )
+            prometheus_logger.disk_gated_by_length_count.set_function(
+                lambda: self._disk_gated_by_length_count
+            )
+            prometheus_logger.disk_gated_by_frequency_count.set_function(
+                lambda: self._disk_gated_by_frequency_count
+            )
+            prometheus_logger.disk_write_avg_size_bytes.set_function(
+                lambda: (
+                    self._disk_write_bytes // self._disk_write_ops
+                    if self._disk_write_ops > 0
+                    else 0
+                )
+            )
+
     def __str__(self):
         return "LocalDiskBackend"
 
@@ -192,6 +248,9 @@ class LocalDiskBackend(StorageBackendInterface):
         with self.disk_lock:
             for key in reversed(self.keys_in_request):
                 self.cache_policy.update_on_hit(key, self.dict)
+                self._chunk_access_count[key.chunk_hash] = (
+                    self._chunk_access_count.get(key.chunk_hash, 0) + 1
+                )
             self.keys_in_request = []
 
     def exists_in_put_tasks(self, key: CacheEngineKey) -> bool:
@@ -237,6 +296,8 @@ class LocalDiskBackend(StorageBackendInterface):
         self.usage -= size
         self.stats_monitor.update_local_storage_usage(self.usage)
 
+        self._chunk_access_count.pop(key.chunk_hash, None)
+
         # NOTE: The following code will cause deadlock
         # res = asyncio.run_coroutine_threadsafe(
         #     self.disk_worker.submit_task("delete", os.remove, path),
@@ -245,6 +306,10 @@ class LocalDiskBackend(StorageBackendInterface):
         # res.result()
 
         os.remove(path)
+
+        with self._disk_metrics_lock:
+            self._disk_remove_ops += 1
+            self._disk_evict_bytes += size
 
         if force:
             self.cache_policy.update_on_force_evict(key)
@@ -310,10 +375,34 @@ class LocalDiskBackend(StorageBackendInterface):
             logger.debug(f"Put task for {key} is already in progress.")
             return None
 
-        self.disk_worker.insert_put_task(key)
-
-        # TODO(Jiayi): Fragmentation is not considered here.
         required_size = memory_obj.get_physical_size()
+
+        # SSD gating policy: frequency- and length-based (defaults 0 = no gating)
+        min_sz = self._ssd_gate_min_size_bytes
+        if min_sz > 0 and required_size < min_sz:
+            with self._disk_metrics_lock:
+                self._disk_gated_count += 1
+                self._disk_gated_by_length_count += 1
+            logger.debug(
+                "SSD gate (length): chunk size %s < min_size_bytes %s",
+                required_size,
+                min_sz,
+            )
+            return None
+        if self._ssd_gate_min_access_count > 0:
+            access_count = self._chunk_access_count.get(key.chunk_hash, 0)
+            if access_count < self._ssd_gate_min_access_count:
+                with self._disk_metrics_lock:
+                    self._disk_gated_count += 1
+                    self._disk_gated_by_frequency_count += 1
+                logger.debug(
+                    "SSD gate (frequency): chunk access_count %s < min_access_count %s",
+                    access_count,
+                    self._ssd_gate_min_access_count,
+                )
+                return None
+
+        self.disk_worker.insert_put_task(key)
         all_evict_keys = []
         evict_success = True
         with self.disk_lock:
@@ -389,8 +478,11 @@ class LocalDiskBackend(StorageBackendInterface):
             self.disk_lock.release()
             return None
 
-        # Update cache recency
+        # Update cache recency and access count (for SSD frequency-based gating)
         self.cache_policy.update_on_hit(key, self.dict)
+        self._chunk_access_count[key.chunk_hash] = (
+            self._chunk_access_count.get(key.chunk_hash, 0) + 1
+        )
 
         disk_meta = self.dict[key]
         path = disk_meta.path
@@ -516,6 +608,7 @@ class LocalDiskBackend(StorageBackendInterface):
         cached_positions = memory_obj.metadata.cached_positions
         memory_obj.ref_count_down()
 
+        self._chunk_access_count[key.chunk_hash] = 0
         self.insert_key(key, size, shape, dtype, fmt, cached_positions=cached_positions)
 
         self.disk_worker.remove_put_task(key)
@@ -583,6 +676,9 @@ class LocalDiskBackend(StorageBackendInterface):
     def write_file(self, buffer, path):
         start_time = time.time()
         size = len(buffer)
+        with self._disk_metrics_lock:
+            self._disk_write_ops += 1
+            self._disk_write_bytes += size
         if size % self.os_disk_bs != 0 or not self.use_odirect:
             with open(path, "wb") as f:
                 f.write(buffer)
@@ -630,6 +726,24 @@ class LocalDiskBackend(StorageBackendInterface):
         return self.local_cpu_backend
 
     def close(self) -> None:
+        avg_size = (
+            self._disk_write_bytes // self._disk_write_ops
+            if self._disk_write_ops > 0
+            else 0
+        )
+        logger.info(
+            "Disk metrics: disk_write_ops=%s, disk_write_bytes=%s, "
+            "disk_write_avg_size_bytes=%s, disk_remove_ops=%s, disk_evict_bytes=%s, "
+            "disk_gated_count=%s (by_length=%s, by_frequency=%s)",
+            self._disk_write_ops,
+            self._disk_write_bytes,
+            avg_size,
+            self._disk_remove_ops,
+            self._disk_evict_bytes,
+            self._disk_gated_count,
+            self._disk_gated_by_length_count,
+            self._disk_gated_by_frequency_count,
+        )
         if self.batched_msg_sender is not None:
             self.batched_msg_sender.close()
         self.disk_worker.close()
