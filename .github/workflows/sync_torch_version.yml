@@ -1,0 +1,49 @@
+name: Sync Torch Version
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 2 * * 1"
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    env:
+      GITHUB_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: dev
+          token: ${{ github.token }}
+
+      - name: Sync torch version with vLLM
+        id: sync
+        run: |
+          set -euo pipefail
+          url="https://raw.githubusercontent.com/vllm-project/vllm/main/pyproject.toml"
+          upstream=$(curl -fsSL "$url" | sed -nE 's/.*torch\s*==\s*"?([0-9.]+)"?.*/\1/p' | head -1)
+          [[ -z "$upstream" ]] && { echo "Failed to get torch version from vLLM"; exit 1; }
+          current=$(sed -nE 's/.*torch\s*==\s*"?([0-9.]+)"?.*/\1/p' pyproject.toml | head -1)
+          if [[ "$upstream" != "$current" ]]; then
+            sed -i -E "s/(torch\s*==\s*)[0-9.]+/\1$upstream/" pyproject.toml
+            echo "changed=true" >> $GITHUB_OUTPUT
+          else
+            echo "changed=false" >> $GITHUB_OUTPUT
+          fi
+          echo "upstream=$upstream" >> $GITHUB_OUTPUT
+          echo "current=$current" >> $GITHUB_OUTPUT
+
+      - if: steps.sync.outputs.changed == 'true'
+        uses: peter-evans/create-pull-request@v8
+        with:
+          branch: automation/sync-torch-version
+          base: dev
+          add-paths: pyproject.toml
+          commit-message: "build: sync torch version with vllm (${{ steps.sync.outputs.upstream }})"
+          title: "build: sync torch version with vllm (${{ steps.sync.outputs.upstream }})"
+          body: "Sync torch with vLLM. ${{ steps.sync.outputs.current }} → ${{ steps.sync.outputs.upstream }}"
+          labels: dependencies, automation
