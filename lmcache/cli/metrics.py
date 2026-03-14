@@ -26,19 +26,19 @@ The output style is configurable:
 """
 
 # Standard
+from typing import IO, Any, Optional, Union
 import abc
 import json
 import os
 import sys
-from typing import IO, Any, Optional, Union
 
 # First Party
 from lmcache.cli.config import get_cli_config
 
-
 # ---------------------------------------------------------------------------
 # Section
 # ---------------------------------------------------------------------------
+
 
 class Section:
     """A named group of metrics.
@@ -67,6 +67,7 @@ class Section:
 # ---------------------------------------------------------------------------
 # Style base class + registry
 # ---------------------------------------------------------------------------
+
 
 class MetricsStyle(abc.ABC):
     """Base class for terminal rendering styles."""
@@ -117,15 +118,14 @@ def _get_style(name: Optional[str]) -> MetricsStyle:
     cls = _STYLE_REGISTRY.get(name)
     if cls is None:
         available = ", ".join(sorted(_STYLE_REGISTRY))
-        raise ValueError(
-            f"Unknown metrics style {name!r}. Available: {available}"
-        )
+        raise ValueError(f"Unknown metrics style {name!r}. Available: {available}")
     return cls()
 
 
 # ---------------------------------------------------------------------------
 # Built-in styles
 # ---------------------------------------------------------------------------
+
 
 def _format_value(value: Any) -> str:
     """Format a metric value for terminal display."""
@@ -190,6 +190,7 @@ class VllmStyle(MetricsStyle):
 # ---------------------------------------------------------------------------
 # Metrics collector
 # ---------------------------------------------------------------------------
+
 
 class Metrics:
     """Hierarchical metrics collector with terminal and JSON output.
@@ -283,9 +284,7 @@ class Metrics:
         """
         if file is None:
             file = sys.stdout
-        file.write(
-            self._style.render(self._title, self._sections, self._width)
-        )
+        file.write(self._style.render(self._title, self._sections, self._width))
         file.write("\n")
 
     def to_dict(self) -> dict[str, Any]:
