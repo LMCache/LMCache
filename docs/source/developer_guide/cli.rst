@@ -57,7 +57,7 @@ Step-by-Step: Adding a New Command
 
        def add_arguments(self, parser: argparse.ArgumentParser) -> None:
            parser.add_argument("--url", required=True,
-                               help="Server URL (e.g. localhost:5555)")
+                               help="LMCache HTTP server URL (e.g. http://localhost:8000)")
 
        def handler(self, args: argparse.Namespace) -> None:
            # Connect to server, gather info...
@@ -77,7 +77,7 @@ Step-by-Step: Adding a New Command
        DescribeCommand(),   # add here
    ]
 
-That's it --- ``lmcache describe --url localhost:5555`` is now available.
+That's it --- ``lmcache describe --url http://localhost:8000`` is now available.
 
 
 Using the Metrics System

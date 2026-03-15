@@ -28,9 +28,8 @@ lmcache
 | `bench` | How fast is it? | Multi-iteration, metrics-heavy |
 | `kvcache` | Mutate cache state | Clear, end-session, evict (future) |
 
-All client commands use a unified `--url` flag:
-- KV cache targets: `--url localhost:5555` (ZMQ)
-- Engine targets: `--url http://localhost:8000` (HTTP)
+All client commands use a `--url` flag pointing to the **LMCache HTTP server**
+(e.g. `--url http://localhost:8000`).
 
 ---
 

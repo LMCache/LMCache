@@ -25,7 +25,7 @@ CLIConfig = create_config_class(
 )
 
 
-def get_cli_config() -> "CLIConfig":
+def get_cli_config() -> "CLIConfig":  # type: ignore[valid-type]
     """Load CLI configuration from environment variables.
 
     Returns:

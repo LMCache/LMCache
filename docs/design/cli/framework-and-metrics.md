@@ -101,7 +101,7 @@ ALL_COMMANDS: list[BaseCommand] = [
 ]
 ```
 
-That's it — `lmcache describe --url ...` is now available.
+That's it — `lmcache describe --url http://localhost:8000` is now available.
 
 ### File layout
 
@@ -313,8 +313,9 @@ helper `add_output_arg(parser)` in `base.py`.
 
 ### `--url` flag
 
-Each subcommand configures its own `--url` flag as needed (ZMQ vs HTTP
-semantics vary per command).
+The `--url` flag points to the **LMCache HTTP server** (e.g.
+`http://localhost:8000`).  Each subcommand configures its own `--url`
+flag as needed.
 
 ### Error handling
 

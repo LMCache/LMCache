@@ -114,7 +114,7 @@ def _register_style(name: str):
 def _get_style(name: Optional[str]) -> MetricsStyle:
     """Resolve a style by name (falling back to config, then ``"vllm"``)."""
     if name is None:
-        name = get_cli_config().metrics_style
+        name = get_cli_config().metrics_style  # type: ignore[attr-defined]
     cls = _STYLE_REGISTRY.get(name)
     if cls is None:
         available = ", ".join(sorted(_STYLE_REGISTRY))
