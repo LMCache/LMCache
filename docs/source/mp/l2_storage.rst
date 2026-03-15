@@ -157,6 +157,43 @@ argument.  Adapters are used in the order they are specified.  The
     --l2-adapter '{"type": "nixl_store", "backend": "POSIX", "backend_params": {"file_path": "/data/ssd/l2", "use_direct_io": "false"}, "pool_size": 64}' \
     --l2-adapter '{"type": "nixl_store", "backend": "GDS", "backend_params": {"file_path": "/data/nvme/l2", "use_direct_io": "true"}, "pool_size": 128}'
 
+Store and Prefetch Policies
+----------------------------
+
+The **store policy** controls how keys flow from L1 to L2: which adapters
+receive each key and whether keys are deleted from L1 after a successful
+L2 store.  The **prefetch policy** controls how keys flow from L2 back to
+L1: when multiple adapters have the same key, the policy decides which
+adapter loads it.
+
+Select policies via CLI:
+
+.. code-block:: bash
+
+    --l2-store-policy default \
+    --l2-prefetch-policy default
+
+**Built-in policies:**
+
+.. list-table::
+   :header-rows: 1
+   :widths: 15 15 70
+
+   * - Flag
+     - Name
+     - Behaviour
+   * - ``--l2-store-policy``
+     - ``default``
+     - Store all keys to all adapters.  Never delete from L1.
+   * - ``--l2-prefetch-policy``
+     - ``default``
+     - For each key, pick the first (lowest-indexed) adapter that has it.
+
+Policies are extensible -- new policies can be added by creating a file
+in ``storage_controllers/`` and calling ``register_store_policy()`` or
+``register_prefetch_policy()`` at import time.  See the design doc
+``l2_adapters/design_docs/overall.md`` for details.
+
 Verifying L2 Storage
 --------------------
 
