@@ -33,10 +33,10 @@ StorageManager Read Metrics
      - Number of read (prefetch) requests received by the StorageManager.
    * - ``lmcache_mp:sm_read_succeed_keys``
      - Counter
-     - Number of keys successfully found in L1 during read.
+     - Number of keys that succeeded in reading from LMCache.
    * - ``lmcache_mp:sm_read_failed_keys``
      - Counter
-     - Number of keys not found in L1 during read.
+     - Number of keys that failed in reading from LMCache.
 
 StorageManager Write Metrics
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -70,10 +70,10 @@ L1 Metrics
      - Description
    * - ``lmcache_mp:l1_read_keys``
      - Counter
-     - Number of keys successfully read from L1.
+     - Number of keys finished for read on L1.
    * - ``lmcache_mp:l1_write_keys``
      - Counter
-     - Number of keys successfully written to L1.
+     - Number of keys finished for write on L1.
    * - ``lmcache_mp:l1_evicted_keys``
      - Counter
      - Number of keys evicted from L1 by the EvictionController.
