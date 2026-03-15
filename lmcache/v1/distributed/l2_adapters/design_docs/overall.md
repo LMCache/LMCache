@@ -204,6 +204,10 @@ The policy decides two things:
    Which keys to evict from L1 after successful L2 store.
    `DefaultStorePolicy`: never delete (empty list).
 
+Policies are selected by name via `--l2-store-policy` (default: `"default"`).
+New policies self-register with `register_store_policy(name, cls)` at import
+time and are auto-discovered by `storage_controllers/__init__.py`.
+
 ## PrefetchController
 
 **Purpose:** Asynchronously load KV cache data from L2 into L1 ahead of a
@@ -380,6 +384,10 @@ assignment of keys to adapters. Each key appears in at most one adapter's bitmap
 `DefaultPrefetchPolicy`: For each key, assign it to the first (lowest-indexed)
 adapter that has it. This is a simple greedy approach.
 
+Policies are selected by name via `--l2-prefetch-policy` (default: `"default"`).
+New policies self-register with `register_prefetch_policy(name, cls)` at import
+time and are auto-discovered by `storage_controllers/__init__.py`.
+
 ### Max In-Flight Limiting
 
 The controller limits concurrent prefetch requests to `max_in_flight` (default: 8).
@@ -495,3 +503,52 @@ pybind-wrapped `IStorageConnector` to the `L2AdapterInterface`:
 **Reference implementation:** The Redis (RESP) connector in
 `csrc/storage_backends/redis/` demonstrates all 5 steps of the integration
 guide.
+
+## Implementing a New Store or Prefetch Policy
+
+Both store and prefetch policies use a name-based registry with automatic
+module discovery. **To add a new policy, create a single file in
+`storage_controllers/` — no changes to any existing file are needed.**
+
+### Store Policy
+
+1. Create a new file (e.g., `storage_controllers/store_policy_tiered.py`).
+2. Subclass `StorePolicy` and implement `select_store_targets()` and
+   `select_l1_deletions()`.
+3. Call `register_store_policy("tiered", TieredStorePolicy)` at module level.
+
+```python
+from lmcache.v1.distributed.storage_controllers.store_policy import (
+    StorePolicy,
+    AdapterDescriptor,
+    register_store_policy,
+)
+from lmcache.v1.distributed.api import ObjectKey
+
+
+class TieredStorePolicy(StorePolicy):
+    def select_store_targets(self, keys, adapters):
+        # custom logic ...
+        ...
+
+    def select_l1_deletions(self, keys):
+        return []
+
+
+register_store_policy("tiered", TieredStorePolicy)
+```
+
+The policy is now available via `--l2-store-policy tiered`.
+
+### Prefetch Policy
+
+Same pattern: subclass `PrefetchPolicy`, implement `select_load_plan()`,
+and call `register_prefetch_policy("name", cls)`.
+
+### How Discovery Works
+
+`storage_controllers/__init__.py` uses `pkgutil.iter_modules()` to import
+every module in the package at import time. When your module is imported,
+the `register_*_policy()` call at module level adds it to the registry.
+The `--l2-store-policy` and `--l2-prefetch-policy` CLI arguments use the
+registry to populate their `choices` list.

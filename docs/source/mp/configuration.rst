@@ -132,6 +132,29 @@ Source: ``lmcache/v1/distributed/config.py``
      - ``0.2``
      - Fraction of allocated memory to evict when triggered (0.0--1.0).
 
+L2 Policies
+-----------
+
+Source: ``lmcache/v1/distributed/config.py``
+
+.. list-table::
+   :header-rows: 1
+   :widths: 30 15 55
+
+   * - Argument
+     - Default
+     - Description
+   * - ``--l2-store-policy``
+     - ``default``
+     - L2 store policy.  Determines which adapters receive each key
+       and whether keys are deleted from L1 after L2 store.
+       The ``default`` policy stores all keys to all adapters and keeps L1.
+   * - ``--l2-prefetch-policy``
+     - ``default``
+     - L2 prefetch policy.  Determines which adapter loads each key
+       when multiple adapters have it.
+       The ``default`` policy picks the first adapter (lowest index).
+
 L2 Adapters
 -----------
 
@@ -329,6 +352,8 @@ Full Example
         --eviction-policy LRU \
         --eviction-trigger-watermark 0.9 \
         --eviction-ratio 0.1 \
+        --l2-store-policy default \
+        --l2-prefetch-policy default \
         --l2-adapter '{"type": "nixl_store", "backend": "POSIX", "backend_params": {"file_path": "/data/lmcache/l2", "use_direct_io": "false"}, "pool_size": 64}' \
         --prometheus-port 9090 \
         --prometheus-log-interval 10 \
