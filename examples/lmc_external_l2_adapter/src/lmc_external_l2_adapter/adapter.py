@@ -90,13 +90,14 @@ class InMemoryL2Adapter(L2AdapterInterface):
     """In-memory L2 adapter loaded as an external plugin.
 
     Constructor accepts either an
-    ``InMemoryL2AdapterConfig`` instance (matching
-    the built-in adapter convention) **or** a plain
-    dict (legacy plugin mode) for backward compatibility.
+    ``InMemoryL2AdapterConfig`` instance (when the
+    framework auto-discovers the config class) **or**
+    a plain dict (raw-dict mode, when no config class
+    is registered).
 
-    Any extra ``**kwargs`` that come from the framework
-    (e.g. ``l1_memory_desc``) are silently ignored so the
-    adapter stays compatible with all callers.
+    Any extra ``**kwargs`` forwarded by the framework
+    (e.g. ``l1_memory_desc``) are accepted but not used
+    by this simple example adapter.
     """
 
     def __init__(

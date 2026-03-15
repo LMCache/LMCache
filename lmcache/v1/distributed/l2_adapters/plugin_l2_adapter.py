@@ -16,9 +16,6 @@ if TYPE_CHECKING:
     from lmcache.v1.distributed.internal_api import (
         L1MemoryDesc,
     )
-    from lmcache.v1.distributed.l2_adapters.base import (
-        L2AdapterInterface,
-    )
 
 # First Party
 from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface as _L2AI
@@ -129,7 +126,7 @@ class PluginL2AdapterConfig(L2AdapterConfigBase):
 def _create_plugin_adapter(
     config: L2AdapterConfigBase,
     l1_memory_desc: "Optional[L1MemoryDesc]" = None,
-) -> "L2AdapterInterface":
+) -> _L2AI:
     """Dynamically load and create a plugin L2 adapter."""
     assert isinstance(config, PluginL2AdapterConfig)
 
@@ -159,13 +156,19 @@ def _create_plugin_adapter(
         config,
         adapter_cls,
     )
+    kwargs: dict[str, object] = {}
+    if l1_memory_desc is not None:
+        kwargs["l1_memory_desc"] = l1_memory_desc
+
     if cfg_cls is not None:
         return adapter_cls(  # type: ignore[call-arg]
             cfg_cls.from_dict(config.adapter_params),
+            **kwargs,
         )
 
     return adapter_cls(  # type: ignore[call-arg]
         config.adapter_params,
+        **kwargs,
     )
 
 
