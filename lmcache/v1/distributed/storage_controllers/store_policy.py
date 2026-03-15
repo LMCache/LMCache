@@ -210,4 +210,4 @@ class BufferOnlyStorePolicy(DefaultStorePolicy):
 
 
 register_store_policy("default", DefaultStorePolicy)
-register_store_policy("noop", BufferOnlyStorePolicy)
+register_store_policy("skip_l1", BufferOnlyStorePolicy)
