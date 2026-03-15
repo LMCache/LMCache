@@ -1553,7 +1553,6 @@ class LMCacheEngine:
                 memory_obj_map[key] = memory_obj
 
         # TODO(Jiayi): hashing inside `process_tokens` can be skipped.
-        used_keys: set[CacheEngineKey] = set()
         for start, end, key in self.token_database.process_tokens(
             tokens=tokens,
             mask=mask,
@@ -1568,7 +1567,6 @@ class LMCacheEngine:
             chunks.append((key, memory_obj, start, end))
             tot_kv_size += memory_obj.get_size()
             ret_mask[start:end] = True
-            used_keys.add(key)
 
         return chunks, tot_kv_size
 
