@@ -148,6 +148,7 @@ class RustRawBlockBackend(StoragePluginInterface):
         self.meta_verify_on_load: bool = bool(
             extra.get("rust_raw_block.meta_verify_on_load", True)
         )
+        self._meta_copy_count: int = 2
 
         get_full_chunk_size_bytes = getattr(
             self.local_cpu_backend, "get_full_chunk_size_bytes", None
@@ -191,6 +192,14 @@ class RustRawBlockBackend(StoragePluginInterface):
             raise ValueError(
                 "rust_raw_block.meta_total_bytes must be > block_align "
                 "(room for metadata header + payload)"
+            )
+        self._meta_container_bytes: int = (
+            (self.meta_total_bytes // self._meta_copy_count) // self.block_align
+        ) * self.block_align
+        if self._meta_container_bytes <= self.block_align:
+            raise ValueError(
+                "rust_raw_block.meta_total_bytes must provide room for at least "
+                "two metadata copies (header + payload)"
             )
 
         self._lock = threading.Lock()
@@ -789,7 +798,12 @@ class RustRawBlockBackend(StoragePluginInterface):
                 logger.warning(f"Periodic metadata checkpoint failed: {e}")
 
     def _meta_payload_capacity(self) -> int:
-        return self.meta_total_bytes - self.block_align
+        return self._meta_container_bytes - self.block_align
+
+    def _meta_container_offsets(self) -> list[int]:
+        return [
+            idx * self._meta_container_bytes for idx in range(self._meta_copy_count)
+        ]
 
     def _read_meta_header(self, container_offset: int) -> Optional[dict[str, int]]:
         raw = self._rawdev()
@@ -831,6 +845,23 @@ class RustRawBlockBackend(StoragePluginInterface):
         if crc != int(header["crc"]):
             return None
         return payload
+
+    def _select_latest_checkpoint(
+        self,
+    ) -> tuple[Optional[dict[str, int]], Optional[bytes]]:
+        best_header: Optional[dict[str, int]] = None
+        best_payload: Optional[bytes] = None
+        for offset in self._meta_container_offsets():
+            header = self._read_meta_header(offset)
+            if header is None:
+                continue
+            payload = self._load_meta_payload(header)
+            if payload is None:
+                continue
+            if best_header is None or int(header["seq"]) > int(best_header["seq"]):
+                best_header = header
+                best_payload = payload
+        return best_header, best_payload
 
     def _snapshot_state(self) -> tuple[dict[str, Any], int]:
         with self._lock:
@@ -886,10 +917,9 @@ class RustRawBlockBackend(StoragePluginInterface):
             )
             return False
 
-        target = 0
-        current = self._read_meta_header(target)
-        current_seq = int(current["seq"]) if current is not None else 0
-        next_seq = max(current_seq, self._meta_seq) + 1
+        next_seq = self._meta_seq + 1
+        target_idx = int((next_seq - 1) % self._meta_copy_count)
+        target = self._meta_container_offsets()[target_idx]
 
         payload_len = len(payload)
         payload_total_len = _round_up(payload_len, self.block_align)
@@ -941,6 +971,17 @@ class RustRawBlockBackend(StoragePluginInterface):
                 len(snapshot.get("entries", {})),
             )
         return ok
+
+    def _is_valid_checkpoint_entry(self, offset: int, size: int) -> bool:
+        if offset < self._data_base_offset:
+            return False
+        rel = offset - self._data_base_offset
+        if rel % self.slot_bytes != 0:
+            return False
+        slot = rel // self.slot_bytes
+        if slot < 0 or slot >= self._max_slots:
+            return False
+        return 0 < size <= (self.slot_bytes - self.header_bytes)
 
     def _apply_loaded_state(self, data: dict[str, Any]) -> bool:
         if not isinstance(data, dict):
@@ -1035,6 +1076,16 @@ class RustRawBlockBackend(StoragePluginInterface):
                     shape_list = entry.get("shape")
                     fmt_name = entry.get("fmt")
                     cached_positions_list = entry.get("cached_positions")
+
+                    if not self._is_valid_checkpoint_entry(offset, size):
+                        logger.warning(
+                            "Skipping invalid checkpoint entry for key '%s': "
+                            "offset=%d size=%d",
+                            k_str,
+                            offset,
+                            size,
+                        )
+                        continue
 
                     shape = (
                         torch.Size(list(shape_list)) if shape_list is not None else None
@@ -1132,18 +1183,13 @@ class RustRawBlockBackend(StoragePluginInterface):
         )
 
     def _load_checkpoint_from_device(self) -> None:
-        header = self._read_meta_header(0)
+        header, payload = self._select_latest_checkpoint()
         if header is None:
             logger.info(
                 "RustRawBlockBackend: no valid on-device metadata checkpoint found"
             )
             return
-        payload = self._load_meta_payload(header)
-        if payload is None:
-            logger.warning(
-                "RustRawBlockBackend: metadata header exists but payload is invalid"
-            )
-            return
+        assert payload is not None
         try:
             data = json.loads(payload.decode("utf-8"))
         except Exception:
