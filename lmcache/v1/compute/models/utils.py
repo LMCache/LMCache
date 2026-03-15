@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from typing import Dict
+from typing import Any, Dict
 
 # Third Party
 from torch import nn
@@ -11,7 +11,19 @@ from lmcache.logging import init_logger
 logger = init_logger(__name__)
 
 
+def _unwrap_vllm_model(vllm_model: Any) -> Any:
+    """Return the underlying vLLM model if it is wrapped by CUDA graphs."""
+    current_model = vllm_model
+    while type(current_model).__name__ == "CUDAGraphWrapper":
+        next_model = getattr(current_model, "runnable", None)
+        if next_model is None:
+            break
+        current_model = next_model
+    return current_model
+
+
 def infer_model_from_vllm(vllm_model, blender, enable_sparse: bool = False):
+    vllm_model = _unwrap_vllm_model(vllm_model)
     model_name = type(vllm_model).__name__
     if model_name == "LlamaForCausalLM":
         # First Party

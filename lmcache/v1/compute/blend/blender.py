@@ -38,7 +38,7 @@ class LMCBlender:
         self.layerwise_model = infer_model_from_vllm(vllm_model, self, enable_sparse)
 
         # TODO: remove this hardcode
-        self.num_layers = len(vllm_model.model.layers)
+        self.num_layers = len(self.layerwise_model.vllm_model.model.layers)
 
         # TODO(Jiayi): support threshold-based blending
         # TODO(Jiayi): support different ratios for different layers
