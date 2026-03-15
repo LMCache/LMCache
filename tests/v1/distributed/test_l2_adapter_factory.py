@@ -30,7 +30,8 @@ from lmcache.v1.distributed.l2_adapters.plugin_l2_adapter import PluginL2Adapter
 class _FakeL2Adapter:
     """Minimal stub that passes issubclass check."""
 
-    def __init__(self, **kwargs):
+    def __init__(self, params=None, **kwargs):
+        self.params = params
         self.kwargs = kwargs
 
 
@@ -184,7 +185,7 @@ class TestPluginAdapterFactory:
         )
         adapter = create_l2_adapter_from_registry(config)
         assert isinstance(adapter, _FakeL2Adapter)
-        assert adapter.kwargs["host"] == "localhost"
+        assert adapter.params["host"] == "localhost"
 
     def test_import_error_raises(self, monkeypatch):
         """ImportError propagates when module not found."""
