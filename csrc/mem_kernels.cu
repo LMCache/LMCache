@@ -26,6 +26,8 @@
     } while (0)
 #endif
 
+namespace {
+
 unsigned int checked_cuda_dim_component(const int64_t value,
                                         const int64_t limit,
                                         const char* const name) {
@@ -53,6 +55,8 @@ dim3 make_block_dim3(const int64_t x, const int64_t y = 1,
       checked_cuda_dim_component(y, props->maxThreadsDim[1], "block.y"),
       checked_cuda_dim_component(z, props->maxThreadsDim[2], "block.z"));
 }
+
+}  // namespace
 
 namespace lmc {
 
