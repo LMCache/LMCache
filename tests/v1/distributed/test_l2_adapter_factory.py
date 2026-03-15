@@ -162,12 +162,12 @@ class TestPluginAdapterFactory:
     def test_load_external_adapter(self, monkeypatch):
         """Successfully load an external adapter class."""
         # First Party
-        from lmcache.v1.distributed.l2_adapters import base as base_mod
+        from lmcache.v1.distributed.l2_adapters import plugin_l2_adapter as plugin_mod
 
         # Make _FakeL2Adapter pass issubclass check
         monkeypatch.setattr(
-            base_mod,
-            "L2AdapterInterface",
+            plugin_mod,
+            "_L2AI",
             _FakeL2Adapter,
         )
 
@@ -285,11 +285,11 @@ class TestPluginInitialization:
     def _patch_base(self, monkeypatch, adapter_cls):
         """Make *adapter_cls* pass issubclass check."""
         # First Party
-        from lmcache.v1.distributed.l2_adapters import base as base_mod
+        from lmcache.v1.distributed.l2_adapters import plugin_l2_adapter as plugin_mod
 
         monkeypatch.setattr(
-            base_mod,
-            "L2AdapterInterface",
+            plugin_mod,
+            "_L2AI",
             adapter_cls,
         )
 
