@@ -15,13 +15,6 @@ from lmcache.v1.distributed.l2_adapters.config import (
     add_l2_adapters_args,
     parse_args_to_l2_adapters_config,
 )
-from lmcache.v1.distributed.storage_controllers.prefetch_policy import (
-    get_registered_prefetch_policies,
-)
-from lmcache.v1.distributed.storage_controllers.store_policy import (
-    get_registered_store_policies,
-)
-import lmcache.v1.distributed.storage_controllers  # noqa: F401
 
 
 @dataclass
@@ -200,6 +193,19 @@ def add_storage_manager_args(
     )
 
     # L2 Policies
+    # Import here to break circular dependency:
+    # config.py <-> storage_controllers (via eviction_controller)
+    # Safe because config.py is fully initialized by the time this
+    # function is called.
+    # First Party
+    from lmcache.v1.distributed.storage_controllers.prefetch_policy import (
+        get_registered_prefetch_policies,
+    )
+    from lmcache.v1.distributed.storage_controllers.store_policy import (
+        get_registered_store_policies,
+    )
+    import lmcache.v1.distributed.storage_controllers  # noqa: F401
+
     policy_group = parser.add_argument_group(
         "L2 Policies", "Store and prefetch policy selection for L2 adapters"
     )
