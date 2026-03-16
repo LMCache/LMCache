@@ -712,7 +712,17 @@ def _update_config_from_env(self):
             env_config[deprecated_name] = env_value
 
     # Resolve aliases and handle deprecated configurations
-    resolved_config = _resolve_config_aliases(env_config, "environment variables")
+    resolved_config = _resolve_config_aliases(
+        env_config,
+        "environment variables",
+        _CONFIG_DEFINITIONS,
+        _CONFIG_ALIASES,
+        _DEPRECATED_CONFIGS,
+    )
+
+    # Ensure _user_set_keys exists
+    if not hasattr(self, "_user_set_keys"):
+        object.__setattr__(self, "_user_set_keys", set())
 
     # Update config object with environment values
     for name, config in _CONFIG_DEFINITIONS.items():
@@ -723,6 +733,8 @@ def _update_config_from_env(self):
                 value = _parse_quoted_string(raw_value)
                 converted_value = config["env_converter"](value)
                 setattr(self, name, converted_value)
+                # Mark as user-set
+                self._user_set_keys.add(name)
             except (ValueError, json.JSONDecodeError) as e:
                 logger.warning(
                     f"Failed to parse {get_env_name(name)}={raw_value!r}: {e}"
@@ -745,6 +757,7 @@ LMCacheEngineConfig = create_config_class(
         "get_lmcache_worker_ids": _get_lmcache_worker_ids,
         "get_lookup_server_worker_ids": _get_lookup_server_worker_ids,
         "from_legacy": classmethod(_from_legacy),
+        "update_config_from_env": _update_config_from_env,
     },
 )
 
