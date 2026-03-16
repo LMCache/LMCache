@@ -3,6 +3,7 @@ Extending LMCache
 
 LMCache is designed to be extensible, allowing integration of custom functionality without modifying the core. The main extension mechanisms are:
 
+- **Native Connector Framework** – build high-performance C++ storage connectors with pybind11 that work in both non-MP and MP modes. Provides multi-threaded I/O, batched tiling, and eventfd-based completions.
 - **Storage Plugin Framework** – integrate new storage backends (custom cache storage modules) via a standardized interface.
 - **External Remote Connector Framework** – integrate new remote KV store connectors for external/distributed storage systems. This is still supported but has a planned deprecation by v0.5.0. It is replaced by **Remote Storage Plugin Framework**.
 - **Remote Storage Plugin Framework** – integrate new remote storage connectors for remote/distributed KV storage systems.
@@ -121,6 +122,7 @@ Together, these extension points – custom storage backends, remote storage con
    :maxdepth: 1
    :caption: Extending LMCache
 
+   native_connectors
    runtime_plugins
    storage_plugins
    remote_storage_plugins
