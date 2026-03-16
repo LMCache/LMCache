@@ -106,7 +106,7 @@ class LMCacheConnector:
         tp_size: int,
         rank: int,
         k_pool: List[torch.Tensor],
-        v_pool: List[torch.Tensor],
+        v_pool: Optional[List[torch.Tensor]] = None,
     ):
         if not k_pool:
             raise ValueError("k_pool cannot be empty during initialization.")
@@ -129,7 +129,11 @@ class LMCacheConnector:
         self.sgl_config = sgl_config
         self.tp_size = tp_size
         self.rank = local_rank  # Use local_rank for torch.device() calls
-        self.kvcaches = k_pool + v_pool
+        # For MLA, single kv buffer is used and v_pool is None.
+        if v_pool is not None:
+            self.kvcaches = k_pool + v_pool
+        else:
+            self.kvcaches = k_pool
         self.num_layer = sgl_config.num_hidden_layers
 
         self.lmcache_engine.post_init(kvcaches=self.kvcaches)
@@ -205,14 +209,18 @@ class LMCacheLayerwiseConnector(LMCacheConnector):
         tp_size: int,
         rank: int,
         k_pool: List[torch.Tensor],
-        v_pool: List[torch.Tensor],
+        v_pool: Optional[List[torch.Tensor]] = None,
         tp_group: Optional[torch.distributed.ProcessGroup] = None,
     ):
         super().__init__(sgl_config, tp_size, rank, k_pool, v_pool)
         self._lmcache_chunk_size = self.lmcache_engine.config.chunk_size
         self.layerwise_retrievers: List[Any] = []
         self.layer_load_layer: List[int] = []
-        self.kvcaches = [k_pool, v_pool]
+        # For MLA, single kv buffer is used and v_pool is None.
+        if v_pool is not None:
+            self.kvcaches = [k_pool, v_pool]
+        else:
+            self.kvcaches = k_pool
         self.tp_group = tp_group
         self.lookup_id_list: List[str] = []
 
