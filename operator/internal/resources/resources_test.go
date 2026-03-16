@@ -542,9 +542,9 @@ func TestBuildDaemonSet_CustomEnvAndVolumes(t *testing.T) {
 	ds := BuildDaemonSet(engine)
 	c := ds.Spec.Template.Spec.Containers[0]
 
-	// Should have LMCACHE_LOG_LEVEL + NVIDIA_VISIBLE_DEVICES + CUSTOM_VAR
-	if len(c.Env) != 3 {
-		t.Fatalf("expected 3 env vars, got %d", len(c.Env))
+	// Should have LMCACHE_LOG_LEVEL + NVIDIA_VISIBLE_DEVICES + NVIDIA_DRIVER_CAPABILITIES + CUSTOM_VAR
+	if len(c.Env) != 4 {
+		t.Fatalf("expected 4 env vars, got %d", len(c.Env))
 	}
 
 	// Should have only user-specified extra-vol (no built-in dshm)
