@@ -120,6 +120,8 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
     },
     "blend_min_tokens": {"type": int, "default": 256, "env_converter": int},
     "blend_special_str": {"type": str, "default": " # # ", "env_converter": str},
+    "retrieve_locations": {"type": Optional[list[str]], "default": None},
+    "store_location": {"type": Optional[str], "default": None},
     # P2P configurations
     "enable_p2p": {
         "type": bool,
@@ -544,11 +546,6 @@ def _validate_config(self):
         assert self.pd_role is not None
         assert self.pd_buffer_size is not None
         assert self.pd_buffer_device is not None
-
-        assert self.remote_url is None, "PD only supports remote_url=None"
-        assert self.save_decode_cache is False, (
-            "PD only supports save_decode_cache=False"
-        )
         assert self.enable_p2p is False, "PD only supports enable_p2p=False"
 
         # PD requires save_unfull_chunk=True for complete KV cache transfer
@@ -566,6 +563,19 @@ def _validate_config(self):
             logger.info(
                 "PD mode enabled with save_unfull_chunk=True - all KV cache "
                 "including partial chunks will be transferred to decode node"
+            )
+
+        # for receiver, PDBackend is for retrieve location
+        # can't take PDBackend as store location
+        # as PDBackend is now one way from producer to receiver only
+        if self.pd_role == "receiver":
+            assert self.store_location != "PDBackend", (
+                "store_location cannot be PDBackend for receiver"
+            )
+            assert self.retrieve_locations in (None, ["PDBackend"]), (
+                "for pd receiver, "
+                'retrieve_locations are expected to be ["PDBackend"], '
+                f"now, it is {self.retrieve_locations}"
             )
 
     if enable_nixl_storage:

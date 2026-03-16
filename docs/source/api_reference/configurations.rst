@@ -79,6 +79,12 @@ Basic cache settings that control the core functionality of LMCache.
    * - min_retrieve_tokens
      - LMCACHE_MIN_RETRIEVE_TOKENS
      - Minimum number of hit tokens required to perform retrieve. If hit tokens < this value, skip retrieve but still record the hits to avoid re-storing existing chunks. See :ref:`performance_tuning` for a working example. Default: 0 (disabled)
+   * - store_location
+     - LMCACHE_STORE_LOCATION
+     - A single storage backend name to store KV caches into. When specified, only the matching backend receives store operations. Valid values are the backend class names registered in the storage manager, including: ``"LocalCPUBackend"``, ``"LocalDiskBackend"``, ``"RemoteBackend"``, ``"PDBackend"``, ``"P2PBackend"``, ``"GdsBackend"``, etc, and any storage plugin backends. Note: ``"PDBackend"`` cannot be used as a store location for a decoder instance in a PD setup, since PDBackend is one-way from prefiller to decoder only. Default: null (store to all active backends)
+   * - retrieve_locations
+     - LMCACHE_RETRIEVE_LOCATIONS
+     - List of storage backend names to search when retrieving or looking up KV caches. When specified, only the listed backends are searched. Valid values are the backend class names registered in the storage manager, including: ``"LocalCPUBackend"``, ``"LocalDiskBackend"``, ``"RemoteBackend"``, ``"PDBackend"``, ``"P2PBackend"``, ``"GdsBackend"``, etc, and any storage plugin backends. Default: null (search all active backends)
    * - extra_config
      - LMCACHE_EXTRA_CONFIG={"key": value, ...}
      - Additional configuration as JSON dict. For NUMA manual mode, include "gpu_to_numa_mapping": {gpu_id: numa_node, ...}. Default: {}

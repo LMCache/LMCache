@@ -180,6 +180,11 @@ class LMCacheEngine:
         # at decoder.
         self.remove_after_retrieve = config.enable_pd and config.pd_role == "receiver"
 
+        # asymmetric store/retrieve location can be specified
+        # this is typically used (but not limited) in PD system
+        self.store_location = config.store_location
+        self.retrieve_locations = config.retrieve_locations
+
         self.num_layers = metadata.kv_shape[0]
         self.fmt = None
         if self.use_layerwise:
@@ -532,7 +537,10 @@ class LMCacheEngine:
             # TODO: we implicitly rely on batched_put to call ref_count_down
             # this management should be done in a cleaner way
             self.storage_manager.batched_put(
-                keys, memory_objs, transfer_spec=transfer_spec
+                keys,
+                memory_objs,
+                transfer_spec=transfer_spec,
+                location=self.store_location,
             )
 
         self.stats_monitor.on_store_finished(
@@ -640,7 +648,9 @@ class LMCacheEngine:
 
             keys_multi_layer = key.split_layers(self.num_layers)
             # Only check the first layer
-            if self.storage_manager.contains(keys_multi_layer[0]):
+            if self.storage_manager.contains(
+                keys_multi_layer[0], self.retrieve_locations
+            ):
                 continue
 
             # Allocate the memory object
@@ -715,7 +725,9 @@ class LMCacheEngine:
             for layer_id in range(self.num_layers):
                 yield
                 next(mem_obj_generator)
-                self.storage_manager.batched_put(keys[layer_id], memory_objs[layer_id])
+                self.storage_manager.batched_put(
+                    keys[layer_id], memory_objs[layer_id], location=self.store_location
+                )
 
             tot_time = time.perf_counter() - t_start
             logger.info(
@@ -848,7 +860,7 @@ class LMCacheEngine:
         for key, memory_obj, _, _ in reordered_chunks:
             if self.remove_after_retrieve and not self._is_passive():
                 assert self.storage_manager is not None
-                self.storage_manager.remove(key)
+                self.storage_manager.remove(key, self.retrieve_locations)
             if not self.async_loading:
                 memory_obj.ref_count_down()
 
@@ -956,7 +968,9 @@ class LMCacheEngine:
             keys_multi_layer = key.split_layers(self.num_layers)
 
             # NOTE: Only check the first layer
-            if current_location := self.storage_manager.contains(keys_multi_layer[0]):
+            if current_location := self.storage_manager.contains(
+                keys_multi_layer[0], self.retrieve_locations
+            ):
                 if location is None:
                     location = current_location
                 else:
@@ -1081,6 +1095,9 @@ class LMCacheEngine:
             assert offsets is not None
             assert hashes is not None
             lookup_stats = self.stats_monitor.on_lookup_request(sum(offsets))
+
+        if search_range is None:
+            search_range = self.retrieve_locations
 
         res = 0
         try:
@@ -1242,6 +1259,9 @@ class LMCacheEngine:
 
         keys: list[CacheEngineKey] = []
         cum_chunk_lengths = [0]
+
+        if search_range is None:
+            search_range = self.retrieve_locations
 
         # TODO(Jiayi): make token database able to return list.
         for start, end, key in self.token_database.process_tokens(
