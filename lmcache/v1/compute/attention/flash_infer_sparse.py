@@ -268,9 +268,11 @@ class LMCFlashInferSparseBackend(AttentionInterface):
         num_block_col = seq_len // sparse_blk_col_size
         last_col_len = seq_len % sparse_blk_col_size
         block_col_sizes = torch.tensor(
-            [sparse_blk_col_size] * num_block_col, device=self.device
+            [sparse_blk_col_size] * num_block_col
+            + ([last_col_len] if last_col_len > 0 else []),
+            device=self.device
         )
-        block_col_sizes[-1] += last_col_len
+
         return LMCFlashInferSparseMetadata(
             wrapper,
             seq_len,

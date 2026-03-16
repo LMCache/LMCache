@@ -54,13 +54,15 @@ class LMCFlashInferSparseMetadata(LMCAttnMetadata):
         device = top_indices.device
         top_k_num = len(top_indices)
         num_block_row = top_k_num // self.sparse_blk_row_size
+        last_row_len = top_k_num % self.sparse_blk_row_size
         block_row_sizes = torch.tensor(
-            [self.sparse_blk_row_size] * num_block_row, device=device
+            [self.sparse_blk_row_size] * num_block_row
+            + ([last_row_len] if last_row_len > 0 else []),
+            device=device
         )
-        block_row_sizes[-1] += top_k_num % self.sparse_blk_row_size
 
         block_mask_map = torch.zeros(
-            num_block_row, len(self.block_col_sizes), dtype=torch.bool, device=device
+            len(block_row_sizes), len(self.block_col_sizes), dtype=torch.bool, device=device
         )
         cols = torch.arange(block_mask_map.size(1), device=device).expand(
             block_mask_map.size(0), -1
@@ -71,7 +73,15 @@ class LMCFlashInferSparseMetadata(LMCAttnMetadata):
         top_indices_slice = top_indices[
             self.sparse_blk_row_size - 1 :: self.sparse_blk_row_size
         ]
+        if len(top_indices_slice) == 0 and len(top_indices) > 0:
+            top_indices_slice = top_indices[-1:]
         top_indices_slice //= self.sparse_blk_col_size
+        top_indices_slice = top_indices_slice.clamp_min(1) # ensure at least 1 block
+        if len(top_indices_slice) < len(block_row_sizes):
+            top_indices_slice = torch.cat([
+                top_indices_slice,
+                top_indices_slice[-1:].repeat(len(block_row_sizes) - len(top_indices_slice))
+            ])
         mask = cols < top_indices_slice.unsqueeze(1)
         block_mask_map[mask] = 1
         self.wrapper.plan(
