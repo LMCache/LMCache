@@ -3,11 +3,18 @@
 Interface for L2 adapters
 """
 
+# Future
+from __future__ import annotations
+
 # Standard
 from abc import ABC, abstractmethod
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.native_storage_ops import Bitmap
 
 # First Party
-from lmcache.native_storage_ops import Bitmap
 from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.memory_management import MemoryObj
 
