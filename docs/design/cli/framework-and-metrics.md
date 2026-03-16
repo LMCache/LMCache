@@ -109,12 +109,17 @@ That's it — `lmcache describe --url http://localhost:8000` is now available.
 lmcache/cli/
 ├── __init__.py          # empty
 ├── main.py              # main() entry point
-├── metrics.py           # Metrics (Section 2)
+├── config.py            # CLIConfig (centralized config system)
+├── metrics/             # Metrics system (Section 2)
+│   ├── __init__.py      # re-exports
+│   ├── metrics.py       # Metrics collector
+│   ├── section.py       # Section data class
+│   ├── handler.py       # StreamHandler, FileHandler
+│   └── formatter.py     # VllmFormatter, JsonFormatter
 ├── commands/
 │   ├── __init__.py      # ALL_COMMANDS registry
 │   ├── base.py          # BaseCommand ABC, add_output_args()
 │   └── mock.py          # lmcache mock  (example command)
-├── config.py            # CLIConfig (centralized config system)
 └── corpora/             # built-in prompt corpora (future)
 ```
 
@@ -203,8 +208,8 @@ sets up default handlers automatically:
 # Inside a command's handler() method:
 metrics = self.create_metrics("Bench Result", args, width=48)
 # ^ automatically adds:
-#   - StreamHandler(VllmFormatter(width=48)) → stdout
-#   - FileHandler(args.output) → if --output is set
+#   - StreamHandler → stdout (formatter chosen by --format, default: vllm)
+#   - FileHandler   → if --output is set (always JSON)
 ```
 
 ### Handlers and Formatters

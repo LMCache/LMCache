@@ -275,7 +275,7 @@ in `lmcache/cli/corpora/`.
 lmcache/cli/
 ├── __init__.py
 ├── main.py              # main() entry point
-├── metrics.py           # Metrics class (see framework-and-metrics.md)
+├── metrics/             # Metrics system (see framework-and-metrics.md)
 ├── commands/
 │   ├── __init__.py      # ALL_COMMANDS registry
 │   ├── base.py          # BaseCommand ABC, add_output_args()

@@ -49,7 +49,7 @@ Step-by-Step: Adding a New Command
    # SPDX-License-Identifier: Apache-2.0
    import argparse
 
-   from lmcache.cli.commands.base import BaseCommand, add_output_arg
+   from lmcache.cli.commands.base import BaseCommand, add_output_args
 
    class DescribeCommand(BaseCommand):
 
@@ -101,8 +101,8 @@ command authors just build metrics and call ``emit()``:
 
    def handler(self, args: argparse.Namespace) -> None:
        # create_metrics() auto-registers:
-       #   - StreamHandler(VllmFormatter) → stdout
-       #   - FileHandler(JsonFormatter)   → if --output is set
+       #   - StreamHandler → stdout (formatter chosen by --format, default: vllm)
+       #   - FileHandler   → if --output is set (always JSON)
        metrics = self.create_metrics("Bench KV Cache Result", args)
 
        # Create named sections
@@ -116,12 +116,15 @@ command authors just build metrics and call ``emit()``:
        # Trigger all handlers
        metrics.emit()
 
-The ``--output`` flag is available via the shared helper:
+The ``--format`` and ``--output`` flags are available via the shared helper:
 
 .. code-block:: python
 
-   from lmcache.cli.commands.base import add_output_arg
+   from lmcache.cli.commands.base import add_output_args
 
    def add_arguments(self, parser):
        # ... your args ...
        add_output_args(parser)
+       # Adds:
+       #   --format FORMAT  Stdout format (default: vllm). Available: vllm, json.
+       #   --output PATH    Save metrics to a JSON file at PATH.

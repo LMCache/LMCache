@@ -21,7 +21,10 @@ After installing LMCache, the ``lmcache`` command is available:
    # Run the example mock command
    lmcache mock --name my-run --num-items 5
 
-   # Save metrics to JSON
+   # JSON on stdout (for scripts)
+   lmcache mock --name my-run --format json
+
+   # Save metrics to JSON file
    lmcache mock --name my-run --num-items 5 --output result.json
 
 
@@ -66,7 +69,8 @@ Human-readable ASCII table matching the ``vllm bench serve`` style:
 JSON Output
 ~~~~~~~~~~~
 
-Machine-readable output with structured keys, enabled via ``--output``:
+Machine-readable output with structured keys, available via ``--format json``
+(stdout) or ``--output`` (file):
 
 .. code-block:: bash
 
@@ -111,7 +115,8 @@ CLI behavior can be configured via environment variables using the
      - Description
    * - ``LMCACHE_CLI_METRICS_STYLE``
      - ``vllm``
-     - Terminal rendering style for metrics output. Currently supports ``vllm``.
+     - Default stdout format for metrics (overridden by ``--format``).
+       Supports ``vllm`` and ``json``.
 
 
 Adding New Commands
