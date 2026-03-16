@@ -364,12 +364,13 @@ class ConnectorBase : public IStorageConnector {
                 try {
                   do_single_get(conn, req.keys[i], req.buf_ptrs[i],
                                 req.buf_lens[i], req.batch_chunk_num_bytes);
+                  // 1 = success (key loaded OK)
                   req.batch->per_key_results[req.start_idx + i] = 1;
                 } catch (const std::exception& e) {
                   // Per-key error tolerance: record failure
                   // but continue processing remaining keys
                   req.batch->per_key_results[req.start_idx + i] = 0;
-                  fprintf(stderr, "[LMCache FS GET] key %s failed: %s\n",
+                  fprintf(stderr, "[LMCache GET] key %s failed: %s\n",
                           req.keys[i].c_str(), e.what());
                 }
               }
