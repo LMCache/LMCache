@@ -5,6 +5,15 @@
 import abc
 import argparse
 
+# First Party
+from lmcache.cli.metrics import (
+    FileHandler,
+    Metrics,
+    StreamHandler,
+    VllmFormatter,
+    get_formatter,
+)
+
 
 class BaseCommand(abc.ABC):
     """Abstract base class that all CLI subcommands must inherit from.
@@ -24,9 +33,12 @@ class BaseCommand(abc.ABC):
 
             def add_arguments(self, parser: argparse.ArgumentParser) -> None:
                 parser.add_argument("--url", required=True)
+                add_output_args(parser)
 
             def handler(self, args: argparse.Namespace) -> None:
-                ...
+                metrics = self.create_metrics("Ping Result", args)
+                metrics.add("status", "Status", "OK")
+                metrics.emit()
     """
 
     @abc.abstractmethod
@@ -67,13 +79,60 @@ class BaseCommand(abc.ABC):
         self.add_arguments(parser)
         parser.set_defaults(func=self.handler)
 
+    def create_metrics(
+        self,
+        title: str,
+        args: argparse.Namespace,
+        width: int = 48,
+    ) -> Metrics:
+        """Create a :class:`Metrics` with default handlers pre-registered.
 
-def add_output_arg(parser: argparse.ArgumentParser) -> None:
-    """Add the common ``--output`` flag for JSON metrics export.
+        Handlers are configured from ``args.format`` and ``args.output``:
+
+        * A :class:`StreamHandler` writing to stdout. The formatter is
+          determined by ``--format`` (default: ``vllm``).
+        * A :class:`FileHandler` if ``--output`` is set (always uses
+          :class:`JsonFormatter`).
+
+        Args:
+            title: Report title.
+            args: Parsed CLI arguments (inspects ``format`` and ``output``).
+            width: Character width for terminal rendering (only used by
+                formatters that support it, e.g. ``VllmFormatter``).
+
+        Returns:
+            A ready-to-use ``Metrics`` instance.
+        """
+        metrics = Metrics(title=title)
+
+        # Resolve stdout formatter from --format
+        fmt_name = getattr(args, "format", None) or "vllm"
+        stdout_formatter = get_formatter(fmt_name)
+        if isinstance(stdout_formatter, VllmFormatter):
+            stdout_formatter = VllmFormatter(width=width)
+        metrics.add_handler(StreamHandler(stdout_formatter))
+
+        # File handler if --output is set
+        output = getattr(args, "output", None)
+        if output:
+            metrics.add_handler(FileHandler(output))
+
+        return metrics
+
+
+def add_output_args(parser: argparse.ArgumentParser) -> None:
+    """Add the common ``--format`` and ``--output`` flags.
 
     Args:
-        parser: The ``ArgumentParser`` to add the flag to.
+        parser: The ``ArgumentParser`` to add the flags to.
     """
+    parser.add_argument(
+        "--format",
+        type=str,
+        default=None,
+        metavar="FORMAT",
+        help="Stdout output format (default: vllm). Available: vllm, json.",
+    )
     parser.add_argument(
         "--output",
         type=str,

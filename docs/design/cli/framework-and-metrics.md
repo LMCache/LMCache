@@ -112,7 +112,7 @@ lmcache/cli/
 ├── metrics.py           # Metrics (Section 2)
 ├── commands/
 │   ├── __init__.py      # ALL_COMMANDS registry
-│   ├── base.py          # BaseCommand ABC, add_output_arg()
+│   ├── base.py          # BaseCommand ABC, add_output_args()
 │   └── mock.py          # lmcache mock  (example command)
 ├── config.py            # CLIConfig (centralized config system)
 └── corpora/             # built-in prompt corpora (future)
@@ -127,16 +127,46 @@ lmcache = "lmcache.cli.main:main"
 
 ---
 
-## 2. Hierarchical Metrics Logger
+## 2. Hierarchical Metrics System
 
 ### Goal
 
-A lightweight, dependency-free metrics collector that:
+A lightweight, dependency-free metrics system that:
 
 1. Accepts metrics organized into **sections** (categories).
-2. Renders a fixed-width ASCII table to the terminal — matching the style used
-   throughout the CLI design doc and `vllm bench serve` output.
-3. Serializes the same data to JSON for file output and programmatic consumption.
+2. Uses a **handler + formatter** architecture (like Python `logging`) to
+   separate *where* metrics are written from *how* they are rendered.
+3. Supports stdout, file, and future destinations (e.g. Kafka) without
+   requiring command authors to manage handlers themselves.
+
+### Architecture
+
+The metrics system has three layers:
+
+- **`Metrics`** — the collector. Holds sections and entries. Calls `emit()`
+  to trigger all registered handlers.
+- **`MetricsHandler`** — the destination (where to write). Each handler holds
+  a formatter. Built-in: `StreamHandler` (writes to a stream like stdout),
+  `FileHandler` (writes to a file path).
+- **`MetricsFormatter`** — the rendering (how to format). Built-in:
+  `VllmFormatter` (ASCII table), `JsonFormatter` (JSON string).
+
+```
+Metrics ──emit()──▶ Handler (destination) ──▶ Formatter (rendering)
+                     StreamHandler(stdout)      VllmFormatter
+                     FileHandler("out.json")    JsonFormatter
+```
+
+### File layout
+
+```
+lmcache/cli/metrics/
+├── __init__.py       # re-exports
+├── metrics.py        # Metrics collector
+├── section.py        # Section data class
+├── handler.py        # MetricsHandler, StreamHandler, FileHandler
+└── formatter.py      # MetricsFormatter, VllmFormatter, JsonFormatter
+```
 
 ### API
 
@@ -144,7 +174,7 @@ Each metric has a **machine key** (used in JSON output) and a **human-readable
 label** (used in terminal output). Sections work the same way.
 
 ```python
-from lmcache.cli.metrics import Metrics
+from lmcache.cli.metrics import Metrics, StreamHandler, VllmFormatter
 
 metrics = Metrics(title="Bench KV Cache Result (30s)")
 
@@ -152,24 +182,49 @@ metrics = Metrics(title="Bench KV Cache Result (30s)")
 metrics.title("Bench KV Cache Result (60s)")
 
 # Create named sections (machine key + display label)
-metrics.create_section("ops", "Operations (ops/s)")
-metrics.create_section("hit_rate", "Hit Rate")
-metrics.create_section("correctness", "Correctness")
+metrics.add_section("ops", "Operations (ops/s)")
+metrics.add_section("hit_rate", "Hit Rate")
+metrics.add_section("correctness", "Correctness")
 
 # Add metrics to sections via dict-like access
 metrics["ops"].add("store", "Store", 41.3)
 metrics["ops"].add("retrieve", "Retrieve", 127.3)
 metrics["hit_rate"].add("l1", "L1", "92.3%")
-metrics["correctness"].add("checksums", "Checksums", "5060/5060 OK")
+metrics["correctness"].add("checksums", "5060/5060 OK")
 
-# Terminal output (uses human-readable labels)
-metrics.print()
-
-# JSON output (uses machine keys)
-metrics.to_json("result.json")
-# Or get dict directly
-data: dict = metrics.to_dict()
+# Trigger all handlers
+metrics.emit()
 ```
+
+**Command authors don't register handlers manually.** `BaseCommand.create_metrics()`
+sets up default handlers automatically:
+
+```python
+# Inside a command's handler() method:
+metrics = self.create_metrics("Bench Result", args, width=48)
+# ^ automatically adds:
+#   - StreamHandler(VllmFormatter(width=48)) → stdout
+#   - FileHandler(args.output) → if --output is set
+```
+
+### Handlers and Formatters
+
+**Handlers** (destination):
+
+| Handler | Default Formatter | Description |
+|---|---|---|
+| `StreamHandler(formatter, stream)` | `VllmFormatter` | Writes to a text stream (default: stdout) |
+| `FileHandler(path, formatter)` | `JsonFormatter` | Writes to a file |
+
+**Formatters** (rendering):
+
+| Formatter | Description |
+|---|---|
+| `VllmFormatter(width)` | ASCII table with `=`/`-` dividers |
+| `JsonFormatter(indent)` | JSON string |
+
+Custom handlers and formatters can be added by subclassing `MetricsHandler`
+and `MetricsFormatter`.
 
 ### Terminal output format
 
@@ -186,12 +241,14 @@ Checksums:                               5060/5060 OK
 ```
 
 Design choices:
-- **Fixed total width** of 48 characters (configurable via `width` param).
+- **Fixed total width** of 48 characters (configurable via `width` param on
+  `VllmFormatter`).
 - Title row is centered within `=` borders.
 - Section headers are centered within `-` borders.
 - Key-value lines are left-aligned label, right-aligned value.
 - Values are formatted automatically: floats get 2 decimal places, strings are
   printed as-is, `None` is printed as `N/A`.
+- Output goes directly to stdout (conventional CLI behavior, not via `logging`).
 
 ### JSON output format
 
@@ -221,9 +278,10 @@ For top-level metrics that don't belong to a section, use `metrics.add()`
 directly:
 
 ```python
-metrics = Metrics(title="Ping KV Cache")
+metrics = self.create_metrics("Ping KV Cache", args)
 metrics.add("status", "Status", "OK")
 metrics.add("rtt_ms", "Round trip time (ms)", 0.42)
+metrics.emit()
 ```
 
 Produces:
@@ -238,36 +296,16 @@ Round trip time (ms):    0.42
 These go into a default unnamed section — no header line is rendered, and in
 JSON the entries appear at the top level of `"metrics"`.
 
-### Configurable output style
-
-The terminal rendering style is **pluggable**. The default is `vllm` (matching
-`vllm bench serve`). Override via:
-
-- Constructor: `Metrics(title="...", style="rich_panel")`
-- Environment variable: `LMCACHE_CLI_METRICS_STYLE=rich_panel` (uses the
-  centralized config system in `config.py` with `LMCACHE_CLI_` prefix)
-- Constructor takes precedence over env var.
-
-Supported styles (initial):
-- `vllm` — `=`/`-` dividers, plain ASCII (default)
-- Future styles can be added by subclassing `MetricsStyle` in `metrics.py`.
-
 ### Implementation notes
 
 - `Metrics` holds an ordered list of `Section` objects. Each `Section` stores
   a machine key, a display label, and a list of `(key, label, value)` entries.
 - `metrics["name"]` returns the `Section` with that machine key. `KeyError`
-  if `create_section()` was not called first.
+  if `add_section()` was not called first.
 - `metrics.add(key, label, value)` appends to a default unnamed section
   (created implicitly on first use).
-- `print()` writes to `sys.stdout` by default; accepts an optional `file` param.
-- `to_dict()` returns `{"title": ..., "metrics": ...}` with sections as nested
-  dicts keyed by machine key. The unnamed section's entries are placed at the
-  top level of `"metrics"`.
-- `to_json(path)` calls `to_dict()` → `json.dump()`.
-- Rendering is delegated to a `MetricsStyle` object (strategy pattern). Each
-  style implements `render(title, sections, width) -> str`. The renderer
-  receives display labels, not machine keys.
+- `emit()` iterates all registered handlers and calls `handler.emit()`.
+- `to_dict()` returns `{"title": ..., "metrics": ...}` for programmatic access.
 - No external dependencies beyond the Python standard library.
 
 ---
@@ -292,24 +330,39 @@ Throughput (items/s):          405.19
 Status:                            OK
 =====================================
 
-# JSON output uses machine keys
+# With --output, both stdout and JSON file are produced (two handlers)
 $ lmcache mock --name test-run --num-items 5 --output result.json
 (same terminal output)
-Metrics saved to result.json
 # result.json → {"title": "Mock Result", "metrics": {"input": {"name": "test-run", ...}, ...}}
 ```
 
 This command lives in `lmcache/cli/commands/mock.py` and serves as a reference
-implementation for future commands.
+implementation for future commands. Note how it uses `self.create_metrics()`
+instead of manually registering handlers.
 
 ---
 
 ## 4. Shared CLI Conventions
 
+### `--format` flag
+
+Controls the stdout rendering format. Default: `vllm` (ASCII table). Available:
+`vllm`, `json`. Added via the shared helper `add_output_args(parser)` in `base.py`.
+
+```bash
+lmcache bench ... --format json    # JSON on stdout (for scripts)
+lmcache bench ... --format vllm    # ASCII table (default)
+```
+
 ### `--output` flag
 
-All commands support `--output <path>` to save metrics as JSON. Added via a shared
-helper `add_output_arg(parser)` in `base.py`.
+Saves metrics to a JSON file. Also added via `add_output_args(parser)`.
+Can be combined with `--format`:
+
+```bash
+lmcache bench ... --output result.json                 # ASCII stdout + JSON file
+lmcache bench ... --format json --output result.json   # JSON stdout + JSON file
+```
 
 ### `--url` flag
 

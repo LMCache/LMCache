@@ -10,8 +10,7 @@ and JSON output paths.
 import argparse
 
 # First Party
-from lmcache.cli.commands.base import BaseCommand, add_output_arg
-from lmcache.cli.metrics import Metrics
+from lmcache.cli.commands.base import BaseCommand, add_output_args
 
 
 class MockCommand(BaseCommand):
@@ -51,7 +50,7 @@ class MockCommand(BaseCommand):
             default=10,
             help="Number of fake items to process.",
         )
-        add_output_arg(parser)
+        add_output_args(parser)
 
     def handler(self, args: argparse.Namespace) -> None:
         """Execute the mock command.
@@ -60,23 +59,18 @@ class MockCommand(BaseCommand):
             args: Parsed CLI arguments containing ``name``, ``num_items``,
                 and optionally ``output``.
         """
-        # Build metrics with hardcoded fake values
-        metrics = Metrics(title="Mock Result", width=40)
+        metrics = self.create_metrics("Mock Result", args, width=40)
 
-        metrics.create_section("input", "Input Parameters")
+        metrics.add_section("input", "Input Parameters")
         metrics["input"].add("name", "Name", args.name)
         metrics["input"].add("num_items", "Num items", args.num_items)
 
-        metrics.create_section("mock", "Mock Metrics")
+        metrics.add_section("mock", "Mock Metrics")
         metrics["mock"].add("items_processed", "Items processed", 42)
         metrics["mock"].add("total_time_ms", "Total time (ms)", 12.34)
         metrics["mock"].add("throughput", "Throughput (items/s)", 3403.73)
 
-        metrics.create_section("validation", "Validation")
+        metrics.add_section("validation", "Validation")
         metrics["validation"].add("status", "Status", "OK")
 
-        metrics.print()
-
-        if args.output:
-            metrics.to_json(args.output)
-            print(f"Metrics saved to {args.output}")
+        metrics.emit()

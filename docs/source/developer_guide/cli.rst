@@ -27,10 +27,15 @@ File Layout
    ├── __init__.py
    ├── main.py              # Entry point
    ├── config.py            # CLIConfig (env var configuration)
-   ├── metrics.py           # Metrics class + rendering styles
+   ├── metrics/             # Metrics system
+   │   ├── __init__.py      # Re-exports
+   │   ├── metrics.py       # Metrics collector
+   │   ├── section.py       # Section data class
+   │   ├── handler.py       # StreamHandler, FileHandler
+   │   └── formatter.py     # VllmFormatter, JsonFormatter
    └── commands/
        ├── __init__.py      # ALL_COMMANDS registry
-       ├── base.py          # BaseCommand ABC, add_output_arg()
+       ├── base.py          # BaseCommand ABC, add_output_args()
        └── mock.py          # Example command
 
 
@@ -44,8 +49,7 @@ Step-by-Step: Adding a New Command
    # SPDX-License-Identifier: Apache-2.0
    import argparse
 
-   from lmcache.cli.commands.base import BaseCommand
-   from lmcache.cli.metrics import Metrics
+   from lmcache.cli.commands.base import BaseCommand, add_output_arg
 
    class DescribeCommand(BaseCommand):
 
@@ -58,13 +62,14 @@ Step-by-Step: Adding a New Command
        def add_arguments(self, parser: argparse.ArgumentParser) -> None:
            parser.add_argument("--url", required=True,
                                help="LMCache HTTP server URL (e.g. http://localhost:8000)")
+           add_output_args(parser)
 
        def handler(self, args: argparse.Namespace) -> None:
            # Connect to server, gather info...
-           metrics = Metrics(title="Describe KV Cache")
+           metrics = self.create_metrics("Describe KV Cache", args)
            metrics.add("status", "Status", "OK")
            metrics.add("chunks", "Cached chunks", 1024)
-           metrics.print()
+           metrics.emit()
 
 **Step 2.** Register it in ``lmcache/cli/commands/__init__.py``:
 
@@ -83,30 +88,33 @@ That's it --- ``lmcache describe --url http://localhost:8000`` is now available.
 Using the Metrics System
 ------------------------
 
-The ``Metrics`` class provides hierarchical metrics with separate machine keys
-(for JSON) and human-readable labels (for terminal display).
+The metrics system uses a **handler + formatter** architecture:
+
+- **Metrics** — the collector. Holds sections and entries.
+- **Handler** — the destination (stdout, file, etc.).
+- **Formatter** — the rendering (ASCII table, JSON, etc.).
+
+``BaseCommand.create_metrics()`` sets up default handlers automatically, so
+command authors just build metrics and call ``emit()``:
 
 .. code-block:: python
 
-   from lmcache.cli.metrics import Metrics
+   def handler(self, args: argparse.Namespace) -> None:
+       # create_metrics() auto-registers:
+       #   - StreamHandler(VllmFormatter) → stdout
+       #   - FileHandler(JsonFormatter)   → if --output is set
+       metrics = self.create_metrics("Bench KV Cache Result", args)
 
-   metrics = Metrics(title="Bench KV Cache Result")
+       # Create named sections
+       metrics.add_section("ops", "Operations (ops/s)")
+       metrics["ops"].add("store", "Store", 41.3)
+       metrics["ops"].add("retrieve", "Retrieve", 127.3)
 
-   # Create named sections
-   metrics.create_section("ops", "Operations (ops/s)")
-   metrics["ops"].add("store", "Store", 41.3)
-   metrics["ops"].add("retrieve", "Retrieve", 127.3)
+       # Top-level metrics (no section header)
+       metrics.add("status", "Status", "OK")
 
-   # Top-level metrics (no section header)
-   metrics.add("status", "Status", "OK")
-
-   # Change title after construction
-   metrics.title("Updated Title")
-
-   # Output
-   metrics.print()                   # terminal (human labels)
-   metrics.to_json("result.json")    # file (machine keys)
-   data = metrics.to_dict()          # dict (machine keys)
+       # Trigger all handlers
+       metrics.emit()
 
 The ``--output`` flag is available via the shared helper:
 
@@ -116,11 +124,4 @@ The ``--output`` flag is available via the shared helper:
 
    def add_arguments(self, parser):
        # ... your args ...
-       add_output_arg(parser)
-
-   def handler(self, args):
-       metrics = Metrics(title="My Result")
-       # ... populate metrics ...
-       metrics.print()
-       if args.output:
-           metrics.to_json(args.output)
+       add_output_args(parser)
