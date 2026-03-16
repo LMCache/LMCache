@@ -130,6 +130,9 @@ class LocalCPUBackend(AllocatorBackendInterface):
         with self.cpu_lock:
             for key in reversed(self.keys_in_request):
                 self.cache_policy.update_on_hit(key, self.hot_cache)
+                # Unpin the key to balance the pin_count from contains()
+                if key in self.hot_cache:
+                    self.hot_cache[key].unpin()
             self.keys_in_request = []
 
     def exists_in_put_tasks(self, key: CacheEngineKey) -> bool:
