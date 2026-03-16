@@ -59,12 +59,12 @@ class L1ManagerStatsLogger(L1ManagerListener, PrometheusLogger):
         # Prometheus L1-level counters
         self._l1_read_keys_counter = self.create_counter(
             "lmcache_mp:l1_read_keys",
-            "Total number of keys reserved for read on L1",
+            "Total number of keys finished for read on L1",
             labelnames,
         )
         self._l1_write_keys_counter = self.create_counter(
             "lmcache_mp:l1_write_keys",
-            "Total number of keys reserved for write on L1",
+            "Total number of keys finished for write on L1",
             labelnames,
         )
         self._l1_evicted_keys_counter = self.create_counter(

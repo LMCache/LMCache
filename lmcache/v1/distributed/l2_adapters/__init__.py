@@ -27,10 +27,16 @@ from lmcache.v1.distributed.l2_adapters.factory import (
 
 # Auto-discover and import every module in this package so
 # that each adapter's self-registration code runs.
+# Modules that depend on optional C extensions (e.g.
+# native_storage_ops) may fail to import -- skip them
+# gracefully so the rest of the package remains usable.
 _PACKAGE_PATH = __path__  # type: ignore[name-defined]
 _PACKAGE_NAME = __name__
 for _finder, _mod_name, _is_pkg in pkgutil.iter_modules(_PACKAGE_PATH):
-    importlib.import_module(f".{_mod_name}", _PACKAGE_NAME)
+    try:
+        importlib.import_module(f".{_mod_name}", _PACKAGE_NAME)
+    except ImportError:
+        pass
 
 
 def create_l2_adapter(
@@ -57,3 +63,10 @@ def create_l2_adapter(
         config,
         l1_memory_desc=l1_memory_desc,
     )
+
+
+__all__ = [
+    "L2AdapterInterface",
+    "L2AdapterConfigBase",
+    "create_l2_adapter",
+]
