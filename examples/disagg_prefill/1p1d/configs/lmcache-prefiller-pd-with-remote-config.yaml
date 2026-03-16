@@ -1,0 +1,19 @@
+local_cpu: True
+max_local_cpu_size: 5
+
+remote_url: "lm://localhost:6800"
+remote_serde: "cachegen"
+
+retrieve_locations: ["LocalCPUBackend", "RemoteBackend"]
+
+enable_pd: True
+transfer_channel: "nixl"
+pd_role: "sender"
+pd_proxy_host: "localhost"
+pd_proxy_port: 7500
+pd_buffer_size: 1073741824 # 1GB
+pd_buffer_device: "cuda"
+nixl_backends: [UCX]
+
+save_unfull_chunk: true
+
