@@ -61,8 +61,8 @@ class EvictionConfig:
     The configuration for eviction policies.
     """
 
-    eviction_policy: Literal["LRU"]
-    """ The eviction policy to use. Currently only 'LRU' is supported. """
+    eviction_policy: Literal["LRU", "noop"]
+    """ The eviction policy to use. """
 
     trigger_watermark: float = field(default=0.8)
     """ The memory usage watermark to trigger eviction (0.0 to 1.0). """
@@ -173,9 +173,9 @@ def add_storage_manager_args(
     eviction_group.add_argument(
         "--eviction-policy",
         type=str,
-        choices=["LRU"],
+        choices=["LRU", "noop"],
         required=True,
-        help="The eviction policy to use. Currently only 'LRU' is supported.",
+        help="The eviction policy to use ('LRU' or 'noop').",
     )
     eviction_group.add_argument(
         "--eviction-trigger-watermark",
