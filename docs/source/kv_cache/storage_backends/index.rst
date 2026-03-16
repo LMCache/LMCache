@@ -20,6 +20,7 @@ Supported Backends
    mooncake
    nixl
    redis
+   resp
    s3
    sagemaker_hyperpod
    valkey
