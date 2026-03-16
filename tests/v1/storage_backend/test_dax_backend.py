@@ -2,7 +2,6 @@
 
 # Standard
 import asyncio
-from concurrent.futures import Future
 from concurrent.futures import ThreadPoolExecutor
 import os
 import tempfile

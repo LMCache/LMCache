@@ -14,17 +14,11 @@ import mmap
 import os
 import threading
 
-# Third Party
-import torch
-
 # First Party
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey, DiskCacheMetadata
 from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.memory_management import (
-    MemoryFormat,
-    MemoryObj,
-)
+from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.storage_backend.abstract_backend import (
     StoragePluginInterface,
@@ -112,8 +106,6 @@ class DaxBackend(StoragePluginInterface):
         if not self.device_path:
             raise ValueError("extra_config['dax.device_path'] is required")
 
-        # Optional async put path. Disabled by default to avoid loop/thread
-        # coupling issues on platforms where cross-thread loop wakeups are limited.
         self.async_put = _to_bool(extra.get("dax.async_put", False))
         if self.async_put and self.loop is None:
             raise ValueError("DaxBackend async_put=true requires an asyncio event loop")
@@ -133,7 +125,6 @@ class DaxBackend(StoragePluginInterface):
         self._mmap_obj: Optional[mmap.mmap] = None
         self._base_ptr: int = 0
         self._arena_view: Optional[memoryview] = None
-        self._arena_tensor: Optional[torch.Tensor] = None
         self._open_arena()
         try:
             assert self.local_cpu_backend is not None
@@ -172,7 +163,6 @@ class DaxBackend(StoragePluginInterface):
             self._mmap_obj = None
             self._base_ptr = 0
             self._arena_view = None
-            self._arena_tensor = None
             self._release_arena_resources(fd, mmap_obj, arena_view)
             raise
 
@@ -272,7 +262,6 @@ class DaxBackend(StoragePluginInterface):
             ) from e
         try:
             try:
-                # Best effort capacity check for file-backed tests and many dax setups.
                 capacity_bytes = os.fstat(fd).st_size
                 if capacity_bytes > 0 and self._arena_bytes > capacity_bytes:
                     raise RuntimeError(
@@ -291,19 +280,10 @@ class DaxBackend(StoragePluginInterface):
             )
             base_ptr = ctypes.addressof(ctypes.c_char.from_buffer(mmap_obj))
             arena_view = memoryview(mmap_obj)
-            if hasattr(torch, "frombuffer"):
-                arena_tensor = torch.frombuffer(arena_view, dtype=torch.uint8)
-            else:
-                # Third Party
-                import numpy as np
-
-                arr = np.frombuffer(arena_view, dtype=np.uint8)
-                arena_tensor = torch.from_numpy(arr)
             self._fd = fd
             self._mmap_obj = mmap_obj
             self._base_ptr = base_ptr
             self._arena_view = arena_view
-            self._arena_tensor = arena_tensor
         except Exception as e:
             DaxBackend._release_arena_resources(fd, mmap_obj, arena_view)
             if isinstance(e, RuntimeError):
@@ -353,7 +333,6 @@ class DaxBackend(StoragePluginInterface):
             self._schedule_slot_reclaim_locked(entry.slot_id, entry.generation)
             return True
         return False
-
 
     def _do_write(self, offset: int, memory_obj: MemoryObj, size: int) -> None:
         ctypes.memmove(
@@ -726,6 +705,5 @@ class DaxBackend(StoragePluginInterface):
             self._mmap_obj = None
             self._base_ptr = 0
             self._arena_view = None
-            self._arena_tensor = None
 
         self._release_arena_resources(fd, mmap_obj, arena_view)
