@@ -2,3 +2,16 @@ div.highlight pre {
     overflow-x: auto;
     white-space: pre;
 }
+
+/* Wide CSV / docutils tables: horizontal scroll in HTML */
+.compat-table-scroll {
+    overflow-x: auto;
+    max-width: 100%;
+    -webkit-overflow-scrolling: touch;
+}
+
+.compat-table-scroll table {
+    width: max-content;
+    min-width: 100%;
+    max-width: none;
+}
