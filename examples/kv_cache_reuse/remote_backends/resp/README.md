@@ -50,18 +50,87 @@ The "golden spot" for high throughput transfers for redis is ~4 MB (any higher o
 LMCACHE_CONFIG_FILE=resp.yaml \
 vllm serve meta-llama/Llama-3.1-8B-Instruct \
     --kv-transfer-config '{"kv_connector":"LMCacheConnectorV1", "kv_role":"kv_both"}' \
-    --disable-log-requests --no-enable-prefix-caching \
+    --no-enable-prefix-caching \
     --load-format dummy
 ```
 
-Coming Soon: 
-MP Mode Controller. This will support variable size chunks.
+## MP Mode (Multiprocess)
 
-Send twice. First time for store. Second time for retrieve. 
+MP mode runs LMCache as a separate server process, communicating with vLLM over
+ZMQ. The RESP connector serves as an L2 adapter, supporting variable-size
+chunks. See [`csrc/storage_backends/README.md`](../../../../csrc/storage_backends/README.md)
+for the full native backend architecture.
+
+### Launch Redis
+
 ```bash
-curl -X POST http://localhost:8000/v1/completions   -H "Content-Type: application/json"   -d '{
-    "model": "meta-llama/Llama-3.1-8B-Instruct",
-    "prompt": "'"$(printf 'abcElaborate the significance of KV cache in language models. %.0s' {1..1000})"'",
-    "max_tokens": 10
-  }'
+# Build Redis 8.2 with IO threads
+git clone https://github.com/redis/redis.git && cd redis
+git checkout 8.2 && make -j
+./src/redis-server --protected-mode no --save '' --appendonly no --io-threads 4 --port 6379
+```
+
+### Launch LMCache MP Server
+
+```bash
+python -m lmcache.v1.multiprocess.server \
+    --l1-size-gb 10 \
+    --eviction-policy LRU \
+    --chunk-size 16 \
+    --l2-adapter '{"type": "resp", "host": "localhost", "port": 6379, "num_workers": 8}' \
+    --port 6555
+```
+
+The `--l2-adapter` JSON accepts these fields:
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `type` | str | (required) | Must be `"resp"` |
+| `host` | str | (required) | Redis hostname |
+| `port` | int | (required) | Redis port |
+| `num_workers` | int | 8 | C++ worker threads for parallel I/O |
+| `username` | str | `""` | Redis ACL username |
+| `password` | str | `""` | Redis AUTH password |
+
+### Launch vLLM with LMCache MP Connector
+
+```bash
+PORT=8000
+vllm serve meta-llama/Llama-3.1-8B-Instruct \
+    --kv-transfer-config '{
+        "kv_connector": "LMCacheMPConnector",
+        "kv_role": "kv_both",
+        "kv_connector_extra_config": {
+            "lmcache.mp.host": "tcp://localhost",
+            "lmcache.mp.port": 6555
+        }
+    }' \
+    --no-enable-prefix-caching \
+    --port $PORT \
+    --load-format dummy
+```
+
+### Test (MP and non-MP mode)
+
+Send the same prompt twice. The first request stores KV cache to Redis via the
+MP server; the second retrieves it.
+
+```bash
+PORT=8000
+PROMPT="$(printf 'Elaborate the significance of KV cache in language models. %.0s' {1..1000})"
+
+# First request: store
+curl -s -X POST http://localhost:${PORT}/v1/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"meta-llama/Llama-3.1-8B-Instruct","prompt":"'"$PROMPT"'","max_tokens":10}'
+
+# Second request with same prefix: retrieve from Redis
+curl -s -X POST http://localhost:${PORT}/v1/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"meta-llama/Llama-3.1-8B-Instruct","prompt":"'"$PROMPT"'","max_tokens":10}'
+```
+
+Check Redis to verify data was stored:
+```bash
+redis-cli -p 6379 DBSIZE
 ```
