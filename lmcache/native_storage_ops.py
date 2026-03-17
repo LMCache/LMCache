@@ -154,18 +154,25 @@ class RangePatternMatcher:
         self._end = end_pattern
 
     def match(self, data: list[int]) -> list[tuple[int, int]]:
-        start_matches = ParallelPatternMatcher(self._start).match(data)
         ranges: list[tuple[int, int]] = []
         start_len = len(self._start)
         end_len = len(self._end)
+        i = 0
 
-        for start_idx in start_matches:
-            search_idx = start_idx + start_len
-            while search_idx <= len(data) - end_len:
-                if data[search_idx : search_idx + end_len] == self._end:
-                    ranges.append((start_idx, search_idx + end_len))
-                    break
-                search_idx += 1
+        while i <= len(data) - start_len:
+            if data[i : i + start_len] == self._start:
+                search_idx = i + start_len
+                while search_idx <= len(data) - end_len:
+                    if data[search_idx : search_idx + end_len] == self._end:
+                        end_idx = search_idx + end_len
+                        ranges.append((i, end_idx))
+                        i = end_idx
+                        break
+                    search_idx += 1
+                else:
+                    i += 1
+            else:
+                i += 1
         return ranges
 
 
