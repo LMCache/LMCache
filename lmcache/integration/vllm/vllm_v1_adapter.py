@@ -949,8 +949,10 @@ LMCacheLookupClient`).  This method delegates the provider to the client
                     )
                     self._invalid_block_ids.update(missing_blocks)
 
-                # Fire post-load hooks after KV is fully retrieved.
-                # Hooks are skipped when no hooks are registered (fast path).
+                # Fire post-load hooks after KV is fully retrieved (non-layerwise
+                # path only; layerwise retrieval is async layer-by-layer and
+                # does not currently support post-load hooks).
+                # Hooks are skipped when none are registered (fast path).
                 if self._post_load_hooks:
                     self._fire_post_load_hooks(
                         request_id=request.req_id,
@@ -959,9 +961,7 @@ LMCacheLookupClient`).  This method delegates the provider to the client
                             lmcache_cached_tokens
                             - request.load_spec.vllm_cached_tokens
                         ),
-                        provider_metadata=getattr(
-                            request, "provider_metadata", None
-                        ),
+                        provider_metadata=request.provider_metadata,
                     )
 
     def _fire_post_load_hooks(
