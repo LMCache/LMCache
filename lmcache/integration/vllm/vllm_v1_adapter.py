@@ -40,6 +40,7 @@ from lmcache.v1.cache_engine import LMCacheEngine
 from lmcache.v1.compute.blend import LMCBlenderBuilder
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.config_base import validate_and_set_config_value
+from lmcache.v1.hooks import PostLoadContext, PostLoadHook
 from lmcache.v1.lookup_client.semantic_provider import (
     SemanticLookupProvider,
     SemanticLookupResult,
@@ -582,6 +583,9 @@ class LMCacheConnectorV1Impl:
         # successful semantic lookup.
         self._semantic_substitutions: dict[str, SemanticLookupResult] = {}
 
+        # PostLoadHook list — fired in registration order after KV retrieve
+        self._post_load_hooks: list[PostLoadHook] = []
+
     def _check_legacy_register_kv_caches(self) -> None:
         """Check for legacy connector without register_kv_caches implementation."""
         if self.lmcache_engine is None:
@@ -630,6 +634,34 @@ LMCacheLookupClient`).  This method delegates the provider to the client
         if self.lookup_client is not None:
             self.lookup_client.set_semantic_provider(provider)
         logger.info("SemanticLookupProvider registered: %s", type(provider).__name__)
+
+    def add_post_load_hook(self, hook: PostLoadHook) -> None:
+        """Append a :class:`~lmcache.v1.hooks.PostLoadHook` to the hook list.
+
+        Hooks fire **in the order they were added** after all KV layers for a
+        request have been retrieved by :meth:`start_load_kv`.
+
+        Each hook receives a :class:`~lmcache.v1.hooks.PostLoadContext`
+        containing the paged KV caches, slot mapping, token count, and
+        optional :attr:`~lmcache.v1.lookup_client.semantic_provider\
+.SemanticLookupResult.provider_metadata` from the
+        :class:`~lmcache.v1.lookup_client.semantic_provider\
+.SemanticLookupProvider`.
+
+        Multiple hooks can be added; an exception in one hook is logged and
+        suppressed so subsequent hooks and the forward pass are not blocked.
+
+        Parameters
+        ----------
+        hook:
+            An instance of a :class:`PostLoadHook` subclass.
+        """
+        self._post_load_hooks.append(hook)
+        logger.info(
+            "PostLoadHook registered (#%d): %s",
+            len(self._post_load_hooks),
+            type(hook).__name__,
+        )
 
     # ==================== Property Accessors ====================
 
@@ -916,6 +948,53 @@ LMCacheLookupClient`).  This method delegates the provider to the client
                         slot_mapping[:lmcache_cached_tokens],
                     )
                     self._invalid_block_ids.update(missing_blocks)
+
+                # Fire post-load hooks after KV is fully retrieved.
+                # Hooks are skipped when no hooks are registered (fast path).
+                if self._post_load_hooks:
+                    self._fire_post_load_hooks(
+                        request_id=request.req_id,
+                        slot_mapping=slot_mapping[:lmcache_cached_tokens],
+                        num_loaded_tokens=int(
+                            lmcache_cached_tokens
+                            - request.load_spec.vllm_cached_tokens
+                        ),
+                        provider_metadata=getattr(
+                            request, "provider_metadata", None
+                        ),
+                    )
+
+    def _fire_post_load_hooks(
+        self,
+        request_id: str,
+        slot_mapping: torch.Tensor,
+        num_loaded_tokens: int,
+        provider_metadata: Any,
+    ) -> None:
+        """Call all registered :class:`PostLoadHook` instances in order.
+
+        Called from :meth:`start_load_kv` (non-layerwise path) after the
+        engine's ``retrieve`` call completes for a single request.
+
+        Exceptions in individual hooks are logged and suppressed.
+        """
+        ctx = PostLoadContext(
+            request_id=request_id,
+            kv_caches=self.kv_caches,
+            slot_mapping=slot_mapping,
+            num_loaded_tokens=num_loaded_tokens,
+            provider_metadata=provider_metadata,
+        )
+        for hook in self._post_load_hooks:
+            try:
+                hook.after_kv_load(ctx)
+            except Exception:
+                logger.warning(
+                    "PostLoadHook %s raised for req %s",
+                    type(hook).__name__,
+                    request_id,
+                    exc_info=True,
+                )
 
     def record_failed_blocks(
         self,
