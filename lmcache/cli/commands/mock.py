@@ -52,7 +52,7 @@ class MockCommand(BaseCommand):
         )
         add_output_args(parser)
 
-    def handler(self, args: argparse.Namespace) -> None:
+    def execute(self, args: argparse.Namespace) -> None:
         """Execute the mock command.
 
         Args:

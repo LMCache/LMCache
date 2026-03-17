@@ -26,13 +26,12 @@ File Layout
    lmcache/cli/
    ├── __init__.py
    ├── main.py              # Entry point
-   ├── config.py            # CLIConfig (env var configuration)
    ├── metrics/             # Metrics system
    │   ├── __init__.py      # Re-exports
    │   ├── metrics.py       # Metrics collector
    │   ├── section.py       # Section data class
    │   ├── handler.py       # StreamHandler, FileHandler
-   │   └── formatter.py     # VllmFormatter, JsonFormatter
+   │   └── formatter.py     # TerminalFormatter, JsonFormatter
    └── commands/
        ├── __init__.py      # ALL_COMMANDS registry
        ├── base.py          # BaseCommand ABC, add_output_args()
@@ -64,7 +63,7 @@ Step-by-Step: Adding a New Command
                                help="LMCache HTTP server URL (e.g. http://localhost:8000)")
            add_output_args(parser)
 
-       def handler(self, args: argparse.Namespace) -> None:
+       def execute(self, args: argparse.Namespace) -> None:
            # Connect to server, gather info...
            metrics = self.create_metrics("Describe KV Cache", args)
            metrics.add("status", "Status", "OK")
@@ -99,9 +98,9 @@ command authors just build metrics and call ``emit()``:
 
 .. code-block:: python
 
-   def handler(self, args: argparse.Namespace) -> None:
+   def execute(self, args: argparse.Namespace) -> None:
        # create_metrics() auto-registers:
-       #   - StreamHandler → stdout (formatter chosen by --format, default: vllm)
+       #   - StreamHandler → stdout (formatter chosen by --format, default: terminal)
        #   - FileHandler   → if --output is set (always JSON)
        metrics = self.create_metrics("Bench KV Cache Result", args)
 
@@ -126,5 +125,5 @@ The ``--format`` and ``--output`` flags are available via the shared helper:
        # ... your args ...
        add_output_args(parser)
        # Adds:
-       #   --format FORMAT  Stdout format (default: vllm). Available: vllm, json.
+       #   --format FORMAT  Stdout format (default: terminal). Available: terminal, json.
        #   --output PATH    Save metrics to a JSON file at PATH.

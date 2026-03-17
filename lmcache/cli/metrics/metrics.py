@@ -22,9 +22,8 @@ Example usage::
 from typing import Any, Optional
 
 # First Party
-from lmcache.cli.metrics.formatter import _sections_to_dict
 from lmcache.cli.metrics.handler import MetricsHandler
-from lmcache.cli.metrics.section import Section
+from lmcache.cli.metrics.section import Section, sections_to_dict
 
 
 class Metrics:
@@ -131,4 +130,4 @@ class Metrics:
             unnamed default section's entries are placed at the top
             level of ``"metrics"``.
         """
-        return _sections_to_dict(self._title, self._sections)
+        return sections_to_dict(self._title, self._sections)

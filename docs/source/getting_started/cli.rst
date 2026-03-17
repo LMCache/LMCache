@@ -100,25 +100,6 @@ The terminal output uses human-readable labels (e.g., ``"Total time (ms)"``),
 while the JSON output uses machine-readable keys (e.g., ``"total_time_ms"``).
 
 
-Configuration
--------------
-
-CLI behavior can be configured via environment variables using the
-``LMCACHE_CLI_`` prefix, consistent with the LMCache centralized config system.
-
-.. list-table::
-   :header-rows: 1
-   :widths: 40 20 40
-
-   * - Environment Variable
-     - Default
-     - Description
-   * - ``LMCACHE_CLI_METRICS_STYLE``
-     - ``vllm``
-     - Default stdout format for metrics (overridden by ``--format``).
-       Supports ``vllm`` and ``json``.
-
-
 Adding New Commands
 -------------------
 

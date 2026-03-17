@@ -27,3 +27,33 @@ class Section:
                 places on terminal output; strings are printed as-is.
         """
         self.entries.append((key, label, value))
+
+
+def sections_to_dict(
+    title: str,
+    sections: list[Section],
+) -> dict[str, Any]:
+    """Convert a title and sections to a JSON-serialisable dictionary.
+
+    Named sections become nested dicts keyed by machine key. The
+    unnamed default section's entries are placed at the top level
+    of ``"metrics"``.
+
+    Args:
+        title: The report title.
+        sections: Ordered list of ``Section`` objects.
+
+    Returns:
+        A dict with ``"title"`` and ``"metrics"`` keys.
+    """
+    metrics: dict[str, Any] = {}
+    for section in sections:
+        if section.key is None:
+            for key, _label, value in section.entries:
+                metrics[key] = value
+        else:
+            section_dict: dict[str, Any] = {}
+            for key, _label, value in section.entries:
+                section_dict[key] = value
+            metrics[section.key] = section_dict
+    return {"title": title, "metrics": metrics}

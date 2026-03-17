@@ -10,7 +10,7 @@ from lmcache.cli.metrics import (
     FileHandler,
     Metrics,
     StreamHandler,
-    VllmFormatter,
+    TerminalFormatter,
     get_formatter,
 )
 
@@ -19,7 +19,7 @@ class BaseCommand(abc.ABC):
     """Abstract base class that all CLI subcommands must inherit from.
 
     Subclasses must implement :meth:`name`, :meth:`help`,
-    :meth:`add_arguments`, and :meth:`handler`.  The :meth:`register`
+    :meth:`add_arguments`, and :meth:`execute`.  The :meth:`register`
     method wires everything together automatically.
 
     Example::
@@ -35,7 +35,7 @@ class BaseCommand(abc.ABC):
                 parser.add_argument("--url", required=True)
                 add_output_args(parser)
 
-            def handler(self, args: argparse.Namespace) -> None:
+            def execute(self, args: argparse.Namespace) -> None:
                 metrics = self.create_metrics("Ping Result", args)
                 metrics.add("status", "Status", "OK")
                 metrics.emit()
@@ -58,8 +58,13 @@ class BaseCommand(abc.ABC):
         """
 
     @abc.abstractmethod
-    def handler(self, args: argparse.Namespace) -> None:
+    def execute(self, args: argparse.Namespace) -> None:
         """Execute the subcommand.
+
+        Called by the CLI dispatcher in ``main.py`` via
+        ``args.func(args)`` after argument parsing.  The
+        :meth:`register` method binds this as the dispatch target
+        using ``parser.set_defaults(func=self.execute)``.
 
         Args:
             args: Parsed CLI arguments.
@@ -70,14 +75,14 @@ class BaseCommand(abc.ABC):
 
         This method is not typically overridden.  It calls
         :meth:`name`, :meth:`help`, and :meth:`add_arguments`, then
-        binds :meth:`handler` as the dispatch target.
+        binds :meth:`execute` as the dispatch target.
 
         Args:
             subparsers: The subparsers action from the root parser.
         """
         parser = subparsers.add_parser(self.name(), help=self.help())
         self.add_arguments(parser)
-        parser.set_defaults(func=self.handler)
+        parser.set_defaults(func=self.execute)
 
     def create_metrics(
         self,
@@ -90,7 +95,7 @@ class BaseCommand(abc.ABC):
         Handlers are configured from ``args.format`` and ``args.output``:
 
         * A :class:`StreamHandler` writing to stdout. The formatter is
-          determined by ``--format`` (default: ``vllm``).
+          determined by ``--format`` (default: ``terminal``).
         * A :class:`FileHandler` if ``--output`` is set (always uses
           :class:`JsonFormatter`).
 
@@ -98,7 +103,7 @@ class BaseCommand(abc.ABC):
             title: Report title.
             args: Parsed CLI arguments (inspects ``format`` and ``output``).
             width: Character width for terminal rendering (only used by
-                formatters that support it, e.g. ``VllmFormatter``).
+                formatters that support it, e.g. ``TerminalFormatter``).
 
         Returns:
             A ready-to-use ``Metrics`` instance.
@@ -106,10 +111,10 @@ class BaseCommand(abc.ABC):
         metrics = Metrics(title=title)
 
         # Resolve stdout formatter from --format
-        fmt_name = getattr(args, "format", None) or "vllm"
+        fmt_name = getattr(args, "format", None) or "terminal"
         stdout_formatter = get_formatter(fmt_name)
-        if isinstance(stdout_formatter, VllmFormatter):
-            stdout_formatter = VllmFormatter(width=width)
+        if isinstance(stdout_formatter, TerminalFormatter):
+            stdout_formatter = TerminalFormatter(width=width)
         metrics.add_handler(StreamHandler(stdout_formatter))
 
         # File handler if --output is set
@@ -131,7 +136,7 @@ def add_output_args(parser: argparse.ArgumentParser) -> None:
         type=str,
         default=None,
         metavar="FORMAT",
-        help="Stdout output format (default: vllm). Available: vllm, json.",
+        help=("Stdout output format (default: terminal). Available: terminal, json."),
     )
     parser.add_argument(
         "--output",

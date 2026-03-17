@@ -36,7 +36,7 @@ class MyCommand(BaseCommand):
     def add_arguments(self, parser) -> None:
         parser.add_argument("--flag", ...)
 
-    def handler(self, args) -> None:
+    def execute(self, args) -> None:
         ...  # command logic
 ```
 
@@ -51,7 +51,7 @@ ALL_COMMANDS: list[BaseCommand] = [
 ```
 
 `BaseCommand` enforces that all four abstract methods (`name`, `help`,
-`add_arguments`, `handler`) are implemented — instantiation fails otherwise.
+`add_arguments`, `execute`) are implemented — instantiation fails otherwise.
 The concrete `register()` method (inherited, not typically overridden) wires
 everything up automatically.
 
@@ -65,9 +65,9 @@ everything up automatically.
 4. `main.py` iterates `ALL_COMMANDS` and calls `cmd.register(subparsers)`.
 5. `BaseCommand.register()` creates an argparse subparser (using `name()` and
    `help()`), calls `add_arguments()` to wire up flags, and sets
-   `parser.set_defaults(func=self.handler)`.
+   `parser.set_defaults(func=self.execute)`.
 6. After parsing, `main.py` dispatches via `args.func(args)`, which calls the
-   matched command's `handler()`.
+   matched command's `execute()`.
 
 ### How to add a new subcommand
 
@@ -86,7 +86,7 @@ class DescribeCommand(BaseCommand):
     def add_arguments(self, parser) -> None:
         parser.add_argument("--url", required=True)
 
-    def handler(self, args) -> None:
+    def execute(self, args) -> None:
         ...  # implementation
 ```
 
@@ -109,13 +109,12 @@ That's it — `lmcache describe --url http://localhost:8000` is now available.
 lmcache/cli/
 ├── __init__.py          # empty
 ├── main.py              # main() entry point
-├── config.py            # CLIConfig (centralized config system)
 ├── metrics/             # Metrics system (Section 2)
 │   ├── __init__.py      # re-exports
 │   ├── metrics.py       # Metrics collector
 │   ├── section.py       # Section data class
 │   ├── handler.py       # StreamHandler, FileHandler
-│   └── formatter.py     # VllmFormatter, JsonFormatter
+│   └── formatter.py     # TerminalFormatter, JsonFormatter
 ├── commands/
 │   ├── __init__.py      # ALL_COMMANDS registry
 │   ├── base.py          # BaseCommand ABC, add_output_args()
@@ -154,11 +153,11 @@ The metrics system has three layers:
   a formatter. Built-in: `StreamHandler` (writes to a stream like stdout),
   `FileHandler` (writes to a file path).
 - **`MetricsFormatter`** — the rendering (how to format). Built-in:
-  `VllmFormatter` (ASCII table), `JsonFormatter` (JSON string).
+  `TerminalFormatter` (ASCII table), `JsonFormatter` (JSON string).
 
 ```
 Metrics ──emit()──▶ Handler (destination) ──▶ Formatter (rendering)
-                     StreamHandler(stdout)      VllmFormatter
+                     StreamHandler(stdout)      TerminalFormatter
                      FileHandler("out.json")    JsonFormatter
 ```
 
@@ -170,7 +169,7 @@ lmcache/cli/metrics/
 ├── metrics.py        # Metrics collector
 ├── section.py        # Section data class
 ├── handler.py        # MetricsHandler, StreamHandler, FileHandler
-└── formatter.py      # MetricsFormatter, VllmFormatter, JsonFormatter
+└── formatter.py      # MetricsFormatter, TerminalFormatter, JsonFormatter
 ```
 
 ### API
@@ -179,7 +178,7 @@ Each metric has a **machine key** (used in JSON output) and a **human-readable
 label** (used in terminal output). Sections work the same way.
 
 ```python
-from lmcache.cli.metrics import Metrics, StreamHandler, VllmFormatter
+from lmcache.cli.metrics import Metrics, StreamHandler, TerminalFormatter
 
 metrics = Metrics(title="Bench KV Cache Result (30s)")
 
@@ -195,7 +194,7 @@ metrics.add_section("correctness", "Correctness")
 metrics["ops"].add("store", "Store", 41.3)
 metrics["ops"].add("retrieve", "Retrieve", 127.3)
 metrics["hit_rate"].add("l1", "L1", "92.3%")
-metrics["correctness"].add("checksums", "5060/5060 OK")
+metrics["correctness"].add("checksums", "Checksums", "5060/5060 OK")
 
 # Trigger all handlers
 metrics.emit()
@@ -205,10 +204,10 @@ metrics.emit()
 sets up default handlers automatically:
 
 ```python
-# Inside a command's handler() method:
+# Inside a command's execute() method:
 metrics = self.create_metrics("Bench Result", args, width=48)
 # ^ automatically adds:
-#   - StreamHandler → stdout (formatter chosen by --format, default: vllm)
+#   - StreamHandler → stdout (formatter chosen by --format, default: terminal)
 #   - FileHandler   → if --output is set (always JSON)
 ```
 
@@ -218,14 +217,14 @@ metrics = self.create_metrics("Bench Result", args, width=48)
 
 | Handler | Default Formatter | Description |
 |---|---|---|
-| `StreamHandler(formatter, stream)` | `VllmFormatter` | Writes to a text stream (default: stdout) |
+| `StreamHandler(formatter, stream)` | `TerminalFormatter` | Writes to a text stream (default: stdout) |
 | `FileHandler(path, formatter)` | `JsonFormatter` | Writes to a file |
 
 **Formatters** (rendering):
 
 | Formatter | Description |
 |---|---|
-| `VllmFormatter(width)` | ASCII table with `=`/`-` dividers |
+| `TerminalFormatter(width)` | ASCII table with `=`/`-` dividers |
 | `JsonFormatter(indent)` | JSON string |
 
 Custom handlers and formatters can be added by subclassing `MetricsHandler`
@@ -247,7 +246,7 @@ Checksums:                               5060/5060 OK
 
 Design choices:
 - **Fixed total width** of 48 characters (configurable via `width` param on
-  `VllmFormatter`).
+  `TerminalFormatter`).
 - Title row is centered within `=` borders.
 - Section headers are centered within `-` borders.
 - Key-value lines are left-aligned label, right-aligned value.
@@ -323,17 +322,17 @@ logging, and both terminal and JSON output. It doesn't connect to any server.
 ```bash
 $ lmcache mock --name test-run --num-items 5
 
-============ Mock Result ============
------------ Input Parameters --------
-Name:                        test-run
-Num items:                          5
------------- Mock Metrics -----------
-Items processed:                    5
-Total time (ms):                12.34
-Throughput (items/s):          405.19
-------------- Validation ------------
-Status:                            OK
-=====================================
+============= Mock Result ==============
+----------- Input Parameters -----------
+Name:                           test-run
+Num items:                             5
+------------- Mock Metrics -------------
+Items processed:                      42
+Total time (ms):                   12.34
+Throughput (items/s):            3403.73
+-------------- Validation --------------
+Status:                               OK
+========================================
 
 # With --output, both stdout and JSON file are produced (two handlers)
 $ lmcache mock --name test-run --num-items 5 --output result.json
@@ -351,12 +350,12 @@ instead of manually registering handlers.
 
 ### `--format` flag
 
-Controls the stdout rendering format. Default: `vllm` (ASCII table). Available:
-`vllm`, `json`. Added via the shared helper `add_output_args(parser)` in `base.py`.
+Controls the stdout rendering format. Default: `terminal` (ASCII table). Available:
+`terminal`, `json`. Added via the shared helper `add_output_args(parser)` in `base.py`.
 
 ```bash
-lmcache bench ... --format json    # JSON on stdout (for scripts)
-lmcache bench ... --format vllm    # ASCII table (default)
+lmcache bench ... --format json       # JSON on stdout (for scripts)
+lmcache bench ... --format terminal   # ASCII table (default)
 ```
 
 ### `--output` flag

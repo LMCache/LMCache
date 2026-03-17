@@ -5,7 +5,7 @@
 from lmcache.cli.metrics.formatter import (
     JsonFormatter,
     MetricsFormatter,
-    VllmFormatter,
+    TerminalFormatter,
     get_formatter,
 )
 from lmcache.cli.metrics.handler import (
@@ -25,5 +25,5 @@ __all__ = [
     "MetricsHandler",
     "Section",
     "StreamHandler",
-    "VllmFormatter",
+    "TerminalFormatter",
 ]

@@ -11,7 +11,7 @@ import abc
 import json
 
 # First Party
-from lmcache.cli.metrics.section import Section
+from lmcache.cli.metrics.section import Section, sections_to_dict
 
 
 class MetricsFormatter(abc.ABC):
@@ -58,7 +58,7 @@ def get_formatter(name: str) -> MetricsFormatter:
     """Instantiate a formatter by its registered name.
 
     Args:
-        name: Registered format name (e.g. ``"vllm"``, ``"json"``).
+        name: Registered format name (e.g. ``"terminal"``, ``"json"``).
 
     Returns:
         A new formatter instance.
@@ -87,9 +87,9 @@ def _format_value(value: Any) -> str:
     return str(value)
 
 
-@register_formatter("vllm")
-class VllmFormatter(MetricsFormatter):
-    """Plain ASCII style matching ``vllm bench serve`` output.
+@register_formatter("terminal")
+class TerminalFormatter(MetricsFormatter):
+    """Plain ASCII table formatter for terminal output.
 
     Title is centered in ``=`` borders, section headers are centered in
     ``-`` borders, key-value lines have left-aligned labels and
@@ -103,7 +103,7 @@ class VllmFormatter(MetricsFormatter):
         self._width = width
 
     def format(self, title: str, sections: list[Section]) -> str:
-        """Render metrics in vLLM style.
+        """Render metrics as an ASCII table.
 
         Args:
             title: The report title.
@@ -139,24 +139,6 @@ class VllmFormatter(MetricsFormatter):
         return "\n".join(lines)
 
 
-def _sections_to_dict(
-    title: str,
-    sections: list[Section],
-) -> dict[str, Any]:
-    """Convert sections to a JSON-serialisable dictionary."""
-    metrics: dict[str, Any] = {}
-    for section in sections:
-        if section.key is None:
-            for key, _label, value in section.entries:
-                metrics[key] = value
-        else:
-            section_dict: dict[str, Any] = {}
-            for key, _label, value in section.entries:
-                section_dict[key] = value
-            metrics[section.key] = section_dict
-    return {"title": title, "metrics": metrics}
-
-
 @register_formatter("json")
 class JsonFormatter(MetricsFormatter):
     """Renders metrics as a JSON string.
@@ -179,6 +161,6 @@ class JsonFormatter(MetricsFormatter):
             JSON string.
         """
         return json.dumps(
-            _sections_to_dict(title, sections),
+            sections_to_dict(title, sections),
             indent=self._indent,
         )

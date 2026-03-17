@@ -16,7 +16,7 @@ import sys
 from lmcache.cli.metrics.formatter import (
     JsonFormatter,
     MetricsFormatter,
-    VllmFormatter,
+    TerminalFormatter,
 )
 from lmcache.cli.metrics.section import Section
 
@@ -50,7 +50,7 @@ class StreamHandler(MetricsHandler):
         formatter: Optional[MetricsFormatter] = None,
         stream: Optional[IO[str]] = None,
     ) -> None:
-        super().__init__(formatter or VllmFormatter())
+        super().__init__(formatter or TerminalFormatter())
         self._stream = stream
 
     def emit(self, title: str, sections: list[Section]) -> None:
