@@ -173,18 +173,29 @@ class KVLayerGroupsManager:
         )
 
         for idx, (layer_name, kv_cache) in enumerate(kv_caches.items()):
-            # Normalize kv_cache to iterable. Supports:
-            # - GPU (CUDA): A single tensor.
-            # - TPU/HPU: A tuple/list (e.g., (k, v, k_scale, v_scale)).
-            tensors = kv_cache if isinstance(kv_cache, (tuple, list)) else [kv_cache]
-
-            # Find the first non-None tensor
-            first_valid_tensor = next(
-                (tensor for tensor in tensors if tensor is not None), None
-            )
-            if first_valid_tensor is not None:
-                key = (first_valid_tensor.shape, first_valid_tensor.dtype)
-                groups_dict[key].append((layer_name, idx))
+            # Supports two KV cache formats:
+            # - Single-tensor format: a single tensor with shape
+            #   [2, num_blocks, block_size, num_heads, head_size].
+            # - List/tuple format (e.g., TPU/HPU): [k_tensor, v_tensor],
+            #   where each tensor has shape
+            #   [num_blocks, block_size, num_heads, head_size].
+            if isinstance(kv_cache, (tuple, list)):
+                if len(kv_cache) != 2:
+                    raise ValueError(
+                        f"Expected 2 tensors (k, v) for layer {layer_name}, "
+                        f"got {len(kv_cache)}"
+                    )
+                # Prepend the count as a leading dimension to produce the
+                # same canonical shape as the single-tensor format
+                # (e.g., [2, num_blocks, ...] for k+v), so downstream
+                # indexing (e.g., hidden_dim_size) is unaffected.
+                shape = torch.Size([len(kv_cache)] + list(kv_cache[0].shape))
+                dtype = kv_cache[0].dtype
+            else:
+                shape = kv_cache.shape
+                dtype = kv_cache.dtype
+            key = (shape, dtype)
+            groups_dict[key].append((layer_name, idx))
 
         # Build KVLayerGroupInfo list
         # Sort groups by the first layer index to maintain order
