@@ -2,6 +2,7 @@
 # Standard
 from dataclasses import dataclass
 import argparse
+import signal
 import threading
 import time
 
@@ -836,16 +837,27 @@ def run_cache_server(
     if return_engine:
         return server, engine
 
+    def _shutdown(sig_name: str) -> None:
+        logger.info("Received %s, shutting down server...", sig_name)
+        get_telemetry_controller().stop()
+        get_prometheus_controller().stop()
+        server.close()
+        engine.close()
+
+    def _signal_handler(signum, frame):
+        sig_name = signal.Signals(signum).name
+        _shutdown(sig_name)
+        raise SystemExit(1)
+
+    signal.signal(signal.SIGHUP, _signal_handler)
+    signal.signal(signal.SIGTERM, _signal_handler)
+
     # Dummy loop to keep the server running
     try:
         while True:
             time.sleep(1)
     except KeyboardInterrupt:
-        logger.info("Shutting down server...")
-        get_telemetry_controller().stop()
-        get_prometheus_controller().stop()
-        server.close()
-        engine.close()
+        _shutdown("KeyboardInterrupt")
 
 
 def parse_args():
