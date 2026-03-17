@@ -64,42 +64,47 @@ def CreateGPUConnector(
     elif engine == EngineType.VLLM:
         # First Party
         from lmcache.integration.vllm.utils import get_vllm_torch_dev
-        from lmcache.v1.gpu_connector.gpu_connectors import (
-            VLLMBufferLayerwiseGPUConnector,
-            VLLMPagedMemGPUConnectorV2,
-            VLLMPagedMemGPUConnectorV3,
-            VLLMPagedMemLayerwiseGPUConnector,
-        )
+
+        torch_dev, dev_name = get_vllm_torch_dev()
+        if dev_name == "cuda":
+            # First Party
+            from lmcache.v1.gpu_connector.gpu_connectors import (
+                VLLMBufferLayerwiseGPUConnector,
+                VLLMPagedMemGPUConnectorV2,
+                VLLMPagedMemGPUConnectorV3,
+                VLLMPagedMemLayerwiseGPUConnector,
+            )
+        elif dev_name == "xpu":
+            # First Party
+            from lmcache.v1.gpu_connector.xpu_connectors import (
+                VLLMBufferLayerwiseXPUConnector,
+                VLLMPagedMemLayerwiseXPUConnector,
+                VLLMPagedMemXPUConnectorV2,
+                VLLMPagedMemXPUConnectorV3,
+            )
+        elif dev_name == "hpu":
+            # First Party
+            from lmcache.v1.gpu_connector.hpu_connector import (
+                VLLMPagedMemHPUConnectorV2,
+            )
+        else:
+            raise ValueError(f"Unsupported dev_name: {dev_name}")
 
         local_worker_id = metadata.local_worker_id
-        torch_dev, dev_name = get_vllm_torch_dev()
         torch_dev.set_device(local_worker_id)
         device = torch.device(f"{dev_name}:{local_worker_id}")
 
-        if dev_name == "xpu":
-            # First Party
-            from lmcache.v1.gpu_connector.xpu_connectors import (
-                VLLMPagedMemLayerwiseXPUConnector,
-                VLLMPagedMemXPUConnectorV2,
-            )
-
+        if dev_name == "cuda":
             if config.use_layerwise:
-                return VLLMPagedMemLayerwiseXPUConnector.from_metadata(
-                    metadata, use_xpu=use_gpu, device=device
-                )
-            return VLLMPagedMemXPUConnectorV2.from_metadata(metadata, use_gpu, device)
+                if config.enable_blending:
+                    return VLLMBufferLayerwiseGPUConnector.from_metadata(
+                        metadata, use_gpu, device, layout_hints=layout_hints
+                    )
+                else:
+                    return VLLMPagedMemLayerwiseGPUConnector.from_metadata(
+                        metadata, use_gpu, device, layout_hints=layout_hints
+                    )
 
-        if config.use_layerwise:
-            if config.enable_blending:
-                return VLLMBufferLayerwiseGPUConnector.from_metadata(
-                    metadata, use_gpu, device, layout_hints=layout_hints
-                )
-            else:
-                return VLLMPagedMemLayerwiseGPUConnector.from_metadata(
-                    metadata, use_gpu, device, layout_hints=layout_hints
-                )
-
-        elif dev_name == "cuda":
             if config.use_gpu_connector_v3:
                 return VLLMPagedMemGPUConnectorV3.from_metadata(
                     metadata, use_gpu, device, layout_hints=layout_hints
@@ -108,13 +113,26 @@ def CreateGPUConnector(
                 return VLLMPagedMemGPUConnectorV2.from_metadata(
                     metadata, use_gpu, device, layout_hints=layout_hints
                 )
+        elif dev_name == "xpu":
+            if config.use_layerwise:
+                if config.enable_blending:
+                    return VLLMBufferLayerwiseXPUConnector.from_metadata(
+                        metadata, use_gpu, device, layout_hints=layout_hints
+                    )
+                else:
+                    return VLLMPagedMemLayerwiseXPUConnector.from_metadata(
+                        metadata, use_gpu, device, layout_hints=layout_hints
+                    )
 
+            if config.use_gpu_connector_v3:
+                return VLLMPagedMemXPUConnectorV3.from_metadata(
+                    metadata, use_gpu, device, layout_hints=layout_hints
+                )
+            else:
+                return VLLMPagedMemXPUConnectorV2.from_metadata(
+                    metadata, use_gpu, device, layout_hints=layout_hints
+                )
         elif dev_name == "hpu":
-            # First Party
-            from lmcache.v1.gpu_connector.hpu_connector import (
-                VLLMPagedMemHPUConnectorV2,
-            )
-
             return VLLMPagedMemHPUConnectorV2.from_metadata(metadata, use_gpu, device)
         else:
             raise RuntimeError("No supported connector found for the current platform.")

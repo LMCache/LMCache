@@ -22,7 +22,7 @@ from lmcache.v1.memory_management import AdHocMemoryAllocator, MemoryFormat, Mem
 from lmcache.v1.metadata import LMCacheMetadata
 
 # Conditional import for CUDA-only operations
-if torch.cuda.is_available():
+if torch.cuda.is_available() or torch.xpu.is_available():
     try:
         # First Party
         import lmcache.c_ops as lmc_ops
@@ -31,6 +31,7 @@ if torch.cuda.is_available():
         lmc_ops = None
 else:
     # Mock c_ops when CUDA is not available
+    # First Party
     lmc_ops = None
 
 # Define mock GPUKVFormat enum if c_ops is not available
@@ -247,6 +248,8 @@ def generate_kv_cache_paged_list_tensors(
             shape = [2, num_blocks, num_heads, block_size, head_size]
         elif gpu_kv_format == lmc_ops.GPUKVFormat.NL_X_NB_TWO_NH_BS_HS:
             shape = [num_blocks, 2, num_heads, block_size, head_size]
+        else:
+            raise ValueError(f"Unsupported gpu_kv_format: {gpu_kv_format}")
 
     for i in range(num_layers):
         # TODO(chunxiaozheng): support more dtypes

@@ -24,7 +24,7 @@ if TYPE_CHECKING:
     # First Party
     from lmcache.v1.gpu_connector.gpu_connectors import GPUConnectorInterface
 
-if torch.cuda.is_available():
+if torch.cuda.is_available() or torch.xpu.is_available():
     # First Party
     import lmcache.c_ops as lmc_ops
 
@@ -182,24 +182,17 @@ def assert_layerwise_gpu_connector(gpu_connector: "GPUConnectorInterface"):
     """
     # Import at runtime to avoid circular dependency
     # First Party
-    from lmcache.v1.gpu_connector.gpu_connectors import (
-        SGLangLayerwiseGPUConnector,
-        VLLMBufferLayerwiseGPUConnector,
-        VLLMPagedMemLayerwiseGPUConnector,
-    )
-    from lmcache.v1.gpu_connector.xpu_connectors import (
-        VLLMPagedMemLayerwiseXPUConnector,
+    from lmcache.v1.gpu_connector import gpu_connectors, xpu_connectors
+
+    valid_connectors = (
+        gpu_connectors.VLLMPagedMemLayerwiseGPUConnector,
+        gpu_connectors.VLLMBufferLayerwiseGPUConnector,
+        gpu_connectors.SGLangLayerwiseGPUConnector,
+        xpu_connectors.VLLMPagedMemLayerwiseXPUConnector,
+        xpu_connectors.VLLMBufferLayerwiseXPUConnector,
     )
 
-    assert isinstance(
-        gpu_connector,
-        (
-            VLLMPagedMemLayerwiseGPUConnector,
-            VLLMBufferLayerwiseGPUConnector,
-            SGLangLayerwiseGPUConnector,
-            VLLMPagedMemLayerwiseXPUConnector,
-        ),
-    )
+    assert isinstance(gpu_connector, valid_connectors)
 
 
 def get_gpu_kv_shape_description(gpu_kv_format: "lmc_ops.GPUKVFormat") -> str:
