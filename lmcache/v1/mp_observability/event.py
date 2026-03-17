@@ -23,6 +23,7 @@ class EventType(Enum):
     L1_READ_FINISHED = "l1.read.finished"
     L1_WRITE_RESERVED = "l1.write.reserved"
     L1_WRITE_FINISHED = "l1.write.finished"
+    L1_WRITE_FINISHED_AND_READ_RESERVED = "l1.write_finished_and_read_reserved"
     L1_KEYS_EVICTED = "l1.keys.evicted"
 
     # StorageManager events
