@@ -374,6 +374,13 @@ def mock_redis_cluster():
 
 @pytest.fixture(scope="module")
 def lmserver_v1_process(request):
+    def get_free_port() -> int:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.bind(("localhost", 0))
+        _, port = sock.getsockname()
+        sock.close()
+        return port
+
     def ensure_connection(host, port):
         retries = 10
         client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -403,7 +410,7 @@ def lmserver_v1_process(request):
     max_retries = 5
     while max_retries > 0:
         max_retries -= 1
-        port_number = random.randint(10000, 65500)
+        port_number = get_free_port()
         print("Starting the lmcache v1 server process on port")
         proc = subprocess.Popen(
             shlex.split(
@@ -416,7 +423,7 @@ def lmserver_v1_process(request):
 
         successful = False
         if proc.poll() is not None:
-            successful = True
+            successful = False
         else:
             successful = ensure_connection("localhost", port_number)
 
@@ -441,6 +448,13 @@ def lmserver_v1_process(request):
 
 @pytest.fixture(scope="module")
 def lmserver_process(request):
+    def get_free_port() -> int:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.bind(("localhost", 0))
+        _, port = sock.getsockname()
+        sock.close()
+        return port
+
     def ensure_connection(host, port):
         retries = 10
         client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -470,7 +484,7 @@ def lmserver_process(request):
     max_retries = 5
     while max_retries > 0:
         max_retries -= 1
-        port_number = random.randint(10000, 65500)
+        port_number = get_free_port()
         print("Starting the lmcache server process on port")
         proc = subprocess.Popen(
             shlex.split(f"python3 -m lmcache.server localhost {port_number} {device}")
@@ -481,7 +495,7 @@ def lmserver_process(request):
 
         successful = False
         if proc.poll() is not None:
-            successful = True
+            successful = False
         else:
             successful = ensure_connection("localhost", port_number)
 
