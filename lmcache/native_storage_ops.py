@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import threading
 import time
-from typing import Any, Iterable, List, Set
+from typing import Any, List, Set
 
 
 class TTLLock:
@@ -104,7 +104,8 @@ class Bitmap:
         size = min(len(self._bits), len(other._bits))
         out = Bitmap(size)
         out._bits = [
-            a & b for a, b in zip(self._bits[:size], other._bits[:size])
+            a & b
+            for a, b in zip(self._bits[:size], other._bits[:size], strict=False)
         ]
         return out
 
@@ -112,7 +113,8 @@ class Bitmap:
         size = min(len(self._bits), len(other._bits))
         out = Bitmap(size)
         out._bits = [
-            a | b for a, b in zip(self._bits[:size], other._bits[:size])
+            a | b
+            for a, b in zip(self._bits[:size], other._bits[:size], strict=False)
         ]
         return out
 
@@ -128,7 +130,9 @@ class Bitmap:
         return set(self.get_indices_list())
 
     def gather(self, items: list[Any]) -> list[Any]:
-        return [item for item, bit in zip(items, self._bits) if bit]
+        return [
+            item for item, bit in zip(items, self._bits, strict=False) if bit
+        ]
 
     def __repr__(self) -> str:  # pragma: no cover - debugging helper
         return "".join("1" if b else "0" for b in self._bits)
