@@ -1356,6 +1356,9 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
         Unlike `batched_allocate`, this function does not
         assume that the memory objs are equal-sized.
         """
+        if not memory_objs:
+            return
+
         # Coalesce adjacent memory objects before freeing to reduce
         # the number of free operations
         coalesced_blocks: list[tuple[int, int, int]] = []  # (address, size, count)
@@ -1442,6 +1445,25 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
         return "TensorMemoryAllocator"
 
 
+class PagedAddressManager:
+    """
+    A lightweight address manager for PagedTensorMemoryAllocator.
+    Provides get_free_size() and get_heap_size() by reading the
+    paged allocator's state.
+    """
+
+    def __init__(self, paged_allocator: "PagedTensorMemoryAllocator"):
+        self._allocator = paged_allocator
+
+    def get_heap_size(self) -> int:
+        """Get the total size of the paged address space in bytes."""
+        return self._allocator.buffer_size
+
+    def get_free_size(self) -> int:
+        """Get the total free size in bytes."""
+        return len(self._allocator.free_blocks) * self._allocator.align_bytes
+
+
 class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
     """
     Implements a paged memory allocator.
@@ -1499,6 +1521,9 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
                 parent_allocator=self,
             )
             self.free_blocks.append(mem_obj)
+
+        # Address manager for memory usage tracking
+        self.address_manager = PagedAddressManager(self)
 
         # For debugging purposes
         self.num_active_allocations = 0
@@ -1644,6 +1669,8 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
         Unlike `batched_allocate`, this function does not
         assume that the memory objs are equal-sized.
         """
+        if not memory_objs:
+            return
 
         for memory_obj in memory_objs:
             if not memory_obj.is_valid():
@@ -2047,6 +2074,9 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
         allocator_type: Optional[str] = None,
         update_stats: bool = True,
     ):
+        if not memory_objs:
+            return
+
         # NOTE: fmts of all memory_objs should be the same
         fmt = memory_objs[0].meta.fmt
         if fmt == MemoryFormat.BINARY_BUFFER:

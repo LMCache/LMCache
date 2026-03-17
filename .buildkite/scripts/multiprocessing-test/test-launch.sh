@@ -24,7 +24,7 @@ GPU_MEMORY_MB=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounit
 GPU_MEMORY_GB=$((GPU_MEMORY_MB / 1024))
 echo "Detected GPU memory: ${GPU_MEMORY_GB}GB (${GPU_MEMORY_MB}MB)"
 
-if [ "$GPU_MEMORY_GB" -gt 100 ]; then
+if [ "$GPU_MEMORY_GB" -gt 90 ]; then
     echo "GPU memory > 100GB, adding --gpu-memory-utilization 0.5"
     GPU_MEMORY_UTIL_ARG="--gpu-memory-utilization 0.5"
 fi

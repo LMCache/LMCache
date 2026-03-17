@@ -59,12 +59,12 @@ class L1ManagerStatsLogger(L1ManagerListener, PrometheusLogger):
         # Prometheus L1-level counters
         self._l1_read_keys_counter = self.create_counter(
             "lmcache_mp:l1_read_keys",
-            "Total number of keys reserved for read on L1",
+            "Total number of keys finished for read on L1",
             labelnames,
         )
         self._l1_write_keys_counter = self.create_counter(
             "lmcache_mp:l1_write_keys",
-            "Total number of keys reserved for write on L1",
+            "Total number of keys finished for write on L1",
             labelnames,
         )
         self._l1_evicted_keys_counter = self.create_counter(
@@ -94,6 +94,10 @@ class L1ManagerStatsLogger(L1ManagerListener, PrometheusLogger):
     @stats_safe
     def on_l1_keys_deleted_by_manager(self, keys: list[ObjectKey]):
         self.stats.interval_l1_evicted_keys += len(keys)
+
+    @stats_safe
+    def on_l1_keys_finish_write_and_reserve_read(self, keys: list[ObjectKey]):
+        self.stats.interval_l1_write_keys += len(keys)
 
     def log_prometheus(self) -> None:
         """Log accumulated stats to Prometheus and reset internal counters."""

@@ -140,7 +140,6 @@ vllm serve "${MODEL}" \
     --enforce-eager \
     --attention-backend FLASH_ATTN \
     --gpu-memory-utilization 0.8 \
-    -cc.level=0 \
     >"${VLLM_LOG}" 2>&1 &
 VLLM_PID=$!
 
@@ -174,8 +173,8 @@ stop_vllm
 #######################################
 echo "[INFO] Preparing LMCache config (cpu.yaml)..."
 cat <<EOF > cpu.yaml
-chunk_size: 16
-local_cpu: true 
+chunk_size: 256
+local_cpu: true
 max_local_cpu_size: 50
 EOF
 
@@ -191,7 +190,6 @@ vllm serve "${MODEL}" \
     --enforce-eager \
     --attention-backend FLASH_ATTN \
     --gpu-memory-utilization 0.8 \
-    -cc.level=0 \
     --kv-transfer-config '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}' \
     >>"${VLLM_LOG}" 2>&1 &
 VLLM_PID=$!

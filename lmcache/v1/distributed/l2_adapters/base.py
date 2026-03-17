@@ -3,11 +3,18 @@
 Interface for L2 adapters
 """
 
+# Future
+from __future__ import annotations
+
 # Standard
 from abc import ABC, abstractmethod
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.native_storage_ops import Bitmap
 
 # First Party
-from lmcache.native_storage_ops import Bitmap
 from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.memory_management import MemoryObj
 
@@ -59,6 +66,12 @@ class L2AdapterInterface(ABC):
     # Event Fd Interface
     #####################
 
+    # IMPORTANT: Each of the three event fd methods below MUST return a
+    # distinct file descriptor.  The store controller and prefetch controller
+    # build fd-to-adapter lookup maps; if any two methods return the same fd
+    # (within one adapter or across adapters), poll-based dispatch will
+    # silently misroute events.
+
     @abstractmethod
     def get_store_event_fd(self) -> int:
         """
@@ -67,6 +80,10 @@ class L2AdapterInterface(ABC):
 
         Returns:
             int: the event fd for store operation.
+
+        Note:
+            Must be distinct from the lookup and load event fds of this
+            adapter, and from the event fds of all other adapters.
         """
         pass
 
@@ -78,6 +95,10 @@ class L2AdapterInterface(ABC):
 
         Returns:
             int: the event fd for lookup and lock operation.
+
+        Note:
+            Must be distinct from the store and load event fds of this
+            adapter, and from the event fds of all other adapters.
         """
         pass
 
@@ -89,6 +110,10 @@ class L2AdapterInterface(ABC):
 
         Returns:
             int: the event fd for load operation.
+
+        Note:
+            Must be distinct from the store and lookup event fds of this
+            adapter, and from the event fds of all other adapters.
         """
         pass
 
@@ -252,3 +277,19 @@ class L2AdapterInterface(ABC):
         the L2 adapter should not be used anymore.
         """
         pass
+
+    #####################
+    # Status Interface
+    #####################
+
+    def report_status(self) -> dict:
+        """
+        Return a status dict for this adapter.
+
+        Must include at least ``is_healthy: bool``.
+        Subclasses should override this with adapter-specific metrics.
+        """
+        return {
+            "is_healthy": True,
+            "extra_warning": "report_status is not implemented and runs default impl",
+        }
