@@ -40,6 +40,7 @@ jobs:
       - if: steps.sync.outputs.changed == 'true'
         uses: peter-evans/create-pull-request@v8
         with:
+          token: ${{ github.token }}
           branch: automation/sync-torch-version
           base: dev
           add-paths: pyproject.toml
