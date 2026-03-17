@@ -144,7 +144,7 @@ class DaxBackend(StoragePluginInterface):
             self._slot_states: dict[int, _SlotState] = {}
 
             self._next_slot = 0
-            self._free_slots: list[int] = []
+            self._free_slots: set[int] = set()
             self._active_ops = 0
             self._active_puts = 0
             self._closing = False
@@ -295,19 +295,17 @@ class DaxBackend(StoragePluginInterface):
 
     def _allocate_slot_locked(self) -> int:
         if self._free_slots:
-            slot = self._free_slots.pop()
-            return slot * self.slot_bytes
+            return self._free_slots.pop()
         if self._next_slot < self._max_slots:
             slot = self._next_slot
             self._next_slot += 1
-            return slot * self.slot_bytes
+            return slot
         raise RuntimeError("No free slots available; eviction required")
 
     def _free_slot_locked(self, slot_id: int) -> None:
         if slot_id < 0:
             return
-        if slot_id not in self._free_slots:
-            self._free_slots.append(slot_id)
+        self._free_slots.add(slot_id)
 
     def _touch_locked(self, key: CacheEngineKey) -> None:
         self._lru.pop(key, None)
@@ -441,12 +439,12 @@ class DaxBackend(StoragePluginInterface):
                         continue
                     while True:
                         try:
-                            offset = self._allocate_slot_locked()
+                            slot_id = self._allocate_slot_locked()
                             break
                         except RuntimeError:
                             if not self._evict_one_locked():
                                 raise
-                    slot_id = int(offset // self.slot_bytes)
+                    offset = slot_id * self.slot_bytes
                     generation = self._reserve_slot_state_locked(slot_id)
 
                     meta = DiskCacheMetadata(
