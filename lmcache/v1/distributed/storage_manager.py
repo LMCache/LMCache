@@ -27,11 +27,11 @@ from lmcache.v1.distributed.storage_controllers import (
     StoreController,
 )
 from lmcache.v1.distributed.storage_controllers.prefetch_policy import (
-    DefaultPrefetchPolicy,
+    create_prefetch_policy,
 )
 from lmcache.v1.distributed.storage_controllers.store_policy import (
     AdapterDescriptor,
-    DefaultStorePolicy,
+    create_store_policy,
 )
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.mp_observability.logger.storage_manager_stats_logger import (
@@ -87,7 +87,7 @@ class StorageManager:
             l1_manager=self._l1_manager,
             l2_adapters=self._l2_adapters,
             adapter_descriptors=adapter_descriptors,
-            policy=DefaultStorePolicy(),
+            policy=create_store_policy(config.store_policy),
         )
         self._store_controller.start()
 
@@ -96,7 +96,7 @@ class StorageManager:
             l1_manager=self._l1_manager,
             l2_adapters=self._l2_adapters,
             adapter_descriptors=adapter_descriptors,
-            policy=DefaultPrefetchPolicy(),
+            policy=create_prefetch_policy(config.prefetch_policy),
         )
         self._prefetch_controller.start()
 

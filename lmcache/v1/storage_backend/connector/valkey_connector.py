@@ -233,6 +233,7 @@ class ValkeyClusterConnector(RemoteConnector):
         username: str,
         password: str,
         hosts_and_ports: Optional[List[Tuple[str, int]]],
+        database_id: Optional[int] = None,
     ):
         # initialize base class, which includes some common attributes
         super().__init__(local_cpu_backend.config, local_cpu_backend.metadata)
@@ -243,6 +244,7 @@ class ValkeyClusterConnector(RemoteConnector):
         self.username = username
         self.password = password
         self.hosts_and_ports = hosts_and_ports
+        self.database_id = database_id
 
         # Create connection
         self.connection = self._init_connection()
@@ -261,8 +263,11 @@ class ValkeyClusterConnector(RemoteConnector):
                     NodeAddress(host, port) for host, port in self.hosts_and_ports
                 ]
                 config = GlideClusterClientConfiguration(
-                    addresses=addresses, credentials=credentials
+                    addresses=addresses,
+                    credentials=credentials,
+                    database_id=self.database_id,
                 )
+
                 return await GlideClusterClient.create(config)
             except Exception as e:
                 raise RuntimeError(f"Fail to init valkey connection {e}") from e
