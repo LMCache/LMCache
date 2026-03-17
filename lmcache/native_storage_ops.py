@@ -103,13 +103,17 @@ class Bitmap:
     def __and__(self, other: "Bitmap") -> "Bitmap":
         size = min(len(self._bits), len(other._bits))
         out = Bitmap(size)
-        out._bits = [a & b for a, b in zip(self._bits[:size], other._bits[:size])]
+        out._bits = [
+            a & b for a, b in zip(self._bits[:size], other._bits[:size])
+        ]
         return out
 
     def __or__(self, other: "Bitmap") -> "Bitmap":
         size = min(len(self._bits), len(other._bits))
         out = Bitmap(size)
-        out._bits = [a | b for a, b in zip(self._bits[:size], other._bits[:size])]
+        out._bits = [
+            a | b for a, b in zip(self._bits[:size], other._bits[:size])
+        ]
         return out
 
     def __invert__(self) -> "Bitmap":
