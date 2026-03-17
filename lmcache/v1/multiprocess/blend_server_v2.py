@@ -729,10 +729,10 @@ def run_cache_server(
         EventBusConfig,
         init_event_bus,
     )
-    from lmcache.v1.mp_observability.subscribers.l1_metrics import (
+    from lmcache.v1.mp_observability.subscribers.metrics.l1 import (
         L1MetricsSubscriber,
     )
-    from lmcache.v1.mp_observability.subscribers.sm_metrics import (
+    from lmcache.v1.mp_observability.subscribers.metrics.sm import (
         SMMetricsSubscriber,
     )
 

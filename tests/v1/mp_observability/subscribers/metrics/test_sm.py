@@ -11,7 +11,7 @@ import pytest
 # First Party
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import EventBus, EventBusConfig
-from lmcache.v1.mp_observability.subscribers.sm_metrics import (
+from lmcache.v1.mp_observability.subscribers.metrics.sm import (
     SMMetricsSubscriber,
 )
 
