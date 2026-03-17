@@ -27,6 +27,10 @@ import torch
 # Use LMCache's own math utilities instead of vllm's
 # (avoids dependency on vllm internal changes like https://github.com/vllm-project/vllm/pull/27188)
 from lmcache import utils
+from lmcache.v1.lookup_client.semantic_provider import (
+    SemanticLookupProvider,
+    SemanticLookupResult,
+)
 from lmcache.integration.vllm.utils import (
     ENGINE_NAME,
     apply_mm_hashes_to_token_ids,
@@ -288,6 +292,9 @@ class ReqMeta:
     disagg_spec: Optional[DisaggSpec] = None
     # the configs of the request
     request_configs: Optional[dict] = None
+    # Opaque, picklable metadata from a SemanticLookupProvider.
+    # Passed through to PostLoadHook.after_kv_load() via PostLoadContext.
+    provider_metadata: Any = None
 
     @staticmethod
     def from_request_tracker(
@@ -569,6 +576,12 @@ class LMCacheConnectorV1Impl:
         self._requests_priority: dict[str, int] = {}
         self._invalid_block_ids: set[int] = set()
 
+        # SemanticLookupProvider — optional approximate KV matching
+        self._semantic_provider: Optional[SemanticLookupProvider] = None
+        # req_id -> SemanticLookupResult pending token-id substitution in
+        # build_connector_meta; cleared when the request is handled or finished
+        self._semantic_substitutions: dict[str, SemanticLookupResult] = {}
+
     def _check_legacy_register_kv_caches(self) -> None:
         """Check for legacy connector without register_kv_caches implementation."""
         if self.lmcache_engine is None:
@@ -590,6 +603,27 @@ class LMCacheConnectorV1Impl:
                 "features may not work, such as DSA"
             )
             self._manager.post_init()
+
+    # ==================== Semantic Lookup Provider ====================
+
+    def set_semantic_lookup_provider(self, provider: SemanticLookupProvider) -> None:
+        """Register a :class:`SemanticLookupProvider`.
+
+        The provider is consulted when the standard chunk-hash lookup returns
+        zero hit tokens.  It can supply an alternate token sequence whose KV
+        cache is already in the store, enabling approximate / semantic cache
+        reuse without storing duplicate KV data.
+
+        Only one provider can be active at a time; calling this method
+        again replaces the previous provider.
+
+        Parameters
+        ----------
+        provider:
+            An instance of a :class:`SemanticLookupProvider` subclass.
+        """
+        self._semantic_provider = provider
+        logger.info("SemanticLookupProvider registered: %s", type(provider).__name__)
 
     # ==================== Property Accessors ====================
 
@@ -1337,6 +1371,31 @@ class LMCacheConnectorV1Impl:
         )
 
         if below_min_retrieve or need_to_allocate <= 0:
+            # Standard lookup found no usable cached tokens.
+            # Consult the semantic provider (if any) for an approximate match.
+            # Only do this when there are truly zero hit tokens (not when
+            # below_min_retrieve: that means there IS a hit, just too small).
+            if (
+                num_external_hit_tokens == 0
+                and not below_min_retrieve
+                and self._semantic_provider is not None
+                and not request.request_id.startswith("mock_req")
+            ):
+                # Always derive token_ids fresh from the request so this branch
+                # is correct whether we are in a first lookup (else) or an
+                # idempotent re-call (if / cached branch).
+                sem_token_ids: list[int] = list(request.all_token_ids)
+                if self.skip_last_n_tokens > 0:
+                    sem_token_ids = sem_token_ids[: -self.skip_last_n_tokens]
+                sem_request_configs = extract_request_configs(request.sampling_params)
+                sem_result = self._try_semantic_lookup(
+                    req_id,
+                    sem_token_ids,
+                    num_computed_tokens,
+                    sem_request_configs,
+                )
+                if sem_result is not None:
+                    return sem_result
             return 0
 
         # TODO: Align to vLLM block size. Should test whether it can be removed
@@ -1344,6 +1403,95 @@ class LMCacheConnectorV1Impl:
         #        self._block_size
 
         return need_to_allocate
+
+    def _try_semantic_lookup(
+        self,
+        req_id: str,
+        token_ids: list[int],
+        num_computed_tokens: int,
+        request_configs: Optional[dict],
+    ) -> Optional[int]:
+        """Consult the semantic provider and set up a donor substitution.
+
+        Called from :meth:`get_num_new_matched_tokens` when the standard
+        chunk-hash lookup returns zero hit tokens.
+
+        Returns the tokens-to-allocate count (>0) when a semantic hit is
+        found, or ``None`` when the provider returns no match.
+        """
+        assert self._semantic_provider is not None
+        assert self.lookup_client is not None
+
+        result = self._semantic_provider.on_lookup_miss(
+            req_id, token_ids, num_computed_tokens
+        )
+        if result is None:
+            return None
+
+        # Re-lookup the chunk store using the donor's token IDs.
+        # Clear the previously cached zero-hit result first so that
+        # the lookup client accepts the new query.
+        self.lookup_client.clear_lookup_status(req_id)
+        num_semantic_hit = self.lookup_client.lookup(
+            result.alternate_token_ids,
+            lookup_id=req_id,
+            request_configs=request_configs,
+        )
+
+        if not num_semantic_hit or num_semantic_hit <= num_computed_tokens:
+            # Donor KV not in the store (or too few tokens) — fall through
+            # to normal cold prefill. Restore clean lookup state.
+            self.lookup_client.clear_lookup_status(req_id)
+            return None
+
+        # Store the substitution so build_connector_meta can swap token IDs.
+        self._semantic_substitutions[req_id] = result
+
+        need_to_allocate = num_semantic_hit - num_computed_tokens
+        # Full-prompt hit: recompute the last token (same as standard path)
+        if num_semantic_hit == len(token_ids):
+            need_to_allocate -= 1
+
+        if need_to_allocate <= 0:
+            self.lookup_client.clear_lookup_status(req_id)
+            self._semantic_substitutions.pop(req_id, None)
+            return None
+
+        self.load_specs[req_id] = LoadSpec(
+            vllm_cached_tokens=num_computed_tokens,
+            lmcache_cached_tokens=num_semantic_hit,
+            can_load=False,
+        )
+        logger.info(
+            "Semantic hit for req %s: donor=%s hit=%d need_to_alloc=%d",
+            req_id,
+            result.source_id or "unknown",
+            num_semantic_hit,
+            need_to_allocate,
+        )
+        return need_to_allocate
+
+    def _apply_semantic_substitution(self, req_meta: "ReqMeta") -> None:
+        """Swap ``req_meta.token_ids`` with the donor tokens for a semantic hit.
+
+        Called from :meth:`build_connector_meta` for each newly created
+        :class:`ReqMeta`.  Pops the pending substitution so it is applied
+        exactly once.
+        """
+        sub = self._semantic_substitutions.pop(req_meta.req_id, None)
+        if sub is None:
+            return
+        # Align the donor token IDs to the same length that
+        # from_request_tracker() selected for this request.
+        req_meta.token_ids = sub.alternate_token_ids[: len(req_meta.token_ids)]
+        if sub.skip_save and req_meta.save_spec is not None:
+            req_meta.save_spec.can_save = False
+        req_meta.provider_metadata = sub.provider_metadata
+        logger.debug(
+            "Applied semantic substitution for req %s (donor src=%s)",
+            req_meta.req_id,
+            sub.source_id or "unknown",
+        )
 
     @_lmcache_nvtx_annotate
     def update_state_after_alloc(self, request: "Request", num_external_tokens: int):
@@ -1482,6 +1630,7 @@ class LMCacheConnectorV1Impl:
                 save_decode_cache=self.config.save_decode_cache,
             )
             if req_meta is not None:
+                self._apply_semantic_substitution(req_meta)
                 meta.add_request(req_meta)
 
         cached_reqs = scheduler_output.scheduled_cached_reqs
@@ -1528,6 +1677,7 @@ class LMCacheConnectorV1Impl:
                     save_decode_cache=self.config.save_decode_cache,
                 )
                 if req_meta is not None:
+                    self._apply_semantic_substitution(req_meta)
                     meta.add_request(req_meta)
             return meta
 
@@ -1637,6 +1787,7 @@ class LMCacheConnectorV1Impl:
                 save_decode_cache=self.config.save_decode_cache,
             )
             if req_meta is not None:
+                self._apply_semantic_substitution(req_meta)
                 meta.add_request(req_meta)
 
         return meta
@@ -1684,6 +1835,24 @@ class LMCacheConnectorV1Impl:
                 return_params = return_params or {}
                 return_params["num_lmcache_cached_tokens"] = (
                     request_tracker.num_lmcache_cached_tokens
+                )
+
+        # Notify semantic provider and clean up any leftover substitution state
+        if self._semantic_provider is not None:
+            self._semantic_substitutions.pop(request.request_id, None)
+            try:
+                token_ids = list(request.all_token_ids)
+                num_prompt_tokens = getattr(
+                    request, "num_prompt_tokens", len(token_ids)
+                )
+                self._semantic_provider.on_request_finished(
+                    request.request_id, token_ids, num_prompt_tokens
+                )
+            except Exception:
+                logger.warning(
+                    "SemanticLookupProvider.on_request_finished raised for req %s",
+                    request.request_id,
+                    exc_info=True,
                 )
 
         return False, return_params
