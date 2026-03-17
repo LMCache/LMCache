@@ -32,6 +32,7 @@ export LM_CACHE_METRICS=1
 export LMCACHE_CONFIG_FILE="/home/users/ntu/yulin001/wychen/lmcache-multimodal/scripts_test_video/lmcache_blend_gpu.yml"
 export LM_CACHE_CONFIG_FILE="/home/users/ntu/yulin001/wychen/lmcache-multimodal/scripts_test_video/lmcache_blend_gpu.yml"
 export HF_HOME="/home/users/ntu/yulin001/.cache/huggingface"
+export VLLM_INTERNVL_PRUNE=1
 
 export PATH=/home/users/ntu/yulin001/.conda/envs/vllm/bin:$PATH
 
@@ -66,7 +67,7 @@ for ratio in "${blend_recompute_ratios[@]}"; do
   echo "  blend_recompute_ratio set to ${ratio}"
   
   # Ensure results directory exists
-  results_dir="results_analysis/logs/${model_name}/small_dataset/with_codec"
+  results_dir="results_analysis/logs/${model_name}/small_dataset/e2e_test"
   mkdir -p "$results_dir"
 
   # Clean up previous logs and processes
@@ -82,10 +83,12 @@ for ratio in "${blend_recompute_ratios[@]}"; do
 
   # Start vLLM server in the background
   SERVER_LOG=server_win${WIN_SIZES[0]}_stride${STRIDE_SIZES[0]}_recompute${ratio}_costream.log
+  rm $SERVER_LOG
   vllm serve $model \
     --host 0.0.0.0 \
     --port 8000 \
     --trust-remote-code \
+    --chat-template-content-format string \
     --disable-log-requests \
     --max-num-batched-tokens 102400 \
     --max-model-len 30656 \
@@ -109,7 +112,7 @@ for ratio in "${blend_recompute_ratios[@]}"; do
     for STRIDE in "${STRIDE_SIZES[@]}"; do
       echo "Running win=${WIN}s, stride=${STRIDE}"
       
-      python3 with_codec_client.py \
+      python3 e2e_with_codec_client.py \
         --dataset-root $dataset_root  \
         --dataset-json $dataset_json \
         --output-dir $results_dir \
