@@ -101,7 +101,7 @@ command authors just build metrics and call ``emit()``:
    def execute(self, args: argparse.Namespace) -> None:
        # create_metrics() auto-registers:
        #   - StreamHandler → stdout (formatter chosen by --format, default: terminal)
-       #   - FileHandler   → if --output is set (always JSON)
+       #   - FileHandler   → if --output is set (same format as --format)
        metrics = self.create_metrics("Bench KV Cache Result", args)
 
        # Create named sections
@@ -126,4 +126,4 @@ The ``--format`` and ``--output`` flags are available via the shared helper:
        add_output_args(parser)
        # Adds:
        #   --format FORMAT  Stdout format (default: terminal). Available: terminal, json.
-       #   --output PATH    Save metrics to a JSON file at PATH.
+       #   --output PATH    Save metrics to a file at PATH (format chosen by --format).

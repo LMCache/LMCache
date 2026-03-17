@@ -24,8 +24,8 @@ After installing LMCache, the ``lmcache`` command is available:
    # JSON on stdout (for scripts)
    lmcache mock --name my-run --format json
 
-   # Save metrics to JSON file
-   lmcache mock --name my-run --num-items 5 --output result.json
+   # Save metrics to a file (format follows --format, default: terminal)
+   lmcache mock --name my-run --num-items 5 --format json --output result.json
 
 
 Available Commands

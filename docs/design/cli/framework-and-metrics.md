@@ -208,7 +208,7 @@ sets up default handlers automatically:
 metrics = self.create_metrics("Bench Result", args, width=48)
 # ^ automatically adds:
 #   - StreamHandler → stdout (formatter chosen by --format, default: terminal)
-#   - FileHandler   → if --output is set (always JSON)
+#   - FileHandler   → if --output is set (same format as --format)
 ```
 
 ### Handlers and Formatters
@@ -334,7 +334,7 @@ Throughput (items/s):            3403.73
 Status:                               OK
 ========================================
 
-# With --output, both stdout and JSON file are produced (two handlers)
+# With --output, both stdout and file are produced (two handlers)
 $ lmcache mock --name test-run --num-items 5 --output result.json
 (same terminal output)
 # result.json → {"title": "Mock Result", "metrics": {"input": {"name": "test-run", ...}, ...}}
@@ -360,12 +360,13 @@ lmcache bench ... --format terminal   # ASCII table (default)
 
 ### `--output` flag
 
-Saves metrics to a JSON file. Also added via `add_output_args(parser)`.
+Saves metrics to a file. The file format follows ``--format`` (default:
+``terminal``). Also added via `add_output_args(parser)`.
 Can be combined with `--format`:
 
 ```bash
-lmcache bench ... --output result.json                 # ASCII stdout + JSON file
-lmcache bench ... --format json --output result.json   # JSON stdout + JSON file
+lmcache bench ... --output result.txt                  # terminal format to both stdout and file
+lmcache bench ... --format json --output result.json   # JSON to both stdout and file
 ```
 
 ### `--url` flag

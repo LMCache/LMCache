@@ -96,8 +96,8 @@ class BaseCommand(abc.ABC):
 
         * A :class:`StreamHandler` writing to stdout. The formatter is
           determined by ``--format`` (default: ``terminal``).
-        * A :class:`FileHandler` if ``--output`` is set (always uses
-          :class:`JsonFormatter`).
+        * A :class:`FileHandler` if ``--output`` is set (uses the same
+          formatter chosen by ``--format``).
 
         Args:
             title: Report title.
@@ -120,7 +120,10 @@ class BaseCommand(abc.ABC):
         # File handler if --output is set
         output = getattr(args, "output", None)
         if output:
-            metrics.add_handler(FileHandler(output))
+            file_formatter = get_formatter(fmt_name)
+            if isinstance(file_formatter, TerminalFormatter):
+                file_formatter = TerminalFormatter(width=width)
+            metrics.add_handler(FileHandler(output, file_formatter))
 
         return metrics
 
@@ -143,5 +146,5 @@ def add_output_args(parser: argparse.ArgumentParser) -> None:
         type=str,
         default=None,
         metavar="PATH",
-        help="Save metrics to a JSON file at PATH.",
+        help="Save metrics to a file at PATH (format chosen by --format).",
     )
