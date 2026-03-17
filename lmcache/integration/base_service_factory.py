@@ -33,6 +33,11 @@ class BaseServiceFactory:
     components for their serving engine integration.
     """
 
+    def get_engine_instance_id(self) -> str:
+        """Return the instance_id used to register the engine with
+        LMCacheEngineBuilder. Used by LMCacheManager for engine destruction."""
+        raise NotImplementedError
+
     def get_or_create_metadata(self) -> Optional["LMCacheMetadata"]:
         raise NotImplementedError
 

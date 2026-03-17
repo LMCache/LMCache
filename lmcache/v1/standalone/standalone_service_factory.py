@@ -46,6 +46,9 @@ class StandaloneServiceFactory(BaseServiceFactory):
         self._broadcast_object_fn = broadcast_object_fn
         self._engine: Optional[LMCacheEngine] = None
 
+    def get_engine_instance_id(self) -> str:
+        return self._config.lmcache_instance_id
+
     def get_or_create_metadata(self) -> Optional[LMCacheMetadata]:
         return self._metadata
 

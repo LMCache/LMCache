@@ -62,6 +62,12 @@ class VllmServiceFactory(BaseServiceFactory):
         self.metadata: Optional[LMCacheMetadata] = None
         self.lmcache_engine: Optional[LMCacheEngine] = None
 
+    def get_engine_instance_id(self) -> str:
+        # First Party
+        from lmcache.integration.vllm.utils import ENGINE_NAME
+
+        return ENGINE_NAME
+
     def get_or_create_metadata(self) -> Optional[LMCacheMetadata]:
         if self.metadata is not None:
             return self.metadata

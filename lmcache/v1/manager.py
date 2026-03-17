@@ -35,9 +35,6 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-# Engine name constant
-ENGINE_NAME = "LMCacheEngine"
-
 
 class LMCacheManager:
     """
@@ -299,9 +296,12 @@ class LMCacheManager:
 
         # Destroy cache engine
         try:
-            logger.info("Destroying LMCache engine: %s", ENGINE_NAME)
+            engine_instance_id = self._service_factory.get_engine_instance_id()
+            logger.info("Destroying LMCache engine: %s", engine_instance_id)
             with ThreadPoolExecutor(max_workers=1) as executor:
-                future = executor.submit(LMCacheEngineBuilder.destroy, ENGINE_NAME)
+                future = executor.submit(
+                    LMCacheEngineBuilder.destroy, engine_instance_id
+                )
                 try:
                     future.result(timeout=15.0)
                     logger.info("LMCache engine destroyed successfully")
