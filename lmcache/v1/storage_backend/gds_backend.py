@@ -47,8 +47,6 @@ class UnsupportedMetadataVersion(Exception):
     pass
 
 
-# dummy change
-
 torch_dtypes = {
     torch.half: "F16",
     torch.bfloat16: "BF16",
