@@ -12,7 +12,7 @@ requires = [
     "packaging>=24.2",
     "setuptools>=77.0.3,<81.0.0",
     "setuptools_scm>=8",
-    "torch==2.10.0",
+    "torch==2.8.0",
     "wheel",
 ]
 build-backend = "setuptools.build_meta"
@@ -84,8 +84,6 @@ select = [
     # "I",
     # flake8-logging-format
     #"G",
-    # flake8-self (private member access)
-    "SLF",
 ]
 ignore = [
     # star imports
@@ -97,11 +95,6 @@ ignore = [
     # f-string format
     "UP032",
 ]
-
-[tool.ruff.lint.per-file-ignores]
-# Ignore SLF everywhere except lmcache/v1/multiprocess/
-"!lmcache/v1/multiprocess/**" = ["SLF"]
-"!lmcache/v1/distributed/**" = ["SLF"]
 
 [tool.ruff.lint.isort]
 # same as .isort.cfg
@@ -115,7 +108,6 @@ from-first = true
 
 [tool.mypy]
 
-platform = "linux"
 modules = ["lmcache", "tests", "benchmarks"]
 
 disable_error_code = [
@@ -143,10 +135,6 @@ disallow_untyped_calls = false
 warn_return_any = false
 
 follow_imports = "silent"
-
-[tool.codespell]
-ignore-words-list = "afterall,allready,notin"
-skip = "operator/config/crd/bases/*"
 
 [tool.cibuildwheel]
 build = "cp3*-manylinux_x86_64"
