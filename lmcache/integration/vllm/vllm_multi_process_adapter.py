@@ -238,6 +238,7 @@ class LMCacheMPSchedulerAdapter:
         # request, by which time vLLM is fully ready.
         self._heartbeat_interval = heartbeat_interval
         self._heartbeat: HeartbeatThread | None = None
+        self._heartbeat_lock = threading.Lock()
 
     @property
     def is_healthy(self) -> bool:
@@ -248,12 +249,15 @@ class LMCacheMPSchedulerAdapter:
         """Lazily start the heartbeat thread on first use."""
         if self._heartbeat is not None:
             return
-        self._heartbeat = HeartbeatThread(
-            mq_client=self.mq_client,
-            health_event=self._health_event,
-            interval=self._heartbeat_interval,
-        )
-        self._heartbeat.start()
+        with self._heartbeat_lock:
+            if self._heartbeat is not None:
+                return
+            self._heartbeat = HeartbeatThread(
+                mq_client=self.mq_client,
+                health_event=self._health_event,
+                interval=self._heartbeat_interval,
+            )
+            self._heartbeat.start()
 
     @_lmcache_nvtx_annotate
     def maybe_submit_lookup_request(
@@ -529,6 +533,7 @@ class LMCacheMPWorkerAdapter:
         # completes, i.e. after vLLM is fully ready.
         self._heartbeat_interval = heartbeat_interval
         self._heartbeat: HeartbeatThread | None = None
+        self._heartbeat_lock = threading.Lock()
 
         # request telemetry, used for prefill-decode disagg
         # TODO: pass down the configuration via vLLM connector config
@@ -575,7 +580,7 @@ class LMCacheMPWorkerAdapter:
             raise ConnectionError(
                 "LMCache server did not respond to "
                 "register_kv_caches within "
-                "%ss. Is the server running?" % self._mq_timeout
+                f"{self._mq_timeout}s. Is the server running?"
             ) from None
 
         # Start heartbeat only after vLLM is fully ready
@@ -586,12 +591,15 @@ class LMCacheMPWorkerAdapter:
         """Start the heartbeat thread (idempotent)."""
         if self._heartbeat is not None:
             return
-        self._heartbeat = HeartbeatThread(
-            mq_client=self.mq_client,
-            health_event=self._health_event,
-            interval=self._heartbeat_interval,
-        )
-        self._heartbeat.start()
+        with self._heartbeat_lock:
+            if self._heartbeat is not None:
+                return
+            self._heartbeat = HeartbeatThread(
+                mq_client=self.mq_client,
+                health_event=self._health_event,
+                interval=self._heartbeat_interval,
+            )
+            self._heartbeat.start()
 
     @_lmcache_nvtx_annotate
     def submit_store_request(
