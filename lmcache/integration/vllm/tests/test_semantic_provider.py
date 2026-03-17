@@ -421,6 +421,23 @@ class TestApplySemanticSubstitution:
         # token_ids unchanged
         assert req_meta.token_ids == original_ids
 
+    def test_short_donor_skipped_safely(self):
+        """If donor is shorter than needed, substitution is skipped (not applied)."""
+        impl = _make_impl()
+        # Donor has only 128 tokens but req_meta needs 256
+        impl._semantic_substitutions["req-g"] = SemanticLookupResult(
+            alternate_token_ids=list(range(128)),  # too short
+            num_cached_tokens=128,
+        )
+        original_ids = list(range(256))
+        req_meta = self._make_req_meta("req-g", original_ids)
+        impl._apply_semantic_substitution(req_meta)
+
+        # token_ids should remain unchanged (substitution skipped)
+        assert req_meta.token_ids == original_ids
+        # substitution state was consumed (popped)
+        assert "req-g" not in impl._semantic_substitutions
+
 
 # ---------------------------------------------------------------------------
 # request_finished notification tests

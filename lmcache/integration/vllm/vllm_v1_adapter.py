@@ -27,10 +27,6 @@ import torch
 # Use LMCache's own math utilities instead of vllm's
 # (avoids dependency on vllm internal changes like https://github.com/vllm-project/vllm/pull/27188)
 from lmcache import utils
-from lmcache.v1.lookup_client.semantic_provider import (
-    SemanticLookupProvider,
-    SemanticLookupResult,
-)
 from lmcache.integration.vllm.utils import (
     ENGINE_NAME,
     apply_mm_hashes_to_token_ids,
@@ -44,6 +40,10 @@ from lmcache.v1.cache_engine import LMCacheEngine
 from lmcache.v1.compute.blend import LMCBlenderBuilder
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.config_base import validate_and_set_config_value
+from lmcache.v1.lookup_client.semantic_provider import (
+    SemanticLookupProvider,
+    SemanticLookupResult,
+)
 from lmcache.v1.manager import LMCacheManager
 
 if TYPE_CHECKING:
@@ -1418,6 +1418,13 @@ class LMCacheConnectorV1Impl:
 
         Returns the tokens-to-allocate count (>0) when a semantic hit is
         found, or ``None`` when the provider returns no match.
+
+        Note on idempotency: if this method returns ``None`` (provider finds
+        no semantic hit), the standard lookup result (0) remains cached in
+        the lookup client.  On a subsequent idempotent re-call (preemption
+        recovery without ``update_state_after_alloc``), the provider's
+        ``on_lookup_miss`` will be invoked again.  Providers should be
+        prepared for this and treat duplicate calls as idempotent.
         """
         assert self._semantic_provider is not None
         assert self.lookup_client is not None
@@ -1481,8 +1488,22 @@ class LMCacheConnectorV1Impl:
         sub = self._semantic_substitutions.pop(req_meta.req_id, None)
         if sub is None:
             return
+        # Guard: the donor must cover at least as many tokens as
+        # from_request_tracker() allocated for this request.  A shorter
+        # donor would leave req_meta.token_ids shorter than slot_mapping,
+        # causing an assertion failure in start_load_kv.
+        if len(sub.alternate_token_ids) < len(req_meta.token_ids):
+            logger.warning(
+                "Semantic donor for req %s has %d tokens but %d are needed; "
+                "skipping substitution and falling back to cold prefill.",
+                req_meta.req_id,
+                len(sub.alternate_token_ids),
+                len(req_meta.token_ids),
+            )
+            return
         # Align the donor token IDs to the same length that
-        # from_request_tracker() selected for this request.
+        # from_request_tracker() selected for this request (chunk-boundary
+        # aligned, may be shorter than the full prompt).
         req_meta.token_ids = sub.alternate_token_ids[: len(req_meta.token_ids)]
         if sub.skip_save and req_meta.save_spec is not None:
             req_meta.save_spec.can_save = False
