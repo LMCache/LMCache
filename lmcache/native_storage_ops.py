@@ -71,13 +71,17 @@ class Bitmap:
                 self._bits[i] = 1
 
     def set(self, index: int) -> None:
-        self._bits[index] = 1
+        if 0 <= index < len(self._bits):
+            self._bits[index] = 1
 
     def clear(self, index: int) -> None:
-        self._bits[index] = 0
+        if 0 <= index < len(self._bits):
+            self._bits[index] = 0
 
     def test(self, index: int) -> bool:
-        return bool(self._bits[index])
+        if 0 <= index < len(self._bits):
+            return bool(self._bits[index])
+        return False
 
     def popcount(self) -> int:
         return sum(self._bits)
