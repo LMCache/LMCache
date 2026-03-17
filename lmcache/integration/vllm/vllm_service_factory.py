@@ -137,9 +137,15 @@ class VllmServiceFactory(BaseServiceFactory):
                     kv_transfer_config, "kv_connector_extra_config", None
                 )
 
-        local_worker_id, local_world_size = calculate_local_rank_and_world_size(
-            self.vllm_config
-        )
+        if self.role == "scheduler":
+            # Avoid GPU probing for scheduler-only metadata path;
+            # scheduler may run on CPU-only control-plane nodes.
+            local_worker_id = parallel_config.rank
+            local_world_size = parallel_config.world_size
+        else:
+            local_worker_id, local_world_size = calculate_local_rank_and_world_size(
+                self.vllm_config
+            )
         self.metadata = LMCacheMetadata(
             model_name=model_config.model,
             world_size=parallel_config.world_size,
@@ -231,6 +237,11 @@ class VllmServiceFactory(BaseServiceFactory):
     def _ensure_engine(self):
         if self.lmcache_engine is None:
             self.get_or_create_lmcache_engine()
+
+    def maybe_create_prometheus_logger(self):
+        # PrometheusLogger is created on-demand within other components
+        # (e.g., engine creation for scheduler, health monitor setup).
+        return None
 
     def maybe_create_lookup_client(self) -> Optional[LookupClientInterface]:
         # Only scheduler needs lookup client

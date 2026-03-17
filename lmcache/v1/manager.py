@@ -76,31 +76,29 @@ class LMCacheManager:
         self._init_failed = False
         self._init_failed_reason: str = ""
 
-        # Health monitor initialized during post_init
         self._health_monitor: Optional[HealthMonitor] = None
+        self._lmcache_engine_metadata: Optional[LMCacheMetadata] = None
+        self._lmcache_engine: Optional[LMCacheEngine] = None
+        self._lookup_client: Optional[LookupClientInterface] = None
+        self._lookup_server: Optional[
+            Union["LMCacheLookupServer", "LMCacheAsyncLookupServer"]
+        ] = None
+        self._offload_server: Optional[ZMQOffloadServer] = None
+        self._runtime_plugin_launcher: Optional[RuntimePluginLauncher] = None
+        self._api_server: Optional[InternalAPIServer] = None
 
         # Initialize components via service factory
         try:
-            self._lmcache_engine_metadata: Optional[LMCacheMetadata] = (
-                service_factory.get_or_create_metadata()
-            )
-            self._lmcache_engine: Optional[LMCacheEngine] = (
-                service_factory.get_or_create_lmcache_engine()
-            )
-            self._lookup_client: Optional[LookupClientInterface] = (
-                service_factory.maybe_create_lookup_client()
-            )
-            self._lookup_server: Optional[
-                Union["LMCacheLookupServer", "LMCacheAsyncLookupServer"]
-            ] = service_factory.maybe_create_lookup_server()
-            self._offload_server: Optional[ZMQOffloadServer] = (
-                service_factory.maybe_create_offload_server()
-            )
-            self._runtime_plugin_launcher: Optional[RuntimePluginLauncher] = (
+            self._lmcache_engine_metadata = service_factory.get_or_create_metadata()
+            self._lmcache_engine = service_factory.get_or_create_lmcache_engine()
+            self._lookup_client = service_factory.maybe_create_lookup_client()
+            self._lookup_server = service_factory.maybe_create_lookup_server()
+            self._offload_server = service_factory.maybe_create_offload_server()
+            self._runtime_plugin_launcher = (
                 service_factory.maybe_create_runtime_plugin_launcher()
             )
-            self._api_server: Optional[InternalAPIServer] = (
-                service_factory.maybe_create_internal_api_server(lmcache_manager=self)
+            self._api_server = service_factory.maybe_create_internal_api_server(
+                lmcache_manager=self
             )
         except Exception as e:
             self._init_failed = True
