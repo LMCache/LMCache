@@ -25,7 +25,7 @@ class TTLLock:
         self._expire_at_ms = 0
 
     def _now_ms(self) -> int:
-        return int(time.time() * 1000)
+        return int(time.monotonic() * 1000)
 
     def _expired(self) -> bool:
         return self._expire_at_ms <= self._now_ms()
@@ -41,6 +41,7 @@ class TTLLock:
         with self._lock:
             if self._expired():
                 self._count = 0
+                return
             if self._count > 0:
                 self._count -= 1
 
@@ -149,19 +150,23 @@ class RangePatternMatcher:
     def __init__(self, start_pattern: list[int], end_pattern: list[int]) -> None:
         if not start_pattern or not end_pattern:
             raise ValueError("patterns must not be empty")
-        self.start = start_pattern
-        self.end = end_pattern
+        self._start = start_pattern
+        self._end = end_pattern
 
-    def match(self, data: list[int]) -> list[int]:
-        starts = ParallelPatternMatcher(self.start).match(data)
-        results: list[int] = []
-        for s in starts:
-            for e in range(s + len(self.start), len(data) - len(self.end) + 1):
-                if data[e : e + len(self.end)] == self.end:
-                    results.append(s)
+    def match(self, data: list[int]) -> list[tuple[int, int]]:
+        start_matches = ParallelPatternMatcher(self._start).match(data)
+        ranges: list[tuple[int, int]] = []
+        start_len = len(self._start)
+        end_len = len(self._end)
+
+        for start_idx in start_matches:
+            search_idx = start_idx + start_len
+            while search_idx <= len(data) - end_len:
+                if data[search_idx : search_idx + end_len] == self._end:
+                    ranges.append((start_idx, search_idx + end_len))
                     break
-        return results
+                search_idx += 1
+        return ranges
 
 
 __all__ = ["TTLLock", "Bitmap", "ParallelPatternMatcher", "RangePatternMatcher"]
-
