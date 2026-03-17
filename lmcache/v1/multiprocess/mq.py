@@ -360,6 +360,9 @@ class MessageQueueServer:
         # Registered handlers: request_type -> (payload_cls, handler)
         self.handlers: dict[RequestType, RequestHandlerBase[Any]] = {}
 
+        # Dedicated thread pools for specific request types
+        self.dedicated_pools: list[ThreadPoolExecutor] = []
+
     def _call_sync_handler(
         self,
         handler_entry: SyncRequestHandler[Any],
@@ -606,10 +609,65 @@ class MessageQueueServer:
     ) -> None:
         raise NotImplementedError
 
+    def add_dedicated_thread_pool(
+        self,
+        request_types: list[RequestType],
+        max_workers: int,
+    ) -> None:
+        """Assign a dedicated ThreadPoolExecutor to specific request types.
+
+        Must be called after the handlers are registered (via add_handler /
+        add_blocking_handler) and before start().  Each request_type must
+        already be registered as a BlockingRequestHandler; otherwise a
+        ValueError or TypeError is raised.
+
+        Args:
+            request_types: The request types that should use this pool.
+            max_workers: Number of worker threads in the dedicated pool.
+        """
+        # Pass 1: validate all request types
+        for request_type in request_types:
+            handler = self.handlers.get(request_type)
+            if handler is None:
+                raise ValueError(
+                    f"No handler registered for request type: {request_type}. "
+                    f"Register handlers before calling add_dedicated_thread_pool."
+                )
+            if not isinstance(handler, BlockingRequestHandler):
+                raise TypeError(
+                    f"Handler for {request_type} is "
+                    f"{type(handler).__name__}, not BlockingRequestHandler. "
+                    f"Only blocking handlers can use dedicated thread pools."
+                )
+
+        # Pass 2: create pool and assign
+        if not request_types:
+            return
+
+        pool = ThreadPoolExecutor(
+            max_workers=max_workers,
+            thread_name_prefix=f"dedicated-pool-{len(self.dedicated_pools)}",
+        )
+        self.dedicated_pools.append(pool)
+        for request_type in request_types:
+            handler = self.handlers[request_type]
+            assert isinstance(handler, BlockingRequestHandler)
+            handler.executor = pool
+
+        logger.debug(
+            "Created dedicated thread pool (max_workers=%d) for request types: %s",
+            max_workers,
+            [rt.name for rt in request_types],
+        )
+
     def start(self):
         self.worker_thread.start()
 
     def close(self) -> None:
         self.is_finished.set()
-        self.worker_thread.join()
+        if self.worker_thread.is_alive():
+            self.worker_thread.join()
         self.socket.close()
+        self.thread_pool.shutdown(wait=False)
+        for pool in self.dedicated_pools:
+            pool.shutdown(wait=False)
