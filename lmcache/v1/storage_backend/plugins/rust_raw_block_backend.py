@@ -67,8 +67,23 @@ class RustRawBlockBackend(StoragePluginInterface):
     - On-device metadata checkpoint for restart recovery
     - Efficient buffer operations via Rust extension
 
-    .. warning::
-       **This backend currently only supports TP=1 (single GPU) deployments.**
+    - TP > 1 support via per-TP partitions
+
+    TP > 1 Support:
+    ----------------
+    When using Tensor Parallelism (TP > 1), each TP worker must use a
+    separate partition to avoid metadata conflicts and data corruption.
+
+    Configuration:
+    For TP > 1, you must explicitly configure device paths for each TP worker:
+       extra_config:
+         rust_raw_block.per_tp_device_paths:
+           "0": "/dev/nvme0n1p1"
+           "1": "/dev/nvme0n1p2"
+           "2": "/dev/nvme0n1p3"
+           "3": "/dev/nvme0n1p4"
+
+    Note: Partitions must be pre-created on the device before use.
     """
 
     def __init__(
@@ -93,17 +108,37 @@ class RustRawBlockBackend(StoragePluginInterface):
         if self.config is None:
             raise ValueError("RustRawBlockBackend requires config")
 
-        if self.metadata is not None and self.metadata.world_size != 1:
-            raise ValueError(
-                "RustRawBlockBackend currently only supports TP=1 "
-                "(single GPU) deployments. "
-                f"Current world_size={self.metadata.world_size}."
-            )
-
         extra = self.config.extra_config or {}
-        self.device_path: str = extra.get("rust_raw_block.device_path", "")
-        if not self.device_path:
-            raise ValueError("extra_config['rust_raw_block.device_path'] is required")
+
+        # Support TP > 1 via per-TP device paths.
+        # Each TP worker uses its own partition to avoid conflicts.
+        if self.metadata is not None and self.metadata.world_size > 1:
+            tp_rank = self.metadata.worker_id
+            per_tp_devices = extra.get("rust_raw_block.per_tp_device_paths", {})
+
+            if not per_tp_devices:
+                raise ValueError(
+                    "For TP > 1, rust_raw_block.per_tp_device_paths is required. "
+                    "Each TP worker must have an explicit device path configured."
+                )
+
+            tp_rank_str = str(tp_rank)
+            self.device_path = per_tp_devices.get(tp_rank_str)
+            if not self.device_path:
+                raise ValueError(
+                    f"No device path configured for TP rank {tp_rank_str}. "
+                    f"Available ranks: {list(per_tp_devices.keys())}"
+                )
+            logger.info(
+                f"RustRawBlockBackend: TP={self.metadata.world_size} mode, "
+                f"using explicit device path for rank {tp_rank}: {self.device_path}"
+            )
+        else:
+            self.device_path: str = extra.get("rust_raw_block.device_path", "")
+            if not self.device_path:
+                raise ValueError(
+                    "extra_config['rust_raw_block.device_path'] is required"
+                )
 
         self.capacity_bytes: int = int(extra.get("rust_raw_block.capacity_bytes", 0))
         self.block_align: int = int(extra.get("rust_raw_block.block_align", 4096))
