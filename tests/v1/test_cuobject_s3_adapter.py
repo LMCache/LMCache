@@ -1,0 +1,159 @@
+# SPDX-License-Identifier: Apache-2.0
+"""Unit tests for the cuObject S3 connector adapter.
+
+Verifies that:
+- The adapter registers itself with the ``cuobj+s3://`` prefix.
+- ``create_connector`` extracts cuObject-specific config and strips the
+  ``cuobj+`` prefix before passing the URL to the connector.
+- Auto-discovery picks up the adapter from the connector package.
+"""
+# Standard
+from types import ModuleType
+from unittest.mock import MagicMock, patch
+import asyncio
+import importlib
+import pkgutil
+
+# Third Party
+import pytest
+
+# First Party
+from lmcache.v1.storage_backend.connector import (
+    ConnectorAdapter,
+    ConnectorManager,
+)
+from lmcache.v1.storage_backend.connector.cuobject_s3_adapter import (
+    CuObjectS3ConnectorAdapter,
+)
+
+
+# ---------------------------------------------------------------------------
+# Tests
+# ---------------------------------------------------------------------------
+
+
+class TestAdapterRegistration:
+    """Verify adapter metadata."""
+
+    def test_prefix(self):
+        adapter = CuObjectS3ConnectorAdapter()
+        assert adapter.schema == "cuobj+s3://"
+
+    def test_is_connector_adapter(self):
+        adapter = CuObjectS3ConnectorAdapter()
+        assert isinstance(adapter, ConnectorAdapter)
+
+
+class TestCreateConnector:
+    """Verify that create_connector builds the right connector."""
+
+    def test_strips_cuobj_prefix(self):
+        """The URL passed to CuObjectS3Connector should be s3://..."""
+        adapter = CuObjectS3ConnectorAdapter()
+
+        mock_config = MagicMock()
+        mock_config.extra_config = {
+            "s3_region": "us-east-1",
+            "s3_num_io_threads": 4,
+            "s3_prefer_http2": False,
+            "s3_enable_s3express": False,
+            "disable_tls": True,
+            "cuobj_nic_device": "mlx5_0",
+        }
+
+        mock_metadata = MagicMock()
+        mock_backend = MagicMock()
+        mock_loop = asyncio.new_event_loop()
+
+        mock_context = MagicMock()
+        mock_context.url = "cuobj+s3://bucket.s3.us-east-1.amazonaws.com"
+        mock_context.config = mock_config
+        mock_context.metadata = mock_metadata
+        mock_context.loop = mock_loop
+        mock_context.local_cpu_backend = mock_backend
+
+        with patch(
+            "lmcache.v1.storage_backend.connector."
+            "cuobject_s3_adapter.CuObjectS3Connector"
+        ) as mock_cls:
+            mock_cls.return_value = MagicMock()
+            adapter.create_connector(mock_context)
+            # Verify the s3_endpoint was stripped of "cuobj+"
+            call_kwargs = mock_cls.call_args
+            assert call_kwargs.kwargs["s3_endpoint"] == (
+                "s3://bucket.s3.us-east-1.amazonaws.com"
+            )
+            assert call_kwargs.kwargs["s3_region"] == "us-east-1"
+            assert call_kwargs.kwargs["cuobj_nic_device"] == "mlx5_0"
+
+        mock_loop.close()
+
+    def test_requires_s3_region(self):
+        """Should assert if s3_region is not provided."""
+        adapter = CuObjectS3ConnectorAdapter()
+        mock_config = MagicMock()
+        mock_config.extra_config = {}
+
+        mock_context = MagicMock()
+        mock_context.url = "cuobj+s3://bucket"
+        mock_context.config = mock_config
+        mock_context.metadata = MagicMock()
+
+        with pytest.raises(AssertionError, match="s3_region is required"):
+            adapter.create_connector(mock_context)
+
+    def test_requires_metadata(self):
+        """Should raise if metadata is None."""
+        adapter = CuObjectS3ConnectorAdapter()
+        mock_config = MagicMock()
+        mock_config.extra_config = {"s3_region": "us-east-1"}
+
+        mock_context = MagicMock()
+        mock_context.url = "cuobj+s3://bucket"
+        mock_context.config = mock_config
+        mock_context.metadata = None
+
+        with pytest.raises(ValueError, match="metadata is required"):
+            adapter.create_connector(mock_context)
+
+
+class TestAutoDiscovery:
+    """Verify that the adapter is discoverable by ConnectorManager."""
+
+    def test_adapter_discovered(self, monkeypatch):
+        """ConnectorManager should find CuObjectS3ConnectorAdapter."""
+        # Create a fake module containing our adapter
+        cuobj_module = ModuleType("cuobject_s3_adapter")
+        cuobj_module.CuObjectS3ConnectorAdapter = (
+            CuObjectS3ConnectorAdapter
+        )
+
+        def fake_iter_modules(_path):
+            yield None, "cuobject_s3_adapter", False
+
+        def fake_import_module(name):
+            if name.endswith(".cuobject_s3_adapter"):
+                return cuobj_module
+            raise ImportError(f"unexpected import: {name}")
+
+        monkeypatch.setattr(pkgutil, "iter_modules", fake_iter_modules)
+        monkeypatch.setattr(
+            importlib, "import_module", fake_import_module
+        )
+
+        loop = asyncio.new_event_loop()
+        try:
+            manager = ConnectorManager(
+                "cuobj+s3://test-bucket", loop, None
+            )
+        finally:
+            loop.close()
+
+        assert len(manager.adapters) == 1
+        assert isinstance(
+            manager.adapters[0], CuObjectS3ConnectorAdapter
+        )
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v", "-s"])
