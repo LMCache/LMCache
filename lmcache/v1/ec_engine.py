@@ -20,8 +20,6 @@ paged KV GPU gather/scatter.
 
 from __future__ import annotations
 
-import hashlib
-from dataclasses import dataclass
 from typing import Optional
 
 import torch
@@ -35,40 +33,14 @@ from lmcache.v1.metadata import LMCacheMetadata
 logger = init_logger(__name__)
 
 
-def _stable_u64_from_str(s: str) -> int:
-    # CacheEngineKey expects an int chunk_hash; for EC we derive one from mm_hash.
-    digest = hashlib.sha256(str(s).encode("utf-8")).digest()
-    return int.from_bytes(digest[:8], byteorder="big", signed=False)
-
-
-@dataclass(slots=True)
-class ECKey:
-    """EC logical key.
-
-    We keep model + mm_hash, but convert to CacheEngineKey for reuse of backends.
-    """
-
-    model_name: str
-    mm_hash: str
-    dtype: torch.dtype
-
-    # SAM: Move this into the adapter. UNLESS we can do tensor parrellism in EC (ok well research it keep in adapter still)
-    def to_cache_engine_key(self, world_size: int, worker_id: int) -> CacheEngineKey:
-        # Store EC independent of rank by default (worker_id=0) unless you decide
-        # otherwise later.
-        return CacheEngineKey(
-            model_name=self.model_name,
-            world_size=world_size,
-            worker_id=worker_id,
-            chunk_hash=_stable_u64_from_str(self.mm_hash),
-            dtype=self.dtype,
-            request_configs={},
-        )
-
-
-# SAM: change cache engine
-class ECLocalDiskEngine:
-    def __init__(self, config: LMCacheEngineConfig, metadata: LMCacheMetadata):
+class ECCacheEngine:
+    def __init__(
+        self,
+        config: LMCacheEngineConfig,
+        metadata: LMCacheMetadata,
+        *,
+        storage_location: str = "LocalDiskBackend",
+    ):
         if not config.local_disk or config.max_local_disk_size <= 0:
             raise ValueError(
                 "EC LocalDiskEngine requires config.local_disk and max_local_disk_size > 0"
@@ -81,12 +53,12 @@ class ECLocalDiskEngine:
 
         self.config = config
         self.metadata = metadata
+        self._storage_location = storage_location
 
         # Mirror KV engine layering: StorageManager owns backends + allocator.
         from lmcache.v1.event_manager import EventManager
         from lmcache.v1.storage_backend.storage_manager import StorageManager
 
-        # SAM: investigate
         self._event_manager = EventManager()
         self._storage_manager = StorageManager(
             config=config,
@@ -101,26 +73,19 @@ class ECLocalDiskEngine:
         self._storage_dtype = torch.float16
 
     def close(self) -> None:
-        # SAM: try to understand storage manager a bit more, so u can also abstract away the different storages
-
-        # StorageManager owns its own loop/thread; best-effort shutdown.
         if hasattr(self, "_storage_manager") and self._storage_manager is not None:
-            # Close backends if they expose close().
-            for _name, backend in self._storage_manager.storage_backends.items():
-                close_fn = getattr(backend, "close", None)
-                if callable(close_fn):
-                    close_fn()
+            self._storage_manager.close()
 
-    def contains(self, key: ECKey) -> bool:
-        cek = ECKey(
-            key.model_name, key.mm_hash, self._storage_dtype
-        ).to_cache_engine_key(world_size=1, worker_id=0)
-        # Directly query disk tier.
+    def contains(self, key: CacheEngineKey) -> bool:
+        return (
+            self._storage_manager.contains(
+                key,
+                search_range=[self._storage_location],
+            )
+            is not None
+        )
 
-        # SAM: try to understand storage manager a bit more, so u can also abstract away the different storages
-        return self._storage_manager.storage_backends["LocalDiskBackend"].contains(cek)
-
-    def put(self, key: ECKey, tensor: torch.Tensor) -> None:
+    def put(self, key: CacheEngineKey, tensor: torch.Tensor) -> None:
         # Allocate via LMCache allocator (LocalCPUBackend) through StorageManager.
         # Use the original tensor's shape but normalize to storage dtype (fp16).
         mem_obj = self._storage_manager.allocate(
@@ -131,40 +96,36 @@ class ECLocalDiskEngine:
             busy_loop=True,
         )
         if mem_obj is None or mem_obj.tensor is None:
-            logger.warning("EC allocate failed; skipping put for %s", key.mm_hash)
+            logger.warning("EC allocate failed; skipping put for key %s", key)
             return
 
         # Single copy: GPU -> pinned CPU buffer, handles device transfer + dtype cast.
         mem_obj.tensor.copy_(tensor.detach())
 
-        cek = ECKey(
-            key.model_name, key.mm_hash, self._storage_dtype
-        ).to_cache_engine_key(world_size=1, worker_id=0)
+        self._storage_manager.batched_put(
+            [key],
+            [mem_obj],
+            location=self._storage_location,
+        )
 
-        # SAM: try to understand storage manager a bit more, so u can also abstract away the different storages
-
-        self._storage_manager.batched_put([cek], [mem_obj], location="LocalDiskBackend")
-
-    def get(self, key: ECKey, device: Optional[str] = None) -> Optional[torch.Tensor]:
+    def get(
+        self,
+        key: CacheEngineKey,
+        device: Optional[str] = None,
+    ) -> Optional[torch.Tensor]:
         logger.debug("Getting encoder cache for key %s", key)
 
-        cek = ECKey(
-            key.model_name, key.mm_hash, self._storage_dtype
-        ).to_cache_engine_key(world_size=1, worker_id=0)
-
-        # SAM: try to understand storage manager a bit more, so u can also abstract away the different storages
-
-        mem_objs = self._storage_manager.batched_get([cek], location="LocalDiskBackend")
+        mem_objs = self._storage_manager.batched_get(
+            [key],
+            location=self._storage_location,
+        )
         mem_obj = mem_objs[0]
         if mem_obj is None or mem_obj.tensor is None:
             return None
 
-        # Always clone before releasing allocator-owned buffer.
-
-        # SAM: clone looks SUS
-        cpu_t = mem_obj.tensor.detach().clone()
-        mem_obj.ref_count_down()
-
-        if device is None:
-            return cpu_t
-        return cpu_t.to(device=device)
+        try:
+            if device is None:
+                return mem_obj.tensor.detach().clone()
+            return mem_obj.tensor.to(device=device)
+        finally:
+            mem_obj.ref_count_down()

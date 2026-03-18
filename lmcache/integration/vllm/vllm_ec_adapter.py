@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import hashlib
 import os
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any
 
 import torch
 
@@ -15,7 +16,8 @@ from lmcache.integration.vllm.utils import (
     create_lmcache_metadata,
     lmcache_get_or_create_config,
 )
-from lmcache.v1.ec_engine import ECKey, ECLocalDiskEngine
+from lmcache.utils import CacheEngineKey
+from lmcache.v1.ec_engine import ECCacheEngine
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -25,28 +27,18 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-def _get_num_encoder_tokens(request: "Request", index: int) -> int:
-    # vLLM has renamed this across versions.
-    if hasattr(request, "get_num_encoder_embeds"):
-        return int(request.get_num_encoder_embeds(index))
-    if hasattr(request, "get_num_encoder_tokens"):
-        return int(request.get_num_encoder_tokens(index))
-    mm_feature = request.mm_features[index]
-    if hasattr(mm_feature, "mm_position") and hasattr(mm_feature.mm_position, "length"):
-        return int(mm_feature.mm_position.length)
-    raise AttributeError(
-        "Cannot determine num encoder tokens; missing get_num_encoder_embeds/get_num_encoder_tokens/mm_position.length"
-    )
+def _stable_u64_from_str(s: str) -> int:
+    digest = hashlib.sha256(str(s).encode("utf-8")).digest()
+    return int.from_bytes(digest[:8], byteorder="big", signed=False)
 
 
 @dataclass
 class MMMeta:
     mm_hash: str
-    num_token: int  # SAM: dont need dont need
 
     @staticmethod
-    def make_meta(mm_hash: str, num_token: int) -> "MMMeta":
-        return MMMeta(mm_hash=mm_hash, num_token=num_token)
+    def make_meta(mm_hash: str) -> "MMMeta":
+        return MMMeta(mm_hash=mm_hash)
 
 
 @dataclass
@@ -66,8 +58,8 @@ class LMCacheECConnectorImpl:
         self._vllm_config = vllm_config
         self._role = role
 
-        # Scheduler-side state: mm_hash -> num_token
-        self._mm_datas_need_loads: dict[str, int] = {}
+        # Scheduler-side state: set of multimodal hashes to load.
+        self._mm_hashes_need_loads: set[str] = set()
 
         transfer_config = vllm_config.ec_transfer_config
         if transfer_config is None:
@@ -93,8 +85,25 @@ class LMCacheECConnectorImpl:
 
         # Build metadata (model_name/world_size/worker_id mainly). We'll treat EC as rank-agnostic.
         lmcache_metadata, _ = create_lmcache_metadata(vllm_config, role="worker")
+        self._model_name = lmcache_metadata.model_name
+        self._cache_world_size = 1
+        self._cache_worker_id = 0
+        self._cache_dtype = torch.float16
 
-        self._ec_engine = ECLocalDiskEngine(config=config, metadata=lmcache_metadata)
+        self._ec_engine = ECCacheEngine(
+            config=config,
+            metadata=lmcache_metadata,
+        )
+
+    def _make_cache_key(self, mm_hash: str) -> CacheEngineKey:
+        return CacheEngineKey(
+            model_name=self._model_name,
+            world_size=self._cache_world_size,
+            worker_id=self._cache_worker_id,
+            chunk_hash=_stable_u64_from_str(mm_hash),
+            dtype=self._cache_dtype,
+            request_configs={},
+        )
 
     # ------------------------------
     # Worker-side methods
@@ -119,12 +128,8 @@ class LMCacheECConnectorImpl:
         for mm_data in metadata.mm_datas:
             if mm_data.mm_hash in encoder_cache:
                 continue
-            # Use LMCache LocalDiskBackend via ECLocalDiskEngine
-            key = ECKey(
-                model_name=self._ec_engine.metadata.model_name,
-                mm_hash=mm_data.mm_hash,
-                dtype=torch.float16,
-            )
+            # Use LMCache storage via ECCacheEngine
+            key = self._make_cache_key(mm_data.mm_hash)
             t = self._ec_engine.get(key, device=current_platform.device_type)
             if t is None:
                 continue
@@ -145,11 +150,7 @@ class LMCacheECConnectorImpl:
             return
 
         t = encoder_cache[mm_hash]
-        key = ECKey(
-            model_name=self._ec_engine.metadata.model_name,
-            mm_hash=mm_hash,
-            dtype=t.dtype,
-        )
+        key = self._make_cache_key(mm_hash)
         self._ec_engine.put(key, t)
         logger.debug("Saved encoder cache for mm_hash %s", mm_hash)
 
@@ -158,28 +159,21 @@ class LMCacheECConnectorImpl:
     # ------------------------------
 
     def has_cache_item(self, identifier: str) -> bool:
-        key = ECKey(
-            model_name=self._ec_engine.metadata.model_name,
-            mm_hash=identifier,
-            dtype=torch.float16,  # v1: assume fp16
-        )
+        key = self._make_cache_key(identifier)
         return self._ec_engine.contains(key)
 
     def update_state_after_alloc(self, request: "Request", index: int) -> None:
-        # SAM: Maybe just a set of MMhashes.
         mm_hash = request.mm_features[index].identifier
-        num_encoder_token = _get_num_encoder_tokens(request, index)
-        self._mm_datas_need_loads[mm_hash] = num_encoder_token
+        self._mm_hashes_need_loads.add(mm_hash)
 
     def build_connector_meta(
         self, scheduler_output: SchedulerOutput
     ) -> ECConnectorMetadata:
-        # SAM: look thorugh the set above, and create the meta data based on the set
         _ = scheduler_output
         meta = LMCacheECConnectorMetadata()
-        for mm_hash, num_encoder_token in self._mm_datas_need_loads.items():
-            meta.add_mm_data(MMMeta.make_meta(mm_hash, num_encoder_token))
-        self._mm_datas_need_loads.clear()
+        for mm_hash in sorted(self._mm_hashes_need_loads):
+            meta.add_mm_data(MMMeta.make_meta(mm_hash))
+        self._mm_hashes_need_loads.clear()
         return meta
 
     # ------------------------------

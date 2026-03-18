@@ -51,7 +51,7 @@ def test_ec_roundtrip_save_then_load():
         )
 
         meta = LMCacheECConnectorMetadata()
-        meta.add_mm_data(MMMeta.make_meta(mm_hash, x.shape[0]))
+        meta.add_mm_data(MMMeta.make_meta(mm_hash))
         conn._get_connector_metadata = lambda: meta  # type: ignore
 
         encoder_cache2 = {}
