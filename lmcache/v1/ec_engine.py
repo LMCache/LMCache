@@ -52,6 +52,7 @@ class ECKey:
     mm_hash: str
     dtype: torch.dtype
 
+    # SAM: Move this into the adapter. UNLESS we can do tensor parrellism in EC (ok well research it keep in adapter still)
     def to_cache_engine_key(self, world_size: int, worker_id: int) -> CacheEngineKey:
         # Store EC independent of rank by default (worker_id=0) unless you decide
         # otherwise later.
@@ -65,6 +66,7 @@ class ECKey:
         )
 
 
+# SAM: change cache engine
 class ECLocalDiskEngine:
     def __init__(self, config: LMCacheEngineConfig, metadata: LMCacheMetadata):
         if not config.local_disk or config.max_local_disk_size <= 0:
@@ -84,6 +86,7 @@ class ECLocalDiskEngine:
         from lmcache.v1.event_manager import EventManager
         from lmcache.v1.storage_backend.storage_manager import StorageManager
 
+        # SAM: investigate
         self._event_manager = EventManager()
         self._storage_manager = StorageManager(
             config=config,
@@ -98,6 +101,8 @@ class ECLocalDiskEngine:
         self._storage_dtype = torch.float16
 
     def close(self) -> None:
+        # SAM: try to understand storage manager a bit more, so u can also abstract away the different storages
+
         # StorageManager owns its own loop/thread; best-effort shutdown.
         if hasattr(self, "_storage_manager") and self._storage_manager is not None:
             # Close backends if they expose close().
@@ -107,21 +112,21 @@ class ECLocalDiskEngine:
                     close_fn()
 
     def contains(self, key: ECKey) -> bool:
-        cek = ECKey(key.model_name, key.mm_hash, self._storage_dtype).to_cache_engine_key(
-            world_size=1, worker_id=0
-        )
+        cek = ECKey(
+            key.model_name, key.mm_hash, self._storage_dtype
+        ).to_cache_engine_key(world_size=1, worker_id=0)
         # Directly query disk tier.
+
+        # SAM: try to understand storage manager a bit more, so u can also abstract away the different storages
         return self._storage_manager.storage_backends["LocalDiskBackend"].contains(cek)
 
     def put(self, key: ECKey, tensor: torch.Tensor) -> None:
-        # v1: normalize storage dtype for stable keying.
-        t = tensor.detach().to(device="cpu", dtype=self._storage_dtype)
-
         # Allocate via LMCache allocator (LocalCPUBackend) through StorageManager.
+        # Use the original tensor's shape but normalize to storage dtype (fp16).
         mem_obj = self._storage_manager.allocate(
-            shapes=t.shape,
-            dtypes=t.dtype,
-            fmt=MemoryFormat.UNDEFINED,
+            shapes=tensor.shape,
+            dtypes=self._storage_dtype,
+            fmt=MemoryFormat.EC_T2D,
             eviction=True,
             busy_loop=True,
         )
@@ -129,26 +134,34 @@ class ECLocalDiskEngine:
             logger.warning("EC allocate failed; skipping put for %s", key.mm_hash)
             return
 
-        # Copy data into allocator-managed buffer.
-        mem_obj.tensor.copy_(t)
+        # Single copy: GPU -> pinned CPU buffer, handles device transfer + dtype cast.
+        mem_obj.tensor.copy_(tensor.detach())
 
-        cek = ECKey(key.model_name, key.mm_hash, self._storage_dtype).to_cache_engine_key(
-            world_size=1, worker_id=0
-        )
+        cek = ECKey(
+            key.model_name, key.mm_hash, self._storage_dtype
+        ).to_cache_engine_key(world_size=1, worker_id=0)
+
+        # SAM: try to understand storage manager a bit more, so u can also abstract away the different storages
+
         self._storage_manager.batched_put([cek], [mem_obj], location="LocalDiskBackend")
 
     def get(self, key: ECKey, device: Optional[str] = None) -> Optional[torch.Tensor]:
         logger.debug("Getting encoder cache for key %s", key)
 
-        cek = ECKey(key.model_name, key.mm_hash, self._storage_dtype).to_cache_engine_key(
-            world_size=1, worker_id=0
-        )
+        cek = ECKey(
+            key.model_name, key.mm_hash, self._storage_dtype
+        ).to_cache_engine_key(world_size=1, worker_id=0)
+
+        # SAM: try to understand storage manager a bit more, so u can also abstract away the different storages
+
         mem_objs = self._storage_manager.batched_get([cek], location="LocalDiskBackend")
         mem_obj = mem_objs[0]
         if mem_obj is None or mem_obj.tensor is None:
             return None
 
         # Always clone before releasing allocator-owned buffer.
+
+        # SAM: clone looks SUS
         cpu_t = mem_obj.tensor.detach().clone()
         mem_obj.ref_count_down()
 

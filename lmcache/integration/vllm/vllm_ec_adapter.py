@@ -11,7 +11,10 @@ from vllm.distributed.ec_transfer.ec_connector.base import ECConnectorMetadata
 from vllm.logger import init_logger
 from vllm.v1.core.sched.output import SchedulerOutput
 
-from lmcache.integration.vllm.utils import create_lmcache_metadata, lmcache_get_or_create_config
+from lmcache.integration.vllm.utils import (
+    create_lmcache_metadata,
+    lmcache_get_or_create_config,
+)
 from lmcache.v1.ec_engine import ECKey, ECLocalDiskEngine
 
 if TYPE_CHECKING:
@@ -39,7 +42,7 @@ def _get_num_encoder_tokens(request: "Request", index: int) -> int:
 @dataclass
 class MMMeta:
     mm_hash: str
-    num_token: int
+    num_token: int  # SAM: dont need dont need
 
     @staticmethod
     def make_meta(mm_hash: str, num_token: int) -> "MMMeta":
@@ -73,7 +76,9 @@ class LMCacheECConnectorImpl:
         # Mirror KV connector style: use LMCache config system.
         config = lmcache_get_or_create_config()
         # v1: force local_disk location from vLLM ec_transfer_config.
-        config.local_disk = transfer_config.get_from_extra_config("shared_storage_path", "/tmp")
+        config.local_disk = transfer_config.get_from_extra_config(
+            "shared_storage_path", "/tmp"
+        )
 
         # LocalDiskBackend currently requires LocalCPUBackend for allocations.
         # For EC v1, if user didn't configure local_cpu, we default a small CPU pool.
@@ -161,11 +166,15 @@ class LMCacheECConnectorImpl:
         return self._ec_engine.contains(key)
 
     def update_state_after_alloc(self, request: "Request", index: int) -> None:
+        # SAM: Maybe just a set of MMhashes.
         mm_hash = request.mm_features[index].identifier
         num_encoder_token = _get_num_encoder_tokens(request, index)
         self._mm_datas_need_loads[mm_hash] = num_encoder_token
 
-    def build_connector_meta(self, scheduler_output: SchedulerOutput) -> ECConnectorMetadata:
+    def build_connector_meta(
+        self, scheduler_output: SchedulerOutput
+    ) -> ECConnectorMetadata:
+        # SAM: look thorugh the set above, and create the meta data based on the set
         _ = scheduler_output
         meta = LMCacheECConnectorMetadata()
         for mm_hash, num_encoder_token in self._mm_datas_need_loads.items():

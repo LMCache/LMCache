@@ -77,6 +77,11 @@ class MemoryFormat(Enum):
     """[1, num_layers, num_tokens, aligned_head_size]
     """
 
+    # This is for the encoder cache (EC) tensor format
+    EC_T2D = auto()
+    """[num_tokens, hidden_dim]
+    """
+
     def token_dim(self) -> int:
         if self == MemoryFormat.KV_2LTD:
             return 2
@@ -90,6 +95,8 @@ class MemoryFormat(Enum):
             return 0
         elif self == MemoryFormat.KV_MLA_FMT:
             return 2
+        elif self == MemoryFormat.EC_T2D:
+            return 1
         return 0
 
 
@@ -1945,6 +1952,7 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
             MemoryFormat.KV_2TD,
             MemoryFormat.KV_T2D,
             MemoryFormat.KV_MLA_FMT,
+            MemoryFormat.EC_T2D
         ]:
             with self.host_mem_lock:
                 return self.pin_allocator.allocate(shapes, dtypes, fmt, str(self))
@@ -1969,6 +1977,7 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
             MemoryFormat.KV_2TD,
             MemoryFormat.KV_T2D,
             MemoryFormat.KV_MLA_FMT,
+            MemoryFormat.EC_T2D
         ]:
             with self.host_mem_lock:
                 return self.pin_allocator.batched_allocate(
@@ -1987,6 +1996,7 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
             MemoryFormat.KV_2TD,
             MemoryFormat.KV_T2D,
             MemoryFormat.KV_MLA_FMT,
+            MemoryFormat.EC_T2D
         ]:
             with self.host_mem_lock:
                 self.pin_allocator.free(memory_obj)
@@ -2009,6 +2019,7 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
             MemoryFormat.KV_2TD,
             MemoryFormat.KV_T2D,
             MemoryFormat.KV_MLA_FMT,
+            MemoryFormat.EC_T2D
         ]:
             with self.host_mem_lock:
                 self.pin_allocator.batched_free(memory_objs)
