@@ -669,6 +669,15 @@ LMCacheLookupClient`).  This method delegates the provider to the client
                 "hook %s will not be registered",
                 type(hook).__name__,
             )
+        # Warn when layerwise retrieval is enabled: retrieve_layer() is used
+        # instead of retrieve(), so _fire_post_load_hooks is never reached.
+        if getattr(self, "use_layerwise", False):
+            logger.warning(
+                "Post-load hooks are not supported when use_layerwise=True "
+                "(LMCacheEngine.retrieve_layer() bypasses hook firing). "
+                "Hook %s is registered but will never be called.",
+                type(hook).__name__,
+            )
 
     # ==================== Property Accessors ====================
 

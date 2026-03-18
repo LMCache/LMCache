@@ -943,6 +943,13 @@ class LMCacheEngine:
                     num_loaded_tokens=int(retrieved_tokens),
                     provider_metadata=provider_metadata,
                 )
+            else:
+                logger.warning(
+                    "Post-load hooks are registered but slot_mapping was not "
+                    "passed to retrieve() for req %s; hooks will not fire. "
+                    "Pass slot_mapping=<tensor> in kwargs to enable hooks.",
+                    req_id,
+                )
 
         self.stats_monitor.on_retrieve_finished(
             retrieve_stats,

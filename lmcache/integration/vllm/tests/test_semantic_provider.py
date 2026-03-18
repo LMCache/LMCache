@@ -308,6 +308,59 @@ class TestLMCacheLookupClientSemantic:
         client.notify_request_finished("req-i", [1], 1)
         assert "req-i" not in client._pending_substitutions
 
+    def test_on_lookup_miss_exception_is_caught_and_returns_zero(self):
+        """If on_lookup_miss raises, lookup returns 0 and reqs_status stays 0.
+
+        The exception must be swallowed so a broken provider can never block
+        inference. reqs_status must remain consistent (set to 0) so the engine
+        does not confuse the request as an ongoing lookup.
+        """
+
+        class _RaisingProvider(SemanticLookupProvider):
+            def on_lookup_miss(self, request_id, token_ids, num_computed_tokens):
+                raise RuntimeError("provider failure")
+
+            def on_request_finished(self, request_id, token_ids, num_prompt_tokens):
+                pass
+
+        client = _make_lookup_client_for_semantic()
+        client.set_semantic_provider(_RaisingProvider())
+
+        # transport returns 0 (miss) so on_lookup_miss is called
+        client.transport.send_and_recv_all.return_value = [(0).to_bytes(4, "big")]
+
+        # Must not raise
+        result = client.lookup(list(range(256)), "req-exc")
+
+        assert result == 0
+        assert "req-exc" not in client._pending_substitutions
+        # reqs_status[lookup_id] = 0 was set before the provider call
+        assert client.reqs_status.get("req-exc") == 0
+
+    def test_set_semantic_provider_calls_shutdown_on_replaced_provider(self):
+        """Replacing a provider calls on_shutdown() on the old one."""
+        shutdown_called = []
+
+        class _ShutdownProvider(SemanticLookupProvider):
+            def on_lookup_miss(self, request_id, token_ids, num_computed_tokens):
+                return None
+
+            def on_request_finished(self, request_id, token_ids, num_prompt_tokens):
+                pass
+
+            def on_shutdown(self):
+                shutdown_called.append(True)
+
+        client = _make_lookup_client_for_semantic()
+        old_provider = _ShutdownProvider()
+        client.set_semantic_provider(old_provider)
+
+        new_provider = _NeverHitProvider()
+        client.set_semantic_provider(new_provider)
+
+        assert len(shutdown_called) == 1
+        assert client._semantic_provider is new_provider
+
 
 # ---------------------------------------------------------------------------
 # set_semantic_lookup_provider adapter tests
