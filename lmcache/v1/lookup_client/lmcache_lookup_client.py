@@ -95,9 +95,22 @@ class LMCacheLookupClient(LookupClientInterface):
     def set_semantic_provider(self, provider: SemanticLookupProvider) -> None:
         """Register a SemanticLookupProvider for approximate KV cache matching.
 
+        If a provider is already registered, its ``on_shutdown`` lifecycle
+        hook is called before the replacement takes effect.
+
         Args:
             provider: An instance of a SemanticLookupProvider subclass.
         """
+        if self._semantic_provider is not None:
+            try:
+                self._semantic_provider.on_shutdown()
+            except Exception:
+                logger.warning(
+                    "SemanticLookupProvider.on_shutdown raised for %s during "
+                    "replacement; continuing with new provider",
+                    type(self._semantic_provider).__name__,
+                    exc_info=True,
+                )
         self._semantic_provider = provider
         logger.info(
             "SemanticLookupProvider registered in LMCacheLookupClient: %s",
