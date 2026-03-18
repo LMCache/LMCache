@@ -34,13 +34,11 @@ def create_memory_allocator(config: L1MemoryManagerConfig) -> MemoryAllocatorInt
             config.init_size_in_bytes,
             config.size_in_bytes,
             config.align_bytes,
-            config.contiguous_alloc,
         )
         return LazyMemoryAllocator(
             init_size=config.init_size_in_bytes,
             final_size=config.size_in_bytes,
             align_bytes=config.align_bytes,
-            contiguous_alloc=config.contiguous_alloc,
         )
     else:
         logger.info(
@@ -48,12 +46,9 @@ def create_memory_allocator(config: L1MemoryManagerConfig) -> MemoryAllocatorInt
             "align bytes is %d bytes, contiguous alloc is %s",
             config.size_in_bytes,
             config.align_bytes,
-            config.contiguous_alloc,
         )
         return MixedMemoryAllocator(
-            config.size_in_bytes,
-            align_bytes=config.align_bytes,
-            contiguous_alloc=config.contiguous_alloc,
+            config.size_in_bytes, align_bytes=config.align_bytes
         )
 
 

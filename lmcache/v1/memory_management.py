@@ -1105,8 +1105,9 @@ class AddressManager:
 
         Returns:
             A list of tuple (address, allocated_size) where address is the starting
-            address of the allocated block and allocated_size is the actual
-            size of the allocated block.
+            address of the allocated block and allocated_size is the actual size of
+            the allocated block.
+            Note: the length of the return list is the same as the batch_size.
 
         Raises:
             RuntimeError: If no memory is available to allocate.
@@ -1153,6 +1154,21 @@ class AddressManager:
             raise RuntimeError(
                 f"Failed to batched allocate {batch_size} memory blocks "
                 f"of size {size} because no enough memory is available"
+            )
+        if len(allocate_result) != batch_size:
+            # The length of allocate_result is not equal to batch_size;
+            # free list is untouched, no rollback needed
+            logger.debug(
+                "Failed to batched allocate %d memory blocks of size %d "
+                "because the length of allocate_result %d is not equal to batch_size",
+                batch_size,
+                size,
+                len(allocate_result),
+            )
+            raise RuntimeError(
+                f"Failed to batched allocate {batch_size} memory blocks "
+                f"of size {size} because the length of allocate_result "
+                f"{len(allocate_result)} is not equal to batch_size"
             )
 
         # Allocation succeeded; batch-update the free list
@@ -1261,7 +1277,6 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
         tensor: torch.Tensor,
         align_bytes: int = AddressManager.ALIGN_BYTES,
         init_address_space: int | None = None,
-        contiguous_alloc: bool = True,
     ):
         """
         Args:
@@ -1269,9 +1284,6 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
             align_bytes: The alignment requirement for allocations.
             init_address_space: Initial size of the address space. If None,
                 use the size of the provided tensor.
-            contiguous_alloc: Whether to allocate memory contiguously in
-                batched_allocate. If True, a single large block is allocated
-                and split; if False, each block is allocated individually.
 
         Note:
             The `init_address_space` is used for lazy memory allocation.
@@ -1285,8 +1297,6 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
             self.buffer.numel() if init_address_space is None else init_address_space,
             align_bytes,
         )
-
-        self.contiguous_alloc = contiguous_alloc
 
         # For debugging purposes
         self.num_active_allocations = 0
@@ -1367,34 +1377,16 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
         unit_raw_size = get_size_bytes(shapes, dtypes)
         unit_aligned_size = self.address_manager.compute_aligned_size(unit_raw_size)
 
-        if self.contiguous_alloc:
-            # If use contiguous allocate, allocate one large block from
-            # address manager directly
-            total_aligned_size = unit_aligned_size * batch_size
-
-            try:
-                block_start, _ = self.address_manager.allocate(total_aligned_size)
-            except RuntimeError:
-                return None
-            addresses = list(
-                range(block_start, block_start + total_aligned_size, unit_aligned_size)
+        try:
+            alloc_results = self.address_manager.batched_allocate(
+                unit_aligned_size, batch_size
             )
-            raw_datas = torch.chunk(
-                self.buffer[block_start : block_start + total_aligned_size],
-                batch_size,
-            )
-        else:
-            # Non-contiguous allocation: batch-allocate independent blocks
-            try:
-                alloc_results = self.address_manager.batched_allocate(
-                    unit_aligned_size, batch_size
-                )
-            except RuntimeError:
-                return None
-            addresses = [addr for addr, _ in alloc_results]
-            raw_datas = [
-                self._get_buffer_slice(addr, unit_aligned_size) for addr in addresses
-            ]
+        except RuntimeError:
+            return None
+        addresses = [addr for addr, _ in alloc_results]
+        raw_datas = [
+            self._get_buffer_slice(addr, unit_aligned_size) for addr in addresses
+        ]
 
         # For debug
         self.num_active_allocations += batch_size
@@ -2097,9 +2089,7 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
             )
         else:
             self.pin_allocator = TensorMemoryAllocator(
-                self.buffer,
-                align_bytes=self.align_bytes,
-                contiguous_alloc=kwargs.get("contiguous_alloc", True),
+                self.buffer, align_bytes=self.align_bytes
             )
 
         self.host_mem_lock = threading.Lock() if not use_paging else nullcontext()

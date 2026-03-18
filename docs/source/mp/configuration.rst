@@ -90,9 +90,6 @@ Source: ``lmcache/v1/distributed/config.py``
    * - ``--l1-align-bytes``
      - ``4096``
      - Alignment size in bytes (default 4 KB).
-   * - ``--l1-contiguous-alloc``
-     - ``True``
-     - Whether to use contiguous allocation, use ``--no-l1-contiguous-alloc`` to disable it. (default True).
 
 L1 Manager TTLs
 ----------------
