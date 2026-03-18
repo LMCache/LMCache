@@ -1,7 +1,7 @@
 name: Codex PR Review
 
 on:
-  pull_request:
+  pull_request_target:
     types: [opened, synchronize, reopened]
 
 permissions:
@@ -25,9 +25,10 @@ jobs:
           #   registry.npmjs.org:443
           #   huggingface.co:443
 
-      - name: Checkout
+      - name: Checkout PR head
         uses: actions/checkout@v5
         with:
+          ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
 
       - name: Smart triage
@@ -76,6 +77,8 @@ jobs:
     needs: codex
     if: always()
     runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
     steps:
       - name: Post review comment
         uses: actions/github-script@v7
