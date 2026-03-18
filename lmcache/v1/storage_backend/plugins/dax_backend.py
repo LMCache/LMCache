@@ -771,14 +771,14 @@ class DaxBackend(StoragePluginInterface):
         ctypes.memmove(
             ctypes.c_void_p(self._base_ptr + offset),
             ctypes.c_void_p(memory_obj.data_ptr),
-            ctypes.c_size_t(size),
+            size,
         )
 
     def _do_read(self, offset: int, memory_obj: MemoryObj, size: int) -> None:
         ctypes.memmove(
             ctypes.c_void_p(memory_obj.data_ptr),
             ctypes.c_void_p(self._base_ptr + offset),
-            ctypes.c_size_t(size),
+            size,
         )
 
     async def _submit_write(

@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Standard
-import asyncio
+from collections.abc import Generator
 from concurrent.futures import ThreadPoolExecutor
+import asyncio
 import os
 import tempfile
 import threading
@@ -23,7 +24,7 @@ from lmcache.v1.storage_backend.plugins.dax_backend import DaxBackend
 
 
 @pytest.fixture
-def loop_in_thread() -> asyncio.AbstractEventLoop:
+def loop_in_thread() -> Generator[asyncio.AbstractEventLoop]:
     loop = asyncio.new_event_loop()
     try:
         yield loop
@@ -477,8 +478,8 @@ def test_dax_backend_get_blocking_releases_lock_during_read(
         read_started = threading.Event()
         allow_read = threading.Event()
         remove_finished = threading.Event()
-        reader_out: dict[str, object] = {}
-        remove_out: dict[str, object] = {}
+        reader_result: list[MemoryObj | None] = []
+        remove_result: list[bool] = []
         original_do_read = DaxBackend._do_read
 
         def _blocking_do_read(self, offset, memory_obj, size) -> None:
@@ -503,10 +504,10 @@ def test_dax_backend_get_blocking_releases_lock_during_read(
                 obj.ref_count_down()
 
             def _reader() -> None:
-                reader_out["value"] = backend.get_blocking(key1)
+                reader_result.append(backend.get_blocking(key1))
 
             def _remover() -> None:
-                remove_out["value"] = backend.remove(key2)
+                remove_result.append(backend.remove(key2))
                 remove_finished.set()
 
             reader = threading.Thread(target=_reader)
@@ -516,7 +517,7 @@ def test_dax_backend_get_blocking_releases_lock_during_read(
             remover = threading.Thread(target=_remover)
             remover.start()
             assert remove_finished.wait(timeout=0.2)
-            assert remove_out["value"] is True
+            assert remove_result[0] is True
 
             allow_read.set()
             reader.join(timeout=1)
@@ -524,7 +525,7 @@ def test_dax_backend_get_blocking_releases_lock_during_read(
             assert not reader.is_alive()
             assert not remover.is_alive()
 
-            result = reader_out["value"]
+            result = reader_result[0]
             assert result is not None
             assert result.tensor is not None
             assert torch.all(result.tensor == 3)
@@ -570,7 +571,7 @@ def test_dax_backend_remove_during_read_defers_slot_reclaim(
         key = CacheEngineKey("test_model", 1, 0, 703, torch.bfloat16)
         read_started = threading.Event()
         allow_read = threading.Event()
-        reader_out: dict[str, object] = {}
+        reader_result: list[MemoryObj | None] = []
         original_do_read = DaxBackend._do_read
 
         def _blocking_do_read(self, offset, memory_obj, size) -> None:
@@ -594,7 +595,7 @@ def test_dax_backend_remove_during_read_defers_slot_reclaim(
             obj.ref_count_down()
 
             def _reader() -> None:
-                reader_out["value"] = backend.get_blocking(key)
+                reader_result.append(backend.get_blocking(key))
 
             reader = threading.Thread(target=_reader)
             reader.start()
@@ -616,7 +617,7 @@ def test_dax_backend_remove_during_read_defers_slot_reclaim(
             reader.join(timeout=1)
             assert not reader.is_alive()
 
-            result = reader_out["value"]
+            result = reader_result[0]
             assert result is not None
             assert result.tensor is not None
             assert torch.all(result.tensor == 7)
@@ -940,7 +941,9 @@ def test_dax_backend_overlapping_pin_unpin(memory_allocator, loop_in_thread):
             obj_c.ref_count_down()
 
             # Key A is still retrievable (protected by remaining pin)
-            assert backend.contains(keys[0]), "key A should survive eviction (pin_count=1)"
+            assert backend.contains(keys[0]), (
+                "key A should survive eviction (pin_count=1)"
+            )
 
             # Key B was evicted (unpinned)
             assert not backend.contains(keys[1]), "key B should be evicted"
@@ -962,7 +965,9 @@ def test_dax_backend_overlapping_pin_unpin(memory_allocator, loop_in_thread):
             obj_d.ref_count_down()
 
             # Key A should now be evicted
-            assert not backend.contains(keys[0]), "key A should be evictable after full unpin"
+            assert not backend.contains(keys[0]), (
+                "key A should be evictable after full unpin"
+            )
         finally:
             backend.close()
 
@@ -1153,10 +1158,12 @@ def test_dax_backend_sync_close_waits_for_active_put(
                 except BaseException as e:
                     writer_exc["error"] = e
 
+            def _closer() -> None:
+                backend.close()
+                close_returned.set()
+
             writer = threading.Thread(target=_writer)
-            closer = threading.Thread(
-                target=lambda: (backend.close(), close_returned.set())
-            )
+            closer = threading.Thread(target=_closer)
 
             writer.start()
             assert write_started.wait(timeout=1)
@@ -1216,7 +1223,7 @@ def test_dax_backend_sync_close_waits_for_active_get(
         read_started = threading.Event()
         allow_read = threading.Event()
         close_returned = threading.Event()
-        reader_out: dict[str, object] = {}
+        reader_result: list[MemoryObj | None] = []
         original_do_read = DaxBackend._do_read
 
         def _blocking_do_read(self, offset, memory_obj, size) -> None:
@@ -1241,12 +1248,14 @@ def test_dax_backend_sync_close_waits_for_active_get(
             obj.ref_count_down()
 
             def _reader() -> None:
-                reader_out["value"] = backend.get_blocking(key)
+                reader_result.append(backend.get_blocking(key))
+
+            def _closer() -> None:
+                backend.close()
+                close_returned.set()
 
             reader = threading.Thread(target=_reader)
-            closer = threading.Thread(
-                target=lambda: (backend.close(), close_returned.set())
-            )
+            closer = threading.Thread(target=_closer)
 
             reader.start()
             assert read_started.wait(timeout=1)
@@ -1254,8 +1263,8 @@ def test_dax_backend_sync_close_waits_for_active_get(
             time.sleep(0.05)
 
             assert not close_returned.is_set()
-            assert backend._mmap_obj is not None
-            assert backend._base_ptr != 0
+            assert backend._mmap_obj is not None  # noqa: SLF001
+            assert backend._base_ptr != 0  # noqa: SLF001
 
             allow_read.set()
             reader.join(timeout=1)
@@ -1265,7 +1274,7 @@ def test_dax_backend_sync_close_waits_for_active_get(
             assert not closer.is_alive()
             assert close_returned.is_set()
 
-            result = reader_out["value"]
+            result = reader_result[0]
             assert result is not None
             assert result.tensor is not None
             assert torch.all(result.tensor == 6)
@@ -1274,8 +1283,7 @@ def test_dax_backend_sync_close_waits_for_active_get(
             backend.close()
 
 
-def test_dax_backend_close_rejects_new_ops_after_shutdown(
-) -> None:
+def test_dax_backend_close_rejects_new_ops_after_shutdown() -> None:
     with tempfile.TemporaryDirectory() as td:
         dev_path = os.path.join(td, "dax.bin")
         with open(dev_path, "wb") as fout:
@@ -1307,9 +1315,12 @@ def test_dax_backend_close_rejects_new_ops_after_shutdown(
 
         try:
             backend.close()
-            assert backend.get_blocking(
-                CacheEngineKey("test_model", 1, 0, 999, torch.bfloat16)
-            ) is None
+            assert (
+                backend.get_blocking(
+                    CacheEngineKey("test_model", 1, 0, 999, torch.bfloat16)
+                )
+                is None
+            )
             alloc = AdHocMemoryAllocator(device="cpu")
             obj = alloc.allocate(
                 [torch.Size([2, 16, 8])],
@@ -1390,10 +1401,12 @@ def test_dax_backend_async_close_waits_for_active_put(
             futs = backend.batched_submit_put_task([key], [obj])
             assert futs is not None
 
+            def _closer() -> None:
+                backend.close()
+                close_returned.set()
+
             assert write_started.wait(timeout=2)
-            closer = threading.Thread(
-                target=lambda: (backend.close(), close_returned.set())
-            )
+            closer = threading.Thread(target=_closer)
             closer.start()
             time.sleep(0.05)
             assert not close_returned.is_set()
