@@ -1384,17 +1384,31 @@ LMCacheLookupClient`).  This method delegates the provider to the client
         if num_external_hit_tokens > 0:
             pending_sub = self.lookup_client.pop_pending_substitution(req_id)
             if pending_sub is not None:
+                # Cap semantic hit count by the request's own prompt length.
+                # The donor may have more tokens cached than this request has —
+                # returning more matched tokens than the prompt length would
+                # cause the vLLM scheduler to over-allocate KV blocks.
+                num_usable = min(num_external_hit_tokens, request.num_tokens)
+                need_to_allocate = num_usable - num_computed_tokens
+                if num_usable == request.num_tokens:
+                    need_to_allocate -= 1
+                # Re-evaluate below_min_retrieve with the capped need_to_allocate
+                below_min_retrieve = (
+                    min_retrieve > 0 and need_to_allocate < min_retrieve
+                )
                 self._semantic_substitutions[req_id] = pending_sub
                 self.load_specs[req_id] = LoadSpec(
                     vllm_cached_tokens=num_computed_tokens,
-                    lmcache_cached_tokens=num_external_hit_tokens,
+                    lmcache_cached_tokens=num_usable,
                     can_load=False,
                 )
                 logger.info(
-                    "Semantic hit for req %s: donor=%s hit=%d need_to_alloc=%d",
+                    "Semantic hit for req %s: donor=%s hit=%d usable=%d "
+                    "need_to_alloc=%d",
                     req_id,
                     pending_sub.source_id or "unknown",
                     num_external_hit_tokens,
+                    num_usable,
                     need_to_allocate,
                 )
 
@@ -1429,6 +1443,12 @@ LMCacheLookupClient`).  This method delegates the provider to the client
                 len(sub.alternate_token_ids),
                 len(req_meta.token_ids),
             )
+            # Cancel the semantic load so start_load_kv does not attempt to
+            # retrieve KV for the original tokens (which had zero exact hits).
+            # can_load=False is the existing mechanism to skip loading while
+            # still forwarding the spec to the worker for metrics.
+            if req_meta.load_spec is not None:
+                req_meta.load_spec.can_load = False
             return
         # Align the donor token IDs to the same length that
         # from_request_tracker() selected for this request (chunk-boundary

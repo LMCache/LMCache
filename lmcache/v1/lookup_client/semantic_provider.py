@@ -35,7 +35,11 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional
 
 if TYPE_CHECKING:
-    pass
+    # First Party
+    from lmcache.v1.config import LMCacheEngineConfig
+
+    # Third Party
+    from vllm.config import VllmConfig
 
 
 @dataclass
@@ -145,7 +149,11 @@ class SemanticLookupProvider(ABC):
         """
         ...
 
-    def on_init(self, config: Any, vllm_config: Any) -> None:  # noqa: B027
+    def on_init(  # noqa: B027
+        self,
+        config: "LMCacheEngineConfig",
+        vllm_config: "VllmConfig",
+    ) -> None:
         """Called once when the :class:`LMCacheConnectorV1Impl` initialises.
 
         Parameters
