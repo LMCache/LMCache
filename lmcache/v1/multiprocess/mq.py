@@ -337,8 +337,9 @@ class MessageQueueServer:
         self.ctx = context
         self.socket = self.ctx.socket(zmq.ROUTER)
         self.socket.bind(bind_url)
-        # Output task notifier socket and output queue
-
+        # Use eventfd instead of zmq PUSH/PULL sockets because blocking
+        # handler callbacks run on ThreadPoolExecutor threads, and zmq
+        # sockets are not thread-safe. eventfd_write() is atomic.
         self._output_efd = os.eventfd(0, os.EFD_NONBLOCK | os.EFD_CLOEXEC)
         self.output_queue: queue.Queue = queue.Queue()
 
