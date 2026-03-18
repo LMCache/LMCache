@@ -34,7 +34,7 @@ File Layout
    │   └── formatter.py     # TerminalFormatter, JsonFormatter
    └── commands/
        ├── __init__.py      # ALL_COMMANDS registry
-       ├── base.py          # BaseCommand ABC, add_output_args()
+       ├── base.py          # BaseCommand ABC
        └── mock.py          # Example command
 
 
@@ -48,7 +48,7 @@ Step-by-Step: Adding a New Command
    # SPDX-License-Identifier: Apache-2.0
    import argparse
 
-   from lmcache.cli.commands.base import BaseCommand, add_output_args
+   from lmcache.cli.commands.base import BaseCommand
 
    class DescribeCommand(BaseCommand):
 
@@ -61,7 +61,6 @@ Step-by-Step: Adding a New Command
        def add_arguments(self, parser: argparse.ArgumentParser) -> None:
            parser.add_argument("--url", required=True,
                                help="LMCache HTTP server URL (e.g. http://localhost:8000)")
-           add_output_args(parser)
 
        def execute(self, args: argparse.Namespace) -> None:
            # Connect to server, gather info...
@@ -115,15 +114,5 @@ command authors just build metrics and call ``emit()``:
        # Trigger all handlers
        metrics.emit()
 
-The ``--format`` and ``--output`` flags are available via the shared helper:
-
-.. code-block:: python
-
-   from lmcache.cli.commands.base import add_output_args
-
-   def add_arguments(self, parser):
-       # ... your args ...
-       add_output_args(parser)
-       # Adds:
-       #   --format FORMAT  Stdout format (default: terminal). Available: terminal, json.
-       #   --output PATH    Save metrics to a file at PATH (format chosen by --format).
+The ``--format`` and ``--output`` flags are added automatically by
+``BaseCommand.register()`` — subcommands do not need to add them manually.

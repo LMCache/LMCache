@@ -32,7 +32,6 @@ class BaseCommand(abc.ABC):
 
             def add_arguments(self, parser: argparse.ArgumentParser) -> None:
                 parser.add_argument("--url", required=True)
-                add_output_args(parser)
 
             def execute(self, args: argparse.Namespace) -> None:
                 metrics = self.create_metrics("Ping Result", args)
@@ -81,6 +80,7 @@ class BaseCommand(abc.ABC):
         """
         parser = subparsers.add_parser(self.name(), help=self.help())
         self.add_arguments(parser)
+        _add_output_args(parser)
         parser.set_defaults(func=self.execute)
 
     def create_metrics(
@@ -121,8 +121,11 @@ class BaseCommand(abc.ABC):
         return metrics
 
 
-def add_output_args(parser: argparse.ArgumentParser) -> None:
+def _add_output_args(parser: argparse.ArgumentParser) -> None:
     """Add the common ``--format`` and ``--output`` flags.
+
+    Called automatically by :meth:`BaseCommand.register` — subcommands
+    do not need to call this themselves.
 
     Args:
         parser: The ``ArgumentParser`` to add the flags to.

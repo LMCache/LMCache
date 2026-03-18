@@ -117,7 +117,7 @@ lmcache/cli/
 │   └── formatter.py     # TerminalFormatter, JsonFormatter
 ├── commands/
 │   ├── __init__.py      # ALL_COMMANDS registry
-│   ├── base.py          # BaseCommand ABC, add_output_args()
+│   ├── base.py          # BaseCommand ABC
 │   └── mock.py          # lmcache mock  (example command)
 └── corpora/             # built-in prompt corpora (future)
 ```
@@ -351,7 +351,7 @@ instead of manually registering handlers.
 ### `--format` flag
 
 Controls the stdout rendering format. Default: `terminal` (ASCII table). Available:
-`terminal`, `json`. Added via the shared helper `add_output_args(parser)` in `base.py`.
+`terminal`, `json`. Added automatically by `BaseCommand.register()`.
 
 ```bash
 lmcache bench ... --format json       # JSON on stdout (for scripts)
@@ -361,7 +361,7 @@ lmcache bench ... --format terminal   # ASCII table (default)
 ### `--output` flag
 
 Saves metrics to a file. The file format follows ``--format`` (default:
-``terminal``). Also added via `add_output_args(parser)`.
+``terminal``). Also added automatically by `BaseCommand.register()`.
 Can be combined with `--format`:
 
 ```bash

@@ -10,7 +10,7 @@ and JSON output paths.
 import argparse
 
 # First Party
-from lmcache.cli.commands.base import BaseCommand, add_output_args
+from lmcache.cli.commands.base import BaseCommand
 
 
 class MockCommand(BaseCommand):
@@ -50,7 +50,6 @@ class MockCommand(BaseCommand):
             default=10,
             help="Number of fake items to process.",
         )
-        add_output_args(parser)
 
     def execute(self, args: argparse.Namespace) -> None:
         """Execute the mock command.

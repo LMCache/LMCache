@@ -278,7 +278,7 @@ lmcache/cli/
 ├── metrics/             # Metrics system (see framework-and-metrics.md)
 ├── commands/
 │   ├── __init__.py      # ALL_COMMANDS registry
-│   ├── base.py          # BaseCommand ABC, add_output_args()
+│   ├── base.py          # BaseCommand ABC
 │   ├── mock.py          # lmcache mock  (example/test command)
 │   ├── server.py        # lmcache server
 │   ├── describe.py      # lmcache describe {kvcache,engine}
