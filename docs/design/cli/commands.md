@@ -28,9 +28,8 @@ lmcache
 | `bench` | How fast is it? | Multi-iteration, metrics-heavy |
 | `kvcache` | Mutate cache state | Clear, end-session, evict (future) |
 
-All client commands use a unified `--url` flag:
-- KV cache targets: `--url localhost:5555` (ZMQ)
-- Engine targets: `--url http://localhost:8000` (HTTP)
+All client commands use a `--url` flag pointing to the **LMCache HTTP server**
+(e.g. `--url http://localhost:8000`).
 
 ---
 
@@ -260,34 +259,34 @@ in `lmcache/cli/corpora/`.
 
 ### Architecture
 
-- **Auto-discovery:** Commands discovered via `pkgutil.iter_modules()` on the
-  `commands/` package. Drop a new file in `commands/`, define
-  `register_command(subparsers)`, done.
-- **`CommandRegistrar` protocol:** Each command module exposes
-  `register_command(subparsers)` which adds a subparser and sets
-  `parser.set_defaults(func=handler)`.
+- **Explicit registration:** Each command inherits from `BaseCommand` (in
+  `commands/base.py`) and is registered in `commands/__init__.py`'s
+  `ALL_COMMANDS` list. See [framework-and-metrics.md](framework-and-metrics.md).
 - **`send_request()` helper:** Creates a temporary `MessageQueueClient`, submits
   a ZMQ request, waits with timeout (default 5s), tears down. All ZMQ commands
   use this. Extended to handle HTTP targets alongside ZMQ.
 - **Framework:** `argparse` with subparsers (no new deps). Reuses existing
   `add_*_args()` helpers.
-- **`--url` flag:** Unified connection flag with auto-detection
-  (`localhost:5555` → ZMQ, `http://localhost:8000` → HTTP).
+- **`--url` flag:** Configured per-subcommand (ZMQ vs HTTP semantics vary).
 
 ### File layout
 
 ```
 lmcache/cli/
 ├── __init__.py
-├── __main__.py          # Auto-discovery + dispatch
-├── base.py              # send_request(), add_url_arg(), CommandRegistrar
+├── main.py              # main() entry point
+├── metrics/             # Metrics system (see framework-and-metrics.md)
 ├── commands/
+│   ├── __init__.py      # ALL_COMMANDS registry
+│   ├── base.py          # BaseCommand ABC
+│   ├── mock.py          # lmcache mock  (example/test command)
 │   ├── server.py        # lmcache server
 │   ├── describe.py      # lmcache describe {kvcache,engine}
 │   ├── ping.py          # lmcache ping {kvcache,engine}
 │   ├── query.py         # lmcache query {kvcache,engine}
 │   ├── bench.py         # lmcache bench {kvcache,engine}
 │   └── kvcache.py       # lmcache kvcache {clear,end-session}
+├── config.py            # CLIConfig (centralized config system)
 └── corpora/             # Built-in prompt corpora
 ```
 
@@ -303,7 +302,8 @@ lmcache/cli/
 
 | Phase | Scope |
 |-------|-------|
-| **1** | `server`, `ping kvcache`, `kvcache clear`, `kvcache end-session`, `describe kvcache`, entry point |
+| **0** | CLI framework (explicit registration, `Metrics`), `mock` example command, entry point — see [framework-and-metrics.md](framework-and-metrics.md) |
+| **1** | `server`, `ping kvcache`, `kvcache clear`, `kvcache end-session`, `describe kvcache` |
 | **2** | `ping engine`, `query engine`, `query kvcache`, `bench engine`, `bench kvcache`, `describe engine`, corpora |
 | **3** | `kvcache evict` (future) |
 
