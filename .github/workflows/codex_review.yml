@@ -64,7 +64,6 @@ jobs:
           sandbox: danger-full-access
           safety-strategy: drop-sudo
           output-file: /tmp/review.json
-          allow-bots: dependabot[bot]
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           PR_BASE: ${{ github.base_ref }}
