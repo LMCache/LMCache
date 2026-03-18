@@ -75,6 +75,7 @@ Documentation
    getting_started/quickstart/index
    getting_started/benchmarking
    getting_started/kv_cache_calculator
+   getting_started/cli
    getting_started/troubleshoot
    getting_started/faq
    getting_started/quickstart/standalone_starter
@@ -163,6 +164,7 @@ Documentation
    developer_guide/architecture
    developer_guide/integration
    developer_guide/extending_lmcache/index
+   developer_guide/cli
    developer_guide/usage/index
 
 :raw-html:`<br />`
