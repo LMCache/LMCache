@@ -7,6 +7,8 @@ import shutil
 import sys
 import tempfile
 import threading
+import time
+import urllib.parse
 
 # Third Party
 import pytest
@@ -15,9 +17,10 @@ import torch
 # First Party
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.memory_management import MemoryObj
+from lmcache.v1.memory_management import MemoryFormat, MemoryObj
 from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.storage_backend.gds_backend import (
+    _DATA_FILE_SUFFIX,
     _METADATA_FILE_SUFFIX,
     _METADATA_VERSION,
     GdsBackend,
@@ -473,3 +476,282 @@ class TestGdsBackend:
                     metadata=metadata,
                     dst_device="cuda:0",
                 )
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="Requires CUDA for TestGdsMultiPath",
+)
+@pytest.mark.skipif(sys.platform != "linux", reason="Runs only on Linux")
+class TestGdsMultiPath:
+    """Tests for multi-path GDS backend support.
+
+    Verifies comma-separated gds_path parsing, GPU-to-NVMe affinity
+    (by_gpu sharding), directory creation for all paths, and backward
+    compatibility with single-path configs.
+    """
+
+    @staticmethod
+    def _make_backend(gds_path: str, dst_device: str, async_loop):
+        """Create a GdsBackend with mocked allocator and fstype.
+
+        Mocks are used so the tests run without cuFile / real NVMe.
+        """
+
+        class DummyAllocator:
+            def __init__(self):
+                self.base_pointer = 0
+
+            def close(self):
+                pass
+
+        config = create_test_config(gds_path)
+        metadata = create_test_metadata()
+        with (
+            mock.patch(
+                "lmcache.v1.storage_backend.gds_backend.get_fstype",
+                return_value="tmpfs",
+            ),
+            mock.patch.object(
+                GdsBackend,
+                "initialize_allocator",
+                return_value=DummyAllocator(),
+            ),
+            mock.patch(
+                "lmcache.v1.storage_backend.gds_backend.ctypes.CDLL",
+                return_value=mock.MagicMock(),
+            ),
+        ):
+            backend = GdsBackend(
+                config=config,
+                loop=async_loop,
+                metadata=metadata,
+                dst_device=dst_device,
+            )
+        return backend
+
+    def test_single_path_backward_compat(self, temp_gds_path, async_loop):
+        """A single gds_path (no commas) behaves like before."""
+        backend = self._make_backend(temp_gds_path, "cuda:0", async_loop)
+        try:
+            assert backend.gds_paths == [temp_gds_path]
+            assert backend.gds_path == temp_gds_path
+        finally:
+            backend.close()
+
+    def test_multi_path_parsing(self, async_loop):
+        """Comma-separated paths are split into gds_paths list."""
+        paths = [tempfile.mkdtemp() for _ in range(3)]
+        try:
+            gds_path = ",".join(paths)
+            backend = self._make_backend(gds_path, "cuda:0", async_loop)
+            try:
+                assert backend.gds_paths == paths
+                assert len(backend.gds_paths) == 3
+            finally:
+                backend.close()
+        finally:
+            for p in paths:
+                shutil.rmtree(p, ignore_errors=True)
+
+    def test_multi_path_parsing_with_spaces(self, async_loop):
+        """Spaces around commas are stripped."""
+        paths = [tempfile.mkdtemp() for _ in range(2)]
+        try:
+            gds_path = f"  {paths[0]}  ,  {paths[1]}  "
+            backend = self._make_backend(gds_path, "cuda:0", async_loop)
+            try:
+                assert backend.gds_paths == paths
+            finally:
+                backend.close()
+        finally:
+            for p in paths:
+                shutil.rmtree(p, ignore_errors=True)
+
+    def test_gpu_affinity_selects_path(self, async_loop):
+        """Different cuda devices select different paths via modulo."""
+        paths = [tempfile.mkdtemp() for _ in range(4)]
+        try:
+            gds_path = ",".join(paths)
+            for device_id in range(8):
+                dst = f"cuda:{device_id}"
+                backend = self._make_backend(gds_path, dst, async_loop)
+                try:
+                    expected = paths[device_id % 4]
+                    assert backend.gds_path == expected, (
+                        f"cuda:{device_id} should map to {expected}, "
+                        f"got {backend.gds_path}"
+                    )
+                finally:
+                    backend.close()
+        finally:
+            for p in paths:
+                shutil.rmtree(p, ignore_errors=True)
+
+    def test_all_directories_created(self, async_loop):
+        """All paths in gds_paths get their directories created."""
+        base = tempfile.mkdtemp()
+        try:
+            paths = [os.path.join(base, f"nvme{i}") for i in range(3)]
+            gds_path = ",".join(paths)
+            backend = self._make_backend(gds_path, "cuda:0", async_loop)
+            try:
+                for p in paths:
+                    assert os.path.isdir(p), f"{p} should exist"
+            finally:
+                backend.close()
+        finally:
+            shutil.rmtree(base, ignore_errors=True)
+
+    def test_key_to_path_uses_selected_path(self, async_loop):
+        """_key_to_path builds file paths under the selected gds_path."""
+        paths = [tempfile.mkdtemp() for _ in range(2)]
+        try:
+            gds_path = ",".join(paths)
+            backend = self._make_backend(gds_path, "cuda:0", async_loop)
+            try:
+                key = create_test_key(0)
+                file_path, _, _, _ = backend._key_to_path(key)
+                assert file_path.startswith(backend.gds_path)
+            finally:
+                backend.close()
+        finally:
+            for p in paths:
+                shutil.rmtree(p, ignore_errors=True)
+
+    def test_deterministic_path_selection(self, async_loop):
+        """Same device always selects the same path."""
+        paths = [tempfile.mkdtemp() for _ in range(3)]
+        try:
+            gds_path = ",".join(paths)
+            selected = set()
+            for _ in range(5):
+                backend = self._make_backend(gds_path, "cuda:1", async_loop)
+                try:
+                    selected.add(backend.gds_path)
+                finally:
+                    backend.close()
+            assert len(selected) == 1, "Path selection should be deterministic"
+        finally:
+            for p in paths:
+                shutil.rmtree(p, ignore_errors=True)
+
+    def test_scan_discovers_entries_across_all_paths(self, async_loop):
+        """Startup scan finds metadata written under a non-affinity path.
+
+        cuda:0 has affinity to paths[0], but a metadata file is placed
+        under paths[1].  The scan should still discover it because
+        ``_scan_metadata`` iterates all ``gds_paths``.
+        """
+        paths = [tempfile.mkdtemp() for _ in range(2)]
+        try:
+            # chunk_hash must have >=4 decimal digits so l1/l2 dirs
+            # are each 2 chars (the scanner filters on len == 2).
+            key = CacheEngineKey(
+                model_name="testmodel",
+                world_size=3,
+                worker_id=1,
+                chunk_hash=1234,
+                dtype=torch.bfloat16,
+            )
+            hash_str = str(key.chunk_hash)
+            l1_dir = hash_str[:2]
+            l2_dir = hash_str[2:4]
+            key_str = urllib.parse.quote(key.to_string(), safe="")
+
+            # Build directory structure under paths[1] (non-affinity path)
+            subdir = os.path.join(paths[1], l1_dir, l2_dir)
+            os.makedirs(subdir, exist_ok=True)
+
+            # Write a valid metadata file
+            dummy_tensor = torch.zeros(2, 256, 8, 128, dtype=torch.bfloat16)
+            metadata_bytes = pack_metadata(
+                dummy_tensor,
+                fmt=MemoryFormat.KV_2LTD,
+                lmcache_version="1",
+            )
+            meta_path = os.path.join(
+                subdir,
+                key_str + _DATA_FILE_SUFFIX + _METADATA_FILE_SUFFIX,
+            )
+            with open(meta_path, "wb") as f:
+                f.write(metadata_bytes)
+
+            # Create backend — cuda:0 affinity selects paths[0]
+            gds_path = ",".join(paths)
+            backend = self._make_backend(gds_path, "cuda:0", async_loop)
+            try:
+                assert backend.gds_path == paths[0]
+
+                # Wait for the async _scan_metadata to finish
+                time.sleep(1)
+
+                # contains() would NOT find this via _try_to_read_metadata
+                # (which only checks the affinity path).  If it returns
+                # True, the cross-path scan populated hot_cache.
+                assert backend.contains(key), (
+                    "Scan should discover metadata across all gds_paths"
+                )
+            finally:
+                backend.close()
+        finally:
+            for p in paths:
+                shutil.rmtree(p, ignore_errors=True)
+
+    def test_try_to_read_metadata_finds_across_all_paths(self, async_loop):
+        """contains() fallback finds metadata on a non-affinity path.
+
+        After clearing hot_cache (so the startup scan results are gone),
+        ``contains()`` falls back to ``_try_to_read_metadata`` which
+        should search all ``gds_paths``, not just the affinity path.
+        """
+        paths = [tempfile.mkdtemp() for _ in range(2)]
+        try:
+            key = CacheEngineKey(
+                model_name="testmodel",
+                world_size=3,
+                worker_id=1,
+                chunk_hash=1234,
+                dtype=torch.bfloat16,
+            )
+            hash_str = str(key.chunk_hash)
+            l1_dir = hash_str[:2]
+            l2_dir = hash_str[2:4]
+            key_str = urllib.parse.quote(key.to_string(), safe="")
+
+            # Place metadata under paths[1] (non-affinity path)
+            subdir = os.path.join(paths[1], l1_dir, l2_dir)
+            os.makedirs(subdir, exist_ok=True)
+
+            dummy_tensor = torch.zeros(2, 256, 8, 128, dtype=torch.bfloat16)
+            metadata_bytes = pack_metadata(
+                dummy_tensor,
+                fmt=MemoryFormat.KV_2LTD,
+                lmcache_version="1",
+            )
+            meta_path = os.path.join(
+                subdir,
+                key_str + _DATA_FILE_SUFFIX + _METADATA_FILE_SUFFIX,
+            )
+            with open(meta_path, "wb") as f:
+                f.write(metadata_bytes)
+
+            gds_path = ",".join(paths)
+            backend = self._make_backend(gds_path, "cuda:0", async_loop)
+            try:
+                assert backend.gds_path == paths[0]
+
+                # Wait for async scan, then clear its results
+                time.sleep(1)
+                with backend.hot_lock:
+                    backend.hot_cache.clear()
+
+                # contains() now relies solely on _try_to_read_metadata
+                assert backend.contains(key), (
+                    "_try_to_read_metadata should search all gds_paths"
+                )
+            finally:
+                backend.close()
+        finally:
+            for p in paths:
+                shutil.rmtree(p, ignore_errors=True)
