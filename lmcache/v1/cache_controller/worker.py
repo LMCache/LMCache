@@ -118,11 +118,11 @@ class LMCacheWorker:
         )
         if not lmcache_worker_ids:
             # start lmcache worker on all ranks
-            assert len(config.lmcache_worker_ports) == metadata.world_size
+            assert len(config.lmcache_worker_ports) >= metadata.world_size
             lmcache_worker_port = config.lmcache_worker_ports[self.worker_id]
         else:
             # start lmcache worker on given worker ids
-            assert len(lmcache_worker_ids) == len(config.lmcache_worker_ports)
+            assert len(config.lmcache_worker_ports) >= len(lmcache_worker_ids)
             index = lmcache_worker_ids.index(self.worker_id)
             lmcache_worker_port = config.lmcache_worker_ports[index]
 
