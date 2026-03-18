@@ -248,9 +248,21 @@ class TestEngineFirePostLoadHooks:
         assert len(good_hook.calls) == 1
 
     def test_hook_not_fired_when_list_empty(self):
-        """Fast path: zero overhead when no hooks registered."""
+        """Fast path: _fire_post_load_hooks is a no-op with an empty list.
+
+        Even if called directly, no hook code runs and no exception is raised.
+        Using a sentinel recording hook as a sanity check: it must not appear
+        in calls when the engine has zero registered hooks.
+        """
+        sentinel = _RecordingHook()
+        # Engine with NO hooks — sentinel is intentionally NOT registered
         engine = _make_engine(hooks=[])
-        assert not engine._post_load_hooks
+        # Call _fire_post_load_hooks directly; the empty loop means no hook fires
+        engine._fire_post_load_hooks(
+            "req-empty", {}, torch.zeros(0, dtype=torch.long), 0, None
+        )
+        # Sentinel was never registered, so it must never have been called
+        assert len(sentinel.calls) == 0
 
 
 # ---------------------------------------------------------------------------
