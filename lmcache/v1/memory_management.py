@@ -1066,7 +1066,7 @@ class AddressManager:
             if block.size >= aligned_size:
                 break
         else:
-            logger.debug(
+            logger.warning(
                 "Failed to allocate memory block of size %d "
                 "because no memory is available",
                 size,
@@ -1144,7 +1144,7 @@ class AddressManager:
 
         if remaining > 0:
             # Not enough memory; free list is untouched, no rollback needed
-            logger.debug(
+            logger.warning(
                 "Failed to batched allocate %d memory blocks of size %d "
                 "because no enough memory is available (short by %d blocks)",
                 batch_size,
@@ -1158,7 +1158,7 @@ class AddressManager:
         if len(allocate_result) != batch_size:
             # The length of allocate_result is not equal to batch_size;
             # free list is untouched, no rollback needed
-            logger.debug(
+            logger.warning(
                 "Failed to batched allocate %d memory blocks of size %d "
                 "because the length of allocate_result %d is not equal to batch_size",
                 batch_size,
