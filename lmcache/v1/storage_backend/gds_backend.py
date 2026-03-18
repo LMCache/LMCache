@@ -592,6 +592,10 @@ class GdsBackend(AllocatorBackendInterface):
                 )
                 self.save_metadata_tasks.add(task)
                 task.add_done_callback(self.save_metadata_tasks.discard)
+                # Add callback to check for exceptions during task execution
+                task.add_done_callback(
+                    lambda t: self._handle_metadata_write_completion(t, key, path)
+                )
             except Exception as e:
                 logger.error(
                     f"POSIX metadata write operation failed for key {key.to_string()} "
@@ -617,6 +621,29 @@ class GdsBackend(AllocatorBackendInterface):
                     f"on_complete_callback failed for key {key.to_string()}: {e}",
                     exc_info=True,
                 )
+
+    def _handle_metadata_write_completion(
+        self, task: asyncio.Task, key: CacheEngineKey, path: str
+    ) -> None:
+        """Handle completion of metadata write task, checking for exceptions."""
+        try:
+            # Retrieve exception if task failed
+            exception = task.exception()
+            if exception is not None:
+                logger.error(
+                    f"Metadata write task failed for key {key.to_string()} "
+                    f"at path {path + _METADATA_FILE_SUFFIX}: {exception}",
+                    exc_info=exception,
+                )
+                with self.hot_lock:
+                    self.hot_cache.pop(key, None)
+        except Exception as e:
+            # Exception calling task.exception() (e.g., task was cancelled)
+            logger.error(
+                f"Error checking metadata write task status for key "
+                f"{key.to_string()}: {e}",
+                exc_info=True,
+            )
 
     def insert_key(self, key: CacheEngineKey, memory_obj: MemoryObj) -> None:
         path, _, _, _ = self._key_to_path(key)
