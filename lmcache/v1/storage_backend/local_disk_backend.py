@@ -244,7 +244,10 @@ class LocalDiskBackend(StorageBackendInterface):
         # )
         # res.result()
 
-        os.remove(path)
+        try:
+            os.remove(path)
+        except FileNotFoundError:
+            logger.warning(f"File not found on disk: {path}")
 
         if force:
             self.cache_policy.update_on_force_evict(key)
