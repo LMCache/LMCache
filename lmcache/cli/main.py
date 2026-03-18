@@ -11,6 +11,9 @@ import sys
 
 # First Party
 from lmcache.cli.commands import ALL_COMMANDS
+from lmcache.logging import init_logger
+
+logger = init_logger(__name__)
 
 
 def main() -> None:
@@ -34,6 +37,6 @@ def main() -> None:
         args.func(args)
     except KeyboardInterrupt:
         sys.exit(130)
-    except Exception as exc:  # noqa: BLE001
-        print(f"error: {exc}", file=sys.stderr)
+    except Exception:  # noqa: BLE001
+        logger.exception("Command failed")
         sys.exit(1)
