@@ -18,10 +18,10 @@ from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.storage_backend.gds_backend import (
-    GdsBackend,
-    UnsupportedMetadataVersion,
     _METADATA_FILE_SUFFIX,
     _METADATA_VERSION,
+    GdsBackend,
+    UnsupportedMetadataVersion,
     pack_metadata,
 )
 from tests.v1.utils import create_test_memory_obj, has_cufile
@@ -343,7 +343,9 @@ class TestGdsBackend:
     async def test_async_save_bytes_metadata_write_failure(
         self, gds_backend, temp_gds_path
     ):
-        """Test that metadata write failures during task execution trigger cache cleanup."""
+        """
+        Test that metadata write failures during task execution trigger cache cleanup.
+        """
         key = create_test_key(500)
         memory_obj = create_test_memory_obj(device="cuda")
         memory_obj.ref_count_up()
