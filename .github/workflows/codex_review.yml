@@ -53,6 +53,13 @@ jobs:
             echo "tier=lite" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Verify Codex CLI
+        if: steps.triage.outputs.tier != 'skip'
+        run: |
+          echo "Codex version:"
+          codex --version 2>&1 || echo "codex not found in PATH"
+          echo "OPENAI_API_KEY is set: ${{ secrets.OPENAI_API_KEY != '' }}"
+
       - name: Run Codex agent
         id: agent
         if: steps.triage.outputs.tier != 'skip'
@@ -60,7 +67,7 @@ jobs:
         with:
           openai-api-key: ${{ secrets.OPENAI_API_KEY }}
           prompt-file: .github/codex/prompts/review.md
-          model: o3
+          model: o3-mini
           output-file: /tmp/review.json
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
