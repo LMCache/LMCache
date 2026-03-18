@@ -576,10 +576,10 @@ class LMCacheConnectorV1Impl:
         self._requests_priority: dict[str, int] = {}
         self._invalid_block_ids: set[int] = set()
 
-        # SemanticLookupProvider — optional approximate KV matching
-        self._semantic_provider: Optional[SemanticLookupProvider] = None
         # req_id -> SemanticLookupResult pending token-id substitution in
-        # build_connector_meta; cleared when the request is handled or finished
+        # build_connector_meta; cleared when the request is handled or finished.
+        # Populated via lookup_client.pop_pending_substitution() after a
+        # successful semantic lookup.
         self._semantic_substitutions: dict[str, SemanticLookupResult] = {}
 
     def _check_legacy_register_kv_caches(self) -> None:
@@ -617,12 +617,18 @@ class LMCacheConnectorV1Impl:
         Only one provider can be active at a time; calling this method
         again replaces the previous provider.
 
+        The semantic lookup logic now lives inside the lookup client
+        (:class:`~lmcache.v1.lookup_client.lmcache_lookup_client.\
+LMCacheLookupClient`).  This method delegates the provider to the client
+        and also calls the provider's :meth:`on_init` lifecycle hook.
+
         Parameters
         ----------
         provider:
             An instance of a :class:`SemanticLookupProvider` subclass.
         """
-        self._semantic_provider = provider
+        if self.lookup_client is not None:
+            self.lookup_client.set_semantic_provider(provider)
         logger.info("SemanticLookupProvider registered: %s", type(provider).__name__)
 
     # ==================== Property Accessors ====================
@@ -1313,6 +1319,7 @@ class LMCacheConnectorV1Impl:
                 token_ids,
                 lookup_id=req_id,
                 request_configs=request_configs,
+                num_computed_tokens=num_computed_tokens,
             )
 
         if num_external_hit_tokens is None:
@@ -1370,112 +1377,34 @@ class LMCacheConnectorV1Impl:
             can_load=False,
         )
 
-        if below_min_retrieve or need_to_allocate <= 0:
-            # Standard lookup found no usable cached tokens.
-            # Consult the semantic provider (if any) for an approximate match.
-            # Only do this when there are truly zero hit tokens (not when
-            # below_min_retrieve: that means there IS a hit, just too small).
-            if (
-                num_external_hit_tokens == 0
-                and not below_min_retrieve
-                and self._semantic_provider is not None
-                and not request.request_id.startswith("mock_req")
-            ):
-                # Always derive token_ids fresh from the request so this branch
-                # is correct whether we are in a first lookup (else) or an
-                # idempotent re-call (if / cached branch).
-                sem_token_ids: list[int] = list(request.all_token_ids)
-                if self.skip_last_n_tokens > 0:
-                    sem_token_ids = sem_token_ids[: -self.skip_last_n_tokens]
-                sem_request_configs = extract_request_configs(request.sampling_params)
-                sem_result = self._try_semantic_lookup(
-                    req_id,
-                    sem_token_ids,
-                    num_computed_tokens,
-                    sem_request_configs,
+        # Transfer any pending semantic substitution from lookup client.
+        # The semantic fallback (if any) already ran inside lookup_client.lookup();
+        # we just need to move the result into _semantic_substitutions so
+        # build_connector_meta can apply the token-ID swap.
+        if num_external_hit_tokens > 0:
+            pending_sub = self.lookup_client.pop_pending_substitution(req_id)
+            if pending_sub is not None:
+                self._semantic_substitutions[req_id] = pending_sub
+                self.load_specs[req_id] = LoadSpec(
+                    vllm_cached_tokens=num_computed_tokens,
+                    lmcache_cached_tokens=num_external_hit_tokens,
+                    can_load=False,
                 )
-                if sem_result is not None:
-                    return sem_result
+                logger.info(
+                    "Semantic hit for req %s: donor=%s hit=%d need_to_alloc=%d",
+                    req_id,
+                    pending_sub.source_id or "unknown",
+                    num_external_hit_tokens,
+                    need_to_allocate,
+                )
+
+        if below_min_retrieve or need_to_allocate <= 0:
             return 0
 
         # TODO: Align to vLLM block size. Should test whether it can be removed
         # need_to_allocate = need_to_allocate // self._block_size * \
         #        self._block_size
 
-        return need_to_allocate
-
-    def _try_semantic_lookup(
-        self,
-        req_id: str,
-        token_ids: list[int],
-        num_computed_tokens: int,
-        request_configs: Optional[dict],
-    ) -> Optional[int]:
-        """Consult the semantic provider and set up a donor substitution.
-
-        Called from :meth:`get_num_new_matched_tokens` when the standard
-        chunk-hash lookup returns zero hit tokens.
-
-        Returns the tokens-to-allocate count (>0) when a semantic hit is
-        found, or ``None`` when the provider returns no match.
-
-        Note on idempotency: if this method returns ``None`` (provider finds
-        no semantic hit), the standard lookup result (0) remains cached in
-        the lookup client.  On a subsequent idempotent re-call (preemption
-        recovery without ``update_state_after_alloc``), the provider's
-        ``on_lookup_miss`` will be invoked again.  Providers should be
-        prepared for this and treat duplicate calls as idempotent.
-        """
-        assert self._semantic_provider is not None
-        assert self.lookup_client is not None
-
-        result = self._semantic_provider.on_lookup_miss(
-            req_id, token_ids, num_computed_tokens
-        )
-        if result is None:
-            return None
-
-        # Re-lookup the chunk store using the donor's token IDs.
-        # Clear the previously cached zero-hit result first so that
-        # the lookup client accepts the new query.
-        self.lookup_client.clear_lookup_status(req_id)
-        num_semantic_hit = self.lookup_client.lookup(
-            result.alternate_token_ids,
-            lookup_id=req_id,
-            request_configs=request_configs,
-        )
-
-        if not num_semantic_hit or num_semantic_hit <= num_computed_tokens:
-            # Donor KV not in the store (or too few tokens) — fall through
-            # to normal cold prefill. Restore clean lookup state.
-            self.lookup_client.clear_lookup_status(req_id)
-            return None
-
-        # Store the substitution so build_connector_meta can swap token IDs.
-        self._semantic_substitutions[req_id] = result
-
-        need_to_allocate = num_semantic_hit - num_computed_tokens
-        # Full-prompt hit: recompute the last token (same as standard path)
-        if num_semantic_hit == len(token_ids):
-            need_to_allocate -= 1
-
-        if need_to_allocate <= 0:
-            self.lookup_client.clear_lookup_status(req_id)
-            self._semantic_substitutions.pop(req_id, None)
-            return None
-
-        self.load_specs[req_id] = LoadSpec(
-            vllm_cached_tokens=num_computed_tokens,
-            lmcache_cached_tokens=num_semantic_hit,
-            can_load=False,
-        )
-        logger.info(
-            "Semantic hit for req %s: donor=%s hit=%d need_to_alloc=%d",
-            req_id,
-            result.source_id or "unknown",
-            num_semantic_hit,
-            need_to_allocate,
-        )
         return need_to_allocate
 
     def _apply_semantic_substitution(self, req_meta: "ReqMeta") -> None:
@@ -1858,23 +1787,17 @@ class LMCacheConnectorV1Impl:
                     request_tracker.num_lmcache_cached_tokens
                 )
 
-        # Notify semantic provider and clean up any leftover substitution state
-        if self._semantic_provider is not None:
-            self._semantic_substitutions.pop(request.request_id, None)
-            try:
-                token_ids = list(request.all_token_ids)
-                num_prompt_tokens = getattr(
-                    request, "num_prompt_tokens", len(token_ids)
-                )
-                self._semantic_provider.on_request_finished(
-                    request.request_id, token_ids, num_prompt_tokens
-                )
-            except Exception:
-                logger.warning(
-                    "SemanticLookupProvider.on_request_finished raised for req %s",
-                    request.request_id,
-                    exc_info=True,
-                )
+        # Clean up any leftover semantic substitution state and notify the
+        # lookup client (which will forward to the provider if one is set).
+        self._semantic_substitutions.pop(request.request_id, None)
+        if self.lookup_client is not None:
+            token_ids = list(request.all_token_ids)
+            num_prompt_tokens = getattr(
+                request, "num_prompt_tokens", len(token_ids)
+            )
+            self.lookup_client.notify_request_finished(
+                request.request_id, token_ids, num_prompt_tokens
+            )
 
         return False, return_params
 

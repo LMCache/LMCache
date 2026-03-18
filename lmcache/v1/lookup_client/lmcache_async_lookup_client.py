@@ -195,6 +195,7 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
         token_ids: Union[torch.Tensor, list[int]],
         lookup_id: str,
         request_configs: Optional[dict] = None,
+        num_computed_tokens: int = 0,
     ) -> Optional[int]:
         hashes: list[int] = []
         offsets = []

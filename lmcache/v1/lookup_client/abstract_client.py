@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from typing import Optional, Union
+from typing import Any, Optional, Union
 import abc
 
 # Third Party
@@ -30,6 +30,7 @@ class LookupClientInterface(metaclass=abc.ABCMeta):
         token_ids: Union[torch.Tensor, list[int]],
         lookup_id: str,
         request_configs: Optional[dict] = None,
+        num_computed_tokens: int = 0,
     ) -> Optional[int]:
         """
         Perform lookup for the given token IDs.
@@ -46,6 +47,9 @@ class LookupClientInterface(metaclass=abc.ABCMeta):
 
             request_configs: The configs of the request,
             includes tags and the other configs
+
+            num_computed_tokens: Number of tokens already computed locally
+            (vLLM prefix cache hit). Used by semantic lookup fallback.
 
         Returns:
             The number of tokens that exist inside LMCache.
@@ -73,5 +77,44 @@ class LookupClientInterface(metaclass=abc.ABCMeta):
 
         Args:
             lookup_id: The lookup ID whose status needs to be cleared.
+        """
+        return
+
+    def set_semantic_provider(self, provider: Any) -> None:
+        """Register a SemanticLookupProvider (default no-op for most clients).
+
+        Args:
+            provider: An instance of a SemanticLookupProvider subclass.
+        """
+        return
+
+    def pop_pending_substitution(self, lookup_id: str) -> Optional[Any]:
+        """Pop and return a pending semantic substitution result, if any.
+
+        Returns None by default (no semantic fallback implemented).
+
+        Args:
+            lookup_id: The lookup ID (request ID) to check.
+
+        Returns:
+            SemanticLookupResult if a substitution is pending, else None.
+        """
+        return None
+
+    def notify_request_finished(
+        self,
+        request_id: str,
+        token_ids: list[int],
+        num_prompt_tokens: int,
+    ) -> None:
+        """Notify the client that a request has finished (default no-op).
+
+        Called by the adapter so that clients that hold a SemanticLookupProvider
+        can forward the on_request_finished lifecycle event.
+
+        Args:
+            request_id: vLLM request ID of the finished request.
+            token_ids: Full prompt token IDs of the finished request.
+            num_prompt_tokens: Number of prompt tokens in the request.
         """
         return

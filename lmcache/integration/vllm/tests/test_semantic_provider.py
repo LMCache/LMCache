@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests for SemanticLookupProvider integration.
 
-Validates PR: add SemanticLookupProvider interface for approximate KV cache
-matching.
+Validates PR: move SemanticLookupProvider logic into LMCacheLookupClient.
 """
 
 # Future
@@ -63,8 +62,12 @@ class _NeverHitProvider(SemanticLookupProvider):
         self.finish_calls.append((request_id, token_ids, num_prompt_tokens))
 
 
-def _make_impl(semantic_provider=None):
-    """Return a minimal LMCacheConnectorV1Impl with semantic state initialised."""
+def _make_impl(mock_lookup=None):
+    """Return a minimal LMCacheConnectorV1Impl with semantic state initialised.
+
+    The lookup_client is always a MagicMock. Call set_semantic_lookup_provider()
+    to register a provider — it will delegate to mock_lookup.set_semantic_provider.
+    """
     # First Party
     from lmcache.integration.vllm.vllm_v1_adapter import (
         LMCacheConnectorV1Impl,
@@ -72,20 +75,23 @@ def _make_impl(semantic_provider=None):
 
     impl = LMCacheConnectorV1Impl.__new__(LMCacheConnectorV1Impl)
     impl.load_specs = {}
-    impl._semantic_provider = semantic_provider
     impl._semantic_substitutions = {}
     impl._lmcache_chunk_size = 256
     impl.skip_last_n_tokens = 0
     impl.kv_role = "kv_consumer"
     impl.config = MagicMock()
     impl.config.min_retrieve_tokens = 0
+    impl.config.get_extra_config_value.return_value = False
     impl._stats_monitor = MagicMock()
     impl._requests_priority = {}
+    impl._request_trackers = {}
 
     # Mock lookup client — synchronous, returns 0 by default
-    mock_lookup = MagicMock()
-    mock_lookup.lookup_cache.return_value = -1  # -1 means not cached yet
-    mock_lookup.lookup.return_value = 0
+    if mock_lookup is None:
+        mock_lookup = MagicMock()
+        mock_lookup.lookup_cache.return_value = -1  # -1 means not cached yet
+        mock_lookup.lookup.return_value = 0
+        mock_lookup.pop_pending_substitution.return_value = None
     impl._manager = MagicMock()
     impl._manager.lookup_client = mock_lookup
 
@@ -100,7 +106,38 @@ def _make_request(request_id: str, token_ids: list[int], num_computed: int = 0):
     req.num_tokens = len(token_ids)
     req.sampling_params = MagicMock()
     req.sampling_params.extra_args = None
+    # Disable multimodal features so extract_mm_features returns ([], [])
+    req.mm_features = None
+    req.mm_hashes = None
+    req.mm_positions = None
     return req
+
+
+def _make_lookup_client_for_semantic():
+    """Create a minimal LMCacheLookupClient instance (no transport, no vllm)."""
+    from lmcache.v1.lookup_client.lmcache_lookup_client import LMCacheLookupClient
+
+    client = LMCacheLookupClient.__new__(LMCacheLookupClient)
+    client.reqs_status = {}
+    client._pending_substitutions = {}
+    client.enable_blending = False
+    client._semantic_provider = None
+
+    # Mock transport: world_size=1
+    mock_transport = MagicMock()
+    mock_transport.world_size = 1
+    # Default: return 0 hit tokens
+    mock_transport.send_and_recv_all.return_value = [
+        (0).to_bytes(4, "big"),
+    ]
+    client.transport = mock_transport
+
+    # Mock token_database: process_tokens yields one chunk hash
+    mock_db = MagicMock()
+    mock_db.process_tokens.return_value = [(0, 256, b"hash1")]
+    client.token_database = mock_db
+
+    return client
 
 
 # ---------------------------------------------------------------------------
@@ -159,173 +196,250 @@ class TestSemanticLookupProviderABC:
 
 
 # ---------------------------------------------------------------------------
-# set_semantic_lookup_provider tests
+# LMCacheLookupClient semantic tests (new location for semantic logic)
+# ---------------------------------------------------------------------------
+
+
+class TestLMCacheLookupClientSemantic:
+    def test_set_semantic_provider_stores_provider(self):
+        client = _make_lookup_client_for_semantic()
+        provider = _AlwaysHitProvider([1, 2, 3])
+        client.set_semantic_provider(provider)
+        assert client._semantic_provider is provider
+
+    def test_provider_not_called_when_no_hits_and_no_provider(self):
+        """No semantic provider — zero hit is just returned as-is."""
+        client = _make_lookup_client_for_semantic()
+        # transport returns 0
+        result = client.lookup([1, 2, 3], "req-a")
+        assert result == 0
+        assert client._pending_substitutions == {}
+
+    def test_provider_called_on_zero_hit(self):
+        """on_lookup_miss called when exact lookup returns 0."""
+        provider = _NeverHitProvider()
+        client = _make_lookup_client_for_semantic()
+        client.set_semantic_provider(provider)
+
+        token_ids = list(range(256))
+        client.lookup(token_ids, "req-b")
+        assert len(provider.miss_calls) == 1
+        call_req_id, call_tokens, call_computed = provider.miss_calls[0]
+        assert call_req_id == "req-b"
+        assert call_tokens == token_ids
+        assert call_computed == 0
+
+    def test_semantic_hit_stores_pending_substitution(self):
+        """When donor lookup returns >0, pending sub is stored."""
+        donor_ids = list(range(512))
+        provider = _AlwaysHitProvider(alternate_ids=donor_ids)
+        client = _make_lookup_client_for_semantic()
+        client.set_semantic_provider(provider)
+
+        # First transport call returns 0 (miss), second returns 512 (donor hit)
+        client.transport.send_and_recv_all.side_effect = [
+            [(0).to_bytes(4, "big")],
+            [(512).to_bytes(4, "big")],
+        ]
+
+        result = client.lookup(list(range(512)), "req-c", num_computed_tokens=0)
+        assert result == 512
+        assert "req-c" in client._pending_substitutions
+        assert client._pending_substitutions["req-c"].alternate_token_ids == donor_ids
+
+    def test_semantic_miss_donor_not_in_store(self):
+        """If donor re-lookup also returns 0 — no pending substitution."""
+        donor_ids = list(range(512))
+        provider = _AlwaysHitProvider(alternate_ids=donor_ids)
+        client = _make_lookup_client_for_semantic()
+        client.set_semantic_provider(provider)
+
+        # Both calls return 0
+        client.transport.send_and_recv_all.return_value = [(0).to_bytes(4, "big")]
+
+        result = client.lookup(list(range(512)), "req-d", num_computed_tokens=0)
+        assert result == 0
+        assert "req-d" not in client._pending_substitutions
+
+    def test_clear_lookup_status_clears_pending(self):
+        """clear_lookup_status removes both reqs_status and pending sub."""
+        client = _make_lookup_client_for_semantic()
+        client.reqs_status["req-e"] = 0
+        client._pending_substitutions["req-e"] = SemanticLookupResult(
+            alternate_token_ids=[1, 2, 3], num_cached_tokens=3
+        )
+        client.clear_lookup_status("req-e")
+        assert "req-e" not in client.reqs_status
+        assert "req-e" not in client._pending_substitutions
+
+    def test_pop_pending_substitution(self):
+        """pop_pending_substitution returns and removes the result."""
+        client = _make_lookup_client_for_semantic()
+        sub = SemanticLookupResult(alternate_token_ids=[1, 2], num_cached_tokens=2)
+        client._pending_substitutions["req-f"] = sub
+        popped = client.pop_pending_substitution("req-f")
+        assert popped is sub
+        assert "req-f" not in client._pending_substitutions
+        # Second pop returns None
+        assert client.pop_pending_substitution("req-f") is None
+
+    def test_notify_request_finished_calls_provider(self):
+        """notify_request_finished delegates to provider.on_request_finished."""
+        provider = _NeverHitProvider()
+        client = _make_lookup_client_for_semantic()
+        client.set_semantic_provider(provider)
+
+        client.notify_request_finished("req-g", [1, 2, 3], 3)
+        assert len(provider.finish_calls) == 1
+        assert provider.finish_calls[0] == ("req-g", [1, 2, 3], 3)
+
+    def test_notify_request_finished_no_provider_is_noop(self):
+        """notify_request_finished with no provider does not raise."""
+        client = _make_lookup_client_for_semantic()
+        # Should not raise
+        client.notify_request_finished("req-h", [1, 2], 2)
+
+    def test_notify_request_finished_clears_pending_substitution(self):
+        """Pending substitution is cleaned up on request finish."""
+        client = _make_lookup_client_for_semantic()
+        client._pending_substitutions["req-i"] = SemanticLookupResult(
+            alternate_token_ids=[1], num_cached_tokens=1
+        )
+        client.notify_request_finished("req-i", [1], 1)
+        assert "req-i" not in client._pending_substitutions
+
+
+# ---------------------------------------------------------------------------
+# set_semantic_lookup_provider adapter tests
 # ---------------------------------------------------------------------------
 
 
 class TestSetSemanticLookupProvider:
-    def test_registers_provider(self):
+    def test_delegates_to_lookup_client(self):
+        """set_semantic_lookup_provider delegates to lookup_client."""
         impl = _make_impl()
         provider = _AlwaysHitProvider([1, 2, 3])
         impl.set_semantic_lookup_provider(provider)
-        assert impl._semantic_provider is provider
+        impl.lookup_client.set_semantic_provider.assert_called_once_with(provider)
 
-    def test_replaces_existing_provider(self):
-        provider_a = _AlwaysHitProvider([1, 2, 3])
-        provider_b = _AlwaysHitProvider([4, 5, 6])
-        impl = _make_impl(semantic_provider=provider_a)
-        impl.set_semantic_lookup_provider(provider_b)
-        assert impl._semantic_provider is provider_b
+    def test_works_when_lookup_client_is_none(self):
+        """set_semantic_lookup_provider does not crash when client is None."""
+        impl = _make_impl()
+        impl._manager.lookup_client = None
+        provider = _AlwaysHitProvider([1, 2, 3])
+        # Should not raise
+        impl.set_semantic_lookup_provider(provider)
 
 
 # ---------------------------------------------------------------------------
-# on_lookup_miss integration tests
+# get_num_new_matched_tokens adapter tests (with mock lookup_client)
 # ---------------------------------------------------------------------------
 
 
 class TestOnLookupMissNotCalled:
     def test_provider_not_called_when_standard_hit(self):
-        """Provider is never called when exact lookup finds cached tokens."""
-        provider = _AlwaysHitProvider(alternate_ids=list(range(512)))
-        impl = _make_impl(semantic_provider=provider)
+        """When lookup_client.lookup returns hits, pop_pending_sub is checked."""
+        impl = _make_impl()
+        # Lookup hits 512 tokens
+        impl.lookup_client.lookup.return_value = 512
+        impl.lookup_client.pop_pending_substitution.return_value = None
 
         request = _make_request("req-1", list(range(512)))
-        # Standard lookup returns a hit (512 tokens)
-        impl.lookup_client.lookup.return_value = 512
-
         result = impl.get_num_new_matched_tokens(request, num_computed_tokens=0)
-        # Should return 511 (full prompt hit → subtract 1)
+        # Full prompt hit → 512 - 0 - 1 = 511
         assert result == 511
-        assert provider.miss_calls == []
-
-    def test_provider_not_called_when_no_provider_set(self):
-        """Default behaviour (no provider) unchanged — exact zero hit returns 0."""
-        impl = _make_impl(semantic_provider=None)
-        request = _make_request("req-2", list(range(256)))
-        impl.lookup_client.lookup.return_value = 0
-
-        result = impl.get_num_new_matched_tokens(request, num_computed_tokens=0)
-        assert result == 0
 
     def test_provider_not_called_for_mock_requests(self):
         """DP attention mock requests bypass all lookup logic."""
-        provider = _AlwaysHitProvider(alternate_ids=list(range(256)))
-        impl = _make_impl(semantic_provider=provider)
+        impl = _make_impl()
         request = _make_request("mock_req_dp", list(range(256)))
 
         result = impl.get_num_new_matched_tokens(request, num_computed_tokens=0)
         assert result == 0
-        assert provider.miss_calls == []
 
-
-class TestOnLookupMissCalled:
-    def test_provider_called_on_zero_hit(self):
-        """Provider.on_lookup_miss called when exact lookup returns 0."""
-        donor_ids = list(range(512))
-        provider = _AlwaysHitProvider(alternate_ids=donor_ids)
-        impl = _make_impl(semantic_provider=provider)
-
-        token_ids = list(range(512))
-        request = _make_request("req-3", token_ids)
+    def test_returns_zero_when_no_hit(self):
+        """Default: no semantic provider, zero hit → 0."""
+        impl = _make_impl()
         impl.lookup_client.lookup.return_value = 0
+        impl.lookup_client.pop_pending_substitution.return_value = None
 
-        impl.get_num_new_matched_tokens(request, num_computed_tokens=0)
-        assert len(provider.miss_calls) == 1
-        call_req_id, call_tokens, call_computed = provider.miss_calls[0]
-        assert call_req_id == "req-3"
-        assert call_tokens == token_ids
-        assert call_computed == 0
-
-    def test_provider_returns_none_falls_back_to_cold_prefill(self):
-        """When provider returns None the request proceeds as cold prefill."""
-        provider = _NeverHitProvider()
-        impl = _make_impl(semantic_provider=provider)
-        request = _make_request("req-4", list(range(256)))
-        impl.lookup_client.lookup.return_value = 0
-
+        request = _make_request("req-2", list(range(256)))
         result = impl.get_num_new_matched_tokens(request, num_computed_tokens=0)
         assert result == 0
-        assert len(provider.miss_calls) == 1
-        # No semantic substitution stored
-        assert "req-4" not in impl._semantic_substitutions
 
 
 class TestSemanticHitFlow:
+    """Adapter tests for semantic hit flow via mock lookup_client."""
+
     def test_semantic_hit_returns_correct_need_to_allocate(self):
-        """When provider returns a result and re-lookup hits, correct count returned."""
+        """When lookup_client.lookup returns 512 and pending sub is set, correct count."""
+        impl = _make_impl()
         donor_ids = list(range(512))
-        provider = _AlwaysHitProvider(alternate_ids=donor_ids)
-        impl = _make_impl(semantic_provider=provider)
+        sub = SemanticLookupResult(
+            alternate_token_ids=donor_ids, num_cached_tokens=512
+        )
+        # The lookup client already handles semantic internally and returns the
+        # donor hit count
+        impl.lookup_client.lookup.return_value = 512
+        impl.lookup_client.pop_pending_substitution.return_value = sub
 
-        token_ids = list(range(512))
-        request = _make_request("req-5", token_ids)
-
-        # First call: standard lookup misses
-        impl.lookup_client.lookup.side_effect = [
-            0,  # standard lookup → 0
-            512,  # re-lookup with alternate_ids → full hit
-        ]
-
+        request = _make_request("req-5", list(range(512)))
         result = impl.get_num_new_matched_tokens(request, num_computed_tokens=0)
         # Full prompt hit → 512 - 0 - 1 = 511
         assert result == 511
 
     def test_semantic_hit_stores_substitution(self):
-        """Pending substitution stored in _semantic_substitutions."""
+        """When lookup returns >0 and pop_pending returns a sub, it's stored."""
+        impl = _make_impl()
         donor_ids = list(range(512))
-        provider = _AlwaysHitProvider(alternate_ids=donor_ids)
-        impl = _make_impl(semantic_provider=provider)
+        sub = SemanticLookupResult(
+            alternate_token_ids=donor_ids, num_cached_tokens=512
+        )
+        impl.lookup_client.lookup.return_value = 512
+        impl.lookup_client.pop_pending_substitution.return_value = sub
 
         request = _make_request("req-6", list(range(512)))
-        impl.lookup_client.lookup.side_effect = [0, 512]
-
         impl.get_num_new_matched_tokens(request, num_computed_tokens=0)
         assert "req-6" in impl._semantic_substitutions
-        sub = impl._semantic_substitutions["req-6"]
-        assert sub.alternate_token_ids == donor_ids
+        assert impl._semantic_substitutions["req-6"] is sub
 
     def test_semantic_hit_updates_load_spec(self):
         """load_specs updated with semantic hit count."""
-
+        impl = _make_impl()
         donor_ids = list(range(512))
-        provider = _AlwaysHitProvider(alternate_ids=donor_ids)
-        impl = _make_impl(semantic_provider=provider)
+        sub = SemanticLookupResult(
+            alternate_token_ids=donor_ids, num_cached_tokens=256
+        )
+        impl.lookup_client.lookup.return_value = 256
+        impl.lookup_client.pop_pending_substitution.return_value = sub
 
         request = _make_request("req-7", list(range(512)))
-        impl.lookup_client.lookup.side_effect = [0, 256]
-
         impl.get_num_new_matched_tokens(request, num_computed_tokens=0)
         assert "req-7" in impl.load_specs
         spec = impl.load_specs["req-7"]
         assert spec.lmcache_cached_tokens == 256
         assert spec.can_load is False
 
-    def test_semantic_miss_donor_not_in_store(self):
-        """If re-lookup with donor tokens returns 0 — fall through to cold prefill."""
-        donor_ids = list(range(512))
-        provider = _AlwaysHitProvider(alternate_ids=donor_ids)
-        impl = _make_impl(semantic_provider=provider)
+    def test_no_substitution_when_pop_returns_none(self):
+        """When pop_pending returns None — no substitution stored."""
+        impl = _make_impl()
+        impl.lookup_client.lookup.return_value = 512
+        impl.lookup_client.pop_pending_substitution.return_value = None
 
         request = _make_request("req-8", list(range(512)))
-        # Both standard and semantic re-lookup miss
-        impl.lookup_client.lookup.return_value = 0
-
-        result = impl.get_num_new_matched_tokens(request, num_computed_tokens=0)
-        assert result == 0
+        impl.get_num_new_matched_tokens(request, num_computed_tokens=0)
         assert "req-8" not in impl._semantic_substitutions
 
-    def test_semantic_lookup_clears_status_on_miss(self):
-        """lookup_client.clear_lookup_status called when semantic lookup returns 0."""
-        donor_ids = list(range(512))
-        provider = _AlwaysHitProvider(alternate_ids=donor_ids)
-        impl = _make_impl(semantic_provider=provider)
+    def test_zero_hit_no_substitution(self):
+        """When lookup returns 0, no substitution is stored."""
+        impl = _make_impl()
+        impl.lookup_client.lookup.return_value = 0
+        impl.lookup_client.pop_pending_substitution.return_value = None
 
         request = _make_request("req-9", list(range(512)))
-        impl.lookup_client.lookup.return_value = 0
-
-        impl.get_num_new_matched_tokens(request, num_computed_tokens=0)
-        # clear_lookup_status should be called for cleanup
-        impl.lookup_client.clear_lookup_status.assert_called()
+        result = impl.get_num_new_matched_tokens(request, num_computed_tokens=0)
+        assert result == 0
+        assert "req-9" not in impl._semantic_substitutions
 
 
 # ---------------------------------------------------------------------------
@@ -457,10 +571,9 @@ class TestOnRequestFinished:
         req.kv_transfer_params = None
         return req
 
-    def test_provider_notified_on_finish(self):
-        provider = _NeverHitProvider()
-        impl = _make_impl(semantic_provider=provider)
-        impl.lookup_client = MagicMock()
+    def test_lookup_client_notified_on_finish(self):
+        """lookup_client.notify_request_finished is called on request finish."""
+        impl = _make_impl()
         impl.async_loading = False
         impl.use_layerwise = False
 
@@ -468,9 +581,9 @@ class TestOnRequestFinished:
         request = self._make_request_finished("req-fin-1", token_ids)
         impl.request_finished(request, block_ids=[])
 
-        assert len(provider.finish_calls) == 1
-        assert provider.finish_calls[0][0] == "req-fin-1"
-        assert provider.finish_calls[0][1] == token_ids
+        impl.lookup_client.notify_request_finished.assert_called_once_with(
+            "req-fin-1", token_ids, 256
+        )
 
     def test_pending_substitution_cleared_on_finish(self):
         """Any leftover semantic substitution state is cleaned up on finish."""
@@ -479,7 +592,6 @@ class TestOnRequestFinished:
             alternate_token_ids=[1, 2, 3],
             num_cached_tokens=3,
         )
-        impl.lookup_client = MagicMock()
         impl.async_loading = False
         impl.use_layerwise = False
 
@@ -496,18 +608,10 @@ class TestOnRequestFinished:
         impl.request_finished(request, block_ids=[])
         assert "req-fin-2" not in impl._semantic_substitutions
 
-    def test_provider_exception_does_not_propagate(self):
-        """Exception in on_request_finished is logged, not raised."""
-
-        class _BrokenProvider(SemanticLookupProvider):
-            def on_lookup_miss(self, *args):
-                return None
-
-            def on_request_finished(self, *args):
-                raise RuntimeError("provider broken")
-
-        impl = _make_impl(semantic_provider=_BrokenProvider())
-        impl.lookup_client = MagicMock()
+    def test_no_lookup_client_does_not_crash(self):
+        """request_finished with no lookup_client is safe."""
+        impl = _make_impl()
+        impl._manager.lookup_client = None
         impl.async_loading = False
         impl.use_layerwise = False
 
@@ -522,23 +626,4 @@ class TestOnRequestFinished:
         request.kv_transfer_params = None
 
         # Should not raise
-        impl.request_finished(request, block_ids=[])
-
-    def test_no_provider_set_does_not_crash(self):
-        """request_finished with no provider is a no-op for semantic path."""
-        impl = _make_impl(semantic_provider=None)
-        impl.lookup_client = MagicMock()
-        impl.async_loading = False
-        impl.use_layerwise = False
-
-        # Third Party
-        from vllm.v1.request import RequestStatus
-
-        request = MagicMock()
-        request.request_id = "req-fin-4"
-        request.all_token_ids = [1, 2]
-        request.num_prompt_tokens = 2
-        request.status = RequestStatus.FINISHED_STOPPED
-        request.kv_transfer_params = None
-
         impl.request_finished(request, block_ids=[])

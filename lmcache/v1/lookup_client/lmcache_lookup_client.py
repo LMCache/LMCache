@@ -12,6 +12,10 @@ from lmcache.logging import init_logger
 from lmcache.v1.cache_engine import LMCacheEngine
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.lookup_client.abstract_client import LookupClientInterface
+from lmcache.v1.lookup_client.semantic_provider import (
+    SemanticLookupProvider,
+    SemanticLookupResult,
+)
 from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.rpc.transport import (
     RpcClientTransport,
@@ -75,6 +79,11 @@ class LMCacheLookupClient(LookupClientInterface):
         else:
             self.token_database = ChunkedTokenDatabase(config, metadata)
 
+        # Semantic fallback provider (optional)
+        self._semantic_provider: Optional[SemanticLookupProvider] = None
+        # Pending donor substitutions keyed by lookup_id
+        self._pending_substitutions: dict[str, SemanticLookupResult] = {}
+
     def lookup_cache(self, lookup_id: str) -> Optional[int]:
         """
         "-1 means not found;
@@ -83,19 +92,71 @@ class LMCacheLookupClient(LookupClientInterface):
         """
         return self.reqs_status.get(lookup_id, -1)
 
-    def lookup(
+    def set_semantic_provider(self, provider: SemanticLookupProvider) -> None:
+        """Register a SemanticLookupProvider for approximate KV cache matching.
+
+        Args:
+            provider: An instance of a SemanticLookupProvider subclass.
+        """
+        self._semantic_provider = provider
+        logger.info(
+            "SemanticLookupProvider registered in LMCacheLookupClient: %s",
+            type(provider).__name__,
+        )
+
+    def pop_pending_substitution(
+        self, lookup_id: str
+    ) -> Optional[SemanticLookupResult]:
+        """Pop and return a pending semantic substitution result, if any.
+
+        Args:
+            lookup_id: The request ID to check.
+
+        Returns:
+            SemanticLookupResult if a substitution is pending, else None.
+        """
+        return self._pending_substitutions.pop(lookup_id, None)
+
+    def notify_request_finished(
+        self,
+        request_id: str,
+        token_ids: list[int],
+        num_prompt_tokens: int,
+    ) -> None:
+        """Notify the semantic provider that a request has finished.
+
+        Also cleans up any leftover pending substitution state for the request.
+
+        Args:
+            request_id: vLLM request ID of the finished request.
+            token_ids: Full prompt token IDs of the finished request.
+            num_prompt_tokens: Number of prompt tokens in the request.
+        """
+        # Clean up any leftover substitution state
+        self._pending_substitutions.pop(request_id, None)
+
+        if self._semantic_provider is not None:
+            try:
+                self._semantic_provider.on_request_finished(
+                    request_id, token_ids, num_prompt_tokens
+                )
+            except Exception:
+                logger.warning(
+                    "SemanticLookupProvider.on_request_finished raised for req %s",
+                    request_id,
+                    exc_info=True,
+                )
+
+    def _do_transport_lookup(
         self,
         token_ids: Union[torch.Tensor, list[int]],
         lookup_id: str,
-        request_configs: Optional[dict] = None,
-    ) -> Optional[int]:
-        request_configs_str = ""
-        if request_configs is not None and len(request_configs) != 0:
-            request_configs_str = json.dumps(request_configs)
+        request_configs_str: str,
+    ) -> int:
+        """Send a lookup request via transport and return the hit token count.
 
-        # NOTE(Jiayi): We cannot only send hashes when
-        # blending enabled because the blender need the
-        # input embedding.
+        Returns 0 on transport failure or empty response.
+        """
         if not self.enable_blending:
             hashes = []
             offsets = []
@@ -108,8 +169,7 @@ class LMCacheLookupClient(LookupClientInterface):
                 hashes.append(key)
                 offsets.append(end - start)
 
-            # if the token database returns no hashes,
-            # return 0
+            # if the token database returns no hashes, return 0
             if not hashes:
                 return 0
 
@@ -144,13 +204,62 @@ class LMCacheLookupClient(LookupClientInterface):
         # NOTE: it is possible that the number of hit
         # tokens is different across (TP and PP) ranks,
         # so we can use the minimum value.
-        num_hit_toks = min(results)
+        return min(results)
+
+    def lookup(
+        self,
+        token_ids: Union[torch.Tensor, list[int]],
+        lookup_id: str,
+        request_configs: Optional[dict] = None,
+        num_computed_tokens: int = 0,
+    ) -> Optional[int]:
+        request_configs_str = ""
+        if request_configs is not None and len(request_configs) != 0:
+            request_configs_str = json.dumps(request_configs)
+
+        num_hit_toks = self._do_transport_lookup(
+            token_ids, lookup_id, request_configs_str
+        )
         self.reqs_status[lookup_id] = num_hit_toks
+
+        # Semantic fallback: only in non-blending path, only on zero hit
+        if (
+            num_hit_toks == 0
+            and not self.enable_blending
+            and self._semantic_provider is not None
+        ):
+            result = None
+            try:
+                result = self._semantic_provider.on_lookup_miss(
+                    lookup_id, list(token_ids), num_computed_tokens
+                )
+            except Exception:
+                logger.warning(
+                    "SemanticLookupProvider.on_lookup_miss raised for req %s",
+                    lookup_id,
+                    exc_info=True,
+                )
+
+            if result is not None:
+                # Clear the cached zero-hit so the re-lookup is accepted
+                self.reqs_status.pop(lookup_id, None)
+                donor_hit = self._do_transport_lookup(
+                    result.alternate_token_ids, lookup_id, request_configs_str
+                )
+                if donor_hit > num_computed_tokens:
+                    self.reqs_status[lookup_id] = donor_hit
+                    self._pending_substitutions[lookup_id] = result
+                    return donor_hit
+                else:
+                    # Donor not in store or too few tokens — cold prefill
+                    self.reqs_status[lookup_id] = 0
+                    return 0
 
         return num_hit_toks
 
     def clear_lookup_status(self, lookup_id: str) -> None:
         self.reqs_status.pop(lookup_id, None)
+        self._pending_substitutions.pop(lookup_id, None)
 
     def supports_producer_reuse(self) -> bool:
         """Return True as LMCacheLookupClient supports
@@ -165,6 +274,14 @@ class LMCacheLookupClient(LookupClientInterface):
         return False
 
     def close(self):
+        if self._semantic_provider is not None:
+            try:
+                self._semantic_provider.on_shutdown()
+            except Exception:
+                logger.warning(
+                    "SemanticLookupProvider.on_shutdown raised",
+                    exc_info=True,
+                )
         self.transport.close()
 
 
