@@ -660,7 +660,7 @@ class MessageQueueServer:
         if self.worker_thread.is_alive():
             self.worker_thread.join()
         self.socket.close()
-        os.close(self._output_efd)
         self.thread_pool.shutdown(wait=False)
         for pool in self.dedicated_pools:
             pool.shutdown(wait=False)
+        os.close(self._output_efd)
