@@ -1,13 +1,16 @@
-# Distributed Storage Manager Observability Metrics
+# LMCache MP Mode Observability Metrics
 
 ## Overview
 
 The observability system uses an **EventBus with pub/sub dispatch** and
 **OpenTelemetry** for metrics instrumentation.
 
-- **Producers** (`L1Manager`, `StorageManager`) publish `Event` objects to the EventBus.
+- **Producers** (`L1Manager`, `StorageManager`, `MPCacheEngine`) publish `Event` objects
+  to the EventBus.
 - **Metrics subscribers** (`L1MetricsSubscriber`, `SMMetricsSubscriber`) subscribe to
   specific event types and update OTel counters.
+- **Logging subscribers** (`MPServerLoggingSubscriber`) log events at debug level.
+- **Tracing subscribers** (`MPServerTracingSubscriber`) create OTel spans from START/END pairs.
 - **Export** is via OTLP push to an OTel collector (production) or an in-process
   Prometheus `/metrics` endpoint (dev/debug fallback).
 
@@ -86,19 +89,4 @@ For implementation guidance on adding new events and subscribers, see [README.md
 
 ---
 
-## Metadata Contracts
-
-Each `EventType` has a documented metadata schema. Subscribers rely on these keys:
-
-| EventType | Metadata keys | Types |
-|---|---|---|
-| `L1_READ_RESERVED` | `keys` | `list[ObjectKey]` |
-| `L1_READ_FINISHED` | `keys` | `list[ObjectKey]` |
-| `L1_WRITE_RESERVED` | `keys` | `list[ObjectKey]` |
-| `L1_WRITE_FINISHED` | `keys` | `list[ObjectKey]` |
-| `L1_WRITE_FINISHED_AND_READ_RESERVED` | `keys` | `list[ObjectKey]` |
-| `L1_KEYS_EVICTED` | `keys` | `list[ObjectKey]` |
-| `SM_READ_PREFETCHED` | `succeeded_keys`, `failed_keys` | `list[ObjectKey]`, `list[ObjectKey]` |
-| `SM_READ_PREFETCHED_FINISHED` | `succeeded_keys`, `failed_keys` | `list[ObjectKey]`, `list[ObjectKey]` |
-| `SM_WRITE_RESERVED` | `succeeded_keys`, `failed_keys` | `list[ObjectKey]`, `list[ObjectKey]` |
-| `SM_WRITE_FINISHED` | `succeeded_keys`, `failed_keys` | `list[ObjectKey]`, `list[ObjectKey]` |
+For event metadata contracts (what keys each `EventType` carries), see [EVENTS.md](EVENTS.md).

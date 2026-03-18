@@ -10,91 +10,11 @@ import argparse
 
 
 @dataclass
-class PrometheusConfig:
-    """
-    The configuration for the Prometheus observability stack.
-    """
-
-    enabled: bool = True
-    """ Whether to enable Prometheus metrics collection and HTTP server. """
-
-    port: int = 9090
-    """ Port to expose the Prometheus /metrics endpoint on. """
-
-    log_interval: float = 10.0
-    """ How often (in seconds) to flush accumulated stats to Prometheus. """
-
-
-DEFAULT_PROMETHEUS_CONFIG = PrometheusConfig(enabled=False)
-
-
-def add_prometheus_args(
-    parser: argparse.ArgumentParser,
-) -> argparse.ArgumentParser:
-    """
-    Add Prometheus configuration arguments to an existing parser.
-
-    Args:
-        parser: The argument parser to add arguments to.
-
-    Returns:
-        argparse.ArgumentParser: The same parser with Prometheus arguments added.
-    """
-    prometheus_group = parser.add_argument_group(
-        "Prometheus Observability", "Configuration for Prometheus metrics"
-    )
-    prometheus_group.add_argument(
-        "--disable-prometheus",
-        action="store_true",
-        default=False,
-        help="Disable Prometheus metrics collection and HTTP server.",
-    )
-    prometheus_group.add_argument(
-        "--prometheus-port",
-        type=int,
-        default=9090,
-        help="Port to expose the Prometheus /metrics endpoint on. Default is 9090.",
-    )
-    prometheus_group.add_argument(
-        "--prometheus-log-interval",
-        type=float,
-        default=10.0,
-        help="How often (in seconds) to flush stats to Prometheus. Default is 10.0.",
-    )
-    return parser
-
-
-def parse_args_to_prometheus_config(
-    args: argparse.Namespace,
-) -> PrometheusConfig:
-    """
-    Convert parsed command line arguments to a PrometheusConfig.
-
-    Args:
-        args: Parsed arguments from the argument parser.
-
-    Returns:
-        PrometheusConfig: The configuration object.
-    """
-    return PrometheusConfig(
-        enabled=not args.disable_prometheus,
-        port=args.prometheus_port,
-        log_interval=args.prometheus_log_interval,
-    )
-
-
-# ---------------------------------------------------------------------------
-# Unified observability config (new EventBus-based system)
-# ---------------------------------------------------------------------------
-
-
-@dataclass
 class ObservabilityConfig:
     """Unified configuration for the EventBus-based observability system.
 
-    This config drives the new EventBus + OTel pipeline.  During the
-    migration period it coexists with ``PrometheusConfig`` and
-    ``TelemetryConfig``.
+    Controls the EventBus, OTel metrics/tracing pipelines, and subscriber
+    registration.
     """
 
     enabled: bool = True
@@ -112,8 +32,95 @@ class ObservabilityConfig:
     tracing_enabled: bool = False
     """Register span subscribers (OTel traces)."""
 
+    otlp_endpoint: str | None = None
+    """OTLP gRPC endpoint (e.g. ``http://localhost:4317``).  When set,
+    metrics and traces are pushed to an OTel collector.  When ``None``,
+    metrics fall back to an in-process Prometheus ``/metrics`` endpoint."""
+
     prometheus_port: int = 9090
-    """Port for the Prometheus /metrics endpoint (via OTel exporter)."""
+    """Port for the Prometheus /metrics endpoint.  Only used when
+    ``otlp_endpoint`` is ``None`` (Prometheus pull fallback)."""
 
 
 DEFAULT_OBSERVABILITY_CONFIG = ObservabilityConfig(enabled=False)
+
+
+def add_observability_args(
+    parser: argparse.ArgumentParser,
+) -> argparse.ArgumentParser:
+    """Add observability configuration arguments to an existing parser.
+
+    Args:
+        parser: The argument parser to add arguments to.
+
+    Returns:
+        The same parser with observability arguments added.
+    """
+    group = parser.add_argument_group(
+        "Observability", "Configuration for metrics, logging, and tracing"
+    )
+    group.add_argument(
+        "--disable-observability",
+        action="store_true",
+        default=False,
+        help="Disable the observability EventBus entirely.",
+    )
+    group.add_argument(
+        "--disable-metrics",
+        action="store_true",
+        default=False,
+        help="Disable metrics subscribers (OTel counters).",
+    )
+    group.add_argument(
+        "--disable-logging",
+        action="store_true",
+        default=False,
+        help="Disable logging subscribers.",
+    )
+    group.add_argument(
+        "--enable-tracing",
+        action="store_true",
+        default=False,
+        help="Enable span subscribers (OTel traces). Disabled by default.",
+    )
+    group.add_argument(
+        "--otlp-endpoint",
+        type=str,
+        default=None,
+        help=(
+            "OTLP gRPC endpoint (e.g. http://localhost:4317). "
+            "When set, metrics/traces are pushed to an OTel collector. "
+            "When unset, falls back to Prometheus pull mode."
+        ),
+    )
+    group.add_argument(
+        "--prometheus-port",
+        type=int,
+        default=9090,
+        help=(
+            "Port for the Prometheus /metrics endpoint. "
+            "Only used when --otlp-endpoint is not set. Default is 9090."
+        ),
+    )
+    return parser
+
+
+def parse_args_to_observability_config(
+    args: argparse.Namespace,
+) -> ObservabilityConfig:
+    """Convert parsed command line arguments to an ObservabilityConfig.
+
+    Args:
+        args: Parsed arguments from the argument parser.
+
+    Returns:
+        The configuration object.
+    """
+    return ObservabilityConfig(
+        enabled=not args.disable_observability,
+        metrics_enabled=not args.disable_metrics,
+        logging_enabled=not args.disable_logging,
+        tracing_enabled=args.enable_tracing,
+        otlp_endpoint=args.otlp_endpoint,
+        prometheus_port=args.prometheus_port,
+    )

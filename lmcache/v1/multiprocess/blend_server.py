@@ -27,28 +27,8 @@ from lmcache.v1.gpu_connector.gpu_ops import (
 )
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.mp_observability.config import (
-    PrometheusConfig,
-    parse_args_to_prometheus_config,
-)
-from lmcache.v1.mp_observability.event_bus import (
-    EventBusConfig,
-    init_event_bus,
-)
-from lmcache.v1.mp_observability.otel_init import init_otel_metrics
-from lmcache.v1.mp_observability.subscribers.metrics.l1 import (
-    L1MetricsSubscriber,
-)
-from lmcache.v1.mp_observability.subscribers.metrics.sm import (
-    SMMetricsSubscriber,
-)
-from lmcache.v1.mp_observability.telemetry import (
-    TelemetryConfig,
-    get_telemetry_controller,
-    init_telemetry_controller,
-    parse_args_to_telemetry_config,
-)
-from lmcache.v1.mp_observability.telemetry.config import (
-    DEFAULT_TELEMETRY_CONFIG,
+    ObservabilityConfig,
+    parse_args_to_observability_config,
 )
 from lmcache.v1.multiprocess.config import (
     MPServerConfig,
@@ -639,8 +619,7 @@ def add_handler_helper(
 def run_cache_server(
     mp_config: MPServerConfig,
     storage_manager_config: StorageManagerConfig,
-    prometheus_config: PrometheusConfig,
-    telemetry_config: TelemetryConfig = DEFAULT_TELEMETRY_CONFIG,
+    obs_config: ObservabilityConfig,
     return_engine: bool = False,
 ):
     """
@@ -649,8 +628,7 @@ def run_cache_server(
     Args:
         mp_config: Configuration for the ZMQ multiprocess server
         storage_manager_config: Configuration for the storage manager
-        prometheus_config: Configuration for the Prometheus observability stack
-        telemetry_config: Configuration for the telemetry event system
+        obs_config: Configuration for the observability stack
         return_engine: If True, return (server, engine) after starting;
                        if False, run blocking loop to keep server alive
 
@@ -658,18 +636,62 @@ def run_cache_server(
         If return_engine is True: tuple of (MessageQueueServer, MPCacheEngine)
         If return_engine is False: None (blocks until interrupted)
     """
-    # Initialize global telemetry controller
-    init_telemetry_controller(telemetry_config)
-
     # Initialize EventBus and register observability subscribers
     # First Party
-    # Set up OTel MeterProvider BEFORE creating subscribers
-    if prometheus_config.enabled:
-        init_otel_metrics(prometheus_port=prometheus_config.port)
+    from lmcache.v1.mp_observability.event_bus import (
+        EventBusConfig,
+        init_event_bus,
+    )
 
-    bus = init_event_bus(EventBusConfig(enabled=prometheus_config.enabled))
-    bus.register_subscriber(L1MetricsSubscriber())
-    bus.register_subscriber(SMMetricsSubscriber())
+    # Set up OTel providers BEFORE creating subscribers
+    if obs_config.enabled and obs_config.metrics_enabled:
+        # First Party
+        from lmcache.v1.mp_observability.otel_init import init_otel_metrics
+
+        init_otel_metrics(
+            otlp_endpoint=obs_config.otlp_endpoint,
+            prometheus_port=obs_config.prometheus_port,
+        )
+
+    if obs_config.enabled and obs_config.tracing_enabled:
+        # First Party
+        from lmcache.v1.mp_observability.otel_init import init_otel_tracing
+
+        init_otel_tracing(otlp_endpoint=obs_config.otlp_endpoint)
+
+    bus = init_event_bus(
+        EventBusConfig(
+            enabled=obs_config.enabled,
+            max_queue_size=obs_config.max_queue_size,
+        )
+    )
+
+    if obs_config.metrics_enabled:
+        # First Party
+        from lmcache.v1.mp_observability.subscribers.metrics import (
+            L1MetricsSubscriber,
+            SMMetricsSubscriber,
+        )
+
+        bus.register_subscriber(L1MetricsSubscriber())
+        bus.register_subscriber(SMMetricsSubscriber())
+
+    if obs_config.logging_enabled:
+        # First Party
+        from lmcache.v1.mp_observability.subscribers.logging import (
+            MPServerLoggingSubscriber,
+        )
+
+        bus.register_subscriber(MPServerLoggingSubscriber())
+
+    if obs_config.tracing_enabled:
+        # First Party
+        from lmcache.v1.mp_observability.subscribers.tracing import (
+            MPServerTracingSubscriber,
+        )
+
+        bus.register_subscriber(MPServerTracingSubscriber())
+
     bus.start()
 
     sep_tokens = get_sep_tokens()
@@ -732,8 +754,6 @@ def run_cache_server(
     torch.cuda.init()
     server.start()
 
-    # Start telemetry controller
-    get_telemetry_controller().start()
     logger.info("LMCache cache blend server is running...")
 
     # Return server and engine if requested (for HTTP server integration)
@@ -746,7 +766,7 @@ def run_cache_server(
             time.sleep(1)
     except KeyboardInterrupt:
         logger.info("Shutting down server...")
-        get_telemetry_controller().stop()
+        bus.stop()
         server.close()
         engine.close()
 
@@ -755,11 +775,9 @@ if __name__ == "__main__":
     args = parse_args()
     mp_config = parse_args_to_mp_server_config(args)
     storage_manager_config = parse_args_to_config(args)
-    prometheus_config = parse_args_to_prometheus_config(args)
-    telemetry_config = parse_args_to_telemetry_config(args)
+    obs_config = parse_args_to_observability_config(args)
     run_cache_server(
         mp_config=mp_config,
         storage_manager_config=storage_manager_config,
-        prometheus_config=prometheus_config,
-        telemetry_config=telemetry_config,
+        obs_config=obs_config,
     )
