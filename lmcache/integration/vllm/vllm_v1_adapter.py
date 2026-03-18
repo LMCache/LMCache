@@ -40,7 +40,7 @@ from lmcache.v1.cache_engine import LMCacheEngine
 from lmcache.v1.compute.blend import LMCBlenderBuilder
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.config_base import validate_and_set_config_value
-from lmcache.v1.hooks import PostLoadContext, PostLoadHook
+from lmcache.v1.hooks import PostLoadHook
 from lmcache.v1.lookup_client.semantic_provider import (
     SemanticLookupProvider,
     SemanticLookupResult,
@@ -583,9 +583,6 @@ class LMCacheConnectorV1Impl:
         # successful semantic lookup.
         self._semantic_substitutions: dict[str, SemanticLookupResult] = {}
 
-        # PostLoadHook list — fired in registration order after KV retrieve
-        self._post_load_hooks: list[PostLoadHook] = []
-
     def _check_legacy_register_kv_caches(self) -> None:
         """Check for legacy connector without register_kv_caches implementation."""
         if self.lmcache_engine is None:
@@ -656,12 +653,14 @@ LMCacheLookupClient`).  This method delegates the provider to the client
         hook:
             An instance of a :class:`PostLoadHook` subclass.
         """
-        self._post_load_hooks.append(hook)
-        logger.info(
-            "PostLoadHook registered (#%d): %s",
-            len(self._post_load_hooks),
-            type(hook).__name__,
-        )
+        if self.lmcache_engine is not None:
+            self.lmcache_engine.add_post_load_hook(hook)
+        else:
+            logger.warning(
+                "add_post_load_hook called but lmcache_engine is None; "
+                "hook %s will not be registered",
+                type(hook).__name__,
+            )
 
     # ==================== Property Accessors ====================
 
@@ -919,6 +918,8 @@ LMCacheLookupClient`).  This method delegates the provider to the client
                     vllm_cached_tokens=request.load_spec.vllm_cached_tokens,
                     request_configs=request.request_configs,
                     req_id=request.req_id,
+                    kv_caches_dict=self.kv_caches,
+                    provider_metadata=request.provider_metadata,
                 )
 
                 # Check the result
@@ -948,53 +949,6 @@ LMCacheLookupClient`).  This method delegates the provider to the client
                         slot_mapping[:lmcache_cached_tokens],
                     )
                     self._invalid_block_ids.update(missing_blocks)
-
-                # Fire post-load hooks after KV is fully retrieved (non-layerwise
-                # path only; layerwise retrieval is async layer-by-layer and
-                # does not currently support post-load hooks).
-                # Hooks are skipped when none are registered (fast path).
-                if self._post_load_hooks:
-                    self._fire_post_load_hooks(
-                        request_id=request.req_id,
-                        slot_mapping=slot_mapping[:lmcache_cached_tokens],
-                        num_loaded_tokens=int(
-                            lmcache_cached_tokens
-                            - request.load_spec.vllm_cached_tokens
-                        ),
-                        provider_metadata=request.provider_metadata,
-                    )
-
-    def _fire_post_load_hooks(
-        self,
-        request_id: str,
-        slot_mapping: torch.Tensor,
-        num_loaded_tokens: int,
-        provider_metadata: Any,
-    ) -> None:
-        """Call all registered :class:`PostLoadHook` instances in order.
-
-        Called from :meth:`start_load_kv` (non-layerwise path) after the
-        engine's ``retrieve`` call completes for a single request.
-
-        Exceptions in individual hooks are logged and suppressed.
-        """
-        ctx = PostLoadContext(
-            request_id=request_id,
-            kv_caches=self.kv_caches,
-            slot_mapping=slot_mapping,
-            num_loaded_tokens=num_loaded_tokens,
-            provider_metadata=provider_metadata,
-        )
-        for hook in self._post_load_hooks:
-            try:
-                hook.after_kv_load(ctx)
-            except Exception:
-                logger.warning(
-                    "PostLoadHook %s raised for req %s",
-                    type(hook).__name__,
-                    request_id,
-                    exc_info=True,
-                )
 
     def record_failed_blocks(
         self,
@@ -1463,17 +1417,31 @@ LMCacheLookupClient`).  This method delegates the provider to the client
         if num_external_hit_tokens > 0:
             pending_sub = self.lookup_client.pop_pending_substitution(req_id)
             if pending_sub is not None:
+                # Cap semantic hit count by the request's own prompt length.
+                # The donor may have more tokens cached than this request has —
+                # returning more matched tokens than the prompt length would
+                # cause the vLLM scheduler to over-allocate KV blocks.
+                num_usable = min(num_external_hit_tokens, request.num_tokens)
+                need_to_allocate = num_usable - num_computed_tokens
+                if num_usable == request.num_tokens:
+                    need_to_allocate -= 1
+                # Re-evaluate below_min_retrieve with the capped need_to_allocate
+                below_min_retrieve = (
+                    min_retrieve > 0 and need_to_allocate < min_retrieve
+                )
                 self._semantic_substitutions[req_id] = pending_sub
                 self.load_specs[req_id] = LoadSpec(
                     vllm_cached_tokens=num_computed_tokens,
-                    lmcache_cached_tokens=num_external_hit_tokens,
+                    lmcache_cached_tokens=num_usable,
                     can_load=False,
                 )
                 logger.info(
-                    "Semantic hit for req %s: donor=%s hit=%d need_to_alloc=%d",
+                    "Semantic hit for req %s: donor=%s hit=%d usable=%d "
+                    "need_to_alloc=%d",
                     req_id,
                     pending_sub.source_id or "unknown",
                     num_external_hit_tokens,
+                    num_usable,
                     need_to_allocate,
                 )
 

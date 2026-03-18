@@ -52,6 +52,7 @@ from lmcache.v1.memory_management import (  # noqa: E501
     PagedTensorMemoryAllocator,
     TensorMemoryObj,
 )
+from lmcache.v1.hooks import PostLoadContext, PostLoadHook
 from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.pin_monitor import PinMonitor
 from lmcache.v1.storage_backend.storage_manager import StorageManager
@@ -225,6 +226,9 @@ class LMCacheEngine:
         # Flag to indicate if initialization failed (irrecoverable error)
         self._init_failed = False
 
+        # PostLoadHook list — fired in registration order after KV retrieve
+        self._post_load_hooks: List[PostLoadHook] = []
+
     def set_health_monitor(self, health_monitor: "HealthMonitor") -> None:
         """
         Set the health monitor reference.
@@ -236,6 +240,64 @@ class LMCacheEngine:
             health_monitor: The HealthMonitor instance from LMCacheManager
         """
         self._health_monitor = health_monitor
+
+    # ==================== PostLoadHook ====================
+
+    def add_post_load_hook(self, hook: PostLoadHook) -> None:
+        """Append a :class:`~lmcache.v1.hooks.PostLoadHook` to the hook list.
+
+        Hooks fire **in the order they were added** after all KV layers for a
+        request have been retrieved by :meth:`retrieve`.
+
+        Each hook receives a :class:`~lmcache.v1.hooks.PostLoadContext`
+        containing the paged KV caches, slot mapping, token count, and
+        optional provider metadata.
+
+        Multiple hooks can be added; an exception in one hook is logged and
+        suppressed so subsequent hooks and the forward pass are not blocked.
+
+        Parameters
+        ----------
+        hook:
+            An instance of a :class:`PostLoadHook` subclass.
+        """
+        self._post_load_hooks.append(hook)
+        logger.info(
+            "PostLoadHook registered (#%d): %s",
+            len(self._post_load_hooks),
+            type(hook).__name__,
+        )
+
+    def _fire_post_load_hooks(
+        self,
+        request_id: str,
+        kv_caches: Dict[str, Any],
+        slot_mapping: torch.Tensor,
+        num_loaded_tokens: int,
+        provider_metadata: Any,
+    ) -> None:
+        """Call all registered :class:`PostLoadHook` instances in order.
+
+        Called from :meth:`retrieve` after the KV load completes for a single
+        request.  Exceptions in individual hooks are logged and suppressed.
+        """
+        ctx = PostLoadContext(
+            request_id=request_id,
+            kv_caches=kv_caches,
+            slot_mapping=slot_mapping,
+            num_loaded_tokens=num_loaded_tokens,
+            provider_metadata=provider_metadata,
+        )
+        for hook in self._post_load_hooks:
+            try:
+                hook.after_kv_load(ctx)
+            except Exception:
+                logger.warning(
+                    "PostLoadHook %s raised for req %s",
+                    type(hook).__name__,
+                    request_id,
+                    exc_info=True,
+                )
 
     def is_healthy(self) -> bool:
         """
@@ -787,6 +849,10 @@ class LMCacheEngine:
             "gpu_connector is required for retrieve operation"
         )
 
+        # Pop hook-specific kwargs before forwarding to gpu_connector
+        kv_caches_dict: Optional[Dict] = kwargs.pop("kv_caches_dict", None)
+        provider_metadata: Any = kwargs.pop("provider_metadata", None)
+
         # Get req_id for logging
         req_id = self._get_req_id(kwargs)
 
@@ -865,6 +931,19 @@ class LMCacheEngine:
                 memory_obj.ref_count_down()
 
         retrieved_tokens = torch.sum(ret_mask)
+
+        # Fire post-load hooks (fast path: skipped when no hooks registered).
+        if self._post_load_hooks and kv_caches_dict is not None:
+            slot_mapping_for_hooks: Optional[torch.Tensor] = kwargs.get("slot_mapping")
+            if slot_mapping_for_hooks is not None:
+                self._fire_post_load_hooks(
+                    request_id=req_id,
+                    kv_caches=kv_caches_dict,
+                    slot_mapping=slot_mapping_for_hooks,
+                    num_loaded_tokens=int(retrieved_tokens),
+                    provider_metadata=provider_metadata,
+                )
+
         self.stats_monitor.on_retrieve_finished(
             retrieve_stats,
             retrieved_tokens,

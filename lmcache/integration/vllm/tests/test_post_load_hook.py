@@ -1,12 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests for PostLoadHook integration.
 
-Validates PR: add PostLoadHook for KV cache transformations after retrieval.
-Depends on: SemanticLookupProvider (PR 1) for provider_metadata flow-through.
+Validates PR: move PostLoadHook logic from LMCacheConnectorV1Impl into
+LMCacheEngine.  Hook registration and firing now happen at the engine level;
+the adapter's add_post_load_hook() simply delegates to the engine.
 """
 
 # Future
 from __future__ import annotations
+
+# Standard
+from unittest.mock import MagicMock
 
 # Third Party
 import pytest
@@ -48,38 +52,33 @@ class _RaisingHook(PostLoadHook):
         raise RuntimeError("hook failure")
 
 
-def _make_impl(hooks=None):
-    """Return a minimal LMCacheConnectorV1Impl with hook state initialised."""
+def _make_engine(hooks=None):
+    """Return a minimal LMCacheEngine with hook state initialised."""
+    # First Party
+    from lmcache.v1.cache_engine import LMCacheEngine
+
+    engine = LMCacheEngine.__new__(LMCacheEngine)
+    engine._post_load_hooks = list(hooks or [])
+    return engine
+
+
+def _make_impl(engine=None):
+    """Return a minimal LMCacheConnectorV1Impl that delegates to *engine*."""
     # First Party
     from lmcache.integration.vllm.vllm_v1_adapter import LMCacheConnectorV1Impl
 
     impl = LMCacheConnectorV1Impl.__new__(LMCacheConnectorV1Impl)
-    impl._post_load_hooks = list(hooks or [])
-    impl._semantic_provider = None
-    impl._semantic_substitutions = {}
-    impl.kv_caches = {
-        "layer.0": torch.ones(4, 2, 8),
-        "layer.1": torch.ones(4, 2, 8),
-    }
+    # Patch lmcache_engine property via _manager
+    impl._manager = MagicMock()
+    impl._manager.lmcache_engine = engine
     return impl
 
 
-def _make_req_meta(req_id: str, lmcache_cached: int, vllm_cached: int = 0):
-    # First Party
-    from lmcache.integration.vllm.vllm_v1_adapter import LoadSpec, ReqMeta
-
-    slot_mapping = torch.arange(lmcache_cached, dtype=torch.long)
-    load_spec = LoadSpec(
-        vllm_cached_tokens=vllm_cached,
-        lmcache_cached_tokens=lmcache_cached,
-        can_load=True,
-    )
-    return ReqMeta(
-        req_id=req_id,
-        token_ids=list(range(lmcache_cached)),
-        slot_mapping=slot_mapping,
-        load_spec=load_spec,
-    )
+# Shared kv_caches dict used by most tests
+_KV_CACHES = {
+    "layer.0": torch.ones(4, 2, 8),
+    "layer.1": torch.ones(4, 2, 8),
+}
 
 
 # ---------------------------------------------------------------------------
@@ -127,43 +126,64 @@ class TestPostLoadHookABC:
 
 
 # ---------------------------------------------------------------------------
-# add_post_load_hook tests
+# LMCacheEngine.add_post_load_hook tests
 # ---------------------------------------------------------------------------
 
 
-class TestAddPostLoadHook:
+class TestEngineAddPostLoadHook:
     def test_appends_hook(self):
-        impl = _make_impl()
+        engine = _make_engine()
         hook = _RecordingHook()
-        impl.add_post_load_hook(hook)
-        assert impl._post_load_hooks == [hook]
+        engine.add_post_load_hook(hook)
+        assert engine._post_load_hooks == [hook]
 
     def test_multiple_hooks_registered_in_order(self):
-        impl = _make_impl()
+        engine = _make_engine()
         h1, h2 = _RecordingHook(), _RecordingHook()
-        impl.add_post_load_hook(h1)
-        impl.add_post_load_hook(h2)
-        assert impl._post_load_hooks == [h1, h2]
+        engine.add_post_load_hook(h1)
+        engine.add_post_load_hook(h2)
+        assert engine._post_load_hooks == [h1, h2]
 
 
 # ---------------------------------------------------------------------------
-# _fire_post_load_hooks tests
+# Adapter delegation tests
 # ---------------------------------------------------------------------------
 
 
-class TestFirePostLoadHooks:
+class TestAdapterAddPostLoadHookDelegates:
+    def test_delegates_to_engine(self):
+        engine = _make_engine()
+        impl = _make_impl(engine=engine)
+        hook = _RecordingHook()
+        impl.add_post_load_hook(hook)
+        assert engine._post_load_hooks == [hook]
+
+    def test_logs_warning_when_engine_is_none(self):
+        impl = _make_impl(engine=None)
+        hook = _RecordingHook()
+        # Should not raise even when engine is None
+        impl.add_post_load_hook(hook)
+
+
+# ---------------------------------------------------------------------------
+# LMCacheEngine._fire_post_load_hooks tests
+# ---------------------------------------------------------------------------
+
+
+class TestEngineFirePostLoadHooks:
     def test_no_hooks_is_noop(self):
-        impl = _make_impl(hooks=[])
+        engine = _make_engine(hooks=[])
         slot = torch.arange(256, dtype=torch.long)
         # Should not raise
-        impl._fire_post_load_hooks("req-3", slot, 256, None)
+        engine._fire_post_load_hooks("req-3", _KV_CACHES, slot, 256, None)
 
     def test_single_hook_receives_correct_context(self):
         hook = _RecordingHook()
-        impl = _make_impl(hooks=[hook])
+        engine = _make_engine(hooks=[hook])
         slot = torch.arange(128, dtype=torch.long)
+        kv = {"layer.0": torch.zeros(4)}
 
-        impl._fire_post_load_hooks("req-4", slot, 128, {"key": "val"})
+        engine._fire_post_load_hooks("req-4", kv, slot, 128, {"key": "val"})
 
         assert len(hook.calls) == 1
         ctx = hook.calls[0]
@@ -173,20 +193,29 @@ class TestFirePostLoadHooks:
         assert torch.equal(ctx.slot_mapping, slot)
 
     def test_hook_receives_kv_caches_reference(self):
-        """Hook receives the same kv_caches dict as the connector."""
+        """Hook receives the exact kv_caches dict passed in."""
         hook = _RecordingHook()
-        impl = _make_impl(hooks=[hook])
-        impl._fire_post_load_hooks("req-5", torch.zeros(4, dtype=torch.long), 4, None)
-        assert hook.calls[0].kv_caches is impl.kv_caches
+        engine = _make_engine(hooks=[hook])
+        kv = {"layer.0": torch.zeros(4)}
+        engine._fire_post_load_hooks(
+            "req-5", kv, torch.zeros(4, dtype=torch.long), 4, None
+        )
+        assert hook.calls[0].kv_caches is kv
 
     def test_hook_can_mutate_kv_cache_in_place(self):
         """In-place mutation by a hook is visible after the call."""
+        kv = {
+            "layer.0": torch.ones(4, 2, 8),
+            "layer.1": torch.ones(4, 2, 8),
+        }
         hook = _MutatingHook("layer.0")
-        impl = _make_impl(hooks=[hook])
-        impl._fire_post_load_hooks("req-6", torch.zeros(4, dtype=torch.long), 4, None)
-        assert impl.kv_caches["layer.0"].sum().item() == 0.0
+        engine = _make_engine(hooks=[hook])
+        engine._fire_post_load_hooks(
+            "req-6", kv, torch.zeros(4, dtype=torch.long), 4, None
+        )
+        assert kv["layer.0"].sum().item() == 0.0
         # layer.1 should be untouched
-        assert impl.kv_caches["layer.1"].sum().item() > 0
+        assert kv["layer.1"].sum().item() > 0
 
     def test_multiple_hooks_fire_in_order(self):
         call_order: list[str] = []
@@ -199,35 +228,29 @@ class TestFirePostLoadHooks:
                 call_order.append(self.name)
 
         h1, h2, h3 = _OrderHook("a"), _OrderHook("b"), _OrderHook("c")
-        impl = _make_impl(hooks=[h1, h2, h3])
-        impl._fire_post_load_hooks("req-7", torch.zeros(1, dtype=torch.long), 1, None)
+        engine = _make_engine(hooks=[h1, h2, h3])
+        engine._fire_post_load_hooks(
+            "req-7", {}, torch.zeros(1, dtype=torch.long), 1, None
+        )
         assert call_order == ["a", "b", "c"]
 
     def test_hook_exception_does_not_propagate(self):
         """A broken hook should not crash the forward pass."""
         bad_hook = _RaisingHook()
         good_hook = _RecordingHook()
-        impl = _make_impl(hooks=[bad_hook, good_hook])
+        engine = _make_engine(hooks=[bad_hook, good_hook])
 
         # Should not raise
-        impl._fire_post_load_hooks("req-8", torch.zeros(4, dtype=torch.long), 4, None)
+        engine._fire_post_load_hooks(
+            "req-8", {}, torch.zeros(4, dtype=torch.long), 4, None
+        )
         # good_hook still runs after the bad one
         assert len(good_hook.calls) == 1
 
     def test_hook_not_fired_when_list_empty(self):
         """Fast path: zero overhead when no hooks registered."""
-        impl = _make_impl(hooks=[])
-        # Patch _post_load_hooks to ensure firing would fail if called
-        original = impl._fire_post_load_hooks
-        fired = []
-
-        def _sentinel(*args, **kwargs):
-            fired.append(True)
-            return original(*args, **kwargs)
-
-        impl._fire_post_load_hooks = _sentinel
-        # start_load_kv guards on `if self._post_load_hooks` before calling
-        assert not impl._post_load_hooks
+        engine = _make_engine(hooks=[])
+        assert not engine._post_load_hooks
 
 
 # ---------------------------------------------------------------------------
@@ -239,19 +262,19 @@ class TestProviderMetadataFlowThrough:
     def test_provider_metadata_reaches_hook(self):
         """SemanticLookupResult.provider_metadata flows to PostLoadContext."""
         hook = _RecordingHook()
-        impl = _make_impl(hooks=[hook])
+        engine = _make_engine(hooks=[hook])
 
         meta = {"rope_delta": 512}
         slot = torch.arange(256, dtype=torch.long)
-        impl._fire_post_load_hooks("req-pm", slot, 256, meta)
+        engine._fire_post_load_hooks("req-pm", _KV_CACHES, slot, 256, meta)
 
         assert hook.calls[0].provider_metadata is meta
 
     def test_no_metadata_when_no_provider(self):
         """Without a SemanticLookupProvider, provider_metadata is None."""
         hook = _RecordingHook()
-        impl = _make_impl(hooks=[hook])
-        impl._fire_post_load_hooks(
-            "req-pm-none", torch.zeros(4, dtype=torch.long), 4, None
+        engine = _make_engine(hooks=[hook])
+        engine._fire_post_load_hooks(
+            "req-pm-none", _KV_CACHES, torch.zeros(4, dtype=torch.long), 4, None
         )
         assert hook.calls[0].provider_metadata is None
