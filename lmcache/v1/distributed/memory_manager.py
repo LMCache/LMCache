@@ -77,7 +77,7 @@ class L1MemoryManager:
             layout_desc.shapes, layout_desc.dtypes, count
         )
         if objects is None:
-            return L1Error.SUCCESS, []
+            return L1Error.OUT_OF_MEMORY, []
         return L1Error.SUCCESS, objects
 
     def free(self, mem_objs: list[MemoryObj]) -> L1Error:

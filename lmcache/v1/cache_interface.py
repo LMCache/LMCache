@@ -17,12 +17,3 @@ class LMCacheModelRequest(
 
     store_cache: bool = True  # Whether to store the cache
     ttl: Optional[float] = None  # Time to live
-    debug_cmd: Optional[str] = None  # Debug command to execute
-
-    def run_debug(self):
-        """Run a debug command if provided."""
-        # Standard
-        import subprocess
-
-        if self.debug_cmd:
-            subprocess.run(self.debug_cmd, shell=True)
