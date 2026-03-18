@@ -1,12 +1,11 @@
 name: Codex PR Review
 
 on:
-  pull_request_target:
+  pull_request:
     types: [opened, synchronize, reopened]
 
 permissions:
   contents: read
-  pull-requests: write
 
 jobs:
   codex:
@@ -25,10 +24,9 @@ jobs:
           #   registry.npmjs.org:443
           #   huggingface.co:443
 
-      - name: Checkout PR head
+      - name: Checkout
         uses: actions/checkout@v5
         with:
-          ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
 
       - name: Smart triage
@@ -73,70 +71,6 @@ jobs:
           PR_TIER: ${{ steps.triage.outputs.tier }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
 
-  post_comment:
-    needs: codex
-    if: always()
-    runs-on: ubuntu-latest
-    permissions:
-      pull-requests: write
-    steps:
-      - name: Post review comment
-        uses: actions/github-script@v7
-        env:
-          TIER: ${{ needs.codex.outputs.tier }}
-          CODEX_MSG: ${{ needs.codex.outputs.final_message }}
-        with:
-          script: |
-            const tier = process.env.TIER;
-            const raw = process.env.CODEX_MSG || '';
-
-            if (tier === 'skip') {
-              await github.rest.issues.createComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: context.issue.number,
-                body: '**Codex Review:** Skipped (docs/config-only changes)'
-              });
-              return;
-            }
-
-            let body;
-            try {
-              const data = JSON.parse(raw);
-              const icons = { pass: 'PASS', fail: 'FAIL', warn: 'WARN' };
-              const sevIcons = { error: 'ERROR', warning: 'WARN', info: 'info' };
-              const verdict = icons[data.verdict] || 'UNKNOWN';
-
-              let table = '';
-              if (data.findings && data.findings.length > 0) {
-                table = '\n### Findings\n\n';
-                table += '| # | Severity | Category | File | Message |\n';
-                table += '|---|----------|----------|------|---------|\n';
-                data.findings.forEach((f, i) => {
-                  const loc = f.line ? `${f.file}:${f.line}` : f.file;
-                  table += `| ${i + 1} | ${sevIcons[f.severity] || f.severity} | ${f.category} | \`${loc}\` | ${f.message} |\n`;
-                });
-              }
-
-              body = `## Codex PR Review\n\n`;
-              body += `**Verdict: ${verdict}** | Confidence: ${data.confidence} | Tier: ${tier}\n\n`;
-              body += `### Summary\n${data.summary}\n`;
-              body += table;
-              body += `\n---\n*Powered by [Codex GHA](https://developers.openai.com/codex/github-action) with o3*`;
-            } catch (e) {
-              // Fail-closed: if we can't parse, show raw output
-              body = `## Codex PR Review\n\n`;
-              body += `**Verdict: ERROR** — could not parse agent output.\n\n`;
-              body += `<details><summary>Raw output</summary>\n\n\`\`\`\n${raw || '(empty)'}\n\`\`\`\n</details>`;
-            }
-
-            await github.rest.issues.createComment({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: context.issue.number,
-              body: body
-            });
-
   gate:
     needs: codex
     if: always()
@@ -152,7 +86,6 @@ jobs:
             exit 0
           fi
 
-          # Fail-closed: if output is empty or unparsable, block the PR
           if [ -z "$CODEX_MSG" ]; then
             echo "::error::Codex agent produced no output — failing closed"
             exit 1
@@ -179,11 +112,11 @@ jobs:
               exit 0
               ;;
             warn)
-              echo "::warning::Codex review has warnings — see PR comment"
+              echo "::warning::Codex review has warnings"
               exit 0
               ;;
             fail)
-              echo "::error::Codex review failed — see PR comment for details"
+              echo "::error::Codex review failed"
               exit 1
               ;;
             *)
