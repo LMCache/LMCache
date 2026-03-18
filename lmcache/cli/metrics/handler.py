@@ -80,7 +80,7 @@ class FileHandler(MetricsHandler):
         formatter: Optional[MetricsFormatter] = None,
     ) -> None:
         super().__init__(formatter or JsonFormatter())
-        self._path = path
+        self.path = path
 
     def emit(self, title: str, sections: list[Section]) -> None:
         """Format and write metrics to the file.
@@ -89,6 +89,6 @@ class FileHandler(MetricsHandler):
             title: The report title.
             sections: Ordered list of ``Section`` objects.
         """
-        with open(self._path, "w") as f:
+        with open(self.path, "w") as f:
             f.write(self.formatter.format(title, sections))
             f.write("\n")

@@ -8,6 +8,7 @@ Formatters are attached to handlers, separating rendering from destination.
 # Standard
 from typing import Any
 import abc
+import inspect
 import json
 
 # First Party
@@ -54,11 +55,12 @@ def register_formatter(name: str):
     return decorator
 
 
-def get_formatter(name: str) -> MetricsFormatter:
+def get_formatter(name: str, **kwargs: Any) -> MetricsFormatter:
     """Instantiate a formatter by its registered name.
 
     Args:
         name: Registered format name (e.g. ``"terminal"``, ``"json"``).
+        **kwargs: Forwarded to the formatter constructor (e.g. ``width``).
 
     Returns:
         A new formatter instance.
@@ -70,7 +72,10 @@ def get_formatter(name: str) -> MetricsFormatter:
     if cls is None:
         available = ", ".join(sorted(_FORMATTER_REGISTRY))
         raise ValueError(f"Unknown format {name!r}. Available: {available}")
-    return cls()
+    # Only forward kwargs that the constructor accepts.
+    sig = inspect.signature(cls.__init__)
+    valid = {k: v for k, v in kwargs.items() if k in sig.parameters}
+    return cls(**valid)
 
 
 # ---------------------------------------------------------------------------

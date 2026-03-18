@@ -22,8 +22,11 @@ Example usage::
 from typing import Any, Optional
 
 # First Party
-from lmcache.cli.metrics.handler import MetricsHandler
+from lmcache.cli.metrics.handler import FileHandler, MetricsHandler
 from lmcache.cli.metrics.section import Section, sections_to_dict
+from lmcache.logging import init_logger
+
+logger = init_logger(__name__)
 
 
 class Metrics:
@@ -120,6 +123,9 @@ class Metrics:
         """Trigger all registered handlers."""
         for handler in self._handlers:
             handler.emit(self._title, self._sections)
+        for handler in self._handlers:
+            if isinstance(handler, FileHandler):
+                logger.info("Results saved to %s", handler.path)
 
     def to_dict(self) -> dict[str, Any]:
         """Return metrics as a JSON-serialisable dictionary.

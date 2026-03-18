@@ -10,7 +10,6 @@ from lmcache.cli.metrics import (
     FileHandler,
     Metrics,
     StreamHandler,
-    TerminalFormatter,
     get_formatter,
 )
 
@@ -110,20 +109,14 @@ class BaseCommand(abc.ABC):
         """
         metrics = Metrics(title=title)
 
-        # Resolve stdout formatter from --format
         fmt_name = getattr(args, "format", None) or "terminal"
-        stdout_formatter = get_formatter(fmt_name)
-        if isinstance(stdout_formatter, TerminalFormatter):
-            stdout_formatter = TerminalFormatter(width=width)
-        metrics.add_handler(StreamHandler(stdout_formatter))
+        metrics.add_handler(StreamHandler(get_formatter(fmt_name, width=width)))
 
-        # File handler if --output is set
         output = getattr(args, "output", None)
         if output:
-            file_formatter = get_formatter(fmt_name)
-            if isinstance(file_formatter, TerminalFormatter):
-                file_formatter = TerminalFormatter(width=width)
-            metrics.add_handler(FileHandler(output, file_formatter))
+            metrics.add_handler(
+                FileHandler(output, get_formatter(fmt_name, width=width))
+            )
 
         return metrics
 
