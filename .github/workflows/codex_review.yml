@@ -61,8 +61,6 @@ jobs:
           openai-api-key: ${{ secrets.OPENAI_API_KEY }}
           prompt-file: .github/codex/prompts/review.md
           model: o3
-          sandbox: danger-full-access
-          safety-strategy: drop-sudo
           output-file: /tmp/review.json
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
