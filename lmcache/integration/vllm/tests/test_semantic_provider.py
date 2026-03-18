@@ -441,6 +441,42 @@ class TestSemanticHitFlow:
         assert result == 0
         assert "req-9" not in impl._semantic_substitutions
 
+    def test_semantic_hit_capped_by_request_length(self):
+        """When donor has more tokens than request, hit is capped at request length.
+
+        This prevents returning need_to_allocate > request.num_tokens, which
+        would confuse the vLLM scheduler into over-allocating KV blocks.
+        """
+        impl = _make_impl()
+        # Donor has 1024 tokens cached; request only has 512 tokens
+        donor_ids = list(range(1024))
+        sub = SemanticLookupResult(
+            alternate_token_ids=donor_ids, num_cached_tokens=1024
+        )
+        impl.lookup_client.lookup.return_value = 1024
+        impl.lookup_client.pop_pending_substitution.return_value = sub
+
+        request = _make_request("req-cap", list(range(512)))
+        result = impl.get_num_new_matched_tokens(request, num_computed_tokens=0)
+        # Must be capped: 512 - 0 - 1 = 511, not 1024 - 0 - 1 = 1023
+        assert result == 511
+
+    def test_semantic_hit_capped_load_spec(self):
+        """load_specs.lmcache_cached_tokens is capped at request length."""
+        impl = _make_impl()
+        donor_ids = list(range(1024))
+        sub = SemanticLookupResult(
+            alternate_token_ids=donor_ids, num_cached_tokens=1024
+        )
+        impl.lookup_client.lookup.return_value = 1024
+        impl.lookup_client.pop_pending_substitution.return_value = sub
+
+        request = _make_request("req-cap2", list(range(512)))
+        impl.get_num_new_matched_tokens(request, num_computed_tokens=0)
+        spec = impl.load_specs["req-cap2"]
+        # Capped at request.num_tokens (512), not raw donor count (1024)
+        assert spec.lmcache_cached_tokens == 512
+
 
 # ---------------------------------------------------------------------------
 # _apply_semantic_substitution tests

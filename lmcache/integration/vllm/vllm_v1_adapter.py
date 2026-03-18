@@ -1476,6 +1476,12 @@ LMCacheLookupClient`).  This method delegates the provider to the client
                 len(sub.alternate_token_ids),
                 len(req_meta.token_ids),
             )
+            # Cancel the semantic load so start_load_kv does not attempt to
+            # retrieve KV for the original tokens (which had zero exact hits).
+            # can_load=False is the existing mechanism to skip loading while
+            # still forwarding the spec to the worker for metrics.
+            if req_meta.load_spec is not None:
+                req_meta.load_spec.can_load = False
             return
         # Align the donor token IDs to the same length that
         # from_request_tracker() selected for this request (chunk-boundary
