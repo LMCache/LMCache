@@ -55,6 +55,7 @@ class ValkeyConnectorAdapter(ConnectorAdapter):
                 local_cpu_backend=context.local_cpu_backend,
                 username=self.valkey_username,
                 password=self.valkey_password,
+                database_id=self.valkey_database,
             )
         else:
             url = context.url[len(self.schema) :]
