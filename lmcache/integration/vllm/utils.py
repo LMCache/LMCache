@@ -306,6 +306,10 @@ def get_vllm_torch_dev():
         logger.info("XPU device is available. Using XPU for LMCache engine.")
         torch_dev = torch.xpu
         dev_name = "xpu"
+    elif hasattr(torch, "hpu") and torch.hpu.is_available():
+        logger.info("HPU device is available. Using HPU for LMCache engine.")
+        torch_dev = torch.hpu
+        dev_name = "hpu"
     else:
         raise RuntimeError("Unsupported device platform for LMCache engine.")
     return torch_dev, dev_name
