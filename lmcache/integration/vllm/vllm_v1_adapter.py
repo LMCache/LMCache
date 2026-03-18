@@ -630,6 +630,14 @@ LMCacheLookupClient`).  This method delegates the provider to the client
         """
         if self.lookup_client is not None:
             self.lookup_client.set_semantic_provider(provider)
+        try:
+            provider.on_init(config=self.config, vllm_config=self._vllm_config)
+        except Exception:
+            logger.warning(
+                "SemanticLookupProvider.on_init raised for %s",
+                type(provider).__name__,
+                exc_info=True,
+            )
         logger.info("SemanticLookupProvider registered: %s", type(provider).__name__)
 
     def add_post_load_hook(self, hook: PostLoadHook) -> None:
