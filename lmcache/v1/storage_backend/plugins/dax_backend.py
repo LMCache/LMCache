@@ -110,16 +110,16 @@ class DaxBackend(StoragePluginInterface):
         if self.async_put and self.loop is None:
             raise ValueError("DaxBackend async_put=true requires an asyncio event loop")
 
-        self.arena_size_gb = float(extra.get("dax.arena_size_gb", 0))
-        if self.arena_size_gb <= 0:
-            raise ValueError("extra_config['dax.arena_size_gb'] must be > 0")
+        self.max_dax_size = float(extra.get("dax.max_dax_size", 0))
+        if self.max_dax_size <= 0:
+            raise ValueError("extra_config['dax.max_dax_size'] must be > 0")
 
         if self.local_cpu_backend is None:
             raise ValueError("DaxBackend requires local_cpu_backend")
 
-        self._arena_bytes = int(self.arena_size_gb * 1024**3)
+        self._arena_bytes = int(self.max_dax_size * 1024**3)
         if self._arena_bytes <= 0:
-            raise ValueError("dax.arena_size_gb results in zero-sized arena")
+            raise ValueError("dax.max_dax_size results in zero-sized arena")
 
         self._fd: Optional[int] = None
         self._mmap_obj: Optional[mmap.mmap] = None
@@ -132,13 +132,15 @@ class DaxBackend(StoragePluginInterface):
             self.slot_bytes = max(1, int(full_chunk_size))
             self._max_slots = self._arena_bytes // self.slot_bytes
             if self._max_slots <= 0:
-                raise RuntimeError("DAX arena too small for configured chunk slot size")
+                raise RuntimeError(
+                    "dax.max_dax_size is too small for the configured chunk size"
+                )
 
             self._state_lock = threading.RLock()
             self._state_condition = threading.Condition(self._state_lock)
 
             self._index: dict[CacheEngineKey, _Entry] = {}
-            self._pinned: set[CacheEngineKey] = set()
+            self._pin_counts: dict[CacheEngineKey, int] = {}
             self._inflight: dict[CacheEngineKey, _Inflight] = {}
             self._lru: "OrderedDict[CacheEngineKey, None]" = OrderedDict()
             self._slot_states: dict[int, _SlotState] = {}
@@ -151,7 +153,7 @@ class DaxBackend(StoragePluginInterface):
             self._closed = False
 
             logger.info(
-                "DaxBackend init: device=%s arena=%d slot=%d max_slots=%d",
+                "DaxBackend init: device=%s dax_size=%d slot=%d max_slots=%d",
                 self.device_path,
                 self._arena_bytes,
                 self.slot_bytes,
@@ -265,12 +267,15 @@ class DaxBackend(StoragePluginInterface):
                 capacity_bytes = os.fstat(fd).st_size
                 if capacity_bytes > 0 and self._arena_bytes > capacity_bytes:
                     raise RuntimeError(
-                        f"dax.arena_size_gb ({self._arena_bytes} bytes) exceeds "
+                        f"dax.max_dax_size ({self._arena_bytes} bytes) exceeds "
                         f"device capacity ({capacity_bytes} bytes)"
                     )
             except OSError:
                 # Some dax devices may not report size via fstat.
-                pass
+                logger.warning(
+                    "Could not determine DAX device capacity via fstat; "
+                    "skipping dax.max_dax_size validation"
+                )
 
             mmap_obj = mmap.mmap(
                 fd,
@@ -313,7 +318,7 @@ class DaxBackend(StoragePluginInterface):
 
     def _evict_one_locked(self) -> bool:
         for victim in list(self._lru.keys()):
-            if victim in self._pinned or victim in self._inflight:
+            if self._pin_counts.get(victim, 0) > 0 or victim in self._inflight:
                 continue
             entry = self._index.get(victim)
             if entry is None:
@@ -327,7 +332,7 @@ class DaxBackend(StoragePluginInterface):
                 continue
             self._index.pop(victim, None)
             self._lru.pop(victim, None)
-            self._pinned.discard(victim)
+            self._pin_counts.pop(victim, None)
             self._schedule_slot_reclaim_locked(entry.slot_id, entry.generation)
             return True
         return False
@@ -350,7 +355,7 @@ class DaxBackend(StoragePluginInterface):
         with self._state_lock:
             ok = key in self._index
             if ok and pin:
-                self._pinned.add(key)
+                self._pin_counts[key] = self._pin_counts.get(key, 0) + 1
             return ok
 
     def exists_in_put_tasks(self, key: CacheEngineKey) -> bool:
@@ -360,14 +365,18 @@ class DaxBackend(StoragePluginInterface):
     def pin(self, key: CacheEngineKey) -> bool:
         with self._state_lock:
             if key in self._index:
-                self._pinned.add(key)
+                self._pin_counts[key] = self._pin_counts.get(key, 0) + 1
                 return True
             return False
 
     def unpin(self, key: CacheEngineKey) -> bool:
         with self._state_lock:
-            if key in self._pinned:
-                self._pinned.remove(key)
+            count = self._pin_counts.get(key, 0)
+            if count > 0:
+                if count == 1:
+                    del self._pin_counts[key]
+                else:
+                    self._pin_counts[key] = count - 1
                 return True
             return key in self._index
 
@@ -377,7 +386,7 @@ class DaxBackend(StoragePluginInterface):
             existed = key in self._index or key in self._inflight
             entry = self._index.pop(key, None)
             inflight = self._inflight.get(key)
-            self._pinned.discard(key)
+            self._pin_counts.pop(key, None)
             self._lru.pop(key, None)
             if entry is not None:
                 self._schedule_slot_reclaim_locked(entry.slot_id, entry.generation)
@@ -404,7 +413,7 @@ class DaxBackend(StoragePluginInterface):
         for key, obj in zip(keys, objs, strict=True):
             should_finish_put = False
             try:
-                # Reject multi-tensor objects explicitly
+                # Multi-tensor objects are not yet supported.
                 num_shapes = len(obj.get_shapes())
                 if num_shapes > 1:
                     logger.error(
@@ -429,14 +438,10 @@ class DaxBackend(StoragePluginInterface):
                         continue
 
                     if size > self.slot_bytes:
-                        logger.warning(
-                            "Skipping DAX put for key %s: object size %d exceeds "
-                            "slot size %d",
-                            key,
-                            size,
-                            self.slot_bytes,
+                        raise ValueError(
+                            f"DaxBackend: object size {size} for key {key} "
+                            f"exceeds slot size {self.slot_bytes}"
                         )
-                        continue
                     while True:
                         try:
                             slot_id = self._allocate_slot_locked()
@@ -630,7 +635,7 @@ class DaxBackend(StoragePluginInterface):
                 if key not in self._index:
                     break
                 if pin:
-                    self._pinned.add(key)
+                    self._pin_counts[key] = self._pin_counts.get(key, 0) + 1
                 hit += 1
         return hit
 
@@ -660,7 +665,7 @@ class DaxBackend(StoragePluginInterface):
                 if key not in self._index:
                     break
                 if pin:
-                    self._pinned.add(key)
+                    self._pin_counts[key] = self._pin_counts.get(key, 0) + 1
                 hit += 1
         return hit
 
@@ -686,14 +691,19 @@ class DaxBackend(StoragePluginInterface):
                 return
             self._closing = True
             while self._active_puts > 0 or self._active_ops > 0:
-                self._state_condition.wait()
+                if not self._state_condition.wait(timeout=30.0):
+                    logger.warning(
+                        "DaxBackend close: still waiting for %d puts, %d ops",
+                        self._active_puts,
+                        self._active_ops,
+                    )
             if self._closed:
                 return
             self._closed = True
             self._index.clear()
             self._inflight.clear()
             self._lru.clear()
-            self._pinned.clear()
+            self._pin_counts.clear()
             self._slot_states.clear()
             self._free_slots.clear()
             fd = self._fd
