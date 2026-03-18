@@ -258,7 +258,9 @@ else
 fi
 [[ -n "${LMCACHE_VERSIONS:-}" ]] && IFS=',' read -ra lmcache_versions <<< "${LMCACHE_VERSIONS}"
 
-
+echo "vllm_versions: ${vllm_versions[@]}"
+echo "lmcache_versions: ${lmcache_versions[@]}"
+exit 0
 declare -A RESULTS
 for rv in "${vllm_versions[@]}"; do
     setup_env
