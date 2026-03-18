@@ -13,6 +13,9 @@ nixl; python_version < "3.13"
 numpy<=2.2.6
 numba
 nvtx
+opentelemetry-api >= 1.20.0
+opentelemetry-sdk >= 1.20.0
+opentelemetry-exporter-prometheus >= 0.50b0
 prometheus_client >= 0.18.0
 psutil
 py-cpuinfo
