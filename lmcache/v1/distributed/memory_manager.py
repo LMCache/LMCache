@@ -28,9 +28,9 @@ def create_memory_allocator(config: L1MemoryManagerConfig) -> MemoryAllocatorInt
         MemoryAllocatorInterface: An instance of a memory allocator.
     """
     if config.use_lazy:
-        logger.info(
+        logger.debug(
             "use lazy memory allocator, init size is %d bytes, "
-            "final size is %d bytes, align bytes is %d bytes, contiguous alloc is %s",
+            "final size is %d bytes, align bytes is %d bytes",
             config.init_size_in_bytes,
             config.size_in_bytes,
             config.align_bytes,
@@ -39,9 +39,9 @@ def create_memory_allocator(config: L1MemoryManagerConfig) -> MemoryAllocatorInt
             config.init_size_in_bytes, config.size_in_bytes, config.align_bytes
         )
     else:
-        logger.info(
+        logger.debug(
             "use mixed memory allocator, total size is %d bytes, "
-            "align bytes is %d bytes, contiguous alloc is %s",
+            "align bytes is %d bytes",
             config.size_in_bytes,
             config.align_bytes,
         )
