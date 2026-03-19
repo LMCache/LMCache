@@ -3,7 +3,8 @@
 Unit tests for L2StatsLogger.
 
 Tests cover:
-- on_l2_lookup_and_lock is a no-op that does not raise
+- on_l2_keys_stored, on_l2_keys_accessed, on_l2_keys_deleted
+  are no-ops that do not raise
 - log_prometheus is a no-op that does not raise
 """
 
@@ -36,9 +37,17 @@ def logger() -> L2ManagerStatsLogger:
 
 
 class TestL2Callbacks:
-    def test_l2_lookup_and_lock_is_noop(self, logger):
-        """on_l2_lookup_and_lock must not raise."""
-        logger.on_l2_lookup_and_lock()
+    def test_l2_keys_stored_is_noop(self, logger):
+        """on_l2_keys_stored must not raise."""
+        logger.on_l2_keys_stored([])
+
+    def test_l2_keys_accessed_is_noop(self, logger):
+        """on_l2_keys_accessed must not raise."""
+        logger.on_l2_keys_accessed([])
+
+    def test_l2_keys_deleted_is_noop(self, logger):
+        """on_l2_keys_deleted must not raise."""
+        logger.on_l2_keys_deleted([])
 
     def test_log_prometheus_is_noop(self, logger):
         """log_prometheus must not raise."""
