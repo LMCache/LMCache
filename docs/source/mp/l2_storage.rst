@@ -214,6 +214,149 @@ in ``storage_controllers/`` and calling ``register_store_policy()`` or
 ``register_prefetch_policy()`` at import time.  See the design doc
 ``l2_adapters/design_docs/overall.md`` for details.
 
+Eviction
+--------
+
+LMCache supports eviction at both storage tiers so that each tier
+can operate within a fixed capacity budget.
+
+L1 Eviction
+~~~~~~~~~~~
+
+L1 eviction runs a single background thread that monitors overall L1
+memory usage. When usage exceeds ``trigger_watermark``, the eviction
+policy evicts a fraction of the least-recently-used keys.
+
+**CLI flags:**
+
+.. list-table::
+   :header-rows: 1
+   :widths: 30 15 55
+
+   * - Flag
+     - Default
+     - Description
+   * - ``--eviction-policy``
+     - *(required)*
+     - Policy name: ``LRU`` or ``noop``.
+   * - ``--eviction-trigger-watermark``
+     - ``0.8``
+     - L1 usage fraction [0, 1] above which eviction is triggered.
+   * - ``--eviction-ratio``
+     - ``0.2``
+     - Fraction of currently allocated L1 memory to evict per cycle.
+
+**Example:**
+
+.. code-block:: bash
+
+    --eviction-policy LRU \
+    --eviction-trigger-watermark 0.8 \
+    --eviction-ratio 0.2
+
+L2 Eviction
+~~~~~~~~~~~
+
+L2 eviction is **per-adapter** and **opt-in**. Each adapter can
+independently declare an eviction policy by adding an ``"eviction"``
+sub-object to its ``--l2-adapter`` JSON spec. Adapters without an
+``"eviction"`` key have no eviction controller.
+
+When L2 eviction is enabled for an adapter, a dedicated background
+thread monitors that adapter's ``get_usage()`` value. Once usage
+exceeds ``trigger_watermark``, the policy evicts keys until usage
+drops by ``eviction_ratio``.
+
+**``"eviction"`` sub-object fields:**
+
+.. list-table::
+   :header-rows: 1
+   :widths: 25 15 60
+
+   * - Field
+     - Default
+     - Description
+   * - ``eviction_policy``
+     - *(required)*
+     - Policy name: ``"LRU"`` or ``"noop"``.
+   * - ``trigger_watermark``
+     - ``0.8``
+     - Adapter usage fraction [0, 1] above which eviction is triggered.
+   * - ``eviction_ratio``
+     - ``0.2``
+     - Fraction of used capacity to evict per cycle.
+
+**Example — nixl_store with LRU eviction:**
+
+.. code-block:: bash
+
+    --l2-adapter '{
+      "type": "nixl_store",
+      "backend": "POSIX",
+      "backend_params": {"file_path": "/data/lmcache/l2", "use_direct_io": "false"},
+      "pool_size": 128,
+      "eviction": {
+        "eviction_policy": "LRU",
+        "trigger_watermark": 0.8,
+        "eviction_ratio": 0.2
+      }
+    }'
+
+**Adapter support:**
+
+.. list-table::
+   :header-rows: 1
+   :widths: 30 70
+
+   * - Adapter
+     - L2 Eviction Support
+   * - ``nixl_store``
+     - Full support. ``delete`` frees pool slots; pinned keys (in-flight
+       loads) are skipped and retried on the next cycle.
+   * - ``mock``
+     - Full support. Useful for testing eviction behaviour without
+       real storage hardware.
+   * - ``fs``
+     - No eviction support (``delete`` and ``get_usage`` are no-ops).
+   * - native connectors
+     - No eviction support.
+
+.. note::
+
+   Each L2 adapter instance gets its own independent eviction
+   controller and policy.  Two adapters of the same type can have
+   different watermarks or policies.
+
+Combined L1 + L2 Eviction Example
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. code-block:: bash
+
+    --l1-size-gb 100 \
+    --eviction-policy LRU \
+    --eviction-trigger-watermark 0.8 \
+    --eviction-ratio 0.2 \
+    --l2-adapter '{
+      "type": "nixl_store",
+      "backend": "GDS",
+      "backend_params": {"file_path": "/data/nvme/l2", "use_direct_io": "true"},
+      "pool_size": 256,
+      "eviction": {
+        "eviction_policy": "LRU",
+        "trigger_watermark": 0.9,
+        "eviction_ratio": 0.1
+      }
+    }'
+
+In this setup:
+
+- L1 evicts from memory when it is 80 % full, reclaiming 20 % of
+  allocated memory per cycle.
+- L2 (NIXL/GDS) evicts from the storage pool when 90 % of pool slots
+  are occupied, reclaiming 10 % per cycle.
+- Both tiers use independent LRU policies, so each evicts its own
+  least-recently-used keys.
+
 Verifying L2 Storage
 --------------------
 
