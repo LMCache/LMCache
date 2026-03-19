@@ -698,7 +698,7 @@ class MPCacheEngine:
         sm = self.storage_manager.report_status()
         return {
             "is_healthy": sm["is_healthy"],
-            "engine_type": "MPCacheEngine",
+            "engine_type": self.__class__.__name__,
             "chunk_size": self.chunk_size,
             "hash_algorithm": self.token_hasher.hash_algorithm_name,
             "registered_gpu_ids": list(self.gpu_contexts.keys()),

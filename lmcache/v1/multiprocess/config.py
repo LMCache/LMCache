@@ -44,7 +44,7 @@ class HTTPFrontendConfig:
     http_host: str = "0.0.0.0"
     """HTTP server host."""
 
-    http_port: int = 8000
+    http_port: int = 8080
     """HTTP server port."""
 
 
@@ -155,8 +155,8 @@ def add_http_frontend_args(
     http_group.add_argument(
         "--http-port",
         type=int,
-        default=8000,
-        help="Port to bind the HTTP server. Default is 8000.",
+        default=8080,
+        help="Port to bind the HTTP server. Default is 8080.",
     )
     return parser
 
