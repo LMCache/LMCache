@@ -135,6 +135,9 @@ class RequestTracker:
     # Whether the request cache should be saved
     skip_save: bool = False
 
+    # The number of tokens that are cached in LMCache for this request
+    num_lmcache_cached_tokens: int = 0
+
     @_lmcache_nvtx_annotate
     @staticmethod
     def from_new_request(
@@ -194,6 +197,7 @@ class RequestTracker:
             mm_positions=mm_positions,
             skip_save=skip_save,
             request_configs=request_configs,
+            num_lmcache_cached_tokens=lmcache_cached_tokens,
         )
 
     def update(
@@ -819,6 +823,7 @@ class LMCacheConnectorV1Impl:
                         token_mask[:lmcache_cached_tokens],
                         kvcaches=kvcaches,
                         slot_mapping=slot_mapping[:lmcache_cached_tokens],
+                        vllm_cached_tokens=request.load_spec.vllm_cached_tokens,
                     )
                 else:
                     layerwise_retriever = self.lmcache_engine.retrieve_layer(
@@ -826,6 +831,7 @@ class LMCacheConnectorV1Impl:
                         token_mask[:lmcache_cached_tokens],
                         kvcaches=kvcaches,
                         slot_mapping=slot_mapping[:lmcache_cached_tokens],
+                        vllm_cached_tokens=request.load_spec.vllm_cached_tokens,
                         sync=sync,
                     )
                     # NOTE: retrieve for two layers at the first layer
@@ -838,6 +844,7 @@ class LMCacheConnectorV1Impl:
                     token_mask[:lmcache_cached_tokens],
                     kvcaches=kvcaches,
                     slot_mapping=slot_mapping[:lmcache_cached_tokens],
+                    vllm_cached_tokens=request.load_spec.vllm_cached_tokens,
                     request_configs=request.request_configs,
                     req_id=request.req_id,
                 )
@@ -1668,6 +1675,16 @@ class LMCacheConnectorV1Impl:
             return_params = {
                 "first_tok": request._output_token_ids[0],
             }
+
+        if self.config.get_extra_config_value(
+            "enable_cache_usage_details_in_response", False
+        ):
+            request_tracker = self._request_trackers.get(request.request_id)
+            if request_tracker:
+                return_params = return_params or {}
+                return_params["num_lmcache_cached_tokens"] = (
+                    request_tracker.num_lmcache_cached_tokens
+                )
 
         return False, return_params
 

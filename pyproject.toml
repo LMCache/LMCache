@@ -12,7 +12,7 @@ requires = [
     "packaging>=24.2",
     "setuptools>=77.0.3,<81.0.0",
     "setuptools_scm>=8",
-    "torch==2.8.0",
+    "torch==2.10.0",
     "wheel",
 ]
 build-backend = "setuptools.build_meta"
@@ -43,6 +43,7 @@ requires-python = ">=3.10,<3.14"
 dynamic = ["dependencies", "version"]
 
 [project.scripts]
+lmcache="lmcache.cli.main:main"
 lmcache_v0_server="lmcache.server.__main__:main"
 lmcache_server="lmcache.v1.server.__main__:main"
 lmcache_controller="lmcache.v1.api_server.__main__:main"

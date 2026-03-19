@@ -27,11 +27,11 @@ from lmcache.v1.distributed.storage_controllers import (
     StoreController,
 )
 from lmcache.v1.distributed.storage_controllers.prefetch_policy import (
-    DefaultPrefetchPolicy,
+    create_prefetch_policy,
 )
 from lmcache.v1.distributed.storage_controllers.store_policy import (
     AdapterDescriptor,
-    DefaultStorePolicy,
+    create_store_policy,
 )
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.mp_observability.logger.storage_manager_stats_logger import (
@@ -87,7 +87,7 @@ class StorageManager:
             l1_manager=self._l1_manager,
             l2_adapters=self._l2_adapters,
             adapter_descriptors=adapter_descriptors,
-            policy=DefaultStorePolicy(),
+            policy=create_store_policy(config.store_policy),
         )
         self._store_controller.start()
 
@@ -96,7 +96,7 @@ class StorageManager:
             l1_manager=self._l1_manager,
             l2_adapters=self._l2_adapters,
             adapter_descriptors=adapter_descriptors,
-            policy=DefaultPrefetchPolicy(),
+            policy=create_prefetch_policy(config.prefetch_policy),
         )
         self._prefetch_controller.start()
 
@@ -218,11 +218,11 @@ class StorageManager:
         try:
             yield good_objs if all_good else None
             successfully_yielded = True
-        except Exception as e:
-            logger.warning(
-                "Exception occurred while processing read prefetched results: %s",
-                str(e),
+        except Exception:
+            logger.exception(
+                "Exception occurred while processing read prefetched results",
             )
+            raise
         finally:
             # Decrease the read lock for all successfully read memory objects
             # if None is yielded or exception occurs during caller's processing
@@ -305,6 +305,7 @@ class StorageManager:
             request_id = self._prefetch_controller.submit_prefetch_request(
                 remaining_keys,
                 layout_desc,
+                extra_count=extra_count,
             )
 
         submit_time = time.monotonic()

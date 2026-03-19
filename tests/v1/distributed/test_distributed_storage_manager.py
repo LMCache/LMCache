@@ -20,8 +20,8 @@ from lmcache.v1.distributed.config import (
 )
 from lmcache.v1.distributed.l2_adapters.config import (
     L2AdaptersConfig,
-    MockL2AdapterConfig,
 )
+from lmcache.v1.distributed.l2_adapters.mock_l2_adapter import MockL2AdapterConfig
 
 try:
     # First Party

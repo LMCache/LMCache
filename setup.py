@@ -88,8 +88,8 @@ def cuda_extension() -> tuple[list, dict]:
         "csrc/storage_manager/utils.cpp",
     ]
     redis_sources = [
-        "csrc/redis/pybind.cpp",
-        "csrc/redis/resp.cpp",
+        "csrc/storage_backends/redis/pybind.cpp",
+        "csrc/storage_backends/redis/connector.cpp",
     ]
     ext_modules = [
         cpp_extension.CUDAExtension(
@@ -111,7 +111,7 @@ def cuda_extension() -> tuple[list, dict]:
         cpp_extension.CppExtension(
             "lmcache.lmcache_redis",
             sources=redis_sources,
-            include_dirs=["csrc/redis"],
+            include_dirs=["csrc/storage_backends", "csrc/storage_backends/redis"],
             extra_compile_args={
                 "cxx": [flag_cxx_abi, "-O3", "-std=c++17"],
             },
@@ -144,8 +144,8 @@ def rocm_extension() -> tuple[list, dict]:
         "csrc/storage_manager/utils.cpp",
     ]
     redis_sources = [
-        "csrc/redis/pybind.cpp",
-        "csrc/redis/resp.cpp",
+        "csrc/storage_backends/redis/pybind.cpp",
+        "csrc/storage_backends/redis/connector.cpp",
     ]
     # For HIP, we generally use CppExtension and let hipcc handle things.
     # Ensure CXX environment variable is set to hipcc when running this build.
@@ -189,7 +189,7 @@ def rocm_extension() -> tuple[list, dict]:
         cpp_extension.CppExtension(
             "lmcache.lmcache_redis",
             sources=redis_sources,
-            include_dirs=["csrc/redis"],
+            include_dirs=["csrc/storage_backends", "csrc/storage_backends/redis"],
             extra_compile_args={
                 "cxx": ["-O3", "-std=c++17"],
             },

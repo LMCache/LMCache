@@ -9,6 +9,7 @@ This module provides GPU-side KV cache management functionality, including:
 
 # Standard
 import array
+import threading
 
 # Third Party
 import cupy
@@ -94,6 +95,20 @@ class GPUCacheContext:
             self.cuda_stream_.cuda_stream, self.device_.index
         )
 
+        _, high_priority = torch.cuda.Stream.priority_range()
+        self.high_priority_cuda_stream_ = torch.cuda.Stream(
+            device=self.device_, priority=high_priority
+        )
+        self.high_priority_cupy_stream_ = cupy.cuda.ExternalStream(
+            self.high_priority_cuda_stream_.cuda_stream, self.device_.index
+        )
+
+        # Per-device lock to serialise GPU↔CPU data transfers
+        # on the same device without blocking transfers on other
+        # devices.  Replaces the old global ``MPCacheEngine.lock``
+        # to avoid deadlocks with the implicit CUDA driver lock.
+        self.transfer_lock = threading.Lock()
+
         # Extra initialization
         self.cupy_stream_.launch_host_func(
             lambda logger: logger.info(
@@ -131,6 +146,14 @@ class GPUCacheContext:
     @property
     def cupy_stream(self) -> cupy.cuda.Stream:
         return self.cupy_stream_
+
+    @property
+    def high_priority_stream(self) -> torch.cuda.Stream:
+        return self.high_priority_cuda_stream_
+
+    @property
+    def high_priority_cupy_stream(self) -> cupy.cuda.Stream:
+        return self.high_priority_cupy_stream_
 
     @property
     def block_size(self) -> int:
@@ -225,6 +248,14 @@ class PlainGPUCacheContext:
             self._cuda_stream.cuda_stream, self._device.index
         )
 
+        _, high_priority = torch.cuda.Stream.priority_range()
+        self._high_priority_cuda_stream = torch.cuda.Stream(
+            device=self._device, priority=high_priority
+        )
+        self._high_priority_cupy_stream = cupy.cuda.ExternalStream(
+            self._high_priority_cuda_stream.cuda_stream, self._device.index
+        )
+
         # Extra initialization
         self._cupy_stream.launch_host_func(
             lambda logger: logger.info(
@@ -266,6 +297,14 @@ class PlainGPUCacheContext:
     @property
     def cupy_stream(self) -> cupy.cuda.Stream:
         return self._cupy_stream
+
+    @property
+    def high_priority_stream(self) -> torch.cuda.Stream:
+        return self._high_priority_cuda_stream
+
+    @property
+    def high_priority_cupy_stream(self) -> cupy.cuda.Stream:
+        return self._high_priority_cupy_stream
 
     @property
     def num_layers(self) -> int:

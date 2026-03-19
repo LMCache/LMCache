@@ -1,18 +1,33 @@
 # SPDX-License-Identifier: Apache-2.0
 
+# Future
+from __future__ import annotations
+
 # Standard
 from collections import defaultdict
+from typing import TYPE_CHECKING, Optional
 import asyncio
 import copy
 import os
 import threading
 import time
 
+if TYPE_CHECKING:
+    from lmcache.v1.distributed.internal_api import (
+        L1MemoryDesc,
+    )
+
 # First Party
 from lmcache.native_storage_ops import Bitmap
 from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface, L2TaskId
-from lmcache.v1.distributed.l2_adapters.config import MockL2AdapterConfig
+from lmcache.v1.distributed.l2_adapters.config import (
+    L2AdapterConfigBase,
+    register_l2_adapter_type,
+)
+from lmcache.v1.distributed.l2_adapters.factory import (
+    register_l2_adapter_factory,
+)
 from lmcache.v1.memory_management import MemoryObj, TensorMemoryObj
 
 # Helper function
@@ -34,6 +49,52 @@ def clone_tensor_memory_obj(obj: MemoryObj) -> TensorMemoryObj:
     )
 
     return new_obj
+
+
+# Config class
+
+
+class MockL2AdapterConfig(L2AdapterConfigBase):
+    """
+    Config for a mock L2 adapter (for testing).
+
+    Fields:
+    - max_size_gb: maximum size in GB.
+    - mock_bandwidth_gb: simulated bandwidth in GB/sec.
+    """
+
+    def __init__(
+        self,
+        max_size_gb: float,
+        mock_bandwidth_gb: float,
+    ):
+        self.max_size_gb = max_size_gb
+        self.mock_bandwidth_gb = mock_bandwidth_gb
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "MockL2AdapterConfig":
+        max_size_gb = d.get("max_size_gb")
+        if not isinstance(max_size_gb, (int, float)) or max_size_gb <= 0:
+            raise ValueError("max_size_gb must be a positive number")
+
+        mock_bandwidth_gb = d.get("mock_bandwidth_gb")
+        if not isinstance(mock_bandwidth_gb, (int, float)) or mock_bandwidth_gb <= 0:
+            raise ValueError("mock_bandwidth_gb must be a positive number")
+
+        return cls(
+            max_size_gb=max_size_gb,
+            mock_bandwidth_gb=mock_bandwidth_gb,
+        )
+
+    @classmethod
+    def help(cls) -> str:
+        return (
+            "Mock L2 adapter config fields:\n"
+            "- max_size_gb (float): maximum size of "
+            "the adapter in GB (required, >0)\n"
+            "- mock_bandwidth_gb (float): simulated "
+            "bandwidth in GB/sec (required, >0)"
+        )
 
 
 # Main class
@@ -421,3 +482,18 @@ class MockL2Adapter(L2AdapterInterface):
         with self._lock:
             self._completed_load_tasks[task_id] = bitmap
         self._signal_load_event()
+
+
+# Self-register config type and adapter factory
+register_l2_adapter_type("mock", MockL2AdapterConfig)
+
+
+def _create_mock_adapter(
+    config: L2AdapterConfigBase,
+    l1_memory_desc: "Optional[L1MemoryDesc]" = None,
+) -> L2AdapterInterface:
+    """Create a MockL2Adapter from config."""
+    return MockL2Adapter(config)  # type: ignore[arg-type]
+
+
+register_l2_adapter_factory("mock", _create_mock_adapter)
