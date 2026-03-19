@@ -21,9 +21,6 @@ from lmcache.v1.mp_observability.config import (
     add_prometheus_args,
     parse_args_to_prometheus_config,
 )
-from lmcache.v1.mp_observability.prometheus_controller import (
-    get_prometheus_controller,
-)
 from lmcache.v1.mp_observability.telemetry import (
     TelemetryConfig,
     add_telemetry_args,
@@ -90,7 +87,6 @@ async def lifespan(app: FastAPI):
     # Shutdown
     logger.info("Shutting down LMCache HTTP server...")
     get_telemetry_controller().stop()
-    get_prometheus_controller().stop()
     if hasattr(app.state, "zmq_server") and app.state.zmq_server is not None:
         app.state.zmq_server.close()
     logger.info("LMCache HTTP server stopped")
