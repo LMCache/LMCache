@@ -1537,8 +1537,14 @@ class LMCacheConnectorV1Impl:
             # TODO: this is a dangerous reference to the request object inside vllm
             if request := self._unfinished_requests.get(req_id):
                 num_current_tokens = request.num_computed_tokens
+                # Use tracker's token_ids length as the slice base instead of
+                # request.num_computed_tokens, because in newer vLLM versions
+                # num_computed_tokens may already be updated before
+                # build_connector_meta is called, causing the slice to be empty
+                # during decode phase.
+                tracker_len = len(request_tracker.token_ids)
                 new_token_ids = request.all_token_ids[
-                    num_current_tokens : num_current_tokens + num_new_tokens
+                    tracker_len : tracker_len + num_new_tokens
                 ]
             else:
                 raise ValueError(
