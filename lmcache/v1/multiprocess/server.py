@@ -603,8 +603,12 @@ class MPCacheEngine:
             )
             return None
 
-        hits = self.storage_manager.query_prefetch_lookup_hits(job.handle)
-        return hits
+        found_count = self.storage_manager.query_prefetch_lookup_hits(job.handle)
+        if found_count is None:
+            return None
+
+        found_count = found_count // job.world_size
+        return found_count
 
     def query_prefetch_status(
         self,
