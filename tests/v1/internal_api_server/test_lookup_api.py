@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, PropertyMock
 import json
 
 # Third Party
@@ -16,9 +16,14 @@ class TestLookupAPI:
 
     @pytest.fixture
     def mock_scheduler_manager(self):
-        """Create a mock LMCacheManager for scheduler role."""
+        """Create a mock LMCacheManager for scheduler role.
+
+        Scheduler has a lookup_client but no lookup_server.
+        """
         manager = MagicMock()
-        manager.role = "scheduler"
+        # Scheduler: has lookup_client, no lookup_server
+        type(manager).lookup_client = PropertyMock(return_value=MagicMock())
+        type(manager).lookup_server = PropertyMock(return_value=None)
         manager.get_lookup_info.return_value = {
             "client": "HitLimitLookupClient(LMCacheBypassLookupClient)",
             "server": "None",
@@ -35,9 +40,14 @@ class TestLookupAPI:
 
     @pytest.fixture
     def mock_worker_manager(self):
-        """Create a mock LMCacheManager for worker role."""
+        """Create a mock LMCacheManager for worker role.
+
+        Worker has a lookup_server but no lookup_client.
+        """
         manager = MagicMock()
-        manager.role = "worker"
+        # Worker: has lookup_server, no lookup_client
+        type(manager).lookup_client = PropertyMock(return_value=None)
+        type(manager).lookup_server = PropertyMock(return_value=MagicMock())
         manager.get_lookup_info.return_value = {
             "client": "None",
             "server": "LMCacheLookupServer",
@@ -108,7 +118,7 @@ class TestLookupAPI:
         assert response.status_code == 200
         data = json.loads(response.text)
         assert "LMCacheBypassLookupClient" in data["old"]
-        assert data["role"] == "scheduler"
+        assert data["mode"] == "client"
         mock_scheduler_manager.close_lookup_client.assert_called_once()
 
     def test_close_lookup_worker(self, worker_client, mock_worker_manager):
@@ -118,7 +128,7 @@ class TestLookupAPI:
         assert response.status_code == 200
         data = json.loads(response.text)
         assert data["old"] == "LMCacheLookupServer"
-        assert data["role"] == "worker"
+        assert data["mode"] == "server"
         mock_worker_manager.close_lookup_server.assert_called_once()
 
     # ==================== POST /lookup/create Tests ====================
@@ -130,7 +140,7 @@ class TestLookupAPI:
         assert response.status_code == 200
         data = json.loads(response.text)
         assert data["new"] == "LMCacheLookupClient"
-        assert data["role"] == "scheduler"
+        assert data["mode"] == "client"
         mock_scheduler_manager.create_lookup_client.assert_called_once_with(
             dryrun=False
         )
@@ -142,7 +152,7 @@ class TestLookupAPI:
         assert response.status_code == 200
         data = json.loads(response.text)
         assert data["new"] == "LMCacheAsyncLookupServer"
-        assert data["role"] == "worker"
+        assert data["mode"] == "server"
         mock_worker_manager.create_lookup_server.assert_called_once_with(dryrun=False)
 
     def test_create_lookup_dryrun_scheduler(
@@ -199,7 +209,7 @@ class TestLookupAPI:
         data = json.loads(response.text)
         assert "LMCacheBypassLookupClient" in data["old"]
         assert data["new"] == "LMCacheLookupClient"
-        assert data["role"] == "scheduler"
+        assert data["mode"] == "client"
         mock_scheduler_manager.recreate_lookup_client.assert_called_once()
 
     def test_recreate_lookup_worker(self, worker_client, mock_worker_manager):
@@ -210,7 +220,7 @@ class TestLookupAPI:
         data = json.loads(response.text)
         assert data["old"] == "LMCacheLookupServer"
         assert data["new"] == "LMCacheAsyncLookupServer"
-        assert data["role"] == "worker"
+        assert data["mode"] == "server"
         mock_worker_manager.recreate_lookup_server.assert_called_once()
 
     def test_recreate_lookup_error(self, scheduler_client, mock_scheduler_manager):
@@ -225,10 +235,11 @@ class TestLookupAPI:
         data = json.loads(response.text)
         assert "error" in data
 
-    def test_recreate_lookup_unknown_role(self):
-        """Test recreation with unknown role."""
+    def test_recreate_lookup_no_components(self):
+        """Test recreation with no lookup components."""
         manager = MagicMock()
-        manager.role = "unknown"
+        type(manager).lookup_client = PropertyMock(return_value=None)
+        type(manager).lookup_server = PropertyMock(return_value=None)
         app.state.lmcache_adapter = manager
         client = TestClient(app)
 
@@ -236,13 +247,14 @@ class TestLookupAPI:
 
         assert response.status_code == 400
         data = json.loads(response.text)
-        assert data["error"] == "Unknown role"
+        assert data["error"] == "No active lookup component"
 
     def test_recreate_lookup_not_supported(self):
         """Test recreation when manager doesn't support it."""
 
         class SimpleAdapter:
-            role = "scheduler"
+            lookup_client = MagicMock()
+            lookup_server = None
 
         app.state.lmcache_adapter = SimpleAdapter()
         client = TestClient(app)
