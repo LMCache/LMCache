@@ -15,6 +15,8 @@ import pkgutil
 # First Party
 from lmcache.v1.distributed.storage_controllers.eviction_controller import (
     EvictionController,
+    L1EvictionController,
+    L2EvictionController,
 )
 from lmcache.v1.distributed.storage_controllers.prefetch_controller import (
     PrefetchController,
@@ -32,6 +34,8 @@ for _finder, _mod_name, _is_pkg in pkgutil.iter_modules(_PACKAGE_PATH):
 
 __all__ = [
     "EvictionController",
+    "L1EvictionController",
+    "L2EvictionController",
     "PrefetchController",
     "StoreController",
 ]

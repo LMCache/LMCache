@@ -58,7 +58,7 @@ class L1ManagerConfig:
 @dataclass
 class EvictionConfig:
     """
-    The configuration for eviction policies.
+    The configuration for eviction policies (L1 and optionally L2).
     """
 
     eviction_policy: Literal["LRU", "noop"]

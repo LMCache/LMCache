@@ -16,12 +16,16 @@ if TYPE_CHECKING:
 
 # First Party
 from lmcache.v1.distributed.api import ObjectKey
+from lmcache.v1.distributed.internal_api import L2AdapterListener
 from lmcache.v1.memory_management import MemoryObj
 
 L2TaskId = int
 
 
 class L2AdapterInterface(ABC):
+    def __init__(self):
+        self._listeners: list[L2AdapterListener] = []
+
     """
     The abstracted interface for L2 I/O adapters.
 
@@ -265,6 +269,66 @@ class L2AdapterInterface(ABC):
             None is returned when the load task is not completed.
         """
         pass
+
+    #####################
+    # Listener Interface
+    #####################
+
+    def register_listener(self, listener: L2AdapterListener) -> None:
+        """Register a listener to receive L2 adapter events."""
+        self._listeners.append(listener)
+
+    def _notify_keys_stored(self, keys: list[ObjectKey]) -> None:
+        for listener in self._listeners:
+            listener.on_l2_keys_stored(keys)
+
+    def _notify_keys_accessed(self, keys: list[ObjectKey]) -> None:
+        for listener in self._listeners:
+            listener.on_l2_keys_accessed(keys)
+
+    def _notify_keys_deleted(self, keys: list[ObjectKey]) -> None:
+        for listener in self._listeners:
+            listener.on_l2_keys_deleted(keys)
+
+    #####################
+    # Eviction Interface
+    #####################
+
+    def delete(self, keys: list[ObjectKey]) -> None:
+        """
+        Delete a batch of objects from L2 storage.
+
+        Args:
+            keys (list[ObjectKey]): The keys of the objects to delete.
+
+        Note:
+            Implementations should fire on_l2_keys_deleted on registered
+            L2AdapterListeners once the deletion completes.
+
+            The default implementation is a no-op. Subclasses that support
+            eviction should override this method.
+        """
+        return None
+
+    def get_usage(self) -> tuple[float, float]:
+        """
+        Return the current L2 storage utilization.
+
+        Returns:
+            tuple[float, float]: A pair
+                ``(current_usage, usage_after_ongoing_eviction)`` where each
+                value is in the range [0.0, 1.0].
+
+                - ``current_usage``: fraction of total L2 capacity currently
+                  occupied (bytes used / total bytes).
+                - ``usage_after_ongoing_eviction``: estimated fraction once all
+                  in-flight deletes/evictions complete
+                  ((bytes used - bytes being deleted) / total bytes).
+
+            The default implementation returns ``(0.0, 0.0)``. Subclasses that
+            support eviction should override this method.
+        """
+        return (0.0, 0.0)
 
     #####################
     # Cleanup Interface

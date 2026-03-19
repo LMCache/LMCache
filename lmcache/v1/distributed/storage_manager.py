@@ -22,7 +22,8 @@ from lmcache.v1.distributed.l1_manager import L1Manager
 from lmcache.v1.distributed.l2_adapters import create_l2_adapter
 from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface
 from lmcache.v1.distributed.storage_controllers import (
-    EvictionController,
+    L1EvictionController,
+    L2EvictionController,
     PrefetchController,
     StoreController,
 )
@@ -64,8 +65,8 @@ class StorageManager:
         self._l1_manager = L1Manager(config.l1_manager_config)
         self._registered_listeners: list[StorageManagerListener] = []
 
-        # Eviction controller
-        self._eviction_controller = EvictionController(
+        # L1 eviction controller
+        self._eviction_controller = L1EvictionController(
             l1_manager=self._l1_manager,
             eviction_config=config.eviction_config,
         )
@@ -77,6 +78,20 @@ class StorageManager:
             create_l2_adapter(ac, l1_memory_desc)
             for ac in config.l2_adapter_config.adapters
         ]
+
+        # L2 eviction controllers — one per adapter, only if adapter has eviction config
+        self._l2_eviction_controllers: list[L2EvictionController] = [
+            L2EvictionController(
+                l2_adapter=adapter,
+                eviction_config=ac.eviction_config,
+            )
+            for adapter, ac in zip(
+                self._l2_adapters, config.l2_adapter_config.adapters, strict=False
+            )
+            if ac.eviction_config is not None
+        ]
+        for ctrl in self._l2_eviction_controllers:
+            ctrl.start()
 
         adapter_descriptors = [
             AdapterDescriptor(index=i, config=ac)
@@ -385,6 +400,8 @@ class StorageManager:
         self._prefetch_controller.stop()
         self._store_controller.stop()
         self._eviction_controller.stop()
+        for ctrl in self._l2_eviction_controllers:
+            ctrl.stop()
 
         for adapter in self._l2_adapters:
             adapter.close()
@@ -396,15 +413,17 @@ class StorageManager:
         l1 = self._l1_manager.report_status()
         store = self._store_controller.report_status()
         prefetch = self._prefetch_controller.report_status()
-        eviction = self._eviction_controller.report_status()
+        l1_eviction = self._eviction_controller.report_status()
+        l2_evictions = [c.report_status() for c in self._l2_eviction_controllers]
         adapters = [a.report_status() for a in self._l2_adapters]
-        children = [l1, store, prefetch, eviction] + adapters
+        children = [l1, store, prefetch, l1_eviction] + l2_evictions + adapters
         return {
             "is_healthy": all(c["is_healthy"] for c in children),
             "l1_manager": l1,
             "store_controller": store,
             "prefetch_controller": prefetch,
-            "eviction_controller": eviction,
+            "l1_eviction_controller": l1_eviction,
+            "l2_eviction_controllers": l2_evictions,
             "l2_adapters": adapters,
             "num_l2_adapters": len(self._l2_adapters),
         }

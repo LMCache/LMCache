@@ -127,7 +127,7 @@ class TestStorageManagerReportStatus:
         assert "l1_manager" in status
         assert "store_controller" in status
         assert "prefetch_controller" in status
-        assert "eviction_controller" in status
+        assert "l1_eviction_controller" in status
         assert "l2_adapters" in status
         assert "num_l2_adapters" in status
 
@@ -186,7 +186,7 @@ class TestStorageManagerReportStatus:
         assert "num_l2_adapters" in pc
 
     def test_eviction_controller_status_shape(self, storage_manager_no_l2):
-        ec = storage_manager_no_l2.report_status()["eviction_controller"]
+        ec = storage_manager_no_l2.report_status()["l1_eviction_controller"]
 
         assert ec["is_healthy"] is True
         assert ec["thread_alive"] is True
@@ -219,4 +219,4 @@ class TestStorageManagerReportStatus:
         assert status["l1_manager"]["is_healthy"] is True
         assert status["store_controller"]["is_healthy"] is True
         assert status["prefetch_controller"]["is_healthy"] is True
-        assert status["eviction_controller"]["is_healthy"] is True
+        assert status["l1_eviction_controller"]["is_healthy"] is True

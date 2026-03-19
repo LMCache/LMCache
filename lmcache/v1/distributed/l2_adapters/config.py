@@ -14,9 +14,13 @@ from __future__ import annotations
 # Standard
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import TypeVar
+from typing import TYPE_CHECKING, TypeVar
 import argparse
 import json
+
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.v1.distributed.config import EvictionConfig
 
 # First Party
 from lmcache.logging import init_logger
@@ -92,7 +96,55 @@ class L2AdapterConfigBase(ABC):
     - Subclasses this base.
     - Implements from_dict() to parse a dict (from JSON) into an instance.
     - Is registered via register_l2_adapter_type("type_name", ConfigClass).
+
+    An optional ``"eviction"`` key in the JSON dict enables per-adapter L2
+    eviction. When present it is parsed by ``_parse_eviction_config()`` and
+    stored on ``eviction_config``; the L2EvictionController is then created
+    for this adapter in the StorageManager.
     """
+
+    #: Populated by ``_parse_eviction_config`` after ``from_dict``; ``None``
+    #: means L2 eviction is disabled for this adapter.
+    eviction_config: EvictionConfig | None = None
+
+    @staticmethod
+    def _parse_eviction_config(d: dict) -> EvictionConfig | None:
+        """
+        Parse an optional ``"eviction"`` sub-dict from an adapter JSON spec.
+
+        Expected format::
+
+            {
+                "type": "mock",
+                ...
+                "eviction": {
+                    "eviction_policy": "LRU",
+                    "trigger_watermark": 0.8,
+                    "eviction_ratio": 0.2
+                }
+            }
+
+        Returns ``None`` when the key is absent (eviction disabled).
+        """
+        eviction_dict = d.get("eviction")
+        if eviction_dict is None:
+            return None
+
+        # Lazy import to avoid circular dependency:
+        # l2_adapters/config.py <- config.py <- l2_adapters/config.py
+        # First Party
+        from lmcache.v1.distributed.config import EvictionConfig  # noqa: PLC0415
+
+        policy = eviction_dict.get("eviction_policy")
+        if policy not in ("LRU", "noop"):
+            raise ValueError(
+                f"eviction.eviction_policy must be 'LRU' or 'noop', got {policy!r}"
+            )
+        return EvictionConfig(
+            eviction_policy=policy,
+            trigger_watermark=float(eviction_dict.get("trigger_watermark", 0.8)),
+            eviction_ratio=float(eviction_dict.get("eviction_ratio", 0.2)),
+        )
 
     @classmethod
     @abstractmethod
@@ -243,7 +295,9 @@ def parse_args_to_l2_adapters_config(args: argparse.Namespace) -> L2AdaptersConf
 
         config_cls = _L2_ADAPTER_CONFIG_REGISTRY[type_name]
         try:
-            adapter_configs.append(config_cls.from_dict(d))
+            adapter_cfg = config_cls.from_dict(d)
+            adapter_cfg.eviction_config = L2AdapterConfigBase._parse_eviction_config(d)
+            adapter_configs.append(adapter_cfg)
         except (TypeError, ValueError) as e:
             logger.error(
                 "Error parsing --l2-adapter #%d (type %r): %s",

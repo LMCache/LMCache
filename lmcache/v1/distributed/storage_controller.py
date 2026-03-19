@@ -9,27 +9,8 @@ and can operate on it.
 # Standard
 from abc import ABC, abstractmethod
 
-# First Party
-from lmcache.v1.distributed.l1_manager import L1Manager
-
 
 class StorageControllerInterface(ABC):
-    def __init__(
-        self,
-        l1_manager: L1Manager,
-    ):
-        self._l1_manager = l1_manager
-
-    def get_l1_manager(self) -> L1Manager:
-        """
-        Get the L1 manager instance.
-        This function will be used by sub classes to access L1 manager APIs.
-
-        Returns:
-            L1Manager: The L1 manager instance.
-        """
-        return self._l1_manager
-
     @abstractmethod
     def start(self):
         """
