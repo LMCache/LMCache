@@ -5,8 +5,8 @@
 ## Why
 
 Users need a way to manage KV cache state for **specific requests** from the
-command line — pin a request's cache to prevent eviction, compress it, clear it,
-or warm the cache for an upcoming prompt. Part of **Phase 1** of the
+command line — pin a request's cache to prevent eviction, compress it, or clear
+it. Part of **Phase 1** of the
 [CLI design](commands.md).
 
 ---
@@ -36,9 +36,6 @@ Every sub-command requires one of these to identify the target KV cache:
 - **`--start <st> --end <ed>`** (optional) — narrow the operation to a token
   range `[st, ed)` within the request. Defaults to the full sequence.
 
-The only exception is `generate`, which creates a new request rather than
-targeting an existing one.
-
 ### Pipe- and script-friendly output
 
 - **Exit codes:** `0` = success, `1` = error, `2` = rejected (e.g. pin rejected
@@ -58,8 +55,7 @@ lmcache kvcache
 ├── clear          # Remove a request's cached KV data
 ├── pin            # Pin a request's KV cache to L1/CPU (may be rejected)
 ├── compress       # Compress a request's KV cache in-place
-├── end-session    # Clean up session state for a finished request
-└── generate       # Prefill a prompt via vLLM to populate the cache
+└── end-session    # Clean up session state for a finished request
 ```
 
 | Sub-command | Target | Description |
@@ -69,7 +65,6 @@ lmcache kvcache
 | `pin` | instance or controller | Pin a request's KV cache to L1/CPU; may be rejected if memory pressure is too high |
 | `compress` | instance or controller | Compress a request's KV cache to reduce memory footprint |
 | `end-session` | instance | Remove per-request session state (token hashes, chunk tracking) |
-| `generate` | instance + vLLM | Send a prompt to a vLLM endpoint to trigger prefill and populate the cache |
 
 ---
 
@@ -215,50 +210,24 @@ $ lmcache kvcache end-session --url http://localhost:8000 --request-id req-abc-1
 **Note:** Today `end-session` is ZMQ-only (`END_SESSION` in `RequestType`). A new
 HTTP endpoint needs to be added to the per-instance server.
 
-### `generate`
-
-Trigger KV cache generation by sending a prompt to a vLLM inference endpoint.
-The prompt is prefilled and the resulting KV cache is stored in LMCache. Useful
-for warming the cache before production traffic arrives.
-
-This is the only sub-command that does not require `--request-id`
-— it creates a new cache entry rather than targeting an existing one.
-
-```bash
-$ lmcache kvcache generate \
-    --target-url http://localhost:8080/v1/completions \
-    --prompt "System prompt text here..." --max-tokens 1
-
-$ lmcache kvcache generate \
-    --target-url http://localhost:8080/v1/completions \
-    --prompt-file ./system_prompt.txt --max-tokens 1
-
-# Script: warm cache and check how many chunks were stored
-$ CHUNKS=$(lmcache kvcache generate --format json \
-    --target-url http://localhost:8080/v1/completions \
-    --prompt-file ./system_prompt.txt | jq -r '.metrics.chunks_cached')
-$ echo "Cached ${CHUNKS} chunks"
-```
-
-| Flag | Required | Description |
-|------|----------|-------------|
-| `--target-url` | yes | vLLM-compatible completions endpoint |
-| `--prompt` or `--prompt-file` | yes | Prompt text or path to file |
-| `--max-tokens` | no (default: 1) | Output tokens (1 = prefill only) |
-| `--model` | no | Model name (if endpoint serves multiple) |
-
 ---
 
 ## Existing API Surface & Gaps
 
-| CLI sub-command | Existing HTTP endpoint | Gap |
-|----------------|----------------------|-----|
-| `info` | `/cache/kvcache/info` (metadata only) | Need per-request chunk detail endpoint |
-| `clear` | `/cache/clear` (instance), `/clear` (controller) | Need request-id and token-range filtering |
-| `pin` | `/pin` (controller only) | Need per-instance HTTP pin endpoint with rejection |
-| `compress` | `/compress` (controller only) | Need per-instance HTTP compress endpoint |
-| `end-session` | ZMQ `END_SESSION` only | Need HTTP endpoint on per-instance server |
-| `generate` | N/A (client-side) | No server endpoint needed — CLI sends request to vLLM directly |
+### Usable today (no new endpoints needed)
+
+| CLI sub-command | Existing endpoint | Notes |
+|----------------|------------------|-------|
+| `clear` | `DELETE /cache/clear` (instance), `POST /clear` (controller) | Needs request-id filtering added to existing endpoint |
+
+### Needs new HTTP endpoints
+
+| CLI sub-command | What exists today | New endpoint needed |
+|----------------|------------------|---------------------|
+| `info` | `GET /cache/kvcache/info` returns layer metadata only | Per-request chunk detail: given a request ID, return chunk ranges, locations, and pinned status |
+| `pin` | `POST /pin` on controller only | Per-instance `POST /cache/pin` that accepts request-id, returns OK or REJECTED with reason |
+| `compress` | `POST /compress` on controller only | Per-instance `POST /cache/compress` that accepts request-id + method |
+| `end-session` | ZMQ `END_SESSION` only (no HTTP) | Per-instance `POST /cache/end-session` that accepts request-id |
 
 ---
 
@@ -268,7 +237,7 @@ $ echo "Cached ${CHUNKS} chunks"
   argparse subparsers. File: `lmcache/cli/commands/kvcache.py`.
 - **HTTP only:** `_http_request()` wraps `urllib.request` (no new deps).
 - **Indexing args** shared via a helper that adds `--request-id`,
-  `--start`, `--end` to each subparser (except `generate`).
+  `--start`, `--end` to each subparser.
 - **Output:** `self.create_metrics()` — use `--format json | jq` for scripting.
 - **New `--quiet` / `-q` flag** on `BaseCommand`: skips `StreamHandler`.
 - **Exit codes:** `0` success, `1` error, `2` rejected. Errors to stderr.
@@ -279,4 +248,4 @@ $ echo "Cached ${CHUNKS} chunks"
 |-------|------|
 | **1a** | `clear` (HTTP exists), `end-session` (needs new HTTP endpoint) |
 | **1b** | `info` (needs per-request endpoint), `pin` (needs per-instance endpoint) |
-| **1c** | `compress` (needs per-instance endpoint), `generate` (client-side only) |
+| **1c** | `compress` (needs per-instance endpoint) |
