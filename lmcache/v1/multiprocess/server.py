@@ -300,7 +300,7 @@ class MPCacheEngine:
 
                 # Copy from GPU to CPU
                 tmp_buffer = gpu_context.get_tmp_gpu_buffer(self.chunk_size)
-                with self.lock:
+                with gpu_context.transfer_lock:
                     lmc_ops.multi_layer_kv_transfer(
                         tmp_buffer,
                         gpu_context.kv_pointers,
@@ -419,7 +419,7 @@ class MPCacheEngine:
 
                 # Copy from CPU to GPU
                 tmp_gpu_buffer_ = gpu_context.get_tmp_gpu_buffer(self.chunk_size)
-                with self.lock:
+                with gpu_context.transfer_lock:
                     lmcache_memcpy_async_h2d(memory_obj, tmp_gpu_buffer_)
                     lmc_ops.multi_layer_kv_transfer(
                         tmp_gpu_buffer_,
