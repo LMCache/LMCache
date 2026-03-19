@@ -71,8 +71,8 @@ class VllmServiceFactory(BaseServiceFactory):
         # First Party
         from lmcache.integration.vllm.utils import (
             calculate_draft_layers,
-            calculate_local_rank_and_world_size,
             mla_enabled,
+            resolve_vllm_worker_identity,
             validate_mla_config,
         )
 
@@ -133,21 +133,13 @@ class VllmServiceFactory(BaseServiceFactory):
                     kv_transfer_config, "kv_connector_extra_config", None
                 )
 
-        if self.role == "scheduler":
-            # Avoid GPU probing for scheduler-only metadata path;
-            # scheduler may run on CPU-only control-plane nodes.
-            local_worker_id = parallel_config.rank
-            local_world_size = parallel_config.world_size
-        else:
-            local_worker_id, local_world_size = calculate_local_rank_and_world_size(
-                self.vllm_config
-            )
+        worker_identity = resolve_vllm_worker_identity(self.vllm_config)
         self.metadata = LMCacheMetadata(
             model_name=model_config.model,
-            world_size=parallel_config.world_size,
-            local_world_size=local_world_size,
-            worker_id=parallel_config.rank,
-            local_worker_id=local_worker_id,
+            world_size=worker_identity.world_size,
+            local_world_size=worker_identity.local_world_size,
+            worker_id=worker_identity.worker_id,
+            local_worker_id=worker_identity.local_worker_id,
             kv_dtype=kv_dtype,
             kv_shape=kv_shape,
             use_mla=use_mla,

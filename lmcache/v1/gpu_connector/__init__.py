@@ -66,9 +66,12 @@ def CreateGPUConnector(
             VLLMPagedMemLayerwiseGPUConnector,
         )
 
-        local_worker_id = metadata.local_worker_id
         torch_dev, dev_name = get_vllm_torch_dev()
-        torch_dev.set_device(local_worker_id)
+        try:
+            local_worker_id = torch_dev.current_device()
+        except (AttributeError, RuntimeError):
+            local_worker_id = metadata.local_worker_id
+            torch_dev.set_device(local_worker_id)
         device = torch.device(f"{dev_name}:{local_worker_id}")
 
         if config.use_layerwise:

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from typing import TYPE_CHECKING, Optional, Tuple
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, Optional, Tuple
 import hashlib
 import os
 import string
@@ -25,6 +26,16 @@ ENGINE_NAME = "vllm-instance"
 # Thread-safe singleton storage
 _config_instance: Optional[LMCacheEngineConfig] = None
 _config_lock = threading.Lock()
+
+
+@dataclass(frozen=True)
+class VLLMWorkerIdentity:
+    """DP-aware LMCache worker identity resolved from a vLLM worker config."""
+
+    world_size: int
+    local_world_size: int
+    worker_id: int
+    local_worker_id: int
 
 
 def is_false(value: str) -> bool:
@@ -146,6 +157,143 @@ def mla_enabled(model_config: "ModelConfig") -> bool:
     )
 
 
+def _get_env_int(name: str) -> Optional[int]:
+    value = os.getenv(name)
+    if value is None:
+        return None
+
+    try:
+        return int(value)
+    except ValueError:
+        logger.warning(
+            "Ignoring invalid integer environment variable %s=%s",
+            name,
+            value,
+        )
+        return None
+
+
+def _get_vllm_visible_device_state() -> tuple[Optional[int], Optional[int]]:
+    try:
+        torch_dev, _ = get_vllm_torch_dev()
+    except RuntimeError:
+        return None, None
+
+    try:
+        visible_device_count = torch_dev.device_count()
+    except (AttributeError, RuntimeError):
+        return None, None
+
+    if visible_device_count <= 0:
+        return None, None
+
+    try:
+        current_device = torch_dev.current_device()
+    except (AttributeError, RuntimeError):
+        current_device = None
+
+    return current_device, visible_device_count
+
+
+def _get_vllm_data_parallel_rank(parallel_config: Any) -> int:
+    return getattr(
+        parallel_config,
+        "data_parallel_index",
+        getattr(parallel_config, "data_parallel_rank", 0),
+    )
+
+
+def _get_vllm_data_parallel_rank_local(parallel_config: Any, dp_rank: int) -> int:
+    dp_local_rank = getattr(parallel_config, "data_parallel_rank_local", None)
+    if dp_local_rank is not None and dp_local_rank >= 0:
+        return dp_local_rank
+
+    env_dp_local_rank = _get_env_int("VLLM_DP_RANK_LOCAL")
+    if env_dp_local_rank is not None and env_dp_local_rank >= 0:
+        return env_dp_local_rank
+
+    # Dense-model DP deployments that do not expose a separate local rank are
+    # typically single-node, so the global DP rank still matches the process's
+    # local GPU ordinal. We only reach this fallback when neither vLLM nor the
+    # launcher provided a node-local rank explicitly.
+    return dp_rank
+
+
+def _get_vllm_data_parallel_size(parallel_config: Any) -> int:
+    env_dp_size = _get_env_int("VLLM_DP_SIZE")
+    candidates = [
+        1,
+        # Preserved when vLLM keeps the original DP size in the worker config.
+        getattr(parallel_config, "data_parallel_size", 1),
+        # Dense-model DP workers may rewrite data_parallel_size=1 but keep the
+        # API process count at the original DP width.
+        getattr(parallel_config, "_api_process_count", 1),
+        # data_parallel_index may survive even when size is rewritten, so
+        # rank+1 gives a lower bound on the original DP world size.
+        _get_vllm_data_parallel_rank(parallel_config) + 1,
+    ]
+    if env_dp_size is not None:
+        # External launchers can provide the authoritative DP size explicitly.
+        candidates.append(env_dp_size)
+    return max(candidates)
+
+
+def resolve_vllm_worker_identity(vllm_config: "VllmConfig") -> VLLMWorkerIdentity:
+    """Resolve LMCache worker identity from vLLM in a DP-aware way.
+
+    vLLM rewrites non-MoE DP worker configs to `data_parallel_size=1` and
+    `data_parallel_rank=0`, while preserving `data_parallel_index`,
+    `data_parallel_rank_local`, and the current CUDA/XPU device. LMCache must
+    use those preserved fields to avoid collapsing all DP workers onto rank 0
+    and rebinding the process to the wrong device.
+    """
+
+    parallel_config = vllm_config.parallel_config
+    tp_pp_rank = getattr(parallel_config, "rank", 0)
+    tp_pp_world_size = getattr(parallel_config, "world_size", 1)
+    tp_pp_local_world_size = getattr(
+        parallel_config, "local_world_size", tp_pp_world_size
+    )
+
+    if (
+        getattr(parallel_config, "distributed_executor_backend", None)
+        == "external_launcher"
+    ):
+        worker_id = tp_pp_rank
+        world_size = tp_pp_world_size
+    else:
+        dp_rank = _get_vllm_data_parallel_rank(parallel_config)
+        dp_world_size = _get_vllm_data_parallel_size(parallel_config)
+        worker_id = dp_rank * tp_pp_world_size + tp_pp_rank
+        world_size = dp_world_size * tp_pp_world_size
+
+    current_device, visible_device_count = _get_vllm_visible_device_state()
+    if current_device is not None:
+        local_worker_id = current_device
+        local_world_size = visible_device_count or 1
+    else:
+        dp_rank = _get_vllm_data_parallel_rank(parallel_config)
+        dp_local_rank = _get_vllm_data_parallel_rank_local(parallel_config, dp_rank)
+        local_tp_pp_rank = tp_pp_rank % max(tp_pp_local_world_size, 1)
+        local_worker_id = dp_local_rank * tp_pp_local_world_size + local_tp_pp_rank
+        if visible_device_count is not None:
+            local_world_size = visible_device_count
+        elif getattr(parallel_config, "nnodes", 1) == 1:
+            local_world_size = world_size
+        else:
+            local_world_size = max(
+                getattr(parallel_config, "data_parallel_size_local", 1),
+                1,
+            ) * tp_pp_local_world_size
+
+    return VLLMWorkerIdentity(
+        world_size=world_size,
+        local_world_size=local_world_size,
+        worker_id=worker_id,
+        local_worker_id=local_worker_id,
+    )
+
+
 def create_lmcache_metadata(
     vllm_config=None,
     model_config=None,
@@ -170,7 +318,8 @@ def create_lmcache_metadata(
         tuple: (LMCacheMetadata, LMCacheEngineConfig)
     """
     # Third Party
-    # Try to import from old location before merged https://github.com/vllm-project/vllm/pull/26908
+    # Try to import from the old location before
+    # https://github.com/vllm-project/vllm/pull/26908 landed.
     try:
         # Third Party
         from vllm.utils.torch_utils import get_kv_cache_torch_dtype
@@ -186,10 +335,17 @@ def create_lmcache_metadata(
         model_cfg = vllm_config.model_config
         parallel_cfg = vllm_config.parallel_config
         cache_cfg = vllm_config.cache_config
+        worker_identity = resolve_vllm_worker_identity(vllm_config)
     else:
         model_cfg = model_config
         parallel_cfg = parallel_config
         cache_cfg = cache_config
+        worker_identity = VLLMWorkerIdentity(
+            world_size=parallel_cfg.world_size,
+            local_world_size=parallel_cfg.world_size,
+            worker_id=parallel_cfg.rank,
+            local_worker_id=parallel_cfg.rank,
+        )
 
     # Get KV cache dtype
     kv_dtype = get_kv_cache_torch_dtype(cache_cfg.cache_dtype, model_cfg.dtype)
@@ -218,10 +374,10 @@ def create_lmcache_metadata(
     # Create metadata
     metadata = LMCacheMetadata(
         model_name=model_cfg.model,
-        world_size=parallel_cfg.world_size,
-        local_world_size=parallel_cfg.world_size,
-        worker_id=parallel_cfg.rank,
-        local_worker_id=parallel_cfg.rank,
+        world_size=worker_identity.world_size,
+        local_world_size=worker_identity.local_world_size,
+        worker_id=worker_identity.worker_id,
+        local_worker_id=worker_identity.local_worker_id,
         kv_dtype=kv_dtype,
         kv_shape=kv_shape,
         use_mla=use_mla,
@@ -319,32 +475,11 @@ def calculate_local_rank_and_world_size(vllm_config: "VllmConfig") -> Tuple[int,
     """
     Calculate the local worker id and local world size.
 
-    Current assumption (TODO: add custom logic in the future):
-    - Tensor Parallel is intra-node
-    - Pipeline Parallel is inter-node
-
     Returns:
         Tuple[int, int]: (local_worker_id, local_world_size)
     """
-    parallel_config = vllm_config.parallel_config
-    global_rank = parallel_config.rank
-    global_world_size = parallel_config.world_size
-    torch_dev, dev_name = get_vllm_torch_dev()
-    num_gpus = torch_dev.device_count()
-    if global_world_size <= num_gpus:
-        # single node case
-        return parallel_config.rank, parallel_config.world_size
-    else:
-        tp_size = parallel_config.tensor_parallel_size
-        pp_size = parallel_config.pipeline_parallel_size
-        local_world_size = global_world_size // pp_size
-        assert local_world_size == tp_size, (
-            "LMCache is operating under the assumption that the "
-            "local world size is equal to the tensor parallel size "
-            "in multi-node deployment."
-        )
-        local_worker_id = global_rank % local_world_size
-        return local_worker_id, local_world_size
+    worker_identity = resolve_vllm_worker_identity(vllm_config)
+    return worker_identity.local_worker_id, worker_identity.local_world_size
 
 
 def validate_mla_config(config: LMCacheEngineConfig, use_mla: bool) -> None:
