@@ -19,17 +19,17 @@ def _json_response(data: dict, status_code: int = 200) -> PlainTextResponse:
     )
 
 
-def _get_lookup_mode(adapter) -> str:
-    """Determine lookup mode from the manager's active components.
+def _get_role(adapter) -> str:
+    """Get the role from the manager's engine metadata.
 
-    Returns "client" if the manager has a lookup client (scheduler),
-    "server" if it has a lookup server (worker), or "none".
+    Returns "scheduler", "worker", or "unknown".
     """
-    if getattr(adapter, "lookup_client", None) is not None:
-        return "client"
-    if getattr(adapter, "lookup_server", None) is not None:
-        return "server"
-    return "none"
+    metadata = getattr(adapter, "lmcache_engine_metadata", None)
+    if metadata is not None:
+        role = getattr(metadata, "role", None)
+        if role is not None:
+            return role
+    return "unknown"
 
 
 @router.get("/lookup/info")
@@ -55,20 +55,20 @@ async def close_lookup(request: Request):
         curl -X POST http://localhost:6999/lookup/close
     """
     adapter = request.app.state.lmcache_adapter
-    mode = _get_lookup_mode(adapter)
+    role = _get_role(adapter)
 
-    if mode == "client":
+    if role == "scheduler":
         if not hasattr(adapter, "close_lookup_client"):
             return _json_response({"error": "API unavailable"}, 503)
         result = adapter.close_lookup_client()
-    elif mode == "server":
+    elif role == "worker":
         if not hasattr(adapter, "close_lookup_server"):
             return _json_response({"error": "API unavailable"}, 503)
         result = adapter.close_lookup_server()
     else:
-        return _json_response({"error": "No active lookup component"}, 400)
+        return _json_response({"error": "Unknown role"}, 400)
 
-    result["mode"] = mode
+    result["role"] = role
     return _json_response(result)
 
 
@@ -88,20 +88,20 @@ async def create_lookup(request: Request, dryrun: bool = False):
         curl -X POST "http://localhost:6999/lookup/create?dryrun=true"
     """
     adapter = request.app.state.lmcache_adapter
-    mode = _get_lookup_mode(adapter)
+    role = _get_role(adapter)
 
-    if mode == "client":
+    if role == "scheduler":
         if not hasattr(adapter, "create_lookup_client"):
             return _json_response({"error": "API unavailable"}, 503)
         result = adapter.create_lookup_client(dryrun=dryrun)
-    elif mode == "server":
+    elif role == "worker":
         if not hasattr(adapter, "create_lookup_server"):
             return _json_response({"error": "API unavailable"}, 503)
         result = adapter.create_lookup_server(dryrun=dryrun)
     else:
-        return _json_response({"error": "No active lookup component"}, 400)
+        return _json_response({"error": "Unknown role"}, 400)
 
-    result["mode"] = mode
+    result["role"] = role
     if "error" in result:
         return _json_response(result, 400)
     return _json_response(result)
@@ -126,20 +126,20 @@ async def recreate_lookup(request: Request):
         curl -X POST http://localhost:6999/lookup/recreate
     """
     adapter = request.app.state.lmcache_adapter
-    mode = _get_lookup_mode(adapter)
+    role = _get_role(adapter)
 
-    if mode == "client":
+    if role == "scheduler":
         if not hasattr(adapter, "recreate_lookup_client"):
             return _json_response({"error": "API unavailable"}, 503)
         result = adapter.recreate_lookup_client()
-    elif mode == "server":
+    elif role == "worker":
         if not hasattr(adapter, "recreate_lookup_server"):
             return _json_response({"error": "API unavailable"}, 503)
         result = adapter.recreate_lookup_server()
     else:
-        return _json_response({"error": "No active lookup component"}, 400)
+        return _json_response({"error": "Unknown role"}, 400)
 
-    result["mode"] = mode
+    result["role"] = role
     if "error" in result:
         return _json_response(result, 400)
     return _json_response(result)
