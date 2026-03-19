@@ -24,6 +24,7 @@ from lmcache.v1.gpu_connector.utils import (
     get_concrete_gpu_kv_shape,
     get_dtype,
     get_gpu_kv_shape_description,
+    get_head_size,
     get_hidden_dim_size,
     get_num_blocks,
     get_num_layers,
@@ -72,6 +73,7 @@ class GPUCacheContext:
         self.hidden_dim_size_ = get_hidden_dim_size(
             self.kv_caches_, self.gpu_kv_format_
         )
+        self.head_size_ = get_head_size(self.kv_caches_, self.gpu_kv_format_)
 
         # Pre-computed slot mapping
         # shape: [num_blocks, block_size]
@@ -178,6 +180,10 @@ class GPUCacheContext:
         Returns the hidden dimension size of the model
         """
         return self.hidden_dim_size_
+
+    @property
+    def head_size(self) -> int:
+        return self.head_size_
 
     @property
     def is_mla(self) -> bool:

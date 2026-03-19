@@ -561,9 +561,27 @@ class LMCacheMPWorkerAdapter:
             kv_caches: A dict of kv caches to register. The keys are the
                 layer names and the values are the corresponding tensors.
         """
+        # First Party
+        from lmcache.v1.gpu_connector.utils import (
+            permute_kv_caches_to_contiguous,
+            try_get_vllm_kv_cache_layout,
+        )
+
         # Register kv cache and send the request
         self.kv_caches = kv_caches
         logger.info("Registering kv caches")
+
+        # Permute HND tensors to contiguous physical shape before IPC
+        # wrapping — CudaIPCWrapper asserts contiguity.
+        if try_get_vllm_kv_cache_layout() == "HND":
+            kv_caches = dict(
+                zip(
+                    kv_caches.keys(),
+                    permute_kv_caches_to_contiguous(list(kv_caches.values())),
+                    strict=False,
+                )
+            )
+
         future = send_lmcache_request(
             self.mq_client,
             RequestType.REGISTER_KV_CACHE,

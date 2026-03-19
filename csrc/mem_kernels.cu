@@ -192,21 +192,44 @@ __global__ void single_layer_kv_transfer_kernel(
 }
 
 template <GPUKVFormat format>
-__device__ __forceinline__ int64_t
-page_buffer_offset(const int k_or_v, const int token_idx,
-                   const int scalar_offset, const int scalars_per_token,
-                   const int page_buffer_size, const int block_size) {
+__device__ __forceinline__ int64_t page_buffer_offset(
+    const int k_or_v, const int token_idx, const int scalar_offset,
+    const int scalars_per_token, const int page_buffer_size,
+    const int block_size, const int head_size) {
+  /*
+  logical semantics of arguments (agnostic to physical format):
+  k_or_v:            0 for key, 1 for value
+  token_idx:         flat slot index from slot_mapping[] = block_id * block_size
+  + offset_in_block scalar_offset:     thread-loop index in [0,
+  scalars_per_token), flat offset within one token's data (NH*HS in xword units)
+  scalars_per_token: NH * HS in xword units — total data elements per token slot
+  page_buffer_size:  NB * BS — total token slots in the paged buffer
+  block_size:        BS — number of token slots per block
+  head_size:         HS in xword units — only used by HND formats to decompose
+  scalar_offset into (head_idx, head_offset)
+
+  The job of page_buffer_offset is to translate these logical arguments into a
+  physical address based on the GPUKVFormat.
+
+  NOTE(perf): For HND formats, threads within a warp access non-contiguous
+  addresses when crossing head boundaries (stride BS*HS between heads),
+  harming memory coalescing
+  TODO: A dedicated HND kernel could launch with
+  grid=(2, L, T*NH) thread=(HS,,) to keep warps within one head's contiguous
+  HS run
+  */
+
   // vllm cross layer
   if constexpr (format == GPUKVFormat::NB_NL_TWO_BS_NH_HS) {
     return k_or_v * page_buffer_size * scalars_per_token +
            token_idx * scalars_per_token + scalar_offset;
   }
-  // vllm flash attention
+  // vllm flash attention (NHD)
   else if constexpr (format == GPUKVFormat::NL_X_TWO_NB_BS_NH_HS) {
     return k_or_v * page_buffer_size * scalars_per_token +
            token_idx * scalars_per_token + scalar_offset;
   }
-  // vllm flash infer
+  // vllm flash infer (NHD)
   else if constexpr (format == GPUKVFormat::NL_X_NB_TWO_BS_NH_HS) {
     const int block_idx = token_idx / block_size;
     const int block_offset = token_idx % block_size;
@@ -218,6 +241,30 @@ page_buffer_offset(const int k_or_v, const int token_idx,
   else if constexpr (format == GPUKVFormat::NL_X_NB_BS_HS ||
                      format == GPUKVFormat::NL_X_NBBS_ONE_HS) {
     return token_idx * scalars_per_token + scalar_offset;
+  }
+  // vllm flash attention (HND) — physical: [2, NB, NH, BS, HS]
+  else if constexpr (format == GPUKVFormat::NL_X_TWO_NB_NH_BS_HS) {
+    const int block_idx = token_idx / block_size;
+    const int block_offset = token_idx % block_size;
+    const int head_idx = scalar_offset / head_size;
+    const int head_offset = scalar_offset % head_size;
+    const int num_heads = scalars_per_token / head_size;
+    return k_or_v * page_buffer_size * scalars_per_token +
+           block_idx * num_heads * block_size * head_size +
+           head_idx * block_size * head_size + block_offset * head_size +
+           head_offset;
+  }
+  // vllm flash infer (HND) — physical: [NB, 2, NH, BS, HS]
+  else if constexpr (format == GPUKVFormat::NL_X_NB_TWO_NH_BS_HS) {
+    const int block_idx = token_idx / block_size;
+    const int block_offset = token_idx % block_size;
+    const int head_idx = scalar_offset / head_size;
+    const int head_offset = scalar_offset % head_size;
+    const int num_heads = scalars_per_token / head_size;
+    return block_idx * 2 * num_heads * block_size * head_size +
+           k_or_v * num_heads * block_size * head_size +
+           head_idx * block_size * head_size + block_offset * head_size +
+           head_offset;
   }
 }
 
@@ -305,7 +352,7 @@ __global__ void load_and_reshape_multi_layer_kernel(
                                                 // scalars_per_token]
     const int64_t* __restrict__ slot_mapping,   // [num_tokens]
     const int scalars_per_token, const int num_tokens, const int num_layers,
-    const int page_buffer_size, const int block_size,
+    const int page_buffer_size, const int block_size, const int head_size,
     const int skip_prefix_n_tokens) {
   const int token_id = blockIdx.x;
   const int layer_id = blockIdx.y;
@@ -327,8 +374,9 @@ __global__ void load_and_reshape_multi_layer_kernel(
         key_value_offset(k_or_v, layer_id, kv_token_id, i, scalars_per_token,
                          num_tokens, num_layers);
 
-    const int64_t vllm_offset = page_buffer_offset<format>(
-        k_or_v, slot_idx, i, scalars_per_token, page_buffer_size, block_size);
+    const int64_t vllm_offset =
+        page_buffer_offset<format>(k_or_v, slot_idx, i, scalars_per_token,
+                                   page_buffer_size, block_size, head_size);
 
     if (DIRECTION)  // 1 is paged buffer to LMCache
       key_value[lmcache_offset] = paged_buffer_ptr[vllm_offset];
@@ -440,7 +488,7 @@ T* get_kernel_ptr(TENSOR_TYPE& tensor) {
       <<<grid, block, 0, stream>>>(key_value_ptr, page_buffer_ptrs,          \
                                    slot_mapping_ptr, num_xwords, num_tokens, \
                                    num_layers, page_buffer_size, block_size, \
-                                   skip_prefix_n_tokens);                    \
+                                   head_size, skip_prefix_n_tokens);         \
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 
 template <typename T>
@@ -455,7 +503,7 @@ void multi_layer_kv_transfer_templated(
     const torch::Tensor& slot_mapping,    // [num_tokens],
     const torch::Device& paged_memory_device, const int page_buffer_size,
     const TransferDirection direction, const GPUKVFormat gpu_kv_format,
-    const int block_size, const int skip_prefix_n_tokens) {
+    const int block_size, const int head_size, const int skip_prefix_n_tokens) {
   T* key_value_ptr = get_kernel_ptr<T, torch::Tensor>(key_value);
   T** page_buffer_ptrs =
       get_kernel_ptr<T*, const torch::Tensor>(key_value_ptrs);
@@ -494,6 +542,12 @@ void multi_layer_kv_transfer_templated(
       case GPUKVFormat::NL_X_NBBS_ONE_HS:
         LAUNCH_KERNEL_WITH_FORMAT(T, false, GPUKVFormat::NL_X_NBBS_ONE_HS);
         break;
+      case GPUKVFormat::NL_X_TWO_NB_NH_BS_HS:
+        LAUNCH_KERNEL_WITH_FORMAT(T, false, GPUKVFormat::NL_X_TWO_NB_NH_BS_HS);
+        break;
+      case GPUKVFormat::NL_X_NB_TWO_NH_BS_HS:
+        LAUNCH_KERNEL_WITH_FORMAT(T, false, GPUKVFormat::NL_X_NB_TWO_NH_BS_HS);
+        break;
       default:
         throw std::runtime_error("Unsupported GPUKVFormat");
     }
@@ -514,6 +568,12 @@ void multi_layer_kv_transfer_templated(
       case GPUKVFormat::NL_X_NBBS_ONE_HS:
         LAUNCH_KERNEL_WITH_FORMAT(T, true, GPUKVFormat::NL_X_NBBS_ONE_HS);
         break;
+      case GPUKVFormat::NL_X_TWO_NB_NH_BS_HS:
+        LAUNCH_KERNEL_WITH_FORMAT(T, true, GPUKVFormat::NL_X_TWO_NB_NH_BS_HS);
+        break;
+      case GPUKVFormat::NL_X_NB_TWO_NH_BS_HS:
+        LAUNCH_KERNEL_WITH_FORMAT(T, true, GPUKVFormat::NL_X_NB_TWO_NH_BS_HS);
+        break;
       default:
         throw std::runtime_error("Unsupported GPUKVFormat");
     }
@@ -529,17 +589,17 @@ void multi_layer_kv_transfer(
     torch::Tensor& key_value, const torch::Tensor& key_value_ptrs,
     const torch::Tensor& slot_mapping, const torch::Device& paged_memory_device,
     const int page_buffer_size, const TransferDirection direction,
-    const GPUKVFormat gpu_kv_format, const int block_size,
+    const GPUKVFormat gpu_kv_format, const int block_size, const int head_size,
     const int skip_prefix_n_tokens) {
   int num_origin_elements = key_value.size(3);
   int copy_size = num_origin_elements * key_value.element_size();
 #ifndef LAUNCH_MULTI_LAYER_KV_TRANSFER
-  #define LAUNCH_MULTI_LAYER_KV_TRANSFER(type)                          \
-    do {                                                                \
-      multi_layer_kv_transfer_templated<type>(                          \
-          key_value, key_value_ptrs, slot_mapping, paged_memory_device, \
-          page_buffer_size, direction, gpu_kv_format, block_size,       \
-          skip_prefix_n_tokens);                                        \
+  #define LAUNCH_MULTI_LAYER_KV_TRANSFER(type)                               \
+    do {                                                                     \
+      multi_layer_kv_transfer_templated<type>(                               \
+          key_value, key_value_ptrs, slot_mapping, paged_memory_device,      \
+          page_buffer_size, direction, gpu_kv_format, block_size, head_size, \
+          skip_prefix_n_tokens);                                             \
     } while (0)
 #endif
   if (copy_size % 8 == 0) {

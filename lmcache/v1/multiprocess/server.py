@@ -296,16 +296,18 @@ class MPCacheEngine:
 
                 # Copy from GPU to CPU
                 tmp_buffer = gpu_context.get_tmp_gpu_buffer(self.chunk_size)
-                lmc_ops.multi_layer_kv_transfer(
-                    tmp_buffer,
-                    gpu_context.kv_pointers,
-                    slot_mapping,
-                    gpu_context.device,
-                    gpu_context.block_size * gpu_context.num_blocks,
-                    lmc_ops.TransferDirection.D2H,
-                    gpu_context.gpu_kv_format_,
-                    gpu_context.block_size,
-                )
+                with gpu_context.transfer_lock:
+                    lmc_ops.multi_layer_kv_transfer(
+                        tmp_buffer,
+                        gpu_context.kv_pointers,
+                        slot_mapping,
+                        gpu_context.device,
+                        gpu_context.block_size * gpu_context.num_blocks,
+                        lmc_ops.TransferDirection.D2H,
+                        gpu_context.gpu_kv_format_,
+                        block_size=gpu_context.block_size,
+                        head_size=gpu_context.head_size,
+                    )
 
                 assert memory_obj.tensor is not None
                 lmcache_memcpy_async_d2h(tmp_buffer, memory_obj)
@@ -414,18 +416,20 @@ class MPCacheEngine:
 
                 # Copy from CPU to GPU
                 tmp_gpu_buffer_ = gpu_context.get_tmp_gpu_buffer(self.chunk_size)
-                lmcache_memcpy_async_h2d(memory_obj, tmp_gpu_buffer_)
-                lmc_ops.multi_layer_kv_transfer(
-                    tmp_gpu_buffer_,
-                    gpu_context.kv_pointers,
-                    slot_mapping,
-                    gpu_context.device,
-                    gpu_context.block_size * gpu_context.num_blocks,
-                    lmc_ops.TransferDirection.H2D,
-                    gpu_context.gpu_kv_format_,
-                    gpu_context.block_size,
-                    skip_in_chunk,
-                )
+                with gpu_context.transfer_lock:
+                    lmcache_memcpy_async_h2d(memory_obj, tmp_gpu_buffer_)
+                    lmc_ops.multi_layer_kv_transfer(
+                        tmp_gpu_buffer_,
+                        gpu_context.kv_pointers,
+                        slot_mapping,
+                        gpu_context.device,
+                        gpu_context.block_size * gpu_context.num_blocks,
+                        lmc_ops.TransferDirection.H2D,
+                        gpu_context.gpu_kv_format_,
+                        block_size=gpu_context.block_size,
+                        head_size=gpu_context.head_size,
+                        skip_prefix_n_tokens=skip_in_chunk,
+                    )
 
         with (
             torch.cuda.device(gpu_context.device),
