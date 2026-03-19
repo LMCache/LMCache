@@ -65,6 +65,7 @@ from lmcache.v1.mp_observability.config import (
     PrometheusConfig,
     parse_args_to_prometheus_config,
 )
+from lmcache.v1.mp_observability.otel_init import init_otel_metrics
 from lmcache.v1.mp_observability.telemetry import (
     TelemetryConfig,
     get_telemetry_controller,
@@ -738,9 +739,6 @@ def run_cache_server(
 
     # Set up OTel MeterProvider BEFORE creating subscribers
     if prometheus_config.enabled:
-        # First Party
-        from lmcache.v1.mp_observability.otel_init import init_otel_metrics
-
         init_otel_metrics(prometheus_port=prometheus_config.port)
 
     bus = init_event_bus(EventBusConfig(enabled=prometheus_config.enabled))
