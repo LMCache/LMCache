@@ -99,6 +99,22 @@ def wait_for_prefetch_result(
     return None
 
 
+def wait_for_lookup_result(
+    ctrl: PrefetchController,
+    req_id: int,
+    timeout: float = 5.0,
+    poll_interval: float = 0.05,
+) -> int | None:
+    """Poll query_lookup_result until it returns a non-None value."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        result = ctrl.query_lookup_result(req_id)
+        if result is not None:
+            return result
+        time.sleep(poll_interval)
+    return None
+
+
 def make_adapter() -> MockL2Adapter:
     """Create a MockL2Adapter with fast bandwidth."""
     config = MockL2AdapterConfig(max_size_gb=0.01, mock_bandwidth_gb=10.0)
@@ -958,3 +974,171 @@ class TestExtraCountPrefetch:
 
         ctrl.stop()
         adapter.close()
+
+
+# =============================================================================
+# Query Lookup Result
+# =============================================================================
+
+
+class TestQueryLookupResult:
+    """Test query_lookup_result semantics."""
+
+    def test_lookup_result_available_before_prefetch_completes(self, l1_manager):
+        """Lookup result is available while load is still in progress."""
+        adapter = make_adapter()
+        layout = make_layout()
+        keys = [make_object_key(i) for i in range(3)]
+        store_keys_in_l2(adapter, keys, layout)
+
+        ctrl = PrefetchController(
+            l1_manager=l1_manager,
+            l2_adapters=[adapter],
+            adapter_descriptors=[make_descriptor(0)],
+            policy=DefaultPrefetchPolicy(),
+        )
+        ctrl.start()
+
+        req_id = ctrl.submit_prefetch_request(keys, layout)
+
+        # Lookup result should be available before or at the same time as
+        # the full prefetch result.
+        lookup_hits = wait_for_lookup_result(ctrl, req_id)
+        assert lookup_hits is not None
+        assert lookup_hits == 3
+
+        # Wait for full prefetch to complete and clean up
+        result = wait_for_prefetch_result(ctrl, req_id)
+        assert result == 3
+
+        l1_manager.finish_read(keys)
+        ctrl.stop()
+        adapter.close()
+
+    def test_lookup_result_with_prefix_gap(self, l1_manager):
+        """Lookup result reflects prefix-only hits (gap breaks prefix)."""
+        adapter = make_adapter()
+        layout = make_layout()
+        # Store keys 0 and 2 (gap at 1)
+        keys = [make_object_key(i) for i in range(3)]
+        store_keys_in_l2(adapter, [keys[0], keys[2]], layout)
+
+        ctrl = PrefetchController(
+            l1_manager=l1_manager,
+            l2_adapters=[adapter],
+            adapter_descriptors=[make_descriptor(0)],
+            policy=DefaultPrefetchPolicy(),
+        )
+        ctrl.start()
+
+        req_id = ctrl.submit_prefetch_request(keys, layout)
+        lookup_hits = wait_for_lookup_result(ctrl, req_id)
+        assert lookup_hits is not None
+        # Only key 0 is in the prefix (gap at key 1 breaks it)
+        assert lookup_hits == 1
+
+        result = wait_for_prefetch_result(ctrl, req_id)
+        assert result == 1
+
+        l1_manager.finish_read([keys[0]])
+        ctrl.stop()
+        adapter.close()
+
+    def test_lookup_result_zero_hits(self, l1_manager):
+        """Lookup result is 0 when no keys are found in L2."""
+        adapter = make_adapter()
+        layout = make_layout()
+        keys = [make_object_key(i) for i in range(3)]
+        # Don't store anything in L2
+
+        ctrl = PrefetchController(
+            l1_manager=l1_manager,
+            l2_adapters=[adapter],
+            adapter_descriptors=[make_descriptor(0)],
+            policy=DefaultPrefetchPolicy(),
+        )
+        ctrl.start()
+
+        req_id = ctrl.submit_prefetch_request(keys, layout)
+        lookup_hits = wait_for_lookup_result(ctrl, req_id)
+        assert lookup_hits is not None
+        assert lookup_hits == 0
+
+        result = wait_for_prefetch_result(ctrl, req_id)
+        assert result == 0
+
+        ctrl.stop()
+        adapter.close()
+
+    def test_lookup_result_not_popped_by_query(self, l1_manager):
+        """query_lookup_result does not consume the result (idempotent reads)."""
+        adapter = make_adapter()
+        layout = make_layout()
+        keys = [make_object_key(i) for i in range(2)]
+        store_keys_in_l2(adapter, keys, layout)
+
+        ctrl = PrefetchController(
+            l1_manager=l1_manager,
+            l2_adapters=[adapter],
+            adapter_descriptors=[make_descriptor(0)],
+            policy=DefaultPrefetchPolicy(),
+        )
+        ctrl.start()
+
+        req_id = ctrl.submit_prefetch_request(keys, layout)
+        lookup_hits = wait_for_lookup_result(ctrl, req_id)
+        assert lookup_hits == 2
+
+        # Second query should still return the same value (not consumed)
+        assert ctrl.query_lookup_result(req_id) == 2
+
+        result = wait_for_prefetch_result(ctrl, req_id)
+        assert result == 2
+
+        l1_manager.finish_read(keys)
+        ctrl.stop()
+        adapter.close()
+
+    def test_lookup_result_cleaned_up_by_prefetch_result(self, l1_manager):
+        """query_prefetch_result cleans up the lookup result entry."""
+        adapter = make_adapter()
+        layout = make_layout()
+        keys = [make_object_key(i) for i in range(2)]
+        store_keys_in_l2(adapter, keys, layout)
+
+        ctrl = PrefetchController(
+            l1_manager=l1_manager,
+            l2_adapters=[adapter],
+            adapter_descriptors=[make_descriptor(0)],
+            policy=DefaultPrefetchPolicy(),
+        )
+        ctrl.start()
+
+        req_id = ctrl.submit_prefetch_request(keys, layout)
+        lookup_hits = wait_for_lookup_result(ctrl, req_id)
+        assert lookup_hits == 2
+
+        # Consume the prefetch result (should also clean up lookup entry)
+        result = wait_for_prefetch_result(ctrl, req_id)
+        assert result == 2
+
+        # Lookup result should now be gone
+        assert ctrl.query_lookup_result(req_id) is None
+
+        l1_manager.finish_read(keys)
+        ctrl.stop()
+        adapter.close()
+
+    def test_lookup_result_nonexistent_request(self, l1_manager):
+        """Querying a nonexistent request ID returns None."""
+        ctrl = PrefetchController(
+            l1_manager=l1_manager,
+            l2_adapters=[],
+            adapter_descriptors=[],
+            policy=DefaultPrefetchPolicy(),
+        )
+        ctrl.start()
+
+        assert ctrl.query_lookup_result(999) is None
+
+        ctrl.stop()
