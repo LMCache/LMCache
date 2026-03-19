@@ -1066,7 +1066,7 @@ class AddressManager:
             if block.size >= aligned_size:
                 break
         else:
-            logger.debug(
+            logger.warning(
                 "Failed to allocate memory block of size %d "
                 "because no memory is available",
                 size,
@@ -1089,6 +1089,99 @@ class AddressManager:
         self.total_allocated_size += aligned_size
 
         return block.start, aligned_size
+
+    @_lmcache_nvtx_annotate
+    @synchronized("_lock")
+    def batched_allocate(self, size: int, batch_size: int) -> list[tuple[int, int]]:
+        """
+        Allocate blocks of memory from the virtual address space of a given
+        size and batch size. The actual allocated size could be larger than
+        the requested size in order to satisfy alignment requirements.
+
+        Args:
+            size: The requested size of the memory block. Should be greater
+                than 0.
+            batch_size: The number of memory blocks to allocate.
+
+        Returns:
+            A list of tuple (address, allocated_size) where address is the starting
+            address of the allocated block and allocated_size is the actual size of
+            the allocated block.
+            Note: the length of the return list is the same as the batch_size.
+
+        Raises:
+            RuntimeError: If no memory is available to allocate.
+        """
+        aligned_size = self.compute_aligned_size(size)
+        remaining = batch_size
+        allocate_result: list[tuple[int, int]] = []
+
+        blocks_to_remove: list[FreeBlock] = []
+        blocks_to_add: list[FreeBlock] = []
+
+        for block in self._explicit_list:
+            if remaining <= 0:
+                break
+            if block.size < aligned_size:
+                continue
+
+            # Greedily carve out as many aligned_size chunks as possible
+            num_from_block = min(remaining, block.size // aligned_size)
+            start = block.start
+            for i in range(num_from_block):
+                allocate_result.append((start + i * aligned_size, aligned_size))
+            remaining -= num_from_block
+
+            # Mark the original block for removal
+            blocks_to_remove.append(block)
+
+            # Keep the remaining tail as a new free block if any space is left
+            used = num_from_block * aligned_size
+            if block.size > used:
+                blocks_to_add.append(
+                    FreeBlock(start=block.start + used, size=block.size - used)
+                )
+
+        if remaining > 0:
+            # Not enough memory; free list is untouched, no rollback needed
+            logger.warning(
+                "Failed to batched allocate %d memory blocks of size %d "
+                "because no enough memory is available (short by %d blocks)",
+                batch_size,
+                size,
+                remaining,
+            )
+            raise RuntimeError(
+                f"Failed to batched allocate {batch_size} memory blocks "
+                f"of size {size} because no enough memory is available"
+            )
+        if len(allocate_result) != batch_size:
+            # The length of allocate_result is not equal to batch_size;
+            # free list is untouched, no rollback needed
+            logger.warning(
+                "Failed to batched allocate %d memory blocks of size %d "
+                "because the length of allocate_result %d is not equal to batch_size",
+                batch_size,
+                size,
+                len(allocate_result),
+            )
+            raise RuntimeError(
+                f"Failed to batched allocate {batch_size} memory blocks "
+                f"of size {size} because the length of allocate_result "
+                f"{len(allocate_result)} is not equal to batch_size"
+            )
+
+        # Allocation succeeded; batch-update the free list
+        for block in blocks_to_remove:
+            self._explicit_list.remove(block)
+        for block in blocks_to_add:
+            self._explicit_list.add(block)
+
+        # Update debug statistics
+        total_allocated = aligned_size * batch_size
+        self.total_allocated_size += total_allocated
+
+        return allocate_result
 
     @_lmcache_nvtx_annotate
     @synchronized("_lock")
@@ -1282,13 +1375,17 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
         # Calculate the size of the tensor
         unit_raw_size = get_size_bytes(shapes, dtypes)
         unit_aligned_size = self.address_manager.compute_aligned_size(unit_raw_size)
-        total_aligned_size = unit_aligned_size * batch_size
 
-        # Allocate one large block from address manager
         try:
-            block_start, _ = self.address_manager.allocate(total_aligned_size)
+            alloc_results = self.address_manager.batched_allocate(
+                unit_aligned_size, batch_size
+            )
         except RuntimeError:
             return None
+        addresses = [addr for addr, _ in alloc_results]
+        raw_datas = [
+            self._get_buffer_slice(addr, unit_aligned_size) for addr in addresses
+        ]
 
         # For debug
         self.num_active_allocations += batch_size
@@ -1299,20 +1396,15 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
         )
         self.stats_monitor.update_active_memory_objs_count(self.num_active_allocations)
 
-        raw_datas = torch.chunk(
-            self.buffer[block_start : block_start + total_aligned_size],
-            batch_size,
-        )
         tensor_mem_objs = []
-        temp_start = block_start
-        for raw_data in raw_datas:
+        for raw_data, address in zip(raw_datas, addresses, strict=True):
             tensor_mem_objs.append(
                 TensorMemoryObj(
                     raw_data=raw_data,
                     metadata=MemoryObjMetadata(
                         shapes[0],
                         dtypes[0],
-                        temp_start,
+                        address,
                         unit_aligned_size,
                         1,
                         0,
@@ -1323,7 +1415,6 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
                     parent_allocator=self,
                 )
             )
-            temp_start += unit_aligned_size
 
         return tensor_mem_objs
 

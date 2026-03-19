@@ -17,7 +17,6 @@ from lmcache.v1.distributed.api import (
 )
 from lmcache.v1.distributed.config import StorageManagerConfig
 from lmcache.v1.distributed.error import L1Error, strerror
-from lmcache.v1.distributed.internal_api import StorageManagerListener
 from lmcache.v1.distributed.l1_manager import L1Manager
 from lmcache.v1.distributed.l2_adapters import create_l2_adapter
 from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface
@@ -34,12 +33,8 @@ from lmcache.v1.distributed.storage_controllers.store_policy import (
     create_store_policy,
 )
 from lmcache.v1.memory_management import MemoryObj
-from lmcache.v1.mp_observability.logger.storage_manager_stats_logger import (
-    StorageManagerStatsLogger,
-)
-from lmcache.v1.mp_observability.prometheus_controller import (
-    get_prometheus_controller,
-)
+from lmcache.v1.mp_observability.event import Event, EventType
+from lmcache.v1.mp_observability.event_bus import get_event_bus
 
 logger = init_logger(__name__)
 
@@ -62,7 +57,7 @@ class PrefetchHandle:
 class StorageManager:
     def __init__(self, config: StorageManagerConfig):
         self._l1_manager = L1Manager(config.l1_manager_config)
-        self._registered_listeners: list[StorageManagerListener] = []
+        self._event_bus = get_event_bus()
 
         # Eviction controller
         self._eviction_controller = EvictionController(
@@ -100,19 +95,6 @@ class StorageManager:
         )
         self._prefetch_controller.start()
 
-        # Self-register observability logger
-        sm_stats_logger = StorageManagerStatsLogger()
-        self.register_listener(sm_stats_logger)
-        get_prometheus_controller().register_logger(sm_stats_logger)
-
-    def register_listener(self, listener: StorageManagerListener) -> None:
-        """Register a listener for StorageManager events.
-
-        Args:
-            listener: The listener to register.
-        """
-        self._registered_listeners.append(listener)
-
     # External APIs for serving engine integration code to call
     def reserve_write(
         self,
@@ -147,8 +129,15 @@ class StorageManager:
         result = {k: m for k, (e, m) in reserve_result.items() if m is not None}
         successful_keys = list(result.keys())
         failed_keys = [k for k, (e, m) in reserve_result.items() if m is None]
-        for listener in self._registered_listeners:
-            listener.on_sm_reserved_write(successful_keys, failed_keys)
+        self._event_bus.publish(
+            Event(
+                event_type=EventType.SM_WRITE_RESERVED,
+                metadata={
+                    "succeeded_keys": successful_keys,
+                    "failed_keys": failed_keys,
+                },
+            )
+        )
         return result
 
     def finish_write(
@@ -164,8 +153,15 @@ class StorageManager:
         finish_result = self._l1_manager.finish_write(keys)
         successful_keys = [k for k, e in finish_result.items() if e == L1Error.SUCCESS]
         failed_keys = [k for k, e in finish_result.items() if e != L1Error.SUCCESS]
-        for listener in self._registered_listeners:
-            listener.on_sm_write_finished(successful_keys, failed_keys)
+        self._event_bus.publish(
+            Event(
+                event_type=EventType.SM_WRITE_FINISHED,
+                metadata={
+                    "succeeded_keys": successful_keys,
+                    "failed_keys": failed_keys,
+                },
+            )
+        )
 
         # TODO: global key states update
 
@@ -228,8 +224,15 @@ class StorageManager:
             # if None is yielded or exception occurs during caller's processing
             if not all_good or not successfully_yielded:
                 self._l1_manager.finish_read(good_keys)
-                for listener in self._registered_listeners:
-                    listener.on_sm_read_prefetched_finished(good_keys, bad_keys)
+                self._event_bus.publish(
+                    Event(
+                        event_type=EventType.SM_READ_PREFETCHED_FINISHED,
+                        metadata={
+                            "succeeded_keys": good_keys,
+                            "failed_keys": bad_keys,
+                        },
+                    )
+                )
 
     def finish_read_prefetched(
         self,
@@ -246,8 +249,15 @@ class StorageManager:
         finish_result = self._l1_manager.finish_read(keys, extra_count=extra_count)
         successful_keys = [k for k, e in finish_result.items() if e == L1Error.SUCCESS]
         failed_keys = [k for k, e in finish_result.items() if e != L1Error.SUCCESS]
-        for listener in self._registered_listeners:
-            listener.on_sm_read_prefetched_finished(successful_keys, failed_keys)
+        self._event_bus.publish(
+            Event(
+                event_type=EventType.SM_READ_PREFETCHED_FINISHED,
+                metadata={
+                    "succeeded_keys": successful_keys,
+                    "failed_keys": failed_keys,
+                },
+            )
+        )
 
     def submit_prefetch_task(
         self,
@@ -295,8 +305,15 @@ class StorageManager:
         if skipped_keys:
             self._l1_manager.finish_read(skipped_keys, extra_count=extra_count)
 
-        for listener in self._registered_listeners:
-            listener.on_sm_read_prefetched(keys[:hit_count], keys[hit_count:])
+        self._event_bus.publish(
+            Event(
+                event_type=EventType.SM_READ_PREFETCHED,
+                metadata={
+                    "succeeded_keys": keys[:hit_count],
+                    "failed_keys": keys[hit_count:],
+                },
+            )
+        )
 
         # Submit remaining keys to L2 prefetch controller
         remaining_keys = keys[hit_count:]
