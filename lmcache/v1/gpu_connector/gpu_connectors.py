@@ -22,6 +22,7 @@ from lmcache.v1.gpu_connector.utils import (
     get_tokens_per_layer,
     is_hnd,
     permute_kv_caches_to_contiguous,
+    try_get_vllm_kv_cache_layout,
 )
 from lmcache.v1.memory_management import GPUMemoryAllocator  # noqa: E501
 from lmcache.v1.memory_management import MemoryFormat, MemoryObj
@@ -32,6 +33,15 @@ if torch.cuda.is_available():
     import lmcache.c_ops as lmc_ops
 
 logger = init_logger(__name__)
+
+
+def _vllm_layout_hints() -> dict[str, str]:
+    """Build layout_hints dict by querying vLLM at runtime."""
+    hints: dict[str, str] = {}
+    kv_layout = try_get_vllm_kv_cache_layout()
+    if kv_layout is not None:
+        hints["kv_layout"] = kv_layout
+    return hints
 
 
 class GPUConnectorInterface(metaclass=abc.ABCMeta):
@@ -232,7 +242,10 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
         )
         self.kv_cache_pointers_on_gpu[idx].copy_(self.kv_cache_pointers)
 
-        self.gpu_kv_format = discover_gpu_kv_format(kv_caches, EngineType.VLLM)
+        layout_hints = _vllm_layout_hints()
+        self.gpu_kv_format = discover_gpu_kv_format(
+            kv_caches, EngineType.VLLM, layout_hints=layout_hints
+        )
         if is_hnd(self.gpu_kv_format):
             kv_caches = permute_kv_caches_to_contiguous(kv_caches)
         self.num_blocks = get_num_blocks(kv_caches, self.gpu_kv_format)
@@ -459,7 +472,10 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
             kv_cache_pointers_on_gpu.copy_(kv_cache_pointers)
             self.group_kv_cache_pointers_on_gpu.append(kv_cache_pointers_on_gpu)
 
-        self.gpu_kv_format = discover_gpu_kv_format(self.kvcaches, EngineType.VLLM)
+        layout_hints = _vllm_layout_hints()
+        self.gpu_kv_format = discover_gpu_kv_format(
+            self.kvcaches, EngineType.VLLM, layout_hints=layout_hints
+        )
         kv_caches = (
             permute_kv_caches_to_contiguous(self.kvcaches)
             if is_hnd(self.gpu_kv_format)
@@ -669,7 +685,10 @@ class VLLMBufferLayerwiseGPUConnector(GPUConnectorInterface):
             # is okay since fragmentation shouldn't exist in the `gpu_buffer_allocator`
             # in layerwise mode.
 
-            self.gpu_kv_format = discover_gpu_kv_format(kv_caches, EngineType.VLLM)
+            layout_hints = _vllm_layout_hints()
+            self.gpu_kv_format = discover_gpu_kv_format(
+                kv_caches, EngineType.VLLM, layout_hints=layout_hints
+            )
             assert_is_vllm_flash_attn_or_flash_infer(self.gpu_kv_format)
             if is_hnd(self.gpu_kv_format):
                 kv_caches = permute_kv_caches_to_contiguous(kv_caches)
@@ -1068,7 +1087,10 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
             # is okay since fragmentation shouldn't exist in the `gpu_buffer_allocator`
             # in layerwise mode.
 
-            self.gpu_kv_format = discover_gpu_kv_format(kv_caches, EngineType.VLLM)
+            layout_hints = _vllm_layout_hints()
+            self.gpu_kv_format = discover_gpu_kv_format(
+                kv_caches, EngineType.VLLM, layout_hints=layout_hints
+            )
             assert_is_vllm_flash_attn_or_flash_infer(self.gpu_kv_format)
             if is_hnd(self.gpu_kv_format):
                 kv_caches = permute_kv_caches_to_contiguous(kv_caches)

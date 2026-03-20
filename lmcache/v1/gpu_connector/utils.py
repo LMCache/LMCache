@@ -270,8 +270,7 @@ def discover_gpu_kv_format(
                 "No KV Cache Layout hint provided when using vLLM, defaulting to NHD"
             )
             kv_layout = "NHD"
-        if kv_layout is not None:
-            logger.info("vLLM KV cache layout found: %s", kv_layout)
+        logger.info("vLLM KV cache layout: %s", kv_layout)
         is_hnd = kv_layout == "HND"
         if list_depth == 0:
             # vllm cross layer

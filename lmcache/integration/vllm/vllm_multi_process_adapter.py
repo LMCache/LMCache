@@ -568,7 +568,6 @@ class LMCacheMPWorkerAdapter:
         )
 
         # Register kv cache and send the request
-        self.kv_caches = kv_caches
         logger.info("Registering kv caches")
 
         # give a layout hint (for HND vs NHD) to the lmcache server
@@ -587,6 +586,8 @@ class LMCacheMPWorkerAdapter:
                     strict=False,
                 )
             )
+
+        self.kv_caches = kv_caches
 
         future = send_lmcache_request(
             self.mq_client,
