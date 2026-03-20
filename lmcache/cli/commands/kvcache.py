@@ -4,9 +4,6 @@
 Sub-commands:
     clear         Clear all cached KV data
     end-session   Clean up session state for a finished request
-    pin           Pin a request's KV cache to L1/CPU (not yet implemented)
-    compress      Compress a request's KV cache in-place (not yet implemented)
-    info          Show per-request cache state (not yet implemented)
 """
 
 # Standard
@@ -122,36 +119,6 @@ class KVCacheCommand(BaseCommand):
             help="Request ID whose session should be removed.",
         )
 
-        # pin (stub)
-        p_pin = sub.add_parser(
-            "pin",
-            help="Pin a request's KV cache to L1/CPU (not yet implemented).",
-        )
-        p_pin.add_argument("--url", type=str, required=True)
-        p_pin.add_argument("--request-id", type=str, required=True)
-        p_pin.add_argument("--start", type=int, default=None)
-        p_pin.add_argument("--end", type=int, default=None)
-
-        # compress (stub)
-        p_compress = sub.add_parser(
-            "compress",
-            help="Compress a request's KV cache in-place (not yet implemented).",
-        )
-        p_compress.add_argument("--url", type=str, required=True)
-        p_compress.add_argument("--request-id", type=str, required=True)
-        p_compress.add_argument("--method", type=str, required=True)
-        p_compress.add_argument("--start", type=int, default=None)
-        p_compress.add_argument("--end", type=int, default=None)
-
-        # info (stub)
-        p_info = sub.add_parser(
-            "info",
-            help="Show per-request cache state (not yet implemented).",
-        )
-        p_info.add_argument("--url", type=str, required=True)
-        p_info.add_argument("--request-id", type=str, required=True)
-        p_info.add_argument("--start", type=int, default=None)
-        p_info.add_argument("--end", type=int, default=None)
 
     def execute(self, args: argparse.Namespace) -> None:
         """Dispatch to the appropriate sub-command handler.
@@ -168,9 +135,6 @@ class KVCacheCommand(BaseCommand):
         dispatch = {
             "clear": self._clear,
             "end-session": self._end_session,
-            "pin": self._not_implemented,
-            "compress": self._not_implemented,
-            "info": self._not_implemented,
         }
         dispatch[action](args)
 
@@ -211,12 +175,3 @@ class KVCacheCommand(BaseCommand):
         metrics.add("status", "Status", result.get("status", "OK"))
         metrics.emit()
 
-    def _not_implemented(self, args: argparse.Namespace) -> None:
-        """Print an error for sub-commands that are not yet implemented."""
-        action = args.action
-        logger.error(
-            "'lmcache kvcache %s' is not yet implemented. "
-            "See docs/design/cli/kvcache-command.md for the design.",
-            action,
-        )
-        sys.exit(1)
