@@ -163,7 +163,7 @@ class CuObjectS3Connector(S3Connector):
             )
             return super()._s3_upload(key_str, memory_obj)
 
-    def _rdma_upload(self, key_str: str, memory_obj: MemoryObj):
+    def _rdma_upload(self, key_str: str, memory_obj: MemoryObj) -> s3.S3Request:
         """Build an RDMA-augmented PUT request via CRT."""
         data_size = memory_obj.get_physical_size()
 
