@@ -2,6 +2,8 @@
 
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
+#include <torch/torch.h>
+#include <torch/extension.h>
 #include "multi_layer_block_kv_transfer.cuh"
 
 namespace py = pybind11;

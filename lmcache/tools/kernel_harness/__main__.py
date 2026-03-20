@@ -25,6 +25,7 @@ logger = logging.getLogger(__name__)
 
 # Try to import the CUDA kernel module.
 # The .so is built in-place in the kernel_harness directory.
+# torch must be imported first so libc10.so / libtorch.so are loaded.
 _harness_dir = os.path.dirname(os.path.abspath(__file__))
 if _harness_dir not in sys.path:
     sys.path.insert(0, _harness_dir)
@@ -34,8 +35,9 @@ try:
     import kernel_harness_ops
 
     HAS_KERNEL = True
-except ImportError:
+except ImportError as e:
     HAS_KERNEL = False
+    logger.debug("kernel_harness_ops import failed: %s", e)
 
 
 def _get_kernel_fn(use_reference: bool):
@@ -163,6 +165,12 @@ def main():
         default=0,
         help="Number of prefix blocks to skip (default: 0)",
     )
+    parser.add_argument(
+        "--mem-device",
+        choices=["cpu", "gpu"],
+        default="gpu",
+        help="Device for LMCache memory objects (default: gpu)",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -182,8 +190,10 @@ def main():
         return
 
     kernel_fn = _get_kernel_fn(args.use_reference)
+    mem_device = torch.device("cuda" if args.mem_device == "gpu" else "cpu")
     mode_label = "reference" if args.use_reference else "CUDA kernel"
     print(f"Using: {mode_label}")
+    print(f"Memory object device: {mem_device}")
     print(f"Test configurations: {len(configs)}")
     print()
 
@@ -195,14 +205,14 @@ def main():
 
         all_passed = True
         for config in configs:
-            result = run_correctness_test(config, kernel_fn)
+            result = run_correctness_test(config, kernel_fn, mem_device)
             status = "PASS" if result else "FAIL"
             print(f"  [{status}] {config.name}")
             if not result:
                 all_passed = False
 
             # Also run skip prefix test
-            skip_result = run_skip_prefix_test(config, kernel_fn)
+            skip_result = run_skip_prefix_test(config, kernel_fn, mem_device)
             skip_status = "PASS" if skip_result else "FAIL"
             print(f"  [{skip_status}] {config.name} (skip_prefix=4)")
             if not skip_result:
@@ -228,7 +238,7 @@ def main():
         results = []
         for config in bench_configs:
             print(f"  Benchmarking {config.name}...")
-            result = run_benchmark(config, kernel_fn)
+            result = run_benchmark(config, kernel_fn, mem_device)
             results.append(result)
 
         print_benchmark_table(results)

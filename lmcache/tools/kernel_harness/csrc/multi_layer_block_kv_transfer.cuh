@@ -3,6 +3,8 @@
 #pragma once
 
 #include <torch/all.h>
+#include <ATen/cuda/CUDAContext.h>
+#include <c10/cuda/CUDAGuard.h>
 #include <vector>
 
 enum class TransferDirection : int {
@@ -56,21 +58,20 @@ struct MemoryObj4 {
  * Block-level multi-layer KV transfer between vLLM paged buffers and
  * LMCache contiguous memory objects.
  *
- * @param key_value_tensors  vLLM paged buffer tensors (per-layer or single
- * cross-layer)
- * @param memory_objects     LMCache memory objects (pinned CPU tensors)
- * @param block_ids          Block indices in vLLM paged buffer (pinned CPU
- * int64)
- * @param device             CUDA device of vLLM tensors
- * @param direction          H2D (LMCache->vLLM) or D2H (vLLM->LMCache)
- * @param gpu_kv_format      GPUKVFormat identifier
- * @param block_size         Block size (BS) for vLLM paged buffers
- * @param num_blocks         Number of blocks (NB) for vLLM paged buffers
- * @param skip_prefix_n_blocks  Number of blocks to skip at the beginning
+ * @param paged_buffer_ptrs_tensor  GPU int64 tensor of data pointers into
+ *                                  vLLM paged buffers (one per tensor)
+ * @param lmcache_objects_ptrs      Raw pointers to LMCache memory objects
+ * @param block_ids                 Block indices in vLLM paged buffer
+ * @param device                    CUDA device of vLLM tensors
+ * @param direction                 H2D (LMCache->vLLM) or D2H (vLLM->LMCache)
+ * @param shape_desc                Shape descriptor for the paged buffer
+ * @param lmcache_chunk_size        Tokens per LMCache memory object
+ * @param gpu_kv_format             GPUKVFormat identifier
+ * @param skip_prefix_n_blocks      Number of blocks to skip at the beginning
  */
 void multi_layer_block_kv_transfer(
-    const std::vector<torch::Tensor>& key_value_tensors,
-    std::vector<torch::Tensor>& memory_objects, const torch::Tensor& block_ids,
+    const torch::Tensor& paged_buffer_ptrs_tensor,
+    std::vector<int64_t> lmcache_objects_ptrs, const torch::Tensor& block_ids,
     const torch::Device& device, TransferDirection direction,
-    GPUKVFormat gpu_kv_format, int block_size, int num_blocks,
-    int skip_prefix_n_blocks);
+    PageBufferShapeDesc shape_desc, int lmcache_chunk_size,
+    GPUKVFormat gpu_kv_format, int skip_prefix_n_blocks);

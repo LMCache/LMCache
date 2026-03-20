@@ -46,6 +46,7 @@ def _compute_total_bytes(config: TestConfig) -> int:
 def run_benchmark(
     config: TestConfig,
     kernel_fn: Callable = reference_multi_layer_block_kv_transfer,
+    mem_device: torch.device = None,
 ) -> BenchmarkResult:
     """Benchmark D2H and H2D transfers separately.
 
@@ -55,7 +56,7 @@ def run_benchmark(
 
     # Set up tensors
     vllm_tensors = create_vllm_tensors(config, device)
-    mem_objects = create_memory_objects(config)
+    mem_objects = create_memory_objects(config, mem_device)
     block_ids = create_block_ids(config, seed=42)
 
     total_bytes = _compute_total_bytes(config)

@@ -107,12 +107,13 @@ def _check_block_is_zero(
 def run_correctness_test(
     config: TestConfig,
     kernel_fn: Callable = reference_multi_layer_block_kv_transfer,
+    mem_device: torch.device = None,
 ) -> bool:
     """Run D2H -> H2D roundtrip correctness test.
 
     Steps:
     1. Create source vLLM tensors with random data on GPU
-    2. Create empty memory objects on pinned CPU
+    2. Create empty memory objects on mem_device (default: GPU)
     3. D2H: copy source -> memory objects using block_ids_d2h
     4. H2D: copy memory objects -> target vLLM using block_ids_h2d (different blocks)
     5. Verify: target[h2d_block] == source[d2h_block] for all corresponding pairs
@@ -125,7 +126,7 @@ def run_correctness_test(
     # Create tensors
     source_vllm = create_vllm_tensors(config, device)
     target_vllm = create_zero_vllm_tensors(config, device)
-    mem_objects = create_memory_objects(config)
+    mem_objects = create_memory_objects(config, mem_device)
 
     # Create disjoint block ID sets
     block_ids_d2h = create_block_ids(config, seed=42)
@@ -190,6 +191,7 @@ def run_correctness_test(
 def run_skip_prefix_test(
     config: TestConfig,
     kernel_fn: Callable = reference_multi_layer_block_kv_transfer,
+    mem_device: torch.device = None,
 ) -> bool:
     """Test that skip_prefix_n_blocks correctly skips the first N blocks.
 
@@ -200,4 +202,4 @@ def run_skip_prefix_test(
     from dataclasses import replace
 
     modified_config = replace(config, skip_prefix_n_blocks=4)
-    return run_correctness_test(modified_config, kernel_fn)
+    return run_correctness_test(modified_config, kernel_fn, mem_device)

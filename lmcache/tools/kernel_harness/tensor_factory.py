@@ -122,8 +122,11 @@ def create_zero_vllm_tensors(
     raise ValueError(f"Unknown format: {config.vllm_format}")
 
 
-def create_memory_objects(config: TestConfig) -> list:
-    """Create LMCache memory objects as pinned CPU tensors.
+def create_memory_objects(config: TestConfig, device: torch.device = None) -> list:
+    """Create LMCache memory objects on the given device.
+
+    If device is None or a CUDA device, tensors are created on GPU.
+    If device is CPU, tensors are created as pinned CPU memory.
 
     Returns a list of num_memory_objects tensors:
     - Non-MLA: each [2, L, tokens_per_object, hidden_dim]
@@ -136,14 +139,18 @@ def create_memory_objects(config: TestConfig) -> list:
 
     shape = [kv, nl, t, d]
 
+    if device is None:
+        device = torch.device("cuda")
+
     objects = []
     for _ in range(config.num_memory_objects):
         if config.dtype == torch.float8_e4m3fn:
-            tensor = torch.zeros(shape, dtype=torch.bfloat16, pin_memory=True).to(
-                config.dtype
-            )
+            tensor = torch.zeros(shape, dtype=torch.bfloat16, device=device)
+            tensor = tensor.to(config.dtype)
         else:
-            tensor = torch.zeros(shape, dtype=config.dtype, pin_memory=True)
+            tensor = torch.zeros(shape, dtype=config.dtype, device=device)
+        if device.type == "cpu":
+            tensor = tensor.pin_memory()
         objects.append(tensor)
     return objects
 

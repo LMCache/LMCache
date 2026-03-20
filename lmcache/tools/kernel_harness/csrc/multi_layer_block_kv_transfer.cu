@@ -23,17 +23,29 @@ __device__ inline size_t calculate_engine_global_offset(
   size_t scalars_per_block = shape_desc.scalars_per_block<ScalarType>();
   // will use kv_size, nb, nl, scalars per block
   if constexpr (format == GPUKVFormat::NB_NL_TWO_BS_NH_HS) {
+    // Cross-layer: single tensor [NB, NL, 2, BS, NH, HS]
     return k_or_v * scalars_per_block +
            layer_idx * shape_desc.kv_size * scalars_per_block +
            engine_block_idx * shape_desc.kv_size * scalars_per_block *
                shape_desc.nl;
   } else if constexpr (format == GPUKVFormat::NL_X_TWO_NB_BS_NH_HS) {
+    // Normal: L tensors [2, NB, BS, NH, HS]
     return engine_block_idx * scalars_per_block +
            k_or_v * shape_desc.nb * scalars_per_block;
+  } else if constexpr (format == GPUKVFormat::NL_X_NB_TWO_BS_NH_HS) {
+    // Flash Infer: L tensors [NB, 2, BS, NH, HS]
+    return engine_block_idx * shape_desc.kv_size * scalars_per_block +
+           k_or_v * scalars_per_block;
   } else if constexpr (format == GPUKVFormat::NL_X_NB_BS_HS) {
+    // MLA: L tensors [NB, BS, HS]
     return engine_block_idx * scalars_per_block;
-  } else
-    return 0;  // TODO: not implemented, do it later
+  } else if constexpr (format == GPUKVFormat::TWO_X_NL_X_NBBS_NH_HS) {
+    // SGLang MHA: 2L tensors [NBBS, NH, HS] — K/V via separate tensor ptrs
+    return engine_block_idx * scalars_per_block;
+  } else if constexpr (format == GPUKVFormat::NL_X_NBBS_ONE_HS) {
+    // SGLang MLA: L tensors [NBBS, 1, HS]
+    return engine_block_idx * scalars_per_block;
+  }
 }
 
 template <typename ScalarType, GPUKVFormat format>
@@ -70,21 +82,41 @@ __device__ inline size_t calculate_lmcache_local_offset(
   return head_idx * scalars_per_head + token_offset * scalars_per_token;
 }
 
+__device__ inline uint4 ld_cs(const uint4* addr) {
+  uint4 val;
+  asm volatile("ld.global.cs.v4.u32 {%0, %1, %2, %3}, [%4];"
+               : "=r"(val.x), "=r"(val.y), "=r"(val.z), "=r"(val.w)
+               : "l"(addr));
+  return val;
+}
+
+__device__ inline void st_cs(uint4* addr, uint4 val) {
+  asm volatile("st.global.cs.v4.u32 [%0], {%1, %2, %3, %4};"
+               :
+               : "l"(addr), "r"(val.x), "r"(val.y), "r"(val.z), "r"(val.w));
+}
+
 template <typename ScalarType>
 __device__ inline void warp_copy(ScalarType* __restrict__ dst,
                                  const ScalarType* __restrict__ src,
                                  size_t num_elements) {
-  // we can use cs/cg to stream data and bypass L2 cache
   int idx = threadIdx.x;
-  for (size_t i = idx; i < num_elements; i += warpSize) {
-    dst[i] = src[i];
+  int stride = blockDim.x;
+  if constexpr (std::is_same_v<ScalarType, uint4>) {
+    for (size_t i = idx; i < num_elements; i += stride) {
+      st_cs(dst + i, ld_cs(src + i));
+    }
+  } else {
+    for (size_t i = idx; i < num_elements; i += stride) {
+      dst[i] = src[i];
+    }
   }
 }
 
 template <typename ScalarType, bool lmcache_to_engine, GPUKVFormat format>
 __device__ void multi_layer_block_transfer_single_block(
-    ScalarType __restrict__* lmcache_object,
-    ScalarType __restrict__** paged_buffer_ptrs, const int engine_block_idx,
+    ScalarType* __restrict__ lmcache_object,
+    ScalarType** __restrict__ paged_buffer_ptrs, const int engine_block_idx,
     const int offset_in_lmcache_block, const PageBufferShapeDesc shape_desc,
     const int lmcache_chunk_size  // e.g., 256, used to calculate global offset
                                   // in LMCache object
@@ -103,6 +135,10 @@ __device__ void multi_layer_block_transfer_single_block(
   ScalarType* paged_buffer_layer_ptr;
   if constexpr (format == GPUKVFormat::NB_NL_TWO_BS_NH_HS) {
     paged_buffer_layer_ptr = (ScalarType*)paged_buffer_ptrs[0];
+  } else if constexpr (format == GPUKVFormat::TWO_X_NL_X_NBBS_NH_HS) {
+    // SGLang MHA: ptrs[0..NL-1] = K per layer, ptrs[NL..2NL-1] = V per layer
+    paged_buffer_layer_ptr =
+        (ScalarType*)paged_buffer_ptrs[k_or_v * shape_desc.nl + layer_idx];
   } else {
     paged_buffer_layer_ptr = (ScalarType*)paged_buffer_ptrs[layer_idx];
   }
@@ -138,7 +174,8 @@ __device__ void multi_layer_block_transfer_single_object(
                                    // in LMCache object
     const int skip_prefix_n_blocks) {
   const int block_idx_in_batch = blockIdx.y % num_blocks_in_batch;
-  if (block_idx_in_batch < skip_prefix_n_blocks) {
+  const int global_block_idx = start_block_idx + block_idx_in_batch;
+  if (global_block_idx < skip_prefix_n_blocks) {
     // this block is in the prefix that we need to skip, so we do nothing
     return;
   }
@@ -184,11 +221,10 @@ __global__ void multi_layer_block_transfer_kernel(
 
 void multi_layer_block_kv_transfer(
     const torch::Tensor& paged_buffer_ptrs_tensor,
-    std::vector<uintptr_t>& lmcache_objects_ptrs,
-    const torch::Tensor& block_ids, const torch::Device& device,
-    TransferDirection direction, PageBufferShapeDesc shape_desc,
-    int lmcache_chunk_size, GPUKVFormat gpu_kv_format,
-    int skip_prefix_n_blocks) {
+    std::vector<int64_t> lmcache_objects_ptrs, const torch::Tensor& block_ids,
+    const torch::Device& device, TransferDirection direction,
+    PageBufferShapeDesc shape_desc, int lmcache_chunk_size,
+    GPUKVFormat gpu_kv_format, int skip_prefix_n_blocks) {
   // --- Validation ---
   int num_objects = static_cast<int>(lmcache_objects_ptrs.size());
   TORCH_CHECK(num_objects >= 1 && num_objects <= 4,
