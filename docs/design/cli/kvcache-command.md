@@ -24,7 +24,7 @@ inference engine and LMCache (store, retrieve, prefetch). Every `lmcache kvcache
 CLI operation goes through the **MP HTTP server**
 (`lmcache/v1/multiprocess/http_server.py`).
 
-Today some operations (e.g. `end-session`) only have ZMQ implementations. These
+Today some operations (e.g. `pin`) only have ZMQ implementations. These
 need new HTTP endpoints on the MP HTTP server before the CLI can use them.
 
 ### Every sub-command targets a specific request
@@ -54,8 +54,7 @@ lmcache kvcache
 ├── info           # Per-request cache state (locations, pinned status)
 ├── clear          # Clear all cached KV data
 ├── pin            # Pin a request's KV cache to L1/CPU (may be rejected)
-├── compress       # Compress a request's KV cache in-place
-└── end-session    # Clean up session state for a finished request
+└── compress       # Compress a request's KV cache in-place
 ```
 
 | Sub-command | Target | Description |
@@ -64,20 +63,18 @@ lmcache kvcache
 | `clear` | instance | Clear all cached KV data |
 | `pin` | instance | Pin a request's KV cache to L1/CPU; may be rejected if memory pressure is too high |
 | `compress` | instance | Compress a request's KV cache to reduce memory footprint |
-| `end-session` | instance | Remove per-request session state (token hashes, chunk tracking) |
 
 ```bash
 $ lmcache kvcache -h
-usage: lmcache kvcache [-h] {info,clear,pin,compress,end-session} ...
+usage: lmcache kvcache [-h] {info,clear,pin,compress} ...
 
-Manage KV cache state for specific requests.
+Manage KV cache state.
 
 subcommands:
   info          Show per-request cache state (chunks, locations, pinned status)
   clear         Clear all cached KV data
   pin           Pin a request's KV cache to L1/CPU (may be rejected)
   compress      Compress a request's KV cache in-place
-  end-session   Clean up session state for a finished request
 ```
 
 ---
@@ -210,23 +207,6 @@ $ lmcache kvcache compress --url http://localhost:8000 \
 | `--request-id` | yes | Target request |
 | `--start`, `--end` | no | Narrow to token range `[st, ed)` |
 
-### `end-session`
-
-Remove per-request session state from the engine. A session tracks the
-accumulated token IDs and computed chunk hashes for a request. Call this after
-an inference request completes to free the associated tracking resources.
-
-```bash
-$ lmcache kvcache end-session --url http://localhost:8000 --request-id req-abc-123
-
-=== KV Cache End Session (req-abc-123) =====
-Status:                                   OK
-=============================================
-```
-
-**Note:** Today `end-session` is ZMQ-only (`END_SESSION` in `RequestType`). A new
-HTTP endpoint needs to be added to the per-instance server.
-
 ---
 
 ## Existing API Surface & Gaps
@@ -247,7 +227,6 @@ All CLI operations target the **MP HTTP server**
 | `info` | No per-request HTTP endpoint | `GET /api/kvcache-info?request_id=...` returning chunk ranges, locations, pinned status |
 | `pin` | ZMQ only (no HTTP) | `POST /api/pin` accepting request-id, returning OK or REJECTED with reason |
 | `compress` | ZMQ only (no HTTP) | `POST /api/compress` accepting request-id + method |
-| `end-session` | ZMQ `END_SESSION` only (no HTTP) | `POST /api/end-session` accepting request-id |
 
 ---
 
@@ -267,6 +246,6 @@ All CLI operations target the **MP HTTP server**
 
 | Phase | Work |
 |-------|------|
-| **1a** | `clear` (HTTP exists), `end-session` (needs new HTTP endpoint) |
+| **1a** | `clear` (HTTP exists) |
 | **1b** | `pin` (needs per-instance endpoint), `compress` (needs per-instance endpoint) |
 | **future** | `info` (needs further design — deferred) |

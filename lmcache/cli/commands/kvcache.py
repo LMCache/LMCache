@@ -1,9 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
-"""``lmcache kvcache`` — per-request KV cache management.
+"""``lmcache kvcache`` — KV cache management.
 
 Sub-commands:
     clear         Clear all cached KV data
-    end-session   Clean up session state for a finished request
 """
 
 # Standard
@@ -101,23 +100,7 @@ class KVCacheCommand(BaseCommand):
             help="Target MP HTTP endpoint (e.g. http://localhost:8000).",
         )
 
-        # end-session
-        p_end = sub.add_parser(
-            "end-session",
-            help="Clean up session state for a finished request.",
-        )
-        p_end.add_argument(
-            "--url",
-            type=str,
-            required=True,
-            help="Target MP HTTP endpoint (e.g. http://localhost:8000).",
-        )
-        p_end.add_argument(
-            "--request-id",
-            type=str,
-            required=True,
-            help="Request ID whose session should be removed.",
-        )
+
 
 
     def execute(self, args: argparse.Namespace) -> None:
@@ -134,7 +117,6 @@ class KVCacheCommand(BaseCommand):
 
         dispatch = {
             "clear": self._clear,
-            "end-session": self._end_session,
         }
         dispatch[action](args)
 
@@ -153,25 +135,4 @@ class KVCacheCommand(BaseCommand):
         metrics.add("status", "Status", "OK")
         metrics.emit()
 
-    def _end_session(self, args: argparse.Namespace) -> None:
-        """End a request's session via the MP HTTP server."""
-        url = args.url.rstrip("/")
-        request_id = args.request_id
-
-        # This endpoint does not exist yet on the MP HTTP server.
-        # See docs/design/cli/kvcache-command.md for the design.
-        # Expected: POST /api/end-session  {"request_id": "..."}
-        result = _http_request(
-            "POST",
-            f"{url}/api/end-session",
-            data={"request_id": request_id},
-        )
-
-        quiet = getattr(args, "quiet", False)
-        if quiet:
-            return
-
-        metrics = self.create_metrics(f"KV Cache End Session ({request_id})", args)
-        metrics.add("status", "Status", result.get("status", "OK"))
-        metrics.emit()
 
