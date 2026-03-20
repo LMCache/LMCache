@@ -21,7 +21,6 @@ You can enable EIC KVCache offload with the official interface, such as
 .. code-block:: bash
 
    export LMCACHE_CONFIG_FILE=/workspace/config/remote-eic.yaml
-   export LMCACHE_USE_EXPERIMENTAL=True
    export VLLM_USE_V1=1
 
    python3 -m vllm.entrypoints.openai.api_server \

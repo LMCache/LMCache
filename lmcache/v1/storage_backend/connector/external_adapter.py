@@ -27,6 +27,10 @@ class ExternalConnectorAdapter(ConnectorAdapter):
         - external://host:0/external_log_connector.lmc_external_log_connector/?connector_name=ExternalLogConnector
         """
         logger.info(f"Creating External connector for URL: {context.url}")
+        logger.warning(
+            "External connector is due for deprecation in release v0.5.0. "
+            "Please use the Remote Storage Plugin Framework instead."
+        )
         hosts = context.url.split(",")
         if len(hosts) > 1:
             raise ValueError(
@@ -66,8 +70,10 @@ class ExternalConnectorAdapter(ConnectorAdapter):
             logger.info(f"Loaded external connector: {module_path}.{connector_name}")
             return connector
         except ImportError as e:
-            raise ImportError(f"Could not import module '{module_path}'") from e
+            raise ImportError(
+                f"Could not import module '{module_path}', error: {e}"
+            ) from e
         except AttributeError as e:
             raise AttributeError(
-                f"Module '{module_path}' has no class '{connector_name}'"
+                f"Module '{module_path}' has no class '{connector_name}', error: {e}"
             ) from e

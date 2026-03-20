@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from typing import TYPE_CHECKING, Literal, Optional
+from typing import Literal, Optional
 import os
 import socket
 
@@ -10,10 +10,6 @@ import zmq.asyncio
 
 # First Party
 from lmcache.logging import init_logger
-
-if TYPE_CHECKING:
-    # Third Party
-    from vllm.config import VllmConfig
 
 logger = init_logger(__name__)
 
@@ -109,34 +105,44 @@ def get_ip():
 
 
 def get_zmq_rpc_path_lmcache(
-    vllm_config: Optional["VllmConfig"] = None,
+    engine_id: str,
     service_name: ServiceKind = "lookup",
     rpc_port: int = 0,
     rank: int = 0,
+    base_url: Optional[str] = None,
 ) -> str:
-    """Get the ZMQ RPC path for LMCache lookup and offload communication."""
-    # Try to import vllm.envs, fallback to default if not available
-    try:
-        # Third Party
-        import vllm.envs as envs
+    """Get the ZMQ RPC path for LMCache lookup and offload communication.
 
-        base_url = envs.VLLM_RPC_BASE_PATH
-    except (ImportError, ModuleNotFoundError):
-        # Fallback for testing environments without vllm
-        base_url = "/tmp/vllm_rpc"
-        logger.debug("vllm not available, using default base_url: %s", base_url)
-        # Ensure the directory exists for IPC socket
-        os.makedirs(base_url, exist_ok=True)
+    Args:
+        engine_id: The engine ID for the RPC path.
+        service_name: The service name, one of 'lookup', 'offload',
+            'lookup_worker', 'lookup_scheduler'.
+        rpc_port: The RPC port number.
+        rank: The rank of the worker.
+        base_url: Optional base URL for the socket path. If not provided,
+            will try to use VLLM_RPC_BASE_PATH or fallback to /tmp/vllm_rpc.
 
-    if vllm_config is None or vllm_config.kv_transfer_config is None:
-        raise ValueError("A valid kv_transfer_config with engine_id is required.")
+    Returns:
+        The ZMQ socket path string.
+    """
+    if base_url is None:
+        # Try to import vllm.envs, fallback to default if not available
+        try:
+            # Third Party
+            import vllm.envs as envs
+
+            base_url = envs.VLLM_RPC_BASE_PATH
+        except (ImportError, ModuleNotFoundError):
+            # Fallback for testing environments without vllm
+            base_url = "/tmp/vllm_rpc"
+            logger.debug("vllm not available, using default base_url: %s", base_url)
+            # Ensure the directory exists for IPC socket
+            os.makedirs(base_url, exist_ok=True)
 
     if service_name not in {"lookup", "offload", "lookup_worker", "lookup_scheduler"}:
         raise ValueError(
             f"service_name must be 'lookup' or 'offload', got {service_name!r}"
         )
-
-    engine_id = vllm_config.kv_transfer_config.engine_id
 
     if isinstance(rpc_port, str):
         rpc_port = rpc_port + str(rank)

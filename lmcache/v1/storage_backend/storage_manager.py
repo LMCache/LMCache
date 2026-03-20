@@ -13,6 +13,7 @@ from typing import (
     Sequence,
     Tuple,
     Union,
+    cast,
 )
 import asyncio
 import functools
@@ -22,7 +23,6 @@ import threading
 import torch
 
 # First Party
-from lmcache.config import LMCacheEngineMetadata
 from lmcache.logging import init_logger
 from lmcache.observability import PrometheusLogger
 from lmcache.utils import (
@@ -36,6 +36,7 @@ from lmcache.v1.memory_management import (
     MemoryFormat,
     MemoryObj,
 )
+from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.storage_backend import CreateStorageBackends, is_cuda_worker
 from lmcache.v1.storage_backend.abstract_backend import (
     AllocatorBackendInterface,
@@ -93,14 +94,25 @@ def allocate_and_copy_objects(
             busy_loop=False,
         )
 
-        if memory_obj is None or memory_obj.tensor is None:
+        if memory_obj is None:
+            break
+
+        if memory_obj.tensor is None:
+            # This should not happen with current implementation,
+            # but handle it defensively to avoid memory leak
+            logger.warning(
+                "Allocated MemoryObj has None tensor, this is unexpected. "
+                "Releasing the memory object."
+            )
+            memory_obj.ref_count_down()
             break
 
         with torch.cuda.stream(stream):
             memory_obj.tensor.copy_(src_memory_obj.tensor, non_blocking=True)
         allocated_objects.append(memory_obj)
 
-    stream.synchronize()
+    if stream is not None:
+        stream.synchronize()
     return keys[: len(allocated_objects)], allocated_objects
 
 
@@ -209,9 +221,10 @@ class StorageManager:
     def __init__(
         self,
         config: LMCacheEngineConfig,
-        metadata: LMCacheEngineMetadata,
+        metadata: LMCacheMetadata,
         event_manager: EventManager,
         lmcache_worker: Optional["LMCacheWorker"] = None,
+        async_lookup_server: Optional["LMCacheAsyncLookupServer"] = None,
     ):
         self.config = config
         self.metadata = metadata
@@ -224,20 +237,13 @@ class StorageManager:
         )
         self.thread.start()
 
-        # For scheduler role, always use CPU device
-        if is_cuda_worker(metadata):
-            dst_device = "cuda"
-        else:
-            dst_device = "cpu"
-        self.storage_backends: OrderedDict[str, StorageBackendInterface] = (
-            CreateStorageBackends(
-                config,
-                metadata,
-                self.loop,
-                dst_device,
-                lmcache_worker,
-            )
-        )
+        self.storage_backends: OrderedDict[str, StorageBackendInterface] = OrderedDict()
+        self.manager_lock = threading.Lock()
+        self.lmcache_worker = lmcache_worker
+
+        # Use the unified create path so that init and
+        # dynamic creation share the same logic.
+        self.create_backends()
 
         # the backend used for actual storage
         self.non_allocator_backends = self.get_non_allocator_backends()
@@ -247,18 +253,17 @@ class StorageManager:
         self.allocator_backend = None
         if metadata.role != "scheduler":
             self.allocator_backend = self._get_allocator_backend(config)
-        if config.local_cpu:
-            self.local_cpu_backend = self.storage_backends["LocalCPUBackend"]
 
-        self.manager_lock = threading.Lock()
+        self.local_cpu_backend = self.storage_backends.get("LocalCPUBackend", None)
 
-        self.lmcache_worker = lmcache_worker
         self.instance_id = config.lmcache_instance_id
         self.worker_id = metadata.worker_id
 
         self.event_manager = event_manager
 
-        self.async_lookup_server: Optional["LMCacheAsyncLookupServer"] = None
+        self.async_lookup_server: Optional["LMCacheAsyncLookupServer"] = (
+            async_lookup_server
+        )
         self.async_serializer: Optional[AsyncSerializer] = None
 
         # The cuda stream for internal copies during put
@@ -270,6 +275,14 @@ class StorageManager:
         # freeze mode: only use local_cpu backend for retrieval
         self._freeze = False
         self._freeze_lock = threading.RLock()
+
+        # Backend bypass mode: skip specific backends during health check failures
+        self._bypassed_backends: set[str] = set()
+        self._bypass_lock = threading.RLock()
+
+        if not self.enable_pd and self.config.enable_async_loading:
+            assert self.allocator_backend is not None
+            self.async_serializer = AsyncSingleSerializer(self.loop)
 
         self._setup_metrics()
 
@@ -295,14 +308,6 @@ class StorageManager:
                     EventType.LOADING, s
                 )
             )
-
-    def post_init(self, **kwargs) -> None:
-        if "async_lookup_server" in kwargs:
-            self.async_lookup_server = kwargs.pop("async_lookup_server")
-        # PDBackend has't supported calculate_chunk_budget
-        if not self.enable_pd and self.config.enable_async_loading:
-            assert self.allocator_backend is not None
-            self.async_serializer = AsyncSingleSerializer(self.loop)
 
     def _get_allocator_backend(
         self, config: LMCacheEngineConfig
@@ -400,6 +405,10 @@ class StorageManager:
         for backend_name, backend in self.storage_backends.items():
             if location and backend_name != location:
                 continue
+            # Skip bypassed backends
+            with self._bypass_lock:
+                if backend_name in self._bypassed_backends:
+                    continue
 
             allocator_backend = backend.get_allocator_backend()
             cname = get_backend_cname(allocator_backend)
@@ -467,7 +476,7 @@ class StorageManager:
         self,
         keys: List[CacheEngineKey],
         location: Optional[str] = None,
-    ) -> Optional[List[Optional[MemoryObj]]]:
+    ) -> List[Optional[MemoryObj]]:
         """
         Blocking function to get the memory objects from the storages.
         """
@@ -475,8 +484,28 @@ class StorageManager:
         for backend_name, storage_backend in self.get_active_storage_backends(location):
             memory_objs = storage_backend.batched_get_blocking(keys)
             if memory_objs:
+                # Align with single-key `get()` logic:
+                # auto-write remote data to local CPU cache
+                if (
+                    backend_name not in ["LocalCPUBackend", "PDBackend"]
+                    and "LocalCPUBackend" in self.storage_backends
+                    and None not in memory_objs
+                ):
+                    logger.debug(
+                        "Storing %s objects from %s to LocalCPUBackend",
+                        len(keys),
+                        backend_name,
+                    )
+                    local_cpu_backend = self.storage_backends["LocalCPUBackend"]
+                    assert isinstance(local_cpu_backend, LocalCPUBackend)
+                    # Type cast: Safe (we verified no Nones above)
+                    # `batched_submit_put_task` expects list[MemoryObj]
+                    # TODO (lisiG9): Refactor this write-back logic into caching
+                    #  policy module
+                    memory_objs_no_none = cast(List[MemoryObj], memory_objs)
+                    local_cpu_backend.batched_submit_put_task(keys, memory_objs_no_none)
                 return memory_objs
-        return None
+        return [None] * len(keys)
 
     def layerwise_batched_get(
         self,
@@ -739,6 +768,38 @@ class StorageManager:
             )
         )
 
+    def set_hot_cache(self, enabled: bool) -> None:
+        """
+        Dynamically enable or disable the hot cache on LocalCPUBackend.
+
+        When disabled, the existing hot cache entries will be cleared
+        and no new data will be written to the hot cache.
+
+        Args:
+            enabled: True to enable hot cache, False to disable
+        """
+        backend = self.local_cpu_backend
+        if not isinstance(backend, LocalCPUBackend):
+            logger.warning("Cannot set hot_cache: LocalCPUBackend not available")
+            return
+
+        if not enabled:
+            backend.clear()
+        backend.use_hot = enabled
+        logger.info("LocalCPUBackend hot_cache set to %s", enabled)
+
+    def is_hot_cache_enabled(self) -> bool:
+        """
+        Get the current hot cache status of LocalCPUBackend.
+
+        Returns:
+            bool: True if hot cache is enabled, False otherwise
+        """
+        backend = self.local_cpu_backend
+        if not isinstance(backend, LocalCPUBackend):
+            return False
+        return backend.use_hot
+
     def set_freeze(self, enabled: bool) -> None:
         """
         Set freeze mode.
@@ -758,6 +819,61 @@ class StorageManager:
         """
         with self._freeze_lock:
             return self._freeze
+
+    def set_backend_bypass(self, backend_name: str, bypassed: bool) -> None:
+        """
+        Set bypass mode for a specific backend.
+
+        When a backend is bypassed:
+        - It will be skipped during contains/put/get operations
+        - This is typically used when a health check fails with LOCAL_CPU fallback
+
+        Args:
+            backend_name: The name of the backend to bypass (e.g., "RemoteBackend")
+            bypassed: True to bypass, False to restore normal operation
+        """
+        with self._bypass_lock:
+            if bypassed:
+                self._bypassed_backends.add(backend_name)
+                logger.info(f"StorageManager: Backend {backend_name} is now bypassed")
+            else:
+                self._bypassed_backends.discard(backend_name)
+                logger.info(
+                    f"StorageManager: Backend {backend_name} bypass removed, "
+                    "restored to normal operation"
+                )
+
+    def is_backend_bypassed(self, backend_name: str) -> bool:
+        """
+        Check if a backend is currently bypassed.
+
+        Args:
+            backend_name: The name of the backend to check
+
+        Returns:
+            bool: True if the backend is bypassed, False otherwise
+        """
+        with self._bypass_lock:
+            return backend_name in self._bypassed_backends
+
+    def get_bypassed_backends(self) -> List[str]:
+        """
+        Get the list of currently bypassed backend names.
+
+        Returns:
+            List[str]: List of bypassed backend names
+        """
+        with self._bypass_lock:
+            return list(self._bypassed_backends)
+
+    def get_all_backend_names(self) -> List[str]:
+        """
+        Get the list of all registered backend names.
+
+        Returns:
+            List[str]: List of all backend names
+        """
+        return list(self.storage_backends.keys())
 
     def contains(
         self,
@@ -991,7 +1107,7 @@ class StorageManager:
         search_range: Optional[List[str]] = None,
     ) -> Generator[Tuple[str, StorageBackendInterface], None, None]:
         """
-        Get the active storage backends based on freeze mode and filters.
+        Get the active storage backends based on freeze mode, bypass mode, and filters.
 
         :param Optional[str] location: If specified, only yield backends
             matching this exact name.
@@ -1004,6 +1120,10 @@ class StorageManager:
             # In freeze mode, only use local_cpu backend
             with self._freeze_lock:
                 if self._freeze and backend_name != "LocalCPUBackend":
+                    continue
+            # Skip bypassed backends
+            with self._bypass_lock:
+                if backend_name in self._bypassed_backends:
                     continue
             if location and backend_name != location:
                 continue
@@ -1027,6 +1147,166 @@ class StorageManager:
                 continue
             storage_names.append(backend_name)
         return storage_names
+
+    def list_backends(self) -> Dict[str, str]:
+        """
+        List all active storage backends.
+
+        Returns:
+            Dict mapping backend name to its class name.
+        """
+        with self.manager_lock:
+            return {
+                name: type(backend).__name__
+                for name, backend in self.storage_backends.items()
+            }
+
+    def close_backend(self, backend_name: str) -> bool:
+        """
+        Close and remove a specific storage backend by name.
+
+        The backend will be closed and removed from the internal
+        dict so that no stale references remain.
+
+        Args:
+            backend_name: The name of the backend to close.
+
+        Returns:
+            True if the backend was found and closed, False
+            otherwise.
+        """
+        with self.manager_lock:
+            backend = self.storage_backends.get(backend_name)
+            if backend is None:
+                logger.warning(
+                    "Backend %s not found, cannot close",
+                    backend_name,
+                )
+                return False
+
+            try:
+                logger.info("Closing backend: %s", backend_name)
+                backend.close()
+            except Exception:
+                logger.exception("Error closing backend %s", backend_name)
+
+            del self.storage_backends[backend_name]
+
+            # Update derived references
+            self.non_allocator_backends = self.get_non_allocator_backends()
+            if backend_name == "LocalCPUBackend":
+                self.local_cpu_backend = None
+            logger.info("Backend %s closed and removed", backend_name)
+            return True
+
+    def create_backends(self) -> Dict[str, str]:
+        """
+        Create new storage backends based on current config.
+
+        Backends that are already present will be skipped
+        **before** instantiation so that no unnecessary
+        resources are allocated.  This allows callers to close
+        a subset of backends, update config via ``/conf``,
+        and then call this method to bring up only the missing
+        backends.
+
+        Returns:
+            Dict mapping newly created backend name to its
+            class name.
+        """
+        with self.manager_lock:
+            existing_names = set(self.storage_backends)
+            new_backends = CreateStorageBackends(
+                self.config,
+                self.metadata,
+                self.loop,
+                dst_device=("cuda" if is_cuda_worker(self.metadata) else "cpu"),
+                lmcache_worker=self.lmcache_worker,
+                skip_backends=existing_names,
+                existing_backends=self.storage_backends,
+            )
+
+            created: Dict[str, str] = {}
+            for name, backend in new_backends.items():
+                self.storage_backends[name] = backend
+                created[name] = type(backend).__name__
+                logger.info(
+                    "Created backend: %s (%s)",
+                    name,
+                    created[name],
+                )
+
+            # Refresh derived references
+            self.non_allocator_backends = self.get_non_allocator_backends()
+            cpu = self.storage_backends.get("LocalCPUBackend")
+            if cpu is not None:
+                self.local_cpu_backend = cpu
+
+            return created
+
+    def recreate_backend(self, backend_name: str) -> Dict[str, str]:
+        """
+        Close a backend and recreate it from current config.
+
+        This is an atomic close-then-create operation that
+        combines :meth:`close_backend` and :meth:`create_backends`
+        into a single step.
+
+        Args:
+            backend_name: Name of the backend to recreate
+                (e.g. ``RemoteBackend``).
+
+        Returns:
+            Dict mapping newly created backend name to its
+            class name.
+
+        Raises:
+            KeyError: If *backend_name* does not exist.
+        """
+        with self.manager_lock:
+            backend = self.storage_backends.get(backend_name)
+            if backend is None:
+                raise KeyError("Backend %s not found" % backend_name)
+
+            # --- close ---
+            try:
+                logger.info("Closing backend: %s", backend_name)
+                backend.close()
+            except Exception:
+                logger.exception("Error closing backend %s", backend_name)
+            del self.storage_backends[backend_name]
+
+            # --- create ---
+            existing_names = set(self.storage_backends)
+            new_backends = CreateStorageBackends(
+                self.config,
+                self.metadata,
+                self.loop,
+                dst_device=("cuda" if is_cuda_worker(self.metadata) else "cpu"),
+                lmcache_worker=self.lmcache_worker,
+                skip_backends=existing_names,
+                existing_backends=self.storage_backends,
+            )
+
+            created: Dict[str, str] = {}
+            for name, be in new_backends.items():
+                self.storage_backends[name] = be
+                created[name] = type(be).__name__
+                logger.info(
+                    "Recreated backend: %s (%s)",
+                    name,
+                    created[name],
+                )
+
+            # Refresh derived references
+            self.non_allocator_backends = self.get_non_allocator_backends()
+            cpu = self.storage_backends.get("LocalCPUBackend")
+            if cpu is not None:
+                self.local_cpu_backend = cpu
+            elif backend_name == "LocalCPUBackend":
+                self.local_cpu_backend = None
+
+            return created
 
     def close(self):
         logger.info("Closing StorageManager...")

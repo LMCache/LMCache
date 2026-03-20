@@ -2,6 +2,8 @@
 # Standard
 from dataclasses import dataclass
 from unittest.mock import patch
+import asyncio
+import importlib.util
 import random
 import shlex
 import socket
@@ -9,13 +11,20 @@ import subprocess
 import time
 
 # Third Party
+import numpy as np
 import pytest
 import torch
 
 # First Party
-from lmcache.config import LMCacheEngineMetadata
-from lmcache.v1.cache_engine import LMCacheEngineBuilder
+from lmcache.v1.cache_engine import LMCacheEngine, LMCacheEngineBuilder
 from lmcache.v1.memory_management import MixedMemoryAllocator
+from lmcache.v1.metadata import LMCacheMetadata
+
+if importlib.util.find_spec("pytest_benchmark") is None:
+
+    @pytest.fixture
+    def benchmark():
+        pytest.skip("pytest-benchmark is not installed")
 
 # This is to mock the constructor and destructor of
 # MixedMemoryAllocator and PinMemoryAllocator to
@@ -221,6 +230,86 @@ class MockRedisSentinel:
         self, service_name, socket_timeout=None, username=None, password=None, **kwargs
     ):
         return self.slave_redis
+
+
+class MockRESPClient:
+    """In-memory mock of RESPClient so RESP connector tests never hit real Redis."""
+
+    def __init__(
+        self,
+        host: str,
+        port: int,
+        num_workers: int,
+        loop=None,
+        username: str = "",
+        password: str = "",
+    ):
+        self._store: dict[str, bytes] = {}  # key -> bytes
+        self._loop = loop
+        self._closed = False
+        self._username = username
+        self._password = password
+
+    async def exists(self, key: str) -> bool:
+        return key in self._store
+
+    def exists_sync(self, key: str) -> bool:
+        if self._loop is None:
+            return key in self._store
+        fut = asyncio.run_coroutine_threadsafe(self.exists(key), self._loop)
+        return fut.result(timeout=10.0)
+
+    def _copy_into_buf(self, buf: memoryview, data: bytes) -> None:
+        """
+        Copy bytes into buffer; buf may be non-byte or multi-dimensional
+        (e.g. from bfloat16 tensor).
+        """
+        view = buf.cast("B")
+        n = len(data)
+        try:
+            view[:n] = data
+        except (NotImplementedError, TypeError, ValueError):
+            # Multi-dimensional or non-contiguous:
+            # write via flat numpy view (same memory)
+            arr = np.asarray(view, dtype=np.uint8, copy=False)
+            arr.flat[:n] = np.frombuffer(data, dtype=np.uint8, count=n)
+
+    async def get(self, key: str, buf: memoryview) -> None:
+        data = self._store.get(key)
+        if data is None:
+            raise RuntimeError("key not found")
+        self._copy_into_buf(buf, data)
+
+    async def set(self, key: str, buf: memoryview) -> None:
+        self._store[key] = bytes(buf.cast("B"))
+
+    async def batch_get(self, keys: list, bufs: list) -> None:
+        if len(keys) != len(bufs):
+            raise ValueError("keys and bufs length mismatch")
+        for k, b in zip(keys, bufs, strict=False):
+            data = self._store.get(k)
+            if data is None:
+                raise RuntimeError("key not found")
+            self._copy_into_buf(b, data)
+
+    async def batch_set(self, keys: list, bufs: list) -> None:
+        if len(keys) != len(bufs):
+            raise ValueError("keys and bufs length mismatch")
+        for k, b in zip(keys, bufs, strict=False):
+            self._store[k] = bytes(b.cast("B"))
+
+    async def batch_exists(self, keys: list) -> list:
+        return [k in self._store for k in keys]
+
+    def batch_exists_sync(self, keys: list) -> list:
+        if self._loop is None:
+            return [k in self._store for k in keys]
+        fut = asyncio.run_coroutine_threadsafe(self.batch_exists(keys), self._loop)
+        return fut.result(timeout=10.0)
+
+    def close(self) -> None:
+        self._closed = True
+        self._store.clear()
 
 
 class MockRedisCluster:
@@ -434,7 +523,9 @@ def autorelease(request):
 def autorelease_v1(request):
     objects = []
 
-    def _factory(obj):
+    def _factory(obj, **kwargs):
+        if isinstance(obj, LMCacheEngine):
+            obj.post_init(**kwargs)
         objects.append(obj)
         return obj
 
@@ -443,8 +534,19 @@ def autorelease_v1(request):
     LMCacheEngineBuilder.destroy("test")
 
     # Cleanup all objects created by the factory
-    # for obj in objects:
-    #    obj.close()
+    # IMPORTANT: We must close connectors to ensure AsyncPQExecutor and other
+    # async resources are properly cleaned up
+    # NOTE: Skip LMCacheEngine instances since destroy() already calls close()
+    for obj in objects:
+        if isinstance(obj, LMCacheEngine):
+            continue
+        try:
+            # Check if object has a close method
+            if hasattr(obj, "close"):
+                obj.close()
+        except Exception as e:
+            # Log but don't fail the test
+            print("Error during close obj:%s - %s", obj, e)
 
 
 @pytest.fixture(scope="session")
@@ -492,12 +594,13 @@ def use_shared_allocator(request, monkeypatch, memory_allocator):
 
 @pytest.fixture(scope="function")
 def lmcache_engine_metadata(role="worker"):
-    """Create a fresh LMCacheEngineMetadata for each test."""
-    return LMCacheEngineMetadata(
+    """Create a fresh LMCacheMetadata for each test."""
+    return LMCacheMetadata(
         model_name="test_model",
         world_size=1,
+        local_world_size=1,
         worker_id=0,
-        fmt="vllm",
+        local_worker_id=0,
         kv_dtype=torch.bfloat16,
         kv_shape=(32, 2, 256, 32, 128),
         use_mla=False,

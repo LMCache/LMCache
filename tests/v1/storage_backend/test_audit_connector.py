@@ -17,6 +17,7 @@ from lmcache.v1.memory_management import (
     MemoryObj,
     TensorMemoryObj,
 )
+from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.storage_backend.connector.audit_connector import AuditConnector
 from lmcache.v1.storage_backend.connector.mock_connector import MockConnector
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
@@ -24,7 +25,13 @@ from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 
 def create_test_key(key_id: str) -> CacheEngineKey:
     """Helper to create a test CacheEngineKey"""
-    return CacheEngineKey("vllm", "test_model", 3, 123, hash(key_id), dtype=torch.uint8)
+    return CacheEngineKey(
+        model_name="test_model",
+        world_size=3,
+        worker_id=1,
+        chunk_hash=hash(key_id),
+        dtype=torch.uint8,
+    )
 
 
 def create_mock_memory_obj(backend: LocalCPUBackend, data: bytes) -> MemoryObj:
@@ -78,8 +85,17 @@ def local_cpu_backend():
         remote_url="mock://test",
         extra_config={},
     )
+    metadata = LMCacheMetadata(
+        model_name="test_model",
+        world_size=1,
+        local_world_size=1,
+        worker_id=0,
+        local_worker_id=0,
+        kv_dtype=torch.bfloat16,
+        kv_shape=(64, 2, 1, 8, 128),
+    )
     allocator = AdHocMemoryAllocator(device="cpu")
-    return LocalCPUBackend(config=config, memory_allocator=allocator)
+    return LocalCPUBackend(config=config, metadata=metadata, memory_allocator=allocator)
 
 
 @pytest.fixture
@@ -95,7 +111,13 @@ def mock_connector(event_loop, local_cpu_backend):
         write_throughput=100.0,
     )
     yield connector
-    # No cleanup needed, let event_loop fixture handle it
+    # Clean up connector to ensure AsyncPQExecutor is properly shut down
+    try:
+        # Close the connector which will shutdown the AsyncPQExecutor
+        connector.close()
+    except Exception as e:
+        # Log but don't fail the test
+        print(f"Failed to close mock connector: {e}")
 
 
 class LogCaptureHandler(logging.Handler):
@@ -468,16 +490,11 @@ class TestAuditConnector:
         log_capture.clear()
 
         audit.post_init()
-        audit.init_chunk_meta(None, None)
 
         print("\nAfter @NotAudit methods:")
         print(log_capture.get_logs())
 
-        operation_logs = [
-            r
-            for r in log_capture.get_records()
-            if "POST_INIT" in r.msg or "INIT_CHUNK_META" in r.msg
-        ]
+        operation_logs = [r for r in log_capture.get_records() if "POST_INIT" in r.msg]
         operation_logs = [r for r in operation_logs if "SUCCESS" in r.msg]
         assert len(operation_logs) == 0, (
             f"@NotAudit methods should not generate operation audit logs. "

@@ -10,13 +10,9 @@ import pytest
 import torch
 
 # First Party
-from lmcache.config import LMCacheEngineMetadata
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.memory_management import (
-    MemoryFormat,
-    MemoryObj,
-)
+from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 from lmcache.v1.storage_backend.local_disk_backend import LocalDiskBackend
 
@@ -53,12 +49,13 @@ def create_test_config(disk_path: str, max_disk_size: float = 1.0):
 
 
 def create_test_metadata():
-    """Create a test metadata for LMCacheEngineMetadata."""
-    return LMCacheEngineMetadata(
+    """Create a test metadata for LMCacheMetadata."""
+    return LMCacheMetadata(
         model_name="test_model",
         world_size=1,
+        local_world_size=1,
         worker_id=0,
-        fmt="vllm",
+        local_worker_id=0,
         kv_dtype=torch.bfloat16,
         kv_shape=(28, 2, 256, 8, 128),
     )
@@ -66,17 +63,13 @@ def create_test_metadata():
 
 def create_test_key(key_id: int = 0) -> CacheEngineKey:
     """Create a test CacheEngineKey."""
-    return CacheEngineKey("vllm", "test_model", 3, 123, hash(key_id), torch.bfloat16)
-
-
-def create_test_memory_obj(shape=(2, 16, 8, 128), dtype=torch.bfloat16) -> MemoryObj:
-    """Create a test MemoryObj using AdHocMemoryAllocator for testing."""
-    # First Party
-    from lmcache.v1.memory_management import AdHocMemoryAllocator
-
-    allocator = AdHocMemoryAllocator(device="cpu")
-    memory_obj = allocator.allocate(shape, dtype, fmt=MemoryFormat.KV_T2D)
-    return memory_obj
+    return CacheEngineKey(
+        model_name="test_model",
+        world_size=3,
+        worker_id=1,
+        chunk_hash=hash(key_id),
+        dtype=torch.bfloat16,
+    )
 
 
 @pytest.fixture

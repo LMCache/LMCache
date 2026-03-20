@@ -40,7 +40,6 @@ def main():
             msg = ClientMetaMessage(
                 ClientCommand.HEALTH,
                 key=CacheEngineKey(
-                    fmt="",
                     model_name="",
                     world_size=0,
                     worker_id=0,

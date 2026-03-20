@@ -1,11 +1,12 @@
 workload:
   type: long_doc_qa
   max-inflight-requests: 20
-  expected-latency-gain: true
 
 docker:
   env:
     - "LMCACHE_CONFIG_FILE=/etc/lmcache/local_cpu_mla.yaml"
+    - "LMCACHE_INTERNAL_API_SERVER_ENABLED=True"
+    - "LMCACHE_INTERNAL_API_SERVER_SOCKET_PATH_PREFIX=/tmp/lmcache_internal_api_server/socket"
   gpu_count: 2
 
 vllm:
@@ -24,3 +25,6 @@ vllm:
     - "fp8_e4m3"
     - "--quantization"
     - "fp8"
+
+checking-fields:
+  - query_round_time_per_prompt

@@ -57,6 +57,19 @@ class KVLayerGroupInfo:
         """Return the number of layers in this group."""
         return len(self.layer_names)
 
+    @property
+    def hidden_dim_size(self) -> int:
+        """Return the size of the hidden dimension in this group."""
+        # hidden_dim_size = num_heads * head_size
+        if len(self.shape) == 5:
+            # MHA
+            return self.shape[3] * self.shape[4]
+        elif len(self.shape) == 3:
+            # MLA
+            return self.shape[2]
+        else:
+            raise ValueError(f"Invalid shape: {self.shape}")
+
     def contains_layer(self, layer_idx: int) -> bool:
         """Check if a layer index belongs to this group."""
         return layer_idx in self._layer_indices_set
@@ -160,8 +173,27 @@ class KVLayerGroupsManager:
         )
 
         for idx, (layer_name, kv_cache) in enumerate(kv_caches.items()):
-            shape = kv_cache.shape
-            dtype = kv_cache.dtype
+            # Supports two KV cache formats:
+            # - Single-tensor format: a single tensor with shape
+            #   [2, num_blocks, block_size, num_heads, head_size].
+            # - List/tuple format (e.g., TPU/HPU): [k_tensor, v_tensor],
+            #   where each tensor has shape
+            #   [num_blocks, block_size, num_heads, head_size].
+            if isinstance(kv_cache, (tuple, list)):
+                if len(kv_cache) != 2:
+                    raise ValueError(
+                        f"Expected 2 tensors (k, v) for layer {layer_name}, "
+                        f"got {len(kv_cache)}"
+                    )
+                # Prepend the count as a leading dimension to produce the
+                # same canonical shape as the single-tensor format
+                # (e.g., [2, num_blocks, ...] for k+v), so downstream
+                # indexing (e.g., hidden_dim_size) is unaffected.
+                shape = torch.Size([len(kv_cache)] + list(kv_cache[0].shape))
+                dtype = kv_cache[0].dtype
+            else:
+                shape = kv_cache.shape
+                dtype = kv_cache.dtype
             key = (shape, dtype)
             groups_dict[key].append((layer_name, idx))
 

@@ -46,6 +46,9 @@ class ValkeyConnector(RemoteConnector):
         password: str,
         database_id: Optional[int] = None,
     ):
+        # initialize base class, which includes some common attributes
+        super().__init__(local_cpu_backend.config, local_cpu_backend.metadata)
+
         if ":" in url:
             host, port_str = url.split(":", 1)
             port = int(port_str)
@@ -134,8 +137,8 @@ class ValkeyConnector(RemoteConnector):
         metadata = RemoteMetadata.deserialize(memoryview(metadata_bytes))
 
         memory_obj = self.local_cpu_backend.allocate(
-            metadata.shape,
-            metadata.dtype,
+            metadata.shapes,
+            metadata.dtypes,
             metadata.fmt,
         )
         if memory_obj is None:
@@ -182,12 +185,12 @@ class ValkeyConnector(RemoteConnector):
     async def _put(self, key: CacheEngineKey, memory_obj: MemoryObj):
         try:
             kv_bytes = bytes(memory_obj.byte_array)
-            kv_shape = memory_obj.get_shape()
-            kv_dtype = memory_obj.get_dtype()
+            kv_shapes = memory_obj.get_shapes()
+            kv_dtypes = memory_obj.get_dtypes()
             memory_format = memory_obj.get_memory_format()
 
             metadata_bytes = RemoteMetadata(
-                len(kv_bytes), kv_shape, kv_dtype, memory_format
+                len(kv_bytes), kv_shapes, kv_dtypes, memory_format
             ).serialize()
 
             metadata_key, kv_key = self._get_keys(key)
@@ -230,13 +233,18 @@ class ValkeyClusterConnector(RemoteConnector):
         username: str,
         password: str,
         hosts_and_ports: Optional[List[Tuple[str, int]]],
+        database_id: Optional[int] = None,
     ):
+        # initialize base class, which includes some common attributes
+        super().__init__(local_cpu_backend.config, local_cpu_backend.metadata)
+
         self.loop = loop
         self.local_cpu_backend = local_cpu_backend
         self.executor = AsyncPQExecutor(loop)
         self.username = username
         self.password = password
         self.hosts_and_ports = hosts_and_ports
+        self.database_id = database_id
 
         # Create connection
         self.connection = self._init_connection()
@@ -255,8 +263,11 @@ class ValkeyClusterConnector(RemoteConnector):
                     NodeAddress(host, port) for host, port in self.hosts_and_ports
                 ]
                 config = GlideClusterClientConfiguration(
-                    addresses=addresses, credentials=credentials
+                    addresses=addresses,
+                    credentials=credentials,
+                    database_id=self.database_id,
                 )
+
                 return await GlideClusterClient.create(config)
             except Exception as e:
                 raise RuntimeError(f"Fail to init valkey connection {e}") from e
@@ -307,8 +318,8 @@ class ValkeyClusterConnector(RemoteConnector):
         metadata = RemoteMetadata.deserialize(memoryview(metadata_bytes))
 
         memory_obj = self.local_cpu_backend.allocate(
-            metadata.shape,
-            metadata.dtype,
+            metadata.shapes,
+            metadata.dtypes,
             metadata.fmt,
         )
         if memory_obj is None:
@@ -354,12 +365,12 @@ class ValkeyClusterConnector(RemoteConnector):
     async def _put(self, key: CacheEngineKey, memory_obj: MemoryObj):
         try:
             kv_bytes = bytes(memory_obj.byte_array)
-            kv_shape = memory_obj.get_shape()
-            kv_dtype = memory_obj.get_dtype()
+            kv_shapes = memory_obj.get_shapes()
+            kv_dtypes = memory_obj.get_dtypes()
             memory_format = memory_obj.get_memory_format()
 
             metadata_bytes = RemoteMetadata(
-                len(kv_bytes), kv_shape, kv_dtype, memory_format
+                len(kv_bytes), kv_shapes, kv_dtypes, memory_format
             ).serialize()
 
             metadata_key, kv_key = self._get_keys_with_hash_tag(key)

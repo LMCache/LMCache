@@ -552,7 +552,6 @@ class UserSessionManager:
         pending_queries = len([s for s in self.sessions if s.has_unfinished_request])
         assert self.start_time is not None
         start_time = max(self.start_time, start_time)
-        end_time = min(end_time, df["finish_time"].max())
         qps = self.workload_config.qps
 
         df = UserSessionManager.ProcessSummary(

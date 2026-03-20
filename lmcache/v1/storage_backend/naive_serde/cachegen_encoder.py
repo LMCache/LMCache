@@ -3,12 +3,12 @@
 import torch
 
 # First Party
-from lmcache.config import LMCacheEngineMetadata
 from lmcache.logging import init_logger
 from lmcache.storage_backend.serde.cachegen_encoder import encode_function
 from lmcache.utils import _lmcache_nvtx_annotate
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_management import BytesBufferMemoryObj, MemoryObj
+from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.storage_backend.naive_serde.cachegen_basics import CacheGenConfig
 from lmcache.v1.storage_backend.naive_serde.serde import Serializer
 
@@ -16,10 +16,9 @@ logger = init_logger(__name__)
 
 
 class CacheGenSerializer(Serializer):
-    def __init__(self, config: LMCacheEngineConfig, metadata: LMCacheEngineMetadata):
+    def __init__(self, config: LMCacheEngineConfig, metadata: LMCacheMetadata):
         self.cachegen_config = CacheGenConfig.from_model_name(metadata.model_name)
         self.chunk_size = config.chunk_size
-        self.fmt = metadata.fmt
         self.key_bins = self.make_key_bins(self.cachegen_config)
         self.value_bins = self.make_value_bins(self.cachegen_config)
 

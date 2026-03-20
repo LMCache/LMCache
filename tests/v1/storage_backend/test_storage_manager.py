@@ -27,9 +27,9 @@ import pytest
 import torch
 
 # First Party
-from lmcache.config import LMCacheEngineMetadata
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.event_manager import EventManager, EventType
+from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.storage_backend.storage_manager import StorageManager
 
 
@@ -79,11 +79,12 @@ def storage_manager_config():
 @pytest.fixture
 def storage_manager_metadata():
     """Create test metadata for StorageManager."""
-    metadata = LMCacheEngineMetadata(
+    metadata = LMCacheMetadata(
         model_name="test_model",
         world_size=1,
+        local_world_size=1,
         worker_id=0,
-        fmt="vllm",
+        local_worker_id=0,
         kv_dtype=torch.bfloat16,
         kv_shape=(28, 2, 256, 8, 128),
         role="scheduler",

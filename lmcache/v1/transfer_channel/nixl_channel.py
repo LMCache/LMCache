@@ -67,6 +67,7 @@ class NixlChannel(BaseTransferChannel):
     def __init__(
         self,
         async_mode: bool = False,
+        device: Optional[str] = None,
         **kwargs,
     ):
         assert "role" in kwargs
@@ -89,6 +90,7 @@ class NixlChannel(BaseTransferChannel):
             page_size=kwargs["align_bytes"],
             tp_rank=kwargs["tp_rank"],
             backends=backends,
+            device=device,
         )
         self.nixl_agent = self.nixl_wrapper.agent
 
@@ -579,6 +581,7 @@ class NixlAgentWrapper:
         page_size: int,
         tp_rank: int,
         backends: list[str],
+        device: Optional[str] = None,
     ):
         """
         Initialize the NIXL agent.
@@ -618,8 +621,9 @@ class NixlAgentWrapper:
         # The four fields are (base_addr, length, dev_id, meta_info)
         # https://github.com/ai-dynamo/nixl/blob/main/src/api/cpp/nixl_descriptors.h#L152
         memory_desc = [(buffer_ptr, buffer_size, tp_rank, "")]
-        # TODO(Jiayi): remove hardcode `mem_type`
-        reg_descs = nixl_agent.get_reg_descs(memory_desc, mem_type="cuda")
+        mem_type = "cpu" if device == "cpu" else "cuda"
+
+        reg_descs = nixl_agent.get_reg_descs(memory_desc, mem_type=mem_type)
         nixl_agent.register_memory(reg_descs)
 
         # Create xfer handlers
@@ -627,9 +631,8 @@ class NixlAgentWrapper:
         for base_addr in range(buffer_ptr, buffer_ptr + buffer_size, page_size):
             xfer_desc.append((base_addr, page_size, tp_rank))
 
-        xfer_descs = nixl_agent.get_xfer_descs(xfer_desc, mem_type="cuda")
-        xfer_handler = nixl_agent.prep_xfer_dlist("", xfer_descs, mem_type="cuda")
-
+        xfer_descs = nixl_agent.get_xfer_descs(xfer_desc, mem_type=mem_type)
+        xfer_handler = nixl_agent.prep_xfer_dlist("", xfer_descs, mem_type=mem_type)
         self.agent = nixl_agent
         self.reg_descs = reg_descs
         self.xfer_descs = xfer_descs

@@ -148,15 +148,6 @@ class SageMakerHyperPodConnectorAdapter(ConnectorAdapter):
             max_lease_size_mb=max_lease_size_mb,
         )
 
-        # Initialize shared memory connection
-        try:
-            connector.post_init()
-        except Exception as e:
-            logger.error(f"Failed to initialize SageMaker HyperPod connector: {e}")
-            raise RuntimeError(
-                f"SageMaker HyperPod connector initialization failed: {e}"
-            ) from e
-
         logger.info("SageMaker HyperPod connector created successfully")
         return connector
 

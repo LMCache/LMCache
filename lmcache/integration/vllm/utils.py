@@ -1,11 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from typing import TYPE_CHECKING, Tuple, Union
+from typing import TYPE_CHECKING, Optional, Tuple
+import hashlib
 import os
+import string
 import threading
 
 if TYPE_CHECKING:
-    from vllm.config import ModelConfig
+    from vllm.config import ModelConfig, VllmConfig
     from vllm.multimodal.inputs import PlaceholderRange
     from vllm.v1.request import Request
 
@@ -13,17 +15,15 @@ if TYPE_CHECKING:
 import torch
 
 # First Party
-from lmcache.config import LMCacheEngineConfig as Config  # type: ignore[assignment]
 from lmcache.logging import init_logger
-from lmcache.v1.config import (
-    LMCacheEngineConfig as V1Config,  # type: ignore[assignment]
-)
+from lmcache.v1.config import LMCacheEngineConfig
+from lmcache.v1.config_base import apply_remote_configs, fetch_remote_config
 
 logger = init_logger(__name__)
 ENGINE_NAME = "vllm-instance"
 
 # Thread-safe singleton storage
-_config_instance: Union[Config, V1Config, None] = None
+_config_instance: Optional[LMCacheEngineConfig] = None
 _config_lock = threading.Lock()
 
 
@@ -32,13 +32,18 @@ def is_false(value: str) -> bool:
     return value.lower() in ("false", "0", "no", "n", "off")
 
 
-def lmcache_get_or_create_config() -> Union[Config, V1Config]:
+def lmcache_get_or_create_config() -> LMCacheEngineConfig:
     """Get the LMCache configuration from the environment variable
     `LMCACHE_CONFIG_FILE`. If the environment variable is not set, this
     function will return the default configuration.
 
     This function is thread-safe and implements singleton pattern,
     ensuring the configuration is loaded only once.
+
+    After loading the configuration, if 'remote_config_url' is configured,
+    this function will attempt to fetch additional configuration from the
+    remote config service. The current config and LMCACHE environment
+    variables will be sent to the service, along with 'appid' if set.
     """
     global _config_instance
 
@@ -46,17 +51,6 @@ def lmcache_get_or_create_config() -> Union[Config, V1Config]:
     if _config_instance is None:
         with _config_lock:
             if _config_instance is None:  # Check again within lock
-                if is_false(os.getenv("LMCACHE_USE_EXPERIMENTAL", "True")):
-                    logger.warning(
-                        "Detected LMCACHE_USE_EXPERIMENTAL is set to False. "
-                        "Using legacy configuration is deprecated and will "
-                        "be remove soon! Please set LMCACHE_USE_EXPERIMENTAL "
-                        "to True."
-                    )
-                    LMCacheEngineConfig = Config  # type: ignore[assignment]
-                else:
-                    LMCacheEngineConfig = V1Config  # type: ignore[assignment]
-
                 if "LMCACHE_CONFIG_FILE" not in os.environ:
                     logger.warning(
                         "No LMCache configuration file is set. Trying to read"
@@ -73,14 +67,56 @@ def lmcache_get_or_create_config() -> Union[Config, V1Config]:
                     _config_instance = LMCacheEngineConfig.from_file(config_file)
                     # Update config from environment variables
                     _config_instance.update_config_from_env()
+
+                # Fetch and apply remote configuration if configured
+                remote_config_url = _config_instance.remote_config_url
+                if remote_config_url:
+                    logger.info(
+                        "Fetching remote configuration from %s", remote_config_url
+                    )
+                    app_id = _config_instance.app_id
+                    remote_response = fetch_remote_config(
+                        remote_config_url, app_id, _config_instance
+                    )
+                    if remote_response:
+                        _config_instance = apply_remote_configs(
+                            _config_instance, remote_response
+                        )
+                    else:
+                        logger.warning(
+                            "Failed to fetch remote configuration from %s. "
+                            "Using local configuration only.",
+                            remote_config_url,
+                        )
     return _config_instance
 
 
 def hex_hash_to_int16(s: str) -> int:
     """
-    Convert a hex hash string to a 16-bit integer.
+    Convert a hash identifier into a 16-bit integer.
+
+    Historically, LMCache expected multimodal identifiers to be hex strings.
+    In practice (e.g., OpenAI-style multimodal requests), identifiers may be
+    arbitrary strings like `chatcmpl-...-image-0`. This function therefore:
+      - Parses hex strings (optionally prefixed with `0x`) as before, or
+      - Falls back to a stable string hash (SHA-256) when the input is not hex.
     """
-    return int(s, 16) & 0xFFFF
+    # Be defensive: vLLM may pass non-string identifiers.
+    s = "" if s is None else str(s)
+    s_stripped = s.strip()
+
+    # Fast-path: pure hex (optionally 0x-prefixed).
+    hex_part = s_stripped[2:] if s_stripped.lower().startswith("0x") else s_stripped
+    if hex_part and all(c in string.hexdigits for c in hex_part):
+        try:
+            return int(hex_part, 16) & 0xFFFF
+        except ValueError:
+            # Extremely unlikely (e.g., oversized/odd formatting); fall back to hashing.
+            pass
+
+    # Fallback: stable 16-bit value derived from the full identifier string.
+    digest = hashlib.sha256(s_stripped.encode("utf-8")).digest()
+    return int.from_bytes(digest[:2], byteorder="big", signed=False)
 
 
 def apply_mm_hashes_to_token_ids(
@@ -118,7 +154,7 @@ def create_lmcache_metadata(
     role=None,
 ):
     """
-    Create LMCacheEngineMetadata from vLLM configuration.
+    Create LMCacheMetadata from vLLM configuration.
 
     This function extracts common metadata creation logic that was duplicated
     across multiple files.
@@ -131,7 +167,7 @@ def create_lmcache_metadata(
         cache_config: Cache configuration (alternative to vllm_config)
 
     Returns:
-        tuple: (LMCacheEngineMetadata, LMCacheEngineConfig)
+        tuple: (LMCacheMetadata, LMCacheEngineConfig)
     """
     # Third Party
     # Try to import from old location before merged https://github.com/vllm-project/vllm/pull/26908
@@ -142,7 +178,7 @@ def create_lmcache_metadata(
         # Third Party
         from vllm.utils import get_kv_cache_torch_dtype
     # First Party
-    from lmcache.config import LMCacheEngineMetadata
+    from lmcache.v1.metadata import LMCacheMetadata
 
     config = lmcache_get_or_create_config()
     # Support both vllm_config object and individual config parameters
@@ -168,17 +204,31 @@ def create_lmcache_metadata(
     head_size = model_cfg.get_head_size()
     kv_shape = (num_layer, 1 if use_mla else 2, chunk_size, num_kv_head, head_size)
 
+    # Extract engine_id and kv_connector_extra_config from vllm_config if available
+    engine_id = None
+    kv_connector_extra_config = None
+    if vllm_config is not None and hasattr(vllm_config, "kv_transfer_config"):
+        kv_transfer_config = vllm_config.kv_transfer_config
+        if kv_transfer_config is not None:
+            engine_id = getattr(kv_transfer_config, "engine_id", None)
+            kv_connector_extra_config = getattr(
+                kv_transfer_config, "kv_connector_extra_config", None
+            )
+
     # Create metadata
-    metadata = LMCacheEngineMetadata(
-        model_cfg.model,
-        parallel_cfg.world_size,
-        parallel_cfg.rank,
-        "vllm",
-        kv_dtype,
-        kv_shape,
-        use_mla,
-        role,
+    metadata = LMCacheMetadata(
+        model_name=model_cfg.model,
+        world_size=parallel_cfg.world_size,
+        local_world_size=parallel_cfg.world_size,
+        worker_id=parallel_cfg.rank,
+        local_worker_id=parallel_cfg.rank,
+        kv_dtype=kv_dtype,
+        kv_shape=kv_shape,
+        use_mla=use_mla,
+        role=role,
         served_model_name=model_cfg.served_model_name,
+        engine_id=engine_id,
+        kv_connector_extra_config=kv_connector_extra_config,
     )
 
     return metadata, config
@@ -230,8 +280,110 @@ def get_size_bytes(shapes: list[torch.Size], kv_dtypes: list[torch.dtype]):
     """
     Calculate the size in bytes with the given shapes and dtypes.
     """
-    assert len(shapes) == len(kv_dtypes)
+    assert len(shapes) == len(kv_dtypes), (
+        f"shapes and dtypes must have the same length, "
+        f"but got {len(shapes)} and {len(kv_dtypes)}"
+    )
     return sum(
         shape.numel() * kv_dtype.itemsize
         for shape, kv_dtype in zip(shapes, kv_dtypes, strict=True)
     )
+
+
+def get_vllm_torch_dev():
+    """
+    Returns the torch device and device name for the vLLM engine.
+    e.g. (torch.cuda, "cuda") or (torch.xpu, "xpu")
+    """
+    # Third Party
+    from vllm.platforms import current_platform
+
+    if current_platform.is_cuda_alike():
+        logger.info("CUDA device is available. Using CUDA for LMCache engine.")
+        torch_dev = torch.cuda
+        dev_name = "cuda"
+    elif current_platform.is_xpu():
+        logger.info("XPU device is available. Using XPU for LMCache engine.")
+        torch_dev = torch.xpu
+        dev_name = "xpu"
+    else:
+        raise RuntimeError("Unsupported device platform for LMCache engine.")
+    return torch_dev, dev_name
+
+
+def calculate_local_rank_and_world_size(vllm_config: "VllmConfig") -> Tuple[int, int]:
+    """
+    Calculate the local worker id and local world size.
+
+    Current assumption (TODO: add custom logic in the future):
+    - Tensor Parallel is intra-node
+    - Pipeline Parallel is inter-node
+
+    Returns:
+        Tuple[int, int]: (local_worker_id, local_world_size)
+    """
+    parallel_config = vllm_config.parallel_config
+    global_rank = parallel_config.rank
+    global_world_size = parallel_config.world_size
+    torch_dev, dev_name = get_vllm_torch_dev()
+    num_gpus = torch_dev.device_count()
+    if global_world_size <= num_gpus:
+        # single node case
+        return parallel_config.rank, parallel_config.world_size
+    else:
+        tp_size = parallel_config.tensor_parallel_size
+        pp_size = parallel_config.pipeline_parallel_size
+        local_world_size = global_world_size // pp_size
+        assert local_world_size == tp_size, (
+            "LMCache is operating under the assumption that the "
+            "local world size is equal to the tensor parallel size "
+            "in multi-node deployment."
+        )
+        local_worker_id = global_rank % local_world_size
+        return local_worker_id, local_world_size
+
+
+def validate_mla_config(config: LMCacheEngineConfig, use_mla: bool) -> None:
+    """Validate MLA-related configuration."""
+    if use_mla and (config.remote_serde != "naive" and config.remote_serde is not None):
+        raise ValueError("MLA only works with naive serde mode..")
+
+    if use_mla and config.use_layerwise and config.enable_blending:
+        raise ValueError(
+            "We haven't supported MLA with Cacheblend yet. Please disable blending."
+        )
+
+
+def calculate_draft_layers(vllm_config: "VllmConfig") -> int:
+    """Calculate the number of draft layers for speculative decoding."""
+    assert vllm_config is not None, "vllm_config required for vLLM mode"
+
+    num_draft_layers = 0
+    model_config = vllm_config.model_config
+
+    if vllm_config.speculative_config is not None:
+        logger.info(
+            "vllm_config.speculative_config: %s", vllm_config.speculative_config
+        )
+        if vllm_config.speculative_config.method == "deepseek_mtp":
+            num_draft_layers = getattr(
+                model_config.hf_config, "num_nextn_predict_layers", 0
+            )
+        elif vllm_config.speculative_config.use_eagle():
+            try:
+                draft_model_config = vllm_config.speculative_config.draft_model_config
+                num_draft_layers = draft_model_config.get_num_layers(
+                    vllm_config.parallel_config
+                )
+                logger.info("EAGLE detected %d extra layer(s)", num_draft_layers)
+            except Exception:
+                logger.info(
+                    "EAGLE detected, but failed to get the number of extra layers"
+                    "falling back to 1"
+                )
+                num_draft_layers = 1
+    return num_draft_layers
+
+
+def is_dp_rank0(vllm_config: "VllmConfig") -> bool:
+    return vllm_config.parallel_config.data_parallel_rank_local == 0

@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from dataclasses import dataclass, field
-from typing import Callable, NamedTuple, Optional
+from enum import Enum
+from typing import Callable, NamedTuple, Optional, Set
 import threading
 
 # Third Party
@@ -11,6 +12,7 @@ import zmq.asyncio
 from lmcache.logging import init_logger
 from lmcache.v1.cache_controller.locks import FastLockWithTimeout, RWLockWithTimeout
 from lmcache.v1.cache_controller.message import BatchedKVOperationMsg, WorkerInfo
+from lmcache.v1.utils.cache_utils import TTLListCache
 
 logger = init_logger(__name__)
 
@@ -24,6 +26,33 @@ class KVChunkInfo(NamedTuple):
     instance_id: str
     worker_id: int
     location: str
+
+
+class FullSyncState(Enum):
+    """State of full sync for a worker"""
+
+    IDLE = "idle"  # Not in sync
+    SYNCING = "syncing"  # Sync in progress
+    COMPLETED = "completed"  # Sync completed
+    FAILED = "failed"  # Sync failed/timeout
+
+
+@dataclass
+class WorkerSyncInfo:
+    """Information about a worker's sync state"""
+
+    sync_id: str
+    state: FullSyncState
+    start_time: float
+    expected_total_keys: int
+    expected_batch_count: int
+    received_batches: Set[int] = field(default_factory=set)
+    received_keys_count: int = 0
+    last_activity_time: float = 0.0
+
+    def __post_init__(self):
+        if self.last_activity_time == 0.0:
+            self.last_activity_time = self.start_time
 
 
 @dataclass
@@ -44,6 +73,7 @@ class WorkerNode:
     kv_store: dict[str, set[int]] = field(
         default_factory=dict
     )  # location -> set[chunk_hash]
+    sync_info: Optional[WorkerSyncInfo] = None  # Full sync state
 
     def __post_init__(self):
         # Fast lock with timeout for WorkerNode operations
@@ -53,19 +83,52 @@ class WorkerNode:
         self,
         msg: BatchedKVOperationMsg,
         on_seq_num_out_of_order: Optional[Callable[[], None]] = None,
-    ) -> None:
+        is_full_sync: bool = False,
+    ) -> bool:
         """
         Handle batched KV operations with single lock acquisition.
         Logs warning and calls callback if sequence out of order is detected.
+
+        Args:
+            msg: The batched KV operation message.
+            on_seq_num_out_of_order: Callback when sequence out of order detected.
+            is_full_sync: If True, this is a full sync batch operation.
+                         During full sync, sequence check is skipped.
+                         When worker is syncing, non-full-sync operations are rejected.
+
+        Returns:
+            True if operations were processed, False if rejected
+            (e.g., during syncing when is_full_sync=False).
         """
-        seq_warning: tuple[int, int, int] | None = None
+        seq_warning: Optional[tuple[int, int, int]] = None
         with self._lock:
+            # During syncing, reject non-full-sync operations
+            if (
+                self.sync_info is not None
+                and self.sync_info.state == FullSyncState.SYNCING
+                and not is_full_sync
+            ):
+                return False
+
             location = msg.location
 
             if location not in self.kv_store:
                 self.kv_store[location] = set()
 
             for op in msg.operations:
+                # Apply operation first, then check sequence
+                # (sequence check is skipped during full sync)
+                if op.op_type.value == "admit":
+                    self.kv_store[location].add(op.key)
+                elif op.op_type.value == "evict":
+                    self.kv_store[location].discard(op.key)
+                else:
+                    logger.error(f"Unknown op_type: {op.op_type}")
+
+                # Skip sequence check during full sync
+                if is_full_sync:
+                    continue
+
                 # Sequence check
                 last_seq_num = self.seq_tracker.get(location)
                 if last_seq_num is not None:
@@ -77,14 +140,6 @@ class WorkerNode:
                             op.seq_num - expected_seq,
                         )
                 self.seq_tracker[location] = op.seq_num
-
-                # Apply operation
-                if op.op_type.value == "admit":
-                    self.kv_store[location].add(op.key)
-                elif op.op_type.value == "evict":
-                    self.kv_store[location].discard(op.key)
-                else:
-                    logger.error(f"Unknown op_type: {op.op_type}")
 
             # Clean up empty set
             if not self.kv_store[location]:
@@ -102,6 +157,7 @@ class WorkerNode:
                 seq_warning[1],
                 seq_warning[2],
             )
+        return True
 
     def has_kv(self, location: str, key: int) -> bool:
         """Check if a KV chunk exists in this worker."""
@@ -121,6 +177,7 @@ class WorkerNode:
         """Clear all KV data for this worker."""
         with self._lock:
             self.kv_store.clear()
+            self.seq_tracker.clear()
 
     def get_kv_count(self) -> int:
         """Get total count of KV chunks."""
@@ -143,7 +200,8 @@ class WorkerNode:
         """
         Find a key in this worker's kv_store.
         Returns: (KVChunkInfo, peer_init_url, keys) if found, None otherwise.
-        KVChunkInfo will have instance_id="" since WorkerNode doesn't know its instance.
+        KVChunkInfo will have instance_id="" since WorkerNode doesn't know
+        its instance.
         """
         with self._lock:
             for location, keys in self.kv_store.items():
@@ -160,7 +218,8 @@ class WorkerNode:
     def find_key_simple(self, key: int) -> Optional[KVChunkInfo]:
         """
         Find a key in this worker's kv_store, returning only KVChunkInfo.
-        KVChunkInfo will have instance_id="" since WorkerNode doesn't know its instance.
+        KVChunkInfo will have instance_id="" since WorkerNode doesn't know
+        its instance.
         """
         with self._lock:
             for location, keys in self.kv_store.items():
@@ -300,6 +359,12 @@ class RegistryTree:
         # Atomic counter for sequence discontinuity (protected by _counter_lock)
         self._seq_discontinuity_count = 0
         self._counter_lock = threading.Lock()
+        # Cache for get_all_worker_infos (for Prometheus metrics)
+        self._worker_info_cache: TTLListCache[WorkerInfo] = TTLListCache[WorkerInfo]()
+        # Cache for get_all_worker_nodes (for FullSyncTracker and other use cases)
+        self._worker_node_cache: TTLListCache[tuple[str, WorkerNode]] = TTLListCache[
+            tuple[str, WorkerNode]
+        ]()
 
     def get_seq_discontinuity_count(self) -> int:
         """Get the count of sequence discontinuities (thread-safe)."""
@@ -417,12 +482,60 @@ class RegistryTree:
             return []
         return instance_node.get_worker_ids()
 
-    def get_all_worker_infos(self) -> list[WorkerInfo]:
-        """Get WorkerInfo for all workers across all instances."""
+    def get_all_worker_infos_cached(
+        self, timeout_seconds: Optional[float] = None
+    ) -> list[WorkerInfo]:
+        """Get WorkerInfo for all workers across all instances.
+
+        Args:
+            timeout_seconds: Cache timeout in seconds.
+                - If None (default): use the cache's default timeout.
+                - If 0: cache immediately expires, always get fresh data
+                  and update cache.
+                - If > 0: use cache with specified timeout.
+
+        Returns:
+            List of WorkerInfo, either from cache or fresh data
+        """
+        return self._worker_info_cache.get_cached(
+            lambda: self._get_all_worker_infos_fresh(), timeout_override=timeout_seconds
+        )
+
+    def _get_all_worker_infos_fresh(self) -> list[WorkerInfo]:
+        """Internal method to get fresh WorkerInfo without cache."""
         # Snapshot to avoid RuntimeError if dict changes during iteration
         result = []
         for instance_node in list(self.instances.values()):
             result.extend(instance_node.get_all_worker_infos())
+        return result
+
+    def get_all_worker_nodes_cached(
+        self, timeout_seconds: Optional[float] = None
+    ) -> list[tuple[str, WorkerNode]]:
+        """Get all (instance_id, WorkerNode) tuples across all instances, with caching.
+
+        Args:
+            timeout_seconds: Cache timeout in seconds.
+                - If None (default): use the cache's default timeout.
+                - If 0: cache immediately expires, always get fresh data
+                  and update cache.
+                - If > 0: use cache with specified timeout.
+
+        Returns:
+            List of (instance_id, WorkerNode) tuples, either from cache or fresh data
+        """
+        return self._worker_node_cache.get_cached(
+            lambda: self._get_all_worker_nodes_fresh(), timeout_override=timeout_seconds
+        )
+
+    def _get_all_worker_nodes_fresh(self) -> list[tuple[str, WorkerNode]]:
+        """Internal method to get fresh (instance_id, WorkerNode) tuples
+        without cache."""
+        # Snapshot to avoid RuntimeError if dict changes during iteration
+        result = []
+        for instance_id, instance_node in self.instances.items():
+            for worker_node in instance_node.workers.values():
+                result.append((instance_id, worker_node))
         return result
 
     def update_heartbeat(
@@ -438,10 +551,19 @@ class RegistryTree:
         worker_node.last_heartbeat_time = timestamp
         return True
 
-    def handle_batched_kv_operations(self, msg: BatchedKVOperationMsg) -> bool:
+    def handle_batched_kv_operations(
+        self, msg: BatchedKVOperationMsg, is_full_sync: bool = False
+    ) -> bool:
         """
         Handle batched KV operations by forwarding to WorkerNode.
-        Returns True if worker found, False otherwise.
+
+        Args:
+            msg: The batched KV operation message.
+            is_full_sync: If True, this is a full sync batch operation.
+
+        Returns:
+            True if operations were processed successfully.
+            False if worker not found or operations were rejected.
         """
         instance_node = self._get_instance(msg.instance_id)
         if instance_node is None:
@@ -449,10 +571,11 @@ class RegistryTree:
         worker_node = instance_node.get_worker(msg.worker_id)
         if worker_node is None:
             return False
-        worker_node.handle_batched_kv_operations(
-            msg, on_seq_num_out_of_order=self._incr_seq_discontinuity_count
+        return worker_node.handle_batched_kv_operations(
+            msg,
+            on_seq_num_out_of_order=self._incr_seq_discontinuity_count,
+            is_full_sync=is_full_sync,
         )
-        return True
 
     def find_kv(
         self,
@@ -521,3 +644,36 @@ class RegistryTree:
         if worker_node is None:
             return set()
         return worker_node.get_kv_keys(location)
+
+    def clear_worker_kv(
+        self, instance_id: str, worker_id: int, location: Optional[str] = None
+    ) -> bool:
+        """
+        Clear all KV chunks for a specific worker and location.
+        Returns True if successful, False if worker not found.
+        """
+        worker_node = self.get_worker(instance_id, worker_id)
+        if worker_node is None:
+            return False
+        with worker_node._lock:
+            if location is None:
+                worker_node.kv_store.clear()
+                worker_node.seq_tracker.clear()
+                return True
+            if location in worker_node.kv_store:
+                del worker_node.kv_store[location]
+            if location in worker_node.seq_tracker:
+                del worker_node.seq_tracker[location]
+        return True
+
+    def clear_all_worker_kv(self, instance_id: str, worker_id: int) -> bool:
+        """
+        Clear all KV chunks for a worker across all locations.
+        Returns True if successful, False if worker not found.
+        """
+        worker_node = self.get_worker(instance_id, worker_id)
+        if worker_node is None:
+            return False
+
+        worker_node.clear_kv_store()
+        return True

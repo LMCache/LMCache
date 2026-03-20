@@ -24,16 +24,15 @@ import sys
 import torch
 
 # First Party
-from lmcache.config import LMCacheEngineMetadata
-from lmcache.integration.vllm.utils import get_size_bytes
+from lmcache.integration.vllm.utils import get_size_bytes, lmcache_get_or_create_config
 from lmcache.logging import init_logger
-from lmcache.utils import mock_up_broadcast_fn, mock_up_broadcast_object_fn
-from lmcache.v1.cache_engine import LMCacheEngine, LMCacheEngineBuilder
+from lmcache.utils import EngineType, mock_up_broadcast_fn, mock_up_broadcast_object_fn
+from lmcache.v1.cache_engine import LMCacheEngine
 from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.gpu_connector import VLLMPagedMemGPUConnectorV2
-from lmcache.v1.internal_api_server.api_server import InternalAPIServer
-from lmcache.v1.mock_gpu_connector import MockGPUConnector
-from lmcache.v1.xpu_connector import VLLMPagedMemXPUConnectorV2
+from lmcache.v1.config_base import parse_command_line_extra_params
+from lmcache.v1.gpu_connector import CreateGPUConnector
+from lmcache.v1.metadata import LMCacheMetadata
+from lmcache.v1.standalone.manager import StandaloneLMCacheManager
 
 # Third Party - Platform detection
 try:
@@ -197,7 +196,7 @@ class LMCacheStandaloneStarter:
     def __init__(
         self,
         config: LMCacheEngineConfig,
-        metadata: LMCacheEngineMetadata,
+        metadata: LMCacheMetadata,
         layer_groups: List[LayerGroupSpec],
         device: str = "cpu",
     ):
@@ -206,80 +205,32 @@ class LMCacheStandaloneStarter:
         self.layer_groups = layer_groups
         self.device = device
 
-        # Create objects in constructor for better error handling
-        instance_id = self.config.lmcache_instance_id
+        gpu_connector = CreateGPUConnector(config, metadata, EngineType.MOCK)
 
-        # Construct GPU connector based on platform detection
-        gpu_connector = self._construct_gpu_connector()
-
-        self.lmcache_engine = LMCacheEngineBuilder.get_or_create(
-            instance_id=instance_id,
-            config=self.config,
-            metadata=self.metadata,
+        # Create standalone manager directly
+        self._manager = StandaloneLMCacheManager(
+            config=config,
+            metadata=metadata,
             gpu_connector=gpu_connector,
             broadcast_fn=mock_up_broadcast_fn,
             broadcast_object_fn=mock_up_broadcast_object_fn,
+            connector=self,
         )
-
-        # Create API server in constructor
-        self.api_server = InternalAPIServer(self)  # type: ignore[arg-type]
 
         self.running = False
 
-    def _construct_gpu_connector(self):
-        """Construct GPU connector based on platform detection"""
+    @property
+    def lmcache_engine(self) -> LMCacheEngine:
+        """Get the LMCache engine instance."""
+        # Directly access engine from standalone manager
+        engine = self._manager.lmcache_engine
+        assert engine is not None, "LMCache engine not initialized yet"
+        return engine
 
-        # If vLLM platform detection is not available, use MockGPUConnector
-        if current_platform is None:
-            logger.info("vLLM platform detection not available, using MockGPUConnector")
-            return MockGPUConnector(kv_shape=self.metadata.kv_shape)
-
-        # Extract parameters from metadata and config
-        kv_shape = self.metadata.kv_shape
-        num_layer = kv_shape[0]  # number of layers
-        num_kv_head = kv_shape[3]  # number of KV heads
-        head_size = kv_shape[4]  # head size
-        hidden_dim_size = num_kv_head * head_size
-
-        chunk_size = self.config.chunk_size
-        kv_dtype = self.metadata.kv_dtype
-        use_mla = self.metadata.use_mla
-
-        # Determine device based on platform
-        if self.device == "cpu":
-            logger.info("CPU device specified, using MockGPUConnector")
-            return MockGPUConnector(kv_shape=kv_shape)
-        if current_platform.is_cuda_alike():
-            connector_cls = VLLMPagedMemGPUConnectorV2
-            logger.info("CUDA device detected, using VLLMPagedMemGPUConnectorV2")
-        elif current_platform.is_xpu():
-            connector_cls = VLLMPagedMemXPUConnectorV2
-            logger.info("XPU device detected, using VLLMPagedMemXPUConnectorV2")
-        else:
-            logger.info("No GPU device detected, using MockGPUConnector")
-            return MockGPUConnector(kv_shape=kv_shape)
-
-        # Construct the GPU connector
-        gpu_connector = connector_cls(
-            hidden_dim_size,
-            num_layer,
-            use_gpu=False if self.device == "cpu" else True,
-            chunk_size=chunk_size,
-            dtype=kv_dtype,
-            device=self.device,
-            use_mla=use_mla,
-        )
-
-        logger.info(
-            "Constructed GPU connector: hidden_dim_size=%d, num_layer=%d, "
-            "chunk_size=%d, dtype=%s",
-            hidden_dim_size,
-            num_layer,
-            chunk_size,
-            kv_dtype,
-        )
-
-        return gpu_connector
+    @property
+    def api_server(self):
+        """Get the API server instance."""
+        return self._manager.api_server
 
     def _generate_fixed_kvcaches(self, device: str = "cpu") -> dict:
         """Generate fixed pattern kvcaches for testing and MD5 verification.
@@ -366,12 +317,11 @@ class LMCacheStandaloneStarter:
         kv_caches = self._generate_fixed_kvcaches(device=self.device)
         self.kv_caches = kv_caches
 
-        # Initialize the engine with kvcaches
-        self.lmcache_engine.post_init(kvcaches=list(kv_caches.values()))
+        # Post-initialize with kvcaches and start API server
+        self._manager.post_init()
         logger.info("LMCache engine post-initialized with fixed kvcaches")
 
-        # Start internal API server
-        self.api_server.start()
+        self._manager.start_services()
 
         self.running = True
         logger.info("LMCache engine started successfully")
@@ -385,17 +335,7 @@ class LMCacheStandaloneStarter:
         logger.info("Stopping LMCache engine...")
         self.running = False
 
-        if self.api_server:
-            logger.info("Stopping internal API server...")
-            self.api_server.stop()
-
-        if self.lmcache_engine:
-            logger.info("Closing LMCache engine...")
-            self.lmcache_engine.close()
-
-            instance_id = self.config.lmcache_instance_id
-            LMCacheEngineBuilder.destroy(instance_id)
-            logger.info("Engine instance %s destroyed", instance_id)
+        self._manager.stop_services()
 
         logger.info("LMCache engine stopped")
 
@@ -460,28 +400,6 @@ def parse_kv_shape(shape_str: str) -> Tuple[int, int, int, int, int]:
         return parts  # type: ignore[return-value]
     except ValueError as e:
         raise ValueError(f"Invalid kv_shape format: {shape_str}. Error: {e}") from e
-
-
-def parse_extra_params(extra_args: list) -> Dict[str, Any]:
-    """Parse extra parameters in key=value format"""
-    params = {}
-    for arg in extra_args:
-        if "=" in arg:
-            key, value = arg.split("=", 1)
-            key = key.lstrip("-")
-            try:
-                if value.lower() in ("true", "false"):
-                    params[key] = value.lower() == "true"
-                elif value.isdigit():
-                    params[key] = int(value)
-                elif value.replace(".", "", 1).isdigit():
-                    params[key] = float(value)
-                else:
-                    params[key] = value
-            except ValueError:
-                params[key] = value
-            logger.info(f"Extra parameter: {key} = {params[key]}")
-    return params
 
 
 def setup_signal_handlers(starter: LMCacheStandaloneStarter):
@@ -567,12 +485,6 @@ def parse_args() -> argparse.Namespace:
         help="Enable MLA (Multi-Level Attention)",
     )
     parser.add_argument(
-        "--fmt",
-        type=str,
-        default="vllm",
-        help="Cache format (default: vllm)",
-    )
-    parser.add_argument(
         "--device",
         type=str,
         default="cpu",
@@ -580,7 +492,7 @@ def parse_args() -> argparse.Namespace:
     )
 
     args, extra = parser.parse_known_args()
-    args.extra_params = parse_extra_params(extra)
+    args.extra_params = parse_command_line_extra_params(extra)
 
     return args
 
@@ -594,7 +506,7 @@ def main():
     logger.info("=" * 80)
 
     try:
-        config_path = args.config or os.getenv("LMCACHE_CONFIG_FILE")
+        config_path = args.config
         if config_path:
             logger.info("Loading LMCache config file: %s", config_path)
             config = LMCacheEngineConfig.from_file(config_path)
@@ -602,7 +514,7 @@ def main():
             config.update_config_from_env()
         else:
             logger.info("No config file specified, loading from environment variables.")
-            config = LMCacheEngineConfig.from_env()
+            config = lmcache_get_or_create_config()
         # Override with any extra command-line parameters
         if args.extra_params:
             override_config_from_dict(config, args.extra_params)
@@ -638,11 +550,12 @@ def main():
             kv_shape[4],
         )
 
-        metadata = LMCacheEngineMetadata(
+        metadata = LMCacheMetadata(
             model_name=args.model_name,
             world_size=args.world_size,
+            local_world_size=args.world_size,
             worker_id=args.worker_id,
-            fmt=args.fmt,
+            local_worker_id=args.worker_id,
             kv_dtype=kv_dtype,
             kv_shape=kv_shape,
             use_mla=args.use_mla,

@@ -3,7 +3,6 @@
 from typing import TYPE_CHECKING, Optional, Union
 
 # First Party
-from lmcache.config import LMCacheEngineMetadata
 from lmcache.logging import init_logger
 from lmcache.v1.cache_engine import LMCacheEngine
 from lmcache.v1.config import LMCacheEngineConfig
@@ -16,11 +15,15 @@ from lmcache.v1.lookup_client.lmcache_lookup_client_bypass import (
     LMCacheBypassLookupClient,
 )
 from lmcache.v1.lookup_client.mooncake_lookup_client import MooncakeLookupClient
+from lmcache.v1.metadata import LMCacheMetadata
+from lmcache.v1.rpc.zmq_transport import (
+    SocketParams,
+    ZmqReqRepClientTransport,
+    ZmqRouterServerTransport,
+)
+from lmcache.v1.rpc_utils import get_zmq_rpc_path_lmcache
 
 if TYPE_CHECKING:
-    # Third Party
-    from vllm.config import VllmConfig
-
     # First Party
     from lmcache.v1.lookup_client.lmcache_async_lookup_client import (
         LMCacheAsyncLookupServer,
@@ -35,20 +38,19 @@ class LookupClientFactory:
 
     @staticmethod
     def create_lookup_client(
-        vllm_config: "VllmConfig",
         config: LMCacheEngineConfig,
-        metadata: LMCacheEngineMetadata,
+        metadata: LMCacheMetadata,
         lmcache_engine: Optional[LMCacheEngine] = None,
     ) -> LookupClientInterface:
         """
         Create a lookup client based on the configuration.
 
         Args:
-            vllm_config: The vLLM configuration
             config: The LMCache engine configuration
-            lmcache_engine: Optional LMCacheEngine instance for bypass lookup client
-            instance_id: Optional instance ID to retrieve stats logger for
-                        chunk statistics registration
+            metadata: The LMCache engine metadata (includes engine_id,
+                world_size, kv_connector_extra_config)
+            lmcache_engine: Optional LMCacheEngine instance for
+                bypass lookup client
 
         Returns:
             A lookup client instance
@@ -62,7 +64,7 @@ class LookupClientFactory:
                     "Asynchronous loading is not supported for external lookup clients."
                 )
             client = LookupClientFactory._create_external_lookup_client(
-                config.external_lookup_client, vllm_config, config, metadata
+                config.external_lookup_client, config, metadata
             )
         else:
             # First Party
@@ -75,13 +77,14 @@ class LookupClientFactory:
 
             # Check if bypass lookup is enabled and lmcache_engine is provided
             if config.enable_scheduler_bypass_lookup and lmcache_engine is not None:
-                client = LMCacheBypassLookupClient(
-                    vllm_config, config, metadata, lmcache_engine
-                )
+                client = LMCacheBypassLookupClient(config, metadata, lmcache_engine)
             elif config.enable_async_loading:
-                client = LMCacheAsyncLookupClient(vllm_config, config, metadata)
+                client = LMCacheAsyncLookupClient(config, metadata)
             else:
-                client = LMCacheLookupClient(vllm_config, config, metadata)
+                transport = LookupClientFactory._create_zmq_client_transport(
+                    config, metadata
+                )
+                client = LMCacheLookupClient(config, metadata, transport)
 
         if config.hit_miss_ratio is not None and 0 <= config.hit_miss_ratio <= 1:
             client = HitLimitLookupClient(client, config)
@@ -97,14 +100,15 @@ class LookupClientFactory:
     @staticmethod
     def create_lookup_server(
         lmcache_engine: LMCacheEngine,
-        vllm_config: "VllmConfig",
+        metadata: LMCacheMetadata,
     ) -> Optional[Union["LMCacheLookupServer", "LMCacheAsyncLookupServer"]]:
         """
         Create a lookup server based on the configuration.
 
         Args:
             lmcache_engine: The LMCache engine instance
-            vllm_config: The vLLM configuration
+            metadata: The LMCache engine metadata (includes engine_id,
+                world_size, kv_connector_extra_config, worker_id)
 
         Returns:
             A lookup server instance, or None if no server should be created
@@ -115,12 +119,12 @@ class LookupClientFactory:
         )
 
         lookup_server_worker_ids = config.get_lookup_server_worker_ids(
-            lmcache_engine.metadata.use_mla, lmcache_engine.metadata.world_size
+            metadata.use_mla, metadata.world_size
         )
 
         if config.external_lookup_client is None and (
             len(lookup_server_worker_ids) == 0
-            or lmcache_engine.metadata.worker_id in lookup_server_worker_ids
+            or metadata.worker_id in lookup_server_worker_ids
         ):
             # First Party
             from lmcache.v1.lookup_client.lmcache_async_lookup_client import (
@@ -131,25 +135,26 @@ class LookupClientFactory:
             )
 
             if config.enable_async_loading:
-                return LMCacheAsyncLookupServer(lmcache_engine, vllm_config)
+                return LMCacheAsyncLookupServer(lmcache_engine, metadata)
             else:
-                return LMCacheLookupServer(lmcache_engine, vllm_config)
+                transport = LookupClientFactory._create_zmq_server_transport(metadata)
+                return LMCacheLookupServer(lmcache_engine, metadata, transport)
 
         return None
 
     @staticmethod
     def _create_external_lookup_client(
         external_lookup_uri: str,
-        vllm_config: "VllmConfig",
         config: LMCacheEngineConfig,
-        metadata: LMCacheEngineMetadata,
+        metadata: LMCacheMetadata,
     ) -> LookupClientInterface:
         """
         Create an external lookup client based on the URI format.
 
         Args:
             external_lookup_uri: URI in format <scheme>://<address>
-            vllm_config: The vLLM configuration
+            config: The LMCache engine configuration
+            metadata: The LMCache engine metadata
 
         Returns:
             A lookup client instance
@@ -169,7 +174,7 @@ class LookupClientFactory:
         # Route to appropriate client based on scheme
         if scheme == "mooncakestore":
             return LookupClientFactory._create_mooncake_lookup_client(
-                address, vllm_config, config, metadata
+                address, config, metadata
             )
         else:
             raise ValueError(
@@ -180,9 +185,8 @@ class LookupClientFactory:
     @staticmethod
     def _create_mooncake_lookup_client(
         master_address: str,
-        vllm_config: "VllmConfig",
         config: LMCacheEngineConfig,
-        metadata: LMCacheEngineMetadata,
+        metadata: LMCacheMetadata,
     ) -> "MooncakeLookupClient":
         """Create a MooncakeLookupClient instance."""
         # First Party
@@ -190,4 +194,58 @@ class LookupClientFactory:
             MooncakeLookupClient,
         )
 
-        return MooncakeLookupClient(vllm_config, config, metadata, master_address)
+        return MooncakeLookupClient(config, metadata, master_address)
+
+    @staticmethod
+    def _create_zmq_client_transport(
+        config: LMCacheEngineConfig,
+        metadata: LMCacheMetadata,
+    ) -> ZmqReqRepClientTransport:
+        """Create a ZMQ REQ-REP client transport."""
+        kv_extra = metadata.kv_connector_extra_config or {}
+        rpc_port = kv_extra.get("lmcache_rpc_port", 0)
+        assert metadata.engine_id is not None, (
+            "engine_id is required for RPC communication"
+        )
+
+        lookup_ids = config.get_lookup_server_worker_ids(
+            metadata.use_mla, metadata.world_size
+        )
+        ranks = lookup_ids if len(lookup_ids) > 0 else list(range(metadata.world_size))
+
+        socket_params = [
+            SocketParams(
+                socket_path=get_zmq_rpc_path_lmcache(
+                    metadata.engine_id,
+                    "lookup",
+                    rpc_port,
+                    rank,
+                ),
+                rank=rank,
+            )
+            for rank in ranks
+        ]
+        return ZmqReqRepClientTransport(
+            socket_params=socket_params,
+            timeout_ms=config.lookup_timeout_ms,
+        )
+
+    @staticmethod
+    def _create_zmq_server_transport(
+        metadata: LMCacheMetadata,
+    ) -> ZmqRouterServerTransport:
+        """Create a ZMQ ROUTER server transport."""
+        kv_extra = metadata.kv_connector_extra_config or {}
+        rpc_port = kv_extra.get("lmcache_rpc_port", 0)
+        assert metadata.engine_id is not None, (
+            "engine_id is required for RPC communication"
+        )
+        socket_path = get_zmq_rpc_path_lmcache(
+            metadata.engine_id,
+            "lookup",
+            rpc_port,
+            metadata.worker_id,
+        )
+        return ZmqRouterServerTransport(
+            socket_path=socket_path,
+        )

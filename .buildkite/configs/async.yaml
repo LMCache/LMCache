@@ -2,7 +2,6 @@ workload:
   type: long_doc_qa
   max-inflight-requests: 20
   sleep-time-after-warmup: 20
-  expected-latency-gain: true
   num-documents: 20
   repeat-count: 1
   hit-miss-ratio: 2:2
@@ -17,6 +16,8 @@ docker:
     - "LMCACHE_ENABLE_ASYNC_LOADING=True"
     - "LMCACHE_EXTRA_CONFIG={\"lookup_backoff_time\": 0.01, \"use_odirect\": True}"
     - "LMCACHE_SAVE_UNFULL_CHUNK=False"
+    - "LMCACHE_INTERNAL_API_SERVER_ENABLED=True"
+    - "LMCACHE_INTERNAL_API_SERVER_SOCKET_PATH_PREFIX=/tmp/lmcache_internal_api_server/socket"
 
 vllm:
   model: "meta-llama/Llama-3.1-8B-Instruct"
@@ -26,3 +27,6 @@ vllm:
     - "--no-enable-prefix-caching"
     - "--kv-transfer-config"
     - "{\"kv_connector\":\"LMCacheConnectorV1\",\"kv_role\":\"kv_both\"}"
+
+checking-fields:
+  - query_round_time_per_prompt

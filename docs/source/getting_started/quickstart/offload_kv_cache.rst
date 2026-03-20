@@ -101,6 +101,14 @@ Use CPU offloading in online inference
 
 This section demonstrates how to use CPU memory offloading in online serving scenarios. 
 
+First, create a configuration file named ``lmcache_config.yaml`` with the following content:
+
+.. code-block:: yaml
+
+    chunk_size: 256
+    local_cpu: true
+    max_local_cpu_size: 5
+
 .. note::
     LMCache supports extensive configuration through a ``lmcache_config.yaml`` file where you can customize chunk sizes, memory limits, storage backends, and more. We'll cover advanced configuration options in later examples. For now, let's run a minimal example with default configuration.
 
@@ -108,6 +116,7 @@ Launch the vLLM server with LMCache integration using environment variables. Her
 
 .. code-block:: bash
 
+    LMCACHE_CONFIG_FILE=lmcache_config.yaml \
     vllm serve \
         Qwen/Qwen3-8B \
         --kv-transfer-config \

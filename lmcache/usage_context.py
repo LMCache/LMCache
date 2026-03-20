@@ -18,9 +18,10 @@ import requests
 import torch
 
 # First Party
-from lmcache.config import LMCacheEngineConfig, LMCacheEngineMetadata
 from lmcache.connections import global_http_connection
 from lmcache.logging import init_logger
+from lmcache.v1.config import LMCacheEngineConfig
+from lmcache.v1.metadata import LMCacheMetadata
 
 if TYPE_CHECKING:
     # First Party
@@ -66,21 +67,20 @@ class EnvMessage:
 
 
 class EngineMessage:
-    def __init__(self, config: LMCacheEngineConfig, metadata: LMCacheEngineMetadata):
+    def __init__(self, config: LMCacheEngineConfig, metadata: LMCacheMetadata):
         self.chunksize = config.chunk_size
-        self.local_device = config.local_device
-        self.max_local_cache_size = config.max_local_cache_size
+        self.local_device = "cpu" if config.local_cpu else "cuda"
+        self.max_local_cache_size = int(config.max_local_cpu_size)
         self.remote_url = config.remote_url
         self.remote_serde = config.remote_serde
-        self.pipelined_backend = config.pipelined_backend
+        self.pipelined_backend = False
         self.save_decode_cache = config.save_decode_cache
         self.enable_blending = config.enable_blending
-        self.blend_recompute_ratio = config.blend_recompute_ratio
+        self.blend_recompute_ratio = 0.15
         self.blend_min_tokens = config.blend_min_tokens
         self.model_name = metadata.model_name
         self.world_size = metadata.world_size
         self.worker_id = metadata.worker_id
-        self.fmt = metadata.fmt
         self.kv_dtype = metadata.kv_dtype
         self.kv_shape = metadata.kv_shape
 
@@ -105,7 +105,7 @@ class UsageContext:
         self,
         server_url: str,
         config: LMCacheEngineConfig,
-        metadata: LMCacheEngineMetadata,
+        metadata: LMCacheMetadata,
         local_log: Optional[str] = None,
     ):
         self.server_url = server_url
@@ -285,7 +285,7 @@ class UsageContext:
 class ContinuousUsageContext:
     _instance = None
 
-    def __init__(self, metadata: LMCacheEngineMetadata):
+    def __init__(self, metadata: LMCacheMetadata):
         self.cache_lifespan_buckets = [
             0,
             1,
@@ -303,7 +303,7 @@ class ContinuousUsageContext:
             2500,
             5000,
         ]
-        self.metadata: LMCacheEngineMetadata = metadata
+        self.metadata: LMCacheMetadata = metadata
         self.cache_usage_url: str = urljoin(
             os.getenv("LMCACHE_USAGE_TRACK_URL", "http://stats.lmcache.ai:8080"),
             "cache-usage",
@@ -328,7 +328,7 @@ class ContinuousUsageContext:
         self.cache_lifespan_data: List[float] = []
 
     @staticmethod
-    def GetOrCreate(metadata: LMCacheEngineMetadata) -> "ContinuousUsageContext":
+    def GetOrCreate(metadata: LMCacheMetadata) -> "ContinuousUsageContext":
         if ContinuousUsageContext._instance is None:
             ContinuousUsageContext._instance = ContinuousUsageContext(metadata)
         if ContinuousUsageContext._instance.metadata != metadata:
@@ -399,7 +399,7 @@ class ContinuousUsageContext:
 
 def InitializeUsageContext(
     config: LMCacheEngineConfig,
-    metadata: LMCacheEngineMetadata,
+    metadata: LMCacheMetadata,
     local_log: Optional[str] = None,
 ):
     server_url = urljoin(

@@ -26,7 +26,7 @@ RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
     && apt-get update -y \
     && apt-get install -y --no-install-recommends \
         ccache software-properties-common git curl sudo \
-        python3 python3-dev python3-venv python3-pip tzdata \
+        python3 python3-dev python3-venv python3-pip tzdata libxcb1-dev \
     && ldconfig /usr/local/cuda-$(echo $CUDA_VERSION | cut -d. -f1,2)/compat/ \
     && curl -LsSf https://astral.sh/uv/install.sh | sh \
     && mv ~/.local/bin/uv /usr/local/bin/ \
@@ -47,10 +47,6 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 # CUDA arch list used by torch
 ARG torch_cuda_arch_list='7.0 7.5 8.0 8.6 8.9 9.0 10.0+PTX'
 ENV TORCH_CUDA_ARCH_LIST=${torch_cuda_arch_list}
-
-# Override the arch list for flash-attn to reduce the binary size
-ARG vllm_fa_cmake_gpu_arches='80-real;90-real;100-real'
-ENV VLLM_FA_CMAKE_GPU_ARCHES=${vllm_fa_cmake_gpu_arches}
 
 #################### vLLM IMAGE & LMCache (Build) ##########################
 # Integrate vLLM nightly build and LMCache build, and expose vLLM OpenAI API

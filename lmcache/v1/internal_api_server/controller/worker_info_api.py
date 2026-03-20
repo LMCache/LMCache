@@ -109,7 +109,7 @@ async def get_workers(
 
         # Case 3: Get all workers across all instances
         else:
-            worker_infos = reg_controller.registry.get_all_worker_infos()
+            worker_infos = reg_controller.registry.get_all_worker_infos_cached()
             workers = []
             for worker_info in worker_infos:
                 worker_node = reg_controller.registry.get_worker(

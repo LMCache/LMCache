@@ -10,9 +10,9 @@ import inspect
 import pkgutil
 
 # First Party
-from lmcache.config import LMCacheEngineMetadata
 from lmcache.logging import init_logger
 from lmcache.v1.config import LMCacheEngineConfig
+from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.storage_backend.connector.base_connector import RemoteConnector
 from lmcache.v1.storage_backend.connector.instrumented_connector import (
     InstrumentedRemoteConnector,
@@ -113,7 +113,7 @@ class ConnectorContext:
         loop: asyncio.AbstractEventLoop,
         local_cpu_backend: Optional[LocalCPUBackend],
         config: Optional[LMCacheEngineConfig],
-        metadata: Optional[LMCacheEngineMetadata],
+        metadata: Optional[LMCacheMetadata],
     ):
         self.url = url
         self.loop = loop
@@ -127,13 +127,13 @@ class ConnectorContext:
         self.config = config
         self.metadata = metadata
 
-    def get_full_chunk_size(self) -> int:
+    def get_full_chunk_size_bytes(self) -> int:
         """
         return the number of bytes in a full chunk
         useful for S3Connector where we need to preallocate filesystem buffers
         in ramfs for zero-copy transfers
         """
-        return self.local_cpu_backend.get_full_chunk_size()
+        return self.local_cpu_backend.get_full_chunk_size_bytes()
 
 
 class ConnectorAdapter(ABC):
@@ -167,7 +167,7 @@ class ConnectorManager:
         loop: asyncio.AbstractEventLoop,
         local_cpu_backend: Optional[LocalCPUBackend],
         config: Optional[LMCacheEngineConfig] = None,
-        metadata: Optional[LMCacheEngineMetadata] = None,
+        metadata: Optional[LMCacheMetadata] = None,
     ) -> None:
         logger.info("Initializing ConnectorManager")
         self.context = ConnectorContext(
@@ -178,10 +178,11 @@ class ConnectorManager:
             metadata=metadata,
         )
         self.adapters: List[ConnectorAdapter] = []
-        self._discover_adapters()
+        self._remote_adapters_builtin_launcher()
+        self._remote_adapters_plugin_launcher(config)
 
-    def _discover_adapters(self) -> None:
-        """Automatically discover and register all ConnectorAdapter subclasses."""
+    def _remote_adapters_builtin_launcher(self) -> None:
+        """Automatically load all builtin remote connector adapters."""
         # Import current package to ensure all modules are loaded
         # First Party
         import lmcache.v1.storage_backend.connector as connector_pkg
@@ -216,15 +217,76 @@ class ConnectorManager:
             except ImportError as e:
                 logger.warning(f"Failed to import module {module_name}: {e}")
 
+    def _remote_adapters_plugin_launcher(self, config: LMCacheEngineConfig) -> None:
+        """Automatically load all plug and play remote connector adapters."""
+
+        if config is None:
+            logger.warning(
+                "Configuration not available to parse remote connector adapters."
+            )
+            return
+
+        # Get the list of allowed remote connector adapters if configured
+        remote_storage_plugins = (
+            set(config.remote_storage_plugins)
+            if config.remote_storage_plugins
+            else set()
+        )
+
+        for remote_storage_plugin in remote_storage_plugins:
+            try:
+                extra_config = config.extra_config
+                if extra_config is None:
+                    logger.warning(
+                        f"Remote connector {remote_storage_plugin} configuration is "
+                        f"missing 'extra_config'."
+                    )
+                    continue
+
+                module_path = extra_config.get(
+                    f"remote_storage_plugin.{remote_storage_plugin}.module_path"
+                )
+                class_name = extra_config.get(
+                    f"remote_storage_plugin.{remote_storage_plugin}.class_name"
+                )
+
+                if not module_path or not class_name:
+                    logger.warning(
+                        f"Remote connector {remote_storage_plugin} missing adapter "
+                        f"module_path or class_name"
+                    )
+                    continue
+
+                # Dynamically import the module
+                module = importlib.import_module(module_path)
+                # Get the class from the module
+                adapter_class = getattr(module, class_name)
+                adapter_instance = adapter_class()
+                if not isinstance(adapter_instance, ConnectorAdapter):
+                    logger.warning(
+                        f"Remote connector {remote_storage_plugin} adapter does not "
+                        f"implement the 'ConnectorAdapter' interface"
+                    )
+                    adapter_instance = None
+                    continue
+                self.adapters.append(adapter_instance)
+                logger.info(f"Discovered adapter: {adapter_class.__name__}")
+            except (ImportError, AttributeError) as e:
+                logger.error(
+                    f"Failed to load remote connector {remote_storage_plugin} due to "
+                    f"import/attribute error: {e}"
+                )
+            except Exception as e:
+                logger.error(
+                    f"Failed to create remote connector {remote_storage_plugin} "
+                    f"adapter: {str(e)}"
+                )
+
     def create_connector(self) -> RemoteConnector:
         for adapter in self.adapters:
             if adapter.can_parse(self.context.url):
                 logger.info(f"Creating connector for URL: {self.context.url}")
                 connector = adapter.create_connector(self.context)
-                logger.info(f"initializing chunk meta for connector: {connector}")
-                connector.init_chunk_meta(self.context.config, self.context.metadata)
-                logger.info(f"post-initializing connector: {connector}")
-                connector.post_init()
                 return connector
 
         raise ValueError(f"No adapter found for URL: {self.context.url}")
@@ -235,7 +297,7 @@ def CreateConnector(
     loop: asyncio.AbstractEventLoop,
     local_cpu_backend: Optional[LocalCPUBackend],
     config: Optional[LMCacheEngineConfig] = None,
-    metadata: Optional[LMCacheEngineMetadata] = None,
+    metadata: Optional[LMCacheMetadata] = None,
 ) -> InstrumentedRemoteConnector:
     """
     Create a remote connector from the given URL.

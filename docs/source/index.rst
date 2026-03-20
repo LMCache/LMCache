@@ -75,6 +75,7 @@ Documentation
    getting_started/quickstart/index
    getting_started/benchmarking
    getting_started/kv_cache_calculator
+   getting_started/cli
    getting_started/troubleshoot
    getting_started/faq
    getting_started/quickstart/standalone_starter
@@ -90,7 +91,13 @@ Documentation
    kv_cache/async_loading
    kv_cache/caching_policies
    kv_cache/p2p_sharing
-   kv_cache/multiprocess_mode
+:raw-html:`<br />`
+
+.. toctree::
+   :maxdepth: 3
+   :caption: Multiprocess Mode
+
+   mp/index
 
 :raw-html:`<br />`
 
@@ -129,6 +136,7 @@ Documentation
    production/kubernetes_deployment
    production/kv_cache_events
    production/observability/index
+   production/performance_tuning
 
 :raw-html:`<br />`
 
@@ -156,6 +164,7 @@ Documentation
    developer_guide/architecture
    developer_guide/integration
    developer_guide/extending_lmcache/index
+   developer_guide/cli
    developer_guide/usage/index
 
 :raw-html:`<br />`

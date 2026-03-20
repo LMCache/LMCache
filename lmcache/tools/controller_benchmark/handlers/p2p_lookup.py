@@ -14,15 +14,19 @@ if TYPE_CHECKING:
     from ..benchmark import TestData, ZMQControllerBenchmark
 
 # Local
-from .base import OperationHandler
+from .base import OperationHandler, SocketType
 
 
 class P2PLookupHandler(OperationHandler):
-    """Handler for P2P lookup operations (uses REQ-REP socket)"""
+    """Handler for P2P lookup operations (uses DEALER-ROUTER socket)"""
 
     @property
     def operation_name(self) -> str:
         return "p2p_lookup"
+
+    @property
+    def socket_type(self) -> SocketType:
+        return SocketType.DEALER
 
     def create_message(
         self, benchmark: "ZMQControllerBenchmark", test_data: "TestData"
@@ -41,7 +45,3 @@ class P2PLookupHandler(OperationHandler):
 
     def get_message_count(self, benchmark: "ZMQControllerBenchmark") -> int:
         return benchmark.config.num_hashes
-
-    def use_req_socket(self) -> bool:
-        """P2P lookup requires REQ-REP pattern"""
-        return True

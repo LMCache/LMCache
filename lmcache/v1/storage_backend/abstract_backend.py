@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from concurrent.futures import Future
-from typing import TYPE_CHECKING, Any, List, Optional, Sequence, Union
+from typing import TYPE_CHECKING, Any, Callable, List, Optional, Sequence, Union
 import abc
 import asyncio
 
@@ -9,7 +9,6 @@ import asyncio
 import torch
 
 # First Party
-from lmcache.config import LMCacheEngineMetadata
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_management import (
@@ -17,6 +16,7 @@ from lmcache.v1.memory_management import (
     MemoryFormat,
     MemoryObj,
 )
+from lmcache.v1.metadata import LMCacheMetadata
 
 if TYPE_CHECKING:
     # First Party
@@ -73,12 +73,20 @@ class StorageBackendInterface(metaclass=abc.ABCMeta):
         keys: Sequence[CacheEngineKey],
         objs: List[MemoryObj],
         transfer_spec: Any = None,
+        on_complete_callback: Optional[Callable[[CacheEngineKey], None]] = None,
     ) -> Union[List[Future], None]:
         """
         An async function to put the MemoryObj into the storage backend.
 
         :param List[CacheEngineKey] keys: The keys of the MemoryObjs.
         :param List[MemoryObj] objs: The MemoryObjs to be stored.
+        :param Any transfer_spec: Optional transfer specification.
+        :param on_complete_callback: Optional callback invoked once per key
+            after the backend finishes persisting the KV chunk for that key.
+            For batched puts, the callback is invoked separately for each key
+            when that key completes (not once per batch). Callback exceptions
+            are caught and logged. Backends that cannot use this callback may
+            ignore it.
 
         :return:  Union[List[Future], None]: A list of `Future` objects if the
         storage persistence operation is asynchronous and is successful.
@@ -96,9 +104,13 @@ class StorageBackendInterface(metaclass=abc.ABCMeta):
         keys: Sequence[CacheEngineKey],
         objs: List[MemoryObj],
         transfer_spec: Any = None,
+        on_complete_callback: Optional[Callable[[CacheEngineKey], None]] = None,
     ) -> None:
         """
         An async version of batched_submit_put_task.
+
+        :param on_complete_callback: Optional callback invoked once per key
+            after the backend finishes persisting the KV chunk for that key.
         """
         raise NotImplementedError
 
@@ -288,7 +300,7 @@ class AllocatorBackendInterface(StorageBackendInterface):
 
     @abc.abstractmethod
     def initialize_allocator(
-        self, config: LMCacheEngineConfig, metadata: LMCacheEngineMetadata
+        self, config: LMCacheEngineConfig, metadata: LMCacheMetadata
     ) -> MemoryAllocatorInterface:
         """
         Create the correct memory allocator for the current storage backend
@@ -388,7 +400,7 @@ class StoragePluginInterface(StorageBackendInterface):
         self,
         dst_device: str = "cuda",
         config: Optional[LMCacheEngineConfig] = None,
-        metadata: Optional[LMCacheEngineMetadata] = None,
+        metadata: Optional[LMCacheMetadata] = None,
         local_cpu_backend: Optional["LocalCPUBackend"] = None,
         loop: Optional[asyncio.AbstractEventLoop] = None,
     ):
@@ -400,7 +412,7 @@ class StoragePluginInterface(StorageBackendInterface):
             (e.g., "cuda" or "cpu").
         :param LMCacheEngineConfig config: Optional configuration object for the
             cache engine.
-        :param LMCacheEngineMetadata metadata: Optional metadata describing the cache
+        :param LMCacheMetadata metadata: Optional metadata describing the cache
             engine state or version.
         :param LocalCPUBackend local_cpu_backend: Optional backend for local CPU-based
             inference or caching.

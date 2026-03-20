@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
+from asyncio import CancelledError
 from concurrent.futures import Future
 from typing import Any, Awaitable, Callable
 import asyncio
@@ -53,7 +54,20 @@ class AsyncPQExecutor(BaseJobExecutor):
 
     async def _worker(self):
         while True:
-            item = await self._queue.get()
+            try:
+                item = await self._queue.get()
+            except GeneratorExit:
+                # GeneratorExit means the generator/coroutine is being closed,
+                # likely during interpreter shutdown.
+                # Just exit without calling task_done()
+                break
+            except CancelledError:
+                # Task cancellation, we should exit cleanly
+                break
+            except Exception:
+                # Any other exception, break the loop
+                break
+
             # Detect sentinel both as raw object and wrapped tuple
             if item is _SENTINEL or (
                 isinstance(item, tuple) and len(item) >= 3 and item[2] is _SENTINEL
@@ -88,14 +102,16 @@ class AsyncPQExecutor(BaseJobExecutor):
                 (sentinel_priority, next(self._counter), _SENTINEL, None, {}, None)
             )
 
-        if wait:
-            # Let workers drain tasks
-            await self._queue.join()
-
-            # FORCE CANCEL to avoid loop-closing race
-            for fut in self._workers:
+        # Cancel all worker futures to ensure they stop
+        # Even when wait=False, we should cancel workers to prevent hanging coroutines
+        for fut in self._workers:
+            if not fut.done():
                 fut.cancel()
 
+        if wait:
+            # Let workers drain tasks and exit gracefully
+            await self._queue.join()
+            # Wait for all workers to complete (with cancellation handling)
             await asyncio.gather(
                 *[asyncio.wrap_future(fut, loop=self.loop) for fut in self._workers],
                 return_exceptions=True,
@@ -136,7 +152,20 @@ class AsyncPQThreadPoolExecutor(AsyncPQExecutor):
 
     async def _worker(self):
         while True:
-            item = await self._queue.get()
+            try:
+                item = await self._queue.get()
+            except GeneratorExit:
+                # GeneratorExit means the generator/coroutine is being closed,
+                # likely during interpreter shutdown.
+                # Just exit without calling task_done()
+                break
+            except CancelledError:
+                # Task cancellation, we should exit cleanly
+                break
+            except Exception:
+                # Any other exception, break the loop
+                break
+
             # Detect sentinel both as raw object and wrapped tuple
             if item is _SENTINEL or (
                 isinstance(item, tuple) and len(item) >= 3 and item[2] is _SENTINEL
@@ -156,6 +185,8 @@ class AsyncPQThreadPoolExecutor(AsyncPQExecutor):
                 self._queue.task_done()
 
     async def _shutdown_async(self, wait: bool = True) -> None:
+        if self._closed:
+            return
         self._closed = True
         # Enqueue comparable sentinel tuples with the highest priority value so
         # that outstanding work drains before shutdown signals are consumed.
@@ -165,17 +196,25 @@ class AsyncPQThreadPoolExecutor(AsyncPQExecutor):
             await self._queue.put(
                 (sentinel_priority, next(self._counter), _SENTINEL, None, {}, None)
             )
+
         if wait:
+            # Let workers drain tasks and exit gracefully
             await self._queue.join()
-
-            # FORCE CANCEL to avoid loop-closing race
+            # Cancel all worker futures after queue is drained
             for fut in self._workers:
-                fut.cancel()
-
+                if not fut.done():
+                    fut.cancel()
+            # Wait for all workers to complete (with cancellation handling)
             await asyncio.gather(
                 *[asyncio.wrap_future(fut, loop=self.loop) for fut in self._workers],
                 return_exceptions=True,
             )
+        else:
+            # When wait=False, just cancel workers immediately
+            # This may cause RuntimeError if loop is closed, but that's expected
+            for fut in self._workers:
+                if not fut.done():
+                    fut.cancel()
 
     def shutdown(self, wait: bool = True) -> None:
         future = asyncio.run_coroutine_threadsafe(self._shutdown_async(wait), self.loop)

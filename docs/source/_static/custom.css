@@ -1,3 +1,28 @@
+/* Force white background on all Mermaid diagrams and fix sizing */
+.mermaid {
+    background-color: #ffffff !important;
+    padding: 10px !important;
+    border-radius: 8px !important;
+    margin: 10px 0 !important;
+    display: flex !important;
+    justify-content: center !important;
+}
+
+.mermaid svg {
+    background-color: #ffffff !important;
+    height: auto !important;
+    max-height: 300px !important;
+}
+
+/* Tighter fit for flowcharts */
+.mermaid[data-processed="true"] {
+    overflow: visible !important;
+}
+
+.mermaid svg[id^="flowchart"] {
+    max-height: 250px !important;
+}
+
 /* Hide extra buttons if multiple are showing */
 div.highlight button.copybtn + button.copybtn {
     display: none;

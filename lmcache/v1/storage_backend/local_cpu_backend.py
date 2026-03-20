@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from concurrent.futures import Future
-from typing import TYPE_CHECKING, Any, List, Optional, Sequence, Union
+from typing import TYPE_CHECKING, Any, Callable, List, Optional, Sequence, Union
 import threading
 import time
 
@@ -9,14 +9,12 @@ import time
 import torch
 
 # First Party
-from lmcache.config import LMCacheEngineMetadata
 from lmcache.integration.vllm.utils import get_size_bytes
 from lmcache.logging import init_logger
 from lmcache.observability import LMCStatsMonitor, PrometheusLogger
 from lmcache.utils import CacheEngineKey, _lmcache_nvtx_annotate
 from lmcache.v1.cache_controller.message import OpType
 from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.lazy_memory_allocator import LazyMixedMemoryAllocator
 from lmcache.v1.memory_management import (
     MemoryAllocatorInterface,
     MemoryFormat,
@@ -24,6 +22,7 @@ from lmcache.v1.memory_management import (
     MixedMemoryAllocator,
     PagedCpuGpuMemoryAllocator,
 )
+from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.storage_backend.abstract_backend import AllocatorBackendInterface
 from lmcache.v1.storage_backend.batched_message_sender import BatchedMessageSender
 from lmcache.v1.storage_backend.cache_policy import get_cache_policy
@@ -46,7 +45,7 @@ class LocalCPUBackend(AllocatorBackendInterface):
     def __init__(
         self,
         config: LMCacheEngineConfig,
-        metadata: Optional[LMCacheEngineMetadata] = None,
+        metadata: Optional[LMCacheMetadata] = None,
         dst_device: str = "cuda",
         lmcache_worker: Optional["LMCacheWorker"] = None,
         memory_allocator: Optional[MemoryAllocatorInterface] = None,
@@ -140,12 +139,18 @@ class LocalCPUBackend(AllocatorBackendInterface):
         return False
 
     def submit_put_task(
-        self, key: CacheEngineKey, memory_obj: MemoryObj
+        self,
+        key: CacheEngineKey,
+        memory_obj: MemoryObj,
+        on_complete_callback: Optional[Callable[[CacheEngineKey], None]] = None,
     ) -> Optional[Future]:
         """
         Synchronously put the MemoryObj into the local cpu backend.
-        """
 
+        :param on_complete_callback: Optional callback invoked after the
+            synchronous put completes. Callback exceptions are caught and logged.
+        """
+        stored = False
         with self.cpu_lock:
             if key in self.hot_cache:
                 return None
@@ -161,6 +166,14 @@ class LocalCPUBackend(AllocatorBackendInterface):
                     op_type=OpType.ADMIT,
                     key=key.chunk_hash,
                 )
+            stored = True
+
+        # Call callback after put completes (outside lock)
+        if stored and on_complete_callback is not None:
+            try:
+                on_complete_callback(key)
+            except Exception as e:
+                logger.warning(f"on_complete_callback failed for key {key}: {e}")
 
         return None
 
@@ -169,16 +182,22 @@ class LocalCPUBackend(AllocatorBackendInterface):
         keys: Sequence[CacheEngineKey],
         memory_objs: List[MemoryObj],
         transfer_spec: Any = None,
+        on_complete_callback: Optional[Callable[[CacheEngineKey], None]] = None,
     ) -> None:
         """
         Synchronously put the MemoryObjs into the local cpu backend.
+
+        :param on_complete_callback: Optional callback invoked once per key
+            after that key's put completes (not once per batch).
         """
         if not self.use_hot:
             return
 
         # TODO(Jiayi): optimize this with batching
         for key, memory_obj in zip(keys, memory_objs, strict=False):
-            self.submit_put_task(key, memory_obj)
+            self.submit_put_task(
+                key, memory_obj, on_complete_callback=on_complete_callback
+            )
 
     def get_blocking(
         self,
@@ -272,7 +291,7 @@ class LocalCPUBackend(AllocatorBackendInterface):
         self,
         configured_cpu_size: float,
         config: LMCacheEngineConfig,
-        metadata: Optional[LMCacheEngineMetadata] = None,
+        metadata: Optional[LMCacheMetadata] = None,
     ) -> float:
         """
         Calculate the effective CPU memory size based on system available memory
@@ -327,7 +346,7 @@ class LocalCPUBackend(AllocatorBackendInterface):
     def initialize_allocator(
         self,
         config: LMCacheEngineConfig,
-        metadata: Optional[LMCacheEngineMetadata] = None,
+        metadata: Optional[LMCacheMetadata] = None,
     ) -> MemoryAllocatorInterface:
         cpu_size = config.max_local_cpu_size
 
@@ -351,24 +370,25 @@ class LocalCPUBackend(AllocatorBackendInterface):
 
         # Calculate effective CPU memory size
         cpu_size = self._calculate_effective_cpu_size(cpu_size, config, metadata)
+        cpu_size_bytes = int(cpu_size * 1024**3)
+
+        allocator_align_bytes = self._resolve_local_cpu_allocator_alignment(config)
+        if allocator_align_bytes is not None:
+            logger.info(
+                "LocalCPUBackend: using pinned allocation alignment=%d bytes",
+                allocator_align_bytes,
+            )
 
         if config.enable_p2p:
             # TODO(baoloongmao): Add lazy memory allocator support for P2P mode
             # For now, keep the original P2P implementation
             assert metadata is not None
-            meta_shape = torch.Size(metadata.kv_shape)
-            # TODO(Jiayi): remove this hardcode
-            new_shape = torch.Size(
-                [
-                    meta_shape[1],
-                    meta_shape[0],
-                    meta_shape[2],
-                    meta_shape[3] * meta_shape[4],
-                ]
-            )
+            shapes = metadata.get_shapes()
+            dtypes = metadata.get_dtypes()
+
             paged_mem_allocator = PagedCpuGpuMemoryAllocator()
-            chunk_size_bytes = get_size_bytes([new_shape], [metadata.kv_dtype])
-            origin_cpu_size_bytes = int(cpu_size * 1024**3)
+            chunk_size_bytes = get_size_bytes(shapes, dtypes)
+            origin_cpu_size_bytes = cpu_size_bytes
             align_cpu_size_bytes = (
                 origin_cpu_size_bytes // chunk_size_bytes * chunk_size_bytes
             )
@@ -378,8 +398,8 @@ class LocalCPUBackend(AllocatorBackendInterface):
             )
             paged_mem_allocator.init_cpu_memory_allocator(
                 align_cpu_size_bytes,
-                shapes=[new_shape],
-                dtypes=[metadata.kv_dtype],
+                shapes=shapes,
+                dtypes=dtypes,
                 fmt=MemoryFormat.KV_2LTD,  # TODO: remove this hardcode
                 numa_mapping=numa_mapping,
             )
@@ -390,37 +410,80 @@ class LocalCPUBackend(AllocatorBackendInterface):
                 config.enable_lazy_memory_allocator
                 and cpu_size > config.lazy_memory_safe_size
             )
-
             if use_lazy:
+                logger.warning(
+                    "LazyMixedMemoryAllocator is temporarily unavailable; "
+                    "falling back to MixedMemoryAllocator with full allocation. "
+                    "Disable enable_lazy_memory_allocator or reduce "
+                    "max_local_cpu_size to avoid large pinned allocations."
+                )
+            elif config.enable_lazy_memory_allocator:
                 logger.info(
-                    f"Using LazyMixedMemoryAllocator with "
-                    f"initial_ratio={config.lazy_memory_initial_ratio}, "
-                    f"expand_trigger_ratio="
-                    f"{config.lazy_memory_expand_trigger_ratio}, "
-                    f"step_ratio={config.lazy_memory_step_ratio}"
+                    f"LazyMixedMemoryAllocator is disabled because "
+                    f"cpu_size ({cpu_size:.2f} GB) does not exceed "
+                    f"lazy_memory_safe_size "
+                    f"({config.lazy_memory_safe_size:.2f} GB). "
+                    f"Using MixedMemoryAllocator instead."
                 )
-                return LazyMixedMemoryAllocator(
-                    int(cpu_size * 1024**3),
-                    config=config,
-                    numa_mapping=numa_mapping,
-                    memory_limit_callback=lambda: int(
-                        self._calculate_effective_cpu_size(cpu_size, config, metadata)
-                        * 1024**3
-                    ),
-                )
-            else:
-                if config.enable_lazy_memory_allocator:
-                    logger.info(
-                        f"LazyMixedMemoryAllocator is disabled because "
-                        f"cpu_size ({cpu_size:.2f} GB) does not exceed "
-                        f"lazy_memory_safe_size "
-                        f"({config.lazy_memory_safe_size:.2f} GB). "
-                        f"Using MixedMemoryAllocator instead."
-                    )
+            if allocator_align_bytes is not None:
                 return MixedMemoryAllocator(
-                    int(cpu_size * 1024**3),
+                    cpu_size_bytes,
                     numa_mapping=numa_mapping,
+                    align_bytes=allocator_align_bytes,
                 )
+            return MixedMemoryAllocator(
+                cpu_size_bytes,
+                numa_mapping=numa_mapping,
+                config=config,
+            )
+
+    @staticmethod
+    def _is_power_of_two(value: int) -> bool:
+        return value > 0 and (value & (value - 1)) == 0
+
+    def _resolve_local_cpu_allocator_alignment(
+        self, config: LMCacheEngineConfig
+    ) -> Optional[int]:
+        """
+        Determine pinned-memory alignment for LocalCPUBackend allocator.
+
+        Precedence:
+        1) explicit override: extra_config["local_cpu.pinned_align_bytes"]
+        2) rust raw block auto mode:
+           - rust_raw_block.device_path is set
+           - rust_raw_block.use_odirect is true
+           - rust_raw_block.align_local_cpu_allocator is true (default)
+           -> use rust_raw_block.block_align
+        3) None (use allocator default)
+        """
+        extra = config.extra_config or {}
+
+        explicit_align = extra.get("local_cpu.pinned_align_bytes")
+        if explicit_align is not None:
+            align = int(explicit_align)
+            if not self._is_power_of_two(align):
+                raise ValueError(
+                    "extra_config['local_cpu.pinned_align_bytes'] must be "
+                    "a positive power of two"
+                )
+            return align
+
+        rust_device_path = extra.get("rust_raw_block.device_path")
+        rust_use_odirect = bool(extra.get("rust_raw_block.use_odirect", False))
+        rust_auto_align = bool(
+            extra.get("rust_raw_block.align_local_cpu_allocator", True)
+        )
+
+        if not rust_device_path or not rust_use_odirect or not rust_auto_align:
+            return None
+
+        rust_block_align = int(extra.get("rust_raw_block.block_align", 4096))
+        if not self._is_power_of_two(rust_block_align):
+            raise ValueError(
+                "extra_config['rust_raw_block.block_align'] must be a positive "
+                "power of two when O_DIRECT alignment is enabled"
+            )
+        return rust_block_align
 
     @_lmcache_nvtx_annotate
     def allocate(
@@ -650,7 +713,7 @@ class LocalCPUBackend(AllocatorBackendInterface):
         self.stats_monitor.update_local_cpu_evict_metrics(evict_keys_count)
         return memory_objs
 
-    def get_full_chunk_size(self) -> int:
+    def get_full_chunk_size_bytes(self) -> int:
         logger.info("Calculating the size of a single LMCache chunk")
         assert self.metadata is not None, (
             "metadata required for chunk budget calculation"
@@ -693,7 +756,7 @@ class LocalCPUBackend(AllocatorBackendInterface):
             int: The estimated chunk budget for concurrent allocations
         """
         total_memory = int(self.config.max_local_cpu_size * 1024**3)
-        chunk_bytes = self.get_full_chunk_size()
+        chunk_bytes = self.get_full_chunk_size_bytes()
         # add alignment overhead
         # (MixedMemoryAllocator uses TensorMemoryAllocator with 4KB alignment)
         assert hasattr(self.memory_allocator, "align_bytes")

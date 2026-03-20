@@ -78,11 +78,10 @@ docker run --runtime nvidia --gpus all \
 LMCache stores data in Redis using a structured key format. Each key contains the following information in a delimited format:
 
 ```
-format@model_name@world_size@worker_id@chunk_hash
+model_name@world_size@worker_id@chunk_hash
 ```
 
 Where:
-- `format`: The model format (e.g., "vllm" or "huggingface")
 - `model_name`: Name of the language model
 - `world_size`: Total number of workers in distributed deployment
 - `worker_id`: ID of the worker that created this cache entry

@@ -257,6 +257,7 @@ def main():
         monitor_ports = json.loads(args.monitor_ports)
         pull_port = monitor_ports.get("pull", 8100)
         reply_port = monitor_ports.get("reply")
+        heartbeat_port = monitor_ports.get("heartbeat")
     except json.JSONDecodeError as e:
         logger.error("Failed to parse monitor-ports JSON: %s", e)
         raise ValueError("Invalid monitor-ports format") from e
@@ -267,6 +268,9 @@ def main():
     )
     controller_pull_url = f"{client_host}:{pull_port}"
     controller_reply_url = f"{client_host}:{reply_port}" if reply_port else None
+    controller_heartbeat_url = (
+        f"{client_host}:{heartbeat_port}" if heartbeat_port else None
+    )
 
     # Parse operations
     operations = {}
@@ -281,6 +285,7 @@ def main():
     base_config_kwargs = {
         "controller_pull_url": controller_pull_url,
         "controller_reply_url": controller_reply_url,
+        "controller_heartbeat_url": controller_heartbeat_url,
         "duration": args.duration,
         "batch_size": args.batch_size,
         "operations": operations,

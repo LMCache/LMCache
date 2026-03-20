@@ -144,7 +144,6 @@ def test_store_1GB(
 
     # lmcache and vllm configs
     device = "cuda"
-    fmt = "vllm"
     num_tokens = 2000
 
     num_blocks = 1000
@@ -172,7 +171,7 @@ def test_store_1GB(
         LMCacheEngineBuilder.get_or_create(
             "test",
             cfg,
-            dumb_metadata(fmt, kv_shape),
+            dumb_metadata(kv_shape),
             connector,
             mock_up_broadcast_fn,
             mock_up_broadcast_object_fn,
@@ -259,7 +258,6 @@ def test_retrieve_1GB_allhit(
 
     # lmcache and vllm configs
     device = "cuda"
-    fmt = "vllm"
     num_tokens = 2000
 
     num_blocks = 1000
@@ -294,7 +292,7 @@ def test_retrieve_1GB_allhit(
         LMCacheEngineBuilder.get_or_create(
             "test",
             cfg,
-            dumb_metadata(fmt, kv_shape),
+            dumb_metadata(kv_shape),
             connector,
             mock_up_broadcast_fn,
             mock_up_broadcast_object_fn,
@@ -379,7 +377,6 @@ def test_lookup_20K_tokens(
 
     # lmcache and vllm configs
     device = "cuda"
-    fmt = "vllm"
     num_tokens = 2000
 
     num_blocks = 1000
@@ -413,7 +410,7 @@ def test_lookup_20K_tokens(
         LMCacheEngineBuilder.get_or_create(
             "test",
             cfg,
-            dumb_metadata(fmt, kv_shape),
+            dumb_metadata(kv_shape),
             connector,
             mock_up_broadcast_fn,
             mock_up_broadcast_object_fn,
