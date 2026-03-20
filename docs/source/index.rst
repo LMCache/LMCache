@@ -142,8 +142,16 @@ Documentation
 
 .. toctree::
    :maxdepth: 2
+   :caption: CLI
+
+   cli/index
+
+:raw-html:`<br />`
+
+.. toctree::
+   :maxdepth: 2
    :caption: Internal API Server
-   
+
    internal_api_server/internal_api_server
 
 :raw-html:`<br />`
