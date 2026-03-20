@@ -392,8 +392,8 @@
             let kv_lora_rank, qk_rope_head_dim;
             let head_dim, head_size;
 
-            // Check for DeepSeek models (exact matching)
-            const isDeepSeekModel = model === "deepseek-ai/DeepSeek-V3" || model === "deepseek-ai/DeepSeek-R1";
+            // Check for DeepSeek MLA models (prefix match covers V3, V3.1, V3.2, … ; plus R1)
+            const isDeepSeekModel = model.startsWith("deepseek-ai/DeepSeek-V3") || model === "deepseek-ai/DeepSeek-R1";
 
             // Check for Qwen3 models (fuzzy matching)
             const isQwen3Model = model.toLowerCase().includes("qwen/qwen3-");
