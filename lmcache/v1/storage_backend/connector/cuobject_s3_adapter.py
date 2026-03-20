@@ -27,6 +27,23 @@ class CuObjectS3ConnectorAdapter(ConnectorAdapter):
     def create_connector(
         self, context: ConnectorContext
     ) -> RemoteConnector:
+        """Create a `CuObjectS3Connector` instance.
+
+        This method parses the configuration from the provided context,
+        strips the `cuobj+` prefix from the URL to get the underlying S3
+        endpoint, and instantiates the RDMA-accelerated S3 connector.
+
+        Args:
+            context: The connector context containing URL, config, and other
+                     necessary information.
+
+        Returns:
+            An instance of `CuObjectS3Connector`.
+
+        Raises:
+            ValueError: If `context.metadata` is None.
+            AssertionError: If required configuration like `s3_region` is missing.
+        """
         # Local
         from .cuobject_s3_connector import CuObjectS3Connector
 
