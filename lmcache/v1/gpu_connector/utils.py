@@ -225,12 +225,20 @@ def _list_depth_tensor_dim(kv_caches: Any) -> Tuple[int, int]:
 def discover_gpu_kv_format(
     kv_caches: Any,
     serving_engine: EngineType,
+    layout_hints: dict[str, str] | None = None,
 ) -> "lmc_ops.GPUKVFormat":
     """
     Discover the GPU KV Cache Format from the kv_caches.
 
     The logic is that "external" layers are lists and there is one tensor internally.
     We "unwrap" layers until we find the tensor.
+
+    Args:
+        kv_caches: The KV cache tensors (possibly nested lists of tensors).
+        serving_engine: Which serving engine produced the caches.
+        layout_hints: Engine-provided hints dict (e.g.
+            ``{"kv_layout": "HND"}``).  Each serving-engine branch
+            extracts the keys it understands.
 
     Please see csrc/mem_kernels.cuh for the naming schema of the GPUKVFormat.
     """
@@ -250,12 +258,20 @@ def discover_gpu_kv_format(
     )
     logger.info("GPU KV Cache Dimensions: %s", dims_str)
 
+    if layout_hints is None:
+        layout_hints = {}
+
     detected_format = None
 
     if serving_engine == EngineType.VLLM:
-        kv_layout = try_get_vllm_kv_cache_layout()
+        kv_layout = layout_hints.get("kv_layout")
+        if kv_layout is None:
+            logger.warning(
+                "No KV Cache Layout hint provided when using vLLM, defaulting to NHD"
+            )
+            kv_layout = "NHD"
         if kv_layout is not None:
-            logger.info("vLLM KV cache layout: %s", kv_layout)
+            logger.info("vLLM KV cache layout found: %s", kv_layout)
         is_hnd = kv_layout == "HND"
         if list_depth == 0:
             # vllm cross layer

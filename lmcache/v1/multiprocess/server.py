@@ -183,6 +183,7 @@ class MPCacheEngine:
         kv_caches: KVCache,
         model_name: str,
         world_size: int,
+        layout_hints: dict[str, str] | None = None,
     ) -> None:
         """
         Registers the KV cache tensors for a given GPU instance ID.
@@ -192,8 +193,14 @@ class MPCacheEngine:
             kv_caches (KVCache): The KV cache tensor wrappers from vLLM.
             model_name (str): The name of the model associated with this KV cache.
             world_size (int): The world size associated with this KV cache.
+            layout_hints: Engine-provided hints (e.g.
+                ``{"kv_layout": "HND"}``).  Forwarded to
+                :class:`GPUCacheContext` so the server can detect the GPU KV
+                format without importing the serving engine.
         """
-        gpu_context = GPUCacheContext(kv_caches, self.chunk_size)
+        gpu_context = GPUCacheContext(
+            kv_caches, self.chunk_size, layout_hints=layout_hints
+        )
         self.gpu_contexts[instance_id] = gpu_context
         self.gpu_context_meta[instance_id] = (model_name, world_size)
         logger.info(

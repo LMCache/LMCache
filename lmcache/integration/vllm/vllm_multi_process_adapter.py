@@ -571,9 +571,15 @@ class LMCacheMPWorkerAdapter:
         self.kv_caches = kv_caches
         logger.info("Registering kv caches")
 
+        # give a layout hint (for HND vs NHD) to the lmcache server
+        layout_hints: dict[str, str] = {}
+        kv_layout = try_get_vllm_kv_cache_layout()
+        if kv_layout is not None:
+            layout_hints["kv_layout"] = kv_layout
+
         # Permute HND tensors to contiguous physical shape before IPC
         # wrapping — CudaIPCWrapper asserts contiguity.
-        if try_get_vllm_kv_cache_layout() == "HND":
+        if kv_layout == "HND":
             kv_caches = dict(
                 zip(
                     kv_caches.keys(),
@@ -590,6 +596,7 @@ class LMCacheMPWorkerAdapter:
                 wrap_kv_caches(kv_caches),
                 self.model_name,
                 self.world_size,
+                layout_hints,
             ],
         )
         try:

@@ -47,9 +47,12 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
         #   - kv_cache: KVCache - The KV cache configuration
         #   - model_name: str - Name of the model associated with the engine
         #   - world_size: int - World size of the engine
+        #   - layout_hints: dict - Optional engine-provided hints (e.g.
+        #     {"kv_layout": "HND"}). Empty dict when the engine has nothing
+        #     to communicate.
         # Returns: None
         "REGISTER_KV_CACHE": ProtocolDefinition(
-            payload_classes=[int, KVCache, str, int],
+            payload_classes=[int, KVCache, str, int, dict],
             response_class=None,
             handler_type=HandlerType.SYNC,
         ),

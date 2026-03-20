@@ -56,7 +56,12 @@ class GPUCacheContext:
     Manages the shape and pointers to vLLM GPU KV cache tensors.
     """
 
-    def __init__(self, kv_caches: KVCache, lmcache_chunk_size: int = 256):
+    def __init__(
+        self,
+        kv_caches: KVCache,
+        lmcache_chunk_size: int = 256,
+        layout_hints: dict[str, str] | None = None,
+    ):
         self.kv_caches_ = unwrap_kv_cache_tensors(kv_caches)
         self.device_ = self.kv_caches_[0].device
 
@@ -65,7 +70,11 @@ class GPUCacheContext:
         self.kv_cache_pointers_ = list_to_gpu_tensor(pointers_list, self.device_)
 
         # TODO support creating GPUCacheContext for SGLang
-        self.gpu_kv_format_ = discover_gpu_kv_format(self.kv_caches_, EngineType.VLLM)
+        self.gpu_kv_format_ = discover_gpu_kv_format(
+            self.kv_caches_,
+            EngineType.VLLM,
+            layout_hints=layout_hints,
+        )
         self.is_mla_ = is_mla(self.gpu_kv_format_)
         self.num_layers_ = get_num_layers(self.kv_caches_, self.gpu_kv_format_)
         self.num_blocks_ = get_num_blocks(self.kv_caches_, self.gpu_kv_format_)
