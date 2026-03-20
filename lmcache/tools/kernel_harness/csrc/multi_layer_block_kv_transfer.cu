@@ -211,6 +211,96 @@ __global__ void multi_layer_block_transfer_kernel(
 
 }  // namespace
 
+// ---------------------------------------------------------------------------
+// Pinned ring buffer: pre-allocated cudaHostAlloc region for staging small
+// host data (e.g. block_ids) that the GPU kernel reads via zero-copy.
+//
+// Thread-local so no locking needed across threads. Pinned host memory is
+// accessible from any GPU device, so one buffer per thread is sufficient
+// regardless of which device is active.
+//
+// Multi-stream: tracks which streams have outstanding borrows. On wrap,
+// syncs all of them to guarantee every borrowed region has been consumed
+// before reuse. Wrap is rare (32 MB / ~512 B per call ≈ 65 K calls).
+//
+// After each kernel launch, the caller registers a cudaLaunchHostFunc
+// callback to release the borrowed region back to the ring buffer.
+// ---------------------------------------------------------------------------
+
+static constexpr size_t RING_BUFFER_CAPACITY = 32 * 1024 * 1024;  // 32 MB
+static constexpr size_t RING_BUFFER_ALIGNMENT = 256;
+
+class PinnedRingBuffer {
+ public:
+  PinnedRingBuffer() : buffer_(nullptr), head_(0), tail_(0) {
+    C10_CUDA_CHECK(
+        cudaHostAlloc(&buffer_, RING_BUFFER_CAPACITY, cudaHostAllocMapped));
+  }
+
+  ~PinnedRingBuffer() {
+    if (buffer_) {
+      // At thread exit the CUDA context may already be torn down.
+      // Ignore errors — the OS reclaims the memory on process exit.
+      cudaFreeHost(buffer_);
+    }
+  }
+
+  PinnedRingBuffer(const PinnedRingBuffer&) = delete;
+  PinnedRingBuffer& operator=(const PinnedRingBuffer&) = delete;
+
+  // Borrow a region of `size` bytes. Returns a pinned host pointer that is
+  // accessible from both CPU and GPU (via CUDA unified addressing).
+  void* borrow(size_t size, cudaStream_t stream) {
+    size_t aligned = align_up(size);
+    if (head_ + aligned > RING_BUFFER_CAPACITY) {
+      // Wrap: sync ALL streams that have outstanding borrows to ensure
+      // every borrowed region has been consumed before we reuse the buffer.
+      for (cudaStream_t s : active_streams_) {
+        C10_CUDA_CHECK(cudaStreamSynchronize(s));
+      }
+      active_streams_.clear();
+      head_ = 0;
+      tail_ = 0;
+    }
+    void* ptr = buffer_ + head_;
+    head_ += aligned;
+    active_streams_.insert(stream);
+    return ptr;
+  }
+
+  // Called asynchronously from cudaLaunchHostFunc after the kernel that
+  // uses the borrowed region has completed on the stream.
+  void release(size_t size) { tail_ += align_up(size); }
+
+ private:
+  char* buffer_;
+  size_t head_;               // next byte to allocate
+  std::atomic<size_t> tail_;  // advanced by async callbacks
+  std::unordered_set<cudaStream_t> active_streams_;
+
+  static size_t align_up(size_t size) {
+    return (size + RING_BUFFER_ALIGNMENT - 1) & ~(RING_BUFFER_ALIGNMENT - 1);
+  }
+};
+
+static PinnedRingBuffer& get_ring_buffer() {
+  thread_local PinnedRingBuffer ring;
+  return ring;
+}
+
+struct RingReleaseInfo {
+  PinnedRingBuffer* ring;
+  size_t size;
+};
+
+static void CUDART_CB ring_release_callback(void* data) {
+  auto* info = static_cast<RingReleaseInfo*>(data);
+  info->ring->release(info->size);
+  delete info;
+}
+
+// ---------------------------------------------------------------------------
+
 #define LAUNCH_BLOCK_KERNEL_WITH_FORMAT(DIRECTION, FORMAT)               \
   multi_layer_block_transfer_kernel<uint4, DIRECTION, FORMAT>            \
       <<<grid, block, 0, stream>>>(lmcache_obj4, paged_buffer_ptrs,      \
@@ -221,7 +311,7 @@ __global__ void multi_layer_block_transfer_kernel(
 
 void multi_layer_block_kv_transfer(
     const torch::Tensor& paged_buffer_ptrs_tensor,
-    std::vector<int64_t> lmcache_objects_ptrs, const torch::Tensor& block_ids,
+    std::vector<int64_t> lmcache_objects_ptrs, std::vector<int64_t> block_ids,
     const torch::Device& device, TransferDirection direction,
     PageBufferShapeDesc shape_desc, int lmcache_chunk_size,
     GPUKVFormat gpu_kv_format, int skip_prefix_n_blocks) {
@@ -230,7 +320,7 @@ void multi_layer_block_kv_transfer(
   TORCH_CHECK(num_objects >= 1 && num_objects <= 4,
               "Expected 1-4 LMCache objects, got ", num_objects);
 
-  int total_blocks = block_ids.size(0);
+  int total_blocks = static_cast<int>(block_ids.size());
   TORCH_CHECK(total_blocks % num_objects == 0, "block_ids length (",
               total_blocks, ") must be divisible by num_objects (", num_objects,
               ")");
@@ -259,8 +349,16 @@ void multi_layer_block_kv_transfer(
   uint4** paged_buffer_ptrs =
       reinterpret_cast<uint4**>(paged_buffer_ptrs_tensor.data_ptr());
 
-  // --- Block IDs pointer ---
-  const int64_t* block_ids_ptr = block_ids.data_ptr<int64_t>();
+  const at::cuda::OptionalCUDAGuard device_guard(device);
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+
+  // --- Stage block_ids into pinned ring buffer (GPU-accessible via UVA) ---
+  size_t block_ids_bytes = total_blocks * sizeof(int64_t);
+  PinnedRingBuffer& ring = get_ring_buffer();
+  int64_t* block_ids_pinned =
+      static_cast<int64_t*>(ring.borrow(block_ids_bytes, stream));
+  std::memcpy(block_ids_pinned, block_ids.data(), block_ids_bytes);
+  const int64_t* block_ids_ptr = block_ids_pinned;
 
   // --- Grid and block dimensions ---
   int elements_per_head =
@@ -270,9 +368,6 @@ void multi_layer_block_kv_transfer(
 
   dim3 block(thread_dim_x, thread_dim_y);
   dim3 grid(shape_desc.kv_size, num_blocks_per_object, shape_desc.nl);
-
-  const at::cuda::OptionalCUDAGuard device_guard(device);
-  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
   // --- Dispatch on direction x format ---
   if (direction == TransferDirection::H2D) {
@@ -330,6 +425,11 @@ void multi_layer_block_kv_transfer(
                     static_cast<int>(gpu_kv_format));
     }
   }
+
+  // --- Release ring buffer region after kernel completes on stream ---
+  auto* release_info = new RingReleaseInfo{&ring, block_ids_bytes};
+  C10_CUDA_CHECK(
+      cudaLaunchHostFunc(stream, ring_release_callback, release_info));
 }
 
 #undef LAUNCH_BLOCK_KERNEL_WITH_FORMAT

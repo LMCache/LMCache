@@ -155,28 +155,26 @@ def create_memory_objects(config: TestConfig, device: torch.device = None) -> li
     return objects
 
 
-def create_block_ids(config: TestConfig, seed: int = 42) -> torch.Tensor:
-    """Create random unique block indices as a pinned CPU int64 tensor.
+def create_block_ids(config: TestConfig, seed: int = 42) -> list:
+    """Create random unique block indices as a list of ints.
 
-    Returns tensor of shape [total_blocks] with unique values in [0, num_blocks).
+    Returns a list of total_blocks unique values in [0, num_blocks).
     """
     rng = random.Random(seed)
-    ids = rng.sample(range(config.num_blocks), config.total_blocks)
-    return torch.tensor(ids, dtype=torch.int64, pin_memory=True)
+    return rng.sample(range(config.num_blocks), config.total_blocks)
 
 
 def create_h2d_block_ids(
     config: TestConfig,
-    exclude: torch.Tensor,
+    exclude: list,
     seed: int = 123,
-) -> torch.Tensor:
+) -> list:
     """Create a set of block IDs disjoint from `exclude`.
 
     Used for the H2D target so we can verify correctness (writing to
     different blocks than we read from).
     """
-    excluded_set = set(exclude.tolist())
+    excluded_set = set(exclude)
     available = [i for i in range(config.num_blocks) if i not in excluded_set]
     rng = random.Random(seed)
-    ids = rng.sample(available, config.total_blocks)
-    return torch.tensor(ids, dtype=torch.int64, pin_memory=True)
+    return rng.sample(available, config.total_blocks)

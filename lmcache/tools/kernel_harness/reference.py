@@ -96,7 +96,7 @@ def _set_vllm_block(
 def reference_multi_layer_block_kv_transfer(
     vllm_tensors: list,
     memory_objects: list,
-    block_ids: torch.Tensor,
+    block_ids: list,
     config: TestConfig,
     direction: Direction,
 ) -> None:
@@ -107,7 +107,7 @@ def reference_multi_layer_block_kv_transfer(
 
     Args:
         vllm_tensors: vLLM paged buffer tensors on GPU.
-        memory_objects: LMCache memory objects on pinned CPU.
+        memory_objects: LMCache memory objects.
         block_ids: Block indices into the vLLM paged buffer.
         config: Test configuration.
         direction: D2H (vLLM->LMCache) or H2D (LMCache->vLLM).
@@ -124,8 +124,6 @@ def reference_multi_layer_block_kv_transfer(
             global_block_idx = obj_idx * bpo + local_block_idx
             if global_block_idx < skip:
                 continue
-
-            block_id = block_id.item()
             token_start = local_block_idx * bs
             token_end = token_start + bs
 

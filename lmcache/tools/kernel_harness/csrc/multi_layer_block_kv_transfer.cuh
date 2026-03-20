@@ -5,6 +5,7 @@
 #include <torch/all.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
+#include <unordered_set>
 #include <vector>
 
 enum class TransferDirection : int {
@@ -71,7 +72,7 @@ struct MemoryObj4 {
  */
 void multi_layer_block_kv_transfer(
     const torch::Tensor& paged_buffer_ptrs_tensor,
-    std::vector<int64_t> lmcache_objects_ptrs, const torch::Tensor& block_ids,
+    std::vector<int64_t> lmcache_objects_ptrs, std::vector<int64_t> block_ids,
     const torch::Device& device, TransferDirection direction,
     PageBufferShapeDesc shape_desc, int lmcache_chunk_size,
     GPUKVFormat gpu_kv_format, int skip_prefix_n_blocks);

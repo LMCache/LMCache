@@ -147,8 +147,8 @@ def run_correctness_test(
         if i < config.skip_prefix_n_blocks:
             continue
 
-        src_block_id = block_ids_d2h[i].item()
-        tgt_block_id = block_ids_h2d[i].item()
+        src_block_id = block_ids_d2h[i]
+        tgt_block_id = block_ids_h2d[i]
 
         src_data = _get_block_data(source_vllm, config, src_block_id)
         tgt_data = _get_block_data(target_vllm, config, tgt_block_id)
@@ -163,7 +163,7 @@ def run_correctness_test(
             passed = False
 
     # Verify: blocks that were NOT written should remain zero
-    h2d_set = set(block_ids_h2d.tolist())
+    h2d_set = set(block_ids_h2d)
     # Sample a few untouched blocks to check
     untouched_blocks = [
         b for b in range(min(config.num_blocks, 200)) if b not in h2d_set
@@ -176,7 +176,7 @@ def run_correctness_test(
     # Verify skip_prefix_n_blocks: skipped blocks in target should be zero
     if config.skip_prefix_n_blocks > 0:
         for i in range(config.skip_prefix_n_blocks):
-            tgt_block_id = block_ids_h2d[i].item()
+            tgt_block_id = block_ids_h2d[i]
             if not _check_block_is_zero(target_vllm, config, tgt_block_id):
                 logger.error(
                     "FAIL: Skipped prefix block %d (tgt_block=%d) is not zero",
