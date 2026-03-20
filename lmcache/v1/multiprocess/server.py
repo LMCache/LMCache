@@ -183,7 +183,7 @@ class MPCacheEngine:
         kv_caches: KVCache,
         model_name: str,
         world_size: int,
-        layout_hints: dict[str, str] | None = None,
+        layout_hints: dict,
     ) -> None:
         """
         Registers the KV cache tensors for a given GPU instance ID.
