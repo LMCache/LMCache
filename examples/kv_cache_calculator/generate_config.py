@@ -45,6 +45,17 @@ def main():
         ):
             config_data["head_dim"] = getattr(config, "head_dim", None)
 
+        # Check for Hunyuan dense models (explicit head_dim, may differ from hidden/heads)
+        if (
+            args.model.lower().startswith("tencent/hunyuan-")
+            and args.model.lower() != "tencent/hunyuan-large"
+        ):
+            config_data["head_dim"] = getattr(config, "head_dim", None)
+
+        # Check for Hunyuan-Large (CLA: cross-layer attention sharing)
+        if args.model.lower() == "tencent/hunyuan-large":
+            config_data["cla_share_factor"] = getattr(config, "cla_share_factor", None)
+
         # Convert to JSON and print
         string = json.dumps(config_data, indent=4)
 
