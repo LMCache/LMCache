@@ -52,7 +52,7 @@ Every sub-command requires one of these to identify the target KV cache:
 ```
 lmcache kvcache
 ├── info           # Per-request cache state (locations, pinned status)
-├── clear          # Remove a request's cached KV data
+├── clear          # Clear all cached KV data
 ├── pin            # Pin a request's KV cache to L1/CPU (may be rejected)
 ├── compress       # Compress a request's KV cache in-place
 └── end-session    # Clean up session state for a finished request
@@ -61,10 +61,24 @@ lmcache kvcache
 | Sub-command | Target | Description |
 |------------|--------|-------------|
 | `info` | instance | Show per-request cache state: which chunks, where stored, pinned status |
-| `clear` | instance or controller | Remove cached data for a specific request |
+| `clear` | instance | Clear all cached KV data |
 | `pin` | instance or controller | Pin a request's KV cache to L1/CPU; may be rejected if memory pressure is too high |
 | `compress` | instance or controller | Compress a request's KV cache to reduce memory footprint |
 | `end-session` | instance | Remove per-request session state (token hashes, chunk tracking) |
+
+```bash
+$ lmcache kvcache -h
+usage: lmcache kvcache [-h] {info,clear,pin,compress,end-session} ...
+
+Manage KV cache state for specific requests.
+
+subcommands:
+  info          Show per-request cache state (chunks, locations, pinned status)
+  clear         Clear all cached KV data
+  pin           Pin a request's KV cache to L1/CPU (may be rejected)
+  compress      Compress a request's KV cache in-place
+  end-session   Clean up session state for a finished request
+```
 
 ---
 
@@ -123,31 +137,16 @@ $ lmcache kvcache info --url http://localhost:8000 \
 
 ### `clear`
 
-Remove cached KV data for a specific request.
+Clear **all** cached KV data on the target instance.
 
 ```bash
-$ lmcache kvcache clear --url http://localhost:8000 --request-id req-abc-123
+$ lmcache kvcache clear --url http://localhost:8000
 
-# Clear specific backends only
-$ lmcache kvcache clear --url http://localhost:8000 \
-    --request-id req-abc-123 --location LocalCPUBackend
-
-# By token range
-$ lmcache kvcache clear --url http://localhost:8000 \
-    --request-id req-abc-123 --start 0 --end 512
-
-# Via controller (targets specific instance)
-$ lmcache kvcache clear --url http://localhost:9000 \
-    --instance-id inst-0 --request-id req-abc-123
+========== KV Cache Clear ==================
+Status:                                   OK
+Chunks removed:                         1024
+=============================================
 ```
-
-| Flag | Required | Description |
-|------|----------|-------------|
-| `--url` | yes | Target HTTP endpoint |
-| `--request-id` | yes | Target request |
-| `--start`, `--end` | no | Narrow to token range `[st, ed)` |
-| `--location` | no | Restrict to specific backend(s) |
-| `--instance-id` | no | Target instance (controller mode) |
 
 ### `pin`
 
@@ -158,6 +157,11 @@ Exit codes: `0` = pinned, `2` = rejected, `1` = error.
 
 ```bash
 $ lmcache kvcache pin --url http://localhost:8000 --request-id req-abc-123
+
+======== KV Cache Pin (req-abc-123) ========
+Status:                                   OK
+Chunks pinned:                            32
+=============================================
 $ echo $?
 0
 
@@ -168,12 +172,17 @@ else
     echo "rejected or error"
 fi
 
-# By token range
+# Narrowed to a token range
 $ lmcache kvcache pin --url http://localhost:8000 \
     --request-id req-abc-123 --start 0 --end 512
 
 # Rejected case (exit code 2)
 $ lmcache kvcache pin --url http://localhost:8000 --request-id req-xyz
+
+======== KV Cache Pin (req-xyz) =============
+Status:                             REJECTED
+Reason:              L1 memory pressure (91%)
+=============================================
 $ echo $?
 2
 ```
@@ -185,6 +194,12 @@ Compress a request's KV cache chunks in-place to reduce memory footprint.
 ```bash
 $ lmcache kvcache compress --url http://localhost:8000 \
     --request-id req-abc-123 --method zstd
+
+===== KV Cache Compress (req-abc-123) ======
+Status:                                   OK
+Method:                                 zstd
+Chunks compressed:                        32
+=============================================
 
 $ lmcache kvcache compress --url http://localhost:8000 \
     --request-id req-abc-123 --start 0 --end 512 --method zstd
@@ -205,6 +220,10 @@ an inference request completes to free the associated tracking resources.
 
 ```bash
 $ lmcache kvcache end-session --url http://localhost:8000 --request-id req-abc-123
+
+=== KV Cache End Session (req-abc-123) =====
+Status:                                   OK
+=============================================
 ```
 
 **Note:** Today `end-session` is ZMQ-only (`END_SESSION` in `RequestType`). A new
@@ -218,7 +237,7 @@ HTTP endpoint needs to be added to the per-instance server.
 
 | CLI sub-command | Existing endpoint | Notes |
 |----------------|------------------|-------|
-| `clear` | `DELETE /cache/clear` (instance), `POST /clear` (controller) | Needs request-id filtering added to existing endpoint |
+| `clear` | `DELETE /cache/clear` (instance), `POST /clear` (controller) | Existing endpoints work as-is |
 
 ### Needs new HTTP endpoints
 
