@@ -296,7 +296,7 @@ class CuObjectS3Connector(S3Connector):
 
     # -- Lifecycle -----------------------------------------------------------
 
-    async def close(self):
+    async def close(self) -> None:
         """Release RDMA resources, then shut down CRT."""
         if self._cuobj_client is not None:
             if self._rdma_pool_handle is not None:
