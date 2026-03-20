@@ -30,6 +30,7 @@ from lmcache.v1.lookup_client.lmcache_lookup_client import (
     LMCacheLookupClient,
     LMCacheLookupServer,
 )
+from lmcache.v1.metadata import LMCacheMetadata
 from tests.v1.utils import (
     create_test_config,
     create_test_metadata,
@@ -455,3 +456,64 @@ class TestLMCacheLookupClientServer:
                 lookup_id = "test_large"
                 result = client.lookup(tokens.tolist(), lookup_id)
                 assert result == num_tokens, f"Expected {num_tokens}, got {result}"
+
+    def test_dp_aware_metadata_uses_local_rpc_topology_for_lookup(self):
+        """DP-aware cache identity must not suppress per-engine lookup servers."""
+        instance_id = f"test_lookup_dp_{uuid.uuid4().hex[:8]}"
+        config = create_test_config(instance_id=instance_id)
+        metadata = LMCacheMetadata(
+            model_name="test_model",
+            world_size=8,
+            local_world_size=8,
+            worker_id=6,
+            local_worker_id=6,
+            kv_dtype=torch.bfloat16,
+            kv_shape=(4, 1, 256, 8, 128),
+            use_mla=True,
+            engine_id=instance_id,
+            rpc_world_size=1,
+            rpc_worker_id=0,
+        )
+        connector = MockGPUConnector(kv_shape=(4, 1, 256, 8, 128))
+        engine = LMCacheEngineBuilder.get_or_create(
+            instance_id=instance_id,
+            config=config,
+            metadata=metadata,
+            gpu_connector=connector,
+            broadcast_fn=mock_up_broadcast_fn,
+            broadcast_object_fn=mock_up_broadcast_object_fn,
+        )
+        engine.post_init()
+
+        try:
+            assert engine.storage_manager is not None
+
+            server = LookupClientFactory.create_lookup_server(engine, metadata)
+            assert server is not None
+            client = LookupClientFactory.create_lookup_client(config, metadata)
+
+            device = "cpu"
+            num_tokens = 256
+            num_blocks = 64
+            block_size = 16
+            tokens = generate_tokens(num_tokens, device, fixed=True)
+            kv_cache = generate_kv_cache_paged_list_tensors(
+                num_blocks, device, block_size
+            )
+            slot_mapping = torch.tensor(
+                random.sample(range(0, num_blocks * block_size), num_tokens),
+                device=device,
+            )
+
+            engine.store(tokens=tokens, kvcaches=kv_cache, slot_mapping=slot_mapping)
+            recover_engine_states(engine)
+            time.sleep(0.5)
+
+            with server, client:
+                assert client.lookup(tokens.tolist(), "dp-aware-request") == num_tokens
+        finally:
+            engine.close()
+            LMCacheEngineBuilder._instances.pop(instance_id, None)
+            LMCacheEngineBuilder._cfgs.pop(instance_id, None)
+            LMCacheEngineBuilder._metadatas.pop(instance_id, None)
+            LMCacheEngineBuilder._stat_loggers.pop(instance_id, None)

@@ -61,9 +61,9 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
         rpc_port = kv_connector_extra_config.get("lmcache_rpc_port", 0)
         engine_id = metadata.engine_id
         assert engine_id is not None, "engine_id is required for RPC communication"
-        self.world_size = metadata.world_size
+        self.world_size = metadata.get_rpc_world_size()
         self.lookup_server_worker_ids = config.get_lookup_server_worker_ids(
-            metadata.use_mla, metadata.world_size
+            metadata.use_mla, metadata.get_rpc_world_size()
         )
 
         self.push_sockets = []
@@ -316,7 +316,10 @@ class LMCacheAsyncLookupServer:
             "engine_id is required for RPC communication"
         )
         worker_socket_path = get_zmq_rpc_path_lmcache(
-            metadata.engine_id, "lookup_worker", rpc_port, metadata.worker_id
+            metadata.engine_id,
+            "lookup_worker",
+            rpc_port,
+            metadata.get_rpc_worker_id(),
         )
         scheduler_socket_path = get_zmq_rpc_path_lmcache(
             metadata.engine_id, "lookup_scheduler", rpc_port, 0

@@ -119,12 +119,12 @@ class LookupClientFactory:
         )
 
         lookup_server_worker_ids = config.get_lookup_server_worker_ids(
-            metadata.use_mla, metadata.world_size
+            metadata.use_mla, metadata.get_rpc_world_size()
         )
 
         if config.external_lookup_client is None and (
             len(lookup_server_worker_ids) == 0
-            or metadata.worker_id in lookup_server_worker_ids
+            or metadata.get_rpc_worker_id() in lookup_server_worker_ids
         ):
             # First Party
             from lmcache.v1.lookup_client.lmcache_async_lookup_client import (
@@ -209,9 +209,10 @@ class LookupClientFactory:
         )
 
         lookup_ids = config.get_lookup_server_worker_ids(
-            metadata.use_mla, metadata.world_size
+            metadata.use_mla, metadata.get_rpc_world_size()
         )
-        ranks = lookup_ids if len(lookup_ids) > 0 else list(range(metadata.world_size))
+        rpc_world_size = metadata.get_rpc_world_size()
+        ranks = lookup_ids if len(lookup_ids) > 0 else list(range(rpc_world_size))
 
         socket_params = [
             SocketParams(
@@ -244,7 +245,7 @@ class LookupClientFactory:
             metadata.engine_id,
             "lookup",
             rpc_port,
-            metadata.worker_id,
+            metadata.get_rpc_worker_id(),
         )
         return ZmqRouterServerTransport(
             socket_path=socket_path,

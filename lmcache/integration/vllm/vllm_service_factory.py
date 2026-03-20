@@ -148,6 +148,8 @@ class VllmServiceFactory(BaseServiceFactory):
             chunk_size=self.lmcache_config.chunk_size,
             engine_id=engine_id,
             kv_connector_extra_config=kv_connector_extra_config,
+            rpc_world_size=worker_identity.rpc_world_size,
+            rpc_worker_id=worker_identity.rpc_worker_id,
         )
         return self.metadata
 

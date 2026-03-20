@@ -36,6 +36,8 @@ class VLLMWorkerIdentity:
     local_world_size: int
     worker_id: int
     local_worker_id: int
+    rpc_world_size: int
+    rpc_worker_id: int
 
 
 def is_false(value: str) -> bool:
@@ -291,6 +293,8 @@ def resolve_vllm_worker_identity(vllm_config: "VllmConfig") -> VLLMWorkerIdentit
         local_world_size=local_world_size,
         worker_id=worker_id,
         local_worker_id=local_worker_id,
+        rpc_world_size=tp_pp_world_size,
+        rpc_worker_id=tp_pp_rank,
     )
 
 
@@ -345,6 +349,8 @@ def create_lmcache_metadata(
             local_world_size=parallel_cfg.world_size,
             worker_id=parallel_cfg.rank,
             local_worker_id=parallel_cfg.rank,
+            rpc_world_size=parallel_cfg.world_size,
+            rpc_worker_id=parallel_cfg.rank,
         )
 
     # Get KV cache dtype
@@ -385,6 +391,8 @@ def create_lmcache_metadata(
         served_model_name=model_cfg.served_model_name,
         engine_id=engine_id,
         kv_connector_extra_config=kv_connector_extra_config,
+        rpc_world_size=worker_identity.rpc_world_size,
+        rpc_worker_id=worker_identity.rpc_worker_id,
     )
 
     return metadata, config

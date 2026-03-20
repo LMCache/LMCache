@@ -64,10 +64,22 @@ class LMCacheMetadata:
     engine_id: Optional[str] = None
     """ extra config from kv_connector (e.g., lmcache_rpc_port) """
     kv_connector_extra_config: Optional[dict] = None
+    """ engine-local world size for lookup RPC topology """
+    rpc_world_size: Optional[int] = None
+    """ engine-local worker id for lookup RPC topology """
+    rpc_worker_id: Optional[int] = None
 
     def is_first_rank(self) -> bool:
         """Check if the current worker is the first rank"""
         return self.worker_id == self.first_rank
+
+    def get_rpc_world_size(self) -> int:
+        """Return the engine-local world size used by lookup RPC."""
+        return self.world_size if self.rpc_world_size is None else self.rpc_world_size
+
+    def get_rpc_worker_id(self) -> int:
+        """Return the engine-local worker id used by lookup RPC."""
+        return self.worker_id if self.rpc_worker_id is None else self.rpc_worker_id
 
     # TODO(chunxiaozheng): some uts do not `build_kv_layer_groups`
     def get_dtypes(self) -> list[torch.dtype]:

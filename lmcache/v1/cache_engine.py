@@ -282,7 +282,7 @@ class LMCacheEngine:
         if not self.post_inited:
             logger.info("Post initializing LMCacheEngine")
             lookup_server_worker_ids = self.config.get_lookup_server_worker_ids(
-                self.metadata.use_mla, self.metadata.world_size
+                self.metadata.use_mla, self.metadata.get_rpc_world_size()
             )
             if (
                 self.lmcache_worker is not None
@@ -290,12 +290,15 @@ class LMCacheEngine:
                 or not self.save_only_first_rank
                 or self.metadata.is_first_rank()
                 or len(lookup_server_worker_ids) == 0
-                or self.metadata.worker_id in lookup_server_worker_ids
+                or self.metadata.get_rpc_worker_id() in lookup_server_worker_ids
             ):
                 logger.info(
-                    f"Initialize storage manager on rank {self.metadata.worker_id}, "
-                    f"use layerwise: {self.use_layerwise},"
-                    f"save only first rank: {self.save_only_first_rank}"
+                    "Initialize storage manager on rank %s (rpc rank %s), "
+                    "use layerwise: %s,save only first rank: %s",
+                    self.metadata.worker_id,
+                    self.metadata.get_rpc_worker_id(),
+                    self.use_layerwise,
+                    self.save_only_first_rank,
                 )
                 async_lookup_server = kwargs.get("async_lookup_server", None)
                 self.storage_manager = StorageManager(

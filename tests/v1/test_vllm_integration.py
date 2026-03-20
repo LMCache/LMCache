@@ -91,6 +91,8 @@ def test_resolve_vllm_worker_identity_uses_dp_rank_and_current_device():
     assert identity.worker_id == 6
     assert identity.local_world_size == 8
     assert identity.local_worker_id == 6
+    assert identity.rpc_world_size == 1
+    assert identity.rpc_worker_id == 0
 
 
 def test_resolve_vllm_worker_identity_falls_back_to_dp_local_rank():
@@ -120,6 +122,8 @@ def test_resolve_vllm_worker_identity_falls_back_to_dp_local_rank():
     assert identity.worker_id == 5
     assert identity.local_world_size == 8
     assert identity.local_worker_id == 5
+    assert identity.rpc_world_size == 1
+    assert identity.rpc_worker_id == 0
 
 
 def test_create_lmcache_metadata_is_dp_aware_for_dense_workers():
@@ -152,6 +156,8 @@ def test_create_lmcache_metadata_is_dp_aware_for_dense_workers():
     assert metadata.worker_id == 7
     assert metadata.local_world_size == 8
     assert metadata.local_worker_id == 7
+    assert metadata.rpc_world_size == 1
+    assert metadata.rpc_worker_id == 0
     assert metadata.kv_shape == (61, 1, 256, 1, 576)
 
 
