@@ -115,6 +115,7 @@ class DaxBackend(StoragePluginInterface):
         if self.local_cpu_backend is None:
             raise ValueError("DaxBackend requires local_cpu_backend")
 
+        # Total size in bytes of the mapped DAX arena.
         self._arena_bytes = int(self.max_dax_size * 1024**3)
         if self._arena_bytes <= 0:
             raise ValueError("dax.max_dax_size results in zero-sized arena")
@@ -122,6 +123,7 @@ class DaxBackend(StoragePluginInterface):
         self._fd: Optional[int] = None
         self._mmap_obj: Optional[mmap.mmap] = None
         self._base_ptr: int = 0
+        # Python memoryview exposing the mapped arena for byte-level access.
         self._arena_view: Optional[memoryview] = None
         self._open_arena()
         try:
