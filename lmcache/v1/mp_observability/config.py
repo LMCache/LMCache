@@ -4,9 +4,17 @@
 Configuration for the MP-mode observability stack.
 """
 
+# Future
+from __future__ import annotations
+
 # Standard
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 import argparse
+
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.v1.mp_observability.event_bus import EventBus
 
 
 @dataclass
@@ -94,6 +102,15 @@ def add_observability_args(
         ),
     )
     group.add_argument(
+        "--event-bus-queue-size",
+        type=int,
+        default=10_000,
+        help=(
+            "Maximum number of events in the EventBus queue before "
+            "tail-drop. Default is 10000."
+        ),
+    )
+    group.add_argument(
         "--prometheus-port",
         type=int,
         default=9090,
@@ -118,9 +135,80 @@ def parse_args_to_observability_config(
     """
     return ObservabilityConfig(
         enabled=not args.disable_observability,
+        max_queue_size=args.event_bus_queue_size,
         metrics_enabled=not args.disable_metrics,
         logging_enabled=not args.disable_logging,
         tracing_enabled=args.enable_tracing,
         otlp_endpoint=args.otlp_endpoint,
         prometheus_port=args.prometheus_port,
     )
+
+
+def init_observability(obs_config: ObservabilityConfig) -> EventBus:
+    """Initialize OTel providers, EventBus, and register subscribers.
+
+    This is the single entry-point that every MP server calls at startup.
+    Returns a **started** EventBus.
+    """
+    # First Party
+    from lmcache.v1.mp_observability.event_bus import (
+        EventBusConfig,
+        init_event_bus,
+    )
+
+    # Set up OTel providers BEFORE creating subscribers so that
+    # module-level get_meter()/get_tracer() calls bind to the real provider
+    if obs_config.enabled and obs_config.metrics_enabled:
+        # First Party
+        from lmcache.v1.mp_observability.otel_init import init_otel_metrics
+
+        init_otel_metrics(
+            otlp_endpoint=obs_config.otlp_endpoint,
+            prometheus_port=obs_config.prometheus_port,
+        )
+
+    if obs_config.enabled and obs_config.tracing_enabled:
+        # First Party
+        from lmcache.v1.mp_observability.otel_init import init_otel_tracing
+
+        init_otel_tracing(otlp_endpoint=obs_config.otlp_endpoint)
+
+    bus = init_event_bus(
+        EventBusConfig(
+            enabled=obs_config.enabled,
+            max_queue_size=obs_config.max_queue_size,
+        )
+    )
+
+    if obs_config.metrics_enabled:
+        # First Party
+        from lmcache.v1.mp_observability.subscribers.metrics import (
+            L1MetricsSubscriber,
+            SMMetricsSubscriber,
+        )
+
+        bus.register_subscriber(L1MetricsSubscriber())
+        bus.register_subscriber(SMMetricsSubscriber())
+
+    if obs_config.logging_enabled:
+        # First Party
+        from lmcache.v1.mp_observability.subscribers.logging import (
+            L1LoggingSubscriber,
+            MPServerLoggingSubscriber,
+            SMLoggingSubscriber,
+        )
+
+        bus.register_subscriber(MPServerLoggingSubscriber())
+        bus.register_subscriber(L1LoggingSubscriber())
+        bus.register_subscriber(SMLoggingSubscriber())
+
+    if obs_config.tracing_enabled:
+        # First Party
+        from lmcache.v1.mp_observability.subscribers.tracing import (
+            MPServerTracingSubscriber,
+        )
+
+        bus.register_subscriber(MPServerTracingSubscriber())
+
+    bus.start()
+    return bus

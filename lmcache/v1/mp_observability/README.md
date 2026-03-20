@@ -47,6 +47,7 @@ CLI, pass the flags below; when embedding programmatically, construct an
 | `--disable-metrics` | off | Skip registering metrics subscribers (OTel counters). |
 | `--disable-logging` | off | Skip registering logging subscribers. |
 | `--enable-tracing` | off | Register tracing subscribers (OTel spans). Disabled by default. |
+| `--event-bus-queue-size N` | `10000` | Maximum number of events in the EventBus queue before tail-drop. |
 | `--otlp-endpoint URL` | *(none)* | OTLP gRPC endpoint (e.g. `http://localhost:4317`). When set, metrics and traces are pushed to an OTel collector. When unset, metrics fall back to Prometheus pull mode. |
 | `--prometheus-port PORT` | `9090` | Port for the Prometheus `/metrics` endpoint. Only used when `--otlp-endpoint` is not set. |
 

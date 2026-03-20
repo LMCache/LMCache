@@ -63,6 +63,7 @@ from lmcache.v1.gpu_connector.gpu_ops import (
 )
 from lmcache.v1.mp_observability.config import (
     ObservabilityConfig,
+    init_observability,
     parse_args_to_observability_config,
 )
 from lmcache.v1.multiprocess.config import (
@@ -709,63 +710,7 @@ def run_cache_server(
         If return_engine is True: tuple of (MessageQueueServer, BlendEngineV2)
         If return_engine is False: None (blocks until interrupted)
     """
-    # Initialize EventBus and register observability subscribers
-    # First Party
-    from lmcache.v1.mp_observability.event_bus import (
-        EventBusConfig,
-        init_event_bus,
-    )
-
-    # Set up OTel providers BEFORE creating subscribers
-    if obs_config.enabled and obs_config.metrics_enabled:
-        # First Party
-        from lmcache.v1.mp_observability.otel_init import init_otel_metrics
-
-        init_otel_metrics(
-            otlp_endpoint=obs_config.otlp_endpoint,
-            prometheus_port=obs_config.prometheus_port,
-        )
-
-    if obs_config.enabled and obs_config.tracing_enabled:
-        # First Party
-        from lmcache.v1.mp_observability.otel_init import init_otel_tracing
-
-        init_otel_tracing(otlp_endpoint=obs_config.otlp_endpoint)
-
-    bus = init_event_bus(
-        EventBusConfig(
-            enabled=obs_config.enabled,
-            max_queue_size=obs_config.max_queue_size,
-        )
-    )
-
-    if obs_config.metrics_enabled:
-        # First Party
-        from lmcache.v1.mp_observability.subscribers.metrics import (
-            L1MetricsSubscriber,
-            SMMetricsSubscriber,
-        )
-
-        bus.register_subscriber(L1MetricsSubscriber())
-        bus.register_subscriber(SMMetricsSubscriber())
-
-    if obs_config.logging_enabled:
-        # First Party
-        from lmcache.v1.mp_observability.subscribers.logging import (
-            MPServerLoggingSubscriber,
-        )
-
-        bus.register_subscriber(MPServerLoggingSubscriber())
-
-    if obs_config.tracing_enabled:
-        # First Party
-        from lmcache.v1.mp_observability.subscribers.tracing import (
-            MPServerTracingSubscriber,
-        )
-
-        bus.register_subscriber(MPServerTracingSubscriber())
-
-    bus.start()
+    event_bus = init_observability(obs_config)
 
     # Initialize the engine (loggers self-register with the global controller)
     engine = BlendEngineV2(
@@ -838,7 +783,7 @@ def run_cache_server(
             time.sleep(1)
     except KeyboardInterrupt:
         logger.info("Shutting down server...")
-        bus.stop()
+        event_bus.stop()
         server.close()
         engine.close()
 
