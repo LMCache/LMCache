@@ -29,7 +29,11 @@ def noop_handler() -> str:
 
 
 def register_kv_cache_handler(
-    gpu_id: int, kv_cache: KVCache, model_name: str, world_size: int
+    gpu_id: int,
+    kv_cache: KVCache,
+    model_name: str,
+    world_size: int,
+    layout_hints: dict,
 ) -> None:
     """
     Dummy handler for REGISTER_KV_CACHE requests.
@@ -39,6 +43,7 @@ def register_kv_cache_handler(
         kv_cache: List of CudaIPCWrapper objects representing KV cache
         model_name: Name of the model associated with this KV cache
         world_size: World size associated with this KV cache
+        layout_hints: Engine-provided hints dict
 
     Returns:
         None
@@ -54,6 +59,9 @@ def register_kv_cache_handler(
     )
     assert isinstance(world_size, int), (
         f"Expected world_size to be int, got {type(world_size)}"
+    )
+    assert isinstance(layout_hints, dict), (
+        f"Expected layout_hints to be dict, got {type(layout_hints)}"
     )
     # No return value (returns None implicitly)
 

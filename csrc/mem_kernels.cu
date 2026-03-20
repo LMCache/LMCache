@@ -217,6 +217,10 @@ __device__ __forceinline__ int64_t page_buffer_offset(
   TODO: A dedicated HND kernel could launch with
   grid=(2, L, T*NH) thread=(HS,,) to keep warps within one head's contiguous
   HS run
+  However, most models have head_size = 128 using bf16 or fp16 which is 256
+  bytes when divided by xwords (8 bytes) is exactly 32 xwords which fits one
+  warp Worst case if HS is smaller or quantization is smaller, we will have to
+  make two vectorized loads per warp that are BS * HS (the head stride) apart
   */
 
   // vllm cross layer
