@@ -488,7 +488,7 @@ T* get_kernel_ptr(TENSOR_TYPE& tensor) {
       <<<grid, block, 0, stream>>>(key_value_ptr, page_buffer_ptrs,          \
                                    slot_mapping_ptr, num_xwords, num_tokens, \
                                    num_layers, page_buffer_size, block_size, \
-                                   head_size, skip_prefix_n_tokens);         \
+                                   head_size_xword, skip_prefix_n_tokens);   \
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 
 template <typename T>
@@ -516,6 +516,10 @@ void multi_layer_kv_transfer_templated(
   int num_origin_elements = key_value.size(3);
   int elements_per_xword = sizeof(T) / key_value.element_size();
   int num_xwords = num_origin_elements / elements_per_xword;
+  // head_size is in element units
+  // convert to xword units
+  // to match scalars_per_token (num_xwords) which is also in xword units.
+  int head_size_xword = head_size > 0 ? head_size / elements_per_xword : 0;
 
   int k_or_v_size = lmc::is_mla(gpu_kv_format) ? 1 : 2;
 
