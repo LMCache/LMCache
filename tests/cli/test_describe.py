@@ -13,10 +13,10 @@ import pytest
 # First Party
 from lmcache.cli.commands.describe import (
     DescribeError,
-    _fetch_json,
-    _fmt_used_gb,
-    _normalize_url,
-    _safe_get,
+    fetch_json,
+    fmt_health,
+    normalize_url,
+    safe_get,
 )
 
 # ---------------------------------------------------------------------------
@@ -80,47 +80,48 @@ SAMPLE_STATUS = {
 
 class TestNormalizeUrl:
     def test_adds_http(self):
-        assert _normalize_url("localhost:8000") == "http://localhost:8000"
+        assert normalize_url("localhost:8000") == "http://localhost:8000"
 
     def test_preserves_http(self):
-        assert _normalize_url("http://localhost:8000") == "http://localhost:8000"
+        assert normalize_url("http://localhost:8000") == "http://localhost:8000"
 
     def test_preserves_https(self):
-        assert _normalize_url("https://host:443") == "https://host:443"
+        assert normalize_url("https://host:443") == "https://host:443"
 
     def test_strips_trailing_slash(self):
-        assert _normalize_url("http://host:8000/") == "http://host:8000"
+        assert normalize_url("http://host:8000/") == "http://host:8000"
 
     def test_strips_multiple_trailing_slashes(self):
-        assert _normalize_url("http://host:8000///") == "http://host:8000"
+        assert normalize_url("http://host:8000///") == "http://host:8000"
 
 
-class TestFmtUsedGb:
-    def test_basic(self):
-        result = _fmt_used_gb(45_415_895_859, 0.705)
-        assert result == "42.30 (70.5%)"
+class TestFmtHealth:
+    def test_healthy(self):
+        assert fmt_health(True) == "OK"
 
-    def test_zero(self):
-        result = _fmt_used_gb(0, 0.0)
-        assert result == "0.00 (0.0%)"
+    def test_unhealthy(self):
+        assert fmt_health(False) == "UNHEALTHY"
+
+    def test_none(self):
+        assert fmt_health(None) is None
 
 
 class TestSafeGet:
     def test_nested(self):
         d = {"a": {"b": {"c": 42}}}
-        assert _safe_get(d, "a", "b", "c") == 42
+        assert safe_get(d, "a", "b", "c") == 42
 
     def test_missing_key(self):
         d = {"a": {"b": 1}}
-        assert _safe_get(d, "a", "x") is None
+        assert safe_get(d, "a", "x") is None
 
     def test_missing_key_with_default(self):
         d = {"a": 1}
-        assert _safe_get(d, "a", "b", default="N/A") == "N/A"
+        assert safe_get(d, "a", "b", default="N/A") == "N/A"
 
     def test_non_dict_intermediate(self):
         d = {"a": 5}
-        assert _safe_get(d, "a", "b") is None
+        assert safe_get(d, "a", "b") is None
 
 
 # ---------------------------------------------------------------------------
@@ -145,9 +146,9 @@ class TestDescribeKvcacheFields:
             format = "json"
             output = None
 
-        # Patch _fetch_json to return our sample data
+        # Patch fetch_json to return our sample data
         with patch(
-            "lmcache.cli.commands.describe._fetch_json",
+            "lmcache.cli.commands.describe.fetch_json",
             return_value=SAMPLE_STATUS,
         ):
             # Capture the JSON output
@@ -171,8 +172,10 @@ class TestDescribeKvcacheFields:
         assert m["cached_objects"] == 1024
         assert m["active_sessions"] == 3
 
-        # Per-model section
-        model = m["model_0"]
+        # Per-model section (list)
+        assert "models" in m
+        model = m["models"][0]
+        assert model["model"] == "llama"
         assert model["world_size"] == 1
         assert model["gpu_ids"] == "0"
         assert model["num_layers"] == 32
@@ -197,7 +200,7 @@ class TestDescribeKvcacheFields:
             output = None
 
         with patch(
-            "lmcache.cli.commands.describe._fetch_json",
+            "lmcache.cli.commands.describe.fetch_json",
             return_value=unhealthy_data,
         ):
             # Standard
@@ -226,7 +229,7 @@ class TestDescribeKvcacheFields:
             output = None
 
         with patch(
-            "lmcache.cli.commands.describe._fetch_json",
+            "lmcache.cli.commands.describe.fetch_json",
             return_value=minimal_data,
         ):
             # Standard
@@ -284,7 +287,7 @@ class TestDescribeErrors:
             output = None
 
         with patch(
-            "lmcache.cli.commands.describe._fetch_json",
+            "lmcache.cli.commands.describe.fetch_json",
             side_effect=DescribeError("Server unhealthy: engine not initialized"),
         ):
             with pytest.raises(SystemExit) as exc_info:
@@ -294,7 +297,7 @@ class TestDescribeErrors:
 
 
 # ---------------------------------------------------------------------------
-# _fetch_json with a real HTTP server
+# fetch_json with a real HTTP server
 # ---------------------------------------------------------------------------
 
 
@@ -329,7 +332,7 @@ class TestFetchJson:
         t = Thread(target=server.handle_request, daemon=True)
         t.start()
         try:
-            result = _fetch_json(f"http://127.0.0.1:{port}/api/status")
+            result = fetch_json(f"http://127.0.0.1:{port}/api/status")
             assert result == {"ok": True}
         finally:
             server.server_close()
@@ -351,6 +354,6 @@ class TestFetchJson:
         t.start()
         try:
             with pytest.raises(DescribeError, match="Server unhealthy"):
-                _fetch_json(f"http://127.0.0.1:{port}/api/status")
+                fetch_json(f"http://127.0.0.1:{port}/api/status")
         finally:
             server.server_close()
