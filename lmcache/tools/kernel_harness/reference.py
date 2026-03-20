@@ -134,7 +134,7 @@ def reference_multi_layer_block_kv_transfer(
                     # MLA: vllm_block is [BS, HS], mem_obj is [1, L, T, D]
                     if direction == Direction.D2H:
                         mem_obj[0, layer_idx, token_start:token_end, :] = (
-                            vllm_block.reshape(bs, config.hidden_dim).cpu()
+                            vllm_block.reshape(bs, config.hidden_dim).to(mem_obj.device)
                         )
                     else:
                         _set_vllm_block(
@@ -152,7 +152,9 @@ def reference_multi_layer_block_kv_transfer(
                     if direction == Direction.D2H:
                         for kv in range(2):
                             mem_obj[kv, layer_idx, token_start:token_end, :] = (
-                                vllm_block[kv].reshape(bs, config.hidden_dim).cpu()
+                                vllm_block[kv]
+                                .reshape(bs, config.hidden_dim)
+                                .to(mem_obj.device)
                             )
                     else:
                         combined = torch.stack(

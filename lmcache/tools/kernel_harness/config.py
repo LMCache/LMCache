@@ -132,10 +132,10 @@ def get_all_test_configs(
 
 
 def filter_configs(
-    configs: list,
+    configs: list[TestConfig],
     format_filter: str = "all",
     dtype_filter: str = "all",
-) -> list:
+) -> list[TestConfig]:
     """Filter configs by format and dtype CLI arguments."""
     format_map = {
         "normal": VLLMBufferFormat.NORMAL,

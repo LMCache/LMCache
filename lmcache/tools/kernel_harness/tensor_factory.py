@@ -36,7 +36,7 @@ def _create_zero_tensor(
 def create_vllm_tensors(
     config: TestConfig,
     device: torch.device,
-) -> list:
+) -> list[torch.Tensor]:
     """Create vLLM paged buffer tensors based on the format.
 
     Returns a list of tensors:
@@ -86,7 +86,7 @@ def create_vllm_tensors(
 def create_zero_vllm_tensors(
     config: TestConfig,
     device: torch.device,
-) -> list:
+) -> list[torch.Tensor]:
     """Create zeroed vLLM tensors (same shapes as create_vllm_tensors)."""
     nb = config.num_blocks
     bs = config.block_size
@@ -122,7 +122,9 @@ def create_zero_vllm_tensors(
     raise ValueError(f"Unknown format: {config.vllm_format}")
 
 
-def create_memory_objects(config: TestConfig, device: torch.device = None) -> list:
+def create_memory_objects(
+    config: TestConfig, device: torch.device = None
+) -> list[torch.Tensor]:
     """Create LMCache memory objects on the given device.
 
     If device is None or a CUDA device, tensors are created on GPU.

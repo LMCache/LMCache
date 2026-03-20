@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Standard
+from typing import Callable
 import argparse
 import logging
 import os
@@ -40,7 +41,7 @@ except ImportError as e:
     logger.debug("kernel_harness_ops import failed: %s", e)
 
 
-def _get_kernel_fn(use_reference: bool):
+def _get_kernel_fn(use_reference: bool) -> Callable:
     """Get the kernel function to use for testing."""
     if use_reference:
         return reference_multi_layer_block_kv_transfer
@@ -112,7 +113,7 @@ def _get_kernel_fn(use_reference: bool):
     return cuda_kernel_wrapper
 
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser(
         description="LMCache Block Transfer Kernel Test Harness"
     )
@@ -238,8 +239,8 @@ def main():
         results = []
         for config in bench_configs:
             print(f"  Benchmarking {config.name}...")
-            result = run_benchmark(config, kernel_fn, mem_device)
-            results.append(result)
+            r = run_benchmark(config, kernel_fn, mem_device)
+            results.append(r)
 
         print_benchmark_table(results)
 
