@@ -40,15 +40,19 @@ def create_vllm_tensors(
     """Create vLLM paged buffer tensors based on the format.
 
     Returns a list of tensors:
-    - NORMAL: list of L tensors, each [2, NB, BS, NH, HS]
-    - CROSS_LAYER: list with a single tensor [NB, NL, 2, BS, NH, HS]
-    - MLA: list of L tensors, each [NB, BS, HS]
+    - NORMAL: L tensors [2, NB, BS, NH, HS]
+    - CROSS_LAYER: 1 tensor [NB, NL, 2, BS, NH, HS]
+    - MLA: L tensors [NB, BS, HS]
+    - FLASH_INFER: L tensors [NB, 2, BS, NH, HS]
+    - SGLANG_MHA: 2L tensors [NBBS, NH, HS] (first L=K, next L=V)
+    - SGLANG_MLA: L tensors [NBBS, 1, HS]
     """
     nb = config.num_blocks
     bs = config.block_size
     nh = config.num_heads
     hs = config.head_size
     nl = config.num_layers
+    nbbs = config.nbbs
 
     if config.vllm_format == VLLMBufferFormat.NORMAL:
         shape = [2, nb, bs, nh, hs]
@@ -60,6 +64,20 @@ def create_vllm_tensors(
 
     elif config.vllm_format == VLLMBufferFormat.MLA:
         shape = [nb, bs, hs]
+        return [_create_random_tensor(shape, config.dtype, device) for _ in range(nl)]
+
+    elif config.vllm_format == VLLMBufferFormat.FLASH_INFER:
+        shape = [nb, 2, bs, nh, hs]
+        return [_create_random_tensor(shape, config.dtype, device) for _ in range(nl)]
+
+    elif config.vllm_format == VLLMBufferFormat.SGLANG_MHA:
+        shape = [nbbs, nh, hs]
+        return [
+            _create_random_tensor(shape, config.dtype, device) for _ in range(2 * nl)
+        ]
+
+    elif config.vllm_format == VLLMBufferFormat.SGLANG_MLA:
+        shape = [nbbs, 1, hs]
         return [_create_random_tensor(shape, config.dtype, device) for _ in range(nl)]
 
     raise ValueError(f"Unknown format: {config.vllm_format}")
@@ -75,6 +93,7 @@ def create_zero_vllm_tensors(
     nh = config.num_heads
     hs = config.head_size
     nl = config.num_layers
+    nbbs = config.nbbs
 
     if config.vllm_format == VLLMBufferFormat.NORMAL:
         shape = [2, nb, bs, nh, hs]
@@ -86,6 +105,18 @@ def create_zero_vllm_tensors(
 
     elif config.vllm_format == VLLMBufferFormat.MLA:
         shape = [nb, bs, hs]
+        return [_create_zero_tensor(shape, config.dtype, device) for _ in range(nl)]
+
+    elif config.vllm_format == VLLMBufferFormat.FLASH_INFER:
+        shape = [nb, 2, bs, nh, hs]
+        return [_create_zero_tensor(shape, config.dtype, device) for _ in range(nl)]
+
+    elif config.vllm_format == VLLMBufferFormat.SGLANG_MHA:
+        shape = [nbbs, nh, hs]
+        return [_create_zero_tensor(shape, config.dtype, device) for _ in range(2 * nl)]
+
+    elif config.vllm_format == VLLMBufferFormat.SGLANG_MLA:
+        shape = [nbbs, 1, hs]
         return [_create_zero_tensor(shape, config.dtype, device) for _ in range(nl)]
 
     raise ValueError(f"Unknown format: {config.vllm_format}")

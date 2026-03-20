@@ -27,14 +27,28 @@ def _get_block_data(
     block_idx: int,
 ) -> list:
     """Extract all layer data for a given block, returned as a list of tensors."""
+    bs = config.block_size
+    nl = config.num_layers
     results = []
-    for layer_idx in range(config.num_layers):
+    for layer_idx in range(nl):
         if config.vllm_format == VLLMBufferFormat.NORMAL:
             results.append(vllm_tensors[layer_idx][:, block_idx, :, :, :].clone())
         elif config.vllm_format == VLLMBufferFormat.CROSS_LAYER:
             results.append(vllm_tensors[0][block_idx, layer_idx, :, :, :, :].clone())
         elif config.vllm_format == VLLMBufferFormat.MLA:
             results.append(vllm_tensors[layer_idx][block_idx, :, :].clone())
+        elif config.vllm_format == VLLMBufferFormat.FLASH_INFER:
+            results.append(vllm_tensors[layer_idx][block_idx, :, :, :, :].clone())
+        elif config.vllm_format == VLLMBufferFormat.SGLANG_MHA:
+            token_start = block_idx * bs
+            token_end = token_start + bs
+            k = vllm_tensors[layer_idx][token_start:token_end, :, :].clone()
+            v = vllm_tensors[nl + layer_idx][token_start:token_end, :, :].clone()
+            results.append(torch.stack([k, v], dim=0))
+        elif config.vllm_format == VLLMBufferFormat.SGLANG_MLA:
+            token_start = block_idx * bs
+            token_end = token_start + bs
+            results.append(vllm_tensors[layer_idx][token_start:token_end, 0, :].clone())
     return results
 
 
@@ -58,13 +72,27 @@ def _check_block_is_zero(
     block_idx: int,
 ) -> bool:
     """Check if a block in the vLLM tensors is all zeros."""
-    for layer_idx in range(config.num_layers):
+    bs = config.block_size
+    nl = config.num_layers
+    for layer_idx in range(nl):
         if config.vllm_format == VLLMBufferFormat.NORMAL:
             block = vllm_tensors[layer_idx][:, block_idx, :, :, :]
         elif config.vllm_format == VLLMBufferFormat.CROSS_LAYER:
             block = vllm_tensors[0][block_idx, layer_idx, :, :, :, :]
         elif config.vllm_format == VLLMBufferFormat.MLA:
             block = vllm_tensors[layer_idx][block_idx, :, :]
+        elif config.vllm_format == VLLMBufferFormat.FLASH_INFER:
+            block = vllm_tensors[layer_idx][block_idx, :, :, :, :]
+        elif config.vllm_format == VLLMBufferFormat.SGLANG_MHA:
+            token_start = block_idx * bs
+            token_end = token_start + bs
+            k = vllm_tensors[layer_idx][token_start:token_end, :, :]
+            v = vllm_tensors[nl + layer_idx][token_start:token_end, :, :]
+            block = torch.cat([k, v], dim=0)
+        elif config.vllm_format == VLLMBufferFormat.SGLANG_MLA:
+            token_start = block_idx * bs
+            token_end = token_start + bs
+            block = vllm_tensors[layer_idx][token_start:token_end, 0, :]
         else:
             return False
 

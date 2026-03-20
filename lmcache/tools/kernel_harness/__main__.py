@@ -6,11 +6,20 @@ import logging
 import os
 import sys
 
+# Third Party
+import torch
+
 # Local
 from .benchmark import print_benchmark_table, run_benchmark
-from .config import filter_configs, get_all_test_configs
+from .config import Direction, VLLMBufferFormat, filter_configs, get_all_test_configs
 from .correctness import run_correctness_test, run_skip_prefix_test
 from .reference import reference_multi_layer_block_kv_transfer
+
+BENCHMARK_FORMATS = {
+    VLLMBufferFormat.NORMAL,
+    VLLMBufferFormat.CROSS_LAYER,
+    VLLMBufferFormat.MLA,
+}
 
 logger = logging.getLogger(__name__)
 
@@ -43,41 +52,58 @@ def _get_kernel_fn(use_reference: bool):
         )
         return reference_multi_layer_block_kv_transfer
 
-    # Wrap the C++ kernel to match the Python reference signature
-    def cuda_kernel_wrapper(vllm_tensors, memory_objects, block_ids, config, direction):
-        # Local
-        from .config import Direction
+    FORMAT_MAP = {
+        VLLMBufferFormat.NORMAL: kernel_harness_ops.GPUKVFormat.NL_X_TWO_NB_BS_NH_HS,  # noqa: E501
+        VLLMBufferFormat.CROSS_LAYER: kernel_harness_ops.GPUKVFormat.NB_NL_TWO_BS_NH_HS,  # noqa: E501
+        VLLMBufferFormat.MLA: kernel_harness_ops.GPUKVFormat.NL_X_NB_BS_HS,
+        VLLMBufferFormat.FLASH_INFER: kernel_harness_ops.GPUKVFormat.NL_X_NB_TWO_BS_NH_HS,  # noqa: E501
+        VLLMBufferFormat.SGLANG_MHA: kernel_harness_ops.GPUKVFormat.TWO_X_NL_X_NBBS_NH_HS,  # noqa: E501
+        VLLMBufferFormat.SGLANG_MLA: kernel_harness_ops.GPUKVFormat.NL_X_NBBS_ONE_HS,  # noqa: E501
+    }
 
+    def cuda_kernel_wrapper(vllm_tensors, memory_objects, block_ids, config, direction):
+        """Wrap the C++ kernel to match the Python reference signature."""
         cpp_direction = (
             kernel_harness_ops.TransferDirection.H2D
             if direction == Direction.H2D
             else kernel_harness_ops.TransferDirection.D2H
         )
+        gpu_kv_format = FORMAT_MAP[config.vllm_format]
 
-        # Map VLLMBufferFormat to GPUKVFormat
-        # Local
-        from .config import VLLMBufferFormat
+        # Build PageBufferShapeDesc
+        shape_desc = kernel_harness_ops.PageBufferShapeDesc()
+        shape_desc.kv_size = config.kv_dim
+        shape_desc.nl = config.num_layers
+        shape_desc.nb = config.num_blocks
+        shape_desc.bs = config.block_size
+        shape_desc.nh = config.num_heads
+        shape_desc.hs = config.head_size
+        shape_desc.element_size = vllm_tensors[0].element_size()
 
-        format_map = {
-            VLLMBufferFormat.NORMAL: kernel_harness_ops.GPUKVFormat.NL_X_TWO_NB_BS_NH_HS,  # noqa: E501
-            VLLMBufferFormat.CROSS_LAYER: kernel_harness_ops.GPUKVFormat.NB_NL_TWO_BS_NH_HS,  # noqa: E501
-            VLLMBufferFormat.MLA: kernel_harness_ops.GPUKVFormat.NL_X_NB_BS_HS,
-        }
-        gpu_kv_format = format_map[config.vllm_format]
+        # Build paged_buffer_ptrs_tensor: GPU tensor of data pointers.
+        # One pointer per tensor in vllm_tensors — the kernel resolves
+        # layer indexing internally (e.g., cross-layer has 1 pointer,
+        # SGLang MHA has 2*NL pointers, per-layer formats have NL).
+        ptrs = [t.data_ptr() for t in vllm_tensors]
+        paged_buffer_ptrs_tensor = torch.tensor(
+            ptrs,
+            dtype=torch.int64,
+            device=vllm_tensors[0].device,
+        )
 
-        # Third Party
-        import torch
+        # Build lmcache_objects_ptrs: list of raw pointers
+        lmcache_objects_ptrs = [m.data_ptr() for m in memory_objects]
 
-        device = torch.device("cuda")
+        device = vllm_tensors[0].device
         kernel_harness_ops.multi_layer_block_kv_transfer(
-            vllm_tensors,
-            memory_objects,
+            paged_buffer_ptrs_tensor,
+            lmcache_objects_ptrs,
             block_ids,
             device,
             cpp_direction,
+            shape_desc,
+            config.tokens_per_object,
             gpu_kv_format,
-            config.block_size,
-            config.num_blocks,
             config.skip_prefix_n_blocks,
         )
 
@@ -101,9 +127,17 @@ def main():
     )
     parser.add_argument(
         "--format",
-        choices=["normal", "cross_layer", "mla", "all"],
+        choices=[
+            "normal",
+            "cross_layer",
+            "mla",
+            "flash_infer",
+            "sglang_mha",
+            "sglang_mla",
+            "all",
+        ],
         default="all",
-        help="Which vLLM format to test (default: all)",
+        help="Which GPU KV format to test (default: all)",
     )
     parser.add_argument(
         "--dtype",
@@ -181,14 +215,18 @@ def main():
             print("Some correctness tests FAILED.")
         print()
 
-    # Benchmark
+    # Benchmark (only for the 3 core formats)
     if args.mode in ("benchmark", "all"):
         print("=" * 60)
         print("Benchmark")
         print("=" * 60)
 
+        bench_configs = [c for c in configs if c.vllm_format in BENCHMARK_FORMATS]
+        if not bench_configs:
+            print("  No benchmark configurations match the given filters.")
+
         results = []
-        for config in configs:
+        for config in bench_configs:
             print(f"  Benchmarking {config.name}...")
             result = run_benchmark(config, kernel_fn)
             results.append(result)

@@ -9,11 +9,14 @@ import torch
 
 
 class VLLMBufferFormat(Enum):
-    """Which vLLM paged buffer configuration to test."""
+    """Which vLLM/SGLang paged buffer configuration to test."""
 
-    NORMAL = auto()  # NL_X_TWO_NB_BS_NH_HS: L separate tensors [2, NB, BS, NH, HS]
+    NORMAL = auto()  # NL_X_TWO_NB_BS_NH_HS: L tensors [2, NB, BS, NH, HS]
     CROSS_LAYER = auto()  # NB_NL_TWO_BS_NH_HS: single tensor [NB, NL, 2, BS, NH, HS]
-    MLA = auto()  # NL_X_NB_BS_HS: L separate tensors [NB, BS, HS]
+    MLA = auto()  # NL_X_NB_BS_HS: L tensors [NB, BS, HS]
+    FLASH_INFER = auto()  # NL_X_NB_TWO_BS_NH_HS: L tensors [NB, 2, BS, NH, HS]
+    SGLANG_MHA = auto()  # TWO_X_NL_X_NBBS_NH_HS: 2L tensors [NBBS, NH, HS]
+    SGLANG_MLA = auto()  # NL_X_NBBS_ONE_HS: L tensors [NBBS, 1, HS]
 
 
 class Direction(Enum):
@@ -63,7 +66,20 @@ class TestConfig:
 
     @property
     def is_mla(self) -> bool:
-        return self.vllm_format == VLLMBufferFormat.MLA
+        return self.vllm_format in (VLLMBufferFormat.MLA, VLLMBufferFormat.SGLANG_MLA)
+
+    @property
+    def uses_flat_indexing(self) -> bool:
+        """SGLang formats use NBBS flat token indexing instead of [NB, BS]."""
+        return self.vllm_format in (
+            VLLMBufferFormat.SGLANG_MHA,
+            VLLMBufferFormat.SGLANG_MLA,
+        )
+
+    @property
+    def nbbs(self) -> int:
+        """Total token capacity in paged buffer: NB * BS."""
+        return self.num_blocks * self.block_size
 
     @property
     def kv_dim(self) -> int:
@@ -81,12 +97,15 @@ def get_all_test_configs(
     num_bench: int = DEFAULT_NUM_BENCH,
     skip_prefix_n_blocks: int = 0,
 ) -> list:
-    """Generate all 6 test configurations (3 formats x 2 dtypes)."""
+    """Generate all 12 test configurations (6 formats x 2 dtypes)."""
     format_params = [
         # (format, num_layers, num_heads, head_size)
         (VLLMBufferFormat.NORMAL, 64, 8, 128),
         (VLLMBufferFormat.CROSS_LAYER, 64, 8, 128),
         (VLLMBufferFormat.MLA, 104, 1, 576),
+        (VLLMBufferFormat.FLASH_INFER, 64, 8, 128),
+        (VLLMBufferFormat.SGLANG_MHA, 64, 8, 128),
+        (VLLMBufferFormat.SGLANG_MLA, 104, 1, 576),
     ]
     dtypes = [torch.bfloat16, torch.float8_e4m3fn]
 
@@ -122,6 +141,9 @@ def filter_configs(
         "normal": VLLMBufferFormat.NORMAL,
         "cross_layer": VLLMBufferFormat.CROSS_LAYER,
         "mla": VLLMBufferFormat.MLA,
+        "flash_infer": VLLMBufferFormat.FLASH_INFER,
+        "sglang_mha": VLLMBufferFormat.SGLANG_MHA,
+        "sglang_mla": VLLMBufferFormat.SGLANG_MLA,
     }
     dtype_map = {
         "bf16": torch.bfloat16,

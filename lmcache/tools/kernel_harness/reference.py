@@ -16,10 +16,11 @@ def _get_vllm_block(
     """Extract a single block from vLLM tensors for a given layer.
 
     Returns:
-    - NORMAL: shape [2, BS, NH, HS]
-    - CROSS_LAYER: shape [2, BS, NH, HS]
-    - MLA: shape [BS, HS]
+    - Non-MLA formats: shape [2, BS, NH, HS]
+    - MLA formats: shape [BS, HS]
     """
+    bs = config.block_size
+
     if config.vllm_format == VLLMBufferFormat.NORMAL:
         # vllm_tensors[layer]: [2, NB, BS, NH, HS]
         return vllm_tensors[layer_idx][:, block_idx, :, :, :]
@@ -32,6 +33,26 @@ def _get_vllm_block(
         # vllm_tensors[layer]: [NB, BS, HS]
         return vllm_tensors[layer_idx][block_idx, :, :]
 
+    elif config.vllm_format == VLLMBufferFormat.FLASH_INFER:
+        # vllm_tensors[layer]: [NB, 2, BS, NH, HS]
+        return vllm_tensors[layer_idx][block_idx, :, :, :, :]
+
+    elif config.vllm_format == VLLMBufferFormat.SGLANG_MHA:
+        # vllm_tensors[layer] = K, vllm_tensors[nl + layer] = V
+        # each: [NBBS, NH, HS], flat token indexing
+        token_start = block_idx * bs
+        token_end = token_start + bs
+        nl = config.num_layers
+        k_block = vllm_tensors[layer_idx][token_start:token_end, :, :]
+        v_block = vllm_tensors[nl + layer_idx][token_start:token_end, :, :]
+        return torch.stack([k_block, v_block], dim=0)  # [2, BS, NH, HS]
+
+    elif config.vllm_format == VLLMBufferFormat.SGLANG_MLA:
+        # vllm_tensors[layer]: [NBBS, 1, HS], flat token indexing
+        token_start = block_idx * bs
+        token_end = token_start + bs
+        return vllm_tensors[layer_idx][token_start:token_end, 0, :]  # [BS, HS]
+
     raise ValueError(f"Unknown format: {config.vllm_format}")
 
 
@@ -43,6 +64,8 @@ def _set_vllm_block(
     data: torch.Tensor,
 ) -> None:
     """Write a block into vLLM tensors for a given layer."""
+    bs = config.block_size
+
     if config.vllm_format == VLLMBufferFormat.NORMAL:
         vllm_tensors[layer_idx][:, block_idx, :, :, :] = data
 
@@ -51,6 +74,23 @@ def _set_vllm_block(
 
     elif config.vllm_format == VLLMBufferFormat.MLA:
         vllm_tensors[layer_idx][block_idx, :, :] = data
+
+    elif config.vllm_format == VLLMBufferFormat.FLASH_INFER:
+        vllm_tensors[layer_idx][block_idx, :, :, :, :] = data
+
+    elif config.vllm_format == VLLMBufferFormat.SGLANG_MHA:
+        # data: [2, BS, NH, HS] → split into K and V flat tensors
+        token_start = block_idx * bs
+        token_end = token_start + bs
+        nl = config.num_layers
+        vllm_tensors[layer_idx][token_start:token_end, :, :] = data[0]
+        vllm_tensors[nl + layer_idx][token_start:token_end, :, :] = data[1]
+
+    elif config.vllm_format == VLLMBufferFormat.SGLANG_MLA:
+        # data: [BS, HS] → write into flat tensor
+        token_start = block_idx * bs
+        token_end = token_start + bs
+        vllm_tensors[layer_idx][token_start:token_end, 0, :] = data
 
 
 def reference_multi_layer_block_kv_transfer(
@@ -117,17 +157,15 @@ def reference_multi_layer_block_kv_transfer(
                                 vllm_block[kv].reshape(bs, config.hidden_dim).cpu()
                             )
                     else:
-                        for kv in range(2):
-                            block_data = (
+                        combined = torch.stack(
+                            [
                                 mem_obj[kv, layer_idx, token_start:token_end, :]
                                 .reshape(bs, config.num_heads, config.head_size)
                                 .to(vllm_tensors[0].device)
-                            )
-                            if config.vllm_format == VLLMBufferFormat.NORMAL:
-                                vllm_tensors[layer_idx][kv, block_id, :, :, :] = (
-                                    block_data
-                                )
-                            elif config.vllm_format == VLLMBufferFormat.CROSS_LAYER:
-                                vllm_tensors[0][block_id, layer_idx, kv, :, :, :] = (
-                                    block_data
-                                )
+                                for kv in range(2)
+                            ],
+                            dim=0,
+                        )  # [2, BS, NH, HS]
+                        _set_vllm_block(
+                            vllm_tensors, config, layer_idx, block_id, combined
+                        )

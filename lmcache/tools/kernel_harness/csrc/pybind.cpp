@@ -17,13 +17,26 @@ PYBIND11_MODULE(kernel_harness_ops, m) {
   py::enum_<GPUKVFormat>(m, "GPUKVFormat")
       .value("NB_NL_TWO_BS_NH_HS", GPUKVFormat::NB_NL_TWO_BS_NH_HS)
       .value("NL_X_TWO_NB_BS_NH_HS", GPUKVFormat::NL_X_TWO_NB_BS_NH_HS)
+      .value("NL_X_NB_TWO_BS_NH_HS", GPUKVFormat::NL_X_NB_TWO_BS_NH_HS)
       .value("NL_X_NB_BS_HS", GPUKVFormat::NL_X_NB_BS_HS)
+      .value("TWO_X_NL_X_NBBS_NH_HS", GPUKVFormat::TWO_X_NL_X_NBBS_NH_HS)
+      .value("NL_X_NBBS_ONE_HS", GPUKVFormat::NL_X_NBBS_ONE_HS)
       .export_values();
 
   m.def("multi_layer_block_kv_transfer", &multi_layer_block_kv_transfer,
-        py::arg("key_value_tensors"), py::arg("memory_objects"),
+        py::arg("paged_buffer_ptrs_tensor"), py::arg("lmcache_objects_ptrs"),
         py::arg("block_ids"), py::arg("device"), py::arg("direction"),
-        py::arg("gpu_kv_format"), py::arg("block_size"), py::arg("num_blocks"),
-        py::arg("skip_prefix_n_blocks"),
+        py::arg("shape_desc"), py::arg("lmcache_chunk_size"),
+        py::arg("gpu_kv_format"), py::arg("skip_prefix_n_blocks"),
         py::call_guard<py::gil_scoped_release>());
+
+  py::class_<PageBufferShapeDesc>(m, "PageBufferShapeDesc")
+      .def(py::init<>())
+      .def_readwrite("kv_size", &PageBufferShapeDesc::kv_size)
+      .def_readwrite("nl", &PageBufferShapeDesc::nl)
+      .def_readwrite("nb", &PageBufferShapeDesc::nb)
+      .def_readwrite("bs", &PageBufferShapeDesc::bs)
+      .def_readwrite("nh", &PageBufferShapeDesc::nh)
+      .def_readwrite("hs", &PageBufferShapeDesc::hs)
+      .def_readwrite("element_size", &PageBufferShapeDesc::element_size);
 }
