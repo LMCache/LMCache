@@ -168,9 +168,7 @@ class CuObjectS3Connector(S3Connector):
         data_size = memory_obj.get_physical_size()
 
         # Prepare RDMA token (sub-region within the registered pool)
-        rdma_token = self._cuobj_client.prepare_put(
-            memory_obj.data_ptr, data_size
-        )
+        rdma_token = self._cuobj_client.prepare_put(memory_obj.data_ptr, data_size)
 
         # Build HTTP headers
         headers = HttpHeaders()
@@ -201,7 +199,11 @@ class CuObjectS3Connector(S3Connector):
                 )
             # Verify RDMA completion
             if rdma_state["reply"]:
-                self._cuobj_client.parse_rdma_reply(rdma_state["reply"])
+                if not self._cuobj_client.parse_rdma_reply(rdma_state["reply"]):
+                    raise RuntimeError(
+                        f"RDMA upload verification failed for {key_str}: "
+                        f"reply={rdma_state['reply']!r}"
+                    )
 
         s3_req = s3.S3Request(
             client=self.s3_client,
@@ -247,9 +249,7 @@ class CuObjectS3Connector(S3Connector):
         data_size = mem_obj.get_physical_size()
 
         # Prepare RDMA token (server will RDMA_WRITE into this buffer)
-        rdma_token = self._cuobj_client.prepare_get(
-            mem_obj.data_ptr, data_size
-        )
+        rdma_token = self._cuobj_client.prepare_get(mem_obj.data_ptr, data_size)
 
         headers = HttpHeaders()
         headers.add("Host", self.s3_endpoint)
@@ -275,7 +275,11 @@ class CuObjectS3Connector(S3Connector):
                     f"error={rdma_state['err']}, status={final_status}"
                 )
             if rdma_state["reply"]:
-                self._cuobj_client.parse_rdma_reply(rdma_state["reply"])
+                if not self._cuobj_client.parse_rdma_reply(rdma_state["reply"]):
+                    raise RuntimeError(
+                        f"RDMA download verification failed for "
+                        f"{key_str}: reply={rdma_state['reply']!r}"
+                    )
 
         # No on_body — data arrives via RDMA_WRITE, not HTTP body
         s3_req = s3.S3Request(
@@ -297,13 +301,9 @@ class CuObjectS3Connector(S3Connector):
         if self._cuobj_client is not None:
             if self._rdma_pool_handle is not None:
                 try:
-                    self._cuobj_client.deregister_pool(
-                        self._rdma_pool_handle
-                    )
+                    self._cuobj_client.deregister_pool(self._rdma_pool_handle)
                 except Exception as exc:
-                    logger.warning(
-                        f"Error deregistering RDMA pool: {exc}"
-                    )
+                    logger.warning(f"Error deregistering RDMA pool: {exc}")
                 self._rdma_pool_handle = None
             try:
                 self._cuobj_client.close()
