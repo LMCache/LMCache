@@ -35,7 +35,8 @@ File Layout
    └── commands/
        ├── __init__.py      # ALL_COMMANDS registry
        ├── base.py          # BaseCommand ABC
-       └── mock.py          # Example command
+       ├── mock.py          # Example command
+       └── server.py        # lmcache server
 
 
 Step-by-Step: Adding a New Command

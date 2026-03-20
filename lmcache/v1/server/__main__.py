@@ -150,6 +150,13 @@ class LMCacheServer:
 def main():
     # Standard
     import sys
+    import warnings
+
+    warnings.warn(
+        "lmcache_server is deprecated. Use 'lmcache server' instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
 
     if len(sys.argv) not in [3, 4]:
         logger.error(f"Usage: {sys.argv[0]} <host> <port> <storage>(default:cpu)")

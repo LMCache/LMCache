@@ -18,6 +18,9 @@ After installing LMCache, the ``lmcache`` command is available:
    # Show available commands
    lmcache -h
 
+   # Start the LMCache server
+   lmcache server --l1-size-gb 60 --eviction-policy LRU
+
    # Run the example mock command
    lmcache mock --name my-run --num-items 5
 
@@ -37,9 +40,81 @@ Available Commands
 
    * - Command
      - Description
+   * - ``server``
+     - Start the LMCache cache server (ZMQ + HTTP). See :ref:`cli-server`
+       below for details.
    * - ``mock``
      - Example command that outputs fake metrics. Useful for testing the CLI
        framework and as a reference for new commands.
+
+
+.. _cli-server:
+
+``lmcache server``
+------------------
+
+Start the LMCache cache server. This replaces the standalone
+``lmcache_server`` and ``python3 -m lmcache.v1.multiprocess.http_server``
+entry points.
+
+By default the server starts both the ZMQ backend and an HTTP frontend.
+Use ``--no-http`` for ZMQ-only mode.
+
+.. code-block:: bash
+
+   # HTTP + ZMQ (default)
+   lmcache server \
+       --engine-type blend --host 0.0.0.0 --port 5555 \
+       --l1-size-gb 60 --eviction-policy LRU
+
+   # ZMQ-only (no HTTP frontend)
+   lmcache server --no-http \
+       --host 0.0.0.0 --port 5555 \
+       --l1-size-gb 60 --eviction-policy LRU
+
+Server Arguments
+~~~~~~~~~~~~~~~~
+
+The server command accepts arguments from several groups:
+
+**Core server (ZMQ)**
+
+- ``--host`` — ZMQ server host (default: ``localhost``)
+- ``--port`` — ZMQ server port (default: ``5555``)
+- ``--chunk-size`` — Chunk size for KV cache operations (default: ``256``)
+- ``--max-workers`` — Maximum worker threads (default: ``1``)
+- ``--hash-algorithm`` — Hash algorithm: ``builtin``, ``sha256_cbor``, ``blake3`` (default: ``blake3``)
+- ``--engine-type`` — Cache engine type: ``default``, ``blend`` (default: ``default``)
+
+**HTTP frontend**
+
+- ``--http-host`` — HTTP server host (default: ``0.0.0.0``)
+- ``--http-port`` — HTTP server port (default: ``8000``)
+- ``--no-http`` — Disable the HTTP frontend entirely
+
+**L1 memory**
+
+- ``--l1-size-gb`` — Size of L1 memory in GB (**required**)
+- ``--l1-use-lazy`` — Use lazy allocation (default: ``True``)
+- ``--l1-init-size-gb`` — Initial allocation size in GB when lazy (default: ``20``)
+- ``--l1-align-bytes`` — Alignment in bytes (default: ``4096``)
+
+**Eviction**
+
+- ``--eviction-policy`` — Eviction policy: ``LRU``, ``noop`` (**required**)
+- ``--eviction-trigger-watermark`` — Memory usage fraction to trigger eviction (default: ``0.8``)
+- ``--eviction-ratio`` — Fraction of memory to evict (default: ``0.2``)
+
+**Observability**
+
+- ``--disable-prometheus`` — Disable Prometheus metrics
+- ``--prometheus-port`` — Prometheus metrics port (default: ``9090``)
+- ``--enable-telemetry`` — Enable the telemetry event system
+
+.. note::
+
+   The standalone ``lmcache_server`` entry point is deprecated.
+   Use ``lmcache server`` instead.
 
 
 Metrics Output
