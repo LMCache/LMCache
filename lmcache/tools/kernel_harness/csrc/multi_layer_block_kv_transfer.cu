@@ -165,48 +165,31 @@ __device__ void multi_layer_block_transfer_single_block(
 }
 
 template <typename ScalarType, bool lmcache_to_engine, GPUKVFormat format>
-__device__ void multi_layer_block_transfer_single_object(
-    ScalarType* __restrict__ lmcache_object,
-    ScalarType** __restrict__ paged_buffer_ptrs,
-    const int64_t* engine_block_ids, const int start_block_idx,
-    const int num_blocks_in_batch, const PageBufferShapeDesc shape_desc,
-    const int lmcache_chunk_size,  // e.g., 256, used to calculate global offset
-                                   // in LMCache object
-    const int skip_prefix_n_blocks) {
-  const int block_idx_in_batch = blockIdx.y % num_blocks_in_batch;
-  const int global_block_idx = start_block_idx + block_idx_in_batch;
-  if (global_block_idx < skip_prefix_n_blocks) {
-    // this block is in the prefix that we need to skip, so we do nothing
-    return;
-  }
-
-  const int engine_block_idx =
-      engine_block_ids[start_block_idx + block_idx_in_batch];
-  multi_layer_block_transfer_single_block<ScalarType, lmcache_to_engine,
-                                          format>(
-      lmcache_object, paged_buffer_ptrs, engine_block_idx,
-      block_idx_in_batch * shape_desc.bs,  // offset in LMCache block
-      shape_desc, lmcache_chunk_size);
-}
-
-template <typename ScalarType, bool lmcache_to_engine, GPUKVFormat format>
 __global__ void multi_layer_block_transfer_kernel(
     MemoryObj4<ScalarType> lmcache_objects,
     ScalarType** __restrict__ paged_buffer_ptrs,
     const int64_t* engine_block_ids,
-    const int num_blocks_in_lmcache_object,  // e.g. 16 for lmcache chunk size =
-                                             // 256 and block size = 16
+    const int num_blocks_per_object,  // e.g. 16 for lmcache chunk size =
+                                      // 256 and block size = 16
     const PageBufferShapeDesc shape_desc,
     const int lmcache_chunk_size,  // e.g., 256, used to calculate global offset
                                    // in LMCache object
     const int skip_prefix_n_blocks) {
-  for (int obj_idx = 0; obj_idx < lmcache_objects.num_objects; ++obj_idx) {
-    multi_layer_block_transfer_single_object<ScalarType, lmcache_to_engine,
-                                             format>(
-        lmcache_objects.objects[obj_idx], paged_buffer_ptrs, engine_block_ids,
-        obj_idx * num_blocks_in_lmcache_object, num_blocks_in_lmcache_object,
-        shape_desc, lmcache_chunk_size, skip_prefix_n_blocks);
+  // blockIdx.y spans all blocks across all objects (total_blocks).
+  // Derive which object and local block index from the flat index.
+  const int flat_block_idx = blockIdx.y;
+  if (flat_block_idx < skip_prefix_n_blocks) {
+    return;
   }
+  const int obj_idx = flat_block_idx / num_blocks_per_object;
+  const int block_idx_in_object = flat_block_idx % num_blocks_per_object;
+
+  const int engine_block_idx = engine_block_ids[flat_block_idx];
+  multi_layer_block_transfer_single_block<ScalarType, lmcache_to_engine,
+                                          format>(
+      lmcache_objects.objects[obj_idx], paged_buffer_ptrs, engine_block_idx,
+      block_idx_in_object * shape_desc.bs,  // offset in LMCache object
+      shape_desc, lmcache_chunk_size);
 }
 
 }  // namespace
@@ -367,7 +350,7 @@ void multi_layer_block_kv_transfer(
   int thread_dim_y = shape_desc.nh;
 
   dim3 block(thread_dim_x, thread_dim_y);
-  dim3 grid(shape_desc.kv_size, num_blocks_per_object, shape_desc.nl);
+  dim3 grid(shape_desc.kv_size, total_blocks, shape_desc.nl);
 
   // --- Dispatch on direction x format ---
   if (direction == TransferDirection::H2D) {
