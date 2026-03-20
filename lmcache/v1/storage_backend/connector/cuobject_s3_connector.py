@@ -9,11 +9,15 @@ from awscrt.http import HttpHeaders, HttpRequest
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.lazy_memory_allocator import LazyMemoryAllocator
 from lmcache.v1.memory_management import (
-    LazyMemoryAllocator,
     MemoryObj,
     MixedMemoryAllocator,
     PinMemoryAllocator,
+)
+from lmcache.v1.storage_backend.connector.cuobject_bindings import (
+    CuObjClientWrapper,
+    CuObjConfig,
 )
 from lmcache.v1.storage_backend.connector.s3_connector import S3Connector
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
@@ -105,12 +109,6 @@ class CuObjectS3Connector(S3Connector):
         self._rdma_pool_handle: Optional[tuple[int, int]] = None
 
         try:
-            # Local
-            from lmcache.v1.storage_backend.connector.cuobject_bindings import (
-                CuObjClientWrapper,
-                CuObjConfig,
-            )
-
             config = CuObjConfig(
                 lib_path=cuobj_lib_path,
                 nic_device=cuobj_nic_device,

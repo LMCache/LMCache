@@ -7,6 +7,7 @@ These tests mock the C library so they can run on any machine without
 # Standard
 from unittest.mock import MagicMock, patch
 import ctypes
+import logging
 
 # Third Party
 import pytest
@@ -33,12 +34,7 @@ def _make_fake_lib():
     """
     lib = MagicMock(spec=ctypes.CDLL)
 
-    def _client_create(handle_ptr, ops_ptr, proto):
-        # Simulate writing a non-NULL handle
-        handle_ptr.contents = ctypes.c_void_p(0xDEAD)
-        return CUOBJ_SUCCESS
-
-    lib.cuObjClientCreate = MagicMock(side_effect=_client_create)
+    lib.cuObjClientCreate = MagicMock(return_value=CUOBJ_SUCCESS)
     lib.cuObjClientDestroy = MagicMock(return_value=CUOBJ_SUCCESS)
     lib.cuObjRegisterMemory = MagicMock(return_value=CUOBJ_SUCCESS)
     lib.cuObjDeregisterMemory = MagicMock(return_value=CUOBJ_SUCCESS)
@@ -76,7 +72,7 @@ class TestCuObjClientWrapperInit:
 
     def test_successful_init(self):
         wrapper, lib = _build_wrapper()
-        assert wrapper._rdma_enabled is not None or True
+        assert wrapper._handle is not None
         lib.cuObjClientCreate.assert_called_once()
 
     def test_create_failure_raises(self):
@@ -116,7 +112,12 @@ class TestPoolRegistration:
     def test_deregister_pool_failure_logs_warning(self, caplog):
         wrapper, lib = _build_wrapper()
         lib.cuObjDeregisterMemory.return_value = 99
-        wrapper.deregister_pool((0x1000, 4096))
+        _logger = logging.getLogger("lmcache.v1.storage_backend.connector.cuobject_bindings")
+        _logger.addHandler(caplog.handler)
+        try:
+            wrapper.deregister_pool((0x1000, 4096))
+        finally:
+            _logger.removeHandler(caplog.handler)
         assert "returned error 99" in caplog.text
 
 
@@ -198,7 +199,12 @@ class TestClose:
     def test_close_logs_warning_on_error(self, caplog):
         wrapper, lib = _build_wrapper()
         lib.cuObjClientDestroy.return_value = 99
-        wrapper.close()
+        _logger = logging.getLogger("lmcache.v1.storage_backend.connector.cuobject_bindings")
+        _logger.addHandler(caplog.handler)
+        try:
+            wrapper.close()
+        finally:
+            _logger.removeHandler(caplog.handler)
         assert "returned error 99" in caplog.text
 
 

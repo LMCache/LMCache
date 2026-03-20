@@ -81,22 +81,24 @@ _CRT_PATCHES = {
     "lmcache.v1.storage_backend.connector.s3_connector.io": MagicMock(),
     "lmcache.v1.storage_backend.connector.s3_connector.auth": MagicMock(),
     "lmcache.v1.storage_backend.connector.s3_connector.s3": MagicMock(),
+    "lmcache.v1.storage_backend.connector.cuobject_s3_connector.s3": MagicMock(),
+    "lmcache.v1.storage_backend.connector.cuobject_s3_connector.HttpHeaders": MagicMock(),
+    "lmcache.v1.storage_backend.connector.cuobject_s3_connector.HttpRequest": MagicMock(),
 }
 
 
 @pytest.fixture
 def mock_crt():
     """Patch AWS CRT modules so S3Connector.__init__ succeeds."""
-    with patch.dict("sys.modules", {}):
-        patchers = [
-            patch(target, mock)
-            for target, mock in _CRT_PATCHES.items()
-        ]
-        for p in patchers:
-            p.start()
-        yield
-        for p in patchers:
-            p.stop()
+    patchers = [
+        patch(target, mock)
+        for target, mock in _CRT_PATCHES.items()
+    ]
+    for p in patchers:
+        p.start()
+    yield
+    for p in patchers:
+        p.stop()
 
 
 @pytest.fixture
@@ -406,8 +408,17 @@ class TestClose:
                 disable_tls=True,
             )
 
-            # Run the async close
-            async_loop.run_until_complete(connector.close())
+            # Mock the parent S3Connector.close() to avoid event-loop
+            # deadlock from pq_executor.shutdown() in the test harness.
+            async def _noop():
+                pass
+
+            with patch.object(
+                CuObjectS3Connector.__bases__[0],
+                "close",
+                return_value=_noop(),
+            ):
+                async_loop.run_until_complete(connector.close())
 
             mock_client.deregister_pool.assert_called_once()
             mock_client.close.assert_called_once()
@@ -445,8 +456,17 @@ class TestClose:
                 disable_tls=True,
             )
 
-            # Should not raise
-            async_loop.run_until_complete(connector.close())
+            # Mock the parent S3Connector.close() to avoid event-loop
+            # deadlock from pq_executor.shutdown() in the test harness.
+            async def _noop():
+                pass
+
+            with patch.object(
+                CuObjectS3Connector.__bases__[0],
+                "close",
+                return_value=_noop(),
+            ):
+                async_loop.run_until_complete(connector.close())
             mock_client.close.assert_called_once()
 
 

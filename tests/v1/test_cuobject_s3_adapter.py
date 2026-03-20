@@ -74,7 +74,7 @@ class TestCreateConnector:
 
         with patch(
             "lmcache.v1.storage_backend.connector."
-            "cuobject_s3_adapter.CuObjectS3Connector"
+            "cuobject_s3_connector.CuObjectS3Connector"
         ) as mock_cls:
             mock_cls.return_value = MagicMock()
             adapter.create_connector(mock_context)
