@@ -708,6 +708,10 @@ class MPCacheEngine:
                     "dtype": str(ctx.dtype),
                     "is_mla": ctx.is_mla,
                     "num_blocks": ctx.num_blocks,
+                    "gpu_kv_format": ctx.gpu_kv_format_name,
+                    "gpu_kv_shape": ctx.gpu_kv_shape,
+                    "gpu_kv_concrete_shape": ctx.concrete_gpu_kv_shape,
+                    "attention_backend": ctx.attention_backend,
                 }
             gpu_context_meta[str(gpu_id)] = entry
 

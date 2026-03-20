@@ -30,26 +30,90 @@ Eviction policy:                         LRU
 Cached objects:                          1024
 Active sessions:                         3
 Uptime:                                  2h 14m 32s
+------ Model: meta-llama/Llama-3.1-70B-Instruct ---
+World size:                              4
+GPU IDs:                                 0, 1, 2, 3
+Attention backend:         vLLM non-MLA flash attention
+GPU KV shape:              NL x [2, NB, BS, NH, HS]
+GPU KV tensor shape:       80 x [2, 2048, 128, 8, 128]
+Num layers:                              80
+Block size:                              128
+Hidden dim size:                         1024
+Dtype:                                   torch.float16
+MLA:                                     False
+Num blocks:                              2048
+----------- L2: NixlStoreL2Adapter ------------
+Type:                          NixlStoreL2Adapter
+Health:                                  OK
+Backend:                                 nixl_rdma
+Stored objects:                          512
+Pool used:                     480 / 512 (93.8%)
 ==================================================
+```
 
-$ lmcache describe kvcache --url http://localhost:8000 --format json
+JSON output collects model and L2 adapter sections into lists for easier
+programmatic access:
+
+```json
 {
   "title": "LMCache KV Cache Service",
   "metrics": {
     "health": "OK",
-    "zmq_endpoint": "tcp://localhost:5555",
-    "http_endpoint": "http://localhost:8000",
+    "url": "http://localhost:8000",
     "engine_type": "blend",
-    "chunk_size": 256,
-    "l1_capacity_gb": 60.0,
-    "l1_used_gb": "42.30 (70.5%)",
-    "eviction_policy": "LRU",
-    "cached_objects": 1024,
-    "active_sessions": 3,
-    "uptime": "2h 14m 32s"
+    ...
+    "models": [
+      {
+        "model": "meta-llama/Llama-3.1-70B-Instruct",
+        "world_size": 4,
+        "gpu_ids": "0, 1, 2, 3",
+        "attention_backend": "vLLM non-MLA flash attention",
+        "gpu_kv_shape": "NL x [2, NB, BS, NH, HS]",
+        "gpu_kv_concrete_shape": "80 x [2, 2048, 128, 8, 128]",
+        "num_layers": 80,
+        "block_size": 128,
+        "hidden_dim_size": 1024,
+        "dtype": "torch.float16",
+        "is_mla": false,
+        "num_blocks": 2048
+      }
+    ],
+    "l2_adapters": [
+      {
+        "type": "NixlStoreL2Adapter",
+        "health": "OK",
+        "backend": "nixl_rdma",
+        "stored_object_count": 512,
+        "pool_used": "480 / 512 (93.8%)"
+      }
+    ]
   }
 }
 ```
+
+Per-model sections are generated for each unique `(model_name, world_size)` pair
+registered with the engine. The section includes:
+
+- **Attention backend** — which attention implementation is active (e.g.,
+  `vLLM non-MLA flash attention`, `vLLM MLA`, `SGLang MHA`), derived from the
+  `GPUKVFormat` enum.
+- **GPU KV shape** — the symbolic tensor layout using short names matching the
+  `GPUKVFormat` enum (NB=num_blocks, NL=num_layers, BS=block_size, NH=num_heads,
+  HS=head_size, PBS=page_buffer_size). E.g., `NL x [2, NB, BS, NH, HS]`.
+- **GPU KV tensor shape** — the same layout with actual numeric values substituted
+  (e.g., `80 x [2, 2048, 128, 8, 128]`).
+- **Layout details** — num_layers, block_size, hidden_dim_size, dtype, MLA flag,
+  num_blocks.
+
+L2 adapter sections are generated for each adapter in
+`storage_manager.l2_adapters`. Fields shown depend on the adapter type:
+
+- **Type** and **Health** — always shown.
+- **Backend** — Nixl adapter backend (e.g., `nixl_rdma`).
+- **Base path** — filesystem adapter storage directory.
+- **Stored objects** — number of cached objects (Mock, Nixl).
+- **Used** — size used vs capacity with percentage (Mock).
+- **Pool used** — pool slots used vs total with percentage (Nixl).
 
 ---
 
@@ -189,6 +253,29 @@ Mirror the same `start_time`, `zmq_endpoint`, and `http_endpoint` additions if
 | `uptime_seconds` | `MPCacheEngine.__init__` + `report_status()` | Record `time.monotonic()` at init, compute delta in status |
 | `zmq_endpoint` | `MPCacheEngine.__init__` + `run_cache_server()` | New constructor kwarg, passed from `MPServerConfig` |
 | `http_endpoint` | `run_http_server()` lifespan + `report_status()` | Set on engine after construction when HTTP is enabled |
+
+### 4. Expose GPU KV format, shape, and attention backend in `kv_cache_layout`
+
+**Files:** `lmcache/v1/gpu_connector/utils.py`, `lmcache/v1/multiprocess/gpu_context.py`, `lmcache/v1/multiprocess/server.py`
+
+Three new helper functions in `utils.py` (derived from `legible_print_gpu_kv_format()`):
+- `get_gpu_kv_shape_description(gpu_kv_format)` — symbolic shape (e.g., `List[num_layers] of [2, num_blocks, ...]`)
+- `get_attention_backend(gpu_kv_format)` — backend name (e.g., `vLLM non-MLA flash attention`)
+- `get_concrete_gpu_kv_shape(kv_caches, gpu_kv_format)` — shape with actual values (e.g., `List[80] of [2, 2048, 128, 8, 128]`)
+
+`GPUCacheContext` exposes these as properties: `gpu_kv_format_name`, `gpu_kv_shape`, `concrete_gpu_kv_shape`, `attention_backend`.
+
+`report_status()` includes them in the per-GPU `kv_cache_layout` dict:
+
+```python
+"kv_cache_layout": {
+    ...,
+    "gpu_kv_format": "NL_X_TWO_NB_BS_NH_HS",
+    "gpu_kv_shape": "NL x [2, NB, BS, NH, HS]",
+    "gpu_kv_concrete_shape": "80 x [2, 2048, 128, 8, 128]",
+    "attention_backend": "vLLM non-MLA flash attention",
+}
+```
 
 ---
 
