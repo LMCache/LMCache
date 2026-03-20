@@ -9,8 +9,8 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 cd "${REPO_ROOT}"
 
 # ── Environment setup ────────────────────────────────────────
-source .buildkite/k3_harness/setup-env.sh
-uv pip install aiohttp tqdm pandas huggingface_hub
+# source .buildkite/k3_harness/setup-env.sh
+# uv pip install aiohttp tqdm pandas huggingface_hub
 
-# ── Run the actual test logic ────────────────────────────────
-exec bash "${SCRIPT_DIR}/scripts/run-compatible-test.sh"
+# ── Check missing versions, run tests, update docs, submit PR ─
+bash "${SCRIPT_DIR}/scripts/check-and-update.sh" check_and_update_and_submit

@@ -50,18 +50,28 @@ norm() {
     [[ "$v" =~ ^[0-9]+\.[0-9]+$ ]] && echo "${v}.0" || echo "$v"
 }
 
+# Return 0 when version $1 is strictly greater than version $2.
+version_gt() {
+    local lhs="$1"
+    local rhs="$2"
+    [[ "$lhs" != "$rhs" ]] && [[ "$(printf '%s\n%s\n' "$lhs" "$rhs" | sort -V | tail -n1)" == "$lhs" ]]
+}
+
 # Ensure venv and environment variables.
 setup_env() {
     [[ -d "$LMCACHE_DIR/.venv" ]] || uv venv "$LMCACHE_DIR/.venv"
     # shellcheck disable=SC1091
     source "$LMCACHE_DIR/.venv/bin/activate"
+    # Prevent accidental imports from repo cwd / custom PYTHONPATH.
+    unset PYTHONPATH
+    export PYTHONSAFEPATH=1
     export HF_TOKEN="${HF_TOKEN:-}"
 }
 
 # Get min transformers and torch versions required by vllm from PyPI metadata.
 get_deps_for_vllm() {
     local v_ver="$1"
-    python3 - <<PY
+    python - <<PY
 import json
 import re
 import urllib.request
@@ -155,10 +165,9 @@ install_lmcache() {
     uv pip uninstall -y lmcache >/dev/null 2>&1 || true
 
     if [[ "$use_isolation" == "false" ]]; then
-        cd "$LMCACHE_DIR" || return 1
-        git checkout "v$ver" 2>/dev/null || git checkout "$ver" || return 1
-        uv pip install -e . --no-build-isolation 2>&1 | tee "$install_log" >&2
-        cd - >/dev/null || true
+        uv pip install --no-build-isolation \
+            "lmcache @ git+https://github.com/LMCache/LMCache.git@v${ver}" \
+            2>&1 | tee "$install_log" >&2
     else
         uv pip install "lmcache==$ver" 2>&1 | tee "$install_log" >&2
     fi
@@ -167,6 +176,15 @@ install_lmcache() {
     installed_ver=$(python -c "from importlib.metadata import version; print(version('lmcache'))" 2>/dev/null) || return 1
     if [[ "$installed_ver" != "$ver" ]]; then
         log_fail "LMCache version mismatch: expected $ver, got $installed_ver"
+        return 1
+    fi
+
+    local lmcache_path
+    lmcache_path=$(python -c "import os, lmcache; print(os.path.realpath(lmcache.__file__))" 2>/dev/null) || return 1
+    if [[ "$lmcache_path" != "$VIRTUAL_ENV"/lib/* ]]; then
+        log_fail "lmcache imported from unexpected path: $lmcache_path"
+        echo "Expected lmcache under $VIRTUAL_ENV/lib" >> "$install_log"
+        echo "Actual lmcache path: $lmcache_path" >> "$install_log"
         return 1
     fi
 
@@ -259,7 +277,7 @@ test_pair() {
 
 # Defaults; override via VLLM_VERSIONS and LMCACHE_VERSIONS (comma-separated).
 # If VLLM_VERSIONS is not provided, read versions from docs compatibility table.
-vllm_versions=("0.11.0.x")
+vllm_versions=("0.17.0.x")
 lmcache_versions=("0.4.2")
 if [[ -n "${VLLM_VERSIONS:-}" ]]; then
     IFS=',' read -r -a vllm_versions <<< "${VLLM_VERSIONS}"
@@ -273,17 +291,41 @@ else
 fi
 [[ -n "${LMCACHE_VERSIONS:-}" ]] && IFS=',' read -r -a lmcache_versions <<< "${LMCACHE_VERSIONS}"
 
+# Only test versions newer than the supported cutoffs.
+filtered_vllm_versions=()
+for rv in "${vllm_versions[@]}"; do
+    if version_gt "$(norm "$rv")" "0.11.0"; then
+        filtered_vllm_versions+=("$rv")
+    fi
+done
+vllm_versions=("${filtered_vllm_versions[@]}")
+
+filtered_lmcache_versions=()
+for cv in "${lmcache_versions[@]}"; do
+    if version_gt "$(norm "$cv")" "0.3.9"; then
+        filtered_lmcache_versions+=("$cv")
+    fi
+done
+lmcache_versions=("${filtered_lmcache_versions[@]}")
+
+[[ ${#vllm_versions[@]} -gt 0 ]] || die "No vLLM versions to test after 0.11.x"
+[[ ${#lmcache_versions[@]} -gt 0 ]] || die "No LMCache versions to test after 0.3.9"
+
 echo "vllm_versions: ${vllm_versions[*]}"
 echo "lmcache_versions: ${lmcache_versions[*]}"
 declare -A RESULTS
+
 for rv in "${vllm_versions[@]}"; do
     setup_env
     install_vllm "$rv" || die "Failed to install vLLM $rv"
     for cv in "${lmcache_versions[@]}"; do
+        key="$(norm "$rv")|$(norm "$cv")"
         log "Testing vLLM $rv + LMCache $cv..."
         res=$(test_pair "$rv" "$cv") || res="$BAD"
-        RESULTS["$(norm "$rv")|$(norm "$cv")"]="$res"
+        RESULTS["$key"]="$res"
         log "Result for vLLM $rv + LMCache $cv: $res"
+        echo "Cleaning uv cache..."
+        uv cache clean
     done
 done
 
@@ -305,6 +347,3 @@ done
     done
 } | tee "$OUT_FILE"
 
-# Clean cached wheels and build artifacts.
-echo "Cleaning uv cache..."
-uv cache clean
