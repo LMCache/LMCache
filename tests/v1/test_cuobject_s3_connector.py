@@ -294,10 +294,10 @@ class TestRDMAUpload:
 class TestRDMADownload:
     """Tests for the RDMA-accelerated download path."""
 
-    def test_rdma_download_injects_token_header(
+    def test_s3_download_uses_rdma_path_when_enabled(
         self, mock_crt, async_loop, local_cpu_backend
     ):
-        """GET request should contain x-amz-rdma-token header."""
+        """_s3_download should route through RDMA when enabled."""
         mock_client = _make_mock_cuobj_client()
 
         with (
@@ -331,7 +331,7 @@ class TestRDMADownload:
             mem_obj = local_cpu_backend.allocate(mem_shape, _DTYPE)
             mem_obj.ref_count_up()
 
-            connector._rdma_download("test-key", mem_obj)
+            connector._s3_download("test-key", mem_obj)
 
             mock_client.prepare_get.assert_called_once()
             args = mock_client.prepare_get.call_args
