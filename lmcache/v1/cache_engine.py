@@ -1658,7 +1658,9 @@ class LMCacheEngine:
                     )
                     if (
                         last_failed_block_start is None
-                        or last_failed_block_start < start
+                        # The minimum value should be taken here to ensure that
+                        # the prefix keys are all consecutive successful.
+                        or last_failed_block_start > start
                     ):
                         last_failed_block_start = start
                     break
@@ -1680,19 +1682,20 @@ class LMCacheEngine:
             ret_mask[last_failed_block_start:] = False
 
             for key, memory_obj, _, end in reordered_chunks:
-                if end >= last_failed_block_start:
+                if end > last_failed_block_start:
                     logger.debug(
                         "ref_count_down for %s as it is truncated by "
                         "last_failed_block_start %d",
                         key,
                         last_failed_block_start,
                     )
+                    tot_kv_size -= memory_obj.get_size()
                     memory_obj.ref_count_down()
 
             reordered_chunks = [
                 (key, memory_obj, start, end)
                 for key, memory_obj, start, end in reordered_chunks
-                if end < last_failed_block_start
+                if end <= last_failed_block_start
             ]
         return reordered_chunks, tot_kv_size
 
