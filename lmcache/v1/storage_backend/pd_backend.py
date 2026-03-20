@@ -518,7 +518,7 @@ class PDBackend(AllocatorBackendInterface):
 
         for idx, key_str in enumerate(alloc_request.keys):
             key = CacheEngineKey.from_string(key_str)
-            if self.contains(key, pin=True):
+            if self.contains(key, pin=False):
                 already_send_indexes.append(idx)
                 continue
 
