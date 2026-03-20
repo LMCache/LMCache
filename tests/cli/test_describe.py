@@ -29,7 +29,20 @@ SAMPLE_STATUS = {
     "chunk_size": 256,
     "hash_algorithm": "sha256",
     "registered_gpu_ids": [0],
-    "gpu_context_meta": {"0": {"model_name": "llama", "world_size": 1}},
+    "gpu_context_meta": {
+        "0": {
+            "model_name": "llama",
+            "world_size": 1,
+            "kv_cache_layout": {
+                "num_layers": 32,
+                "block_size": 16,
+                "hidden_dim_size": 128,
+                "dtype": "torch.float16",
+                "is_mla": False,
+                "num_blocks": 2048,
+            },
+        },
+    },
     "active_sessions": 3,
     "storage_manager": {
         "is_healthy": True,
@@ -157,6 +170,17 @@ class TestDescribeKvcacheFields:
         assert m["eviction_policy"] == "LRU"
         assert m["cached_objects"] == 1024
         assert m["active_sessions"] == 3
+
+        # Per-model section
+        model = m["model_0"]
+        assert model["world_size"] == 1
+        assert model["gpu_ids"] == "0"
+        assert model["num_layers"] == 32
+        assert model["block_size"] == 16
+        assert model["hidden_dim_size"] == 128
+        assert model["dtype"] == "torch.float16"
+        assert model["is_mla"] is False
+        assert model["num_blocks"] == 2048
 
     def test_unhealthy(self):
         """Verify health shows UNHEALTHY when is_healthy is False."""

@@ -164,4 +164,39 @@ class DescribeCommand(BaseCommand):
         # Active sessions
         metrics.add("active_sessions", "Active sessions", data.get("active_sessions"))
 
+        # Per-model KV cache layout sections
+        gpu_meta = data.get("gpu_context_meta", {})
+        if gpu_meta:
+            # Deduplicate by (model_name, world_size) — multiple GPU IDs
+            # may share the same model.
+            seen: dict[tuple[str, int], dict] = {}
+            for gpu_id, meta in gpu_meta.items():
+                key = (meta["model_name"], meta["world_size"])
+                if key not in seen:
+                    seen[key] = {
+                        "gpu_ids": [],
+                        "layout": meta.get("kv_cache_layout"),
+                    }
+                seen[key]["gpu_ids"].append(gpu_id)
+
+            for idx, ((model_name, world_size), info) in enumerate(seen.items()):
+                section_key = f"model_{idx}"
+                metrics.add_section(section_key, f"Model: {model_name}")
+                sec = metrics[section_key]
+                sec.add("world_size", "World size", world_size)
+                sec.add("gpu_ids", "GPU IDs", ", ".join(info["gpu_ids"]))
+
+                layout = info.get("layout")
+                if layout:
+                    sec.add("num_layers", "Num layers", layout["num_layers"])
+                    sec.add("block_size", "Block size", layout["block_size"])
+                    sec.add(
+                        "hidden_dim_size",
+                        "Hidden dim size",
+                        layout["hidden_dim_size"],
+                    )
+                    sec.add("dtype", "Dtype", layout["dtype"])
+                    sec.add("is_mla", "MLA", layout["is_mla"])
+                    sec.add("num_blocks", "Num blocks", layout["num_blocks"])
+
         metrics.emit()
