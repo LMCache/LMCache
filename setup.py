@@ -74,6 +74,7 @@ def cuda_extension() -> tuple[list, dict]:
     cuda_sources = [
         "csrc/pybind.cpp",
         "csrc/mem_kernels.cu",
+        "csrc/mp_mem_kernels.cu",
         "csrc/cal_cdf.cu",
         "csrc/ac_enc.cu",
         "csrc/ac_dec.cu",
