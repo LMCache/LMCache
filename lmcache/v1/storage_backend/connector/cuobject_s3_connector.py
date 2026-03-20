@@ -244,7 +244,7 @@ class CuObjectS3Connector(S3Connector):
             )
             return super()._s3_download(key_str, mem_obj)
 
-    def _rdma_download(self, key_str: str, mem_obj: MemoryObj):
+    def _rdma_download(self, key_str: str, mem_obj: MemoryObj) -> s3.S3Request:
         """Build an RDMA-augmented GET request via CRT."""
         data_size = mem_obj.get_physical_size()
 
