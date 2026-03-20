@@ -225,6 +225,9 @@ def test_adapter_free_lookup_locks_key_matches_lookup():
     adapter._health_event.set()
     adapter.tp_size = 1
     adapter._mq_timeout = 30.0
+    adapter._heartbeat = None
+    adapter._heartbeat_lock = threading.Lock()
+    adapter._heartbeat_interval = 5.0
 
     mock_client = MagicMock(spec=MessageQueueClient)
     mock_future = MagicMock()
@@ -235,8 +238,9 @@ def test_adapter_free_lookup_locks_key_matches_lookup():
 
     token_ids = list(range(512))
 
-    # Submit lookup
-    adapter.maybe_submit_lookup_request("req-1", token_ids)
+    # Submit lookup – patch heartbeat to avoid spawning a real thread
+    with patch.object(adapter, "_ensure_heartbeat_started"):
+        adapter.maybe_submit_lookup_request("req-1", token_ids)
     lookup_call = mock_client.submit_request.call_args
     lookup_payloads = lookup_call[0][1]
     lookup_key = lookup_payloads[0]

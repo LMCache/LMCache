@@ -2,92 +2,103 @@
 
 ## Overview
 
-The observability model is listener-based with **separate per-tier loggers**:
+The observability system uses an **EventBus with pub/sub dispatch** and
+**OpenTelemetry** for metrics instrumentation.
 
-- **`StorageManagerStatsLogger`** (`StorageManagerListener`) — events from the top-level `StorageManager` API (`submit_prefetch_task`, `reserve_write`, etc.)
-- **`L1ManagerStatsLogger`** (`L1ManagerListener`) — events from the L1 in-memory cache tier (key reads, writes, evictions)
+- **Producers** (`L1Manager`, `StorageManager`) publish `Event` objects to the EventBus.
+- **Metrics subscribers** (`L1MetricsSubscriber`, `SMMetricsSubscriber`) subscribe to
+  specific event types and update OTel counters.
+- **Export** is via OTLP push to an OTel collector (production) or an in-process
+  Prometheus `/metrics` endpoint (dev/debug fallback).
 
-Each logger owns its own stats dataclass (`StorageManagerStats`, `L1Stats`) and independently
-implements the `PrometheusLogger` interface.
+All metrics use the `lmcache_mp.` prefix (mp = multiprocess), distinct from the main
+engine's `lmcache.` namespace. On Prometheus, `.` is converted to `_` and counters get
+a `_total` suffix (e.g., `lmcache_mp_l1_read_keys_total`).
 
-`PrometheusController` runs a background daemon thread that calls `log_prometheus()` on every
-registered logger at a configurable interval. `log_prometheus()` atomically snapshots `self.stats`,
-resets it to a fresh stats instance, and pushes all accumulated values to Prometheus.
-
-All metrics use the `lmcache_mp:` prefix (mp = multiprocess), distinct from the main engine's
-`lmcache:` namespace.
-
-For implementation guidance on adding new loggers, see [LOGGER_GUIDE.md](LOGGER_GUIDE.md).
+For implementation guidance on adding new events and subscribers, see [README.md](README.md).
 
 ---
 
 ## StorageManager Read Metrics
 
-| Python field | Prometheus name | Type | Source callback | Calculation |
+| OTel metric name | Prometheus name | Type | Source event | Calculation |
 |---|---|---|---|---|
-| `interval_sm_read_requests` | `lmcache_mp:sm_read_requests` | Counter | `on_sm_read_prefetched` | +1 per call |
-| `interval_sm_read_succeed_keys` | `lmcache_mp:sm_read_succeed_keys` | Counter | `on_sm_read_prefetched` | `+len(succeeded_keys)` per call |
-| `interval_sm_read_failed_keys` | `lmcache_mp:sm_read_failed_keys` | Counter | `on_sm_read_prefetched` | `+len(failed_keys)` per call |
+| `lmcache_mp.sm_read_requests` | `lmcache_mp_sm_read_requests_total` | Counter | `SM_READ_PREFETCHED` | +1 per event |
+| `lmcache_mp.sm_read_succeed_keys` | `lmcache_mp_sm_read_succeed_keys_total` | Counter | `SM_READ_PREFETCHED` | `+len(succeeded_keys)` |
+| `lmcache_mp.sm_read_failed_keys` | `lmcache_mp_sm_read_failed_keys_total` | Counter | `SM_READ_PREFETCHED` | `+len(failed_keys)` |
 
 **What it answers:** How often does the StorageManager receive read requests? What is the L1 hit rate?
 
-> **Note:** StorageManager-level read latency is not tracked. The `on_sm_read_prefetched` callback fires
-> during the `lookup()` RPC, while `on_sm_read_prefetched_finished` fires during the separate
-> `retrieve()` RPC. With concurrent workers these can complete out of order, making a simple
-> FIFO latency tracker unreliable.
+> **Note:** `SM_READ_PREFETCHED_FINISHED` is published but has no metrics subscriber —
+> it is available for logging subscribers only.
 
 ---
 
 ## StorageManager Write Metrics
 
-| Python field | Prometheus name | Type | Source callback | Calculation |
+| OTel metric name | Prometheus name | Type | Source event | Calculation |
 |---|---|---|---|---|
-| `interval_sm_write_requests` | `lmcache_mp:sm_write_requests` | Counter | `on_sm_reserved_write` | +1 per call |
-| `interval_sm_write_succeed_keys` | `lmcache_mp:sm_write_succeed_keys` | Counter | `on_sm_reserved_write` | `+len(succeeded_keys)` per call |
-| `interval_sm_write_failed_keys` | `lmcache_mp:sm_write_failed_keys` | Counter | `on_sm_reserved_write` | `+len(failed_keys)` per call |
+| `lmcache_mp.sm_write_requests` | `lmcache_mp_sm_write_requests_total` | Counter | `SM_WRITE_RESERVED` | +1 per event |
+| `lmcache_mp.sm_write_succeed_keys` | `lmcache_mp_sm_write_succeed_keys_total` | Counter | `SM_WRITE_RESERVED` | `+len(succeeded_keys)` |
+| `lmcache_mp.sm_write_failed_keys` | `lmcache_mp_sm_write_failed_keys_total` | Counter | `SM_WRITE_RESERVED` | `+len(failed_keys)` |
 
 **What it answers:** How often are writes attempted? What fraction fail due to OOM or write conflicts?
+
+> **Note:** `SM_WRITE_FINISHED` is published but has no metrics subscriber.
 
 ---
 
 ## L1 Read Metrics
 
-| Python field | Prometheus name | Type | Source callback | Calculation |
+| OTel metric name | Prometheus name | Type | Source event | Calculation |
 |---|---|---|---|---|
-| `interval_l1_read_keys` | `lmcache_mp:l1_read_keys` | Counter | `on_l1_keys_read_finished` | `+len(keys)` per call |
+| `lmcache_mp.l1_read_keys` | `lmcache_mp_l1_read_keys_total` | Counter | `L1_READ_FINISHED` | `+len(keys)` |
 
 **What it answers:** How many keys are being read from L1?
 
-> **Note:** `on_l1_keys_reserved_read` is a no-op — key counts are recorded only when the read
-> actually completes via `on_l1_keys_read_finished`, giving an accurate count of successfully
-> served reads.
+> **Note:** `L1_READ_RESERVED` is published but has no metrics subscriber — key counts
+> are recorded only when the read actually completes.
 
 ---
 
 ## L1 Write Metrics
 
-| Python field | Prometheus name | Type | Source callback | Calculation |
+| OTel metric name | Prometheus name | Type | Source event | Calculation |
 |---|---|---|---|---|
-| `interval_l1_write_keys` | `lmcache_mp:l1_write_keys` | Counter | `on_l1_keys_write_finished` | `+len(keys)` per call |
+| `lmcache_mp.l1_write_keys` | `lmcache_mp_l1_write_keys_total` | Counter | `L1_WRITE_FINISHED` | `+len(keys)` |
+| *(same counter)* | *(same)* | Counter | `L1_WRITE_FINISHED_AND_READ_RESERVED` | `+len(keys)` |
 
 **What it answers:** How many keys are being written to L1?
 
-> **Note:** `on_l1_keys_reserved_write` is a no-op — key counts are recorded only when the write
-> actually completes via `on_l1_keys_write_finished`.
+> **Note:** `L1_WRITE_RESERVED` is published but has no metrics subscriber.
+> `L1_WRITE_FINISHED_AND_READ_RESERVED` (atomic write-then-read used by prefetch)
+> increments the same write counter.
 
 ---
 
 ## L1 Eviction Metrics
 
-| Python field | Prometheus name | Type | Source callback | Calculation |
+| OTel metric name | Prometheus name | Type | Source event | Calculation |
 |---|---|---|---|---|
-| `interval_l1_evicted_keys` | `lmcache_mp:l1_evicted_keys` | Counter | `on_l1_keys_deleted_by_manager` | `+len(keys)` per call |
+| `lmcache_mp.l1_evicted_keys` | `lmcache_mp_l1_evicted_keys_total` | Counter | `L1_KEYS_EVICTED` | `+len(keys)` |
 
 **What it answers:** How aggressively is the eviction controller clearing L1? A high eviction rate relative to writes signals memory pressure.
 
 ---
 
-## L2 Placeholder
+## Metadata Contracts
 
-`L2ManagerListener.on_l2_lookup_and_lock()` is currently a no-op. L2 metrics will be
-added to a new stats dataclass and logger once the L2 manager interface is finalized.
+Each `EventType` has a documented metadata schema. Subscribers rely on these keys:
+
+| EventType | Metadata keys | Types |
+|---|---|---|
+| `L1_READ_RESERVED` | `keys` | `list[ObjectKey]` |
+| `L1_READ_FINISHED` | `keys` | `list[ObjectKey]` |
+| `L1_WRITE_RESERVED` | `keys` | `list[ObjectKey]` |
+| `L1_WRITE_FINISHED` | `keys` | `list[ObjectKey]` |
+| `L1_WRITE_FINISHED_AND_READ_RESERVED` | `keys` | `list[ObjectKey]` |
+| `L1_KEYS_EVICTED` | `keys` | `list[ObjectKey]` |
+| `SM_READ_PREFETCHED` | `succeeded_keys`, `failed_keys` | `list[ObjectKey]`, `list[ObjectKey]` |
+| `SM_READ_PREFETCHED_FINISHED` | `succeeded_keys`, `failed_keys` | `list[ObjectKey]`, `list[ObjectKey]` |
+| `SM_WRITE_RESERVED` | `succeeded_keys`, `failed_keys` | `list[ObjectKey]`, `list[ObjectKey]` |
+| `SM_WRITE_FINISHED` | `succeeded_keys`, `failed_keys` | `list[ObjectKey]`, `list[ObjectKey]` |

@@ -33,6 +33,7 @@ from lmcache.integration.vllm.utils import (
     extract_mm_features,
     lmcache_get_or_create_config,
 )
+from lmcache.integration.vllm.vllm_service_factory import VllmServiceFactory
 from lmcache.logging import init_logger
 from lmcache.observability import LMCStatsMonitor, PrometheusLogger
 from lmcache.utils import CacheStoreEvent, _lmcache_nvtx_annotate, cdiv
@@ -460,13 +461,8 @@ class LMCacheConnectorV1Impl:
         self._apply_extra_config(config, vllm_config)
         self.config = config
 
-        # Initialize LMCacheManager to handle internal components
-        self._manager = LMCacheManager(
-            config=config,
-            vllm_config=vllm_config,
-            role=role.name.lower(),
-            connector=self,
-        )
+        service_factory = VllmServiceFactory(config, vllm_config, role.name.lower())
+        self._manager = LMCacheManager(config, service_factory, connector=self)
 
         # Start services managed by LMCacheManager
         self._manager.start_services()

@@ -111,7 +111,8 @@ def allocate_and_copy_objects(
             memory_obj.tensor.copy_(src_memory_obj.tensor, non_blocking=True)
         allocated_objects.append(memory_obj)
 
-    stream.synchronize()
+    if stream is not None:
+        stream.synchronize()
     return keys[: len(allocated_objects)], allocated_objects
 
 
