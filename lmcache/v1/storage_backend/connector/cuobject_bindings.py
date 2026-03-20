@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Optional
 import ctypes
 import ctypes.util
+import json
 import threading
 
 # First Party
@@ -111,16 +112,15 @@ class CuObjClientWrapper:
             rdma_token_cb=self._token_cb,
             user_ctx=None,
         )
-        self._handle = ctypes.c_void_p()
+        handle = ctypes.c_void_p()
         rc = self._lib.cuObjClientCreate(
-            ctypes.byref(self._handle),
+            ctypes.byref(handle),
             ctypes.byref(self._ops),
             ctypes.c_int(config.proto),
         )
         if rc != CUOBJ_SUCCESS:
-            raise RuntimeError(
-                f"cuObjClientCreate failed with error code {rc}"
-            )
+            raise RuntimeError(f"cuObjClientCreate failed with error code {rc}")
+        self._handle = handle
         logger.info(
             "cuObject client initialised "
             f"(proto={config.proto}, nic={config.nic_device})"
@@ -144,8 +144,7 @@ class CuObjClientWrapper:
             lib = ctypes.CDLL(lib_path, mode=ctypes.RTLD_GLOBAL)
         except OSError as exc:
             raise ImportError(
-                f"Failed to load cuObject client library from {lib_path}: "
-                f"{exc}"
+                f"Failed to load cuObject client library from {lib_path}: {exc}"
             ) from exc
         logger.info(f"Loaded cuObject client library from {lib_path}")
         return lib
@@ -237,13 +236,9 @@ class CuObjClientWrapper:
         )
         if rc != CUOBJ_SUCCESS:
             raise RuntimeError(
-                f"cuObjRegisterMemory failed (ptr=0x{ptr:x}, "
-                f"size={size}): error {rc}"
+                f"cuObjRegisterMemory failed (ptr=0x{ptr:x}, size={size}): error {rc}"
             )
-        logger.info(
-            f"Registered RDMA memory pool: "
-            f"ptr=0x{ptr:x}, size={size} bytes"
-        )
+        logger.info(f"Registered RDMA memory pool: ptr=0x{ptr:x}, size={size} bytes")
         return (ptr, size)
 
     def deregister_pool(self, handle: tuple[int, int]) -> None:
@@ -261,8 +256,7 @@ class CuObjClientWrapper:
             )
         else:
             logger.info(
-                f"Deregistered RDMA memory pool: "
-                f"ptr=0x{ptr:x}, size={size} bytes"
+                f"Deregistered RDMA memory pool: ptr=0x{ptr:x}, size={size} bytes"
             )
 
     def prepare_put(self, ptr: int, size: int, offset: int = 0) -> str:
@@ -290,13 +284,11 @@ class CuObjClientWrapper:
             )
             if rc != CUOBJ_SUCCESS:
                 raise RuntimeError(
-                    f"cuObjPut failed (ptr=0x{ptr:x}, size={size}): "
-                    f"error {rc}"
+                    f"cuObjPut failed (ptr=0x{ptr:x}, size={size}): error {rc}"
                 )
             if self._captured_token is None:
                 raise RuntimeError(
-                    "cuObjPut succeeded but RDMA token callback "
-                    "was not invoked"
+                    "cuObjPut succeeded but RDMA token callback was not invoked"
                 )
             return self._captured_token.decode("ascii")
 
@@ -325,15 +317,20 @@ class CuObjClientWrapper:
             )
             if rc != CUOBJ_SUCCESS:
                 raise RuntimeError(
-                    f"cuObjGet failed (ptr=0x{ptr:x}, size={size}): "
-                    f"error {rc}"
+                    f"cuObjGet failed (ptr=0x{ptr:x}, size={size}): error {rc}"
                 )
             if self._captured_token is None:
                 raise RuntimeError(
-                    "cuObjGet succeeded but RDMA token callback "
-                    "was not invoked"
+                    "cuObjGet succeeded but RDMA token callback was not invoked"
                 )
             return self._captured_token.decode("ascii")
+
+    # Keywords that unambiguously indicate RDMA success.
+    _SUCCESS_KEYWORDS: frozenset = frozenset(
+        {"ok", "success", "complete", "completed", "done"}
+    )
+    # Prefixes that unambiguously indicate RDMA failure.
+    _ERROR_PREFIXES: tuple = ("error", "fail", "fault")
 
     @staticmethod
     def parse_rdma_reply(reply_header: str) -> bool:
@@ -342,23 +339,91 @@ class CuObjClientWrapper:
         Returns *True* if the header indicates successful RDMA
         completion, *False* otherwise.
 
-        The exact semantics of the reply value are defined by the
-        cuObject protocol; for now we treat any non-empty value as
-        success.
+        Supported reply formats
+        -----------------------
+        * **JSON object** – must contain a ``"status"`` key whose value
+          is one of the recognised success keywords (``ok``, ``success``,
+          ``complete``, ``completed``, ``done``).  An ``"error"`` key
+          with a truthy value is always treated as failure.
+        * **Numeric string** – ``"0"`` maps to ``CUOBJ_SUCCESS``;
+          any other integer is treated as an error code.
+        * **Plain keyword** – one of the recognised success / error
+          keywords listed above.
+
+        Any unrecognised, non-empty value is logged as a warning and
+        treated as failure to prevent silent data corruption.
         """
-        if not reply_header:
+        if not reply_header or not reply_header.strip():
             return False
-        # TODO: parse structured reply from cuObjServer if needed
-        return True
+
+        stripped = reply_header.strip()
+        lower = stripped.lower()
+
+        # -- 1. Try JSON -------------------------------------------------
+        try:
+            data = json.loads(stripped)
+            if isinstance(data, dict):
+                return CuObjClientWrapper._parse_json_reply(data)
+        except (json.JSONDecodeError, ValueError):
+            pass  # Not JSON – fall through to simpler formats.
+
+        # -- 2. Numeric error code ----------------------------------------
+        try:
+            code = int(stripped)
+            if code == CUOBJ_SUCCESS:
+                return True
+            logger.warning(f"RDMA reply error code: {code}")
+            return False
+        except ValueError:
+            pass
+
+        # -- 3. Plain-text keywords ---------------------------------------
+        if lower in CuObjClientWrapper._SUCCESS_KEYWORDS:
+            return True
+
+        if any(lower.startswith(p) for p in CuObjClientWrapper._ERROR_PREFIXES):
+            logger.warning(f"RDMA reply indicates failure: {reply_header}")
+            return False
+
+        # -- 4. Unrecognised format – fail safe ---------------------------
+        logger.warning(
+            f"RDMA reply has unrecognised format, treating as failure: {reply_header!r}"
+        )
+        return False
+
+    @staticmethod
+    def _parse_json_reply(data: dict) -> bool:
+        """Interpret a JSON-decoded RDMA reply dict.
+
+        Returns *True* only when the reply unambiguously signals
+        success; *False* (with a warning log) otherwise.
+        """
+        # Explicit error field takes priority.
+        err = data.get("error")
+        if err:
+            logger.warning(f"RDMA reply indicates error: {err}")
+            return False
+
+        status = str(data.get("status", "")).strip().lower()
+        if status in CuObjClientWrapper._SUCCESS_KEYWORDS:
+            return True
+
+        if not status:
+            logger.warning(f"RDMA reply JSON missing 'status' field: {data}")
+        else:
+            msg = data.get("message", data.get("msg", ""))
+            logger.warning(
+                f"RDMA reply status indicates failure: "
+                f"status={status!r}, message={msg!r}"
+            )
+        return False
 
     def close(self) -> None:
         """Destroy the cuObject client and release RDMA resources."""
         if self._handle is not None:
             rc = self._lib.cuObjClientDestroy(self._handle)
             if rc != CUOBJ_SUCCESS:
-                logger.warning(
-                    f"cuObjClientDestroy returned error {rc}"
-                )
+                logger.warning(f"cuObjClientDestroy returned error {rc}")
             self._handle = None
             logger.info("cuObject client destroyed")
 

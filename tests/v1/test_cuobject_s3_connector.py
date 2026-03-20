@@ -4,6 +4,7 @@
 All AWS CRT and cuObject C library calls are mocked so tests can run
 on any machine without real S3 or RDMA hardware.
 """
+
 # Standard
 from unittest.mock import MagicMock, patch
 import asyncio
@@ -17,7 +18,6 @@ from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_management import PinMemoryAllocator
 from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.storage_backend import LocalCPUBackend
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -77,23 +77,22 @@ def _make_mock_s3_request(status_code=200, rdma_reply="ok"):
 
 # Patch the CRT imports at the s3_connector module level so the parent
 # S3Connector.__init__ doesn't try to talk to real AWS.
+_CUOBJ = "lmcache.v1.storage_backend.connector.cuobject_s3_connector"
+_S3 = "lmcache.v1.storage_backend.connector.s3_connector"
 _CRT_PATCHES = {
-    "lmcache.v1.storage_backend.connector.s3_connector.io": MagicMock(),
-    "lmcache.v1.storage_backend.connector.s3_connector.auth": MagicMock(),
-    "lmcache.v1.storage_backend.connector.s3_connector.s3": MagicMock(),
-    "lmcache.v1.storage_backend.connector.cuobject_s3_connector.s3": MagicMock(),
-    "lmcache.v1.storage_backend.connector.cuobject_s3_connector.HttpHeaders": MagicMock(),
-    "lmcache.v1.storage_backend.connector.cuobject_s3_connector.HttpRequest": MagicMock(),
+    f"{_S3}.io": MagicMock(),
+    f"{_S3}.auth": MagicMock(),
+    f"{_S3}.s3": MagicMock(),
+    f"{_CUOBJ}.s3": MagicMock(),
+    f"{_CUOBJ}.HttpHeaders": MagicMock(),
+    f"{_CUOBJ}.HttpRequest": MagicMock(),
 }
 
 
 @pytest.fixture
 def mock_crt():
     """Patch AWS CRT modules so S3Connector.__init__ succeeds."""
-    patchers = [
-        patch(target, mock)
-        for target, mock in _CRT_PATCHES.items()
-    ]
+    patchers = [patch(target, mock) for target, mock in _CRT_PATCHES.items()]
     for p in patchers:
         p.start()
     yield
@@ -132,15 +131,18 @@ class TestCuObjectS3ConnectorInit:
         """RDMA should be enabled when cuObject library loads OK."""
         mock_client = _make_mock_cuobj_client()
 
-        with patch(
-            "lmcache.v1.storage_backend.connector."
-            "cuobject_s3_connector.CuObjClientWrapper",
-            return_value=mock_client,
-        ), patch(
-            "lmcache.v1.storage_backend.connector."
-            "cuobject_s3_connector.CuObjConfig",
+        with (
+            patch(
+                "lmcache.v1.storage_backend.connector."
+                "cuobject_s3_connector.CuObjClientWrapper",
+                return_value=mock_client,
+            ),
+            patch(
+                "lmcache.v1.storage_backend.connector."
+                "cuobject_s3_connector.CuObjConfig",
+            ),
         ):
-            # Local
+            # First Party
             from lmcache.v1.storage_backend.connector.cuobject_s3_connector import (
                 CuObjectS3Connector,
             )
@@ -162,15 +164,18 @@ class TestCuObjectS3ConnectorInit:
         self, mock_crt, async_loop, local_cpu_backend
     ):
         """RDMA should be disabled if cuObject import fails."""
-        with patch(
-            "lmcache.v1.storage_backend.connector."
-            "cuobject_s3_connector.CuObjClientWrapper",
-            side_effect=ImportError("no cuobject"),
-        ), patch(
-            "lmcache.v1.storage_backend.connector."
-            "cuobject_s3_connector.CuObjConfig",
+        with (
+            patch(
+                "lmcache.v1.storage_backend.connector."
+                "cuobject_s3_connector.CuObjClientWrapper",
+                side_effect=ImportError("no cuobject"),
+            ),
+            patch(
+                "lmcache.v1.storage_backend.connector."
+                "cuobject_s3_connector.CuObjConfig",
+            ),
         ):
-            # Local
+            # First Party
             from lmcache.v1.storage_backend.connector.cuobject_s3_connector import (
                 CuObjectS3Connector,
             )
@@ -198,15 +203,18 @@ class TestRDMAUpload:
         """PUT request should contain x-amz-rdma-token header."""
         mock_client = _make_mock_cuobj_client()
 
-        with patch(
-            "lmcache.v1.storage_backend.connector."
-            "cuobject_s3_connector.CuObjClientWrapper",
-            return_value=mock_client,
-        ), patch(
-            "lmcache.v1.storage_backend.connector."
-            "cuobject_s3_connector.CuObjConfig",
+        with (
+            patch(
+                "lmcache.v1.storage_backend.connector."
+                "cuobject_s3_connector.CuObjClientWrapper",
+                return_value=mock_client,
+            ),
+            patch(
+                "lmcache.v1.storage_backend.connector."
+                "cuobject_s3_connector.CuObjConfig",
+            ),
         ):
-            # Local
+            # First Party
             from lmcache.v1.storage_backend.connector.cuobject_s3_connector import (
                 CuObjectS3Connector,
             )
@@ -223,9 +231,7 @@ class TestRDMAUpload:
             )
 
             # Create a test memory object
-            mem_shape = torch.Size(
-                [_KV_SHAPE[1], _KV_SHAPE[3], 256, _KV_SHAPE[4]]
-            )
+            mem_shape = torch.Size([_KV_SHAPE[1], _KV_SHAPE[3], 256, _KV_SHAPE[4]])
             mem_obj = local_cpu_backend.allocate(mem_shape, _DTYPE)
             mem_obj.ref_count_up()
 
@@ -244,15 +250,18 @@ class TestRDMAUpload:
         mock_client = _make_mock_cuobj_client()
         mock_client.prepare_put.side_effect = RuntimeError("RDMA error")
 
-        with patch(
-            "lmcache.v1.storage_backend.connector."
-            "cuobject_s3_connector.CuObjClientWrapper",
-            return_value=mock_client,
-        ), patch(
-            "lmcache.v1.storage_backend.connector."
-            "cuobject_s3_connector.CuObjConfig",
+        with (
+            patch(
+                "lmcache.v1.storage_backend.connector."
+                "cuobject_s3_connector.CuObjClientWrapper",
+                return_value=mock_client,
+            ),
+            patch(
+                "lmcache.v1.storage_backend.connector."
+                "cuobject_s3_connector.CuObjConfig",
+            ),
         ):
-            # Local
+            # First Party
             from lmcache.v1.storage_backend.connector.cuobject_s3_connector import (
                 CuObjectS3Connector,
             )
@@ -268,9 +277,7 @@ class TestRDMAUpload:
                 disable_tls=True,
             )
 
-            mem_shape = torch.Size(
-                [_KV_SHAPE[1], _KV_SHAPE[3], 256, _KV_SHAPE[4]]
-            )
+            mem_shape = torch.Size([_KV_SHAPE[1], _KV_SHAPE[3], 256, _KV_SHAPE[4]])
             mem_obj = local_cpu_backend.allocate(mem_shape, _DTYPE)
             mem_obj.ref_count_up()
 
@@ -293,15 +300,18 @@ class TestRDMADownload:
         """GET request should contain x-amz-rdma-token header."""
         mock_client = _make_mock_cuobj_client()
 
-        with patch(
-            "lmcache.v1.storage_backend.connector."
-            "cuobject_s3_connector.CuObjClientWrapper",
-            return_value=mock_client,
-        ), patch(
-            "lmcache.v1.storage_backend.connector."
-            "cuobject_s3_connector.CuObjConfig",
+        with (
+            patch(
+                "lmcache.v1.storage_backend.connector."
+                "cuobject_s3_connector.CuObjClientWrapper",
+                return_value=mock_client,
+            ),
+            patch(
+                "lmcache.v1.storage_backend.connector."
+                "cuobject_s3_connector.CuObjConfig",
+            ),
         ):
-            # Local
+            # First Party
             from lmcache.v1.storage_backend.connector.cuobject_s3_connector import (
                 CuObjectS3Connector,
             )
@@ -317,9 +327,7 @@ class TestRDMADownload:
                 disable_tls=True,
             )
 
-            mem_shape = torch.Size(
-                [_KV_SHAPE[1], _KV_SHAPE[3], 256, _KV_SHAPE[4]]
-            )
+            mem_shape = torch.Size([_KV_SHAPE[1], _KV_SHAPE[3], 256, _KV_SHAPE[4]])
             mem_obj = local_cpu_backend.allocate(mem_shape, _DTYPE)
             mem_obj.ref_count_up()
 
@@ -336,15 +344,18 @@ class TestRDMADownload:
         mock_client = _make_mock_cuobj_client()
         mock_client.prepare_get.side_effect = RuntimeError("RDMA error")
 
-        with patch(
-            "lmcache.v1.storage_backend.connector."
-            "cuobject_s3_connector.CuObjClientWrapper",
-            return_value=mock_client,
-        ), patch(
-            "lmcache.v1.storage_backend.connector."
-            "cuobject_s3_connector.CuObjConfig",
+        with (
+            patch(
+                "lmcache.v1.storage_backend.connector."
+                "cuobject_s3_connector.CuObjClientWrapper",
+                return_value=mock_client,
+            ),
+            patch(
+                "lmcache.v1.storage_backend.connector."
+                "cuobject_s3_connector.CuObjConfig",
+            ),
         ):
-            # Local
+            # First Party
             from lmcache.v1.storage_backend.connector.cuobject_s3_connector import (
                 CuObjectS3Connector,
             )
@@ -360,9 +371,7 @@ class TestRDMADownload:
                 disable_tls=True,
             )
 
-            mem_shape = torch.Size(
-                [_KV_SHAPE[1], _KV_SHAPE[3], 256, _KV_SHAPE[4]]
-            )
+            mem_shape = torch.Size([_KV_SHAPE[1], _KV_SHAPE[3], 256, _KV_SHAPE[4]])
             mem_obj = local_cpu_backend.allocate(mem_shape, _DTYPE)
             mem_obj.ref_count_up()
 
@@ -384,15 +393,18 @@ class TestClose:
         """close() should deregister the RDMA pool and destroy the client."""
         mock_client = _make_mock_cuobj_client()
 
-        with patch(
-            "lmcache.v1.storage_backend.connector."
-            "cuobject_s3_connector.CuObjClientWrapper",
-            return_value=mock_client,
-        ), patch(
-            "lmcache.v1.storage_backend.connector."
-            "cuobject_s3_connector.CuObjConfig",
+        with (
+            patch(
+                "lmcache.v1.storage_backend.connector."
+                "cuobject_s3_connector.CuObjClientWrapper",
+                return_value=mock_client,
+            ),
+            patch(
+                "lmcache.v1.storage_backend.connector."
+                "cuobject_s3_connector.CuObjConfig",
+            ),
         ):
-            # Local
+            # First Party
             from lmcache.v1.storage_backend.connector.cuobject_s3_connector import (
                 CuObjectS3Connector,
             )
@@ -432,15 +444,18 @@ class TestClose:
         mock_client = _make_mock_cuobj_client()
         mock_client.deregister_pool.side_effect = RuntimeError("oops")
 
-        with patch(
-            "lmcache.v1.storage_backend.connector."
-            "cuobject_s3_connector.CuObjClientWrapper",
-            return_value=mock_client,
-        ), patch(
-            "lmcache.v1.storage_backend.connector."
-            "cuobject_s3_connector.CuObjConfig",
+        with (
+            patch(
+                "lmcache.v1.storage_backend.connector."
+                "cuobject_s3_connector.CuObjClientWrapper",
+                return_value=mock_client,
+            ),
+            patch(
+                "lmcache.v1.storage_backend.connector."
+                "cuobject_s3_connector.CuObjConfig",
+            ),
         ):
-            # Local
+            # First Party
             from lmcache.v1.storage_backend.connector.cuobject_s3_connector import (
                 CuObjectS3Connector,
             )
