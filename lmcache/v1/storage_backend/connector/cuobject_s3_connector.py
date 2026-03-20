@@ -142,7 +142,7 @@ class CuObjectS3Connector(S3Connector):
         self,
         key_str: str,
         memory_obj: MemoryObj,
-    ):
+    ) -> s3.S3Request:
         """RDMA-accelerated upload.
 
         If RDMA is enabled, injects ``x-amz-rdma-token`` into the HTTP
