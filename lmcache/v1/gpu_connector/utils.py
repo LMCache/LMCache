@@ -31,16 +31,18 @@ def try_get_vllm_kv_cache_layout() -> str | None:
 
     Returns ``"NHD"`` or ``"HND"`` if vLLM is available and the layout
     has been configured, otherwise ``None``.
-    """
-    try:
-        # Third Party
-        from vllm.v1.attention.backends.utils import (  # type: ignore[import-untyped]
-            get_kv_cache_layout,
-        )
 
-        return get_kv_cache_layout()
-    except (ImportError, AttributeError, Exception):
-        return None
+    Please only call this where vllm is available (i.e. not in the MP server)
+    We want to raise an error if we try to get vllm kv layout where vllm
+    is not available.
+    """
+
+    # Third Party
+    from vllm.v1.attention.backends.utils import (  # type: ignore[import-untyped]
+        get_kv_cache_layout,
+    )
+
+    return get_kv_cache_layout()
 
 
 def permute_to_contiguous(tensor: torch.Tensor) -> torch.Tensor:
