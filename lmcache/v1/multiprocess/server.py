@@ -803,10 +803,14 @@ def run_cache_server(
     if obs_config.logging_enabled:
         # First Party
         from lmcache.v1.mp_observability.subscribers.logging import (
+            L1LoggingSubscriber,
             MPServerLoggingSubscriber,
+            SMLoggingSubscriber,
         )
 
         bus.register_subscriber(MPServerLoggingSubscriber())
+        bus.register_subscriber(L1LoggingSubscriber())
+        bus.register_subscriber(SMLoggingSubscriber())
 
     if obs_config.tracing_enabled:
         # First Party
