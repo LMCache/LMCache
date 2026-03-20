@@ -19,6 +19,19 @@ def _json_response(data: dict, status_code: int = 200) -> PlainTextResponse:
     )
 
 
+def _get_role(adapter) -> str:
+    """Get the role from the manager's engine metadata.
+
+    Returns "scheduler", "worker", or "unknown".
+    """
+    metadata = getattr(adapter, "lmcache_engine_metadata", None)
+    if metadata is not None:
+        role = getattr(metadata, "role", None)
+        if role is not None:
+            return role
+    return "unknown"
+
+
 @router.get("/lookup/info")
 async def get_lookup_info(request: Request):
     """
@@ -42,7 +55,7 @@ async def close_lookup(request: Request):
         curl -X POST http://localhost:6999/lookup/close
     """
     adapter = request.app.state.lmcache_adapter
-    role = getattr(adapter, "role", None)
+    role = _get_role(adapter)
 
     if role == "scheduler":
         if not hasattr(adapter, "close_lookup_client"):
@@ -75,7 +88,7 @@ async def create_lookup(request: Request, dryrun: bool = False):
         curl -X POST "http://localhost:6999/lookup/create?dryrun=true"
     """
     adapter = request.app.state.lmcache_adapter
-    role = getattr(adapter, "role", None)
+    role = _get_role(adapter)
 
     if role == "scheduler":
         if not hasattr(adapter, "create_lookup_client"):
@@ -113,7 +126,7 @@ async def recreate_lookup(request: Request):
         curl -X POST http://localhost:6999/lookup/recreate
     """
     adapter = request.app.state.lmcache_adapter
-    role = getattr(adapter, "role", None)
+    role = _get_role(adapter)
 
     if role == "scheduler":
         if not hasattr(adapter, "recreate_lookup_client"):
