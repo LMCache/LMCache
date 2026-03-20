@@ -285,6 +285,30 @@ class LocalDiskBackend(StorageBackendInterface):
 
         return True
 
+    def _insert_key_under_disk_lock(
+        self,
+        key: CacheEngineKey,
+        size: int,
+        shape: torch.Size,
+        dtype: torch.dtype,
+        fmt: MemoryFormat,
+        cached_positions: Optional[torch.Tensor] = None,
+    ) -> bool:
+        """
+        Insert or touch ``key`` in ``self.dict``. Caller must hold ``disk_lock``.
+
+        Returns:
+            True if the key was already stored (hit), False if newly inserted.
+        """
+        path = self._key_to_path(key)
+        if key in self.dict:
+            self.cache_policy.update_on_hit(key, self.dict)
+            return True
+        self.dict[key] = DiskCacheMetadata(
+            path, size, shape, dtype, cached_positions, fmt, 0
+        )
+        return False
+
     def insert_key(
         self,
         key: CacheEngineKey,
@@ -294,18 +318,10 @@ class LocalDiskBackend(StorageBackendInterface):
         fmt: MemoryFormat,
         cached_positions: Optional[torch.Tensor] = None,
     ) -> None:
-        path = self._key_to_path(key)
-
-        has_stored = False
         with self.disk_lock:
-            if key in self.dict:
-                # Update cache recency
-                self.cache_policy.update_on_hit(key, self.dict)
-                has_stored = True
-            else:
-                self.dict[key] = DiskCacheMetadata(
-                    path, size, shape, dtype, cached_positions, fmt, 0
-                )
+            has_stored = self._insert_key_under_disk_lock(
+                key, size, shape, dtype, fmt, cached_positions
+            )
 
         # Push kv admit msg with batching
         if self.batched_msg_sender is not None and not has_stored:
@@ -349,15 +365,16 @@ class LocalDiskBackend(StorageBackendInterface):
             )
             return None
         if self._ssd_gate_min_access_count > 0:
-            access_count = self._chunk_access_count.get(key.chunk_hash, 0)
-            if access_count < self._ssd_gate_min_access_count:
-                self._disk_prom_listener.on_gated_by_frequency()
-                logger.debug(
-                    "SSD gate (frequency): chunk access_count %s < min_access_count %s",
-                    access_count,
-                    self._ssd_gate_min_access_count,
-                )
-                return None
+            with self.disk_lock:
+                access_count = self._chunk_access_count.get(key.chunk_hash, 0)
+                if access_count < self._ssd_gate_min_access_count:
+                    self._disk_prom_listener.on_gated_by_frequency()
+                    logger.debug(
+                        "SSD gate (frequency): access_count=%s < min_access_count=%s",
+                        access_count,
+                        self._ssd_gate_min_access_count,
+                    )
+                    return None
 
         self.disk_worker.insert_put_task(key)
         all_evict_keys = []
@@ -565,8 +582,16 @@ class LocalDiskBackend(StorageBackendInterface):
         cached_positions = memory_obj.metadata.cached_positions
         memory_obj.ref_count_down()
 
-        self._chunk_access_count[key.chunk_hash] = 0
-        self.insert_key(key, size, shape, dtype, fmt, cached_positions=cached_positions)
+        with self.disk_lock:
+            self._chunk_access_count[key.chunk_hash] = 0
+            has_stored = self._insert_key_under_disk_lock(
+                key, size, shape, dtype, fmt, cached_positions=cached_positions
+            )
+        if self.batched_msg_sender is not None and not has_stored:
+            self.batched_msg_sender.add_kv_op(
+                op_type=OpType.ADMIT,
+                key=key.chunk_hash,
+            )
 
         self.disk_worker.remove_put_task(key)
 
