@@ -12,7 +12,7 @@ import torch
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.observability import LMCStatsMonitor, PrometheusLogger
+from lmcache.observability import LMCStatsMonitor
 from lmcache.utils import CacheEngineKey, DiskCacheMetadata, _lmcache_nvtx_annotate
 from lmcache.v1.cache_controller.message import OpType
 from lmcache.v1.config import LMCacheEngineConfig
@@ -21,6 +21,9 @@ from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.storage_backend.abstract_backend import StorageBackendInterface
 from lmcache.v1.storage_backend.batched_message_sender import BatchedMessageSender
 from lmcache.v1.storage_backend.cache_policy import get_cache_policy
+from lmcache.v1.storage_backend.disk_prometheus_listener import (
+    DiskPrometheusListener,
+)
 from lmcache.v1.storage_backend.job_executor.pq_executor import (
     AsyncPQThreadPoolExecutor,
 )
@@ -168,15 +171,8 @@ class LocalDiskBackend(StorageBackendInterface):
         else:
             logger.warning("Controller message sender is not initialized")
 
-        # Disk metrics for Prometheus
-        self._disk_metrics_lock = threading.Lock()
-        self._disk_write_ops = 0
-        self._disk_write_bytes = 0
-        self._disk_remove_ops = 0
-        self._disk_evict_bytes = 0
-        self._disk_gated_count = 0
-        self._disk_gated_by_length_count = 0
-        self._disk_gated_by_frequency_count = 0
+        self._disk_prom_listener = DiskPrometheusListener()
+        self._disk_prom_listener.register()
 
         # SSD gating policy (defaults 0 = no gating). From extra_config.
         self._ssd_gate_min_size_bytes: int = 0
@@ -190,39 +186,6 @@ class LocalDiskBackend(StorageBackendInterface):
             )
         # Access count per chunk (for frequency-based gating). Key: chunk_hash.
         self._chunk_access_count: dict = {}
-
-        self._setup_metrics()
-
-    def _setup_metrics(self) -> None:
-        """Register disk metrics (SSD wear) with PrometheusLogger."""
-        prometheus_logger = PrometheusLogger.GetInstanceOrNone()
-        if prometheus_logger is not None:
-            prometheus_logger.disk_write_ops.set_function(lambda: self._disk_write_ops)
-            prometheus_logger.disk_write_bytes.set_function(
-                lambda: self._disk_write_bytes
-            )
-            prometheus_logger.disk_remove_ops.set_function(
-                lambda: self._disk_remove_ops
-            )
-            prometheus_logger.disk_evict_bytes.set_function(
-                lambda: self._disk_evict_bytes
-            )
-            prometheus_logger.disk_gated_count.set_function(
-                lambda: self._disk_gated_count
-            )
-            prometheus_logger.disk_gated_by_length_count.set_function(
-                lambda: self._disk_gated_by_length_count
-            )
-            prometheus_logger.disk_gated_by_frequency_count.set_function(
-                lambda: self._disk_gated_by_frequency_count
-            )
-            prometheus_logger.disk_write_avg_size_bytes.set_function(
-                lambda: (
-                    self._disk_write_bytes // self._disk_write_ops
-                    if self._disk_write_ops > 0
-                    else 0
-                )
-            )
 
     def __str__(self):
         return "LocalDiskBackend"
@@ -307,9 +270,7 @@ class LocalDiskBackend(StorageBackendInterface):
 
         os.remove(path)
 
-        with self._disk_metrics_lock:
-            self._disk_remove_ops += 1
-            self._disk_evict_bytes += size
+        self._disk_prom_listener.on_remove(size)
 
         if force:
             self.cache_policy.update_on_force_evict(key)
@@ -380,9 +341,7 @@ class LocalDiskBackend(StorageBackendInterface):
         # SSD gating policy: frequency- and length-based (defaults 0 = no gating)
         min_sz = self._ssd_gate_min_size_bytes
         if min_sz > 0 and required_size < min_sz:
-            with self._disk_metrics_lock:
-                self._disk_gated_count += 1
-                self._disk_gated_by_length_count += 1
+            self._disk_prom_listener.on_gated_by_length()
             logger.debug(
                 "SSD gate (length): chunk size %s < min_size_bytes %s",
                 required_size,
@@ -392,9 +351,7 @@ class LocalDiskBackend(StorageBackendInterface):
         if self._ssd_gate_min_access_count > 0:
             access_count = self._chunk_access_count.get(key.chunk_hash, 0)
             if access_count < self._ssd_gate_min_access_count:
-                with self._disk_metrics_lock:
-                    self._disk_gated_count += 1
-                    self._disk_gated_by_frequency_count += 1
+                self._disk_prom_listener.on_gated_by_frequency()
                 logger.debug(
                     "SSD gate (frequency): chunk access_count %s < min_access_count %s",
                     access_count,
@@ -676,9 +633,7 @@ class LocalDiskBackend(StorageBackendInterface):
     def write_file(self, buffer, path):
         start_time = time.time()
         size = len(buffer)
-        with self._disk_metrics_lock:
-            self._disk_write_ops += 1
-            self._disk_write_bytes += size
+        self._disk_prom_listener.on_write(size)
         if size % self.os_disk_bs != 0 or not self.use_odirect:
             with open(path, "wb") as f:
                 f.write(buffer)
@@ -726,24 +681,7 @@ class LocalDiskBackend(StorageBackendInterface):
         return self.local_cpu_backend
 
     def close(self) -> None:
-        avg_size = (
-            self._disk_write_bytes // self._disk_write_ops
-            if self._disk_write_ops > 0
-            else 0
-        )
-        logger.info(
-            "Disk metrics: disk_write_ops=%s, disk_write_bytes=%s, "
-            "disk_write_avg_size_bytes=%s, disk_remove_ops=%s, disk_evict_bytes=%s, "
-            "disk_gated_count=%s (by_length=%s, by_frequency=%s)",
-            self._disk_write_ops,
-            self._disk_write_bytes,
-            avg_size,
-            self._disk_remove_ops,
-            self._disk_evict_bytes,
-            self._disk_gated_count,
-            self._disk_gated_by_length_count,
-            self._disk_gated_by_frequency_count,
-        )
+        self._disk_prom_listener.log_summary()
         if self.batched_msg_sender is not None:
             self.batched_msg_sender.close()
         self.disk_worker.close()
