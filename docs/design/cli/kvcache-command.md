@@ -21,11 +21,11 @@ sequence.
 
 ZMQ is reserved for **performance-critical data-path** communication between the
 inference engine and LMCache (store, retrieve, prefetch). Every `lmcache kvcache`
-CLI operation goes through **HTTP** — either the per-instance HTTP server or the
-controller HTTP server.
+CLI operation goes through the **MP HTTP server**
+(`lmcache/v1/multiprocess/http_server.py`).
 
 Today some operations (e.g. `end-session`) only have ZMQ implementations. These
-need new HTTP endpoints before the CLI can use them.
+need new HTTP endpoints on the MP HTTP server before the CLI can use them.
 
 ### Every sub-command targets a specific request
 
@@ -62,8 +62,8 @@ lmcache kvcache
 |------------|--------|-------------|
 | `info` | instance | Show per-request cache state: which chunks, where stored, pinned status |
 | `clear` | instance | Clear all cached KV data |
-| `pin` | instance or controller | Pin a request's KV cache to L1/CPU; may be rejected if memory pressure is too high |
-| `compress` | instance or controller | Compress a request's KV cache to reduce memory footprint |
+| `pin` | instance | Pin a request's KV cache to L1/CPU; may be rejected if memory pressure is too high |
+| `compress` | instance | Compress a request's KV cache to reduce memory footprint |
 | `end-session` | instance | Remove per-request session state (token hashes, chunk tracking) |
 
 ```bash
@@ -144,7 +144,6 @@ $ lmcache kvcache clear --url http://localhost:8000
 
 ========== KV Cache Clear ==================
 Status:                                   OK
-Chunks removed:                         1024
 =============================================
 ```
 
@@ -210,7 +209,6 @@ $ lmcache kvcache compress --url http://localhost:8000 \
 | `--method` | yes | Compression method (e.g. `zstd`) |
 | `--request-id` | yes | Target request |
 | `--start`, `--end` | no | Narrow to token range `[st, ed)` |
-| `--instance-id` | no | Target instance (controller mode) |
 
 ### `end-session`
 
@@ -233,20 +231,23 @@ HTTP endpoint needs to be added to the per-instance server.
 
 ## Existing API Surface & Gaps
 
+All CLI operations target the **MP HTTP server**
+(`lmcache/v1/multiprocess/http_server.py`).
+
 ### Usable today (no new endpoints needed)
 
-| CLI sub-command | Existing endpoint | Notes |
-|----------------|------------------|-------|
-| `clear` | `DELETE /cache/clear` (instance), `POST /clear` (controller) | Existing endpoints work as-is |
+| CLI sub-command | Existing MP HTTP endpoint | Notes |
+|----------------|--------------------------|-------|
+| `clear` | `POST /api/clear-cache` | Clears all L1 cache. Works as-is. |
 
-### Needs new HTTP endpoints
+### Needs new MP HTTP endpoints
 
-| CLI sub-command | What exists today | New endpoint needed |
-|----------------|------------------|---------------------|
-| `info` | `GET /cache/kvcache/info` returns layer metadata only | Per-request chunk detail: given a request ID, return chunk ranges, locations, and pinned status |
-| `pin` | `POST /pin` on controller only | Per-instance `POST /cache/pin` that accepts request-id, returns OK or REJECTED with reason |
-| `compress` | `POST /compress` on controller only | Per-instance `POST /cache/compress` that accepts request-id + method |
-| `end-session` | ZMQ `END_SESSION` only (no HTTP) | Per-instance `POST /cache/end-session` that accepts request-id |
+| CLI sub-command | What exists today | New endpoint needed on MP HTTP server |
+|----------------|------------------|---------------------------------------|
+| `info` | No per-request HTTP endpoint | `GET /api/kvcache-info?request_id=...` returning chunk ranges, locations, pinned status |
+| `pin` | ZMQ only (no HTTP) | `POST /api/pin` accepting request-id, returning OK or REJECTED with reason |
+| `compress` | ZMQ only (no HTTP) | `POST /api/compress` accepting request-id + method |
+| `end-session` | ZMQ `END_SESSION` only (no HTTP) | `POST /api/end-session` accepting request-id |
 
 ---
 
@@ -254,7 +255,8 @@ HTTP endpoint needs to be added to the per-instance server.
 
 - **Single `KVCacheCommand`** (`BaseCommand` subclass) with second-level
   argparse subparsers. File: `lmcache/cli/commands/kvcache.py`.
-- **HTTP only:** `_http_request()` wraps `urllib.request` (no new deps).
+- **MP HTTP only:** `_http_request()` wraps `urllib.request` (no new deps).
+  All requests target the MP HTTP server.
 - **Indexing args** shared via a helper that adds `--request-id`,
   `--start`, `--end` to each subparser.
 - **Output:** `self.create_metrics()` — use `--format json | jq` for scripting.
