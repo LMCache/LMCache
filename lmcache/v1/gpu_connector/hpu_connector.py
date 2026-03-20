@@ -46,6 +46,7 @@ class VLLMPagedMemHPUConnectorV2(GPUConnectorInterface):
         use_gpu: bool = False,
         **kwargs,
     ):
+        self.kvcaches: Optional[List[torch.Tensor]] = None
         self.use_mla = "use_mla" in kwargs and kwargs["use_mla"]
 
     @classmethod
@@ -113,32 +114,38 @@ class VLLMPagedMemHPUConnectorV2(GPUConnectorInterface):
                     " order to be processed by VLLMPagedMemHPUConnectorV2"
                 )
 
-        if "kvcaches" not in kwargs:
-            raise ValueError("'kvcaches' should be provided in kwargs.")
+        self.initialize_kvcaches_ptr(**kwargs)
+
+        assert self.kvcaches is not None, (
+            "kvcaches should be provided in kwargs or initialized beforehand."
+        )
 
         if "slot_mapping" not in kwargs:
             raise ValueError("'slot_mapping' should be provided in kwargs.")
 
-        kvcaches: List[torch.Tensor] = kwargs["kvcaches"]
         slot_mapping: torch.Tensor = kwargs["slot_mapping"]
         slices = slot_mapping[start:end]
 
+        # Flush the HPU lazy-mode op graph so the slot_mapping slice is
+        # materialized before downstream ops consume it. This also keeps
+        # LMCache's transfer ops decoupled from vLLM's HPU compute graph,
+        # which issues its own mark_step() calls at forward-pass boundaries.
         htorch.core.mark_step()
 
         if self.use_mla:
             tmp = memory_obj.tensor[0].to(slot_mapping.device)
-            num_blocks, block_size, head_size = kvcaches[0].shape
+            num_blocks, block_size, head_size = self.kvcaches[0].shape
             total_blocks = num_blocks * block_size
-            for i, kvcache in enumerate(kvcaches):
+            for i, kvcache in enumerate(self.kvcaches):
                 kvcache.view(total_blocks, head_size).index_copy_(0, slices, tmp[i])
                 htorch.core.mark_step()
         else:
             tmp_k = memory_obj.tensor[0].to(slot_mapping.device)
             tmp_v = memory_obj.tensor[1].to(slot_mapping.device)
-            num_blocks, block_size, num_heads, head_size = kvcaches[0][0].shape
+            num_blocks, block_size, num_heads, head_size = self.kvcaches[0][0].shape
             total_blocks = num_blocks * block_size
             d = num_heads * head_size
-            for i, (kcache, vcache) in enumerate(kvcaches):
+            for i, (kcache, vcache) in enumerate(self.kvcaches):
                 kcache.view(total_blocks, d).index_copy_(0, slices, tmp_k[i])
                 vcache.view(total_blocks, d).index_copy_(0, slices, tmp_v[i])
                 htorch.core.mark_step()
@@ -166,41 +173,42 @@ class VLLMPagedMemHPUConnectorV2(GPUConnectorInterface):
         """
         assert memory_obj.tensor is not None
 
-        if "kvcaches" not in kwargs:
-            raise ValueError("'kvcaches' should be provided in kwargs.")
+        self.initialize_kvcaches_ptr(**kwargs)
+        assert self.kvcaches is not None, (
+            "kvcaches should be provided in kwargs or initialized beforehand."
+        )
 
         if "slot_mapping" not in kwargs:
             raise ValueError("'slot_mapping' should be provided in kwargs.")
 
-        kvcaches: List[torch.Tensor] = kwargs["kvcaches"]
         slot_mapping: torch.Tensor = kwargs["slot_mapping"]
         slices = slot_mapping[start:end]
 
         htorch.core.mark_step()
 
         if self.use_mla:
-            num_blocks, block_size, head_size = kvcaches[0].shape
+            num_blocks, block_size, head_size = self.kvcaches[0].shape
             total_blocks = num_blocks * block_size
             tmp = torch.stack(
                 [
                     kvcache.view(total_blocks, head_size).index_select(0, slices)
-                    for kvcache in kvcaches
+                    for kvcache in self.kvcaches
                 ]
             )
         else:
-            num_blocks, block_size, num_heads, head_size = kvcaches[0][0].shape
+            num_blocks, block_size, num_heads, head_size = self.kvcaches[0][0].shape
             total_blocks = num_blocks * block_size
             d = num_heads * head_size
             tmp_k = torch.stack(
                 [
                     kvcache[0].view(total_blocks, d).index_select(0, slices)
-                    for kvcache in kvcaches
+                    for kvcache in self.kvcaches
                 ]
             )
             tmp_v = torch.stack(
                 [
                     kvcache[1].view(total_blocks, d).index_select(0, slices)
-                    for kvcache in kvcaches
+                    for kvcache in self.kvcaches
                 ]
             )
             tmp = torch.stack([tmp_k, tmp_v])
