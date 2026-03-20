@@ -187,3 +187,52 @@ class TestLocalDiskBackend:
         assert result is None
 
         local_disk_backend.local_cpu_backend.memory_allocator.close()
+
+    def test_read_file_missing_file_no_crash(self, local_disk_backend):
+        """Test that read_file handles FileNotFoundError gracefully.
+
+        Regression test: previously, read_file would pop the key from
+        self.dict on FileNotFoundError, and callers would then crash
+        with a KeyError when accessing self.dict[key].
+        """
+        from lmcache.v1.memory_management import MemoryFormat
+
+        key = create_test_key(99)
+        shape = torch.Size([28, 2, 256, 8, 128])
+        dtype = torch.bfloat16
+        fmt = MemoryFormat.KV_2LTD
+
+        # Register the key in the dict so it looks like a valid cache entry
+        local_disk_backend.insert_key(key, 1024, shape, dtype, fmt)
+        assert local_disk_backend.contains(key)
+
+        # The file doesn't exist on disk — read_file should return False
+        path = local_disk_backend._key_to_path(key)
+        buffer = bytearray(1024)
+        result = local_disk_backend.read_file(key, buffer, path)
+
+        assert result is False
+        assert not local_disk_backend.contains(key)
+
+        local_disk_backend.local_cpu_backend.memory_allocator.close()
+
+    def test_load_bytes_from_disk_missing_file(self, local_disk_backend):
+        """Test that load_bytes_from_disk returns None for missing files."""
+        from lmcache.v1.memory_management import MemoryFormat
+
+        key = create_test_key(100)
+        shape = torch.Size([28, 2, 256, 8, 128])
+        dtype = torch.bfloat16
+        fmt = MemoryFormat.KV_2LTD
+
+        local_disk_backend.insert_key(key, 1024, shape, dtype, fmt)
+        path = local_disk_backend._key_to_path(key)
+
+        result = local_disk_backend.load_bytes_from_disk(
+            key, path, dtype, shape, fmt
+        )
+
+        assert result is None
+        assert not local_disk_backend.contains(key)
+
+        local_disk_backend.local_cpu_backend.memory_allocator.close()

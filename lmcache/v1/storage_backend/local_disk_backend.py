@@ -536,13 +536,20 @@ class LocalDiskBackend(StorageBackendInterface):
     ) -> list[MemoryObj]:
         """
         Async load bytearray from disk.
+
+        Returns only the successfully loaded MemoryObj instances.
+        If a file is missing on disk, the corresponding MemoryObj is
+        unpinned and freed, and excluded from the returned list.
         """
 
         logger.debug("Executing `async_load_bytes` from disk.")
-        # TODO (Jiayi): handle the case where loading fails.
+        loaded_objs: list[MemoryObj] = []
         for path, key, mem_obj in zip(paths, keys, memory_objs, strict=False):
             buffer = mem_obj.byte_array
-            self.read_file(key, buffer, path)
+            if not self.read_file(key, buffer, path):
+                mem_obj.unpin()
+                mem_obj.ref_count_down()
+                continue
 
             # TODO(Jiayi): Please recover the metadata in a more
             # elegant way in the future.
@@ -553,7 +560,9 @@ class LocalDiskBackend(StorageBackendInterface):
             self.dict[key].unpin()
             self.disk_lock.release()
 
-        return memory_objs
+            loaded_objs.append(mem_obj)
+
+        return loaded_objs
 
     def load_bytes_from_disk(
         self,
@@ -565,13 +574,17 @@ class LocalDiskBackend(StorageBackendInterface):
     ) -> Optional[MemoryObj]:
         """
         Load bytearray from disk.
+
+        Returns None if the file is missing on disk.
         """
 
         memory_obj = self.local_cpu_backend.allocate(shape, dtype, fmt)
         assert memory_obj is not None, "Memory allocation failed during disk load."
 
         buffer = memory_obj.byte_array
-        self.read_file(key, buffer, path)
+        if not self.read_file(key, buffer, path):
+            memory_obj.ref_count_down()
+            return None
 
         # TODO(Jiayi): Please recover the metadata in a more
         # elegant way in the future.
@@ -596,7 +609,12 @@ class LocalDiskBackend(StorageBackendInterface):
             f"Bandwidth: {size / disk_write_time / 1e6:.2f} MB/s"
         )
 
-    def read_file(self, key, buffer, path):
+    def read_file(self, key, buffer, path) -> bool:
+        """Read file contents into buffer.
+
+        Returns True on success, False if the file was not found
+        (in which case the key is removed from self.dict).
+        """
         start_time = time.time()
         size = len(buffer)
         fblock_aligned = size % self.os_disk_bs == 0
@@ -616,15 +634,16 @@ class LocalDiskBackend(StorageBackendInterface):
                     fdo.readinto(buffer)
         except FileNotFoundError:
             logger.warning(f"File not found on disk: {path}")
-            if self.dict.get(key, None):
-                self.dict.pop(key)
-            return
+            with self.disk_lock:
+                self.dict.pop(key, None)
+            return False
 
         disk_read_time = time.time() - start_time
         logger.debug(
             f"Disk read size: {size} bytes, "
             f"Bandwidth: {size / disk_read_time / 1e6:.2f} MB/s"
         )
+        return True
 
     def get_allocator_backend(self):
         return self.local_cpu_backend
