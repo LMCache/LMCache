@@ -4,6 +4,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any, Callable, Generic, Optional, TypeVar, get_type_hints
 import inspect
+import os
 import queue
 import threading
 import uuid
@@ -336,17 +337,16 @@ class MessageQueueServer:
         self.ctx = context
         self.socket = self.ctx.socket(zmq.ROUTER)
         self.socket.bind(bind_url)
-        # Output task notifier socket and output queue
-
-        self.output_notifier, self.output_waiter = prepare_internal_push_pull_sockets(
-            self.ctx
-        )
+        # Use eventfd instead of zmq PUSH/PULL sockets because blocking
+        # handler callbacks run on ThreadPoolExecutor threads, and zmq
+        # sockets are not thread-safe. eventfd_write() is atomic.
+        self._output_efd = os.eventfd(0, os.EFD_NONBLOCK | os.EFD_CLOEXEC)
         self.output_queue: queue.Queue = queue.Queue()
 
         # Poller
         self.poller = zmq.Poller()
         self.poller.register(self.socket, zmq.POLLIN)
-        self.poller.register(self.output_waiter, zmq.POLLIN)
+        self.poller.register(self._output_efd, zmq.POLLIN)
 
         # Main loop thread
         self.is_finished = threading.Event()
@@ -359,6 +359,9 @@ class MessageQueueServer:
 
         # Registered handlers: request_type -> (payload_cls, handler)
         self.handlers: dict[RequestType, RequestHandlerBase[Any]] = {}
+
+        # Dedicated thread pools for specific request types
+        self.dedicated_pools: list[ThreadPoolExecutor] = []
 
     def _call_sync_handler(
         self,
@@ -411,15 +414,11 @@ class MessageQueueServer:
                 )
 
                 self.output_queue.put(frames_to_send)
-                self.output_notifier.send(b"1")
+                os.eventfd_write(self._output_efd, 1)
 
             except Exception as e:
                 logger.error("Error in blocking handler: %s", e)
 
-        # TODO: HERE'S A BUG: WE CANNOT SEND RESPONSE IN THE FUTURE THREAD
-        # BECAUSE THE OUTPUT ZMQ SOCKET IS NOT THREAD-SAFE.
-        # WE SHOULD USE A ZMQ SOCKET TO NOTIFY THE MAIN THREAD TO SEND THE
-        # RESPONSE AND USE THE THREAD-QUEUE TO PASS THE RESPONSE DATA
         future.add_done_callback(_notify_response)
 
     def _call_handler(
@@ -444,7 +443,7 @@ class MessageQueueServer:
         while not self.is_finished.is_set():
             socks = dict(self.poller.poll(1000))
             inbound_state = socks.get(self.socket, None)
-            outbound_state = socks.get(self.output_waiter, None)
+            outbound_state = socks.get(self._output_efd, None)
 
             # Process the incoming requests
             if inbound_state and inbound_state & zmq.POLLIN:
@@ -474,12 +473,8 @@ class MessageQueueServer:
 
             # Send the responses
             if outbound_state and outbound_state & zmq.POLLIN:
-                # Drain the notifier
-                while True:
-                    try:
-                        self.output_waiter.recv(zmq.DONTWAIT)
-                    except zmq.Again:
-                        break
+                # Consume the eventfd counter (resets atomically)
+                os.eventfd_read(self._output_efd)
 
                 # Process the output tasks
                 try:
@@ -606,10 +601,66 @@ class MessageQueueServer:
     ) -> None:
         raise NotImplementedError
 
+    def add_dedicated_thread_pool(
+        self,
+        request_types: list[RequestType],
+        max_workers: int,
+    ) -> None:
+        """Assign a dedicated ThreadPoolExecutor to specific request types.
+
+        Must be called after the handlers are registered (via add_handler /
+        add_blocking_handler) and before start().  Each request_type must
+        already be registered as a BlockingRequestHandler; otherwise a
+        ValueError or TypeError is raised.
+
+        Args:
+            request_types: The request types that should use this pool.
+            max_workers: Number of worker threads in the dedicated pool.
+        """
+        # Pass 1: validate all request types
+        for request_type in request_types:
+            handler = self.handlers.get(request_type)
+            if handler is None:
+                raise ValueError(
+                    f"No handler registered for request type: {request_type}. "
+                    f"Register handlers before calling add_dedicated_thread_pool."
+                )
+            if not isinstance(handler, BlockingRequestHandler):
+                raise TypeError(
+                    f"Handler for {request_type} is "
+                    f"{type(handler).__name__}, not BlockingRequestHandler. "
+                    f"Only blocking handlers can use dedicated thread pools."
+                )
+
+        # Pass 2: create pool and assign
+        if not request_types:
+            return
+
+        pool = ThreadPoolExecutor(
+            max_workers=max_workers,
+            thread_name_prefix=f"dedicated-pool-{len(self.dedicated_pools)}",
+        )
+        self.dedicated_pools.append(pool)
+        for request_type in request_types:
+            handler = self.handlers[request_type]
+            assert isinstance(handler, BlockingRequestHandler)
+            handler.executor = pool
+
+        logger.debug(
+            "Created dedicated thread pool (max_workers=%d) for request types: %s",
+            max_workers,
+            [rt.name for rt in request_types],
+        )
+
     def start(self):
         self.worker_thread.start()
 
     def close(self) -> None:
         self.is_finished.set()
-        self.worker_thread.join()
+        if self.worker_thread.is_alive():
+            self.worker_thread.join()
         self.socket.close()
+        self.thread_pool.shutdown(wait=False)
+        for pool in self.dedicated_pools:
+            pool.shutdown(wait=False)
+        os.close(self._output_efd)
