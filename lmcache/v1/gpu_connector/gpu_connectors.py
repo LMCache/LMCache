@@ -692,6 +692,7 @@ class VLLMBufferLayerwiseGPUConnector(GPUConnectorInterface):
             assert_is_vllm_flash_attn_or_flash_infer(self.gpu_kv_format)
             if is_hnd(self.gpu_kv_format):
                 kv_caches = permute_kv_caches_to_contiguous(kv_caches)
+                self.kvcaches = kv_caches
             self.tokens_per_layer = get_tokens_per_layer(kv_caches, self.gpu_kv_format)
             self.elements_per_layer = get_elements_per_layer(
                 kv_caches, self.gpu_kv_format
@@ -1094,6 +1095,7 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
             assert_is_vllm_flash_attn_or_flash_infer(self.gpu_kv_format)
             if is_hnd(self.gpu_kv_format):
                 kv_caches = permute_kv_caches_to_contiguous(kv_caches)
+                self.kvcaches = kv_caches
             self.tokens_per_layer = get_tokens_per_layer(kv_caches, self.gpu_kv_format)
             self.elements_per_layer = get_elements_per_layer(
                 kv_caches, self.gpu_kv_format
