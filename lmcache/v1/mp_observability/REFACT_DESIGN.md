@@ -424,14 +424,9 @@ L1 writes finish (it signals an eventfd to wake its background loop).
 `EvictionPolicy(L1ManagerListener)` tracks key creation/access/deletion for LRU eviction.
 
 These are **business logic**, not observability. The L1Manager listener pattern cannot be
-fully removed — only the observability listener (`L1ManagerStatsLogger`) migrates to the
-EventBus. `StorageManagerListener`, by contrast, is only used by
-`StorageManagerStatsLogger`, so StorageManager can fully migrate.
-
-The strategy for L1Manager: add a **bridge listener** that implements `L1ManagerListener`
-and publishes each callback as an `Event` to the EventBus. This replaces
-`L1ManagerStatsLogger` in L1Manager's listener list. StoreListener and EvictionPolicy
-remain as direct listeners.
+fully removed. L1Manager publishes events **directly** to the EventBus (alongside its
+existing listener iteration for business-logic consumers). `StorageManagerListener`, by
+contrast, is only used by observability, so StorageManager migrates fully.
 
 ### PR 1: Core infrastructure + OpenTelemetry dependency
 
@@ -439,85 +434,82 @@ remain as direct listeners.
 - `mp_observability/event.py` — `EventType` enum, `Event` dataclass
 - `mp_observability/event_bus.py` — `EventBus` class, `EventSubscriber` ABC, singleton
   (`get_event_bus()`, `init_event_bus()`)
-- `mp_observability/otel_init.py` — `init_otel_metrics(config)` helper that sets up
-  `MeterProvider` + `PrometheusMetricReader`, and optionally `TracerProvider`
-- `tests/v1/mp_observability/test_event_bus.py` — unit tests for EventBus (subscribe,
-  publish, drain, queue overflow, start/stop)
+- `mp_observability/otel_init.py` — `init_otel_metrics()` with dual mode:
+  OTLP push (when `OTEL_EXPORTER_OTLP_ENDPOINT` is set) or Prometheus pull fallback
+- `mp_observability/config.py` — add `ObservabilityConfig`
+- `tests/v1/mp_observability/test_event_bus.py` — unit tests for EventBus
 
 **Files modified:**
-- `pyproject.toml` / `setup.cfg` — add `opentelemetry-api`, `opentelemetry-sdk`,
-  `opentelemetry-exporter-prometheus`
-- `mp_observability/config.py` — add `ObservabilityConfig` (extends existing
-  `PrometheusConfig` with `metrics_enabled`, `logging_enabled`, `tracing_enabled`)
+- `requirements/common.txt` — add `opentelemetry-api`, `opentelemetry-sdk`,
+  `opentelemetry-exporter-otlp`, `opentelemetry-exporter-prometheus`
 
 **Why first:** Pure additions with no risk to existing behavior. Establishes the
 foundation (EventBus + OTel) that all subsequent PRs depend on.
 
 ---
 
-### PR 2: L1 + StorageManager observability migration
+### PR 2: L1 + StorageManager observability migration + old Prometheus removal
 
 **Files added:**
-- `mp_observability/bridge.py` — `L1EventBusBridge(L1ManagerListener)` that publishes
-  events to the EventBus:
-  ```python
-  class L1EventBusBridge(L1ManagerListener):
-      def __init__(self, bus: EventBus):
-          self._bus = bus
-
-      def on_l1_keys_read_finished(self, keys: list[ObjectKey]) -> None:
-          self._bus.publish(Event(
-              event_type=EventType.L1_READ_FINISHED,
-              metadata={"keys": keys},
-          ))
-      # ... same for other L1 callbacks
-  ```
+- `mp_observability/subscribers/__init__.py`
 - `mp_observability/subscribers/l1_metrics.py` — `L1MetricsSubscriber` (OTel counters)
-- `mp_observability/subscribers/l1_logging.py` — `L1LoggingSubscriber`
-- `mp_observability/subscribers/sm_metrics.py` — `SMMetricsSubscriber`
-- `mp_observability/subscribers/sm_logging.py` — `SMLoggingSubscriber`
+- `mp_observability/subscribers/l1_logging.py` — `L1LoggingSubscriber` (with OTel
+  `LoggingHandler` bridge)
+- `mp_observability/subscribers/sm_metrics.py` — `SMMetricsSubscriber` (OTel counters)
+- `mp_observability/subscribers/sm_logging.py` — `SMLoggingSubscriber` (with OTel
+  `LoggingHandler` bridge)
+- `tests/v1/mp_observability/subscribers/test_l1_metrics.py`
+- `tests/v1/mp_observability/subscribers/test_sm_metrics.py`
+- `deploy/otel-config.yaml` — OTel collector config for OTLP mode testing
+- `deploy/test_otlp_receiver.py` — lightweight Python OTLP receiver for testing
 
 **Files modified:**
-- `distributed/l1_manager.py` — in `__init__`, replace `L1ManagerStatsLogger` with
-  `L1EventBusBridge`:
+- `mp_observability/event.py` — add `L1_WRITE_FINISHED_AND_READ_RESERVED` event type
+- `mp_observability/otel_init.py` — updated with OTLP push + Prometheus pull dual mode
+- `distributed/l1_manager.py` — publish events directly to EventBus alongside existing
+  listener iteration (no bridge). Remove `L1ManagerStatsLogger` and
+  `get_prometheus_controller` imports:
   ```python
-  # Before:
-  l1_stats_logger = L1ManagerStatsLogger()
-  self.register_listener(l1_stats_logger)
-  get_prometheus_controller().register_logger(l1_stats_logger)
-
-  # After:
-  bridge = L1EventBusBridge(get_event_bus())
-  self.register_listener(bridge)
-  ```
-  StoreListener and EvictionPolicy registrations unchanged.
-- `distributed/storage_manager.py` — replace listener iteration with `bus.publish()`:
-  ```python
-  # Before:
+  # Listener iteration stays for StoreListener, EvictionPolicy
   for listener in self._registered_listeners:
-      listener.on_sm_reserved_write(successful_keys, failed_keys)
-
-  # After:
-  get_event_bus().publish(Event(
-      event_type=EventType.SM_WRITE_RESERVED,
-      metadata={"succeeded_keys": successful_keys, "failed_keys": failed_keys},
+      listener.on_l1_keys_read_finished(successful_keys)
+  # EventBus publish added for observability
+  self._event_bus.publish(Event(
+      event_type=EventType.L1_READ_FINISHED,
+      metadata={"keys": successful_keys},
   ))
   ```
-  Remove `_registered_listeners`, `register_listener()`, and `StorageManagerStatsLogger`
-  import/registration.
+- `distributed/storage_manager.py` — replace all listener iteration with
+  `self._event_bus.publish(Event(...))`. Remove `_registered_listeners`,
+  `register_listener()`, `StorageManagerListener` import.
 - `distributed/internal_api.py` — remove `StorageManagerListener`
+- `multiprocess/server.py` — remove `PrometheusController` init/start/stop, remove
+  `prometheus_client` import. Add EventBus init, OTel `MeterProvider` setup, and
+  subscriber registration before engine creation.
+- `multiprocess/blend_server.py` — same as server.py
+- `multiprocess/blend_server_v2.py` — same as server.py
+- `multiprocess/http_server.py` — remove `get_prometheus_controller` import and
+  `.stop()` call
 
 **Files removed:**
-- `mp_observability/stats/l1_stats.py`
+- `mp_observability/stats/` — entire directory (all stats dataclasses)
 - `mp_observability/logger/l1_stats_logger.py`
-- `mp_observability/stats/storage_manager_stats.py`
 - `mp_observability/logger/storage_manager_stats_logger.py`
+- `mp_observability/logger/integrator_stats_logger.py` — empty
+- `mp_observability/logger/mp_server_logger.py` — empty
+- `mp_observability/logger/l2_stats_logger.py` — placeholder
+- `mp_observability/prometheus_controller.py` — no longer used in MP mode
+- `tests/v1/mp_observability/test_l1_stats_logger.py`
+- `tests/v1/mp_observability/test_storage_manager_stats_logger.py`
+- `tests/v1/mp_observability/test_prometheus_controller.py`
+- `tests/v1/mp_observability/test_l2_stats_logger.py`
 
-**Note:** L1 uses a bridge (StoreListener and EvictionPolicy need the listener pattern).
-StorageManager migrates fully (no non-observability listeners).
+**Metrics export modes (controlled by environment):**
+- `OTEL_EXPORTER_OTLP_ENDPOINT=http://host:4317` → OTLP push to OTel collector
+- No env var set → Prometheus pull fallback on `--prometheus-port` (default 9090)
 
-**Verification:** Run existing tests + compare Prometheus metric output before/after
-to confirm parity for both L1 and SM counters.
+**Verification:** 78 tests pass. Metrics verified on both OTLP (via test receiver)
+and Prometheus fallback (via `curl /metrics`).
 
 ---
 
@@ -548,48 +540,18 @@ to confirm parity for both L1 and SM counters.
 
 ---
 
-### PR 4: Final cleanup
-
-**Files removed:**
-- `mp_observability/prometheus_controller.py` — no more PrometheusLogger consumers
-- `mp_observability/logger/prometheus_logger.py` — ABC no longer needed
-- `mp_observability/logger/l2_stats_logger.py` — placeholder, replace with future
-  L2 EventBus subscriber when L2 is finalized
-- `mp_observability/stats/mp_server_stats.py` — empty
-- `mp_observability/stats/vllm_integrator_stats.py` — empty
-- `mp_observability/logger/integrator_stats_logger.py` — empty
-- `mp_observability/logger/mp_server_logger.py` — empty
-
-**Files modified:**
-- `multiprocess/server.py`, `blend_server.py`, `blend_server_v2.py` — replace
-  `init_prometheus_controller(config)` + `init_telemetry_controller(config)` with
-  unified `init_mp_observability(config)` call
-- `distributed/internal_api.py` — remove `EventListener` base class. Keep
-  `L1ManagerListener` (still used by StoreListener, EvictionPolicy). Remove
-  `L2ManagerListener` placeholder.
-- `mp_observability/LOGGER_GUIDE.md` — rewrite for new subscriber pattern
-- `mp_observability/METRICS.md` — update to reflect new architecture
-- `pyproject.toml` — remove `prometheus_client` direct dependency (it remains as a
-  transitive dep via `opentelemetry-exporter-prometheus`)
-
----
-
 ### PR dependency graph
 
 ```
 PR 1 (EventBus core + OTel dependency)
   │
-  ├──► PR 2 (L1 + SM migration)
+  ├──► PR 2 (L1 + SM migration + old Prometheus removal)
   │
-  └──► PR 3 (MPServer migration)     ← can be parallel with PR 2
-       │
-       ▼
-     PR 4 (cleanup)                   ← depends on PR 2 + 3 both merged
+  └──► PR 3 (MPServer telemetry migration)  ← can be parallel with PR 2
 ```
 
 PRs 2 and 3 are independent of each other (they touch different producers and
 different subscriber files) and can be reviewed/merged in parallel after PR 1 lands.
-PR 4 depends on both completing.
 
 ---
 
@@ -597,36 +559,32 @@ PR 4 depends on both completing.
 
 ### A. Migration Map
 
-#### A.1 Files Removed
+#### A.1 Files Removed (MP mode scope)
 
 | File | Reason |
 |---|---|
-| `stats/l1_stats.py` | No intermediate accumulation — counters update directly in callbacks |
-| `stats/storage_manager_stats.py` | Same |
-| `stats/mp_server_stats.py` | Empty, unused |
-| `stats/vllm_integrator_stats.py` | Empty, unused |
+| `stats/` (entire directory) | No intermediate accumulation — OTel counters update directly in subscriber callbacks |
 | `logger/l1_stats_logger.py` | Replaced by `L1MetricsSubscriber` + `L1LoggingSubscriber` |
-| `logger/l2_stats_logger.py` | Replaced by future `L2MetricsSubscriber` |
+| `logger/l2_stats_logger.py` | Placeholder, removed |
 | `logger/storage_manager_stats_logger.py` | Replaced by `SMMetricsSubscriber` + `SMLoggingSubscriber` |
 | `logger/integrator_stats_logger.py` | Empty, unused |
 | `logger/mp_server_logger.py` | Empty, unused |
-| `logger/prometheus_logger.py` | ABC replaced by OTel Metrics API |
-| `prometheus_controller.py` | Merged into `EventBus` |
-| `telemetry/controller.py` | Merged into `EventBus` |
-| `telemetry/event.py` | Replaced by unified `Event` + `EventType` |
-| `telemetry/config.py` | Merged into unified `ObservabilityConfig` |
-| `telemetry/processors/base.py` | Replaced by `EventSubscriber` ABC |
-| `telemetry/processors/logging_processor.py` | Replaced by per-component logging subscribers |
+| `prometheus_controller.py` | Replaced by `EventBus` + OTel. Non-MP code has its own prometheus logger. |
+| `telemetry/` (entire directory, PR 3) | Replaced by EventBus + `MPServerSpanSubscriber` |
+
+Note: `logger/prometheus_logger.py` is used by non-MP code and is **not** removed.
 
 #### A.2 Files Modified
 
 | File | Change |
 |---|---|
-| `distributed/internal_api.py` | Remove `StorageManagerListener`, `L2ManagerListener`, `EventListener`. **Keep `L1ManagerListener`** (used by StoreListener, EvictionPolicy). |
-| `distributed/l1_manager.py` | Replace `L1ManagerStatsLogger` with `L1EventBusBridge` in listener list. Listener iteration stays (for StoreListener, EvictionPolicy). |
-| `distributed/storage_manager.py` | Replace listener iteration with `bus.publish(Event(...))`. Remove `_registered_listeners`. |
-| `multiprocess/server.py` | Replace `log_telemetry(make_start_event(...))` with `bus.publish(Event(...))` |
-| Server startup code | Replace `init_prometheus_controller()` + `init_telemetry_controller()` with `init_mp_observability()` |
+| `distributed/internal_api.py` | Remove `StorageManagerListener`. **Keep `L1ManagerListener`** (used by StoreListener, EvictionPolicy). |
+| `distributed/l1_manager.py` | Add `self._event_bus.publish(Event(...))` at each listener site. Remove `L1ManagerStatsLogger` and `get_prometheus_controller` imports. Listener iteration stays for business logic. |
+| `distributed/storage_manager.py` | Replace all listener iteration with `self._event_bus.publish(Event(...))`. Remove `_registered_listeners`, `register_listener()`. |
+| `multiprocess/server.py` | Remove `PrometheusController` init/start/stop and `prometheus_client` import. Add EventBus init, OTel MeterProvider setup, subscriber registration. |
+| `multiprocess/blend_server.py` | Same as server.py |
+| `multiprocess/blend_server_v2.py` | Same as server.py |
+| `multiprocess/http_server.py` | Remove `get_prometheus_controller` import and `.stop()` call |
 
 #### A.3 Files Added
 
@@ -634,24 +592,27 @@ PR 4 depends on both completing.
 |---|---|
 | `event.py` | `EventType` enum + `Event` dataclass |
 | `event_bus.py` | `EventBus` class + `EventSubscriber` ABC + singleton management |
-| `bridge.py` | `L1EventBusBridge(L1ManagerListener)` — adapts L1 listener callbacks to EventBus events |
-| `subscribers/l1_metrics.py` | `L1MetricsSubscriber` |
-| `subscribers/l1_logging.py` | `L1LoggingSubscriber` |
-| `subscribers/sm_metrics.py` | `SMMetricsSubscriber` |
-| `subscribers/sm_logging.py` | `SMLoggingSubscriber` |
-| `subscribers/mp_server_metrics.py` | `MPServerMetricsSubscriber` |
-| `subscribers/mp_server_logging.py` | `MPServerLoggingSubscriber` |
-| `subscribers/mp_server_spans.py` | `MPServerSpanSubscriber` (OTel spans from START/END pairs) |
-| `otel_init.py` | OTel SDK initialization helper |
-| `config.py` (rewrite) | Unified `ObservabilityConfig` |
+| `otel_init.py` | OTel SDK init — dual mode: OTLP push or Prometheus pull fallback |
+| `config.py` (extended) | `ObservabilityConfig` added alongside existing `PrometheusConfig` |
+| `subscribers/__init__.py` | Package init |
+| `subscribers/l1_metrics.py` | `L1MetricsSubscriber` (OTel counters) |
+| `subscribers/l1_logging.py` | `L1LoggingSubscriber` (with OTel LoggingHandler bridge) |
+| `subscribers/sm_metrics.py` | `SMMetricsSubscriber` (OTel counters) |
+| `subscribers/sm_logging.py` | `SMLoggingSubscriber` (with OTel LoggingHandler bridge) |
+| `deploy/otel-config.yaml` | OTel collector config for OTLP mode |
+| `deploy/test_otlp_receiver.py` | Lightweight Python OTLP receiver for testing |
 
 #### A.4 Dependencies
 
 | Add | Remove |
 |---|---|
-| `opentelemetry-api` | `prometheus_client` (eventually — see [Appendix B.1](#b1-phased-vs-big-bang-migration)) |
-| `opentelemetry-sdk` | |
-| `opentelemetry-exporter-prometheus` | |
+| `opentelemetry-api` | — |
+| `opentelemetry-sdk` | — |
+| `opentelemetry-exporter-otlp` | — |
+| `opentelemetry-exporter-prometheus` | — |
+
+`prometheus_client` remains as a dependency (used by non-MP code and as the Prometheus
+pull fallback in `otel_init.py`).
 
 ---
 
