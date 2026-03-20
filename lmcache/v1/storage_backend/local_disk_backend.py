@@ -283,9 +283,9 @@ class LocalDiskBackend(StorageBackendInterface):
         dtypes: Optional[list[torch.dtype]] = None,
     ) -> None:
         path = self._key_to_path(key)
-        if shape is None and shapes is not None:
+        if shape is None and shapes:
             shape = shapes[0]
-        if dtype is None and dtypes is not None:
+        if dtype is None and dtypes:
             dtype = dtypes[0]
 
         has_stored = False

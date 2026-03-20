@@ -73,6 +73,12 @@ def CreateGPUConnector(
         try:
             local_worker_id = torch_dev.current_device()
         except (AttributeError, RuntimeError):
+            logger.warning(
+                "Could not read the current %s device from vLLM; "
+                "falling back to LMCache metadata local_worker_id=%s.",
+                dev_name,
+                metadata.local_worker_id,
+            )
             local_worker_id = metadata.local_worker_id
             torch_dev.set_device(local_worker_id)
         device = torch.device(f"{dev_name}:{local_worker_id}")
