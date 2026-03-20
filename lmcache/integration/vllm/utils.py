@@ -341,3 +341,49 @@ def calculate_local_rank_and_world_size(vllm_config: "VllmConfig") -> Tuple[int,
         )
         local_worker_id = global_rank % local_world_size
         return local_worker_id, local_world_size
+
+
+def validate_mla_config(config: LMCacheEngineConfig, use_mla: bool) -> None:
+    """Validate MLA-related configuration."""
+    if use_mla and (config.remote_serde != "naive" and config.remote_serde is not None):
+        raise ValueError("MLA only works with naive serde mode..")
+
+    if use_mla and config.use_layerwise and config.enable_blending:
+        raise ValueError(
+            "We haven't supported MLA with Cacheblend yet. Please disable blending."
+        )
+
+
+def calculate_draft_layers(vllm_config: "VllmConfig") -> int:
+    """Calculate the number of draft layers for speculative decoding."""
+    assert vllm_config is not None, "vllm_config required for vLLM mode"
+
+    num_draft_layers = 0
+    model_config = vllm_config.model_config
+
+    if vllm_config.speculative_config is not None:
+        logger.info(
+            "vllm_config.speculative_config: %s", vllm_config.speculative_config
+        )
+        if vllm_config.speculative_config.method == "deepseek_mtp":
+            num_draft_layers = getattr(
+                model_config.hf_config, "num_nextn_predict_layers", 0
+            )
+        elif vllm_config.speculative_config.use_eagle():
+            try:
+                draft_model_config = vllm_config.speculative_config.draft_model_config
+                num_draft_layers = draft_model_config.get_num_layers(
+                    vllm_config.parallel_config
+                )
+                logger.info("EAGLE detected %d extra layer(s)", num_draft_layers)
+            except Exception:
+                logger.info(
+                    "EAGLE detected, but failed to get the number of extra layers"
+                    "falling back to 1"
+                )
+                num_draft_layers = 1
+    return num_draft_layers
+
+
+def is_dp_rank0(vllm_config: "VllmConfig") -> bool:
+    return vllm_config.parallel_config.data_parallel_rank_local == 0

@@ -140,6 +140,279 @@ class TestAddressManagerAllocation:
         assert manager.check_consistency()
 
 
+class TestAddressManagerBatchedAllocation:
+    """Test batched_allocate functionality."""
+
+    def test_single_batch(self):
+        """Test batched_allocate with batch_size=1 behaves like allocate."""
+        size = 4096 * 10
+        manager = AddressManager(size)
+
+        results = manager.batched_allocate(100, 1)
+
+        assert len(results) == 1
+        addr, allocated_size = results[0]
+        assert addr >= 0
+        assert allocated_size == 4096  # Aligned to 4096
+        assert manager.total_allocated_size == 4096
+        assert manager.get_free_size() == size - 4096
+        assert manager.check_consistency()
+
+    def test_multiple_batch(self):
+        """Test batched_allocate with multiple blocks."""
+        size = 4096 * 10
+        manager = AddressManager(size)
+
+        results = manager.batched_allocate(1000, 5)
+
+        assert len(results) == 5
+        for addr, allocated_size in results:
+            assert addr >= 0
+            assert allocated_size == 4096
+
+        assert _no_overlap(results)
+        assert manager.total_allocated_size == 4096 * 5
+        assert manager.get_free_size() == size - 4096 * 5
+        assert manager.check_consistency()
+
+    def test_batch_exact_aligned_size(self):
+        """Test batched_allocate with exact aligned size."""
+        manager = AddressManager(4096 * 5)
+
+        results = manager.batched_allocate(4096, 5)
+
+        assert len(results) == 5
+        for addr, allocated_size in results:
+            assert addr >= 0
+            assert allocated_size == 4096
+
+        assert _no_overlap(results)
+        assert manager.get_free_size() == 0
+        assert manager.check_consistency()
+
+    def test_batch_allocate_all_memory(self):
+        """Test batched_allocate that exhausts all memory."""
+        size = 4096 * 8
+        manager = AddressManager(size)
+
+        results = manager.batched_allocate(4096, 8)
+
+        assert len(results) == 8
+        assert _no_overlap(results)
+        assert manager.get_free_size() == 0
+        assert manager.total_allocated_size == size
+        assert manager.check_consistency()
+
+    def test_batch_failure_out_of_memory(self):
+        """Test that batched_allocate fails when out of memory."""
+        size = 4096 * 2
+        manager = AddressManager(size)
+
+        # First batch succeeds
+        manager.batched_allocate(4096, 2)
+
+        # Second batch should fail - no memory left
+        with pytest.raises(RuntimeError):
+            manager.batched_allocate(4096, 1)
+
+        assert manager.check_consistency()
+
+    def test_batch_failure_insufficient_memory(self):
+        """Test batched_allocate fails when not enough memory for all blocks."""
+        size = 4096 * 3
+        manager = AddressManager(size)
+
+        # Request 5 blocks but only 3 pages available
+        with pytest.raises(RuntimeError):
+            manager.batched_allocate(4096, 5)
+
+        # Verify no partial allocation occurred (atomicity)
+        assert manager.total_allocated_size == 0
+        assert manager.get_free_size() == size
+        assert manager.check_consistency()
+
+    def test_batch_failure_too_large_single_block(self):
+        """Test batched_allocate failure when single block size is too large."""
+        size = 4096 * 2
+        manager = AddressManager(size)
+
+        with pytest.raises(RuntimeError):
+            manager.batched_allocate(size + 1, 1)
+
+        assert manager.total_allocated_size == 0
+        assert manager.check_consistency()
+
+    def test_batch_atomicity_on_failure(self):
+        """Test that failed batched_allocate does not modify state."""
+        size = 4096 * 5
+        manager = AddressManager(size)
+
+        # Pre-allocate some memory
+        manager.allocate(4096 * 2)
+        allocated_before = manager.total_allocated_size
+        free_before = manager.get_free_size()
+
+        # This should fail - requesting more than available
+        with pytest.raises(RuntimeError):
+            manager.batched_allocate(4096, 10)
+
+        # State should be unchanged
+        assert manager.total_allocated_size == allocated_before
+        assert manager.get_free_size() == free_before
+        assert manager.check_consistency()
+
+    def test_batch_after_free(self):
+        """Test batched_allocate after freeing memory."""
+        size = 4096 * 5
+        manager = AddressManager(size)
+
+        # Allocate all
+        addrs = []
+        for _ in range(5):
+            addr, alloc_size = manager.allocate(4096)
+            addrs.append((addr, alloc_size))
+
+        # Free 3 blocks
+        for addr, alloc_size in addrs[:3]:
+            manager.free(addr, alloc_size)
+
+        # Batched allocate should succeed with 3 blocks
+        results = manager.batched_allocate(4096, 3)
+        assert len(results) == 3
+        assert _no_overlap(results + addrs[3:])
+        assert manager.check_consistency()
+
+    def test_batch_from_fragmented_memory(self):
+        """Test batched_allocate from fragmented free list."""
+        size = 4096 * 6
+        manager = AddressManager(size)
+
+        # Allocate all 6 blocks
+        addrs = []
+        for _ in range(6):
+            addr, alloc_size = manager.allocate(4096)
+            addrs.append((addr, alloc_size))
+
+        # Free alternating blocks to create fragmentation
+        # Free blocks 0, 2, 4 => 3 free non-contiguous blocks
+        manager.free(addrs[0][0], addrs[0][1])
+        manager.free(addrs[2][0], addrs[2][1])
+        manager.free(addrs[4][0], addrs[4][1])
+
+        assert manager.get_free_size() == 4096 * 3
+
+        # Batched allocate 3 blocks from fragmented free list
+        results = manager.batched_allocate(4096, 3)
+        assert len(results) == 3
+        # All allocated + still-occupied blocks should not overlap
+        all_allocs = results + [addrs[1], addrs[3], addrs[5]]
+        assert _no_overlap(all_allocs)
+        assert manager.get_free_size() == 0
+        assert manager.check_consistency()
+
+    def test_batch_carves_from_large_block(self):
+        """
+        Test batched_allocate carving multiple chunks from a single large free block.
+        """
+        size = 4096 * 10
+        manager = AddressManager(size)
+
+        # All memory is one contiguous free block
+        results = manager.batched_allocate(4096, 5)
+        assert len(results) == 5
+        assert _no_overlap(results)
+        assert manager.total_allocated_size == 4096 * 5
+        assert manager.get_free_size() == 4096 * 5
+        assert manager.check_consistency()
+
+    def test_batch_with_non_aligned_size(self):
+        """Test batched_allocate with non-aligned size request."""
+        size = 4096 * 10
+        manager = AddressManager(size)
+
+        results = manager.batched_allocate(100, 3)
+
+        assert len(results) == 3
+        for addr, allocated_size in results:
+            assert addr >= 0
+            assert allocated_size == 4096  # Aligned up to 4096
+        assert _no_overlap(results)
+        assert manager.total_allocated_size == 4096 * 3
+        assert manager.check_consistency()
+
+    def test_batch_mixed_with_single_allocate(self):
+        """Test batched_allocate interleaved with single allocate."""
+        size = 4096 * 10
+        manager = AddressManager(size)
+
+        # Single allocate
+        addr1, size1 = manager.allocate(4096)
+
+        # Batch allocate
+        batch_results = manager.batched_allocate(4096, 3)
+
+        # Single allocate again
+        addr2, size2 = manager.allocate(4096)
+
+        all_allocs = [(addr1, size1), (addr2, size2)] + batch_results
+        assert _no_overlap(all_allocs)
+        assert manager.total_allocated_size == 4096 * 5
+        assert manager.check_consistency()
+
+    def test_batch_after_sbrk(self):
+        """Test batched_allocate after sbrk expansion."""
+        size = 4096 * 2
+        manager = AddressManager(size)
+
+        # Allocate all initial memory
+        manager.allocate(4096)
+        manager.allocate(4096)
+        assert manager.get_free_size() == 0
+
+        # Expand
+        manager.sbrk(4096 * 5)
+
+        # Now batched_allocate should succeed
+        results = manager.batched_allocate(4096, 3)
+        assert len(results) == 3
+        assert _no_overlap(results)
+        assert manager.check_consistency()
+
+    def test_batch_free_and_rebatch(self):
+        """Test free after batched_allocate and re-allocate."""
+        size = 4096 * 10
+        manager = AddressManager(size)
+
+        # Batched allocate
+        results = manager.batched_allocate(4096, 5)
+        assert len(results) == 5
+
+        # Free all batched blocks
+        for addr, alloc_size in results:
+            manager.free(addr, alloc_size)
+
+        assert manager.total_allocated_size == 0
+        assert manager.get_free_size() == size
+        assert manager.check_consistency()
+
+        # Re-allocate the same batch
+        results2 = manager.batched_allocate(4096, 5)
+        assert len(results2) == 5
+        assert _no_overlap(results2)
+        assert manager.check_consistency()
+
+    def test_batch_size_zero(self):
+        """Test batched_allocate with batch_size=0."""
+        size = 4096 * 10
+        manager = AddressManager(size)
+
+        results = manager.batched_allocate(4096, 0)
+        assert len(results) == 0
+        assert manager.total_allocated_size == 0
+        assert manager.get_free_size() == size
+        assert manager.check_consistency()
+
+
 class TestAddressManagerFree:
     """Test free functionality."""
 
@@ -670,6 +943,95 @@ class TestAddressManagerThreadSafety:
         assert manager.total_allocated_size == 0
         assert manager.check_consistency()
 
+    def test_concurrent_batched_allocations(self):
+        """Test that concurrent batched_allocate calls are thread-safe."""
+        size = 4096 * 2000
+        manager = AddressManager(size)
+
+        num_threads = 20
+        batch_per_thread = 10
+        results: List[List[Tuple[int, int]]] = [[] for _ in range(num_threads)]
+        errors: List[Exception] = []
+
+        def batch_alloc_worker(thread_id: int):
+            try:
+                batch = manager.batched_allocate(4096, batch_per_thread)
+                results[thread_id] = batch
+            except Exception as e:
+                errors.append(e)
+
+        threads = [
+            threading.Thread(target=batch_alloc_worker, args=(i,))
+            for i in range(num_threads)
+        ]
+
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert len(errors) == 0, f"Errors occurred: {errors}"
+
+        all_allocations = [a for thread_results in results for a in thread_results]
+        assert len(all_allocations) == num_threads * batch_per_thread
+        assert _no_overlap(all_allocations)
+        assert manager.check_consistency()
+        assert manager.total_allocated_size == num_threads * batch_per_thread * 4096
+
+    def test_concurrent_batched_alloc_and_free(self):
+        """Test concurrent batched_allocate and free operations."""
+        size = 4096 * 1000
+        manager = AddressManager(size)
+
+        num_iterations = 20
+        errors: List[Exception] = []
+        allocated_lock = threading.Lock()
+        allocated: List[Tuple[int, int]] = []
+
+        def batch_alloc_worker():
+            try:
+                for _ in range(num_iterations):
+                    try:
+                        batch = manager.batched_allocate(4096, 5)
+                        with allocated_lock:
+                            allocated.extend(batch)
+                    except RuntimeError:
+                        pass
+            except Exception as e:
+                errors.append(e)
+
+        def free_worker():
+            try:
+                for _ in range(num_iterations * 5):
+                    to_free = None
+                    with allocated_lock:
+                        if allocated:
+                            to_free = allocated.pop()
+                    if to_free:
+                        manager.free(to_free[0], to_free[1])
+            except Exception as e:
+                errors.append(e)
+
+        threads = []
+        for _ in range(5):
+            threads.append(threading.Thread(target=batch_alloc_worker))
+            threads.append(threading.Thread(target=free_worker))
+
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert len(errors) == 0, f"Errors occurred: {errors}"
+        assert manager.check_consistency()
+
+        # Clean up remaining allocations
+        for addr, alloc_size in allocated:
+            manager.free(addr, alloc_size)
+
+        assert manager.total_allocated_size == 0
+        assert manager.check_consistency()
+
 
 class TestAddressManagerEdgeCases:
     """Test edge cases."""
@@ -771,6 +1133,55 @@ class TestAddressManagerEdgeCases:
 
         assert manager.get_free_size() == size
         assert manager.check_consistency()
+
+    def test_batched_allocate_varied_batch_sizes(self):
+        """Test batched_allocate with varied batch sizes."""
+        size = 4096 * 100
+        manager = AddressManager(size)
+
+        all_allocs: List[Tuple[int, int]] = []
+
+        for batch_size in [1, 2, 5, 10, 3]:
+            results = manager.batched_allocate(4096, batch_size)
+            assert len(results) == batch_size
+            all_allocs.extend(results)
+
+        assert _no_overlap(all_allocs)
+        assert manager.total_allocated_size == 4096 * (1 + 2 + 5 + 10 + 3)
+        assert manager.check_consistency()
+
+        # Free all
+        for addr, alloc_size in all_allocs:
+            manager.free(addr, alloc_size)
+
+        assert manager.get_free_size() == size
+        assert manager.check_consistency()
+
+    def test_batched_allocate_from_zero_size_manager(self):
+        """Test batched_allocate on a zero-size manager."""
+        manager = AddressManager(0)
+
+        with pytest.raises(RuntimeError):
+            manager.batched_allocate(1, 1)
+
+        assert manager.check_consistency()
+
+    def test_batched_allocate_repeated_cycles(self):
+        """Test repeated batched_allocate and free cycles."""
+        size = 4096 * 10
+        manager = AddressManager(size)
+
+        for _ in range(50):
+            results = manager.batched_allocate(4096, 5)
+            assert len(results) == 5
+            assert manager.check_consistency()
+
+            for addr, alloc_size in results:
+                manager.free(addr, alloc_size)
+            assert manager.check_consistency()
+
+        assert manager.get_free_size() == size
+        assert manager.total_allocated_size == 0
 
 
 def _no_overlap(allocations: List[Tuple[int, int]]) -> bool:

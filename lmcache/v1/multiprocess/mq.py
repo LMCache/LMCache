@@ -4,6 +4,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any, Callable, Generic, Optional, TypeVar, get_type_hints
 import inspect
+import os
 import queue
 import threading
 import uuid
@@ -336,17 +337,16 @@ class MessageQueueServer:
         self.ctx = context
         self.socket = self.ctx.socket(zmq.ROUTER)
         self.socket.bind(bind_url)
-        # Output task notifier socket and output queue
-
-        self.output_notifier, self.output_waiter = prepare_internal_push_pull_sockets(
-            self.ctx
-        )
+        # Use eventfd instead of zmq PUSH/PULL sockets because blocking
+        # handler callbacks run on ThreadPoolExecutor threads, and zmq
+        # sockets are not thread-safe. eventfd_write() is atomic.
+        self._output_efd = os.eventfd(0, os.EFD_NONBLOCK | os.EFD_CLOEXEC)
         self.output_queue: queue.Queue = queue.Queue()
 
         # Poller
         self.poller = zmq.Poller()
         self.poller.register(self.socket, zmq.POLLIN)
-        self.poller.register(self.output_waiter, zmq.POLLIN)
+        self.poller.register(self._output_efd, zmq.POLLIN)
 
         # Main loop thread
         self.is_finished = threading.Event()
@@ -414,15 +414,11 @@ class MessageQueueServer:
                 )
 
                 self.output_queue.put(frames_to_send)
-                self.output_notifier.send(b"1")
+                os.eventfd_write(self._output_efd, 1)
 
             except Exception as e:
                 logger.error("Error in blocking handler: %s", e)
 
-        # TODO: HERE'S A BUG: WE CANNOT SEND RESPONSE IN THE FUTURE THREAD
-        # BECAUSE THE OUTPUT ZMQ SOCKET IS NOT THREAD-SAFE.
-        # WE SHOULD USE A ZMQ SOCKET TO NOTIFY THE MAIN THREAD TO SEND THE
-        # RESPONSE AND USE THE THREAD-QUEUE TO PASS THE RESPONSE DATA
         future.add_done_callback(_notify_response)
 
     def _call_handler(
@@ -447,7 +443,7 @@ class MessageQueueServer:
         while not self.is_finished.is_set():
             socks = dict(self.poller.poll(1000))
             inbound_state = socks.get(self.socket, None)
-            outbound_state = socks.get(self.output_waiter, None)
+            outbound_state = socks.get(self._output_efd, None)
 
             # Process the incoming requests
             if inbound_state and inbound_state & zmq.POLLIN:
@@ -477,12 +473,8 @@ class MessageQueueServer:
 
             # Send the responses
             if outbound_state and outbound_state & zmq.POLLIN:
-                # Drain the notifier
-                while True:
-                    try:
-                        self.output_waiter.recv(zmq.DONTWAIT)
-                    except zmq.Again:
-                        break
+                # Consume the eventfd counter (resets atomically)
+                os.eventfd_read(self._output_efd)
 
                 # Process the output tasks
                 try:
@@ -671,3 +663,4 @@ class MessageQueueServer:
         self.thread_pool.shutdown(wait=False)
         for pool in self.dedicated_pools:
             pool.shutdown(wait=False)
+        os.close(self._output_efd)
