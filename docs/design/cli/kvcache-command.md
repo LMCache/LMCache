@@ -86,12 +86,12 @@ subcommands:
 
 ### `info`
 
+> **Status: needs further design — will not be implemented yet.**
+> The output format, filtering options, and server-side endpoint are TBD.
+> The sketch below is a placeholder to illustrate intent.
+
 Show the cache state for a specific request: which chunks exist, which storage
 backend holds each one, and whether they are pinned.
-
-Each chunk becomes an entry in a "Chunks" section, keyed by range. The value
-is a summary string (location + flags). This fits the existing `Metrics` API:
-`metrics["chunks"].add("0:256", "[0:256]", "L1, pinned")`.
 
 ```bash
 # By request ID
@@ -266,5 +266,5 @@ HTTP endpoint needs to be added to the per-instance server.
 | Phase | Work |
 |-------|------|
 | **1a** | `clear` (HTTP exists), `end-session` (needs new HTTP endpoint) |
-| **1b** | `info` (needs per-request endpoint), `pin` (needs per-instance endpoint) |
-| **1c** | `compress` (needs per-instance endpoint) |
+| **1b** | `pin` (needs per-instance endpoint), `compress` (needs per-instance endpoint) |
+| **future** | `info` (needs further design — deferred) |
