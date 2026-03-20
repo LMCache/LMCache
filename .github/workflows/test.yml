@@ -7,20 +7,10 @@ on:
     branches:
       - "dev"
       - "release-**"
-    paths:
-      - '**.py'
-      - 'pyproject.toml'
-      - 'requirements/**.txt'
-      - '.github/workflows/test.yml' # This workflow
   pull_request:
     branches:
       - "dev"
       - "release-**"
-    paths:
-      - '**.py'
-      - 'pyproject.toml'
-      - 'requirements/**.txt'
-      - '.github/workflows/test.yml' # This workflow
 
 env:
   LC_ALL: en_US.UTF-8
@@ -34,7 +24,31 @@ permissions:
   contents: read
 
 jobs:
+  changes:
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+    outputs:
+      should_test: ${{ steps.filter.outputs.python }}
+    steps:
+      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        if: github.event_name != 'pull_request'
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            python:
+              - '**.py'
+              - 'pyproject.toml'
+              - 'requirements/**.txt'
+              - '.github/workflows/test.yml'
+
   test:
+    needs: changes
+    if: >-
+      needs.changes.outputs.should_test == 'true' ||
+      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'workflow_call'
     name: "test: ${{ matrix.python }} on ${{ matrix.platform }}"
     runs-on: "${{ matrix.platform }}"
     strategy:
