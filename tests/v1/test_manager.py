@@ -11,6 +11,7 @@ import pytest
 
 # First Party
 from lmcache.integration.base_service_factory import BaseServiceFactory
+from lmcache.utils import EngineType
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.manager import LMCacheManager
 
@@ -255,6 +256,40 @@ class TestLMCacheManagerPostInit:
         mock_engine.post_init.assert_called_once_with(
             async_lookup_server=mock_lookup_server
         )
+
+    def test_post_init_refreshes_grouped_vllm_gpu_connector(self):
+        """Grouped KV metadata should recreate the worker connector with V3."""
+        config = LMCacheEngineConfig.from_defaults()
+        mock_engine = MagicMock()
+        mock_metadata = MagicMock()
+        mock_metadata.role = "worker"
+        mock_metadata.get_num_groups.return_value = 2
+        mock_engine.metadata = mock_metadata
+        mock_engine.gpu_connector = object()
+        factory = _make_mock_factory(engine=mock_engine)
+
+        manager = LMCacheManager(
+            config=config,
+            service_factory=factory,
+        )
+
+        refreshed_connector = object()
+        with (
+            patch(
+                "lmcache.v1.gpu_connector.CreateGPUConnector",
+                return_value=refreshed_connector,
+            ) as mock_create_gpu_connector,
+            patch.object(manager, "_init_health_monitor"),
+        ):
+            manager.post_init()
+
+        mock_create_gpu_connector.assert_called_once_with(
+            config,
+            mock_engine.metadata,
+            EngineType.VLLM,
+        )
+        assert manager._lmcache_engine.gpu_connector is refreshed_connector
+        mock_engine.post_init.assert_called_once_with(async_lookup_server=None)
 
 
 class TestLMCacheManagerShutdown:

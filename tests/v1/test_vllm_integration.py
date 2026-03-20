@@ -11,7 +11,10 @@ from lmcache.integration.vllm.utils import (
     create_lmcache_metadata,
     resolve_vllm_worker_identity,
 )
+from lmcache.utils import EngineType
 from lmcache.v1.config import LMCacheEngineConfig
+from lmcache.v1.gpu_connector import CreateGPUConnector
+from lmcache.v1.metadata import LMCacheMetadata
 
 
 def _make_vllm_config(
@@ -150,3 +153,45 @@ def test_create_lmcache_metadata_is_dp_aware_for_dense_workers():
     assert metadata.local_world_size == 8
     assert metadata.local_worker_id == 7
     assert metadata.kv_shape == (61, 1, 256, 1, 576)
+
+
+def test_create_gpu_connector_uses_v3_for_grouped_vllm_metadata():
+    """Grouped KV metadata should force the group-aware V3 connector."""
+
+    config = LMCacheEngineConfig.from_defaults()
+    metadata = LMCacheMetadata(
+        model_name="test-model",
+        world_size=8,
+        local_world_size=8,
+        worker_id=0,
+        local_worker_id=0,
+        kv_dtype=torch.uint8,
+        kv_shape=(61, 1, 256, 1, 132),
+        use_mla=True,
+    )
+    metadata.kv_layer_groups_manager.kv_layer_groups = [
+        SimpleNamespace(num_layers=30, hidden_dim_size=132, dtype=torch.uint8),
+        SimpleNamespace(num_layers=31, hidden_dim_size=128, dtype=torch.uint8),
+    ]
+    fake_torch_dev = SimpleNamespace(current_device=lambda: 7)
+
+    with (
+        patch(
+            "lmcache.v1.gpu_connector.get_vllm_torch_dev",
+            return_value=(fake_torch_dev, "cuda"),
+        ),
+        patch(
+            "lmcache.v1.gpu_connector.gpu_connectors."
+            "VLLMPagedMemGPUConnectorV2.from_metadata"
+        ) as mock_v2,
+        patch(
+            "lmcache.v1.gpu_connector.gpu_connectors."
+            "VLLMPagedMemGPUConnectorV3.from_metadata",
+            return_value="v3-connector",
+        ) as mock_v3,
+    ):
+        connector = CreateGPUConnector(config, metadata, EngineType.VLLM)
+
+    assert connector == "v3-connector"
+    mock_v2.assert_not_called()
+    mock_v3.assert_called_once()

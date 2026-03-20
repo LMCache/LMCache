@@ -264,6 +264,8 @@ class DiskCacheMetadata:
     cached_positions: Optional[torch.Tensor] = None
     fmt: Optional[MemoryFormat] = None
     pin_count: int = 0
+    shapes: Optional[list[torch.Size]] = None
+    dtypes: Optional[list[torch.dtype]] = None
 
     def pin(self) -> bool:
         self.pin_count += 1

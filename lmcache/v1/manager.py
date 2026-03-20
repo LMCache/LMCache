@@ -177,6 +177,57 @@ class LMCacheManager:
         if self._runtime_plugin_launcher is not None:
             self._runtime_plugin_launcher.launch_plugins()
 
+    def _maybe_refresh_vllm_gpu_connector(self) -> None:
+        """
+        Recreate the vLLM GPU connector when grouped KV metadata requires V3.
+
+        The worker-side connector is created before vLLM registers its live
+        KV caches, so multi-group KV metadata is not available yet. Once
+        `register_kv_caches()` builds the layer groups, refresh the connector
+        so store/load paths use the group-aware V3 implementation.
+        """
+        if self._lmcache_engine is None:
+            return
+
+        if self._config.use_layerwise:
+            return
+
+        metadata = getattr(self._lmcache_engine, "metadata", None)
+        gpu_connector = getattr(self._lmcache_engine, "gpu_connector", None)
+        if metadata is None or gpu_connector is None:
+            return
+        if getattr(metadata, "role", None) != "worker":
+            return
+
+        get_num_groups = getattr(metadata, "get_num_groups", None)
+        if get_num_groups is None:
+            return
+
+        num_groups = get_num_groups()
+        if not isinstance(num_groups, int) or num_groups <= 1:
+            return
+
+        # First Party
+        from lmcache.utils import EngineType
+        from lmcache.v1.gpu_connector import CreateGPUConnector
+        from lmcache.v1.gpu_connector.gpu_connectors import (
+            VLLMPagedMemGPUConnectorV3,
+        )
+
+        if isinstance(gpu_connector, VLLMPagedMemGPUConnectorV3):
+            return
+
+        logger.info(
+            "Detected %d KV layer group(s) after KV cache registration; "
+            "recreating the vLLM GPU connector with V3.",
+            num_groups,
+        )
+        self._lmcache_engine.gpu_connector = CreateGPUConnector(
+            self._config,
+            metadata,
+            EngineType.VLLM,
+        )
+
     def post_init(self) -> None:
         """
         Post-initialization after KV caches are registered.
@@ -204,6 +255,7 @@ class LMCacheManager:
                 assert isinstance(self._lookup_server, LMCacheAsyncLookupServer)
                 async_lookup_server = self._lookup_server
 
+            self._maybe_refresh_vllm_gpu_connector()
             self._lmcache_engine.post_init(async_lookup_server=async_lookup_server)
 
             # Initialize health monitor after engine post_init completes

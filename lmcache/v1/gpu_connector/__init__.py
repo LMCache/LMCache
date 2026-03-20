@@ -4,12 +4,15 @@ import torch
 
 # First Party
 from lmcache.integration.vllm.utils import get_vllm_torch_dev
+from lmcache.logging import init_logger
 from lmcache.utils import EngineType
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.gpu_connector.gpu_connectors import GPUConnectorInterface
 from lmcache.v1.gpu_connector.mock_gpu_connector import MockGPUConnector
 from lmcache.v1.gpu_connector.utils import need_gpu_interm_buffer
 from lmcache.v1.metadata import LMCacheMetadata
+
+logger = init_logger(__name__)
 
 
 def CreateGPUConnector(
@@ -85,7 +88,13 @@ def CreateGPUConnector(
                 )
 
         if dev_name == "cuda":
-            if config.use_gpu_connector_v3:
+            if config.use_gpu_connector_v3 or metadata.get_num_groups() > 1:
+                if not config.use_gpu_connector_v3 and metadata.get_num_groups() > 1:
+                    logger.info(
+                        "Detected %d KV layer group(s); using "
+                        "VLLMPagedMemGPUConnectorV3 for grouped KV transfer.",
+                        metadata.get_num_groups(),
+                    )
                 return VLLMPagedMemGPUConnectorV3.from_metadata(
                     metadata, use_gpu, device
                 )

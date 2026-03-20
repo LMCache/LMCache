@@ -33,6 +33,18 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
+def _get_disk_cache_layout(
+    disk_meta: DiskCacheMetadata,
+) -> tuple[torch.Size | list[torch.Size], torch.dtype | list[torch.dtype]]:
+    """Return the saved tensor layout for disk-backed MemoryObj allocation."""
+    if disk_meta.shapes is not None and disk_meta.dtypes is not None:
+        return disk_meta.shapes, disk_meta.dtypes
+
+    assert disk_meta.shape is not None
+    assert disk_meta.dtype is not None
+    return disk_meta.shape, disk_meta.dtype
+
+
 # TODO(Jiayi): handle cases where cache is repetitvely prefetched.
 class LocalDiskWorker:
     def __init__(self, loop: asyncio.AbstractEventLoop) -> None:
@@ -263,12 +275,18 @@ class LocalDiskBackend(StorageBackendInterface):
         self,
         key: CacheEngineKey,
         size: int,
-        shape: torch.Size,
-        dtype: torch.dtype,
+        shape: Optional[torch.Size],
+        dtype: Optional[torch.dtype],
         fmt: MemoryFormat,
         cached_positions: Optional[torch.Tensor] = None,
+        shapes: Optional[list[torch.Size]] = None,
+        dtypes: Optional[list[torch.dtype]] = None,
     ) -> None:
         path = self._key_to_path(key)
+        if shape is None and shapes is not None:
+            shape = shapes[0]
+        if dtype is None and dtypes is not None:
+            dtype = dtypes[0]
 
         has_stored = False
         with self.disk_lock:
@@ -278,7 +296,15 @@ class LocalDiskBackend(StorageBackendInterface):
                 has_stored = True
             else:
                 self.dict[key] = DiskCacheMetadata(
-                    path, size, shape, dtype, cached_positions, fmt, 0
+                    path=path,
+                    size=size,
+                    shape=shape,
+                    dtype=dtype,
+                    shapes=shapes,
+                    dtypes=dtypes,
+                    cached_positions=cached_positions,
+                    fmt=fmt,
+                    pin_count=0,
                 )
 
         # Push kv admit msg with batching
@@ -303,8 +329,6 @@ class LocalDiskBackend(StorageBackendInterface):
             after the disk write completes. Callback exceptions are caught
             and logged.
         """
-        assert memory_obj.tensor is not None
-
         # skip repeated save
         if self.exists_in_put_tasks(key):
             logger.debug(f"Put task for {key} is already in progress.")
@@ -394,16 +418,11 @@ class LocalDiskBackend(StorageBackendInterface):
 
         disk_meta = self.dict[key]
         path = disk_meta.path
-        dtype = disk_meta.dtype
-        shape = disk_meta.shape
         fmt = disk_meta.fmt
-        assert dtype is not None
-        assert shape is not None
+        shapes, dtypes = _get_disk_cache_layout(disk_meta)
 
         self.disk_lock.release()
-        memory_obj = self.load_bytes_from_disk(
-            key, path, dtype=dtype, shape=shape, fmt=fmt
-        )
+        memory_obj = self.load_bytes_from_disk(key, path, dtypes, shapes, fmt)
 
         return memory_obj
 
@@ -421,17 +440,14 @@ class LocalDiskBackend(StorageBackendInterface):
             self.disk_lock.acquire()
             assert key in self.dict, f"Key {key} not found in disk cache after pinning"
 
-            path = self.dict[key].path
-            dtype = self.dict[key].dtype
-            shape = self.dict[key].shape
-            fmt = self.dict[key].fmt
-
-            assert dtype is not None
-            assert shape is not None
+            disk_meta = self.dict[key]
+            path = disk_meta.path
+            fmt = disk_meta.fmt
+            shapes, dtypes = _get_disk_cache_layout(disk_meta)
 
             memory_obj = self.local_cpu_backend.allocate(
-                shape,
-                dtype,
+                shapes,
+                dtypes,
                 fmt,
             )
 
@@ -491,8 +507,6 @@ class LocalDiskBackend(StorageBackendInterface):
             write completes for this key. Callback exceptions are caught and
             logged.
         """
-        kv_chunk = memory_obj.tensor
-        assert kv_chunk is not None
         buffer = memory_obj.byte_array
         path = self._key_to_path(key)
 
@@ -512,11 +526,22 @@ class LocalDiskBackend(StorageBackendInterface):
         size = memory_obj.get_physical_size()
         shape = memory_obj.metadata.shape
         dtype = memory_obj.metadata.dtype
+        shapes = memory_obj.metadata.shapes
+        dtypes = memory_obj.metadata.dtypes
         fmt = memory_obj.metadata.fmt
         cached_positions = memory_obj.metadata.cached_positions
         memory_obj.ref_count_down()
 
-        self.insert_key(key, size, shape, dtype, fmt, cached_positions=cached_positions)
+        self.insert_key(
+            key,
+            size,
+            shape,
+            dtype,
+            fmt,
+            cached_positions=cached_positions,
+            shapes=shapes,
+            dtypes=dtypes,
+        )
 
         self.disk_worker.remove_put_task(key)
 
@@ -559,15 +584,15 @@ class LocalDiskBackend(StorageBackendInterface):
         self,
         key: CacheEngineKey,
         path: str,
-        dtype: torch.dtype,
-        shape: torch.Size,
+        dtypes: torch.dtype | list[torch.dtype],
+        shapes: torch.Size | list[torch.Size],
         fmt: MemoryFormat,
     ) -> Optional[MemoryObj]:
         """
         Load bytearray from disk.
         """
 
-        memory_obj = self.local_cpu_backend.allocate(shape, dtype, fmt)
+        memory_obj = self.local_cpu_backend.allocate(shapes, dtypes, fmt)
         assert memory_obj is not None, "Memory allocation failed during disk load."
 
         buffer = memory_obj.byte_array

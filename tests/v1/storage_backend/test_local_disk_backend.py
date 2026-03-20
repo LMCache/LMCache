@@ -12,6 +12,7 @@ import torch
 # First Party
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
+from lmcache.v1.memory_management import MemoryFormat
 from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 from lmcache.v1.storage_backend.local_disk_backend import LocalDiskBackend
@@ -186,4 +187,42 @@ class TestLocalDiskBackend:
 
         assert result is None
 
+        local_disk_backend.local_cpu_backend.memory_allocator.close()
+
+    def test_grouped_memory_obj_roundtrip(self, local_disk_backend):
+        """Grouped KV buffers should round-trip through disk without reshape."""
+        key = create_test_key(3)
+        shapes = [torch.Size([1, 2, 4, 3]), torch.Size([1, 2, 4, 5])]
+        dtypes = [torch.uint8, torch.uint8]
+        memory_obj = local_disk_backend.local_cpu_backend.allocate(
+            shapes,
+            dtypes,
+            MemoryFormat.KV_MLA_FMT,
+        )
+        assert memory_obj is not None
+
+        raw_tensor = memory_obj.raw_tensor
+        assert raw_tensor is not None
+        raw_tensor.copy_(torch.arange(raw_tensor.numel(), dtype=torch.uint8))
+        expected = raw_tensor.clone()
+
+        local_disk_backend.disk_worker.insert_put_task(key)
+        memory_obj.ref_count_up()
+        local_disk_backend.async_save_bytes_to_disk(key, memory_obj)
+        memory_obj.ref_count_down()
+
+        assert key in local_disk_backend.dict
+        disk_meta = local_disk_backend.dict[key]
+        assert disk_meta.shapes == shapes
+        assert disk_meta.dtypes == dtypes
+
+        loaded = local_disk_backend.get_blocking(key)
+        assert loaded is not None
+        assert loaded.metadata.shapes == shapes
+        assert loaded.metadata.dtypes == dtypes
+        loaded_raw_tensor = loaded.raw_tensor
+        assert loaded_raw_tensor is not None
+        assert torch.equal(loaded_raw_tensor, expected)
+
+        loaded.ref_count_down()
         local_disk_backend.local_cpu_backend.memory_allocator.close()
