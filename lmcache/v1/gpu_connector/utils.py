@@ -33,16 +33,24 @@ def try_get_vllm_kv_cache_layout() -> str | None:
     has been configured, otherwise ``None``.
 
     Please only call this where vllm is available (i.e. not in the MP server)
-    We want to raise an error if we try to get vllm kv layout where vllm
+    We will print an error if we try to get vllm kv layout where vllm
     is not available.
     """
 
     # Third Party
-    from vllm.v1.attention.backends.utils import (  # type: ignore[import-untyped]
-        get_kv_cache_layout,
-    )
+    try:
+        # Third Party
+        from vllm.v1.attention.backends.utils import (  # type: ignore[import-untyped]
+            get_kv_cache_layout,
+        )
 
-    return get_kv_cache_layout()
+        return get_kv_cache_layout()
+    except Exception:
+        logger.error(
+            "vLLM is not available but tried to query kv cache "
+            "layout information, cannot get KV cache layout"
+        )
+        return None
 
 
 def permute_to_contiguous(tensor: torch.Tensor) -> torch.Tensor:
