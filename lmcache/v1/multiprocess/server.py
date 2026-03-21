@@ -256,12 +256,16 @@ class MPCacheEngine:
         )
         gpu_context = self.gpu_contexts[instance_id]
 
+        blocks_per_chunk = self.chunk_size // gpu_context.block_size
+
         with (
             torch.cuda.device(gpu_context.device),
             torch.cuda.stream(gpu_context.stream),
         ):
             event = torch.cuda.Event(interprocess=True)
-            slot_mapping_tensor = gpu_context.get_slot_mapping_tensor(gpu_block_ids)
+
+            # Stage all block_ids to GPU once before the loop
+            all_block_ids_gpu = gpu_context.stage_block_ids(gpu_block_ids)
 
             # Wait for vLLM to finish
             vllm_event = torch.cuda.Event.from_ipc_handle(
@@ -290,25 +294,25 @@ class MPCacheEngine:
                 else:
                     continue
 
-                start = idx * self.chunk_size
-                end = start + self.chunk_size
-                slot_mapping = slot_mapping_tensor[start:end]
+                chunk_block_ids_gpu = all_block_ids_gpu[
+                    idx * blocks_per_chunk : (idx + 1) * blocks_per_chunk
+                ]
 
-                # Copy from GPU to CPU
-                tmp_buffer = gpu_context.get_tmp_gpu_buffer(self.chunk_size)
+                # Copy from paged buffer to tmp GPU buffer, then to CPU
+                assert memory_obj.tensor is not None
                 with gpu_context.transfer_lock:
-                    lmc_ops.multi_layer_kv_transfer(
-                        tmp_buffer,
+                    tmp_buffer = gpu_context.get_tmp_gpu_buffer(self.chunk_size)
+                    lmc_ops.multi_layer_block_kv_transfer(
                         gpu_context.kv_pointers,
-                        slot_mapping,
+                        [tmp_buffer.data_ptr()],
+                        chunk_block_ids_gpu,
                         gpu_context.device,
-                        gpu_context.block_size * gpu_context.num_blocks,
                         lmc_ops.TransferDirection.D2H,
+                        gpu_context.shape_desc,
+                        self.chunk_size,
                         gpu_context.gpu_kv_format_,
-                        gpu_context.block_size,
+                        0,
                     )
-
-                    assert memory_obj.tensor is not None
                     lmcache_memcpy_async_d2h(tmp_buffer, memory_obj)
 
             event.record()
@@ -392,6 +396,8 @@ class MPCacheEngine:
                 ),
             )
 
+        blocks_per_chunk = self.chunk_size // gpu_context.block_size
+
         def _retrieve_loop(keys: list[ObjectKey], memory_objs: list[MemoryObj]) -> None:
             for idx, (key, memory_obj) in enumerate(
                 zip(keys, memory_objs, strict=False)
@@ -407,33 +413,48 @@ class MPCacheEngine:
                 if effective_start >= chunk_end:
                     # Entire chunk is within APC range, skip it
                     continue
-                # clamp to [0, chunk_size - 1]
-                skip_in_chunk = max(
+                # Convert token-level skip to block-level skip
+                skip_tokens_in_chunk = max(
                     0, min(effective_start - chunk_start, self.chunk_size - 1)
                 )
-                slot_mapping = slot_mapping_tensor[chunk_start:chunk_end]
-
-                # Copy from CPU to GPU
-                tmp_gpu_buffer_ = gpu_context.get_tmp_gpu_buffer(self.chunk_size)
-                with gpu_context.transfer_lock:
-                    lmcache_memcpy_async_h2d(memory_obj, tmp_gpu_buffer_)
-                    lmc_ops.multi_layer_kv_transfer(
-                        tmp_gpu_buffer_,
-                        gpu_context.kv_pointers,
-                        slot_mapping,
-                        gpu_context.device,
-                        gpu_context.block_size * gpu_context.num_blocks,
-                        lmc_ops.TransferDirection.H2D,
-                        gpu_context.gpu_kv_format_,
+                if skip_tokens_in_chunk % gpu_context.block_size != 0:
+                    logger.error(
+                        "skip_first_n_tokens (%d) is not aligned to block_size (%d), "
+                        "rounding down from %d tokens to %d blocks",
+                        skip_first_n_tokens,
                         gpu_context.block_size,
-                        skip_in_chunk,
+                        skip_tokens_in_chunk,
+                        skip_tokens_in_chunk // gpu_context.block_size,
+                    )
+                skip_blocks_in_chunk = skip_tokens_in_chunk // gpu_context.block_size
+
+                chunk_block_ids_gpu = all_block_ids_gpu[
+                    idx * blocks_per_chunk : (idx + 1) * blocks_per_chunk
+                ]
+
+                # Copy from CPU to tmp GPU buffer, then to paged buffer
+                assert memory_obj.tensor is not None
+                with gpu_context.transfer_lock:
+                    tmp_buffer = gpu_context.get_tmp_gpu_buffer(self.chunk_size)
+                    lmcache_memcpy_async_h2d(memory_obj, tmp_buffer)
+                    lmc_ops.multi_layer_block_kv_transfer(
+                        gpu_context.kv_pointers,
+                        [tmp_buffer.data_ptr()],
+                        chunk_block_ids_gpu,
+                        gpu_context.device,
+                        lmc_ops.TransferDirection.H2D,
+                        gpu_context.shape_desc,
+                        self.chunk_size,
+                        gpu_context.gpu_kv_format_,
+                        skip_blocks_in_chunk,
                     )
 
         with (
             torch.cuda.device(gpu_context.device),
             torch.cuda.stream(gpu_context.high_priority_stream),
         ):
-            slot_mapping_tensor = gpu_context.get_slot_mapping_tensor(gpu_block_ids)
+            # Stage all block_ids to GPU once before the loop
+            all_block_ids_gpu = gpu_context.stage_block_ids(gpu_block_ids)
 
             event = torch.cuda.Event(interprocess=True)
 
