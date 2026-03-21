@@ -4,7 +4,7 @@
 The CLI arg-registration code transitively imports
 ``lmcache.native_storage_ops`` (a compiled C extension).  On CI runners
 without a CUDA build the module is absent, so we insert a lightweight
-stub into ``sys.modules`` before any CLI test touches the import chain.
+stub into ``sys.modules`` for the duration of each CLI test only.
 """
 
 # Standard
@@ -13,18 +13,34 @@ import importlib
 import sys
 import types
 
+# Third Party
+import pytest
 
-def _ensure_native_stub():
-    """Insert a mock for ``lmcache.native_storage_ops`` if it is not built."""
-    mod_name = "lmcache.native_storage_ops"
-    if importlib.util.find_spec(mod_name) is None:
-        stub = types.ModuleType(mod_name)
-        # Provide the symbols that downstream modules import at top level.
-        stub.TTLLock = MagicMock()
-        stub.Bitmap = MagicMock()
-        stub.ParallelPatternMatcher = MagicMock()
-        stub.RangePatternMatcher = MagicMock()
-        sys.modules[mod_name] = stub
+_MOD_NAME = "lmcache.native_storage_ops"
 
 
-_ensure_native_stub()
+@pytest.fixture(autouse=True)
+def _stub_native_storage_ops():
+    """Temporarily stub ``native_storage_ops`` if the extension is not built.
+
+    The stub is removed from ``sys.modules`` after the test so it does not
+    interfere with other test suites that ``importorskip`` the real module.
+    """
+    if importlib.util.find_spec(_MOD_NAME) is not None:
+        # Real extension is available — nothing to do.
+        yield
+        return
+
+    stub = types.ModuleType(_MOD_NAME)
+    stub.TTLLock = MagicMock()
+    stub.Bitmap = MagicMock()
+    stub.ParallelPatternMatcher = MagicMock()
+    stub.RangePatternMatcher = MagicMock()
+
+    sys.modules[_MOD_NAME] = stub
+    try:
+        yield
+    finally:
+        # Only remove if it is still our stub (not replaced by a real import).
+        if sys.modules.get(_MOD_NAME) is stub:
+            del sys.modules[_MOD_NAME]
