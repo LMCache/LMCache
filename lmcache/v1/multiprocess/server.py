@@ -300,8 +300,8 @@ class MPCacheEngine:
 
                 # Copy from paged buffer to tmp GPU buffer, then to CPU
                 assert memory_obj.tensor is not None
+                tmp_buffer = gpu_context.get_tmp_gpu_buffer(self.chunk_size)
                 with gpu_context.transfer_lock:
-                    tmp_buffer = gpu_context.get_tmp_gpu_buffer(self.chunk_size)
                     lmc_ops.multi_layer_block_kv_transfer(
                         gpu_context.kv_pointers,
                         [tmp_buffer.data_ptr()],
@@ -434,8 +434,8 @@ class MPCacheEngine:
 
                 # Copy from CPU to tmp GPU buffer, then to paged buffer
                 assert memory_obj.tensor is not None
+                tmp_buffer = gpu_context.get_tmp_gpu_buffer(self.chunk_size)
                 with gpu_context.transfer_lock:
-                    tmp_buffer = gpu_context.get_tmp_gpu_buffer(self.chunk_size)
                     lmcache_memcpy_async_h2d(memory_obj, tmp_buffer)
                     lmc_ops.multi_layer_block_kv_transfer(
                         gpu_context.kv_pointers,
