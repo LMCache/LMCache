@@ -219,10 +219,11 @@ def call_block_kernel(
     paged_buffer_ptrs_tensor = torch.tensor(ptrs, dtype=torch.int64, device=device)
     lmcache_objects_ptrs = [m.data_ptr() for m in mem_objects]
 
+    block_ids_gpu = torch.tensor(block_ids, dtype=torch.int64, device=device)
     lmc_ops.multi_layer_block_kv_transfer(
         paged_buffer_ptrs_tensor,
         lmcache_objects_ptrs,
-        block_ids,
+        block_ids_gpu,
         device,
         direction,
         shape_desc,
