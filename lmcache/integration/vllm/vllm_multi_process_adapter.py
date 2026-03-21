@@ -17,6 +17,7 @@ from lmcache.v1.multiprocess.custom_types import (
     CudaIPCWrapper,
     IPCCacheEngineKey,
     KVCache,
+    LayoutHints,
 )
 from lmcache.v1.multiprocess.mq import MessageQueueClient, MessagingFuture
 from lmcache.v1.multiprocess.protocol import RequestType, get_response_class
@@ -571,7 +572,7 @@ class LMCacheMPWorkerAdapter:
         logger.info("Registering kv caches")
 
         # give a layout hint (for HND vs NHD) to the lmcache server
-        layout_hints: dict[str, str] = {}
+        layout_hints: LayoutHints = {}
         kv_layout = try_get_vllm_kv_cache_layout()
         if kv_layout is not None:
             layout_hints["kv_layout"] = kv_layout

@@ -32,6 +32,7 @@ from lmcache.v1.gpu_connector.utils import (
 )
 from lmcache.v1.multiprocess.custom_types import (
     KVCache,
+    LayoutHints,
 )
 
 logger = init_logger(__name__)
@@ -60,7 +61,7 @@ class GPUCacheContext:
         self,
         kv_caches: KVCache,
         lmcache_chunk_size: int = 256,
-        layout_hints: dict[str, str] | None = None,
+        layout_hints: LayoutHints | None = None,
     ):
         self.kv_caches_ = unwrap_kv_cache_tensors(kv_caches)
         self.device_ = self.kv_caches_[0].device

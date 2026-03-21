@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from typing import TYPE_CHECKING, Any, List, Tuple, overload
+from typing import TYPE_CHECKING, Any, List, Literal, Tuple, overload
 
 # Third Party
 import torch
@@ -13,6 +13,7 @@ from lmcache.v1.config import LMCacheEngineConfig
 if TYPE_CHECKING:
     # First Party
     from lmcache.v1.gpu_connector.gpu_connectors import GPUConnectorInterface
+    from lmcache.v1.multiprocess.custom_types import LayoutHints
 
 if torch.cuda.is_available():
     # First Party
@@ -26,7 +27,7 @@ _ATTRIBUTE_NOT_EXIST_ERROR = "trying to access an attribute of the GPU KV Cache 
 "A misalignment with the GPUKVFormat must be resolved"
 
 
-def try_get_vllm_kv_cache_layout() -> str | None:
+def try_get_vllm_kv_cache_layout() -> Literal["NHD", "HND"] | None:
     """Try to query the KV cache layout from vLLM at runtime.
 
     Returns ``"NHD"`` or ``"HND"`` if vLLM is available and the layout
@@ -306,7 +307,7 @@ def _list_depth_tensor_dim(kv_caches: Any) -> Tuple[int, int]:
 def discover_gpu_kv_format(
     kv_caches: Any,
     serving_engine: EngineType,
-    layout_hints: dict[str, str] | None = None,
+    layout_hints: "LayoutHints | None" = None,
 ) -> "lmc_ops.GPUKVFormat":
     """
     Discover the GPU KV Cache Format from the kv_caches.
@@ -320,9 +321,7 @@ def discover_gpu_kv_format(
     Args:
         kv_caches: The KV cache tensors (possibly nested lists of tensors).
         serving_engine: Which serving engine produced the caches.
-        layout_hints: Engine-provided hints dict (e.g.
-            ``{"kv_layout": "HND"}``).  Each serving-engine branch
-            extracts the keys it understands.
+        layout_hints: See :class:`~lmcache.v1.multiprocess.custom_types.LayoutHints`.
 
     Please see csrc/mem_kernels.cuh for the naming schema of the GPUKVFormat.
     """

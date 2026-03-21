@@ -26,6 +26,7 @@ from lmcache.v1.gpu_connector.utils import (
 from lmcache.v1.memory_management import GPUMemoryAllocator  # noqa: E501
 from lmcache.v1.memory_management import MemoryFormat, MemoryObj
 from lmcache.v1.metadata import LMCacheMetadata
+from lmcache.v1.multiprocess.custom_types import LayoutHints
 
 if torch.cuda.is_available():
     # First Party
@@ -34,9 +35,9 @@ if torch.cuda.is_available():
 logger = init_logger(__name__)
 
 
-def _vllm_layout_hints() -> dict[str, str]:
+def _vllm_layout_hints() -> LayoutHints:
     """Build layout_hints dict by querying vLLM at runtime."""
-    hints: dict[str, str] = {}
+    hints: LayoutHints = {}
     kv_layout = try_get_vllm_kv_cache_layout()
     if kv_layout is not None:
         hints["kv_layout"] = kv_layout

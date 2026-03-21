@@ -55,6 +55,7 @@ from lmcache.v1.multiprocess.config import (
 from lmcache.v1.multiprocess.custom_types import (
     IPCCacheEngineKey,
     KVCache,
+    LayoutHints,
 )
 from lmcache.v1.multiprocess.gpu_context import (
     GPUCacheContext,
@@ -183,7 +184,7 @@ class MPCacheEngine:
         kv_caches: KVCache,
         model_name: str,
         world_size: int,
-        layout_hints: dict,
+        layout_hints: LayoutHints,
     ) -> None:
         """
         Registers the KV cache tensors for a given GPU instance ID.
@@ -193,10 +194,8 @@ class MPCacheEngine:
             kv_caches (KVCache): The KV cache tensor wrappers from vLLM.
             model_name (str): The name of the model associated with this KV cache.
             world_size (int): The world size associated with this KV cache.
-            layout_hints: Engine-provided hints (e.g.
-                ``{"kv_layout": "HND"}``).  Forwarded to
-                :class:`GPUCacheContext` so the server can detect the GPU KV
-                format without importing the serving engine.
+            layout_hints: See :class:`LayoutHints`.  Forwarded to
+                :class:`GPUCacheContext` for GPU KV format detection.
         """
         gpu_context = GPUCacheContext(
             kv_caches, self.chunk_size, layout_hints=layout_hints
