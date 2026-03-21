@@ -236,16 +236,19 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
         idx = self.device.index
         if idx in self.kv_cache_pointers_on_gpu:
             return self.kv_cache_pointers_on_gpu[idx]
+
+        # contiguous before pointer capture or format discovery
+        layout_hints = _vllm_layout_hints()
+        kv_caches = ensure_contiguous_kv_caches(
+            kv_caches, kv_layout=layout_hints.get("kv_layout")
+        )
+
         self.kv_cache_pointers.numpy()[:] = [t.data_ptr() for t in kv_caches]
         self.kv_cache_pointers_on_gpu[idx] = torch.empty(
             self.num_layers, dtype=torch.int64, device=self.device
         )
         self.kv_cache_pointers_on_gpu[idx].copy_(self.kv_cache_pointers)
 
-        layout_hints = _vllm_layout_hints()
-        kv_caches = ensure_contiguous_kv_caches(
-            kv_caches, kv_layout=layout_hints.get("kv_layout")
-        )
         self.gpu_kv_format = discover_gpu_kv_format(
             kv_caches, EngineType.VLLM, layout_hints=layout_hints
         )
@@ -446,6 +449,13 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
         if self.init:
             return
         assert self.metadata.kv_layer_groups_manager.kv_layer_groups
+
+        # permute to contiguous before capturing pointers or doing format discovery
+        layout_hints = _vllm_layout_hints()
+        self.kvcaches = ensure_contiguous_kv_caches(
+            self.kvcaches, kv_layout=layout_hints.get("kv_layout")
+        )
+
         if self.use_gpu:
             # init tmp buffer
             tmp_buf_shapes = self.metadata.get_shapes(self.chunk_size)
@@ -473,17 +483,13 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
             kv_cache_pointers_on_gpu.copy_(kv_cache_pointers)
             self.group_kv_cache_pointers_on_gpu.append(kv_cache_pointers_on_gpu)
 
-        layout_hints = _vllm_layout_hints()
-        kv_caches = ensure_contiguous_kv_caches(
-            self.kvcaches, kv_layout=layout_hints.get("kv_layout")
-        )
         self.gpu_kv_format = discover_gpu_kv_format(
-            kv_caches, EngineType.VLLM, layout_hints=layout_hints
+            self.kvcaches, EngineType.VLLM, layout_hints=layout_hints
         )
-        self.num_blocks = get_num_blocks(kv_caches, self.gpu_kv_format)
-        self.block_size = get_block_size(kv_caches, self.gpu_kv_format)
+        self.num_blocks = get_num_blocks(self.kvcaches, self.gpu_kv_format)
+        self.block_size = get_block_size(self.kvcaches, self.gpu_kv_format)
         self.page_buffer_size = self.num_blocks * self.block_size
-        self.head_size = get_head_size(kv_caches, self.gpu_kv_format)
+        self.head_size = get_head_size(self.kvcaches, self.gpu_kv_format)
 
         self.init = True
         logger.info("init kv cache pointers success in VLLMPagedMemGPUConnectorV3")
