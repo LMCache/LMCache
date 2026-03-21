@@ -44,8 +44,7 @@ Available Commands
      - Example command that outputs fake metrics. Useful for testing the CLI
        framework and as a reference for new commands.
    * - ``server``
-     - Launch the LMCache server (ZMQ + HTTP). Replaces
-       ``python -m lmcache.v1.multiprocess.http_server``.
+     - Launch the LMCache server (ZMQ + HTTP).
 
 
 Metrics Output
