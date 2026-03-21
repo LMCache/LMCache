@@ -42,6 +42,22 @@ __host__ __device__ __forceinline__ bool is_hnd(
          gpu_kv_format == GPUKVFormat::NL_X_NB_TWO_NH_BS_HS;  // flash infer HND
 }
 
+// All paged (non-MLA) formats rely on block_size for offset computation.
+inline void check_block_size(const GPUKVFormat gpu_kv_format,
+                             const int block_size) {
+  TORCH_CHECK(is_mla(gpu_kv_format) || block_size > 0,
+              "block_size is required (must be > 0) for GPUKVFormat ",
+              static_cast<int>(gpu_kv_format));
+}
+
+// HND formats additionally need head_size to decompose scalar offsets.
+inline void check_head_size(const GPUKVFormat gpu_kv_format,
+                            const int head_size) {
+  TORCH_CHECK(!is_hnd(gpu_kv_format) || head_size > 0,
+              "head_size is required (must be > 0) for GPUKVFormat ",
+              static_cast<int>(gpu_kv_format));
+}
+
 template <typename scalar_t>
 __global__ void load_and_reshape_flash_kernel(
     scalar_t* __restrict__ key_value,  // [num_tokens, num_heads, head_size]
@@ -540,6 +556,9 @@ void multi_layer_kv_transfer_templated(
   // to match scalars_per_token (num_xwords) which is also in xword units.
   int head_size_xword = head_size > 0 ? head_size / elements_per_xword : 0;
 
+  lmc::check_block_size(gpu_kv_format, block_size);
+  lmc::check_head_size(gpu_kv_format, head_size_xword);
+
   int k_or_v_size = lmc::is_mla(gpu_kv_format) ? 1 : 2;
 
   dim3 grid(num_transfer_tokens, num_layers, k_or_v_size);
@@ -790,6 +809,9 @@ void single_layer_kv_transfer(
     head_size_in_64bit = vllm_key_value_cache.size(4) / elements_per_entry;
     block_size = vllm_key_value_cache.size(2);
   }
+
+  lmc::check_block_size(gpu_kv_format, block_size);
+  lmc::check_head_size(gpu_kv_format, head_size_in_64bit);
 
   int lmc_stride;
   int lmc_value_offset;
