@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from typing import TYPE_CHECKING, Any, List, Tuple
+from typing import TYPE_CHECKING, Any, List, Tuple, overload
 
 # Third Party
 import torch
@@ -76,6 +76,77 @@ def permute_kv_caches_to_contiguous(
     The returned list shares the same underlying storage as the input.
     """
     return [permute_to_contiguous(t) for t in kv_caches]
+
+
+def assert_contiguous(tensor: torch.Tensor) -> None:
+    """Assert that a tensor has a contiguous physical layout with zero offset.
+
+    LMCache transfer kernels assume logical and physical views match
+    for coalesced memory accesses. Do NOT blindly call ``.contiguous()``
+    or ``.permute()`` to fix failures here — identify the root cause.
+    """
+    assert tensor.storage_offset() == 0, (
+        f"expected storage_offset 0, got {tensor.storage_offset()}"
+    )
+    assert tensor.is_contiguous(), "tensor is not contiguous"
+
+
+def any_non_contiguous(kv_caches: dict[str, torch.Tensor] | List[torch.Tensor]) -> bool:
+    """Return True if any tensor in *kv_caches* is non-contiguous."""
+    tensors = kv_caches.values() if isinstance(kv_caches, dict) else kv_caches
+    return not all(t.is_contiguous() for t in tensors)
+
+
+@overload
+def ensure_contiguous_kv_caches(
+    kv_caches: dict[str, torch.Tensor],
+    kv_layout: str | None = None,
+) -> dict[str, torch.Tensor]: ...
+
+
+@overload
+def ensure_contiguous_kv_caches(
+    kv_caches: List[torch.Tensor],
+    kv_layout: str | None = None,
+) -> List[torch.Tensor]: ...
+
+
+def ensure_contiguous_kv_caches(
+    kv_caches: dict[str, torch.Tensor] | List[torch.Tensor],
+    kv_layout: str | None = None,
+) -> dict[str, torch.Tensor] | List[torch.Tensor]:
+    """Permute non-contiguous KV caches to contiguous physical shape.
+
+    LMCache assumes tensors have matching logical and physical views.
+    Known reasons for non-contiguity: HND format from vLLM.
+
+    Accepts both ``dict`` and ``list`` forms.
+    Returns *kv_caches* unchanged if already contiguous.
+    """
+    if not any_non_contiguous(kv_caches):
+        return kv_caches
+
+    if isinstance(kv_caches, dict):
+        result: dict[str, torch.Tensor] | List[torch.Tensor] = dict(
+            zip(
+                kv_caches.keys(),
+                permute_kv_caches_to_contiguous(list(kv_caches.values())),
+                strict=False,
+            )
+        )
+    else:
+        result = permute_kv_caches_to_contiguous(kv_caches)
+
+    if kv_layout == "HND":
+        logger.info("Permuted HND tensors to contiguous physical shape")
+    else:
+        logger.warning(
+            "Non-contiguous KV tensors detected with layout=%s; "
+            "permuted to contiguous. Please identify the underlying reason.",
+            kv_layout,
+        )
+
+    return result
 
 
 def need_gpu_interm_buffer(lmcache_config: LMCacheEngineConfig):
@@ -232,6 +303,9 @@ def discover_gpu_kv_format(
     """
     Discover the GPU KV Cache Format from the kv_caches.
 
+    KEY: the logical view and physical views of the kv_caches should be made consistent
+    BEFORE format discovery
+
     The logic is that "external" layers are lists and there is one tensor internally.
     We "unwrap" layers until we find the tensor.
 
@@ -254,6 +328,8 @@ def discover_gpu_kv_format(
         list_dims.append(len(ptr))
         ptr = ptr[0]
     # ptr is now the tensor
+    assert_contiguous(ptr)
+
     tensor_dims = list(ptr.shape)
     dims_str = (
         "".join(f"[{d}]" for d in list_dims) + f"[{', '.join(map(str, tensor_dims))}]"

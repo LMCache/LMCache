@@ -14,14 +14,13 @@ from lmcache.v1.compute.blend.utils import LMCBlenderBuilder
 from lmcache.v1.gpu_connector.utils import (
     assert_is_vllm_flash_attn_or_flash_infer,
     discover_gpu_kv_format,
+    ensure_contiguous_kv_caches,
     get_block_size,
     get_elements_per_layer,
     get_head_size,
     get_num_blocks,
     get_page_buffer_size,
     get_tokens_per_layer,
-    is_hnd,
-    permute_kv_caches_to_contiguous,
     try_get_vllm_kv_cache_layout,
 )
 from lmcache.v1.memory_management import GPUMemoryAllocator  # noqa: E501
@@ -243,11 +242,12 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
         self.kv_cache_pointers_on_gpu[idx].copy_(self.kv_cache_pointers)
 
         layout_hints = _vllm_layout_hints()
+        kv_caches = ensure_contiguous_kv_caches(
+            kv_caches, kv_layout=layout_hints.get("kv_layout")
+        )
         self.gpu_kv_format = discover_gpu_kv_format(
             kv_caches, EngineType.VLLM, layout_hints=layout_hints
         )
-        if is_hnd(self.gpu_kv_format):
-            kv_caches = permute_kv_caches_to_contiguous(kv_caches)
         self.num_blocks = get_num_blocks(kv_caches, self.gpu_kv_format)
         self.block_size = get_block_size(kv_caches, self.gpu_kv_format)
         self.page_buffer_size = self.num_blocks * self.block_size
@@ -473,13 +473,11 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
             self.group_kv_cache_pointers_on_gpu.append(kv_cache_pointers_on_gpu)
 
         layout_hints = _vllm_layout_hints()
-        self.gpu_kv_format = discover_gpu_kv_format(
-            self.kvcaches, EngineType.VLLM, layout_hints=layout_hints
+        kv_caches = ensure_contiguous_kv_caches(
+            self.kvcaches, kv_layout=layout_hints.get("kv_layout")
         )
-        kv_caches = (
-            permute_kv_caches_to_contiguous(self.kvcaches)
-            if is_hnd(self.gpu_kv_format)
-            else self.kvcaches
+        self.gpu_kv_format = discover_gpu_kv_format(
+            kv_caches, EngineType.VLLM, layout_hints=layout_hints
         )
         self.num_blocks = get_num_blocks(kv_caches, self.gpu_kv_format)
         self.block_size = get_block_size(kv_caches, self.gpu_kv_format)
@@ -686,13 +684,14 @@ class VLLMBufferLayerwiseGPUConnector(GPUConnectorInterface):
             # in layerwise mode.
 
             layout_hints = _vllm_layout_hints()
+            kv_caches = ensure_contiguous_kv_caches(
+                kv_caches, kv_layout=layout_hints.get("kv_layout")
+            )
+            self.kvcaches = kv_caches
             self.gpu_kv_format = discover_gpu_kv_format(
                 kv_caches, EngineType.VLLM, layout_hints=layout_hints
             )
             assert_is_vllm_flash_attn_or_flash_infer(self.gpu_kv_format)
-            if is_hnd(self.gpu_kv_format):
-                kv_caches = permute_kv_caches_to_contiguous(kv_caches)
-                self.kvcaches = kv_caches
             self.tokens_per_layer = get_tokens_per_layer(kv_caches, self.gpu_kv_format)
             self.elements_per_layer = get_elements_per_layer(
                 kv_caches, self.gpu_kv_format
@@ -1089,13 +1088,14 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
             # in layerwise mode.
 
             layout_hints = _vllm_layout_hints()
+            kv_caches = ensure_contiguous_kv_caches(
+                kv_caches, kv_layout=layout_hints.get("kv_layout")
+            )
+            self.kvcaches = kv_caches
             self.gpu_kv_format = discover_gpu_kv_format(
                 kv_caches, EngineType.VLLM, layout_hints=layout_hints
             )
             assert_is_vllm_flash_attn_or_flash_infer(self.gpu_kv_format)
-            if is_hnd(self.gpu_kv_format):
-                kv_caches = permute_kv_caches_to_contiguous(kv_caches)
-                self.kvcaches = kv_caches
             self.tokens_per_layer = get_tokens_per_layer(kv_caches, self.gpu_kv_format)
             self.elements_per_layer = get_elements_per_layer(
                 kv_caches, self.gpu_kv_format

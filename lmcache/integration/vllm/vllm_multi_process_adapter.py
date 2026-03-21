@@ -563,7 +563,7 @@ class LMCacheMPWorkerAdapter:
         """
         # First Party
         from lmcache.v1.gpu_connector.utils import (
-            permute_kv_caches_to_contiguous,
+            ensure_contiguous_kv_caches,
             try_get_vllm_kv_cache_layout,
         )
 
@@ -576,16 +576,7 @@ class LMCacheMPWorkerAdapter:
         if kv_layout is not None:
             layout_hints["kv_layout"] = kv_layout
 
-        # Permute HND tensors to contiguous physical shape before IPC
-        # wrapping — CudaIPCWrapper asserts contiguity.
-        if kv_layout == "HND":
-            kv_caches = dict(
-                zip(
-                    kv_caches.keys(),
-                    permute_kv_caches_to_contiguous(list(kv_caches.values())),
-                    strict=False,
-                )
-            )
+        kv_caches = ensure_contiguous_kv_caches(kv_caches, kv_layout=kv_layout)
 
         self.kv_caches = kv_caches
 

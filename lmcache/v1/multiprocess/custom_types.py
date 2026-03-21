@@ -64,14 +64,10 @@ class CudaIPCWrapper:
         return device_index
 
     def __init__(self, tensor: torch.Tensor):
-        # lmcache gpu registration should force all logical views to match
-        # physical views (i.e. contiguity)
-        # this is important for lmcache transfer kernels where we want thread
-        # blocks to have coalesced memory accesses
-        # do NOT blindly call .contiguous() nor .permute()
-        # we WANT to fail here when our assumptions fail
-        assert tensor.storage_offset() == 0
-        assert tensor.is_contiguous()
+        # First Party
+        from lmcache.v1.gpu_connector.utils import assert_contiguous
+
+        assert_contiguous(tensor)
 
         storage = tensor.untyped_storage()
         handle = storage._share_cuda_()
