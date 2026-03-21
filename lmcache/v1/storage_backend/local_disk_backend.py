@@ -632,4 +632,6 @@ class LocalDiskBackend(StorageBackendInterface):
     def close(self) -> None:
         if self.batched_msg_sender is not None:
             self.batched_msg_sender.close()
+            self.batched_msg_sender = None  # prevent stale sends during cleanup
+        self.batched_remove(list(self.dict.keys()))
         self.disk_worker.close()
