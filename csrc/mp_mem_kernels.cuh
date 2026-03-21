@@ -5,7 +5,6 @@
 #include "mem_kernels.cuh"  // TransferDirection, GPUKVFormat
 
 #include <c10/cuda/CUDAGuard.h>
-#include <unordered_set>
 #include <vector>
 
 struct PageBufferShapeDesc {
@@ -46,7 +45,8 @@ struct MemoryObj4 {
  * @param paged_buffer_ptrs_tensor  GPU int64 tensor of data pointers into
  *                                  vLLM paged buffers (one per tensor)
  * @param lmcache_objects_ptrs      Raw pointers to LMCache memory objects
- * @param block_ids                 Block indices in vLLM paged buffer
+ * @param block_ids                 GPU int64 tensor of block indices in vLLM
+ *                                  paged buffer
  * @param device                    CUDA device of vLLM tensors
  * @param direction                 H2D (LMCache->vLLM) or D2H (vLLM->LMCache)
  * @param shape_desc                Shape descriptor for the paged buffer
@@ -56,7 +56,7 @@ struct MemoryObj4 {
  */
 void multi_layer_block_kv_transfer(
     const torch::Tensor& paged_buffer_ptrs_tensor,
-    std::vector<int64_t> lmcache_objects_ptrs, std::vector<int64_t> block_ids,
+    std::vector<int64_t> lmcache_objects_ptrs, const torch::Tensor& block_ids,
     const torch::Device& device, TransferDirection direction,
     PageBufferShapeDesc shape_desc, int lmcache_chunk_size,
     GPUKVFormat gpu_kv_format, int skip_prefix_n_blocks);
