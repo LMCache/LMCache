@@ -233,8 +233,8 @@ test_pair() {
     export LD_LIBRARY_PATH="${torch_lib}:${LD_LIBRARY_PATH:-}"
 
     # Pick a free GPU before each run.
-    source "${LMCACHE_DIR}/.buildkite/scripts/pick-free-gpu.sh" \
-        "${MIN_FREE_MEM_MB:-10000}" >> "$run_dir/server.log" 2>&1 || die "Failed to pick free GPU"
+    # source "${LMCACHE_DIR}/.buildkite/scripts/pick-free-gpu.sh" \
+    #     "${MIN_FREE_MEM_MB:-10000}" >> "$run_dir/server.log" 2>&1 || die "Failed to pick free GPU"
 
     # 3. Start Server.
     LMCACHE_CHUNK_SIZE=8 vllm serve "$MODEL_ID" --port "$port" --load-format dummy \
