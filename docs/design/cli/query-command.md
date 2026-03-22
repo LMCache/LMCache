@@ -3,8 +3,7 @@
 **Status:** Proposal  |  **Date:** 2026-03-20
 
 ## Goal
-Provide a formal single-shot query interface for both the serving engine and
-KV cache worker, with metrics output. besides normal request query to serving engine, offers the feature to query the detailed KV cache info by the request prompt.
+Provide a formal single-shot query interface for both the serving engine and KV cache worker, with metrics output. besides normal request query to serving engine, offers the feature to query the detailed KV cache info by the request prompt.
  
 
 ---
@@ -22,8 +21,7 @@ can choose `--format terminal` or `--format json`.
 `query` has two second-level targets:
 
 - `query engine`: run one inference request and measure TTFT/TPOT/throughput.
-- `query kvcache`: inspect cache coverage for one prompt (lookup) or run a
-  store-retrieve round-trip with correctness check.
+- `query kvcache`: inspect cache coverage for one prompt (lookup).
 
 This matches the top-level CLI command model in
 [commands.md](commands.md): one verb, different backends.
@@ -67,8 +65,25 @@ subcommands:
 
 ### `query engine`
 
-Send one inference request to an engine HTTP endpoint and report token and
-latency metrics. 
+Send one inference request to an engine HTTP endpoint and report token and latency metrics. 
+
+```bash
+# Single inference query
+$ lmcache query engine --url http://localhost:8000/v1 \
+    --prompt "{ffmpeg} What is the example usage of ffmpeg?" \
+    --max-tokens 128
+
+======== Query Engine Result ==========
+Prompt tokens:                            512
+Output tokens:                            128
+TTFT (ms):                               45.2
+TPOT (ms/token):                          8.1
+Total latency (ms):                    1089.5
+Throughput (tokens/s):                  117.6
+External cache hits:                      256
+=========================================
+```
+
 #### Proposed flags besides native engine query flags
 
 | Flag | Description |
@@ -78,6 +93,8 @@ latency metrics.
 | `--timeout` | Request timeout in seconds (default: 30) |
 | `--corpus name=path` | Register custom corpus template |
 
+
+
 #### Output metrics
 
 - `prompt_tokens`
@@ -86,6 +103,9 @@ latency metrics.
 - `tpot_ms_per_token`
 - `total_latency_ms`
 - `throughput_tokens_per_s`
+- `external_num_cache_hit`
+
+ 
 
 ### `query kvcache`
 
@@ -102,25 +122,12 @@ $ lmcache query kvcache --url http://localhost:5555 \
 ======== Query KV Cache Result ==========
 Prompt tokens:                           8192
 Cached chunks:                       30/32 (93.8%)
-Cache locations:               [cpu=12, disk=0, s3=0]
+Cache locations:               [cpu=12, disk=0, ...]
 Cached tokens:                         7680/8192
 Cache status:                       HIT (partial)
 =========================================
 ```
-
-2. **Round-trip mode (`--round-trip`):** measure store/retrieve latency for a round-trip operation, then verify checksum integrity.
-
-
-```bash
-# Round-trip mode
-$ lmcache query kvcache --url http://localhost:5555 --round-trip
-
-==== Query KV Cache Result (round-trip) ====
-Store latency (ms):                      1.23
-Retrieve latency (ms):                   0.87
-Checksum:                                OK
-============================================
-```
+ 
 
 #### Proposed flags
 
@@ -129,8 +136,6 @@ Checksum:                                OK
 | `--url` | KV cache HTTP endpoint (`http://host:port`) |
 | `--prompt` | Prompt for tokenization + lookup |
 | `--model` | Tokenizer/model used to derive token IDs |
-| `--round-trip` | Switch to store-retrieve verification mode |
-| `--chunk-size` | Override chunk size for synthetic round-trip payload |
 | `--corpus name=path` | Register custom corpus template |
 
 #### Output metrics (lookup mode)
@@ -140,15 +145,9 @@ Checksum:                                OK
 - `cached_chunks_total`
 - `cached_chunk_location`
 - `cached_tokens_hit`
-
 - `cached_tokens_total`
 - `cache_status` (`HIT`, `MISS`, `HIT (partial)`)
 
-#### Output metrics (round-trip mode)
-
-- `store_latency_ms`
-- `retrieve_latency_ms`
-- `checksum_status`
 
 ---
 
@@ -165,13 +164,7 @@ No new dependencies required: use stdlib `urllib.request` and existing helpers.
 
 All `lmcache query kvcache` CLI operations go through HTTP, using either the
 per-instance HTTP server or the controller HTTP server.
-
-ZMQ remains reserved for performance-critical data-path communication between
-the inference engine and LMCache (store, retrieve, prefetch), not for CLI
-query operations.
-
-Some operations (for example, end-session) are currently implemented only over
-ZMQ. These require new HTTP endpoints before they can be supported by the CLI.
+ 
 
 ---
 
@@ -182,8 +175,6 @@ ZMQ. These require new HTTP endpoints before they can be supported by the CLI.
   `lmcache/cli/commands/query.py`.
 - **Shared metrics integration:** always construct output via
   `self.create_metrics(title, args, width=48)` to honor `--format` and `--output`.
-- **Prompt expansion:** reuse shared corpus expansion helper used by
-  `bench engine`/other prompt-capable commands.
 - **Transport split by target:**
   - `engine` path uses HTTP client helper.
   - `kvcache` path uses HTTP client helper.
@@ -198,6 +189,5 @@ ZMQ. These require new HTTP endpoints before they can be supported by the CLI.
 |-------|------|
 | **1a** | `query engine` with prompt, max-tokens, TTFT/TPOT/throughput metrics |
 | **1b** | `query kvcache` lookup mode (prompt tokenization + cache coverage) |
-| **1c** | `query kvcache --round-trip` with checksum verification metrics |
 | **future** | richer query diagnostics (per-chunk detail) |
 
