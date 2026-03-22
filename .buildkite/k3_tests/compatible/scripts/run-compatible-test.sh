@@ -238,6 +238,7 @@ test_pair() {
 
     # 3. Start Server.
     LMCACHE_CHUNK_SIZE=8 vllm serve "$MODEL_ID" --port "$port" --load-format dummy \
+        --gpu-memory-utilization 0.1 \
         --kv-transfer-config '{"kv_connector":"LMCacheConnectorV1", "kv_role":"kv_both"}' \
         >> "$run_dir/server.log" 2>&1 &
     local server_pid=$!
