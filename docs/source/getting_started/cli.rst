@@ -40,6 +40,8 @@ Available Commands
    * - ``describe``
      - Show detailed status of a running LMCache service, including cache
        health, L1 storage, registered models, and L2 adapters.
+   * - ``query``
+     - Single-shot query interface for both the serving engine and KV cache worker.
    * - ``mock``
      - Example command that outputs fake metrics. Useful for testing the CLI
        framework and as a reference for new commands.
@@ -189,6 +191,35 @@ The ``gpu_kv_shape`` field uses short names from the ``GPUKVFormat`` enum:
    * - PBS
      - page_buffer_size (NB × BS)
 
+``query``
+---------
+
+The ``query engine`` subcommand  sends a single request to the engine API and reports metrics. 
+``--prompt`` supports placeholder expansion into actual text.
+
+.. code-block:: bash
+
+   lmcache query engine --url http://localhost:8000/v1 \
+  --prompt "{ctx}  What is the example usage of ctx?" \
+  --corpus ctx=path_to_file \
+  --max-tokens 128
+
+.. code-block:: text
+
+    ========== Query Engine Result ==========
+    Prompt tokens:                         38
+      Corpus 'ctx':                     28
+      Query:                               10
+    Output tokens:                        105
+    Model:                  facebook/opt-125m
+    ------------ Latency Metrics ------------
+    TTFT (ms):                          10.10
+    TPOT (ms/token):                     1.34
+    Total latency (ms):                149.46
+    Throughput (tokens/s):             702.55
+    =========================================
+
+ 
 
 Metrics Output
 --------------

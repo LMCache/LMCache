@@ -22,10 +22,7 @@ can choose `--format terminal` or `--format json`.
 
 - `query engine`: run one inference request and measure TTFT/TPOT/throughput.
 - `query kvcache`: inspect cache coverage for one prompt (lookup).
-
-This matches the top-level CLI command model in
-[commands.md](commands.md): one verb, different backends.
-
+ 
 ### Script-friendly output and behavior
 
 - `--format json` produces machine-readable metrics.
@@ -69,18 +66,23 @@ Send one inference request to an engine HTTP endpoint and report token and laten
 
 ```bash
 # Single inference query
-$ lmcache query engine --url http://localhost:8000/v1 \
-    --prompt "{ffmpeg} What is the example usage of ffmpeg?" \
-    --max-tokens 128
-
-======== Query Engine Result ==========
-Prompt tokens:                            512
-Output tokens:                            128
-TTFT (ms):                               45.2
-TPOT (ms/token):                          8.1
-Total latency (ms):                    1089.5
-Throughput (tokens/s):                  117.6
-External cache hits:                      256
+$ lmcache query engine --url http://localhost:8008/v1 \
+  --prompt "{ctx} {ffmpeg}   What is the example usage of ffmpeg,ctx?" \
+  --corpus ctx=/home/weishu/lmc/test-query/man-bash.txt \
+  --format terminal  --max-tokens 128
+   
+========== Query Engine Result ==========
+Prompt tokens:                        234
+  Corpus 'ctx':                       193
+  Corpus 'ffmpeg':                     28
+  Query:                               13
+Output tokens:                        128
+Model:                  facebook/opt-125m
+------------ Latency Metrics ------------
+TTFT (ms):                           8.53
+TPOT (ms/token):                     1.14
+Total latency (ms):                154.84
+Throughput (tokens/s):             874.88
 =========================================
 ```
 
@@ -96,14 +98,9 @@ External cache hits:                      256
 
 
 #### Output metrics
-
-- `prompt_tokens`
-- `output_tokens`
-- `ttft_ms`
-- `tpot_ms_per_token`
-- `total_latency_ms`
-- `throughput_tokens_per_s`
-- `external_num_cache_hit`
+ 
+- `prompt_tokens`, `output_tokens`, `model`
+- `ttft_ms`, `tpot_ms_per_token`, `total_latency_ms`, `throughput_tokens_per_s`
 
  
 
