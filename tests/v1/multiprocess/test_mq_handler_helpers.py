@@ -7,7 +7,7 @@ and passed between processes during multiprocessing tests.
 """
 
 # First Party
-from lmcache.v1.multiprocess.custom_types import KVCache
+from lmcache.v1.multiprocess.custom_types import KVCache, LayoutHints
 from lmcache.v1.multiprocess.protocol import KeyType
 
 # ==============================================================================
@@ -33,7 +33,7 @@ def register_kv_cache_handler(
     kv_cache: KVCache,
     model_name: str,
     world_size: int,
-    layout_hints: dict,
+    layout_hints: LayoutHints,
 ) -> None:
     """
     Dummy handler for REGISTER_KV_CACHE requests.

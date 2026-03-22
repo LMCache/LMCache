@@ -13,7 +13,11 @@ This module defines the protocol for:
 """
 
 # First Party
-from lmcache.v1.multiprocess.custom_types import IPCCacheEngineKey, KVCache
+from lmcache.v1.multiprocess.custom_types import (
+    IPCCacheEngineKey,
+    KVCache,
+    LayoutHints,
+)
 from lmcache.v1.multiprocess.protocols.base import HandlerType, ProtocolDefinition
 
 # Define request names for this protocol group
@@ -50,7 +54,7 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
         #   - layout_hints: LayoutHints - See custom_types.LayoutHints.
         # Returns: None
         "REGISTER_KV_CACHE": ProtocolDefinition(
-            payload_classes=[int, KVCache, str, int, dict],
+            payload_classes=[int, KVCache, str, int, LayoutHints],
             response_class=None,
             handler_type=HandlerType.SYNC,
         ),

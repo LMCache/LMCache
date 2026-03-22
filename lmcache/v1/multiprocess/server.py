@@ -184,7 +184,7 @@ class MPCacheEngine:
         kv_caches: KVCache,
         model_name: str,
         world_size: int,
-        layout_hints: LayoutHints | None,
+        layout_hints: LayoutHints,
     ) -> None:
         """
         Registers the KV cache tensors for a given GPU instance ID.
@@ -198,7 +198,9 @@ class MPCacheEngine:
                 :class:`GPUCacheContext` for GPU KV format detection.
         """
         gpu_context = GPUCacheContext(
-            kv_caches, self.chunk_size, layout_hints=layout_hints
+            kv_caches,
+            self.chunk_size,
+            layout_hints=layout_hints or None,
         )
         self.gpu_contexts[instance_id] = gpu_context
         self.gpu_context_meta[instance_id] = (model_name, world_size)
