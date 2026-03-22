@@ -19,6 +19,7 @@ ARG PYTHON_VERSION=3.12
 ARG UBUNTU_VERSION
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PATH="/opt/venv/bin:${PATH}"
+ENV LMCACHE_FILTER_TORCH_CUDA_ARCH_LIST=/usr/local/bin/lmcache-filter-torch-cuda-arch-list
 
 # Install Python and other dependencies
 RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
@@ -34,6 +35,28 @@ RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
     && uv venv /opt/venv \
     && . /opt/venv/bin/activate \
     && python3 --version
+
+RUN cat <<'EOF' >/usr/local/bin/lmcache-filter-torch-cuda-arch-list
+#!/bin/sh
+set -eu
+
+printf '%s\n' "${1:-}" | awk '
+BEGIN { first = 1 }
+{
+    for (i = 1; i <= NF; ++i) {
+        if ($i != "7.0" && $i != "7.0+PTX") {
+            if (!first) {
+                printf " "
+            }
+            printf "%s", $i
+            first = 0
+        }
+    }
+}
+END { print "" }'
+EOF
+
+RUN chmod +x "${LMCACHE_FILTER_TORCH_CUDA_ARCH_LIST}"
 
 WORKDIR /workspace
 
@@ -102,7 +125,7 @@ RUN --mount=type=cache,target=/root/.cache/ccache,id=ccache \
     python3 -c 'import torch; print("TORCH=", torch.__version__)' && \
     LM_TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST}" && \
     if [ "$CUDA_MAJOR" -ge 13 ]; then \
-        LM_TORCH_CUDA_ARCH_LIST="$(printf '%s\n' "${TORCH_CUDA_ARCH_LIST}" | awk 'BEGIN { first = 1 } { for (i = 1; i <= NF; ++i) if ($i != "7.0" && $i != "7.0+PTX") { if (!first) printf " "; printf "%s", $i; first = 0 } } END { print "" }')"; \
+        LM_TORCH_CUDA_ARCH_LIST="$(${LMCACHE_FILTER_TORCH_CUDA_ARCH_LIST} "${TORCH_CUDA_ARCH_LIST}")"; \
     fi && \
     TORCH_CUDA_ARCH_LIST="${LM_TORCH_CUDA_ARCH_LIST}" \
         python3 setup.py bdist_wheel --dist-dir=dist_lmcache && \
@@ -138,7 +161,7 @@ RUN . /opt/venv/bin/activate && \
     if [ "$CUDA_MAJOR" -ge 13 ]; then \
         apt-get update -y && \
         apt-get install -y --no-install-recommends ${BUILD_PKGS} && \
-        LM_TORCH_CUDA_ARCH_LIST="$(printf '%s\n' "${TORCH_CUDA_ARCH_LIST}" | awk 'BEGIN { first = 1 } { for (i = 1; i <= NF; ++i) if ($i != "7.0" && $i != "7.0+PTX") { if (!first) printf " "; printf "%s", $i; first = 0 } } END { print "" }')" && \
+        LM_TORCH_CUDA_ARCH_LIST="$(${LMCACHE_FILTER_TORCH_CUDA_ARCH_LIST} "${TORCH_CUDA_ARCH_LIST}")" && \
         TORCH_CUDA_ARCH_LIST="${LM_TORCH_CUDA_ARCH_LIST}" \
             uv pip install . --verbose --no-build-isolation --no-deps && \
         apt-get purge -y ${BUILD_PKGS} && \
@@ -146,7 +169,7 @@ RUN . /opt/venv/bin/activate && \
     else \
         uv pip install lmcache --verbose; \
     fi && \
-    rm -rf /workspace/LMCache /workspace/build.txt dist_lmcache
+    rm -rf /workspace/LMCache /workspace/build.txt
 
 WORKDIR /workspace
 ENTRYPOINT ["/opt/venv/bin/vllm", "serve"]

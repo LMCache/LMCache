@@ -13,6 +13,7 @@ def _section_between(text: str, start_marker: str, end_marker: str) -> str:
 
 
 def test_runtime_dependencies_switch_to_cuda13_packages() -> None:
+    """Verify that CUDA 13 runtime dependencies switch to CUDA 13 packages."""
     dockerfile = DOCKERFILE.read_text()
     runtime_section = _section_between(
         dockerfile,
@@ -27,6 +28,7 @@ def test_runtime_dependencies_switch_to_cuda13_packages() -> None:
 
 
 def test_runtime_dependencies_preserve_cuda12_defaults() -> None:
+    """Verify that the default CUDA 12 path remains present in the runtime section."""
     dockerfile = DOCKERFILE.read_text()
     runtime_section = _section_between(
         dockerfile,
@@ -46,6 +48,7 @@ def test_runtime_dependencies_preserve_cuda12_defaults() -> None:
 
 
 def test_release_path_builds_lmcache_from_source_for_cuda13() -> None:
+    """Verify that the release image builds LMCache from source for CUDA 13."""
     dockerfile = DOCKERFILE.read_text()
     release_section = _section_between(
         dockerfile,
