@@ -6,6 +6,7 @@ from typing import List, Optional, Sequence, Any
 # Third Party
 import torch
 
+BLEND_MODES = ("direct_reuse", "topk", "costream", "vlcache")
 
 @dataclass
 class LMCBlendCommonMetadata:
@@ -16,8 +17,9 @@ class LMCBlendCommonMetadata:
     check_layers: List[int]
     recomp_ratios: Optional[List[float]] = None
     thresholds: Optional[List[float]] = None
-    is_costream: bool = True
+    blend_mode: str = "costream"
     GOP: int = 8
+    vlcache_recompute_ratio: float = 0.05
 
 @dataclass
 class LMCBlendMetadata:
@@ -32,6 +34,8 @@ class LMCBlendMetadata:
     mm_positions: Optional[Sequence[Any]] = None
     selection_effective_len: Optional[int] = None
     is_full_selection: bool = False
+    image_grid_thw: Optional[List[List[int]]] = None
+    input_ids: Optional[List[int]] = None
 
     def clean(self):
         self.imp_indices = None
@@ -41,3 +45,5 @@ class LMCBlendMetadata:
         self.mm_positions = None
         self.selection_effective_len = None
         self.is_full_selection = False
+        self.image_grid_thw = None
+        self.input_ids = None

@@ -86,6 +86,7 @@ class TokenDatabase(metaclass=abc.ABCMeta):
         mask: Optional[torch.Tensor] = None,
         make_key: bool = True,
         request_configs: Optional[dict] = None,
+        skip_last_segment: bool = False,
     ) -> Iterable[ProcessTokensResult]:
         """Process the tokens and return the corresponding cache engine keys.
 
@@ -105,6 +106,11 @@ class TokenDatabase(metaclass=abc.ABCMeta):
             If False, the hash value will be returned instead.
 
         :param Optional[dict] request_configs: The configs of the request.
+
+        :param bool skip_last_segment: If True, the trailing segment (after the
+            final separator) is omitted.  Used by the store path to avoid
+            caching the question-text segment whose positional encoding
+            differs across sliding windows.
 
         :returns: A iterable of tuples with three elements. The first element
             is the start index of the tokens for the key. The second element
@@ -225,6 +231,7 @@ class ChunkedTokenDatabase(TokenDatabase):
         mask: Optional[torch.Tensor] = None,
         make_key: bool = True,
         request_configs: Optional[dict] = None,
+        skip_last_segment: bool = False,
     ) -> Iterable[ProcessTokensResult]:
         """Process the tokens/hashes and return the corresponding cache engine keys.
 
@@ -319,11 +326,19 @@ class SegmentTokenDatabase(TokenDatabase):
         self.sep_tokens = torch.tensor(self.sep_tokens, device="cpu")
         self.sep_len = len(self.sep_tokens)
 
-    def _fast_split_by_subtensor(self, tokens: torch.Tensor) -> Iterable[torch.Tensor]:
-        """Match the `sep_tokens` with sliding windows"""
+    def _fast_split_by_subtensor(
+        self, tokens: torch.Tensor, skip_last: bool = False,
+    ) -> Iterable[torch.Tensor]:
+        """Match the `sep_tokens` with sliding windows.
+
+        When *skip_last* is True the trailing chunk (after the final
+        separator) is omitted.  This prevents caching the question-text
+        segment whose positional encoding differs across sliding windows.
+        """
 
         if self.sep_len == 0 or len(tokens) < self.sep_len:
             yield tokens
+            return
 
         # Unfold into sliding windows
         # shape: (num_tokens-sep_len+1, sep_len)
@@ -333,16 +348,15 @@ class SegmentTokenDatabase(TokenDatabase):
         matches = (
             (windows == self.sep_tokens).all(dim=1).nonzero(as_tuple=True)[0].tolist()
         )
-        # logger.info(f"Found separator matches at indices: {matches}")
 
         # Split based on matches
         start = 0
         for idx in matches:
             yield tokens[start:idx]
             start = idx + self.sep_len
-            # logger.info(f"Splitting tokens at index {idx}, next start is {start}")  
-        # yield last chunk
-        yield tokens[start:]
+        # Yield trailing chunk only when skip_last is False
+        if not skip_last:
+            yield tokens[start:]
 
     def process_tokens(
         self,
@@ -352,6 +366,7 @@ class SegmentTokenDatabase(TokenDatabase):
         mask: Optional[torch.Tensor] = None,
         make_key: bool = True,
         request_configs: Optional[dict] = None,
+        skip_last_segment: bool = False,
     ) -> Iterable[ProcessTokensResult]:
         """Process the tokens and return the corresponding cache engine keys.
 
@@ -371,6 +386,11 @@ class SegmentTokenDatabase(TokenDatabase):
             If False, the hash value will be returned instead.
 
         :param Optional[dict] request_configs: The configs of the request.
+
+        :param bool skip_last_segment: If True, the trailing segment (after the
+            final separator) is omitted.  Used by the store path to avoid
+            caching the question-text segment whose positional encoding
+            differs across sliding windows.
 
         :returns: A iterable of tuples with three elements. The first element
             is the start index of the tokens for the key. The second element
@@ -397,7 +417,9 @@ class SegmentTokenDatabase(TokenDatabase):
                 "be less than the length of tokens."
             )
 
-            token_chunks = self._fast_split_by_subtensor(tokens)
+            token_chunks = self._fast_split_by_subtensor(
+                tokens, skip_last=skip_last_segment,
+            )
             start_idx = 0
             for idx, token_chunk in enumerate(token_chunks):
                 token_chunk_len = len(token_chunk)

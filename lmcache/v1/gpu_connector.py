@@ -21,6 +21,68 @@ if torch.cuda.is_available():
 logger = init_logger(__name__)
 
 
+def _rotate_half(x: torch.Tensor) -> torch.Tensor:
+    """Rotary embedding helper: [-x2, x1, -x4, x3, ...]"""
+    x1 = x[..., : x.shape[-1] // 2]
+    x2 = x[..., x.shape[-1] // 2 :]
+    return torch.cat((-x2, x1), dim=-1)
+
+
+def _mrope_delta_rotate_k(
+    k: torch.Tensor,
+    old_positions: torch.Tensor,
+    new_positions: torch.Tensor,
+    cos_sin_cache: torch.Tensor,
+    head_size: int,
+) -> torch.Tensor:
+    """Apply DELTA rotation to cached K for mRoPE models.
+
+    Unlike the fused kernel (which un-rotates from old_pos then re-rotates to
+    new_pos), this function directly applies rotation by (new_pos - old_pos).
+    For mRoPE, the fused un-rotate/re-rotate approach fails because the
+    per-token 1D position doesn't match the per-section mRoPE positions used
+    during original encoding.  However, the per-axis mRoPE base offsets shift
+    uniformly, so a direct delta rotation is correct.
+
+    k: (num_tokens, num_kv_heads * head_size)
+    old_positions, new_positions: (num_tokens,) -- 1D sequential positions
+    cos_sin_cache: (max_position, rotary_dim) from model's RotaryEmbedding
+    head_size: per-head dimension
+    """
+    num_tokens = k.shape[0]
+    num_kv_heads = k.shape[1] // head_size
+    rotary_dim = cos_sin_cache.shape[-1]
+    rot_dim_half = rotary_dim // 2
+
+    delta = new_positions - old_positions  # (T,)
+    abs_delta = delta.abs().clamp(max=cos_sin_cache.shape[0] - 1)
+
+    cs = cos_sin_cache[abs_delta]  # (T, rotary_dim)
+    cos_d = cs[:, :rot_dim_half]
+    sin_d = cs[:, rot_dim_half:]
+
+    neg_mask = (delta < 0).unsqueeze(-1)
+    sin_d = torch.where(neg_mask, -sin_d, sin_d)
+
+    cos_full = torch.cat([cos_d, cos_d], dim=-1)  # (T, rotary_dim)
+    sin_full = torch.cat([sin_d, sin_d], dim=-1)
+
+    k_view = k.view(num_tokens, num_kv_heads, head_size)
+    k_rot = k_view[..., :rotary_dim]
+    k_pass = k_view[..., rotary_dim:]
+
+    cos_e = cos_full.unsqueeze(1)
+    sin_e = sin_full.unsqueeze(1)
+
+    k_rotated = k_rot * cos_e + _rotate_half(k_rot) * sin_e
+
+    if k_pass.shape[-1] > 0:
+        out = torch.cat([k_rotated, k_pass], dim=-1)
+    else:
+        out = k_rotated
+    return out.view(num_tokens, -1)
+
+
 class GPUConnectorInterface(metaclass=abc.ABCMeta):
     @abc.abstractmethod
     def to_gpu(self, memory_obj: MemoryObj, start: int, end: int, **kwargs):
@@ -470,7 +532,11 @@ class VLLMBufferLayerwiseGPUConnector(GPUConnectorInterface):
             # TODO(Jiayi): Make this more elegant
             self.lmc_model = LMCBlenderBuilder.get(ENGINE_NAME).layerwise_model
             self.fused_rotary_emb = self.lmc_model.fused_rotary_emb
-            self.lmc_model.rope_cache_to_device(self.device)
+            self._is_mrope = getattr(self.lmc_model, "is_mrope", False)
+            if self._is_mrope:
+                logger.info("mRoPE model detected: will use mRoPE-aware delta rotation instead of 1D fused kernel.")
+            elif self.fused_rotary_emb is not None:
+                self.lmc_model.rope_cache_to_device(self.device)
 
         slot_mapping: torch.Tensor = kwargs["slot_mapping"]
 
@@ -561,11 +627,21 @@ class VLLMBufferLayerwiseGPUConnector(GPUConnectorInterface):
                 if self.cache_positions:
                     assert compute_gpu_buffer_obj.tensor is not None
 
-                    compute_gpu_buffer_obj.tensor[0] = self.fused_rotary_emb(
-                        old_positions_full,
-                        new_positions_full,
-                        compute_gpu_buffer_obj.tensor[0],
-                    )
+                    if getattr(self, "_is_mrope", False):
+                        rotary_emb = self.lmc_model.layers[0].self_attn.rotary_emb
+                        compute_gpu_buffer_obj.tensor[0] = _mrope_delta_rotate_k(
+                            compute_gpu_buffer_obj.tensor[0],
+                            old_positions_full,
+                            new_positions_full,
+                            rotary_emb.cos_sin_cache,
+                            rotary_emb.head_size,
+                        )
+                    else:
+                        compute_gpu_buffer_obj.tensor[0] = self.fused_rotary_emb(
+                            old_positions_full,
+                            new_positions_full,
+                            compute_gpu_buffer_obj.tensor[0],
+                        )
 
                 # gap zeroing after RoPE
                 if self.current_gap_positions.numel():

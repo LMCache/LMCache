@@ -221,3 +221,31 @@ def extract_mm_features(
             return (request.mm_hashes, request.mm_positions)
     else:
         return ([], [])
+
+
+def extract_image_grid_thw(request) -> list:
+    """Extract image_grid_thw from mm_features for M-RoPE position computation.
+
+    Each multimodal feature may contain ``image_grid_thw`` (shape [N, 3])
+    representing the temporal/height/width grid of the processed image(s).
+    Returns a flat list of [t, h, w] entries across all features.
+    """
+    result: list = []
+    mm_features = getattr(request, "mm_features", None)
+    if not mm_features:
+        return result
+    for f in mm_features:
+        data = getattr(f, "data", None)
+        if data is None:
+            continue
+        try:
+            mm_input = data.get_data()
+        except Exception:
+            continue
+        grid = mm_input.get("image_grid_thw")
+        if grid is not None:
+            if hasattr(grid, "tolist"):
+                result.extend(grid.tolist())
+            elif isinstance(grid, (list, tuple)):
+                result.extend(grid)
+    return result

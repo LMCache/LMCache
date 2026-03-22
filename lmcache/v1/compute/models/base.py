@@ -110,15 +110,26 @@ class LMCBaseModel(nn.Module, ABC):
         dtype = getattr(rotary, "dtype", torch.get_default_dtype())
         rope_scaling = getattr(rotary, "rope_scaling", None)
 
-        self.fused_rotary_emb = get_fused_rope(
-            head_dim,
-            rotary_dim=head_dim,
-            max_position=max_position_embeddings,
-            base=base,
-            rope_scaling=rope_scaling,
-            is_neox_style=is_neox_style,
-            dtype=dtype,
-        )
+        self.is_mrope = hasattr(rotary, "mrope_section") and rotary.mrope_section is not None
+        self.mrope_section = getattr(rotary, "mrope_section", None)
+
+        if self.is_mrope:
+            logger.info(
+                "Detected mRoPE model (mrope_section=%s). "
+                "Disabling 1D fused RoPE; will use mRoPE-aware position handling.",
+                self.mrope_section,
+            )
+            self.fused_rotary_emb = None
+        else:
+            self.fused_rotary_emb = get_fused_rope(
+                head_dim,
+                rotary_dim=head_dim,
+                max_position=max_position_embeddings,
+                base=base,
+                rope_scaling=rope_scaling,
+                is_neox_style=is_neox_style,
+                dtype=dtype,
+            )
 
         # NOTE(Jiayi): better not to pass the blender in init
         # if we want to make this LMCModel more general.
@@ -179,13 +190,17 @@ class LMCBaseModel(nn.Module, ABC):
         check_layers,
         input_ids: torch.Tensor,
         page_stream=None,
+        inputs_embeds: "Optional[torch.Tensor]" = None,
+        deepstack_input_embeds: "Optional[torch.Tensor]" = None,
         **kwargs,
     ):
         timing = True
         input_ids = input_ids.cuda()
-        
-        # Some integrations allow get_input_embeddings to accept ids directly; keep existing call style
-        hidden_states = self.vllm_model.get_input_embeddings(input_ids)
+
+        if inputs_embeds is not None:
+            hidden_states = inputs_embeds
+        else:
+            hidden_states = self.vllm_model.get_input_embeddings(input_ids)
 
         residual = None
         attn_output = None
@@ -287,12 +302,24 @@ class LMCBaseModel(nn.Module, ABC):
                     ffn_start.record(stream)
                 skip_ffn = bool(getattr(self.blender, "skip_ffn", False))
                 if skip_ffn and bool(getattr(self.blender, "skip_ffn_only_costream", True)):
-                    skip_ffn = bool(getattr(self.blender, "is_costream", False))
+                    skip_ffn = getattr(self.blender, "blend_mode", "") in ("costream",)
                 if skip_ffn:
-                    # Keep shape/flow consistent while skipping the FFN branch.
                     hidden_states = torch.zeros_like(hidden_states)
                 else:
                     hidden_states = layer.mlp(hidden_states)
+
+                # Deepstack injection for Qwen3-VL: add multi-scale features
+                # at early decoder layers.
+                if deepstack_input_embeds is not None:
+                    global_layer_idx = self.start_layer + layer_idx
+                    if deepstack_input_embeds.ndim == 3 and global_layer_idx < deepstack_input_embeds.shape[0]:
+                        ds_slice = deepstack_input_embeds[global_layer_idx]
+                        if residual is not None:
+                            imp_indices = getattr(self.blender.metadata, "imp_indices", None)
+                            if imp_indices is not None and ds_slice.shape[0] != residual.shape[0]:
+                                ds_slice = ds_slice.index_select(0, imp_indices)
+                            if ds_slice.shape[0] == residual.shape[0]:
+                                residual = residual + ds_slice
                 if timing is not None:
                     ffn_end.record(stream)
                     ffn_events = (ffn_start, ffn_end)

@@ -94,6 +94,7 @@ def infer_model_from_vllm(vllm_model, blender, enable_sparse: bool = False):
 
 class VLLMModelTracker:
     _vllm_models: Dict[str, nn.Module] = {}
+    _encoder_caches: Dict[str, dict] = {}
 
     @classmethod
     def register_model(
@@ -111,6 +112,19 @@ class VLLMModelTracker:
             logger.warning(
                 f"vllm model for {instance_id} already registered, doing nothing."
             )
+
+    @classmethod
+    def register_encoder_cache(
+        cls,
+        instance_id: str,
+        encoder_cache: dict,
+    ):
+        cls._encoder_caches[instance_id] = encoder_cache
+        logger.info("Registered encoder_cache for %s", instance_id)
+
+    @classmethod
+    def get_encoder_cache(cls, instance_id: str):
+        return cls._encoder_caches.get(instance_id)
 
     @classmethod
     def get_model(

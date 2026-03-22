@@ -8,7 +8,7 @@ import torch
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.compute.attention.metadata import LMCAttnMetadata
-from lmcache.v1.compute.blend.metadata import LMCBlendCommonMetadata, LMCBlendMetadata
+from lmcache.v1.compute.blend.metadata import BLEND_MODES, LMCBlendCommonMetadata, LMCBlendMetadata
 from lmcache.v1.compute.models.utils import infer_model_from_vllm
 from lmcache.v1.config import LMCacheEngineConfig
 
@@ -47,23 +47,51 @@ class LMCBlender:
         # TODO(Jiayi): support threshold-based blending
         # TODO(Jiayi): support different ratios for different layers
         # TODO(Jiayi): support "skipping blending if hit too short"
+        blend_mode = getattr(config, "blend_mode", "") or ""
+        if not blend_mode:
+            blend_mode = "costream" if config.is_costream else "topk"
+        if blend_mode not in BLEND_MODES:
+            logger.warning(
+                "Unknown blend_mode '%s', falling back to 'direct_reuse'. "
+                "Valid modes: %s", blend_mode, BLEND_MODES,
+            )
+            blend_mode = "direct_reuse"
+        self.blend_mode = blend_mode
+        self.gop = max(int(config.GOP), 1)
+        self.vlcache_recompute_ratio = float(
+            getattr(config, "vlcache_recompute_ratio", 0.05)
+        )
+        self.vlcache_mode = str(
+            getattr(config, "vlcache_mode", "per_frame")
+        )
+        logger.info("Blender blend_mode=%s, GOP=%d, vlcache_ratio=%.3f, vlcache_mode=%s",
+                     self.blend_mode, self.gop, self.vlcache_recompute_ratio,
+                     self.vlcache_mode)
+
         self.common_metadata = LMCBlendCommonMetadata(
             check_layers=config.blend_check_layers,
             recomp_ratios=config.blend_recompute_ratios,
             thresholds=config.blend_thresholds,
-            is_costream=config.is_costream,
+            blend_mode=self.blend_mode,
             GOP=config.GOP,
+            vlcache_recompute_ratio=self.vlcache_recompute_ratio,
         )
-        self.is_costream = bool(config.is_costream)
-        self.gop = max(int(config.GOP), 1)
         self.skip_ffn = False
         self.skip_ffn_only_costream = True
+        # When True, blend_mode direct_reuse only runs layerwise GPU retrieve
+        # (same KV load as enable_blending=False) and skips the redundant
+        # layerwise_model.compute_layer pass that recomputes attention/FFN.
+        self.direct_reuse_retrieve_only = True
         self._single_zero_idx: dict[torch.device, torch.Tensor] = {}
         if config.extra_config is not None:
             self.skip_ffn = bool(config.extra_config.get("skip_ffn", False))
             self.skip_ffn_only_costream = bool(
                 config.extra_config.get("skip_ffn_only_costream", True)
             )
+            if "direct_reuse_retrieve_only" in config.extra_config:
+                self.direct_reuse_retrieve_only = bool(
+                    config.extra_config.get("direct_reuse_retrieve_only", True)
+                )
         if self.skip_ffn:
             logger.warning(
                 "FFN skip is enabled (only_costream=%s). This may reduce output quality.",
@@ -80,13 +108,455 @@ class LMCBlender:
             self._get_rotary_emb(layer.self_attn) for layer in self.layers
         ]
 
+        self.is_mrope = getattr(self.layerwise_model, "is_mrope", False)
+        self.mrope_section = getattr(self.layerwise_model, "mrope_section", None)
+        self._mrope_model_config = None
+        if self.is_mrope:
+            try:
+                vllm_cfg = self.layerwise_model.vllm_model.config
+                self._mrope_model_config = {
+                    "image_token_id": getattr(vllm_cfg, "image_token_id", 151655),
+                    "video_token_id": getattr(vllm_cfg, "video_token_id", 151656),
+                    "vision_start_token_id": getattr(vllm_cfg, "vision_start_token_id", 151652),
+                    "spatial_merge_size": getattr(
+                        getattr(vllm_cfg, "vision_config", None),
+                        "spatial_merge_size", 2),
+                }
+                logger.info("mRoPE blender initialized with config: %s", self._mrope_model_config)
+            except Exception as e:
+                logger.warning("Could not extract mRoPE config from model: %s", e)
+                self.is_mrope = False
+
     def _get_rotary_emb(self, attn_layer):
-        # 兼容不同实现的 rotary 暴露方式
         if hasattr(attn_layer, "rotary_emb"):
             return attn_layer.rotary_emb
         if hasattr(attn_layer, "rotary_emb_func"):
-            return attn_layer.rotary_emb_func  # 少数实现
+            return attn_layer.rotary_emb_func
         raise AttributeError("Attention layer does not expose rotary embedding module.")
+
+    def _compute_mrope_positions(self, num_tokens: int, device: torch.device) -> torch.Tensor:
+        """Compute correct M-RoPE 3D positions for Qwen3-VL models.
+
+        Falls back to 1D arange if the required metadata is unavailable.
+        Returns a tensor of shape [3, num_tokens] for M-RoPE or [num_tokens] for 1D.
+        """
+        input_ids = self.metadata.input_ids
+        image_grid_thw = self.metadata.image_grid_thw
+        cfg = self._mrope_model_config
+
+        if input_ids is None or cfg is None:
+            logger.warning("M-RoPE metadata missing; falling back to 1D positions.")
+            return torch.arange(num_tokens, device=device, dtype=torch.int64)
+
+        input_ids_for_pos = input_ids[:num_tokens]
+
+        image_token_id = cfg["image_token_id"]
+        video_token_id = cfg["video_token_id"]
+        vision_start_token_id = cfg["vision_start_token_id"]
+        spatial_merge_size = cfg["spatial_merge_size"]
+
+        if image_grid_thw is None:
+            image_grid_thw = []
+
+        # Flatten nested grid lists: each image has [[t, h, w]]
+        flat_grid = []
+        for entry in image_grid_thw:
+            if isinstance(entry, (list, tuple)):
+                if len(entry) > 0 and isinstance(entry[0], (list, tuple)):
+                    flat_grid.extend(entry)
+                else:
+                    flat_grid.append(entry)
+            else:
+                flat_grid.append(entry)
+
+        input_tokens_tensor = torch.tensor(input_ids_for_pos)
+        vision_start_indices = torch.argwhere(
+            input_tokens_tensor == vision_start_token_id
+        ).squeeze(1)
+        vision_tokens = input_tokens_tensor[vision_start_indices + 1]
+        image_nums = int((vision_tokens == image_token_id).sum())
+        video_nums = int((vision_tokens == video_token_id).sum())
+
+        # For Qwen3-VL: video frames are sent as individual images, so
+        # video_grid_thw should be empty (each frame is an image entry).
+        video_grid_thw_expanded: list = []
+
+        llm_pos_ids_list: list = []
+        st = 0
+        remain_images, remain_videos = image_nums, video_nums
+        image_index, video_index = 0, 0
+
+        for _ in range(image_nums + video_nums):
+            ed_image = len(input_ids_for_pos) + 1
+            ed_video = len(input_ids_for_pos) + 1
+            if remain_images > 0:
+                try:
+                    ed_image = input_ids_for_pos.index(image_token_id, st)
+                except ValueError:
+                    pass
+            if remain_videos > 0:
+                try:
+                    ed_video = input_ids_for_pos.index(video_token_id, st)
+                except ValueError:
+                    pass
+
+            sentinel = len(input_ids_for_pos) + 1
+            if ed_image >= sentinel and ed_video >= sentinel:
+                break
+
+            if ed_image < ed_video:
+                if image_index < len(flat_grid):
+                    t, h, w = flat_grid[image_index]
+                else:
+                    logger.warning(
+                        "image_grid_thw index %d out of range (len=%d); "
+                        "falling back to 1D positions.",
+                        image_index, len(flat_grid),
+                    )
+                    return torch.arange(num_tokens, device=device, dtype=torch.int64)
+                image_index += 1
+                remain_images -= 1
+                ed = ed_image
+            elif ed_video < sentinel:
+                if video_index < len(video_grid_thw_expanded):
+                    t, h, w = video_grid_thw_expanded[video_index]
+                else:
+                    return torch.arange(num_tokens, device=device, dtype=torch.int64)
+                video_index += 1
+                remain_videos -= 1
+                ed = ed_video
+            else:
+                break
+
+            llm_grid_t = t
+            llm_grid_h = h // spatial_merge_size
+            llm_grid_w = w // spatial_merge_size
+            text_len = ed - st
+
+            st_idx = (
+                llm_pos_ids_list[-1].max() + 1
+                if llm_pos_ids_list
+                else 0
+            )
+            llm_pos_ids_list.append(
+                torch.arange(text_len).view(1, -1).expand(3, -1) + st_idx
+            )
+
+            t_index = (
+                torch.arange(llm_grid_t)
+                .view(-1, 1)
+                .expand(-1, llm_grid_h * llm_grid_w)
+                .flatten()
+            )
+            h_index = (
+                torch.arange(llm_grid_h)
+                .view(1, -1, 1)
+                .expand(llm_grid_t, -1, llm_grid_w)
+                .flatten()
+            )
+            w_index = (
+                torch.arange(llm_grid_w)
+                .view(1, 1, -1)
+                .expand(llm_grid_t, llm_grid_h, -1)
+                .flatten()
+            )
+            llm_pos_ids_list.append(
+                torch.stack([t_index, h_index, w_index]) + text_len + st_idx
+            )
+            st = ed + llm_grid_t * llm_grid_h * llm_grid_w
+
+        if st < len(input_ids_for_pos):
+            st_idx = (
+                llm_pos_ids_list[-1].max() + 1
+                if llm_pos_ids_list
+                else 0
+            )
+            text_len = len(input_ids_for_pos) - st
+            llm_pos_ids_list.append(
+                torch.arange(text_len).view(1, -1).expand(3, -1) + st_idx
+            )
+
+        if not llm_pos_ids_list:
+            return torch.arange(num_tokens, device=device, dtype=torch.int64)
+
+        positions = torch.cat(llm_pos_ids_list, dim=1).reshape(3, -1)
+        return positions.to(device=device, dtype=torch.int64)
+
+    # ------------------------------------------------------------------
+    # Helpers shared by costream / vlcache selection paths
+    # ------------------------------------------------------------------
+
+    def _compute_hit_indices(self, effective_len: int, device: torch.device):
+        """Return indices of cache-*hit* tokens (excluding gaps)."""
+        gap_positions = getattr(
+            self.gpu_connector, "current_gap_positions", None
+        )
+        if gap_positions is None or gap_positions.numel() == 0:
+            return torch.arange(effective_len, device=device, dtype=torch.long)
+        hit_mask = torch.ones(effective_len, device=device, dtype=torch.bool)
+        if gap_positions.device != device or gap_positions.dtype != torch.long:
+            gap_positions = gap_positions.to(device=device, dtype=torch.long)
+        valid_gap = gap_positions[
+            (gap_positions >= 0) & (gap_positions < effective_len)
+        ]
+        hit_mask[valid_gap] = False
+        return torch.where(hit_mask)[0]
+
+    def _costream_select(
+        self,
+        hit_indices: torch.Tensor,
+        effective_len: int,
+        device: torch.device,
+    ) -> torch.Tensor:
+        """CoStream I-frame selection using GOP / mm_positions."""
+        gop = self.gop
+        tokens_per_frame = int(self.metadata.tokens_per_frame or 0)
+        mm_positions: Optional[Sequence[Any]] = self.metadata.mm_positions
+
+        if mm_positions:
+            selected_chunks: list[torch.Tensor] = []
+            first_key_start: Optional[int] = None
+            for frame_id, placeholder in enumerate(mm_positions):
+                start = int(getattr(placeholder, "offset", 0))
+                length = int(getattr(placeholder, "length", 0))
+                if length <= 0 or start >= effective_len:
+                    continue
+                end = min(start + length, effective_len)
+                if gop > 1 and (frame_id % gop) != 0:
+                    continue
+                if first_key_start is None:
+                    first_key_start = start
+                hit_in_range = hit_indices[
+                    (hit_indices >= start) & (hit_indices < end)
+                ]
+                if hit_in_range.numel() > 0:
+                    selected_chunks.append(hit_in_range)
+
+            if selected_chunks:
+                selected = torch.cat(selected_chunks, dim=0)
+            else:
+                selected = hit_indices.new_empty((0,))
+            if selected.numel() == 0 and first_key_start is not None:
+                if first_key_start < effective_len:
+                    selected = torch.tensor(
+                        [first_key_start], device=device, dtype=torch.long
+                    )
+        elif tokens_per_frame > 0:
+            if gop > 1:
+                frame_ids = hit_indices // tokens_per_frame
+                selected = hit_indices[(frame_ids % gop) == 0]
+            else:
+                selected = hit_indices
+            if selected.numel() == 0 and hit_indices.numel() > 0:
+                selected = hit_indices[:1]
+            elif selected.numel() == 0:
+                selected = hit_indices
+        elif gop > 1:
+            selected = hit_indices[(hit_indices % gop) == 0]
+            if selected.numel() == 0 and hit_indices.numel() > 0:
+                selected = hit_indices[:1]
+        else:
+            selected = hit_indices
+        return selected
+
+    def _vlcache_select(
+        self,
+        hit_indices: torch.Tensor,
+        effective_len: int,
+        device: torch.device,
+    ) -> torch.Tensor:
+        """VLCache baseline: select image-token prefix for recomputation.
+
+        Two sub-modes controlled by ``self.vlcache_mode``:
+          - ``per_frame``: floor(r * T_i) from each frame (paper-faithful)
+          - ``prefix``:    first r% of all image tokens concatenated
+        Falls back to prefix-of-all-overlap when mm_positions is absent.
+        """
+        mm_positions: Optional[Sequence[Any]] = self.metadata.mm_positions
+        r = self.vlcache_recompute_ratio
+
+        if not mm_positions:
+            logger.debug(
+                "vlcache: mm_positions unavailable, falling back to "
+                "prefix-of-all (effective_len=%d, r=%.4f)", effective_len, r,
+            )
+            prefix_len = max(1, int(effective_len * r))
+            return torch.arange(
+                min(prefix_len, effective_len), device=device, dtype=torch.long
+            )
+
+        logger.debug(
+            "vlcache mode=%s: %d frames in mm_positions, effective_len=%d, r=%.4f",
+            self.vlcache_mode, len(mm_positions), effective_len, r,
+        )
+
+        if self.vlcache_mode == "prefix":
+            selected = self._vlcache_video_prefix(
+                mm_positions, r, hit_indices, effective_len, device,
+            )
+        else:
+            selected = self._vlcache_per_frame(
+                mm_positions, r, hit_indices, effective_len, device,
+            )
+
+        logger.debug(
+            "vlcache mode=%s selected %d tokens for recompute out of %d hit tokens",
+            self.vlcache_mode, selected.numel(), hit_indices.numel(),
+        )
+        return selected
+
+    def _vlcache_per_frame(
+        self,
+        mm_positions: Sequence[Any],
+        r: float,
+        hit_indices: torch.Tensor,
+        effective_len: int,
+        device: torch.device,
+    ) -> torch.Tensor:
+        """Paper-faithful: floor(r * T_i) prefix tokens from each frame."""
+        selected: list[torch.Tensor] = []
+        for placeholder in mm_positions:
+            start = int(getattr(placeholder, "offset", 0))
+            length = int(getattr(placeholder, "length", 0))
+            if length <= 0 or start >= effective_len:
+                continue
+            end = min(start + length, effective_len)
+            n = max(1, int((end - start) * r))
+            frame_hit = hit_indices[
+                (hit_indices >= start) & (hit_indices < start + n)
+            ]
+            if frame_hit.numel() > 0:
+                selected.append(frame_hit)
+        if selected:
+            return torch.cat(selected)
+        if hit_indices.numel() > 0:
+            return hit_indices[:1]
+        return hit_indices.new_empty((0,))
+
+    def _vlcache_video_prefix(
+        self,
+        mm_positions: Sequence[Any],
+        r: float,
+        hit_indices: torch.Tensor,
+        effective_len: int,
+        device: torch.device,
+    ) -> torch.Tensor:
+        """Whole-video prefix: first r% of all image tokens concatenated."""
+        all_image: list[torch.Tensor] = []
+        for placeholder in mm_positions:
+            start = int(getattr(placeholder, "offset", 0))
+            length = int(getattr(placeholder, "length", 0))
+            if length <= 0 or start >= effective_len:
+                continue
+            end = min(start + length, effective_len)
+            frame_hit = hit_indices[
+                (hit_indices >= start) & (hit_indices < end)
+            ]
+            if frame_hit.numel() > 0:
+                all_image.append(frame_hit)
+        if not all_image:
+            if hit_indices.numel() > 0:
+                return hit_indices[:1]
+            return hit_indices.new_empty((0,))
+        all_image_t = torch.cat(all_image)
+        budget = max(1, int(all_image_t.numel() * r))
+        return all_image_t[:budget]
+
+    # ------------------------------------------------------------------
+    # Shared logic: apply index selection + rotary for selective modes
+    # ------------------------------------------------------------------
+
+    def _apply_selected_indices(
+        self,
+        selected_indices: torch.Tensor,
+        effective_len: int,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        old_k: torch.Tensor,
+        old_v: torch.Tensor,
+        residual: torch.Tensor,
+        attn_output: torch.Tensor,
+        attn_metadata: LMCAttnMetadata,
+        rotary,
+        layer_id: int,
+        mode_label: str,
+    ):
+        """Build imp_indices on first layer, then apply per-layer.
+
+        Slices q/k/v/residual to the selected subset and updates
+        attn_metadata (query side only -- cu_seqlens_k stays at full
+        sequence length so the selected queries attend to the entire
+        cached KV context, matching the official lmcache behaviour).
+        """
+        num_tokens = q.shape[0]
+
+        if self.metadata.imp_indices is None:
+            self.metadata.imp_indices = selected_indices
+            if self.metadata.positions.ndim == 2:
+                self.metadata.positions = self.metadata.positions[:, selected_indices]
+            else:
+                self.metadata.positions = self.metadata.positions[selected_indices]
+            self.metadata.selection_effective_len = effective_len
+            self.metadata.is_full_selection = (
+                selected_indices.numel() == effective_len
+            )
+            logger.debug(
+                "%s selected %d/%d tokens for recompute.",
+                mode_label,
+                int(selected_indices.numel()),
+                num_tokens,
+            )
+
+        imp_indices = self.metadata.imp_indices
+        assert imp_indices is not None
+        sel_eff_len = int(self.metadata.selection_effective_len or 0)
+        if sel_eff_len > 0 and effective_len >= sel_eff_len:
+            layer_imp = imp_indices
+            layer_positions = self.metadata.positions
+        else:
+            valid_mask = imp_indices < effective_len
+            layer_imp = imp_indices[valid_mask]
+            if self.metadata.positions.ndim == 2:
+                layer_positions = self.metadata.positions[:, valid_mask]
+            else:
+                layer_positions = self.metadata.positions[valid_mask]
+
+        if layer_imp.numel() == 0 and effective_len > 0:
+            if q.device not in self._single_zero_idx:
+                self._single_zero_idx[q.device] = torch.tensor(
+                    [0], device=q.device, dtype=torch.long
+                )
+            layer_imp = self._single_zero_idx[q.device]
+            if self.metadata.positions.ndim == 2:
+                layer_positions = self._single_zero_idx[q.device].unsqueeze(0).expand(3, -1)
+            else:
+                layer_positions = self._single_zero_idx[q.device]
+            self.metadata.imp_indices = layer_imp
+            self.metadata.positions = layer_positions
+
+        full_range = (
+            self.metadata.is_full_selection
+            and effective_len == num_tokens
+            and sel_eff_len == num_tokens
+        )
+        if not full_range:
+            attn_metadata.update_from_top_indices(layer_imp)
+            k = k.index_select(0, layer_imp)
+            v = v.index_select(0, layer_imp)
+            q = q.index_select(0, layer_imp)
+            residual = residual.index_select(0, layer_imp)
+            attn_output = attn_output[: len(layer_imp)]
+
+        q, k = rotary(layer_positions, q, k)
+
+        old_k[layer_imp] = k
+        old_v[layer_imp] = v
+        return q, old_k, old_v, residual, attn_output, attn_metadata
+
+    # ------------------------------------------------------------------
+    # Main entry: process_qkv
+    # ------------------------------------------------------------------
 
     def process_qkv(
         self,
@@ -98,17 +568,14 @@ class LMCBlender:
         attn_output: Optional[torch.Tensor],
         attn_metadata: LMCAttnMetadata,
     ):
-        """
-        layer_id 为全局层号（与 layerwise_model 内部一致），支持 Qwen2.5-VL。
+        """Dispatch to the appropriate blend strategy based on ``blend_mode``.
+
+        Supported modes: direct_reuse, topk, costream, vlcache.
         """
         logger.debug("Blender is processing KV for layer %d", layer_id)
         try:
             old_k, old_v = self.gpu_connector.get_kv(layer_id)
         except ValueError:
-            # When the layerwise retriever finds no cached KV for this layer,
-            # the GPU buffer mapping will be empty. Instead of crashing the
-            # engine, fall back to the original QKV so the request can
-            # continue without blending.
             logger.warning(
                 "KV cache for layer %s is not loaded into GPU buffer, skip blending.",
                 layer_id,
@@ -117,198 +584,126 @@ class LMCBlender:
 
         if attn_output is None:
             attn_output = torch.empty(
-                q.shape,
-                dtype=q.dtype,
-                device=q.device,
+                q.shape, dtype=q.dtype, device=q.device,
             )
 
-        # Initialize (or inherit) positions: length is consistent with the dimension of the current batch of tokens
+        # Initialize positions once per blend request.
         if self.metadata.positions is None:
-            self.metadata.positions = torch.arange(
-                q.shape[0], device=q.device, dtype=torch.int64
-            )
+            if self.is_mrope and self._mrope_model_config is not None:
+                self.metadata.positions = self._compute_mrope_positions(
+                    q.shape[0], q.device,
+                )
+                logger.info(
+                    "Computed M-RoPE positions: shape=%s",
+                    list(self.metadata.positions.shape),
+                )
+            else:
+                self.metadata.positions = torch.arange(
+                    q.shape[0], device=q.device, dtype=torch.int64
+                )
 
-        # Rotary (common in the Qwen family)
         rotary = self._rotary_by_layer[layer_id]
 
-        # CoStream: recompute only key-frame tokens
-        if self.is_costream:
-            # Build recompute indices once, then keep using the same reduced path
-            # for following layers in this request.
-            if self.metadata.imp_indices is None:
-                num_tokens = q.shape[0]
-                cache_len = old_k.shape[0]
-                effective_len = min(num_tokens, cache_len)
-                logger.debug("num_tokens=%d, cache_len=%d", num_tokens, cache_len)
-                # Gap positions are cache-miss token positions; the remaining
-                # tokens are cache-hit positions.
-                gap_positions = getattr(
-                    self.gpu_connector, "current_gap_positions", None
-                )
-                if gap_positions is None or gap_positions.numel() == 0:
-                    hit_indices = torch.arange(
-                        effective_len, device=q.device, dtype=torch.long
-                    )
-                else:
-                    hit_mask = torch.ones(
-                        effective_len, device=q.device, dtype=torch.bool
-                    )
-                    if gap_positions.device != q.device or gap_positions.dtype != torch.long:
-                        gap_positions = gap_positions.to(
-                            device=q.device, dtype=torch.long
-                        )
-                    valid_gap = gap_positions[
-                        (gap_positions >= 0) & (gap_positions < effective_len)
-                    ]
-                    hit_mask[valid_gap] = False
-                    hit_indices = torch.where(hit_mask)[0]
+        # ==============================================================
+        # direct_reuse: no recomputation, just return cached KV
+        # ==============================================================
+        if self.blend_mode == "direct_reuse":
+            q, _ = rotary(self.metadata.positions, q, k)
+            return q, old_k, old_v, residual, attn_output, attn_metadata
 
-                gop = self.gop
-                tokens_per_frame = int(self.metadata.tokens_per_frame or 0)
-                mm_positions: Optional[Sequence[Any]] = self.metadata.mm_positions
-                # logger.info(f'tokens_per_frame is {tokens_per_frame}, gop is {gop}')
-
-                if mm_positions:
-                    # Precise alignment using mm_positions (offset/length per frame).
-                    selected_chunks = []
-                    first_key_start: Optional[int] = None
-                    for frame_id, placeholder in enumerate(mm_positions):
-                        start = int(getattr(placeholder, "offset", 0))
-                        length = int(getattr(placeholder, "length", 0))
-                        if length <= 0 or start >= effective_len:
-                            continue
-                        end = min(start + length, effective_len)
-                        if gop > 1 and ((frame_id+1) % gop) != 0:
-                            continue
-                        if first_key_start is None:
-                            first_key_start = start
-                        hit_in_range = hit_indices[
-                            (hit_indices >= start) & (hit_indices < end)
-                        ]
-                        if hit_in_range.numel() > 0:
-                            selected_chunks.append(hit_in_range)
-
-                    if selected_chunks:
-                        selected_indices = torch.cat(selected_chunks, dim=0)
-                    else:
-                        selected_indices = hit_indices.new_empty((0,))
-
-                    # If no hit tokens in key frames, keep one token from the first
-                    # key frame range to avoid empty selection.
-                    if selected_indices.numel() == 0 and first_key_start is not None:
-                        if first_key_start < effective_len:
-                            selected_indices = torch.tensor(
-                                [first_key_start], device=q.device, dtype=torch.long
-                            )
-                    logger.debug("selected_indices length=%d", len(selected_indices))
-                # Recompute key frames by GOP at frame granularity based on tokens_per_frame.
-                elif tokens_per_frame > 0:
-                    if gop > 1:
-                        frame_ids = hit_indices // tokens_per_frame
-                        selected_indices = hit_indices[(frame_ids % gop) == 0]
-                    else:
-                        selected_indices = hit_indices
-                    if selected_indices.numel() == 0 and hit_indices.numel() > 0:
-                        selected_indices = hit_indices[:1]
-                    elif selected_indices.numel() == 0:
-                        selected_indices = hit_indices
-                    logger.debug("selected_indices length=%d", len(selected_indices))
-                elif gop > 1:
-                    # Fallback: no frame info, degrade to token-based selection.
-                    selected_indices = hit_indices[(hit_indices % gop) == 0]
-                    if selected_indices.numel() == 0 and hit_indices.numel() > 0:
-                        selected_indices = hit_indices[:1]
-                else:
-                    selected_indices = hit_indices
-
-                self.metadata.imp_indices = selected_indices
-                self.metadata.positions = self.metadata.positions[selected_indices]
-                self.metadata.selection_effective_len = effective_len
-                self.metadata.is_full_selection = selected_indices.numel() == effective_len
-                logger.debug(
-                    "CoStream mode selected %d/%d hit tokens for recompute (GOP=%d).",
-                    int(selected_indices.numel()),
-                    int(num_tokens),
-                    gop,
-                )
-
-            imp_indices = self.metadata.imp_indices
-            assert imp_indices is not None
-            effective_len = min(q.shape[0], old_k.shape[0])
-            selection_effective_len = int(self.metadata.selection_effective_len or 0)
-            if selection_effective_len > 0 and effective_len >= selection_effective_len:
-                # Fast path: indices are already valid for this layer.
-                layer_imp = imp_indices
-                layer_positions = self.metadata.positions
-            else:
-                valid_mask = imp_indices < effective_len
-                layer_imp = imp_indices[valid_mask]
-                layer_positions = self.metadata.positions[valid_mask]
-            if layer_imp.numel() == 0 and effective_len > 0:
-                if q.device not in self._single_zero_idx:
-                    self._single_zero_idx[q.device] = torch.tensor(
-                        [0], device=q.device, dtype=torch.long
-                    )
-                layer_imp = self._single_zero_idx[q.device]
-                layer_positions = self._single_zero_idx[q.device]
-
-            # Each layer gets a fresh attention metadata object; keep it aligned
-            # with the reduced token set.
-            full_range_selected = (
-                self.metadata.is_full_selection
-                and effective_len == q.shape[0]
-                and selection_effective_len == q.shape[0]
-            )
-            if not full_range_selected:
-                attn_metadata.update_from_top_indices(layer_imp)
-                k = k.index_select(0, layer_imp)
-                v = v.index_select(0, layer_imp)
-                q = q.index_select(0, layer_imp)
-                residual = residual.index_select(0, layer_imp)
-                attn_output = attn_output[: len(layer_imp)]
-            # Apply rotary after selecting tokens to keep positions aligned.
-            q, k = rotary(layer_positions, q, k)
-            write_indices = layer_imp
-        else:
+        # ==============================================================
+        # topk: L2-diff based selection (original check_layers path)
+        #
+        # Matches the official lmcache approach: slice q/k/v to the
+        # selected subset but keep cu_seqlens_k at full sequence length
+        # so each selected query attends to the entire cached KV.
+        # ==============================================================
+        if self.blend_mode == "topk":
             q, k = rotary(self.metadata.positions, q, k)
             write_indices = self.metadata.imp_indices
 
-        # Recomputation/selection logic for important layers
-        if layer_id in self.common_metadata.check_layers and not self.is_costream:
-            logger.info(f'layer_id is {layer_id}, len(layers) is {len(self.layers)}')   
-            # Select the KV rows that need to be recalculated based on L2 differences
-            diff_k = torch.sum(
-                (k.to(torch.float32) - old_k.to(torch.float32)) ** 2, dim=[1]
-            )
-            total_len = diff_k.shape[0]
+            if layer_id in self.common_metadata.check_layers:
+                diff_k = torch.sum(
+                    (k.to(torch.float32) - old_k.to(torch.float32)) ** 2,
+                    dim=[1],
+                )
+                total_len = diff_k.shape[0]
+                assert self.common_metadata.recomp_ratios is not None
+                topk_num = int(
+                    total_len * self.common_metadata.recomp_ratios[0]
+                )
+                logger.info(
+                    "TOPK check layer=%d: total=%d, topk_num=%d, "
+                    "diff_k min=%.6f max=%.6f mean=%.6f median=%.6f, "
+                    "k_norm=%.4f old_k_norm=%.4f, "
+                    "nonzero_diff=%d/%d",
+                    layer_id, total_len, topk_num,
+                    diff_k.min().item(), diff_k.max().item(),
+                    diff_k.mean().item(), diff_k.median().item(),
+                    k.norm().item(), old_k.norm().item(),
+                    (diff_k > 1e-6).sum().item(), total_len,
+                )
+                top_indices = torch.topk(diff_k, k=topk_num).indices
+                top_indices, _ = torch.sort(top_indices)
 
-            assert self.common_metadata.recomp_ratios is not None
-            topk_num = int(total_len * self.common_metadata.recomp_ratios[0])
+                k, v = k[top_indices], v[top_indices]
+                q = q[top_indices]
+                residual = residual[top_indices]
 
-            top_indices = torch.topk(diff_k, k=topk_num).indices
-            top_indices, _ = torch.sort(top_indices)
+                self.metadata.imp_indices = top_indices
+                if self.metadata.positions.ndim == 2:
+                    self.metadata.positions = self.metadata.positions[:, top_indices]
+                else:
+                    self.metadata.positions = self.metadata.positions[top_indices]
+                attn_output = attn_output[:topk_num]
+                attn_metadata.update_from_top_indices(top_indices)
+                write_indices = top_indices
 
-            k, v = k[top_indices], v[top_indices]
-            q = q[top_indices]
-            residual = residual[top_indices]
-
-            logger.debug(f"Number of indices picked: {len(top_indices)}")
-
-            self.metadata.imp_indices = top_indices
-            self.metadata.positions = self.metadata.positions[top_indices]
-            attn_output = attn_output[:topk_num]
-
-            attn_metadata.update_from_top_indices(top_indices)
-
-        # Write the selected key-value pairs back/return
-        if self.metadata.imp_indices is not None:
-            if write_indices is None:
-                write_indices = self.metadata.imp_indices
-            old_k[write_indices] = k
-            old_v[write_indices] = v
-            return q, old_k, old_v, residual, attn_output, attn_metadata
-        else:
+            if write_indices is not None:
+                old_k[write_indices] = k
+                old_v[write_indices] = v
+                return q, old_k, old_v, residual, attn_output, attn_metadata
             return q, k, v, residual, attn_output, attn_metadata
+
+        # ==============================================================
+        # costream / vlcache: index-based selective recomputation
+        # ==============================================================
+        _MIN_BLEND_TOKENS = 128
+        first_layer = self.metadata.imp_indices is None
+
+        if first_layer:
+            effective_len = min(q.shape[0], old_k.shape[0])
+            if effective_len < _MIN_BLEND_TOKENS:
+                logger.info(
+                    "Cached prefix too short (%d < %d tokens) for %s, "
+                    "falling back to direct_reuse",
+                    effective_len, _MIN_BLEND_TOKENS, self.blend_mode,
+                )
+                q, _ = rotary(self.metadata.positions, q, k)
+                return q, old_k, old_v, residual, attn_output, attn_metadata
+            hit_indices = self._compute_hit_indices(effective_len, q.device)
+            if self.blend_mode == "costream":
+                selected = self._costream_select(
+                    hit_indices, effective_len, q.device,
+                )
+            else:
+                selected = self._vlcache_select(
+                    hit_indices, effective_len, q.device,
+                )
+            return self._apply_selected_indices(
+                selected, effective_len, q, k, v, old_k, old_v,
+                residual, attn_output, attn_metadata, rotary,
+                layer_id, self.blend_mode,
+            )
+
+        # Subsequent layers: q/k/v/residual are already reduced to
+        # the selected subset by compute_layer. Apply rotary and write
+        # into the full KV cache at the stored indices.
+        imp_indices = self.metadata.imp_indices
+        q, k = rotary(self.metadata.positions, q, k)
+        old_k[imp_indices] = k
+        old_v[imp_indices] = v
+        return q, old_k, old_v, residual, attn_output, attn_metadata
 
     # NOTE(Jiayi): Exposing this `blend_layer` interface as we might
     # want to orchestrate the blending process elsewhere
@@ -323,7 +718,8 @@ class LMCBlender:
         """
         # TODO(Jiayi): store is currently not included in this function
         check_layers = self.common_metadata.check_layers
-        layerwise_model_executor = self.layerwise_model.compute_layer(check_layers, tokens)
+        inputs_embeds = kwargs.pop("inputs_embeds", None)
+        deepstack_input_embeds = kwargs.pop("deepstack_input_embeds", None)
         layerwise_retriever = self.cache_engine.retrieve_layer(tokens, mask, **kwargs)
 
         # warmup retriever
@@ -346,6 +742,24 @@ class LMCBlender:
             yield
             return
 
+        if self.blend_mode == "direct_reuse" and self.direct_reuse_retrieve_only:
+            logger.info(
+                "direct_reuse: retrieve-only path (skip layerwise compute_layer); "
+                "KV load matches non-blending retrieve_layer."
+            )
+            for _ in range(self.num_layers):
+                next(layerwise_retriever)
+                yield
+            next(layerwise_retriever)
+            self.metadata.clean()
+            yield
+            return
+
+        layerwise_model_executor = self.layerwise_model.compute_layer(
+            check_layers, tokens,
+            inputs_embeds=inputs_embeds,
+            deepstack_input_embeds=deepstack_input_embeds,
+        )
         for _ in range(self.num_layers):
             next(layerwise_retriever)
             next(layerwise_model_executor)
@@ -375,6 +789,14 @@ class LMCBlender:
         mm_positions = kwargs.get("mm_positions")
         if mm_positions is not None:
             self.metadata.mm_positions = mm_positions
+        image_grid_thw = kwargs.get("image_grid_thw")
+        if image_grid_thw is not None:
+            self.metadata.image_grid_thw = image_grid_thw
+        if isinstance(tokens, torch.Tensor):
+            self.metadata.input_ids = tokens.tolist()
+        else:
+            self.metadata.input_ids = list(tokens)
+
         layerwise_blender = self.blend_layer(tokens, mask, **kwargs)
 
         # +2 is for the handshake/closing process with the retriever at both the beginning and end.

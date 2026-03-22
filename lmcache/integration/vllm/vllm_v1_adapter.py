@@ -4,7 +4,6 @@ from dataclasses import dataclass, field
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Generator, Optional, Union
 import os
-import time
 
 # Third Party
 from vllm.config import (
@@ -45,6 +44,7 @@ from lmcache.config import LMCacheEngineMetadata
 from lmcache.integration.vllm.utils import (
     ENGINE_NAME,
     apply_mm_hashes_to_token_ids,
+    extract_image_grid_thw,
     extract_mm_features,
     lmcache_get_or_create_config,
     mla_enabled,
@@ -106,6 +106,12 @@ def _patch_vllm_model_registration():
             VLLMModelTracker.register_model(ENGINE_NAME, self.model)
         except Exception as exc:  # pragma: no cover - defensive
             logger.warning("Failed to register vLLM model for LMCache: %s", exc)
+        try:
+            VLLMModelTracker.register_encoder_cache(
+                ENGINE_NAME, self.encoder_cache
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug("Could not register encoder_cache: %s", exc)
 
     _load_model_with_register._lmcache_patched = True  # type: ignore[attr-defined]
     GPUModelRunner.load_model = _load_model_with_register
@@ -185,6 +191,9 @@ class RequestTracker:
     mm_hashes: Optional[list[str]] = None
     mm_positions: Optional[list["PlaceholderRange"]] = None
 
+    # Per-image grid dimensions [t, h, w] for M-RoPE position computation
+    image_grid_thw: Optional[list] = None
+
     # The configs of the request, includes tags and other configs
     request_configs: Optional[dict] = None
 
@@ -241,6 +250,7 @@ class RequestTracker:
         request_configs = extract_request_configs(new_request.sampling_params)
 
         mm_hashes, mm_positions = extract_mm_features(new_request, modify=True)
+        image_grid_thw = extract_image_grid_thw(new_request)
 
         return RequestTracker(
             req_id=new_request.req_id,
@@ -251,6 +261,7 @@ class RequestTracker:
             disagg_spec=disagg_spec,
             mm_hashes=mm_hashes,
             mm_positions=mm_positions,
+            image_grid_thw=image_grid_thw or None,
             skip_save=skip_save,
             request_configs=request_configs,
         )
@@ -312,6 +323,10 @@ class ReqMeta:
     tokens_per_frame: Optional[int] = None
     # Multimodal placeholder positions for precise frame alignment.
     mm_positions: Optional[list["PlaceholderRange"]] = None
+    # Multimodal content hashes for encoder_cache lookup.
+    mm_hashes: Optional[list[str]] = None
+    # Per-image grid dimensions [t, h, w] for M-RoPE position computation
+    image_grid_thw: Optional[list] = None
 
     @staticmethod
     def from_request_tracker(
@@ -451,6 +466,8 @@ class ReqMeta:
             request_configs=tracker.request_configs,
             tokens_per_frame=tokens_per_frame,
             mm_positions=tracker.mm_positions,
+            mm_hashes=tracker.mm_hashes,
+            image_grid_thw=tracker.image_grid_thw,
         )
 
 
@@ -734,6 +751,7 @@ class LMCacheConnectorV1Impl:
         )
 
         self._lmcache_chunk_size = config.chunk_size
+
         self._save_decode_cache = config.save_decode_cache
 
         self.skip_last_n_tokens = vllm_config.kv_transfer_config.get_from_extra_config(
@@ -881,6 +899,218 @@ class LMCacheConnectorV1Impl:
     # Worker side APIs
     ####################
 
+    @staticmethod
+    def _scatter_vision_embeds(
+        text_embeds: torch.Tensor,
+        vision_embeds: list[torch.Tensor],
+        mm_positions: list,
+        num_tokens: int,
+    ) -> torch.Tensor:
+        """Overlay vision embeddings onto text embeddings at mm_positions.
+
+        Handles NaN rows from ``scatter_mm_placeholders`` (structural tokens
+        like ``<img>``/``</img>``) by preserving the text embedding there.
+        """
+        inputs_embeds = text_embeds.clone()
+        ve_idx = 0
+        for placeholder in mm_positions:
+            start = int(getattr(placeholder, "offset", 0))
+            length = int(getattr(placeholder, "length", 0))
+            if length <= 0 or start >= num_tokens:
+                continue
+            end = min(start + length, num_tokens)
+            if ve_idx >= len(vision_embeds):
+                break
+            ve = vision_embeds[ve_idx]
+            actual_len = end - start
+            ve_slice = ve[:actual_len].to(
+                dtype=inputs_embeds.dtype, device=inputs_embeds.device)
+            valid_mask = ~torch.isnan(ve_slice).any(dim=-1)
+            if ve_idx == 0:
+                nan_count = int((~valid_mask).sum().item())
+                logger.info(
+                    "vision_embed[0]: shape=%s, nan_rows=%d/%d, dtype=%s",
+                    ve.shape, nan_count, actual_len, ve.dtype)
+            if valid_mask.all():
+                inputs_embeds[start:end] = ve_slice
+            else:
+                inputs_embeds[start:end][valid_mask] = ve_slice[valid_mask]
+            ve_idx += 1
+        final_has_nan = bool(torch.isnan(inputs_embeds).any())
+        logger.info(
+            "Reconstructed inputs_embeds: shape=%s, "
+            "vision_embeds_merged=%d/%d, num_tokens=%d, has_nan=%s",
+            inputs_embeds.shape, ve_idx, len(vision_embeds), num_tokens,
+            final_has_nan,
+        )
+        return inputs_embeds
+
+    @staticmethod
+    def _normalize_cached_mm_embed(
+        embed: torch.Tensor,
+        length: int,
+    ) -> torch.Tensor:
+        """Normalize cached multimodal embed to [tokens, dim] then crop tokens."""
+        if embed.ndim == 1:
+            embed = embed.unsqueeze(0)
+        elif embed.ndim > 2:
+            embed = embed.reshape(-1, embed.shape[-1])
+        return embed[:length]
+
+    def _reconstruct_inputs_embeds(
+        self,
+        token_ids: list[int],
+        mm_hashes: Optional[list[str]],
+        mm_positions: Optional[list["PlaceholderRange"]],
+        num_tokens: int,
+    ) -> tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
+        """Reconstruct ``inputs_embeds`` (and optionally Deepstack embeds)
+        for the cached prefix of a request by looking up the ViT encoder
+        outputs stored in vLLM's ``encoder_cache``.
+
+        Returns ``(inputs_embeds, deepstack_input_embeds)`` or
+        ``(None, None)`` when the cache is unavailable.
+        """
+        if not mm_hashes or not mm_positions:
+            return None, None
+
+        try:
+            vllm_model = VLLMModelTracker.get_model(ENGINE_NAME)
+        except (ValueError, KeyError):
+            return None, None
+
+        encoder_cache = VLLMModelTracker.get_encoder_cache(ENGINE_NAME)
+        if encoder_cache is None:
+            logger.warning(
+                "encoder_cache not registered; vision token recompute disabled"
+            )
+            return None, None
+
+        token_ids_t = torch.tensor(
+            token_ids[:num_tokens], dtype=torch.long, device="cuda"
+        )
+
+        # Collect vision embeddings that fall within the cached prefix.
+        vision_embeds: list[torch.Tensor] = []
+        for mm_hash, placeholder in zip(mm_hashes, mm_positions):
+            start = int(getattr(placeholder, "offset", 0))
+            length = int(getattr(placeholder, "length", 0))
+            if length <= 0 or start >= num_tokens:
+                continue
+            end = min(start + length, num_tokens)
+            enc_out = encoder_cache.get(mm_hash)
+            if enc_out is None:
+                logger.debug("encoder_cache miss: hash=%s", mm_hash)
+                continue
+
+            if isinstance(enc_out, torch.Tensor):
+                enc_slice = self._normalize_cached_mm_embed(
+                    enc_out, end - start)
+            else:
+                enc_slice = self._normalize_cached_mm_embed(
+                    torch.as_tensor(enc_out), end - start)
+            vision_embeds.append(enc_slice)
+
+        if not vision_embeds:
+            logger.warning(
+                "No vision embeds found from encoder_cache "
+                "(mm_hashes=%d, mm_positions=%d, num_tokens=%d)",
+                len(mm_hashes), len(mm_positions), num_tokens,
+            )
+            return None, None
+
+        # Build text embeddings then overlay vision embeddings directly
+        # using mm_positions (not placeholder token ID matching, because
+        # token_ids may have been rewritten with content hashes).
+        lang_model = getattr(vllm_model, "language_model", vllm_model)
+        embed_fn = getattr(lang_model, "get_input_embeddings", None)
+        if embed_fn is None:
+            embed_fn = getattr(lang_model, "embed_tokens", None)
+        if embed_fn is None:
+            return None, None
+
+        text_embeds = embed_fn(token_ids_t)
+        text_has_nan = bool(torch.isnan(text_embeds).any())
+        logger.info(
+            "text_embeds: shape=%s, has_nan=%s, norm=%.4f, "
+            "token_ids min=%d max=%d",
+            text_embeds.shape, text_has_nan,
+            text_embeds.norm().item() if not text_has_nan else float('nan'),
+            token_ids_t.min().item(), token_ids_t.max().item(),
+        )
+
+        # --- Deepstack (Qwen3-VL): encoder_cache stores concatenated
+        # [main | multiscale] embeddings whose dim > text hidden size.
+        # Split via _compute_deepstack_embeds before scattering. ----------
+        deepstack_input_embeds: Optional[torch.Tensor] = None
+        compute_deepstack = getattr(vllm_model, "_compute_deepstack_embeds", None)
+        use_deepstack = getattr(vllm_model, "use_deepstack", False)
+        visual_dim = int(getattr(vllm_model, "visual_dim", text_embeds.shape[-1]))
+        multiscale_dim = int(getattr(vllm_model, "multiscale_dim", 0))
+        expected_mm_dim = visual_dim + multiscale_dim
+
+        # Qwen codec path may append 4 mRoPE channels to cached vision embeds.
+        # Strip these channels before deepstack split / scatter reconstruction.
+        vision_embeds_norm: list[torch.Tensor] = []
+        for ve in vision_embeds:
+            if ve.ndim == 1:
+                ve = ve.unsqueeze(0)
+            if ve.ndim > 2:
+                ve = ve.reshape(-1, ve.shape[-1])
+
+            last_dim = ve.shape[-1]
+            if expected_mm_dim > 0 and last_dim == expected_mm_dim + 4:
+                ve = ve[:, :-4]
+                last_dim = ve.shape[-1]
+            vision_embeds_norm.append(ve)
+
+        vision_embeds = vision_embeds_norm
+        if use_deepstack and compute_deepstack is not None:
+            try:
+                # If cache provides full [main|multiscale], use model split path.
+                ds_embeds, vision_embeds_main = compute_deepstack(
+                    token_ids_t, text_embeds, vision_embeds,
+                )
+                inputs_embeds = self._scatter_vision_embeds(
+                    text_embeds, vision_embeds_main, mm_positions, num_tokens,
+                )
+                deepstack_input_embeds = ds_embeds
+                return inputs_embeds, deepstack_input_embeds
+            except Exception as exc:
+                logger.warning("Deepstack reconstruction failed: %s", exc)
+
+        # Fallback: ensure scatter dims match language hidden size.
+        # If cache carries concatenated [main|multiscale], keep main slice only.
+        hidden = text_embeds.shape[-1]
+        vision_embeds_scatter: list[torch.Tensor] = []
+        for idx, ve in enumerate(vision_embeds):
+            if ve.shape[-1] == hidden:
+                vision_embeds_scatter.append(ve)
+                continue
+            if expected_mm_dim > 0 and ve.shape[-1] == expected_mm_dim:
+                vision_embeds_scatter.append(ve[:, :hidden])
+                continue
+            if ve.shape[-1] > hidden:
+                logger.warning(
+                    "Fallback scatter: truncating cached vision dim %d -> %d "
+                    "(item %d)",
+                    ve.shape[-1], hidden, idx,
+                )
+                vision_embeds_scatter.append(ve[:, :hidden])
+            else:
+                logger.warning(
+                    "Fallback scatter: cached vision dim %d < hidden %d "
+                    "(item %d); skipping this embed",
+                    ve.shape[-1], hidden, idx,
+                )
+
+        # --- Standard path (InternVL, etc.): encoder_cache dim matches
+        # text hidden size. Scatter directly. --------------------------
+        inputs_embeds = self._scatter_vision_embeds(
+            text_embeds, vision_embeds_scatter, mm_positions, num_tokens,
+        )
+        return inputs_embeds, deepstack_input_embeds
+
     @_lmcache_nvtx_annotate
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
         """Start loading the KV cache from the connector buffer to vLLM's
@@ -968,8 +1198,32 @@ class LMCacheConnectorV1Impl:
                         continue
 
                     # TODO(Jiayi): Need to make prefix caching and blending compatible
-                    start_blending = time.perf_counter()
                     page_stream = self.lmcache_engine.gpu_connector.get_page_stream()
+
+                    skip_embeds = (
+                        getattr(self.blender, "blend_mode", "") == "direct_reuse"
+                        and getattr(
+                            self.blender, "direct_reuse_retrieve_only", False)
+                    )
+                    if skip_embeds:
+                        inputs_embeds, deepstack_input_embeds = None, None
+                    else:
+                        inputs_embeds, deepstack_input_embeds = (
+                            self._reconstruct_inputs_embeds(
+                                tokens, request.mm_hashes,
+                                request.mm_positions, lmcache_cached_tokens,
+                            )
+                        )
+                    logger.info(
+                        "start_load_kv: inputs_embeds=%s, "
+                        "deepstack=%s, mm_hashes=%d, mm_positions=%d, "
+                        "cached_tokens=%d",
+                        inputs_embeds.shape if inputs_embeds is not None else None,
+                        deepstack_input_embeds.shape if deepstack_input_embeds is not None else None,
+                        len(request.mm_hashes) if request.mm_hashes else 0,
+                        len(request.mm_positions) if request.mm_positions else 0,
+                        lmcache_cached_tokens,
+                    )
 
                     self.blender.blend(
                         tokens[:lmcache_cached_tokens],
@@ -978,13 +1232,11 @@ class LMCacheConnectorV1Impl:
                         slot_mapping=slot_mapping[:lmcache_cached_tokens],
                         tokens_per_frame=request.tokens_per_frame,
                         mm_positions=request.mm_positions,
+                        image_grid_thw=request.image_grid_thw,
                         page_stream=page_stream,
                         sync=sync,
-                    )
-                    end_blending = time.perf_counter()
-                    logger.info(
-                        f"Blending time for request {request.req_id}: "
-                        f"{end_blending - start_blending:.4f} seconds"
+                        inputs_embeds=inputs_embeds,
+                        deepstack_input_embeds=deepstack_input_embeds,
                     )
                 else:
                     layerwise_retriever = self.lmcache_engine.retrieve_layer(

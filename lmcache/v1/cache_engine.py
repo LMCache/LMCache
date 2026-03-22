@@ -260,6 +260,7 @@ class LMCacheEngine:
             offsets,
             mask,
             request_configs=request_configs,
+            skip_last_segment=True,
         ):
             assert isinstance(key, CacheEngineKey)
             # Allocate the memory object
@@ -368,7 +369,8 @@ class LMCacheEngine:
         self.storage_manager.maybe_discard_stale_cache(reason="store_layer")
 
         for start, end, key in self.token_database.process_tokens(
-            tokens=tokens, mask=mask, request_configs=request_configs
+            tokens=tokens, mask=mask, request_configs=request_configs,
+            skip_last_segment=True,
         ):
             assert isinstance(key, CacheEngineKey)
 

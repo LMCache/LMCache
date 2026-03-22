@@ -191,6 +191,21 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
         "default": False,
         "env_converter": _to_bool,
     },
+    "blend_mode": {
+        "type": str,
+        "default": "",
+        "env_converter": str,
+    },
+    "vlcache_recompute_ratio": {
+        "type": float,
+        "default": 0.05,
+        "env_converter": float,
+    },
+    "vlcache_mode": {
+        "type": str,
+        "default": "per_frame",
+        "env_converter": str,
+    },
     "GOP": {"type": int, "default": 8, "env_converter": int,},
     "blend_min_tokens": {"type": int, "default": 256, "env_converter": int},
     "blend_special_str": {"type": str, "default": " # # ", "env_converter": str},
