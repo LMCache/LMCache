@@ -580,7 +580,6 @@ class VLLMBufferLayerwiseGPUConnector(GPUConnectorInterface):
         assert load_gpu_buffer_obj.tensor is not None
 
         stream = torch.cuda.current_stream()
-        stream = torch.cuda.current_stream()
 
         if self.cache_positions:
             old_positions_full = torch.zeros(
