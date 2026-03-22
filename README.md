@@ -65,13 +65,16 @@ For more details, please check our [Ray Summit talk](https://www.youtube.com/wat
 
 ## Installation
 
-To use LMCache, simply install `lmcache` from your package manager, e.g. pip:
+To use LMCache, install `lmcache` from your package manager, e.g. pip:
 
 ```bash
 pip install lmcache
 ```
 
-Works on Linux NVIDIA GPU platform.
+Works on Linux NVIDIA GPU platforms with the published CUDA 12 wheel stack.
+If you are running a CUDA 13 environment such as `vllm/vllm-openai:latest-cu130`,
+install LMCache from source so its native extension is rebuilt against the local
+CUDA/Torch toolchain.
 
 More [detailed installation instructions](https://docs.lmcache.ai/getting_started/installation) are available in the docs, particularly if you are not using the latest stable version of vllm or using another serving engine with different dependencies. Any "undefined symbol" or torch mismatch versions can be resolved in the documentation. 
 

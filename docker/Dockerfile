@@ -41,8 +41,13 @@ WORKDIR /workspace
 COPY ./requirements/common.txt common.txt
 COPY ./requirements/cuda.txt cuda.txt
 RUN --mount=type=cache,target=/root/.cache/pip \
+    CUDA_MAJOR="${CUDA_VERSION%%.*}" && \
     . /opt/venv/bin/activate && \
-    uv pip install -r cuda.txt
+    uv pip install -r cuda.txt && \
+    if [ "$CUDA_MAJOR" -ge 13 ]; then \
+        uv pip uninstall cupy-cuda12x nixl nixl-cu12 || true && \
+        uv pip install cupy-cuda13x nixl-cu13; \
+    fi
 
 # CUDA arch list used by torch
 ARG torch_cuda_arch_list='7.0 7.5 8.0 8.6 8.9 9.0 10.0+PTX'
@@ -81,6 +86,7 @@ WORKDIR /workspace/LMCache
 # This means that LMCache is in sync with the vLLM torch version.
 RUN --mount=type=cache,target=/root/.cache/ccache,id=ccache \
     --mount=type=cache,target=/root/.cache/uv,id=uv-cache,sharing=locked \
+    CUDA_MAJOR="${CUDA_VERSION%%.*}" && \
     . /opt/venv/bin/activate && \
     if [ "$VLLM_VERSION" = "nightly" ]; then \
         uv pip install --prerelease=allow \
@@ -94,8 +100,13 @@ RUN --mount=type=cache,target=/root/.cache/ccache,id=ccache \
             'triton-kernels @ git+https://github.com/triton-lang/triton.git@v3.5.0#subdirectory=python/triton_kernels' ; \
     fi && \
     python3 -c 'import torch; print("TORCH=", torch.__version__)' && \
-    python3 setup.py bdist_wheel --dist-dir=dist_lmcache && \
-    uv pip install ./dist_lmcache/*.whl --verbose
+    LM_TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST}" && \
+    if [ "$CUDA_MAJOR" -ge 13 ]; then \
+        LM_TORCH_CUDA_ARCH_LIST="$(printf '%s\n' "${TORCH_CUDA_ARCH_LIST}" | awk 'BEGIN { first = 1 } { for (i = 1; i <= NF; ++i) if ($i != "7.0" && $i != "7.0+PTX") { if (!first) printf " "; printf "%s", $i; first = 0 } } END { print "" }')"; \
+    fi && \
+    TORCH_CUDA_ARCH_LIST="${LM_TORCH_CUDA_ARCH_LIST}" \
+        python3 setup.py bdist_wheel --dist-dir=dist_lmcache && \
+    uv pip install ./dist_lmcache/*.whl --verbose --no-deps
 
 WORKDIR /workspace
 ENTRYPOINT ["/opt/venv/bin/vllm", "serve"]
@@ -105,12 +116,37 @@ ENTRYPOINT ["/opt/venv/bin/vllm", "serve"]
 
 FROM base AS image-release
 
-# Install LMCache and vLLM stable releases.
-# It is imperative that LMCache uses the same torch version as the 
-# vLLM stable release.
+ARG CUDA_VERSION
+
+# Copy LMCache sources so CUDA 13 builds can be compiled when needed.
+COPY ./requirements/build.txt /workspace/build.txt
+COPY . /workspace/LMCache
+WORKDIR /workspace/LMCache
+
+RUN --mount=type=cache,target=/root/.cache/uv \
+    . /opt/venv/bin/activate && \
+    uv pip install -r /workspace/build.txt
+
+# Install vLLM stable release and LMCache.
+# CUDA 12 uses the published LMCache wheel.
+# CUDA 13 builds LMCache from source against the image-local CUDA/Torch stack.
 RUN . /opt/venv/bin/activate && \
+    CUDA_MAJOR="${CUDA_VERSION%%.*}" && \
+    CUDA_VERSION_DASH=$(echo $CUDA_VERSION | cut -d. -f1,2 | tr '.' '-') && \
+    BUILD_PKGS="libcusparse-dev-${CUDA_VERSION_DASH} libcublas-dev-${CUDA_VERSION_DASH} libcusolver-dev-${CUDA_VERSION_DASH}" && \
     uv pip install --prerelease=allow vllm[runai,tensorizer,flashinfer] && \
-    uv pip install lmcache --verbose
+    if [ "$CUDA_MAJOR" -ge 13 ]; then \
+        apt-get update -y && \
+        apt-get install -y --no-install-recommends ${BUILD_PKGS} && \
+        LM_TORCH_CUDA_ARCH_LIST="$(printf '%s\n' "${TORCH_CUDA_ARCH_LIST}" | awk 'BEGIN { first = 1 } { for (i = 1; i <= NF; ++i) if ($i != "7.0" && $i != "7.0+PTX") { if (!first) printf " "; printf "%s", $i; first = 0 } } END { print "" }')" && \
+        TORCH_CUDA_ARCH_LIST="${LM_TORCH_CUDA_ARCH_LIST}" \
+            uv pip install . --verbose --no-build-isolation --no-deps && \
+        apt-get purge -y ${BUILD_PKGS} && \
+        rm -rf /var/lib/apt/lists/*; \
+    else \
+        uv pip install lmcache --verbose; \
+    fi && \
+    rm -rf /workspace/LMCache /workspace/build.txt dist_lmcache
 
 WORKDIR /workspace
 ENTRYPOINT ["/opt/venv/bin/vllm", "serve"]

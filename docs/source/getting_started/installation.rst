@@ -24,6 +24,11 @@ Prerequisites
 The simplest way to install the latest stable release of LMCache is through PyPI.
 If you require a different version of torch for the LMCache instance that you built with (symbol undefined error), please follow the install from source instructions below.
 
+.. note::
+    The published LMCache wheel is built against the CUDA 12 toolchain. For CUDA 13
+    environments, install LMCache from source so ``lmcache.c_ops`` is rebuilt against
+    the local CUDA/Torch stack.
+
 .. code-block:: bash
 
     uv venv --python 3.12
@@ -98,6 +103,21 @@ linker issues that will show up as undefined symbol references.
 
     # no build isolation requires torch to already be installed
     # with your desired version
+    uv pip install -e . --no-build-isolation
+
+If you are installing from source on CUDA 13, make sure the CUDA 13 development
+packages are available and set a CUDA 13 compatible architecture list before the
+build. For example, on the ``vllm/vllm-openai:latest-cu130`` base image:
+
+.. code-block:: bash
+
+    apt-get update -y
+    apt-get install -y --no-install-recommends \
+        libcusparse-dev-13-0 \
+        libcublas-dev-13-0 \
+        libcusolver-dev-13-0
+    export CUDA_HOME=/usr/local/cuda
+    export TORCH_CUDA_ARCH_LIST="8.9"
     uv pip install -e . --no-build-isolation
 
 You can quickly test whether you have undefined symbol references by running: 

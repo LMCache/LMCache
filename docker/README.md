@@ -19,7 +19,11 @@ This directory contains Dockerfiles for building different LMCache images. Each 
 
 **Build Targets**:
 - `image-build`: Builds with vLLM nightly and LMCache from source
-- `image-release`: Uses stable vLLM release and LMCache from PyPI
+- `image-release`: Uses stable vLLM release; installs LMCache from PyPI on CUDA 12 and rebuilds LMCache from source on CUDA 13
+
+For CUDA 13 builds, both targets rebuild LMCache from source so the native
+extension links against the CUDA/Torch stack inside the image instead of the
+published CUDA 12 wheel.
 
 **Usage**:
 
@@ -210,4 +214,3 @@ docker pull lmcache/standalone:latest
 - [vLLM Documentation](https://docs.vllm.ai/)
 - [Installation Guide](https://docs.lmcache.ai/getting_started/installation.html)
 - [Docker Deployment Guide](https://docs.lmcache.ai/production/docker_deployment.html)
-

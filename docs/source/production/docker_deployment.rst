@@ -28,6 +28,12 @@ See example run file in `docker <https://github.com/LMCache/LMCache/tree/dev/doc
 
 .. note::
 
+    The published LMCache Python wheel is built for the CUDA 12 stack. For CUDA 13
+    container builds, the Dockerfile rebuilds LMCache from source and swaps in the
+    CUDA 13 dependency variants such as ``cupy-cuda13x`` and ``nixl-cu13``.
+
+.. note::
+
     DockerHub contains the following image types:
 
     - Nightly build images of LMCache and vLLM latest code (e.g. tagged with `latest-nightly` and `nightly-<date>`)

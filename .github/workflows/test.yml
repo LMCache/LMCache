@@ -9,6 +9,7 @@ on:
       - "release-**"
     paths:
       - '**.py'
+      - 'docker/**'
       - 'pyproject.toml'
       - 'requirements/**.txt'
       - '.github/workflows/test.yml' # This workflow
@@ -18,6 +19,7 @@ on:
       - "release-**"
     paths:
       - '**.py'
+      - 'docker/**'
       - 'pyproject.toml'
       - 'requirements/**.txt'
       - '.github/workflows/test.yml' # This workflow
@@ -86,4 +88,3 @@ jobs:
             --ignore=tests/v1/mp_observability/ \
             --ignore=tests/skipped \
             --ignore=tests/v1/storage_backend/test_eic.py
-
