@@ -24,6 +24,7 @@ REQUEST_NAMES = [
     "RETRIEVE",
     "LOOKUP",
     "QUERY_PREFETCH_STATUS",
+    "QUERY_PREFETCH_LOOKUP_HITS",
     "FREE_LOOKUP_LOCKS",
     "END_SESSION",
 ]
@@ -98,6 +99,15 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
             response_class=int,
             handler_type=HandlerType.BLOCKING,
         ),
+        # Query the lookup hit chunks before the prefetch is done
+        # Payload:
+        #   - prefetch_job_id: int - Job ID returned by LOOKUP
+        # Returns: int | None - Chunk count if lookup is done, None if still in progress
+        "QUERY_PREFETCH_LOOKUP_HITS": ProtocolDefinition(
+            payload_classes=[int],
+            response_class=int | None,
+            handler_type=HandlerType.BLOCKING,
+        ),
         # Query the status of a prefetch job
         # Payload:
         #   - prefetch_job_id: int - Job ID returned by LOOKUP
@@ -105,7 +115,7 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
         "QUERY_PREFETCH_STATUS": ProtocolDefinition(
             payload_classes=[int],
             response_class=int | None,
-            handler_type=HandlerType.SYNC,
+            handler_type=HandlerType.BLOCKING,
         ),
         # Free locks (release read locks without a full RETRIEVE)
         # Payload:
