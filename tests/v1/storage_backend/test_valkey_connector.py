@@ -137,9 +137,7 @@ def _create_test_memory_obj(local_backend, seed=42):
     memory_obj = local_backend.allocate(mem_obj_shape, dtype)
     memory_obj.ref_count_up()
     torch.manual_seed(seed)
-    test_tensor = torch.randint(
-        0, 100, memory_obj.raw_data.shape, dtype=torch.int64
-    )
+    test_tensor = torch.randint(0, 100, memory_obj.raw_data.shape, dtype=torch.int64)
     memory_obj.raw_data.copy_(test_tensor.to(torch.float32).to(dtype))
     return memory_obj
 
@@ -166,9 +164,7 @@ def valkey_url():
 @pytest.fixture
 def valkey_config():
     """Config for ValkeyConnector testing."""
-    return LMCacheEngineConfig.from_defaults(
-        extra_config={"valkey_num_workers": 4}
-    )
+    return LMCacheEngineConfig.from_defaults(extra_config={"valkey_num_workers": 4})
 
 
 @pytest.fixture
@@ -188,9 +184,7 @@ def test_valkey_basic_operations(
 
     try:
         connector = autorelease_v1(
-            CreateConnector(
-                valkey_url, async_loop, local_backend, valkey_config
-            )
+            CreateConnector(valkey_url, async_loop, local_backend, valkey_config)
         )
 
         random_key = dumb_cache_engine_key()
@@ -216,9 +210,7 @@ def test_valkey_basic_operations(
         assert future.result(), "Key should exist after put"
 
         # Get and verify data
-        future = asyncio.run_coroutine_threadsafe(
-            connector.get(random_key), async_loop
-        )
+        future = asyncio.run_coroutine_threadsafe(connector.get(random_key), async_loop)
         retrieved = future.result()
         check_mem_obj_equal([retrieved], [memory_obj])
 
@@ -234,9 +226,7 @@ def test_valkey_batch_operations(
 
     try:
         connector = autorelease_v1(
-            CreateConnector(
-                valkey_url, async_loop, local_backend, valkey_config
-            )
+            CreateConnector(valkey_url, async_loop, local_backend, valkey_config)
         )
 
         num_keys = 10
@@ -249,8 +239,7 @@ def test_valkey_batch_operations(
         assert future.result() == 0, "No keys should exist initially"
 
         memory_objs = [
-            _create_test_memory_obj(local_backend, seed=42 + i)
-            for i in range(num_keys)
+            _create_test_memory_obj(local_backend, seed=42 + i) for i in range(num_keys)
         ]
 
         # Batch put
@@ -263,9 +252,7 @@ def test_valkey_batch_operations(
         future = asyncio.run_coroutine_threadsafe(
             connector.batched_async_contains("test_lookup", keys), async_loop
         )
-        assert future.result() == num_keys, (
-            "All keys should exist after batch_put"
-        )
+        assert future.result() == num_keys, "All keys should exist after batch_put"
 
         # Batch get and verify
         future = asyncio.run_coroutine_threadsafe(
@@ -288,9 +275,7 @@ def test_valkey_nonexistent_key(
 
     try:
         connector = autorelease_v1(
-            CreateConnector(
-                valkey_url, async_loop, local_backend, valkey_config
-            )
+            CreateConnector(valkey_url, async_loop, local_backend, valkey_config)
         )
 
         nonexistent_key = dumb_cache_engine_key()
@@ -317,9 +302,7 @@ def test_valkey_sequential_operations(
 
     try:
         connector = autorelease_v1(
-            CreateConnector(
-                valkey_url, async_loop, local_backend, valkey_config
-            )
+            CreateConnector(valkey_url, async_loop, local_backend, valkey_config)
         )
 
         for i in range(5):
@@ -331,9 +314,7 @@ def test_valkey_sequential_operations(
             )
             future.result()
 
-            future = asyncio.run_coroutine_threadsafe(
-                connector.get(key), async_loop
-            )
+            future = asyncio.run_coroutine_threadsafe(connector.get(key), async_loop)
             retrieved = future.result()
             check_mem_obj_equal([retrieved], [memory_obj])
 
@@ -349,9 +330,7 @@ def test_valkey_concurrent_operations(
 
     try:
         connector = autorelease_v1(
-            CreateConnector(
-                valkey_url, async_loop, local_backend, valkey_config
-            )
+            CreateConnector(valkey_url, async_loop, local_backend, valkey_config)
         )
 
         num_concurrent = 5
@@ -371,9 +350,7 @@ def test_valkey_concurrent_operations(
             f.result()
 
         get_futures = [
-            asyncio.run_coroutine_threadsafe(
-                connector.get(key), async_loop
-            )
+            asyncio.run_coroutine_threadsafe(connector.get(key), async_loop)
             for key in keys
         ]
         retrieved_objs = [f.result() for f in get_futures]
@@ -383,17 +360,13 @@ def test_valkey_concurrent_operations(
         close_asyncio_loop(async_loop, async_thread)
 
 
-def test_valkey_exists_sync(
-    valkey_url, local_backend, valkey_config, autorelease_v1
-):
+def test_valkey_exists_sync(valkey_url, local_backend, valkey_config, autorelease_v1):
     """Test synchronous exists method."""
     async_loop, async_thread = init_asyncio_loop()
 
     try:
         connector = autorelease_v1(
-            CreateConnector(
-                valkey_url, async_loop, local_backend, valkey_config
-            )
+            CreateConnector(valkey_url, async_loop, local_backend, valkey_config)
         )
 
         key = dumb_cache_engine_key()
@@ -420,9 +393,7 @@ def test_valkey_batched_contains_prefix(
 
     try:
         connector = autorelease_v1(
-            CreateConnector(
-                valkey_url, async_loop, local_backend, valkey_config
-            )
+            CreateConnector(valkey_url, async_loop, local_backend, valkey_config)
         )
 
         keys = [dumb_cache_engine_key(i) for i in range(5)]
@@ -447,9 +418,7 @@ def test_valkey_different_chunk_sizes(autorelease_v1):
     async_loop, async_thread = init_asyncio_loop()
 
     memory_allocator = PinMemoryAllocator(1024 * 1024 * 1024)
-    config = LMCacheEngineConfig.from_defaults(
-        extra_config={"valkey_num_workers": 4}
-    )
+    config = LMCacheEngineConfig.from_defaults(extra_config={"valkey_num_workers": 4})
 
     kv_shape = (32, 2, 512, 8, 128)
     dtype = torch.bfloat16
@@ -494,9 +463,7 @@ def test_valkey_different_chunk_sizes(autorelease_v1):
         )
         future.result()
 
-        future = asyncio.run_coroutine_threadsafe(
-            connector.get(key), async_loop
-        )
+        future = asyncio.run_coroutine_threadsafe(connector.get(key), async_loop)
         retrieved = future.result()
         check_mem_obj_equal([retrieved], [memory_obj])
 
@@ -524,9 +491,7 @@ def test_valkey_pipelined_batch_exceeds_arena(
 
     try:
         connector = autorelease_v1(
-            CreateConnector(
-                valkey_url, async_loop, local_backend, valkey_config
-            )
+            CreateConnector(valkey_url, async_loop, local_backend, valkey_config)
         )
 
         num_keys = 12
@@ -594,9 +559,7 @@ def test_valkey_worker_scaling(num_workers, autorelease_v1):
         )
         future.result()
 
-        future = asyncio.run_coroutine_threadsafe(
-            connector.get(key), async_loop
-        )
+        future = asyncio.run_coroutine_threadsafe(connector.get(key), async_loop)
         retrieved = future.result()
         check_mem_obj_equal([retrieved], [memory_obj])
 
@@ -620,9 +583,7 @@ def test_valkey_batched_get_partial_misses(
 
     try:
         connector = autorelease_v1(
-            CreateConnector(
-                valkey_url, async_loop, local_backend, valkey_config
-            )
+            CreateConnector(valkey_url, async_loop, local_backend, valkey_config)
         )
 
         num_present = 5
@@ -666,9 +627,7 @@ def test_valkey_batched_get_non_blocking_all_present(
 
     try:
         connector = autorelease_v1(
-            CreateConnector(
-                valkey_url, async_loop, local_backend, valkey_config
-            )
+            CreateConnector(valkey_url, async_loop, local_backend, valkey_config)
         )
 
         num_keys = 5
@@ -707,9 +666,7 @@ def test_valkey_batched_get_non_blocking_prefix_truncation(
 
     try:
         connector = autorelease_v1(
-            CreateConnector(
-                valkey_url, async_loop, local_backend, valkey_config
-            )
+            CreateConnector(valkey_url, async_loop, local_backend, valkey_config)
         )
 
         num_present = 3
@@ -745,9 +702,7 @@ def test_valkey_batched_get_non_blocking_first_missing(
 
     try:
         connector = autorelease_v1(
-            CreateConnector(
-                valkey_url, async_loop, local_backend, valkey_config
-            )
+            CreateConnector(valkey_url, async_loop, local_backend, valkey_config)
         )
 
         keys = [dumb_cache_engine_key(i) for i in range(3)]

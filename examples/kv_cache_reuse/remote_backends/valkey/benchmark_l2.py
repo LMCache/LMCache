@@ -31,13 +31,13 @@ Requirements:
 """
 
 # Standard
+from pathlib import Path
 import argparse
 import json
 import random
 import string
 import sys
 import time
-from pathlib import Path
 
 # Third Party
 import requests
@@ -112,7 +112,7 @@ def cmd_generate(args):
     for i in range(args.num_floods):
         # Use seeds far apart from test (42) and from each other
         seed = 1000 + i * 1000
-        print(f"Generating flood prompt {i+1}/{args.num_floods} (seed={seed})...")
+        print(f"Generating flood prompt {i + 1}/{args.num_floods} (seed={seed})...")
         flood_text = _random_text(chars_estimate, seed=seed)
         flood_ids = tokenizer.encode(flood_text, add_special_tokens=False)
         flood_ids = flood_ids[:target_tokens]
@@ -120,32 +120,36 @@ def cmd_generate(args):
         flood_tokens = len(
             tokenizer.encode(flood_text_truncated, add_special_tokens=False)
         )
-        print(f"  Flood {i+1}: {flood_tokens} tokens")
+        print(f"  Flood {i + 1}: {flood_tokens} tokens")
 
         # Verify zero prefix overlap at the token level
         test_first_chunk = test_ids[:256]
         flood_first_chunk = flood_ids[:256]
         if test_first_chunk == flood_first_chunk:
-            print("  WARNING: first chunk matches test prompt! Retrying with "
-                  "different seed would be needed.")
+            print(
+                "  WARNING: first chunk matches test prompt! Retrying with "
+                "different seed would be needed."
+            )
         else:
             overlap = 0
             for a, b in zip(test_ids, flood_ids, strict=False):
                 if a != b:
                     break
                 overlap += 1
-            print(f"  Token prefix overlap with test: {overlap} "
-                  f"(< chunk_size=256 → OK, different chunk hashes)")
+            print(
+                f"  Token prefix overlap with test: {overlap} "
+                f"(< chunk_size=256 → OK, different chunk hashes)"
+            )
 
         flood_payload = _make_prompt_payload(flood_text_truncated, args.model)
-        flood_path = out / f"flood_{i+1}.json"
+        flood_path = out / f"flood_{i + 1}.json"
         flood_path.write_text(json.dumps(flood_payload, ensure_ascii=False))
         print(f"  Saved: {flood_path}")
 
     print(f"\nAll prompts saved to {out}/")
     print(f"  prompt.json        — test prompt ({actual_tokens} tokens)")
     for i in range(args.num_floods):
-        print(f"  flood_{i+1}.json      — flood prompt (disjoint content)")
+        print(f"  flood_{i + 1}.json      — flood prompt (disjoint content)")
 
 
 def _get_keyspace_hits(nodes: list[str], port: int) -> tuple[int, list[int]]:
@@ -237,7 +241,8 @@ def cmd_run(args):
 
     delta = after_total - before_total
     delta_per_node = [
-        a - b for a, b in zip(after_per_node, before_per_node, strict=True)
+        a - b
+        for a, b in zip(after_per_node, before_per_node, strict=True)
         if a >= 0 and b >= 0
     ]
     print(f"\n  keyspace_hits Δ: +{delta} (per-node: {delta_per_node})")
@@ -270,17 +275,22 @@ def main():
     gen = sub.add_parser("generate", help="Generate test + flood prompts")
     gen.add_argument("--model", required=True, help="HF model name for tokenizer")
     gen.add_argument("--context-tokens", type=int, default=65536)
-    gen.add_argument("--num-floods", type=int, default=3,
-                     help="Number of disjoint flood prompts")
+    gen.add_argument(
+        "--num-floods", type=int, default=3, help="Number of disjoint flood prompts"
+    )
     gen.add_argument("--output-dir", required=True)
 
     # ── run ──
     run = sub.add_parser("run", help="Run the L2 benchmark")
-    run.add_argument("--prompt-dir", required=True,
-                     help="Directory with prompt.json and flood_*.json")
+    run.add_argument(
+        "--prompt-dir",
+        required=True,
+        help="Directory with prompt.json and flood_*.json",
+    )
     run.add_argument("--vllm-url", default="http://localhost:8000")
-    run.add_argument("--valkey-nodes", required=True,
-                     help="Comma-separated Valkey cluster node IPs")
+    run.add_argument(
+        "--valkey-nodes", required=True, help="Comma-separated Valkey cluster node IPs"
+    )
     run.add_argument("--valkey-port", type=int, default=6379)
 
     args = parser.parse_args()
