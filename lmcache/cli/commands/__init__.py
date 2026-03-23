@@ -9,10 +9,12 @@ To add a new command:
 
 # First Party
 from lmcache.cli.commands.base import BaseCommand
+from lmcache.cli.commands.describe import DescribeCommand
 from lmcache.cli.commands.mock import MockCommand
 
 ALL_COMMANDS: list[BaseCommand] = [
     MockCommand(),
+    DescribeCommand(),
 ]
 
 __all__ = ["ALL_COMMANDS", "BaseCommand"]
