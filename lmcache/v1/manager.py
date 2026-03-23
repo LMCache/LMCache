@@ -8,7 +8,6 @@ decoupling the vLLM adapter from internal LMCache implementation details.
 
 # Standard
 from concurrent.futures import ThreadPoolExecutor, TimeoutError
-from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Optional, Union
 import time
 
@@ -16,16 +15,11 @@ import time
 import torch
 
 # First Party
+from lmcache.integration.base_service_factory import BaseServiceFactory
 from lmcache.logging import init_logger
-from lmcache.utils import EngineType
 from lmcache.v1.cache_engine import LMCacheEngine, LMCacheEngineBuilder
 from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.gpu_connector import CreateGPUConnector
 from lmcache.v1.health_monitor.base import HealthMonitor
-from lmcache.v1.health_monitor.constants import (
-    DEFAULT_PING_INTERVAL,
-    PING_INTERVAL_CONFIG_KEY,
-)
 from lmcache.v1.internal_api_server.api_server import InternalAPIServer
 from lmcache.v1.lookup_client.abstract_client import LookupClientInterface
 from lmcache.v1.metadata import LMCacheMetadata
@@ -33,9 +27,6 @@ from lmcache.v1.offload_server.zmq_server import ZMQOffloadServer
 from lmcache.v1.plugin.runtime_plugin_launcher import RuntimePluginLauncher
 
 if TYPE_CHECKING:
-    # Third Party
-    from vllm.config import VllmConfig
-
     # First Party
     from lmcache.v1.lookup_client.lmcache_async_lookup_client import (
         LMCacheAsyncLookupServer,
@@ -44,13 +35,13 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-# Engine name constant
-ENGINE_NAME = "LMCacheEngine"
-
 
 class LMCacheManager:
     """
     LMCacheManager manages the lifecycle of LMCache internal components.
+
+    For an integration to utilize the Manager, define a ServiceFactory
+    that determines which components to create for which workers.
 
     This class encapsulates the initialization and shutdown of:
     - LMCacheEngine
@@ -59,52 +50,56 @@ class LMCacheManager:
     - InternalAPIServer
     - RuntimePluginLauncher
     - HealthMonitor
-
-    This manager supports two main modes:
-    - vLLM integration mode (requires vllm_config)
-    - Standalone mode (requires metadata and GPU connector)
     """
 
     def __init__(
         self,
         config: LMCacheEngineConfig,
-        vllm_config: Optional["VllmConfig"] = None,
-        role: str = "worker",
+        service_factory: BaseServiceFactory,
         connector: Optional[Any] = None,
     ):
         """
-        Initialize LMCacheManager for vLLM integration mode.
+        Initialize LMCacheManager.
 
         Args:
             config: LMCache engine configuration
-            vllm_config: vLLM configuration (required for vLLM integration mode)
+            service_factory: Factory for creating service components
             role: The role string ("scheduler" or "worker")
-            connector: Reference to LMCacheConnectorV1Impl for internal API server
+            connector: Reference to LMCacheConnectorV1Impl for internal
+                       API server
         """
         self._config = config
-        self._vllm_config: Optional["VllmConfig"] = vllm_config
-        self._role = role
+        self._service_factory = service_factory
         self._connector: Any = connector
-
-        # Components (initialized later)
-        self._lmcache_engine: Optional[LMCacheEngine] = None
-        self._lmcache_engine_metadata: Optional[LMCacheMetadata] = None
-        self._lookup_client: Optional[LookupClientInterface] = None
-        self._lookup_server: Optional[
-            Union["LMCacheLookupServer", "LMCacheAsyncLookupServer"]
-        ] = None
-        self._offload_server: Optional[ZMQOffloadServer] = None
-        self._api_server: Optional[InternalAPIServer] = None
-        self._runtime_plugin_launcher: Optional[RuntimePluginLauncher] = None
-        self._health_monitor: Optional[HealthMonitor] = None
 
         # Flag to track if initialization failed
         self._init_failed = False
         self._init_failed_reason: str = ""
 
-        # Initialize components based on role
+        self._health_monitor: Optional[HealthMonitor] = None
+        self._lmcache_engine_metadata: Optional[LMCacheMetadata] = None
+        self._lmcache_engine: Optional[LMCacheEngine] = None
+        self._lookup_client: Optional[LookupClientInterface] = None
+        self._lookup_server: Optional[
+            Union["LMCacheLookupServer", "LMCacheAsyncLookupServer"]
+        ] = None
+        self._offload_server: Optional[ZMQOffloadServer] = None
+        self._runtime_plugin_launcher: Optional[RuntimePluginLauncher] = None
+        self._api_server: Optional[InternalAPIServer] = None
+
+        # Initialize components via service factory
         try:
-            self._init_components()
+            self._lmcache_engine_metadata = service_factory.get_or_create_metadata()
+            self._lmcache_engine = service_factory.get_or_create_lmcache_engine()
+            self._lookup_client = service_factory.maybe_create_lookup_client()
+            self._lookup_server = service_factory.maybe_create_lookup_server()
+            self._offload_server = service_factory.maybe_create_offload_server()
+            self._runtime_plugin_launcher = (
+                service_factory.maybe_create_runtime_plugin_launcher()
+            )
+            self._api_server = service_factory.maybe_create_internal_api_server(
+                lmcache_manager=self
+            )
         except Exception as e:
             self._init_failed = True
             self._init_failed_reason = str(e)
@@ -114,344 +109,57 @@ class LMCacheManager:
                 e,
             )
 
-    def _init_components(self) -> None:
-        """Initialize components based on the role for vLLM mode."""
-        if self._role == "scheduler":
-            # Initialize vLLM scheduler components
-            self._init_scheduler_components()
-        else:
-            # Initialize vLLM worker components
-            self._init_worker_components()
-        # Initialize API server and plugin launcher only on DP rank 0
-        assert self._vllm_config is not None
-        if self._vllm_config.parallel_config.data_parallel_rank_local == 0:
-            self._init_dp_rank0_components()
+    # ==================== Property Accessors ====================
 
-    def _init_scheduler_components(self) -> None:
-        """Initialize components for scheduler role."""
-        # First Party
-        from lmcache.integration.vllm.utils import create_lmcache_metadata
-        from lmcache.observability import PrometheusLogger
-        from lmcache.v1.lookup_client.factory import LookupClientFactory
+    @property
+    def lmcache_engine(self) -> Optional[LMCacheEngine]:
+        """Get the LMCache engine instance."""
+        return self._lmcache_engine
 
-        assert self._vllm_config is not None, "vllm_config required for vLLM mode"
+    @property
+    def lmcache_engine_metadata(self) -> Optional[LMCacheMetadata]:
+        """Get the LMCache engine metadata."""
+        return self._lmcache_engine_metadata
 
-        if self._config.enable_scheduler_bypass_lookup:
-            # Create LMCacheEngine for scheduler when bypass is enabled
-            self._lmcache_engine = self._create_lmcache_engine(role="scheduler")
-            self._lmcache_engine_metadata = self._lmcache_engine.metadata
-        else:
-            self._lmcache_engine = None
-            # Create a dummy metadata for prometheus logger
-            self._lmcache_engine_metadata, _ = create_lmcache_metadata(
-                self._vllm_config, role="scheduler"
-            )
-            PrometheusLogger.GetOrCreate(
-                self._lmcache_engine_metadata,
-                config=self._config,
-            )
+    @property
+    def lookup_client(self) -> Optional[LookupClientInterface]:
+        """Get the lookup client instance."""
+        return self._lookup_client
 
-        # Create lookup client
-        self._lookup_client = LookupClientFactory.create_lookup_client(
-            self._config,
-            self._lmcache_engine_metadata,
-            self._lmcache_engine,
-        )
+    @property
+    def lookup_server(
+        self,
+    ) -> Optional[Union["LMCacheLookupServer", "LMCacheAsyncLookupServer"]]:
+        """Get the lookup server instance."""
+        return self._lookup_server
 
-    def _init_worker_components(self) -> None:
-        """Initialize components for worker role."""
-        # Third Party
-        from vllm.distributed.parallel_state import get_tensor_model_parallel_rank
+    @property
+    def offload_server(self) -> Optional[ZMQOffloadServer]:
+        """Get the offload server instance."""
+        return self._offload_server
 
-        # First Party
-        from lmcache.v1.lookup_client.factory import LookupClientFactory
+    @property
+    def api_server(self) -> Optional[InternalAPIServer]:
+        """Get the API server instance."""
+        return self._api_server
 
-        assert self._vllm_config is not None, "vllm_config required for vLLM mode"
+    @property
+    def health_monitor(self) -> Optional[HealthMonitor]:
+        """Get the health monitor instance."""
+        return self._health_monitor
 
-        # Create LMCacheEngine
-        self._lmcache_engine = self._create_lmcache_engine(role="worker")
-        self._lmcache_engine_metadata = self._lmcache_engine.metadata
+    @property
+    def kv_caches(self) -> dict[str, torch.Tensor]:
+        if self._connector is not None and hasattr(self._connector, "kv_caches"):
+            return self._connector.kv_caches
+        return {}
 
-        # Create lookup server
-        self._lookup_server = LookupClientFactory.create_lookup_server(
-            self._lmcache_engine, self._lmcache_engine_metadata
-        )
+    @property
+    def config(self) -> LMCacheEngineConfig:
+        """Get the LMCache engine configuration."""
+        return self._config
 
-        # Create offload server
-        self._offload_server = ZMQOffloadServer(
-            self._lmcache_engine,
-            get_tensor_model_parallel_rank(),
-        )
-
-    def _init_dp_rank0_components(self) -> None:
-        """Initialize components that only run on DP rank 0."""
-        assert self._vllm_config is not None, "vllm_config required for vLLM mode"
-
-        # Start internal API server
-        self._api_server = InternalAPIServer(self)
-
-        # Create plugin launcher
-        worker_id = (
-            -1
-            if self._lmcache_engine is None
-            else self._lmcache_engine.metadata.worker_id
-        )
-        self._runtime_plugin_launcher = RuntimePluginLauncher(
-            self._config,
-            self._role,
-            self._vllm_config.parallel_config.tensor_parallel_size,
-            worker_id,
-        )
-
-    def _init_health_monitor(self) -> None:
-        """
-        Initialize the health monitor for the LMCacheManager.
-
-        This is called during post_init after all components are initialized.
-        The HealthMonitor automatically discovers and instantiates all
-        HealthCheck subclasses based on the manager's role and components.
-        """
-        # First Party
-        from lmcache.observability import PrometheusLogger
-        from lmcache.v1.periodic_thread import (
-            PeriodicThreadRegistry,
-            ThreadLevel,
-        )
-
-        # Get ping interval from config
-        ping_interval = self._config.get_extra_config_value(
-            PING_INTERVAL_CONFIG_KEY, DEFAULT_PING_INTERVAL
-        )
-
-        # Create health monitor with manager - it will auto-discover health checks
-        self._health_monitor = HealthMonitor(
-            manager=self,
-            ping_interval=ping_interval,
-        )
-
-        # Inject health monitor into engine (if exists)
-        if self._lmcache_engine is not None:
-            self._lmcache_engine.set_health_monitor(self._health_monitor)
-
-        # Start the health monitor
-        self._health_monitor.start()
-        logger.info(
-            "Health monitor initialized and started at manager level (role=%s)",
-            self._role,
-        )
-
-        # Setup metrics callback for health status
-        prometheus_logger = PrometheusLogger.GetInstanceOrNone()
-        if prometheus_logger is not None:
-            prometheus_logger.lmcache_is_healthy.set_function(
-                lambda: 1 if self.is_healthy() else 0
-            )
-
-            # Setup PeriodicThread metrics callbacks
-            registry = PeriodicThreadRegistry.get_instance()
-
-            prometheus_logger.periodic_threads_total_count.set_function(
-                lambda: len(registry.get_all())
-            )
-            prometheus_logger.periodic_threads_running_count.set_function(
-                lambda: registry.get_running_count()
-            )
-            prometheus_logger.periodic_threads_active_count.set_function(
-                lambda: registry.get_active_count()
-            )
-
-            # Per-level metrics
-            for level in ThreadLevel:
-                level_name = level.value
-                total_attr = f"periodic_threads_{level_name}_total"
-                running_attr = f"periodic_threads_{level_name}_running"
-                active_attr = f"periodic_threads_{level_name}_active"
-
-                if hasattr(prometheus_logger, total_attr):
-                    getattr(prometheus_logger, total_attr).set_function(
-                        lambda lvl=level: registry.get_count_by_level(lvl)["total"]
-                    )
-                if hasattr(prometheus_logger, running_attr):
-                    getattr(prometheus_logger, running_attr).set_function(
-                        lambda lvl=level: registry.get_count_by_level(lvl)["running"]
-                    )
-                if hasattr(prometheus_logger, active_attr):
-                    getattr(prometheus_logger, active_attr).set_function(
-                        lambda lvl=level: registry.get_count_by_level(lvl)["active"]
-                    )
-
-    def _create_lmcache_engine(self, role: str) -> LMCacheEngine:
-        """
-        Create and return an LMCacheEngine instance.
-
-        Args:
-            role: The role string ("scheduler" or "worker")
-
-        Returns:
-            LMCacheEngine instance
-        """
-        # First Party
-        from lmcache.integration.vllm.utils import (
-            ENGINE_NAME,
-            calculate_local_rank_and_world_size,
-            mla_enabled,
-        )
-
-        if curr_engine := LMCacheEngineBuilder.get(ENGINE_NAME):
-            return curr_engine
-
-        assert self._vllm_config is not None, "vllm_config required for vLLM mode"
-
-        try:
-            # Third Party
-            from vllm.utils.torch_utils import get_kv_cache_torch_dtype
-        except ImportError:
-            # Third Party
-            from vllm.utils import get_kv_cache_torch_dtype
-        # Third Party
-        from vllm.distributed.parallel_state import get_tp_group
-
-        model_config = self._vllm_config.model_config
-        parallel_config = self._vllm_config.parallel_config
-        cache_config = self._vllm_config.cache_config
-
-        kv_dtype = get_kv_cache_torch_dtype(
-            cache_config.cache_dtype, model_config.dtype
-        )
-
-        use_mla = mla_enabled(model_config)
-        self._validate_mla_config(use_mla)
-
-        # Construct kv shape
-        num_layer = model_config.get_num_layers(parallel_config)
-        num_draft_layers = self._calculate_draft_layers()
-        num_layer += num_draft_layers
-        chunk_size = self._config.chunk_size
-        num_kv_head = model_config.get_num_kv_heads(parallel_config)
-        head_size = model_config.get_head_size()
-        kv_shape = (num_layer, 1 if use_mla else 2, chunk_size, num_kv_head, head_size)
-
-        logger.info(
-            "num_layer: %d, chunk_size: %d, num_kv_head (per gpu): %d, "
-            "head_size: %d, hidden_dim (D) for KV (per gpu): %d, "
-            "use mla: %s, kv shape: %s, num_draft_layers: %d",
-            num_layer,
-            chunk_size,
-            num_kv_head,
-            head_size,
-            num_kv_head * head_size,
-            use_mla,
-            kv_shape,
-            num_draft_layers,
-        )
-
-        # Extract engine_id and kv_connector_extra_config from vllm_config
-        engine_id = None
-        kv_connector_extra_config = None
-        if hasattr(self._vllm_config, "kv_transfer_config"):
-            kv_transfer_config = self._vllm_config.kv_transfer_config
-            if kv_transfer_config is not None:
-                engine_id = getattr(kv_transfer_config, "engine_id", None)
-                kv_connector_extra_config = getattr(
-                    kv_transfer_config, "kv_connector_extra_config", None
-                )
-
-        # Create metadata
-        local_worker_id, local_world_size = calculate_local_rank_and_world_size(
-            self._vllm_config
-        )
-        metadata = LMCacheMetadata(
-            model_name=model_config.model,
-            world_size=parallel_config.world_size,
-            local_world_size=local_world_size,
-            worker_id=parallel_config.rank,
-            local_worker_id=local_worker_id,
-            kv_dtype=kv_dtype,
-            kv_shape=kv_shape,
-            use_mla=use_mla,
-            role=role,
-            served_model_name=model_config.served_model_name,
-            chunk_size=self._config.chunk_size,
-            engine_id=engine_id,
-            kv_connector_extra_config=kv_connector_extra_config,
-        )
-
-        # Get tensor parallel group
-        if role == "scheduler":
-            tpg = SimpleNamespace()
-            tpg.broadcast = lambda tensor, src: tensor
-            tpg.broadcast_object = lambda obj, src: obj
-            vllm_gpu_connector = None
-        else:
-            tpg = get_tp_group()
-            vllm_gpu_connector = CreateGPUConnector(
-                self._config, metadata, EngineType.VLLM
-            )
-
-        engine = LMCacheEngineBuilder.get_or_create(
-            ENGINE_NAME,
-            self._config,
-            metadata,
-            vllm_gpu_connector,
-            tpg.broadcast,
-            tpg.broadcast_object,
-        )
-
-        if role == "scheduler" and self._config.enable_scheduler_bypass_lookup:
-            assert engine.save_only_first_rank or self._config.get_extra_config_value(
-                "remote_enable_mla_worker_id_as0", metadata.use_mla
-            ), (
-                "enable_scheduler_bypass_lookup is only supported with "
-                "save_only_first_rank or remote_enable_mla_worker_id_as0"
-            )
-
-        return engine
-
-    def _validate_mla_config(self, use_mla: bool) -> None:
-        """Validate MLA-related configuration."""
-        if use_mla and (
-            self._config.remote_serde != "naive"
-            and self._config.remote_serde is not None
-        ):
-            raise ValueError("MLA only works with naive serde mode..")
-
-        if use_mla and self._config.use_layerwise and self._config.enable_blending:
-            raise ValueError(
-                "We haven't supported MLA with Cacheblend yet. Please disable blending."
-            )
-
-    def _calculate_draft_layers(self) -> int:
-        """Calculate the number of draft layers for speculative decoding."""
-        assert self._vllm_config is not None, "vllm_config required for vLLM mode"
-
-        num_draft_layers = 0
-        vllm_config = self._vllm_config
-        model_config = vllm_config.model_config
-
-        if vllm_config.speculative_config is not None:
-            logger.info(
-                "vllm_config.speculative_config: %s", vllm_config.speculative_config
-            )
-            if vllm_config.speculative_config.method == "deepseek_mtp":
-                num_draft_layers = getattr(
-                    model_config.hf_config, "num_nextn_predict_layers", 0
-                )
-            elif vllm_config.speculative_config.use_eagle():
-                try:
-                    draft_model_config = (
-                        vllm_config.speculative_config.draft_model_config
-                    )
-                    num_draft_layers = draft_model_config.get_num_layers(
-                        vllm_config.parallel_config
-                    )
-                    logger.info("EAGLE detected %d extra layer(s)", num_draft_layers)
-                except Exception:
-                    logger.info(
-                        "EAGLE detected, but failed to get the number of extra layers"
-                        "falling back to 1"
-                    )
-                    num_draft_layers = 1
-        return num_draft_layers
+    # ==================== Lifecycle Methods ====================
 
     def start_services(self) -> None:
         """
@@ -461,33 +169,13 @@ class LMCacheManager:
         - InternalAPIServer: HTTP server exposing internal APIs for
           monitoring and management (e.g., cache stats, flush operations).
         - RuntimePluginLauncher: Launches external plugin processes defined
-          in the configuration (e.g., custom telemetry, cache warming scripts).
+          in the configuration (e.g., custom telemetry, cache warming).
         """
         if self._api_server is not None:
             self._api_server.start()
 
         if self._runtime_plugin_launcher is not None:
             self._runtime_plugin_launcher.launch_plugins()
-
-    def _handle_post_init_failure(self, e: Exception) -> None:
-        """
-        Handle initialization failure during post_init.
-
-        This method is shared between LMCacheManager and subclasses to avoid
-        code duplication.
-
-        Args:
-            e: The exception that caused the failure
-        """
-        self._init_failed = True
-        self._init_failed_reason = str(e)
-        if self._lmcache_engine is not None:
-            self._lmcache_engine.mark_init_failed(str(e))
-        logger.error(
-            "Failed during post_init: %s. "
-            "System will operate in degraded mode (recompute).",
-            e,
-        )
 
     def post_init(self) -> None:
         """
@@ -506,7 +194,6 @@ class LMCacheManager:
             return
 
         try:
-            # vLLM mode post-init
             # First Party
             from lmcache.v1.lookup_client.lmcache_async_lookup_client import (
                 LMCacheAsyncLookupServer,
@@ -523,6 +210,32 @@ class LMCacheManager:
             self._init_health_monitor()
         except Exception as e:
             self._handle_post_init_failure(e)
+
+    def _init_health_monitor(self) -> None:
+        """Initialize the health monitor via the service factory.
+
+        Called during post_init after all components are initialized.
+        """
+        self._health_monitor = self._service_factory.maybe_create_health_monitor(
+            lmcache_manager=self
+        )
+
+    def _handle_post_init_failure(self, e: Exception) -> None:
+        """
+        Handle initialization failure during post_init.
+
+        Args:
+            e: The exception that caused the failure
+        """
+        self._init_failed = True
+        self._init_failed_reason = str(e)
+        if self._lmcache_engine is not None:
+            self._lmcache_engine.mark_init_failed(str(e))
+        logger.error(
+            "Failed during post_init: %s. "
+            "System will operate in degraded mode (recompute).",
+            e,
+        )
 
     def stop_services(self) -> None:
         """Stop all managed components gracefully."""
@@ -581,10 +294,12 @@ class LMCacheManager:
 
         # Destroy cache engine
         try:
-            # In vLLM mode, use ENGINE_NAME constant
-            logger.info("Destroying LMCache engine: %s", ENGINE_NAME)
+            engine_instance_id = self._service_factory.get_engine_instance_id()
+            logger.info("Destroying LMCache engine: %s", engine_instance_id)
             with ThreadPoolExecutor(max_workers=1) as executor:
-                future = executor.submit(LMCacheEngineBuilder.destroy, ENGINE_NAME)
+                future = executor.submit(
+                    LMCacheEngineBuilder.destroy, engine_instance_id
+                )
                 try:
                     future.result(timeout=15.0)
                     logger.info("LMCache engine destroyed successfully")
@@ -608,32 +323,11 @@ class LMCacheManager:
             )
         else:
             logger.info(
-                "LMCacheManager services stopped successfully in %.2fs", elapsed
+                "LMCacheManager services stopped successfully in %.2fs",
+                elapsed,
             )
 
-    # ==================== Property Accessors ====================
-
-    @property
-    def lmcache_engine(self) -> Optional[LMCacheEngine]:
-        """Get the LMCache engine instance."""
-        return self._lmcache_engine
-
-    @property
-    def lmcache_engine_metadata(self) -> Optional[LMCacheMetadata]:
-        """Get the LMCache engine metadata."""
-        return self._lmcache_engine_metadata
-
-    @property
-    def lookup_client(self) -> Optional[LookupClientInterface]:
-        """Get the lookup client instance."""
-        return self._lookup_client
-
-    @property
-    def lookup_server(
-        self,
-    ) -> Optional[Union["LMCacheLookupServer", "LMCacheAsyncLookupServer"]]:
-        """Get the lookup server instance."""
-        return self._lookup_server
+    # ==================== Lookup Management ====================
 
     def close_lookup_client(self) -> dict:
         """
@@ -670,7 +364,6 @@ class LMCacheManager:
             return {"error": "metadata not available"}
 
         if dryrun:
-            # Create temporarily to get type info, then discard
             client = LookupClientFactory.create_lookup_client(
                 self._config,
                 self._lmcache_engine_metadata,
@@ -696,9 +389,8 @@ class LMCacheManager:
         Returns:
             dict: Result with old and new client type info.
         """
-        if self._role != "scheduler":
-            return {"error": "only supported for scheduler role"}
-
+        if self._lookup_client is None:
+            return {"error": "lookup client not available"}
         result = self.close_lookup_client()
         create_result = self.create_lookup_client()
         result.update(create_result)
@@ -741,7 +433,6 @@ class LMCacheManager:
             return {"error": "metadata not available"}
 
         if dryrun:
-            # Create temporarily to get type info, then discard
             server = LookupClientFactory.create_lookup_server(
                 self._lmcache_engine,
                 self._lmcache_engine_metadata,
@@ -766,8 +457,8 @@ class LMCacheManager:
         Returns:
             dict: Result with old and new server type info.
         """
-        if self._role != "worker":
-            return {"error": "only supported for worker role"}
+        if self._lookup_server is None:
+            return {"error": "lookup server not available"}
 
         result = self.close_lookup_server()
         create_result = self.create_lookup_server()
@@ -783,12 +474,10 @@ class LMCacheManager:
         if obj is None:
             return "None"
 
-        # First Party
         parts = []
         current = obj
         while True:
             parts.append(type(current).__name__)
-            # Check for wrapper by looking for 'actual_lookup_client' attribute
             if hasattr(current, "actual_lookup_client"):
                 current = current.actual_lookup_client
             else:
@@ -796,7 +485,6 @@ class LMCacheManager:
 
         if len(parts) == 1:
             return parts[0]
-        # Format: Outer(Inner(Core))
         result = parts[-1]
         for wrapper in reversed(parts[:-1]):
             result = "%s(%s)" % (wrapper, result)
@@ -812,34 +500,9 @@ class LMCacheManager:
         return {
             "client": self._get_lookup_type_str(self._lookup_client),
             "server": self._get_lookup_type_str(self._lookup_server),
-            "role": self._role,
         }
 
-    @property
-    def offload_server(self) -> Optional[ZMQOffloadServer]:
-        """Get the offload server instance."""
-        return self._offload_server
-
-    @property
-    def api_server(self) -> Optional[InternalAPIServer]:
-        """Get the API server instance."""
-        return self._api_server
-
-    @property
-    def health_monitor(self) -> Optional[HealthMonitor]:
-        """Get the health monitor instance."""
-        return self._health_monitor
-
-    @property
-    def role(self) -> str:
-        """Get the role of this manager (scheduler or worker)."""
-        return self._role
-
-    @property
-    def kv_caches(self) -> dict[str, torch.Tensor]:
-        if self._connector is not None and hasattr(self._connector, "kv_caches"):
-            return self._connector.kv_caches
-        return {}
+    # ==================== Health & Info ====================
 
     def is_healthy(self) -> bool:
         """
@@ -860,11 +523,6 @@ class LMCacheManager:
         if self._health_monitor is not None:
             return self._health_monitor.is_healthy()
         return True
-
-    @property
-    def config(self) -> LMCacheEngineConfig:
-        """Get the LMCache engine configuration."""
-        return self._config
 
     def get_inference_info(self) -> dict:
         """Get inference information by delegating to the connector.

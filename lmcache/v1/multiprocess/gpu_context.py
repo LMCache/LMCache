@@ -9,6 +9,7 @@ This module provides GPU-side KV cache management functionality, including:
 
 # Standard
 import array
+import threading
 
 # Third Party
 import cupy
@@ -101,6 +102,12 @@ class GPUCacheContext:
         self.high_priority_cupy_stream_ = cupy.cuda.ExternalStream(
             self.high_priority_cuda_stream_.cuda_stream, self.device_.index
         )
+
+        # Per-device lock to serialise GPU↔CPU data transfers
+        # on the same device without blocking transfers on other
+        # devices.  Replaces the old global ``MPCacheEngine.lock``
+        # to avoid deadlocks with the implicit CUDA driver lock.
+        self.transfer_lock = threading.Lock()
 
         # Extra initialization
         self.cupy_stream_.launch_host_func(
