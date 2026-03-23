@@ -16,8 +16,8 @@ from lmcache.utils import _lmcache_nvtx_annotate, init_logger
 from lmcache.v1.multiprocess.custom_types import (
     CudaIPCWrapper,
     IPCCacheEngineKey,
-    KVCacheRegistration,
     KVCache,
+    KVCacheRegistration,
 )
 from lmcache.v1.multiprocess.mq import MessageQueueClient, MessagingFuture
 from lmcache.v1.multiprocess.protocol import RequestType, get_response_class
@@ -569,14 +569,16 @@ class LMCacheMPWorkerAdapter:
         future = send_lmcache_request(
             self.mq_client,
             RequestType.REGISTER_KV_CACHE,
-            [KVCacheRegistration(
-                self.instance_id,
-                self.model_name,
-                self.world_size,
-                "vllm",
-                self.vllm_block_size,
-                wrap_kv_caches(kv_caches),
-            )],
+            [
+                KVCacheRegistration(
+                    self.instance_id,
+                    self.model_name,
+                    self.world_size,
+                    "vllm",
+                    self.vllm_block_size,
+                    wrap_kv_caches(kv_caches),
+                )
+            ],
         )
         try:
             future.result(timeout=self._mq_timeout)

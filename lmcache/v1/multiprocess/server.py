@@ -330,8 +330,8 @@ class MPCacheEngine:
                 with gpu_context.transfer_lock:
                     if gpu_context.is_sglang_mha:
                         for layer_id in range(gpu_context.num_layers):
-                            key_tensor, value_tensor = gpu_context.get_layerwise_kv_tensors(
-                                layer_id
+                            key_tensor, value_tensor = (
+                                gpu_context.get_layerwise_kv_tensors(layer_id)
                             )
                             lmc_ops.single_layer_kv_transfer_sgl(
                                 memory_obj.tensor[:, layer_id, :, :],
@@ -493,7 +493,9 @@ class MPCacheEngine:
                     )
 
                 if memory_obj.tensor is None:
-                    raise ValueError("Prefetched memory object does not contain a tensor")
+                    raise ValueError(
+                        "Prefetched memory object does not contain a tensor"
+                    )
 
                 slot_mapping = slot_mapping[skip_in_chunk:]
                 with gpu_context.transfer_lock:

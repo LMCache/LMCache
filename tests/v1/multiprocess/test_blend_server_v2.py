@@ -1661,7 +1661,15 @@ def test_cb_store_final_v2_then_normal_lookup(
     retrieve_result = (
         client.submit_request(
             RequestType.RETRIEVE,
-            [retrieve_key, registered_instance, gpu_block_ids, event2.ipc_handle(), 0, -1, -1],
+            [
+                retrieve_key,
+                registered_instance,
+                gpu_block_ids,
+                event2.ipc_handle(),
+                0,
+                -1,
+                -1,
+            ],
             get_response_class(RequestType.RETRIEVE),
         )
         .to_cuda_future()

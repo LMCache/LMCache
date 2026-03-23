@@ -8,9 +8,9 @@ This module provides GPU-side KV cache management functionality, including:
 """
 
 # Standard
+from typing import Any
 import array
 import threading
-from typing import Any
 
 # Third Party
 import cupy
@@ -26,8 +26,8 @@ from lmcache.v1.gpu_connector.utils import (
     get_head_size,
     get_hidden_dim_size,
     get_num_blocks,
-    get_num_layers,
     get_num_heads,
+    get_num_layers,
     get_page_buffer_size,
     is_mla,
     is_sglang_mha,
@@ -86,7 +86,9 @@ class GPUCacheContext:
         self.gpu_kv_format_ = discover_gpu_kv_format(self.kv_caches_, self.engine_type_)
         self.is_mla_ = is_mla(self.gpu_kv_format_)
         self.num_layers_ = get_num_layers(self.kv_caches_, self.gpu_kv_format_)
-        self.page_buffer_size_ = get_page_buffer_size(self.kv_caches_, self.gpu_kv_format_)
+        self.page_buffer_size_ = get_page_buffer_size(
+            self.kv_caches_, self.gpu_kv_format_
+        )
         if block_size is None:
             block_size = get_block_size(self.kv_caches_, self.gpu_kv_format_)
         self.block_size_ = block_size
@@ -173,10 +175,6 @@ class GPUCacheContext:
         return self.kv_caches_
 
     @property
-    def engine_type(self) -> EngineType:
-        return self.engine_type_
-
-    @property
     def kv_pointers(self) -> torch.Tensor:
         """
         Returns a GPU tensor of the KV cache pointers
@@ -245,7 +243,9 @@ class GPUCacheContext:
     def page_buffer_size(self) -> int:
         return self.page_buffer_size_
 
-    def get_layerwise_kv_tensors(self, layer_id: int) -> tuple[torch.Tensor, torch.Tensor]:
+    def get_layerwise_kv_tensors(
+        self, layer_id: int
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         if not self.is_sglang_mha:
             raise ValueError(
                 "Layerwise KV tensor views are only available for "

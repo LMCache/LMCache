@@ -200,8 +200,10 @@ class LMCacheMPLayerwiseConnector:
                 f"{slot_mapping.numel()} and page_size={self.page_size}"
             )
 
-        groups = slot_mapping.detach().to(dtype=torch.int64, device="cpu").reshape(
-            -1, self.page_size
+        groups = (
+            slot_mapping.detach()
+            .to(dtype=torch.int64, device="cpu")
+            .reshape(-1, self.page_size)
         )
         starts = groups[:, 0]
         if torch.any(starts % self.page_size != 0):
@@ -390,21 +392,25 @@ class LMCacheMPLayerwiseConnector:
         )
         event = torch.cuda.Event(interprocess=True)
         event.record(torch.cuda.current_stream())
-        success = send_lmcache_request(
-            self.mq_client,
-            RequestType.STORE,
-            [
-                self._create_key(
-                    store_metadata.token_ids,
-                    start=0,
-                    end=aligned_end,
-                    request_id=request_id,
-                ),
-                self.instance_id,
-                block_ids,
-                event.ipc_handle(),
-            ],
-        ).to_cuda_future(device=self.device).result(timeout=self._mq_timeout)
+        success = (
+            send_lmcache_request(
+                self.mq_client,
+                RequestType.STORE,
+                [
+                    self._create_key(
+                        store_metadata.token_ids,
+                        start=0,
+                        end=aligned_end,
+                        request_id=request_id,
+                    ),
+                    self.instance_id,
+                    block_ids,
+                    event.ipc_handle(),
+                ],
+            )
+            .to_cuda_future(device=self.device)
+            .result(timeout=self._mq_timeout)
+        )
         self._end_session(request_id)
         if not success:
             raise RuntimeError("LMCache MP store failed")
