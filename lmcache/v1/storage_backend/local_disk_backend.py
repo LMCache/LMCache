@@ -35,7 +35,7 @@ logger = init_logger(__name__)
 
 # TODO(Jiayi): handle cases where cache is repetitvely prefetched.
 class LocalDiskWorker:
-    def __init__(self, loop: asyncio.AbstractEventLoop) -> None:
+    def __init__(self, loop: asyncio.AbstractEventLoop, pq_workers: int, r_workers: int) -> None:
         self.put_lock = threading.Lock()
         self.put_tasks: List[CacheEngineKey] = []
 
@@ -43,8 +43,8 @@ class LocalDiskWorker:
         self.prefetch_tasks: dict[CacheEngineKey, Future] = {}
 
         # TODO(Jiayi): make executor and its parameters configurable
-        self.executor = AsyncPQThreadPoolExecutor(loop, max_workers=4)
-        self.reader_executor = ThreadPoolExecutor(max_workers=16, thread_name_prefix="DiskRWorker")
+        self.executor = AsyncPQThreadPoolExecutor(loop, max_workers=pq_workers)
+        self.reader_executor = ThreadPoolExecutor(max_workers=r_workers, thread_name_prefix="DiskRWorker")
         self.loop = loop
         self._closed = False
 
@@ -144,12 +144,16 @@ class LocalDiskBackend(StorageBackendInterface):
         stat = os.statvfs(self.path)
         self.os_disk_bs = stat.f_bsize
         self.use_odirect = False
+        self.pq_workers = 4
+        self.reader_workers = 16
 
         if config.extra_config is not None:
             self.use_odirect = config.extra_config.get("use_odirect", False)
+            self.pq_workers = config.extra_config.get("pq_workers", 4)
+            self.reader_workers = config.extra_config.get("reader_workers", 16)
         logger.info("Using O_DIRECT for disk I/O: %s", self.use_odirect)
 
-        self.disk_worker = LocalDiskWorker(loop)
+        self.disk_worker = LocalDiskWorker(loop, self.pq_workers, self.reader_workers)
 
         # TODO(Jiayi): We need a disk space allocator to avoid fragmentation
         # and hide the following details away from the backend.
