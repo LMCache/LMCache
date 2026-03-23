@@ -902,7 +902,7 @@ class LMCacheConnectorV1Impl:
     @staticmethod
     def _scatter_vision_embeds(
         text_embeds: torch.Tensor,
-        vision_embeds: list[torch.Tensor],
+        vision_embeds: list[Optional[torch.Tensor]],
         mm_positions: list,
         num_tokens: int,
     ) -> torch.Tensor:
@@ -910,9 +910,12 @@ class LMCacheConnectorV1Impl:
 
         Handles NaN rows from ``scatter_mm_placeholders`` (structural tokens
         like ``<img>``/``</img>``) by preserving the text embedding there.
+        ``None`` entries in *vision_embeds* (encoder_cache misses) are
+        skipped, leaving the text embedding in place at that position.
         """
         inputs_embeds = text_embeds.clone()
         ve_idx = 0
+        merged = 0
         for placeholder in mm_positions:
             start = int(getattr(placeholder, "offset", 0))
             length = int(getattr(placeholder, "length", 0))
@@ -922,25 +925,36 @@ class LMCacheConnectorV1Impl:
             if ve_idx >= len(vision_embeds):
                 break
             ve = vision_embeds[ve_idx]
+            ve_idx += 1
+            if ve is None:
+                continue
             actual_len = end - start
             ve_slice = ve[:actual_len].to(
                 dtype=inputs_embeds.dtype, device=inputs_embeds.device)
             valid_mask = ~torch.isnan(ve_slice).any(dim=-1)
-            if ve_idx == 0:
+            if merged == 0:
                 nan_count = int((~valid_mask).sum().item())
                 logger.info(
                     "vision_embed[0]: shape=%s, nan_rows=%d/%d, dtype=%s",
                     ve.shape, nan_count, actual_len, ve.dtype)
-            if valid_mask.all():
-                inputs_embeds[start:end] = ve_slice
+            if ve_slice.shape[0] >= actual_len:
+                if valid_mask.all():
+                    inputs_embeds[start:end] = ve_slice
+                else:
+                    inputs_embeds[start:end][valid_mask] = \
+                        ve_slice[valid_mask]
             else:
-                inputs_embeds[start:end][valid_mask] = ve_slice[valid_mask]
-            ve_idx += 1
+                sub_len = ve_slice.shape[0]
+                sub_mask = valid_mask[:sub_len]
+                if sub_mask.any():
+                    inputs_embeds[start:start + sub_len][sub_mask] = \
+                        ve_slice[sub_mask]
+            merged += 1
         final_has_nan = bool(torch.isnan(inputs_embeds).any())
         logger.info(
             "Reconstructed inputs_embeds: shape=%s, "
             "vision_embeds_merged=%d/%d, num_tokens=%d, has_nan=%s",
-            inputs_embeds.shape, ve_idx, len(vision_embeds), num_tokens,
+            inputs_embeds.shape, merged, len(vision_embeds), num_tokens,
             final_has_nan,
         )
         return inputs_embeds
@@ -991,7 +1005,10 @@ class LMCacheConnectorV1Impl:
         )
 
         # Collect vision embeddings that fall within the cached prefix.
-        vision_embeds: list[torch.Tensor] = []
+        # Use None as sentinel for encoder_cache misses so that the list
+        # stays aligned 1:1 with the mm_positions that pass the filter.
+        vision_embeds: list[Optional[torch.Tensor]] = []
+        num_encoder_misses = 0
         for mm_hash, placeholder in zip(mm_hashes, mm_positions):
             start = int(getattr(placeholder, "offset", 0))
             length = int(getattr(placeholder, "length", 0))
@@ -1001,6 +1018,8 @@ class LMCacheConnectorV1Impl:
             enc_out = encoder_cache.get(mm_hash)
             if enc_out is None:
                 logger.debug("encoder_cache miss: hash=%s", mm_hash)
+                vision_embeds.append(None)
+                num_encoder_misses += 1
                 continue
 
             if isinstance(enc_out, torch.Tensor):
@@ -1010,8 +1029,16 @@ class LMCacheConnectorV1Impl:
                 enc_slice = self._normalize_cached_mm_embed(
                     torch.as_tensor(enc_out), end - start)
             vision_embeds.append(enc_slice)
+        if num_encoder_misses > 0:
+            logger.warning(
+                "encoder_cache missed %d/%d items in cached prefix "
+                "(evicted before blending); aborting blend, falling "
+                "back to layerwise retrieval for correctness",
+                num_encoder_misses, len(vision_embeds),
+            )
+            return None, None
 
-        if not vision_embeds:
+        if not any(ve is not None for ve in vision_embeds):
             logger.warning(
                 "No vision embeds found from encoder_cache "
                 "(mm_hashes=%d, mm_positions=%d, num_tokens=%d)",
@@ -1051,8 +1078,12 @@ class LMCacheConnectorV1Impl:
 
         # Qwen codec path may append 4 mRoPE channels to cached vision embeds.
         # Strip these channels before deepstack split / scatter reconstruction.
-        vision_embeds_norm: list[torch.Tensor] = []
+        # None entries (encoder_cache misses) are preserved for alignment.
+        vision_embeds_norm: list[Optional[torch.Tensor]] = []
         for ve in vision_embeds:
+            if ve is None:
+                vision_embeds_norm.append(None)
+                continue
             if ve.ndim == 1:
                 ve = ve.unsqueeze(0)
             if ve.ndim > 2:
@@ -1081,9 +1112,13 @@ class LMCacheConnectorV1Impl:
 
         # Fallback: ensure scatter dims match language hidden size.
         # If cache carries concatenated [main|multiscale], keep main slice only.
+        # None entries (encoder_cache misses) are preserved for alignment.
         hidden = text_embeds.shape[-1]
-        vision_embeds_scatter: list[torch.Tensor] = []
+        vision_embeds_scatter: list[Optional[torch.Tensor]] = []
         for idx, ve in enumerate(vision_embeds):
+            if ve is None:
+                vision_embeds_scatter.append(None)
+                continue
             if ve.shape[-1] == hidden:
                 vision_embeds_scatter.append(ve)
                 continue
@@ -1214,6 +1249,28 @@ class LMCacheConnectorV1Impl:
                                 request.mm_positions, lmcache_cached_tokens,
                             )
                         )
+
+                    if inputs_embeds is None and not skip_embeds:
+                        logger.warning(
+                            "inputs_embeds unavailable (encoder_cache "
+                            "eviction); falling back to layerwise "
+                            "retrieval for this request"
+                        )
+                        layerwise_retriever = \
+                            self.lmcache_engine.retrieve_layer(
+                                tokens[:lmcache_cached_tokens],
+                                token_mask[:lmcache_cached_tokens],
+                                kvcaches=kvcaches,
+                                slot_mapping=slot_mapping[
+                                    :lmcache_cached_tokens],
+                                sync=sync,
+                            )
+                        next(layerwise_retriever)
+                        next(layerwise_retriever)
+                        self.layerwise_retrievers.append(
+                            layerwise_retriever)
+                        continue
+
                     logger.info(
                         "start_load_kv: inputs_embeds=%s, "
                         "deepstack=%s, mm_hashes=%d, mm_positions=%d, "
