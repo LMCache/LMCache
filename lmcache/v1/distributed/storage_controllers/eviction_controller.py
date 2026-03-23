@@ -189,8 +189,10 @@ class L2EvictionController(StorageControllerInterface):
         watermark = state.eviction_config.trigger_watermark
         eviction_ratio = state.eviction_config.eviction_ratio
 
+        # `current usage = -1` means the adapter doesn't support usage
+        # based eviction, so we do not trigger eviction based on usage.
         current_usage, _ = state.adapter.get_usage()
-        if current_usage < watermark:
+        if current_usage < 0 or current_usage < watermark:
             logger.debug(
                 "L2 usage %.2f below watermark %.2f; skipping eviction.",
                 current_usage,
