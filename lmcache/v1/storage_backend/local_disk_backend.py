@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from concurrent.futures import Future
+from concurrent.futures import Future, ThreadPoolExecutor
 from typing import TYPE_CHECKING, Any, Callable, List, Optional, Sequence
 import asyncio
 import os
@@ -44,6 +44,7 @@ class LocalDiskWorker:
 
         # TODO(Jiayi): make executor and its parameters configurable
         self.executor = AsyncPQThreadPoolExecutor(loop, max_workers=4)
+        self.reader_executor = ThreadPoolExecutor(max_workers=16, thread_name_prefix="DiskRWorker")
         self.loop = loop
         self._closed = False
 
@@ -70,6 +71,17 @@ class LocalDiskWorker:
             priority=priority,
             **kwargs,
         )
+
+    def submit_read_task(self, task: Callable, key: CacheEngineKey) -> Future:
+        """
+        Submit read task to threadpool.
+
+        :param Callable task: The target task.
+        :param CacheEngineKey key: The key of MemoryObj.
+
+        :return: a future object.
+        """
+        return self.reader_executor.submit(task, key)
 
     def remove_put_task(self, key: CacheEngineKey):
         with self.put_lock:
@@ -406,6 +418,21 @@ class LocalDiskBackend(StorageBackendInterface):
         )
 
         return memory_obj
+
+    def batched_get_blocking(
+        self,
+        keys: List[CacheEngineKey],
+    ) -> List[Optional[MemoryObj]]:
+        """
+        A blocking function to get the kv cache from the storage backend.
+
+        :param List[CacheEngineKey] keys: The keys of the MemoryObjs.
+
+        :return: a list of memory objects.
+        """
+        futures = [self.disk_worker.submit_read_task(self.get_blocking, key) for key in keys]
+        memory_objs = [future.result() for future in futures]
+        return memory_objs
 
     async def batched_get_non_blocking(
         self,
