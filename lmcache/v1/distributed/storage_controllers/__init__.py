@@ -16,6 +16,7 @@ import pkgutil
 from lmcache.v1.distributed.storage_controllers.eviction_controller import (
     EvictionController,
     L1EvictionController,
+    L2AdapterEvictionState,
     L2EvictionController,
 )
 from lmcache.v1.distributed.storage_controllers.prefetch_controller import (
@@ -36,6 +37,7 @@ __all__ = [
     "EvictionController",
     "L1EvictionController",
     "L2EvictionController",
+    "L2AdapterEvictionState",
     "PrefetchController",
     "StoreController",
 ]

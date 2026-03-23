@@ -6,14 +6,12 @@ import time
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.distributed.config import EvictionConfig
+from lmcache.v1.distributed.eviction import L1EvictionPolicy, L2EvictionPolicy
 from lmcache.v1.distributed.eviction_policy import CreateEvictionPolicy
 from lmcache.v1.distributed.internal_api import (
     EvictionAction,
     EvictionDestination,
-    L1ManagerListener,
-    L2AdapterListener,
 )
 from lmcache.v1.distributed.l1_manager import L1Manager
 from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface
@@ -58,12 +56,13 @@ class EvictionController(StorageControllerInterface):
         raise NotImplementedError
 
 
-class L1EvictionController(EvictionController, L1ManagerListener):
+class L1EvictionController(EvictionController):
     """
     Eviction controller for L1 cache.
 
-    Registers itself as an L1ManagerListener to keep the eviction policy
-    up-to-date, and periodically triggers eviction based on L1 memory usage.
+    Uses an L1EvictionPolicy bridge to keep the eviction policy up-to-date
+    with L1 manager events, and periodically triggers eviction based on
+    L1 memory usage.
     """
 
     def __init__(
@@ -73,7 +72,8 @@ class L1EvictionController(EvictionController, L1ManagerListener):
     ):
         super().__init__(eviction_config)
         self._l1_manager = l1_manager
-        self._l1_manager.register_listener(self)
+        self._listener = L1EvictionPolicy(self._eviction_policy)
+        self._l1_manager.register_listener(self._listener)
 
     def report_status(self) -> dict:
         return {
@@ -83,32 +83,6 @@ class L1EvictionController(EvictionController, L1ManagerListener):
             "trigger_watermark": self._eviction_config.trigger_watermark,
             "eviction_ratio": self._eviction_config.eviction_ratio,
         }
-
-    # ------------------------------------------------------------------
-    # L1ManagerListener — delegate to the eviction policy
-    # ------------------------------------------------------------------
-
-    def on_l1_keys_reserved_read(self, keys: list[ObjectKey]):
-        pass
-
-    def on_l1_keys_read_finished(self, keys: list[ObjectKey]):
-        self._eviction_policy.on_keys_touched(keys)
-
-    def on_l1_keys_reserved_write(self, keys: list[ObjectKey]):
-        pass
-
-    def on_l1_keys_write_finished(self, keys: list[ObjectKey]):
-        self._eviction_policy.on_keys_created(keys)
-
-    def on_l1_keys_deleted_by_manager(self, keys: list[ObjectKey]):
-        self._eviction_policy.on_keys_removed(keys)
-
-    def on_l1_keys_finish_write_and_reserve_read(self, keys: list[ObjectKey]):
-        self._eviction_policy.on_keys_created(keys)
-
-    # ------------------------------------------------------------------
-    # Eviction loop
-    # ------------------------------------------------------------------
 
     def _eviction_loop(self):
         watermark = self._eviction_config.trigger_watermark
@@ -144,83 +118,101 @@ class L1EvictionController(EvictionController, L1ManagerListener):
             self._l1_manager.delete(action.keys)
 
 
-class L2EvictionController(EvictionController, L2AdapterListener):
+class L2AdapterEvictionState:
+    """Per-adapter eviction state: its own policy, listener, and config."""
+
+    def __init__(
+        self,
+        adapter: L2AdapterInterface,
+        eviction_config: EvictionConfig,
+    ):
+        self.adapter = adapter
+        self.eviction_config = eviction_config
+        self.eviction_policy = CreateEvictionPolicy(eviction_config)
+        self.listener = L2EvictionPolicy(self.eviction_policy)
+        adapter.register_listener(self.listener)
+
+
+class L2EvictionController(StorageControllerInterface):
     """
-    Eviction controller for L2 storage.
+    Unified eviction controller for all L2 adapters.
 
-    Acts as a L2AdapterListener to keep the eviction policy up-to-date,
-    and periodically triggers eviction based on L2 storage usage reported
-    by the adapter.
-
-    Does NOT require or hold an L1Manager.
+    Each adapter gets its own eviction policy and listener bridge, but a
+    single background thread loops over all of them.
     """
 
     def __init__(
         self,
-        l2_adapter: L2AdapterInterface,
-        eviction_config: EvictionConfig,
+        l2_adapter_states: list[L2AdapterEvictionState],
     ):
-        super().__init__(eviction_config)
-        self._l2_adapter = l2_adapter
-        self._l2_adapter.register_listener(self)
+        self._adapter_states = l2_adapter_states
+        self._stop_flag = threading.Event()
+        self._thread = threading.Thread(
+            target=self._eviction_loop,
+            daemon=True,
+        )
+
+    def start(self):
+        logger.info("Starting %s...", self.__class__.__name__)
+        self._thread.start()
+
+    def stop(self):
+        self._stop_flag.set()
+        self._thread.join()
 
     def report_status(self) -> dict:
-        current_usage, usage_after_eviction = self._l2_adapter.get_usage()
+        adapter_statuses = []
+        for state in self._adapter_states:
+            current_usage, usage_after_eviction = state.adapter.get_usage()
+            adapter_statuses.append(
+                {
+                    "eviction_policy": state.eviction_config.eviction_policy,
+                    "trigger_watermark": state.eviction_config.trigger_watermark,
+                    "eviction_ratio": state.eviction_config.eviction_ratio,
+                    "current_usage": current_usage,
+                    "usage_after_ongoing_eviction": usage_after_eviction,
+                }
+            )
         return {
             "is_healthy": self._thread.is_alive(),
             "thread_alive": self._thread.is_alive(),
-            "eviction_policy": self._eviction_config.eviction_policy,
-            "trigger_watermark": self._eviction_config.trigger_watermark,
-            "eviction_ratio": self._eviction_config.eviction_ratio,
-            "current_usage": current_usage,
-            "usage_after_ongoing_eviction": usage_after_eviction,
+            "adapters": adapter_statuses,
         }
 
-    # ------------------------------------------------------------------
-    # L2AdapterListener — delegate to the eviction policy
-    # ------------------------------------------------------------------
-
-    def on_l2_keys_stored(self, keys: list[ObjectKey]):
-        self._eviction_policy.on_keys_created(keys)
-
-    def on_l2_keys_accessed(self, keys: list[ObjectKey]):
-        self._eviction_policy.on_keys_touched(keys)
-
-    def on_l2_keys_deleted(self, keys: list[ObjectKey]):
-        self._eviction_policy.on_keys_removed(keys)
-
-    # ------------------------------------------------------------------
-    # Eviction loop
-    # ------------------------------------------------------------------
-
     def _eviction_loop(self):
-        watermark = self._eviction_config.trigger_watermark
-        eviction_ratio = self._eviction_config.eviction_ratio
-
         while not self._stop_flag.is_set():
             time.sleep(1)
-            current_usage, _ = self._l2_adapter.get_usage()
-            if current_usage < watermark:
-                logger.debug(
-                    "L2 usage %.2f below watermark %.2f; skipping eviction.",
-                    current_usage,
-                    watermark,
-                )
-                continue
+            for state in self._adapter_states:
+                self._check_and_evict(state)
 
-            logger.info(
-                "L2 usage %.2f above watermark %.2f; triggering eviction.",
+    def _check_and_evict(self, state: L2AdapterEvictionState):
+        watermark = state.eviction_config.trigger_watermark
+        eviction_ratio = state.eviction_config.eviction_ratio
+
+        current_usage, _ = state.adapter.get_usage()
+        if current_usage < watermark:
+            logger.debug(
+                "L2 usage %.2f below watermark %.2f; skipping eviction.",
                 current_usage,
                 watermark,
             )
-            actions = self._eviction_policy.get_eviction_actions(eviction_ratio)
-            for action in actions:
-                self._execute_eviction_action(action)
+            return
 
-    def _execute_eviction_action(self, action: EvictionAction):
+        logger.info(
+            "L2 usage %.2f above watermark %.2f; triggering eviction.",
+            current_usage,
+            watermark,
+        )
+        actions = state.eviction_policy.get_eviction_actions(eviction_ratio)
+        for action in actions:
+            self._execute_eviction_action(state.adapter, action)
+
+    def _execute_eviction_action(
+        self, adapter: L2AdapterInterface, action: EvictionAction
+    ):
         if action.destination == EvictionDestination.DISCARD:
-            self._l2_adapter.delete(action.keys)
+            adapter.delete(action.keys)
         else:
             logger.error("Unsupported eviction destination: %s", action.destination)
             logger.error("Treating it as DISCARD.")
-            self._l2_adapter.delete(action.keys)
+            adapter.delete(action.keys)

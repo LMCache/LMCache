@@ -93,13 +93,20 @@ class EvictionPolicy:
         pass
 
 
-class L1EvictionPolicy(EvictionPolicy, L1ManagerListener):
+class L1EvictionPolicy(L1ManagerListener):
     """
-    Bridges L1Manager lifecycle events to the EvictionPolicy on_keys_* API.
+    Bridges L1Manager lifecycle events to an EvictionPolicy instance.
 
-    Subclasses only need to implement the EvictionPolicy abstract methods;
-    the L1ManagerListener callbacks are handled here.
+    The actual eviction policy is provided via the constructor, keeping
+    the policy logic decoupled from the listener interface.
     """
+
+    def __init__(self, policy: EvictionPolicy):
+        self._policy = policy
+
+    @property
+    def policy(self) -> EvictionPolicy:
+        return self._policy
 
     # L1ManagerListener implementations
     def on_l1_keys_reserved_read(self, keys: list[ObjectKey]):
@@ -107,7 +114,7 @@ class L1EvictionPolicy(EvictionPolicy, L1ManagerListener):
         pass
 
     def on_l1_keys_read_finished(self, keys: list[ObjectKey]):
-        self.on_keys_touched(keys)
+        self._policy.on_keys_touched(keys)
 
     def on_l1_keys_reserved_write(self, keys: list[ObjectKey]):
         # No-op
@@ -118,28 +125,35 @@ class L1EvictionPolicy(EvictionPolicy, L1ManagerListener):
         # updated keys here. Probably need to fix that by introducing a new
         # callback in L1ManagerListener or adding `mode` argument into
         # on_keys_reserved_write.
-        self.on_keys_created(keys)
+        self._policy.on_keys_created(keys)
 
     def on_l1_keys_deleted_by_manager(self, keys: list[ObjectKey]):
-        self.on_keys_removed(keys)
+        self._policy.on_keys_removed(keys)
 
     def on_l1_keys_finish_write_and_reserve_read(self, keys: list[ObjectKey]):
-        self.on_keys_created(keys)
+        self._policy.on_keys_created(keys)
 
 
-class L2EvictionPolicy(EvictionPolicy, L2AdapterListener):
+class L2EvictionPolicy(L2AdapterListener):
     """
-    Bridges L2Adapter lifecycle events to the EvictionPolicy on_keys_* API.
+    Bridges L2Adapter lifecycle events to an EvictionPolicy instance.
 
-    Subclasses only need to implement the EvictionPolicy abstract methods;
-    the L2AdapterListener callbacks are handled here.
+    The actual eviction policy is provided via the constructor, keeping
+    the policy logic decoupled from the listener interface.
     """
+
+    def __init__(self, policy: EvictionPolicy):
+        self._policy = policy
+
+    @property
+    def policy(self) -> EvictionPolicy:
+        return self._policy
 
     def on_l2_keys_stored(self, keys: list[ObjectKey]):
-        self.on_keys_created(keys)
+        self._policy.on_keys_created(keys)
 
     def on_l2_keys_accessed(self, keys: list[ObjectKey]):
-        self.on_keys_touched(keys)
+        self._policy.on_keys_touched(keys)
 
     def on_l2_keys_deleted(self, keys: list[ObjectKey]):
-        self.on_keys_removed(keys)
+        self._policy.on_keys_removed(keys)

@@ -23,9 +23,6 @@ L2TaskId = int
 
 
 class L2AdapterInterface(ABC):
-    def __init__(self):
-        self._listeners: list[L2AdapterListener] = []
-
     """
     The abstracted interface for L2 I/O adapters.
 
@@ -65,6 +62,9 @@ class L2AdapterInterface(ABC):
     The L2 adapter is designed to be called by a 2 controller threads (store controller
     and prefetch controller), therefore, it needs to be thread-safe.
     """
+
+    def __init__(self):
+        self._listeners: list[L2AdapterListener] = []
 
     #####################
     # Event Fd Interface
