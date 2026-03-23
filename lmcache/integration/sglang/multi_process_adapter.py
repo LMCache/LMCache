@@ -130,9 +130,9 @@ class LMCacheMPLayerwiseConnector:
             [registration],
         ).result(timeout=self._mq_timeout)
         self._registered = True
-        self._start_heartbeat()
+        self.start_heartbeat()
 
-    def _start_heartbeat(self) -> None:
+    def start_heartbeat(self) -> None:
         if self._heartbeat is not None:
             return
         self._heartbeat = HeartbeatThread(
@@ -159,7 +159,7 @@ class LMCacheMPLayerwiseConnector:
         dist.all_reduce(t, op=dist.ReduceOp.MIN, group=tp_group)
         return int(t.item())
 
-    def _create_key(
+    def create_key(
         self,
         token_ids: list[int],
         start: int,
@@ -177,7 +177,7 @@ class LMCacheMPLayerwiseConnector:
             request_id=request_id,
         )
 
-    def _wait_for_lookup(self, job_id: int) -> int:
+    def wait_for_lookup(self, job_id: int) -> int:
         deadline = time.monotonic() + self._mq_timeout
         while True:
             matched_chunks = send_lmcache_request(
@@ -191,7 +191,7 @@ class LMCacheMPLayerwiseConnector:
                 raise TimeoutError("Timed out waiting for LMCache prefetch to finish")
             time.sleep(0.001)
 
-    def _slot_mapping_to_block_ids(self, slot_mapping: torch.Tensor) -> list[int]:
+    def slot_mapping_to_block_ids(self, slot_mapping: torch.Tensor) -> list[int]:
         if slot_mapping.numel() == 0:
             return []
         if slot_mapping.numel() % self.page_size != 0:
@@ -215,7 +215,7 @@ class LMCacheMPLayerwiseConnector:
 
         return (starts // self.page_size).tolist()
 
-    def _submit_retrieve(
+    def submit_retrieve(
         self,
         state: _ActiveRetrieveState,
         layer_id: int,
@@ -226,7 +226,7 @@ class LMCacheMPLayerwiseConnector:
             self.mq_client,
             RequestType.RETRIEVE,
             [
-                self._create_key(
+                self.create_key(
                     state.token_ids,
                     start=state.offset,
                     end=state.matched_end,
@@ -244,7 +244,7 @@ class LMCacheMPLayerwiseConnector:
         state.future = future
         return future
 
-    def _free_lookup_locks(
+    def free_lookup_locks(
         self,
         token_ids: list[int],
         start: int,
@@ -257,7 +257,7 @@ class LMCacheMPLayerwiseConnector:
             self.mq_client,
             RequestType.FREE_LOOKUP_LOCKS,
             [
-                self._create_key(
+                self.create_key(
                     token_ids,
                     start=start,
                     end=end,
@@ -268,16 +268,16 @@ class LMCacheMPLayerwiseConnector:
             ],
         )
 
-    def _end_session(self, request_id: str) -> None:
+    def end_session(self, request_id: str) -> None:
         if not self.is_healthy:
             return
         send_lmcache_request(self.mq_client, RequestType.END_SESSION, [request_id])
 
-    def _cleanup_retrieve_state(self, state: _ActiveRetrieveState) -> None:
-        self._free_lookup_locks(
+    def cleanup_retrieve_state(self, state: _ActiveRetrieveState) -> None:
+        self.free_lookup_locks(
             state.token_ids, state.offset, state.matched_end, state.request_id
         )
-        self._end_session(state.request_id)
+        self.end_session(state.request_id)
 
     def chunk_size(self) -> int:
         return self._lmcache_chunk_size
@@ -299,7 +299,7 @@ class LMCacheMPLayerwiseConnector:
             )
 
         request_id = str(uuid.uuid4())
-        lookup_key = self._create_key(
+        lookup_key = self.create_key(
             load_metadata.token_ids,
             start=0,
             end=aligned_end,
@@ -312,21 +312,21 @@ class LMCacheMPLayerwiseConnector:
             RequestType.LOOKUP,
             [lookup_key, self.tp_size],
         ).result(timeout=self._mq_timeout)
-        retrieve_token_num = self._wait_for_lookup(job_id)
+        retrieve_token_num = self.wait_for_lookup(job_id)
 
         retrieve_token_num = self.global_min_tokens(
             retrieve_token_num, self.tp_group, self.device
         )
 
         if retrieve_token_num <= offset:
-            self._free_lookup_locks(
+            self.free_lookup_locks(
                 load_metadata.token_ids, 0, retrieve_token_num, request_id
             )
-            self._end_session(request_id)
+            self.end_session(request_id)
             return 0
 
-        self._free_lookup_locks(load_metadata.token_ids, 0, offset, request_id)
-        block_ids = self._slot_mapping_to_block_ids(
+        self.free_lookup_locks(load_metadata.token_ids, 0, offset, request_id)
+        block_ids = self.slot_mapping_to_block_ids(
             load_metadata.slot_mapping[offset:retrieve_token_num]
         )
 
@@ -339,7 +339,7 @@ class LMCacheMPLayerwiseConnector:
             in_flight_layer=0,
             future=None,
         )
-        self._submit_retrieve(state, 0)
+        self.submit_retrieve(state, 0)
         self._active_retrieves.append(state)
         return retrieve_token_num - offset
 
@@ -353,14 +353,14 @@ class LMCacheMPLayerwiseConnector:
                 continue
 
             if state.future is None:
-                self._cleanup_retrieve_state(state)
+                self.cleanup_retrieve_state(state)
                 finished_indices.append(i)
                 raise RuntimeError(
                     f"LMCache MP retrieve state is missing a future for "
                     f"request_id={state.request_id}"
                 )
             if not state.future.result(timeout=self._mq_timeout):
-                self._cleanup_retrieve_state(state)
+                self.cleanup_retrieve_state(state)
                 finished_indices.append(i)
                 raise RuntimeError(
                     f"LMCache MP retrieve failed for request_id={state.request_id}"
@@ -368,9 +368,9 @@ class LMCacheMPLayerwiseConnector:
 
             next_layer = layer_id + 1
             if next_layer < self.num_layers:
-                self._submit_retrieve(state, next_layer)
+                self.submit_retrieve(state, next_layer)
             else:
-                self._end_session(state.request_id)
+                self.end_session(state.request_id)
                 finished_indices.append(i)
 
         for i in reversed(finished_indices):
@@ -387,7 +387,7 @@ class LMCacheMPLayerwiseConnector:
             return
 
         request_id = str(uuid.uuid4())
-        block_ids = self._slot_mapping_to_block_ids(
+        block_ids = self.slot_mapping_to_block_ids(
             store_metadata.kv_indices[:aligned_end]
         )
         event = torch.cuda.Event(interprocess=True)
@@ -397,7 +397,7 @@ class LMCacheMPLayerwiseConnector:
                 self.mq_client,
                 RequestType.STORE,
                 [
-                    self._create_key(
+                    self.create_key(
                         store_metadata.token_ids,
                         start=0,
                         end=aligned_end,
@@ -411,14 +411,14 @@ class LMCacheMPLayerwiseConnector:
             .to_cuda_future(device=self.device)
             .result(timeout=self._mq_timeout)
         )
-        self._end_session(request_id)
+        self.end_session(request_id)
         if not success:
             raise RuntimeError("LMCache MP store failed")
 
     def reset(self) -> None:
         while self._active_retrieves:
             state = self._active_retrieves.pop()
-            self._cleanup_retrieve_state(state)
+            self.cleanup_retrieve_state(state)
 
     def close(self) -> None:
         self.reset()

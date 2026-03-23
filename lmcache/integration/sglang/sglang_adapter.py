@@ -53,7 +53,7 @@ def resolve_sglang_kv_pools(
             raise ValueError("Both k_pool and v_pool must be provided together")
         return k_pool, v_pool
 
-    def _get_kv_pool_buffer(attr_name: str) -> Any:
+    def get_kv_pool_buffer(attr_name: str) -> Any:
         if kvcache is not None and hasattr(kvcache, attr_name):
             return getattr(kvcache, attr_name)
 
@@ -73,7 +73,7 @@ def resolve_sglang_kv_pools(
             f"Missing `{attr_name}` on the active KV cache."
         )
 
-    return _get_kv_pool_buffer("k_buffer"), _get_kv_pool_buffer("v_buffer")
+    return get_kv_pool_buffer("k_buffer"), get_kv_pool_buffer("v_buffer")
 
 
 def init_lmcache_engine(
