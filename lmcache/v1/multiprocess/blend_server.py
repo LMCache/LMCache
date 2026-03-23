@@ -30,9 +30,16 @@ from lmcache.v1.mp_observability.config import (
     PrometheusConfig,
     parse_args_to_prometheus_config,
 )
-from lmcache.v1.mp_observability.prometheus_controller import (
-    get_prometheus_controller,
-    init_prometheus_controller,
+from lmcache.v1.mp_observability.event_bus import (
+    EventBusConfig,
+    init_event_bus,
+)
+from lmcache.v1.mp_observability.otel_init import init_otel_metrics
+from lmcache.v1.mp_observability.subscribers.metrics.l1 import (
+    L1MetricsSubscriber,
+)
+from lmcache.v1.mp_observability.subscribers.metrics.sm import (
+    SMMetricsSubscriber,
 )
 from lmcache.v1.mp_observability.telemetry import (
     TelemetryConfig,
@@ -651,11 +658,19 @@ def run_cache_server(
         If return_engine is True: tuple of (MessageQueueServer, MPCacheEngine)
         If return_engine is False: None (blocks until interrupted)
     """
-    # Initialize global prometheus controller
-    init_prometheus_controller(prometheus_config)
-
     # Initialize global telemetry controller
     init_telemetry_controller(telemetry_config)
+
+    # Initialize EventBus and register observability subscribers
+    # First Party
+    # Set up OTel MeterProvider BEFORE creating subscribers
+    if prometheus_config.enabled:
+        init_otel_metrics(prometheus_port=prometheus_config.port)
+
+    bus = init_event_bus(EventBusConfig(enabled=prometheus_config.enabled))
+    bus.register_subscriber(L1MetricsSubscriber())
+    bus.register_subscriber(SMMetricsSubscriber())
+    bus.start()
 
     sep_tokens = get_sep_tokens()
 
@@ -717,9 +732,6 @@ def run_cache_server(
     torch.cuda.init()
     server.start()
 
-    # Start prometheus controller after engine creation (loggers are registered)
-    get_prometheus_controller().start()
-
     # Start telemetry controller
     get_telemetry_controller().start()
     logger.info("LMCache cache blend server is running...")
@@ -735,7 +747,6 @@ def run_cache_server(
     except KeyboardInterrupt:
         logger.info("Shutting down server...")
         get_telemetry_controller().stop()
-        get_prometheus_controller().stop()
         server.close()
         engine.close()
 

@@ -17,12 +17,8 @@ from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.internal_api import L1ManagerListener
 from lmcache.v1.distributed.memory_manager import L1MemoryManager
 from lmcache.v1.memory_management import MemoryObj
-from lmcache.v1.mp_observability.logger.l1_stats_logger import (
-    L1ManagerStatsLogger,
-)
-from lmcache.v1.mp_observability.prometheus_controller import (
-    get_prometheus_controller,
-)
+from lmcache.v1.mp_observability.event import Event, EventType
+from lmcache.v1.mp_observability.event_bus import get_event_bus
 
 logger = init_logger(__name__)
 
@@ -173,10 +169,7 @@ class L1Manager:
 
         self._registered_listeners: list[L1ManagerListener] = []
 
-        # Self-register observability logger
-        l1_stats_logger = L1ManagerStatsLogger()
-        self.register_listener(l1_stats_logger)
-        get_prometheus_controller().register_logger(l1_stats_logger)
+        self._event_bus = get_event_bus()
 
     def register_listener(self, listener: L1ManagerListener) -> None:
         """Register a listener for L1Manager events.
@@ -237,6 +230,12 @@ class L1Manager:
 
         for listener in self._registered_listeners:
             listener.on_l1_keys_reserved_read(successful_keys)
+        self._event_bus.publish(
+            Event(
+                event_type=EventType.L1_READ_RESERVED,
+                metadata={"keys": successful_keys},
+            )
+        )
         return ret
 
     @l1_mgr_synchronized
@@ -361,6 +360,18 @@ class L1Manager:
         for listener in self._registered_listeners:
             listener.on_l1_keys_read_finished(successful_keys)
             listener.on_l1_keys_deleted_by_manager(need_to_free_keys)
+        self._event_bus.publish(
+            Event(
+                event_type=EventType.L1_READ_FINISHED,
+                metadata={"keys": successful_keys},
+            )
+        )
+        self._event_bus.publish(
+            Event(
+                event_type=EventType.L1_KEYS_EVICTED,
+                metadata={"keys": need_to_free_keys},
+            )
+        )
 
         return ret
 
@@ -453,6 +464,12 @@ class L1Manager:
 
         for listener in self._registered_listeners:
             listener.on_l1_keys_reserved_write(successful_keys)
+        self._event_bus.publish(
+            Event(
+                event_type=EventType.L1_WRITE_RESERVED,
+                metadata={"keys": successful_keys},
+            )
+        )
         return ret
 
     @l1_mgr_synchronized
@@ -506,6 +523,12 @@ class L1Manager:
 
         for listener in self._registered_listeners:
             listener.on_l1_keys_write_finished(successful_keys)
+        self._event_bus.publish(
+            Event(
+                event_type=EventType.L1_WRITE_FINISHED,
+                metadata={"keys": successful_keys},
+            )
+        )
         return ret
 
     @l1_mgr_synchronized
@@ -573,6 +596,12 @@ class L1Manager:
 
         for listener in self._registered_listeners:
             listener.on_l1_keys_finish_write_and_reserve_read(successful_keys)
+        self._event_bus.publish(
+            Event(
+                event_type=EventType.L1_WRITE_FINISHED_AND_READ_RESERVED,
+                metadata={"keys": successful_keys},
+            )
+        )
         return ret
 
     @l1_mgr_synchronized
@@ -613,6 +642,12 @@ class L1Manager:
 
         for listener in self._registered_listeners:
             listener.on_l1_keys_deleted_by_manager(successful_keys)
+        self._event_bus.publish(
+            Event(
+                event_type=EventType.L1_KEYS_EVICTED,
+                metadata={"keys": successful_keys},
+            )
+        )
         return ret
 
     @l1_mgr_synchronized
@@ -638,6 +673,12 @@ class L1Manager:
             self._objects.clear()
             for listener in self._registered_listeners:
                 listener.on_l1_keys_deleted_by_manager(all_keys)
+            self._event_bus.publish(
+                Event(
+                    event_type=EventType.L1_KEYS_EVICTED,
+                    metadata={"keys": all_keys},
+                )
+            )
             logger.info(
                 "L1Manager: cleared %d objects, 0 remaining.",
                 len(all_keys),
@@ -663,6 +704,12 @@ class L1Manager:
         if keys_to_clear:
             for listener in self._registered_listeners:
                 listener.on_l1_keys_deleted_by_manager(keys_to_clear)
+            self._event_bus.publish(
+                Event(
+                    event_type=EventType.L1_KEYS_EVICTED,
+                    metadata={"keys": keys_to_clear},
+                )
+            )
 
         logger.info(
             "L1Manager: cleared %d objects, %d locked objects remaining.",

@@ -3,6 +3,9 @@
 # Called at the start of every CI job.
 set -euo pipefail
 
+# Print the failing command and line number on any error.
+trap 'echo "ERROR: setup-env.sh failed at line $LINENO (exit code $?)" >&2' ERR
+
 # ── GPU health pre-check ────────────────────────────────────
 # Fail fast if GPUs are occupied by stale host processes.
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -16,22 +19,23 @@ echo "--- :python: Installing vLLM nightly"
 # indexes are available. We work around this by parsing the nightly index
 # page and installing the wheel by URL.
 ARCH=$(uname -m)  # x86_64 or aarch64
-VLLM_NIGHTLY_URL=$(
-    curl -sfL https://wheels.vllm.ai/nightly/vllm/ \
+VLLM_NIGHTLY_INDEX="https://wheels.vllm.ai/nightly/vllm/"
+INDEX_HTML=$(curl -sfL "$VLLM_NIGHTLY_INDEX" 2>&1) || true
+VLLM_NIGHTLY_URL=$(echo "$INDEX_HTML" \
     | grep -oP 'href="\K[^"]+'"${ARCH}"'\.whl' \
-    | head -1
-)
+    | head -1) || true
 if [[ -z "$VLLM_NIGHTLY_URL" ]]; then
-    echo "ERROR: Could not find vLLM nightly wheel for ${ARCH}" >&2
-    exit 1
+    echo "WARNING: Could not find vLLM nightly wheel for ${ARCH} — falling back to latest stable" >&2
+    uv pip install "vllm[runai,tensorizer,flashinfer]"
+else
+    # href is relative (../../<commit>/vllm-....whl), resolve to absolute URL
+    VLLM_WHEEL_URL="https://wheels.vllm.ai/nightly/vllm/${VLLM_NIGHTLY_URL}"
+    echo "Resolved nightly wheel: $VLLM_WHEEL_URL"
+    uv pip install --prerelease=allow \
+        "${VLLM_WHEEL_URL}[runai,tensorizer,flashinfer]" \
+        --extra-index-url https://pypi.org/simple \
+        --index-strategy unsafe-best-match
 fi
-# href is relative (../../<commit>/vllm-....whl), resolve to absolute URL
-VLLM_WHEEL_URL="https://wheels.vllm.ai/nightly/vllm/${VLLM_NIGHTLY_URL}"
-echo "Resolved nightly wheel: $VLLM_WHEEL_URL"
-uv pip install --prerelease=allow \
-    "${VLLM_WHEEL_URL}[runai,tensorizer,flashinfer]" \
-    --extra-index-url https://pypi.org/simple \
-    --index-strategy unsafe-best-match
 
 echo "--- :python: Installing LMCache from source"
 uv pip install -e . --no-build-isolation
