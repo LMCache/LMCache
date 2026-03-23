@@ -883,6 +883,8 @@ def run_cache_server(
     server.add_normal_thread_pool(
         [
             RequestType.LOOKUP,
+            RequestType.QUERY_PREFETCH_STATUS,
+            RequestType.QUERY_PREFETCH_LOOKUP_HITS,
             RequestType.FREE_LOOKUP_LOCKS,
             RequestType.END_SESSION,
             RequestType.CLEAR,
