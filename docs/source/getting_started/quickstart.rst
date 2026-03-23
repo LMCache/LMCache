@@ -73,6 +73,7 @@ This guide helps you get LMCache running end-to-end in a couple of minutes. Use 
 
       .. note::
          Configure LMCache via the config file. See :doc:`../api_reference/configurations` for the full list.
+         For LMCache multi-process mode with SGLang, see :doc:`../mp/quickstart`.
 
 (Terminal 2) Test LMCache in Action
 -----------------------------------
