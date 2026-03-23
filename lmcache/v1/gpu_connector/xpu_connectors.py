@@ -81,53 +81,6 @@ class VLLMPagedMemXPUConnectorV2(VLLMPagedMemGPUConnectorV2):
             use_gpu=use_gpu,
         )
 
-    def _initialize_attributes(self, kv_caches: List[torch.Tensor]):
-        """Initialize attributes from the kv_caches using utils functions.
-
-        Uses format discovery and utility functions from utils.py to
-        extract all KV cache parameters lazily on first use.
-
-        Args:
-            kv_caches: The KV cache tensors from which to discover
-                the cache layout and parameters.
-        """
-        if self._attributes_initialized:
-            return
-
-        self.device = kv_caches[0].device
-        assert self.device.type == "xpu", "The device should be XPU."
-
-        self.gpu_kv_format = discover_gpu_kv_format(kv_caches, EngineType.VLLM)
-        self.num_layers = get_num_layers(kv_caches, self.gpu_kv_format)
-        self.num_blocks = get_num_blocks(kv_caches, self.gpu_kv_format)
-        self.block_size = get_block_size(kv_caches, self.gpu_kv_format)
-        self.page_buffer_size = get_page_buffer_size(kv_caches, self.gpu_kv_format)
-        self.hidden_dim_size = get_hidden_dim_size(kv_caches, self.gpu_kv_format)
-        self.head_size = get_head_size(kv_caches, self.gpu_kv_format)
-        self.use_mla = is_mla(self.gpu_kv_format)
-        self.dtype = get_dtype(kv_caches, self.gpu_kv_format)
-        self.num_heads = (
-            1 if self.use_mla else get_num_heads(kv_caches, self.gpu_kv_format)
-        )
-
-        self._attributes_initialized = True
-        logger.info(
-            "XPU: attributes initialized - format: %s, "
-            "num_layers: %d, num_blocks: %d, block_size: %d, "
-            "page_buffer_size: %d, hidden_dim_size: %d, head_size: %d, "
-            "use_mla: %s, dtype: %s, num_heads: %d",
-            self.gpu_kv_format,
-            self.num_layers,
-            self.num_blocks,
-            self.block_size,
-            self.page_buffer_size,
-            self.hidden_dim_size,
-            self.head_size,
-            self.use_mla,
-            self.dtype,
-            self.num_heads,
-        )
-
     def to_gpu(self, memory_obj: MemoryObj, start: int, end: int, **kwargs):
         """Expect a kwarg 'kvcaches' which is a nested tuple of K and V tensors.
         The kvcaches should correspond to the "WHOLE token sequence".
@@ -251,6 +204,28 @@ class VLLMPagedMemXPUConnectorV2(VLLMPagedMemGPUConnectorV2):
         for memory_obj, start, end in zip(memory_objs, starts, ends, strict=False):
             self.to_gpu(memory_obj, start, end, **kwargs)
 
+    def get_shape(self, num_tokens: int) -> torch.Size:
+        """Get the shape of the data given the number of tokens.
+
+        Args:
+            num_tokens: The number of tokens in the data.
+
+        Returns:
+            The shape of the KV cache data.
+
+        Raises:
+            RuntimeError: If attributes have not been initialized yet
+                (i.e., no kv_caches have been seen).
+        """
+        if not self._attributes_initialized:
+            raise RuntimeError(
+                "Cannot determine shape before attributes are initialized. "
+                "Call to_gpu or from_gpu first so that _initialize_attributes "
+                "can discover the KV cache layout."
+            )
+        kv_size = 1 if self.use_mla else 2
+        return torch.Size([kv_size, self.num_layers, num_tokens, self.hidden_dim_size])
+
     def _validate_memory_format(self, memory_obj: MemoryObj) -> None:
         """Validate that the memory object has the expected format.
 
@@ -273,3 +248,50 @@ class VLLMPagedMemXPUConnectorV2(VLLMPagedMemGPUConnectorV2):
                     "The memory object should be in KV_2LTD format in"
                     " order to be processed by VLLMPagedMemXPUConnectorV2"
                 )
+
+    def _initialize_attributes(self, kv_caches: List[torch.Tensor]):
+        """Initialize attributes from the kv_caches using utils functions.
+
+        Uses format discovery and utility functions from utils.py to
+        extract all KV cache parameters lazily on first use.
+
+        Args:
+            kv_caches: The KV cache tensors from which to discover
+                the cache layout and parameters.
+        """
+        if self._attributes_initialized:
+            return
+
+        self.device = kv_caches[0].device
+        assert self.device.type == "xpu", "The device should be XPU."
+
+        self.gpu_kv_format = discover_gpu_kv_format(kv_caches, EngineType.VLLM)
+        self.num_layers = get_num_layers(kv_caches, self.gpu_kv_format)
+        self.num_blocks = get_num_blocks(kv_caches, self.gpu_kv_format)
+        self.block_size = get_block_size(kv_caches, self.gpu_kv_format)
+        self.page_buffer_size = get_page_buffer_size(kv_caches, self.gpu_kv_format)
+        self.hidden_dim_size = get_hidden_dim_size(kv_caches, self.gpu_kv_format)
+        self.head_size = get_head_size(kv_caches, self.gpu_kv_format)
+        self.use_mla = is_mla(self.gpu_kv_format)
+        self.dtype = get_dtype(kv_caches, self.gpu_kv_format)
+        self.num_heads = (
+            1 if self.use_mla else get_num_heads(kv_caches, self.gpu_kv_format)
+        )
+
+        self._attributes_initialized = True
+        logger.info(
+            "XPU: attributes initialized - format: %s, "
+            "num_layers: %d, num_blocks: %d, block_size: %d, "
+            "page_buffer_size: %d, hidden_dim_size: %d, head_size: %d, "
+            "use_mla: %s, dtype: %s, num_heads: %d",
+            self.gpu_kv_format,
+            self.num_layers,
+            self.num_blocks,
+            self.block_size,
+            self.page_buffer_size,
+            self.hidden_dim_size,
+            self.head_size,
+            self.use_mla,
+            self.dtype,
+            self.num_heads,
+        )

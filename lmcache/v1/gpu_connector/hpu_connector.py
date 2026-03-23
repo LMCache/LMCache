@@ -80,71 +80,6 @@ class VLLMPagedMemHPUConnectorV2(GPUConnectorInterface):
             use_gpu=use_gpu,
         )
 
-    def _initialize_attributes(self, kv_caches: List[torch.Tensor]):
-        if self._attributes_initialized:
-            return
-
-        self.device = kv_caches[0].device
-        assert self.device.type == "hpu", "The device should be HPU."
-
-        # HPU vLLM provides kv_caches as List[TensorTuple(k_tensor, v_tensor)],
-        # where each TensorTuple contains two 4D tensors of shape
-        # (num_blocks, block_size, num_heads, head_size).
-        # We create a lightweight proxy List[Tensor(2, ...)] to match the
-        # standard vLLM format (NL_X_TWO_NB_BS_NH_HS) for format discovery.
-        if (
-            isinstance(kv_caches, (list, tuple))
-            and len(kv_caches) > 0
-            and len(kv_caches[0]) == 2
-            and not isinstance(kv_caches[0], torch.Tensor)
-            and isinstance(kv_caches[0][0], torch.Tensor)
-            and isinstance(kv_caches[0][1], torch.Tensor)
-        ):
-            # kv_caches[i][0].shape = (num_blocks, block_size, num_heads, head_size)
-            # We need shape (2, num_blocks, block_size, num_heads, head_size)
-            inner_shape = kv_caches[0][0].shape
-            fake_shape = (2, *inner_shape)
-            kv_caches = [
-                torch.empty(fake_shape, dtype=kv_caches[0][0].dtype, device="meta")
-                for _ in range(len(kv_caches))
-            ]
-            logger.info(
-                "HPU: created lightweight kv_caches proxy with shape %s "
-                "for format discovery",
-                fake_shape,
-            )
-
-        self.gpu_kv_format = discover_gpu_kv_format(kv_caches, EngineType.VLLM)
-        self.num_layers = get_num_layers(kv_caches, self.gpu_kv_format)
-        self.num_blocks = get_num_blocks(kv_caches, self.gpu_kv_format)
-        self.block_size = get_block_size(kv_caches, self.gpu_kv_format)
-        self.page_buffer_size = get_page_buffer_size(kv_caches, self.gpu_kv_format)
-        self.hidden_dim_size = get_hidden_dim_size(kv_caches, self.gpu_kv_format)
-        self.head_size = get_head_size(kv_caches, self.gpu_kv_format)
-        self.use_mla = is_mla(self.gpu_kv_format)
-        self.dtype = get_dtype(kv_caches, self.gpu_kv_format)
-        self.num_heads = (
-            1 if self.use_mla else get_num_heads(kv_caches, self.gpu_kv_format)
-        )
-
-        self._attributes_initialized = True
-        logger.info(
-            "HPU: attributes initialized - format: %s, "
-            "num_layers: %d, num_blocks: %d, block_size: %d, "
-            "page_buffer_size: %d, hidden_dim_size: %d, head_size: %d, "
-            "use_mla: %s, dtype: %s, num_heads: %d",
-            self.gpu_kv_format,
-            self.num_layers,
-            self.num_blocks,
-            self.block_size,
-            self.page_buffer_size,
-            self.hidden_dim_size,
-            self.head_size,
-            self.use_mla,
-            self.dtype,
-            self.num_heads,
-        )
-
     def to_gpu(self, memory_obj: MemoryObj, start: int, end: int, **kwargs):
         """Expect a kwarg 'kvcaches' which is a nested tuple of K and V tensors.
         The kvcaches should correspond to the "WHOLE token sequence".
@@ -324,3 +259,68 @@ class VLLMPagedMemHPUConnectorV2(GPUConnectorInterface):
                     "The memory object should be in KV_2LTD format in"
                     " order to be processed by VLLMPagedMemHPUConnectorV2"
                 )
+
+    def _initialize_attributes(self, kv_caches: List[torch.Tensor]):
+        if self._attributes_initialized:
+            return
+
+        self.device = kv_caches[0].device
+        assert self.device.type == "hpu", "The device should be HPU."
+
+        # HPU vLLM provides kv_caches as List[TensorTuple(k_tensor, v_tensor)],
+        # where each TensorTuple contains two 4D tensors of shape
+        # (num_blocks, block_size, num_heads, head_size).
+        # We create a lightweight proxy List[Tensor(2, ...)] to match the
+        # standard vLLM format (NL_X_TWO_NB_BS_NH_HS) for format discovery.
+        if (
+            isinstance(kv_caches, (list, tuple))
+            and len(kv_caches) > 0
+            and len(kv_caches[0]) == 2
+            and not isinstance(kv_caches[0], torch.Tensor)
+            and isinstance(kv_caches[0][0], torch.Tensor)
+            and isinstance(kv_caches[0][1], torch.Tensor)
+        ):
+            # kv_caches[i][0].shape = (num_blocks, block_size, num_heads, head_size)
+            # We need shape (2, num_blocks, block_size, num_heads, head_size)
+            inner_shape = kv_caches[0][0].shape
+            fake_shape = (2, *inner_shape)
+            kv_caches = [
+                torch.empty(fake_shape, dtype=kv_caches[0][0].dtype, device="meta")
+                for _ in range(len(kv_caches))
+            ]
+            logger.info(
+                "HPU: created lightweight kv_caches proxy with shape %s "
+                "for format discovery",
+                fake_shape,
+            )
+
+        self.gpu_kv_format = discover_gpu_kv_format(kv_caches, EngineType.VLLM)
+        self.num_layers = get_num_layers(kv_caches, self.gpu_kv_format)
+        self.num_blocks = get_num_blocks(kv_caches, self.gpu_kv_format)
+        self.block_size = get_block_size(kv_caches, self.gpu_kv_format)
+        self.page_buffer_size = get_page_buffer_size(kv_caches, self.gpu_kv_format)
+        self.hidden_dim_size = get_hidden_dim_size(kv_caches, self.gpu_kv_format)
+        self.head_size = get_head_size(kv_caches, self.gpu_kv_format)
+        self.use_mla = is_mla(self.gpu_kv_format)
+        self.dtype = get_dtype(kv_caches, self.gpu_kv_format)
+        self.num_heads = (
+            1 if self.use_mla else get_num_heads(kv_caches, self.gpu_kv_format)
+        )
+
+        self._attributes_initialized = True
+        logger.info(
+            "HPU: attributes initialized - format: %s, "
+            "num_layers: %d, num_blocks: %d, block_size: %d, "
+            "page_buffer_size: %d, hidden_dim_size: %d, head_size: %d, "
+            "use_mla: %s, dtype: %s, num_heads: %d",
+            self.gpu_kv_format,
+            self.num_layers,
+            self.num_blocks,
+            self.block_size,
+            self.page_buffer_size,
+            self.hidden_dim_size,
+            self.head_size,
+            self.use_mla,
+            self.dtype,
+            self.num_heads,
+        )

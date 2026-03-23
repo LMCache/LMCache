@@ -19,11 +19,15 @@ _buf_registry: dict[int, ctypes.Array] = {}
 
 
 class TransferDirection(Enum):
+    """Specifies the direction of a memory transfer."""
+
     H2D = 0
     D2H = 1
 
 
 class GPUKVFormat(IntEnum):
+    """Enumeration of different GPU KV cache memory layouts."""
+
     # used by: vLLM CROSS_LAYER mode
     NB_NL_TWO_BS_NH_HS = 0
 
