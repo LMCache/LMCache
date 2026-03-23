@@ -5,5 +5,6 @@ pytest-benchmark
 pytest-benchmark[histogram]
 pytest-cov
 pytest-html>=3.2,<5.0  # 4.x requires external assets; 3.2 is stable
+pytest-timeout
 jinja2<3.2
 python-multipart
