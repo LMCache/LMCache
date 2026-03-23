@@ -114,7 +114,7 @@ $ lmcache kvcache info --url http://localhost:8000 \
 
 # JSON for scripting
 $ lmcache kvcache info --url http://localhost:8000 \
-    --request-id req-abc-123 --format json
+    req-abc-123 --format json
 {
   "title": "KV Cache Info (req-abc-123)",
   "metrics": {
@@ -131,7 +131,7 @@ $ lmcache kvcache info --url http://localhost:8000 \
 
 # Find chunks on L2
 $ lmcache kvcache info --url http://localhost:8000 \
-    --request-id req-abc-123 --format json \
+    req-abc-123 --format json \
     | jq '.metrics.chunks | to_entries[] | select(.value | contains("L2"))'
 ```
 
