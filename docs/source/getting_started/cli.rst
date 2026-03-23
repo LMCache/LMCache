@@ -22,7 +22,7 @@ After installing LMCache, the ``lmcache`` command is available:
    lmcache mock --name my-run --num-items 5
 
    # Launch the LMCache server (ZMQ + HTTP)
-   lmcache server --engine-type blend --host 0.0.0.0 --port 5555
+   lmcache server --host 0.0.0.0 --port 5555
 
    # JSON on stdout (for scripts)
    lmcache mock --name my-run --format json
