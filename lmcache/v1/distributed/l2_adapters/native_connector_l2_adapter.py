@@ -255,7 +255,7 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
 
     def get_usage(self) -> tuple[float, float]:
         # Not implemented for the native connector adapter.
-        return (0.0, 0.0)
+        return (-1.0, -1.0)
 
     # ---------------------------------------------------------------
     # Cleanup

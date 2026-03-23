@@ -398,7 +398,7 @@ class FSL2Adapter(L2AdapterInterface):
 
     def get_usage(self) -> tuple[float, float]:
         # Not implemented for the filesystem adapter.
-        return (0.0, 0.0)
+        return (-1.0, -1.0)
 
     # ------------------------------------------------------------------
     # Cleanup

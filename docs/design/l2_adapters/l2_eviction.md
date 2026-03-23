@@ -8,41 +8,50 @@ adapters participate in the eviction loop.
 
 L2 eviction is **per-adapter** and **opt-in**. Each L2 adapter instance can
 independently declare an eviction policy via its JSON config. Adapters without
-an `"eviction"` key in their config have no eviction controller created for them.
+an `"eviction"` key in their config are excluded from the eviction loop.
 
-When eviction is enabled for an adapter, a dedicated `L2EvictionController`
-background thread monitors that adapter's storage utilization and periodically
-evicts keys according to the configured policy (e.g., LRU).
+A single `L2EvictionController` manages all adapters that have eviction enabled.
+Its background thread loops over every adapter each cycle, checking usage and
+triggering eviction independently per adapter.
 
 ## Architecture
 
 ```
 StorageManager
   │
-  ├─ L2Adapter[0]  ──► L2EvictionController[0]  (if eviction_config set)
-  │     ▲                  │
-  │     │ events           │ delete(keys)
-  │     └──────────────────┘
-  │
-  ├─ L2Adapter[1]  (no eviction config → no controller)
-  │
-  └─ L2Adapter[2]  ──► L2EvictionController[2]  (if eviction_config set)
-        ▲                  │
-        │ events           │ delete(keys)
-        └──────────────────┘
+  └─ L2EvictionController  (single instance, single thread)
+       │
+       ├─ L2AdapterEvictionState[0]
+       │     adapter ──► L2Adapter[0]   (eviction_config set)
+       │     policy  ──► EvictionPolicy
+       │     listener ─► L2EvictionPolicy (bridge)
+       │
+       ├─ (L2Adapter[1] has no eviction config → not tracked)
+       │
+       └─ L2AdapterEvictionState[1]
+             adapter ──► L2Adapter[2]   (eviction_config set)
+             policy  ──► EvictionPolicy
+             listener ─► L2EvictionPolicy (bridge)
 ```
 
-The `L2EvictionController` and the adapter communicate through two channels:
+Each adapter with eviction enabled gets an `L2AdapterEvictionState` that bundles:
 
-1. **Listener callbacks** — the controller registers itself as an
+- An **`EvictionPolicy`** instance (e.g., LRU) that tracks key state.
+- An **`L2EvictionPolicy`** listener bridge registered on the adapter. The
+  bridge translates adapter events into policy `on_keys_*` calls via
+  composition (no multi-inheritance).
+
+The controller and each adapter communicate through two channels:
+
+1. **Listener callbacks** — the `L2EvictionPolicy` bridge is registered as an
    `L2AdapterListener` on the adapter. The adapter fires events when keys are
-   stored, accessed, or deleted, keeping the eviction policy's key tracking
-   up-to-date.
+   stored, accessed, or deleted, and the bridge forwards them to the eviction
+   policy to keep its key tracking up-to-date.
 
 2. **`delete(keys)`** — when the eviction policy decides to evict, the
    controller calls `adapter.delete(keys)` directly. The adapter removes those
    keys from its storage and fires an `on_l2_keys_deleted` callback, which the
-   controller forwards to the policy so it removes them from its tracking state.
+   bridge forwards to the policy so it removes them from its tracking state.
 
 ## Configuration
 
@@ -68,8 +77,8 @@ JSON spec passed to `--l2-adapter`:
 | `trigger_watermark` | float   | `0.8`   | Usage fraction [0, 1] above which eviction is triggered.        |
 | `eviction_ratio`    | float   | `0.2`   | Fraction of **used** capacity to evict each cycle.              |
 
-If the `"eviction"` key is absent, no `L2EvictionController` is created for
-that adapter instance.
+If the `"eviction"` key is absent, no `L2AdapterEvictionState` is created for
+that adapter instance and it is excluded from the eviction loop.
 
 The eviction config is parsed by `L2AdapterConfigBase._parse_eviction_config()`
 and stored as `adapter_config.eviction_config: EvictionConfig | None`.
@@ -92,7 +101,7 @@ class L2AdapterListener:
 The base class owns the listener list and provides:
 
 - `register_listener(listener)` — adds a listener; called by
-  `L2EvictionController.__init__`.
+  `L2AdapterEvictionState.__init__`.
 - `_notify_keys_stored(keys)` / `_notify_keys_accessed(keys)` /
   `_notify_keys_deleted(keys)` — protected helpers that fan out to all
   registered listeners. Adapter implementations call these after mutating
@@ -101,26 +110,23 @@ The base class owns the listener list and provides:
 No per-adapter code is needed to support listeners — just call
 `super().__init__()` and use the `_notify_*` helpers.
 
-### `L2EvictionController` (`storage_controllers/eviction_controller.py`)
+### `L2AdapterEvictionState` (`storage_controllers/eviction_controller.py`)
 
-Extends both `EvictionController` (background thread + policy) and
-`L2AdapterListener` (event receiver):
-
-```
-L2EvictionController
-  ├─ inherits: EvictionController      (stop flag, thread, eviction loop)
-  └─ implements: L2AdapterListener     (delegates events → policy)
-```
-
-**Initialization:**
+Bundles the per-adapter eviction state: the adapter reference, its
+`EvictionConfig`, an `EvictionPolicy` instance, and an `L2EvictionPolicy`
+listener bridge. On construction, it registers the bridge on the adapter:
 
 ```python
-L2EvictionController(l2_adapter, eviction_config)
-  → super().__init__(eviction_config)   # creates policy + thread
-  → l2_adapter.register_listener(self)  # subscribe to adapter events
+L2AdapterEvictionState(adapter, eviction_config)
+  → creates EvictionPolicy from config
+  → creates L2EvictionPolicy(policy)   # listener bridge
+  → adapter.register_listener(bridge)  # subscribe to adapter events
 ```
 
-**Listener delegation:**
+### `L2EvictionPolicy` (`eviction.py`)
+
+Listener bridge that inherits only `L2AdapterListener` and delegates events
+to an `EvictionPolicy` via composition:
 
 | Callback               | Delegates to              |
 |------------------------|---------------------------|
@@ -128,12 +134,19 @@ L2EvictionController(l2_adapter, eviction_config)
 | `on_l2_keys_accessed`  | `policy.on_keys_touched`  |
 | `on_l2_keys_deleted`   | `policy.on_keys_removed`  |
 
+### `L2EvictionController` (`storage_controllers/eviction_controller.py`)
+
+A single controller that manages all adapters with eviction enabled. It owns
+one background thread and a list of `L2AdapterEvictionState` objects.
+
 **Eviction loop:**
 
-Every second, the thread calls `adapter.get_usage()` which returns
+Every second, the thread iterates over all adapter states. For each adapter,
+it calls `adapter.get_usage()` which returns
 `(current_usage, usage_after_ongoing_eviction)`. If `current_usage` exceeds
-`trigger_watermark`, the policy's `get_eviction_actions(eviction_ratio)` is
-called and the resulting keys are passed to `adapter.delete()`.
+that adapter's `trigger_watermark`, the policy's
+`get_eviction_actions(eviction_ratio)` is called and the resulting keys are
+passed to `adapter.delete()`.
 
 ### Eviction Policy (`eviction_policy/`)
 
@@ -183,8 +196,8 @@ capacity) can omit steps 2–6 and rely on the base class no-op defaults.
 |----------------------------|----------|-------------|---------------------|
 | `MockL2Adapter`            | ✓        | ✓           | stored, deleted     |
 | `NixlStoreL2Adapter`       | ✓ (skips pinned) | ✓ (pool-based) | stored, deleted |
-| `FSL2Adapter`              | no-op    | `(0, 0)`    | none                |
-| `NativeConnectorL2Adapter` | no-op    | `(0, 0)`    | none                |
+| `FSL2Adapter`              | no-op    | `(-1, -1)`  | none                |
+| `NativeConnectorL2Adapter` | no-op    | `(-1, -1)`  | none                |
 
 ## Data Flow: Eviction Cycle
 
@@ -192,39 +205,43 @@ capacity) can omit steps 2–6 and rely on the base class no-op defaults.
 [Background thread — every 1s]
   │
   ▼
-adapter.get_usage()
-  → (current_usage, _)
+for each L2AdapterEvictionState:
   │
-  ├─ current_usage < watermark → sleep, repeat
-  │
-  └─ current_usage ≥ watermark
-       │
-       ▼
-  policy.get_eviction_actions(eviction_ratio)
-       → list[EvictionAction(keys, destination=DISCARD)]
-       │
-       ▼
-  adapter.delete(eviction_action.keys)
-       │
-       ├─ removes keys from storage
-       └─ calls _notify_keys_deleted(deleted_keys)
-            │
-            ▼
-       on_l2_keys_deleted → policy.on_keys_removed
-            → updates internal tracking (e.g., LRU order)
+  ▼
+  state.adapter.get_usage()
+    → (current_usage, _)
+    │
+    ├─ current_usage < watermark → skip this adapter
+    │
+    └─ current_usage ≥ watermark
+         │
+         ▼
+    state.policy.get_eviction_actions(eviction_ratio)
+         → list[EvictionAction(keys, destination=DISCARD)]
+         │
+         ▼
+    state.adapter.delete(eviction_action.keys)
+         │
+         ├─ removes keys from storage
+         └─ calls _notify_keys_deleted(deleted_keys)
+              │
+              ▼
+         L2EvictionPolicy bridge → policy.on_keys_removed
+              → updates internal tracking (e.g., LRU order)
 ```
 
 ## Relationship to L1 Eviction
 
 L1 and L2 eviction share the same policy classes (`LRUEvictionPolicy`,
-`NoOpEvictionPolicy`) and the same `EvictionController` base class. They differ
-in how they are wired:
+`NoOpEvictionPolicy`) and the same listener-bridge pattern (composition over
+multi-inheritance). They differ in how they are wired:
 
 | Aspect              | L1                                   | L2                                    |
 |---------------------|--------------------------------------|---------------------------------------|
 | Controller          | `L1EvictionController`               | `L2EvictionController`                |
+| Listener bridge     | `L1EvictionPolicy`                   | `L2EvictionPolicy`                    |
 | Listener interface  | `L1ManagerListener`                  | `L2AdapterListener`                   |
 | Usage source        | `L1Manager.get_memory_usage()`       | `L2AdapterInterface.get_usage()`      |
 | Config location     | `StorageManagerConfig.eviction_config` | `L2AdapterConfigBase.eviction_config` |
-| Cardinality         | One per `StorageManager`             | One per adapter (only if configured)  |
-| Created by          | `StorageManager.__init__`            | `StorageManager.__init__` (per adapter) |
+| Cardinality         | One per `StorageManager`             | One controller for all adapters       |
+| Created by          | `StorageManager.__init__`            | `StorageManager.__init__`             |

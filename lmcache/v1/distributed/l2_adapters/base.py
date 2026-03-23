@@ -325,10 +325,11 @@ class L2AdapterInterface(ABC):
                   in-flight deletes/evictions complete
                   ((bytes used - bytes being deleted) / total bytes).
 
-            The default implementation returns ``(0.0, 0.0)``. Subclasses that
-            support eviction should override this method.
+            The default implementation returns ``(-1.0, -1.0)`` to indicate
+            that usage tracking is not supported. Subclasses that support
+            eviction should override this method.
         """
-        return (0.0, 0.0)
+        return (-1.0, -1.0)
 
     #####################
     # Cleanup Interface
