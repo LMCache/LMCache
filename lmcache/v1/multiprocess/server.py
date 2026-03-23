@@ -6,7 +6,6 @@ import threading
 import time
 
 # Third Party
-import prometheus_client
 import torch
 import zmq
 
@@ -34,10 +33,7 @@ from lmcache.v1.mp_observability.config import (
     add_prometheus_args,
     parse_args_to_prometheus_config,
 )
-from lmcache.v1.mp_observability.prometheus_controller import (
-    get_prometheus_controller,
-    init_prometheus_controller,
-)
+from lmcache.v1.mp_observability.otel_init import init_otel_metrics
 from lmcache.v1.mp_observability.telemetry import (
     TelemetryConfig,
     add_telemetry_args,
@@ -300,7 +296,7 @@ class MPCacheEngine:
 
                 # Copy from GPU to CPU
                 tmp_buffer = gpu_context.get_tmp_gpu_buffer(self.chunk_size)
-                with self.lock:
+                with gpu_context.transfer_lock:
                     lmc_ops.multi_layer_kv_transfer(
                         tmp_buffer,
                         gpu_context.kv_pointers,
@@ -419,7 +415,7 @@ class MPCacheEngine:
 
                 # Copy from CPU to GPU
                 tmp_gpu_buffer_ = gpu_context.get_tmp_gpu_buffer(self.chunk_size)
-                with self.lock:
+                with gpu_context.transfer_lock:
                     lmcache_memcpy_async_h2d(memory_obj, tmp_gpu_buffer_)
                     lmc_ops.multi_layer_kv_transfer(
                         tmp_gpu_buffer_,
@@ -581,6 +577,35 @@ class MPCacheEngine:
             self._prefetch_jobs[job_id] = job
         return job_id
 
+    def query_prefetch_lookup_hits(
+        self,
+        prefetch_job_id: int,
+    ) -> int | None:
+        """Query the number of hits for a prefetch request before it's finished
+
+        Returns:
+            The number of hits for the prefetched keys if the lookup is all done.
+            None if the lookup phase is still in progress, or the prefetch is
+            already completed and consumed by query_prefetch_status, or the
+            prefetch_job_id is invalid.
+        """
+        with self._prefetch_job_lock:
+            job = self._prefetch_jobs.get(prefetch_job_id)
+
+        if job is None:
+            logger.warning(
+                "Prefetch job %d not found (already completed or invalid)",
+                prefetch_job_id,
+            )
+            return None
+
+        found_count = self.storage_manager.query_prefetch_lookup_hits(job.handle)
+        if found_count is None:
+            return None
+
+        found_count = found_count // job.world_size
+        return found_count
+
     def query_prefetch_status(
         self,
         prefetch_job_id: int,
@@ -696,16 +721,36 @@ class MPCacheEngine:
     def report_status(self) -> dict:
         """Return a status dict for the entire cache engine."""
         sm = self.storage_manager.report_status()
+
+        gpu_context_meta: dict[str, dict] = {}
+        for gpu_id, meta in self.gpu_context_meta.items():
+            entry: dict = {
+                "model_name": meta[0],
+                "world_size": meta[1],
+            }
+            ctx = self.gpu_contexts.get(gpu_id)
+            if ctx is not None:
+                entry["kv_cache_layout"] = {
+                    "num_layers": ctx.num_layers,
+                    "block_size": ctx.block_size,
+                    "hidden_dim_size": ctx.hidden_dim_size,
+                    "dtype": str(ctx.dtype),
+                    "is_mla": ctx.is_mla,
+                    "num_blocks": ctx.num_blocks,
+                    "gpu_kv_format": ctx.gpu_kv_format_name,
+                    "gpu_kv_shape": ctx.gpu_kv_shape,
+                    "gpu_kv_concrete_shape": ctx.concrete_gpu_kv_shape,
+                    "attention_backend": ctx.attention_backend,
+                }
+            gpu_context_meta[str(gpu_id)] = entry
+
         return {
             "is_healthy": sm["is_healthy"],
-            "engine_type": "MPCacheEngine",
+            "engine_type": self.__class__.__name__,
             "chunk_size": self.chunk_size,
             "hash_algorithm": self.token_hasher.hash_algorithm_name,
             "registered_gpu_ids": list(self.gpu_contexts.keys()),
-            "gpu_context_meta": {
-                str(gpu_id): {"model_name": meta[0], "world_size": meta[1]}
-                for gpu_id, meta in self.gpu_context_meta.items()
-            },
+            "gpu_context_meta": gpu_context_meta,
             "active_sessions": self.session_manager.active_count(),
             "storage_manager": sm,
         }
@@ -769,19 +814,31 @@ def run_cache_server(
         If return_engine is True: tuple of (MessageQueueServer, MPCacheEngine)
         If return_engine is False: None (blocks until interrupted)
     """
-    # Initialize global prometheus controller
-    init_prometheus_controller(prometheus_config)
-
     # Initialize global telemetry controller
     init_telemetry_controller(telemetry_config)
 
-    # Start Prometheus metrics HTTP server if enabled
+    # Initialize EventBus and register observability subscribers
+    # First Party
+    from lmcache.v1.mp_observability.event_bus import (
+        EventBusConfig,
+        init_event_bus,
+    )
+    from lmcache.v1.mp_observability.subscribers.metrics.l1 import (
+        L1MetricsSubscriber,
+    )
+    from lmcache.v1.mp_observability.subscribers.metrics.sm import (
+        SMMetricsSubscriber,
+    )
+
+    # Set up OTel MeterProvider BEFORE creating subscribers so that
+    # module-level get_meter() calls bind to the real provider
     if prometheus_config.enabled:
-        prometheus_client.start_http_server(prometheus_config.port)
-        logger.info(
-            "Prometheus metrics available at http://0.0.0.0:%d/metrics",
-            prometheus_config.port,
-        )
+        init_otel_metrics(prometheus_port=prometheus_config.port)
+
+    bus = init_event_bus(EventBusConfig(enabled=prometheus_config.enabled))
+    bus.register_subscriber(L1MetricsSubscriber())
+    bus.register_subscriber(SMMetricsSubscriber())
+    bus.start()
 
     # Initialize the engine (loggers self-register with the global controller)
     engine = MPCacheEngine(
@@ -808,6 +865,11 @@ def run_cache_server(
     add_handler_helper(
         server, RequestType.QUERY_PREFETCH_STATUS, engine.query_prefetch_status
     )
+    add_handler_helper(
+        server,
+        RequestType.QUERY_PREFETCH_LOOKUP_HITS,
+        engine.query_prefetch_lookup_hits,
+    )
     add_handler_helper(server, RequestType.FREE_LOOKUP_LOCKS, engine.free_lookup_locks)
     add_handler_helper(server, RequestType.RETRIEVE, engine.retrieve)
     add_handler_helper(server, RequestType.CLEAR, engine.clear)
@@ -825,9 +887,6 @@ def run_cache_server(
     torch.cuda.init()
     server.start()
 
-    # Start prometheus controller after engine creation (loggers are registered)
-    get_prometheus_controller().start()
-
     # Start telemetry controller
     get_telemetry_controller().start()
     logger.info("LMCache cache server is running...")
@@ -843,7 +902,6 @@ def run_cache_server(
     except KeyboardInterrupt:
         logger.info("Shutting down server...")
         get_telemetry_controller().stop()
-        get_prometheus_controller().stop()
         server.close()
         engine.close()
 
