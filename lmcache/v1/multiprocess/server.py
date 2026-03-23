@@ -692,16 +692,36 @@ class MPCacheEngine:
     def report_status(self) -> dict:
         """Return a status dict for the entire cache engine."""
         sm = self.storage_manager.report_status()
+
+        gpu_context_meta: dict[str, dict] = {}
+        for gpu_id, meta in self.gpu_context_meta.items():
+            entry: dict = {
+                "model_name": meta[0],
+                "world_size": meta[1],
+            }
+            ctx = self.gpu_contexts.get(gpu_id)
+            if ctx is not None:
+                entry["kv_cache_layout"] = {
+                    "num_layers": ctx.num_layers,
+                    "block_size": ctx.block_size,
+                    "hidden_dim_size": ctx.hidden_dim_size,
+                    "dtype": str(ctx.dtype),
+                    "is_mla": ctx.is_mla,
+                    "num_blocks": ctx.num_blocks,
+                    "gpu_kv_format": ctx.gpu_kv_format_name,
+                    "gpu_kv_shape": ctx.gpu_kv_shape,
+                    "gpu_kv_concrete_shape": ctx.concrete_gpu_kv_shape,
+                    "attention_backend": ctx.attention_backend,
+                }
+            gpu_context_meta[str(gpu_id)] = entry
+
         return {
             "is_healthy": sm["is_healthy"],
-            "engine_type": "MPCacheEngine",
+            "engine_type": self.__class__.__name__,
             "chunk_size": self.chunk_size,
             "hash_algorithm": self.token_hasher.hash_algorithm_name,
             "registered_gpu_ids": list(self.gpu_contexts.keys()),
-            "gpu_context_meta": {
-                str(gpu_id): {"model_name": meta[0], "world_size": meta[1]}
-                for gpu_id, meta in self.gpu_context_meta.items()
-            },
+            "gpu_context_meta": gpu_context_meta,
             "active_sessions": self.session_manager.active_count(),
             "storage_manager": sm,
         }

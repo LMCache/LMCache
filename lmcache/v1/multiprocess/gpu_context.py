@@ -20,8 +20,11 @@ from lmcache.logging import init_logger
 from lmcache.utils import EngineType, _lmcache_nvtx_annotate
 from lmcache.v1.gpu_connector.utils import (
     discover_gpu_kv_format,
+    get_attention_backend,
     get_block_size,
+    get_concrete_gpu_kv_shape,
     get_dtype,
+    get_gpu_kv_shape_description,
     get_hidden_dim_size,
     get_num_blocks,
     get_num_layers,
@@ -189,6 +192,26 @@ class GPUCacheContext:
         Returns whether the model uses MLA
         """
         return self.is_mla_
+
+    @property
+    def gpu_kv_format_name(self) -> str:
+        """Returns the GPU KV format enum name (e.g. ``'NL_X_TWO_NB_BS_NH_HS'``)."""
+        return self.gpu_kv_format_.name
+
+    @property
+    def gpu_kv_shape(self) -> str:
+        """Returns a human-readable shape description of the GPU KV cache layout."""
+        return get_gpu_kv_shape_description(self.gpu_kv_format_)
+
+    @property
+    def attention_backend(self) -> str:
+        """Returns the attention backend name."""
+        return get_attention_backend(self.gpu_kv_format_)
+
+    @property
+    def concrete_gpu_kv_shape(self) -> str:
+        """Returns the GPU KV shape with actual numeric values substituted."""
+        return get_concrete_gpu_kv_shape(self.kv_caches_, self.gpu_kv_format_)
 
     def get_tmp_gpu_buffer(self, num_tokens: int) -> torch.Tensor:
         """
