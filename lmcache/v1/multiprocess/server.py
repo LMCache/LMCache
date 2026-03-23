@@ -577,6 +577,35 @@ class MPCacheEngine:
             self._prefetch_jobs[job_id] = job
         return job_id
 
+    def query_prefetch_lookup_hits(
+        self,
+        prefetch_job_id: int,
+    ) -> int | None:
+        """Query the number of hits for a prefetch request before it's finished
+
+        Returns:
+            The number of hits for the prefetched keys if the lookup is all done.
+            None if the lookup phase is still in progress, or the prefetch is
+            already completed and consumed by query_prefetch_status, or the
+            prefetch_job_id is invalid.
+        """
+        with self._prefetch_job_lock:
+            job = self._prefetch_jobs.get(prefetch_job_id)
+
+        if job is None:
+            logger.warning(
+                "Prefetch job %d not found (already completed or invalid)",
+                prefetch_job_id,
+            )
+            return None
+
+        found_count = self.storage_manager.query_prefetch_lookup_hits(job.handle)
+        if found_count is None:
+            return None
+
+        found_count = found_count // job.world_size
+        return found_count
+
     def query_prefetch_status(
         self,
         prefetch_job_id: int,
@@ -835,6 +864,11 @@ def run_cache_server(
     add_handler_helper(server, RequestType.LOOKUP, engine.lookup)
     add_handler_helper(
         server, RequestType.QUERY_PREFETCH_STATUS, engine.query_prefetch_status
+    )
+    add_handler_helper(
+        server,
+        RequestType.QUERY_PREFETCH_LOOKUP_HITS,
+        engine.query_prefetch_lookup_hits,
     )
     add_handler_helper(server, RequestType.FREE_LOOKUP_LOCKS, engine.free_lookup_locks)
     add_handler_helper(server, RequestType.RETRIEVE, engine.retrieve)
