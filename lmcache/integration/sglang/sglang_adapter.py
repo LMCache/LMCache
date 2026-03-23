@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from dataclasses import dataclass
-from typing import Any, Iterable, List, Optional
+from typing import Any, Iterable, Optional
 import uuid
 
 # Third Party
@@ -29,14 +29,14 @@ logger = init_logger(__name__)
 @dataclass
 class StoreMetadata:
     last_node: Any
-    token_ids: List[int]
+    token_ids: list[int]
     kv_indices: torch.Tensor
     offset: int
 
 
 @dataclass
 class LoadMetadata:
-    token_ids: List[int]
+    token_ids: list[int]
     slot_mapping: torch.Tensor
     offset: int
 
@@ -45,33 +45,46 @@ def resolve_sglang_kv_pools(
     *,
     token_to_kv_pool_allocator: Any | None = None,
     kvcache: Any | None = None,
-    k_pool: Optional[List[torch.Tensor]] = None,
-    v_pool: Optional[List[torch.Tensor]] = None,
-) -> tuple[List[torch.Tensor], List[torch.Tensor]]:
+    k_pool: list[torch.Tensor] | None = None,
+    v_pool: list[torch.Tensor] | None = None,
+) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
     if k_pool is not None or v_pool is not None:
         if k_pool is None or v_pool is None:
             raise ValueError("Both k_pool and v_pool must be provided together")
         return k_pool, v_pool
 
-    def get_kv_pool_buffer(attr_name: str) -> Any:
+    def get_kv_pool_buffer(attr_name: str) -> list[torch.Tensor]:
         if kvcache is not None and hasattr(kvcache, attr_name):
-            return getattr(kvcache, attr_name)
+            buffer = getattr(kvcache, attr_name)
+        else:
+            legacy_kvcache = getattr(token_to_kv_pool_allocator, "_kvcache", None)
+            if legacy_kvcache is not None and hasattr(legacy_kvcache, attr_name):
+                buffer = getattr(legacy_kvcache, attr_name)
+            else:
+                buffer = None
 
-        legacy_kvcache = getattr(token_to_kv_pool_allocator, "_kvcache", None)
-        if legacy_kvcache is not None and hasattr(legacy_kvcache, attr_name):
-            return getattr(legacy_kvcache, attr_name)
-
-        if token_to_kv_pool_allocator is not None:
+        if buffer is None and token_to_kv_pool_allocator is not None:
             get_kvcache = getattr(token_to_kv_pool_allocator, "get_kvcache", None)
             if callable(get_kvcache):
                 active_kvcache = get_kvcache()
                 if active_kvcache is not None and hasattr(active_kvcache, attr_name):
-                    return getattr(active_kvcache, attr_name)
+                    buffer = getattr(active_kvcache, attr_name)
 
-        raise ValueError(
-            "Unsupported SGLang KV cache layout for LMCache. "
-            f"Missing `{attr_name}` on the active KV cache."
-        )
+        if buffer is None:
+            raise ValueError(
+                "Unsupported SGLang KV cache layout for LMCache. "
+                f"Missing `{attr_name}` on the active KV cache."
+            )
+
+        if not isinstance(buffer, list | tuple) or not all(
+            isinstance(tensor, torch.Tensor) for tensor in buffer
+        ):
+            raise TypeError(
+                f"Expected `{attr_name}` to be a sequence of torch.Tensor values, "
+                f"got {type(buffer)}"
+            )
+
+        return list(buffer)
 
     return get_kv_pool_buffer("k_buffer"), get_kv_pool_buffer("v_buffer")
 
@@ -140,8 +153,8 @@ class LMCacheConnector:
         sgl_config: ModelConfig,
         tp_size: int,
         rank: int,
-        k_pool: Optional[List[torch.Tensor]] = None,
-        v_pool: Optional[List[torch.Tensor]] = None,
+        k_pool: list[torch.Tensor] | None = None,
+        v_pool: list[torch.Tensor] | None = None,
         token_to_kv_pool_allocator: Any | None = None,
         kvcache: Any | None = None,
     ):
@@ -247,8 +260,8 @@ class LMCacheLayerwiseConnector(LMCacheConnector):
         sgl_config: ModelConfig,
         tp_size: int,
         rank: int,
-        k_pool: Optional[List[torch.Tensor]] = None,
-        v_pool: Optional[List[torch.Tensor]] = None,
+        k_pool: list[torch.Tensor] | None = None,
+        v_pool: list[torch.Tensor] | None = None,
         tp_group: Optional[torch.distributed.ProcessGroup] = None,
         token_to_kv_pool_allocator: Any | None = None,
         kvcache: Any | None = None,
@@ -261,11 +274,11 @@ class LMCacheLayerwiseConnector(LMCacheConnector):
         )
         super().__init__(sgl_config, tp_size, rank, k_pool, v_pool)
         self._lmcache_chunk_size = self.lmcache_engine.config.chunk_size
-        self.layerwise_retrievers: List[Any] = []
-        self.layer_load_layer: List[int] = []
+        self.layerwise_retrievers: list[Any] = []
+        self.layer_load_layer: list[int] = []
         self.kvcaches = [k_pool, v_pool]
         self.tp_group = tp_group
-        self.lookup_id_list: List[str] = []
+        self.lookup_id_list: list[str] = []
 
     @torch.no_grad()
     def global_min_tokens(

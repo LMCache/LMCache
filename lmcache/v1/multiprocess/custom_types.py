@@ -238,6 +238,8 @@ class KVCacheRegistration:
             raise ValueError(f"Unsupported engine type: {self.engine_type}")
         if self.block_size <= 0:
             raise ValueError(f"block_size must be positive, got {self.block_size}")
+        if not _has_kv_cache_payload(self.kv_caches):
+            raise ValueError("kv_caches must contain at least one KV cache tensor")
 
 
 @dataclass
@@ -254,6 +256,14 @@ _CUSTOMERIZED_SERIALIZERS = {
         code=1,
     ),
 }
+
+
+def _has_kv_cache_payload(kv_caches: Any) -> bool:
+    if kv_caches is None:
+        return False
+    if isinstance(kv_caches, list | tuple):
+        return any(_has_kv_cache_payload(kv_cache) for kv_cache in kv_caches)
+    return True
 
 
 def get_customized_encoder(type: Any) -> msgspec.msgpack.Encoder:

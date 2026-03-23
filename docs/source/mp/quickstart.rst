@@ -127,14 +127,23 @@ In a new terminal:
 
 .. code-block:: bash
 
+    PROMPT=$(python - <<'PY'
+    print(" ".join(f"tok{i}" for i in range(1, 201)))
+    PY
+    )
+
+    cat >/tmp/sglang-mp-request.json <<EOF
+    {
+      "model": "Qwen/Qwen3-0.6B",
+      "messages": [{"role": "user", "content": "${PROMPT}"}],
+      "temperature": 0,
+      "max_tokens": 16
+    }
+    EOF
+
     curl http://127.0.0.1:30000/v1/chat/completions \
         -H "Content-Type: application/json" \
-        -d '{
-          "model": "Qwen/Qwen3-0.6B",
-          "messages": [{"role": "user", "content": "tok1 tok2 tok3 tok4 tok5 tok6 tok7 tok8 tok9 tok10 tok11 tok12 tok13 tok14 tok15 tok16 tok17 tok18 tok19 tok20 tok21 tok22 tok23 tok24 tok25 tok26 tok27 tok28 tok29 tok30 tok31 tok32 tok33 tok34 tok35 tok36 tok37 tok38 tok39 tok40 tok41 tok42 tok43 tok44 tok45 tok46 tok47 tok48 tok49 tok50 tok51 tok52 tok53 tok54 tok55 tok56 tok57 tok58 tok59 tok60 tok61 tok62 tok63 tok64 tok65 tok66 tok67 tok68 tok69 tok70 tok71 tok72 tok73 tok74 tok75 tok76 tok77 tok78 tok79 tok80 tok81 tok82 tok83 tok84 tok85 tok86 tok87 tok88 tok89 tok90 tok91 tok92 tok93 tok94 tok95 tok96 tok97 tok98 tok99 tok100 tok101 tok102 tok103 tok104 tok105 tok106 tok107 tok108 tok109 tok110 tok111 tok112 tok113 tok114 tok115 tok116 tok117 tok118 tok119 tok120 tok121 tok122 tok123 tok124 tok125 tok126 tok127 tok128 tok129 tok130 tok131 tok132 tok133 tok134 tok135 tok136 tok137 tok138 tok139 tok140 tok141 tok142 tok143 tok144 tok145 tok146 tok147 tok148 tok149 tok150 tok151 tok152 tok153 tok154 tok155 tok156 tok157 tok158 tok159 tok160 tok161 tok162 tok163 tok164 tok165 tok166 tok167 tok168 tok169 tok170 tok171 tok172 tok173 tok174 tok175 tok176 tok177 tok178 tok179 tok180 tok181 tok182 tok183 tok184 tok185 tok186 tok187 tok188 tok189 tok190 tok191 tok192 tok193 tok194 tok195 tok196 tok197 tok198 tok199 tok200"}],
-          "temperature": 0,
-          "max_tokens": 16
-        }'
+        -d @/tmp/sglang-mp-request.json
 
 Example result observed during validation:
 

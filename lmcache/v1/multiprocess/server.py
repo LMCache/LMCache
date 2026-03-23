@@ -162,6 +162,40 @@ def resolve_layer_window(
     return layer_begin, layer_end, False
 
 
+def get_sglang_chunk_tensor(
+    memory_obj: MemoryObj,
+    *,
+    layer_begin: int,
+    layer_end: int,
+    token_begin: int,
+    token_end: int,
+) -> torch.Tensor:
+    tensor = memory_obj.tensor
+    if tensor is None:
+        raise ValueError("Prefetched memory object does not contain a tensor")
+    if tensor.ndim != 4:
+        raise ValueError(
+            "Expected SGLang MP memory tensor to have shape "
+            f"[2, num_layers, num_tokens, hidden_dim], got {tuple(tensor.shape)}"
+        )
+    if tensor.shape[0] != 2:
+        raise ValueError(
+            "Expected the first SGLang MP memory tensor dimension to be 2 "
+            f"(K/V), got {tensor.shape[0]}"
+        )
+    if layer_begin < 0 or layer_end > tensor.shape[1]:
+        raise ValueError(
+            f"Layer window [{layer_begin}, {layer_end}) exceeds stored tensor "
+            f"shape {tuple(tensor.shape)}"
+        )
+    if token_begin < 0 or token_end < token_begin or token_end > tensor.shape[2]:
+        raise ValueError(
+            f"Token window [{token_begin}, {token_end}) exceeds stored tensor "
+            f"shape {tuple(tensor.shape)}"
+        )
+    return tensor
+
+
 @dataclass
 class _PrefetchJob:
     handle: PrefetchHandle
@@ -326,15 +360,21 @@ class MPCacheEngine:
                 end = start + self.chunk_size
                 slot_mapping = slot_mapping_tensor[start:end]
 
-                assert memory_obj.tensor is not None
                 with gpu_context.transfer_lock:
                     if gpu_context.is_sglang_mha:
+                        chunk_tensor = get_sglang_chunk_tensor(
+                            memory_obj,
+                            layer_begin=0,
+                            layer_end=gpu_context.num_layers,
+                            token_begin=0,
+                            token_end=self.chunk_size,
+                        )
                         for layer_id in range(gpu_context.num_layers):
                             key_tensor, value_tensor = (
                                 gpu_context.get_layerwise_kv_tensors(layer_id)
                             )
                             lmc_ops.single_layer_kv_transfer_sgl(
-                                memory_obj.tensor[:, layer_id, :, :],
+                                chunk_tensor[:, layer_id, : self.chunk_size, :],
                                 key_tensor,
                                 value_tensor,
                                 slot_mapping,
@@ -492,19 +532,26 @@ class MPCacheEngine:
                         "only for the SGLang MHA GPUKVFormat"
                     )
 
-                if memory_obj.tensor is None:
-                    raise ValueError(
-                        "Prefetched memory object does not contain a tensor"
-                    )
-
                 slot_mapping = slot_mapping[skip_in_chunk:]
+                if slot_mapping.numel() == 0:
+                    continue
+                chunk_tensor = get_sglang_chunk_tensor(
+                    memory_obj,
+                    layer_begin=layer_begin,
+                    layer_end=layer_end,
+                    token_begin=skip_in_chunk,
+                    token_end=self.chunk_size,
+                )
                 with gpu_context.transfer_lock:
                     for layer_id in range(layer_begin, layer_end):
                         key_tensor, value_tensor = gpu_context.get_layerwise_kv_tensors(
                             layer_id
                         )
+                        layer_chunk_tensor = chunk_tensor[
+                            :, layer_id, skip_in_chunk : self.chunk_size, :
+                        ]
                         lmc_ops.single_layer_kv_transfer_sgl(
-                            memory_obj.tensor[:, layer_id, skip_in_chunk:, :],
+                            layer_chunk_tensor,
                             key_tensor,
                             value_tensor,
                             slot_mapping,

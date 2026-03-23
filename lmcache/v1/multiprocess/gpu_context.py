@@ -44,7 +44,15 @@ def unwrap_kv_cache_tensors(kv_caches: Any) -> Any:
         return [unwrap_kv_cache_tensors(kv_cache) for kv_cache in kv_caches]
     if isinstance(kv_caches, tuple):
         return tuple(unwrap_kv_cache_tensors(kv_cache) for kv_cache in kv_caches)
-    return kv_caches.to_tensor()
+    if isinstance(kv_caches, torch.Tensor):
+        return kv_caches
+    to_tensor = getattr(kv_caches, "to_tensor", None)
+    if callable(to_tensor):
+        return to_tensor()
+    raise TypeError(
+        "Expected KV cache leaf to be a torch.Tensor or CUDA IPC wrapper, "
+        f"got {type(kv_caches)}"
+    )
 
 
 def flatten_kv_cache_tensors(kv_caches: Any) -> list[torch.Tensor]:
@@ -53,6 +61,11 @@ def flatten_kv_cache_tensors(kv_caches: Any) -> list[torch.Tensor]:
         for kv_cache in kv_caches:
             flattened.extend(flatten_kv_cache_tensors(kv_cache))
         return flattened
+    if not isinstance(kv_caches, torch.Tensor):
+        raise TypeError(
+            "Expected flattened KV cache leaf to be a torch.Tensor, "
+            f"got {type(kv_caches)}"
+        )
     return [kv_caches]
 
 
@@ -97,15 +110,18 @@ class GPUCacheContext:
                 "page_buffer_size must be divisible by block_size, got "
                 f"{self.page_buffer_size_} and {self.block_size_}"
             )
-        try:
-            expected_num_blocks = get_num_blocks(self.kv_caches_, self.gpu_kv_format_)
-        except ValueError:
-            expected_num_blocks = self.page_buffer_size_ // self.block_size_
         self.num_blocks_ = self.page_buffer_size_ // self.block_size_
-        if expected_num_blocks != self.num_blocks_:
+        try:
+            discovered_num_blocks = get_num_blocks(self.kv_caches_, self.gpu_kv_format_)
+        except ValueError:
+            discovered_num_blocks = None
+        if (
+            discovered_num_blocks is not None
+            and discovered_num_blocks != self.num_blocks_
+        ):
             raise ValueError(
                 "Registration block_size does not match discovered KV cache "
-                f"layout: expected {expected_num_blocks} blocks, "
+                f"layout: expected {discovered_num_blocks} blocks, "
                 f"got {self.num_blocks_}"
             )
         self.hidden_dim_size_ = get_hidden_dim_size(
@@ -251,10 +267,34 @@ class GPUCacheContext:
                 "Layerwise KV tensor views are only available for "
                 "the SGLang MHA GPUKVFormat"
             )
-        assert isinstance(self.kv_caches_, list) and len(self.kv_caches_) == 2
+        if not isinstance(self.kv_caches_, list) or len(self.kv_caches_) != 2:
+            raise TypeError(
+                "Expected SGLang MHA KV caches to be a list of [key_layers, "
+                f"value_layers], got {type(self.kv_caches_)}"
+            )
         key_layers, value_layers = self.kv_caches_
+        if not isinstance(key_layers, list | tuple) or not isinstance(
+            value_layers, list | tuple
+        ):
+            raise TypeError(
+                "Expected SGLang MHA KV caches to store per-layer tensors in "
+                "two sequences"
+            )
+        if not (0 <= layer_id < len(key_layers)) or not (
+            0 <= layer_id < len(value_layers)
+        ):
+            raise IndexError(
+                f"layer_id={layer_id} is out of bounds for {len(key_layers)} "
+                f"key layers and {len(value_layers)} value layers"
+            )
         key_tensor = key_layers[layer_id]
         value_tensor = value_layers[layer_id]
+        if not isinstance(key_tensor, torch.Tensor) or not isinstance(
+            value_tensor, torch.Tensor
+        ):
+            raise TypeError(
+                "Expected SGLang MHA layerwise KV entries to be torch.Tensor values"
+            )
         num_heads = get_num_heads(self.kv_caches_, self.gpu_kv_format_)
         head_size = get_head_size(self.kv_caches_, self.gpu_kv_format_)
         view_shape = (self.num_blocks_, self.block_size_, num_heads, head_size)

@@ -89,6 +89,8 @@ class LMCacheMPLayerwiseConnector:
             raise ValueError("K/V pool layer counts must match")
         if not k_pool[0].is_cuda:
             raise ValueError("SGLang MP connector requires CUDA KV caches")
+        if tp_size > 1 and tp_group is None:
+            raise ValueError("tp_group is required when tp_size > 1")
 
         self.tp_size = tp_size
         self.worker_id = rank
@@ -148,7 +150,10 @@ class LMCacheMPLayerwiseConnector:
 
     @torch.no_grad()
     def global_min_tokens(
-        self, local_tokens: int, tp_group: dist.ProcessGroup, device: torch.device
+        self,
+        local_tokens: int,
+        tp_group: dist.ProcessGroup | None,
+        device: torch.device,
     ) -> int:
         if self.tp_size == 1:
             return local_tokens
@@ -348,33 +353,37 @@ class LMCacheMPLayerwiseConnector:
             return
 
         finished_indices: list[int] = []
+        failures: list[Exception] = []
         for i, state in enumerate(self._active_retrieves):
             if state.in_flight_layer != layer_id:
                 continue
 
-            if state.future is None:
-                self.cleanup_retrieve_state(state)
-                finished_indices.append(i)
-                raise RuntimeError(
-                    f"LMCache MP retrieve state is missing a future for "
-                    f"request_id={state.request_id}"
-                )
-            if not state.future.result(timeout=self._mq_timeout):
-                self.cleanup_retrieve_state(state)
-                finished_indices.append(i)
-                raise RuntimeError(
-                    f"LMCache MP retrieve failed for request_id={state.request_id}"
-                )
+            try:
+                if state.future is None:
+                    raise RuntimeError(
+                        f"LMCache MP retrieve state is missing a future for "
+                        f"request_id={state.request_id}"
+                    )
+                if not state.future.result(timeout=self._mq_timeout):
+                    raise RuntimeError(
+                        f"LMCache MP retrieve failed for request_id={state.request_id}"
+                    )
 
-            next_layer = layer_id + 1
-            if next_layer < self.num_layers:
-                self.submit_retrieve(state, next_layer)
-            else:
-                self.end_session(state.request_id)
+                next_layer = layer_id + 1
+                if next_layer < self.num_layers:
+                    self.submit_retrieve(state, next_layer)
+                else:
+                    self.end_session(state.request_id)
+                    finished_indices.append(i)
+            except Exception as exc:
+                self.cleanup_retrieve_state(state)
                 finished_indices.append(i)
+                failures.append(exc)
 
         for i in reversed(finished_indices):
             del self._active_retrieves[i]
+        if failures:
+            raise failures[0]
 
     def store_kv(self, store_metadata: StoreMetadata) -> None:
         if not self.is_healthy:
