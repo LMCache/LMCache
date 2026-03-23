@@ -63,8 +63,8 @@ class KVCacheCommand(BaseCommand):
     """Manage KV cache state.
 
     This command provides sub-commands for managing KV cache data on the
-    MP HTTP server: clearing all cache, ending sessions, and (in the
-    future) pinning, compressing, and inspecting per-request cache state.
+    MP HTTP server. Currently supports clearing all L1 cache. Future
+    sub-commands (pin, compress, info) are defined in the design doc.
     """
 
     def name(self) -> str:
@@ -92,16 +92,13 @@ class KVCacheCommand(BaseCommand):
         sub = parser.add_subparsers(dest="action")
 
         # clear
-        p_clear = sub.add_parser("clear", help="Clear all cached KV data.")
+        p_clear = sub.add_parser("clear", help="Clear all cached KV data in L1 (CPU).")
         p_clear.add_argument(
             "--url",
             type=str,
             required=True,
             help="Target MP HTTP endpoint (e.g. http://localhost:8000).",
         )
-
-
-
 
     def execute(self, args: argparse.Namespace) -> None:
         """Dispatch to the appropriate sub-command handler.
@@ -134,5 +131,3 @@ class KVCacheCommand(BaseCommand):
         metrics = self.create_metrics("KV Cache Clear", args)
         metrics.add("status", "Status", "OK")
         metrics.emit()
-
-

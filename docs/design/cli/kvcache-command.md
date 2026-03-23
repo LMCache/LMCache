@@ -27,14 +27,18 @@ CLI operation goes through the **MP HTTP server**
 Today some operations (e.g. `pin`) only have ZMQ implementations. These
 need new HTTP endpoints on the MP HTTP server before the CLI can use them.
 
-### Every sub-command targets a specific request
+### Indexing KV caches
 
-Every sub-command requires one of these to identify the target KV cache:
+Per-request sub-commands (`pin`, `compress`, `info`) take a **positional
+request ID** and optional range flags:
 
-- **`--request-id <id>`** (required) — identifies the request whose KV cache
-  to operate on.
+- **`<request_id>`** (positional, required) — identifies the request whose
+  KV cache to operate on.
 - **`--start <st> --end <ed>`** (optional) — narrow the operation to a token
   range `[st, ed)` within the request. Defaults to the full sequence.
+
+`clear` is a **bulk operation** — it clears all L1 cache and does not take a
+request ID.
 
 ### Pipe- and script-friendly output
 
@@ -52,7 +56,7 @@ Every sub-command requires one of these to identify the target KV cache:
 ```
 lmcache kvcache
 ├── info           # Per-request cache state (locations, pinned status)
-├── clear          # Clear all cached KV data
+├── clear          # Clear all cached KV data in L1 (CPU)
 ├── pin            # Pin a request's KV cache to L1/CPU (may be rejected)
 └── compress       # Compress a request's KV cache in-place
 ```
@@ -60,21 +64,20 @@ lmcache kvcache
 | Sub-command | Target | Description |
 |------------|--------|-------------|
 | `info` | instance | Show per-request cache state: which chunks, where stored, pinned status |
-| `clear` | instance | Clear all cached KV data |
+| `clear` | instance | Clear all cached KV data in L1 (CPU) |
 | `pin` | instance | Pin a request's KV cache to L1/CPU; may be rejected if memory pressure is too high |
 | `compress` | instance | Compress a request's KV cache to reduce memory footprint |
 
 ```bash
 $ lmcache kvcache -h
-usage: lmcache kvcache [-h] {info,clear,pin,compress} ...
+usage: lmcache kvcache [-h] {clear} ...
 
 Manage KV cache state.
 
 subcommands:
-  info          Show per-request cache state (chunks, locations, pinned status)
-  clear         Clear all cached KV data
-  pin           Pin a request's KV cache to L1/CPU (may be rejected)
-  compress      Compress a request's KV cache in-place
+  clear         Clear all cached KV data in L1 (CPU)
+
+# info, pin, compress will appear here once implemented
 ```
 
 ---
@@ -92,7 +95,7 @@ backend holds each one, and whether they are pinned.
 
 ```bash
 # By request ID
-$ lmcache kvcache info --url http://localhost:8000 --request-id req-abc-123
+$ lmcache kvcache info --url http://localhost:8000 req-abc-123
 
 ===== KV Cache Info (req-abc-123) =====
 Total chunks:                         32
@@ -107,7 +110,7 @@ Pinned:                                8
 
 # Narrowed to a token range
 $ lmcache kvcache info --url http://localhost:8000 \
-    --request-id req-abc-123 --start 0 --end 512
+    req-abc-123 --start 0 --end 512
 
 # JSON for scripting
 $ lmcache kvcache info --url http://localhost:8000 \
@@ -134,7 +137,7 @@ $ lmcache kvcache info --url http://localhost:8000 \
 
 ### `clear`
 
-Clear **all** cached KV data on the target instance.
+Clear all cached KV data in **L1 (CPU memory)** on the target instance.
 
 ```bash
 $ lmcache kvcache clear --url http://localhost:8000
@@ -152,7 +155,7 @@ server **may reject** the request if CPU memory pressure is too high.
 Exit codes: `0` = pinned, `2` = rejected, `1` = error.
 
 ```bash
-$ lmcache kvcache pin --url http://localhost:8000 --request-id req-abc-123
+$ lmcache kvcache pin --url http://localhost:8000 req-abc-123
 
 ======== KV Cache Pin (req-abc-123) ========
 Status:                                   OK
@@ -162,7 +165,7 @@ $ echo $?
 0
 
 # Quiet mode for scripts
-if lmcache kvcache pin -q --url http://localhost:8000 --request-id req-abc-123; then
+if lmcache kvcache pin -q --url http://localhost:8000 req-abc-123; then
     echo "pinned"
 else
     echo "rejected or error"
@@ -170,10 +173,10 @@ fi
 
 # Narrowed to a token range
 $ lmcache kvcache pin --url http://localhost:8000 \
-    --request-id req-abc-123 --start 0 --end 512
+    req-abc-123 --start 0 --end 512
 
 # Rejected case (exit code 2)
-$ lmcache kvcache pin --url http://localhost:8000 --request-id req-xyz
+$ lmcache kvcache pin --url http://localhost:8000 req-xyz
 
 ======== KV Cache Pin (req-xyz) =============
 Status:                             REJECTED
@@ -189,7 +192,7 @@ Compress a request's KV cache chunks in-place to reduce memory footprint.
 
 ```bash
 $ lmcache kvcache compress --url http://localhost:8000 \
-    --request-id req-abc-123 --method zstd
+    req-abc-123 --method zstd
 
 ===== KV Cache Compress (req-abc-123) ======
 Status:                                   OK
@@ -198,13 +201,13 @@ Chunks compressed:                        32
 =============================================
 
 $ lmcache kvcache compress --url http://localhost:8000 \
-    --request-id req-abc-123 --start 0 --end 512 --method zstd
+    req-abc-123 --start 0 --end 512 --method zstd
 ```
 
 | Flag | Required | Description |
 |------|----------|-------------|
+| `<request_id>` | yes (positional) | Target request |
 | `--method` | yes | Compression method (e.g. `zstd`) |
-| `--request-id` | yes | Target request |
 | `--start`, `--end` | no | Narrow to token range `[st, ed)` |
 
 ---
@@ -236,8 +239,8 @@ All CLI operations target the **MP HTTP server**
   argparse subparsers. File: `lmcache/cli/commands/kvcache.py`.
 - **MP HTTP only:** `_http_request()` wraps `urllib.request` (no new deps).
   All requests target the MP HTTP server.
-- **Indexing args** shared via a helper that adds `--request-id`,
-  `--start`, `--end` to each subparser.
+- **Indexing args** for future per-request sub-commands: positional
+  `request_id` + optional `--start`/`--end`, added via a shared helper.
 - **Output:** `self.create_metrics()` — use `--format json | jq` for scripting.
 - **New `--quiet` / `-q` flag** on `BaseCommand`: skips `StreamHandler`.
 - **Exit codes:** `0` success, `1` error, `2` rejected. Errors to stderr.

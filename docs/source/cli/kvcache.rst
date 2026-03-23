@@ -16,7 +16,7 @@ server.
    Manage KV cache state.
 
    subcommands:
-     clear          Clear all cached KV data
+     clear          Clear all cached KV data in L1 (CPU)
 
    options:
      -h, --help       show this help message and exit
@@ -27,7 +27,7 @@ server.
 clear
 -----
 
-Clear **all** cached KV data on the target LMCache server.
+Clear all cached KV data in **L1 (CPU memory)** on the target LMCache server.
 
 .. code-block:: bash
 
@@ -103,14 +103,18 @@ Exit Codes
 Common Patterns
 ---------------
 
-**Check if a server is reachable before clearing:**
+**Handle temporary server unavailability:**
+
+If the server is temporarily unreachable (e.g. due to network issue), the command
+fails with exit code 1. For persistent connectivity issues, use ``lmcache ping``
+to diagnose.
 
 .. code-block:: bash
 
    if lmcache kvcache clear -q --url http://localhost:8000; then
        echo "Cache cleared"
    else
-       echo "Failed to clear cache (server down?)"
+       echo "Clear failed — server temporarily unreachable, retrying later"
    fi
 
 **Clear cache and capture JSON result:**
