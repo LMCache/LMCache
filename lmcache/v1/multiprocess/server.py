@@ -575,6 +575,35 @@ class MPCacheEngine:
             self._prefetch_jobs[job_id] = job
         return job_id
 
+    def query_prefetch_lookup_hits(
+        self,
+        prefetch_job_id: int,
+    ) -> int | None:
+        """Query the number of hits for a prefetch request before it's finished
+
+        Returns:
+            The number of hits for the prefetched keys if the lookup is all done.
+            None if the lookup phase is still in progress, or the prefetch is
+            already completed and consumed by query_prefetch_status, or the
+            prefetch_job_id is invalid.
+        """
+        with self._prefetch_job_lock:
+            job = self._prefetch_jobs.get(prefetch_job_id)
+
+        if job is None:
+            logger.warning(
+                "Prefetch job %d not found (already completed or invalid)",
+                prefetch_job_id,
+            )
+            return None
+
+        found_count = self.storage_manager.query_prefetch_lookup_hits(job.handle)
+        if found_count is None:
+            return None
+
+        found_count = found_count // job.world_size
+        return found_count
+
     def query_prefetch_status(
         self,
         prefetch_job_id: int,
@@ -690,16 +719,36 @@ class MPCacheEngine:
     def report_status(self) -> dict:
         """Return a status dict for the entire cache engine."""
         sm = self.storage_manager.report_status()
+
+        gpu_context_meta: dict[str, dict] = {}
+        for gpu_id, meta in self.gpu_context_meta.items():
+            entry: dict = {
+                "model_name": meta[0],
+                "world_size": meta[1],
+            }
+            ctx = self.gpu_contexts.get(gpu_id)
+            if ctx is not None:
+                entry["kv_cache_layout"] = {
+                    "num_layers": ctx.num_layers,
+                    "block_size": ctx.block_size,
+                    "hidden_dim_size": ctx.hidden_dim_size,
+                    "dtype": str(ctx.dtype),
+                    "is_mla": ctx.is_mla,
+                    "num_blocks": ctx.num_blocks,
+                    "gpu_kv_format": ctx.gpu_kv_format_name,
+                    "gpu_kv_shape": ctx.gpu_kv_shape,
+                    "gpu_kv_concrete_shape": ctx.concrete_gpu_kv_shape,
+                    "attention_backend": ctx.attention_backend,
+                }
+            gpu_context_meta[str(gpu_id)] = entry
+
         return {
             "is_healthy": sm["is_healthy"],
-            "engine_type": "MPCacheEngine",
+            "engine_type": self.__class__.__name__,
             "chunk_size": self.chunk_size,
             "hash_algorithm": self.token_hasher.hash_algorithm_name,
             "registered_gpu_ids": list(self.gpu_contexts.keys()),
-            "gpu_context_meta": {
-                str(gpu_id): {"model_name": meta[0], "world_size": meta[1]}
-                for gpu_id, meta in self.gpu_context_meta.items()
-            },
+            "gpu_context_meta": gpu_context_meta,
             "active_sessions": self.session_manager.active_count(),
             "storage_manager": sm,
         }
@@ -812,6 +861,11 @@ def run_cache_server(
     add_handler_helper(server, RequestType.LOOKUP, engine.lookup)
     add_handler_helper(
         server, RequestType.QUERY_PREFETCH_STATUS, engine.query_prefetch_status
+    )
+    add_handler_helper(
+        server,
+        RequestType.QUERY_PREFETCH_LOOKUP_HITS,
+        engine.query_prefetch_lookup_hits,
     )
     add_handler_helper(server, RequestType.FREE_LOOKUP_LOCKS, engine.free_lookup_locks)
     add_handler_helper(server, RequestType.RETRIEVE, engine.retrieve)

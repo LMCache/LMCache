@@ -37,9 +37,157 @@ Available Commands
 
    * - Command
      - Description
+   * - ``describe``
+     - Show detailed status of a running LMCache service, including cache
+       health, L1 storage, registered models, and L2 adapters.
    * - ``mock``
      - Example command that outputs fake metrics. Useful for testing the CLI
        framework and as a reference for new commands.
+
+
+``describe`` — Service Status Dashboard
+----------------------------------------
+
+Inspect the state of a running LMCache KV cache server:
+
+.. code-block:: bash
+
+   lmcache describe kvcache --url http://localhost:8000
+
+.. code-block:: text
+
+   ============ LMCache KV Cache Service ============
+   Health:                                  OK
+   URL:                            http://localhost:8000
+   Engine type:                         BlendEngine
+   Chunk size:                              256
+   L1 capacity (GB):                       60.00
+   L1 used (GB):                    42.30 (70.5%)
+   Eviction policy:                         LRU
+   Cached objects:                          1024
+   Active sessions:                            3
+   --- Model: meta-llama/Llama-3.1-70B-Instruct ----
+   Model:          meta-llama/Llama-3.1-70B-Instruct
+   World size:                                4
+   GPU IDs:                          0, 1, 2, 3
+   Attention backend:  vLLM non-MLA flash attention
+   GPU KV shape:          NL x [2, NB, BS, NH, HS]
+   GPU KV tensor shape: 80 x [2, 2048, 128, 8, 128]
+   Num layers:                               80
+   Block size:                              128
+   Hidden dim size:                        1024
+   Dtype:                          torch.float16
+   MLA:                                   False
+   Num blocks:                             2048
+   --------- L2: NixlStoreL2Adapter ------------
+   Type:                      NixlStoreL2Adapter
+   Health:                                  OK
+   Backend:                           nixl_rdma
+   Stored objects:                          512
+   Pool used:                 480 / 512 (93.8%)
+   ==================================================
+
+The output shows:
+
+- **Overview** — health status, engine type, chunk size.
+- **L1 storage** — capacity, usage, eviction policy, cached object count.
+- **Registered models** — per-model KV cache layout including the GPU KV
+  tensor shape (symbolic and concrete), attention backend, and layer details.
+- **L2 adapters** — type, health, backend, stored objects, and utilization.
+
+Arguments
+~~~~~~~~~
+
+.. list-table::
+   :header-rows: 1
+   :widths: 25 75
+
+   * - Flag
+     - Description
+   * - ``kvcache``
+     - Target to describe (currently only ``kvcache`` is supported).
+   * - ``--url``
+     - LMCache HTTP server URL (default: ``http://localhost:8080``).
+   * - ``--format``
+     - Output format: ``terminal`` (default) or ``json``.
+   * - ``--output PATH``
+     - Save metrics to a file (format follows ``--format``).
+
+JSON Output
+~~~~~~~~~~~
+
+Use ``--format json`` for machine-readable output. Models and L2 adapters
+are collected into lists for easy programmatic access:
+
+.. code-block:: bash
+
+   lmcache describe kvcache --url http://localhost:8000 --format json
+
+.. code-block:: json
+
+   {
+     "title": "LMCache KV Cache Service",
+     "metrics": {
+       "health": "OK",
+       "url": "http://localhost:8000",
+       "engine_type": "BlendEngine",
+       "chunk_size": 256,
+       "l1_capacity_gb": 60.0,
+       "l1_used_gb": "42.30 (70.5%)",
+       "eviction_policy": "LRU",
+       "cached_objects": 1024,
+       "active_sessions": 3,
+       "models": [
+         {
+           "model": "meta-llama/Llama-3.1-70B-Instruct",
+           "world_size": 4,
+           "gpu_ids": "0, 1, 2, 3",
+           "attention_backend": "vLLM non-MLA flash attention",
+           "gpu_kv_shape": "NL x [2, NB, BS, NH, HS]",
+           "gpu_kv_concrete_shape": "80 x [2, 2048, 128, 8, 128]",
+           "num_layers": 80,
+           "block_size": 128,
+           "hidden_dim_size": 1024,
+           "dtype": "torch.float16",
+           "is_mla": false,
+           "num_blocks": 2048
+         }
+       ],
+       "l2_adapters": [
+         {
+           "type": "NixlStoreL2Adapter",
+           "health": "OK",
+           "backend": "nixl_rdma",
+           "stored_object_count": 512,
+           "pool_used": "480 / 512 (93.8%)"
+         }
+       ]
+     }
+   }
+
+GPU KV Shape Abbreviations
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The ``gpu_kv_shape`` field uses short names from the ``GPUKVFormat`` enum:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 15 85
+
+   * - Abbrev
+     - Meaning
+   * - NB
+     - num_blocks
+   * - NL
+     - num_layers
+   * - BS
+     - block_size
+   * - NH
+     - num_heads
+   * - HS
+     - head_size
+   * - PBS
+     - page_buffer_size (NB × BS)
 
 
 Metrics Output
