@@ -717,7 +717,7 @@ class LMCacheEngine:
                     layer_elapsed_ms = layer_start_event.elapsed_time(layer_end_event)
                     layer_bytes = 0
                     for mem_obj in mem_objs_layer:
-                        if mem_obj.tensor is not None:
+                        if mem_obj is not None and mem_obj.tensor is not None:
                             layer_bytes += (
                                 mem_obj.tensor.numel()
                                 * mem_obj.tensor.element_size()

@@ -377,6 +377,11 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
         start_event.record(self.load_stream)
         with torch.cuda.stream(self.load_stream):
             for memory_obj, start, end in zip(memory_objs, starts, ends, strict=False):
+                if memory_obj is None:
+                    logger.warning(
+                        "batched_to_gpu: evicted chunk (%d, %d); skipping", start, end,
+                    )
+                    continue
                 self.to_gpu(memory_obj, start, end, **kwargs)
         end_event.record(self.load_stream)
         end_event.synchronize()
@@ -658,6 +663,7 @@ class VLLMBufferLayerwiseGPUConnector(GPUConnectorInterface):
 
                 # memobj -> gpu_buffer
                 c = 0
+                evicted_ranges = []
                 with torch.cuda.stream(self.load_stream):
                     if timing:
                         load_start = torch.cuda.Event(enable_timing=True)
@@ -667,19 +673,14 @@ class VLLMBufferLayerwiseGPUConnector(GPUConnectorInterface):
                         starts, ends, memory_objs_layer, strict=False
                     ):
                         c += 1
-                        assert memory_obj.metadata.fmt == MemoryFormat.KV_2TD
-                        assert load_gpu_buffer_obj.tensor is not None
-                        # load_gpu_buffer_obj.tensor[0][
-                        #     start - buf_offset : end - buf_offset
-                        # ].copy_(memory_obj.tensor[0], non_blocking=True)
-
-                        # load_gpu_buffer_obj.tensor[1][
-                        #     start - buf_offset : end - buf_offset
-                        # ].copy_(memory_obj.tensor[1], non_blocking=True)
                         s = start - buf_offset
                         e = end - buf_offset
+                        if memory_obj is None:
+                            evicted_ranges.append((s, e))
+                            continue
+                        assert memory_obj.metadata.fmt == MemoryFormat.KV_2TD
+                        assert load_gpu_buffer_obj.tensor is not None
 
-                        # 一次性拷贝 K 和 V
                         load_gpu_buffer_obj.tensor[:, s:e].copy_(memory_obj.tensor, non_blocking=True)
 
                         if self.cache_positions and layer_id == 0:
@@ -691,6 +692,21 @@ class VLLMBufferLayerwiseGPUConnector(GPUConnectorInterface):
                     if timing:
                         load_end.record(self.load_stream)
                         load_events = (load_start, load_end)
+                if evicted_ranges and layer_id == 0:
+                    new_gap_indices = []
+                    for gs, ge in evicted_ranges:
+                        new_gap_indices.append(
+                            torch.arange(gs, ge, device=self.current_gap_positions.device)
+                        )
+                    extra_gaps = torch.cat(new_gap_indices)
+                    self.current_gap_positions = torch.cat(
+                        [self.current_gap_positions, extra_gaps]
+                    ).unique()
+                    logger.warning(
+                        "batched_to_gpu: %d evicted chunk(s) on layer %d; "
+                        "added %d positions to gap mask",
+                        len(evicted_ranges), layer_id, extra_gaps.numel(),
+                    )
 
             elif layer_id == self.num_layers:
                 yield
@@ -1021,6 +1037,12 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
                 for start, end, memory_obj in zip(
                     starts, ends, memory_objs_layer, strict=False
                 ):
+                    if memory_obj is None:
+                        logger.warning(
+                            "Layer %d, chunk (%d, %d) evicted; skipping",
+                            layer_id, start, end,
+                        )
+                        continue
                     assert memory_obj.metadata.fmt == MemoryFormat.KV_T2D
                     start_event.record(self.load_stream)
                     if self.use_gpu:
@@ -1387,6 +1409,11 @@ class SGLangGPUConnector(GPUConnectorInterface):
     # TODO(Jiayi): need to optimize to enable real batching
     def batched_to_gpu(self, memory_objs, starts, ends, **kwargs):
         for memory_obj, start, end in zip(memory_objs, starts, ends, strict=False):
+            if memory_obj is None:
+                logger.warning(
+                    "batched_to_gpu: evicted chunk (%d, %d); skipping", start, end,
+                )
+                continue
             self.to_gpu(memory_obj, start, end, **kwargs)
 
     # TODO(Yuwei): need to optimize to enable real batching
