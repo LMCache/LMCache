@@ -13,7 +13,10 @@ This module defines the protocol for:
 """
 
 # First Party
-from lmcache.v1.multiprocess.custom_types import IPCCacheEngineKey, KVCache
+from lmcache.v1.multiprocess.custom_types import (
+    IPCCacheEngineKey,
+    KVCacheRegistration,
+)
 from lmcache.v1.multiprocess.protocols.base import HandlerType, ProtocolDefinition
 
 # Define request names for this protocol group
@@ -42,13 +45,10 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
     return {
         # Register KV Cache
         # Payload:
-        #   - instance_id: int - Unique identifier for the vLLM instance
-        #   - kv_cache: KVCache - The KV cache configuration
-        #   - model_name: str - Name of the model associated with the engine
-        #   - world_size: int - World size of the engine
+        #   - registration: KVCacheRegistration - Worker registration metadata
         # Returns: None
         "REGISTER_KV_CACHE": ProtocolDefinition(
-            payload_classes=[int, KVCache, str, int],
+            payload_classes=[KVCacheRegistration],
             response_class=None,
             handler_type=HandlerType.SYNC,
         ),
@@ -81,9 +81,11 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
         #   - event_ipc_handle: bytes - CUDA event IPC handle for synchronization
         #   - skip_first_n_tokens: int - Number of tokens to skip writing at the
         #     start of the retrieve range (to avoid overwriting APC-shared blocks)
+        #   - layer_begin: int - Inclusive layer index to retrieve, or -1 for all
+        #   - layer_end: int - Exclusive layer index to retrieve, or -1 for all
         # Returns: tuple[bytes, bool] - (CUDA event handle, success flag)
         "RETRIEVE": ProtocolDefinition(
-            payload_classes=[KeyType, int, list[int], bytes, int],
+            payload_classes=[KeyType, int, list[int], bytes, int, int, int],
             response_class=tuple[bytes, bool],
             handler_type=HandlerType.BLOCKING,
         ),

@@ -7,7 +7,7 @@ and passed between processes during multiprocessing tests.
 """
 
 # First Party
-from lmcache.v1.multiprocess.custom_types import KVCache
+from lmcache.v1.multiprocess.custom_types import KVCacheRegistration
 from lmcache.v1.multiprocess.protocol import KeyType
 
 # ==============================================================================
@@ -28,34 +28,36 @@ def noop_handler() -> str:
 # ==============================================================================
 
 
-def register_kv_cache_handler(
-    gpu_id: int, kv_cache: KVCache, model_name: str, world_size: int
-) -> None:
+def register_kv_cache_handler(registration: KVCacheRegistration) -> None:
     """
     Dummy handler for REGISTER_KV_CACHE requests.
 
     Args:
-        gpu_id: GPU device ID
-        kv_cache: List of CudaIPCWrapper objects representing KV cache
-        model_name: Name of the model associated with this KV cache
-        world_size: World size associated with this KV cache
+        registration: Structured registration payload
 
     Returns:
         None
     """
     # In a real implementation, this would register the KV cache
     # For testing, we just validate the inputs are received correctly
-    assert isinstance(gpu_id, int), f"Expected gpu_id to be int, got {type(gpu_id)}"
-    assert isinstance(kv_cache, list), (
-        f"Expected kv_cache to be list, got {type(kv_cache)}"
+    assert isinstance(registration, KVCacheRegistration), (
+        f"Expected KVCacheRegistration, got {type(registration)}"
     )
-    assert isinstance(model_name, str), (
-        f"Expected model_name to be str, got {type(model_name)}"
+    assert isinstance(registration.instance_id, int), (
+        f"Expected instance_id to be int, got {type(registration.instance_id)}"
     )
-    assert isinstance(world_size, int), (
-        f"Expected world_size to be int, got {type(world_size)}"
+    assert isinstance(registration.model_name, str), (
+        f"Expected model_name to be str, got {type(registration.model_name)}"
     )
-    # No return value (returns None implicitly)
+    assert isinstance(registration.world_size, int), (
+        f"Expected world_size to be int, got {type(registration.world_size)}"
+    )
+    assert isinstance(registration.engine_type, str), (
+        f"Expected engine_type to be str, got {type(registration.engine_type)}"
+    )
+    assert isinstance(registration.block_size, int), (
+        f"Expected block_size to be int, got {type(registration.block_size)}"
+    )
 
 
 # ==============================================================================
@@ -121,6 +123,8 @@ def retrieve_handler(
     gpu_block_ids: list[int],
     event_handler: bytes,
     skip_first_n_tokens: int = 0,
+    layer_begin: int = -1,
+    layer_end: int = -1,
 ) -> tuple[bytes, bool]:
     """
     Dummy handler for RETRIEVE requests.
@@ -131,6 +135,8 @@ def retrieve_handler(
         gpu_block_ids: List of GPU block IDs
         event_handler: CUDA event IPC handle
         skip_first_n_tokens: Number of tokens to skip at retrieve start
+        layer_begin: Inclusive layer index, or -1 for all layers
+        layer_end: Exclusive layer index, or -1 for all layers
 
     Returns:
         tuple[bytes, bool]: (event handle, success flag)
@@ -145,6 +151,12 @@ def retrieve_handler(
     )
     assert isinstance(skip_first_n_tokens, int), (
         f"Expected skip_first_n_tokens to be int, got {type(skip_first_n_tokens)}"
+    )
+    assert isinstance(layer_begin, int), (
+        f"Expected layer_begin to be int, got {type(layer_begin)}"
+    )
+    assert isinstance(layer_end, int), (
+        f"Expected layer_end to be int, got {type(layer_end)}"
     )
     return b"\x01" * 64, True
 

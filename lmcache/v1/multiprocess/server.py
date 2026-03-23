@@ -11,7 +11,7 @@ import zmq
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.utils import _lmcache_nvtx_annotate
+from lmcache.utils import EngineType, _lmcache_nvtx_annotate
 from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
     ObjectKey,
@@ -54,7 +54,7 @@ from lmcache.v1.multiprocess.config import (
 )
 from lmcache.v1.multiprocess.custom_types import (
     IPCCacheEngineKey,
-    KVCache,
+    KVCacheRegistration,
 )
 from lmcache.v1.multiprocess.gpu_context import (
     GPUCacheContext,
@@ -131,6 +131,37 @@ def get_layout_desc(gpu_context: GPUCacheContext, num_tokens: int) -> MemoryLayo
     return MemoryLayoutDesc(shapes=[shape], dtypes=[dtype])
 
 
+def parse_engine_type(engine_type: str) -> EngineType:
+    try:
+        return EngineType(engine_type)
+    except ValueError as exc:
+        raise ValueError(f"Unsupported engine type: {engine_type}") from exc
+
+
+def resolve_layer_window(
+    gpu_context: GPUCacheContext,
+    layer_begin: int,
+    layer_end: int,
+) -> tuple[int, int, bool]:
+    if layer_begin == -1 and layer_end == -1:
+        return 0, gpu_context.num_layers, True
+
+    if layer_begin < 0 or layer_end < 0:
+        raise ValueError(
+            f"Layer window must be non-negative, got [{layer_begin}, {layer_end})"
+        )
+    if layer_begin >= layer_end:
+        raise ValueError(
+            f"Layer window must be non-empty, got [{layer_begin}, {layer_end})"
+        )
+    if layer_end > gpu_context.num_layers:
+        raise ValueError(
+            f"Layer window [{layer_begin}, {layer_end}) exceeds num_layers="
+            f"{gpu_context.num_layers}"
+        )
+    return layer_begin, layer_end, False
+
+
 @dataclass
 class _PrefetchJob:
     handle: PrefetchHandle
@@ -177,27 +208,28 @@ class MPCacheEngine:
         self._next_prefetch_job_id: int = 0
         self._prefetch_job_lock = threading.Lock()
 
-    def register_kv_cache(
-        self,
-        instance_id: int,
-        kv_caches: KVCache,
-        model_name: str,
-        world_size: int,
-    ) -> None:
+    def register_kv_cache(self, registration: KVCacheRegistration) -> None:
         """
         Registers the KV cache tensors for a given GPU instance ID.
 
         Args:
-            instance_id (int): The GPU instance ID (such as PID).
-            kv_caches (KVCache): The KV cache tensor wrappers from vLLM.
-            model_name (str): The name of the model associated with this KV cache.
-            world_size (int): The world size associated with this KV cache.
+            registration: Worker registration metadata and KV cache wrappers.
         """
-        gpu_context = GPUCacheContext(kv_caches, self.chunk_size)
+        instance_id = registration.instance_id
+        gpu_context = GPUCacheContext(
+            registration.kv_caches,
+            self.chunk_size,
+            engine_type=parse_engine_type(registration.engine_type),
+            block_size=registration.block_size,
+        )
         self.gpu_contexts[instance_id] = gpu_context
-        self.gpu_context_meta[instance_id] = (model_name, world_size)
+        self.gpu_context_meta[instance_id] = (
+            registration.model_name,
+            registration.world_size,
+        )
         logger.info(
-            "Registered KV cache for GPU ID %d with %d layers",
+            "Registered %s KV cache for GPU ID %d with %d layers",
+            registration.engine_type,
             instance_id,
             gpu_context.num_layers,
         )
@@ -294,22 +326,35 @@ class MPCacheEngine:
                 end = start + self.chunk_size
                 slot_mapping = slot_mapping_tensor[start:end]
 
-                # Copy from GPU to CPU
-                tmp_buffer = gpu_context.get_tmp_gpu_buffer(self.chunk_size)
+                assert memory_obj.tensor is not None
                 with gpu_context.transfer_lock:
-                    lmc_ops.multi_layer_kv_transfer(
-                        tmp_buffer,
-                        gpu_context.kv_pointers,
-                        slot_mapping,
-                        gpu_context.device,
-                        gpu_context.block_size * gpu_context.num_blocks,
-                        lmc_ops.TransferDirection.D2H,
-                        gpu_context.gpu_kv_format_,
-                        gpu_context.block_size,
-                    )
-
-                    assert memory_obj.tensor is not None
-                    lmcache_memcpy_async_d2h(tmp_buffer, memory_obj)
+                    if gpu_context.engine_type == EngineType.SGLANG and not gpu_context.is_mla:
+                        for layer_id in range(gpu_context.num_layers):
+                            key_tensor, value_tensor = gpu_context.get_sglang_layer_tensors(
+                                layer_id
+                            )
+                            lmc_ops.single_layer_kv_transfer_sgl(
+                                memory_obj.tensor[:, layer_id, :, :],
+                                key_tensor,
+                                value_tensor,
+                                slot_mapping,
+                                lmc_ops.TransferDirection.D2H,
+                                False,
+                            )
+                    else:
+                        # Copy from GPU to CPU
+                        tmp_buffer = gpu_context.get_tmp_gpu_buffer(self.chunk_size)
+                        lmc_ops.multi_layer_kv_transfer(
+                            tmp_buffer,
+                            gpu_context.kv_pointers,
+                            slot_mapping,
+                            gpu_context.device,
+                            gpu_context.block_size * gpu_context.num_blocks,
+                            lmc_ops.TransferDirection.D2H,
+                            gpu_context.gpu_kv_format_,
+                            gpu_context.block_size,
+                        )
+                        lmcache_memcpy_async_d2h(tmp_buffer, memory_obj)
 
             event.record()
 
@@ -346,6 +391,8 @@ class MPCacheEngine:
         gpu_block_ids: list[int],
         event_ipc_handle: bytes,
         skip_first_n_tokens: int = 0,
+        layer_begin: int = -1,
+        layer_end: int = -1,
     ) -> tuple[bytes, bool]:
         """
         Retrieves the CPU KV cache and put into GPU blocks.
@@ -360,6 +407,10 @@ class MPCacheEngine:
                 the start of the retrieve range. This avoids overwriting
                 APC-shared GPU blocks that may be read concurrently by other
                 requests.
+            layer_begin (int): Inclusive layer index for partial layerwise
+                retrieve, or -1 for all layers.
+            layer_end (int): Exclusive layer index for partial layerwise
+                retrieve, or -1 for all layers.
 
         Returns:
             tuple[bytes, bool]: The first element is the IPC handle of the event
@@ -381,6 +432,10 @@ class MPCacheEngine:
             f"KV cache not registered for GPU ID {instance_id}"
         )
         gpu_context = self.gpu_contexts[instance_id]
+        layer_begin, layer_end, full_layer_range = resolve_layer_window(
+            gpu_context, layer_begin, layer_end
+        )
+        is_final_layer_window = full_layer_range or layer_end == gpu_context.num_layers
 
         if get_telemetry_controller().is_enabled():
             gpu_context.cupy_stream.launch_host_func(
@@ -413,21 +468,47 @@ class MPCacheEngine:
                 )
                 slot_mapping = slot_mapping_tensor[chunk_start:chunk_end]
 
-                # Copy from CPU to GPU
-                tmp_gpu_buffer_ = gpu_context.get_tmp_gpu_buffer(self.chunk_size)
-                with gpu_context.transfer_lock:
-                    lmcache_memcpy_async_h2d(memory_obj, tmp_gpu_buffer_)
-                    lmc_ops.multi_layer_kv_transfer(
-                        tmp_gpu_buffer_,
-                        gpu_context.kv_pointers,
-                        slot_mapping,
-                        gpu_context.device,
-                        gpu_context.block_size * gpu_context.num_blocks,
-                        lmc_ops.TransferDirection.H2D,
-                        gpu_context.gpu_kv_format_,
-                        gpu_context.block_size,
-                        skip_in_chunk,
+                if full_layer_range:
+                    # Copy from CPU to GPU
+                    tmp_gpu_buffer_ = gpu_context.get_tmp_gpu_buffer(self.chunk_size)
+                    with gpu_context.transfer_lock:
+                        lmcache_memcpy_async_h2d(memory_obj, tmp_gpu_buffer_)
+                        lmc_ops.multi_layer_kv_transfer(
+                            tmp_gpu_buffer_,
+                            gpu_context.kv_pointers,
+                            slot_mapping,
+                            gpu_context.device,
+                            gpu_context.page_buffer_size,
+                            lmc_ops.TransferDirection.H2D,
+                            gpu_context.gpu_kv_format_,
+                            gpu_context.block_size,
+                            skip_in_chunk,
+                        )
+                    continue
+
+                if gpu_context.engine_type != EngineType.SGLANG or gpu_context.is_mla:
+                    raise NotImplementedError(
+                        "Partial layer-window retrieve is currently supported "
+                        "only for SGLang MHA KV layouts"
                     )
+
+                if memory_obj.tensor is None:
+                    raise ValueError("Prefetched memory object does not contain a tensor")
+
+                slot_mapping = slot_mapping[skip_in_chunk:]
+                with gpu_context.transfer_lock:
+                    for layer_id in range(layer_begin, layer_end):
+                        key_tensor, value_tensor = gpu_context.get_sglang_layer_tensors(
+                            layer_id
+                        )
+                        lmc_ops.single_layer_kv_transfer_sgl(
+                            memory_obj.tensor[:, layer_id, skip_in_chunk:, :],
+                            key_tensor,
+                            value_tensor,
+                            slot_mapping,
+                            lmc_ops.TransferDirection.H2D,
+                            False,
+                        )
 
         with (
             torch.cuda.device(gpu_context.device),
@@ -456,7 +537,12 @@ class MPCacheEngine:
                 return event.ipc_handle(), False
             finally:
                 event.record()
-                if retrieve_succeeded:
+                if prefetched_keys and (retrieve_succeeded and is_final_layer_window):
+                    gpu_context.cupy_stream.launch_host_func(
+                        self.storage_manager.finish_read_prefetched,
+                        prefetched_keys,
+                    )
+                elif prefetched_keys and not retrieve_succeeded:
                     gpu_context.cupy_stream.launch_host_func(
                         self.storage_manager.finish_read_prefetched,
                         prefetched_keys,

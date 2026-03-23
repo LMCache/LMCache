@@ -223,6 +223,24 @@ KVCache = list[CudaIPCWrapper]
 
 
 @dataclass
+class KVCacheRegistration:
+    """Structured MP registration payload for GPU KV cache workers."""
+
+    instance_id: int
+    model_name: str
+    world_size: int
+    engine_type: str
+    block_size: int
+    kv_caches: Any
+
+    def __post_init__(self) -> None:
+        if self.engine_type not in {"vllm", "sglang"}:
+            raise ValueError(f"Unsupported engine type: {self.engine_type}")
+        if self.block_size <= 0:
+            raise ValueError(f"block_size must be positive, got {self.block_size}")
+
+
+@dataclass
 class CustomizedSerdeConfig:
     serializer: Callable[[Any], bytes]
     deserializer: Callable[[bytes], Any]

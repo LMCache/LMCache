@@ -23,6 +23,7 @@ from lmcache.v1.multiprocess.custom_types import (
     CudaIPCWrapper,
     IPCCacheEngineKey,
     KVCache,
+    KVCacheRegistration,
 )
 from lmcache.v1.multiprocess.mq import MessageQueueClient
 from lmcache.v1.multiprocess.protocol import (
@@ -118,6 +119,21 @@ class ClientContext:
         Wrap GPU tensors in CudaIPCWrapper for IPC communication.
         """
         return [CudaIPCWrapper(tensor) for tensor in self.gpu_kv_caches]
+
+    def get_registration(
+        self,
+        instance_id: int,
+        model_name: str = "testmodel",
+        world_size: int = 1,
+    ) -> KVCacheRegistration:
+        return KVCacheRegistration(
+            instance_id=instance_id,
+            model_name=model_name,
+            world_size=world_size,
+            engine_type="vllm",
+            block_size=self.page_size,
+            kv_caches=self.get_kv_cache(),
+        )
 
     def get_tensor_slice(
         self, layer: int, start_page: int, num_pages: int
@@ -218,7 +234,7 @@ def retrieve_keys(
         block_ids = gpu_block_ids[start:end]
         future = client.submit_request(
             RequestType.RETRIEVE,
-            [key, instance_id, block_ids, event.ipc_handle(), 0],
+            [key, instance_id, block_ids, event.ipc_handle(), 0, -1, -1],
             get_response_class(RequestType.RETRIEVE),
         )
         result = future.to_cuda_future().result(timeout=timeout)
@@ -331,7 +347,7 @@ def registered_instance(
     # Register KV cache
     future = client.submit_request(
         RequestType.REGISTER_KV_CACHE,
-        [instance_id, client_context.get_kv_cache(), "testmodel", 1],
+        [client_context.get_registration(instance_id)],
         get_response_class(RequestType.REGISTER_KV_CACHE),
     )
     result = future.result(timeout=DEFAULT_TIMEOUT)
@@ -381,7 +397,7 @@ def test_register_unregister_kv_cache(
     # Register
     future = client.submit_request(
         RequestType.REGISTER_KV_CACHE,
-        [instance_id, client_context.get_kv_cache(), "testmodel", 1],
+        [client_context.get_registration(instance_id)],
         get_response_class(RequestType.REGISTER_KV_CACHE),
     )
     result = future.result(timeout=DEFAULT_TIMEOUT)

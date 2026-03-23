@@ -16,6 +16,7 @@ from lmcache.utils import _lmcache_nvtx_annotate, init_logger
 from lmcache.v1.multiprocess.custom_types import (
     CudaIPCWrapper,
     IPCCacheEngineKey,
+    KVCacheRegistration,
     KVCache,
 )
 from lmcache.v1.multiprocess.mq import MessageQueueClient, MessagingFuture
@@ -523,6 +524,7 @@ class LMCacheMPWorkerAdapter:
             "LMCache chunk size should be a multiple of vLLM block size"
         )
         self.blocks_in_chunk = chunk_size // vllm_block_size
+        self.vllm_block_size = vllm_block_size
 
         # Health state (shared with heartbeat thread)
         self._health_event = threading.Event()
@@ -567,12 +569,14 @@ class LMCacheMPWorkerAdapter:
         future = send_lmcache_request(
             self.mq_client,
             RequestType.REGISTER_KV_CACHE,
-            [
+            [KVCacheRegistration(
                 self.instance_id,
-                wrap_kv_caches(kv_caches),
                 self.model_name,
                 self.world_size,
-            ],
+                "vllm",
+                self.vllm_block_size,
+                wrap_kv_caches(kv_caches),
+            )],
         )
         try:
             future.result(timeout=self._mq_timeout)
@@ -654,6 +658,8 @@ class LMCacheMPWorkerAdapter:
                 op.block_ids,
                 event.ipc_handle(),
                 op.skip_first_n_tokens,
+                -1,
+                -1,
             ],
         ).to_cuda_future()
         self.retrieve_futures[request_id] = (future, list(op.block_ids))

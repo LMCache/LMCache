@@ -47,6 +47,7 @@ from lmcache.v1.multiprocess.custom_types import (
     CudaIPCWrapper,
     IPCCacheEngineKey,
     KVCache,
+    KVCacheRegistration,
 )
 from lmcache.v1.multiprocess.mq import MessageQueueClient
 from lmcache.v1.multiprocess.protocol import (
@@ -356,6 +357,18 @@ class ClientContext:
     def get_kv_cache(self) -> KVCache:
         return [CudaIPCWrapper(tensor) for tensor in self.gpu_kv_caches]
 
+    def get_registration(
+        self, instance_id: int, model_name: str = "testmodel", world_size: int = 1
+    ) -> KVCacheRegistration:
+        return KVCacheRegistration(
+            instance_id=instance_id,
+            model_name=model_name,
+            world_size=world_size,
+            engine_type="vllm",
+            block_size=self.page_size,
+            kv_caches=self.get_kv_cache(),
+        )
+
     def get_tensor_slice(
         self, layer: int, start_page: int, num_pages: int
     ) -> torch.Tensor:
@@ -538,7 +551,7 @@ def registered_instance(
 
     future = client.submit_request(
         RequestType.REGISTER_KV_CACHE,
-        [instance_id, client_context.get_kv_cache(), "testmodel", 1],
+        [client_context.get_registration(instance_id)],
         get_response_class(RequestType.REGISTER_KV_CACHE),
     )
     assert future.result(timeout=DEFAULT_TIMEOUT) is None
@@ -1648,7 +1661,7 @@ def test_cb_store_final_v2_then_normal_lookup(
     retrieve_result = (
         client.submit_request(
             RequestType.RETRIEVE,
-            [retrieve_key, registered_instance, gpu_block_ids, event2.ipc_handle(), 0],
+            [retrieve_key, registered_instance, gpu_block_ids, event2.ipc_handle(), 0, -1, -1],
             get_response_class(RequestType.RETRIEVE),
         )
         .to_cuda_future()

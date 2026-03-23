@@ -12,7 +12,11 @@ import torch
 import zmq
 
 # First Party
-from lmcache.v1.multiprocess.custom_types import CudaIPCWrapper, IPCCacheEngineKey
+from lmcache.v1.multiprocess.custom_types import (
+    CudaIPCWrapper,
+    IPCCacheEngineKey,
+    KVCacheRegistration,
+)
 from lmcache.v1.multiprocess.mq import (
     BlockingRequestHandler,
     MessageQueueClient,
@@ -350,7 +354,7 @@ def test_mq_noop_multiple_clients():
 def test_mq_register_kv_cache():
     """
     Test MessageQueue with REGISTER_KV_CACHE request type.
-    REGISTER_KV_CACHE takes (gpu_id: int, kv_cache: KVCache) and returns None.
+    REGISTER_KV_CACHE takes a KVCacheRegistration and returns None.
     """
     # Create test KV cache (list of CudaIPCWrapper objects)
     kv_cache = []
@@ -359,7 +363,14 @@ def test_mq_register_kv_cache():
         wrapper = CudaIPCWrapper(tensor)
         kv_cache.append(wrapper)
 
-    gpu_id = 0
+    registration = KVCacheRegistration(
+        instance_id=0,
+        model_name="testmodel",
+        world_size=1,
+        engine_type="vllm",
+        block_size=1,
+        kv_caches=kv_cache,
+    )
 
     # Create test helper and register handler
     helper = MessageQueueTestHelper(server_url="tcp://127.0.0.1:5559")
@@ -370,7 +381,7 @@ def test_mq_register_kv_cache():
     # Run test with REGISTER_KV_CACHE request
     helper.run_test(
         request_type=RequestType.REGISTER_KV_CACHE,
-        payloads=[gpu_id, kv_cache, "testmodel", 1],
+        payloads=[registration],
         expected_response=None,
         num_requests=1,
     )
@@ -452,7 +463,8 @@ def test_mq_retrieve():
     """
     Test MessageQueue with RETRIEVE request type.
     RETRIEVE takes (key: KeyType, gpu_id: int, gpu_block_ids: list[int],
-    event_ipc_handle: bytes) and returns (bytes, bool).
+    event_ipc_handle: bytes, skip_first_n_tokens: int, layer_begin: int,
+    layer_end: int) and returns (bytes, bool).
     """
     # Create test key
     key = create_cache_key(0)
@@ -469,7 +481,7 @@ def test_mq_retrieve():
     # Run test with RETRIEVE request
     helper.run_test(
         request_type=RequestType.RETRIEVE,
-        payloads=[key, gpu_id, gpu_block_ids, test_handle, 0],
+        payloads=[key, gpu_id, gpu_block_ids, test_handle, 0, -1, -1],
         expected_response=(b"\x01" * 64, True),
         num_requests=1,
     )

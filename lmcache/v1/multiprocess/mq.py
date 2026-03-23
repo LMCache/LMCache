@@ -17,6 +17,7 @@ import zmq
 from lmcache.logging import init_logger
 from lmcache.v1.multiprocess.custom_types import (
     CudaIPCWrapper,
+    KVCacheRegistration,
     get_customized_decoder,
     get_customized_encoder,
 )
@@ -85,6 +86,10 @@ _SPECIAL_ENCODER_DECODERS = {
     list[CudaIPCWrapper]: (
         get_customized_encoder(list[CudaIPCWrapper]),
         get_customized_decoder(list[CudaIPCWrapper]),
+    ),
+    KVCacheRegistration: (
+        get_customized_encoder(KVCacheRegistration),
+        get_customized_decoder(KVCacheRegistration),
     ),
 }
 

@@ -10,6 +10,7 @@ This module provides GPU-side KV cache management functionality, including:
 # Standard
 import array
 import threading
+from typing import Any
 
 # Third Party
 import cupy
@@ -25,6 +26,7 @@ from lmcache.v1.gpu_connector.utils import (
     get_hidden_dim_size,
     get_num_blocks,
     get_num_layers,
+    get_page_buffer_size,
     is_mla,
 )
 from lmcache.v1.multiprocess.custom_types import (
@@ -34,12 +36,21 @@ from lmcache.v1.multiprocess.custom_types import (
 logger = init_logger(__name__)
 
 
-def unwrap_kv_cache_tensors(kv_caches: KVCache) -> list[torch.Tensor]:
-    unwrapped_tensors = []
-    for ipc_wrapper in kv_caches:
-        tensor = ipc_wrapper.to_tensor()
-        unwrapped_tensors.append(tensor)
-    return unwrapped_tensors
+def unwrap_kv_cache_tensors(kv_caches: Any) -> Any:
+    if isinstance(kv_caches, list):
+        return [unwrap_kv_cache_tensors(kv_cache) for kv_cache in kv_caches]
+    if isinstance(kv_caches, tuple):
+        return tuple(unwrap_kv_cache_tensors(kv_cache) for kv_cache in kv_caches)
+    return kv_caches.to_tensor()
+
+
+def flatten_kv_cache_tensors(kv_caches: Any) -> list[torch.Tensor]:
+    if isinstance(kv_caches, list | tuple):
+        flattened: list[torch.Tensor] = []
+        for kv_cache in kv_caches:
+            flattened.extend(flatten_kv_cache_tensors(kv_cache))
+        return flattened
+    return [kv_caches]
 
 
 def list_to_gpu_tensor(lis: list[int], device: torch.device) -> torch.Tensor:
@@ -53,20 +64,45 @@ class GPUCacheContext:
     Manages the shape and pointers to vLLM GPU KV cache tensors.
     """
 
-    def __init__(self, kv_caches: KVCache, lmcache_chunk_size: int = 256):
+    def __init__(
+        self,
+        kv_caches: Any,
+        lmcache_chunk_size: int = 256,
+        engine_type: EngineType = EngineType.VLLM,
+        block_size: int | None = None,
+    ):
         self.kv_caches_ = unwrap_kv_cache_tensors(kv_caches)
-        self.device_ = self.kv_caches_[0].device
+        self.engine_type_ = engine_type
+        self.flat_kv_caches_ = flatten_kv_cache_tensors(self.kv_caches_)
+        self.device_ = self.flat_kv_caches_[0].device
 
         # Pointers
-        pointers_list = [t.data_ptr() for t in self.kv_caches_]
+        pointers_list = [t.data_ptr() for t in self.flat_kv_caches_]
         self.kv_cache_pointers_ = list_to_gpu_tensor(pointers_list, self.device_)
 
-        # TODO support creating GPUCacheContext for SGLang
-        self.gpu_kv_format_ = discover_gpu_kv_format(self.kv_caches_, EngineType.VLLM)
+        self.gpu_kv_format_ = discover_gpu_kv_format(self.kv_caches_, self.engine_type_)
         self.is_mla_ = is_mla(self.gpu_kv_format_)
         self.num_layers_ = get_num_layers(self.kv_caches_, self.gpu_kv_format_)
-        self.num_blocks_ = get_num_blocks(self.kv_caches_, self.gpu_kv_format_)
-        self.block_size_ = get_block_size(self.kv_caches_, self.gpu_kv_format_)
+        self.page_buffer_size_ = get_page_buffer_size(self.kv_caches_, self.gpu_kv_format_)
+        if block_size is None:
+            block_size = get_block_size(self.kv_caches_, self.gpu_kv_format_)
+        self.block_size_ = block_size
+        if self.page_buffer_size_ % self.block_size_ != 0:
+            raise ValueError(
+                "page_buffer_size must be divisible by block_size, got "
+                f"{self.page_buffer_size_} and {self.block_size_}"
+            )
+        try:
+            expected_num_blocks = get_num_blocks(self.kv_caches_, self.gpu_kv_format_)
+        except ValueError:
+            expected_num_blocks = self.page_buffer_size_ // self.block_size_
+        self.num_blocks_ = self.page_buffer_size_ // self.block_size_
+        if expected_num_blocks != self.num_blocks_:
+            raise ValueError(
+                "Registration block_size does not match discovered KV cache "
+                f"layout: expected {expected_num_blocks} blocks, "
+                f"got {self.num_blocks_}"
+            )
         self.hidden_dim_size_ = get_hidden_dim_size(
             self.kv_caches_, self.gpu_kv_format_
         )
@@ -126,8 +162,12 @@ class GPUCacheContext:
         return self.device_
 
     @property
-    def kv_tensors(self) -> list[torch.Tensor]:
+    def kv_tensors(self) -> Any:
         return self.kv_caches_
+
+    @property
+    def engine_type(self) -> EngineType:
+        return self.engine_type_
 
     @property
     def kv_pointers(self) -> torch.Tensor:
@@ -189,6 +229,24 @@ class GPUCacheContext:
         Returns whether the model uses MLA
         """
         return self.is_mla_
+
+    @property
+    def page_buffer_size(self) -> int:
+        return self.page_buffer_size_
+
+    def get_sglang_layer_tensors(self, layer_id: int) -> tuple[torch.Tensor, torch.Tensor]:
+        if self.engine_type_ != EngineType.SGLANG:
+            raise ValueError("SGLang layer tensors are only available for SGLang KV layouts")
+        if self.is_mla_:
+            raise NotImplementedError("SGLang MLA is not supported in MP mode yet")
+        assert isinstance(self.kv_caches_, list) and len(self.kv_caches_) == 2
+        key_layers, value_layers = self.kv_caches_
+        key_tensor = key_layers[layer_id]
+        value_tensor = value_layers[layer_id]
+        num_heads = key_tensor.shape[1]
+        head_size = key_tensor.shape[2]
+        view_shape = (self.num_blocks_, self.block_size_, num_heads, head_size)
+        return key_tensor.view(view_shape), value_tensor.view(view_shape)
 
     def get_tmp_gpu_buffer(self, num_tokens: int) -> torch.Tensor:
         """
