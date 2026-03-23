@@ -41,6 +41,41 @@ class LoadMetadata:
     offset: int
 
 
+def resolve_sglang_kv_pools(
+    *,
+    token_to_kv_pool_allocator: Any | None = None,
+    kvcache: Any | None = None,
+    k_pool: Optional[List[torch.Tensor]] = None,
+    v_pool: Optional[List[torch.Tensor]] = None,
+) -> tuple[List[torch.Tensor], List[torch.Tensor]]:
+    if k_pool is not None or v_pool is not None:
+        if k_pool is None or v_pool is None:
+            raise ValueError("Both k_pool and v_pool must be provided together")
+        return k_pool, v_pool
+
+    def _get_kv_pool_buffer(attr_name: str) -> Any:
+        if kvcache is not None and hasattr(kvcache, attr_name):
+            return getattr(kvcache, attr_name)
+
+        legacy_kvcache = getattr(token_to_kv_pool_allocator, "_kvcache", None)
+        if legacy_kvcache is not None and hasattr(legacy_kvcache, attr_name):
+            return getattr(legacy_kvcache, attr_name)
+
+        if token_to_kv_pool_allocator is not None:
+            get_kvcache = getattr(token_to_kv_pool_allocator, "get_kvcache", None)
+            if callable(get_kvcache):
+                active_kvcache = get_kvcache()
+                if active_kvcache is not None and hasattr(active_kvcache, attr_name):
+                    return getattr(active_kvcache, attr_name)
+
+        raise ValueError(
+            "Unsupported SGLang KV cache layout for LMCache. "
+            f"Missing `{attr_name}` on the active KV cache."
+        )
+
+    return _get_kv_pool_buffer("k_buffer"), _get_kv_pool_buffer("v_buffer")
+
+
 def init_lmcache_engine(
     model_config: ModelConfig,
     tp_size: int,
@@ -105,9 +140,17 @@ class LMCacheConnector:
         sgl_config: ModelConfig,
         tp_size: int,
         rank: int,
-        k_pool: List[torch.Tensor],
-        v_pool: List[torch.Tensor],
+        k_pool: Optional[List[torch.Tensor]] = None,
+        v_pool: Optional[List[torch.Tensor]] = None,
+        token_to_kv_pool_allocator: Any | None = None,
+        kvcache: Any | None = None,
     ):
+        k_pool, v_pool = resolve_sglang_kv_pools(
+            token_to_kv_pool_allocator=token_to_kv_pool_allocator,
+            kvcache=kvcache,
+            k_pool=k_pool,
+            v_pool=v_pool,
+        )
         if not k_pool:
             raise ValueError("k_pool cannot be empty during initialization.")
         kv_dtype = k_pool[0].dtype
@@ -204,10 +247,18 @@ class LMCacheLayerwiseConnector(LMCacheConnector):
         sgl_config: ModelConfig,
         tp_size: int,
         rank: int,
-        k_pool: List[torch.Tensor],
-        v_pool: List[torch.Tensor],
+        k_pool: Optional[List[torch.Tensor]] = None,
+        v_pool: Optional[List[torch.Tensor]] = None,
         tp_group: Optional[torch.distributed.ProcessGroup] = None,
+        token_to_kv_pool_allocator: Any | None = None,
+        kvcache: Any | None = None,
     ):
+        k_pool, v_pool = resolve_sglang_kv_pools(
+            token_to_kv_pool_allocator=token_to_kv_pool_allocator,
+            kvcache=kvcache,
+            k_pool=k_pool,
+            v_pool=v_pool,
+        )
         super().__init__(sgl_config, tp_size, rank, k_pool, v_pool)
         self._lmcache_chunk_size = self.lmcache_engine.config.chunk_size
         self.layerwise_retrievers: List[Any] = []

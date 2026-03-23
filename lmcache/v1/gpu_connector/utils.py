@@ -425,6 +425,13 @@ def is_mla(gpu_kv_format: "lmc_ops.GPUKVFormat") -> bool:
     )
 
 
+def is_sglang_mha(gpu_kv_format: "lmc_ops.GPUKVFormat") -> bool:
+    """
+    Check if the GPU KV Format is SGLang MHA.
+    """
+    return gpu_kv_format == lmc_ops.GPUKVFormat.TWO_X_NL_X_NBBS_NH_HS
+
+
 def get_dtype(kv_caches: Any, gpu_kv_format: "lmc_ops.GPUKVFormat") -> torch.dtype:
     """
     Get the dtype from the kv_caches

@@ -328,9 +328,9 @@ class MPCacheEngine:
 
                 assert memory_obj.tensor is not None
                 with gpu_context.transfer_lock:
-                    if gpu_context.engine_type == EngineType.SGLANG and not gpu_context.is_mla:
+                    if gpu_context.is_sglang_mha:
                         for layer_id in range(gpu_context.num_layers):
-                            key_tensor, value_tensor = gpu_context.get_sglang_layer_tensors(
+                            key_tensor, value_tensor = gpu_context.get_layerwise_kv_tensors(
                                 layer_id
                             )
                             lmc_ops.single_layer_kv_transfer_sgl(
@@ -351,7 +351,7 @@ class MPCacheEngine:
                             gpu_context.device,
                             gpu_context.block_size * gpu_context.num_blocks,
                             lmc_ops.TransferDirection.D2H,
-                            gpu_context.gpu_kv_format_,
+                            gpu_context.gpu_kv_format,
                             gpu_context.block_size,
                         )
                         lmcache_memcpy_async_d2h(tmp_buffer, memory_obj)
@@ -480,16 +480,16 @@ class MPCacheEngine:
                             gpu_context.device,
                             gpu_context.page_buffer_size,
                             lmc_ops.TransferDirection.H2D,
-                            gpu_context.gpu_kv_format_,
+                            gpu_context.gpu_kv_format,
                             gpu_context.block_size,
                             skip_in_chunk,
                         )
                     continue
 
-                if gpu_context.engine_type != EngineType.SGLANG or gpu_context.is_mla:
+                if not gpu_context.is_sglang_mha:
                     raise NotImplementedError(
                         "Partial layer-window retrieve is currently supported "
-                        "only for SGLang MHA KV layouts"
+                        "only for the SGLang MHA GPUKVFormat"
                     )
 
                 if memory_obj.tensor is None:
@@ -498,7 +498,7 @@ class MPCacheEngine:
                 slot_mapping = slot_mapping[skip_in_chunk:]
                 with gpu_context.transfer_lock:
                     for layer_id in range(layer_begin, layer_end):
-                        key_tensor, value_tensor = gpu_context.get_sglang_layer_tensors(
+                        key_tensor, value_tensor = gpu_context.get_layerwise_kv_tensors(
                             layer_id
                         )
                         lmc_ops.single_layer_kv_transfer_sgl(

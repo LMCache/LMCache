@@ -14,7 +14,11 @@ import torch.distributed as dist
 import zmq
 
 # First Party
-from lmcache.integration.sglang.sglang_adapter import LoadMetadata, StoreMetadata
+from lmcache.integration.sglang.sglang_adapter import (
+    LoadMetadata,
+    StoreMetadata,
+    resolve_sglang_kv_pools,
+)
 from lmcache.integration.vllm.vllm_multi_process_adapter import (
     DEFAULT_HEARTBEAT_INTERVAL,
     DEFAULT_MQ_TIMEOUT,
@@ -63,14 +67,22 @@ class LMCacheMPLayerwiseConnector:
         tp_size: int,
         rank: int,
         page_size: int,
-        k_pool: list[torch.Tensor],
-        v_pool: list[torch.Tensor],
         host: str,
         port: int,
+        k_pool: Optional[list[torch.Tensor]] = None,
+        v_pool: Optional[list[torch.Tensor]] = None,
         tp_group: Optional[torch.distributed.ProcessGroup] = None,
+        token_to_kv_pool_allocator: object | None = None,
+        kvcache: object | None = None,
         mq_timeout: float = DEFAULT_MQ_TIMEOUT,
         heartbeat_interval: float = DEFAULT_HEARTBEAT_INTERVAL,
     ):
+        k_pool, v_pool = resolve_sglang_kv_pools(
+            token_to_kv_pool_allocator=token_to_kv_pool_allocator,
+            kvcache=kvcache,
+            k_pool=k_pool,
+            v_pool=v_pool,
+        )
         if not k_pool or not v_pool:
             raise ValueError("SGLang MP connector requires non-empty K/V pools")
         if len(k_pool) != len(v_pool):

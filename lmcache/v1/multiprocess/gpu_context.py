@@ -23,11 +23,14 @@ from lmcache.v1.gpu_connector.utils import (
     discover_gpu_kv_format,
     get_block_size,
     get_dtype,
+    get_head_size,
     get_hidden_dim_size,
     get_num_blocks,
     get_num_layers,
+    get_num_heads,
     get_page_buffer_size,
     is_mla,
+    is_sglang_mha,
 )
 from lmcache.v1.multiprocess.custom_types import (
     KVCache,
@@ -158,6 +161,10 @@ class GPUCacheContext:
         return get_dtype(self.kv_caches_, self.gpu_kv_format_)
 
     @property
+    def gpu_kv_format(self):
+        return self.gpu_kv_format_
+
+    @property
     def device(self) -> torch.device:
         return self.device_
 
@@ -231,20 +238,25 @@ class GPUCacheContext:
         return self.is_mla_
 
     @property
+    def is_sglang_mha(self) -> bool:
+        return is_sglang_mha(self.gpu_kv_format_)
+
+    @property
     def page_buffer_size(self) -> int:
         return self.page_buffer_size_
 
-    def get_sglang_layer_tensors(self, layer_id: int) -> tuple[torch.Tensor, torch.Tensor]:
-        if self.engine_type_ != EngineType.SGLANG:
-            raise ValueError("SGLang layer tensors are only available for SGLang KV layouts")
-        if self.is_mla_:
-            raise NotImplementedError("SGLang MLA is not supported in MP mode yet")
+    def get_layerwise_kv_tensors(self, layer_id: int) -> tuple[torch.Tensor, torch.Tensor]:
+        if not self.is_sglang_mha:
+            raise ValueError(
+                "Layerwise KV tensor views are only available for "
+                "the SGLang MHA GPUKVFormat"
+            )
         assert isinstance(self.kv_caches_, list) and len(self.kv_caches_) == 2
         key_layers, value_layers = self.kv_caches_
         key_tensor = key_layers[layer_id]
         value_tensor = value_layers[layer_id]
-        num_heads = key_tensor.shape[1]
-        head_size = key_tensor.shape[2]
+        num_heads = get_num_heads(self.kv_caches_, self.gpu_kv_format_)
+        head_size = get_head_size(self.kv_caches_, self.gpu_kv_format_)
         view_shape = (self.num_blocks_, self.block_size_, num_heads, head_size)
         return key_tensor.view(view_shape), value_tensor.view(view_shape)
 
