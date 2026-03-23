@@ -776,6 +776,55 @@ class TestEvictionInterface:
         assert real_key in notified
         assert missing_key not in notified
 
+    def test_listener_notified_on_load(self, adapter):
+        """Listener.on_l2_keys_accessed should be called after a load completes."""
+        listener = _RecordingListener()
+        adapter.register_listener(listener)
+
+        key = create_object_key(1)
+        store_obj = create_memory_obj(size=100, fill_value=42.0)
+        load_obj = create_memory_obj(size=100, fill_value=0.0)
+        store_fd = adapter.get_store_event_fd()
+        load_fd = adapter.get_load_event_fd()
+
+        # Store
+        adapter.submit_store_task([key], [store_obj])
+        wait_for_event_fd(store_fd, timeout=5.0)
+        adapter.pop_completed_store_tasks()
+
+        # Load
+        adapter.submit_load_task([key], [load_obj])
+        wait_for_event_fd(load_fd, timeout=5.0)
+
+        assert len(listener.accessed) == 1
+        assert key in listener.accessed[0]
+
+    def test_listener_load_skips_missing_keys(self, adapter):
+        """on_l2_keys_accessed should only include keys that were actually loaded."""
+        listener = _RecordingListener()
+        adapter.register_listener(listener)
+
+        real_key = create_object_key(1)
+        missing_key = create_object_key(999)
+        store_obj = create_memory_obj(size=100, fill_value=42.0)
+        load_obj1 = create_memory_obj(size=100, fill_value=0.0)
+        load_obj2 = create_memory_obj(size=100, fill_value=0.0)
+        store_fd = adapter.get_store_event_fd()
+        load_fd = adapter.get_load_event_fd()
+
+        # Store only real_key
+        adapter.submit_store_task([real_key], [store_obj])
+        wait_for_event_fd(store_fd, timeout=5.0)
+        adapter.pop_completed_store_tasks()
+
+        # Load both keys
+        adapter.submit_load_task([real_key, missing_key], [load_obj1, load_obj2])
+        wait_for_event_fd(load_fd, timeout=5.0)
+
+        assert len(listener.accessed) == 1
+        assert real_key in listener.accessed[0]
+        assert missing_key not in listener.accessed[0]
+
     def test_multiple_listeners_all_notified(self, adapter):
         """All registered listeners should receive the same store event."""
         l1, l2 = _RecordingListener(), _RecordingListener()

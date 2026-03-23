@@ -468,6 +468,7 @@ class MockL2Adapter(L2AdapterInterface):
         """
         bitmap = Bitmap(len(keys))
         total_bytes = 0
+        accessed_keys: list[ObjectKey] = []
         start = time.perf_counter()
 
         for i, key in enumerate(keys):
@@ -482,6 +483,7 @@ class MockL2Adapter(L2AdapterInterface):
             dst_tensor.copy_(src_tensor)
             bitmap.set(i)
             total_bytes += obj.get_size()
+            accessed_keys.append(key)
 
         end = time.perf_counter()
         delay_seconds = (
@@ -491,6 +493,8 @@ class MockL2Adapter(L2AdapterInterface):
         delay_seconds = max(delay_seconds, 0)  # Ensure non-negative delay
 
         await asyncio.sleep(delay_seconds)
+        if accessed_keys:
+            self._notify_keys_accessed(accessed_keys)
         with self._lock:
             self._completed_load_tasks[task_id] = bitmap
         self._signal_load_event()

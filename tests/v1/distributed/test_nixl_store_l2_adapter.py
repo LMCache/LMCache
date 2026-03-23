@@ -953,6 +953,73 @@ class TestEvictionInterface:
         assert key in listener.stored[0]
         assert listener.deleted == []
 
+    def test_listener_notified_on_load(self, adapter):
+        """Listener.on_l2_keys_accessed should be called after a load completes."""
+        adpt, buf = adapter
+        listener = _RecordingListener()
+        adpt.register_listener(listener)
+
+        key = create_object_key(1)
+        store_obj = create_memory_obj(buf, page_index=0, fill_value=42.0)
+        store_fd = adpt.get_store_event_fd()
+        load_fd = adpt.get_load_event_fd()
+        lookup_fd = adpt.get_lookup_and_lock_event_fd()
+
+        # Store
+        adpt.submit_store_task([key], [store_obj])
+        assert wait_for_event_fd(store_fd, timeout=5.0)
+        adpt.pop_completed_store_tasks()
+
+        # Lookup and lock (required before load)
+        task_id = adpt.submit_lookup_and_lock_task([key])
+        assert wait_for_event_fd(lookup_fd, timeout=5.0)
+        adpt.query_lookup_and_lock_result(task_id)
+
+        # Load
+        load_obj = create_memory_obj(buf, page_index=1, fill_value=0.0)
+        adpt.submit_load_task([key], [load_obj])
+        assert wait_for_event_fd(load_fd, timeout=5.0)
+
+        assert len(listener.accessed) == 1
+        assert key in listener.accessed[0]
+
+        adpt.submit_unlock([key])
+
+    def test_listener_load_skips_missing_keys(self, adapter):
+        """on_l2_keys_accessed should only include keys that were actually loaded."""
+        adpt, buf = adapter
+        listener = _RecordingListener()
+        adpt.register_listener(listener)
+
+        real_key = create_object_key(1)
+        missing_key = create_object_key(999)
+        store_obj = create_memory_obj(buf, page_index=0, fill_value=42.0)
+        store_fd = adpt.get_store_event_fd()
+        load_fd = adpt.get_load_event_fd()
+        lookup_fd = adpt.get_lookup_and_lock_event_fd()
+
+        # Store only real_key
+        adpt.submit_store_task([real_key], [store_obj])
+        assert wait_for_event_fd(store_fd, timeout=5.0)
+        adpt.pop_completed_store_tasks()
+
+        # Lookup and lock
+        task_id = adpt.submit_lookup_and_lock_task([real_key])
+        assert wait_for_event_fd(lookup_fd, timeout=5.0)
+        adpt.query_lookup_and_lock_result(task_id)
+
+        # Load both keys
+        load_obj1 = create_memory_obj(buf, page_index=1, fill_value=0.0)
+        load_obj2 = create_memory_obj(buf, page_index=2, fill_value=0.0)
+        adpt.submit_load_task([real_key, missing_key], [load_obj1, load_obj2])
+        assert wait_for_event_fd(load_fd, timeout=5.0)
+
+        assert len(listener.accessed) == 1
+        assert real_key in listener.accessed[0]
+        assert missing_key not in listener.accessed[0]
+
+        adpt.submit_unlock([real_key])
+
     def test_listener_notified_on_delete(self, adapter):
         """Listener.on_l2_keys_deleted should be called after delete()."""
         adpt, buf = adapter

@@ -815,6 +815,7 @@ class NixlStoreL2Adapter(L2AdapterInterface):
                 ``_completed_load_tasks``.
         """
         bitmap = Bitmap(len(keys))
+        accessed_keys: list[ObjectKey] = []
         try:
             mem_indices_flat = []
             storage_indices_flat = []
@@ -831,6 +832,7 @@ class NixlStoreL2Adapter(L2AdapterInterface):
                     storage_indices_flat.extend(storage_obj.page_indices)
 
                     bitmap.set(i)
+                    accessed_keys.append(key)
 
             if mem_indices_flat:
                 handle = self.nixl_agent.get_storage_to_mem_handle(
@@ -842,6 +844,8 @@ class NixlStoreL2Adapter(L2AdapterInterface):
         except Exception as e:
             logger.warning("NIXL load failed: %s", e)
 
+        if accessed_keys:
+            self._notify_keys_accessed(accessed_keys)
         with self._lock:
             self._completed_load_tasks[task_id] = bitmap
         self._signal_load_event()
