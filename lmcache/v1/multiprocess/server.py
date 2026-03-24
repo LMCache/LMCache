@@ -408,16 +408,6 @@ class MPCacheEngine:
         )
         gpu_context = self.gpu_contexts[instance_id]
 
-        if get_telemetry_controller().is_enabled():
-            gpu_context.cupy_stream.launch_host_func(
-                log_telemetry,
-                make_start_event(
-                    "retrieve",
-                    key.request_id,
-                    device=str(gpu_context.device),
-                ),
-            )
-
         blocks_per_chunk = self.chunk_size // gpu_context.block_size
 
         def _retrieve_loop(keys: list[ObjectKey], memory_objs: list[MemoryObj]) -> None:
@@ -481,55 +471,6 @@ class MPCacheEngine:
                     skip_blocks_in_chunk,
                 )
 
-            # for idx, (key, memory_obj) in enumerate(
-            #    zip(keys, memory_objs, strict=False)
-            # ):
-            #    chunk_start = idx * self.chunk_size
-            #    chunk_end = chunk_start + self.chunk_size
-
-            #    # Skip tokens that overlap with APC-cached blocks to
-            #    # avoid a data race: the retrieve writes on the LMCache
-            #    # CUDA stream while concurrent requests may read from
-            #    # those same APC-shared blocks on the vLLM CUDA stream.
-            #    effective_start = max(chunk_start, skip_first_n_tokens)
-            #    if effective_start >= chunk_end:
-            #        # Entire chunk is within APC range, skip it
-            #        continue
-            #    # Convert token-level skip to block-level skip
-            #    skip_tokens_in_chunk = max(
-            #        0, min(effective_start - chunk_start, self.chunk_size - 1)
-            #    )
-            #    if skip_tokens_in_chunk % gpu_context.block_size != 0:
-            #        logger.error(
-            #            "skip_first_n_tokens (%d) is not aligned to block_size (%d), "
-            #            "rounding down from %d tokens to %d blocks",
-            #            skip_first_n_tokens,
-            #            gpu_context.block_size,
-            #            skip_tokens_in_chunk,
-            #            skip_tokens_in_chunk // gpu_context.block_size,
-            #        )
-            #    skip_blocks_in_chunk = skip_tokens_in_chunk // gpu_context.block_size
-
-            #    chunk_block_ids_gpu = all_block_ids_gpu[
-            #        idx * blocks_per_chunk : (idx + 1) * blocks_per_chunk
-            #    ]
-
-            #    # Copy from CPU to tmp GPU buffer, then to paged buffer
-            #    assert memory_obj.tensor is not None
-            #    tmp_buffer = gpu_context.get_tmp_gpu_buffer(self.chunk_size)
-            #    lmcache_memcpy_async_h2d(memory_obj, tmp_buffer)
-            #    lmc_ops.multi_layer_block_kv_transfer(
-            #        gpu_context.kv_pointers,
-            #        [tmp_buffer.data_ptr()],
-            #        chunk_block_ids_gpu,
-            #        gpu_context.device,
-            #        lmc_ops.TransferDirection.H2D,
-            #        gpu_context.shape_desc,
-            #        self.chunk_size,
-            #        gpu_context.gpu_kv_format_,
-            #        skip_blocks_in_chunk,
-            #    )
-
         with (
             torch.cuda.device(gpu_context.device),
             torch.cuda.stream(gpu_context.high_priority_stream),
@@ -538,6 +479,16 @@ class MPCacheEngine:
             all_block_ids_gpu = gpu_context.stage_block_ids(gpu_block_ids)
 
             event = torch.cuda.Event(interprocess=True)
+
+            if get_telemetry_controller().is_enabled():
+                gpu_context.cupy_stream.launch_host_func(
+                    log_telemetry,
+                    make_start_event(
+                        "retrieve",
+                        key.request_id,
+                        device=str(gpu_context.device),
+                    ),
+                )
 
             prefetched_keys: list[ObjectKey] = []
             retrieve_succeeded = False
@@ -563,16 +514,17 @@ class MPCacheEngine:
                         self.storage_manager.finish_read_prefetched,
                         prefetched_keys,
                     )
-                if get_telemetry_controller().is_enabled():
-                    gpu_context.cupy_stream.launch_host_func(
-                        log_telemetry,
-                        make_end_event(
-                            "retrieve",
-                            key.request_id,
-                            retrieved_count=len(prefetched_keys),
-                            device=str(gpu_context.device),
-                        ),
-                    )
+
+        if get_telemetry_controller().is_enabled():
+            gpu_context.cupy_stream.launch_host_func(
+                log_telemetry,
+                make_end_event(
+                    "retrieve",
+                    key.request_id,
+                    retrieved_count=len(prefetched_keys),
+                    device=str(gpu_context.device),
+                ),
+            )
 
         tokens_retrieved = len(obj_keys) * self.chunk_size
         ed = time.perf_counter()
