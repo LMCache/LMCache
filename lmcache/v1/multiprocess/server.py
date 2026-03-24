@@ -133,7 +133,7 @@ def get_layout_desc(gpu_context: GPUCacheContext, num_tokens: int) -> MemoryLayo
     return MemoryLayoutDesc(shapes=[shape], dtypes=[dtype])
 
 
-def batched_iteration(lst: list, batch_size: int) -> Generator[tuple]:
+def batched_iteration(lst: list, batch_size: int) -> Generator[tuple, None, None]:
     """Utility function to iterate over a list in batches.
 
     Args:
