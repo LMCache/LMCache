@@ -79,7 +79,7 @@ def CreateGPUConnector(
             )
             if config.use_layerwise:
                 return VLLMPagedMemLayerwiseXPUConnector.from_metadata(
-                    metadata, use_gpu, device
+                    metadata, use_xpu=use_gpu, device=device
                 )
             return VLLMPagedMemXPUConnectorV2.from_metadata(metadata, use_gpu, device)
 

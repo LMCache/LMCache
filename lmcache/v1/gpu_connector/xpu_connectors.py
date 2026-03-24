@@ -266,12 +266,12 @@ class VLLMPagedMemLayerwiseXPUConnector(GPUConnectorInterface):
         self,
         hidden_dim_size: int,
         num_layers: int,
-        use_gpu: bool = False,
+        use_xpu: bool = False,
         **kwargs,
     ):
         self.hidden_dim_size = hidden_dim_size
         self.num_layers = num_layers
-        self.use_gpu = use_gpu
+        self.use_xpu = use_xpu
 
         assert "chunk_size" in kwargs, "chunk_size should be provided."
         assert "dtype" in kwargs, "dtype should be provided."
@@ -294,7 +294,7 @@ class VLLMPagedMemLayerwiseXPUConnector(GPUConnectorInterface):
     def from_metadata(
         cls,
         metadata: LMCacheMetadata,
-        use_gpu: bool = False,
+        use_xpu: bool = False,
         device: Optional[torch.device] = None,
     ) -> "VLLMPagedMemLayerwiseXPUConnector":
         num_layers = metadata.kv_shape[0]
@@ -304,7 +304,7 @@ class VLLMPagedMemLayerwiseXPUConnector(GPUConnectorInterface):
         return cls(
             hidden_dim_size=hidden_dim_size,
             num_layers=num_layers,
-            use_gpu=use_gpu,
+            use_xpu=use_xpu,
             chunk_size=metadata.kv_shape[2],
             dtype=metadata.kv_dtype,
             device=device,
@@ -320,8 +320,8 @@ class VLLMPagedMemLayerwiseXPUConnector(GPUConnectorInterface):
             )
 
     def _lazy_initialize_buffer(self, kv_caches: List[torch.Tensor]) -> None:
-        # Buffer allocator only needed when use_gpu=True (device staging)
-        if self.use_gpu and self.gpu_buffer_allocator is None:
+        # Buffer allocator only needed when use_xpu=True (device staging)
+        if self.use_xpu and self.gpu_buffer_allocator is None:
             from lmcache.v1.memory_management import XPUMemoryAllocator
 
             # Derive size from first layer KV tensor
@@ -394,7 +394,7 @@ class VLLMPagedMemLayerwiseXPUConnector(GPUConnectorInterface):
             return
 
         tmp_gpu_buffer_obj: Optional[MemoryObj] = None
-        if self.use_gpu:
+        if self.use_xpu:
             from lmcache.v1.memory_management import MemoryFormat
 
             buffer_shape = self.get_shape(num_tokens)
@@ -445,7 +445,7 @@ class VLLMPagedMemLayerwiseXPUConnector(GPUConnectorInterface):
 
                     cursor = 0
 
-                    if self.use_gpu:
+                    if self.use_xpu:
                         staged = tmp_gpu_buffer_obj.tensor
 
                         for s, e, mem in zip(
@@ -678,9 +678,9 @@ class VLLMPagedMemLayerwiseXPUConnector(GPUConnectorInterface):
         )
         total_tokens = int(slot_mapping_full.numel())
 
-        # Optional staging buffer (will be USED when self.use_gpu=True)
+        # Optional staging buffer (will be USED when self.use_xpu=True)
         tmp_gpu_buffer_obj: Optional[MemoryObj] = None
-        if self.use_gpu:
+        if self.use_xpu:
             from lmcache.v1.memory_management import MemoryFormat
 
             # buffer shape uses existing helper; must match how allocator expects KV_T2D
@@ -725,7 +725,7 @@ class VLLMPagedMemLayerwiseXPUConnector(GPUConnectorInterface):
                     if self.use_mla:
                         src_flat = _get_head_size_view(src_layer, use_mla=True)
 
-                        if self.use_gpu:
+                        if self.use_xpu:
                             gathered_full = src_flat.index_select(0, slot_mapping_full)
                             # Write into tmp if possible, else fallback to per-chunk
                             tmp_src = (
@@ -778,7 +778,7 @@ class VLLMPagedMemLayerwiseXPUConnector(GPUConnectorInterface):
                             src_layer, use_mla=False
                         )
 
-                        if self.use_gpu:
+                        if self.use_xpu:
                             k_full = src_k_flat.index_select(0, slot_mapping_full)
                             v_full = src_v_flat.index_select(0, slot_mapping_full)
 

@@ -166,7 +166,7 @@ def test_xpu_connector_roundtrip_layerwise(use_gpu: bool):
 
     conn = VLLMPagedMemLayerwiseXPUConnector.from_metadata(
         meta,
-        use_gpu=use_gpu,
+        use_xpu=use_gpu,
         device=device,
     )
 
@@ -338,7 +338,8 @@ def test_xpu_connector_roundtrip_non_layerwise_multi_chunk(
         pin_alloc.close()
 
 
-def test_xpu_connector_roundtrip_layerwise_multi_chunk_use_gpu_true() -> None:
+@pytest.mark.parametrize("use_xpu", [False, True])
+def test_xpu_connector_roundtrip_layerwise_multi_chunk(use_xpu: bool) -> None:
     _skip_if_no_xpu()
     device = torch.device("xpu:0")
 
@@ -380,7 +381,7 @@ def test_xpu_connector_roundtrip_layerwise_multi_chunk_use_gpu_true() -> None:
     )
     conn = VLLMPagedMemLayerwiseXPUConnector.from_metadata(
         meta,
-        use_gpu=True,
+        use_xpu=use_xpu,
         device=device,
     )
 
@@ -411,7 +412,10 @@ def test_xpu_connector_roundtrip_layerwise_multi_chunk_use_gpu_true() -> None:
         for _ in range(num_layers + 1):
             next(producer)
 
-        assert conn.gpu_buffer_allocator is not None
+        if use_xpu:
+            assert conn.gpu_buffer_allocator is not None
+        else:
+            assert conn.gpu_buffer_allocator is None
 
         kvcaches_dst = generate_kv_cache_paged_list_tensors(
             num_blocks=num_blocks,

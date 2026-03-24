@@ -2495,5 +2495,9 @@ class XPUMemoryAllocator(MemoryAllocatorInterface):
         with self.device_mem_lock:
             return self.allocator.memcheck()
 
+    def close(self):
+        if hasattr(torch, "xpu") and torch.xpu.is_available():
+            torch.xpu.synchronize()
+
     def __str__(self):
         return "XPUMemoryAllocator"
