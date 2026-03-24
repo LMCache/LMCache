@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from typing import TYPE_CHECKING, Any, Tuple, Union, Optional
+from typing import TYPE_CHECKING, Any, Optional, Tuple, Union
 
 # Third Party
 import torch
@@ -48,7 +48,9 @@ def assert_layerwise_gpu_connector(gpu_connector: "GPUConnectorInterface"):
         VLLMBufferLayerwiseGPUConnector,
         VLLMPagedMemLayerwiseGPUConnector,
     )
-    from lmcache.v1.gpu_connector.xpu_connectors import VLLMPagedMemLayerwiseXPUConnector
+    from lmcache.v1.gpu_connector.xpu_connectors import (
+        VLLMPagedMemLayerwiseXPUConnector,
+    )
 
     assert isinstance(
         gpu_connector,
@@ -488,6 +490,7 @@ def get_dtype(kv_caches: Any, gpu_kv_format: "lmc_ops.GPUKVFormat") -> torch.dty
     else:
         raise ValueError(f"Unknown GPU KV Format: {gpu_kv_format}")
 
+
 def _split_token2d_kv(token2d: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Accepts either:
@@ -556,13 +559,17 @@ def _get_head_size_view(
         if gpu_kv_format == lmc_ops.GPUKVFormat.NL_X_TWO_NB_BS_NH_HS:
             # per-layer: [2, NB, BS, NH, HS]
             if t.shape[0] != 2:
-                raise ValueError(f"{gpu_kv_format} expects [2,NB,BS,NH,HS], got {t.shape}")
+                raise ValueError(
+                    f"{gpu_kv_format} expects [2,NB,BS,NH,HS], got {t.shape}"
+                )
             k, v = t[0], t[1]  # [NB,BS,NH,HS]
 
         elif gpu_kv_format == lmc_ops.GPUKVFormat.NL_X_NB_TWO_BS_NH_HS:
             # per-layer: [NB, 2, BS, NH, HS]
             if t.shape[1] != 2:
-                raise ValueError(f"{gpu_kv_format} expects [NB,2,BS,NH,HS], got {t.shape}")
+                raise ValueError(
+                    f"{gpu_kv_format} expects [NB,2,BS,NH,HS], got {t.shape}"
+                )
             k, v = t[:, 0], t[:, 1]  # [NB,BS,NH,HS]
 
         else:

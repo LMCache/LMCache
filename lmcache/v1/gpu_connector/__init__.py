@@ -74,9 +74,10 @@ def CreateGPUConnector(
         if dev_name == "xpu":
             # First Party
             from lmcache.v1.gpu_connector.xpu_connectors import (
-                VLLMPagedMemXPUConnectorV2,
                 VLLMPagedMemLayerwiseXPUConnector,
+                VLLMPagedMemXPUConnectorV2,
             )
+
             if config.use_layerwise:
                 return VLLMPagedMemLayerwiseXPUConnector.from_metadata(
                     metadata, use_xpu=use_gpu, device=device

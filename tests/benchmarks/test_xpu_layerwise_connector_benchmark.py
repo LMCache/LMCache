@@ -1,17 +1,20 @@
+# SPDX-License-Identifier: Apache-2.0
+# Standard
+from functools import partial
 import os
 import random
 import tempfile
 import time
-from typing import Callable, List
-from functools import partial
+
+# Third Party
 import pytest
 import torch
 
+# First Party
 from lmcache.utils import mock_up_broadcast_fn, mock_up_broadcast_object_fn
 from lmcache.v1.cache_engine import LMCacheEngineBuilder
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.gpu_connector.xpu_connectors import VLLMPagedMemLayerwiseXPUConnector
-
 from tests.v1.utils import (
     dumb_metadata,
     generate_kv_cache_paged_list_tensors,
@@ -83,7 +86,7 @@ def _create_connector(
 
 def _layerwise_store_vllm_contract(
     engine,
-    list_token_ids,      # list[Tensor] or list[list[int]]
+    list_token_ids,  # list[Tensor] or list[list[int]]
     list_slot_mappings,  # list[Tensor]
     kvcaches,
     *,
@@ -94,21 +97,27 @@ def _layerwise_store_vllm_contract(
     """
     Mimic vLLM layerwise store contract:
 
-      - create one store_layer generator per request (first one sync=True, rest sync=False)
+      - create one store_layer generator per request
+        (first one sync=True, rest sync=False)
       - tick generators once per layer (num_layers times)
       - tick generators one final time (like wait_for_save)
 
     IMPORTANT:
       - store_layer expects token_ids as list[int] (like vLLM adapter)
-      - for save_unfull_chunk=False, truncate to aligned_len instead of trailing False mask
+      - for save_unfull_chunk=False, truncate to aligned_len
+        instead of trailing False mask
       - mask False indicates skipped LEADING tokens only (we use skip=0 here)
     """
     storers = []
     is_first = True
 
-    for token_ids, slot_mapping in zip(list_token_ids, list_slot_mappings, strict=False):
+    for token_ids, slot_mapping in zip(
+        list_token_ids, list_slot_mappings, strict=False
+    ):
         # token_ids: Tensor -> list[int]
-        token_ids_list = token_ids.tolist() if isinstance(token_ids, torch.Tensor) else token_ids
+        token_ids_list = (
+            token_ids.tolist() if isinstance(token_ids, torch.Tensor) else token_ids
+        )
 
         # keep slot_mapping on same device as kvcaches (xpu)
         slot_mapping = slot_mapping.to(kvcaches[0].device)
@@ -125,7 +134,9 @@ def _layerwise_store_vllm_contract(
 
         skip_leading_tokens = 0
         # put mask on same device (avoid implicit device moves)
-        mask = torch.ones(len(token_ids_list), dtype=torch.bool, device=slot_mapping.device)
+        mask = torch.ones(
+            len(token_ids_list), dtype=torch.bool, device=slot_mapping.device
+        )
         mask[:skip_leading_tokens] = False
 
         st = engine.store_layer(
@@ -167,11 +178,15 @@ def _layerwise_retrieve_vllm_contract(
     retrievers = []
     is_first = True
 
-    for token_ids, slot_mapping in zip(list_token_ids, list_slot_mappings, strict=False):
+    for token_ids, slot_mapping in zip(
+        list_token_ids, list_slot_mappings, strict=False
+    ):
         if isinstance(token_ids, torch.Tensor):
             tokens = token_ids
         else:
-            tokens = torch.tensor(token_ids, dtype=torch.long, device=slot_mapping.device)
+            tokens = torch.tensor(
+                token_ids, dtype=torch.long, device=slot_mapping.device
+            )
 
         slot_mapping = slot_mapping.to(kvcaches[0].device)
 
@@ -240,7 +255,9 @@ def create_config():
                 raise ValueError(f"Unknown backend: {backend}")
 
     homedir = os.environ.get("HOME", "/tmp")
-    with tempfile.TemporaryDirectory(dir=homedir, ignore_cleanup_errors=True) as temp_dir:
+    with tempfile.TemporaryDirectory(
+        dir=homedir, ignore_cleanup_errors=True
+    ) as temp_dir:
         yield partial(make_config, path=temp_dir)
 
 
@@ -382,6 +399,7 @@ def test_store_1GB(
         rounds=num_repeats,
         iterations=1,
     )
+
 
 # --------------------------
 # Retrieve benchmarks (100% hit)

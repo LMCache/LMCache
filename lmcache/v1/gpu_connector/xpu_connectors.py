@@ -13,17 +13,24 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # Standard
+from typing import List, Optional, Union, cast
 import os
-from typing import List, Optional, Generator, Iterable, Sequence, Tuple, Union
 
 # Third Party
 import torch
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.gpu_connector.gpu_connectors import VLLMPagedMemGPUConnectorV2, GPUConnectorInterface
-from lmcache.v1.gpu_connector.utils import _split_token2d_kv, _get_head_size_view
-from lmcache.v1.memory_management import MemoryFormat, MemoryObj
+from lmcache.v1.gpu_connector.gpu_connectors import (
+    GPUConnectorInterface,
+    VLLMPagedMemGPUConnectorV2,
+)
+from lmcache.v1.gpu_connector.utils import _get_head_size_view, _split_token2d_kv
+from lmcache.v1.memory_management import (
+    MemoryAllocatorInterface,
+    MemoryFormat,
+    MemoryObj,
+)
 from lmcache.v1.metadata import LMCacheMetadata
 
 logger = init_logger(__name__)
@@ -33,6 +40,7 @@ ALLOWED_FORMAT_TRANSITIONS = {
     (MemoryFormat.KV_MLA_FMT, MemoryFormat.KV_MLA_FMT),
     (MemoryFormat.KV_T2D, MemoryFormat.KV_MLA_FMT),
 }
+
 
 class VLLMPagedMemXPUConnectorV2(VLLMPagedMemGPUConnectorV2):
     """
@@ -250,7 +258,6 @@ class VLLMPagedMemXPUConnectorV2(VLLMPagedMemGPUConnectorV2):
             self.to_gpu(memory_obj, start, end, **kwargs)
 
 
-
 class VLLMPagedMemLayerwiseXPUConnector(GPUConnectorInterface):
     """
     Layerwise paged KV connector for XPU.
@@ -288,7 +295,7 @@ class VLLMPagedMemLayerwiseXPUConnector(GPUConnectorInterface):
         self.store_stream = torch.xpu.Stream()
 
         # Optional device staging buffer allocator (same pattern as CUDA class)
-        self.gpu_buffer_allocator = None
+        self.gpu_buffer_allocator: Optional[MemoryAllocatorInterface] = None
 
     @classmethod
     def from_metadata(
@@ -322,6 +329,7 @@ class VLLMPagedMemLayerwiseXPUConnector(GPUConnectorInterface):
     def _lazy_initialize_buffer(self, kv_caches: List[torch.Tensor]) -> None:
         # Buffer allocator only needed when use_xpu=True (device staging)
         if self.use_xpu and self.gpu_buffer_allocator is None:
+            # First Party
             from lmcache.v1.memory_management import XPUMemoryAllocator
 
             # Derive size from first layer KV tensor
@@ -372,12 +380,15 @@ class VLLMPagedMemLayerwiseXPUConnector(GPUConnectorInterface):
             if t is None:
                 return t
             if t.device != self.device:
-                # non_blocking is fine; will be blocking if underlying memory isn't pinned
+                # non_blocking is fine; will be blocking
+                # if underlying memory isn't pinned
                 return t.to(self.device, non_blocking=True)
             return t
 
         # Build a single contiguous mapping in the SAME order we will pack chunks.
-        slot_mapping_chunks = [slot_mapping[s:e] for s, e in zip(starts, ends, strict=False)]
+        slot_mapping_chunks = [
+            slot_mapping[s:e] for s, e in zip(starts, ends, strict=False)
+        ]
         slot_mapping_full = torch.cat(slot_mapping_chunks, dim=0)
 
         # Move mapping ONCE to device (fixes multiple small H2D copies).
@@ -395,13 +406,15 @@ class VLLMPagedMemLayerwiseXPUConnector(GPUConnectorInterface):
 
         tmp_gpu_buffer_obj: Optional[MemoryObj] = None
         if self.use_xpu:
+            # First Party
             from lmcache.v1.memory_management import MemoryFormat
 
             buffer_shape = self.get_shape(num_tokens)
             assert self.gpu_buffer_allocator is not None
-            requested_bytes = int(buffer_shape.numel()) * torch.empty(
-                (), dtype=self.dtype
-            ).element_size()
+            requested_bytes = (
+                int(buffer_shape.numel())
+                * torch.empty((), dtype=self.dtype).element_size()
+            )
             allocator_tensor = getattr(self.gpu_buffer_allocator, "tensor", None)
             capacity_bytes: Optional[int] = None
             if isinstance(allocator_tensor, torch.Tensor):
@@ -409,9 +422,7 @@ class VLLMPagedMemLayerwiseXPUConnector(GPUConnectorInterface):
                     allocator_tensor.numel() * allocator_tensor.element_size()
                 )
             allocator_backend = getattr(self.gpu_buffer_allocator, "allocator", None)
-            allocated_bytes = getattr(
-                allocator_backend, "total_allocated_size", None
-            )
+            allocated_bytes = getattr(allocator_backend, "total_allocated_size", None)
             tmp_gpu_buffer_obj = self.gpu_buffer_allocator.allocate(
                 buffer_shape, self.dtype, MemoryFormat.KV_T2D
             )
@@ -422,7 +433,8 @@ class VLLMPagedMemLayerwiseXPUConnector(GPUConnectorInterface):
                     f"capacity_bytes={capacity_bytes}, "
                     f"allocated_bytes={allocated_bytes}, "
                     f"allocator_type={type(self.gpu_buffer_allocator).__name__}, "
-                    f"allocator_tensor_device={getattr(allocator_tensor, 'device', None)}"
+                    f"allocator_tensor_device="
+                    f"{getattr(allocator_tensor, 'device', None)}"
                 )
 
         current_stream = torch.xpu.current_stream()
@@ -437,16 +449,21 @@ class VLLMPagedMemLayerwiseXPUConnector(GPUConnectorInterface):
                 with torch.xpu.stream(self.load_stream):
                     dst_layer = self.kvcaches[layer_id]
                     if self.use_mla:
-                        dst_flat = _get_head_size_view(dst_layer, use_mla=True)
+                        dst_flat = cast(
+                            torch.Tensor,
+                            _get_head_size_view(dst_layer, use_mla=True),
+                        )
                     else:
-                        dst_k_flat, dst_v_flat = _get_head_size_view(
+                        dst_k_flat, dst_v_flat = _get_head_size_view(  # type: ignore[misc]
                             dst_layer, use_mla=False
                         )
 
                     cursor = 0
 
                     if self.use_xpu:
+                        assert tmp_gpu_buffer_obj is not None
                         staged = tmp_gpu_buffer_obj.tensor
+                        assert staged is not None
 
                         for s, e, mem in zip(
                             starts, ends, memory_objs_layer, strict=False
@@ -472,8 +489,7 @@ class VLLMPagedMemLayerwiseXPUConnector(GPUConnectorInterface):
                                 dst_flat.index_copy_(0, sl, staged_xpu[0])
                             else:
                                 raise ValueError(
-                                    "Unexpected MLA staged tensor: "
-                                    f"{staged_xpu.shape}"
+                                    f"Unexpected MLA staged tensor: {staged_xpu.shape}"
                                 )
                         else:
                             k_tok, v_tok = _split_token2d_kv(staged)
@@ -518,9 +534,9 @@ class VLLMPagedMemLayerwiseXPUConnector(GPUConnectorInterface):
                             if n <= 0:
                                 continue
 
-                            src = _ensure_xpu(mem.tensor)  
+                            src = _ensure_xpu(mem.tensor)
                             sl = slot_mapping_full[cursor : cursor + n]
-                            sl = _ensure_xpu(sl)  
+                            sl = _ensure_xpu(sl)
                             cursor += n
 
                             if self.use_mla:
@@ -530,8 +546,7 @@ class VLLMPagedMemLayerwiseXPUConnector(GPUConnectorInterface):
                                     dst_flat.index_copy_(0, sl, src[0])
                                 else:
                                     raise ValueError(
-                                        "Unexpected MLA token tensor: "
-                                        f"{src.shape}"
+                                        f"Unexpected MLA token tensor: {src.shape}"
                                     )
                             else:
                                 k_tok, v_tok = _split_token2d_kv(src)
@@ -574,8 +589,7 @@ class VLLMPagedMemLayerwiseXPUConnector(GPUConnectorInterface):
 
         yield
 
-
-    def batched_from_gpu(
+    def batched_from_gpu(  # type: ignore[override]
         self,
         memory_objs: List[List[MemoryObj]],
         starts: List[int],
@@ -601,7 +615,9 @@ class VLLMPagedMemLayerwiseXPUConnector(GPUConnectorInterface):
         current_stream = torch.xpu.current_stream()
 
         # ---- helpers (keep local to minimize file-wide changes) ----
-        def _flatten_last2_if_needed(src: torch.Tensor, dst: torch.Tensor) -> torch.Tensor:
+        def _flatten_last2_if_needed(
+            src: torch.Tensor, dst: torch.Tensor
+        ) -> torch.Tensor:
             """
             Make src match dst for the common KV layouts:
             - src: [..., H, HS] -> dst: [..., H*HS]
@@ -618,12 +634,17 @@ class VLLMPagedMemLayerwiseXPUConnector(GPUConnectorInterface):
 
             # same ndim but dst last dim is flattened (dst ends with D)
             if src.dim() == dst.dim():
-                if dst.shape[:-1] == src.shape[:-2] and dst.shape[-1] == src.shape[-2] * src.shape[-1]:
+                if (
+                    dst.shape[:-1] == src.shape[:-2]
+                    and dst.shape[-1] == src.shape[-2] * src.shape[-1]
+                ):
                     return src.reshape(*src.shape[:-2], -1)
 
             return src  # caller will error if still incompatible
 
-        def _copy_kv_into_mem(mem_tensor: torch.Tensor, k_src: torch.Tensor, v_src: torch.Tensor) -> None:
+        def _copy_kv_into_mem(
+            mem_tensor: torch.Tensor, k_src: torch.Tensor, v_src: torch.Tensor
+        ) -> None:
             """
             Copy K/V into mem.tensor supporting:
             - [2, ..., D]  (K in 0, V in 1)
@@ -631,7 +652,9 @@ class VLLMPagedMemLayerwiseXPUConnector(GPUConnectorInterface):
             - [2, ..., H, HS] or [..., 2, H, HS] similarly
             """
             if mem_tensor.dim() < 3:
-                raise ValueError(f"Unexpected output token2d layout: {mem_tensor.shape}")
+                raise ValueError(
+                    f"Unexpected output token2d layout: {mem_tensor.shape}"
+                )
 
             # Case A: mem is [2, ...]
             if mem_tensor.shape[0] == 2:
@@ -669,7 +692,7 @@ class VLLMPagedMemLayerwiseXPUConnector(GPUConnectorInterface):
 
         slot_mapping_on_device = slot_mapping.to(self.device)
 
-        # Precompute “full” mapping for batched gather 
+        # Precompute “full” mapping for batched gather
         # NOTE: this assumes starts/ends partition slot_mapping contiguously.
         # If not contiguous, concatenation is still correct.
         slot_mapping_full = torch.cat(
@@ -681,14 +704,16 @@ class VLLMPagedMemLayerwiseXPUConnector(GPUConnectorInterface):
         # Optional staging buffer (will be USED when self.use_xpu=True)
         tmp_gpu_buffer_obj: Optional[MemoryObj] = None
         if self.use_xpu:
+            # First Party
             from lmcache.v1.memory_management import MemoryFormat
 
             # buffer shape uses existing helper; must match how allocator expects KV_T2D
             buffer_shape = self.get_shape(total_tokens)
             assert self.gpu_buffer_allocator is not None
-            requested_bytes = int(buffer_shape.numel()) * torch.empty(
-                (), dtype=self.dtype
-            ).element_size()
+            requested_bytes = (
+                int(buffer_shape.numel())
+                * torch.empty((), dtype=self.dtype).element_size()
+            )
             allocator_tensor = getattr(self.gpu_buffer_allocator, "tensor", None)
             capacity_bytes: Optional[int] = None
             if isinstance(allocator_tensor, torch.Tensor):
@@ -696,9 +721,7 @@ class VLLMPagedMemLayerwiseXPUConnector(GPUConnectorInterface):
                     allocator_tensor.numel() * allocator_tensor.element_size()
                 )
             allocator_backend = getattr(self.gpu_buffer_allocator, "allocator", None)
-            allocated_bytes = getattr(
-                allocator_backend, "total_allocated_size", None
-            )
+            allocated_bytes = getattr(allocator_backend, "total_allocated_size", None)
             tmp_gpu_buffer_obj = self.gpu_buffer_allocator.allocate(
                 buffer_shape, self.dtype, MemoryFormat.KV_T2D
             )
@@ -709,7 +732,8 @@ class VLLMPagedMemLayerwiseXPUConnector(GPUConnectorInterface):
                     f"capacity_bytes={capacity_bytes}, "
                     f"allocated_bytes={allocated_bytes}, "
                     f"allocator_type={type(self.gpu_buffer_allocator).__name__}, "
-                    f"allocator_tensor_device={getattr(allocator_tensor, 'device', None)}"
+                    f"allocator_tensor_device="
+                    f"{getattr(allocator_tensor, 'device', None)}"
                 )
             tmp = tmp_gpu_buffer_obj.tensor  # staging tensor on device
 
@@ -723,7 +747,10 @@ class VLLMPagedMemLayerwiseXPUConnector(GPUConnectorInterface):
                     src_layer = self.kvcaches[layer_id]
 
                     if self.use_mla:
-                        src_flat = _get_head_size_view(src_layer, use_mla=True)
+                        src_flat = cast(
+                            torch.Tensor,
+                            _get_head_size_view(src_layer, use_mla=True),
+                        )
 
                         if self.use_xpu:
                             gathered_full = src_flat.index_select(0, slot_mapping_full)
@@ -754,12 +781,11 @@ class VLLMPagedMemLayerwiseXPUConnector(GPUConnectorInterface):
                                     sl = slot_mapping_on_device[s:e]
                                     gathered = src_flat.index_select(0, sl)
                                     mem.tensor.copy_(
-                                        gathered.to(mem.tensor.device), non_blocking=True
+                                        gathered.to(mem.tensor.device),
+                                        non_blocking=True,
                                     )
                         else:
-                            for s, e, mem in zip(
-                                starts, ends, mem_layer, strict=False
-                            ):
+                            for s, e, mem in zip(starts, ends, mem_layer, strict=False):
                                 assert mem.tensor is not None
                                 sl = slot_mapping_on_device[s:e]
                                 gathered = src_flat.index_select(0, sl)
@@ -782,13 +808,10 @@ class VLLMPagedMemLayerwiseXPUConnector(GPUConnectorInterface):
                             k_full = src_k_flat.index_select(0, slot_mapping_full)
                             v_full = src_v_flat.index_select(0, slot_mapping_full)
 
-                            # Slice from staging. If tmp exists and can hold the layout, use it.
-                            # If tmp layout isn't compatible, we still avoid per-chunk gathers;
-                            # we just slice k_full/v_full directly.
+                            # Slice from staging. If tmp exists and can hold
+                            # the layout, use it; otherwise slice k/v directly.
                             off = 0
-                            for s, e, mem in zip(
-                                starts, ends, mem_layer, strict=False
-                            ):
+                            for s, e, mem in zip(starts, ends, mem_layer, strict=False):
                                 assert mem.tensor is not None
                                 n = e - s
 
@@ -799,10 +822,9 @@ class VLLMPagedMemLayerwiseXPUConnector(GPUConnectorInterface):
                                 _copy_kv_into_mem(mem.tensor, k_chunk, v_chunk)
 
                         else:
-                            # per-chunk gather (original behavior) but without per-iter H2D transfer
-                            for s, e, mem in zip(
-                                starts, ends, mem_layer, strict=False
-                            ):
+                            # per-chunk gather (original behavior);
+                            # avoids per-iteration H2D slot_mapping transfers
+                            for s, e, mem in zip(starts, ends, mem_layer, strict=False):
                                 assert mem.tensor is not None
                                 sl = slot_mapping_on_device[s:e]
                                 k = src_k_flat.index_select(0, sl)
@@ -820,12 +842,14 @@ class VLLMPagedMemLayerwiseXPUConnector(GPUConnectorInterface):
 
     def batched_to_gpu(
         self,
+        memory_objs: Union[
+            List[List[MemoryObj]], List[MemoryObj], List[int], None
+        ] = None,
         starts: Optional[List[int]] = None,
         ends: Optional[List[int]] = None,
         **kwargs,
     ):
-        return self._batched_to_gpu_gen(starts=starts, ends=ends, **kwargs)
-
+        return self._batched_to_gpu_gen(starts=starts or [], ends=ends or [], **kwargs)
 
     def get_shape(self, num_tokens: int) -> torch.Size:
         if self.use_mla:

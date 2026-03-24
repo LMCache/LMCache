@@ -97,7 +97,9 @@ def _v2_store_vllm_contract(
     save_unfull_chunk: bool,
 ):
     """Mimic vLLM non-layerwise store contract for V2 connector."""
-    for token_ids, slot_mapping in zip(list_token_ids, list_slot_mappings, strict=False):
+    for token_ids, slot_mapping in zip(
+        list_token_ids, list_slot_mappings, strict=False
+    ):
         tokens = token_ids
         slots = slot_mapping.to(kvcaches[0][0].device)
 
@@ -124,7 +126,9 @@ def _v2_retrieve_vllm_contract(
     save_unfull_chunk: bool,
 ):
     """Mimic vLLM non-layerwise retrieve contract for V2 connector."""
-    for token_ids, slot_mapping in zip(list_token_ids, list_slot_mappings, strict=False):
+    for token_ids, slot_mapping in zip(
+        list_token_ids, list_slot_mappings, strict=False
+    ):
         tokens = token_ids
         slots = slot_mapping.to(kvcaches[0][0].device)
 
@@ -143,7 +147,9 @@ def _v2_retrieve_vllm_contract(
 
 @pytest.fixture
 def create_config():
-    def make_config(backend: str, size: float, save_unfull_chunk: bool = True, **kwargs):
+    def make_config(
+        backend: str, size: float, save_unfull_chunk: bool = True, **kwargs
+    ):
         common = dict(
             save_unfull_chunk=save_unfull_chunk,
             extra_config={"force_store_wait": True},
@@ -170,7 +176,9 @@ def create_config():
                 raise ValueError(f"Unknown backend: {backend}")
 
     homedir = os.environ.get("HOME", "/tmp")
-    with tempfile.TemporaryDirectory(dir=homedir, ignore_cleanup_errors=True) as temp_dir:
+    with tempfile.TemporaryDirectory(
+        dir=homedir, ignore_cleanup_errors=True
+    ) as temp_dir:
         yield partial(make_config, path=temp_dir)
 
 
@@ -225,7 +233,6 @@ def test_store_1gb_v2(
     num_blocks = 1000
     block_size = 16
     chunk_size = 256
-    kv_shape = (num_layers, 2, chunk_size, num_heads, head_dim)
 
     num_requests = 4
     num_repeats = 10

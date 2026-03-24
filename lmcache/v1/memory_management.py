@@ -2508,6 +2508,7 @@ class PagedCpuGpuMemoryAllocator(MemoryAllocatorInterface):
     def __str__(self):
         return "PDMemoryAllocator"
 
+
 class XPUMemoryAllocator(MemoryAllocatorInterface):
     """Allocates memory in the pre-allocated XPU memory."""
 

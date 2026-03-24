@@ -1,18 +1,20 @@
+# SPDX-License-Identifier: Apache-2.0
 # tests/v1/test_xpu_connector.py
 
+# Third Party
 import pytest
 import torch
 
+# First Party
 from lmcache.v1.gpu_connector.xpu_connectors import (
-    VLLMPagedMemXPUConnectorV2,
     VLLMPagedMemLayerwiseXPUConnector,
+    VLLMPagedMemXPUConnectorV2,
 )
 from lmcache.v1.memory_management import MemoryFormat, PinMemoryAllocator
 from lmcache.v1.metadata import LMCacheMetadata
-
 from tests.v1.utils import (
-    generate_kv_cache_paged_list_tensors,
     check_paged_kv_cache_equal,
+    generate_kv_cache_paged_list_tensors,
 )
 
 
@@ -35,6 +37,7 @@ def _pack_slot_mapping(
         [slot_mapping[s:e] for s, e in zip(starts, ends, strict=False)],
         dim=0,
     )
+
 
 @pytest.mark.parametrize("use_gpu", [False, True])
 def test_xpu_connector_roundtrip_non_layerwise(use_gpu: bool):
@@ -125,6 +128,7 @@ def test_xpu_connector_roundtrip_non_layerwise(use_gpu: bool):
     finally:
         memobj.ref_count_down()
         pin_alloc.close()
+
 
 @pytest.mark.parametrize("use_gpu", [False, True])
 def test_xpu_connector_roundtrip_layerwise(use_gpu: bool):
