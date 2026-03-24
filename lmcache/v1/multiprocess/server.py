@@ -473,7 +473,7 @@ class MPCacheEngine:
 
         with (
             torch.cuda.device(gpu_context.device),
-            torch.cuda.stream(gpu_context.high_priority_stream),
+            torch.cuda.stream(gpu_context.stream),
         ):
             # Stage all block_ids to GPU once before the loop
             all_block_ids_gpu = gpu_context.stage_block_ids(gpu_block_ids)
