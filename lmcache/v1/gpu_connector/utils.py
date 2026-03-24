@@ -59,57 +59,99 @@ def assert_layerwise_gpu_connector(gpu_connector: "GPUConnectorInterface"):
     )
 
 
+def get_gpu_kv_shape_description(gpu_kv_format: "lmc_ops.GPUKVFormat") -> str:
+    """Return a human-readable shape description for the GPU KV format.
+
+    Uses short names matching the ``GPUKVFormat`` enum convention:
+    NB=num_blocks, NL=num_layers, BS=block_size, NH=num_heads,
+    HS=head_size, PBS=page_buffer_size (NB*BS).
+    """
+    _SHAPE_DESCRIPTIONS: dict["lmc_ops.GPUKVFormat", str] = {
+        lmc_ops.GPUKVFormat.NB_NL_TWO_BS_NH_HS: "[NB, NL, 2, BS, NH, HS]",
+        lmc_ops.GPUKVFormat.NL_X_TWO_NB_BS_NH_HS: "NL x [2, NB, BS, NH, HS]",
+        lmc_ops.GPUKVFormat.NL_X_NB_TWO_BS_NH_HS: "NL x [NB, 2, BS, NH, HS]",
+        lmc_ops.GPUKVFormat.NL_X_NB_BS_HS: "NL x [NB, BS, HS]",
+        lmc_ops.GPUKVFormat.TWO_X_NL_X_NBBS_NH_HS: "2 x NL x [PBS, NH, HS]",
+        lmc_ops.GPUKVFormat.NL_X_NBBS_ONE_HS: "NL x [PBS, 1, HS]",
+    }
+    return _SHAPE_DESCRIPTIONS.get(gpu_kv_format, f"Unknown ({gpu_kv_format})")
+
+
+def get_attention_backend(gpu_kv_format: "lmc_ops.GPUKVFormat") -> str:
+    """Return the attention backend name for the GPU KV format."""
+    _ATTENTION_BACKENDS: dict["lmc_ops.GPUKVFormat", str] = {
+        lmc_ops.GPUKVFormat.NB_NL_TWO_BS_NH_HS: "vLLM CROSS_LAYER",
+        lmc_ops.GPUKVFormat.NL_X_TWO_NB_BS_NH_HS: "vLLM non-MLA flash attention",
+        lmc_ops.GPUKVFormat.NL_X_NB_TWO_BS_NH_HS: "vLLM non-MLA flash infer",
+        lmc_ops.GPUKVFormat.NL_X_NB_BS_HS: "vLLM MLA",
+        lmc_ops.GPUKVFormat.TWO_X_NL_X_NBBS_NH_HS: (
+            "SGLang MHA (flash attention and flash infer)"
+        ),
+        lmc_ops.GPUKVFormat.NL_X_NBBS_ONE_HS: "SGLang MLA",
+    }
+    return _ATTENTION_BACKENDS.get(gpu_kv_format, f"Unknown ({gpu_kv_format})")
+
+
+def get_concrete_gpu_kv_shape(
+    kv_caches: Any, gpu_kv_format: "lmc_ops.GPUKVFormat"
+) -> str:
+    """Return the shape with actual numeric values substituted.
+
+    For example, instead of ``NL x [2, NB, BS, NH, HS]``
+    this returns ``80 x [2, 2048, 128, 8, 128]``.
+    """
+    nl = get_num_layers(kv_caches, gpu_kv_format)
+    hs = get_head_size(kv_caches, gpu_kv_format)
+
+    fmt = gpu_kv_format
+    F = lmc_ops.GPUKVFormat
+
+    if fmt == F.NB_NL_TWO_BS_NH_HS:
+        nb = get_num_blocks(kv_caches, fmt)
+        bs = get_block_size(kv_caches, fmt)
+        nh = get_num_heads(kv_caches, fmt)
+        return f"[{nb}, {nl}, 2, {bs}, {nh}, {hs}]"
+
+    if fmt == F.NL_X_TWO_NB_BS_NH_HS:
+        nb = get_num_blocks(kv_caches, fmt)
+        bs = get_block_size(kv_caches, fmt)
+        nh = get_num_heads(kv_caches, fmt)
+        return f"{nl} x [2, {nb}, {bs}, {nh}, {hs}]"
+
+    if fmt == F.NL_X_NB_TWO_BS_NH_HS:
+        nb = get_num_blocks(kv_caches, fmt)
+        bs = get_block_size(kv_caches, fmt)
+        nh = get_num_heads(kv_caches, fmt)
+        return f"{nl} x [{nb}, 2, {bs}, {nh}, {hs}]"
+
+    if fmt == F.NL_X_NB_BS_HS:
+        nb = get_num_blocks(kv_caches, fmt)
+        bs = get_block_size(kv_caches, fmt)
+        return f"{nl} x [{nb}, {bs}, {hs}]"
+
+    if fmt == F.TWO_X_NL_X_NBBS_NH_HS:
+        pbs = get_page_buffer_size(kv_caches, fmt)
+        nh = get_num_heads(kv_caches, fmt)
+        return f"2 x {nl} x [{pbs}, {nh}, {hs}]"
+
+    if fmt == F.NL_X_NBBS_ONE_HS:
+        pbs = get_page_buffer_size(kv_caches, fmt)
+        return f"{nl} x [{pbs}, 1, {hs}]"
+
+    return f"Unknown ({gpu_kv_format})"
+
+
 def legible_print_gpu_kv_format(gpu_kv_format: "lmc_ops.GPUKVFormat"):
     """
     Print the GPU KV Format in a legible way
     """
-    if gpu_kv_format == lmc_ops.GPUKVFormat.NB_NL_TWO_BS_NH_HS:
-        logger.info(
-            "GPU KV Format: "
-            "[num_blocks, num_layers, 2, block_size, num_heads, head_size]"
-        )
-        logger.info("Currently used by:\n  - vLLM CROSS_LAYER mode")
-
-    elif gpu_kv_format == lmc_ops.GPUKVFormat.NL_X_TWO_NB_BS_NH_HS:
-        logger.info(
-            "GPU KV Format: "
-            "List[num_layers] of "
-            "[2, num_blocks, block_size, num_heads, head_size]"
-        )
-        logger.info("Currently used by:\n  - vLLM non-MLA flash attention")
-
-    elif gpu_kv_format == lmc_ops.GPUKVFormat.NL_X_NB_TWO_BS_NH_HS:
-        logger.info(
-            "GPU KV Format: "
-            "List[num_layers] of "
-            "[num_blocks, 2, block_size, num_heads, head_size]"
-        )
-        logger.info("Currently used by:\n  - vLLM non-MLA flash infer")
-
-    elif gpu_kv_format == lmc_ops.GPUKVFormat.NL_X_NB_BS_HS:
-        logger.info(
-            "GPU KV Format: List[num_layers] of [num_blocks, block_size, head_size]"
-        )
-        logger.info("Currently used by:\n  - vLLM MLA")
-
-    elif gpu_kv_format == lmc_ops.GPUKVFormat.TWO_X_NL_X_NBBS_NH_HS:
-        logger.info(
-            "GPU KV Format: "
-            "List[2] -> List[num_layers] of "
-            "[page_buffer_size, num_heads, head_size]"
-        )
-        logger.info(
-            "Currently used by:\n  - SGLang MHA (flash attention and flash infer)"
-        )
-
-    elif gpu_kv_format == lmc_ops.GPUKVFormat.NL_X_NBBS_ONE_HS:
-        logger.info(
-            "GPU KV Format: List[num_layers] of [page_buffer_size, 1, head_size]"
-        )
-        logger.info("Currently used by:\n  - SGLang MLA")
-
-    else:
+    shape = get_gpu_kv_shape_description(gpu_kv_format)
+    backend = get_attention_backend(gpu_kv_format)
+    if shape.startswith("Unknown"):
         logger.warning(f"Unknown GPU KV Format: {gpu_kv_format}")
+    else:
+        logger.info("GPU KV Format: %s", shape)
+        logger.info("Currently used by:\n  - %s", backend)
 
 
 def _list_depth_tensor_dim(kv_caches: Any) -> Tuple[int, int]:
