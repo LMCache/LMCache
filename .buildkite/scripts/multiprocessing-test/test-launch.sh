@@ -70,7 +70,7 @@ docker run -d \
     --env PYTHONHASHSEED=0 \
     lmcache/vllm-openai:test \
     "$MODEL" \
-    --kv-transfer-config "{\"kv_connector\":\"LMCacheMPConnector\", \"kv_role\":\"kv_both\", \"kv_connector_extra_config\": {\"lmcache.mp.port\": $LMCACHE_PORT}}" \
+    --kv-transfer-config "{\"kv_connector\":\"LMCacheMPConnector\", \"kv_role\":\"kv_both\", \"kv_load_failure_policy\": \"recompute\", \"kv_connector_extra_config\": {\"lmcache.mp.port\": $LMCACHE_PORT, \"lmcache.mp.mq_timeout\": 10}}" \
     --port "$VLLM_PORT" \
     --no-async-scheduling \
     $GPU_MEMORY_UTIL_ARG
