@@ -62,6 +62,9 @@ class ConnectorBase : public IStorageConnector {
     auto [batch_future_id, batch_state, num_tiles, tile_size] =
         prepare_batch_operation(num_items, Op::BATCH_TILE_GET);
 
+    // pre-allocate per-key results for load error tolerance
+    batch_state->per_key_results.assign(num_items, 0);
+
     // fan out work to threads
     for (size_t tile_idx = 0; tile_idx < num_tiles; ++tile_idx) {
       auto tile_req = create_tile_request(
@@ -104,7 +107,7 @@ class ConnectorBase : public IStorageConnector {
         prepare_batch_operation(num_items, Op::BATCH_TILE_EXISTS);
 
     // pre-allocate results vector with correct size
-    batch_state->exists_results.assign(num_items, 0);
+    batch_state->per_key_results.assign(num_items, 0);
 
     // fan out work to threads
     for (size_t tile_idx = 0; tile_idx < num_tiles; ++tile_idx) {
@@ -262,6 +265,7 @@ class ConnectorBase : public IStorageConnector {
     tile_req.future_id = batch_future_id;
     tile_req.batch = batch_state;
     tile_req.batch_chunk_num_bytes = batch_chunk_num_bytes;
+    tile_req.start_idx = start;
 
     for (size_t i = start; i < end; ++i) {
       tile_req.keys.push_back(keys[i]);
@@ -357,8 +361,18 @@ class ConnectorBase : public IStorageConnector {
           switch (req.op) {
             case Op::BATCH_TILE_GET:
               for (size_t i = 0; i < req.keys.size(); ++i) {
-                do_single_get(conn, req.keys[i], req.buf_ptrs[i],
-                              req.buf_lens[i], req.batch_chunk_num_bytes);
+                try {
+                  do_single_get(conn, req.keys[i], req.buf_ptrs[i],
+                                req.buf_lens[i], req.batch_chunk_num_bytes);
+                  // 1 = success (key loaded OK)
+                  req.batch->per_key_results[req.start_idx + i] = 1;
+                } catch (const std::exception& e) {
+                  // Per-key error tolerance: record failure
+                  // but continue processing remaining keys
+                  req.batch->per_key_results[req.start_idx + i] = 0;
+                  fprintf(stderr, "[LMCache GET] key %s failed: %s\n",
+                          req.keys[i].c_str(), e.what());
+                }
               }
               comp.ok = true;
               break;
@@ -375,7 +389,7 @@ class ConnectorBase : public IStorageConnector {
               for (size_t i = 0; i < req.keys.size(); ++i) {
                 bool exists = do_single_exists(conn, req.keys[i]);
                 // Write result as uint8_t (0/1) to avoid vector<bool> data race
-                req.batch->exists_results[req.start_idx + i] = exists ? 1 : 0;
+                req.batch->per_key_results[req.start_idx + i] = exists ? 1 : 0;
               }
               comp.ok = true;
               break;
@@ -422,9 +436,10 @@ class ConnectorBase : public IStorageConnector {
         std::lock_guard<std::mutex> lk(req.batch->err_mu);
         batch_comp.error = req.batch->first_error;
       }
-      // for batch exists, move the results
-      if (req.batch->batch_op == Op::BATCH_TILE_EXISTS) {
-        batch_comp.result_bytes = std::move(req.batch->exists_results);
+      // for batch exists and batch get, move per-key results
+      if (req.batch->batch_op == Op::BATCH_TILE_EXISTS ||
+          req.batch->batch_op == Op::BATCH_TILE_GET) {
+        batch_comp.result_bytes = std::move(req.batch->per_key_results);
       }
       push_completion(std::move(batch_comp));
     }
