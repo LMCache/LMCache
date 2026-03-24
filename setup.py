@@ -91,6 +91,10 @@ def cuda_extension() -> tuple[list, dict]:
         "csrc/storage_backends/redis/pybind.cpp",
         "csrc/storage_backends/redis/connector.cpp",
     ]
+    fs_sources = [
+        "csrc/storage_backends/fs/pybind.cpp",
+        "csrc/storage_backends/fs/connector.cpp",
+    ]
     ext_modules = [
         cpp_extension.CUDAExtension(
             "lmcache.c_ops",
@@ -112,6 +116,14 @@ def cuda_extension() -> tuple[list, dict]:
             "lmcache.lmcache_redis",
             sources=redis_sources,
             include_dirs=["csrc/storage_backends", "csrc/storage_backends/redis"],
+            extra_compile_args={
+                "cxx": [flag_cxx_abi, "-O3", "-std=c++17"],
+            },
+        ),
+        cpp_extension.CppExtension(
+            "lmcache.lmcache_fs",
+            sources=fs_sources,
+            include_dirs=["csrc/storage_backends", "csrc/storage_backends/fs"],
             extra_compile_args={
                 "cxx": [flag_cxx_abi, "-O3", "-std=c++17"],
             },
@@ -146,6 +158,10 @@ def rocm_extension() -> tuple[list, dict]:
     redis_sources = [
         "csrc/storage_backends/redis/pybind.cpp",
         "csrc/storage_backends/redis/connector.cpp",
+    ]
+    fs_sources = [
+        "csrc/storage_backends/fs/pybind.cpp",
+        "csrc/storage_backends/fs/connector.cpp",
     ]
     # For HIP, we generally use CppExtension and let hipcc handle things.
     # Ensure CXX environment variable is set to hipcc when running this build.
@@ -190,6 +206,14 @@ def rocm_extension() -> tuple[list, dict]:
             "lmcache.lmcache_redis",
             sources=redis_sources,
             include_dirs=["csrc/storage_backends", "csrc/storage_backends/redis"],
+            extra_compile_args={
+                "cxx": ["-O3", "-std=c++17"],
+            },
+        ),
+        cpp_extension.CppExtension(
+            "lmcache.lmcache_fs",
+            sources=fs_sources,
+            include_dirs=["csrc/storage_backends", "csrc/storage_backends/fs"],
             extra_compile_args={
                 "cxx": ["-O3", "-std=c++17"],
             },
