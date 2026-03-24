@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from dataclasses import dataclass
+from itertools import islice
+from typing import Generator
 import argparse
 import threading
 import time
@@ -129,6 +131,23 @@ def get_layout_desc(gpu_context: GPUCacheContext, num_tokens: int) -> MemoryLayo
     shape = gpu_context.get_kv_buffer_shape(num_tokens)
     dtype = gpu_context.dtype
     return MemoryLayoutDesc(shapes=[shape], dtypes=[dtype])
+
+
+def batched_iteration(lst: list, batch_size: int) -> Generator[tuple]:
+    """Utility function to iterate over a list in batches.
+
+    Args:
+        lst: The list to iterate over.
+        batch_size: The size of each batch.
+
+    Yields:
+        Batches of the list as tuples.
+    """
+    if batch_size < 1:
+        raise ValueError("batch size must be at least one")
+    it = iter(lst)
+    while batch := tuple(islice(it, batch_size)):
+        yield batch
 
 
 @dataclass
@@ -288,6 +307,10 @@ class MPCacheEngine:
                 obj_keys, layout_desc, "new"
             )
 
+            # NOTE: Store is not batched because some obj_keys may be
+            # skipped (not in reserved_dict), making block_ids
+            # non-contiguous. Batching would require torch.cat to
+            # reassemble block_ids, negating the benefit.
             for idx, obj_key in enumerate(obj_keys):
                 if obj_key in reserved_dict:
                     memory_obj = reserved_dict[obj_key]
@@ -398,23 +421,23 @@ class MPCacheEngine:
         blocks_per_chunk = self.chunk_size // gpu_context.block_size
 
         def _retrieve_loop(keys: list[ObjectKey], memory_objs: list[MemoryObj]) -> None:
-            for idx, (key, memory_obj) in enumerate(
-                zip(keys, memory_objs, strict=False)
+            _BATCH_SIZE = 4
+            for batch_idx, memory_obj_batch in enumerate(
+                batched_iteration(memory_objs, batch_size=_BATCH_SIZE)
             ):
-                chunk_start = idx * self.chunk_size
-                chunk_end = chunk_start + self.chunk_size
+                chunk_start = batch_idx * self.chunk_size * _BATCH_SIZE
+                chunk_end = chunk_start + self.chunk_size * len(memory_obj_batch)
 
-                # Skip tokens that overlap with APC-cached blocks to
-                # avoid a data race: the retrieve writes on the LMCache
-                # CUDA stream while concurrent requests may read from
-                # those same APC-shared blocks on the vLLM CUDA stream.
                 effective_start = max(chunk_start, skip_first_n_tokens)
                 if effective_start >= chunk_end:
-                    # Entire chunk is within APC range, skip it
+                    # Entire batch is within APC range, skip it
                     continue
-                # Convert token-level skip to block-level skip
+
                 skip_tokens_in_chunk = max(
-                    0, min(effective_start - chunk_start, self.chunk_size - 1)
+                    0,
+                    min(
+                        effective_start - chunk_start, self.chunk_size * _BATCH_SIZE - 1
+                    ),
                 )
                 if skip_tokens_in_chunk % gpu_context.block_size != 0:
                     logger.error(
@@ -427,17 +450,28 @@ class MPCacheEngine:
                     )
                 skip_blocks_in_chunk = skip_tokens_in_chunk // gpu_context.block_size
 
+                start_chunk_id = batch_idx * _BATCH_SIZE
+                end_chunk_id = start_chunk_id + len(memory_obj_batch)
                 chunk_block_ids_gpu = all_block_ids_gpu[
-                    idx * blocks_per_chunk : (idx + 1) * blocks_per_chunk
+                    start_chunk_id * blocks_per_chunk : end_chunk_id * blocks_per_chunk
                 ]
 
-                # Copy from CPU to tmp GPU buffer, then to paged buffer
-                assert memory_obj.tensor is not None
-                tmp_buffer = gpu_context.get_tmp_gpu_buffer(self.chunk_size)
-                lmcache_memcpy_async_h2d(memory_obj, tmp_buffer)
+                # TODO: implement get_gpu_buffer_batched
+                tmp_buffers = gpu_context.get_tmp_gpu_buffer_batched(
+                    self.chunk_size, len(memory_obj_batch)
+                )
+
+                # launch h2d for all the chunks in the batch
+                for tmp_buffer, memory_obj in zip(
+                    tmp_buffers, memory_obj_batch, strict=False
+                ):
+                    assert memory_obj.tensor is not None
+                    lmcache_memcpy_async_h2d(memory_obj, tmp_buffer)
+
+                # launch multi_layer_block_kv_transfer for all the chunks in the batch
                 lmc_ops.multi_layer_block_kv_transfer(
                     gpu_context.kv_pointers,
-                    [tmp_buffer.data_ptr()],
+                    [tb.data_ptr() for tb in tmp_buffers],
                     chunk_block_ids_gpu,
                     gpu_context.device,
                     lmc_ops.TransferDirection.H2D,
@@ -446,6 +480,55 @@ class MPCacheEngine:
                     gpu_context.gpu_kv_format_,
                     skip_blocks_in_chunk,
                 )
+
+            # for idx, (key, memory_obj) in enumerate(
+            #    zip(keys, memory_objs, strict=False)
+            # ):
+            #    chunk_start = idx * self.chunk_size
+            #    chunk_end = chunk_start + self.chunk_size
+
+            #    # Skip tokens that overlap with APC-cached blocks to
+            #    # avoid a data race: the retrieve writes on the LMCache
+            #    # CUDA stream while concurrent requests may read from
+            #    # those same APC-shared blocks on the vLLM CUDA stream.
+            #    effective_start = max(chunk_start, skip_first_n_tokens)
+            #    if effective_start >= chunk_end:
+            #        # Entire chunk is within APC range, skip it
+            #        continue
+            #    # Convert token-level skip to block-level skip
+            #    skip_tokens_in_chunk = max(
+            #        0, min(effective_start - chunk_start, self.chunk_size - 1)
+            #    )
+            #    if skip_tokens_in_chunk % gpu_context.block_size != 0:
+            #        logger.error(
+            #            "skip_first_n_tokens (%d) is not aligned to block_size (%d), "
+            #            "rounding down from %d tokens to %d blocks",
+            #            skip_first_n_tokens,
+            #            gpu_context.block_size,
+            #            skip_tokens_in_chunk,
+            #            skip_tokens_in_chunk // gpu_context.block_size,
+            #        )
+            #    skip_blocks_in_chunk = skip_tokens_in_chunk // gpu_context.block_size
+
+            #    chunk_block_ids_gpu = all_block_ids_gpu[
+            #        idx * blocks_per_chunk : (idx + 1) * blocks_per_chunk
+            #    ]
+
+            #    # Copy from CPU to tmp GPU buffer, then to paged buffer
+            #    assert memory_obj.tensor is not None
+            #    tmp_buffer = gpu_context.get_tmp_gpu_buffer(self.chunk_size)
+            #    lmcache_memcpy_async_h2d(memory_obj, tmp_buffer)
+            #    lmc_ops.multi_layer_block_kv_transfer(
+            #        gpu_context.kv_pointers,
+            #        [tmp_buffer.data_ptr()],
+            #        chunk_block_ids_gpu,
+            #        gpu_context.device,
+            #        lmc_ops.TransferDirection.H2D,
+            #        gpu_context.shape_desc,
+            #        self.chunk_size,
+            #        gpu_context.gpu_kv_format_,
+            #        skip_blocks_in_chunk,
+            #    )
 
         with (
             torch.cuda.device(gpu_context.device),

@@ -113,7 +113,10 @@ class GPUCacheContext:
         )
 
         # Temporary GPU buffer for transfers
-        tmp_buffer_shape = self.get_kv_buffer_shape(lmcache_chunk_size)
+        self.max_batch_size = 4
+        tmp_buffer_shape = self.get_kv_buffer_shape(
+            lmcache_chunk_size * self.max_batch_size
+        )
         self.tmp_gpu_buffer_ = torch.empty(
             tmp_buffer_shape, dtype=self.dtype, device=self.device_
         )
@@ -247,8 +250,36 @@ class GPUCacheContext:
     def get_tmp_gpu_buffer(self, num_tokens: int) -> torch.Tensor:
         """
         Returns the temporary GPU buffer for transfers
+
+        Note:
+            The returned buffer is guaranteed to be contiguous
         """
-        return self.tmp_gpu_buffer_[:, :, :num_tokens, :]
+        shape = self.get_kv_buffer_shape(num_tokens)
+        num_elems = shape.numel()
+        return self.tmp_gpu_buffer_.flatten()[:num_elems].view(shape)
+
+    def get_tmp_gpu_buffer_batched(
+        self, num_tokens: int, batch_size: int
+    ) -> list[torch.Tensor]:
+        """
+        Returns a list of temporary GPU buffer for batched transfers
+
+        Note:
+            Each returned buffer is guaranteed to be contiguous.
+        """
+        assert batch_size <= self.max_batch_size, (
+            f"Batch size {batch_size} exceeds max {self.max_batch_size}"
+        )
+        ret = []
+        start_offset = 0
+        flatten_view = self.tmp_gpu_buffer_.flatten()
+        for i in range(batch_size):
+            shape = self.get_kv_buffer_shape(num_tokens)
+            num_elems = shape.numel()
+            buf = flatten_view[start_offset : start_offset + num_elems].view(shape)
+            ret.append(buf)
+            start_offset += num_elems
+        return ret
 
     def stage_block_ids(self, block_ids: list[int]) -> torch.Tensor:
         """Copy block_ids into the pre-allocated GPU buffer and return a
