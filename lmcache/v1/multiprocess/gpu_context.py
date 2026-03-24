@@ -193,6 +193,9 @@ class GPUCacheContext:
 
     @property
     def head_size(self) -> int:
+        """
+        Returns the head size of the KV cache
+        """
         return self.head_size_
 
     @property
