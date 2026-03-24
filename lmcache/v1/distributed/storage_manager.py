@@ -379,12 +379,12 @@ class StorageManager:
             Therefore, it's the caller’s responsibility to make sure not calling
             this function after the prefetch task is done.
         """
-        if handle.request_id == -1:
+        if handle.prefetch_request_id == -1:
             # No L2 request, the prefix hit count is final
             return handle.l1_prefix_hit_count
 
         # Have L2 request, need to check the status from prefetch controller
-        l2_r = self._prefetch_controller.query_lookup_result(handle.request_id)
+        l2_r = self._prefetch_controller.query_lookup_result(handle.prefetch_request_id)
 
         if l2_r is None:
             # L2 prefetch is still in progress or it's already done and
