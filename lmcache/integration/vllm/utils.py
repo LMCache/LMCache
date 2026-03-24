@@ -93,7 +93,7 @@ def apply_mm_hashes_to_token_ids(
     efficient slice assignments.
     """
     n = token_ids.size(0)
-    logger.info("Token IDs before applying multimodal hashes: %s", len(token_ids))
+    logger.debug("Token IDs before applying multimodal hashes: %s", len(token_ids))
     for hash_str, placeholder in zip(mm_hashes, mm_positions, strict=False):
         start, length = placeholder.offset, placeholder.length
         # logger.info("placeholder.offset: %d, placeholder.length: %d for hash %s", start, length, hash_str)
@@ -101,7 +101,7 @@ def apply_mm_hashes_to_token_ids(
             continue
         end = min(start + length, n)
         token_ids[start:end] = hex_hash_to_int16(hash_str)
-    logger.info("Token IDs after applying multimodal hashes: %s", len(token_ids))
+    logger.debug("Token IDs after applying multimodal hashes: %s", len(token_ids))
     return token_ids
 
 

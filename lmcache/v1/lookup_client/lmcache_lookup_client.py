@@ -179,8 +179,8 @@ class LMCacheLookupClient(LookupClientInterface):
 
         # NOTE(Jiayi): We cannot only send hashes when blending enabled
         # because the blender need the input embedding.
-        logger.info("LMCacheLookupClient.lookup called with %d tokens, lookup_id=%s", len(token_ids), lookup_id)   
-        logger.info(f"self.enable_blending {self.enable_blending}")
+        logger.debug("LMCacheLookupClient.lookup called with %d tokens, lookup_id=%s", len(token_ids), lookup_id)
+        logger.debug(f"self.enable_blending {self.enable_blending}")
         if not self.enable_blending:
             hashes = []
             offsets = []
@@ -205,7 +205,7 @@ class LMCacheLookupClient(LookupClientInterface):
                 lookup_id_buf,
                 request_configs_buf,
             ]
-            logger.info("msg_buf lengths: %s", [len(buf) for buf in msg_buf])
+            logger.debug("msg_buf lengths: %s", [len(buf) for buf in msg_buf])
 
         results = []
         failed_rank = -1

@@ -934,7 +934,7 @@ class LMCacheConnectorV1Impl:
             valid_mask = ~torch.isnan(ve_slice).any(dim=-1)
             if merged == 0:
                 nan_count = int((~valid_mask).sum().item())
-                logger.info(
+                logger.debug(
                     "vision_embed[0]: shape=%s, nan_rows=%d/%d, dtype=%s",
                     ve.shape, nan_count, actual_len, ve.dtype)
             if ve_slice.shape[0] >= actual_len:
@@ -951,7 +951,7 @@ class LMCacheConnectorV1Impl:
                         ve_slice[sub_mask]
             merged += 1
         final_has_nan = bool(torch.isnan(inputs_embeds).any())
-        logger.info(
+        logger.debug(
             "Reconstructed inputs_embeds: shape=%s, "
             "vision_embeds_merged=%d/%d, num_tokens=%d, has_nan=%s",
             inputs_embeds.shape, merged, len(vision_embeds), num_tokens,
@@ -1058,7 +1058,7 @@ class LMCacheConnectorV1Impl:
 
         text_embeds = embed_fn(token_ids_t)
         text_has_nan = bool(torch.isnan(text_embeds).any())
-        logger.info(
+        logger.debug(
             "text_embeds: shape=%s, has_nan=%s, norm=%.4f, "
             "token_ids min=%d max=%d",
             text_embeds.shape, text_has_nan,
@@ -1188,7 +1188,7 @@ class LMCacheConnectorV1Impl:
 
         for idx, request in enumerate(metadata.requests):
             if request.load_spec is None:
-                logger.info("skip request due to load spec is None")
+                logger.debug("skip request due to load spec is None")
                 continue
 
             tokens = request.token_ids
@@ -1205,14 +1205,14 @@ class LMCacheConnectorV1Impl:
             token_mask[:masked_token_count] = False
 
             lmcache_cached_tokens = request.load_spec.lmcache_cached_tokens
-            logger.info(f"enter self.enable_blending {self.enable_blending}, self.use_layerwise {self.use_layerwise}")
+            logger.debug(f"enter self.enable_blending {self.enable_blending}, self.use_layerwise {self.use_layerwise}")
             if self.use_layerwise:
                 if idx == last_idx:
                     sync = True
                 else:
                     sync = False
                 # NOTE(Jiayi): Perform blending before layerwise prefix caching
-                logger.info(f"self.enable_blending {self.enable_blending}")
+                logger.debug(f"self.enable_blending {self.enable_blending}")
                 if self.enable_blending:
                     self._ensure_blender_initialized()
                     if self.blender is None:
@@ -1271,7 +1271,7 @@ class LMCacheConnectorV1Impl:
                             layerwise_retriever)
                         continue
 
-                    logger.info(
+                    logger.debug(
                         "start_load_kv: inputs_embeds=%s, "
                         "deepstack=%s, mm_hashes=%d, mm_positions=%d, "
                         "cached_tokens=%d",
@@ -1443,7 +1443,7 @@ class LMCacheConnectorV1Impl:
             if self.current_layer == self.num_layers - 1:
                 assert ret_token_mask is not None
                 num_retrieved_tokens = ret_token_mask.sum().item()
-                logger.info(f"Retrieved {num_retrieved_tokens} tokens")
+                logger.debug(f"Retrieved {num_retrieved_tokens} tokens")
 
         return
 
@@ -1518,11 +1518,11 @@ class LMCacheConnectorV1Impl:
                         * self._lmcache_chunk_size
                     )
 
-                logger.info(f"kv_role: {self.kv_role}, layer_name: {layer_name}, skip_leading_tokens: {skip_leading_tokens}")
+                logger.debug(f"kv_role: {self.kv_role}, layer_name: {layer_name}, skip_leading_tokens: {skip_leading_tokens}")
                 store_mask = torch.ones(len(token_ids), dtype=torch.bool)
                 store_mask[:skip_leading_tokens] = False
 
-                logger.info(
+                logger.debug(
                     "save_kv_layer->Storing KV cache for %d out of %d tokens "
                     "(skip_leading_tokens=%d) for request %s",
                     len(token_ids) - skip_leading_tokens,
@@ -1604,19 +1604,18 @@ class LMCacheConnectorV1Impl:
 
             if skip_leading_tokens == len(token_ids):
                 continue  # skip this request
-            logger.info(f"kv_role: {self.kv_role}, before-skip_leading_tokens: {skip_leading_tokens}")
-            # Align to lmcache chunk size
+            logger.debug(f"kv_role: {self.kv_role}, before-skip_leading_tokens: {skip_leading_tokens}")
             skip_leading_tokens = (
                 skip_leading_tokens
                 // self._lmcache_chunk_size
                 * self._lmcache_chunk_size
             )
-            logger.info(f"kv_role: {self.kv_role}, after-skip_leading_tokens: {skip_leading_tokens}")
+            logger.debug(f"kv_role: {self.kv_role}, after-skip_leading_tokens: {skip_leading_tokens}")
 
             store_mask = torch.ones(len(token_ids), dtype=torch.bool)
             store_mask[:skip_leading_tokens] = False
 
-            logger.info(
+            logger.debug(
                 "wait_for_save->Storing KV cache for %d out of %d tokens "
                 "(skip_leading_tokens=%d) for request %s",
                 len(token_ids) - skip_leading_tokens,
@@ -1712,15 +1711,15 @@ class LMCacheConnectorV1Impl:
             token_ids = token_ids[: -self.skip_last_n_tokens]
 
         lookup_id = request.request_id
-        logger.info("request %s: Looking up KV cache for %d tokens with configs %s",
-                    request.request_id, len(token_ids), request_configs)
+        logger.debug("request %s: Looking up KV cache for %d tokens with configs %s",
+                     request.request_id, len(token_ids), request_configs)
         
         num_external_hit_tokens = self.lookup_client.lookup(
             token_ids,
             lookup_id=lookup_id,
             request_configs=request_configs,
         )
-        logger.info("Lookup result for request %s: %s", request.request_id, num_external_hit_tokens)
+        logger.debug("Lookup result for request %s: %s", request.request_id, num_external_hit_tokens)
 
         if num_external_hit_tokens is None:
             logger.info(
@@ -1804,7 +1803,7 @@ class LMCacheConnectorV1Impl:
         if request.request_id not in self.load_specs:
             # No KV tokens from external KV cache, return
             return
-        logger.info(f"num_external_tokens is {num_external_tokens}")
+        logger.debug(f"num_external_tokens is {num_external_tokens}")
         if num_external_tokens == 0:
             # No need to load anything
             self.load_specs[request.request_id].can_load = False

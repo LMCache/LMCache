@@ -386,7 +386,7 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
         end_event.record(self.load_stream)
         end_event.synchronize()
         elapsed_ms = start_event.elapsed_time(end_event)
-        logger.info("batched_to_gpu cost %.3f ms", elapsed_ms)
+        logger.debug("batched_to_gpu cost %.3f ms", elapsed_ms)
 
     # TODO(Jiayi): need to optimize to enable real batching
     def batched_from_gpu(self, memory_objs, starts, ends, **kwargs):
@@ -733,7 +733,7 @@ class VLLMBufferLayerwiseGPUConnector(GPUConnectorInterface):
                 )
                 total_ms = store_ms + rope_ms + load_ms
 
-                logger.info(
+                logger.debug(
                     "batched_to_gpu iter=%d store_layer=%s rope_layer=%s load_layer=%s "
                     "store_ms=%.3f rope_ms=%.3f load_ms=%.3f total_ms=%.3f, c=%d",
                     layer_id,
@@ -1061,7 +1061,7 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
                     end_event.record(self.load_stream)
                     end_event.synchronize()
                     elapsed_ms = start_event.elapsed_time(end_event)
-                    logger.info(
+                    logger.debug(
                         "Layer %d, chunk (%d, %d) transfer to GPU buffer cost %.3f ms",
                         layer_id,
                         start,
@@ -1081,7 +1081,7 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
                 end_event.record(self.load_stream)
                 end_event.synchronize()
                 elapsed_ms = start_event.elapsed_time(end_event)
-                logger.info(
+                logger.debug(
                     "Layer %d transfer from GPU buffer to paged memory cost %.3f ms",
                     layer_id,
                     elapsed_ms,
@@ -1189,7 +1189,7 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
                     starts, ends, memory_objs_layer, strict=False
                 ):
                     assert memory_obj.tensor is not None
-                    logger.info(f"Memory obj device: {memory_obj.tensor.device}")
+                    logger.debug(f"Memory obj device: {memory_obj.tensor.device}")
                     if self.use_gpu:
                         memory_obj.tensor.copy_(
                             tmp_gpu_buffer_obj.tensor[start - offset : end - offset],

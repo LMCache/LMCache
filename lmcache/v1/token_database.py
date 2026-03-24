@@ -398,10 +398,10 @@ class SegmentTokenDatabase(TokenDatabase):
             the cache engine key for the tokens.
 
         """
-        logger.info("Processing tokens using SegmentTokenDatabase, request_configs: "
-                    f"{request_configs.items() if request_configs is not None else None}") 
-        logger.info(f"Input tokens length: {len(tokens) if tokens is not None else 'N/A'}, "
-                    f"hashes length: {len(hashes) if hashes is not None else 'N/A'}")
+        logger.debug("Processing tokens using SegmentTokenDatabase, request_configs: "
+                     f"{request_configs.items() if request_configs is not None else None}")
+        logger.debug(f"Input tokens length: {len(tokens) if tokens is not None else 'N/A'}, "
+                     f"hashes length: {len(hashes) if hashes is not None else 'N/A'}")
         if tokens is not None:
             if not isinstance(tokens, torch.Tensor):
                 tokens = torch.tensor(tokens, dtype=torch.long, device="cpu")
@@ -424,13 +424,13 @@ class SegmentTokenDatabase(TokenDatabase):
             for idx, token_chunk in enumerate(token_chunks):
                 token_chunk_len = len(token_chunk)
                 end_idx = start_idx + token_chunk_len
-                logger.info(f"token_chunk_len: {token_chunk_len}, start_idx: {start_idx}, end_idx: {end_idx}, mask num_falses: {num_falses}") 
+                logger.debug(f"token_chunk_len: {token_chunk_len}, start_idx: {start_idx}, end_idx: {end_idx}, mask num_falses: {num_falses}") 
                 if idx > 0:
                     start_idx += self.sep_len
                     end_idx += self.sep_len
                 if start_idx >= num_falses:
                     if make_key:
-                        logger.info(f"Making key for tokens from {start_idx} to {end_idx}, chunk_len {token_chunk_len}, self._hash_tokens: {self._hash_tokens(token_chunk)}")
+                        logger.debug(f"Making key for tokens from {start_idx} to {end_idx}, chunk_len {token_chunk_len}, self._hash_tokens: {self._hash_tokens(token_chunk)}")
                         yield (
                             start_idx,
                             end_idx,

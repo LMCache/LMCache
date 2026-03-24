@@ -528,6 +528,8 @@ class LMCacheEngine:
         # TODO(Jiayi): Remove the following for loop with batched operations
         # TODO(Jiayi): Need to refactor the `remove_after_retrieve` logic.
         for key, memory_obj, _, _ in reordered_chunks:
+            if memory_obj is None:
+                continue
             if self.remove_after_retrieve and not self._is_passive():
                 self.storage_manager.remove(key)
             memory_obj.ref_count_down()
@@ -728,7 +730,7 @@ class LMCacheEngine:
                         if layer_elapsed_ms > 0
                         else 0.0
                     )
-                    logger.info(
+                    logger.debug(
                         "Layer %d load-to-gpu cost %.3f ms for %d tokens, "
                         "%.4f GB, %.2f GB/s",
                         layer_id,
@@ -742,7 +744,8 @@ class LMCacheEngine:
                 to_count_down.extend(mem_objs_layer)
 
             for mem_obj in to_count_down:
-                mem_obj.ref_count_down()
+                if mem_obj is not None:
+                    mem_obj.ref_count_down()
         else:
             # If no cache are found, we still need to yield to avoid
             # `StopIteration`
@@ -855,9 +858,9 @@ class LMCacheEngine:
                             )
                         res = end
                         total_hit_tokens += end - start
-                        logger.info(f"Hit: start={start}, end={end}, key={key}")
+                        logger.debug(f"Hit: start={start}, end={end}, key={key}")
                         continue
-                    logger.info(f"total_hit_tokens to {total_hit_tokens}, res is {res}")  
+                    logger.debug(f"total_hit_tokens to {total_hit_tokens}, res is {res}")
                     return res
             else:
                 chunk_info_list = []
@@ -882,9 +885,9 @@ class LMCacheEngine:
                             self.lookup_pins[lookup_id].append(key)
                         res = end
                         total_hit_tokens += end - start
-                        logger.info(f"Hit: start={start}, end={end}, key={key}")
+                        logger.debug(f"Hit: start={start}, end={end}, key={key}")
                         continue
-                    logger.info(f"Res: {res}, updating total_hit_tokens to {total_hit_tokens}")
+                    logger.debug(f"Res: {res}, updating total_hit_tokens to {total_hit_tokens}")
                     return res
 
             # all tokens where found, return the maximal end
@@ -1225,9 +1228,8 @@ class LMCacheEngine:
             ret_mask[start:end] = True
             used_indices.add(idx)
 
-        # NOTE: free the memory objects that are not hit.
         for idx, unused_mem_obj in enumerate(memory_objs):
-            if idx not in used_indices:
+            if idx not in used_indices and unused_mem_obj is not None:
                 unused_mem_obj.ref_count_down()
 
         return chunks, tot_kv_size
