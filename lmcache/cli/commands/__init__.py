@@ -12,11 +12,13 @@ from lmcache.cli.commands.base import BaseCommand
 from lmcache.cli.commands.describe import DescribeCommand
 from lmcache.cli.commands.kvcache import KVCacheCommand
 from lmcache.cli.commands.mock import MockCommand
+from lmcache.cli.commands.ping import PingCommand
 
 ALL_COMMANDS: list[BaseCommand] = [
     MockCommand(),
     KVCacheCommand(),
     DescribeCommand(),
+    PingCommand(),
 ]
 
 __all__ = ["ALL_COMMANDS", "BaseCommand"]

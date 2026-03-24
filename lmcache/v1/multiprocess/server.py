@@ -158,7 +158,7 @@ class MPCacheEngine:
         # chunk size
         self.chunk_size = chunk_size
 
-        # thread lock to avoid tmp buffer conflicts
+        # Lock for clear() to avoid concurrent storage manager mutations
         self.lock = threading.Lock()
 
         # storage manager
@@ -296,20 +296,19 @@ class MPCacheEngine:
 
                 # Copy from GPU to CPU
                 tmp_buffer = gpu_context.get_tmp_gpu_buffer(self.chunk_size)
-                with gpu_context.transfer_lock:
-                    lmc_ops.multi_layer_kv_transfer(
-                        tmp_buffer,
-                        gpu_context.kv_pointers,
-                        slot_mapping,
-                        gpu_context.device,
-                        gpu_context.block_size * gpu_context.num_blocks,
-                        lmc_ops.TransferDirection.D2H,
-                        gpu_context.gpu_kv_format_,
-                        gpu_context.block_size,
-                    )
+                lmc_ops.multi_layer_kv_transfer(
+                    tmp_buffer,
+                    gpu_context.kv_pointers,
+                    slot_mapping,
+                    gpu_context.device,
+                    gpu_context.block_size * gpu_context.num_blocks,
+                    lmc_ops.TransferDirection.D2H,
+                    gpu_context.gpu_kv_format_,
+                    gpu_context.block_size,
+                )
 
-                    assert memory_obj.tensor is not None
-                    lmcache_memcpy_async_d2h(tmp_buffer, memory_obj)
+                assert memory_obj.tensor is not None
+                lmcache_memcpy_async_d2h(tmp_buffer, memory_obj)
 
             event.record()
 
@@ -415,19 +414,18 @@ class MPCacheEngine:
 
                 # Copy from CPU to GPU
                 tmp_gpu_buffer_ = gpu_context.get_tmp_gpu_buffer(self.chunk_size)
-                with gpu_context.transfer_lock:
-                    lmcache_memcpy_async_h2d(memory_obj, tmp_gpu_buffer_)
-                    lmc_ops.multi_layer_kv_transfer(
-                        tmp_gpu_buffer_,
-                        gpu_context.kv_pointers,
-                        slot_mapping,
-                        gpu_context.device,
-                        gpu_context.block_size * gpu_context.num_blocks,
-                        lmc_ops.TransferDirection.H2D,
-                        gpu_context.gpu_kv_format_,
-                        gpu_context.block_size,
-                        skip_in_chunk,
-                    )
+                lmcache_memcpy_async_h2d(memory_obj, tmp_gpu_buffer_)
+                lmc_ops.multi_layer_kv_transfer(
+                    tmp_gpu_buffer_,
+                    gpu_context.kv_pointers,
+                    slot_mapping,
+                    gpu_context.device,
+                    gpu_context.block_size * gpu_context.num_blocks,
+                    lmc_ops.TransferDirection.H2D,
+                    gpu_context.gpu_kv_format_,
+                    gpu_context.block_size,
+                    skip_in_chunk,
+                )
 
         with (
             torch.cuda.device(gpu_context.device),
@@ -852,7 +850,6 @@ def run_cache_server(
     server = MessageQueueServer(
         bind_url=f"tcp://{mp_config.host}:{mp_config.port}",
         context=context,
-        max_workers=mp_config.max_workers,
     )
 
     # Add handlers
@@ -877,6 +874,24 @@ def run_cache_server(
     add_handler_helper(server, RequestType.PING, engine.ping)
     add_handler_helper(server, RequestType.END_SESSION, engine.end_session)
     add_handler_helper(server, RequestType.NOOP, engine.debug)
+
+    # Assign thread pools
+    server.add_affinity_thread_pool(
+        [RequestType.STORE, RequestType.RETRIEVE],
+        max_workers=mp_config.max_gpu_workers,
+    )
+    server.add_normal_thread_pool(
+        [
+            RequestType.LOOKUP,
+            RequestType.QUERY_PREFETCH_STATUS,
+            RequestType.QUERY_PREFETCH_LOOKUP_HITS,
+            RequestType.FREE_LOOKUP_LOCKS,
+            RequestType.END_SESSION,
+            RequestType.CLEAR,
+            RequestType.PING,
+        ],
+        max_workers=mp_config.max_cpu_workers,
+    )
 
     logger.info(
         "LMCache ZMQ cache server is running on tcp://%s:%d",
