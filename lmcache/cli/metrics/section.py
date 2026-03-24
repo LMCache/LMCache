@@ -10,11 +10,21 @@ class Section:
 
     Each entry has a machine ``key`` (used in JSON), a human-readable
     ``label`` (used in terminal output), and a ``value``.
+
+    Sections with the same :attr:`list_group` are collected into a
+    JSON list under that key (e.g., ``"models": [{...}, {...}]``).
+    In terminal output they render as normal independent sections.
     """
 
-    def __init__(self, key: Optional[str], label: Optional[str]) -> None:
+    def __init__(
+        self,
+        key: Optional[str],
+        label: Optional[str],
+        list_group: Optional[str] = None,
+    ) -> None:
         self.key = key
         self.label = label
+        self.list_group = list_group
         self.entries: list[tuple[str, str, Any]] = []
 
     def add(self, key: str, label: str, value: Any) -> None:
@@ -47,13 +57,21 @@ def sections_to_dict(
         A dict with ``"title"`` and ``"metrics"`` keys.
     """
     metrics: dict[str, Any] = {}
+    list_groups: dict[str, list[dict[str, Any]]] = {}
     for section in sections:
         if section.key is None:
             for key, _label, value in section.entries:
                 metrics[key] = value
-        else:
+        elif section.list_group is not None:
             section_dict: dict[str, Any] = {}
             for key, _label, value in section.entries:
                 section_dict[key] = value
+            list_groups.setdefault(section.list_group, []).append(section_dict)
+        else:
+            section_dict = {}
+            for key, _label, value in section.entries:
+                section_dict[key] = value
             metrics[section.key] = section_dict
+    for group_key, items in list_groups.items():
+        metrics[group_key] = items
     return {"title": title, "metrics": metrics}
