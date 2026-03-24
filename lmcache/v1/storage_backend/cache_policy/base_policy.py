@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from collections.abc import MutableMapping
-from typing import Generic, TypeVar
+from typing import Generic, Optional, TypeVar
 import abc
 
 KeyType = TypeVar("KeyType")
@@ -85,3 +85,75 @@ class BaseCachePolicy(Generic[KeyType, MapType], metaclass=abc.ABCMeta):
             return a list of keys to be evicted
         """
         raise NotImplementedError
+
+    def disk_access_get(self, key: KeyType) -> int:
+        """
+        Return the access count used for optional SSD write gating.
+
+        Backends that gate disk writes on frequency should update this count
+        on cache hits (under their storage lock). Default: 0.
+
+        Args:
+            key: Cache key (same type as used in the backend dict).
+
+        Returns:
+            Current access count for ``key``.
+        """
+        return 0
+
+    def disk_access_increment(self, key: KeyType) -> None:
+        """
+        Increment the access count for SSD frequency gating.
+
+        Default: no-op (policies that do not implement gating).
+
+        Args:
+            key: Cache key.
+        """
+        pass
+
+    def disk_access_reset(self, key: KeyType) -> None:
+        """
+        Reset the access count after a chunk is admitted to disk storage.
+
+        Default: no-op.
+
+        Args:
+            key: Cache key.
+        """
+        pass
+
+    def disk_access_pop(self, key: KeyType) -> None:
+        """
+        Drop access-count state when a chunk is removed from disk.
+
+        Default: no-op.
+
+        Args:
+            key: Cache key.
+        """
+        pass
+
+    def disk_gate_block_reason(
+        self,
+        key: KeyType,
+        size_bytes: int,
+        access_count: int,
+    ) -> Optional[str]:
+        """
+        If an SSD write should be skipped, return why; otherwise ``None``.
+
+        Implementations may compare ``size_bytes`` and ``access_count`` to
+        configured thresholds. Return values are ``\"length\"`` or
+        ``\"frequency\"`` for observability; backends map these to metrics.
+
+        Args:
+            key: Cache key.
+            size_bytes: Serialized chunk size in bytes.
+            access_count: Value from :meth:`disk_access_get` (taken under the
+                same lock as dict access).
+
+        Returns:
+            ``\"length\"`` or ``\"frequency\"`` if gated, else ``None`` to admit.
+        """
+        return None
