@@ -6,14 +6,17 @@ namespace {
 
 /**
  * Key logic in the kernel implementation:
- * 1 Each thread block is for (BS, NH, HS) part (i.e., a single block in the
- * paged buffer) 2 Within a thread block, each warp is for a single head. Number
- * of warps in a thread block is equal to the number of heads (NH). 3 Within a
- * thread block, we do the loop over the BS (i.e., number of tokens in the
- * block) dimension. 4 The grid will take over (2, NB, NL) dimensions. No matter
- * what the actual layout in memory is, we will calculate the global offset for
- * the start of the block 5 For LMCache, we assume it is always using 2LTD
- * layout, e.g., [2, L, 256, NH * HS], where 256 means that 256 tokens
+ * 1. Each thread block is for (BS, NH, HS) part (i.e., a single block in the
+ * paged buffer)
+ * 2. Within a thread block, each warp is for a single head. Number of warps
+ * in a thread block is equal to the number of heads (NH).
+ * 3. Within a thread block, we do the loop over the BS (i.e., number of tokens
+ * in the block) dimension.
+ * 4. The grid will take over (2, NB, NL) dimensions. No matter what the actual
+ * layout in memory is, we will calculate the global offset for the start of the
+ * block
+ * 5. For LMCache, we assume it is always using 2LTD layout, e.g.,
+ * [2, L, 256, NH * HS], where 256 means that 256 tokens
  */
 
 template <typename ScalarType, GPUKVFormat format>
