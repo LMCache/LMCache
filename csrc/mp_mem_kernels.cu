@@ -85,17 +85,25 @@ __device__ inline size_t calculate_lmcache_local_offset(
 }
 
 __device__ inline uint4 ld_cs(const uint4* addr) {
+#ifdef __CUDA_ARCH__
   uint4 val;
   asm volatile("ld.global.cs.v4.u32 {%0, %1, %2, %3}, [%4];"
                : "=r"(val.x), "=r"(val.y), "=r"(val.z), "=r"(val.w)
                : "l"(addr));
   return val;
+#else
+  return *addr;
+#endif
 }
 
 __device__ inline void st_cs(uint4* addr, uint4 val) {
+#ifdef __CUDA_ARCH__
   asm volatile("st.global.cs.v4.u32 [%0], {%1, %2, %3, %4};"
                :
                : "l"(addr), "r"(val.x), "r"(val.y), "r"(val.z), "r"(val.w));
+#else
+  *addr = val;
+#endif
 }
 
 template <typename ScalarType>

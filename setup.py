@@ -131,6 +131,7 @@ def rocm_extension() -> tuple[list, dict]:
     hip_sources = [
         "csrc/pybind_hip.cpp",  # Use the hipified pybind
         "csrc/mem_kernels.hip",
+        "csrc/mp_mem_kernels.hip",
         "csrc/cal_cdf.hip",
         "csrc/ac_enc.hip",
         "csrc/ac_dec.hip",
