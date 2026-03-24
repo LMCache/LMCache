@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """
-Configuration for the MP-mode Prometheus observability stack.
+Configuration for the MP-mode observability stack.
 """
 
 # Standard
@@ -81,3 +81,39 @@ def parse_args_to_prometheus_config(
         port=args.prometheus_port,
         log_interval=args.prometheus_log_interval,
     )
+
+
+# ---------------------------------------------------------------------------
+# Unified observability config (new EventBus-based system)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class ObservabilityConfig:
+    """Unified configuration for the EventBus-based observability system.
+
+    This config drives the new EventBus + OTel pipeline.  During the
+    migration period it coexists with ``PrometheusConfig`` and
+    ``TelemetryConfig``.
+    """
+
+    enabled: bool = True
+    """Master switch for the EventBus."""
+
+    max_queue_size: int = 10_000
+    """Maximum events in the EventBus queue before tail-drop."""
+
+    metrics_enabled: bool = True
+    """Register metrics subscribers (OTel counters / histograms)."""
+
+    logging_enabled: bool = True
+    """Register logging subscribers."""
+
+    tracing_enabled: bool = False
+    """Register span subscribers (OTel traces)."""
+
+    prometheus_port: int = 9090
+    """Port for the Prometheus /metrics endpoint (via OTel exporter)."""
+
+
+DEFAULT_OBSERVABILITY_CONFIG = ObservabilityConfig(enabled=False)

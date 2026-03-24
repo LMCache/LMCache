@@ -51,6 +51,55 @@ class PrefetchPolicy(ABC):
         """
 
 
+# -----------------------------------------------------------------------------
+# Registry: prefetch policy name -> policy class
+# -----------------------------------------------------------------------------
+
+_PREFETCH_POLICY_REGISTRY: dict[str, type[PrefetchPolicy]] = {}
+
+
+def register_prefetch_policy(
+    name: str,
+    policy_cls: type[PrefetchPolicy],
+) -> None:
+    """
+    Register a prefetch policy class under a name.
+
+    Each policy module should call this at import time.
+
+    Args:
+        name: Policy name (e.g. "default").
+        policy_cls: A concrete PrefetchPolicy subclass.
+    """
+    if name in _PREFETCH_POLICY_REGISTRY:
+        raise ValueError(f"Prefetch policy already registered: {name!r}")
+    _PREFETCH_POLICY_REGISTRY[name] = policy_cls
+
+
+def get_registered_prefetch_policies() -> list[str]:
+    """Return the list of registered prefetch policy names."""
+    return list(_PREFETCH_POLICY_REGISTRY)
+
+
+def create_prefetch_policy(name: str) -> PrefetchPolicy:
+    """
+    Create a prefetch policy instance by name.
+
+    Args:
+        name: Registered policy name.
+
+    Returns:
+        A new PrefetchPolicy instance.
+
+    Raises:
+        ValueError: If no policy is registered under the given name.
+    """
+    if name not in _PREFETCH_POLICY_REGISTRY:
+        known = ", ".join(sorted(_PREFETCH_POLICY_REGISTRY)) or "(none)"
+        raise ValueError(f"Unknown prefetch policy {name!r}. Known: {known}")
+    return _PREFETCH_POLICY_REGISTRY[name]()
+
+
 class DefaultPrefetchPolicy(PrefetchPolicy):
     """
     Default prefetch policy: for each key, pick the first adapter
@@ -93,3 +142,6 @@ class DefaultPrefetchPolicy(PrefetchPolicy):
             plan[ad.index] = local_bitmap
 
         return plan
+
+
+register_prefetch_policy("default", DefaultPrefetchPolicy)

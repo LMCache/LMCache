@@ -70,15 +70,15 @@ class NixlStorageConfig:
 
     @staticmethod
     def validate_nixl_backend(dynamic_storage: bool, backend: str, device: str):
-        if dynamic_storage:  # For now only supported for OBJ & cpu
+        if dynamic_storage:  # For now only supports OBJ backend
             if backend in ("OBJ",):
-                return device == "cpu"
+                return device == "cpu" or device == "cuda"
             else:
                 return False
         else:
-            if backend in ("GDS", "GDS_MT"):
+            if backend in ("GDS", "GDS_MT", "OBJ"):
                 return device == "cpu" or device == "cuda"
-            elif backend in ("POSIX", "HF3FS", "OBJ"):
+            elif backend in ("POSIX", "HF3FS"):
                 return device == "cpu"
             else:
                 return False
@@ -283,7 +283,12 @@ class NixlStorageAgent(ABC):
         self.init_mem_handlers(device, buffer_ptr, buffer_size, page_size, device_id)
 
     def init_mem_handlers(self, device, buffer_ptr, buffer_size, page_size, device_id):
-        reg_list = [(buffer_ptr, buffer_size, device_id, "")]
+        # Break the registration into page size chunks to ensure the maximum buffer size
+        # of the underlying plugin is not exceeded
+        reg_list = [
+            (base_addr, page_size, device_id, "")
+            for base_addr in range(buffer_ptr, buffer_ptr + buffer_size, page_size)
+        ]
         xfer_desc = [
             (base_addr, page_size, device_id)
             for base_addr in range(buffer_ptr, buffer_ptr + buffer_size, page_size)

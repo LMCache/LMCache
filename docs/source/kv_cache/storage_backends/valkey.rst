@@ -21,7 +21,10 @@ Pipelining will also be implemented to the Redis Connector in the future.
 Example Configurations
 ----------------------
 
-Basic Valkey Configuration (Standalone mode)
+Standalone-mode
+~~~~~~~~~~~~~~~~
+
+Basic Valkey Configuration (Standalone-mode)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 .. code-block:: yaml
@@ -46,9 +49,18 @@ Standalone-mode Valkey Configuration with database
      valkey_password: "Your password"
      valkey_database: 0
 
+Cluster-mode
+~~~~~~~~~~~~~~~~
 
 Cluster-mode Valkey Configuration (Endpoint)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+For example, the configuration endpoint in ElastiCache is as follows:
+
+<cache-name>.<identifier>.clustercfg.<region>.cache.amazonaws.com
+
+You need to add this DNS name in the <your host>.
+
 
 .. code-block:: yaml
 
@@ -60,8 +72,15 @@ Cluster-mode Valkey Configuration (Endpoint)
      valkey_username: "Your username"
      valkey_password: "Your password"
 
+
 Cluster-mode Valkey Configuration (Nodes)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Nodes are deployed directly and configured in cluster mode without connecting them via DNS names (CNAME).
+
+In this scenario, you simply input multiple IP hosts and ports.
+
+Example: 172.0.0.1:7001, 172.0.0.2:7002 ... 172.0.0.6:7006
 
 .. code-block:: yaml
 
@@ -72,3 +91,19 @@ Cluster-mode Valkey Configuration (Nodes)
      valkey_mode: "cluster"
      valkey_username: "Your username"
      valkey_password: "Your password"
+
+Cluster-mode Valkey Configuration with numbered databases (Valkey 9.0+ and Valkey-GLIDE 2.1+)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Valkey connector supports numbered databases in both the Endpoint using DNS and the Nodes method using IP and port pairs.
+
+.. code-block:: yaml
+
+   chunk_size: 256
+   remote_url: "valkey://<your host>:6379"
+   remote_serde: "naive"
+   extra_config:
+     valkey_mode: "cluster"
+     valkey_username: "Your username"
+     valkey_password: "Your password"
+     valkey_database: 1
