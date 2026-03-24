@@ -102,6 +102,14 @@ def CreateGPUConnector(
                 return VLLMPagedMemGPUConnectorV2.from_metadata(
                     metadata, use_gpu, device
                 )
+
+        elif dev_name == "hpu":
+            # First Party
+            from lmcache.v1.gpu_connector.hpu_connector import (
+                VLLMPagedMemHPUConnectorV2,
+            )
+
+            return VLLMPagedMemHPUConnectorV2.from_metadata(metadata, use_gpu, device)
         else:
             raise RuntimeError("No supported connector found for the current platform.")
 
