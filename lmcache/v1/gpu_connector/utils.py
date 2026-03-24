@@ -205,6 +205,8 @@ def get_gpu_kv_shape_description(gpu_kv_format: "lmc_ops.GPUKVFormat") -> str:
         lmc_ops.GPUKVFormat.NL_X_NB_BS_HS: "NL x [NB, BS, HS]",
         lmc_ops.GPUKVFormat.TWO_X_NL_X_NBBS_NH_HS: "2 x NL x [PBS, NH, HS]",
         lmc_ops.GPUKVFormat.NL_X_NBBS_ONE_HS: "NL x [PBS, 1, HS]",
+        lmc_ops.GPUKVFormat.NL_X_TWO_NB_NH_BS_HS: "NL x [2, NB, NH, BS, HS]",
+        lmc_ops.GPUKVFormat.NL_X_NB_TWO_NH_BS_HS: "NL x [NB, 2, NH, BS, HS]",
     }
     return _SHAPE_DESCRIPTIONS.get(gpu_kv_format, f"Unknown ({gpu_kv_format})")
 
@@ -220,6 +222,12 @@ def get_attention_backend(gpu_kv_format: "lmc_ops.GPUKVFormat") -> str:
             "SGLang MHA (flash attention and flash infer)"
         ),
         lmc_ops.GPUKVFormat.NL_X_NBBS_ONE_HS: "SGLang MLA",
+        lmc_ops.GPUKVFormat.NL_X_TWO_NB_NH_BS_HS: (
+            "vLLM non-MLA flash attention (HND layout)"
+        ),
+        lmc_ops.GPUKVFormat.NL_X_NB_TWO_NH_BS_HS: (
+            "vLLM non-MLA flash infer (HND layout)"
+        ),
     }
     return _ATTENTION_BACKENDS.get(gpu_kv_format, f"Unknown ({gpu_kv_format})")
 
@@ -269,6 +277,18 @@ def get_concrete_gpu_kv_shape(
     if fmt == F.NL_X_NBBS_ONE_HS:
         pbs = get_page_buffer_size(kv_caches, fmt)
         return f"{nl} x [{pbs}, 1, {hs}]"
+
+    if fmt == F.NL_X_TWO_NB_NH_BS_HS:
+        nb = get_num_blocks(kv_caches, fmt)
+        nh = get_num_heads(kv_caches, fmt)
+        bs = get_block_size(kv_caches, fmt)
+        return f"{nl} x [2, {nb}, {nh}, {bs}, {hs}]"
+
+    if fmt == F.NL_X_NB_TWO_NH_BS_HS:
+        nb = get_num_blocks(kv_caches, fmt)
+        nh = get_num_heads(kv_caches, fmt)
+        bs = get_block_size(kv_caches, fmt)
+        return f"{nl} x [{nb}, 2, {nh}, {bs}, {hs}]"
 
     return f"Unknown ({gpu_kv_format})"
 
