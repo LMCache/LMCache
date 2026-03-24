@@ -39,9 +39,12 @@ struct BatchState {
   std::mutex err_mu;
   std::string first_error;
 
-  // for batch exists, store the boolean results (0/1)
+  // Per-key success/failure results used by both EXISTS and GET.
+  // For EXISTS: 1 = key found, 0 = not found.
+  // For GET: 1 = read succeeded, 0 = read failed (e.g. file
+  //   not found).  This enables per-key error tolerance on loads.
   // IMPORTANT: not vector<bool> due to concurrent write data race
-  std::vector<uint8_t> exists_results;
+  std::vector<uint8_t> per_key_results;
 
   Op batch_op;
 };

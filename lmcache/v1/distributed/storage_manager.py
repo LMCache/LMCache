@@ -342,6 +342,46 @@ class StorageManager:
             submit_time=submit_time,
         )
 
+    def query_prefetch_lookup_hits(
+        self,
+        handle: PrefetchHandle,
+    ) -> int | None:
+        """
+        Query the number of prefix hit chunks for a prefetch task before
+        the L2 prefetching is done.
+
+        Args:
+            handle (PrefetchHandle): The handle of the lookup task.
+
+        Returns:
+            the number of prefix hit chunks if the lookup is done, None if
+            it's still in progress,  or the prefetch task is already done.
+
+        Note:
+            This function is designed for the scenario where the caller wants
+            to check the L1 prefix hits as soon as possible without waiting for
+            the whole prefetch task to be done.
+            When the prefetch task is already done and the prefetch task result
+            has already been queried by `query_prefetch_status`, this function
+            will return None forever for the same prefetch handle.
+            Therefore, it's the caller’s responsibility to make sure not calling
+            this function after the prefetch task is done.
+        """
+        if handle.request_id == -1:
+            # No L2 request, the prefix hit count is final
+            return handle.l1_prefix_hit_count
+
+        # Have L2 request, need to check the status from prefetch controller
+        l2_r = self._prefetch_controller.query_lookup_result(handle.request_id)
+
+        if l2_r is None:
+            # L2 prefetch is still in progress or it's already done and
+            # the result has been consumed by `query_prefetch_status`
+            return None
+
+        # L2 lookup is done, return the total prefix hit count (L1 + L2)
+        return handle.l1_prefix_hit_count + l2_r
+
     def query_prefetch_status(
         self,
         handle: PrefetchHandle,
