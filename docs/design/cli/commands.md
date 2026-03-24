@@ -90,9 +90,9 @@ consolidated view.
 Pure liveness check for both targets. Returns OK/FAIL with round-trip time,
 measuring only the network round-trip excluding local Python overhead.
 
-**`ping kvcache`** -- single `NOOP` round-trip over ZMQ:
+**`ping kvcache`** -- pings the LMCache server process via HTTP `/api/healthcheck`:
 ```bash
-$ lmcache ping kvcache --url localhost:5555
+$ lmcache ping kvcache --url http://localhost:8080
 
 ======= Ping KV Cache =======
 Status:                  OK
@@ -101,7 +101,7 @@ Round trip time (ms):    0.42
 
 ```
 
-**`ping engine`** -- single `/api/healthcheck` round-trip over HTTP:
+**`ping engine`** -- pings the vLLM server process via HTTP `/health`:
 ```bash
 $ lmcache ping engine --url http://localhost:8000
 

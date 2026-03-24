@@ -11,10 +11,12 @@ To add a new command:
 from lmcache.cli.commands.base import BaseCommand
 from lmcache.cli.commands.describe import DescribeCommand
 from lmcache.cli.commands.mock import MockCommand
+from lmcache.cli.commands.ping import PingCommand
 
 ALL_COMMANDS: list[BaseCommand] = [
     MockCommand(),
     DescribeCommand(),
+    PingCommand(),
 ]
 
 __all__ = ["ALL_COMMANDS", "BaseCommand"]
