@@ -122,6 +122,10 @@ def cuda_extension() -> tuple[list, dict]:
     cuobject_sources = [
         "csrc/storage_backends/cuobject/pybind.cpp",
         "csrc/storage_backends/cuobject/cuobject_client.cpp",
+        ]
+    fs_sources = [
+        "csrc/storage_backends/fs/pybind.cpp",
+        "csrc/storage_backends/fs/connector.cpp",
     ]
     ext_modules = [
         cpp_extension.CUDAExtension(
@@ -144,6 +148,14 @@ def cuda_extension() -> tuple[list, dict]:
             "lmcache.lmcache_redis",
             sources=redis_sources,
             include_dirs=["csrc/storage_backends", "csrc/storage_backends/redis"],
+            extra_compile_args={
+                "cxx": [flag_cxx_abi, "-O3", "-std=c++17"],
+            },
+        ),
+        cpp_extension.CppExtension(
+            "lmcache.lmcache_fs",
+            sources=fs_sources,
+            include_dirs=["csrc/storage_backends", "csrc/storage_backends/fs"],
             extra_compile_args={
                 "cxx": [flag_cxx_abi, "-O3", "-std=c++17"],
             },
@@ -205,9 +217,9 @@ def rocm_extension() -> tuple[list, dict]:
         "csrc/storage_backends/redis/pybind.cpp",
         "csrc/storage_backends/redis/connector.cpp",
     ]
-    cuobject_sources = [
-        "csrc/storage_backends/cuobject/pybind.cpp",
-        "csrc/storage_backends/cuobject/cuobject_client.cpp",
+    fs_sources = [
+        "csrc/storage_backends/fs/pybind.cpp",
+        "csrc/storage_backends/fs/connector.cpp",
     ]
     # For HIP, we generally use CppExtension and let hipcc handle things.
     # Ensure CXX environment variable is set to hipcc when running this build.
@@ -256,33 +268,15 @@ def rocm_extension() -> tuple[list, dict]:
                 "cxx": ["-O3", "-std=c++17"],
             },
         ),
+        cpp_extension.CppExtension(
+            "lmcache.lmcache_fs",
+            sources=fs_sources,
+            include_dirs=["csrc/storage_backends", "csrc/storage_backends/fs"],
+            extra_compile_args={
+                "cxx": ["-O3", "-std=c++17"],
+            },
+        ),
     ]
-
-    # cuObject extension -- requires cuObjClient SDK (cuobjclient.h)
-    cuobj_inc, cuobj_lib = _find_cuobject_paths()
-    if cuobj_inc is not None:
-        ext_modules.append(
-            cpp_extension.CppExtension(
-                "lmcache.lmcache_cuobject",
-                sources=cuobject_sources,
-                include_dirs=[
-                    "csrc/storage_backends",
-                    "csrc/storage_backends/cuobject",
-                    cuobj_inc,
-                ],
-                library_dirs=[cuobj_lib],
-                libraries=["cuobjclient"],
-                extra_compile_args={
-                    "cxx": ["-O3", "-std=c++17"],
-                },
-            ),
-        )
-    else:
-        print(
-            "cuobjclient.h not found -- skipping lmcache_cuobject extension. "
-            "Set CUOBJECT_INCLUDE_DIR and CUOBJECT_LIB_DIR to override."
-        )
-
     cmdclass = {"build_ext": cpp_extension.BuildExtension}
     return ext_modules, cmdclass
 
