@@ -23,8 +23,8 @@ from lmcache.v1.gpu_connector.utils import (
     get_block_size,
     get_concrete_gpu_kv_shape,
     get_dtype,
-    get_head_size,
     get_gpu_kv_shape_description,
+    get_head_size,
     get_hidden_dim_size,
     get_num_blocks,
     get_num_heads,
@@ -224,6 +224,7 @@ class GPUCacheContext:
     @property
     def shape_desc(self) -> "lmc_ops.PageBufferShapeDesc":
         return self.shape_desc_
+
     def gpu_kv_format_name(self) -> str:
         """Returns the GPU KV format enum name (e.g. ``'NL_X_TWO_NB_BS_NH_HS'``)."""
         return self.gpu_kv_format_.name
