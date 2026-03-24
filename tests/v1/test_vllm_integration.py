@@ -11,10 +11,17 @@ from lmcache.integration.vllm.utils import (
     create_lmcache_metadata,
     resolve_vllm_worker_identity,
 )
-from lmcache.utils import EngineType
+from lmcache.integration.vllm.vllm_service_factory import VllmServiceFactory
+from lmcache.utils import (
+    EngineType,
+    mock_up_broadcast_fn,
+    mock_up_broadcast_object_fn,
+)
+from lmcache.v1.cache_engine import LMCacheEngine
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.gpu_connector import CreateGPUConnector
 from lmcache.v1.metadata import LMCacheMetadata
+from lmcache.v1.token_database import ChunkedTokenDatabase
 
 
 def _make_vllm_config(
@@ -26,6 +33,7 @@ def _make_vllm_config(
     dp_local_rank: int = 0,
     dp_size: int = 1,
     api_process_count: int = 1,
+    kv_role: str = "kv_both",
 ):
     model_config = SimpleNamespace(
         model="test-model",
@@ -57,6 +65,7 @@ def _make_vllm_config(
     kv_transfer_config = SimpleNamespace(
         engine_id="test-engine-id",
         kv_connector_extra_config={},
+        kv_role=kv_role,
     )
 
     return SimpleNamespace(
@@ -64,6 +73,7 @@ def _make_vllm_config(
         parallel_config=parallel_config,
         cache_config=cache_config,
         kv_transfer_config=kv_transfer_config,
+        speculative_config=None,
     )
 
 
@@ -201,3 +211,127 @@ def test_create_gpu_connector_uses_v3_for_grouped_vllm_metadata():
     assert connector == "v3-connector"
     mock_v2.assert_not_called()
     mock_v3.assert_called_once()
+
+
+def test_dp_only_mla_engine_keeps_nonzero_dp_worker_active():
+    """DP-only MLA workers should not become passive local cache followers."""
+
+    config = LMCacheEngineConfig.from_defaults()
+    metadata = LMCacheMetadata(
+        model_name="test-model",
+        world_size=8,
+        local_world_size=8,
+        worker_id=7,
+        local_worker_id=7,
+        kv_dtype=torch.uint8,
+        kv_shape=(61, 1, 256, 1, 576),
+        use_mla=True,
+        rpc_world_size=1,
+        rpc_worker_id=0,
+    )
+    engine = LMCacheEngine(
+        config=config,
+        metadata=metadata,
+        token_database=ChunkedTokenDatabase(config, metadata),
+        gpu_connector=None,
+        broadcast_fn=mock_up_broadcast_fn,
+        broadcast_object_fn=mock_up_broadcast_object_fn,
+    )
+    try:
+        assert metadata.is_rpc_first_rank() is True
+        assert engine.save_only_first_rank is False
+        with patch.object(engine, "_clear", return_value=17) as mock_clear:
+            assert engine.clear(tokens=[]) == 17
+            mock_clear.assert_called_once_with([], None, None)
+    finally:
+        engine.close()
+
+
+def test_multi_rank_mla_engine_uses_rpc_rank_for_first_rank_logic():
+    """MLA first-rank gating should follow engine-local RPC rank, not global rank."""
+
+    config = LMCacheEngineConfig.from_defaults()
+    active_metadata = LMCacheMetadata(
+        model_name="test-model",
+        world_size=16,
+        local_world_size=16,
+        worker_id=8,
+        local_worker_id=8,
+        kv_dtype=torch.uint8,
+        kv_shape=(61, 1, 256, 1, 576),
+        use_mla=True,
+        rpc_world_size=2,
+        rpc_worker_id=0,
+    )
+    active_engine = LMCacheEngine(
+        config=config,
+        metadata=active_metadata,
+        token_database=ChunkedTokenDatabase(config, active_metadata),
+        gpu_connector=None,
+        broadcast_fn=mock_up_broadcast_fn,
+        broadcast_object_fn=mock_up_broadcast_object_fn,
+    )
+    passive_metadata = LMCacheMetadata(
+        model_name="test-model",
+        world_size=16,
+        local_world_size=16,
+        worker_id=9,
+        local_worker_id=9,
+        kv_dtype=torch.uint8,
+        kv_shape=(61, 1, 256, 1, 576),
+        use_mla=True,
+        rpc_world_size=2,
+        rpc_worker_id=1,
+    )
+    passive_engine = LMCacheEngine(
+        config=config,
+        metadata=passive_metadata,
+        token_database=ChunkedTokenDatabase(config, passive_metadata),
+        gpu_connector=None,
+        broadcast_fn=mock_up_broadcast_fn,
+        broadcast_object_fn=mock_up_broadcast_object_fn,
+    )
+    try:
+        assert active_metadata.is_rpc_first_rank() is True
+        assert passive_metadata.is_rpc_first_rank() is False
+        assert active_engine.save_only_first_rank is True
+        assert passive_engine.save_only_first_rank is True
+
+        with patch.object(active_engine, "_clear", return_value=23) as mock_clear:
+            assert active_engine.clear(tokens=[]) == 23
+            mock_clear.assert_called_once_with([], None, None)
+
+        with patch.object(passive_engine, "_clear") as mock_clear:
+            assert passive_engine.clear(tokens=[]) == 0
+            mock_clear.assert_not_called()
+    finally:
+        active_engine.close()
+        passive_engine.close()
+
+
+def test_scheduler_without_engine_skips_prometheus_logger_in_kv_both_mode():
+    """kv_both scheduler path should reuse the worker-side logger in-process."""
+
+    config = LMCacheEngineConfig.from_defaults()
+    vllm_config = _make_vllm_config(kv_role="kv_both")
+    factory = VllmServiceFactory(config, vllm_config, "scheduler")
+
+    with patch("lmcache.observability.PrometheusLogger.GetOrCreate") as mock_get:
+        engine = factory.get_or_create_lmcache_engine()
+
+    assert engine is None
+    mock_get.assert_not_called()
+
+
+def test_scheduler_without_engine_creates_prometheus_logger_in_scheduler_only_mode():
+    """Scheduler-only deployments should still create a Prometheus logger."""
+
+    config = LMCacheEngineConfig.from_defaults()
+    vllm_config = _make_vllm_config(kv_role="kv_consumer")
+    factory = VllmServiceFactory(config, vllm_config, "scheduler")
+
+    with patch("lmcache.observability.PrometheusLogger.GetOrCreate") as mock_get:
+        engine = factory.get_or_create_lmcache_engine()
+
+    assert engine is None
+    mock_get.assert_called_once()

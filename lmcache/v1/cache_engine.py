@@ -108,10 +108,11 @@ class LMCacheEngine:
         self.gpu_connector = gpu_connector
         self.broadcast_fn = broadcast_fn
         self.broadcast_object_fn = broadcast_object_fn
-        # save_only_first_rank only works when use mla
+        # save_only_first_rank only works for multi-rank engine-local MLA groups.
         self.save_only_first_rank = (
             self.config.get_extra_config_value("save_only_first_rank", metadata.use_mla)
             and metadata.use_mla
+            and metadata.has_rpc_peer_workers()
         )
 
         if self.save_only_first_rank and self.gpu_connector is not None:
@@ -288,7 +289,7 @@ class LMCacheEngine:
                 self.lmcache_worker is not None
                 or self.use_layerwise
                 or not self.save_only_first_rank
-                or self.metadata.is_first_rank()
+                or self.metadata.is_rpc_first_rank()
                 or len(lookup_server_worker_ids) == 0
                 or self.metadata.get_rpc_worker_id() in lookup_server_worker_ids
             ):
@@ -1465,7 +1466,7 @@ class LMCacheEngine:
     ) -> int:
         # TODO: need to clear by request_configs
         if self.save_only_first_rank:
-            if self.metadata.is_first_rank():
+            if self.metadata.is_rpc_first_rank():
                 num_removed = self._clear(tokens, locations, request_configs)
                 return num_removed
             else:
@@ -1702,7 +1703,7 @@ class LMCacheEngine:
           * Receives chunk data and populates reordered_chunks
           * Updates ret_mask to mark received positions as True
         """
-        if self.metadata.is_first_rank():
+        if self.metadata.is_rpc_first_rank():
             # Broadcast total chunk count
             chunk_count = len(reordered_chunks)
             self.broadcast_object_fn(chunk_count, self.metadata.first_rank)
@@ -1764,7 +1765,7 @@ class LMCacheEngine:
         A 'passive' CacheEngine means that the node itself will not store/retrieve
         the data directly, but from the "active" worker (i.e., rank 0 in MLA)
         """
-        return self.save_only_first_rank and not self.metadata.is_first_rank()
+        return self.save_only_first_rank and not self.metadata.is_rpc_first_rank()
 
     def _get_slot_mapping_list(
         self,
@@ -1892,12 +1893,13 @@ class LMCacheEngineBuilder:
             return CuFileMemoryAllocator(config.cufile_buffer_size * 1024**2)
 
         max_local_cpu_size = config.max_local_cpu_size
-        # save_only_first_rank only works when use mla
+        # save_only_first_rank only works for multi-rank engine-local MLA groups.
         save_only_first_rank = (
             config.get_extra_config_value("save_only_first_rank", metadata.use_mla)
             and metadata.use_mla
+            and metadata.has_rpc_peer_workers()
         )
-        if save_only_first_rank and metadata.is_first_rank():
+        if save_only_first_rank and metadata.is_rpc_first_rank():
             # Only the first rank will save the cache,
             # so we need to set it lager than other ranks
             first_rank_max_local_cpu_size = (

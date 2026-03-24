@@ -162,14 +162,20 @@ class VllmServiceFactory(BaseServiceFactory):
             self.role == "scheduler"
             and not self.lmcache_config.enable_scheduler_bypass_lookup
         ):
-            # Create PrometheusLogger for scheduler without engine
+            # In kv_both mode, worker and scheduler services share the same
+            # EngineCore process. The worker-side engine already creates the
+            # process-global Prometheus logger, so recreating it for the
+            # scheduler-only path would trip the singleton metadata guard.
             # First Party
             from lmcache.observability import PrometheusLogger
 
-            PrometheusLogger.GetOrCreate(
-                self.metadata,
-                config=self.lmcache_config,
-            )
+            kv_transfer_config = getattr(self.vllm_config, "kv_transfer_config", None)
+            kv_role = getattr(kv_transfer_config, "kv_role", None)
+            if kv_role != "kv_both":
+                PrometheusLogger.GetOrCreate(
+                    self.metadata,
+                    config=self.lmcache_config,
+                )
             return None
 
         # First Party

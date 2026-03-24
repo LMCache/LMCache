@@ -73,6 +73,14 @@ class LMCacheMetadata:
         """Check if the current worker is the first rank"""
         return self.worker_id == self.first_rank
 
+    def has_rpc_peer_workers(self) -> bool:
+        """Check whether the engine-local RPC topology spans multiple workers."""
+        return self.get_rpc_world_size() > 1
+
+    def is_rpc_first_rank(self) -> bool:
+        """Check if the current worker is the first engine-local RPC rank."""
+        return self.get_rpc_worker_id() == self.first_rank
+
     def get_rpc_world_size(self) -> int:
         """Return the engine-local world size used by lookup RPC."""
         return self.world_size if self.rpc_world_size is None else self.rpc_world_size

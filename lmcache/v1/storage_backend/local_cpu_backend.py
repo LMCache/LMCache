@@ -310,6 +310,7 @@ class LocalCPUBackend(AllocatorBackendInterface):
             metadata is not None
             and config.get_extra_config_value("save_only_first_rank", metadata.use_mla)
             and metadata.use_mla
+            and metadata.has_rpc_peer_workers()
         )
         if not save_only_first_rank:
             # Do not adjust cpu_size if save_only_first_rank is False for now
@@ -355,9 +356,10 @@ class LocalCPUBackend(AllocatorBackendInterface):
             save_only_first_rank = (
                 config.get_extra_config_value("save_only_first_rank", metadata.use_mla)
                 and metadata.use_mla
+                and metadata.has_rpc_peer_workers()
             )
 
-            if save_only_first_rank and metadata.is_first_rank():
+            if save_only_first_rank and metadata.is_rpc_first_rank():
                 # Only the first rank will save the cache,
                 # so we need to set it larger than other ranks
                 cpu_size = config.get_extra_config_value(
