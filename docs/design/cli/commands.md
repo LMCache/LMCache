@@ -44,6 +44,7 @@ ZMQ-only.
 ```bash
 lmcache server \
     --engine-type blend --host 0.0.0.0 --port 5555 \
+    --max-gpu-workers 2 \
     --l1-size-gb 60 --eviction-policy LRU \
     --no-http  # opt out of HTTP frontend
 ```
