@@ -87,7 +87,6 @@ class CuObjectS3Connector(S3Connector):
         aws_access_key_id: Optional[str] = None,
         aws_secret_access_key: Optional[str] = None,
         cuobj_nic_device: Optional[str] = None,
-        cuobj_lib_path: Optional[str] = None,
     ):
         # Initialise the parent S3Connector (CRT client, auth, etc.)
         super().__init__(
@@ -110,7 +109,6 @@ class CuObjectS3Connector(S3Connector):
 
         try:
             config = CuObjConfig(
-                lib_path=cuobj_lib_path,
                 nic_device=cuobj_nic_device,
             )
             self._cuobj_client = CuObjClientWrapper(config)

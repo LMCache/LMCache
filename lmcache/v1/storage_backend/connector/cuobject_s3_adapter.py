@@ -81,7 +81,6 @@ class CuObjectS3ConnectorAdapter(ConnectorAdapter):
 
         # cuObject-specific config
         cuobj_nic_device = extra_config.get("cuobj_nic_device", None)
-        cuobj_lib_path = extra_config.get("cuobj_lib_path", None)
 
         if context.metadata is None:
             raise ValueError(
@@ -110,5 +109,4 @@ class CuObjectS3ConnectorAdapter(ConnectorAdapter):
             aws_access_key_id=aws_access_key_id,
             aws_secret_access_key=aws_secret_access_key,
             cuobj_nic_device=cuobj_nic_device,
-            cuobj_lib_path=cuobj_lib_path,
         )

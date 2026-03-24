@@ -1,13 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Unit tests for the cuObject ctypes bindings wrapper.
+"""Unit tests for the cuObject pybind11 bindings wrapper.
 
-These tests mock the C library so they can run on any machine without
-``libcuobject_client.so`` being installed.
+These tests mock the C++ ``CuObjectClient`` class so they can run on
+any machine without the cuObjClient SDK or the compiled pybind11
+extension being installed.
 """
 
 # Standard
 from unittest.mock import MagicMock, patch
-import ctypes
 import logging
 
 # Third Party
@@ -15,7 +15,7 @@ import pytest
 
 # First Party
 from lmcache.v1.storage_backend.connector.cuobject_bindings import (
-    CUOBJ_SUCCESS,
+    CU_OBJ_SUCCESS,
     CuObjClientWrapper,
     CuObjConfig,
 )
@@ -25,39 +25,41 @@ from lmcache.v1.storage_backend.connector.cuobject_bindings import (
 # ---------------------------------------------------------------------------
 
 
-def _make_fake_lib():
-    """Build a mock CDLL that pretends to be libcuobject_client.so.
+def _make_fake_cpp_client():
+    """Build a mock ``CuObjectClient`` (the pybind11 C++ class).
 
-    Each C API entry point is a :class:`MagicMock` that returns
-    ``CUOBJ_SUCCESS`` by default.  Symbol type annotations are added
-    as plain attributes so ``_resolve_symbols`` does not choke.
+    Each method is a :class:`MagicMock` with sensible defaults:
+    * ``register_pool`` returns ``(ptr, size)`` tuple
+    * ``deregister_pool`` returns ``CU_OBJ_SUCCESS``
+    * ``prepare_put`` / ``prepare_get`` return a fake RDMA token string
+    * ``close`` returns ``CU_OBJ_SUCCESS``
     """
-    lib = MagicMock(spec=ctypes.CDLL)
-
-    lib.cuObjClientCreate = MagicMock(return_value=CUOBJ_SUCCESS)
-    lib.cuObjClientDestroy = MagicMock(return_value=CUOBJ_SUCCESS)
-    lib.cuObjRegisterMemory = MagicMock(return_value=CUOBJ_SUCCESS)
-    lib.cuObjDeregisterMemory = MagicMock(return_value=CUOBJ_SUCCESS)
-
-    def _put_with_token(handle, ptr, size, offset):
-        # Access the wrapper's callback to deliver a fake token
-        return CUOBJ_SUCCESS
-
-    lib.cuObjPut = MagicMock(return_value=CUOBJ_SUCCESS)
-    lib.cuObjGet = MagicMock(return_value=CUOBJ_SUCCESS)
-    return lib
+    client = MagicMock()
+    client.register_pool = MagicMock(side_effect=lambda ptr, size: (ptr, size))
+    client.deregister_pool = MagicMock(return_value=CU_OBJ_SUCCESS)
+    client.prepare_put = MagicMock(return_value="rdma-token-put")
+    client.prepare_get = MagicMock(return_value="rdma-token-get")
+    client.is_connected = MagicMock(return_value=True)
+    client.get_max_callback_size = MagicMock(return_value=1048576)
+    client.close = MagicMock(return_value=CU_OBJ_SUCCESS)
+    return client
 
 
-def _build_wrapper(fake_lib=None):
-    """Construct a ``CuObjClientWrapper`` with mocked library loading."""
-    if fake_lib is None:
-        fake_lib = _make_fake_lib()
+def _build_wrapper(fake_client=None):
+    """Construct a ``CuObjClientWrapper`` with mocked C++ client.
 
-    with patch.object(CuObjClientWrapper, "_load_library", return_value=fake_lib):
-        wrapper = CuObjClientWrapper(
-            CuObjConfig(lib_path="/fake/libcuobject_client.so")
-        )
-    return wrapper, fake_lib
+    Patches:
+    * ``CuObjectClient`` constructor to return ``fake_client``
+    """
+    if fake_client is None:
+        fake_client = _make_fake_cpp_client()
+
+    with patch(
+        "lmcache.v1.storage_backend.connector.cuobject_bindings.CuObjectClient",
+        return_value=fake_client,
+    ):
+        wrapper = CuObjClientWrapper(CuObjConfig())
+    return wrapper, fake_client
 
 
 # ---------------------------------------------------------------------------
@@ -66,50 +68,56 @@ def _build_wrapper(fake_lib=None):
 
 
 class TestCuObjClientWrapperInit:
-    """Tests for library loading and client creation."""
+    """Tests for client creation."""
 
     def test_successful_init(self):
-        wrapper, lib = _build_wrapper()
-        assert wrapper._handle is not None
-        lib.cuObjClientCreate.assert_called_once()
+        wrapper, client = _build_wrapper()
+        assert wrapper._client is not None
 
     def test_create_failure_raises(self):
-        lib = _make_fake_lib()
-        lib.cuObjClientCreate = MagicMock(return_value=42)
-        with pytest.raises(RuntimeError, match="cuObjClientCreate failed"):
-            _build_wrapper(lib)
-
-    def test_load_library_not_found(self):
-        with (
-            patch("ctypes.util.find_library", return_value=None),
-            pytest.raises(ImportError, match="Cannot find"),
+        with patch(
+            "lmcache.v1.storage_backend.connector.cuobject_bindings.CuObjectClient",
+            side_effect=RuntimeError("cuObjClient construction failed"),
         ):
-            CuObjClientWrapper._load_library(None)
+            with pytest.raises(RuntimeError, match="cuObjClient construction failed"):
+                CuObjClientWrapper(CuObjConfig())
+
+    def test_extension_not_available(self):
+        with patch(
+            "lmcache.v1.storage_backend.connector.cuobject_bindings.CuObjectClient",
+            None,
+        ):
+            with pytest.raises(ImportError, match="C\\+\\+ extension"):
+                CuObjClientWrapper(CuObjConfig())
 
 
 class TestPoolRegistration:
     """Tests for register_pool / deregister_pool."""
 
     def test_register_pool_success(self):
-        wrapper, lib = _build_wrapper()
+        wrapper, client = _build_wrapper()
         handle = wrapper.register_pool(ptr=0x1000, size=4096)
         assert handle == (0x1000, 4096)
-        lib.cuObjRegisterMemory.assert_called_once()
+        client.register_pool.assert_called_once_with(0x1000, 4096)
 
     def test_register_pool_failure_raises(self):
-        wrapper, lib = _build_wrapper()
-        lib.cuObjRegisterMemory.return_value = 1
-        with pytest.raises(RuntimeError, match="cuObjRegisterMemory"):
+        fake_client = _make_fake_cpp_client()
+        fake_client.register_pool.side_effect = RuntimeError(
+            "cuMemObjGetDescriptor failed"
+        )
+        wrapper, _ = _build_wrapper(fake_client)
+        with pytest.raises(RuntimeError, match="cuMemObjGetDescriptor"):
             wrapper.register_pool(ptr=0x1000, size=4096)
 
     def test_deregister_pool_success(self):
-        wrapper, lib = _build_wrapper()
+        wrapper, client = _build_wrapper()
         wrapper.deregister_pool((0x1000, 4096))
-        lib.cuObjDeregisterMemory.assert_called_once()
+        client.deregister_pool.assert_called_once_with(0x1000)
 
     def test_deregister_pool_failure_logs_warning(self, caplog):
-        wrapper, lib = _build_wrapper()
-        lib.cuObjDeregisterMemory.return_value = 99
+        fake_client = _make_fake_cpp_client()
+        fake_client.deregister_pool.return_value = 99
+        wrapper, _ = _build_wrapper(fake_client)
         _logger = logging.getLogger(
             "lmcache.v1.storage_backend.connector.cuobject_bindings"
         )
@@ -125,27 +133,26 @@ class TestPreparePut:
     """Tests for RDMA PUT token generation."""
 
     def test_prepare_put_returns_token(self):
-        wrapper, lib = _build_wrapper()
-
-        # Simulate the cuObjPut calling the callback with a fake token
-        def fake_put(handle, ptr, size, offset):
-            wrapper._on_rdma_token(None, b"rdma-token-abc", 14)
-            return CUOBJ_SUCCESS
-
-        lib.cuObjPut.side_effect = fake_put
+        fake_client = _make_fake_cpp_client()
+        fake_client.prepare_put.return_value = "rdma-token-abc"
+        wrapper, _ = _build_wrapper(fake_client)
         token = wrapper.prepare_put(ptr=0x2000, size=1024)
         assert token == "rdma-token-abc"
+        fake_client.prepare_put.assert_called_once_with(0x2000, 1024, 0, 0)
 
     def test_prepare_put_failure_raises(self):
-        wrapper, lib = _build_wrapper()
-        lib.cuObjPut.return_value = 5
+        fake_client = _make_fake_cpp_client()
+        fake_client.prepare_put.side_effect = RuntimeError("cuObjPut failed")
+        wrapper, _ = _build_wrapper(fake_client)
         with pytest.raises(RuntimeError, match="cuObjPut failed"):
             wrapper.prepare_put(ptr=0x2000, size=1024)
 
     def test_prepare_put_no_callback_raises(self):
-        wrapper, lib = _build_wrapper()
-        # cuObjPut returns success but never calls the callback
-        lib.cuObjPut.return_value = CUOBJ_SUCCESS
+        fake_client = _make_fake_cpp_client()
+        fake_client.prepare_put.side_effect = RuntimeError(
+            "callback was not invoked"
+        )
+        wrapper, _ = _build_wrapper(fake_client)
         with pytest.raises(RuntimeError, match="callback was not invoked"):
             wrapper.prepare_put(ptr=0x2000, size=1024)
 
@@ -154,19 +161,17 @@ class TestPrepareGet:
     """Tests for RDMA GET token generation."""
 
     def test_prepare_get_returns_token(self):
-        wrapper, lib = _build_wrapper()
-
-        def fake_get(handle, ptr, size, offset):
-            wrapper._on_rdma_token(None, b"rdma-get-token", 14)
-            return CUOBJ_SUCCESS
-
-        lib.cuObjGet.side_effect = fake_get
+        fake_client = _make_fake_cpp_client()
+        fake_client.prepare_get.return_value = "rdma-get-token"
+        wrapper, _ = _build_wrapper(fake_client)
         token = wrapper.prepare_get(ptr=0x3000, size=2048)
         assert token == "rdma-get-token"
+        fake_client.prepare_get.assert_called_once_with(0x3000, 2048, 0, 0)
 
     def test_prepare_get_failure_raises(self):
-        wrapper, lib = _build_wrapper()
-        lib.cuObjGet.return_value = 7
+        fake_client = _make_fake_cpp_client()
+        fake_client.prepare_get.side_effect = RuntimeError("cuObjGet failed")
+        wrapper, _ = _build_wrapper(fake_client)
         with pytest.raises(RuntimeError, match="cuObjGet failed"):
             wrapper.prepare_get(ptr=0x3000, size=2048)
 
@@ -290,20 +295,21 @@ class TestClose:
     """Tests for resource cleanup."""
 
     def test_close_destroys_client(self):
-        wrapper, lib = _build_wrapper()
+        wrapper, client = _build_wrapper()
         wrapper.close()
-        lib.cuObjClientDestroy.assert_called_once()
-        assert wrapper._handle is None
+        client.close.assert_called_once()
+        assert wrapper._client is None
 
     def test_double_close_is_safe(self):
-        wrapper, lib = _build_wrapper()
+        wrapper, client = _build_wrapper()
         wrapper.close()
         wrapper.close()  # Should not raise
-        lib.cuObjClientDestroy.assert_called_once()
+        client.close.assert_called_once()
 
     def test_close_logs_warning_on_error(self, caplog):
-        wrapper, lib = _build_wrapper()
-        lib.cuObjClientDestroy.return_value = 99
+        fake_client = _make_fake_cpp_client()
+        fake_client.close.return_value = 99
+        wrapper, _ = _build_wrapper(fake_client)
         _logger = logging.getLogger(
             "lmcache.v1.storage_backend.connector.cuobject_bindings"
         )

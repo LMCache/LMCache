@@ -11,6 +11,9 @@ ROOT_DIR = Path(__file__).parent
 HIPIFY_DIR = os.path.join(ROOT_DIR, "csrc/")
 HIPIFY_OUT_DIR = os.path.join(ROOT_DIR, "csrc_hip/")
 
+# cuObject SDK (NVIDIA cuObjClient) -- optional
+NO_CUOBJECT = os.environ.get("NO_CUOBJECT", "0") == "1"
+
 # python -m build --sdist
 # will run python setup.py sdist --dist-dir dist
 BUILDING_SDIST = "sdist" in sys.argv or os.environ.get("NO_CUDA_EXT", "0") == "1"
@@ -19,6 +22,31 @@ BUILDING_SDIST = "sdist" in sys.argv or os.environ.get("NO_CUDA_EXT", "0") == "1
 BUILD_WITH_HIP = os.environ.get("BUILD_WITH_HIP", "0") == "1"
 
 ENABLE_CXX11_ABI = os.environ.get("ENABLE_CXX11_ABI", "1") == "1"
+
+
+def _find_cuobject_paths() -> tuple:
+    """Locate the cuObjClient SDK (cuobjclient.h + libcuobjclient.so).
+
+    Returns (include_dir, lib_dir) or (None, None) if not found.
+    Override with CUOBJECT_INCLUDE_DIR / CUOBJECT_LIB_DIR env vars.
+    """
+    if NO_CUOBJECT:
+        return None, None
+
+    inc = os.environ.get("CUOBJECT_INCLUDE_DIR")
+    lib = os.environ.get("CUOBJECT_LIB_DIR")
+    if inc and lib:
+        return inc, lib
+
+    cuda_home = os.environ.get(
+        "CUDA_HOME", os.environ.get("CUDA_PATH", "/usr/local/cuda")
+    )
+    inc_dir = os.path.join(cuda_home, "include")
+    lib_dir = os.path.join(cuda_home, "lib64")
+    if os.path.isfile(os.path.join(inc_dir, "cuobjclient.h")):
+        return inc_dir, lib_dir
+
+    return None, None
 
 
 def hipify_wrapper() -> None:
@@ -91,6 +119,10 @@ def cuda_extension() -> tuple[list, dict]:
         "csrc/storage_backends/redis/pybind.cpp",
         "csrc/storage_backends/redis/connector.cpp",
     ]
+    cuobject_sources = [
+        "csrc/storage_backends/cuobject/pybind.cpp",
+        "csrc/storage_backends/cuobject/cuobject_client.cpp",
+    ]
     ext_modules = [
         cpp_extension.CUDAExtension(
             "lmcache.c_ops",
@@ -117,6 +149,32 @@ def cuda_extension() -> tuple[list, dict]:
             },
         ),
     ]
+
+    # cuObject extension -- requires cuObjClient SDK (cuobjclient.h)
+    cuobj_inc, cuobj_lib = _find_cuobject_paths()
+    if cuobj_inc is not None:
+        ext_modules.append(
+            cpp_extension.CppExtension(
+                "lmcache.lmcache_cuobject",
+                sources=cuobject_sources,
+                include_dirs=[
+                    "csrc/storage_backends",
+                    "csrc/storage_backends/cuobject",
+                    cuobj_inc,
+                ],
+                library_dirs=[cuobj_lib],
+                libraries=["cuobjclient"],
+                extra_compile_args={
+                    "cxx": [flag_cxx_abi, "-O3", "-std=c++17"],
+                },
+            ),
+        )
+    else:
+        print(
+            "cuobjclient.h not found -- skipping lmcache_cuobject extension. "
+            "Set CUOBJECT_INCLUDE_DIR and CUOBJECT_LIB_DIR to override."
+        )
+
     cmdclass = {"build_ext": cpp_extension.BuildExtension}
     return ext_modules, cmdclass
 
@@ -146,6 +204,10 @@ def rocm_extension() -> tuple[list, dict]:
     redis_sources = [
         "csrc/storage_backends/redis/pybind.cpp",
         "csrc/storage_backends/redis/connector.cpp",
+    ]
+    cuobject_sources = [
+        "csrc/storage_backends/cuobject/pybind.cpp",
+        "csrc/storage_backends/cuobject/cuobject_client.cpp",
     ]
     # For HIP, we generally use CppExtension and let hipcc handle things.
     # Ensure CXX environment variable is set to hipcc when running this build.
@@ -195,6 +257,32 @@ def rocm_extension() -> tuple[list, dict]:
             },
         ),
     ]
+
+    # cuObject extension -- requires cuObjClient SDK (cuobjclient.h)
+    cuobj_inc, cuobj_lib = _find_cuobject_paths()
+    if cuobj_inc is not None:
+        ext_modules.append(
+            cpp_extension.CppExtension(
+                "lmcache.lmcache_cuobject",
+                sources=cuobject_sources,
+                include_dirs=[
+                    "csrc/storage_backends",
+                    "csrc/storage_backends/cuobject",
+                    cuobj_inc,
+                ],
+                library_dirs=[cuobj_lib],
+                libraries=["cuobjclient"],
+                extra_compile_args={
+                    "cxx": ["-O3", "-std=c++17"],
+                },
+            ),
+        )
+    else:
+        print(
+            "cuobjclient.h not found -- skipping lmcache_cuobject extension. "
+            "Set CUOBJECT_INCLUDE_DIR and CUOBJECT_LIB_DIR to override."
+        )
+
     cmdclass = {"build_ext": cpp_extension.BuildExtension}
     return ext_modules, cmdclass
 

@@ -2,10 +2,7 @@
 # Standard
 from dataclasses import dataclass
 from typing import Optional
-import ctypes
-import ctypes.util
 import json
-import threading
 
 # First Party
 from lmcache.logging import init_logger
@@ -13,208 +10,86 @@ from lmcache.logging import init_logger
 logger = init_logger(__name__)
 
 # ---------------------------------------------------------------------------
-# cuObject C API type definitions
+# Lazy import of the pybind11 C++ extension.
 #
-# These are derived from the NVIDIA cuObject documentation (v1.16).
-# The actual struct layouts and function signatures should be verified
-# against the cuobject.h header shipped with CUDA Toolkit >= 13.1.1.
+# The extension is built by setup.py as ``lmcache.lmcache_cuobject``
+# when the cuObjClient SDK (cuobjclient.h) is found at build time.
+# If it was not compiled (e.g. sdist install, missing SDK) the import
+# is deferred and a clear error is raised at construction time.
+# ---------------------------------------------------------------------------
+try:
+    # Third Party
+    from lmcache.lmcache_cuobject import CuObjectClient  # pybind11 C++ class
+except ImportError:
+    CuObjectClient = None  # type: ignore[assignment,misc]
+
+# ---------------------------------------------------------------------------
+# Constants (mirrored from C++ for convenience)
+#
+# These match the official cuObjClient API Specification v1.0.0.
 # ---------------------------------------------------------------------------
 
 # Protocol enum for cuObjClient initialization
-CUOBJ_PROTO_DC = 0  # Dynamic Connection (InfiniBand / RoCEv2)
+# Official: CUOBJ_PROTO_RDMA_DC_V1 = 1001 (RDMA Dynamically Connected v1)
+CUOBJ_PROTO_RDMA_DC_V1 = 1001
 
-# Return codes
-CUOBJ_SUCCESS = 0
+# Return codes (official: cuObjErr_t)
+CU_OBJ_SUCCESS = 0
+CU_OBJ_FAIL = 1
 
-# Callback type invoked by cuObjPut/cuObjGet to deliver the RDMA token.
-#   int (*rdma_token_cb)(void *user_ctx, const char *token, size_t token_len)
-RDMA_TOKEN_CALLBACK = ctypes.CFUNCTYPE(
-    ctypes.c_int,  # return code
-    ctypes.c_void_p,  # user_ctx
-    ctypes.c_char_p,  # token data
-    ctypes.c_size_t,  # token length
-)
-
-
-class CUObjOps(ctypes.Structure):
-    """Callback operations struct passed to cuObjClient constructor.
-
-    The cuObject client library calls ``rdma_token_cb`` after it has
-    registered the memory region and generated the RDMA token.  The
-    callback is responsible for capturing the token so the caller can
-    inject it into the HTTP ``x-amz-rdma-token`` header.
-
-    .. note::
-       The exact field layout must be verified against ``cuobject.h``.
-       Additional fields (e.g. for error callbacks) may exist; they
-       should be added here as ``ctypes.c_void_p`` placeholders.
-    """
-
-    _fields_ = [
-        ("rdma_token_cb", RDMA_TOKEN_CALLBACK),
-        ("user_ctx", ctypes.c_void_p),
-    ]
+# Maximum memory registration size per call (official: 4 GiB)
+CUOBJ_MAX_MEMORY_REG_SIZE = 4 * 1024 * 1024 * 1024
 
 
 @dataclass
 class CuObjConfig:
     """Configuration for the cuObject client wrapper."""
 
-    # Explicit path to the shared library.  When *None* the wrapper
-    # falls back to ``ctypes.util.find_library("cuobject_client")``.
-    lib_path: Optional[str] = None
-
     # RDMA NIC device name (e.g. ``"mlx5_0"``).  *None* = auto-select.
     nic_device: Optional[str] = None
 
-    # cuObject transport protocol.  Currently only DC is supported.
-    proto: int = CUOBJ_PROTO_DC
+    # cuObject transport protocol.
+    # Official: CUOBJ_PROTO_RDMA_DC_V1 (1001)
+    proto: int = CUOBJ_PROTO_RDMA_DC_V1
 
 
 class CuObjClientWrapper:
-    """Python wrapper around ``libcuobject_client.so``.
+    """Python wrapper around the cuObject pybind11 C++ client.
 
     Provides:
 
     * One-time pool registration (``register_pool`` / ``deregister_pool``)
     * Per-request RDMA token generation (``prepare_put`` / ``prepare_get``)
     * RDMA reply verification (``parse_rdma_reply``)
+    * Connection status (``is_connected``)
 
     Thread safety
     -------------
-    ``prepare_put`` and ``prepare_get`` are serialised with a lock so
-    that the callback-captured token cannot be clobbered by a concurrent
-    call.  ``register_pool`` / ``deregister_pool`` are expected to be
-    called only during init / shutdown.
+    ``prepare_put`` and ``prepare_get`` are serialised with a C++ mutex
+    so that the callback-captured descriptor cannot be clobbered by a
+    concurrent call.  ``register_pool`` / ``deregister_pool`` are
+    expected to be called only during init / shutdown.
     """
 
     def __init__(self, config: Optional[CuObjConfig] = None):
         if config is None:
             config = CuObjConfig()
         self._config = config
-        self._lock = threading.Lock()
-        self._captured_token: Optional[bytes] = None
-        self._handle: Optional[ctypes.c_void_p] = None
+        self._client = None  # Set early for safe __del__
 
-        # -- Load the shared library -----------------------------------------
-        self._lib = self._load_library(config.lib_path)
+        if CuObjectClient is None:
+            raise ImportError(
+                "The lmcache.lmcache_cuobject C++ extension is not "
+                "available. Rebuild LMCache with the cuObjClient SDK "
+                "installed (CUDA Toolkit >= 13.1.1 with cuObject support)."
+            )
 
-        # -- Resolve C function symbols --------------------------------------
-        self._resolve_symbols()
-
-        # -- Set up the callback that captures RDMA tokens -------------------
-        # Must be stored as an instance attribute so the prevent GC of the
-        # prevent garbage-collection of the ctypes callback closure.
-        self._token_cb = RDMA_TOKEN_CALLBACK(self._on_rdma_token)
-
-        # -- Initialise the cuObject client ----------------------------------
-        self._ops = CUObjOps(
-            rdma_token_cb=self._token_cb,
-            user_ctx=None,
-        )
-        handle = ctypes.c_void_p()
-        rc = self._lib.cuObjClientCreate(
-            ctypes.byref(handle),
-            ctypes.byref(self._ops),
-            ctypes.c_int(config.proto),
-        )
-        if rc != CUOBJ_SUCCESS:
-            raise RuntimeError(f"cuObjClientCreate failed with error code {rc}")
-        self._handle = handle
+        # -- Create the C++ client (build-time linked cuObjClient) -----------
+        self._client = CuObjectClient(config.proto)
         logger.info(
             "cuObject client initialised "
             f"(proto={config.proto}, nic={config.nic_device})"
         )
-
-    # -- Library loading -----------------------------------------------------
-
-    @staticmethod
-    def _load_library(lib_path: Optional[str]) -> ctypes.CDLL:
-        """Load ``libcuobject_client.so`` via *ctypes*."""
-        if lib_path is None:
-            lib_path = ctypes.util.find_library("cuobject_client")
-        if lib_path is None:
-            raise ImportError(
-                "Cannot find libcuobject_client.so. "
-                "Ensure CUDA Toolkit >= 13.1.1 is installed and "
-                "LD_LIBRARY_PATH includes the cuObject library directory, "
-                "or set 'cuobject_lib_path' in extra_config."
-            )
-        try:
-            lib = ctypes.CDLL(lib_path, mode=ctypes.RTLD_GLOBAL)
-        except OSError as exc:
-            raise ImportError(
-                f"Failed to load cuObject client library from {lib_path}: {exc}"
-            ) from exc
-        logger.info(f"Loaded cuObject client library from {lib_path}")
-        return lib
-
-    def _resolve_symbols(self):
-        """Resolve and type-annotate the C API entry points.
-
-        .. note::
-           The exact signatures must be verified against ``cuobject.h``.
-           The placeholders below reflect the documented API surface.
-        """
-        lib = self._lib
-
-        # int cuObjClientCreate(void **handle, CUObjOps_t *ops, int proto)
-        lib.cuObjClientCreate.argtypes = [
-            ctypes.POINTER(ctypes.c_void_p),
-            ctypes.POINTER(CUObjOps),
-            ctypes.c_int,
-        ]
-        lib.cuObjClientCreate.restype = ctypes.c_int
-
-        # int cuObjClientDestroy(void *handle)
-        lib.cuObjClientDestroy.argtypes = [ctypes.c_void_p]
-        lib.cuObjClientDestroy.restype = ctypes.c_int
-
-        # int cuObjRegisterMemory(void *handle, void *ptr, size_t size)
-        lib.cuObjRegisterMemory.argtypes = [
-            ctypes.c_void_p,
-            ctypes.c_void_p,
-            ctypes.c_size_t,
-        ]
-        lib.cuObjRegisterMemory.restype = ctypes.c_int
-
-        # int cuObjDeregisterMemory(void *handle, void *ptr, size_t size)
-        lib.cuObjDeregisterMemory.argtypes = [
-            ctypes.c_void_p,
-            ctypes.c_void_p,
-            ctypes.c_size_t,
-        ]
-        lib.cuObjDeregisterMemory.restype = ctypes.c_int
-
-        # int cuObjPut(void *handle, void *ptr, size_t size, off_t offset)
-        lib.cuObjPut.argtypes = [
-            ctypes.c_void_p,
-            ctypes.c_void_p,
-            ctypes.c_size_t,
-            ctypes.c_int64,
-        ]
-        lib.cuObjPut.restype = ctypes.c_int
-
-        # int cuObjGet(void *handle, void *ptr, size_t size, off_t offset)
-        lib.cuObjGet.argtypes = [
-            ctypes.c_void_p,
-            ctypes.c_void_p,
-            ctypes.c_size_t,
-            ctypes.c_int64,
-        ]
-        lib.cuObjGet.restype = ctypes.c_int
-
-    # -- RDMA token callback -------------------------------------------------
-
-    def _on_rdma_token(
-        self,
-        _user_ctx: ctypes.c_void_p,
-        token_data: bytes,
-        token_len: int,
-    ) -> int:
-        """Called by the cuObject library with the generated RDMA token."""
-        self._captured_token = token_data[:token_len]
-        return CUOBJ_SUCCESS
 
     # -- Public API ----------------------------------------------------------
 
@@ -225,105 +100,99 @@ class CuObjClientWrapper:
         size of the ``MixedMemoryAllocator`` / ``PinMemoryAllocator``
         buffer.
 
+        Args:
+            ptr: Base address of the memory region.
+            size: Byte size.  Must be < 4 GiB (CUOBJ_MAX_MEMORY_REG_SIZE).
+
         Returns:
             ``(ptr, size)`` tuple that serves as the registration handle
             for ``deregister_pool``.
         """
-        rc = self._lib.cuObjRegisterMemory(
-            self._handle,
-            ctypes.c_void_p(ptr),
-            ctypes.c_size_t(size),
-        )
-        if rc != CUOBJ_SUCCESS:
-            raise RuntimeError(
-                f"cuObjRegisterMemory failed (ptr=0x{ptr:x}, size={size}): error {rc}"
-            )
+        result = self._client.register_pool(ptr, size)
         logger.info(f"Registered RDMA memory pool: ptr=0x{ptr:x}, size={size} bytes")
-        return (ptr, size)
+        return result
 
     def deregister_pool(self, handle: tuple[int, int]) -> None:
-        """Deregister a previously registered memory pool."""
+        """Deregister a previously registered memory pool.
+
+        Args:
+            handle: The ``(ptr, size)`` tuple returned by ``register_pool``.
+                    Only ptr is passed to the library (per the official API,
+                    cuMemObjPutDescriptor takes only the pointer).
+        """
         ptr, size = handle
-        rc = self._lib.cuObjDeregisterMemory(
-            self._handle,
-            ctypes.c_void_p(ptr),
-            ctypes.c_size_t(size),
-        )
-        if rc != CUOBJ_SUCCESS:
+        rc = self._client.deregister_pool(ptr)
+        if rc != CU_OBJ_SUCCESS:
             logger.warning(
-                f"cuObjDeregisterMemory returned error {rc} "
-                f"(ptr=0x{ptr:x}, size={size})"
+                f"cuMemObjPutDescriptor returned error {rc} "
+                f"(ptr=0x{ptr:x})"
             )
         else:
             logger.info(
                 f"Deregistered RDMA memory pool: ptr=0x{ptr:x}, size={size} bytes"
             )
 
-    def prepare_put(self, ptr: int, size: int, offset: int = 0) -> str:
+    def prepare_put(
+        self, ptr: int, size: int, offset: int = 0, buf_offset: int = 0
+    ) -> str:
         """Prepare an RDMA-accelerated PUT operation.
 
-        Internally calls ``cuObjPut`` which registers the sub-region
-        (within the already-registered pool) and invokes the callback
-        with the RDMA token.
+        Internally calls ``cuObjPut`` which invokes the PUT callback with
+        the RDMA descriptor.  The descriptor's size field is patched with
+        the actual payload size (matching CRT plugin behaviour).
 
         Args:
             ptr: Data pointer of the ``MemoryObj`` to upload.
             size: Byte size of the data.
-            offset: Byte offset within the object (default 0).
+            offset: Object offset (reserved, default 0).
+            buf_offset: Buffer offset from base (default 0).
 
         Returns:
             The ``x-amz-rdma-token`` header value as a string.
         """
-        with self._lock:
-            self._captured_token = None
-            rc = self._lib.cuObjPut(
-                self._handle,
-                ctypes.c_void_p(ptr),
-                ctypes.c_size_t(size),
-                ctypes.c_int64(offset),
-            )
-            if rc != CUOBJ_SUCCESS:
-                raise RuntimeError(
-                    f"cuObjPut failed (ptr=0x{ptr:x}, size={size}): error {rc}"
-                )
-            if self._captured_token is None:
-                raise RuntimeError(
-                    "cuObjPut succeeded but RDMA token callback was not invoked"
-                )
-            return self._captured_token.decode("ascii")
+        return self._client.prepare_put(ptr, size, offset, buf_offset)
 
-    def prepare_get(self, ptr: int, size: int, offset: int = 0) -> str:
+    def prepare_get(
+        self, ptr: int, size: int, offset: int = 0, buf_offset: int = 0
+    ) -> str:
         """Prepare an RDMA-accelerated GET operation.
 
-        Internally calls ``cuObjGet`` which registers the destination
-        buffer and invokes the callback with the RDMA token.
+        Internally calls ``cuObjGet`` which invokes the GET callback with
+        the RDMA descriptor.
 
         Args:
             ptr: Destination pointer where the server will
                  ``RDMA_WRITE`` data.
             size: Expected byte size of the data.
-            offset: Byte offset (default 0).
+            offset: Object offset (reserved, default 0).
+            buf_offset: Buffer offset from base (default 0).
 
         Returns:
             The ``x-amz-rdma-token`` header value as a string.
         """
-        with self._lock:
-            self._captured_token = None
-            rc = self._lib.cuObjGet(
-                self._handle,
-                ctypes.c_void_p(ptr),
-                ctypes.c_size_t(size),
-                ctypes.c_int64(offset),
-            )
-            if rc != CUOBJ_SUCCESS:
-                raise RuntimeError(
-                    f"cuObjGet failed (ptr=0x{ptr:x}, size={size}): error {rc}"
-                )
-            if self._captured_token is None:
-                raise RuntimeError(
-                    "cuObjGet succeeded but RDMA token callback was not invoked"
-                )
-            return self._captured_token.decode("ascii")
+        return self._client.prepare_get(ptr, size, offset, buf_offset)
+
+    def is_connected(self) -> bool:
+        """Check if the cuObject client is connected and ready.
+
+        Returns:
+            True if connected, False otherwise.
+        """
+        return self._client.is_connected()
+
+    def get_max_callback_size(self, ptr: int) -> int:
+        """Get the maximum callback chunk size for registered memory.
+
+        If an I/O request exceeds this size, the callback will be invoked
+        multiple times (once per chunk).
+
+        Args:
+            ptr: Start address of registered memory.
+
+        Returns:
+            Maximum callback size in bytes, or -1 on error / unavailable.
+        """
+        return self._client.get_max_callback_size(ptr)
 
     # Keywords that unambiguously indicate RDMA success.
     _SUCCESS_KEYWORDS: frozenset = frozenset(
@@ -341,13 +210,13 @@ class CuObjClientWrapper:
 
         Supported reply formats
         -----------------------
-        * **JSON object** – must contain a ``"status"`` key whose value
+        * **JSON object** -- must contain a ``"status"`` key whose value
           is one of the recognised success keywords (``ok``, ``success``,
           ``complete``, ``completed``, ``done``).  An ``"error"`` key
           with a truthy value is always treated as failure.
-        * **Numeric string** – ``"0"`` maps to ``CUOBJ_SUCCESS``;
+        * **Numeric string** -- ``"0"`` maps to ``CU_OBJ_SUCCESS``;
           any other integer is treated as an error code.
-        * **Plain keyword** – one of the recognised success / error
+        * **Plain keyword** -- one of the recognised success / error
           keywords listed above.
 
         Any unrecognised, non-empty value is logged as a warning and
@@ -365,12 +234,12 @@ class CuObjClientWrapper:
             if isinstance(data, dict):
                 return CuObjClientWrapper._parse_json_reply(data)
         except (json.JSONDecodeError, ValueError):
-            pass  # Not JSON – fall through to simpler formats.
+            pass  # Not JSON -- fall through to simpler formats.
 
         # -- 2. Numeric error code ----------------------------------------
         try:
             code = int(stripped)
-            if code == CUOBJ_SUCCESS:
+            if code == CU_OBJ_SUCCESS:
                 return True
             logger.warning(f"RDMA reply error code: {code}")
             return False
@@ -385,7 +254,7 @@ class CuObjClientWrapper:
             logger.warning(f"RDMA reply indicates failure: {reply_header}")
             return False
 
-        # -- 4. Unrecognised format – fail safe ---------------------------
+        # -- 4. Unrecognised format -- fail safe ---------------------------
         logger.warning(
             f"RDMA reply has unrecognised format, treating as failure: {reply_header!r}"
         )
@@ -420,11 +289,11 @@ class CuObjClientWrapper:
 
     def close(self) -> None:
         """Destroy the cuObject client and release RDMA resources."""
-        if self._handle is not None:
-            rc = self._lib.cuObjClientDestroy(self._handle)
-            if rc != CUOBJ_SUCCESS:
+        if self._client is not None:
+            rc = self._client.close()
+            if rc != CU_OBJ_SUCCESS:
                 logger.warning(f"cuObjClientDestroy returned error {rc}")
-            self._handle = None
+            self._client = None
             logger.info("cuObject client destroyed")
 
     def __del__(self):
