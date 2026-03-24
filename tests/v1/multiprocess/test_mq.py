@@ -65,14 +65,24 @@ def _server_process(
         shutdown_event: Event to signal server shutdown
         request_handlers: Dict mapping RequestType to handler functions
     """
+    # First Party
+    from lmcache.v1.multiprocess.protocol import HandlerType
+
     context = zmq.Context.instance()
     server = MessageQueueServer(server_url, context)
 
     # Register all handlers
+    blocking_types: list[RequestType] = []
     for request_type, handler in request_handlers.items():
         payload_classes = get_payload_classes(request_type)
         handler_type = get_handler_type(request_type)
         server.add_handler(request_type, payload_classes, handler_type, handler)
+        if handler_type == HandlerType.BLOCKING:
+            blocking_types.append(request_type)
+
+    # Assign a normal pool for all blocking handlers in tests
+    if blocking_types:
+        server.add_normal_thread_pool(blocking_types, max_workers=4)
 
     server.start()
 
@@ -524,87 +534,121 @@ def test_mq_lookup_with_different_key():
 
 
 # ==============================================================================
-# Dedicated Thread Pool Tests
+# Thread Pool Tests
 # ==============================================================================
 
 
-def test_add_dedicated_thread_pool():
+def test_add_normal_thread_pool():
     """
-    Test that add_dedicated_thread_pool reassigns handler executors
-    to a new dedicated pool.
+    Test that add_normal_thread_pool assigns handler executors.
     """
     context = zmq.Context.instance()
-    server = MessageQueueServer("tcp://127.0.0.1:15700", context, max_workers=2)
+    server = MessageQueueServer("tcp://127.0.0.1:15700", context)
 
-    # Register blocking handlers
+    add_handler_helper(
+        server, RequestType.LOOKUP, test_mq_handler_helpers.lookup_handler
+    )
+    add_handler_helper(server, RequestType.NOOP, test_mq_handler_helpers.noop_handler)
+
+    lookup_handler = server.handlers[RequestType.LOOKUP]
+    assert isinstance(lookup_handler, BlockingRequestHandler)
+    assert lookup_handler.executor is None
+
+    server.add_normal_thread_pool([RequestType.LOOKUP], max_workers=4)
+
+    assert lookup_handler.executor is not None
+    assert len(server.extra_pools) == 1
+
+    server.close()
+
+
+def test_add_affinity_thread_pool():
+    """
+    Test that add_affinity_thread_pool assigns AffinityThreadPool executors.
+    """
+    # First Party
+    from lmcache.v1.multiprocess.affinity_pool import AffinityThreadPool
+
+    context = zmq.Context.instance()
+    server = MessageQueueServer("tcp://127.0.0.1:15700", context)
+
     add_handler_helper(server, RequestType.STORE, test_mq_handler_helpers.store_handler)
     add_handler_helper(
         server, RequestType.RETRIEVE, test_mq_handler_helpers.retrieve_handler
     )
-    # Register a sync handler
-    add_handler_helper(server, RequestType.NOOP, test_mq_handler_helpers.noop_handler)
 
-    default_pool = server.thread_pool
-
-    # STORE and RETRIEVE should currently use default pool
     store_handler = server.handlers[RequestType.STORE]
     retrieve_handler = server.handlers[RequestType.RETRIEVE]
     assert isinstance(store_handler, BlockingRequestHandler)
     assert isinstance(retrieve_handler, BlockingRequestHandler)
-    assert store_handler.executor is default_pool
-    assert retrieve_handler.executor is default_pool
+    assert store_handler.executor is None
 
-    # Create dedicated pool for STORE and RETRIEVE
-    server.add_dedicated_thread_pool(
-        [RequestType.STORE, RequestType.RETRIEVE], max_workers=4
+    server.add_affinity_thread_pool(
+        [RequestType.STORE, RequestType.RETRIEVE], max_workers=2
     )
 
-    # Verify reassignment
-    assert store_handler.executor is not default_pool
-    assert retrieve_handler.executor is not default_pool
-    # Both should share the same dedicated pool
+    assert isinstance(store_handler.executor, AffinityThreadPool)
     assert store_handler.executor is retrieve_handler.executor
-    assert len(server.dedicated_pools) == 1
+    assert len(server.extra_pools) == 1
 
     server.close()
 
 
-def test_dedicated_thread_pool_error_on_sync_handler():
+def test_normal_pool_error_on_sync_handler():
     """
-    Test that add_dedicated_thread_pool raises TypeError for SYNC handlers.
+    Test that add_normal_thread_pool raises TypeError for SYNC handlers.
     """
     context = zmq.Context.instance()
-    server = MessageQueueServer("tcp://127.0.0.1:15701", context, max_workers=1)
+    server = MessageQueueServer("tcp://127.0.0.1:15701", context)
 
     add_handler_helper(server, RequestType.NOOP, test_mq_handler_helpers.noop_handler)
 
     with pytest.raises(TypeError, match="not BlockingRequestHandler"):
-        server.add_dedicated_thread_pool([RequestType.NOOP], max_workers=1)
+        server.add_normal_thread_pool([RequestType.NOOP], max_workers=1)
 
     server.close()
 
 
-def test_dedicated_thread_pool_error_on_unregistered():
+def test_affinity_pool_error_on_sync_handler():
     """
-    Test that add_dedicated_thread_pool raises ValueError for
-    unregistered request types.
+    Test that add_affinity_thread_pool raises TypeError for SYNC handlers.
     """
     context = zmq.Context.instance()
-    server = MessageQueueServer("tcp://127.0.0.1:15702", context, max_workers=1)
+    server = MessageQueueServer("tcp://127.0.0.1:15701", context)
+
+    add_handler_helper(server, RequestType.NOOP, test_mq_handler_helpers.noop_handler)
+
+    with pytest.raises(TypeError, match="not BlockingRequestHandler"):
+        server.add_affinity_thread_pool([RequestType.NOOP], max_workers=1)
+
+    server.close()
+
+
+def test_pool_error_on_unregistered():
+    """
+    Test that pool methods raise ValueError for unregistered request types.
+    """
+    context = zmq.Context.instance()
+    server = MessageQueueServer("tcp://127.0.0.1:15702", context)
 
     with pytest.raises(ValueError, match="No handler registered"):
-        server.add_dedicated_thread_pool([RequestType.STORE], max_workers=1)
+        server.add_normal_thread_pool([RequestType.STORE], max_workers=1)
+
+    with pytest.raises(ValueError, match="No handler registered"):
+        server.add_affinity_thread_pool([RequestType.STORE], max_workers=1)
 
     server.close()
 
 
-def test_multiple_dedicated_thread_pools():
+def test_multiple_pools():
     """
-    Test that multiple dedicated pools can coexist, each serving
-    different request types.
+    Test that normal and affinity pools can coexist.
     """
+    # First Party
+    from lmcache.v1.multiprocess.affinity_pool import AffinityThreadPool
+
     context = zmq.Context.instance()
-    server = MessageQueueServer("tcp://127.0.0.1:15703", context, max_workers=1)
+    server = MessageQueueServer("tcp://127.0.0.1:15703", context)
 
     add_handler_helper(server, RequestType.STORE, test_mq_handler_helpers.store_handler)
     add_handler_helper(
@@ -614,11 +658,10 @@ def test_multiple_dedicated_thread_pools():
         server, RequestType.LOOKUP, test_mq_handler_helpers.lookup_handler
     )
 
-    # Create two separate dedicated pools
-    server.add_dedicated_thread_pool([RequestType.STORE], max_workers=2)
-    server.add_dedicated_thread_pool(
-        [RequestType.RETRIEVE, RequestType.LOOKUP], max_workers=3
+    server.add_affinity_thread_pool(
+        [RequestType.STORE, RequestType.RETRIEVE], max_workers=2
     )
+    server.add_normal_thread_pool([RequestType.LOOKUP], max_workers=3)
 
     store_handler = server.handlers[RequestType.STORE]
     retrieve_handler = server.handlers[RequestType.RETRIEVE]
@@ -627,12 +670,29 @@ def test_multiple_dedicated_thread_pools():
     assert isinstance(retrieve_handler, BlockingRequestHandler)
     assert isinstance(lookup_handler, BlockingRequestHandler)
 
-    # Each group should have its own pool
-    assert store_handler.executor is not retrieve_handler.executor
-    assert retrieve_handler.executor is lookup_handler.executor
-    # Neither should be the default pool
-    assert store_handler.executor is not server.thread_pool
-    assert retrieve_handler.executor is not server.thread_pool
-    assert len(server.dedicated_pools) == 2
+    # STORE/RETRIEVE share affinity pool
+    assert isinstance(store_handler.executor, AffinityThreadPool)
+    assert store_handler.executor is retrieve_handler.executor
+    # LOOKUP uses normal pool
+    assert store_handler.executor is not lookup_handler.executor
+    assert not isinstance(lookup_handler.executor, AffinityThreadPool)
+    assert len(server.extra_pools) == 2
+
+    server.close()
+
+
+def test_start_fails_without_pool_assignment():
+    """
+    Test that start() raises RuntimeError if a blocking handler
+    has no executor assigned.
+    """
+    context = zmq.Context.instance()
+    server = MessageQueueServer("tcp://127.0.0.1:15704", context)
+
+    add_handler_helper(server, RequestType.STORE, test_mq_handler_helpers.store_handler)
+    # Don't assign any pool
+
+    with pytest.raises(RuntimeError, match="no thread pool assigned"):
+        server.start()
 
     server.close()
