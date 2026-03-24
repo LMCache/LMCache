@@ -145,32 +145,19 @@ __global__ void reshape_and_cache_back_flash_kernel(
   }
 }
 
-template <typename scalar_t, bool USE_MLA>
+template <typename scalar_t, GPUKVFormat format>
 __global__ void single_layer_kv_transfer_kernel(
-    // scalar_t* __restrict__ lmc_key_cache,    // [num_tokens,
-    // num_heads*head_size] scalar_t* __restrict__ lmc_value_cache,  //
-    // [num_tokens, num_heads*head_size]
-    scalar_t* __restrict__ lmc_key_value_cache,   // [num_tokens, 2,
-                                                  // num_heads*head_size]
-                                                  // or
-                                                  // [2, num_tokens,
-                                                  // num_heads*head_size]
-                                                  // or for MLA:
-                                                  // [num_tokens,
-                                                  // aligned_head_size]
-    scalar_t* __restrict__ vllm_key_value_cache,  // [2, num_blocks, block_size,
-                                                  // num_heads, head_size] or
-                                                  // [num_blocks, 2, block_size,
-                                                  // num_heads, head_size]
-                                                  // or for MLA:
-                                                  // [num_blocks, block_size,
-                                                  // head_size]
-
+    scalar_t* __restrict__ lmc_key_value_cache,
+    scalar_t* __restrict__ vllm_key_value_cache,
     const int64_t* __restrict__ slot_mapping,  // [num_tokens]
     const int vllm_block_key_stride_in_64bit, const int vllm_value_offset,
     const int lmc_stride, const int lmc_value_offset, const int num_heads,
     const int head_size_in_64bit, const int block_size,
-    const TransferDirection direction, const bool hnd_layout) {
+    const TransferDirection direction) {
+  constexpr bool USE_MLA = (format == GPUKVFormat::NL_X_NB_BS_HS);
+  constexpr bool HND_LAYOUT = (format == GPUKVFormat::NL_X_TWO_NB_NH_BS_HS ||
+                               format == GPUKVFormat::NL_X_NB_TWO_NH_BS_HS);
+
   const int64_t token_idx = blockIdx.x;
   const int64_t slot_idx = slot_mapping[token_idx];
 
@@ -187,21 +174,24 @@ __global__ void single_layer_kv_transfer_kernel(
 
     const int head_idx = i / head_size_in_64bit;
     const int head_offset = i % head_size_in_64bit;
-    // NHD layout: [..., block_size, num_heads, head_size]
-    //   offset = block_offset * NH * HS + head_idx * HS + head_offset
-    // HND layout: [..., num_heads, block_size, head_size]
-    //   offset = head_idx * BS * HS + block_offset * HS + head_offset
-    const int64_t vllm_key_idx =
-        block_idx * vllm_block_key_stride_in_64bit +
-        (hnd_layout ? (head_idx * block_size * head_size_in_64bit +
-                       block_offset * head_size_in_64bit + head_offset)
-                    : (block_offset * num_heads * head_size_in_64bit +
-                       head_idx * head_size_in_64bit + head_offset));
+
+    int64_t vllm_key_idx;
+    if constexpr (HND_LAYOUT) {
+      // HND layout: [..., num_heads, block_size, head_size]
+      vllm_key_idx = block_idx * vllm_block_key_stride_in_64bit +
+                     head_idx * block_size * head_size_in_64bit +
+                     block_offset * head_size_in_64bit + head_offset;
+    } else {
+      // NHD layout: [..., block_size, num_heads, head_size]
+      // (also correct for MLA where num_heads==1)
+      vllm_key_idx = block_idx * vllm_block_key_stride_in_64bit +
+                     block_offset * num_heads * head_size_in_64bit +
+                     head_idx * head_size_in_64bit + head_offset;
+    }
 
     if (direction == TransferDirection::D2H) {
       // GPU to LMCache
       lmc_key_value_cache[lmc_key_idx] = vllm_key_value_cache[vllm_key_idx];
-      // For non-MLA, also copy the value component
       if constexpr (!USE_MLA) {
         const int64_t lmc_value_idx = lmc_key_idx + lmc_value_offset;
         const int64_t vllm_value_idx = vllm_key_idx + vllm_value_offset;
@@ -211,7 +201,6 @@ __global__ void single_layer_kv_transfer_kernel(
     } else {
       // LMCache to GPU
       vllm_key_value_cache[vllm_key_idx] = lmc_key_value_cache[lmc_key_idx];
-      // For non-MLA, also copy the value component
       if constexpr (!USE_MLA) {
         const int64_t lmc_value_idx = lmc_key_idx + lmc_value_offset;
         const int64_t vllm_value_idx = vllm_key_idx + vllm_value_offset;
@@ -805,9 +794,9 @@ void single_layer_kv_transfer(
     head_size_in_64bit = vllm_key_value_cache.size(4) / elements_per_entry;
   } else {
     // NHD format: [..., block_size, num_heads, head_size]
+    block_size = vllm_key_value_cache.size(2);
     num_heads = vllm_key_value_cache.size(3);
     head_size_in_64bit = vllm_key_value_cache.size(4) / elements_per_entry;
-    block_size = vllm_key_value_cache.size(2);
   }
 
   lmc::check_block_size(gpu_kv_format, block_size);
@@ -854,22 +843,33 @@ void single_layer_kv_transfer(
       device_of(vllm_key_value_cache));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
-  // Dispatch to the appropriate template specialization based on use_mla
-  if (use_mla) {
-    lmc::single_layer_kv_transfer_kernel<int64_t, true>
-        <<<grid, block, 0, stream>>>(
-            lmc_key_value_cache_ptr, vllm_key_value_cache_ptr, slot_mapping_ptr,
-            vllm_block_key_stride_in_64bit, vllm_value_offset, lmc_stride,
-            lmc_value_offset, num_heads, head_size_in_64bit, block_size,
-            direction, hnd_layout);
-  } else {
-    lmc::single_layer_kv_transfer_kernel<int64_t, false>
-        <<<grid, block, 0, stream>>>(
-            lmc_key_value_cache_ptr, vllm_key_value_cache_ptr, slot_mapping_ptr,
-            vllm_block_key_stride_in_64bit, vllm_value_offset, lmc_stride,
-            lmc_value_offset, num_heads, head_size_in_64bit, block_size,
-            direction, hnd_layout);
+  // Dispatch to the appropriate template specialization based on GPUKVFormat
+#define LAUNCH_SINGLE_LAYER_KERNEL(FORMAT)                                     \
+  lmc::single_layer_kv_transfer_kernel<int64_t, FORMAT>                        \
+      <<<grid, block, 0, stream>>>(                                            \
+          lmc_key_value_cache_ptr, vllm_key_value_cache_ptr, slot_mapping_ptr, \
+          vllm_block_key_stride_in_64bit, vllm_value_offset, lmc_stride,       \
+          lmc_value_offset, num_heads, head_size_in_64bit, block_size,         \
+          direction);                                                          \
+  break;
+
+  switch (gpu_kv_format) {
+    case GPUKVFormat::NL_X_NB_BS_HS:
+      LAUNCH_SINGLE_LAYER_KERNEL(GPUKVFormat::NL_X_NB_BS_HS)
+    case GPUKVFormat::NL_X_TWO_NB_BS_NH_HS:
+      LAUNCH_SINGLE_LAYER_KERNEL(GPUKVFormat::NL_X_TWO_NB_BS_NH_HS)
+    case GPUKVFormat::NL_X_NB_TWO_BS_NH_HS:
+      LAUNCH_SINGLE_LAYER_KERNEL(GPUKVFormat::NL_X_NB_TWO_BS_NH_HS)
+    case GPUKVFormat::NL_X_TWO_NB_NH_BS_HS:
+      LAUNCH_SINGLE_LAYER_KERNEL(GPUKVFormat::NL_X_TWO_NB_NH_BS_HS)
+    case GPUKVFormat::NL_X_NB_TWO_NH_BS_HS:
+      LAUNCH_SINGLE_LAYER_KERNEL(GPUKVFormat::NL_X_NB_TWO_NH_BS_HS)
+    default:
+      TORCH_CHECK(false,
+                  "Unsupported GPUKVFormat for single_layer_kv_transfer: ",
+                  static_cast<int>(gpu_kv_format));
   }
+#undef LAUNCH_SINGLE_LAYER_KERNEL
 }
 
 void load_and_reshape_flash(

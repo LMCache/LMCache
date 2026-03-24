@@ -60,6 +60,14 @@ def permute_to_contiguous(tensor: torch.Tensor) -> torch.Tensor:
     Assumption: the tensor is only non-contiguous because of a previous
     permutation.  Raises if this assumption is not met.
 
+    The only known case is HND: vLLM allocates physically as HND
+    (e.g. [2, NB, NH, BS, HS]) but exposes an NHD logical view via
+    permute/transpose.  This function recovers the underlying HND
+    physical shape so that ``discover_gpu_kv_format`` (with the
+    ``kv_layout="HND"`` hint) sees the true memory layout and selects
+    the correct HND format enum.  The reverse — physically NHD but
+    logically permuted to HND — does not occur in practice.
+
     Returns the tensor unchanged if already contiguous.
     """
     if tensor.is_contiguous():
