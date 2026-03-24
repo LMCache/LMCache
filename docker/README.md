@@ -93,6 +93,7 @@ docker run --runtime nvidia --gpus all -it \
   -m lmcache.v1.multiprocess.server \
   --cpu-buffer-size 60 \
   --max-workers 4 \
+  --max-gpu-workers 2 \
   --port 6555
 ```
 

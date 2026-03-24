@@ -9,7 +9,6 @@ This module provides GPU-side KV cache management functionality, including:
 
 # Standard
 import array
-import threading
 
 # Third Party
 import cupy
@@ -20,9 +19,12 @@ from lmcache.logging import init_logger
 from lmcache.utils import EngineType, _lmcache_nvtx_annotate
 from lmcache.v1.gpu_connector.utils import (
     discover_gpu_kv_format,
+    get_attention_backend,
     get_block_size,
+    get_concrete_gpu_kv_shape,
     get_dtype,
     get_head_size,
+    get_gpu_kv_shape_description,
     get_hidden_dim_size,
     get_num_blocks,
     get_num_heads,
@@ -130,12 +132,6 @@ class GPUCacheContext:
             self.high_priority_cuda_stream_.cuda_stream, self.device_.index
         )
 
-        # Per-device lock to serialise GPU↔CPU data transfers
-        # on the same device without blocking transfers on other
-        # devices.  Replaces the old global ``MPCacheEngine.lock``
-        # to avoid deadlocks with the implicit CUDA driver lock.
-        self.transfer_lock = threading.Lock()
-
         # Extra initialization
         self.cupy_stream_.launch_host_func(
             lambda logger: logger.info(
@@ -228,6 +224,24 @@ class GPUCacheContext:
     @property
     def shape_desc(self) -> "lmc_ops.PageBufferShapeDesc":
         return self.shape_desc_
+    def gpu_kv_format_name(self) -> str:
+        """Returns the GPU KV format enum name (e.g. ``'NL_X_TWO_NB_BS_NH_HS'``)."""
+        return self.gpu_kv_format_.name
+
+    @property
+    def gpu_kv_shape(self) -> str:
+        """Returns a human-readable shape description of the GPU KV cache layout."""
+        return get_gpu_kv_shape_description(self.gpu_kv_format_)
+
+    @property
+    def attention_backend(self) -> str:
+        """Returns the attention backend name."""
+        return get_attention_backend(self.gpu_kv_format_)
+
+    @property
+    def concrete_gpu_kv_shape(self) -> str:
+        """Returns the GPU KV shape with actual numeric values substituted."""
+        return get_concrete_gpu_kv_shape(self.kv_caches_, self.gpu_kv_format_)
 
     def get_tmp_gpu_buffer(self, num_tokens: int) -> torch.Tensor:
         """
