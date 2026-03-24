@@ -336,11 +336,11 @@ class LocalDiskBackend(StorageBackendInterface):
                 all_evict_keys.extend(evict_keys)
             if evict_success:
                 self.current_cache_size += required_size
+                self.cache_policy.update_on_put(key)
 
         if not evict_success:
             return None
 
-        self.cache_policy.update_on_put(key)
         memory_obj.ref_count_up()
 
         asyncio.run_coroutine_threadsafe(
