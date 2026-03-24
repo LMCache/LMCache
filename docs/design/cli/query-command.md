@@ -67,23 +67,22 @@ Send one inference request to an engine HTTP endpoint and report token and laten
 ```bash
 # Single inference query
 $ lmcache query engine --url http://localhost:8008/v1 \
-  --prompt "{ctx} {ffmpeg}   What is the example usage of ffmpeg,ctx?" \
-  --corpus ctx=/home/weishu/lmc/test-query/man-bash.txt \
+  --prompt "{ctx} What is the example usage of lmcache?" \
+  --corpus ctx=LMCache/lmcache/cli/documents/lmcache.txt  \
   --format terminal  --max-tokens 128
    
-========== Query Engine Result ==========
-Prompt tokens:                        234
-  Corpus 'ctx':                       193
-  Corpus 'ffmpeg':                     28
-  Query:                               13
-Output tokens:                        128
-Model:                  facebook/opt-125m
------------- Latency Metrics ------------
-TTFT (ms):                           8.53
-TPOT (ms/token):                     1.14
-Total latency (ms):                154.84
-Throughput (tokens/s):             874.88
-=========================================
+================= Query Engine =================
+Model:                         facebook/opt-125m
+Prompt documents ctx:                        608
+Prompt query:                                  9
+--------------- Latency Metrics ----------------
+Input tokens:                             618.00
+Output tokens:                              9.00
+TTFT (ms):                                 26.88
+TPOT (ms/token):                            0.91
+Total latency (ms):                        35.05
+Throughput (tokens/s):                   1100.64
+================================================
 ```
 
 #### Proposed flags besides native engine query flags
@@ -168,15 +167,17 @@ per-instance HTTP server or the controller HTTP server.
 ## Implementation
 
 - **Single `QueryCommand`** (`BaseCommand` subclass) with second-level
-  subparsers (`engine`, `kvcache`), implemented in
-  `lmcache/cli/commands/query.py`.
-- **Shared metrics integration:** always construct output via
-  `self.create_metrics(title, args, width=48)` to honor `--format` and `--output`.
-- **Transport split by target:**
-  - `engine` path uses HTTP client helper.
-  - `kvcache` path uses HTTP client helper.
-- **Error handling:** raise command errors with concise messages; dispatcher prints
-  to stderr and returns exit code `1`.
+  subparsers (`engine`, `kvcache`) in `lmcache/cli/commands/query.py`.
+- **`query engine`:** `PromptBuilder` (`lmcache/cli/prompt.py`) expands `{name}`
+  placeholders from `--documents`; top-level metrics include model plus per-slot
+  token estimates (e.g. prompt documents, prompt query). `Request`
+  (`lmcache/cli/request.py`) streams an OpenAI-compatible `/v1/chat/completions`
+  or `/v1/completions` request; **Latency Metrics** repeats server usage (labeled
+  **Input tokens**, not a duplicate client-side total).
+- **`query kvcache`:** stub; no handler yet.
+- **Errors:** `query_engine` catches `RuntimeError` / `ValueError`, prints the
+  message to stderr, exits `1`; unknown `query_target` prints to stderr and exits
+  `1`.
 
 ---
 

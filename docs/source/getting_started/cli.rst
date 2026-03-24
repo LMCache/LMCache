@@ -199,27 +199,25 @@ The ``query engine`` subcommand  sends a single request to the engine API and re
 
 .. code-block:: bash
 
-   lmcache query engine --url http://localhost:8000/v1 \
-  --prompt "{ctx}  What is the example usage of ctx?" \
-  --corpus ctx=path_to_file \
-  --max-tokens 128
+  lmcache query engine --url http://localhost:8008/v1 \
+    --prompt "{ctx} What is the example usage of lmcache?" \
+    --corpus ctx=LMCache/lmcache/cli/documents/lmcache.txt  \
+    --format terminal  --max-tokens 128
+    
+  ================= Query Engine =================
+  Model:                         facebook/opt-125m
+  Prompt documents ctx:                        608
+  Prompt query:                                  9
+  --------------- Latency Metrics ----------------
+  Input tokens:                             618.00
+  Output tokens:                              9.00
+  TTFT (ms):                                 26.88
+  TPOT (ms/token):                            0.91
+  Total latency (ms):                        35.05
+  Throughput (tokens/s):                   1100.64
+  ================================================
 
-.. code-block:: text
-
-    ========== Query Engine Result ==========
-    Prompt tokens:                         38
-      Corpus 'ctx':                     28
-      Query:                               10
-    Output tokens:                        105
-    Model:                  facebook/opt-125m
-    ------------ Latency Metrics ------------
-    TTFT (ms):                          10.10
-    TPOT (ms/token):                     1.34
-    Total latency (ms):                149.46
-    Throughput (tokens/s):             702.55
-    =========================================
-
- 
+  
 
 Metrics Output
 --------------

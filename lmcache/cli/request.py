@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""HTTP request helpers for ``lmcache query``."""
+"""HTTP request for VLLM Serving Engine."""
 
 # Standard
 from typing import Any, Optional
@@ -10,6 +10,17 @@ import urllib.error
 import urllib.request
 
 _MAX_ERR = 65536
+MetricValue = tuple[str, Any]
+MetricMap = dict[str, MetricValue]
+_METRIC_NAMES = {
+    "prompt_tokens": "Input tokens",
+    "output_tokens": "Output tokens",
+    "ttft_ms": "TTFT (ms)",
+    "tpot_ms_per_token": "TPOT (ms/token)",
+    "total_latency_ms": "Total latency (ms)",
+    "throughput_tokens_per_s": "Throughput (tokens/s)",
+    "model": "Model",
+}
 
 
 def _clip(text: str, limit: int = _MAX_ERR) -> str:
@@ -92,20 +103,6 @@ def _read_json(url: str, timeout: float) -> dict[str, Any]:
     if not isinstance(obj, dict):
         raise RuntimeError(f"GET {url}: expected a JSON object")
     return obj
-
-
-def first_model_id(base: str, timeout: float) -> str:
-    """Return the first model ID from ``GET /v1/models``."""
-    obj = _read_json(_api_url(base, "models"), timeout)
-    data = obj.get("data")
-    if not isinstance(data, list) or not data:
-        raise RuntimeError(
-            "GET /v1/models returned no models; pass --model explicitly."
-        )
-    first = data[0]
-    if not isinstance(first, dict) or "id" not in first:
-        raise RuntimeError("GET /v1/models: first entry missing 'id'.")
-    return str(first["id"])
 
 
 def _sse_piece(obj: dict[str, Any], chat: bool) -> str:
@@ -225,24 +222,6 @@ def _stream(
     }
 
 
-def _query_once(
-    base: str, model: str, prompt: str, max_tokens: int, timeout: float, *, chat: bool
-) -> dict[str, Any]:
-    path = "chat/completions" if chat else "completions"
-    body = (
-        {
-            "model": model,
-            "messages": [{"role": "user", "content": prompt}],
-            "max_tokens": max_tokens,
-        }
-        if chat
-        else {"model": model, "prompt": prompt, "max_tokens": max_tokens}
-    )
-    return _stream(
-        _api_url(base, path), body, timeout, chat=chat, max_tokens=max_tokens
-    )
-
-
 def _missing_chat_template(exc: BaseException) -> bool:
     msg = str(exc).lower()
     return any(
@@ -270,37 +249,108 @@ def _weak_completions_error(msg: str) -> bool:
     )
 
 
-def query_with_fallback(
-    base: str,
-    model: str,
-    prompt: str,
-    max_tokens: int,
-    timeout: float,
-    *,
-    completions_only: bool,
-    chat_first: bool,
-) -> dict[str, Any]:
-    """Send one query and fallback between completions/chat endpoints."""
-    if completions_only:
-        return _query_once(base, model, prompt, max_tokens, timeout, chat=False)
-    try:
-        return _query_once(base, model, prompt, max_tokens, timeout, chat=chat_first)
-    except RuntimeError as first_err:
-        if chat_first:
-            if not _missing_chat_template(first_err):
-                raise
-            _info("chat API failed (no chat template); retrying with /v1/completions")
-            return _query_once(base, model, prompt, max_tokens, timeout, chat=False)
-        _info("/v1/completions failed; retrying with /v1/chat/completions")
+class Request:
+    """Build and send one query request against an OpenAI-compatible endpoint."""
+
+    def __init__(
+        self,
+        base: str,
+        model: Optional[str],
+        max_tokens: int,
+        timeout: float,
+        *,
+        completions_only: bool = False,
+        chat_first: bool = False,
+    ) -> None:
+        self._base = base
+        self._model = model
+        self._max_tokens = max_tokens
+        self._timeout = timeout
+        self._completions_only = completions_only
+        self._chat_first = chat_first
+
+    def build_request(self, prompt: str) -> dict[str, Any]:
+        """Build request payload and metadata for the provided prompt."""
+        model = self._model or self._first_model_id()
+        return {
+            "base": self._base,
+            "model": model,
+            "prompt": prompt,
+            "max_tokens": self._max_tokens,
+            "timeout": self._timeout,
+            "completions_only": self._completions_only,
+            "chat_first": self._chat_first,
+        }
+
+    def send_request(self, prompt: str) -> dict[str, Any] | MetricMap:
+        """Send request and return stats."""
+        request_data = self.build_request(prompt)
+        stats = {
+            "model": request_data["model"],
+            **self._query_with_fallback(request_data),
+        }
+        return {key: (_METRIC_NAMES.get(key, key), stats[key]) for key in stats}
+
+    def _first_model_id(self) -> str:
+        """Return the first model ID from ``GET /v1/models``."""
+        obj = _read_json(_api_url(self._base, "models"), self._timeout)
+        data = obj.get("data")
+        if not isinstance(data, list) or not data:
+            raise RuntimeError(
+                "GET /v1/models returned no models; pass --model explicitly."
+            )
+        first = data[0]
+        if not isinstance(first, dict) or "id" not in first:
+            raise RuntimeError("GET /v1/models: first entry missing 'id'.")
+        return str(first["id"])
+
+    def _query_with_fallback(self, request_data: dict[str, Any]) -> dict[str, Any]:
+        """Send one query and fallback between completions/chat endpoints."""
+        if request_data["completions_only"]:
+            return self._query(request_data, chat=False)
         try:
-            return _query_once(base, model, prompt, max_tokens, timeout, chat=True)
-        except RuntimeError as second_err:
-            if _weak_completions_error(str(first_err)) and _missing_chat_template(
-                second_err
-            ):
+            return self._query(request_data, chat=request_data["chat_first"])
+        except RuntimeError as first_err:
+            if request_data["chat_first"]:
+                if not _missing_chat_template(first_err):
+                    raise
                 _info(
-                    "base / completion-only models: try `--completions` or an instruct "
-                    "model with a chat template."
+                    "chat API failed (no chat template); retrying with /v1/completions"
                 )
-                raise second_err
-            raise RuntimeError(f"{first_err}; then {second_err}") from second_err
+                return self._query(request_data, chat=False)
+            _info("/v1/completions failed; retrying with /v1/chat/completions")
+            try:
+                return self._query(request_data, chat=True)
+            except RuntimeError as second_err:
+                if _weak_completions_error(str(first_err)) and _missing_chat_template(
+                    second_err
+                ):
+                    _info(
+                        "base / completion-only models: try `--completions` or "
+                        "an instruct model with a chat template."
+                    )
+                    raise second_err
+                raise RuntimeError(f"{first_err}; then {second_err}") from second_err
+
+    def _query(self, request_data: dict[str, Any], *, chat: bool) -> dict[str, Any]:
+        path = "chat/completions" if chat else "completions"
+        model = request_data["model"]
+        prompt = request_data["prompt"]
+        max_tokens = request_data["max_tokens"]
+        timeout = request_data["timeout"]
+        body = (
+            {
+                "model": model,
+                "messages": [{"role": "user", "content": prompt}],
+                "max_tokens": max_tokens,
+            }
+            if chat
+            else {"model": model, "prompt": prompt, "max_tokens": max_tokens}
+        )
+        return _stream(
+            _api_url(request_data["base"], path),
+            body,
+            timeout,
+            chat=chat,
+            max_tokens=max_tokens,
+        )

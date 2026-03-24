@@ -12,6 +12,21 @@ import pytest
 from lmcache.cli.commands.query import QueryCommand
 
 
+def _engine_metric_map(
+    model_id: str = "facebook/opt-125m",
+) -> dict[str, tuple[str, object]]:
+    """Shape returned by :meth:`lmcache.cli.request.Request.send_request`."""
+    return {
+        "model": ("Model", model_id),
+        "prompt_tokens": ("Input tokens", 10),
+        "output_tokens": ("Output tokens", 5),
+        "ttft_ms": ("TTFT (ms)", 1.0),
+        "tpot_ms_per_token": ("TPOT (ms/token)", 2.0),
+        "total_latency_ms": ("Total latency (ms)", 100.0),
+        "throughput_tokens_per_s": ("Throughput (tokens/s)", 50.0),
+    }
+
+
 @pytest.fixture
 def cmd() -> QueryCommand:
     return QueryCommand()
@@ -64,7 +79,7 @@ class TestQueryCommandArguments:
                 "64",
                 "--timeout",
                 "5",
-                "--corpus",
+                "--documents",
                 "a=/tmp/x",
                 "--completions",
                 "--chat-first",
@@ -79,7 +94,7 @@ class TestQueryCommandArguments:
         assert args.model == "m"
         assert args.max_tokens == 64
         assert args.timeout == 5.0
-        assert args.corpus == ["a=/tmp/x"]
+        assert args.documents == ["a=/tmp/x"]
         assert args.completions is True
         assert args.chat_first is True
         assert args.format == "json"
@@ -100,7 +115,7 @@ class TestQueryCommandArguments:
         assert args.model is None
         assert args.max_tokens == 128
         assert args.timeout == 30.0
-        assert args.corpus == []
+        assert args.documents == []
         assert args.completions is False
         assert args.chat_first is False
         assert args.format is None
@@ -126,23 +141,19 @@ class TestQueryCommandExecute:
         )
         assert args.func == cmd.execute
 
-    @patch("lmcache.cli.commands.query._query_with_fallback")
-    def test_execute_calls_query_with_fallback(
+    @patch("lmcache.cli.commands.query.Request")
+    def test_execute_calls_request_send_request(
         self,
-        mock_qwf: MagicMock,
+        mock_request_cls: MagicMock,
         cmd: QueryCommand,
         parser: argparse.ArgumentParser,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
-        """``execute()`` should call the streaming query helper with parsed args."""
-        mock_qwf.return_value = {
-            "prompt_tokens": 10,
-            "output_tokens": 5,
-            "ttft_ms": 1.0,
-            "tpot_ms_per_token": 2.0,
-            "total_latency_ms": 100.0,
-            "throughput_tokens_per_s": 50.0,
-        }
+        """query_engine should call Request.send_request with the expanded prompt."""
+        mock_instance = MagicMock()
+        mock_instance.send_request.return_value = _engine_metric_map()
+        mock_request_cls.return_value = mock_instance
+
         args = parser.parse_args(
             [
                 "query",
@@ -157,33 +168,37 @@ class TestQueryCommandExecute:
         )
         cmd.execute(args)
 
-        mock_qwf.assert_called_once()
-        call_kw = mock_qwf.call_args.kwargs
-        assert call_kw["completions_only"] is False
-        assert call_kw["chat_first"] is False
+        mock_request_cls.assert_called_once_with(
+            base="http://localhost:8000/v1",
+            model="facebook/opt-125m",
+            max_tokens=128,
+            timeout=30.0,
+            completions_only=False,
+            chat_first=False,
+        )
+        mock_instance.send_request.assert_called_once_with("hello")
 
         out = capsys.readouterr().out
-        assert "Query Engine Result" in out
+        assert "Query Engine" in out
         assert "facebook/opt-125m" in out
+        assert "Input tokens" in out
+        assert "Prompt tokens" not in out
 
-    @patch("lmcache.cli.commands.query._query_with_fallback")
-    @patch("lmcache.cli.commands.query._first_model_id", return_value="listed-model")
-    def test_execute_resolves_model_when_omitted(
+    @patch("lmcache.cli.commands.query.Request")
+    def test_execute_uses_engine_model_when_cli_model_omitted(
         self,
-        mock_first: MagicMock,
-        mock_qwf: MagicMock,
+        mock_request_cls: MagicMock,
         cmd: QueryCommand,
         parser: argparse.ArgumentParser,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
-        mock_qwf.return_value = {
-            "prompt_tokens": 1,
-            "output_tokens": 1,
-            "ttft_ms": 1.0,
-            "tpot_ms_per_token": 1.0,
-            "total_latency_ms": 10.0,
-            "throughput_tokens_per_s": 10.0,
-        }
+        """With no ``--model``, the report uses the model id from engine stats."""
+        mock_instance = MagicMock()
+        mock_instance.send_request.return_value = _engine_metric_map(
+            model_id="listed-model"
+        )
+        mock_request_cls.return_value = mock_instance
+
         args = parser.parse_args(
             [
                 "query",
@@ -195,18 +210,15 @@ class TestQueryCommandExecute:
             ],
         )
         cmd.execute(args)
-        mock_first.assert_called_once()
         assert "listed-model" in capsys.readouterr().out
 
-    @patch("lmcache.cli.commands.query._die")
     def test_execute_invalid_prompt_exits(
         self,
-        mock_die: MagicMock,
         cmd: QueryCommand,
         parser: argparse.ArgumentParser,
+        capsys: pytest.CaptureFixture[str],
     ) -> None:
-        """Invalid ``--prompt`` placeholders call :func:`_die` (exits the process)."""
-        mock_die.side_effect = SystemExit(1)
+        """Unknown ``{placeholder}`` without ``--documents`` raises and exits."""
         args = parser.parse_args(
             [
                 "query",
@@ -222,5 +234,6 @@ class TestQueryCommandExecute:
         with pytest.raises(SystemExit) as exc_info:
             cmd.execute(args)
         assert exc_info.value.code == 1
-        mock_die.assert_called_once()
-        assert "Unknown corpus" in mock_die.call_args[0][0]
+        err = capsys.readouterr().err
+        assert "Unknown documents" in err
+        assert "unknown_corpus" in err
