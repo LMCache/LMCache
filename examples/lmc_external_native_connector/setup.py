@@ -5,7 +5,8 @@ Build script for the example native connector plugin.
 Compiles the C++ pybind11 extension that implements
 ExampleFSConnector and ExampleMemoryConnector.  The
 LMCache connector_base.h headers are resolved from the
-installed lmcache package's csrc directory.
+LMCache source tree, assuming this example is located
+within the repository.
 
 NOTE: The C++ extension requires Linux (eventfd).  On
 other platforms the extension is skipped and only the
