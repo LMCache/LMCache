@@ -199,9 +199,9 @@ The ``query engine`` subcommand  sends a single request to the engine API and re
 
 .. code-block:: bash
 
-  lmcache query engine --url http://localhost:8008/v1 \
+  lmcache query engine --url http://localhost:8000/v1 \
     --prompt "{ctx} What is the example usage of lmcache?" \
-    --corpus ctx=LMCache/lmcache/cli/documents/lmcache.txt  \
+    --documents ctx=LMCache/lmcache/cli/documents/lmcache.txt  \
     --format terminal  --max-tokens 128
     
   ================= Query Engine =================
