@@ -71,6 +71,19 @@ def CreateGPUConnector(
         torch_dev.set_device(local_worker_id)
         device = torch.device(f"{dev_name}:{local_worker_id}")
 
+        if dev_name == "xpu":
+            # First Party
+            from lmcache.v1.gpu_connector.xpu_connectors import (
+                VLLMPagedMemLayerwiseXPUConnector,
+                VLLMPagedMemXPUConnectorV2,
+            )
+
+            if config.use_layerwise:
+                return VLLMPagedMemLayerwiseXPUConnector.from_metadata(
+                    metadata, use_xpu=use_gpu, device=device
+                )
+            return VLLMPagedMemXPUConnectorV2.from_metadata(metadata, use_gpu, device)
+
         if config.use_layerwise:
             if config.enable_blending:
                 return VLLMBufferLayerwiseGPUConnector.from_metadata(
@@ -81,7 +94,7 @@ def CreateGPUConnector(
                     metadata, use_gpu, device
                 )
 
-        if dev_name == "cuda":
+        elif dev_name == "cuda":
             if config.use_gpu_connector_v3:
                 return VLLMPagedMemGPUConnectorV3.from_metadata(
                     metadata, use_gpu, device
@@ -90,13 +103,7 @@ def CreateGPUConnector(
                 return VLLMPagedMemGPUConnectorV2.from_metadata(
                     metadata, use_gpu, device
                 )
-        elif dev_name == "xpu":
-            # First Party
-            from lmcache.v1.gpu_connector.xpu_connectors import (
-                VLLMPagedMemXPUConnectorV2,
-            )
 
-            return VLLMPagedMemXPUConnectorV2.from_metadata(metadata, use_gpu, device)
         elif dev_name == "hpu":
             # First Party
             from lmcache.v1.gpu_connector.hpu_connector import (

@@ -304,7 +304,7 @@ lmcache/cli/
 | Phase | Scope |
 |-------|-------|
 | **0** | CLI framework (explicit registration, `Metrics`), `mock` example command, entry point — see [framework-and-metrics.md](framework-and-metrics.md) |
-| **1** | `server`, `ping kvcache`, `kvcache clear`, `kvcache end-session`, `describe kvcache` |
+| **1** | **`server`** (done), `ping kvcache`, `kvcache clear`, `kvcache end-session`, `describe kvcache` |
 | **2** | `ping engine`, `query engine`, `query kvcache`, `bench engine`, `bench kvcache`, `describe engine`, corpora |
 | **3** | `kvcache evict` (future) |
 

@@ -364,7 +364,11 @@ class BlendEngineV2(MPCacheEngine):
         for group in groups:
             chunk_hashes = [r.hash for r in group]
             obj_keys = ipc_key_to_object_keys(key, chunk_hashes)
-            handle = self.storage_manager.submit_prefetch_task(obj_keys, layout_desc)
+            handle = self.storage_manager.submit_prefetch_task(
+                obj_keys,
+                layout_desc,
+                external_request_id=key.request_id,
+            )
             prefetch_handles.append(handle)
 
             logger.debug(

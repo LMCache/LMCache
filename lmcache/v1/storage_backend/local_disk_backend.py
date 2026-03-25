@@ -429,15 +429,24 @@ class LocalDiskBackend(StorageBackendInterface):
             assert dtype is not None
             assert shape is not None
 
+            # busy_loop=False prevents spinning on the event loop thread;
+            # if staging memory is exhausted the caller will get a logged
+            # error rather than a silent deadlock.
             memory_obj = self.local_cpu_backend.allocate(
                 shape,
                 dtype,
                 fmt,
+                busy_loop=False,
             )
 
-            assert memory_obj is not None, (
-                "Memory allocation failed during async disk load."
-            )
+            if memory_obj is None:
+                logger.error(
+                    "Memory allocation failed during async disk load for key %s. "
+                    "CPU staging pool may be exhausted (unpin() not called after "
+                    "a previous retrieve). Returning partial results.",
+                    key,
+                )
+                return mem_objs
 
             self.dict[key].pin()
 

@@ -119,7 +119,8 @@ def _make_engine_with_job(
     engine._prefetch_job_lock = threading.Lock()
 
     handle = PrefetchHandle(
-        request_id=0,
+        prefetch_request_id=0,
+        external_request_id="req-0",
         l1_prefix_hit_count=0,
         total_requested_keys=10,
         submit_time=time.monotonic(),
