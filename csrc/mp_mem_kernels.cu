@@ -19,6 +19,9 @@ namespace {
  * [2, L, 256, NH * HS], where 256 means that 256 tokens
  */
 
+/**
+ * Calculate the offset for the current block in the paged buffer
+ */
 template <typename ScalarType, GPUKVFormat format>
 __device__ inline size_t calculate_engine_global_offset(
     const int k_or_v, const int engine_block_idx, const int layer_idx,
@@ -50,6 +53,10 @@ __device__ inline size_t calculate_engine_global_offset(
   }
 }
 
+/**
+ * Calculate the offset for the current token against the start
+ * of the block in the paged buffer.
+ */
 template <typename ScalarType, GPUKVFormat format>
 __device__ inline size_t calculate_engine_local_offset(
     const int token_offset, const int head_idx,
@@ -60,21 +67,29 @@ __device__ inline size_t calculate_engine_local_offset(
   return head_idx * scalars_per_head + token_offset * scalars_per_token;
 }
 
+/**
+ * Calculate the global offset for the current `block` in the LMCache object.
+ * The `block` here is the memory region corresponding to a thread-block.
+ */
 template <typename ScalarType, GPUKVFormat format>
 __device__ inline size_t calculate_lmcache_global_offset(
     const int k_or_v,
     const int
-        token_offset_in_lmcache_block,  // 0~255 if LMCache block size is 256
+        token_offset_in_lmcache_object,  // 0~255 if LMCache chunk size is 256
     const int layer_idx,
     const int lmcache_chunk_size,  // e.g., 256
     const PageBufferShapeDesc shape_desc) {
   size_t scalars_per_token = shape_desc.scalars_per_token<ScalarType>();
   // LMCache is using 2LTD all the times
-  return token_offset_in_lmcache_block * scalars_per_token +
+  return token_offset_in_lmcache_object * scalars_per_token +
          layer_idx * lmcache_chunk_size * scalars_per_token +
          k_or_v * shape_desc.nl * lmcache_chunk_size * scalars_per_token;
 }
 
+/**
+ * Calculate the local offset for the current token against the start of the
+ * block in the LMCache object.
+ */
 template <typename ScalarType, GPUKVFormat format>
 __device__ inline size_t calculate_lmcache_local_offset(
     const int token_offset, const int head_idx,
