@@ -13,7 +13,6 @@ export VLLM_BASELINE_CONTAINER_NAME="vllm-baseline-test-$$"
 export LMCACHE_PORT="${LMCACHE_PORT:-6555}"
 export VLLM_PORT="${VLLM_PORT:-8000}"
 export VLLM_BASELINE_PORT="${VLLM_BASELINE_PORT:-9000}"
-export LMCACHE_HTTP_PORT="${LMCACHE_HTTP_PORT:-6556}"
 export MAX_WAIT_SECONDS="${MAX_WAIT_SECONDS:-300}"
 export BUILD_ID="${BUILD_ID:-local_$$}"
 
@@ -110,12 +109,15 @@ if ! "$SCRIPT_DIR/run-long-doc-qa.sh"; then
 fi
 echo ""
 
-
-# Step 7: Query LMCache server status
+# Step 7: Run fault tolerance test (destructive — kills LMCache container)
 echo "============================================"
-echo "=== Step 7: LMCache server status ==="
+echo "=== Step 7: Running fault tolerance test ==="
 echo "============================================"
-curl -s "http://localhost:${LMCACHE_HTTP_PORT}/api/status" | python3 -m json.tool || echo "⚠️ Failed to query LMCache status"
+if ! "$SCRIPT_DIR/run-fault-tolerance.sh"; then
+    echo "❌ fault tolerance test failed"
+    TEST_RESULT=1
+    exit 1
+fi
 echo ""
 
 echo "============================================"
