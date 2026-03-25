@@ -1158,6 +1158,21 @@ class RustRawBlockBackend(StoragePluginInterface):
                     )
                     self._index[key] = _Entry(offset=offset, size=size, meta=meta)
 
+            if self.metadata is not None and self._index:
+                first_loaded_key = next(iter(self._index))
+                expected_worker_id = int(self.metadata.worker_id)
+                loaded_worker_id = int(first_loaded_key.worker_id)
+                if loaded_worker_id != expected_worker_id:
+                    logger.warning(
+                        "RustRawBlockBackend: loaded metadata may belong to another "
+                        "worker (device=%s, current_worker_id=%d, "
+                        "first_entry_worker_id=%d, first_entry_key=%s)",
+                        self.device_path,
+                        expected_worker_id,
+                        loaded_worker_id,
+                        first_loaded_key.to_string(),
+                    )
+
             # Remove free-slot entries that overlap with loaded index slots.
             used_slots = {
                 self._offset_to_slot(int(entry.offset))
