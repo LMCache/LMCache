@@ -425,6 +425,10 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
         if self.init:
             return
         assert self.metadata.kv_layer_groups_manager.kv_layer_groups
+
+        # Skip recurrent layers (multi-tensor state per layer)
+        attn_kvcaches = [kv for kv in self.kvcaches if isinstance(kv, torch.Tensor)]
+
         if self.use_gpu:
             # init tmp buffer
             tmp_buf_shapes = self.metadata.get_shapes(self.chunk_size)
@@ -437,14 +441,21 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
                 )
             ]
         self.group_kv_cache_pointers_on_gpu = []
+
+        # Map original indices to filtered indices
+        attn_idx_map = {}
+        attn_i = 0
+        for i, kv in enumerate(self.kvcaches):
+            if isinstance(kv, torch.Tensor):
+                attn_idx_map[i] = attn_i
+                attn_i += 1
+
         for group in self.metadata.kv_layer_groups_manager.kv_layer_groups:
             # init kv cache pointers
             num_layers = group.num_layers
             kv_cache_pointers = torch.empty(num_layers, dtype=torch.int64, device="cpu")
             kv_cache_pointers.numpy()[:] = [
-                t.data_ptr()
-                for i, t in enumerate(self.kvcaches)
-                if i in group.layer_indices
+                attn_kvcaches[attn_idx_map[i]].data_ptr() for i in group.layer_indices
             ]
             kv_cache_pointers_on_gpu = torch.empty(
                 num_layers, dtype=torch.int64, device=self.device
@@ -452,9 +463,9 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
             kv_cache_pointers_on_gpu.copy_(kv_cache_pointers)
             self.group_kv_cache_pointers_on_gpu.append(kv_cache_pointers_on_gpu)
 
-        self.gpu_kv_format = discover_gpu_kv_format(self.kvcaches, EngineType.VLLM)
-        self.num_blocks = get_num_blocks(self.kvcaches, self.gpu_kv_format)
-        self.block_size = get_block_size(self.kvcaches, self.gpu_kv_format)
+        self.gpu_kv_format = discover_gpu_kv_format(attn_kvcaches, EngineType.VLLM)
+        self.num_blocks = get_num_blocks(attn_kvcaches, self.gpu_kv_format)
+        self.block_size = get_block_size(attn_kvcaches, self.gpu_kv_format)
         self.page_buffer_size = self.num_blocks * self.block_size
 
         self.init = True
@@ -472,7 +483,8 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
         slot_mapping: torch.Tensor = kwargs["slot_mapping"]
         self.initialize_kvcaches_ptr(**kwargs)
         assert self.kvcaches is not None
-        assert self.kvcaches[0].device == self.device
+        first_tensor = next(kv for kv in self.kvcaches if isinstance(kv, torch.Tensor))
+        assert first_tensor.device == self.device
         self._initialize_kv_cache_pointers()
         assert self.group_kv_cache_pointers_on_gpu is not None
 
@@ -505,7 +517,8 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
         slot_mapping: torch.Tensor = kwargs["slot_mapping"]
         self.initialize_kvcaches_ptr(**kwargs)
         assert self.kvcaches is not None
-        assert self.kvcaches[0].device == self.device
+        first_tensor = next(kv for kv in self.kvcaches if isinstance(kv, torch.Tensor))
+        assert first_tensor.device == self.device
         self._initialize_kv_cache_pointers()
         assert self.group_kv_cache_pointers_on_gpu is not None
         with torch.cuda.stream(self.store_stream):

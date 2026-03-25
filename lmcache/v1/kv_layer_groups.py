@@ -172,6 +172,7 @@ class KVLayerGroupsManager:
             defaultdict(list)
         )
 
+        skipped_layers: list[str] = []
         for idx, (layer_name, kv_cache) in enumerate(kv_caches.items()):
             # Supports two KV cache formats:
             # - Single-tensor format: a single tensor with shape
@@ -180,22 +181,40 @@ class KVLayerGroupsManager:
             #   where each tensor has shape
             #   [num_blocks, block_size, num_heads, head_size].
             if isinstance(kv_cache, (tuple, list)):
-                if len(kv_cache) != 2:
-                    raise ValueError(
-                        f"Expected 2 tensors (k, v) for layer {layer_name}, "
-                        f"got {len(kv_cache)}"
-                    )
-                # Prepend the count as a leading dimension to produce the
-                # same canonical shape as the single-tensor format
-                # (e.g., [2, num_blocks, ...] for k+v), so downstream
-                # indexing (e.g., hidden_dim_size) is unaffected.
-                shape = torch.Size([len(kv_cache)] + list(kv_cache[0].shape))
-                dtype = kv_cache[0].dtype
+                if (
+                    len(kv_cache) == 2
+                    and isinstance(kv_cache[0], torch.Tensor)
+                    and isinstance(kv_cache[1], torch.Tensor)
+                    and kv_cache[0].shape == kv_cache[1].shape
+                ):
+                    # k, v pair (e.g., TPU/HPU format)
+                    shape = torch.Size([len(kv_cache)] + list(kv_cache[0].shape))
+                    dtype = kv_cache[0].dtype
+                else:
+                    # Recurrent/Mamba layers: multi-tensor state that
+                    # can't be transferred via multi_layer_kv_transfer.
+                    # TODO: support recurrent state offloading for
+                    # high-concurrency deployments.
+                    skipped_layers.append(layer_name)
+                    continue
             else:
                 shape = kv_cache.shape
                 dtype = kv_cache.dtype
             key = (shape, dtype)
             groups_dict[key].append((layer_name, idx))
+
+        if skipped_layers:
+            logger.info(
+                "Skipped %d recurrent/Mamba layers for KV cache "
+                "offloading (unsupported multi-tensor state): %s",
+                len(skipped_layers),
+                skipped_layers[0]
+                + (
+                    f" ... +{len(skipped_layers) - 1} more"
+                    if len(skipped_layers) > 1
+                    else ""
+                ),
+            )
 
         # Build KVLayerGroupInfo list
         # Sort groups by the first layer index to maintain order

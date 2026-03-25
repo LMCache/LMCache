@@ -289,6 +289,27 @@ class TestKVLayerGroupsManager:
         assert manager.get_layer_dtype(0) == torch.float16
         assert manager.get_layer_dtype(2) == torch.float16
 
+    def test_build_kv_layer_groups_hybrid_model_skips_recurrent(self):
+        """Test that hybrid models (attention + Mamba) skip recurrent layers."""
+        manager = KVLayerGroupsManager()
+
+        kv_caches = {
+            "attn_0": torch.randn(2, 32, 256, 8, 64, dtype=torch.float16),
+            "attn_1": torch.randn(2, 32, 256, 8, 64, dtype=torch.float16),
+            # Mamba layers: list of state tensors with different shapes
+            "mamba_0": [
+                torch.randn(32, 16, 128, dtype=torch.float16),
+                torch.randn(32, 4, 64, dtype=torch.float16),
+            ],
+        }
+
+        manager.build_kv_layer_groups(kv_caches)
+
+        assert len(manager.kv_layer_groups) == 1
+        group = manager.kv_layer_groups[0]
+        assert group.layer_names == ["attn_0", "attn_1"]
+        assert group.layer_indices == [0, 1]
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
