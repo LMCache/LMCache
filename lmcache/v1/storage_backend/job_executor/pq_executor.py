@@ -86,7 +86,12 @@ class AsyncPQExecutor(BaseJobExecutor):
                 # join needs to wait until task count is zero
                 self._queue.task_done()
 
-    async def _shutdown_async(self, wait: bool = True) -> None:
+    async def shutdown_async(self, wait: bool = True) -> None:
+        """Async shutdown — safe to call from a coroutine on the event loop.
+
+        Args:
+            wait: If True, drain the queue before shutting down.
+        """
         if self._closed:
             return
         self._closed = True
@@ -118,7 +123,8 @@ class AsyncPQExecutor(BaseJobExecutor):
             )
 
     def shutdown(self, wait: bool = True) -> None:
-        future = asyncio.run_coroutine_threadsafe(self._shutdown_async(wait), self.loop)
+        """Sync shutdown — blocks the calling thread until shutdown is complete."""
+        future = asyncio.run_coroutine_threadsafe(self.shutdown_async(wait), self.loop)
         if wait:
             # Propagate exceptions if any
             future.result()
@@ -184,7 +190,12 @@ class AsyncPQThreadPoolExecutor(AsyncPQExecutor):
                 # join needs to wait until task count is zero
                 self._queue.task_done()
 
-    async def _shutdown_async(self, wait: bool = True) -> None:
+    async def shutdown_async(self, wait: bool = True) -> None:
+        """Async shutdown — safe to call from a coroutine on the event loop.
+
+        Args:
+            wait: If True, drain the queue before shutting down.
+        """
         if self._closed:
             return
         self._closed = True
@@ -217,7 +228,8 @@ class AsyncPQThreadPoolExecutor(AsyncPQExecutor):
                     fut.cancel()
 
     def shutdown(self, wait: bool = True) -> None:
-        future = asyncio.run_coroutine_threadsafe(self._shutdown_async(wait), self.loop)
+        """Sync shutdown — blocks the calling thread until shutdown is complete."""
+        future = asyncio.run_coroutine_threadsafe(self.shutdown_async(wait), self.loop)
         if wait:
             # Propagate exceptions if any
             future.result()
