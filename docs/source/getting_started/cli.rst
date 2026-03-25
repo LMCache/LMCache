@@ -21,6 +21,9 @@ After installing LMCache, the ``lmcache`` command is available:
    # Run the example mock command
    lmcache mock --name my-run --num-items 5
 
+   # Launch the LMCache server (ZMQ + HTTP)
+   lmcache server --host 0.0.0.0 --port 5555 --l1-size-gb 100 --eviction-policy LRU
+
    # JSON on stdout (for scripts)
    lmcache mock --name my-run --format json
 
@@ -45,6 +48,8 @@ Available Commands
    * - ``mock``
      - Example command that outputs fake metrics. Useful for testing the CLI
        framework and as a reference for new commands.
+   * - ``server``
+     - Launch the LMCache server (ZMQ + HTTP).
 
 
 ``describe`` — Service Status Dashboard

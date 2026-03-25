@@ -36,9 +36,8 @@ File Layout
        ├── __init__.py      # ALL_COMMANDS registry
        ├── base.py          # BaseCommand ABC
        ├── mock.py          # Example command
+       ├── server.py        # lmcache server
        └── query.py         # lmcache query engine and kvcache
-
-
 
 Step-by-Step: Adding a New Command
 -----------------------------------
