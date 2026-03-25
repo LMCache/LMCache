@@ -27,6 +27,7 @@ from lmcache.v1.gpu_connector.gpu_ops import (
     lmcache_memcpy_async_d2h,
     lmcache_memcpy_async_h2d,
 )
+from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.mp_observability.config import (
     PrometheusConfig,
@@ -55,7 +56,6 @@ from lmcache.v1.multiprocess.config import (
 from lmcache.v1.multiprocess.custom_types import (
     IPCCacheEngineKey,
     KVCache,
-    LayoutHints,
 )
 from lmcache.v1.multiprocess.gpu_context import (
     GPUCacheContext,

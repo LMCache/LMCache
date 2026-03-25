@@ -13,10 +13,10 @@ This module defines the protocol for:
 """
 
 # First Party
+from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.multiprocess.custom_types import (
     IPCCacheEngineKey,
     KVCache,
-    LayoutHints,
 )
 from lmcache.v1.multiprocess.protocols.base import HandlerType, ProtocolDefinition
 

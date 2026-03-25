@@ -18,6 +18,7 @@ import torch
 from lmcache.logging import init_logger
 from lmcache.utils import EngineType, _lmcache_nvtx_annotate
 from lmcache.v1.gpu_connector.utils import (
+    LayoutHints,
     discover_gpu_kv_format,
     get_attention_backend,
     get_block_size,
@@ -32,7 +33,6 @@ from lmcache.v1.gpu_connector.utils import (
 )
 from lmcache.v1.multiprocess.custom_types import (
     KVCache,
-    LayoutHints,
 )
 
 logger = init_logger(__name__)

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from dataclasses import dataclass, field
-from typing import Any, Callable, Literal, TypedDict
+from typing import Any, Callable
 import pickle
 import threading
 
@@ -18,23 +18,6 @@ Key Types:
   - Contains token_ids, start, end, request_id (all required)
   - Converted to ObjectKey for storage operations via ipc_key_to_object_keys()
 """
-
-
-class LayoutHints(TypedDict, total=False):
-    """Hints passed from a serving engine to LMCache during KV cache
-    registration (``REGISTER_KV_CACHE``).
-
-    Serving engines may pass a plain ``dict`` that satisfies this
-    schema — importing this type is optional.
-
-    Keys:
-        kv_layout: Physical ordering of the KV cache dimensions.
-            ``"NHD"`` — heads after block-size (default for most
-            vLLM builds).
-            ``"HND"`` — heads before block-size (``VLLM_KV_CACHE_LAYOUT=HND``).
-    """
-
-    kv_layout: Literal["NHD", "HND"]
 
 
 class CudaIPCWrapper:

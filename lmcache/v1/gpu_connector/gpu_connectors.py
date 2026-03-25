@@ -7,7 +7,7 @@ import abc
 import torch
 
 # First Party
-from lmcache.integration.vllm.utils import ENGINE_NAME
+from lmcache.integration.vllm.utils import ENGINE_NAME, _vllm_layout_hints
 from lmcache.logging import init_logger
 from lmcache.utils import EngineType, _lmcache_nvtx_annotate
 from lmcache.v1.compute.blend.utils import LMCBlenderBuilder
@@ -21,27 +21,16 @@ from lmcache.v1.gpu_connector.utils import (
     get_num_blocks,
     get_page_buffer_size,
     get_tokens_per_layer,
-    try_get_vllm_kv_cache_layout,
 )
 from lmcache.v1.memory_management import GPUMemoryAllocator  # noqa: E501
 from lmcache.v1.memory_management import MemoryFormat, MemoryObj
 from lmcache.v1.metadata import LMCacheMetadata
-from lmcache.v1.multiprocess.custom_types import LayoutHints
 
 if torch.cuda.is_available():
     # First Party
     import lmcache.c_ops as lmc_ops
 
 logger = init_logger(__name__)
-
-
-def _vllm_layout_hints() -> LayoutHints:
-    """Build layout_hints dict by querying vLLM at runtime."""
-    hints: LayoutHints = {}
-    kv_layout = try_get_vllm_kv_cache_layout()
-    if kv_layout is not None:
-        hints["kv_layout"] = kv_layout
-    return hints
 
 
 class GPUConnectorInterface(metaclass=abc.ABCMeta):

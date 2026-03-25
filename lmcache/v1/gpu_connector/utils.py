@@ -1,6 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from typing import TYPE_CHECKING, Any, List, Literal, Optional, Tuple, Union, overload
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    List,
+    Literal,
+    Optional,
+    Tuple,
+    TypedDict,
+    Union,
+    overload,
+)
 
 # Third Party
 import torch
@@ -13,7 +23,6 @@ from lmcache.v1.config import LMCacheEngineConfig
 if TYPE_CHECKING:
     # First Party
     from lmcache.v1.gpu_connector.gpu_connectors import GPUConnectorInterface
-    from lmcache.v1.multiprocess.custom_types import LayoutHints
 
 if torch.cuda.is_available():
     # First Party
@@ -27,31 +36,21 @@ _ATTRIBUTE_NOT_EXIST_ERROR = "trying to access an attribute of the GPU KV Cache 
 "A misalignment with the GPUKVFormat must be resolved"
 
 
-def try_get_vllm_kv_cache_layout() -> Literal["NHD", "HND"] | None:
-    """Try to query the KV cache layout from vLLM at runtime.
+class LayoutHints(TypedDict, total=False):
+    """Hints passed from a serving engine to LMCache during KV cache
+    registration (``REGISTER_KV_CACHE``).
 
-    Returns ``"NHD"`` or ``"HND"`` if vLLM is available and the layout
-    has been configured, otherwise ``None``.
+    Serving engines may pass a plain ``dict`` that satisfies this
+    schema — importing this type is optional.
 
-    Please only call this where vllm is available (i.e. not in the MP server)
-    We will print an error if we try to get vllm kv layout where vllm
-    is not available.
+    Keys:
+        kv_layout: Physical ordering of the KV cache dimensions.
+            ``"NHD"`` — heads after block-size (default for most
+            vLLM builds).
+            ``"HND"`` — heads before block-size (``VLLM_KV_CACHE_LAYOUT=HND``).
     """
 
-    # Third Party
-    try:
-        # Third Party
-        from vllm.v1.attention.backends.utils import (  # type: ignore[import-untyped]
-            get_kv_cache_layout,
-        )
-
-        return get_kv_cache_layout()
-    except Exception:
-        logger.error(
-            "vLLM is not available but tried to query kv cache "
-            "layout information, cannot get KV cache layout"
-        )
-        return None
+    kv_layout: Literal["NHD", "HND"]
 
 
 def permute_to_contiguous(tensor: torch.Tensor) -> torch.Tensor:

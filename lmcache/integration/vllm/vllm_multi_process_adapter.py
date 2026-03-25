@@ -13,11 +13,11 @@ import zmq
 # First Party
 from lmcache.integration.request_telemetry.factory import RequestTelemetryFactory
 from lmcache.utils import _lmcache_nvtx_annotate, init_logger
+from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.multiprocess.custom_types import (
     CudaIPCWrapper,
     IPCCacheEngineKey,
     KVCache,
-    LayoutHints,
 )
 from lmcache.v1.multiprocess.mq import MessageQueueClient, MessagingFuture
 from lmcache.v1.multiprocess.protocol import RequestType, get_response_class
@@ -566,9 +566,9 @@ class LMCacheMPWorkerAdapter:
                 layer names and the values are the corresponding tensors.
         """
         # First Party
+        from lmcache.integration.vllm.utils import try_get_vllm_kv_cache_layout
         from lmcache.v1.gpu_connector.utils import (
             ensure_contiguous_kv_caches,
-            try_get_vllm_kv_cache_layout,
         )
 
         # Register kv cache and send the request
