@@ -25,30 +25,33 @@ permissions:
 
 jobs:
   changes:
+    name: Detect changes
     runs-on: ubuntu-latest
     permissions:
       pull-requests: read
     outputs:
-      should_test: ${{ steps.filter.outputs.python }}
+      lmcache: ${{ github.event_name == 'workflow_dispatch' || github.event_name == 'release' || steps.filter.outputs.lmcache == 'true' }}
     steps:
       - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
-        if: github.event_name != 'pull_request'
+        if: github.event_name == 'push'
+        with:
+          fetch-depth: 2
+
       - uses: dorny/paths-filter@v3
+        if: github.event_name == 'push' || github.event_name == 'pull_request'
         id: filter
         with:
           filters: |
-            python:
+            lmcache:
               - '**.py'
               - 'pyproject.toml'
               - 'requirements/**.txt'
               - '.github/workflows/test.yml'
+              - '!operator/**'
 
   test:
     needs: changes
-    if: >-
-      needs.changes.outputs.should_test == 'true' ||
-      github.event_name == 'workflow_dispatch' ||
-      github.event_name == 'workflow_call'
+    if: needs.changes.outputs.lmcache == 'true'
     name: "test: ${{ matrix.python }} on ${{ matrix.platform }}"
     runs-on: "${{ matrix.platform }}"
     strategy:

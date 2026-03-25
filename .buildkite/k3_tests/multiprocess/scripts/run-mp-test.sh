@@ -95,6 +95,17 @@ if ! "${SCRIPT_DIR}/run-long-doc-qa.sh"; then
 fi
 echo ""
 
+# Step 6: Fault tolerance test (kills LMCache server -- must be last)
+echo "============================================"
+echo "=== Step 6: Running fault tolerance test ==="
+echo "============================================"
+if ! "${SCRIPT_DIR}/run-fault-tolerance.sh"; then
+    echo "fault tolerance test failed"
+    TEST_RESULT=1
+    exit 1
+fi
+echo ""
+
 echo "============================================"
 echo "=== All tests passed! ==="
 echo "============================================"
