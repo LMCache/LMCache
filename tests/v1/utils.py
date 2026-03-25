@@ -40,6 +40,8 @@ if lmc_ops is None:
         NL_X_TWO_NB_BS_NH_HS = 0
         NL_X_NB_TWO_BS_NH_HS = 1
         NL_X_NB_BS_HS = 2
+        NL_X_TWO_NB_NH_BS_HS = 3
+        NL_X_NB_TWO_NH_BS_HS = 4
 
     class MockCOps:
         GPUKVFormat = MockGPUKVFormat
