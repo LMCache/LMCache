@@ -113,16 +113,30 @@ class LMCacheWorker:
         self.heartbeat_socket: Optional[zmq.asyncio.Socket] = None
         self.controller_heartbeat_url: Optional[str] = None
 
+        # metadata.world_size comes from vLLM's parallel_config.world_size.
+        # For MLA models, vLLM divides this by tp_size (e.g. TP=8 PP=1 on
+        # 8 GPUs → world_size=1), so it may be much smaller than the total
+        # GPU count.  For non-MLA models it equals TP × PP.
+        #
+        # get_lmcache_worker_ids() decides which workers run an LMCache
+        # instance: [0] for MLA (only one worker needed since KV caches
+        # are not TP-sharded), or range(world_size) for non-MLA.
+        #
+        # We use >= because extra ports are harmless — port selection
+        # indexes by worker_id or lmcache_worker_ids position, so
+        # trailing entries are never bound to sockets.
         lmcache_worker_ids = config.get_lmcache_worker_ids(
             metadata.use_mla, metadata.world_size
         )
         if not lmcache_worker_ids:
-            # start lmcache worker on all ranks
-            assert len(config.lmcache_worker_ports) == metadata.world_size
+            # start lmcache worker on all ranks;
+            # need at least one port per rank (world_size)
+            assert len(config.lmcache_worker_ports) >= metadata.world_size
             lmcache_worker_port = config.lmcache_worker_ports[self.worker_id]
         else:
-            # start lmcache worker on given worker ids
-            assert len(lmcache_worker_ids) == len(config.lmcache_worker_ports)
+            # start lmcache worker on given worker ids;
+            # need at least one port per explicitly listed worker
+            assert len(config.lmcache_worker_ports) >= len(lmcache_worker_ids)
             index = lmcache_worker_ids.index(self.worker_id)
             lmcache_worker_port = config.lmcache_worker_ports[index]
 
