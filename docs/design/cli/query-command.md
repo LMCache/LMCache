@@ -66,9 +66,9 @@ Send one inference request to an engine HTTP endpoint and report token and laten
 
 ```bash
 # Single inference query
-$ lmcache query engine --url http://localhost:8008/v1 \
+$ lmcache query engine --url http://localhost:8000/v1 \
   --prompt "{ctx} What is the example usage of lmcache?" \
-  --corpus ctx=LMCache/lmcache/cli/documents/lmcache.txt  \
+  --documents ctx=LMCache/lmcache/cli/documents/lmcache.txt  \
   --format terminal  --max-tokens 128
    
 ================= Query Engine =================
@@ -90,9 +90,9 @@ Throughput (tokens/s):                   1100.64
 | Flag | Description |
 |------|-------------|
 | `--url` | Engine HTTP endpoint (`http://host:port`) |
-| `--prompt` | Prompt text, supports `{corpus}` templates |
+| `--prompt` | Prompt text, supports `{documents}` templates |
 | `--timeout` | Request timeout in seconds (default: 30) |
-| `--corpus name=path` | Register custom corpus template |
+| `--documents name=path` | Register custom documents template |
 
 
 
@@ -112,7 +112,8 @@ Two modes under one command:
 ```bash
 # Lookup mode
 $ lmcache query kvcache --url http://localhost:5555 \
-    --prompt "{ffmpeg} What is the example usage of ffmpeg?" \
+    --prompt "{ctx} What is the example usage of lmcache?" \
+    --documents ctx=LMCache/lmcache/cli/documents/lmcache.txt  \
     --model meta-llama/Llama-3.1-8B-Instruct
 
 ======== Query KV Cache Result ==========
@@ -132,7 +133,7 @@ Cache status:                       HIT (partial)
 | `--url` | KV cache HTTP endpoint (`http://host:port`) |
 | `--prompt` | Prompt for tokenization + lookup |
 | `--model` | Tokenizer/model used to derive token IDs |
-| `--corpus name=path` | Register custom corpus template |
+| `--documents name=path` | Register custom documents template |
 
 #### Output metrics (lookup mode)
 
