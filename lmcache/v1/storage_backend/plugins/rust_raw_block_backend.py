@@ -40,6 +40,15 @@ def _round_up(x: int, align: int) -> int:
     return ((x + align - 1) // align) * align
 
 
+def _validate_per_tp_device_paths(per_tp_devices: Any) -> None:
+    """Validate per-TP device mapping and enforce unique paths."""
+    values = list(per_tp_devices.values())
+    if len(values) != len(set(values)):
+        raise ValueError(
+            "Duplicate device path configured in rust_raw_block.per_tp_device_paths"
+        )
+
+
 @dataclass
 class _Entry:
     """In-memory index entry for a stored chunk."""
@@ -121,6 +130,7 @@ class RustRawBlockBackend(StoragePluginInterface):
                     "For TP > 1, rust_raw_block.per_tp_device_paths is required. "
                     "Each TP worker must have an explicit device path configured."
                 )
+            _validate_per_tp_device_paths(per_tp_devices)
 
             tp_rank_str = str(tp_rank)
             self.device_path = per_tp_devices.get(tp_rank_str)

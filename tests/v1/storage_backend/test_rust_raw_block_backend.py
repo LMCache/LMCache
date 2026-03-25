@@ -742,3 +742,54 @@ def test_rust_raw_block_backend_tp4_comprehensive_io(memory_allocator, loop_in_t
         finally:
             for backend in backends:
                 backend.close()
+
+
+@pytest.mark.skipif(
+    not _has_ext(), reason="lmcache_rust_raw_block_io extension not installed"
+)
+def test_rust_raw_block_backend_tp_paths_must_be_unique(
+    memory_allocator, loop_in_thread
+):
+    """Reject TP config when multiple ranks point to the same partition."""
+    with tempfile.TemporaryDirectory() as td:
+        shared_dev = os.path.join(td, "shared.bin")
+        with open(shared_dev, "wb") as f:
+            f.truncate(512 * 1024 * 1024)
+
+        config = LMCacheEngineConfig.from_defaults(
+            chunk_size=256,
+            local_cpu=True,
+            max_local_cpu_size=0.1,
+            lmcache_instance_id="test_rust_raw_block_backend_tp_dupe_paths",
+        )
+        config.storage_plugins = []
+        config.extra_config = {
+            "rust_raw_block.per_tp_device_paths": {"0": shared_dev, "1": shared_dev},
+            "rust_raw_block.block_align": 4096,
+            "rust_raw_block.header_bytes": 4096,
+            "rust_raw_block.meta_total_bytes": 4 * 1024 * 1024,
+            "rust_raw_block.meta_enable_periodic": False,
+        }
+        metadata = LMCacheMetadata(
+            model_name="test-model",
+            world_size=2,
+            local_world_size=2,
+            worker_id=0,
+            local_worker_id=0,
+            kv_dtype=torch.bfloat16,
+            kv_shape=(32, 2, 256, 32, 128),
+        )
+        local_cpu = LocalCPUBackend(
+            config=config,
+            metadata=metadata,
+            dst_device="cpu",
+            memory_allocator=memory_allocator,
+        )
+        with pytest.raises(ValueError, match="Duplicate device path configured"):
+            RustRawBlockBackend(
+                config=config,
+                metadata=metadata,
+                local_cpu_backend=local_cpu,
+                loop=loop_in_thread,
+                dst_device="cpu",
+            )
