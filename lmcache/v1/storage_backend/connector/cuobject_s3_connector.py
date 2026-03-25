@@ -25,7 +25,9 @@ from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 logger = init_logger(__name__)
 
 
-def _get_allocator_buffer_info(allocator: "LazyMemoryAllocator | MixedMemoryAllocator | PinMemoryAllocator") -> tuple[int, int]:
+def _get_allocator_buffer_info(
+    allocator: "LazyMemoryAllocator | MixedMemoryAllocator | PinMemoryAllocator",
+) -> tuple[int, int]:
     """Extract the base pointer and byte size of the allocator's pinned pool.
 
     Supports :class:`MixedMemoryAllocator`, :class:`PinMemoryAllocator`,
