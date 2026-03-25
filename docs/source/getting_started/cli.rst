@@ -65,34 +65,34 @@ Inspect the state of a running LMCache KV cache server:
 .. code-block:: text
 
    ============ LMCache KV Cache Service ============
-   Health:                                  OK
-   URL:                            http://localhost:8000
-   Engine type:                         BlendEngine
-   Chunk size:                              256
-   L1 capacity (GB):                       60.00
-   L1 used (GB):                    42.30 (70.5%)
-   Eviction policy:                         LRU
-   Cached objects:                          1024
-   Active sessions:                            3
-   --- Model: meta-llama/Llama-3.1-70B-Instruct ----
-   Model:          meta-llama/Llama-3.1-70B-Instruct
-   World size:                                4
-   GPU IDs:                          0, 1, 2, 3
-   Attention backend:  vLLM non-MLA flash attention
-   GPU KV shape:          NL x [2, NB, BS, NH, HS]
-   GPU KV tensor shape: 80 x [2, 2048, 128, 8, 128]
-   Num layers:                               80
-   Block size:                              128
-   Hidden dim size:                        1024
-   Dtype:                          torch.float16
-   MLA:                                   False
-   Num blocks:                             2048
-   --------- L2: NixlStoreL2Adapter ------------
-   Type:                      NixlStoreL2Adapter
-   Health:                                  OK
-   Backend:                           nixl_rdma
-   Stored objects:                          512
-   Pool used:                 480 / 512 (93.8%)
+   Health:                                         OK
+   URL:                         http://localhost:8000
+   Engine type:                           BlendEngine
+   Chunk size:                                    256
+   L1 capacity (GB):                            60.00
+   L1 used (GB):                        42.30 (70.5%)
+   Eviction policy:                               LRU
+   Cached objects:                               1024
+   Active sessions:                                 3
+   ---- Model: meta-llama/Llama-3.1-70B-Instruct ----
+   Model:           meta-llama/Llama-3.1-70B-Instruct
+   World size:                                      4
+   GPU IDs:                                0, 1, 2, 3
+   Attention backend:    vLLM non-MLA flash attention
+   GPU KV shape:             NL x [2, NB, BS, NH, HS]
+   GPU KV tensor shape:   80 x [2, 2048, 128, 8, 128]
+   Num layers:                                     80
+   Block size:                                    128
+   Hidden dim size:                              1024
+   Dtype:                               torch.float16
+   MLA:                                         False
+   Num blocks:                                   2048
+   ------------- L2: NixlStoreL2Adapter -------------
+   Type:                           NixlStoreL2Adapter
+   Health:                                         OK
+   Backend:                                 nixl_rdma
+   Stored objects:                                512
+   Pool used:                       480 / 512 (93.8%)
    ==================================================
 
 The output shows:
@@ -240,9 +240,9 @@ Check whether an LMCache KV cache server or a vLLM serving engine is reachable:
 
 .. code-block:: text
 
-   ====== Ping KV Cache ======
+   ======= Ping KV Cache ========
    Status:                   OK
-   Round trip time (ms):   3.42
+   Round trip time (ms):     3.42
    ==============================
 
 Options
@@ -306,9 +306,9 @@ Human-readable ASCII table:
 
 .. code-block:: text
 
-   ====== Ping KV Cache ======
+   ======= Ping KV Cache ========
    Status:                   OK
-   Round trip time (ms):   3.42
+   Round trip time (ms):     3.42
    ==============================
 
 JSON Output
