@@ -3,20 +3,39 @@ name: Code Quality
 on:
   workflow_call:
   pull_request:
-    paths-ignore:
-      - 'operator/**'
-      - '.github/workflows/operator_*.yml'
   push:
     branches: [dev]
-    paths-ignore:
-      - 'operator/**'
-      - '.github/workflows/operator_*.yml'
 
 permissions:
   contents: read
 
 jobs:
+  changes:
+    name: Detect changes
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+    outputs:
+      lmcache: ${{ github.event_name == 'release' || steps.filter.outputs.lmcache == 'true' }}
+    steps:
+      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        if: github.event_name == 'push'
+        with:
+          fetch-depth: 2
+
+      - uses: dorny/paths-filter@v3
+        if: github.event_name == 'push' || github.event_name == 'pull_request'
+        id: filter
+        with:
+          filters: |
+            lmcache:
+              - '**'
+              - '!operator/**'
+              - '!.github/workflows/operator_*.yml'
+
   pre-commit:
+    needs: changes
+    if: needs.changes.outputs.lmcache == 'true'
     name: Check code quality
     runs-on: ubuntu-latest
     steps:
