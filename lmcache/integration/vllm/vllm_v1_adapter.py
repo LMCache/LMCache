@@ -1091,7 +1091,8 @@ class LMCacheConnectorV1Impl:
                 "LMCacheEngine must be initialized to unpin requests."
             )
             for request in connector_metadata.requests:
-                self.lmcache_engine.lookup_unpin(request.req_id)
+                if request.status != RequestStatus.FINISHED_ABORTED:
+                    self.lmcache_engine.lookup_unpin(request.req_id)
 
             return
 
