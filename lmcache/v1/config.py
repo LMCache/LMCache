@@ -252,11 +252,9 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
     "extra_config": {
         "type": Optional[dict],
         "default": None,
-        "env_converter": lambda x: x
-        if isinstance(x, dict)
-        else json.loads(x)
-        if x
-        else None,
+        "env_converter": lambda x: (
+            x if isinstance(x, dict) else json.loads(x) if x else None
+        ),
     },
     "save_unfull_chunk": {
         "type": bool,
