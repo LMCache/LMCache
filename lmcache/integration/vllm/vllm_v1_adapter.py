@@ -1091,8 +1091,7 @@ class LMCacheConnectorV1Impl:
                 "LMCacheEngine must be initialized to unpin requests."
             )
             for request in connector_metadata.requests:
-                if request.status != RequestStatus.FINISHED_ABORTED:
-                    self.lmcache_engine.lookup_unpin(request.req_id)
+                self.lmcache_engine.lookup_unpin(request.req_id)
 
             return
 
@@ -1661,16 +1660,11 @@ class LMCacheConnectorV1Impl:
             self._layerwise_save_storers.pop(request.request_id, None)
 
         # Cleanup if request was aborted
-        if request.status == RequestStatus.FINISHED_ABORTED:
-            if self.async_loading:
-                # Cancel any ongoing async lookup and prefetch tasks on workers
-                lookup_id = request.request_id
-                assert self.lookup_client is not None
-                self.lookup_client.cancel_lookup(lookup_id)  # type: ignore[attr-defined]
-
-            # Unpin to balance pin count from lookup
-            if self.lmcache_engine is not None:
-                self.lmcache_engine.lookup_unpin(request.request_id)
+        if request.status == RequestStatus.FINISHED_ABORTED and self.async_loading:
+            # Cancel any ongoing async lookup and prefetch tasks on workers
+            lookup_id = request.request_id
+            assert self.lookup_client is not None
+            self.lookup_client.cancel_lookup(lookup_id)  # type: ignore[attr-defined]
 
         params = (
             request.kv_transfer_params
