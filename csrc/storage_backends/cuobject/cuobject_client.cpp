@@ -1,10 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "cuobject_client.h"
 
-#include <cstdio>
 #include <cstring>
 #include <memory>
-#include <mutex>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -17,112 +15,16 @@ namespace cuobject {
 // ---------------------------------------------------------------------------
 
 CuObjectClient::CuObjectClient(int proto) {
-  // Set up GET/PUT callbacks per the official cuObjClient API.
-  // The callbacks extract RDMA descriptors from cufileRDMAInfo_t and
-  // store them in captured_descriptor_ for the calling prepare_* method.
-  ops_.get = &CuObjectClient::get_callback;
-  ops_.put = &CuObjectClient::put_callback;
+  // The constructor requires a CUObjOps_t reference.  Since we use
+  // cuMemObjGetRDMAToken() for token generation (not cuObjPut/cuObjGet),
+  // the callbacks are unused.  Zero-initialise the struct.
+  std::memset(&ops_, 0, sizeof(ops_));
 
-  // Construct the cuObjClient instance directly (build-time linked).
   client_ = std::make_unique<cuObjClient>(
       ops_, static_cast<cuObjProto_t>(proto));
 }
 
 CuObjectClient::~CuObjectClient() { close(); }
-
-// ---------------------------------------------------------------------------
-// GET/PUT callbacks
-//
-// Called synchronously by cuObjGet() / cuObjPut().  Each callback
-// receives the cufileRDMAInfo_t containing the RDMA descriptor string.
-// We copy desc_str into captured_descriptor_ for the calling
-// prepare_put / prepare_get method.
-//
-// The handle parameter is an opaque cookie.  We pass 'this' as the
-// ctx argument to cuObjGet/cuObjPut; the library wraps it in handle.
-// cuObjClient::getCtx(handle) unwraps it.
-//
-// Note: For large transfers, callbacks may be invoked multiple times.
-// We capture only the last descriptor.  For LMCache's KV cache
-// workload, transfers are single-chunk (within MaxRequestCallbackSize).
-// ---------------------------------------------------------------------------
-
-ssize_t CuObjectClient::get_callback(const void *handle, char * /*ptr*/,
-                                     size_t size, loff_t /*offset*/,
-                                     const cufileRDMAInfo_t *rdma_info) {
-  if (!rdma_info || rdma_info->desc_len <= 0 || !rdma_info->desc_str) {
-    return -1;
-  }
-
-  auto *self =
-      static_cast<CuObjectClient *>(cuObjClient::getCtx(handle));
-  if (!self) return -1;
-
-  size_t copy_len = static_cast<size_t>(rdma_info->desc_len);
-  // Strip trailing NUL if the library includes it in desc_len
-  // (some versions do, some don't -- the CRT plugin handles both).
-  if (copy_len > 0 && rdma_info->desc_str[copy_len - 1] == '\0') {
-    --copy_len;
-  }
-
-  self->captured_descriptor_.assign(rdma_info->desc_str, copy_len);
-  self->descriptor_received_ = true;
-  return static_cast<ssize_t>(size);
-}
-
-ssize_t CuObjectClient::put_callback(const void *handle,
-                                     const char * /*ptr*/, size_t size,
-                                     loff_t /*offset*/,
-                                     const cufileRDMAInfo_t *rdma_info) {
-  if (!rdma_info || rdma_info->desc_len <= 0 || !rdma_info->desc_str) {
-    return -1;
-  }
-
-  auto *self =
-      static_cast<CuObjectClient *>(cuObjClient::getCtx(handle));
-  if (!self) return -1;
-
-  size_t copy_len = static_cast<size_t>(rdma_info->desc_len);
-  if (copy_len > 0 && rdma_info->desc_str[copy_len - 1] == '\0') {
-    --copy_len;
-  }
-
-  self->captured_descriptor_.assign(rdma_info->desc_str, copy_len);
-  self->descriptor_received_ = true;
-  return static_cast<ssize_t>(size);
-}
-
-// ---------------------------------------------------------------------------
-// PUT token size patching
-//
-// The RDMA descriptor format is "<proto>:<size_hex>:<rdma_fields...>".
-// For PUT operations the CRT cuObject plugin patches the 2nd colon-
-// delimited field with the actual payload size, zero-padded to the
-// original width in lowercase hex.  We replicate this behaviour.
-// ---------------------------------------------------------------------------
-
-void CuObjectClient::patch_put_token_size(std::string &token,
-                                          size_t payload_size) {
-  if (token.empty()) return;
-
-  // Locate the first two ':' delimiters.
-  size_t first_colon = token.find(':');
-  if (first_colon == std::string::npos) return;
-
-  size_t second_colon = token.find(':', first_colon + 1);
-  if (second_colon == std::string::npos) return;
-
-  size_t field_start = first_colon + 1;
-  size_t width = second_colon - field_start;
-  if (width == 0 || width > 16) return;  // sanity bound
-
-  char buf[17];
-  int n = std::snprintf(buf, sizeof(buf), "%0*zx",
-                        static_cast<int>(width), payload_size);
-  if (n > 0 && static_cast<size_t>(n) >= width) {
-    token.replace(field_start, width, buf, width);
-  }
-}
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -146,68 +48,30 @@ std::pair<uintptr_t, size_t> CuObjectClient::register_pool(uintptr_t ptr,
         << "): error " << static_cast<int>(rc);
     throw std::runtime_error(oss.str());
   }
+
+  // Store pool bounds for buffer_offset computation in generate_token().
+  pool_base_ = ptr;
+  pool_size_ = size;
+
   return {ptr, size};
 }
 
 int CuObjectClient::deregister_pool(uintptr_t ptr) noexcept {
-  // Official API: cuMemObjPutDescriptor(ptr) -- no size argument.
   cuObjErr_t rc =
       client_->cuMemObjPutDescriptor(reinterpret_cast<void *>(ptr));
+  if (ptr == pool_base_) {
+    pool_base_ = 0;
+    pool_size_ = 0;
+  }
   return static_cast<int>(rc);
 }
 
-std::string CuObjectClient::prepare_put(uintptr_t ptr, size_t size,
-                                        int64_t offset, int64_t buf_offset) {
-  std::lock_guard<std::mutex> lock(mutex_);
-  captured_descriptor_.clear();
-  descriptor_received_ = false;
-
-  // Pass 'this' as the user context so our PUT callback can store
-  // the RDMA descriptor back into this instance.
-  // Official API: ssize_t cuObjPut(ctx, ptr, size, offset, buf_offset)
-  ssize_t rc = client_->cuObjPut(
-      static_cast<void *>(this), reinterpret_cast<void *>(ptr), size,
-      static_cast<loff_t>(offset), static_cast<loff_t>(buf_offset));
-  if (rc < 0) {
-    std::ostringstream oss;
-    oss << "cuObjPut failed (ptr=0x" << std::hex << ptr
-        << ", size=" << std::dec << size << "): error " << rc;
-    throw std::runtime_error(oss.str());
-  }
-  if (!descriptor_received_ || captured_descriptor_.empty()) {
-    throw std::runtime_error(
-        "cuObjPut succeeded but RDMA descriptor callback was not invoked");
-  }
-
-  // Patch the size field in the RDMA descriptor to match the actual
-  // payload size.  Required for PUT per the CRT plugin convention.
-  patch_put_token_size(captured_descriptor_, size);
-
-  return captured_descriptor_;
+std::string CuObjectClient::prepare_put(uintptr_t data_ptr, size_t size) {
+  return generate_token(data_ptr, size, CUOBJ_OP_PUT);
 }
 
-std::string CuObjectClient::prepare_get(uintptr_t ptr, size_t size,
-                                        int64_t offset, int64_t buf_offset) {
-  std::lock_guard<std::mutex> lock(mutex_);
-  captured_descriptor_.clear();
-  descriptor_received_ = false;
-
-  // Official API: ssize_t cuObjGet(ctx, ptr, size, offset, buf_offset)
-  ssize_t rc = client_->cuObjGet(
-      static_cast<void *>(this), reinterpret_cast<void *>(ptr), size,
-      static_cast<loff_t>(offset), static_cast<loff_t>(buf_offset));
-  if (rc < 0) {
-    std::ostringstream oss;
-    oss << "cuObjGet failed (ptr=0x" << std::hex << ptr
-        << ", size=" << std::dec << size << "): error " << rc;
-    throw std::runtime_error(oss.str());
-  }
-  if (!descriptor_received_ || captured_descriptor_.empty()) {
-    throw std::runtime_error(
-        "cuObjGet succeeded but RDMA descriptor callback was not invoked");
-  }
-
-  return captured_descriptor_;
+std::string CuObjectClient::prepare_get(uintptr_t data_ptr, size_t size) {
+  return generate_token(data_ptr, size, CUOBJ_OP_GET);
 }
 
 bool CuObjectClient::is_connected() const {
@@ -215,15 +79,65 @@ bool CuObjectClient::is_connected() const {
   return client_->isConnected();
 }
 
-ssize_t CuObjectClient::get_max_callback_size(uintptr_t ptr) const {
-  if (!client_) return -1;
-  return client_->cuMemObjGetMaxRequestCallbackSize(
-      reinterpret_cast<void *>(ptr));
-}
-
 int CuObjectClient::close() noexcept {
   client_.reset();
   return CU_OBJ_SUCCESS;
+}
+
+// ---------------------------------------------------------------------------
+// Private: RDMA token generation
+//
+// cuMemObjGetRDMAToken() generates an RDMA descriptor string for a
+// sub-region of the registered memory pool.  The descriptor encodes the
+// RDMA memory address, keys, and connection info that the server uses
+// to perform RDMA_READ (PUT) or RDMA_WRITE (GET).
+//
+// The buffer_offset is computed as (data_ptr - pool_base_) so that the
+// Python caller can simply pass the MemoryObj's data pointer without
+// needing to know the pool base address.
+//
+// After copying the descriptor string, cuMemObjPutRDMAToken() frees
+// the library-allocated memory.  The token content is still valid for
+// the S3 request because the underlying RDMA memory registration
+// (from cuMemObjGetDescriptor) remains active.
+// ---------------------------------------------------------------------------
+
+std::string CuObjectClient::generate_token(uintptr_t data_ptr, size_t size,
+                                           int op_type) {
+  if (pool_base_ == 0 || pool_size_ == 0) {
+    throw std::runtime_error(
+        "No memory pool registered.  Call register_pool() first.");
+  }
+  if (data_ptr < pool_base_ || data_ptr + size > pool_base_ + pool_size_) {
+    std::ostringstream oss;
+    oss << "Data region [0x" << std::hex << data_ptr << ", 0x"
+        << (data_ptr + size) << ") is outside registered pool [0x"
+        << pool_base_ << ", 0x" << (pool_base_ + pool_size_) << ")";
+    throw std::runtime_error(oss.str());
+  }
+
+  size_t buffer_offset = data_ptr - pool_base_;
+  char *desc_str = nullptr;
+
+  cuObjErr_t rc = client_->cuMemObjGetRDMAToken(
+      reinterpret_cast<void *>(pool_base_), size, buffer_offset,
+      static_cast<cuObjOpType_t>(op_type), &desc_str);
+
+  if (static_cast<int>(rc) != CU_OBJ_SUCCESS || desc_str == nullptr) {
+    std::ostringstream oss;
+    oss << "cuMemObjGetRDMAToken failed (ptr=0x" << std::hex << data_ptr
+        << ", size=" << std::dec << size
+        << ", offset=" << buffer_offset
+        << ", op=" << (op_type == CUOBJ_OP_PUT ? "PUT" : "GET")
+        << "): error " << static_cast<int>(rc);
+    throw std::runtime_error(oss.str());
+  }
+
+  // Copy the descriptor string and free the library allocation.
+  std::string token(desc_str);
+  client_->cuMemObjPutRDMAToken(desc_str);
+
+  return token;
 }
 
 }  // namespace cuobject

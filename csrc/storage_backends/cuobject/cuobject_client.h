@@ -3,33 +3,32 @@
 // C++ wrapper around the NVIDIA cuObjClient library.
 //
 // Linked against libcuobjclient.so at build time.  The cuObjClient C++
-// class (from <cuobjclient.h>) is constructed directly -- no
-// dlopen/dlsym.
+// class (from <cuobjclient.h>) is constructed directly.
 //
-// Callback model (per official cuObjClient API v1.0.0)
-// ----------------------------------------------------
-// cuObjClient uses a CUObjIOOps / CUObjOps_t struct with GET and PUT
-// callbacks.  During cuObjGet() / cuObjPut(), the library invokes these
-// callbacks one or more times (for buffers that exceed
-// MaxRequestCallbackSize).  Each callback receives a cufileRDMAInfo_t*
-// containing the RDMA descriptor string (desc_str) that serves as the
-// x-amz-rdma-token.
+// Token generation model (per official cuObjClient API v1.0.0)
+// ------------------------------------------------------------
+// RDMA tokens are generated via cuMemObjGetRDMAToken(), which returns
+// an opaque descriptor string encoding the RDMA memory address, keys,
+// and connection info.  The caller injects this string as the
+// x-amz-rdma-token HTTP header in the S3 PUT/GET request.
 //
-// This wrapper captures the descriptor from the callback into a
-// std::string that is returned to the Python layer.
+// After copying the descriptor string, cuMemObjPutRDMAToken() frees the
+// library-allocated memory.  The token content remains valid because the
+// underlying RDMA memory registration (via cuMemObjGetDescriptor) is
+// still active.
 //
-// PUT token size patching
-// -----------------------
-// For PUT operations, the RDMA descriptor's size field (2nd colon-
-// delimited field) is patched with the actual payload size.  This
-// matches the behaviour of the EMCECS/aws-c-s3 CRT cuObject plugin.
+// Pool tracking
+// -------------
+// register_pool() stores the base address and size of the registered
+// memory pool.  prepare_put / prepare_get accept a data pointer
+// anywhere within the pool and automatically compute the buffer_offset
+// as (data_ptr - pool_base) for cuMemObjGetRDMAToken().
 //
 // Thread safety
 // -------------
-// prepare_put / prepare_get are serialised with an internal mutex so
-// that the callback-captured descriptor cannot be clobbered by a
-// concurrent call.  register_pool / deregister_pool are expected to
-// be called only during init / shutdown.
+// cuMemObjGetRDMAToken() writes to a caller-provided output pointer, so
+// concurrent calls from different threads each get their own descriptor
+// allocation.  No internal mutex is needed.
 
 #pragma once
 
@@ -37,7 +36,6 @@
 
 #include <cstdint>
 #include <memory>
-#include <mutex>
 #include <string>
 #include <utility>
 
@@ -67,6 +65,9 @@ class CuObjectClient {
   /// Wraps cuMemObjGetDescriptor(ptr, size).  Supports system memory,
   /// CUDA managed memory, and CUDA device memory.
   ///
+  /// Also stores the pool base address and size so that prepare_put /
+  /// prepare_get can compute the buffer_offset automatically.
+  ///
   /// @param ptr   Start address of the memory region.
   /// @param size  Byte size.  Must be < CUOBJ_MAX_MEMORY_REG_SIZE (4 GiB).
   /// @returns (ptr, size) pair that serves as the registration handle.
@@ -82,48 +83,32 @@ class CuObjectClient {
   /// @returns 0 on success, error code otherwise.  Does **not** throw.
   int deregister_pool(uintptr_t ptr) noexcept;
 
-  /// Prepare an RDMA-accelerated PUT operation.
+  /// Generate an RDMA token for a PUT operation.
   ///
-  /// Internally calls cuObjPut which invokes the PUT callback with the
-  /// RDMA descriptor.  The descriptor's size field is patched with the
-  /// actual payload size (matching CRT plugin behaviour).
+  /// Calls cuMemObjGetRDMAToken() with CUOBJ_PUT.  The returned token
+  /// string is the value for the x-amz-rdma-token HTTP header.
   ///
-  /// @param ptr         Data pointer within the registered pool.
-  /// @param size        Byte size of the data.
-  /// @param offset      Object offset (reserved, default 0).
-  /// @param buf_offset  Buffer offset from base (default 0).
+  /// @param data_ptr  Data pointer within the registered pool.
+  /// @param size      Byte size of the data to upload.
   /// @returns The x-amz-rdma-token header value.
-  /// @throws std::runtime_error on failure or if no descriptor received.
-  std::string prepare_put(uintptr_t ptr, size_t size, int64_t offset = 0,
-                          int64_t buf_offset = 0);
+  /// @throws std::runtime_error on failure or if data_ptr is outside pool.
+  std::string prepare_put(uintptr_t data_ptr, size_t size);
 
-  /// Prepare an RDMA-accelerated GET operation.
+  /// Generate an RDMA token for a GET operation.
   ///
-  /// Internally calls cuObjGet which invokes the GET callback with the
-  /// RDMA descriptor.
+  /// Calls cuMemObjGetRDMAToken() with CUOBJ_GET.  The returned token
+  /// string is the value for the x-amz-rdma-token HTTP header.
   ///
-  /// @param ptr         Destination pointer within the registered pool.
-  /// @param size        Expected byte size of the data.
-  /// @param offset      Object offset (reserved, default 0).
-  /// @param buf_offset  Buffer offset from base (default 0).
+  /// @param data_ptr  Destination pointer within the registered pool.
+  /// @param size      Expected byte size of the data to download.
   /// @returns The x-amz-rdma-token header value.
-  /// @throws std::runtime_error on failure or if no descriptor received.
-  std::string prepare_get(uintptr_t ptr, size_t size, int64_t offset = 0,
-                          int64_t buf_offset = 0);
+  /// @throws std::runtime_error on failure or if data_ptr is outside pool.
+  std::string prepare_get(uintptr_t data_ptr, size_t size);
 
   /// Check if the client is connected and ready for operations.
   ///
   /// @returns true if connected, false otherwise.
   bool is_connected() const;
-
-  /// Get the maximum callback chunk size for registered memory.
-  ///
-  /// If an I/O request exceeds this size, the callback will be invoked
-  /// multiple times (once per chunk).
-  ///
-  /// @param ptr  Start address of registered memory.
-  /// @returns Maximum callback size in bytes, or -1 on error.
-  ssize_t get_max_callback_size(uintptr_t ptr) const;
 
   /// Destroy the cuObject client.  Safe to call multiple times.
   ///
@@ -131,35 +116,23 @@ class CuObjectClient {
   int close() noexcept;
 
  private:
-  /// Static GET callback handed to the cuObject library.
-  /// Extracts the RDMA descriptor from cufileRDMAInfo_t.
-  static ssize_t get_callback(const void *handle, char *ptr, size_t size,
-                               loff_t offset,
-                               const cufileRDMAInfo_t *rdma_info);
-
-  /// Static PUT callback handed to the cuObject library.
-  /// Extracts the RDMA descriptor from cufileRDMAInfo_t.
-  static ssize_t put_callback(const void *handle, const char *ptr,
-                               size_t size, loff_t offset,
-                               const cufileRDMAInfo_t *rdma_info);
-
-  /// Patch the size field in an RDMA descriptor for PUT operations.
+  /// Generate an RDMA token for the given operation type.
   ///
-  /// The RDMA token format is "<proto>:<size_hex>:<rdma_fields...>".
-  /// This overwrites the size field (2nd colon-delimited field) with
-  /// zero-padded lowercase hex of the actual payload size, matching
-  /// the CRT cuObject plugin's behaviour.
-  static void patch_put_token_size(std::string &token, size_t payload_size);
+  /// Calls cuMemObjGetRDMAToken(), copies the descriptor string, then
+  /// frees the library allocation via cuMemObjPutRDMAToken().
+  ///
+  /// @param data_ptr  Pointer within the registered pool.
+  /// @param size      Byte size of the operation.
+  /// @param op_type   CUOBJ_GET or CUOBJ_PUT.
+  /// @returns The RDMA token string.
+  /// @throws std::runtime_error on failure.
+  std::string generate_token(uintptr_t data_ptr, size_t size, int op_type);
 
   std::unique_ptr<cuObjClient> client_;  ///< cuObject client instance
-  CUObjOps_t ops_{};  ///< Callback struct (must outlive client)
+  CUObjOps_t ops_{};  ///< Callback struct (required by constructor, unused)
 
-  /// Captured RDMA descriptor from the most recent callback invocation.
-  std::string captured_descriptor_;
-  /// Whether a callback was received during the last I/O operation.
-  bool descriptor_received_ = false;
-
-  std::mutex mutex_;  ///< Serialises prepare_put / prepare_get
+  uintptr_t pool_base_ = 0;  ///< Base address of the registered pool
+  size_t pool_size_ = 0;     ///< Byte size of the registered pool
 };
 
 }  // namespace cuobject

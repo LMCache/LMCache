@@ -42,21 +42,14 @@ PYBIND11_MODULE(lmcache_cuobject, m) {
            &lmcache::cuobject::CuObjectClient::deregister_pool,
            py::arg("ptr"), py::call_guard<py::gil_scoped_release>())
       .def("prepare_put", &lmcache::cuobject::CuObjectClient::prepare_put,
-           py::arg("ptr"), py::arg("size"),
-           py::arg("offset") = static_cast<int64_t>(0),
-           py::arg("buf_offset") = static_cast<int64_t>(0),
+           py::arg("data_ptr"), py::arg("size"),
            py::call_guard<py::gil_scoped_release>())
       .def("prepare_get", &lmcache::cuobject::CuObjectClient::prepare_get,
-           py::arg("ptr"), py::arg("size"),
-           py::arg("offset") = static_cast<int64_t>(0),
-           py::arg("buf_offset") = static_cast<int64_t>(0),
+           py::arg("data_ptr"), py::arg("size"),
            py::call_guard<py::gil_scoped_release>())
       .def("is_connected",
            &lmcache::cuobject::CuObjectClient::is_connected,
            py::call_guard<py::gil_scoped_release>())
-      .def("get_max_callback_size",
-           &lmcache::cuobject::CuObjectClient::get_max_callback_size,
-           py::arg("ptr"), py::call_guard<py::gil_scoped_release>())
       .def("close", &lmcache::cuobject::CuObjectClient::close,
            py::call_guard<py::gil_scoped_release>());
 }

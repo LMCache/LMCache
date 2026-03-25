@@ -40,7 +40,6 @@ def _make_fake_cpp_client():
     client.prepare_put = MagicMock(return_value="rdma-token-put")
     client.prepare_get = MagicMock(return_value="rdma-token-get")
     client.is_connected = MagicMock(return_value=True)
-    client.get_max_callback_size = MagicMock(return_value=1048576)
     client.close = MagicMock(return_value=CU_OBJ_SUCCESS)
     return client
 
@@ -90,6 +89,30 @@ class TestCuObjClientWrapperInit:
             with pytest.raises(ImportError, match="C\\+\\+ extension"):
                 CuObjClientWrapper(CuObjConfig())
 
+    # Scenario: CuObjConfig with custom NIC device is forwarded to the
+    # C++ client constructor via the proto parameter.
+    # Verification: The config's proto value is passed to CuObjectClient().
+    def test_custom_config_proto_forwarded(self):
+        fake_client = _make_fake_cpp_client()
+        custom_proto = 9999
+        with patch(
+            "lmcache.v1.storage_backend.connector.cuobject_bindings.CuObjectClient",
+            return_value=fake_client,
+        ) as mock_cls:
+            CuObjClientWrapper(CuObjConfig(proto=custom_proto))
+            mock_cls.assert_called_once_with(custom_proto)
+
+    # Scenario: Default CuObjConfig uses CUOBJ_PROTO_RDMA_DC_V1 (1001).
+    # Verification: CuObjectClient() is called with proto=1001.
+    def test_default_config_uses_rdma_dc_v1(self):
+        fake_client = _make_fake_cpp_client()
+        with patch(
+            "lmcache.v1.storage_backend.connector.cuobject_bindings.CuObjectClient",
+            return_value=fake_client,
+        ) as mock_cls:
+            CuObjClientWrapper()
+            mock_cls.assert_called_once_with(1001)
+
 
 class TestPoolRegistration:
     """Tests for register_pool / deregister_pool."""
@@ -138,22 +161,15 @@ class TestPreparePut:
         wrapper, _ = _build_wrapper(fake_client)
         token = wrapper.prepare_put(ptr=0x2000, size=1024)
         assert token == "rdma-token-abc"
-        fake_client.prepare_put.assert_called_once_with(0x2000, 1024, 0, 0)
+        fake_client.prepare_put.assert_called_once_with(0x2000, 1024)
 
     def test_prepare_put_failure_raises(self):
         fake_client = _make_fake_cpp_client()
-        fake_client.prepare_put.side_effect = RuntimeError("cuObjPut failed")
-        wrapper, _ = _build_wrapper(fake_client)
-        with pytest.raises(RuntimeError, match="cuObjPut failed"):
-            wrapper.prepare_put(ptr=0x2000, size=1024)
-
-    def test_prepare_put_no_callback_raises(self):
-        fake_client = _make_fake_cpp_client()
         fake_client.prepare_put.side_effect = RuntimeError(
-            "callback was not invoked"
+            "cuMemObjGetRDMAToken failed"
         )
         wrapper, _ = _build_wrapper(fake_client)
-        with pytest.raises(RuntimeError, match="callback was not invoked"):
+        with pytest.raises(RuntimeError, match="cuMemObjGetRDMAToken failed"):
             wrapper.prepare_put(ptr=0x2000, size=1024)
 
 
@@ -166,14 +182,39 @@ class TestPrepareGet:
         wrapper, _ = _build_wrapper(fake_client)
         token = wrapper.prepare_get(ptr=0x3000, size=2048)
         assert token == "rdma-get-token"
-        fake_client.prepare_get.assert_called_once_with(0x3000, 2048, 0, 0)
+        fake_client.prepare_get.assert_called_once_with(0x3000, 2048)
 
     def test_prepare_get_failure_raises(self):
         fake_client = _make_fake_cpp_client()
-        fake_client.prepare_get.side_effect = RuntimeError("cuObjGet failed")
+        fake_client.prepare_get.side_effect = RuntimeError(
+            "cuMemObjGetRDMAToken failed"
+        )
         wrapper, _ = _build_wrapper(fake_client)
-        with pytest.raises(RuntimeError, match="cuObjGet failed"):
+        with pytest.raises(RuntimeError, match="cuMemObjGetRDMAToken failed"):
             wrapper.prepare_get(ptr=0x3000, size=2048)
+
+
+class TestIsConnected:
+    """Tests for connection status checking."""
+
+    # Scenario: is_connected() delegates to the C++ client and returns True
+    # when the RDMA transport is operational.
+    # Verification: Return value matches what the C++ mock returns (True).
+    def test_is_connected_returns_true(self):
+        fake_client = _make_fake_cpp_client()
+        fake_client.is_connected.return_value = True
+        wrapper, _ = _build_wrapper(fake_client)
+        assert wrapper.is_connected() is True
+        fake_client.is_connected.assert_called_once()
+
+    # Scenario: is_connected() returns False when the C++ client reports
+    # that the RDMA connection is not established (e.g. NIC not available).
+    # Verification: Return value matches False from the C++ mock.
+    def test_is_connected_returns_false(self):
+        fake_client = _make_fake_cpp_client()
+        fake_client.is_connected.return_value = False
+        wrapper, _ = _build_wrapper(fake_client)
+        assert wrapper.is_connected() is False
 
 
 class TestParseRdmaReply:
@@ -290,6 +331,94 @@ class TestParseRdmaReply:
     def test_unrecognised_string_is_failure(self):
         assert CuObjClientWrapper.parse_rdma_reply("some-random-token") is False
 
+    # -- JSON non-dict values (arrays, strings, numbers) -----------------
+
+    # Scenario: The server sends a JSON array instead of a dict.
+    # json.loads succeeds but isinstance(data, dict) is False, so it falls
+    # through to numeric/keyword parsing.  "[1, 2, 3]" is not a valid
+    # keyword or number, so it should be treated as failure.
+    # Verification: Returns False for a JSON array.
+    def test_json_array_is_not_dict_treated_as_failure(self):
+        assert CuObjClientWrapper.parse_rdma_reply("[1, 2, 3]") is False
+
+    # Scenario: The server sends a bare JSON string "ok" (with quotes).
+    # json.loads succeeds with a str, not a dict, so it falls through to
+    # keyword parsing where the value (with quotes stripped by json.loads)
+    # would be "ok".  But since the original string is '"ok"', the keyword
+    # check operates on the stripped original.  Actually json.loads('"ok"')
+    # returns "ok", but since isinstance("ok", dict) is False, it falls
+    # through.  Then the stripped value '"ok"' is checked as keyword.
+    # The stripped input to keyword check is '"ok"' (with double quotes),
+    # which is not in _SUCCESS_KEYWORDS.
+    # Verification: '"ok"' (JSON string literal) is treated as failure
+    # because the keyword check sees the original input '"ok"' not the
+    # json-decoded "ok".
+    def test_json_bare_string_literal_is_failure(self):
+        assert CuObjClientWrapper.parse_rdma_reply('"ok"') is False
+
+    # -- JSON with message/msg field for failure diagnostics -------------
+
+    # Scenario: The server sends a JSON reply with an unrecognised status
+    # and a "message" field.  The _parse_json_reply method logs the message
+    # for debugging.
+    # Verification: Returns False and the message is included in the log.
+    def test_json_failure_with_message_field(self, caplog):
+        _logger = logging.getLogger(
+            "lmcache.v1.storage_backend.connector.cuobject_bindings"
+        )
+        _logger.addHandler(caplog.handler)
+        try:
+            result = CuObjClientWrapper.parse_rdma_reply(
+                '{"status": "timeout", "message": "RDMA transfer timed out"}'
+            )
+        finally:
+            _logger.removeHandler(caplog.handler)
+        assert result is False
+        assert "timeout" in caplog.text
+
+    # Scenario: Same as above but with "msg" key instead of "message".
+    # Verification: Returns False, the msg value appears in the log.
+    def test_json_failure_with_msg_field(self, caplog):
+        _logger = logging.getLogger(
+            "lmcache.v1.storage_backend.connector.cuobject_bindings"
+        )
+        _logger.addHandler(caplog.handler)
+        try:
+            result = CuObjClientWrapper.parse_rdma_reply(
+                '{"status": "aborted", "msg": "connection reset"}'
+            )
+        finally:
+            _logger.removeHandler(caplog.handler)
+        assert result is False
+        assert "aborted" in caplog.text
+
+    # -- JSON success with additional status keywords --------------------
+
+    # Scenario: Server sends "completed" status (not just "complete").
+    # Verification: Both "completed" and "done" are valid success keywords.
+    def test_json_status_completed(self):
+        assert CuObjClientWrapper.parse_rdma_reply('{"status": "completed"}') is True
+
+    def test_json_status_done(self):
+        assert CuObjClientWrapper.parse_rdma_reply('{"status": "done"}') is True
+
+    # -- JSON with case-insensitive status and whitespace ----------------
+
+    # Scenario: Status field has mixed case and leading/trailing whitespace.
+    # The code does .strip().lower() on the status value.
+    # Verification: " OK " is recognised as success after stripping.
+    def test_json_status_with_whitespace_and_case(self):
+        assert CuObjClientWrapper.parse_rdma_reply('{"status": " OK "}') is True
+
+    # -- None input (defensive) ------------------------------------------
+
+    # Scenario: Caller passes None instead of a string (e.g. header not
+    # present in the HTTP response).  parse_rdma_reply should handle it
+    # gracefully without raising.
+    # Verification: Returns False for None input.
+    def test_none_input_is_failure(self):
+        assert CuObjClientWrapper.parse_rdma_reply(None) is False
+
 
 class TestClose:
     """Tests for resource cleanup."""
@@ -319,6 +448,17 @@ class TestClose:
         finally:
             _logger.removeHandler(caplog.handler)
         assert "returned error 99" in caplog.text
+
+    # Scenario: __del__ triggers close() to release RDMA resources when
+    # the wrapper is garbage collected.  If close() was not already called
+    # explicitly, __del__ should call it.
+    # Verification: The C++ client's close() is called when __del__ runs.
+    def test_del_calls_close(self):
+        wrapper, client = _build_wrapper()
+        # Manually trigger __del__
+        wrapper.__del__()
+        client.close.assert_called_once()
+        assert wrapper._client is None
 
 
 if __name__ == "__main__":

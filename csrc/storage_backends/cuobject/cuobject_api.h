@@ -20,7 +20,6 @@
 #include <cuobjclient.h>
 
 #include <cstddef>
-#include <unistd.h>  // ssize_t, loff_t
 
 namespace lmcache {
 namespace cuobject {
@@ -37,6 +36,10 @@ constexpr int CU_OBJ_FAIL = 1;
 constexpr int CUOBJ_PROTO_RDMA_DC_V1 = 1001;
 
 constexpr size_t CUOBJ_MAX_MEMORY_REG_SIZE = 4ULL * 1024 * 1024 * 1024;
+
+// Operation types for cuMemObjGetRDMAToken().
+constexpr int CUOBJ_OP_GET = 0;  // CUOBJ_GET
+constexpr int CUOBJ_OP_PUT = 1;  // CUOBJ_PUT
 
 constexpr int CUOBJ_MEMORY_SYSTEM = 0;
 constexpr int CUOBJ_MEMORY_CUDA_MANAGED = 1;

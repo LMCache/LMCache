@@ -18,7 +18,7 @@ logger = init_logger(__name__)
 # is deferred and a clear error is raised at construction time.
 # ---------------------------------------------------------------------------
 try:
-    # Third Party
+    # First Party
     from lmcache.lmcache_cuobject import CuObjectClient  # pybind11 C++ class
 except ImportError:
     CuObjectClient = None  # type: ignore[assignment,misc]
@@ -65,10 +65,10 @@ class CuObjClientWrapper:
 
     Thread safety
     -------------
-    ``prepare_put`` and ``prepare_get`` are serialised with a C++ mutex
-    so that the callback-captured descriptor cannot be clobbered by a
-    concurrent call.  ``register_pool`` / ``deregister_pool`` are
-    expected to be called only during init / shutdown.
+    ``prepare_put`` and ``prepare_get`` call ``cuMemObjGetRDMAToken``
+    which writes to a caller-provided output pointer, so concurrent
+    calls from different threads each get their own descriptor.
+    No internal mutex is needed.
     """
 
     def __init__(self, config: Optional[CuObjConfig] = None):
@@ -123,54 +123,46 @@ class CuObjClientWrapper:
         ptr, size = handle
         rc = self._client.deregister_pool(ptr)
         if rc != CU_OBJ_SUCCESS:
-            logger.warning(
-                f"cuMemObjPutDescriptor returned error {rc} "
-                f"(ptr=0x{ptr:x})"
-            )
+            logger.warning(f"cuMemObjPutDescriptor returned error {rc} (ptr=0x{ptr:x})")
         else:
             logger.info(
                 f"Deregistered RDMA memory pool: ptr=0x{ptr:x}, size={size} bytes"
             )
 
-    def prepare_put(
-        self, ptr: int, size: int, offset: int = 0, buf_offset: int = 0
-    ) -> str:
-        """Prepare an RDMA-accelerated PUT operation.
+    def prepare_put(self, ptr: int, size: int) -> str:
+        """Generate an RDMA token for a PUT operation.
 
-        Internally calls ``cuObjPut`` which invokes the PUT callback with
-        the RDMA descriptor.  The descriptor's size field is patched with
-        the actual payload size (matching CRT plugin behaviour).
+        Calls ``cuMemObjGetRDMAToken`` with ``CUOBJ_PUT``.  The C++
+        layer automatically computes the buffer offset from the
+        registered pool base address.
 
         Args:
-            ptr: Data pointer of the ``MemoryObj`` to upload.
+            ptr: Data pointer of the ``MemoryObj`` to upload (must be
+                 within the registered pool).
             size: Byte size of the data.
-            offset: Object offset (reserved, default 0).
-            buf_offset: Buffer offset from base (default 0).
 
         Returns:
             The ``x-amz-rdma-token`` header value as a string.
         """
-        return self._client.prepare_put(ptr, size, offset, buf_offset)
+        return self._client.prepare_put(ptr, size)
 
-    def prepare_get(
-        self, ptr: int, size: int, offset: int = 0, buf_offset: int = 0
-    ) -> str:
-        """Prepare an RDMA-accelerated GET operation.
+    def prepare_get(self, ptr: int, size: int) -> str:
+        """Generate an RDMA token for a GET operation.
 
-        Internally calls ``cuObjGet`` which invokes the GET callback with
-        the RDMA descriptor.
+        Calls ``cuMemObjGetRDMAToken`` with ``CUOBJ_GET``.  The C++
+        layer automatically computes the buffer offset from the
+        registered pool base address.
 
         Args:
             ptr: Destination pointer where the server will
-                 ``RDMA_WRITE`` data.
+                 ``RDMA_WRITE`` data (must be within the registered
+                 pool).
             size: Expected byte size of the data.
-            offset: Object offset (reserved, default 0).
-            buf_offset: Buffer offset from base (default 0).
 
         Returns:
             The ``x-amz-rdma-token`` header value as a string.
         """
-        return self._client.prepare_get(ptr, size, offset, buf_offset)
+        return self._client.prepare_get(ptr, size)
 
     def is_connected(self) -> bool:
         """Check if the cuObject client is connected and ready.
@@ -179,20 +171,6 @@ class CuObjClientWrapper:
             True if connected, False otherwise.
         """
         return self._client.is_connected()
-
-    def get_max_callback_size(self, ptr: int) -> int:
-        """Get the maximum callback chunk size for registered memory.
-
-        If an I/O request exceeds this size, the callback will be invoked
-        multiple times (once per chunk).
-
-        Args:
-            ptr: Start address of registered memory.
-
-        Returns:
-            Maximum callback size in bytes, or -1 on error / unavailable.
-        """
-        return self._client.get_max_callback_size(ptr)
 
     # Keywords that unambiguously indicate RDMA success.
     _SUCCESS_KEYWORDS: frozenset = frozenset(
