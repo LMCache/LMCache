@@ -3,7 +3,6 @@
 import torch
 
 # First Party
-from lmcache.integration.vllm.utils import get_vllm_torch_dev
 from lmcache.utils import EngineType
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.gpu_connector.gpu_connectors import GPUConnectorInterface
@@ -59,6 +58,7 @@ def CreateGPUConnector(
             )
     elif engine == EngineType.VLLM:
         # First Party
+        from lmcache.integration.vllm.utils import get_vllm_torch_dev
         from lmcache.v1.gpu_connector.gpu_connectors import (
             VLLMBufferLayerwiseGPUConnector,
             VLLMPagedMemGPUConnectorV2,

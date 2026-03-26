@@ -18,7 +18,10 @@ import torch
 from lmcache.logging import init_logger
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.config_base import apply_remote_configs, fetch_remote_config
-from lmcache.v1.gpu_connector.utils import LayoutHints
+
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.v1.gpu_connector.utils import LayoutHints
 
 logger = init_logger(__name__)
 ENGINE_NAME = "vllm-instance"
@@ -33,13 +36,13 @@ def is_false(value: str) -> bool:
     return value.lower() in ("false", "0", "no", "n", "off")
 
 
-def _vllm_layout_hints() -> LayoutHints:
+def _vllm_layout_hints() -> "LayoutHints":
     """Build layout_hints dict by querying vLLM at runtime."""
-    hints: LayoutHints = {}
+    hints: dict[str, str] = {}
     kv_layout = try_get_vllm_kv_cache_layout()
     if kv_layout is not None:
         hints["kv_layout"] = kv_layout
-    return hints
+    return hints  # type: ignore[return-value]
 
 
 def try_get_vllm_kv_cache_layout() -> Literal["NHD", "HND"] | None:

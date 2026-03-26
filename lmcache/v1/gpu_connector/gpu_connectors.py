@@ -7,7 +7,6 @@ import abc
 import torch
 
 # First Party
-from lmcache.integration.vllm.utils import ENGINE_NAME, _vllm_layout_hints
 from lmcache.logging import init_logger
 from lmcache.utils import EngineType, _lmcache_nvtx_annotate
 from lmcache.v1.compute.blend.utils import LMCBlenderBuilder
@@ -227,6 +226,9 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
             return self.kv_cache_pointers_on_gpu[idx]
 
         # contiguous before pointer capture or format discovery
+        # First Party
+        from lmcache.integration.vllm.utils import _vllm_layout_hints
+
         layout_hints = _vllm_layout_hints()
         kv_caches = ensure_contiguous_kv_caches(
             kv_caches, kv_layout=layout_hints.get("kv_layout")
@@ -440,6 +442,9 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
         assert self.metadata.kv_layer_groups_manager.kv_layer_groups
 
         # permute to contiguous before capturing pointers or doing format discovery
+        # First Party
+        from lmcache.integration.vllm.utils import _vllm_layout_hints
+
         layout_hints = _vllm_layout_hints()
         self.kvcaches = ensure_contiguous_kv_caches(
             self.kvcaches, kv_layout=layout_hints.get("kv_layout")
@@ -679,6 +684,9 @@ class VLLMBufferLayerwiseGPUConnector(GPUConnectorInterface):
             # is okay since fragmentation shouldn't exist in the `gpu_buffer_allocator`
             # in layerwise mode.
 
+            # First Party
+            from lmcache.integration.vllm.utils import _vllm_layout_hints
+
             layout_hints = _vllm_layout_hints()
             kv_caches = ensure_contiguous_kv_caches(
                 kv_caches, kv_layout=layout_hints.get("kv_layout")
@@ -749,6 +757,9 @@ class VLLMBufferLayerwiseGPUConnector(GPUConnectorInterface):
 
         if self.fused_rotary_emb is None and self.cache_positions:
             # TODO(Jiayi): Make this more elegant
+            # First Party
+            from lmcache.integration.vllm.utils import ENGINE_NAME
+
             self.lmc_model = LMCBlenderBuilder.get(ENGINE_NAME).layerwise_model
             self.fused_rotary_emb = self.lmc_model.fused_rotary_emb
 
@@ -1082,6 +1093,9 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
             # NOTE (Jiayi): Using the exact number of tokens in the first layer
             # is okay since fragmentation shouldn't exist in the `gpu_buffer_allocator`
             # in layerwise mode.
+
+            # First Party
+            from lmcache.integration.vllm.utils import _vllm_layout_hints
 
             layout_hints = _vllm_layout_hints()
             kv_caches = ensure_contiguous_kv_caches(
