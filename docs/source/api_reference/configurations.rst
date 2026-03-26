@@ -266,6 +266,9 @@ Settings for disaggregated prefill functionality. The latest/default PD is imple
    * - pd_proxy_port
      - LMCACHE_PD_PROXY_PORT
      - Port for proxy server. Required for senders to connect to inform the proxy when transfer to decoder has been completed
+   * - pd_skip_proxy_notification
+     - LMCACHE_PD_SKIP_PROXY_NOTIFICATION
+     - When true, the sender skips ZMQ proxy notification after KV transfer and does not require pd_proxy_host/pd_proxy_port. Use when an external router (e.g., vLLM Production Stack) manages the prefill-decode flow via HTTP. Values: true/false. Default: false
 
 P2P Backend Configurations
 --------------------------

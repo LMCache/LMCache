@@ -149,6 +149,7 @@ class PDBackend(AllocatorBackendInterface):
         self.running = True
 
         self.tp_rank = metadata.worker_id
+        self.config = config
 
         self.pd_config = PDConfig.from_cache_engine_config(
             config, metadata, self.tp_rank
@@ -322,14 +323,22 @@ class PDBackend(AllocatorBackendInterface):
     # Prefiller functions
     ############################################################
     def _init_sender(self):
-        proxy_url = f"{self.pd_config.proxy_host}:{self.pd_config.proxy_port}"
-        self.proxy_side_channel = get_zmq_socket(
-            self.zmq_context,
-            proxy_url,
-            "tcp",
-            zmq.PUSH,
-            "connect",
-        )
+        self.skip_proxy_notification = self.config.pd_skip_proxy_notification
+        if self.skip_proxy_notification:
+            logger.info(
+                "pd_skip_proxy_notification=True, "
+                "skipping ZMQ PUSH proxy notification setup."
+            )
+            self.proxy_side_channel = None
+        else:
+            proxy_url = f"{self.pd_config.proxy_host}:{self.pd_config.proxy_port}"
+            self.proxy_side_channel = get_zmq_socket(
+                self.zmq_context,
+                proxy_url,
+                "tcp",
+                zmq.PUSH,
+                "connect",
+            )
 
     def _ensure_peer_connection(
         self,
@@ -471,9 +480,10 @@ class PDBackend(AllocatorBackendInterface):
 
         if transfer_spec.is_last_prefill:
             # Notify the proxy that the transfer is done
-            notif_msg = ProxyNotif(req_id=transfer_spec.req_id)
-            notif_msg_bytes = msgspec.msgpack.encode(notif_msg)
-            self.proxy_side_channel.send(notif_msg_bytes)
+            if self.proxy_side_channel is not None:
+                notif_msg = ProxyNotif(req_id=transfer_spec.req_id)
+                notif_msg_bytes = msgspec.msgpack.encode(notif_msg)
+                self.proxy_side_channel.send(notif_msg_bytes)
 
         # Call completion callback for all keys after transfer completes
         if on_complete_callback is not None:
