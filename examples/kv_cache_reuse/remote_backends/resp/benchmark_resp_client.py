@@ -12,7 +12,7 @@ import asyncio
 import time
 
 # First Party
-from lmcache.v1.storage_backend.resp_client import RESPClient
+from lmcache.v1.storage_backend.native_clients.resp_client import RESPClient
 
 
 async def run_benchmark(

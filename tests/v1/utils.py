@@ -67,6 +67,26 @@ def has_cufile() -> bool:
     return True
 
 
+def has_hipfile() -> bool:
+    """
+    True only when AMD hipFile is available:
+    - python package `hipfile` importable
+    - dynamic library `libhipfile.so` loadable
+    """
+    try:
+        # Third Party
+        import hipfile  # noqa: F401
+    except Exception:
+        return False
+
+    try:
+        ctypes.CDLL("libhipfile.so")
+    except OSError:
+        return False
+
+    return True
+
+
 def recover_engine_states(engine):
     engine.gpu_connector.kv_cache_pointers_on_gpu = {}
 

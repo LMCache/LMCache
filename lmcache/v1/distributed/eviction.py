@@ -108,3 +108,6 @@ class EvictionPolicy(L1ManagerListener):
 
     def on_l1_keys_deleted_by_manager(self, keys: list[ObjectKey]):
         self.on_keys_removed(keys)
+
+    def on_l1_keys_finish_write_and_reserve_read(self, keys: list[ObjectKey]):
+        self.on_keys_created(keys)

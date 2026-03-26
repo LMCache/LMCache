@@ -61,8 +61,8 @@ class EvictionConfig:
     The configuration for eviction policies.
     """
 
-    eviction_policy: Literal["LRU"]
-    """ The eviction policy to use. Currently only 'LRU' is supported. """
+    eviction_policy: Literal["LRU", "noop"]
+    """ The eviction policy to use. """
 
     trigger_watermark: float = field(default=0.8)
     """ The memory usage watermark to trigger eviction (0.0 to 1.0). """
@@ -87,6 +87,12 @@ class StorageManagerConfig:
         default_factory=lambda: L2AdaptersConfig([])
     )
     """ The configuration for L2 adapters. """
+
+    store_policy: str = "default"
+    """ The L2 store policy name. """
+
+    prefetch_policy: str = "default"
+    """ The L2 prefetch policy name. """
 
 
 def add_storage_manager_args(
@@ -126,7 +132,7 @@ def add_storage_manager_args(
     )
     memory_group.add_argument(
         "--l1-use-lazy",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
         default=True,
         help="Whether to use lazy loading for L1 memory. (Default is True)",
     )
@@ -167,9 +173,9 @@ def add_storage_manager_args(
     eviction_group.add_argument(
         "--eviction-policy",
         type=str,
-        choices=["LRU"],
+        choices=["LRU", "noop"],
         required=True,
-        help="The eviction policy to use. Currently only 'LRU' is supported.",
+        help="The eviction policy to use ('LRU' or 'noop').",
     )
     eviction_group.add_argument(
         "--eviction-trigger-watermark",
@@ -184,6 +190,42 @@ def add_storage_manager_args(
         default=0.2,
         help="The fraction of memory to evict when triggered (0.0 to 1.0). "
         "Default is 0.2.",
+    )
+
+    # L2 Policies
+    # Import here to break circular dependency:
+    # config.py <-> storage_controllers (via eviction_controller)
+    # Safe because config.py is fully initialized by the time this
+    # function is called.
+    # First Party
+    from lmcache.v1.distributed.storage_controllers.prefetch_policy import (
+        get_registered_prefetch_policies,
+    )
+    from lmcache.v1.distributed.storage_controllers.store_policy import (
+        get_registered_store_policies,
+    )
+    import lmcache.v1.distributed.storage_controllers  # noqa: F401
+
+    policy_group = parser.add_argument_group(
+        "L2 Policies", "Store and prefetch policy selection for L2 adapters"
+    )
+    policy_group.add_argument(
+        "--l2-store-policy",
+        type=str,
+        choices=get_registered_store_policies(),
+        default="default",
+        help="L2 store policy. Determines which adapters receive each key "
+        "and whether keys are deleted from L1 after L2 store. "
+        "Default is 'default' (store all keys to all adapters, keep L1).",
+    )
+    policy_group.add_argument(
+        "--l2-prefetch-policy",
+        type=str,
+        choices=get_registered_prefetch_policies(),
+        default="default",
+        help="L2 prefetch policy. Determines which adapter loads each key "
+        "when multiple adapters have it. "
+        "Default is 'default' (pick the first adapter by index).",
     )
 
     # Adapter config
@@ -246,6 +288,8 @@ def parse_args_to_config(
         l1_manager_config=l1_manager_config,
         eviction_config=eviction_config,
         l2_adapter_config=l2_adapter_config,
+        store_policy=args.l2_store_policy,
+        prefetch_policy=args.l2_prefetch_policy,
     )
 
 

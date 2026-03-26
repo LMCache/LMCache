@@ -109,6 +109,11 @@ class StoreListener(L1ManagerListener):
     def on_l1_keys_deleted_by_manager(self, keys: list[ObjectKey]) -> None:
         pass
 
+    def on_l1_keys_finish_write_and_reserve_read(self, keys: list[ObjectKey]) -> None:
+        # No op here because we don't want to trigger store when the
+        # objects are prefetched to L1.
+        pass
+
     def close(self) -> None:
         """Close the eventfd."""
         os.close(self._event_fd)

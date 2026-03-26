@@ -19,8 +19,11 @@ from lmcache.logging import init_logger
 from lmcache.utils import EngineType, _lmcache_nvtx_annotate
 from lmcache.v1.gpu_connector.utils import (
     discover_gpu_kv_format,
+    get_attention_backend,
     get_block_size,
+    get_concrete_gpu_kv_shape,
     get_dtype,
+    get_gpu_kv_shape_description,
     get_hidden_dim_size,
     get_num_blocks,
     get_num_layers,
@@ -94,6 +97,14 @@ class GPUCacheContext:
             self.cuda_stream_.cuda_stream, self.device_.index
         )
 
+        _, high_priority = torch.cuda.Stream.priority_range()
+        self.high_priority_cuda_stream_ = torch.cuda.Stream(
+            device=self.device_, priority=high_priority
+        )
+        self.high_priority_cupy_stream_ = cupy.cuda.ExternalStream(
+            self.high_priority_cuda_stream_.cuda_stream, self.device_.index
+        )
+
         # Extra initialization
         self.cupy_stream_.launch_host_func(
             lambda logger: logger.info(
@@ -133,6 +144,14 @@ class GPUCacheContext:
         return self.cupy_stream_
 
     @property
+    def high_priority_stream(self) -> torch.cuda.Stream:
+        return self.high_priority_cuda_stream_
+
+    @property
+    def high_priority_cupy_stream(self) -> cupy.cuda.Stream:
+        return self.high_priority_cupy_stream_
+
+    @property
     def block_size(self) -> int:
         """
         Returns the block size (number of tokens per block)
@@ -166,6 +185,26 @@ class GPUCacheContext:
         Returns whether the model uses MLA
         """
         return self.is_mla_
+
+    @property
+    def gpu_kv_format_name(self) -> str:
+        """Returns the GPU KV format enum name (e.g. ``'NL_X_TWO_NB_BS_NH_HS'``)."""
+        return self.gpu_kv_format_.name
+
+    @property
+    def gpu_kv_shape(self) -> str:
+        """Returns a human-readable shape description of the GPU KV cache layout."""
+        return get_gpu_kv_shape_description(self.gpu_kv_format_)
+
+    @property
+    def attention_backend(self) -> str:
+        """Returns the attention backend name."""
+        return get_attention_backend(self.gpu_kv_format_)
+
+    @property
+    def concrete_gpu_kv_shape(self) -> str:
+        """Returns the GPU KV shape with actual numeric values substituted."""
+        return get_concrete_gpu_kv_shape(self.kv_caches_, self.gpu_kv_format_)
 
     def get_tmp_gpu_buffer(self, num_tokens: int) -> torch.Tensor:
         """
@@ -225,6 +264,14 @@ class PlainGPUCacheContext:
             self._cuda_stream.cuda_stream, self._device.index
         )
 
+        _, high_priority = torch.cuda.Stream.priority_range()
+        self._high_priority_cuda_stream = torch.cuda.Stream(
+            device=self._device, priority=high_priority
+        )
+        self._high_priority_cupy_stream = cupy.cuda.ExternalStream(
+            self._high_priority_cuda_stream.cuda_stream, self._device.index
+        )
+
         # Extra initialization
         self._cupy_stream.launch_host_func(
             lambda logger: logger.info(
@@ -266,6 +313,14 @@ class PlainGPUCacheContext:
     @property
     def cupy_stream(self) -> cupy.cuda.Stream:
         return self._cupy_stream
+
+    @property
+    def high_priority_stream(self) -> torch.cuda.Stream:
+        return self._high_priority_cuda_stream
+
+    @property
+    def high_priority_cupy_stream(self) -> cupy.cuda.Stream:
+        return self._high_priority_cupy_stream
 
     @property
     def num_layers(self) -> int:

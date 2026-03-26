@@ -21,11 +21,9 @@ nixl = pytest.importorskip("nixl")
 # First Party
 from lmcache.v1.distributed.api import ObjectKey  # noqa: E402
 from lmcache.v1.distributed.internal_api import L1MemoryDesc  # noqa: E402
-from lmcache.v1.distributed.l2_adapters.config import (  # noqa: E402
-    NixlStoreL2AdapterConfig,
-)
 from lmcache.v1.distributed.l2_adapters.nixl_store_l2_adapter import (  # noqa: E402
     NixlStoreL2Adapter,
+    NixlStoreL2AdapterConfig,
 )
 from lmcache.v1.memory_management import (  # noqa: E402
     MemoryFormat,

@@ -681,3 +681,37 @@ class TestValidateAndSetConfigValueTypeConversion:
         config = LMCacheEngineConfig.from_defaults()
         result = validate_and_set_config_value(config, "extra_config", "{invalid_json")
         assert result is False
+
+
+def test_update_config_from_env_calls_validate():
+    """Test that update_config_from_env() calls validate() method.
+
+    This is a regression test for the issue where _validate_config at line 504
+    was not being called after commit 3d88cee. The issue was that the custom
+    _update_config_from_env method was removed from namespace_extras, causing
+    the config to use the base implementation which doesn't call validate().
+    """
+    # Set up environment for PD mode which requires validation
+    os.environ["LMCACHE_ENABLE_PD"] = "true"
+    os.environ["LMCACHE_PD_ROLE"] = "sender"
+    os.environ["LMCACHE_PD_BUFFER_SIZE"] = "1024"
+    os.environ["LMCACHE_PD_BUFFER_DEVICE"] = "cpu"
+    os.environ["LMCACHE_SAVE_UNFULL_CHUNK"] = "false"
+
+    try:
+        # Create a config and update from env
+        config = LMCacheEngineConfig.from_defaults()
+        config.update_config_from_env()
+
+        # If validate() was called, save_unfull_chunk should be auto-set to True
+        # because PD mode requires it (see line 558-564 in config.py)
+        assert config.save_unfull_chunk is True, (
+            "validate() was not called - save_unfull_chunk should be True for PD mode"
+        )
+    finally:
+        # Clean up environment
+        del os.environ["LMCACHE_ENABLE_PD"]
+        del os.environ["LMCACHE_PD_ROLE"]
+        del os.environ["LMCACHE_PD_BUFFER_SIZE"]
+        del os.environ["LMCACHE_PD_BUFFER_DEVICE"]
+        del os.environ["LMCACHE_SAVE_UNFULL_CHUNK"]

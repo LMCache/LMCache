@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from typing import TYPE_CHECKING, Any, Tuple
+from typing import TYPE_CHECKING, Any, Optional, Tuple, Union
 
 # Third Party
 import torch
@@ -48,6 +48,9 @@ def assert_layerwise_gpu_connector(gpu_connector: "GPUConnectorInterface"):
         VLLMBufferLayerwiseGPUConnector,
         VLLMPagedMemLayerwiseGPUConnector,
     )
+    from lmcache.v1.gpu_connector.xpu_connectors import (
+        VLLMPagedMemLayerwiseXPUConnector,
+    )
 
     assert isinstance(
         gpu_connector,
@@ -55,61 +58,104 @@ def assert_layerwise_gpu_connector(gpu_connector: "GPUConnectorInterface"):
             VLLMPagedMemLayerwiseGPUConnector,
             VLLMBufferLayerwiseGPUConnector,
             SGLangLayerwiseGPUConnector,
+            VLLMPagedMemLayerwiseXPUConnector,
         ),
     )
+
+
+def get_gpu_kv_shape_description(gpu_kv_format: "lmc_ops.GPUKVFormat") -> str:
+    """Return a human-readable shape description for the GPU KV format.
+
+    Uses short names matching the ``GPUKVFormat`` enum convention:
+    NB=num_blocks, NL=num_layers, BS=block_size, NH=num_heads,
+    HS=head_size, PBS=page_buffer_size (NB*BS).
+    """
+    _SHAPE_DESCRIPTIONS: dict["lmc_ops.GPUKVFormat", str] = {
+        lmc_ops.GPUKVFormat.NB_NL_TWO_BS_NH_HS: "[NB, NL, 2, BS, NH, HS]",
+        lmc_ops.GPUKVFormat.NL_X_TWO_NB_BS_NH_HS: "NL x [2, NB, BS, NH, HS]",
+        lmc_ops.GPUKVFormat.NL_X_NB_TWO_BS_NH_HS: "NL x [NB, 2, BS, NH, HS]",
+        lmc_ops.GPUKVFormat.NL_X_NB_BS_HS: "NL x [NB, BS, HS]",
+        lmc_ops.GPUKVFormat.TWO_X_NL_X_NBBS_NH_HS: "2 x NL x [PBS, NH, HS]",
+        lmc_ops.GPUKVFormat.NL_X_NBBS_ONE_HS: "NL x [PBS, 1, HS]",
+    }
+    return _SHAPE_DESCRIPTIONS.get(gpu_kv_format, f"Unknown ({gpu_kv_format})")
+
+
+def get_attention_backend(gpu_kv_format: "lmc_ops.GPUKVFormat") -> str:
+    """Return the attention backend name for the GPU KV format."""
+    _ATTENTION_BACKENDS: dict["lmc_ops.GPUKVFormat", str] = {
+        lmc_ops.GPUKVFormat.NB_NL_TWO_BS_NH_HS: "vLLM CROSS_LAYER",
+        lmc_ops.GPUKVFormat.NL_X_TWO_NB_BS_NH_HS: "vLLM non-MLA flash attention",
+        lmc_ops.GPUKVFormat.NL_X_NB_TWO_BS_NH_HS: "vLLM non-MLA flash infer",
+        lmc_ops.GPUKVFormat.NL_X_NB_BS_HS: "vLLM MLA",
+        lmc_ops.GPUKVFormat.TWO_X_NL_X_NBBS_NH_HS: (
+            "SGLang MHA (flash attention and flash infer)"
+        ),
+        lmc_ops.GPUKVFormat.NL_X_NBBS_ONE_HS: "SGLang MLA",
+    }
+    return _ATTENTION_BACKENDS.get(gpu_kv_format, f"Unknown ({gpu_kv_format})")
+
+
+def get_concrete_gpu_kv_shape(
+    kv_caches: Any, gpu_kv_format: "lmc_ops.GPUKVFormat"
+) -> str:
+    """Return the shape with actual numeric values substituted.
+
+    For example, instead of ``NL x [2, NB, BS, NH, HS]``
+    this returns ``80 x [2, 2048, 128, 8, 128]``.
+    """
+    nl = get_num_layers(kv_caches, gpu_kv_format)
+    hs = get_head_size(kv_caches, gpu_kv_format)
+
+    fmt = gpu_kv_format
+    F = lmc_ops.GPUKVFormat
+
+    if fmt == F.NB_NL_TWO_BS_NH_HS:
+        nb = get_num_blocks(kv_caches, fmt)
+        bs = get_block_size(kv_caches, fmt)
+        nh = get_num_heads(kv_caches, fmt)
+        return f"[{nb}, {nl}, 2, {bs}, {nh}, {hs}]"
+
+    if fmt == F.NL_X_TWO_NB_BS_NH_HS:
+        nb = get_num_blocks(kv_caches, fmt)
+        bs = get_block_size(kv_caches, fmt)
+        nh = get_num_heads(kv_caches, fmt)
+        return f"{nl} x [2, {nb}, {bs}, {nh}, {hs}]"
+
+    if fmt == F.NL_X_NB_TWO_BS_NH_HS:
+        nb = get_num_blocks(kv_caches, fmt)
+        bs = get_block_size(kv_caches, fmt)
+        nh = get_num_heads(kv_caches, fmt)
+        return f"{nl} x [{nb}, 2, {bs}, {nh}, {hs}]"
+
+    if fmt == F.NL_X_NB_BS_HS:
+        nb = get_num_blocks(kv_caches, fmt)
+        bs = get_block_size(kv_caches, fmt)
+        return f"{nl} x [{nb}, {bs}, {hs}]"
+
+    if fmt == F.TWO_X_NL_X_NBBS_NH_HS:
+        pbs = get_page_buffer_size(kv_caches, fmt)
+        nh = get_num_heads(kv_caches, fmt)
+        return f"2 x {nl} x [{pbs}, {nh}, {hs}]"
+
+    if fmt == F.NL_X_NBBS_ONE_HS:
+        pbs = get_page_buffer_size(kv_caches, fmt)
+        return f"{nl} x [{pbs}, 1, {hs}]"
+
+    return f"Unknown ({gpu_kv_format})"
 
 
 def legible_print_gpu_kv_format(gpu_kv_format: "lmc_ops.GPUKVFormat"):
     """
     Print the GPU KV Format in a legible way
     """
-    if gpu_kv_format == lmc_ops.GPUKVFormat.NB_NL_TWO_BS_NH_HS:
-        logger.info(
-            "GPU KV Format: "
-            "[num_blocks, num_layers, 2, block_size, num_heads, head_size]"
-        )
-        logger.info("Currently used by:\n  - vLLM CROSS_LAYER mode")
-
-    elif gpu_kv_format == lmc_ops.GPUKVFormat.NL_X_TWO_NB_BS_NH_HS:
-        logger.info(
-            "GPU KV Format: "
-            "List[num_layers] of "
-            "[2, num_blocks, block_size, num_heads, head_size]"
-        )
-        logger.info("Currently used by:\n  - vLLM non-MLA flash attention")
-
-    elif gpu_kv_format == lmc_ops.GPUKVFormat.NL_X_NB_TWO_BS_NH_HS:
-        logger.info(
-            "GPU KV Format: "
-            "List[num_layers] of "
-            "[num_blocks, 2, block_size, num_heads, head_size]"
-        )
-        logger.info("Currently used by:\n  - vLLM non-MLA flash infer")
-
-    elif gpu_kv_format == lmc_ops.GPUKVFormat.NL_X_NB_BS_HS:
-        logger.info(
-            "GPU KV Format: List[num_layers] of [num_blocks, block_size, head_size]"
-        )
-        logger.info("Currently used by:\n  - vLLM MLA")
-
-    elif gpu_kv_format == lmc_ops.GPUKVFormat.TWO_X_NL_X_NBBS_NH_HS:
-        logger.info(
-            "GPU KV Format: "
-            "List[2] -> List[num_layers] of "
-            "[page_buffer_size, num_heads, head_size]"
-        )
-        logger.info(
-            "Currently used by:\n  - SGLang MHA (flash attention and flash infer)"
-        )
-
-    elif gpu_kv_format == lmc_ops.GPUKVFormat.NL_X_NBBS_ONE_HS:
-        logger.info(
-            "GPU KV Format: List[num_layers] of [page_buffer_size, 1, head_size]"
-        )
-        logger.info("Currently used by:\n  - SGLang MLA")
-
-    else:
+    shape = get_gpu_kv_shape_description(gpu_kv_format)
+    backend = get_attention_backend(gpu_kv_format)
+    if shape.startswith("Unknown"):
         logger.warning(f"Unknown GPU KV Format: {gpu_kv_format}")
+    else:
+        logger.info("GPU KV Format: %s", shape)
+        logger.info("Currently used by:\n  - %s", backend)
 
 
 def _list_depth_tensor_dim(kv_caches: Any) -> Tuple[int, int]:
@@ -443,3 +489,114 @@ def get_dtype(kv_caches: Any, gpu_kv_format: "lmc_ops.GPUKVFormat") -> torch.dty
         return kv_caches[0].dtype
     else:
         raise ValueError(f"Unknown GPU KV Format: {gpu_kv_format}")
+
+
+def _split_token2d_kv(token2d: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Accepts either:
+      - [2, T, D]
+      - [T, 2, D]
+    Returns:
+      - k_tok: [T, D]
+      - v_tok: [T, D]
+    """
+    if token2d.dim() != 3:
+        raise ValueError(f"Expected token2d dim=3, got {token2d.shape}")
+    if token2d.shape[0] == 2:  # [2, T, D]
+        return token2d[0], token2d[1]
+    if token2d.shape[1] == 2:  # [T, 2, D]
+        return token2d[:, 0, :], token2d[:, 1, :]
+    raise ValueError(f"Unrecognized token2d layout: {token2d.shape}")
+
+
+def _get_head_size_view(
+    kv_cache_layer: Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]],
+    *,
+    use_mla: bool,
+    gpu_kv_format: Optional["lmc_ops.GPUKVFormat"] = None,
+) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+    """
+    Returns flattened views for index_copy/index_select.
+
+    If gpu_kv_format is provided, use it to interpret tensor layout explicitly.
+    If not provided, fall back to current structural behavior:
+      - MLA: expects Tensor [P, B, HS]
+      - Non-MLA: expects either
+          * Tensor [2, P, B, NH, HS]  OR
+          * (k, v) tuple each [P, B, NH, HS]
+        (and also supports [P, 2, B, NH, HS] as a safe extension)
+    """
+    # -------------------------
+    # MLA
+    # -------------------------
+    if use_mla:
+        if not isinstance(kv_cache_layer, torch.Tensor):
+            raise ValueError("MLA expects kv_cache_layer as Tensor")
+        if kv_cache_layer.dim() != 3:
+            raise ValueError(f"MLA expects 3D [P,B,HS], got {kv_cache_layer.shape}")
+        p, b, hs = kv_cache_layer.shape
+        return kv_cache_layer.view(p * b, hs)
+
+    # -------------------------
+    # non-MLA (K/V)
+    # -------------------------
+    # If already provided (k, v) in canonical per-layer form, no format needed.
+    if not isinstance(kv_cache_layer, torch.Tensor):
+        k, v = kv_cache_layer
+        if k.dim() != 4 or v.dim() != 4:
+            raise ValueError(f"Expected (k,v) 4D [P,B,NH,HS], got {k.shape}, {v.shape}")
+        p, b, nh, hs = k.shape
+        if v.shape != (p, b, nh, hs):
+            raise ValueError(f"k/v shape mismatch: {k.shape} vs {v.shape}")
+        return k.view(p * b, nh * hs), v.view(p * b, nh * hs)
+
+    t = kv_cache_layer
+    if t.dim() != 5:
+        raise ValueError(f"Expected 5D tensor for non-MLA, got {t.shape}")
+
+    # If we have the format enum, decode explicitly.
+    if gpu_kv_format is not None:
+        if gpu_kv_format == lmc_ops.GPUKVFormat.NL_X_TWO_NB_BS_NH_HS:
+            # per-layer: [2, NB, BS, NH, HS]
+            if t.shape[0] != 2:
+                raise ValueError(
+                    f"{gpu_kv_format} expects [2,NB,BS,NH,HS], got {t.shape}"
+                )
+            k, v = t[0], t[1]  # [NB,BS,NH,HS]
+
+        elif gpu_kv_format == lmc_ops.GPUKVFormat.NL_X_NB_TWO_BS_NH_HS:
+            # per-layer: [NB, 2, BS, NH, HS]
+            if t.shape[1] != 2:
+                raise ValueError(
+                    f"{gpu_kv_format} expects [NB,2,BS,NH,HS], got {t.shape}"
+                )
+            k, v = t[:, 0], t[:, 1]  # [NB,BS,NH,HS]
+
+        else:
+            # Other formats are either MLA-only or require upstream normalization.
+            raise NotImplementedError(
+                f"gpu_kv_format={gpu_kv_format} not supported in non-MLA path here. "
+                "Normalize to (k,v) tuple [NB,BS,NH,HS] per-layer before calling."
+            )
+
+    else:
+        # No enum available: Assumed [2,P,B,H,D] (or [2,NB,BS,NH,HS] per-layer).
+        # Also accept [P,2,B,H,D] (or [NB,2,BS,NH,HS]) to be more robust.
+        if t.shape[0] == 2:
+            k, v = t[0], t[1]
+        elif t.shape[1] == 2:
+            k, v = t[:, 0], t[:, 1]
+        else:
+            raise ValueError(
+                f"gpu_kv_format is None and tensor does not look like stacked KV. "
+                f"Expected axis0==2 or axis1==2, got {t.shape}"
+            )
+
+    if k.dim() != 4 or v.dim() != 4:
+        raise ValueError(f"Expected k/v 4D [NB,BS,NH,HS], got {k.shape}, {v.shape}")
+
+    nb, bs, nh, hs = k.shape
+    if v.shape != (nb, bs, nh, hs):
+        raise ValueError(f"k/v shape mismatch after decode: {k.shape} vs {v.shape}")
+
+    return k.view(nb * bs, nh * hs), v.view(nb * bs, nh * hs)

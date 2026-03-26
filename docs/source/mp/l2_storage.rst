@@ -5,9 +5,10 @@ LMCache multiprocess mode supports a two-tier storage architecture:
 
 - **L1 (in-memory)** -- Fast CPU memory managed by the L1 Manager.  All KV
   cache chunks live here during active use.
-- **L2 (persistent)** -- Durable storage backends accessed through NIXL.
-  The StoreController asynchronously pushes data from L1 to L2, and the
-  PrefetchController loads data from L2 back into L1 on cache misses.
+- **L2 (persistent)** -- Durable storage backends (NIXL-based or plain
+  file-system).  The StoreController asynchronously pushes data from L1
+  to L2, and the PrefetchController loads data from L2 back into L1 on
+  cache misses.
 
 .. contents::
    :local:
@@ -94,6 +95,39 @@ The ``OBJ`` backend (object store) does not require ``file_path``.
     # OBJ backend
     --l2-adapter '{"type": "nixl_store", "backend": "OBJ", "backend_params": {}, "pool_size": 32}'
 
+``fs`` -- File-system backed storage
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+A pure file-system L2 adapter using async I/O (``aiofiles``).  Each KV cache
+object is stored as a raw ``.data`` file whose name encodes the full
+``ObjectKey``.  Does **not** require NIXL -- works on any POSIX file system.
+
+**Required fields:**
+
+- ``base_path``: Directory for storing KV cache files.
+
+**Optional fields:**
+
+- ``relative_tmp_dir``: Relative sub-directory for temporary files during
+  writes (atomic rename on completion).
+- ``read_ahead_size``: Trigger file-system read-ahead by reading this many
+  bytes first (positive integer, optional).
+- ``use_odirect``: ``true`` or ``false`` (default ``false``) -- bypass the
+  page cache via ``O_DIRECT``.
+
+**Configuration examples:**
+
+.. code-block:: bash
+
+    # Basic FS adapter
+    --l2-adapter '{"type": "fs", "base_path": "/data/lmcache/l2"}'
+
+    # With temp directory
+    --l2-adapter '{"type": "fs", "base_path": "/data/lmcache/l2", "relative_tmp_dir": ".tmp"}'
+
+    # With O_DIRECT for bypassing page cache
+    --l2-adapter '{"type": "fs", "base_path": "/data/lmcache/l2", "use_odirect": true}'
+
 ``mock`` -- Mock adapter for testing
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -122,6 +156,63 @@ argument.  Adapters are used in the order they are specified.  The
     # SSD (fast, smaller) + NVMe GDS (larger capacity)
     --l2-adapter '{"type": "nixl_store", "backend": "POSIX", "backend_params": {"file_path": "/data/ssd/l2", "use_direct_io": "false"}, "pool_size": 64}' \
     --l2-adapter '{"type": "nixl_store", "backend": "GDS", "backend_params": {"file_path": "/data/nvme/l2", "use_direct_io": "true"}, "pool_size": 128}'
+
+Store and Prefetch Policies
+----------------------------
+
+The **store policy** controls how keys flow from L1 to L2: which adapters
+receive each key and whether keys are deleted from L1 after a successful
+L2 store.  The **prefetch policy** controls how keys flow from L2 back to
+L1: when multiple adapters have the same key, the policy decides which
+adapter loads it.
+
+Select policies via CLI:
+
+.. code-block:: bash
+
+    --l2-store-policy default \
+    --l2-prefetch-policy default
+
+**Built-in policies:**
+
+.. list-table::
+   :header-rows: 1
+   :widths: 15 15 70
+
+   * - Flag
+     - Name
+     - Behaviour
+   * - ``--l2-store-policy``
+     - ``default``
+     - Store all keys to all adapters.  Never delete from L1.
+   * - ``--l2-store-policy``
+     - ``noop``
+     - Buffer-only mode.  Store all keys to all adapters, then
+       **delete them from L1** immediately.  Pair with
+       ``--eviction-policy noop`` to avoid useless LRU overhead.
+   * - ``--l2-prefetch-policy``
+     - ``default``
+     - For each key, pick the first (lowest-indexed) adapter that has it.
+
+Buffer-Only Mode
+~~~~~~~~~~~~~~~~~
+
+When L1 is used purely as a write buffer (all data lives in L2), use
+``--l2-store-policy noop`` together with ``--eviction-policy noop``.
+This combination deletes keys from L1 as soon as they are stored to L2
+and disables the LRU eviction tracker entirely, reducing memory and CPU
+overhead.
+
+.. code-block:: bash
+
+    --eviction-policy noop \
+    --l2-store-policy noop \
+    --l2-prefetch-policy default
+
+Policies are extensible -- new policies can be added by creating a file
+in ``storage_controllers/`` and calling ``register_store_policy()`` or
+``register_prefetch_policy()`` at import time.  See the design doc
+``l2_adapters/design_docs/overall.md`` for details.
 
 Verifying L2 Storage
 --------------------
