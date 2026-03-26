@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from typing import TYPE_CHECKING, Optional, Tuple
+from typing import TYPE_CHECKING, Literal, Optional, Tuple
 import hashlib
 import os
 import string
@@ -19,6 +19,10 @@ from lmcache.logging import init_logger
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.config_base import apply_remote_configs, fetch_remote_config
 
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.v1.gpu_connector.utils import LayoutHints
+
 logger = init_logger(__name__)
 ENGINE_NAME = "vllm-instance"
 
@@ -30,6 +34,42 @@ _config_lock = threading.Lock()
 def is_false(value: str) -> bool:
     """Check if the given string value is equivalent to 'false'."""
     return value.lower() in ("false", "0", "no", "n", "off")
+
+
+def vllm_layout_hints() -> "LayoutHints":
+    """Build layout_hints dict by querying vLLM at runtime."""
+    hints: dict[str, str] = {}
+    kv_layout = try_get_vllm_kv_cache_layout()
+    if kv_layout is not None:
+        hints["kv_layout"] = kv_layout
+    return hints  # type: ignore[return-value]
+
+
+def try_get_vllm_kv_cache_layout() -> Literal["NHD", "HND"] | None:
+    """Try to query the KV cache layout from vLLM at runtime.
+
+    Returns ``"NHD"`` or ``"HND"`` if vLLM is available and the layout
+    has been configured, otherwise ``None``.
+
+    Please only call this where vllm is available (i.e. not in the MP server)
+    We will print an error if we try to get vllm kv layout where vllm
+    is not available.
+    """
+
+    # Third Party
+    try:
+        # Third Party
+        from vllm.v1.attention.backends.utils import (  # type: ignore[import-untyped]
+            get_kv_cache_layout,
+        )
+
+        return get_kv_cache_layout()
+    except Exception:
+        logger.error(
+            "vLLM is not available but tried to query kv cache "
+            "layout information, cannot get KV cache layout"
+        )
+        return None
 
 
 def lmcache_get_or_create_config() -> LMCacheEngineConfig:

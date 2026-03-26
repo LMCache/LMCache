@@ -2408,6 +2408,32 @@ class CuFileMemoryAllocator(GPUMemoryAllocator):
         return "CuFileMemoryAllocator"
 
 
+class HipFileMemoryAllocator(GPUMemoryAllocator):
+    def __init__(self, size: int, device=None):
+        # HACK: hipfile import is placed here to avoid import errors on
+        # hardware without GPUDirect Storage / hipFile support.
+        # Third Party
+        from hipfile.bindings import hipFileBufDeregister, hipFileBufRegister
+
+        self.hipFileBufDeregister = hipFileBufDeregister
+        if device is None:
+            if torch.cuda.is_available():
+                # TODO: On ROCm, PyTorch still uses the CUDA API internally
+                device = f"cuda:{torch.cuda.current_device()}"
+            else:
+                device = "cpu:0"
+
+        super().__init__(size, device, align_bytes=4096)
+        self.base_pointer = self.tensor.data_ptr()
+        hipFileBufRegister(ctypes.c_void_p(self.base_pointer), size, flags=0)
+
+    def __del__(self):
+        self.hipFileBufDeregister(ctypes.c_void_p(self.base_pointer))
+
+    def __str__(self):
+        return "HipFileMemoryAllocator"
+
+
 class PagedCpuGpuMemoryAllocator(MemoryAllocatorInterface):
     """
     Paged Memory Allocator for both CPU and GPU memory.

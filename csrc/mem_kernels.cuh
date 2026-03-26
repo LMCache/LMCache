@@ -72,6 +72,20 @@ enum class GPUKVFormat : int {
   used by:
   - SGLang MLA
   */
+
+  NL_X_TWO_NB_NH_BS_HS = 6,
+  /*
+  used by:
+  - vLLM non-MLA flash attention (HND layout)
+  physical shape per layer: [2, num_blocks, num_heads, block_size, head_size]
+  */
+
+  NL_X_NB_TWO_NH_BS_HS = 7,
+  /*
+  used by:
+  - vLLM non-MLA flash infer (HND layout)
+  physical shape per layer: [num_blocks, 2, num_heads, block_size, head_size]
+  */
 };
 
 void multi_layer_kv_transfer(
@@ -79,7 +93,7 @@ void multi_layer_kv_transfer(
     const torch::Tensor& slot_mapping, const torch::Device& paged_memory_device,
     const int page_buffer_size, const TransferDirection direction,
     const GPUKVFormat gpu_kv_format, const int block_size = 0,
-    const int skip_prefix_n_tokens = 0);
+    const int head_size = 0, const int skip_prefix_n_tokens = 0);
 
 // collapses to multi_layer_kv_transfer for MLA
 void multi_layer_kv_transfer_unilateral(
