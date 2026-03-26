@@ -1085,6 +1085,14 @@ class LMCacheConnectorV1Impl:
 
         if self.kv_role == "kv_consumer":
             # Don't do save if the role is kv_consumer
+            # But still need to unpin the kv caches according to req_id
+            # to balance the pin count from contains()
+            assert self.lmcache_engine is not None, (
+                "LMCacheEngine must be initialized to unpin requests."
+            )
+            for request in connector_metadata.requests:
+                self.lmcache_engine.lookup_unpin(request.req_id)
+
             return
 
         if self.use_layerwise:

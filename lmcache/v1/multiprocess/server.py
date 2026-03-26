@@ -29,6 +29,7 @@ from lmcache.v1.gpu_connector.gpu_ops import (
     lmcache_memcpy_async_d2h,
     lmcache_memcpy_async_h2d,
 )
+from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.mp_observability.config import (
     PrometheusConfig,
@@ -202,6 +203,7 @@ class MPCacheEngine:
         kv_caches: KVCache,
         model_name: str,
         world_size: int,
+        layout_hints: LayoutHints,
     ) -> None:
         """
         Registers the KV cache tensors for a given GPU instance ID.
@@ -211,8 +213,14 @@ class MPCacheEngine:
             kv_caches (KVCache): The KV cache tensor wrappers from vLLM.
             model_name (str): The name of the model associated with this KV cache.
             world_size (int): The world size associated with this KV cache.
+            layout_hints: See :class:`LayoutHints`.  Forwarded to
+                :class:`GPUCacheContext` for GPU KV format detection.
         """
-        gpu_context = GPUCacheContext(kv_caches, self.chunk_size)
+        gpu_context = GPUCacheContext(
+            kv_caches,
+            self.chunk_size,
+            layout_hints=layout_hints or None,
+        )
         self.gpu_contexts[instance_id] = gpu_context
         self.gpu_context_meta[instance_id] = (model_name, world_size)
         logger.info(
@@ -584,7 +592,8 @@ class MPCacheEngine:
             return self._register_prefetch_job(
                 _PrefetchJob(
                     handle=PrefetchHandle(
-                        request_id=-1,
+                        prefetch_request_id=-1,
+                        external_request_id=key.request_id,
                         l1_prefix_hit_count=0,
                         total_requested_keys=0,
                         submit_time=time.monotonic(),
@@ -602,7 +611,8 @@ class MPCacheEngine:
             return self._register_prefetch_job(
                 _PrefetchJob(
                     handle=PrefetchHandle(
-                        request_id=-1,
+                        prefetch_request_id=-1,
+                        external_request_id=key.request_id,
                         l1_prefix_hit_count=0,
                         total_requested_keys=0,
                         submit_time=time.monotonic(),
@@ -614,7 +624,10 @@ class MPCacheEngine:
         obj_keys = ipc_key_to_object_keys(key, chunk_hashes)
 
         handle = self.storage_manager.submit_prefetch_task(
-            obj_keys, layout_desc, extra_count=extra_count
+            obj_keys,
+            layout_desc,
+            extra_count=extra_count,
+            external_request_id=key.request_id,
         )
         return self._register_prefetch_job(
             _PrefetchJob(

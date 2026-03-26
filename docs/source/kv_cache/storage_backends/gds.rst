@@ -9,7 +9,8 @@ Overview
 This backend will work with any file system, whether local, remote, and remote
 with GDS-based optimizations. Remote file systems allow for multiple LMCache
 instances to share data seamlessly. The GDS (GPU-Direct Storage) optimizations
-are used for for zero-copy I/O from GPU memory to storage systems.
+are used for zero-copy I/O from GPU memory to storage systems. Supports both
+NVIDIA cuFile and AMD hipFile for GPU-direct storage.
 
 
 Ways to configure LMCache GDS Backend
@@ -55,6 +56,62 @@ is registered in VRAM so options like ``--gpu-memory-utilization`` from ``vllm``
 when setting it. For example, a good rule of thumb for H100 which generally has 80GiBs of VRAM would
 be to start with 8GiB and set ``--gpu-memory-utilization 0.85`` and depending on your workflow fine-tune
 it from there.
+
+
+Using AMD hipFile
+-----------------
+
+.. note::
+
+   hipFile is alpha software and has been tested on limited hardware.
+   For full installation details, see the
+   `hipFile install guide <https://github.com/ROCm/hipFile/blob/develop/INSTALL.md>`__.
+
+**Prerequisites:**
+
+- **ROCm >= 7.2** with ``amdgpu-dkms >= 30.20.1``
+  (see the `ROCm quick start installation guide <https://rocm.docs.amd.com/projects/install-on-linux/en/latest/install/quick-start.html>`__)
+- **Supported storage:** local NVMe drives only
+- **Supported filesystems:** ext4 (mounted with ``data=ordered``) and xfs
+- **Kernel:** ``CONFIG_PCI_P2PDMA`` must be enabled
+
+**Quick install (Ubuntu 24.04):**
+
+.. code-block:: bash
+
+    sudo apt install libmount-dev wget
+
+    # Install nightly hipFile packages
+    wget https://github.com/ROCm/hipFile/releases/download/nightly/hipfile_0.2.0.70200-nightly.9999.24.04_amd64.deb
+    wget https://github.com/ROCm/hipFile/releases/download/nightly/hipfile-dev_0.2.0.70200-nightly.9999.24.04_amd64.deb
+    sudo dpkg -i hipfile-dev_0.2.0.70200-nightly.9999.24.04_amd64.deb hipfile_0.2.0.70200-nightly.9999.24.04_amd64.deb
+
+You can verify that the HIP libraries and kernel support AIS (AMD Infinity Storage) by running:
+
+.. code-block:: bash
+
+    /opt/rocm/bin/ais-check
+
+Successful output will show ``True`` for ``Kernel P2PDMA support``, ``HIP runtime``, and ``amdgpu``.
+
+**LMCache configuration:**
+
+To use AMD hipFile instead of NVIDIA cuFile, add the following to your configuration:
+
+**Environment Variables:**
+
+.. code-block:: bash
+
+    export LMCACHE_EXTRA_CONFIG='{"use_hipfile": true}'
+
+**Configuration File:**
+
+.. code-block:: yaml
+
+    extra_config:
+        use_hipfile: true
+
+Note: The ``cufile_buffer_size`` configuration is used for both cuFile and hipFile buffers.
 
 
 Setup Example
