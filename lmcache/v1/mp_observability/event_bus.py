@@ -9,7 +9,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import Callable
+from typing import Any, Callable
 import collections
 import threading
 import time
@@ -118,6 +118,16 @@ class EventBus:
         subscriber.register(self)
         with self._lock:
             self._registered_subscribers.append(subscriber)
+
+    def publish_on_stream(self, stream: Any, event: Event) -> None:
+        """Schedule :meth:`publish` as a CUDA host function on *stream*.
+
+        No-op when the EventBus is disabled, avoiding the overhead of
+        scheduling a host function on the CUDA stream entirely.
+        """
+        if not self._config.enabled:
+            return
+        stream.launch_host_func(self.publish, event)
 
     def publish(self, event: Event) -> None:
         """Submit an event (hot path — non-blocking).
