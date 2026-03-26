@@ -421,6 +421,13 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
         assert device is not None
         return cls(metadata, device, use_gpu)
 
+    def _get_first_attn_tensor(self) -> torch.Tensor:
+        """Get the first attention tensor from kvcaches, skipping
+        non-tensor entries (recurrent/mamba layers)."""
+        t = next((kv for kv in self.kvcaches if isinstance(kv, torch.Tensor)), None)
+        assert t is not None, "No attention tensors in kvcaches"
+        return t
+
     def _initialize_kv_cache_pointers(self):
         if self.init:
             return
@@ -483,8 +490,7 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
         slot_mapping: torch.Tensor = kwargs["slot_mapping"]
         self.initialize_kvcaches_ptr(**kwargs)
         assert self.kvcaches is not None
-        first_tensor = next(kv for kv in self.kvcaches if isinstance(kv, torch.Tensor))
-        assert first_tensor.device == self.device
+        assert self._get_first_attn_tensor().device == self.device
         self._initialize_kv_cache_pointers()
         assert self.group_kv_cache_pointers_on_gpu is not None
 
@@ -517,8 +523,7 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
         slot_mapping: torch.Tensor = kwargs["slot_mapping"]
         self.initialize_kvcaches_ptr(**kwargs)
         assert self.kvcaches is not None
-        first_tensor = next(kv for kv in self.kvcaches if isinstance(kv, torch.Tensor))
-        assert first_tensor.device == self.device
+        assert self._get_first_attn_tensor().device == self.device
         self._initialize_kv_cache_pointers()
         assert self.group_kv_cache_pointers_on_gpu is not None
         with torch.cuda.stream(self.store_stream):
