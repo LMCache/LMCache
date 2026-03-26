@@ -17,7 +17,13 @@ from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.metadata import LMCacheMetadata
-from lmcache.v1.storage_backend.gds_backend import GdsBackend
+from lmcache.v1.storage_backend.gds_backend import (
+    _METADATA_FILE_SUFFIX,
+    _METADATA_VERSION,
+    GdsBackend,
+    UnsupportedMetadataVersion,
+    pack_metadata,
+)
 from tests.v1.utils import create_test_memory_obj, has_cufile
 
 
@@ -187,6 +193,182 @@ class TestGdsBackend:
         key = create_test_key(1)
         result = gds_backend.get_blocking(key)
         assert result is None
+
+    # Error handling tests
+    def test_try_to_read_metadata_file_not_found(self, gds_backend, temp_gds_path):
+        """Test that FileNotFoundError is handled gracefully."""
+        key = create_test_key(400)
+
+        # Create a path that doesn't exist
+        result = gds_backend._try_to_read_metadata(key)
+        assert result is None
+
+    def test_try_to_read_metadata_permission_error(self, gds_backend, temp_gds_path):
+        """Test that PermissionError is handled gracefully."""
+        key = create_test_key(401)
+        path, subdir_key, l1_dir, l2_dir = gds_backend._key_to_path(key)
+        metadata_path = path + _METADATA_FILE_SUFFIX
+
+        # Create metadata file
+        os.makedirs(os.path.join(temp_gds_path, l1_dir, l2_dir), exist_ok=True)
+        memory_obj = create_test_memory_obj(device="cuda")
+        metadata = pack_metadata(
+            memory_obj.tensor,
+            fmt=memory_obj.metadata.fmt,
+            lmcache_version=str(_METADATA_VERSION),
+        )
+        with open(metadata_path, "wb") as f:
+            f.write(metadata)
+
+        # Mock _read_metadata to raise PermissionError
+        original_read_metadata = gds_backend._read_metadata
+
+        def failing_read_metadata(*args, **kwargs):
+            raise PermissionError("Simulated permission denied")
+
+        gds_backend._read_metadata = failing_read_metadata
+
+        try:
+            result = gds_backend._try_to_read_metadata(key)
+            assert result is None
+        finally:
+            gds_backend._read_metadata = original_read_metadata
+
+    def test_try_to_read_metadata_unsupported_version(self, gds_backend, temp_gds_path):
+        """Test that UnsupportedMetadataVersion is handled gracefully."""
+        key = create_test_key(402)
+        path, subdir_key, l1_dir, l2_dir = gds_backend._key_to_path(key)
+        metadata_path = path + _METADATA_FILE_SUFFIX
+
+        os.makedirs(os.path.join(temp_gds_path, l1_dir, l2_dir), exist_ok=True)
+
+        # Mock _read_metadata to raise UnsupportedMetadataVersion
+        original_read_metadata = gds_backend._read_metadata
+
+        def failing_read_metadata(*args, **kwargs):
+            raise UnsupportedMetadataVersion("Unsupported version")
+
+        gds_backend._read_metadata = failing_read_metadata
+
+        # Create a dummy file so os.path.exists returns True
+        with open(metadata_path, "wb") as f:
+            f.write(b"dummy")
+
+        try:
+            result = gds_backend._try_to_read_metadata(key)
+            assert result is None
+        finally:
+            gds_backend._read_metadata = original_read_metadata
+
+    def test_try_to_read_metadata_io_error(self, gds_backend, temp_gds_path):
+        """Test that OSError/IOError is handled gracefully."""
+        key = create_test_key(403)
+        path, subdir_key, l1_dir, l2_dir = gds_backend._key_to_path(key)
+        metadata_path = path + _METADATA_FILE_SUFFIX
+
+        os.makedirs(os.path.join(temp_gds_path, l1_dir, l2_dir), exist_ok=True)
+
+        # Mock _read_metadata to raise IOError
+        original_read_metadata = gds_backend._read_metadata
+
+        def failing_read_metadata(*args, **kwargs):
+            raise IOError("Simulated I/O error")
+
+        gds_backend._read_metadata = failing_read_metadata
+
+        # Create a dummy file
+        with open(metadata_path, "wb") as f:
+            f.write(b"dummy")
+
+        try:
+            result = gds_backend._try_to_read_metadata(key)
+            assert result is None
+        finally:
+            gds_backend._read_metadata = original_read_metadata
+
+    def test_try_to_read_metadata_generic_exception(self, gds_backend, temp_gds_path):
+        """Test that generic exceptions are handled gracefully."""
+        key = create_test_key(404)
+        path, subdir_key, l1_dir, l2_dir = gds_backend._key_to_path(key)
+        metadata_path = path + _METADATA_FILE_SUFFIX
+
+        os.makedirs(os.path.join(temp_gds_path, l1_dir, l2_dir), exist_ok=True)
+
+        # Mock _read_metadata to raise a generic exception
+        original_read_metadata = gds_backend._read_metadata
+
+        def failing_read_metadata(*args, **kwargs):
+            raise RuntimeError("Unexpected error")
+
+        gds_backend._read_metadata = failing_read_metadata
+
+        # Create a dummy file
+        with open(metadata_path, "wb") as f:
+            f.write(b"dummy")
+
+        try:
+            result = gds_backend._try_to_read_metadata(key)
+            assert result is None
+        finally:
+            gds_backend._read_metadata = original_read_metadata
+
+    @pytest.mark.asyncio
+    async def test_async_save_bytes_to_disk_write_error_handling(
+        self, gds_backend, temp_gds_path
+    ):
+        """Test error handling when GDS write operation fails."""
+        key = create_test_key(300)
+        memory_obj = create_test_memory_obj(device="cuda")
+        memory_obj.ref_count_up()
+
+        # Mock _save_gds to raise an exception
+        original_save_gds = gds_backend._save_gds
+
+        def failing_save_gds(*args, **kwargs):
+            raise IOError("Simulated GDS write failure")
+
+        gds_backend._save_gds = failing_save_gds
+
+        try:
+            # Call should not raise, but should handle error gracefully
+            await gds_backend._async_save_bytes_to_disk(key, memory_obj)
+
+            # Key should not be in cache after failed write
+            assert not gds_backend.contains(key)
+        finally:
+            gds_backend._save_gds = original_save_gds
+            memory_obj.ref_count_down()
+
+    @pytest.mark.asyncio
+    async def test_async_save_bytes_metadata_write_failure(
+        self, gds_backend, temp_gds_path
+    ):
+        """
+        Test that metadata write failures during task execution trigger cache cleanup.
+        """
+        key = create_test_key(500)
+        memory_obj = create_test_memory_obj(device="cuda")
+        memory_obj.ref_count_up()
+
+        # Mock save_metadata to raise an exception during execution
+        async def failing_save_metadata(path, tmp, metadata):
+            raise IOError("Simulated metadata write failure")
+
+        with mock.patch(
+            "lmcache.v1.storage_backend.gds_backend.save_metadata",
+            side_effect=failing_save_metadata,
+        ):
+            try:
+                await gds_backend._async_save_bytes_to_disk(key, memory_obj)
+
+                # Wait for the background task to complete and exception to be handled
+                await asyncio.sleep(0.2)
+
+                # Key should be removed from hot_cache after metadata write failure
+                with gds_backend.hot_lock:
+                    assert key not in gds_backend.hot_cache
+            finally:
+                memory_obj.ref_count_down()
 
     def test_close(self, gds_backend):
         # Should not raise
