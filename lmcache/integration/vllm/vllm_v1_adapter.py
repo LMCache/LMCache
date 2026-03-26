@@ -3,6 +3,7 @@
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Generator, Optional, Union
+import hashlib
 import os
 
 # Third Party
@@ -90,6 +91,11 @@ class DisaggSpec:
 tmp_disagg_tracker: dict[str, DisaggSpec] = {}
 
 
+def _cache_salt_tag_value(cache_salt: str) -> str:
+    """Convert a request cache salt into a backend-safe LMCache tag value."""
+    return hashlib.sha256(cache_salt.encode("utf-8")).hexdigest()
+
+
 def extract_request_configs(
     sampling_params: SamplingParams,
     cache_salt: Optional[str] = None,
@@ -105,7 +111,7 @@ def extract_request_configs(
     if cache_salt is not None:
         if request_configs is None:
             request_configs = {}
-        request_configs["lmcache.tag.cache_salt"] = cache_salt
+        request_configs["lmcache.tag.cachesalt"] = _cache_salt_tag_value(cache_salt)
     return request_configs
 
 
@@ -833,6 +839,7 @@ class LMCacheConnectorV1Impl:
                         kvcaches=kvcaches,
                         slot_mapping=slot_mapping[:lmcache_cached_tokens],
                         vllm_cached_tokens=request.load_spec.vllm_cached_tokens,
+                        request_configs=request.request_configs,
                     )
                 else:
                     layerwise_retriever = self.lmcache_engine.retrieve_layer(
@@ -841,6 +848,7 @@ class LMCacheConnectorV1Impl:
                         kvcaches=kvcaches,
                         slot_mapping=slot_mapping[:lmcache_cached_tokens],
                         vllm_cached_tokens=request.load_spec.vllm_cached_tokens,
+                        request_configs=request.request_configs,
                         sync=sync,
                     )
                     # NOTE: retrieve for two layers at the first layer
@@ -1081,6 +1089,7 @@ class LMCacheConnectorV1Impl:
                     slot_mapping=slot_mapping,
                     offset=skip_leading_tokens,
                     sync=is_first,
+                    request_configs=request.request_configs,
                     req_id=request.req_id,
                 )
                 self._layerwise_save_storers[request.req_id] = layerwise_storer
@@ -1486,9 +1495,7 @@ class LMCacheConnectorV1Impl:
 
             original_request = self._unfinished_requests.get(request.req_id)
             cache_salt = (
-                original_request.cache_salt
-                if original_request is not None
-                else None
+                original_request.cache_salt if original_request is not None else None
             )
 
             request_tracker = RequestTracker.from_new_request(
