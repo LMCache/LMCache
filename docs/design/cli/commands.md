@@ -44,6 +44,7 @@ ZMQ-only.
 ```bash
 lmcache server \
     --engine-type blend --host 0.0.0.0 --port 5555 \
+    --max-gpu-workers 2 \
     --l1-size-gb 60 --eviction-policy LRU \
     --no-http  # opt out of HTTP frontend
 ```
@@ -89,9 +90,9 @@ consolidated view.
 Pure liveness check for both targets. Returns OK/FAIL with round-trip time,
 measuring only the network round-trip excluding local Python overhead.
 
-**`ping kvcache`** -- single `NOOP` round-trip over ZMQ:
+**`ping kvcache`** -- pings the LMCache server process via HTTP `/api/healthcheck`:
 ```bash
-$ lmcache ping kvcache --url localhost:5555
+$ lmcache ping kvcache --url http://localhost:8080
 
 ======= Ping KV Cache =======
 Status:                  OK
@@ -100,7 +101,7 @@ Round trip time (ms):    0.42
 
 ```
 
-**`ping engine`** -- single `/api/healthcheck` round-trip over HTTP:
+**`ping engine`** -- pings the vLLM server process via HTTP `/health`:
 ```bash
 $ lmcache ping engine --url http://localhost:8000
 
@@ -303,7 +304,7 @@ lmcache/cli/
 | Phase | Scope |
 |-------|-------|
 | **0** | CLI framework (explicit registration, `Metrics`), `mock` example command, entry point — see [framework-and-metrics.md](framework-and-metrics.md) |
-| **1** | `server`, `ping kvcache`, `kvcache clear`, `kvcache end-session`, `describe kvcache` |
+| **1** | **`server`** (done), `ping kvcache`, `kvcache clear`, `kvcache end-session`, `describe kvcache` |
 | **2** | `ping engine`, `query engine`, `query kvcache`, `bench engine`, `bench kvcache`, `describe engine`, corpora |
 | **3** | `kvcache evict` (future) |
 

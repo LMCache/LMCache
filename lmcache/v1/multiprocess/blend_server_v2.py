@@ -364,7 +364,11 @@ class BlendEngineV2(MPCacheEngine):
         for group in groups:
             chunk_hashes = [r.hash for r in group]
             obj_keys = ipc_key_to_object_keys(key, chunk_hashes)
-            handle = self.storage_manager.submit_prefetch_task(obj_keys, layout_desc)
+            handle = self.storage_manager.submit_prefetch_task(
+                obj_keys,
+                layout_desc,
+                external_request_id=key.request_id,
+            )
             prefetch_handles.append(handle)
 
             logger.debug(
@@ -758,7 +762,6 @@ def run_cache_server(
     server = MessageQueueServer(
         bind_url=f"tcp://{mp_config.host}:{mp_config.port}",
         context=context,
-        max_workers=mp_config.max_workers,
     )
 
     # Add handlers for original server
@@ -795,6 +798,29 @@ def run_cache_server(
         server, RequestType.CB_RETRIEVE_PRE_COMPUTED_V2, engine.cb_retrieve_pre_computed
     )
     add_handler_helper(server, RequestType.CB_STORE_FINAL, engine.cb_store_final)
+
+    # Assign thread pools
+    server.add_affinity_thread_pool(
+        [
+            RequestType.STORE,
+            RequestType.RETRIEVE,
+            RequestType.CB_STORE_PRE_COMPUTED,
+            RequestType.CB_RETRIEVE_PRE_COMPUTED_V2,
+            RequestType.CB_STORE_FINAL,
+        ],
+        max_workers=mp_config.max_gpu_workers,
+    )
+    server.add_normal_thread_pool(
+        [
+            RequestType.LOOKUP,
+            RequestType.QUERY_PREFETCH_STATUS,
+            RequestType.FREE_LOOKUP_LOCKS,
+            RequestType.END_SESSION,
+            RequestType.CLEAR,
+            RequestType.CB_LOOKUP_PRE_COMPUTED_V2,
+        ],
+        max_workers=mp_config.max_cpu_workers,
+    )
 
     logger.info(
         "LMCache ZMQ cache server is running on tcp://%s:%d",

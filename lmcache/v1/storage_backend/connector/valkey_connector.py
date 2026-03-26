@@ -1,400 +1,627 @@
 # SPDX-License-Identifier: Apache-2.0
+"""
+ValkeyConnector — high-throughput Valkey connector using the GLIDE sync
+client (standalone or cluster) with a ThreadPoolExecutor and per-thread clients.
+
+This replaces the legacy async ValkeyConnector / ValkeyClusterConnector
+that used the async GLIDE client with 2-key storage.  The implementation
+is shared with ``sync_valkey_connector.SyncValkeyConnector`` (which
+registers on the ``valkey-sync://`` scheme as a backward-compat alias).
+
+Design choices:
+- N worker threads, each with its own GLIDE sync client
+  (``GlideClient`` in standalone mode, ``GlideClusterClient`` in cluster mode)
+  via ``threading.local()``, enabling true parallel I/O when the GIL is
+  released during FFI calls.
+- Direct ``memoryview`` access to pinned CPU memory — no shared-memory
+  arena or cross-process copies needed since threads share the parent's
+  address space.
+- Single-key storage (like RESPConnector) to halve Valkey round-trips
+  compared to the legacy 2-key metadata/kv_bytes split.
+- Priority scheduling via ``AsyncPQExecutor`` (PEEK > PREFETCH > GET > PUT)
+  ensures latency-sensitive lookups are not delayed behind bulk writes,
+  matching the priority scheme used by ``RESPConnector``.
+
+Migration notes from the old ValkeyConnector:
+- Standalone mode (default) uses ``GlideClient`` and supports ``database_id``.
+- Cluster mode (``valkey_mode: "cluster"``) uses ``GlideClusterClient`` which
+  auto-discovers cluster topology from a single seed node.
+
+Requires ``valkey-glide`` with PRs #5492 (zero-copy SET) and #5493 (buffer GET).
+"""
+
 # Standard
+from concurrent.futures import Future, ThreadPoolExecutor
 from enum import IntEnum, auto
-from typing import List, Optional, Tuple, no_type_check
+from typing import List, Optional
 import asyncio
 import inspect
-
-# Third Party
-from glide import (
-    Batch,
-    ClusterBatch,
-    GlideClient,
-    GlideClientConfiguration,
-    GlideClusterClient,
-    GlideClusterClientConfiguration,
-    NodeAddress,
-    ServerCredentials,
-)
+import threading
 
 # First Party
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.memory_management import MemoryObj
-from lmcache.v1.protocol import RemoteMetadata
 from lmcache.v1.storage_backend.connector.base_connector import RemoteConnector
 from lmcache.v1.storage_backend.job_executor.pq_executor import AsyncPQExecutor
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 
 logger = init_logger(__name__)
 
+#: Default request timeout (seconds).
+DEFAULT_REQUEST_TIMEOUT_SECS: float = 5.0
+#: Default connection timeout (seconds).
+DEFAULT_CONNECTION_TIMEOUT_SECS: float = 10.0
+
 
 class Priorities(IntEnum):
+    """Operation priorities for the ``AsyncPQExecutor``.
+
+    Lower numeric value = higher priority.  Matches the scheme used by
+    ``RESPConnector`` so that exists/peek checks run before bulk writes.
+    """
+
     PEEK = auto()
     PREFETCH = auto()
     GET = auto()
     PUT = auto()
 
 
-class ValkeyConnector(RemoteConnector):
+class _ThreadWorkerPool:
+    """Manages a pool of threads, each with its own GLIDE sync client.
+
+    Each thread gets an independent GLIDE sync client
+    (``GlideClient`` or ``GlideClusterClient``) via
+    ``threading.local()``, enabling true parallel I/O when the GIL is
+    released during FFI calls.
+
+    Args:
+        host: Valkey server hostname.
+        port: Valkey server port.
+        num_workers: Number of worker threads.
+        username: Valkey authentication username.
+        password: Valkey authentication password.
+        request_timeout: Timeout in seconds for GLIDE requests and
+            Future.result() calls.
+        connection_timeout: Timeout in seconds for initial GLIDE client
+            connections and thread pool warmup.
+        tls_enable: Whether to use TLS for Valkey connections.
+        cluster_mode: If True, use GlideClusterClient; else GlideClient.
+        database_id: Database ID for standalone mode (ignored in cluster).
+    """
+
     def __init__(
         self,
-        url: str,
-        loop: asyncio.AbstractEventLoop,
-        local_cpu_backend: LocalCPUBackend,
+        host: str,
+        port: int,
+        num_workers: int,
         username: str,
         password: str,
+        request_timeout: float = DEFAULT_REQUEST_TIMEOUT_SECS,
+        connection_timeout: float = DEFAULT_CONNECTION_TIMEOUT_SECS,
+        tls_enable: bool = False,
+        cluster_mode: bool = False,
         database_id: Optional[int] = None,
     ):
-        # initialize base class, which includes some common attributes
-        super().__init__(local_cpu_backend.config, local_cpu_backend.metadata)
+        self.num_workers = num_workers
+        self._host = host
+        self._port = port
+        self._username = username
+        self._password = password
+        self._request_timeout = request_timeout
+        self._request_timeout_ms = int(request_timeout * 1000)
+        self._connection_timeout_ms = int(connection_timeout * 1000)
+        self._tls_enable = tls_enable
+        self._cluster_mode = cluster_mode
+        self._database_id = database_id
+        self._local = threading.local()
+        self._has_buffer_get: Optional[bool] = None
 
-        if ":" in url:
-            host, port_str = url.split(":", 1)
-            port = int(port_str)
+        self._executor = ThreadPoolExecutor(
+            max_workers=num_workers,
+            thread_name_prefix="valkey",
+        )
+        # Warm up: create a client on each thread
+        futs = [self._executor.submit(self._get_client) for _ in range(num_workers)]
+        for f in futs:
+            f.result(timeout=connection_timeout)
+        mode_str = "cluster" if cluster_mode else "standalone"
+        logger.info(
+            "Valkey thread pool: %d threads, mode=%s, per-thread clients, "
+            "buffer_get=%s",
+            num_workers,
+            mode_str,
+            self._has_buffer_get,
+        )
+
+    def _get_client(self):  # type: ignore[no-untyped-def]
+        """Get or create the per-thread GLIDE sync client.
+
+        Creates a ``GlideClusterClient`` (cluster mode) or ``GlideClient``
+        (standalone mode) depending on the ``cluster_mode`` flag.
+        """
+        # Third Party
+        import glide_sync  # type: ignore[import-untyped]
+
+        client = getattr(self._local, "client", None)
+        if client is not None:
+            return client
+
+        credentials = None
+        if self._username or self._password:
+            credentials = glide_sync.ServerCredentials(self._username, self._password)
+
+        address = glide_sync.NodeAddress(self._host, self._port)
+
+        if self._cluster_mode:
+            advanced = glide_sync.AdvancedGlideClusterClientConfiguration(
+                connection_timeout=self._connection_timeout_ms,
+            )
+            config_kwargs: dict = {
+                "addresses": [address],
+                "request_timeout": self._request_timeout_ms,
+                "use_tls": self._tls_enable,
+                "advanced_config": advanced,
+            }
+            if credentials is not None:
+                config_kwargs["credentials"] = credentials
+            config = glide_sync.GlideClusterClientConfiguration(**config_kwargs)
+            client = glide_sync.GlideClusterClient.create(config)
         else:
-            host = url
-            port = 6379  # Default Valkey port
+            # Standalone mode — supports database_id and advanced config
+            advanced = glide_sync.AdvancedGlideClientConfiguration(
+                connection_timeout=self._connection_timeout_ms,
+            )
+            config_kwargs = {
+                "addresses": [address],
+                "request_timeout": self._request_timeout_ms,
+                "use_tls": self._tls_enable,
+                "advanced_config": advanced,
+            }
+            if credentials is not None:
+                config_kwargs["credentials"] = credentials
+            if self._database_id is not None:
+                config_kwargs["database_id"] = self._database_id
+            config = glide_sync.GlideClientConfiguration(**config_kwargs)
+            client = glide_sync.GlideClient.create(config)
+
+        self._local.client = client
+
+        if self._has_buffer_get is None:
+            self._has_buffer_get = "buffer" in inspect.signature(client.get).parameters
+
+        return client
+
+    @property
+    def has_buffer_get(self) -> bool:
+        """Whether the GLIDE client supports buffer GET."""
+        if self._has_buffer_get is None:
+            self._executor.submit(self._get_client).result(
+                timeout=self._connection_timeout_ms / 1000
+            )
+        return bool(self._has_buffer_get)
+
+    def _do_set(self, key_str: str, data: bytes) -> None:
+        """SET a key (runs on a worker thread)."""
+        self._get_client().set(key_str.encode(), data)
+
+    def _do_get_into(self, key_str: str, buf: memoryview) -> bool:
+        """GET a key into a buffer (runs on a worker thread)."""
+        client = self._get_client()
+        if self._has_buffer_get:
+            result = client.get(key_str.encode(), buffer=buf)
+            return result is not None
+        else:
+            data = client.get(key_str.encode())
+            if data is None:
+                return False
+            buf[: len(data)] = data
+            return True
+
+    def _do_exists(self, key_str: str) -> bool:
+        """Check if a key exists (runs on a worker thread)."""
+        return bool(self._get_client().exists([key_str.encode()]))
+
+    def submit_set(self, key_str: str, data: bytes) -> Future:
+        """Submit a SET operation."""
+        return self._executor.submit(self._do_set, key_str, data)
+
+    def submit_get_into(self, key_str: str, buf: memoryview) -> Future:
+        """Submit a GET-into-buffer operation."""
+        return self._executor.submit(self._do_get_into, key_str, buf)
+
+    def submit_exists(self, key_str: str) -> Future:
+        """Submit an EXISTS check."""
+        return self._executor.submit(self._do_exists, key_str)
+
+    def _close_client(self) -> None:
+        """Close the per-thread GLIDE client (runs on a worker thread)."""
+        client = getattr(self._local, "client", None)
+        if client is not None:
+            try:
+                client.close()
+            except Exception as exc:
+                logger.debug("Error closing per-thread GLIDE client: %s", exc)
+            self._local.client = None
+
+    def close(self) -> None:
+        """Shut down all per-thread GLIDE clients and the thread pool."""
+        close_futs = [
+            self._executor.submit(self._close_client) for _ in range(self.num_workers)
+        ]
+        for f in close_futs:
+            try:
+                f.result(timeout=self._request_timeout)
+            except Exception as exc:
+                logger.debug("Error during client close: %s", exc)
+        self._executor.shutdown(wait=True, cancel_futures=False)
+        logger.info("Valkey thread pool closed")
+
+
+class ValkeyConnector(RemoteConnector):
+    """High-throughput Valkey connector using GLIDE sync cluster client with
+    per-thread clients, ThreadPoolExecutor, and priority scheduling.
+
+    Uses N worker threads, each with its own GLIDE sync client, and
+    direct memoryview access for zero-copy data transfer.  Single-key
+    storage halves Valkey round-trips compared to the legacy 2-key split.
+
+    Operations are dispatched through an ``AsyncPQExecutor`` with priority
+    levels (PEEK > PREFETCH > GET > PUT) so that latency-sensitive lookups
+    are not delayed behind bulk writes.
+
+    Args:
+        host: Valkey server hostname.
+        port: Valkey server port.
+        loop: Asyncio event loop (used for PQ executor and wrap_future).
+        local_cpu_backend: Backend for allocating CPU memory objects.
+        num_workers: Number of worker threads (default 8).
+        username: Valkey authentication username.
+        password: Valkey authentication password.
+        request_timeout: Timeout in seconds for requests and
+            Future.result() calls (default 5).
+        connection_timeout: Timeout in seconds for initial client
+            connections (default 10).
+        tls_enable: Whether to use TLS for Valkey connections.
+        cluster_mode: If True, use GlideClusterClient; else GlideClient.
+        database_id: Database ID for standalone mode (ignored in cluster).
+    """
+
+    def __init__(
+        self,
+        host: str,
+        port: int,
+        loop: asyncio.AbstractEventLoop,
+        local_cpu_backend: LocalCPUBackend,
+        num_workers: int = 8,
+        username: str = "",
+        password: str = "",
+        request_timeout: float = DEFAULT_REQUEST_TIMEOUT_SECS,
+        connection_timeout: float = DEFAULT_CONNECTION_TIMEOUT_SECS,
+        tls_enable: bool = False,
+        cluster_mode: bool = False,
+        database_id: Optional[int] = None,
+    ):
+        super().__init__(local_cpu_backend.config, local_cpu_backend.metadata)
 
         self.host = host
         self.port = port
-        self.database_id = database_id
-        self.username = username
-        self.password = password
+        self.num_workers = num_workers
+        self._request_timeout = request_timeout
         self.loop = loop
         self.local_cpu_backend = local_cpu_backend
-        self.executor = AsyncPQExecutor(loop)
 
-        # Create connection properly using async create
-        self.connection = self._init_connection()
+        self._pool = _ThreadWorkerPool(
+            host,
+            port,
+            num_workers,
+            username,
+            password,
+            request_timeout=request_timeout,
+            connection_timeout=connection_timeout,
+            tls_enable=tls_enable,
+            cluster_mode=cluster_mode,
+            database_id=database_id,
+        )
+        self._pq_executor = AsyncPQExecutor(loop)
 
-    def _init_connection(self):
-        """Initialize GlideClient connection with credentials and database"""
-
-        async def create_connection():
-            try:
-                # Setup credentials if provided
-                credentials = None
-                if self.username or self.password:
-                    credentials = ServerCredentials(self.username, self.password)
-
-                # Build config with optional database_id
-                config_kwargs = {
-                    "addresses": [NodeAddress(self.host, self.port)],
-                    "credentials": credentials,
-                }
-
-                if self.database_id is not None:
-                    config_kwargs["database_id"] = self.database_id
-
-                config = GlideClientConfiguration(**config_kwargs)
-                return await GlideClient.create(config)
-            except Exception as e:
-                raise RuntimeError(f"Fail to init valkey connection {e}") from e
-
-        future = asyncio.run_coroutine_threadsafe(create_connection(), self.loop)
-        connection = future.result(timeout=1.0)
-        return connection
-
-    def _get_keys(self, key: CacheEngineKey) -> Tuple[str, str]:
-        """Generate metadata and kv_bytes keys"""
-        key_str = key.to_string()
-        metadata_key = f"{key_str}:metadata"
-        kv_key = f"{key_str}:kv_bytes"
-        return metadata_key, kv_key
+    # ── EXISTS ───────────────────────────────────────────────────────────
 
     async def _exists(self, key: CacheEngineKey) -> bool:
-        metadata_key, _ = self._get_keys(key)
-        return bool(await self.connection.exists([metadata_key]))
+        """Internal: check if a key exists in Valkey."""
+        return await asyncio.wrap_future(self._pool.submit_exists(key.to_string()))
 
     async def exists(self, key: CacheEngineKey) -> bool:
-        return await self.executor.submit_job(
+        """Check if a key exists in Valkey."""
+        return await self._pq_executor.submit_job(
             self._exists, key=key, priority=Priorities.PEEK
         )
 
     def exists_sync(self, key: CacheEngineKey) -> bool:
-        future = asyncio.run_coroutine_threadsafe(
-            self.executor.submit_job(self._exists, key=key, priority=Priorities.PEEK),
-            self.loop,
+        """Synchronously check if a key exists in Valkey."""
+        return self._pool.submit_exists(key.to_string()).result(
+            timeout=self._request_timeout
         )
-        return future.result()
+
+    # ── GET ──────────────────────────────────────────────────────────────
 
     async def _get(self, key: CacheEngineKey) -> Optional[MemoryObj]:
-        metadata_key, kv_key = self._get_keys(key)
-
-        results = await self.connection.mget([metadata_key, kv_key])
-
-        if len(results) != 2:
-            return None
-
-        metadata_bytes, kv_bytes = results[0], results[1]
-
-        if metadata_bytes is None:
-            return None
-
-        assert not inspect.isawaitable(metadata_bytes)
-
-        metadata = RemoteMetadata.deserialize(memoryview(metadata_bytes))
-
+        """Internal: retrieve a memory object from Valkey by key."""
         memory_obj = self.local_cpu_backend.allocate(
-            metadata.shapes,
-            metadata.dtypes,
-            metadata.fmt,
+            self.meta_shapes, self.meta_dtypes, self.meta_fmt
         )
         if memory_obj is None:
             logger.warning("Failed to allocate memory during remote receive")
             return None
 
-        if kv_bytes is None:
-            logger.warning(
-                "Key exists but KV cache does not exist."
-                "Might happen when the cache is evicted by valkey."
-            )
-            memory_obj.ref_count_down()
-            return None
-
-        assert not inspect.isawaitable(kv_bytes)
+        dst = memory_obj.byte_array
+        if not isinstance(dst, memoryview):
+            dst = memoryview(dst)
+        if dst.format != "B":
+            dst = dst.cast("B")
 
         try:
-            if isinstance(memory_obj.byte_array, memoryview):
-                view = memory_obj.byte_array
-                if view.format == "<B":
-                    view = view.cast("B")
-            else:
-                view = memoryview(memory_obj.byte_array)
+            found = await asyncio.wrap_future(
+                self._pool.submit_get_into(key.to_string(), dst)
+            )
+        except Exception:
+            memory_obj.ref_count_down()
+            raise
 
-            if isinstance(kv_bytes, (bytes, bytearray)):
-                view[: metadata.length] = kv_bytes
-            elif isinstance(kv_bytes, str):
-                converted = kv_bytes.encode("utf-8")
-                view[: metadata.length] = converted
-            else:
-                converted = bytes(kv_bytes)
-                view[: metadata.length] = converted
-            return memory_obj
-
-        except Exception as exc:
-            logger.error(f"Fail to converting : {exc}")
+        if not found:
+            memory_obj.ref_count_down()
             return None
+        return memory_obj
 
     async def get(self, key: CacheEngineKey) -> Optional[MemoryObj]:
-        return await self.executor.submit_job(
+        """Retrieve a memory object from Valkey by key."""
+        return await self._pq_executor.submit_job(
             self._get, key=key, priority=Priorities.GET
         )
 
-    async def _put(self, key: CacheEngineKey, memory_obj: MemoryObj):
-        try:
-            kv_bytes = bytes(memory_obj.byte_array)
-            kv_shapes = memory_obj.get_shapes()
-            kv_dtypes = memory_obj.get_dtypes()
-            memory_format = memory_obj.get_memory_format()
+    # ── PUT ──────────────────────────────────────────────────────────────
 
-            metadata_bytes = RemoteMetadata(
-                len(kv_bytes), kv_shapes, kv_dtypes, memory_format
-            ).serialize()
+    async def _put(self, key: CacheEngineKey, memory_obj: MemoryObj) -> None:
+        """Internal: store a memory object in Valkey.
 
-            metadata_key, kv_key = self._get_keys(key)
+        Note: This method does NOT call ``ref_count_down()`` on the memory
+        object.  Reference counting is managed by the caller
+        (``RemoteBackend.submit_put_task``), which increments before
+        submitting and decrements in the done callback.
+        """
+        await asyncio.wrap_future(
+            self._pool.submit_set(key.to_string(), memory_obj.byte_array)
+        )
 
-            # Use batch to set both keys in one operation
-            # kv bytes needs to be set first to avoid race condition
-            batch = Batch(False)
-            batch.set(kv_key, kv_bytes)
-            batch.set(metadata_key, metadata_bytes)
-
-            await self.connection.exec(batch, raise_on_error=False)
-        except Exception as exc:
-            logger.error(f"Fail to put data: {exc}")
-
-    async def put(self, key: CacheEngineKey, memory_obj: MemoryObj):
-        await self.executor.submit_job(
+    async def put(self, key: CacheEngineKey, memory_obj: MemoryObj) -> None:
+        """Store a memory object in Valkey."""
+        await self._pq_executor.submit_job(
             self._put, key=key, memory_obj=memory_obj, priority=Priorities.PUT
         )
 
-    @no_type_check
-    async def list(self) -> List[str]:
-        pass
+    # ── BATCHED PUT ──────────────────────────────────────────────────────
 
-    async def close(self):
-        await self.executor.shutdown(wait=True)
-        await self.connection.close()
-        logger.info("Closed the Valkey connection")
+    def support_batched_put(self) -> bool:
+        """Returns True — batched put is supported."""
+        return True
 
+    async def _batched_put(
+        self, keys: List[CacheEngineKey], memory_objs: List[MemoryObj]
+    ) -> None:
+        """Internal: store multiple memory objects in Valkey in parallel."""
+        n = len(keys)
+        key_strs = [k.to_string() for k in keys]
 
-class ValkeyClusterConnector(RemoteConnector):
-    """
-    Uses GlideClusterClient to connect to a Valkey cluster.
-    Supports both URL-based and hosts_and_ports-based initialization.
-    """
+        futures = [
+            self._pool.submit_set(key_strs[i], memory_objs[i].byte_array)
+            for i in range(n)
+        ]
+        wrapped = [asyncio.wrap_future(f) for f in futures]
+        await asyncio.gather(*wrapped)
 
-    def __init__(
-        self,
-        loop: asyncio.AbstractEventLoop,
-        local_cpu_backend: LocalCPUBackend,
-        username: str,
-        password: str,
-        hosts_and_ports: Optional[List[Tuple[str, int]]],
-        database_id: Optional[int] = None,
-    ):
-        # initialize base class, which includes some common attributes
-        super().__init__(local_cpu_backend.config, local_cpu_backend.metadata)
+    async def batched_put(
+        self, keys: List[CacheEngineKey], memory_objs: List[MemoryObj]
+    ) -> None:
+        """Store multiple memory objects in Valkey in parallel."""
+        await self._pq_executor.submit_job(
+            self._batched_put,
+            keys=keys,
+            memory_objs=memory_objs,
+            priority=Priorities.PUT,
+        )
 
-        self.loop = loop
-        self.local_cpu_backend = local_cpu_backend
-        self.executor = AsyncPQExecutor(loop)
-        self.username = username
-        self.password = password
-        self.hosts_and_ports = hosts_and_ports
-        self.database_id = database_id
+    # ── BATCHED GET ──────────────────────────────────────────────────────
 
-        # Create connection
-        self.connection = self._init_connection()
+    def support_batched_get(self) -> bool:
+        """Returns True — batched get is supported."""
+        return True
 
-    def _init_connection(self):
-        """Initialize GlideClusterClient connection with credentials"""
+    async def _batched_get(
+        self, keys: List[CacheEngineKey]
+    ) -> List[Optional[MemoryObj]]:
+        """Internal: retrieve multiple memory objects from Valkey in parallel.
 
-        async def create_connection():
-            try:
-                # Setup credentials if provided
-                credentials = None
-                if self.username or self.password:
-                    credentials = ServerCredentials(self.username, self.password)
+        Note: Once an allocation failure occurs, all subsequent slots are
+        set to ``None`` (intentional — memory pressure means further
+        allocations would also fail).
+        """
+        n = len(keys)
+        key_strs = [k.to_string() for k in keys]
 
-                addresses = [
-                    NodeAddress(host, port) for host, port in self.hosts_and_ports
-                ]
-                config = GlideClusterClientConfiguration(
-                    addresses=addresses,
-                    credentials=credentials,
-                    database_id=self.database_id,
+        memory_objs: List[Optional[MemoryObj]] = []
+        dst_bufs: List[Optional[memoryview]] = []
+        alloc_failed = False
+
+        for _ in keys:
+            if alloc_failed:
+                memory_objs.append(None)
+                dst_bufs.append(None)
+                continue
+
+            mobj = self.local_cpu_backend.allocate(
+                self.meta_shapes, self.meta_dtypes, self.meta_fmt
+            )
+            if mobj is None:
+                logger.warning(
+                    "Failed to allocate memory during batched remote receive"
+                )
+                alloc_failed = True
+                memory_objs.append(None)
+                dst_bufs.append(None)
+                continue
+
+            memory_objs.append(mobj)
+            dst = mobj.byte_array
+            if not isinstance(dst, memoryview):
+                dst = memoryview(dst)
+            if dst.format != "B":
+                dst = dst.cast("B")
+            dst_bufs.append(dst)
+
+        # Submit GET futures for allocated slots; track which indices have
+        # real futures vs None (allocation failed).
+        live_indices: List[int] = []
+        live_futures: List[asyncio.Future] = []
+        for i in range(n):
+            if memory_objs[i] is not None and dst_bufs[i] is not None:
+                live_indices.append(i)
+                live_futures.append(
+                    asyncio.wrap_future(
+                        self._pool.submit_get_into(
+                            key_strs[i],
+                            dst_bufs[i],  # type: ignore[arg-type]
+                        )
+                    )
                 )
 
-                return await GlideClusterClient.create(config)
-            except Exception as e:
-                raise RuntimeError(f"Fail to init valkey connection {e}") from e
-
-        future = asyncio.run_coroutine_threadsafe(create_connection(), self.loop)
-        connection = future.result(timeout=1.0)
-        return connection
-
-    def _get_keys_with_hash_tag(self, key: CacheEngineKey) -> Tuple[str, str]:
-        """Generate metadata and kv_bytes keys with hash tag for same slot placement"""
-        key_str = key.to_string()
-        # Use hash tag to ensure both keys go to same slot
-        metadata_key = f"{{{key_str}}}:metadata"
-        kv_key = f"{{{key_str}}}:kv_bytes"
-        return metadata_key, kv_key
-
-    async def _exists(self, key: CacheEngineKey) -> bool:
-        metadata_key, _ = self._get_keys_with_hash_tag(key)
-        return bool(await self.connection.exists([metadata_key]))
-
-    async def exists(self, key: CacheEngineKey) -> bool:
-        return await self.executor.submit_job(
-            self._exists, key=key, priority=Priorities.PEEK
-        )
-
-    def exists_sync(self, key: CacheEngineKey) -> bool:
-        future = asyncio.run_coroutine_threadsafe(
-            self.executor.submit_job(self._exists, key=key, priority=Priorities.PEEK),
-            self.loop,
-        )
-        return future.result()
-
-    async def _get(self, key: CacheEngineKey) -> Optional[MemoryObj]:
-        metadata_key, kv_key = self._get_keys_with_hash_tag(key)
-
-        results = await self.connection.mget([metadata_key, kv_key])
-
-        if len(results) != 2:
-            return None
-
-        metadata_bytes, kv_bytes = results[0], results[1]
-
-        if metadata_bytes is None:
-            return None
-
-        assert not inspect.isawaitable(metadata_bytes)
-
-        metadata = RemoteMetadata.deserialize(memoryview(metadata_bytes))
-
-        memory_obj = self.local_cpu_backend.allocate(
-            metadata.shapes,
-            metadata.dtypes,
-            metadata.fmt,
-        )
-        if memory_obj is None:
-            logger.warning("Failed to allocate memory during remote receive")
-            return None
-
-        if kv_bytes is None:
-            logger.warning(
-                "Key exists but KV cache does not exist."
-                "Might happen when the cache is evicted by valkey."
-            )
-            memory_obj.ref_count_down()
-            return None
-
-        assert not inspect.isawaitable(kv_bytes)
-
         try:
-            if isinstance(memory_obj.byte_array, memoryview):
-                view = memory_obj.byte_array
-                if view.format == "<B":
-                    view = view.cast("B")
-            else:
-                view = memoryview(memory_obj.byte_array)
+            results = await asyncio.gather(*live_futures)
+            for idx, found in zip(live_indices, results, strict=True):
+                if not found:
+                    memory_objs[idx].ref_count_down()  # type: ignore[union-attr]
+                    memory_objs[idx] = None
+        except Exception:
+            for mobj in memory_objs:
+                if mobj is not None:
+                    mobj.ref_count_down()
+            raise
 
-            if isinstance(kv_bytes, (bytes, bytearray)):
-                view[: metadata.length] = kv_bytes
-            elif isinstance(kv_bytes, str):
-                converted = kv_bytes.encode("utf-8")
-                view[: metadata.length] = converted
-            else:
-                converted = bytes(kv_bytes)
-                view[: metadata.length] = converted
-            return memory_obj
-        except Exception as exc:
-            logger.error(f"Fail to converting : {exc}")
-            return None
+        return memory_objs
 
-    async def get(self, key: CacheEngineKey) -> Optional[MemoryObj]:
-        return await self.executor.submit_job(
-            self._get, key=key, priority=Priorities.GET
+    async def batched_get(
+        self, keys: List[CacheEngineKey]
+    ) -> List[Optional[MemoryObj]]:
+        """Retrieve multiple memory objects from Valkey in parallel."""
+        return await self._pq_executor.submit_job(
+            self._batched_get, keys=keys, priority=Priorities.GET
         )
 
-    async def _put(self, key: CacheEngineKey, memory_obj: MemoryObj):
-        try:
-            kv_bytes = bytes(memory_obj.byte_array)
-            kv_shapes = memory_obj.get_shapes()
-            kv_dtypes = memory_obj.get_dtypes()
-            memory_format = memory_obj.get_memory_format()
+    # ── BATCHED CONTAINS ─────────────────────────────────────────────────
 
-            metadata_bytes = RemoteMetadata(
-                len(kv_bytes), kv_shapes, kv_dtypes, memory_format
-            ).serialize()
+    def support_batched_contains(self) -> bool:
+        """Returns True — synchronous batched contains is supported."""
+        return True
 
-            metadata_key, kv_key = self._get_keys_with_hash_tag(key)
+    def _count_consecutive_exists(self, keys: List[CacheEngineKey]) -> int:
+        """Check how many consecutive keys exist (prefix match).
 
-            # Use cluster batch to set both keys in one operation
-            # kv bytes needs to be set first to avoid race condition
-            batch = ClusterBatch(False)
-            batch.set(kv_key, kv_bytes)
-            batch.set(metadata_key, metadata_bytes)
+        Fans out individual EXISTS checks across the thread pool for
+        parallel round-trips: wall-clock time is roughly
+        ``ceil(N / num_workers) * RTT`` instead of ``N * RTT``.
+        """
+        key_strs = [k.to_string() for k in keys]
+        futures = [self._pool.submit_exists(k) for k in key_strs]
+        for i, fut in enumerate(futures):
+            if not fut.result(timeout=self._request_timeout):
+                return i
+        return len(futures)
 
-            await self.connection.exec(batch, raise_on_error=False)
-        except Exception as exc:
-            logger.error(f"Fail to put data: {exc}")
+    def batched_contains(self, keys: List[CacheEngineKey]) -> int:
+        """Synchronously check how many consecutive keys exist."""
+        return self._count_consecutive_exists(keys)
 
-    async def put(self, key: CacheEngineKey, memory_obj: MemoryObj):
-        await self.executor.submit_job(
-            self._put, key=key, memory_obj=memory_obj, priority=Priorities.PUT
+    def support_batched_async_contains(self) -> bool:
+        """Returns True — async batched contains is supported."""
+        return True
+
+    async def _batched_async_contains(
+        self,
+        keys: List[CacheEngineKey],
+    ) -> int:
+        """Internal: asynchronously check how many consecutive keys exist.
+
+        Fans out individual EXISTS checks across the thread pool.
+        """
+        key_strs = [k.to_string() for k in keys]
+        wrapped = [asyncio.wrap_future(self._pool.submit_exists(k)) for k in key_strs]
+        results = await asyncio.gather(*wrapped)
+        for i, r in enumerate(results):
+            if not r:
+                return i
+        return len(results)
+
+    async def batched_async_contains(
+        self,
+        lookup_id: str,
+        keys: List[CacheEngineKey],
+        pin: bool = False,
+    ) -> int:
+        """Asynchronously check how many consecutive keys exist."""
+        return await self._pq_executor.submit_job(
+            self._batched_async_contains,
+            keys=keys,
+            priority=Priorities.PREFETCH,
         )
 
-    @no_type_check
+    def support_batched_get_non_blocking(self) -> bool:
+        """Returns True — non-blocking batched get is supported."""
+        return True
+
+    async def _batched_get_non_blocking(
+        self,
+        keys: List[CacheEngineKey],
+    ) -> List[MemoryObj]:
+        """Internal: non-blocking batched get returning the consecutive prefix.
+
+        Only the consecutive prefix of non-None memory objects (from the
+        beginning) is returned.  Once a ``None`` (missing key or allocation
+        failure) is encountered, all subsequent objects — even if they were
+        successfully retrieved — are released and excluded.  This matches
+        the base-class contract.
+        """
+        all_results = await self._batched_get(keys)
+
+        prefix: List[MemoryObj] = []
+        found_failure = False
+        for result in all_results:
+            if found_failure:
+                if result is not None:
+                    result.ref_count_down()
+            elif result is not None:
+                prefix.append(result)
+            else:
+                found_failure = True
+
+        return prefix
+
+    async def batched_get_non_blocking(
+        self,
+        lookup_id: str,
+        keys: List[CacheEngineKey],
+    ) -> List[MemoryObj]:
+        """Non-blocking batched get returning the consecutive prefix."""
+        return await self._pq_executor.submit_job(
+            self._batched_get_non_blocking,
+            keys=keys,
+            priority=Priorities.PREFETCH,
+        )
+
     async def list(self) -> List[str]:
-        pass
+        """List all keys (not implemented)."""
+        return []
 
-    async def close(self):
-        await self.executor.shutdown(wait=True)
-        await self.connection.close()
-        logger.info("Closed the Valkey connection")
+    async def close(self) -> None:
+        """Shut down the PQ executor and the thread pool."""
+        await self._pq_executor.shutdown_async(wait=True)
+        self._pool.close()
+        logger.info("Closed ValkeyConnector")

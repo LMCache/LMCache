@@ -223,8 +223,12 @@ class PrefetchController(StorageControllerInterface):
         self._next_request_id: PrefetchRequestId = 0
         self._submission_efd = os.eventfd(0, os.EFD_NONBLOCK | os.EFD_CLOEXEC)
 
-        # Thread-safe results (background -> external)
-        self._results_lock = threading.Lock()
+        # Thread-safe lookup results (background -> external)
+        self._lookup_results_lock = threading.Lock()
+        self._completed_lookups: dict[PrefetchRequestId, int] = {}
+
+        # Thread-safe prefetch results (background -> external)
+        self._prefetch_results_lock = threading.Lock()
         self._completed_results: dict[PrefetchRequestId, int] = {}
 
         # Map eventfds to adapter indices for quick lookup in poll.
@@ -285,6 +289,30 @@ class PrefetchController(StorageControllerInterface):
         os.eventfd_write(self._submission_efd, 1)
         return request_id
 
+    def query_lookup_result(self, request_id: PrefetchRequestId) -> int | None:
+        """
+        Query the number of prefix hits from the lookup phase.
+
+        Thread-safe. Returns the number of prefix hits if the lookup phase
+        has completed, None if still in progress, or the prefetch request
+        has already been consumed by query_prefetch_result.
+
+        Args:
+            request_id: The request ID from submit_prefetch_request.
+
+        Returns:
+            Number of prefix hits from the lookup phase, or None if not yet complete
+            or if the request has already been consumed by a previous call to this
+            method.
+
+        Note:
+            This function does not pop the result. The caller need to make sure to call
+            the query_prefetch_result after calling this function, otherwise nobody
+            will clean up the completed lookups dictionary, causing memory leak.
+        """
+        with self._lookup_results_lock:
+            return self._completed_lookups.get(request_id, None)
+
     def query_prefetch_result(self, request_id: PrefetchRequestId) -> int | None:
         """
         Query the result of a prefetch request.
@@ -298,16 +326,26 @@ class PrefetchController(StorageControllerInterface):
 
         Returns:
             Number of prefix hits, or None if not yet complete.
+
+        Note:
+            This function will pop the completed lookup results as well.
+            Therefore, the caller need to make sure that never call
+            query_lookup_result after calling this function, otherwise it will
+            get None forever.
         """
-        with self._results_lock:
-            return self._completed_results.pop(request_id, None)
+        with self._prefetch_results_lock:
+            result = self._completed_results.pop(request_id, None)
+        if result is not None:
+            with self._lookup_results_lock:
+                self._completed_lookups.pop(request_id, None)
+        return result
 
     def report_status(self) -> dict:
         """Return a status dict for the prefetch controller."""
         is_healthy = self._thread.is_alive()
         with self._submission_lock:
             submission_queue_size = len(self._submission_queue)
-        with self._results_lock:
+        with self._prefetch_results_lock:
             completed_results_count = len(self._completed_results)
         return {
             "is_healthy": is_healthy,
@@ -465,7 +503,6 @@ class PrefetchController(StorageControllerInterface):
     # =========================================================================
     # Load phase
     # =========================================================================
-
     def _transition_to_load_phase(self, request: InFlightPrefetchRequest) -> None:
         """Compute load plan, reserve L1 buffers, and submit load tasks."""
         request.phase = PrefetchPhase.PLAN_AND_LOAD
@@ -486,6 +523,7 @@ class PrefetchController(StorageControllerInterface):
             # Nothing to load after trimming to prefix. Unlock all lookup locks
             # and complete with 0 hits.
             self._unlock_all_lookups(request)
+            self._update_lookup_results(request.request_id, 0)
             self._complete_request(request.request_id, 0)
             return
 
@@ -536,6 +574,7 @@ class PrefetchController(StorageControllerInterface):
             if request.write_reserved_keys:
                 l1_mgr.finish_write(request.write_reserved_keys)
                 l1_mgr.delete(request.write_reserved_keys)
+            self._update_lookup_results(request.request_id, 0)
             self._complete_request(request.request_id, 0)
             return
 
@@ -550,12 +589,22 @@ class PrefetchController(StorageControllerInterface):
             )
             request.pending_load_tasks[adapter_idx] = task_id
 
+        ## Step 8: update the lookup result based on the final load plan
+        self._update_lookup_results(request.request_id, prefix_length)
+
         logger.debug(
             "Prefetch request %d: submitted load tasks to %d adapters for %d keys",
             request.request_id,
             len(trimmed_plan),
             len(reserved_key_set),
         )
+
+    def _update_lookup_results(
+        self, request_id: PrefetchRequestId, hit_chunks: int
+    ) -> None:
+        """Update the completed lookups dict with the number of prefix hits."""
+        with self._lookup_results_lock:
+            self._completed_lookups[request_id] = hit_chunks
 
     def _process_load_completions(self, adapter_index: int) -> None:
         """Check all PLAN_AND_LOAD-phase requests for completed loads."""
@@ -671,7 +720,7 @@ class PrefetchController(StorageControllerInterface):
         self, request_id: PrefetchRequestId, prefix_hits: int
     ) -> None:
         """Store the result and remove from in-flight tracking."""
-        with self._results_lock:
+        with self._prefetch_results_lock:
             self._completed_results[request_id] = prefix_hits
         removed = self._in_flight_requests.pop(request_id, None)
         if removed is not None:
