@@ -344,7 +344,7 @@ Settings for different storage backends and paths.
      - Path for GDS backend
    * - cufile_buffer_size
      - LMCACHE_CUFILE_BUFFER_SIZE
-     - Buffer size for cuFile operations
+     - Buffer size for cuFile/hipFile operations
 
 Custom Prometheus Histogram Buckets
 ------------------------------------

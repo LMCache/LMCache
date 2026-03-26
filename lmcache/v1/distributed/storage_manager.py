@@ -41,8 +41,12 @@ logger = init_logger(__name__)
 
 @dataclass(frozen=True)
 class PrefetchHandle:
-    request_id: int
-    """Opaque ID for tracking L2 prefetch in the controller. -1 if no L2 request."""
+    prefetch_request_id: int
+    """Opaque ID for tracking L2 prefetch in the controller.
+    -1 if no L2 request was submitted."""
+
+    external_request_id: str
+    """Request ID from the caller for end-to-end tracing."""
 
     l1_prefix_hit_count: int
     """Number of leading keys already in L1 at submission time."""
@@ -264,6 +268,7 @@ class StorageManager:
         keys: list[ObjectKey],
         layout_desc: MemoryLayoutDesc,
         extra_count: int = 0,
+        external_request_id: str = "",
     ) -> PrefetchHandle:
         """Prefetch objects into L1 asynchronously.
 
@@ -273,6 +278,8 @@ class StorageManager:
             extra_count: Extra workers (on top of the default
                 1) that will independently retrieve the same
                 key.  Total locks = 1 + extra_count.
+            external_request_id: Request ID from the caller
+                for end-to-end log tracing.
 
         Returns:
             PrefetchHandle to track the task.
@@ -317,9 +324,9 @@ class StorageManager:
 
         # Submit remaining keys to L2 prefetch controller
         remaining_keys = keys[hit_count:]
-        request_id = -1
+        prefetch_request_id = -1
         if remaining_keys and self._l2_adapters:
-            request_id = self._prefetch_controller.submit_prefetch_request(
+            prefetch_request_id = self._prefetch_controller.submit_prefetch_request(
                 remaining_keys,
                 layout_desc,
                 extra_count=extra_count,
@@ -327,16 +334,21 @@ class StorageManager:
 
         submit_time = time.monotonic()
         logger.debug(
-            "Prefetch request submitted: %d total keys, "
-            "%d L1 prefix hits, %d remaining for L2 (request_id=%d)",
+            "Prefetch request submitted: "
+            "%d total keys, %d L1 prefix hits, "
+            "%d remaining for L2 "
+            "(external_request_id=%s, "
+            "prefetch_request_id=%d)",
             len(keys),
             hit_count,
             len(remaining_keys),
-            request_id,
+            external_request_id,
+            prefetch_request_id,
         )
 
         return PrefetchHandle(
-            request_id=request_id,
+            prefetch_request_id=prefetch_request_id,
+            external_request_id=external_request_id,
             l1_prefix_hit_count=hit_count,
             total_requested_keys=len(keys),
             submit_time=submit_time,
@@ -367,12 +379,12 @@ class StorageManager:
             Therefore, it's the caller’s responsibility to make sure not calling
             this function after the prefetch task is done.
         """
-        if handle.request_id == -1:
+        if handle.prefetch_request_id == -1:
             # No L2 request, the prefix hit count is final
             return handle.l1_prefix_hit_count
 
         # Have L2 request, need to check the status from prefetch controller
-        l2_r = self._prefetch_controller.query_lookup_result(handle.request_id)
+        l2_r = self._prefetch_controller.query_lookup_result(handle.prefetch_request_id)
 
         if l2_r is None:
             # L2 prefetch is still in progress or it's already done and
@@ -399,8 +411,10 @@ class StorageManager:
         l2_result: int = 0
 
         # Have L2 request, need to check the result from prefetch controller
-        if handle.request_id != -1:
-            l2_r = self._prefetch_controller.query_prefetch_result(handle.request_id)
+        if handle.prefetch_request_id != -1:
+            l2_r = self._prefetch_controller.query_prefetch_result(
+                handle.prefetch_request_id
+            )
 
             if l2_r is None:
                 return None
@@ -412,14 +426,17 @@ class StorageManager:
         if total_hits > 0:
             logger.info(
                 "Prefetch request completed (L1+L2): "
-                "%d/%d prefix hits (%d L1, %d L2) in %.1f ms "
-                "(request_id=%d)",
+                "%d/%d prefix hits (%d L1, %d L2) "
+                "in %.1f ms "
+                "(external_request_id=%s, "
+                "prefetch_request_id=%d)",
                 total_hits,
                 handle.total_requested_keys,
                 handle.l1_prefix_hit_count,
                 l2_result,
                 elapsed_ms,
-                handle.request_id,
+                handle.external_request_id,
+                handle.prefetch_request_id,
             )
         return total_hits
 

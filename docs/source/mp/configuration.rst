@@ -352,7 +352,7 @@ Full Example
 
 .. code-block:: bash
 
-    python3 -m lmcache.v1.multiprocess.http_server \
+    lmcache server \
         --host 0.0.0.0 \
         --port 6555 \
         --chunk-size 512 \
