@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Standard
+from abc import abstractmethod
 import threading
 import time
 
@@ -24,17 +25,15 @@ class EvictionController(StorageControllerInterface):
     """
     Abstract base class for eviction controllers.
 
-    Provides the shared eviction loop structure: background thread, stop flag,
-    and eviction policy. Subclasses implement _eviction_loop and
-    _execute_eviction_action for their specific tier (L1 or L2).
+    Provides the shared eviction loop structure: background thread and stop
+    flag. Subclasses implement eviction_loop and execute_eviction_action
+    for their specific tier (L1 or L2).
     """
 
-    def __init__(self, eviction_config: EvictionConfig):
-        self._eviction_config = eviction_config
-        self._eviction_policy = CreateEvictionPolicy(eviction_config)
+    def __init__(self):
         self._stop_flag = threading.Event()
         self._thread = threading.Thread(
-            target=self._eviction_loop,
+            target=self.eviction_loop,
             daemon=True,
         )
 
@@ -46,14 +45,32 @@ class EvictionController(StorageControllerInterface):
         self._stop_flag.set()
         self._thread.join()
 
+    @abstractmethod
     def report_status(self) -> dict:
-        raise NotImplementedError
+        """Return a status dict for this controller.
 
-    def _eviction_loop(self):
-        raise NotImplementedError
+        The child class needs to override this function to report
+        controller-specific health and configuration information.
+        """
+        pass
 
-    def _execute_eviction_action(self, action: EvictionAction):
-        raise NotImplementedError
+    @abstractmethod
+    def eviction_loop(self):
+        """Run the eviction loop.
+
+        The child class needs to override this function to implement
+        internal eviction controlling logic.
+        """
+        pass
+
+    @abstractmethod
+    def execute_eviction_action(self, action: EvictionAction):
+        """Execute a single eviction action.
+
+        The child class needs to override this function to implement
+        internal eviction controlling logic.
+        """
+        pass
 
 
 class L1EvictionController(EvictionController):
@@ -70,7 +87,9 @@ class L1EvictionController(EvictionController):
         l1_manager: L1Manager,
         eviction_config: EvictionConfig,
     ):
-        super().__init__(eviction_config)
+        super().__init__()
+        self._eviction_config = eviction_config
+        self._eviction_policy = CreateEvictionPolicy(eviction_config)
         self._l1_manager = l1_manager
         self._listener = L1EvictionPolicy(self._eviction_policy)
         self._l1_manager.register_listener(self._listener)
@@ -84,7 +103,7 @@ class L1EvictionController(EvictionController):
             "eviction_ratio": self._eviction_config.eviction_ratio,
         }
 
-    def _eviction_loop(self):
+    def eviction_loop(self):
         watermark = self._eviction_config.trigger_watermark
         eviction_ratio = self._eviction_config.eviction_ratio
 
@@ -107,9 +126,9 @@ class L1EvictionController(EvictionController):
             )
             actions = self._eviction_policy.get_eviction_actions(eviction_ratio)
             for action in actions:
-                self._execute_eviction_action(action)
+                self.execute_eviction_action(action)
 
-    def _execute_eviction_action(self, action: EvictionAction):
+    def execute_eviction_action(self, action: EvictionAction):
         if action.destination == EvictionDestination.DISCARD:
             self._l1_manager.delete(action.keys)
         else:
