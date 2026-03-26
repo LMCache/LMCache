@@ -11,6 +11,7 @@ from lmcache.logging import init_logger
 from lmcache.utils import EngineType, _lmcache_nvtx_annotate
 from lmcache.v1.compute.blend.utils import LMCBlenderBuilder
 from lmcache.v1.gpu_connector.utils import (
+    LayoutHints,
     assert_is_vllm_flash_attn_or_flash_infer,
     discover_gpu_kv_format,
     ensure_contiguous_kv_caches,
@@ -20,6 +21,7 @@ from lmcache.v1.gpu_connector.utils import (
     get_num_blocks,
     get_page_buffer_size,
     get_tokens_per_layer,
+    permute_kv_caches_to_contiguous,
 )
 from lmcache.v1.memory_management import GPUMemoryAllocator  # noqa: E501
 from lmcache.v1.memory_management import MemoryFormat, MemoryObj
@@ -128,6 +130,11 @@ class GPUConnectorInterface(metaclass=abc.ABCMeta):
         """Initialize the kvcaches pointers if not already initialized."""
         if "kvcaches" in kwargs:
             self.kvcaches = kwargs["kvcaches"]
+            # Ensure contiguity on every call.  HND tensors from vLLM have a
+            # non-contiguous logical view (NHD) that must be permuted back to
+            # the physical (HND) shape for correct kernel indexing.
+            # permute_kv_caches_to_contiguous is a no-op when already contiguous.
+            self.kvcaches = permute_kv_caches_to_contiguous(self.kvcaches)
 
 
 class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
@@ -167,6 +174,9 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
 
         self.gpu_buffer: Optional[torch.Tensor] = None
         self.use_mla = "use_mla" in kwargs and kwargs["use_mla"]
+        self.layout_hints: LayoutHints = kwargs.get(  # type: ignore[assignment]
+            "layout_hints", {}
+        )
         if use_gpu:
             assert "chunk_size" in kwargs, (
                 "chunk_size should be provided to create a GPU buffer."
@@ -189,6 +199,7 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
         metadata: LMCacheMetadata,
         use_gpu: bool = False,
         device: Optional[torch.device] = None,
+        layout_hints: Optional[LayoutHints] = None,
     ) -> "VLLMPagedMemGPUConnectorV2":
         """Create a connector from LMCacheMetadata.
 
@@ -196,6 +207,8 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
             metadata: The LMCache engine metadata containing model configuration.
             use_gpu: Whether to use GPU intermediate buffer.
             device: The device to use for the connector.
+            layout_hints: Optional hints about KV cache layout from the
+                serving engine.
 
         Returns:
             A new instance of VLLMPagedMemGPUConnectorV2.
@@ -216,6 +229,7 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
             dtype=metadata.kv_dtype,
             device=device,
             use_mla=metadata.use_mla,
+            layout_hints=layout_hints,
         )
 
     def _initialize_pointers(self, kv_caches: List[torch.Tensor]) -> torch.Tensor:
@@ -226,12 +240,8 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
             return self.kv_cache_pointers_on_gpu[idx]
 
         # contiguous before pointer capture or format discovery
-        # First Party
-        from lmcache.integration.vllm.utils import _vllm_layout_hints
-
-        layout_hints = _vllm_layout_hints()
         kv_caches = ensure_contiguous_kv_caches(
-            kv_caches, kv_layout=layout_hints.get("kv_layout")
+            kv_caches, kv_layout=self.layout_hints.get("kv_layout")
         )
 
         self.kv_cache_pointers.numpy()[:] = [t.data_ptr() for t in kv_caches]
@@ -241,7 +251,7 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
         self.kv_cache_pointers_on_gpu[idx].copy_(self.kv_cache_pointers)
 
         self.gpu_kv_format = discover_gpu_kv_format(
-            kv_caches, EngineType.VLLM, layout_hints=layout_hints
+            kv_caches, EngineType.VLLM, layout_hints=self.layout_hints
         )
         self.num_blocks = get_num_blocks(kv_caches, self.gpu_kv_format)
         self.block_size = get_block_size(kv_caches, self.gpu_kv_format)
@@ -410,6 +420,7 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
         metadata: LMCacheMetadata,
         device: torch.device,
         use_gpu: bool = False,
+        layout_hints: Optional[LayoutHints] = None,
     ):
         assert device.type == "cuda", "The device should be CUDA."
         self.metadata = metadata
@@ -417,6 +428,7 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
         self.use_mla = metadata.use_mla
         self.chunk_size = metadata.chunk_size
         self.use_gpu = use_gpu
+        self.layout_hints: LayoutHints = layout_hints or {}
         self.kvcaches: Optional[List[torch.Tensor]] = None
 
         self.init = False
@@ -432,9 +444,10 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
         metadata: LMCacheMetadata,
         use_gpu: bool = False,
         device: Optional[torch.device] = None,
+        layout_hints: Optional[LayoutHints] = None,
     ) -> "VLLMPagedMemGPUConnectorV3":
         assert device is not None
-        return cls(metadata, device, use_gpu)
+        return cls(metadata, device, use_gpu, layout_hints=layout_hints)
 
     def _initialize_kv_cache_pointers(self):
         if self.init:
@@ -442,12 +455,8 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
         assert self.metadata.kv_layer_groups_manager.kv_layer_groups
 
         # permute to contiguous before capturing pointers or doing format discovery
-        # First Party
-        from lmcache.integration.vllm.utils import _vllm_layout_hints
-
-        layout_hints = _vllm_layout_hints()
         self.kvcaches = ensure_contiguous_kv_caches(
-            self.kvcaches, kv_layout=layout_hints.get("kv_layout")
+            self.kvcaches, kv_layout=self.layout_hints.get("kv_layout")
         )
 
         if self.use_gpu:
@@ -478,7 +487,7 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
             self.group_kv_cache_pointers_on_gpu.append(kv_cache_pointers_on_gpu)
 
         self.gpu_kv_format = discover_gpu_kv_format(
-            self.kvcaches, EngineType.VLLM, layout_hints=layout_hints
+            self.kvcaches, EngineType.VLLM, layout_hints=self.layout_hints
         )
         self.num_blocks = get_num_blocks(self.kvcaches, self.gpu_kv_format)
         self.block_size = get_block_size(self.kvcaches, self.gpu_kv_format)
@@ -613,6 +622,9 @@ class VLLMBufferLayerwiseGPUConnector(GPUConnectorInterface):
         self.num_layers = num_layers
 
         self.kvcaches: Optional[List[torch.Tensor]] = None
+        self.layout_hints: LayoutHints = kwargs.get(  # type: ignore[assignment]
+            "layout_hints", {}
+        )
 
         # TODO(Jiayi): remove this hardcode
         self.cache_positions = True
@@ -644,6 +656,7 @@ class VLLMBufferLayerwiseGPUConnector(GPUConnectorInterface):
         metadata: LMCacheMetadata,
         use_gpu: bool = False,
         device: Optional[torch.device] = None,
+        layout_hints: Optional[LayoutHints] = None,
     ) -> "VLLMBufferLayerwiseGPUConnector":
         """Create a connector from LMCacheMetadata.
 
@@ -651,6 +664,8 @@ class VLLMBufferLayerwiseGPUConnector(GPUConnectorInterface):
             metadata: The LMCache engine metadata containing model configuration.
             use_gpu: Whether to use GPU intermediate buffer.
             device: The device to use for the connector.
+            layout_hints: Optional hints about KV cache layout from the
+                serving engine.
 
         Returns:
             A new instance of VLLMBufferLayerwiseGPUConnector.
@@ -668,6 +683,7 @@ class VLLMBufferLayerwiseGPUConnector(GPUConnectorInterface):
             use_gpu=use_gpu,
             dtype=metadata.kv_dtype,
             device=device,
+            layout_hints=layout_hints,
         )
 
     def _lazy_initialize_buffer(self, kv_caches):
@@ -684,16 +700,12 @@ class VLLMBufferLayerwiseGPUConnector(GPUConnectorInterface):
             # is okay since fragmentation shouldn't exist in the `gpu_buffer_allocator`
             # in layerwise mode.
 
-            # First Party
-            from lmcache.integration.vllm.utils import _vllm_layout_hints
-
-            layout_hints = _vllm_layout_hints()
             kv_caches = ensure_contiguous_kv_caches(
-                kv_caches, kv_layout=layout_hints.get("kv_layout")
+                kv_caches, kv_layout=self.layout_hints.get("kv_layout")
             )
             self.kvcaches = kv_caches
             self.gpu_kv_format = discover_gpu_kv_format(
-                kv_caches, EngineType.VLLM, layout_hints=layout_hints
+                kv_caches, EngineType.VLLM, layout_hints=self.layout_hints
             )
             assert_is_vllm_flash_attn_or_flash_infer(self.gpu_kv_format)
             self.tokens_per_layer = get_tokens_per_layer(kv_caches, self.gpu_kv_format)
@@ -1023,6 +1035,9 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
         self.hidden_dim_size = hidden_dim_size
         self.num_layers = num_layers
         self.use_gpu = use_gpu
+        self.layout_hints: LayoutHints = kwargs.get(  # type: ignore[assignment]
+            "layout_hints", {}
+        )
 
         self.gpu_buffer_allocator = None
 
@@ -1051,6 +1066,7 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
         metadata: LMCacheMetadata,
         use_gpu: bool = False,
         device: Optional[torch.device] = None,
+        layout_hints: Optional[LayoutHints] = None,
     ) -> "VLLMPagedMemLayerwiseGPUConnector":
         """Create a connector from LMCacheMetadata.
 
@@ -1058,6 +1074,8 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
             metadata: The LMCache engine metadata containing model configuration.
             use_gpu: Whether to use GPU intermediate buffer.
             device: The device to use for the connector.
+            layout_hints: Optional hints about KV cache layout from the
+                serving engine.
 
         Returns:
             A new instance of VLLMPagedMemLayerwiseGPUConnector.
@@ -1078,6 +1096,7 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
             dtype=metadata.kv_dtype,
             device=device,
             use_mla=metadata.use_mla,
+            layout_hints=layout_hints,
         )
 
     def _lazy_initialize_buffer(self, kv_caches):
@@ -1094,16 +1113,12 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
             # is okay since fragmentation shouldn't exist in the `gpu_buffer_allocator`
             # in layerwise mode.
 
-            # First Party
-            from lmcache.integration.vllm.utils import _vllm_layout_hints
-
-            layout_hints = _vllm_layout_hints()
             kv_caches = ensure_contiguous_kv_caches(
-                kv_caches, kv_layout=layout_hints.get("kv_layout")
+                kv_caches, kv_layout=self.layout_hints.get("kv_layout")
             )
             self.kvcaches = kv_caches
             self.gpu_kv_format = discover_gpu_kv_format(
-                kv_caches, EngineType.VLLM, layout_hints=layout_hints
+                kv_caches, EngineType.VLLM, layout_hints=self.layout_hints
             )
             assert_is_vllm_flash_attn_or_flash_infer(self.gpu_kv_format)
             self.tokens_per_layer = get_tokens_per_layer(kv_caches, self.gpu_kv_format)
