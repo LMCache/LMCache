@@ -17,12 +17,18 @@ _shm_registry: dict[int, shared_memory.SharedMemory] = {}
 _buf_registry: dict[int, ctypes.Array] = {}
 
 
+# On XPU (Intel GPU), PyTorch 2.4+ supports pin_memory=True via SYCL USM
+# host allocation, enabling fast DMA for XPU<->CPU transfers.
+_XPU_PIN_MEMORY = hasattr(torch, "xpu") and torch.xpu.is_available()
+
+
 def alloc_pinned_numa_ptr(size: int, numa_id: int = 0) -> int:
     """Non-CUDA equivalent of allocating pinned memory with NUMA awareness.
-    Note: NUMA and pinned memory are not supported on non-CUDA."""
+    On XPU, uses pin_memory=True (SYCL USM host allocation) for fast transfers.
+    Note: NUMA node selection is not supported on non-CUDA."""
 
     # Create a 1D uint8 CPU tensor, as uint8 == 1 byte
-    tensor = torch.empty(size, dtype=torch.uint8, pin_memory=False)
+    tensor = torch.empty(size, dtype=torch.uint8, pin_memory=_XPU_PIN_MEMORY)
 
     # First-touch initialization (forces physical allocation)
     tensor.fill_(0)
@@ -46,10 +52,11 @@ def free_pinned_numa_ptr(ptr: int, size: int | None = None) -> None:
 
 def alloc_pinned_ptr(size: int, device_id: int = 0) -> int:
     """Non-CUDA equivalent of allocating pinned memory and returning pointer
-    to it. Note: Pinned memory is not supported on non-CUDA."""
+    to it. On XPU, uses pin_memory=True (SYCL USM host allocation) for
+    fast DMA transfers. On other non-CUDA platforms, pinning is not supported."""
 
     # Create a 1D uint8 CPU tensor, as uint8 == 1 byte
-    tensor = torch.empty(size, dtype=torch.uint8, pin_memory=False)
+    tensor = torch.empty(size, dtype=torch.uint8, pin_memory=_XPU_PIN_MEMORY)
 
     # First-touch initialization (forces physical allocation)
     tensor.fill_(0)

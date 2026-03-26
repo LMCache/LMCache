@@ -528,7 +528,8 @@ class MPCacheEngine:
             return self._register_prefetch_job(
                 _PrefetchJob(
                     handle=PrefetchHandle(
-                        request_id=-1,
+                        prefetch_request_id=-1,
+                        external_request_id=key.request_id,
                         l1_prefix_hit_count=0,
                         total_requested_keys=0,
                         submit_time=time.monotonic(),
@@ -546,7 +547,8 @@ class MPCacheEngine:
             return self._register_prefetch_job(
                 _PrefetchJob(
                     handle=PrefetchHandle(
-                        request_id=-1,
+                        prefetch_request_id=-1,
+                        external_request_id=key.request_id,
                         l1_prefix_hit_count=0,
                         total_requested_keys=0,
                         submit_time=time.monotonic(),
@@ -558,7 +560,10 @@ class MPCacheEngine:
         obj_keys = ipc_key_to_object_keys(key, chunk_hashes)
 
         handle = self.storage_manager.submit_prefetch_task(
-            obj_keys, layout_desc, extra_count=extra_count
+            obj_keys,
+            layout_desc,
+            extra_count=extra_count,
+            external_request_id=key.request_id,
         )
         return self._register_prefetch_job(
             _PrefetchJob(
