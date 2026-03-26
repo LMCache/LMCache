@@ -36,7 +36,7 @@ def is_false(value: str) -> bool:
     return value.lower() in ("false", "0", "no", "n", "off")
 
 
-def _vllm_layout_hints() -> "LayoutHints":
+def vllm_layout_hints() -> "LayoutHints":
     """Build layout_hints dict by querying vLLM at runtime."""
     hints: dict[str, str] = {}
     kv_layout = try_get_vllm_kv_cache_layout()
