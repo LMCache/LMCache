@@ -538,6 +538,9 @@ class LMCacheConnectorV1Impl:
         self._check_legacy_register_kv_caches()
 
         self.kv_caches: dict[str, torch.Tensor] = {}
+        self._has_non_attention_layers = getattr(
+            vllm_config.model_config, "is_hybrid", False
+        )
         self._block_size = vllm_config.cache_config.block_size
         self.load_specs: dict[str, LoadSpec] = {}
         self.kv_cache_manager: Optional["KVCacheManager"] = None
@@ -705,6 +708,20 @@ class LMCacheConnectorV1Impl:
                 self.lmcache_engine.metadata.kv_layer_groups_manager
             )
             kv_layer_groups_manager.build_kv_layer_groups(self.kv_caches)
+
+            # Also detect from layer groups (worker-side confirmation)
+            total_grouped = sum(
+                len(g.layer_indices)
+                for g in kv_layer_groups_manager.kv_layer_groups
+            )
+            if total_grouped < len(self.kv_caches):
+                self._has_non_attention_layers = True
+                logger.warning(
+                    "Hybrid model: %d/%d non-attention layers, "
+                    "cache load disabled",
+                    len(self.kv_caches) - total_grouped,
+                    len(self.kv_caches),
+                )
 
     # TODO(chunxiaozheng): in the latest lmcache_connector, we use `register_kv_caches`
     #  to init self.kv_caches, we keep it in order to be compatible with old versions
@@ -1225,6 +1242,11 @@ class LMCacheConnectorV1Impl:
         # Ignore DP attention mock requests
         if request.request_id.startswith("mock_req"):
             return 0
+
+        # Hybrid models: can't restore non-attention layers from cache
+        if self._has_non_attention_layers:
+            return 0
+
         # to handle preempted requests, we want `get_num_new_matched_tokens` to be
         # idempotent under the condition that `update_state_after_alloc` is NOT called
         # then the two side-effects that must be idempotent are:
