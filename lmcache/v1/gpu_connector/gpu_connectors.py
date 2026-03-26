@@ -174,8 +174,11 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
 
         self.gpu_buffer: Optional[torch.Tensor] = None
         self.use_mla = "use_mla" in kwargs and kwargs["use_mla"]
-        self.layout_hints: LayoutHints = kwargs.get(  # type: ignore[assignment]
-            "layout_hints", {}
+        self.layout_hints: LayoutHints = (
+            kwargs.get(  # type: ignore[assignment]
+                "layout_hints"
+            )
+            or {}
         )
         if use_gpu:
             assert "chunk_size" in kwargs, (
@@ -622,8 +625,11 @@ class VLLMBufferLayerwiseGPUConnector(GPUConnectorInterface):
         self.num_layers = num_layers
 
         self.kvcaches: Optional[List[torch.Tensor]] = None
-        self.layout_hints: LayoutHints = kwargs.get(  # type: ignore[assignment]
-            "layout_hints", {}
+        self.layout_hints: LayoutHints = (
+            kwargs.get(  # type: ignore[assignment]
+                "layout_hints"
+            )
+            or {}
         )
 
         # TODO(Jiayi): remove this hardcode
@@ -1035,8 +1041,11 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
         self.hidden_dim_size = hidden_dim_size
         self.num_layers = num_layers
         self.use_gpu = use_gpu
-        self.layout_hints: LayoutHints = kwargs.get(  # type: ignore[assignment]
-            "layout_hints", {}
+        self.layout_hints: LayoutHints = (
+            kwargs.get(  # type: ignore[assignment]
+                "layout_hints"
+            )
+            or {}
         )
 
         self.gpu_buffer_allocator = None
