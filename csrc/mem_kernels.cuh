@@ -1,12 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
+#pragma once
+
 #include <torch/all.h>
 #include <ATen/ATen.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/util/Exception.h>
-
-// #ifndef MEM_KERNELS_CUH
-// #define MEM_KERNELS_CUH
 
 enum class TransferDirection : int {
   H2D = 0,

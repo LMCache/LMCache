@@ -28,9 +28,15 @@ from lmcache.v1.gpu_connector.utils import (
     get_head_size,
     get_hidden_dim_size,
     get_num_blocks,
+    get_num_heads,
     get_num_layers,
     is_mla,
 )
+
+if torch.cuda.is_available():
+    import lmcache.c_ops as lmc_ops
+
+# First Party
 from lmcache.v1.multiprocess.custom_types import (
     KVCache,
 )
@@ -83,9 +89,28 @@ class GPUCacheContext:
         self.hidden_dim_size_ = get_hidden_dim_size(
             self.kv_caches_, self.gpu_kv_format_
         )
+        self.num_heads_ = get_num_heads(self.kv_caches_, self.gpu_kv_format_)
         self.head_size_ = get_head_size(self.kv_caches_, self.gpu_kv_format_)
 
-        # Pre-computed slot mapping
+        # Pre-built PageBufferShapeDesc for the block-level kernel
+        self.shape_desc_ = lmc_ops.PageBufferShapeDesc()
+        self.shape_desc_.kv_size = 1 if self.is_mla_ else 2
+        self.shape_desc_.nl = self.num_layers_
+        self.shape_desc_.nb = self.num_blocks_
+        self.shape_desc_.bs = self.block_size_
+        self.shape_desc_.nh = self.num_heads_
+        self.shape_desc_.hs = self.head_size_
+        self.shape_desc_.element_size = self.kv_caches_[0].element_size()
+
+        # Pre-allocated GPU buffer for block IDs (up to 1M elements).
+        # The caller copies block_ids into this buffer before launching the
+        # block-level kernel. Single-thread assumption: no lock needed.
+        _MAX_BLOCK_IDS = 1_000_000
+        self.block_ids_buffer_ = torch.empty(
+            _MAX_BLOCK_IDS, dtype=torch.long, device=self.device_
+        )
+
+        # Pre-computed slot mapping (used by the old token-level kernel)
         # shape: [num_blocks, block_size]
         block_ids = torch.arange(
             0, self.num_blocks_, dtype=torch.long, device=self.device_
@@ -98,7 +123,10 @@ class GPUCacheContext:
         )
 
         # Temporary GPU buffer for transfers
-        tmp_buffer_shape = self.get_kv_buffer_shape(lmcache_chunk_size)
+        self.max_batch_size = 4
+        tmp_buffer_shape = self.get_kv_buffer_shape(
+            lmcache_chunk_size * self.max_batch_size
+        )
         self.tmp_gpu_buffer_ = torch.empty(
             tmp_buffer_shape, dtype=self.dtype, device=self.device_
         )
@@ -192,6 +220,11 @@ class GPUCacheContext:
         return self.hidden_dim_size_
 
     @property
+    def num_heads(self) -> int:
+        """Returns the number of attention heads in the model"""
+        return self.num_heads_
+
+    @property
     def head_size(self) -> int:
         """
         Returns the head size of the KV cache
@@ -206,6 +239,9 @@ class GPUCacheContext:
         return self.is_mla_
 
     @property
+    def shape_desc(self) -> "lmc_ops.PageBufferShapeDesc":
+        return self.shape_desc_
+
     def gpu_kv_format_name(self) -> str:
         """Returns the GPU KV format enum name (e.g. ``'NL_X_TWO_NB_BS_NH_HS'``)."""
         return self.gpu_kv_format_.name
@@ -228,8 +264,53 @@ class GPUCacheContext:
     def get_tmp_gpu_buffer(self, num_tokens: int) -> torch.Tensor:
         """
         Returns the temporary GPU buffer for transfers
+
+        Note:
+            The returned buffer is guaranteed to be contiguous
         """
-        return self.tmp_gpu_buffer_[:, :, :num_tokens, :]
+        shape = self.get_kv_buffer_shape(num_tokens)
+        num_elems = shape.numel()
+        return self.tmp_gpu_buffer_.flatten()[:num_elems].view(shape)
+
+    def get_tmp_gpu_buffer_batched(
+        self, num_tokens: int, batch_size: int
+    ) -> list[torch.Tensor]:
+        """
+        Returns a list of temporary GPU buffer for batched transfers
+
+        Note:
+            Each returned buffer is guaranteed to be contiguous.
+        """
+        assert batch_size <= self.max_batch_size, (
+            f"Batch size {batch_size} exceeds max {self.max_batch_size}"
+        )
+        ret = []
+        start_offset = 0
+        flatten_view = self.tmp_gpu_buffer_.flatten()
+        for i in range(batch_size):
+            shape = self.get_kv_buffer_shape(num_tokens)
+            num_elems = shape.numel()
+            buf = flatten_view[start_offset : start_offset + num_elems].view(shape)
+            ret.append(buf)
+            start_offset += num_elems
+        return ret
+
+    def stage_block_ids(self, block_ids: list[int]) -> torch.Tensor:
+        """Copy block_ids into the pre-allocated GPU buffer and return a
+        view of the occupied region. Uses non-blocking copy via a pinned
+        CPU tensor created from the list's underlying buffer.
+
+        Args:
+            block_ids: Block indices as a Python list of ints.
+
+        Returns:
+            A GPU int64 tensor view into the pre-allocated buffer.
+        """
+        n = len(block_ids)
+        cpu_tensor = torch.frombuffer(array.array("l", block_ids), dtype=torch.long)
+        buf = self.block_ids_buffer_[:n]
+        buf.copy_(cpu_tensor, non_blocking=True)
+        return buf
 
     @_lmcache_nvtx_annotate
     def get_slot_mapping_tensor(self, gpu_block_ids: list[int]) -> torch.Tensor:
