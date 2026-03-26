@@ -132,7 +132,7 @@ management endpoints for health checking and cache administration.
 
 .. code-block:: bash
 
-    python3 -m lmcache.v1.multiprocess.http_server \
+    lmcache server \
         --l1-size-gb 100 --eviction-policy LRU
 
 The HTTP server listens on ``0.0.0.0:8000`` by default (configurable with

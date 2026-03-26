@@ -31,7 +31,17 @@ Source: ``lmcache/v1/multiprocess/config.py``
      - Chunk size for KV cache operations (in tokens).
    * - ``--max-workers``
      - ``1``
-     - Maximum number of worker threads for handling ZMQ requests.
+     - Base number of worker threads. Sets the default for both the GPU
+       (affinity) pool and the CPU (normal) pool. Can be overridden
+       per-pool with ``--max-gpu-workers`` and ``--max-cpu-workers``.
+   * - ``--max-gpu-workers``
+     - (inherits ``--max-workers``)
+     - Worker threads for the GPU affinity pool (STORE/RETRIEVE).
+       Requests from the same vLLM instance are always dispatched to the
+       same thread, eliminating GPU transfer lock contention.
+   * - ``--max-cpu-workers``
+     - (inherits ``--max-workers``)
+     - Worker threads for the normal CPU pool (LOOKUP, etc.).
    * - ``--hash-algorithm``
      - ``blake3``
      - Hash algorithm for token-based operations.
@@ -342,11 +352,12 @@ Full Example
 
 .. code-block:: bash
 
-    python3 -m lmcache.v1.multiprocess.http_server \
+    lmcache server \
         --host 0.0.0.0 \
         --port 6555 \
         --chunk-size 512 \
         --max-workers 4 \
+        --max-gpu-workers 2 \
         --hash-algorithm blake3 \
         --engine-type default \
         --l1-size-gb 100 \

@@ -33,6 +33,7 @@ from lmcache.integration.vllm.utils import (
     extract_mm_features,
     lmcache_get_or_create_config,
 )
+from lmcache.integration.vllm.vllm_service_factory import VllmServiceFactory
 from lmcache.logging import init_logger
 from lmcache.observability import LMCStatsMonitor, PrometheusLogger
 from lmcache.utils import CacheStoreEvent, _lmcache_nvtx_annotate, cdiv
@@ -460,13 +461,8 @@ class LMCacheConnectorV1Impl:
         self._apply_extra_config(config, vllm_config)
         self.config = config
 
-        # Initialize LMCacheManager to handle internal components
-        self._manager = LMCacheManager(
-            config=config,
-            vllm_config=vllm_config,
-            role=role.name.lower(),
-            connector=self,
-        )
+        service_factory = VllmServiceFactory(config, vllm_config, role.name.lower())
+        self._manager = LMCacheManager(config, service_factory, connector=self)
 
         # Start services managed by LMCacheManager
         self._manager.start_services()
@@ -1089,6 +1085,14 @@ class LMCacheConnectorV1Impl:
 
         if self.kv_role == "kv_consumer":
             # Don't do save if the role is kv_consumer
+            # But still need to unpin the kv caches according to req_id
+            # to balance the pin count from contains()
+            assert self.lmcache_engine is not None, (
+                "LMCacheEngine must be initialized to unpin requests."
+            )
+            for request in connector_metadata.requests:
+                self.lmcache_engine.lookup_unpin(request.req_id)
+
             return
 
         if self.use_layerwise:

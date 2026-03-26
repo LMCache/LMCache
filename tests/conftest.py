@@ -138,6 +138,25 @@ def patch_pin_allocator():
 """
 
 
+class MockSyncGlideClient:
+    """In-memory mock of a synchronous Glide (Valkey) client."""
+
+    _store: dict[bytes, bytes] = {}
+
+    def set(self, key: bytes, value) -> None:
+        self._store[key] = bytes(value)
+
+    def get(self, key: bytes):
+        return self._store.get(key)
+
+    def exists(self, keys: list[bytes]) -> int:
+        return sum(1 for k in keys if k in self._store)
+
+    @classmethod
+    def reset_store(cls) -> None:
+        cls._store.clear()
+
+
 class MockRedis:
     def __init__(
         self, host=None, port=None, url=None, decode_responses=False, **kwargs

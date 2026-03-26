@@ -15,6 +15,7 @@ import zmq
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.multiprocess.affinity_pool import AffinityThreadPool
 from lmcache.v1.multiprocess.custom_types import (
     CudaIPCWrapper,
     get_customized_decoder,
@@ -289,24 +290,37 @@ class SyncRequestHandler(RequestHandlerBase[ResponseType]):
 class BlockingRequestHandler(RequestHandlerBase[ResponseType]):
     """
     Returns the future of the response.
+
+    The ``executor`` field is initially ``None`` and must be assigned via
+    :meth:`MessageQueueServer.add_normal_thread_pool` or
+    :meth:`MessageQueueServer.add_affinity_thread_pool` before the server
+    is started.
     """
 
     def __init__(
         self,
-        executor: ThreadPoolExecutor,
         payload_clss: list[Any],
         response_cls: ResponseType,
         handler: Callable[..., ResponseType],
     ):
-        self.executor = executor
+        self.executor: ThreadPoolExecutor | AffinityThreadPool | None = None
         self.payload_clss = payload_clss
         self.handler = handler
         self.response_cls = response_cls
 
-    def __call__(self, payloads: list[bytes]) -> Future[ResponseType]:
+    def __call__(
+        self, payloads: list[bytes], affinity_key: int = 0
+    ) -> Future[ResponseType]:
+        assert self.executor is not None, (
+            "BlockingRequestHandler has no executor assigned. "
+            "Call add_normal_thread_pool or add_affinity_thread_pool first."
+        )
         decoded_payloads = unwrap_request_payloads(payloads, self.payload_clss)
-        future = self.executor.submit(self.handler, *decoded_payloads)
-        return future
+        if isinstance(self.executor, AffinityThreadPool):
+            return self.executor.submit(
+                self.handler, *decoded_payloads, affinity_key=affinity_key
+            )
+        return self.executor.submit(self.handler, *decoded_payloads)
 
     def get_response_class(self) -> ResponseType:
         return self.response_cls
@@ -332,7 +346,7 @@ class NonBlockingRequestHandler(Generic[ResponseType, StateType]):
 
 
 class MessageQueueServer:
-    def __init__(self, bind_url: str, context: zmq.Context, max_workers: int = 4):
+    def __init__(self, bind_url: str, context: zmq.Context):
         # Socket
         self.ctx = context
         self.socket = self.ctx.socket(zmq.ROUTER)
@@ -354,14 +368,11 @@ class MessageQueueServer:
             target=self._main_loop, daemon=True, name="mq-server-thread"
         )
 
-        # Thread pool for blocking handlers
-        self.thread_pool = ThreadPoolExecutor(max_workers=max_workers)
-
         # Registered handlers: request_type -> (payload_cls, handler)
         self.handlers: dict[RequestType, RequestHandlerBase[Any]] = {}
 
-        # Dedicated thread pools for specific request types
-        self.dedicated_pools: list[ThreadPoolExecutor] = []
+        # Thread pools assigned via add_normal_thread_pool / add_affinity_thread_pool
+        self.extra_pools: list[ThreadPoolExecutor | AffinityThreadPool] = []
 
     def _call_sync_handler(
         self,
@@ -399,8 +410,10 @@ class MessageQueueServer:
             handler_entry (BlockingRequestHandler[Any]): The handler entry.
             payloads (list[bytes]): The payloads of the request.
             prefix_frames (list[bytes]): The prefix frames to send back.
+                prefix_frames[0] is the zmq identity used as affinity key.
         """
-        future = handler_entry(payloads)
+        affinity_key = hash(prefix_frames[0])
+        future = handler_entry(payloads, affinity_key=affinity_key)
 
         def _notify_response(fut: Future):
             try:
@@ -593,7 +606,7 @@ class MessageQueueServer:
     ) -> None:
         response_cls = get_response_class(request_type)
         self.handlers[request_type] = BlockingRequestHandler(
-            self.thread_pool, payload_clss, response_cls, handler
+            payload_clss, response_cls, handler
         )
 
     def add_nonblocking_handler(
@@ -601,12 +614,34 @@ class MessageQueueServer:
     ) -> None:
         raise NotImplementedError
 
-    def add_dedicated_thread_pool(
+    def _validate_blocking_handlers(
+        self,
+        request_types: list[RequestType],
+        method_name: str,
+    ) -> None:
+        """Validate that all request types are registered BlockingRequestHandlers."""
+        for request_type in request_types:
+            handler = self.handlers.get(request_type)
+            if handler is None:
+                raise ValueError(
+                    f"No handler registered for request type: {request_type}. "
+                    f"Register handlers before calling {method_name}."
+                )
+            if not isinstance(handler, BlockingRequestHandler):
+                raise TypeError(
+                    f"Handler for {request_type} is "
+                    f"{type(handler).__name__}, not BlockingRequestHandler. "
+                    f"Only blocking handlers can use thread pools."
+                )
+
+    def add_normal_thread_pool(
         self,
         request_types: list[RequestType],
         max_workers: int,
     ) -> None:
-        """Assign a dedicated ThreadPoolExecutor to specific request types.
+        """Assign a ThreadPoolExecutor to specific request types.
+
+        Use this for non-GPU blocking handlers (e.g. LOOKUP, END_SESSION).
 
         Must be called after the handlers are registered (via add_handler /
         add_blocking_handler) and before start().  Each request_type must
@@ -615,44 +650,76 @@ class MessageQueueServer:
 
         Args:
             request_types: The request types that should use this pool.
-            max_workers: Number of worker threads in the dedicated pool.
+            max_workers: Number of worker threads in the pool.
         """
-        # Pass 1: validate all request types
-        for request_type in request_types:
-            handler = self.handlers.get(request_type)
-            if handler is None:
-                raise ValueError(
-                    f"No handler registered for request type: {request_type}. "
-                    f"Register handlers before calling add_dedicated_thread_pool."
-                )
-            if not isinstance(handler, BlockingRequestHandler):
-                raise TypeError(
-                    f"Handler for {request_type} is "
-                    f"{type(handler).__name__}, not BlockingRequestHandler. "
-                    f"Only blocking handlers can use dedicated thread pools."
-                )
-
-        # Pass 2: create pool and assign
+        self._validate_blocking_handlers(request_types, "add_normal_thread_pool")
         if not request_types:
             return
 
         pool = ThreadPoolExecutor(
             max_workers=max_workers,
-            thread_name_prefix=f"dedicated-pool-{len(self.dedicated_pools)}",
+            thread_name_prefix=f"normal-pool-{len(self.extra_pools)}",
         )
-        self.dedicated_pools.append(pool)
+        self.extra_pools.append(pool)
         for request_type in request_types:
             handler = self.handlers[request_type]
             assert isinstance(handler, BlockingRequestHandler)
             handler.executor = pool
 
         logger.debug(
-            "Created dedicated thread pool (max_workers=%d) for request types: %s",
+            "Created normal thread pool (max_workers=%d) for request types: %s",
+            max_workers,
+            [rt.name for rt in request_types],
+        )
+
+    def add_affinity_thread_pool(
+        self,
+        request_types: list[RequestType],
+        max_workers: int,
+    ) -> None:
+        """Assign an AffinityThreadPool to specific request types.
+
+        Use this for GPU-bound blocking handlers (e.g. STORE, RETRIEVE).
+        Requests from the same zmq client identity are always dispatched
+        to the same worker thread, eliminating the need for per-instance
+        GPU transfer locks.
+
+        Must be called after the handlers are registered (via add_handler /
+        add_blocking_handler) and before start().
+
+        Args:
+            request_types: The request types that should use this pool.
+            max_workers: Number of worker threads in the pool.
+        """
+        self._validate_blocking_handlers(request_types, "add_affinity_thread_pool")
+        if not request_types:
+            return
+
+        pool = AffinityThreadPool(
+            max_workers=max_workers,
+            thread_name_prefix=f"affinity-pool-{len(self.extra_pools)}",
+        )
+        self.extra_pools.append(pool)
+        for request_type in request_types:
+            handler = self.handlers[request_type]
+            assert isinstance(handler, BlockingRequestHandler)
+            handler.executor = pool
+
+        logger.debug(
+            "Created affinity thread pool (max_workers=%d) for request types: %s",
             max_workers,
             [rt.name for rt in request_types],
         )
 
     def start(self):
+        # Validate all blocking handlers have an executor assigned
+        for rt, handler in self.handlers.items():
+            if isinstance(handler, BlockingRequestHandler) and handler.executor is None:
+                raise RuntimeError(
+                    f"BlockingRequestHandler for {rt} has no thread pool "
+                    f"assigned. Call add_normal_thread_pool or "
+                    f"add_affinity_thread_pool before start()."
+                )
         self.worker_thread.start()
 
     def close(self) -> None:
@@ -660,7 +727,6 @@ class MessageQueueServer:
         if self.worker_thread.is_alive():
             self.worker_thread.join()
         self.socket.close()
-        self.thread_pool.shutdown(wait=False)
-        for pool in self.dedicated_pools:
+        for pool in self.extra_pools:
             pool.shutdown(wait=False)
         os.close(self._output_efd)
