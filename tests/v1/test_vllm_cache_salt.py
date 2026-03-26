@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Standard
-import hashlib
 from types import SimpleNamespace
+from typing import Any, cast
 from unittest.mock import MagicMock
+import hashlib
 
 # Third Party
 import pytest
@@ -17,8 +18,8 @@ from vllm.sampling_params import SamplingParams
 # First Party
 from lmcache.integration.vllm.vllm_v1_adapter import (
     LMCacheConnectorMetadata,
-    LoadSpec,
     LMCacheConnectorV1Impl,
+    LoadSpec,
     SaveSpec,
     extract_request_configs,
 )
@@ -64,15 +65,23 @@ class _FakeBlender:
         self.blend_calls.append(kwargs)
 
 
+class _FakeManager:
+    def __init__(self, lookup_client=None, lmcache_engine=None) -> None:
+        self.lookup_client = lookup_client
+        self.lmcache_engine = lmcache_engine
+        self.lookup_server = None
+
+
 def _hash_cache_salt(cache_salt: str) -> str:
     return hashlib.sha256(cache_salt.encode("utf-8")).hexdigest()
 
 
 def _make_connector() -> LMCacheConnectorV1Impl:
     connector = LMCacheConnectorV1Impl.__new__(LMCacheConnectorV1Impl)
+    lookup_client = MagicMock()
+    lookup_client.lookup_cache.return_value = -1
+    cast(Any, connector)._manager = _FakeManager(lookup_client=lookup_client)
     connector.kv_role = "kv_both"
-    connector.lookup_client = MagicMock()
-    connector.lookup_client.lookup_cache.return_value = -1
     connector.skip_last_n_tokens = 0
     connector.load_specs = {}
     connector._requests_priority = {}
@@ -97,7 +106,7 @@ def _make_layerwise_connector(
     engine = _FakeLayerwiseEngine()
     connector.use_layerwise = True
     connector.enable_blending = False
-    connector.lmcache_engine = engine
+    cast(Any, connector)._manager.lmcache_engine = engine
     connector._parent = _FakeParent(LMCacheConnectorMetadata(requests=requests))
     connector._stats_monitor = MagicMock()
     connector.device = "cpu"
@@ -135,7 +144,8 @@ def test_extract_request_configs_hashes_underscore_salt() -> None:
 
 def test_lookup_uses_cache_salt_in_request_configs() -> None:
     connector = _make_connector()
-    connector.lookup_client.lookup.return_value = 4
+    lookup_client = cast(Any, connector.lookup_client)
+    lookup_client.lookup.return_value = 4
 
     request = MagicMock()
     request.request_id = "req-1"
@@ -156,7 +166,7 @@ def test_lookup_uses_cache_salt_in_request_configs() -> None:
 
     connector.get_num_new_matched_tokens(request, num_computed_tokens=0)
 
-    connector.lookup_client.lookup.assert_called_once_with(
+    lookup_client.lookup.assert_called_once_with(
         [1, 2, 3, 4],
         lookup_id="req-1",
         request_configs={
