@@ -175,11 +175,72 @@ else:
         failed=1
     fi
 
+    # Sanity check: on a random (no-reuse) workload, LMCache should NOT be
+    # significantly faster than baseline. If it is, the benchmark setup is
+    # asymmetric and the results are unreliable as a regression test.
+    local max_speedup_pct=10
+    speedup_check=$(python3 -c "
+lmcache_tp = $lmcache_throughput
+baseline_tp = $baseline_throughput
+if baseline_tp > 0:
+    speedup_pct = ((lmcache_tp - baseline_tp) / baseline_tp) * 100
+else:
+    speedup_pct = 0
+if speedup_pct > $max_speedup_pct:
+    print(f'WARN|{speedup_pct:.2f}')
+else:
+    print(f'OK|{speedup_pct:.2f}')
+")
+
+    local speedup_status speedup_pct
+    speedup_status=$(echo "$speedup_check" | cut -d'|' -f1)
+    speedup_pct=$(echo "$speedup_check" | cut -d'|' -f2)
+
+    if [ "$speedup_status" = "WARN" ]; then
+        echo "WARNING: LMCache is ${speedup_pct}% faster than baseline on random workload (max expected: ${max_speedup_pct}%)"
+        echo "This suggests a measurement asymmetry, not a real cache benefit."
+        failed=1
+    else
+        echo "Speedup sanity check: LMCache is ${speedup_pct}% faster (max expected: ${max_speedup_pct}%) OK"
+    fi
+
     echo ""
     return "$failed"
 }
 
+warmup_server() {
+    local port="$1"
+    local description="$2"
+    local num_warmup="${3:-3}"
+
+    echo "=== Warming up $description (port $port) ==="
+    # Send a few chat completion requests to warm up the tokenizer,
+    # chat template (Jinja2), and engine pipeline. Without this, the
+    # first-ever batch of requests incurs ~25s of cold-start overhead
+    # (BPE compilation, template compilation, etc.) which skews the
+    # benchmark since lm-eval (Step 3) only warms the LMCache server.
+    for i in $(seq 1 "$num_warmup"); do
+        curl -s -X POST "http://localhost:${port}/v1/chat/completions" \
+            -H "Content-Type: application/json" \
+            -d "{
+                \"model\": \"${MODEL}\",
+                \"messages\": [{\"role\": \"user\", \"content\": \"Warmup request ${i}. The quick brown fox jumps over the lazy dog.\"}],
+                \"max_tokens\": 1
+            }" > /dev/null 2>&1
+    done
+    echo "$description warmup complete"
+}
+
 echo "Using random seed: $RANDOM_SEED"
+echo ""
+
+# Warm up both servers so tokenizer/template compilation does not
+# skew the benchmark. See THROUGHPUT_FIX_PROPOSAL.md for details.
+echo "============================================"
+echo "=== Warming up both servers ==="
+echo "============================================"
+warmup_server "$VLLM_PORT" "vLLM with LMCache"
+warmup_server "$VLLM_BASELINE_PORT" "vLLM baseline"
 echo ""
 
 # Baseline first
