@@ -18,12 +18,14 @@ import torch
 from lmcache.logging import init_logger
 from lmcache.utils import EngineType, _lmcache_nvtx_annotate
 from lmcache.v1.gpu_connector.utils import (
+    LayoutHints,
     discover_gpu_kv_format,
     get_attention_backend,
     get_block_size,
     get_concrete_gpu_kv_shape,
     get_dtype,
     get_gpu_kv_shape_description,
+    get_head_size,
     get_hidden_dim_size,
     get_num_blocks,
     get_num_layers,
@@ -55,7 +57,12 @@ class GPUCacheContext:
     Manages the shape and pointers to vLLM GPU KV cache tensors.
     """
 
-    def __init__(self, kv_caches: KVCache, lmcache_chunk_size: int = 256):
+    def __init__(
+        self,
+        kv_caches: KVCache,
+        lmcache_chunk_size: int = 256,
+        layout_hints: LayoutHints | None = None,
+    ):
         self.kv_caches_ = unwrap_kv_cache_tensors(kv_caches)
         self.device_ = self.kv_caches_[0].device
 
@@ -64,7 +71,11 @@ class GPUCacheContext:
         self.kv_cache_pointers_ = list_to_gpu_tensor(pointers_list, self.device_)
 
         # TODO support creating GPUCacheContext for SGLang
-        self.gpu_kv_format_ = discover_gpu_kv_format(self.kv_caches_, EngineType.VLLM)
+        self.gpu_kv_format_ = discover_gpu_kv_format(
+            self.kv_caches_,
+            EngineType.VLLM,
+            layout_hints=layout_hints,
+        )
         self.is_mla_ = is_mla(self.gpu_kv_format_)
         self.num_layers_ = get_num_layers(self.kv_caches_, self.gpu_kv_format_)
         self.num_blocks_ = get_num_blocks(self.kv_caches_, self.gpu_kv_format_)
@@ -72,6 +83,7 @@ class GPUCacheContext:
         self.hidden_dim_size_ = get_hidden_dim_size(
             self.kv_caches_, self.gpu_kv_format_
         )
+        self.head_size_ = get_head_size(self.kv_caches_, self.gpu_kv_format_)
 
         # Pre-computed slot mapping
         # shape: [num_blocks, block_size]
@@ -178,6 +190,13 @@ class GPUCacheContext:
         Returns the hidden dimension size of the model
         """
         return self.hidden_dim_size_
+
+    @property
+    def head_size(self) -> int:
+        """
+        Returns the head size of the KV cache
+        """
+        return self.head_size_
 
     @property
     def is_mla(self) -> bool:

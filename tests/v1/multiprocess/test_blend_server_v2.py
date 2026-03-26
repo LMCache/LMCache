@@ -538,7 +538,7 @@ def registered_instance(
 
     future = client.submit_request(
         RequestType.REGISTER_KV_CACHE,
-        [instance_id, client_context.get_kv_cache(), "testmodel", 1],
+        [instance_id, client_context.get_kv_cache(), "testmodel", 1, {}],
         get_response_class(RequestType.REGISTER_KV_CACHE),
     )
     assert future.result(timeout=DEFAULT_TIMEOUT) is None

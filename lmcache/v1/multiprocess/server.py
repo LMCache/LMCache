@@ -27,6 +27,7 @@ from lmcache.v1.gpu_connector.gpu_ops import (
     lmcache_memcpy_async_d2h,
     lmcache_memcpy_async_h2d,
 )
+from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.mp_observability.config import (
     ObservabilityConfig,
@@ -175,6 +176,7 @@ class MPCacheEngine:
         kv_caches: KVCache,
         model_name: str,
         world_size: int,
+        layout_hints: LayoutHints,
     ) -> None:
         """
         Registers the KV cache tensors for a given GPU instance ID.
@@ -184,8 +186,14 @@ class MPCacheEngine:
             kv_caches (KVCache): The KV cache tensor wrappers from vLLM.
             model_name (str): The name of the model associated with this KV cache.
             world_size (int): The world size associated with this KV cache.
+            layout_hints: See :class:`LayoutHints`.  Forwarded to
+                :class:`GPUCacheContext` for GPU KV format detection.
         """
-        gpu_context = GPUCacheContext(kv_caches, self.chunk_size)
+        gpu_context = GPUCacheContext(
+            kv_caches,
+            self.chunk_size,
+            layout_hints=layout_hints or None,
+        )
         self.gpu_contexts[instance_id] = gpu_context
         self.gpu_context_meta[instance_id] = (model_name, world_size)
         logger.info(
@@ -295,7 +303,8 @@ class MPCacheEngine:
                     gpu_context.block_size * gpu_context.num_blocks,
                     lmc_ops.TransferDirection.D2H,
                     gpu_context.gpu_kv_format_,
-                    gpu_context.block_size,
+                    block_size=gpu_context.block_size,
+                    head_size=gpu_context.head_size,
                 )
 
                 assert memory_obj.tensor is not None
@@ -414,8 +423,9 @@ class MPCacheEngine:
                     gpu_context.block_size * gpu_context.num_blocks,
                     lmc_ops.TransferDirection.H2D,
                     gpu_context.gpu_kv_format_,
-                    gpu_context.block_size,
-                    skip_in_chunk,
+                    block_size=gpu_context.block_size,
+                    head_size=gpu_context.head_size,
+                    skip_prefix_n_tokens=skip_in_chunk,
                 )
 
         with (
