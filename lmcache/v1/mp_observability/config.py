@@ -133,7 +133,7 @@ def parse_args_to_observability_config(
     Returns:
         The configuration object.
     """
-    return ObservabilityConfig(
+    config = ObservabilityConfig(
         enabled=not args.disable_observability,
         max_queue_size=args.event_bus_queue_size,
         metrics_enabled=not args.disable_metrics,
@@ -142,6 +142,14 @@ def parse_args_to_observability_config(
         otlp_endpoint=args.otlp_endpoint,
         prometheus_port=args.prometheus_port,
     )
+
+    if config.tracing_enabled and config.otlp_endpoint is None:
+        raise ValueError(
+            "--enable-tracing requires --otlp-endpoint to be set. "
+            "Tracing needs an OTLP gRPC endpoint to export spans."
+        )
+
+    return config
 
 
 def init_observability(obs_config: ObservabilityConfig) -> EventBus:

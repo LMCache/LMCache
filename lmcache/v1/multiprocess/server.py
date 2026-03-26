@@ -35,7 +35,10 @@ from lmcache.v1.mp_observability.config import (
     parse_args_to_observability_config,
 )
 from lmcache.v1.mp_observability.event import Event, EventType
-from lmcache.v1.mp_observability.event_bus import get_event_bus
+from lmcache.v1.mp_observability.event_bus import (
+    get_event_bus,
+    is_observability_enabled,
+)
 from lmcache.v1.multiprocess.config import (
     MPServerConfig,
     add_mp_server_args,
@@ -161,6 +164,7 @@ class MPCacheEngine:
 
         # EventBus for observability
         self._event_bus = get_event_bus()
+        self._obs_enabled = is_observability_enabled()
 
         # Prefetch job tracking for two-phase lookup
         # TODO: implement periodic cleanup of stale _prefetch_jobs entries
@@ -261,14 +265,15 @@ class MPCacheEngine:
             )
             vllm_event.wait(stream=gpu_context.stream)
 
-            gpu_context.cupy_stream.launch_host_func(
-                self._event_bus.publish,
-                Event(
-                    event_type=EventType.MP_STORE_START,
-                    session_id=key.request_id,
-                    metadata={"device": str(gpu_context.device)},
-                ),
-            )
+            if self._obs_enabled:
+                gpu_context.cupy_stream.launch_host_func(
+                    self._event_bus.publish,
+                    Event(
+                        event_type=EventType.MP_STORE_START,
+                        session_id=key.request_id,
+                        metadata={"device": str(gpu_context.device)},
+                    ),
+                )
 
             layout_desc = get_layout_desc(gpu_context, self.chunk_size)
             reserved_dict = self.storage_manager.reserve_write(
@@ -308,17 +313,18 @@ class MPCacheEngine:
             list(reserved_dict.keys()),
         )
 
-        self.gpu_contexts[instance_id].cupy_stream.launch_host_func(
-            self._event_bus.publish,
-            Event(
-                event_type=EventType.MP_STORE_END,
-                session_id=key.request_id,
-                metadata={
-                    "stored_count": len(reserved_dict),
-                    "device": str(gpu_context.device),
-                },
-            ),
-        )
+        if self._obs_enabled:
+            self.gpu_contexts[instance_id].cupy_stream.launch_host_func(
+                self._event_bus.publish,
+                Event(
+                    event_type=EventType.MP_STORE_END,
+                    session_id=key.request_id,
+                    metadata={
+                        "stored_count": len(reserved_dict),
+                        "device": str(gpu_context.device),
+                    },
+                ),
+            )
 
         ed = time.perf_counter()
         if length := len(reserved_dict):
@@ -373,14 +379,15 @@ class MPCacheEngine:
         )
         gpu_context = self.gpu_contexts[instance_id]
 
-        gpu_context.cupy_stream.launch_host_func(
-            self._event_bus.publish,
-            Event(
-                event_type=EventType.MP_RETRIEVE_START,
-                session_id=key.request_id,
-                metadata={"device": str(gpu_context.device)},
-            ),
-        )
+        if self._obs_enabled:
+            gpu_context.cupy_stream.launch_host_func(
+                self._event_bus.publish,
+                Event(
+                    event_type=EventType.MP_RETRIEVE_START,
+                    session_id=key.request_id,
+                    metadata={"device": str(gpu_context.device)},
+                ),
+            )
 
         def _retrieve_loop(keys: list[ObjectKey], memory_objs: list[MemoryObj]) -> None:
             for idx, (key, memory_obj) in enumerate(
@@ -450,17 +457,18 @@ class MPCacheEngine:
                         self.storage_manager.finish_read_prefetched,
                         prefetched_keys,
                     )
-                gpu_context.cupy_stream.launch_host_func(
-                    self._event_bus.publish,
-                    Event(
-                        event_type=EventType.MP_RETRIEVE_END,
-                        session_id=key.request_id,
-                        metadata={
-                            "retrieved_count": len(prefetched_keys),
-                            "device": str(gpu_context.device),
-                        },
-                    ),
-                )
+                if self._obs_enabled:
+                    gpu_context.cupy_stream.launch_host_func(
+                        self._event_bus.publish,
+                        Event(
+                            event_type=EventType.MP_RETRIEVE_END,
+                            session_id=key.request_id,
+                            metadata={
+                                "retrieved_count": len(prefetched_keys),
+                                "device": str(gpu_context.device),
+                            },
+                        ),
+                    )
 
         tokens_retrieved = len(obj_keys) * self.chunk_size
         ed = time.perf_counter()

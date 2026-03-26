@@ -220,6 +220,16 @@ class EventBus:
 # ---------------------------------------------------------------------------
 
 _global_bus = EventBus(EventBusConfig(enabled=False))
+_observability_enabled: bool = False
+
+
+def is_observability_enabled() -> bool:
+    """Fast check for whether observability is active.
+
+    Use this to guard expensive event-construction or CUDA host-function
+    scheduling when observability is disabled.
+    """
+    return _observability_enabled
 
 
 def get_event_bus() -> EventBus:
@@ -232,6 +242,7 @@ def init_event_bus(config: EventBusConfig | None = None) -> EventBus:
 
     Returns the newly created bus.
     """
-    global _global_bus
+    global _global_bus, _observability_enabled
     _global_bus = EventBus(config)
+    _observability_enabled = config.enabled if config else True
     return _global_bus

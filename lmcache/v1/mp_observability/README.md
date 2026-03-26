@@ -46,7 +46,7 @@ CLI, pass the flags below; when embedding programmatically, construct an
 | `--disable-observability` | off | Disable the EventBus entirely. No events are published or consumed. |
 | `--disable-metrics` | off | Skip registering metrics subscribers (OTel counters). |
 | `--disable-logging` | off | Skip registering logging subscribers. |
-| `--enable-tracing` | off | Register tracing subscribers (OTel spans). Disabled by default. |
+| `--enable-tracing` | off | Register tracing subscribers (OTel spans). Disabled by default. **Requires `--otlp-endpoint`.** |
 | `--event-bus-queue-size N` | `10000` | Maximum number of events in the EventBus queue before tail-drop. |
 | `--otlp-endpoint URL` | *(none)* | OTLP gRPC endpoint (e.g. `http://localhost:4317`). When set, metrics and traces are pushed to an OTel collector. When unset, metrics fall back to Prometheus pull mode. |
 | `--prometheus-port PORT` | `9090` | Port for the Prometheus `/metrics` endpoint. Only used when `--otlp-endpoint` is not set. |
@@ -78,8 +78,8 @@ CLI, pass the flags below; when embedding programmatically, construct an
 Tracing is opt-in (`--enable-tracing`).  When enabled, `MPServerTracingSubscriber`
 creates OTel spans from MP server START/END event pairs (store, retrieve,
 lookup/prefetch).  Trace export requires an OTLP endpoint — there is no local
-fallback.  If `--enable-tracing` is set without `--otlp-endpoint`, the tracing
-provider init is skipped and spans are silently dropped.
+fallback.  `--enable-tracing` **requires** `--otlp-endpoint`; the server will
+raise a `ValueError` at startup if the endpoint is missing.
 
 ---
 
