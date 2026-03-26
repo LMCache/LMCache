@@ -12,6 +12,7 @@ from typing import (
     Literal,
     Optional,
     TypedDict,
+    TypeGuard,
     Union,
     cast,
 )
@@ -1378,3 +1379,40 @@ def _get_head_size_view(
         raise ValueError(f"k/v shape mismatch after decode: {k.shape} vs {v.shape}")
 
     return k.view(nb * bs, nh * hs), v.view(nb * bs, nh * hs)
+
+
+def is_attention_kv_cache(kv_cache: object) -> TypeGuard[torch.Tensor]:
+    """Return True when ``kv_cache`` is a supported attention KV tensor."""
+    return isinstance(kv_cache, torch.Tensor) and kv_cache.dim() in (3, 5)
+
+
+def filter_attention_kv_caches(kv_caches: list) -> list:
+    """Filter KV caches to attention-only tensors for hybrid models.
+
+    Hybrid models (e.g., Qwen 3.5 with mamba + attention) store
+    multiple state tensors per recurrent layer that can't be handled
+    by the standard ``multi_layer_kv_transfer`` CUDA ops.  This
+    helper keeps only 3-D (MLA) and 5-D (MHA) attention tensors.
+
+    Args:
+        kv_caches: list of per-layer KV cache entries (tensors or
+            multi-tensor recurrent state).
+
+    Returns:
+        Filtered list containing only attention-layer tensors.
+        If nothing was filtered, the original list is returned
+        unchanged.  If all entries were filtered out, an empty
+        list is returned and the caller should skip GPU init.
+    """
+    if not isinstance(kv_caches, list):
+        return kv_caches
+
+    filtered = [kv for kv in kv_caches if is_attention_kv_cache(kv)]
+    if len(filtered) < len(kv_caches):
+        logger.info(
+            "Filtered %d non-attention KV entries (hybrid "
+            "model). Using %d attention layers.",
+            len(kv_caches) - len(filtered),
+            len(filtered),
+        )
+    return filtered

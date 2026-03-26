@@ -16,6 +16,7 @@ from lmcache.v1.gpu_connector.utils import (
     assert_is_vllm_flash_attn_or_flash_infer,
     assert_is_vllm_mla_or_flash_attn_or_flash_infer,
     attempt_permute_to_contiguous_view,
+    filter_attention_kv_caches,
     get_block_size,
     get_device,
     get_elements_per_layer,
@@ -716,19 +717,39 @@ class VLLMBufferLayerwiseGPUConnector(GPUConnectorInterface):
             layout_hints=layout_hints,
         )
 
+    def reconfigure_for_layers(self, num_layers: int) -> None:
+        """Reset internal state for a new layer count.
+
+        Called when hybrid-model filtering reduces the set of
+        layers that LMCache operates on (e.g., from 32 total
+        to 8 attention-only).  Clears pre-allocated buffers so
+        they are lazily re-created at the correct size.
+        """
+        self.num_layers = num_layers
+        self.kv_cache_pointers = torch.empty(
+            num_layers, dtype=torch.int64, device="cpu"
+        )
+        self.kv_cache_pointers_on_gpu = {}
+        if hasattr(self, "gpu_buffer"):
+            self.gpu_buffer = None
+        if hasattr(self, "gpu_buffer_allocator"):
+            self.gpu_buffer_allocator = None
+
     def _lazy_initialize_buffer(self, kv_caches):
         """
-        Lazily initialize the GPU buffer allocator if it is not initialized yet.
-        Currently, we use the `kv_caches` (kv cache pointer) to determine
-        the gpu buffer size in gpu connector.
-        Also, the first request might be a bit slower due to buffer creation.
+        Lazily initialize the GPU buffer allocator if it is not
+        initialized yet.
         """
         if self.use_gpu and self.gpu_buffer_allocator is None:
             logger.info("Lazily initializing GPU buffer.")
-            # NOTE (Jiayi): We use the first layer to determine the gpu buffer size.
-            # NOTE (Jiayi): Using the exact number of tokens in the first layer
-            # is okay since fragmentation shouldn't exist in the `gpu_buffer_allocator`
-            # in layerwise mode.
+
+            kv_caches = filter_attention_kv_caches(kv_caches)
+            if not kv_caches:
+                logger.warning(
+                    "No attention KV caches after hybrid "
+                    "filtering. Skipping GPU buffer init."
+                )
+                return
 
             self.gpu_kv_format, kv_caches = normalize_kv_and_discover_format(
                 kv_caches, EngineType.VLLM, layout_hints=self.layout_hints
@@ -1129,19 +1150,39 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
             layout_hints=layout_hints,
         )
 
+    def reconfigure_for_layers(self, num_layers: int) -> None:
+        """Reset internal state for a new layer count.
+
+        Called when hybrid-model filtering reduces the set of
+        layers that LMCache operates on (e.g., from 32 total
+        to 8 attention-only).  Clears pre-allocated buffers so
+        they are lazily re-created at the correct size.
+        """
+        self.num_layers = num_layers
+        self.kv_cache_pointers = torch.empty(
+            num_layers, dtype=torch.int64, device="cpu"
+        )
+        self.kv_cache_pointers_on_gpu = {}
+        if hasattr(self, "gpu_buffer"):
+            self.gpu_buffer = None
+        if hasattr(self, "gpu_buffer_allocator"):
+            self.gpu_buffer_allocator = None
+
     def _lazy_initialize_buffer(self, kv_caches):
         """
-        Lazily initialize the GPU buffer allocator if it is not initialized yet.
-        Currently, we use the `kv_caches` (kv cache pointer) to determine
-        the gpu buffer size in gpu connector.
-        Also, the first request might be a bit slower due to buffer creation.
+        Lazily initialize the GPU buffer allocator if it is not
+        initialized yet.
         """
         if self.use_gpu and self.gpu_buffer_allocator is None:
             logger.info("Lazily initializing GPU buffer.")
-            # NOTE (Jiayi): We use the first layer to determine the gpu buffer size.
-            # NOTE (Jiayi): Using the exact number of tokens in the first layer
-            # is okay since fragmentation shouldn't exist in the `gpu_buffer_allocator`
-            # in layerwise mode.
+
+            kv_caches = filter_attention_kv_caches(kv_caches)
+            if not kv_caches:
+                logger.warning(
+                    "No attention KV caches after hybrid "
+                    "filtering. Skipping GPU buffer init."
+                )
+                return
 
             self.gpu_kv_format, kv_caches = normalize_kv_and_discover_format(
                 kv_caches, EngineType.VLLM, layout_hints=self.layout_hints

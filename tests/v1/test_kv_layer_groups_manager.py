@@ -235,5 +235,33 @@ class TestFormatKvcacheShapeSpec:
             format_kvcache_shape_spec([])
 
 
+class TestFilterAttentionKVCaches:
+    """Tests for hybrid-model attention KV filtering."""
+
+    def test_filter_attention_kv_caches_skips_recurrent(self):
+        """Test that hybrid models keep attention tensors only.
+
+        Mamba/GDN layers store multiple tensors with different shapes
+        per layer, which can't be represented as a standard attention
+        KV tensor. The shared helper should gracefully skip these and
+        preserve the supported attention tensors.
+        """
+        # First Party
+        from lmcache.v1.gpu_connector.utils import filter_attention_kv_caches
+
+        attn_0 = torch.randn(2, 32, 256, 8, 64, dtype=torch.float16)
+        attn_1 = torch.randn(2, 32, 256, 8, 64, dtype=torch.float16)
+        mamba_state = [
+            torch.randn(32, 16, 128, dtype=torch.float16),
+            torch.randn(32, 4, 64, dtype=torch.float16),
+        ]
+
+        filtered = filter_attention_kv_caches([attn_0, mamba_state, attn_1])
+
+        assert len(filtered) == 2
+        assert filtered[0] is attn_0
+        assert filtered[1] is attn_1
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

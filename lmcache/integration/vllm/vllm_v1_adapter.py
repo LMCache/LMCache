@@ -42,6 +42,7 @@ from lmcache.v1.cache_engine import LMCacheEngine
 from lmcache.v1.compute.blend import LMCBlenderBuilder
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.config_base import validate_and_set_config_value
+from lmcache.v1.gpu_connector.utils import is_attention_kv_cache
 from lmcache.v1.manager import LMCacheManager
 
 if TYPE_CHECKING:
@@ -57,6 +58,18 @@ if TYPE_CHECKING:
     from lmcache.v1.lookup_client.abstract_client import LookupClientInterface
 
 logger = init_logger(__name__)
+
+
+def _filter_attention_kv_cache_dict(
+    kv_caches: dict[str, Any],
+) -> tuple[dict[str, torch.Tensor], int]:
+    """Return attention-layer KV tensors and the number of skipped layers."""
+    attn_kv_caches = {
+        name: kv
+        for name, kv in kv_caches.items()
+        if is_attention_kv_cache(kv)
+    }
+    return attn_kv_caches, len(kv_caches) - len(attn_kv_caches)
 
 
 @dataclass
@@ -173,15 +186,16 @@ class RequestTracker:
         if not isinstance(new_request.block_ids[0], list):
             unfolded_block_ids = new_request.block_ids.copy()
         else:
-            # According to the vLLM code
-            # (https://github.com/vllm-project/vllm/blob/main/vllm/v1/core/
-            # sched/scheduler.py#L943),
-            # only one KVCacheGroup is supported in connector for now.
-
-            # TODO: Please support multiple KVCacheGroup in connector.
-            # NOTE: Also, `update` method in RequestTracker should be
-            # updated accordingly.
-            unfolded_block_ids = new_request.block_ids[0].copy()
+            # For hybrid models (e.g. Qwen3.5 mamba + attention), vLLM
+            # exposes one block list per KV cache group.  The mamba group
+            # always has exactly 1 block (block_size == max_model_len),
+            # while the attention group has one block per attention-block-
+            # size tokens.  Using the mamba block list keeps num_blocks
+            # stuck at 1 and caps max_saveable_tokens at 1 × block_size
+            # regardless of prompt length.  Instead, pick the group with
+            # the most blocks so we track the attention group whose block
+            # count actually grows with the token count.
+            unfolded_block_ids = max(new_request.block_ids, key=len).copy()
 
         # NOTE: Initialized in `update_state_after_alloc`
         disagg_spec = tmp_disagg_tracker.pop(new_request.req_id, None)
@@ -230,7 +244,11 @@ class RequestTracker:
         elif len(new_block_ids) == 0:
             new_block_ids = []
         elif isinstance(new_block_ids, tuple):
-            new_block_ids = new_block_ids[0]
+            # For hybrid models, pick the group with the most new blocks
+            # (attention group).  The mamba group gets 0 new blocks after
+            # the initial allocation, so max-by-len reliably selects the
+            # attention group for all subsequent prefill/decode steps.
+            new_block_ids = max(new_block_ids, key=len)
         elif isinstance(new_block_ids, list):
             # If input is a list, flatten it to handle potential nesting.
             # This also correctly processes already-flat lists.
@@ -360,9 +378,6 @@ class ReqMeta:
         else:
             num_tokens_to_save = input_token_len
 
-        # If we need to save, update the number of saved tokens
-        if not skip_save:
-            tracker.num_saved_tokens = num_tokens_to_save
         save_spec = SaveSpec(skip_leading_tokens, not skip_save)
 
         # Calculate the token ids and slot mappings for load and save
@@ -382,19 +397,26 @@ class ReqMeta:
 
         num_blocks = len(tracker.allocated_block_ids)
 
-        if len(token_ids) > num_blocks * block_size:
-            logger.error(
-                "The number of tokens is more than the number of blocks"
-                " for request %s. "
-                "Something might be wrong in scheduling logic!",
-                tracker.req_id,
-            )
-            logger.error(
-                "Num tokens: %d, num blocks: %d, block size: %d",
-                len(token_ids),
-                num_blocks,
-                block_size,
-            )
+        # For hybrid models (HMA), the attention-group blocks may
+        # cover fewer tokens than the full chunk.  Cap token_ids to
+        # what the allocated blocks can hold, aligned down to the
+        # LMCache chunk boundary so the token database gets exact
+        # multiples.
+        max_saveable_tokens = num_blocks * block_size
+        max_saveable_tokens = (
+            max_saveable_tokens // lmcache_chunk_size * lmcache_chunk_size
+        )
+        if max_saveable_tokens > 0 and len(token_ids) > max_saveable_tokens:
+            token_ids = token_ids[:max_saveable_tokens]
+
+        # Update num_saved_tokens AFTER the HMA cap so it reflects
+        # what was actually saved, not what was requested.  The old
+        # placement (before the cap) caused LMCache to believe it had
+        # saved the entire chunk-aligned prompt when only one
+        # attention-block's worth was actually stored, preventing
+        # incremental saves on subsequent prefill steps.
+        if not skip_save:
+            tracker.num_saved_tokens = len(token_ids)
 
         block_ids = torch.tensor(tracker.allocated_block_ids, dtype=torch.long)
         block_offsets = torch.arange(0, block_size, dtype=torch.long)
@@ -547,6 +569,7 @@ class LMCacheConnectorV1Impl:
         self._check_legacy_register_kv_caches()
 
         self.kv_caches: dict[str, torch.Tensor] = {}
+        self._has_non_attention_layers = False
         self._block_size = vllm_config.cache_config.block_size
         self.load_specs: dict[str, LoadSpec] = {}
         self.kv_cache_manager: Optional["KVCacheManager"] = None
@@ -731,7 +754,38 @@ class LMCacheConnectorV1Impl:
         # TODO(chunxiaozheng): `_init_kv_caches_from_forward_context` is
         #  not called, we should consider removing it.
         assert len(self.kv_caches) == 0 and len(kv_caches) > 0
-        self.kv_caches = kv_caches
+
+        attn_kv_caches, skipped = _filter_attention_kv_cache_dict(kv_caches)
+        cacheable_kv_caches = attn_kv_caches if skipped > 0 else kv_caches
+
+        should_reconfigure_layers = skipped > 0 or (
+            self._has_non_attention_layers
+            and len(cacheable_kv_caches) != self.num_layers
+        )
+        if should_reconfigure_layers:
+            self._has_non_attention_layers = True
+            logger.info(
+                "Hybrid/attention-free model: registering %d cacheable "
+                "attention layers and skipping %d non-attention layers. "
+                "LMCache load remains disabled to avoid uninitialized "
+                "recurrent state.",
+                len(cacheable_kv_caches),
+                skipped,
+            )
+            self.num_layers = len(cacheable_kv_caches)
+
+            engine = self.lmcache_engine
+            if engine is not None:
+                engine.num_layers = self.num_layers
+                old_shape = engine.metadata.kv_shape
+                engine.metadata.kv_shape = (self.num_layers,) + old_shape[1:]
+                gpu_connector = engine.gpu_connector
+                if gpu_connector is not None and hasattr(
+                    gpu_connector, "reconfigure_for_layers"
+                ):
+                    gpu_connector.reconfigure_for_layers(self.num_layers)
+
+        self.kv_caches = cacheable_kv_caches
         self._manager.post_init()
 
     @_lmcache_nvtx_annotate
@@ -1077,15 +1131,12 @@ class LMCacheConnectorV1Impl:
         assert isinstance(connector_metadata, LMCacheConnectorMetadata)
 
         if self.kv_role == "kv_consumer":
-            # Don't do save if the role is kv_consumer
-            # But still need to unpin the kv caches according to req_id
-            # to balance the pin count from contains()
-            assert self.lmcache_engine is not None, (
-                "LMCacheEngine must be initialized to unpin requests."
-            )
+            # Don't do save if the role is kv_consumer.
+            # Still unpin KV caches to balance the pin count
+            # from the lookup in get_num_new_matched_tokens.
+            assert self.lmcache_engine is not None
             for request in connector_metadata.requests:
                 self.lmcache_engine.lookup_unpin(request.req_id)
-
             return
 
         if self.use_layerwise:
@@ -1331,6 +1382,12 @@ class LMCacheConnectorV1Impl:
         """
         # Ignore DP attention mock requests
         if request.request_id.startswith("mock_req"):
+            return 0
+        # Hybrid models (mamba + attention): LMCache only caches
+        # attention layers.  Reporting a hit causes the scheduler
+        # to skip ALL layers including mamba, leaving recurrent
+        # state uninitialized → garbled output.
+        if self._has_non_attention_layers:
             return 0
         # to handle preempted requests, we want `get_num_new_matched_tokens` to be
         # idempotent under the condition that `update_state_after_alloc` is NOT called
