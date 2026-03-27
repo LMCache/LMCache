@@ -266,6 +266,7 @@ class MockL2Adapter(L2AdapterInterface):
             self._loop.call_soon_threadsafe(self._loop.stop)
 
         self._loop_thread.join()
+        self._loop.close()
 
         os.close(self._store_efd)
         os.close(self._lookup_efd)
