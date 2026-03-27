@@ -1,0 +1,430 @@
+# SPDX-License-Identifier: Apache-2.0
+"""Tests for the BenchCommand CLI wiring and orchestrator."""
+
+# Standard
+from unittest.mock import AsyncMock, MagicMock, patch
+import argparse
+import io
+import json
+import sys
+import time
+
+# Third Party
+import pytest
+
+# First Party
+from lmcache.cli.commands.bench import BenchCommand
+from lmcache.cli.commands.bench.engine_bench.config import EngineBenchConfig
+from lmcache.cli.commands.bench.engine_bench.stats import (
+    FinalStats,
+    RequestResult,
+)
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _make_args(**overrides) -> argparse.Namespace:
+    defaults = dict(
+        bench_target="engine",
+        engine_url="http://localhost:8000",
+        lmcache_url=None,
+        model="test-model",
+        workload="long-doc-qa",
+        kv_cache_volume=100.0,
+        tokens_per_gb_kvcache=50000,
+        seed=42,
+        output_dir=".",
+        no_csv=False,
+        json=False,
+        quiet=True,
+        document_length=100,
+        query_per_document=1,
+        shuffle_policy="tile",
+        num_inflight_requests=1,
+        format=None,
+        output=None,
+    )
+    defaults.update(overrides)
+    return argparse.Namespace(**defaults)
+
+
+def _make_config(**overrides) -> EngineBenchConfig:
+    defaults = dict(
+        engine_url="http://localhost:8000",
+        model="test-model",
+        workload="long-doc-qa",
+        kv_cache_volume_gb=100.0,
+        tokens_per_gb_kvcache=50000,
+        seed=42,
+        output_dir=".",
+        export_csv=True,
+        export_json=False,
+        quiet=True,
+    )
+    defaults.update(overrides)
+    return EngineBenchConfig(**defaults)  # type: ignore[arg-type]
+
+
+def _make_final_stats(**overrides) -> FinalStats:
+    defaults: dict[str, int | float] = dict(
+        total_requests=10,
+        successful_requests=10,
+        failed_requests=0,
+        elapsed_time=5.0,
+        mean_ttft_ms=300.0,
+        mean_decode_speed=48.0,
+        mean_request_latency_ms=2000.0,
+        input_throughput=20000.0,
+        output_throughput=256.0,
+        total_input_tokens=100000,
+        total_output_tokens=1280,
+        p50_ttft_ms=280.0,
+        p90_ttft_ms=450.0,
+        p99_ttft_ms=600.0,
+        p50_decode_speed=47.0,
+        p90_decode_speed=42.0,
+        p99_decode_speed=38.0,
+        p50_request_latency_ms=1900.0,
+        p90_request_latency_ms=2500.0,
+        p99_request_latency_ms=3000.0,
+    )
+    defaults.update(overrides)
+    return FinalStats(**defaults)  # type: ignore[arg-type]
+
+
+def _make_result(request_id: str = "req_0") -> RequestResult:
+    now = time.time()
+    return RequestResult(
+        request_id=request_id,
+        successful=True,
+        ttft=0.3,
+        request_latency=2.0,
+        num_input_tokens=100,
+        num_output_tokens=10,
+        decode_speed=25.0,
+        submit_time=now,
+        first_token_time=now + 0.3,
+        finish_time=now + 2.0,
+        error="",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Registration
+# ---------------------------------------------------------------------------
+
+
+class TestBenchCommandRegistration:
+    def test_bench_in_all_commands(self) -> None:
+        # First Party
+        from lmcache.cli.commands import ALL_COMMANDS
+
+        names = [cmd.name() for cmd in ALL_COMMANDS]
+        assert "bench" in names
+
+    def test_engine_subparser_exists(self) -> None:
+        parser = argparse.ArgumentParser()
+        subparsers = parser.add_subparsers()
+        cmd = BenchCommand()
+        cmd.register(subparsers)
+
+        args = parser.parse_args(
+            [
+                "bench",
+                "engine",
+                "--engine-url",
+                "http://localhost:8000",
+                "--workload",
+                "long-doc-qa",
+                "--tokens-per-gb-kvcache",
+                "50000",
+            ]
+        )
+        assert args.bench_target == "engine"
+        assert args.engine_url == "http://localhost:8000"
+        assert args.workload == "long-doc-qa"
+        assert args.tokens_per_gb_kvcache == 50000
+
+    def test_required_args_engine_url(self) -> None:
+        parser = argparse.ArgumentParser()
+        subparsers = parser.add_subparsers()
+        cmd = BenchCommand()
+        cmd.register(subparsers)
+
+        with pytest.raises(SystemExit):
+            parser.parse_args(
+                [
+                    "bench",
+                    "engine",
+                    "--workload",
+                    "long-doc-qa",
+                ]
+            )
+
+    def test_required_args_workload(self) -> None:
+        parser = argparse.ArgumentParser()
+        subparsers = parser.add_subparsers()
+        cmd = BenchCommand()
+        cmd.register(subparsers)
+
+        with pytest.raises(SystemExit):
+            parser.parse_args(
+                [
+                    "bench",
+                    "engine",
+                    "--engine-url",
+                    "http://localhost:8000",
+                ]
+            )
+
+    def test_default_values(self) -> None:
+        parser = argparse.ArgumentParser()
+        subparsers = parser.add_subparsers()
+        cmd = BenchCommand()
+        cmd.register(subparsers)
+
+        args = parser.parse_args(
+            [
+                "bench",
+                "engine",
+                "--engine-url",
+                "http://localhost:8000",
+                "--workload",
+                "long-doc-qa",
+                "--tokens-per-gb-kvcache",
+                "50000",
+            ]
+        )
+        assert args.kv_cache_volume == 100.0
+        assert args.seed == 42
+        assert args.output_dir == "."
+        assert args.document_length == 10000
+        assert args.query_per_document == 2
+        assert args.shuffle_policy == "random"
+        assert args.num_inflight_requests == 3
+        assert args.quiet is False
+
+
+# ---------------------------------------------------------------------------
+# Final metrics emission
+# ---------------------------------------------------------------------------
+
+
+class TestBenchCommandEmitMetrics:
+    def test_emit_final_metrics_terminal(self) -> None:
+        cmd = BenchCommand()
+        config = _make_config()
+        final = _make_final_stats()
+        args = _make_args(quiet=False)
+
+        old_stdout = sys.stdout
+        sys.stdout = buf = io.StringIO()
+        try:
+            cmd._emit_final_metrics(config, final, args)
+        finally:
+            sys.stdout = old_stdout
+
+        output = buf.getvalue()
+        assert "Engine Benchmark Result" in output
+        assert "Configuration" in output
+        assert "Time to First Token" in output
+        assert "Decoding Speed" in output
+        assert "test-model" in output
+
+    def test_emit_final_metrics_json(self) -> None:
+        cmd = BenchCommand()
+        config = _make_config()
+        final = _make_final_stats()
+        args = _make_args(quiet=False, format="json")
+
+        old_stdout = sys.stdout
+        sys.stdout = buf = io.StringIO()
+        try:
+            cmd._emit_final_metrics(config, final, args)
+        finally:
+            sys.stdout = old_stdout
+
+        data = json.loads(buf.getvalue())
+        assert "metrics" in data
+        assert "ttft" in data["metrics"]
+        assert "decode" in data["metrics"]
+        assert data["metrics"]["config"]["model"] == "test-model"
+        assert data["metrics"]["results"]["successful"] == 10
+
+
+# ---------------------------------------------------------------------------
+# Orchestrator
+# ---------------------------------------------------------------------------
+
+
+class TestBenchCommandOrchestrator:
+    @patch(
+        "lmcache.cli.commands.bench.engine_bench.config.resolve_tokens_per_gb",
+        return_value=6553,
+    )
+    @patch(
+        "lmcache.cli.commands.bench.engine_bench.request_sender.AsyncOpenAI",
+    )
+    def test_lmcache_url_resolves(
+        self,
+        mock_openai_cls,
+        mock_resolve,
+        tmp_path,
+    ) -> None:
+        """When --lmcache-url is set, tokens_per_gb is resolved from server."""
+        # Third Party
+        from openai.types import CompletionUsage
+        from openai.types.chat import ChatCompletionChunk
+        from openai.types.chat.chat_completion_chunk import (
+            Choice,
+            ChoiceDelta,
+        )
+
+        usage = CompletionUsage(
+            prompt_tokens=100,
+            completion_tokens=10,
+            total_tokens=110,
+        )
+
+        async def _fake_stream(*_args, **_kwargs):
+            yield ChatCompletionChunk(
+                id="c1",
+                choices=[
+                    Choice(
+                        delta=ChoiceDelta(content="Hi"),
+                        index=0,
+                    )
+                ],
+                created=0,
+                model="test-model",
+                object="chat.completion.chunk",
+            )
+            yield ChatCompletionChunk(
+                id="c1",
+                choices=[],
+                created=0,
+                model="test-model",
+                object="chat.completion.chunk",
+                usage=usage,
+            )
+
+        mock_client = MagicMock()
+        mock_openai_cls.return_value = mock_client
+        mock_client.chat.completions.create = AsyncMock(
+            side_effect=lambda **kw: _fake_stream(),
+        )
+        mock_client.close = AsyncMock()
+
+        args = _make_args(
+            lmcache_url="http://localhost:8080",
+            tokens_per_gb_kvcache=None,
+            kv_cache_volume=0.001,
+            document_length=100,
+            query_per_document=1,
+            num_inflight_requests=1,
+            output_dir=str(tmp_path),
+            no_csv=True,
+        )
+
+        cmd = BenchCommand()
+        old_stdout = sys.stdout
+        sys.stdout = io.StringIO()
+        try:
+            cmd._bench_engine(args)
+        finally:
+            sys.stdout = old_stdout
+
+        mock_resolve.assert_called_once_with(
+            "http://localhost:8080",
+            "test-model",
+        )
+
+    @patch(
+        "lmcache.cli.commands.bench.engine_bench.request_sender.AsyncOpenAI",
+    )
+    def test_bench_engine_wiring(
+        self,
+        mock_openai_cls,
+        tmp_path,
+    ) -> None:
+        """End-to-end orchestrator test with mocked OpenAI client."""
+        # Third Party
+        from openai.types import CompletionUsage
+        from openai.types.chat import ChatCompletionChunk
+        from openai.types.chat.chat_completion_chunk import (
+            Choice,
+            ChoiceDelta,
+        )
+
+        def _make_chunk(content="", usage=None):
+            choices = []
+            if content:
+                choices.append(
+                    Choice(
+                        delta=ChoiceDelta(content=content),
+                        index=0,
+                    )
+                )
+            return ChatCompletionChunk(
+                id="c1",
+                choices=choices,
+                created=0,
+                model="test-model",
+                object="chat.completion.chunk",
+                usage=usage,
+            )
+
+        usage = CompletionUsage(
+            prompt_tokens=100,
+            completion_tokens=10,
+            total_tokens=110,
+        )
+
+        async def _fake_stream(*_args, **_kwargs):
+            yield _make_chunk(content="Hello")
+            yield _make_chunk(content=" world")
+            yield _make_chunk(usage=usage)
+
+        mock_client = MagicMock()
+        mock_openai_cls.return_value = mock_client
+        mock_client.chat.completions.create = AsyncMock(
+            side_effect=lambda **kw: _fake_stream(),
+        )
+        mock_client.close = AsyncMock()
+
+        output_dir = str(tmp_path)
+        args = _make_args(
+            kv_cache_volume=0.001,
+            tokens_per_gb_kvcache=1000,
+            document_length=100,
+            query_per_document=1,
+            num_inflight_requests=1,
+            output_dir=output_dir,
+            no_csv=False,
+            json=True,
+            quiet=True,
+        )
+
+        cmd = BenchCommand()
+        # Suppress stdout for metrics emission
+        old_stdout = sys.stdout
+        sys.stdout = io.StringIO()
+        try:
+            cmd._bench_engine(args)
+        finally:
+            sys.stdout = old_stdout
+
+        # Verify CSV was written
+        csv_path = tmp_path / "bench_results.csv"
+        assert csv_path.exists()
+
+        # Verify JSON was written
+        json_path = tmp_path / "bench_summary.json"
+        assert json_path.exists()
+        with open(json_path) as f:
+            data = json.load(f)
+        assert "config" in data
+        assert "results" in data
+        assert data["results"]["total_requests"] > 0
