@@ -21,6 +21,7 @@ import torch
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.observability import LMCStatsMonitor, PrometheusLogger
 from lmcache.utils import CacheEngineKey, DiskCacheMetadata, _lmcache_nvtx_annotate
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_management import (
@@ -340,6 +341,29 @@ class GdsBackend(AllocatorBackendInterface):
         # flag to use O_NOATIME during metadata file read for performance improvement
         self._use_noatime = True
 
+        # Initialize stats monitor for Prometheus metrics
+        self.stats_monitor = LMCStatsMonitor.GetOrCreate()
+
+        # Running total of storage usage (updated under hot_lock)
+        self._total_storage_size = 0
+
+        # Failure counters for observability
+        self._get_blocking_failed_count = 0
+        self._put_failed_count = 0
+
+        self._setup_metrics()
+
+    def _setup_metrics(self):
+        """Set up Prometheus metrics for GDS backend."""
+        prometheus_logger = PrometheusLogger.GetInstanceOrNone()
+        if prometheus_logger is not None:
+            prometheus_logger.get_blocking_failed_count.set_function(
+                lambda: self._get_blocking_failed_count
+            )
+            prometheus_logger.put_failed_count.set_function(
+                lambda: self._put_failed_count
+            )
+
     async def _scan_metadata(self):
         # TODO: even though we only run it once on startup, this is still
         # not super scalable - test whether Rust code will be faster here, or
@@ -368,6 +392,8 @@ class GdsBackend(AllocatorBackendInterface):
             f"Read {len(self.hot_cache)} cache entries from persistent "
             f"storage in {end - start:.2f} seconds"
         )
+        # Report storage usage after scanning all existing cache entries
+        self._report_storage_usage()
 
     def _scan_metadata_subdir(self, path, l1_dir):
         target_suffix = self.data_suffix + _METADATA_FILE_SUFFIX
@@ -461,6 +487,7 @@ class GdsBackend(AllocatorBackendInterface):
         with self.hot_lock:
             self.metadata_dirs.add(subdir_key)
             self.hot_cache[key] = metadata
+            self._total_storage_size += size
         return metadata
 
     def __str__(self):
@@ -606,6 +633,8 @@ class GdsBackend(AllocatorBackendInterface):
                 self.metadata_dirs.add(subdir_key)
             tmp = ".tmp" + rand_suffix(8)
             fmt = memory_obj.metadata.fmt
+            write_size = kv_chunk.nbytes
+            write_start = time.perf_counter()
             try:
                 metadata = await asyncio.to_thread(
                     self._save_gds,
@@ -624,7 +653,13 @@ class GdsBackend(AllocatorBackendInterface):
                     f"tensor_size_bytes={kv_chunk.nbytes}, error={e}",
                     exc_info=True,
                 )
+                self._put_failed_count += 1
                 return
+            write_duration_ms = (time.perf_counter() - write_start) * 1000
+
+            # Update Prometheus metrics for GDS writes
+            self.stats_monitor.update_interval_remote_write_metrics(write_size)
+            self.stats_monitor.update_interval_remote_time_to_put(write_duration_ms)
 
             # Register key in cache
             logger.debug(
@@ -682,7 +717,10 @@ class GdsBackend(AllocatorBackendInterface):
                     exc_info=exception,
                 )
                 with self.hot_lock:
-                    self.hot_cache.pop(key, None)
+                    entry = self.hot_cache.pop(key, None)
+                    if entry is not None:
+                        self._total_storage_size -= entry.size
+                self._report_storage_usage()
         except Exception as e:
             # Exception calling task.exception() (e.g., task was cancelled)
             logger.error(
@@ -693,13 +731,21 @@ class GdsBackend(AllocatorBackendInterface):
 
     def insert_key(self, key: CacheEngineKey, memory_obj: MemoryObj) -> None:
         path, _, _, _ = self._key_to_path(key)
-        size = memory_obj.get_physical_size()
+        # Use get_size() for actual tensor data size, not get_physical_size()
+        # which returns the aligned allocation size from the memory pool
+        size = memory_obj.get_size()
         shape = memory_obj.metadata.shape
         dtype = memory_obj.metadata.dtype
         fmt = memory_obj.metadata.fmt
         with self.hot_lock:
             # TODO(Jiayi): need to support `cached_positions`.
             self.hot_cache[key] = DiskCacheMetadata(path, size, shape, dtype, None, fmt)
+            self._total_storage_size += size
+        self._report_storage_usage()
+
+    def _report_storage_usage(self) -> None:
+        """Report the current storage usage metric to Prometheus."""
+        self.stats_monitor.update_local_storage_usage(self._total_storage_size)
 
     def submit_prefetch_task(
         self,
@@ -751,7 +797,6 @@ class GdsBackend(AllocatorBackendInterface):
         dtype = entry.dtype
         shape = entry.shape
         fmt = entry.fmt
-        logger.warning(entry)
         assert dtype is not None
         assert shape is not None
         assert fmt is not None
@@ -825,23 +870,37 @@ class GdsBackend(AllocatorBackendInterface):
         else:
             addr = ctypes.c_void_p(self.cufile_base_pointer)
             dev_offset = memory_obj.metadata.address
-        ret = self._load_gds(path, offset, addr, memory_obj.get_size(), dev_offset)
-        if ret != memory_obj.get_size():
+
+        read_size = memory_obj.get_size()
+        read_start = time.perf_counter()
+        ret = self._load_gds(path, offset, addr, read_size, dev_offset)
+        read_duration_ms = (time.perf_counter() - read_start) * 1000
+
+        if ret != read_size:
             if ret < 0:
                 logger.error(
                     f"Error loading {path}: ret: {ret} removing entry from cache"
                 )
                 with self.hot_lock:
-                    self.hot_cache.pop(key)
+                    entry = self.hot_cache.pop(key, None)
+                    if entry is not None:
+                        self._total_storage_size -= entry.size
+                self._report_storage_usage()
             else:
                 # TODO: we should probably count errors and
                 # remove the entry if it's a persistent problem.
                 logger.error(
                     f"Error loading {path}: got only {ret} bytes "
-                    f"out of {memory_obj.get_size()}, ignoring"
+                    f"out of {read_size}, ignoring"
                 )
+            self._get_blocking_failed_count += 1
             memory_obj.ref_count_down()
             return None
+
+        # Update Prometheus metrics for GDS reads
+        self.stats_monitor.update_interval_remote_read_metrics(read_size)
+        self.stats_monitor.update_interval_remote_time_to_get(read_duration_ms)
+
         return memory_obj
 
     def get_non_blocking(
@@ -943,9 +1002,15 @@ class GdsBackend(AllocatorBackendInterface):
                 with self.cufile.CuFile(
                     tmp_path, "r+", use_direct_io=self.use_direct_io
                 ) as f:
-                    f.write(
+                    bytes_written = f.write(
                         addr, kv_chunk.nbytes, file_offset=offset, dev_offset=dev_offset
                     )
+                    # Check for errors
+                    if bytes_written != kv_chunk.nbytes:
+                        raise RuntimeError(
+                            f"cuFile write failed: returned {bytes_written}, "
+                            f"expected {kv_chunk.nbytes} bytes"
+                        )
             elif self.cudart:
                 # mmap the file
                 fd = os.open(tmp_path, os.O_RDWR)
@@ -975,6 +1040,7 @@ class GdsBackend(AllocatorBackendInterface):
         except Exception as e:
             logger.error(f"Error saving {tmp_path}: {e}", exc_info=True)
             raise e
+
         os.rename(tmp_path, path)
         return metadata
 
