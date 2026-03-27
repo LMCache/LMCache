@@ -13,6 +13,10 @@ from lmcache.cli.commands.bench.engine_bench.config import (
     EngineBenchConfig,
     parse_args_to_config,
 )
+from lmcache.cli.commands.bench.engine_bench.interactive import run_interactive
+from lmcache.cli.commands.bench.engine_bench.interactive.state import (
+    InteractiveState,
+)
 from lmcache.cli.commands.bench.engine_bench.progress import ProgressMonitor
 from lmcache.cli.commands.bench.engine_bench.request_sender import (
     RequestSender,
@@ -61,10 +65,18 @@ class BenchCommand(BaseCommand):
             help="Benchmark an inference engine.",
         )
 
+        # --- Config file ---
+        parser.add_argument(
+            "--config",
+            default=None,
+            metavar="FILE",
+            help="Load configuration from a JSON file (skips interactive mode).",
+        )
+
         # --- General args ---
         parser.add_argument(
             "--engine-url",
-            required=True,
+            default=None,
             help=(
                 "Inference engine URL (e.g., http://localhost:8000). "
                 "Set OPENAI_API_KEY env var if authentication is needed."
@@ -73,7 +85,7 @@ class BenchCommand(BaseCommand):
         parser.add_argument(
             "--lmcache-url",
             default=None,
-            help=("LMCache MP server URL for autoconfig (not yet implemented)."),
+            help="LMCache MP server URL for auto-detecting tokens per GB.",
         )
         parser.add_argument(
             "--model",
@@ -82,7 +94,7 @@ class BenchCommand(BaseCommand):
         )
         parser.add_argument(
             "--workload",
-            required=True,
+            default=None,
             choices=["long-doc-qa", "multi-round-chat", "random-prefill"],
             help="Workload type.",
         )
@@ -228,8 +240,58 @@ class BenchCommand(BaseCommand):
     # Engine benchmark orchestrator
     # ------------------------------------------------------------------
 
+    def _needs_interactive(self, args: argparse.Namespace) -> bool:
+        """Check whether interactive mode should be triggered."""
+        # Config file provided — skip interactive
+        if getattr(args, "config", None):
+            return False
+        # Missing required args → interactive
+        if args.engine_url is None or args.workload is None:
+            return True
+        # Required args present but tokens_per_gb_kvcache missing
+        # and no lmcache_url → interactive
+        if (
+            args.tokens_per_gb_kvcache is None
+            and getattr(args, "lmcache_url", None) is None
+        ):
+            return True
+        return False
+
+    def _resolve_args(self, args: argparse.Namespace) -> argparse.Namespace:
+        """Resolve args via config file, interactive mode, or pass through."""
+        # Case 1: --config file
+        config_path = getattr(args, "config", None)
+        if config_path:
+            state = InteractiveState.load_json(config_path)
+            state.merge_cli_args(args)
+            resolved = state.to_namespace()
+            # Carry over output flags from CLI
+            for attr in (
+                "output_dir",
+                "seed",
+                "no_csv",
+                "json",
+                "quiet",
+                "format",
+                "output",
+            ):
+                cli_val = getattr(args, attr, None)
+                if cli_val is not None:
+                    setattr(resolved, attr, cli_val)
+            return resolved
+
+        # Case 2: Interactive mode
+        if self._needs_interactive(args):
+            return run_interactive(args)
+
+        # Case 3: All required args present — run directly
+        return args
+
     def _bench_engine(self, args: argparse.Namespace) -> None:
         """Centralized orchestrator: create all modules and run benchmark."""
+        # 0. Resolve args (config file / interactive / pass-through)
+        args = self._resolve_args(args)
+
         # 1. Parse config
         config = parse_args_to_config(args)
         logger.info(

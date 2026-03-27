@@ -9,9 +9,6 @@ import json
 import sys
 import time
 
-# Third Party
-import pytest
-
 # First Party
 from lmcache.cli.commands.bench import BenchCommand
 from lmcache.cli.commands.bench.engine_bench.config import EngineBenchConfig
@@ -53,6 +50,7 @@ def _make_args(**overrides) -> argparse.Namespace:
         rp_num_requests=50,
         format=None,
         output=None,
+        config=None,
     )
     defaults.update(overrides)
     return argparse.Namespace(**defaults)
@@ -155,37 +153,25 @@ class TestBenchCommandRegistration:
         assert args.workload == "long-doc-qa"
         assert args.tokens_per_gb_kvcache == 50000
 
-    def test_required_args_engine_url(self) -> None:
+    def test_optional_args_parse_without_engine_url(self) -> None:
         parser = argparse.ArgumentParser()
         subparsers = parser.add_subparsers()
         cmd = BenchCommand()
         cmd.register(subparsers)
 
-        with pytest.raises(SystemExit):
-            parser.parse_args(
-                [
-                    "bench",
-                    "engine",
-                    "--workload",
-                    "long-doc-qa",
-                ]
-            )
+        # engine-url and workload are now optional (for interactive mode)
+        args = parser.parse_args(["bench", "engine"])
+        assert args.engine_url is None
+        assert args.workload is None
 
-    def test_required_args_workload(self) -> None:
+    def test_config_flag_accepted(self) -> None:
         parser = argparse.ArgumentParser()
         subparsers = parser.add_subparsers()
         cmd = BenchCommand()
         cmd.register(subparsers)
 
-        with pytest.raises(SystemExit):
-            parser.parse_args(
-                [
-                    "bench",
-                    "engine",
-                    "--engine-url",
-                    "http://localhost:8000",
-                ]
-            )
+        args = parser.parse_args(["bench", "engine", "--config", "my_config.json"])
+        assert args.config == "my_config.json"
 
     def test_default_values(self) -> None:
         parser = argparse.ArgumentParser()
@@ -436,3 +422,92 @@ class TestBenchCommandOrchestrator:
         assert "config" in data
         assert "results" in data
         assert data["results"]["total_requests"] > 0
+
+    @patch(
+        "lmcache.cli.commands.bench.engine_bench.request_sender.AsyncOpenAI",
+    )
+    def test_config_file_loading(
+        self,
+        mock_openai_cls,
+        tmp_path,
+    ) -> None:
+        """Benchmark runs correctly from a --config JSON file."""
+        # Third Party
+        from openai.types import CompletionUsage
+        from openai.types.chat import ChatCompletionChunk
+        from openai.types.chat.chat_completion_chunk import (
+            Choice,
+            ChoiceDelta,
+        )
+
+        def _make_chunk(content="", usage=None):
+            choices = []
+            if content:
+                choices.append(
+                    Choice(
+                        delta=ChoiceDelta(content=content),
+                        index=0,
+                    )
+                )
+            return ChatCompletionChunk(
+                id="c1",
+                choices=choices,
+                created=0,
+                model="test-model",
+                object="chat.completion.chunk",
+                usage=usage,
+            )
+
+        usage = CompletionUsage(
+            prompt_tokens=100,
+            completion_tokens=10,
+            total_tokens=110,
+        )
+
+        async def _fake_stream(*_args, **_kwargs):
+            yield _make_chunk(content="Hello")
+            yield _make_chunk(usage=usage)
+
+        mock_client = MagicMock()
+        mock_openai_cls.return_value = mock_client
+        mock_client.chat.completions.create = AsyncMock(
+            side_effect=lambda **kw: _fake_stream(),
+        )
+        mock_client.close = AsyncMock()
+
+        # Write a config JSON file
+        config_data = {
+            "engine_url": "http://localhost:8000",
+            "model": "test-model",
+            "workload": "long-doc-qa",
+            "tokens_per_gb_kvcache": 1000,
+            "kv_cache_volume": 0.001,
+            "ldqa_document_length": 100,
+            "ldqa_query_per_document": 1,
+            "ldqa_shuffle_policy": "tile",
+            "ldqa_num_inflight_requests": 1,
+        }
+        config_path = tmp_path / "test_config.json"
+        with open(config_path, "w") as f:
+            json.dump(config_data, f)
+
+        args = _make_args(
+            config=str(config_path),
+            engine_url=None,
+            workload=None,
+            tokens_per_gb_kvcache=None,
+            output_dir=str(tmp_path),
+            no_csv=True,
+            quiet=True,
+        )
+
+        cmd = BenchCommand()
+        old_stdout = sys.stdout
+        sys.stdout = io.StringIO()
+        try:
+            cmd._bench_engine(args)
+        finally:
+            sys.stdout = old_stdout
+
+        # Verify benchmark ran — sender was called
+        assert mock_client.chat.completions.create.call_count > 0
