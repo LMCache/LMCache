@@ -9,6 +9,9 @@ import json
 import sys
 import time
 
+# Third Party
+import pytest
+
 # First Party
 from lmcache.cli.commands.bench import BenchCommand
 from lmcache.cli.commands.bench.engine_bench.config import EngineBenchConfig
@@ -51,6 +54,8 @@ def _make_args(**overrides) -> argparse.Namespace:
         format=None,
         output=None,
         config=None,
+        no_interactive=False,
+        export_config=None,
     )
     defaults.update(overrides)
     return argparse.Namespace(**defaults)
@@ -199,6 +204,187 @@ class TestBenchCommandRegistration:
         assert args.ldqa_shuffle_policy == "random"
         assert args.ldqa_num_inflight_requests == 3
         assert args.quiet is False
+
+
+# ---------------------------------------------------------------------------
+# --no-interactive
+# ---------------------------------------------------------------------------
+
+
+class TestNoInteractive:
+    def test_no_interactive_flag_accepted(self) -> None:
+        parser = argparse.ArgumentParser()
+        subparsers = parser.add_subparsers()
+        cmd = BenchCommand()
+        cmd.register(subparsers)
+
+        args = parser.parse_args(["bench", "engine", "--no-interactive"])
+        assert args.no_interactive is True
+
+    def test_no_interactive_missing_engine_url(self) -> None:
+        args = _make_args(
+            engine_url=None,
+            workload="long-doc-qa",
+            tokens_per_gb_kvcache=6553,
+            no_interactive=True,
+        )
+        cmd = BenchCommand()
+        with pytest.raises(SystemExit, match="--engine-url"):
+            cmd._resolve_args(args)
+
+    def test_no_interactive_missing_workload(self) -> None:
+        args = _make_args(
+            engine_url="http://localhost:8000",
+            workload=None,
+            tokens_per_gb_kvcache=6553,
+            no_interactive=True,
+        )
+        cmd = BenchCommand()
+        with pytest.raises(SystemExit, match="--workload"):
+            cmd._resolve_args(args)
+
+    def test_no_interactive_missing_tokens_and_lmcache(self) -> None:
+        args = _make_args(
+            engine_url="http://localhost:8000",
+            workload="long-doc-qa",
+            tokens_per_gb_kvcache=None,
+            lmcache_url=None,
+            no_interactive=True,
+        )
+        cmd = BenchCommand()
+        with pytest.raises(
+            SystemExit, match="--tokens-per-gb-kvcache or --lmcache-url"
+        ):
+            cmd._resolve_args(args)
+
+    def test_no_interactive_passes_with_all_args(self) -> None:
+        args = _make_args(no_interactive=True)
+        cmd = BenchCommand()
+        result = cmd._resolve_args(args)
+        assert result is args
+
+    def test_no_interactive_passes_with_lmcache_url(self) -> None:
+        args = _make_args(
+            tokens_per_gb_kvcache=None,
+            lmcache_url="http://localhost:8080",
+            no_interactive=True,
+        )
+        cmd = BenchCommand()
+        result = cmd._resolve_args(args)
+        assert result is args
+
+
+# ---------------------------------------------------------------------------
+# --export-config
+# ---------------------------------------------------------------------------
+
+
+class TestExportConfig:
+    def test_export_config_flag_accepted(self) -> None:
+        parser = argparse.ArgumentParser()
+        subparsers = parser.add_subparsers()
+        cmd = BenchCommand()
+        cmd.register(subparsers)
+
+        args = parser.parse_args(
+            [
+                "bench",
+                "engine",
+                "--engine-url",
+                "http://localhost:8000",
+                "--workload",
+                "long-doc-qa",
+                "--tokens-per-gb-kvcache",
+                "6553",
+                "--export-config",
+                "out.json",
+            ]
+        )
+        assert args.export_config == "out.json"
+
+    def test_export_config_errors_when_missing_args(self) -> None:
+        args = _make_args(
+            engine_url=None,
+            export_config="out.json",
+        )
+        cmd = BenchCommand()
+        with pytest.raises(SystemExit, match="--engine-url"):
+            cmd._resolve_args(args)
+
+    def test_export_config_writes_json(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
+        export_path = str(tmp_path / "exported.json")
+        args = _make_args(
+            export_config=export_path,
+            quiet=True,
+        )
+
+        cmd = BenchCommand()
+        old_stdout = sys.stdout
+        sys.stdout = io.StringIO()
+        try:
+            cmd._bench_engine(args)
+        finally:
+            sys.stdout = old_stdout
+
+        with open(export_path) as f:
+            data = json.load(f)
+
+        assert "engine_url" not in data
+        assert data["workload"] == "long-doc-qa"
+        assert data["tokens_per_gb_kvcache"] == 50000
+        assert "lmcache_url" not in data
+
+    def test_export_config_excludes_lmcache_url(
+        self,
+        tmp_path,  # type: ignore[no-untyped-def]
+    ) -> None:
+        export_path = str(tmp_path / "exported.json")
+        args = _make_args(
+            lmcache_url="http://localhost:8080",
+            export_config=export_path,
+            quiet=True,
+        )
+
+        cmd = BenchCommand()
+        old_stdout = sys.stdout
+        sys.stdout = io.StringIO()
+        try:
+            cmd._bench_engine(args)
+        finally:
+            sys.stdout = old_stdout
+
+        with open(export_path) as f:
+            data = json.load(f)
+
+        assert "lmcache_url" not in data
+        assert data["tokens_per_gb_kvcache"] == 50000
+
+    def test_export_config_includes_workload_args(
+        self,
+        tmp_path,  # type: ignore[no-untyped-def]
+    ) -> None:
+        export_path = str(tmp_path / "exported.json")
+        args = _make_args(
+            workload="long-doc-qa",
+            ldqa_document_length=5000,
+            ldqa_query_per_document=4,
+            export_config=export_path,
+            quiet=True,
+        )
+
+        cmd = BenchCommand()
+        old_stdout = sys.stdout
+        sys.stdout = io.StringIO()
+        try:
+            cmd._bench_engine(args)
+        finally:
+            sys.stdout = old_stdout
+
+        with open(export_path) as f:
+            data = json.load(f)
+
+        assert data["ldqa_document_length"] == 5000
+        assert data["ldqa_query_per_document"] == 4
 
 
 # ---------------------------------------------------------------------------

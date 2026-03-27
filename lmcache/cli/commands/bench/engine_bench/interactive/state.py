@@ -28,6 +28,10 @@ _OUTPUT_KEYS = ("output_dir", "seed", "no_csv", "export_csv", "json", "quiet")
 # passed to the orchestrator.
 _INTERACTIVE_ONLY_KEYS = {"has_lmcache"}
 
+# Keys excluded from exported JSON configs.  These are either
+# environment-specific (engine_url, lmcache_url) or interactive-only.
+_EXPORT_EXCLUDED_KEYS = _INTERACTIVE_ONLY_KEYS | {"engine_url", "lmcache_url"}
+
 # Mapping from ConfigItem.key to the argparse attribute name when they differ.
 # Most keys match directly; these are the exceptions.
 _KEY_TO_ATTR: dict[str, str] = {
@@ -220,7 +224,15 @@ class InteractiveState:
             if item.key in _INTERACTIVE_ONLY_KEYS:
                 continue
             attr = _KEY_TO_ATTR.get(item.key, item.key)
-            value = self._values.get(item.key, item.default)
+            # Only fall back to schema default if the item's condition is met.
+            # This prevents lmcache_url's default from leaking when
+            # has_lmcache is not set.
+            if item.key in self._values:
+                value = self._values[item.key]
+            elif self._condition_met(item):
+                value = item.default
+            else:
+                value = None
             setattr(ns, attr, value)
 
         # Output settings (not in the interactive registry)
@@ -244,11 +256,14 @@ class InteractiveState:
     # ------------------------------------------------------------------
 
     def to_json(self) -> dict[str, Any]:
-        """Serialize to a JSON-compatible dict for config export."""
+        """Serialize to a JSON-compatible dict for config export.
+
+        Excludes environment-specific keys (``engine_url``,
+        ``lmcache_url``) and interactive-only keys so the exported
+        config is portable and works without an LMCache server.
+        """
         self.fill_defaults()
-        return {
-            k: v for k, v in self._values.items() if k not in _INTERACTIVE_ONLY_KEYS
-        }
+        return {k: v for k, v in self._values.items() if k not in _EXPORT_EXCLUDED_KEYS}
 
     @classmethod
     def from_json(cls, data: dict[str, Any]) -> "InteractiveState":

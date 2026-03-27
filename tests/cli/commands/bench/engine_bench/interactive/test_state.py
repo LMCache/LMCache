@@ -291,10 +291,11 @@ class TestJsonRoundTrip:
         state = _make_full_state(workload="long-doc-qa")
         state.set("ldqa_document_length", 5000)
         data = state.to_json()
+        # engine_url excluded from export (environment-specific)
+        assert "engine_url" not in data
+        assert data["ldqa_document_length"] == 5000
         restored = InteractiveState.from_json(data)
-        assert restored.get("engine_url") == "http://localhost:8000"
         assert restored.get("ldqa_document_length") == 5000
-        assert restored.is_ready()
 
     def test_save_and_load(self, tmp_path: object) -> None:
         # Standard
@@ -305,7 +306,7 @@ class TestJsonRoundTrip:
         state.save_json(path)
 
         loaded = InteractiveState.load_json(path)
-        assert loaded.get("engine_url") == "http://localhost:8000"
+        assert "engine_url" not in loaded.values
         assert loaded.get("workload") == "long-doc-qa"
 
     def test_json_file_is_valid_json(self, tmp_path: object) -> None:
@@ -319,7 +320,8 @@ class TestJsonRoundTrip:
         with open(path) as f:
             data = json.load(f)
         assert isinstance(data, dict)
-        assert data["engine_url"] == "http://localhost:8000"
+        assert "engine_url" not in data
+        assert data["workload"] == "long-doc-qa"
 
     def test_merge_cli_args(self) -> None:
         state = _make_full_state(workload="long-doc-qa")

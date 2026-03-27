@@ -137,8 +137,46 @@ def _prompt_action() -> str:
     )
 
 
+def _resolve_before_export(state: InteractiveState) -> None:
+    """Resolve tokens_per_gb_kvcache and model before exporting.
+
+    If the user provided an LMCache URL, query the server to get
+    ``tokens_per_gb_kvcache`` so the exported config is standalone.
+    If the model is empty and an engine URL is available, auto-detect it.
+    """
+    # First Party
+    from lmcache.cli.commands.bench.engine_bench.config import (
+        auto_detect_model,
+        resolve_tokens_per_gb,
+    )
+
+    engine_url = state.get("engine_url", "")
+    model = state.get("model", "")
+
+    # Auto-detect model if empty
+    if not model and engine_url:
+        try:
+            model = auto_detect_model(engine_url)
+            state.set("model", model)
+        except RuntimeError as e:
+            print(f"  {YELLOW}Warning: could not auto-detect model: {e}{RESET}")
+
+    # Resolve tokens_per_gb from LMCache if needed
+    lmcache_url = state.get("lmcache_url", "")
+    if lmcache_url and not state.is_set("tokens_per_gb_kvcache"):
+        try:
+            tokens = resolve_tokens_per_gb(lmcache_url, model)
+            state.set("tokens_per_gb_kvcache", tokens)
+        except RuntimeError as e:
+            print(
+                f"  {YELLOW}Warning: could not resolve "
+                f"tokens_per_gb from LMCache: {e}{RESET}"
+            )
+
+
 def _handle_export(state: InteractiveState) -> None:
-    """Prompt for filename, save JSON, print replay command, and exit."""
+    """Prompt for filename, resolve values, save JSON, and exit."""
+    _resolve_before_export(state)
     filename = prompt_text(
         "Export filename",
         "",
@@ -147,7 +185,11 @@ def _handle_export(state: InteractiveState) -> None:
     state.save_json(filename)
     print()
     print(f"  {CYAN}Saved to {filename}{RESET}")
-    print(f"  Replay with: {YELLOW}lmcache bench engine --config {filename}{RESET}")
+    print(
+        f"  {BOLD}Replay with:{RESET} "
+        f"{CYAN}lmcache bench engine "
+        f"--engine-url <URL> --config {filename}{RESET}"
+    )
     print()
     sys.exit(0)
 

@@ -137,6 +137,22 @@ class BenchCommand(BaseCommand):
             action="store_true",
             help="Suppress real-time progress display.",
         )
+        parser.add_argument(
+            "--no-interactive",
+            action="store_true",
+            help=(
+                "Disable interactive mode. Errors if required arguments are missing."
+            ),
+        )
+        parser.add_argument(
+            "--export-config",
+            default=None,
+            metavar="FILE",
+            help=(
+                "Export resolved configuration to a JSON file and exit. "
+                "Does not run the benchmark or enter interactive mode."
+            ),
+        )
 
         # --- Long-doc-qa workload args ---
         group = parser.add_argument_group("long-doc-qa workload options")
@@ -240,22 +256,25 @@ class BenchCommand(BaseCommand):
     # Engine benchmark orchestrator
     # ------------------------------------------------------------------
 
-    def _needs_interactive(self, args: argparse.Namespace) -> bool:
-        """Check whether interactive mode should be triggered."""
-        # Config file provided — skip interactive
-        if getattr(args, "config", None):
-            return False
-        # Missing required args → interactive
-        if args.engine_url is None or args.workload is None:
-            return True
-        # Required args present but tokens_per_gb_kvcache missing
-        # and no lmcache_url → interactive
+    def _get_missing_args(self, args: argparse.Namespace) -> list[str]:
+        """Return list of missing required CLI flags."""
+        missing: list[str] = []
+        if args.engine_url is None:
+            missing.append("--engine-url")
+        if args.workload is None:
+            missing.append("--workload")
         if (
             args.tokens_per_gb_kvcache is None
             and getattr(args, "lmcache_url", None) is None
         ):
-            return True
-        return False
+            missing.append("--tokens-per-gb-kvcache or --lmcache-url")
+        return missing
+
+    def _needs_interactive(self, args: argparse.Namespace) -> bool:
+        """Check whether interactive mode should be triggered."""
+        if getattr(args, "config", None):
+            return False
+        return len(self._get_missing_args(args)) > 0
 
     def _resolve_args(self, args: argparse.Namespace) -> argparse.Namespace:
         """Resolve args via config file, interactive mode, or pass through."""
@@ -280,12 +299,70 @@ class BenchCommand(BaseCommand):
                     setattr(resolved, attr, cli_val)
             return resolved
 
-        # Case 2: Interactive mode
+        # Case 2: --no-interactive or --export-config — error if missing
+        no_interactive = getattr(args, "no_interactive", False)
+        export_config = getattr(args, "export_config", None)
+        if no_interactive or export_config:
+            missing = self._get_missing_args(args)
+            if missing:
+                flag = "--export-config" if export_config else "--no-interactive"
+                raise SystemExit(
+                    "Missing required arguments: "
+                    + ", ".join(missing)
+                    + f". Provide them or remove {flag} "
+                    "for guided setup."
+                )
+            return args
+
+        # Case 3: Interactive mode
         if self._needs_interactive(args):
             return run_interactive(args)
 
-        # Case 3: All required args present — run directly
+        # Case 4: All required args present — run directly
         return args
+
+    def _export_config(
+        self,
+        config: EngineBenchConfig,
+        args: argparse.Namespace,
+        path: str,
+    ) -> None:
+        """Export resolved config to JSON and exit.
+
+        Builds a standalone config dict from the resolved
+        ``EngineBenchConfig`` and workload-specific CLI args.
+        Environment-specific keys (``engine_url``, ``lmcache_url``)
+        are excluded by ``InteractiveState.to_json()`` so the exported
+        config is portable.
+        """
+        # Standard
+        import json as json_mod
+
+        state = InteractiveState()
+        state.set("engine_url", config.engine_url)
+        state.set("model", config.model)
+        state.set("workload", config.workload)
+        state.set("kv_cache_volume", config.kv_cache_volume_gb)
+        state.set("tokens_per_gb_kvcache", config.tokens_per_gb_kvcache)
+
+        # Workload-specific args from namespace
+        for item in state.get_workload_items():
+            value = getattr(args, item.key, item.default)
+            if value is not None:
+                state.set(item.key, value)
+
+        # to_json() handles filtering out engine_url, lmcache_url, etc.
+        data = state.to_json()
+
+        with open(path, "w") as f:
+            json_mod.dump(data, f, indent=2)
+            f.write("\n")
+
+        print(f"Configuration exported to {path}")
+        print(
+            f"\033[1mReplay with:\033[0m \033[96mlmcache bench engine "
+            f"--engine-url <URL> --config {path}\033[0m"
+        )
 
     def _bench_engine(self, args: argparse.Namespace) -> None:
         """Centralized orchestrator: create all modules and run benchmark."""
@@ -294,6 +371,13 @@ class BenchCommand(BaseCommand):
 
         # 1. Parse config
         config = parse_args_to_config(args)
+
+        # 1b. --export-config: save resolved config and exit
+        export_path = getattr(args, "export_config", None)
+        if export_path:
+            self._export_config(config, args, export_path)
+            return
+
         logger.info(
             "Benchmark config: workload=%s, model=%s, "
             "kv_cache=%.1f GB, tokens_per_gb=%d",
