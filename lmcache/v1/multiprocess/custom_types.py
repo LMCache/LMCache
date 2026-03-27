@@ -63,49 +63,11 @@ class CudaIPCWrapper:
             )
         return device_index
 
-    @staticmethod
-    def _validate_tensor_for_ipc(tensor: torch.Tensor) -> None:
-        if not tensor.is_cuda:
-            raise ValueError("CudaIPCWrapper only supports CUDA tensors.")
-        if tensor.is_sparse:
-            raise ValueError("sparse tensors are not supported for CUDA IPC sharing.")
-        # disallow negative strides (possible via as_strided)
-        if any(s < 0 for s in tensor.stride()):
-            raise ValueError(
-                "negative strides are not supported for IPC reconstruction."
-            )
-
-        storage = tensor.untyped_storage()
-        if storage.device.type != "cuda":
-            raise ValueError("tensor storage is not CUDA.")
-
-        offset_elems = tensor.storage_offset()
-        sizes = tensor.size()
-        strides = tensor.stride()
-        itemsize = tensor.element_size()
-
-        # edge case: if the tensor is empty, return
-        if tensor.numel() == 0:
-            return
-
-        # compute max idx (in elements) for the strided view
-        # start at the offset
-        max_index = offset_elems
-        for sz, st in zip(sizes, strides, strict=False):
-            # edge case: if any size is 0, then whole tensor is empty, and return
-            if sz == 0:
-                return
-            max_index += (sz - 1) * st
-
-        required_bytes = (max_index + 1) * itemsize
-        if required_bytes > storage.nbytes():
-            raise ValueError(
-                f"tensor view exceeds underlying storage: need {required_bytes} bytes, "
-                f"storage has {storage.nbytes()} bytes."
-            )
-
     def __init__(self, tensor: torch.Tensor):
-        self._validate_tensor_for_ipc(tensor)
+        # First Party
+        from lmcache.v1.gpu_connector.utils import assert_contiguous
+
+        assert_contiguous(tensor)
 
         storage = tensor.untyped_storage()
         handle = storage._share_cuda_()

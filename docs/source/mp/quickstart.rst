@@ -11,7 +11,7 @@ Local Quick Start
 
 .. code-block:: bash
 
-    python3 -m lmcache.v1.multiprocess.server \
+    lmcache server \
         --l1-size-gb 100 --eviction-policy LRU
 
 Expected log output:
@@ -21,7 +21,9 @@ Expected log output:
     LMCache INFO: LMCache cache server is running...
 
 .. note::
-   The default ZMQ port is **5555**.  Use ``--port`` to change it.
+   The default ZMQ port is **5555** (use ``--port`` to change it).
+   The HTTP frontend listens on **8080** by default (use ``--http-port`` to
+   change it).
 
 **Step 2: Start vLLM with the LMCache connector**
 
@@ -135,7 +137,7 @@ management endpoints for health checking and cache administration.
     lmcache server \
         --l1-size-gb 100 --eviction-policy LRU
 
-The HTTP server listens on ``0.0.0.0:8000`` by default (configurable with
+The HTTP server listens on ``0.0.0.0:8080`` by default (configurable with
 ``--http-host`` and ``--http-port``).
 
 **Endpoints:**
@@ -166,15 +168,15 @@ Examples:
 .. code-block:: bash
 
     # Health check
-    curl http://localhost:8000/api/healthcheck
+    curl http://localhost:8080/api/healthcheck
     # {"status": "healthy"}
 
     # Clear all KV cache data in L1 (CPU) memory
-    curl -X POST http://localhost:8000/api/clear-cache
+    curl -X POST http://localhost:8080/api/clear-cache
     # {"status": "ok"}
 
     # Inspect detailed internal state
-    curl http://localhost:8000/api/status
+    curl http://localhost:8080/api/status
 
 The ZMQ server runs on the same default port (5555) and accepts vLLM
 connections exactly as in the local quick start.

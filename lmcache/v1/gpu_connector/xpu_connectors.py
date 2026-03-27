@@ -25,7 +25,11 @@ from lmcache.v1.gpu_connector.gpu_connectors import (
     GPUConnectorInterface,
     VLLMPagedMemGPUConnectorV2,
 )
-from lmcache.v1.gpu_connector.utils import _get_head_size_view, _split_token2d_kv
+from lmcache.v1.gpu_connector.utils import (
+    LayoutHints,
+    _get_head_size_view,
+    _split_token2d_kv,
+)
 from lmcache.v1.memory_management import (
     MemoryAllocatorInterface,
     MemoryFormat,
@@ -98,6 +102,7 @@ class VLLMPagedMemXPUConnectorV2(VLLMPagedMemGPUConnectorV2):
         metadata: LMCacheMetadata,
         use_gpu: bool = False,
         device: Optional[torch.device] = None,
+        layout_hints: Optional[LayoutHints] = None,
     ) -> "VLLMPagedMemXPUConnectorV2":
         """Create a connector from LMCacheMetadata.
 
@@ -105,6 +110,8 @@ class VLLMPagedMemXPUConnectorV2(VLLMPagedMemGPUConnectorV2):
             metadata: The LMCache engine metadata containing model configuration.
             use_gpu: Whether to use GPU intermediate buffer.
             device: The device to use for the connector.
+            layout_hints: Optional hints about KV cache layout from the
+                serving engine.
 
         Returns:
             A new instance of VLLMPagedMemXPUConnectorV2.
@@ -125,6 +132,7 @@ class VLLMPagedMemXPUConnectorV2(VLLMPagedMemGPUConnectorV2):
             dtype=metadata.kv_dtype,
             device=device,
             use_mla=metadata.use_mla,
+            layout_hints=layout_hints,
         )
 
     def to_gpu(self, memory_obj: MemoryObj, start: int, end: int, **kwargs):
