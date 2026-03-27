@@ -19,6 +19,23 @@ inline unsigned bit_offset(size_t bit_index) {
 Bitmap::Bitmap(size_t size)
     : size_(size), data_(size == 0 ? 0 : (size - 1) / kBitsPerByte + 1, 0) {}
 
+Bitmap::Bitmap(size_t size, size_t prefix_bits) : Bitmap(size) {
+  if (prefix_bits == 0 || size == 0) return;
+  if (prefix_bits > size) prefix_bits = size;
+
+  // Set full bytes to 0xFF
+  const size_t full_bytes = prefix_bits / kBitsPerByte;
+  for (size_t i = 0; i < full_bytes; ++i) {
+    data_[i] = 0xFF;
+  }
+
+  // Set remaining bits in the partial byte
+  const unsigned remaining = prefix_bits % kBitsPerByte;
+  if (remaining > 0) {
+    data_[full_bytes] = static_cast<uint8_t>((1u << remaining) - 1);
+  }
+}
+
 void Bitmap::set(size_t index) {
   if (index >= size_) return;
   data_[byte_index(index)] |= static_cast<uint8_t>(1u << bit_offset(index));
@@ -101,6 +118,38 @@ Bitmap Bitmap::operator&(const Bitmap& other) const {
     result.data_[i] = data_[i] & other.data_[i];
   }
   return result;
+}
+
+Bitmap Bitmap::operator|(const Bitmap& other) const {
+  const size_t result_size = (size_ <= other.size_) ? size_ : other.size_;
+  Bitmap result(result_size);
+  for (size_t i = 0; i < result.data_.size(); ++i) {
+    result.data_[i] = data_[i] | other.data_[i];
+  }
+  return result;
+}
+
+std::vector<size_t> Bitmap::get_indices() const {
+  std::vector<size_t> indices;
+  indices.reserve(popcount());
+  for (size_t i = 0; i < data_.size(); ++i) {
+    uint8_t byte = data_[i];
+    while (byte != 0) {
+      unsigned bit =
+          static_cast<unsigned>(__builtin_ctz(static_cast<unsigned>(byte)));
+      size_t idx = i * kBitsPerByte + bit;
+      if (idx < size_) {
+        indices.push_back(idx);
+      }
+      byte &= static_cast<uint8_t>(byte - 1);  // clear lowest set bit
+    }
+  }
+  return indices;
+}
+
+std::unordered_set<size_t> Bitmap::get_indices_set() const {
+  auto vec = get_indices();
+  return std::unordered_set<size_t>(vec.begin(), vec.end());
 }
 
 std::string Bitmap::to_string() const {

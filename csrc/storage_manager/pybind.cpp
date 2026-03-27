@@ -33,6 +33,9 @@ PYBIND11_MODULE(native_storage_ops, m) {
   py::class_<Bitmap>(m, "Bitmap")
       .def(py::init<size_t>(), py::arg("size"),
            "Construct a Bitmap with the specified size.")
+      .def(py::init<size_t, size_t>(), py::arg("size"), py::arg("prefix_bits"),
+           "Construct a Bitmap with the specified size and first N prefix "
+           "bits set to 1.")
       .def("set", &Bitmap::set, py::arg("index"),
            "Set the bit at the specified index to 1.")
       .def("clear", &Bitmap::clear, py::arg("index"),
@@ -46,6 +49,28 @@ PYBIND11_MODULE(native_storage_ops, m) {
            "Count the number of leading ones.")
       .def("__and__", &Bitmap::operator&, py::arg("other"),
            "Bitwise AND operation between two bitmaps.")
+      .def("__or__", &Bitmap::operator|, py::arg("other"),
+           "Bitwise OR operation between two bitmaps.")
+      .def("__invert__", &Bitmap::operator~,
+           "Bitwise NOT operation (flip all bits).")
+      .def("get_indices_list", &Bitmap::get_indices,
+           "Return a list of indices where the bit is set to 1.")
+      .def("get_indices_set", &Bitmap::get_indices_set,
+           "Return a set of indices where the bit is set to 1.")
+      .def(
+          "gather",
+          [](const Bitmap& self, const py::list& items) {
+            auto indices = self.get_indices();
+            py::list result;
+            for (auto idx : indices) {
+              if (idx < static_cast<size_t>(py::len(items))) {
+                result.append(items[idx]);
+              }
+            }
+            return result;
+          },
+          py::arg("items"),
+          "Return elements from items at indices where the bit is set to 1.")
       .def("__repr__", &Bitmap::to_string,
            "Convert the bitmap to a string representation.");
 

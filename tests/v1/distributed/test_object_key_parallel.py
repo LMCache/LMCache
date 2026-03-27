@@ -181,7 +181,7 @@ class TestStorageManagerTPLookup:
 
         # Create interleaved lookup keys for scheduler-style lookup
         lookup_keys = create_interleaved_lookup_keys(num_chunks, world_size)
-        handle = storage_manager.submit_prefetch_task(lookup_keys)
+        handle = storage_manager.submit_prefetch_task(lookup_keys, test_layout)
         found_count = storage_manager.query_prefetch_status(handle)
 
         # All keys should be found (5 chunks * 2 workers = 10)
@@ -209,7 +209,7 @@ class TestStorageManagerTPLookup:
 
         # Create interleaved lookup keys for scheduler-style lookup
         lookup_keys = create_interleaved_lookup_keys(num_chunks, world_size)
-        handle = storage_manager.submit_prefetch_task(lookup_keys)
+        handle = storage_manager.submit_prefetch_task(lookup_keys, test_layout)
         found_count = storage_manager.query_prefetch_status(handle)
 
         # Only worker 0's first chunk is found, then lookup stops
@@ -241,7 +241,7 @@ class TestStorageManagerTPLookup:
 
         # Create interleaved lookup keys for scheduler-style lookup
         lookup_keys = create_interleaved_lookup_keys(num_chunks, world_size)
-        handle = storage_manager.submit_prefetch_task(lookup_keys)
+        handle = storage_manager.submit_prefetch_task(lookup_keys, test_layout)
         found_count = storage_manager.query_prefetch_status(handle)
 
         # First lookup key is chunk0_worker0 which is missing
@@ -275,7 +275,7 @@ class TestStorageManagerTPLookup:
 
         # Request 5 chunks with scheduler-style interleaved lookup
         lookup_keys = create_interleaved_lookup_keys(num_requested_chunks, world_size)
-        handle = storage_manager.submit_prefetch_task(lookup_keys)
+        handle = storage_manager.submit_prefetch_task(lookup_keys, test_layout)
         found_count = storage_manager.query_prefetch_status(handle)
 
         # First 3 chunks * 2 workers = 6 keys found, then stops at chunk3_worker0
@@ -318,7 +318,7 @@ class TestStorageManagerTPLookup:
 
         # Request 5 chunks with scheduler-style interleaved lookup
         lookup_keys = create_interleaved_lookup_keys(5, world_size)
-        handle = storage_manager.submit_prefetch_task(lookup_keys)
+        handle = storage_manager.submit_prefetch_task(lookup_keys, test_layout)
         found_count = storage_manager.query_prefetch_status(handle)
 
         # Lookup order:
@@ -358,7 +358,7 @@ class TestStorageManagerTPLookup:
 
         # Scheduler-style interleaved lookup
         lookup_keys = create_interleaved_lookup_keys(num_chunks, world_size)
-        handle = storage_manager.submit_prefetch_task(lookup_keys)
+        handle = storage_manager.submit_prefetch_task(lookup_keys, test_layout)
         found_count = storage_manager.query_prefetch_status(handle)
 
         # All keys found: 3 chunks * 4 workers = 12
@@ -390,7 +390,7 @@ class TestStorageManagerTPLookup:
 
         # Scheduler-style interleaved lookup
         lookup_keys = create_interleaved_lookup_keys(num_chunks, world_size)
-        handle = storage_manager.submit_prefetch_task(lookup_keys)
+        handle = storage_manager.submit_prefetch_task(lookup_keys, test_layout)
         found_count = storage_manager.query_prefetch_status(handle)
 
         # Lookup order: chunk0_w0, chunk0_w1, chunk0_w2, chunk0_w3, ...
@@ -437,7 +437,7 @@ class TestStorageManagerTPStoreRetrieve:
         storage_manager.finish_write(list(reserved_dict1.keys()))
 
         # Prefetch to secure both entries
-        handle = storage_manager.submit_prefetch_task([key_w0, key_w1])
+        handle = storage_manager.submit_prefetch_task([key_w0, key_w1], test_layout)
         _ = storage_manager.query_prefetch_status(handle)
 
         # Both should be retrievable independently
@@ -467,7 +467,7 @@ class TestStorageManagerTPStoreRetrieve:
             all_keys.extend(keys)
 
         # Prefetch to secure all entries
-        handle = storage_manager.submit_prefetch_task(all_keys)
+        handle = storage_manager.submit_prefetch_task(all_keys, test_layout)
         _ = storage_manager.query_prefetch_status(handle)
 
         # Retrieve only worker 0's data
@@ -516,7 +516,7 @@ class TestTPEdgeCases:
         storage_manager.finish_write(list(reserved_dict.keys()))
 
         # Lookup should find all chunks
-        handle = storage_manager.submit_prefetch_task(storage_keys)
+        handle = storage_manager.submit_prefetch_task(storage_keys, test_layout)
         found_count = storage_manager.query_prefetch_status(handle)
         assert found_count == num_chunks
 
@@ -559,7 +559,7 @@ class TestTPEdgeCases:
                 )
 
         # All keys should be found
-        handle = storage_manager.submit_prefetch_task(lookup_keys)
+        handle = storage_manager.submit_prefetch_task(lookup_keys, test_layout)
         found_count = storage_manager.query_prefetch_status(handle)
         assert found_count == num_chunks * world_size
 
@@ -597,7 +597,7 @@ class TestTPEdgeCases:
         storage_manager.finish_write(list(reserved_dict.keys()))
 
         # Lookup all keys
-        handle = storage_manager.submit_prefetch_task(storage_keys)
+        handle = storage_manager.submit_prefetch_task(storage_keys, test_layout)
         found_count = storage_manager.query_prefetch_status(handle)
         assert found_count == world_size
 
@@ -661,7 +661,7 @@ class TestTPIntegration:
                         world_size=world_size,
                     )
                 )
-        handle = storage_manager.submit_prefetch_task(lookup_keys)
+        handle = storage_manager.submit_prefetch_task(lookup_keys, test_layout)
         found_count = storage_manager.query_prefetch_status(handle)
 
         # Step 4: Verify hit count
@@ -729,6 +729,6 @@ class TestTPIntegration:
                         world_size=world_size,
                     )
                 )
-        handle = storage_manager.submit_prefetch_task(lookup_keys)
+        handle = storage_manager.submit_prefetch_task(lookup_keys, test_layout)
         found_count = storage_manager.query_prefetch_status(handle)
         assert found_count == num_chunks * world_size

@@ -1,17 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Callable
+from typing import Any, Callable
 import pickle
 import threading
 
 # Third Party
 import msgspec
 import torch
-
-if TYPE_CHECKING:
-    # First Party
-    from lmcache.v1.multiprocess.token_hasher import TokenHasher
 
 """
 Defines the types and the customized encoder/decoders for inter-process
@@ -20,8 +16,7 @@ communications.
 Key Types:
 - IPCCacheEngineKey: Token-based cache key
   - Contains token_ids, start, end, request_id (all required)
-  - chunk_hash is optionally set after hashing by the server
-  - Converted to ObjectKey for storage operations via ipc_keys_to_object_keys()
+  - Converted to ObjectKey for storage operations via ipc_key_to_object_keys()
 """
 
 
@@ -68,49 +63,11 @@ class CudaIPCWrapper:
             )
         return device_index
 
-    @staticmethod
-    def _validate_tensor_for_ipc(tensor: torch.Tensor) -> None:
-        if not tensor.is_cuda:
-            raise ValueError("CudaIPCWrapper only supports CUDA tensors.")
-        if tensor.is_sparse:
-            raise ValueError("sparse tensors are not supported for CUDA IPC sharing.")
-        # disallow negative strides (possible via as_strided)
-        if any(s < 0 for s in tensor.stride()):
-            raise ValueError(
-                "negative strides are not supported for IPC reconstruction."
-            )
-
-        storage = tensor.untyped_storage()
-        if storage.device.type != "cuda":
-            raise ValueError("tensor storage is not CUDA.")
-
-        offset_elems = tensor.storage_offset()
-        sizes = tensor.size()
-        strides = tensor.stride()
-        itemsize = tensor.element_size()
-
-        # edge case: if the tensor is empty, return
-        if tensor.numel() == 0:
-            return
-
-        # compute max idx (in elements) for the strided view
-        # start at the offset
-        max_index = offset_elems
-        for sz, st in zip(sizes, strides, strict=False):
-            # edge case: if any size is 0, then whole tensor is empty, and return
-            if sz == 0:
-                return
-            max_index += (sz - 1) * st
-
-        required_bytes = (max_index + 1) * itemsize
-        if required_bytes > storage.nbytes():
-            raise ValueError(
-                f"tensor view exceeds underlying storage: need {required_bytes} bytes, "
-                f"storage has {storage.nbytes()} bytes."
-            )
-
     def __init__(self, tensor: torch.Tensor):
-        self._validate_tensor_for_ipc(tensor)
+        # First Party
+        from lmcache.v1.gpu_connector.utils import assert_contiguous
+
+        assert_contiguous(tensor)
 
         storage = tensor.untyped_storage()
         handle = storage._share_cuda_()
@@ -169,7 +126,7 @@ class IPCCacheEngineKey:
 
     The client sends token_ids, start, end, and request_id (all required).
     The server computes chunk hashes via TokenHasher and converts to
-    ObjectKey for storage operations.
+    ObjectKey for storage operations using ipc_key_to_object_keys().
 
     The request_id field is for session tracking and is NOT included
     in equality/hash comparisons (two keys with same content but different
@@ -186,41 +143,6 @@ class IPCCacheEngineKey:
 
     # === Session tracking (not part of cache identity) ===
     request_id: str = field(compare=False)
-
-    chunk_hash: bytes | None = None
-
-    def to_hash_keys(
-        self,
-        hasher: "TokenHasher",
-        full_chunk_only: bool = True,
-        prefix_hash: int | None = None,
-    ) -> list["IPCCacheEngineKey"]:
-        """Compute chunk hashes and return one IPCCacheEngineKey per chunk.
-
-        Preserves all fields in generated keys.
-
-        Args:
-            hasher: TokenHasher instance to compute chunk hashes
-            full_chunk_only: If True, only return keys for full chunks .
-                Else, return keys for all chunks (including partial ones).
-            prefix_hash: Optional int hash to combine with token_ids.
-        """
-        chunk_hashes = hasher.compute_chunk_hashes(
-            list(self.token_ids), full_chunk_only, prefix_hash
-        )
-        return [
-            IPCCacheEngineKey(
-                model_name=self.model_name,
-                world_size=self.world_size,
-                worker_id=self.worker_id,
-                token_ids=self.token_ids,
-                start=self.start,
-                end=self.end,
-                request_id=self.request_id,
-                chunk_hash=hasher.hash_to_bytes(h),
-            )
-            for h in chunk_hashes
-        ]
 
     # Helper function for unit tests only
     @classmethod
@@ -254,7 +176,6 @@ class IPCCacheEngineKey:
             token_ids=self.token_ids,
             start=self.start,
             end=self.end,
-            chunk_hash=self.chunk_hash,
             request_id=self.request_id,
         )
 
@@ -299,3 +220,22 @@ def get_customized_decoder(type: Any) -> msgspec.msgpack.Decoder:
         raise TypeError(f"Unsupported ext code for deserialization: {code}")
 
     return msgspec.msgpack.Decoder(ext_hook=ext_hook, type=type)
+
+
+@dataclass
+class CBMatchResult:
+    """Result of a sub-sequence match from BlendTokenRangeMatcher.
+
+    Attributes:
+        old_st: Start position in the originally registered (stored) sequence.
+        old_ed: End position in the originally registered (stored) sequence.
+        cur_st: Start position in the query sequence where the match was found.
+        cur_ed: End position in the query sequence where the match was found.
+        hash: Token hash bytes (from registration) used as the storage key.
+    """
+
+    old_st: int
+    old_ed: int
+    cur_st: int
+    cur_ed: int
+    hash: bytes

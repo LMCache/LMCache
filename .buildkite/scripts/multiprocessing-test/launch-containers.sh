@@ -11,6 +11,7 @@ export VLLM_BASELINE_CONTAINER_NAME="${VLLM_BASELINE_CONTAINER_NAME:-vllm-baseli
 
 # Configuration
 LMCACHE_PORT="${LMCACHE_PORT:-6555}"
+LMCACHE_HTTP_PORT="${LMCACHE_HTTP_PORT:-6556}"
 VLLM_PORT="${VLLM_PORT:-8000}"
 VLLM_BASELINE_PORT="${VLLM_BASELINE_PORT:-9000}"
 
@@ -45,7 +46,7 @@ GPU_MEMORY_MB=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounit
 GPU_MEMORY_GB=$((GPU_MEMORY_MB / 1024))
 echo "Detected GPU memory: ${GPU_MEMORY_GB}GB (${GPU_MEMORY_MB}MB)"
 
-if [ "$GPU_MEMORY_GB" -gt 100 ]; then
+if [ "$GPU_MEMORY_GB" -gt 90 ]; then
     echo "GPU memory > 100GB, adding --gpu-memory-utilization 0.5"
     GPU_MEMORY_UTIL_ARG="--gpu-memory-utilization 0.5"
 fi
@@ -62,11 +63,12 @@ docker run -d \
     --ipc host \
     --entrypoint /opt/venv/bin/python3 \
     lmcache/vllm-openai:test \
-    -m lmcache.v1.multiprocess.server \
+    -m lmcache.v1.multiprocess.http_server \
     --l1-size-gb "$CPU_BUFFER_SIZE" \
     --eviction-policy LRU \
     --max-workers "$MAX_WORKERS" \
-    --port "$LMCACHE_PORT"
+    --port "$LMCACHE_PORT" \
+    --http-port "$LMCACHE_HTTP_PORT"
 
 echo "LMCache container started"
 
@@ -90,10 +92,9 @@ docker run -d \
     --env PYTHONHASHSEED=0 \
     lmcache/vllm-openai:test \
     "$MODEL" \
-    --kv-transfer-config "{\"kv_connector\":\"LMCacheMPConnector\", \"kv_role\":\"kv_both\", \"kv_connector_extra_config\": {\"lmcache.mp.port\": $LMCACHE_PORT}}" \
+    --kv-transfer-config "{\"kv_connector\":\"LMCacheMPConnector\", \"kv_role\":\"kv_both\", \"kv_load_failure_policy\": \"recompute\", \"kv_connector_extra_config\": {\"lmcache.mp.port\": $LMCACHE_PORT, \"lmcache.mp.mq_timeout\": 10}}" \
     --attention-backend FLASH_ATTN \
     --port "$VLLM_PORT" \
-    --no-async-scheduling \
     $GPU_MEMORY_UTIL_ARG
 
 echo "vLLM container started"
@@ -116,7 +117,6 @@ docker run -d \
     "$MODEL" \
     --port "$VLLM_BASELINE_PORT" \
     --attention-backend FLASH_ATTN \
-    --no-async-scheduling \
     $GPU_MEMORY_UTIL_ARG
 
 echo "vLLM baseline container started"

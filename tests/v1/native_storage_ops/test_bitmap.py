@@ -243,6 +243,295 @@ class TestBitmapToString:
         assert "1" in r and "0" in r
 
 
+class TestBitmapOr:
+    """Test bitwise OR between two bitmaps."""
+
+    @pytest.mark.parametrize("size", [1, 7, 8, 9, 10, 16, 17])
+    def test_or_same_size_no_overlap(self, size):
+        a = Bitmap(size)
+        b = Bitmap(size)
+        for i in range(0, size, 2):
+            a.set(i)
+        for i in range(1, size, 2):
+            b.set(i)
+        c = a | b
+        assert c.popcount() == size
+        for i in range(size):
+            assert c.test(i)
+
+    @pytest.mark.parametrize("size", [1, 9, 10])
+    def test_or_same_size_with_overlap(self, size):
+        a = Bitmap(size)
+        b = Bitmap(size)
+        for i in range(size):
+            a.set(i)
+        for i in range(0, size, 2):
+            b.set(i)
+        c = a | b
+        assert c.popcount() == size
+
+    def test_or_different_sizes_result_truncated(self):
+        a = Bitmap(10)
+        b = Bitmap(5)
+        for i in range(0, 10, 2):
+            a.set(i)
+        for i in range(1, 5, 2):
+            b.set(i)
+        c = a | b
+        # Result is min(10,5)=5 bits
+        assert c.popcount() == 5
+        for i in range(5):
+            assert c.test(i)
+
+    def test_or_both_empty(self):
+        a = Bitmap(8)
+        b = Bitmap(8)
+        c = a | b
+        assert c.popcount() == 0
+
+
+class TestBitmapGetIndices:
+    """Test get_indices_list and get_indices_set."""
+
+    @pytest.mark.parametrize("size", [1, 7, 8, 9, 10, 17])
+    def test_get_indices_list_all_zeros(self, size):
+        b = Bitmap(size)
+        assert b.get_indices_list() == []
+
+    @pytest.mark.parametrize("size", [1, 7, 8, 9, 10, 17])
+    def test_get_indices_list_all_ones(self, size):
+        b = Bitmap(size)
+        for i in range(size):
+            b.set(i)
+        assert b.get_indices_list() == list(range(size))
+
+    @pytest.mark.parametrize("size", [9, 10, 17, 25])
+    def test_get_indices_list_even_bits(self, size):
+        b = Bitmap(size)
+        expected = list(range(0, size, 2))
+        for i in expected:
+            b.set(i)
+        assert b.get_indices_list() == expected
+
+    @pytest.mark.parametrize("size", [9, 12, 20])
+    def test_get_indices_list_random(self, size):
+        b = Bitmap(size)
+        positions = sorted(random.sample(range(size), 5))
+        for i in positions:
+            b.set(i)
+        assert b.get_indices_list() == positions
+
+    @pytest.mark.parametrize("size", [1, 7, 8, 9, 10, 17])
+    def test_get_indices_set_all_zeros(self, size):
+        b = Bitmap(size)
+        assert b.get_indices_set() == set()
+
+    @pytest.mark.parametrize("size", [1, 7, 8, 9, 10, 17])
+    def test_get_indices_set_all_ones(self, size):
+        b = Bitmap(size)
+        for i in range(size):
+            b.set(i)
+        assert b.get_indices_set() == set(range(size))
+
+    @pytest.mark.parametrize("size", [9, 12, 20])
+    def test_get_indices_set_random(self, size):
+        b = Bitmap(size)
+        positions = random.sample(range(size), 5)
+        for i in positions:
+            b.set(i)
+        assert b.get_indices_set() == set(positions)
+
+    def test_get_indices_list_and_set_consistent(self):
+        b = Bitmap(17)
+        for i in [0, 3, 8, 15, 16]:
+            b.set(i)
+        assert set(b.get_indices_list()) == b.get_indices_set()
+
+
+class TestBitmapGather:
+    """Test gather operation."""
+
+    def test_gather_basic(self):
+        b = Bitmap(5)
+        b.set(0)
+        b.set(2)
+        b.set(4)
+        items = ["a", "b", "c", "d", "e"]
+        assert b.gather(items) == ["a", "c", "e"]
+
+    def test_gather_all_set(self):
+        b = Bitmap(4)
+        for i in range(4):
+            b.set(i)
+        items = [10, 20, 30, 40]
+        assert b.gather(items) == [10, 20, 30, 40]
+
+    def test_gather_none_set(self):
+        b = Bitmap(3)
+        items = ["x", "y", "z"]
+        assert b.gather(items) == []
+
+    def test_gather_mixed_types(self):
+        b = Bitmap(4)
+        b.set(1)
+        b.set(3)
+        items = [1, "two", 3.0, None]
+        assert b.gather(items) == ["two", None]
+
+    @pytest.mark.parametrize("size", [9, 10, 17])
+    def test_gather_preserves_order(self, size):
+        b = Bitmap(size)
+        positions = sorted(random.sample(range(size), 5))
+        for i in positions:
+            b.set(i)
+        items = list(range(size))
+        assert b.gather(items) == positions
+
+    def test_gather_single_element(self):
+        b = Bitmap(1)
+        b.set(0)
+        assert b.gather(["only"]) == ["only"]
+
+
+class TestBitmapInvert:
+    """Test bitwise NOT (~) operation."""
+
+    @pytest.mark.parametrize("size", [1, 7, 8, 9, 10, 16, 17])
+    def test_invert_all_zeros_gives_all_ones(self, size):
+        b = Bitmap(size)
+        inv = ~b
+        assert inv.popcount() == size
+        for i in range(size):
+            assert inv.test(i)
+
+    @pytest.mark.parametrize("size", [1, 7, 8, 9, 10, 16, 17])
+    def test_invert_all_ones_gives_all_zeros(self, size):
+        b = Bitmap(size)
+        for i in range(size):
+            b.set(i)
+        inv = ~b
+        assert inv.popcount() == 0
+        for i in range(size):
+            assert not inv.test(i)
+
+    @pytest.mark.parametrize("size", [1, 7, 8, 9, 10, 17, 25])
+    def test_invert_flips_each_bit(self, size):
+        b = Bitmap(size)
+        for i in range(0, size, 2):
+            b.set(i)
+        inv = ~b
+        for i in range(size):
+            assert inv.test(i) == (i % 2 == 1)
+
+    @pytest.mark.parametrize("size", [1, 7, 8, 9, 10, 17])
+    def test_double_invert_is_identity(self, size):
+        b = Bitmap(size)
+        positions = [i for i in range(size) if i % 3 == 0]
+        for i in positions:
+            b.set(i)
+        result = ~(~b)
+        for i in range(size):
+            assert result.test(i) == b.test(i)
+
+    def test_invert_does_not_mutate_original(self):
+        b = Bitmap(10)
+        b.set(0)
+        b.set(5)
+        _ = ~b
+        assert b.popcount() == 2
+        assert b.test(0)
+        assert b.test(5)
+
+    @pytest.mark.parametrize("size", [9, 10, 17])
+    def test_invert_popcount_complement(self, size):
+        b = Bitmap(size)
+        for i in range(0, size, 3):
+            b.set(i)
+        inv = ~b
+        assert b.popcount() + inv.popcount() == size
+
+    def test_invert_and_original_gives_zero(self):
+        b = Bitmap(10)
+        for i in [1, 3, 5, 7, 9]:
+            b.set(i)
+        result = b & ~b
+        assert result.popcount() == 0
+
+    def test_invert_or_original_gives_all_ones(self):
+        b = Bitmap(10)
+        for i in [1, 3, 5, 7, 9]:
+            b.set(i)
+        result = b | ~b
+        assert result.popcount() == 10
+
+
+class TestBitmapPrefixConstructor:
+    """Test Bitmap(size, prefix_bits) constructor."""
+
+    @pytest.mark.parametrize("size", [1, 7, 8, 9, 10, 16, 17, 25])
+    def test_prefix_zero(self, size):
+        b = Bitmap(size, 0)
+        assert b.popcount() == 0
+
+    @pytest.mark.parametrize("size", [1, 7, 8, 9, 10, 16, 17, 25])
+    def test_prefix_all(self, size):
+        b = Bitmap(size, size)
+        assert b.popcount() == size
+        assert b.count_leading_ones() == size
+
+    @pytest.mark.parametrize("size", [8, 9, 10, 16, 17, 25])
+    def test_prefix_partial(self, size):
+        prefix = size // 2
+        b = Bitmap(size, prefix)
+        assert b.popcount() == prefix
+        assert b.count_leading_ones() == prefix
+        for i in range(prefix):
+            assert b.test(i)
+        for i in range(prefix, size):
+            assert not b.test(i)
+
+    @pytest.mark.parametrize("size", [1, 7, 8, 9, 16, 17])
+    def test_prefix_one(self, size):
+        b = Bitmap(size, 1)
+        assert b.popcount() == 1
+        assert b.test(0)
+        for i in range(1, size):
+            assert not b.test(i)
+
+    def test_prefix_exceeds_size_clamped(self):
+        b = Bitmap(5, 100)
+        assert b.popcount() == 5
+        assert b.count_leading_ones() == 5
+
+    @pytest.mark.parametrize("size", [8, 16, 24])
+    def test_prefix_exact_byte_boundary(self, size):
+        b = Bitmap(size, 8)
+        assert b.popcount() == 8
+        assert b.count_leading_ones() == 8
+        for i in range(8):
+            assert b.test(i)
+        for i in range(8, size):
+            assert not b.test(i)
+
+    @pytest.mark.parametrize(
+        "size,prefix",
+        [(9, 3), (10, 5), (17, 9), (25, 13)],
+    )
+    def test_prefix_matches_manual_set(self, size, prefix):
+        """Bitmap(size, prefix) should be identical to setting bits 0..prefix-1."""
+        a = Bitmap(size, prefix)
+        b = Bitmap(size)
+        for i in range(prefix):
+            b.set(i)
+        assert a.popcount() == b.popcount()
+        assert a.get_indices_list() == b.get_indices_list()
+        assert str(a) == str(b)
+
+    def test_prefix_zero_size(self):
+        b = Bitmap(0, 0)
+        assert b.popcount() == 0
+
+
 class TestBitmapNonMultipleOfEight:
     """Focused tests when length is not a multiple of 8."""
 

@@ -14,6 +14,7 @@ import zmq
 # First Party
 from lmcache.v1.multiprocess.custom_types import CudaIPCWrapper, IPCCacheEngineKey
 from lmcache.v1.multiprocess.mq import (
+    BlockingRequestHandler,
     MessageQueueClient,
     MessageQueueServer,
 )
@@ -22,6 +23,7 @@ from lmcache.v1.multiprocess.protocol import (
     get_handler_type,
     get_payload_classes,
 )
+from lmcache.v1.multiprocess.server import add_handler_helper
 
 # Test helpers
 from tests.v1.multiprocess import test_mq_handler_helpers
@@ -63,14 +65,24 @@ def _server_process(
         shutdown_event: Event to signal server shutdown
         request_handlers: Dict mapping RequestType to handler functions
     """
+    # First Party
+    from lmcache.v1.multiprocess.protocol import HandlerType
+
     context = zmq.Context.instance()
     server = MessageQueueServer(server_url, context)
 
     # Register all handlers
+    blocking_types: list[RequestType] = []
     for request_type, handler in request_handlers.items():
         payload_classes = get_payload_classes(request_type)
         handler_type = get_handler_type(request_type)
         server.add_handler(request_type, payload_classes, handler_type, handler)
+        if handler_type == HandlerType.BLOCKING:
+            blocking_types.append(request_type)
+
+    # Assign a normal pool for all blocking handlers in tests
+    if blocking_types:
+        server.add_normal_thread_pool(blocking_types, max_workers=4)
 
     server.start()
 
@@ -368,7 +380,7 @@ def test_mq_register_kv_cache():
     # Run test with REGISTER_KV_CACHE request
     helper.run_test(
         request_type=RequestType.REGISTER_KV_CACHE,
-        payloads=[gpu_id, kv_cache],
+        payloads=[gpu_id, kv_cache, "testmodel", 1, {}],
         expected_response=None,
         num_requests=1,
     )
@@ -467,7 +479,7 @@ def test_mq_retrieve():
     # Run test with RETRIEVE request
     helper.run_test(
         request_type=RequestType.RETRIEVE,
-        payloads=[key, gpu_id, gpu_block_ids, test_handle],
+        payloads=[key, gpu_id, gpu_block_ids, test_handle, 0],
         expected_response=(b"\x01" * 64, True),
         num_requests=1,
     )
@@ -476,13 +488,13 @@ def test_mq_retrieve():
 def test_mq_lookup():
     """
     Test MessageQueue with LOOKUP request type.
-    LOOKUP takes (keys: list[KeyType]) and returns int.
+    LOOKUP takes (key: KeyType) and returns int.
     """
-    # Create test keys
-    keys = [create_cache_key(i) for i in range(4)]
+    # Create a single test key
+    key = create_cache_key(0)
 
-    # Expected response: count of even-indexed keys (0, 2) = 2
-    expected_response = 2
+    # Expected response: 1 (dummy handler always returns 1)
+    expected_response = 1
 
     # Create test helper and register handler
     helper = MessageQueueTestHelper(server_url="tcp://127.0.0.1:5564")
@@ -491,22 +503,22 @@ def test_mq_lookup():
     # Run test with LOOKUP request
     helper.run_test(
         request_type=RequestType.LOOKUP,
-        payloads=[keys],
+        payloads=[key, 1],
         expected_response=expected_response,
         num_requests=1,
     )
 
 
-def test_mq_lookup_with_different_key_count():
+def test_mq_lookup_with_different_key():
     """
-    Test MessageQueue with LOOKUP request type with different number of keys.
-    Tests that the handler correctly counts matched keys.
+    Test MessageQueue with LOOKUP request type with a different key.
+    Tests that the handler correctly processes a single key.
     """
-    # Create test keys
-    keys = [create_cache_key(i) for i in range(3)]
+    # Create a different test key
+    key = create_cache_key(42)
 
-    # Expected response: count of even-indexed keys (0, 2) = 2
-    expected_response = 2
+    # Expected response: 1 (dummy handler always returns 1)
+    expected_response = 1
 
     # Create test helper and register handler
     helper = MessageQueueTestHelper(server_url="tcp://127.0.0.1:5565")
@@ -515,7 +527,172 @@ def test_mq_lookup_with_different_key_count():
     # Run test with LOOKUP request
     helper.run_test(
         request_type=RequestType.LOOKUP,
-        payloads=[keys],
+        payloads=[key, 1],
         expected_response=expected_response,
         num_requests=1,
     )
+
+
+# ==============================================================================
+# Thread Pool Tests
+# ==============================================================================
+
+
+def test_add_normal_thread_pool():
+    """
+    Test that add_normal_thread_pool assigns handler executors.
+    """
+    context = zmq.Context.instance()
+    server = MessageQueueServer("tcp://127.0.0.1:15700", context)
+
+    add_handler_helper(
+        server, RequestType.LOOKUP, test_mq_handler_helpers.lookup_handler
+    )
+    add_handler_helper(server, RequestType.NOOP, test_mq_handler_helpers.noop_handler)
+
+    lookup_handler = server.handlers[RequestType.LOOKUP]
+    assert isinstance(lookup_handler, BlockingRequestHandler)
+    assert lookup_handler.executor is None
+
+    server.add_normal_thread_pool([RequestType.LOOKUP], max_workers=4)
+
+    assert lookup_handler.executor is not None
+    assert len(server.extra_pools) == 1
+
+    server.close()
+
+
+def test_add_affinity_thread_pool():
+    """
+    Test that add_affinity_thread_pool assigns AffinityThreadPool executors.
+    """
+    # First Party
+    from lmcache.v1.multiprocess.affinity_pool import AffinityThreadPool
+
+    context = zmq.Context.instance()
+    server = MessageQueueServer("tcp://127.0.0.1:15700", context)
+
+    add_handler_helper(server, RequestType.STORE, test_mq_handler_helpers.store_handler)
+    add_handler_helper(
+        server, RequestType.RETRIEVE, test_mq_handler_helpers.retrieve_handler
+    )
+
+    store_handler = server.handlers[RequestType.STORE]
+    retrieve_handler = server.handlers[RequestType.RETRIEVE]
+    assert isinstance(store_handler, BlockingRequestHandler)
+    assert isinstance(retrieve_handler, BlockingRequestHandler)
+    assert store_handler.executor is None
+
+    server.add_affinity_thread_pool(
+        [RequestType.STORE, RequestType.RETRIEVE], max_workers=2
+    )
+
+    assert isinstance(store_handler.executor, AffinityThreadPool)
+    assert store_handler.executor is retrieve_handler.executor
+    assert len(server.extra_pools) == 1
+
+    server.close()
+
+
+def test_normal_pool_error_on_sync_handler():
+    """
+    Test that add_normal_thread_pool raises TypeError for SYNC handlers.
+    """
+    context = zmq.Context.instance()
+    server = MessageQueueServer("tcp://127.0.0.1:15701", context)
+
+    add_handler_helper(server, RequestType.NOOP, test_mq_handler_helpers.noop_handler)
+
+    with pytest.raises(TypeError, match="not BlockingRequestHandler"):
+        server.add_normal_thread_pool([RequestType.NOOP], max_workers=1)
+
+    server.close()
+
+
+def test_affinity_pool_error_on_sync_handler():
+    """
+    Test that add_affinity_thread_pool raises TypeError for SYNC handlers.
+    """
+    context = zmq.Context.instance()
+    server = MessageQueueServer("tcp://127.0.0.1:15701", context)
+
+    add_handler_helper(server, RequestType.NOOP, test_mq_handler_helpers.noop_handler)
+
+    with pytest.raises(TypeError, match="not BlockingRequestHandler"):
+        server.add_affinity_thread_pool([RequestType.NOOP], max_workers=1)
+
+    server.close()
+
+
+def test_pool_error_on_unregistered():
+    """
+    Test that pool methods raise ValueError for unregistered request types.
+    """
+    context = zmq.Context.instance()
+    server = MessageQueueServer("tcp://127.0.0.1:15702", context)
+
+    with pytest.raises(ValueError, match="No handler registered"):
+        server.add_normal_thread_pool([RequestType.STORE], max_workers=1)
+
+    with pytest.raises(ValueError, match="No handler registered"):
+        server.add_affinity_thread_pool([RequestType.STORE], max_workers=1)
+
+    server.close()
+
+
+def test_multiple_pools():
+    """
+    Test that normal and affinity pools can coexist.
+    """
+    # First Party
+    from lmcache.v1.multiprocess.affinity_pool import AffinityThreadPool
+
+    context = zmq.Context.instance()
+    server = MessageQueueServer("tcp://127.0.0.1:15703", context)
+
+    add_handler_helper(server, RequestType.STORE, test_mq_handler_helpers.store_handler)
+    add_handler_helper(
+        server, RequestType.RETRIEVE, test_mq_handler_helpers.retrieve_handler
+    )
+    add_handler_helper(
+        server, RequestType.LOOKUP, test_mq_handler_helpers.lookup_handler
+    )
+
+    server.add_affinity_thread_pool(
+        [RequestType.STORE, RequestType.RETRIEVE], max_workers=2
+    )
+    server.add_normal_thread_pool([RequestType.LOOKUP], max_workers=3)
+
+    store_handler = server.handlers[RequestType.STORE]
+    retrieve_handler = server.handlers[RequestType.RETRIEVE]
+    lookup_handler = server.handlers[RequestType.LOOKUP]
+    assert isinstance(store_handler, BlockingRequestHandler)
+    assert isinstance(retrieve_handler, BlockingRequestHandler)
+    assert isinstance(lookup_handler, BlockingRequestHandler)
+
+    # STORE/RETRIEVE share affinity pool
+    assert isinstance(store_handler.executor, AffinityThreadPool)
+    assert store_handler.executor is retrieve_handler.executor
+    # LOOKUP uses normal pool
+    assert store_handler.executor is not lookup_handler.executor
+    assert not isinstance(lookup_handler.executor, AffinityThreadPool)
+    assert len(server.extra_pools) == 2
+
+    server.close()
+
+
+def test_start_fails_without_pool_assignment():
+    """
+    Test that start() raises RuntimeError if a blocking handler
+    has no executor assigned.
+    """
+    context = zmq.Context.instance()
+    server = MessageQueueServer("tcp://127.0.0.1:15704", context)
+
+    add_handler_helper(server, RequestType.STORE, test_mq_handler_helpers.store_handler)
+    # Don't assign any pool
+
+    with pytest.raises(RuntimeError, match="no thread pool assigned"):
+        server.start()
+
+    server.close()

@@ -28,7 +28,7 @@ from lmcache.v1.metadata import LMCacheMetadata
 
 logger = init_logger(__name__)
 
-NONE_HASH: int
+NONE_HASH = 0
 
 # Type alias for process_tokens return value
 # (start_index, end_index, cache_engine_key｜hash)
@@ -220,6 +220,25 @@ class TokenDatabase(metaclass=abc.ABCMeta):
             request_configs,
         )
 
+    def _canonicalize_hash_inputs(
+        self,
+        prefix_hash: Optional[int],
+        tokens_tuple: Tuple[int, ...],
+        extra_keys: Optional[List[Any]],
+    ) -> Tuple[int, Tuple[int, ...], Tuple[Any, ...]]:
+        """
+        Canonicalize hash inputs so that semantically identical requests
+        produce structurally identical hash inputs across instances.
+        - prefix_hash: int or NONE_HASH if None
+        - tokens_tuple: tuple of token IDs
+        - extra_keys: tuple of additional keys, empty if None
+        """
+        return (
+            prefix_hash if prefix_hash is not None else NONE_HASH,
+            tokens_tuple,
+            tuple(extra_keys) if extra_keys is not None else (),
+        )
+
     def _hash_tokens(
         self,
         tokens: Union[torch.Tensor, List[int]],
@@ -236,7 +255,15 @@ class TokenDatabase(metaclass=abc.ABCMeta):
         # Ignore extra keys for now
         # Extra keys are for multi-modal inputs and
         # request specific metadata (e.g., LoRA ID).
-        return self.hash_func((prefix_hash, tokens_tuple, extra_keys))
+        # Use default values for None to maintain a fixed tuple structure for hashing.
+
+        # Use helper to canonicalize inputs to ensure consistent hashing
+        # This replaces the logic that was causing inconsistency
+        canon_prefix, canon_tokens, canon_extra = self._canonicalize_hash_inputs(
+            prefix_hash, tokens_tuple, extra_keys
+        )
+
+        return self.hash_func((canon_prefix, canon_tokens, canon_extra))
 
 
 class ChunkedTokenDatabase(TokenDatabase):

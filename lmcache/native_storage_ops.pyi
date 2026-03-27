@@ -3,6 +3,9 @@
 
 """Native storage operations for LMCache."""
 
+# Standard
+from typing import Any, Set, overload
+
 class TTLLock:
     """
     A thread-safe lock with TTL (Time-To-Live) support.
@@ -52,12 +55,23 @@ class Bitmap:
     Each bit represents the success or failure of a key.
     """
 
+    @overload
     def __init__(self, size: int) -> None:
         """
         Construct a Bitmap with the specified number of bits.
 
         Args:
             size: The number of bits in the bitmap.
+        """
+        ...
+    @overload
+    def __init__(self, size: int, prefix_bits: int) -> None:
+        """
+        Construct a Bitmap with the specified number of bits and prefix.
+
+        Args:
+            size: The number of bits in the bitmap.
+            prefix_bits: The first N bits are set to 1.
         """
         ...
 
@@ -94,6 +108,37 @@ class Bitmap:
         """
         Bitwise AND with another bitmap.
         If sizes differ, the result is truncated to the smaller size.
+        """
+        ...
+
+    def __invert__(self) -> Bitmap:
+        """Bitwise NOT (flip all bits)."""
+        ...
+
+    def __or__(self, other: Bitmap) -> Bitmap:
+        """
+        Bitwise OR with another bitmap.
+        If sizes differ, the result is truncated to the smaller size.
+        """
+        ...
+
+    def get_indices_list(self) -> list[int]:
+        """Return a list of indices where the bit is set to 1, in ascending order."""
+        ...
+
+    def get_indices_set(self) -> Set[int]:
+        """Return a set of indices where the bit is set to 1."""
+        ...
+
+    def gather(self, items: list[Any]) -> list[Any]:
+        """
+        Return elements from items at indices where the bit is set to 1.
+
+        Args:
+            items: A list of objects. Length should match the bitmap size.
+
+        Returns:
+            A list of objects from items at positions where the bitmap bit is 1.
         """
         ...
 

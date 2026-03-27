@@ -24,7 +24,7 @@ GPU_MEMORY_MB=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounit
 GPU_MEMORY_GB=$((GPU_MEMORY_MB / 1024))
 echo "Detected GPU memory: ${GPU_MEMORY_GB}GB (${GPU_MEMORY_MB}MB)"
 
-if [ "$GPU_MEMORY_GB" -gt 100 ]; then
+if [ "$GPU_MEMORY_GB" -gt 90 ]; then
     echo "GPU memory > 100GB, adding --gpu-memory-utilization 0.5"
     GPU_MEMORY_UTIL_ARG="--gpu-memory-utilization 0.5"
 fi
@@ -70,7 +70,7 @@ docker run -d \
     --env PYTHONHASHSEED=0 \
     lmcache/vllm-openai:test \
     "$MODEL" \
-    --kv-transfer-config "{\"kv_connector\":\"LMCacheMPConnector\", \"kv_role\":\"kv_both\", \"kv_connector_extra_config\": {\"lmcache.mp.port\": $LMCACHE_PORT}}" \
+    --kv-transfer-config "{\"kv_connector\":\"LMCacheMPConnector\", \"kv_role\":\"kv_both\", \"kv_load_failure_policy\": \"recompute\", \"kv_connector_extra_config\": {\"lmcache.mp.port\": $LMCACHE_PORT, \"lmcache.mp.mq_timeout\": 10}}" \
     --port "$VLLM_PORT" \
     --no-async-scheduling \
     $GPU_MEMORY_UTIL_ARG

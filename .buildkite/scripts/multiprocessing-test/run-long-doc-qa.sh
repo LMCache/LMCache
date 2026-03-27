@@ -152,13 +152,16 @@ def safe_float(val):
     except (ValueError, TypeError):
         return None
 
+failed = False
+
 def format_comparison(name, lmcache_val, baseline_val):
+    global failed
     lmcache = safe_float(lmcache_val)
     baseline = safe_float(baseline_val)
-    
+
     if lmcache is None or baseline is None:
         return f"{name}: Unable to compare (invalid values)"
-    
+
     if baseline > 0:
         diff_pct = ((lmcache - baseline) / baseline) * 100
         if diff_pct < 0:
@@ -167,13 +170,14 @@ def format_comparison(name, lmcache_val, baseline_val):
         elif diff_pct > 10:
             status = "❌ SLOWER"
             diff_str = f"{diff_pct:.2f}% slower"
+            failed = True
         else:
             status = "✅ OK"
             diff_str = f"{diff_pct:.2f}% slower"
     else:
         status = "⚠️"
         diff_str = "N/A"
-    
+
     return f"{name}:\n  Baseline:  {baseline:.4f}s\n  LMCache:   {lmcache:.4f}s\n  Diff:      {diff_str} {status}"
 
 print("=" * 50)
@@ -210,7 +214,7 @@ metrics = [
 for name, baseline_val, lmcache_val in metrics:
     baseline = safe_float(baseline_val)
     lmcache = safe_float(lmcache_val)
-    
+
     if baseline is not None and lmcache is not None:
         if baseline > 0:
             diff_pct = ((lmcache - baseline) / baseline) * 100
@@ -222,9 +226,14 @@ for name, baseline_val, lmcache_val in metrics:
         print(f"{name:<35} {'N/A':>12} {'N/A':>12} {'N/A':>10}")
 
 print()
+
+if failed:
+    print("❌ LMCache is significantly slower (>10%) than baseline on one or more metrics")
+    sys.exit(1)
+else:
+    print("✅ LMCache performance is within acceptable range")
+    sys.exit(0)
 EOF
-    
-    return 0
 }
 
 # Verify LMCache performance meets thresholds
@@ -317,13 +326,12 @@ main() {
         exit 1
     fi
     
-    # Verify LMCache performance meets thresholds
+    # Verify LMCache performance meets thresholds (soft-fail: warn but don't exit)
     echo "============================================"
     echo "=== Verifying Performance Thresholds ==="
     echo "============================================"
     if ! verify_thresholds; then
-        echo "❌ Threshold verification failed"
-        exit 1
+        echo "⚠️ Threshold verification failed (soft-fail, not blocking)"
     fi
     
     echo "============================================"

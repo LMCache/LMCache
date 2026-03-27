@@ -7,6 +7,7 @@ Distributed multi-tier storage manager for MP mode
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Iterator, Literal
+import time
 
 # First Party
 from lmcache.logging import init_logger
@@ -16,57 +17,87 @@ from lmcache.v1.distributed.api import (
 )
 from lmcache.v1.distributed.config import StorageManagerConfig
 from lmcache.v1.distributed.error import L1Error, strerror
-from lmcache.v1.distributed.internal_api import StorageManagerListener
 from lmcache.v1.distributed.l1_manager import L1Manager
-from lmcache.v1.distributed.observability.prometheus_controller import (
-    PrometheusController,
-)
+from lmcache.v1.distributed.l2_adapters import create_l2_adapter
+from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface
 from lmcache.v1.distributed.storage_controllers import (
     EvictionController,
+    PrefetchController,
+    StoreController,
+)
+from lmcache.v1.distributed.storage_controllers.prefetch_policy import (
+    create_prefetch_policy,
+)
+from lmcache.v1.distributed.storage_controllers.store_policy import (
+    AdapterDescriptor,
+    create_store_policy,
 )
 from lmcache.v1.memory_management import MemoryObj
+from lmcache.v1.mp_observability.event import Event, EventType
+from lmcache.v1.mp_observability.event_bus import get_event_bus
 
 logger = init_logger(__name__)
 
 
 @dataclass(frozen=True)
 class PrefetchHandle:
-    prefix_hit_chunks: int
-    """ how many chunks are hit in the prefix of the requested keys """
+    prefetch_request_id: int
+    """Opaque ID for tracking L2 prefetch in the controller.
+    -1 if no L2 request was submitted."""
+
+    external_request_id: str
+    """Request ID from the caller for end-to-end tracing."""
+
+    l1_prefix_hit_count: int
+    """Number of leading keys already in L1 at submission time."""
+
+    total_requested_keys: int
+    """Total number of keys originally requested."""
+
+    submit_time: float
+    """Monotonic timestamp when the prefetch task was submitted."""
 
 
 class StorageManager:
     def __init__(self, config: StorageManagerConfig):
         self._l1_manager = L1Manager(config.l1_manager_config)
-        self._registered_listeners: list[StorageManagerListener] = []
+        self._event_bus = get_event_bus()
 
         # Eviction controller
         self._eviction_controller = EvictionController(
-            storage_manager=self,
             l1_manager=self._l1_manager,
             eviction_config=config.eviction_config,
         )
         self._eviction_controller.start()
 
-        if config.prometheus_config.enabled:
-            self._prometheus_controller: PrometheusController | None = (
-                PrometheusController(
-                    storage_manager=self,
-                    l1_manager=self._l1_manager,
-                    log_interval=config.prometheus_config.log_interval,
-                )
-            )
-            self._prometheus_controller.start()
-        else:
-            self._prometheus_controller = None
+        # L2 adapters and store controller
+        l1_memory_desc = self._l1_manager.get_l1_memory_desc()
+        self._l2_adapters: list[L2AdapterInterface] = [
+            create_l2_adapter(ac, l1_memory_desc)
+            for ac in config.l2_adapter_config.adapters
+        ]
 
-    def register_listener(self, listener: StorageManagerListener) -> None:
-        """Register a listener for StorageManager events.
+        adapter_descriptors = [
+            AdapterDescriptor(index=i, config=ac)
+            for i, ac in enumerate(config.l2_adapter_config.adapters)
+        ]
 
-        Args:
-            listener: The listener to register.
-        """
-        self._registered_listeners.append(listener)
+        self._store_controller = StoreController(
+            l1_manager=self._l1_manager,
+            l2_adapters=self._l2_adapters,
+            adapter_descriptors=adapter_descriptors,
+            policy=create_store_policy(config.store_policy),
+        )
+        self._store_controller.start()
+
+        # Prefetch controller
+        self._prefetch_controller = PrefetchController(
+            l1_manager=self._l1_manager,
+            l2_adapters=self._l2_adapters,
+            adapter_descriptors=adapter_descriptors,
+            policy=create_prefetch_policy(config.prefetch_policy),
+        )
+        self._prefetch_controller.start()
 
     # External APIs for serving engine integration code to call
     def reserve_write(
@@ -102,8 +133,15 @@ class StorageManager:
         result = {k: m for k, (e, m) in reserve_result.items() if m is not None}
         successful_keys = list(result.keys())
         failed_keys = [k for k, (e, m) in reserve_result.items() if m is None]
-        for listener in self._registered_listeners:
-            listener.on_sm_reserved_write(successful_keys, failed_keys)
+        self._event_bus.publish(
+            Event(
+                event_type=EventType.SM_WRITE_RESERVED,
+                metadata={
+                    "succeeded_keys": successful_keys,
+                    "failed_keys": failed_keys,
+                },
+            )
+        )
         return result
 
     def finish_write(
@@ -119,11 +157,17 @@ class StorageManager:
         finish_result = self._l1_manager.finish_write(keys)
         successful_keys = [k for k, e in finish_result.items() if e == L1Error.SUCCESS]
         failed_keys = [k for k, e in finish_result.items() if e != L1Error.SUCCESS]
-        for listener in self._registered_listeners:
-            listener.on_sm_write_finished(successful_keys, failed_keys)
+        self._event_bus.publish(
+            Event(
+                event_type=EventType.SM_WRITE_FINISHED,
+                metadata={
+                    "succeeded_keys": successful_keys,
+                    "failed_keys": failed_keys,
+                },
+            )
+        )
 
         # TODO: global key states update
-        # TODO: trigger L2 controller
 
     @contextmanager
     def read_prefetched_results(
@@ -174,53 +218,76 @@ class StorageManager:
         try:
             yield good_objs if all_good else None
             successfully_yielded = True
-        except Exception as e:
-            logger.warning(
-                "Exception occurred while processing read prefetched results: %s",
-                str(e),
+        except Exception:
+            logger.exception(
+                "Exception occurred while processing read prefetched results",
             )
+            raise
         finally:
             # Decrease the read lock for all successfully read memory objects
             # if None is yielded or exception occurs during caller's processing
             if not all_good or not successfully_yielded:
                 self._l1_manager.finish_read(good_keys)
-                for listener in self._registered_listeners:
-                    listener.on_sm_read_prefetched_finished(good_keys, bad_keys)
+                self._event_bus.publish(
+                    Event(
+                        event_type=EventType.SM_READ_PREFETCHED_FINISHED,
+                        metadata={
+                            "succeeded_keys": good_keys,
+                            "failed_keys": bad_keys,
+                        },
+                    )
+                )
 
     def finish_read_prefetched(
         self,
         keys: list[ObjectKey],
+        extra_count: int = 0,
     ) -> None:
-        """
-        Finish reading of the prefetched objects, releasing their read locks.
+        """Finish reading prefetched objects.
 
         Args:
-            keys (list[ObjectKey]): List of object keys that have been read.
+            keys: Object keys that have been read.
+            extra_count: Extra read locks to release per key
+                (on top of the default 1).
         """
-        finish_result = self._l1_manager.finish_read(keys)
+        finish_result = self._l1_manager.finish_read(keys, extra_count=extra_count)
         successful_keys = [k for k, e in finish_result.items() if e == L1Error.SUCCESS]
         failed_keys = [k for k, e in finish_result.items() if e != L1Error.SUCCESS]
-        for listener in self._registered_listeners:
-            listener.on_sm_read_prefetched_finished(successful_keys, failed_keys)
+        self._event_bus.publish(
+            Event(
+                event_type=EventType.SM_READ_PREFETCHED_FINISHED,
+                metadata={
+                    "succeeded_keys": successful_keys,
+                    "failed_keys": failed_keys,
+                },
+            )
+        )
 
     def submit_prefetch_task(
         self,
         keys: list[ObjectKey],
+        layout_desc: MemoryLayoutDesc,
+        extra_count: int = 0,
+        external_request_id: str = "",
     ) -> PrefetchHandle:
-        """
-        Prefetch the objects into L1 memory asynchronously. The prefetched object
-        will be added with read locks.
+        """Prefetch objects into L1 asynchronously.
 
         Args:
-            keys (list[ObjectKey]): List of object keys to prefetch.
+            keys: Object keys to prefetch.
+            layout_desc: Memory layout description.
+            extra_count: Extra workers (on top of the default
+                1) that will independently retrieve the same
+                key.  Total locks = 1 + extra_count.
+            external_request_id: Request ID from the caller
+                for end-to-end log tracing.
 
         Returns:
-            PrefetchHandle: A handle to track the prefetch task.
+            PrefetchHandle to track the task.
         """
         # NOTE: now we only have L1, so the prefetch is essentially checking how many
         # objects are already in L1, and adding read locks to them.
 
-        l1_read_result = self._l1_manager.reserve_read(keys)
+        l1_read_result = self._l1_manager.reserve_read(keys, extra_count=extra_count)
         hit_count = 0
         for key in keys:
             entry = l1_read_result.get(key, None)
@@ -243,11 +310,89 @@ class StorageManager:
                 skipped_keys.append(key)
 
         if skipped_keys:
-            self._l1_manager.finish_read(skipped_keys)
+            self._l1_manager.finish_read(skipped_keys, extra_count=extra_count)
 
-        for listener in self._registered_listeners:
-            listener.on_sm_read_prefetched(keys[:hit_count], keys[hit_count:])
-        return PrefetchHandle(prefix_hit_chunks=hit_count)
+        self._event_bus.publish(
+            Event(
+                event_type=EventType.SM_READ_PREFETCHED,
+                metadata={
+                    "succeeded_keys": keys[:hit_count],
+                    "failed_keys": keys[hit_count:],
+                },
+            )
+        )
+
+        # Submit remaining keys to L2 prefetch controller
+        remaining_keys = keys[hit_count:]
+        prefetch_request_id = -1
+        if remaining_keys and self._l2_adapters:
+            prefetch_request_id = self._prefetch_controller.submit_prefetch_request(
+                remaining_keys,
+                layout_desc,
+                extra_count=extra_count,
+            )
+
+        submit_time = time.monotonic()
+        logger.debug(
+            "Prefetch request submitted: "
+            "%d total keys, %d L1 prefix hits, "
+            "%d remaining for L2 "
+            "(external_request_id=%s, "
+            "prefetch_request_id=%d)",
+            len(keys),
+            hit_count,
+            len(remaining_keys),
+            external_request_id,
+            prefetch_request_id,
+        )
+
+        return PrefetchHandle(
+            prefetch_request_id=prefetch_request_id,
+            external_request_id=external_request_id,
+            l1_prefix_hit_count=hit_count,
+            total_requested_keys=len(keys),
+            submit_time=submit_time,
+        )
+
+    def query_prefetch_lookup_hits(
+        self,
+        handle: PrefetchHandle,
+    ) -> int | None:
+        """
+        Query the number of prefix hit chunks for a prefetch task before
+        the L2 prefetching is done.
+
+        Args:
+            handle (PrefetchHandle): The handle of the lookup task.
+
+        Returns:
+            the number of prefix hit chunks if the lookup is done, None if
+            it's still in progress,  or the prefetch task is already done.
+
+        Note:
+            This function is designed for the scenario where the caller wants
+            to check the L1 prefix hits as soon as possible without waiting for
+            the whole prefetch task to be done.
+            When the prefetch task is already done and the prefetch task result
+            has already been queried by `query_prefetch_status`, this function
+            will return None forever for the same prefetch handle.
+            Therefore, it's the caller’s responsibility to make sure not calling
+            this function after the prefetch task is done.
+        """
+        if handle.prefetch_request_id == -1:
+            # No L2 request, the prefix hit count is final
+            return handle.l1_prefix_hit_count
+
+        # Have L2 request, need to check the status from prefetch controller
+        l2_r = self._prefetch_controller.query_lookup_result(handle.prefetch_request_id)
+
+        if l2_r is None:
+            # L2 prefetch is still in progress or it's already done and
+            # the result has been consumed by `query_prefetch_status`
+            return None
+
+        # L2 lookup is done, return the total prefix hit count (L1 + L2)
+        return handle.l1_prefix_hit_count + l2_r
 
     def query_prefetch_status(
         self,
@@ -263,22 +408,80 @@ class StorageManager:
             the number of prefix hit chunks if the prefetch is done, None if
             it's still in progress.
         """
-        return handle.prefix_hit_chunks
+        l2_result: int = 0
 
-    def clear(self):
+        # Have L2 request, need to check the result from prefetch controller
+        if handle.prefetch_request_id != -1:
+            l2_r = self._prefetch_controller.query_prefetch_result(
+                handle.prefetch_request_id
+            )
+
+            if l2_r is None:
+                return None
+            l2_result = l2_r  # Just to make linter happy
+
+        total_hits = handle.l1_prefix_hit_count + l2_result
+        elapsed_ms = (time.monotonic() - handle.submit_time) * 1000
+
+        if total_hits > 0:
+            logger.info(
+                "Prefetch request completed (L1+L2): "
+                "%d/%d prefix hits (%d L1, %d L2) "
+                "in %.1f ms "
+                "(external_request_id=%s, "
+                "prefetch_request_id=%d)",
+                total_hits,
+                handle.total_requested_keys,
+                handle.l1_prefix_hit_count,
+                l2_result,
+                elapsed_ms,
+                handle.external_request_id,
+                handle.prefetch_request_id,
+            )
+        return total_hits
+
+    def clear(self, force: bool = False):
         """
-        Clear all data in the storage manager.
+        Clear data in the storage manager.
+
+        Args:
+            force: If True, clear ALL objects including locked ones.
+                This may corrupt in-flight store/prefetch operations.
+                If False (default), only clear unlocked objects, keeping
+                write-locked and read-locked objects intact.
         """
-        self._l1_manager.clear()
+        self._l1_manager.clear(force=force)
 
     def close(self):
         """
         Close the storage manager and release all resources.
         """
+        self._prefetch_controller.stop()
+        self._store_controller.stop()
         self._eviction_controller.stop()
-        if self._prometheus_controller is not None:
-            self._prometheus_controller.stop()
+
+        for adapter in self._l2_adapters:
+            adapter.close()
+
         self._l1_manager.close()
+
+    def report_status(self) -> dict:
+        """Return a status dict aggregating all sub-component statuses."""
+        l1 = self._l1_manager.report_status()
+        store = self._store_controller.report_status()
+        prefetch = self._prefetch_controller.report_status()
+        eviction = self._eviction_controller.report_status()
+        adapters = [a.report_status() for a in self._l2_adapters]
+        children = [l1, store, prefetch, eviction] + adapters
+        return {
+            "is_healthy": all(c["is_healthy"] for c in children),
+            "l1_manager": l1,
+            "store_controller": store,
+            "prefetch_controller": prefetch,
+            "eviction_controller": eviction,
+            "l2_adapters": adapters,
+            "num_l2_adapters": len(self._l2_adapters),
+        }
 
     # Functions for debugging and testing
     def memcheck(self) -> bool:

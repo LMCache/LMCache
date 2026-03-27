@@ -32,16 +32,20 @@ T = TypeVar("T", bound="L2AdapterConfigBase")
 _L2_ADAPTER_CONFIG_REGISTRY: dict[str, type[L2AdapterConfigBase]] = {}
 
 
-def register_l2_adapter_type(name: str, config_cls: type[L2AdapterConfigBase]) -> None:
+def register_l2_adapter_type(
+    name: str,
+    config_cls: type[L2AdapterConfigBase],
+) -> None:
     """
     Register an L2 adapter config class under a type name.
 
-    The type name is used in JSON specs as the "type" field. Each adapter
-    module should call this at import time.
+    The type name is used in JSON specs as the "type" field.
+    Each adapter config module should call this at import time.
 
     Args:
-        name: Adapter type name (e.g. "disk", "redis").
-        config_cls: Config class that can parse from dict via from_dict().
+        name: Adapter type name (e.g. "fs", "mock").
+        config_cls: Config class that can parse from dict
+            via ``from_dict()``.
     """
     if name in _L2_ADAPTER_CONFIG_REGISTRY:
         raise ValueError(f"L2 adapter type already registered: {name!r}")
@@ -51,6 +55,28 @@ def register_l2_adapter_type(name: str, config_cls: type[L2AdapterConfigBase]) -
 def get_registered_l2_adapter_types() -> list[str]:
     """Return the list of registered adapter type names."""
     return list(_L2_ADAPTER_CONFIG_REGISTRY)
+
+
+def get_type_name_for_config(
+    config: L2AdapterConfigBase,
+) -> str:
+    """
+    Reverse-lookup the registered type name for a config
+    instance.
+
+    Args:
+        config: An L2 adapter config instance.
+
+    Returns:
+        The registered type name (e.g., "mock", "fs").
+
+    Raises:
+        ValueError: If the config's class is not registered.
+    """
+    for name, cls in _L2_ADAPTER_CONFIG_REGISTRY.items():
+        if type(config) is cls:
+            return name
+    raise ValueError(f"Unregistered L2 adapter config type: {type(config).__name__}")
 
 
 # -----------------------------------------------------------------------------
@@ -102,43 +128,6 @@ class L2AdapterConfigBase(ABC):
         """
         ...
 
-
-### Detailed config classes for each L2 adapter
-class MockL2AdapterConfig(L2AdapterConfigBase):
-    """
-    Config for a mock L2 adapter (for testing).
-
-    Fields:
-    - max_size_gb: maximum size of the adapter in GB.
-    - mock_bandwidth_gb: simulated bandwidth in GB/sec (for testing load times).
-    """
-
-    def __init__(self, max_size_gb: float, mock_bandwidth_gb: float):
-        self.max_size_gb = max_size_gb
-        self.mock_bandwidth_gb = mock_bandwidth_gb
-
-    @classmethod
-    def from_dict(cls, d: dict) -> MockL2AdapterConfig:
-        max_size_gb = d.get("max_size_gb")
-        if not isinstance(max_size_gb, (int, float)) or max_size_gb <= 0:
-            raise ValueError("max_size_gb must be a positive number")
-
-        mock_bandwidth_gb = d.get("mock_bandwidth_gb")
-        if not isinstance(mock_bandwidth_gb, (int, float)) or mock_bandwidth_gb <= 0:
-            raise ValueError("mock_bandwidth_gb must be a positive number")
-
-        return cls(max_size_gb=max_size_gb, mock_bandwidth_gb=mock_bandwidth_gb)
-
-    @classmethod
-    def help(cls) -> str:
-        return (
-            "Mock L2 adapter config fields:\n"
-            "- max_size_gb (float): maximum size of the adapter in GB (required, >0)\n"
-            "- mock_bandwidth_gb (float): simulated bandwidth in GB/sec (required, >0)"
-        )
-
-
-register_l2_adapter_type("mock", MockL2AdapterConfig)
 
 # -----------------------------------------------------------------------------
 # Main config: list of adapter configs (order = adapter order)

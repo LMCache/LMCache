@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <vector>
+#include <unordered_set>
 #include <string>
 
 namespace lmcache {
@@ -24,6 +25,15 @@ class Bitmap {
    * @param size The number of bits in the bitmap.
    */
   explicit Bitmap(size_t size);
+
+  /**
+   * @brief Construct a new Bitmap with the specified size and
+   * first N prefix bits set to 1.
+   *
+   * @param size The number of bits in the bitmap.
+   * @param prefix_bits The number of leading bits to set to 1.
+   */
+  explicit Bitmap(size_t size, size_t prefix_bits);
 
   /**
    * @brief set the bit at the specified index to 1.
@@ -74,6 +84,37 @@ class Bitmap {
   Bitmap operator&(const Bitmap& other) const;
 
   /**
+   * @brief bitwise OR operation between two bitmaps.
+   *
+   * @return a new Bitmap that is the result of the bitwise OR operation.
+   *
+   * @note If this and other have different sizes, the result will be truncated
+   * to the smaller size.
+   */
+  Bitmap operator|(const Bitmap& other) const;
+
+  /**
+   * @brief flip the bits in the bitmap (bitwise NOT).
+   *
+   * @return a new Bitmap that is the result of the bitwise NOT operation.
+   */
+  Bitmap operator~() const;
+
+  /**
+   * @brief get the indices of all set bits (value 1) in the bitmap.
+   *
+   * @return a vector of indices where the bit is set to 1, in ascending order.
+   */
+  std::vector<size_t> get_indices() const;
+
+  /**
+   * @brief get the indices of all set bits (value 1) as an unordered set.
+   *
+   * @return an unordered set of indices where the bit is set to 1.
+   */
+  std::unordered_set<size_t> get_indices_set() const;
+
+  /**
    * @brief convert the bitmap to a string representation.
    *
    * @return a string representation of the bitmap, where '1' represents a set
@@ -89,15 +130,6 @@ class Bitmap {
  private:
   size_t size_;
   std::vector<uint8_t> data_;
-
-  // Helper functions
-
-  /**
-   * @brief flip the bits in the bitmap (bitwise NOT).
-   *
-   * @return a new Bitmap that is the result of the bitwise NOT operation.
-   */
-  Bitmap operator~() const;
 };
 
 }  // namespace storage_manager

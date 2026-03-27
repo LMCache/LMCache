@@ -33,6 +33,7 @@ from lmcache.integration.vllm.utils import (
     extract_mm_features,
     lmcache_get_or_create_config,
 )
+from lmcache.integration.vllm.vllm_service_factory import VllmServiceFactory
 from lmcache.logging import init_logger
 from lmcache.observability import LMCStatsMonitor, PrometheusLogger
 from lmcache.utils import CacheStoreEvent, _lmcache_nvtx_annotate, cdiv
@@ -135,6 +136,9 @@ class RequestTracker:
     # Whether the request cache should be saved
     skip_save: bool = False
 
+    # The number of tokens that are cached in LMCache for this request
+    num_lmcache_cached_tokens: int = 0
+
     @_lmcache_nvtx_annotate
     @staticmethod
     def from_new_request(
@@ -194,6 +198,7 @@ class RequestTracker:
             mm_positions=mm_positions,
             skip_save=skip_save,
             request_configs=request_configs,
+            num_lmcache_cached_tokens=lmcache_cached_tokens,
         )
 
     def update(
@@ -224,7 +229,13 @@ class RequestTracker:
         elif isinstance(new_block_ids, tuple):
             new_block_ids = new_block_ids[0]
         elif isinstance(new_block_ids, list):
-            pass
+            # If input is a list, flatten it to handle potential nesting.
+            # This also correctly processes already-flat lists.
+            new_block_ids = [
+                i
+                for elem in new_block_ids
+                for i in (elem if isinstance(elem, list) else [elem])
+            ]
         else:
             raise ValueError(f"Unsupported new_block_ids type {type(new_block_ids)}")
 
@@ -450,13 +461,8 @@ class LMCacheConnectorV1Impl:
         self._apply_extra_config(config, vllm_config)
         self.config = config
 
-        # Initialize LMCacheManager to handle internal components
-        self._manager = LMCacheManager(
-            config=config,
-            vllm_config=vllm_config,
-            role=role.name.lower(),
-            connector=self,
-        )
+        service_factory = VllmServiceFactory(config, vllm_config, role.name.lower())
+        self._manager = LMCacheManager(config, service_factory, connector=self)
 
         # Start services managed by LMCacheManager
         self._manager.start_services()
@@ -813,6 +819,7 @@ class LMCacheConnectorV1Impl:
                         token_mask[:lmcache_cached_tokens],
                         kvcaches=kvcaches,
                         slot_mapping=slot_mapping[:lmcache_cached_tokens],
+                        vllm_cached_tokens=request.load_spec.vllm_cached_tokens,
                     )
                 else:
                     layerwise_retriever = self.lmcache_engine.retrieve_layer(
@@ -820,6 +827,7 @@ class LMCacheConnectorV1Impl:
                         token_mask[:lmcache_cached_tokens],
                         kvcaches=kvcaches,
                         slot_mapping=slot_mapping[:lmcache_cached_tokens],
+                        vllm_cached_tokens=request.load_spec.vllm_cached_tokens,
                         sync=sync,
                     )
                     # NOTE: retrieve for two layers at the first layer
@@ -832,6 +840,7 @@ class LMCacheConnectorV1Impl:
                     token_mask[:lmcache_cached_tokens],
                     kvcaches=kvcaches,
                     slot_mapping=slot_mapping[:lmcache_cached_tokens],
+                    vllm_cached_tokens=request.load_spec.vllm_cached_tokens,
                     request_configs=request.request_configs,
                     req_id=request.req_id,
                 )
@@ -1076,6 +1085,14 @@ class LMCacheConnectorV1Impl:
 
         if self.kv_role == "kv_consumer":
             # Don't do save if the role is kv_consumer
+            # But still need to unpin the kv caches according to req_id
+            # to balance the pin count from contains()
+            assert self.lmcache_engine is not None, (
+                "LMCacheEngine must be initialized to unpin requests."
+            )
+            for request in connector_metadata.requests:
+                self.lmcache_engine.lookup_unpin(request.req_id)
+
             return
 
         if self.use_layerwise:
@@ -1572,6 +1589,36 @@ class LMCacheConnectorV1Impl:
                     f"{max(lmcache_cached_tokens, vllm_cached_tokens)}"
                 )
 
+            # When retrieve fail, vllm will call _handle_invalid_blocks to
+            # reset request.num_computed_tokens, this will lead to
+            # request_tracker.token_ids being not matched with vllm
+            if num_current_tokens < len(request_tracker.token_ids):
+                logger.warning(
+                    "Request %s rolled back from %d to %d tokens; "
+                    "truncating tracker state.",
+                    req_id,
+                    len(request_tracker.token_ids),
+                    num_current_tokens,
+                )
+                num_token_slots = (
+                    len(request_tracker.allocated_block_ids) * self._block_size
+                )
+                tokens_to_keep = num_current_tokens
+                if num_token_slots < num_current_tokens:
+                    logger.warning(
+                        "Request %s tracker has %d token slots but %d tokens; "
+                        "capping token_ids to slot capacity.",
+                        req_id,
+                        num_token_slots,
+                        num_current_tokens,
+                    )
+                    tokens_to_keep = num_token_slots
+
+                request_tracker.token_ids = list(request.all_token_ids[:tokens_to_keep])
+                request_tracker.num_saved_tokens = min(
+                    request_tracker.num_saved_tokens, tokens_to_keep
+                )
+
             # Pass all_token_ids for preempted requests to restore
             # token_ids correctly for chunk key computation
             all_token_ids = list(request.all_token_ids) if preempted else None
@@ -1617,9 +1664,7 @@ class LMCacheConnectorV1Impl:
             # Cancel any ongoing async lookup and prefetch tasks on workers
             lookup_id = request.request_id
             assert self.lookup_client is not None
-            self.lookup_client.cancel_lookup(  # type: ignore[attr-defined]
-                lookup_id
-            )
+            self.lookup_client.cancel_lookup(lookup_id)  # type: ignore[attr-defined]
 
         params = (
             request.kv_transfer_params
@@ -1634,6 +1679,16 @@ class LMCacheConnectorV1Impl:
             return_params = {
                 "first_tok": request._output_token_ids[0],
             }
+
+        if self.config.get_extra_config_value(
+            "enable_cache_usage_details_in_response", False
+        ):
+            request_tracker = self._request_trackers.get(request.request_id)
+            if request_tracker:
+                return_params = return_params or {}
+                return_params["num_lmcache_cached_tokens"] = (
+                    request_tracker.num_lmcache_cached_tokens
+                )
 
         return False, return_params
 
