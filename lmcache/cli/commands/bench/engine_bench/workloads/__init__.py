@@ -22,15 +22,27 @@ from lmcache.cli.commands.bench.engine_bench.workloads.long_doc_qa import (
     LongDocQAConfig,
     LongDocQAWorkload,
 )
+from lmcache.cli.commands.bench.engine_bench.workloads.multi_round_chat import (
+    MultiRoundChatConfig,
+    MultiRoundChatWorkload,
+)
+from lmcache.cli.commands.bench.engine_bench.workloads.random_prefill import (
+    RandomPrefillConfig,
+    RandomPrefillWorkload,
+)
 
 __all__ = [
     "BaseWorkload",
     "LongDocQAConfig",
     "LongDocQAWorkload",
+    "MultiRoundChatConfig",
+    "MultiRoundChatWorkload",
+    "RandomPrefillConfig",
+    "RandomPrefillWorkload",
     "create_workload",
 ]
 
-_WORKLOAD_NAMES = ("long-doc-qa",)
+_WORKLOAD_NAMES = ("long-doc-qa", "multi-round-chat", "random-prefill")
 
 
 def create_workload(
@@ -60,16 +72,48 @@ def create_workload(
         ValueError: If the workload name is not recognized.
     """
     if config.workload == "long-doc-qa":
-        workload_config = LongDocQAConfig.resolve(
+        ld_workload_config = LongDocQAConfig.resolve(
             kv_cache_volume_gb=config.kv_cache_volume_gb,
             tokens_per_gb_kvcache=config.tokens_per_gb_kvcache,
-            document_length=args.document_length,
-            query_per_document=args.query_per_document,
-            shuffle_policy=args.shuffle_policy,
-            num_inflight_requests=args.num_inflight_requests,
+            document_length=args.ldqa_document_length,
+            query_per_document=args.ldqa_query_per_document,
+            shuffle_policy=args.ldqa_shuffle_policy,
+            num_inflight_requests=args.ldqa_num_inflight_requests,
         )
         return LongDocQAWorkload(
-            config=workload_config,
+            config=ld_workload_config,
+            request_sender=request_sender,
+            stats_collector=stats_collector,
+            progress_monitor=progress_monitor,
+            seed=config.seed,
+        )
+
+    if config.workload == "multi-round-chat":
+        mr_workload_config = MultiRoundChatConfig.resolve(
+            kv_cache_volume_gb=config.kv_cache_volume_gb,
+            tokens_per_gb_kvcache=config.tokens_per_gb_kvcache,
+            shared_prompt_length=args.mrc_shared_prompt_length,
+            chat_history_length=args.mrc_chat_history_length,
+            user_input_length=args.mrc_user_input_length,
+            output_length=args.mrc_output_length,
+            qps=args.mrc_qps,
+            duration=args.mrc_duration,
+        )
+        return MultiRoundChatWorkload(
+            config=mr_workload_config,
+            request_sender=request_sender,
+            stats_collector=stats_collector,
+            progress_monitor=progress_monitor,
+            seed=config.seed,
+        )
+
+    if config.workload == "random-prefill":
+        rp_workload_config = RandomPrefillConfig.resolve(
+            request_length=args.rp_request_length,
+            num_requests=args.rp_num_requests,
+        )
+        return RandomPrefillWorkload(
+            config=rp_workload_config,
             request_sender=request_sender,
             stats_collector=stats_collector,
             progress_monitor=progress_monitor,

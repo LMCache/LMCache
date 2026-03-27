@@ -56,6 +56,10 @@ class BaseWorkload(ABC):
         """
 
     @abstractmethod
+    def log_config(self) -> None:
+        """Log key workload config before the benchmark starts."""
+
+    @abstractmethod
     def on_request_finished(self, request_id: str, output: str) -> None:
         """Called when a request finishes (from the loop thread).
 

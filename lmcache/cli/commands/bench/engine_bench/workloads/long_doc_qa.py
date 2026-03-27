@@ -126,6 +126,27 @@ class LongDocQAWorkload(BaseWorkload):
         self._semaphore = asyncio.Semaphore(config.num_inflight_requests)
         self._pending_tasks: set[asyncio.Task] = set()
 
+    def log_config(self) -> None:
+        """Log key workload config before the benchmark starts."""
+        c = self._config
+        B = "\033[1m"  # bold
+        C = "\033[96m"  # cyan
+        Y = "\033[93m"  # yellow
+        R = "\033[0m"  # reset
+        total = c.num_documents * c.query_per_document
+        print(
+            f"{B}{'═' * 50}{R}\n"
+            f"{B} Workload: {C}long-doc-qa{R}\n"
+            f"{B}{'─' * 50}{R}\n"
+            f"  Documents:        {Y}{c.num_documents}{R}\n"
+            f"  Queries/doc:      {Y}{c.query_per_document}{R}\n"
+            f"  Total requests:   {Y}{total}{R}\n"
+            f"  Document length:  {Y}{c.document_length}{R} tokens\n"
+            f"  Max inflight:     {Y}{c.num_inflight_requests}{R}\n"
+            f"  Shuffle policy:   {Y}{c.shuffle_policy}{R}\n"
+            f"{B}{'═' * 50}{R}"
+        )
+
     # ------------------------------------------------------------------
     # Data generation
     # ------------------------------------------------------------------
@@ -237,6 +258,9 @@ class LongDocQAWorkload(BaseWorkload):
         request_id = f"doc{doc_index}_q{query_index}"
         messages = self._build_messages(doc_index, query_index)
         self._progress_monitor.on_request_sent(request_id)
+        self._progress_monitor.log_message(
+            f"Dispatched request {request_id} (doc {doc_index}, query {query_index})"
+        )
         try:
             await self._request_sender.send_request(
                 request_id,

@@ -83,7 +83,7 @@ class BenchCommand(BaseCommand):
         parser.add_argument(
             "--workload",
             required=True,
-            choices=["long-doc-qa"],
+            choices=["long-doc-qa", "multi-round-chat", "random-prefill"],
             help="Workload type.",
         )
         parser.add_argument(
@@ -129,28 +129,86 @@ class BenchCommand(BaseCommand):
         # --- Long-doc-qa workload args ---
         group = parser.add_argument_group("long-doc-qa workload options")
         group.add_argument(
-            "--document-length",
+            "--ldqa-document-length",
             type=int,
             default=10000,
             help="Token length per document (default: 10000).",
         )
         group.add_argument(
-            "--query-per-document",
+            "--ldqa-query-per-document",
             type=int,
             default=2,
             help="Questions per document (default: 2).",
         )
         group.add_argument(
-            "--shuffle-policy",
+            "--ldqa-shuffle-policy",
             default="random",
             choices=["random", "tile"],
             help="Request ordering (default: random).",
         )
         group.add_argument(
-            "--num-inflight-requests",
+            "--ldqa-num-inflight-requests",
             type=int,
             default=3,
             help="Max concurrent in-flight requests (default: 3).",
+        )
+
+        # --- Multi-round-chat workload args ---
+        mrc_group = parser.add_argument_group(
+            "multi-round-chat workload options",
+        )
+        mrc_group.add_argument(
+            "--mrc-shared-prompt-length",
+            type=int,
+            default=2000,
+            help="System prompt token length (default: 2000).",
+        )
+        mrc_group.add_argument(
+            "--mrc-chat-history-length",
+            type=int,
+            default=10000,
+            help="Pre-filled chat history token length (default: 10000).",
+        )
+        mrc_group.add_argument(
+            "--mrc-user-input-length",
+            type=int,
+            default=50,
+            help="Tokens per user query (default: 50).",
+        )
+        mrc_group.add_argument(
+            "--mrc-output-length",
+            type=int,
+            default=200,
+            help="Max tokens to generate per response (default: 200).",
+        )
+        mrc_group.add_argument(
+            "--mrc-qps",
+            type=float,
+            default=1.0,
+            help="Queries per second (default: 1.0).",
+        )
+        mrc_group.add_argument(
+            "--mrc-duration",
+            type=float,
+            default=60.0,
+            help="Benchmark duration in seconds (default: 60).",
+        )
+
+        # --- Random-prefill workload args ---
+        rp_group = parser.add_argument_group(
+            "random-prefill workload options",
+        )
+        rp_group.add_argument(
+            "--rp-request-length",
+            type=int,
+            default=10000,
+            help="Token length per request (default: 10000).",
+        )
+        rp_group.add_argument(
+            "--rp-num-requests",
+            type=int,
+            default=50,
+            help="Number of requests to send (default: 50).",
         )
 
         parser.set_defaults(func=self.execute)
@@ -214,7 +272,8 @@ class BenchCommand(BaseCommand):
             ]
         )
 
-        # 6. Run benchmark
+        # 6. Log config and run benchmark
+        workload.log_config()
         progress_monitor.start()
         try:
             workload.run()

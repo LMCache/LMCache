@@ -24,6 +24,9 @@ class StubWorkload(BaseWorkload):
         self.finished_calls: list[tuple[str, str]] = []
         self._step_returns: list[float] = []
 
+    def log_config(self) -> None:
+        pass
+
     async def warmup(self) -> None:
         self.warmup_called = True
 

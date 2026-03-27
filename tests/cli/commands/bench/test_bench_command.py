@@ -39,10 +39,18 @@ def _make_args(**overrides) -> argparse.Namespace:
         no_csv=False,
         json=False,
         quiet=True,
-        document_length=100,
-        query_per_document=1,
-        shuffle_policy="tile",
-        num_inflight_requests=1,
+        ldqa_document_length=100,
+        ldqa_query_per_document=1,
+        ldqa_shuffle_policy="tile",
+        ldqa_num_inflight_requests=1,
+        mrc_shared_prompt_length=2000,
+        mrc_chat_history_length=10000,
+        mrc_user_input_length=50,
+        mrc_output_length=200,
+        mrc_qps=1.0,
+        mrc_duration=60.0,
+        rp_request_length=10000,
+        rp_num_requests=50,
         format=None,
         output=None,
     )
@@ -200,10 +208,10 @@ class TestBenchCommandRegistration:
         assert args.kv_cache_volume == 100.0
         assert args.seed == 42
         assert args.output_dir == "."
-        assert args.document_length == 10000
-        assert args.query_per_document == 2
-        assert args.shuffle_policy == "random"
-        assert args.num_inflight_requests == 3
+        assert args.ldqa_document_length == 10000
+        assert args.ldqa_query_per_document == 2
+        assert args.ldqa_shuffle_policy == "random"
+        assert args.ldqa_num_inflight_requests == 3
         assert args.quiet is False
 
 
@@ -321,9 +329,9 @@ class TestBenchCommandOrchestrator:
             lmcache_url="http://localhost:8080",
             tokens_per_gb_kvcache=None,
             kv_cache_volume=0.001,
-            document_length=100,
-            query_per_document=1,
-            num_inflight_requests=1,
+            ldqa_document_length=100,
+            ldqa_query_per_document=1,
+            ldqa_num_inflight_requests=1,
             output_dir=str(tmp_path),
             no_csv=True,
         )
@@ -398,9 +406,9 @@ class TestBenchCommandOrchestrator:
         args = _make_args(
             kv_cache_volume=0.001,
             tokens_per_gb_kvcache=1000,
-            document_length=100,
-            query_per_document=1,
-            num_inflight_requests=1,
+            ldqa_document_length=100,
+            ldqa_query_per_document=1,
+            ldqa_num_inflight_requests=1,
             output_dir=output_dir,
             no_csv=False,
             json=True,
