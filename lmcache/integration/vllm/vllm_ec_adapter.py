@@ -67,9 +67,25 @@ class LMCacheECConnectorImpl:
 
         # Mirror KV connector style: use LMCache config system.
         config = lmcache_get_or_create_config()
-        # v1: force local_disk location from vLLM ec_transfer_config.
-        config.local_disk = transfer_config.get_from_extra_config(
-            "shared_storage_path", "/tmp"
+
+        ec_storage_backend = transfer_config.get_from_extra_config(
+            "storage_backend", None
+        )
+        if ec_storage_backend is None:
+            ec_storage_backend = transfer_config.get_from_extra_config(
+                "storage_location", None
+            )
+        if isinstance(ec_storage_backend, str):
+            ec_storage_backend = ec_storage_backend.strip() or None
+
+        # Backward-compatible default: use LocalDiskBackend with shared_storage_path.
+        if ec_storage_backend is None or ec_storage_backend == "LocalDiskBackend":
+            ec_storage_backend = "LocalDiskBackend"
+            config.local_disk = transfer_config.get_from_extra_config(
+                "shared_storage_path", "/tmp"
+            )
+        logger.info(
+            "LMCache EC connector using storage backend: %s", ec_storage_backend
         )
 
         # LocalDiskBackend currently requires LocalCPUBackend for allocations.
@@ -93,6 +109,7 @@ class LMCacheECConnectorImpl:
         self._ec_engine = ECCacheEngine(
             config=config,
             metadata=lmcache_metadata,
+            storage_location=ec_storage_backend,
         )
 
     def _make_cache_key(self, mm_hash: str) -> CacheEngineKey:

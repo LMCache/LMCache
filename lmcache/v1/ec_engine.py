@@ -8,11 +8,7 @@ vLLM encoder outputs:
 - Key granularity: 1 per multimodal input (mm_hash)
 - Value: a single tensor [num_tokens, hidden_size]
 
-v1 scope: LocalDiskBackend only.
-
-We intentionally reuse LMCache's LocalDiskBackend implementation to get:
-- consistent disk I/O behavior
-- eviction/policy hooks (even if we keep it simple initially)
+v1 scope: uses any configured LMCache storage backend.
 
 Unlike KV caching, EC does not require token chunking, layerwise operations, or
 paged KV GPU gather/scatter.
@@ -39,21 +35,19 @@ class ECCacheEngine:
         config: LMCacheEngineConfig,
         metadata: LMCacheMetadata,
         *,
-        storage_location: str = "LocalDiskBackend",
+        storage_location: Optional[str] = None,
     ):
-        if not config.local_disk or config.max_local_disk_size <= 0:
+        if not config.enable_pd and (
+            not config.local_cpu or config.max_local_cpu_size <= 0
+        ):
             raise ValueError(
-                "EC LocalDiskEngine requires config.local_disk and max_local_disk_size > 0"
-            )
-        if not config.local_cpu or config.max_local_cpu_size <= 0:
-            raise ValueError(
-                "EC LocalDiskEngine currently requires local_cpu enabled with max_local_cpu_size > 0 "
-                "(LocalDiskBackend uses LocalCPUBackend for allocations)."
+                "EC cache engine requires an allocator backend. Enable local_cpu with "
+                "max_local_cpu_size > 0, or enable PD."
             )
 
         self.config = config
         self.metadata = metadata
-        self._storage_location = storage_location
+        self._storage_location: str = ""
 
         # Mirror KV engine layering: StorageManager owns backends + allocator.
         from lmcache.v1.event_manager import EventManager
@@ -66,6 +60,43 @@ class ECCacheEngine:
             event_manager=self._event_manager,
             lmcache_worker=None,
             async_lookup_server=None,
+        )
+
+        available_backends = self._storage_manager.non_allocator_backends
+        if len(available_backends) == 0:
+            raise ValueError(
+                "EC cache engine found no storage backends. Configure at least one "
+                "backend (e.g. local_disk, remote_url, gds_path, nixl storage plugin)."
+            )
+
+        if storage_location is not None:
+            if storage_location not in available_backends:
+                raise ValueError(
+                    f"Requested EC storage backend '{storage_location}' is not available. "
+                    f"Available backends: {available_backends}"
+                )
+            resolved_location = storage_location
+        else:
+            preferred_order = [
+                "LocalDiskBackend",
+                "RemoteBackend",
+                "GdsBackend",
+                "NixlStorageBackend",
+                "P2PBackend",
+                "PDBackend",
+                "LocalCPUBackend",
+            ]
+            resolved_location = available_backends[0]
+            for candidate in preferred_order:
+                if candidate in available_backends:
+                    resolved_location = candidate
+                    break
+
+        self._storage_location = resolved_location
+        logger.info(
+            "Initialized EC cache engine with storage backend '%s' (available=%s)",
+            self._storage_location,
+            available_backends,
         )
 
         # EC transfer is simple contiguous tensor copy.
@@ -111,7 +142,7 @@ class ECCacheEngine:
     def get(
         self,
         key: CacheEngineKey,
-        device: Optional[str] = None,
+        device: str,
     ) -> Optional[torch.Tensor]:
         logger.debug("Getting encoder cache for key %s", key)
 
@@ -124,8 +155,6 @@ class ECCacheEngine:
             return None
 
         try:
-            if device is None:
-                return mem_obj.tensor.detach().clone()
             return mem_obj.tensor.to(device=device)
         finally:
             mem_obj.ref_count_down()
