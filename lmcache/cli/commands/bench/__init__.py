@@ -323,16 +323,16 @@ class BenchCommand(BaseCommand):
         )
 
         # 5. Wire callbacks on sender
-        request_sender._on_finished.extend(
-            [
-                lambda result, _text: stats_collector.on_request_finished(result),
-                lambda result, _text: progress_monitor.on_request_finished(
-                    result.request_id,
-                    result.successful,
-                ),
-                workload.request_finished,
-            ]
+        request_sender.add_on_finished_callback(
+            lambda result, _text: stats_collector.on_request_finished(result),
         )
+        request_sender.add_on_finished_callback(
+            lambda result, _text: progress_monitor.on_request_finished(
+                result.request_id,
+                result.successful,
+            ),
+        )
+        request_sender.add_on_finished_callback(workload.request_finished)
 
         # 6. Log config and run benchmark
         workload.log_config()

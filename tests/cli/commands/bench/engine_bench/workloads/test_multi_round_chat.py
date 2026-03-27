@@ -256,7 +256,6 @@ def _make_mock_sender() -> MagicMock:
     sender = MagicMock()
     sender.send_request = AsyncMock(return_value=_make_mock_result())
     sender.send_warmup_request = AsyncMock(return_value=_make_mock_result())
-    sender._on_finished = []
     return sender
 
 

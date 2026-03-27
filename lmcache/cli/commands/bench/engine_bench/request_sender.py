@@ -92,6 +92,10 @@ class RequestSender:
             timeout=None,
         )
 
+    def add_on_finished_callback(self, callback: OnFinishedCallback) -> None:
+        """Register a callback to be invoked when a request finishes."""
+        self._on_finished.append(callback)
+
     async def send_request(
         self,
         request_id: str,

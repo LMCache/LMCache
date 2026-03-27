@@ -66,7 +66,6 @@ def _make_args(**overrides) -> argparse.Namespace:
 
 def _make_deps() -> tuple[MagicMock, MagicMock, MagicMock]:
     sender = MagicMock()
-    sender._on_finished = []
     collector = MagicMock()
     monitor = MagicMock()
     return sender, collector, monitor
