@@ -32,24 +32,13 @@ from lmcache.v1.gpu_connector.gpu_ops import (
 from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.mp_observability.config import (
-    PrometheusConfig,
-    add_prometheus_args,
-    parse_args_to_prometheus_config,
+    ObservabilityConfig,
+    add_observability_args,
+    init_observability,
+    parse_args_to_observability_config,
 )
-from lmcache.v1.mp_observability.otel_init import init_otel_metrics
-from lmcache.v1.mp_observability.telemetry import (
-    TelemetryConfig,
-    add_telemetry_args,
-    get_telemetry_controller,
-    init_telemetry_controller,
-    log_telemetry,
-    make_end_event,
-    make_start_event,
-    parse_args_to_telemetry_config,
-)
-from lmcache.v1.mp_observability.telemetry.config import (
-    DEFAULT_TELEMETRY_CONFIG,
-)
+from lmcache.v1.mp_observability.event import Event, EventType
+from lmcache.v1.mp_observability.event_bus import get_event_bus
 from lmcache.v1.multiprocess.config import (
     MPServerConfig,
     add_mp_server_args,
@@ -190,6 +179,9 @@ class MPCacheEngine:
         )
         self.session_manager = SessionManager(self.token_hasher)
 
+        # EventBus for observability
+        self._event_bus = get_event_bus()
+
         # Prefetch job tracking for two-phase lookup
         # TODO: implement periodic cleanup of stale _prefetch_jobs entries
         # for crash resilience (e.g., client calls lookup but never queries)
@@ -300,15 +292,14 @@ class MPCacheEngine:
             )
             vllm_event.wait(stream=gpu_context.stream)
 
-            if get_telemetry_controller().is_enabled():
-                gpu_context.cupy_stream.launch_host_func(
-                    log_telemetry,
-                    make_start_event(
-                        "store",
-                        key.request_id,
-                        device=str(gpu_context.device),
-                    ),
-                )
+            self._event_bus.publish_on_stream(
+                gpu_context.cupy_stream,
+                Event(
+                    event_type=EventType.MP_STORE_START,
+                    session_id=key.request_id,
+                    metadata={"device": str(gpu_context.device)},
+                ),
+            )
 
             layout_desc = get_layout_desc(gpu_context, self.chunk_size)
             reserved_dict = self.storage_manager.reserve_write(
@@ -352,16 +343,17 @@ class MPCacheEngine:
             list(reserved_dict.keys()),
         )
 
-        if get_telemetry_controller().is_enabled():
-            self.gpu_contexts[instance_id].cupy_stream.launch_host_func(
-                log_telemetry,
-                make_end_event(
-                    "store",
-                    key.request_id,
-                    stored_count=len(reserved_dict),
-                    device=str(gpu_context.device),
-                ),
-            )
+        self._event_bus.publish_on_stream(
+            self.gpu_contexts[instance_id].cupy_stream,
+            Event(
+                event_type=EventType.MP_STORE_END,
+                session_id=key.request_id,
+                metadata={
+                    "stored_count": len(reserved_dict),
+                    "device": str(gpu_context.device),
+                },
+            ),
+        )
 
         ed = time.perf_counter()
         if length := len(reserved_dict):
@@ -415,6 +407,15 @@ class MPCacheEngine:
             f"KV cache not registered for GPU ID {instance_id}"
         )
         gpu_context = self.gpu_contexts[instance_id]
+
+        self._event_bus.publish_on_stream(
+            gpu_context.cupy_stream,
+            Event(
+                event_type=EventType.MP_RETRIEVE_START,
+                session_id=key.request_id,
+                metadata={"device": str(gpu_context.device)},
+            ),
+        )
 
         blocks_per_chunk = self.chunk_size // gpu_context.block_size
 
@@ -488,16 +489,6 @@ class MPCacheEngine:
 
             event = torch.cuda.Event(interprocess=True)
 
-            if get_telemetry_controller().is_enabled():
-                gpu_context.cupy_stream.launch_host_func(
-                    log_telemetry,
-                    make_start_event(
-                        "retrieve",
-                        key.request_id,
-                        device=str(gpu_context.device),
-                    ),
-                )
-
             prefetched_keys: list[ObjectKey] = []
             retrieve_succeeded = False
             try:
@@ -522,17 +513,17 @@ class MPCacheEngine:
                         self.storage_manager.finish_read_prefetched,
                         prefetched_keys,
                     )
-
-        if get_telemetry_controller().is_enabled():
-            gpu_context.cupy_stream.launch_host_func(
-                log_telemetry,
-                make_end_event(
-                    "retrieve",
-                    key.request_id,
-                    retrieved_count=len(prefetched_keys),
-                    device=str(gpu_context.device),
-                ),
-            )
+                self._event_bus.publish_on_stream(
+                    gpu_context.cupy_stream,
+                    Event(
+                        event_type=EventType.MP_RETRIEVE_END,
+                        session_id=key.request_id,
+                        metadata={
+                            "retrieved_count": len(prefetched_keys),
+                            "device": str(gpu_context.device),
+                        },
+                    ),
+                )
 
         tokens_retrieved = len(obj_keys) * self.chunk_size
         ed = time.perf_counter()
@@ -580,7 +571,12 @@ class MPCacheEngine:
             Prefetch job ID for polling via query_prefetch_status.
         """
         model_name, world_size = key.model_name, key.world_size
-        log_telemetry(make_start_event("lookup_and_prefetch", key.request_id))
+        self._event_bus.publish(
+            Event(
+                event_type=EventType.MP_LOOKUP_PREFETCH_START,
+                session_id=key.request_id,
+            )
+        )
 
         layout_desc = self._find_layout_desc(model_name, world_size)
         if layout_desc is None:
@@ -710,11 +706,11 @@ class MPCacheEngine:
         #    first failure
         found_count = found_count // job.world_size
 
-        log_telemetry(
-            make_end_event(
-                "lookup_and_prefetch",
-                job.request_id,
-                found_count=found_count,
+        self._event_bus.publish(
+            Event(
+                event_type=EventType.MP_LOOKUP_PREFETCH_END,
+                session_id=job.request_id,
+                metadata={"found_count": found_count},
             )
         )
 
@@ -862,8 +858,7 @@ def add_handler_helper(
 def run_cache_server(
     mp_config: MPServerConfig,
     storage_manager_config: StorageManagerConfig,
-    prometheus_config: PrometheusConfig,
-    telemetry_config: TelemetryConfig = DEFAULT_TELEMETRY_CONFIG,
+    obs_config: ObservabilityConfig,
     return_engine: bool = False,
 ):
     """
@@ -872,8 +867,7 @@ def run_cache_server(
     Args:
         mp_config: Configuration for the ZMQ multiprocess server
         storage_manager_config: Configuration for the storage manager
-        prometheus_config: Configuration for the Prometheus observability stack
-        telemetry_config: Configuration for the telemetry event system
+        obs_config: Configuration for the observability stack
         return_engine: If True, return (server, engine) after starting;
                        if False, run blocking loop to keep server alive
 
@@ -881,31 +875,7 @@ def run_cache_server(
         If return_engine is True: tuple of (MessageQueueServer, MPCacheEngine)
         If return_engine is False: None (blocks until interrupted)
     """
-    # Initialize global telemetry controller
-    init_telemetry_controller(telemetry_config)
-
-    # Initialize EventBus and register observability subscribers
-    # First Party
-    from lmcache.v1.mp_observability.event_bus import (
-        EventBusConfig,
-        init_event_bus,
-    )
-    from lmcache.v1.mp_observability.subscribers.metrics.l1 import (
-        L1MetricsSubscriber,
-    )
-    from lmcache.v1.mp_observability.subscribers.metrics.sm import (
-        SMMetricsSubscriber,
-    )
-
-    # Set up OTel MeterProvider BEFORE creating subscribers so that
-    # module-level get_meter() calls bind to the real provider
-    if prometheus_config.enabled:
-        init_otel_metrics(prometheus_port=prometheus_config.port)
-
-    bus = init_event_bus(EventBusConfig(enabled=prometheus_config.enabled))
-    bus.register_subscriber(L1MetricsSubscriber())
-    bus.register_subscriber(SMMetricsSubscriber())
-    bus.start()
+    event_bus = init_observability(obs_config)
 
     # Initialize the engine (loggers self-register with the global controller)
     engine = MPCacheEngine(
@@ -971,8 +941,6 @@ def run_cache_server(
     torch.cuda.init()
     server.start()
 
-    # Start telemetry controller
-    get_telemetry_controller().start()
     logger.info("LMCache cache server is running...")
 
     # Return server and engine if requested (for HTTP server integration)
@@ -985,7 +953,7 @@ def run_cache_server(
             time.sleep(1)
     except KeyboardInterrupt:
         logger.info("Shutting down server...")
-        get_telemetry_controller().stop()
+        event_bus.stop()
         server.close()
         engine.close()
 
@@ -996,8 +964,7 @@ def parse_args():
     )
     add_mp_server_args(parser)
     add_storage_manager_args(parser)
-    add_prometheus_args(parser)
-    add_telemetry_args(parser)
+    add_observability_args(parser)
     return parser.parse_args()
 
 
@@ -1005,11 +972,9 @@ if __name__ == "__main__":
     args = parse_args()
     mp_config = parse_args_to_mp_server_config(args)
     storage_manager_config = parse_args_to_config(args)
-    prometheus_config = parse_args_to_prometheus_config(args)
-    telemetry_config = parse_args_to_telemetry_config(args)
+    obs_config = parse_args_to_observability_config(args)
     run_cache_server(
         mp_config=mp_config,
         storage_manager_config=storage_manager_config,
-        prometheus_config=prometheus_config,
-        telemetry_config=telemetry_config,
+        obs_config=obs_config,
     )
