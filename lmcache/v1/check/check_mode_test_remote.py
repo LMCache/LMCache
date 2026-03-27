@@ -136,7 +136,10 @@ async def run_test_mode(model: str, **kwargs):
 
         # Run the common test framework
         num_tests = kwargs.get("num_keys", 5)
-        await run_common_test_framework(test_context, model, num_tests=num_tests)
+        settle_time = kwargs.get("settle_time", 0.0)
+        await run_common_test_framework(
+            test_context, model, num_tests=num_tests, settle_time=settle_time
+        )
 
     except Exception as e:
         print(f"Test Failed - Error: {e}")

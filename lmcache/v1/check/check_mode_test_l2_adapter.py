@@ -141,6 +141,7 @@ async def run_test_mode(model: str, **kwargs):
         return
 
     num_tests = kwargs.get("num_keys", 5)
+    settle_time = kwargs.get("settle_time", 0.0)
 
     for idx, adapter_cfg in enumerate(l2_cfg.adapters):
         adapter = create_l2_adapter(adapter_cfg)
@@ -153,6 +154,7 @@ async def run_test_mode(model: str, **kwargs):
                 num_tests,
                 obj_size=obj_size,
                 kv_dtype=kv_dtype,
+                settle_time=settle_time,
             )
         except Exception as e:
             print("  Test Failed - Error: %s" % e)
@@ -166,6 +168,7 @@ def _test_single_adapter(
     num_tests,
     obj_size=DEFAULT_OBJ_SIZE,
     kv_dtype=torch.float32,
+    settle_time=0.0,
 ):
     """Run all test phases against one adapter."""
     # -- Prepare test data -----------------------------------
@@ -190,23 +193,14 @@ def _test_single_adapter(
     adapter.submit_unlock(non_exist_keys)
 
     # -- Phase 2: store existing keys ------------------------
-    print("Phase 2: Store operations...")
-    store_times = []
-    store_pass = 0
-    for i in range(num_tests):
-        ms, ok = _run_store_phase(
-            adapter,
-            [exist_keys[i]],
-            [store_objs[i]],
-        )
-        if ms is not None:
-            store_times.append(ms)
-        if ok:
-            store_pass += 1
-        print(
-            "  Store %d/%d %s (%.2fms)"
-            % (i + 1, num_tests, "OK" if ok else "FAIL", ms or 0)
-        )
+    print("Phase 2: Store operations (batch of %d)..." % num_tests)
+    st_ms, st_ok = _run_store_phase(adapter, exist_keys, store_objs)
+    store_pass = num_tests if st_ok else 0
+    print("  Batch store %s (%.2fms)" % ("OK" if st_ok else "FAIL", st_ms or 0))
+
+    if settle_time > 0:
+        print("  Waiting %.1fs for data to settle..." % settle_time)
+        time.sleep(settle_time)
 
     # -- Phase 3: lookup existing keys -----------------------
     print("Phase 3: Lookup existing keys...")
@@ -244,7 +238,7 @@ def _test_single_adapter(
     adapter.submit_unlock(exist_keys)
 
     # -- Summary ---------------------------------------------
-    obj_bytes = obj_size * store_objs[0].tensor.element_size()
+    total_bytes = obj_size * store_objs[0].tensor.element_size() * num_tests
     stats_data = [
         (
             "LOOKUP (absent)",
@@ -259,9 +253,9 @@ def _test_single_adapter(
         (
             "STORE",
             {
-                "avg": (sum(store_times) / len(store_times) if store_times else 0),
-                "max": (max(store_times) if store_times else 0),
-                "min": (min(store_times) if store_times else 0),
+                "avg": st_ms or 0,
+                "max": st_ms or 0,
+                "min": st_ms or 0,
             },
             [True] * store_pass + [False] * (num_tests - store_pass),
             store_pass,
@@ -287,4 +281,4 @@ def _test_single_adapter(
             content_pass,
         ),
     ]
-    print_performance_results(stats_data, obj_bytes=obj_bytes)
+    print_performance_results(stats_data, obj_bytes=total_bytes)

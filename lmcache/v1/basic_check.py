@@ -61,6 +61,14 @@ def parse_args():
         default=None,
         help="KV dtype, e.g. float32, bfloat16, float16 (default depends on mode)",
     )
+    parser.add_argument(
+        "--settle-time",
+        dest="settle_time",
+        type=float,
+        default=0.0,
+        help="Seconds to wait after store before load "
+        "(default: 0, useful for remote backends)",
+    )
     return parser.parse_args()
 
 
@@ -93,6 +101,7 @@ async def main():
         "l2_adapter": args.l2_adapter,
         "obj_size": args.obj_size,
         "kv_dtype": args.kv_dtype,
+        "settle_time": args.settle_time,
     }
 
     # Execute the mode function

@@ -395,6 +395,7 @@ async def run_common_test_framework(
     test_context,
     model: str,
     num_tests: int = 5,
+    settle_time: float = 0.0,
 ):
     """
     Common test framework for both storage manager and remote backend tests.
@@ -468,6 +469,10 @@ async def run_common_test_framework(
     put_pass_count = sum(1 for r in put_res["results"] if r is True)
     pass_rate = put_pass_count / num_tests * 100
     print(f"  Validation: {put_pass_count}/{num_tests} passed ({pass_rate:.1f}%)")
+
+    if settle_time > 0:
+        print("  Waiting %.1fs for data to settle..." % settle_time)
+        await asyncio.sleep(settle_time)
 
     # Phase 3: exists test (key exists)
     print("Phase 3: Testing exists for existing keys...")
