@@ -353,7 +353,7 @@ class GdsBackend(AllocatorBackendInterface):
 
         self._setup_metrics()
 
-    def _setup_metrics(self):
+    def _setup_metrics(self) -> None:
         """Set up Prometheus metrics for GDS backend."""
         prometheus_logger = PrometheusLogger.GetInstanceOrNone()
         if prometheus_logger is not None:
