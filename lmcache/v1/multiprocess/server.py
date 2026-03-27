@@ -512,8 +512,8 @@ class MPCacheEngine:
                     _retrieve_loop(obj_keys, memory_objs)
                 # Only set True when with-block exits normally
                 retrieve_succeeded = True
-            except Exception as e:
-                logger.warning("Cannot retrieve keys due to exception: %s", str(e))
+            except Exception:
+                logger.exception("Cannot retrieve keys due to exception")
                 return event.ipc_handle(), False
             finally:
                 event.record()
