@@ -20,6 +20,7 @@ from lmcache.v1.cache_controller.observability import (
     SocketType,
 )
 from lmcache.v1.rpc_utils import (
+    close_zmq_socket,
     get_ip,
     get_zmq_context,
     get_zmq_socket,
@@ -524,3 +525,18 @@ class LMCacheControllerManager:
             *tasks,
             return_exceptions=True,
         )
+
+    def close(self):
+        """Clean up all resources owned by the controller manager."""
+        if hasattr(self, "loop") and self.loop is not None:
+            if self.loop.is_running():
+                self.loop.call_soon_threadsafe(self.loop.stop)
+            if hasattr(self, "thread") and self.thread.is_alive():
+                self.thread.join()
+            self.loop.close()
+
+        close_zmq_socket(self.controller_pull_socket)
+        if hasattr(self, "controller_reply_socket"):
+            close_zmq_socket(self.controller_reply_socket)
+        if self.controller_heartbeat_socket is not None:
+            close_zmq_socket(self.controller_heartbeat_socket)

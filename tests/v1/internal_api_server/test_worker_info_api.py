@@ -58,12 +58,7 @@ class TestWorkerInfoAPI:
 
         yield controller_manager
 
-        if hasattr(controller_manager, "controller_pull_socket"):
-            controller_manager.controller_pull_socket.close()
-        if hasattr(controller_manager, "controller_reply_socket"):
-            controller_manager.controller_reply_socket.close()
-        if hasattr(controller_manager, "zmq_context"):
-            controller_manager.zmq_context.destroy()
+        controller_manager.close()
 
     @pytest.fixture
     def worker_socket(self, zmq_context, controller_urls):
