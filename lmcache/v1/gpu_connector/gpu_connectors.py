@@ -1902,3 +1902,205 @@ class SGLangLayerwiseGPUConnector(GPUConnectorInterface):
     def get_shape(self, num_tokens: int) -> torch.Size:
         # TODO: support MLA
         return torch.Size([num_tokens, 2, self.hidden_dim_size])
+
+
+class TRTLLMGPUConnector(GPUConnectorInterface):
+    """GPU connector bridging TRT-LLM's block-indexed KV format to LMCache.
+
+    TRT-LLM stores the full KV pool as a single contiguous tensor::
+
+        kv_cache_tensor: [num_blocks, ...]
+
+    where ``kv_cache_tensor[block_id]`` holds one block's KV data for all
+    layers. LMCache uses ``chunk_size`` tokens per chunk (equal to TRT-LLM's
+    ``tokens_per_block``), and calls :meth:`from_gpu` / :meth:`to_gpu` to
+    move data between that pool and LMCache's CPU-managed
+    :class:`~lmcache.v1.memory_management.MemoryObj` buffers.
+
+    Block IDs are passed through ``kwargs['block_ids']`` — a list whose
+    ``i``-th element is the physical GPU block ID for the ``i``-th chunk,
+    where chunk index ``i = start // block_size``.
+
+    Usage::
+
+        connector = TRTLLMGPUConnector()
+        connector.initialize(kv_cache_tensor, block_size=tokens_per_block)
+    """
+
+    def __init__(self) -> None:
+        self.kv_cache_tensor: Optional[torch.Tensor] = None
+        self.block_size: Optional[int] = None
+        # Dedicated CUDA streams keep store (D→H) and load (H→D) transfers
+        # independent so they can overlap with compute on the default stream.
+        self.store_stream = torch.cuda.Stream()
+        self.load_stream = torch.cuda.Stream()
+
+    def initialize(self, kv_cache_tensor: torch.Tensor, block_size: int) -> None:
+        """Register the KV pool tensor and token block size.
+
+        Must be called before any :meth:`from_gpu` / :meth:`to_gpu` usage.
+        Safe to call again to refresh the tensor reference (e.g. across
+        multiple ``LLM()`` instantiations within the same process).
+
+        Args:
+            kv_cache_tensor: Full KV cache pool, shape ``[num_blocks, ...]``.
+            block_size: Tokens per KV block (TRT-LLM's ``tokens_per_block``).
+        """
+        self.kv_cache_tensor = kv_cache_tensor
+        self.block_size = block_size
+
+    def get_shape(self, num_tokens: int) -> torch.Size:
+        """Return the LMCache tensor shape for a chunk of ``num_tokens``.
+
+        The shape ``[2, 1, num_tokens, hidden_dim]`` satisfies LMCacheMetadata's
+        ``get_shapes()`` convention ``[2, num_layers, chunk_size, hidden]`` and
+        ensures element count equals one TRT-LLM KV block's numel.
+
+        Args:
+            num_tokens: Number of tokens in the chunk (typically equals
+                ``block_size`` set in :meth:`initialize`).
+
+        Returns:
+            ``torch.Size([2, 1, num_tokens, hidden_dim])``
+        """
+        assert self.kv_cache_tensor is not None, "initialize() must be called first"
+        assert self.block_size is not None, "initialize() must be called first"
+        block_numel = int(self.kv_cache_tensor[0].numel())
+        hidden_dim = block_numel // (2 * self.block_size)
+        return torch.Size([2, 1, num_tokens, hidden_dim])
+
+    def from_gpu(
+        self,
+        memory_obj: MemoryObj,
+        start: int,
+        end: int,
+        **kwargs,
+    ) -> None:
+        """Copy one GPU KV block into a CPU MemoryObj (device→host, for store).
+
+        Args:
+            memory_obj: Destination CPU memory object.
+            start: Token offset; ``chunk_idx = start // block_size``.
+            end: Token end offset (unused at block granularity).
+            **kwargs: Must contain ``block_ids`` (``List[int]``) that maps
+                chunk indices to physical GPU block IDs.
+        """
+        assert self.kv_cache_tensor is not None
+        assert self.block_size is not None
+        block_ids: List[int] = kwargs.get("block_ids", [])
+        chunk_idx = start // self.block_size
+        if chunk_idx >= len(block_ids):
+            return
+        tensor = memory_obj.tensor
+        if tensor is not None:
+            with torch.cuda.stream(self.store_stream):
+                tensor.copy_(
+                    self.kv_cache_tensor[block_ids[chunk_idx]].view(tensor.shape),
+                    non_blocking=True,
+                )
+
+    def to_gpu(
+        self,
+        memory_obj: MemoryObj,
+        start: int,
+        end: int,
+        **kwargs,
+    ) -> None:
+        """Copy a CPU MemoryObj into one GPU KV block (host→device, for load).
+
+        Args:
+            memory_obj: Source CPU memory object.
+            start: Token offset; ``chunk_idx = start // block_size``.
+            end: Token end offset (unused at block granularity).
+            **kwargs: Must contain ``block_ids`` (``List[int]``) that maps
+                chunk indices to physical GPU block IDs.
+        """
+        assert self.kv_cache_tensor is not None
+        assert self.block_size is not None
+        block_ids: List[int] = kwargs.get("block_ids", [])
+        chunk_idx = start // self.block_size
+        if chunk_idx >= len(block_ids):
+            return
+        block_id = block_ids[chunk_idx]
+        tensor = memory_obj.tensor
+        if tensor is not None:
+            with torch.cuda.stream(self.load_stream):
+                self.kv_cache_tensor[block_id].copy_(
+                    tensor.view(self.kv_cache_tensor[block_id].shape),
+                    non_blocking=True,
+                )
+
+    def batched_from_gpu(
+        self,
+        memory_objs: Union[List[List[MemoryObj]], List[MemoryObj]],
+        starts: List[int],
+        ends: List[int],
+        **kwargs,
+    ) -> None:
+        """Copy multiple GPU KV blocks into CPU MemoryObjs within one stream.
+
+        Opens ``store_stream`` once for the entire batch to avoid per-chunk
+        context-manager overhead.
+
+        Args:
+            memory_objs: Destination CPU memory objects, one per chunk.
+            starts: Token offsets for each chunk.
+            ends: Token end offsets (unused at block granularity).
+            **kwargs: Must contain ``block_ids`` (``List[int]``).
+        """
+        assert self.kv_cache_tensor is not None
+        assert self.block_size is not None
+        block_ids: List[int] = kwargs.get("block_ids", [])
+        with torch.cuda.stream(self.store_stream):
+            for memory_obj, start in zip(memory_objs, starts, strict=False):
+                if isinstance(memory_obj, list):
+                    continue
+                chunk_idx = start // self.block_size
+                if chunk_idx >= len(block_ids):
+                    continue
+                tensor = memory_obj.tensor
+                if tensor is not None:
+                    tensor.copy_(
+                        self.kv_cache_tensor[block_ids[chunk_idx]].view(tensor.shape),
+                        non_blocking=True,
+                    )
+
+    def batched_to_gpu(
+        self,
+        memory_objs: Union[
+            List[List[MemoryObj]], List[MemoryObj], List[int], None
+        ] = None,
+        starts: Optional[List[int]] = None,
+        ends: Optional[List[int]] = None,
+        **kwargs,
+    ) -> None:
+        """Copy multiple CPU MemoryObjs into GPU KV blocks within one stream.
+
+        Opens ``load_stream`` once for the entire batch to avoid per-chunk
+        context-manager overhead.
+
+        Args:
+            memory_objs: Source CPU memory objects, one per chunk.
+            starts: Token offsets for each chunk.
+            ends: Token end offsets (unused at block granularity).
+            **kwargs: Must contain ``block_ids`` (``List[int]``).
+        """
+        if memory_objs is None or starts is None or ends is None:
+            return
+        assert self.kv_cache_tensor is not None
+        assert self.block_size is not None
+        block_ids: List[int] = kwargs.get("block_ids", [])
+        with torch.cuda.stream(self.load_stream):
+            for memory_obj, start in zip(memory_objs, starts, strict=False):
+                if isinstance(memory_obj, list):
+                    continue
+                chunk_idx = start // self.block_size
+                if chunk_idx >= len(block_ids):
+                    continue
+                tensor = memory_obj.tensor  # type: ignore[union-attr]
+                if tensor is not None:
+                    block_id = block_ids[chunk_idx]
+                    self.kv_cache_tensor[block_id].copy_(
+                        tensor.view(self.kv_cache_tensor[block_id].shape),
+                        non_blocking=True,
+                    )
