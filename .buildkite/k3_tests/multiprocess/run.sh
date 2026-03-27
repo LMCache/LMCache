@@ -15,5 +15,8 @@ source .buildkite/k3_harness/setup-env.sh
 # Install test extras (lm-eval for eval workload, openai/pandas/matplotlib for benchmarks)
 uv pip install 'lm-eval[api]' openai pandas matplotlib
 
+# ── Ensure all scripts are executable ────────────────────────
+chmod +x "${SCRIPT_DIR}"/scripts/*.sh
+
 # ── Run the actual test logic ────────────────────────────────
 exec bash "${SCRIPT_DIR}/scripts/run-mp-test.sh"

@@ -261,13 +261,19 @@ class StoreController(StorageControllerInterface):
                 except (OSError, BlockingIOError):
                     pass
 
-                if fd == listener_efd:
-                    keys = self._listener.pop_pending_keys()
-                    if keys:
-                        self._process_new_keys(keys)
-                elif fd in self._efd_to_adapter_index:
-                    adapter_index = self._efd_to_adapter_index[fd]
-                    self._process_completed_tasks(adapter_index)
+                try:
+                    if fd == listener_efd:
+                        keys = self._listener.pop_pending_keys()
+                        if keys:
+                            self._process_new_keys(keys)
+                    elif fd in self._efd_to_adapter_index:
+                        adapter_index = self._efd_to_adapter_index[fd]
+                        self._process_completed_tasks(adapter_index)
+                except Exception:
+                    logger.exception(
+                        "Unexpected error in store loop while processing fd %d",
+                        fd,
+                    )
 
     def _process_new_keys(self, keys: list[ObjectKey]) -> None:
         """

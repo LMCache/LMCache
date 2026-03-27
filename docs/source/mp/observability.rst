@@ -125,7 +125,7 @@ Enabling Telemetry
 
 .. code-block:: bash
 
-    python3 -m lmcache.v1.multiprocess.server \
+    lmcache server \
         --l1-size-gb 100 --eviction-policy LRU \
         --enable-telemetry \
         --telemetry-processor '{"type": "logging", "log_level": "DEBUG"}'
@@ -191,7 +191,7 @@ LMCache uses Python's ``logging`` module.  Control the log level with the
 
 .. code-block:: bash
 
-    LMCACHE_LOG_LEVEL=DEBUG python3 -m lmcache.v1.multiprocess.server ...
+    LMCACHE_LOG_LEVEL=DEBUG lmcache server ...
 
 Key log messages to look for:
 

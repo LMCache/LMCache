@@ -71,7 +71,7 @@ Only available when running ``http_server.py``.
      - ``0.0.0.0``
      - Host to bind the HTTP (FastAPI/uvicorn) server.
    * - ``--http-port``
-     - ``8000``
+     - ``8080``
      - Port to bind the HTTP server.
 
 L1 Memory Manager

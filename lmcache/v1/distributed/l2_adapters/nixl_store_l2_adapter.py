@@ -750,6 +750,7 @@ class NixlStoreL2Adapter(L2AdapterInterface):
 
         # success is only set to false for transfer failures
         except Exception:
+            logger.exception("NIXL store task %d failed", task_id)
             success = False
 
             # free storage indices if transfer fails
@@ -841,8 +842,8 @@ class NixlStoreL2Adapter(L2AdapterInterface):
                 )
                 await self.nixl_agent.post_non_blocking(handle)
                 self.nixl_agent.release_handle(handle)
-        except Exception as e:
-            logger.warning("NIXL load failed: %s", e)
+        except Exception:
+            logger.exception("NIXL load task %d failed", task_id)
 
         if accessed_keys:
             self._notify_keys_accessed(accessed_keys)
