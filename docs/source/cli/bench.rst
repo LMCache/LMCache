@@ -292,6 +292,10 @@ prefill performance. No warmup phase.
 Interactive Mode
 ----------------
 
+.. image:: /_static/bench_interactive_demo.gif
+   :alt: Interactive mode demo
+   :width: 100%
+
 When ``--engine-url`` or ``--workload`` is not provided (and
 ``--no-interactive`` is not set), the tool enters interactive mode. It guides
 you through four phases:

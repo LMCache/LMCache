@@ -509,16 +509,6 @@ class BenchCommand(BaseCommand):
             round(final.mean_decode_speed, 2),
         )
         decode.add(
-            "p50",
-            "P50 decode (tok/s)",
-            round(final.p50_decode_speed, 2),
-        )
-        decode.add(
-            "p90",
-            "P90 decode (tok/s)",
-            round(final.p90_decode_speed, 2),
-        )
-        decode.add(
             "p99",
             "P99 decode (tok/s)",
             round(final.p99_decode_speed, 2),
