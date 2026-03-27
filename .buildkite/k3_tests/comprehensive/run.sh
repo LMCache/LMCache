@@ -16,5 +16,8 @@ source .buildkite/k3_harness/setup-env.sh
 # Install test utilities (yq for YAML parsing, jq for JSON, openai/pandas/matplotlib for benchmarks)
 uv pip install yq jq openai pandas matplotlib 2>/dev/null || true
 
+# ── Ensure all scripts are executable ────────────────────────
+chmod +x "${SCRIPT_DIR}"/scripts/*.sh
+
 # ── Run the actual test logic ────────────────────────────────
 exec bash "${SCRIPT_DIR}/scripts/run-single-config.sh" "$CFG_NAME"

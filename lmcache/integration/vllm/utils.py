@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from typing import TYPE_CHECKING, Optional, Tuple
+from typing import TYPE_CHECKING, Literal, Optional, Tuple
 import hashlib
 import os
 import string
@@ -19,6 +19,10 @@ from lmcache.logging import init_logger
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.config_base import apply_remote_configs, fetch_remote_config
 
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.v1.gpu_connector.utils import LayoutHints
+
 logger = init_logger(__name__)
 ENGINE_NAME = "vllm-instance"
 
@@ -30,6 +34,42 @@ _config_lock = threading.Lock()
 def is_false(value: str) -> bool:
     """Check if the given string value is equivalent to 'false'."""
     return value.lower() in ("false", "0", "no", "n", "off")
+
+
+def vllm_layout_hints() -> "LayoutHints":
+    """Build layout_hints dict by querying vLLM at runtime."""
+    hints: dict[str, str] = {}
+    kv_layout = try_get_vllm_kv_cache_layout()
+    if kv_layout is not None:
+        hints["kv_layout"] = kv_layout
+    return hints  # type: ignore[return-value]
+
+
+def try_get_vllm_kv_cache_layout() -> Literal["NHD", "HND"] | None:
+    """Try to query the KV cache layout from vLLM at runtime.
+
+    Returns ``"NHD"`` or ``"HND"`` if vLLM is available and the layout
+    has been configured, otherwise ``None``.
+
+    Please only call this where vllm is available (i.e. not in the MP server)
+    We will print an error if we try to get vllm kv layout where vllm
+    is not available.
+    """
+
+    # Third Party
+    try:
+        # Third Party
+        from vllm.v1.attention.backends.utils import (  # type: ignore[import-untyped]
+            get_kv_cache_layout,
+        )
+
+        return get_kv_cache_layout()
+    except Exception:
+        logger.error(
+            "vLLM is not available but tried to query kv cache "
+            "layout information, cannot get KV cache layout"
+        )
+        return None
 
 
 def lmcache_get_or_create_config() -> LMCacheEngineConfig:
@@ -306,6 +346,10 @@ def get_vllm_torch_dev():
         logger.info("XPU device is available. Using XPU for LMCache engine.")
         torch_dev = torch.xpu
         dev_name = "xpu"
+    elif hasattr(torch, "hpu") and torch.hpu.is_available():
+        logger.info("HPU device is available. Using HPU for LMCache engine.")
+        torch_dev = torch.hpu
+        dev_name = "hpu"
     else:
         raise RuntimeError("Unsupported device platform for LMCache engine.")
     return torch_dev, dev_name
@@ -341,3 +385,49 @@ def calculate_local_rank_and_world_size(vllm_config: "VllmConfig") -> Tuple[int,
         )
         local_worker_id = global_rank % local_world_size
         return local_worker_id, local_world_size
+
+
+def validate_mla_config(config: LMCacheEngineConfig, use_mla: bool) -> None:
+    """Validate MLA-related configuration."""
+    if use_mla and (config.remote_serde != "naive" and config.remote_serde is not None):
+        raise ValueError("MLA only works with naive serde mode..")
+
+    if use_mla and config.use_layerwise and config.enable_blending:
+        raise ValueError(
+            "We haven't supported MLA with Cacheblend yet. Please disable blending."
+        )
+
+
+def calculate_draft_layers(vllm_config: "VllmConfig") -> int:
+    """Calculate the number of draft layers for speculative decoding."""
+    assert vllm_config is not None, "vllm_config required for vLLM mode"
+
+    num_draft_layers = 0
+    model_config = vllm_config.model_config
+
+    if vllm_config.speculative_config is not None:
+        logger.info(
+            "vllm_config.speculative_config: %s", vllm_config.speculative_config
+        )
+        if vllm_config.speculative_config.method == "deepseek_mtp":
+            num_draft_layers = getattr(
+                model_config.hf_config, "num_nextn_predict_layers", 0
+            )
+        elif vllm_config.speculative_config.use_eagle():
+            try:
+                draft_model_config = vllm_config.speculative_config.draft_model_config
+                num_draft_layers = draft_model_config.get_num_layers(
+                    vllm_config.parallel_config
+                )
+                logger.info("EAGLE detected %d extra layer(s)", num_draft_layers)
+            except Exception:
+                logger.info(
+                    "EAGLE detected, but failed to get the number of extra layers"
+                    "falling back to 1"
+                )
+                num_draft_layers = 1
+    return num_draft_layers
+
+
+def is_dp_rank0(vllm_config: "VllmConfig") -> bool:
+    return vllm_config.parallel_config.data_parallel_rank_local == 0

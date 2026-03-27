@@ -49,7 +49,7 @@ All three server entry points share the same ``MPCacheEngine`` and
 and a ``MessageQueueServer``, registers handlers for all core
 ``RequestType`` values, and blocks in a keep-alive loop.
 
-**``blend_server.py``** -- Extends ``MPCacheEngine`` with ``BlendEngine``,
+**``blend_server_v2.py``** -- Extends ``MPCacheEngine`` with ``BlendEngineV2``,
 which adds CacheBlend operations (``CB_REGISTER_KV_CACHE``,
 ``CB_LOOKUP_PRE_COMPUTED``, ``CB_STORE_PRE_COMPUTED``,
 ``CB_RETRIEVE_PRE_COMPUTED``, ``CB_STORE_FINAL``).  Enables non-prefix KV
@@ -149,7 +149,7 @@ Each config module exposes a composable triple:
     add_prometheus_args(parser)       # from mp_observability/config.py
     add_telemetry_args(parser)        # from mp_observability/telemetry/config.py
 
-Both ``blend_server.py`` and ``http_server.py`` reuse this pattern, adding
+Both ``blend_server_v2.py`` and ``http_server.py`` reuse this pattern, adding
 ``add_http_frontend_args()`` for the HTTP variant.
 
 Distributed Storage
@@ -342,8 +342,8 @@ Key Source Files
      - MPCacheEngine + ZMQ server entry point
    * - ``lmcache/v1/multiprocess/config.py``
      - MPServerConfig, HTTPFrontendConfig
-   * - ``lmcache/v1/multiprocess/blend_server.py``
-     - BlendEngine (extends MPCacheEngine)
+   * - ``lmcache/v1/multiprocess/blend_server_v2.py``
+     - BlendEngineV2 (extends MPCacheEngine)
    * - ``lmcache/v1/multiprocess/http_server.py``
      - FastAPI wrapper with health check and many other useful APIs
    * - ``lmcache/v1/multiprocess/protocols/base.py``

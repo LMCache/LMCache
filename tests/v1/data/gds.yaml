@@ -3,3 +3,5 @@ gds_path: "/tmp/gds/test-cache"
 local_cpu: False
 save_decode_cache: True
 cufile_buffer_size: 128
+extra_config:
+  use_cufile: true  # Explicitly enable cuFile for GDS backend
