@@ -76,8 +76,23 @@ types:
    # Interactive mode: guided step-by-step setup
    lmcache bench engine
 
-   # From a saved config file
-   lmcache bench engine --config my_bench.json
+   # From a saved config file (engine URL provided separately)
+   lmcache bench engine --engine-url http://localhost:8000 \
+       --config my_bench.json
+
+   # Export config for later reuse (resolves auto-detected values)
+   lmcache bench engine \
+       --engine-url http://localhost:8000 \
+       --workload long-doc-qa \
+       --lmcache-url http://localhost:8080 \
+       --export-config my_bench.json
+
+   # Non-interactive mode for scripts/CI (errors if args missing)
+   lmcache bench engine \
+       --engine-url http://localhost:8000 \
+       --workload long-doc-qa \
+       --lmcache-url http://localhost:8080 \
+       --no-interactive
 
 Three workloads are available:
 

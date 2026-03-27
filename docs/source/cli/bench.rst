@@ -45,10 +45,42 @@ defaults.
 
 .. code-block:: bash
 
-   lmcache bench engine --config my_bench.json
+   lmcache bench engine --engine-url http://localhost:8000 \
+       --config my_bench.json
+
+Config files contain benchmark parameters (workload, KV cache settings, etc.)
+but not the engine URL, so you can reuse the same config against different
+engines.
+
+**Export a config without running the benchmark:**
+
+.. code-block:: bash
+
+   lmcache bench engine \
+       --engine-url http://localhost:8000 \
+       --workload long-doc-qa \
+       --lmcache-url http://localhost:8080 \
+       --export-config my_bench.json
+
+This resolves all auto-detected values (model name, tokens per GB) and saves
+them to a portable JSON file that works without an LMCache server.
+
+**Non-interactive mode (for scripts and CI):**
+
+.. code-block:: bash
+
+   lmcache bench engine \
+       --engine-url http://localhost:8000 \
+       --workload long-doc-qa \
+       --lmcache-url http://localhost:8080 \
+       --no-interactive
+
+Errors immediately if any required argument is missing, instead of entering
+interactive mode. Useful in automated pipelines.
 
 If you don't have an LMCache server, you can pass ``--tokens-per-gb-kvcache``
-directly (see :ref:`bench-tokens-per-gb` for how to find this value).
+directly instead of ``--lmcache-url``
+(see :ref:`bench-tokens-per-gb` for how to find this value).
 
 
 General Options
@@ -64,7 +96,18 @@ General Options
    * - ``--config FILE``
      - No
      - Load configuration from a JSON file. Skips interactive mode.
-       CLI flags override values in the file.
+       CLI flags override values in the file. The engine URL is not
+       stored in config files and must be provided separately.
+   * - ``--export-config FILE``
+     - No
+     - Export resolved configuration to a JSON file and exit. Does not
+       run the benchmark. Auto-detected values (model, tokens per GB)
+       are resolved and saved so the config is portable. Environment-
+       specific values (engine URL, LMCache URL) are excluded.
+   * - ``--no-interactive``
+     - No
+     - Disable interactive mode. Errors if required arguments are
+       missing instead of prompting. Useful for scripts and CI.
    * - ``--engine-url URL``
      - Yes
      - Inference engine URL (e.g., ``http://localhost:8000``).
@@ -249,8 +292,9 @@ prefill performance. No warmup phase.
 Interactive Mode
 ----------------
 
-When ``--engine-url`` or ``--workload`` is not provided, the tool enters
-interactive mode. It guides you through four phases:
+When ``--engine-url`` or ``--workload`` is not provided (and
+``--no-interactive`` is not set), the tool enters interactive mode. It guides
+you through four phases:
 
 1. **Required settings** -- engine URL, workload type, LMCache server
    (or tokens per GB).
@@ -280,14 +324,18 @@ text and number prompts accept typed input with defaults shown in brackets.
        multi-round-chat   Multi-turn chat with stateful sessions
        random-prefill     Prefill-only requests fired simultaneously
 
+   LMCache Server
+     Do you have a running LMCache server?
+     It can auto-detect KV cache size information.
+     [default: Y] (Y/n) >
+
    ...
 
    ──────────────────────────────────────────────────
     Configuration Summary
    ──────────────────────────────────────────────────
-     Engine URL:           http://localhost:8000
-     Model:                (auto-detect)
      Workload:             long-doc-qa
+     Model:                Qwen/Qwen3-14B
      Tokens per GB:        6553
      ...
    ──────────────────────────────────────────────────
@@ -296,18 +344,29 @@ text and number prompts accept typed input with defaults shown in brackets.
      * Start benchmark
        Export configuration for later use and exit
 
+When you choose "Export configuration", all auto-detected values (model name,
+tokens per GB) are resolved and saved to a portable JSON file.
+
 
 Config File
 -----------
 
-The interactive mode can export a JSON config file. You can also write one
-manually. The keys match CLI argument names with dashes replaced by
-underscores:
+Config files store benchmark parameters but **not** environment-specific
+values like engine URL or LMCache URL. This lets you reuse the same config
+across different environments.
+
+You can create a config file in three ways:
+
+1. **Interactive mode** -- choose "Export configuration" at the summary step.
+2. **``--export-config``** -- resolve and export from CLI without running.
+3. **Manually** -- write JSON with keys matching CLI arg names (dashes
+   replaced by underscores).
+
+Example config file:
 
 .. code-block:: json
 
    {
-     "engine_url": "http://localhost:8000",
      "model": "Qwen/Qwen3-14B",
      "workload": "long-doc-qa",
      "tokens_per_gb_kvcache": 6553,
@@ -318,11 +377,12 @@ underscores:
      "ldqa_num_inflight_requests": 3
    }
 
-Load it with ``--config``:
+Load it with ``--config`` (engine URL must be provided separately):
 
 .. code-block:: bash
 
-   lmcache bench engine --config my_bench.json
+   lmcache bench engine --engine-url http://localhost:8000 \
+       --config my_bench.json
 
 CLI arguments override config file values, so you can use a base config and
 tweak individual settings:
@@ -330,7 +390,8 @@ tweak individual settings:
 .. code-block:: bash
 
    # Use saved config but override KV cache volume
-   lmcache bench engine --config my_bench.json --kv-cache-volume 200
+   lmcache bench engine --engine-url http://localhost:8000 \
+       --config my_bench.json --kv-cache-volume 200
 
 
 Output
