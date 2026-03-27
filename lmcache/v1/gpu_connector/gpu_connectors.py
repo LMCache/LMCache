@@ -13,6 +13,7 @@ from lmcache.utils import EngineType, _lmcache_nvtx_annotate
 from lmcache.v1.compute.blend.utils import LMCBlenderBuilder
 from lmcache.v1.gpu_connector.utils import (
     assert_is_vllm_flash_attn_or_flash_infer,
+    assert_is_vllm_mla_or_flash_attn_or_flash_infer,
     discover_gpu_kv_format,
     get_block_size,
     get_elements_per_layer,
@@ -1051,7 +1052,7 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
             # in layerwise mode.
 
             self.gpu_kv_format = discover_gpu_kv_format(kv_caches, EngineType.VLLM)
-            assert_is_vllm_flash_attn_or_flash_infer(self.gpu_kv_format)
+            assert_is_vllm_mla_or_flash_attn_or_flash_infer(self.gpu_kv_format)
             self.tokens_per_layer = get_tokens_per_layer(kv_caches, self.gpu_kv_format)
             self.elements_per_layer = get_elements_per_layer(
                 kv_caches, self.gpu_kv_format
@@ -1120,12 +1121,14 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
 
         num_tokens = len(slot_mapping_full)
 
+        mem_fmt = MemoryFormat.KV_MLA_FMT if self.use_mla else MemoryFormat.KV_T2D
+
         tmp_gpu_buffer_obj: Optional[MemoryObj] = None
         if self.use_gpu:
             buffer_shape = self.get_shape(num_tokens)
             assert self.gpu_buffer_allocator is not None
             tmp_gpu_buffer_obj = self.gpu_buffer_allocator.allocate(
-                buffer_shape, self.dtype, MemoryFormat.KV_T2D
+                buffer_shape, self.dtype, mem_fmt
             )
             assert tmp_gpu_buffer_obj is not None, (
                 "Failed to allocate GPU buffer in GPUConnector"
@@ -1250,12 +1253,14 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
 
         num_tokens = len(slot_mapping_full)
 
+        mem_fmt = MemoryFormat.KV_MLA_FMT if self.use_mla else MemoryFormat.KV_T2D
+
         tmp_gpu_buffer_obj: Optional[MemoryObj] = None
         if self.use_gpu:
             buffer_shape = self.get_shape(num_tokens)
             assert self.gpu_buffer_allocator is not None
             tmp_gpu_buffer_obj = self.gpu_buffer_allocator.allocate(
-                buffer_shape, self.dtype, MemoryFormat.KV_T2D
+                buffer_shape, self.dtype, mem_fmt
             )
             assert tmp_gpu_buffer_obj is not None, (
                 "Failed to allocate GPU buffer in GPUConnector"
