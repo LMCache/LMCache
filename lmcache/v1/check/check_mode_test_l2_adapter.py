@@ -13,6 +13,9 @@ import torch
 # First Party
 from lmcache.v1.check import check_mode
 from lmcache.v1.check.utils import (
+    DEFAULT_KV_DTYPE_STR,
+    DEFAULT_OBJ_SIZE,
+    parse_kv_dtype,
     print_performance_results,
 )
 from lmcache.v1.distributed.api import ObjectKey
@@ -26,8 +29,7 @@ from lmcache.v1.memory_management import (
     TensorMemoryObj,
 )
 
-_OBJ_SIZE = 1024
-_POLL_TIMEOUT_MS = 10000
+_POLL_TIMEOUT_MS = 100000
 
 
 def _create_object_key(model: str, key_id: str) -> ObjectKey:
@@ -41,15 +43,17 @@ def _create_object_key(model: str, key_id: str) -> ObjectKey:
 
 def _create_memory_obj(
     fill_value: float = 0.0,
+    obj_size: int = DEFAULT_OBJ_SIZE,
+    dtype: torch.dtype = torch.float32,
 ) -> TensorMemoryObj:
     """Create a test TensorMemoryObj."""
-    raw_data = torch.empty(_OBJ_SIZE, dtype=torch.float32)
+    raw_data = torch.empty(obj_size, dtype=dtype)
     raw_data.fill_(fill_value)
     metadata = MemoryObjMetadata(
-        shape=torch.Size([_OBJ_SIZE]),
-        dtype=torch.float32,
+        shape=torch.Size([obj_size]),
+        dtype=dtype,
         address=0,
-        phy_size=_OBJ_SIZE * 4,
+        phy_size=obj_size * raw_data.element_size(),
         fmt=MemoryFormat.KV_2LTD,
         ref_count=1,
     )
@@ -122,6 +126,13 @@ async def run_test_mode(model: str, **kwargs):
         print("Error: --l2-adapter is required for test_l2_adapter mode")
         return
 
+    obj_size = kwargs.get("obj_size") or DEFAULT_OBJ_SIZE
+    kv_dtype_str = kwargs.get("kv_dtype") or DEFAULT_KV_DTYPE_STR
+    kv_dtype = parse_kv_dtype(kv_dtype_str)
+    if kv_dtype is None:
+        print("Error: unsupported --kv-dtype '%s'" % kv_dtype_str)
+        return
+
     # Build adapter config via the standard parser
     ns = argparse.Namespace(l2_adapter=l2_adapter_raw)
     l2_cfg = parse_args_to_l2_adapters_config(ns)
@@ -129,28 +140,42 @@ async def run_test_mode(model: str, **kwargs):
         print("Error: no L2 adapter configs parsed")
         return
 
-    num_tests = 5
+    num_tests = kwargs.get("num_keys", 5)
 
     for idx, adapter_cfg in enumerate(l2_cfg.adapters):
         adapter = create_l2_adapter(adapter_cfg)
         print("=== Testing L2 adapter #%d (%s) ===" % (idx, type(adapter).__name__))
 
         try:
-            _test_single_adapter(adapter, model, num_tests)
+            _test_single_adapter(
+                adapter,
+                model,
+                num_tests,
+                obj_size=obj_size,
+                kv_dtype=kv_dtype,
+            )
         except Exception as e:
             print("  Test Failed - Error: %s" % e)
         finally:
             adapter.close()
 
 
-def _test_single_adapter(adapter, model, num_tests):
+def _test_single_adapter(
+    adapter,
+    model,
+    num_tests,
+    obj_size=DEFAULT_OBJ_SIZE,
+    kv_dtype=torch.float32,
+):
     """Run all test phases against one adapter."""
     # -- Prepare test data -----------------------------------
     exist_keys = [_create_object_key(model, "exist_%d" % i) for i in range(num_tests)]
     non_exist_keys = [
         _create_object_key(model, "nonexist_%d" % i) for i in range(num_tests)
     ]
-    store_objs = [_create_memory_obj(float(i + 1)) for i in range(num_tests)]
+    store_objs = [
+        _create_memory_obj(float(i + 1), obj_size, kv_dtype) for i in range(num_tests)
+    ]
 
     # -- Phase 1: lookup non-existing keys -------------------
     print("Phase 1: Lookup non-existing keys...")
@@ -195,7 +220,9 @@ def _test_single_adapter(adapter, model, num_tests):
 
     # -- Phase 4: load existing keys -------------------------
     print("Phase 4: Load operations...")
-    load_buffers = [_create_memory_obj(0.0) for _ in range(num_tests)]
+    load_buffers = [
+        _create_memory_obj(0.0, obj_size, kv_dtype) for _ in range(num_tests)
+    ]
     ld_ms, ld_bitmap = _run_load_phase(adapter, exist_keys, load_buffers)
     load_pass = 0
     content_pass = 0
@@ -217,6 +244,7 @@ def _test_single_adapter(adapter, model, num_tests):
     adapter.submit_unlock(exist_keys)
 
     # -- Summary ---------------------------------------------
+    obj_bytes = obj_size * store_objs[0].tensor.element_size()
     stats_data = [
         (
             "LOOKUP (absent)",
@@ -259,4 +287,4 @@ def _test_single_adapter(adapter, model, num_tests):
             content_pass,
         ),
     ]
-    print_performance_results(stats_data)
+    print_performance_results(stats_data, obj_bytes=obj_bytes)
