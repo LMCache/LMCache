@@ -341,7 +341,7 @@ Settings for different storage backends and paths.
      - Description
    * - gds_path
      - LMCACHE_GDS_PATH
-     - Path for GDS backend
+     - Path for GDS backend. Supports comma-separated paths for multi-device I/O (e.g. ``/mnt/nvme0/cache,/mnt/nvme1/cache``). Each GPU selects a path via ``device_id % num_paths``.
    * - cufile_buffer_size
      - LMCACHE_CUFILE_BUFFER_SIZE
      - Buffer size for cuFile/hipFile operations
