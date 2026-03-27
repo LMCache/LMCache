@@ -33,6 +33,9 @@ Configuration
 
      dax.device_path: "/dev/dax1.0"
      dax.max_dax_size: 100
+     dax.restore_workers: 8
+     dax.restore_max_regions: 8
+     dax.retrieve_staging_slab_bytes: 268435456
 
 
 Runtime Requirements
@@ -53,3 +56,9 @@ Validation and Current Limits
   (``metadata.world_size == 1``).
 - Only single-tensor chunk layouts are supported. Multi-tensor put
   requests are rejected.
+- Batched restore uses a backend-owned retrieve staging slab and persistent
+  restore executors. The slab and region count can be tuned with
+  ``dax.restore_workers``, ``dax.restore_max_regions``, and
+  ``dax.retrieve_staging_slab_bytes``.
+- Blocking batched restore preserves positional output semantics, while
+  asynchronous batched restore returns only the consecutive hit prefix.

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include <pybind11/pybind11.h>
+#include <pybind11/stl.h>
 #include "mem_kernels.cuh"
 #include "cachegen_kernels.cuh"
 #include "pos_kernels.cuh"
@@ -62,6 +63,9 @@ PYBIND11_MODULE(c_ops, m) {
   m.def("alloc_shm_pinned_ptr", &alloc_shm_pinned_ptr,
         py::call_guard<py::gil_scoped_release>());
   m.def("free_shm_pinned_ptr", &free_shm_pinned_ptr,
+        py::call_guard<py::gil_scoped_release>());
+  m.def("batched_memcpy", &batched_memcpy,
+        py::arg("src_ptrs"), py::arg("dst_ptrs"), py::arg("sizes"),
         py::call_guard<py::gil_scoped_release>());
   m.def("get_gpu_pci_bus_id", &get_gpu_pci_bus_id);
 }
