@@ -9,10 +9,10 @@ from typing import Any, Optional
 import math
 import re
 
-# Third Party
-from transformers import AutoTokenizer  # type: ignore[import-untyped]
-
 PLACEHOLDER = re.compile(r"\{(\w+)\}")
+BUILTIN_DOCUMENT_PATHS = {
+    "lmcache": Path(__file__).resolve().parent / "documents" / "lmcache.txt",
+}
 MetricValue = tuple[str, Any]
 MetricMap = dict[str, MetricValue]
 
@@ -110,6 +110,7 @@ def resolve_documents(
     prompt_template: str, documents_args: list[str]
 ) -> tuple[dict[str, str], str]:
     """Resolve ``--documents`` args into placeholder mapping and trailing text."""
+    placeholders = _unique_placeholders(prompt_template)
     documents: dict[str, str] = {}
     plain_docs: list[str] = []
     for item in documents_args:
@@ -121,15 +122,19 @@ def resolve_documents(
             raise ValueError(f"Invalid --documents {item!r}; empty name")
         documents[name] = _read_document_file(path, name=name)
 
-    if not plain_docs:
-        return documents, ""
-
-    unresolved = [
-        key for key in _unique_placeholders(prompt_template) if key not in documents
-    ]
+    unresolved = [key for key in placeholders if key not in documents]
     for idx, key in enumerate(unresolved[: len(plain_docs)]):
         documents[key] = plain_docs[idx]
     appended_docs = plain_docs[len(unresolved) :]
+
+    for key in placeholders:
+        if key in documents:
+            continue
+        builtin_path = BUILTIN_DOCUMENT_PATHS.get(key)
+        if builtin_path is None:
+            continue
+        documents[key] = _read_document_file(str(builtin_path), name=key)
+
     return documents, "\n".join(appended_docs).strip()
 
 
@@ -183,6 +188,9 @@ def _load_tokenizer(model_id: str) -> Optional[Any]:
     if not model_id:
         return None
     try:
+        # Third Party
+        from transformers import AutoTokenizer  # type: ignore[import-untyped]
+
         return AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
     except Exception:
         return None

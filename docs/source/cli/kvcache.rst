@@ -39,9 +39,9 @@ Clear all cached KV data in **L1 (CPU memory)** on the target LMCache server.
 
    $ lmcache kvcache clear --url http://localhost:8000
 
-   ========== KV Cache Clear ==================
-   Status:                                   OK
-   =============================================
+   ================ KV Cache Clear ================
+   Status:                                       OK
+   ================================================
 
 **JSON output** (for scripting with ``jq``):
 

@@ -620,8 +620,8 @@ class BlendEngineV2(MPCacheEngine):
                             lmcache_memcpy_async_h2d(memory_obj, tmp_buffer)
                             target_buffer.copy_(tmp_buffer, non_blocking=True)
 
-            except Exception as e:
-                logger.error("Error during retrieving prefetched results: %s", e)
+            except Exception:
+                logger.exception("Error during retrieving prefetched results")
                 return event.ipc_handle(), False
 
             finally:

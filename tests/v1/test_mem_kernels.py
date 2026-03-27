@@ -32,6 +32,8 @@ if lmc_ops is None:
         NL_X_TWO_NB_BS_NH_HS = 0
         NL_X_NB_TWO_BS_NH_HS = 1
         NL_X_NB_BS_HS = 2
+        NL_X_TWO_NB_NH_BS_HS = 3
+        NL_X_NB_TWO_NH_BS_HS = 4
 
     class MockTransferDirection:
         H2D = 0
@@ -486,8 +488,8 @@ def test_multi_layer_kernel_use_mla(num_tokens, head_size, gpu_kv_format):
     "gpu_kv_format",
     [
         lmc_ops.GPUKVFormat.NL_X_TWO_NB_BS_NH_HS,  # vllm non-MLA flash attention
-        lmc_ops.GPUKVFormat.NL_X_NB_TWO_BS_NH_HS,
-    ],  # vllm non-MLA flash infer
+        lmc_ops.GPUKVFormat.NL_X_NB_TWO_BS_NH_HS,  # vllm non-MLA flash infer
+    ],
 )
 def test_single_layer_kernel(num_tokens, token_major, gpu_kv_format):
     device = "cuda"
@@ -504,6 +506,187 @@ def test_single_layer_kernel(num_tokens, token_major, gpu_kv_format):
     )
     kv_cache_new = generate_kv_cache_paged_list_tensors(
         num_blocks, device, block_size, dtype, gpu_kv_format=gpu_kv_format
+    )
+    slot_mapping = random.sample(range(0, num_blocks * block_size), num_tokens)
+    slot_mapping = torch.tensor(slot_mapping, device=device)
+
+    if token_major:
+        tmp_gpu_buffer = torch.empty(
+            (num_tokens, 2, hidden_dim_size), dtype=dtype, device=device
+        )
+    else:
+        tmp_gpu_buffer = torch.empty(
+            (2, num_tokens, hidden_dim_size), dtype=dtype, device=device
+        )
+
+    for layer_id in range(num_layers):
+        lmc_ops.single_layer_kv_transfer(
+            tmp_gpu_buffer,
+            kv_cache[layer_id],
+            slot_mapping,
+            lmc_ops.TransferDirection.D2H,
+            gpu_kv_format,
+            token_major,
+        )
+        lmc_ops.single_layer_kv_transfer(
+            tmp_gpu_buffer,
+            kv_cache_new[layer_id],
+            slot_mapping,
+            lmc_ops.TransferDirection.H2D,
+            gpu_kv_format,
+            token_major,
+        )
+
+    check_paged_kv_cache_equal(
+        kv_cache,
+        kv_cache_new,
+        slot_mapping,
+        gpu_kv_format=gpu_kv_format,
+    )
+
+
+@pytest.mark.parametrize("num_tokens", [256, 500, 1024])
+@pytest.mark.parametrize(
+    "gpu_kv_format",
+    [
+        lmc_ops.GPUKVFormat.NL_X_TWO_NB_NH_BS_HS,  # vllm HND flash attention
+        lmc_ops.GPUKVFormat.NL_X_NB_TWO_NH_BS_HS,  # vllm HND flash infer
+    ],
+)
+def test_multi_layer_kernel_hnd(num_tokens, gpu_kv_format):
+    """Round-trip test for HND multi-layer kernel: D2H then H2D."""
+    device = "cuda"
+
+    num_blocks = 200
+    block_size = 16
+    num_heads = 8
+    head_size = 128
+    chunk_size = 256
+    num_layers = 4
+    dtype = torch.bfloat16
+
+    kv_cache = generate_kv_cache_paged_list_tensors(
+        num_blocks,
+        device,
+        block_size,
+        dtype,
+        num_layers=num_layers,
+        head_size=head_size,
+        gpu_kv_format=gpu_kv_format,
+    )
+    page_buffer_size = num_blocks * block_size
+
+    slot_mapping = random.sample(range(0, page_buffer_size), num_tokens)
+    slot_mapping = torch.tensor(slot_mapping, device=device)
+
+    pinned_cpu_size = 512 * 1024 * 1024  # 512MB
+    mem_allocator = PinMemoryAllocator(pinned_cpu_size)
+
+    # D2H: extract from paged cache into flat memory
+    kv_cache_pointers = torch.empty(
+        num_layers, dtype=torch.int64, device="cpu", pin_memory=True
+    )
+    for i in range(num_layers):
+        kv_cache_pointers[i] = kv_cache[i].data_ptr()
+
+    memory_obj_list = []
+    slot_mapping_chunked = torch.split(slot_mapping, chunk_size)
+    for slot_mapping_temp in slot_mapping_chunked:
+        mem_obj_shape = torch.Size(
+            [2, num_layers, len(slot_mapping_temp), num_heads * head_size]
+        )
+        memory_obj = mem_allocator.allocate(mem_obj_shape, dtype)
+        lmc_ops.multi_layer_kv_transfer(
+            memory_obj.tensor,
+            kv_cache_pointers,
+            slot_mapping_temp,
+            kv_cache[0].device,
+            page_buffer_size,
+            lmc_ops.TransferDirection.D2H,
+            gpu_kv_format,
+            block_size,
+            head_size=head_size,
+        )
+        memory_obj_list.append(memory_obj)
+    torch.cuda.synchronize()
+
+    # H2D: write back into a fresh paged cache
+    kv_cache_new = generate_kv_cache_paged_list_tensors(
+        num_blocks,
+        device,
+        block_size,
+        dtype,
+        num_layers=num_layers,
+        head_size=head_size,
+        gpu_kv_format=gpu_kv_format,
+    )
+    kv_cache_pointers_new = torch.empty(
+        num_layers, dtype=torch.int64, device="cpu", pin_memory=True
+    )
+    for i in range(num_layers):
+        kv_cache_pointers_new[i] = kv_cache_new[i].data_ptr()
+
+    for chunk_id, slot_mapping_temp in enumerate(slot_mapping_chunked):
+        lmc_ops.multi_layer_kv_transfer(
+            memory_obj_list[chunk_id].tensor,
+            kv_cache_pointers_new,
+            slot_mapping_temp,
+            kv_cache_new[0].device,
+            page_buffer_size,
+            lmc_ops.TransferDirection.H2D,
+            gpu_kv_format,
+            block_size,
+            head_size=head_size,
+        )
+    torch.cuda.synchronize()
+
+    check_paged_kv_cache_equal(
+        kv_cache,
+        kv_cache_new,
+        slot_mapping,
+        gpu_kv_format=gpu_kv_format,
+    )
+    mem_allocator.close()
+
+
+@pytest.mark.parametrize("num_tokens", [256, 500, 1024])
+@pytest.mark.parametrize("token_major", [True, False])
+@pytest.mark.parametrize(
+    "gpu_kv_format",
+    [
+        lmc_ops.GPUKVFormat.NL_X_TWO_NB_NH_BS_HS,  # vllm HND flash attention
+        lmc_ops.GPUKVFormat.NL_X_NB_TWO_NH_BS_HS,  # vllm HND flash infer
+    ],
+)
+def test_single_layer_kernel_hnd(num_tokens, token_major, gpu_kv_format):
+    """Round-trip test for HND single-layer kernel: D2H then H2D per layer."""
+    device = "cuda"
+
+    num_layers = 4
+    num_blocks = 200
+    block_size = 16
+    num_heads = 8
+    head_size = 128
+    hidden_dim_size = num_heads * head_size
+    dtype = torch.bfloat16
+
+    kv_cache = generate_kv_cache_paged_list_tensors(
+        num_blocks,
+        device,
+        block_size,
+        dtype,
+        num_layers=num_layers,
+        head_size=head_size,
+        gpu_kv_format=gpu_kv_format,
+    )
+    kv_cache_new = generate_kv_cache_paged_list_tensors(
+        num_blocks,
+        device,
+        block_size,
+        dtype,
+        num_layers=num_layers,
+        head_size=head_size,
+        gpu_kv_format=gpu_kv_format,
     )
     slot_mapping = random.sample(range(0, num_blocks * block_size), num_tokens)
     slot_mapping = torch.tensor(slot_mapping, device=device)

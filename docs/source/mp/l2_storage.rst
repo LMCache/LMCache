@@ -186,7 +186,7 @@ Select policies via CLI:
      - ``default``
      - Store all keys to all adapters.  Never delete from L1.
    * - ``--l2-store-policy``
-     - ``noop``
+     - ``skip_l1``
      - Buffer-only mode.  Store all keys to all adapters, then
        **delete them from L1** immediately.  Pair with
        ``--eviction-policy noop`` to avoid useless LRU overhead.
@@ -198,7 +198,7 @@ Buffer-Only Mode
 ~~~~~~~~~~~~~~~~~
 
 When L1 is used purely as a write buffer (all data lives in L2), use
-``--l2-store-policy noop`` together with ``--eviction-policy noop``.
+``--l2-store-policy skip_l1`` together with ``--eviction-policy noop``.
 This combination deletes keys from L1 as soon as they are stored to L2
 and disables the LRU eviction tracker entirely, reducing memory and CPU
 overhead.
@@ -206,7 +206,7 @@ overhead.
 .. code-block:: bash
 
     --eviction-policy noop \
-    --l2-store-policy noop \
+    --l2-store-policy skip_l1 \
     --l2-prefetch-policy default
 
 Policies are extensible -- new policies can be added by creating a file
@@ -221,7 +221,7 @@ Set ``LMCACHE_LOG_LEVEL=DEBUG`` to see L2 activity in the server logs:
 
 .. code-block:: bash
 
-    LMCACHE_LOG_LEVEL=DEBUG python3 -m lmcache.v1.multiprocess.server \
+    LMCACHE_LOG_LEVEL=DEBUG lmcache server \
         --l1-size-gb 100 --eviction-policy LRU \
         --l2-adapter '{"type": "nixl_store", "backend": "POSIX", "backend_params": {"file_path": "/data/lmcache/l2", "use_direct_io": "false"}, "pool_size": 64}'
 

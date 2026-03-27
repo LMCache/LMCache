@@ -34,6 +34,30 @@ __host__ __device__ __forceinline__ bool is_mla(
          gpu_kv_format == GPUKVFormat::NL_X_NBBS_ONE_HS;  // SGLang MLA
 }
 
+// inline helper to check HND layout (callable from device and host)
+__host__ __device__ __forceinline__ bool is_hnd(
+    const GPUKVFormat gpu_kv_format) {
+  return gpu_kv_format ==
+             GPUKVFormat::NL_X_TWO_NB_NH_BS_HS ||             // flash attn HND
+         gpu_kv_format == GPUKVFormat::NL_X_NB_TWO_NH_BS_HS;  // flash infer HND
+}
+
+// All paged (non-MLA) formats rely on block_size for offset computation.
+inline void check_block_size(const GPUKVFormat gpu_kv_format,
+                             const int block_size) {
+  TORCH_CHECK(is_mla(gpu_kv_format) || block_size > 0,
+              "block_size is required (must be > 0) for GPUKVFormat ",
+              static_cast<int>(gpu_kv_format));
+}
+
+// HND formats additionally need head_size to decompose scalar offsets.
+inline void check_head_size(const GPUKVFormat gpu_kv_format,
+                            const int head_size) {
+  TORCH_CHECK(!is_hnd(gpu_kv_format) || head_size > 0,
+              "head_size is required (must be > 0) for GPUKVFormat ",
+              static_cast<int>(gpu_kv_format));
+}
+
 template <typename scalar_t>
 __global__ void load_and_reshape_flash_kernel(
     scalar_t* __restrict__ key_value,  // [num_tokens, num_heads, head_size]
@@ -121,32 +145,19 @@ __global__ void reshape_and_cache_back_flash_kernel(
   }
 }
 
-template <typename scalar_t, bool USE_MLA>
+template <typename scalar_t, GPUKVFormat format>
 __global__ void single_layer_kv_transfer_kernel(
-    // scalar_t* __restrict__ lmc_key_cache,    // [num_tokens,
-    // num_heads*head_size] scalar_t* __restrict__ lmc_value_cache,  //
-    // [num_tokens, num_heads*head_size]
-    scalar_t* __restrict__ lmc_key_value_cache,   // [num_tokens, 2,
-                                                  // num_heads*head_size]
-                                                  // or
-                                                  // [2, num_tokens,
-                                                  // num_heads*head_size]
-                                                  // or for MLA:
-                                                  // [num_tokens,
-                                                  // aligned_head_size]
-    scalar_t* __restrict__ vllm_key_value_cache,  // [2, num_blocks, block_size,
-                                                  // num_heads, head_size] or
-                                                  // [num_blocks, 2, block_size,
-                                                  // num_heads, head_size]
-                                                  // or for MLA:
-                                                  // [num_blocks, block_size,
-                                                  // head_size]
-
+    scalar_t* __restrict__ lmc_key_value_cache,
+    scalar_t* __restrict__ vllm_key_value_cache,
     const int64_t* __restrict__ slot_mapping,  // [num_tokens]
     const int vllm_block_key_stride_in_64bit, const int vllm_value_offset,
     const int lmc_stride, const int lmc_value_offset, const int num_heads,
     const int head_size_in_64bit, const int block_size,
     const TransferDirection direction) {
+  constexpr bool USE_MLA = (format == GPUKVFormat::NL_X_NB_BS_HS);
+  constexpr bool HND_LAYOUT = (format == GPUKVFormat::NL_X_TWO_NB_NH_BS_HS ||
+                               format == GPUKVFormat::NL_X_NB_TWO_NH_BS_HS);
+
   const int64_t token_idx = blockIdx.x;
   const int64_t slot_idx = slot_mapping[token_idx];
 
@@ -163,14 +174,24 @@ __global__ void single_layer_kv_transfer_kernel(
 
     const int head_idx = i / head_size_in_64bit;
     const int head_offset = i % head_size_in_64bit;
-    const int64_t vllm_key_idx = block_idx * vllm_block_key_stride_in_64bit +
-                                 block_offset * num_heads * head_size_in_64bit +
-                                 head_idx * head_size_in_64bit + head_offset;
+
+    int64_t vllm_key_idx;
+    if constexpr (HND_LAYOUT) {
+      // HND layout: [..., num_heads, block_size, head_size]
+      vllm_key_idx = block_idx * vllm_block_key_stride_in_64bit +
+                     head_idx * block_size * head_size_in_64bit +
+                     block_offset * head_size_in_64bit + head_offset;
+    } else {
+      // NHD layout: [..., block_size, num_heads, head_size]
+      // (also correct for MLA where num_heads==1)
+      vllm_key_idx = block_idx * vllm_block_key_stride_in_64bit +
+                     block_offset * num_heads * head_size_in_64bit +
+                     head_idx * head_size_in_64bit + head_offset;
+    }
 
     if (direction == TransferDirection::D2H) {
       // GPU to LMCache
       lmc_key_value_cache[lmc_key_idx] = vllm_key_value_cache[vllm_key_idx];
-      // For non-MLA, also copy the value component
       if constexpr (!USE_MLA) {
         const int64_t lmc_value_idx = lmc_key_idx + lmc_value_offset;
         const int64_t vllm_value_idx = vllm_key_idx + vllm_value_offset;
@@ -180,7 +201,6 @@ __global__ void single_layer_kv_transfer_kernel(
     } else {
       // LMCache to GPU
       vllm_key_value_cache[vllm_key_idx] = lmc_key_value_cache[lmc_key_idx];
-      // For non-MLA, also copy the value component
       if constexpr (!USE_MLA) {
         const int64_t lmc_value_idx = lmc_key_idx + lmc_value_offset;
         const int64_t vllm_value_idx = vllm_key_idx + vllm_value_offset;
@@ -192,21 +212,48 @@ __global__ void single_layer_kv_transfer_kernel(
 }
 
 template <GPUKVFormat format>
-__device__ __forceinline__ int64_t
-page_buffer_offset(const int k_or_v, const int token_idx,
-                   const int scalar_offset, const int scalars_per_token,
-                   const int page_buffer_size, const int block_size) {
+__device__ __forceinline__ int64_t page_buffer_offset(
+    const int k_or_v, const int token_idx, const int scalar_offset,
+    const int scalars_per_token, const int page_buffer_size,
+    const int block_size, const int head_size) {
+  /*
+  logical semantics of arguments (agnostic to physical format):
+  k_or_v:            0 for key, 1 for value
+  token_idx:         flat slot index from slot_mapping[] = block_id * block_size
+  + offset_in_block scalar_offset:     thread-loop index in [0,
+  scalars_per_token), flat offset within one token's data (NH*HS in xword units)
+  scalars_per_token: NH * HS in xword units — total data elements per token slot
+  page_buffer_size:  NB * BS — total token slots in the paged buffer
+  block_size:        BS — number of token slots per block
+  head_size:         HS in xword units — only used by HND formats to decompose
+  scalar_offset into (head_idx, head_offset)
+
+  The job of page_buffer_offset is to translate these logical arguments into a
+  physical address based on the GPUKVFormat.
+
+  NOTE(perf): For HND formats, threads within a warp access non-contiguous
+  addresses when crossing head boundaries (stride BS*HS between heads),
+  harming memory coalescing
+  TODO: A dedicated HND kernel could launch with
+  grid=(2, L, T*NH) thread=(HS,,) to keep warps within one head's contiguous
+  HS run
+  However, most models have head_size = 128 using bf16 or fp16 which is 256
+  bytes when divided by xwords (8 bytes) is exactly 32 xwords which fits one
+  warp Worst case if HS is smaller or quantization is smaller, we will have to
+  make two vectorized loads per warp that are BS * HS (the head stride) apart
+  */
+
   // vllm cross layer
   if constexpr (format == GPUKVFormat::NB_NL_TWO_BS_NH_HS) {
     return k_or_v * page_buffer_size * scalars_per_token +
            token_idx * scalars_per_token + scalar_offset;
   }
-  // vllm flash attention
+  // vllm flash attention (NHD)
   else if constexpr (format == GPUKVFormat::NL_X_TWO_NB_BS_NH_HS) {
     return k_or_v * page_buffer_size * scalars_per_token +
            token_idx * scalars_per_token + scalar_offset;
   }
-  // vllm flash infer
+  // vllm flash infer (NHD)
   else if constexpr (format == GPUKVFormat::NL_X_NB_TWO_BS_NH_HS) {
     const int block_idx = token_idx / block_size;
     const int block_offset = token_idx % block_size;
@@ -218,6 +265,30 @@ page_buffer_offset(const int k_or_v, const int token_idx,
   else if constexpr (format == GPUKVFormat::NL_X_NB_BS_HS ||
                      format == GPUKVFormat::NL_X_NBBS_ONE_HS) {
     return token_idx * scalars_per_token + scalar_offset;
+  }
+  // vllm flash attention (HND) — physical: [2, NB, NH, BS, HS]
+  else if constexpr (format == GPUKVFormat::NL_X_TWO_NB_NH_BS_HS) {
+    const int block_idx = token_idx / block_size;
+    const int block_offset = token_idx % block_size;
+    const int head_idx = scalar_offset / head_size;
+    const int head_offset = scalar_offset % head_size;
+    const int num_heads = scalars_per_token / head_size;
+    return k_or_v * page_buffer_size * scalars_per_token +
+           block_idx * num_heads * block_size * head_size +
+           head_idx * block_size * head_size + block_offset * head_size +
+           head_offset;
+  }
+  // vllm flash infer (HND) — physical: [NB, 2, NH, BS, HS]
+  else if constexpr (format == GPUKVFormat::NL_X_NB_TWO_NH_BS_HS) {
+    const int block_idx = token_idx / block_size;
+    const int block_offset = token_idx % block_size;
+    const int head_idx = scalar_offset / head_size;
+    const int head_offset = scalar_offset % head_size;
+    const int num_heads = scalars_per_token / head_size;
+    return block_idx * 2 * num_heads * block_size * head_size +
+           k_or_v * num_heads * block_size * head_size +
+           head_idx * block_size * head_size + block_offset * head_size +
+           head_offset;
   }
 }
 
@@ -305,7 +376,7 @@ __global__ void load_and_reshape_multi_layer_kernel(
                                                 // scalars_per_token]
     const int64_t* __restrict__ slot_mapping,   // [num_tokens]
     const int scalars_per_token, const int num_tokens, const int num_layers,
-    const int page_buffer_size, const int block_size,
+    const int page_buffer_size, const int block_size, const int head_size,
     const int skip_prefix_n_tokens) {
   const int token_id = blockIdx.x;
   const int layer_id = blockIdx.y;
@@ -327,8 +398,9 @@ __global__ void load_and_reshape_multi_layer_kernel(
         key_value_offset(k_or_v, layer_id, kv_token_id, i, scalars_per_token,
                          num_tokens, num_layers);
 
-    const int64_t vllm_offset = page_buffer_offset<format>(
-        k_or_v, slot_idx, i, scalars_per_token, page_buffer_size, block_size);
+    const int64_t vllm_offset =
+        page_buffer_offset<format>(k_or_v, slot_idx, i, scalars_per_token,
+                                   page_buffer_size, block_size, head_size);
 
     if (DIRECTION)  // 1 is paged buffer to LMCache
       key_value[lmcache_offset] = paged_buffer_ptr[vllm_offset];
@@ -440,7 +512,7 @@ T* get_kernel_ptr(TENSOR_TYPE& tensor) {
       <<<grid, block, 0, stream>>>(key_value_ptr, page_buffer_ptrs,          \
                                    slot_mapping_ptr, num_xwords, num_tokens, \
                                    num_layers, page_buffer_size, block_size, \
-                                   skip_prefix_n_tokens);                    \
+                                   head_size_xword, skip_prefix_n_tokens);   \
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 
 template <typename T>
@@ -455,7 +527,7 @@ void multi_layer_kv_transfer_templated(
     const torch::Tensor& slot_mapping,    // [num_tokens],
     const torch::Device& paged_memory_device, const int page_buffer_size,
     const TransferDirection direction, const GPUKVFormat gpu_kv_format,
-    const int block_size, const int skip_prefix_n_tokens) {
+    const int block_size, const int head_size, const int skip_prefix_n_tokens) {
   T* key_value_ptr = get_kernel_ptr<T, torch::Tensor>(key_value);
   T** page_buffer_ptrs =
       get_kernel_ptr<T*, const torch::Tensor>(key_value_ptrs);
@@ -468,6 +540,13 @@ void multi_layer_kv_transfer_templated(
   int num_origin_elements = key_value.size(3);
   int elements_per_xword = sizeof(T) / key_value.element_size();
   int num_xwords = num_origin_elements / elements_per_xword;
+  // head_size is in element units
+  // convert to xword units
+  // to match scalars_per_token (num_xwords) which is also in xword units.
+  int head_size_xword = head_size > 0 ? head_size / elements_per_xword : 0;
+
+  lmc::check_block_size(gpu_kv_format, block_size);
+  lmc::check_head_size(gpu_kv_format, head_size_xword);
 
   int k_or_v_size = lmc::is_mla(gpu_kv_format) ? 1 : 2;
 
@@ -494,6 +573,12 @@ void multi_layer_kv_transfer_templated(
       case GPUKVFormat::NL_X_NBBS_ONE_HS:
         LAUNCH_KERNEL_WITH_FORMAT(T, false, GPUKVFormat::NL_X_NBBS_ONE_HS);
         break;
+      case GPUKVFormat::NL_X_TWO_NB_NH_BS_HS:
+        LAUNCH_KERNEL_WITH_FORMAT(T, false, GPUKVFormat::NL_X_TWO_NB_NH_BS_HS);
+        break;
+      case GPUKVFormat::NL_X_NB_TWO_NH_BS_HS:
+        LAUNCH_KERNEL_WITH_FORMAT(T, false, GPUKVFormat::NL_X_NB_TWO_NH_BS_HS);
+        break;
       default:
         throw std::runtime_error("Unsupported GPUKVFormat");
     }
@@ -514,6 +599,12 @@ void multi_layer_kv_transfer_templated(
       case GPUKVFormat::NL_X_NBBS_ONE_HS:
         LAUNCH_KERNEL_WITH_FORMAT(T, true, GPUKVFormat::NL_X_NBBS_ONE_HS);
         break;
+      case GPUKVFormat::NL_X_TWO_NB_NH_BS_HS:
+        LAUNCH_KERNEL_WITH_FORMAT(T, true, GPUKVFormat::NL_X_TWO_NB_NH_BS_HS);
+        break;
+      case GPUKVFormat::NL_X_NB_TWO_NH_BS_HS:
+        LAUNCH_KERNEL_WITH_FORMAT(T, true, GPUKVFormat::NL_X_NB_TWO_NH_BS_HS);
+        break;
       default:
         throw std::runtime_error("Unsupported GPUKVFormat");
     }
@@ -529,17 +620,17 @@ void multi_layer_kv_transfer(
     torch::Tensor& key_value, const torch::Tensor& key_value_ptrs,
     const torch::Tensor& slot_mapping, const torch::Device& paged_memory_device,
     const int page_buffer_size, const TransferDirection direction,
-    const GPUKVFormat gpu_kv_format, const int block_size,
+    const GPUKVFormat gpu_kv_format, const int block_size, const int head_size,
     const int skip_prefix_n_tokens) {
   int num_origin_elements = key_value.size(3);
   int copy_size = num_origin_elements * key_value.element_size();
 #ifndef LAUNCH_MULTI_LAYER_KV_TRANSFER
-  #define LAUNCH_MULTI_LAYER_KV_TRANSFER(type)                          \
-    do {                                                                \
-      multi_layer_kv_transfer_templated<type>(                          \
-          key_value, key_value_ptrs, slot_mapping, paged_memory_device, \
-          page_buffer_size, direction, gpu_kv_format, block_size,       \
-          skip_prefix_n_tokens);                                        \
+  #define LAUNCH_MULTI_LAYER_KV_TRANSFER(type)                               \
+    do {                                                                     \
+      multi_layer_kv_transfer_templated<type>(                               \
+          key_value, key_value_ptrs, slot_mapping, paged_memory_device,      \
+          page_buffer_size, direction, gpu_kv_format, block_size, head_size, \
+          skip_prefix_n_tokens);                                             \
     } while (0)
 #endif
   if (copy_size % 8 == 0) {
@@ -650,10 +741,15 @@ void single_layer_kv_transfer(
     //     vllm_value_cache,  // [num_blocks, block_size, num_heads, head_size]
     //  key_cache/value_cache must be on gpu
     torch::Tensor&
-        vllm_key_value_cache,  // [2, num_blocks, block_size, num_heads,
-                               // head_size] for flash attention
-    // [num_blocks, 2, block_size, num_heads, head_size] for flash infer
-    // [num_blocks, block_size, head_size] for MLA
+        vllm_key_value_cache,  // NHD: [2, num_blocks, block_size, num_heads,
+                               //       head_size] for flash attention
+                               //      [num_blocks, 2, block_size, num_heads,
+                               //       head_size] for flash infer
+                               // HND: [2, num_blocks, num_heads, block_size,
+                               //       head_size] for flash attention
+                               //      [num_blocks, 2, num_heads, block_size,
+                               //       head_size] for flash infer
+                               // MLA: [num_blocks, block_size, head_size]
 
     torch::Tensor& slot_mapping,  // [num_tokens]
     const TransferDirection direction, const GPUKVFormat gpu_kv_format,
@@ -684,17 +780,27 @@ void single_layer_kv_transfer(
   int block_size;
 
   const bool use_mla = lmc::is_mla(gpu_kv_format);
+  const bool hnd_layout = lmc::is_hnd(gpu_kv_format);
 
   if (use_mla) {
     // MLA format: [num_blocks, block_size, head_size]
     num_heads = 1;
     block_size = vllm_key_value_cache.size(1);
     head_size_in_64bit = vllm_key_value_cache.size(2) / elements_per_entry;
+  } else if (hnd_layout) {
+    // HND format: [..., num_heads, block_size, head_size]
+    num_heads = vllm_key_value_cache.size(2);
+    block_size = vllm_key_value_cache.size(3);
+    head_size_in_64bit = vllm_key_value_cache.size(4) / elements_per_entry;
   } else {
+    // NHD format: [..., block_size, num_heads, head_size]
+    block_size = vllm_key_value_cache.size(2);
     num_heads = vllm_key_value_cache.size(3);
     head_size_in_64bit = vllm_key_value_cache.size(4) / elements_per_entry;
-    block_size = vllm_key_value_cache.size(2);
   }
+
+  lmc::check_block_size(gpu_kv_format, block_size);
+  lmc::check_head_size(gpu_kv_format, head_size_in_64bit);
 
   int lmc_stride;
   int lmc_value_offset;
@@ -717,7 +823,8 @@ void single_layer_kv_transfer(
     vllm_block_key_stride_in_64bit =
         vllm_key_value_cache.stride(0) / elements_per_entry;
     vllm_value_offset = 0;  // No separate K/V for MLA
-  } else if (gpu_kv_format == GPUKVFormat::NL_X_TWO_NB_BS_NH_HS) {
+  } else if (gpu_kv_format == GPUKVFormat::NL_X_TWO_NB_BS_NH_HS ||
+             gpu_kv_format == GPUKVFormat::NL_X_TWO_NB_NH_BS_HS) {
     vllm_block_key_stride_in_64bit =
         vllm_key_value_cache.stride(1) / elements_per_entry;
     vllm_value_offset = vllm_key_value_cache.stride(0) / elements_per_entry;
@@ -736,22 +843,33 @@ void single_layer_kv_transfer(
       device_of(vllm_key_value_cache));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
-  // Dispatch to the appropriate template specialization based on use_mla
-  if (use_mla) {
-    lmc::single_layer_kv_transfer_kernel<int64_t, true>
-        <<<grid, block, 0, stream>>>(
-            lmc_key_value_cache_ptr, vllm_key_value_cache_ptr, slot_mapping_ptr,
-            vllm_block_key_stride_in_64bit, vllm_value_offset, lmc_stride,
-            lmc_value_offset, num_heads, head_size_in_64bit, block_size,
-            direction);
-  } else {
-    lmc::single_layer_kv_transfer_kernel<int64_t, false>
-        <<<grid, block, 0, stream>>>(
-            lmc_key_value_cache_ptr, vllm_key_value_cache_ptr, slot_mapping_ptr,
-            vllm_block_key_stride_in_64bit, vllm_value_offset, lmc_stride,
-            lmc_value_offset, num_heads, head_size_in_64bit, block_size,
-            direction);
+  // Dispatch to the appropriate template specialization based on GPUKVFormat
+#define LAUNCH_SINGLE_LAYER_KERNEL(FORMAT)                                     \
+  lmc::single_layer_kv_transfer_kernel<int64_t, FORMAT>                        \
+      <<<grid, block, 0, stream>>>(                                            \
+          lmc_key_value_cache_ptr, vllm_key_value_cache_ptr, slot_mapping_ptr, \
+          vllm_block_key_stride_in_64bit, vllm_value_offset, lmc_stride,       \
+          lmc_value_offset, num_heads, head_size_in_64bit, block_size,         \
+          direction);                                                          \
+  break;
+
+  switch (gpu_kv_format) {
+    case GPUKVFormat::NL_X_NB_BS_HS:
+      LAUNCH_SINGLE_LAYER_KERNEL(GPUKVFormat::NL_X_NB_BS_HS)
+    case GPUKVFormat::NL_X_TWO_NB_BS_NH_HS:
+      LAUNCH_SINGLE_LAYER_KERNEL(GPUKVFormat::NL_X_TWO_NB_BS_NH_HS)
+    case GPUKVFormat::NL_X_NB_TWO_BS_NH_HS:
+      LAUNCH_SINGLE_LAYER_KERNEL(GPUKVFormat::NL_X_NB_TWO_BS_NH_HS)
+    case GPUKVFormat::NL_X_TWO_NB_NH_BS_HS:
+      LAUNCH_SINGLE_LAYER_KERNEL(GPUKVFormat::NL_X_TWO_NB_NH_BS_HS)
+    case GPUKVFormat::NL_X_NB_TWO_NH_BS_HS:
+      LAUNCH_SINGLE_LAYER_KERNEL(GPUKVFormat::NL_X_NB_TWO_NH_BS_HS)
+    default:
+      TORCH_CHECK(false,
+                  "Unsupported GPUKVFormat for single_layer_kv_transfer: ",
+                  static_cast<int>(gpu_kv_format));
   }
+#undef LAUNCH_SINGLE_LAYER_KERNEL
 }
 
 void load_and_reshape_flash(
