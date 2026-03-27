@@ -36,6 +36,16 @@ def parse_args():
         default=0,
         help="Offset for key generation (gen mode only)",
     )
+    parser.add_argument(
+        "--l2-adapter",
+        dest="l2_adapter",
+        action="append",
+        default=[],
+        type=str,
+        metavar="JSON",
+        help="L2 adapter spec as JSON (test_l2_adapter mode). "
+        'e.g. \'{"type":"mock","max_size_gb":1}\'.',
+    )
     return parser.parse_args()
 
 
@@ -65,6 +75,7 @@ async def main():
         "num_keys": args.num_keys,
         "concurrency": args.concurrency,
         "offset": args.offset,
+        "l2_adapter": args.l2_adapter,
     }
 
     # Execute the mode function
