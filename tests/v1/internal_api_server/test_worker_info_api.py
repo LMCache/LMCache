@@ -101,12 +101,16 @@ class TestWorkerInfoAPI:
     @pytest.fixture
     def client_with_real_controller(self, real_controller_manager):
         app.state.lmcache_controller_manager = real_controller_manager
-        return TestClient(app)
+        client = TestClient(app)
+        yield client
+        client.close()
 
     @pytest.fixture
     def client_without_controller(self):
         app.state.lmcache_controller_manager = None
-        return TestClient(app)
+        client = TestClient(app)
+        yield client
+        client.close()
 
     def _send_message(self, socket, msg_type, instance_id, worker_id, ip, port):
         """Send message to controller via ZMQ

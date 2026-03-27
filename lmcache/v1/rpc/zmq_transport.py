@@ -211,4 +211,3 @@ class ZmqRouterServerTransport(RpcServerTransport):
 
     def close(self) -> None:
         self.socket.close(linger=0)
-        self.ctx.term()
