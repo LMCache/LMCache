@@ -327,7 +327,7 @@ impl RawBlockDevice {
         let ptr_usize = ptr as usize;
         let res = py.allow_threads(move || {
             let src = ptr_usize as *const u8;
-            let src_aligned = (src as usize).is_multiple_of(align);
+            let src_aligned = (src as usize) % align == 0;
             if total_len == payload_len && !self.use_odirect {
                 // direct write without padding
                 return pwrite_from_ptr(fd, offset, src, payload_len);
@@ -467,7 +467,7 @@ impl RawBlockDevice {
         let dst_usize = ptr as usize;
         let res = py.allow_threads(move || {
             let dst = dst_usize as *mut u8;
-            let dst_aligned = (dst as usize).is_multiple_of(align);
+            let dst_aligned = (dst as usize) % align == 0;
             if total_len == payload_len && !self.use_odirect {
                 return pread_into(fd, offset, dst, payload_len);
             }
