@@ -62,18 +62,19 @@ subcommands:
 
 ### `query engine`
 
-Send one inference request to an engine HTTP endpoint and report token and latency metrics. 
+Send one inference request to an engine HTTP endpoint and report token/latency metrics; ``--prompt`` supports placeholders, where ``{lmcache}`` loads ``lmcache/cli/documents/lmcache.txt`` and custom documents use ``--documents NAME=PATH``.
+ 
 
 ```bash
 # Single inference query
 $ lmcache query engine --url http://localhost:8000/v1 \
-  --prompt "{ctx} What is the example usage of lmcache?" \
-  --documents ctx=LMCache/lmcache/cli/documents/lmcache.txt  \
-  --format terminal  --max-tokens 128
+     --prompt "{lmcache} Summarize LMCache usage." \
+     --format terminal \
+     --max-tokens 128
    
 ================= Query Engine =================
 Model:                         facebook/opt-125m
-Prompt documents ctx:                        608
+Prompt documents lmcache:                    608
 Prompt query:                                  9
 --------------- Latency Metrics ----------------
 Input tokens:                             618.00

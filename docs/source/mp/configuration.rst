@@ -162,9 +162,9 @@ Source: ``lmcache/v1/distributed/config.py``
      - L2 store policy.  Determines which adapters receive each key
        and whether keys are deleted from L1 after L2 store.
        The ``default`` policy stores all keys to all adapters and keeps L1.
-       The ``noop`` policy stores all keys to all adapters and then
+       The ``skip_l1`` policy stores all keys to all adapters and then
        deletes them from L1 (buffer-only mode).
-       Choices: ``default``, ``noop``.
+       Choices: ``default``, ``skip_l1``.
    * - ``--l2-prefetch-policy``
      - ``default``
      - L2 prefetch policy.  Determines which adapter loads each key
@@ -367,7 +367,7 @@ Full Example
         --l1-write-ttl-seconds 600 \
         --l1-read-ttl-seconds 300 \
         --eviction-policy noop \
-        --l2-store-policy noop \
+        --l2-store-policy skip_l1 \
         --eviction-trigger-watermark 0.9 \
         --eviction-ratio 0.1 \
         --l2-prefetch-policy default \
