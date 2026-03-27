@@ -872,6 +872,7 @@ class GdsBackend(AllocatorBackendInterface):
         paths: list[str | None] = []
         dtypes: list[torch.dtype | None] = []
         shapes: list[torch.Size | None] = []
+        fmts: list[MemoryFormat | None] = []
         with self.hot_lock:
             for key in keys:
                 entry = self.hot_cache.get(key)
@@ -880,18 +881,20 @@ class GdsBackend(AllocatorBackendInterface):
                     paths.append(None)
                     dtypes.append(None)
                     shapes.append(None)
+                    fmts.append(None)
                     continue
                 paths.append(entry.path)
                 dtypes.append(entry.dtype)
                 shapes.append(entry.shape)
+                fmts.append(entry.fmt)
 
         memory_objs: list[MemoryObj | None] = []
         gds_reads, gds_read_bytes = 0, 0
-        for dtype, shape, path in zip(dtypes, shapes, paths, strict=True):
+        for dtype, shape, path, fmt in zip(dtypes, shapes, paths, fmts, strict=True):
             if path is None:
                 memory_objs.append(None)
                 continue
-            memory_obj = self.memory_allocator.allocate(shape, dtype)
+            memory_obj = self.memory_allocator.allocate(shape, dtype, fmt=fmt)
             if memory_obj is None:
                 logger.error(f"Memory allocation failed during get_blocking for {path}")
             else:
