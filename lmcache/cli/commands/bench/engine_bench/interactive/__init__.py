@@ -131,7 +131,7 @@ def _prompt_action() -> str:
         "",
         choices=[
             ("start", "Start benchmark"),
-            ("export", "Export configuration and exit"),
+            ("export", "Export configuration for later use and exit"),
         ],
         default="start",
     )
