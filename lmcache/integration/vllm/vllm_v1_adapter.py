@@ -569,7 +569,24 @@ class LMCacheConnectorV1Impl:
         self._check_legacy_register_kv_caches()
 
         self.kv_caches: dict[str, torch.Tensor] = {}
-        self._has_non_attention_layers = False
+        # Detect hybrid (mamba/recurrent) and attention-free models at init
+        # time so the flag is correct in BOTH the scheduler process and the
+        # worker process.  Previously this was only set in register_kv_caches()
+        # (worker-side), so the scheduler always saw False and would try to
+        # load attention-only KV for hybrid models, leaving mamba state
+        # uninitialized and producing garbage output.
+        self._has_non_attention_layers = (
+            vllm_config.model_config.is_hybrid
+            or vllm_config.model_config.is_attention_free
+        )
+        if self._has_non_attention_layers:
+            logger.info(
+                "Hybrid/attention-free model detected at init (is_hybrid=%s, "
+                "is_attention_free=%s): LMCache load disabled to avoid "
+                "uninitialized mamba state.",
+                vllm_config.model_config.is_hybrid,
+                vllm_config.model_config.is_attention_free,
+            )
         self._block_size = vllm_config.cache_config.block_size
         self.load_specs: dict[str, LoadSpec] = {}
         self.kv_cache_manager: Optional["KVCacheManager"] = None
