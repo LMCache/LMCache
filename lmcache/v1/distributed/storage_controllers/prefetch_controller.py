@@ -414,14 +414,27 @@ class PrefetchController(StorageControllerInterface):
                 except (OSError, BlockingIOError):
                     pass
 
-                if fd == self._submission_efd:
-                    self._drain_submission_queue()
-                elif fd in self._lookup_efd_to_adapter:
-                    self._process_lookup_completions(self._lookup_efd_to_adapter[fd])
-                elif fd in self._load_efd_to_adapter:
-                    self._process_load_completions(self._load_efd_to_adapter[fd])
+                try:
+                    if fd == self._submission_efd:
+                        self._drain_submission_queue()
+                    elif fd in self._lookup_efd_to_adapter:
+                        self._process_lookup_completions(
+                            self._lookup_efd_to_adapter[fd]
+                        )
+                    elif fd in self._load_efd_to_adapter:
+                        self._process_load_completions(self._load_efd_to_adapter[fd])
+                except Exception:
+                    logger.exception(
+                        "Unexpected error in prefetch loop while processing fd %d",
+                        fd,
+                    )
 
-            self._start_pending_requests()
+            try:
+                self._start_pending_requests()
+            except Exception:
+                logger.exception(
+                    "Unexpected error in prefetch loop while starting pending requests"
+                )
 
     def _drain_submission_queue(self) -> None:
         """Move items from the thread-safe submission queue to the

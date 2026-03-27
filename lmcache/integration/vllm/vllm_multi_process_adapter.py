@@ -564,9 +564,22 @@ class LMCacheMPWorkerAdapter:
             kv_caches: A dict of kv caches to register. The keys are the
                 layer names and the values are the corresponding tensors.
         """
+        # First Party
+        from lmcache.integration.vllm.utils import vllm_layout_hints
+        from lmcache.v1.gpu_connector.utils import (
+            ensure_contiguous_kv_caches,
+        )
+
         # Register kv cache and send the request
-        self.kv_caches = kv_caches
         logger.info("Registering kv caches")
+
+        layout_hints = vllm_layout_hints()
+        kv_caches = ensure_contiguous_kv_caches(
+            kv_caches, kv_layout=layout_hints.get("kv_layout")
+        )
+
+        self.kv_caches = kv_caches
+
         future = send_lmcache_request(
             self.mq_client,
             RequestType.REGISTER_KV_CACHE,
@@ -575,6 +588,7 @@ class LMCacheMPWorkerAdapter:
                 wrap_kv_caches(kv_caches),
                 self.model_name,
                 self.world_size,
+                layout_hints,
             ],
         )
         try:

@@ -7,6 +7,7 @@ from __future__ import annotations
 from concurrent.futures import Future
 import asyncio
 import os
+import struct
 import tempfile
 import threading
 
@@ -21,6 +22,8 @@ from lmcache.v1.memory_management import AdHocMemoryAllocator, MemoryFormat
 from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 from lmcache.v1.storage_backend.plugins.rust_raw_block_backend import (
+    _DEFAULT_META_MAGIC,
+    _DEFAULT_META_VERSION,
     RustRawBlockBackend,
 )
 
@@ -69,6 +72,8 @@ def test_rust_raw_block_backend_put_get_roundtrip(memory_allocator, loop_in_thre
             "rust_raw_block.device_path": dev_path,
             "rust_raw_block.block_align": 4096,
             "rust_raw_block.header_bytes": 4096,
+            "rust_raw_block.meta_total_bytes": 4 * 1024 * 1024,
+            "rust_raw_block.meta_enable_periodic": False,
         }
         metadata = LMCacheMetadata(
             model_name="test_model",
@@ -135,10 +140,12 @@ def test_rust_raw_block_backend_eviction_lru(memory_allocator, loop_in_thread):
         )
         config.extra_config = {
             "rust_raw_block.device_path": dev_path,
-            "rust_raw_block.capacity_bytes": 2 * 4 * 1024 * 1024,
+            "rust_raw_block.capacity_bytes": 3 * 4 * 1024 * 1024,
             "rust_raw_block.block_align": 4096,
             "rust_raw_block.header_bytes": 4096,
             "rust_raw_block.slot_bytes": 4 * 1024 * 1024,
+            "rust_raw_block.meta_total_bytes": 4 * 1024 * 1024,
+            "rust_raw_block.meta_enable_periodic": False,
         }
         metadata = LMCacheMetadata(
             model_name="test_model",
@@ -213,11 +220,12 @@ def test_rust_raw_block_backend_eviction_lru(memory_allocator, loop_in_thread):
 @pytest.mark.skipif(
     not _has_ext(), reason="lmcache_rust_raw_block_io extension not installed"
 )
-def test_rust_raw_block_backend_manifest_roundtrip(memory_allocator, loop_in_thread):
-    """Test manifest persistence and restoration across backend restarts."""
+def test_rust_raw_block_backend_device_checkpoint_roundtrip(
+    memory_allocator, loop_in_thread
+):
+    """Test on-device metadata checkpoint persistence across backend restarts."""
     with tempfile.TemporaryDirectory() as td:
         dev_path = os.path.join(td, "dev.bin")
-        manifest_path = os.path.join(td, "manifest.json")
         with open(dev_path, "wb") as f:
             f.truncate(64 * 1024 * 1024)
 
@@ -231,7 +239,8 @@ def test_rust_raw_block_backend_manifest_roundtrip(memory_allocator, loop_in_thr
             "rust_raw_block.device_path": dev_path,
             "rust_raw_block.block_align": 4096,
             "rust_raw_block.header_bytes": 4096,
-            "rust_raw_block.manifest_path": manifest_path,
+            "rust_raw_block.meta_total_bytes": 4 * 1024 * 1024,
+            "rust_raw_block.meta_enable_periodic": False,
         }
         metadata = LMCacheMetadata(
             model_name="test_model",
@@ -285,3 +294,259 @@ def test_rust_raw_block_backend_manifest_roundtrip(memory_allocator, loop_in_thr
             assert bytes(out.byte_array) == expected
         finally:
             backend2.close()
+
+
+@pytest.mark.skipif(
+    not _has_ext(), reason="lmcache_rust_raw_block_io extension not installed"
+)
+def test_rust_raw_block_backend_data_offsets_start_after_metadata(
+    memory_allocator, loop_in_thread
+):
+    """Slot allocations must begin after reserved metadata region."""
+    with tempfile.TemporaryDirectory() as td:
+        dev_path = os.path.join(td, "dev.bin")
+        with open(dev_path, "wb") as f:
+            f.truncate(64 * 1024 * 1024)
+
+        config = LMCacheEngineConfig.from_defaults(
+            chunk_size=256,
+            local_cpu=True,
+            max_local_cpu_size=0.1,
+            lmcache_instance_id="test_rust_raw_block_backend_offsets",
+        )
+        config.extra_config = {
+            "rust_raw_block.device_path": dev_path,
+            "rust_raw_block.block_align": 4096,
+            "rust_raw_block.header_bytes": 4096,
+            "rust_raw_block.meta_total_bytes": 8 * 1024 * 1024,
+            "rust_raw_block.meta_enable_periodic": False,
+        }
+        metadata = LMCacheMetadata(
+            model_name="test_model",
+            world_size=1,
+            local_world_size=1,
+            worker_id=0,
+            local_worker_id=0,
+            kv_dtype=torch.bfloat16,
+            kv_shape=(4, 2, 256, 8, 128),
+        )
+        local_cpu = LocalCPUBackend(
+            config=config,
+            metadata=metadata,
+            dst_device="cpu",
+            memory_allocator=memory_allocator,
+        )
+        backend = RustRawBlockBackend(
+            config=config,
+            metadata=metadata,
+            local_cpu_backend=local_cpu,
+            loop=loop_in_thread,
+            dst_device="cpu",
+        )
+
+        try:
+            key = CacheEngineKey("test_model", 1, 0, 777, torch.bfloat16)
+            alloc = AdHocMemoryAllocator(device="cpu")
+            obj = alloc.allocate(
+                [torch.Size([2, 16, 8, 128])], [torch.bfloat16], fmt=MemoryFormat.KV_T2D
+            )
+            assert obj is not None
+            futs = backend.batched_submit_put_task([key], [obj])
+            assert futs is not None
+            futs[0].result(timeout=10)
+
+            with backend._lock:
+                entry = backend._index.get(key)
+                assert entry is not None
+                assert entry.offset >= 8 * 1024 * 1024
+        finally:
+            backend.close()
+
+
+@pytest.mark.skipif(
+    not _has_ext(), reason="lmcache_rust_raw_block_io extension not installed"
+)
+def test_rust_raw_block_backend_ignores_torn_newer_checkpoint(
+    memory_allocator, loop_in_thread
+):
+    """
+    If a newer checkpoint copy is torn, loader falls back to the older valid copy.
+    """
+    with tempfile.TemporaryDirectory() as td:
+        dev_path = os.path.join(td, "dev.bin")
+        with open(dev_path, "wb") as f:
+            f.truncate(64 * 1024 * 1024)
+
+        base_cfg = LMCacheEngineConfig.from_defaults(
+            chunk_size=256,
+            local_cpu=True,
+            max_local_cpu_size=0.1,
+            lmcache_instance_id="test_rust_raw_block_backend_torn_checkpoint",
+        )
+        meta_total = 4 * 1024 * 1024
+        align = 4096
+        base_cfg.extra_config = {
+            "rust_raw_block.device_path": dev_path,
+            "rust_raw_block.block_align": align,
+            "rust_raw_block.header_bytes": align,
+            "rust_raw_block.meta_total_bytes": meta_total,
+            "rust_raw_block.meta_enable_periodic": False,
+        }
+        metadata = LMCacheMetadata(
+            model_name="test_model",
+            world_size=1,
+            local_world_size=1,
+            worker_id=0,
+            local_worker_id=0,
+            kv_dtype=torch.bfloat16,
+            kv_shape=(4, 2, 256, 8, 128),
+        )
+
+        local_cpu = LocalCPUBackend(
+            config=base_cfg,
+            metadata=metadata,
+            dst_device="cpu",
+            memory_allocator=memory_allocator,
+        )
+
+        backend1 = RustRawBlockBackend(
+            config=base_cfg,
+            metadata=metadata,
+            local_cpu_backend=local_cpu,
+            loop=loop_in_thread,
+            dst_device="cpu",
+        )
+        alloc = AdHocMemoryAllocator(device="cpu")
+        key = CacheEngineKey("test_model", 1, 0, 888, torch.bfloat16)
+        obj = alloc.allocate(
+            [torch.Size([2, 16, 8, 128])], [torch.bfloat16], fmt=MemoryFormat.KV_T2D
+        )
+        assert obj is not None and obj.tensor is not None
+        obj.tensor.fill_(11)
+        expected = bytes(obj.byte_array)
+        try:
+            fut = backend1.batched_submit_put_task([key], [obj])[0]
+            fut.result(timeout=10)
+        finally:
+            torn_offset = backend1._meta_container_offsets()[1]
+            backend1.close()
+
+        # Corrupt the newer checkpoint copy with invalid CRC.
+        # Header format: <8sIQQI (magic, version, seq, payload_len, crc).
+        header = struct.pack(
+            "<8sIQQI", _DEFAULT_META_MAGIC, _DEFAULT_META_VERSION, 9999, 2, 0
+        )
+        padded_header = header + bytes(align - len(header))
+        with open(dev_path, "r+b") as f:
+            f.seek(torn_offset + align)
+            f.write(b"{}")
+            f.seek(torn_offset)
+            f.write(padded_header)
+
+        backend2 = RustRawBlockBackend(
+            config=base_cfg,
+            metadata=metadata,
+            local_cpu_backend=local_cpu,
+            loop=loop_in_thread,
+            dst_device="cpu",
+        )
+        try:
+            assert backend2.contains(key)
+            out = backend2.get_blocking(key)
+            assert out is not None
+            assert bytes(out.byte_array) == expected
+        finally:
+            backend2.close()
+
+
+@pytest.mark.skipif(
+    not _has_ext(), reason="lmcache_rust_raw_block_io extension not installed"
+)
+def test_rust_raw_block_backend_skips_invalid_checkpoint_entries(
+    memory_allocator, loop_in_thread
+):
+    """Checkpoint restore should reject invalid offset/size metadata entries."""
+    with tempfile.TemporaryDirectory() as td:
+        dev_path = os.path.join(td, "dev.bin")
+        with open(dev_path, "wb") as f:
+            f.truncate(64 * 1024 * 1024)
+
+        base_cfg = LMCacheEngineConfig.from_defaults(
+            chunk_size=256,
+            local_cpu=True,
+            max_local_cpu_size=0.1,
+            lmcache_instance_id="test_rust_raw_block_backend_invalid_checkpoint",
+        )
+        base_cfg.extra_config = {
+            "rust_raw_block.device_path": dev_path,
+            "rust_raw_block.block_align": 4096,
+            "rust_raw_block.header_bytes": 4096,
+            "rust_raw_block.meta_total_bytes": 4 * 1024 * 1024,
+            "rust_raw_block.meta_enable_periodic": False,
+            "rust_raw_block.meta_verify_on_load": False,
+        }
+        metadata = LMCacheMetadata(
+            model_name="test_model",
+            world_size=1,
+            local_world_size=1,
+            worker_id=0,
+            local_worker_id=0,
+            kv_dtype=torch.bfloat16,
+            kv_shape=(4, 2, 256, 8, 128),
+        )
+
+        local_cpu = LocalCPUBackend(
+            config=base_cfg,
+            metadata=metadata,
+            dst_device="cpu",
+            memory_allocator=memory_allocator,
+        )
+        backend = RustRawBlockBackend(
+            config=base_cfg,
+            metadata=metadata,
+            local_cpu_backend=local_cpu,
+            loop=loop_in_thread,
+            dst_device="cpu",
+        )
+        try:
+            entries = {}
+            for chunk_hash, (offset, size) in {
+                1: (backend._data_base_offset - backend.slot_bytes, 1024),
+                2: (backend._data_base_offset + 1, 1024),
+                3: (
+                    backend._data_base_offset,
+                    backend.slot_bytes - backend.header_bytes + 1,
+                ),
+            }.items():
+                key = CacheEngineKey("test_model", 1, 0, chunk_hash, torch.bfloat16)
+                entries[key.to_string()] = {
+                    "offset": offset,
+                    "size": size,
+                    "shape": [2, 16, 8, 128],
+                    "dtype": "bfloat16",
+                    "fmt": MemoryFormat.KV_T2D.name,
+                    "cached_positions": None,
+                }
+
+            applied = backend._apply_loaded_state(
+                {
+                    "version": 1,
+                    "device_path": dev_path,
+                    "capacity_bytes": backend.capacity_bytes,
+                    "block_align": backend.block_align,
+                    "header_bytes": backend.header_bytes,
+                    "slot_bytes": backend.slot_bytes,
+                    "meta_total_bytes": backend.meta_total_bytes,
+                    "meta_magic": backend.meta_magic_text,
+                    "meta_version": backend.meta_version,
+                    "data_base_offset": backend._data_base_offset,
+                    "next_slot": 0,
+                    "free_slots": [],
+                    "lru_keys": [],
+                    "entries": entries,
+                }
+            )
+            assert applied is True
+            assert backend._index == {}
+        finally:
+            backend.close()

@@ -40,6 +40,8 @@ if lmc_ops is None:
         NL_X_TWO_NB_BS_NH_HS = 0
         NL_X_NB_TWO_BS_NH_HS = 1
         NL_X_NB_BS_HS = 2
+        NL_X_TWO_NB_NH_BS_HS = 3
+        NL_X_NB_TWO_NH_BS_HS = 4
 
     class MockCOps:
         GPUKVFormat = MockGPUKVFormat
@@ -241,6 +243,10 @@ def generate_kv_cache_paged_list_tensors(
             shape = [2, num_blocks, block_size, num_heads, head_size]
         elif gpu_kv_format == lmc_ops.GPUKVFormat.NL_X_NB_TWO_BS_NH_HS:
             shape = [num_blocks, 2, block_size, num_heads, head_size]
+        elif gpu_kv_format == lmc_ops.GPUKVFormat.NL_X_TWO_NB_NH_BS_HS:
+            shape = [2, num_blocks, num_heads, block_size, head_size]
+        elif gpu_kv_format == lmc_ops.GPUKVFormat.NL_X_NB_TWO_NH_BS_HS:
+            shape = [num_blocks, 2, num_heads, block_size, head_size]
 
     for i in range(num_layers):
         # TODO(chunxiaozheng): support more dtypes
@@ -420,6 +426,76 @@ def check_paged_kv_cache_equal(
             assert right_k.shape[token_dim] >= num_tokens
             assert right_v.shape[token_dim] >= num_tokens
 
+            assert (left_k[slot_mapping, :, :] == right_k[slot_mapping, :, :]).all()
+            assert (left_v[slot_mapping, :, :] == right_v[slot_mapping, :, :]).all()
+
+    elif gpu_kv_format == lmc_ops.GPUKVFormat.NL_X_TWO_NB_NH_BS_HS:
+        # HND flash attention: [2, num_blocks, num_heads, block_size, head_size]
+        # Flatten [num_blocks, num_heads, block_size, head_size] ->
+        #   swap to [num_blocks, block_size, num_heads, head_size] ->
+        #   reshape to [num_blocks*block_size, num_heads, head_size]
+        num_tokens = slot_mapping.shape[0]
+        for left_kv_layer, right_kv_layer in zip(left, right, strict=False):
+            left_k = (
+                left_kv_layer[0]
+                .permute(0, 2, 1, 3)
+                .contiguous()
+                .reshape(-1, num_heads, head_size)
+            )
+            left_v = (
+                left_kv_layer[1]
+                .permute(0, 2, 1, 3)
+                .contiguous()
+                .reshape(-1, num_heads, head_size)
+            )
+            right_k = (
+                right_kv_layer[0]
+                .permute(0, 2, 1, 3)
+                .contiguous()
+                .reshape(-1, num_heads, head_size)
+            )
+            right_v = (
+                right_kv_layer[1]
+                .permute(0, 2, 1, 3)
+                .contiguous()
+                .reshape(-1, num_heads, head_size)
+            )
+
+            assert left_k.shape[0] >= num_tokens
+            assert (left_k[slot_mapping, :, :] == right_k[slot_mapping, :, :]).all()
+            assert (left_v[slot_mapping, :, :] == right_v[slot_mapping, :, :]).all()
+
+    elif gpu_kv_format == lmc_ops.GPUKVFormat.NL_X_NB_TWO_NH_BS_HS:
+        # HND flash infer: [num_blocks, 2, num_heads, block_size, head_size]
+        # left_kv_layer[:, 0] -> [num_blocks, num_heads, block_size, head_size]
+        num_tokens = slot_mapping.shape[0]
+        for left_kv_layer, right_kv_layer in zip(left, right, strict=False):
+            left_k = (
+                left_kv_layer[:, 0]
+                .permute(0, 2, 1, 3)
+                .contiguous()
+                .reshape(-1, num_heads, head_size)
+            )
+            left_v = (
+                left_kv_layer[:, 1]
+                .permute(0, 2, 1, 3)
+                .contiguous()
+                .reshape(-1, num_heads, head_size)
+            )
+            right_k = (
+                right_kv_layer[:, 0]
+                .permute(0, 2, 1, 3)
+                .contiguous()
+                .reshape(-1, num_heads, head_size)
+            )
+            right_v = (
+                right_kv_layer[:, 1]
+                .permute(0, 2, 1, 3)
+                .contiguous()
+                .reshape(-1, num_heads, head_size)
+            )
+
+            assert left_k.shape[0] >= num_tokens
             assert (left_k[slot_mapping, :, :] == right_k[slot_mapping, :, :]).all()
             assert (left_v[slot_mapping, :, :] == right_v[slot_mapping, :, :]).all()
 
