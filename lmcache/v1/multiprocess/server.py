@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from dataclasses import dataclass
+from itertools import islice
+from typing import Generator
 import argparse
 import threading
 import time
@@ -130,6 +132,23 @@ def get_layout_desc(gpu_context: GPUCacheContext, num_tokens: int) -> MemoryLayo
     shape = gpu_context.get_kv_buffer_shape(num_tokens)
     dtype = gpu_context.dtype
     return MemoryLayoutDesc(shapes=[shape], dtypes=[dtype])
+
+
+def batched_iteration(lst: list, batch_size: int) -> Generator[tuple, None, None]:
+    """Utility function to iterate over a list in batches.
+
+    Args:
+        lst: The list to iterate over.
+        batch_size: The size of each batch.
+
+    Yields:
+        Batches of the list as tuples.
+    """
+    if batch_size < 1:
+        raise ValueError("batch size must be at least one")
+    it = iter(lst)
+    while batch := tuple(islice(it, batch_size)):
+        yield batch
 
 
 @dataclass
@@ -264,12 +283,16 @@ class MPCacheEngine:
         )
         gpu_context = self.gpu_contexts[instance_id]
 
+        blocks_per_chunk = self.chunk_size // gpu_context.block_size
+
         with (
             torch.cuda.device(gpu_context.device),
             torch.cuda.stream(gpu_context.stream),
         ):
             event = torch.cuda.Event(interprocess=True)
-            slot_mapping_tensor = gpu_context.get_slot_mapping_tensor(gpu_block_ids)
+
+            # Stage all block_ids to GPU once before the loop
+            all_block_ids_gpu = gpu_context.stage_block_ids(gpu_block_ids)
 
             # Wait for vLLM to finish
             vllm_event = torch.cuda.Event.from_ipc_handle(
@@ -292,31 +315,34 @@ class MPCacheEngine:
                 obj_keys, layout_desc, "new"
             )
 
+            # NOTE: Store is not batched because some obj_keys may be
+            # skipped (not in reserved_dict), making block_ids
+            # non-contiguous. Batching would require torch.cat to
+            # reassemble block_ids, negating the benefit.
             for idx, obj_key in enumerate(obj_keys):
                 if obj_key in reserved_dict:
                     memory_obj = reserved_dict[obj_key]
                 else:
                     continue
 
-                start = idx * self.chunk_size
-                end = start + self.chunk_size
-                slot_mapping = slot_mapping_tensor[start:end]
+                chunk_block_ids_gpu = all_block_ids_gpu[
+                    idx * blocks_per_chunk : (idx + 1) * blocks_per_chunk
+                ]
 
-                # Copy from GPU to CPU
-                tmp_buffer = gpu_context.get_tmp_gpu_buffer(self.chunk_size)
-                lmc_ops.multi_layer_kv_transfer(
-                    tmp_buffer,
-                    gpu_context.kv_pointers,
-                    slot_mapping,
-                    gpu_context.device,
-                    gpu_context.block_size * gpu_context.num_blocks,
-                    lmc_ops.TransferDirection.D2H,
-                    gpu_context.gpu_kv_format_,
-                    block_size=gpu_context.block_size,
-                    head_size=gpu_context.head_size,
-                )
-
+                # Copy from paged buffer to tmp GPU buffer, then to CPU
                 assert memory_obj.tensor is not None
+                tmp_buffer = gpu_context.get_tmp_gpu_buffer(self.chunk_size)
+                lmc_ops.multi_layer_block_kv_transfer(
+                    gpu_context.kv_pointers,
+                    [tmp_buffer.data_ptr()],
+                    chunk_block_ids_gpu,
+                    gpu_context.device,
+                    lmc_ops.TransferDirection.D2H,
+                    gpu_context.shape_desc,
+                    self.chunk_size,
+                    gpu_context.gpu_kv_format_,
+                    0,
+                )
                 lmcache_memcpy_async_d2h(tmp_buffer, memory_obj)
 
             event.record()
@@ -390,60 +416,87 @@ class MPCacheEngine:
         )
         gpu_context = self.gpu_contexts[instance_id]
 
-        if get_telemetry_controller().is_enabled():
-            gpu_context.cupy_stream.launch_host_func(
-                log_telemetry,
-                make_start_event(
-                    "retrieve",
-                    key.request_id,
-                    device=str(gpu_context.device),
-                ),
-            )
+        blocks_per_chunk = self.chunk_size // gpu_context.block_size
 
         def _retrieve_loop(keys: list[ObjectKey], memory_objs: list[MemoryObj]) -> None:
-            for idx, (key, memory_obj) in enumerate(
-                zip(keys, memory_objs, strict=False)
+            _BATCH_SIZE = 4
+            for batch_idx, memory_obj_batch in enumerate(
+                batched_iteration(memory_objs, batch_size=_BATCH_SIZE)
             ):
-                chunk_start = idx * self.chunk_size
-                chunk_end = chunk_start + self.chunk_size
+                chunk_start = batch_idx * self.chunk_size * _BATCH_SIZE
+                chunk_end = chunk_start + self.chunk_size * len(memory_obj_batch)
 
-                # Skip tokens that overlap with APC-cached blocks to
-                # avoid a data race: the retrieve writes on the LMCache
-                # CUDA stream while concurrent requests may read from
-                # those same APC-shared blocks on the vLLM CUDA stream.
                 effective_start = max(chunk_start, skip_first_n_tokens)
                 if effective_start >= chunk_end:
-                    # Entire chunk is within APC range, skip it
+                    # Entire batch is within APC range, skip it
                     continue
-                # clamp to [0, chunk_size - 1]
-                skip_in_chunk = max(
-                    0, min(effective_start - chunk_start, self.chunk_size - 1)
-                )
-                slot_mapping = slot_mapping_tensor[chunk_start:chunk_end]
 
-                # Copy from CPU to GPU
-                tmp_gpu_buffer_ = gpu_context.get_tmp_gpu_buffer(self.chunk_size)
-                lmcache_memcpy_async_h2d(memory_obj, tmp_gpu_buffer_)
-                lmc_ops.multi_layer_kv_transfer(
-                    tmp_gpu_buffer_,
+                skip_tokens_in_chunk = max(
+                    0,
+                    min(
+                        effective_start - chunk_start, self.chunk_size * _BATCH_SIZE - 1
+                    ),
+                )
+                if skip_tokens_in_chunk % gpu_context.block_size != 0:
+                    logger.error(
+                        "skip_first_n_tokens (%d) is not aligned to block_size (%d), "
+                        "rounding down from %d tokens to %d blocks",
+                        skip_first_n_tokens,
+                        gpu_context.block_size,
+                        skip_tokens_in_chunk,
+                        skip_tokens_in_chunk // gpu_context.block_size,
+                    )
+                skip_blocks_in_chunk = skip_tokens_in_chunk // gpu_context.block_size
+
+                start_chunk_id = batch_idx * _BATCH_SIZE
+                end_chunk_id = start_chunk_id + len(memory_obj_batch)
+                chunk_block_ids_gpu = all_block_ids_gpu[
+                    start_chunk_id * blocks_per_chunk : end_chunk_id * blocks_per_chunk
+                ]
+
+                # TODO: implement get_gpu_buffer_batched
+                tmp_buffers = gpu_context.get_tmp_gpu_buffer_batched(
+                    self.chunk_size, len(memory_obj_batch)
+                )
+
+                # launch h2d for all the chunks in the batch
+                for tmp_buffer, memory_obj in zip(
+                    tmp_buffers, memory_obj_batch, strict=False
+                ):
+                    assert memory_obj.tensor is not None
+                    lmcache_memcpy_async_h2d(memory_obj, tmp_buffer)
+
+                # launch multi_layer_block_kv_transfer for all the chunks in the batch
+                lmc_ops.multi_layer_block_kv_transfer(
                     gpu_context.kv_pointers,
-                    slot_mapping,
+                    [tb.data_ptr() for tb in tmp_buffers],
+                    chunk_block_ids_gpu,
                     gpu_context.device,
-                    gpu_context.block_size * gpu_context.num_blocks,
                     lmc_ops.TransferDirection.H2D,
+                    gpu_context.shape_desc,
+                    self.chunk_size,
                     gpu_context.gpu_kv_format_,
-                    block_size=gpu_context.block_size,
-                    head_size=gpu_context.head_size,
-                    skip_prefix_n_tokens=skip_in_chunk,
+                    skip_blocks_in_chunk,
                 )
 
         with (
             torch.cuda.device(gpu_context.device),
-            torch.cuda.stream(gpu_context.high_priority_stream),
+            torch.cuda.stream(gpu_context.stream),
         ):
-            slot_mapping_tensor = gpu_context.get_slot_mapping_tensor(gpu_block_ids)
+            # Stage all block_ids to GPU once before the loop
+            all_block_ids_gpu = gpu_context.stage_block_ids(gpu_block_ids)
 
             event = torch.cuda.Event(interprocess=True)
+
+            if get_telemetry_controller().is_enabled():
+                gpu_context.cupy_stream.launch_host_func(
+                    log_telemetry,
+                    make_start_event(
+                        "retrieve",
+                        key.request_id,
+                        device=str(gpu_context.device),
+                    ),
+                )
 
             prefetched_keys: list[ObjectKey] = []
             retrieve_succeeded = False
@@ -459,8 +512,8 @@ class MPCacheEngine:
                     _retrieve_loop(obj_keys, memory_objs)
                 # Only set True when with-block exits normally
                 retrieve_succeeded = True
-            except Exception as e:
-                logger.warning("Cannot retrieve keys due to exception: %s", str(e))
+            except Exception:
+                logger.exception("Cannot retrieve keys due to exception")
                 return event.ipc_handle(), False
             finally:
                 event.record()
@@ -469,16 +522,17 @@ class MPCacheEngine:
                         self.storage_manager.finish_read_prefetched,
                         prefetched_keys,
                     )
-                if get_telemetry_controller().is_enabled():
-                    gpu_context.cupy_stream.launch_host_func(
-                        log_telemetry,
-                        make_end_event(
-                            "retrieve",
-                            key.request_id,
-                            retrieved_count=len(prefetched_keys),
-                            device=str(gpu_context.device),
-                        ),
-                    )
+
+        if get_telemetry_controller().is_enabled():
+            gpu_context.cupy_stream.launch_host_func(
+                log_telemetry,
+                make_end_event(
+                    "retrieve",
+                    key.request_id,
+                    retrieved_count=len(prefetched_keys),
+                    device=str(gpu_context.device),
+                ),
+            )
 
         tokens_retrieved = len(obj_keys) * self.chunk_size
         ed = time.perf_counter()

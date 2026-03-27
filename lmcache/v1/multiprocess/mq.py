@@ -429,8 +429,8 @@ class MessageQueueServer:
                 self.output_queue.put(frames_to_send)
                 os.eventfd_write(self._output_efd, 1)
 
-            except Exception as e:
-                logger.error("Error in blocking handler: %s", e)
+            except Exception:
+                logger.exception("Error in blocking handler")
 
         future.add_done_callback(_notify_response)
 
@@ -476,8 +476,8 @@ class MessageQueueServer:
                             payloads=payloads,
                             prefix_frames=[identity, b_request_uid, b_request_type],
                         )
-                    except Exception as e:
-                        logger.error("Error handling request %s: %s", request_type, e)
+                    except Exception:
+                        logger.exception("Error handling request %s", request_type)
                 else:
                     logger.error(
                         "No handler registered for request type %s", request_type
