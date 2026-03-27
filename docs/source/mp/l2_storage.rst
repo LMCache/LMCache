@@ -221,7 +221,7 @@ Set ``LMCACHE_LOG_LEVEL=DEBUG`` to see L2 activity in the server logs:
 
 .. code-block:: bash
 
-    LMCACHE_LOG_LEVEL=DEBUG python3 -m lmcache.v1.multiprocess.server \
+    LMCACHE_LOG_LEVEL=DEBUG lmcache server \
         --l1-size-gb 100 --eviction-policy LRU \
         --l2-adapter '{"type": "nixl_store", "backend": "POSIX", "backend_params": {"file_path": "/data/lmcache/l2", "use_direct_io": "false"}, "pool_size": 64}'
 

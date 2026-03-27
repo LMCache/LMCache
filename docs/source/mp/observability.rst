@@ -166,7 +166,7 @@ environment variable.
 
 .. code-block:: bash
 
-    LMCACHE_LOG_LEVEL=DEBUG python3 -m lmcache.v1.multiprocess.server ...
+    LMCACHE_LOG_LEVEL=DEBUG lmcache server ...
 
 Key log messages:
 

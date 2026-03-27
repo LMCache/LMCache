@@ -166,13 +166,13 @@ instead.  Use the ``/api/healthcheck`` endpoint:
     livenessProbe:
       httpGet:
         path: /api/healthcheck
-        port: 8000
+        port: 8080
       initialDelaySeconds: 10
       periodSeconds: 30
     readinessProbe:
       httpGet:
         path: /api/healthcheck
-        port: 8000
+        port: 8080
       initialDelaySeconds: 5
       periodSeconds: 10
 
