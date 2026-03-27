@@ -61,19 +61,22 @@ echo ""
 mkdir -p "$L2_RESULTS_DIR"
 
 # ---------------------------------------------------------------------------
-# Step 1: Kill existing LMCache and relaunch with L2 config
+# Step 1: Kill existing LMCache + vLLM, relaunch both with L2 config
 # ---------------------------------------------------------------------------
 
-echo "--- Stopping existing LMCache MP server ---"
-# The first PID in the file is the LMCache server (from launch-processes.sh)
+echo "--- Stopping existing LMCache MP server and vLLM ---"
+# PID file layout: line1=LMCache, line2=vLLM w/ LMCache, line3=vLLM baseline
 if [ -f "$PID_FILE" ]; then
-    LMCACHE_PID=$(head -n 1 "$PID_FILE")
-    if [ -n "$LMCACHE_PID" ] && kill -0 "$LMCACHE_PID" 2>/dev/null; then
-        echo "Killing LMCache PID $LMCACHE_PID"
-        kill "$LMCACHE_PID" 2>/dev/null || true
-        wait "$LMCACHE_PID" 2>/dev/null || true
-        sleep 2
-    fi
+    LMCACHE_PID=$(sed -n '1p' "$PID_FILE")
+    VLLM_PID=$(sed -n '2p' "$PID_FILE")
+    for pid in $LMCACHE_PID $VLLM_PID; do
+        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+            echo "Killing PID $pid"
+            kill "$pid" 2>/dev/null || true
+            wait "$pid" 2>/dev/null || true
+        fi
+    done
+    sleep 2
 fi
 
 echo "--- Launching LMCache MP server with L2 config ---"
@@ -94,23 +97,55 @@ python -m lmcache.v1.multiprocess.server \
     > "/tmp/build_${BUILD_ID}_lmcache_l2.log" 2>&1 &
 
 NEW_LMCACHE_PID=$!
-# Update PID file (replace first line)
-if [ -f "$PID_FILE" ]; then
-    sed -i "1s/.*/$NEW_LMCACHE_PID/" "$PID_FILE"
-else
-    echo "$NEW_LMCACHE_PID" > "$PID_FILE"
-fi
 echo "LMCache L2 server started (PID=$NEW_LMCACHE_PID)"
 
 echo "Waiting for LMCache L2 to initialize..."
 sleep 10
 
-# Wait for vLLM to reconnect
-echo "--- Waiting for vLLM to reconnect ---"
-if ! wait_for_server "$VLLM_PORT" 120; then
-    echo "vLLM failed to reconnect after LMCache restart"
-    echo "LMCache L2 log:"
+echo "--- Launching vLLM with LMCache ---"
+# Compute GPU memory utilization for large GPUs
+GPU_MEMORY_UTIL_ARG=""
+GPU_MEMORY_MB=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits -i "${GPU_DEVICE}" | tr -d ' ')
+GPU_MEMORY_GB=$((GPU_MEMORY_MB / 1024))
+if [ "$GPU_MEMORY_GB" -gt 90 ]; then
+    GPU_MEMORY_UTIL_ARG="--gpu-memory-utilization 0.5"
+fi
+
+# Unset VLLM_PORT in child env so vLLM's torch.distributed picks a free port
+env -u VLLM_PORT \
+    CUDA_VISIBLE_DEVICES="${GPU_DEVICE}" \
+    VLLM_ENABLE_V1_MULTIPROCESSING=0 \
+    VLLM_SERVER_DEV_MODE=1 \
+    VLLM_BATCH_INVARIANT=1 \
+    PYTHONHASHSEED=0 \
+vllm serve "$MODEL" \
+    --kv-transfer-config "{\"kv_connector\":\"LMCacheMPConnector\", \"kv_role\":\"kv_both\", \"kv_load_failure_policy\": \"recompute\", \"kv_connector_extra_config\": {\"lmcache.mp.port\": $LMCACHE_PORT, \"lmcache.mp.mq_timeout\": 10}}" \
+    --attention-backend FLASH_ATTN \
+    --port "$VLLM_PORT" \
+    --no-async-scheduling \
+    $GPU_MEMORY_UTIL_ARG \
+    > "/tmp/build_${BUILD_ID}_vllm_l2.log" 2>&1 &
+
+NEW_VLLM_PID=$!
+echo "vLLM started (PID=$NEW_VLLM_PID)"
+
+# Update PID file (replace lines 1 and 2, keep baseline on line 3)
+if [ -f "$PID_FILE" ]; then
+    sed -i "1s/.*/$NEW_LMCACHE_PID/" "$PID_FILE"
+    sed -i "2s/.*/$NEW_VLLM_PID/" "$PID_FILE"
+else
+    echo "$NEW_LMCACHE_PID" > "$PID_FILE"
+    echo "$NEW_VLLM_PID" >> "$PID_FILE"
+fi
+
+# Wait for vLLM to be ready (needs time to load model)
+echo "--- Waiting for vLLM to be ready ---"
+if ! wait_for_server "$VLLM_PORT" 300; then
+    echo "vLLM failed to start after restart"
+    echo "LMCache L2 log (last 50 lines):"
     tail -50 "/tmp/build_${BUILD_ID}_lmcache_l2.log" || true
+    echo "vLLM log (last 50 lines):"
+    tail -50 "/tmp/build_${BUILD_ID}_vllm_l2.log" || true
     exit 1
 fi
 
@@ -162,11 +197,21 @@ except Exception:
 # Step 2: Run benchmarks
 # ---------------------------------------------------------------------------
 
-# Phase 1: Baseline (vLLM only)
-echo "============================================"
-echo "=== Phase 1: Baseline vLLM (no LMCache) ==="
-echo "============================================"
-run_long_doc_qa "$VLLM_BASELINE_PORT" "$L2_RESULTS_DIR/baseline_result.json" "baseline"
+# Phase 1: Baseline -- reuse results from step 5 (same port, same params)
+STEP5_BASELINE="$RESULTS_DIR/long_doc_qa/baseline_result.json"
+if [ -f "$STEP5_BASELINE" ]; then
+    echo "============================================"
+    echo "=== Phase 1: Reusing baseline from step 5 ==="
+    echo "============================================"
+    cp "$STEP5_BASELINE" "$L2_RESULTS_DIR/baseline_result.json"
+    echo "Copied baseline results from $STEP5_BASELINE"
+    echo ""
+else
+    echo "============================================"
+    echo "=== Phase 1: Baseline vLLM (no LMCache) ==="
+    echo "============================================"
+    run_long_doc_qa "$VLLM_BASELINE_PORT" "$L2_RESULTS_DIR/baseline_result.json" "baseline"
+fi
 
 # Phase 2+3: L2 warmup + query (repeat_count=2, tile mode)
 #   Round 1 (warmup): prompts -> L1 write buffer -> L2 store -> L1 delete
