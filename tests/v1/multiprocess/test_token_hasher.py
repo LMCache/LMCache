@@ -1,6 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests for TokenHasher."""
 
+# Standard
+from unittest.mock import MagicMock, patch
+import sys
+
 # Third Party
 import numpy as np
 import pytest
@@ -26,6 +30,14 @@ class TestTokenHasher:
         hasher = TokenHasher(chunk_size=256, hash_algorithm="blake3")
         assert hasher.chunk_size == 256
         assert hasher.none_hash is not None
+
+    def test_init_builtin(self) -> None:
+        """builtin hash returns Python's hash() without vLLM lookup."""
+        mock_vllm_hashing = MagicMock()
+        with patch.dict(sys.modules, {"vllm.utils.hashing": mock_vllm_hashing}):
+            hasher = TokenHasher(chunk_size=256, hash_algorithm="builtin")
+        assert hasher.hash_func is hash
+        mock_vllm_hashing.get_hash_fn_by_name.assert_not_called()
 
     def test_hash_tokens_returns_bytes(self, hasher: TokenHasher) -> None:
         h = hasher.hash_tokens([1, 2, 3, 4])

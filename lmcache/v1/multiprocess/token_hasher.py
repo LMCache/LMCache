@@ -81,12 +81,7 @@ class TokenHasher:
 
         # Short-circuit: 'builtin' means Python's built-in hash(), no vLLM lookup needed
         if hash_algorithm == "builtin":
-            logger.info(
-                "Using LMCache builtin hash (Python hash). "
-                "For production environments (non-testing scenarios), "
-                "consider setting a stable hash algorithm (e.g., sha256_cbor) "
-                "to ensure consistent hashing across processes and nodes."
-            )
+            logger.info("Using LMCache builtin hash (Python hash)")
             if os.getenv("PYTHONHASHSEED") is None:
                 logger.warning(
                     "Using builtin hash without PYTHONHASHSEED set. "
