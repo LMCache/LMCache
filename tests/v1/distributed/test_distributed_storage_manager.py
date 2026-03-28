@@ -27,7 +27,7 @@ from lmcache.v1.mp_observability.event_bus import EventBusConfig, init_event_bus
 
 try:
     # First Party
-    from lmcache.v1.distributed.storage_manager import StorageManager
+    from lmcache.v1.distributed.storage_manager import PartialReadResult, StorageManager
 except ImportError:
     # Skip tests if L1Manager cannot be imported
     pytest.skip(

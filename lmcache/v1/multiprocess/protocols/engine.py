@@ -90,10 +90,16 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
         #   - event_ipc_handle: bytes - CUDA event IPC handle for synchronization
         #   - skip_first_n_tokens: int - Number of tokens to skip writing at the
         #     start of the retrieve range (to avoid overwriting APC-shared blocks)
-        # Returns: tuple[bytes, bool] - (CUDA event handle, success flag)
+        # Returns: tuple[bytes, tuple[bool, list[int]]]
+        #   - bytes: CUDA event IPC handle signalling completion
+        #   - tuple[bool, list[int]]:
+        #       - bool: True if at least some chunks were retrieved successfully,
+        #               False if the entire operation failed (e.g. exception)
+        #       - list[int]: GPU block IDs that failed to load.
+        #                    Empty on full success; all block IDs on total failure.
         "RETRIEVE": ProtocolDefinition(
             payload_classes=[KeyType, int, list[int], bytes, int],
-            response_class=tuple[bytes, bool],
+            response_class=tuple[bytes, tuple[bool, list[int]]],
             handler_type=HandlerType.BLOCKING,
         ),
         # Submit a prefix lookup; job is tracked server-side by request_id

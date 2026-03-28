@@ -25,7 +25,11 @@ from lmcache.v1.distributed.config import (
     add_storage_manager_args,
     parse_args_to_config,
 )
-from lmcache.v1.distributed.storage_manager import PrefetchHandle, StorageManager
+from lmcache.v1.distributed.storage_manager import (
+    PartialReadResult,
+    PrefetchHandle,
+    StorageManager,
+)
 from lmcache.v1.gpu_connector.gpu_ops import (
     lmcache_memcpy_async_d2h,
     lmcache_memcpy_async_h2d,
@@ -442,7 +446,7 @@ class MPCacheEngine:
         gpu_block_ids: list[int],
         event_ipc_handle: bytes,
         skip_first_n_tokens: int = 0,
-    ) -> tuple[bytes, bool]:
+    ) -> tuple[bytes, tuple[bool, list[int]]]:
         """
         Retrieves the CPU KV cache and put into GPU blocks.
 
@@ -458,9 +462,11 @@ class MPCacheEngine:
                 requests.
 
         Returns:
-            tuple[bytes, bool]: The first element is the IPC handle of the event
-                that signals the completion of the retrieve operation. The second
-                element indicates whether the key was successfully retrieved.
+            tuple[bytes, tuple[bool, list[int]]]: The first element is the IPC
+                handle of the event that signals completion. The second element
+                is (success, failed_block_ids). success is False only on an
+                unrecoverable exception; failed_block_ids lists GPU block IDs
+                that were not loaded (empty on full success).
         """
         session = self.session_manager.get_or_create(key.request_id)
         session.set_tokens(list(key.token_ids))
@@ -569,6 +575,52 @@ class MPCacheEngine:
                         skip_blocks_in_chunk,
                     )
 
+        def _partial_retrieve_loop(
+            good_objs: list[MemoryObj],
+            good_indices: list[int],
+        ) -> None:
+            # Partial failure path: indices are non-contiguous so process
+            # each chunk individually instead of batching.
+            for memory_obj, chunk_idx in zip(good_objs, good_indices, strict=False):
+                chunk_start_token = chunk_idx * self.chunk_size
+                effective_start = max(chunk_start_token, skip_first_n_tokens)
+                if effective_start >= chunk_start_token + self.chunk_size:
+                    # Entire chunk is within APC range, skip it
+                    continue
+
+                skip_tokens_in_chunk = max(0, effective_start - chunk_start_token)
+                if skip_tokens_in_chunk % gpu_context.block_size != 0:
+                    logger.error(
+                        "skip_first_n_tokens (%d) is not aligned to block_size (%d), "
+                        "rounding down from %d tokens to %d blocks",
+                        skip_first_n_tokens,
+                        gpu_context.block_size,
+                        skip_tokens_in_chunk,
+                        skip_tokens_in_chunk // gpu_context.block_size,
+                    )
+                skip_blocks_in_chunk = skip_tokens_in_chunk // gpu_context.block_size
+
+                block_start = chunk_idx * blocks_per_chunk
+                block_end = block_start + blocks_per_chunk
+                chunk_block_ids_gpu = all_block_ids_gpu[block_start:block_end]
+
+                tmp_buffers = gpu_context.get_tmp_gpu_buffer_batched(self.chunk_size, 1)
+                tmp_buffer = tmp_buffers[0]
+                assert memory_obj.tensor is not None
+                lmcache_memcpy_async_h2d(memory_obj, tmp_buffer)
+
+                lmc_ops.multi_layer_block_kv_transfer(
+                    gpu_context.kv_pointers,
+                    [tmp_buffer.data_ptr()],
+                    chunk_block_ids_gpu,
+                    gpu_context.device,
+                    lmc_ops.TransferDirection.H2D,
+                    gpu_context.shape_desc,
+                    self.chunk_size,
+                    gpu_context.gpu_kv_format_,
+                    skip_blocks_in_chunk,
+                )
+
         with (
             torch.cuda.device(gpu_context.device),
             torch.cuda.stream(gpu_context.stream),
@@ -579,15 +631,29 @@ class MPCacheEngine:
             event = torch.cuda.Event(interprocess=True)
 
             prefetched_keys: list[ObjectKey] = []
+            failed_block_ids: list[int] = []
             retrieve_succeeded = False
             total_bytes = 0
             try:
-                with self.storage_manager.read_prefetched_results(
+                with self.storage_manager.read_prefetched_results_partial(
                     obj_keys
-                ) as memory_objs:
-                    if not memory_objs or len(memory_objs) != len(obj_keys):
-                        logger.error("Some keys not found during retrieve!")
-                        return event.ipc_handle(), False
+                ) as partial_result:
+                    for bad_idx in partial_result.bad_indices:
+                        block_start = bad_idx * blocks_per_chunk
+                        block_end = block_start + blocks_per_chunk
+                        failed_block_ids.extend(gpu_block_ids[block_start:block_end])
+
+                    if partial_result.good_objs:
+                        prefetched_keys = [
+                            obj_keys[i] for i in partial_result.good_indices
+                        ]
+                        if partial_result.bad_indices:
+                            _partial_retrieve_loop(
+                                partial_result.good_objs,
+                                partial_result.good_indices,
+                            )
+                        else:
+                            _retrieve_loop(obj_keys, partial_result.good_objs)
 
                     prefetched_keys = obj_keys[: len(memory_objs)]
                     total_bytes = sum(mo.get_size() for mo in memory_objs)
@@ -596,10 +662,10 @@ class MPCacheEngine:
                 retrieve_succeeded = True
             except Exception:
                 logger.exception("Cannot retrieve keys due to exception")
-                return event.ipc_handle(), False
+                return event.ipc_handle(), (False, list(gpu_block_ids))
             finally:
                 event.record()
-                if retrieve_succeeded:
+                if retrieve_succeeded and prefetched_keys:
                     gpu_context.cupy_stream.launch_host_func(
                         self.storage_manager.finish_read_prefetched,
                         prefetched_keys,
@@ -619,15 +685,26 @@ class MPCacheEngine:
                         },
                     ),
                 )
-        tokens_retrieved = len(obj_keys) * self.chunk_size
+        tokens_retrieved = len(prefetched_keys) * self.chunk_size
         ed = time.perf_counter()
-        logger.info(
-            "Retrieved %d tokens in %.3f seconds",
-            tokens_retrieved,
-            ed - st,
-        )
+        if failed_block_ids:
+            logger.warning(
+                "Partial retrieve: %d/%d chunks succeeded (%d tokens), "
+                "%d block(s) failed, in %.3f seconds",
+                len(prefetched_keys),
+                len(obj_keys),
+                tokens_retrieved,
+                len(failed_block_ids),
+                ed - st,
+            )
+        else:
+            logger.info(
+                "Retrieved %d tokens in %.3f seconds",
+                tokens_retrieved,
+                ed - st,
+            )
 
-        return event.ipc_handle(), True
+        return event.ipc_handle(), (True, failed_block_ids)
 
     def _find_layout_desc(
         self,
