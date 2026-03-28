@@ -103,6 +103,22 @@ class TokenDatabase(metaclass=abc.ABCMeta):
         - Direct imports as fallback
         - sha256_cbor_64bit -> sha256_cbor rename (PR#23673)
         """
+        # Short-circuit: 'builtin' means Python's built-in hash(), no vLLM lookup needed
+        if hash_algorithm == "builtin":
+            logger.info(
+                "Using LMCache builtin hash (Python hash). "
+                "For production environments (non-testing scenarios), "
+                "consider setting a stable hash algorithm (e.g., sha256_cbor) "
+                "to ensure consistent hashing across processes and nodes."
+            )
+            if os.getenv("PYTHONHASHSEED") is None:
+                logger.warning(
+                    "Using builtin hash without PYTHONHASHSEED set. "
+                    "For consistent hashing across processes, "
+                    "set PYTHONHASHSEED (e.g., export PYTHONHASHSEED=0)."
+                )
+            return hash
+
         # Try get_hash_fn_by_name from both locations (PR#27151)
         for module_path in ["vllm.utils.hashing", "vllm.utils"]:
             try:
