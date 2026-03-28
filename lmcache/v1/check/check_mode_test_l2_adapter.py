@@ -182,7 +182,7 @@ def _test_single_adapter(
 
     # -- Phase 1: lookup non-existing keys -------------------
     print("Phase 1: Lookup non-existing keys...")
-    lk_ms, lk_bitmap = _run_lookup_phase(adapter, non_exist_keys)
+    lk_absent_ms, lk_bitmap = _run_lookup_phase(adapter, non_exist_keys)
     if lk_bitmap is None:
         print("  FAIL: lookup returned None bitmap")
         ne_pass = 0
@@ -204,7 +204,7 @@ def _test_single_adapter(
 
     # -- Phase 3: lookup existing keys -----------------------
     print("Phase 3: Lookup existing keys...")
-    lk_ms, lk_bitmap = _run_lookup_phase(adapter, exist_keys)
+    lk_exist_ms, lk_bitmap = _run_lookup_phase(adapter, exist_keys)
     if lk_bitmap is None:
         print("  FAIL: lookup returned None bitmap")
         exist_pass = 0
@@ -243,9 +243,9 @@ def _test_single_adapter(
         (
             "LOOKUP (absent)",
             {
-                "avg": lk_ms or 0,
-                "max": lk_ms or 0,
-                "min": lk_ms or 0,
+                "avg": lk_absent_ms or 0,
+                "max": lk_absent_ms or 0,
+                "min": lk_absent_ms or 0,
             },
             [False] * num_tests,
             ne_pass,
@@ -263,9 +263,9 @@ def _test_single_adapter(
         (
             "LOOKUP (exist)",
             {
-                "avg": lk_ms or 0,
-                "max": lk_ms or 0,
-                "min": lk_ms or 0,
+                "avg": lk_exist_ms or 0,
+                "max": lk_exist_ms or 0,
+                "min": lk_exist_ms or 0,
             },
             [True] * exist_pass + [False] * (num_tests - exist_pass),
             exist_pass,
