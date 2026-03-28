@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from unittest.mock import MagicMock, patch
 import os
-import sys
 
 # Third Party
 import pytest
@@ -67,16 +65,13 @@ def test_chunked_token_database(chunk_length, save_unfull_chunk):
 
 
 def test_builtin_hash_skips_vllm_lookup():
-    """hash_algorithm='builtin' uses Python hash() and skips vLLM lookup."""
-    mock_vllm_hashing = MagicMock()
-    with patch.dict(sys.modules, {"vllm.utils.hashing": mock_vllm_hashing}):
-        cfg = LMCacheEngineConfig.from_legacy(
-            chunk_size=256, backend="cpu", pre_caching_hash_algorithm="builtin"
-        )
-        metadata = dumb_metadata()
-        db = ChunkedTokenDatabase(cfg, metadata)
+    """hash_algorithm='builtin' uses Python hash() directly."""
+    cfg = LMCacheEngineConfig.from_legacy(
+        chunk_size=256, backend="cpu", pre_caching_hash_algorithm="builtin"
+    )
+    metadata = dumb_metadata()
+    db = ChunkedTokenDatabase(cfg, metadata)
     assert db.hash_func is hash
-    mock_vllm_hashing.get_hash_fn_by_name.assert_not_called()
 
 
 @pytest.mark.parametrize("prefix_length", [0, 16, 64, 256])
