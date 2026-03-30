@@ -626,5 +626,10 @@ class LMCacheWorker:
             self.loop.call_soon_threadsafe(self.loop.stop)
         if self.thread.is_alive():
             self.thread.join()
+        self.loop.close()
         close_zmq_socket(self.push_socket)
         close_zmq_socket(self.reply_socket)
+        if self.heartbeat_socket is not None:
+            close_zmq_socket(self.heartbeat_socket)
+        if hasattr(self, "req_socket"):
+            close_zmq_socket(self.req_socket)

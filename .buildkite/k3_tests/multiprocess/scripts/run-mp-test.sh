@@ -95,9 +95,20 @@ if ! "${SCRIPT_DIR}/run-long-doc-qa.sh"; then
 fi
 echo ""
 
-# Step 6: Fault tolerance test (kills LMCache server -- must be last)
+# Step 6: L2 long doc QA test (restarts LMCache with L2 config)
 echo "============================================"
-echo "=== Step 6: Running fault tolerance test ==="
+echo "=== Step 6: Running long doc QA (L2) ==="
+echo "============================================"
+if ! "${SCRIPT_DIR}/run-long-doc-qa-l2.sh"; then
+    echo "long doc QA L2 test failed"
+    TEST_RESULT=1
+    exit 1
+fi
+echo ""
+
+# Step 7: Fault tolerance test (kills LMCache server -- must be last)
+echo "============================================"
+echo "=== Step 7: Running fault tolerance test ==="
 echo "============================================"
 if ! "${SCRIPT_DIR}/run-fault-tolerance.sh"; then
     echo "fault tolerance test failed"

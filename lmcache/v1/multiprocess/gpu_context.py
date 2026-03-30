@@ -329,6 +329,13 @@ class GPUCacheContext:
         else:
             return torch.Size((2, self.num_layers_, num_tokens, self.hidden_dim_size_))
 
+    def cache_size_per_token(self) -> int:
+        """
+        Returns the cache size per token (in bytes)
+        """
+        numels = self.get_kv_buffer_shape(1).numel()
+        return numels * self.dtype.itemsize
+
 
 class PlainGPUCacheContext:
     """

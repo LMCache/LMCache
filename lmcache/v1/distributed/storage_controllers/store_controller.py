@@ -170,13 +170,13 @@ class StoreController(StorageControllerInterface):
         adapter_descriptors: list[AdapterDescriptor],
         policy: StorePolicy,
     ) -> None:
-        super().__init__(l1_manager)
+        self._l1_manager = l1_manager
         self._l2_adapters = l2_adapters
         self._adapter_descriptors = adapter_descriptors
         self._policy = policy
 
         self._listener = StoreListener()
-        self.get_l1_manager().register_listener(self._listener)
+        self._l1_manager.register_listener(self._listener)
 
         # (adapter_index, task_id) -> InFlightStoreTask
         # Composite key is needed because task IDs are only unique
@@ -290,7 +290,7 @@ class StoreController(StorageControllerInterface):
         """
         plan = self._policy.select_store_targets(keys, self._adapter_descriptors)
 
-        l1_mgr = self.get_l1_manager()
+        l1_mgr = self._l1_manager
 
         for adapter_index, target_keys in plan.items():
             if not target_keys:
@@ -363,7 +363,7 @@ class StoreController(StorageControllerInterface):
         adapter = self._l2_adapters[adapter_index]
         completed = adapter.pop_completed_store_tasks()
 
-        l1_mgr = self.get_l1_manager()
+        l1_mgr = self._l1_manager
 
         for task_id, success in completed.items():
             composite_key = (adapter_index, task_id)
@@ -404,7 +404,7 @@ class StoreController(StorageControllerInterface):
         Release all held read locks for any in-flight tasks that
         haven't completed. Called during stop().
         """
-        l1_mgr = self.get_l1_manager()
+        l1_mgr = self._l1_manager
         for (adapter_index, task_id), task in self._in_flight_tasks.items():
             logger.warning(
                 "Cleaning up in-flight store task %d (adapter %d, %d keys).",
