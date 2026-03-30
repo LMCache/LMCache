@@ -247,6 +247,79 @@ def test_dax_backend_batched_get_blocking_keeps_positional_holes(
             backend.close()
 
 
+def test_dax_backend_batched_get_blocking_passes_cached_fmt_to_allocator(
+    memory_allocator,
+    loop_in_thread,
+    monkeypatch,
+) -> None:
+    with tempfile.TemporaryDirectory() as td:
+        dev_path = os.path.join(td, "dax.bin")
+        with open(dev_path, "wb") as fout:
+            fout.truncate(16 * 1024 * 1024)
+
+        config = _create_config(
+            chunk_size=16,
+            local_cpu=True,
+            max_local_cpu_size=0.1,
+            extra_config={
+                "dax.device_path": dev_path,
+                "dax.max_dax_size": 16 / 1024,
+            },
+        )
+        metadata = _create_metadata(chunk_size=16)
+        local_cpu = LocalCPUBackend(
+            config=config,
+            metadata=metadata,
+            dst_device="cpu",
+            memory_allocator=memory_allocator,
+        )
+        backend = DaxBackend(
+            config=config,
+            metadata=metadata,
+            local_cpu_backend=local_cpu,
+            loop=loop_in_thread,
+            dst_device="cpu",
+        )
+
+        seen_formats: list[MemoryFormat] = []
+        original_batched_allocate = local_cpu.batched_allocate
+
+        def _tracking_batched_allocate(
+            shapes: torch.Size | list[torch.Size],
+            dtypes: torch.dtype | list[torch.dtype],
+            batch_size: int,
+            fmt: MemoryFormat | None = None,
+            eviction: bool = True,
+            busy_loop: bool = True,
+        ) -> list[MemoryObj] | None:
+            assert fmt is not None
+            seen_formats.append(fmt)
+            return original_batched_allocate(
+                shapes,
+                dtypes,
+                batch_size,
+                fmt,
+                eviction=eviction,
+                busy_loop=busy_loop,
+            )
+
+        monkeypatch.setattr(local_cpu, "batched_allocate", _tracking_batched_allocate)
+
+        try:
+            key1 = CacheEngineKey("test_model", 1, 0, 14, torch.bfloat16)
+            key2 = CacheEngineKey("test_model", 1, 0, 15, torch.bfloat16)
+            _store_tensor(backend, key1, num_tokens=16, fill_value=4)
+            _store_tensor(backend, key2, num_tokens=16, fill_value=8)
+
+            results = backend.batched_get_blocking([key1, key2])
+            assert seen_formats == [MemoryFormat.KV_T2D]
+            for result in results:
+                assert result is not None
+                result.ref_count_down()
+        finally:
+            backend.close()
+
+
 def test_dax_backend_batched_get_blocking_handles_heterogeneous_chunk_shapes(
     memory_allocator,
     loop_in_thread,

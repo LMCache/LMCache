@@ -21,7 +21,7 @@ import torch
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey, DiskCacheMetadata
 from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.memory_management import MemoryObj
+from lmcache.v1.memory_management import MemoryFormat, MemoryObj
 from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.storage_backend.abstract_backend import StoragePluginInterface
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
@@ -85,7 +85,7 @@ class _RestoreItem:
     size: int
     shape: torch.Size
     dtype: torch.dtype
-    fmt: Any
+    fmt: MemoryFormat
     cached_positions: Optional[torch.Tensor]
     slot_id: int
     generation: int
@@ -514,7 +514,10 @@ class DaxBackend(StoragePluginInterface):
             if entry is None:
                 return None
             meta = entry.meta
-            if meta.shape is None or meta.dtype is None:
+            shape = meta.shape
+            dtype = meta.dtype
+            fmt = meta.fmt
+            if shape is None or dtype is None or fmt is None:
                 return None
             state = self._slot_states.get(entry.slot_id)
             if (
@@ -526,7 +529,6 @@ class DaxBackend(StoragePluginInterface):
             state.borrow_count += 1
             self._active_ops += 1
             offset, size = entry.offset, int(meta.size)
-            shape, dtype, fmt = meta.shape, meta.dtype, meta.fmt
             cached_positions = meta.cached_positions
             slot_id, generation = entry.slot_id, entry.generation
 
@@ -636,6 +638,19 @@ class DaxBackend(StoragePluginInterface):
         self,
         keys: List[CacheEngineKey],
     ) -> List[Optional[MemoryObj]]:
+        """Restore a batch of DAX-backed cache entries synchronously.
+
+        The returned list preserves the input order. Entries that are missing
+        or no longer readable remain ``None`` so callers keep positional
+        alignment with ``keys``.
+
+        Args:
+            keys: Ordered cache keys to restore from the DAX arena.
+
+        Returns:
+            A list aligned with ``keys`` containing restored ``MemoryObj``
+            instances or ``None`` for entries that could not be read.
+        """
         if not keys:
             return []
         return cast(List[Optional[MemoryObj]], self._restore_batch(list(keys), False))
@@ -987,7 +1002,10 @@ class DaxBackend(StoragePluginInterface):
                     continue
 
                 meta = entry.meta
-                if meta.shape is None or meta.dtype is None:
+                shape = meta.shape
+                dtype = meta.dtype
+                fmt = meta.fmt
+                if shape is None or dtype is None or fmt is None:
                     if prefix_only:
                         break
                     continue
@@ -1009,9 +1027,9 @@ class DaxBackend(StoragePluginInterface):
                         key=key,
                         offset=entry.offset,
                         size=int(meta.size),
-                        shape=meta.shape,
-                        dtype=meta.dtype,
-                        fmt=meta.fmt,
+                        shape=shape,
+                        dtype=dtype,
+                        fmt=fmt,
                         cached_positions=meta.cached_positions,
                         slot_id=entry.slot_id,
                         generation=entry.generation,
@@ -1027,7 +1045,7 @@ class DaxBackend(StoragePluginInterface):
         assert self.local_cpu_backend is not None
 
         grouped_items: OrderedDict[
-            tuple[tuple[int, ...], torch.dtype, Any], list[_RestoreItem]
+            tuple[tuple[int, ...], torch.dtype, MemoryFormat], list[_RestoreItem]
         ] = OrderedDict()
         for item in reserved:
             grouped_items.setdefault(
