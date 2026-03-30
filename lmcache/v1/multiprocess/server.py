@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from dataclasses import dataclass
+from functools import partial
 from itertools import islice
 from typing import Generator
 import argparse
@@ -39,6 +40,7 @@ from lmcache.v1.mp_observability.config import (
 )
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import get_event_bus
+from lmcache.v1.mp_observability.otel_init import register_gauge
 from lmcache.v1.multiprocess.config import (
     MPServerConfig,
     add_mp_server_args,
@@ -198,6 +200,8 @@ class MPCacheEngine:
         self._prefetch_jobs: dict[int, _PrefetchJob] = {}
         self._next_prefetch_job_id: int = 0
         self._prefetch_job_lock = threading.Lock()
+
+        self._setup_metrics()
 
     def register_kv_cache(
         self,
@@ -834,6 +838,7 @@ class MPCacheEngine:
             "registered_gpu_ids": list(self.gpu_contexts.keys()),
             "gpu_context_meta": gpu_context_meta,
             "active_sessions": self.session_manager.active_count(),
+            "active_prefetch_jobs": self._active_prefetch_count(),
             "storage_manager": sm,
         }
 
@@ -873,6 +878,20 @@ class MPCacheEngine:
 
         # Release GPU contexts
         self.gpu_contexts.clear()
+
+    def _active_prefetch_count(self) -> int:
+        """Return the number of active prefetch jobs (thread-safe)."""
+        with self._prefetch_job_lock:
+            return len(self._prefetch_jobs)
+
+    def _setup_metrics(self) -> None:
+        """Register OTel observable gauges for MP engine metrics."""
+        _gauge = partial(register_gauge, "lmcache.mp_engine")
+        _gauge(
+            "lmcache_mp.active_prefetch_jobs",
+            "Number of active prefetch jobs",
+            self._active_prefetch_count,
+        )
 
 
 def add_handler_helper(
