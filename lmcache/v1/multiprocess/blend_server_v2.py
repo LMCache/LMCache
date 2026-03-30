@@ -764,6 +764,7 @@ def run_cache_server(
         server, RequestType.CB_RETRIEVE_PRE_COMPUTED_V2, engine.cb_retrieve_pre_computed
     )
     add_handler_helper(server, RequestType.CB_STORE_FINAL, engine.cb_store_final)
+    add_handler_helper(server, RequestType.PING, engine.ping)
 
     # Assign thread pools
     server.add_affinity_thread_pool(
@@ -784,6 +785,7 @@ def run_cache_server(
             RequestType.END_SESSION,
             RequestType.CLEAR,
             RequestType.CB_LOOKUP_PRE_COMPUTED_V2,
+            RequestType.PING,
         ],
         max_workers=mp_config.max_cpu_workers,
     )

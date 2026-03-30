@@ -804,6 +804,7 @@ class MPCacheEngine:
                     "gpu_kv_shape": ctx.gpu_kv_shape,
                     "gpu_kv_concrete_shape": ctx.concrete_gpu_kv_shape,
                     "attention_backend": ctx.attention_backend,
+                    "cache_size_per_token": ctx.cache_size_per_token(),
                 }
             gpu_context_meta[str(gpu_id)] = entry
 

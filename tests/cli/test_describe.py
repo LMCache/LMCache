@@ -40,6 +40,7 @@ SAMPLE_STATUS = {
                 "dtype": "torch.float16",
                 "is_mla": False,
                 "num_blocks": 2048,
+                "cache_size_per_token": 163840,
             },
         },
     },
