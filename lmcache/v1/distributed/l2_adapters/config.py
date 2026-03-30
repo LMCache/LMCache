@@ -52,13 +52,38 @@ def register_l2_adapter_type(
             via ``from_dict()``.
     """
     if name in _L2_ADAPTER_CONFIG_REGISTRY:
-        raise ValueError(f"L2 adapter type already registered: {name!r}")
+        raise ValueError("L2 adapter type already registered: %s" % repr(name))
     _L2_ADAPTER_CONFIG_REGISTRY[name] = config_cls
 
 
+def _ensure_config_loaded(name: str) -> None:
+    """Trigger lazy import for *name* if it is not
+    yet in the config registry.
+
+    Raises:
+        ImportError: If the adapter module cannot be
+            imported (missing dependency).
+    """
+    if name in _L2_ADAPTER_CONFIG_REGISTRY:
+        return
+    # Lazy import lives in factory to avoid circular deps
+    # First Party
+    from lmcache.v1.distributed.l2_adapters.factory import (  # noqa: PLC0415
+        ensure_adapter_loaded,
+    )
+
+    ensure_adapter_loaded(name)
+
+
 def get_registered_l2_adapter_types() -> list[str]:
-    """Return the list of registered adapter type names."""
-    return list(_L2_ADAPTER_CONFIG_REGISTRY)
+    """Return all known adapter type names (eager
+    and lazy)."""
+    # First Party
+    from lmcache.v1.distributed.l2_adapters.factory import (  # noqa: PLC0415
+        get_all_registered_names,
+    )
+
+    return get_all_registered_names()
 
 
 def get_type_name_for_config(
@@ -80,7 +105,7 @@ def get_type_name_for_config(
     for name, cls in _L2_ADAPTER_CONFIG_REGISTRY.items():
         if type(config) is cls:
             return name
-    raise ValueError(f"Unregistered L2 adapter config type: {type(config).__name__}")
+    raise ValueError("Unregistered L2 adapter config type: %s" % type(config).__name__)
 
 
 # -----------------------------------------------------------------------------
@@ -285,7 +310,11 @@ def parse_args_to_l2_adapters_config(args: argparse.Namespace) -> L2AdaptersConf
 
         type_name = d.get("type")
         if type_name is None:
-            raise ValueError(f"--l2-adapter #{i + 1}: missing 'type' field")
+            raise ValueError("--l2-adapter #%d: missing 'type' field" % (i + 1))
+
+        # Trigger lazy import for this adapter type
+        _ensure_config_loaded(type_name)
+
         if type_name not in _L2_ADAPTER_CONFIG_REGISTRY:
             known = ", ".join(sorted(_L2_ADAPTER_CONFIG_REGISTRY)) or "(none)"
             raise ValueError(
