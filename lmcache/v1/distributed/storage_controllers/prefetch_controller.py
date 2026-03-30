@@ -35,6 +35,8 @@ from lmcache.v1.distributed.storage_controllers.store_policy import (
     AdapterDescriptor,
 )
 from lmcache.v1.memory_management import MemoryObj
+from lmcache.v1.mp_observability.event import Event, EventType
+from lmcache.v1.mp_observability.event_bus import get_event_bus
 
 logger = init_logger(__name__)
 
@@ -240,6 +242,8 @@ class PrefetchController(StorageControllerInterface):
         for i, adapter in enumerate(self._l2_adapters):
             self._lookup_efd_to_adapter[adapter.get_lookup_and_lock_event_fd()] = i
             self._load_efd_to_adapter[adapter.get_load_event_fd()] = i
+
+        self._event_bus = get_event_bus()
 
         self._stop_flag = threading.Event()
         self._thread = threading.Thread(
@@ -487,6 +491,17 @@ class PrefetchController(StorageControllerInterface):
         self._status_in_flight_count += 1
         self._status_lookup_phase_count += 1
 
+        self._event_bus.publish(
+            Event(
+                event_type=EventType.L2_PREFETCH_LOOKUP_SUBMITTED,
+                metadata={
+                    "request_id": request_id,
+                    "key_count": len(keys),
+                    "adapter_count": len(pending_lookup_tasks),
+                },
+            )
+        )
+
     def _process_lookup_completions(self, adapter_index: int) -> None:
         """Check all LOOKUP-phase requests for completed lookups from
         this adapter."""
@@ -537,6 +552,15 @@ class PrefetchController(StorageControllerInterface):
             # and complete with 0 hits.
             self._unlock_all_lookups(request)
             self._update_lookup_results(request.request_id, 0)
+            self._event_bus.publish(
+                Event(
+                    event_type=EventType.L2_PREFETCH_LOOKUP_COMPLETED,
+                    metadata={
+                        "request_id": request.request_id,
+                        "prefix_hit_count": 0,
+                    },
+                )
+            )
             self._complete_request(request.request_id, 0)
             return
 
@@ -588,6 +612,15 @@ class PrefetchController(StorageControllerInterface):
                 l1_mgr.finish_write(request.write_reserved_keys)
                 l1_mgr.delete(request.write_reserved_keys)
             self._update_lookup_results(request.request_id, 0)
+            self._event_bus.publish(
+                Event(
+                    event_type=EventType.L2_PREFETCH_LOOKUP_COMPLETED,
+                    metadata={
+                        "request_id": request.request_id,
+                        "prefix_hit_count": 0,
+                    },
+                )
+            )
             self._complete_request(request.request_id, 0)
             return
 
@@ -604,6 +637,26 @@ class PrefetchController(StorageControllerInterface):
 
         ## Step 8: update the lookup result based on the final load plan
         self._update_lookup_results(request.request_id, prefix_length)
+
+        self._event_bus.publish(
+            Event(
+                event_type=EventType.L2_PREFETCH_LOOKUP_COMPLETED,
+                metadata={
+                    "request_id": request.request_id,
+                    "prefix_hit_count": prefix_length,
+                },
+            )
+        )
+        self._event_bus.publish(
+            Event(
+                event_type=EventType.L2_PREFETCH_LOAD_SUBMITTED,
+                metadata={
+                    "request_id": request.request_id,
+                    "key_count": len(reserved_key_set),
+                    "adapter_count": len(trimmed_plan),
+                },
+            )
+        )
 
         logger.debug(
             "Prefetch request %d: submitted load tasks to %d adapters for %d keys",
@@ -687,6 +740,17 @@ class PrefetchController(StorageControllerInterface):
         if failed_keys:
             l1_mgr.finish_write(failed_keys)
             l1_mgr.delete(failed_keys)
+
+        self._event_bus.publish(
+            Event(
+                event_type=EventType.L2_PREFETCH_LOAD_COMPLETED,
+                metadata={
+                    "request_id": request.request_id,
+                    "loaded_count": len(loaded_keys),
+                    "failed_count": len(failed_keys),
+                },
+            )
+        )
 
         # Partial load failures can create gaps in the prefix.
         # Release read locks for loaded keys beyond the prefix.

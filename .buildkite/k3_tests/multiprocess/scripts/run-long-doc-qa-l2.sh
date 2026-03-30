@@ -311,6 +311,104 @@ else:
     print("[PASS] All L2 performance thresholds passed")
 EOF
 
+# ---------------------------------------------------------------------------
+# Step 4: Verify L2 data flow via Prometheus metrics
+# ---------------------------------------------------------------------------
+
+echo "============================================"
+echo "=== Verifying L2 Data Flow (Metrics) ==="
+echo "============================================"
+
+PROMETHEUS_PORT="${PROMETHEUS_PORT:-9090}"
+L2_METRICS_FILE="$L2_RESULTS_DIR/prometheus_metrics.txt"
+curl -sf "http://localhost:${PROMETHEUS_PORT}/metrics" > "$L2_METRICS_FILE" 2>/dev/null || true
+
+if [ ! -s "$L2_METRICS_FILE" ]; then
+    echo "WARNING: Could not fetch metrics from Prometheus (port $PROMETHEUS_PORT). Skipping data flow check."
+else
+    python3 -c "
+import sys
+
+with open('$L2_METRICS_FILE') as f:
+    metrics_text = f.read()
+
+def get_counter(name):
+    for line in metrics_text.splitlines():
+        if line.startswith(name + ' ') or line.startswith(name + '{'):
+            return float(line.rsplit(' ', 1)[-1])
+    return 0.0
+
+# L1 metrics
+l1_write_keys = get_counter('lmcache_mp_l1_write_keys_total')
+sm_read_succeed = get_counter('lmcache_mp_sm_read_succeed_keys_total')
+
+# L2 metrics
+store_keys = get_counter('lmcache_mp_l2_store_keys_total')
+store_succeeded = get_counter('lmcache_mp_l2_store_succeeded_keys_total')
+prefetch_lookups = get_counter('lmcache_mp_l2_prefetch_lookups_total')
+prefetch_hits = get_counter('lmcache_mp_l2_prefetch_hit_keys_total')
+prefetch_loaded = get_counter('lmcache_mp_l2_prefetch_loaded_keys_total')
+
+print('=' * 60)
+print('Data Flow Metrics')
+print('=' * 60)
+print(f'  L1 write keys:               {l1_write_keys:.0f}')
+print(f'  SM read succeed keys:        {sm_read_succeed:.0f}')
+print(f'  L2 store keys submitted:     {store_keys:.0f}')
+print(f'  L2 store keys succeeded:     {store_succeeded:.0f}')
+print(f'  L2 prefetch lookups:         {prefetch_lookups:.0f}')
+print(f'  L2 prefetch prefix hits:     {prefetch_hits:.0f}')
+print(f'  L2 prefetch keys loaded:     {prefetch_loaded:.0f}')
+print()
+
+failed = False
+
+def check(cond, pass_msg, fail_msg):
+    global failed
+    if cond:
+        print(f'[PASS] {pass_msg}')
+    else:
+        print(f'[FAIL] {fail_msg}')
+        failed = True
+
+# 1. L1 store activity (warmup writes KV to L1 before L2 store)
+check(l1_write_keys > 0,
+      f'L1 store: {l1_write_keys:.0f} keys written',
+      'No keys written to L1 (expected > 0 from warmup)')
+
+# 2. L2 store submitted and completed
+check(store_keys > 0,
+      f'L2 store: {store_keys:.0f} keys submitted',
+      'No keys submitted to L2 store')
+check(store_succeeded > 0,
+      f'L2 store: {store_succeeded:.0f} keys succeeded',
+      'No keys successfully stored to L2')
+
+# 3. L1 retrieve activity on warm requests (cache hits after L2 prefetch)
+check(sm_read_succeed > 0,
+      f'L1 retrieve: {sm_read_succeed:.0f} cache hits',
+      'No SM read hits (expected > 0 from query round)')
+
+# 4. L2 prefetch submitted and completed
+check(prefetch_lookups > 0,
+      f'L2 prefetch: {prefetch_lookups:.0f} lookup requests',
+      'No prefetch lookups (expected > 0 from query round)')
+check(prefetch_hits > 0,
+      f'L2 prefetch: {prefetch_hits:.0f} prefix hits',
+      'No prefix hits from L2 lookup')
+check(prefetch_loaded > 0,
+      f'L2 prefetch: {prefetch_loaded:.0f} keys loaded',
+      'No keys loaded from L2')
+
+print()
+if failed:
+    print('[FAIL] Data flow verification FAILED')
+    sys.exit(1)
+else:
+    print('[PASS] All data flow checks passed')
+"
+fi
+
 echo "============================================"
 echo "=== L2 Long Doc QA test completed ==="
 echo "============================================"
