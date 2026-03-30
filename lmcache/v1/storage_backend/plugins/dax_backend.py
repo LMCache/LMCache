@@ -14,6 +14,9 @@ import mmap
 import os
 import threading
 
+# Third Party
+import torch
+
 # First Party
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey, DiskCacheMetadata
@@ -22,9 +25,6 @@ from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.storage_backend.abstract_backend import StoragePluginInterface
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
-
-# Third Party
-import torch
 
 if torch.cuda.is_available():
     # First Party
@@ -561,9 +561,9 @@ class DaxBackend(StoragePluginInterface):
                             and current.generation == generation
                         ):
                             self._touch_locked(key)
-                if state.pending_free and state.borrow_count == 0:
-                    state.pending_free = False
-                    self._free_slot_locked(slot_id)
+                    if state.pending_free and state.borrow_count == 0:
+                        state.pending_free = False
+                        self._free_slot_locked(slot_id)
                 self._state_condition.notify_all()
 
     async def batched_async_contains(
@@ -1026,7 +1026,9 @@ class DaxBackend(StoragePluginInterface):
     def _allocate_restore_outputs(self, reserved: Sequence[_RestoreItem]) -> None:
         assert self.local_cpu_backend is not None
 
-        grouped_items: "OrderedDict[tuple[tuple[int, ...], torch.dtype, Any], list[_RestoreItem]]" = OrderedDict()
+        grouped_items: OrderedDict[
+            tuple[tuple[int, ...], torch.dtype, Any], list[_RestoreItem]
+        ] = OrderedDict()
         for item in reserved:
             grouped_items.setdefault(
                 (tuple(item.shape), item.dtype, item.fmt),
@@ -1055,7 +1057,9 @@ class DaxBackend(StoragePluginInterface):
                     if memory_obj is None:
                         for allocated in outputs:
                             allocated.ref_count_down()
-                        raise RuntimeError("DaxBackend batched restore allocation failed")
+                        raise RuntimeError(
+                            "DaxBackend batched restore allocation failed"
+                        )
                     outputs.append(memory_obj)
 
             for item, memory_obj in zip(group_items, outputs, strict=True):
@@ -1087,9 +1091,13 @@ class DaxBackend(StoragePluginInterface):
                     if item.size > self._restore_region_bytes:
                         raise RuntimeError(
                             f"DaxBackend restore item size {item.size} exceeds "
-                            f"region capacity {self._restore_region_bytes}"
+                            "region capacity "
+                            f"{self._restore_region_bytes}"
                         )
-                    if used_bytes > 0 and used_bytes + item.size > self._restore_region_bytes:
+                    if (
+                        used_bytes > 0
+                        and used_bytes + item.size > self._restore_region_bytes
+                    ):
                         break
 
                     item.slab_offset = used_bytes
@@ -1160,9 +1168,7 @@ class DaxBackend(StoragePluginInterface):
         self._batched_memcpy(dax_src_ptrs, slab_dst_ptrs, dax_copy_sizes)
 
         slab_src_ptrs = [slab_base_ptr + item.slab_offset for item in region.items]
-        dst_ptrs = [
-            cast(MemoryObj, item.memory_obj).data_ptr for item in region.items
-        ]
+        dst_ptrs = [cast(MemoryObj, item.memory_obj).data_ptr for item in region.items]
         out_sizes = [item.size for item in region.items]
         self._batched_memcpy(slab_src_ptrs, dst_ptrs, out_sizes)
 

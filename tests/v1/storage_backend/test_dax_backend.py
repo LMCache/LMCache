@@ -14,7 +14,6 @@ import pytest
 import torch
 
 # First Party
-import lmcache.v1.storage_backend.plugins.dax_backend as dax_backend_module
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.kv_layer_groups import KVLayerGroupInfo, KVLayerGroupsManager
@@ -22,6 +21,7 @@ from lmcache.v1.memory_management import AdHocMemoryAllocator, MemoryFormat, Mem
 from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 from lmcache.v1.storage_backend.plugins.dax_backend import DaxBackend
+import lmcache.v1.storage_backend.plugins.dax_backend as dax_backend_module
 
 
 @pytest.fixture
@@ -291,6 +291,8 @@ def test_dax_backend_batched_get_blocking_handles_heterogeneous_chunk_shapes(
                 torch.Size([2, 16, 8]),
                 torch.Size([2, 8, 8]),
             ]
+            assert results[0] is not None
+            assert results[1] is not None
             assert torch.all(results[0].tensor == 5)
             assert torch.all(results[1].tensor == 9)
             for result in results:
