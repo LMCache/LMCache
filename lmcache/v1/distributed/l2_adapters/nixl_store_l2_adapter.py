@@ -287,6 +287,7 @@ class NixlStorageAgent:
             self.agent_name, xfer_descs, mem_type="FILE"
         )
 
+        self.storage_fds = fds
         self.storage_reg_descs = reg_descs
         self.storage_xfer_descs = xfer_descs
         self.storage_xfer_handler = xfer_handler
@@ -402,6 +403,8 @@ class NixlStorageAgent:
         self.nixl_agent.release_dlist_handle(self.mem_xfer_handler)
         self.nixl_agent.deregister_memory(self.storage_reg_descs)
         self.nixl_agent.deregister_memory(self.mem_reg_descs)
+        for fd in getattr(self, "storage_fds", []):
+            os.close(fd)
 
 
 class NixlStoreL2Adapter(L2AdapterInterface):
