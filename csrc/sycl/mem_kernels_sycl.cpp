@@ -302,7 +302,7 @@ void submit_multi_layer_kernel_fused_kv(
 
   queue.parallel_for(
       sycl::nd_range<3>(global_range, local_range),
-      [=](sycl::nd_item<3> item) [[intel::reqd_sub_group_size(16)]] {
+      [=](sycl::nd_item<3> item) [[sycl::reqd_sub_group_size(16)]] {
         const int token_id = static_cast<int>(item.get_group(2));
         const int layer_id = static_cast<int>(item.get_group(1));
         const int tid = static_cast<int>(item.get_local_id(2));
