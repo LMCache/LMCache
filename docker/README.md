@@ -171,7 +171,7 @@ All Dockerfiles support the following build arguments:
 | `PYTHON_VERSION` | `3.12` | Python version |
 | `max_jobs` | `2` | Max parallel jobs for build |
 | `nvcc_threads` | `8` | Number of nvcc threads |
-| `torch_cuda_arch_list` | `7.0 7.5 8.0 8.6 8.9 9.0 10.0+PTX` | CUDA architectures |
+| `torch_cuda_arch_list` | `7.0 7.5 8.0 8.6 8.9 9.0 10.0 12.0+PTX` | CUDA architectures |
 
 **Example with custom arguments**:
 
