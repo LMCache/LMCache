@@ -38,6 +38,48 @@ Configuration
      dax.retrieve_staging_slab_bytes: 268435456
 
 
+Using The Batched Restore Path
+------------------------------
+
+The current DAX optimization is a staged batched restore path for retrieval.
+It is enabled automatically whenever the DAX backend is configured. No extra
+feature flag is required.
+
+The retrieve flow is:
+
+1. Reserve a batched set of readable DAX chunks.
+2. Allocate CPU restore buffers from ``LocalCPUBackend``.
+3. Copy DAX data into a backend-owned pinned staging slab in coalesced regions.
+4. Copy from the staging slab into the final CPU ``MemoryObj`` outputs.
+5. Upload those CPU outputs through the normal GPU connector path.
+
+The store flow is unchanged: KV data is still staged through CPU memory before
+being written into the DAX arena.
+
+The new DAX tuning knobs control the batched restore path:
+
+- ``dax.restore_workers``: number of persistent worker threads used to execute
+  restore regions in parallel.
+- ``dax.restore_max_regions``: maximum number of restore regions in one wave.
+  Larger values increase parallelism but also increase slab space requirements.
+- ``dax.retrieve_staging_slab_bytes``: total size in bytes of the reusable
+  pinned retrieve slab. This must be large enough to hold one full chunk per
+  configured restore region.
+
+For a first pass, start with:
+
+- ``dax.restore_workers`` equal to the number of CPU workers you want devoted
+  to DAX restores
+- ``dax.restore_max_regions`` equal to ``dax.restore_workers``
+- ``dax.retrieve_staging_slab_bytes`` at least
+  ``dax.restore_max_regions * full_chunk_size``, then scale upward if larger
+  batched restores are common
+
+If retrieve throughput is low, increase the slab size first, then increase
+worker and region counts together. If CPU pressure is high, reduce
+``dax.restore_workers`` and ``dax.restore_max_regions``.
+
+
 Runtime Requirements
 --------------------
 
