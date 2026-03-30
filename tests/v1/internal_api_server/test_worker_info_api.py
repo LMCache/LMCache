@@ -101,9 +101,8 @@ class TestWorkerInfoAPI:
     @pytest.fixture
     def client_with_real_controller(self, real_controller_manager):
         app.state.lmcache_controller_manager = real_controller_manager
-        client = TestClient(app)
-        yield client
-        client.close()
+        with TestClient(app) as client:
+            yield client
 
     @pytest.fixture
     def client_without_controller(self):
