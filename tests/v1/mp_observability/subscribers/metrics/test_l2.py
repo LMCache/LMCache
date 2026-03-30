@@ -13,10 +13,10 @@ provider and assert on counter **deltas** between before/after snapshots.
 import time
 
 # Third Party
-import pytest
 from opentelemetry import metrics
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import InMemoryMetricReader
+import pytest
 
 # First Party
 from lmcache.v1.mp_observability.event import Event, EventType
@@ -42,6 +42,7 @@ metrics.set_meter_provider(_provider)
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _read_counters() -> dict[str, int]:
     """Snapshot all counter values from the module-level reader."""
     data = _reader.get_metrics_data()
@@ -65,6 +66,7 @@ def _counter_delta(before: dict[str, int], after: dict[str, int]) -> dict[str, i
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
+
 
 @pytest.fixture
 def bus():
@@ -93,17 +95,22 @@ def snapshot():
 # Store events
 # ---------------------------------------------------------------------------
 
+
 class TestL2StoreMetrics:
     def test_store_submitted_counts(self, bus, subscriber, snapshot):
         bus.start()
-        bus.publish(Event(
-            event_type=EventType.L2_STORE_SUBMITTED,
-            metadata={"adapter_index": 0, "key_count": 10},
-        ))
-        bus.publish(Event(
-            event_type=EventType.L2_STORE_SUBMITTED,
-            metadata={"adapter_index": 1, "key_count": 5},
-        ))
+        bus.publish(
+            Event(
+                event_type=EventType.L2_STORE_SUBMITTED,
+                metadata={"adapter_index": 0, "key_count": 10},
+            )
+        )
+        bus.publish(
+            Event(
+                event_type=EventType.L2_STORE_SUBMITTED,
+                metadata={"adapter_index": 1, "key_count": 5},
+            )
+        )
         time.sleep(_DRAIN_WAIT)
         bus.stop()
 
@@ -113,10 +120,12 @@ class TestL2StoreMetrics:
 
     def test_store_completed_success(self, bus, subscriber, snapshot):
         bus.start()
-        bus.publish(Event(
-            event_type=EventType.L2_STORE_COMPLETED,
-            metadata={"adapter_index": 0, "succeeded_count": 8, "failed_count": 0},
-        ))
+        bus.publish(
+            Event(
+                event_type=EventType.L2_STORE_COMPLETED,
+                metadata={"adapter_index": 0, "succeeded_count": 8, "failed_count": 0},
+            )
+        )
         time.sleep(_DRAIN_WAIT)
         bus.stop()
 
@@ -127,10 +136,12 @@ class TestL2StoreMetrics:
 
     def test_store_completed_with_failures(self, bus, subscriber, snapshot):
         bus.start()
-        bus.publish(Event(
-            event_type=EventType.L2_STORE_COMPLETED,
-            metadata={"adapter_index": 0, "succeeded_count": 3, "failed_count": 7},
-        ))
+        bus.publish(
+            Event(
+                event_type=EventType.L2_STORE_COMPLETED,
+                metadata={"adapter_index": 0, "succeeded_count": 3, "failed_count": 7},
+            )
+        )
         time.sleep(_DRAIN_WAIT)
         bus.stop()
 
@@ -142,14 +153,18 @@ class TestL2StoreMetrics:
     def test_store_full_lifecycle(self, bus, subscriber, snapshot):
         """Simulate warmup: submit 20 keys, all succeed."""
         bus.start()
-        bus.publish(Event(
-            event_type=EventType.L2_STORE_SUBMITTED,
-            metadata={"adapter_index": 0, "key_count": 20},
-        ))
-        bus.publish(Event(
-            event_type=EventType.L2_STORE_COMPLETED,
-            metadata={"adapter_index": 0, "succeeded_count": 20, "failed_count": 0},
-        ))
+        bus.publish(
+            Event(
+                event_type=EventType.L2_STORE_SUBMITTED,
+                metadata={"adapter_index": 0, "key_count": 20},
+            )
+        )
+        bus.publish(
+            Event(
+                event_type=EventType.L2_STORE_COMPLETED,
+                metadata={"adapter_index": 0, "succeeded_count": 20, "failed_count": 0},
+            )
+        )
         time.sleep(_DRAIN_WAIT)
         bus.stop()
 
@@ -165,13 +180,16 @@ class TestL2StoreMetrics:
 # Prefetch events
 # ---------------------------------------------------------------------------
 
+
 class TestL2PrefetchMetrics:
     def test_lookup_submitted_counts(self, bus, subscriber, snapshot):
         bus.start()
-        bus.publish(Event(
-            event_type=EventType.L2_PREFETCH_LOOKUP_SUBMITTED,
-            metadata={"request_id": 1, "key_count": 12, "adapter_count": 2},
-        ))
+        bus.publish(
+            Event(
+                event_type=EventType.L2_PREFETCH_LOOKUP_SUBMITTED,
+                metadata={"request_id": 1, "key_count": 12, "adapter_count": 2},
+            )
+        )
         time.sleep(_DRAIN_WAIT)
         bus.stop()
 
@@ -181,10 +199,12 @@ class TestL2PrefetchMetrics:
 
     def test_lookup_completed_counts_hits(self, bus, subscriber, snapshot):
         bus.start()
-        bus.publish(Event(
-            event_type=EventType.L2_PREFETCH_LOOKUP_COMPLETED,
-            metadata={"request_id": 1, "prefix_hit_count": 10},
-        ))
+        bus.publish(
+            Event(
+                event_type=EventType.L2_PREFETCH_LOOKUP_COMPLETED,
+                metadata={"request_id": 1, "prefix_hit_count": 10},
+            )
+        )
         time.sleep(_DRAIN_WAIT)
         bus.stop()
 
@@ -193,10 +213,12 @@ class TestL2PrefetchMetrics:
 
     def test_load_submitted_counts(self, bus, subscriber, snapshot):
         bus.start()
-        bus.publish(Event(
-            event_type=EventType.L2_PREFETCH_LOAD_SUBMITTED,
-            metadata={"request_id": 1, "key_count": 10, "adapter_count": 2},
-        ))
+        bus.publish(
+            Event(
+                event_type=EventType.L2_PREFETCH_LOAD_SUBMITTED,
+                metadata={"request_id": 1, "key_count": 10, "adapter_count": 2},
+            )
+        )
         time.sleep(_DRAIN_WAIT)
         bus.stop()
 
@@ -206,10 +228,12 @@ class TestL2PrefetchMetrics:
 
     def test_load_completed_counts(self, bus, subscriber, snapshot):
         bus.start()
-        bus.publish(Event(
-            event_type=EventType.L2_PREFETCH_LOAD_COMPLETED,
-            metadata={"request_id": 1, "loaded_count": 9, "failed_count": 1},
-        ))
+        bus.publish(
+            Event(
+                event_type=EventType.L2_PREFETCH_LOAD_COMPLETED,
+                metadata={"request_id": 1, "loaded_count": 9, "failed_count": 1},
+            )
+        )
         time.sleep(_DRAIN_WAIT)
         bus.stop()
 
@@ -220,22 +244,30 @@ class TestL2PrefetchMetrics:
     def test_prefetch_full_lifecycle(self, bus, subscriber, snapshot):
         """Simulate query: lookup 20 keys, 18 prefix hits, all 18 load OK."""
         bus.start()
-        bus.publish(Event(
-            event_type=EventType.L2_PREFETCH_LOOKUP_SUBMITTED,
-            metadata={"request_id": 42, "key_count": 20, "adapter_count": 1},
-        ))
-        bus.publish(Event(
-            event_type=EventType.L2_PREFETCH_LOOKUP_COMPLETED,
-            metadata={"request_id": 42, "prefix_hit_count": 18},
-        ))
-        bus.publish(Event(
-            event_type=EventType.L2_PREFETCH_LOAD_SUBMITTED,
-            metadata={"request_id": 42, "key_count": 18, "adapter_count": 1},
-        ))
-        bus.publish(Event(
-            event_type=EventType.L2_PREFETCH_LOAD_COMPLETED,
-            metadata={"request_id": 42, "loaded_count": 18, "failed_count": 0},
-        ))
+        bus.publish(
+            Event(
+                event_type=EventType.L2_PREFETCH_LOOKUP_SUBMITTED,
+                metadata={"request_id": 42, "key_count": 20, "adapter_count": 1},
+            )
+        )
+        bus.publish(
+            Event(
+                event_type=EventType.L2_PREFETCH_LOOKUP_COMPLETED,
+                metadata={"request_id": 42, "prefix_hit_count": 18},
+            )
+        )
+        bus.publish(
+            Event(
+                event_type=EventType.L2_PREFETCH_LOAD_SUBMITTED,
+                metadata={"request_id": 42, "key_count": 18, "adapter_count": 1},
+            )
+        )
+        bus.publish(
+            Event(
+                event_type=EventType.L2_PREFETCH_LOAD_COMPLETED,
+                metadata={"request_id": 42, "loaded_count": 18, "failed_count": 0},
+            )
+        )
         time.sleep(_DRAIN_WAIT)
         bus.stop()
 
@@ -253,6 +285,7 @@ class TestL2PrefetchMetrics:
 # Subscription wiring
 # ---------------------------------------------------------------------------
 
+
 class TestL2MetricsSubscriptions:
     def test_subscriptions_cover_all_l2_events(self, subscriber):
         subs = subscriber.get_subscriptions()
@@ -269,18 +302,27 @@ class TestL2MetricsSubscriptions:
 # Accumulation across multiple events
 # ---------------------------------------------------------------------------
 
+
 class TestL2MetricsAccumulation:
     def test_multiple_store_events_accumulate(self, bus, subscriber, snapshot):
         bus.start()
         for _ in range(5):
-            bus.publish(Event(
-                event_type=EventType.L2_STORE_SUBMITTED,
-                metadata={"adapter_index": 0, "key_count": 3},
-            ))
-            bus.publish(Event(
-                event_type=EventType.L2_STORE_COMPLETED,
-                metadata={"adapter_index": 0, "succeeded_count": 3, "failed_count": 0},
-            ))
+            bus.publish(
+                Event(
+                    event_type=EventType.L2_STORE_SUBMITTED,
+                    metadata={"adapter_index": 0, "key_count": 3},
+                )
+            )
+            bus.publish(
+                Event(
+                    event_type=EventType.L2_STORE_COMPLETED,
+                    metadata={
+                        "adapter_index": 0,
+                        "succeeded_count": 3,
+                        "failed_count": 0,
+                    },
+                )
+            )
         time.sleep(_DRAIN_WAIT)
         bus.stop()
 
@@ -293,22 +335,30 @@ class TestL2MetricsAccumulation:
     def test_multiple_prefetch_events_accumulate(self, bus, subscriber, snapshot):
         bus.start()
         for i in range(3):
-            bus.publish(Event(
-                event_type=EventType.L2_PREFETCH_LOOKUP_SUBMITTED,
-                metadata={"request_id": i, "key_count": 10, "adapter_count": 1},
-            ))
-            bus.publish(Event(
-                event_type=EventType.L2_PREFETCH_LOOKUP_COMPLETED,
-                metadata={"request_id": i, "prefix_hit_count": 8},
-            ))
-            bus.publish(Event(
-                event_type=EventType.L2_PREFETCH_LOAD_SUBMITTED,
-                metadata={"request_id": i, "key_count": 8, "adapter_count": 1},
-            ))
-            bus.publish(Event(
-                event_type=EventType.L2_PREFETCH_LOAD_COMPLETED,
-                metadata={"request_id": i, "loaded_count": 7, "failed_count": 1},
-            ))
+            bus.publish(
+                Event(
+                    event_type=EventType.L2_PREFETCH_LOOKUP_SUBMITTED,
+                    metadata={"request_id": i, "key_count": 10, "adapter_count": 1},
+                )
+            )
+            bus.publish(
+                Event(
+                    event_type=EventType.L2_PREFETCH_LOOKUP_COMPLETED,
+                    metadata={"request_id": i, "prefix_hit_count": 8},
+                )
+            )
+            bus.publish(
+                Event(
+                    event_type=EventType.L2_PREFETCH_LOAD_SUBMITTED,
+                    metadata={"request_id": i, "key_count": 8, "adapter_count": 1},
+                )
+            )
+            bus.publish(
+                Event(
+                    event_type=EventType.L2_PREFETCH_LOAD_COMPLETED,
+                    metadata={"request_id": i, "loaded_count": 7, "failed_count": 1},
+                )
+            )
         time.sleep(_DRAIN_WAIT)
         bus.stop()
 
