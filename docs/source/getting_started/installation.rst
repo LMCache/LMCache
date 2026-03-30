@@ -230,3 +230,31 @@ Example on MI300X (gfx942):
     CXX=hipcc \
     BUILD_WITH_HIP=1 \
     python3 -m pip install --no-build-isolation -e .
+
+
+LMCache on Intel XPU
+------------------
+
+Get started through using vLLM docker image as base image
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The `Intel vLLM XPU hub<https://hub.docker.com/r/intel/vllm>`__ offers a prebuilt, optimized docker image designed for validating inference performance on the Intel GPU accelerator like PVC, BMG, and future products.
+
+User could also build latest dev image by following the instructions below:
+
+.. code-block:: bash
+
+    git clone https://github.com/vllm-project/vllm.git
+    cd vllm
+    docker build --network=host -t vllm-xpu:dev --file docker/Dockerfile.xpu .
+    docker run --privileged -it --rm --name vllm-xpu -u root --ipc=host --net=host --cap-add=ALL --device /dev/dri:/dev/dri -v /dev/dri/by-path:/dev/dri/by-path --entrypoint /bin/bash vllm-xpu:dev
+
+Install Latest LMCache from Source for Intel XPU
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+To install from source, clone the repository and install in editable mode.
+
+.. code-block:: bash
+
+   BUILD_WITH_SYCL=1 pip install --no-build-isolation -e .
+
