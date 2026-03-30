@@ -20,6 +20,8 @@
 set -euo pipefail
 set -x
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 BUILD_ID="${BUILDKITE_BUILD_ID:-local_$$}"
 WORK_LOG="/tmp/build_${BUILD_ID}_blend.log"
 # Blend server, vLLM prefiller/decoder, and proxy stdout/stderr (main script uses WORK_LOG via tee).
@@ -226,7 +228,7 @@ done
 # ---------------------------------------------------------------------------
 
 
-"${TEST_PYTHON}" proxy.py \
+"${TEST_PYTHON}" "${SCRIPT_DIR}/proxy.py" \
   --port "$SERVICE_PORT" \
   --prefiller-host localhost --prefiller-port "$PREFILLER_PORT" \
   --decoder-host localhost --decoder-port "$DECODER_PORT" \
