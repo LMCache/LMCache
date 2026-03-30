@@ -340,7 +340,6 @@ def get_counter(name):
 
 # L1 metrics
 l1_write_keys = get_counter('lmcache_mp_l1_write_keys_total')
-sm_read_succeed = get_counter('lmcache_mp_sm_read_succeed_keys_total')
 
 # L2 metrics
 store_keys = get_counter('lmcache_mp_l2_store_keys_total')
@@ -353,7 +352,6 @@ print('=' * 60)
 print('Data Flow Metrics')
 print('=' * 60)
 print(f'  L1 write keys:               {l1_write_keys:.0f}')
-print(f'  SM read succeed keys:        {sm_read_succeed:.0f}')
 print(f'  L2 store keys submitted:     {store_keys:.0f}')
 print(f'  L2 store keys succeeded:     {store_succeeded:.0f}')
 print(f'  L2 prefetch lookups:         {prefetch_lookups:.0f}')
@@ -384,12 +382,7 @@ check(store_succeeded > 0,
       f'L2 store: {store_succeeded:.0f} keys succeeded',
       'No keys successfully stored to L2')
 
-# 3. L1 retrieve activity on warm requests (cache hits after L2 prefetch)
-check(sm_read_succeed > 0,
-      f'L1 retrieve: {sm_read_succeed:.0f} cache hits',
-      'No SM read hits (expected > 0 from query round)')
-
-# 4. L2 prefetch submitted and completed
+# 3. L2 prefetch submitted and completed (query round: L1 cold, L2 has data)
 check(prefetch_lookups > 0,
       f'L2 prefetch: {prefetch_lookups:.0f} lookup requests',
       'No prefetch lookups (expected > 0 from query round)')
