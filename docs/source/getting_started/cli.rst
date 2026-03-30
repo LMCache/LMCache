@@ -24,6 +24,10 @@ After installing LMCache, the ``lmcache`` command is available:
    # Launch the LMCache server (ZMQ + HTTP)
    lmcache server --host 0.0.0.0 --port 5555 --l1-size-gb 100 --eviction-policy LRU
 
+   # Run a benchmark against the engine
+   lmcache bench engine --engine-url http://localhost:8000 \
+       --workload long-doc-qa --lmcache-url http://localhost:8080
+
    # JSON on stdout (for scripts)
    lmcache ping kvcache --format json
 
@@ -49,8 +53,55 @@ Available Commands
      - Launch the LMCache server (ZMQ + HTTP).
    * - ``ping``
      - Liveness check for LMCache or vLLM servers.
+   * - ``bench``
+     - Run sustained performance benchmarks against an inference engine.
    * - ``kvcache``
      - Manage KV cache state (e.g. clear L1 cache) on a running server.
+
+
+``bench`` — Engine Benchmarking
+---------------------------------
+
+Run sustained benchmarks against an inference engine with multiple workload
+types:
+
+.. code-block:: bash
+
+   # Minimal: all required args on the command line
+   lmcache bench engine \
+       --engine-url http://localhost:8000 \
+       --workload long-doc-qa \
+       --lmcache-url http://localhost:8080
+
+   # Interactive mode: guided step-by-step setup
+   lmcache bench engine
+
+   # From a saved config file (engine URL provided separately)
+   lmcache bench engine --engine-url http://localhost:8000 \
+       --config my_bench.json
+
+   # Export config for later reuse (resolves auto-detected values)
+   lmcache bench engine \
+       --engine-url http://localhost:8000 \
+       --workload long-doc-qa \
+       --lmcache-url http://localhost:8080 \
+       --export-config my_bench.json
+
+   # Non-interactive mode for scripts/CI (errors if args missing)
+   lmcache bench engine \
+       --engine-url http://localhost:8000 \
+       --workload long-doc-qa \
+       --lmcache-url http://localhost:8080 \
+       --no-interactive
+
+Three workloads are available:
+
+- **long-doc-qa** -- repeated Q&A over long documents (tests KV cache reuse).
+- **multi-round-chat** -- multi-turn chat with stateful sessions.
+- **random-prefill** -- prefill-only requests fired simultaneously.
+
+See :doc:`/cli/bench` for full documentation including all workload options,
+interactive mode details, and config file format.
 
 
 ``describe`` — Service Status Dashboard

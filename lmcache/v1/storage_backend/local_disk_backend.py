@@ -168,7 +168,7 @@ class LocalDiskBackend(StorageBackendInterface):
         else:
             logger.warning("Controller message sender is not initialized")
 
-    def __str__(self):
+    def __str__(self) -> str:
         return "LocalDiskBackend"
 
     def _key_to_path(
@@ -635,7 +635,7 @@ class LocalDiskBackend(StorageBackendInterface):
             f"Bandwidth: {size / disk_read_time / 1e6:.2f} MB/s"
         )
 
-    def get_allocator_backend(self):
+    def get_allocator_backend(self) -> LocalCPUBackend:
         return self.local_cpu_backend
 
     def close(self) -> None:

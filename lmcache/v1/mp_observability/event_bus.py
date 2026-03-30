@@ -9,7 +9,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import Callable
+from typing import Any, Callable
 import collections
 import threading
 import time
@@ -119,6 +119,16 @@ class EventBus:
         with self._lock:
             self._registered_subscribers.append(subscriber)
 
+    def publish_on_stream(self, stream: Any, event: Event) -> None:
+        """Schedule :meth:`publish` as a CUDA host function on *stream*.
+
+        No-op when the EventBus is disabled, avoiding the overhead of
+        scheduling a host function on the CUDA stream entirely.
+        """
+        if not self._config.enabled:
+            return
+        stream.launch_host_func(self.publish, event)
+
     def publish(self, event: Event) -> None:
         """Submit an event (hot path — non-blocking).
 
@@ -220,6 +230,16 @@ class EventBus:
 # ---------------------------------------------------------------------------
 
 _global_bus = EventBus(EventBusConfig(enabled=False))
+_observability_enabled: bool = False
+
+
+def is_observability_enabled() -> bool:
+    """Fast check for whether observability is active.
+
+    Use this to guard expensive event-construction or CUDA host-function
+    scheduling when observability is disabled.
+    """
+    return _observability_enabled
 
 
 def get_event_bus() -> EventBus:
@@ -232,6 +252,7 @@ def init_event_bus(config: EventBusConfig | None = None) -> EventBus:
 
     Returns the newly created bus.
     """
-    global _global_bus
+    global _global_bus, _observability_enabled
     _global_bus = EventBus(config)
+    _observability_enabled = config.enabled if config else True
     return _global_bus

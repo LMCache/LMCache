@@ -26,6 +26,8 @@ Available Commands
      - Single-shot query interface for the serving engine.
    * - ``ping``
      - Liveness check for LMCache or vLLM servers.
+   * - ``bench``
+     - Run sustained performance benchmarks against an inference engine.
    * - ``kvcache``
      - Manage KV cache state (e.g. clear L1 cache).
    * - ``server``
@@ -36,4 +38,5 @@ For a comprehensive guide with examples, see :doc:`/getting_started/cli`.
 .. toctree::
    :maxdepth: 2
 
+   bench
    kvcache
