@@ -71,9 +71,15 @@ To use LMCache, simply install `lmcache` from your package manager, e.g. pip:
 pip install lmcache
 ```
 
-Works on Linux NVIDIA GPU platform.
+Works on Linux NVIDIA GPU platform. For local development on macOS (CPU-only mode), build with:
 
-More [detailed installation instructions](https://docs.lmcache.ai/getting_started/installation) are available in the docs, particularly if you are not using the latest stable version of vllm or using another serving engine with different dependencies. Any "undefined symbol" or torch mismatch versions can be resolved in the documentation. 
+```bash
+NO_CUDA_EXT=1 pip install -e . --no-deps --no-build-isolation
+```
+
+Then start the MP server: `lmcache server --l1-size-gb 1 --eviction-policy LRU`
+
+More [detailed installation instructions](https://docs.lmcache.ai/getting_started/installation) are available in the docs, particularly if you are not using the latest stable version of vllm or using another serving engine with different dependencies. Any "undefined symbol" or torch mismatch versions can be resolved in the documentation.
 
 ## Getting started
 

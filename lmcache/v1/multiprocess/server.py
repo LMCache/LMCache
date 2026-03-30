@@ -977,7 +977,8 @@ def run_cache_server(
         mp_config.port,
     )
     # Start the ZMQ server
-    torch.cuda.init()
+    if torch.cuda.is_available():
+        torch.cuda.init()
     server.start()
 
     logger.info("LMCache cache server is running...")

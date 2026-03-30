@@ -20,6 +20,10 @@ if TYPE_CHECKING:
 # First Party
 from lmcache.logging import init_logger
 from lmcache.native_storage_ops import Bitmap
+from lmcache.v1.compat_eventfd import (
+    compat_eventfd,
+    compat_eventfd_write,
+)
 from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface, L2TaskId
 from lmcache.v1.distributed.l2_adapters.config import (
@@ -114,9 +118,9 @@ class MockL2Adapter(L2AdapterInterface):
         self._max_capacity_bytes = int(config.max_size_gb * (1024**3))
         self._bandwidth_byte_ps = int(config.mock_bandwidth_gb * (1024**3))
 
-        self._store_efd = os.eventfd(0, os.EFD_NONBLOCK | os.EFD_CLOEXEC)
-        self._lookup_efd = os.eventfd(0, os.EFD_NONBLOCK | os.EFD_CLOEXEC)
-        self._load_efd = os.eventfd(0, os.EFD_NONBLOCK | os.EFD_CLOEXEC)
+        self._store_efd = compat_eventfd()
+        self._lookup_efd = compat_eventfd()
+        self._load_efd = compat_eventfd()
 
         self._memory_objects: dict[ObjectKey, MemoryObj] = {}
         self._locked_keys: dict[ObjectKey, int] = defaultdict(int)
@@ -369,7 +373,7 @@ class MockL2Adapter(L2AdapterInterface):
 
     def _signal_store_event(self) -> None:
         """Signal the store event fd to notify completion."""
-        os.eventfd_write(self._store_efd, 1)
+        compat_eventfd_write(self._store_efd, 1)
 
     async def _execute_store_in_the_loop(
         self,
@@ -438,7 +442,7 @@ class MockL2Adapter(L2AdapterInterface):
 
     def _signal_lookup_event(self) -> None:
         """Signal the lookup event fd to notify completion."""
-        os.eventfd_write(self._lookup_efd, 1)
+        compat_eventfd_write(self._lookup_efd, 1)
 
     def _execute_lookup_in_the_loop(
         self, keys: list[ObjectKey], task_id: L2TaskId
@@ -455,7 +459,7 @@ class MockL2Adapter(L2AdapterInterface):
 
     def _signal_load_event(self) -> None:
         """Signal the load event fd to notify completion."""
-        os.eventfd_write(self._load_efd, 1)
+        compat_eventfd_write(self._load_efd, 1)
 
     async def _execute_load_in_loop(
         self,

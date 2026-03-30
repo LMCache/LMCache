@@ -16,13 +16,18 @@ The controller runs a background thread with an event-driven loop that:
 from dataclasses import dataclass, field
 from typing import Iterable
 import enum
-import os
 import select
 import threading
 
 # First Party
 from lmcache.logging import init_logger
 from lmcache.native_storage_ops import Bitmap
+from lmcache.v1.compat_eventfd import (
+    compat_eventfd,
+    compat_eventfd_close,
+    compat_eventfd_read,
+    compat_eventfd_write,
+)
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.l1_manager import L1Manager
@@ -219,7 +224,7 @@ class PrefetchController(StorageControllerInterface):
             tuple[PrefetchRequestId, list[ObjectKey], MemoryLayoutDesc, int]
         ] = []
         self._next_request_id: PrefetchRequestId = 0
-        self._submission_efd = os.eventfd(0, os.EFD_NONBLOCK | os.EFD_CLOEXEC)
+        self._submission_efd = compat_eventfd()
 
         # Thread-safe lookup results (background -> external)
         self._lookup_results_lock = threading.Lock()
@@ -286,7 +291,7 @@ class PrefetchController(StorageControllerInterface):
             request_id = self._next_request_id
             self._next_request_id += 1
             self._submission_queue.append((request_id, keys, layout_desc, extra_count))
-        os.eventfd_write(self._submission_efd, 1)
+        compat_eventfd_write(self._submission_efd, 1)
         return request_id
 
     def query_lookup_result(self, request_id: PrefetchRequestId) -> int | None:
@@ -377,10 +382,10 @@ class PrefetchController(StorageControllerInterface):
         L2 locks) before returning.
         """
         self._stop_flag.set()
-        os.eventfd_write(self._submission_efd, 1)
+        compat_eventfd_write(self._submission_efd, 1)
         self._thread.join()
         self._cleanup_in_flight_requests()
-        os.close(self._submission_efd)
+        compat_eventfd_close(self._submission_efd)
 
     # =========================================================================
     # Background loop
@@ -410,7 +415,7 @@ class PrefetchController(StorageControllerInterface):
                     continue
 
                 try:
-                    os.eventfd_read(fd)
+                    compat_eventfd_read(fd)
                 except (OSError, BlockingIOError):
                     pass
 

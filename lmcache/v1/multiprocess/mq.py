@@ -15,6 +15,11 @@ import zmq
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.compat_eventfd import (
+    compat_eventfd,
+    compat_eventfd_read,
+    compat_eventfd_write,
+)
 from lmcache.v1.multiprocess.affinity_pool import AffinityThreadPool
 from lmcache.v1.multiprocess.custom_types import (
     CudaIPCWrapper,
@@ -354,7 +359,7 @@ class MessageQueueServer:
         # Use eventfd instead of zmq PUSH/PULL sockets because blocking
         # handler callbacks run on ThreadPoolExecutor threads, and zmq
         # sockets are not thread-safe. eventfd_write() is atomic.
-        self._output_efd = os.eventfd(0, os.EFD_NONBLOCK | os.EFD_CLOEXEC)
+        self._output_efd = compat_eventfd()
         self.output_queue: queue.Queue = queue.Queue()
 
         # Poller
@@ -427,7 +432,7 @@ class MessageQueueServer:
                 )
 
                 self.output_queue.put(frames_to_send)
-                os.eventfd_write(self._output_efd, 1)
+                compat_eventfd_write(self._output_efd, 1)
 
             except Exception:
                 logger.exception("Error in blocking handler")
@@ -487,7 +492,7 @@ class MessageQueueServer:
             # Send the responses
             if outbound_state and outbound_state & zmq.POLLIN:
                 # Consume the eventfd counter (resets atomically)
-                os.eventfd_read(self._output_efd)
+                compat_eventfd_read(self._output_efd)
 
                 # Process the output tasks
                 try:

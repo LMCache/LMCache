@@ -11,12 +11,17 @@ The controller runs a background thread with an event-driven loop that:
 
 # Standard
 from dataclasses import dataclass
-import os
 import select
 import threading
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.compat_eventfd import (
+    compat_eventfd,
+    compat_eventfd_close,
+    compat_eventfd_read,
+    compat_eventfd_write,
+)
 from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.internal_api import L1ManagerListener
@@ -52,7 +57,7 @@ class StoreListener(L1ManagerListener):
     def __init__(self) -> None:
         self._pending_keys: list[ObjectKey] = []
         self._lock = threading.Lock()
-        self._event_fd = os.eventfd(0, os.EFD_NONBLOCK | os.EFD_CLOEXEC)
+        self._event_fd = compat_eventfd()
 
     def get_event_fd(self) -> int:
         """
@@ -97,7 +102,7 @@ class StoreListener(L1ManagerListener):
         """
         with self._lock:
             self._pending_keys.extend(keys)
-        os.eventfd_write(self._event_fd, 1)
+        compat_eventfd_write(self._event_fd, 1)
 
     def on_l1_keys_reserved_read(self, keys: list[ObjectKey]) -> None:
         pass
@@ -118,7 +123,7 @@ class StoreListener(L1ManagerListener):
 
     def close(self) -> None:
         """Close the eventfd."""
-        os.close(self._event_fd)
+        compat_eventfd_close(self._event_fd)
 
 
 @dataclass
@@ -215,7 +220,7 @@ class StoreController(StorageControllerInterface):
         """
         self._stop_flag.set()
         # Wake up the poll loop so it can exit promptly
-        os.eventfd_write(self._listener.get_event_fd(), 1)
+        compat_eventfd_write(self._listener.get_event_fd(), 1)
         self._thread.join()
         self._cleanup_in_flight_tasks()
         self._listener.close()
@@ -260,7 +265,7 @@ class StoreController(StorageControllerInterface):
 
                 # Consume the eventfd value
                 try:
-                    os.eventfd_read(fd)
+                    compat_eventfd_read(fd)
                 except (OSError, BlockingIOError):
                     pass
 

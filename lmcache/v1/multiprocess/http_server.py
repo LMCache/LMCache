@@ -2,6 +2,7 @@
 # Standard
 from contextlib import asynccontextmanager
 import argparse
+import asyncio
 
 # Third Party
 from fastapi import FastAPI, Request
@@ -178,7 +179,10 @@ def run_http_server(
         http_config.http_host,
         http_config.http_port,
     )
-    server.run()
+    # Use asyncio.run() directly instead of server.run()
+    # to avoid compatibility issues with PyCharm's
+    # debugger patching asyncio.
+    asyncio.run(server.serve())
 
 
 def parse_args():

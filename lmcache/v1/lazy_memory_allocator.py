@@ -95,8 +95,8 @@ class LazyMemoryAllocator(MemoryAllocatorInterface):
         self._final_size = align_to(final_size, self.PIN_CHUNK_SIZE)
         # Underlying buffer for the memory allocation
         self._buffer: torch.Tensor
-        # CUDA runtime API
-        self._cudart = torch.cuda.cudart()
+        # CUDA runtime API (None when CUDA is unavailable)
+        self._cudart = torch.cuda.cudart() if torch.cuda.is_available() else None
 
         # List of (ptr, size) for pinned memory chunks
         self._pin_record: list[tuple[int, int]] = []
@@ -196,8 +196,9 @@ class LazyMemoryAllocator(MemoryAllocatorInterface):
         self._expand_thread.join()
 
         # Unpin all pinned memory chunks
-        for ptr, size in self._pin_record:
-            self._cudart.cudaHostUnregister(ptr)
+        if self._cudart is not None:
+            for ptr, size in self._pin_record:
+                self._cudart.cudaHostUnregister(ptr)
         self._pin_record.clear()
 
         # Free the underlying buffer if using NUMA allocation
@@ -236,6 +237,8 @@ class LazyMemoryAllocator(MemoryAllocatorInterface):
         )
         assert offset + size <= self._final_size, "Pinning exceeds buffer size"
 
+        if self._cudart is None:
+            return
         ptr = self._buffer.data_ptr() + offset
         # Use flag: cudaHostRegisterMapped (0x02)
         self._cudart.cudaHostRegister(ptr, size, 2)

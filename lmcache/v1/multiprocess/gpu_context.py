@@ -7,12 +7,22 @@ This module provides GPU-side KV cache management functionality, including:
 - Helper functions for tensor operations and key resolution
 """
 
+# Future
+from __future__ import annotations
+
 # Standard
+from typing import TYPE_CHECKING
 import array
 
 # Third Party
-import cupy
 import torch
+
+if torch.cuda.is_available():
+    # Third Party
+    import cupy
+
+if TYPE_CHECKING:
+    import cupy
 
 # First Party
 from lmcache.logging import init_logger
@@ -35,7 +45,12 @@ from lmcache.v1.gpu_connector.utils import (
 from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
 
 if torch.cuda.is_available():
+    # First Party
     import lmcache.c_ops as lmc_ops
+else:
+    cupy = None  # type: ignore[assignment]
+    # First Party
+    import lmcache.non_cuda_equivalents as lmc_ops  # type: ignore[assignment]
 
 # First Party
 from lmcache.v1.multiprocess.custom_types import (

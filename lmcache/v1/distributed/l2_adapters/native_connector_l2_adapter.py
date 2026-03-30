@@ -29,6 +29,10 @@ import threading
 # First Party
 from lmcache.logging import init_logger
 from lmcache.native_storage_ops import Bitmap
+from lmcache.v1.compat_eventfd import (
+    compat_eventfd,
+    compat_eventfd_write,
+)
 from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.distributed.l2_adapters.base import (
     L2AdapterInterface,
@@ -86,9 +90,9 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
 
         # 3 distinct Python eventfds for the L2 adapter
         # interface
-        self._store_efd = os.eventfd(0, os.EFD_NONBLOCK | os.EFD_CLOEXEC)
-        self._lookup_efd = os.eventfd(0, os.EFD_NONBLOCK | os.EFD_CLOEXEC)
-        self._load_efd = os.eventfd(0, os.EFD_NONBLOCK | os.EFD_CLOEXEC)
+        self._store_efd = compat_eventfd()
+        self._lookup_efd = compat_eventfd()
+        self._load_efd = compat_eventfd()
 
         # Pending ops: native future_id →
         #   (op_type, task_id, num_keys, keys_for_locking)
@@ -392,7 +396,7 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
                                     self._key_sizes[key] = size
                                     self._current_size_bytes += size
                             keys_stored.extend(store_keys)
-                        os.eventfd_write(self._store_efd, 1)
+                        compat_eventfd_write(self._store_efd, 1)
 
                     elif op_type == self._OP_LOOKUP:
                         bitmap = Bitmap(num_keys)
@@ -403,7 +407,7 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
                                     if lookup_keys is not None:
                                         self._locked_keys[lookup_keys[i]] += 1
                         self._completed_lookups[task_id] = bitmap
-                        os.eventfd_write(self._lookup_efd, 1)
+                        compat_eventfd_write(self._lookup_efd, 1)
 
                     elif op_type == self._OP_LOAD:
                         bitmap = Bitmap(num_keys)
@@ -423,7 +427,7 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
                                 loaded_keys.extend(lookup_keys)
                         keys_accessed.extend(loaded_keys)
                         self._completed_loads[task_id] = bitmap
-                        os.eventfd_write(self._load_efd, 1)
+                        compat_eventfd_write(self._load_efd, 1)
 
                     elif op_type == self._OP_DELETE:
                         # Decrement sizes for successfully deleted keys

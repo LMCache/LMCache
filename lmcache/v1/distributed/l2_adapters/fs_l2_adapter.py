@@ -29,6 +29,10 @@ import aiofiles.os
 # First Party
 from lmcache.logging import init_logger
 from lmcache.native_storage_ops import Bitmap
+from lmcache.v1.compat_eventfd import (
+    compat_eventfd,
+    compat_eventfd_write,
+)
 from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.distributed.l2_adapters.base import (
     L2AdapterInterface,
@@ -264,9 +268,9 @@ class FSL2Adapter(L2AdapterInterface):
             stat = os.statvfs(self._base_path)
             self._os_disk_bs = stat.f_bsize
 
-        self._store_efd = os.eventfd(0, os.EFD_NONBLOCK | os.EFD_CLOEXEC)
-        self._lookup_efd = os.eventfd(0, os.EFD_NONBLOCK | os.EFD_CLOEXEC)
-        self._load_efd = os.eventfd(0, os.EFD_NONBLOCK | os.EFD_CLOEXEC)
+        self._store_efd = compat_eventfd()
+        self._lookup_efd = compat_eventfd()
+        self._load_efd = compat_eventfd()
 
         # Task bookkeeping
         self._next_task_id: L2TaskId = 0
@@ -610,7 +614,7 @@ class FSL2Adapter(L2AdapterInterface):
 
         with self._lock:
             self._completed_store_tasks[task_id] = success
-        os.eventfd_write(self._store_efd, 1)
+        compat_eventfd_write(self._store_efd, 1)
 
     # ---- lookup ---------------------------------------------------------
 
@@ -627,7 +631,7 @@ class FSL2Adapter(L2AdapterInterface):
 
         with self._lock:
             self._completed_lookup_tasks[task_id] = bitmap
-        os.eventfd_write(self._lookup_efd, 1)
+        compat_eventfd_write(self._lookup_efd, 1)
 
     # ---- load -----------------------------------------------------------
 
@@ -714,7 +718,7 @@ class FSL2Adapter(L2AdapterInterface):
 
         with self._lock:
             self._completed_load_tasks[task_id] = bitmap
-        os.eventfd_write(self._load_efd, 1)
+        compat_eventfd_write(self._load_efd, 1)
 
 
 # Self-register config type and adapter factory

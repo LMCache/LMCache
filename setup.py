@@ -284,14 +284,43 @@ def rocm_extension() -> tuple[list, dict]:
     return ext_modules, cmdclass
 
 
+def cpu_only_extension() -> tuple[list, dict]:
+    """Build only pure-CPU C++ extensions (no CUDA/HIP required)."""
+    # Third Party
+    from torch.utils import cpp_extension
+
+    print("Building CPU-only C++ extensions (no CUDA/HIP)")
+    storage_manager_sources = [
+        "csrc/storage_manager/bitmap.cpp",
+        "csrc/storage_manager/pybind.cpp",
+        "csrc/storage_manager/ttl_lock.cpp",
+        "csrc/storage_manager/utils.cpp",
+    ]
+    ext_modules = [
+        cpp_extension.CppExtension(
+            "lmcache.native_storage_ops",
+            sources=storage_manager_sources,
+            include_dirs=["csrc/storage_manager"],
+            extra_compile_args={
+                "cxx": ["-O3", "-std=c++17"],
+            },
+        ),
+    ]
+    cmdclass = {"build_ext": cpp_extension.BuildExtension}
+    return ext_modules, cmdclass
+
+
 def source_dist_extension() -> tuple[list, dict]:
     print("Not building CUDA/HIP extensions for sdist")
     return [], {}
 
 
 if __name__ == "__main__":
-    if BUILDING_SDIST:
+    if "sdist" in sys.argv:
         get_extension = source_dist_extension
+    elif BUILDING_SDIST:
+        # NO_CUDA_EXT=1: still build pure-CPU extensions
+        get_extension = cpu_only_extension
     elif BUILD_WITH_HIP:
         get_extension = rocm_extension
     else:
