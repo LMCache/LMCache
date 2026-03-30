@@ -96,6 +96,10 @@ def cuda_extension() -> tuple[list, dict]:
         "csrc/storage_backends/fs/pybind.cpp",
         "csrc/storage_backends/fs/connector.cpp",
     ]
+    mooncake_sources = [
+        "csrc/storage_backends/mooncake/pybind.cpp",
+        "csrc/storage_backends/mooncake/connector.cpp",
+    ]
     ext_modules = [
         cpp_extension.CUDAExtension(
             "lmcache.c_ops",
@@ -130,6 +134,45 @@ def cuda_extension() -> tuple[list, dict]:
             },
         ),
     ]
+    # Mooncake extension is optional.
+    # Set BUILD_MOONCAKE=1 to enable, BUILD_MOONCAKE=0 to force disable.
+    # (Legacy: MOONCAKE_INCLUDE_DIR also enables it unless
+    # BUILD_MOONCAKE is explicitly set to 0.)
+    mc_env = os.environ.get("BUILD_MOONCAKE")
+    if mc_env is not None:
+        build_mc = mc_env == "1"
+    else:
+        build_mc = os.environ.get("MOONCAKE_INCLUDE_DIR", "") != ""
+    if build_mc:
+        mc_include = os.environ.get("MOONCAKE_INCLUDE_DIR", "")
+        mc_lib = os.environ.get("MOONCAKE_LIB_DIR", "")
+        mc_include_dirs = [
+            "csrc/storage_backends",
+            "csrc/storage_backends/mooncake",
+        ]
+        if mc_include:
+            mc_include_dirs.extend(mc_include.split(";"))
+        mc_library_dirs = []
+        if mc_lib:
+            mc_library_dirs.extend(mc_lib.split(";"))
+        ext_modules.append(
+            cpp_extension.CppExtension(
+                "lmcache.lmcache_mooncake",
+                sources=mooncake_sources,
+                include_dirs=mc_include_dirs,
+                library_dirs=mc_library_dirs,
+                libraries=["store"],
+                runtime_library_dirs=mc_library_dirs,
+                extra_compile_args={
+                    "cxx": [
+                        flag_cxx_abi,
+                        "-O3",
+                        "-std=c++20",
+                        "-DYLT_ENABLE_IBV",
+                    ],
+                },
+            ),
+        )
     cmdclass = {"build_ext": cpp_extension.BuildExtension}
     return ext_modules, cmdclass
 
@@ -164,6 +207,10 @@ def rocm_extension() -> tuple[list, dict]:
     fs_sources = [
         "csrc/storage_backends/fs/pybind.cpp",
         "csrc/storage_backends/fs/connector.cpp",
+    ]
+    mooncake_sources = [
+        "csrc/storage_backends/mooncake/pybind.cpp",
+        "csrc/storage_backends/mooncake/connector.cpp",
     ]
     # For HIP, we generally use CppExtension and let hipcc handle things.
     # Ensure CXX environment variable is set to hipcc when running this build.
@@ -221,6 +268,44 @@ def rocm_extension() -> tuple[list, dict]:
             },
         ),
     ]
+    # Mooncake extension is optional.
+    # Set BUILD_MOONCAKE=1 to enable, BUILD_MOONCAKE=0 to force disable.
+    # (Legacy: MOONCAKE_INCLUDE_DIR also enables it unless
+    # BUILD_MOONCAKE is explicitly set to 0.)
+    mc_env = os.environ.get("BUILD_MOONCAKE")
+    if mc_env is not None:
+        build_mc = mc_env == "1"
+    else:
+        build_mc = os.environ.get("MOONCAKE_INCLUDE_DIR", "") != ""
+    if build_mc:
+        mc_include = os.environ.get("MOONCAKE_INCLUDE_DIR", "")
+        mc_lib = os.environ.get("MOONCAKE_LIB_DIR", "")
+        mc_include_dirs = [
+            "csrc/storage_backends",
+            "csrc/storage_backends/mooncake",
+        ]
+        if mc_include:
+            mc_include_dirs.extend(mc_include.split(";"))
+        mc_library_dirs = []
+        if mc_lib:
+            mc_library_dirs.extend(mc_lib.split(";"))
+        ext_modules.append(
+            cpp_extension.CppExtension(
+                "lmcache.lmcache_mooncake",
+                sources=mooncake_sources,
+                include_dirs=mc_include_dirs,
+                library_dirs=mc_library_dirs,
+                libraries=["store"],
+                runtime_library_dirs=mc_library_dirs,
+                extra_compile_args={
+                    "cxx": [
+                        "-O3",
+                        "-std=c++20",
+                        "-DYLT_ENABLE_IBV",
+                    ],
+                },
+            ),
+        )
     cmdclass = {"build_ext": cpp_extension.BuildExtension}
     return ext_modules, cmdclass
 
