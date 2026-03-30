@@ -31,6 +31,7 @@ from lmcache.logging import init_logger
 from lmcache.native_storage_ops import Bitmap
 from lmcache.v1.compat_eventfd import (
     compat_eventfd,
+    compat_eventfd_close,
     compat_eventfd_write,
 )
 from lmcache.v1.distributed.api import ObjectKey
@@ -431,9 +432,9 @@ class FSL2Adapter(L2AdapterInterface):
         self._loop_thread.join()
         self._loop.close()
 
-        os.close(self._store_efd)
-        os.close(self._lookup_efd)
-        os.close(self._load_efd)
+        compat_eventfd_close(self._store_efd)
+        compat_eventfd_close(self._lookup_efd)
+        compat_eventfd_close(self._load_efd)
         logger.info("FSL2Adapter closed")
 
     # ------------------------------------------------------------------

@@ -4,7 +4,6 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any, Callable, Generic, Optional, TypeVar, get_type_hints
 import inspect
-import os
 import queue
 import threading
 import uuid
@@ -17,6 +16,7 @@ import zmq
 from lmcache.logging import init_logger
 from lmcache.v1.compat_eventfd import (
     compat_eventfd,
+    compat_eventfd_close,
     compat_eventfd_read,
     compat_eventfd_write,
 )
@@ -734,4 +734,4 @@ class MessageQueueServer:
         self.socket.close()
         for pool in self.extra_pools:
             pool.shutdown(wait=False)
-        os.close(self._output_efd)
+        compat_eventfd_close(self._output_efd)

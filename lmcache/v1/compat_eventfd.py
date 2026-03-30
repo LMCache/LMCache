@@ -95,5 +95,3 @@ def compat_eventfd_close(efd: int) -> None:
         r, w = pair
         os.close(r)
         os.close(w)
-    else:
-        os.close(efd)
