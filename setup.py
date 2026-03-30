@@ -256,6 +256,10 @@ def sycl_extension() -> tuple[list, dict]:
         "csrc/storage_backends/redis/pybind.cpp",
         "csrc/storage_backends/redis/connector.cpp",
     ]
+    fs_sources = [
+        "csrc/storage_backends/fs/pybind.cpp",
+        "csrc/storage_backends/fs/connector.cpp",
+    ]
     # Use CppExtension with DPC++ compiler (set CXX=icpx before invoking).
     # The -fsycl flag enables SYCL compilation and linking.
     # Intel XPU optimizations:
@@ -306,6 +310,14 @@ def sycl_extension() -> tuple[list, dict]:
             include_dirs=["csrc/storage_backends", "csrc/storage_backends/redis"],
             extra_compile_args={
                 "cxx": ["-D_GLIBCXX_USE_CXX11_ABI=1", "-O3", "-std=c++17"],
+            },
+        ),
+        cpp_extension.CppExtension(
+            "lmcache.lmcache_fs",
+            sources=fs_sources,
+            include_dirs=["csrc/storage_backends", "csrc/storage_backends/fs"],
+            extra_compile_args={
+                "cxx": ["-O3", "-std=c++17"],
             },
         ),
     ]

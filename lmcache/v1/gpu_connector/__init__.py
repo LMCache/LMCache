@@ -117,20 +117,20 @@ def CreateGPUConnector(
             if config.use_layerwise:
                 if config.enable_blending:
                     return VLLMBufferLayerwiseXPUConnector.from_metadata(
-                        metadata, use_gpu, device, layout_hints=layout_hints
+                        metadata, use_gpu, device
                     )
                 else:
                     return VLLMPagedMemLayerwiseXPUConnector.from_metadata(
-                        metadata, use_gpu, device, layout_hints=layout_hints
+                        metadata, use_gpu, device
                     )
 
             if config.use_gpu_connector_v3:
                 return VLLMPagedMemXPUConnectorV3.from_metadata(
-                    metadata, use_gpu, device, layout_hints=layout_hints
+                    metadata, use_gpu, device
                 )
             else:
                 return VLLMPagedMemXPUConnectorV2.from_metadata(
-                    metadata, use_gpu, device, layout_hints=layout_hints
+                    metadata, use_gpu, device
                 )
         elif dev_name == "hpu":
             return VLLMPagedMemHPUConnectorV2.from_metadata(metadata, use_gpu, device)
