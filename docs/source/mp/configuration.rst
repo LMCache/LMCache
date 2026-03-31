@@ -58,7 +58,7 @@ HTTP Frontend
 
 Source: ``lmcache/v1/multiprocess/config.py``
 
-Only available when running ``http_server.py``.
+The HTTP frontend is included when running ``lmcache server``.
 
 .. list-table::
    :header-rows: 1

@@ -86,7 +86,7 @@ L2_ADAPTER_JSON="{\"type\":\"mock\",\"max_size_gb\":${L2_MAX_SIZE_GB},\"mock_ban
 GPU_DEVICE="${GPU_FOR_VLLM:-0}"
 
 CUDA_VISIBLE_DEVICES="${GPU_DEVICE}" \
-python -m lmcache.v1.multiprocess.server \
+lmcache server \
     --l1-size-gb "$CPU_BUFFER_SIZE" \
     --eviction-policy noop \
     --l2-store-policy skip_l1 \
