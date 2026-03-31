@@ -21,8 +21,9 @@ def parse_args():
     parser.add_argument(
         "--num-keys",
         type=int,
-        default=100,
-        help="Number of keys to generate (gen mode only)",
+        default=5,
+        help="Number of keys for gen mode or test iterations "
+        "for test_* modes (default: 5)",
     )
     parser.add_argument(
         "--concurrency",
@@ -35,6 +36,38 @@ def parse_args():
         type=int,
         default=0,
         help="Offset for key generation (gen mode only)",
+    )
+    parser.add_argument(
+        "--l2-adapter",
+        dest="l2_adapter",
+        action="append",
+        default=[],
+        type=str,
+        metavar="JSON",
+        help="L2 adapter spec as JSON (test_l2_adapter mode). "
+        'e.g. \'{"type":"mock","max_size_gb":1}\'.',
+    )
+    parser.add_argument(
+        "--obj-size",
+        dest="obj_size",
+        type=int,
+        default=None,
+        help="Object size in number of elements (default: 1024)",
+    )
+    parser.add_argument(
+        "--kv-dtype",
+        dest="kv_dtype",
+        type=str,
+        default=None,
+        help="KV dtype, e.g. float32, bfloat16, float16 (default depends on mode)",
+    )
+    parser.add_argument(
+        "--settle-time",
+        dest="settle_time",
+        type=float,
+        default=0.0,
+        help="Seconds to wait after store before load "
+        "(default: 0, useful for remote backends)",
     )
     return parser.parse_args()
 
@@ -65,6 +98,10 @@ async def main():
         "num_keys": args.num_keys,
         "concurrency": args.concurrency,
         "offset": args.offset,
+        "l2_adapter": args.l2_adapter,
+        "obj_size": args.obj_size,
+        "kv_dtype": args.kv_dtype,
+        "settle_time": args.settle_time,
     }
 
     # Execute the mode function
