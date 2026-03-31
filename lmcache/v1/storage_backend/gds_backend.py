@@ -326,6 +326,9 @@ class GdsBackend(AllocatorBackendInterface):
         self.put_lock = threading.Lock()
         self.put_tasks: set[CacheEngineKey] = set()
 
+        # Initialize stats monitor for Prometheus metrics
+        self.stats_monitor = LMCStatsMonitor.GetOrCreate()
+
         if hasattr(self.memory_allocator, "base_pointer"):
             logger.debug(f"Using base pointer {self.memory_allocator.base_pointer}")
             self.cufile_base_pointer = self.memory_allocator.base_pointer
@@ -341,9 +344,6 @@ class GdsBackend(AllocatorBackendInterface):
         self._debug_asserts = False
         # flag to use O_NOATIME during metadata file read for performance improvement
         self._use_noatime = True
-
-        # Initialize stats monitor for Prometheus metrics
-        self.stats_monitor = LMCStatsMonitor.GetOrCreate()
 
         # Running total of storage usage (updated under hot_lock)
         self._total_storage_size = 0
@@ -487,6 +487,9 @@ class GdsBackend(AllocatorBackendInterface):
         )
         with self.hot_lock:
             self.metadata_dirs.add(subdir_key)
+            old_entry = self.hot_cache.get(key)
+            if old_entry is not None:
+                self._total_storage_size -= old_entry.size
             self.hot_cache[key] = metadata
             self._total_storage_size += size
         return metadata
@@ -658,10 +661,6 @@ class GdsBackend(AllocatorBackendInterface):
                 return
             write_duration_ms = (time.perf_counter() - write_start) * 1000
 
-            # Update Prometheus metrics for GDS writes
-            self.stats_monitor.update_interval_remote_write_metrics(write_size)
-            self.stats_monitor.update_interval_remote_time_to_put(write_duration_ms)
-
             # Register key in cache
             logger.debug(
                 f"Saved {kv_chunk.numel()} elements of {kv_chunk.dtype} "
@@ -676,7 +675,9 @@ class GdsBackend(AllocatorBackendInterface):
                 task.add_done_callback(self.save_metadata_tasks.discard)
                 # Add callback to check for exceptions during task execution
                 task.add_done_callback(
-                    lambda t: self._handle_metadata_write_completion(t, key, path)
+                    lambda t: self._handle_metadata_write_completion(
+                        t, key, path, write_size, write_duration_ms
+                    )
                 )
             except Exception as e:
                 logger.error(
@@ -691,6 +692,7 @@ class GdsBackend(AllocatorBackendInterface):
                     if entry is not None:
                         self._total_storage_size -= entry.size
                 self._report_storage_usage()
+                self._put_failed_count += 1
                 return
         finally:
             memory_obj.ref_count_down()
@@ -708,7 +710,12 @@ class GdsBackend(AllocatorBackendInterface):
                 )
 
     def _handle_metadata_write_completion(
-        self, task: asyncio.Task, key: CacheEngineKey, path: str
+        self,
+        task: asyncio.Task,
+        key: CacheEngineKey,
+        path: str,
+        write_size: int,
+        write_duration_ms: float,
     ) -> None:
         """Handle completion of metadata write task, checking for exceptions."""
         try:
@@ -725,6 +732,12 @@ class GdsBackend(AllocatorBackendInterface):
                     if entry is not None:
                         self._total_storage_size -= entry.size
                 self._report_storage_usage()
+                self._put_failed_count += 1
+                return
+
+            # Update Prometheus metrics only after metadata persistence succeeds
+            self.stats_monitor.update_interval_remote_write_metrics(write_size)
+            self.stats_monitor.update_interval_remote_time_to_put(write_duration_ms)
         except Exception as e:
             # Exception calling task.exception() (e.g., task was cancelled)
             logger.error(
@@ -732,6 +745,7 @@ class GdsBackend(AllocatorBackendInterface):
                 f"{key.to_string()}: {e}",
                 exc_info=True,
             )
+            self._put_failed_count += 1
 
     def insert_key(self, key: CacheEngineKey, memory_obj: MemoryObj) -> None:
         path, _, _, _ = self._key_to_path(key)
