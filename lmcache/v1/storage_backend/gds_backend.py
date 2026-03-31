@@ -687,7 +687,10 @@ class GdsBackend(AllocatorBackendInterface):
                     exc_info=True,
                 )
                 with self.hot_lock:
-                    self.hot_cache.pop(key, None)
+                    entry = self.hot_cache.pop(key, None)
+                    if entry is not None:
+                        self._total_storage_size -= entry.size
+                self._report_storage_usage()
                 return
         finally:
             memory_obj.ref_count_down()
@@ -740,6 +743,9 @@ class GdsBackend(AllocatorBackendInterface):
         fmt = memory_obj.metadata.fmt
         with self.hot_lock:
             # TODO(Jiayi): need to support `cached_positions`.
+            old_entry = self.hot_cache.get(key)
+            if old_entry is not None:
+                self._total_storage_size -= old_entry.size
             self.hot_cache[key] = DiskCacheMetadata(path, size, shape, dtype, None, fmt)
             self._total_storage_size += size
         self._report_storage_usage()
