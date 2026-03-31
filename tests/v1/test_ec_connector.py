@@ -5,7 +5,11 @@ import tempfile
 
 import torch
 
-from lmcache.integration.vllm.lmcache_ec_connector import LMCacheECConnector
+from lmcache.integration.vllm.vllm_ec_adapter import (
+    LMCacheECConnectorImpl,
+    LMCacheECConnectorMetadata,
+    MMMeta,
+)
 
 
 class _FakeTransferConfig:
@@ -27,13 +31,24 @@ class _FakeRole:
     name = "WORKER"
 
 
+class _FakeParent:
+    def __init__(self):
+        self.is_producer = True
+        self._meta = None
+
+    def _get_connector_metadata(self):
+        return self._meta
+
+
 def test_ec_roundtrip_save_then_load():
     with tempfile.TemporaryDirectory() as td:
         vllm_config = _FakeVllmConfig(td)
-        conn = LMCacheECConnector(vllm_config=vllm_config, role=_FakeRole())
-
-        # Mimic producer role
-        conn.is_producer = True
+        parent = _FakeParent()
+        conn = LMCacheECConnectorImpl(
+            vllm_config=vllm_config,
+            role=_FakeRole(),
+            parent=parent,
+        )
 
         mm_hash = "hash_abc"
         x = torch.randn(7, 13, dtype=torch.float16)
@@ -44,15 +59,9 @@ def test_ec_roundtrip_save_then_load():
         fn = os.path.join(td, mm_hash, "encoder_cache.safetensors")
         assert os.path.exists(fn)
 
-        # Minimal fake metadata plumbing: monkeypatch _get_connector_metadata
-        from lmcache.integration.vllm.vllm_ec_adapter import (
-            LMCacheECConnectorMetadata,
-            MMMeta,
-        )
-
         meta = LMCacheECConnectorMetadata()
         meta.add_mm_data(MMMeta.make_meta(mm_hash))
-        conn._get_connector_metadata = lambda: meta  # type: ignore
+        parent._meta = meta
 
         encoder_cache2 = {}
         conn.start_load_caches(encoder_cache2)

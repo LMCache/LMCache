@@ -16,8 +16,6 @@ paged KV GPU gather/scatter.
 
 from __future__ import annotations
 
-from typing import Optional
-
 import torch
 
 from lmcache.logging import init_logger
@@ -34,8 +32,6 @@ class ECCacheEngine:
         self,
         config: LMCacheEngineConfig,
         metadata: LMCacheMetadata,
-        *,
-        storage_location: Optional[str] = None,
     ):
         # EC always stages through allocator-backed memory. If PD is not used,
         # enforce a minimal LocalCPU allocator here so connector-side code does
@@ -70,46 +66,15 @@ class ECCacheEngine:
             async_lookup_server=None,
         )
 
-        available_backends = self._storage_manager.non_allocator_backends
+        available_backends = self._storage_manager.get_non_allocator_backends()
         if len(available_backends) == 0:
             raise ValueError(
                 "EC cache engine found no storage backends. Configure at least one "
                 "backend (e.g. local_disk, remote_url, gds_path, nixl storage plugin)."
             )
 
-        if storage_location is not None:
-            if storage_location not in available_backends:
-                raise ValueError(
-                    f"Requested EC storage backend '{storage_location}' is not available. "
-                    f"Available backends: {available_backends}"
-                )
-            resolved_location = storage_location
-        else:
-            preferred_order = [
-                "LocalDiskBackend",
-                "RemoteBackend",
-                "GdsBackend",
-                "NixlStorageBackend",
-                "P2PBackend",
-                "PDBackend",
-                "LocalCPUBackend",
-            ]
-            resolved_location = available_backends[0]
-            for candidate in preferred_order:
-                if candidate in available_backends:
-                    resolved_location = candidate
-                    break
-
-        if resolved_location == "LocalDiskBackend" and not config.local_disk:
-            raise ValueError(
-                "EC LocalDiskBackend selected but config.local_disk is not set. "
-                "Set ec_connector_extra_config.shared_storage_path or choose another backend."
-            )
-
-        self._storage_location = resolved_location
         logger.info(
-            "Initialized EC cache engine with storage backend '%s' (available=%s)",
-            self._storage_location,
+            "Initialized EC cache engine with storage backends=%s",
             available_backends,
         )
 
@@ -122,13 +87,7 @@ class ECCacheEngine:
             self._storage_manager.close()
 
     def contains(self, key: CacheEngineKey) -> bool:
-        return (
-            self._storage_manager.contains(
-                key,
-                search_range=[self._storage_location],
-            )
-            is not None
-        )
+        return self._storage_manager.contains(key) is not None
 
     def put(self, key: CacheEngineKey, tensor: torch.Tensor) -> None:
         # Allocate via LMCache allocator (LocalCPUBackend) through StorageManager.
@@ -150,7 +109,6 @@ class ECCacheEngine:
         self._storage_manager.batched_put(
             [key],
             [mem_obj],
-            location=self._storage_location,
         )
 
     def get(
@@ -162,7 +120,6 @@ class ECCacheEngine:
 
         mem_objs = self._storage_manager.batched_get(
             [key],
-            location=self._storage_location,
         )
         mem_obj = mem_objs[0]
         if mem_obj is None or mem_obj.tensor is None:
