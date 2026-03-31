@@ -231,6 +231,11 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
     },
     # Storage paths
     "gds_path": {"type": Optional[str], "default": None, "env_converter": str},
+    "gds_path_sharding": {
+        "type": str,
+        "default": "by_gpu",
+        "env_converter": str,
+    },
     "cufile_buffer_size": {
         "type": Optional[int],
         "default": None,
