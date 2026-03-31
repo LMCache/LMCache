@@ -90,7 +90,9 @@ class TestKVCacheCheckAPI:
     def client_with_adapter(self, mock_lmcache_adapter):
         """Create a test client with mocked adapter."""
         app.state.lmcache_adapter = mock_lmcache_adapter
-        return TestClient(app)
+        client = TestClient(app)
+        yield client
+        client.close()
 
     # ==========================================================================
     # Tests for /kvcache/check endpoint
@@ -170,8 +172,8 @@ class TestKVCacheCheckAPI:
     def test_no_adapter(self, method, url):
         """Test endpoints when adapter is not available."""
         app.state.lmcache_adapter = None
-        client = TestClient(app)
-        response = getattr(client, method)(url)
+        with TestClient(app) as client:
+            response = getattr(client, method)(url)
         assert response.status_code == 503
         assert json.loads(response.text)["error"] == "LMCache adapter unavailable"
 
@@ -182,9 +184,10 @@ class TestKVCacheCheckAPI:
         adapter.kvcaches = {}
         adapter.compute_kvcache_checksums = MagicMock(return_value=None)
         app.state.lmcache_adapter = adapter
-        response = TestClient(app).get(
-            "/cache/kvcache/check?slot_mapping=0,1,2,3&chunk_size=2"
-        )
+        with TestClient(app) as client:
+            response = client.get(
+                "/cache/kvcache/check?slot_mapping=0,1,2,3&chunk_size=2"
+            )
         assert response.status_code == 404
 
     # ==========================================================================
@@ -204,7 +207,8 @@ class TestKVCacheCheckAPI:
         adapter = MagicMock()
         adapter.kvcaches = {}
         app.state.lmcache_adapter = adapter
-        response = TestClient(app).get("/cache/kvcache/info")
+        with TestClient(app) as client:
+            response = client.get("/cache/kvcache/info")
         assert response.status_code == 404
 
     # ==========================================================================

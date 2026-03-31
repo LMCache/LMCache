@@ -40,7 +40,7 @@ from lmcache.v1.distributed.config import (
     L1MemoryManagerConfig,
     StorageManagerConfig,
 )
-from lmcache.v1.mp_observability.config import DEFAULT_PROMETHEUS_CONFIG
+from lmcache.v1.mp_observability.config import DEFAULT_OBSERVABILITY_CONFIG
 from lmcache.v1.multiprocess.blend_server_v2 import BlendTokenRangeMatcher
 from lmcache.v1.multiprocess.custom_types import (
     CBMatchResult,
@@ -433,7 +433,7 @@ def server_process_runner_v2(
     run_cache_server(
         mp_config=mp_config,
         storage_manager_config=storage_manager_config,
-        prometheus_config=DEFAULT_PROMETHEUS_CONFIG,
+        obs_config=DEFAULT_OBSERVABILITY_CONFIG,
     )
 
 

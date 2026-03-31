@@ -238,7 +238,6 @@ class GdsBackend(AllocatorBackendInterface):
         self.memory_allocator = self.initialize_allocator(config, metadata)
 
         self.data_suffix = _DATA_FILE_SUFFIX
-        self.use_thread_pool = False
         self._thread_pool = None
 
         if self.fstype in ["tmpfs", "overlayfs"]:
@@ -259,7 +258,9 @@ class GdsBackend(AllocatorBackendInterface):
                 "Weka filesystem requires either cufile or hipfile to be enabled"
             )
             self.data_suffix = _WEKA_DATA_FILE_SUFFIX
-            self.use_thread_pool = True
+
+        # Always enable the thread pool for parallel I/O
+        self.use_thread_pool = self.use_cufile or self.use_hipfile
 
         if self.use_thread_pool:
             thread_count = _DEFAULT_THREAD_COUNT
@@ -268,7 +269,7 @@ class GdsBackend(AllocatorBackendInterface):
                     "gds_io_threads", _DEFAULT_THREAD_COUNT
                 )
             self._thread_pool = ThreadPoolExecutor(
-                max_workers=thread_count, thread_name_prefix="weka-gds-io"
+                max_workers=thread_count, thread_name_prefix="gds-io"
             )
 
         if self.use_cufile:
@@ -871,6 +872,7 @@ class GdsBackend(AllocatorBackendInterface):
         paths: list[str | None] = []
         dtypes: list[torch.dtype | None] = []
         shapes: list[torch.Size | None] = []
+        fmts: list[MemoryFormat | None] = []
         with self.hot_lock:
             for key in keys:
                 entry = self.hot_cache.get(key)
@@ -879,18 +881,20 @@ class GdsBackend(AllocatorBackendInterface):
                     paths.append(None)
                     dtypes.append(None)
                     shapes.append(None)
+                    fmts.append(None)
                     continue
                 paths.append(entry.path)
                 dtypes.append(entry.dtype)
                 shapes.append(entry.shape)
+                fmts.append(entry.fmt)
 
         memory_objs: list[MemoryObj | None] = []
         gds_reads, gds_read_bytes = 0, 0
-        for dtype, shape, path in zip(dtypes, shapes, paths, strict=True):
+        for dtype, shape, path, fmt in zip(dtypes, shapes, paths, fmts, strict=True):
             if path is None:
                 memory_objs.append(None)
                 continue
-            memory_obj = self.memory_allocator.allocate(shape, dtype)
+            memory_obj = self.memory_allocator.allocate(shape, dtype, fmt=fmt)
             if memory_obj is None:
                 logger.error(f"Memory allocation failed during get_blocking for {path}")
             else:

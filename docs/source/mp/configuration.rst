@@ -258,11 +258,14 @@ Pass ``--l2-adapter`` multiple times.  Adapters are used in the order given:
     --l2-adapter '{"type": "nixl_store", "backend": "POSIX", "backend_params": {"file_path": "/data/ssd/l2", "use_direct_io": "false"}, "pool_size": 64}' \
     --l2-adapter '{"type": "nixl_store", "backend": "GDS", "backend_params": {"file_path": "/data/nvme/l2", "use_direct_io": "true"}, "pool_size": 128}'
 
-Prometheus Observability
-------------------------
+Observability
+-------------
 
 Source: ``lmcache/v1/mp_observability/config.py``
 
+See :doc:`observability` for full details on the three modes (metrics,
+logging, tracing).
+
 .. list-table::
    :header-rows: 1
    :widths: 30 15 55
@@ -270,54 +273,27 @@ Source: ``lmcache/v1/mp_observability/config.py``
    * - Argument
      - Default
      - Description
-   * - ``--disable-prometheus``
-     - ``False``
-     - Disable Prometheus metrics collection and HTTP server.
+   * - ``--disable-observability``
+     - off
+     - Master switch: disable the EventBus entirely.
+   * - ``--disable-metrics``
+     - off
+     - Skip metrics subscribers (no Prometheus endpoint).
+   * - ``--disable-logging``
+     - off
+     - Skip logging subscribers.
+   * - ``--enable-tracing``
+     - off
+     - Register tracing subscribers. Requires ``--otlp-endpoint``.
+   * - ``--event-bus-queue-size``
+     - ``10000``
+     - Max events in the EventBus queue before tail-drop.
+   * - ``--otlp-endpoint``
+     - *(none)*
+     - OTLP gRPC endpoint for exporting metrics and traces.
    * - ``--prometheus-port``
      - ``9090``
-     - Port to expose the Prometheus ``/metrics`` endpoint.
-   * - ``--prometheus-log-interval``
-     - ``10.0``
-     - How often (seconds) to flush accumulated stats to Prometheus.
-
-Telemetry
----------
-
-Source: ``lmcache/v1/mp_observability/telemetry/config.py``
-
-.. list-table::
-   :header-rows: 1
-   :widths: 30 15 55
-
-   * - Argument
-     - Default
-     - Description
-   * - ``--enable-telemetry``
-     - ``False``
-     - Enable the telemetry event system.
-   * - ``--telemetry-max-queue-size``
-     - ``10000``
-     - Maximum events in the telemetry queue before tail-drop.
-   * - ``--telemetry-processor``
-     - *(none)*
-     - Processor spec as JSON (repeatable).  Must include ``"type"`` field.
-
-``logging`` processor
-~~~~~~~~~~~~~~~~~~~~~
-
-The built-in processor.  Logs telemetry events via LMCache's logger.
-
-Fields:
-
-- ``log_level``: Log level to use (``DEBUG``, ``INFO``, ``WARNING``, ``ERROR``,
-  ``CRITICAL``).  Default is ``DEBUG``.
-
-Examples:
-
-.. code-block:: bash
-
-    --telemetry-processor '{"type": "logging", "log_level": "DEBUG"}'
-    --telemetry-processor '{"type": "logging", "log_level": "INFO"}'
+     - Port for the Prometheus ``/metrics`` endpoint.
 
 vLLM Client Configuration
 --------------------------
