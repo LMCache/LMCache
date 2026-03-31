@@ -473,7 +473,20 @@ class StorageManager:
             # NOTE(Jiayi): bypass the allocator for now
             task = backend.get_non_blocking(key)
             if task:
-                # TODO (Jiayi): add write-back logic here
+                if (
+                    backend_name not in ["LocalCPUBackend", "PDBackend"]
+                    and "LocalCPUBackend" in self.storage_backends
+                ):
+                    def _write_back(fut, k=key):
+                        memory_obj = fut.result()
+                        if memory_obj is not None:
+                            local_cpu = self.storage_backends[
+                                "LocalCPUBackend"
+                            ]
+                            assert isinstance(local_cpu, LocalCPUBackend)
+                            local_cpu.submit_put_task(k, memory_obj)
+
+                    task.add_done_callback(_write_back)
                 return task
         return None
 
@@ -549,8 +562,24 @@ class StorageManager:
         Callback function when a single prefetch task
         (i.e., prefetching from a single backend) is done.
         """
-        # TODO(Jiayi): support write-back policy here
-        pass
+        if (
+            backend_name not in ["LocalCPUBackend", "PDBackend"]
+            and "LocalCPUBackend" in self.storage_backends
+        ):
+            try:
+                memory_objs = future.result()
+                if memory_objs:
+                    local_cpu = self.storage_backends["LocalCPUBackend"]
+                    assert isinstance(local_cpu, LocalCPUBackend)
+                    local_cpu.batched_submit_put_task(
+                        keys[: len(memory_objs)], memory_objs
+                    )
+            except Exception as e:
+                logger.warning(
+                    "Write-back to LocalCPUBackend failed for %s: %s",
+                    backend_name,
+                    e,
+                )
 
     def prefetch_all_done_callback(
         self,
