@@ -168,7 +168,7 @@ class LocalDiskBackend(StorageBackendInterface):
         else:
             logger.warning("Controller message sender is not initialized")
 
-    def __str__(self):
+    def __str__(self) -> str:
         return "LocalDiskBackend"
 
     def _key_to_path(
@@ -336,11 +336,11 @@ class LocalDiskBackend(StorageBackendInterface):
                 all_evict_keys.extend(evict_keys)
             if evict_success:
                 self.current_cache_size += required_size
+                self.cache_policy.update_on_put(key)
 
         if not evict_success:
             return None
 
-        self.cache_policy.update_on_put(key)
         memory_obj.ref_count_up()
 
         asyncio.run_coroutine_threadsafe(
@@ -635,7 +635,7 @@ class LocalDiskBackend(StorageBackendInterface):
             f"Bandwidth: {size / disk_read_time / 1e6:.2f} MB/s"
         )
 
-    def get_allocator_backend(self):
+    def get_allocator_backend(self) -> LocalCPUBackend:
         return self.local_cpu_backend
 
     def close(self) -> None:

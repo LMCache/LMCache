@@ -246,6 +246,18 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
             return self._completed_loads.pop(task_id, None)
 
     # ---------------------------------------------------------------
+    # Eviction Interface
+    # ---------------------------------------------------------------
+
+    def delete(self, keys: list[ObjectKey]) -> None:
+        # Not implemented for the native connector adapter.
+        pass
+
+    def get_usage(self) -> tuple[float, float]:
+        # Not implemented for the native connector adapter.
+        return (-1.0, -1.0)
+
+    # ---------------------------------------------------------------
     # Cleanup
     # ---------------------------------------------------------------
 
@@ -371,6 +383,7 @@ class RESPL2AdapterConfig(L2AdapterConfigBase):
         username: str = "",
         password: str = "",
     ):
+        super().__init__()
         self.host = host
         self.port = port
         self.num_workers = num_workers
