@@ -80,6 +80,23 @@ echo "--- :python: Installing LMCache from source"
 "${UV_BIN}" pip install -p "${DEFAULT_VENV_BIN}/python" -e . --no-build-isolation
 "${UV_BIN}" pip install -p "${TEST_VENV_BIN}/python" -e . --no-build-isolation
 
+# Work around openai_harmony vocab download/load issues for GPT-OSS (vLLM recipes troubleshooting).
+# related github issue: https://github.com/openai/harmony/pull/41
+TIKTOKEN_ENCODINGS_DIR="${REPO_ROOT}/tiktoken_encodings"
+mkdir -p "${TIKTOKEN_ENCODINGS_DIR}"
+if ! command -v curl &>/dev/null; then
+    echo "ERROR: curl is required for downloading tiktoken encodings" >&2
+    exit 1
+fi
+if [[ ! -s "${TIKTOKEN_ENCODINGS_DIR}/o200k_base.tiktoken" ]]; then
+  curl -fsSL "https://openaipublic.blob.core.windows.net/encodings/o200k_base.tiktoken" -o "${TIKTOKEN_ENCODINGS_DIR}/o200k_base.tiktoken"
+fi
+if [[ ! -s "${TIKTOKEN_ENCODINGS_DIR}/cl100k_base.tiktoken" ]]; then
+  curl -fsSL "https://openaipublic.blob.core.windows.net/encodings/cl100k_base.tiktoken" -o "${TIKTOKEN_ENCODINGS_DIR}/cl100k_base.tiktoken"
+fi
+export TIKTOKEN_ENCODINGS_BASE="${TIKTOKEN_ENCODINGS_DIR}"
+echo "Using TIKTOKEN_ENCODINGS_BASE=${TIKTOKEN_ENCODINGS_BASE}"
+
 echo "--- :white_check_mark: Environment ready"
 "${DEFAULT_VENV_BIN}/python" -c "import vllm; import lmcache; print(f'vLLM={vllm.__version__}, LMCache installed from source with no build isolation in default venv')"
 "${TEST_VENV_BIN}/python" -c "import vllm; import lmcache; print(f'vLLM={vllm.__version__}, LMCache installed from source with no build isolation in test venv')"

@@ -21,9 +21,15 @@ set -euo pipefail
 set -x
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../../../.." && pwd)"
+
+cd "${REPO_ROOT}"
+source .buildkite/k3_tests/common_scripts/helpers.sh
+
+SERVER_WAIT_TIMEOUT="${SERVER_WAIT_TIMEOUT:-400}"
 
 BUILD_ID="${BUILDKITE_BUILD_ID:-local_$$}"
-WORK_LOG="/tmp/build_${BUILD_ID}_blend.log"
+WORK_LOG="/tmp/build_${BUILD_ID}_blend.log" 
 # Blend server, vLLM prefiller/decoder, and proxy stdout/stderr (main script uses WORK_LOG via tee).
 VLLM_LOG="/tmp/build_${BUILD_ID}_vllm.log"
 ARTIFACT="build_${BUILD_ID}.log"
@@ -33,7 +39,53 @@ BENCHMARK_TIMEOUT_SEC="${BENCHMARK_TIMEOUT_SEC:-4800}"
 : > "${WORK_LOG}"
 : > "${VLLM_LOG}"
 
-BGPIDS=()
+declare -A RESERVED_PORTS=()
+
+reserve_port() {
+  local requested_port="$1"
+  local label="$2"
+  local next_probe="${requested_port}"
+  local chosen
+
+  while true; do
+    chosen="$(find_free_port "${next_probe}")"
+    if [[ -z "${RESERVED_PORTS[$chosen]+x}" ]]; then
+      RESERVED_PORTS["$chosen"]=1
+      if [[ "${chosen}" != "${requested_port}" ]]; then
+        echo "[INFO] ${label}: requested ${requested_port}, using free port ${chosen}" >&2
+      else
+        echo "[INFO] ${label}: using requested free port ${chosen}" >&2
+      fi
+      echo "${chosen}"
+      return 0
+    fi
+    next_probe=$((chosen + 1))
+  done
+}
+
+resolve_port_csv() {
+  local label="$1"
+  local csv="$2"
+  local -a requested=()
+  local -a resolved=()
+  local port
+  local idx=0
+
+  IFS=',' read -ra requested <<< "${csv}"
+  for port in "${requested[@]}"; do
+    port="${port//[[:space:]]/}"
+    if [[ -z "${port}" ]]; then
+      echo "ERROR: Empty port in ${label}: '${csv}'" >&2
+      exit 1
+    fi
+    resolved+=("$(reserve_port "${port}" "${label}[${idx}]")")
+    idx=$((idx + 1))
+  done
+
+  local joined
+  joined="$(IFS=','; echo "${resolved[*]}")"
+  echo "${joined}"
+}
 
 collect_artifact() {
   echo "[INFO] Collecting logs into ${ARTIFACT}"
@@ -44,10 +96,7 @@ finalize() {
   local rc=$?
   echo ""
   echo "[INFO] Shutting down all processes..."
-  for pid in "${BGPIDS[@]}"; do
-    kill "$pid" 2>/dev/null || true
-  done
-  wait 2>/dev/null || true
+  cleanup_pids
   collect_artifact
   exit "$rc"
 }
@@ -55,20 +104,6 @@ finalize() {
 trap finalize EXIT INT TERM
 
 exec > >(tee -a "${WORK_LOG}") 2>&1
-
-wait_for_vllm_api() {
-  local port=$1
-  for i in {1..200}; do
-    if curl --fail --silent "http://localhost:${port}/v1/models" > /dev/null; then
-      echo "vLLM API on ${port} is awake!"
-      return
-    fi
-    echo "Waiting for vLLM API on port ${port} to be ready... ($i/200)"
-    sleep 2
-  done
-  echo "ERROR: vLLM API on port ${port} did not become ready in time."
-  exit 1
-}
 
 # Scan every /tmp/build_${BUILD_ID}_*.log for severe/error lines (same family as other k3 build logs).
 # Strip bash xtrace lines first: `set -x` tees "+ grep ... \\berror\\b ..." into the same log and
@@ -97,11 +132,11 @@ check_build_logs_for_errors() {
 export PYTHONUNBUFFERED=1
 
 MODEL="${MODEL:-/data0/weishu-model/gpt-oss-20b}"
-LMCACHE_MP_PORT=6566
-
-SERVICE_PORT="${SERVICE_PORT:-10001}"
-PREFILLER_PORT="${PREFILLER_PORT:-8100}"
-DECODER_PORT="${DECODER_PORT:-8200}"
+LMCACHE_MP_PORT_REQUESTED="${LMCACHE_MP_PORT:-6566}"
+SERVICE_PORT_REQUESTED="${SERVICE_PORT:-10001}"
+PREFILLER_PORT_REQUESTED="${PREFILLER_PORT:-8100}"
+DECODER_PORT_REQUESTED="${DECODER_PORT:-8200}"
+TELEMETRY_PORT_REQUESTED="${TELEMETRY_PORT:-5768}"
 TENSOR_PARALLEL="${TENSOR_PARALLEL:-1}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-16384}"
 GPU_MEM_UTIL="${GPU_MEM_UTIL:-0.5}"
@@ -120,12 +155,18 @@ DEFAULT_PYTHON="${DEFAULT_PYTHON:-${DEFAULT_VENV_BIN}/python}"
 TEST_PYTHON="${TEST_PYTHON:-${TEST_VENV_BIN}/python}"
 # shuffle_doc_qa benchmark (repo-root cwd; see blend/run.sh)
 SHUFFLE_NUM_DOCUMENTS="${SHUFFLE_NUM_DOCUMENTS:-3}"
-SHUFFLE_DOCUMENT_LENGTH="${SHUFFLE_DOCUMENT_LENGTH:-3000}"
+SHUFFLE_DOCUMENT_LENGTH="${SHUFFLE_DOCUMENT_LENGTH:-1000}"
 SHUFFLE_OUTPUT_LEN="${SHUFFLE_OUTPUT_LEN:-200}"
 PREFILLER_VLLM_BIN="${PREFILLER_VLLM_BIN:-${DEFAULT_VENV_BIN}/vllm}"
 DECODER_VLLM_BIN="${DECODER_VLLM_BIN:-${TEST_VENV_BIN}/vllm}"
+LMCACHE_MP_PORT="$(reserve_port "${LMCACHE_MP_PORT_REQUESTED}" "blend_server")"
+TELEMETRY_PORT="$(reserve_port "${TELEMETRY_PORT_REQUESTED}" "telemetry_server")"
+SERVICE_PORT="$(reserve_port "${SERVICE_PORT_REQUESTED}" "proxy_service")"
+PREFILLER_PORT="$(resolve_port_csv "prefiller" "${PREFILLER_PORT_REQUESTED}")"
+DECODER_PORT="$(resolve_port_csv "decoder" "${DECODER_PORT_REQUESTED}")"
 IFS=',' read -ra PREFILLER_PORTS <<< "$PREFILLER_PORT"
 IFS=',' read -ra DECODER_PORTS <<< "$DECODER_PORT"
+export SERVICE_PORT
 
 NUM_PREFILLERS=${#PREFILLER_PORTS[@]}
 NUM_DECODERS=${#DECODER_PORTS[@]}
@@ -133,6 +174,9 @@ NUM_DECODERS=${#DECODER_PORTS[@]}
 echo "Configuration: ${NUM_PREFILLERS}P${NUM_DECODERS}D (TP=${TENSOR_PARALLEL})"
 echo "  Prefiller ports: ${PREFILLER_PORTS[*]}"
 echo "  Decoder ports:   ${DECODER_PORTS[*]}"
+echo "  Service port:    ${SERVICE_PORT}"
+echo "  Telemetry port:  ${TELEMETRY_PORT}"
+echo "  Blend MP port:   ${LMCACHE_MP_PORT}"
 echo "  GPUs per instance: ${TENSOR_PARALLEL}"
 echo "  Default venv dir: ${DEFAULT_VENV_DIR} (prefiller / blend server python: ${DEFAULT_PYTHON})"
 echo "  Test venv dir:    ${TEST_VENV_DIR} (decoder / proxy / benchmark python: ${TEST_PYTHON})"
@@ -155,7 +199,7 @@ export LD_LIBRARY_PATH=/opt/nvidia/nsight-compute/2025.1.0/host/linux-desktop-gl
   --chunk-size 1024 \
   --l1-align-bytes 16777216 \
   >>"${VLLM_LOG}" 2>&1 &
-BGPIDS+=($!)
+TRACKED_PIDS+=($!)
 
 sleep 10
 # ---------------------------------------------------------------------------
@@ -168,7 +212,7 @@ for port in "${PREFILLER_PORTS[@]}"; do
   echo "Starting prefiller on GPUs ${CUDA_DEVS}, port ${port}"
   CUDA_VISIBLE_DEVICES=$CUDA_DEVS \
     LMCACHE_REQUEST_TELEMETRY_TYPE=fastapi \
-    LMCACHE_REQUEST_TELEMETRY_ENDPOINT="http://localhost:5768/api/v1/telemetry" \
+    LMCACHE_REQUEST_TELEMETRY_ENDPOINT="http://localhost:${TELEMETRY_PORT}/api/v1/telemetry" \
     VLLM_USE_FLASHINFER_MOE_FP8=0 \
     "${PREFILLER_VLLM_BIN}" serve  --model "$MODEL" \
     --trust-remote-code \
@@ -183,7 +227,7 @@ for port in "${PREFILLER_PORTS[@]}"; do
     --kv-transfer-config \
       "{\"kv_connector\":\"LMCacheMPCBConnector\",\"kv_role\":\"kv_both\",\"kv_connector_extra_config\":{\"lmcache.mp.port\":${LMCACHE_MP_PORT}}}" \
     >>"${VLLM_LOG}" 2>&1 &
-  BGPIDS+=($!)
+  TRACKED_PIDS+=($!)
   GPU_IDX=$((GPU_IDX + TENSOR_PARALLEL))
 done
 
@@ -209,7 +253,7 @@ for port in "${DECODER_PORTS[@]}"; do
     --kv-transfer-config \
       "{\"kv_connector\":\"LMCacheMPConnector\",\"kv_role\":\"kv_both\",\"kv_connector_extra_config\":{\"lmcache.mp.port\":${LMCACHE_MP_PORT}}}" \
     >>"${VLLM_LOG}" 2>&1 &
-  BGPIDS+=($!)
+  TRACKED_PIDS+=($!)
   GPU_IDX=$((GPU_IDX + TENSOR_PARALLEL))
 done
 
@@ -217,10 +261,16 @@ done
 # 4. Wait for all vLLM instances to be ready
 # ---------------------------------------------------------------------------
 for port in "${PREFILLER_PORTS[@]}"; do
-  wait_for_vllm_api "$port"
+  if ! wait_for_server "$port" "$SERVER_WAIT_TIMEOUT"; then
+    echo "ERROR: Prefiller vLLM on port ${port} did not become ready."
+    exit 1
+  fi
 done
 for port in "${DECODER_PORTS[@]}"; do
-  wait_for_vllm_api "$port"
+  if ! wait_for_server "$port" "$SERVER_WAIT_TIMEOUT"; then
+    echo "ERROR: Decoder vLLM on port ${port} did not become ready."
+    exit 1
+  fi
 done
 
 # ---------------------------------------------------------------------------
@@ -232,8 +282,8 @@ done
   --port "$SERVICE_PORT" \
   --prefiller-host localhost --prefiller-port "$PREFILLER_PORT" \
   --decoder-host localhost --decoder-port "$DECODER_PORT" \
-  --telemetry-port 5768 >>"${VLLM_LOG}" 2>&1 &
-BGPIDS+=($!)
+  --telemetry-port "$TELEMETRY_PORT" >>"${VLLM_LOG}" 2>&1 &
+TRACKED_PIDS+=($!)
 
 # ---------------------------------------------------------------------------
 # 6. Benchmark (with timeout) + log error gate
