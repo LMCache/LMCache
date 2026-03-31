@@ -2,17 +2,14 @@
 
 """L1 logging subscriber — debug logs for L1Manager events.
 
-Logs are emitted via Python's standard logging module.  When an OTel
-``LoggerProvider`` is configured at startup, attaching a ``LoggingHandler``
-to this logger will forward records to OTel automatically — no changes
-needed in the subscriber callbacks.
+Logs are emitted via Python's standard logging module.  When OpenTelemetry
+is installed, ``init_logger`` automatically attaches an OTel
+``LoggingHandler`` so records are forwarded to OTel when a
+``LoggerProvider`` is configured at startup.
 """
 
 # Future
 from __future__ import annotations
-
-# Standard
-import logging
 
 # First Party
 from lmcache.logging import init_logger
@@ -20,15 +17,6 @@ from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import EventCallback, EventSubscriber
 
 logger = init_logger(__name__)
-
-try:
-    # Third Party
-    from opentelemetry.sdk._logs import LoggingHandler
-
-    _otel_handler = LoggingHandler(level=logging.DEBUG)
-    logger.addHandler(_otel_handler)
-except ImportError:
-    pass
 
 
 class L1LoggingSubscriber(EventSubscriber):

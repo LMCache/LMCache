@@ -62,18 +62,9 @@ from lmcache.v1.gpu_connector.gpu_ops import (
     lmcache_memcpy_async_h2d,
 )
 from lmcache.v1.mp_observability.config import (
-    PrometheusConfig,
-    parse_args_to_prometheus_config,
-)
-from lmcache.v1.mp_observability.otel_init import init_otel_metrics
-from lmcache.v1.mp_observability.telemetry import (
-    TelemetryConfig,
-    get_telemetry_controller,
-    init_telemetry_controller,
-    parse_args_to_telemetry_config,
-)
-from lmcache.v1.mp_observability.telemetry.config import (
-    DEFAULT_TELEMETRY_CONFIG,
+    ObservabilityConfig,
+    init_observability,
+    parse_args_to_observability_config,
 )
 from lmcache.v1.multiprocess.config import (
     MPServerConfig,
@@ -364,7 +355,11 @@ class BlendEngineV2(MPCacheEngine):
         for group in groups:
             chunk_hashes = [r.hash for r in group]
             obj_keys = ipc_key_to_object_keys(key, chunk_hashes)
-            handle = self.storage_manager.submit_prefetch_task(obj_keys, layout_desc)
+            handle = self.storage_manager.submit_prefetch_task(
+                obj_keys,
+                layout_desc,
+                external_request_id=key.request_id,
+            )
             prefetch_handles.append(handle)
 
             logger.debug(
@@ -616,8 +611,8 @@ class BlendEngineV2(MPCacheEngine):
                             lmcache_memcpy_async_h2d(memory_obj, tmp_buffer)
                             target_buffer.copy_(tmp_buffer, non_blocking=True)
 
-            except Exception as e:
-                logger.error("Error during retrieving prefetched results: %s", e)
+            except Exception:
+                logger.exception("Error during retrieving prefetched results")
                 return event.ipc_handle(), False
 
             finally:
@@ -702,8 +697,7 @@ def add_handler_helper(
 def run_cache_server(
     mp_config: MPServerConfig,
     storage_manager_config: StorageManagerConfig,
-    prometheus_config: PrometheusConfig,
-    telemetry_config: TelemetryConfig = DEFAULT_TELEMETRY_CONFIG,
+    obs_config: ObservabilityConfig,
     return_engine: bool = False,
 ):
     """
@@ -712,8 +706,7 @@ def run_cache_server(
     Args:
         mp_config: Configuration for the ZMQ multiprocess server
         storage_manager_config: Configuration for the storage manager
-        prometheus_config: Configuration for the Prometheus observability stack
-        telemetry_config: Configuration for the telemetry event system
+        obs_config: Configuration for the observability stack
         return_engine: If True, return (server, engine) after starting;
                        if False, run blocking loop to keep server alive
 
@@ -721,30 +714,7 @@ def run_cache_server(
         If return_engine is True: tuple of (MessageQueueServer, BlendEngineV2)
         If return_engine is False: None (blocks until interrupted)
     """
-    # Initialize global telemetry controller
-    init_telemetry_controller(telemetry_config)
-
-    # Initialize EventBus and register observability subscribers
-    # First Party
-    from lmcache.v1.mp_observability.event_bus import (
-        EventBusConfig,
-        init_event_bus,
-    )
-    from lmcache.v1.mp_observability.subscribers.metrics.l1 import (
-        L1MetricsSubscriber,
-    )
-    from lmcache.v1.mp_observability.subscribers.metrics.sm import (
-        SMMetricsSubscriber,
-    )
-
-    # Set up OTel MeterProvider BEFORE creating subscribers
-    if prometheus_config.enabled:
-        init_otel_metrics(prometheus_port=prometheus_config.port)
-
-    bus = init_event_bus(EventBusConfig(enabled=prometheus_config.enabled))
-    bus.register_subscriber(L1MetricsSubscriber())
-    bus.register_subscriber(SMMetricsSubscriber())
-    bus.start()
+    event_bus = init_observability(obs_config)
 
     # Initialize the engine (loggers self-register with the global controller)
     engine = BlendEngineV2(
@@ -758,7 +728,6 @@ def run_cache_server(
     server = MessageQueueServer(
         bind_url=f"tcp://{mp_config.host}:{mp_config.port}",
         context=context,
-        max_workers=mp_config.max_workers,
     )
 
     # Add handlers for original server
@@ -795,6 +764,31 @@ def run_cache_server(
         server, RequestType.CB_RETRIEVE_PRE_COMPUTED_V2, engine.cb_retrieve_pre_computed
     )
     add_handler_helper(server, RequestType.CB_STORE_FINAL, engine.cb_store_final)
+    add_handler_helper(server, RequestType.PING, engine.ping)
+
+    # Assign thread pools
+    server.add_affinity_thread_pool(
+        [
+            RequestType.STORE,
+            RequestType.RETRIEVE,
+            RequestType.CB_STORE_PRE_COMPUTED,
+            RequestType.CB_RETRIEVE_PRE_COMPUTED_V2,
+            RequestType.CB_STORE_FINAL,
+        ],
+        max_workers=mp_config.max_gpu_workers,
+    )
+    server.add_normal_thread_pool(
+        [
+            RequestType.LOOKUP,
+            RequestType.QUERY_PREFETCH_STATUS,
+            RequestType.FREE_LOOKUP_LOCKS,
+            RequestType.END_SESSION,
+            RequestType.CLEAR,
+            RequestType.CB_LOOKUP_PRE_COMPUTED_V2,
+            RequestType.PING,
+        ],
+        max_workers=mp_config.max_cpu_workers,
+    )
 
     logger.info(
         "LMCache ZMQ cache server is running on tcp://%s:%d",
@@ -805,8 +799,6 @@ def run_cache_server(
     torch.cuda.init()
     server.start()
 
-    # Start telemetry controller
-    get_telemetry_controller().start()
     logger.info("LMCache cache blend v2 server is running...")
 
     # Return server and engine if requested (for HTTP server integration)
@@ -819,7 +811,7 @@ def run_cache_server(
             time.sleep(1)
     except KeyboardInterrupt:
         logger.info("Shutting down server...")
-        get_telemetry_controller().stop()
+        event_bus.stop()
         server.close()
         engine.close()
 
@@ -828,11 +820,9 @@ if __name__ == "__main__":
     args = parse_args()
     mp_config = parse_args_to_mp_server_config(args)
     storage_manager_config = parse_args_to_config(args)
-    prometheus_config = parse_args_to_prometheus_config(args)
-    telemetry_config = parse_args_to_telemetry_config(args)
+    obs_config = parse_args_to_observability_config(args)
     run_cache_server(
         mp_config=mp_config,
         storage_manager_config=storage_manager_config,
-        prometheus_config=prometheus_config,
-        telemetry_config=telemetry_config,
+        obs_config=obs_config,
     )

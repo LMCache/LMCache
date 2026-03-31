@@ -53,7 +53,7 @@ orchestrators), use the HTTP server entry point:
         --network host \
         --ipc host \
         lmcache/standalone:nightly \
-        /opt/venv/bin/python3 -m lmcache.v1.multiprocess.http_server \
+        /opt/venv/bin/lmcache server \
         --l1-size-gb 60 --eviction-policy LRU --max-workers 4 --port 6555
 
 Kubernetes
@@ -166,13 +166,13 @@ instead.  Use the ``/api/healthcheck`` endpoint:
     livenessProbe:
       httpGet:
         path: /api/healthcheck
-        port: 8000
+        port: 8080
       initialDelaySeconds: 10
       periodSeconds: 30
     readinessProbe:
       httpGet:
         path: /api/healthcheck
-        port: 8000
+        port: 8080
       initialDelaySeconds: 5
       periodSeconds: 10
 
@@ -195,9 +195,12 @@ Cleanup
 Production Best Practices
 -------------------------
 
-**Worker count (``--max-workers``):**
-Start with 1 (default).  Increase to 2--4 if you see ZMQ request queuing with
-multiple vLLM pods.
+**Worker count (``--max-workers``, ``--max-gpu-workers``, ``--max-cpu-workers``):**
+``--max-workers`` sets both the GPU affinity pool and CPU normal pool sizes
+(default 1).  Use ``--max-gpu-workers`` to override the GPU pool independently
+--- set it to at least the number of vLLM instances sharing the cache server so
+each instance gets its own dedicated thread.  Use ``--max-cpu-workers`` to
+override the CPU pool for lookup and other non-GPU operations.
 
 **L1 memory sizing (``--l1-size-gb``):**
 Allocate as much CPU memory as available after accounting for the OS and vLLM.
