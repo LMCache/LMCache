@@ -37,13 +37,21 @@ class ECCacheEngine:
         *,
         storage_location: Optional[str] = None,
     ):
-        if not config.enable_pd and (
-            not config.local_cpu or config.max_local_cpu_size <= 0
-        ):
-            raise ValueError(
-                "EC cache engine requires an allocator backend. Enable local_cpu with "
-                "max_local_cpu_size > 0, or enable PD."
-            )
+        # EC always stages through allocator-backed memory. If PD is not used,
+        # enforce a minimal LocalCPU allocator here so connector-side code does
+        # not need to duplicate this bootstrap logic.
+        if not config.enable_pd:
+            if not config.local_cpu:
+                logger.info("EC enabling local_cpu allocator backend")
+                config.local_cpu = True
+            if config.max_local_cpu_size <= 0:
+                logger.info("EC setting max_local_cpu_size to 1 GB")
+                config.max_local_cpu_size = 1
+
+        # Keep LocalDiskBackend backwards compatible when only the path is set.
+        if config.local_disk and config.max_local_disk_size <= 0:
+            logger.info("EC setting max_local_disk_size to 64 GB")
+            config.max_local_disk_size = 64
 
         self.config = config
         self.metadata = metadata
@@ -92,6 +100,12 @@ class ECCacheEngine:
                     resolved_location = candidate
                     break
 
+        if resolved_location == "LocalDiskBackend" and not config.local_disk:
+            raise ValueError(
+                "EC LocalDiskBackend selected but config.local_disk is not set. "
+                "Set ec_connector_extra_config.shared_storage_path or choose another backend."
+            )
+
         self._storage_location = resolved_location
         logger.info(
             "Initialized EC cache engine with storage backend '%s' (available=%s)",
@@ -131,7 +145,7 @@ class ECCacheEngine:
             return
 
         # Single copy: GPU -> pinned CPU buffer, handles device transfer + dtype cast.
-        mem_obj.tensor.copy_(tensor.detach())
+        mem_obj.tensor.copy_(tensor)
 
         self._storage_manager.batched_put(
             [key],

@@ -88,23 +88,12 @@ class LMCacheECConnectorImpl:
             "LMCache EC connector using storage backend: %s", ec_storage_backend
         )
 
-        # LocalDiskBackend currently requires LocalCPUBackend for allocations.
-        # For EC v1, if user didn't configure local_cpu, we default a small CPU pool.
-        if not config.local_cpu:
-            config.local_cpu = True
-        if config.max_local_cpu_size <= 0:
-            config.max_local_cpu_size = 1  # GB
-
-        # Ensure disk budget is set.
-        if config.max_local_disk_size <= 0:
-            config.max_local_disk_size = 64  # GB default for EC v1
-
-        # Build metadata (model_name/world_size/worker_id mainly). We'll treat EC as rank-agnostic.
+        # Build metadata from vLLM configuration.
         lmcache_metadata, _ = create_lmcache_metadata(vllm_config, role="worker")
         self._model_name = lmcache_metadata.model_name
-        self._cache_world_size = 1
-        self._cache_worker_id = 0
-        self._cache_dtype = torch.float16
+        self._world_size = lmcache_metadata.world_size
+        self._worker_id = lmcache_metadata.worker_id
+        self._dtype = lmcache_metadata.kv_dtype
 
         self._ec_engine = ECCacheEngine(
             config=config,
@@ -115,10 +104,10 @@ class LMCacheECConnectorImpl:
     def _make_cache_key(self, mm_hash: str) -> CacheEngineKey:
         return CacheEngineKey(
             model_name=self._model_name,
-            world_size=self._cache_world_size,
-            worker_id=self._cache_worker_id,
+            world_size=self._world_size,
+            worker_id=self._worker_id,
             chunk_hash=_stable_u64_from_str(mm_hash),
-            dtype=self._cache_dtype,
+            dtype=self._dtype,
             request_configs={},
         )
 
@@ -147,10 +136,10 @@ class LMCacheECConnectorImpl:
                 continue
             # Use LMCache storage via ECCacheEngine
             key = self._make_cache_key(mm_data.mm_hash)
-            t = self._ec_engine.get(key, device=current_platform.device_type)
-            if t is None:
+            mm_tensor = self._ec_engine.get(key, device=current_platform.device_type)
+            if mm_tensor is None:
                 continue
-            encoder_cache[mm_data.mm_hash] = t
+            encoder_cache[mm_data.mm_hash] = mm_tensor
             logger.debug("Loaded encoder cache for hash %s", mm_data.mm_hash)
 
     def save_caches(
@@ -166,9 +155,9 @@ class LMCacheECConnectorImpl:
         if mm_hash not in encoder_cache:
             return
 
-        t = encoder_cache[mm_hash]
+        mm_tensor = encoder_cache[mm_hash]
         key = self._make_cache_key(mm_hash)
-        self._ec_engine.put(key, t)
+        self._ec_engine.put(key, mm_tensor)
         logger.debug("Saved encoder cache for mm_hash %s", mm_hash)
 
     # ------------------------------
