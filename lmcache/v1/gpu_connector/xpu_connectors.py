@@ -27,6 +27,9 @@ from lmcache.v1.gpu_connector.gpu_connectors import (
     VLLMPagedMemGPUConnectorV2,
 )
 from lmcache.v1.gpu_connector.utils import (
+    LayoutHints,
+    _get_head_size_view,
+    _split_token2d_kv,
     discover_gpu_kv_format,
     get_block_size,
     get_dtype,
@@ -37,9 +40,6 @@ from lmcache.v1.gpu_connector.utils import (
     get_num_layers,
     get_page_buffer_size,
     is_mla,
-    LayoutHints,
-    _get_head_size_view,
-    _split_token2d_kv,
 )
 from lmcache.v1.memory_management import (
     MemoryAllocatorInterface,
@@ -315,6 +315,7 @@ class VLLMPagedMemXPUConnectorV2(VLLMPagedMemGPUConnectorV2):
             self.dtype,
             self.num_heads,
         )
+
 
 class VLLMPagedMemLayerwiseXPUConnector(GPUConnectorInterface):
     """
