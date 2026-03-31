@@ -478,13 +478,19 @@ class StorageManager:
                     and "LocalCPUBackend" in self.storage_backends
                 ):
                     def _write_back(fut, k=key):
-                        memory_obj = fut.result()
-                        if memory_obj is not None:
-                            local_cpu = self.storage_backends[
-                                "LocalCPUBackend"
-                            ]
-                            assert isinstance(local_cpu, LocalCPUBackend)
-                            local_cpu.submit_put_task(k, memory_obj)
+                        try:
+                            memory_obj = fut.result()
+                            if memory_obj is not None:
+                                local_cpu = self.storage_backends[
+                                    "LocalCPUBackend"
+                                ]
+                                assert isinstance(local_cpu, LocalCPUBackend)
+                                local_cpu.submit_put_task(k, memory_obj)
+                        except Exception as e:
+                            logger.warning(
+                                "Write-back to LocalCPUBackend failed: %s",
+                                e,
+                            )
 
                     task.add_done_callback(_write_back)
                 return task
