@@ -51,7 +51,6 @@ class ECCacheEngine:
 
         self.config = config
         self.metadata = metadata
-        self._storage_location: str = ""
 
         # Mirror KV engine layering: StorageManager owns backends + allocator.
         from lmcache.v1.event_manager import EventManager
