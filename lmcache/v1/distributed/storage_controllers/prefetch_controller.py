@@ -193,7 +193,7 @@ class PrefetchController(StorageControllerInterface):
         policy: PrefetchPolicy,
         max_in_flight: int = 8,
     ) -> None:
-        super().__init__(l1_manager)
+        self._l1_manager = l1_manager
         self._l2_adapters = l2_adapters
         self._adapter_descriptors = adapter_descriptors
         self._policy = policy
@@ -543,7 +543,7 @@ class PrefetchController(StorageControllerInterface):
         # Step 3: reserve L1 write buffers
         merged_bitmap = merge_bitmaps(trimmed_plan.values(), len(request.keys))
         keys_to_reserve = merged_bitmap.gather(request.keys)
-        l1_mgr = self.get_l1_manager()
+        l1_mgr = self._l1_manager
 
         write_results = l1_mgr.reserve_write(
             keys=keys_to_reserve,
@@ -674,7 +674,7 @@ class PrefetchController(StorageControllerInterface):
         # Phase 2 unlock: release L2 locks for all keys in the load plan
         self._unlock_all_plan_keys(request)
 
-        l1_mgr = self.get_l1_manager()
+        l1_mgr = self._l1_manager
 
         # Transition loaded keys: write-locked -> read-locked
         # Use extra_count so that all TP workers each get their own read lock.
@@ -750,7 +750,7 @@ class PrefetchController(StorageControllerInterface):
 
     def _cleanup_in_flight_requests(self) -> None:
         """Release resources for any in-flight requests during shutdown."""
-        l1_mgr = self.get_l1_manager()
+        l1_mgr = self._l1_manager
         for request in self._in_flight_requests.values():
             if request.phase == PrefetchPhase.PLAN_AND_LOAD:
                 if request.write_reserved_keys:

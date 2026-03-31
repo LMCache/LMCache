@@ -601,8 +601,6 @@ class TestBufferOnlyMode:
     def test_l1_cleaned_after_l2_store(self, l1_manager):
         """L1 data should be deleted after successful L2 store."""
         adapter = make_adapter()
-        noop_policy = NoOpEvictionPolicy()
-        l1_manager.register_listener(noop_policy)
 
         ctrl = StoreController(
             l1_manager=l1_manager,
@@ -643,8 +641,6 @@ class TestBufferOnlyMode:
         """Multiple keys should all flow to L2 and be removed
         from L1."""
         adapter = make_adapter()
-        noop_policy = NoOpEvictionPolicy()
-        l1_manager.register_listener(noop_policy)
 
         ctrl = StoreController(
             l1_manager=l1_manager,

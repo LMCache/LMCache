@@ -100,10 +100,37 @@ class L1ManagerListener(EventListener):
         pass
 
 
-class L2ManagerListener(EventListener):
-    # Just a placeholder here. Waiting for L2 manager to be finalized.
+class L2AdapterListener(EventListener):
+    """Listener for L2 adapter events, analogous to L1ManagerListener."""
+
     @abstractmethod
-    def on_l2_lookup_and_lock(self):
+    def on_l2_keys_stored(self, keys: list[ObjectKey]):
+        """
+        Notify the listener that keys have been successfully stored in L2.
+
+        Args:
+            keys (list[ObjectKey]): The keys that have been stored.
+        """
+        pass
+
+    @abstractmethod
+    def on_l2_keys_accessed(self, keys: list[ObjectKey]):
+        """
+        Notify the listener that keys have been accessed (lookup hit) in L2.
+
+        Args:
+            keys (list[ObjectKey]): The keys that have been accessed.
+        """
+        pass
+
+    @abstractmethod
+    def on_l2_keys_deleted(self, keys: list[ObjectKey]):
+        """
+        Notify the listener that keys have been deleted from L2.
+
+        Args:
+            keys (list[ObjectKey]): The keys that have been deleted.
+        """
         pass
 
 
