@@ -73,7 +73,9 @@ def client_with_engine(mock_engine):
     adapter = MagicMock()
     adapter.lmcache_engine = mock_engine
     app.state.lmcache_adapter = adapter
-    return TestClient(app)
+    client = TestClient(app)
+    yield client
+    client.close()
 
 
 @pytest.fixture
@@ -81,7 +83,9 @@ def client_without_engine():
     adapter = MagicMock()
     adapter.lmcache_engine = None
     app.state.lmcache_adapter = adapter
-    return TestClient(app)
+    client = TestClient(app)
+    yield client
+    client.close()
 
 
 # ------------------------------------------------------------------ #
