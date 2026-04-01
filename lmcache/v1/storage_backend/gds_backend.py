@@ -192,14 +192,29 @@ class GdsBackend(AllocatorBackendInterface):
         self.loop = loop
         self.dst_device = dst_device
 
+        # Extract device index from self.dst_device (e.g. "cuda:2" -> 2)
+        device_id = (
+            int(dst_device.split(":")[1])
+            if ":" in dst_device
+            else torch.cuda.current_device()
+        )
+
         assert config.gds_path is not None, "Need to specify gds_path for GdsBackend"
-        self.gds_path = config.gds_path
-        self.fstype = get_fstype(config.gds_path)
+
+        # Multi-path support: parse comma-separated paths and select one
+        # based on GPU device ID (by_gpu sharding, like NIXL PR #2418).
+        self.gds_paths = [p.strip() for p in config.gds_path.split(",") if p.strip()]
+        assert len(self.gds_paths) > 0, "gds_path cannot be empty"
+
+        # TODO: next patch we can add additional sharding strategies
+        self.gds_path = self.gds_paths[device_id % len(self.gds_paths)]
+        self.fstype = get_fstype(self.gds_path)
 
         # Log the fstype - this is useful in reports and varying optimizations
         # based on the kind of fstype used.
         logger.info(
             f"GDS backend using fstype '{self.fstype}' on path '{self.gds_path}'"
+            f" (device {device_id}, {len(self.gds_paths)} path(s) configured)"
         )
 
         # Initialize use_cufile and use_hipfile before creating the memory allocator
@@ -223,7 +238,6 @@ class GdsBackend(AllocatorBackendInterface):
         self.memory_allocator = self.initialize_allocator(config, metadata)
 
         self.data_suffix = _DATA_FILE_SUFFIX
-        self.use_thread_pool = False
         self._thread_pool = None
 
         if self.fstype in ["tmpfs", "overlayfs"]:
@@ -244,7 +258,9 @@ class GdsBackend(AllocatorBackendInterface):
                 "Weka filesystem requires either cufile or hipfile to be enabled"
             )
             self.data_suffix = _WEKA_DATA_FILE_SUFFIX
-            self.use_thread_pool = True
+
+        # Always enable the thread pool for parallel I/O
+        self.use_thread_pool = self.use_cufile or self.use_hipfile
 
         if self.use_thread_pool:
             thread_count = _DEFAULT_THREAD_COUNT
@@ -253,7 +269,7 @@ class GdsBackend(AllocatorBackendInterface):
                     "gds_io_threads", _DEFAULT_THREAD_COUNT
                 )
             self._thread_pool = ThreadPoolExecutor(
-                max_workers=thread_count, thread_name_prefix="weka-gds-io"
+                max_workers=thread_count, thread_name_prefix="gds-io"
             )
 
         if self.use_cufile:
@@ -297,8 +313,8 @@ class GdsBackend(AllocatorBackendInterface):
             if use_direct_io is not None:
                 self.use_direct_io = use_direct_io
 
-        if not os.path.exists(self.gds_path):
-            os.makedirs(self.gds_path, exist_ok=True)
+        for p in self.gds_paths:
+            os.makedirs(p, exist_ok=True)
 
         self.stats = None  # TODO: plug into LMCache Statistics
 
@@ -331,20 +347,21 @@ class GdsBackend(AllocatorBackendInterface):
         # whether we can serialize meta-data in groups for faster loading.
         tasks = []
         start = time.perf_counter()
-        with os.scandir(self.gds_path) as it:
-            for entry in it:
-                if not entry.is_dir():
-                    continue
-                l1_dir = os.path.basename(entry.name)
-                if len(l1_dir) != 2:
-                    continue
-                tasks.append(
-                    asyncio.to_thread(
-                        self._scan_metadata_subdir,
-                        os.path.join(self.gds_path, l1_dir),
-                        l1_dir,
+        for p in self.gds_paths:
+            with os.scandir(p) as it:
+                for entry in it:
+                    if not entry.is_dir():
+                        continue
+                    l1_dir = os.path.basename(entry.name)
+                    if len(l1_dir) != 2:
+                        continue
+                    tasks.append(
+                        asyncio.to_thread(
+                            self._scan_metadata_subdir,
+                            os.path.join(p, l1_dir),
+                            l1_dir,
+                        )
                     )
-                )
         # TODO: If Python 3.11+, can we use TaskGroup instead?
         await asyncio.gather(*tasks)
         end = time.perf_counter()
@@ -461,49 +478,53 @@ class GdsBackend(AllocatorBackendInterface):
         return False
 
     def _try_to_read_metadata(self, key: CacheEngineKey) -> Optional[DiskCacheMetadata]:
-        path, subdir_key, _, _ = self._key_to_path(key)
-        path += _METADATA_FILE_SUFFIX
-        if os.path.exists(path):
-            try:
-                return self._read_metadata(key, path, subdir_key)
-            except FileNotFoundError:
-                logger.warning(
-                    f"[GDS] File not found for key {key.to_string()} at expected path "
-                    f"{path}, returning None"
-                )
-            except PermissionError:
-                logger.warning(
-                    f"[GDS]: Permission Denied for PID {os.getpid()} on {path},"
-                    f" returning None"
-                )
-            except UnsupportedMetadataVersion:
-                logger.error(f"Unsupported metadata version for {path}, ignoring")
-            except (OSError, IOError) as e:
-                logger.error(
-                    f"Failed to read metadata file {path}: {type(e).__name__}: {e}. "
-                    f"File may be corrupted or inaccessible. "
-                    f"Ignoring cache entry for key {key.to_string()}."
-                )
-            except Exception as e:
-                logger.error(
-                    f"Unexpected error reading metadata file {path}: "
-                    f"{type(e).__name__}: {e}. Ignoring cache entry for key "
-                    f"{key.to_string()}."
-                )
+        for p in self.gds_paths:
+            path, subdir_key, _, _ = self._key_to_path(key, base_path=p)
+            path += _METADATA_FILE_SUFFIX
+            if os.path.exists(path):
+                try:
+                    return self._read_metadata(key, path, subdir_key)
+                except FileNotFoundError:
+                    logger.warning(
+                        f"[GDS] File not found for key {key.to_string()} "
+                        f"at expected path {path}, returning None"
+                    )
+                except PermissionError:
+                    logger.warning(
+                        f"[GDS]: Permission Denied for PID {os.getpid()} on {path},"
+                        f" returning None"
+                    )
+                except UnsupportedMetadataVersion:
+                    logger.error(f"Unsupported metadata version for {path}, ignoring")
+                except (OSError, IOError) as e:
+                    logger.error(
+                        f"Failed to read metadata file {path}: {type(e).__name__}: "
+                        f"{e}. File may be corrupted or inaccessible. "
+                        f"Ignoring cache entry for key {key.to_string()}."
+                    )
+                except Exception as e:
+                    logger.error(
+                        f"Unexpected error reading metadata file {path}: "
+                        f"{type(e).__name__}: {e}. Ignoring cache entry for key "
+                        f"{key.to_string()}."
+                    )
 
         return None
 
     def _key_to_path(
         self,
         key: CacheEngineKey,
+        base_path: Optional[str] = None,
     ) -> Tuple[str, str, str, str]:
         hash = str(key.chunk_hash)
         l1_dir = hash[:2]
         l2_dir = hash[2:4]
         key_str = key.to_string()
+        if base_path is None:
+            base_path = self.gds_path
         return (
             os.path.join(
-                self.gds_path,
+                base_path,
                 l1_dir,
                 l2_dir,
                 urllib.parse.quote(key_str, safe="") + self.data_suffix,
@@ -851,6 +872,7 @@ class GdsBackend(AllocatorBackendInterface):
         paths: list[str | None] = []
         dtypes: list[torch.dtype | None] = []
         shapes: list[torch.Size | None] = []
+        fmts: list[MemoryFormat | None] = []
         with self.hot_lock:
             for key in keys:
                 entry = self.hot_cache.get(key)
@@ -859,18 +881,20 @@ class GdsBackend(AllocatorBackendInterface):
                     paths.append(None)
                     dtypes.append(None)
                     shapes.append(None)
+                    fmts.append(None)
                     continue
                 paths.append(entry.path)
                 dtypes.append(entry.dtype)
                 shapes.append(entry.shape)
+                fmts.append(entry.fmt)
 
         memory_objs: list[MemoryObj | None] = []
         gds_reads, gds_read_bytes = 0, 0
-        for dtype, shape, path in zip(dtypes, shapes, paths, strict=True):
+        for dtype, shape, path, fmt in zip(dtypes, shapes, paths, fmts, strict=True):
             if path is None:
                 memory_objs.append(None)
                 continue
-            memory_obj = self.memory_allocator.allocate(shape, dtype)
+            memory_obj = self.memory_allocator.allocate(shape, dtype, fmt=fmt)
             if memory_obj is None:
                 logger.error(f"Memory allocation failed during get_blocking for {path}")
             else:

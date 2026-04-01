@@ -38,8 +38,7 @@ class ServerCommand(BaseCommand):
         """
         # First Party
         from lmcache.v1.distributed.config import add_storage_manager_args
-        from lmcache.v1.mp_observability.config import add_prometheus_args
-        from lmcache.v1.mp_observability.telemetry import add_telemetry_args
+        from lmcache.v1.mp_observability.config import add_observability_args
         from lmcache.v1.multiprocess.config import (
             add_http_frontend_args,
             add_mp_server_args,
@@ -48,8 +47,7 @@ class ServerCommand(BaseCommand):
         add_mp_server_args(parser)
         add_storage_manager_args(parser)
         add_http_frontend_args(parser)
-        add_prometheus_args(parser)
-        add_telemetry_args(parser)
+        add_observability_args(parser)
 
     def execute(self, args: argparse.Namespace) -> None:
         """Parse CLI arguments into config objects and launch the HTTP server.
@@ -60,10 +58,7 @@ class ServerCommand(BaseCommand):
         # First Party
         from lmcache.v1.distributed.config import parse_args_to_config
         from lmcache.v1.mp_observability.config import (
-            parse_args_to_prometheus_config,
-        )
-        from lmcache.v1.mp_observability.telemetry import (
-            parse_args_to_telemetry_config,
+            parse_args_to_observability_config,
         )
         from lmcache.v1.multiprocess.config import (
             parse_args_to_http_frontend_config,
@@ -75,6 +70,5 @@ class ServerCommand(BaseCommand):
             http_config=parse_args_to_http_frontend_config(args),
             mp_config=parse_args_to_mp_server_config(args),
             storage_manager_config=parse_args_to_config(args),
-            prometheus_config=parse_args_to_prometheus_config(args),
-            telemetry_config=parse_args_to_telemetry_config(args),
+            obs_config=parse_args_to_observability_config(args),
         )

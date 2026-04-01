@@ -48,6 +48,60 @@ Example ``config.yaml``:
     cufile_buffer_size: 8192
 
 
+Multi-Path (Multi-Device) Support
+---------------------------------
+
+When a system has multiple NVMe drives, you can distribute GDS I/O across them
+by specifying a comma-separated list of paths in ``gds_path``. Each GPU worker
+automatically selects one path based on its device index (``device_id % num_paths``),
+so traffic is spread evenly across the drives without any manual pinning.
+
+**Why this helps:** a single PCIe Gen 4 x4 NVMe tops out at ~7 GB/s. With four
+drives the aggregate bandwidth can reach ~28 GB/s, matching what multi-GPU
+systems need for KV cache eviction and prefetch.
+
+**Environment variables:**
+
+.. code-block:: bash
+
+    export LMCACHE_GDS_PATH="/mnt/nvme0/cache,/mnt/nvme1/cache,/mnt/nvme2/cache,/mnt/nvme3/cache"
+
+**YAML config:**
+
+.. code-block:: yaml
+
+    gds_path: "/mnt/nvme0/cache,/mnt/nvme1/cache,/mnt/nvme2/cache,/mnt/nvme3/cache"
+
+With the above configuration on a 4-GPU node:
+
+- ``cuda:0`` writes to ``/mnt/nvme0/cache``
+- ``cuda:1`` writes to ``/mnt/nvme1/cache``
+- ``cuda:2`` writes to ``/mnt/nvme2/cache``
+- ``cuda:3`` writes to ``/mnt/nvme3/cache``
+
+If there are more GPUs than paths, the assignment wraps around (e.g. ``cuda:4``
+maps back to ``/mnt/nvme0/cache``). A single path (no commas) works exactly as
+before.
+
+All directories are created automatically at startup. Every path in the list
+must reside on a filesystem that the rest of the GDS configuration expects
+(e.g., all paths on GDS-capable mounts when using cuFile).
+
+**Read behavior:** on startup the backend scans **all** configured paths for
+previously-stored KV cache entries, regardless of GPU affinity.  This means a
+``cuda:0`` worker whose write affinity is ``/mnt/nvme0/cache`` will still
+discover entries that were written to ``/mnt/nvme1/cache`` by ``cuda:1`` in a
+prior run.  Writes, however, always go to the single affinity-selected path.
+
+.. code-block:: text
+
+   Startup scan (read):   iterate ALL gds_paths → populate hot_cache
+   Runtime writes:        only the affinity path  (device_id % num_paths)
+   Runtime reads:         look up hot_cache first; on miss, check ALL
+                          gds_paths on disk → load from whichever path
+                          the entry lives on
+
+
 CuFile Buffer Size Explanation
 ------------------------------
 

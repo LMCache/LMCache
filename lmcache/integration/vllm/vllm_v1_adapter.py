@@ -1541,8 +1541,13 @@ class LMCacheConnectorV1Impl:
             # TODO: this is a dangerous reference to the request object inside vllm
             if request := self._unfinished_requests.get(req_id):
                 num_current_tokens = request.num_computed_tokens
+                # tracker_len < num_computed_tokens during decode
+                #   (important for save_decode_cache).
+                # num_computed_tokens < tracker_len after preemption.
+                tracker_len = len(request_tracker.token_ids)
+                slice_base = min(num_current_tokens, tracker_len)
                 new_token_ids = request.all_token_ids[
-                    num_current_tokens : num_current_tokens + num_new_tokens
+                    slice_base : slice_base + num_new_tokens
                 ]
             else:
                 raise ValueError(
@@ -1580,13 +1585,22 @@ class LMCacheConnectorV1Impl:
                 # and then set to the number of already cached tokens (maxxing
                 # prefix caching and lmcache)
                 # this assumption is crucial for the update() call of RequestTracker
-                assert request.num_computed_tokens == max(
-                    lmcache_cached_tokens, load_spec.vllm_cached_tokens
-                ), (
+                # On full cache hit, get_num_new_matched_tokens subtracts 1
+                # to force last-token recomputation. This only affects
+                # num_computed_tokens when lmcache has all tokens AND
+                # provides more than vLLM's local cache.
+                expected = max(lmcache_cached_tokens, load_spec.vllm_cached_tokens)
+                full_hit_adj = (
+                    lmcache_cached_tokens == len(request.all_token_ids)
+                    and lmcache_cached_tokens > load_spec.vllm_cached_tokens
+                )
+                if full_hit_adj:
+                    expected -= 1
+                assert request.num_computed_tokens == expected, (
                     f"Preempted request {req_id} has "
                     f"num_computed_tokens {request.num_computed_tokens} "
-                    "but max(lmcache_cached_tokens, vllm_cached_tokens) = "
-                    f"{max(lmcache_cached_tokens, vllm_cached_tokens)}"
+                    f"but expected {expected} "
+                    f"(full_hit_adj={full_hit_adj})"
                 )
 
             # When retrieve fail, vllm will call _handle_invalid_blocks to
