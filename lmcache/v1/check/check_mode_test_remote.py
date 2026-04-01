@@ -10,9 +10,11 @@ from lmcache.v1.check import check_mode
 
 # Import shared utilities
 from lmcache.v1.check.utils import (
+    DEFAULT_KV_DTYPE_STR,
     EventLoopManager,
     _get_default_metadata,
     create_test_key,
+    parse_kv_dtype,
     run_common_test_framework,
     validate_get_results,
 )
@@ -63,15 +65,22 @@ def create_test_memory_obj(
     )
 
 
-def create_test_data_for_backend(backend, local_cpu_backend, model, num_tests):
+def create_test_data_for_backend(
+    backend,
+    local_cpu_backend,
+    model,
+    num_tests,
+    kv_dtype=None,
+):
     """Create test data for backend based tests"""
     # Group 1: Non-existing keys
+    kw = {} if kv_dtype is None else {"kv_dtype": kv_dtype}
     non_exist_keys = [
-        create_test_key(model, f"non_exist_{i}") for i in range(num_tests)
+        create_test_key(model, f"non_exist_{i}", **kw) for i in range(num_tests)
     ]
 
     # Group 2: Existing keys
-    exist_keys = [create_test_key(model, f"exist_{i}") for i in range(num_tests)]
+    exist_keys = [create_test_key(model, f"exist_{i}", **kw) for i in range(num_tests)]
     exist_memories = [
         create_test_memory_obj(backend, local_cpu_backend) for _ in range(num_tests)
     ]
@@ -82,8 +91,16 @@ def create_test_data_for_backend(backend, local_cpu_backend, model, num_tests):
 @check_mode("test_remote")
 async def run_test_mode(model: str, **kwargs):
     """Run connector test mode"""
+    kv_dtype_str = kwargs.get("kv_dtype") or DEFAULT_KV_DTYPE_STR
+    kv_dtype = parse_kv_dtype(kv_dtype_str)
+    if kv_dtype is None:
+        print("Error: unsupported --kv-dtype '%s'" % kv_dtype_str)
+        return
+
+    obj_size = kwargs.get("obj_size")
+
     config = lmcache_get_or_create_config()
-    metadata = _get_default_metadata(model)
+    metadata = _get_default_metadata(model, kv_dtype=kv_dtype, obj_size=obj_size)
 
     # Create and start event loop manager
     loop_manager = EventLoopManager()
@@ -110,11 +127,19 @@ async def run_test_mode(model: str, **kwargs):
             "async_get_func": async_get_backend,
             "validate_get_func": validate_get_results,
             "test_object": backend,
-            "extra_args": [local_cpu_backend],  # Additional argument for backend tests
+            "extra_args": [
+                local_cpu_backend,
+            ],
+            "kv_dtype": kv_dtype,
+            "obj_size": obj_size,
         }
 
         # Run the common test framework
-        await run_common_test_framework(test_context, model, num_tests=5)
+        num_tests = kwargs.get("num_keys", 5)
+        settle_time = kwargs.get("settle_time", 0.0)
+        await run_common_test_framework(
+            test_context, model, num_tests=num_tests, settle_time=settle_time
+        )
 
     except Exception as e:
         print(f"Test Failed - Error: {e}")

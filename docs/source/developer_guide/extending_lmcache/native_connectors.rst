@@ -313,7 +313,8 @@ Create a new file in the L2 adapters package:
 
 .. code-block:: bash
 
-    python -m lmcache.v1.multiprocess.server \
+    lmcache server \
+        --l1-size-gb 100 --eviction-policy LRU \
         --l2-adapter '{"type": "mybackend", "host": "10.0.0.1", "port": 9000}'
 
 
