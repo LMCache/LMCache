@@ -12,16 +12,31 @@ import enum
 from lmcache.v1.distributed.api import ObjectKey
 
 
+@dataclass(frozen=True)
+class L1MemoryDesc:
+    """
+    Describes the L1 memory buffer registered with an external backend (e.g. Nixl).
+    """
+
+    ptr: int
+    size: int
+    align_bytes: int
+
+
+class EventListener(ABC):  # noqa: B024
+    pass
+
+
 # For L1 manager event notifications
-class L1ManagerListener(ABC):
+class L1ManagerListener(EventListener):
     """
     Listener for L1 manager events
     """
 
     @abstractmethod
-    def on_keys_reserved_read(self, keys: list[ObjectKey]):
+    def on_l1_keys_reserved_read(self, keys: list[ObjectKey]):
         """
-        Notify the listener that new keys have been reserved for read.
+        Notify the listener that new keys have been reserved for read on L1.
 
         Args:
             keys (list[ObjectKey]): The keys that have been successfully reserved
@@ -29,9 +44,9 @@ class L1ManagerListener(ABC):
         pass
 
     @abstractmethod
-    def on_keys_read_finished(self, keys: list[ObjectKey]):
+    def on_l1_keys_read_finished(self, keys: list[ObjectKey]):
         """
-        Notify the listener that keys have been accessed.
+        Notify the listener that keys have been accessed on L1.
 
         Args:
             keys (list[ObjectKey]): The keys that have been successfully read
@@ -39,9 +54,9 @@ class L1ManagerListener(ABC):
         pass
 
     @abstractmethod
-    def on_keys_reserved_write(self, keys: list[ObjectKey]):
+    def on_l1_keys_reserved_write(self, keys: list[ObjectKey]):
         """
-        Notify the listener that keys have been reserved for write.
+        Notify the listener that keys have been reserved for write on L1.
 
         Args:
             keys (list[ObjectKey]): The keys that have been successfully reserved
@@ -49,9 +64,9 @@ class L1ManagerListener(ABC):
         pass
 
     @abstractmethod
-    def on_keys_write_finished(self, keys: list[ObjectKey]):
+    def on_l1_keys_write_finished(self, keys: list[ObjectKey]):
         """
-        Notify the listener that keys have been finished for writing.
+        Notify the listener that keys have been finished for writing on L1.
 
         Args:
             keys (list[ObjectKey]): The keys that have been successfully written
@@ -59,12 +74,62 @@ class L1ManagerListener(ABC):
         pass
 
     @abstractmethod
-    def on_keys_deleted_by_manager(self, keys: list[ObjectKey]):
+    def on_l1_keys_finish_write_and_reserve_read(self, keys: list[ObjectKey]):
         """
-        Notify the listener that keys have been deleted.
+        Notify the listener that keys have been finished for writing
+        and reserved for read on L1.
+
+        This will only be trigger by the prefetch operation now.
+
+        Args:
+            keys (list[ObjectKey]): The keys that have been successfully
+                finished for writing and reserved for read
+        """
+        # NOTE (ApostaC): may consider renaming this to `on_l1_keys_finish_prefetch`
+        # for better clarity
+        pass
+
+    @abstractmethod
+    def on_l1_keys_deleted_by_manager(self, keys: list[ObjectKey]):
+        """
+        Notify the listener that keys have been deleted from L1.
 
         Args:
             keys (list[ObjectKey]): The keys that have been deleted
+        """
+        pass
+
+
+class L2AdapterListener(EventListener):
+    """Listener for L2 adapter events, analogous to L1ManagerListener."""
+
+    @abstractmethod
+    def on_l2_keys_stored(self, keys: list[ObjectKey]):
+        """
+        Notify the listener that keys have been successfully stored in L2.
+
+        Args:
+            keys (list[ObjectKey]): The keys that have been stored.
+        """
+        pass
+
+    @abstractmethod
+    def on_l2_keys_accessed(self, keys: list[ObjectKey]):
+        """
+        Notify the listener that keys have been accessed (lookup hit) in L2.
+
+        Args:
+            keys (list[ObjectKey]): The keys that have been accessed.
+        """
+        pass
+
+    @abstractmethod
+    def on_l2_keys_deleted(self, keys: list[ObjectKey]):
+        """
+        Notify the listener that keys have been deleted from L2.
+
+        Args:
+            keys (list[ObjectKey]): The keys that have been deleted.
         """
         pass
 

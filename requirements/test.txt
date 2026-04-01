@@ -7,3 +7,4 @@ pytest-cov
 pytest-html>=3.2,<5.0  # 4.x requires external assets; 3.2 is stable
 jinja2<3.2
 python-multipart
+openai

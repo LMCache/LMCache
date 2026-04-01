@@ -10,8 +10,12 @@ from lmcache.v1.distributed.eviction_policy.factory import (
 from lmcache.v1.distributed.eviction_policy.lru import (
     LRUEvictionPolicy,
 )
+from lmcache.v1.distributed.eviction_policy.noop import (
+    NoOpEvictionPolicy,
+)
 
 __all__ = [
     "LRUEvictionPolicy",
+    "NoOpEvictionPolicy",
     "CreateEvictionPolicy",
 ]

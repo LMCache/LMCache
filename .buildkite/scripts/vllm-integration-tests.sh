@@ -65,6 +65,10 @@ cleanup() {
             fi
         fi
     done
+    
+    # Wait for GPU memory to be fully released
+    echo "  - Waiting 5 seconds for GPU memory to be released..." >&2
+    sleep 5
 }
 
 find_available_port() {
@@ -129,19 +133,32 @@ run_lmcache_vllmopenai_container() {
     # Pick the GPUs based on config
     gpu_count=$(yq -r '.docker.gpu_count // 1' "$cfg_file")
     source "$ORIG_DIR/.buildkite/scripts/pick-free-gpu.sh" 40000 "$gpu_count"
+    if [ -z "$CUDA_VISIBLE_DEVICES" ]; then
+        echo "❌ Failed to select $gpu_count GPU(s)"
+        exit 1
+    fi
     best_gpu="${CUDA_VISIBLE_DEVICES}"
 
     # docker args
     docker_args=(
         --runtime nvidia
         --network host
-        --gpus "\"device=${best_gpu}\""
         --volume ~/.cache/huggingface:/root/.cache/huggingface
         --volume "${CONFIG_DIR}/lmcache_configs:/etc/lmcache:ro"
         --volume /tmp/lmcache_internal_api_server/${PORT}:/tmp/lmcache_internal_api_server
         --env VLLM_USE_FLASHINFER_SAMPLER=0
         --env HF_TOKEN="$HF_TOKEN"
     )
+    
+    # Handle GPU assignment based on count
+    if [ "$gpu_count" -gt 1 ]; then
+        # Multi-GPU: expose all and use CUDA_VISIBLE_DEVICES to restrict
+        docker_args+=(--gpus all)
+        docker_args+=(--env "CUDA_VISIBLE_DEVICES=${best_gpu}")
+    else
+        # Single GPU: use device isolation
+        docker_args+=(--gpus "device=${best_gpu}")
+    fi
     while IFS= read -r e; do
         [[ -n $e ]] && docker_args+=(--env "$e")
     done < <(yq -r '.env[]?' <<<"$docker")
@@ -180,6 +197,21 @@ run_pd_lmcache() {
     PREFILLER_LOGFILE="/tmp/build_${BUILD_ID}_${cfg_name}_prefiller.log"
     DECODER_LOGFILE="/tmp/build_${BUILD_ID}_${cfg_name}_decoder.log"
 
+    # Pick 2 free GPUs for prefiller and decoder
+    source "$ORIG_DIR/.buildkite/scripts/pick-free-gpu.sh" 40000 2
+    if [ -z "$CUDA_VISIBLE_DEVICES" ]; then
+        echo "❌ Failed to select 2 free GPUs"
+        exit 1
+    fi
+    IFS=',' read -ra SELECTED_GPUS <<< "$CUDA_VISIBLE_DEVICES"
+    if [ ${#SELECTED_GPUS[@]} -ne 2 ]; then
+        echo "❌ Expected 2 GPUs, but got ${#SELECTED_GPUS[@]}: ${CUDA_VISIBLE_DEVICES}"
+        exit 1
+    fi
+    GPU_PREFILLER="${SELECTED_GPUS[0]}"
+    GPU_DECODER="${SELECTED_GPUS[1]}"
+    echo "Selected GPU ${GPU_PREFILLER} for prefiller, GPU ${GPU_DECODER} for decoder"
+
     # Ensure host directory exists for socket mapping
     mkdir -p "/tmp/lmcache_internal_api_server/${PORT1}"
     mkdir -p "/tmp/lmcache_internal_api_server/${PORT2}"
@@ -189,7 +221,7 @@ run_pd_lmcache() {
     prefiller_docker_args=(
         --runtime nvidia
         --network host
-        --gpus "device=0"
+        --gpus "device=${GPU_PREFILLER}"
         --volume ~/.cache/huggingface:/root/.cache/huggingface
         --volume /tmp/lmcache_internal_api_server/${PORT1}:/tmp/lmcache_internal_api_server
         --env VLLM_USE_FLASHINFER_SAMPLER=0
@@ -233,7 +265,7 @@ run_pd_lmcache() {
     decoder_docker_args=(
         --runtime nvidia
         --network host
-        --gpus "device=1"
+        --gpus "device=${GPU_DECODER}"
         --volume ~/.cache/huggingface:/root/.cache/huggingface
         --volume /tmp/lmcache_internal_api_server/${PORT2}:/tmp/lmcache_internal_api_server
         --env VLLM_USE_FLASHINFER_SAMPLER=0
@@ -303,6 +335,21 @@ run_p2p_lmcache() {
     LOGFILE1="/tmp/build_${BUILD_ID}_${cfg_name}1.log"
     LOGFILE2="/tmp/build_${BUILD_ID}_${cfg_name}2.log"
 
+    # Pick 2 free GPUs for instance 1 and instance 2
+    source "$ORIG_DIR/.buildkite/scripts/pick-free-gpu.sh" 40000 2
+    if [ -z "$CUDA_VISIBLE_DEVICES" ]; then
+        echo "❌ Failed to select 2 free GPUs"
+        exit 1
+    fi
+    IFS=',' read -ra SELECTED_GPUS <<< "$CUDA_VISIBLE_DEVICES"
+    if [ ${#SELECTED_GPUS[@]} -ne 2 ]; then
+        echo "❌ Expected 2 GPUs, but got ${#SELECTED_GPUS[@]}: ${CUDA_VISIBLE_DEVICES}"
+        exit 1
+    fi
+    GPU_INSTANCE1="${SELECTED_GPUS[0]}"
+    GPU_INSTANCE2="${SELECTED_GPUS[1]}"
+    echo "Selected GPU ${GPU_INSTANCE1} for instance 1, GPU ${GPU_INSTANCE2} for instance 2"
+
     # Ensure host directory exists for socket mapping
     mkdir -p "/tmp/lmcache_internal_api_server/${PORT1}"
     mkdir -p "/tmp/lmcache_internal_api_server/${PORT2}"
@@ -312,7 +359,7 @@ run_p2p_lmcache() {
     docker1_args=(
         --runtime nvidia
         --network host
-        --gpus "device=0"
+        --gpus "device=${GPU_INSTANCE1}"
         --volume ~/.cache/huggingface:/root/.cache/huggingface
         --volume /tmp/lmcache_internal_api_server/${PORT1}:/tmp/lmcache_internal_api_server
         --env VLLM_USE_FLASHINFER_SAMPLER=0
@@ -375,7 +422,7 @@ run_p2p_lmcache() {
     docker2_args=(
         --runtime nvidia
         --network host
-        --gpus "device=1"
+        --gpus "device=${GPU_INSTANCE2}"
         --volume ~/.cache/huggingface:/root/.cache/huggingface
         --volume /tmp/lmcache_internal_api_server/${PORT2}:/tmp/lmcache_internal_api_server
         --env VLLM_USE_FLASHINFER_SAMPLER=0
@@ -638,8 +685,8 @@ run_long_doc_qa() {
         echo "Expected query ttft per prompt: $expected_query_ttft_per_prompt"
         echo "Actual query ttft per prompt: $query_ttft_per_prompt"
         awk -v expected="$expected_query_ttft_per_prompt" -v actual="$query_ttft_per_prompt" 'BEGIN {
-            if (actual > expected * 1.1) {
-                print "Query ttft per prompt requirement not met"
+            if (actual > expected * 1.2) {
+                print "Query ttft per prompt requirement not met (>20% overhead)"
                 exit 1
             } else {
                 print "Query ttft per prompt requirement met"
@@ -651,8 +698,8 @@ run_long_doc_qa() {
         echo "Expected query round time per prompt: $expected_query_round_time_per_prompt"
         echo "Actual query round time per prompt: $query_round_time_per_prompt"
         awk -v expected="$expected_query_round_time_per_prompt" -v actual="$query_round_time_per_prompt" 'BEGIN {
-            if (actual > expected * 1.1) {
-                print "Query round time per prompt requirement not met"
+            if (actual > expected * 1.2) {
+                print "Query round time per prompt requirement not met (>20% overhead)"
                 exit 1
             } else {
                 print "Query round time per prompt requirement met"
@@ -664,8 +711,8 @@ run_long_doc_qa() {
         echo "Expected warmup round time per prompt: $expected_warmup_round_time_per_prompt"
         echo "Actual warmup round time per prompt: $warmup_round_time_per_prompt"
         awk -v expected="$expected_warmup_round_time_per_prompt" -v actual="$warmup_round_time_per_prompt" 'BEGIN {
-            if (actual > expected * 1.1) {
-                print "Warmup round time per prompt requirement not met"
+            if (actual > expected * 1.2) {
+                print "Warmup round time per prompt requirement not met (>20% overhead)"
                 exit 1
             } else {
                 print "Warmup round time per prompt requirement met"

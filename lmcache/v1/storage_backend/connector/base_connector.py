@@ -42,7 +42,7 @@ class RemoteConnector(metaclass=abc.ABCMeta):
         - `meta_shapes` is a list of shapes of lmcache full chunk.
         - `meta_dtypes` is a list of dtypes of lmcache chunk.
         - `meta_fmt` is the memory format of the lmcache chunk.
-        - `full_chunk_size` is the size of the lmcache full chunk.
+        - `full_chunk_size_bytes` is the size of the lmcache full chunk.
         - `single_token_size` is the size of a single token.`
         - `remote_metadata_bytes` is the size of the remote metadata.
 
@@ -62,9 +62,11 @@ class RemoteConnector(metaclass=abc.ABCMeta):
         self.meta_fmt: MemoryFormat = (
             MemoryFormat.KV_MLA_FMT if metadata.use_mla else MemoryFormat.KV_2LTD
         )
-        self.full_chunk_size: int = get_size_bytes(self.meta_shapes, self.meta_dtypes)
-        assert self.full_chunk_size % metadata.chunk_size == 0
-        self.single_token_size = self.full_chunk_size // metadata.chunk_size
+        self.full_chunk_size_bytes: int = get_size_bytes(
+            self.meta_shapes, self.meta_dtypes
+        )
+        assert self.full_chunk_size_bytes % metadata.chunk_size == 0
+        self.single_token_size = self.full_chunk_size_bytes // metadata.chunk_size
 
         # init remote metadata info
         init_remote_metadata_info(metadata.get_num_groups())
@@ -75,7 +77,7 @@ class RemoteConnector(metaclass=abc.ABCMeta):
             self.meta_shapes,
             self.meta_dtypes,
             self.meta_fmt,
-            self.full_chunk_size,
+            self.full_chunk_size_bytes,
             self.single_token_size,
             self.remote_metadata_bytes,
         )
@@ -86,20 +88,20 @@ class RemoteConnector(metaclass=abc.ABCMeta):
         memory_obj: MemoryObj,
         bytes_read: int,
     ) -> MemoryObj:
-        assert self.full_chunk_size is not None
+        assert self.full_chunk_size_bytes is not None
         assert self.single_token_size is not None
         if (
             bytes_read == 0
             or bytes_read % self.single_token_size != 0
-            or bytes_read > self.full_chunk_size
+            or bytes_read > self.full_chunk_size_bytes
         ):
             raise ValueError(
                 f"bytes_read: {bytes_read} is illegal, "
                 f"single_token_size: {self.single_token_size}, "
-                f"full_chunk_size: {self.full_chunk_size}"
+                f"full_chunk_size_bytes: {self.full_chunk_size_bytes}"
             )
 
-        if bytes_read == self.full_chunk_size:
+        if bytes_read == self.full_chunk_size_bytes:
             # full chunk, return directly
             return memory_obj
 

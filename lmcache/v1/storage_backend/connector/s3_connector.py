@@ -89,7 +89,7 @@ class S3Connector(RemoteConnector):
         if not s3_endpoint.startswith("s3://"):
             raise ValueError("S3 url must start with 's3://'")
 
-        self.s3_part_size = self.full_chunk_size
+        self.s3_part_size = self.full_chunk_size_bytes
 
         self.s3_endpoint = s3_endpoint.removeprefix("s3://")
         self.loop = loop
@@ -298,7 +298,7 @@ class S3Connector(RemoteConnector):
         self,
         key_str: str,
         mem_obj: MemoryObj,
-    ):
+    ) -> "s3.S3Request":
         """
         Download a file from S3.
         """
@@ -497,7 +497,7 @@ class S3Connector(RemoteConnector):
         self,
         key_str: str,
         memory_obj: MemoryObj,
-    ):
+    ) -> "s3.S3Request":
         """
         Upload a file to S3.
         """

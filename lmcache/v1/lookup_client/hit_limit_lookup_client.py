@@ -26,11 +26,12 @@ class HitLimitLookupClient(LookupClientInterface):
     ):
         assert config.hit_miss_ratio is not None and 0 <= config.hit_miss_ratio <= 1
         self.actual_lookup_client = actual_lookup_client
-        self.hit_ratio_upper = 1 - config.hit_miss_ratio
-        self.chunk_size = config.chunk_size
+        self.config = config
         logger.info(
-            f"create HitLimitLookupClient succeed, the hit ratio upper"
-            f"is {self.hit_ratio_upper}, chunk size is {self.chunk_size}"
+            "create HitLimitLookupClient succeed, "
+            "the hit ratio upper is %s, chunk size is %s",
+            1 - config.hit_miss_ratio,
+            config.chunk_size,
         )
 
     def lookup_cache(self, lookup_id: str) -> Optional[int]:
@@ -55,18 +56,20 @@ class HitLimitLookupClient(LookupClientInterface):
             if total_tokens_length > 0:
                 current_hit_ratio = result / total_tokens_length
             # limit the hit tokens
-            if current_hit_ratio > self.hit_ratio_upper:
+            hit_ratio_upper = 1 - self.config.hit_miss_ratio
+            if current_hit_ratio > hit_ratio_upper:
                 origin_result = result
                 # align to chunk size
+                chunk_size = self.config.chunk_size
                 new_result = (
-                    int(total_tokens_length * self.hit_ratio_upper)
-                    // self.chunk_size
-                    * self.chunk_size
+                    int(total_tokens_length * hit_ratio_upper)
+                    // chunk_size
+                    * chunk_size
                 )
                 # check again
                 result = min(result, new_result)
                 logger.debug(
-                    f"hit ratio upper: {self.hit_ratio_upper} is smaller than "
+                    f"hit ratio upper: {hit_ratio_upper} is smaller than "
                     f"the real hit ratio {current_hit_ratio}, "
                     f"the origin result is {origin_result}, "
                     f"the new result is {new_result}, the final result is {result}"

@@ -109,9 +109,20 @@ if ! "$SCRIPT_DIR/run-long-doc-qa.sh"; then
 fi
 echo ""
 
+# Step 7: Run fault tolerance test (destructive — kills LMCache container)
+echo "============================================"
+echo "=== Step 7: Running fault tolerance test ==="
+echo "============================================"
+if ! "$SCRIPT_DIR/run-fault-tolerance.sh"; then
+    echo "❌ fault tolerance test failed"
+    TEST_RESULT=1
+    exit 1
+fi
+echo ""
+
 echo "============================================"
 echo "=== ✅ All tests passed! ==="
 echo "============================================"
 
-# Step 7: Cleanup runs automatically via trap
+# Step 8: Cleanup runs automatically via trap
 

@@ -74,6 +74,7 @@ def cuda_extension() -> tuple[list, dict]:
     cuda_sources = [
         "csrc/pybind.cpp",
         "csrc/mem_kernels.cu",
+        "csrc/mp_mem_kernels.cu",
         "csrc/cal_cdf.cu",
         "csrc/ac_enc.cu",
         "csrc/ac_dec.cu",
@@ -82,16 +83,25 @@ def cuda_extension() -> tuple[list, dict]:
         "csrc/utils.cpp",
     ]
     storage_manager_sources = [
+        "csrc/storage_manager/bitmap.cpp",
         "csrc/storage_manager/pybind.cpp",
         "csrc/storage_manager/ttl_lock.cpp",
         "csrc/storage_manager/utils.cpp",
+    ]
+    redis_sources = [
+        "csrc/storage_backends/redis/pybind.cpp",
+        "csrc/storage_backends/redis/connector.cpp",
+    ]
+    fs_sources = [
+        "csrc/storage_backends/fs/pybind.cpp",
+        "csrc/storage_backends/fs/connector.cpp",
     ]
     ext_modules = [
         cpp_extension.CUDAExtension(
             "lmcache.c_ops",
             sources=cuda_sources,
             extra_compile_args={
-                "cxx": [flag_cxx_abi],
+                "cxx": [flag_cxx_abi, "-std=c++17"],
                 "nvcc": [flag_cxx_abi],
             },
         ),
@@ -100,7 +110,23 @@ def cuda_extension() -> tuple[list, dict]:
             sources=storage_manager_sources,
             include_dirs=["csrc/storage_manager"],
             extra_compile_args={
-                "cxx": [flag_cxx_abi, "-O3"],
+                "cxx": [flag_cxx_abi, "-O3", "-std=c++17"],
+            },
+        ),
+        cpp_extension.CppExtension(
+            "lmcache.lmcache_redis",
+            sources=redis_sources,
+            include_dirs=["csrc/storage_backends", "csrc/storage_backends/redis"],
+            extra_compile_args={
+                "cxx": [flag_cxx_abi, "-O3", "-std=c++17"],
+            },
+        ),
+        cpp_extension.CppExtension(
+            "lmcache.lmcache_fs",
+            sources=fs_sources,
+            include_dirs=["csrc/storage_backends", "csrc/storage_backends/fs"],
+            extra_compile_args={
+                "cxx": [flag_cxx_abi, "-O3", "-std=c++17"],
             },
         ),
     ]
@@ -117,6 +143,7 @@ def rocm_extension() -> tuple[list, dict]:
     hip_sources = [
         "csrc/pybind_hip.cpp",  # Use the hipified pybind
         "csrc/mem_kernels.hip",
+        "csrc/mp_mem_kernels.hip",
         "csrc/cal_cdf.hip",
         "csrc/ac_enc.hip",
         "csrc/ac_dec.hip",
@@ -125,9 +152,18 @@ def rocm_extension() -> tuple[list, dict]:
         "csrc/utils_hip.cpp",
     ]
     storage_manager_sources = [
+        "csrc/storage_manager/bitmap.cpp",
         "csrc/storage_manager/pybind.cpp",
         "csrc/storage_manager/ttl_lock.cpp",
         "csrc/storage_manager/utils.cpp",
+    ]
+    redis_sources = [
+        "csrc/storage_backends/redis/pybind.cpp",
+        "csrc/storage_backends/redis/connector.cpp",
+    ]
+    fs_sources = [
+        "csrc/storage_backends/fs/pybind.cpp",
+        "csrc/storage_backends/fs/connector.cpp",
     ]
     # For HIP, we generally use CppExtension and let hipcc handle things.
     # Ensure CXX environment variable is set to hipcc when running this build.
@@ -140,7 +176,8 @@ def rocm_extension() -> tuple[list, dict]:
             extra_compile_args={
                 "cxx": [  # hipcc is typically invoked as a C++ compiler
                     # '-D_GLIBCXX_USE_CXX11_ABI=0',
-                    "-O3"
+                    "-O3",
+                    "-std=c++17",
                     # Add any HIP specific flags if needed.
                     # For example, if you need to specify ROCm architecture:
                     # '--offload-arch=gfx942' # (replace with your target arch)
@@ -164,7 +201,23 @@ def rocm_extension() -> tuple[list, dict]:
             sources=storage_manager_sources,
             include_dirs=["csrc/storage_manager"],
             extra_compile_args={
-                "cxx": ["-O3"],
+                "cxx": ["-O3", "-std=c++17"],
+            },
+        ),
+        cpp_extension.CppExtension(
+            "lmcache.lmcache_redis",
+            sources=redis_sources,
+            include_dirs=["csrc/storage_backends", "csrc/storage_backends/redis"],
+            extra_compile_args={
+                "cxx": ["-O3", "-std=c++17"],
+            },
+        ),
+        cpp_extension.CppExtension(
+            "lmcache.lmcache_fs",
+            sources=fs_sources,
+            include_dirs=["csrc/storage_backends", "csrc/storage_backends/fs"],
+            extra_compile_args={
+                "cxx": ["-O3", "-std=c++17"],
             },
         ),
     ]

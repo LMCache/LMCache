@@ -79,6 +79,12 @@ Basic cache settings that control the core functionality of LMCache.
    * - min_retrieve_tokens
      - LMCACHE_MIN_RETRIEVE_TOKENS
      - Minimum number of hit tokens required to perform retrieve. If hit tokens < this value, skip retrieve but still record the hits to avoid re-storing existing chunks. See :ref:`performance_tuning` for a working example. Default: 0 (disabled)
+   * - store_location
+     - LMCACHE_STORE_LOCATION
+     - A single storage backend name to store KV caches into. When specified, only the matching backend receives store operations. Valid values are the backend class names registered in the storage manager, including: ``"LocalCPUBackend"``, ``"LocalDiskBackend"``, ``"RemoteBackend"``, ``"PDBackend"``, ``"P2PBackend"``, ``"GdsBackend"``, etc, and any storage plugin backends. Note: ``"PDBackend"`` cannot be used as a store location for a decoder instance in a PD setup, since PDBackend is one-way from prefiller to decoder only. Default: null (store to all active backends)
+   * - retrieve_locations
+     - LMCACHE_RETRIEVE_LOCATIONS
+     - List of storage backend names to search when retrieving or looking up KV caches. When specified, only the listed backends are searched. Valid values are the backend class names registered in the storage manager, including: ``"LocalCPUBackend"``, ``"LocalDiskBackend"``, ``"RemoteBackend"``, ``"PDBackend"``, ``"P2PBackend"``, ``"GdsBackend"``, etc, and any storage plugin backends. Default: null (search all active backends)
    * - extra_config
      - LMCACHE_EXTRA_CONFIG={"key": value, ...}
      - Additional configuration as JSON dict. For NUMA manual mode, include "gpu_to_numa_mapping": {gpu_id: numa_node, ...}. Default: {}
@@ -335,10 +341,72 @@ Settings for different storage backends and paths.
      - Description
    * - gds_path
      - LMCACHE_GDS_PATH
-     - Path for GDS backend
+     - Path for GDS backend. Supports comma-separated paths for multi-device I/O (e.g. ``/mnt/nvme0/cache,/mnt/nvme1/cache``). Each GPU selects a path via ``device_id % num_paths``.
    * - cufile_buffer_size
      - LMCACHE_CUFILE_BUFFER_SIZE
-     - Buffer size for cuFile operations
+     - Buffer size for cuFile/hipFile operations
+
+Custom Prometheus Histogram Buckets
+------------------------------------
+
+You can override the default bucket boundaries for any Prometheus histogram metric
+by adding a key ``histogram_bucket_<name>`` to ``extra_config``, where ``<name>``
+is the metric name **without** the ``lmcache:`` prefix.
+
+The value must be a list of numeric boundaries (floats or ints).
+
+.. code-block:: yaml
+
+    extra_config:
+      histogram_bucket_time_to_retrieve: [0.01, 0.05, 0.1, 0.5, 1.0, 5.0]
+      histogram_bucket_retrieve_speed: [100, 500, 1000, 5000, 10000]
+
+.. list-table::
+   :header-rows: 1
+   :widths: 40 60
+
+   * - Available Histogram Names
+     - Description
+   * - ``time_to_retrieve``
+     - Time to retrieve from cache (seconds)
+   * - ``time_to_store``
+     - Time to store to cache (seconds)
+   * - ``time_to_lookup``
+     - Time to lookup in cache (seconds)
+   * - ``retrieve_process_tokens_time``
+     - Time to process tokens in retrieve (seconds)
+   * - ``retrieve_broadcast_time``
+     - Time to broadcast memory objects in retrieve (seconds)
+   * - ``retrieve_to_gpu_time``
+     - Time to move data to GPU in retrieve (seconds)
+   * - ``remote_backend_batched_get_blocking_time``
+     - Time to get data from remote backend (seconds)
+   * - ``instrumented_connector_batched_get_time``
+     - Time used by the connector (seconds)
+   * - ``store_process_tokens_time``
+     - Time to process tokens in store (seconds)
+   * - ``store_from_gpu_time``
+     - Time to move data from GPU in store (seconds)
+   * - ``store_put_time``
+     - Time to put data to storage in store (seconds)
+   * - ``retrieve_speed``
+     - Retrieve speed (tokens per second)
+   * - ``store_speed``
+     - Store speed (tokens per second)
+   * - ``p2p_time_to_transfer``
+     - Time to transfer via P2P (seconds)
+   * - ``p2p_transfer_speed``
+     - P2P transfer speed (tokens per second)
+   * - ``remote_time_to_get``
+     - Time to get from remote backends (ms)
+   * - ``remote_time_to_put``
+     - Time to put to remote backends (ms)
+   * - ``remote_time_to_get_sync``
+     - Time to get from remote backends synchronously (ms)
+   * - ``request_cache_hit_rate``
+     - Request cache hit rate (0.0 to 1.0)
+   * - ``request_cache_lifespan``
+     - Request cache lifespan (minutes)
 
 Internal API Server Configurations
 ----------------------------------

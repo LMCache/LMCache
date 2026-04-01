@@ -1,0 +1,28 @@
+# CacheBlend test in dedicated cacheblend image.
+# Runs lmc/blend/run-everything.sh using two vLLM binaries:
+#   - /opt/venv/bin/vllm (image-bundled)
+#   - /.venv/bin/vllm (wheel-installed during run.sh)
+
+steps:
+  - label: ":cyclone: Blend Test"
+    command: |
+      bash .buildkite/k3_tests/blend/run.sh
+    timeout_in_minutes: 90
+    priority: 1
+    agents: { queue: "k8s" }
+    plugins:
+      - kubernetes:
+          podSpec:
+            containers:
+              - name: container-0
+                image: tensormesh/cacheblend:latest
+                imagePullPolicy: Always
+                resources:
+                  limits:
+                    nvidia.com/gpu: "2"
+                volumeMounts:
+                  - { name: hf-cache, mountPath: /root/.cache/huggingface }
+            volumes:
+              - { name: hf-cache, hostPath: { path: /data/huggingface, type: DirectoryOrCreate } }
+    artifact_paths:
+      - "build_*.log"

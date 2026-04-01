@@ -1,0 +1,318 @@
+# SPDX-License-Identifier: Apache-2.0
+
+"""
+Configuration for L2 adapters.
+
+Supports multiple adapter instances (including multiple instances of the same
+adapter type with different configs) via repeatable --l2-adapter <JSON>.
+Each JSON object must include "type" (adapter type name) and type-specific keys.
+"""
+
+# Future
+from __future__ import annotations
+
+# Standard
+from abc import ABC, abstractmethod
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, TypeVar
+import argparse
+import json
+
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.v1.distributed.config import EvictionConfig
+
+# First Party
+from lmcache.logging import init_logger
+
+logger = init_logger(__name__)
+
+T = TypeVar("T", bound="L2AdapterConfigBase")
+
+# -----------------------------------------------------------------------------
+# Registry: adapter type name -> config class
+# -----------------------------------------------------------------------------
+
+_L2_ADAPTER_CONFIG_REGISTRY: dict[str, type[L2AdapterConfigBase]] = {}
+
+
+def register_l2_adapter_type(
+    name: str,
+    config_cls: type[L2AdapterConfigBase],
+) -> None:
+    """
+    Register an L2 adapter config class under a type name.
+
+    The type name is used in JSON specs as the "type" field.
+    Each adapter config module should call this at import time.
+
+    Args:
+        name: Adapter type name (e.g. "fs", "mock").
+        config_cls: Config class that can parse from dict
+            via ``from_dict()``.
+    """
+    if name in _L2_ADAPTER_CONFIG_REGISTRY:
+        raise ValueError(f"L2 adapter type already registered: {name!r}")
+    _L2_ADAPTER_CONFIG_REGISTRY[name] = config_cls
+
+
+def get_registered_l2_adapter_types() -> list[str]:
+    """Return the list of registered adapter type names."""
+    return list(_L2_ADAPTER_CONFIG_REGISTRY)
+
+
+def get_type_name_for_config(
+    config: L2AdapterConfigBase,
+) -> str:
+    """
+    Reverse-lookup the registered type name for a config
+    instance.
+
+    Args:
+        config: An L2 adapter config instance.
+
+    Returns:
+        The registered type name (e.g., "mock", "fs").
+
+    Raises:
+        ValueError: If the config's class is not registered.
+    """
+    for name, cls in _L2_ADAPTER_CONFIG_REGISTRY.items():
+        if type(config) is cls:
+            return name
+    raise ValueError(f"Unregistered L2 adapter config type: {type(config).__name__}")
+
+
+# -----------------------------------------------------------------------------
+# Base config class for a single L2 adapter
+# -----------------------------------------------------------------------------
+
+
+class L2AdapterConfigBase(ABC):
+    """
+    Base class for per-adapter configs.
+
+    Each adapter type (e.g. disk, redis) defines a config class that:
+    - Subclasses this base.
+    - Implements from_dict() to parse a dict (from JSON) into an instance.
+    - Is registered via register_l2_adapter_type("type_name", ConfigClass).
+
+    An optional ``"eviction"`` key in the JSON dict enables per-adapter L2
+    eviction. When present it is parsed by ``_parse_eviction_config()`` and
+    stored on ``eviction_config``; the L2EvictionController is then created
+    for this adapter in the StorageManager.
+    """
+
+    #: Populated by ``_parse_eviction_config`` after ``from_dict``; ``None``
+    #: means L2 eviction is disabled for this adapter.
+    eviction_config: EvictionConfig | None = None
+
+    @staticmethod
+    def _parse_eviction_config(d: dict) -> EvictionConfig | None:
+        """
+        Parse an optional ``"eviction"`` sub-dict from an adapter JSON spec.
+
+        Expected format::
+
+            {
+                "type": "mock",
+                ...
+                "eviction": {
+                    "eviction_policy": "LRU",
+                    "trigger_watermark": 0.8,
+                    "eviction_ratio": 0.2
+                }
+            }
+
+        Returns ``None`` when the key is absent (eviction disabled).
+        """
+        eviction_dict = d.get("eviction")
+        if eviction_dict is None:
+            return None
+
+        # Lazy import to avoid circular dependency:
+        # l2_adapters/config.py <- config.py <- l2_adapters/config.py
+        # First Party
+        from lmcache.v1.distributed.config import EvictionConfig  # noqa: PLC0415
+
+        policy = eviction_dict.get("eviction_policy")
+        if policy not in ("LRU", "noop"):
+            raise ValueError(
+                f"eviction.eviction_policy must be 'LRU' or 'noop', got {policy!r}"
+            )
+        return EvictionConfig(
+            eviction_policy=policy,
+            trigger_watermark=float(eviction_dict.get("trigger_watermark", 0.8)),
+            eviction_ratio=float(eviction_dict.get("eviction_ratio", 0.2)),
+        )
+
+    @classmethod
+    @abstractmethod
+    def from_dict(cls: type[T], d: dict) -> T:
+        """
+        Build a config instance from a dict (e.g. from parsed JSON).
+
+        The dict will contain the "type" key used for dispatch; the concrete
+        class may ignore it. All other keys are type-specific.
+
+        Args:
+            d: Adapter spec dict (must include type-specific keys).
+
+        Returns:
+            An instance of the config class.
+
+        Raises:
+            ValueError: If required keys are missing or values are invalid.
+        """
+        ...
+
+    @classmethod
+    @abstractmethod
+    def help(cls) -> str:
+        """
+        Return a help string describing the config fields for this adapter type.
+
+        This is used in command-line help to explain the expected JSON format for
+        each adapter type.
+
+        Returns:
+            A help string describing the config fields for this adapter type.
+        """
+        ...
+
+
+# -----------------------------------------------------------------------------
+# Main config: list of adapter configs (order = adapter order)
+# -----------------------------------------------------------------------------
+
+
+@dataclass
+class L2AdaptersConfig:
+    """
+    Main config for L2 adapters.
+
+    Holds an ordered list of adapter configs. Each element corresponds to one
+    L2 adapter instance (e.g. two disk adapters with different paths appear
+    as two entries).
+    """
+
+    adapters: list[L2AdapterConfigBase]
+    """ Ordered list of adapter configs; one per L2 adapter instance. """
+
+
+# -----------------------------------------------------------------------------
+# Command-line: add args and parse to config
+# -----------------------------------------------------------------------------
+
+_L2_ADAPTER_ARG_DEST = "l2_adapter"
+
+
+def add_l2_adapters_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
+    """
+    Add L2 adapter configuration arguments to an existing parser.
+
+    Adds a repeatable --l2-adapter <JSON> argument. Each JSON object specifies
+    one adapter: it must include "type" (registered adapter type name) and
+    type-specific keys. Order of arguments is the order of adapters.
+
+    Args:
+        parser: The argument parser to add arguments to.
+
+    Returns:
+        The same parser with L2 adapter arguments added.
+
+    Example:
+        >>> parser = argparse.ArgumentParser()
+        >>> add_l2_adapters_args(parser)
+        >>> args = parser.parse_args(["--l2-adapter", '{"type":"disk","path":"/data"}'])
+        >>> config = parse_args_to_l2_adapters_config(args)
+    """
+    group = parser.add_argument_group(
+        "L2 Adapters",
+        "L2 adapter instances. Each --l2-adapter is a JSON object with 'type' and "
+        "type-specific keys. Repeat for multiple adapters.",
+    )
+    group.add_argument(
+        "--l2-adapter",
+        dest=_L2_ADAPTER_ARG_DEST,
+        action="append",
+        default=[],
+        type=str,
+        metavar="JSON",
+        help='Adapter spec as JSON with a "type" field and adapter-specific configs'
+        ', e.g. \'{"type":"disk","path":"/data"}\'.'
+        "Repeat for multiple adapters."
+        "Supported adapters are: ["
+        + ", ".join(sorted(get_registered_l2_adapter_types()))
+        + "].",
+    )
+    return parser
+
+
+def parse_args_to_l2_adapters_config(args: argparse.Namespace) -> L2AdaptersConfig:
+    """
+    Build L2AdaptersConfig from parsed command-line arguments.
+
+    Expects args to have the attribute added by add_l2_adapters_args (a list
+    of JSON strings). Each string is parsed; the "type" field selects the
+    config class from the registry, and from_dict() builds the config instance.
+
+    Args:
+        args: Parsed arguments (e.g. from parser.parse_args()).
+
+    Returns:
+        L2AdaptersConfig with one entry per --l2-adapter argument.
+
+    Raises:
+        KeyError: If an adapter "type" is not registered.
+        ValueError: If JSON is invalid or a config class raises from_dict().
+    """
+    raw_list = getattr(args, _L2_ADAPTER_ARG_DEST, None)
+    if raw_list is None:
+        raw_list = []
+
+    adapter_configs: list[L2AdapterConfigBase] = []
+    for i, raw in enumerate(raw_list):
+        try:
+            d = json.loads(raw)
+        except json.JSONDecodeError as e:
+            raise ValueError(f"Invalid JSON for --l2-adapter #{i + 1}: {e}") from e
+
+        if not isinstance(d, dict):
+            raise ValueError(
+                f"--l2-adapter #{i + 1}: expected a JSON object, got {type(d).__name__}"
+            )
+
+        type_name = d.get("type")
+        if type_name is None:
+            raise ValueError(f"--l2-adapter #{i + 1}: missing 'type' field")
+        if type_name not in _L2_ADAPTER_CONFIG_REGISTRY:
+            known = ", ".join(sorted(_L2_ADAPTER_CONFIG_REGISTRY)) or "(none)"
+            raise ValueError(
+                f"--l2-adapter #{i + 1}: unknown adapter type "
+                f"{type_name!r}. Known: {known}"
+            )
+
+        config_cls = _L2_ADAPTER_CONFIG_REGISTRY[type_name]
+        try:
+            adapter_cfg = config_cls.from_dict(d)
+            adapter_cfg.eviction_config = L2AdapterConfigBase._parse_eviction_config(d)
+            adapter_configs.append(adapter_cfg)
+        except (TypeError, ValueError) as e:
+            logger.error(
+                "Error parsing --l2-adapter #%d (type %r): %s",
+                i + 1,
+                type_name,
+                e,
+            )
+            logger.error(
+                "Adapter config help for %s adapter:\n"
+                "---------------------\n"
+                "%s\n"
+                "---------------------\n\n",
+                type_name,
+                config_cls.help(),
+            )
+            raise ValueError(f"--l2-adapter #{i + 1} ({type_name!r}): {e}") from e
+
+    return L2AdaptersConfig(adapters=adapter_configs)

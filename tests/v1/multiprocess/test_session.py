@@ -2,6 +2,7 @@
 """Tests for Session and SessionManager."""
 
 # Standard
+import threading
 import time
 
 # Third Party
@@ -140,3 +141,77 @@ class TestSessionManager:
         session_manager.get_or_create("req-1")
         removed = session_manager.cleanup_expired()
         assert removed == 0
+
+
+class TestSessionThreadSafety:
+    """Verify Session is safe under concurrent access
+    from multiple TP worker threads."""
+
+    def test_concurrent_get_hashes(self, hasher: TokenHasher) -> None:
+        """Multiple threads calling get_hashes on the same Session
+        must produce correct hashes (no duplicates, no corruption).
+        """
+        session = Session(request_id="req-mt", hasher=hasher)
+        tokens = list(range(20))  # 5 chunks of 4
+        session.set_tokens(tokens)
+
+        # Reference hashes computed single-threaded
+        expected = hasher.compute_chunk_hashes(tokens)
+        errors: list[str] = []
+        barrier = threading.Barrier(8)
+
+        def worker(tid: int) -> None:
+            try:
+                barrier.wait(timeout=5)
+                hashes = session.get_hashes(0, 20)
+                if hashes != expected:
+                    errors.append(
+                        "Thread %d: got %r, expected %r" % (tid, hashes, expected)
+                    )
+            except Exception as exc:
+                errors.append("Thread %d: %s" % (tid, exc))
+
+        threads = [threading.Thread(target=worker, args=(i,)) for i in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=10)
+
+        assert not errors, "\n".join(errors)
+        assert session.num_chunks_processed == 5
+
+    def test_concurrent_set_and_get(self, hasher: TokenHasher) -> None:
+        """set_tokens and get_hashes called concurrently must not
+        corrupt internal state."""
+        session = Session(request_id="req-mt2", hasher=hasher)
+        tokens = list(range(8))  # 2 chunks
+        session.set_tokens(tokens)
+        expected = hasher.compute_chunk_hashes(tokens)
+        errors: list[str] = []
+        barrier = threading.Barrier(4)
+
+        def reader(tid: int) -> None:
+            try:
+                barrier.wait(timeout=5)
+                hashes = session.get_hashes(0, 8)
+                if hashes != expected:
+                    errors.append("Reader %d: mismatch" % tid)
+            except Exception as exc:
+                errors.append("Reader %d: %s" % (tid, exc))
+
+        def writer() -> None:
+            try:
+                barrier.wait(timeout=5)
+                # Re-set same tokens (idempotent)
+                session.set_tokens(tokens)
+            except Exception as exc:
+                errors.append("Writer: %s" % exc)
+
+        threads = [threading.Thread(target=reader, args=(i,)) for i in range(3)]
+        threads.append(threading.Thread(target=writer))
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=10)
+
+        assert not errors, "\n".join(errors)

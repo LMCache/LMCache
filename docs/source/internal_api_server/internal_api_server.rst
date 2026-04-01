@@ -1,12 +1,25 @@
 .. _internal_api_server:
 
-Configuring the Internal API Server
-====================================
+Internal API Server
+===================
 
-The ``internal_api_server`` provides APIs for managing the LMCache engine. Below are the configuration options and usage examples.
+The ``internal_api_server`` provides HTTP APIs for managing and inspecting
+the LMCache engine at runtime. APIs are organized into three categories:
 
-Configuration Parameters
-------------------------
+- **Common APIs** — Available across all components (scheduler, worker, controller).
+- **vLLM / Inference APIs** — Specific to vLLM inference workers.
+- **Controller APIs** — Specific to the LMCache Controller.
+
+.. toctree::
+   :maxdepth: 2
+
+   common_apis
+   vllm_apis
+   controller_apis
+
+
+Configuration
+-------------
 
 The following parameters can be configured in the YAML file:
 
@@ -28,113 +41,40 @@ The following parameters can be configured in the YAML file:
     #   /tmp/lmcache_internal_api_server/socket_6999 (scheduler)
     #   /tmp/lmcache_internal_api_server/socket_7000 (worker 0)
 
-.. _testing_internal_api_server:
 
-Testing the Server
----------------------------------------
+Port Assignment
+^^^^^^^^^^^^^^^
 
-You can test the server by querying the relevant endpoints.
+The port for each component is computed as:
 
-`/metrics` endpoint for metrics:
+.. code-block:: text
 
-.. code-block:: bash
+    actual_port = internal_api_server_port_start + port_offset
 
-    curl http://localhost:7000/metrics
+Where ``port_offset`` is:
 
-`/conf` endpoint for configuration:
+- ``0`` for the Scheduler
+- ``1 + worker_id`` for Workers (e.g., Worker 0 → offset 1, Worker 1 → offset 2)
 
-.. code-block:: bash
 
-    # Get current configuration
-    curl http://localhost:7000/conf
+API Category & Route Discovery
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-    # Update one or more config values (Experimental)
-    curl -X POST http://localhost:7000/conf \
-      -H "Content-Type: application/json" \
-      -d '{"min_retrieve_tokens": 512, "save_decode_cache": true}'
+The server uses ``APIRegistry`` to automatically discover and register
+API endpoint modules. Any file named ``*_api.py`` under
+``lmcache/v1/internal_api_server/{common,vllm,controller}/`` that
+exports a ``router = APIRouter()`` will be automatically included.
 
-.. warning::
 
-    The ``POST /conf`` feature is currently **experimental**. At present,
-    all configuration keys are mutable at runtime by default (unless
-    explicitly marked as ``"mutable": False`` in
-    ``_CONFIG_DEFINITIONS``). Once the feature is stabilized, the default
-    will be changed to **immutable**.
+Extending the Server
+^^^^^^^^^^^^^^^^^^^^^
 
-    Note that updating a configuration only modifies the value in the
-    ``LMCacheEngineConfig`` object. If a component has already read and
-    cached the value elsewhere (e.g., stored in a local variable or
-    another object during initialization), the change will **not** take
-    effect for that component.
+To add a new API endpoint:
 
-The request body should be a JSON object with config name-value pairs.
-Type conversion is handled automatically (e.g., string ``"512"`` will
-be converted to integer ``512`` based on the config definition).
+1. Create a new file in the appropriate category directory
+   (``common/``, ``vllm/``, or ``controller/``).
+2. Name the file with ``_api.py`` suffix (e.g., ``my_feature_api.py``).
+3. Define ``router = APIRouter()`` and add your endpoints.
 
-The response contains an ``updated`` field with successfully applied
-values, and an ``errors`` field if any keys failed:
-
-.. code-block:: json
-
-    {
-      "updated": {"min_retrieve_tokens": 512, "save_decode_cache": true},
-      "errors": {"unknown_key": "Unknown config"}
-    }
-
-`/meta` endpoint for metadata:
-
-.. code-block:: bash
-
-    curl http://localhost:7000/meta
-
-`/threads` endpoint for threads:
-
-.. code-block:: bash
-
-    curl http://localhost:7000/threads
-
-`/loglevel` endpoint for log level:
-
-.. code-block:: bash
-
-    # Get all loggers info
-    curl http://localhost:7000/loglevel
-    # Get specified logger level
-    curl http://localhost:7000/loglevel?logger_name=lmcache.v1.cache_engine
-    # Set specified logger level
-    curl http://localhost:7000/loglevel?logger_name=lmcache.v1.cache_engine&level=DEBUG
-
-`/run_script` endpoint for running script:
-
-.. code-block:: bash
-
-    curl -X POST http://localhost:7000/run_script \
-      -F "script=@/Users/msy/scratch.py"
-
-    {'is_first_rank': True, 'model_version': (27, 1, 64, 1, 576), 'LocalCPUBackend.use_hot': False}
-
-`scratch.py`:
-
-.. code-block:: python
-    
-    # Get cache_engine from app.state
-    lmcache_engine = app.state.lmcache_adapter.lmcache_engine
-
-    # Print the worker ID and model name
-    print(f"Worker ID: {lmcache_engine.metadata.worker_id}")
-    print(f"Model name: {lmcache_engine.metadata.model_name}")
-
-    # Set LocalCPUBackend.use_hot to False or True
-    lmcache_engine.storage_manager.storage_backends["LocalCPUBackend"].use_hot = False
-    # return the output contents
-    result = {
-        "is_first_rank": lmcache_engine.metadata.is_first_rank(),
-        "model_version": lmcache_engine.metadata.kv_shape,
-        "LocalCPUBackend.use_hot": lmcache_engine.storage_manager.storage_backends["LocalCPUBackend"].use_hot
-    }
-
-How to extend the Internal API Server
-=======================================
-
-You can extend the ``internal_api_server`` by adding new endpoint files to the `lmcache/v1/internal_api_server/` directory.
-Ensure your new file name ends with `_api.py`. Additionally, you need to define a `router = APIRouter()` in your file and add your endpoints to it.
+The endpoint will be automatically discovered and registered on the
+next server startup.

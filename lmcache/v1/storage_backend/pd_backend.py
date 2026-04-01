@@ -211,7 +211,7 @@ class PDBackend(AllocatorBackendInterface):
         else:
             raise ValueError("Invalid PD role.")
 
-        self.full_chunk_size = config.chunk_size
+        self.full_chunk_size_bytes = config.chunk_size
 
     def __str__(self):
         return self.__class__.__name__
@@ -358,7 +358,7 @@ class PDBackend(AllocatorBackendInterface):
         Let's say there are N memory objects in total.
         We have the following assumptions:
         - The first N-1 memory objects are full chunks, each with
-        `full_chunk_size` tokens.
+        `full_chunk_size_bytes` tokens.
         - The last memory object can be a partial chunk, which has
         `last_chunk_toks` tokens.
         """
@@ -505,7 +505,7 @@ class PDBackend(AllocatorBackendInterface):
                 token_dim = fmt.token_dim()
                 shape[token_dim] = num_alloc_tokens
             else:
-                num_alloc_tokens = self.full_chunk_size
+                num_alloc_tokens = self.full_chunk_size_bytes
 
             mem_obj = self.allocate(torch.Size(shape), dtype, fmt)
 

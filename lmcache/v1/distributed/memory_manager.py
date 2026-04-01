@@ -1,13 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 
-# Third Party
-import torch
-
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.distributed.api import MemoryLayoutDesc
 from lmcache.v1.distributed.config import L1MemoryManagerConfig
 from lmcache.v1.distributed.error import L1Error
+from lmcache.v1.distributed.internal_api import L1MemoryDesc
 from lmcache.v1.lazy_memory_allocator import LazyMemoryAllocator
 from lmcache.v1.memory_management import (
     MemoryAllocatorInterface,
@@ -30,15 +28,26 @@ def create_memory_allocator(config: L1MemoryManagerConfig) -> MemoryAllocatorInt
         MemoryAllocatorInterface: An instance of a memory allocator.
     """
     if config.use_lazy:
+        logger.debug(
+            "use lazy memory allocator, init size is %d bytes, "
+            "final size is %d bytes, align bytes is %d bytes",
+            config.init_size_in_bytes,
+            config.size_in_bytes,
+            config.align_bytes,
+        )
         return LazyMemoryAllocator(
             config.init_size_in_bytes, config.size_in_bytes, config.align_bytes
         )
     else:
-        logger.warning(
-            "MixedMemoryAllocator does not support explicit alignment configuration."
+        logger.debug(
+            "use mixed memory allocator, total size is %d bytes, "
+            "align bytes is %d bytes",
+            config.size_in_bytes,
+            config.align_bytes,
         )
         return MixedMemoryAllocator(
             config.size_in_bytes,
+            align_bytes=config.align_bytes,
         )
 
 
@@ -54,6 +63,8 @@ class L1MemoryManager:
 
     def __init__(self, config: L1MemoryManagerConfig):
         self._allocator = create_memory_allocator(config)
+        self._size_in_bytes = config.size_in_bytes
+        self._align_bytes = config.align_bytes
 
     def allocate(
         self, layout_desc: MemoryLayoutDesc, count: int
@@ -97,27 +108,6 @@ class L1MemoryManager:
         self._allocator.batched_free(mem_objs)
         return L1Error.SUCCESS
 
-    def get_vm_space(self) -> torch.Tensor:
-        """
-        Used by RDMA communication to get the underlying virtual memory space.
-
-        Returns:
-            the underlying virtual memory space as a torch.Tensor.
-
-        Raises:
-            NotImplementedError: If the allocator type does not support this operation.
-        """
-        if isinstance(self._allocator, MixedMemoryAllocator):
-            return self._allocator.buffer
-        elif isinstance(self._allocator, LazyMemoryAllocator):
-            # TODO(ApostaC): need to test if the RDMA registration works
-            # before the lazy expansion is finished
-            return self._allocator.get_underlying_buffer()
-        else:
-            raise NotImplementedError(
-                "get_vm_space is not implemented for this allocator type."
-            )
-
     def get_memory_usage(self) -> tuple[int, int]:
         """
         Get the current memory usage. This function will mainly be used to support
@@ -152,6 +142,32 @@ class L1MemoryManager:
         used_size = total_size - free_size
         return used_size, total_size
 
+    def get_l1_memory_desc(self) -> L1MemoryDesc:
+        """
+        Return an L1MemoryDesc describing the underlying memory buffer.
+
+        Returns:
+            L1MemoryDesc: Pointer, size, and alignment of the L1 buffer.
+
+        Raises:
+            NotImplementedError: If the allocator type does not support this operation.
+        """
+        if isinstance(self._allocator, MixedMemoryAllocator):
+            buffer = self._allocator.buffer
+        elif isinstance(self._allocator, LazyMemoryAllocator):
+            # TODO(ApostaC): need to test if the RDMA registration works
+            # before the lazy expansion is finished
+            buffer = self._allocator.get_underlying_buffer()
+        else:
+            raise NotImplementedError(
+                "get_l1_memory_desc is not implemented for this allocator type."
+            )
+        return L1MemoryDesc(
+            ptr=buffer.data_ptr(),
+            size=self._size_in_bytes,
+            align_bytes=self._align_bytes,
+        )
+
     def close(self) -> None:
         """
         Close the memory manager and release all resources.
@@ -160,4 +176,4 @@ class L1MemoryManager:
 
     # Debugging APIs
     def memcheck(self):
-        self._allocator.memcheck()
+        return self._allocator.memcheck()

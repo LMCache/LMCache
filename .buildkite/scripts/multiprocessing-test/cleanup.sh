@@ -39,6 +39,10 @@ cleanup_container "$LMCACHE_CONTAINER_NAME"
 
 echo "=== Cleanup complete ==="
 
+# Wait for GPU memory to be fully released
+echo "Waiting 5 seconds for GPU memory to be released..."
+sleep 5
+
 # List any remaining test containers (for debugging)
 remaining=$(docker ps -a --format '{{.Names}}' | grep -E "(lmcache|vllm).*-(mp|baseline)-test" || true)
 if [ -n "$remaining" ]; then

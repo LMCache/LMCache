@@ -7,12 +7,17 @@ This module defines the protocol for:
 - UNREGISTER_KV_CACHE: Unregister a KV cache instance
 - STORE: Store KV cache blocks to the server
 - RETRIEVE: Retrieve KV cache blocks from the server
-- LOOKUP: Check if keys exist in the cache
+- LOOKUP: Submit a prefix lookup and return a prefetch job ID
+- QUERY_PREFETCH_STATUS: Poll a prefetch job for its result
 - END_SESSION: End a session and clean up associated resources
 """
 
 # First Party
-from lmcache.v1.multiprocess.custom_types import IPCCacheEngineKey, KVCache
+from lmcache.v1.gpu_connector.utils import LayoutHints
+from lmcache.v1.multiprocess.custom_types import (
+    IPCCacheEngineKey,
+    KVCache,
+)
 from lmcache.v1.multiprocess.protocols.base import HandlerType, ProtocolDefinition
 
 # Define request names for this protocol group
@@ -22,6 +27,9 @@ REQUEST_NAMES = [
     "STORE",
     "RETRIEVE",
     "LOOKUP",
+    "QUERY_PREFETCH_STATUS",
+    "QUERY_PREFETCH_LOOKUP_HITS",
+    "FREE_LOOKUP_LOCKS",
     "END_SESSION",
 ]
 
@@ -41,9 +49,12 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
         # Payload:
         #   - instance_id: int - Unique identifier for the vLLM instance
         #   - kv_cache: KVCache - The KV cache configuration
+        #   - model_name: str - Name of the model associated with the engine
+        #   - world_size: int - World size of the engine
+        #   - layout_hints: LayoutHints - See custom_types.LayoutHints.
         # Returns: None
         "REGISTER_KV_CACHE": ProtocolDefinition(
-            payload_classes=[int, KVCache],
+            payload_classes=[int, KVCache, str, int, LayoutHints],
             response_class=None,
             handler_type=HandlerType.SYNC,
         ),
@@ -58,35 +69,69 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
         ),
         # Store KV cache blocks
         # Payload:
-        #   - keys: list[KeyType] - Cache keys to store
+        #   - key: KeyType - Cache key to store
         #   - instance_id: int - Unique identifier for the vLLM instance
         #   - gpu_block_ids: list[int] - GPU block IDs containing the data
         #   - event_ipc_handle: bytes - CUDA event IPC handle for synchronization
         # Returns: tuple[bytes, bool] - (CUDA event handle, success flag)
         "STORE": ProtocolDefinition(
-            payload_classes=[list[KeyType], int, list[int], bytes],
+            payload_classes=[KeyType, int, list[int], bytes],
             response_class=tuple[bytes, bool],
             handler_type=HandlerType.BLOCKING,
         ),
         # Retrieve KV cache blocks
         # Payload:
-        #   - keys: list[KeyType] - Cache keys to retrieve
+        #   - key: KeyType - Cache key to retrieve
         #   - instance_id: int - Unique identifier for the vLLM instance
         #   - gpu_block_ids: list[int] - GPU block IDs to store retrieved data
         #   - event_ipc_handle: bytes - CUDA event IPC handle for synchronization
-        # Returns: tuple[bytes, list[bool]] - (CUDA event handle, list of success flags)
+        #   - skip_first_n_tokens: int - Number of tokens to skip writing at the
+        #     start of the retrieve range (to avoid overwriting APC-shared blocks)
+        # Returns: tuple[bytes, bool] - (CUDA event handle, success flag)
         "RETRIEVE": ProtocolDefinition(
-            payload_classes=[list[KeyType], int, list[int], bytes],
-            response_class=tuple[bytes, list[bool]],
+            payload_classes=[KeyType, int, list[int], bytes, int],
+            response_class=tuple[bytes, bool],
             handler_type=HandlerType.BLOCKING,
         ),
-        # Lookup keys in cache
+        # Submit a prefix lookup and return a prefetch job ID
         # Payload:
-        #   - keys: list[KeyType] - Cache keys to look up
-        # Returns: int - Number of keys found in cache
+        #   - key: KeyType - Cache key to look up
+        #   - tp_size: int - Tensor-parallel size for
+        #       MLA multi-reader locking
+        # Returns: int - Prefetch job ID for polling via QUERY_PREFETCH_STATUS
         "LOOKUP": ProtocolDefinition(
-            payload_classes=[list[KeyType]],
+            payload_classes=[KeyType, int],
             response_class=int,
+            handler_type=HandlerType.BLOCKING,
+        ),
+        # Query the lookup hit chunks before the prefetch is done
+        # Payload:
+        #   - prefetch_job_id: int - Job ID returned by LOOKUP
+        # Returns: int | None - Chunk count if lookup is done, None if still in progress
+        "QUERY_PREFETCH_LOOKUP_HITS": ProtocolDefinition(
+            payload_classes=[int],
+            response_class=int | None,
+            handler_type=HandlerType.BLOCKING,
+        ),
+        # Query the status of a prefetch job
+        # Payload:
+        #   - prefetch_job_id: int - Job ID returned by LOOKUP
+        # Returns: int | None - Chunk count when done, None if still in progress
+        "QUERY_PREFETCH_STATUS": ProtocolDefinition(
+            payload_classes=[int],
+            response_class=int | None,
+            handler_type=HandlerType.BLOCKING,
+        ),
+        # Free locks (release read locks without a full RETRIEVE)
+        # Payload:
+        #   - key: KeyType - Cache key whose read locks
+        #       to release
+        #   - tp_size: int - Tensor-parallel size for
+        #       MLA multi-reader locking
+        # Returns: None
+        "FREE_LOOKUP_LOCKS": ProtocolDefinition(
+            payload_classes=[KeyType, int],
+            response_class=None,
             handler_type=HandlerType.BLOCKING,
         ),
         # End session

@@ -180,6 +180,11 @@ class LMCacheEngine:
         # at decoder.
         self.remove_after_retrieve = config.enable_pd and config.pd_role == "receiver"
 
+        # asymmetric store/retrieve location can be specified
+        # this is typically used (but not limited) in PD system
+        self.store_location = config.store_location
+        self.retrieve_locations = config.retrieve_locations
+
         self.num_layers = metadata.kv_shape[0]
         self.fmt = None
         if self.use_layerwise:
@@ -206,11 +211,6 @@ class LMCacheEngine:
         PinMonitor.GetOrCreate(config)
 
         self.post_inited = False
-
-        # Whether to force store to wait if no CPU buffer is available
-        self.force_store_wait = config.extra_config and config.extra_config.get(
-            "force_store_wait", False
-        )
 
         # Flag to control KVCache Check logging (can be toggled via API)
         self.kvcache_check_log_enabled = False
@@ -256,6 +256,10 @@ class LMCacheEngine:
         if self._health_monitor is not None:
             return self._health_monitor.is_healthy()
         return True
+
+    def _get_req_id(self, kwargs: dict) -> str:
+        """Extracts request ID from kwargs for logging."""
+        return kwargs.get("req_id", "unspecified")
 
     def mark_init_failed(self, reason: str = "") -> None:
         """
@@ -330,6 +334,30 @@ class LMCacheEngine:
             return self.storage_manager.is_frozen()
         return False
 
+    def set_hot_cache(self, enabled: bool) -> None:
+        """
+        Dynamically enable or disable the LocalCPUBackend hot cache.
+
+        When disabled, the existing hot cache entries will be cleared
+        and no new data will be written to the hot cache.
+
+        Args:
+            enabled (bool): Whether to enable hot cache
+        """
+        if self.storage_manager is not None:
+            self.storage_manager.set_hot_cache(enabled)
+
+    def is_hot_cache_enabled(self) -> bool:
+        """
+        Get the current hot cache status of LocalCPUBackend.
+
+        Returns:
+            bool: True if hot cache is enabled, False otherwise
+        """
+        if self.storage_manager is not None:
+            return self.storage_manager.is_hot_cache_enabled()
+        return False
+
     @_lmcache_nvtx_annotate
     @torch.inference_mode()
     def store(
@@ -373,6 +401,9 @@ class LMCacheEngine:
             return
 
         assert self.storage_manager is not None
+
+        # Get req_id for logging
+        req_id = self._get_req_id(kwargs)
 
         # Initialize num_to_store_tokens to avoid reference before assignment
         num_to_store_tokens = 0
@@ -443,7 +474,9 @@ class LMCacheEngine:
                 memory_obj = self.storage_manager.allocate(
                     kv_shapes,
                     kv_dtypes,
-                    busy_loop=self.force_store_wait,
+                    busy_loop=self.config.get_extra_config_value(
+                        "force_store_wait", False
+                    ),
                     fmt=self.fmt,
                 )
                 if memory_obj is None:
@@ -504,7 +537,10 @@ class LMCacheEngine:
             # TODO: we implicitly rely on batched_put to call ref_count_down
             # this management should be done in a cleaner way
             self.storage_manager.batched_put(
-                keys, memory_objs, transfer_spec=transfer_spec
+                keys,
+                memory_objs,
+                transfer_spec=transfer_spec,
+                location=self.store_location,
             )
 
         self.stats_monitor.on_store_finished(
@@ -514,8 +550,10 @@ class LMCacheEngine:
         tot_time = store_stats.time_to_store()
 
         logger.info(
-            "Stored %d out of total %d tokens. size: %.4f GB, cost %.4f ms, "
-            "throughput: %.4f GB/s; offload_time: %.4f ms, put_time: %.4f ms",
+            "[req_id=%s] Stored %d out of total %d tokens. "
+            "size: %.4f GB, cost %.4f ms, throughput: %.4f GB/s; "
+            "offload_time: %.4f ms, put_time: %.4f ms",
+            req_id,
             tot_token_num,
             num_to_store_tokens,
             tot_kv_size / 1024**3,
@@ -563,6 +601,9 @@ class LMCacheEngine:
             "gpu_connector is required for store_layer operation"
         )
 
+        # Get req_id for logging
+        req_id = self._get_req_id(kwargs)
+
         if mask is not None:
             num_to_store_tokens = torch.sum(mask).item()
         else:
@@ -607,7 +648,9 @@ class LMCacheEngine:
 
             keys_multi_layer = key.split_layers(self.num_layers)
             # Only check the first layer
-            if self.storage_manager.contains(keys_multi_layer[0]):
+            if self.storage_manager.contains(
+                keys_multi_layer[0], self.retrieve_locations
+            ):
                 continue
 
             # Allocate the memory object
@@ -619,7 +662,7 @@ class LMCacheEngine:
                 kv_dtype,
                 batch_size=self.num_layers,
                 fmt=self.fmt,
-                busy_loop=self.force_store_wait,
+                busy_loop=self.config.get_extra_config_value("force_store_wait", False),
             )
 
             if memory_objs_multi_layer is None:
@@ -682,12 +725,15 @@ class LMCacheEngine:
             for layer_id in range(self.num_layers):
                 yield
                 next(mem_obj_generator)
-                self.storage_manager.batched_put(keys[layer_id], memory_objs[layer_id])
+                self.storage_manager.batched_put(
+                    keys[layer_id], memory_objs[layer_id], location=self.store_location
+                )
 
             tot_time = time.perf_counter() - t_start
             logger.info(
-                "Stored %d out of total %d tokens. "
+                "[req_id=%s] Stored %d out of total %d tokens. "
                 "size: %.4f GB, cost %.4f ms, throughput: %.4f GB/s",
+                req_id,
                 tot_token_num,
                 len(tokens),
                 tot_kv_size / 1024**3,
@@ -740,6 +786,9 @@ class LMCacheEngine:
         assert self.gpu_connector is not None, (
             "gpu_connector is required for retrieve operation"
         )
+
+        # Get req_id for logging
+        req_id = self._get_req_id(kwargs)
 
         tot_kv_size = 0
 
@@ -811,8 +860,9 @@ class LMCacheEngine:
         for key, memory_obj, _, _ in reordered_chunks:
             if self.remove_after_retrieve and not self._is_passive():
                 assert self.storage_manager is not None
-                self.storage_manager.remove(key)
-            memory_obj.ref_count_down()
+                self.storage_manager.remove(key, self.retrieve_locations)
+            if not self.async_loading:
+                memory_obj.ref_count_down()
 
         retrieved_tokens = torch.sum(ret_mask)
         self.stats_monitor.on_retrieve_finished(
@@ -834,9 +884,10 @@ class LMCacheEngine:
         # retrieved: 256 tokens
         if not self._is_passive():
             logger.info(
-                "Retrieved %d out of %d required tokens (from %d total tokens)."
-                " size: %.4f gb,"
-                " cost %.4f ms, throughput: %.4f GB/s;",
+                "[req_id=%s] Retrieved %d out of %d required tokens "
+                "(from %d total tokens). size: %.4f gb, "
+                "cost %.4f ms, throughput: %.4f GB/s;",
+                req_id,
                 retrieved_tokens,
                 num_required_tokens,
                 len(tokens),
@@ -887,6 +938,9 @@ class LMCacheEngine:
             "gpu_connector is required for retrieve_layer operation"
         )
 
+        # Get req_id for logging
+        req_id = self._get_req_id(kwargs)
+
         if mask is not None:
             num_required_tokens = torch.sum(mask).item()
         else:
@@ -914,7 +968,9 @@ class LMCacheEngine:
             keys_multi_layer = key.split_layers(self.num_layers)
 
             # NOTE: Only check the first layer
-            if current_location := self.storage_manager.contains(keys_multi_layer[0]):
+            if current_location := self.storage_manager.contains(
+                keys_multi_layer[0], self.retrieve_locations
+            ):
                 if location is None:
                     location = current_location
                 else:
@@ -977,13 +1033,23 @@ class LMCacheEngine:
         # synchronize the last layer
         next(mem_obj_consumer)
 
+        # Unpin any disk-loaded staging objects now that the device-side sync
+        # has been enqueued (mem_obj_consumer advanced past its sync point).
+        # Without this, pin_count stays at 1 forever and the CPU staging pool
+        # fills up, causing the next retrieve to deadlock inside allocate().
+        for mem_obj in to_count_down:
+            if mem_obj.is_pinned:
+                mem_obj.unpin()
+
         retrieved_tokens = torch.sum(ret_mask)
         self.stats_monitor.on_retrieve_finished(monitor_req_id, retrieved_tokens)
         if not self._is_passive():
             logger.info(
-                f"Retrieved {retrieved_tokens} "
-                f"out of {num_required_tokens} "
-                f"out of total {len(tokens)} tokens"
+                "[req_id=%s] Retrieved %d out of %d out of total %d tokens",
+                req_id,
+                retrieved_tokens,
+                num_required_tokens,
+                len(tokens),
             )
 
         yield ret_mask
@@ -1037,6 +1103,9 @@ class LMCacheEngine:
             assert offsets is not None
             assert hashes is not None
             lookup_stats = self.stats_monitor.on_lookup_request(sum(offsets))
+
+        if search_range is None:
+            search_range = self.retrieve_locations
 
         res = 0
         try:
@@ -1199,6 +1268,9 @@ class LMCacheEngine:
         keys: list[CacheEngineKey] = []
         cum_chunk_lengths = [0]
 
+        if search_range is None:
+            search_range = self.retrieve_locations
+
         # TODO(Jiayi): make token database able to return list.
         for start, end, key in self.token_database.process_tokens(
             tokens=tokens,
@@ -1242,9 +1314,10 @@ class LMCacheEngine:
             memory_objs_flat = [mm for m in memory_objs for mm in m]
 
             # Release each memory object
-            for memory_obj in memory_objs_flat:
+            for key, memory_obj in memory_objs_flat:
                 try:
                     logger.debug("Releasing memory object for lookup_id=%s", lookup_id)
+                    memory_obj.unpin()
                     memory_obj.ref_count_down()
                 except Exception as e:
                     logger.error(f"Error releasing memory object: {e}")
@@ -1381,6 +1454,13 @@ class LMCacheEngine:
             for location, keys in self.lookup_pins.pop(lookup_id).items():
                 self.storage_manager.batched_unpin(keys, [location])
 
+        elif (
+            self.async_loading is not None
+            and self.event_manager.get_event_status(EventType.LOADING, lookup_id)
+            != EventStatus.NOT_FOUND
+        ):
+            self.cleanup_memory_objs(lookup_id)
+
     @_lmcache_nvtx_annotate
     def clear(
         self,
@@ -1483,8 +1563,9 @@ class LMCacheEngine:
 
         tot_kv_size = 0
         chunks: List[ProcessedChunk] = []
-        future = self.event_manager.pop_event(EventType.LOADING, kwargs["req_id"])
-
+        future = self.event_manager.get_event_future(
+            EventType.LOADING, kwargs["req_id"]
+        )
         # As mentioned in async_lookup_and_prefetch(), the future.result()
         # is key data pair for each chunk in each tier. So extract the key
         # and memory object pairs to memory_obj_map
@@ -1871,7 +1952,11 @@ class LMCacheEngineBuilder:
             numa_mapping = NUMADetector.get_numa_mapping(config)
             logger.info(f"NUMA mapping for instance {instance_id}: {numa_mapping}")
             token_database = cls._Create_token_database(config, metadata)
-            stat_logger = LMCacheStatsLogger(metadata, log_interval=10)
+            stat_logger = LMCacheStatsLogger(
+                metadata,
+                log_interval=10,
+                config=config,
+            )
 
             engine = LMCacheEngine(
                 config,

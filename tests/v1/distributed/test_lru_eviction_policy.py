@@ -105,17 +105,17 @@ class TestLRUEvictionPolicyOrdering:
     def test_touch_moves_key_to_most_recent(self):
         """Touching a key should move it to the most recently used position."""
         policy = LRUEvictionPolicy()
-        # Create keys in order: 1, 2, 3
+        # Create keys in order: 1, 2, 3, evict order is 3, 2, 1
         policy.on_keys_created([make_key(1), make_key(2), make_key(3)])
 
-        # Touch key 1 - should move it to most recent
-        policy.on_keys_touched([make_key(1)])
+        # Touch key 3 - should move it to most recent
+        policy.on_keys_touched([make_key(3)])
 
-        # Now order should be: 2, 3, 1
+        # Now order should be: 2, 1, 3
         candidates = policy.get_eviction_candidates(3)
         assert ObjectKey.Bytes2IntHash(candidates[0].chunk_hash) == 2
-        assert ObjectKey.Bytes2IntHash(candidates[1].chunk_hash) == 3
-        assert ObjectKey.Bytes2IntHash(candidates[2].chunk_hash) == 1
+        assert ObjectKey.Bytes2IntHash(candidates[1].chunk_hash) == 1
+        assert ObjectKey.Bytes2IntHash(candidates[2].chunk_hash) == 3
 
     def test_touch_nonexistent_key_is_safe(self):
         """Touching a nonexistent key should not raise an error."""
@@ -127,15 +127,17 @@ class TestLRUEvictionPolicyOrdering:
     def test_create_existing_key_moves_to_most_recent(self):
         """Creating an existing key should move it to most recent position."""
         policy = LRUEvictionPolicy()
+        # Create keys in order: 1, 2, 3, evict order is 3, 2, 1
         policy.on_keys_created([make_key(1), make_key(2), make_key(3)])
 
-        # Create key 1 again - should move to end
-        policy.on_keys_created([make_key(1)])
+        # Create key 3 again - should move to end
+        policy.on_keys_created([make_key(3)])
 
+        # Now order should be: 2, 1, 3
         candidates = policy.get_eviction_candidates(3)
         assert ObjectKey.Bytes2IntHash(candidates[0].chunk_hash) == 2
-        assert ObjectKey.Bytes2IntHash(candidates[1].chunk_hash) == 3
-        assert ObjectKey.Bytes2IntHash(candidates[2].chunk_hash) == 1
+        assert ObjectKey.Bytes2IntHash(candidates[1].chunk_hash) == 1
+        assert ObjectKey.Bytes2IntHash(candidates[2].chunk_hash) == 3
 
 
 # =============================================================================
@@ -233,10 +235,11 @@ class TestLRUEvictionPolicyCandidates:
     def test_get_candidates_returns_lru_order(self):
         """Candidates should be returned in LRU order."""
         policy = LRUEvictionPolicy()
+        # Create keys in order: 1, 2, 3, evict order is 3, 2, 1
         policy.on_keys_created([make_key(1), make_key(2), make_key(3)])
         candidates = policy.get_eviction_candidates(2)
         assert len(candidates) == 2
-        assert ObjectKey.Bytes2IntHash(candidates[0].chunk_hash) == 1
+        assert ObjectKey.Bytes2IntHash(candidates[0].chunk_hash) == 3
         assert ObjectKey.Bytes2IntHash(candidates[1].chunk_hash) == 2
 
     def test_get_candidates_respects_count_limit(self):

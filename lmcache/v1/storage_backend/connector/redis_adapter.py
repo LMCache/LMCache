@@ -14,6 +14,51 @@ from lmcache.v1.storage_backend.connector.base_connector import RemoteConnector
 logger = init_logger(__name__)
 
 
+class RESPConnectorAdapter(ConnectorAdapter):
+    """Adapter for RESP connectors."""
+
+    def __init__(self) -> None:
+        super().__init__("resp://")
+
+    def can_parse(self, url: str) -> bool:
+        return url.startswith(self.schema)
+
+    def create_connector(self, context: ConnectorContext) -> RemoteConnector:
+        # Local
+        from .redis_connector import RESPConnector
+
+        config = context.config
+        assert config is not None
+
+        # Get config from extra_config with defaults
+        extra_config = config.extra_config if config.extra_config is not None else {}
+
+        # Validate that save_chunk_meta and save_unfull_chunk are False for RESP
+        self.save_chunk_meta = bool(extra_config.get("save_chunk_meta", False))
+        assert not self.save_chunk_meta, "save_chunk_meta must be False for RESP"
+
+        assert not config.save_unfull_chunk, "save_unfull_chunk must be False for RESP"
+
+        # Get number of threads for RESP connection pool (default is 8)
+        self.resp_num_threads = int(extra_config.get("resp_num_threads", 8))
+
+        # Get authentication credentials from extra_config
+        username = str(extra_config.get("username", ""))
+        password = str(extra_config.get("password", ""))
+
+        logger.info(f"Creating RESP connector for URL: {context.url}")
+        parsed_url = parse_remote_url(context.url)
+        return RESPConnector(
+            host=parsed_url.host,
+            port=parsed_url.port,
+            loop=context.loop,
+            local_cpu_backend=context.local_cpu_backend,
+            num_threads=self.resp_num_threads,
+            username=username,
+            password=password,
+        )
+
+
 class RedisConnectorAdapter(ConnectorAdapter):
     """Adapter for Redis connectors."""
 
