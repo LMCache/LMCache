@@ -4,6 +4,7 @@
 # CUDA-specific operations.
 #
 # Standard
+from enum import Enum, IntEnum
 from multiprocessing import shared_memory
 import ctypes
 
@@ -15,6 +16,41 @@ import torch
 _tensor_registry: dict[int, torch.Tensor] = {}
 _shm_registry: dict[int, shared_memory.SharedMemory] = {}
 _buf_registry: dict[int, ctypes.Array] = {}
+
+
+class TransferDirection(Enum):
+    """Specifies the direction of a memory transfer."""
+
+    H2D = 0
+    D2H = 1
+
+
+class GPUKVFormat(IntEnum):
+    """Enumeration of different GPU KV cache memory layouts."""
+
+    # used by: vLLM CROSS_LAYER mode
+    NB_NL_TWO_BS_NH_HS = 0
+
+    # used by: vLLM non-MLA flash attention
+    NL_X_TWO_NB_BS_NH_HS = 1
+
+    # used by: vLLM non-MLA flash infer
+    NL_X_NB_TWO_BS_NH_HS = 2
+
+    # used by: vLLM MLA
+    NL_X_NB_BS_HS = 3
+
+    # used by: SGLang MHA (flash attention and flash infer)
+    TWO_X_NL_X_NBBS_NH_HS = 4
+
+    # used by: SGLang MLA
+    NL_X_NBBS_ONE_HS = 5
+
+    # used by: vLLM non-MLA flash attention (HND layout)
+    NL_X_TWO_NB_NH_BS_HS = 6
+
+    # used by: vLLM non-MLA flash infer (HND layout)
+    NL_X_NB_TWO_NH_BS_HS = 7
 
 
 # On XPU (Intel GPU), PyTorch 2.4+ supports pin_memory=True via SYCL USM

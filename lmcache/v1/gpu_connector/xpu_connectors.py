@@ -21,6 +21,7 @@ import torch
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.utils import EngineType
 from lmcache.v1.gpu_connector.gpu_connectors import (
     GPUConnectorInterface,
     VLLMPagedMemGPUConnectorV2,
@@ -29,6 +30,16 @@ from lmcache.v1.gpu_connector.utils import (
     LayoutHints,
     _get_head_size_view,
     _split_token2d_kv,
+    discover_gpu_kv_format,
+    get_block_size,
+    get_dtype,
+    get_head_size,
+    get_hidden_dim_size,
+    get_num_blocks,
+    get_num_heads,
+    get_num_layers,
+    get_page_buffer_size,
+    is_mla,
 )
 from lmcache.v1.memory_management import (
     MemoryAllocatorInterface,
@@ -59,42 +70,12 @@ class VLLMPagedMemXPUConnectorV2(VLLMPagedMemGPUConnectorV2):
 
     def __init__(
         self,
-        hidden_dim_size: int,
-        num_layers: int,
         use_gpu: bool = False,
         **kwargs,
     ):
-        """
-        If use_gpu is true, it will create a gpu intermediate buffer. In this
-        case, it requires the following kwargs:
-        - chunk_size: The MAX size of the chunk to be copied to GPU.
-        - dtype: The data type of the intermediate buffer.
-        """
-        self.hidden_dim_size = hidden_dim_size
-        self.num_layers = num_layers
-        self.kv_cache_pointers = torch.empty(
-            num_layers, dtype=torch.int64, device="cpu"
-        )
-        # Not sure we need a dict here. Maybe a single GPU connector always
-        # works with a single device?
-        self.kv_cache_pointers_on_gpu: dict[int, torch.Tensor] = {}
-        self.page_buffer_size = 0
-
+        self._attributes_initialized = False
         self.kvcaches: Optional[List[torch.Tensor]] = None
-        self.gpu_buffer: Optional[torch.Tensor] = None
-        self.use_mla = "use_mla" in kwargs and kwargs["use_mla"]
-        if use_gpu:
-            assert "chunk_size" in kwargs, (
-                "chunk_size should be provided to create a GPU buffer."
-            )
-            assert "dtype" in kwargs, "dtype should be provided to create a GPU buffer."
-            assert "device" in kwargs, (
-                "device should be provided to create a GPU buffer."
-            )
-            shape = self.get_shape(kwargs["chunk_size"])
-            self.gpu_buffer = torch.empty(
-                shape, dtype=kwargs["dtype"], device=kwargs["device"]
-            )
+        self.use_gpu = use_gpu
 
     @classmethod
     def from_metadata(
@@ -116,23 +97,8 @@ class VLLMPagedMemXPUConnectorV2(VLLMPagedMemGPUConnectorV2):
         Returns:
             A new instance of VLLMPagedMemXPUConnectorV2.
         """
-        # Extract parameters from metadata
-        # kv_shape: (num_layer, 2 or 1, chunk_size, num_kv_head, head_size)
-        num_layers = metadata.kv_shape[0]
-        chunk_size = metadata.kv_shape[2]
-        num_kv_head = metadata.kv_shape[3]
-        head_size = metadata.kv_shape[4]
-        hidden_dim_size = num_kv_head * head_size
-
         return cls(
-            hidden_dim_size=hidden_dim_size,
-            num_layers=num_layers,
             use_gpu=use_gpu,
-            chunk_size=chunk_size,
-            dtype=metadata.kv_dtype,
-            device=device,
-            use_mla=metadata.use_mla,
-            layout_hints=layout_hints,
         )
 
     def to_gpu(self, memory_obj: MemoryObj, start: int, end: int, **kwargs):
@@ -154,42 +120,33 @@ class VLLMPagedMemXPUConnectorV2(VLLMPagedMemGPUConnectorV2):
         """
         assert memory_obj.tensor is not None
 
-        if self.use_mla:
-            if memory_obj.metadata.fmt != MemoryFormat.KV_MLA_FMT:
-                raise ValueError(
-                    "The memory object should be in KV_MLA_FMT format in"
-                    " order to be processed by VLLMPagedMemXPUConnector"
-                )
-        else:
-            if memory_obj.metadata.fmt != MemoryFormat.KV_2LTD:
-                raise ValueError(
-                    "The memory object should be in KV_2LTD format in"
-                    " order to be processed by VLLMPagedMemXPUConnector"
-                )
+        self.initialize_kvcaches_ptr(**kwargs)
 
-        if "kvcaches" not in kwargs:
-            raise ValueError("'kvcaches' should be provided in kwargs.")
+        assert self.kvcaches is not None, (
+            "kvcaches should be provided in kwargs or initialized beforehand."
+        )
 
         if "slot_mapping" not in kwargs:
             raise ValueError("'slot_mapping' should be provided in kwargs.")
 
-        kvcaches: List[torch.Tensor] = kwargs["kvcaches"]
         slot_mapping: torch.Tensor = kwargs["slot_mapping"]
         slices = slot_mapping[start:end]
+        self._initialize_attributes(self.kvcaches)
+        self._validate_memory_format(memory_obj)
 
         if self.use_mla:
             tmp = memory_obj.tensor[0].to(slot_mapping.device)
-            num_blocks, block_size, head_size = kvcaches[0].shape
-            total_blocks = num_blocks * block_size
-            for i, kvcache in enumerate(kvcaches):
-                kvcache.view(total_blocks, head_size).index_copy_(0, slices, tmp[i])
+            total_blocks = self.num_blocks * self.block_size
+            for i, kvcache in enumerate(self.kvcaches):
+                kvcache.view(total_blocks, self.head_size).index_copy_(
+                    0, slices, tmp[i]
+                )
         else:
             tmp_k = memory_obj.tensor[0].to(slot_mapping.device)
             tmp_v = memory_obj.tensor[1].to(slot_mapping.device)
-            num_blocks, block_size, num_heads, head_size = kvcaches[0][0].shape
-            total_blocks = num_blocks * block_size
-            d = num_heads * head_size
-            for i, (kcache, vcache) in enumerate(kvcaches):
+            total_blocks = self.num_blocks * self.block_size
+            d = self.num_heads * self.head_size
+            for i, (kcache, vcache) in enumerate(self.kvcaches):
                 kcache.view(total_blocks, d).index_copy_(0, slices, tmp_k[i])
                 vcache.view(total_blocks, d).index_copy_(0, slices, tmp_v[i])
 
@@ -197,7 +154,8 @@ class VLLMPagedMemXPUConnectorV2(VLLMPagedMemGPUConnectorV2):
         """Expect a kwarg 'kvcaches' which is a nested tuple of K and V tensors.
         The kvcaches should correspond to the "WHOLE token sequence".
 
-        Will set the memory_obj.metadata.fmt to MemoryFormat.KV_2LTD.
+        Will set the memory_obj.metadata.fmt to MemoryFormat.KV_MLA_FMT
+        if use_mla is True.
 
         Note:
           1. This function expects the 'slot_mapping' is a "full slot mapping"
@@ -213,39 +171,40 @@ class VLLMPagedMemXPUConnectorV2(VLLMPagedMemGPUConnectorV2):
         """
         assert memory_obj.tensor is not None
 
-        if "kvcaches" not in kwargs:
-            raise ValueError("'kvcaches' should be provided in kwargs.")
+        self.initialize_kvcaches_ptr(**kwargs)
+        assert self.kvcaches is not None, (
+            "kvcaches should be provided in kwargs or initialized beforehand."
+        )
 
         if "slot_mapping" not in kwargs:
             raise ValueError("'slot_mapping' should be provided in kwargs.")
 
-        kvcaches: List[torch.Tensor] = kwargs["kvcaches"]
         slot_mapping: torch.Tensor = kwargs["slot_mapping"]
         slices = slot_mapping[start:end]
+        self._initialize_attributes(self.kvcaches)
+        self._validate_memory_format(memory_obj)
 
         if self.use_mla:
-            num_blocks, block_size, head_size = kvcaches[0].shape
-            total_blocks = num_blocks * block_size
+            total_blocks = self.num_blocks * self.block_size
             tmp = torch.stack(
                 [
-                    kvcache.view(total_blocks, head_size).index_select(0, slices)
-                    for kvcache in kvcaches
+                    kvcache.view(total_blocks, self.head_size).index_select(0, slices)
+                    for kvcache in self.kvcaches
                 ]
             )
         else:
-            num_blocks, block_size, num_heads, head_size = kvcaches[0][0].shape
-            total_blocks = num_blocks * block_size
-            d = num_heads * head_size
+            total_blocks = self.num_blocks * self.block_size
+            d = self.num_heads * self.head_size
             tmp_k = torch.stack(
                 [
                     kvcache[0].view(total_blocks, d).index_select(0, slices)
-                    for kvcache in kvcaches
+                    for kvcache in self.kvcaches
                 ]
             )
             tmp_v = torch.stack(
                 [
                     kvcache[1].view(total_blocks, d).index_select(0, slices)
-                    for kvcache in kvcaches
+                    for kvcache in self.kvcaches
                 ]
             )
             tmp = torch.stack([tmp_k, tmp_v])
@@ -264,6 +223,98 @@ class VLLMPagedMemXPUConnectorV2(VLLMPagedMemGPUConnectorV2):
     def batched_to_gpu(self, memory_objs, starts, ends, **kwargs):
         for memory_obj, start, end in zip(memory_objs, starts, ends, strict=False):
             self.to_gpu(memory_obj, start, end, **kwargs)
+
+    def get_shape(self, num_tokens: int) -> torch.Size:
+        """Get the shape of the data given the number of tokens.
+
+        Args:
+            num_tokens: The number of tokens in the data.
+
+        Returns:
+            The shape of the KV cache data.
+
+        Raises:
+            RuntimeError: If attributes have not been initialized yet
+                (i.e., no kv_caches have been seen).
+        """
+        if not self._attributes_initialized:
+            raise RuntimeError(
+                "Cannot determine shape before attributes are initialized. "
+                "Call to_gpu or from_gpu first so that _initialize_attributes "
+                "can discover the KV cache layout."
+            )
+        kv_size = 1 if self.use_mla else 2
+        return torch.Size([kv_size, self.num_layers, num_tokens, self.hidden_dim_size])
+
+    def _validate_memory_format(self, memory_obj: MemoryObj) -> None:
+        """Validate that the memory object has the expected format.
+
+        Args:
+            memory_obj: The memory object to validate.
+
+        Raises:
+            ValueError: If the memory format does not match the expected
+                format based on whether MLA is in use.
+        """
+        if self.use_mla:
+            if memory_obj.metadata.fmt != MemoryFormat.KV_MLA_FMT:
+                raise ValueError(
+                    "The memory object should be in KV_MLA_FMT format in"
+                    " order to be processed by VLLMPagedMemXPUConnectorV2"
+                )
+        else:
+            if memory_obj.metadata.fmt != MemoryFormat.KV_2LTD:
+                raise ValueError(
+                    "The memory object should be in KV_2LTD format in"
+                    " order to be processed by VLLMPagedMemXPUConnectorV2"
+                )
+
+    def _initialize_attributes(self, kv_caches: List[torch.Tensor]):
+        """Initialize attributes from the kv_caches using utils functions.
+
+        Uses format discovery and utility functions from utils.py to
+        extract all KV cache parameters lazily on first use.
+
+        Args:
+            kv_caches: The KV cache tensors from which to discover
+                the cache layout and parameters.
+        """
+        if self._attributes_initialized:
+            return
+
+        self.device = kv_caches[0].device
+        assert self.device.type == "xpu", "The device should be XPU."
+
+        self.gpu_kv_format = discover_gpu_kv_format(kv_caches, EngineType.VLLM)
+        self.num_layers = get_num_layers(kv_caches, self.gpu_kv_format)
+        self.num_blocks = get_num_blocks(kv_caches, self.gpu_kv_format)
+        self.block_size = get_block_size(kv_caches, self.gpu_kv_format)
+        self.page_buffer_size = get_page_buffer_size(kv_caches, self.gpu_kv_format)
+        self.hidden_dim_size = get_hidden_dim_size(kv_caches, self.gpu_kv_format)
+        self.head_size = get_head_size(kv_caches, self.gpu_kv_format)
+        self.use_mla = is_mla(self.gpu_kv_format)
+        self.dtype = get_dtype(kv_caches, self.gpu_kv_format)
+        self.num_heads = (
+            1 if self.use_mla else get_num_heads(kv_caches, self.gpu_kv_format)
+        )
+
+        self._attributes_initialized = True
+        logger.info(
+            "XPU: attributes initialized - format: %s, "
+            "num_layers: %d, num_blocks: %d, block_size: %d, "
+            "page_buffer_size: %d, hidden_dim_size: %d, head_size: %d, "
+            "use_mla: %s, dtype: %s, num_heads: %d",
+            self.gpu_kv_format,
+            self.num_layers,
+            self.num_blocks,
+            self.block_size,
+            self.page_buffer_size,
+            self.hidden_dim_size,
+            self.head_size,
+            self.use_mla,
+            self.dtype,
+            self.num_heads,
+        )
 
 
 class VLLMPagedMemLayerwiseXPUConnector(GPUConnectorInterface):
