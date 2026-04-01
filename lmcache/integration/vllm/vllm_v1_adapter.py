@@ -1551,7 +1551,7 @@ class LMCacheConnectorV1Impl:
                 # Taking the minimum ensures robustness against both scenarios
                 num_current_tokens = min(tracker_len, request.num_computed_tokens)
                 new_token_ids = request.all_token_ids[
-                    tracker_len : tracker_len + num_new_tokens
+                    num_current_tokens : num_current_tokens + num_new_tokens
                 ]
             else:
                 raise ValueError(
