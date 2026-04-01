@@ -170,6 +170,11 @@ Source: ``lmcache/v1/distributed/config.py``
      - L2 prefetch policy.  Determines which adapter loads each key
        when multiple adapters have it.
        The ``default`` policy picks the first adapter (lowest index).
+   * - ``--l2-prefetch-max-in-flight``
+     - ``8``
+     - Maximum number of concurrent prefetch (L2 load) requests.
+       Limits how many in-flight loads the PrefetchController may
+       issue at once, preventing excessive L1 memory pressure.
 
 L2 Adapters
 -----------
@@ -347,6 +352,7 @@ Full Example
         --eviction-trigger-watermark 0.9 \
         --eviction-ratio 0.1 \
         --l2-prefetch-policy default \
+        --l2-prefetch-max-in-flight 8 \
         --l2-adapter '{"type": "nixl_store", "backend": "POSIX", "backend_params": {"file_path": "/data/lmcache/l2", "use_direct_io": "false"}, "pool_size": 64}' \
         --prometheus-port 9090 \
         --prometheus-log-interval 10 \

@@ -257,7 +257,9 @@ void FSConnector::do_single_set(WorkerFSConn& conn, const std::string& key,
   std::error_code ec;
   std::filesystem::rename(tmp_path, file_path, ec);
   if (ec) {
-    std::filesystem::remove(tmp_path);
+    // Try to clean up, but prioritize reporting the original error.
+    std::error_code remove_ec;
+    std::filesystem::remove(tmp_path, remove_ec);
     throw std::runtime_error("rename failed: " + tmp_path.string() + " -> " +
                              file_path.string() + ": " + ec.message());
   }
