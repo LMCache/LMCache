@@ -147,17 +147,24 @@ def _create_native_plugin_l2_adapter(
         "drain_completions",
         "close",
     ]
-    for method in required_methods:
-        if not callable(getattr(native_client, method, None)):
-            raise TypeError(
-                "%s.%s instance missing required method "
-                "'%s'"
-                % (
-                    config.module_path,
-                    config.class_name,
-                    method,
+    try:
+        for method in required_methods:
+            if not callable(getattr(native_client, method, None)):
+                raise TypeError(
+                    "%s.%s instance missing required method "
+                    "'%s'"
+                    % (
+                        config.module_path,
+                        config.class_name,
+                        method,
+                    )
                 )
-            )
+    except TypeError:
+        # Close the connector to avoid resource leak
+        # when validation fails.
+        if callable(getattr(native_client, "close", None)):
+            native_client.close()
+        raise
 
     logger.info(
         "Created native plugin L2 adapter: %s.%s (params=%s)",

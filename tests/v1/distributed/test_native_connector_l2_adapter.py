@@ -648,7 +648,7 @@ class TestRESPL2AdapterConfig:
 class TestNativePluginL2AdapterConfig:
     def test_from_dict_minimal(self):
         # First Party
-        from lmcache.v1.distributed.l2_adapters.native_connector_l2_adapter import (
+        from lmcache.v1.distributed.l2_adapters.native_plugin_l2_adapter import (
             NativePluginL2AdapterConfig,
         )
 
@@ -665,7 +665,7 @@ class TestNativePluginL2AdapterConfig:
 
     def test_from_dict_full(self):
         # First Party
-        from lmcache.v1.distributed.l2_adapters.native_connector_l2_adapter import (
+        from lmcache.v1.distributed.l2_adapters.native_plugin_l2_adapter import (
             NativePluginL2AdapterConfig,
         )
 
@@ -689,7 +689,7 @@ class TestNativePluginL2AdapterConfig:
 
     def test_from_dict_missing_module_path_raises(self):
         # First Party
-        from lmcache.v1.distributed.l2_adapters.native_connector_l2_adapter import (
+        from lmcache.v1.distributed.l2_adapters.native_plugin_l2_adapter import (
             NativePluginL2AdapterConfig,
         )
 
@@ -703,7 +703,7 @@ class TestNativePluginL2AdapterConfig:
 
     def test_from_dict_missing_class_name_raises(self):
         # First Party
-        from lmcache.v1.distributed.l2_adapters.native_connector_l2_adapter import (
+        from lmcache.v1.distributed.l2_adapters.native_plugin_l2_adapter import (
             NativePluginL2AdapterConfig,
         )
 
@@ -717,7 +717,7 @@ class TestNativePluginL2AdapterConfig:
 
     def test_from_dict_invalid_adapter_params_raises(self):
         # First Party
-        from lmcache.v1.distributed.l2_adapters.native_connector_l2_adapter import (
+        from lmcache.v1.distributed.l2_adapters.native_plugin_l2_adapter import (
             NativePluginL2AdapterConfig,
         )
 
@@ -741,7 +741,7 @@ class TestNativePluginL2AdapterConfig:
 
     def test_help_returns_string(self):
         # First Party
-        from lmcache.v1.distributed.l2_adapters.native_connector_l2_adapter import (
+        from lmcache.v1.distributed.l2_adapters.native_plugin_l2_adapter import (
             NativePluginL2AdapterConfig,
         )
 
@@ -760,7 +760,7 @@ class TestNativePluginL2AdapterConfig:
 class TestFSNativeL2AdapterConfig:
     def test_from_dict_minimal(self):
         # First Party
-        from lmcache.v1.distributed.l2_adapters.native_connector_l2_adapter import (
+        from lmcache.v1.distributed.l2_adapters.fs_native_l2_adapter import (
             FSNativeL2AdapterConfig,
         )
 
@@ -778,7 +778,7 @@ class TestFSNativeL2AdapterConfig:
 
     def test_from_dict_full(self):
         # First Party
-        from lmcache.v1.distributed.l2_adapters.native_connector_l2_adapter import (
+        from lmcache.v1.distributed.l2_adapters.fs_native_l2_adapter import (
             FSNativeL2AdapterConfig,
         )
 
@@ -800,7 +800,7 @@ class TestFSNativeL2AdapterConfig:
 
     def test_from_dict_missing_base_path_raises(self):
         # First Party
-        from lmcache.v1.distributed.l2_adapters.native_connector_l2_adapter import (
+        from lmcache.v1.distributed.l2_adapters.fs_native_l2_adapter import (
             FSNativeL2AdapterConfig,
         )
 
@@ -809,7 +809,7 @@ class TestFSNativeL2AdapterConfig:
 
     def test_from_dict_empty_base_path_raises(self):
         # First Party
-        from lmcache.v1.distributed.l2_adapters.native_connector_l2_adapter import (
+        from lmcache.v1.distributed.l2_adapters.fs_native_l2_adapter import (
             FSNativeL2AdapterConfig,
         )
 
@@ -818,7 +818,7 @@ class TestFSNativeL2AdapterConfig:
 
     def test_from_dict_invalid_num_workers_raises(self):
         # First Party
-        from lmcache.v1.distributed.l2_adapters.native_connector_l2_adapter import (
+        from lmcache.v1.distributed.l2_adapters.fs_native_l2_adapter import (
             FSNativeL2AdapterConfig,
         )
 
@@ -833,7 +833,7 @@ class TestFSNativeL2AdapterConfig:
 
     def test_from_dict_zero_num_workers_raises(self):
         # First Party
-        from lmcache.v1.distributed.l2_adapters.native_connector_l2_adapter import (
+        from lmcache.v1.distributed.l2_adapters.fs_native_l2_adapter import (
             FSNativeL2AdapterConfig,
         )
 
@@ -850,7 +850,7 @@ class TestFSNativeL2AdapterConfig:
         self,
     ):
         # First Party
-        from lmcache.v1.distributed.l2_adapters.native_connector_l2_adapter import (
+        from lmcache.v1.distributed.l2_adapters.fs_native_l2_adapter import (
             FSNativeL2AdapterConfig,
         )
 
@@ -865,7 +865,7 @@ class TestFSNativeL2AdapterConfig:
 
     def test_from_dict_invalid_use_odirect_raises(self):
         # First Party
-        from lmcache.v1.distributed.l2_adapters.native_connector_l2_adapter import (
+        from lmcache.v1.distributed.l2_adapters.fs_native_l2_adapter import (
             FSNativeL2AdapterConfig,
         )
 
@@ -882,7 +882,7 @@ class TestFSNativeL2AdapterConfig:
         self,
     ):
         # First Party
-        from lmcache.v1.distributed.l2_adapters.native_connector_l2_adapter import (
+        from lmcache.v1.distributed.l2_adapters.fs_native_l2_adapter import (
             FSNativeL2AdapterConfig,
         )
 
@@ -899,7 +899,7 @@ class TestFSNativeL2AdapterConfig:
         self,
     ):
         # First Party
-        from lmcache.v1.distributed.l2_adapters.native_connector_l2_adapter import (
+        from lmcache.v1.distributed.l2_adapters.fs_native_l2_adapter import (
             FSNativeL2AdapterConfig,
         )
 
@@ -922,7 +922,7 @@ class TestFSNativeL2AdapterConfig:
 
     def test_help_returns_string(self):
         # First Party
-        from lmcache.v1.distributed.l2_adapters.native_connector_l2_adapter import (
+        from lmcache.v1.distributed.l2_adapters.fs_native_l2_adapter import (
             FSNativeL2AdapterConfig,
         )
 
@@ -938,7 +938,7 @@ class TestFSNativeL2AdapterConfig:
         from lmcache.v1.distributed.l2_adapters.config import (
             get_type_name_for_config,
         )
-        from lmcache.v1.distributed.l2_adapters.native_connector_l2_adapter import (
+        from lmcache.v1.distributed.l2_adapters.fs_native_l2_adapter import (
             FSNativeL2AdapterConfig,
         )
 

@@ -490,6 +490,8 @@ class TestNativePluginFactory:
         # First Party
         from lmcache.v1.distributed.l2_adapters.native_connector_l2_adapter import (
             NativeConnectorL2Adapter,
+        )
+        from lmcache.v1.distributed.l2_adapters.native_plugin_l2_adapter import (
             NativePluginL2AdapterConfig,
         )
 
@@ -512,7 +514,7 @@ class TestNativePluginFactory:
     def test_import_error_raises(self, monkeypatch):
         """ImportError propagates when module not found."""
         # First Party
-        from lmcache.v1.distributed.l2_adapters.native_connector_l2_adapter import (
+        from lmcache.v1.distributed.l2_adapters.native_plugin_l2_adapter import (
             NativePluginL2AdapterConfig,
         )
 
@@ -530,7 +532,7 @@ class TestNativePluginFactory:
     def test_missing_class_raises(self, monkeypatch):
         """AttributeError when class not in module."""
         # First Party
-        from lmcache.v1.distributed.l2_adapters.native_connector_l2_adapter import (
+        from lmcache.v1.distributed.l2_adapters.native_plugin_l2_adapter import (
             NativePluginL2AdapterConfig,
         )
 
@@ -550,7 +552,7 @@ class TestNativePluginFactory:
         """TypeError when connector is missing a required
         method."""
         # First Party
-        from lmcache.v1.distributed.l2_adapters.native_connector_l2_adapter import (
+        from lmcache.v1.distributed.l2_adapters.native_plugin_l2_adapter import (
             NativePluginL2AdapterConfig,
         )
 
@@ -573,6 +575,8 @@ class TestNativePluginFactory:
         # First Party
         from lmcache.v1.distributed.l2_adapters.native_connector_l2_adapter import (
             NativeConnectorL2Adapter,
+        )
+        from lmcache.v1.distributed.l2_adapters.native_plugin_l2_adapter import (
             NativePluginL2AdapterConfig,
         )
 
@@ -596,7 +600,7 @@ class TestNativePluginFactory:
         """'native_plugin' config type should be
         registered."""
         # First Party
-        from lmcache.v1.distributed.l2_adapters.native_connector_l2_adapter import (
+        from lmcache.v1.distributed.l2_adapters.native_plugin_l2_adapter import (
             NativePluginL2AdapterConfig,
         )
 
@@ -660,24 +664,15 @@ class TestFSNativeAdapterFactory:
         """Factory creates a NativeConnectorL2Adapter
         wrapping the FS client."""
         # First Party
-        from lmcache.v1.distributed.l2_adapters import (
-            native_connector_l2_adapter as mod,
-        )
-        from lmcache.v1.distributed.l2_adapters.native_connector_l2_adapter import (
-            FSNativeL2AdapterConfig,
-            NativeConnectorL2Adapter,
-        )
-
-        monkeypatch.setattr(
-            mod,
-            "_create_fs_native_l2_adapter",
-            _patched_fs_factory,
-        )
-
         # Re-register so registry points to patched fn
-        # First Party
         from lmcache.v1.distributed.l2_adapters.factory import (
             _L2_ADAPTER_FACTORY_REGISTRY,
+        )
+        from lmcache.v1.distributed.l2_adapters.fs_native_l2_adapter import (
+            FSNativeL2AdapterConfig,
+        )
+        from lmcache.v1.distributed.l2_adapters.native_connector_l2_adapter import (
+            NativeConnectorL2Adapter,
         )
 
         old = _L2_ADAPTER_FACTORY_REGISTRY["fs_native"]
@@ -698,7 +693,7 @@ class TestFSNativeAdapterFactory:
         """All config params are forwarded to the
         FS client constructor."""
         # First Party
-        from lmcache.v1.distributed.l2_adapters.native_connector_l2_adapter import (
+        from lmcache.v1.distributed.l2_adapters.fs_native_l2_adapter import (
             FSNativeL2AdapterConfig,
         )
 
@@ -758,7 +753,7 @@ class TestFSNativeAdapterFactory:
         """RuntimeError raised when C++ FS extension is
         not available."""
         # First Party
-        from lmcache.v1.distributed.l2_adapters.native_connector_l2_adapter import (
+        from lmcache.v1.distributed.l2_adapters.fs_native_l2_adapter import (
             FSNativeL2AdapterConfig,
         )
 
@@ -785,7 +780,7 @@ class TestFSNativeAdapterFactory:
         """'fs_native' config type should be
         registered."""
         # First Party
-        from lmcache.v1.distributed.l2_adapters.native_connector_l2_adapter import (
+        from lmcache.v1.distributed.l2_adapters.fs_native_l2_adapter import (
             FSNativeL2AdapterConfig,
         )
 
@@ -800,7 +795,7 @@ class TestFSNativeAdapterFactory:
         create_l2_adapter_from_registry (smoke test
         with RuntimeError from missing C++ ext)."""
         # First Party
-        from lmcache.v1.distributed.l2_adapters.native_connector_l2_adapter import (
+        from lmcache.v1.distributed.l2_adapters.fs_native_l2_adapter import (
             FSNativeL2AdapterConfig,
         )
 
@@ -819,7 +814,7 @@ class TestFSNativeAdapterFactory:
         """read_ahead_size=None should be passed as 0
         to the native client."""
         # First Party
-        from lmcache.v1.distributed.l2_adapters.native_connector_l2_adapter import (
+        from lmcache.v1.distributed.l2_adapters.fs_native_l2_adapter import (
             FSNativeL2AdapterConfig,
         )
 
@@ -870,8 +865,10 @@ def _patched_fs_factory(config, l1_memory_desc=None):
     """Factory that uses _FakeLMCacheFSClient instead
     of the real C++ extension."""
     # First Party
-    from lmcache.v1.distributed.l2_adapters.native_connector_l2_adapter import (
+    from lmcache.v1.distributed.l2_adapters.fs_native_l2_adapter import (
         FSNativeL2AdapterConfig,
+    )
+    from lmcache.v1.distributed.l2_adapters.native_connector_l2_adapter import (
         NativeConnectorL2Adapter,
     )
 
