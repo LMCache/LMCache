@@ -1540,13 +1540,16 @@ class LMCacheConnectorV1Impl:
             num_new_tokens = scheduler_output.num_scheduled_tokens[req_id]
             # TODO: this is a dangerous reference to the request object inside vllm
             if request := self._unfinished_requests.get(req_id):
-                num_current_tokens = request.num_computed_tokens
-                # Use tracker's token_ids length as the slice base instead of
-                # request.num_computed_tokens, because in newer vLLM versions
-                # num_computed_tokens may already be updated before
-                # build_connector_meta is called, causing the slice to be empty
-                # during decode phase.
                 tracker_len = len(request_tracker.token_ids)
+
+                # Use min() to reconcile different state synchronization:
+                # 1. Normal case: tracker_len is usually smaller or
+                #    equal as tokens are being tracked.
+                # 2. Preemption case: request.num_computed_tokens
+                #    may drop due to engine rollback, making it smaller than
+                #    the current tracker_len.
+                # Taking the minimum ensures robustness against both scenarios
+                num_current_tokens = min(tracker_len, request.num_computed_tokens)
                 new_token_ids = request.all_token_ids[
                     tracker_len : tracker_len + num_new_tokens
                 ]
