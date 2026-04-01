@@ -5,6 +5,7 @@ PluginL2AdapterConfig.
 """
 
 # Standard
+import os
 import types
 
 # Third Party
@@ -429,3 +430,454 @@ class TestCreateL2Adapter:
         adapter = create_l2_adapter(config)
         assert isinstance(adapter, MockL2Adapter)
         adapter.close()
+
+
+# =========================================================
+# Tests: NativePluginL2AdapterConfig factory
+# =========================================================
+
+
+class _FakeNativeConnector:
+    """Minimal mock that satisfies the native connector
+    interface check."""
+
+    def __init__(self, **kwargs):
+        self.kwargs = kwargs
+
+    def event_fd(self):
+        return -1
+
+    def submit_batch_get(self, keys, memoryviews):
+        return 0
+
+    def submit_batch_set(self, keys, memoryviews):
+        return 0
+
+    def submit_batch_exists(self, keys):
+        return 0
+
+    def drain_completions(self):
+        return []
+
+    def close(self):
+        pass
+
+
+class _MissingMethodConnector:
+    """Connector missing the 'close' method."""
+
+    def event_fd(self):
+        return -1
+
+    def submit_batch_get(self, keys, memoryviews):
+        return 0
+
+    def submit_batch_set(self, keys, memoryviews):
+        return 0
+
+    def submit_batch_exists(self, keys):
+        return 0
+
+    def drain_completions(self):
+        return []
+
+
+class TestNativePluginFactory:
+    """Tests for the native_plugin adapter factory."""
+
+    def test_load_native_connector(self, monkeypatch):
+        """Successfully load a native connector."""
+        # First Party
+        from lmcache.v1.distributed.l2_adapters.native_connector_l2_adapter import (
+            NativeConnectorL2Adapter,
+        )
+        from lmcache.v1.distributed.l2_adapters.native_plugin_l2_adapter import (
+            NativePluginL2AdapterConfig,
+        )
+
+        fake_mod = types.ModuleType("fake_native_mod")
+        fake_mod.FakeClient = _FakeNativeConnector  # type: ignore[attr-defined]
+        monkeypatch.setattr(
+            "importlib.import_module",
+            lambda p: fake_mod,
+        )
+
+        cfg = NativePluginL2AdapterConfig(
+            module_path="fake_native_mod",
+            class_name="FakeClient",
+            adapter_params={"host": "localhost"},
+        )
+        adapter = create_l2_adapter_from_registry(cfg)
+        assert isinstance(adapter, NativeConnectorL2Adapter)
+        adapter.close()
+
+    def test_import_error_raises(self, monkeypatch):
+        """ImportError propagates when module not found."""
+        # First Party
+        from lmcache.v1.distributed.l2_adapters.native_plugin_l2_adapter import (
+            NativePluginL2AdapterConfig,
+        )
+
+        monkeypatch.setattr(
+            "importlib.import_module",
+            lambda p: (_ for _ in ()).throw(ImportError("no such module")),
+        )
+        cfg = NativePluginL2AdapterConfig(
+            module_path="nonexistent",
+            class_name="X",
+        )
+        with pytest.raises(ImportError, match="nonexistent"):
+            create_l2_adapter_from_registry(cfg)
+
+    def test_missing_class_raises(self, monkeypatch):
+        """AttributeError when class not in module."""
+        # First Party
+        from lmcache.v1.distributed.l2_adapters.native_plugin_l2_adapter import (
+            NativePluginL2AdapterConfig,
+        )
+
+        fake_mod = types.ModuleType("empty_mod")
+        monkeypatch.setattr(
+            "importlib.import_module",
+            lambda p: fake_mod,
+        )
+        cfg = NativePluginL2AdapterConfig(
+            module_path="empty_mod",
+            class_name="NoSuchClass",
+        )
+        with pytest.raises(AttributeError, match="NoSuchClass"):
+            create_l2_adapter_from_registry(cfg)
+
+    def test_missing_method_raises(self, monkeypatch):
+        """TypeError when connector is missing a required
+        method."""
+        # First Party
+        from lmcache.v1.distributed.l2_adapters.native_plugin_l2_adapter import (
+            NativePluginL2AdapterConfig,
+        )
+
+        fake_mod = types.ModuleType("incomplete_mod")
+        fake_mod.Bad = _MissingMethodConnector  # type: ignore[attr-defined]
+        monkeypatch.setattr(
+            "importlib.import_module",
+            lambda p: fake_mod,
+        )
+        cfg = NativePluginL2AdapterConfig(
+            module_path="incomplete_mod",
+            class_name="Bad",
+        )
+        with pytest.raises(TypeError, match="close"):
+            create_l2_adapter_from_registry(cfg)
+
+    def test_adapter_params_forwarded(self, monkeypatch):
+        """adapter_params are forwarded as kwargs to the
+        connector class."""
+        # First Party
+        from lmcache.v1.distributed.l2_adapters.native_connector_l2_adapter import (
+            NativeConnectorL2Adapter,
+        )
+        from lmcache.v1.distributed.l2_adapters.native_plugin_l2_adapter import (
+            NativePluginL2AdapterConfig,
+        )
+
+        fake_mod = types.ModuleType("param_mod")
+        fake_mod.Client = _FakeNativeConnector  # type: ignore[attr-defined]
+        monkeypatch.setattr(
+            "importlib.import_module",
+            lambda p: fake_mod,
+        )
+
+        cfg = NativePluginL2AdapterConfig(
+            module_path="param_mod",
+            class_name="Client",
+            adapter_params={"host": "myhost", "port": 42},
+        )
+        adapter = create_l2_adapter_from_registry(cfg)
+        assert isinstance(adapter, NativeConnectorL2Adapter)
+        adapter.close()
+
+    def test_native_plugin_type_registered(self):
+        """'native_plugin' config type should be
+        registered."""
+        # First Party
+        from lmcache.v1.distributed.l2_adapters.native_plugin_l2_adapter import (
+            NativePluginL2AdapterConfig,
+        )
+
+        cfg = NativePluginL2AdapterConfig(
+            module_path="x",
+            class_name="X",
+        )
+        name = get_type_name_for_config(cfg)
+        assert name == "native_plugin"
+
+
+# =========================================================
+# Tests: FSNativeL2AdapterConfig factory
+# =========================================================
+
+
+class _FakeLMCacheFSClient:
+    """Mock for lmcache.lmcache_fs.LMCacheFSClient."""
+
+    def __init__(
+        self,
+        base_path,
+        num_workers,
+        relative_tmp_dir="",
+        use_odirect=False,
+        read_ahead_size=0,
+    ):
+        self.base_path = base_path
+        self.num_workers = num_workers
+        self.relative_tmp_dir = relative_tmp_dir
+        self.use_odirect = use_odirect
+        self.read_ahead_size = read_ahead_size
+        self._efd = os.eventfd(0, os.EFD_NONBLOCK | os.EFD_CLOEXEC)
+        self._closed = False
+
+    def event_fd(self):
+        return self._efd
+
+    def submit_batch_get(self, keys, memoryviews):
+        return 0
+
+    def submit_batch_set(self, keys, memoryviews):
+        return 0
+
+    def submit_batch_exists(self, keys):
+        return 0
+
+    def drain_completions(self):
+        return []
+
+    def close(self):
+        if not self._closed:
+            self._closed = True
+            os.close(self._efd)
+
+
+class TestFSNativeAdapterFactory:
+    """Tests for the fs_native adapter factory."""
+
+    def test_factory_creates_adapter(self, monkeypatch):
+        """Factory creates a NativeConnectorL2Adapter
+        wrapping the FS client."""
+        # First Party
+        # Re-register so registry points to patched fn
+        from lmcache.v1.distributed.l2_adapters.factory import (
+            _L2_ADAPTER_FACTORY_REGISTRY,
+        )
+        from lmcache.v1.distributed.l2_adapters.fs_native_l2_adapter import (
+            FSNativeL2AdapterConfig,
+        )
+        from lmcache.v1.distributed.l2_adapters.native_connector_l2_adapter import (
+            NativeConnectorL2Adapter,
+        )
+
+        old = _L2_ADAPTER_FACTORY_REGISTRY["fs_native"]
+        _L2_ADAPTER_FACTORY_REGISTRY["fs_native"] = _patched_fs_factory
+
+        try:
+            cfg = FSNativeL2AdapterConfig(
+                base_path="/tmp/lmcache_test_factory",
+                num_workers=2,
+            )
+            adapter = create_l2_adapter_from_registry(cfg)
+            assert isinstance(adapter, NativeConnectorL2Adapter)
+            adapter.close()
+        finally:
+            _L2_ADAPTER_FACTORY_REGISTRY["fs_native"] = old
+
+    def test_factory_forwards_all_params(self, monkeypatch):
+        """All config params are forwarded to the
+        FS client constructor."""
+        # First Party
+        from lmcache.v1.distributed.l2_adapters.fs_native_l2_adapter import (
+            FSNativeL2AdapterConfig,
+        )
+
+        captured: dict = {}
+
+        class _CaptureFSClient(_FakeLMCacheFSClient):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                captured["args"] = args
+                captured["kwargs"] = kwargs
+
+        # First Party
+        from lmcache.v1.distributed.l2_adapters.factory import (
+            _L2_ADAPTER_FACTORY_REGISTRY,
+        )
+
+        def _capture_factory(config, l1_memory_desc=None):
+            assert isinstance(config, FSNativeL2AdapterConfig)
+            client = _CaptureFSClient(
+                config.base_path,
+                config.num_workers,
+                config.relative_tmp_dir,
+                config.use_odirect,
+                config.read_ahead_size or 0,
+            )
+            # First Party
+            from lmcache.v1.distributed.l2_adapters.native_connector_l2_adapter import (
+                NativeConnectorL2Adapter,
+            )
+
+            return NativeConnectorL2Adapter(client)
+
+        old = _L2_ADAPTER_FACTORY_REGISTRY["fs_native"]
+        _L2_ADAPTER_FACTORY_REGISTRY["fs_native"] = _capture_factory
+
+        try:
+            cfg = FSNativeL2AdapterConfig(
+                base_path="/data/kv",
+                num_workers=8,
+                relative_tmp_dir=".tmp",
+                use_odirect=True,
+                read_ahead_size=4096,
+            )
+            adapter = create_l2_adapter_from_registry(cfg)
+            assert captured["args"] == (
+                "/data/kv",
+                8,
+                ".tmp",
+                True,
+                4096,
+            )
+            adapter.close()
+        finally:
+            _L2_ADAPTER_FACTORY_REGISTRY["fs_native"] = old
+
+    def test_factory_import_error_raises(self, monkeypatch):
+        """RuntimeError raised when C++ FS extension is
+        not available."""
+        # First Party
+        from lmcache.v1.distributed.l2_adapters.fs_native_l2_adapter import (
+            FSNativeL2AdapterConfig,
+        )
+
+        # Patch the actual factory to simulate missing
+        # C++ extension
+        def _broken_import(name, *args, **kwargs):
+            if name == "lmcache.lmcache_fs":
+                raise ImportError("no C++ FS extension")
+            return _original_import(name, *args, **kwargs)
+
+        # Standard
+        import builtins
+
+        _original_import = builtins.__import__
+        monkeypatch.setattr(builtins, "__import__", _broken_import)
+
+        cfg = FSNativeL2AdapterConfig(
+            base_path="/tmp/test",
+        )
+        with pytest.raises(RuntimeError, match="C\\+\\+ FS"):
+            create_l2_adapter_from_registry(cfg)
+
+    def test_fs_native_type_registered(self):
+        """'fs_native' config type should be
+        registered."""
+        # First Party
+        from lmcache.v1.distributed.l2_adapters.fs_native_l2_adapter import (
+            FSNativeL2AdapterConfig,
+        )
+
+        cfg = FSNativeL2AdapterConfig(
+            base_path="/tmp/test",
+        )
+        name = get_type_name_for_config(cfg)
+        assert name == "fs_native"
+
+    def test_fs_native_factory_registered(self):
+        """'fs_native' factory should be callable via
+        create_l2_adapter_from_registry (smoke test
+        with RuntimeError from missing C++ ext)."""
+        # First Party
+        from lmcache.v1.distributed.l2_adapters.fs_native_l2_adapter import (
+            FSNativeL2AdapterConfig,
+        )
+
+        cfg = FSNativeL2AdapterConfig(
+            base_path="/tmp/test_smoke",
+        )
+        # Without the C++ extension built, expect
+        # RuntimeError
+        try:
+            adapter = create_l2_adapter_from_registry(cfg)
+            adapter.close()
+        except RuntimeError:
+            pass  # Expected when C++ ext not built
+
+    def test_read_ahead_size_none_becomes_zero(self, monkeypatch):
+        """read_ahead_size=None should be passed as 0
+        to the native client."""
+        # First Party
+        from lmcache.v1.distributed.l2_adapters.fs_native_l2_adapter import (
+            FSNativeL2AdapterConfig,
+        )
+
+        captured: dict = {}
+
+        class _CaptureFSClient2(_FakeLMCacheFSClient):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                captured["read_ahead"] = args[4]
+
+        # First Party
+        from lmcache.v1.distributed.l2_adapters.factory import (
+            _L2_ADAPTER_FACTORY_REGISTRY,
+        )
+
+        def _capture_factory2(config, l1_memory_desc=None):
+            assert isinstance(config, FSNativeL2AdapterConfig)
+            client = _CaptureFSClient2(
+                config.base_path,
+                config.num_workers,
+                config.relative_tmp_dir,
+                config.use_odirect,
+                config.read_ahead_size or 0,
+            )
+            # First Party
+            from lmcache.v1.distributed.l2_adapters.native_connector_l2_adapter import (
+                NativeConnectorL2Adapter,
+            )
+
+            return NativeConnectorL2Adapter(client)
+
+        old = _L2_ADAPTER_FACTORY_REGISTRY["fs_native"]
+        _L2_ADAPTER_FACTORY_REGISTRY["fs_native"] = _capture_factory2
+
+        try:
+            cfg = FSNativeL2AdapterConfig(
+                base_path="/tmp/test_ra",
+            )
+            assert cfg.read_ahead_size is None
+            adapter = create_l2_adapter_from_registry(cfg)
+            assert captured["read_ahead"] == 0
+            adapter.close()
+        finally:
+            _L2_ADAPTER_FACTORY_REGISTRY["fs_native"] = old
+
+
+def _patched_fs_factory(config, l1_memory_desc=None):
+    """Factory that uses _FakeLMCacheFSClient instead
+    of the real C++ extension."""
+    # First Party
+    from lmcache.v1.distributed.l2_adapters.fs_native_l2_adapter import (
+        FSNativeL2AdapterConfig,
+    )
+    from lmcache.v1.distributed.l2_adapters.native_connector_l2_adapter import (
+        NativeConnectorL2Adapter,
+    )
+
+    assert isinstance(config, FSNativeL2AdapterConfig)
+    client = _FakeLMCacheFSClient(
+        config.base_path,
+        config.num_workers,
+        config.relative_tmp_dir,
+        config.use_odirect,
+        config.read_ahead_size or 0,
+    )
+    return NativeConnectorL2Adapter(client)

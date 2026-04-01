@@ -73,7 +73,7 @@ git checkout 8.2 && make -j
 ### Launch LMCache MP Server
 
 ```bash
-python -m lmcache.v1.multiprocess.server \
+lmcache server \
     --l1-size-gb 10 \
     --eviction-policy LRU \
     --chunk-size 16 \

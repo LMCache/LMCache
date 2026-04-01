@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from dataclasses import dataclass
+from itertools import islice
+from typing import Generator
 import argparse
 import threading
 import time
@@ -27,26 +29,16 @@ from lmcache.v1.gpu_connector.gpu_ops import (
     lmcache_memcpy_async_d2h,
     lmcache_memcpy_async_h2d,
 )
+from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.mp_observability.config import (
-    PrometheusConfig,
-    add_prometheus_args,
-    parse_args_to_prometheus_config,
+    ObservabilityConfig,
+    add_observability_args,
+    init_observability,
+    parse_args_to_observability_config,
 )
-from lmcache.v1.mp_observability.otel_init import init_otel_metrics
-from lmcache.v1.mp_observability.telemetry import (
-    TelemetryConfig,
-    add_telemetry_args,
-    get_telemetry_controller,
-    init_telemetry_controller,
-    log_telemetry,
-    make_end_event,
-    make_start_event,
-    parse_args_to_telemetry_config,
-)
-from lmcache.v1.mp_observability.telemetry.config import (
-    DEFAULT_TELEMETRY_CONFIG,
-)
+from lmcache.v1.mp_observability.event import Event, EventType
+from lmcache.v1.mp_observability.event_bus import get_event_bus
 from lmcache.v1.multiprocess.config import (
     MPServerConfig,
     add_mp_server_args,
@@ -131,6 +123,23 @@ def get_layout_desc(gpu_context: GPUCacheContext, num_tokens: int) -> MemoryLayo
     return MemoryLayoutDesc(shapes=[shape], dtypes=[dtype])
 
 
+def batched_iteration(lst: list, batch_size: int) -> Generator[tuple, None, None]:
+    """Utility function to iterate over a list in batches.
+
+    Args:
+        lst: The list to iterate over.
+        batch_size: The size of each batch.
+
+    Yields:
+        Batches of the list as tuples.
+    """
+    if batch_size < 1:
+        raise ValueError("batch size must be at least one")
+    it = iter(lst)
+    while batch := tuple(islice(it, batch_size)):
+        yield batch
+
+
 @dataclass
 class _PrefetchJob:
     handle: PrefetchHandle
@@ -170,6 +179,9 @@ class MPCacheEngine:
         )
         self.session_manager = SessionManager(self.token_hasher)
 
+        # EventBus for observability
+        self._event_bus = get_event_bus()
+
         # Prefetch job tracking for two-phase lookup
         # TODO: implement periodic cleanup of stale _prefetch_jobs entries
         # for crash resilience (e.g., client calls lookup but never queries)
@@ -183,6 +195,7 @@ class MPCacheEngine:
         kv_caches: KVCache,
         model_name: str,
         world_size: int,
+        layout_hints: LayoutHints,
     ) -> None:
         """
         Registers the KV cache tensors for a given GPU instance ID.
@@ -192,8 +205,14 @@ class MPCacheEngine:
             kv_caches (KVCache): The KV cache tensor wrappers from vLLM.
             model_name (str): The name of the model associated with this KV cache.
             world_size (int): The world size associated with this KV cache.
+            layout_hints: See :class:`LayoutHints`.  Forwarded to
+                :class:`GPUCacheContext` for GPU KV format detection.
         """
-        gpu_context = GPUCacheContext(kv_caches, self.chunk_size)
+        gpu_context = GPUCacheContext(
+            kv_caches,
+            self.chunk_size,
+            layout_hints=layout_hints or None,
+        )
         self.gpu_contexts[instance_id] = gpu_context
         self.gpu_context_meta[instance_id] = (model_name, world_size)
         logger.info(
@@ -256,12 +275,16 @@ class MPCacheEngine:
         )
         gpu_context = self.gpu_contexts[instance_id]
 
+        blocks_per_chunk = self.chunk_size // gpu_context.block_size
+
         with (
             torch.cuda.device(gpu_context.device),
             torch.cuda.stream(gpu_context.stream),
         ):
             event = torch.cuda.Event(interprocess=True)
-            slot_mapping_tensor = gpu_context.get_slot_mapping_tensor(gpu_block_ids)
+
+            # Stage all block_ids to GPU once before the loop
+            all_block_ids_gpu = gpu_context.stage_block_ids(gpu_block_ids)
 
             # Wait for vLLM to finish
             vllm_event = torch.cuda.Event.from_ipc_handle(
@@ -269,45 +292,48 @@ class MPCacheEngine:
             )
             vllm_event.wait(stream=gpu_context.stream)
 
-            if get_telemetry_controller().is_enabled():
-                gpu_context.cupy_stream.launch_host_func(
-                    log_telemetry,
-                    make_start_event(
-                        "store",
-                        key.request_id,
-                        device=str(gpu_context.device),
-                    ),
-                )
+            self._event_bus.publish_on_stream(
+                gpu_context.cupy_stream,
+                Event(
+                    event_type=EventType.MP_STORE_START,
+                    session_id=key.request_id,
+                    metadata={"device": str(gpu_context.device)},
+                ),
+            )
 
             layout_desc = get_layout_desc(gpu_context, self.chunk_size)
             reserved_dict = self.storage_manager.reserve_write(
                 obj_keys, layout_desc, "new"
             )
 
+            # NOTE: Store is not batched because some obj_keys may be
+            # skipped (not in reserved_dict), making block_ids
+            # non-contiguous. Batching would require torch.cat to
+            # reassemble block_ids, negating the benefit.
             for idx, obj_key in enumerate(obj_keys):
                 if obj_key in reserved_dict:
                     memory_obj = reserved_dict[obj_key]
                 else:
                     continue
 
-                start = idx * self.chunk_size
-                end = start + self.chunk_size
-                slot_mapping = slot_mapping_tensor[start:end]
+                chunk_block_ids_gpu = all_block_ids_gpu[
+                    idx * blocks_per_chunk : (idx + 1) * blocks_per_chunk
+                ]
 
-                # Copy from GPU to CPU
-                tmp_buffer = gpu_context.get_tmp_gpu_buffer(self.chunk_size)
-                lmc_ops.multi_layer_kv_transfer(
-                    tmp_buffer,
-                    gpu_context.kv_pointers,
-                    slot_mapping,
-                    gpu_context.device,
-                    gpu_context.block_size * gpu_context.num_blocks,
-                    lmc_ops.TransferDirection.D2H,
-                    gpu_context.gpu_kv_format_,
-                    gpu_context.block_size,
-                )
-
+                # Copy from paged buffer to tmp GPU buffer, then to CPU
                 assert memory_obj.tensor is not None
+                tmp_buffer = gpu_context.get_tmp_gpu_buffer(self.chunk_size)
+                lmc_ops.multi_layer_block_kv_transfer(
+                    gpu_context.kv_pointers,
+                    [tmp_buffer.data_ptr()],
+                    chunk_block_ids_gpu,
+                    gpu_context.device,
+                    lmc_ops.TransferDirection.D2H,
+                    gpu_context.shape_desc,
+                    self.chunk_size,
+                    gpu_context.gpu_kv_format_,
+                    0,
+                )
                 lmcache_memcpy_async_d2h(tmp_buffer, memory_obj)
 
             event.record()
@@ -317,16 +343,17 @@ class MPCacheEngine:
             list(reserved_dict.keys()),
         )
 
-        if get_telemetry_controller().is_enabled():
-            self.gpu_contexts[instance_id].cupy_stream.launch_host_func(
-                log_telemetry,
-                make_end_event(
-                    "store",
-                    key.request_id,
-                    stored_count=len(reserved_dict),
-                    device=str(gpu_context.device),
-                ),
-            )
+        self._event_bus.publish_on_stream(
+            self.gpu_contexts[instance_id].cupy_stream,
+            Event(
+                event_type=EventType.MP_STORE_END,
+                session_id=key.request_id,
+                metadata={
+                    "stored_count": len(reserved_dict),
+                    "device": str(gpu_context.device),
+                },
+            ),
+        )
 
         ed = time.perf_counter()
         if length := len(reserved_dict):
@@ -381,57 +408,84 @@ class MPCacheEngine:
         )
         gpu_context = self.gpu_contexts[instance_id]
 
-        if get_telemetry_controller().is_enabled():
-            gpu_context.cupy_stream.launch_host_func(
-                log_telemetry,
-                make_start_event(
-                    "retrieve",
-                    key.request_id,
-                    device=str(gpu_context.device),
-                ),
-            )
+        self._event_bus.publish_on_stream(
+            gpu_context.cupy_stream,
+            Event(
+                event_type=EventType.MP_RETRIEVE_START,
+                session_id=key.request_id,
+                metadata={"device": str(gpu_context.device)},
+            ),
+        )
+
+        blocks_per_chunk = self.chunk_size // gpu_context.block_size
 
         def _retrieve_loop(keys: list[ObjectKey], memory_objs: list[MemoryObj]) -> None:
-            for idx, (key, memory_obj) in enumerate(
-                zip(keys, memory_objs, strict=False)
+            _BATCH_SIZE = 4
+            for batch_idx, memory_obj_batch in enumerate(
+                batched_iteration(memory_objs, batch_size=_BATCH_SIZE)
             ):
-                chunk_start = idx * self.chunk_size
-                chunk_end = chunk_start + self.chunk_size
+                chunk_start = batch_idx * self.chunk_size * _BATCH_SIZE
+                chunk_end = chunk_start + self.chunk_size * len(memory_obj_batch)
 
-                # Skip tokens that overlap with APC-cached blocks to
-                # avoid a data race: the retrieve writes on the LMCache
-                # CUDA stream while concurrent requests may read from
-                # those same APC-shared blocks on the vLLM CUDA stream.
                 effective_start = max(chunk_start, skip_first_n_tokens)
                 if effective_start >= chunk_end:
-                    # Entire chunk is within APC range, skip it
+                    # Entire batch is within APC range, skip it
                     continue
-                # clamp to [0, chunk_size - 1]
-                skip_in_chunk = max(
-                    0, min(effective_start - chunk_start, self.chunk_size - 1)
-                )
-                slot_mapping = slot_mapping_tensor[chunk_start:chunk_end]
 
-                # Copy from CPU to GPU
-                tmp_gpu_buffer_ = gpu_context.get_tmp_gpu_buffer(self.chunk_size)
-                lmcache_memcpy_async_h2d(memory_obj, tmp_gpu_buffer_)
-                lmc_ops.multi_layer_kv_transfer(
-                    tmp_gpu_buffer_,
+                skip_tokens_in_chunk = max(
+                    0,
+                    min(
+                        effective_start - chunk_start, self.chunk_size * _BATCH_SIZE - 1
+                    ),
+                )
+                if skip_tokens_in_chunk % gpu_context.block_size != 0:
+                    logger.error(
+                        "skip_first_n_tokens (%d) is not aligned to block_size (%d), "
+                        "rounding down from %d tokens to %d blocks",
+                        skip_first_n_tokens,
+                        gpu_context.block_size,
+                        skip_tokens_in_chunk,
+                        skip_tokens_in_chunk // gpu_context.block_size,
+                    )
+                skip_blocks_in_chunk = skip_tokens_in_chunk // gpu_context.block_size
+
+                start_chunk_id = batch_idx * _BATCH_SIZE
+                end_chunk_id = start_chunk_id + len(memory_obj_batch)
+                chunk_block_ids_gpu = all_block_ids_gpu[
+                    start_chunk_id * blocks_per_chunk : end_chunk_id * blocks_per_chunk
+                ]
+
+                # TODO: implement get_gpu_buffer_batched
+                tmp_buffers = gpu_context.get_tmp_gpu_buffer_batched(
+                    self.chunk_size, len(memory_obj_batch)
+                )
+
+                # launch h2d for all the chunks in the batch
+                for tmp_buffer, memory_obj in zip(
+                    tmp_buffers, memory_obj_batch, strict=False
+                ):
+                    assert memory_obj.tensor is not None
+                    lmcache_memcpy_async_h2d(memory_obj, tmp_buffer)
+
+                # launch multi_layer_block_kv_transfer for all the chunks in the batch
+                lmc_ops.multi_layer_block_kv_transfer(
                     gpu_context.kv_pointers,
-                    slot_mapping,
+                    [tb.data_ptr() for tb in tmp_buffers],
+                    chunk_block_ids_gpu,
                     gpu_context.device,
-                    gpu_context.block_size * gpu_context.num_blocks,
                     lmc_ops.TransferDirection.H2D,
+                    gpu_context.shape_desc,
+                    self.chunk_size,
                     gpu_context.gpu_kv_format_,
-                    gpu_context.block_size,
-                    skip_in_chunk,
+                    skip_blocks_in_chunk,
                 )
 
         with (
             torch.cuda.device(gpu_context.device),
-            torch.cuda.stream(gpu_context.high_priority_stream),
+            torch.cuda.stream(gpu_context.stream),
         ):
-            slot_mapping_tensor = gpu_context.get_slot_mapping_tensor(gpu_block_ids)
+            # Stage all block_ids to GPU once before the loop
+            all_block_ids_gpu = gpu_context.stage_block_ids(gpu_block_ids)
 
             event = torch.cuda.Event(interprocess=True)
 
@@ -449,8 +503,8 @@ class MPCacheEngine:
                     _retrieve_loop(obj_keys, memory_objs)
                 # Only set True when with-block exits normally
                 retrieve_succeeded = True
-            except Exception as e:
-                logger.warning("Cannot retrieve keys due to exception: %s", str(e))
+            except Exception:
+                logger.exception("Cannot retrieve keys due to exception")
                 return event.ipc_handle(), False
             finally:
                 event.record()
@@ -459,16 +513,17 @@ class MPCacheEngine:
                         self.storage_manager.finish_read_prefetched,
                         prefetched_keys,
                     )
-                if get_telemetry_controller().is_enabled():
-                    gpu_context.cupy_stream.launch_host_func(
-                        log_telemetry,
-                        make_end_event(
-                            "retrieve",
-                            key.request_id,
-                            retrieved_count=len(prefetched_keys),
-                            device=str(gpu_context.device),
-                        ),
-                    )
+                self._event_bus.publish_on_stream(
+                    gpu_context.cupy_stream,
+                    Event(
+                        event_type=EventType.MP_RETRIEVE_END,
+                        session_id=key.request_id,
+                        metadata={
+                            "retrieved_count": len(prefetched_keys),
+                            "device": str(gpu_context.device),
+                        },
+                    ),
+                )
 
         tokens_retrieved = len(obj_keys) * self.chunk_size
         ed = time.perf_counter()
@@ -516,7 +571,12 @@ class MPCacheEngine:
             Prefetch job ID for polling via query_prefetch_status.
         """
         model_name, world_size = key.model_name, key.world_size
-        log_telemetry(make_start_event("lookup_and_prefetch", key.request_id))
+        self._event_bus.publish(
+            Event(
+                event_type=EventType.MP_LOOKUP_PREFETCH_START,
+                session_id=key.request_id,
+            )
+        )
 
         layout_desc = self._find_layout_desc(model_name, world_size)
         if layout_desc is None:
@@ -646,11 +706,11 @@ class MPCacheEngine:
         #    first failure
         found_count = found_count // job.world_size
 
-        log_telemetry(
-            make_end_event(
-                "lookup_and_prefetch",
-                job.request_id,
-                found_count=found_count,
+        self._event_bus.publish(
+            Event(
+                event_type=EventType.MP_LOOKUP_PREFETCH_END,
+                session_id=job.request_id,
+                metadata={"found_count": found_count},
             )
         )
 
@@ -744,6 +804,7 @@ class MPCacheEngine:
                     "gpu_kv_shape": ctx.gpu_kv_shape,
                     "gpu_kv_concrete_shape": ctx.concrete_gpu_kv_shape,
                     "attention_backend": ctx.attention_backend,
+                    "cache_size_per_token": ctx.cache_size_per_token(),
                 }
             gpu_context_meta[str(gpu_id)] = entry
 
@@ -798,8 +859,7 @@ def add_handler_helper(
 def run_cache_server(
     mp_config: MPServerConfig,
     storage_manager_config: StorageManagerConfig,
-    prometheus_config: PrometheusConfig,
-    telemetry_config: TelemetryConfig = DEFAULT_TELEMETRY_CONFIG,
+    obs_config: ObservabilityConfig,
     return_engine: bool = False,
 ):
     """
@@ -808,8 +868,7 @@ def run_cache_server(
     Args:
         mp_config: Configuration for the ZMQ multiprocess server
         storage_manager_config: Configuration for the storage manager
-        prometheus_config: Configuration for the Prometheus observability stack
-        telemetry_config: Configuration for the telemetry event system
+        obs_config: Configuration for the observability stack
         return_engine: If True, return (server, engine) after starting;
                        if False, run blocking loop to keep server alive
 
@@ -817,31 +876,7 @@ def run_cache_server(
         If return_engine is True: tuple of (MessageQueueServer, MPCacheEngine)
         If return_engine is False: None (blocks until interrupted)
     """
-    # Initialize global telemetry controller
-    init_telemetry_controller(telemetry_config)
-
-    # Initialize EventBus and register observability subscribers
-    # First Party
-    from lmcache.v1.mp_observability.event_bus import (
-        EventBusConfig,
-        init_event_bus,
-    )
-    from lmcache.v1.mp_observability.subscribers.metrics.l1 import (
-        L1MetricsSubscriber,
-    )
-    from lmcache.v1.mp_observability.subscribers.metrics.sm import (
-        SMMetricsSubscriber,
-    )
-
-    # Set up OTel MeterProvider BEFORE creating subscribers so that
-    # module-level get_meter() calls bind to the real provider
-    if prometheus_config.enabled:
-        init_otel_metrics(prometheus_port=prometheus_config.port)
-
-    bus = init_event_bus(EventBusConfig(enabled=prometheus_config.enabled))
-    bus.register_subscriber(L1MetricsSubscriber())
-    bus.register_subscriber(SMMetricsSubscriber())
-    bus.start()
+    event_bus = init_observability(obs_config)
 
     # Initialize the engine (loggers self-register with the global controller)
     engine = MPCacheEngine(
@@ -907,8 +942,6 @@ def run_cache_server(
     torch.cuda.init()
     server.start()
 
-    # Start telemetry controller
-    get_telemetry_controller().start()
     logger.info("LMCache cache server is running...")
 
     # Return server and engine if requested (for HTTP server integration)
@@ -921,7 +954,7 @@ def run_cache_server(
             time.sleep(1)
     except KeyboardInterrupt:
         logger.info("Shutting down server...")
-        get_telemetry_controller().stop()
+        event_bus.stop()
         server.close()
         engine.close()
 
@@ -932,8 +965,7 @@ def parse_args():
     )
     add_mp_server_args(parser)
     add_storage_manager_args(parser)
-    add_prometheus_args(parser)
-    add_telemetry_args(parser)
+    add_observability_args(parser)
     return parser.parse_args()
 
 
@@ -941,11 +973,9 @@ if __name__ == "__main__":
     args = parse_args()
     mp_config = parse_args_to_mp_server_config(args)
     storage_manager_config = parse_args_to_config(args)
-    prometheus_config = parse_args_to_prometheus_config(args)
-    telemetry_config = parse_args_to_telemetry_config(args)
+    obs_config = parse_args_to_observability_config(args)
     run_cache_server(
         mp_config=mp_config,
         storage_manager_config=storage_manager_config,
-        prometheus_config=prometheus_config,
-        telemetry_config=telemetry_config,
+        obs_config=obs_config,
     )

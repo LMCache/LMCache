@@ -3,17 +3,19 @@
 import torch
 
 # First Party
-from lmcache.integration.vllm.utils import get_vllm_torch_dev
 from lmcache.utils import EngineType
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.gpu_connector.gpu_connectors import GPUConnectorInterface
 from lmcache.v1.gpu_connector.mock_gpu_connector import MockGPUConnector
-from lmcache.v1.gpu_connector.utils import need_gpu_interm_buffer
+from lmcache.v1.gpu_connector.utils import LayoutHints, need_gpu_interm_buffer
 from lmcache.v1.metadata import LMCacheMetadata
 
 
 def CreateGPUConnector(
-    config: LMCacheEngineConfig, metadata: LMCacheMetadata, engine: EngineType
+    config: LMCacheEngineConfig,
+    metadata: LMCacheMetadata,
+    engine: EngineType,
+    layout_hints: LayoutHints | None = None,
 ) -> GPUConnectorInterface:
     """
     Create a GPU Connector based on the configuration and metadata.
@@ -23,6 +25,8 @@ def CreateGPUConnector(
         metadata: The LMCache metadata.
         engine: The serving engine type (EngineType.VLLM, EngineType.SGLANG,
                 or EngineType.MOCK).
+        layout_hints: Optional hints from the serving engine about KV cache
+            layout (e.g. ``{"kv_layout": "HND"}``).
     """
     use_gpu = need_gpu_interm_buffer(config)
 
@@ -59,6 +63,7 @@ def CreateGPUConnector(
             )
     elif engine == EngineType.VLLM:
         # First Party
+        from lmcache.integration.vllm.utils import get_vllm_torch_dev
         from lmcache.v1.gpu_connector.gpu_connectors import (
             VLLMBufferLayerwiseGPUConnector,
             VLLMPagedMemGPUConnectorV2,
@@ -87,21 +92,21 @@ def CreateGPUConnector(
         if config.use_layerwise:
             if config.enable_blending:
                 return VLLMBufferLayerwiseGPUConnector.from_metadata(
-                    metadata, use_gpu, device
+                    metadata, use_gpu, device, layout_hints=layout_hints
                 )
             else:
                 return VLLMPagedMemLayerwiseGPUConnector.from_metadata(
-                    metadata, use_gpu, device
+                    metadata, use_gpu, device, layout_hints=layout_hints
                 )
 
         elif dev_name == "cuda":
             if config.use_gpu_connector_v3:
                 return VLLMPagedMemGPUConnectorV3.from_metadata(
-                    metadata, use_gpu, device
+                    metadata, use_gpu, device, layout_hints=layout_hints
                 )
             else:
                 return VLLMPagedMemGPUConnectorV2.from_metadata(
-                    metadata, use_gpu, device
+                    metadata, use_gpu, device, layout_hints=layout_hints
                 )
 
         elif dev_name == "hpu":

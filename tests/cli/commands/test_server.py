@@ -147,5 +147,4 @@ class TestServerCommandExecute:
         assert "http_config" in kwargs
         assert "mp_config" in kwargs
         assert "storage_manager_config" in kwargs
-        assert "prometheus_config" in kwargs
-        assert "telemetry_config" in kwargs
+        assert "obs_config" in kwargs
