@@ -21,14 +21,14 @@ No extra flags are needed:
 
 .. code-block:: bash
 
-    python3 -m lmcache.v1.multiprocess.server \
+    lmcache server \
         --l1-size-gb 100 --eviction-policy LRU
 
 To enable tracing, supply an OTLP endpoint:
 
 .. code-block:: bash
 
-    python3 -m lmcache.v1.multiprocess.server \
+    lmcache server \
         --l1-size-gb 100 --eviction-policy LRU \
         --enable-tracing --otlp-endpoint http://localhost:4317
 
@@ -217,6 +217,6 @@ View traces in any OTel-compatible backend such as **Jaeger** or
         jaegertracing/all-in-one:latest
 
     # Start LMCache with tracing
-    python3 -m lmcache.v1.multiprocess.server \
+    lmcache server \
         --l1-size-gb 100 --eviction-policy LRU \
         --enable-tracing --otlp-endpoint http://localhost:4317

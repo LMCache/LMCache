@@ -218,7 +218,7 @@ ZMQ. The RESP connector serves as an L2 adapter with variable-size chunk support
 
 .. code-block:: bash
 
-    python -m lmcache.v1.multiprocess.server \
+    lmcache server \
         --l1-size-gb 10 \
         --eviction-policy LRU \
         --chunk-size 16 \

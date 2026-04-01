@@ -177,10 +177,14 @@ class TestParseArgs:
     def test_defaults(self) -> None:
         with patch("sys.argv", ["basic_check", "--mode", "x"]):
             args = parse_args()
-        assert args.num_keys == 100
+        assert args.num_keys == 5
         assert args.concurrency == 16
         assert args.offset == 0
         assert args.model == "/lmcache_test_model/"
+        assert args.l2_adapter == []
+        assert args.obj_size is None
+        assert args.kv_dtype is None
+        assert args.settle_time == 0.0
 
 
 # --------------- main() tests ---------------
@@ -255,4 +259,8 @@ class TestMain:
             num_keys=5,
             concurrency=2,
             offset=3,
+            l2_adapter=[],
+            obj_size=None,
+            kv_dtype=None,
+            settle_time=0.0,
         )
