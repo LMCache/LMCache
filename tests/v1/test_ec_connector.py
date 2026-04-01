@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
-import os
 import tempfile
+import time
 
 import torch
 
@@ -25,6 +25,33 @@ class _FakeTransferConfig:
 class _FakeVllmConfig:
     def __init__(self, storage_path: str):
         self.ec_transfer_config = _FakeTransferConfig(storage_path)
+        self.model_config = _FakeModelConfig()
+        self.parallel_config = _FakeParallelConfig()
+        self.cache_config = _FakeCacheConfig()
+
+
+class _FakeModelConfig:
+    model = "fake-model"
+    served_model_name = "fake-model"
+    dtype = torch.float16
+
+    def get_num_layers(self, parallel_config):
+        return 1
+
+    def get_num_kv_heads(self, parallel_config):
+        return 1
+
+    def get_head_size(self):
+        return 1
+
+
+class _FakeParallelConfig:
+    world_size = 1
+    rank = 0
+
+
+class _FakeCacheConfig:
+    cache_dtype = "auto"
 
 
 class _FakeRole:
@@ -50,22 +77,30 @@ def test_ec_roundtrip_save_then_load():
             parent=parent,
         )
 
-        mm_hash = "hash_abc"
-        x = torch.randn(7, 13, dtype=torch.float16)
-        encoder_cache = {mm_hash: x}
+        try:
+            mm_hash = "hash_abc"
+            x = torch.randn(7, 13, dtype=torch.float16)
+            encoder_cache = {mm_hash: x}
 
-        conn.save_caches(encoder_cache, mm_hash)
+            conn.save_caches(encoder_cache, mm_hash)
 
-        fn = os.path.join(td, mm_hash, "encoder_cache.safetensors")
-        assert os.path.exists(fn)
+            # EC storage is asynchronous across tiers; wait briefly for visibility.
+            deadline = time.time() + 2.0
+            while not conn.has_cache_item(mm_hash) and time.time() < deadline:
+                time.sleep(0.05)
 
-        meta = LMCacheECConnectorMetadata()
-        meta.add_mm_data(MMMeta.make_meta(mm_hash))
-        parent._meta = meta
+            assert conn.has_cache_item(mm_hash)
 
-        encoder_cache2 = {}
-        conn.start_load_caches(encoder_cache2)
+            # Minimal fake metadata plumbing
+            meta = LMCacheECConnectorMetadata()
+            meta.add_mm_data(MMMeta.make_meta(mm_hash))
+            parent._meta = meta
 
-        assert mm_hash in encoder_cache2
-        assert encoder_cache2[mm_hash].shape == x.shape
-        assert encoder_cache2[mm_hash].dtype == x.dtype
+            encoder_cache2 = {}
+            conn.start_load_caches(encoder_cache2)
+
+            assert mm_hash in encoder_cache2
+            assert encoder_cache2[mm_hash].shape == x.shape
+            assert encoder_cache2[mm_hash].dtype == x.dtype
+        finally:
+            conn.close()

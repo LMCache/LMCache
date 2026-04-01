@@ -77,10 +77,6 @@ class ECCacheEngine:
             available_backends,
         )
 
-        # EC transfer is simple contiguous tensor copy.
-        # v1: we normalize storage dtype to fp16 for key stability.
-        self._storage_dtype = torch.float16
-
     def close(self) -> None:
         if hasattr(self, "_storage_manager") and self._storage_manager is not None:
             self._storage_manager.close()
@@ -90,13 +86,13 @@ class ECCacheEngine:
 
     def put(self, key: CacheEngineKey, tensor: torch.Tensor) -> None:
         # Allocate via LMCache allocator (LocalCPUBackend) through StorageManager.
-        # Use the original tensor's shape but normalize to storage dtype (fp16).
+        # Preserve the source tensor dtype to avoid precision loss.
         mem_obj = self._storage_manager.allocate(
             shapes=tensor.shape,
-            dtypes=self._storage_dtype,
+            dtypes=tensor.dtype,
             fmt=MemoryFormat.EC_T2D,
             eviction=True,
-            busy_loop=True,
+            busy_loop=False,
         )
         if mem_obj is None or mem_obj.tensor is None:
             logger.warning("EC allocate failed; skipping put for key %s", key)
@@ -125,6 +121,9 @@ class ECCacheEngine:
             return None
 
         try:
-            return mem_obj.tensor.to(device=device)
+            out = mem_obj.tensor.to(device=device)
+            if out.data_ptr() == mem_obj.tensor.data_ptr():
+                out = out.clone()
+            return out
         finally:
             mem_obj.ref_count_down()
