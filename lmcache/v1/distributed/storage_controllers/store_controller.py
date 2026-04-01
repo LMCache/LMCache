@@ -27,6 +27,8 @@ from lmcache.v1.distributed.storage_controllers.store_policy import (
     AdapterDescriptor,
     StorePolicy,
 )
+from lmcache.v1.mp_observability.event import Event, EventType
+from lmcache.v1.mp_observability.event_bus import get_event_bus
 
 logger = init_logger(__name__)
 
@@ -177,6 +179,7 @@ class StoreController(StorageControllerInterface):
 
         self._listener = StoreListener()
         self._l1_manager.register_listener(self._listener)
+        self._event_bus = get_event_bus()
 
         # (adapter_index, task_id) -> InFlightStoreTask
         # Composite key is needed because task IDs are only unique
@@ -339,6 +342,16 @@ class StoreController(StorageControllerInterface):
             )
             self._status_in_flight_count += 1
 
+            self._event_bus.publish(
+                Event(
+                    event_type=EventType.L2_STORE_SUBMITTED,
+                    metadata={
+                        "adapter_index": adapter_index,
+                        "key_count": len(successful_keys),
+                    },
+                )
+            )
+
             logger.debug(
                 "Submitted store task %d to adapter %d with %d keys.",
                 task_id,
@@ -382,6 +395,16 @@ class StoreController(StorageControllerInterface):
             l1_mgr.finish_read(task.read_locked_keys)
 
             if success:
+                self._event_bus.publish(
+                    Event(
+                        event_type=EventType.L2_STORE_COMPLETED,
+                        metadata={
+                            "adapter_index": adapter_index,
+                            "succeeded_count": len(task.keys),
+                            "failed_count": 0,
+                        },
+                    )
+                )
                 logger.debug(
                     "L2 store task %d completed: adapter %d, %d keys.",
                     task_id,
@@ -392,6 +415,16 @@ class StoreController(StorageControllerInterface):
                 if delete_keys:
                     l1_mgr.delete(delete_keys)
             else:
+                self._event_bus.publish(
+                    Event(
+                        event_type=EventType.L2_STORE_COMPLETED,
+                        metadata={
+                            "adapter_index": adapter_index,
+                            "succeeded_count": 0,
+                            "failed_count": len(task.keys),
+                        },
+                    )
+                )
                 logger.warning(
                     "Store task %d to adapter %d failed for keys: %s",
                     task_id,

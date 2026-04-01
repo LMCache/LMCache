@@ -97,8 +97,6 @@ logger = init_logger(__name__)
 
 class BlendTokenRangeMatcher:
     # TODO(Jiayi): Needs thread-safety for this class.
-    # TODO(Jiayi): Currently, the table size is fixed. We need to support
-    # dynamic expanding or eviction.
     """Fast token-range matcher using polynomial rolling/chunk hashes and a
     direct-address lookup table.
 
@@ -109,13 +107,18 @@ class BlendTokenRangeMatcher:
     sized by an arbitrary max hash — no memory explosion.
 
     Auxiliary storage:
-      _chunk_token_hash[i] : caller-supplied token_hash for chunk i
-      _token_hash_to_start : token_hash → start position in the registered seq
+      _chunk_token_hash[i]      : token_hash for chunk i (None if evicted)
+      _token_hash_to_start      : token_hash → start position in seq
+      _compact_id_to_slot[i]    : table slot for compact_id i
+      _token_hash_to_compact_id : token_hash → compact_chunk_id
 
-    on_new_token_hashes  – register a sequence; chunk_hash_windows_numba(token_hashes)
-                        builds fingerprints, update_table_id_numba writes compact IDs.
-    match_sub_sequence – rolling_hash_windows_numba + unique_hits_direct_id_numba
-                         (num_ids=_TABLE_SIZE) → compact IDs → token_hash → start.
+    Methods:
+      on_new_token_hashes  – register a sequence; builds fingerprints
+                             and writes compact IDs.
+      match_sub_sequence   – sliding-window probe → compact IDs →
+                             token_hash → start. Skips evicted entries.
+      remove_chunks        – lazily evict stale entries. Clears the
+                             table slot and auxiliary maps.
     """
 
     _TABLE_BITS: int = 20  # 2^20 ≈ 1 M entries
@@ -128,9 +131,13 @@ class BlendTokenRangeMatcher:
         self._table_id = np.full(self._TABLE_SIZE, -1, dtype=np.int64)
         self._mask = np.uint64(self._TABLE_SIZE - 1)
         # compact_chunk_id → caller-supplied token_hash (full bytes)
-        self._chunk_token_hash: list[bytes] = []
+        self._chunk_token_hash: list[bytes | None] = []
         # token_hash → start position in its registered sequence
         self._token_hash_to_start: dict[bytes, int] = {}
+        # compact_chunk_id → table slot index (for reverse lookup during eviction)
+        self._compact_id_to_slot = np.full(self._TABLE_SIZE, -1, dtype=np.int64)
+        # token_hash → compact_chunk_id (for eviction lookup)
+        self._token_hash_to_compact_id: dict[bytes, int] = {}
 
     def on_new_token_hashes(
         self,
@@ -162,11 +169,15 @@ class BlendTokenRangeMatcher:
         # Write table: poly_chunk_hash → compact_chunk_id
         update_table_id_numba(chunk_hashes, self._table_id, compact_ids)
 
-        # Persist compact_id → token_hash and token_hash → start
+        # Persist compact_id → token_hash, token_hash → start, and reverse maps
         for i in range(n):
             th = token_hashes[i]
+            cid = int(compact_ids[i])
+            slot = int(chunk_hashes[i]) & int(self._mask)
             self._chunk_token_hash.append(th)
             self._token_hash_to_start[th] = i * self.chunk_size
+            self._compact_id_to_slot[cid] = slot
+            self._token_hash_to_compact_id[th] = cid
 
     def match_sub_sequence(
         self,
@@ -175,7 +186,8 @@ class BlendTokenRangeMatcher:
         """Find stored chunks whose fingerprints appear anywhere in token_ids.
 
         Uses a sliding-window rolling hash so matches need not be aligned to
-        chunk_size boundaries in the query.
+        chunk_size boundaries in the query.  Entries previously evicted via
+        remove_chunks (token_hash set to None) are silently skipped.
 
         Args:
             token_ids: Query token sequence to probe (raw token IDs as uint64).
@@ -218,6 +230,8 @@ class BlendTokenRangeMatcher:
         for cid in hit_ids:
             cid_int = int(cid)
             th = self._chunk_token_hash[cid_int]
+            if th is None:
+                continue
             old_st = self._token_hash_to_start.get(th)
             cur_st = cid_to_query_pos.get(cid_int)
             if old_st is None or cur_st is None:
@@ -232,6 +246,32 @@ class BlendTokenRangeMatcher:
                 )
             )
         return results
+
+    def remove_chunks(self, token_hashes: list[bytes]) -> None:
+        """Evict stale entries whose backing data is no longer in storage.
+
+        Args:
+            token_hashes: Token hashes of chunks to remove from the table.
+        """
+        for th in token_hashes:
+            cid = self._token_hash_to_compact_id.get(th)
+            if cid is None:
+                continue
+            # Clear the table slot
+            slot = int(self._compact_id_to_slot[cid])
+            if slot < 0:
+                logger.warning(
+                    "compact_id %d has no valid table slot; "
+                    "entry may have been evicted twice",
+                    cid,
+                )
+                continue
+            self._table_id[slot] = -1
+            self._compact_id_to_slot[cid] = -1
+            # Clean up auxiliary maps
+            self._chunk_token_hash[cid] = None
+            self._token_hash_to_start.pop(th, None)
+            del self._token_hash_to_compact_id[th]
 
 
 # Main class and main functions
@@ -303,6 +343,8 @@ class BlendEngineV2(MPCacheEngine):
 
         Uses BlendTokenRangeMatcher for a fast local pre-filter, then submits
         prefetch tasks for matched chunks using their stored hashes directly.
+        Chunks that the fingerprint table matched but are no longer present in
+        storage are lazily evicted from the matcher via remove_chunks.
 
         Args:
             key: IPCCacheEngineKey containing the token ids to lookup
@@ -371,6 +413,7 @@ class BlendEngineV2(MPCacheEngine):
         # TODO(Jiayi): We need to follow how lookup is handled in server.py
         # to optimize performance.
         # Collect only the CBMatchResults for chunks actually found in storage
+        stale_hashes: list[bytes] = []
         for handle, group in zip(prefetch_handles, groups, strict=False):
             found_count = None
             while True:
@@ -390,6 +433,8 @@ class BlendEngineV2(MPCacheEngine):
             end = group[-1].cur_ed
             if found_count > 0:
                 found_cb_match_result.extend(group[:found_count])
+                # Chunks after found_count in the group are stale
+                stale_hashes.extend(r.hash for r in group[found_count:])
                 logger.debug(
                     "Found %d pre-computed chunks for range (%d, %d)",
                     found_count,
@@ -397,11 +442,20 @@ class BlendEngineV2(MPCacheEngine):
                     end,
                 )
             else:
+                stale_hashes.extend(r.hash for r in group)
                 logger.debug(
                     "No pre-computed chunks found for range (%d, %d)",
                     start,
                     end,
                 )
+
+        # Evict stale entries from the fingerprint table
+        if stale_hashes:
+            self._token_range_matcher.remove_chunks(stale_hashes)
+            logger.debug(
+                "Evicted %d stale chunks from fingerprint table",
+                len(stale_hashes),
+            )
 
         return found_cb_match_result
 
