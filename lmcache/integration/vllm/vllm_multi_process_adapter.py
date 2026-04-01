@@ -447,6 +447,30 @@ class LMCacheMPSchedulerAdapter:
             [request_id],
         )
 
+    def report_block_allocations(
+        self,
+        records: list[dict],
+    ) -> None:
+        """Report vLLM GPU block allocation deltas to LMCache server.
+
+        Fire-and-forget: does not wait for a response. If the server
+        is unhealthy the report is silently dropped.
+
+        Args:
+            records: List of allocation records, each a dict with:
+                - req_id (str): vLLM request ID
+                - new_block_ids (list[int]): newly allocated block IDs
+                - new_token_ids (list[int]): newly scheduled token IDs
+        """
+        if not self.is_healthy or not records:
+            return
+
+        send_lmcache_request(
+            self.mq_client,
+            RequestType.REPORT_BLOCK_ALLOCATION,
+            [records],
+        )
+
     # Helper functions
     def _create_key(
         self,

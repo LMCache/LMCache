@@ -819,6 +819,22 @@ class MPCacheEngine:
             "storage_manager": sm,
         }
 
+    def report_block_allocations(self, records: list) -> None:
+        """Publish vLLM block allocation records to the EventBus.
+
+        Args:
+            records: List of dicts, each with keys:
+                - req_id (str)
+                - new_block_ids (list[int])
+                - new_token_ids (list[int])
+        """
+        self._event_bus.publish(
+            Event(
+                event_type=EventType.VLLM_BLOCK_ALLOCATION,
+                metadata={"records": records},
+            )
+        )
+
     def debug(self) -> str:
         return "OK"
 
@@ -914,6 +930,11 @@ def run_cache_server(
     add_handler_helper(server, RequestType.PING, engine.ping)
     add_handler_helper(server, RequestType.END_SESSION, engine.end_session)
     add_handler_helper(server, RequestType.NOOP, engine.debug)
+    add_handler_helper(
+        server,
+        RequestType.REPORT_BLOCK_ALLOCATION,
+        engine.report_block_allocations,
+    )
 
     # Assign thread pools
     server.add_affinity_thread_pool(
