@@ -4,6 +4,7 @@
 # CUDA-specific operations.
 #
 # Standard
+from enum import Enum, IntEnum
 from multiprocessing import shared_memory
 import ctypes
 
@@ -17,12 +18,53 @@ _shm_registry: dict[int, shared_memory.SharedMemory] = {}
 _buf_registry: dict[int, ctypes.Array] = {}
 
 
+class TransferDirection(Enum):
+    """Specifies the direction of a memory transfer."""
+
+    H2D = 0
+    D2H = 1
+
+
+class GPUKVFormat(IntEnum):
+    """Enumeration of different GPU KV cache memory layouts."""
+
+    # used by: vLLM CROSS_LAYER mode
+    NB_NL_TWO_BS_NH_HS = 0
+
+    # used by: vLLM non-MLA flash attention
+    NL_X_TWO_NB_BS_NH_HS = 1
+
+    # used by: vLLM non-MLA flash infer
+    NL_X_NB_TWO_BS_NH_HS = 2
+
+    # used by: vLLM MLA
+    NL_X_NB_BS_HS = 3
+
+    # used by: SGLang MHA (flash attention and flash infer)
+    TWO_X_NL_X_NBBS_NH_HS = 4
+
+    # used by: SGLang MLA
+    NL_X_NBBS_ONE_HS = 5
+
+    # used by: vLLM non-MLA flash attention (HND layout)
+    NL_X_TWO_NB_NH_BS_HS = 6
+
+    # used by: vLLM non-MLA flash infer (HND layout)
+    NL_X_NB_TWO_NH_BS_HS = 7
+
+
+# On XPU (Intel GPU), PyTorch 2.4+ supports pin_memory=True via SYCL USM
+# host allocation, enabling fast DMA for XPU<->CPU transfers.
+_XPU_PIN_MEMORY = hasattr(torch, "xpu") and torch.xpu.is_available()
+
+
 def alloc_pinned_numa_ptr(size: int, numa_id: int = 0) -> int:
     """Non-CUDA equivalent of allocating pinned memory with NUMA awareness.
-    Note: NUMA and pinned memory are not supported on non-CUDA."""
+    On XPU, uses pin_memory=True (SYCL USM host allocation) for fast transfers.
+    Note: NUMA node selection is not supported on non-CUDA."""
 
     # Create a 1D uint8 CPU tensor, as uint8 == 1 byte
-    tensor = torch.empty(size, dtype=torch.uint8, pin_memory=False)
+    tensor = torch.empty(size, dtype=torch.uint8, pin_memory=_XPU_PIN_MEMORY)
 
     # First-touch initialization (forces physical allocation)
     tensor.fill_(0)
@@ -46,10 +88,11 @@ def free_pinned_numa_ptr(ptr: int, size: int | None = None) -> None:
 
 def alloc_pinned_ptr(size: int, device_id: int = 0) -> int:
     """Non-CUDA equivalent of allocating pinned memory and returning pointer
-    to it. Note: Pinned memory is not supported on non-CUDA."""
+    to it. On XPU, uses pin_memory=True (SYCL USM host allocation) for
+    fast DMA transfers. On other non-CUDA platforms, pinning is not supported."""
 
     # Create a 1D uint8 CPU tensor, as uint8 == 1 byte
-    tensor = torch.empty(size, dtype=torch.uint8, pin_memory=False)
+    tensor = torch.empty(size, dtype=torch.uint8, pin_memory=_XPU_PIN_MEMORY)
 
     # First-touch initialization (forces physical allocation)
     tensor.fill_(0)

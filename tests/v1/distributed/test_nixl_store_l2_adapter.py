@@ -11,6 +11,7 @@ import os
 import select
 import shutil
 import tempfile
+import time
 
 # Third Party
 import pytest
@@ -20,11 +21,35 @@ nixl = pytest.importorskip("nixl")
 
 # First Party
 from lmcache.v1.distributed.api import ObjectKey  # noqa: E402
-from lmcache.v1.distributed.internal_api import L1MemoryDesc  # noqa: E402
+from lmcache.v1.distributed.internal_api import (  # noqa: E402
+    L1MemoryDesc,
+    L2AdapterListener,
+)
 from lmcache.v1.distributed.l2_adapters.nixl_store_l2_adapter import (  # noqa: E402
     NixlStoreL2Adapter,
     NixlStoreL2AdapterConfig,
 )
+
+
+class _RecordingListener(L2AdapterListener):
+    """Listener that records all events for inspection in tests."""
+
+    def __init__(self):
+        self.stored: list[list[ObjectKey]] = []
+        self.accessed: list[list[ObjectKey]] = []
+        self.deleted: list[list[ObjectKey]] = []
+
+    def on_l2_keys_stored(self, keys: list[ObjectKey]):
+        self.stored.append(list(keys))
+
+    def on_l2_keys_accessed(self, keys: list[ObjectKey]):
+        self.accessed.append(list(keys))
+
+    def on_l2_keys_deleted(self, keys: list[ObjectKey]):
+        self.deleted.append(list(keys))
+
+
+# First Party
 from lmcache.v1.memory_management import (  # noqa: E402
     MemoryFormat,
     MemoryObjMetadata,
@@ -803,3 +828,237 @@ class TestReportStatus:
         assert status["event_loop_alive"] is False
 
         shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+# =============================================================================
+# Eviction Interface Tests
+# =============================================================================
+
+
+def _store_and_wait(adpt, key, obj):
+    """Helper: store one key and wait for the store event fd to fire."""
+    store_fd = adpt.get_store_event_fd()
+    adpt.submit_store_task([key], [obj])
+    assert wait_for_event_fd(store_fd, timeout=5.0), "store timed out"
+    adpt.pop_completed_store_tasks()
+
+
+@pytest.mark.skip(
+    reason="Leaks file descriptors — "
+    "NixlStorageAgent.close() does not close os.open() FDs"
+)
+class TestEvictionInterface:
+    """Tests for delete(), get_usage(), and listener notifications."""
+
+    def test_delete_removes_key(self, adapter):
+        """delete() should make the key invisible to subsequent lookups."""
+        adpt, buf = adapter
+        key = create_object_key(1)
+        obj = create_memory_obj(buf, page_index=0)
+        lookup_fd = adpt.get_lookup_and_lock_event_fd()
+
+        _store_and_wait(adpt, key, obj)
+
+        adpt.delete([key])
+
+        task_id = adpt.submit_lookup_and_lock_task([key])
+        assert wait_for_event_fd(lookup_fd, timeout=5.0)
+        bitmap = adpt.query_lookup_and_lock_result(task_id)
+        assert bitmap.test(0) is False
+
+    def test_delete_nonexistent_key_does_not_raise(self, adapter):
+        """delete() on a key that was never stored should not raise."""
+        adpt, _ = adapter
+        adpt.delete([create_object_key(999)])
+
+    def test_delete_frees_pool_slot(self, adapter):
+        """delete() should release the storage pool slot back to the pool."""
+        adpt, buf = adapter
+        key = create_object_key(1)
+        obj = create_memory_obj(buf, page_index=0)
+
+        _store_and_wait(adpt, key, obj)
+        usage_after_store, _ = adpt.get_usage()
+        assert usage_after_store > 0.0
+
+        adpt.delete([key])
+
+        usage_after_delete, _ = adpt.get_usage()
+        assert usage_after_delete < usage_after_store
+
+    def test_get_usage_empty_adapter_is_zero(self, adapter):
+        """get_usage() on a fresh adapter should return (0.0, 0.0)."""
+        adpt, _ = adapter
+        current, projected = adpt.get_usage()
+        assert current == 0.0
+        assert projected == 0.0
+
+    def test_get_usage_increases_after_store(self, adapter):
+        """get_usage() current value should be > 0 after storing an object."""
+        adpt, buf = adapter
+        key = create_object_key(1)
+        obj = create_memory_obj(buf, page_index=0)
+        _store_and_wait(adpt, key, obj)
+
+        current, _ = adpt.get_usage()
+        assert current > 0.0
+        assert current <= 1.0
+
+    def test_get_usage_reflects_multiple_stores(self, adapter):
+        """get_usage() should increase monotonically as more objects are stored."""
+        adpt, buf = adapter
+        store_fd = adpt.get_store_event_fd()
+
+        keys = [create_object_key(i) for i in range(3)]
+        objs = [create_memory_obj(buf, page_index=i) for i in range(3)]
+        adpt.submit_store_task(keys, objs)
+        assert wait_for_event_fd(store_fd, timeout=5.0)
+        adpt.pop_completed_store_tasks()
+
+        current, _ = adpt.get_usage()
+        # 3 out of POOL_SIZE slots used
+        assert current == pytest.approx(3 / POOL_SIZE)
+
+    def test_delete_pinned_key_is_skipped(self, adapter):
+        """delete() should skip a key that is pinned by an in-flight lookup."""
+        adpt, buf = adapter
+        key = create_object_key(1)
+        obj = create_memory_obj(buf, page_index=0)
+        lookup_fd = adpt.get_lookup_and_lock_event_fd()
+
+        _store_and_wait(adpt, key, obj)
+
+        # Pin the key via lookup_and_lock
+        task_id = adpt.submit_lookup_and_lock_task([key])
+        assert wait_for_event_fd(lookup_fd, timeout=5.0)
+        adpt.query_lookup_and_lock_result(task_id)
+
+        # delete should skip the pinned key — stored_object_count stays 1
+        adpt.delete([key])
+        assert adpt.report_status()["stored_object_count"] == 1
+
+        # Unpin, then delete should succeed
+        adpt.submit_unlock([key])
+        time.sleep(0.1)  # let the unlock execute in the event loop
+        adpt.delete([key])
+        assert adpt.report_status()["stored_object_count"] == 0
+
+    def test_listener_notified_on_store(self, adapter):
+        """Listener.on_l2_keys_stored should be called after a store completes."""
+        adpt, buf = adapter
+        listener = _RecordingListener()
+        adpt.register_listener(listener)
+
+        key = create_object_key(1)
+        obj = create_memory_obj(buf, page_index=0)
+        _store_and_wait(adpt, key, obj)
+
+        assert len(listener.stored) == 1
+        assert key in listener.stored[0]
+        assert listener.deleted == []
+
+    def test_listener_notified_on_load(self, adapter):
+        """Listener.on_l2_keys_accessed should be called after a load completes."""
+        adpt, buf = adapter
+        listener = _RecordingListener()
+        adpt.register_listener(listener)
+
+        key = create_object_key(1)
+        store_obj = create_memory_obj(buf, page_index=0, fill_value=42.0)
+        store_fd = adpt.get_store_event_fd()
+        load_fd = adpt.get_load_event_fd()
+        lookup_fd = adpt.get_lookup_and_lock_event_fd()
+
+        # Store
+        adpt.submit_store_task([key], [store_obj])
+        assert wait_for_event_fd(store_fd, timeout=5.0)
+        adpt.pop_completed_store_tasks()
+
+        # Lookup and lock (required before load)
+        task_id = adpt.submit_lookup_and_lock_task([key])
+        assert wait_for_event_fd(lookup_fd, timeout=5.0)
+        adpt.query_lookup_and_lock_result(task_id)
+
+        # Load
+        load_obj = create_memory_obj(buf, page_index=1, fill_value=0.0)
+        adpt.submit_load_task([key], [load_obj])
+        assert wait_for_event_fd(load_fd, timeout=5.0)
+
+        assert len(listener.accessed) == 1
+        assert key in listener.accessed[0]
+
+        adpt.submit_unlock([key])
+
+    def test_listener_load_skips_missing_keys(self, adapter):
+        """on_l2_keys_accessed should only include keys that were actually loaded."""
+        adpt, buf = adapter
+        listener = _RecordingListener()
+        adpt.register_listener(listener)
+
+        real_key = create_object_key(1)
+        missing_key = create_object_key(999)
+        store_obj = create_memory_obj(buf, page_index=0, fill_value=42.0)
+        store_fd = adpt.get_store_event_fd()
+        load_fd = adpt.get_load_event_fd()
+        lookup_fd = adpt.get_lookup_and_lock_event_fd()
+
+        # Store only real_key
+        adpt.submit_store_task([real_key], [store_obj])
+        assert wait_for_event_fd(store_fd, timeout=5.0)
+        adpt.pop_completed_store_tasks()
+
+        # Lookup and lock
+        task_id = adpt.submit_lookup_and_lock_task([real_key])
+        assert wait_for_event_fd(lookup_fd, timeout=5.0)
+        adpt.query_lookup_and_lock_result(task_id)
+
+        # Load both keys
+        load_obj1 = create_memory_obj(buf, page_index=1, fill_value=0.0)
+        load_obj2 = create_memory_obj(buf, page_index=2, fill_value=0.0)
+        adpt.submit_load_task([real_key, missing_key], [load_obj1, load_obj2])
+        assert wait_for_event_fd(load_fd, timeout=5.0)
+
+        assert len(listener.accessed) == 1
+        assert real_key in listener.accessed[0]
+        assert missing_key not in listener.accessed[0]
+
+        adpt.submit_unlock([real_key])
+
+    def test_listener_notified_on_delete(self, adapter):
+        """Listener.on_l2_keys_deleted should be called after delete()."""
+        adpt, buf = adapter
+        listener = _RecordingListener()
+        adpt.register_listener(listener)
+
+        key = create_object_key(1)
+        obj = create_memory_obj(buf, page_index=0)
+        _store_and_wait(adpt, key, obj)
+        adpt.delete([key])
+
+        assert len(listener.deleted) == 1
+        assert key in listener.deleted[0]
+
+    def test_listener_delete_skips_pinned_key(self, adapter):
+        """
+        on_l2_keys_deleted should not include keys
+        that were skipped due to pinning.
+        """
+        adpt, buf = adapter
+        listener = _RecordingListener()
+        adpt.register_listener(listener)
+
+        key = create_object_key(1)
+        obj = create_memory_obj(buf, page_index=0)
+        lookup_fd = adpt.get_lookup_and_lock_event_fd()
+
+        _store_and_wait(adpt, key, obj)
+
+        # Pin via lookup
+        task_id = adpt.submit_lookup_and_lock_task([key])
+        assert wait_for_event_fd(lookup_fd, timeout=5.0)
+        adpt.query_lookup_and_lock_result(task_id)
+
+        # delete while pinned — should be skipped
+        adpt.delete([key])
+
+        assert listener.deleted == []

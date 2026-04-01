@@ -63,12 +63,23 @@ def init_logger(name: str) -> Logger:
     logger.propagate = False
 
     # Add our custom handler
+    log_level = get_log_level()
     ch = logging.StreamHandler()
-    ch.setLevel(get_log_level())
+    ch.setLevel(log_level)
     ch.setFormatter(CustomFormatter())
     logger.addHandler(ch)
 
-    logger.setLevel(get_log_level())
+    # OTel log forwarding (no-op if opentelemetry is not installed or
+    # no LoggerProvider has been configured at startup)
+    try:
+        # Third Party
+        from opentelemetry.sdk._logs import LoggingHandler
+
+        logger.addHandler(LoggingHandler(level=log_level))
+    except ImportError:
+        pass
+
+    logger.setLevel(log_level)
     return logger
 
 
