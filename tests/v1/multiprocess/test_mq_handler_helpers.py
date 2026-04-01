@@ -148,7 +148,7 @@ def retrieve_handler(
         skip_first_n_tokens: Number of tokens to skip at retrieve start
 
     Returns:
-        tuple[bytes, tuple[bool, list[int]]]: (event handle, (success, failed_block_ids))
+        tuple[bytes, tuple[bool, list[int]]]: (event handle, (success, bad_block_ids))
     """
     assert isinstance(key, KeyType), f"Expected key to be KeyType, got {type(key)}"
     assert isinstance(gpu_id, int), f"Expected gpu_id to be int, got {type(gpu_id)}"

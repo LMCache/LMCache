@@ -26,7 +26,6 @@ from lmcache.v1.distributed.config import (
     parse_args_to_config,
 )
 from lmcache.v1.distributed.storage_manager import (
-    PartialReadResult,
     PrefetchHandle,
     StorageManager,
 )
@@ -604,7 +603,6 @@ class MPCacheEngine:
                 block_end = block_start + blocks_per_chunk
                 chunk_block_ids_gpu = all_block_ids_gpu[block_start:block_end]
 
-                # Stage the single chunk to a temp GPU buffer, then scatter it into the designated physical blocks
                 tmp_buffers = gpu_context.get_tmp_gpu_buffer_batched(self.chunk_size, 1)
                 tmp_buffer = tmp_buffers[0]
                 assert memory_obj.tensor is not None
@@ -655,7 +653,6 @@ class MPCacheEngine:
                                 partial_result.good_indices,
                             )
                         else:
-                            # If there are no bad indices, we can batch the retrieve loop instead of per-chunk copies.
                             _retrieve_loop(obj_keys, partial_result.good_objs)
 
                     prefetched_keys = obj_keys[: len(memory_objs)]

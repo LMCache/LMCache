@@ -1125,8 +1125,7 @@ class LMCacheMPWorkerAdapter:
             success, failed_block_ids = r_result
             if failed_block_ids:
                 logger.warning(
-                    "Retrieve for request_id=%s had %d failed block(s) "
-                    "out of %d total",
+                    "Retrieve for request_id=%s had %d failed block(s) out of %d total",
                     request_id,
                     len(failed_block_ids),
                     len(r_block_ids),
