@@ -19,7 +19,7 @@ Docker
         --network host \
         --ipc host \
         lmcache/standalone:nightly \
-        /opt/venv/bin/python3 -m lmcache.v1.multiprocess.server \
+        /opt/venv/bin/lmcache server \
         --l1-size-gb 60 --eviction-policy LRU --max-workers 4 --port 6555
 
 **vLLM container:**
