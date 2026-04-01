@@ -574,7 +574,7 @@ class TestClose:
 class TestRESPL2AdapterConfig:
     def test_from_dict_minimal(self):
         # First Party
-        from lmcache.v1.distributed.l2_adapters.native_connector_l2_adapter import (
+        from lmcache.v1.distributed.l2_adapters.resp_l2_adapter import (
             RESPL2AdapterConfig,
         )
 
@@ -593,7 +593,7 @@ class TestRESPL2AdapterConfig:
 
     def test_from_dict_full(self):
         # First Party
-        from lmcache.v1.distributed.l2_adapters.native_connector_l2_adapter import (
+        from lmcache.v1.distributed.l2_adapters.resp_l2_adapter import (
             RESPL2AdapterConfig,
         )
 
@@ -615,7 +615,7 @@ class TestRESPL2AdapterConfig:
 
     def test_from_dict_missing_host_raises(self):
         # First Party
-        from lmcache.v1.distributed.l2_adapters.native_connector_l2_adapter import (
+        from lmcache.v1.distributed.l2_adapters.resp_l2_adapter import (
             RESPL2AdapterConfig,
         )
 
@@ -624,7 +624,7 @@ class TestRESPL2AdapterConfig:
 
     def test_from_dict_missing_port_raises(self):
         # First Party
-        from lmcache.v1.distributed.l2_adapters.native_connector_l2_adapter import (
+        from lmcache.v1.distributed.l2_adapters.resp_l2_adapter import (
             RESPL2AdapterConfig,
         )
 
