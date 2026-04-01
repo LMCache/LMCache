@@ -10,6 +10,15 @@
 #include <linux/mempolicy.h>  // for MPOL_BIND, MPOL_MF_MOVE, MPOL_MF_STRICT
 #include "mem_alloc.h"
 
+static void* _mmap_anon(size_t size, bool hugepages) {
+  int flags = MAP_PRIVATE | MAP_ANONYMOUS;
+  if (hugepages) flags |= MAP_HUGETLB;
+  void* ptr = mmap(nullptr, size, PROT_READ | PROT_WRITE, flags, -1, 0);
+  if (ptr == MAP_FAILED)
+    throw std::runtime_error(std::string("mmap failed: ") + strerror(errno));
+  return ptr;
+}
+
 uintptr_t alloc_pinned_ptr(size_t size, unsigned int flags) {
   void* ptr = nullptr;
   cudaError_t err = cudaHostAlloc(&ptr, size, flags);
@@ -23,6 +32,33 @@ void free_pinned_ptr(uintptr_t ptr) {
   cudaError_t err = cudaFreeHost(reinterpret_cast<void*>(ptr));
   if (err != cudaSuccess) {
     throw std::runtime_error("cudaFreeHost failed: " + std::to_string(err));
+  }
+}
+
+uintptr_t alloc_hugepage_pinned_ptr(size_t size, unsigned int flags) {
+  void* ptr = _mmap_anon(size, true);
+
+  cudaError_t st = cudaHostRegister(ptr, size, flags);
+  if (st != cudaSuccess) {
+    munmap(ptr, size);
+    throw std::runtime_error(std::string("cudaHostRegister failed: ") +
+                             cudaGetErrorString(st));
+  }
+
+  return reinterpret_cast<uintptr_t>(ptr);
+}
+
+void free_hugepage_pinned_ptr(uintptr_t ptr, size_t size) {
+  void* p = reinterpret_cast<void*>(ptr);
+  // Unpin first, then unmap.
+  cudaError_t st = cudaHostUnregister(p);
+  if (st != cudaSuccess) {
+    munmap(p, size);
+    throw std::runtime_error(std::string("cudaHostUnregister failed: ") +
+                             cudaGetErrorString(st));
+  }
+  if (munmap(p, size) != 0) {
+    throw std::runtime_error(std::string("munmap failed: ") + strerror(errno));
   }
 }
 
@@ -41,11 +77,8 @@ static inline int mbind_sys(void* addr, unsigned long len, int mode,
   return (rc == -1) ? -errno : 0;
 }
 
-uintptr_t alloc_numa_ptr(size_t size, int node) {
-  void* ptr = mmap(nullptr, size, PROT_READ | PROT_WRITE,
-                   MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-  if (ptr == MAP_FAILED)
-    throw std::runtime_error(std::string("mmap failed: ") + strerror(errno));
+static uintptr_t _alloc_numa_impl(size_t size, int node, bool hugepages) {
+  void* ptr = _mmap_anon(size, hugepages);
 
   // Maximum of 64 numa nodes
   unsigned long mask = 1UL << node;
@@ -62,6 +95,14 @@ uintptr_t alloc_numa_ptr(size_t size, int node) {
   return reinterpret_cast<uintptr_t>(ptr);
 }
 
+uintptr_t alloc_numa_ptr(size_t size, int node) {
+  return _alloc_numa_impl(size, node, false);
+}
+
+uintptr_t alloc_hugepage_numa_ptr(size_t size, int node) {
+  return _alloc_numa_impl(size, node, true);
+}
+
 void free_numa_ptr(uintptr_t ptr, size_t size) {
   void* p = reinterpret_cast<void*>(ptr);
   if (munmap(p, size) != 0) {
@@ -69,8 +110,14 @@ void free_numa_ptr(uintptr_t ptr, size_t size) {
   }
 }
 
-uintptr_t alloc_pinned_numa_ptr(size_t size, int node) {
-  void* ptr = reinterpret_cast<void*>(alloc_numa_ptr(size, node));
+void free_hugepage_numa_ptr(uintptr_t ptr, size_t size) {
+  // Exactly the same as free_numa_ptr...
+  free_numa_ptr(ptr, size);
+}
+
+static uintptr_t _alloc_pinned_numa_impl(size_t size, int node,
+                                         bool hugepages) {
+  void* ptr = reinterpret_cast<void*>(_alloc_numa_impl(size, node, hugepages));
 
   cudaError_t st = cudaHostRegister(ptr, size, 0);
   if (st != cudaSuccess) {
@@ -80,6 +127,14 @@ uintptr_t alloc_pinned_numa_ptr(size_t size, int node) {
   }
 
   return reinterpret_cast<uintptr_t>(ptr);
+}
+
+uintptr_t alloc_pinned_numa_ptr(size_t size, int node) {
+  return _alloc_pinned_numa_impl(size, node, false);
+}
+
+uintptr_t alloc_hugepage_pinned_numa_ptr(size_t size, int node) {
+  return _alloc_pinned_numa_impl(size, node, true);
 }
 
 void free_pinned_numa_ptr(uintptr_t ptr, size_t size) {
@@ -94,6 +149,11 @@ void free_pinned_numa_ptr(uintptr_t ptr, size_t size) {
   if (munmap(p, size) != 0) {
     throw std::runtime_error(std::string("munmap failed: ") + strerror(errno));
   }
+}
+
+void free_hugepage_pinned_numa_ptr(uintptr_t ptr, size_t size) {
+  // Exactly the same as free_pinned_numa_ptr...
+  free_pinned_numa_ptr(ptr, size);
 }
 
 uintptr_t alloc_shm_pinned_ptr(size_t size, const std::string& shm_name) {
