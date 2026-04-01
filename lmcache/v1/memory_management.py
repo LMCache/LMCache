@@ -375,6 +375,7 @@ def _resolve_pinned_alloc_free(
     numa_mapping: Optional[NUMAMapping] = None,
     shm_name: Optional[str] = None,
     size: Optional[int] = None,
+    use_hugepages: bool = False,
 ) -> Tuple[
     tuple,  # (alloc_fn, *alloc_args)
     tuple,  # (free_fn, *free_args_after_ptr)
@@ -387,6 +388,7 @@ def _resolve_pinned_alloc_free(
         - free_info: (free_fn, *args) to call as free_fn(ptr, *args)
     """
     if shm_name:
+        assert not use_hugepages, "Hugepages not supported with shm"
         return (
             (lmc_ops.alloc_shm_pinned_ptr, shm_name),
             (lmc_ops.free_shm_pinned_ptr, size, shm_name),
@@ -401,21 +403,34 @@ def _resolve_pinned_alloc_free(
             f"Current device {current_device_id} is not in the GPU NUMA mapping."
         )
         numa_id = gpu_to_numa_mapping[current_device_id]
-        return (
-            (lmc_ops.alloc_pinned_numa_ptr, numa_id),
-            (lmc_ops.free_pinned_numa_ptr, size),
-        )
+        if use_hugepages:
+            return (
+                (lmc_ops.alloc_hugepage_pinned_numa_ptr, numa_id),
+                (lmc_ops.free_hugepage_pinned_numa_ptr, size),
+            )
+        else:
+            return (
+                (lmc_ops.alloc_pinned_numa_ptr, numa_id),
+                (lmc_ops.free_pinned_numa_ptr, size),
+            )
     else:
-        return (
-            (lmc_ops.alloc_pinned_ptr, 0),
-            (lmc_ops.free_pinned_ptr,),
-        )
+        if use_hugepages:
+            return (
+                (lmc_ops.alloc_hugepage_pinned_ptr, 0),
+                (lmc_ops.free_hugepage_pinned_ptr, size),
+            )
+        else:
+            return (
+                (lmc_ops.alloc_pinned_ptr, 0),
+                (lmc_ops.free_pinned_ptr,),
+            )
 
 
 def _allocate_cpu_memory(
     size: int,
     numa_mapping: Optional[NUMAMapping] = None,
     shm_name: Optional[str] = None,
+    use_hugepages: bool = False,
 ) -> torch.Tensor:
     if size == 0:
         return torch.empty(0, dtype=torch.uint8)
@@ -423,6 +438,8 @@ def _allocate_cpu_memory(
     alloc_info, _ = _resolve_pinned_alloc_free(
         numa_mapping,
         shm_name,
+        size=size,
+        use_hugepages=use_hugepages,
     )
     alloc_fn, *alloc_args = alloc_info
     ptr = alloc_fn(size, *alloc_args)
@@ -439,6 +456,7 @@ def _free_cpu_memory(
     size: int | None = None,
     numa_mapping: Optional[NUMAMapping] = None,
     shm_name: Optional[str] = None,
+    use_hugepages: bool = False,
 ) -> None:
     if torch.cuda.is_available():
         torch.cuda.synchronize()
@@ -447,6 +465,7 @@ def _free_cpu_memory(
         numa_mapping,
         shm_name,
         size=size,
+        use_hugepages=use_hugepages,
     )
     free_fn, *free_args = free_info
     free_fn(buffer.data_ptr(), *free_args)
@@ -2046,12 +2065,16 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
               (2) byte_array buffer memory.
     """
 
-    def __init__(self, size: int, use_paging: bool = False, **kwargs):
+    def __init__(
+        self, size: int, use_paging: bool = False, use_hugepages: bool = False, **kwargs
+    ):
         """
         :param int size: The size of the pinned memory in bytes.
+        :param bool use_hugepages: Whether to use hugepages.
         """
 
         self.numa_mapping = kwargs.get("numa_mapping", None)
+        self.use_hugepages = use_hugepages
         self.align_bytes = kwargs.get("align_bytes", AddressManager.ALIGN_BYTES)
         if self.align_bytes <= 0 or self.align_bytes & (self.align_bytes - 1) != 0:
             raise ValueError("align_bytes must be a positive power of two")
@@ -2067,7 +2090,9 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
 
         self.size = size
 
-        self.buffer = _allocate_cpu_memory(size, self.numa_mapping, self.shm_name)
+        self.buffer = _allocate_cpu_memory(
+            size, self.numa_mapping, self.shm_name, use_hugepages=use_hugepages
+        )
 
         self._unregistered = False
 
@@ -2198,6 +2223,7 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
                 self.size,
                 self.numa_mapping,
                 self.shm_name,
+                use_hugepages=self.use_hugepages,
             )
             self._unregistered = True
 
