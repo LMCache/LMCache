@@ -12,7 +12,7 @@ import torch
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.observability import LMCStatsMonitor
+from lmcache.observability import LMCStatsMonitor, PrometheusLogger
 from lmcache.utils import CacheEngineKey, DiskCacheMetadata, _lmcache_nvtx_annotate
 from lmcache.v1.cache_controller.message import OpType
 from lmcache.v1.config import LMCacheEngineConfig
@@ -21,9 +21,8 @@ from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.storage_backend.abstract_backend import StorageBackendInterface
 from lmcache.v1.storage_backend.batched_message_sender import BatchedMessageSender
 from lmcache.v1.storage_backend.cache_policy import get_cache_policy
-from lmcache.v1.storage_backend.disk_prometheus_listener import (
-    DiskPrometheusListener,
-)
+from lmcache.v1.storage_backend.cache_policy.base_policy import BaseCachePolicy
+from lmcache.v1.storage_backend.cache_policy.lru import LRUCachePolicy
 from lmcache.v1.storage_backend.job_executor.pq_executor import (
     AsyncPQThreadPoolExecutor,
 )
@@ -34,6 +33,101 @@ if TYPE_CHECKING:
     from lmcache.v1.cache_controller.worker import LMCacheWorker
 
 logger = init_logger(__name__)
+
+
+class DiskPrometheusListener:
+    """
+    Collects local-disk SSD wear metrics and registers Prometheus gauges.
+
+    All counter updates go through ``on_*`` methods so call sites stay thin.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._disk_write_ops = 0
+        self._disk_write_bytes = 0
+        self._disk_remove_ops = 0
+        self._disk_evict_bytes = 0
+        self._disk_gated_count = 0
+        self._disk_gated_by_length_count = 0
+        self._disk_gated_by_frequency_count = 0
+
+    def register(self) -> None:
+        """
+        Register gauges with PrometheusLogger when the singleton exists.
+
+        Scraped values read the current counters held by this listener.
+        """
+        prometheus_logger = PrometheusLogger.GetInstanceOrNone()
+        if prometheus_logger is None:
+            return
+        prometheus_logger.disk_write_ops.set_function(lambda: self._disk_write_ops)
+        prometheus_logger.disk_write_bytes.set_function(lambda: self._disk_write_bytes)
+        prometheus_logger.disk_remove_ops.set_function(lambda: self._disk_remove_ops)
+        prometheus_logger.disk_evict_bytes.set_function(lambda: self._disk_evict_bytes)
+        prometheus_logger.disk_gated_count.set_function(lambda: self._disk_gated_count)
+        prometheus_logger.disk_gated_by_length_count.set_function(
+            lambda: self._disk_gated_by_length_count
+        )
+        prometheus_logger.disk_gated_by_frequency_count.set_function(
+            lambda: self._disk_gated_by_frequency_count
+        )
+        prometheus_logger.disk_write_avg_size_bytes.set_function(
+            lambda: (
+                self._disk_write_bytes // self._disk_write_ops
+                if self._disk_write_ops > 0
+                else 0
+            )
+        )
+
+    def on_write(self, size_bytes: int) -> None:
+        """Record one completed disk write of ``size_bytes``."""
+        with self._lock:
+            self._disk_write_ops += 1
+            self._disk_write_bytes += size_bytes
+
+    def on_remove(self, evict_size_bytes: int) -> None:
+        """Record one disk remove (evict) of ``evict_size_bytes``."""
+        with self._lock:
+            self._disk_remove_ops += 1
+            self._disk_evict_bytes += evict_size_bytes
+
+    def on_gated_by_length(self) -> None:
+        """Record a put gated by length-based policy."""
+        with self._lock:
+            self._disk_gated_count += 1
+            self._disk_gated_by_length_count += 1
+
+    def on_gated_by_frequency(self) -> None:
+        """Record a put gated by frequency-based policy."""
+        with self._lock:
+            self._disk_gated_count += 1
+            self._disk_gated_by_frequency_count += 1
+
+    def log_summary(self) -> None:
+        """Emit current counters at INFO (e.g. when the disk backend closes)."""
+        with self._lock:
+            wops = self._disk_write_ops
+            wbytes = self._disk_write_bytes
+            rops = self._disk_remove_ops
+            ebytes = self._disk_evict_bytes
+            gated = self._disk_gated_count
+            glen = self._disk_gated_by_length_count
+            gfreq = self._disk_gated_by_frequency_count
+        avg_size = wbytes // wops if wops > 0 else 0
+        logger.info(
+            "Disk metrics: disk_write_ops=%s, disk_write_bytes=%s, "
+            "disk_write_avg_size_bytes=%s, disk_remove_ops=%s, disk_evict_bytes=%s, "
+            "disk_gated_count=%s (by_length=%s, by_frequency=%s)",
+            wops,
+            wbytes,
+            avg_size,
+            rops,
+            ebytes,
+            gated,
+            glen,
+            gfreq,
+        )
 
 
 # TODO(Jiayi): handle cases where cache is repetitvely prefetched.
@@ -113,13 +207,16 @@ class LocalDiskBackend(StorageBackendInterface):
             super().__init__("cpu")
 
         extra = config.extra_config or {}
-        ssd_gate_min_size_bytes = int(extra.get("ssd_gate_min_size_bytes", 0))
-        ssd_gate_min_access_count = int(extra.get("ssd_gate_min_access_count", 0))
-        self.cache_policy = get_cache_policy(
-            config.cache_policy,
-            ssd_gate_min_size_bytes=ssd_gate_min_size_bytes,
-            ssd_gate_min_access_count=ssd_gate_min_access_count,
-        )
+        self.cache_policy: BaseCachePolicy[Any, Any]
+        if (config.cache_policy or "").upper() == "LRU":
+            self.cache_policy = LRUCachePolicy(
+                ssd_gate_min_size_bytes=int(extra.get("ssd_gate_min_size_bytes", 0)),
+                ssd_gate_min_access_count=int(
+                    extra.get("ssd_gate_min_access_count", 0)
+                ),
+            )
+        else:
+            self.cache_policy = get_cache_policy(config.cache_policy)
         self.dict = self.cache_policy.init_mutable_mapping()
 
         self.dst_device = dst_device

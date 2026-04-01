@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # First Party
 from lmcache.v1.storage_backend.cache_policy import get_cache_policy
+from lmcache.v1.storage_backend.cache_policy.lru import LRUCachePolicy
 
 # Local
 from .utils import dumb_cache_engine_key
@@ -208,7 +209,7 @@ def test_mru_with_pin():
 
 
 def test_lru_disk_gate_length():
-    policy = get_cache_policy("LRU", ssd_gate_min_size_bytes=100)
+    policy = LRUCachePolicy(ssd_gate_min_size_bytes=100)
     key = dumb_cache_engine_key(1)
     assert policy.disk_gate_block_reason(key, 50, 0) == "length"
     assert policy.disk_gate_block_reason(key, 100, 0) is None
@@ -216,7 +217,7 @@ def test_lru_disk_gate_length():
 
 
 def test_lru_disk_gate_frequency():
-    policy = get_cache_policy("LRU", ssd_gate_min_access_count=3)
+    policy = LRUCachePolicy(ssd_gate_min_access_count=3)
     key = dumb_cache_engine_key(1)
     assert policy.disk_gate_block_reason(key, 1000, 0) == "frequency"
     assert policy.disk_gate_block_reason(key, 1000, 2) == "frequency"
