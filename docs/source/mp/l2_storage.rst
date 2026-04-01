@@ -194,6 +194,25 @@ Select policies via CLI:
      - ``default``
      - For each key, pick the first (lowest-indexed) adapter that has it.
 
+Prefetch Concurrency
+~~~~~~~~~~~~~~~~~~~~~
+
+The ``--l2-prefetch-max-in-flight`` flag limits the number of concurrent
+prefetch requests that the ``PrefetchController`` can have in flight at
+any time.  A higher value increases L2-to-L1 throughput but also
+increases L1 memory pressure from in-flight data.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 30 15 55
+
+   * - Flag
+     - Default
+     - Description
+   * - ``--l2-prefetch-max-in-flight``
+     - ``8``
+     - Maximum number of concurrent prefetch requests.
+
 Buffer-Only Mode
 ~~~~~~~~~~~~~~~~~
 
