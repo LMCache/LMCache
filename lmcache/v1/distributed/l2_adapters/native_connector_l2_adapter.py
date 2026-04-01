@@ -342,4 +342,3 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
                                 bitmap.set(i)
                         self._completed_loads[task_id] = bitmap
                         os.eventfd_write(self._load_efd, 1)
-
