@@ -11,7 +11,7 @@ from lmcache.integration.vllm.utils import (
     hex_hash_to_int64,
 )
 
-INT64_MAX = 0xFFFFFFFFFFFFFFFF
+INT64_MAX = 0x7FFFFFFFFFFFFFFF  # signed int64 max (torch.long)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -41,10 +41,10 @@ def test_hex_hash_to_int64_hex_variants_whitespace_and_truncation() -> None:
     assert hex_hash_to_int64(" FfFf ") == 0xFFFF
     assert hex_hash_to_int64("\n0x00aB\t") == 0x00AB
 
-    # Long hex should be truncated to 64 bits via masking.
+    # Long hex should be truncated to 63 bits via masking (signed int64 safe).
     assert hex_hash_to_int64("123456") == 0x123456
-    # Values that exceed 64 bits should be masked.
-    big_hex = "1" + "0" * 16  # 2^64, exceeds 64-bit range
+    # Values that exceed 63 bits should be masked.
+    big_hex = "1" + "0" * 16  # 2^64, exceeds signed int64 range
     assert hex_hash_to_int64(big_hex) == int(big_hex, 16) & INT64_MAX
 
 
@@ -74,6 +74,15 @@ def test_hex_hash_to_int64_non_string_inputs_are_safe() -> None:
         assert isinstance(v1, int)
         assert 0 <= v1 <= INT64_MAX
         assert v1 == v2
+
+
+def test_hex_hash_to_int64_fits_in_signed_int64() -> None:
+    """Ensure the hash value never exceeds signed int64 max (torch.long safe)."""
+    for i in range(1_000):
+        h = hex_hash_to_int64(f"chatcmpl-overflow-test-{i}-image-0")
+        assert 0 <= h <= INT64_MAX, f"Hash {h:#x} overflows signed int64"
+    # Explicit large hex input.
+    assert hex_hash_to_int64("0xFFFFFFFFFFFFFFFF") == INT64_MAX
 
 
 def test_hex_hash_to_int64_different_inputs_no_collision() -> None:

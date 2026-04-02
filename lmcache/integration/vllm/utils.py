@@ -5,6 +5,7 @@ import hashlib
 import os
 import string
 import threading
+import warnings
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
@@ -141,7 +142,8 @@ def hex_hash_to_int64(s: str) -> int:
       - Parses hex strings (optionally prefixed with `0x`) as before, or
       - Falls back to a stable string hash (SHA-256) when the input is not hex.
 
-    The result is masked to 64 bits so it fits in a torch.long (int64) tensor.
+    The result is masked to 63 bits so it fits in a torch.long (signed int64)
+    tensor without overflow.
     Previous versions truncated to 16 bits (2^16 = 65 536 values), which made
     birthday-paradox collisions likely after only ~300 distinct images and
     could cause KV-cache poisoning across unrelated requests.
@@ -154,18 +156,30 @@ def hex_hash_to_int64(s: str) -> int:
     hex_part = s_stripped[2:] if s_stripped.lower().startswith("0x") else s_stripped
     if hex_part and all(c in string.hexdigits for c in hex_part):
         try:
-            return int(hex_part, 16) & 0xFFFFFFFFFFFFFFFF
+            return int(hex_part, 16) & 0x7FFFFFFFFFFFFFFF
         except ValueError:
             # Extremely unlikely (e.g., oversized/odd formatting); fall back to hashing.
             pass
 
-    # Fallback: stable 64-bit value derived from the full identifier string.
+    # Fallback: stable 63-bit value derived from the full identifier string.
     digest = hashlib.sha256(s_stripped.encode("utf-8")).digest()
-    return int.from_bytes(digest[:8], byteorder="big", signed=False)
+    return int.from_bytes(digest[:8], byteorder="big", signed=False) & 0x7FFFFFFFFFFFFFFF
 
 
-# Backward-compatible alias (deprecated).
-hex_hash_to_int16 = hex_hash_to_int64
+def hex_hash_to_int16(s: str) -> int:
+    """Deprecated: use ``hex_hash_to_int64`` instead.
+
+    This wrapper exists solely for backward compatibility. It now returns a
+    63-bit (signed-int64-safe) value, **not** a 16-bit value. The old 16-bit
+    truncation caused KV-cache poisoning via hash collisions.
+    """
+    warnings.warn(
+        "hex_hash_to_int16 is deprecated and now returns a 63-bit value. "
+        "Use hex_hash_to_int64 instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    return hex_hash_to_int64(s)
 
 
 def apply_mm_hashes_to_token_ids(
