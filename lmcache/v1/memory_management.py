@@ -442,7 +442,14 @@ def _allocate_cpu_memory(
         use_hugepages=use_hugepages,
     )
     alloc_fn, *alloc_args = alloc_info
-    ptr = alloc_fn(size, *alloc_args)
+    try:
+        ptr = alloc_fn(size, *alloc_args)
+    except RuntimeError as e:
+        if use_hugepages and "mmap failed" in str(e):
+            logger.error(
+                "Failed to allocate huge pages, please check `sysctl vm.nr_hugepages`"
+            )
+        raise e
 
     array_type = ctypes.c_uint8 * size
     buf = array_type.from_address(ptr)
