@@ -8,8 +8,10 @@ import torch
 # First Party
 from lmcache.integration.vllm.utils import (
     apply_mm_hashes_to_token_ids,
-    hex_hash_to_int16,
+    hex_hash_to_int64,
 )
+
+INT64_MAX = 0xFFFFFFFFFFFFFFFF
 
 
 @dataclasses.dataclass(frozen=True)
@@ -18,58 +20,70 @@ class DummyPlaceholderRange:
     length: int
 
 
-def test_hex_hash_to_int16_accepts_hex_and_non_hex() -> None:
+def test_hex_hash_to_int64_accepts_hex_and_non_hex() -> None:
     # Hex behavior preserved (with and without 0x prefix).
-    assert hex_hash_to_int16("0000") == 0
-    assert hex_hash_to_int16("ffff") == 0xFFFF
-    assert hex_hash_to_int16("0xFFFF") == 0xFFFF
-    assert hex_hash_to_int16("0x0001") == 1
+    assert hex_hash_to_int64("0000") == 0
+    assert hex_hash_to_int64("ffff") == 0xFFFF
+    assert hex_hash_to_int64("0xFFFF") == 0xFFFF
+    assert hex_hash_to_int64("0x0001") == 1
 
     # Non-hex identifiers must not raise and must be deterministic.
     s = "chatcmpl-a2a48871c4aad192-image-0"
-    v1 = hex_hash_to_int16(s)
-    v2 = hex_hash_to_int16(s)
+    v1 = hex_hash_to_int64(s)
+    v2 = hex_hash_to_int64(s)
     assert isinstance(v1, int)
-    assert 0 <= v1 <= 0xFFFF
+    assert 0 <= v1 <= INT64_MAX
     assert v1 == v2
 
 
-def test_hex_hash_to_int16_hex_variants_whitespace_and_truncation() -> None:
+def test_hex_hash_to_int64_hex_variants_whitespace_and_truncation() -> None:
     # Whitespace should be ignored and case should not matter.
-    assert hex_hash_to_int16(" FfFf ") == 0xFFFF
-    assert hex_hash_to_int16("\n0x00aB\t") == 0x00AB
+    assert hex_hash_to_int64(" FfFf ") == 0xFFFF
+    assert hex_hash_to_int64("\n0x00aB\t") == 0x00AB
 
-    # Long hex should be truncated to 16 bits via masking.
-    assert hex_hash_to_int16("123456") == 0x3456
-    assert hex_hash_to_int16("0x123456") == 0x3456
+    # Long hex should be truncated to 64 bits via masking.
+    assert hex_hash_to_int64("123456") == 0x123456
+    # Values that exceed 64 bits should be masked.
+    big_hex = "1" + "0" * 16  # 2^64, exceeds 64-bit range
+    assert hex_hash_to_int64(big_hex) == int(big_hex, 16) & INT64_MAX
 
 
-def test_hex_hash_to_int16_empty_and_invalid_hex_are_safe_and_deterministic() -> None:
+def test_hex_hash_to_int64_empty_and_invalid_hex_are_safe_and_deterministic() -> None:
     # Empty (or effectively empty) values should not raise.
     for s in ("", "   ", "0x"):
-        v1 = hex_hash_to_int16(s)
-        v2 = hex_hash_to_int16(s)
+        v1 = hex_hash_to_int64(s)
+        v2 = hex_hash_to_int64(s)
         assert isinstance(v1, int)
-        assert 0 <= v1 <= 0xFFFF
+        assert 0 <= v1 <= INT64_MAX
         assert v1 == v2
 
     # Invalid "hex-looking" strings must fall back to hashing.
     for s in ("0xGG", "deadbeeg", "0x12xz"):
-        v1 = hex_hash_to_int16(s)
-        v2 = hex_hash_to_int16(s)
+        v1 = hex_hash_to_int64(s)
+        v2 = hex_hash_to_int64(s)
         assert isinstance(v1, int)
-        assert 0 <= v1 <= 0xFFFF
+        assert 0 <= v1 <= INT64_MAX
         assert v1 == v2
 
 
-def test_hex_hash_to_int16_non_string_inputs_are_safe() -> None:
+def test_hex_hash_to_int64_non_string_inputs_are_safe() -> None:
     # Be defensive: callers may pass None or other non-string types.
     for val in (None, 0, 12345, 3.14, b"deadbeef"):
-        v1 = hex_hash_to_int16(val)  # type: ignore[arg-type]
-        v2 = hex_hash_to_int16(val)  # type: ignore[arg-type]
+        v1 = hex_hash_to_int64(val)  # type: ignore[arg-type]
+        v2 = hex_hash_to_int64(val)  # type: ignore[arg-type]
         assert isinstance(v1, int)
-        assert 0 <= v1 <= 0xFFFF
+        assert 0 <= v1 <= INT64_MAX
         assert v1 == v2
+
+
+def test_hex_hash_to_int64_different_inputs_no_collision() -> None:
+    """With 64-bit output, distinct OpenAI-style identifiers should not collide
+    across a realistic working set."""
+    seen: set[int] = set()
+    for i in range(10_000):
+        h = hex_hash_to_int64(f"chatcmpl-test-{i:05d}-image-0")
+        assert h not in seen, f"Unexpected collision at i={i}"
+        seen.add(h)
 
 
 def test_apply_mm_hashes_to_token_ids_handles_non_hex_mm_hash() -> None:
@@ -78,7 +92,7 @@ def test_apply_mm_hashes_to_token_ids_handles_non_hex_mm_hash() -> None:
     mm_positions = [DummyPlaceholderRange(offset=2, length=4)]
 
     out = apply_mm_hashes_to_token_ids(token_ids.clone(), mm_hashes, mm_positions)
-    expected_val = hex_hash_to_int16(mm_hashes[0])
+    expected_val = hex_hash_to_int64(mm_hashes[0])
     assert out[2:6].tolist() == [expected_val] * 4
 
 
@@ -102,8 +116,8 @@ def test_apply_mm_hashes_to_token_ids_multiple_placeholders_and_length_mismatch(
     ]
 
     out = apply_mm_hashes_to_token_ids(token_ids.clone(), mm_hashes, mm_positions)
-    v0 = hex_hash_to_int16(mm_hashes[0])
-    v1 = hex_hash_to_int16(mm_hashes[1])
+    v0 = hex_hash_to_int64(mm_hashes[0])
+    v1 = hex_hash_to_int64(mm_hashes[1])
 
     assert out[0:3].tolist() == [v0] * 3
     assert out[5:9].tolist() == [v1] * 4

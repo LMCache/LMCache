@@ -131,15 +131,20 @@ def lmcache_get_or_create_config() -> LMCacheEngineConfig:
     return _config_instance
 
 
-def hex_hash_to_int16(s: str) -> int:
+def hex_hash_to_int64(s: str) -> int:
     """
-    Convert a hash identifier into a 16-bit integer.
+    Convert a hash identifier into a 64-bit integer.
 
     Historically, LMCache expected multimodal identifiers to be hex strings.
     In practice (e.g., OpenAI-style multimodal requests), identifiers may be
     arbitrary strings like `chatcmpl-...-image-0`. This function therefore:
       - Parses hex strings (optionally prefixed with `0x`) as before, or
       - Falls back to a stable string hash (SHA-256) when the input is not hex.
+
+    The result is masked to 64 bits so it fits in a torch.long (int64) tensor.
+    Previous versions truncated to 16 bits (2^16 = 65 536 values), which made
+    birthday-paradox collisions likely after only ~300 distinct images and
+    could cause KV-cache poisoning across unrelated requests.
     """
     # Be defensive: vLLM may pass non-string identifiers.
     s = "" if s is None else str(s)
@@ -149,14 +154,18 @@ def hex_hash_to_int16(s: str) -> int:
     hex_part = s_stripped[2:] if s_stripped.lower().startswith("0x") else s_stripped
     if hex_part and all(c in string.hexdigits for c in hex_part):
         try:
-            return int(hex_part, 16) & 0xFFFF
+            return int(hex_part, 16) & 0xFFFFFFFFFFFFFFFF
         except ValueError:
             # Extremely unlikely (e.g., oversized/odd formatting); fall back to hashing.
             pass
 
-    # Fallback: stable 16-bit value derived from the full identifier string.
+    # Fallback: stable 64-bit value derived from the full identifier string.
     digest = hashlib.sha256(s_stripped.encode("utf-8")).digest()
-    return int.from_bytes(digest[:2], byteorder="big", signed=False)
+    return int.from_bytes(digest[:8], byteorder="big", signed=False)
+
+
+# Backward-compatible alias (deprecated).
+hex_hash_to_int16 = hex_hash_to_int64
 
 
 def apply_mm_hashes_to_token_ids(
@@ -174,7 +183,7 @@ def apply_mm_hashes_to_token_ids(
         if start >= n:
             continue
         end = min(start + length, n)
-        token_ids[start:end] = hex_hash_to_int16(hash_str)
+        token_ids[start:end] = hex_hash_to_int64(hash_str)
     return token_ids
 
 
