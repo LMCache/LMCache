@@ -281,16 +281,16 @@ The ``--l2-adapter`` JSON accepts these fields:
      - str
      - ``""``
      - Redis AUTH password (leave empty for no auth)
-   * - ``max_capacity_bytes``
-     - int
+   * - ``max_capacity_gb``
+     - float
      - 0
-     - Maximum L2 storage capacity in bytes for client-side usage tracking. Required for L2 eviction. Set to 0 (default) to disable usage tracking.
+     - Maximum L2 storage capacity in GB for client-side usage tracking. Required for L2 eviction. Set to 0 (default) to disable usage tracking.
 
 L2 Eviction
 ~~~~~~~~~~~~
 
 To enable automatic eviction of least-recently-used keys when the Redis backend fills up,
-set ``max_capacity_bytes`` and add an ``"eviction"`` block:
+set ``max_capacity_gb`` and add an ``"eviction"`` block:
 
 .. code-block:: bash
 
@@ -303,7 +303,7 @@ set ``max_capacity_bytes`` and add an ``"eviction"`` block:
             "host": "localhost",
             "port": 6379,
             "num_workers": 8,
-            "max_capacity_bytes": 10737418240,
+            "max_capacity_gb": 10,
             "eviction": {
                 "eviction_policy": "LRU",
                 "trigger_watermark": 0.8,
@@ -317,8 +317,8 @@ the eviction controller will delete the least-recently-used ~20% of stored keys
 (``eviction_ratio``) using the Redis ``DEL`` command.
 
 .. note::
-   ``max_capacity_bytes`` enables **client-side** size tracking. It does not configure
-   the Redis server's ``maxmemory`` setting. You should set ``max_capacity_bytes`` to
+   ``max_capacity_gb`` enables **client-side** size tracking. It does not configure
+   the Redis server's ``maxmemory`` setting. You should set ``max_capacity_gb`` to
    match or be slightly below your Redis server's available memory.
 
 

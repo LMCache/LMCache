@@ -262,11 +262,11 @@ Create a new file in the L2 adapters package:
     class MyBackendL2AdapterConfig(L2AdapterConfigBase):
         def __init__(self, host: str, port: int,
                      num_workers: int = 8,
-                     max_capacity_bytes: int = 0):
+                     max_capacity_gb: float = 0):
             self.host = host
             self.port = port
             self.num_workers = num_workers
-            self.max_capacity_bytes = max_capacity_bytes
+            self.max_capacity_gb = max_capacity_gb
 
         @classmethod
         def from_dict(cls, d: dict) -> "MyBackendL2AdapterConfig":
@@ -277,10 +277,10 @@ Create a new file in the L2 adapters package:
             if not isinstance(port, int) or port <= 0:
                 raise ValueError("port must be a positive integer")
             num_workers = d.get("num_workers", 8)
-            max_capacity_bytes = d.get("max_capacity_bytes", 0)
+            max_capacity_gb = d.get("max_capacity_gb", 0)
             return cls(host=host, port=port,
                        num_workers=num_workers,
-                       max_capacity_bytes=max_capacity_bytes)
+                       max_capacity_gb=max_capacity_gb)
 
         @classmethod
         def help(cls) -> str:
@@ -308,7 +308,7 @@ Create a new file in the L2 adapters package:
         )
         return NativeConnectorL2Adapter(
             native_client,
-            max_capacity_bytes=config.max_capacity_bytes,
+            max_capacity_gb=config.max_capacity_gb,
         )
 
 
@@ -478,10 +478,10 @@ Configuration
      - ``dict``
      - no
      - Forwarded as ``**kwargs`` to the connector class constructor.
-   * - ``max_capacity_bytes``
-     - ``int``
+   * - ``max_capacity_gb``
+     - ``float``
      - no
-     - Maximum L2 storage capacity in bytes for client-side usage tracking. Required for L2 eviction. Default 0 (disabled).
+     - Maximum L2 storage capacity in GB for client-side usage tracking. Required for L2 eviction. Default 0 (disabled).
 
 Loading Flow
 ~~~~~~~~~~~~

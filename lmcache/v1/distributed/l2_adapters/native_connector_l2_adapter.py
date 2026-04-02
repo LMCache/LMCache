@@ -79,7 +79,7 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
     _OP_LOAD = "load"
     _OP_DELETE = "delete"
 
-    def __init__(self, native_client, max_capacity_bytes: int = 0):
+    def __init__(self, native_client, max_capacity_gb: float = 0):
         super().__init__()
         self._client = native_client
         self._client_fd: int = int(native_client.event_fd())
@@ -114,7 +114,7 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
         self._pending_delete_events: dict[L2TaskId, threading.Event] = {}
 
         # Client-side size tracking for get_usage()
-        self._max_capacity_bytes = max_capacity_bytes
+        self._max_capacity_bytes = int(max_capacity_gb * (1024**3))
         self._current_size_bytes: int = 0
         self._key_sizes: dict[ObjectKey, int] = {}
         # Pending store sizes: native future_id -> (keys, per_key_sizes)

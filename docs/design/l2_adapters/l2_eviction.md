@@ -197,14 +197,14 @@ capacity) can omit steps 2–6 and rely on the base class no-op defaults.
 | `MockL2Adapter`            | ✓        | ✓           | stored, deleted     |
 | `NixlStoreL2Adapter`       | ✓ (skips pinned) | ✓ (pool-based) | stored, deleted |
 | `FSL2Adapter`              | no-op    | `(-1, -1)`  | none                |
-| `NativeConnectorL2Adapter` | ✓ (via `submit_batch_delete`) | ✓ (client-side, requires `max_capacity_bytes`) | stored, deleted |
+| `NativeConnectorL2Adapter` | ✓ (via `submit_batch_delete`) | ✓ (client-side, requires `max_capacity_gb`) | stored, deleted |
 
 **Note on `NativeConnectorL2Adapter`:** Eviction support requires two things:
 
 1. The underlying C++ connector must implement `do_single_delete()` (built-in Redis
    and FS connectors do; third-party plugins may not — in which case `delete()` is a
    no-op).
-2. The adapter must be configured with `max_capacity_bytes > 0` to enable client-side
+2. The adapter must be configured with `max_capacity_gb > 0` to enable client-side
    size tracking for `get_usage()`. Without it, `get_usage()` returns `(-1, -1)` and
    the eviction controller will not trigger.
 
@@ -215,7 +215,7 @@ Example configuration with eviction enabled:
   "type": "resp",
   "host": "localhost",
   "port": 6379,
-  "max_capacity_bytes": 10737418240,
+  "max_capacity_gb": 10,
   "eviction": {
     "eviction_policy": "LRU",
     "trigger_watermark": 0.8,

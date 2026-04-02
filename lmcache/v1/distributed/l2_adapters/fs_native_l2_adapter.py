@@ -54,14 +54,14 @@ class FSNativeL2AdapterConfig(L2AdapterConfigBase):
         relative_tmp_dir: str = "",
         use_odirect: bool = False,
         read_ahead_size: Optional[int] = None,
-        max_capacity_bytes: int = 0,
+        max_capacity_gb: float = 0,
     ):
         self.base_path = base_path
         self.num_workers = num_workers
         self.relative_tmp_dir = relative_tmp_dir
         self.use_odirect = use_odirect
         self.read_ahead_size = read_ahead_size
-        self.max_capacity_bytes = max_capacity_bytes
+        self.max_capacity_gb = max_capacity_gb
 
     @classmethod
     def from_dict(cls, d: dict) -> "FSNativeL2AdapterConfig":
@@ -86,9 +86,9 @@ class FSNativeL2AdapterConfig(L2AdapterConfigBase):
             if not isinstance(read_ahead_size, int) or read_ahead_size <= 0:
                 raise ValueError("read_ahead_size must be a positive integer")
 
-        max_capacity_bytes = d.get("max_capacity_bytes", 0)
-        if not isinstance(max_capacity_bytes, int) or max_capacity_bytes < 0:
-            raise ValueError("max_capacity_bytes must be a non-negative integer")
+        max_capacity_gb = d.get("max_capacity_gb", 0)
+        if not isinstance(max_capacity_gb, (int, float)) or max_capacity_gb < 0:
+            raise ValueError("max_capacity_gb must be a non-negative number")
 
         return cls(
             base_path=base_path,
@@ -96,7 +96,7 @@ class FSNativeL2AdapterConfig(L2AdapterConfigBase):
             relative_tmp_dir=str(relative_tmp_dir),
             use_odirect=use_odirect,
             read_ahead_size=read_ahead_size,
-            max_capacity_bytes=max_capacity_bytes,
+            max_capacity_gb=float(max_capacity_gb),
         )
 
     @classmethod
@@ -114,8 +114,8 @@ class FSNativeL2AdapterConfig(L2AdapterConfigBase):
             "- read_ahead_size (int): trigger fs "
             "readahead by reading this many bytes "
             "first (optional)\n"
-            "- max_capacity_bytes (int): max L2 capacity "
-            "in bytes for usage tracking / eviction "
+            "- max_capacity_gb (float): max L2 capacity "
+            "in GB for usage tracking / eviction "
             "(default 0 = disabled)"
         )
 
@@ -159,7 +159,7 @@ def _create_fs_native_l2_adapter(
         config.read_ahead_size,
     )
     return NativeConnectorL2Adapter(
-        native_client, max_capacity_bytes=config.max_capacity_bytes
+        native_client, max_capacity_gb=config.max_capacity_gb
     )
 
 

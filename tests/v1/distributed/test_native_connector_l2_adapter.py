@@ -1081,10 +1081,10 @@ class TestDeleteBackwardCompatibility:
 
 @pytest.fixture
 def adapter_with_capacity():
-    """Adapter with max_capacity_bytes set for usage tracking tests."""
+    """Adapter with max_capacity_gb set for usage tracking tests."""
     mock_client = MockNativeConnector()
-    # 100 floats * 4 bytes = 400 bytes per obj; set capacity to 2000 bytes (5 objects)
-    adp = NativeConnectorL2Adapter(mock_client, max_capacity_bytes=2000)
+    # 100 floats * 4 bytes = 400 bytes per obj; capacity = 2000 bytes = 2000/1024^3 GB
+    adp = NativeConnectorL2Adapter(mock_client, max_capacity_gb=2000 / (1024**3))
     yield adp
     adp.close()
 
