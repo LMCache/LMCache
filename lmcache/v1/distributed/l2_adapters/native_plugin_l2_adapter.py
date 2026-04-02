@@ -105,7 +105,10 @@ class NativePluginL2AdapterConfig(L2AdapterConfigBase):
             '"module_path": "my_ext.connector", '
             '"class_name": "MyConnectorClient", '
             '"adapter_params": '
-            '{"host": "localhost", "port": 1234}}'
+            '{"host": "localhost", "port": 1234}}\n'
+            "- max_capacity_bytes (int): max L2 capacity "
+            "in bytes for usage tracking / eviction "
+            "(default 0 = disabled)"
         )
 
 

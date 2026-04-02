@@ -113,7 +113,10 @@ class FSNativeL2AdapterConfig(L2AdapterConfigBase):
             "via O_DIRECT (default false)\n"
             "- read_ahead_size (int): trigger fs "
             "readahead by reading this many bytes "
-            "first (optional)"
+            "first (optional)\n"
+            "- max_capacity_bytes (int): max L2 capacity "
+            "in bytes for usage tracking / eviction "
+            "(default 0 = disabled)"
         )
 
 

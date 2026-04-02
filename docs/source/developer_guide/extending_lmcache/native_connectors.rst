@@ -104,6 +104,12 @@ inherit from ``ConnectorBase<YourConnectionType>``. You only need to override 4 
         // send EXISTS, return true/false
       }
 
+      // 5. DELETE: remove key (optional, has default no-op)
+      bool do_single_delete(MyConn& conn,
+                            const std::string& key) override {
+        // send DELETE, return true if deleted, false if not found
+      }
+
       // Optional: clean shutdown
       void shutdown_connections() override {
         // close sockets, free resources
@@ -136,8 +142,8 @@ inherit from ``ConnectorBase<YourConnectionType>``. You only need to override 4 
 Step 2: Pybind Module
 ---------------------
 
-Use the ``LMCACHE_BIND_CONNECTOR_METHODS`` macro, which binds all 6 methods
-(``event_fd``, ``submit_batch_get/set/exists``, ``drain_completions``, ``close``)
+Use the ``LMCACHE_BIND_CONNECTOR_METHODS`` macro, which binds all 7 methods
+(``event_fd``, ``submit_batch_get/set/exists/delete``, ``drain_completions``, ``close``)
 with proper GIL release and Python buffer protocol handling.
 
 .. code-block:: cpp
@@ -255,10 +261,12 @@ Create a new file in the L2 adapters package:
 
     class MyBackendL2AdapterConfig(L2AdapterConfigBase):
         def __init__(self, host: str, port: int,
-                     num_workers: int = 8):
+                     num_workers: int = 8,
+                     max_capacity_bytes: int = 0):
             self.host = host
             self.port = port
             self.num_workers = num_workers
+            self.max_capacity_bytes = max_capacity_bytes
 
         @classmethod
         def from_dict(cls, d: dict) -> "MyBackendL2AdapterConfig":
@@ -269,8 +277,10 @@ Create a new file in the L2 adapters package:
             if not isinstance(port, int) or port <= 0:
                 raise ValueError("port must be a positive integer")
             num_workers = d.get("num_workers", 8)
+            max_capacity_bytes = d.get("max_capacity_bytes", 0)
             return cls(host=host, port=port,
-                       num_workers=num_workers)
+                       num_workers=num_workers,
+                       max_capacity_bytes=max_capacity_bytes)
 
         @classmethod
         def help(cls) -> str:
@@ -296,7 +306,10 @@ Create a new file in the L2 adapters package:
         native_client = LMCacheMyBackendClient(
             config.host, config.port, config.num_workers
         )
-        return NativeConnectorL2Adapter(native_client)
+        return NativeConnectorL2Adapter(
+            native_client,
+            max_capacity_bytes=config.max_capacity_bytes,
+        )
 
 
     # Self-register -- runs automatically when the module
@@ -417,12 +430,18 @@ pybind ``LMCACHE_BIND_CONNECTOR_METHODS`` contract):
             self,
             keys: list[str],
         ) -> int: ...
+        def submit_batch_delete(
+            self,
+            keys: list[str],
+        ) -> int: ...
         def drain_completions(
             self,
         ) -> list[tuple[int, bool, str, list[bool] | None]]: ...
         def close(self) -> None: ...
 
-The factory validates these methods at creation time and raises ``TypeError`` if any are missing.
+The factory validates the first 6 methods at creation time and raises ``TypeError`` if
+any are missing. ``submit_batch_delete`` is **optional** -- if absent, the adapter's
+``delete()`` method will be a no-op (eviction will not remove keys from the backend).
 
 Configuration
 ~~~~~~~~~~~~~
@@ -459,6 +478,10 @@ Configuration
      - ``dict``
      - no
      - Forwarded as ``**kwargs`` to the connector class constructor.
+   * - ``max_capacity_bytes``
+     - ``int``
+     - no
+     - Maximum L2 storage capacity in bytes for client-side usage tracking. Required for L2 eviction. Default 0 (disabled).
 
 Loading Flow
 ~~~~~~~~~~~~
@@ -583,7 +606,7 @@ Checklist
 
 Use this checklist when adding a new native connector:
 
-1. C++ connector inheriting ``ConnectorBase<T>`` with 4 method overrides
+1. C++ connector inheriting ``ConnectorBase<T>`` with 4 required + 1 optional (``do_single_delete``) method overrides
 2. Pybind module using ``LMCACHE_BIND_CONNECTOR_METHODS``
 3. ``setup.py`` entry for the new ``CppExtension``
 4. Python client inheriting ``ConnectorClientBase`` (non-MP mode)
@@ -594,7 +617,7 @@ Use this checklist when adding a new native connector:
 For **external** native connector plugins (``native_plugin``):
 
 1. Separate pip-installable package with C++ pybind11 extension
-2. Connector class exposing the 6 required methods
+2. Connector class exposing the 6 required methods (+ optional ``submit_batch_delete`` for eviction)
 3. Python factory class for backend selection
 4. ``pip install -e .`` and configure via ``--l2-adapter`` JSON
 5. Unit tests (see ``examples/lmc_external_native_connector/tests/``)

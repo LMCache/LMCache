@@ -105,7 +105,10 @@ class RESPL2AdapterConfig(L2AdapterConfigBase):
             "- username (str): auth username "
             "(default empty)\n"
             "- password (str): auth password "
-            "(default empty)"
+            "(default empty)\n"
+            "- max_capacity_bytes (int): max L2 capacity "
+            "in bytes for usage tracking / eviction "
+            "(default 0 = disabled)"
         )
 
 
