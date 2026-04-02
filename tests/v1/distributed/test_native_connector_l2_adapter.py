@@ -574,7 +574,7 @@ class TestClose:
 class TestRESPL2AdapterConfig:
     def test_from_dict_minimal(self):
         # First Party
-        from lmcache.v1.distributed.l2_adapters.native_connector_l2_adapter import (
+        from lmcache.v1.distributed.l2_adapters.resp_l2_adapter import (
             RESPL2AdapterConfig,
         )
 
@@ -593,7 +593,7 @@ class TestRESPL2AdapterConfig:
 
     def test_from_dict_full(self):
         # First Party
-        from lmcache.v1.distributed.l2_adapters.native_connector_l2_adapter import (
+        from lmcache.v1.distributed.l2_adapters.resp_l2_adapter import (
             RESPL2AdapterConfig,
         )
 
@@ -615,7 +615,7 @@ class TestRESPL2AdapterConfig:
 
     def test_from_dict_missing_host_raises(self):
         # First Party
-        from lmcache.v1.distributed.l2_adapters.native_connector_l2_adapter import (
+        from lmcache.v1.distributed.l2_adapters.resp_l2_adapter import (
             RESPL2AdapterConfig,
         )
 
@@ -624,7 +624,7 @@ class TestRESPL2AdapterConfig:
 
     def test_from_dict_missing_port_raises(self):
         # First Party
-        from lmcache.v1.distributed.l2_adapters.native_connector_l2_adapter import (
+        from lmcache.v1.distributed.l2_adapters.resp_l2_adapter import (
             RESPL2AdapterConfig,
         )
 
@@ -638,3 +638,311 @@ class TestRESPL2AdapterConfig:
         )
 
         assert "resp" in get_registered_l2_adapter_types()
+
+
+# =============================================================================
+# NativePluginL2AdapterConfig Tests
+# =============================================================================
+
+
+class TestNativePluginL2AdapterConfig:
+    def test_from_dict_minimal(self):
+        # First Party
+        from lmcache.v1.distributed.l2_adapters.native_plugin_l2_adapter import (
+            NativePluginL2AdapterConfig,
+        )
+
+        config = NativePluginL2AdapterConfig.from_dict(
+            {
+                "type": "native_plugin",
+                "module_path": "my_ext.connector",
+                "class_name": "MyClient",
+            }
+        )
+        assert config.module_path == "my_ext.connector"
+        assert config.class_name == "MyClient"
+        assert config.adapter_params == {}
+
+    def test_from_dict_full(self):
+        # First Party
+        from lmcache.v1.distributed.l2_adapters.native_plugin_l2_adapter import (
+            NativePluginL2AdapterConfig,
+        )
+
+        config = NativePluginL2AdapterConfig.from_dict(
+            {
+                "type": "native_plugin",
+                "module_path": "my_ext.connector",
+                "class_name": "MyClient",
+                "adapter_params": {
+                    "host": "localhost",
+                    "port": 1234,
+                },
+            }
+        )
+        assert config.module_path == "my_ext.connector"
+        assert config.class_name == "MyClient"
+        assert config.adapter_params == {
+            "host": "localhost",
+            "port": 1234,
+        }
+
+    def test_from_dict_missing_module_path_raises(self):
+        # First Party
+        from lmcache.v1.distributed.l2_adapters.native_plugin_l2_adapter import (
+            NativePluginL2AdapterConfig,
+        )
+
+        with pytest.raises(ValueError, match="module_path"):
+            NativePluginL2AdapterConfig.from_dict(
+                {
+                    "type": "native_plugin",
+                    "class_name": "X",
+                }
+            )
+
+    def test_from_dict_missing_class_name_raises(self):
+        # First Party
+        from lmcache.v1.distributed.l2_adapters.native_plugin_l2_adapter import (
+            NativePluginL2AdapterConfig,
+        )
+
+        with pytest.raises(ValueError, match="class_name"):
+            NativePluginL2AdapterConfig.from_dict(
+                {
+                    "type": "native_plugin",
+                    "module_path": "my_ext",
+                }
+            )
+
+    def test_from_dict_invalid_adapter_params_raises(self):
+        # First Party
+        from lmcache.v1.distributed.l2_adapters.native_plugin_l2_adapter import (
+            NativePluginL2AdapterConfig,
+        )
+
+        with pytest.raises(ValueError, match="adapter_params"):
+            NativePluginL2AdapterConfig.from_dict(
+                {
+                    "type": "native_plugin",
+                    "module_path": "my_ext",
+                    "class_name": "X",
+                    "adapter_params": "not_a_dict",
+                }
+            )
+
+    def test_registered_as_native_plugin(self):
+        # First Party
+        from lmcache.v1.distributed.l2_adapters.config import (
+            get_registered_l2_adapter_types,
+        )
+
+        assert "native_plugin" in get_registered_l2_adapter_types()
+
+    def test_help_returns_string(self):
+        # First Party
+        from lmcache.v1.distributed.l2_adapters.native_plugin_l2_adapter import (
+            NativePluginL2AdapterConfig,
+        )
+
+        h = NativePluginL2AdapterConfig.help()
+        assert isinstance(h, str)
+        assert "module_path" in h
+        assert "class_name" in h
+        assert "adapter_params" in h
+
+
+# =============================================================================
+# FSNativeL2AdapterConfig Tests
+# =============================================================================
+
+
+class TestFSNativeL2AdapterConfig:
+    def test_from_dict_minimal(self):
+        # First Party
+        from lmcache.v1.distributed.l2_adapters.fs_native_l2_adapter import (
+            FSNativeL2AdapterConfig,
+        )
+
+        config = FSNativeL2AdapterConfig.from_dict(
+            {
+                "type": "fs_native",
+                "base_path": "/tmp/lmcache_test",
+            }
+        )
+        assert config.base_path == "/tmp/lmcache_test"
+        assert config.num_workers == 4
+        assert config.relative_tmp_dir == ""
+        assert config.use_odirect is False
+        assert config.read_ahead_size is None
+
+    def test_from_dict_full(self):
+        # First Party
+        from lmcache.v1.distributed.l2_adapters.fs_native_l2_adapter import (
+            FSNativeL2AdapterConfig,
+        )
+
+        config = FSNativeL2AdapterConfig.from_dict(
+            {
+                "type": "fs_native",
+                "base_path": "/data/kv_cache",
+                "num_workers": 16,
+                "relative_tmp_dir": ".tmp",
+                "use_odirect": True,
+                "read_ahead_size": 4096,
+            }
+        )
+        assert config.base_path == "/data/kv_cache"
+        assert config.num_workers == 16
+        assert config.relative_tmp_dir == ".tmp"
+        assert config.use_odirect is True
+        assert config.read_ahead_size == 4096
+
+    def test_from_dict_missing_base_path_raises(self):
+        # First Party
+        from lmcache.v1.distributed.l2_adapters.fs_native_l2_adapter import (
+            FSNativeL2AdapterConfig,
+        )
+
+        with pytest.raises(ValueError, match="base_path"):
+            FSNativeL2AdapterConfig.from_dict({"type": "fs_native"})
+
+    def test_from_dict_empty_base_path_raises(self):
+        # First Party
+        from lmcache.v1.distributed.l2_adapters.fs_native_l2_adapter import (
+            FSNativeL2AdapterConfig,
+        )
+
+        with pytest.raises(ValueError, match="base_path"):
+            FSNativeL2AdapterConfig.from_dict({"type": "fs_native", "base_path": ""})
+
+    def test_from_dict_invalid_num_workers_raises(self):
+        # First Party
+        from lmcache.v1.distributed.l2_adapters.fs_native_l2_adapter import (
+            FSNativeL2AdapterConfig,
+        )
+
+        with pytest.raises(ValueError, match="num_workers"):
+            FSNativeL2AdapterConfig.from_dict(
+                {
+                    "type": "fs_native",
+                    "base_path": "/tmp/x",
+                    "num_workers": 0,
+                }
+            )
+
+    def test_from_dict_zero_num_workers_raises(self):
+        # First Party
+        from lmcache.v1.distributed.l2_adapters.fs_native_l2_adapter import (
+            FSNativeL2AdapterConfig,
+        )
+
+        with pytest.raises(ValueError, match="num_workers"):
+            FSNativeL2AdapterConfig.from_dict(
+                {
+                    "type": "fs_native",
+                    "base_path": "/tmp/x",
+                    "num_workers": -1,
+                }
+            )
+
+    def test_from_dict_invalid_relative_tmp_dir_raises(
+        self,
+    ):
+        # First Party
+        from lmcache.v1.distributed.l2_adapters.fs_native_l2_adapter import (
+            FSNativeL2AdapterConfig,
+        )
+
+        with pytest.raises(ValueError, match="relative_tmp_dir"):
+            FSNativeL2AdapterConfig.from_dict(
+                {
+                    "type": "fs_native",
+                    "base_path": "/tmp/x",
+                    "relative_tmp_dir": 123,
+                }
+            )
+
+    def test_from_dict_invalid_use_odirect_raises(self):
+        # First Party
+        from lmcache.v1.distributed.l2_adapters.fs_native_l2_adapter import (
+            FSNativeL2AdapterConfig,
+        )
+
+        with pytest.raises(ValueError, match="use_odirect"):
+            FSNativeL2AdapterConfig.from_dict(
+                {
+                    "type": "fs_native",
+                    "base_path": "/tmp/x",
+                    "use_odirect": "yes",
+                }
+            )
+
+    def test_from_dict_invalid_read_ahead_size_raises(
+        self,
+    ):
+        # First Party
+        from lmcache.v1.distributed.l2_adapters.fs_native_l2_adapter import (
+            FSNativeL2AdapterConfig,
+        )
+
+        with pytest.raises(ValueError, match="read_ahead_size"):
+            FSNativeL2AdapterConfig.from_dict(
+                {
+                    "type": "fs_native",
+                    "base_path": "/tmp/x",
+                    "read_ahead_size": -1,
+                }
+            )
+
+    def test_from_dict_zero_read_ahead_size_raises(
+        self,
+    ):
+        # First Party
+        from lmcache.v1.distributed.l2_adapters.fs_native_l2_adapter import (
+            FSNativeL2AdapterConfig,
+        )
+
+        with pytest.raises(ValueError, match="read_ahead_size"):
+            FSNativeL2AdapterConfig.from_dict(
+                {
+                    "type": "fs_native",
+                    "base_path": "/tmp/x",
+                    "read_ahead_size": 0,
+                }
+            )
+
+    def test_registered_as_fs_native(self):
+        # First Party
+        from lmcache.v1.distributed.l2_adapters.config import (
+            get_registered_l2_adapter_types,
+        )
+
+        assert "fs_native" in get_registered_l2_adapter_types()
+
+    def test_help_returns_string(self):
+        # First Party
+        from lmcache.v1.distributed.l2_adapters.fs_native_l2_adapter import (
+            FSNativeL2AdapterConfig,
+        )
+
+        h = FSNativeL2AdapterConfig.help()
+        assert isinstance(h, str)
+        assert "base_path" in h
+        assert "num_workers" in h
+        assert "use_odirect" in h
+        assert "read_ahead_size" in h
+
+    def test_type_name_lookup(self):
+        # First Party
+        from lmcache.v1.distributed.l2_adapters.config import (
+            get_type_name_for_config,
+        )
+        from lmcache.v1.distributed.l2_adapters.fs_native_l2_adapter import (
+            FSNativeL2AdapterConfig,
+        )
+
+        cfg = FSNativeL2AdapterConfig(
+            base_path="/tmp/test",
+        )
+        assert get_type_name_for_config(cfg) == "fs_native"

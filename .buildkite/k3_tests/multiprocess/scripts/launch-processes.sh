@@ -45,7 +45,7 @@ echo "=== Launching LMCache MP server ==="
 echo "Port: $LMCACHE_PORT"
 
 CUDA_VISIBLE_DEVICES="${GPU_FOR_VLLM}" \
-python -m lmcache.v1.multiprocess.server \
+lmcache server \
     --l1-size-gb "$CPU_BUFFER_SIZE" \
     --eviction-policy LRU \
     --max-workers "$MAX_WORKERS" \

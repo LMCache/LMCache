@@ -94,6 +94,9 @@ class StorageManagerConfig:
     prefetch_policy: str = "default"
     """ The L2 prefetch policy name. """
 
+    prefetch_max_in_flight: int = 8
+    """ Maximum number of concurrent prefetch requests. """
+
 
 def add_storage_manager_args(
     parser: argparse.ArgumentParser,
@@ -227,6 +230,12 @@ def add_storage_manager_args(
         "when multiple adapters have it. "
         "Default is 'default' (pick the first adapter by index).",
     )
+    policy_group.add_argument(
+        "--l2-prefetch-max-in-flight",
+        type=int,
+        default=8,
+        help="Maximum number of concurrent prefetch requests. Default is 8.",
+    )
 
     # Adapter config
     add_l2_adapters_args(parser)
@@ -290,6 +299,7 @@ def parse_args_to_config(
         l2_adapter_config=l2_adapter_config,
         store_policy=args.l2_store_policy,
         prefetch_policy=args.l2_prefetch_policy,
+        prefetch_max_in_flight=args.l2_prefetch_max_in_flight,
     )
 
 
