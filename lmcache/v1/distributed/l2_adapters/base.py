@@ -15,9 +15,13 @@ if TYPE_CHECKING:
     from lmcache.native_storage_ops import Bitmap
 
 # First Party
+from lmcache.logging import init_logger
 from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.distributed.internal_api import L2AdapterListener
+from lmcache.v1.distributed.l2_adapters.config import PersistConfig
 from lmcache.v1.memory_management import MemoryObj
+
+logger = init_logger(__name__)
 
 L2TaskId = int
 
@@ -330,6 +334,38 @@ class L2AdapterInterface(ABC):
             eviction should override this method.
         """
         return (-1.0, -1.0)
+
+    #####################
+    # Persist/Recover Interface
+    #####################
+
+    def persist(self, config: PersistConfig) -> bool:
+        """
+        Persist adapter metadata to disk so that it can be recovered
+        after a restart.
+
+        Args:
+            config (PersistConfig): Configuration specifying where to persist.
+
+        Returns:
+            bool: True if persistence succeeded, False otherwise.
+        """
+        logger.warning("persist() is not supported by %s", type(self).__name__)
+        return False
+
+    def recover(self, config: PersistConfig) -> bool:
+        """
+        Recover adapter metadata from a previous persist, restoring
+        knowledge of previously stored objects.
+
+        Args:
+            config (PersistConfig): Configuration specifying where to recover from.
+
+        Returns:
+            bool: True if recovery succeeded, False otherwise.
+        """
+        logger.warning("recover() is not supported by %s", type(self).__name__)
+        return False
 
     #####################
     # Cleanup Interface

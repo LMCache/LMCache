@@ -29,6 +29,22 @@ logger = init_logger(__name__)
 
 T = TypeVar("T", bound="L2AdapterConfigBase")
 
+
+@dataclass(frozen=True)
+class PersistConfig:
+    """
+    Configuration for persist/recover operations on an L2 adapter.
+
+    Either field can be None to disable that direction independently.
+    """
+
+    persist_path: str | None = None
+    """ Path on disk to persist adapter metadata at shutdown. None = disabled. """
+
+    recover_path: str | None = None
+    """ Path on disk to recover adapter metadata at startup. None = disabled. """
+
+
 # -----------------------------------------------------------------------------
 # Registry: adapter type name -> config class
 # -----------------------------------------------------------------------------
@@ -107,6 +123,10 @@ class L2AdapterConfigBase(ABC):
     #: means L2 eviction is disabled for this adapter.
     eviction_config: EvictionConfig | None = None
 
+    #: Populated by ``_parse_persist_config`` after ``from_dict``; ``None``
+    #: means persist/recover is disabled for this adapter.
+    persist_config: PersistConfig | None = None
+
     @staticmethod
     def _parse_eviction_config(d: dict) -> EvictionConfig | None:
         """
@@ -144,6 +164,32 @@ class L2AdapterConfigBase(ABC):
             eviction_policy=policy,
             trigger_watermark=float(eviction_dict.get("trigger_watermark", 0.8)),
             eviction_ratio=float(eviction_dict.get("eviction_ratio", 0.2)),
+        )
+
+    @staticmethod
+    def _parse_persist_config(d: dict) -> PersistConfig | None:
+        """
+        Parse optional ``"persist_path"`` and ``"recover_path"`` keys from
+        an adapter JSON spec.
+
+        Expected format::
+
+            {
+                "type": "nixl_store",
+                ...
+                "persist_path": "/path/to/persist/metadata",
+                "recover_path": "/path/to/recover/metadata"
+            }
+
+        Returns ``None`` when both keys are absent.
+        """
+        persist_path = d.get("persist_path")
+        recover_path = d.get("recover_path")
+        if persist_path is None and recover_path is None:
+            return None
+        return PersistConfig(
+            persist_path=str(persist_path) if persist_path is not None else None,
+            recover_path=str(recover_path) if recover_path is not None else None,
         )
 
     @classmethod
@@ -297,6 +343,7 @@ def parse_args_to_l2_adapters_config(args: argparse.Namespace) -> L2AdaptersConf
         try:
             adapter_cfg = config_cls.from_dict(d)
             adapter_cfg.eviction_config = L2AdapterConfigBase._parse_eviction_config(d)
+            adapter_cfg.persist_config = L2AdapterConfigBase._parse_persist_config(d)
             adapter_configs.append(adapter_cfg)
         except (TypeError, ValueError) as e:
             logger.error(

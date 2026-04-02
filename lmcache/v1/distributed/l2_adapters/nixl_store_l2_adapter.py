@@ -28,6 +28,7 @@ from lmcache.v1.distributed.internal_api import L1MemoryDesc
 from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface, L2TaskId
 from lmcache.v1.distributed.l2_adapters.config import (
     L2AdapterConfigBase,
+    PersistConfig,
     register_l2_adapter_type,
 )
 from lmcache.v1.distributed.l2_adapters.factory import (
@@ -627,6 +628,24 @@ class NixlStoreL2Adapter(L2AdapterInterface):
         Return (current_usage, usage_after_ongoing_eviction) based on pool slots.
         """
         return self.nixl_agent.pool.get_usage()
+
+    #####################
+    # Persist/Recover Interface
+    #####################
+
+    def persist(self, config: PersistConfig) -> bool:
+        logger.warning(
+            "persist() is not supported by the static NixlStoreL2Adapter. "
+            "Please use the nixl_store_dynamic adapter instead."
+        )
+        return False
+
+    def recover(self, config: PersistConfig) -> bool:
+        logger.warning(
+            "recover() is not supported by the static NixlStoreL2Adapter. "
+            "Please use the nixl_store_dynamic adapter instead."
+        )
+        return False
 
     #####################
     # Status Interface

@@ -158,3 +158,13 @@ class EvictionAction:
 
     keys: list[ObjectKey] = field(default_factory=list)
     """The key of the object to be evicted"""
+
+
+@dataclass(frozen=True)
+class PersistDesc:
+    """
+    Descriptor for persist/recover operations on L2 adapters.
+    """
+
+    disk_persist_path: str
+    """ Path on disk where adapter metadata should be persisted/recovered """
