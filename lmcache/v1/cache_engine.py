@@ -821,12 +821,7 @@ class LMCacheEngine:
                     )
                     apc_skipped_keys: List[CacheEngineKey] = []  # async path: cleanup not yet implemented
                 else:
-                    reordered_chunks, tot_kv_size, apc_skipped_keys = self._process_tokens_internal(
-                        tokens,
-                        mask,
-                        ret_mask,
-                        **kwargs,
-                    )
+                    reordered_chunks, tot_kv_size, apc_skipped_keys = self._process_tokens_internal(tokens, mask, ret_mask, **kwargs)
 
         if self.save_only_first_rank:
             with retrieve_stats.profile_broadcast():
@@ -1682,7 +1677,7 @@ class LMCacheEngine:
                 location=location,
             )
 
-            for (key, start, end), memory_obj in zip(blocks, memory_objs, strict=False):
+            for (key, start, end), memory_obj in zip(blocks, memory_objs):
                 if memory_obj is None:
                     logger.warning(
                         "The cache block is in the storage, but it can't be retrieved"
