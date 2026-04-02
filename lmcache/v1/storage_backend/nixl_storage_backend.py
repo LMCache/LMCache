@@ -69,19 +69,13 @@ class NixlStorageConfig:
     path: str
 
     @staticmethod
-    def validate_nixl_backend(dynamic_storage: bool, backend: str, device: str):
-        if dynamic_storage:  # For now only supports OBJ backend
-            if backend in ("OBJ",):
-                return device == "cpu" or device == "cuda"
-            else:
-                return False
+    def validate_nixl_backend(backend: str, device: str):
+        if backend in ("GDS", "GDS_MT", "OBJ"):
+            return device == "cpu" or device == "cuda"
+        elif backend in ("POSIX", "HF3FS"):
+            return device == "cpu"
         else:
-            if backend in ("GDS", "GDS_MT", "OBJ"):
-                return device == "cpu" or device == "cuda"
-            elif backend in ("POSIX", "HF3FS"):
-                return device == "cpu"
-            else:
-                return False
+            return False
 
     @staticmethod
     def from_cache_engine_config(
@@ -117,7 +111,7 @@ class NixlStorageConfig:
         )
 
         assert NixlStorageConfig.validate_nixl_backend(
-            dynamic_storage, backend, config.nixl_buffer_device
+            backend, config.nixl_buffer_device
         ), "Invalid NIXL backend & device combination"
 
         return NixlStorageConfig(
@@ -437,8 +431,7 @@ class NixlDynamicStorageAgent(NixlStorageAgent):
         if backend == "OBJ":
             self.mem_type = "OBJ"
         else:
-            # Already validated in validate_nixl_backend
-            raise ValueError(f"unexpected backend: {backend}")
+            self.mem_type = "FILE"
 
     def create_batched_storage_handler(self, descs: list[NixlDesc], page_size: int):
         reg_list = []
@@ -460,12 +453,18 @@ class NixlDynamicStorageAgent(NixlStorageAgent):
         state = self.nixl_agent.transfer(handle)
         return state
 
-    def release_storage_handler(self, reg_descs, xfer_handler):
+    def release_storage_handler(self, reg_descs, xfer_handler, descs):
         """Release storage handler resources"""
+        if self.mem_type == "FILE":
+            for desc in descs:
+                os.close(desc.device_id)
         self.nixl_agent.release_dlist_handle(xfer_handler)
         self.nixl_agent.deregister_memory(reg_descs)
 
-    def nixl_desc_exists(self, meta_info: str) -> bool:
+    def nixl_desc_exists(self, meta_info: str, path: str) -> bool:
+        if self.mem_type == "FILE":
+            return os.path.exists(os.path.join(path, meta_info))
+
         reg_list = [(0, 0, 0, meta_info)]
         try:
             resp = self.nixl_agent.query_memory(
@@ -953,7 +952,16 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
 
         self.async_mode = nixl_config.enable_async_put
         self.enable_presence_cache = nixl_config.enable_presence_cache
-
+        self.path = nixl_config.path
+        self.direct_io_flag = 0
+        if nixl_config.use_direct_io:
+            if hasattr(os, "O_DIRECT"):
+                self.direct_io_flag = os.O_DIRECT
+            else:
+                logger.warning(
+                    "use_direct_io is True, but O_DIRECT is not available on "
+                    "this system. Falling back to buffered I/O."
+                )
         # Presence cache to reduce remote contains checks
         self.hit_counter = 0
         self.total_counter = 0
@@ -1034,19 +1042,15 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
         Similar to s3_connector._format_safe_path()
         """
         key_str = key.to_string()
-        # Replace slashes with underscores to make it safe for object storage
+        # Replace slashes with underscores to make it safe for object storage/FS
         flat_key_str = key_str.replace("/", "_").replace("@", "_")
         # URL encode for safety
         return url_quote(flat_key_str, safe="")
 
     def key_exists(self, key: CacheEngineKey) -> bool:
-        if self.agent.mem_type == "OBJ":
-            meta_info = self._format_object_key(key)
-        else:
-            # Already validated in validate_nixl_backend
-            raise ValueError(f"unexpected mem_type: {self.agent.mem_type}")
+        meta_info = self._format_object_key(key)
 
-        return self.agent.nixl_desc_exists(meta_info)
+        return self.agent.nixl_desc_exists(meta_info, self.path)
 
     def storage_to_mem(
         self, keys: list[CacheEngineKey], pin: bool = False
@@ -1082,6 +1086,11 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
             for idx in range(len(keys)):
                 object_key = self._format_object_key(keys[idx])
                 descs.append(NixlDesc(device_id=idx, meta_info=object_key))
+        elif self.agent.mem_type == "FILE":
+            for idx in range(len(keys)):
+                file_name = self._format_object_key(keys[idx])
+                fd = os.open(os.path.join(self.path, file_name), os.O_RDONLY | self.direct_io_flag)
+                descs.append(NixlDesc(device_id=fd, meta_info=""))
         else:
             # Already validated in validate_nixl_backend
             raise ValueError(f"unexpected mem_type: {self.agent.mem_type}")
@@ -1106,7 +1115,7 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
             xfer_state = False
 
         self.agent.release_handle(handle)
-        self.agent.release_storage_handler(storage_reg_descs, storage_xfer_handler)
+        self.agent.release_storage_handler(storage_reg_descs, storage_xfer_handler, descs)
 
         if xfer_state:
             for i in range(len(keys)):
@@ -1134,6 +1143,7 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
         keys: Sequence[CacheEngineKey],
         storage_reg_descs: nixlBind.nixlRegDList,
         storage_xfer_handler: NixlDlistHandle,
+        descs: List[NixlDesc],
         mem_objs: List[MemoryObj],
     ):
         """Asynchronously wait for transfer to complete without blocking."""
@@ -1149,7 +1159,7 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
         finally:
             # Release the handle after transfer completes (success or failure)
             self.agent.release_handle(handle)
-            self.agent.release_storage_handler(storage_reg_descs, storage_xfer_handler)
+            self.agent.release_storage_handler(storage_reg_descs, storage_xfer_handler, descs)
 
             if state == "DONE":
                 for key in keys:
@@ -1176,6 +1186,11 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
             for idx in range(len(keys)):
                 object_key = self._format_object_key(keys[idx])
                 descs.append(NixlDesc(device_id=idx, meta_info=object_key))
+        elif self.agent.mem_type == "FILE":
+            for idx in range(len(keys)):
+                file_name = self._format_object_key(keys[idx])
+                fd = os.open(os.path.join(self.path, file_name), os.O_CREAT | os.O_RDWR | self.direct_io_flag)
+                descs.append(NixlDesc(device_id=fd, meta_info=""))
         else:
             # Already validated in validate_nixl_backend
             raise ValueError(f"unexpected mem_type: {self.agent.mem_type}")
@@ -1198,13 +1213,14 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
                     keys,
                     storage_reg_descs,
                     storage_xfer_handler,
+                    descs,
                     mem_objs,
                 )
             )
         else:
             self.agent.post_blocking(handle)
             self.agent.release_handle(handle)
-            self.agent.release_storage_handler(storage_reg_descs, storage_xfer_handler)
+            self.agent.release_storage_handler(storage_reg_descs, storage_xfer_handler, descs)
 
             end_time = time.time()
             duration = end_time - start_time
@@ -1375,6 +1391,9 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
         :param force: Whether to force removal (not used in this implementation)
         """
         self._cache_discard(key.chunk_hash)
+        if self.agent.mem_type == "FILE":
+            os.unlink(os.path.join(self.path, self._format_object_key(key)))
+
         return True
 
     def pin(self, key: CacheEngineKey) -> bool:
