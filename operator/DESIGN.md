@@ -144,11 +144,14 @@ spec:
 The operator always injects these into the pod spec:
 
 - **`hostIPC: true`** — **required for CUDA IPC between LMCache and vLLM.** LMCache uses `CudaIPCWrapper` which calls PyTorch's `_share_cuda_()` to get a GPU driver-level IPC handle. The handle is serialized and sent over ZMQ TCP. The receiving process reconstructs the tensor via `cudaIpcOpenMemHandle` at the driver level. This call requires both processes to share the same IPC namespace — without `hostIPC: true`, `cudaIpcOpenMemHandle` fails with `cudaErrorMapBufferObjectFailed`. **Both the LMCache pods and vLLM pods must have `hostIPC: true`.**
+- **`runtimeClassName: nvidia`** — uses the NVIDIA container runtime, which injects the host's NVIDIA driver libraries and device files into the container. This is required for CUDA to function inside the pod.
+- **`privileged: true`** (security context) — **required for GPU visibility without explicit GPU resource requests.** LMCache needs access to all GPUs on the node for CUDA IPC and custom data transfer kernels, but it must not claim any GPUs via `nvidia.com/gpu` resource requests (otherwise those GPUs would be unavailable to the serving engine). The combination of `runtimeClassName: nvidia` + `privileged: true` + `NVIDIA_VISIBLE_DEVICES=all` allows the container to see all GPUs without consuming device plugin resources. This means the serving engine (e.g., vLLM) can still request all GPUs on the node.
+- **`NVIDIA_VISIBLE_DEVICES=all`** and **`NVIDIA_DRIVER_CAPABILITIES=all`** — env vars that instruct the NVIDIA container runtime to expose all GPUs and all driver capabilities to the container.
 - **`--host 0.0.0.0`** — always passed as a container arg. The server defaults to `--host localhost` which only binds to loopback; the server must bind to all interfaces so the node-local Service can route traffic to it.
 - **No `hostNetwork`** — the operator does **not** use `hostNetwork`. Instead, it creates a ClusterIP Service with `internalTrafficPolicy=Local`. kube-proxy ensures that traffic to the service is routed only to the LMCache pod on the same node. This avoids occupying host ports and reduces the privileged surface area.
 - **No `/dev/shm` emptyDir mount** — the operator intentionally does *not* mount an emptyDir at `/dev/shm`. With `hostIPC: true`, the container already sees the host's `/dev/shm`. Mounting an emptyDir would shadow the host's `/dev/shm` with a private tmpfs, breaking CUDA IPC (`cudaIpcOpenMemHandle` fails because IPC handles written by one pod are invisible to others). If your workload needs a larger `/dev/shm` for non-IPC purposes, add it via `spec.volumes` / `spec.volumeMounts`.
 
-> **Security implications of `hostIPC`:** This setting exposes the host's IPC namespace (System V IPC, POSIX message queues) to the container. This means any process in the container can interact with IPC resources from other processes on the same host. Only deploy in trusted environments. Clusters using Pod Security Standards must allow the `privileged` profile for the LMCache namespace — the `baseline` and `restricted` profiles reject `hostIPC`.
+> **Security implications:** The LMCache pods run with `privileged: true` and `hostIPC: true`. This exposes the host's IPC namespace and grants full device access to the container. This is required for GPU visibility and CUDA IPC. Only deploy in trusted environments. Clusters using Pod Security Standards must allow the `privileged` profile for the LMCache namespace — the `baseline` and `restricted` profiles reject these settings.
 
 ---
 
@@ -313,7 +316,7 @@ OnEvent(LMCacheEngine create/update/delete):
    - memoryLimit = ceil(memoryRequest * 1.5) Gi
    - containerArgs from all spec fields
 3. RECONCILE DaemonSet (CreateOrUpdate, ownerRef)
-   - Always inject: hostIPC, --host 0.0.0.0
+   - Always inject: hostIPC, runtimeClassName: nvidia, privileged: true, --host 0.0.0.0
 4. RECONCILE node-local lookup Service (internalTrafficPolicy=Local)
 5. RECONCILE headless Service for metrics
 6. RECONCILE connection ConfigMap
