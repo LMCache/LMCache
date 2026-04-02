@@ -57,9 +57,15 @@ logger = init_logger(__name__)
 
 
 def _object_key_to_filename(key: ObjectKey) -> str:
-    """Derive a deterministic file name from an ObjectKey."""
+    """Derive a deterministic file name from an ObjectKey.
+
+    Replaces ``/`` in model names with ``--`` to avoid creating
+    subdirectories (e.g. ``meta-llama/Llama-3-8B`` becomes
+    ``meta-llama--Llama-3-8B``).
+    """
+    safe_model_name = key.model_name.replace("/", "--")
     chunk_hex = key.chunk_hash.hex()
-    return f"{key.model_name}_{key.kv_rank:08x}_{chunk_hex}.bin"
+    return f"{safe_model_name}_{key.kv_rank:08x}_{chunk_hex}.bin"
 
 
 # ---------------------------------------------------------------
@@ -457,7 +463,9 @@ class DynamicNixlStoreL2Adapter(L2AdapterInterface):
                     }
                 entries.append(entry)
 
-        os.makedirs(os.path.dirname(config.persist_path), exist_ok=True)
+        persist_dir = os.path.dirname(config.persist_path)
+        if persist_dir:
+            os.makedirs(persist_dir, exist_ok=True)
         with open(config.persist_path, "w") as f:
             json.dump(entries, f)
 
@@ -625,8 +633,10 @@ class DynamicNixlStoreL2Adapter(L2AdapterInterface):
                 mem_addr = obj.meta.address
                 mem_size = obj.meta.phy_size
 
-                # Check capacity before writing
+                # Skip if key already exists or capacity exceeded
                 with self._lock:
+                    if key in self._memory_objects:
+                        continue
                     if self._total_bytes + mem_size > self._max_capacity_bytes:
                         logger.warning(
                             "Storage capacity exceeded, skipping store for key %s",
