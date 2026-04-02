@@ -77,13 +77,7 @@ def _create_connector(
     use_mla: bool = False,
 ):
     return VLLMPagedMemXPUConnectorV2(
-        hidden_dim,
-        num_layers,
         use_gpu=use_gpu,
-        chunk_size=chunk_size,
-        dtype=dtype,
-        device=device,
-        use_mla=use_mla,
     )
 
 
