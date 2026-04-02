@@ -69,6 +69,10 @@ logger = init_logger(__name__)
 ProcessedChunk = Tuple[CacheEngineKey, MemoryObj, int, int]
 # (list of processed chunks, total kv size)
 ProcessTokensInternalResult = Tuple[List[ProcessedChunk], int]
+# (list of processed chunks, total kv size, APC-skipped keys)
+ProcessTokensInternalWithApcResult = Tuple[
+    List[ProcessedChunk], int, List[CacheEngineKey]
+]
 
 
 class CacheEngineEndSignal:
@@ -819,9 +823,14 @@ class LMCacheEngine:
                         ret_mask,
                         **kwargs,
                     )
-                    apc_skipped_keys: List[CacheEngineKey] = []  # async path: cleanup not yet implemented
+                    # Async path: APC-skipped cleanup is not implemented yet.
+                    apc_skipped_keys: List[CacheEngineKey] = []
                 else:
-                    reordered_chunks, tot_kv_size, apc_skipped_keys = self._process_tokens_internal(
+                    (
+                        reordered_chunks,
+                        tot_kv_size,
+                        apc_skipped_keys,
+                    ) = self._process_tokens_internal(
                         tokens,
                         mask,
                         ret_mask,
@@ -877,7 +886,9 @@ class LMCacheEngine:
             apc_mem_objs = self.storage_manager.batched_get(
                 keys=apc_skipped_keys, location=None
             )
-            for apc_key, apc_mem_obj in zip(apc_skipped_keys, apc_mem_objs):
+            for apc_key, apc_mem_obj in zip(
+                apc_skipped_keys, apc_mem_objs, strict=False
+            ):
                 if apc_mem_obj is not None:
                     self.storage_manager.remove(apc_key, self.retrieve_locations)
                     if not self.async_loading:
@@ -1051,6 +1062,14 @@ class LMCacheEngine:
 
         # synchronize the last layer
         next(mem_obj_consumer)
+
+        # Unpin any disk-loaded staging objects now that the device-side sync
+        # has been enqueued (mem_obj_consumer advanced past its sync point).
+        # Without this, pin_count stays at 1 forever and the CPU staging pool
+        # fills up, causing the next retrieve to deadlock inside allocate().
+        for mem_obj in to_count_down:
+            if mem_obj.is_pinned:
+                mem_obj.unpin()
 
         retrieved_tokens = torch.sum(ret_mask)
         self.stats_monitor.on_retrieve_finished(monitor_req_id, retrieved_tokens)
@@ -1622,7 +1641,7 @@ class LMCacheEngine:
         mask,
         ret_mask,
         **kwargs,
-    ) -> ProcessTokensInternalResult:
+    ) -> ProcessTokensInternalWithApcResult:
         """Process tokens and populate the reordered lists.
 
         This function is used to process tokens and populate the reordered lists.
@@ -1632,6 +1651,12 @@ class LMCacheEngine:
             mask: Mask indicating valid token positions
             ret_mask: Output mask updated with cache hit positions
             **kwargs: Additional keyword arguments
+
+        Returns:
+            A tuple containing:
+            - list of chunks to retrieve
+            - total KV size for retrieved chunks
+            - APC-skipped keys for optional cleanup in PD receiver mode
         """
         assert self.storage_manager is not None
 

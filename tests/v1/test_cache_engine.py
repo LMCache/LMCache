@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
+from contextlib import nullcontext
 from copy import deepcopy
 import os
 import random
@@ -7,17 +8,19 @@ import shlex
 import subprocess
 import tempfile
 import time
+from unittest.mock import MagicMock
 
 # Third Party
 import pytest
 import torch
 
 # First Party
+from lmcache.utils import CacheEngineKey
 from lmcache.utils import (
     mock_up_broadcast_fn,
     mock_up_broadcast_object_fn,
 )
-from lmcache.v1.cache_engine import LMCacheEngineBuilder
+from lmcache.v1.cache_engine import LMCacheEngine, LMCacheEngineBuilder
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.event_manager import EventStatus, EventType
 
@@ -1505,3 +1508,59 @@ def test_multi_device_backends(save_unfull_chunk, autorelease_v1):
         )
 
         LMCacheEngineBuilder.destroy("engine")
+
+
+def test_retrieve_cleans_apc_skipped_keys_pd_buffer():
+    apc_key = CacheEngineKey(
+        model_name="test_model",
+        world_size=1,
+        worker_id=0,
+        chunk_hash=11,
+        dtype=torch.bfloat16,
+    )
+
+    class _RetrieveStats:
+        def profile_process_tokens(self):
+            return nullcontext()
+
+        def profile_to_gpu(self):
+            return nullcontext()
+
+        def profile_broadcast(self):
+            return nullcontext()
+
+        def time_to_retrieve(self):
+            return 1.0
+
+    apc_mem_obj = MagicMock()
+
+    engine = LMCacheEngine.__new__(LMCacheEngine)
+    engine.is_healthy = lambda: True
+    engine._get_req_id = lambda _kwargs: "req-2"
+    engine._log_kvcache_for_check = lambda **_kwargs: None
+    engine._is_passive = lambda: False
+    engine.remove_after_retrieve = True
+    engine.async_loading = False
+    engine.save_only_first_rank = False
+    engine.retrieve_locations = ["PDBackend"]
+    engine.storage_manager = MagicMock()
+    engine.storage_manager.batched_get.return_value = [apc_mem_obj]
+    engine.gpu_connector = MagicMock()
+    engine.stats_monitor = MagicMock()
+    engine.stats_monitor.on_retrieve_request.return_value = _RetrieveStats()
+    engine._process_tokens_internal = MagicMock(return_value=([], 0, [apc_key]))
+
+    ret_mask = engine.retrieve(
+        tokens=torch.tensor([1, 2], dtype=torch.int64),
+        mask=torch.tensor([False, True]),
+        req_id="req-2",
+    )
+
+    assert torch.equal(ret_mask, torch.tensor([False, False]))
+    engine.storage_manager.batched_get.assert_called_once_with(
+        keys=[apc_key], location=None
+    )
+    engine.storage_manager.remove.assert_called_once_with(
+        apc_key, engine.retrieve_locations
+    )
+    apc_mem_obj.ref_count_down.assert_called_once()
