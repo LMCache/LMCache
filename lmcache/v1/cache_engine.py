@@ -67,8 +67,8 @@ logger = init_logger(__name__)
 # Type aliases for processed chunks
 # (cache_key, memory_obj, start_index, end_index)
 ProcessedChunk = Tuple[CacheEngineKey, MemoryObj, int, int]
-# (list of processed chunks, total kv size)
-ProcessTokensInternalResult = Tuple[List[ProcessedChunk], int]
+# (list of processed chunks, total kv size, apc-skipped keys for pd_buffer cleanup)
+ProcessTokensInternalResult = Tuple[List[ProcessedChunk], int, List[CacheEngineKey]]
 
 
 class CacheEngineEndSignal:
@@ -865,9 +865,7 @@ class LMCacheEngine:
             if not self.async_loading:
                 memory_obj.ref_count_down()
 
-        # FIX: Free pd_buffer pages for APC-skipped (token_mask=False) chunks.
-        # apc_skipped_keys was populated for free inside _process_tokens_internal
-        # during its single process_tokens pass — no redundant re-hashing.
+        # Free pd_buffer pages for APC-skipped chunks.
         if (
             self.remove_after_retrieve
             and not self._is_passive()
@@ -875,7 +873,7 @@ class LMCacheEngine:
             and apc_skipped_keys
         ):
             apc_mem_objs = self.storage_manager.batched_get(
-                keys=apc_skipped_keys, location=None
+                keys=apc_skipped_keys, location="LocalCPUBackend", fmt=self.fmt
             )
             for apc_key, apc_mem_obj in zip(apc_skipped_keys, apc_mem_objs):
                 if apc_mem_obj is not None:
@@ -1040,6 +1038,7 @@ class LMCacheEngine:
                 to_count_down.extend(mem_objs_layer)
 
             for mem_obj in to_count_down:
+                mem_obj.unpin()
                 mem_obj.ref_count_down()
         else:
             # If no cache are found, we still need to yield to avoid
