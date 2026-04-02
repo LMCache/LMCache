@@ -240,7 +240,7 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
                 self._OP_LOAD,
                 task_id,
                 len(keys),
-                None,
+                list(keys),
             )
 
         return task_id
@@ -254,6 +254,16 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
     # ---------------------------------------------------------------
 
     def delete(self, keys: list[ObjectKey]) -> None:
+        """Delete a batch of keys from the remote backend.
+
+        Submits a batch delete to the native connector and blocks
+        until the demux thread signals completion (up to 30s timeout).
+        Fires ``_notify_keys_deleted`` on success so eviction policy
+        tracking stays in sync.
+
+        No-op if the connector does not expose ``submit_batch_delete``
+        or if the key list is empty.
+        """
         if not keys or not self._has_delete:
             return
 
@@ -273,6 +283,14 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
 
         # Block until demux thread signals completion
         if not done_event.wait(timeout=30.0):
+            with self._lock:
+                self._pending_delete_events.pop(task_id, None)
+                # Note: _pending_ops entry may already be consumed
+                # by the demux thread; pop is safe either way.
+                for fid, entry in list(self._pending_ops.items()):
+                    if entry[1] == task_id:
+                        self._pending_ops.pop(fid, None)
+                        break
             logger.warning(
                 "delete() timed out after 30s for %d keys",
                 len(keys),
@@ -335,6 +353,11 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
             if not completions:
                 continue
 
+            # Collect listener notifications to fire after
+            # releasing the lock.
+            keys_stored: list[ObjectKey] = []
+            keys_accessed: list[ObjectKey] = []
+
             with self._lock:
                 for (
                     future_id,
@@ -368,6 +391,7 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
                                 if key not in self._key_sizes:
                                     self._key_sizes[key] = size
                                     self._current_size_bytes += size
+                            keys_stored.extend(store_keys)
                         os.eventfd_write(self._store_efd, 1)
 
                     elif op_type == self._OP_LOOKUP:
@@ -383,15 +407,21 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
 
                     elif op_type == self._OP_LOAD:
                         bitmap = Bitmap(num_keys)
+                        loaded_keys: list[ObjectKey] = []
                         if result_bools is not None:
                             for i, loaded in enumerate(result_bools):
                                 if loaded:
                                     bitmap.set(i)
+                                    if lookup_keys is not None:
+                                        loaded_keys.append(lookup_keys[i])
                         elif ok:
                             # Fallback for connectors that
                             # do not report per-key results
                             for i in range(num_keys):
                                 bitmap.set(i)
+                            if lookup_keys is not None:
+                                loaded_keys.extend(lookup_keys)
+                        keys_accessed.extend(loaded_keys)
                         self._completed_loads[task_id] = bitmap
                         os.eventfd_write(self._load_efd, 1)
 
@@ -406,3 +436,9 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
                         evt = self._pending_delete_events.pop(task_id, None)
                         if evt is not None:
                             evt.set()
+
+            # Fire listener notifications outside the lock
+            if keys_stored:
+                self._notify_keys_stored(keys_stored)
+            if keys_accessed:
+                self._notify_keys_accessed(keys_accessed)
