@@ -218,6 +218,20 @@ def CreateStorageBackends(
         )
         storage_backends[str(gds_backend)] = gds_backend
 
+    if config.maru_path is not None and "MaruBackend" not in _skip:
+        try:
+            # First Party
+            from lmcache.v1.storage_backend.maru_backend import MaruBackend
+        except ImportError as e:
+            raise ImportError(
+                "The 'maru' and 'maru_lmcache' packages are required "
+                "to use MaruBackend. Please install them according to "
+                "the Maru setup documentation."
+            ) from e
+
+        maru_backend = MaruBackend(config, metadata, loop, dst_device)
+        storage_backends[str(maru_backend)] = maru_backend
+
     if config.remote_url is not None and "RemoteBackend" not in _skip:
         assert local_cpu_backend is not None, (
             "Remote backend requires local CPU backend as a buffer."
