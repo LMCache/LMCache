@@ -501,6 +501,8 @@ class LMCacheMPWorkerAdapter:
         world_size: int,
         kv_rank: int,
         vllm_block_size: int,
+        use_mla: bool,
+        is_first_rank_of_pp_group: bool,
         mq_timeout: float = DEFAULT_MQ_TIMEOUT,
         heartbeat_interval: float = DEFAULT_HEARTBEAT_INTERVAL,
     ):
@@ -549,6 +551,9 @@ class LMCacheMPWorkerAdapter:
             "LMCache chunk size should be a multiple of vLLM block size"
         )
         self.blocks_in_chunk = chunk_size // vllm_block_size
+
+        self.use_mla = use_mla
+        self.is_first_rank_of_pp_group = is_first_rank_of_pp_group
 
         # Health state (shared with heartbeat thread)
         self._health_event = threading.Event()
