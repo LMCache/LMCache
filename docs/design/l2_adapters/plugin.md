@@ -227,18 +227,127 @@ example plugin (`InMemoryL2Adapter`) that demonstrates:
 
 ---
 
+## Native Plugin L2 Adapter (`native_plugin`)
+
+The **Native Plugin** adapter type (`"native_plugin"`) enables loading
+third-party **native connectors** (pybind-wrapped C++ or pure-Python
+implementations of the `IStorageConnector` interface) without requiring
+them to re-implement the Python-side demux/lock bridging logic.
+
+### How It Differs from `plugin`
+
+| Aspect | `plugin` | `native_plugin` |
+|---|---|---|
+| What is loaded | A full `L2AdapterInterface` subclass | A **connector** object (lower level) |
+| Bridging logic | Provided by the plugin itself | Reused from `NativeConnectorL2Adapter` |
+| Third-party effort | Must implement all abstract methods + 3 eventfds | Only 6 connector methods |
+
+### `NativePluginL2AdapterConfig`
+
+Config class registered under the type name `"native_plugin"`. Fields:
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `module_path` | `str` | yes | Dotted Python import path of the module containing the connector class. |
+| `class_name` | `str` | yes | Name of the connector class inside `module_path`. |
+| `adapter_params` | `dict` | no | Forwarded as `**kwargs` to the connector class constructor. |
+
+### Required Connector Interface
+
+The dynamically loaded connector instance must expose the following
+methods (identical to the pybind `LMCACHE_BIND_CONNECTOR_METHODS` contract):
+
+```python
+class NativeConnectorProtocol:
+    def event_fd(self) -> int: ...
+    def submit_batch_get(self, keys: list[str], memoryviews: list[memoryview]) -> int: ...
+    def submit_batch_set(self, keys: list[str], memoryviews: list[memoryview]) -> int: ...
+    def submit_batch_exists(self, keys: list[str]) -> int: ...
+    def drain_completions(self) -> list[tuple[int, bool, str, list[bool] | None]]: ...
+    def close(self) -> None: ...
+```
+
+The factory validates these methods at creation time and raises
+`TypeError` if any are missing.
+
+### Loading Flow
+
+```
+CLI / config JSON
+  │
+  ▼
+parse_args_to_l2_adapters_config()
+  │  JSON: {"type": "native_plugin",
+  │         "module_path": "my_ext.connector",
+  │         "class_name": "MyConnectorClient",
+  │         "adapter_params": {"host": "localhost"}}
+  │
+  ▼
+NativePluginL2AdapterConfig.from_dict(d)
+  │
+  ▼
+_create_native_plugin_l2_adapter(config, ...)
+  │
+  ├─ importlib.import_module(config.module_path)
+  ├─ getattr(module, config.class_name)
+  ├─ connector_cls(**config.adapter_params)
+  ├─ validate 6 required methods
+  └─ NativeConnectorL2Adapter(native_client)
+          │
+          ▼
+  L2AdapterInterface instance (ready for use)
+```
+
+### Example
+
+```json
+{
+  "type": "native_plugin",
+  "module_path": "lmc_external_native_connector",
+  "class_name": "ExampleNativeConnector",
+  "adapter_params": {
+    "backend": "fs",
+    "base_path": "/tmp/lmcache_ext",
+    "num_workers": 2
+  }
+}
+```
+
+### Reference Implementation
+
+See `examples/lmc_external_native_connector/` for a complete,
+pip-installable example connector plugin that demonstrates:
+
+- C++ pybind11-wrapped connectors inheriting from
+  `ConnectorBase<T>` (same as built-in Redis/FS).
+- Two backends: filesystem (ExampleFSConnector) and
+  in-memory (ExampleMemoryConnector), both in C++.
+- A thin Python factory class (`ExampleNativeConnector`)
+  that selects the backend via a `"backend"` parameter.
+- Worker thread pool with eventfd notification
+  (inherited from `ConnectorBase`).
+- Build via `pip install -e .` using pybind11 + setuptools.
+
+---
+
 ## Self-Registration Mechanism
 
-The `plugin_l2_adapter.py` module follows the same self-registration
-pattern as all other adapters in the package:
+The `plugin_l2_adapter.py` and `native_connector_l2_adapter.py`
+modules follow the same self-registration pattern as all other
+adapters in the package:
 
 ```
 __init__.py
   └─ pkgutil.iter_modules → importlib.import_module
-       └─ plugin_l2_adapter.py (auto-discovered)
-            ├─ register_l2_adapter_type("plugin", PluginL2AdapterConfig)
-            └─ register_l2_adapter_factory("plugin", _create_plugin_adapter)
+       ├─ plugin_l2_adapter.py (auto-discovered)
+       │    ├─ register_l2_adapter_type("plugin", PluginL2AdapterConfig)
+       │    └─ register_l2_adapter_factory("plugin", _create_plugin_adapter)
+       │
+       └─ native_connector_l2_adapter.py (auto-discovered)
+            ├─ register_l2_adapter_type("resp", ...)
+            ├─ register_l2_adapter_type("fs_native", ...)
+            └─ register_l2_adapter_type("native_plugin", NativePluginL2AdapterConfig)
 ```
 
-No changes to existing codes are needed when this module
-is present in the `l2_adapters/` package directory.
+No changes to existing codes are needed when these modules
+are present in the `l2_adapters/` package directory.

@@ -199,10 +199,6 @@ class PrefetchController(StorageControllerInterface):
         self._l2_adapters = l2_adapters
         self._adapter_descriptors = adapter_descriptors
         self._policy = policy
-        # TODO(ApostaC): max_in_flight should not be a static constant.
-        # Replace with a dynamic admission controller that monitors L1 memory
-        # usage of in-flight prefetch requests. A fixed limit can still blow
-        # up L1 memory when individual requests are large.
         self._max_in_flight = max_in_flight
 
         # In-flight request tracking (background thread only)
