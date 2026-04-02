@@ -634,6 +634,7 @@ class NixlStoreL2Adapter(L2AdapterInterface):
     #####################
 
     def persist(self, config: PersistConfig) -> bool:
+        """Not supported. Use nixl_store_dynamic adapter instead."""
         logger.warning(
             "persist() is not supported by the static NixlStoreL2Adapter. "
             "Please use the nixl_store_dynamic adapter instead."
@@ -641,6 +642,7 @@ class NixlStoreL2Adapter(L2AdapterInterface):
         return False
 
     def recover(self, config: PersistConfig) -> bool:
+        """Not supported. Use nixl_store_dynamic adapter instead."""
         logger.warning(
             "recover() is not supported by the static NixlStoreL2Adapter. "
             "Please use the nixl_store_dynamic adapter instead."

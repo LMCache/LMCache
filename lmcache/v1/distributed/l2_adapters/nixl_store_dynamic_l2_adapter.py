@@ -136,7 +136,9 @@ class DynamicNixlStorageAgent:
         """Return os.open flags for storage files."""
         flags = os.O_RDWR
         if create:
-            flags |= os.O_CREAT
+            # O_TRUNC ensures any orphaned file from a previous crash
+            # is truncated, avoiding stale trailing bytes on disk.
+            flags |= os.O_CREAT | os.O_TRUNC
         if self.use_direct_io and hasattr(os, "O_DIRECT"):
             flags |= os.O_DIRECT
         return flags
@@ -517,12 +519,13 @@ class DynamicNixlStoreL2Adapter(L2AdapterInterface):
                 layout = MemoryLayoutDesc(shapes, dtypes)
 
             obj_size = entry["size"]
-            self._memory_objects[key] = NixlStoreObj(
-                page_indices=[],  # not used in dynamic mode
-                size=obj_size,
-                layout=layout,
-            )
-            self._total_bytes += obj_size
+            with self._lock:
+                self._memory_objects[key] = NixlStoreObj(
+                    page_indices=[],  # not used in dynamic mode
+                    size=obj_size,
+                    layout=layout,
+                )
+                self._total_bytes += obj_size
             recovered += 1
 
         logger.info(
