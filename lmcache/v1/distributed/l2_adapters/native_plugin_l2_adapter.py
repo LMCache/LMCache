@@ -55,10 +55,12 @@ class NativePluginL2AdapterConfig(L2AdapterConfigBase):
         module_path: str,
         class_name: str,
         adapter_params: dict[str, Any] | None = None,
+        max_capacity_bytes: int = 0,
     ):
         self.module_path = module_path
         self.class_name = class_name
         self.adapter_params = adapter_params or {}
+        self.max_capacity_bytes = max_capacity_bytes
 
     @classmethod
     def from_dict(cls, d: dict) -> "NativePluginL2AdapterConfig":
@@ -74,10 +76,15 @@ class NativePluginL2AdapterConfig(L2AdapterConfigBase):
         if not isinstance(adapter_params, dict):
             raise ValueError("adapter_params must be a dict")
 
+        max_capacity_bytes = d.get("max_capacity_bytes", 0)
+        if not isinstance(max_capacity_bytes, int) or max_capacity_bytes < 0:
+            raise ValueError("max_capacity_bytes must be a non-negative integer")
+
         return cls(
             module_path=module_path,
             class_name=class_name,
             adapter_params=adapter_params,
+            max_capacity_bytes=max_capacity_bytes,
         )
 
     @classmethod
@@ -180,7 +187,9 @@ def _create_native_plugin_l2_adapter(
         config.class_name,
         config.adapter_params,
     )
-    return NativeConnectorL2Adapter(native_client)
+    return NativeConnectorL2Adapter(
+        native_client, max_capacity_bytes=config.max_capacity_bytes
+    )
 
 
 register_l2_adapter_type("native_plugin", NativePluginL2AdapterConfig)

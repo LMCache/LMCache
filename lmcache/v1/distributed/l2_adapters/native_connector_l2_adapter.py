@@ -79,7 +79,7 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
     _OP_LOAD = "load"
     _OP_DELETE = "delete"
 
-    def __init__(self, native_client):
+    def __init__(self, native_client, max_capacity_bytes: int = 0):
         super().__init__()
         self._client = native_client
         self._client_fd: int = int(native_client.event_fd())
@@ -112,6 +112,13 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
 
         # Pending delete events for synchronous delete() calls
         self._pending_delete_events: dict[L2TaskId, threading.Event] = {}
+
+        # Client-side size tracking for get_usage()
+        self._max_capacity_bytes = max_capacity_bytes
+        self._current_size_bytes: int = 0
+        self._key_sizes: dict[ObjectKey, int] = {}
+        # Pending store sizes: native future_id -> (keys, per_key_sizes)
+        self._pending_store_sizes: dict[int, tuple[list[ObjectKey], list[int]]] = {}
 
         # Task ID counter
         self._next_task_id: L2TaskId = 0
@@ -152,6 +159,7 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
     ) -> L2TaskId:
         key_strings = [_object_key_to_string(k) for k in keys]
         memviews = [_obj_to_memoryview(obj) for obj in objects]
+        per_key_sizes = [obj.get_size() for obj in objects]
 
         # Register pending op BEFORE submit to avoid race
         # with demux thread. The native submit is
@@ -165,6 +173,7 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
                 len(keys),
                 None,
             )
+            self._pending_store_sizes[future_id] = (list(keys), per_key_sizes)
 
         return task_id
 
@@ -273,10 +282,11 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
         self._notify_keys_deleted(keys)
 
     def get_usage(self) -> tuple[float, float]:
-        # Not yet implemented for the native connector adapter.
-        # Usage-based eviction triggering requires backend-specific
-        # introspection or client-side size tracking (future work).
-        return (-1.0, -1.0)
+        if self._max_capacity_bytes <= 0:
+            return (-1.0, -1.0)
+        with self._lock:
+            usage = self._current_size_bytes / self._max_capacity_bytes
+            return (usage, usage)
 
     # ---------------------------------------------------------------
     # Cleanup
@@ -350,6 +360,14 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
 
                     if op_type == self._OP_STORE:
                         self._completed_stores[task_id] = ok
+                        # Update size tracking on success
+                        store_info = self._pending_store_sizes.pop(fid, None)
+                        if ok and store_info is not None:
+                            store_keys, sizes = store_info
+                            for key, size in zip(store_keys, sizes, strict=False):
+                                if key not in self._key_sizes:
+                                    self._key_sizes[key] = size
+                                    self._current_size_bytes += size
                         os.eventfd_write(self._store_efd, 1)
 
                     elif op_type == self._OP_LOOKUP:
@@ -378,6 +396,13 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
                         os.eventfd_write(self._load_efd, 1)
 
                     elif op_type == self._OP_DELETE:
+                        # Decrement sizes for successfully deleted keys
+                        if result_bools is not None and lookup_keys is not None:
+                            for i, deleted in enumerate(result_bools):
+                                if deleted:
+                                    key = lookup_keys[i]
+                                    size = self._key_sizes.pop(key, 0)
+                                    self._current_size_bytes -= size
                         evt = self._pending_delete_events.pop(task_id, None)
                         if evt is not None:
                             evt.set()

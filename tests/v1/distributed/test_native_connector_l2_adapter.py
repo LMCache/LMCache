@@ -1072,3 +1072,104 @@ class TestDeleteBackwardCompatibility:
             adp.delete([key])  # should not raise, just no-op
         finally:
             adp.close()
+
+
+# =============================================================================
+# Usage Tracking Tests
+# =============================================================================
+
+
+@pytest.fixture
+def adapter_with_capacity():
+    """Adapter with max_capacity_bytes set for usage tracking tests."""
+    mock_client = MockNativeConnector()
+    # 100 floats * 4 bytes = 400 bytes per obj; set capacity to 2000 bytes (5 objects)
+    adp = NativeConnectorL2Adapter(mock_client, max_capacity_bytes=2000)
+    yield adp
+    adp.close()
+
+
+class TestUsageTracking:
+    def test_get_usage_without_capacity(self, adapter):
+        """Without max_capacity_bytes, get_usage returns (-1, -1)."""
+        usage = adapter.get_usage()
+        assert usage == (-1.0, -1.0)
+
+    def test_get_usage_starts_at_zero(self, adapter_with_capacity):
+        usage, _ = adapter_with_capacity.get_usage()
+        assert usage == 0.0
+
+    def test_get_usage_after_store(self, adapter_with_capacity):
+        adp = adapter_with_capacity
+        store_fd = adp.get_store_event_fd()
+
+        key = create_object_key(1)
+        obj = create_memory_obj(size=100, fill_value=1.0)  # 100 floats = 400 bytes
+
+        adp.submit_store_task([key], [obj])
+        wait_for_event_fd(store_fd, timeout=5.0)
+        adp.pop_completed_store_tasks()
+
+        usage, _ = adp.get_usage()
+        # 400 bytes / 2000 bytes = 0.2
+        assert usage == pytest.approx(0.2)
+
+    def test_get_usage_after_delete(self, adapter_with_capacity):
+        adp = adapter_with_capacity
+        store_fd = adp.get_store_event_fd()
+
+        key = create_object_key(1)
+        obj = create_memory_obj(size=100, fill_value=1.0)
+
+        # Store
+        adp.submit_store_task([key], [obj])
+        wait_for_event_fd(store_fd, timeout=5.0)
+        adp.pop_completed_store_tasks()
+
+        assert adp.get_usage()[0] == pytest.approx(0.2)
+
+        # Delete
+        adp.delete([key])
+
+        assert adp.get_usage()[0] == pytest.approx(0.0)
+
+    def test_get_usage_store_delete_cycle(self, adapter_with_capacity):
+        adp = adapter_with_capacity
+        store_fd = adp.get_store_event_fd()
+
+        # Store 3 objects (3 * 400 = 1200 bytes)
+        keys = [create_object_key(i) for i in range(3)]
+        objs = [create_memory_obj(size=100, fill_value=float(i)) for i in range(3)]
+
+        adp.submit_store_task(keys, objs)
+        wait_for_event_fd(store_fd, timeout=5.0)
+        adp.pop_completed_store_tasks()
+
+        usage, _ = adp.get_usage()
+        assert usage == pytest.approx(1200 / 2000)
+
+        # Delete 2
+        adp.delete(keys[:2])
+
+        usage, _ = adp.get_usage()
+        assert usage == pytest.approx(400 / 2000)
+
+    def test_idempotent_store_no_double_count(self, adapter_with_capacity):
+        adp = adapter_with_capacity
+        store_fd = adp.get_store_event_fd()
+
+        key = create_object_key(1)
+        obj = create_memory_obj(size=100, fill_value=1.0)
+
+        # Store same key twice
+        adp.submit_store_task([key], [obj])
+        wait_for_event_fd(store_fd, timeout=5.0)
+        adp.pop_completed_store_tasks()
+
+        adp.submit_store_task([key], [obj])
+        wait_for_event_fd(store_fd, timeout=5.0)
+        adp.pop_completed_store_tasks()
+
+        # Should only count once
+        usage, _ = adp.get_usage()
+        assert usage == pytest.approx(0.2)

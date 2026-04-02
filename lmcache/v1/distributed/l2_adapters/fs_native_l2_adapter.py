@@ -54,12 +54,14 @@ class FSNativeL2AdapterConfig(L2AdapterConfigBase):
         relative_tmp_dir: str = "",
         use_odirect: bool = False,
         read_ahead_size: Optional[int] = None,
+        max_capacity_bytes: int = 0,
     ):
         self.base_path = base_path
         self.num_workers = num_workers
         self.relative_tmp_dir = relative_tmp_dir
         self.use_odirect = use_odirect
         self.read_ahead_size = read_ahead_size
+        self.max_capacity_bytes = max_capacity_bytes
 
     @classmethod
     def from_dict(cls, d: dict) -> "FSNativeL2AdapterConfig":
@@ -84,12 +86,17 @@ class FSNativeL2AdapterConfig(L2AdapterConfigBase):
             if not isinstance(read_ahead_size, int) or read_ahead_size <= 0:
                 raise ValueError("read_ahead_size must be a positive integer")
 
+        max_capacity_bytes = d.get("max_capacity_bytes", 0)
+        if not isinstance(max_capacity_bytes, int) or max_capacity_bytes < 0:
+            raise ValueError("max_capacity_bytes must be a non-negative integer")
+
         return cls(
             base_path=base_path,
             num_workers=num_workers,
             relative_tmp_dir=str(relative_tmp_dir),
             use_odirect=use_odirect,
             read_ahead_size=read_ahead_size,
+            max_capacity_bytes=max_capacity_bytes,
         )
 
     @classmethod
@@ -148,7 +155,9 @@ def _create_fs_native_l2_adapter(
         config.use_odirect,
         config.read_ahead_size,
     )
-    return NativeConnectorL2Adapter(native_client)
+    return NativeConnectorL2Adapter(
+        native_client, max_capacity_bytes=config.max_capacity_bytes
+    )
 
 
 register_l2_adapter_type("fs_native", FSNativeL2AdapterConfig)

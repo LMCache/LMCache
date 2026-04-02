@@ -53,6 +53,7 @@ class RESPL2AdapterConfig(L2AdapterConfigBase):
         num_workers: int = 8,
         username: str = "",
         password: str = "",
+        max_capacity_bytes: int = 0,
     ):
         super().__init__()
         self.host = host
@@ -60,6 +61,7 @@ class RESPL2AdapterConfig(L2AdapterConfigBase):
         self.num_workers = num_workers
         self.username = username
         self.password = password
+        self.max_capacity_bytes = max_capacity_bytes
 
     @classmethod
     def from_dict(cls, d: dict) -> "RESPL2AdapterConfig":
@@ -78,12 +80,17 @@ class RESPL2AdapterConfig(L2AdapterConfigBase):
         username = d.get("username", "")
         password = d.get("password", "")
 
+        max_capacity_bytes = d.get("max_capacity_bytes", 0)
+        if not isinstance(max_capacity_bytes, int) or max_capacity_bytes < 0:
+            raise ValueError("max_capacity_bytes must be a non-negative integer")
+
         return cls(
             host=host,
             port=port,
             num_workers=num_workers,
             username=str(username),
             password=str(password),
+            max_capacity_bytes=max_capacity_bytes,
         )
 
     @classmethod
@@ -139,7 +146,9 @@ def _create_resp_l2_adapter(
         config.port,
         config.num_workers,
     )
-    return NativeConnectorL2Adapter(native_client)
+    return NativeConnectorL2Adapter(
+        native_client, max_capacity_bytes=config.max_capacity_bytes
+    )
 
 
 # Self-register config type and adapter factory
