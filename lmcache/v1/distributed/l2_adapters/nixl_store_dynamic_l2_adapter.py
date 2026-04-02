@@ -5,6 +5,9 @@ Dynamic-file-mode Nixl L2 adapter.
 Unlike the static ``NixlStoreL2Adapter`` which pre-allocates all storage
 files at init time, this adapter opens/registers files per operation and
 supports persist/recover of cached KV metadata across restarts.
+
+Another alternative is that we can still pre-allocates and register
+all files at start time.
 """
 
 # Future
@@ -57,17 +60,6 @@ def _object_key_to_filename(key: ObjectKey) -> str:
     """Derive a deterministic file name from an ObjectKey."""
     chunk_hex = key.chunk_hash.hex()
     return f"{key.model_name}_{key.kv_rank:08x}_{chunk_hex}.bin"
-
-
-def _filename_to_object_key(filename: str) -> ObjectKey:
-    """Reverse a filename produced by ``_object_key_to_filename``."""
-    stem = filename.removesuffix(".bin")
-    # Split from the right: last part is chunk_hash, second-last is kv_rank
-    parts = stem.rsplit("_", 2)
-    model_name = parts[0]
-    kv_rank = int(parts[1], 16)
-    chunk_hash = bytes.fromhex(parts[2])
-    return ObjectKey(chunk_hash=chunk_hash, model_name=model_name, kv_rank=kv_rank)
 
 
 # ---------------------------------------------------------------
@@ -296,6 +288,11 @@ class DynamicNixlStoreL2Adapter(L2AdapterInterface):
 
         # Cache data structures
         self._memory_objects: dict[ObjectKey, NixlStoreObj] = {}
+        self._total_bytes: int = 0
+        max_capacity_gb = float(config.backend_params.get("max_capacity_gb", 0))
+        if max_capacity_gb <= 0:
+            raise ValueError("backend_params must include a positive 'max_capacity_gb'")
+        self._max_capacity_bytes: int = int(max_capacity_gb * (1024**3))
 
         # Task ID management
         self._next_task_id: L2TaskId = 0
@@ -420,12 +417,19 @@ class DynamicNixlStoreL2Adapter(L2AdapterInterface):
                         obj.pin_count,
                     )
                     continue
+                self._total_bytes -= obj.size
                 del self._memory_objects[key]
                 file_path = self.nixl_agent.get_file_path_for_key(key)
                 self.nixl_agent.dynamic_delete_file(file_path)
                 deleted_keys.append(key)
         if deleted_keys:
             self._notify_keys_deleted(deleted_keys)
+
+    def get_usage(self) -> tuple[float, float]:
+        """Return (current_usage, usage_after_ongoing_eviction) in [0, 1]."""
+        with self._lock:
+            usage = self._total_bytes / self._max_capacity_bytes
+        return (usage, usage)
 
     #####################
     # Persist/Recover Interface
@@ -504,11 +508,13 @@ class DynamicNixlStoreL2Adapter(L2AdapterInterface):
                 dtypes = [getattr(torch, d.replace("torch.", "")) for d in dtypes_str]
                 layout = MemoryLayoutDesc(shapes, dtypes)
 
+            obj_size = entry["size"]
             self._memory_objects[key] = NixlStoreObj(
                 page_indices=[],  # not used in dynamic mode
-                size=entry["size"],
+                size=obj_size,
                 layout=layout,
             )
+            self._total_bytes += obj_size
             recovered += 1
 
         logger.info(
@@ -543,11 +549,7 @@ class DynamicNixlStoreL2Adapter(L2AdapterInterface):
     #####################
 
     def close(self):
-        # Persist before shutdown if configured
-        if self._config.persist_config and self._config.persist_config.persist_path:
-            self.persist(self._config.persist_config)
-
-        # Stop the event loop
+        # Stop the event loop and wait for all in-flight tasks to finish
         async def _stop_tasks():
             tasks = [
                 t
@@ -566,6 +568,20 @@ class DynamicNixlStoreL2Adapter(L2AdapterInterface):
 
         self._loop_thread.join()
         self._loop.close()
+
+        # Persist or clean up data files after all tasks are done
+        if self._config.persist_config and self._config.persist_config.persist_path:
+            logger.info(
+                "Persisting metadata to %s before shutdown",
+                self._config.persist_config.persist_path,
+            )
+            self.persist(self._config.persist_config)
+        else:
+            logger.info("No persist_path configured, deleting all data files")
+            with self._lock:
+                for key in list(self._memory_objects.keys()):
+                    file_path = self.nixl_agent.get_file_path_for_key(key)
+                    self.nixl_agent.dynamic_delete_file(file_path)
 
         self.nixl_agent.close()
 
@@ -608,6 +624,16 @@ class DynamicNixlStoreL2Adapter(L2AdapterInterface):
             for key, obj in zip(keys, objects, strict=False):
                 mem_addr = obj.meta.address
                 mem_size = obj.meta.phy_size
+
+                # Check capacity before writing
+                with self._lock:
+                    if self._total_bytes + mem_size > self._max_capacity_bytes:
+                        logger.warning(
+                            "Storage capacity exceeded, skipping store for key %s",
+                            key,
+                        )
+                        break
+
                 mem_indices = self.nixl_agent.get_memory_indices(mem_addr, mem_size)
                 file_path = self.nixl_agent.get_file_path_for_key(key)
 
@@ -626,6 +652,7 @@ class DynamicNixlStoreL2Adapter(L2AdapterInterface):
                 )
                 with self._lock:
                     self._memory_objects[key] = store_obj
+                    self._total_bytes += store_obj.size
                     store_obj.decrease_pin_count()
                 stored_keys.append(key)
 
@@ -696,6 +723,8 @@ class DynamicNixlStoreL2Adapter(L2AdapterInterface):
 # Config and self-registration
 # ---------------------------------------------------------------------
 
+# TODO(Jiayi): OBJ backend is not supported in the dynamic adapter yet.
+# Only file-based backends are supported.
 _VALID_DYNAMIC_BACKENDS = ("GDS", "GDS_MT", "POSIX", "HF3FS")
 
 

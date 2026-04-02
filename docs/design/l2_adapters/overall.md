@@ -483,6 +483,15 @@ Implement `L2AdapterInterface` directly. See `mock_l2_adapter.py` for a
 reference implementation. Register a config class in `config.py` and add a
 factory branch in `__init__.py`.
 
+### Persist / Recover (Optional)
+
+Adapters that support persisting cached metadata across restarts can override
+`persist(config)` and `recover(config)` from `L2AdapterInterface`. These are
+no-ops by default (log warning + return `False`). Configuration is provided
+via `PersistConfig` (parsed from `"persist_path"` / `"recover_path"` JSON
+keys). See `nixl_store_dynamic_l2_adapter.py` for a reference implementation
+and [`nixl_store.md`](nixl_store.md) for design details.
+
 ### Native (C++/Rust) Storage Backends
 
 For high-performance backends written in C++ or Rust, use the shared native

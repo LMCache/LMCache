@@ -95,6 +95,65 @@ The ``OBJ`` backend (object store) does not require ``file_path``.
     # OBJ backend
     --l2-adapter '{"type": "nixl_store", "backend": "OBJ", "backend_params": {}, "pool_size": 32}'
 
+``nixl_store_dynamic`` -- NIXL-based dynamic storage with persist/recover
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+A dynamic variant of the NIXL adapter that opens and registers files
+per-operation instead of pre-allocating them at init. This enables:
+
+- **Persist/recover** -- cached KV metadata survives restarts.
+- **No fd limits** -- files are opened and closed per transfer, so the
+  cache can grow beyond OS open-file-descriptor limits.
+
+.. note::
+
+   Only file-based backends are supported (``POSIX``, ``GDS``, ``GDS_MT``,
+   ``HF3FS``). The ``OBJ`` backend is not supported yet.
+
+**Required fields:**
+
+- ``backend``: Storage backend -- one of ``POSIX``, ``GDS``, ``GDS_MT``,
+  ``HF3FS``.
+
+**Backend-specific parameters (``backend_params``):**
+
+- ``file_path``: Directory path for storing L2 data files.
+- ``use_direct_io``: ``"true"`` or ``"false"``.
+- ``max_capacity_gb``: Maximum storage capacity in GB. The adapter
+  rejects stores when this limit is reached. Required for the eviction
+  controller to compute usage.
+
+**Optional fields (for persist/recover):**
+
+- ``persist_path``: Path to write metadata JSON at shutdown. If not set,
+  all data files are deleted on shutdown.
+- ``recover_path``: Path to read metadata JSON at startup. If not set,
+  the adapter starts with an empty cache.
+
+**Configuration examples:**
+
+.. code-block:: bash
+
+    # Basic dynamic POSIX backend
+    --l2-adapter '{"type": "nixl_store_dynamic", "backend": "POSIX", "backend_params": {"file_path": "/data/lmcache/l2", "use_direct_io": "false", "max_capacity_gb": "10"}}'
+
+    # With persist/recover
+    --l2-adapter '{"type": "nixl_store_dynamic", "backend": "POSIX", "backend_params": {"file_path": "/data/lmcache/l2", "use_direct_io": "false", "max_capacity_gb": "10"}, "persist_path": "/data/lmcache/metadata.json", "recover_path": "/data/lmcache/metadata.json"}'
+
+    # With eviction
+    --l2-adapter '{"type": "nixl_store_dynamic", "backend": "GDS", "backend_params": {"file_path": "/data/nvme/l2", "use_direct_io": "true", "max_capacity_gb": "50"}, "persist_path": "/data/nvme/metadata.json", "recover_path": "/data/nvme/metadata.json", "eviction": {"eviction_policy": "LRU", "trigger_watermark": 0.9, "eviction_ratio": 0.1}}'
+
+**Persist/recover behaviour:**
+
+- On **shutdown**, if ``persist_path`` is set the adapter writes a JSON
+  file containing the ``ObjectKey`` → metadata mapping. The actual KV
+  data files remain on disk. If ``persist_path`` is *not* set, all data
+  files are deleted.
+- On **startup**, if ``recover_path`` is set the adapter reads the JSON
+  file and rebuilds its in-memory index. Keys whose data files are
+  missing on disk are skipped. Lookups return hits immediately after
+  recovery.
+
 ``fs`` -- File-system backed storage
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -332,6 +391,10 @@ drops by ``eviction_ratio``.
    * - ``nixl_store``
      - Full support. ``delete`` frees pool slots; pinned keys (in-flight
        loads) are skipped and retried on the next cycle.
+   * - ``nixl_store_dynamic``
+     - Full support. ``delete`` removes data files from disk; pinned
+       keys are skipped. ``get_usage`` is byte-based
+       (``_total_bytes / max_capacity_bytes``).
    * - ``mock``
      - Full support. Useful for testing eviction behaviour without
        real storage hardware.
