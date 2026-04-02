@@ -92,6 +92,55 @@ class StorePolicy(ABC):
         """
 
 
+# -----------------------------------------------------------------------------
+# Registry: store policy name -> policy class
+# -----------------------------------------------------------------------------
+
+_STORE_POLICY_REGISTRY: dict[str, type[StorePolicy]] = {}
+
+
+def register_store_policy(
+    name: str,
+    policy_cls: type[StorePolicy],
+) -> None:
+    """
+    Register a store policy class under a name.
+
+    Each policy module should call this at import time.
+
+    Args:
+        name: Policy name (e.g. "default").
+        policy_cls: A concrete StorePolicy subclass.
+    """
+    if name in _STORE_POLICY_REGISTRY:
+        raise ValueError(f"Store policy already registered: {name!r}")
+    _STORE_POLICY_REGISTRY[name] = policy_cls
+
+
+def get_registered_store_policies() -> list[str]:
+    """Return the list of registered store policy names."""
+    return list(_STORE_POLICY_REGISTRY)
+
+
+def create_store_policy(name: str) -> StorePolicy:
+    """
+    Create a store policy instance by name.
+
+    Args:
+        name: Registered policy name.
+
+    Returns:
+        A new StorePolicy instance.
+
+    Raises:
+        ValueError: If no policy is registered under the given name.
+    """
+    if name not in _STORE_POLICY_REGISTRY:
+        known = ", ".join(sorted(_STORE_POLICY_REGISTRY)) or "(none)"
+        raise ValueError(f"Unknown store policy {name!r}. Known: {known}")
+    return _STORE_POLICY_REGISTRY[name]()
+
+
 class DefaultStorePolicy(StorePolicy):
     """
     Default store policy: store all keys to all adapters,
@@ -129,3 +178,36 @@ class DefaultStorePolicy(StorePolicy):
             Empty list (keep all keys in L1).
         """
         return []
+
+
+class BufferOnlyStorePolicy(DefaultStorePolicy):
+    """
+    Buffer-only store policy: store all keys to all adapters,
+    then delete them from L1 immediately.
+
+    Use this with NoOpEvictionPolicy to avoid useless LRU
+    tracking overhead when L1 is a pure write buffer.
+
+    Inherits ``select_store_targets`` from ``DefaultStorePolicy``
+    (store all keys to all adapters) and only overrides the L1
+    deletion decision.
+    """
+
+    def select_l1_deletions(
+        self,
+        keys: list[ObjectKey],
+    ) -> list[ObjectKey]:
+        """
+        Delete all keys from L1 after successful L2 store.
+
+        Args:
+            keys: Keys that were successfully stored to L2.
+
+        Returns:
+            All keys (remove everything from L1).
+        """
+        return list(keys)
+
+
+register_store_policy("default", DefaultStorePolicy)
+register_store_policy("skip_l1", BufferOnlyStorePolicy)

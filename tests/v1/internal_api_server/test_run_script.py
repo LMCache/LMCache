@@ -68,7 +68,9 @@ class TestRunScriptAPI:
         """Create a test client with mocked adapter."""
         app.state.lmcache_adapter = mock_lmcache_adapter_with_config
         app.state.lmcache_engine = mock_lmcache_adapter_with_config.lmcache_engine
-        return TestClient(app)
+        client = TestClient(app)
+        yield client
+        client.close()
 
     @pytest.fixture
     def script_dir(self):

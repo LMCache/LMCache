@@ -19,7 +19,11 @@ logger = init_logger(__name__)
 
 @dataclass
 class Session:
-    """Tracks accumulated token IDs and computed chunk hashes for a request."""
+    """Tracks accumulated token IDs and computed chunk hashes for a request.
+
+    Thread-safe: all public methods are protected by an internal lock
+    to allow concurrent access from multiple TP worker threads.
+    """
 
     request_id: str
     hasher: TokenHasher
@@ -28,6 +32,7 @@ class Session:
     last_prefix_hash: Any = None
     num_chunks_processed: int = 0
     created_at: float = field(default_factory=time.time)
+    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     def set_tokens(self, full_token_ids: list[int]) -> None:
         """Update the token sequence (idempotent, replaces not extends).
@@ -35,7 +40,8 @@ class Session:
         Args:
             full_token_ids: Complete token sequence.
         """
-        self.token_ids = full_token_ids
+        with self._lock:
+            self.token_ids = full_token_ids
 
     def get_hashes(self, start: int, end: int) -> list:
         """Compute and return chunk hashes for the [start, end) token range.
@@ -60,9 +66,9 @@ class Session:
         start_chunk = start // chunk_size
         end_chunk = end // chunk_size
 
-        self._compute_hash(end_chunk)
-
-        return self.chunk_hashes[start_chunk:end_chunk]
+        with self._lock:
+            self._compute_hash(end_chunk)
+            return self.chunk_hashes[start_chunk:end_chunk]
 
     def _compute_hash(self, end_chunk: int) -> None:
         """Compute rolling hashes up to end_chunk.

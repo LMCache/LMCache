@@ -331,13 +331,15 @@ elif [[ "$test_mode" == "long_doc_qa" ]]; then
         # This makes the gate more tolerant of nightly hardware noise.
         timeout 30 git fetch origin benchmarks-main >/dev/null 2>&1 || true
 
-        # List all baseline files for this feature (date-stamped and legacy)
+        # List all baseline files for this feature (date-stamped and legacy).
+        # Note: git ls-tree does NOT expand shell globs in pathspecs, so we
+        # list the directory and filter with grep instead.
         local -a baseline_files=()
         mapfile -t baseline_files < <(
             git ls-tree --name-only origin/benchmarks-main -- \
-                "benchmarks/long_doc_qa/${feat_type}-"*.json \
-                "benchmarks/long_doc_qa/${feat_type}.json" \
-                2>/dev/null || true
+                benchmarks/long_doc_qa/ 2>/dev/null \
+            | grep -E "^benchmarks/long_doc_qa/${feat_type}(-[0-9]{8})?\.json$" \
+            || true
         )
 
         if [[ ${#baseline_files[@]} -eq 0 ]]; then

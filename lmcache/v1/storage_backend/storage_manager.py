@@ -55,7 +55,7 @@ logger = init_logger(__name__)
 
 
 # Helper function to get the class name of the backend
-def get_backend_cname(backend: StorageBackendInterface):
+def get_backend_cname(backend: StorageBackendInterface) -> str:
     return backend.__class__.__name__
 
 
@@ -111,7 +111,8 @@ def allocate_and_copy_objects(
             memory_obj.tensor.copy_(src_memory_obj.tensor, non_blocking=True)
         allocated_objects.append(memory_obj)
 
-    stream.synchronize()
+    if stream is not None:
+        stream.synchronize()
     return keys[: len(allocated_objects)], allocated_objects
 
 
@@ -285,7 +286,7 @@ class StorageManager:
 
         self._setup_metrics()
 
-    def _setup_metrics(self):
+    def _setup_metrics(self) -> None:
         prometheus_logger = PrometheusLogger.GetInstanceOrNone()
         if prometheus_logger is None:
             logger.warning(
@@ -976,7 +977,7 @@ class StorageManager:
             keys = keys[hit_chunks:]
         return block_mapping
 
-    def touch_cache(self):
+    def touch_cache(self) -> None:
         for backend_name, backend in self.storage_backends.items():
             if backend_name == "LocalCPUBackend" or backend_name == "LocalDiskBackend":
                 backend.touch_cache()

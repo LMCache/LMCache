@@ -9,16 +9,10 @@ on:
             - "release-**"
         tags:
             - "v*"
-        paths-ignore:
-            - 'operator/**'
-            - '.github/workflows/operator_*.yml'
     pull_request:
         branches:
             - dev
             - "release-**"
-        paths-ignore:
-            - 'operator/**'
-            - '.github/workflows/operator_*.yml'
     # Trigger the workflow for when a release is created
     release:
         types:
@@ -33,12 +27,43 @@ defaults:
 
 permissions:
     contents: read
+    pull-requests: read
 
 jobs:
+    changes:
+        name: Detect changes
+        runs-on: ubuntu-latest
+        permissions:
+            pull-requests: read
+        outputs:
+            lmcache: ${{ github.event_name == 'release' || startsWith(github.ref, 'refs/tags/') || steps.filter.outputs.lmcache == 'true' }}
+        steps:
+            - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+              if: github.event_name == 'push' && !startsWith(github.ref, 'refs/tags/')
+              with:
+                fetch-depth: 2
+
+            - uses: dorny/paths-filter@v3
+              if: (github.event_name == 'push' && !startsWith(github.ref, 'refs/tags/')) || github.event_name == 'pull_request'
+              id: filter
+              with:
+                filters: |
+                    lmcache:
+                        - '**.py'
+                        - 'pyproject.toml'
+                        - 'requirements/**.txt'
+                        - 'docker/**'
+                        - '.github/workflows/test.yml'
+                        - '.github/workflows/code_quality_checks.yml'
+                        - '.github/workflows/publish.yml'
+                        - '!operator/**'
+
     # Create release artifacts
     # - build source dist (tar ball) and wheel
     # - upload artifacts to GHA
     build-artifacts:
+        needs: changes
+        if: needs.changes.outputs.lmcache == 'true'
         name: Build artifacts
         runs-on: ubuntu-latest
         steps:
@@ -103,10 +128,14 @@ jobs:
 
     # Run tests and code quality checks before publishing
     test:
+        needs: changes
+        if: needs.changes.outputs.lmcache == 'true'
         name: Run tests
         uses: ./.github/workflows/test.yml
 
     code-quality:
+        needs: changes
+        if: needs.changes.outputs.lmcache == 'true'
         name: Run code quality checks
         uses: ./.github/workflows/code_quality_checks.yml
 
@@ -116,6 +145,8 @@ jobs:
     publish-test-pypi:
         name: Publish packages to test.pypi.org
         if: |
+            !failure() && !cancelled() &&
+            needs.changes.outputs.lmcache == 'true' &&
             github.repository_owner == 'LMCache' && (
                 github.event.action == 'published' ||
                 (github.event_name == 'push' && github.ref == 'refs/heads/dev')
@@ -125,7 +156,7 @@ jobs:
             # see https://docs.pypi.org/trusted-publishers/
             id-token: write
         runs-on: ubuntu-latest
-        needs: [build-artifacts, test, code-quality]
+        needs: [changes, build-artifacts, test, code-quality]
 
         steps:
             - name: Harden Runner
@@ -158,6 +189,8 @@ jobs:
     publish-pypi:
         name: Publish release to pypi.org
         if: |
+            !failure() && !cancelled() &&
+            needs.changes.outputs.lmcache == 'true' &&
             github.repository_owner == 'LMCache' && github.event.action == 'published'
         permissions:
             # see https://docs.pypi.org/trusted-publishers/
@@ -166,7 +199,7 @@ jobs:
             contents: write
 
         runs-on: ubuntu-latest
-        needs: [build-artifacts, test, code-quality]
+        needs: [changes, build-artifacts, test, code-quality]
 
         steps:
             - name: Harden Runner

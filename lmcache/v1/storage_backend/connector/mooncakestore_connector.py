@@ -1,11 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from dataclasses import dataclass
-from functools import reduce
 from typing import List, Optional, no_type_check
 import asyncio
 import json
-import operator
 import os
 
 # Third Party
@@ -22,8 +20,6 @@ from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 from lmcache.v1.system_detection import NUMADetector
 
 logger = init_logger(__name__)
-
-METADATA_BYTES_LEN = 28
 
 
 @dataclass
@@ -342,18 +338,17 @@ class MooncakestoreConnector(RemoteConnector):
         buffer_sizes: list[int] = []
 
         for i, _ in enumerate(keys):
-            buf = self.local_cpu_backend.allocate(
+            obj = self.local_cpu_backend.allocate(
                 self.meta_shapes, self.meta_dtypes, self.meta_fmt
             )
-            memory_objs.append(buf)
-            buf_tensor = buf.tensor
-            if buf is not None and buf_tensor is not None:
+            memory_objs.append(obj)
+            if obj is not None and obj.raw_tensor is not None:
                 valid_idx.append(i)
 
                 # Prepare the argument lists for the C++ call
                 key_strs.append(keys[i].to_string())
-                buffer_ptrs.append(buf_tensor.data_ptr())
-                buffer_sizes.append(buf_tensor.numel() * buf_tensor.element_size())
+                buffer_ptrs.append(obj.data_ptr)
+                buffer_sizes.append(obj.get_size())
 
         if not valid_idx:
             logger.warning("Batch-get aborted: unable to allocate any buffers.")
@@ -443,8 +438,8 @@ class MooncakestoreConnector(RemoteConnector):
         Used when save_chunk_meta=True (metadata stored remotely).
         """
         retrieved_view = memoryview(buffer)
-        metadata_bytes = retrieved_view[:METADATA_BYTES_LEN]
-        if metadata_bytes is None or len(metadata_bytes) != METADATA_BYTES_LEN:
+        metadata_bytes = retrieved_view[: self.remote_metadata_bytes]
+        if metadata_bytes is None or len(metadata_bytes) != self.remote_metadata_bytes:
             return None
 
         metadata = RemoteMetadata.deserialize(metadata_bytes)
@@ -454,23 +449,21 @@ class MooncakestoreConnector(RemoteConnector):
             metadata.dtypes,
             metadata.fmt,
         )
-        assert len(retrieved_view) == metadata.length + METADATA_BYTES_LEN
+        assert len(retrieved_view) == metadata.length + self.remote_metadata_bytes
 
         if memory_obj is None:
             logger.warning("Failed to allocate memory during remote receive")
             return None
 
-        if memory_obj.tensor is not None:
-            assert len(metadata.dtypes) == 1
-            num_elements = reduce(operator.mul, metadata.shapes[0])
+        if memory_obj.raw_tensor is not None:
             temp_tensor = torch.frombuffer(
                 buffer,
-                dtype=metadata.dtypes[0],
-                offset=METADATA_BYTES_LEN,
-                count=num_elements,
-            ).reshape(metadata.shapes[0])
+                dtype=torch.uint8,
+                offset=self.remote_metadata_bytes,
+                count=metadata.length,
+            )
 
-            memory_obj.tensor.copy_(temp_tensor)
+            memory_obj.raw_tensor.copy_(temp_tensor)
             return memory_obj
         else:
             return None
@@ -521,10 +514,9 @@ class MooncakestoreConnector(RemoteConnector):
         buffer_ptrs: list[int] = []
         buffer_sizes: list[int] = []
         for obj in memory_objs:
-            tensor = obj.tensor
-            assert tensor is not None
-            buffer_ptrs.append(tensor.data_ptr())
-            buffer_sizes.append(tensor.numel() * tensor.element_size())
+            assert obj.raw_tensor is not None
+            buffer_ptrs.append(obj.data_ptr)
+            buffer_sizes.append(obj.get_size())
 
         try:
             await asyncio.wait_for(
@@ -556,10 +548,9 @@ class MooncakestoreConnector(RemoteConnector):
         This is used when save_chunk_meta=False (matches _batch_get_into).
         """
         try:
-            tensor = memory_obj.tensor
-            assert tensor is not None
-            buffer_ptr = tensor.data_ptr()
-            buffer_size = tensor.numel() * tensor.element_size()
+            assert memory_obj.raw_tensor is not None
+            buffer_ptr = memory_obj.data_ptr
+            buffer_size = memory_obj.get_size()
 
             await asyncio.wait_for(
                 asyncio.to_thread(
@@ -598,7 +589,7 @@ class MooncakestoreConnector(RemoteConnector):
             metadata_bytes = RemoteMetadata(
                 len(kv_bytes), kv_shapes, kv_dtypes, memory_format
             ).serialize()
-            assert len(metadata_bytes) == METADATA_BYTES_LEN
+            assert len(metadata_bytes) == self.remote_metadata_bytes
 
             await asyncio.wait_for(
                 asyncio.to_thread(
