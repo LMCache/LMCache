@@ -819,9 +819,13 @@ class LMCacheEngine:
                         ret_mask,
                         **kwargs,
                     )
-                    apc_skipped_keys: List[CacheEngineKey] = []  # async path: cleanup not yet implemented
+                    apc_skipped_keys: List[
+                        CacheEngineKey
+                    ] = []  # async path: cleanup not yet implemented
                 else:
-                    reordered_chunks, tot_kv_size, apc_skipped_keys = self._process_tokens_internal(tokens, mask, ret_mask, **kwargs)
+                    reordered_chunks, tot_kv_size, apc_skipped_keys = (
+                        self._process_tokens_internal(tokens, mask, ret_mask, **kwargs)
+                    )
 
         if self.save_only_first_rank:
             with retrieve_stats.profile_broadcast():
@@ -870,7 +874,9 @@ class LMCacheEngine:
             apc_mem_objs = self.storage_manager.batched_get(
                 keys=apc_skipped_keys, location="LocalCPUBackend", fmt=self.fmt
             )
-            for apc_key, apc_mem_obj in zip(apc_skipped_keys, apc_mem_objs):
+            for apc_key, apc_mem_obj in zip(
+                apc_skipped_keys, apc_mem_objs, strict=False
+            ):
                 if apc_mem_obj is not None:
                     self.storage_manager.remove(apc_key, self.retrieve_locations)
                     if not self.async_loading:
@@ -1677,7 +1683,7 @@ class LMCacheEngine:
                 location=location,
             )
 
-            for (key, start, end), memory_obj in zip(blocks, memory_objs):
+            for (key, start, end), memory_obj in zip(blocks, memory_objs, strict=False):
                 if memory_obj is None:
                     logger.warning(
                         "The cache block is in the storage, but it can't be retrieved"
