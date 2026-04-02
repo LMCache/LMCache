@@ -77,8 +77,10 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
     _OP_STORE = "store"
     _OP_LOOKUP = "lookup"
     _OP_LOAD = "load"
+    _OP_DELETE = "delete"
 
     def __init__(self, native_client):
+        super().__init__()
         self._client = native_client
         self._client_fd: int = int(native_client.event_fd())
 
@@ -104,6 +106,12 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
 
         # Client-side lock tracking (refcount per key)
         self._locked_keys: dict[ObjectKey, int] = defaultdict(int)
+
+        # Delete capability detection
+        self._has_delete = callable(getattr(native_client, "submit_batch_delete", None))
+
+        # Pending delete events for synchronous delete() calls
+        self._pending_delete_events: dict[L2TaskId, threading.Event] = {}
 
         # Task ID counter
         self._next_task_id: L2TaskId = 0
@@ -237,11 +245,37 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
     # ---------------------------------------------------------------
 
     def delete(self, keys: list[ObjectKey]) -> None:
-        # Not implemented for the native connector adapter.
-        pass
+        if not keys or not self._has_delete:
+            return
+
+        key_strings = [_object_key_to_string(k) for k in keys]
+        done_event = threading.Event()
+
+        with self._lock:
+            task_id = self._get_next_task_id()
+            future_id = int(self._client.submit_batch_delete(key_strings))
+            self._pending_ops[future_id] = (
+                self._OP_DELETE,
+                task_id,
+                len(keys),
+                list(keys),
+            )
+            self._pending_delete_events[task_id] = done_event
+
+        # Block until demux thread signals completion
+        if not done_event.wait(timeout=30.0):
+            logger.warning(
+                "delete() timed out after 30s for %d keys",
+                len(keys),
+            )
+            return
+
+        self._notify_keys_deleted(keys)
 
     def get_usage(self) -> tuple[float, float]:
-        # Not implemented for the native connector adapter.
+        # Not yet implemented for the native connector adapter.
+        # Usage-based eviction triggering requires backend-specific
+        # introspection or client-side size tracking (future work).
         return (-1.0, -1.0)
 
     # ---------------------------------------------------------------
@@ -342,3 +376,8 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
                                 bitmap.set(i)
                         self._completed_loads[task_id] = bitmap
                         os.eventfd_write(self._load_efd, 1)
+
+                    elif op_type == self._OP_DELETE:
+                        evt = self._pending_delete_events.pop(task_id, None)
+                        if evt is not None:
+                            evt.set()

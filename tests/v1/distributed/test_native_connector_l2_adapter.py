@@ -108,6 +108,22 @@ class MockNativeConnector:
 
         return fid
 
+    def submit_batch_delete(self, keys: list[str]) -> int:
+        with self._lock:
+            fid = self._next_id
+            self._next_id += 1
+
+        results = []
+        for key in keys:
+            if key in self._store:
+                del self._store[key]
+                results.append(True)
+            else:
+                results.append(False)
+        self._push_completion(fid, True, "", results)
+
+        return fid
+
     def drain_completions(self) -> list[tuple[int, bool, str, list[bool] | None]]:
         # Drain the eventfd
         try:
@@ -946,3 +962,113 @@ class TestFSNativeL2AdapterConfig:
             base_path="/tmp/test",
         )
         assert get_type_name_for_config(cfg) == "fs_native"
+
+
+# =============================================================================
+# Delete Interface Tests
+# =============================================================================
+
+
+class TestDeleteInterface:
+    def test_delete_existing_key(self, adapter):
+        key = create_object_key(1)
+        obj = create_memory_obj()
+        store_fd = adapter.get_store_event_fd()
+        lookup_fd = adapter.get_lookup_and_lock_event_fd()
+
+        # Store
+        adapter.submit_store_task([key], [obj])
+        wait_for_event_fd(store_fd, timeout=5.0)
+        adapter.pop_completed_store_tasks()
+
+        # Verify exists
+        task_id = adapter.submit_lookup_and_lock_task([key])
+        wait_for_event_fd(lookup_fd, timeout=5.0)
+        bitmap = adapter.query_lookup_and_lock_result(task_id)
+        assert bitmap.test(0) is True
+        adapter.submit_unlock([key])
+
+        # Delete (synchronous)
+        adapter.delete([key])
+
+        # Verify gone
+        task_id = adapter.submit_lookup_and_lock_task([key])
+        wait_for_event_fd(lookup_fd, timeout=5.0)
+        bitmap = adapter.query_lookup_and_lock_result(task_id)
+        assert bitmap.test(0) is False
+
+    def test_delete_nonexistent_key(self, adapter):
+        key = create_object_key(999)
+        adapter.delete([key])  # should not raise
+
+    def test_delete_empty_keys(self, adapter):
+        adapter.delete([])  # should not raise
+
+    def test_delete_batch(self, adapter):
+        keys = [create_object_key(i) for i in range(5)]
+        objs = [create_memory_obj(fill_value=float(i)) for i in range(5)]
+        store_fd = adapter.get_store_event_fd()
+        lookup_fd = adapter.get_lookup_and_lock_event_fd()
+
+        # Store all
+        adapter.submit_store_task(keys, objs)
+        wait_for_event_fd(store_fd, timeout=5.0)
+        adapter.pop_completed_store_tasks()
+
+        # Delete first 3
+        adapter.delete(keys[:3])
+
+        # Verify: first 3 gone, last 2 remain
+        task_id = adapter.submit_lookup_and_lock_task(keys)
+        wait_for_event_fd(lookup_fd, timeout=5.0)
+        bitmap = adapter.query_lookup_and_lock_result(task_id)
+        for i in range(3):
+            assert bitmap.test(i) is False
+        for i in range(3, 5):
+            assert bitmap.test(i) is True
+        adapter.submit_unlock(keys[3:])
+
+
+# =============================================================================
+# Delete Backward Compatibility Tests
+# =============================================================================
+
+
+class TestDeleteBackwardCompatibility:
+    def test_delete_noop_without_submit_batch_delete(self):
+        """Connector without submit_batch_delete => delete is no-op."""
+
+        class NoDeleteConnector:
+            """Mock connector that only has the 6 original methods."""
+
+            def __init__(self):
+                self._efd = os.eventfd(0, os.EFD_NONBLOCK | os.EFD_CLOEXEC)
+                self._closed = False
+
+            def event_fd(self) -> int:
+                return self._efd
+
+            def submit_batch_get(self, keys, memoryviews):
+                return 0
+
+            def submit_batch_set(self, keys, memoryviews):
+                return 0
+
+            def submit_batch_exists(self, keys):
+                return 0
+
+            def drain_completions(self):
+                return []
+
+            def close(self):
+                if not self._closed:
+                    self._closed = True
+                    os.close(self._efd)
+
+        client = NoDeleteConnector()
+        adp = NativeConnectorL2Adapter(client)
+        try:
+            key = create_object_key(1)
+            adp.delete([key])  # should not raise, just no-op
+        finally:
+            adp.close()

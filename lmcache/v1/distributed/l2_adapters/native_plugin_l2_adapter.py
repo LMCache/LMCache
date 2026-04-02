@@ -166,6 +166,14 @@ def _create_native_plugin_l2_adapter(
             native_client.close()
         raise
 
+    if not callable(getattr(native_client, "submit_batch_delete", None)):
+        logger.warning(
+            "%s.%s does not expose submit_batch_delete; "
+            "L2 eviction delete will be a no-op.",
+            config.module_path,
+            config.class_name,
+        )
+
     logger.info(
         "Created native plugin L2 adapter: %s.%s (params=%s)",
         config.module_path,
