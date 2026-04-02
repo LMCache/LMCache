@@ -819,8 +819,9 @@ class LMCacheEngine:
                         ret_mask,
                         **kwargs,
                     )
+                    apc_skipped_keys: List[CacheEngineKey] = []  # async path: cleanup not yet implemented
                 else:
-                    reordered_chunks, tot_kv_size = self._process_tokens_internal(
+                    reordered_chunks, tot_kv_size, apc_skipped_keys = self._process_tokens_internal(
                         tokens,
                         mask,
                         ret_mask,
@@ -863,6 +864,24 @@ class LMCacheEngine:
                 self.storage_manager.remove(key, self.retrieve_locations)
             if not self.async_loading:
                 memory_obj.ref_count_down()
+
+        # FIX: Free pd_buffer pages for APC-skipped (token_mask=False) chunks.
+        # apc_skipped_keys was populated for free inside _process_tokens_internal
+        # during its single process_tokens pass — no redundant re-hashing.
+        if (
+            self.remove_after_retrieve
+            and not self._is_passive()
+            and self.storage_manager is not None
+            and apc_skipped_keys
+        ):
+            apc_mem_objs = self.storage_manager.batched_get(
+                keys=apc_skipped_keys, location=None
+            )
+            for apc_key, apc_mem_obj in zip(apc_skipped_keys, apc_mem_objs):
+                if apc_mem_obj is not None:
+                    self.storage_manager.remove(apc_key, self.retrieve_locations)
+                    if not self.async_loading:
+                        apc_mem_obj.ref_count_down()
 
         retrieved_tokens = torch.sum(ret_mask)
         self.stats_monitor.on_retrieve_finished(
@@ -1032,14 +1051,6 @@ class LMCacheEngine:
 
         # synchronize the last layer
         next(mem_obj_consumer)
-
-        # Unpin any disk-loaded staging objects now that the device-side sync
-        # has been enqueued (mem_obj_consumer advanced past its sync point).
-        # Without this, pin_count stays at 1 forever and the CPU staging pool
-        # fills up, causing the next retrieve to deadlock inside allocate().
-        for mem_obj in to_count_down:
-            if mem_obj.is_pinned:
-                mem_obj.unpin()
 
         retrieved_tokens = torch.sum(ret_mask)
         self.stats_monitor.on_retrieve_finished(monitor_req_id, retrieved_tokens)
@@ -1630,14 +1641,28 @@ class LMCacheEngine:
         if request_configs is not None and len(request_configs) != 0:
             assert isinstance(request_configs, dict)
 
+        # Compute how many prefix tokens are APC-masked so we can split in one pass.
+        _num_falses = 0
+        if mask is not None:
+            _num_falses = int(mask.numel() - mask.long().sum().item())
+
+        # Call process_tokens with mask=None so ALL chunks are yielded in a single
+        # hash pass.  We manually filter into:
+        #   - apc_skipped_keys : APC-covered prefix chunks (for free pd_buffer cleanup)
+        #   - chunk_infos       : chunks that actually need to be retrieved
+        # This avoids a second, redundant process_tokens call in retrieve().
+        apc_skipped_keys: List[CacheEngineKey] = []
         chunk_infos = []
         for start, end, key in self.token_database.process_tokens(
             tokens=tokens,
-            mask=mask,
+            mask=None,
             request_configs=request_configs,
         ):
             assert isinstance(key, CacheEngineKey)
-            chunk_infos.append((key, start, end))
+            if start < _num_falses:
+                apc_skipped_keys.append(key)  # free — hashed in this same loop
+            else:
+                chunk_infos.append((key, start, end))
 
         # block_mapping: location -> [(CacheEngineKey, start, end)]
         if (
@@ -1681,7 +1706,7 @@ class LMCacheEngine:
                 for key, memory_obj, start, end in reordered_chunks
                 if end < last_failed_block_start
             ]
-        return reordered_chunks, tot_kv_size
+        return reordered_chunks, tot_kv_size, apc_skipped_keys
 
     def _broadcast_or_receive_memory_objs(
         self,
