@@ -45,6 +45,7 @@ from lmcache.v1.multiprocess.config import (
     parse_args_to_mp_server_config,
 )
 from lmcache.v1.multiprocess.custom_types import (
+    BlockAllocationRecord,
     IPCCacheEngineKey,
     KVCache,
 )
@@ -819,18 +820,16 @@ class MPCacheEngine:
             "storage_manager": sm,
         }
 
-    def report_block_allocations(self, records: list) -> None:
+    def report_block_allocations(self, records: list[BlockAllocationRecord]) -> None:
         """Publish vLLM block allocation records to the EventBus.
 
         Args:
-            records: List of dicts, each with keys:
-                - req_id (str)
-                - new_block_ids (list[int])
-                - new_token_ids (list[int])
+            records: List of BlockAllocationRecord with per-request
+                block and token allocation deltas.
         """
         self._event_bus.publish(
             Event(
-                event_type=EventType.VLLM_BLOCK_ALLOCATION,
+                event_type=EventType.MP_VLLM_BLOCK_ALLOCATION,
                 metadata={"records": records},
             )
         )
@@ -950,6 +949,7 @@ def run_cache_server(
             RequestType.END_SESSION,
             RequestType.CLEAR,
             RequestType.PING,
+            RequestType.REPORT_BLOCK_ALLOCATION,
         ],
         max_workers=mp_config.max_cpu_workers,
     )

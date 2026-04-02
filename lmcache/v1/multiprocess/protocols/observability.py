@@ -8,6 +8,7 @@ This module defines protocols for:
 """
 
 # First Party
+from lmcache.v1.multiprocess.custom_types import BlockAllocationRecord
 from lmcache.v1.multiprocess.protocols.base import HandlerType, ProtocolDefinition
 
 # Define request names for this protocol group
@@ -25,13 +26,11 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
     """
     return {
         # Report vLLM block allocation
-        # Payload: [list[dict]] - list of allocation records
-        #   Each dict: {"req_id": str, "new_block_ids": list[int],
-        #               "new_token_ids": list[int]}
+        # Payload: [list[BlockAllocationRecord]] - list of allocation records
         # Returns: None (fire-and-forget)
         "REPORT_BLOCK_ALLOCATION": ProtocolDefinition(
-            payload_classes=[list],
+            payload_classes=[list[BlockAllocationRecord]],
             response_class=None,
-            handler_type=HandlerType.SYNC,
+            handler_type=HandlerType.BLOCKING,
         ),
     }

@@ -14,6 +14,7 @@ import zmq
 from lmcache.integration.request_telemetry.factory import RequestTelemetryFactory
 from lmcache.utils import _lmcache_nvtx_annotate, init_logger
 from lmcache.v1.multiprocess.custom_types import (
+    BlockAllocationRecord,
     CudaIPCWrapper,
     IPCCacheEngineKey,
     KVCache,
@@ -449,7 +450,7 @@ class LMCacheMPSchedulerAdapter:
 
     def report_block_allocations(
         self,
-        records: list[dict],
+        records: list[BlockAllocationRecord],
     ) -> None:
         """Report vLLM GPU block allocation deltas to LMCache server.
 
@@ -457,10 +458,8 @@ class LMCacheMPSchedulerAdapter:
         is unhealthy the report is silently dropped.
 
         Args:
-            records: List of allocation records, each a dict with:
-                - req_id (str): vLLM request ID
-                - new_block_ids (list[int]): newly allocated block IDs
-                - new_token_ids (list[int]): newly scheduled token IDs
+            records: List of BlockAllocationRecord with per-request
+                block and token allocation deltas.
         """
         if not self.is_healthy or not records:
             return
