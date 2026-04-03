@@ -13,14 +13,7 @@ pytest.importorskip(
 )
 
 # First Party
-if torch.cuda.is_available():
-    try:
-        # First Party
-        import lmcache.c_ops as lmc_ops
-    except ImportError:
-        lmc_ops = None
-else:
-    lmc_ops = None
+import lmcache.c_ops as lmc_ops
 
 # Skip all tests if c_ops is unavailable
 pytestmark = pytest.mark.skipif(lmc_ops is None, reason="lmcache.c_ops not available")
