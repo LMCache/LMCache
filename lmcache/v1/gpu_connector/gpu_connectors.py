@@ -365,7 +365,8 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
                     group_idx, group_kvcaches
                 )
                 group_fmt = discover_gpu_kv_format(
-                    group_kvcaches, EngineType.VLLM
+                    group_kvcaches, EngineType.VLLM,
+                    kv_layout=self.layout_hints.get("kv_layout"),
                 )
                 group_num_blocks = get_num_blocks(
                     group_kvcaches, group_fmt
@@ -460,7 +461,8 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
                     group_idx, group_kvcaches
                 )
                 group_fmt = discover_gpu_kv_format(
-                    group_kvcaches, EngineType.VLLM
+                    group_kvcaches, EngineType.VLLM,
+                    kv_layout=self.layout_hints.get("kv_layout"),
                 )
                 group_num_blocks = get_num_blocks(
                     group_kvcaches, group_fmt
@@ -479,8 +481,8 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
                         group_page_buf,
                         lmc_ops.TransferDirection.D2H,
                         group_fmt,
-                        group_block_size,
-                        0,  # skip_prefix_n_tokens
+                        block_size=group_block_size,
+                        skip_prefix_n_tokens=0,
                     )
 
                 if not group_tensor.is_cuda:
