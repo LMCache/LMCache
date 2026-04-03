@@ -801,6 +801,17 @@ class RustRawBlockBackend(StoragePluginInterface):
         self,
         keys: List[CacheEngineKey],
     ) -> List[Optional[MemoryObj]]:
+        """
+        Get a batch of cache entries until the first miss or read failure.
+
+        :param List[CacheEngineKey] keys: Ordered keys to retrieve.
+
+        :return: A list aligned to ``keys`` where the successful prefix contains
+            loaded memory objects and the remaining suffix is ``None``.
+
+        :raises Exception: Propagates raw-device initialization failures before
+            any batched reads begin.
+        """
         if not keys:
             return []
 
@@ -830,6 +841,19 @@ class RustRawBlockBackend(StoragePluginInterface):
         keys: list[CacheEngineKey],
         transfer_spec: Any = None,
     ) -> list[MemoryObj]:
+        """
+        Asynchronously get a batch of cache entries until the first miss or read
+        failure.
+
+        :param str lookup_id: Lookup identifier used by the storage manager.
+        :param list[CacheEngineKey] keys: Ordered keys to retrieve.
+        :param Any transfer_spec: Unused transfer hint for API compatibility.
+
+        :return: The successfully loaded prefix of ``keys`` in input order.
+
+        :raises Exception: Propagates raw-device initialization failures before
+            the background batched read starts.
+        """
         del lookup_id, transfer_spec
         return await asyncio.to_thread(self._batched_get_prefix, keys)
 
