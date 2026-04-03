@@ -16,6 +16,7 @@ Supported Backends
    gds
    infinistore
    local_storage
+   maru
    mock
    mooncake
    nixl

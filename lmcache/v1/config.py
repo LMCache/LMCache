@@ -236,6 +236,13 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
         "default": None,
         "env_converter": int,
     },
+    # Maru CXL shared memory backend
+    "maru_path": {"type": Optional[str], "default": None, "env_converter": str},
+    "maru_pool_size": {
+        "type": float,
+        "default": 4.0,
+        "env_converter": float,
+    },
     # Other configurations
     # (Deprecated) The url of the actual remote lmcache instance for auditing.
     # Please use extra_config['audit_actual_remote_url'] instead.

@@ -8,7 +8,7 @@ and passed between processes during multiprocessing tests.
 
 # First Party
 from lmcache.v1.gpu_connector.utils import LayoutHints
-from lmcache.v1.multiprocess.custom_types import KVCache
+from lmcache.v1.multiprocess.custom_types import BlockAllocationRecord, KVCache
 from lmcache.v1.multiprocess.protocol import KeyType
 
 # ==============================================================================
@@ -201,3 +201,33 @@ def free_locks_handler(key: KeyType, tp_size: int) -> None:
     """
     assert isinstance(key, KeyType), f"Expected key to be KeyType, got {type(key)}"
     assert isinstance(tp_size, int), f"Expected tp_size to be int, got {type(tp_size)}"
+
+
+# ==============================================================================
+# REPORT_BLOCK_ALLOCATION Request Handlers
+# ==============================================================================
+
+
+def report_block_allocations_handler(
+    records: list[BlockAllocationRecord],
+) -> None:
+    """
+    Dummy handler for REPORT_BLOCK_ALLOCATION requests.
+
+    Args:
+        records: List of BlockAllocationRecord with per-request
+            block and token allocation deltas.
+
+    Returns:
+        None
+    """
+    assert isinstance(records, list), (
+        f"Expected records to be list, got {type(records)}"
+    )
+    for rec in records:
+        assert isinstance(rec, BlockAllocationRecord), (
+            f"Expected BlockAllocationRecord, got {type(rec)}"
+        )
+        assert isinstance(rec.req_id, str)
+        assert isinstance(rec.new_block_ids, list)
+        assert isinstance(rec.new_token_ids, list)
