@@ -1265,7 +1265,7 @@ class LMCacheConnectorV1Impl:
 
             # token_ids = request.prompt_token_ids
             # all token ids covers the preemption case
-            token_ids = request.all_token_ids
+            token_ids = list(request.all_token_ids)
 
             # If the request has multimodal hashes, apply them to the token ids
             mm_hashes, mm_positions = extract_mm_features(request)

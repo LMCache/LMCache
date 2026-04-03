@@ -3,7 +3,7 @@
 from typing import TYPE_CHECKING
 
 # Third Party
-from vllm.attention import Attention
+from vllm.model_executor.layers.attention import Attention
 from vllm.v1.attention.backends.flash_attn import FlashAttentionImpl
 from vllm.vllm_flash_attn import flash_attn_varlen_func, get_scheduler_metadata
 import torch
