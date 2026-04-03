@@ -532,8 +532,9 @@ class LMCacheMPWorkerAdapter:
         self._health_event.set()
 
         # Heartbeat thread is created but NOT started yet.
-        # It will be started after register_kv_caches()
-        # completes, i.e. after vLLM is fully ready.
+        # It will be lazily started on the first get_finished()
+        # call, by which time vLLM is fully ready (model loaded,
+        # KV caches allocated, warmup & CUDA graph capture done).
         self._heartbeat_interval = heartbeat_interval
         self._heartbeat: HeartbeatThread | None = None
         self._heartbeat_lock = threading.Lock()
@@ -600,12 +601,8 @@ class LMCacheMPWorkerAdapter:
                 f"{self._mq_timeout}s. Is the server running?"
             ) from None
 
-        # Start heartbeat only after vLLM is fully ready
-        # (model loaded, KV caches allocated, warmup done).
-        self._start_heartbeat()
-
-    def _start_heartbeat(self) -> None:
-        """Start the heartbeat thread (idempotent)."""
+    def _ensure_heartbeat_started(self) -> None:
+        """Lazily start the heartbeat thread on first use."""
         if self._heartbeat is not None:
             return
         with self._heartbeat_lock:
@@ -631,6 +628,8 @@ class LMCacheMPWorkerAdapter:
             event: The CUDA event that is recorded after the current
                 model inference step
         """
+        self._ensure_heartbeat_started()
+
         if not self.is_healthy:
             return
 
@@ -656,6 +655,8 @@ class LMCacheMPWorkerAdapter:
             event: The CUDA event that is recorded after the current
                 model inference step
         """
+        self._ensure_heartbeat_started()
+
         if not self.is_healthy:
             self.error_block_ids.update(op.block_ids)
             return
