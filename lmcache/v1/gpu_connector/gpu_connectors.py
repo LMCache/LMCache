@@ -366,7 +366,7 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
                 )
                 group_fmt = discover_gpu_kv_format(
                     group_kvcaches, EngineType.VLLM,
-                    kv_layout=self.layout_hints.get("kv_layout"),
+                    layout_hints=self.layout_hints,
                 )
                 group_num_blocks = get_num_blocks(
                     group_kvcaches, group_fmt
@@ -462,7 +462,7 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
                 )
                 group_fmt = discover_gpu_kv_format(
                     group_kvcaches, EngineType.VLLM,
-                    kv_layout=self.layout_hints.get("kv_layout"),
+                    layout_hints=self.layout_hints,
                 )
                 group_num_blocks = get_num_blocks(
                     group_kvcaches, group_fmt
