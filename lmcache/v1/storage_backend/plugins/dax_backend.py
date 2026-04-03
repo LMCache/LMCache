@@ -715,7 +715,6 @@ class DaxBackend(StoragePluginInterface):
         restore_executor = None
         restore_dispatch_executor = None
         staging_slab_ptr = 0
-        staging_slab_bytes = 0
         with self._state_lock:
             if self._closed:
                 return
@@ -733,7 +732,6 @@ class DaxBackend(StoragePluginInterface):
             restore_executor = self._restore_executor
             restore_dispatch_executor = self._restore_dispatch_executor
             staging_slab_ptr = self._retrieve_staging_slab_ptr
-            staging_slab_bytes = self._retrieve_staging_slab_bytes
             self._restore_executor = None
             self._restore_dispatch_executor = None
             self._retrieve_staging_slab_ptr = 0
@@ -759,7 +757,6 @@ class DaxBackend(StoragePluginInterface):
             restore_executor.shutdown(wait=True)
         self._release_restore_resources(
             restore_slab_ptr=staging_slab_ptr,
-            restore_slab_bytes=staging_slab_bytes,
         )
         self._release_arena_resources(fd, mmap_obj, arena_view)
 
@@ -785,7 +782,6 @@ class DaxBackend(StoragePluginInterface):
     def _release_restore_resources(
         self,
         restore_slab_ptr: Optional[int] = None,
-        restore_slab_bytes: Optional[int] = None,
     ) -> None:
         dispatch_executor = self._restore_dispatch_executor
         if dispatch_executor is not None:
