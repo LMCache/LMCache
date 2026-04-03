@@ -22,8 +22,9 @@ def initialize_from_config(self, kv_cache_config: KVCacheConfig) -> None:
     # VLLMModelTracker.get_model() during connector initialization.
     try:
         from lmcache.v1.compute.models.utils import VLLMModelTracker
+        from lmcache.integration.vllm.utils import ENGINE_NAME
         VLLMModelTracker.register_model(
-            "vllm-instance", self.model_runner.model)
+            ENGINE_NAME, self.model_runner.model)
     except ImportError:
         pass
 

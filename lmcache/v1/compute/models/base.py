@@ -46,7 +46,7 @@ class LMCBaseModel(nn.Module, ABC):
         max_position_embeddings = rotary_emb.max_position_embeddings
         # Use getattr to safely retrieve rope_scaling, as it may not be present
         # in all vLLM configurations or versions.
-        rope_scaling = getattr(rotary_emb, "rope_scaling", None)
+        rope_scaling = None
         base = rotary_emb.base
         is_neox_style = rotary_emb.is_neox_style
         dtype = rotary_emb.dtype

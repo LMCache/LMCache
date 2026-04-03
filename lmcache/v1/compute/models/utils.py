@@ -13,15 +13,7 @@ logger = init_logger(__name__)
 
 def infer_model_from_vllm(vllm_model, blender, enable_sparse: bool = False):
     model_name = type(vllm_model).__name__
-    if model_name == "LlamaForCausalLM":
-        # First Party
-        from lmcache.v1.compute.models.llama import LMCLlamaModel
-
-        return LMCLlamaModel(vllm_model, blender, enable_sparse)
-    # Mistral shares a highly similar architecture with Llama and Qwen2
-    # (e.g., GQA and RoPE), allowing it to reuse the LMCLlamaModel
-    # implementation for LMCache-related tasks.
-    elif model_name in ("Qwen2ForCausalLM", "MistralForCausalLM"):
+    if model_name in ("LlamaForCausalLM", "Qwen2ForCausalLM", "MistralForCausalLM"):
         # First Party
         from lmcache.v1.compute.models.llama import LMCLlamaModel
 
