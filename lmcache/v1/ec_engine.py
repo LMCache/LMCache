@@ -11,11 +11,12 @@ vLLM encoder outputs:
 v1 scope: uses any configured LMCache storage backend.
 
 Unlike KV caching, EC does not require token chunking, layerwise operations, or
-paged KV GPU gather/scatter.
+paged gather/scatter.
 """
 
 from __future__ import annotations
 
+import hashlib
 import torch
 
 from lmcache.logging import init_logger
@@ -25,6 +26,11 @@ from lmcache.v1.memory_management import MemoryFormat
 from lmcache.v1.metadata import LMCacheMetadata
 
 logger = init_logger(__name__)
+
+
+def _stable_u64_from_str(s: str) -> int:
+    digest = hashlib.sha256(str(s).encode("utf-8")).digest()
+    return int.from_bytes(digest[:8], byteorder="big", signed=False)
 
 
 class ECCacheEngine:
@@ -51,6 +57,10 @@ class ECCacheEngine:
 
         self.config = config
         self.metadata = metadata
+        self._model_name = metadata.model_name
+        self._world_size = metadata.world_size
+        self._worker_id = metadata.worker_id
+        self._dtype = metadata.kv_dtype
 
         # Mirror KV engine layering: StorageManager owns backends + allocator.
         from lmcache.v1.event_manager import EventManager
@@ -78,13 +88,37 @@ class ECCacheEngine:
         )
 
     def close(self) -> None:
+        """Close EC storage resources and background workers."""
         if hasattr(self, "_storage_manager") and self._storage_manager is not None:
             self._storage_manager.close()
 
-    def contains(self, key: CacheEngineKey) -> bool:
+    def _make_cache_key(self, mm_hash: str) -> CacheEngineKey:
+        return CacheEngineKey(
+            model_name=self._model_name,
+            world_size=self._world_size,
+            worker_id=self._worker_id,
+            chunk_hash=_stable_u64_from_str(mm_hash),
+            dtype=self._dtype,
+            request_configs={},
+        )
+
+    def contains(self, mm_hash: str) -> bool:
+        """Return whether encoder cache exists for the given multimodal hash."""
+        key = self._make_cache_key(mm_hash)
         return self._storage_manager.contains(key) is not None
 
-    def put(self, key: CacheEngineKey, tensor: torch.Tensor) -> None:
+    def put(self, encoder_cache: dict[str, torch.Tensor], mm_hash: str) -> bool:
+        """Store one encoder cache tensor from encoder_cache into LMCache.
+
+        Returns:
+            True if a store task is submitted, False otherwise.
+        """
+        if mm_hash not in encoder_cache:
+            return False
+
+        key = self._make_cache_key(mm_hash)
+        tensor = encoder_cache[mm_hash]
+
         # Allocate via LMCache allocator (LocalCPUBackend) through StorageManager.
         # Preserve the source tensor dtype to avoid precision loss.
         mem_obj = self._storage_manager.allocate(
@@ -96,7 +130,7 @@ class ECCacheEngine:
         )
         if mem_obj is None or mem_obj.tensor is None:
             logger.warning("EC allocate failed; skipping put for key %s", key)
-            return
+            return False
 
         # Single copy: GPU -> pinned CPU buffer, handles device transfer + dtype cast.
         mem_obj.tensor.copy_(tensor)
@@ -105,12 +139,23 @@ class ECCacheEngine:
             [key],
             [mem_obj],
         )
+        return True
 
     def get(
         self,
-        key: CacheEngineKey,
+        encoder_cache: dict[str, torch.Tensor],
+        mm_hash: str,
         device: str,
-    ) -> Optional[torch.Tensor]:
+    ) -> bool:
+        """Load one encoder cache tensor into encoder_cache if present.
+
+        Returns:
+            True if encoder_cache is populated by this call, False otherwise.
+        """
+        if mm_hash in encoder_cache:
+            return False
+
+        key = self._make_cache_key(mm_hash)
         logger.debug("Getting encoder cache for key %s", key)
 
         mem_objs = self._storage_manager.batched_get(
@@ -118,12 +163,13 @@ class ECCacheEngine:
         )
         mem_obj = mem_objs[0]
         if mem_obj is None or mem_obj.tensor is None:
-            return None
+            return False
 
         try:
             out = mem_obj.tensor.to(device=device)
             if out.data_ptr() == mem_obj.tensor.data_ptr():
                 out = out.clone()
-            return out
+            encoder_cache[mm_hash] = out
+            return True
         finally:
             mem_obj.ref_count_down()
