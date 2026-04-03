@@ -627,6 +627,13 @@ class TensorMemoryObj(MemoryObj):
         if not self.valid:
             logger.warning("Trying to access an invalidated MemoryObj")
             return None
+        # MLA multi-group fix: when KV cache has multiple groups
+        # (e.g., K_rope uint8 + latent KV bfloat16), meta.shape only
+        # describes the first group but raw_data contains all groups.
+        # Return flat buffer; callers should use get_tensor(index) for
+        # per-group access with correct shape and dtype.
+        if self.meta.shapes is not None and len(self.meta.shapes) > 1:
+            return self.raw_data[: self.get_size()]
         assert self.meta.dtype is not None
         # TODO(Jiayi): consider caching the `get_size()`
         return (

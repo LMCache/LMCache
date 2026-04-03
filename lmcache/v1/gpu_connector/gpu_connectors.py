@@ -246,6 +246,16 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
 
         kv_caches = attempt_permute_to_contiguous_view(kv_caches)
 
+        # MLA multi-group fix: kv_caches may have more entries than
+        # num_layers when model uses multiple KV groups (e.g., K_rope
+        # + latent KV = 2 × num_layers entries).
+        actual_num_caches = len(kv_caches)
+        if actual_num_caches != self.kv_cache_pointers.shape[0]:
+            self.kv_cache_pointers = torch.empty(
+                actual_num_caches, dtype=torch.int64, device="cpu"
+            )
+            self.num_layers = actual_num_caches
+
         self.kv_cache_pointers.numpy()[:] = [t.data_ptr() for t in kv_caches]
         self.kv_cache_pointers_on_gpu[idx] = torch.empty(
             self.num_layers, dtype=torch.int64, device=self.device
@@ -357,6 +367,57 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
             raise ValueError("'slot_mapping' should be provided in kwargs.")
 
         slot_mapping: torch.Tensor = kwargs["slot_mapping"]
+
+        # MLA multi-group fix: process each KV group separately.
+        # MLA models store K_rope and latent KV as separate groups with
+        # different shapes and dtypes. Each group needs its own set of
+        # layer pointers and a separate multi_layer_kv_transfer call.
+        if (self.use_mla and memory_obj.metadata.shapes is not None
+                and len(memory_obj.metadata.shapes) > 1):
+            num_groups = len(memory_obj.metadata.shapes)
+            layers_per_group = len(self.kvcaches) // num_groups
+            for group_idx in range(num_groups):
+                group_tensor = memory_obj.get_tensor(group_idx)
+                if group_tensor is None:
+                    continue
+                group_kvcaches = self.kvcaches[
+                    group_idx * layers_per_group :
+                    (group_idx + 1) * layers_per_group
+                ]
+                group_ptrs = torch.tensor(
+                    [t.data_ptr() for t in group_kvcaches],
+                    dtype=torch.int64,
+                )
+                group_ptrs_gpu = group_ptrs.to(group_kvcaches[0].device)
+                group_fmt = discover_gpu_kv_format(
+                    group_kvcaches, EngineType.VLLM
+                )
+                group_num_blocks = get_num_blocks(
+                    group_kvcaches, group_fmt
+                )
+                group_block_size = get_block_size(
+                    group_kvcaches, group_fmt
+                )
+                group_page_buf = group_num_blocks * group_block_size
+
+                with torch.cuda.stream(self.store_stream):
+                    lmc_ops.multi_layer_kv_transfer(
+                        group_tensor,
+                        group_ptrs_gpu,
+                        slot_mapping[start:end],
+                        group_kvcaches[0].device,
+                        group_page_buf,
+                        lmc_ops.TransferDirection.D2H,
+                        group_fmt,
+                        group_block_size,
+                        0,  # skip_prefix_n_tokens
+                    )
+
+                if not group_tensor.is_cuda:
+                    self.store_stream.synchronize()
+
+            memory_obj.metadata.fmt = MemoryFormat.KV_MLA_FMT
+            return
 
         kv_cache_pointers = self._initialize_pointers(self.kvcaches)
 
