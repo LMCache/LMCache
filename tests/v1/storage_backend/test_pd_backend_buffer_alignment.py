@@ -29,7 +29,7 @@ def create_test_metadata(kv_shape=(4, 2, 256, 8, 128)) -> LMCacheMetadata:
 
 
 @patch("lmcache.v1.storage_backend.pd_backend.PagedCpuGpuMemoryAllocator")
-def test_buffer_size_exact_alignment(mock_allocator_cls):
+def test_buffer_size_unaligned_to_aligned(mock_allocator_cls):
     """
     Test that PD buffer size is rounded down to the nearest chunk multiple.
 
