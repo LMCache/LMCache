@@ -471,6 +471,103 @@ def test_rust_raw_block_backend_batched_get_releases_allocation_on_read_error(
 @pytest.mark.skipif(
     not _has_ext(), reason="lmcache_rust_raw_block_io extension not installed"
 )
+def test_rust_raw_block_backend_batched_get_releases_loaded_prefix_on_read_error(
+    memory_allocator, loop_in_thread
+):
+    with tempfile.TemporaryDirectory() as td:
+        dev_path = os.path.join(td, "dev.bin")
+        with open(dev_path, "wb") as f:
+            f.truncate(64 * 1024 * 1024)
+
+        config = LMCacheEngineConfig.from_defaults(
+            chunk_size=256,
+            local_cpu=True,
+            max_local_cpu_size=0.1,
+            lmcache_instance_id="test_rust_raw_block_backend_release_prefix_get",
+        )
+        config.storage_plugins = []
+        config.extra_config = {
+            "rust_raw_block.device_path": dev_path,
+            "rust_raw_block.block_align": 4096,
+            "rust_raw_block.header_bytes": 4096,
+            "rust_raw_block.meta_total_bytes": 4 * 1024 * 1024,
+            "rust_raw_block.meta_enable_periodic": False,
+        }
+        metadata = LMCacheMetadata(
+            model_name="test_model",
+            world_size=1,
+            local_world_size=1,
+            worker_id=0,
+            local_worker_id=0,
+            kv_dtype=torch.bfloat16,
+            kv_shape=(4, 2, 256, 8, 128),
+        )
+
+        local_cpu = LocalCPUBackend(
+            config=config,
+            metadata=metadata,
+            dst_device="cpu",
+            memory_allocator=memory_allocator,
+        )
+        backend = RustRawBlockBackend(
+            config=config,
+            metadata=metadata,
+            local_cpu_backend=local_cpu,
+            loop=loop_in_thread,
+            dst_device="cpu",
+        )
+
+        try:
+            allocator = AdHocMemoryAllocator(device="cpu")
+            key1 = CacheEngineKey("test_model", 1, 0, 3004, torch.bfloat16)
+            key2 = CacheEngineKey("test_model", 1, 0, 3005, torch.bfloat16)
+            for key, fill in ((key1, 34), (key2, 35)):
+                obj = allocator.allocate(
+                    [torch.Size([2, 16, 8, 128])],
+                    [torch.bfloat16],
+                    fmt=MemoryFormat.KV_T2D,
+                )
+                assert obj is not None and obj.tensor is not None
+                obj.tensor.fill_(fill)
+                futs = backend.batched_submit_put_task([key], [obj])
+                assert futs is not None
+                futs[0].result(timeout=10)
+                obj.ref_count_down()
+
+            loaded_obj = local_cpu.allocate(
+                torch.Size([2, 16, 8, 128]),
+                torch.bfloat16,
+                MemoryFormat.KV_T2D,
+            )
+            failed_obj = local_cpu.allocate(
+                torch.Size([2, 16, 8, 128]),
+                torch.bfloat16,
+                MemoryFormat.KV_T2D,
+            )
+            assert loaded_obj is not None
+            assert failed_obj is not None
+            assert loaded_obj.get_ref_count() == 1
+            assert failed_obj.get_ref_count() == 1
+
+            raw_dev = MagicMock()
+            raw_dev.pread_into.side_effect = [None, OSError("read failed")]
+            with patch.object(
+                local_cpu, "allocate", side_effect=[loaded_obj, failed_obj]
+            ):
+                with patch.object(backend, "_rawdev", return_value=raw_dev):
+                    with pytest.raises(OSError, match="read failed"):
+                        backend.batched_get_blocking([key1, key2])
+
+            assert loaded_obj.get_ref_count() == 0
+            assert failed_obj.get_ref_count() == 0
+            assert backend._inflight_io_count == 0
+        finally:
+            backend.close()
+
+
+@pytest.mark.skipif(
+    not _has_ext(), reason="lmcache_rust_raw_block_io extension not installed"
+)
 def test_rust_raw_block_backend_eviction_lru(memory_allocator, loop_in_thread):
     """Test LRU eviction when capacity is exceeded."""
     with tempfile.TemporaryDirectory() as td:

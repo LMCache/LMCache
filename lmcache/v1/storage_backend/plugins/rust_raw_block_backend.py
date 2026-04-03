@@ -789,6 +789,12 @@ class RustRawBlockBackend(StoragePluginInterface):
 
                 loaded.append(memory_obj)
                 touched.append(key)
+        except Exception:
+            for memory_obj in loaded:
+                memory_obj.ref_count_down()
+            loaded.clear()
+            touched.clear()
+            raise
         finally:
             with self._lock:
                 for key in touched:
