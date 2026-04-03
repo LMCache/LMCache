@@ -352,9 +352,7 @@ class MaruBackend(AllocatorBackendInterface):
             handle = allocator.create_store_handle(memory_obj)
             key_str = key.to_string()
 
-            success = await asyncio.to_thread(
-                self._handler.store, key_str, handle
-            )
+            success = await asyncio.to_thread(self._handler.store, key_str, handle)
 
             logger.debug(
                 "[Maru] store key=%s rid=%d pid=%d",
