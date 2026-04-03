@@ -22,8 +22,6 @@ from __future__ import annotations
 
 # Standard
 from collections import defaultdict
-import os
-from typing import TYPE_CHECKING, Optional
 import select
 import threading
 
