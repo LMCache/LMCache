@@ -474,7 +474,7 @@ class StorageManager:
             task = backend.get_non_blocking(key)
             if task:
                 if (
-                    backend_name not in ["LocalCPUBackend", "PDBackend"]
+                    backend_name not in ["LocalCPUBackend", "PDBackend", "MaruBackend"]
                     and "LocalCPUBackend" in self.storage_backends
                 ):
                     def _write_back(fut, k=key):
@@ -569,7 +569,7 @@ class StorageManager:
         (i.e., prefetching from a single backend) is done.
         """
         if (
-            backend_name not in ["LocalCPUBackend", "PDBackend"]
+            backend_name not in ["LocalCPUBackend", "PDBackend", "MaruBackend"]
             and "LocalCPUBackend" in self.storage_backends
         ):
             try:
