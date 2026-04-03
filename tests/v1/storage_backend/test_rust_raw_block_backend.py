@@ -52,6 +52,108 @@ def loop_in_thread():
         loop.close()
 
 
+def _run_batched_get_prefix_stop(
+    memory_allocator,
+    loop_in_thread,
+    *,
+    async_get: bool,
+) -> None:
+    with tempfile.TemporaryDirectory() as td:
+        dev_path = os.path.join(td, "dev.bin")
+        with open(dev_path, "wb") as f:
+            f.truncate(64 * 1024 * 1024)
+
+        config = LMCacheEngineConfig.from_defaults(
+            chunk_size=256,
+            local_cpu=True,
+            max_local_cpu_size=0.1,
+            lmcache_instance_id="test_rust_raw_block_backend_batched_get",
+        )
+        config.storage_plugins = []
+        config.extra_config = {
+            "rust_raw_block.device_path": dev_path,
+            "rust_raw_block.block_align": 4096,
+            "rust_raw_block.header_bytes": 4096,
+            "rust_raw_block.meta_total_bytes": 4 * 1024 * 1024,
+            "rust_raw_block.meta_enable_periodic": False,
+        }
+        metadata = LMCacheMetadata(
+            model_name="test_model",
+            world_size=1,
+            local_world_size=1,
+            worker_id=0,
+            local_worker_id=0,
+            kv_dtype=torch.bfloat16,
+            kv_shape=(4, 2, 256, 8, 128),
+        )
+
+        local_cpu = LocalCPUBackend(
+            config=config,
+            metadata=metadata,
+            dst_device="cpu",
+            memory_allocator=memory_allocator,
+        )
+        backend = RustRawBlockBackend(
+            config=config,
+            metadata=metadata,
+            local_cpu_backend=local_cpu,
+            loop=loop_in_thread,
+            dst_device="cpu",
+        )
+
+        try:
+            allocator = AdHocMemoryAllocator(device="cpu")
+            key1 = CacheEngineKey("test_model", 1, 0, 1001, torch.bfloat16)
+            key_miss = CacheEngineKey("test_model", 1, 0, 1002, torch.bfloat16)
+            key3 = CacheEngineKey("test_model", 1, 0, 1003, torch.bfloat16)
+
+            obj1 = allocator.allocate(
+                [torch.Size([2, 16, 8, 128])], [torch.bfloat16], fmt=MemoryFormat.KV_T2D
+            )
+            obj3 = allocator.allocate(
+                [torch.Size([2, 16, 8, 128])], [torch.bfloat16], fmt=MemoryFormat.KV_T2D
+            )
+            assert obj1 is not None and obj1.tensor is not None
+            assert obj3 is not None and obj3.tensor is not None
+            obj1.tensor.fill_(1)
+            obj3.tensor.fill_(3)
+            expected1 = bytes(obj1.byte_array)
+            expected3 = bytes(obj3.byte_array)
+
+            for key, obj in ((key1, obj1), (key3, obj3)):
+                futs = backend.batched_submit_put_task([key], [obj])
+                assert futs is not None
+                futs[0].result(timeout=10)
+                obj.ref_count_down()
+
+            if async_get:
+                future = asyncio.run_coroutine_threadsafe(
+                    backend.batched_get_non_blocking(
+                        "lookup-rawblock", [key1, key_miss, key3]
+                    ),
+                    loop_in_thread,
+                )
+                async_results = future.result(timeout=10)
+                assert len(async_results) == 1
+                assert bytes(async_results[0].byte_array) == expected1
+                async_results[0].ref_count_down()
+            else:
+                blocking_results = backend.batched_get_blocking([key1, key_miss, key3])
+                assert len(blocking_results) == 3
+                assert blocking_results[0] is not None
+                assert bytes(blocking_results[0].byte_array) == expected1
+                assert blocking_results[1] is None
+                assert blocking_results[2] is None
+                blocking_results[0].ref_count_down()
+
+            out3 = backend.get_blocking(key3)
+            assert out3 is not None
+            assert bytes(out3.byte_array) == expected3
+            out3.ref_count_down()
+        finally:
+            backend.close()
+
+
 @pytest.mark.skipif(
     not _has_ext(), reason="lmcache_rust_raw_block_io extension not installed"
 )
@@ -121,6 +223,26 @@ def test_rust_raw_block_backend_put_get_roundtrip(memory_allocator, loop_in_thre
             assert bytes(out.byte_array) == expected
         finally:
             backend.close()
+
+
+@pytest.mark.skipif(
+    not _has_ext(), reason="lmcache_rust_raw_block_io extension not installed"
+)
+def test_rust_raw_block_backend_batched_get_blocking_prefix_stop(
+    memory_allocator, loop_in_thread
+):
+    """Batched blocking get should stop at the first miss and preserve order."""
+    _run_batched_get_prefix_stop(memory_allocator, loop_in_thread, async_get=False)
+
+
+@pytest.mark.skipif(
+    not _has_ext(), reason="lmcache_rust_raw_block_io extension not installed"
+)
+def test_rust_raw_block_backend_batched_get_non_blocking_prefix_stop(
+    memory_allocator, loop_in_thread
+):
+    """Async batched get should return only the successful prefix."""
+    _run_batched_get_prefix_stop(memory_allocator, loop_in_thread, async_get=True)
 
 
 @pytest.mark.skipif(

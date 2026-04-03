@@ -121,6 +121,7 @@ class RustRawBlockBackend(StoragePluginInterface):
 
         # Support TP > 1 via per-TP device paths.
         # Each TP worker uses its own partition to avoid conflicts.
+        self.device_path: str
         if self.metadata is not None and self.metadata.world_size > 1:
             tp_rank = self.metadata.worker_id
             per_tp_devices = extra.get("rust_raw_block.per_tp_device_paths", {})
@@ -144,7 +145,7 @@ class RustRawBlockBackend(StoragePluginInterface):
                 f"using explicit device path for rank {tp_rank}: {self.device_path}"
             )
         else:
-            self.device_path: str = extra.get("rust_raw_block.device_path", "")
+            self.device_path = extra.get("rust_raw_block.device_path", "")
             if not self.device_path:
                 raise ValueError(
                     "extra_config['rust_raw_block.device_path'] is required"
@@ -696,81 +697,109 @@ class RustRawBlockBackend(StoragePluginInterface):
                 self._inflight_io_count -= 1
                 self._last_io_ts = time.monotonic()
 
-    def get_blocking(self, key: CacheEngineKey) -> Optional[MemoryObj]:
-        if logger.isEnabledFor(10):
-            self._dbg_get_calls += 1
+    def _batched_get_prefix(self, keys: Sequence[CacheEngineKey]) -> list[MemoryObj]:
+        if not keys:
+            return []
+
+        items: list[tuple[CacheEngineKey, _Entry]] = []
         with self._lock:
-            entry = self._index.get(key)
-        if entry is None:
-            return None
+            for key in keys:
+                entry = self._index.get(key)
+                if entry is None:
+                    break
+                items.append((key, entry))
+            if not items:
+                return []
+            self._inflight_io_count += 1
 
-        meta = entry.meta
-        assert meta.shape is not None and meta.dtype is not None
-        payload_len = int(meta.size)
-        total_len = (
-            _round_up(payload_len, self.block_align)
-            if self.use_odirect
-            else payload_len
-        )
-
-        if logger.isEnabledFor(10):
-            self._dbg_get_bytes += int(payload_len)
-            if self._dbg_should_log(self._dbg_get_calls):
-                logger.debug(
-                    "RustRawBlockBackend GET: %s offset=%d size=%d",
-                    self._dbg_key_short(key),
-                    int(entry.offset),
-                    int(payload_len),
-                )
-
-        assert self.local_cpu_backend is not None
-        memory_obj = self.local_cpu_backend.allocate(meta.shape, meta.dtype, meta.fmt)
-        assert memory_obj is not None
-        buf = memory_obj.byte_array
+        raw_dev = self._rawdev()
+        loaded: list[MemoryObj] = []
+        touched: list[CacheEngineKey] = []
         try:
-            buf = buf.cast("B")
-        except Exception:
-            pass
+            for key, entry in items:
+                meta = entry.meta
+                assert meta.shape is not None and meta.dtype is not None
+                assert self.local_cpu_backend is not None
+                memory_obj = self.local_cpu_backend.allocate(
+                    meta.shape, meta.dtype, meta.fmt
+                )
+                assert memory_obj is not None
 
-        try:
-            direct_view = self._build_direct_odirect_view(
-                memory_obj=memory_obj,
-                payload_len=payload_len,
-                total_len=total_len,
-                buffer_len=len(buf),
-                zero_tail=False,
-            )
-            with self._lock:
-                self._inflight_io_count += 1
-            if direct_view is not None:
-                read_payload_len = (
-                    total_len if len(direct_view) >= total_len else payload_len
+                payload_len = int(meta.size)
+                total_len = (
+                    _round_up(payload_len, self.block_align)
+                    if self.use_odirect
+                    else payload_len
                 )
-                self._rawdev().pread_into(
-                    entry.offset + self.header_bytes,
-                    direct_view,
-                    read_payload_len,
-                    total_len,
+                if logger.isEnabledFor(10):
+                    self._dbg_get_calls += 1
+                    self._dbg_get_bytes += payload_len
+                    if self._dbg_should_log(self._dbg_get_calls):
+                        logger.debug(
+                            "RustRawBlockBackend GET: %s offset=%d size=%d",
+                            self._dbg_key_short(key),
+                            int(entry.offset),
+                            payload_len,
+                        )
+
+                buf = memory_obj.byte_array
+                try:
+                    buf = buf.cast("B")
+                except Exception:
+                    pass
+                direct_view = self._build_direct_odirect_view(
+                    memory_obj=memory_obj,
+                    payload_len=payload_len,
+                    total_len=total_len,
+                    buffer_len=len(buf),
+                    zero_tail=False,
                 )
-            else:
-                self._rawdev().pread_into(
-                    entry.offset + self.header_bytes,
-                    buf,
-                    payload_len,
-                    total_len,
-                )
-        except Exception as e:
-            logger.error(f"Read failed for key {self._dbg_key_short(key)}: {e}")
-            raise
+                try:
+                    if direct_view is not None:
+                        raw_dev.pread_into(
+                            entry.offset + self.header_bytes,
+                            direct_view,
+                            total_len if len(direct_view) >= total_len else payload_len,
+                            total_len,
+                        )
+                    else:
+                        raw_dev.pread_into(
+                            entry.offset + self.header_bytes,
+                            buf,
+                            payload_len,
+                            total_len,
+                        )
+                except Exception as e:
+                    memory_obj.ref_count_down()
+                    logger.error(
+                        "Read failed for key %s: %s", self._dbg_key_short(key), e
+                    )
+                    break
+
+                memory_obj.metadata.cached_positions = meta.cached_positions
+                loaded.append(memory_obj)
+                touched.append(key)
         finally:
             with self._lock:
+                for key in touched:
+                    self._touch(key)
                 self._inflight_io_count -= 1
                 self._last_io_ts = time.monotonic()
+        return loaded
 
-        memory_obj.metadata.cached_positions = meta.cached_positions
-        with self._lock:
-            self._touch(key)
-        return memory_obj
+    def get_blocking(self, key: CacheEngineKey) -> Optional[MemoryObj]:
+        loaded = self._batched_get_prefix([key])
+        return loaded[0] if loaded else None
+
+    def batched_get_blocking(
+        self,
+        keys: List[CacheEngineKey],
+    ) -> List[Optional[MemoryObj]]:
+        if not keys:
+            return []
+
+        loaded = self._batched_get_prefix(keys)
+        return [*loaded, *([None] * (len(keys) - len(loaded)))]
 
     async def batched_async_contains(
         self,
@@ -778,6 +807,7 @@ class RustRawBlockBackend(StoragePluginInterface):
         keys: list[CacheEngineKey],
         pin: bool = False,
     ) -> int:
+        del lookup_id
         hit = 0
         with self._lock:
             for k in keys:
@@ -787,6 +817,15 @@ class RustRawBlockBackend(StoragePluginInterface):
                     self._pinned.add(k)
                 hit += 1
         return hit
+
+    async def batched_get_non_blocking(
+        self,
+        lookup_id: str,
+        keys: list[CacheEngineKey],
+        transfer_spec: Any = None,
+    ) -> list[MemoryObj]:
+        del lookup_id, transfer_spec
+        return await asyncio.to_thread(self._batched_get_prefix, keys)
 
     def get_allocator_backend(self) -> "AllocatorBackendInterface":
         assert self.local_cpu_backend is not None
