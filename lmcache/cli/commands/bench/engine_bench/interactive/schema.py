@@ -108,7 +108,7 @@ ALL_ITEMS: list[ConfigItem] = [
         choices=[
             (
                 "long-doc-permutator",
-                "Permutations of context documents (stress-tests blended KV reuse)",
+                "Query the same set of long documents with different orders",
             ),
             ("long-doc-qa", "Repeated Q&A over long documents (tests KV cache reuse)"),
             ("multi-round-chat", "Multi-turn chat with stateful sessions"),

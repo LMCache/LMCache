@@ -188,13 +188,6 @@ class BenchCommand(BaseCommand):
             "Capped at N! where N = --ldp-num-contexts.",
         )
         ldp_group.add_argument(
-            "--ldp-vocab-size",
-            type=int,
-            default=8000,
-            help="Vocabulary pool size for context generation (default: 8000). "
-            "Smaller values increase chunk hash collision risk.",
-        )
-        ldp_group.add_argument(
             "--ldp-num-inflight-requests",
             type=int,
             default=1,
