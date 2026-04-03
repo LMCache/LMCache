@@ -1084,14 +1084,10 @@ def encode_fast_new(cdf, input_sym, output_buffer, output_lengths):
     tasks = [(layer_idx, c) for layer_idx in range(n_layers) for c in range(n_channels)]
 
     with ThreadPoolExecutor() as executor:
-        executor.map(encode_one, tasks)
+        list(executor.map(encode_one, tasks))
 
     output_buffer.copy_(torch.from_numpy(out_buf_np))
     output_lengths.copy_(torch.from_numpy(out_len_np))
-
-
-def uint32_val(val):
-    return int(val & 0xFFFFFFFF)
 
 
 @njit(cache=True)
@@ -1213,7 +1209,7 @@ def decode_fast_new(cdf, bytestreams, lengths, output):
     tasks = [(layer_idx, c) for layer_idx in range(n_layers) for c in range(n_channels)]
 
     with ThreadPoolExecutor() as executor:
-        executor.map(decode_one, tasks)
+        list(executor.map(decode_one, tasks))
 
     if output is not None:
         output.copy_(torch.from_numpy(out_np))
@@ -1258,7 +1254,7 @@ def decode_fast_prefsum(cdf, bytestreams, lengths_prefsum, output):
     tasks = [(layer_idx, c) for layer_idx in range(n_layers) for c in range(n_channels)]
 
     with ThreadPoolExecutor() as executor:
-        executor.map(decode_one, tasks)
+        list(executor.map(decode_one, tasks))
 
     output.copy_(torch.from_numpy(out_np))
 
