@@ -630,10 +630,12 @@ class TensorMemoryObj(MemoryObj):
         # MLA multi-group fix: when KV cache has multiple groups
         # (e.g., K_rope uint8 + latent KV bfloat16), meta.shape only
         # describes the first group but raw_data contains all groups.
-        # Return flat buffer; callers should use get_tensor(index) for
-        # per-group access with correct shape and dtype.
+        # Callers must use get_tensor(group_index) for per-group access.
         if self.meta.shapes is not None and len(self.meta.shapes) > 1:
-            return self.raw_data[: self.get_size()]
+            raise ValueError(
+                "Cannot access .tensor on multi-group memory object. "
+                "Use get_tensor(group_index) for per-group access."
+            )
         assert self.meta.dtype is not None
         # TODO(Jiayi): consider caching the `get_size()`
         return (

@@ -173,6 +173,9 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
         self.kv_cache_pointers_on_gpu: dict[int, torch.Tensor] = {}
 
         self.kvcaches: Optional[List[torch.Tensor]] = None
+        # Per-group GPU pointer cache, keyed by (device_index, group_index).
+        # Avoids re-creating GPU tensors on every from_gpu / to_gpu call.
+        self._group_pointers_on_gpu: dict[tuple[int, int], torch.Tensor] = {}
 
         self.gpu_buffer: Optional[torch.Tensor] = None
         self.use_mla = "use_mla" in kwargs and kwargs["use_mla"]
@@ -237,6 +240,27 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
             layout_hints=layout_hints,
         )
 
+    def _get_group_pointers(
+        self,
+        group_idx: int,
+        group_kvcaches: List[torch.Tensor],
+    ) -> torch.Tensor:
+        """Return cached GPU pointer tensor for a KV cache group.
+
+        On first call for a given (device, group_idx) pair, builds the
+        pointer tensor and stores it.  Subsequent calls return the
+        cached version directly.
+        """
+        device = group_kvcaches[0].device
+        key = (device.index, group_idx)
+        if key not in self._group_pointers_on_gpu:
+            ptrs = torch.tensor(
+                [t.data_ptr() for t in group_kvcaches],
+                dtype=torch.int64,
+            )
+            self._group_pointers_on_gpu[key] = ptrs.to(device)
+        return self._group_pointers_on_gpu[key]
+
     def _initialize_pointers(self, kv_caches: List[torch.Tensor]) -> torch.Tensor:
         self.device = kv_caches[0].device
         assert self.device.type == "cuda", "The device should be CUDA."
@@ -248,17 +272,18 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
 
         # MLA multi-group fix: kv_caches may have more entries than
         # num_layers when model uses multiple KV groups (e.g., K_rope
-        # + latent KV = 2 × num_layers entries).
+        # + latent KV = 2 × num_layers entries).  Resize the pointer
+        # buffers to match, but do NOT mutate self.num_layers — that
+        # tracks transformer layers (e.g. 78), not total KV entries.
         actual_num_caches = len(kv_caches)
         if actual_num_caches != self.kv_cache_pointers.shape[0]:
             self.kv_cache_pointers = torch.empty(
                 actual_num_caches, dtype=torch.int64, device="cpu"
             )
-            self.num_layers = actual_num_caches
 
         self.kv_cache_pointers.numpy()[:] = [t.data_ptr() for t in kv_caches]
         self.kv_cache_pointers_on_gpu[idx] = torch.empty(
-            self.num_layers, dtype=torch.int64, device=self.device
+            actual_num_caches, dtype=torch.int64, device=self.device
         )
         self.kv_cache_pointers_on_gpu[idx].copy_(self.kv_cache_pointers)
 
@@ -290,8 +315,6 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
         :raises AssertionError: If the memory object does not have a tensor.
         :raises ValueError: If 'slot_mapping' is not provided in kwargs.
         """
-        assert memory_obj.tensor is not None
-
         self.initialize_kvcaches_ptr(**kwargs)
 
         assert self.kvcaches is not None, (
@@ -316,13 +339,62 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
 
         slot_mapping: torch.Tensor = kwargs["slot_mapping"]
 
-        kv_cache_pointers = self._initialize_pointers(self.kvcaches)
-
         # avoid read/write stream race condition for shared block
         # this will only be potentially non-zero for the first
         # block lmcache is transferring back
         vllm_cached = kwargs.get("vllm_cached_tokens", 0)
         skip_prefix_n_tokens = min(end - start, max(0, vllm_cached - start))
+
+        # MLA multi-group fix: process each KV group separately.
+        # Same pattern as from_gpu — each group has its own layer
+        # pointers, format, and block geometry.
+        if (self.use_mla and memory_obj.metadata.shapes is not None
+                and len(memory_obj.metadata.shapes) > 1):
+            assert memory_obj.raw_tensor is not None
+            num_groups = len(memory_obj.metadata.shapes)
+            layers_per_group = len(self.kvcaches) // num_groups
+            for group_idx in range(num_groups):
+                group_tensor = memory_obj.get_tensor(group_idx)
+                if group_tensor is None:
+                    continue
+                group_kvcaches = self.kvcaches[
+                    group_idx * layers_per_group :
+                    (group_idx + 1) * layers_per_group
+                ]
+                group_ptrs_gpu = self._get_group_pointers(
+                    group_idx, group_kvcaches
+                )
+                group_fmt = discover_gpu_kv_format(
+                    group_kvcaches, EngineType.VLLM
+                )
+                group_num_blocks = get_num_blocks(
+                    group_kvcaches, group_fmt
+                )
+                group_block_size = get_block_size(
+                    group_kvcaches, group_fmt
+                )
+                group_page_buf = group_num_blocks * group_block_size
+                group_head_size = get_head_size(
+                    group_kvcaches, group_fmt
+                )
+
+                lmc_ops.multi_layer_kv_transfer(
+                    group_tensor,
+                    group_ptrs_gpu,
+                    slot_mapping[start:end],
+                    group_kvcaches[0].device,
+                    group_page_buf,
+                    lmc_ops.TransferDirection.H2D,
+                    group_fmt,
+                    block_size=group_block_size,
+                    head_size=group_head_size,
+                    skip_prefix_n_tokens=skip_prefix_n_tokens,
+                )
+            return
+
+        assert memory_obj.tensor is not None
+
+        kv_cache_pointers = self._initialize_pointers(self.kvcaches)
 
         lmc_ops.multi_layer_kv_transfer(
             memory_obj.tensor,
@@ -356,7 +428,7 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
         :raises AssertionError: If the memory object does not have a tensor.
         :raises ValueError: If 'slot_mapping' is not provided in kwargs.
         """
-        assert memory_obj.tensor is not None
+        assert memory_obj.raw_tensor is not None
 
         self.initialize_kvcaches_ptr(**kwargs)
         assert self.kvcaches is not None, (
@@ -384,11 +456,9 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
                     group_idx * layers_per_group :
                     (group_idx + 1) * layers_per_group
                 ]
-                group_ptrs = torch.tensor(
-                    [t.data_ptr() for t in group_kvcaches],
-                    dtype=torch.int64,
+                group_ptrs_gpu = self._get_group_pointers(
+                    group_idx, group_kvcaches
                 )
-                group_ptrs_gpu = group_ptrs.to(group_kvcaches[0].device)
                 group_fmt = discover_gpu_kv_format(
                     group_kvcaches, EngineType.VLLM
                 )
