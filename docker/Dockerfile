@@ -45,7 +45,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     uv pip install -r cuda.txt
 
 # CUDA arch list used by torch
-ARG torch_cuda_arch_list='7.0 7.5 8.0 8.6 8.9 9.0 10.0+PTX'
+ARG torch_cuda_arch_list='7.0 7.5 8.0 8.6 8.9 9.0 10.0 12.0+PTX'
 ENV TORCH_CUDA_ARCH_LIST=${torch_cuda_arch_list}
 
 #################### vLLM IMAGE & LMCache (Build) ##########################

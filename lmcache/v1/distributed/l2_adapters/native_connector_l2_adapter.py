@@ -22,15 +22,9 @@ from __future__ import annotations
 
 # Standard
 from collections import defaultdict
-from typing import TYPE_CHECKING, Optional
 import os
 import select
 import threading
-
-if TYPE_CHECKING:
-    from lmcache.v1.distributed.internal_api import (
-        L1MemoryDesc,
-    )
 
 # First Party
 from lmcache.logging import init_logger
@@ -39,13 +33,6 @@ from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.distributed.l2_adapters.base import (
     L2AdapterInterface,
     L2TaskId,
-)
-from lmcache.v1.distributed.l2_adapters.config import (
-    L2AdapterConfigBase,
-    register_l2_adapter_type,
-)
-from lmcache.v1.distributed.l2_adapters.factory import (
-    register_l2_adapter_factory,
 )
 from lmcache.v1.memory_management import MemoryObj
 
@@ -246,6 +233,18 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
             return self._completed_loads.pop(task_id, None)
 
     # ---------------------------------------------------------------
+    # Eviction Interface
+    # ---------------------------------------------------------------
+
+    def delete(self, keys: list[ObjectKey]) -> None:
+        # Not implemented for the native connector adapter.
+        pass
+
+    def get_usage(self) -> tuple[float, float]:
+        # Not implemented for the native connector adapter.
+        return (-1.0, -1.0)
+
+    # ---------------------------------------------------------------
     # Cleanup
     # ---------------------------------------------------------------
 
@@ -332,120 +331,14 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
 
                     elif op_type == self._OP_LOAD:
                         bitmap = Bitmap(num_keys)
-                        if ok:
+                        if result_bools is not None:
+                            for i, loaded in enumerate(result_bools):
+                                if loaded:
+                                    bitmap.set(i)
+                        elif ok:
+                            # Fallback for connectors that
+                            # do not report per-key results
                             for i in range(num_keys):
                                 bitmap.set(i)
                         self._completed_loads[task_id] = bitmap
                         os.eventfd_write(self._load_efd, 1)
-
-
-# -------------------------------------------------------------------
-# Config class
-# -------------------------------------------------------------------
-
-
-class RESPL2AdapterConfig(L2AdapterConfigBase):
-    """
-    Config for an L2 adapter backed by a native RESP
-    connector (Redis/Valkey).
-
-    Fields:
-    - host: server hostname or IP.
-    - port: server port.
-    - num_workers: C++ worker threads for I/O (default 8).
-    - username: optional auth username.
-    - password: optional auth password.
-    """
-
-    def __init__(
-        self,
-        host: str,
-        port: int,
-        num_workers: int = 8,
-        username: str = "",
-        password: str = "",
-    ):
-        self.host = host
-        self.port = port
-        self.num_workers = num_workers
-        self.username = username
-        self.password = password
-
-    @classmethod
-    def from_dict(cls, d: dict) -> "RESPL2AdapterConfig":
-        host = d.get("host")
-        if not isinstance(host, str) or not host:
-            raise ValueError("host must be a non-empty string")
-
-        port = d.get("port")
-        if not isinstance(port, int) or port <= 0:
-            raise ValueError("port must be a positive integer")
-
-        num_workers = d.get("num_workers", 8)
-        if not isinstance(num_workers, int) or num_workers <= 0:
-            raise ValueError("num_workers must be a positive integer")
-
-        username = d.get("username", "")
-        password = d.get("password", "")
-
-        return cls(
-            host=host,
-            port=port,
-            num_workers=num_workers,
-            username=str(username),
-            password=str(password),
-        )
-
-    @classmethod
-    def help(cls) -> str:
-        return (
-            "RESP L2 adapter config fields:\n"
-            "- host (str): Redis/Valkey server hostname "
-            "or IP (required)\n"
-            "- port (int): server port (required, >0)\n"
-            "- num_workers (int): C++ worker threads "
-            "for I/O (default 8, >0)\n"
-            "- username (str): auth username "
-            "(default empty)\n"
-            "- password (str): auth password "
-            "(default empty)"
-        )
-
-
-def _create_resp_l2_adapter(
-    config: L2AdapterConfigBase,
-    l1_memory_desc: "Optional[L1MemoryDesc]" = None,
-) -> L2AdapterInterface:
-    """Create a NativeConnectorL2Adapter backed by the
-    C++ Redis connector."""
-    try:
-        # First Party
-        from lmcache.lmcache_redis import (
-            LMCacheRedisClient,
-        )
-    except ImportError as e:
-        raise RuntimeError(
-            "RESP L2 adapter requires the C++ Redis "
-            "extension. Build with: pip install -e ."
-        ) from e
-
-    assert isinstance(config, RESPL2AdapterConfig)
-    native_client = LMCacheRedisClient(
-        config.host,
-        config.port,
-        config.num_workers,
-        config.username,
-        config.password,
-    )
-    logger.info(
-        "Created RESP L2 adapter: %s:%d (workers=%d)",
-        config.host,
-        config.port,
-        config.num_workers,
-    )
-    return NativeConnectorL2Adapter(native_client)
-
-
-# Self-register config type and adapter factory
-register_l2_adapter_type("resp", RESPL2AdapterConfig)
-register_l2_adapter_factory("resp", _create_resp_l2_adapter)

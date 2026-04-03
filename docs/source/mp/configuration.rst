@@ -31,7 +31,17 @@ Source: ``lmcache/v1/multiprocess/config.py``
      - Chunk size for KV cache operations (in tokens).
    * - ``--max-workers``
      - ``1``
-     - Maximum number of worker threads for handling ZMQ requests.
+     - Base number of worker threads. Sets the default for both the GPU
+       (affinity) pool and the CPU (normal) pool. Can be overridden
+       per-pool with ``--max-gpu-workers`` and ``--max-cpu-workers``.
+   * - ``--max-gpu-workers``
+     - (inherits ``--max-workers``)
+     - Worker threads for the GPU affinity pool (STORE/RETRIEVE).
+       Requests from the same vLLM instance are always dispatched to the
+       same thread, eliminating GPU transfer lock contention.
+   * - ``--max-cpu-workers``
+     - (inherits ``--max-workers``)
+     - Worker threads for the normal CPU pool (LOOKUP, etc.).
    * - ``--hash-algorithm``
      - ``blake3``
      - Hash algorithm for token-based operations.
@@ -48,7 +58,7 @@ HTTP Frontend
 
 Source: ``lmcache/v1/multiprocess/config.py``
 
-Only available when running ``http_server.py``.
+The HTTP frontend is included when running ``lmcache server``.
 
 .. list-table::
    :header-rows: 1
@@ -61,7 +71,7 @@ Only available when running ``http_server.py``.
      - ``0.0.0.0``
      - Host to bind the HTTP (FastAPI/uvicorn) server.
    * - ``--http-port``
-     - ``8000``
+     - ``8080``
      - Port to bind the HTTP server.
 
 L1 Memory Manager
@@ -152,14 +162,19 @@ Source: ``lmcache/v1/distributed/config.py``
      - L2 store policy.  Determines which adapters receive each key
        and whether keys are deleted from L1 after L2 store.
        The ``default`` policy stores all keys to all adapters and keeps L1.
-       The ``noop`` policy stores all keys to all adapters and then
+       The ``skip_l1`` policy stores all keys to all adapters and then
        deletes them from L1 (buffer-only mode).
-       Choices: ``default``, ``noop``.
+       Choices: ``default``, ``skip_l1``.
    * - ``--l2-prefetch-policy``
      - ``default``
      - L2 prefetch policy.  Determines which adapter loads each key
        when multiple adapters have it.
        The ``default`` policy picks the first adapter (lowest index).
+   * - ``--l2-prefetch-max-in-flight``
+     - ``8``
+     - Maximum number of concurrent prefetch (L2 load) requests.
+       Limits how many in-flight loads the PrefetchController may
+       issue at once, preventing excessive L1 memory pressure.
 
 L2 Adapters
 -----------
@@ -248,11 +263,14 @@ Pass ``--l2-adapter`` multiple times.  Adapters are used in the order given:
     --l2-adapter '{"type": "nixl_store", "backend": "POSIX", "backend_params": {"file_path": "/data/ssd/l2", "use_direct_io": "false"}, "pool_size": 64}' \
     --l2-adapter '{"type": "nixl_store", "backend": "GDS", "backend_params": {"file_path": "/data/nvme/l2", "use_direct_io": "true"}, "pool_size": 128}'
 
-Prometheus Observability
-------------------------
+Observability
+-------------
 
 Source: ``lmcache/v1/mp_observability/config.py``
 
+See :doc:`observability` for full details on the three modes (metrics,
+logging, tracing).
+
 .. list-table::
    :header-rows: 1
    :widths: 30 15 55
@@ -260,54 +278,27 @@ Source: ``lmcache/v1/mp_observability/config.py``
    * - Argument
      - Default
      - Description
-   * - ``--disable-prometheus``
-     - ``False``
-     - Disable Prometheus metrics collection and HTTP server.
+   * - ``--disable-observability``
+     - off
+     - Master switch: disable the EventBus entirely.
+   * - ``--disable-metrics``
+     - off
+     - Skip metrics subscribers (no Prometheus endpoint).
+   * - ``--disable-logging``
+     - off
+     - Skip logging subscribers.
+   * - ``--enable-tracing``
+     - off
+     - Register tracing subscribers. Requires ``--otlp-endpoint``.
+   * - ``--event-bus-queue-size``
+     - ``10000``
+     - Max events in the EventBus queue before tail-drop.
+   * - ``--otlp-endpoint``
+     - *(none)*
+     - OTLP gRPC endpoint for exporting metrics and traces.
    * - ``--prometheus-port``
      - ``9090``
-     - Port to expose the Prometheus ``/metrics`` endpoint.
-   * - ``--prometheus-log-interval``
-     - ``10.0``
-     - How often (seconds) to flush accumulated stats to Prometheus.
-
-Telemetry
----------
-
-Source: ``lmcache/v1/mp_observability/telemetry/config.py``
-
-.. list-table::
-   :header-rows: 1
-   :widths: 30 15 55
-
-   * - Argument
-     - Default
-     - Description
-   * - ``--enable-telemetry``
-     - ``False``
-     - Enable the telemetry event system.
-   * - ``--telemetry-max-queue-size``
-     - ``10000``
-     - Maximum events in the telemetry queue before tail-drop.
-   * - ``--telemetry-processor``
-     - *(none)*
-     - Processor spec as JSON (repeatable).  Must include ``"type"`` field.
-
-``logging`` processor
-~~~~~~~~~~~~~~~~~~~~~
-
-The built-in processor.  Logs telemetry events via LMCache's logger.
-
-Fields:
-
-- ``log_level``: Log level to use (``DEBUG``, ``INFO``, ``WARNING``, ``ERROR``,
-  ``CRITICAL``).  Default is ``DEBUG``.
-
-Examples:
-
-.. code-block:: bash
-
-    --telemetry-processor '{"type": "logging", "log_level": "DEBUG"}'
-    --telemetry-processor '{"type": "logging", "log_level": "INFO"}'
+     - Port for the Prometheus ``/metrics`` endpoint.
 
 vLLM Client Configuration
 --------------------------
@@ -342,11 +333,12 @@ Full Example
 
 .. code-block:: bash
 
-    python3 -m lmcache.v1.multiprocess.http_server \
+    lmcache server \
         --host 0.0.0.0 \
         --port 6555 \
         --chunk-size 512 \
         --max-workers 4 \
+        --max-gpu-workers 2 \
         --hash-algorithm blake3 \
         --engine-type default \
         --l1-size-gb 100 \
@@ -356,10 +348,11 @@ Full Example
         --l1-write-ttl-seconds 600 \
         --l1-read-ttl-seconds 300 \
         --eviction-policy noop \
-        --l2-store-policy noop \
+        --l2-store-policy skip_l1 \
         --eviction-trigger-watermark 0.9 \
         --eviction-ratio 0.1 \
         --l2-prefetch-policy default \
+        --l2-prefetch-max-in-flight 8 \
         --l2-adapter '{"type": "nixl_store", "backend": "POSIX", "backend_params": {"file_path": "/data/lmcache/l2", "use_direct_io": "false"}, "pool_size": 64}' \
         --prometheus-port 9090 \
         --prometheus-log-interval 10 \

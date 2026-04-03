@@ -91,10 +91,12 @@ class BaseCommand(abc.ABC):
     ) -> Metrics:
         """Create a :class:`Metrics` with default handlers pre-registered.
 
-        Handlers are configured from ``args.format`` and ``args.output``:
+        Handlers are configured from ``args.format``, ``args.output``,
+        and ``args.quiet``:
 
-        * A :class:`StreamHandler` writing to stdout. The formatter is
-          determined by ``--format`` (default: ``terminal``).
+        * A :class:`StreamHandler` writing to stdout, unless ``--quiet``
+          is set. The formatter is determined by ``--format``
+          (default: ``terminal``).
         * A :class:`FileHandler` if ``--output`` is set (uses the same
           formatter chosen by ``--format``).
 
@@ -109,8 +111,10 @@ class BaseCommand(abc.ABC):
         """
         metrics = Metrics(title=title)
 
+        quiet = getattr(args, "quiet", False)
         fmt_name = getattr(args, "format", None) or "terminal"
-        metrics.add_handler(StreamHandler(get_formatter(fmt_name, width=width)))
+        if not quiet:
+            metrics.add_handler(StreamHandler(get_formatter(fmt_name, width=width)))
 
         output = getattr(args, "output", None)
         if output:
@@ -143,4 +147,11 @@ def _add_output_args(parser: argparse.ArgumentParser) -> None:
         default=None,
         metavar="PATH",
         help="Save metrics to a file at PATH (format chosen by --format).",
+    )
+    parser.add_argument(
+        "-q",
+        "--quiet",
+        action="store_true",
+        default=False,
+        help="Suppress stdout output. Exit code only.",
     )

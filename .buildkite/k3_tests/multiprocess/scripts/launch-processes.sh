@@ -45,7 +45,7 @@ echo "=== Launching LMCache MP server ==="
 echo "Port: $LMCACHE_PORT"
 
 CUDA_VISIBLE_DEVICES="${GPU_FOR_VLLM}" \
-python -m lmcache.v1.multiprocess.server \
+lmcache server \
     --l1-size-gb "$CPU_BUFFER_SIZE" \
     --eviction-policy LRU \
     --max-workers "$MAX_WORKERS" \
@@ -76,7 +76,7 @@ VLLM_SERVER_DEV_MODE=1 \
 VLLM_BATCH_INVARIANT=1 \
 PYTHONHASHSEED=0 \
 vllm serve "$MODEL" \
-    --kv-transfer-config "{\"kv_connector\":\"LMCacheMPConnector\", \"kv_role\":\"kv_both\", \"kv_connector_extra_config\": {\"lmcache.mp.port\": $LMCACHE_PORT}}" \
+    --kv-transfer-config "{\"kv_connector\":\"LMCacheMPConnector\", \"kv_role\":\"kv_both\", \"kv_load_failure_policy\": \"recompute\", \"kv_connector_extra_config\": {\"lmcache.mp.port\": $LMCACHE_PORT, \"lmcache.mp.mq_timeout\": 10}}" \
     --attention-backend FLASH_ATTN \
     --port "$vllm_port" \
     --no-async-scheduling \

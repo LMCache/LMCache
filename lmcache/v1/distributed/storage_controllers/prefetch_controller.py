@@ -35,6 +35,8 @@ from lmcache.v1.distributed.storage_controllers.store_policy import (
     AdapterDescriptor,
 )
 from lmcache.v1.memory_management import MemoryObj
+from lmcache.v1.mp_observability.event import Event, EventType
+from lmcache.v1.mp_observability.event_bus import get_event_bus
 
 logger = init_logger(__name__)
 
@@ -193,14 +195,10 @@ class PrefetchController(StorageControllerInterface):
         policy: PrefetchPolicy,
         max_in_flight: int = 8,
     ) -> None:
-        super().__init__(l1_manager)
+        self._l1_manager = l1_manager
         self._l2_adapters = l2_adapters
         self._adapter_descriptors = adapter_descriptors
         self._policy = policy
-        # TODO(ApostaC): max_in_flight should not be a static constant.
-        # Replace with a dynamic admission controller that monitors L1 memory
-        # usage of in-flight prefetch requests. A fixed limit can still blow
-        # up L1 memory when individual requests are large.
         self._max_in_flight = max_in_flight
 
         # In-flight request tracking (background thread only)
@@ -223,8 +221,12 @@ class PrefetchController(StorageControllerInterface):
         self._next_request_id: PrefetchRequestId = 0
         self._submission_efd = os.eventfd(0, os.EFD_NONBLOCK | os.EFD_CLOEXEC)
 
-        # Thread-safe results (background -> external)
-        self._results_lock = threading.Lock()
+        # Thread-safe lookup results (background -> external)
+        self._lookup_results_lock = threading.Lock()
+        self._completed_lookups: dict[PrefetchRequestId, int] = {}
+
+        # Thread-safe prefetch results (background -> external)
+        self._prefetch_results_lock = threading.Lock()
         self._completed_results: dict[PrefetchRequestId, int] = {}
 
         # Map eventfds to adapter indices for quick lookup in poll.
@@ -236,6 +238,8 @@ class PrefetchController(StorageControllerInterface):
         for i, adapter in enumerate(self._l2_adapters):
             self._lookup_efd_to_adapter[adapter.get_lookup_and_lock_event_fd()] = i
             self._load_efd_to_adapter[adapter.get_load_event_fd()] = i
+
+        self._event_bus = get_event_bus()
 
         self._stop_flag = threading.Event()
         self._thread = threading.Thread(
@@ -285,6 +289,30 @@ class PrefetchController(StorageControllerInterface):
         os.eventfd_write(self._submission_efd, 1)
         return request_id
 
+    def query_lookup_result(self, request_id: PrefetchRequestId) -> int | None:
+        """
+        Query the number of prefix hits from the lookup phase.
+
+        Thread-safe. Returns the number of prefix hits if the lookup phase
+        has completed, None if still in progress, or the prefetch request
+        has already been consumed by query_prefetch_result.
+
+        Args:
+            request_id: The request ID from submit_prefetch_request.
+
+        Returns:
+            Number of prefix hits from the lookup phase, or None if not yet complete
+            or if the request has already been consumed by a previous call to this
+            method.
+
+        Note:
+            This function does not pop the result. The caller need to make sure to call
+            the query_prefetch_result after calling this function, otherwise nobody
+            will clean up the completed lookups dictionary, causing memory leak.
+        """
+        with self._lookup_results_lock:
+            return self._completed_lookups.get(request_id, None)
+
     def query_prefetch_result(self, request_id: PrefetchRequestId) -> int | None:
         """
         Query the result of a prefetch request.
@@ -298,16 +326,26 @@ class PrefetchController(StorageControllerInterface):
 
         Returns:
             Number of prefix hits, or None if not yet complete.
+
+        Note:
+            This function will pop the completed lookup results as well.
+            Therefore, the caller need to make sure that never call
+            query_lookup_result after calling this function, otherwise it will
+            get None forever.
         """
-        with self._results_lock:
-            return self._completed_results.pop(request_id, None)
+        with self._prefetch_results_lock:
+            result = self._completed_results.pop(request_id, None)
+        if result is not None:
+            with self._lookup_results_lock:
+                self._completed_lookups.pop(request_id, None)
+        return result
 
     def report_status(self) -> dict:
         """Return a status dict for the prefetch controller."""
         is_healthy = self._thread.is_alive()
         with self._submission_lock:
             submission_queue_size = len(self._submission_queue)
-        with self._results_lock:
+        with self._prefetch_results_lock:
             completed_results_count = len(self._completed_results)
         return {
             "is_healthy": is_healthy,
@@ -376,14 +414,27 @@ class PrefetchController(StorageControllerInterface):
                 except (OSError, BlockingIOError):
                     pass
 
-                if fd == self._submission_efd:
-                    self._drain_submission_queue()
-                elif fd in self._lookup_efd_to_adapter:
-                    self._process_lookup_completions(self._lookup_efd_to_adapter[fd])
-                elif fd in self._load_efd_to_adapter:
-                    self._process_load_completions(self._load_efd_to_adapter[fd])
+                try:
+                    if fd == self._submission_efd:
+                        self._drain_submission_queue()
+                    elif fd in self._lookup_efd_to_adapter:
+                        self._process_lookup_completions(
+                            self._lookup_efd_to_adapter[fd]
+                        )
+                    elif fd in self._load_efd_to_adapter:
+                        self._process_load_completions(self._load_efd_to_adapter[fd])
+                except Exception:
+                    logger.exception(
+                        "Unexpected error in prefetch loop while processing fd %d",
+                        fd,
+                    )
 
-            self._start_pending_requests()
+            try:
+                self._start_pending_requests()
+            except Exception:
+                logger.exception(
+                    "Unexpected error in prefetch loop while starting pending requests"
+                )
 
     def _drain_submission_queue(self) -> None:
         """Move items from the thread-safe submission queue to the
@@ -436,6 +487,17 @@ class PrefetchController(StorageControllerInterface):
         self._status_in_flight_count += 1
         self._status_lookup_phase_count += 1
 
+        self._event_bus.publish(
+            Event(
+                event_type=EventType.L2_PREFETCH_LOOKUP_SUBMITTED,
+                metadata={
+                    "request_id": request_id,
+                    "key_count": len(keys),
+                    "adapter_count": len(pending_lookup_tasks),
+                },
+            )
+        )
+
     def _process_lookup_completions(self, adapter_index: int) -> None:
         """Check all LOOKUP-phase requests for completed lookups from
         this adapter."""
@@ -465,7 +527,6 @@ class PrefetchController(StorageControllerInterface):
     # =========================================================================
     # Load phase
     # =========================================================================
-
     def _transition_to_load_phase(self, request: InFlightPrefetchRequest) -> None:
         """Compute load plan, reserve L1 buffers, and submit load tasks."""
         request.phase = PrefetchPhase.PLAN_AND_LOAD
@@ -486,13 +547,23 @@ class PrefetchController(StorageControllerInterface):
             # Nothing to load after trimming to prefix. Unlock all lookup locks
             # and complete with 0 hits.
             self._unlock_all_lookups(request)
+            self._update_lookup_results(request.request_id, 0)
+            self._event_bus.publish(
+                Event(
+                    event_type=EventType.L2_PREFETCH_LOOKUP_COMPLETED,
+                    metadata={
+                        "request_id": request.request_id,
+                        "prefix_hit_count": 0,
+                    },
+                )
+            )
             self._complete_request(request.request_id, 0)
             return
 
         # Step 3: reserve L1 write buffers
         merged_bitmap = merge_bitmaps(trimmed_plan.values(), len(request.keys))
         keys_to_reserve = merged_bitmap.gather(request.keys)
-        l1_mgr = self.get_l1_manager()
+        l1_mgr = self._l1_manager
 
         write_results = l1_mgr.reserve_write(
             keys=keys_to_reserve,
@@ -536,6 +607,16 @@ class PrefetchController(StorageControllerInterface):
             if request.write_reserved_keys:
                 l1_mgr.finish_write(request.write_reserved_keys)
                 l1_mgr.delete(request.write_reserved_keys)
+            self._update_lookup_results(request.request_id, 0)
+            self._event_bus.publish(
+                Event(
+                    event_type=EventType.L2_PREFETCH_LOOKUP_COMPLETED,
+                    metadata={
+                        "request_id": request.request_id,
+                        "prefix_hit_count": 0,
+                    },
+                )
+            )
             self._complete_request(request.request_id, 0)
             return
 
@@ -550,12 +631,42 @@ class PrefetchController(StorageControllerInterface):
             )
             request.pending_load_tasks[adapter_idx] = task_id
 
+        ## Step 8: update the lookup result based on the final load plan
+        self._update_lookup_results(request.request_id, prefix_length)
+
+        self._event_bus.publish(
+            Event(
+                event_type=EventType.L2_PREFETCH_LOOKUP_COMPLETED,
+                metadata={
+                    "request_id": request.request_id,
+                    "prefix_hit_count": prefix_length,
+                },
+            )
+        )
+        self._event_bus.publish(
+            Event(
+                event_type=EventType.L2_PREFETCH_LOAD_SUBMITTED,
+                metadata={
+                    "request_id": request.request_id,
+                    "key_count": len(reserved_key_set),
+                    "adapter_count": len(trimmed_plan),
+                },
+            )
+        )
+
         logger.debug(
             "Prefetch request %d: submitted load tasks to %d adapters for %d keys",
             request.request_id,
             len(trimmed_plan),
             len(reserved_key_set),
         )
+
+    def _update_lookup_results(
+        self, request_id: PrefetchRequestId, hit_chunks: int
+    ) -> None:
+        """Update the completed lookups dict with the number of prefix hits."""
+        with self._lookup_results_lock:
+            self._completed_lookups[request_id] = hit_chunks
 
     def _process_load_completions(self, adapter_index: int) -> None:
         """Check all PLAN_AND_LOAD-phase requests for completed loads."""
@@ -612,7 +723,7 @@ class PrefetchController(StorageControllerInterface):
         # Phase 2 unlock: release L2 locks for all keys in the load plan
         self._unlock_all_plan_keys(request)
 
-        l1_mgr = self.get_l1_manager()
+        l1_mgr = self._l1_manager
 
         # Transition loaded keys: write-locked -> read-locked
         # Use extra_count so that all TP workers each get their own read lock.
@@ -625,6 +736,17 @@ class PrefetchController(StorageControllerInterface):
         if failed_keys:
             l1_mgr.finish_write(failed_keys)
             l1_mgr.delete(failed_keys)
+
+        self._event_bus.publish(
+            Event(
+                event_type=EventType.L2_PREFETCH_LOAD_COMPLETED,
+                metadata={
+                    "request_id": request.request_id,
+                    "loaded_count": len(loaded_keys),
+                    "failed_count": len(failed_keys),
+                },
+            )
+        )
 
         # Partial load failures can create gaps in the prefix.
         # Release read locks for loaded keys beyond the prefix.
@@ -671,7 +793,7 @@ class PrefetchController(StorageControllerInterface):
         self, request_id: PrefetchRequestId, prefix_hits: int
     ) -> None:
         """Store the result and remove from in-flight tracking."""
-        with self._results_lock:
+        with self._prefetch_results_lock:
             self._completed_results[request_id] = prefix_hits
         removed = self._in_flight_requests.pop(request_id, None)
         if removed is not None:
@@ -688,7 +810,7 @@ class PrefetchController(StorageControllerInterface):
 
     def _cleanup_in_flight_requests(self) -> None:
         """Release resources for any in-flight requests during shutdown."""
-        l1_mgr = self.get_l1_manager()
+        l1_mgr = self._l1_manager
         for request in self._in_flight_requests.values():
             if request.phase == PrefetchPhase.PLAN_AND_LOAD:
                 if request.write_reserved_keys:

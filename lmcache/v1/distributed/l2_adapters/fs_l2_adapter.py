@@ -235,6 +235,7 @@ class FSL2Adapter(L2AdapterInterface):
     """
 
     def __init__(self, config: FSL2AdapterConfig):
+        super().__init__()
         self._config = config
         base = config.base_path
         self._base_path = Path(base)
@@ -388,6 +389,18 @@ class FSL2Adapter(L2AdapterInterface):
         }
 
     # ------------------------------------------------------------------
+    # Eviction Interface
+    # ------------------------------------------------------------------
+
+    def delete(self, keys: list[ObjectKey]) -> None:
+        # Not implemented for the filesystem adapter.
+        pass
+
+    def get_usage(self) -> tuple[float, float]:
+        # Not implemented for the filesystem adapter.
+        return (-1.0, -1.0)
+
+    # ------------------------------------------------------------------
     # Cleanup
     # ------------------------------------------------------------------
 
@@ -412,6 +425,7 @@ class FSL2Adapter(L2AdapterInterface):
             self._loop.call_soon_threadsafe(self._loop.stop)
 
         self._loop_thread.join()
+        self._loop.close()
 
         os.close(self._store_efd)
         os.close(self._lookup_efd)
