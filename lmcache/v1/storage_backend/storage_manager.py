@@ -477,13 +477,12 @@ class StorageManager:
                     backend_name not in ["LocalCPUBackend", "PDBackend", "MaruBackend"]
                     and "LocalCPUBackend" in self.storage_backends
                 ):
+
                     def _write_back(fut, k=key):
                         try:
                             memory_obj = fut.result()
                             if memory_obj is not None:
-                                local_cpu = self.storage_backends[
-                                    "LocalCPUBackend"
-                                ]
+                                local_cpu = self.storage_backends["LocalCPUBackend"]
                                 assert isinstance(local_cpu, LocalCPUBackend)
                                 local_cpu.submit_put_task(k, memory_obj)
                         except Exception as e:
