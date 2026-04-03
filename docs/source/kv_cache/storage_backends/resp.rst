@@ -191,18 +191,19 @@ appearing in logged configuration at startup.
    * - Variable
      - Description
    * - ``LMCACHE_RESP_USERNAME``
-     - Redis ACL username. Overrides ``username`` in config/JSON.
+     - Redis ACL username. Used as default when ``username`` is not set in config/JSON.
    * - ``LMCACHE_RESP_PASSWORD``
-     - Redis AUTH password. Overrides ``password`` in config/JSON.
+     - Redis AUTH password. Used as default when ``password`` is not set in config/JSON.
    * - ``LMCACHE_RESP_HOST``
-     - Redis hostname or IP. Overrides ``host`` in config/JSON/URL.
+     - Redis hostname or IP. Used as default when ``host`` is not set in config/JSON/URL.
    * - ``LMCACHE_RESP_PORT``
-     - Redis port. Overrides ``port`` in config/JSON/URL.
+     - Redis port. Used as default when ``port`` is not set in config/JSON/URL.
 
-Environment variables take precedence over values specified in config files
-(non-MP) or ``--l2-adapter`` JSON (MP). They are read at adapter creation time
-inside the adapter itself, so they are **never stored in the config object** and
-**never printed in startup logs**.
+Config files (non-MP) and ``--l2-adapter`` JSON (MP) take precedence over
+environment variables. Environment variables serve as defaults — they are used
+when the corresponding config value is empty or unset. They are read at adapter
+creation time inside the adapter itself, so they are **never stored in the
+config object** and **never printed in startup logs**.
 
 **Example — MP mode with env vars:**
 
@@ -338,11 +339,11 @@ The ``--l2-adapter`` JSON accepts these fields:
    * - ``username``
      - str
      - ``""``
-     - Redis ACL username (leave empty for no auth). Overridden by ``LMCACHE_RESP_USERNAME`` env var.
+     - Redis ACL username (leave empty for no auth). Falls back to ``LMCACHE_RESP_USERNAME`` env var if empty.
    * - ``password``
      - str
      - ``""``
-     - Redis AUTH password (leave empty for no auth). Overridden by ``LMCACHE_RESP_PASSWORD`` env var.
+     - Redis AUTH password (leave empty for no auth). Falls back to ``LMCACHE_RESP_PASSWORD`` env var if empty.
    * - ``max_capacity_gb``
      - float
      - 0

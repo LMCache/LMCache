@@ -110,12 +110,13 @@ class RESPL2AdapterConfig(L2AdapterConfigBase):
             "- max_capacity_gb (float): max L2 capacity "
             "in GB for usage tracking / eviction "
             "(default 0 = disabled)\n\n"
-            "Environment variable overrides (read at "
-            "adapter creation, not stored in config):\n"
-            "- LMCACHE_RESP_USERNAME: overrides username\n"
-            "- LMCACHE_RESP_PASSWORD: overrides password\n"
-            "- LMCACHE_RESP_HOST: overrides host\n"
-            "- LMCACHE_RESP_PORT: overrides port"
+            "Environment variable defaults (used when "
+            "config value is empty, read at adapter "
+            "creation, not stored in config):\n"
+            "- LMCACHE_RESP_USERNAME: default username\n"
+            "- LMCACHE_RESP_PASSWORD: default password\n"
+            "- LMCACHE_RESP_HOST: default host\n"
+            "- LMCACHE_RESP_PORT: default port"
         )
 
 
@@ -144,14 +145,13 @@ def _create_resp_l2_adapter(
 
     assert isinstance(config, RESPL2AdapterConfig)
 
-    # Environment variables override config values so that
-    # sensitive credentials are never stored in (or logged
-    # from) the config object.
-    host = os.environ.get("LMCACHE_RESP_HOST", "") or config.host
-    port_str = os.environ.get("LMCACHE_RESP_PORT", "")
-    port = int(port_str) if port_str else config.port
-    username = os.environ.get("LMCACHE_RESP_USERNAME", "") or config.username
-    password = os.environ.get("LMCACHE_RESP_PASSWORD", "") or config.password
+    # Config/CLI args take precedence over environment variables,
+    # which serve as defaults. This keeps secrets out of logged
+    # config while allowing explicit CLI overrides.
+    host = config.host or os.environ.get("LMCACHE_RESP_HOST", "")
+    port = config.port if config.port else int(os.environ.get("LMCACHE_RESP_PORT", "0"))
+    username = config.username or os.environ.get("LMCACHE_RESP_USERNAME", "")
+    password = config.password or os.environ.get("LMCACHE_RESP_PASSWORD", "")
 
     native_client = LMCacheRedisClient(
         host,

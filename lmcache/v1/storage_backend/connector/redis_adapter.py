@@ -43,22 +43,23 @@ class RESPConnectorAdapter(ConnectorAdapter):
         # Get number of threads for RESP connection pool (default is 8)
         self.resp_num_threads = int(extra_config.get("resp_num_threads", 8))
 
-        # Get authentication credentials — environment variables
-        # take precedence over config so that secrets are never
-        # stored in (or logged from) the config object.
-        username = os.environ.get("LMCACHE_RESP_USERNAME", "") or str(
-            extra_config.get("username", "")
-        )
-        password = os.environ.get("LMCACHE_RESP_PASSWORD", "") or str(
-            extra_config.get("password", "")
-        )
+        # Config/CLI args take precedence over environment variables,
+        # which serve as defaults. This keeps secrets out of logged
+        # config while allowing explicit overrides.
+        cfg_username = str(extra_config.get("username", ""))
+        cfg_password = str(extra_config.get("password", ""))
+        username = cfg_username or os.environ.get("LMCACHE_RESP_USERNAME", "")
+        password = cfg_password or os.environ.get("LMCACHE_RESP_PASSWORD", "")
 
         parsed_url = parse_remote_url(context.url)
 
-        # Allow env vars to override host/port from URL
-        host = os.environ.get("LMCACHE_RESP_HOST", "") or parsed_url.host
-        port_str = os.environ.get("LMCACHE_RESP_PORT", "")
-        port = int(port_str) if port_str else parsed_url.port
+        # Config/URL values take precedence; env vars are fallback
+        host = parsed_url.host or os.environ.get("LMCACHE_RESP_HOST", "")
+        port = (
+            parsed_url.port
+            if parsed_url.port
+            else int(os.environ.get("LMCACHE_RESP_PORT", "0"))
+        )
 
         logger.info("Creating RESP connector for %s:%d", host, port)
         return RESPConnector(
