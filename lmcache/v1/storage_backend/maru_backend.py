@@ -352,8 +352,9 @@ class MaruBackend(AllocatorBackendInterface):
             handle = allocator.create_store_handle(memory_obj)
             key_str = key.to_string()
 
-            await asyncio.to_thread(self._handler.store, key_str, handle)
-            success = True
+            success = await asyncio.to_thread(
+                self._handler.store, key_str, handle
+            )
 
             logger.debug(
                 "[Maru] store key=%s rid=%d pid=%d",
@@ -538,7 +539,7 @@ class MaruBackend(AllocatorBackendInterface):
         Args:
             lookup_id: Unique request identifier.
             keys: Keys to check in prefix order.
-            pin: Whether to pin. Not supported; logged as debug.
+            pin: If True, atomically check and pin via batch_pin RPC.
 
         Returns:
             Number of prefix-contiguous keys that exist.
