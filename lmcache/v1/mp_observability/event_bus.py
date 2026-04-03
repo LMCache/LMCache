@@ -18,6 +18,17 @@ import time
 from lmcache.logging import init_logger
 from lmcache.v1.mp_observability.event import Event, EventType
 
+try:
+    # Third Party
+    import torch  # noqa: F401 — must be imported before lmcache.c_ops
+
+    # First Party
+    import lmcache.c_ops as _lmc_ops
+
+    _has_native_recorder = hasattr(_lmc_ops, "record_event_on_stream")
+except ImportError:
+    _has_native_recorder = False
+
 logger = init_logger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -120,14 +131,33 @@ class EventBus:
             self._registered_subscribers.append(subscriber)
 
     def publish_on_stream(self, stream: Any, event: Event) -> None:
-        """Schedule :meth:`publish` as a CUDA host function on *stream*.
+        """Schedule event recording as a CUDA host function on *stream*.
+
+        Uses a C++ callback via ``cudaLaunchHostFunc`` so the callback
+        never touches the GIL, avoiding the CUDA-driver/GIL deadlock.
 
         No-op when the EventBus is disabled, avoiding the overhead of
         scheduling a host function on the CUDA stream entirely.
         """
         if not self._config.enabled:
             return
-        stream.launch_host_func(self.publish, event)
+        if _has_native_recorder:
+            str_metadata: dict[str, str] = {}
+            int_metadata: dict[str, int] = {}
+            for k, v in event.metadata.items():
+                if isinstance(v, int):
+                    int_metadata[k] = v
+                else:
+                    str_metadata[k] = str(v)
+            _lmc_ops.record_event_on_stream(
+                stream.ptr,
+                event.event_type.value,
+                event.session_id,
+                str_metadata,
+                int_metadata,
+            )
+        else:
+            stream.launch_host_func(self.publish, event)
 
     def publish(self, event: Event) -> None:
         """Submit an event (hot path — non-blocking).
@@ -207,6 +237,20 @@ class EventBus:
 
     def _drain_all(self) -> None:
         """Pop all queued events and dispatch to subscribers."""
+        # Drain events buffered on the C++ side (from CUDA host callbacks)
+        if _has_native_recorder:
+            for name, sid, ts, str_meta, int_meta in _lmc_ops.drain_recorded_events():
+                metadata: dict[str, Any] = dict(str_meta)
+                metadata.update(int_meta)
+                self._queue.append(
+                    Event(
+                        event_type=EventType(name),
+                        session_id=sid,
+                        timestamp=ts,
+                        metadata=metadata,
+                    )
+                )
+
         with self._lock:
             snapshot = dict(self._subscribers)
 
