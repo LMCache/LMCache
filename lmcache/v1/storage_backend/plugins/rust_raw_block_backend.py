@@ -712,10 +712,10 @@ class RustRawBlockBackend(StoragePluginInterface):
                 return []
             self._inflight_io_count += 1
 
-        raw_dev = self._rawdev()
         loaded: list[MemoryObj] = []
         touched: list[CacheEngineKey] = []
         try:
+            raw_dev = self._rawdev()
             for key, entry in items:
                 meta = entry.meta
                 assert meta.shape is not None and meta.dtype is not None
@@ -723,38 +723,43 @@ class RustRawBlockBackend(StoragePluginInterface):
                 memory_obj = self.local_cpu_backend.allocate(
                     meta.shape, meta.dtype, meta.fmt
                 )
-                assert memory_obj is not None
+                if memory_obj is None:
+                    logger.error(
+                        "Failed to allocate memory for key %s",
+                        self._dbg_key_short(key),
+                    )
+                    break
 
-                payload_len = int(meta.size)
-                total_len = (
-                    _round_up(payload_len, self.block_align)
-                    if self.use_odirect
-                    else payload_len
-                )
-                if logger.isEnabledFor(10):
-                    self._dbg_get_calls += 1
-                    self._dbg_get_bytes += payload_len
-                    if self._dbg_should_log(self._dbg_get_calls):
-                        logger.debug(
-                            "RustRawBlockBackend GET: %s offset=%d size=%d",
-                            self._dbg_key_short(key),
-                            int(entry.offset),
-                            payload_len,
-                        )
+                try:
+                    payload_len = int(meta.size)
+                    total_len = (
+                        _round_up(payload_len, self.block_align)
+                        if self.use_odirect
+                        else payload_len
+                    )
+                    if logger.isEnabledFor(10):
+                        self._dbg_get_calls += 1
+                        self._dbg_get_bytes += payload_len
+                        if self._dbg_should_log(self._dbg_get_calls):
+                            logger.debug(
+                                "RustRawBlockBackend GET: %s offset=%d size=%d",
+                                self._dbg_key_short(key),
+                                int(entry.offset),
+                                payload_len,
+                            )
 
-                buf = memory_obj.byte_array
-                try:
-                    buf = buf.cast("B")
-                except Exception:
-                    pass
-                direct_view = self._build_direct_odirect_view(
-                    memory_obj=memory_obj,
-                    payload_len=payload_len,
-                    total_len=total_len,
-                    buffer_len=len(buf),
-                    zero_tail=False,
-                )
-                try:
+                    buf = memory_obj.byte_array
+                    try:
+                        buf = buf.cast("B")
+                    except Exception:
+                        pass
+                    direct_view = self._build_direct_odirect_view(
+                        memory_obj=memory_obj,
+                        payload_len=payload_len,
+                        total_len=total_len,
+                        buffer_len=len(buf),
+                        zero_tail=False,
+                    )
                     if direct_view is not None:
                         raw_dev.pread_into(
                             entry.offset + self.header_bytes,
@@ -769,6 +774,8 @@ class RustRawBlockBackend(StoragePluginInterface):
                             payload_len,
                             total_len,
                         )
+
+                    memory_obj.metadata.cached_positions = meta.cached_positions
                 except Exception as e:
                     memory_obj.ref_count_down()
                     logger.error(
@@ -776,7 +783,6 @@ class RustRawBlockBackend(StoragePluginInterface):
                     )
                     break
 
-                memory_obj.metadata.cached_positions = meta.cached_positions
                 loaded.append(memory_obj)
                 touched.append(key)
         finally:
