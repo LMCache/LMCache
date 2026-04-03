@@ -1,9 +1,9 @@
 # `lmcache query` CLI Command Design
 
-**Status:** Proposal  |  **Date:** 2026-03-20
+**Status:** Implemented (Phase 1a)  |  **Date:** 2026-04-02
 
 ## Goal
-Provide a formal single-shot query interface for both the serving engine and KV cache worker, with metrics output. besides normal request query to serving engine, offers the feature to query the detailed KV cache info by the request prompt.
+Provide a formal single-shot query interface for both the serving engine and KV cache worker, with metrics output. Besides normal request query to serving engine, offers the feature to query the detailed KV cache info by the request prompt.
  
 
 ---
@@ -92,8 +92,11 @@ Throughput (tokens/s):                   1100.64
 |------|-------------|
 | `--url` | Engine HTTP endpoint (`http://host:port`) |
 | `--prompt` | Prompt text, supports `{documents}` templates |
-| `--timeout` | Request timeout in seconds (default: 30) |
+| `--model` | Model ID for the serving engine (auto-detected if omitted) |
+| `--max-tokens` | Maximum completion tokens (default: 128) |
 | `--documents name=path` | Register custom documents template |
+| `--completions` | Use `/v1/completions` instead of `/v1/chat/completions` |
+| `--timeout` | Request timeout in seconds (default: 30) |
 
 
 
@@ -156,7 +159,8 @@ Cache status:                       HIT (partial)
 Uses inference engine HTTP APIs (OpenAI-compatible or engine-native endpoint),
 then computes CLI-side metrics from the single response stream/non-stream result.
 
-No new dependencies required: use stdlib `urllib.request` and existing helpers.
+No new dependencies required beyond the bench subpackage helpers already in
+`lmcache/cli/commands/bench/`.
 
 ### `query kvcache`
 
@@ -168,14 +172,22 @@ per-instance HTTP server or the controller HTTP server.
 
 ## Implementation
 
+All query logic lives in a single file: **`lmcache/cli/commands/query.py`**.
+
 - **Single `QueryCommand`** (`BaseCommand` subclass) with second-level
-  subparsers (`engine`, `kvcache`) in `lmcache/cli/commands/query.py`.
-- **`query engine`:** `PromptBuilder` (`lmcache/cli/prompt.py`) expands `{name}`
-  placeholders from `--documents`; top-level metrics include model plus per-slot
-  token estimates (e.g. prompt documents, prompt query). `Request`
-  (`lmcache/cli/request.py`) streams an OpenAI-compatible `/v1/chat/completions`
-  or `/v1/completions` request; **Latency Metrics** repeats server usage (labeled
-  **Input tokens**, not a duplicate client-side total).
+  subparsers (`engine`, `kvcache`).
+- **Prompt expansion** is handled by `PromptBuilder` and the module-level helpers
+  (`resolve_documents`, `_token_weights`, `_unique_placeholders`, etc.) defined
+  directly in `query.py`. There are no separate `prompt.py` or `request.py`
+  modules — everything is self-contained.
+- **`query engine`:** `PromptBuilder` expands `{name}` placeholders from
+  `--documents`; top-level metrics include model plus per-slot token estimates
+  (e.g. prompt documents, prompt query). `RequestSender`
+  (`lmcache/cli/commands/bench/engine_bench/request_sender.py`) streams an
+  OpenAI-compatible `/v1/chat/completions` or `/v1/completions` request. If the
+  chat endpoint returns a missing-chat-template error, the command automatically
+  retries with `/v1/completions`. **Latency Metrics** uses server-reported usage
+  (labeled **Input tokens**).
 - **`query kvcache`:** stub; no handler yet.
 - **Errors:** `query_engine` catches `RuntimeError` / `ValueError`, prints the
   message to stderr, exits `1`; unknown `query_target` prints to stderr and exits
@@ -185,9 +197,8 @@ per-instance HTTP server or the controller HTTP server.
 
 ## Phasing
 
-| Phase | Work |
-|-------|------|
-| **1a** | `query engine` with prompt, max-tokens, TTFT/TPOT/throughput metrics |
-| **1b** | `query kvcache` lookup mode (prompt tokenization + cache coverage) |
-| **future** | richer query diagnostics (per-chunk detail) |
-
+| Phase | Work | Status |
+|-------|------|--------|
+| **1a** | `query engine` with prompt, max-tokens, TTFT/TPOT/throughput metrics | Done |
+| **1b** | `query kvcache` lookup mode (prompt tokenization + cache coverage) | Pending |
+| **future** | richer query diagnostics (per-chunk detail) | Pending |

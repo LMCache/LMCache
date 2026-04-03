@@ -109,7 +109,22 @@ class PromptBuilder:
 def resolve_documents(
     prompt_template: str, documents_args: list[str]
 ) -> tuple[dict[str, str], str]:
-    """Resolve ``--documents`` args into placeholder mapping and trailing text."""
+    """Resolve ``--documents`` args into placeholder mapping and trailing text.
+
+    Built-in placeholders (e.g. ``{lmcache}``) are automatically resolved from
+    ``lmcache/cli/documents/`` when not overridden by ``--documents``.
+
+    Args:
+        prompt_template: The raw prompt string, possibly containing ``{name}``
+            placeholders.
+        documents_args: List of ``"NAME=PATH"`` or bare ``"PATH"`` strings
+            from the ``--documents`` CLI flag.
+
+    Returns:
+        A ``(documents, appended_text)`` tuple where ``documents`` maps each
+        placeholder name to its file content, and ``appended_text`` is any
+        extra plain-file content to append after the expanded prompt.
+    """
     placeholders = _unique_placeholders(prompt_template)
     documents: dict[str, str] = {}
     plain_docs: list[str] = []
