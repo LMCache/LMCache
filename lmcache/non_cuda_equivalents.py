@@ -4,6 +4,7 @@
 # CUDA-specific operations.
 #
 # Standard
+from concurrent.futures import ThreadPoolExecutor
 from enum import Enum, IntEnum
 from multiprocessing import shared_memory
 from pathlib import Path
@@ -237,31 +238,6 @@ def _copy_bytes_with_tensor(dst: int, src: int, num_bytes: int) -> None:
     dst_tensor = torch.frombuffer(buffer_type.from_address(dst), dtype=torch.uint8)
     src_tensor = torch.frombuffer(buffer_type.from_address(src), dtype=torch.uint8)
     dst_tensor.copy_(src_tensor)
-
-
-class TransferDirection(Enum):
-    H2D = 0
-    D2H = 1
-
-
-class GPUKVFormat(IntEnum):
-    # used by: vLLM CROSS_LAYER mode
-    NB_NL_TWO_BS_NH_HS = 0
-
-    # used by: vLLM non-MLA flash attention
-    NL_X_TWO_NB_BS_NH_HS = 1
-
-    # used by: vLLM non-MLA flash infer
-    NL_X_NB_TWO_BS_NH_HS = 2
-
-    # used by: vLLM MLA
-    NL_X_NB_BS_HS = 3
-
-    # used by: SGLang MHA (flash attention and flash infer)
-    TWO_X_NL_X_NBBS_NH_HS = 4
-
-    # used by: SGLang MLA
-    NL_X_NBBS_ONE_HS = 5
 
 
 class TransferDirection(Enum):
