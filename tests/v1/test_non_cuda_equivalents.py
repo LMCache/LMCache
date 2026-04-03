@@ -115,6 +115,12 @@ def scenario_get_gpu_pci_bus_id(ops: Any, device: str) -> dict[str, torch.Tensor
 
     is_valid = isinstance(res, str) and len(res) > 0
 
+    if torch.cuda.is_available() is False:
+        # for non cuda device, not expecting a valid return
+        # but crash should not happen
+        # and we mock a valid return here
+        is_valid = True
+
     # 1 = PASS (call succeeded without crash)
     # 0 = FAIL
     return {

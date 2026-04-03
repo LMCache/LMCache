@@ -7,11 +7,9 @@
 from concurrent.futures import ThreadPoolExecutor
 from enum import Enum, IntEnum
 from multiprocessing import shared_memory
-from pathlib import Path
 from typing import Optional, Tuple
 import ctypes
 import ctypes.util
-import subprocess
 
 # Third Party
 from numba import njit
@@ -1364,112 +1362,27 @@ def rotary_embedding_k_fused(
         key[..., 1:rot_dim:2] = y_out
 
 
-def get_gpu_pci_bus_id(device_id: int = 0, keyword: str = "NVIDIA") -> str | None:
+def get_gpu_pci_bus_id(device_id: int = 0) -> str | None:
     """
-    Get the PCI bus ID of a GPU device on Linux in a stable order.
-
-    This is a best-effort fallback for non-CUDA systems. The default
-    keyword="NVIDIA" matches the CUDA C++ implementation's behavior.
-    On non-NVIDIA hardware (e.g., Ascend, Habana/Gaudi, AMD), callers should
-    pass the appropriate vendor keyword (e.g., keyword="GPU"/"HPU"/"TPU"/etc).
-
-    When no matching device is found (common on non-GPU systems or when
-    the keyword doesn't match any PCI device), this function returns None.
-    Callers should treat None as "PCI bus ID unavailable" and fall back
-    to alternative identification or skip PCI-based logic.
+    Get the PCI bus ID via CUDA/ROCm runtime.
+    Other backends return None.
 
     Args:
-        device_id (int): Index of the GPU among matching devices.
-        keyword (str): Keyword to match in the PCI device description.
+        device_id (int): CUDA/ROCm device index.
 
     Returns:
-        str | None: PCI bus ID (e.g., "0000:29:00.0") or None if not found.
+        str | None: PCI bus ID (e.g., "0000:29:00.0") or None if unavailable.
     """
-    PCI_IDS_PATHS = ["/usr/share/misc/pci.ids", "/usr/share/hwdata/pci.ids"]
-
-    def parse_pci_ids(keyword: str) -> set[int]:
-        """
-        Parse pci.ids and return a set of device IDs (hex) that match the keyword.
-        """
-        ids = set()
-        for path in PCI_IDS_PATHS:
-            f = Path(path)
-            if not f.exists():
-                continue
-            with f.open("r", encoding="utf-8", errors="ignore") as fd:
-                for line in fd:
-                    line = line.strip()
-                    if not line or line.startswith("#") or line.startswith("\t"):
-                        continue
-                    if keyword.lower() in line.lower():
-                        parts = line.split()
-                        if len(parts) >= 2:
-                            try:
-                                ids.add(int(parts[0], 16))
-                            except ValueError:
-                                pass
-        return ids
-
-    # Try /sys/bus/pci/devices
-    pci_base = Path("/sys/bus/pci/devices")
-    matching_devices = []
-    target_device_ids = parse_pci_ids(keyword)
-
-    if pci_base.exists():
-        for dev in pci_base.iterdir():
-            try:
-                vendor_file = dev / "vendor"
-                if not vendor_file.exists():
-                    continue
-                vendor_id_hex = int(vendor_file.read_text().strip(), 16)
-                if not target_device_ids or vendor_id_hex in target_device_ids:
-                    addr = dev.name
-                    # Ensure full format "0000:BB:DD.F"
-                    parts = addr.split(":")
-                    if len(parts) == 2:  # short format
-                        addr = "0000:" + addr
-                    matching_devices.append(addr)
-            except Exception:
-                continue
-
-    # Sort by bus number to guarantee stable device order
-    def pci_key(addr: str) -> int:
-        """
-        Convert PCI address to a sortable integer by bus number.
-        Assumes full format "0000:BB:DD.F".
-        """
-        try:
-            # addr = "0000:29:00.0" -> bus = 29
-            bus = addr.split(":")[1]
-            return int(bus, 16)
-        except Exception:
-            return 0
-
-    matching_devices.sort(key=pci_key)
-
-    if device_id < len(matching_devices):
-        addr = matching_devices[device_id]
-        return addr.upper()
-
-    # Fallback to lspci
     try:
-        output = subprocess.check_output(["lspci"], text=True)
-        lines = [
-            line for line in output.splitlines() if keyword.lower() in line.lower()
-        ]
-        # Take first word (PCI address) and sort
-        lspci_addrs = [line.split()[0] for line in lines]
-
-        # Complete the domain to ensure full format "0000:BB:DD.F"
-        for i, addr in enumerate(lspci_addrs):
-            if len(addr.split(":")) == 2:
-                lspci_addrs[i] = "0000:" + addr
-
-        lspci_addrs.sort(key=pci_key)
-        if device_id < len(lspci_addrs):
-            addr = lspci_addrs[device_id]
-            return addr.upper()
-    except (FileNotFoundError, subprocess.CalledProcessError):
-        return None
+        if torch.cuda.is_available() and device_id < torch.cuda.device_count():
+            props = torch.cuda.get_device_properties(device_id)
+            # PCI function number is always 0 for GPUs
+            bus_id = (
+                f"{props.pci_domain_id:04x}:{props.pci_bus_id:02x}:"
+                f"{props.pci_device_id:02x}.0"
+            )
+            return bus_id.upper()
+    except Exception:
+        pass
 
     return None
