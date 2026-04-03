@@ -25,6 +25,9 @@ class:
 - 3. do_single_set()
 - 4. do_single_exists()
 
+optionally override do_single_delete() to support eviction (default returns
+false for all keys).
+
 see the RedisConnector (csrc/redis/) implementing the RESP2 protocol over TCP
 for an example
 */

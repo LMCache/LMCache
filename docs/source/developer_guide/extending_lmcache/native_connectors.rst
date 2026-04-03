@@ -50,7 +50,8 @@ Step 1: C++ Connector
 ---------------------
 
 Create your connector directory (e.g., ``csrc/storage_backends/mybackend/``) and
-inherit from ``ConnectorBase<YourConnectionType>``. You only need to override 4 methods.
+inherit from ``ConnectorBase<YourConnectionType>``. You need to override 4 required methods
+(and optionally ``do_single_delete`` to support eviction).
 
 **connector.h:**
 
@@ -529,7 +530,7 @@ Step-by-Step: Building an External Native Connector Plugin
 
 2. **Implement the C++ connector** inheriting from ``ConnectorBase<T>`` and override
    the 4 required methods (``create_connection``, ``do_single_get``, ``do_single_set``,
-   ``do_single_exists``).
+   ``do_single_exists``) and optionally ``do_single_delete`` for eviction support.
 
 3. **Create pybind11 bindings** using the ``LMCACHE_BIND_CONNECTOR_METHODS`` macro:
 
