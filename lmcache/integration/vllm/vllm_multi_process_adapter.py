@@ -532,8 +532,8 @@ class LMCacheMPWorkerAdapter:
         self._health_event.set()
 
         # Heartbeat thread is created but NOT started yet.
-        # It will be lazily started on the first get_finished()
-        # call, by which time vLLM is fully ready (model loaded,
+        # It will be lazily started on the first store or retrieve
+        # request, by which time vLLM is fully ready (model loaded,
         # KV caches allocated, warmup & CUDA graph capture done).
         self._heartbeat_interval = heartbeat_interval
         self._heartbeat: HeartbeatThread | None = None
