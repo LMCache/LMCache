@@ -388,7 +388,7 @@ def test_rust_raw_block_backend_batched_get_handles_allocator_exhaustion(
 @pytest.mark.skipif(
     not _has_ext(), reason="lmcache_rust_raw_block_io extension not installed"
 )
-def test_rust_raw_block_backend_batched_get_releases_failed_allocation(
+def test_rust_raw_block_backend_batched_get_releases_allocation_on_read_error(
     memory_allocator, loop_in_thread
 ):
     with tempfile.TemporaryDirectory() as td:
@@ -459,7 +459,8 @@ def test_rust_raw_block_backend_batched_get_releases_failed_allocation(
             raw_dev.pread_into.side_effect = OSError("read failed")
             with patch.object(local_cpu, "allocate", return_value=leaked_obj):
                 with patch.object(backend, "_rawdev", return_value=raw_dev):
-                    assert backend.get_blocking(key) is None
+                    with pytest.raises(OSError, match="read failed"):
+                        backend.get_blocking(key)
 
             assert leaked_obj.get_ref_count() == 0
             assert backend._inflight_io_count == 0
@@ -954,6 +955,69 @@ def test_rust_raw_block_backend_tp4_initialization(memory_allocator, loop_in_thr
                 backends.append(be)
                 assert be.device_path == device_paths[i]
             assert len({b.device_path for b in backends}) == TP
+        finally:
+            for backend in backends:
+                backend.close()
+
+
+@pytest.mark.skipif(
+    not _has_ext(), reason="lmcache_rust_raw_block_io extension not installed"
+)
+def test_rust_raw_block_backend_tp4_initialization_accepts_integer_yaml_keys(
+    memory_allocator, loop_in_thread
+):
+    """Accept integer per-TP YAML keys in addition to quoted string keys."""
+    TP = 4
+    with tempfile.TemporaryDirectory() as td:
+        device_paths = [os.path.join(td, f"device{i}.bin") for i in range(TP)]
+        for p in device_paths:
+            with open(p, "wb") as f:
+                f.truncate(256 * 1024 * 1024)
+
+        config = LMCacheEngineConfig.from_defaults(
+            chunk_size=256,
+            local_cpu=True,
+            max_local_cpu_size=0.1,
+            lmcache_instance_id="test_rust_raw_block_backend_tp4_init_int_keys",
+        )
+        config.storage_plugins = []
+        config.extra_config = {
+            "rust_raw_block.per_tp_device_paths": {
+                i: device_paths[i] for i in range(TP)
+            },
+            "rust_raw_block.block_align": 4096,
+            "rust_raw_block.header_bytes": 4096,
+            "rust_raw_block.meta_total_bytes": 4 * 1024 * 1024,
+            "rust_raw_block.meta_enable_periodic": False,
+        }
+
+        backends = []
+        try:
+            for i in range(TP):
+                metadata = LMCacheMetadata(
+                    model_name="test-model",
+                    world_size=TP,
+                    local_world_size=TP,
+                    worker_id=i,
+                    local_worker_id=i,
+                    kv_dtype=torch.bfloat16,
+                    kv_shape=(32, 2, 256, 32, 128),
+                )
+                local_cpu = LocalCPUBackend(
+                    config=config,
+                    metadata=metadata,
+                    dst_device="cpu",
+                    memory_allocator=memory_allocator,
+                )
+                be = RustRawBlockBackend(
+                    config=config,
+                    metadata=metadata,
+                    local_cpu_backend=local_cpu,
+                    loop=loop_in_thread,
+                    dst_device="cpu",
+                )
+                backends.append(be)
+                assert be.device_path == device_paths[i]
         finally:
             for backend in backends:
                 backend.close()

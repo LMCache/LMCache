@@ -49,6 +49,10 @@ def _validate_per_tp_device_paths(per_tp_devices: Any) -> None:
         )
 
 
+def _get_per_tp_device_path(per_tp_devices: dict[Any, Any], tp_rank: int) -> Any:
+    return per_tp_devices.get(str(tp_rank), per_tp_devices.get(tp_rank))
+
+
 @dataclass
 class _Entry:
     """In-memory index entry for a stored chunk."""
@@ -134,7 +138,7 @@ class RustRawBlockBackend(StoragePluginInterface):
             _validate_per_tp_device_paths(per_tp_devices)
 
             tp_rank_str = str(tp_rank)
-            self.device_path = per_tp_devices.get(tp_rank_str)
+            self.device_path = _get_per_tp_device_path(per_tp_devices, tp_rank)
             if not self.device_path:
                 raise ValueError(
                     f"No device path configured for TP rank {tp_rank_str}. "
@@ -781,7 +785,7 @@ class RustRawBlockBackend(StoragePluginInterface):
                     logger.error(
                         "Read failed for key %s: %s", self._dbg_key_short(key), e
                     )
-                    break
+                    raise
 
                 loaded.append(memory_obj)
                 touched.append(key)
@@ -802,15 +806,14 @@ class RustRawBlockBackend(StoragePluginInterface):
         keys: List[CacheEngineKey],
     ) -> List[Optional[MemoryObj]]:
         """
-        Get a batch of cache entries until the first miss or read failure.
+        Get a batch of cache entries until the first miss.
 
         :param List[CacheEngineKey] keys: Ordered keys to retrieve.
 
         :return: A list aligned to ``keys`` where the successful prefix contains
             loaded memory objects and the remaining suffix is ``None``.
 
-        :raises Exception: Propagates raw-device initialization failures before
-            any batched reads begin.
+        :raises Exception: Propagates raw-device initialization or read failures.
         """
         if not keys:
             return []
@@ -842,8 +845,7 @@ class RustRawBlockBackend(StoragePluginInterface):
         transfer_spec: Any = None,
     ) -> list[MemoryObj]:
         """
-        Asynchronously get a batch of cache entries until the first miss or read
-        failure.
+        Asynchronously get a batch of cache entries until the first miss.
 
         :param str lookup_id: Lookup identifier used by the storage manager.
         :param list[CacheEngineKey] keys: Ordered keys to retrieve.
@@ -851,8 +853,7 @@ class RustRawBlockBackend(StoragePluginInterface):
 
         :return: The successfully loaded prefix of ``keys`` in input order.
 
-        :raises Exception: Propagates raw-device initialization failures before
-            the background batched read starts.
+        :raises Exception: Propagates raw-device initialization or read failures.
         """
         del lookup_id, transfer_spec
         return await asyncio.to_thread(self._batched_get_prefix, keys)
