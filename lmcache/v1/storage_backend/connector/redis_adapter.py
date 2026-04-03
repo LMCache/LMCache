@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from typing import List, Tuple
+import os
 
 # First Party
 from lmcache.logging import init_logger
@@ -42,15 +43,27 @@ class RESPConnectorAdapter(ConnectorAdapter):
         # Get number of threads for RESP connection pool (default is 8)
         self.resp_num_threads = int(extra_config.get("resp_num_threads", 8))
 
-        # Get authentication credentials from extra_config
-        username = str(extra_config.get("username", ""))
-        password = str(extra_config.get("password", ""))
+        # Get authentication credentials — environment variables
+        # take precedence over config so that secrets are never
+        # stored in (or logged from) the config object.
+        username = os.environ.get("LMCACHE_RESP_USERNAME", "") or str(
+            extra_config.get("username", "")
+        )
+        password = os.environ.get("LMCACHE_RESP_PASSWORD", "") or str(
+            extra_config.get("password", "")
+        )
 
-        logger.info(f"Creating RESP connector for URL: {context.url}")
         parsed_url = parse_remote_url(context.url)
+
+        # Allow env vars to override host/port from URL
+        host = os.environ.get("LMCACHE_RESP_HOST", "") or parsed_url.host
+        port_str = os.environ.get("LMCACHE_RESP_PORT", "")
+        port = int(port_str) if port_str else parsed_url.port
+
+        logger.info("Creating RESP connector for %s:%d", host, port)
         return RESPConnector(
-            host=parsed_url.host,
-            port=parsed_url.port,
+            host=host,
+            port=port,
             loop=context.loop,
             local_cpu_backend=context.local_cpu_backend,
             num_threads=self.resp_num_threads,

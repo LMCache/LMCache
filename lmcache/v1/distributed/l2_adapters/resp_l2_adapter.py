@@ -11,6 +11,7 @@ from __future__ import annotations
 
 # Standard
 from typing import TYPE_CHECKING, Optional
+import os
 
 if TYPE_CHECKING:
     from lmcache.v1.distributed.internal_api import (
@@ -108,7 +109,13 @@ class RESPL2AdapterConfig(L2AdapterConfigBase):
             "(default empty)\n"
             "- max_capacity_gb (float): max L2 capacity "
             "in GB for usage tracking / eviction "
-            "(default 0 = disabled)"
+            "(default 0 = disabled)\n\n"
+            "Environment variable overrides (read at "
+            "adapter creation, not stored in config):\n"
+            "- LMCACHE_RESP_USERNAME: overrides username\n"
+            "- LMCACHE_RESP_PASSWORD: overrides password\n"
+            "- LMCACHE_RESP_HOST: overrides host\n"
+            "- LMCACHE_RESP_PORT: overrides port"
         )
 
 
@@ -136,17 +143,27 @@ def _create_resp_l2_adapter(
     )
 
     assert isinstance(config, RESPL2AdapterConfig)
+
+    # Environment variables override config values so that
+    # sensitive credentials are never stored in (or logged
+    # from) the config object.
+    host = os.environ.get("LMCACHE_RESP_HOST", "") or config.host
+    port_str = os.environ.get("LMCACHE_RESP_PORT", "")
+    port = int(port_str) if port_str else config.port
+    username = os.environ.get("LMCACHE_RESP_USERNAME", "") or config.username
+    password = os.environ.get("LMCACHE_RESP_PASSWORD", "") or config.password
+
     native_client = LMCacheRedisClient(
-        config.host,
-        config.port,
+        host,
+        port,
         config.num_workers,
-        config.username,
-        config.password,
+        username,
+        password,
     )
     logger.info(
         "Created RESP L2 adapter: %s:%d (workers=%d)",
-        config.host,
-        config.port,
+        host,
+        port,
         config.num_workers,
     )
     return NativeConnectorL2Adapter(
