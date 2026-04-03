@@ -223,6 +223,15 @@ def get_customized_decoder(type: Any) -> msgspec.msgpack.Decoder:
 
 
 @dataclass
+class BlockAllocationRecord:
+    """A single per-request GPU block allocation delta from vLLM."""
+
+    req_id: str
+    new_block_ids: list[int]
+    new_token_ids: list[int]
+
+
+@dataclass
 class CBMatchResult:
     """Result of a sub-sequence match from BlendTokenRangeMatcher.
 

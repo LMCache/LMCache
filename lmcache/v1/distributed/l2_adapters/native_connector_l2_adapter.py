@@ -77,8 +77,10 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
     _OP_STORE = "store"
     _OP_LOOKUP = "lookup"
     _OP_LOAD = "load"
+    _OP_DELETE = "delete"
 
-    def __init__(self, native_client):
+    def __init__(self, native_client, max_capacity_gb: float = 0):
+        super().__init__()
         self._client = native_client
         self._client_fd: int = int(native_client.event_fd())
 
@@ -104,6 +106,19 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
 
         # Client-side lock tracking (refcount per key)
         self._locked_keys: dict[ObjectKey, int] = defaultdict(int)
+
+        # Delete capability detection
+        self._has_delete = callable(getattr(native_client, "submit_batch_delete", None))
+
+        # Pending delete events for synchronous delete() calls
+        self._pending_delete_events: dict[L2TaskId, threading.Event] = {}
+
+        # Client-side size tracking for get_usage()
+        self._max_capacity_bytes = int(max_capacity_gb * (1024**3))
+        self._current_size_bytes: int = 0
+        self._key_sizes: dict[ObjectKey, int] = {}
+        # Pending store sizes: native future_id -> (keys, per_key_sizes)
+        self._pending_store_sizes: dict[int, tuple[list[ObjectKey], list[int]]] = {}
 
         # Task ID counter
         self._next_task_id: L2TaskId = 0
@@ -144,6 +159,7 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
     ) -> L2TaskId:
         key_strings = [_object_key_to_string(k) for k in keys]
         memviews = [_obj_to_memoryview(obj) for obj in objects]
+        per_key_sizes = [obj.get_size() for obj in objects]
 
         # Register pending op BEFORE submit to avoid race
         # with demux thread. The native submit is
@@ -157,6 +173,7 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
                 len(keys),
                 None,
             )
+            self._pending_store_sizes[future_id] = (list(keys), per_key_sizes)
 
         return task_id
 
@@ -223,7 +240,7 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
                 self._OP_LOAD,
                 task_id,
                 len(keys),
-                None,
+                list(keys),
             )
 
         return task_id
@@ -237,12 +254,57 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
     # ---------------------------------------------------------------
 
     def delete(self, keys: list[ObjectKey]) -> None:
-        # Not implemented for the native connector adapter.
-        pass
+        """Delete a batch of keys from the remote backend.
+
+        Submits a batch delete to the native connector and blocks
+        until the demux thread signals completion (up to 30s timeout).
+        Fires ``_notify_keys_deleted`` on success so eviction policy
+        tracking stays in sync.
+
+        No-op if the connector does not expose ``submit_batch_delete``
+        or if the key list is empty.
+        """
+        if not keys or not self._has_delete:
+            return
+
+        key_strings = [_object_key_to_string(k) for k in keys]
+        done_event = threading.Event()
+
+        with self._lock:
+            task_id = self._get_next_task_id()
+            future_id = int(self._client.submit_batch_delete(key_strings))
+            self._pending_ops[future_id] = (
+                self._OP_DELETE,
+                task_id,
+                len(keys),
+                list(keys),
+            )
+            self._pending_delete_events[task_id] = done_event
+
+        # Block until demux thread signals completion
+        if not done_event.wait(timeout=30.0):
+            with self._lock:
+                self._pending_delete_events.pop(task_id, None)
+                # Note: _pending_ops entry may already be consumed
+                # by the demux thread; pop is safe either way.
+                for fid, entry in list(self._pending_ops.items()):
+                    if entry[1] == task_id:
+                        self._pending_ops.pop(fid, None)
+                        break
+            logger.warning(
+                "delete() timed out after 30s for %d keys",
+                len(keys),
+            )
+            return
+
+        self._notify_keys_deleted(keys)
 
     def get_usage(self) -> tuple[float, float]:
-        # Not implemented for the native connector adapter.
-        return (-1.0, -1.0)
+        if self._max_capacity_bytes <= 0:
+            return (-1.0, -1.0)
+        with self._lock:
+            usage = self._current_size_bytes / self._max_capacity_bytes
+            return (usage, usage)
 
     # ---------------------------------------------------------------
     # Cleanup
@@ -291,6 +353,11 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
             if not completions:
                 continue
 
+            # Collect listener notifications to fire after
+            # releasing the lock.
+            keys_stored: list[ObjectKey] = []
+            keys_accessed: list[ObjectKey] = []
+
             with self._lock:
                 for (
                     future_id,
@@ -316,6 +383,15 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
 
                     if op_type == self._OP_STORE:
                         self._completed_stores[task_id] = ok
+                        # Update size tracking on success
+                        store_info = self._pending_store_sizes.pop(fid, None)
+                        if ok and store_info is not None:
+                            store_keys, sizes = store_info
+                            for key, size in zip(store_keys, sizes, strict=False):
+                                if key not in self._key_sizes:
+                                    self._key_sizes[key] = size
+                                    self._current_size_bytes += size
+                            keys_stored.extend(store_keys)
                         os.eventfd_write(self._store_efd, 1)
 
                     elif op_type == self._OP_LOOKUP:
@@ -331,14 +407,38 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
 
                     elif op_type == self._OP_LOAD:
                         bitmap = Bitmap(num_keys)
+                        loaded_keys: list[ObjectKey] = []
                         if result_bools is not None:
                             for i, loaded in enumerate(result_bools):
                                 if loaded:
                                     bitmap.set(i)
+                                    if lookup_keys is not None:
+                                        loaded_keys.append(lookup_keys[i])
                         elif ok:
                             # Fallback for connectors that
                             # do not report per-key results
                             for i in range(num_keys):
                                 bitmap.set(i)
+                            if lookup_keys is not None:
+                                loaded_keys.extend(lookup_keys)
+                        keys_accessed.extend(loaded_keys)
                         self._completed_loads[task_id] = bitmap
                         os.eventfd_write(self._load_efd, 1)
+
+                    elif op_type == self._OP_DELETE:
+                        # Decrement sizes for successfully deleted keys
+                        if result_bools is not None and lookup_keys is not None:
+                            for i, deleted in enumerate(result_bools):
+                                if deleted:
+                                    key = lookup_keys[i]
+                                    size = self._key_sizes.pop(key, 0)
+                                    self._current_size_bytes -= size
+                        evt = self._pending_delete_events.pop(task_id, None)
+                        if evt is not None:
+                            evt.set()
+
+            # Fire listener notifications outside the lock
+            if keys_stored:
+                self._notify_keys_stored(keys_stored)
+            if keys_accessed:
+                self._notify_keys_accessed(keys_accessed)
