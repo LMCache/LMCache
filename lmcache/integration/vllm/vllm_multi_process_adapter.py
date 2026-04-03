@@ -14,6 +14,7 @@ import zmq
 from lmcache.integration.request_telemetry.factory import RequestTelemetryFactory
 from lmcache.utils import _lmcache_nvtx_annotate, init_logger
 from lmcache.v1.multiprocess.custom_types import (
+    BlockAllocationRecord,
     CudaIPCWrapper,
     IPCCacheEngineKey,
     KVCache,
@@ -447,6 +448,28 @@ class LMCacheMPSchedulerAdapter:
             [request_id],
         )
 
+    def report_block_allocations(
+        self,
+        records: list[BlockAllocationRecord],
+    ) -> None:
+        """Report vLLM GPU block allocation deltas to LMCache server.
+
+        Fire-and-forget: does not wait for a response. If the server
+        is unhealthy the report is silently dropped.
+
+        Args:
+            records: List of BlockAllocationRecord with per-request
+                block and token allocation deltas.
+        """
+        if not self.is_healthy or not records:
+            return
+
+        send_lmcache_request(
+            self.mq_client,
+            RequestType.REPORT_BLOCK_ALLOCATION,
+            [records],
+        )
+
     # Helper functions
     def _create_key(
         self,
@@ -505,6 +528,9 @@ class LMCacheMPWorkerAdapter:
         # The finished request ids that are passed via vLLM and also
         # have corresponding store requests submitted to LMCache before
         self.previously_finished: set[str] = set()
+        # Request IDs already returned as finished_sending to the scheduler.
+        # Prevents re-reporting the same ID after drain clears tracking sets.
+        self._returned_finished: set[str] = set()
 
         self.model_name = model_name
         self.world_size = world_size
@@ -561,9 +587,22 @@ class LMCacheMPWorkerAdapter:
             kv_caches: A dict of kv caches to register. The keys are the
                 layer names and the values are the corresponding tensors.
         """
+        # First Party
+        from lmcache.integration.vllm.utils import vllm_layout_hints
+        from lmcache.v1.gpu_connector.utils import (
+            ensure_contiguous_kv_caches,
+        )
+
         # Register kv cache and send the request
-        self.kv_caches = kv_caches
         logger.info("Registering kv caches")
+
+        layout_hints = vllm_layout_hints()
+        kv_caches = ensure_contiguous_kv_caches(
+            kv_caches, kv_layout=layout_hints.get("kv_layout")
+        )
+
+        self.kv_caches = kv_caches
+
         future = send_lmcache_request(
             self.mq_client,
             RequestType.REGISTER_KV_CACHE,
@@ -572,6 +611,7 @@ class LMCacheMPWorkerAdapter:
                 wrap_kv_caches(kv_caches),
                 self.model_name,
                 self.world_size,
+                layout_hints,
             ],
         )
         try:
@@ -707,11 +747,14 @@ class LMCacheMPWorkerAdapter:
         self.finished_stores.update(finished_req_ids_from_lmcache)
         ret_stores = set()
         for req_id in finished_req_ids_from_engine:
+            if req_id in self._returned_finished:
+                continue
             if req_id in self.finished_stores or req_id in self.store_futures:
                 self.previously_finished.add(req_id)
             else:
                 ret_stores.add(req_id)
         ret_stores.update(self._update_and_get_finished_store())
+        self._returned_finished.update(ret_stores)
         return ret_stores
 
     @_lmcache_nvtx_annotate
@@ -754,6 +797,12 @@ class LMCacheMPWorkerAdapter:
             ret_stores = self._process_finished_stores(
                 finished_stores, finished_req_ids_from_engine
             )
+            # A request may have a pending retrieve AND appear in
+            # finished_req_ids_from_engine (it ran without loading KV after
+            # the server died).  The scheduler processes finished_recving
+            # first and deletes the request, so we must not also report it
+            # in finished_sending.
+            ret_stores -= finished_retrieves
             return ret_stores, finished_retrieves
 
         finished_stores = set()

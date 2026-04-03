@@ -18,6 +18,7 @@ if TYPE_CHECKING:
     )
 
 # First Party
+from lmcache.logging import init_logger
 from lmcache.native_storage_ops import Bitmap
 from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface, L2TaskId
@@ -29,6 +30,8 @@ from lmcache.v1.distributed.l2_adapters.factory import (
     register_l2_adapter_factory,
 )
 from lmcache.v1.memory_management import MemoryObj, TensorMemoryObj
+
+logger = init_logger(__name__)
 
 # Helper function
 
@@ -106,6 +109,7 @@ class MockL2Adapter(L2AdapterInterface):
     """
 
     def __init__(self, config: MockL2AdapterConfig):
+        super().__init__()
         self._config = config
         self._max_capacity_bytes = int(config.max_size_gb * (1024**3))
         self._bandwidth_byte_ps = int(config.mock_bandwidth_gb * (1024**3))
@@ -114,9 +118,7 @@ class MockL2Adapter(L2AdapterInterface):
         self._lookup_efd = os.eventfd(0, os.EFD_NONBLOCK | os.EFD_CLOEXEC)
         self._load_efd = os.eventfd(0, os.EFD_NONBLOCK | os.EFD_CLOEXEC)
 
-        # FIFO queue for objects
         self._memory_objects: dict[ObjectKey, MemoryObj] = {}
-        self._key_queue: list[ObjectKey] = []
         self._locked_keys: dict[ObjectKey, int] = defaultdict(int)
         self._current_size_bytes: int = 0
 
@@ -264,6 +266,7 @@ class MockL2Adapter(L2AdapterInterface):
             self._loop.call_soon_threadsafe(self._loop.stop)
 
         self._loop_thread.join()
+        self._loop.close()
 
         os.close(self._store_efd)
         os.close(self._lookup_efd)
@@ -339,32 +342,30 @@ class MockL2Adapter(L2AdapterInterface):
         self._next_task_id += 1
         return task_id
 
-    def _evict_if_needed(self, required_bytes: int) -> None:
-        """
-        Evict objects from the cache using FIFO policy until there is enough
-        space for the required bytes.
-        """
-        keys_to_check = len(self._key_queue)
-        while (
-            self._current_size_bytes + required_bytes > self._max_capacity_bytes
-            and keys_to_check > 0
-        ):
-            keys_to_check -= 1
-            key_to_evict = self._key_queue.pop(0)
+    #####################
+    # Eviction Interface
+    #####################
 
-            if self._locked_keys.get(key_to_evict, 0) > 0:
-                # If the key is locked, skip eviction and put it back
-                self._key_queue.append(key_to_evict)
-                continue
+    def delete(self, keys: list[ObjectKey]) -> None:
+        """Delete a batch of objects from the mock adapter."""
+        deleted_keys: list[ObjectKey] = []
+        with self._lock:
+            for key in keys:
+                if key not in self._memory_objects:
+                    continue
+                obj = self._memory_objects.pop(key)
+                self._current_size_bytes -= obj.get_size()
+                deleted_keys.append(key)
+        if deleted_keys:
+            self._notify_keys_deleted(deleted_keys)
 
-            if key_to_evict in self._memory_objects:
-                evicted_obj = self._memory_objects.pop(key_to_evict)
-                self._current_size_bytes -= evicted_obj.get_size()
-
-        if self._current_size_bytes + required_bytes > self._max_capacity_bytes:
-            raise MemoryError(
-                "Not enough space to store the new object even after eviction."
-            )
+    def get_usage(self) -> tuple[float, float]:
+        """Return (current_usage, usage_after_ongoing_eviction) in [0, 1]."""
+        with self._lock:
+            if self._max_capacity_bytes == 0:
+                return (0.0, 0.0)
+            usage = self._current_size_bytes / self._max_capacity_bytes
+            return (usage, usage)
 
     def _signal_store_event(self) -> None:
         """Signal the store event fd to notify completion."""
@@ -384,6 +385,7 @@ class MockL2Adapter(L2AdapterInterface):
         success = True
         start = time.perf_counter()
 
+        stored_keys: list[ObjectKey] = []
         try:
             for key, obj in zip(keys, objects, strict=False):
                 obj_size = obj.get_size()
@@ -396,15 +398,24 @@ class MockL2Adapter(L2AdapterInterface):
                 if key in self._memory_objects:
                     continue
 
-                # Evict old objects if needed
-                self._evict_if_needed(obj_size)
+                # Skip if there is not enough capacity
+                if self._current_size_bytes + obj_size > self._max_capacity_bytes:
+                    logger.warning(
+                        "MockL2Adapter: not enough capacity to store key %s "
+                        "(used=%d, needed=%d, max=%d); skipping.",
+                        key,
+                        self._current_size_bytes,
+                        obj_size,
+                        self._max_capacity_bytes,
+                    )
+                    continue
 
                 # Store the object
                 new_obj = clone_tensor_memory_obj(obj)
                 self._memory_objects[key] = new_obj
-                self._key_queue.append(key)
                 self._current_size_bytes += obj_size
                 total_bytes += obj_size
+                stored_keys.append(key)
         except Exception:
             success = False
 
@@ -421,6 +432,8 @@ class MockL2Adapter(L2AdapterInterface):
         with self._lock:
             self._completed_store_tasks[task_id] = success
 
+        if stored_keys:
+            self._notify_keys_stored(stored_keys)
         self._signal_store_event()
 
     def _signal_lookup_event(self) -> None:
@@ -456,6 +469,7 @@ class MockL2Adapter(L2AdapterInterface):
         """
         bitmap = Bitmap(len(keys))
         total_bytes = 0
+        accessed_keys: list[ObjectKey] = []
         start = time.perf_counter()
 
         for i, key in enumerate(keys):
@@ -470,6 +484,7 @@ class MockL2Adapter(L2AdapterInterface):
             dst_tensor.copy_(src_tensor)
             bitmap.set(i)
             total_bytes += obj.get_size()
+            accessed_keys.append(key)
 
         end = time.perf_counter()
         delay_seconds = (
@@ -479,6 +494,8 @@ class MockL2Adapter(L2AdapterInterface):
         delay_seconds = max(delay_seconds, 0)  # Ensure non-negative delay
 
         await asyncio.sleep(delay_seconds)
+        if accessed_keys:
+            self._notify_keys_accessed(accessed_keys)
         with self._lock:
             self._completed_load_tasks[task_id] = bitmap
         self._signal_load_event()

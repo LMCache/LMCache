@@ -334,3 +334,60 @@ class TestGlobalSingleton:
         bus = init_event_bus()
         assert bus._config.enabled is True
         assert bus._config.max_queue_size == 10_000
+
+
+# ---------------------------------------------------------------------------
+# Block allocation event
+# ---------------------------------------------------------------------------
+
+
+class TestBlockAllocationEvent:
+    def test_publish_block_allocation_event(self, bus):
+        """Verify MP_VLLM_BLOCK_ALLOCATION events are delivered to subscribers."""
+        sub = _RecordingSubscriber(event_types=[EventType.MP_VLLM_BLOCK_ALLOCATION])
+        bus.register_subscriber(sub)
+        bus.start()
+
+        # First Party
+        from lmcache.v1.multiprocess.custom_types import BlockAllocationRecord
+
+        records = [
+            BlockAllocationRecord(
+                req_id="req-1",
+                new_block_ids=[0, 1, 2],
+                new_token_ids=[10, 20, 30],
+            ),
+        ]
+        bus.publish(
+            _make_event(
+                event_type=EventType.MP_VLLM_BLOCK_ALLOCATION,
+                session_id="",
+                records=records,
+            )
+        )
+        time.sleep(0.15)
+        bus.stop()
+
+        assert len(sub.events) == 1
+        evt = sub.events[0]
+        assert evt.event_type == EventType.MP_VLLM_BLOCK_ALLOCATION
+        assert len(evt.metadata["records"]) == 1
+        assert evt.metadata["records"][0].req_id == "req-1"
+        assert evt.metadata["records"][0].new_block_ids == [0, 1, 2]
+
+    def test_block_allocation_not_delivered_to_other_subscriber(self, bus):
+        """Verify block allocation events are not delivered to unrelated subscribers."""
+        sub = _RecordingSubscriber(event_types=[EventType.L1_READ_FINISHED])
+        bus.register_subscriber(sub)
+        bus.start()
+
+        bus.publish(
+            _make_event(
+                event_type=EventType.MP_VLLM_BLOCK_ALLOCATION,
+                session_id="",
+            )
+        )
+        time.sleep(0.15)
+        bus.stop()
+
+        assert len(sub.events) == 0

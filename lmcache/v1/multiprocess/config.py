@@ -23,13 +23,21 @@ class MPServerConfig:
     """Chunk size for KV cache operations."""
 
     max_workers: int = 1
-    """Maximum number of worker threads for ZMQ server."""
+    """Base number of worker threads. Sets default for both GPU and CPU pools."""
+
+    max_gpu_workers: int = 1
+    """Worker threads for the GPU affinity pool (STORE/RETRIEVE).
+    Resolved from --max-gpu-workers or --max-workers."""
+
+    max_cpu_workers: int = 1
+    """Worker threads for the normal (CPU) pool (LOOKUP, END_SESSION, etc.).
+    Resolved from --max-cpu-workers or --max-workers."""
 
     hash_algorithm: str = "blake3"
     """Hash algorithm for token-based operations (builtin, sha256_cbor, blake3)."""
 
     engine_type: str = "default"
-    """Cache engine backend type 
+    """Cache engine backend type
     ('default' for MPCacheEngine, 'blend' for BlendEngineV2).
     """
 
@@ -88,7 +96,23 @@ def add_mp_server_args(
         "--max-workers",
         type=int,
         default=1,
-        help="Maximum number of worker threads. Default is 1.",
+        help="Base number of worker threads for both GPU and CPU pools. "
+        "Default is 1. Can be overridden per-pool with "
+        "--max-gpu-workers and --max-cpu-workers.",
+    )
+    mp_group.add_argument(
+        "--max-gpu-workers",
+        type=int,
+        default=None,
+        help="Worker threads for the GPU affinity pool (STORE/RETRIEVE). "
+        "Defaults to --max-workers if not specified.",
+    )
+    mp_group.add_argument(
+        "--max-cpu-workers",
+        type=int,
+        default=None,
+        help="Worker threads for the normal CPU pool (LOOKUP, etc.). "
+        "Defaults to --max-workers if not specified.",
     )
     mp_group.add_argument(
         "--hash-algorithm",
@@ -121,11 +145,16 @@ def parse_args_to_mp_server_config(
     Returns:
         MPServerConfig: The configuration object.
     """
+    base = args.max_workers
+    max_gpu = args.max_gpu_workers if args.max_gpu_workers is not None else base
+    max_cpu = args.max_cpu_workers if args.max_cpu_workers is not None else base
     return MPServerConfig(
         host=args.host,
         port=args.port,
         chunk_size=args.chunk_size,
-        max_workers=args.max_workers,
+        max_workers=base,
+        max_gpu_workers=max_gpu,
+        max_cpu_workers=max_cpu,
         hash_algorithm=args.hash_algorithm,
         engine_type=args.engine_type,
     )

@@ -17,7 +17,7 @@ from lmcache.v1.distributed.config import (
     L1MemoryManagerConfig,
     StorageManagerConfig,
 )
-from lmcache.v1.mp_observability.config import DEFAULT_PROMETHEUS_CONFIG
+from lmcache.v1.mp_observability.config import DEFAULT_OBSERVABILITY_CONFIG
 from lmcache.v1.multiprocess.config import MPServerConfig
 from lmcache.v1.multiprocess.custom_types import (
     CudaIPCWrapper,
@@ -245,7 +245,7 @@ def server_process_runner(
     run_cache_server(
         mp_config=mp_config,
         storage_manager_config=storage_manager_config,
-        prometheus_config=DEFAULT_PROMETHEUS_CONFIG,
+        obs_config=DEFAULT_OBSERVABILITY_CONFIG,
     )
 
 
@@ -331,7 +331,7 @@ def registered_instance(
     # Register KV cache
     future = client.submit_request(
         RequestType.REGISTER_KV_CACHE,
-        [instance_id, client_context.get_kv_cache(), "testmodel", 1],
+        [instance_id, client_context.get_kv_cache(), "testmodel", 1, {}],
         get_response_class(RequestType.REGISTER_KV_CACHE),
     )
     result = future.result(timeout=DEFAULT_TIMEOUT)
@@ -381,7 +381,7 @@ def test_register_unregister_kv_cache(
     # Register
     future = client.submit_request(
         RequestType.REGISTER_KV_CACHE,
-        [instance_id, client_context.get_kv_cache(), "testmodel", 1],
+        [instance_id, client_context.get_kv_cache(), "testmodel", 1, {}],
         get_response_class(RequestType.REGISTER_KV_CACHE),
     )
     result = future.result(timeout=DEFAULT_TIMEOUT)
