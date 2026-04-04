@@ -61,7 +61,7 @@ def compat_eventfd_write(efd: int, value: int = 1) -> None:
         raise OSError("compat_eventfd_write: unknown fd %d" % efd)
     _, w = pair
     try:
-        os.write(w, b"\x01")
+        os.write(w, b"\x01" * value)
     except BlockingIOError:
         pass  # pipe buffer full, already signaled
 
@@ -96,5 +96,11 @@ def compat_eventfd_close(efd: int) -> None:
     pair = _pipe_registry.pop(efd, None)
     if pair is not None:
         r, w = pair
-        os.close(r)
-        os.close(w)
+        try:
+            os.close(r)
+        except OSError:
+            pass
+        try:
+            os.close(w)
+        except OSError:
+            pass
