@@ -888,6 +888,7 @@ class LMCacheEngine:
                 if any(obj is not None for obj in candidate):
                     apc_mem_objs = candidate
                     break
+            freed = 0
             for apc_key, apc_mem_obj in zip(
                 apc_skipped_keys, apc_mem_objs, strict=False
             ):
@@ -895,6 +896,14 @@ class LMCacheEngine:
                     self.storage_manager.remove(apc_key, self.retrieve_locations)
                     if not self.async_loading:
                         apc_mem_obj.ref_count_down()
+                    freed += 1
+            logger.debug(
+                "APC pd_buffer cleanup: freed %d/%d APC-skipped chunks "
+                "(search_locs=%s)",
+                freed,
+                len(apc_skipped_keys),
+                search_locs,
+            )
 
         retrieved_tokens = torch.sum(ret_mask)
         self.stats_monitor.on_retrieve_finished(
