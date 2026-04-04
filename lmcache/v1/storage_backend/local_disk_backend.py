@@ -279,6 +279,8 @@ class LocalDiskBackend(StorageBackendInterface):
         dtype: torch.dtype,
         fmt: MemoryFormat,
         cached_positions: Optional[torch.Tensor] = None,
+        shapes: Optional[list] = None,
+        dtypes: Optional[list] = None,
     ) -> None:
         path = self._key_to_path(key)
 
@@ -289,9 +291,13 @@ class LocalDiskBackend(StorageBackendInterface):
                 self.cache_policy.update_on_hit(key, self.dict)
                 has_stored = True
             else:
-                self.dict[key] = DiskCacheMetadata(
+                meta = DiskCacheMetadata(
                     path, size, shape, dtype, cached_positions, fmt, 0
                 )
+                # MLA fix: attach multi-group metadata
+                meta._shapes = shapes
+                meta._dtypes = dtypes
+                self.dict[key] = meta
 
         # Push kv admit msg with batching
         if self.batched_msg_sender is not None and not has_stored:
@@ -413,9 +419,20 @@ class LocalDiskBackend(StorageBackendInterface):
         assert shape is not None
 
         self.disk_lock.release()
-        memory_obj = self.load_bytes_from_disk(
+        # MLA fix: use multi-group shapes/dtypes if available
+        shapes = getattr(disk_meta, "_shapes", None)
+        dtypes_list = getattr(disk_meta, "_dtypes", None)
+        if shapes is not None and dtypes_list is not None and len(shapes) > 1:
+            memory_obj = self.local_cpu_backend.allocate(shapes, dtypes_list, fmt)
+            assert memory_obj is not None
+            buffer = memory_obj.byte_array
+            self.read_file(key, buffer, path)
+            cached_positions = disk_meta.cached_positions
+            memory_obj.metadata.cached_positions = cached_positions
+        else:
+            memory_obj = self.load_bytes_from_disk(
             key, path, dtype=dtype, shape=shape, fmt=fmt
-        )
+            )
 
         return memory_obj
 
@@ -512,7 +529,7 @@ class LocalDiskBackend(StorageBackendInterface):
             write completes for this key. Callback exceptions are caught and
             logged.
         """
-        kv_chunk = memory_obj.tensor
+        kv_chunk = memory_obj.raw_tensor  # MLA fix
         assert kv_chunk is not None
         buffer = memory_obj.byte_array
         path = self._key_to_path(key)
@@ -535,9 +552,13 @@ class LocalDiskBackend(StorageBackendInterface):
         dtype = memory_obj.metadata.dtype
         fmt = memory_obj.metadata.fmt
         cached_positions = memory_obj.metadata.cached_positions
+        # MLA fix: preserve multi-group shapes/dtypes
+        shapes = memory_obj.metadata.shapes
+        dtypes = memory_obj.metadata.dtypes
         memory_obj.ref_count_down()
 
-        self.insert_key(key, size, shape, dtype, fmt, cached_positions=cached_positions)
+        self.insert_key(key, size, shape, dtype, fmt, cached_positions=cached_positions,
+            shapes=shapes, dtypes=dtypes)
 
         self.disk_worker.remove_put_task(key)
 
