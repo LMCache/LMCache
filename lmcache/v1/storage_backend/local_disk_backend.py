@@ -295,11 +295,12 @@ class LocalDiskBackend(StorageBackendInterface):
             return True
 
     def touch_cache(self):
-        # flip the order of the keys in the request
+        # flip the order of the keys in the request.
+        # disk_access_increment is done in get_blocking / batched_get_non_blocking
+        # so pin+lookup+touch then load does not double-count.
         with self.disk_lock:
             for key in reversed(self.keys_in_request):
                 self.cache_policy.update_on_hit(key, self.dict)
-                self.cache_policy.disk_access_increment(key)
             self.keys_in_request = []
 
     def exists_in_put_tasks(self, key: CacheEngineKey) -> bool:
@@ -370,33 +371,6 @@ class LocalDiskBackend(StorageBackendInterface):
             )
 
         return True
-
-    def insert_key(
-        self,
-        key: CacheEngineKey,
-        size: int,
-        shape: torch.Size,
-        dtype: torch.dtype,
-        fmt: MemoryFormat,
-        cached_positions: Optional[torch.Tensor] = None,
-    ) -> None:
-        with self.disk_lock:
-            path = self._key_to_path(key)
-            if key in self.dict:
-                self.cache_policy.update_on_hit(key, self.dict)
-                has_stored = True
-            else:
-                self.dict[key] = DiskCacheMetadata(
-                    path, size, shape, dtype, cached_positions, fmt, 0
-                )
-                has_stored = False
-
-        # Push kv admit msg with batching
-        if self.batched_msg_sender is not None and not has_stored:
-            self.batched_msg_sender.add_kv_op(
-                op_type=OpType.ADMIT,
-                key=key.chunk_hash,
-            )
 
     def submit_put_task(
         self,
@@ -575,6 +549,9 @@ class LocalDiskBackend(StorageBackendInterface):
             # NOTE(Jiayi): Currently, we consider prefetch as cache hit.
             # Update cache recency
             self.cache_policy.update_on_hit(key, self.dict)
+            # One increment per prefetch (touch_cache no longer increments; avoids
+            # double count with get_blocking after batched_contains+touch).
+            self.cache_policy.disk_access_increment(key)
 
             self.disk_lock.release()
             logger.debug(f"Prefetching {key} from disk.")
@@ -636,7 +613,7 @@ class LocalDiskBackend(StorageBackendInterface):
 
         # ref count down here because there's a ref_count_up in
         # `submit_put_task` above.
-        # Ref count down better be before `insert_key` for testing
+        # Ref count down better be before registering the key in dict for testing
         # purposes (e.g., testing mem_leak).
         # TODO(Jiayi): This could be problematic if the
         # freed memory object is immediately reused.
@@ -734,14 +711,16 @@ class LocalDiskBackend(StorageBackendInterface):
     def write_file(self, buffer, path):
         start_time = time.time()
         size = len(buffer)
-        self._disk_prom_listener.on_write(size)
         if size % self.os_disk_bs != 0 or not self.use_odirect:
             with open(path, "wb") as f:
                 f.write(buffer)
         else:
             fd = os.open(path, os.O_CREAT | os.O_WRONLY | os.O_DIRECT, 0o644)
-            os.write(fd, buffer)
-            os.close(fd)
+            try:
+                os.write(fd, buffer)
+            finally:
+                os.close(fd)
+        self._disk_prom_listener.on_write(size)
         disk_write_time = time.time() - start_time
         logger.debug(
             f"Disk write size: {size} bytes, "
