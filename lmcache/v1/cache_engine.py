@@ -1097,6 +1097,17 @@ class LMCacheEngine:
 
         assert self.storage_manager is not None
 
+        # MLA save_only_first_rank lookup fix: non-first ranks have empty
+        # storage when save_only_first_rank is enabled. Return total
+        # requested tokens so min() aggregation in the lookup client
+        # defers to rank 0's result (which has the actual stored data).
+        if self.save_only_first_rank and not self.metadata.is_first_rank():
+            total = (
+                len(tokens) if tokens is not None
+                else (sum(offsets) if offsets else 0)
+            )
+            return total
+
         if tokens is not None:
             lookup_stats = self.stats_monitor.on_lookup_request(len(tokens))
         else:
