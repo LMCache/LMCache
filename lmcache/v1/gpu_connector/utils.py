@@ -561,7 +561,8 @@ def get_num_heads(kv_caches: Any, gpu_kv_format: "lmc_ops.GPUKVFormat") -> int:
         # HND: [..., NH, BS, HS] — num_heads at shape[2]
         return kv_caches[0].shape[2]
     elif gpu_kv_format == lmc_ops.GPUKVFormat.NL_X_NB_BS_HS:
-        raise ValueError(_ATTRIBUTE_NOT_EXIST_ERROR.format(format=gpu_kv_format))
+        # MLA: heads are absorbed into hidden dim, so num_heads = 1
+        return 1
     elif gpu_kv_format == lmc_ops.GPUKVFormat.TWO_X_NL_X_NBBS_NH_HS:
         return kv_caches[0][0].shape[1]
     elif gpu_kv_format == lmc_ops.GPUKVFormat.NL_X_NBBS_ONE_HS:

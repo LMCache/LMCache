@@ -202,11 +202,15 @@ class GdsBackend(AllocatorBackendInterface):
         assert config.gds_path is not None, "Need to specify gds_path for GdsBackend"
 
         # Multi-path support: parse comma-separated paths and select one
-        # based on GPU device ID (by_gpu sharding, like NIXL PR #2418).
+        # based on the configured sharding strategy.
         self.gds_paths = [p.strip() for p in config.gds_path.split(",") if p.strip()]
         assert len(self.gds_paths) > 0, "gds_path cannot be empty"
 
-        # TODO: next patch we can add additional sharding strategies
+        self.gds_path_sharding = config.gds_path_sharding
+        assert self.gds_path_sharding == "by_gpu", (
+            f"Unsupported gds_path_sharding '{self.gds_path_sharding}'. "
+            "Only 'by_gpu' is supported currently."
+        )
         self.gds_path = self.gds_paths[device_id % len(self.gds_paths)]
         self.fstype = get_fstype(self.gds_path)
 
