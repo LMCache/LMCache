@@ -168,3 +168,64 @@ class TestMLAMultiGroupTensorAccess:
 # testing those paths in isolation would require mocking the CUDA
 # kernel (lmc_ops.multi_layer_kv_transfer) which is fragile and
 # provides low signal.  See the integration test suite for coverage.
+
+
+class TestMLASaveOnlyFirstRankLookup:
+    """Verify lookup returns total tokens for non-first ranks when
+    save_only_first_rank is enabled, so min() aggregation defers to rank 0."""
+
+    def test_non_first_rank_lookup_returns_total_tokens(self) -> None:
+        """Non-first ranks must return total tokens to avoid zeroing
+        the min() aggregation in the lookup client."""
+        # Skip if CUDA is not available
+        if not torch.cuda.is_available():
+            pytest.skip("CUDA not available")
+
+        # First Party
+        from lmcache.v1.cache_engine import LMCacheEngineBuilder
+        from lmcache.v1.config import LMCacheEngineConfig
+        from lmcache.v1.metadata import LMCacheMetadata
+
+        # Create metadata for a non-first rank MLA model
+        metadata = LMCacheMetadata(
+            model_name="test_mla_model",
+            world_size=8,
+            local_world_size=8,
+            worker_id=3,  # NOT first rank
+            local_worker_id=3,
+            kv_dtype=torch.bfloat16,
+            kv_shape=(78, 1, 256, 1, 576),
+            use_mla=True,
+            role="worker",
+        )
+
+        config = LMCacheEngineConfig(
+            local_cpu=True,
+            max_local_cpu_size=1.0,
+            chunk_size=256,
+        )
+
+        engine = LMCacheEngineBuilder.build(
+            config=config,
+            metadata=metadata,
+        )
+
+        # Lookup with token_ids
+        token_ids = list(range(512))
+        result = engine.lookup(tokens=token_ids)
+
+        # Non-first rank should return total tokens (512)
+        assert result == len(token_ids), (
+            f"Non-first rank lookup should return {len(token_ids)}, "
+            f"got {result}"
+        )
+
+        # Lookup with hashes/offsets
+        result_hashes = engine.lookup(
+            hashes=[123, 456],
+            offsets=[256, 256],
+        )
+        assert result_hashes == 512, (
+            f"Non-first rank lookup with offsets should return 512, "
+            f"got {result_hashes}"
+        )
