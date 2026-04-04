@@ -871,9 +871,23 @@ class LMCacheEngine:
             and self.storage_manager is not None
             and apc_skipped_keys
         ):
-            apc_mem_objs = self.storage_manager.batched_get(
-                keys=apc_skipped_keys, location="LocalCPUBackend", fmt=self.fmt
+            # Search each configured retrieve location in order; break on first
+            # hit.  Explicit enumeration over retrieve_locations makes the
+            # backend set clear (e.g. ["PDBackend"] on a PD receiver,
+            # ["LocalCPUBackend"] on a CPU-only node, or a GPU-Direct backend).
+            # Falls back to all registered backends when retrieve_locations is
+            # not configured (None).
+            apc_mem_objs: List[Optional[MemoryObj]] = [None] * len(apc_skipped_keys)
+            search_locs = (
+                self.retrieve_locations or self.storage_manager.get_all_backend_names()
             )
+            for loc in search_locs:
+                candidate = self.storage_manager.batched_get(
+                    keys=apc_skipped_keys, location=loc
+                )
+                if any(obj is not None for obj in candidate):
+                    apc_mem_objs = candidate
+                    break
             for apc_key, apc_mem_obj in zip(
                 apc_skipped_keys, apc_mem_objs, strict=False
             ):
@@ -1007,6 +1021,7 @@ class LMCacheEngine:
 
             ret_mask[start:end] = True
 
+        to_count_down: List[MemoryObj] = []
         if keys:
             # Transpose the keys into layer major format
             keys_layer_major = [list(row) for row in zip(*keys, strict=False)]
@@ -1021,7 +1036,6 @@ class LMCacheEngine:
             mem_obj_consumer = self.gpu_connector.batched_to_gpu(starts, ends, **kwargs)
             next(mem_obj_consumer)
 
-            to_count_down = []
             for layer_id in range(self.num_layers):
                 task = next(get_generator)
 
@@ -1039,7 +1053,8 @@ class LMCacheEngine:
                 to_count_down.extend(mem_objs_layer)
 
             for mem_obj in to_count_down:
-                mem_obj.unpin()
+                # Defer unpin until after GPU sync below; the pin keeps the
+                # allocator from freeing staging memory while GPU still reads it.
                 mem_obj.ref_count_down()
         else:
             # If no cache are found, we still need to yield to avoid
@@ -1051,6 +1066,13 @@ class LMCacheEngine:
 
         # synchronize the last layer
         next(mem_obj_consumer)
+
+        # Unpin staging objects only after GPU sync: between ref_count_down()
+        # above and this sync point the GPU may still be reading staging memory.
+        # The pin prevents the allocator from freeing it prematurely.
+        for mem_obj in to_count_down:
+            if mem_obj.is_pinned:
+                mem_obj.unpin()
 
         retrieved_tokens = torch.sum(ret_mask)
         self.stats_monitor.on_retrieve_finished(monitor_req_id, retrieved_tokens)
@@ -1557,7 +1579,7 @@ class LMCacheEngine:
         mask,
         ret_mask,
         **kwargs,
-    ) -> ProcessTokensInternalResult:
+    ) -> Tuple[List[ProcessedChunk], int]:
         """
         This function is used to get the memory objects from the event manager.
 
@@ -1659,6 +1681,10 @@ class LMCacheEngine:
             request_configs=request_configs,
         ):
             assert isinstance(key, CacheEngineKey)
+            # Contiguous-prefix assumption: the token mask is always FFFFFTTTTT
+            # so APC-masked chunks (start < _num_falses) always precede retrievable
+            # chunks.  Chunk boundaries are aligned to chunk_size, so no chunk
+            # straddles the APC boundary.
             if start < _num_falses:
                 apc_skipped_keys.append(key)  # free — hashed in this same loop
             else:
