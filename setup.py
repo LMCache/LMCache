@@ -60,6 +60,49 @@ def hipify_wrapper() -> None:
     assert len(hipified_sources) == len(extra_files)
 
 
+def _mooncake_extension(
+    cpp_extension,
+    mooncake_sources: list[str],
+    extra_cxx_flags: list[str],
+) -> list:
+    """Build mooncake CppExtension if enabled via env vars.
+
+    Returns a list with zero or one Extension objects.
+    """
+    mc_env = os.environ.get("BUILD_MOONCAKE")
+    if mc_env is not None:
+        build_mc = mc_env == "1"
+    else:
+        build_mc = os.environ.get("MOONCAKE_INCLUDE_DIR", "") != ""
+    if not build_mc:
+        return []
+
+    mc_include = os.environ.get("MOONCAKE_INCLUDE_DIR", "")
+    mc_lib = os.environ.get("MOONCAKE_LIB_DIR", "")
+    mc_include_dirs = [
+        "csrc/storage_backends",
+        "csrc/storage_backends/mooncake",
+    ]
+    if mc_include:
+        mc_include_dirs.extend(mc_include.split(";"))
+    mc_library_dirs: list[str] = []
+    if mc_lib:
+        mc_library_dirs.extend(mc_lib.split(";"))
+    return [
+        cpp_extension.CppExtension(
+            "lmcache.lmcache_mooncake",
+            sources=mooncake_sources,
+            include_dirs=mc_include_dirs,
+            library_dirs=mc_library_dirs,
+            libraries=["store"],
+            runtime_library_dirs=mc_library_dirs,
+            extra_compile_args={
+                "cxx": extra_cxx_flags + ["-O3", "-std=c++20", "-DYLT_ENABLE_IBV"],
+            },
+        ),
+    ]
+
+
 def cuda_extension() -> tuple[list, dict]:
     # Third Party
     from torch.utils import cpp_extension  # Import here
@@ -96,6 +139,10 @@ def cuda_extension() -> tuple[list, dict]:
         "csrc/storage_backends/fs/pybind.cpp",
         "csrc/storage_backends/fs/connector.cpp",
     ]
+    mooncake_sources = [
+        "csrc/storage_backends/mooncake/pybind.cpp",
+        "csrc/storage_backends/mooncake/connector.cpp",
+    ]
     ext_modules = [
         cpp_extension.CUDAExtension(
             "lmcache.c_ops",
@@ -130,6 +177,10 @@ def cuda_extension() -> tuple[list, dict]:
             },
         ),
     ]
+    # Mooncake extension is optional.
+    ext_modules.extend(
+        _mooncake_extension(cpp_extension, mooncake_sources, [flag_cxx_abi])
+    )
     cmdclass = {"build_ext": cpp_extension.BuildExtension}
     return ext_modules, cmdclass
 
@@ -164,6 +215,10 @@ def rocm_extension() -> tuple[list, dict]:
     fs_sources = [
         "csrc/storage_backends/fs/pybind.cpp",
         "csrc/storage_backends/fs/connector.cpp",
+    ]
+    mooncake_sources = [
+        "csrc/storage_backends/mooncake/pybind.cpp",
+        "csrc/storage_backends/mooncake/connector.cpp",
     ]
     # For HIP, we generally use CppExtension and let hipcc handle things.
     # Ensure CXX environment variable is set to hipcc when running this build.
@@ -221,6 +276,8 @@ def rocm_extension() -> tuple[list, dict]:
             },
         ),
     ]
+    # Mooncake extension is optional.
+    ext_modules.extend(_mooncake_extension(cpp_extension, mooncake_sources, []))
     cmdclass = {"build_ext": cpp_extension.BuildExtension}
     return ext_modules, cmdclass
 
