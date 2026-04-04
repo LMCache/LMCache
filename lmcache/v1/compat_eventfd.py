@@ -87,7 +87,10 @@ def compat_eventfd_read(efd: int) -> int:
 def compat_eventfd_close(efd: int) -> None:
     """Close the eventfd (or both pipe ends)."""
     if _HAS_EVENTFD:
-        os.close(efd)
+        try:
+            os.close(efd)
+        except OSError:
+            pass
         return
 
     pair = _pipe_registry.pop(efd, None)
