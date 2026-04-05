@@ -16,6 +16,7 @@
 # Distributed / L2
 /lmcache/v1/distributed/               @ApostaC @maobaolong @chunxiaozheng
 /lmcache/v1/distributed/l2_adapters/mooncake_store_l2_adapter.py  @maobaolong
+/lmcache/v1/distributed/l2_adapters/resp_l2_adapter.py           @sammshen
 
 # GPU connector
 /lmcache/v1/gpu_connector/             @sammshen @ApostaC
