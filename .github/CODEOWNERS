@@ -9,9 +9,9 @@
 /lmcache/v1/memory_management.py       @sammshen @deng451e @chunxiaozheng @DongDongJu @ApostaC
 
 # Multiprocess
-/lmcache/v1/multiprocess/              @ApostaC
+/lmcache/v1/multiprocess/              @ApostaC @OasisGit
 /lmcache/v1/multiprocess/protocols/observability.py  @royyhuang @ApostaC
-/lmcache/v1/multiprocess/http_server.py              @royyhuang @ApostaC
+/lmcache/v1/multiprocess/http_server.py              @royyhuang @ApostaC @OasisGit
 
 # Distributed / L2
 /lmcache/v1/distributed/               @ApostaC @maobaolong @chunxiaozheng
