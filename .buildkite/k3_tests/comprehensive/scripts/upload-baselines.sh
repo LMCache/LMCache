@@ -48,28 +48,25 @@ printf "  %s\n" "${NEW_FILES[@]}"
 WORK_DIR="/tmp/baselines_push_$$"
 trap 'rm -rf "$WORK_DIR"' EXIT
 
-echo "--- Preparing benchmarks-main branch"
-timeout 30 git fetch origin benchmarks-main 2>/dev/null || true
+# Push baselines to a dedicated CI repo instead of the main LMCache repo.
+CI_REPO="LMCache/LMCache-CI"
+CI_BRANCH="benchmarks-main"
 
-if git rev-parse origin/benchmarks-main >/dev/null 2>&1; then
-    git worktree add "$WORK_DIR" origin/benchmarks-main --detach 2>/dev/null || {
-        # Fallback: clone fresh
-        git clone --depth=1 --branch benchmarks-main \
-            "$(git remote get-url origin)" "$WORK_DIR" 2>/dev/null || {
-            # Branch doesn't exist yet — create an orphan
-            mkdir -p "$WORK_DIR"
-            git -C "$WORK_DIR" init
-            git -C "$WORK_DIR" remote add origin "$(git remote get-url origin)"
-            git -C "$WORK_DIR" checkout --orphan benchmarks-main
-        }
-    }
+if [[ -n "${GITHUB_TOKEN:-}" ]]; then
+    CI_REPO_URL="https://x-access-token:${GITHUB_TOKEN}@github.com/${CI_REPO}.git"
 else
-    # benchmarks-main doesn't exist — create from orphan
+    echo "[WARN] GITHUB_TOKEN not set — push may fail without credentials"
+    CI_REPO_URL="https://github.com/${CI_REPO}.git"
+fi
+
+echo "--- Preparing ${CI_BRANCH} branch from ${CI_REPO}"
+git clone --depth=1 --branch "${CI_BRANCH}" "${CI_REPO_URL}" "$WORK_DIR" 2>/dev/null || {
+    # Branch doesn't exist yet — create an orphan
     mkdir -p "$WORK_DIR"
     git -C "$WORK_DIR" init
-    git -C "$WORK_DIR" remote add origin "$(git remote get-url origin)"
-    git -C "$WORK_DIR" checkout --orphan benchmarks-main
-fi
+    git -C "$WORK_DIR" remote add origin "${CI_REPO_URL}"
+    git -C "$WORK_DIR" checkout --orphan "${CI_BRANCH}"
+}
 
 ###############
 # COPY + PRUNE#
@@ -117,24 +114,12 @@ TODAY="$(date +%Y-%m-%d)"
 git -c user.email="ci@lmcache.ai" -c user.name="LMCache CI" \
     commit -m "Update rolling baselines: ${TODAY}" || true
 
-echo "--- Pushing to benchmarks-main"
-# Build HTTPS push URL using GITHUB_TOKEN (injected by agent-stack-k8s from K8s secret).
-# Falls back to origin URL if token isn't available.
-ORIGIN_URL="$(cd "$REPO_ROOT" && git remote get-url origin)"
-if [[ -n "${GITHUB_TOKEN:-}" ]]; then
-    # Extract owner/repo from any URL format (SSH or HTTPS)
-    REPO_PATH="$(echo "$ORIGIN_URL" | sed -E 's|.*github\.com[:/]||' | sed 's/\.git$//')"
-    PUSH_URL="https://x-access-token:${GITHUB_TOKEN}@github.com/${REPO_PATH}.git"
-else
-    echo "[WARN] GITHUB_TOKEN not set — push may fail without credentials"
-    PUSH_URL="$ORIGIN_URL"
-fi
-
+echo "--- Pushing to ${CI_REPO} ${CI_BRANCH}"
 # Try normal push first; fall back to force-push if history diverged
-if ! git push "$PUSH_URL" HEAD:benchmarks-main 2>/dev/null; then
+if ! git push origin "HEAD:${CI_BRANCH}" 2>/dev/null; then
     echo "[WARN] Normal push failed, force-pushing..."
-    git push "$PUSH_URL" +HEAD:benchmarks-main 2>/dev/null || {
-        echo "[ERROR] Failed to push baselines to benchmarks-main"
+    git push origin "+HEAD:${CI_BRANCH}" 2>/dev/null || {
+        echo "[ERROR] Failed to push baselines to ${CI_REPO} ${CI_BRANCH}"
         exit 1
     }
 fi
