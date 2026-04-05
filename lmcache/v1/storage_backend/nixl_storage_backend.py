@@ -917,7 +917,7 @@ class NixlStaticStorageBackend(NixlStorageBackend):
             nixl_config.path,
             nixl_config.use_direct_io,
             nixl_config.path_sharding,
-            metadata.worker_id,
+            metadata.local_worker_id,
         )
         assert self.pool is not None
 
