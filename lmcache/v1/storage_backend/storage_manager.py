@@ -478,7 +478,7 @@ class StorageManager:
                     and "LocalCPUBackend" in self.storage_backends
                 ):
 
-                    def _write_back(fut, k=key):
+                    def _write_back(fut: Future, k: CacheEngineKey = key) -> None:
                         try:
                             memory_obj = fut.result()
                             if memory_obj is not None:
@@ -566,6 +566,7 @@ class StorageManager:
         """
         Callback function when a single prefetch task
         (i.e., prefetching from a single backend) is done.
+        Writes back fetched data to LocalCPUBackend for local caching.
         """
         if (
             backend_name not in ["LocalCPUBackend", "PDBackend", "MaruBackend"]
