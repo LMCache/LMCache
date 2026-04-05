@@ -304,9 +304,7 @@ class NixlFilePool(NixlDescPool):
                     "use_direct_io is True, but O_DIRECT is not available on "
                     "this system. Falling back to buffered I/O."
                 )
-        base_path = NixlStorageConfig.validate_nixl_path(
-            path, path_sharding, worker_id
-        )
+        base_path = NixlStorageConfig.validate_nixl_path(path, path_sharding, worker_id)
 
         for i in reversed(range(size)):
             filename = f"obj_{i}_{uuid.uuid4().hex[0:4]}.bin"
@@ -942,12 +940,16 @@ class NixlStaticStorageBackend(NixlStorageBackend):
     ):
         if backend in ("GDS", "GDS_MT", "POSIX", "HF3FS"):
 <<<<<<< HEAD
+<<<<<<< HEAD
             return NixlFilePool(size, path, use_direct_io, path_sharding)
         elif backend in ("OBJ", "AZURE_BLOB"):
 =======
             return NixlFilePool(
                 size, path, use_direct_io, path_sharding, worker_id
             )
+=======
+            return NixlFilePool(size, path, use_direct_io, path_sharding, worker_id)
+>>>>>>> e8ded938 (Fix code formatting (ruff format))
         elif backend in ("OBJ"):
 >>>>>>> b93d0c09 (Use metadata.worker_id for path sharding instead of torch.cuda.current_device())
             return NixlObjectPool(size)

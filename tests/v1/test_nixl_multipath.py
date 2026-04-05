@@ -27,27 +27,19 @@ class TestNixlMultipath:
         path_sharding = "by_gpu"
 
         # Test with worker_id 0
-        result = NixlStorageConfig.validate_nixl_path(
-            paths, path_sharding, 0
-        )
+        result = NixlStorageConfig.validate_nixl_path(paths, path_sharding, 0)
         assert result == paths[0]
 
         # Test with worker_id 1
-        result = NixlStorageConfig.validate_nixl_path(
-            paths, path_sharding, 1
-        )
+        result = NixlStorageConfig.validate_nixl_path(paths, path_sharding, 1)
         assert result == paths[1]
 
         # Test with worker_id 2
-        result = NixlStorageConfig.validate_nixl_path(
-            paths, path_sharding, 2
-        )
+        result = NixlStorageConfig.validate_nixl_path(paths, path_sharding, 2)
         assert result == paths[2]
 
         # Test with worker_id 3 (should wrap around to paths[0])
-        result = NixlStorageConfig.validate_nixl_path(
-            paths, path_sharding, 3
-        )
+        result = NixlStorageConfig.validate_nixl_path(paths, path_sharding, 3)
         assert result == paths[0]
 
     def test_validate_nixl_path_none_path(self):
