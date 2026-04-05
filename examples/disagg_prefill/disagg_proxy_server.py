@@ -8,6 +8,7 @@ import argparse
 import asyncio
 import itertools
 import json
+import math
 import os
 import time
 
@@ -28,6 +29,36 @@ from lmcache.v1.storage_backend.pd_backend import (
 )
 
 logger = init_logger(__name__)
+
+
+class WeightedSemaphore:
+    """Async semaphore with variable-weight acquire.
+
+    Limits decoder PD buffer usage: each request holds ceil(L/chunk_size)
+    slots until decoding starts, preventing buffer exhaustion deadlocks.
+    """
+
+    def __init__(self, capacity: int) -> None:
+        self._capacity = capacity
+        self._available = capacity
+        self._lock = asyncio.Condition()
+
+    async def acquire(self, slots: int) -> None:
+        async with self._lock:
+            await self._lock.wait_for(lambda: self._available >= slots)
+            self._available -= slots
+
+    def release(self, slots: int) -> None:
+        async def _release():
+            async with self._lock:
+                self._available += slots
+                self._lock.notify_all()
+
+        asyncio.get_event_loop().create_task(_release())
+
+    @property
+    def available(self) -> int:
+        return self._available
 
 
 @asynccontextmanager
@@ -199,6 +230,30 @@ def parse_args():
     parser.add_argument("--proxy-host", type=str, default="localhost")
     parser.add_argument("--proxy-port", type=int, default=8500)
 
+    # PD buffer concurrency limiting (optional). When both are set, a weighted
+    # semaphore caps in-flight requests to prevent decoder PD buffer deadlocks.
+    # capacity = pd_buffer_size // (chunk_size * kv_bytes_per_token)
+    # kv_bytes_per_token = num_layers * 2 * num_kv_heads * head_size * dtype_bytes
+    parser.add_argument(
+        "--pd-buffer-size",
+        type=int,
+        default=None,
+        help="Decoder PD buffer bytes (matches pd_buffer_size in LMCache config).",
+    )
+    parser.add_argument(
+        "--chunk-size",
+        type=int,
+        default=256,
+        help="LMCache chunk size in tokens.",
+    )
+    parser.add_argument(
+        "--kv-bytes-per-token",
+        type=int,
+        default=None,
+        help="KV bytes per token: num_layers*2*num_kv_heads*head_size*dtype_bytes."
+        " e.g. Llama-3.1-8B bf16=131072.",
+    )
+
     args = parser.parse_args()
     return args
 
@@ -225,6 +280,9 @@ app.state.bound_clients = {}
 
 # Keep finished reqs
 app.state.finished_reqs = defaultdict(int)
+
+# None when --pd-buffer-size / --kv-bytes-per-token are not provided (unlimited).
+pd_buffer_semaphore = None
 
 
 zmq_ctx = zmq.asyncio.Context()
@@ -357,6 +415,7 @@ async def handle_completions(request: Request):
     req_id = str(counter)  # we use counter as req_id
 
     st = time.time()
+    slots = 0  # 0 until tokenization; guards error-path release
     try:
         req_data = await request.json()
 
@@ -371,6 +430,11 @@ async def handle_completions(request: Request):
         org_max_tokens = req_data["max_tokens"]
         req_data["prompt"] = tokenize_output["tokens"]
         req_data["max_tokens"] = 1
+
+        # Acquire ceil(L/chunk_size) PD buffer slots before prefill.
+        slots = math.ceil(len(tokenize_output["tokens"]) / global_args.chunk_size)
+        if pd_buffer_semaphore is not None:
+            await pd_buffer_semaphore.acquire(slots)
 
         disagg_spec = {
             "req_id": req_id,
@@ -427,8 +491,9 @@ async def handle_completions(request: Request):
                 "data: " + json.dumps(head_chunk, separators=(",", ":")) + "\n\n"
             ).encode()
 
-            # Wait until decode node signals that kv is ready
             await wait_decode_kv_ready(req_id, num_tp_rank)
+            if pd_buffer_semaphore is not None:
+                pd_buffer_semaphore.release(slots)
 
             async for chunk in stream_service_response(
                 decode_client.client, "/v1/completions", req_data
@@ -438,6 +503,8 @@ async def handle_completions(request: Request):
         return StreamingResponse(generate_stream(), media_type="application/json")
 
     except Exception as e:
+        if pd_buffer_semaphore is not None:
+            pd_buffer_semaphore.release(slots)
         # Standard
         import sys
         import traceback
@@ -456,6 +523,7 @@ async def handle_chat_completions(request: Request):
     req_id = str(counter)
 
     st = time.time()
+    slots = 0  # slots acquired from pd_buffer_semaphore; 0 until tokenization
     try:
         req_data = await request.json()
 
@@ -476,6 +544,11 @@ async def handle_chat_completions(request: Request):
         if "max_completion_tokens" in req_data:
             org_max_completion_tokens = req_data["max_completion_tokens"]
             req_data["max_completion_tokens"] = 1
+
+        # Acquire ceil(L/chunk_size) PD buffer slots before prefill.
+        slots = math.ceil(len(tokenize_output["tokens"]) / global_args.chunk_size)
+        if pd_buffer_semaphore is not None:
+            await pd_buffer_semaphore.acquire(slots)
 
         disagg_spec = {
             "req_id": req_id,
@@ -555,6 +628,8 @@ async def handle_chat_completions(request: Request):
             ).encode()
 
             await wait_decode_kv_ready(req_id, num_tp_rank)
+            if pd_buffer_semaphore is not None:
+                pd_buffer_semaphore.release(slots)
 
             # Stream and convert completion format chunks to chat completion format
             async for chunk in stream_service_response(
@@ -606,6 +681,8 @@ async def handle_chat_completions(request: Request):
         return StreamingResponse(generate_stream(), media_type="application/json")
 
     except Exception as e:
+        if pd_buffer_semaphore is not None:
+            pd_buffer_semaphore.release(slots)
         # Standard
         import sys
         import traceback
@@ -622,6 +699,24 @@ async def handle_chat_completions(request: Request):
 if __name__ == "__main__":
     global global_args
     global_args = parse_args()
+
+    if (
+        global_args.pd_buffer_size is not None
+        and global_args.kv_bytes_per_token is not None
+    ):
+        capacity_slots = global_args.pd_buffer_size // (
+            global_args.chunk_size * global_args.kv_bytes_per_token
+        )
+        pd_buffer_semaphore = WeightedSemaphore(capacity_slots)
+        logger.info("PD buffer semaphore: capacity=%d slots.", capacity_slots)
+    elif (
+        global_args.pd_buffer_size is not None
+        or global_args.kv_bytes_per_token is not None
+    ):
+        logger.warning(
+            "Both --pd-buffer-size and --kv-bytes-per-token required."
+            " Running unlimited."
+        )
 
     # Third Party
     import uvicorn
