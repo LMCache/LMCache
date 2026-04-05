@@ -52,6 +52,12 @@
 
 # C extensions
 /csrc/                                 @ApostaC @YaoJiayi @sammshen
+/csrc/storage_backends/                @sammshen
+
+# Native connector L2 adapters
+/lmcache/v1/distributed/l2_adapters/native_connector_l2_adapter.py  @sammshen
+/lmcache/v1/distributed/l2_adapters/native_plugin_l2_adapter.py     @sammshen
+/lmcache/v1/distributed/l2_adapters/fs_native_l2_adapter.py         @sammshen
 
 # Tests
 /tests/                                @hickeyma @sammshen @ApostaC @deng451e
