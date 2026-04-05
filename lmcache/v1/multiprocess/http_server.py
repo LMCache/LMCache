@@ -63,7 +63,7 @@ async def lifespan(app: FastAPI):
         # First Party
         from lmcache.v1.multiprocess.server import run_cache_server
 
-    zmq_server, engine = run_cache_server(
+    zmq_server, engine, plugin_launcher = run_cache_server(
         mp_config=mp_config,
         storage_manager_config=_configs["storage_manager"],
         obs_config=_configs["observability"],
@@ -71,12 +71,16 @@ async def lifespan(app: FastAPI):
     )
     app.state.zmq_server = zmq_server
     app.state.engine = engine
+    app.state.plugin_launcher = plugin_launcher
     logger.info("LMCache HTTP server initialized")
 
     yield
 
     # Shutdown
     logger.info("Shutting down LMCache HTTP server...")
+    launcher = getattr(app.state, "plugin_launcher", None)
+    if launcher is not None:
+        launcher.stop_plugins()
     get_event_bus().stop()
     if hasattr(app.state, "zmq_server") and app.state.zmq_server is not None:
         app.state.zmq_server.close()

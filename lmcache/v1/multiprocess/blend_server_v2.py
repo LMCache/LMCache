@@ -79,6 +79,9 @@ from lmcache.v1.multiprocess.custom_types import (
 from lmcache.v1.multiprocess.gpu_context import (
     PlainGPUCacheContext,
 )
+from lmcache.v1.multiprocess.mp_runtime_plugin_launcher import (
+    MPRuntimePluginLauncher,
+)
 from lmcache.v1.multiprocess.mq import MessageQueueServer
 from lmcache.v1.multiprocess.protocol import (
     RequestType,
@@ -859,9 +862,20 @@ def run_cache_server(
 
     logger.info("LMCache cache blend v2 server is running...")
 
+    # Launch runtime plugins if configured
+    plugin_launcher = None
+    if mp_config.runtime_plugin_locations:
+        plugin_launcher = MPRuntimePluginLauncher(
+            runtime_plugin_locations=(mp_config.runtime_plugin_locations),
+            mp_config=mp_config,
+            storage_manager_config=storage_manager_config,
+            obs_config=obs_config,
+        )
+        plugin_launcher.launch_plugins()
+
     # Return server and engine if requested (for HTTP server integration)
     if return_engine:
-        return server, engine
+        return server, engine, plugin_launcher
 
     # Dummy loop to keep the server running
     try:
@@ -869,6 +883,8 @@ def run_cache_server(
             time.sleep(1)
     except KeyboardInterrupt:
         logger.info("Shutting down server...")
+        if plugin_launcher is not None:
+            plugin_launcher.stop_plugins()
         event_bus.stop()
         server.close()
         engine.close()
