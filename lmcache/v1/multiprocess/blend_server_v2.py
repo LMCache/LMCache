@@ -757,20 +757,34 @@ def run_cache_server(
     storage_manager_config: StorageManagerConfig,
     obs_config: ObservabilityConfig,
     return_engine: bool = False,
+) -> (
+    tuple[
+        MessageQueueServer,
+        BlendEngineV2,
+        MPRuntimePluginLauncher | None,
+    ]
+    | None
 ):
-    """
-    Run the LMCache cache server with ZMQ message queue.
+    """Run the LMCache cache server with ZMQ message queue.
 
     Args:
-        mp_config: Configuration for the ZMQ multiprocess server
-        storage_manager_config: Configuration for the storage manager
-        obs_config: Configuration for the observability stack
-        return_engine: If True, return (server, engine) after starting;
-                       if False, run blocking loop to keep server alive
+        mp_config: Configuration for the ZMQ multiprocess
+            server.
+        storage_manager_config: Configuration for the
+            storage manager.
+        obs_config: Configuration for the observability
+            stack.
+        return_engine: If True, return
+            (server, engine, plugin_launcher) after
+            starting; if False, run blocking loop to keep
+            server alive.
 
     Returns:
-        If return_engine is True: tuple of (MessageQueueServer, BlendEngineV2)
-        If return_engine is False: None (blocks until interrupted)
+        If return_engine is True: tuple of
+            (MessageQueueServer, BlendEngineV2,
+            MPRuntimePluginLauncher | None).
+        If return_engine is False: None (blocks until
+            interrupted).
     """
     event_bus = init_observability(obs_config)
 
@@ -888,6 +902,8 @@ def run_cache_server(
         event_bus.stop()
         server.close()
         engine.close()
+
+    return None
 
 
 if __name__ == "__main__":

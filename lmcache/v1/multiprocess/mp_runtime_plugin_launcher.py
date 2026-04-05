@@ -81,7 +81,18 @@ class MPRuntimePluginLauncher:
         self,
         runtime_plugin_locations: list[str],
         **configs: object,
-    ):
+    ) -> None:
+        """Initialize the MP runtime plugin launcher.
+
+        Aggregates arbitrary dataclass configs into a single
+        JSON blob and delegates to RuntimePluginLauncher.
+
+        Args:
+            runtime_plugin_locations: Paths to plugin scripts
+                or directories.
+            **configs: Dataclass config objects to serialize
+                and pass to plugins via environment variable.
+        """
         # Build the aggregated JSON dict from all configs
         aggregated: dict = {}
         for name, cfg in configs.items():

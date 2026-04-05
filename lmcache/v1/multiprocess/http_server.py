@@ -58,17 +58,23 @@ async def lifespan(app: FastAPI):
     mp_config = _configs["mp"]
     if mp_config.engine_type == "blend":
         # First Party
-        from lmcache.v1.multiprocess.blend_server_v2 import run_cache_server
+        from lmcache.v1.multiprocess.blend_server_v2 import (  # type: ignore[assignment]
+            run_cache_server,
+        )
     else:
         # First Party
-        from lmcache.v1.multiprocess.server import run_cache_server
+        from lmcache.v1.multiprocess.server import (  # type: ignore[assignment]
+            run_cache_server,
+        )
 
-    zmq_server, engine, plugin_launcher = run_cache_server(
+    result = run_cache_server(
         mp_config=mp_config,
         storage_manager_config=_configs["storage_manager"],
         obs_config=_configs["observability"],
         return_engine=True,
     )
+    assert result is not None, "run_cache_server returned None with return_engine=True"
+    zmq_server, engine, plugin_launcher = result
     app.state.zmq_server = zmq_server
     app.state.engine = engine
     app.state.plugin_launcher = plugin_launcher
