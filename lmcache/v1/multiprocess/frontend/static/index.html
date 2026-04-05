@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport"
+          content="width=device-width, initial-scale=1.0">
+    <title>LMCache MultiProcess Dashboard</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css"
+          rel="stylesheet">
+    <link rel="stylesheet"
+          href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.0/font/bootstrap-icons.css">
+    <link rel="stylesheet" href="/static/css/style.css">
+    <link rel="icon" href="/static/img/logo.png"
+          type="image/png">
+</head>
+<body>
+    <div class="container-fluid">
+        <header class="bg-primary text-white p-3 mb-4">
+            <h1>
+                <i class="bi bi-cpu"></i>
+                LMCache MultiProcess Dashboard
+            </h1>
+            <div class="row align-items-center">
+                <div class="col-md-8">
+                    <div class="row g-2">
+                        <div class="col-md-4">
+                            <div class="d-flex align-items-center">
+                                <button id="refreshAllBtn"
+                                        class="btn btn-sm btn-outline-light me-2">
+                                    <i class="bi bi-arrow-clockwise"></i>
+                                    Refresh
+                                </button>
+                                <div class="form-check form-switch
+                                            text-white ms-2">
+                                    <input class="form-check-input"
+                                           type="checkbox"
+                                           id="autoRefreshToggle">
+                                    <label class="form-check-label"
+                                           for="autoRefreshToggle">
+                                        Auto (5s)
+                                    </label>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="col-md-4">
+                            <span id="connectionStatus"
+                                  class="badge bg-warning">
+                                Connecting...
+                            </span>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-md-4 text-end">
+                    <span id="currentTime"
+                          class="badge bg-info fs-6"></span>
+                </div>
+            </div>
+        </header>
+
+        <ul class="nav nav-tabs" id="mpTabs" role="tablist">
+            <li class="nav-item" role="presentation">
+                <button class="nav-link active"
+                        id="overview-tab"
+                        data-bs-toggle="tab"
+                        data-bs-target="#overview"
+                        type="button" role="tab">
+                    <i class="bi bi-speedometer2"></i> Overview
+                </button>
+            </li>
+            <li class="nav-item" role="presentation">
+                <button class="nav-link"
+                        id="storage-tab"
+                        data-bs-toggle="tab"
+                        data-bs-target="#storage"
+                        type="button" role="tab">
+                    <i class="bi bi-hdd-stack"></i> Storage
+                </button>
+            </li>
+            <li class="nav-item" role="presentation">
+                <button class="nav-link"
+                        id="gpu-tab"
+                        data-bs-toggle="tab"
+                        data-bs-target="#gpu"
+                        type="button" role="tab">
+                    <i class="bi bi-gpu-card"></i> GPU Contexts
+                </button>
+            </li>
+            <li class="nav-item" role="presentation">
+                <button class="nav-link"
+                        id="raw-tab"
+                        data-bs-toggle="tab"
+                        data-bs-target="#raw"
+                        type="button" role="tab">
+                    <i class="bi bi-code-slash"></i> Raw JSON
+                </button>
+            </li>
+        </ul>
+
+        <div class="tab-content p-3 border border-top-0"
+             id="mpTabContent">
+
+            <!-- Overview Tab -->
+            <div class="tab-pane fade show active"
+                 id="overview" role="tabpanel">
+                <h3>Engine Overview</h3>
+                <div class="row" id="overviewCards">
+                    <div class="col-12 text-center">
+                        <div class="spinner-border" role="status">
+                            <span class="visually-hidden">
+                                Loading...
+                            </span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Storage Tab -->
+            <div class="tab-pane fade"
+                 id="storage" role="tabpanel">
+                <h3>Storage Manager</h3>
+                <div id="storageContent">
+                    <div class="spinner-border" role="status">
+                        <span class="visually-hidden">
+                            Loading...
+                        </span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- GPU Contexts Tab -->
+            <div class="tab-pane fade"
+                 id="gpu" role="tabpanel">
+                <h3>GPU Contexts</h3>
+                <div id="gpuContent">
+                    <div class="spinner-border" role="status">
+                        <span class="visually-hidden">
+                            Loading...
+                        </span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Raw JSON Tab -->
+            <div class="tab-pane fade"
+                 id="raw" role="tabpanel">
+                <h3>Raw Status JSON</h3>
+                <div class="mb-3">
+                    <input type="text" class="form-control"
+                           id="jsonSearchInput"
+                           placeholder="Search in JSON...">
+                </div>
+                <pre id="rawJsonContent">
+                    Loading...
+                </pre>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="/static/js/mp_app.js"></script>
+</body>
+</html>
