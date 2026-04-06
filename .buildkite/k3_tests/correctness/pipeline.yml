@@ -4,7 +4,7 @@
 
 steps:
   - label: ":white_check_mark: Correctness"
-    command: .buildkite/scripts/is-operator-only.sh && exit 0; .buildkite/k3_tests/correctness/run.sh
+    command: .buildkite/k3_tests/correctness/run.sh
     timeout_in_minutes: 30
     agents: { queue: "k8s" }
     plugins:

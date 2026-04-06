@@ -6,7 +6,7 @@ steps:
   - group: ":test_tube: Comprehensive (2-GPU)"
     steps:
       - label: ":test_tube: pd"
-        command: .buildkite/scripts/is-operator-only.sh && exit 0; .buildkite/k3_tests/comprehensive/run.sh pd.yaml
+        command: .buildkite/k3_tests/comprehensive/run.sh pd.yaml
         timeout_in_minutes: 30
         agents: { queue: "k8s" }
         plugins:
@@ -26,14 +26,14 @@ steps:
         artifact_paths: ["*.log", "benchmarks/long_doc_qa/*.json"]
 
       - label: ":test_tube: p2p"
-        command: .buildkite/scripts/is-operator-only.sh && exit 0; .buildkite/k3_tests/comprehensive/run.sh p2p.yaml
+        command: .buildkite/k3_tests/comprehensive/run.sh p2p.yaml
         timeout_in_minutes: 30
         agents: { queue: "k8s" }
         plugins: [{ kubernetes: { podSpec: *pod-2gpu } }]
         artifact_paths: ["*.log", "benchmarks/long_doc_qa/*.json"]
 
       - label: ":test_tube: p2p_with_v3"
-        command: .buildkite/scripts/is-operator-only.sh && exit 0; .buildkite/k3_tests/comprehensive/run.sh p2p_with_v3.yaml
+        command: .buildkite/k3_tests/comprehensive/run.sh p2p_with_v3.yaml
         timeout_in_minutes: 30
         agents: { queue: "k8s" }
         plugins: [{ kubernetes: { podSpec: *pod-2gpu } }]
@@ -42,7 +42,7 @@ steps:
   - group: ":test_tube: Comprehensive (1-GPU)"
     steps:
       - label: ":test_tube: local_cpu"
-        command: .buildkite/scripts/is-operator-only.sh && exit 0; .buildkite/k3_tests/comprehensive/run.sh local_cpu.yaml
+        command: .buildkite/k3_tests/comprehensive/run.sh local_cpu.yaml
         timeout_in_minutes: 30
         agents: { queue: "k8s" }
         plugins:
@@ -58,42 +58,42 @@ steps:
         artifact_paths: ["*.log", "benchmarks/long_doc_qa/*.json"]
 
       - label: ":test_tube: local_disk"
-        command: .buildkite/scripts/is-operator-only.sh && exit 0; .buildkite/k3_tests/comprehensive/run.sh local_disk.yaml
+        command: .buildkite/k3_tests/comprehensive/run.sh local_disk.yaml
         timeout_in_minutes: 30
         agents: { queue: "k8s" }
         plugins: [{ kubernetes: { podSpec: *pod-1gpu } }]
         artifact_paths: ["*.log", "benchmarks/long_doc_qa/*.json"]
 
       - label: ":test_tube: async"
-        command: .buildkite/scripts/is-operator-only.sh && exit 0; .buildkite/k3_tests/comprehensive/run.sh async.yaml
+        command: .buildkite/k3_tests/comprehensive/run.sh async.yaml
         timeout_in_minutes: 30
         agents: { queue: "k8s" }
         plugins: [{ kubernetes: { podSpec: *pod-1gpu } }]
         artifact_paths: ["*.log", "benchmarks/long_doc_qa/*.json"]
 
       - label: ":test_tube: local_cpu_with_v3"
-        command: .buildkite/scripts/is-operator-only.sh && exit 0; .buildkite/k3_tests/comprehensive/run.sh local_cpu_with_v3.yaml
+        command: .buildkite/k3_tests/comprehensive/run.sh local_cpu_with_v3.yaml
         timeout_in_minutes: 30
         agents: { queue: "k8s" }
         plugins: [{ kubernetes: { podSpec: *pod-1gpu } }]
         artifact_paths: ["*.log", "benchmarks/long_doc_qa/*.json"]
 
       - label: ":test_tube: local_disk_with_v3"
-        command: .buildkite/scripts/is-operator-only.sh && exit 0; .buildkite/k3_tests/comprehensive/run.sh local_disk_with_v3.yaml
+        command: .buildkite/k3_tests/comprehensive/run.sh local_disk_with_v3.yaml
         timeout_in_minutes: 30
         agents: { queue: "k8s" }
         plugins: [{ kubernetes: { podSpec: *pod-1gpu } }]
         artifact_paths: ["*.log", "benchmarks/long_doc_qa/*.json"]
 
       - label: ":test_tube: multi_device"
-        command: .buildkite/scripts/is-operator-only.sh && exit 0; .buildkite/k3_tests/comprehensive/run.sh multi_device.yaml
+        command: .buildkite/k3_tests/comprehensive/run.sh multi_device.yaml
         timeout_in_minutes: 30
         agents: { queue: "k8s" }
         plugins: [{ kubernetes: { podSpec: *pod-1gpu } }]
         artifact_paths: ["*.log", "benchmarks/long_doc_qa/*.json"]
 
       - label: ":test_tube: layerwise"
-        command: .buildkite/scripts/is-operator-only.sh && exit 0; .buildkite/k3_tests/comprehensive/run.sh layerwise.yaml
+        command: .buildkite/k3_tests/comprehensive/run.sh layerwise.yaml
         timeout_in_minutes: 30
         agents: { queue: "k8s" }
         plugins: [{ kubernetes: { podSpec: *pod-1gpu } }]

@@ -66,9 +66,6 @@ while IFS= read -r f; do
     asset/*)
       add_safe_category "asset/"
       ;;
-    operator/*)
-      add_safe_category "operator/"
-      ;;
     *)
       # Non-safe file touched -> run comprehensive tests.
       exit 0

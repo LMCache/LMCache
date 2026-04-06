@@ -6,7 +6,6 @@ steps:
     key: "test"
     timeout_in_minutes: 60
     commands:
-      - .buildkite/scripts/is-operator-only.sh && exit 0
       - .buildkite/scripts/should-run-comprehensive.sh || exit 0 # Skip comprehensive tests for safe-path-only PRs.
       - chmod +x .buildkite/scripts/vllm-integration-tests.sh
       - |

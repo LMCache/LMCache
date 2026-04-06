@@ -6,7 +6,7 @@ steps:
   - group: ":compression: Multiprocess"
     steps:
       - label: ":compression: lm_eval"
-        command: .buildkite/scripts/is-operator-only.sh && exit 0; .buildkite/k3_tests/multiprocess/run.sh lm_eval
+        command: .buildkite/k3_tests/multiprocess/run.sh lm_eval
         timeout_in_minutes: 30
         agents: { queue: "k8s" }
         plugins:
@@ -24,28 +24,28 @@ steps:
         artifact_paths: ["*.log"]
 
       - label: ":compression: vllm_bench"
-        command: .buildkite/scripts/is-operator-only.sh && exit 0; .buildkite/k3_tests/multiprocess/run.sh vllm_bench
+        command: .buildkite/k3_tests/multiprocess/run.sh vllm_bench
         timeout_in_minutes: 30
         agents: { queue: "k8s" }
         plugins: [{ kubernetes: { podSpec: *pod-2gpu } }]
         artifact_paths: ["*.log"]
 
       - label: ":compression: long_doc_qa"
-        command: .buildkite/scripts/is-operator-only.sh && exit 0; .buildkite/k3_tests/multiprocess/run.sh long_doc_qa
+        command: .buildkite/k3_tests/multiprocess/run.sh long_doc_qa
         timeout_in_minutes: 30
         agents: { queue: "k8s" }
         plugins: [{ kubernetes: { podSpec: *pod-2gpu } }]
         artifact_paths: ["*.log"]
 
       - label: ":compression: long_doc_qa_l2"
-        command: .buildkite/scripts/is-operator-only.sh && exit 0; .buildkite/k3_tests/multiprocess/run.sh long_doc_qa_l2
+        command: .buildkite/k3_tests/multiprocess/run.sh long_doc_qa_l2
         timeout_in_minutes: 30
         agents: { queue: "k8s" }
         plugins: [{ kubernetes: { podSpec: *pod-2gpu } }]
         artifact_paths: ["*.log"]
 
       - label: ":compression: fault_tolerance"
-        command: .buildkite/scripts/is-operator-only.sh && exit 0; .buildkite/k3_tests/multiprocess/run.sh fault_tolerance
+        command: .buildkite/k3_tests/multiprocess/run.sh fault_tolerance
         timeout_in_minutes: 30
         agents: { queue: "k8s" }
         plugins: [{ kubernetes: { podSpec: *pod-2gpu } }]
