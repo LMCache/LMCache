@@ -23,6 +23,29 @@ BUILD_ID="${BUILD_ID:-local_$$}"
 PID_FILE="/tmp/lmcache_mp_pids_${BUILD_ID}"
 TIMEOUT_SECONDS=180   # 3 minutes
 
+# ── Install py-spy for deadlock diagnosis ──────────────────
+echo "=== Installing py-spy ==="
+uv pip install py-spy
+PY_SPY="$(which py-spy)"
+echo "py-spy installed at: $PY_SPY"
+
+PYSPY_LOG="/tmp/build_${BUILD_ID}_pyspy.log"
+
+# ── Helper: dump stacks of server processes via py-spy ─────
+dump_stacks() {
+    echo "" | tee -a "$PYSPY_LOG"
+    echo "=== py-spy stack dump (native + Python) ===" | tee -a "$PYSPY_LOG"
+
+    if kill -0 "$LMCACHE_PID" 2>/dev/null; then
+        echo "" | tee -a "$PYSPY_LOG"
+        echo "--- LMCache server (PID=$LMCACHE_PID) ---" | tee -a "$PYSPY_LOG"
+        sudo "$PY_SPY" dump --pid "$LMCACHE_PID" --native 2>&1 | tee -a "$PYSPY_LOG" || true
+    fi
+
+    # Copy to repo root so cleanup.sh collects it as a Buildkite artifact
+    cp "$PYSPY_LOG" "${REPO_ROOT}/build_${BUILD_ID}_pyspy.log" 2>/dev/null || true
+}
+
 # ── 1. Launch LMCache server ───────────────────────────────
 echo "=== Launching LMCache server ==="
 echo "Port: $LMCACHE_PORT"
@@ -68,6 +91,7 @@ vllm serve "$MODEL" \
     --max-num-batched-tokens 16000 \
     --scheduling-policy fcfs \
     --port "$SAVED_VLLM_PORT" \
+    --enforce-eager \
     --kv-transfer-config "{\"kv_connector\":\"LMCacheMPConnector\", \"kv_role\":\"kv_both\", \"kv_load_failure_policy\": \"recompute\", \"kv_connector_extra_config\": {\"lmcache.mp.port\": $LMCACHE_PORT, \"lmcache.mp.mq_timeout\": 60}}" \
     > "/tmp/build_${BUILD_ID}_vllm.log" 2>&1 &
 
