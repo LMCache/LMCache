@@ -33,6 +33,7 @@ from lmcache.integration.vllm.utils import (
     extract_mm_features,
     lmcache_get_or_create_config,
 )
+from lmcache.integration.vllm.vllm_service_factory import VllmServiceFactory
 from lmcache.logging import init_logger
 from lmcache.observability import LMCStatsMonitor, PrometheusLogger
 from lmcache.utils import CacheStoreEvent, _lmcache_nvtx_annotate, cdiv
@@ -135,6 +136,9 @@ class RequestTracker:
     # Whether the request cache should be saved
     skip_save: bool = False
 
+    # The number of tokens that are cached in LMCache for this request
+    num_lmcache_cached_tokens: int = 0
+
     @_lmcache_nvtx_annotate
     @staticmethod
     def from_new_request(
@@ -194,6 +198,7 @@ class RequestTracker:
             mm_positions=mm_positions,
             skip_save=skip_save,
             request_configs=request_configs,
+            num_lmcache_cached_tokens=lmcache_cached_tokens,
         )
 
     def update(
@@ -456,13 +461,8 @@ class LMCacheConnectorV1Impl:
         self._apply_extra_config(config, vllm_config)
         self.config = config
 
-        # Initialize LMCacheManager to handle internal components
-        self._manager = LMCacheManager(
-            config=config,
-            vllm_config=vllm_config,
-            role=role.name.lower(),
-            connector=self,
-        )
+        service_factory = VllmServiceFactory(config, vllm_config, role.name.lower())
+        self._manager = LMCacheManager(config, service_factory, connector=self)
 
         # Start services managed by LMCacheManager
         self._manager.start_services()
@@ -819,6 +819,7 @@ class LMCacheConnectorV1Impl:
                         token_mask[:lmcache_cached_tokens],
                         kvcaches=kvcaches,
                         slot_mapping=slot_mapping[:lmcache_cached_tokens],
+                        vllm_cached_tokens=request.load_spec.vllm_cached_tokens,
                     )
                 else:
                     layerwise_retriever = self.lmcache_engine.retrieve_layer(
@@ -826,6 +827,7 @@ class LMCacheConnectorV1Impl:
                         token_mask[:lmcache_cached_tokens],
                         kvcaches=kvcaches,
                         slot_mapping=slot_mapping[:lmcache_cached_tokens],
+                        vllm_cached_tokens=request.load_spec.vllm_cached_tokens,
                         sync=sync,
                     )
                     # NOTE: retrieve for two layers at the first layer
@@ -838,6 +840,7 @@ class LMCacheConnectorV1Impl:
                     token_mask[:lmcache_cached_tokens],
                     kvcaches=kvcaches,
                     slot_mapping=slot_mapping[:lmcache_cached_tokens],
+                    vllm_cached_tokens=request.load_spec.vllm_cached_tokens,
                     request_configs=request.request_configs,
                     req_id=request.req_id,
                 )
@@ -1082,6 +1085,14 @@ class LMCacheConnectorV1Impl:
 
         if self.kv_role == "kv_consumer":
             # Don't do save if the role is kv_consumer
+            # But still need to unpin the kv caches according to req_id
+            # to balance the pin count from contains()
+            assert self.lmcache_engine is not None, (
+                "LMCacheEngine must be initialized to unpin requests."
+            )
+            for request in connector_metadata.requests:
+                self.lmcache_engine.lookup_unpin(request.req_id)
+
             return
 
         if self.use_layerwise:
@@ -1530,8 +1541,13 @@ class LMCacheConnectorV1Impl:
             # TODO: this is a dangerous reference to the request object inside vllm
             if request := self._unfinished_requests.get(req_id):
                 num_current_tokens = request.num_computed_tokens
+                # tracker_len < num_computed_tokens during decode
+                #   (important for save_decode_cache).
+                # num_computed_tokens < tracker_len after preemption.
+                tracker_len = len(request_tracker.token_ids)
+                slice_base = min(num_current_tokens, tracker_len)
                 new_token_ids = request.all_token_ids[
-                    num_current_tokens : num_current_tokens + num_new_tokens
+                    slice_base : slice_base + num_new_tokens
                 ]
             else:
                 raise ValueError(
@@ -1569,13 +1585,22 @@ class LMCacheConnectorV1Impl:
                 # and then set to the number of already cached tokens (maxxing
                 # prefix caching and lmcache)
                 # this assumption is crucial for the update() call of RequestTracker
-                assert request.num_computed_tokens == max(
-                    lmcache_cached_tokens, load_spec.vllm_cached_tokens
-                ), (
+                # On full cache hit, get_num_new_matched_tokens subtracts 1
+                # to force last-token recomputation. This only affects
+                # num_computed_tokens when lmcache has all tokens AND
+                # provides more than vLLM's local cache.
+                expected = max(lmcache_cached_tokens, load_spec.vllm_cached_tokens)
+                full_hit_adj = (
+                    lmcache_cached_tokens == len(request.all_token_ids)
+                    and lmcache_cached_tokens > load_spec.vllm_cached_tokens
+                )
+                if full_hit_adj:
+                    expected -= 1
+                assert request.num_computed_tokens == expected, (
                     f"Preempted request {req_id} has "
                     f"num_computed_tokens {request.num_computed_tokens} "
-                    "but max(lmcache_cached_tokens, vllm_cached_tokens) = "
-                    f"{max(lmcache_cached_tokens, vllm_cached_tokens)}"
+                    f"but expected {expected} "
+                    f"(full_hit_adj={full_hit_adj})"
                 )
 
             # When retrieve fail, vllm will call _handle_invalid_blocks to
@@ -1668,6 +1693,16 @@ class LMCacheConnectorV1Impl:
             return_params = {
                 "first_tok": request._output_token_ids[0],
             }
+
+        if self.config.get_extra_config_value(
+            "enable_cache_usage_details_in_response", False
+        ):
+            request_tracker = self._request_trackers.get(request.request_id)
+            if request_tracker:
+                return_params = return_params or {}
+                return_params["num_lmcache_cached_tokens"] = (
+                    request_tracker.num_lmcache_cached_tokens
+                )
 
         return False, return_params
 

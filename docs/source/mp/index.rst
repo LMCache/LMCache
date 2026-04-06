@@ -40,14 +40,16 @@ LMCache ships three server entry points:
 
    * - Entry Point
      - Description
-   * - ``python3 -m lmcache.v1.multiprocess.server``
-     - ZMQ-only server using MPCacheEngine (default, production).
-   * - ``python3 -m lmcache.v1.multiprocess.http_server``
-     - ZMQ + FastAPI HTTP frontend (adds ``/api/healthcheck`` for K8s probes).
+   * - ``lmcache server``
+     - **Recommended.** ZMQ + FastAPI HTTP frontend (adds ``/api/healthcheck``
+       for K8s probes, ``/api/clear-cache``, ``/api/status``).
        Use ``--engine-type blend`` to enable BlendEngineV2 for cross-request
-       KV reuse (replaces the standalone ``blend_server`` entry point).
-   * - ``python3 -m lmcache.v1.multiprocess.blend_server``
-     - Legacy CacheBlend-enabled server. Prefer ``http_server --engine-type blend``.
+       KV reuse.
+   * - ``python3 -m lmcache.v1.multiprocess.server``
+     - (Legacy) ZMQ-only server using MPCacheEngine (no HTTP endpoints).
+       Prefer ``lmcache server``.
+   * - ``python3 -m lmcache.v1.multiprocess.blend_server_v2``
+     - (Legacy) CacheBlend-enabled server. Prefer ``lmcache server --engine-type blend``.
 
 .. toctree::
    :maxdepth: 2
@@ -57,5 +59,6 @@ LMCache ships three server entry points:
    configuration
    l2_storage
    deployment
+   operator
    observability
    architecture

@@ -5,9 +5,10 @@ LMCache multiprocess mode supports a two-tier storage architecture:
 
 - **L1 (in-memory)** -- Fast CPU memory managed by the L1 Manager.  All KV
   cache chunks live here during active use.
-- **L2 (persistent)** -- Durable storage backends accessed through NIXL.
-  The StoreController asynchronously pushes data from L1 to L2, and the
-  PrefetchController loads data from L2 back into L1 on cache misses.
+- **L2 (persistent)** -- Durable storage backends (NIXL-based or plain
+  file-system).  The StoreController asynchronously pushes data from L1
+  to L2, and the PrefetchController loads data from L2 back into L1 on
+  cache misses.
 
 .. contents::
    :local:
@@ -94,6 +95,107 @@ The ``OBJ`` backend (object store) does not require ``file_path``.
     # OBJ backend
     --l2-adapter '{"type": "nixl_store", "backend": "OBJ", "backend_params": {}, "pool_size": 32}'
 
+``fs`` -- File-system backed storage
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+A pure file-system L2 adapter using async I/O (``aiofiles``).  Each KV cache
+object is stored as a raw ``.data`` file whose name encodes the full
+``ObjectKey``.  Does **not** require NIXL -- works on any POSIX file system.
+
+**Required fields:**
+
+- ``base_path``: Directory for storing KV cache files.
+
+**Optional fields:**
+
+- ``relative_tmp_dir``: Relative sub-directory for temporary files during
+  writes (atomic rename on completion).
+- ``read_ahead_size``: Trigger file-system read-ahead by reading this many
+  bytes first (positive integer, optional).
+- ``use_odirect``: ``true`` or ``false`` (default ``false``) -- bypass the
+  page cache via ``O_DIRECT``.
+
+**Configuration examples:**
+
+.. code-block:: bash
+
+    # Basic FS adapter
+    --l2-adapter '{"type": "fs", "base_path": "/data/lmcache/l2"}'
+
+    # With temp directory
+    --l2-adapter '{"type": "fs", "base_path": "/data/lmcache/l2", "relative_tmp_dir": ".tmp"}'
+
+    # With O_DIRECT for bypassing page cache
+    --l2-adapter '{"type": "fs", "base_path": "/data/lmcache/l2", "use_odirect": true}'
+
+``mooncake_store`` -- Mooncake Store native connector
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+An L2 adapter backed by the native C++ Mooncake Store connector.  Uses
+`Mooncake <https://github.com/kvcache-ai/Mooncake>`_ for high-performance
+distributed KV cache storage with RDMA support.
+
+**Prerequisites -- Building with Mooncake support:**
+
+The Mooncake extension is **not** built by default.  You must explicitly
+enable it:
+
+.. code-block:: bash
+
+    BUILD_MOONCAKE=1 pip install -e . --verbose
+
+The ``BUILD_MOONCAKE`` environment variable controls compilation:
+
+- ``BUILD_MOONCAKE=1``: Enable the Mooncake C++ extension.
+- ``BUILD_MOONCAKE=0``: Force disable (highest priority), even if
+  ``MOONCAKE_INCLUDE_DIR`` is set.
+- **Not set**: Falls back to checking ``MOONCAKE_INCLUDE_DIR`` for
+  backward compatibility.  If ``MOONCAKE_INCLUDE_DIR`` is also unset,
+  the extension is skipped.
+
+If the Mooncake headers are not installed in the system include path
+(e.g., ``/usr/local/include``), you must point to them explicitly:
+
+.. code-block:: bash
+
+    BUILD_MOONCAKE=1 \
+    MOONCAKE_INCLUDE_DIR=/path/to/mooncake/include \
+    MOONCAKE_LIB_DIR=/path/to/mooncake/lib \
+    pip install -e . --verbose
+
+**LMCache-specific fields:**
+
+- ``num_workers``: Number of C++ worker threads (default ``4``, must
+  be > 0).
+
+**Mooncake fields:**
+
+All other keys in the JSON config (except ``type``, ``num_workers``,
+and ``eviction``) are forwarded **as-is** to Mooncake's
+``setup_internal(ConfigDict)``.  Refer to the
+`Mooncake documentation <https://github.com/kvcache-ai/Mooncake>`_
+for available setup keys (e.g., ``local_hostname``,
+``metadata_server``, ``master_server_address``, ``protocol``,
+``device_name``, ``global_segment_size``).
+
+**Configuration example:**
+
+.. code-block:: bash
+
+    --l2-adapter '{
+      "type": "mooncake_store",
+      "num_workers": 4,
+      "local_hostname": "node01",
+      "metadata_server": "http://localhost:8080/metadata",
+      "master_server_address": "localhost:50051",
+      "protocol": "tcp",
+      "local_buffer_size": "3221225472"
+      "global_segment_size": "3221225472"
+    }'
+
+For full Mooncake setup instructions (master service, metadata server,
+etc.), see `Mooncake <https://github.com/kvcache-ai/Mooncake>`_ .
+
 ``mock`` -- Mock adapter for testing
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -123,6 +225,227 @@ argument.  Adapters are used in the order they are specified.  The
     --l2-adapter '{"type": "nixl_store", "backend": "POSIX", "backend_params": {"file_path": "/data/ssd/l2", "use_direct_io": "false"}, "pool_size": 64}' \
     --l2-adapter '{"type": "nixl_store", "backend": "GDS", "backend_params": {"file_path": "/data/nvme/l2", "use_direct_io": "true"}, "pool_size": 128}'
 
+Store and Prefetch Policies
+----------------------------
+
+The **store policy** controls how keys flow from L1 to L2: which adapters
+receive each key and whether keys are deleted from L1 after a successful
+L2 store.  The **prefetch policy** controls how keys flow from L2 back to
+L1: when multiple adapters have the same key, the policy decides which
+adapter loads it.
+
+Select policies via CLI:
+
+.. code-block:: bash
+
+    --l2-store-policy default \
+    --l2-prefetch-policy default
+
+**Built-in policies:**
+
+.. list-table::
+   :header-rows: 1
+   :widths: 15 15 70
+
+   * - Flag
+     - Name
+     - Behaviour
+   * - ``--l2-store-policy``
+     - ``default``
+     - Store all keys to all adapters.  Never delete from L1.
+   * - ``--l2-store-policy``
+     - ``skip_l1``
+     - Buffer-only mode.  Store all keys to all adapters, then
+       **delete them from L1** immediately.  Pair with
+       ``--eviction-policy noop`` to avoid useless LRU overhead.
+   * - ``--l2-prefetch-policy``
+     - ``default``
+     - For each key, pick the first (lowest-indexed) adapter that has it.
+
+Prefetch Concurrency
+~~~~~~~~~~~~~~~~~~~~~
+
+The ``--l2-prefetch-max-in-flight`` flag limits the number of concurrent
+prefetch requests that the ``PrefetchController`` can have in flight at
+any time.  A higher value increases L2-to-L1 throughput but also
+increases L1 memory pressure from in-flight data.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 30 15 55
+
+   * - Flag
+     - Default
+     - Description
+   * - ``--l2-prefetch-max-in-flight``
+     - ``8``
+     - Maximum number of concurrent prefetch requests.
+
+Buffer-Only Mode
+~~~~~~~~~~~~~~~~~
+
+When L1 is used purely as a write buffer (all data lives in L2), use
+``--l2-store-policy skip_l1`` together with ``--eviction-policy noop``.
+This combination deletes keys from L1 as soon as they are stored to L2
+and disables the LRU eviction tracker entirely, reducing memory and CPU
+overhead.
+
+.. code-block:: bash
+
+    --eviction-policy noop \
+    --l2-store-policy skip_l1 \
+    --l2-prefetch-policy default
+
+Policies are extensible -- new policies can be added by creating a file
+in ``storage_controllers/`` and calling ``register_store_policy()`` or
+``register_prefetch_policy()`` at import time.  See the design doc
+``l2_adapters/design_docs/overall.md`` for details.
+
+Eviction
+--------
+
+LMCache supports eviction at both storage tiers so that each tier
+can operate within a fixed capacity budget.
+
+L1 Eviction
+~~~~~~~~~~~
+
+L1 eviction runs a single background thread that monitors overall L1
+memory usage. When usage exceeds ``trigger_watermark``, the eviction
+policy evicts a fraction of the least-recently-used keys.
+
+**CLI flags:**
+
+.. list-table::
+   :header-rows: 1
+   :widths: 30 15 55
+
+   * - Flag
+     - Default
+     - Description
+   * - ``--eviction-policy``
+     - *(required)*
+     - Policy name: ``LRU`` or ``noop``.
+   * - ``--eviction-trigger-watermark``
+     - ``0.8``
+     - L1 usage fraction [0, 1] above which eviction is triggered.
+   * - ``--eviction-ratio``
+     - ``0.2``
+     - Fraction of currently allocated L1 memory to evict per cycle.
+
+**Example:**
+
+.. code-block:: bash
+
+    --eviction-policy LRU \
+    --eviction-trigger-watermark 0.8 \
+    --eviction-ratio 0.2
+
+L2 Eviction
+~~~~~~~~~~~
+
+L2 eviction is **per-adapter** and **opt-in**. Each adapter can
+independently declare an eviction policy by adding an ``"eviction"``
+sub-object to its ``--l2-adapter`` JSON spec. Adapters without an
+``"eviction"`` key have no eviction controller.
+
+When L2 eviction is enabled for an adapter, a dedicated background
+thread monitors that adapter's ``get_usage()`` value. Once usage
+exceeds ``trigger_watermark``, the policy evicts keys until usage
+drops by ``eviction_ratio``.
+
+**``"eviction"`` sub-object fields:**
+
+.. list-table::
+   :header-rows: 1
+   :widths: 25 15 60
+
+   * - Field
+     - Default
+     - Description
+   * - ``eviction_policy``
+     - *(required)*
+     - Policy name: ``"LRU"`` or ``"noop"``.
+   * - ``trigger_watermark``
+     - ``0.8``
+     - Adapter usage fraction [0, 1] above which eviction is triggered.
+   * - ``eviction_ratio``
+     - ``0.2``
+     - Fraction of used capacity to evict per cycle.
+
+**Example — nixl_store with LRU eviction:**
+
+.. code-block:: bash
+
+    --l2-adapter '{
+      "type": "nixl_store",
+      "backend": "POSIX",
+      "backend_params": {"file_path": "/data/lmcache/l2", "use_direct_io": "false"},
+      "pool_size": 128,
+      "eviction": {
+        "eviction_policy": "LRU",
+        "trigger_watermark": 0.8,
+        "eviction_ratio": 0.2
+      }
+    }'
+
+**Adapter support:**
+
+.. list-table::
+   :header-rows: 1
+   :widths: 30 70
+
+   * - Adapter
+     - L2 Eviction Support
+   * - ``nixl_store``
+     - Full support. ``delete`` frees pool slots; pinned keys (in-flight
+       loads) are skipped and retried on the next cycle.
+   * - ``mock``
+     - Full support. Useful for testing eviction behaviour without
+       real storage hardware.
+   * - ``mooncake_store``
+     - No eviction support (native connector adapter).
+   * - ``fs``
+     - No eviction support (``delete`` and ``get_usage`` are no-ops).
+   * - native connectors
+     - No eviction support.
+
+.. note::
+
+   Each L2 adapter instance gets its own independent eviction
+   controller and policy.  Two adapters of the same type can have
+   different watermarks or policies.
+
+Combined L1 + L2 Eviction Example
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. code-block:: bash
+
+    --l1-size-gb 100 \
+    --eviction-policy LRU \
+    --eviction-trigger-watermark 0.8 \
+    --eviction-ratio 0.2 \
+    --l2-adapter '{
+      "type": "nixl_store",
+      "backend": "GDS",
+      "backend_params": {"file_path": "/data/nvme/l2", "use_direct_io": "true"},
+      "pool_size": 256,
+      "eviction": {
+        "eviction_policy": "LRU",
+        "trigger_watermark": 0.9,
+        "eviction_ratio": 0.1
+      }
+    }'
+
+In this setup:
+
+- L1 evicts from memory when it is 80 % full, reclaiming 20 % of
+  allocated memory per cycle.
+- L2 (NIXL/GDS) evicts from the storage pool when 90 % of pool slots
+  are occupied, reclaiming 10 % per cycle.
+- Both tiers use independent LRU policies, so each evicts its own
+  least-recently-used keys.
+
 Verifying L2 Storage
 --------------------
 
@@ -130,7 +453,7 @@ Set ``LMCACHE_LOG_LEVEL=DEBUG`` to see L2 activity in the server logs:
 
 .. code-block:: bash
 
-    LMCACHE_LOG_LEVEL=DEBUG python3 -m lmcache.v1.multiprocess.server \
+    LMCACHE_LOG_LEVEL=DEBUG lmcache server \
         --l1-size-gb 100 --eviction-policy LRU \
         --l2-adapter '{"type": "nixl_store", "backend": "POSIX", "backend_params": {"file_path": "/data/lmcache/l2", "use_direct_io": "false"}, "pool_size": 64}'
 

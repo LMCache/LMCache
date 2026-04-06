@@ -12,6 +12,7 @@ import torch
 import zmq
 
 # First Party
+from lmcache.integration.vllm.utils import get_size_bytes
 from lmcache.logging import init_logger
 from lmcache.utils import (
     STR_DTYPE_TO_TORCH_DTYPE,
@@ -219,8 +220,6 @@ class PDBackend(AllocatorBackendInterface):
     def initialize_allocator(
         self, config: LMCacheEngineConfig, metadata: LMCacheMetadata
     ) -> PagedCpuGpuMemoryAllocator:
-        # First Party
-
         if self.corrected_device != "cpu":
             logger.info(f"Setting cuda device to {self.corrected_device} ")
             torch.cuda.set_device(self.corrected_device)
@@ -233,10 +232,33 @@ class PDBackend(AllocatorBackendInterface):
             else paged_mem_allocator.init_gpu_memory_allocator
         )
 
+        # Calculate the chunk size (align_bytes) and align buffer size
+        shapes = [torch.Size(metadata.kv_shape)]
+        dtypes = [metadata.kv_dtype]
+        chunk_size_bytes = get_size_bytes(shapes, dtypes)
+        origin_buffer_size = config.pd_buffer_size
+        aligned_buffer_size = origin_buffer_size // chunk_size_bytes * chunk_size_bytes
+
+        if aligned_buffer_size == 0 and origin_buffer_size > 0:
+            raise ValueError(
+                f"pd_buffer_size ({origin_buffer_size}) is smaller than a "
+                f"single chunk ({chunk_size_bytes}), resulting in an aligned "
+                f"buffer of size 0. Please increase pd_buffer_size to be at "
+                f"least {chunk_size_bytes}."
+            )
+
+        if aligned_buffer_size != origin_buffer_size:
+            logger.info(
+                f"Auto align pd_buffer_size, origin: {origin_buffer_size}, "
+                f"aligned: {aligned_buffer_size}, chunk size: {chunk_size_bytes}. "
+                f"The remaining {origin_buffer_size - aligned_buffer_size} bytes "
+                f"will not be allocated."
+            )
+
         init_func(
-            config.pd_buffer_size,
-            [torch.Size(metadata.kv_shape)],
-            [metadata.kv_dtype],
+            aligned_buffer_size,
+            shapes,
+            dtypes,
             MemoryFormat.KV_2LTD,  # TODO: remove this hardcode
         )
 

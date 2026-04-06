@@ -181,7 +181,7 @@ class LocalDiskBackend(StorageBackendInterface):
 
         self._restore_disk_cache_state()
 
-    def __str__(self):
+    def __str__(self) -> str:
         return "LocalDiskBackend"
 
     def _key_to_path(
@@ -567,11 +567,11 @@ class LocalDiskBackend(StorageBackendInterface):
                 all_evict_keys.extend(evict_keys)
             if evict_success:
                 self.current_cache_size += required_size
+                self.cache_policy.update_on_put(key)
 
         if not evict_success:
             return None
 
-        self.cache_policy.update_on_put(key)
         memory_obj.ref_count_up()
 
         asyncio.run_coroutine_threadsafe(
@@ -668,15 +668,24 @@ class LocalDiskBackend(StorageBackendInterface):
             assert dtype is not None
             assert shape is not None
 
+            # busy_loop=False prevents spinning on the event loop thread;
+            # if staging memory is exhausted the caller will get a logged
+            # error rather than a silent deadlock.
             memory_obj = self.local_cpu_backend.allocate(
                 shape,
                 dtype,
                 fmt,
+                busy_loop=False,
             )
 
-            assert memory_obj is not None, (
-                "Memory allocation failed during async disk load."
-            )
+            if memory_obj is None:
+                logger.error(
+                    "Memory allocation failed during async disk load for key %s. "
+                    "CPU staging pool may be exhausted (unpin() not called after "
+                    "a previous retrieve). Returning partial results.",
+                    key,
+                )
+                return mem_objs
 
             self.dict[key].pin()
 
@@ -885,7 +894,7 @@ class LocalDiskBackend(StorageBackendInterface):
         )
         return True
 
-    def get_allocator_backend(self):
+    def get_allocator_backend(self) -> LocalCPUBackend:
         return self.local_cpu_backend
 
     def _release_prefetch_resources(

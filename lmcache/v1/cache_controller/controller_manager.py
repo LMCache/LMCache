@@ -524,3 +524,12 @@ class LMCacheControllerManager:
             *tasks,
             return_exceptions=True,
         )
+
+    def close(self):
+        """Clean up all resources owned by the controller manager."""
+        if hasattr(self, "controller_pull_socket"):
+            self.controller_pull_socket.close()
+        if hasattr(self, "controller_reply_socket"):
+            self.controller_reply_socket.close()
+        if hasattr(self, "zmq_context"):
+            self.zmq_context.destroy()

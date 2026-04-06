@@ -40,7 +40,7 @@ from lmcache.v1.distributed.config import (
     L1MemoryManagerConfig,
     StorageManagerConfig,
 )
-from lmcache.v1.mp_observability.config import DEFAULT_PROMETHEUS_CONFIG
+from lmcache.v1.mp_observability.config import DEFAULT_OBSERVABILITY_CONFIG
 from lmcache.v1.multiprocess.blend_server_v2 import BlendTokenRangeMatcher
 from lmcache.v1.multiprocess.custom_types import (
     CBMatchResult,
@@ -256,6 +256,71 @@ class TestBlendTokenRangeMatcher:
         assert r.cur_st == chunk_size  # chunk_a starts after the prefix
         assert r.cur_ed == 2 * chunk_size
 
+    def test_remove_chunks_evicts_entry(self):
+        """After remove_chunks, the evicted chunk no longer matches."""
+        chunk_size = 4
+        matcher = BlendTokenRangeMatcher(chunk_size=chunk_size)
+        chunk_a = [1, 2, 3, 4]
+        chunk_b = [5, 6, 7, 8]
+        hash_a = ObjectKey.IntHash2Bytes(1001)
+        hash_b = ObjectKey.IntHash2Bytes(1002)
+        matcher.on_new_token_hashes(chunk_a + chunk_b, [hash_a, hash_b])
+
+        # Both chunks match before eviction
+        results = matcher.match_sub_sequence(chunk_a + chunk_b)
+        assert len(results) == 2
+
+        # Evict chunk_a
+        matcher.remove_chunks([hash_a])
+
+        # Only chunk_b matches now
+        results = matcher.match_sub_sequence(chunk_a + chunk_b)
+        assert len(results) == 1
+        assert results[0].hash == hash_b
+
+    def test_remove_chunks_all_evicted_returns_empty(self):
+        """Evicting all registered chunks yields no matches."""
+        chunk_size = 4
+        matcher = BlendTokenRangeMatcher(chunk_size=chunk_size)
+        chunk_a = [1, 2, 3, 4]
+        hash_a = ObjectKey.IntHash2Bytes(2001)
+        matcher.on_new_token_hashes(chunk_a, [hash_a])
+
+        matcher.remove_chunks([hash_a])
+        assert matcher.match_sub_sequence(chunk_a) == []
+
+    def test_remove_chunks_unknown_hash_is_noop(self):
+        """Removing a hash that was never registered does not crash."""
+        chunk_size = 4
+        matcher = BlendTokenRangeMatcher(chunk_size=chunk_size)
+        matcher.on_new_token_hashes([1, 2, 3, 4], [ObjectKey.IntHash2Bytes(3001)])
+
+        # Should not raise
+        matcher.remove_chunks([ObjectKey.IntHash2Bytes(9999)])
+
+        # Original entry still matches
+        results = matcher.match_sub_sequence([1, 2, 3, 4])
+        assert len(results) == 1
+
+    def test_remove_chunks_then_register_new(self):
+        """New registrations still work after eviction."""
+        chunk_size = 4
+        matcher = BlendTokenRangeMatcher(chunk_size=chunk_size)
+        hash_a = ObjectKey.IntHash2Bytes(4001)
+        hash_b = ObjectKey.IntHash2Bytes(4002)
+
+        matcher.on_new_token_hashes([1, 2, 3, 4], [hash_a])
+        matcher.remove_chunks([hash_a])
+
+        # Register a new chunk
+        matcher.on_new_token_hashes([10, 20, 30, 40], [hash_b])
+
+        # Old chunk gone, new chunk matches
+        assert matcher.match_sub_sequence([1, 2, 3, 4]) == []
+        results = matcher.match_sub_sequence([10, 20, 30, 40])
+        assert len(results) == 1
+        assert results[0].hash == hash_b
+
 
 # =============================================================================
 # Helper Functions and Classes for integration tests
@@ -433,7 +498,7 @@ def server_process_runner_v2(
     run_cache_server(
         mp_config=mp_config,
         storage_manager_config=storage_manager_config,
-        prometheus_config=DEFAULT_PROMETHEUS_CONFIG,
+        obs_config=DEFAULT_OBSERVABILITY_CONFIG,
     )
 
 
@@ -538,7 +603,7 @@ def registered_instance(
 
     future = client.submit_request(
         RequestType.REGISTER_KV_CACHE,
-        [instance_id, client_context.get_kv_cache(), "testmodel", 1],
+        [instance_id, client_context.get_kv_cache(), "testmodel", 1, {}],
         get_response_class(RequestType.REGISTER_KV_CACHE),
     )
     assert future.result(timeout=DEFAULT_TIMEOUT) is None

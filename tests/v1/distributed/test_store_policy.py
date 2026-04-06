@@ -9,7 +9,7 @@ Tests are written against the StorePolicy contract defined in store_policy.py.
 
 # First Party
 from lmcache.v1.distributed.api import ObjectKey
-from lmcache.v1.distributed.l2_adapters.config import MockL2AdapterConfig
+from lmcache.v1.distributed.l2_adapters.mock_l2_adapter import MockL2AdapterConfig
 from lmcache.v1.distributed.storage_controllers.store_policy import (
     AdapterDescriptor,
     DefaultStorePolicy,
