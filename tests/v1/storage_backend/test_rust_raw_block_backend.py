@@ -5,6 +5,7 @@ from __future__ import annotations
 
 # Standard
 from concurrent.futures import Future
+from typing import Any, Iterator
 import asyncio
 import os
 import struct
@@ -56,18 +57,18 @@ def loop_in_thread():
 
 
 @pytest.fixture(scope="module")
-def memory_allocator():
-    """Use a smaller allocator for this module so CI stays within runner memory limits."""
+def memory_allocator() -> Iterator[Any]:
+    """Use a smaller allocator for this module to fit CI runner memory."""
     _real = MixedMemoryAllocator(256 * 1024 * 1024)
 
     class _NoCloseWrapper:
-        def __init__(self, real):
+        def __init__(self, real: MixedMemoryAllocator) -> None:
             self._real = real
 
-        def __getattr__(self, name):
+        def __getattr__(self, name: str) -> Any:
             return getattr(self._real, name)
 
-        def close(self):
+        def close(self) -> None:
             pass
 
     try:
