@@ -58,6 +58,7 @@ class _LocalDiskManifest:
         entries: Mapping[CacheEngineKey, DiskCacheMetadata],
         version: int,
     ) -> "_LocalDiskManifest":
+        """Build a manifest snapshot from the current disk-cache entries."""
         return cls(
             cache_dir=cache_dir,
             version=version,
@@ -83,6 +84,7 @@ class _LocalDiskManifest:
         cache_dir: str,
         version: int,
     ) -> Optional["_LocalDiskManifest"]:
+        """Load a manifest from disk if the file exists and matches the schema."""
         if not os.path.exists(manifest_path):
             return None
 
@@ -114,6 +116,7 @@ class _LocalDiskManifest:
         return cls(cache_dir=cache_dir, version=version, entries=entries)
 
     def write(self, manifest_path: str) -> None:
+        """Persist the manifest to disk with an atomic replace."""
         manifest_dir = os.path.dirname(manifest_path)
         if not manifest_dir or not os.path.isdir(manifest_dir):
             logger.debug(
@@ -156,6 +159,7 @@ class _LocalDiskManifest:
                 os.remove(tmp_path)
 
     def restore_entries(self) -> list[tuple[CacheEngineKey, DiskCacheMetadata]]:
+        """Restore valid disk-cache entries described by this manifest."""
         restored_entries: list[tuple[CacheEngineKey, DiskCacheMetadata]] = []
 
         for key_str, entry in self.entries.items():
@@ -526,7 +530,8 @@ class LocalDiskBackend(StorageBackendInterface):
             if force:
                 self.cache_policy.update_on_force_evict(key)
 
-            self._save_manifest_locked()
+            if force:
+                self._save_manifest_locked()
         finally:
             if force:
                 self.disk_lock.release()
@@ -615,6 +620,8 @@ class LocalDiskBackend(StorageBackendInterface):
                 self.batched_remove(evict_keys, force=False)
 
                 all_evict_keys.extend(evict_keys)
+            if all_evict_keys:
+                self._save_manifest_locked()
             if evict_success:
                 self.current_cache_size += required_size
                 self.cache_policy.update_on_put(key)

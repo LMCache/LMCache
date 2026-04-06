@@ -462,3 +462,76 @@ class TestLocalDiskBackend:
             allow_first_write.set()
             local_disk_backend.close()
             local_cpu_backend.memory_allocator.close()
+
+    def test_submit_put_task_saves_manifest_once_for_batched_eviction(
+        self, temp_disk_path, loop_in_thread, memory_allocator, monkeypatch
+    ):
+        """Test batched eviction persists the manifest once after the loop."""
+        config = create_test_config(temp_disk_path)
+        local_cpu_backend = LocalCPUBackend(
+            config=config,
+            memory_allocator=memory_allocator,
+        )
+        local_disk_backend = LocalDiskBackend(
+            config=config,
+            loop=loop_in_thread,
+            local_cpu_backend=local_cpu_backend,
+            dst_device="cpu",
+        )
+
+        existing_keys = [create_test_key(i) for i in range(31, 34)]
+        new_key = create_test_key(34)
+        shape = torch.Size([1])
+        dtype = torch.bfloat16
+        fmt = MemoryFormat.KV_2LTD
+
+        class FakeMemoryObj:
+            def __init__(self) -> None:
+                self.tensor = object()
+
+            def get_physical_size(self) -> int:
+                return 2
+
+            def ref_count_up(self) -> None:
+                return
+
+        save_calls = 0
+
+        original_save_manifest_locked = local_disk_backend._save_manifest_locked
+
+        def counted_save_manifest_locked() -> None:
+            nonlocal save_calls
+            save_calls += 1
+            original_save_manifest_locked()
+
+        def fake_run_coroutine_threadsafe(coro, loop):
+            coro.close()
+            return None
+
+        monkeypatch.setattr(
+            local_disk_backend,
+            "_save_manifest_locked",
+            counted_save_manifest_locked,
+        )
+        monkeypatch.setattr(
+            local_disk_backend_module.asyncio,
+            "run_coroutine_threadsafe",
+            fake_run_coroutine_threadsafe,
+        )
+
+        try:
+            for key in existing_keys:
+                with open(local_disk_backend._key_to_path(key), "wb") as f:
+                    f.write(b"x")
+                local_disk_backend.insert_key(key, 1, shape, dtype, fmt)
+
+            local_disk_backend.max_cache_size = 3
+            local_disk_backend.current_cache_size = 3
+
+            local_disk_backend.submit_put_task(new_key, FakeMemoryObj())
+
+            assert save_calls == 1
+        finally:
+            monkeypatch.undo()
+            local_disk_backend.close()
+            local_cpu_backend.memory_allocator.close()
