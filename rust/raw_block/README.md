@@ -47,6 +47,11 @@ Use the benchmark commands in:
 
 No fixed numbers are included here because results are host/device/workload dependent.
 
+## LMCache Configuration
+
+In LMCache YAML, use the plugin name `raw_block` for `store_location` and
+`retrieve_locations`. Do not use `RustRawBlockBackend` there.
+
 ## Limitations
 
 - Linux only (`pread` / `pwrite`, O_DIRECT semantics).
