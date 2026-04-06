@@ -19,6 +19,7 @@ from lmcache.v1.memory_management import MemoryFormat
 from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 from lmcache.v1.storage_backend.local_disk_backend import LocalDiskBackend
+import lmcache.v1.storage_backend.local_disk_backend as local_disk_backend_module
 
 
 class MockLookupServer:
@@ -368,4 +369,96 @@ class TestLocalDiskBackend:
             assert key.to_string() not in manifest_data["entries"]
         finally:
             backend.close()
+            local_cpu_backend.memory_allocator.close()
+
+    def test_manifest_save_serializes_overlapping_writes(
+        self, temp_disk_path, loop_in_thread, memory_allocator, monkeypatch
+    ):
+        """Test blocked manifest writes keep later saves from overtaking them."""
+        config = create_test_config(temp_disk_path)
+        local_cpu_backend = LocalCPUBackend(
+            config=config,
+            memory_allocator=memory_allocator,
+        )
+        local_disk_backend = LocalDiskBackend(
+            config=config,
+            loop=loop_in_thread,
+            local_cpu_backend=local_cpu_backend,
+            dst_device="cpu",
+        )
+        key1 = create_test_key(21)
+        key2 = create_test_key(22)
+        shape = torch.Size([1])
+        dtype = torch.bfloat16
+        fmt = MemoryFormat.KV_2LTD
+
+        first_path = local_disk_backend._key_to_path(key1)
+        with open(first_path, "wb") as f:
+            f.write(b"1")
+        local_disk_backend.insert_key(key1, 1, shape, dtype, fmt)
+
+        first_write_started = threading.Event()
+        allow_first_write = threading.Event()
+        second_save_done = threading.Event()
+        thread_errors: list[Exception] = []
+
+        original_write = local_disk_backend_module._LocalDiskManifest.write
+
+        def delayed_write(
+            self: local_disk_backend_module._LocalDiskManifest,
+            manifest_path: str,
+        ) -> None:
+            if (
+                set(self.entries) == {key1.to_string()}
+                and not first_write_started.is_set()
+            ):
+                first_write_started.set()
+                assert allow_first_write.wait(timeout=5)
+            return original_write(self, manifest_path)
+
+        monkeypatch.setattr(
+            local_disk_backend_module._LocalDiskManifest,
+            "write",
+            delayed_write,
+        )
+
+        def save_second_manifest() -> None:
+            try:
+                second_path = local_disk_backend._key_to_path(key2)
+                with open(second_path, "wb") as f:
+                    f.write(b"2")
+                local_disk_backend.insert_key(key2, 1, shape, dtype, fmt)
+                local_disk_backend._save_manifest()
+            except Exception as e:
+                thread_errors.append(e)
+            finally:
+                second_save_done.set()
+
+        first_thread = threading.Thread(target=local_disk_backend._save_manifest)
+        second_thread = threading.Thread(target=save_second_manifest)
+
+        try:
+            first_thread.start()
+            assert first_write_started.wait(timeout=5)
+
+            second_thread.start()
+            assert not second_save_done.wait(timeout=1)
+
+            allow_first_write.set()
+            first_thread.join(timeout=5)
+            second_thread.join(timeout=5)
+
+            assert not thread_errors
+            assert not first_thread.is_alive()
+            assert not second_thread.is_alive()
+
+            with open(local_disk_backend.manifest_path, encoding="utf-8") as f:
+                manifest_data = json.load(f)
+            assert set(manifest_data["entries"]) == {
+                key1.to_string(),
+                key2.to_string(),
+            }
+        finally:
+            allow_first_write.set()
+            local_disk_backend.close()
             local_cpu_backend.memory_allocator.close()

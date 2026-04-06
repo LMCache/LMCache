@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from concurrent.futures import Future
-from typing import TYPE_CHECKING, Any, Callable, List, Optional, Sequence
+from typing import TYPE_CHECKING, Any, Callable, List, Mapping, Optional, Sequence
 import asyncio
 import json
 import os
@@ -38,6 +38,202 @@ if TYPE_CHECKING:
     from lmcache.v1.cache_controller.worker import LMCacheWorker
 
 logger = init_logger(__name__)
+
+
+class _LocalDiskManifest:
+    def __init__(
+        self,
+        cache_dir: str,
+        version: int,
+        entries: dict[str, dict[str, Any]],
+    ) -> None:
+        self.cache_dir = cache_dir
+        self.version = version
+        self.entries = entries
+
+    @classmethod
+    def from_cache_entries(
+        cls,
+        cache_dir: str,
+        entries: Mapping[CacheEngineKey, DiskCacheMetadata],
+        version: int,
+    ) -> "_LocalDiskManifest":
+        return cls(
+            cache_dir=cache_dir,
+            version=version,
+            entries={
+                key.to_string(): {
+                    "path": os.path.relpath(meta.path, cache_dir),
+                    "size": meta.size,
+                    "shape": list(meta.shape) if meta.shape is not None else None,
+                    "dtype": key.to_dict()["dtype"],
+                    "fmt": meta.fmt.name if meta.fmt is not None else None,
+                    "cached_positions": cls._serialize_cached_positions(
+                        meta.cached_positions
+                    ),
+                }
+                for key, meta in entries.items()
+            },
+        )
+
+    @classmethod
+    def load(
+        cls,
+        manifest_path: str,
+        cache_dir: str,
+        version: int,
+    ) -> Optional["_LocalDiskManifest"]:
+        if not os.path.exists(manifest_path):
+            return None
+
+        try:
+            with open(manifest_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception as e:
+            logger.warning(
+                "Failed to load local disk manifest %s: %s", manifest_path, e
+            )
+            return None
+
+        if not isinstance(data, dict) or data.get("version") != version:
+            logger.warning(
+                "Ignoring incompatible local disk manifest: %s", manifest_path
+            )
+            return None
+
+        raw_entries = data.get("entries", {})
+        if not isinstance(raw_entries, dict):
+            logger.warning("Ignoring malformed local disk manifest: %s", manifest_path)
+            return None
+
+        entries = {}
+        for key_str, raw_entry in raw_entries.items():
+            if isinstance(key_str, str) and isinstance(raw_entry, dict):
+                entries[key_str] = raw_entry
+
+        return cls(cache_dir=cache_dir, version=version, entries=entries)
+
+    def write(self, manifest_path: str) -> None:
+        manifest_dir = os.path.dirname(manifest_path)
+        if not manifest_dir or not os.path.isdir(manifest_dir):
+            logger.debug(
+                (
+                    "Skipping local disk manifest persistence because cache dir "
+                    "is missing: %s"
+                ),
+                manifest_dir,
+            )
+            return
+
+        tmp_path: Optional[str] = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                dir=manifest_dir,
+                prefix=os.path.basename(manifest_path) + ".",
+                suffix=".tmp",
+                delete=False,
+            ) as f:
+                json.dump(
+                    {
+                        "version": self.version,
+                        "entries": self.entries,
+                    },
+                    f,
+                )
+                tmp_path = f.name
+            os.replace(tmp_path, manifest_path)
+        except FileNotFoundError:
+            if os.path.isdir(manifest_dir):
+                logger.warning(
+                    "Failed to persist local disk manifest: manifest path disappeared"
+                )
+        except Exception as e:
+            logger.warning("Failed to persist local disk manifest: %s", e)
+        finally:
+            if tmp_path is not None and os.path.exists(tmp_path):
+                os.remove(tmp_path)
+
+    def restore_entries(self) -> list[tuple[CacheEngineKey, DiskCacheMetadata]]:
+        restored_entries: list[tuple[CacheEngineKey, DiskCacheMetadata]] = []
+
+        for key_str, entry in self.entries.items():
+            try:
+                key = parse_cache_key(key_str)
+            except ValueError:
+                continue
+
+            path = entry.get("path")
+            if not isinstance(path, str):
+                continue
+
+            full_path = os.path.join(self.cache_dir, path)
+            if not os.path.isfile(full_path):
+                continue
+
+            if entry.get("dtype") != key.to_dict()["dtype"]:
+                continue
+
+            shape_list = entry.get("shape")
+            if not isinstance(shape_list, list):
+                continue
+
+            try:
+                shape = torch.Size([int(v) for v in shape_list])
+            except (TypeError, ValueError):
+                continue
+
+            fmt_name = entry.get("fmt")
+            if (
+                not isinstance(fmt_name, str)
+                or fmt_name not in MemoryFormat.__members__
+            ):
+                continue
+
+            try:
+                size = int(entry.get("size", os.path.getsize(full_path)))
+            except (OSError, TypeError, ValueError):
+                continue
+
+            restored_entries.append(
+                (
+                    key,
+                    DiskCacheMetadata(
+                        path=full_path,
+                        size=size,
+                        shape=shape,
+                        dtype=key.dtype,
+                        cached_positions=self._deserialize_cached_positions(
+                            entry.get("cached_positions")
+                        ),
+                        fmt=MemoryFormat[fmt_name],
+                        pin_count=0,
+                    ),
+                )
+            )
+
+        return restored_entries
+
+    @staticmethod
+    def _serialize_cached_positions(
+        cached_positions: Optional[torch.Tensor],
+    ) -> Optional[list[int]]:
+        if cached_positions is None:
+            return None
+        return cached_positions.detach().cpu().tolist()
+
+    @staticmethod
+    def _deserialize_cached_positions(
+        cached_positions: Any,
+    ) -> Optional[torch.Tensor]:
+        if cached_positions is None or not isinstance(cached_positions, list):
+            return None
+
+        try:
+            return torch.tensor(cached_positions, dtype=torch.long)
+        except (TypeError, ValueError):
+            return None
 
 
 # TODO(Jiayi): handle cases where cache is repetitvely prefetched.
@@ -204,91 +400,21 @@ class LocalDiskBackend(StorageBackendInterface):
             f".lmcache-local-disk-manifest-{namespace.replace('/', '-')}.json",
         )
 
-    def _serialize_cached_positions(
-        self, cached_positions: Optional[torch.Tensor]
-    ) -> Optional[list[int]]:
-        if cached_positions is None:
-            return None
-        return cached_positions.detach().cpu().tolist()
-
-    def _deserialize_cached_positions(
-        self, cached_positions: Any
-    ) -> Optional[torch.Tensor]:
-        if cached_positions is None:
-            return None
-        if not isinstance(cached_positions, list):
-            return None
-        try:
-            return torch.tensor(cached_positions, dtype=torch.long)
-        except (TypeError, ValueError):
-            return None
-
-    def _build_manifest_data_locked(self) -> dict[str, Any]:
-        entries = {}
-        for key, meta in self.dict.items():
-            entries[key.to_string()] = {
-                "path": os.path.relpath(meta.path, self.path),
-                "size": meta.size,
-                "shape": list(meta.shape) if meta.shape is not None else None,
-                "dtype": key._dtype_str,
-                "fmt": (
-                    meta.fmt.name
-                    if meta.fmt is not None and hasattr(meta.fmt, "name")
-                    else None
-                ),
-                "cached_positions": self._serialize_cached_positions(
-                    meta.cached_positions
-                ),
-            }
-
-        data: dict[str, Any] = {
-            "version": self.MANIFEST_VERSION,
-            "entries": entries,
-        }
-        return data
-
-    def _write_manifest_data(self, data: dict[str, Any]) -> None:
-        manifest_dir = os.path.dirname(self.manifest_path)
-        if not manifest_dir or not os.path.isdir(manifest_dir):
-            logger.debug(
-                (
-                    "Skipping local disk manifest persistence because cache dir "
-                    "is missing: %s"
-                ),
-                manifest_dir,
-            )
-            return
-
-        tmp_path: Optional[str] = None
-        try:
-            with tempfile.NamedTemporaryFile(
-                mode="w",
-                encoding="utf-8",
-                dir=manifest_dir,
-                prefix=os.path.basename(self.manifest_path) + ".",
-                suffix=".tmp",
-                delete=False,
-            ) as f:
-                json.dump(data, f)
-                tmp_path = f.name
-            os.replace(tmp_path, self.manifest_path)
-        except FileNotFoundError:
-            if os.path.isdir(manifest_dir):
-                logger.warning(
-                    "Failed to persist local disk manifest: manifest path disappeared"
-                )
-        except Exception as e:
-            logger.warning("Failed to persist local disk manifest: %s", e)
-        finally:
-            if tmp_path is not None and os.path.exists(tmp_path):
-                os.remove(tmp_path)
+    def _save_manifest_locked(self) -> None:
+        """Persist the manifest while the caller holds ``disk_lock``."""
+        manifest = _LocalDiskManifest.from_cache_entries(
+            self.path,
+            self.dict,
+            self.MANIFEST_VERSION,
+        )
+        manifest.write(self.manifest_path)
 
     def _save_manifest(self) -> None:
         with self.disk_lock:
-            data = self._build_manifest_data_locked()
-        self._write_manifest_data(data)
+            self._save_manifest_locked()
 
     def _recompute_usage_locked(self) -> None:
+        """Recompute disk usage while the caller holds ``disk_lock``."""
         self.current_cache_size = sum(meta.size for meta in self.dict.values())
         self.usage = 0
         for meta in self.dict.values():
@@ -296,87 +422,15 @@ class LocalDiskBackend(StorageBackendInterface):
                 self.usage += os.path.getsize(meta.path)
 
     def _load_manifest(self) -> bool:
-        if not os.path.exists(self.manifest_path):
+        manifest = _LocalDiskManifest.load(
+            self.manifest_path,
+            self.path,
+            self.MANIFEST_VERSION,
+        )
+        if manifest is None:
             return False
 
-        try:
-            with open(self.manifest_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-        except Exception as e:
-            logger.warning(
-                "Failed to load local disk manifest %s: %s", self.manifest_path, e
-            )
-            return False
-
-        if not isinstance(data, dict) or data.get("version") != self.MANIFEST_VERSION:
-            logger.warning(
-                "Ignoring incompatible local disk manifest: %s", self.manifest_path
-            )
-            return False
-
-        entries = data.get("entries", {})
-        if not isinstance(entries, dict):
-            logger.warning(
-                "Ignoring malformed local disk manifest: %s", self.manifest_path
-            )
-            return False
-
-        restored_entries: list[tuple[CacheEngineKey, DiskCacheMetadata]] = []
-
-        for key_str, entry in entries.items():
-            if not isinstance(entry, dict):
-                continue
-
-            try:
-                key = parse_cache_key(key_str)
-            except ValueError:
-                continue
-
-            rel_path = entry.get("path")
-            if not isinstance(rel_path, str):
-                continue
-
-            path = os.path.join(self.path, rel_path)
-            if not os.path.isfile(path):
-                continue
-
-            shape_list = entry.get("shape")
-            if not isinstance(shape_list, list):
-                continue
-
-            try:
-                shape = torch.Size([int(v) for v in shape_list])
-            except (TypeError, ValueError):
-                continue
-
-            fmt_name = entry.get("fmt")
-            if (
-                not isinstance(fmt_name, str)
-                or fmt_name not in MemoryFormat.__members__
-            ):
-                continue
-
-            try:
-                size = int(entry.get("size", os.path.getsize(path)))
-            except (OSError, TypeError, ValueError):
-                continue
-
-            restored_entries.append(
-                (
-                    key,
-                    DiskCacheMetadata(
-                        path=path,
-                        size=size,
-                        shape=shape,
-                        dtype=key.dtype,
-                        cached_positions=self._deserialize_cached_positions(
-                            entry.get("cached_positions")
-                        ),
-                        fmt=MemoryFormat[fmt_name],
-                        pin_count=0,
-                    ),
-                )
-            )
+        restored_entries = manifest.restore_entries()
 
         with self.disk_lock:
             self.dict = self.cache_policy.init_mutable_mapping()
@@ -447,7 +501,6 @@ class LocalDiskBackend(StorageBackendInterface):
         if force:
             self.disk_lock.acquire()
 
-        manifest_data = None
         try:
             if not (meta := self.dict.pop(key, None)):
                 return False
@@ -473,13 +526,10 @@ class LocalDiskBackend(StorageBackendInterface):
             if force:
                 self.cache_policy.update_on_force_evict(key)
 
-            manifest_data = self._build_manifest_data_locked()
+            self._save_manifest_locked()
         finally:
             if force:
                 self.disk_lock.release()
-
-        if manifest_data is not None:
-            self._write_manifest_data(manifest_data)
 
         # Push kv evict msg with batching
         if self.batched_msg_sender is not None:
@@ -873,7 +923,6 @@ class LocalDiskBackend(StorageBackendInterface):
                     fdo.readinto(buffer)
         except FileNotFoundError:
             logger.warning(f"File not found on disk: {path}")
-            manifest_data = None
             with self.disk_lock:
                 if disk_meta := self.dict.pop(key, None):
                     self.current_cache_size = max(
@@ -881,10 +930,8 @@ class LocalDiskBackend(StorageBackendInterface):
                     )
                     self.usage = max(self.usage - disk_meta.size, 0)
                     self.cache_policy.update_on_force_evict(key)
-                    manifest_data = self._build_manifest_data_locked()
+                    self._save_manifest_locked()
             self.stats_monitor.update_local_storage_usage(self.usage)
-            if manifest_data is not None:
-                self._write_manifest_data(manifest_data)
             return False
 
         disk_read_time = time.time() - start_time
