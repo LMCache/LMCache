@@ -529,8 +529,6 @@ class LocalDiskBackend(StorageBackendInterface):
 
             if force:
                 self.cache_policy.update_on_force_evict(key)
-
-            if force:
                 self._save_manifest_locked()
         finally:
             if force:
