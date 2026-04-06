@@ -18,7 +18,11 @@ import torch
 # First Party
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.memory_management import AdHocMemoryAllocator, MemoryFormat
+from lmcache.v1.memory_management import (
+    AdHocMemoryAllocator,
+    MemoryFormat,
+    MixedMemoryAllocator,
+)
 from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 from lmcache.v1.storage_backend.plugins.rust_raw_block_backend import (
@@ -49,6 +53,27 @@ def loop_in_thread():
         loop.call_soon_threadsafe(loop.stop)
         t.join(timeout=5)
         loop.close()
+
+
+@pytest.fixture(scope="module")
+def memory_allocator():
+    """Use a smaller allocator for this module so CI stays within runner memory limits."""
+    _real = MixedMemoryAllocator(256 * 1024 * 1024)
+
+    class _NoCloseWrapper:
+        def __init__(self, real):
+            self._real = real
+
+        def __getattr__(self, name):
+            return getattr(self._real, name)
+
+        def close(self):
+            pass
+
+    try:
+        yield _NoCloseWrapper(_real)
+    finally:
+        _real.close()
 
 
 @pytest.mark.skipif(

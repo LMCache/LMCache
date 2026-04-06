@@ -51,6 +51,8 @@ jobs:
               crates.io:443
               index.crates.io:443
               static.crates.io:443
+              sh.rustup.rs:443
+              static.rust-lang.org:443
 
         - name: Checkout code
           uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
@@ -63,10 +65,17 @@ jobs:
           with:
             python-version: "3.13"
 
+        - name: Setup Rust stable
+          uses: actions-rust-lang/setup-rust-toolchain@150fca883cd4034361b621bd4e6a9d34e5143606 # v1
+          with:
+            toolchain: stable
+            components: rustfmt, clippy
+            cache: false
+            rustflags: ""
+
         - run: echo "::add-matcher::.github/workflows/matchers/mypy.json"
 
         - name: Run code quality checks - lint, format, spell, & static checks
           uses: pre-commit/action@2c7b3805fd2a0fd8c1884dcaebf91fc102a13ecd # v3.0.1
           with:
             extra_args: --all-files
-

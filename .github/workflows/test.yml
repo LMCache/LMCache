@@ -44,6 +44,7 @@ jobs:
           filters: |
             lmcache:
               - '**.py'
+              - 'rust/**'
               - 'pyproject.toml'
               - 'requirements/**.txt'
               - '.github/workflows/test.yml'
@@ -104,3 +105,60 @@ jobs:
             --ignore=tests/skipped \
             --ignore=tests/v1/storage_backend/test_eic.py
 
+  rust-backend-basic:
+    needs: changes
+    if: needs.changes.outputs.lmcache == 'true'
+    name: "rust backend basic"
+    runs-on: ubuntu-latest
+    env:
+      CUDA_VISIBLE_DEVICES: "-1"
+
+    steps:
+      - name: "Harden Runner"
+        uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
+        with:
+          egress-policy: audit # TODO: change to 'egress-policy: block' after couple of runs
+
+      - name: Checkout
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        with:
+          # https://github.com/actions/checkout/issues/249
+          fetch-depth: 0
+
+      - name: Free disk space
+        uses: ./.github/actions/free-disk-space
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            **/pyproject.toml
+            **/requirements/*.txt
+
+      - name: Setup Rust stable
+        uses: actions-rust-lang/setup-rust-toolchain@150fca883cd4034361b621bd4e6a9d34e5143606 # v1
+        with:
+          toolchain: stable
+          cache: false
+          rustflags: ""
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install vllm
+          python -m pip install -r requirements/test.txt
+          python -m pip install -r requirements/common.txt
+          python -m pip install maturin
+          python -m pip install -e rust/raw_block
+
+      - name: Run Rust crate tests
+        working-directory: rust/raw_block
+        run: cargo test
+
+      - name: Smoke test Rust extension import
+        run: python -c "import lmcache_rust_raw_block_io"
+
+      - name: Run Rust backend pytest target
+        run: pytest tests/v1/storage_backend/test_rust_raw_block_backend.py
