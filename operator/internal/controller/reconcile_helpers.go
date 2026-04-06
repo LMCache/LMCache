@@ -414,11 +414,17 @@ func (r *LMCacheEngineReconciler) reconcileRESPAuthSecret(ctx context.Context, e
 		return fmt.Errorf("failed to read RESP auth secret %s/%s: %w", sourceNS, ref.Name, err)
 	}
 
+	// Validate that the source secret contains the required "password" key.
+	password, ok := source.Data["password"]
+	if !ok || len(password) == 0 {
+		return fmt.Errorf("RESP auth secret %s/%s is missing required 'password' key", sourceNS, ref.Name)
+	}
+
 	// Build the local managed copy.
 	// Only "password" is required; "username" is optional (Redis Enterprise
 	// often uses password-only auth).
 	secretData := map[string][]byte{
-		"password": source.Data["password"],
+		"password": password,
 	}
 	if u, ok := source.Data["username"]; ok {
 		secretData["username"] = u
@@ -445,8 +451,8 @@ func (r *LMCacheEngineReconciler) reconcileRESPAuthSecret(ctx context.Context, e
 		return err
 	}
 
-	// Update existing if data changed.
-	if err := ctrl.SetControllerReference(engine, desired, r.Scheme); err != nil {
+	// Update existing — apply ownerRef, data, and labels.
+	if err := ctrl.SetControllerReference(engine, existing, r.Scheme); err != nil {
 		return err
 	}
 	patch := client.MergeFrom(existing.DeepCopy())

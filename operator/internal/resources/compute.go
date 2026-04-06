@@ -138,7 +138,10 @@ func buildRESPL2JSON(resp *lmcachev1alpha1.RESPL2AdapterSpec) string {
 	// Auth credentials are passed via LMCACHE_RESP_USERNAME /
 	// LMCACHE_RESP_PASSWORD env vars (injected by the DaemonSet builder),
 	// not in the JSON config.
-	b, _ := json.Marshal(flat)
+	b, err := json.Marshal(flat)
+	if err != nil {
+		return ""
+	}
 	return string(b)
 }
 
@@ -153,7 +156,10 @@ func buildRawL2JSON(raw *lmcachev1alpha1.RawL2AdapterSpec) string {
 			flat[k] = parsed
 		}
 	}
-	b, _ := json.Marshal(flat)
+	b, err := json.Marshal(flat)
+	if err != nil {
+		return ""
+	}
 	return string(b)
 }
 
