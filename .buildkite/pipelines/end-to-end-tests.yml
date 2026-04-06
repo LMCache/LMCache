@@ -4,6 +4,8 @@ steps:
     command: |
       echo $PWD # for debugging
 
+      .buildkite/scripts/is-operator-only.sh && exit 0
+
       uv venv --python 3.12 .venv-$BUILDKITE_BUILD_ID
       source .venv-$BUILDKITE_BUILD_ID/bin/activate
 

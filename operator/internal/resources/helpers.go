@@ -16,6 +16,10 @@ limitations under the License.
 
 package resources
 
+import (
+	lmcachev1alpha1 "github.com/LMCache/LMCache/api/v1alpha1"
+)
+
 // derefInt32 returns the value pointed to by p, or def if p is nil.
 func derefInt32(p *int32, def int32) int32 {
 	if p != nil {
@@ -46,4 +50,21 @@ func derefFloat64(p *float64, def float64) float64 {
 		return *p
 	}
 	return def
+}
+
+// RESPAuthSecretName returns the name of the managed local copy of the
+// RESP auth secret for a given LMCacheEngine.
+func RESPAuthSecretName(engineName string) string {
+	return engineName + "-resp-auth"
+}
+
+// NeedsCrossNamespaceSecret returns true when the RESP auth secret
+// lives in a different namespace than the LMCacheEngine and needs
+// to be copied by the controller.
+func NeedsCrossNamespaceSecret(engineNamespace string, spec *lmcachev1alpha1.LMCacheEngineSpec) bool {
+	if spec.L2Backend == nil || spec.L2Backend.RESP == nil || spec.L2Backend.RESP.AuthSecretRef == nil {
+		return false
+	}
+	ns := spec.L2Backend.RESP.AuthSecretRef.Namespace
+	return ns != "" && ns != engineNamespace
 }

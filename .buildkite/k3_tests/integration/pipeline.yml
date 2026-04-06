@@ -3,7 +3,7 @@
 
 steps:
   - label: ":test_tube: Integration — CPU backend"
-    command: .buildkite/k3_tests/integration/run.sh cpu
+    command: .buildkite/scripts/is-operator-only.sh && exit 0; .buildkite/k3_tests/integration/run.sh cpu
     timeout_in_minutes: 20
     agents: { queue: "k8s" }
     plugins:
@@ -26,7 +26,7 @@ steps:
       - "*.log"
 
   - label: ":test_tube: Integration — Disk backend"
-    command: .buildkite/k3_tests/integration/run.sh disk
+    command: .buildkite/scripts/is-operator-only.sh && exit 0; .buildkite/k3_tests/integration/run.sh disk
     timeout_in_minutes: 20
     agents: { queue: "k8s" }
     plugins:

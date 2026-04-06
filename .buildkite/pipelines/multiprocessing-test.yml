@@ -6,6 +6,7 @@ steps:
     key: "test"
     timeout_in_minutes: 60
     commands:
+      - .buildkite/scripts/is-operator-only.sh && exit 0
       - .buildkite/scripts/should-run-comprehensive.sh || exit 0 # Reuse the trigger condition for comprehensive tests
       - chmod +x .buildkite/scripts/multiprocessing-test/*.sh
       - BUILD_ID=${BUILDKITE_BUILD_ID} .buildkite/scripts/multiprocessing-test/run-mp-test.sh
