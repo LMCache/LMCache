@@ -16,6 +16,7 @@ Supported Backends
    gds
    infinistore
    local_storage
+   raw_block
    maru
    mock
    mooncake

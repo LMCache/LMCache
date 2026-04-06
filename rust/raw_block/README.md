@@ -49,8 +49,9 @@ No fixed numbers are included here because results are host/device/workload depe
 
 ## LMCache Configuration
 
-In LMCache YAML, use the plugin name `raw_block` for `store_location` and
-`retrieve_locations`. Do not use `RustRawBlockBackend` there.
+For end-user LMCache YAML configuration, see
+[`docs/source/kv_cache/storage_backends/raw_block.rst`](../../docs/source/kv_cache/storage_backends/raw_block.rst).
+LMCache selects this backend by the plugin name `raw_block`.
 
 ## Limitations
 
