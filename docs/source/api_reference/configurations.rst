@@ -244,7 +244,7 @@ Settings for disaggregated prefill functionality. The latest/default PD is imple
      - PD role. Values: "sender" (prefiller) or "receiver" (decoder).
    * - pd_buffer_size
      - LMCACHE_PD_BUFFER_SIZE
-     - Transport buffer size for PD in bytes. Required for both senders and receivers when enable_pd=true
+     - Upper bound of PD transport buffer size (in bytes), aligned to chunk size. Required for both senders and receivers when enable_pd=true
    * - pd_buffer_device
      - LMCACHE_PD_BUFFER_DEVICE
      - Device for PD buffer. Values: "cpu", "cuda". Required for both senders and receivers when enable_pd=true
