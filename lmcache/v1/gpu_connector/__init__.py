@@ -133,7 +133,7 @@ def CreateGPUConnector(
             return VLLMPagedMemHPUConnectorV2.from_metadata(metadata, use_gpu, device)
         else:
             raise RuntimeError(
-                "No supported connector {dev_name} found for the current platform."
+                f"No supported connector {dev_name} found for the current platform."
             )
 
     elif engine == EngineType.MOCK:

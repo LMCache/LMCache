@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
+
 //
 // Python bindings for the SYCL/XPU memory kernels.
 // This module (lmcache.xpu_ops) mirrors the mem-kernel subset of
 // lmcache.c_ops but targets Intel XPU via SYCL.
-
+//
 #include <pybind11/pybind11.h>
 #include <torch/torch.h>
 #include "mem_kernels_sycl.h"
@@ -41,11 +42,13 @@ PYBIND11_MODULE(c_ops, m) {
   m.def("single_layer_kv_transfer", &single_layer_kv_transfer,
         py::arg("lmc_key_value_cache"), py::arg("vllm_key_value_cache"),
         py::arg("slot_mapping"), py::arg("direction"), py::arg("gpu_kv_format"),
-        py::arg("token_major") = false);
+        py::arg("token_major") = false,
+        py::call_guard<py::gil_scoped_release>());
   m.def("single_layer_kv_transfer_sgl", &single_layer_kv_transfer_sgl,
         py::arg("lmc_key_value_cache"), py::arg("sgl_key_cache"),
         py::arg("sgl_value_cache"), py::arg("slot_mapping"),
-        py::arg("direction"), py::arg("token_major") = false);
+        py::arg("direction"), py::arg("token_major") = false,
+        py::call_guard<py::gil_scoped_release>());
   m.def("load_and_reshape_flash", &load_and_reshape_flash);
   m.def("reshape_and_cache_back_flash", &reshape_and_cache_back_flash);
   m.def("lmcache_memcpy_async", &lmcache_memcpy_async,
