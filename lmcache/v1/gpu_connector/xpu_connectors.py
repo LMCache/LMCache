@@ -644,7 +644,7 @@ class VLLMBufferLayerwiseXPUConnector(GPUConnectorInterface):
         buf_offset = starts[0]
         if self.cache_positions:
             new_positions_full = torch.arange(
-                starts[0], ends[-1], dtype=torch.uint64, device=self.kvcaches[0].device
+                starts[0], ends[-1], dtype=torch.int64, device=self.kvcaches[0].device
             )
 
         buffer_shape = self.get_shape(num_all_tokens)
@@ -668,7 +668,7 @@ class VLLMBufferLayerwiseXPUConnector(GPUConnectorInterface):
 
         if self.cache_positions:
             old_positions_full = torch.zeros(
-                (num_all_tokens,), dtype=torch.uint64, device=self.kvcaches[0].device
+                (num_all_tokens,), dtype=torch.int64, device=self.kvcaches[0].device
             )
         for layer_id in range(self.num_layers + 2):
             if layer_id > 1:
@@ -808,7 +808,7 @@ class VLLMBufferLayerwiseXPUConnector(GPUConnectorInterface):
             if self.cache_positions:
                 old_positions_chunks.append(
                     torch.arange(
-                        start, end, device=self.kvcaches[0].device, dtype=torch.uint64
+                        start, end, device=self.kvcaches[0].device, dtype=torch.int64
                     )
                 )
 
@@ -1070,7 +1070,7 @@ class VLLMPagedMemLayerwiseXPUConnector(GPUConnectorInterface):
                         lmc_ops.single_layer_kv_transfer(
                             memory_obj.tensor,
                             self.kvcaches[layer_id],
-                            slot_mapping_full,
+                            slot_mapping[start:end],
                             lmc_ops.TransferDirection.H2D,
                             self.gpu_kv_format,
                             token_major=True,
