@@ -96,6 +96,36 @@ def send_ping(
         return False
 
 
+@dataclass
+class ParallelStrategy:
+    use_mla: bool
+    """Whether to use the MLA."""
+
+    world_size: int
+    """
+    The world size, world_size may not be equal to the actual_world_size, 
+    in the case of mla, it will 'exclude' the effect of TP.
+    """
+
+    worker_id: int
+    """
+    The worker id of the sub-process, worker_id may not be equal to the 
+    actual_worker_id, in the case of mla, it will 'exclude' the effect of TP.
+    """
+
+    actual_world_size: int
+    """The actual world size."""
+
+    actual_worker_id: int
+    """The actual worker id of the sub-process."""
+
+    tp_size: int
+    """The tensor parallel size."""
+
+    pp_size: int
+    """The pipeline parallel size."""
+
+
 class HeartbeatThread(PeriodicThread):
     """Periodically checks server health via PING.
 
@@ -182,10 +212,8 @@ class LMCacheMPSchedulerAdapter:
         server_url: str,
         context: zmq.Context,
         model_name: str,
-        world_size: int,
-        kv_rank: int,
         vllm_block_size: int,
-        tp_size: int = 1,
+        parallel_strategy: ParallelStrategy,
         mq_timeout: float = DEFAULT_MQ_TIMEOUT,
         heartbeat_interval: float = DEFAULT_HEARTBEAT_INTERVAL,
     ):
@@ -194,11 +222,10 @@ class LMCacheMPSchedulerAdapter:
             server_url: The server URL for the LMCache message queue
             context: The ZMQ context
             model_name: The model name used for LMCache keys
-            world_size: The world size used for LMCache keys
-            kv_rank: The kv rank used for LMCache keys
             vllm_block_size: The block size used in vLLM
-            tp_size: Tensor-parallel size for MLA
-                multi-reader locking (default 1).
+            parallel_strategy:
+                The parallel strategy, which includes `use_mla`,
+                `world_size`, `worker_id` and so on
             mq_timeout: Timeout in seconds for message queue requests.
             heartbeat_interval: Interval in seconds between heartbeat pings.
         """
@@ -213,8 +240,7 @@ class LMCacheMPSchedulerAdapter:
         self._finished_lookup_jobs: dict[int, int] = {}
 
         self.model_name = model_name
-        self.world_size = world_size
-        self.tp_size = tp_size
+        self.parallel_strategy = parallel_strategy
 
         # Read chunk size from lmcache
         try:
@@ -240,6 +266,16 @@ class LMCacheMPSchedulerAdapter:
         self._heartbeat_interval = heartbeat_interval
         self._heartbeat: HeartbeatThread | None = None
         self._heartbeat_lock = threading.Lock()
+
+    @property
+    def world_size(self) -> int:
+        """The world size."""
+        return self.parallel_strategy.world_size
+
+    @property
+    def tp_size(self) -> int:
+        """The tensor parallel size."""
+        return self.parallel_strategy.tp_size
 
     @property
     def is_healthy(self) -> bool:
@@ -498,11 +534,8 @@ class LMCacheMPWorkerAdapter:
         server_url: str,
         context: zmq.Context,
         model_name: str,
-        world_size: int,
-        kv_rank: int,
         vllm_block_size: int,
-        use_mla: bool,
-        is_first_rank_of_pp_group: bool,
+        parallel_strategy: ParallelStrategy,
         mq_timeout: float = DEFAULT_MQ_TIMEOUT,
         heartbeat_interval: float = DEFAULT_HEARTBEAT_INTERVAL,
     ):
@@ -535,8 +568,7 @@ class LMCacheMPWorkerAdapter:
         self._returned_finished: set[str] = set()
 
         self.model_name = model_name
-        self.world_size = world_size
-        self.worker_id = kv_rank
+        self.parallel_strategy = parallel_strategy
 
         # Read chunk size from lmcache
         try:
@@ -551,9 +583,6 @@ class LMCacheMPWorkerAdapter:
             "LMCache chunk size should be a multiple of vLLM block size"
         )
         self.blocks_in_chunk = chunk_size // vllm_block_size
-
-        self.use_mla = use_mla
-        self.is_first_rank_of_pp_group = is_first_rank_of_pp_group
 
         # Health state (shared with heartbeat thread)
         self._health_event = threading.Event()
@@ -583,6 +612,29 @@ class LMCacheMPWorkerAdapter:
     def is_healthy(self) -> bool:
         """Whether the LMCache server is healthy."""
         return self._health_event.is_set()
+
+    @property
+    def world_size(self) -> int:
+        """The world size."""
+        return self.parallel_strategy.world_size
+
+    @property
+    def worker_id(self) -> int:
+        """The worker id."""
+        return self.parallel_strategy.worker_id
+
+    @property
+    def use_mla(self) -> bool:
+        """Whether to use MLA."""
+        return self.parallel_strategy.use_mla
+
+    @property
+    def is_first_rank_of_pp_group(self) -> bool:
+        """Is the first rank of the pipeline parallel group."""
+        return (
+            self.parallel_strategy.actual_worker_id % self.parallel_strategy.tp_size
+            == 0
+        )
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """
