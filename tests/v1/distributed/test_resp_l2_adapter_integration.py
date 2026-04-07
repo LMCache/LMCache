@@ -274,7 +274,7 @@ class TestRESPL2AdapterIntegration:
         """Verify the factory can create a RESP L2 adapter from config."""
         # First Party
         from lmcache.v1.distributed.l2_adapters import create_l2_adapter
-        from lmcache.v1.distributed.l2_adapters.native_connector_l2_adapter import (
+        from lmcache.v1.distributed.l2_adapters.resp_l2_adapter import (
             RESPL2AdapterConfig,
         )
 

@@ -33,6 +33,7 @@ class ExampleFSConnector
   void do_single_set(WorkerFSConn& conn, const std::string& key,
                      const void* buf, size_t len, size_t chunk_size) override;
   bool do_single_exists(WorkerFSConn& conn, const std::string& key) override;
+  bool do_single_delete(WorkerFSConn& conn, const std::string& key) override;
 
  private:
   static std::string safe_filename(const std::string& key);
@@ -71,6 +72,7 @@ class ExampleMemoryConnector
   void do_single_set(WorkerMemConn& conn, const std::string& key,
                      const void* buf, size_t len, size_t chunk_size) override;
   bool do_single_exists(WorkerMemConn& conn, const std::string& key) override;
+  bool do_single_delete(WorkerMemConn& conn, const std::string& key) override;
 
  private:
   std::shared_ptr<SharedMemoryStore> store_;

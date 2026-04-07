@@ -3,6 +3,7 @@
 
 # Standard
 from dataclasses import asdict, dataclass
+from pathlib import Path
 import csv
 import json
 import threading
@@ -227,6 +228,7 @@ class StatsCollector:
             "finish_time",
             "error",
         ]
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
         with open(path, "w", newline="") as f:
             writer = csv.DictWriter(f, fieldnames=fieldnames)
             writer.writeheader()

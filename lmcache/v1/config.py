@@ -231,10 +231,22 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
     },
     # Storage paths
     "gds_path": {"type": Optional[str], "default": None, "env_converter": str},
+    "gds_path_sharding": {
+        "type": str,
+        "default": "by_gpu",
+        "env_converter": str,
+    },
     "cufile_buffer_size": {
         "type": Optional[int],
         "default": None,
         "env_converter": int,
+    },
+    # Maru CXL shared memory backend
+    "maru_path": {"type": Optional[str], "default": None, "env_converter": str},
+    "maru_pool_size": {
+        "type": float,
+        "default": 4.0,
+        "env_converter": float,
     },
     # Other configurations
     # (Deprecated) The url of the actual remote lmcache instance for auditing.

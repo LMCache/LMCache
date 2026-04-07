@@ -36,6 +36,10 @@ example usage (see `redis/pybind.cpp`):
            lmcache::connector::pybind_utils::bind_submit_batch_exists< \
                ConnectorType>(),                                       \
            py::arg("keys"))                                            \
+      .def("submit_batch_delete",                                      \
+           lmcache::connector::pybind_utils::bind_submit_batch_delete< \
+               ConnectorType>(),                                       \
+           py::arg("keys"))                                            \
       .def("drain_completions",                                        \
            lmcache::connector::pybind_utils::bind_drain_completions<   \
                ConnectorType>())                                       \
@@ -110,6 +114,14 @@ auto bind_submit_batch_exists() {
   return [](ConnectorType& self, const std::vector<std::string>& keys) {
     py::gil_scoped_release release;
     return self.submit_batch_exists(keys);
+  };
+}
+
+template <typename ConnectorType>
+auto bind_submit_batch_delete() {
+  return [](ConnectorType& self, const std::vector<std::string>& keys) {
+    py::gil_scoped_release release;
+    return self.submit_batch_delete(keys);
   };
 }
 

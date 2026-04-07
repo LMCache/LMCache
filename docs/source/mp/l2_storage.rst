@@ -128,6 +128,74 @@ object is stored as a raw ``.data`` file whose name encodes the full
     # With O_DIRECT for bypassing page cache
     --l2-adapter '{"type": "fs", "base_path": "/data/lmcache/l2", "use_odirect": true}'
 
+``mooncake_store`` -- Mooncake Store native connector
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+An L2 adapter backed by the native C++ Mooncake Store connector.  Uses
+`Mooncake <https://github.com/kvcache-ai/Mooncake>`_ for high-performance
+distributed KV cache storage with RDMA support.
+
+**Prerequisites -- Building with Mooncake support:**
+
+The Mooncake extension is **not** built by default.  You must explicitly
+enable it:
+
+.. code-block:: bash
+
+    BUILD_MOONCAKE=1 pip install -e . --verbose
+
+The ``BUILD_MOONCAKE`` environment variable controls compilation:
+
+- ``BUILD_MOONCAKE=1``: Enable the Mooncake C++ extension.
+- ``BUILD_MOONCAKE=0``: Force disable (highest priority), even if
+  ``MOONCAKE_INCLUDE_DIR`` is set.
+- **Not set**: Falls back to checking ``MOONCAKE_INCLUDE_DIR`` for
+  backward compatibility.  If ``MOONCAKE_INCLUDE_DIR`` is also unset,
+  the extension is skipped.
+
+If the Mooncake headers are not installed in the system include path
+(e.g., ``/usr/local/include``), you must point to them explicitly:
+
+.. code-block:: bash
+
+    BUILD_MOONCAKE=1 \
+    MOONCAKE_INCLUDE_DIR=/path/to/mooncake/include \
+    MOONCAKE_LIB_DIR=/path/to/mooncake/lib \
+    pip install -e . --verbose
+
+**LMCache-specific fields:**
+
+- ``num_workers``: Number of C++ worker threads (default ``4``, must
+  be > 0).
+
+**Mooncake fields:**
+
+All other keys in the JSON config (except ``type``, ``num_workers``,
+and ``eviction``) are forwarded **as-is** to Mooncake's
+``setup_internal(ConfigDict)``.  Refer to the
+`Mooncake documentation <https://github.com/kvcache-ai/Mooncake>`_
+for available setup keys (e.g., ``local_hostname``,
+``metadata_server``, ``master_server_address``, ``protocol``,
+``device_name``, ``global_segment_size``).
+
+**Configuration example:**
+
+.. code-block:: bash
+
+    --l2-adapter '{
+      "type": "mooncake_store",
+      "num_workers": 4,
+      "local_hostname": "node01",
+      "metadata_server": "http://localhost:8080/metadata",
+      "master_server_address": "localhost:50051",
+      "protocol": "tcp",
+      "local_buffer_size": "3221225472"
+      "global_segment_size": "3221225472"
+    }'
+
+For full Mooncake setup instructions (master service, metadata server,
+etc.), see `Mooncake <https://github.com/kvcache-ai/Mooncake>`_ .
+
 ``mock`` -- Mock adapter for testing
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -335,6 +403,8 @@ drops by ``eviction_ratio``.
    * - ``mock``
      - Full support. Useful for testing eviction behaviour without
        real storage hardware.
+   * - ``mooncake_store``
+     - No eviction support (native connector adapter).
    * - ``fs``
      - No eviction support (``delete`` and ``get_usage`` are no-ops).
    * - native connectors
