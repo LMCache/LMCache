@@ -112,6 +112,8 @@ def compute_extra_count(
 def get_layout_desc(gpu_context: GPUCacheContext, num_tokens: int) -> MemoryLayoutDesc:
     """Get the memory layout description for a given GPU context and number of tokens.
 
+    Supports multiple KV layer groups with different shapes and dtypes.
+
     Args:
         gpu_context: The GPU cache context containing the KV cache information.
         num_tokens: The number of tokens to determine the layout for.
@@ -119,9 +121,16 @@ def get_layout_desc(gpu_context: GPUCacheContext, num_tokens: int) -> MemoryLayo
     Returns:
         MemoryLayoutDesc: The memory layout description containing shapes and dtypes.
     """
-    shape = gpu_context.get_kv_buffer_shape(num_tokens)
-    dtype = gpu_context.dtype
-    return MemoryLayoutDesc(shapes=[shape], dtypes=[dtype])
+    num_groups = gpu_context.kv_layer_groups_manager.num_groups
+    shapes = [
+        gpu_context.get_kv_buffer_shape(num_tokens, group_idx)
+        for group_idx in range(num_groups)
+    ]
+    dtypes = [
+        gpu_context.kv_layer_groups_manager.kv_layer_groups[group_idx].dtype
+        for group_idx in range(num_groups)
+    ]
+    return MemoryLayoutDesc(shapes=shapes, dtypes=dtypes)
 
 
 def batched_iteration(lst: list, batch_size: int) -> Generator[tuple, None, None]:
@@ -311,6 +320,7 @@ class MPCacheEngine:
             # skipped (not in reserved_dict), making block_ids
             # non-contiguous. Batching would require torch.cat to
             # reassemble block_ids, negating the benefit.
+            num_groups = gpu_context.kv_layer_groups_manager.num_groups
             for idx, obj_key in enumerate(obj_keys):
                 if obj_key in reserved_dict:
                     memory_obj = reserved_dict[obj_key]
@@ -321,21 +331,25 @@ class MPCacheEngine:
                     idx * blocks_per_chunk : (idx + 1) * blocks_per_chunk
                 ]
 
-                # Copy from paged buffer to tmp GPU buffer, then to CPU
-                assert memory_obj.tensor is not None
-                tmp_buffer = gpu_context.get_tmp_gpu_buffer(self.chunk_size)
-                lmc_ops.multi_layer_block_kv_transfer(
-                    gpu_context.kv_pointers,
-                    [tmp_buffer.data_ptr()],
-                    chunk_block_ids_gpu,
-                    gpu_context.device,
-                    lmc_ops.TransferDirection.D2H,
-                    gpu_context.shape_desc,
-                    self.chunk_size,
-                    gpu_context.gpu_kv_format_,
-                    0,
+                # Copy from GPU paged buffer to tmp buffer, then to CPU — per group
+                for group_idx in range(num_groups):
+                    tmp_buffer = gpu_context.get_tmp_chunk_gpu_buffer(group_idx)
+                    group_kv_pointers = gpu_context.get_group_kv_pointers(group_idx)
+                    lmc_ops.multi_layer_block_kv_transfer(
+                        group_kv_pointers,
+                        [tmp_buffer.data_ptr()],
+                        chunk_block_ids_gpu,
+                        gpu_context.device,
+                        lmc_ops.TransferDirection.D2H,
+                        gpu_context.get_shape_desc(group_idx),
+                        self.chunk_size,
+                        gpu_context.gpu_kv_format_,
+                        0,
+                    )
+                # Store is not batched, so we always use chunk_idx=0 (single slot)
+                lmcache_memcpy_async_d2h(
+                    gpu_context.get_tmp_gpu_buffer_flat(chunk_idx=0), memory_obj
                 )
-                lmcache_memcpy_async_d2h(tmp_buffer, memory_obj)
 
             event.record()
 
@@ -421,12 +435,14 @@ class MPCacheEngine:
         blocks_per_chunk = self.chunk_size // gpu_context.block_size
 
         def _retrieve_loop(keys: list[ObjectKey], memory_objs: list[MemoryObj]) -> None:
-            _BATCH_SIZE = 4
+            _BATCH_SIZE = gpu_context.max_batch_size
+            num_groups = gpu_context.kv_layer_groups_manager.num_groups
             for batch_idx, memory_obj_batch in enumerate(
                 batched_iteration(memory_objs, batch_size=_BATCH_SIZE)
             ):
+                batch_len = len(memory_obj_batch)
                 chunk_start = batch_idx * self.chunk_size * _BATCH_SIZE
-                chunk_end = chunk_start + self.chunk_size * len(memory_obj_batch)
+                chunk_end = chunk_start + self.chunk_size * batch_len
 
                 effective_start = max(chunk_start, skip_first_n_tokens)
                 if effective_start >= chunk_end:
@@ -436,7 +452,8 @@ class MPCacheEngine:
                 skip_tokens_in_chunk = max(
                     0,
                     min(
-                        effective_start - chunk_start, self.chunk_size * _BATCH_SIZE - 1
+                        effective_start - chunk_start,
+                        self.chunk_size * batch_len - 1,
                     ),
                 )
                 if skip_tokens_in_chunk % gpu_context.block_size != 0:
@@ -451,35 +468,35 @@ class MPCacheEngine:
                 skip_blocks_in_chunk = skip_tokens_in_chunk // gpu_context.block_size
 
                 start_chunk_id = batch_idx * _BATCH_SIZE
-                end_chunk_id = start_chunk_id + len(memory_obj_batch)
+                end_chunk_id = start_chunk_id + batch_len
                 chunk_block_ids_gpu = all_block_ids_gpu[
                     start_chunk_id * blocks_per_chunk : end_chunk_id * blocks_per_chunk
                 ]
 
-                # TODO: implement get_gpu_buffer_batched
-                tmp_buffers = gpu_context.get_tmp_gpu_buffer_batched(
-                    self.chunk_size, len(memory_obj_batch)
-                )
+                # Copy from CPU to GPU tmp buffers, then scatter to paged KV — per group
+                # H2D copy: each memory_obj maps to its own batch slot
+                for chunk_idx, memory_obj in enumerate(memory_obj_batch):
+                    lmcache_memcpy_async_h2d(
+                        memory_obj,
+                        gpu_context.get_tmp_gpu_buffer_flat(chunk_idx=chunk_idx),
+                    )
+                for group_idx in range(num_groups):
+                    tmp_buffers = gpu_context.get_tmp_chunk_gpu_buffer_batched(
+                        batch_len, group_idx
+                    )
+                    group_kv_pointers = gpu_context.get_group_kv_pointers(group_idx)
 
-                # launch h2d for all the chunks in the batch
-                for tmp_buffer, memory_obj in zip(
-                    tmp_buffers, memory_obj_batch, strict=False
-                ):
-                    assert memory_obj.tensor is not None
-                    lmcache_memcpy_async_h2d(memory_obj, tmp_buffer)
-
-                # launch multi_layer_block_kv_transfer for all the chunks in the batch
-                lmc_ops.multi_layer_block_kv_transfer(
-                    gpu_context.kv_pointers,
-                    [tb.data_ptr() for tb in tmp_buffers],
-                    chunk_block_ids_gpu,
-                    gpu_context.device,
-                    lmc_ops.TransferDirection.H2D,
-                    gpu_context.shape_desc,
-                    self.chunk_size,
-                    gpu_context.gpu_kv_format_,
-                    skip_blocks_in_chunk,
-                )
+                    lmc_ops.multi_layer_block_kv_transfer(
+                        group_kv_pointers,
+                        [tb.data_ptr() for tb in tmp_buffers],
+                        chunk_block_ids_gpu,
+                        gpu_context.device,
+                        lmc_ops.TransferDirection.H2D,
+                        gpu_context.get_shape_desc(group_idx),
+                        self.chunk_size,
+                        gpu_context.gpu_kv_format_,
+                        skip_blocks_in_chunk,
+                    )
 
         with (
             torch.cuda.device(gpu_context.device),
@@ -797,7 +814,7 @@ class MPCacheEngine:
                 entry["kv_cache_layout"] = {
                     "num_layers": ctx.num_layers,
                     "block_size": ctx.block_size,
-                    "hidden_dim_size": ctx.hidden_dim_size,
+                    "hidden_dim_sizes": str(ctx.hidden_dim_sizes),
                     "dtype": str(ctx.dtype),
                     "is_mla": ctx.is_mla,
                     "num_blocks": ctx.num_blocks,
