@@ -1129,8 +1129,6 @@ def run_cache_server(
         server.close()
         engine.close()
 
-    return None
-
 
 def parse_args():
     parser = argparse.ArgumentParser(

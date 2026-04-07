@@ -58,14 +58,10 @@ async def lifespan(app: FastAPI):
     mp_config = _configs["mp"]
     if mp_config.engine_type == "blend":
         # First Party
-        from lmcache.v1.multiprocess.blend_server_v2 import (  # type: ignore[assignment]
-            run_cache_server,
-        )
+        from lmcache.v1.multiprocess.blend_server_v2 import run_cache_server
     else:
         # First Party
-        from lmcache.v1.multiprocess.server import (  # type: ignore[assignment]
-            run_cache_server,
-        )
+        from lmcache.v1.multiprocess.server import run_cache_server
 
     result = run_cache_server(
         mp_config=mp_config,
