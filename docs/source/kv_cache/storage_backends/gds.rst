@@ -52,9 +52,11 @@ Multi-Path (Multi-Device) Support
 ---------------------------------
 
 When a system has multiple NVMe drives, you can distribute GDS I/O across them
-by specifying a comma-separated list of paths in ``gds_path``. Each GPU worker
-automatically selects one path based on its device index (``device_id % num_paths``),
-so traffic is spread evenly across the drives without any manual pinning.
+by specifying a comma-separated list of paths in ``gds_path``. The
+``gds_path_sharding`` option controls how each GPU worker selects its path.
+Currently only ``"by_gpu"`` is supported (the default), which selects a path
+based on the device index (``device_id % num_paths``), so traffic is spread
+evenly across the drives without any manual pinning.
 
 **Why this helps:** a single PCIe Gen 4 x4 NVMe tops out at ~7 GB/s. With four
 drives the aggregate bandwidth can reach ~28 GB/s, matching what multi-GPU
@@ -65,12 +67,14 @@ systems need for KV cache eviction and prefetch.
 .. code-block:: bash
 
     export LMCACHE_GDS_PATH="/mnt/nvme0/cache,/mnt/nvme1/cache,/mnt/nvme2/cache,/mnt/nvme3/cache"
+    export LMCACHE_GDS_PATH_SHARDING="by_gpu"
 
 **YAML config:**
 
 .. code-block:: yaml
 
     gds_path: "/mnt/nvme0/cache,/mnt/nvme1/cache,/mnt/nvme2/cache,/mnt/nvme3/cache"
+    gds_path_sharding: "by_gpu"
 
 With the above configuration on a 4-GPU node:
 

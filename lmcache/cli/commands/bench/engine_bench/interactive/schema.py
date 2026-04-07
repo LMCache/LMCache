@@ -106,6 +106,10 @@ ALL_ITEMS: list[ConfigItem] = [
         default=None,
         required=True,
         choices=[
+            (
+                "long-doc-permutator",
+                "Query the same set of long documents with different orders",
+            ),
             ("long-doc-qa", "Repeated Q&A over long documents (tests KV cache reuse)"),
             ("multi-round-chat", "Multi-turn chat with stateful sessions"),
             ("random-prefill", "Prefill-only requests fired simultaneously"),
@@ -170,6 +174,52 @@ ALL_ITEMS: list[ConfigItem] = [
         input_type="float",
         default=100.0,
         phase=PHASE_GENERAL,
+    ),
+    # ── Phase 3: long-doc-permutator ─────────────────────────────────
+    ConfigItem(
+        key="ldp_num_contexts",
+        display_name="Number of contexts",
+        description="Number of unique context documents to generate.",
+        input_type="int",
+        default=5,
+        condition=_workload_is("long-doc-permutator"),
+        phase=PHASE_WORKLOAD,
+    ),
+    ConfigItem(
+        key="ldp_context_length",
+        display_name="Context length (tokens)",
+        description="Token length of each context document.",
+        input_type="int",
+        default=5000,
+        condition=_workload_is("long-doc-permutator"),
+        phase=PHASE_WORKLOAD,
+    ),
+    ConfigItem(
+        key="ldp_system_prompt_length",
+        display_name="System prompt length (tokens)",
+        description="Token length of the shared system prompt. Use 0 for none.",
+        input_type="int",
+        default=1000,
+        condition=_workload_is("long-doc-permutator"),
+        phase=PHASE_WORKLOAD,
+    ),
+    ConfigItem(
+        key="ldp_num_permutations",
+        display_name="Number of permutations",
+        description="Distinct permutations to send. Capped at N! (N = num_contexts).",
+        input_type="int",
+        default=10,
+        condition=_workload_is("long-doc-permutator"),
+        phase=PHASE_WORKLOAD,
+    ),
+    ConfigItem(
+        key="ldp_num_inflight_requests",
+        display_name="Max inflight requests",
+        description="Maximum concurrent in-flight requests.",
+        input_type="int",
+        default=1,
+        condition=_workload_is("long-doc-permutator"),
+        phase=PHASE_WORKLOAD,
     ),
     # ── Phase 3: long-doc-qa ──────────────────────────────────────────
     ConfigItem(
