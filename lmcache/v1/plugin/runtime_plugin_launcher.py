@@ -56,29 +56,38 @@ class RuntimePluginLauncher:
             self._launch_plugin(file)
 
     def _should_skip_plugin(self, file: Path, parts: list[str]) -> bool:
-        """Determine if plugin should be skipped based on role/worker ID"""
+        """Determine if plugin should be skipped based on role/worker ID.
+
+        The naming convention is ROLE_WORKERID_NAME (e.g. server_0_foo.py).
+        When role is None (MP mode), this convention does not apply,
+        so both role and worker ID filtering are skipped entirely.
+        """
         if len(parts) < 2:
             return False
 
-        # When role is None, skip role-based filtering entirely
+        # When role is None, skip all role/worker-based filtering
         # (e.g. MP mode has no role concept)
-        if self.role is not None:
-            plugin_role = parts[0].upper()
-            if plugin_role != "ALL" and plugin_role != self.role.upper():
-                logger.info(
-                    "Skipping %s: requires role %s",
-                    file,
-                    plugin_role,
-                )
-                return True
+        if self.role is None:
+            return False
 
-        # Check worker ID match
+        plugin_role = parts[0].upper()
+        if plugin_role != "ALL" and plugin_role != self.role.upper():
+            logger.info(
+                "Skipping %s: requires role %s",
+                file,
+                plugin_role,
+            )
+            return True
+
+        # Check worker ID match (parts[1] in ROLE_WORKERID_NAME)
         if len(parts) > 2 and parts[1].isdigit():
             plugin_worker_id = int(parts[1])
             if plugin_worker_id != self.worker_id:
                 logger.info(
-                    f"worker {self.worker_id} is skipping plugin {file}, "
-                    f"which is only for worker ID {plugin_worker_id}"
+                    "worker %d is skipping plugin %s, which is only for worker ID %d",
+                    self.worker_id,
+                    file,
+                    plugin_worker_id,
                 )
                 return True
 
