@@ -321,7 +321,7 @@ class LocalDiskBackend(StorageBackendInterface):
             after the disk write completes. Callback exceptions are caught
             and logged.
         """
-        assert memory_obj.tensor is not None
+        assert memory_obj.raw_tensor is not None
 
         # skip repeated save
         if self.exists_in_put_tasks(key):
