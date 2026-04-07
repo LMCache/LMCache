@@ -104,14 +104,15 @@ class RequestSender:
     ) -> RequestResult:
         """Send a single streaming request and return the result.
 
-        Streams the response via SSE, measures TTFT, decode speed, and
-        total latency.  Extracts token counts from server usage reports.
+        Streams the response via SSE, measures TTFT, ITL, decode speed,
+        and total latency.  Extracts token counts from server usage reports.
         After collecting the result, invokes all registered
         ``on_finished`` callbacks.
         """
         submit_time = time.time()
         first_token_time = 0.0
         tokens: list[str] = []
+        token_times: list[float] = []
         num_input_tokens = 0
         num_output_tokens = 0
 
@@ -131,17 +132,38 @@ class RequestSender:
 
                 content = _extract_content(chunk, self._completions_mode)
                 if content:
+                    now = time.time()
                     if not first_token_time:
-                        first_token_time = time.time()
+                        first_token_time = now
                     tokens.append(content)
+                    token_times.append(now)
 
             finish_time = time.time()
             successful = first_token_time > 0.0
+            if not successful:
+                logger.warning(
+                    "Request %s: no content tokens received "
+                    "(tokens=%d, input=%d, output=%d)",
+                    request_id,
+                    len(tokens),
+                    num_input_tokens,
+                    num_output_tokens,
+                )
             ttft = (first_token_time - submit_time) if successful else -1.0
             request_latency = finish_time - submit_time
             decode_time = (finish_time - first_token_time) if successful else 0.0
             num_output = num_output_tokens if num_output_tokens > 0 else len(tokens)
             decode_speed = (num_output / decode_time) if decode_time > 0 else 0.0
+
+            # Compute average inter-token latency using server-reported
+            # token count (not chunk count) for accuracy when chunks
+            # contain multiple tokens.
+            if len(token_times) >= 2 and num_output > 1:
+                inter_token_latency = (token_times[-1] - token_times[0]) / (
+                    num_output - 1
+                )
+            else:
+                inter_token_latency = 0.0
 
             result = RequestResult(
                 request_id=request_id,
@@ -151,6 +173,7 @@ class RequestSender:
                 num_input_tokens=num_input_tokens,
                 num_output_tokens=num_output,
                 decode_speed=decode_speed,
+                inter_token_latency=inter_token_latency,
                 submit_time=submit_time,
                 first_token_time=first_token_time,
                 finish_time=finish_time,
@@ -168,6 +191,7 @@ class RequestSender:
                 num_input_tokens=0,
                 num_output_tokens=0,
                 decode_speed=0.0,
+                inter_token_latency=0.0,
                 submit_time=submit_time,
                 first_token_time=0.0,
                 finish_time=finish_time,

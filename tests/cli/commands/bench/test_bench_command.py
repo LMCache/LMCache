@@ -87,6 +87,7 @@ def _make_final_stats(**overrides) -> FinalStats:
         mean_ttft_ms=300.0,
         mean_decode_speed=48.0,
         mean_request_latency_ms=2000.0,
+        mean_itl_ms=12.0,
         input_throughput=20000.0,
         output_throughput=256.0,
         total_input_tokens=100000,
@@ -100,6 +101,9 @@ def _make_final_stats(**overrides) -> FinalStats:
         p50_request_latency_ms=1900.0,
         p90_request_latency_ms=2500.0,
         p99_request_latency_ms=3000.0,
+        p50_itl_ms=11.0,
+        p90_itl_ms=14.0,
+        p99_itl_ms=18.0,
     )
     defaults.update(overrides)
     return FinalStats(**defaults)  # type: ignore[arg-type]
@@ -115,6 +119,7 @@ def _make_result(request_id: str = "req_0") -> RequestResult:
         num_input_tokens=100,
         num_output_tokens=10,
         decode_speed=25.0,
+        inter_token_latency=0.012,
         submit_time=now,
         first_token_time=now + 0.3,
         finish_time=now + 2.0,

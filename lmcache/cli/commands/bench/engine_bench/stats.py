@@ -27,6 +27,7 @@ class RequestResult:
     num_input_tokens: int  # from server usage report
     num_output_tokens: int  # tokens generated
     decode_speed: float  # output tokens / decode time (tok/s)
+    inter_token_latency: float  # average inter-token latency (seconds)
     submit_time: float  # absolute timestamp
     first_token_time: float  # absolute timestamp
     finish_time: float  # absolute timestamp
@@ -45,6 +46,7 @@ class AggregatedStats:
     mean_ttft_ms: float
     mean_decode_speed: float  # tok/s
     mean_request_latency_ms: float
+    mean_itl_ms: float  # average inter-token latency
 
     input_throughput: float  # total input tokens / elapsed time
     output_throughput: float  # total output tokens / elapsed time
@@ -66,6 +68,9 @@ class FinalStats(AggregatedStats):
     p50_request_latency_ms: float = 0.0
     p90_request_latency_ms: float = 0.0
     p99_request_latency_ms: float = 0.0
+    p50_itl_ms: float = 0.0
+    p90_itl_ms: float = 0.0
+    p99_itl_ms: float = 0.0
 
 
 class StatsCollector:
@@ -86,6 +91,7 @@ class StatsCollector:
         self._sum_ttft: float = 0.0
         self._sum_decode_speed: float = 0.0
         self._sum_request_latency: float = 0.0
+        self._sum_itl: float = 0.0
         self._total_input_tokens: int = 0
         self._total_output_tokens: int = 0
 
@@ -98,6 +104,7 @@ class StatsCollector:
                 self._sum_ttft += result.ttft
                 self._sum_decode_speed += result.decode_speed
                 self._sum_request_latency += result.request_latency
+                self._sum_itl += result.inter_token_latency
             else:
                 self._failed += 1
             self._total_input_tokens += result.num_input_tokens
@@ -122,6 +129,7 @@ class StatsCollector:
             self._sum_ttft = 0.0
             self._sum_decode_speed = 0.0
             self._sum_request_latency = 0.0
+            self._sum_itl = 0.0
             self._total_input_tokens = 0
             self._total_output_tokens = 0
         logger.debug("Stats collector reset")
@@ -135,6 +143,7 @@ class StatsCollector:
             sum_ttft = self._sum_ttft
             sum_decode = self._sum_decode_speed
             sum_latency = self._sum_request_latency
+            sum_itl = self._sum_itl
             total_in = self._total_input_tokens
             total_out = self._total_output_tokens
 
@@ -148,6 +157,7 @@ class StatsCollector:
             mean_ttft_ms=(sum_ttft / safe_successful) * 1000.0,
             mean_decode_speed=sum_decode / safe_successful,
             mean_request_latency_ms=(sum_latency / safe_successful) * 1000.0,
+            mean_itl_ms=(sum_itl / safe_successful) * 1000.0,
             input_throughput=total_in / max(elapsed, 1e-9),
             output_throughput=total_out / max(elapsed, 1e-9),
             total_input_tokens=total_in,
@@ -174,6 +184,7 @@ class StatsCollector:
                 mean_ttft_ms=current.mean_ttft_ms,
                 mean_decode_speed=current.mean_decode_speed,
                 mean_request_latency_ms=current.mean_request_latency_ms,
+                mean_itl_ms=current.mean_itl_ms,
                 input_throughput=current.input_throughput,
                 output_throughput=current.output_throughput,
                 total_input_tokens=current.total_input_tokens,
@@ -183,6 +194,15 @@ class StatsCollector:
         ttfts = sorted(r.ttft * 1000.0 for r in successful_results)
         decode_speeds = sorted(r.decode_speed for r in successful_results)
         latencies = sorted(r.request_latency * 1000.0 for r in successful_results)
+        itls = sorted(
+            r.inter_token_latency * 1000.0
+            for r in successful_results
+            if r.inter_token_latency > 0
+        )
+
+        # Recompute mean ITL from the same filtered population as
+        # percentiles (only requests with inter_token_latency > 0).
+        mean_itl = sum(itls) / len(itls) if itls else 0.0
 
         return FinalStats(
             total_requests=current.total_requests,
@@ -192,6 +212,7 @@ class StatsCollector:
             mean_ttft_ms=current.mean_ttft_ms,
             mean_decode_speed=current.mean_decode_speed,
             mean_request_latency_ms=current.mean_request_latency_ms,
+            mean_itl_ms=mean_itl,
             input_throughput=current.input_throughput,
             output_throughput=current.output_throughput,
             total_input_tokens=current.total_input_tokens,
@@ -205,6 +226,9 @@ class StatsCollector:
             p50_request_latency_ms=_percentile(latencies, 50),
             p90_request_latency_ms=_percentile(latencies, 90),
             p99_request_latency_ms=_percentile(latencies, 99),
+            p50_itl_ms=_percentile(itls, 50),
+            p90_itl_ms=_percentile(itls, 90),
+            p99_itl_ms=_percentile(itls, 99),
         )
 
     def get_all_results(self) -> list[RequestResult]:
@@ -223,6 +247,7 @@ class StatsCollector:
             "num_input_tokens",
             "num_output_tokens",
             "decode_speed",
+            "inter_token_latency",
             "submit_time",
             "first_token_time",
             "finish_time",

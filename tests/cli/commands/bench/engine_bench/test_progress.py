@@ -35,6 +35,7 @@ def _make_result(request_id: str = "req_0") -> RequestResult:
         num_input_tokens=10000,
         num_output_tokens=128,
         decode_speed=48.0,
+        inter_token_latency=0.012,
         submit_time=now,
         first_token_time=now + 0.3,
         finish_time=now + 2.0,

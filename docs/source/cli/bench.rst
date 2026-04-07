@@ -3,8 +3,8 @@ lmcache bench engine
 
 The ``lmcache bench engine`` command runs sustained performance benchmarks
 against an inference engine (e.g., vLLM). It supports multiple workload types
-that exercise different caching patterns and reports TTFT, decoding speed, and
-throughput metrics.
+that exercise different caching patterns and reports TTFT, decoding speed,
+inter-token latency (ITL), and throughput metrics.
 
 .. code-block:: bash
 
@@ -437,6 +437,11 @@ After completion, a summary table is printed:
    P50 decode (tok/s):               47.91
    P90 decode (tok/s):               42.10
    P99 decode (tok/s):               38.55
+   --------------- Inter-Token Latency -------------------
+   Mean ITL (ms):                    12.50
+   P50 ITL (ms):                     11.80
+   P90 ITL (ms):                     14.30
+   P99 ITL (ms):                     18.20
    ======================================================
 
 CSV and JSON

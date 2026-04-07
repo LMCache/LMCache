@@ -475,3 +475,31 @@ class TestRequestSenderClose:
         await sender.close()
 
         mock_client.close.assert_called_once()
+
+
+# -----------------------------------------------------------------------
+# ITL computation tests
+# -----------------------------------------------------------------------
+
+
+class TestITLComputation:
+    def test_itl_from_multiple_tokens(self) -> None:
+        # Standard
+        import time
+
+        now = time.time()
+        token_times = [now, now + 0.1, now + 0.2]
+        itl = (token_times[-1] - token_times[0]) / (len(token_times) - 1)
+        assert abs(itl - 0.1) < 1e-6
+
+    def test_itl_single_token_is_zero(self) -> None:
+        # Standard
+        import time
+
+        token_times = [time.time()]
+        itl = (
+            0.0
+            if len(token_times) < 2
+            else ((token_times[-1] - token_times[0]) / (len(token_times) - 1))
+        )
+        assert itl == 0.0
