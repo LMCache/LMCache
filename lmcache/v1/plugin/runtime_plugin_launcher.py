@@ -110,6 +110,11 @@ class RuntimePluginLauncher:
             env["LMCACHE_PLUGIN_WORKER_COUNT"] = str(self.worker_count)
             env["LMCACHE_PLUGIN_WORKER_ID"] = str(self.worker_id)
 
+            # Force line-buffered stdout for Python sub-processes
+            # so that output is captured in real-time rather than
+            # being held in the block buffer until exit.
+            env["PYTHONUNBUFFERED"] = "1"
+
             proc = subprocess.Popen(
                 [interpreter, str(file)],
                 env=env,
