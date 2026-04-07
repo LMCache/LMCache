@@ -586,6 +586,18 @@ class StorageManager:
         """
         Callback function when all prefetch tasks
         (i.e., prefetching from all backends for the entire request) are done.
+
+        Calculates prefix-contiguous retrieved chunks and writes back
+        valid chunks to LocalCPUBackend (skipping chunks from backends
+        in the exclusion list). Responds to the scheduler with the
+        total retrieved token length.
+
+        :param asyncio.Future task: The gathered future of all tier results.
+        :param str lookup_id: The unique request id.
+        :param list[int] cum_chunk_lengths_total: Cumulative token lengths.
+        :param list[int] tier_expected_chunks: Expected chunk count per tier.
+        :param Optional[list[str]] tier_backend_names: Backend name per tier,
+            used to filter write-back (skip LocalCPUBackend, PDBackend, etc.).
         """
         assert self.async_lookup_server is not None
         self.event_manager.update_event_status(
