@@ -566,26 +566,14 @@ class StorageManager:
         """
         Callback function when a single prefetch task
         (i.e., prefetching from a single backend) is done.
-        Writes back fetched data to LocalCPUBackend for local caching.
+
+        Note: Write-back to LocalCPUBackend is intentionally NOT done here.
+        Each tier's callback fires independently, so writing back here could
+        cache non-contiguous chunks from subsequent tiers when a middle tier
+        has a gap (partial eviction). Instead, write-back is performed in
+        prefetch_all_done_callback where prefix continuity is validated.
         """
-        if (
-            backend_name not in ["LocalCPUBackend", "PDBackend", "MaruBackend"]
-            and "LocalCPUBackend" in self.storage_backends
-        ):
-            try:
-                memory_objs = future.result()
-                if memory_objs:
-                    local_cpu = self.storage_backends["LocalCPUBackend"]
-                    assert isinstance(local_cpu, LocalCPUBackend)
-                    local_cpu.batched_submit_put_task(
-                        keys[: len(memory_objs)], memory_objs
-                    )
-            except Exception as e:
-                logger.warning(
-                    "Write-back to LocalCPUBackend failed for %s: %s",
-                    backend_name,
-                    e,
-                )
+        pass
 
     def prefetch_all_done_callback(
         self,
@@ -661,6 +649,33 @@ class StorageManager:
                     for mem_obj in subsequent_tier:
                         mem_obj.ref_count_down()
                 break
+
+        # Write-back only prefix-contiguous chunks to LocalCPUBackend.
+        # This avoids caching non-contiguous chunks from subsequent tiers
+        # when a middle tier has a gap due to eviction.
+        if total_retrieved_chunks > 0 and "LocalCPUBackend" in self.storage_backends:
+            try:
+                local_cpu = self.storage_backends["LocalCPUBackend"]
+                assert isinstance(local_cpu, LocalCPUBackend)
+                valid_keys = []
+                valid_objs = []
+                count = 0
+                for tier_result in res:
+                    for key, obj in tier_result:
+                        if count >= total_retrieved_chunks:
+                            break
+                        valid_keys.append(key)
+                        valid_objs.append(obj)
+                        count += 1
+                    if count >= total_retrieved_chunks:
+                        break
+                if valid_keys:
+                    local_cpu.batched_submit_put_task(valid_keys, valid_objs)
+            except Exception as e:
+                logger.warning(
+                    "Write-back to LocalCPUBackend failed: %s",
+                    e,
+                )
 
         retrieved_length = cum_chunk_lengths_total[total_retrieved_chunks]
         logger.info(
