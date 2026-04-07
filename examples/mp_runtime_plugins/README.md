@@ -11,6 +11,11 @@ This directory contains example runtime plugins designed for the
 > `storage_manager_config`, and `obs_config` — rather than a single
 > `LMCacheEngineConfig` JSON.
 
+## Design
+
+For architecture details, component diagrams, and data flow, see
+[docs/design/mp_runtime_plugin.md](../../docs/design/mp_runtime_plugin.md).
+
 ## Files
 
 | File | Language | Description |

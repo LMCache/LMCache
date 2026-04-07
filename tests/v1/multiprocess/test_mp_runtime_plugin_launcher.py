@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """
-Unit tests for MPRuntimePluginLauncher and helper functions.
+Unit tests for MPRuntimePluginLauncher.
 """
 
 # Standard
@@ -15,9 +15,6 @@ import pytest
 # First Party
 from lmcache.v1.multiprocess.mp_runtime_plugin_launcher import (
     MPRuntimePluginLauncher,
-    _make_json_safe,
-    _MPPluginConfig,
-    _safe_asdict,
 )
 
 # ---------------------------------------------------------------------------
@@ -44,100 +41,6 @@ class _FakeConfigWithPath:
 
     name: str = "test"
     path: Path = Path("/tmp/test")
-
-
-# ---------------------------------------------------------------------------
-# _make_json_safe
-# ---------------------------------------------------------------------------
-
-
-class TestMakeJsonSafe:
-    def test_primitive_types(self):
-        assert _make_json_safe("hello") == "hello"
-        assert _make_json_safe(42) == 42
-        assert _make_json_safe(3.14) == 3.14
-        assert _make_json_safe(True) is True
-        assert _make_json_safe(None) is None
-
-    def test_dict(self):
-        result = _make_json_safe({"a": 1, "b": "two"})
-        assert result == {"a": 1, "b": "two"}
-
-    def test_list_and_tuple(self):
-        assert _make_json_safe([1, "x", None]) == [1, "x", None]
-        assert _make_json_safe((1, 2)) == [1, 2]
-
-    def test_nested_structure(self):
-        data = {"a": [1, {"b": (True, None)}]}
-        result = _make_json_safe(data)
-        assert result == {"a": [1, {"b": [True, None]}]}
-
-    def test_non_serializable_fallback(self):
-        p = Path("/some/path")
-        result = _make_json_safe(p)
-        assert result == str(p)
-
-    def test_nested_non_serializable(self):
-        data = {"path": Path("/tmp"), "items": [Path("/a")]}
-        result = _make_json_safe(data)
-        assert result == {
-            "path": "/tmp",
-            "items": ["/a"],
-        }
-
-
-# ---------------------------------------------------------------------------
-# _safe_asdict
-# ---------------------------------------------------------------------------
-
-
-class TestSafeAsdict:
-    def test_simple_dataclass(self):
-        cfg = _FakeServerConfig()
-        result = _safe_asdict(cfg)
-        assert result == {
-            "host": "localhost",
-            "port": 8080,
-            "chunk_size": 256,
-        }
-
-    def test_non_serializable_field(self):
-        cfg = _FakeConfigWithPath(name="x", path=Path("/foo"))
-        result = _safe_asdict(cfg)
-        assert result["name"] == "x"
-        assert result["path"] == "/foo"
-        # Ensure the result is JSON-serializable
-        json.dumps(result)
-
-    def test_rejects_non_dataclass(self):
-        with pytest.raises(TypeError, match="Expected a dataclass"):
-            _safe_asdict({"not": "a dataclass"})
-
-    def test_rejects_plain_object(self):
-        with pytest.raises(TypeError, match="Expected a dataclass"):
-            _safe_asdict(object())
-
-
-# ---------------------------------------------------------------------------
-# _MPPluginConfig
-# ---------------------------------------------------------------------------
-
-
-class TestMPPluginConfig:
-    def test_to_json(self):
-        cfg = _MPPluginConfig(
-            runtime_plugin_locations=["/a", "/b"],
-            configs_dict={"server": {"host": "localhost"}},
-        )
-        parsed = json.loads(cfg.to_json())
-        assert parsed == {"server": {"host": "localhost"}}
-
-    def test_runtime_plugin_locations(self):
-        cfg = _MPPluginConfig(
-            runtime_plugin_locations=["/x"],
-            configs_dict={},
-        )
-        assert cfg.runtime_plugin_locations == ["/x"]
 
 
 # ---------------------------------------------------------------------------
@@ -184,6 +87,15 @@ class TestMPRuntimePluginLauncher:
         assert parsed["my_config"]["path"] == "/data"
 
     @patch("lmcache.v1.multiprocess.mp_runtime_plugin_launcher.RuntimePluginLauncher")
+    def test_init_rejects_non_dataclass(self, mock_rpl_cls):
+        """Passing a non-dataclass config raises TypeError."""
+        with pytest.raises(TypeError, match="Expected a dataclass"):
+            MPRuntimePluginLauncher(
+                runtime_plugin_locations=["/p"],
+                bad_config={"not": "a dataclass"},
+            )
+
+    @patch("lmcache.v1.multiprocess.mp_runtime_plugin_launcher.RuntimePluginLauncher")
     def test_init_no_configs(self, mock_rpl_cls):
         """Launcher works with zero extra configs."""
         MPRuntimePluginLauncher(
@@ -194,16 +106,14 @@ class TestMPRuntimePluginLauncher:
         assert json.loads(wrapper.to_json()) == {}
 
     @patch("lmcache.v1.multiprocess.mp_runtime_plugin_launcher.RuntimePluginLauncher")
-    def test_init_passes_server_role(self, mock_rpl_cls):
-        """Inner launcher is created with role=SERVER."""
+    def test_init_passes_no_role(self, mock_rpl_cls):
+        """MP mode has no role; inner launcher gets role=None."""
         MPRuntimePluginLauncher(
             runtime_plugin_locations=["/p"],
         )
 
         call_kwargs = mock_rpl_cls.call_args[1]
-        assert call_kwargs["role"] == "SERVER"
-        assert call_kwargs["worker_count"] == 1
-        assert call_kwargs["worker_id"] == 0
+        assert call_kwargs["role"] is None
 
     @patch("lmcache.v1.multiprocess.mp_runtime_plugin_launcher.RuntimePluginLauncher")
     def test_launch_plugins_delegates(self, mock_rpl_cls):
