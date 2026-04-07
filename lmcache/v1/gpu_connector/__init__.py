@@ -66,6 +66,10 @@ def CreateGPUConnector(
         from lmcache.integration.vllm.utils import get_vllm_torch_dev
 
         torch_dev, dev_name = get_vllm_torch_dev()
+        local_worker_id = metadata.local_worker_id
+        torch_dev.set_device(local_worker_id)
+        device = torch.device(f"{dev_name}:{local_worker_id}")
+
         if dev_name == "cuda":
             # First Party
             from lmcache.v1.gpu_connector.gpu_connectors import (
@@ -74,27 +78,7 @@ def CreateGPUConnector(
                 VLLMPagedMemGPUConnectorV3,
                 VLLMPagedMemLayerwiseGPUConnector,
             )
-        elif dev_name == "xpu":
-            # First Party
-            from lmcache.v1.gpu_connector.xpu_connectors import (
-                VLLMBufferLayerwiseXPUConnector,
-                VLLMPagedMemLayerwiseXPUConnector,
-                VLLMPagedMemXPUConnectorV2,
-                VLLMPagedMemXPUConnectorV3,
-            )
-        elif dev_name == "hpu":
-            # First Party
-            from lmcache.v1.gpu_connector.hpu_connector import (
-                VLLMPagedMemHPUConnectorV2,
-            )
-        else:
-            raise ValueError(f"Unsupported dev_name: {dev_name}")
 
-        local_worker_id = metadata.local_worker_id
-        torch_dev.set_device(local_worker_id)
-        device = torch.device(f"{dev_name}:{local_worker_id}")
-
-        if dev_name == "cuda":
             if config.use_layerwise:
                 if config.enable_blending:
                     return VLLMBufferLayerwiseGPUConnector.from_metadata(
@@ -114,6 +98,14 @@ def CreateGPUConnector(
                     metadata, use_gpu, device, layout_hints=layout_hints
                 )
         elif dev_name == "xpu":
+            # First Party
+            from lmcache.v1.gpu_connector.xpu_connectors import (
+                VLLMBufferLayerwiseXPUConnector,
+                VLLMPagedMemLayerwiseXPUConnector,
+                VLLMPagedMemXPUConnectorV2,
+                VLLMPagedMemXPUConnectorV3,
+            )
+
             if config.use_layerwise:
                 if config.enable_blending:
                     return VLLMBufferLayerwiseXPUConnector.from_metadata(
@@ -133,9 +125,16 @@ def CreateGPUConnector(
                     metadata, use_gpu, device
                 )
         elif dev_name == "hpu":
+            # First Party
+            from lmcache.v1.gpu_connector.hpu_connector import (
+                VLLMPagedMemHPUConnectorV2,
+            )
+
             return VLLMPagedMemHPUConnectorV2.from_metadata(metadata, use_gpu, device)
         else:
-            raise RuntimeError("No supported connector found for the current platform.")
+            raise RuntimeError(
+                "No supported connector {dev_name} found for the current platform."
+            )
 
     elif engine == EngineType.MOCK:
         kv_shape = metadata.kv_shape
