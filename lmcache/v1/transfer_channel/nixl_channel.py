@@ -464,7 +464,45 @@ class NixlChannel(BaseTransferChannel):
         buffers: Union[list[bytes], list[MemoryObj]],
         transfer_spec: Optional[dict] = None,
     ) -> int:
-        raise NotImplementedError
+        """
+        Read a batch of data from a remote peer through the nixl channel.
+
+        This is the reverse of batched_write: the local side initiates a READ
+        from the remote peer's memory into local buffers.
+
+        :param buffers: A list of MemoryObj to store the read data.
+        :param transfer_spec: Must contain 'sender_id' and 'remote_indexes'.
+
+        :return: Number of successfully transferred objects.
+        """
+        assert transfer_spec is not None
+
+        handle = self.nixl_agent.make_prepped_xfer(
+            "READ",
+            self.nixl_wrapper.xfer_handler,
+            self.get_local_mem_indices(buffers),
+            self.remote_xfer_handlers_dict[transfer_spec["sender_id"]],
+            transfer_spec["remote_indexes"],
+        )
+
+        self.nixl_agent.transfer(handle)
+
+        # Poll for completion
+        wait_time = 0.001
+        while True:
+            status = self.nixl_agent.check_xfer_state(handle)
+            logger.debug(f"Read transfer status: {status}")
+
+            if status == "ERR":
+                logger.error("Error in read operation")
+                raise RuntimeError("Failed to read objects from remote peer")
+            elif status == "PROC":
+                time.sleep(wait_time)
+                continue
+            assert status == "DONE", f"Transfer status is {status}, expected DONE"
+            break
+
+        return len(buffers)
 
     async def async_batched_write(
         self,
@@ -637,3 +675,62 @@ class NixlAgentWrapper:
         self.reg_descs = reg_descs
         self.xfer_descs = xfer_descs
         self.xfer_handler = xfer_handler
+
+    @classmethod
+    def from_memory_regions(
+        cls,
+        memory_regions: list[tuple[int, int, int, str]],
+        page_size: int,
+        tp_rank: int,
+        backends: list[str],
+    ) -> "NixlAgentWrapper":
+        """Initialize NIXL agent with multiple memory regions (e.g. vLLM KV caches).
+
+        This enables direct KV cache registration without an intermediate
+        pd_buffer, eliminating two GPU memcpy operations per DPD transfer.
+
+        Args:
+            memory_regions: List of (base_addr, size, dev_id, meta_info) tuples.
+                Each tuple describes one contiguous memory region to register.
+            page_size: Transfer descriptor granularity in bytes.
+            tp_rank: Tensor parallel rank.
+            backends: NIXL backend list (e.g. ["UCX"]).
+
+        Returns:
+            NixlAgentWrapper with all regions registered.
+        """
+        try:
+            # Third Party
+            from nixl._api import nixl_agent as NixlAgent
+            from nixl._api import nixl_agent_config
+        except ImportError as err:
+            raise RuntimeError("NIXL is not available") from err
+
+        if backends is None:
+            backends = ["UCX"]
+
+        nixl_agent = NixlAgent(
+            str(uuid.uuid4()),
+            nixl_agent_config(backends=backends),
+        )
+
+        # Register all memory regions at once
+        reg_descs = nixl_agent.get_reg_descs(memory_regions, mem_type="cuda")
+        nixl_agent.register_memory(reg_descs)
+
+        # Create transfer descriptors at page_size granularity across all regions
+        xfer_desc = []
+        for base_addr, size, dev_id, _meta in memory_regions:
+            for offset in range(0, size, page_size):
+                chunk_size = min(page_size, size - offset)
+                xfer_desc.append((base_addr + offset, chunk_size, dev_id))
+
+        xfer_descs = nixl_agent.get_xfer_descs(xfer_desc, mem_type="cuda")
+        xfer_handler = nixl_agent.prep_xfer_dlist("", xfer_descs, mem_type="cuda")
+
+        wrapper = cls.__new__(cls)
+        wrapper.agent = nixl_agent
+        wrapper.reg_descs = reg_descs
+        wrapper.xfer_descs = xfer_descs
+        wrapper.xfer_handler = xfer_handler
+        return wrapper
