@@ -104,7 +104,7 @@ class MPRuntimePluginLauncher:
         )
         self._inner = RuntimePluginLauncher(
             config=wrapper,
-            role="SERVER",
+            role=None,
             worker_count=1,
             worker_id=0,
         )

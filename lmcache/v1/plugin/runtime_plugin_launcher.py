@@ -14,7 +14,13 @@ logger = init_logger(__name__)
 
 
 class RuntimePluginLauncher:
-    def __init__(self, config, role: str, worker_count: int, worker_id: int):
+    def __init__(
+        self,
+        config,
+        role: str | None,
+        worker_count: int,
+        worker_id: int,
+    ):
         self.config = config
         self.role = role
         self.worker_count = worker_count
@@ -54,11 +60,17 @@ class RuntimePluginLauncher:
         if len(parts) < 2:
             return False
 
-        # Check role match
-        plugin_role = parts[0].upper()
-        if plugin_role != "ALL" and plugin_role != self.role.upper():
-            logger.info("Skipping %s: requires role %s", file, plugin_role)
-            return True
+        # When role is None, skip role-based filtering entirely
+        # (e.g. MP mode has no role concept)
+        if self.role is not None:
+            plugin_role = parts[0].upper()
+            if plugin_role != "ALL" and plugin_role != self.role.upper():
+                logger.info(
+                    "Skipping %s: requires role %s",
+                    file,
+                    plugin_role,
+                )
+                return True
 
         # Check worker ID match
         if len(parts) > 2 and parts[1].isdigit():
@@ -86,13 +98,14 @@ class RuntimePluginLauncher:
 
             # Pass role and config as environment variables
             env = os.environ.copy()
-            env["LMCACHE_RUNTIME_PLUGIN_ROLE"] = str(self.role)
+            role_str = self.role or ""
+            env["LMCACHE_RUNTIME_PLUGIN_ROLE"] = role_str
             env["LMCACHE_RUNTIME_PLUGIN_CONFIG"] = self.config.to_json()
             env["LMCACHE_RUNTIME_PLUGIN_WORKER_COUNT"] = str(self.worker_count)
             env["LMCACHE_RUNTIME_PLUGIN_WORKER_ID"] = str(self.worker_id)
 
             # TODO: For backwards compatibility, remove when applicable
-            env["LMCACHE_PLUGIN_ROLE"] = str(self.role)
+            env["LMCACHE_PLUGIN_ROLE"] = role_str
             env["LMCACHE_PLUGIN_CONFIG"] = self.config.to_json()
             env["LMCACHE_PLUGIN_WORKER_COUNT"] = str(self.worker_count)
             env["LMCACHE_PLUGIN_WORKER_ID"] = str(self.worker_id)

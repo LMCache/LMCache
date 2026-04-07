@@ -20,16 +20,12 @@ config="${LMCACHE_RUNTIME_PLUGIN_CONFIG}"
 
 echo "[mp_heartbeat] Started"
 
-# Try to extract key fields with jq if available
+# Dump config as compact single-line JSON.
+# The parent captures stdout line-by-line, so avoid multi-line output.
 if command -v jq &>/dev/null && [ -n "${config}" ]; then
-    host=$(echo "${config}" | jq -r '.mp_config.host // "?"')
-    port=$(echo "${config}" | jq -r '.mp_config.port // "?"')
-    chunk_size=$(echo "${config}" | jq -r '.mp_config.chunk_size // "?"')
-    eviction=$(echo "${config}" | jq -r '.storage_manager_config.eviction_config.eviction_policy // "?"')
-    echo "[mp_heartbeat] MP server: host=${host}  port=${port}  chunk_size=${chunk_size}  eviction=${eviction}"
+    echo "[mp_heartbeat] config: $(echo "${config}" | jq -c .)"
 else
-    echo "[mp_heartbeat] jq not found or config empty; raw config:"
-    echo "${config}"
+    echo "[mp_heartbeat] config: ${config}"
 fi
 
 # Heartbeat loop

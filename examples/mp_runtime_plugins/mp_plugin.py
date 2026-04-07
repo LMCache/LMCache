@@ -65,47 +65,22 @@ def parse_mp_config() -> dict:
         return {}
 
 
+def dump_parsed_config(config: dict) -> None:
+    """Dump the parsed aggregated config as compact JSON.
+
+    The parent process captures stdout line-by-line and logs each
+    line separately, so we emit a single-line JSON to keep the
+    output in one log entry.
+    """
+    print("[mp_plugin] config: %s" % json.dumps(config, default=str))
+
+
 def main() -> None:
     config = parse_mp_config()
 
-    # Extract individual config sections
-    mp_cfg = config.get("mp_config", {})
-    sm_cfg = config.get("storage_manager_config", {})
-    obs_cfg = config.get("obs_config", {})
-
     print("[mp_plugin] Started")
-    print(
-        "[mp_plugin] MP server: host=%s  port=%s  "
-        "chunk_size=%s"
-        % (
-            mp_cfg.get("host", "?"),
-            mp_cfg.get("port", "?"),
-            mp_cfg.get("chunk_size", "?"),
-        )
-    )
 
-    l1_cfg = sm_cfg.get("l1_manager_config", {})
-    mem_cfg = l1_cfg.get("memory_config", {})
-    l1_size_gb = mem_cfg.get("size_in_bytes", 0) / (1 << 30)
-    eviction = sm_cfg.get("eviction_config", {})
-    print(
-        "[mp_plugin] Storage: L1=%.1fGB  eviction=%s  "
-        "watermark=%s"
-        % (
-            l1_size_gb,
-            eviction.get("eviction_policy", "?"),
-            eviction.get("trigger_watermark", "?"),
-        )
-    )
-    print(
-        "[mp_plugin] Observability: enabled=%s  "
-        "metrics=%s  tracing=%s"
-        % (
-            obs_cfg.get("enabled", "?"),
-            obs_cfg.get("metrics_enabled", "?"),
-            obs_cfg.get("tracing_enabled", "?"),
-        )
-    )
+    dump_parsed_config(config)
 
     # --- Periodic status reporter loop ---
     loop_count = 0
