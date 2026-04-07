@@ -68,8 +68,7 @@ Mixing different connector types:
     remote_storage_plugins: ["fs.local", "mooncakestore"]
     extra_config:
       remote_storage_plugin.fs.local.base_path: /data/cache
-      remote_storage_plugin.mooncakestore.host: localhost
-      remote_storage_plugin.mooncakestore.port: 50051
+      remote_storage_plugin.mooncakestore.master_server_address: "localhost:50051"
 
 How to Integrate Custom Remote Storage with LMCache
 ---------------------------------------------------
@@ -242,9 +241,12 @@ The adapter module (``adapter.py``):
     from lmcache.v1.storage_backend.connector import (
         ConnectorAdapter,
         ConnectorContext,
+        extract_plugin_type,
     )
     from lmcache.v1.storage_backend.connector.base_connector import RemoteConnector
     from .connector import MyStoreConnector
+
+    PLUGIN_TYPE = "mystore"
 
     class MyStoreConnectorAdapter(ConnectorAdapter):
         def __init__(self) -> None:
@@ -254,12 +256,8 @@ The adapter module (``adapter.py``):
             if url.startswith(self.schema):
                 return True
             if url.startswith("plugin://"):
-                from lmcache.v1.storage_backend.connector import (
-                    extract_plugin_type,
-                )
-                return extract_plugin_type(
-                    url[len("plugin://"):]
-                ) == "mystore"
+                pname = url[len("plugin://"):]
+                return extract_plugin_type(pname) == PLUGIN_TYPE
             return False
 
         def create_connector(self, context: ConnectorContext) -> RemoteConnector:
