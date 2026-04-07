@@ -581,6 +581,7 @@ class StorageManager:
         lookup_id: str,
         cum_chunk_lengths_total: list[int],
         tier_expected_chunks: list[int],
+        tier_backend_names: Optional[list[str]] = None,
     ) -> None:
         """
         Callback function when all prefetch tasks
@@ -653,19 +654,26 @@ class StorageManager:
         # Write-back only prefix-contiguous chunks to LocalCPUBackend.
         # This avoids caching non-contiguous chunks from subsequent tiers
         # when a middle tier has a gap due to eviction.
-        if total_retrieved_chunks > 0 and "LocalCPUBackend" in self.storage_backends:
+        _WRITE_BACK_SKIP_BACKENDS = {"LocalCPUBackend", "PDBackend", "MaruBackend"}
+        if (
+            total_retrieved_chunks > 0
+            and "LocalCPUBackend" in self.storage_backends
+            and tier_backend_names is not None
+        ):
             try:
                 local_cpu = self.storage_backends["LocalCPUBackend"]
                 assert isinstance(local_cpu, LocalCPUBackend)
                 valid_keys = []
                 valid_objs = []
                 count = 0
-                for tier_result in res:
+                for tier_idx, tier_result in enumerate(res):
+                    skip = tier_backend_names[tier_idx] in _WRITE_BACK_SKIP_BACKENDS
                     for key, obj in tier_result:
                         if count >= total_retrieved_chunks:
                             break
-                        valid_keys.append(key)
-                        valid_objs.append(obj)
+                        if not skip:
+                            valid_keys.append(key)
+                            valid_objs.append(obj)
                         count += 1
                     if count >= total_retrieved_chunks:
                         break
@@ -736,6 +744,7 @@ class StorageManager:
         cum_chunk_lengths_total = cum_chunk_lengths[:]
         loading_tasks = []
         tier_expected_chunks = []
+        tier_backend_names: list[str] = []
         # we also keep track of the keys for each tier and each chunk
         loading_task_keys: list[list[CacheEngineKey]] = []
         for backend_name, backend in self.get_active_storage_backends(
@@ -748,6 +757,7 @@ class StorageManager:
 
             num_total_hit_chunks += num_hit_chunks
             tier_expected_chunks.append(num_hit_chunks)
+            tier_backend_names.append(backend_name)
 
             backend_keys = keys[:num_hit_chunks]
             loading_task_keys.append(backend_keys)
@@ -820,6 +830,7 @@ class StorageManager:
                 lookup_id,
                 cum_chunk_lengths_total,
                 tier_expected_chunks,
+                tier_backend_names,
             )
         )
 
