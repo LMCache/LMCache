@@ -111,6 +111,10 @@ class RemoteConnector(metaclass=abc.ABCMeta):
         actual_shape = torch.Size(shape_list)
         memory_obj.raw_data = memory_obj.raw_data[:bytes_read]
         memory_obj.meta.shape = actual_shape
+        # Sync group_prefix_sum so that get_size() / byte_array reflect the
+        # truncated size rather than the original full-chunk size.
+        if hasattr(memory_obj, "group_prefix_sum"):
+            memory_obj.group_prefix_sum = [0, bytes_read]  # type: ignore[attr-defined]
 
         return memory_obj
 

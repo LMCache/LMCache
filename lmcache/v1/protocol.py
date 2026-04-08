@@ -96,6 +96,49 @@ def get_remote_metadata_bytes():
     return REMOTE_METADATA_BYTES
 
 
+def pad_shape_to_4d(shape: torch.Size) -> list[int]:
+    """Pad a shape with fewer than 4 dimensions to 4D using trailing
+    zeros.
+
+    Shapes that are already 4D are returned as-is.  For shapes with
+    fewer dimensions the missing trailing slots are filled with ``0``.
+    This is consistent with the convention used by
+    :class:`BinaryMemoryObj` (``[length, 0, 0, 0]``).
+
+    Args:
+        shape: The original tensor shape (1-D to 4-D).
+
+    Returns:
+        A list of exactly 4 integers representing the padded shape.
+
+    Raises:
+        AssertionError: If the shape has more than 4 dimensions.
+    """
+    assert len(shape) <= 4, (
+        f"Shape dimension must be <= 4 for serialization, got {len(shape)}"
+    )
+    padded = list(shape) + [0] * (4 - len(shape))
+    return padded
+
+
+def strip_shape_padding(dims: list[int]) -> torch.Size:
+    """Strip trailing-zero padding that was added by
+    :func:`pad_shape_to_4d`.
+
+    Trailing zeros are removed so that the original dimensionality is
+    restored.  At least one dimension is always preserved.
+
+    Args:
+        dims: A list of 4 integers read from the serialized format.
+
+    Returns:
+        A :class:`torch.Size` with the padding removed.
+    """
+    while len(dims) > 1 and dims[-1] == 0:
+        dims.pop()
+    return torch.Size(dims)
+
+
 @dataclass
 class RemoteMetadata:
     length: int
@@ -103,53 +146,10 @@ class RemoteMetadata:
     dtypes: list[torch.dtype]
     fmt: MemoryFormat
 
-    @staticmethod
-    def _pad_shape_to_4d(shape: torch.Size) -> list[int]:
-        """Pad a shape with fewer than 4 dimensions to 4D using trailing
-        zeros.
-
-        Shapes that are already 4D are returned as-is.  For shapes with
-        fewer dimensions the missing trailing slots are filled with ``0``.
-        This is consistent with the convention used by
-        :class:`BinaryMemoryObj` (``[length, 0, 0, 0]``).
-
-        Args:
-            shape: The original tensor shape (1-D to 4-D).
-
-        Returns:
-            A list of exactly 4 integers representing the padded shape.
-
-        Raises:
-            AssertionError: If the shape has more than 4 dimensions.
-        """
-        assert len(shape) <= 4, (
-            f"Shape dimension must be <= 4 for serialization, got {len(shape)}"
-        )
-        padded = list(shape) + [0] * (4 - len(shape))
-        return padded
-
-    @staticmethod
-    def _strip_shape_padding(dims: list[int]) -> torch.Size:
-        """Strip trailing-zero padding that was added by
-        :meth:`_pad_shape_to_4d`.
-
-        Trailing zeros are removed so that the original dimensionality is
-        restored.  At least one dimension is always preserved.
-
-        Args:
-            dims: A list of 4 integers read from the serialized format.
-
-        Returns:
-            A :class:`torch.Size` with the padding removed.
-        """
-        while len(dims) > 1 and dims[-1] == 0:
-            dims.pop()
-        return torch.Size(dims)
-
     def _prepare_params(self):
         params = [self.length, int(self.fmt.value)]
         for shape, dtype in zip(self.shapes, self.dtypes, strict=True):
-            padded = self._pad_shape_to_4d(shape)
+            padded = pad_shape_to_4d(shape)
             params.append(DTYPE_TO_INT[dtype])
             params.extend(padded)
         return params
@@ -176,7 +176,7 @@ class RemoteMetadata:
         dtypes = []
         for i in range(2, len(result), 5):
             dims = list(result[i + 1 : i + 5])
-            shapes.append(RemoteMetadata._strip_shape_padding(dims))
+            shapes.append(strip_shape_padding(dims))
             dtypes.append(INT_TO_DTYPE[result[i]])
 
         return RemoteMetadata(
@@ -212,7 +212,7 @@ class ClientMetaMessage:
 
         # NOTE(Jiayi): 4 is the maximum dimension of memory object.
         # Pass in shape [x, 0, 0, 0] if it is a bytes memory object
-        padded = RemoteMetadata._pad_shape_to_4d(self.shape)
+        padded = pad_shape_to_4d(self.shape)
 
         packed_bytes = struct.pack(
             f"iiiiiiiii{MAX_KEY_LENGTH}s",
@@ -234,7 +234,7 @@ class ClientMetaMessage:
         command, length, fmt, dtype, location, shape0, shape1, shape2, shape3, key = (
             struct.unpack(f"iiiiiiiii{MAX_KEY_LENGTH}s", s)
         )
-        shape = RemoteMetadata._strip_shape_padding([shape0, shape1, shape2, shape3])
+        shape = strip_shape_padding([shape0, shape1, shape2, shape3])
         return ClientMetaMessage(
             ClientCommand(command),
             parse_cache_key(key.decode().strip()),
@@ -265,7 +265,7 @@ class ServerMetaMessage:
     location: Optional[str] = None
 
     def serialize(self) -> bytes:
-        padded = RemoteMetadata._pad_shape_to_4d(self.shape)
+        padded = pad_shape_to_4d(self.shape)
         packed_bytes = struct.pack(
             "iiiiiiiii",
             self.code.value,
@@ -289,7 +289,7 @@ class ServerMetaMessage:
         code, length, fmt, dtype, shape0, shape1, shape2, shape3, location = (
             struct.unpack("iiiiiiiii", s)
         )
-        shape = RemoteMetadata._strip_shape_padding([shape0, shape1, shape2, shape3])
+        shape = strip_shape_padding([shape0, shape1, shape2, shape3])
         return ServerMetaMessage(
             ServerReturnCode(code),
             length,
