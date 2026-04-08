@@ -117,6 +117,27 @@ class NixlStorageConfig:
     def validate_nixl_path(
         path: Union[str, List[str]], path_sharding: str, worker_id: int
     ) -> str:
+        """Validate the NIXL path configuration and select a path for this worker.
+
+        Ensures the path is not None, the sharding strategy is supported, and
+        the path list is non-empty. When multiple paths are provided, selects
+        one via round-robin based on the worker ID.
+
+        Args:
+            path: A single directory path or a list of directory paths for
+                KV-cache storage.
+            path_sharding: The sharding strategy. Currently only ``"by_gpu"``
+                is supported, which assigns paths round-robin by worker ID.
+            worker_id: The local worker (GPU) ID used for round-robin
+                path selection.
+
+        Returns:
+            The selected base path string for this worker.
+
+        Raises:
+            AssertionError: If *path* is ``None``, *path_sharding* is not
+                ``"by_gpu"``, or the resolved path list is empty.
+        """
         assert path is not None, "nixl_path cannot be None"
         assert path_sharding == "by_gpu", (
             "Unsupported path_sharding. Only 'by_gpu' is supported currently."
@@ -934,7 +955,7 @@ class NixlStaticStorageBackend(NixlStorageBackend):
         use_direct_io: bool,
         path_sharding: str,
         worker_id: int,
-    ):
+    ) -> NixlDescPool:
         if backend in ("GDS", "GDS_MT", "POSIX", "HF3FS"):
 <<<<<<< HEAD
 <<<<<<< HEAD
