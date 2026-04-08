@@ -1708,6 +1708,7 @@ class LMCacheConnectorV1Impl:
         force_skip_save = self.kv_role == "kv_consumer" or self.force_skip_save
 
         meta = LMCacheConnectorMetadata()
+        kv_cache_groups = getattr(self.kv_cache_config, "kv_cache_groups", None)
 
         for finished_req_id in scheduler_output.finished_req_ids:
             self._request_trackers.pop(finished_req_id, None)
@@ -1749,7 +1750,7 @@ class LMCacheConnectorV1Impl:
             req_meta = ReqMeta.from_request_tracker(
                 request_tracker,
                 self._block_size,
-                self.kv_cache_config.kv_cache_groups,
+                kv_cache_groups,
                 self._lmcache_chunk_size,
                 load_spec=load_spec,
                 discard_partial_chunks=self._discard_partial_chunks,
@@ -1796,7 +1797,7 @@ class LMCacheConnectorV1Impl:
                 req_meta = ReqMeta.from_request_tracker(
                     request_tracker,
                     self._block_size,
-                    self.kv_cache_config.kv_cache_groups,
+                    kv_cache_groups,
                     self._lmcache_chunk_size,
                     load_spec=load_spec,
                     discard_partial_chunks=self._discard_partial_chunks,
@@ -1920,7 +1921,7 @@ class LMCacheConnectorV1Impl:
             req_meta = ReqMeta.from_request_tracker(
                 request_tracker,
                 self._block_size,
-                self.kv_cache_config.kv_cache_groups,
+                kv_cache_groups,
                 self._lmcache_chunk_size,
                 load_spec=load_spec,
                 discard_partial_chunks=self._discard_partial_chunks,
