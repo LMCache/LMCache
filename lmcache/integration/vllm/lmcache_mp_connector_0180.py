@@ -106,6 +106,7 @@ def create_scheduler_adapter(
     vllm_config: VllmConfig,
     mq_timeout: float,
     heartbeat_interval: float,
+    save_decode_cache: bool = False,
 ) -> LMCacheMPSchedulerAdapter:
     world_size, kv_rank = extract_world_size_and_kv_rank(
         vllm_config.parallel_config.world_size,
@@ -129,6 +130,7 @@ def create_scheduler_adapter(
         vllm_config.cache_config.block_size,
         mq_timeout=mq_timeout,
         heartbeat_interval=heartbeat_interval,
+        save_decode_cache=save_decode_cache,
         **kwargs,
     )
 
@@ -139,6 +141,7 @@ def create_worker_adapter(
     vllm_config: VllmConfig,
     mq_timeout: float,
     heartbeat_interval: float,
+    save_decode_cache: bool = False,
 ) -> LMCacheMPWorkerAdapter:
     world_size, kv_rank = extract_world_size_and_kv_rank(
         vllm_config.parallel_config.world_size,
@@ -154,6 +157,7 @@ def create_worker_adapter(
         vllm_config.cache_config.block_size,
         mq_timeout=mq_timeout,
         heartbeat_interval=heartbeat_interval,
+        save_decode_cache=save_decode_cache,
     )
 
 
@@ -280,6 +284,7 @@ class LMCacheMPRequestMetadata:
         tracker: LMCacheMPRequestTracker,
         blocks_in_chunk: int,
         vllm_block_size: int,
+        skip_store: bool = False,
     ) -> "LMCacheMPRequestMetadata | None":
         """
         Generate the store metadata for the current request tracker.
@@ -288,7 +293,13 @@ class LMCacheMPRequestMetadata:
             tracker: The request tracker to generate the metadata from.
             blocks_in_chunk: the number of blocks in a LMCache data chunk
             vllm_block_size: the block size used in vLLM
+            skip_store: If True, the store operation is skipped entirely.
+                Callers should use the adapter's should_skip_store() to
+                determine this value.
         """
+        if skip_store:
+            return None
+
         # Store the blocks that has block hashes
         # NOTE: the invariant here is that `num_stored_blocks` should
         # always be a multiple of `blocks_in_chunk`
@@ -456,6 +467,10 @@ class LMCacheMPConnector(KVConnectorBase_V1):
             )
         )
 
+        save_decode_cache: bool = vllm_config.kv_transfer_config.get_from_extra_config(
+            "lmcache.save_decode_cache", False
+        )
+
         server_url = f"{server_host}:{server_port}"
         zmq_context = zmq.Context.instance()
         if self.role == KVConnectorRole.SCHEDULER:
@@ -465,6 +480,7 @@ class LMCacheMPConnector(KVConnectorBase_V1):
                 vllm_config,
                 mq_timeout,
                 heartbeat_interval,
+                save_decode_cache=save_decode_cache,
             )
             self.request_trackers: dict[str, LMCacheMPRequestTracker] = {}
         elif self.role == KVConnectorRole.WORKER:
@@ -474,6 +490,7 @@ class LMCacheMPConnector(KVConnectorBase_V1):
                 vllm_config,
                 mq_timeout,
                 heartbeat_interval,
+                save_decode_cache=save_decode_cache,
             )
         else:
             raise ValueError(f"Unknown KVConnectorRole: {self.role}")
@@ -870,6 +887,8 @@ class LMCacheMPConnector(KVConnectorBase_V1):
         """
         # Clean up request tracker to prevent memory leak
         self._cleanup_request_tracker(request.request_id)
+        # Clean up decode phase tracking in the adapter
+        self.scheduler_adapter.cleanup_decode_state(request.request_id)
         # Notify LMCache to end the session for this request
         self.scheduler_adapter.end_session(request.request_id)
 
@@ -1000,8 +1019,16 @@ class LMCacheMPConnector(KVConnectorBase_V1):
             num_new_tokens = cached_reqs.num_computed_tokens[idx]
             request_tracker.increase_num_scheduled_tokens(num_new_tokens)
 
+            # When num_output_tokens > 0, the request has entered decode phase
+            # (auto-regressive generation). This is the canonical way to check
+            # decode phase in vLLM, equivalent to is_context_phase() == False.
+            if not cached_reqs.is_context_phase(request_id):
+                self.scheduler_adapter.mark_decode_phase(request_id)
+
             r_meta = LMCacheMPRequestMetadata.GetStoreMetadata(
-                request_tracker, blocks_per_chunk, self.vllm_block_size
+                request_tracker, blocks_per_chunk, self.vllm_block_size,
+                skip_store=self.scheduler_adapter.should_skip_store(
+                    request_id),
             )
 
             if r_meta is not None:

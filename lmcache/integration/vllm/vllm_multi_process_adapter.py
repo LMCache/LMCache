@@ -188,6 +188,7 @@ class LMCacheMPSchedulerAdapter:
         tp_size: int = 1,
         mq_timeout: float = DEFAULT_MQ_TIMEOUT,
         heartbeat_interval: float = DEFAULT_HEARTBEAT_INTERVAL,
+        save_decode_cache: bool = False,
     ):
         """
         Args:
@@ -201,6 +202,9 @@ class LMCacheMPSchedulerAdapter:
                 multi-reader locking (default 1).
             mq_timeout: Timeout in seconds for message queue requests.
             heartbeat_interval: Interval in seconds between heartbeat pings.
+            save_decode_cache: Whether to save KV cache during decode phase.
+                If False (default), store operations are skipped when the
+                request is in decode phase.
         """
         self.mq_client = MessageQueueClient(server_url, context)
         self._mq_timeout = mq_timeout
@@ -215,6 +219,12 @@ class LMCacheMPSchedulerAdapter:
         self.model_name = model_name
         self.world_size = world_size
         self.tp_size = tp_size
+        self.save_decode_cache = save_decode_cache
+
+        # Decode phase tracking: request IDs that have entered decode phase.
+        # Connectors call mark_decode_phase() to register, and
+        # should_skip_store() to check whether a store should be skipped.
+        self._decode_requests: set[str] = set()
 
         # Read chunk size from lmcache
         try:
@@ -395,6 +405,58 @@ class LMCacheMPSchedulerAdapter:
         if job_id is not None:
             self._finished_lookup_jobs.pop(job_id, None)
 
+    def mark_decode_phase(self, request_id: str) -> None:
+        """Mark a request as having entered the decode phase.
+
+        Connectors should call this when they detect that a request
+        has transitioned from context (prefill) phase to decode
+        (auto-regressive generation) phase.
+
+        Args:
+            request_id: The ID of the request.
+        """
+        self._decode_requests.add(request_id)
+
+    def is_decode_phase(self, request_id: str) -> bool:
+        """Check whether a request is in the decode phase.
+
+        Args:
+            request_id: The ID of the request.
+
+        Returns:
+            True if the request has been marked as decode phase.
+        """
+        return request_id in self._decode_requests
+
+    def should_skip_store(self, request_id: str) -> bool:
+        """Determine whether a store operation should be skipped.
+
+        The store is skipped when the request is in decode phase and
+        ``save_decode_cache`` is disabled.
+
+        This centralises the decode-phase filtering logic so that
+        connectors do not need to implement it themselves.
+
+        Args:
+            request_id: The ID of the request.
+
+        Returns:
+            True if the store should be skipped.
+        """
+        if self.save_decode_cache:
+            return False
+        return request_id in self._decode_requests
+
+    def cleanup_decode_state(self, request_id: str) -> None:
+        """Remove decode-phase tracking for a finished request.
+
+        Should be called when a request finishes to prevent memory leak.
+
+        Args:
+            request_id: The ID of the finished request.
+        """
+        self._decode_requests.discard(request_id)
+
     def free_lookup_locks(
         self,
         token_ids: list[int],
@@ -503,6 +565,7 @@ class LMCacheMPWorkerAdapter:
         vllm_block_size: int,
         mq_timeout: float = DEFAULT_MQ_TIMEOUT,
         heartbeat_interval: float = DEFAULT_HEARTBEAT_INTERVAL,
+        save_decode_cache: bool = False,
     ):
         self.mq_client = MessageQueueClient(server_url, context)
         self._mq_timeout = mq_timeout
@@ -535,6 +598,7 @@ class LMCacheMPWorkerAdapter:
         self.model_name = model_name
         self.world_size = world_size
         self.worker_id = kv_rank
+        self.save_decode_cache = save_decode_cache
 
         # Read chunk size from lmcache
         try:
