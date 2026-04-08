@@ -1493,10 +1493,8 @@ class LMCacheConnectorV1Impl:
                 and request_priority > self.config.priority_limit
             )
 
-            original_request = self._unfinished_requests.get(request.req_id)
-            cache_salt = (
-                original_request.cache_salt if original_request is not None else None
-            )
+            req = self._unfinished_requests.get(request.req_id)
+            cache_salt = req.cache_salt if req is not None else None
 
             request_tracker = RequestTracker.from_new_request(
                 self.config,
