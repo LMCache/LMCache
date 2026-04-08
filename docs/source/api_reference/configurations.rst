@@ -36,7 +36,10 @@ Basic cache settings that control the core functionality of LMCache.
      - Maximum CPU cache size in GB. Default: 5.0
    * - local_disk
      - LMCACHE_LOCAL_DISK
-     - Path to local disk cache. Format: "file:///path/to/cache".
+     - Path (or comma-separated paths) to local disk cache directories. Format: ``"file:///path/to/cache"`` or ``"/path/a,/path/b"`` for multi-device I/O. See ``local_disk_path_sharding`` for how paths are assigned to GPUs.
+   * - local_disk_path_sharding
+     - LMCACHE_LOCAL_DISK_PATH_SHARDING
+     - Strategy for selecting a path when multiple paths are provided. Currently only ``"by_gpu"`` is supported, which selects paths based on GPU device ID (default: "by_gpu").
    * - max_local_disk_size
      - LMCACHE_MAX_LOCAL_DISK_SIZE
      - Maximum disk cache size in GB. Default: 0.0
@@ -244,7 +247,7 @@ Settings for disaggregated prefill functionality. The latest/default PD is imple
      - PD role. Values: "sender" (prefiller) or "receiver" (decoder).
    * - pd_buffer_size
      - LMCACHE_PD_BUFFER_SIZE
-     - Transport buffer size for PD in bytes. Required for both senders and receivers when enable_pd=true
+     - Upper bound of PD transport buffer size (in bytes), aligned to chunk size. Required for both senders and receivers when enable_pd=true
    * - pd_buffer_device
      - LMCACHE_PD_BUFFER_DEVICE
      - Device for PD buffer. Values: "cpu", "cuda". Required for both senders and receivers when enable_pd=true
@@ -341,7 +344,10 @@ Settings for different storage backends and paths.
      - Description
    * - gds_path
      - LMCACHE_GDS_PATH
-     - Path for GDS backend. Supports comma-separated paths for multi-device I/O (e.g. ``/mnt/nvme0/cache,/mnt/nvme1/cache``). Each GPU selects a path via ``device_id % num_paths``.
+     - Path for GDS backend. Supports comma-separated paths for multi-device I/O (e.g. ``/mnt/nvme0/cache,/mnt/nvme1/cache``). See ``gds_path_sharding`` for how paths are assigned to GPUs.
+   * - gds_path_sharding
+     - LMCACHE_GDS_PATH_SHARDING
+     - Strategy for selecting a path when multiple paths are provided. Currently only ``"by_gpu"`` is supported, which selects paths based on GPU device ID (default: "by_gpu").
    * - cufile_buffer_size
      - LMCACHE_CUFILE_BUFFER_SIZE
      - Buffer size for cuFile/hipFile operations
