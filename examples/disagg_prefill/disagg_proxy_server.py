@@ -174,15 +174,20 @@ async def lifespan(app: FastAPI):
     app.state.zmq_task = asyncio.create_task(zmq_pull_server())
 
     global pd_buffer_semaphore
-    if global_args.max_inflight_tokens is not None:
-        capacity_slots = global_args.max_inflight_tokens // global_args.chunk_size
-        pd_buffer_semaphore = WeightedSemaphore(capacity_slots)
-        logger.info(
-            "PD buffer semaphore: capacity=%d slots (%d tokens / %d chunk_size).",
-            capacity_slots,
-            global_args.max_inflight_tokens,
-            global_args.chunk_size,
-        )
+    kv_bytes_per_token = compute_kv_bytes_per_token(global_args.model)
+    capacity_slots = global_args.pd_buffer_size // (
+        kv_bytes_per_token * global_args.chunk_size
+    )
+    pd_buffer_semaphore = WeightedSemaphore(capacity_slots)
+    logger.info(
+        "PD buffer semaphore: capacity=%d slots"
+        " (%d bytes / (%d bytes/tok * %d chunk_size)) for model %s.",
+        capacity_slots,
+        global_args.pd_buffer_size,
+        kv_bytes_per_token,
+        global_args.chunk_size,
+        global_args.model,
+    )
 
     yield
 
@@ -241,6 +246,31 @@ def csv_strs(s):
     return [x.strip() for x in s.split(",")]
 
 
+def compute_kv_bytes_per_token(model_name: str) -> int:
+    """Return the number of KV cache bytes per token for *model_name*.
+
+    Reads num_hidden_layers, num_key_value_heads, head_dim, and torch_dtype
+    from the HuggingFace config without downloading model weights.
+
+    Args:
+        model_name: HuggingFace model id or local path.
+
+    Returns:
+        Bytes per token across all layers and both K/V tensors.
+    """
+    # Third Party
+    from transformers import AutoConfig
+
+    cfg = AutoConfig.from_pretrained(model_name)
+    num_layers: int = cfg.num_hidden_layers
+    num_kv_heads: int = getattr(cfg, "num_key_value_heads", cfg.num_attention_heads)
+    head_dim: int = getattr(cfg, "head_dim", cfg.hidden_size // cfg.num_attention_heads)
+    # 4 bytes for float32, 2 bytes for float16/bfloat16 (the common default)
+    torch_dtype = str(getattr(cfg, "torch_dtype", "bfloat16"))
+    dtype_bytes = 4 if "float32" in torch_dtype else 2
+    return 2 * num_layers * num_kv_heads * head_dim * dtype_bytes
+
+
 def parse_args():
     parser = argparse.ArgumentParser()
 
@@ -258,18 +288,27 @@ def parse_args():
     parser.add_argument("--proxy-host", type=str, default="localhost")
     parser.add_argument("--proxy-port", type=int, default=8500)
 
-    # PD buffer concurrency limiting (optional). When set, a weighted semaphore
-    # caps in-flight token usage to prevent decoder buffer exhaustion deadlocks.
-    # capacity_slots = max_inflight_tokens // chunk_size
+    # PD buffer concurrency limiting. A weighted semaphore caps in-flight
+    # chunk slots to prevent decoder buffer exhaustion deadlocks.
+    # capacity_slots = pd_buffer_size // (kv_bytes_per_token * chunk_size)
+    # kv_bytes_per_token is derived from the model config automatically.
     parser.add_argument(
-        "--max-inflight-tokens",
-        type=int,
-        default=None,
+        "--model",
+        type=str,
+        default="meta-llama/Llama-3.1-8B-Instruct",
         help=(
-            "Maximum total prompt tokens allowed in flight across all requests."
-            " Each request occupies ceil(prompt_tokens / chunk_size) slots."
-            " Set to roughly pd_buffer_size / kv_bytes_per_token to match the"
-            " decoder buffer capacity. Disabled (unlimited) when not provided."
+            "HuggingFace model name or local path. Used to derive"
+            " kv_bytes_per_token for the PD buffer semaphore capacity."
+        ),
+    )
+    parser.add_argument(
+        "--pd-buffer-size",
+        type=int,
+        default=2 * 1024 * 1024 * 1024,  # 2 GB
+        help=(
+            "PD transfer buffer size in bytes (must match the decoder's"
+            " LMCache config). Used to derive the in-flight slot capacity."
+            " Default: 2 GB."
         ),
     )
     parser.add_argument(
@@ -306,7 +345,6 @@ app.state.bound_clients = {}
 # Keep finished reqs
 app.state.finished_reqs = defaultdict(int)
 
-# None when --max-inflight-tokens is not provided (unlimited).
 pd_buffer_semaphore: Optional[WeightedSemaphore] = None
 
 
