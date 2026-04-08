@@ -21,15 +21,14 @@ from lmcache.logging import init_logger
 from lmcache.observability import LMCStatsMonitor
 from lmcache.utils import _lmcache_nvtx_annotate
 from lmcache.v1.pin_monitor import PinMonitor
+from lmcache.v1.platform import (
+    HAS_CUDA,
+    current_device_id,
+    lmc_ops,
+    safe_device,
+    synchronize,
+)
 from lmcache.v1.system_detection import NUMAMapping
-
-if torch.cuda.is_available():
-    # First Party
-    import lmcache.c_ops as lmc_ops
-else:
-    # First Party
-    import lmcache.non_cuda_equivalents as lmc_ops
-
 
 logger = init_logger(__name__)
 
@@ -392,15 +391,12 @@ def _resolve_pinned_alloc_free(
             (lmc_ops.free_shm_pinned_ptr, size, shm_name),
         )
     elif numa_mapping:
-        if torch.cuda.is_available():
-            current_device_id = torch.cuda.current_device()
-        else:
-            current_device_id = 0
+        dev_id = current_device_id()
         gpu_to_numa_mapping = numa_mapping.gpu_to_numa_mapping
-        assert current_device_id in gpu_to_numa_mapping, (
-            f"Current device {current_device_id} is not in the GPU NUMA mapping."
+        assert dev_id in gpu_to_numa_mapping, (
+            f"Current device {dev_id} is not in the GPU NUMA mapping."
         )
-        numa_id = gpu_to_numa_mapping[current_device_id]
+        numa_id = gpu_to_numa_mapping[dev_id]
         return (
             (lmc_ops.alloc_pinned_numa_ptr, numa_id),
             (lmc_ops.free_pinned_numa_ptr, size),
@@ -440,8 +436,7 @@ def _free_cpu_memory(
     numa_mapping: Optional[NUMAMapping] = None,
     shm_name: Optional[str] = None,
 ) -> None:
-    if torch.cuda.is_available():
-        torch.cuda.synchronize()
+    synchronize()
 
     _, free_info = _resolve_pinned_alloc_free(
         numa_mapping,
@@ -2189,8 +2184,7 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
 
     def close(self):
         if not self._unregistered:
-            if torch.cuda.is_available():
-                torch.cuda.synchronize()
+            synchronize()
             if self.buffer.numel() == 0:
                 return
             _free_cpu_memory(
@@ -2220,8 +2214,7 @@ class GPUMemoryAllocator(MemoryAllocatorInterface):
         :param int size: The size of the GPU memory in bytes.
         :param Optional[int] align_bytes: The byte alignment for allocations.
         """
-        if not torch.cuda.is_available():
-            device = "cpu"
+        device = safe_device(device)
 
         self.tensor = torch.empty(size, dtype=torch.uint8, device=device)
 
@@ -2304,10 +2297,7 @@ class AdHocMemoryAllocator(MemoryAllocatorInterface):
         """
         :param str device: The device of the ad hoc memory allocator.
         """
-        if not torch.cuda.is_available():
-            self.device = "cpu"
-        else:
-            self.device = device
+        self.device = safe_device(device)
 
     @_lmcache_nvtx_annotate
     def allocate(
@@ -2393,10 +2383,7 @@ class CuFileMemoryAllocator(GPUMemoryAllocator):
         if device is None:
             # TODO(Serapheim): Ideally we'd get the device from the upper
             # layer - for now just use the current device.
-            if torch.cuda.is_available():
-                device = f"cuda:{torch.cuda.current_device()}"
-            else:
-                device = "cpu:0"
+            device = f"cuda:{current_device_id()}" if HAS_CUDA else "cpu:0"
         super().__init__(size, device, align_bytes=4096)
         self.base_pointer = self.tensor.data_ptr()
         cuFileBufRegister(ctypes.c_void_p(self.base_pointer), size, flags=0)
@@ -2417,11 +2404,8 @@ class HipFileMemoryAllocator(GPUMemoryAllocator):
 
         self.hipFileBufDeregister = hipFileBufDeregister
         if device is None:
-            if torch.cuda.is_available():
-                # TODO: On ROCm, PyTorch still uses the CUDA API internally
-                device = f"cuda:{torch.cuda.current_device()}"
-            else:
-                device = "cpu:0"
+            # TODO: On ROCm, PyTorch still uses the CUDA API
+            device = f"cuda:{current_device_id()}" if HAS_CUDA else "cpu:0"
 
         super().__init__(size, device, align_bytes=4096)
         self.base_pointer = self.tensor.data_ptr()

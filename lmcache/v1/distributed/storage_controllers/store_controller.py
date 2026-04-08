@@ -16,12 +16,6 @@ import threading
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.compat_eventfd import (
-    compat_eventfd,
-    compat_eventfd_close,
-    compat_eventfd_read,
-    compat_eventfd_write,
-)
 from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.internal_api import L1ManagerListener
@@ -31,6 +25,10 @@ from lmcache.v1.distributed.storage_controller import StorageControllerInterface
 from lmcache.v1.distributed.storage_controllers.store_policy import (
     AdapterDescriptor,
     StorePolicy,
+)
+from lmcache.v1.event_notifier import (
+    consume_fd,
+    create_event_notifier,
 )
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import get_event_bus
@@ -57,7 +55,7 @@ class StoreListener(L1ManagerListener):
     def __init__(self) -> None:
         self._pending_keys: list[ObjectKey] = []
         self._lock = threading.Lock()
-        self._event_fd = compat_eventfd()
+        self._event_fd = create_event_notifier()
 
     def get_event_fd(self) -> int:
         """
@@ -66,7 +64,7 @@ class StoreListener(L1ManagerListener):
         Returns:
             int: The eventfd file descriptor.
         """
-        return self._event_fd
+        return self._event_fd.fileno()
 
     def pop_pending_keys(self) -> list[ObjectKey]:
         """
@@ -102,7 +100,7 @@ class StoreListener(L1ManagerListener):
         """
         with self._lock:
             self._pending_keys.extend(keys)
-        compat_eventfd_write(self._event_fd, 1)
+        self._event_fd.notify()
 
     def on_l1_keys_reserved_read(self, keys: list[ObjectKey]) -> None:
         pass
@@ -121,9 +119,13 @@ class StoreListener(L1ManagerListener):
         # objects are prefetched to L1.
         pass
 
+    def notify(self) -> None:
+        """Wake up the poll loop (used during shutdown)."""
+        self._event_fd.notify()
+
     def close(self) -> None:
         """Close the eventfd."""
-        compat_eventfd_close(self._event_fd)
+        self._event_fd.close()
 
 
 @dataclass
@@ -220,7 +222,7 @@ class StoreController(StorageControllerInterface):
         """
         self._stop_flag.set()
         # Wake up the poll loop so it can exit promptly
-        compat_eventfd_write(self._listener.get_event_fd(), 1)
+        self._listener.notify()
         self._thread.join()
         self._cleanup_in_flight_tasks()
         self._listener.close()
@@ -265,7 +267,7 @@ class StoreController(StorageControllerInterface):
 
                 # Consume the eventfd value
                 try:
-                    compat_eventfd_read(fd)
+                    consume_fd(fd)
                 except (OSError, BlockingIOError):
                     pass
 

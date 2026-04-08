@@ -33,6 +33,9 @@ from lmcache.v1.distributed.l2_adapters.config import (
 from lmcache.v1.distributed.l2_adapters.factory import (
     register_l2_adapter_factory,
 )
+from lmcache.v1.event_notifier import (
+    create_event_notifier,
+)
 from lmcache.v1.memory_management import MemoryObj
 
 logger = init_logger(__name__)
@@ -425,9 +428,9 @@ class NixlStoreL2Adapter(L2AdapterInterface):
         super().__init__()
         self._config = config
 
-        self._store_efd = os.eventfd(0, os.EFD_NONBLOCK | os.EFD_CLOEXEC)
-        self._lookup_efd = os.eventfd(0, os.EFD_NONBLOCK | os.EFD_CLOEXEC)
-        self._load_efd = os.eventfd(0, os.EFD_NONBLOCK | os.EFD_CLOEXEC)
+        self._store_notifier = create_event_notifier()
+        self._lookup_notifier = create_event_notifier()
+        self._load_notifier = create_event_notifier()
 
         # Cache data structures
         self._memory_objects: dict[ObjectKey, NixlStoreObj] = {}
@@ -458,13 +461,13 @@ class NixlStoreL2Adapter(L2AdapterInterface):
     # --------------------
 
     def get_store_event_fd(self) -> int:
-        return self._store_efd
+        return self._store_notifier.fileno()
 
     def get_lookup_and_lock_event_fd(self) -> int:
-        return self._lookup_efd
+        return self._lookup_notifier.fileno()
 
     def get_load_event_fd(self) -> int:
-        return self._load_efd
+        return self._load_notifier.fileno()
 
     #####################
     # Store Interface
@@ -586,9 +589,9 @@ class NixlStoreL2Adapter(L2AdapterInterface):
         self._loop_thread.join()
         self._loop.close()
 
-        os.close(self._store_efd)
-        os.close(self._lookup_efd)
-        os.close(self._load_efd)
+        self._store_notifier.close()
+        self._lookup_notifier.close()
+        self._load_notifier.close()
 
     #####################
     # Eviction Interface
@@ -682,7 +685,7 @@ class NixlStoreL2Adapter(L2AdapterInterface):
 
     def _signal_store_event(self) -> None:
         """Signal the store event fd to notify completion."""
-        os.eventfd_write(self._store_efd, 1)
+        self._store_notifier.notify()
 
     async def _execute_store_in_the_loop(
         self,
@@ -767,7 +770,7 @@ class NixlStoreL2Adapter(L2AdapterInterface):
 
     def _signal_lookup_event(self) -> None:
         """Signal the lookup event fd to notify completion."""
-        os.eventfd_write(self._lookup_efd, 1)
+        self._lookup_notifier.notify()
 
     def _execute_lookup_in_the_loop(
         self, keys: list[ObjectKey], task_id: L2TaskId
@@ -796,7 +799,7 @@ class NixlStoreL2Adapter(L2AdapterInterface):
 
     def _signal_load_event(self) -> None:
         """Signal the load event fd to notify completion."""
-        os.eventfd_write(self._load_efd, 1)
+        self._load_notifier.notify()
 
     async def _execute_load_in_loop(
         self,

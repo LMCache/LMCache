@@ -22,12 +22,6 @@ import threading
 # First Party
 from lmcache.logging import init_logger
 from lmcache.native_storage_ops import Bitmap
-from lmcache.v1.compat_eventfd import (
-    compat_eventfd,
-    compat_eventfd_close,
-    compat_eventfd_read,
-    compat_eventfd_write,
-)
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.l1_manager import L1Manager
@@ -38,6 +32,10 @@ from lmcache.v1.distributed.storage_controllers.prefetch_policy import (
 )
 from lmcache.v1.distributed.storage_controllers.store_policy import (
     AdapterDescriptor,
+)
+from lmcache.v1.event_notifier import (
+    consume_fd,
+    create_event_notifier,
 )
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.mp_observability.event import Event, EventType
@@ -224,7 +222,7 @@ class PrefetchController(StorageControllerInterface):
             tuple[PrefetchRequestId, list[ObjectKey], MemoryLayoutDesc, int]
         ] = []
         self._next_request_id: PrefetchRequestId = 0
-        self._submission_efd = compat_eventfd()
+        self._submission_notifier = create_event_notifier()
 
         # Thread-safe lookup results (background -> external)
         self._lookup_results_lock = threading.Lock()
@@ -291,7 +289,7 @@ class PrefetchController(StorageControllerInterface):
             request_id = self._next_request_id
             self._next_request_id += 1
             self._submission_queue.append((request_id, keys, layout_desc, extra_count))
-        compat_eventfd_write(self._submission_efd, 1)
+        self._submission_notifier.notify()
         return request_id
 
     def query_lookup_result(self, request_id: PrefetchRequestId) -> int | None:
@@ -382,10 +380,10 @@ class PrefetchController(StorageControllerInterface):
         L2 locks) before returning.
         """
         self._stop_flag.set()
-        compat_eventfd_write(self._submission_efd, 1)
+        self._submission_notifier.notify()
         self._thread.join()
         self._cleanup_in_flight_requests()
-        compat_eventfd_close(self._submission_efd)
+        self._submission_notifier.close()
 
     # =========================================================================
     # Background loop
@@ -401,7 +399,7 @@ class PrefetchController(StorageControllerInterface):
         - Each L2 adapter's load eventfd (completed loads).
         """
         poller = select.poll()
-        poller.register(self._submission_efd, select.POLLIN)
+        poller.register(self._submission_notifier.fileno(), select.POLLIN)
         for efd in self._lookup_efd_to_adapter:
             poller.register(efd, select.POLLIN)
         for efd in self._load_efd_to_adapter:
@@ -415,12 +413,15 @@ class PrefetchController(StorageControllerInterface):
                     continue
 
                 try:
-                    compat_eventfd_read(fd)
+                    if fd == self._submission_notifier.fileno():
+                        self._submission_notifier.consume()
+                    else:
+                        consume_fd(fd)
                 except (OSError, BlockingIOError):
                     pass
 
                 try:
-                    if fd == self._submission_efd:
+                    if fd == self._submission_notifier.fileno():
                         self._drain_submission_queue()
                     elif fd in self._lookup_efd_to_adapter:
                         self._process_lookup_completions(

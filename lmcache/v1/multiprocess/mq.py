@@ -14,11 +14,8 @@ import zmq
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.compat_eventfd import (
-    compat_eventfd,
-    compat_eventfd_close,
-    compat_eventfd_read,
-    compat_eventfd_write,
+from lmcache.v1.event_notifier import (
+    create_event_notifier,
 )
 from lmcache.v1.multiprocess.affinity_pool import AffinityThreadPool
 from lmcache.v1.multiprocess.custom_types import (
@@ -359,13 +356,13 @@ class MessageQueueServer:
         # Use eventfd instead of zmq PUSH/PULL sockets because blocking
         # handler callbacks run on ThreadPoolExecutor threads, and zmq
         # sockets are not thread-safe. eventfd_write() is atomic.
-        self._output_efd = compat_eventfd()
+        self._output_notifier = create_event_notifier()
         self.output_queue: queue.Queue = queue.Queue()
 
         # Poller
         self.poller = zmq.Poller()
         self.poller.register(self.socket, zmq.POLLIN)
-        self.poller.register(self._output_efd, zmq.POLLIN)
+        self.poller.register(self._output_notifier.fileno(), zmq.POLLIN)
 
         # Main loop thread
         self.is_finished = threading.Event()
@@ -432,7 +429,7 @@ class MessageQueueServer:
                 )
 
                 self.output_queue.put(frames_to_send)
-                compat_eventfd_write(self._output_efd, 1)
+                self._output_notifier.notify()
 
             except Exception:
                 logger.exception("Error in blocking handler")
@@ -461,7 +458,7 @@ class MessageQueueServer:
         while not self.is_finished.is_set():
             socks = dict(self.poller.poll(1000))
             inbound_state = socks.get(self.socket, None)
-            outbound_state = socks.get(self._output_efd, None)
+            outbound_state = socks.get(self._output_notifier.fileno(), None)
 
             # Process the incoming requests
             if inbound_state and inbound_state & zmq.POLLIN:
@@ -492,7 +489,7 @@ class MessageQueueServer:
             # Send the responses
             if outbound_state and outbound_state & zmq.POLLIN:
                 # Consume the eventfd counter (resets atomically)
-                compat_eventfd_read(self._output_efd)
+                self._output_notifier.consume()
 
                 # Process the output tasks
                 try:
@@ -734,4 +731,4 @@ class MessageQueueServer:
         self.socket.close()
         for pool in self.extra_pools:
             pool.shutdown(wait=False)
-        compat_eventfd_close(self._output_efd)
+        self._output_notifier.close()

@@ -17,6 +17,9 @@ import array
 # Third Party
 import torch
 
+# First Party
+from lmcache.v1.platform import lmc_ops
+
 if torch.cuda.is_available():
     # Third Party
     import cupy
@@ -43,16 +46,6 @@ from lmcache.v1.gpu_connector.utils import (
     is_mla,
 )
 from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
-
-if torch.cuda.is_available():
-    # First Party
-    import lmcache.c_ops as lmc_ops
-else:
-    cupy = None  # type: ignore[assignment]
-    # First Party
-    import lmcache.non_cuda_equivalents as lmc_ops  # type: ignore[assignment]
-
-# First Party
 from lmcache.v1.multiprocess.custom_types import (
     KVCache,
 )

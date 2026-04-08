@@ -182,7 +182,16 @@ def run_http_server(
     # Use asyncio.run() directly instead of server.run()
     # to avoid compatibility issues with PyCharm's
     # debugger patching asyncio.
-    asyncio.run(server.serve())
+    # Ensure uvloop (if installed) is still used as the
+    # event loop implementation.
+    if hasattr(config, "get_loop_factory"):
+        # uvicorn >= 0.36.0
+        loop_factory = config.get_loop_factory()
+        asyncio.run(server.serve(), loop_factory=loop_factory)
+    else:
+        # uvicorn < 0.36.0
+        config.setup_event_loop()
+        asyncio.run(server.serve())
 
 
 def parse_args():

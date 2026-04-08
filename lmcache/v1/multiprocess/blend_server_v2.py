@@ -91,6 +91,7 @@ from lmcache.v1.multiprocess.token_hasher import (
     unique_hits_direct_id_numba,
     update_table_id_numba,
 )
+from lmcache.v1.platform import cuda_init
 
 logger = init_logger(__name__)
 
@@ -850,7 +851,7 @@ def run_cache_server(
         mp_config.port,
     )
     # Start the ZMQ server
-    torch.cuda.init()
+    cuda_init()
     server.start()
 
     logger.info("LMCache cache blend v2 server is running...")

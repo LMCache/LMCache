@@ -29,11 +29,6 @@ import aiofiles.os
 # First Party
 from lmcache.logging import init_logger
 from lmcache.native_storage_ops import Bitmap
-from lmcache.v1.compat_eventfd import (
-    compat_eventfd,
-    compat_eventfd_close,
-    compat_eventfd_write,
-)
 from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.distributed.l2_adapters.base import (
     L2AdapterInterface,
@@ -45,6 +40,9 @@ from lmcache.v1.distributed.l2_adapters.config import (
 )
 from lmcache.v1.distributed.l2_adapters.factory import (
     register_l2_adapter_factory,
+)
+from lmcache.v1.event_notifier import (
+    create_event_notifier,
 )
 from lmcache.v1.memory_management import MemoryObj
 
@@ -269,9 +267,9 @@ class FSL2Adapter(L2AdapterInterface):
             stat = os.statvfs(self._base_path)
             self._os_disk_bs = stat.f_bsize
 
-        self._store_efd = compat_eventfd()
-        self._lookup_efd = compat_eventfd()
-        self._load_efd = compat_eventfd()
+        self._store_notifier = create_event_notifier()
+        self._lookup_notifier = create_event_notifier()
+        self._load_notifier = create_event_notifier()
 
         # Task bookkeeping
         self._next_task_id: L2TaskId = 0
@@ -300,13 +298,13 @@ class FSL2Adapter(L2AdapterInterface):
     # ------------------------------------------------------------------
 
     def get_store_event_fd(self) -> int:
-        return self._store_efd
+        return self._store_notifier.fileno()
 
     def get_lookup_and_lock_event_fd(self) -> int:
-        return self._lookup_efd
+        return self._lookup_notifier.fileno()
 
     def get_load_event_fd(self) -> int:
-        return self._load_efd
+        return self._load_notifier.fileno()
 
     # ------------------------------------------------------------------
     # Store Interface
@@ -432,9 +430,9 @@ class FSL2Adapter(L2AdapterInterface):
         self._loop_thread.join()
         self._loop.close()
 
-        compat_eventfd_close(self._store_efd)
-        compat_eventfd_close(self._lookup_efd)
-        compat_eventfd_close(self._load_efd)
+        self._store_notifier.close()
+        self._lookup_notifier.close()
+        self._load_notifier.close()
         logger.info("FSL2Adapter closed")
 
     # ------------------------------------------------------------------
@@ -615,7 +613,7 @@ class FSL2Adapter(L2AdapterInterface):
 
         with self._lock:
             self._completed_store_tasks[task_id] = success
-        compat_eventfd_write(self._store_efd, 1)
+        self._store_notifier.notify()
 
     # ---- lookup ---------------------------------------------------------
 
@@ -632,7 +630,7 @@ class FSL2Adapter(L2AdapterInterface):
 
         with self._lock:
             self._completed_lookup_tasks[task_id] = bitmap
-        compat_eventfd_write(self._lookup_efd, 1)
+        self._lookup_notifier.notify()
 
     # ---- load -----------------------------------------------------------
 
@@ -719,7 +717,7 @@ class FSL2Adapter(L2AdapterInterface):
 
         with self._lock:
             self._completed_load_tasks[task_id] = bitmap
-        compat_eventfd_write(self._load_efd, 1)
+        self._load_notifier.notify()
 
 
 # Self-register config type and adapter factory

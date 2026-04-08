@@ -1878,8 +1878,16 @@ class LMCacheEngineBuilder:
             )
 
             if corrected_device == "cpu":
-                torch.cuda.cudart().cudaHostRegister(
-                    buffer.data_ptr(), config.nixl_buffer_size, 0
+                # First Party
+                from lmcache.v1.platform import (
+                    create_memory_pinner,
+                )
+
+                pinner = create_memory_pinner()
+                pinner.pin(
+                    buffer.data_ptr(),
+                    config.nixl_buffer_size,
+                    flags=0,
                 )
             else:
                 logger.info(f"Setting cuda device to {corrected_device} ")

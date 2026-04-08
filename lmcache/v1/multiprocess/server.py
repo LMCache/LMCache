@@ -60,10 +60,7 @@ from lmcache.v1.multiprocess.protocol import (
 )
 from lmcache.v1.multiprocess.session import SessionManager
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
-
-if torch.cuda.is_available():
-    # First Party
-    import lmcache.c_ops as lmc_ops
+from lmcache.v1.platform import cuda_init, lmc_ops
 
 logger = init_logger(__name__)
 
@@ -977,8 +974,7 @@ def run_cache_server(
         mp_config.port,
     )
     # Start the ZMQ server
-    if torch.cuda.is_available():
-        torch.cuda.init()
+    cuda_init()
     server.start()
 
     logger.info("LMCache cache server is running...")

@@ -16,14 +16,8 @@ from lmcache.v1.memory_management import (
     MemoryObj,
     TensorMemoryAllocator,
 )
+from lmcache.v1.platform import create_memory_pinner, current_device_id, lmc_ops
 from lmcache.v1.system_detection import NUMAMapping
-
-if torch.cuda.is_available():
-    # First Party
-    import lmcache.c_ops as lmc_ops
-else:
-    # First Party
-    import lmcache.non_cuda_equivalents as lmc_ops
 
 logger = init_logger(__name__)
 
@@ -42,7 +36,7 @@ def get_numa_id(numa_mapping: NUMAMapping) -> int:
     Raises:
         KeyError: If GPU id is not detected in the numa mapping.
     """
-    gpu_id = torch.cuda.current_device() if torch.cuda.is_available() else 0
+    gpu_id = current_device_id()
     return numa_mapping.gpu_to_numa_mapping[gpu_id]
 
 
@@ -95,11 +89,8 @@ class LazyMemoryAllocator(MemoryAllocatorInterface):
         self._final_size = align_to(final_size, self.PIN_CHUNK_SIZE)
         # Underlying buffer for the memory allocation
         self._buffer: torch.Tensor
-        # CUDA runtime API (None when CUDA is unavailable)
-        self._cudart = torch.cuda.cudart() if torch.cuda.is_available() else None
-
-        # List of (ptr, size) for pinned memory chunks
-        self._pin_record: list[tuple[int, int]] = []
+        # Platform-aware memory pinner
+        self._pinner = create_memory_pinner()
 
         # Detect numa mapping
         if numa_mapping is not None:
@@ -196,10 +187,7 @@ class LazyMemoryAllocator(MemoryAllocatorInterface):
         self._expand_thread.join()
 
         # Unpin all pinned memory chunks
-        if self._cudart is not None:
-            for ptr, size in self._pin_record:
-                self._cudart.cudaHostUnregister(ptr)
-        self._pin_record.clear()
+        self._pinner.close()
 
         # Free the underlying buffer if using NUMA allocation
         if self._use_numa:
@@ -237,12 +225,8 @@ class LazyMemoryAllocator(MemoryAllocatorInterface):
         )
         assert offset + size <= self._final_size, "Pinning exceeds buffer size"
 
-        if self._cudart is None:
-            return
         ptr = self._buffer.data_ptr() + offset
-        # Use flag: cudaHostRegisterMapped (0x02)
-        self._cudart.cudaHostRegister(ptr, size, 2)
-        self._pin_record.append((ptr, size))
+        self._pinner.pin(ptr, size)
 
     def _commit_expansion(self, expand_size: int):
         """

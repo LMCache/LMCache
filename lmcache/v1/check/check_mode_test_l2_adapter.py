@@ -3,7 +3,6 @@
 
 # Standard
 import argparse
-import os
 import select
 import time
 
@@ -66,10 +65,11 @@ def _wait_event_fd(efd: int, timeout_ms: int = _POLL_TIMEOUT_MS) -> bool:
     poll.register(efd, select.POLLIN)
     events = poll.poll(timeout_ms)
     if events:
-        try:
-            os.eventfd_read(efd)
-        except BlockingIOError:
-            pass
+        # Import here to avoid circular imports at module level
+        # First Party
+        from lmcache.v1.event_notifier import consume_fd
+
+        consume_fd(efd)
         return True
     return False
 
