@@ -1,13 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-# Standard
+import enum
+import inspect
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
-import enum
-import inspect
 
-# Third Party
+import torch
+import zmq
+from lmcache.integration.vllm.utils import mla_enabled
+from lmcache.utils import init_logger as lmcache_init_logger
+
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
@@ -19,30 +22,21 @@ from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import RequestStatus
 from vllm.v1.utils import ConstantList
-import torch
-import zmq
-
-# First Party
-from lmcache.integration.vllm.utils import mla_enabled
-from lmcache.utils import init_logger as lmcache_init_logger
 
 try:
-    # First Party
     from lmcache.integration.vllm.vllm_multi_process_adapter import (
         LMCacheMPSchedulerAdapter,
         LMCacheMPWorkerAdapter,
         LoadStoreOp,
     )
 except ImportError:
-    # Third Party
-    from vllm.distributed.kv_transfer.kv_connector.v1.lmcache_integration import (  # type: ignore[no-redef]
+    from vllm.distributed.kv_transfer.kv_connector.v1.lmcache_integration import (
         LMCacheMPSchedulerAdapter,
         LMCacheMPWorkerAdapter,
         LoadStoreOp,
     )
 
 if TYPE_CHECKING:
-    # Third Party
     from vllm.distributed.kv_events import KVCacheEvent
     from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
         KVConnectorPromMetrics,
@@ -298,7 +292,7 @@ class LMCacheMPRequestMetadata:
         # Store the blocks that has block hashes
         # NOTE: the invariant here is that `num_stored_blocks` should
         # always be a multiple of `blocks_in_chunk`
-        # TODO: This should be checked every time we update the num_stored_blocks
+        # TODO: This should be checked everytime we update the num_stored_blocks
         min_available_blocks = min(
             len(tracker.block_hashes),
             len(tracker.allocated_block_ids),
