@@ -814,7 +814,7 @@ class MPCacheEngine:
                 entry["kv_cache_layout"] = {
                     "num_layers": ctx.num_layers,
                     "block_size": ctx.block_size,
-                    "hidden_dim_sizes": str(ctx.hidden_dim_sizes),
+                    "hidden_dim_size": str(ctx.hidden_dim_sizes),
                     "dtype": str(ctx.dtype),
                     "is_mla": ctx.is_mla,
                     "num_blocks": ctx.num_blocks,
