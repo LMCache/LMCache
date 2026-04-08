@@ -95,7 +95,12 @@ class BenchCommand(BaseCommand):
         parser.add_argument(
             "--workload",
             default=None,
-            choices=["long-doc-qa", "multi-round-chat", "random-prefill"],
+            choices=[
+                "long-doc-permutator",
+                "long-doc-qa",
+                "multi-round-chat",
+                "random-prefill",
+            ],
             help="Workload type.",
         )
         parser.add_argument(
@@ -152,6 +157,41 @@ class BenchCommand(BaseCommand):
                 "Export resolved configuration to a JSON file and exit. "
                 "Does not run the benchmark or enter interactive mode."
             ),
+        )
+
+        # --- Long-doc-permutator workload args ---
+        ldp_group = parser.add_argument_group("long-doc-permutator workload options")
+        ldp_group.add_argument(
+            "--ldp-num-contexts",
+            type=int,
+            default=5,
+            help="Number of unique context documents (default: 5).",
+        )
+        ldp_group.add_argument(
+            "--ldp-context-length",
+            type=int,
+            default=5000,
+            help="Token length of each context (default: 5000).",
+        )
+        ldp_group.add_argument(
+            "--ldp-system-prompt-length",
+            type=int,
+            default=1000,
+            help="Token length of the shared system prompt (default: 1000). "
+            "Use 0 for no system prompt.",
+        )
+        ldp_group.add_argument(
+            "--ldp-num-permutations",
+            type=int,
+            default=10,
+            help="Number of distinct permutations to send (default: 10). "
+            "Capped at N! where N = --ldp-num-contexts.",
+        )
+        ldp_group.add_argument(
+            "--ldp-num-inflight-requests",
+            type=int,
+            default=1,
+            help="Max concurrent in-flight requests (default: 1).",
         )
 
         # --- Long-doc-qa workload args ---

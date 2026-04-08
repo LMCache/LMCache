@@ -74,6 +74,11 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
         "default": None,
         "env_converter": _parse_local_disk,
     },
+    "local_disk_path_sharding": {
+        "type": str,
+        "default": "by_gpu",
+        "env_converter": str,
+    },
     "max_local_disk_size": {"type": float, "default": 0.0, "env_converter": float},
     "remote_url": {
         "type": Optional[str],
@@ -231,6 +236,11 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
     },
     # Storage paths
     "gds_path": {"type": Optional[str], "default": None, "env_converter": str},
+    "gds_path_sharding": {
+        "type": str,
+        "default": "by_gpu",
+        "env_converter": str,
+    },
     "cufile_buffer_size": {
         "type": Optional[int],
         "default": None,

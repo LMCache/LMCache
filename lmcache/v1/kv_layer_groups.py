@@ -228,3 +228,40 @@ class KVLayerGroupsManager:
 
         # Print the group structure
         logger.info("KV layer groups: %s", kv_layer_groups)
+
+    def build_kv_layer_groups_from_list(self, kv_caches: list[torch.Tensor]) -> None:
+        """Build KV layer groups from a plain list of tensors (one per layer).
+
+        Layers with the same shape and dtype are grouped together.
+        If layer groups are already built (non-empty list), this method does nothing.
+
+        Args:
+            kv_caches: List of KV cache tensors, one per layer.
+        """
+        if len(self.kv_layer_groups) > 0:
+            return
+
+        if not kv_caches:
+            logger.debug("No KV caches available, skipping KV layer groups building")
+            return
+
+        groups_dict: dict[tuple[torch.Size, torch.dtype], list[int]] = defaultdict(list)
+        for idx, tensor in enumerate(kv_caches):
+            key = (tensor.shape, tensor.dtype)
+            groups_dict[key].append(idx)
+
+        sorted_keys = sorted(groups_dict.keys(), key=lambda k: groups_dict[k][0])
+
+        kv_layer_groups: list[KVLayerGroupInfo] = []
+        for shape, dtype in sorted_keys:
+            indices = groups_dict[(shape, dtype)]
+            group_info = KVLayerGroupInfo(
+                layer_names=[str(i) for i in indices],
+                layer_indices=indices,
+                shape=shape,
+                dtype=dtype,
+            )
+            kv_layer_groups.append(group_info)
+
+        self.kv_layer_groups = kv_layer_groups
+        logger.info("KV layer groups (from list): %s", kv_layer_groups)

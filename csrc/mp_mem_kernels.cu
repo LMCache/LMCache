@@ -217,17 +217,41 @@ __global__ void multi_layer_block_transfer_kernel(
       shape_desc, lmcache_chunk_size);
 }
 
-#define LAUNCH_BLOCK_KERNEL_WITH_FORMAT(DIRECTION, FORMAT)               \
-  multi_layer_block_transfer_kernel<uint4, DIRECTION, FORMAT>            \
+#define LAUNCH_KERNEL(DIRECTION, FORMAT)                                 \
+  multi_layer_block_transfer_kernel<ScalarType, DIRECTION, FORMAT>       \
       <<<grid, block, 0, stream>>>(lmcache_obj4, paged_buffer_ptrs,      \
                                    block_ids_ptr, num_blocks_per_object, \
                                    shape_desc, lmcache_chunk_size,       \
                                    skip_prefix_n_blocks);                \
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 
-}  // namespace
+#define DISPATCH_FORMAT(DIRECTION)                                  \
+  switch (gpu_kv_format) {                                          \
+    case GPUKVFormat::NB_NL_TWO_BS_NH_HS:                           \
+      LAUNCH_KERNEL(DIRECTION, GPUKVFormat::NB_NL_TWO_BS_NH_HS);    \
+      break;                                                        \
+    case GPUKVFormat::NL_X_TWO_NB_BS_NH_HS:                         \
+      LAUNCH_KERNEL(DIRECTION, GPUKVFormat::NL_X_TWO_NB_BS_NH_HS);  \
+      break;                                                        \
+    case GPUKVFormat::NL_X_NB_TWO_BS_NH_HS:                         \
+      LAUNCH_KERNEL(DIRECTION, GPUKVFormat::NL_X_NB_TWO_BS_NH_HS);  \
+      break;                                                        \
+    case GPUKVFormat::NL_X_NB_BS_HS:                                \
+      LAUNCH_KERNEL(DIRECTION, GPUKVFormat::NL_X_NB_BS_HS);         \
+      break;                                                        \
+    case GPUKVFormat::TWO_X_NL_X_NBBS_NH_HS:                        \
+      LAUNCH_KERNEL(DIRECTION, GPUKVFormat::TWO_X_NL_X_NBBS_NH_HS); \
+      break;                                                        \
+    case GPUKVFormat::NL_X_NBBS_ONE_HS:                             \
+      LAUNCH_KERNEL(DIRECTION, GPUKVFormat::NL_X_NBBS_ONE_HS);      \
+      break;                                                        \
+    default:                                                        \
+      TORCH_CHECK(false, "Unsupported GPUKVFormat: ",               \
+                  static_cast<int>(gpu_kv_format));                 \
+  }
 
-void multi_layer_block_kv_transfer(
+template <typename ScalarType>
+void multi_layer_block_kv_transfer_templated(
     const torch::Tensor& paged_buffer_ptrs_tensor,
     std::vector<int64_t> lmcache_objects_ptrs, const torch::Tensor& block_ids,
     const torch::Device& device, TransferDirection direction,
@@ -249,23 +273,19 @@ void multi_layer_block_kv_transfer(
               num_blocks_per_object * shape_desc.bs,
               ") must equal lmcache_chunk_size (", lmcache_chunk_size, ")");
 
-  TORCH_CHECK(
-      shape_desc.hs * shape_desc.element_size % sizeof(uint4) == 0,
-      "head_size * element_size (", shape_desc.hs * shape_desc.element_size,
-      ") must be divisible by ", sizeof(uint4), " for uint4 vectorized access");
-
   // --- Build MemoryObj4 ---
-  MemoryObj4<uint4> lmcache_obj4;
+  MemoryObj4<ScalarType> lmcache_obj4;
   lmcache_obj4.num_objects = num_objects;
   for (int i = 0; i < 4; ++i) {
     lmcache_obj4.objects[i] =
-        (i < num_objects) ? reinterpret_cast<uint4*>(lmcache_objects_ptrs[i])
-                          : nullptr;
+        (i < num_objects)
+            ? reinterpret_cast<ScalarType*>(lmcache_objects_ptrs[i])
+            : nullptr;
   }
 
   // --- Build paged buffer pointer array ---
-  uint4** paged_buffer_ptrs =
-      reinterpret_cast<uint4**>(paged_buffer_ptrs_tensor.data_ptr());
+  ScalarType** paged_buffer_ptrs =
+      reinterpret_cast<ScalarType**>(paged_buffer_ptrs_tensor.data_ptr());
 
   const at::cuda::OptionalCUDAGuard device_guard(device);
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
@@ -274,68 +294,51 @@ void multi_layer_block_kv_transfer(
   const int64_t* block_ids_ptr = block_ids.data_ptr<int64_t>();
 
   // --- Grid and block dimensions ---
-  int elements_per_head =
-      shape_desc.hs * shape_desc.element_size / sizeof(uint4);
+  int elements_per_head = shape_desc.hs * shape_desc.element_size /
+                          static_cast<int>(sizeof(ScalarType));
   int thread_dim_x = std::min(elements_per_head, 32);
   int thread_dim_y = shape_desc.nh;
 
   dim3 block(thread_dim_x, thread_dim_y);
   dim3 grid(shape_desc.kv_size, total_blocks, shape_desc.nl);
 
-  // --- Dispatch on direction x format ---
   if (direction == TransferDirection::H2D) {
-    switch (gpu_kv_format) {
-      case GPUKVFormat::NB_NL_TWO_BS_NH_HS:
-        LAUNCH_BLOCK_KERNEL_WITH_FORMAT(true, GPUKVFormat::NB_NL_TWO_BS_NH_HS);
-        break;
-      case GPUKVFormat::NL_X_TWO_NB_BS_NH_HS:
-        LAUNCH_BLOCK_KERNEL_WITH_FORMAT(true,
-                                        GPUKVFormat::NL_X_TWO_NB_BS_NH_HS);
-        break;
-      case GPUKVFormat::NL_X_NB_TWO_BS_NH_HS:
-        LAUNCH_BLOCK_KERNEL_WITH_FORMAT(true,
-                                        GPUKVFormat::NL_X_NB_TWO_BS_NH_HS);
-        break;
-      case GPUKVFormat::NL_X_NB_BS_HS:
-        LAUNCH_BLOCK_KERNEL_WITH_FORMAT(true, GPUKVFormat::NL_X_NB_BS_HS);
-        break;
-      case GPUKVFormat::TWO_X_NL_X_NBBS_NH_HS:
-        LAUNCH_BLOCK_KERNEL_WITH_FORMAT(true,
-                                        GPUKVFormat::TWO_X_NL_X_NBBS_NH_HS);
-        break;
-      case GPUKVFormat::NL_X_NBBS_ONE_HS:
-        LAUNCH_BLOCK_KERNEL_WITH_FORMAT(true, GPUKVFormat::NL_X_NBBS_ONE_HS);
-        break;
-      default:
-        TORCH_CHECK(false, "Unsupported GPUKVFormat: ",
-                    static_cast<int>(gpu_kv_format));
-    }
+    DISPATCH_FORMAT(true);
   } else {
-    switch (gpu_kv_format) {
-      case GPUKVFormat::NB_NL_TWO_BS_NH_HS:
-        LAUNCH_BLOCK_KERNEL_WITH_FORMAT(false, GPUKVFormat::NB_NL_TWO_BS_NH_HS);
-        break;
-      case GPUKVFormat::NL_X_TWO_NB_BS_NH_HS:
-        LAUNCH_BLOCK_KERNEL_WITH_FORMAT(false,
-                                        GPUKVFormat::NL_X_TWO_NB_BS_NH_HS);
-        break;
-      case GPUKVFormat::NL_X_NB_TWO_BS_NH_HS:
-        LAUNCH_BLOCK_KERNEL_WITH_FORMAT(false,
-                                        GPUKVFormat::NL_X_NB_TWO_BS_NH_HS);
-        break;
-      case GPUKVFormat::NL_X_NB_BS_HS:
-        LAUNCH_BLOCK_KERNEL_WITH_FORMAT(false, GPUKVFormat::NL_X_NB_BS_HS);
-        break;
-      case GPUKVFormat::TWO_X_NL_X_NBBS_NH_HS:
-        LAUNCH_BLOCK_KERNEL_WITH_FORMAT(false,
-                                        GPUKVFormat::TWO_X_NL_X_NBBS_NH_HS);
-        break;
-      case GPUKVFormat::NL_X_NBBS_ONE_HS:
-        LAUNCH_BLOCK_KERNEL_WITH_FORMAT(false, GPUKVFormat::NL_X_NBBS_ONE_HS);
-        break;
-      default:
-        TORCH_CHECK(false, "Unsupported GPUKVFormat: ",
-                    static_cast<int>(gpu_kv_format));
-    }
+    DISPATCH_FORMAT(false);
   }
 }
+
+#undef DISPATCH_FORMAT
+#undef LAUNCH_KERNEL
+
+}  // namespace
+
+#define LAUNCH_TEMPLATED(type)                                             \
+  do {                                                                     \
+    multi_layer_block_kv_transfer_templated<type>(                         \
+        paged_buffer_ptrs_tensor, lmcache_objects_ptrs, block_ids, device, \
+        direction, shape_desc, lmcache_chunk_size, gpu_kv_format,          \
+        skip_prefix_n_blocks);                                             \
+  } while (0)
+
+void multi_layer_block_kv_transfer(
+    const torch::Tensor& paged_buffer_ptrs_tensor,
+    std::vector<int64_t> lmcache_objects_ptrs, const torch::Tensor& block_ids,
+    const torch::Device& device, TransferDirection direction,
+    PageBufferShapeDesc shape_desc, int lmcache_chunk_size,
+    GPUKVFormat gpu_kv_format, int skip_prefix_n_blocks) {
+  int head_bytes = shape_desc.hs * shape_desc.element_size;
+  TORCH_CHECK(head_bytes % sizeof(uint16_t) == 0, "head_size * element_size (",
+              head_bytes, ") must be divisible by 2 for vectorized access");
+
+  if (head_bytes % sizeof(uint4) == 0) {
+    LAUNCH_TEMPLATED(uint4);  // 16 bytes per copy
+  } else if (head_bytes % sizeof(uint32_t) == 0) {
+    LAUNCH_TEMPLATED(uint32_t);  // 4 bytes per copy
+  } else {
+    LAUNCH_TEMPLATED(uint16_t);  // 2 bytes per copy (minimum granularity)
+  }
+}
+
+#undef LAUNCH_TEMPLATED
