@@ -1,11 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from contextlib import asynccontextmanager
+from pathlib import Path
 import argparse
 
 # Third Party
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 import torch
 import uvicorn
 
@@ -91,9 +93,22 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="LMCache HTTP API", version="1.0.0", lifespan=lifespan)
 
+# Mount the frontend static files
+_FRONTEND_DIR = Path(__file__).resolve().parent / "frontend" / "static"
+if _FRONTEND_DIR.is_dir():
+    app.mount(
+        "/static",
+        StaticFiles(directory=str(_FRONTEND_DIR)),
+        name="static",
+    )
+
 
 @app.get("/")
 async def root():
+    """Serve the frontend dashboard if available."""
+    index = _FRONTEND_DIR / "index.html"
+    if index.is_file():
+        return FileResponse(str(index))
     return {"status": "ok", "service": "LMCache HTTP API"}
 
 
