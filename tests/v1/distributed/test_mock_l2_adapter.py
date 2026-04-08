@@ -17,6 +17,7 @@ import torch
 
 # First Party
 from lmcache.v1.distributed.api import ObjectKey
+from lmcache.v1.distributed.internal_api import L2AdapterListener
 from lmcache.v1.distributed.l2_adapters.mock_l2_adapter import (
     MockL2Adapter,
     MockL2AdapterConfig,
@@ -26,6 +27,25 @@ from lmcache.v1.memory_management import (
     MemoryObjMetadata,
     TensorMemoryObj,
 )
+
+
+class _RecordingListener(L2AdapterListener):
+    """Listener that records all events for inspection in tests."""
+
+    def __init__(self):
+        self.stored: list[list[ObjectKey]] = []
+        self.accessed: list[list[ObjectKey]] = []
+        self.deleted: list[list[ObjectKey]] = []
+
+    def on_l2_keys_stored(self, keys: list[ObjectKey]):
+        self.stored.append(list(keys))
+
+    def on_l2_keys_accessed(self, keys: list[ObjectKey]):
+        self.accessed.append(list(keys))
+
+    def on_l2_keys_deleted(self, keys: list[ObjectKey]):
+        self.deleted.append(list(keys))
+
 
 # =============================================================================
 # Test Fixtures
@@ -627,3 +647,193 @@ class TestBandwidthSimulation:
 
         # With fast bandwidth, should complete quickly
         assert elapsed < 1.0
+
+
+# =============================================================================
+# Eviction Interface Tests
+# =============================================================================
+
+
+def _store_and_wait(adapter, key, obj):
+    """Helper: store one key and wait for the store event fd to fire."""
+    store_fd = adapter.get_store_event_fd()
+    adapter.submit_store_task([key], [obj])
+    assert wait_for_event_fd(store_fd, timeout=5.0), "store timed out"
+    adapter.pop_completed_store_tasks()
+
+
+class TestEvictionInterface:
+    """Tests for delete(), get_usage(), and listener notifications."""
+
+    def test_delete_removes_key(self, adapter):
+        """delete() should make the key invisible to subsequent lookups."""
+        key = create_object_key(1)
+        obj = create_memory_obj()
+        lookup_fd = adapter.get_lookup_and_lock_event_fd()
+
+        _store_and_wait(adapter, key, obj)
+
+        adapter.delete([key])
+
+        task_id = adapter.submit_lookup_and_lock_task([key])
+        assert wait_for_event_fd(lookup_fd, timeout=5.0)
+        bitmap = adapter.query_lookup_and_lock_result(task_id)
+        assert bitmap.test(0) is False
+
+    def test_delete_nonexistent_key_does_not_raise(self, adapter):
+        """delete() on a key that was never stored should not raise."""
+        adapter.delete([create_object_key(999)])
+
+    def test_delete_multiple_keys(self, adapter):
+        """delete() on a batch of keys removes all of them."""
+        keys = [create_object_key(i) for i in range(3)]
+        objs = [create_memory_obj() for _ in range(3)]
+        store_fd = adapter.get_store_event_fd()
+        lookup_fd = adapter.get_lookup_and_lock_event_fd()
+
+        adapter.submit_store_task(keys, objs)
+        assert wait_for_event_fd(store_fd, timeout=5.0)
+        adapter.pop_completed_store_tasks()
+
+        adapter.delete(keys)
+
+        task_id = adapter.submit_lookup_and_lock_task(keys)
+        assert wait_for_event_fd(lookup_fd, timeout=5.0)
+        bitmap = adapter.query_lookup_and_lock_result(task_id)
+        for i in range(len(keys)):
+            assert bitmap.test(i) is False
+
+    def test_get_usage_empty_adapter_is_zero(self, adapter):
+        """get_usage() on a fresh adapter should return (0.0, 0.0)."""
+        current, projected = adapter.get_usage()
+        assert current == 0.0
+        assert projected == 0.0
+
+    def test_get_usage_increases_after_store(self, adapter):
+        """get_usage() current value should be > 0 after storing an object."""
+        key = create_object_key(1)
+        obj = create_memory_obj(size=1024)
+        _store_and_wait(adapter, key, obj)
+
+        current, _ = adapter.get_usage()
+        assert current > 0.0
+        assert current <= 1.0
+
+    def test_get_usage_decreases_after_delete(self, adapter):
+        """get_usage() should drop back to 0 after deleting the only stored key."""
+        key = create_object_key(1)
+        obj = create_memory_obj(size=1024)
+        _store_and_wait(adapter, key, obj)
+
+        usage_before, _ = adapter.get_usage()
+        assert usage_before > 0.0
+
+        adapter.delete([key])
+
+        current, _ = adapter.get_usage()
+        assert current == 0.0
+
+    def test_listener_notified_on_store(self, adapter):
+        """Listener.on_l2_keys_stored should be called after a store completes."""
+        listener = _RecordingListener()
+        adapter.register_listener(listener)
+
+        key = create_object_key(1)
+        obj = create_memory_obj()
+        _store_and_wait(adapter, key, obj)
+
+        assert len(listener.stored) == 1
+        assert key in listener.stored[0]
+        assert listener.deleted == []
+
+    def test_listener_notified_on_delete(self, adapter):
+        """Listener.on_l2_keys_deleted should be called after delete()."""
+        listener = _RecordingListener()
+        adapter.register_listener(listener)
+
+        key = create_object_key(1)
+        obj = create_memory_obj()
+        _store_and_wait(adapter, key, obj)
+        adapter.delete([key])
+
+        assert len(listener.deleted) == 1
+        assert key in listener.deleted[0]
+
+    def test_listener_delete_skips_missing_keys(self, adapter):
+        """on_l2_keys_deleted should only include keys that were actually removed."""
+        listener = _RecordingListener()
+        adapter.register_listener(listener)
+
+        real_key = create_object_key(1)
+        missing_key = create_object_key(999)
+        obj = create_memory_obj()
+        _store_and_wait(adapter, real_key, obj)
+
+        adapter.delete([real_key, missing_key])
+
+        assert len(listener.deleted) == 1
+        notified = listener.deleted[0]
+        assert real_key in notified
+        assert missing_key not in notified
+
+    def test_listener_notified_on_load(self, adapter):
+        """Listener.on_l2_keys_accessed should be called after a load completes."""
+        listener = _RecordingListener()
+        adapter.register_listener(listener)
+
+        key = create_object_key(1)
+        store_obj = create_memory_obj(size=100, fill_value=42.0)
+        load_obj = create_memory_obj(size=100, fill_value=0.0)
+        store_fd = adapter.get_store_event_fd()
+        load_fd = adapter.get_load_event_fd()
+
+        # Store
+        adapter.submit_store_task([key], [store_obj])
+        wait_for_event_fd(store_fd, timeout=5.0)
+        adapter.pop_completed_store_tasks()
+
+        # Load
+        adapter.submit_load_task([key], [load_obj])
+        wait_for_event_fd(load_fd, timeout=5.0)
+
+        assert len(listener.accessed) == 1
+        assert key in listener.accessed[0]
+
+    def test_listener_load_skips_missing_keys(self, adapter):
+        """on_l2_keys_accessed should only include keys that were actually loaded."""
+        listener = _RecordingListener()
+        adapter.register_listener(listener)
+
+        real_key = create_object_key(1)
+        missing_key = create_object_key(999)
+        store_obj = create_memory_obj(size=100, fill_value=42.0)
+        load_obj1 = create_memory_obj(size=100, fill_value=0.0)
+        load_obj2 = create_memory_obj(size=100, fill_value=0.0)
+        store_fd = adapter.get_store_event_fd()
+        load_fd = adapter.get_load_event_fd()
+
+        # Store only real_key
+        adapter.submit_store_task([real_key], [store_obj])
+        wait_for_event_fd(store_fd, timeout=5.0)
+        adapter.pop_completed_store_tasks()
+
+        # Load both keys
+        adapter.submit_load_task([real_key, missing_key], [load_obj1, load_obj2])
+        wait_for_event_fd(load_fd, timeout=5.0)
+
+        assert len(listener.accessed) == 1
+        assert real_key in listener.accessed[0]
+        assert missing_key not in listener.accessed[0]
+
+    def test_multiple_listeners_all_notified(self, adapter):
+        """All registered listeners should receive the same store event."""
+        l1, l2 = _RecordingListener(), _RecordingListener()
+        adapter.register_listener(l1)
+        adapter.register_listener(l2)
+
+        key = create_object_key(1)
+        obj = create_memory_obj()
+        _store_and_wait(adapter, key, obj)
+
+        assert len(l1.stored) == 1
+        assert len(l2.stored) == 1

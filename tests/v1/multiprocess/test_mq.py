@@ -12,7 +12,11 @@ import torch
 import zmq
 
 # First Party
-from lmcache.v1.multiprocess.custom_types import CudaIPCWrapper, IPCCacheEngineKey
+from lmcache.v1.multiprocess.custom_types import (
+    BlockAllocationRecord,
+    CudaIPCWrapper,
+    IPCCacheEngineKey,
+)
 from lmcache.v1.multiprocess.mq import (
     BlockingRequestHandler,
     MessageQueueClient,
@@ -529,6 +533,59 @@ def test_mq_lookup_with_different_key():
         request_type=RequestType.LOOKUP,
         payloads=[key, 1],
         expected_response=expected_response,
+        num_requests=1,
+    )
+
+
+def test_mq_report_block_allocation():
+    """
+    Test MessageQueue with REPORT_BLOCK_ALLOCATION request type.
+    REPORT_BLOCK_ALLOCATION takes (records: list[BlockAllocationRecord])
+    and returns None.
+    """
+    records = [
+        BlockAllocationRecord(
+            req_id="req-1",
+            new_block_ids=[0, 1, 2],
+            new_token_ids=[100, 200, 300],
+        ),
+        BlockAllocationRecord(
+            req_id="req-2",
+            new_block_ids=[3, 4],
+            new_token_ids=[400, 500],
+        ),
+    ]
+
+    helper = MessageQueueTestHelper(server_url="tcp://127.0.0.1:5566")
+    helper.register_handler(
+        RequestType.REPORT_BLOCK_ALLOCATION,
+        test_mq_handler_helpers.report_block_allocations_handler,
+    )
+
+    helper.run_test(
+        request_type=RequestType.REPORT_BLOCK_ALLOCATION,
+        payloads=[records],
+        expected_response=None,
+        num_requests=1,
+    )
+
+
+def test_mq_report_block_allocation_empty():
+    """
+    Test REPORT_BLOCK_ALLOCATION with an empty records list.
+    """
+    records: list[BlockAllocationRecord] = []
+
+    helper = MessageQueueTestHelper(server_url="tcp://127.0.0.1:5567")
+    helper.register_handler(
+        RequestType.REPORT_BLOCK_ALLOCATION,
+        test_mq_handler_helpers.report_block_allocations_handler,
+    )
+
+    helper.run_test(
+        request_type=RequestType.REPORT_BLOCK_ALLOCATION,
+        payloads=[records],
+        expected_response=None,
         num_requests=1,
     )
 

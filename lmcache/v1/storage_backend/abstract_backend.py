@@ -291,6 +291,21 @@ class StorageBackendInterface(metaclass=abc.ABCMeta):
             hit_chunks += 1
         return hit_chunks
 
+    def touch_cache(self) -> None:
+        """
+        Update cache policy with keys that were accessed during a request.
+
+        This method is called to update the cache eviction policy with the
+        keys that were accessed in the most recent request, typically to
+        implement LRU or similar eviction strategies.
+
+        Default implementation does nothing. Backends that support
+        cache eviction policies should override this method.
+
+        :return: None
+        """
+        raise NotImplementedError
+
 
 class AllocatorBackendInterface(StorageBackendInterface):
     """

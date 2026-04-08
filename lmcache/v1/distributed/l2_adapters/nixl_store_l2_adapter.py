@@ -82,6 +82,7 @@ class NixlObjPool:
             num_total_objs: Total number of storage slots to manage.
         """
         self.indices = list(range(num_total_objs))
+        self._total = num_total_objs
         self._lock = threading.Lock()
 
     def batched_allocate(self, num_objs: int) -> list[int]:
@@ -114,6 +115,18 @@ class NixlObjPool:
         """
         with self._lock:
             self.indices.extend(obj_indices)
+
+    def get_usage(self) -> tuple[float, float]:
+        """
+        Return (current_usage, usage_after_ongoing_eviction) in [0, 1].
+
+        Both values are identical because slot frees are synchronous.
+        """
+        with self._lock:
+            if self._total == 0:
+                return (0.0, 0.0)
+            usage = (self._total - len(self.indices)) / self._total
+            return (usage, usage)
 
 
 class NixlStorageAgent:
@@ -274,6 +287,7 @@ class NixlStorageAgent:
             self.agent_name, xfer_descs, mem_type="FILE"
         )
 
+        self.storage_fds = fds
         self.storage_reg_descs = reg_descs
         self.storage_xfer_descs = xfer_descs
         self.storage_xfer_handler = xfer_handler
@@ -389,6 +403,8 @@ class NixlStorageAgent:
         self.nixl_agent.release_dlist_handle(self.mem_xfer_handler)
         self.nixl_agent.deregister_memory(self.storage_reg_descs)
         self.nixl_agent.deregister_memory(self.mem_reg_descs)
+        for fd in getattr(self, "storage_fds", []):
+            os.close(fd)
 
 
 class NixlStoreL2Adapter(L2AdapterInterface):
@@ -406,6 +422,7 @@ class NixlStoreL2Adapter(L2AdapterInterface):
             l1_memory_desc: Descriptor of the L1 memory buffer to register with the
                 Nixl backend for DMA transfers.
         """
+        super().__init__()
         self._config = config
 
         self._store_efd = os.eventfd(0, os.EFD_NONBLOCK | os.EFD_CLOEXEC)
@@ -567,10 +584,49 @@ class NixlStoreL2Adapter(L2AdapterInterface):
             self._loop.call_soon_threadsafe(self._loop.stop)
 
         self._loop_thread.join()
+        self._loop.close()
 
         os.close(self._store_efd)
         os.close(self._lookup_efd)
         os.close(self._load_efd)
+
+    #####################
+    # Eviction Interface
+    #####################
+
+    def delete(self, keys: list[ObjectKey]) -> None:
+        """
+        Delete a batch of objects from Nixl storage, freeing their page slots.
+
+        Pinned objects (pin_count > 0) are skipped to avoid racing with an
+        in-flight load; the eviction controller will retry them on the next
+        cycle once they are unpinned.
+        """
+        # TODO(Jiayi): Optimize lock usage here
+        deleted_keys: list[ObjectKey] = []
+        with self._lock:
+            for key in keys:
+                obj = self._memory_objects.get(key)
+                if obj is None:
+                    continue
+                if obj.pin_count > 0:
+                    logger.debug(
+                        "Skipping eviction of pinned key %s (pin_count=%d)",
+                        key,
+                        obj.pin_count,
+                    )
+                    continue
+                del self._memory_objects[key]
+                self.nixl_agent.pool.batched_free(obj.page_indices)
+                deleted_keys.append(key)
+        if deleted_keys:
+            self._notify_keys_deleted(deleted_keys)
+
+    def get_usage(self) -> tuple[float, float]:
+        """
+        Return (current_usage, usage_after_ongoing_eviction) based on pool slots.
+        """
+        return self.nixl_agent.pool.get_usage()
 
     #####################
     # Status Interface
@@ -578,6 +634,7 @@ class NixlStoreL2Adapter(L2AdapterInterface):
 
     def report_status(self) -> dict:
         """Return a status dict for the Nixl L2 adapter."""
+        # NOTE(Jiayi): This function looks pretty slow.
         with self._lock:
             stored_object_count = len(self._memory_objects)
             pinned_object_count = sum(
@@ -693,6 +750,7 @@ class NixlStoreL2Adapter(L2AdapterInterface):
                 for key, storage_obj in zip(keys, storage_objs, strict=False):
                     self._memory_objects[key] = storage_obj
                     storage_obj.decrease_pin_count()
+            self._notify_keys_stored(keys)
 
         # success is only set to false for transfer failures
         except Exception:
@@ -762,6 +820,7 @@ class NixlStoreL2Adapter(L2AdapterInterface):
                 ``_completed_load_tasks``.
         """
         bitmap = Bitmap(len(keys))
+        accessed_keys: list[ObjectKey] = []
         try:
             mem_indices_flat = []
             storage_indices_flat = []
@@ -778,6 +837,7 @@ class NixlStoreL2Adapter(L2AdapterInterface):
                     storage_indices_flat.extend(storage_obj.page_indices)
 
                     bitmap.set(i)
+                    accessed_keys.append(key)
 
             if mem_indices_flat:
                 handle = self.nixl_agent.get_storage_to_mem_handle(
@@ -789,6 +849,8 @@ class NixlStoreL2Adapter(L2AdapterInterface):
         except Exception:
             logger.exception("NIXL load task %d failed", task_id)
 
+        if accessed_keys:
+            self._notify_keys_accessed(accessed_keys)
         with self._lock:
             self._completed_load_tasks[task_id] = bitmap
         self._signal_load_event()

@@ -17,19 +17,11 @@ from lmcache.v1.distributed.config import (
     parse_args_to_config,
 )
 from lmcache.v1.mp_observability.config import (
-    PrometheusConfig,
-    add_prometheus_args,
-    parse_args_to_prometheus_config,
+    ObservabilityConfig,
+    add_observability_args,
+    parse_args_to_observability_config,
 )
-from lmcache.v1.mp_observability.telemetry import (
-    TelemetryConfig,
-    add_telemetry_args,
-    get_telemetry_controller,
-    parse_args_to_telemetry_config,
-)
-from lmcache.v1.mp_observability.telemetry.config import (
-    DEFAULT_TELEMETRY_CONFIG,
-)
+from lmcache.v1.mp_observability.event_bus import get_event_bus
 from lmcache.v1.multiprocess.config import (
     HTTPFrontendConfig,
     MPServerConfig,
@@ -74,8 +66,7 @@ async def lifespan(app: FastAPI):
     zmq_server, engine = run_cache_server(
         mp_config=mp_config,
         storage_manager_config=_configs["storage_manager"],
-        prometheus_config=_configs["prometheus"],
-        telemetry_config=_configs["telemetry"],
+        obs_config=_configs["observability"],
         return_engine=True,
     )
     app.state.zmq_server = zmq_server
@@ -86,7 +77,7 @@ async def lifespan(app: FastAPI):
 
     # Shutdown
     logger.info("Shutting down LMCache HTTP server...")
-    get_telemetry_controller().stop()
+    get_event_bus().stop()
     if hasattr(app.state, "zmq_server") and app.state.zmq_server is not None:
         app.state.zmq_server.close()
     logger.info("LMCache HTTP server stopped")
@@ -158,8 +149,7 @@ def run_http_server(
     http_config: HTTPFrontendConfig,
     mp_config: MPServerConfig,
     storage_manager_config: StorageManagerConfig,
-    prometheus_config: PrometheusConfig,
-    telemetry_config: TelemetryConfig = DEFAULT_TELEMETRY_CONFIG,
+    obs_config: ObservabilityConfig,
 ) -> None:
     """
     Run the LMCache HTTP server with integrated MP (ZMQ) server.
@@ -168,13 +158,11 @@ def run_http_server(
         http_config: Configuration for the HTTP frontend
         mp_config: Configuration for the ZMQ multiprocess server
         storage_manager_config: Configuration for the storage manager
-        prometheus_config: Configuration for the Prometheus observability stack
-        telemetry_config: Configuration for the telemetry event system
+        obs_config: Configuration for the observability stack
     """
     _configs["mp"] = mp_config
     _configs["storage_manager"] = storage_manager_config
-    _configs["prometheus"] = prometheus_config
-    _configs["telemetry"] = telemetry_config
+    _configs["observability"] = obs_config
 
     config = uvicorn.Config(
         app=app,
@@ -200,8 +188,7 @@ def parse_args():
     add_http_frontend_args(parser)
     add_mp_server_args(parser)
     add_storage_manager_args(parser)
-    add_prometheus_args(parser)
-    add_telemetry_args(parser)
+    add_observability_args(parser)
     return parser.parse_args()
 
 
@@ -210,12 +197,10 @@ if __name__ == "__main__":
     http_config = parse_args_to_http_frontend_config(args)
     mp_config = parse_args_to_mp_server_config(args)
     storage_manager_config = parse_args_to_config(args)
-    prometheus_config = parse_args_to_prometheus_config(args)
-    telemetry_config = parse_args_to_telemetry_config(args)
+    obs_config = parse_args_to_observability_config(args)
     run_http_server(
         http_config=http_config,
         mp_config=mp_config,
         storage_manager_config=storage_manager_config,
-        prometheus_config=prometheus_config,
-        telemetry_config=telemetry_config,
+        obs_config=obs_config,
     )
