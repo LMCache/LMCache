@@ -94,6 +94,21 @@ class SafeLocalCPUBackend(LocalCPUBackend):
         return "SafeLocalCPUBackend(dummy)"
 
 
+def extract_plugin_type(plugin_name: str) -> str:
+    """Extract the type portion from a plugin name.
+
+    Plugin name format: ``{type}`` or ``{type}.{instance}``.
+    Returns the *type* part so that adapters can match by type.
+
+    Examples:
+        >>> extract_plugin_type("fs")
+        'fs'
+        >>> extract_plugin_type("fs.primary")
+        'fs'
+    """
+    return plugin_name.split(".", 1)[0]
+
+
 class ConnectorContext:
     """
     Context for creating a connector.
@@ -104,7 +119,8 @@ class ConnectorContext:
         local_cpu_backend: The local CPU backend
             (wrapped as SafeLocalCPUBackend if None)
         config: Optional LMCache engine configuration
-        parsed_url: Parsed representation of the URL
+        plugin_name: Optional plugin instance name
+            (e.g. "fs", "fs.primary")
     """
 
     def __init__(
@@ -114,6 +130,7 @@ class ConnectorContext:
         local_cpu_backend: Optional[LocalCPUBackend],
         config: Optional[LMCacheEngineConfig],
         metadata: Optional[LMCacheMetadata],
+        plugin_name: Optional[str] = None,
     ):
         self.url = url
         self.loop = loop
@@ -126,6 +143,7 @@ class ConnectorContext:
         )
         self.config = config
         self.metadata = metadata
+        self.plugin_name = plugin_name
 
     def get_full_chunk_size_bytes(self) -> int:
         """
@@ -153,6 +171,46 @@ class ConnectorAdapter(ABC):
         pass
 
 
+class DynamicConnectorAdapter(ConnectorAdapter):
+    """Adapter that wraps a RemoteConnector class loaded
+    dynamically from plugin config.
+
+    When ``class_name`` points to a ``RemoteConnector`` subclass
+    rather than a ``ConnectorAdapter``, this wrapper is used to
+    instantiate the connector with the proper context.
+    """
+
+    def __init__(
+        self,
+        plugin_name: str,
+        connector_class: type,
+    ) -> None:
+        schema = "plugin://%s" % extract_plugin_type(plugin_name)
+        super().__init__(schema)
+        self._plugin_name = plugin_name
+        self._connector_class = connector_class
+
+    def can_parse(self, url: str) -> bool:
+        if url.startswith(self.schema):
+            return True
+        if url.startswith("plugin://"):
+            pname = url[len("plugin://") :]
+            return extract_plugin_type(pname) == extract_plugin_type(self._plugin_name)
+        return False
+
+    def create_connector(self, context: ConnectorContext) -> RemoteConnector:
+        logger.info(
+            "Creating dynamic connector %s via %s",
+            self._plugin_name,
+            self._connector_class.__name__,
+        )
+        return self._connector_class(
+            loop=context.loop,
+            local_cpu_backend=context.local_cpu_backend,
+            config=context.config,
+        )
+
+
 class ConnectorManager:
     """
     Manager for creating connectors based on URL.
@@ -168,6 +226,7 @@ class ConnectorManager:
         local_cpu_backend: Optional[LocalCPUBackend],
         config: Optional[LMCacheEngineConfig] = None,
         metadata: Optional[LMCacheMetadata] = None,
+        plugin_name: Optional[str] = None,
     ) -> None:
         logger.info("Initializing ConnectorManager")
         self.context = ConnectorContext(
@@ -176,6 +235,7 @@ class ConnectorManager:
             local_cpu_backend=local_cpu_backend,
             config=config,
             metadata=metadata,
+            plugin_name=plugin_name,
         )
         self.adapters: List[ConnectorAdapter] = []
         self._remote_adapters_builtin_launcher()
@@ -236,41 +296,64 @@ class ConnectorManager:
         for remote_storage_plugin in remote_storage_plugins:
             try:
                 extra_config = config.extra_config
-                if extra_config is None:
-                    logger.warning(
-                        f"Remote connector {remote_storage_plugin} configuration is "
-                        f"missing 'extra_config'."
-                    )
-                    continue
 
-                module_path = extra_config.get(
-                    f"remote_storage_plugin.{remote_storage_plugin}.module_path"
+                module_path = (
+                    extra_config.get(
+                        "remote_storage_plugin.%s.module_path" % remote_storage_plugin
+                    )
+                    if extra_config
+                    else None
                 )
-                class_name = extra_config.get(
-                    f"remote_storage_plugin.{remote_storage_plugin}.class_name"
+                class_name = (
+                    extra_config.get(
+                        "remote_storage_plugin.%s.class_name" % remote_storage_plugin
+                    )
+                    if extra_config
+                    else None
                 )
 
                 if not module_path or not class_name:
+                    # Skip silently when a builtin adapter
+                    # already handles this plugin type.
+                    plugin_url = "plugin://%s" % remote_storage_plugin
+                    if any(a.can_parse(plugin_url) for a in self.adapters):
+                        continue
                     logger.warning(
-                        f"Remote connector {remote_storage_plugin} missing adapter "
-                        f"module_path or class_name"
+                        "Remote connector %s missing adapter module_path or class_name",
+                        remote_storage_plugin,
                     )
                     continue
 
                 # Dynamically import the module
                 module = importlib.import_module(module_path)
                 # Get the class from the module
-                adapter_class = getattr(module, class_name)
-                adapter_instance = adapter_class()
-                if not isinstance(adapter_instance, ConnectorAdapter):
-                    logger.warning(
-                        f"Remote connector {remote_storage_plugin} adapter does not "
-                        f"implement the 'ConnectorAdapter' interface"
+                loaded_class = getattr(module, class_name)
+
+                if inspect.isclass(loaded_class) and issubclass(
+                    loaded_class, ConnectorAdapter
+                ):
+                    adapter_instance = loaded_class()
+                elif inspect.isclass(loaded_class) and issubclass(
+                    loaded_class, RemoteConnector
+                ):
+                    adapter_instance = DynamicConnectorAdapter(
+                        plugin_name=remote_storage_plugin,
+                        connector_class=loaded_class,
                     )
-                    adapter_instance = None
+                else:
+                    logger.warning(
+                        "Remote connector %s class %s is "
+                        "neither a ConnectorAdapter nor a "
+                        "RemoteConnector subclass",
+                        remote_storage_plugin,
+                        class_name,
+                    )
                     continue
                 self.adapters.append(adapter_instance)
-                logger.info(f"Discovered adapter: {adapter_class.__name__}")
+                logger.info(
+                    "Discovered adapter: %s",
+                    loaded_class.__name__,
+                )
             except (ImportError, AttributeError) as e:
                 logger.error(
                     f"Failed to load remote connector {remote_storage_plugin} due to "
@@ -298,6 +381,7 @@ def CreateConnector(
     local_cpu_backend: Optional[LocalCPUBackend],
     config: Optional[LMCacheEngineConfig] = None,
     metadata: Optional[LMCacheMetadata] = None,
+    plugin_name: Optional[str] = None,
 ) -> InstrumentedRemoteConnector:
     """
     Create a remote connector from the given URL.
@@ -351,7 +435,9 @@ def CreateConnector(
     if "://" not in url:
         raise ValueError(f"Invalid remote url {url}: missing scheme")
 
-    manager = ConnectorManager(url, loop, local_cpu_backend, config, metadata)
+    manager = ConnectorManager(
+        url, loop, local_cpu_backend, config, metadata, plugin_name
+    )
     connector = manager.create_connector()
 
     return InstrumentedRemoteConnector(connector)
