@@ -728,23 +728,27 @@ def is_hnd(gpu_kv_format: "lmc_ops.GPUKVFormat") -> bool:
 
 def assert_is_vllm_mla_or_flash_attn_or_flash_infer(
     gpu_kv_format: "lmc_ops.GPUKVFormat",
-):
+) -> None:
     """
     Ensure that we have a GPU KV Cache Format that is either
     vLLM's MLA, flash attention, or flash infer.
 
     Accepted formats:
-        - ``NL_X_TWO_NB_BS_NH_HS`` (flash attention)
-        - ``NL_X_NB_TWO_BS_NH_HS`` (flash infer)
+        - ``NL_X_TWO_NB_BS_NH_HS`` (flash attention, NHD)
+        - ``NL_X_NB_TWO_BS_NH_HS`` (flash infer, NHD)
+        - ``NL_X_TWO_NB_NH_BS_HS`` (flash attention, HND)
+        - ``NL_X_NB_TWO_NH_BS_HS`` (flash infer, HND)
         - ``NL_X_NB_BS_HS`` (MLA)
 
     Raises:
         AssertionError: If *gpu_kv_format* is not one of the accepted formats.
     """
-    assert (
-        gpu_kv_format == lmc_ops.GPUKVFormat.NL_X_TWO_NB_BS_NH_HS
-        or gpu_kv_format == lmc_ops.GPUKVFormat.NL_X_NB_TWO_BS_NH_HS
-        or gpu_kv_format == lmc_ops.GPUKVFormat.NL_X_NB_BS_HS
+    assert gpu_kv_format in (
+        lmc_ops.GPUKVFormat.NL_X_TWO_NB_BS_NH_HS,
+        lmc_ops.GPUKVFormat.NL_X_NB_TWO_BS_NH_HS,
+        lmc_ops.GPUKVFormat.NL_X_TWO_NB_NH_BS_HS,
+        lmc_ops.GPUKVFormat.NL_X_NB_TWO_NH_BS_HS,
+        lmc_ops.GPUKVFormat.NL_X_NB_BS_HS,
     )
 
 
