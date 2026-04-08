@@ -34,8 +34,8 @@ logger = init_logger(__name__)
 class WeightedSemaphore:
     """Async semaphore with variable-weight acquire.
 
-    Limits decoder PD buffer usage: each request holds ceil(L/chunk_size)
-    slots until decoding starts, preventing buffer exhaustion deadlocks.
+    Limits in-flight PD token usage: each request holds ceil(L/chunk_size)
+    slots until decoding starts, preventing decoder buffer exhaustion deadlocks.
     """
 
     def __init__(self, capacity: int) -> None:
@@ -44,6 +44,14 @@ class WeightedSemaphore:
         self._lock = asyncio.Condition()
 
     async def acquire(self, slots: int) -> None:
+        """Acquire *slots* from the semaphore, blocking until available.
+
+        Args:
+            slots: Number of slots to acquire (must be <= capacity).
+
+        Raises:
+            ValueError: If slots exceeds total capacity (would block forever).
+        """
         if slots > self._capacity:
             raise ValueError(
                 f"Requested {slots} slots exceeds total capacity {self._capacity}"
@@ -53,6 +61,11 @@ class WeightedSemaphore:
             self._available -= slots
 
     async def release(self, slots: int) -> None:
+        """Return *slots* to the semaphore and wake waiting acquirers.
+
+        Args:
+            slots: Number of slots to release. No-op if <= 0.
+        """
         if slots <= 0:
             return
         async with self._lock:
@@ -61,6 +74,7 @@ class WeightedSemaphore:
 
     @property
     def available(self) -> int:
+        """Number of slots currently available."""
         return self._available
 
 
@@ -160,22 +174,14 @@ async def lifespan(app: FastAPI):
     app.state.zmq_task = asyncio.create_task(zmq_pull_server())
 
     global pd_buffer_semaphore
-    if (
-        global_args.pd_buffer_size is not None
-        and global_args.kv_bytes_per_token is not None
-    ):
-        capacity_slots = global_args.pd_buffer_size // (
-            global_args.chunk_size * global_args.kv_bytes_per_token
-        )
+    if global_args.max_inflight_tokens is not None:
+        capacity_slots = global_args.max_inflight_tokens // global_args.chunk_size
         pd_buffer_semaphore = WeightedSemaphore(capacity_slots)
-        logger.info("PD buffer semaphore: capacity=%d slots.", capacity_slots)
-    elif (
-        global_args.pd_buffer_size is not None
-        or global_args.kv_bytes_per_token is not None
-    ):
-        logger.warning(
-            "Both --pd-buffer-size and --kv-bytes-per-token required."
-            " Running unlimited."
+        logger.info(
+            "PD buffer semaphore: capacity=%d slots (%d tokens / %d chunk_size).",
+            capacity_slots,
+            global_args.max_inflight_tokens,
+            global_args.chunk_size,
         )
 
     yield
@@ -252,28 +258,25 @@ def parse_args():
     parser.add_argument("--proxy-host", type=str, default="localhost")
     parser.add_argument("--proxy-port", type=int, default=8500)
 
-    # PD buffer concurrency limiting (optional). When both are set, a weighted
-    # semaphore caps in-flight requests to prevent decoder PD buffer deadlocks.
-    # capacity = pd_buffer_size // (chunk_size * kv_bytes_per_token)
-    # kv_bytes_per_token = num_layers * 2 * num_kv_heads * head_size * dtype_bytes
+    # PD buffer concurrency limiting (optional). When set, a weighted semaphore
+    # caps in-flight token usage to prevent decoder buffer exhaustion deadlocks.
+    # capacity_slots = max_inflight_tokens // chunk_size
     parser.add_argument(
-        "--pd-buffer-size",
+        "--max-inflight-tokens",
         type=int,
         default=None,
-        help="Decoder PD buffer bytes (matches pd_buffer_size in LMCache config).",
+        help=(
+            "Maximum total prompt tokens allowed in flight across all requests."
+            " Each request occupies ceil(prompt_tokens / chunk_size) slots."
+            " Set to roughly pd_buffer_size / kv_bytes_per_token to match the"
+            " decoder buffer capacity. Disabled (unlimited) when not provided."
+        ),
     )
     parser.add_argument(
         "--chunk-size",
         type=int,
         default=256,
-        help="LMCache chunk size in tokens.",
-    )
-    parser.add_argument(
-        "--kv-bytes-per-token",
-        type=int,
-        default=None,
-        help="KV bytes per token: num_layers*2*num_kv_heads*head_size*dtype_bytes."
-        " e.g. Llama-3.1-8B bf16=131072.",
+        help="LMCache chunk size in tokens (must match the LMCache config).",
     )
 
     args = parser.parse_args()
@@ -303,7 +306,7 @@ app.state.bound_clients = {}
 # Keep finished reqs
 app.state.finished_reqs = defaultdict(int)
 
-# None when --pd-buffer-size / --kv-bytes-per-token are not provided (unlimited).
+# None when --max-inflight-tokens is not provided (unlimited).
 pd_buffer_semaphore: Optional[WeightedSemaphore] = None
 
 
@@ -437,7 +440,8 @@ async def handle_completions(request: Request):
     req_id = str(counter)  # we use counter as req_id
 
     st = time.time()
-    slots = 0  # 0 until tokenization; guards error-path release
+    slots = 0  # slots to release on error; set after successful acquire only
+    acquired = False
     try:
         req_data = await request.json()
 
@@ -457,6 +461,7 @@ async def handle_completions(request: Request):
         slots = math.ceil(len(tokenize_output["tokens"]) / global_args.chunk_size)
         if pd_buffer_semaphore is not None:
             await pd_buffer_semaphore.acquire(slots)
+            acquired = True
 
         disagg_spec = {
             "req_id": req_id,
@@ -527,7 +532,7 @@ async def handle_completions(request: Request):
         return StreamingResponse(generate_stream(), media_type="application/json")
 
     except Exception as e:
-        if pd_buffer_semaphore is not None:
+        if pd_buffer_semaphore is not None and acquired:
             await pd_buffer_semaphore.release(slots)
         # Standard
         import sys
@@ -547,7 +552,8 @@ async def handle_chat_completions(request: Request):
     req_id = str(counter)
 
     st = time.time()
-    slots = 0  # slots acquired from pd_buffer_semaphore; 0 until tokenization
+    slots = 0  # slots to release on error; set after successful acquire only
+    acquired = False
     try:
         req_data = await request.json()
 
@@ -573,6 +579,7 @@ async def handle_chat_completions(request: Request):
         slots = math.ceil(len(tokenize_output["tokens"]) / global_args.chunk_size)
         if pd_buffer_semaphore is not None:
             await pd_buffer_semaphore.acquire(slots)
+            acquired = True
 
         disagg_spec = {
             "req_id": req_id,
@@ -707,7 +714,7 @@ async def handle_chat_completions(request: Request):
         return StreamingResponse(generate_stream(), media_type="application/json")
 
     except Exception as e:
-        if pd_buffer_semaphore is not None:
+        if pd_buffer_semaphore is not None and acquired:
             await pd_buffer_semaphore.release(slots)
         # Standard
         import sys

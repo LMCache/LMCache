@@ -100,9 +100,10 @@ wait_for_server() {
 
 
 main() {
-    # kv_bytes_per_token = num_layers * 2 * num_kv_heads * head_size * dtype_bytes
-    # Default: Llama-3.1-8B bf16 (32*2*8*128*2). Override via first argument.
-    KV_BYTES_PER_TOKEN=${1:-131072}
+    # Max in-flight tokens: limits concurrent PD buffer usage to prevent deadlocks.
+    # Default (16384) suits Llama-3.1-8B on a 2 GB PD buffer (2GB / 131072 B/tok).
+    # Pass as the first argument to override for other models or buffer sizes.
+    MAX_INFLIGHT_TOKENS=${1:-16384}
 
     check_hf_token
     check_num_gpus
@@ -119,9 +120,6 @@ main() {
     echo "Launching prefiller, decoder and proxy..."
     echo "Please check prefiller.log, decoder.log and proxy.log for logs."
 
-    # Read pd_buffer_size from decoder config (single source of truth).
-    PD_BUFFER_SIZE_BYTES=$(grep 'pd_buffer_size' configs/lmcache-decoder-config.yaml | awk '{print $2}')
-
     # Launch the proxy first
     python3 ../disagg_proxy_server.py \
         --host localhost \
@@ -136,8 +134,7 @@ main() {
         --proxy-host localhost \
         --proxy-port 7500 \
         --num-decoders 1 \
-        --pd-buffer-size $PD_BUFFER_SIZE_BYTES \
-        --kv-bytes-per-token $KV_BYTES_PER_TOKEN \
+        --max-inflight-tokens $MAX_INFLIGHT_TOKENS \
         > >(tee proxy.log)    2>&1 &
     proxy_pid=$!
     PIDS+=($proxy_pid)
