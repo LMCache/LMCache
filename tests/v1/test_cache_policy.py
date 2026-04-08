@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # First Party
 from lmcache.v1.storage_backend.cache_policy import get_cache_policy
-from lmcache.v1.storage_backend.cache_policy.lru import LRUCachePolicy
 
 # Local
 from .utils import dumb_cache_engine_key
@@ -206,26 +205,3 @@ def test_mru_with_pin():
     evict_candidates = policy.get_evict_candidates(cache_dict, num_candidates=2)
     # key1 is most recent, followed by key3, but since key3 is pinned, wo go to key2.
     assert evict_candidates == [key1, key2], (evict_candidates, [key1, key2])
-
-
-def test_lru_disk_gate_length():
-    policy = LRUCachePolicy(ssd_gate_min_size_bytes=100)
-    key = dumb_cache_engine_key(1)
-    assert policy.disk_gate_block_reason(key, 50, 0) == "length"
-    assert policy.disk_gate_block_reason(key, 100, 0) is None
-    assert policy.disk_gate_block_reason(key, 200, 0) is None
-
-
-def test_lru_disk_gate_frequency():
-    policy = LRUCachePolicy(ssd_gate_min_access_count=3)
-    key = dumb_cache_engine_key(1)
-    assert policy.disk_gate_block_reason(key, 1000, 0) == "frequency"
-    assert policy.disk_gate_block_reason(key, 1000, 2) == "frequency"
-    assert policy.disk_gate_block_reason(key, 1000, 3) is None
-
-
-def test_fifo_disk_gate_defaults_noop():
-    policy = get_cache_policy("FIFO")
-    key = dumb_cache_engine_key(1)
-    assert policy.disk_gate_block_reason(key, 1, 0) is None
-    assert policy.disk_access_get(key) == 0

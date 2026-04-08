@@ -140,3 +140,6 @@ operator/dist/
 operator/cover.out
 operator/coverage.html
 operator/Dockerfile.cross
+
+# Rust (PyO3 / raw_block): never commit cargo build trees
+rust/raw_block/target/

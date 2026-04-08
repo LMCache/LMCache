@@ -15,6 +15,7 @@ from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 from lmcache.v1.storage_backend.local_disk_backend import LocalDiskBackend
+from tests.v1.utils import create_test_memory_obj
 
 
 class MockLookupServer:
@@ -187,3 +188,56 @@ class TestLocalDiskBackend:
         assert result is None
 
         local_disk_backend.local_cpu_backend.memory_allocator.close()
+
+    def test_submit_put_task_gated_by_min_chunk_size(
+        self, temp_disk_path, async_loop, local_cpu_backend
+    ):
+        """Large ssd_gate_min_size_bytes rejects put before enqueue (extra_config).
+
+        Does not call ``LocalDiskBackend.close()`` here: the test ``async_loop``
+        is never run, and ``close()`` would block on executor shutdown.
+        """
+        config = create_test_config(temp_disk_path)
+        config.extra_config = {
+            "ssd_gate_min_size_bytes": 10**9,
+            "ssd_gate_min_access_count": 0,
+        }
+        backend = LocalDiskBackend(
+            config=config,
+            loop=async_loop,
+            local_cpu_backend=local_cpu_backend,
+            dst_device="cuda",
+        )
+        key = create_test_key(42)
+        memory_obj = create_test_memory_obj()
+        backend.submit_put_task(key, memory_obj)
+        assert not backend.exists_in_put_tasks(key)
+        local_cpu_backend.memory_allocator.close()
+
+    def test_submit_put_task_gated_by_read_count_until_warmed(
+        self, temp_disk_path, async_loop, local_cpu_backend
+    ):
+        """Frequency gate: enqueue only after enough read credits on the gate.
+
+        Uses ``_storage_gate.record_read`` to simulate hits without seeding the
+        on-disk dict. Same note as min-size test: no ``close()`` while loop idle.
+        """
+        config = create_test_config(temp_disk_path)
+        config.extra_config = {"ssd_gate_min_access_count": 2}
+        backend = LocalDiskBackend(
+            config=config,
+            loop=async_loop,
+            local_cpu_backend=local_cpu_backend,
+            dst_device="cuda",
+        )
+        key = create_test_key(43)
+        memory_obj = create_test_memory_obj()
+        backend.submit_put_task(key, memory_obj)
+        assert not backend.exists_in_put_tasks(key)
+        backend._storage_gate.record_read(key)
+        backend.submit_put_task(key, memory_obj)
+        assert not backend.exists_in_put_tasks(key)
+        backend._storage_gate.record_read(key)
+        backend.submit_put_task(key, memory_obj)
+        assert backend.exists_in_put_tasks(key)
+        local_cpu_backend.memory_allocator.close()

@@ -22,7 +22,11 @@ from lmcache.v1.storage_backend.abstract_backend import StorageBackendInterface
 from lmcache.v1.storage_backend.batched_message_sender import BatchedMessageSender
 from lmcache.v1.storage_backend.cache_policy import get_cache_policy
 from lmcache.v1.storage_backend.cache_policy.base_policy import BaseCachePolicy
-from lmcache.v1.storage_backend.cache_policy.lru import LRUCachePolicy
+from lmcache.v1.storage_backend.gating import (
+    BaseStorageGate,
+    WriteVetoReason,
+    build_storage_gate_from_extra,
+)
 from lmcache.v1.storage_backend.job_executor.pq_executor import (
     AsyncPQThreadPoolExecutor,
 )
@@ -207,16 +211,10 @@ class LocalDiskBackend(StorageBackendInterface):
             super().__init__("cpu")
 
         extra = config.extra_config or {}
-        self.cache_policy: BaseCachePolicy[Any, Any]
-        if (config.cache_policy or "").upper() == "LRU":
-            self.cache_policy = LRUCachePolicy(
-                ssd_gate_min_size_bytes=int(extra.get("ssd_gate_min_size_bytes", 0)),
-                ssd_gate_min_access_count=int(
-                    extra.get("ssd_gate_min_access_count", 0)
-                ),
-            )
-        else:
-            self.cache_policy = get_cache_policy(config.cache_policy)
+        self._storage_gate: BaseStorageGate = build_storage_gate_from_extra(extra)
+        self.cache_policy: BaseCachePolicy[Any, Any] = get_cache_policy(
+            config.cache_policy
+        )
         self.dict = self.cache_policy.init_mutable_mapping()
 
         self.dst_device = dst_device
@@ -288,6 +286,9 @@ class LocalDiskBackend(StorageBackendInterface):
         with self.disk_lock:
             if key not in self.dict:
                 return False
+            if not self._storage_gate.on_lookup(key):
+                return False
+            self._storage_gate.record_lookup(key)
             if pin:
                 self.dict[key].pin()
                 # vllm lookup sets pin to True
@@ -296,8 +297,9 @@ class LocalDiskBackend(StorageBackendInterface):
 
     def touch_cache(self):
         # flip the order of the keys in the request.
-        # disk_access_increment is done in get_blocking / batched_get_non_blocking
-        # so pin+lookup+touch then load does not double-count.
+        # Storage gate read counts are updated in get_blocking /
+        # batched_get_non_blocking so pin+lookup+touch then load does not
+        # double-count toward write admission.
         with self.disk_lock:
             for key in reversed(self.keys_in_request):
                 self.cache_policy.update_on_hit(key, self.dict)
@@ -336,17 +338,25 @@ class LocalDiskBackend(StorageBackendInterface):
         if force:
             self.disk_lock.acquire()
 
-        if not (meta := self.dict.pop(key, None)):
+        meta = self.dict.get(key)
+        if meta is None:
             if force:
                 self.disk_lock.release()
             return False
+
+        if not self._storage_gate.on_delete(key):
+            if force:
+                self.disk_lock.release()
+            return False
+
+        self.dict.pop(key, None)
 
         path = meta.path
         size = meta.size
         self.usage -= size
         self.stats_monitor.update_local_storage_usage(self.usage)
 
-        self.cache_policy.disk_access_pop(key)
+        self._storage_gate.record_delete(key)
 
         # NOTE: The following code will cause deadlock
         # res = asyncio.run_coroutine_threadsafe(
@@ -396,25 +406,24 @@ class LocalDiskBackend(StorageBackendInterface):
 
         required_size = memory_obj.get_physical_size()
 
-        # SSD gating (policy; defaults: no gating). Read access count under disk_lock.
+        # SSD / storage gate (see ``gating`` module). Pure check under disk_lock.
         with self.disk_lock:
-            access_count = self.cache_policy.disk_access_get(key)
-            block = self.cache_policy.disk_gate_block_reason(
-                key, required_size, access_count
-            )
-        if block == "length":
+            veto = self._storage_gate.explain_write_veto(key, required_size)
+        if veto == WriteVetoReason.LENGTH:
             self._disk_prom_listener.on_gated_by_length()
             logger.debug(
-                "SSD gate (length): chunk size %s below policy threshold",
+                "SSD gate (length): chunk size %s below gate threshold",
                 required_size,
             )
             return None
-        if block == "frequency":
+        if veto == WriteVetoReason.FREQUENCY:
             self._disk_prom_listener.on_gated_by_frequency()
             logger.debug(
-                "SSD gate (frequency): access_count=%s below policy threshold",
-                access_count,
+                "SSD gate (frequency): read count below gate threshold for key",
             )
+            return None
+        if veto is not None:
+            logger.debug("SSD gate: write vetoed (%s)", veto.value)
             return None
 
         self.disk_worker.insert_put_task(key)
@@ -493,9 +502,13 @@ class LocalDiskBackend(StorageBackendInterface):
             self.disk_lock.release()
             return None
 
-        # Update cache recency and access count (for SSD frequency-based gating)
+        if not self._storage_gate.on_read(key):
+            self.disk_lock.release()
+            return None
+
+        # Update cache recency; gate read counter for write admission
         self.cache_policy.update_on_hit(key, self.dict)
-        self.cache_policy.disk_access_increment(key)
+        self._storage_gate.record_read(key)
 
         disk_meta = self.dict[key]
         path = disk_meta.path
@@ -518,6 +531,14 @@ class LocalDiskBackend(StorageBackendInterface):
         keys: list[CacheEngineKey],
         transfer_spec: Any = None,
     ) -> list[MemoryObj]:
+        """
+        Prefetch keys from disk.
+
+        Does not consult :meth:`BaseStorageGate.on_read`: a read veto would
+        require either dropping keys (breaking alignment with ``keys``) or
+        placeholder buffers. Blocking :meth:`get_blocking` still applies
+        ``on_read``.
+        """
         mem_objs: list[MemoryObj] = []
         paths: list[str] = []
 
@@ -549,9 +570,7 @@ class LocalDiskBackend(StorageBackendInterface):
             # NOTE(Jiayi): Currently, we consider prefetch as cache hit.
             # Update cache recency
             self.cache_policy.update_on_hit(key, self.dict)
-            # One increment per prefetch (touch_cache no longer increments; avoids
-            # double count with get_blocking after batched_contains+touch).
-            self.cache_policy.disk_access_increment(key)
+            self._storage_gate.record_read(key)
 
             self.disk_lock.release()
             logger.debug(f"Prefetching {key} from disk.")
@@ -578,6 +597,9 @@ class LocalDiskBackend(StorageBackendInterface):
             for key in keys:
                 if key not in self.dict:
                     return num_hit_counts
+                if not self._storage_gate.on_lookup(key):
+                    return num_hit_counts
+                self._storage_gate.record_lookup(key)
                 if pin:
                     self.dict[key].pin()
                     self.keys_in_request.append(key)
@@ -625,8 +647,9 @@ class LocalDiskBackend(StorageBackendInterface):
         memory_obj.ref_count_down()
 
         with self.disk_lock:
-            self.cache_policy.disk_access_reset(key)
-            if key in self.dict:
+            was_existing = key in self.dict
+            self._storage_gate.record_write(key, new_admission=not was_existing)
+            if was_existing:
                 self.cache_policy.update_on_hit(key, self.dict)
                 has_stored = True
             else:
