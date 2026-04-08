@@ -586,11 +586,7 @@ class PDBackend(AllocatorBackendInterface):
 
     def get_blocking(self, key: CacheEngineKey) -> Optional[MemoryObj]:
         with self.data_lock:
-            # NOTE(Jiayi): we assume that the key must be in local data
-            # because we are using a push-based transfer
-            mem_obj = self.data.get(key, None)
-            assert mem_obj is not None, f"Key {key} not found in local data."
-            return mem_obj
+            return self.data.get(key, None)
 
     def remove(
         self,
