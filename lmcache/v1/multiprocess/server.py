@@ -54,6 +54,9 @@ from lmcache.v1.multiprocess.custom_types import (
 from lmcache.v1.multiprocess.gpu_context import (
     GPUCacheContext,
 )
+from lmcache.v1.multiprocess.mp_runtime_plugin_launcher import (
+    MPRuntimePluginLauncher,
+)
 from lmcache.v1.multiprocess.mq import MessageQueueServer
 from lmcache.v1.multiprocess.protocol import (
     RequestType,
@@ -915,11 +918,13 @@ def run_cache_server(
         mp_config: Configuration for the ZMQ multiprocess server
         storage_manager_config: Configuration for the storage manager
         obs_config: Configuration for the observability stack
-        return_engine: If True, return (server, engine) after starting;
+        return_engine: If True, return (server, engine, plugin_launcher)
+                       after starting;
                        if False, run blocking loop to keep server alive
 
     Returns:
-        If return_engine is True: tuple of (MessageQueueServer, MPCacheEngine)
+        If return_engine is True: tuple of (MessageQueueServer,
+            MPCacheEngine, MPRuntimePluginLauncher | None)
         If return_engine is False: None (blocks until interrupted)
     """
     event_bus = init_observability(obs_config)
@@ -996,9 +1001,20 @@ def run_cache_server(
 
     logger.info("LMCache cache server is running...")
 
+    # Launch runtime plugins if configured
+    plugin_launcher = None
+    if mp_config.runtime_plugin_locations:
+        plugin_launcher = MPRuntimePluginLauncher(
+            runtime_plugin_locations=(mp_config.runtime_plugin_locations),
+            mp_config=mp_config,
+            storage_manager_config=storage_manager_config,
+            obs_config=obs_config,
+        )
+        plugin_launcher.launch_plugins()
+
     # Return server and engine if requested (for HTTP server integration)
     if return_engine:
-        return server, engine
+        return server, engine, plugin_launcher
 
     # Dummy loop to keep the server running
     try:
@@ -1006,6 +1022,8 @@ def run_cache_server(
             time.sleep(1)
     except KeyboardInterrupt:
         logger.info("Shutting down server...")
+        if plugin_launcher is not None:
+            plugin_launcher.stop_plugins()
         event_bus.stop()
         server.close()
         engine.close()

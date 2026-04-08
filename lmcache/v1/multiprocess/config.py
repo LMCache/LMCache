@@ -5,7 +5,7 @@ Configuration for the multiprocess (ZMQ) server and HTTP frontend.
 """
 
 # Standard
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import argparse
 
 
@@ -40,6 +40,9 @@ class MPServerConfig:
     """Cache engine backend type
     ('default' for MPCacheEngine, 'blend' for BlendEngineV2).
     """
+
+    runtime_plugin_locations: list[str] = field(default_factory=list)
+    """Paths to runtime plugin scripts or directories."""
 
 
 DEFAULT_MP_SERVER_CONFIG = MPServerConfig()
@@ -130,6 +133,14 @@ def add_mp_server_args(
         "'blend' uses BlendEngineV2 for cross-request KV reuse. "
         "Default is 'default'.",
     )
+    mp_group.add_argument(
+        "--runtime-plugin-locations",
+        type=str,
+        nargs="*",
+        default=[],
+        help="Paths to runtime plugin scripts or "
+        "directories to launch alongside the server.",
+    )
     return parser
 
 
@@ -157,6 +168,7 @@ def parse_args_to_mp_server_config(
         max_cpu_workers=max_cpu,
         hash_algorithm=args.hash_algorithm,
         engine_type=args.engine_type,
+        runtime_plugin_locations=(args.runtime_plugin_locations or []),
     )
 
 
