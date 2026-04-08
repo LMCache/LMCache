@@ -5,6 +5,7 @@ import json
 import os
 import shutil
 import tempfile
+import threading
 
 # Third Party
 import pytest
@@ -39,11 +40,16 @@ class MockLMCacheWorker:
         self.messages.append(msg)
 
 
-def create_test_config(disk_path: str, max_disk_size: float = 1.0):
+def create_test_config(
+    disk_path: str,
+    max_disk_size: float = 1.0,
+    local_disk_path_sharding: str = "by_gpu",
+):
     """Create a test configuration for LocalDiskBackend."""
     config = LMCacheEngineConfig.from_defaults(
         chunk_size=256,
         local_disk=disk_path,
+        local_disk_path_sharding=local_disk_path_sharding,
         max_local_disk_size=max_disk_size,
         lmcache_instance_id="test_instance",
     )
@@ -86,11 +92,20 @@ def temp_disk_path():
 
 @pytest.fixture
 def async_loop():
-    """Create an asyncio event loop for testing."""
+    """Create a running asyncio event loop for testing."""
     loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
+    ready = threading.Event()
+
+    def run_loop() -> None:
+        asyncio.set_event_loop(loop)
+        ready.set()
+        loop.run_forever()
+
+    thread = threading.Thread(target=run_loop, daemon=True)
+    thread.start()
+    ready.wait()
     yield loop
-    loop.close()
+    loop.call_soon_threadsafe(loop.stop)
 
 
 # ----------------------------------------------------------------------------
@@ -107,12 +122,14 @@ def local_cpu_backend(memory_allocator):
 def local_disk_backend(temp_disk_path, async_loop, local_cpu_backend):
     """Create a LocalDiskBackend for testing."""
     config = create_test_config(temp_disk_path)
-    return LocalDiskBackend(
+    backend = LocalDiskBackend(
         config=config,
         loop=async_loop,
         local_cpu_backend=local_cpu_backend,
         dst_device="cuda",
     )
+    yield backend
+    local_cpu_backend.memory_allocator.close()
 
 
 class TestLocalDiskBackend:
@@ -161,7 +178,6 @@ class TestLocalDiskBackend:
     def test_str(self, local_disk_backend):
         """Test string representation."""
         assert str(local_disk_backend) == "LocalDiskBackend"
-        local_disk_backend.local_cpu_backend.memory_allocator.close()
 
     def test_key_to_path(self, local_disk_backend):
         """Test key to path conversion."""
@@ -171,15 +187,11 @@ class TestLocalDiskBackend:
         expected_filename = key.to_string().replace("/", "-") + ".pt"
         assert path == os.path.join(local_disk_backend.path, expected_filename)
 
-        local_disk_backend.local_cpu_backend.memory_allocator.close()
-
     def test_contains_key_not_exists(self, local_disk_backend):
         """Test contains() when key doesn't exist."""
         key = create_test_key(2)
         assert not local_disk_backend.contains(key)
         assert not local_disk_backend.contains(key, pin=True)
-
-        local_disk_backend.local_cpu_backend.memory_allocator.close()
 
     def test_get_blocking_key_not_exists(self, local_disk_backend):
         """Test get_blocking() when key doesn't exist."""
@@ -187,8 +199,6 @@ class TestLocalDiskBackend:
         result = local_disk_backend.get_blocking(key)
 
         assert result is None
-
-        local_disk_backend.local_cpu_backend.memory_allocator.close()
 
     def test_get_blocking_returns_none_when_cpu_staging_is_exhausted(
         self, local_disk_backend, monkeypatch
@@ -208,11 +218,13 @@ class TestLocalDiskBackend:
             fmt=MemoryFormat.BINARY,
         )
 
-        monkeypatch.setattr(local_disk_backend.local_cpu_backend, "allocate", lambda *args, **kwargs: None)
+        monkeypatch.setattr(
+            local_disk_backend.local_cpu_backend,
+            "allocate",
+            lambda *args, **kwargs: None,
+        )
 
         assert local_disk_backend.get_blocking(key) is None
-
-        local_disk_backend.local_cpu_backend.memory_allocator.close()
 
     def test_recover_persisted_index_restores_lru_order(
         self, temp_disk_path, async_loop, local_cpu_backend
@@ -269,6 +281,77 @@ class TestLocalDiskBackend:
         )
         assert evict_candidates == [key_old]
 
-        backend.disk_worker.close()
-        recovered_backend.disk_worker.close()
+        local_cpu_backend.memory_allocator.close()
+
+    def test_init_multi_path(self, async_loop, local_cpu_backend):
+        """Comma-separated disk paths should remain supported."""
+        dir_a = tempfile.mkdtemp()
+        dir_b = tempfile.mkdtemp()
+        try:
+            config = create_test_config(f"{dir_a},{dir_b}")
+            backend = LocalDiskBackend(
+                config=config,
+                loop=async_loop,
+                local_cpu_backend=local_cpu_backend,
+                dst_device="cuda:0",
+            )
+
+            assert backend.path == dir_a
+            assert backend.local_disk_path_sharding == "by_gpu"
+            assert os.path.isdir(dir_a)
+            assert os.path.isdir(dir_b)
+            assert isinstance(backend.os_disk_bs, int)
+
+        finally:
+            shutil.rmtree(dir_a, ignore_errors=True)
+            shutil.rmtree(dir_b, ignore_errors=True)
+            local_cpu_backend.memory_allocator.close()
+
+    def test_multi_path_uses_device_affinity(self, async_loop, local_cpu_backend):
+        """Different CUDA devices should shard onto different disk paths."""
+        dir_a = tempfile.mkdtemp()
+        dir_b = tempfile.mkdtemp()
+        try:
+            config = create_test_config(f"{dir_a},{dir_b}")
+            backend0 = LocalDiskBackend(
+                config=config,
+                loop=async_loop,
+                local_cpu_backend=local_cpu_backend,
+                dst_device="cuda:0",
+            )
+            backend1 = LocalDiskBackend(
+                config=config,
+                loop=async_loop,
+                local_cpu_backend=local_cpu_backend,
+                dst_device="cuda:1",
+            )
+
+            assert backend0.path == dir_a
+            assert backend1.path == dir_b
+
+        finally:
+            shutil.rmtree(dir_a, ignore_errors=True)
+            shutil.rmtree(dir_b, ignore_errors=True)
+            local_cpu_backend.memory_allocator.close()
+
+    def test_unsupported_path_sharding_raises(
+        self, temp_disk_path, async_loop, local_cpu_backend
+    ):
+        """Unsupported sharding modes should fail fast."""
+        config = create_test_config(
+            temp_disk_path,
+            local_disk_path_sharding="round_robin",
+        )
+
+        with pytest.raises(
+            AssertionError,
+            match="Unsupported local_disk_path_sharding",
+        ):
+            LocalDiskBackend(
+                config=config,
+                loop=async_loop,
+                local_cpu_backend=local_cpu_backend,
+                dst_device="cuda:0",
+            )
+
         local_cpu_backend.memory_allocator.close()
