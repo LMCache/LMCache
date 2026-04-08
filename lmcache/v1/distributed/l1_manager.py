@@ -733,11 +733,6 @@ class L1Manager:
         """
         entry = self._objects.get(key, None)
         if entry is None:
-            logger.warning(
-                "object key %s not found in L1Manager check evictable, "
-                "this should not happen",
-                key,
-            )
             return False
         return not entry.read_lock.is_locked() and not entry.write_lock.is_locked()
 
