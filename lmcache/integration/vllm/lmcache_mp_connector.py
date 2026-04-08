@@ -419,7 +419,7 @@ class LMCacheMPConnectorMetadata(KVConnectorMetadata):
         return self.__str__()
 
 
-class LMCacheMPConnector(KVConnectorBase_V1):
+class LMCacheMPConnectorDynamic(KVConnectorBase_V1):
     """
     The connector for LMCache multi-process mode.
 
