@@ -31,6 +31,7 @@ from lmcache.v1.memory_management import (
 )
 from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.storage_backend.abstract_backend import AllocatorBackendInterface
+from lmcache.v1.storage_backend.path_sharder import PathSharder
 
 logger = init_logger(__name__)
 
@@ -192,33 +193,22 @@ class GdsBackend(AllocatorBackendInterface):
         self.loop = loop
         self.dst_device = dst_device
 
-        # Extract device index from self.dst_device (e.g. "cuda:2" -> 2)
-        device_id = (
-            int(dst_device.split(":")[1])
-            if ":" in dst_device
-            else torch.cuda.current_device()
-        )
-
         assert config.gds_path is not None, "Need to specify gds_path for GdsBackend"
 
-        # Multi-path support: parse comma-separated paths and select one
-        # based on the configured sharding strategy.
-        self.gds_paths = [p.strip() for p in config.gds_path.split(",") if p.strip()]
-        assert len(self.gds_paths) > 0, "gds_path cannot be empty"
-
-        self.gds_path_sharding = config.gds_path_sharding
-        assert self.gds_path_sharding == "by_gpu", (
-            f"Unsupported gds_path_sharding '{self.gds_path_sharding}'. "
-            "Only 'by_gpu' is supported currently."
+        sharder = PathSharder(
+            raw_csv=config.gds_path,
+            strategy=config.gds_path_sharding,
+            dst_device=dst_device,
         )
-        self.gds_path = self.gds_paths[device_id % len(self.gds_paths)]
+        self.gds_paths = sharder.all_paths
+        self.gds_path = sharder.selected
         self.fstype = get_fstype(self.gds_path)
 
         # Log the fstype - this is useful in reports and varying optimizations
         # based on the kind of fstype used.
         logger.info(
             f"GDS backend using fstype '{self.fstype}' on path '{self.gds_path}'"
-            f" (device {device_id}, {len(self.gds_paths)} path(s) configured)"
+            f" ({len(self.gds_paths)} path(s) configured)"
         )
 
         # Initialize use_cufile and use_hipfile before creating the memory allocator
