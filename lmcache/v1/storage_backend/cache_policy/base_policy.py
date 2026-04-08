@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from collections.abc import MutableMapping
-from typing import Generic, TypeVar
+from typing import Any, Generic, TypeVar
 import abc
 
 KeyType = TypeVar("KeyType")
@@ -85,3 +85,23 @@ class BaseCachePolicy(Generic[KeyType, MapType], metaclass=abc.ABCMeta):
             return a list of keys to be evicted
         """
         raise NotImplementedError
+
+    def get_recovery_sort_key(self, metadata: Any) -> tuple[float, float]:
+        """
+        Return a best-effort ordering key for rebuilding cache policy state
+        after a process restart.
+        """
+        last_access_ts = float(getattr(metadata, "last_access_ts", 0.0) or 0.0)
+        created_ts = float(getattr(metadata, "created_ts", 0.0) or 0.0)
+        return (last_access_ts, created_ts)
+
+    def restore_on_recover(
+        self,
+        key: KeyType,
+        cache_dict: MapType,
+        metadata: Any,
+    ) -> None:
+        """
+        Restore in-memory policy state for a recovered cache entry.
+        """
+        return None

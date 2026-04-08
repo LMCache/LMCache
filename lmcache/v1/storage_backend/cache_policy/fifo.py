@@ -56,3 +56,8 @@ class FIFOCachePolicy(BaseCachePolicy[KeyType, dict[KeyType, Any]]):
                 break
 
         return evict_keys
+
+    def get_recovery_sort_key(self, metadata: Any) -> tuple[float, float]:
+        created_ts = float(getattr(metadata, "created_ts", 0.0) or 0.0)
+        last_access_ts = float(getattr(metadata, "last_access_ts", 0.0) or 0.0)
+        return (created_ts, last_access_ts)

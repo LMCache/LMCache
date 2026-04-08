@@ -3,6 +3,7 @@
 from concurrent.futures import Future
 from typing import TYPE_CHECKING, Any, Callable, List, Optional, Sequence
 import asyncio
+import json
 import os
 import threading
 import time
@@ -13,7 +14,14 @@ import torch
 # First Party
 from lmcache.logging import init_logger
 from lmcache.observability import LMCStatsMonitor
-from lmcache.utils import CacheEngineKey, DiskCacheMetadata, _lmcache_nvtx_annotate
+from lmcache.utils import (
+    STR_DTYPE_TO_TORCH_DTYPE,
+    CacheEngineKey,
+    DiskCacheMetadata,
+    TORCH_DTYPE_TO_STR_DTYPE,
+    _lmcache_nvtx_annotate,
+    parse_cache_key,
+)
 from lmcache.v1.cache_controller.message import OpType
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_management import MemoryFormat, MemoryObj
@@ -119,40 +127,15 @@ class LocalDiskBackend(StorageBackendInterface):
         self.disk_lock = threading.Lock()
 
         assert config.local_disk is not None
-
-        # Multi-path support: parse comma-separated paths and select one
-        # based on the configured sharding strategy.
-        paths = [p.strip() for p in config.local_disk.split(",") if p.strip()]
-        assert len(paths) > 0, "At least one disk path must be provided"
-
-        self.local_disk_path_sharding = config.local_disk_path_sharding
-        assert self.local_disk_path_sharding == "by_gpu", (
-            f"Unsupported local_disk_path_sharding "
-            f"'{self.local_disk_path_sharding}'. "
-            "Only 'by_gpu' is supported currently."
-        )
-
-        # Extract device index from dst_device (e.g. "cuda:2" -> 2)
-        device_id = (
-            int(dst_device.split(":")[1])
-            if ":" in dst_device
-            else (torch.cuda.current_device() if torch.cuda.is_available() else 0)
-        )
-        self.path: str = paths[device_id % len(paths)]
-
-        # Create all directories (not just the selected one)
-        for p in paths:
-            os.makedirs(p, exist_ok=True)
-        logger.info(
-            "Local disk cache path: %s (device %s, %d path(s) configured)",
-            self.path,
-            dst_device,
-            len(paths),
-        )
+        self.path: str = config.local_disk
+        if not os.path.exists(self.path):
+            os.makedirs(self.path)
+            logger.info(f"Created local disk cache directory: {self.path}")
 
         self.loop = loop
 
         self.use_local_cpu = config.local_cpu
+        self.metadata = metadata
 
         # Block size (for file system I/O)
         stat = os.statvfs(self.path)
@@ -194,6 +177,8 @@ class LocalDiskBackend(StorageBackendInterface):
         else:
             logger.warning("Controller message sender is not initialized")
 
+        self._recover_persisted_index()
+
     def __str__(self) -> str:
         return "LocalDiskBackend"
 
@@ -202,6 +187,212 @@ class LocalDiskBackend(StorageBackendInterface):
         key: CacheEngineKey,
     ) -> str:
         return os.path.join(self.path, key.to_string().replace("/", "-") + ".pt")
+
+    def _meta_path_from_data_path(self, path: str) -> str:
+        return path + ".meta.json"
+
+    def _key_to_meta_path(self, key: CacheEngineKey) -> str:
+        return self._meta_path_from_data_path(self._key_to_path(key))
+
+    def _serialize_cached_positions(
+        self, cached_positions: Optional[torch.Tensor]
+    ) -> Optional[list[int]]:
+        if cached_positions is None:
+            return None
+        return cached_positions.detach().cpu().tolist()
+
+    def _serialize_dtype(self, dtype: Optional[torch.dtype]) -> Optional[str]:
+        if dtype is None:
+            return None
+        return TORCH_DTYPE_TO_STR_DTYPE[dtype]
+
+    def _deserialize_dtype(self, dtype_str: Optional[str]) -> Optional[torch.dtype]:
+        if dtype_str is None:
+            return None
+        return STR_DTYPE_TO_TORCH_DTYPE[dtype_str]
+
+    def _serialize_disk_metadata(self, key: CacheEngineKey, metadata: DiskCacheMetadata) -> dict:
+        return {
+            "key": key.to_string(),
+            "size": metadata.size,
+            "shape": list(metadata.shape) if metadata.shape is not None else None,
+            "dtype": self._serialize_dtype(metadata.dtype),
+            "fmt": metadata.fmt.value if metadata.fmt is not None else None,
+            "cached_positions": self._serialize_cached_positions(
+                metadata.cached_positions
+            ),
+            "shapes": [list(s) for s in metadata.shapes]
+            if metadata.shapes is not None
+            else None,
+            "dtypes": [self._serialize_dtype(d) for d in metadata.dtypes]
+            if metadata.dtypes is not None
+            else None,
+            "created_ts": metadata.created_ts,
+            "last_access_ts": metadata.last_access_ts,
+            "hit_count": metadata.hit_count,
+        }
+
+    def _write_metadata_sidecar(
+        self,
+        key: CacheEngineKey,
+        path: str,
+        size: int,
+        shape: Optional[torch.Size],
+        dtype: Optional[torch.dtype],
+        fmt: Optional[MemoryFormat],
+        cached_positions: Optional[torch.Tensor],
+        shapes: Optional[list[torch.Size]],
+        dtypes: Optional[list[torch.dtype]],
+        *,
+        created_ts: float,
+        last_access_ts: float,
+        hit_count: int,
+    ) -> None:
+        meta_path = self._meta_path_from_data_path(path)
+        payload = self._serialize_disk_metadata(
+            key,
+            DiskCacheMetadata(
+                path=path,
+                size=size,
+                shape=shape,
+                dtype=dtype,
+                cached_positions=cached_positions,
+                fmt=fmt,
+                pin_count=0,
+                shapes=shapes,
+                dtypes=dtypes,
+                created_ts=created_ts,
+                last_access_ts=last_access_ts,
+                hit_count=hit_count,
+            ),
+        )
+
+        tmp_meta_path = meta_path + ".tmp"
+        with open(tmp_meta_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False)
+        os.replace(tmp_meta_path, meta_path)
+
+    def _persist_sidecar_for_metadata(
+        self,
+        key: CacheEngineKey,
+        metadata: DiskCacheMetadata,
+    ) -> None:
+        meta_path = self._key_to_meta_path(key)
+        payload = self._serialize_disk_metadata(key, metadata)
+        tmp_meta_path = meta_path + ".tmp"
+        with open(tmp_meta_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False)
+        os.replace(tmp_meta_path, meta_path)
+
+    def _record_hit_locked(
+        self,
+        key: CacheEngineKey,
+        *,
+        persist: bool = True,
+    ) -> None:
+        metadata = self.dict[key]
+        metadata.hit_count = max(1, int(metadata.hit_count or 1)) + 1
+        metadata.last_access_ts = time.time()
+        self.cache_policy.update_on_hit(key, self.dict)
+        if persist:
+            self._persist_sidecar_for_metadata(key, metadata)
+
+    def _recover_persisted_index(self) -> None:
+        recovered = 0
+        total_bytes = 0
+        recovered_entries: list[tuple[CacheEngineKey, DiskCacheMetadata]] = []
+
+        for entry in os.listdir(self.path):
+            if not entry.endswith(".meta.json"):
+                continue
+
+            meta_path = os.path.join(self.path, entry)
+            try:
+                with open(meta_path, "r", encoding="utf-8") as f:
+                    payload = json.load(f)
+
+                key = parse_cache_key(payload["key"])
+                path = self._key_to_path(key)
+                if not os.path.exists(path):
+                    logger.warning("Skipping stale disk metadata without data file: %s", meta_path)
+                    continue
+
+                size = os.path.getsize(path)
+                shape = (
+                    torch.Size(payload["shape"])
+                    if payload.get("shape") is not None
+                    else None
+                )
+                dtype = self._deserialize_dtype(payload.get("dtype"))
+                fmt = (
+                    MemoryFormat(payload["fmt"])
+                    if payload.get("fmt") is not None
+                    else None
+                )
+                cached_positions = payload.get("cached_positions")
+                shapes = payload.get("shapes")
+                dtypes = payload.get("dtypes")
+                created_ts = float(
+                    payload.get("created_ts", os.path.getmtime(path)) or 0.0
+                )
+                last_access_ts = float(
+                    payload.get("last_access_ts", created_ts) or created_ts
+                )
+                hit_count = max(1, int(payload.get("hit_count", 1) or 1))
+
+                recovered_entries.append(
+                    (
+                        key,
+                        DiskCacheMetadata(
+                            path=path,
+                            size=size,
+                            shape=shape,
+                            dtype=dtype,
+                            cached_positions=(
+                                torch.tensor(cached_positions, dtype=torch.long)
+                                if cached_positions is not None
+                                else None
+                            ),
+                            fmt=fmt,
+                            pin_count=0,
+                            shapes=[torch.Size(s) for s in shapes]
+                            if shapes is not None
+                            else None,
+                            dtypes=[self._deserialize_dtype(d) for d in dtypes]
+                            if dtypes is not None
+                            else None,
+                            created_ts=created_ts,
+                            last_access_ts=last_access_ts,
+                            hit_count=hit_count,
+                        ),
+                    )
+                )
+                total_bytes += size
+                recovered += 1
+            except Exception as e:
+                logger.warning("Failed to recover disk cache metadata %s: %s", meta_path, e)
+
+        if recovered_entries:
+            recovered_entries.sort(
+                key=lambda item: (
+                    self.cache_policy.get_recovery_sort_key(item[1]),
+                    item[0].to_string(),
+                )
+            )
+            for key, metadata in recovered_entries:
+                self.dict[key] = metadata
+                self.cache_policy.restore_on_recover(key, self.dict, metadata)
+
+        if recovered:
+            self.current_cache_size = total_bytes
+            self.usage = total_bytes
+            self.stats_monitor.update_local_storage_usage(self.usage)
+            logger.info(
+                "Recovered %d persisted disk cache entries (%d bytes) from %s",
+                recovered,
+                total_bytes,
+                self.path,
+            )
 
     def contains(self, key: CacheEngineKey, pin: bool = False) -> bool:
         with self.disk_lock:
@@ -217,7 +408,7 @@ class LocalDiskBackend(StorageBackendInterface):
         # flip the order of the keys in the request
         with self.disk_lock:
             for key in reversed(self.keys_in_request):
-                self.cache_policy.update_on_hit(key, self.dict)
+                self._record_hit_locked(key)
             self.keys_in_request = []
 
     def exists_in_put_tasks(self, key: CacheEngineKey) -> bool:
@@ -259,6 +450,7 @@ class LocalDiskBackend(StorageBackendInterface):
             return False
 
         path = meta.path
+        meta_path = self._meta_path_from_data_path(path)
         size = meta.size
         self.usage -= size
         self.stats_monitor.update_local_storage_usage(self.usage)
@@ -271,6 +463,8 @@ class LocalDiskBackend(StorageBackendInterface):
         # res.result()
 
         os.remove(path)
+        if os.path.exists(meta_path):
+            os.remove(meta_path)
 
         if force:
             self.cache_policy.update_on_force_evict(key)
@@ -293,19 +487,43 @@ class LocalDiskBackend(StorageBackendInterface):
         dtype: torch.dtype,
         fmt: MemoryFormat,
         cached_positions: Optional[torch.Tensor] = None,
+        shapes: Optional[list[torch.Size]] = None,
+        dtypes: Optional[list[torch.dtype]] = None,
+        *,
+        created_ts: Optional[float] = None,
+        last_access_ts: Optional[float] = None,
+        hit_count: int = 1,
+        persist_sidecar: bool = True,
     ) -> None:
         path = self._key_to_path(key)
+        created_at = float(created_ts if created_ts is not None else time.time())
+        last_access_at = float(
+            last_access_ts if last_access_ts is not None else created_at
+        )
 
         has_stored = False
         with self.disk_lock:
             if key in self.dict:
                 # Update cache recency
-                self.cache_policy.update_on_hit(key, self.dict)
+                self._record_hit_locked(key)
                 has_stored = True
             else:
                 self.dict[key] = DiskCacheMetadata(
-                    path, size, shape, dtype, cached_positions, fmt, 0
+                    path=path,
+                    size=size,
+                    shape=shape,
+                    dtype=dtype,
+                    cached_positions=cached_positions,
+                    fmt=fmt,
+                    pin_count=0,
+                    shapes=shapes,
+                    dtypes=dtypes,
+                    created_ts=created_at,
+                    last_access_ts=last_access_at,
+                    hit_count=max(1, int(hit_count or 1)),
                 )
+                if persist_sidecar:
+                    self._persist_sidecar_for_metadata(key, self.dict[key])
 
         # Push kv admit msg with batching
         if self.batched_msg_sender is not None and not has_stored:
@@ -329,8 +547,6 @@ class LocalDiskBackend(StorageBackendInterface):
             after the disk write completes. Callback exceptions are caught
             and logged.
         """
-        assert memory_obj.tensor is not None
-
         # skip repeated save
         if self.exists_in_put_tasks(key):
             logger.debug(f"Put task for {key} is already in progress.")
@@ -416,19 +632,27 @@ class LocalDiskBackend(StorageBackendInterface):
             return None
 
         # Update cache recency
-        self.cache_policy.update_on_hit(key, self.dict)
+        self._record_hit_locked(key)
 
         disk_meta = self.dict[key]
         path = disk_meta.path
         dtype = disk_meta.dtype
         shape = disk_meta.shape
+        dtypes = disk_meta.dtypes
+        shapes = disk_meta.shapes
         fmt = disk_meta.fmt
         assert dtype is not None
         assert shape is not None
 
         self.disk_lock.release()
         memory_obj = self.load_bytes_from_disk(
-            key, path, dtype=dtype, shape=shape, fmt=fmt
+            key,
+            path,
+            dtype=dtype,
+            shape=shape,
+            fmt=fmt,
+            dtypes=dtypes,
+            shapes=shapes,
         )
 
         return memory_obj
@@ -450,6 +674,8 @@ class LocalDiskBackend(StorageBackendInterface):
             path = self.dict[key].path
             dtype = self.dict[key].dtype
             shape = self.dict[key].shape
+            dtypes = self.dict[key].dtypes
+            shapes = self.dict[key].shapes
             fmt = self.dict[key].fmt
 
             assert dtype is not None
@@ -459,8 +685,8 @@ class LocalDiskBackend(StorageBackendInterface):
             # if staging memory is exhausted the caller will get a logged
             # error rather than a silent deadlock.
             memory_obj = self.local_cpu_backend.allocate(
-                shape,
-                dtype,
+                shapes if shapes is not None and dtypes is not None else shape,
+                dtypes if shapes is not None and dtypes is not None else dtype,
                 fmt,
                 busy_loop=False,
             )
@@ -478,7 +704,7 @@ class LocalDiskBackend(StorageBackendInterface):
 
             # NOTE(Jiayi): Currently, we consider prefetch as cache hit.
             # Update cache recency
-            self.cache_policy.update_on_hit(key, self.dict)
+            self._record_hit_locked(key)
 
             self.disk_lock.release()
             logger.debug(f"Prefetching {key} from disk.")
@@ -526,8 +752,6 @@ class LocalDiskBackend(StorageBackendInterface):
             write completes for this key. Callback exceptions are caught and
             logged.
         """
-        kv_chunk = memory_obj.tensor
-        assert kv_chunk is not None
         buffer = memory_obj.byte_array
         path = self._key_to_path(key)
 
@@ -549,9 +773,42 @@ class LocalDiskBackend(StorageBackendInterface):
         dtype = memory_obj.metadata.dtype
         fmt = memory_obj.metadata.fmt
         cached_positions = memory_obj.metadata.cached_positions
+        shapes = memory_obj.metadata.shapes
+        dtypes = memory_obj.metadata.dtypes
         memory_obj.ref_count_down()
+        created_at = time.time()
+        last_access_at = created_at
+        initial_hit_count = 1
 
-        self.insert_key(key, size, shape, dtype, fmt, cached_positions=cached_positions)
+        self._write_metadata_sidecar(
+            key=key,
+            path=path,
+            size=size,
+            shape=shape,
+            dtype=dtype,
+            fmt=fmt,
+            cached_positions=cached_positions,
+            shapes=shapes,
+            dtypes=dtypes,
+            created_ts=created_at,
+            last_access_ts=last_access_at,
+            hit_count=initial_hit_count,
+        )
+
+        self.insert_key(
+            key,
+            size,
+            shape,
+            dtype,
+            fmt,
+            cached_positions=cached_positions,
+            shapes=shapes,
+            dtypes=dtypes,
+            created_ts=created_at,
+            last_access_ts=last_access_at,
+            hit_count=initial_hit_count,
+            persist_sidecar=False,
+        )
 
         self.disk_worker.remove_put_task(key)
 
@@ -597,13 +854,26 @@ class LocalDiskBackend(StorageBackendInterface):
         dtype: torch.dtype,
         shape: torch.Size,
         fmt: MemoryFormat,
+        dtypes: Optional[list[torch.dtype]] = None,
+        shapes: Optional[list[torch.Size]] = None,
     ) -> Optional[MemoryObj]:
         """
         Load bytearray from disk.
         """
 
-        memory_obj = self.local_cpu_backend.allocate(shape, dtype, fmt)
-        assert memory_obj is not None, "Memory allocation failed during disk load."
+        memory_obj = self.local_cpu_backend.allocate(
+            shapes if shapes is not None and dtypes is not None else shape,
+            dtypes if shapes is not None and dtypes is not None else dtype,
+            fmt,
+            busy_loop=False,
+        )
+        if memory_obj is None:
+            logger.warning(
+                "Memory allocation failed during blocking disk load for key %s. "
+                "CPU staging pool may be exhausted; treating this as a cache miss.",
+                key,
+            )
+            return None
 
         buffer = memory_obj.byte_array
         self.read_file(key, buffer, path)

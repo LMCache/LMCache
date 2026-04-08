@@ -1,4 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
+# Standard
+from types import SimpleNamespace
+
 # First Party
 from lmcache.v1.storage_backend.cache_policy import get_cache_policy
 
@@ -159,6 +162,38 @@ def test_lfu_with_pin():
     evict_candidates = policy.get_evict_candidates(cache_dict, num_candidates=2)
 
     assert evict_candidates == [key3, key2]
+
+
+def test_lfu_restore_on_recover():
+    policy = get_cache_policy("LFU")
+    cache_dict = policy.init_mutable_mapping()
+
+    key1 = dumb_cache_engine_key(1)
+    key2 = dumb_cache_engine_key(2)
+    key3 = dumb_cache_engine_key(3)
+
+    cache_dict[key1] = DummyMemoryObj()
+    cache_dict[key2] = DummyMemoryObj()
+    cache_dict[key3] = DummyMemoryObj()
+
+    for key, metadata in [
+        (
+            key1,
+            SimpleNamespace(hit_count=5, created_ts=3.0, last_access_ts=30.0),
+        ),
+        (
+            key2,
+            SimpleNamespace(hit_count=2, created_ts=1.0, last_access_ts=10.0),
+        ),
+        (
+            key3,
+            SimpleNamespace(hit_count=2, created_ts=2.0, last_access_ts=20.0),
+        ),
+    ]:
+        policy.restore_on_recover(key, cache_dict, metadata)
+
+    evict_candidates = policy.get_evict_candidates(cache_dict, num_candidates=3)
+    assert evict_candidates == [key2, key3, key1]
 
 
 def test_mru():

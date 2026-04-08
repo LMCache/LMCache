@@ -35,6 +35,13 @@ class LFUCachePolicy(BaseCachePolicy[KeyType, dict[KeyType, Any]]):
     def init_mutable_mapping(self) -> dict[KeyType, Any]:
         return {}
 
+    def get_recovery_sort_key(self, metadata: Any) -> tuple[int, float, float]:
+        hit_count = int(getattr(metadata, "hit_count", 1) or 1)
+        created_ts = float(getattr(metadata, "created_ts", 0.0) or 0.0)
+        last_access_ts = float(getattr(metadata, "last_access_ts", 0.0) or 0.0)
+        # Tie-break by last_access_ts (not created_ts) to preserve LFU semantics
+        return (hit_count, last_access_ts, created_ts)
+
     def update_on_hit(
         self,
         key: KeyType,
@@ -74,6 +81,19 @@ class LFUCachePolicy(BaseCachePolicy[KeyType, dict[KeyType, Any]]):
         self.freq_to_keys[freq].pop(key)
         if not self.freq_to_keys[freq]:
             self.freq_to_keys.pop(freq)
+
+    def restore_on_recover(
+        self,
+        key: KeyType,
+        cache_dict: dict[KeyType, Any],
+        metadata: Any,
+    ) -> None:
+        freq = max(1, int(getattr(metadata, "hit_count", 1) or 1))
+        self.key_to_freq[key] = freq
+        if freq not in self.freq_to_keys:
+            self.freq_to_keys[freq] = {key: None}
+        else:
+            self.freq_to_keys[freq][key] = None
 
     # NOTE(Jiayi): We do best effort to get eviction candidates so the number
     # of returned keys mignt be smaller than num_candidates.

@@ -1773,7 +1773,7 @@ class LMCacheEngine:
 
     def _get_slot_mapping_list(
         self,
-        slot_mapping: Optional[Union[torch.Tensor, List[int]]],
+        slot_mapping: Optional[Union[torch.Tensor, List[int], Dict[str, torch.Tensor]]],
     ) -> Optional[List[int]]:
         """
         Convert slot_mapping to list if it's a tensor, otherwise return as is.
@@ -1786,6 +1786,10 @@ class LMCacheEngine:
         """
         if slot_mapping is None:
             return None
+        if isinstance(slot_mapping, dict):
+            if not slot_mapping:
+                return None
+            slot_mapping = next(iter(slot_mapping.values()))
         if isinstance(slot_mapping, torch.Tensor):
             return slot_mapping.tolist()
         # At this point, slot_mapping must be List[int]

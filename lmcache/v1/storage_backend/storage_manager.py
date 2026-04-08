@@ -86,9 +86,12 @@ def allocate_and_copy_objects(
     for key, src_memory_obj in zip(keys, src_memory_objs, strict=False):
         if allocator_backend.contains(key):
             continue
+        src_shapes = src_memory_obj.get_shapes()
+        src_dtypes = src_memory_obj.get_dtypes()
+        use_grouped_tensors = len(src_shapes) > 1 and len(src_shapes) == len(src_dtypes)
         memory_obj = allocator_backend.allocate(
-            src_memory_obj.get_shape(),
-            src_memory_obj.get_dtype(),
+            src_shapes if use_grouped_tensors else src_memory_obj.get_shape(),
+            src_dtypes if use_grouped_tensors else src_memory_obj.get_dtype(),
             fmt=src_memory_obj.meta.fmt,
             eviction=True,
             busy_loop=False,
@@ -97,18 +100,31 @@ def allocate_and_copy_objects(
         if memory_obj is None:
             break
 
-        if memory_obj.tensor is None:
-            # This should not happen with current implementation,
-            # but handle it defensively to avoid memory leak
-            logger.warning(
-                "Allocated MemoryObj has None tensor, this is unexpected. "
-                "Releasing the memory object."
-            )
-            memory_obj.ref_count_down()
-            break
-
         with torch.cuda.stream(stream):
-            memory_obj.tensor.copy_(src_memory_obj.tensor, non_blocking=True)
+            if use_grouped_tensors:
+                for i in range(len(src_shapes)):
+                    dst_tensor = memory_obj.get_tensor(i)
+                    src_tensor = src_memory_obj.get_tensor(i)
+                    if dst_tensor is None or src_tensor is None:
+                        logger.warning(
+                            "Allocated grouped MemoryObj is missing tensor %d. "
+                            "Releasing the memory object.",
+                            i,
+                        )
+                        memory_obj.ref_count_down()
+                        return keys[: len(allocated_objects)], allocated_objects
+                    dst_tensor.copy_(src_tensor, non_blocking=True)
+            else:
+                if memory_obj.tensor is None or src_memory_obj.tensor is None:
+                    # This should not happen with current implementation,
+                    # but handle it defensively to avoid memory leak
+                    logger.warning(
+                        "Allocated MemoryObj has None tensor, this is unexpected. "
+                        "Releasing the memory object."
+                    )
+                    memory_obj.ref_count_down()
+                    break
+                memory_obj.tensor.copy_(src_memory_obj.tensor, non_blocking=True)
         allocated_objects.append(memory_obj)
 
     if stream is not None:
