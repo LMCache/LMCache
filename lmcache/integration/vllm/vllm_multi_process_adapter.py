@@ -101,16 +101,19 @@ class ParallelStrategy:
     use_mla: bool
     """Whether to use the MLA."""
 
-    world_size: int
+    kv_world_size: int
     """
-    The world size, world_size may not be equal to the actual_world_size, 
-    in the case of mla, it will 'exclude' the effect of TP.
+    The kv world size, kv_world_size may not be equal to the actual_world_size, 
+    in the case of mla, it will 'exclude' the effect of TP, the value is 
+    calculated by `extract_world_size_and_kv_rank` in `lmcache_mp_connector.py`.
     """
 
-    worker_id: int
+    kv_worker_id: int
     """
-    The worker id of the sub-process, worker_id may not be equal to the 
-    actual_worker_id, in the case of mla, it will 'exclude' the effect of TP.
+    The kv worker id of the sub-process, kv_worker_id may not be equal to the 
+    actual_worker_id, in the case of mla, it will 'exclude' the effect of TP, 
+    the value is calculated by `extract_world_size_and_kv_rank` in 
+    `lmcache_mp_connector.py`.
     """
 
     actual_world_size: int
@@ -225,7 +228,7 @@ class LMCacheMPSchedulerAdapter:
             vllm_block_size: The block size used in vLLM
             parallel_strategy:
                 The parallel strategy, which includes `use_mla`,
-                `world_size`, `worker_id` and so on
+                `kv_world_size`, `kv_worker_id` and so on
             mq_timeout: Timeout in seconds for message queue requests.
             heartbeat_interval: Interval in seconds between heartbeat pings.
         """
@@ -269,8 +272,8 @@ class LMCacheMPSchedulerAdapter:
 
     @property
     def world_size(self) -> int:
-        """The world size."""
-        return self.parallel_strategy.world_size
+        """Get the kv world size."""
+        return self.parallel_strategy.kv_world_size
 
     @property
     def tp_size(self) -> int:
@@ -615,13 +618,13 @@ class LMCacheMPWorkerAdapter:
 
     @property
     def world_size(self) -> int:
-        """The world size."""
-        return self.parallel_strategy.world_size
+        """Get the kv world size."""
+        return self.parallel_strategy.kv_world_size
 
     @property
     def worker_id(self) -> int:
-        """The worker id."""
-        return self.parallel_strategy.worker_id
+        """Get the kv worker id."""
+        return self.parallel_strategy.kv_worker_id
 
     @property
     def use_mla(self) -> bool:
