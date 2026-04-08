@@ -313,29 +313,36 @@ class PrefetchController(StorageControllerInterface):
         with self._lookup_results_lock:
             return self._completed_lookups.get(request_id, None)
 
-    def query_prefetch_result(self, request_id: PrefetchRequestId) -> int | None:
+    def query_prefetch_result(
+        self, request_id: PrefetchRequestId, *, pop: bool = True
+    ) -> int | None:
         """
         Query the result of a prefetch request.
 
         Thread-safe. Returns the number of prefix hits if the request
-        has completed, None if still in progress. Each result can only
-        be retrieved once (subsequent calls return None).
+        has completed, None if still in progress.
 
         Args:
             request_id: The request ID from submit_prefetch_request.
+            pop: If True (default), consume the result — subsequent
+                calls return None.  If False, peek without consuming
+                (the entry stays for later cleanup).
 
         Returns:
             Number of prefix hits, or None if not yet complete.
 
         Note:
-            This function will pop the completed lookup results as well.
-            Therefore, the caller need to make sure that never call
-            query_lookup_result after calling this function, otherwise it will
+            When ``pop=True`` this function will pop the completed
+            lookup results as well.  Therefore, the caller must never
+            call ``query_lookup_result`` after a pop, otherwise it will
             get None forever.
         """
         with self._prefetch_results_lock:
-            result = self._completed_results.pop(request_id, None)
-        if result is not None:
+            if pop:
+                result = self._completed_results.pop(request_id, None)
+            else:
+                result = self._completed_results.get(request_id, None)
+        if result is not None and pop:
             with self._lookup_results_lock:
                 self._completed_lookups.pop(request_id, None)
         return result

@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Any
 import os
 import threading
+import time
 
 # Third Party
 import torch
@@ -554,6 +555,73 @@ class LMCacheMPSchedulerAdapter:
         )
 
 
+class LMCacheMPSyncLookUpSchedulerAdapter(LMCacheMPSchedulerAdapter):
+    """LMCacheMPSchedulerAdapter subclass that uses the synchronous
+    SYNC_LOOKUP protocol instead of the two-phase LOOKUP + polling path.
+
+    ``sync_lookup`` performs the entire lookup in a single blocking
+    round-trip and returns the matched token count directly.
+    """
+
+    @_lmcache_nvtx_annotate
+    def sync_lookup(
+        self,
+        request_id: str,
+        token_ids: list[int],
+    ) -> int:
+        """Synchronous prefix lookup — single blocking round-trip.
+
+        Sends a SYNC_LOOKUP request to the server that performs the L1
+        prefix scan and L2 existence check atomically.  Returns the
+        number of matched **tokens** (not chunks).
+
+        Args:
+            request_id: The request ID.
+            token_ids: Full token sequence for the request.
+
+        Returns:
+            Number of matched tokens (always a multiple of
+            ``chunk_size``), or 0 on error / unhealthy server.
+        """
+        self._ensure_heartbeat_started()
+
+        if not self.is_healthy:
+            return 0
+
+        aligned_end = (len(token_ids) // self.chunk_size) * self.chunk_size
+
+        key = self._create_key(
+            token_ids,
+            start=0,
+            end=aligned_end,
+            request_id=request_id,
+        ).no_worker_id_version()
+
+        future = send_lmcache_request(
+            self.mq_client,
+            RequestType.SYNC_LOOKUP,
+            [key, self.tp_size],
+        )
+        try:
+            hit_chunks = future.result(timeout=self._mq_timeout)
+        except TimeoutError:
+            logger.warning(
+                "SYNC_LOOKUP request timed out after %ss. Marking server as unhealthy.",
+                self._mq_timeout,
+            )
+            self._health_event.clear()
+            return 0
+
+        hit_tokens = hit_chunks * self.chunk_size
+        logger.debug(
+            "SYNC_LOOKUP: request_id=%s hit %d chunks (%d tokens)",
+            request_id,
+            hit_chunks,
+            hit_tokens,
+        )
+        return hit_tokens
+
+
 class LMCacheMPWorkerAdapter:
     def __init__(
         self,
@@ -748,6 +816,18 @@ class LMCacheMPWorkerAdapter:
             self.error_block_ids.update(op.block_ids)
             return
 
+        result = None
+        while result is None:
+            result = send_lmcache_request(
+                self.mq_client,
+                RequestType.QUERY_PREFETCH_STATUS_WITH_REQ_ID,
+                [request_id],
+            ).result(timeout=self._mq_timeout)
+            assert result is not None
+            if result is not None:
+                break
+            time.sleep(0.005)
+
         assert op.token_ids is not None
         key = self._create_key(op.token_ids, op.start, op.end, request_id=request_id)
         future = send_lmcache_request(
@@ -802,6 +882,9 @@ class LMCacheMPWorkerAdapter:
         """
         for request_id, op in zip(request_ids, ops, strict=False):
             self.submit_retrieve_request(request_id, op, event)
+        for request_id, (r_future, _) in self.retrieve_futures.items():
+            r_future.result()
+        self.retrieve_futures.clear()
 
     def _process_finished_stores(
         self,

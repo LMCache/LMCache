@@ -27,8 +27,10 @@ REQUEST_NAMES = [
     "STORE",
     "RETRIEVE",
     "LOOKUP",
+    "SYNC_LOOKUP",
     "QUERY_PREFETCH_STATUS",
     "QUERY_PREFETCH_LOOKUP_HITS",
+    "QUERY_PREFETCH_STATUS_WITH_REQ_ID",
     "FREE_LOOKUP_LOCKS",
     "END_SESSION",
 ]
@@ -104,6 +106,17 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
             response_class=int,
             handler_type=HandlerType.BLOCKING,
         ),
+        # Synchronous lookup (L1 + L2 existence check in a single blocking call)
+        # Payload:
+        #   - key: KeyType - Cache key to look up
+        #   - tp_size: int - Tensor-parallel size for
+        #       MLA multi-reader locking
+        # Returns: int - Number of matched chunks (prefix hit count)
+        "SYNC_LOOKUP": ProtocolDefinition(
+            payload_classes=[KeyType, int],
+            response_class=int,
+            handler_type=HandlerType.BLOCKING,
+        ),
         # Query the lookup hit chunks before the prefetch is done
         # Payload:
         #   - prefetch_job_id: int - Job ID returned by LOOKUP
@@ -132,6 +145,19 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
         "FREE_LOOKUP_LOCKS": ProtocolDefinition(
             payload_classes=[KeyType, int],
             response_class=None,
+            handler_type=HandlerType.BLOCKING,
+        ),
+        # Query prefetch status by request_id (instead of job_id).
+        # Same semantics as QUERY_PREFETCH_STATUS but keyed by the
+        # external request_id, for use by the worker adapter which
+        # does not have the server-internal job_id.
+        # Payload:
+        #   - request_id: str - The external request ID
+        # Returns: int | None - Chunk count when done, None if still
+        #   in progress or no SYNC_LOOKUP was issued
+        "QUERY_PREFETCH_STATUS_WITH_REQ_ID": ProtocolDefinition(
+            payload_classes=[str],
+            response_class=int | None,
             handler_type=HandlerType.BLOCKING,
         ),
         # End session

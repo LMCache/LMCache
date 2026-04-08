@@ -414,12 +414,17 @@ class StorageManager:
     def query_prefetch_status(
         self,
         handle: PrefetchHandle,
+        *,
+        pop: bool = True,
     ) -> int | None:
         """
         Query the status of the prefetch task.
 
         Args:
             handle (PrefetchHandle): The handle of the prefetch task.
+            pop: If True (default), consume the result from the prefetch
+                controller (exactly-once semantics).  If False, peek
+                without consuming — the result stays for later cleanup.
 
         Returns:
             the number of prefix hit chunks if the prefetch is done, None if
@@ -430,7 +435,7 @@ class StorageManager:
         # Have L2 request, need to check the result from prefetch controller
         if handle.prefetch_request_id != -1:
             l2_r = self._prefetch_controller.query_prefetch_result(
-                handle.prefetch_request_id
+                handle.prefetch_request_id, pop=pop
             )
 
             if l2_r is None:
