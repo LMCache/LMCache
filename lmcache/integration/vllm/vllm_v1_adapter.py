@@ -1985,6 +1985,20 @@ class LMCacheConnectorV1Impl:
         request: "Request",
         block_ids: tuple[list[int], ...],
     ) -> tuple[bool, Optional[dict[str, Any]]]:
+        """Handle request completion callbacks that report grouped block tables.
+
+        Args:
+            request: The vLLM request that has finished.
+            block_ids: Request block ids grouped by KV cache group.
+
+        Returns:
+            The same completion tuple returned by ``request_finished``.
+
+        Notes:
+            LMCache completion bookkeeping is currently request-centric rather
+            than block-table-centric, so grouped block ids are flattened before
+            delegating to ``request_finished``.
+        """
         # LMCache completion bookkeeping is currently request-centric rather
         # than block-table-centric. Accept the grouped HMA completion callback
         # so the scheduler can keep hybrid KV cache manager enabled, while
