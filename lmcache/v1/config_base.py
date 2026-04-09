@@ -12,7 +12,6 @@ from typing import Any, Callable, Dict, Optional, Protocol, Union
 import ast
 import json
 import os
-import re
 import threading
 import uuid
 
@@ -49,15 +48,41 @@ def _apply_env_converter_safely(config_definitions, name, value):
 
 # Common configuration parsing utilities
 def _parse_local_disk(local_disk) -> Optional[str]:
-    """Parse local disk path configuration"""
-    match local_disk:
-        case None:
-            local_disk_path = None
-        case path if re.match(r"file://(.*)/", path):
-            local_disk_path = path[7:]
-        case _:
-            local_disk_path = local_disk
-    return local_disk_path
+    """Parse local disk path configuration.
+
+    Accepts a single path or comma-separated paths, each optionally
+    prefixed with ``file://``.  Returns a comma-joined string of bare
+    directory paths suitable for ``LocalDiskBackend``.
+
+    Examples::
+
+        "file:///mnt/nvme0/"              -> "/mnt/nvme0/"
+        "/mnt/nvme0/,/mnt/nvme1/"         -> "/mnt/nvme0/,/mnt/nvme1/"
+        "file:///mnt/nvme0/,file:///mnt/nvme1/"
+                                           -> "/mnt/nvme0/,/mnt/nvme1/"
+
+    Args:
+        local_disk: Raw config value — ``None``, a single path, or
+            comma-separated paths.
+
+    Returns:
+        Comma-joined bare directory paths, or ``None`` if disabled.
+    """
+    if local_disk is None:
+        return None
+
+    raw_parts = [p.strip() for p in str(local_disk).split(",") if p.strip()]
+    if not raw_parts:
+        return None
+
+    parsed: list[str] = []
+    for part in raw_parts:
+        if part.startswith("file://"):
+            parsed.append(part[7:])
+        else:
+            parsed.append(part)
+
+    return ",".join(parsed)
 
 
 def _to_int_list(
