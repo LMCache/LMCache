@@ -8,3 +8,8 @@
 - Skip queued / cancel running branch builds: Yes
 
 Heavy test (2 GPUs, Docker-in-Docker, ~45 min) — run on `"mp"`/`"full"` label or dev push, not every PR.
+
+> Builds whose only changes are docs/`*.md`/`LICENSE` auto-pass via the
+> [path filter](../README.md#path-based-skip-auto-pass-on-docs-only-changes).
+> Changes under `.github/` or `.buildkite/` always run. Set
+> `K3_PATH_FILTER_DISABLE=1` to bypass.

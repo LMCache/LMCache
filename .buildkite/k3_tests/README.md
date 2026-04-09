@@ -31,12 +31,38 @@ Each directory has a `BK_WEB_SETUP.md` with the exact settings — env vars, Git
 
    steps:
      - label: ":pipeline: Upload pipeline"
-       command: buildkite-agent pipeline upload .buildkite/k3_tests/<test-name>/pipeline.yml
+       command: bash .buildkite/k3_tests/common_scripts/upload-pipeline.sh .buildkite/k3_tests/<test-name>/pipeline.yml
    ```
    The `agents.queue` must match the queue you created above. This routes the initial upload step to agent-stack-k8s, which checks out the repo and uploads the real pipeline definition. Each subsequent step in `pipeline.yml` also targets the same queue.
 3. `HF_TOKEN` is needed for gated model access (e.g., Llama, Qwen). Set it in the `env` block as shown above, or under **Pipeline Settings → Environment Variables** in the UI — both work
 4. Under **GitHub Settings**, configure trigger filters per the test's `BK_WEB_SETUP.md`
 5. Save — jobs will run on the K8s queue automatically
+
+### Path-based skip (auto-pass on docs-only changes)
+
+Every test's upload step runs `common_scripts/upload-pipeline.sh` instead of
+`buildkite-agent pipeline upload` directly. The wrapper inspects the changed
+files in the build and:
+
+- **Skips** the build (uploads no further steps, exits 0 → green) when *all*
+  changed files match a "trivial" pattern: `*.md`, `LICENSE*`, `NOTICE*`,
+  `.gitignore`, `.gitattributes`, `.editorconfig`, `.mailmap`, `CODEOWNERS`,
+  or anything under `docs/`.
+- **Force-runs** the build when any changed file lives under `.github/` or
+  `.buildkite/` — those PRs are usually fixing CI itself, so we want them
+  tested on the PR rather than after merge.
+- **Runs** the build whenever there is at least one non-trivial file.
+
+Detection:
+- PR builds diff against `origin/${BUILDKITE_PULL_REQUEST_BASE_BRANCH}`
+  (default `main`) using the merge-base.
+- Push builds diff `HEAD~1..HEAD`.
+- If the script can't determine the changed files (shallow clone with no
+  parent, missing base branch, etc.) it falls back to "do not skip".
+
+To bypass the skip and force a full run for one build, set the env var
+`K3_PATH_FILTER_DISABLE=1` in the Buildkite UI ("New Build" → Environment
+Variables) or in the pipeline's env block.
 
 ### Trigger strategy
 
@@ -85,14 +111,16 @@ Set **"Rebuild on PR label change"** to `Yes` for label-triggered pipelines so a
                  - { name: hf-cache, hostPath: { path: /data/huggingface, type: DirectoryOrCreate } }
    ```
 
-4. Write a `buildkite-pipeline.yml` (the upload step for the Buildkite UI):
+4. Write a `buildkite-pipeline.yml` (the upload step for the Buildkite UI).
+   Use `common_scripts/upload-pipeline.sh` so the test gets the path-based
+   skip behavior described above:
    ```yaml
    agents:
      queue: "k8s"
 
    steps:
      - label: ":pipeline: Upload pipeline"
-       command: buildkite-agent pipeline upload .buildkite/k3_tests/<test-name>/pipeline.yml
+       command: bash .buildkite/k3_tests/common_scripts/upload-pipeline.sh .buildkite/k3_tests/<test-name>/pipeline.yml
    ```
 
 5. Write a `BK_WEB_SETUP.md` documenting the Buildkite UI settings for this test (env vars, trigger filters, recommendations). Use an existing test's `BK_WEB_SETUP.md` as a template.
