@@ -136,9 +136,10 @@ class L2AdapterConfigBase(ABC):
         from lmcache.v1.distributed.config import EvictionConfig  # noqa: PLC0415
 
         policy = eviction_dict.get("eviction_policy")
-        if policy not in ("LRU", "noop"):
+        if policy not in ("LRU", "UserLRU", "noop"):
             raise ValueError(
-                f"eviction.eviction_policy must be 'LRU' or 'noop', got {policy!r}"
+                f"eviction.eviction_policy must be 'LRU', 'UserLRU', "
+                f"or 'noop', got {policy!r}"
             )
         return EvictionConfig(
             eviction_policy=policy,

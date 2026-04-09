@@ -5,6 +5,9 @@ from lmcache.v1.distributed.config import EvictionConfig
 from lmcache.v1.distributed.eviction import EvictionPolicy
 from lmcache.v1.distributed.eviction_policy.lru import LRUEvictionPolicy
 from lmcache.v1.distributed.eviction_policy.noop import NoOpEvictionPolicy
+from lmcache.v1.distributed.eviction_policy.user_lru import (
+    UserLRUEvictionPolicy,
+)
 
 
 def CreateEvictionPolicy(eviction_config: EvictionConfig) -> EvictionPolicy:
@@ -19,6 +22,8 @@ def CreateEvictionPolicy(eviction_config: EvictionConfig) -> EvictionPolicy:
     """
     if eviction_config.eviction_policy == "LRU":
         return LRUEvictionPolicy()
+    elif eviction_config.eviction_policy == "UserLRU":
+        return UserLRUEvictionPolicy()
     elif eviction_config.eviction_policy == "noop":
         return NoOpEvictionPolicy()
     else:

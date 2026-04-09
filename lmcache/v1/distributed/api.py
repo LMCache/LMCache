@@ -34,6 +34,9 @@ class ObjectKey:
     kv_rank: int
     """ The rank that uniquely identifies the slice of the KV cache """
 
+    user_id: str = ""
+    """ The user who owns this cache entry (empty = shared/legacy). """
+
     @staticmethod
     def IntHash2Bytes(chunk_hash: int) -> bytes:
         # NOTE: this is only used by tests
@@ -117,6 +120,7 @@ class MemoryLayoutDesc:
 def ipc_key_to_object_keys(
     ipc_key: IPCCacheEngineKey,
     chunk_hashes: list[bytes],
+    user_id: str = "",
 ) -> list[ObjectKey]:
     """
     Convert a single IPCCacheEngineKey and its chunk hashes to a list of ObjectKey.
@@ -127,6 +131,7 @@ def ipc_key_to_object_keys(
     Args:
         ipc_key: The IPC key providing model_name, world_size, and worker_id.
         chunk_hashes: List of chunk hash bytes, one per chunk.
+        user_id: The user who owns this cache entry (empty = shared/legacy).
 
     Returns:
         list[ObjectKey]: The converted list of ObjectKey.
@@ -150,6 +155,7 @@ def ipc_key_to_object_keys(
                         chunk_hash=chunk_hash,
                         model_name=ipc_key.model_name,
                         kv_rank=kv_rank,
+                        user_id=user_id,
                     )
                 )
         else:
@@ -165,6 +171,7 @@ def ipc_key_to_object_keys(
                     chunk_hash=chunk_hash,
                     model_name=ipc_key.model_name,
                     kv_rank=kv_rank,
+                    user_id=user_id,
                 )
             )
 

@@ -68,7 +68,11 @@ class EvictionPolicy:
         pass
 
     @abstractmethod
-    def get_eviction_actions(self, expected_ratio: float) -> list[EvictionAction]:
+    def get_eviction_actions(
+        self,
+        expected_ratio: float,
+        user_id: str | None = None,
+    ) -> list[EvictionAction]:
         """
         Get the eviction actions to evict objects from cache.
 
@@ -78,6 +82,10 @@ class EvictionPolicy:
                 in range [0.0, 1.0]. For example, 0.1 means roughly 10% of
                 keys should be evicted. This is a hint and the policy may
                 return more or fewer keys.
+            user_id (str | None): If set, scope eviction to this user's
+                keys only. If None, evict globally across all keys.
+                Policies that do not support per-user eviction ignore
+                this parameter.
 
         Returns:
             list[EvictionAction]: The eviction actions to perform. Each

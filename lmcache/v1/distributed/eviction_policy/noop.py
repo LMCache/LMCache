@@ -38,5 +38,9 @@ class NoOpEvictionPolicy(EvictionPolicy):
     def on_keys_removed(self, keys: list[ObjectKey]):
         pass
 
-    def get_eviction_actions(self, expected_ratio: float) -> list[EvictionAction]:
+    def get_eviction_actions(
+        self,
+        expected_ratio: float,
+        user_id: str | None = None,
+    ) -> list[EvictionAction]:
         return []

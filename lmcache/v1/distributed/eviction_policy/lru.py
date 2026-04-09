@@ -118,7 +118,11 @@ class LRUEvictionPolicy(EvictionPolicy):
                 if key in self._order:
                     del self._order[key]
 
-    def get_eviction_actions(self, expected_ratio: float) -> list[EvictionAction]:
+    def get_eviction_actions(
+        self,
+        expected_ratio: float,
+        user_id: str | None = None,
+    ) -> list[EvictionAction]:
         """
         Get the eviction actions to evict objects from L1 cache.
         Returns keys in LRU order (least recently used first).

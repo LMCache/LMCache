@@ -144,6 +144,9 @@ class IPCCacheEngineKey:
     # === Session tracking (not part of cache identity) ===
     request_id: str = field(compare=False)
 
+    # === Per-user identity (participates in equality/hash) ===
+    user_id: str = ""
+
     # Helper function for unit tests only
     @classmethod
     def from_token_ids(
@@ -155,6 +158,7 @@ class IPCCacheEngineKey:
         start: int = 0,
         end: int = 0,
         request_id: str = "",
+        user_id: str = "",
     ) -> "IPCCacheEngineKey":
         """Create a key from token ids. Only used by the tests."""
         return cls(
@@ -165,6 +169,7 @@ class IPCCacheEngineKey:
             start=start,
             end=end,
             request_id=request_id,
+            user_id=user_id,
         )
 
     def no_worker_id_version(self) -> "IPCCacheEngineKey":
@@ -177,6 +182,7 @@ class IPCCacheEngineKey:
             start=self.start,
             end=self.end,
             request_id=self.request_id,
+            user_id=self.user_id,
         )
 
 
