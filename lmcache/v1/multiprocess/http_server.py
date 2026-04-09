@@ -3,6 +3,7 @@
 from contextlib import asynccontextmanager
 import argparse
 import asyncio
+import sys
 
 # Third Party
 from fastapi import FastAPI, Request
@@ -187,7 +188,14 @@ def run_http_server(
     if hasattr(config, "get_loop_factory"):
         # uvicorn >= 0.36.0
         loop_factory = config.get_loop_factory()
-        asyncio.run(server.serve(), loop_factory=loop_factory)
+        if sys.version_info >= (3, 12):
+            asyncio.run(server.serve(), loop_factory=loop_factory)
+        else:
+            # loop_factory kwarg requires Python 3.12+;
+            # fall back to setting the event loop manually.
+            loop = loop_factory()
+            loop.run_until_complete(server.serve())
+            loop.close()
     else:
         # uvicorn < 0.36.0
         config.setup_event_loop()
