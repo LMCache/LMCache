@@ -265,6 +265,7 @@ class LMCacheMPSchedulerAdapter:
         self,
         request_id: str,
         token_ids: list[int],
+        user_id: str = "",
     ):
         """
         Submit a new lookup request to LMCache if there is no ongoing request.
@@ -277,6 +278,10 @@ class LMCacheMPSchedulerAdapter:
             request_id: The ID of the lookup request. The same ID indicates it's
                 from the same request
             token_ids: Token IDs to lookup from LMCache
+            user_id: The user ID for per-user quota tracking.  When non-empty,
+                the server caches it on the session so that subsequent
+                STORE/RETRIEVE from the worker (which has no user_id)
+                inherits the correct identity.
 
         Returns:
             None
@@ -304,6 +309,7 @@ class LMCacheMPSchedulerAdapter:
             start=0,
             end=aligned_end,
             request_id=request_id,
+            user_id=user_id,
         ).no_worker_id_version()
 
         future = send_lmcache_request(
@@ -401,6 +407,7 @@ class LMCacheMPSchedulerAdapter:
         start: int,
         end: int,
         request_id: str,
+        user_id: str = "",
     ) -> None:
         """Release read locks acquired during lookup without a full retrieve.
 
@@ -420,12 +427,17 @@ class LMCacheMPSchedulerAdapter:
             start: Start token index.
             end: End token index.
             request_id: The request ID.
+            user_id: The user ID for per-user quota tracking.
         """
         if not self.is_healthy:
             return
 
         key = self._create_key(
-            token_ids, start=start, end=end, request_id=request_id
+            token_ids,
+            start=start,
+            end=end,
+            request_id=request_id,
+            user_id=user_id,
         ).no_worker_id_version()
         send_lmcache_request(
             self.mq_client,
@@ -477,8 +489,21 @@ class LMCacheMPSchedulerAdapter:
         start: int,
         end: int,
         request_id: str,
+        user_id: str = "",
     ) -> IPCCacheEngineKey:
-        """Convert token IDs to an IPC cache engine key"""
+        """Convert token IDs to an IPC cache engine key.
+
+        Args:
+            token_ids: The token IDs for the cache key.
+            start: Start token index.
+            end: End token index.
+            request_id: The request ID (session tracking, not cache identity).
+            user_id: The user ID for per-user quota tracking.
+                Part of cache identity so different users get separate keys.
+
+        Returns:
+            An IPCCacheEngineKey with worker_id=None (scheduler side).
+        """
         # NOTE: for the scheduler adapter, we don't have a worker id,
         # so we set it to None in the key.
         return IPCCacheEngineKey(
@@ -489,6 +514,7 @@ class LMCacheMPSchedulerAdapter:
             start=start,
             end=end,
             request_id=request_id,
+            user_id=user_id,
         )
 
 

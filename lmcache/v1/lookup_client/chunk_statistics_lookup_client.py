@@ -119,12 +119,14 @@ class ChunkStatisticsLookupClient(LookupClientInterface):
         token_ids: Union[torch.Tensor, list[int]],
         lookup_id: str,
         request_configs: Optional[dict] = None,
+        user_id: str = "",
     ) -> Optional[int]:
         start_time = time.time()
         result = self.actual_lookup_client.lookup(
             token_ids,
             lookup_id,
             request_configs,
+            user_id=user_id,
         )
         lookup_elapsed = time.time() - start_time
         with self.lock:

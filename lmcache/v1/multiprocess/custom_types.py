@@ -144,7 +144,8 @@ class IPCCacheEngineKey:
     # === Session tracking (not part of cache identity) ===
     request_id: str = field(compare=False)
 
-    # === Per-user identity (participates in equality/hash) ===
+    # === Per-user quota identity (participates in equality/hash) ===
+    # Placed after request_id to preserve msgspec wire compatibility.
     user_id: str = ""
 
     # Helper function for unit tests only

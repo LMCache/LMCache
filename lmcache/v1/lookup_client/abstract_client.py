@@ -30,6 +30,7 @@ class LookupClientInterface(metaclass=abc.ABCMeta):
         token_ids: Union[torch.Tensor, list[int]],
         lookup_id: str,
         request_configs: Optional[dict] = None,
+        user_id: str = "",
     ) -> Optional[int]:
         """
         Perform lookup for the given token IDs.
@@ -46,6 +47,10 @@ class LookupClientInterface(metaclass=abc.ABCMeta):
 
             request_configs: The configs of the request,
             includes tags and the other configs
+
+            user_id: The user ID for per-user quota tracking.
+                Forwarded to the server so per-user keys are
+                scoped correctly.
 
         Returns:
             The number of tokens that exist inside LMCache.
