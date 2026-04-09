@@ -102,6 +102,20 @@ def extract_request_configs(sampling_params: SamplingParams) -> Optional[dict]:
     return request_configs
 
 
+def _compute_group_block_sizes(
+    num_groups: int,
+    fallback_block_size: int,
+    kv_cache_groups: Optional[list[Any]] = None,
+) -> tuple[int, ...]:
+    group_block_sizes: list[int] = []
+    for gid in range(num_groups):
+        group_block_size = fallback_block_size
+        if kv_cache_groups is not None and gid < len(kv_cache_groups):
+            group_block_size = kv_cache_groups[gid].kv_cache_spec.block_size
+        group_block_sizes.append(group_block_size)
+    return tuple(group_block_sizes)
+
+
 @dataclass
 class RequestTracker:
     # Request id
@@ -160,12 +174,24 @@ class RequestTracker:
 
     @property
     def allocated_block_ids(self) -> list[int]:
+        """Return the first KV group's blocks for legacy single-group callers.
+
+        Returns:
+            The block ids tracked for KV group 0, or an empty list when no
+            blocks have been allocated yet.
+        """
         if not self.allocated_block_ids_by_group:
             return []
         return self.allocated_block_ids_by_group[0]
 
     @property
     def num_allocated_blocks(self) -> int:
+        """Return the maximum allocated block count across all KV groups.
+
+        Returns:
+            The largest block count among all tracked KV groups, or 0 when the
+            request has not allocated any blocks yet.
+        """
         if not self.allocated_block_ids_by_group:
             return 0
         return max(len(group) for group in self.allocated_block_ids_by_group)
@@ -327,13 +353,11 @@ class ReqMeta:
         fallback_block_size: int,
         kv_cache_groups: Optional[list[Any]] = None,
     ) -> tuple[int, ...]:
-        group_block_sizes: list[int] = []
-        for gid in range(num_groups):
-            group_block_size = fallback_block_size
-            if kv_cache_groups is not None and gid < len(kv_cache_groups):
-                group_block_size = kv_cache_groups[gid].kv_cache_spec.block_size
-            group_block_sizes.append(group_block_size)
-        return tuple(group_block_sizes)
+        return _compute_group_block_sizes(
+            num_groups=num_groups,
+            fallback_block_size=fallback_block_size,
+            kv_cache_groups=kv_cache_groups,
+        )
 
     @staticmethod
     def from_request_tracker(
@@ -613,14 +637,11 @@ class LMCacheConnectorV1Impl:
         kv_cache_groups = getattr(self.kv_cache_config, "kv_cache_groups", [])
         if num_groups is None:
             num_groups = len(kv_cache_groups)
-
-        group_block_sizes: list[int] = []
-        for gid in range(num_groups):
-            group_block_size = self._block_size
-            if gid < len(kv_cache_groups):
-                group_block_size = kv_cache_groups[gid].kv_cache_spec.block_size
-            group_block_sizes.append(group_block_size)
-        return tuple(group_block_sizes)
+        return _compute_group_block_sizes(
+            num_groups=num_groups,
+            fallback_block_size=self._block_size,
+            kv_cache_groups=kv_cache_groups,
+        )
 
     def _get_max_token_slots(
         self, block_ids_by_group: tuple[list[int], ...]

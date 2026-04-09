@@ -6,6 +6,8 @@ import os
 import shutil
 import tempfile
 import threading
+import time
+from typing import Callable
 
 # Third Party
 import pytest
@@ -78,6 +80,24 @@ def create_test_key(key_id: int = 0) -> CacheEngineKey:
         chunk_hash=hash(key_id),
         dtype=torch.bfloat16,
     )
+
+
+def wait_for_metadata(
+    meta_path: str,
+    predicate: Callable[[dict[str, object]], bool],
+    timeout_s: float = 2.0,
+) -> dict[str, object]:
+    """Poll a metadata sidecar until it matches the expected state."""
+    deadline = time.time() + timeout_s
+    last_payload = None
+    while time.time() < deadline:
+        with open(meta_path, "r", encoding="utf-8") as f:
+            last_payload = json.load(f)
+        if predicate(last_payload):
+            return last_payload
+        time.sleep(0.01)
+
+    pytest.fail(f"Timed out waiting for metadata update in {meta_path}: {last_payload}")
 
 
 @pytest.fixture
@@ -283,6 +303,30 @@ class TestLocalDiskBackend:
 
         local_cpu_backend.memory_allocator.close()
 
+    def test_touch_cache_persists_hit_metadata(self, local_disk_backend):
+        """Pinned cache hits should eventually flush updated access metadata."""
+        key = create_test_key(30)
+        local_disk_backend.insert_key(
+            key,
+            size=16,
+            shape=torch.Size([16]),
+            dtype=torch.uint8,
+            fmt=MemoryFormat.BINARY,
+        )
+
+        meta_path = local_disk_backend._key_to_meta_path(key)
+        with open(meta_path, "r", encoding="utf-8") as f:
+            initial_payload = json.load(f)
+
+        assert local_disk_backend.contains(key, pin=True)
+        local_disk_backend.touch_cache()
+
+        updated_payload = wait_for_metadata(
+            meta_path,
+            lambda payload: payload["hit_count"] == 2,
+        )
+        assert updated_payload["last_access_ts"] >= initial_payload["last_access_ts"]
+
     def test_init_multi_path(self, async_loop, local_cpu_backend):
         """Comma-separated disk paths should remain supported."""
         dir_a = tempfile.mkdtemp()
@@ -301,7 +345,6 @@ class TestLocalDiskBackend:
             assert os.path.isdir(dir_a)
             assert os.path.isdir(dir_b)
             assert isinstance(backend.os_disk_bs, int)
-
         finally:
             shutil.rmtree(dir_a, ignore_errors=True)
             shutil.rmtree(dir_b, ignore_errors=True)
@@ -328,7 +371,6 @@ class TestLocalDiskBackend:
 
             assert backend0.path == dir_a
             assert backend1.path == dir_b
-
         finally:
             shutil.rmtree(dir_a, ignore_errors=True)
             shutil.rmtree(dir_b, ignore_errors=True)

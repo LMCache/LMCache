@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from concurrent.futures import Future
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Callable, List, Optional, Sequence
 import asyncio
 import json
@@ -39,6 +40,50 @@ if TYPE_CHECKING:
     from lmcache.v1.cache_controller.worker import LMCacheWorker
 
 logger = init_logger(__name__)
+
+
+def _build_disk_cache_metadata(
+    path: str,
+    size: int,
+    shape: Optional[torch.Size],
+    dtype: Optional[torch.dtype],
+    fmt: Optional[MemoryFormat],
+    cached_positions: Optional[torch.Tensor],
+    shapes: Optional[list[torch.Size]],
+    dtypes: Optional[list[torch.dtype]],
+    *,
+    created_ts: float,
+    last_access_ts: float,
+    hit_count: int,
+) -> DiskCacheMetadata:
+    return DiskCacheMetadata(
+        path=path,
+        size=size,
+        shape=shape,
+        dtype=dtype,
+        cached_positions=cached_positions,
+        fmt=fmt,
+        pin_count=0,
+        shapes=shapes,
+        dtypes=dtypes,
+        created_ts=created_ts,
+        last_access_ts=last_access_ts,
+        hit_count=max(1, int(hit_count or 1)),
+    )
+
+
+def _clone_disk_cache_metadata(metadata: DiskCacheMetadata) -> DiskCacheMetadata:
+    return replace(metadata)
+
+
+def _has_same_persisted_state(
+    current: DiskCacheMetadata, snapshot: DiskCacheMetadata
+) -> bool:
+    return (
+        current.created_ts == snapshot.created_ts
+        and current.last_access_ts == snapshot.last_access_ts
+        and current.hit_count == snapshot.hit_count
+    )
 
 
 # TODO(Jiayi): handle cases where cache is repetitvely prefetched.
@@ -253,46 +298,6 @@ class LocalDiskBackend(StorageBackendInterface):
             "hit_count": metadata.hit_count,
         }
 
-    def _write_metadata_sidecar(
-        self,
-        key: CacheEngineKey,
-        path: str,
-        size: int,
-        shape: Optional[torch.Size],
-        dtype: Optional[torch.dtype],
-        fmt: Optional[MemoryFormat],
-        cached_positions: Optional[torch.Tensor],
-        shapes: Optional[list[torch.Size]],
-        dtypes: Optional[list[torch.dtype]],
-        *,
-        created_ts: float,
-        last_access_ts: float,
-        hit_count: int,
-    ) -> None:
-        meta_path = self._meta_path_from_data_path(path)
-        payload = self._serialize_disk_metadata(
-            key,
-            DiskCacheMetadata(
-                path=path,
-                size=size,
-                shape=shape,
-                dtype=dtype,
-                cached_positions=cached_positions,
-                fmt=fmt,
-                pin_count=0,
-                shapes=shapes,
-                dtypes=dtypes,
-                created_ts=created_ts,
-                last_access_ts=last_access_ts,
-                hit_count=hit_count,
-            ),
-        )
-
-        tmp_meta_path = meta_path + ".tmp"
-        with open(tmp_meta_path, "w", encoding="utf-8") as f:
-            json.dump(payload, f, ensure_ascii=False)
-        os.replace(tmp_meta_path, meta_path)
-
     def _persist_sidecar_for_metadata(
         self,
         key: CacheEngineKey,
@@ -308,26 +313,23 @@ class LocalDiskBackend(StorageBackendInterface):
     def _record_hit_locked(
         self,
         key: CacheEngineKey,
-        *,
-        persist: bool = True,
-    ) -> None:
+    ) -> DiskCacheMetadata:
         metadata = self.dict[key]
         metadata.hit_count = max(1, int(metadata.hit_count or 1)) + 1
         metadata.last_access_ts = time.time()
         self.cache_policy.update_on_hit(key, self.dict)
-        if persist:
-            self._persist_sidecar_for_metadata(key, metadata)
+        return _clone_disk_cache_metadata(metadata)
 
     def _recover_persisted_index(self) -> None:
         recovered = 0
         total_bytes = 0
         recovered_entries: list[tuple[CacheEngineKey, DiskCacheMetadata]] = []
 
-        for entry in os.listdir(self.path):
-            if not entry.endswith(".meta.json"):
+        for entry in os.scandir(self.path):
+            if not entry.name.endswith(".meta.json"):
                 continue
 
-            meta_path = os.path.join(self.path, entry)
+            meta_path = entry.path
             try:
                 with open(meta_path, "r", encoding="utf-8") as f:
                     payload = json.load(f)
@@ -427,10 +429,13 @@ class LocalDiskBackend(StorageBackendInterface):
 
     def touch_cache(self):
         # flip the order of the keys in the request
+        metadata_snapshots: list[tuple[CacheEngineKey, DiskCacheMetadata]] = []
         with self.disk_lock:
             for key in reversed(self.keys_in_request):
-                self._record_hit_locked(key)
+                metadata_snapshots.append((key, self._record_hit_locked(key)))
             self.keys_in_request = []
+        for key, metadata in metadata_snapshots:
+            self._submit_metadata_persist(key, metadata)
 
     def exists_in_put_tasks(self, key: CacheEngineKey) -> bool:
         return self.disk_worker.exists_in_put_tasks(key)
@@ -523,28 +528,34 @@ class LocalDiskBackend(StorageBackendInterface):
         )
 
         has_stored = False
+        metadata_to_persist: Optional[DiskCacheMetadata] = None
         with self.disk_lock:
             if key in self.dict:
                 # Update cache recency
-                self._record_hit_locked(key)
+                metadata_to_persist = self._record_hit_locked(key)
                 has_stored = True
             else:
-                self.dict[key] = DiskCacheMetadata(
+                self.dict[key] = _build_disk_cache_metadata(
                     path=path,
                     size=size,
                     shape=shape,
                     dtype=dtype,
-                    cached_positions=cached_positions,
                     fmt=fmt,
-                    pin_count=0,
+                    cached_positions=cached_positions,
                     shapes=shapes,
                     dtypes=dtypes,
                     created_ts=created_at,
                     last_access_ts=last_access_at,
-                    hit_count=max(1, int(hit_count or 1)),
+                    hit_count=hit_count,
                 )
                 if persist_sidecar:
-                    self._persist_sidecar_for_metadata(key, self.dict[key])
+                    metadata_to_persist = _clone_disk_cache_metadata(self.dict[key])
+
+        if metadata_to_persist is not None and persist_sidecar:
+            if has_stored:
+                self._submit_metadata_persist(key, metadata_to_persist)
+            else:
+                self._persist_sidecar_for_metadata(key, metadata_to_persist)
 
         # Push kv admit msg with batching
         if self.batched_msg_sender is not None and not has_stored:
@@ -653,7 +664,7 @@ class LocalDiskBackend(StorageBackendInterface):
             return None
 
         # Update cache recency
-        self._record_hit_locked(key)
+        metadata_to_persist = self._record_hit_locked(key)
 
         disk_meta = self.dict[key]
         path = disk_meta.path
@@ -666,6 +677,7 @@ class LocalDiskBackend(StorageBackendInterface):
         assert shape is not None
 
         self.disk_lock.release()
+        self._submit_metadata_persist(key, metadata_to_persist)
         memory_obj = self.load_bytes_from_disk(
             key,
             path,
@@ -725,9 +737,10 @@ class LocalDiskBackend(StorageBackendInterface):
 
             # NOTE(Jiayi): Currently, we consider prefetch as cache hit.
             # Update cache recency
-            self._record_hit_locked(key)
+            metadata_to_persist = self._record_hit_locked(key)
 
             self.disk_lock.release()
+            self._submit_metadata_persist(key, metadata_to_persist)
             logger.debug(f"Prefetching {key} from disk.")
             memory_obj.pin()
             mem_objs.append(memory_obj)
@@ -801,21 +814,6 @@ class LocalDiskBackend(StorageBackendInterface):
         last_access_at = created_at
         initial_hit_count = 1
 
-        self._write_metadata_sidecar(
-            key=key,
-            path=path,
-            size=size,
-            shape=shape,
-            dtype=dtype,
-            fmt=fmt,
-            cached_positions=cached_positions,
-            shapes=shapes,
-            dtypes=dtypes,
-            created_ts=created_at,
-            last_access_ts=last_access_at,
-            hit_count=initial_hit_count,
-        )
-
         self.insert_key(
             key,
             size,
@@ -828,7 +826,7 @@ class LocalDiskBackend(StorageBackendInterface):
             created_ts=created_at,
             last_access_ts=last_access_at,
             hit_count=initial_hit_count,
-            persist_sidecar=False,
+            persist_sidecar=True,
         )
 
         self.disk_worker.remove_put_task(key)
@@ -959,3 +957,25 @@ class LocalDiskBackend(StorageBackendInterface):
         if self.batched_msg_sender is not None:
             self.batched_msg_sender.close()
         self.disk_worker.close()
+
+    def _persist_metadata_snapshot_if_current(
+        self,
+        key: CacheEngineKey,
+        metadata_snapshot: DiskCacheMetadata,
+    ) -> None:
+        with self.disk_lock:
+            current_metadata = self.dict.get(key)
+            if current_metadata is None:
+                return
+            if not _has_same_persisted_state(current_metadata, metadata_snapshot):
+                return
+            latest_metadata = _clone_disk_cache_metadata(current_metadata)
+
+        self._persist_sidecar_for_metadata(key, latest_metadata)
+
+    def _submit_metadata_persist(
+        self,
+        key: CacheEngineKey,
+        metadata_snapshot: DiskCacheMetadata,
+    ) -> None:
+        self._persist_metadata_snapshot_if_current(key, metadata_snapshot)

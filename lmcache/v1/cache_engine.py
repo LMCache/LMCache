@@ -1779,9 +1779,11 @@ class LMCacheEngine:
         Convert slot_mapping to list if it's a tensor, otherwise return as is.
 
         :param slot_mapping: The slot_mapping to convert,
-            can be a torch.Tensor or List[int], or None
-        :type slot_mapping: Optional[Union[torch.Tensor, List[int]]]
-        :return: The slot_mapping as a List[int], or None if input is None
+            can be a torch.Tensor, List[int], Dict[str, torch.Tensor], or None.
+            Dict inputs use the first mapping value for backward compatibility.
+        :type slot_mapping: Optional[Union[torch.Tensor, List[int], Dict[str, torch.Tensor]]]
+        :return: The slot_mapping as a List[int], or None if input is None or an
+            empty dict.
         :rtype: Optional[List[int]]
         """
         if slot_mapping is None:
