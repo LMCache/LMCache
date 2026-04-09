@@ -198,6 +198,7 @@ class GdsBackend(AllocatorBackendInterface):
             if ":" in dst_device
             else torch.cuda.current_device()
         )
+        self.device_id = device_id
 
         assert config.gds_path is not None, "Need to specify gds_path for GdsBackend"
 
@@ -931,6 +932,7 @@ class GdsBackend(AllocatorBackendInterface):
         base_pointer: int,
         device_offset: int,
     ):
+        self._set_device()
         if base_pointer is None:
             addr = ctypes.c_void_p(kv_chunk.data_ptr())
             dev_offset = 0
@@ -994,7 +996,8 @@ class GdsBackend(AllocatorBackendInterface):
         size_in_bytes: int,
         dev_offset: int,
     ) -> int:
-        """Read data from disk into a GPU buffer"""
+        """Read data from disk into a GPU buffer."""
+        self._set_device()
         try:
             if self.cufile:
                 with self.cufile.CuFile(
@@ -1183,6 +1186,15 @@ class GdsBackend(AllocatorBackendInterface):
 
     def get_memory_allocator(self):
         return self.memory_allocator
+
+    def _set_device(self) -> None:
+        """Ensure the correct HIP/CUDA device is active in this thread.
+
+        ``asyncio.to_thread()`` dispatches to a pool thread whose default
+        device may differ from the worker's assigned GPU, causing GDS
+        reads/writes to fail with a device mismatch error.
+        """
+        torch.cuda.set_device(self.device_id)
 
     def close(self) -> None:
         # Wait for initial metadata scan to complete
