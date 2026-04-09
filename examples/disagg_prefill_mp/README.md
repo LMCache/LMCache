@@ -20,7 +20,7 @@ Launch the following in 4 different terminal windows
 
 ```bash
 # LMCache multi-process server
-python3 -m lmcache.v1.multiprocess.server --l1-size-gb 100 --eviction-policy LRU
+lmcache server --l1-size-gb 100 --eviction-policy LRU
 # Prefill instance, enforce_eager for faster startup
 LMCACHE_REQUEST_TELEMETRY_TYPE=fastapi LMCACHE_REQUEST_TELEMETRY_ENDPOINT=http://localhost:5768/api/v1/telemetry vllm serve Qwen/Qwen3-14B --kv-transfer-config '{"kv_connector":"LMCacheMPConnector", "kv_role":"kv_both"}' --gpu-memory-utilization 0.7 --no-enable-prefix-caching --enforce-eager --port 8100
 # Decode instance, enforce_eager for faster startup

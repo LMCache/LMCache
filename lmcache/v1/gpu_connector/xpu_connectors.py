@@ -44,8 +44,6 @@ class VLLMPagedMemXPUConnectorV2(GPUConnectorInterface):
 
     def __init__(
         self,
-        hidden_dim_size: int,
-        num_layers: int,
         use_gpu: bool = False,
         **kwargs,
     ):
@@ -102,17 +100,7 @@ class VLLMPagedMemXPUConnectorV2(GPUConnectorInterface):
         Returns:
             A new instance of VLLMPagedMemXPUConnectorV2.
         """
-        # Extract parameters from metadata
-        # kv_shape: (num_layer, 2 or 1, chunk_size, num_kv_head, head_size)
-        num_layers = metadata.kv_shape[0]
-        chunk_size = metadata.kv_shape[2]
-        num_kv_head = metadata.kv_shape[3]
-        head_size = metadata.kv_shape[4]
-        hidden_dim_size = num_kv_head * head_size
-
         return cls(
-            hidden_dim_size=hidden_dim_size,
-            num_layers=num_layers,
             use_gpu=use_gpu,
             chunk_size=chunk_size,
             dtype=metadata.kv_dtype,
@@ -208,7 +196,8 @@ class VLLMPagedMemXPUConnectorV2(GPUConnectorInterface):
         """Expect a kwarg 'kvcaches' which is a nested tuple of K and V tensors.
         The kvcaches should correspond to the "WHOLE token sequence".
 
-        Will set the memory_obj.metadata.fmt to MemoryFormat.KV_2LTD.
+        Will set the memory_obj.metadata.fmt to MemoryFormat.KV_MLA_FMT
+        if use_mla is True.
 
         Note:
           1. This function expects the 'slot_mapping' is a "full slot mapping"

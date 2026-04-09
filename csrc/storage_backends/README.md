@@ -49,7 +49,7 @@ Therefore the framework enforces:
 |------|---------|
 | `connector_types.h` | `Request`, `Completion`, `BatchState`, `Op` |
 | `connector_interface.h` | `IStorageConnector` — top-level abstract interface |
-| `connector_base.h` | `ConnectorBase<T>` — core harness (eventfd, SQ/CQ, threading, tiling). Override 4 methods per backend |
+| `connector_base.h` | `ConnectorBase<T>` — core harness (eventfd, SQ/CQ, threading, tiling). Override 4 required + 1 optional method per backend |
 | `connector_pybind_utils.h` | Pybind utilities with GIL release + `LMCACHE_BIND_CONNECTOR_METHODS` macro |
 | `redis/` | Reference implementation (RESP2 protocol over TCP) |
 
@@ -61,8 +61,8 @@ each step.
 ### Step 1: C++ connector — inherit from ConnectorBase
 
 Create your connector directory (e.g., `csrc/storage_backends/mybackend/`)
-and inherit from `ConnectorBase<YourConnectionType>`. You only need to
-override 4 methods:
+and inherit from `ConnectorBase<YourConnectionType>`. You need to
+override 4 required methods (and optionally `do_single_delete` for eviction):
 
 ```cpp
 // csrc/storage_backends/mybackend/connector.h
@@ -103,6 +103,11 @@ class MyConnector : public lmcache::connector::ConnectorBase<MyConn> {
   // 4. EXISTS: check if key exists
   bool do_single_exists(MyConn& conn, const std::string& key) override {
     // send EXISTS, return true/false
+  }
+
+  // Optional: delete a key (enables eviction support)
+  bool do_single_delete(MyConn& conn, const std::string& key) override {
+    // send DELETE, return true if deleted, false if not found
   }
 
   // Optional: clean shutdown of connections
@@ -275,7 +280,7 @@ Python eventfd.
 
 ## Checklist for a new backend
 
-- [ ] C++ connector inheriting `ConnectorBase<T>` with 4 method overrides
+- [ ] C++ connector inheriting `ConnectorBase<T>` with 4 required + 1 optional (`do_single_delete`) method overrides
 - [ ] Pybind module using `LMCACHE_BIND_CONNECTOR_METHODS`
 - [ ] `setup.py` entry for the new `CppExtension`
 - [ ] Python client inheriting `ConnectorClientBase` (non-MP mode)

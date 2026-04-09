@@ -35,6 +35,8 @@ from lmcache.v1.distributed.storage_controllers.store_policy import (
     AdapterDescriptor,
 )
 from lmcache.v1.memory_management import MemoryObj
+from lmcache.v1.mp_observability.event import Event, EventType
+from lmcache.v1.mp_observability.event_bus import get_event_bus
 
 logger = init_logger(__name__)
 
@@ -193,14 +195,10 @@ class PrefetchController(StorageControllerInterface):
         policy: PrefetchPolicy,
         max_in_flight: int = 8,
     ) -> None:
-        super().__init__(l1_manager)
+        self._l1_manager = l1_manager
         self._l2_adapters = l2_adapters
         self._adapter_descriptors = adapter_descriptors
         self._policy = policy
-        # TODO(ApostaC): max_in_flight should not be a static constant.
-        # Replace with a dynamic admission controller that monitors L1 memory
-        # usage of in-flight prefetch requests. A fixed limit can still blow
-        # up L1 memory when individual requests are large.
         self._max_in_flight = max_in_flight
 
         # In-flight request tracking (background thread only)
@@ -240,6 +238,8 @@ class PrefetchController(StorageControllerInterface):
         for i, adapter in enumerate(self._l2_adapters):
             self._lookup_efd_to_adapter[adapter.get_lookup_and_lock_event_fd()] = i
             self._load_efd_to_adapter[adapter.get_load_event_fd()] = i
+
+        self._event_bus = get_event_bus()
 
         self._stop_flag = threading.Event()
         self._thread = threading.Thread(
@@ -487,6 +487,17 @@ class PrefetchController(StorageControllerInterface):
         self._status_in_flight_count += 1
         self._status_lookup_phase_count += 1
 
+        self._event_bus.publish(
+            Event(
+                event_type=EventType.L2_PREFETCH_LOOKUP_SUBMITTED,
+                metadata={
+                    "request_id": request_id,
+                    "key_count": len(keys),
+                    "adapter_count": len(pending_lookup_tasks),
+                },
+            )
+        )
+
     def _process_lookup_completions(self, adapter_index: int) -> None:
         """Check all LOOKUP-phase requests for completed lookups from
         this adapter."""
@@ -537,13 +548,22 @@ class PrefetchController(StorageControllerInterface):
             # and complete with 0 hits.
             self._unlock_all_lookups(request)
             self._update_lookup_results(request.request_id, 0)
+            self._event_bus.publish(
+                Event(
+                    event_type=EventType.L2_PREFETCH_LOOKUP_COMPLETED,
+                    metadata={
+                        "request_id": request.request_id,
+                        "prefix_hit_count": 0,
+                    },
+                )
+            )
             self._complete_request(request.request_id, 0)
             return
 
         # Step 3: reserve L1 write buffers
         merged_bitmap = merge_bitmaps(trimmed_plan.values(), len(request.keys))
         keys_to_reserve = merged_bitmap.gather(request.keys)
-        l1_mgr = self.get_l1_manager()
+        l1_mgr = self._l1_manager
 
         write_results = l1_mgr.reserve_write(
             keys=keys_to_reserve,
@@ -588,6 +608,15 @@ class PrefetchController(StorageControllerInterface):
                 l1_mgr.finish_write(request.write_reserved_keys)
                 l1_mgr.delete(request.write_reserved_keys)
             self._update_lookup_results(request.request_id, 0)
+            self._event_bus.publish(
+                Event(
+                    event_type=EventType.L2_PREFETCH_LOOKUP_COMPLETED,
+                    metadata={
+                        "request_id": request.request_id,
+                        "prefix_hit_count": 0,
+                    },
+                )
+            )
             self._complete_request(request.request_id, 0)
             return
 
@@ -604,6 +633,26 @@ class PrefetchController(StorageControllerInterface):
 
         ## Step 8: update the lookup result based on the final load plan
         self._update_lookup_results(request.request_id, prefix_length)
+
+        self._event_bus.publish(
+            Event(
+                event_type=EventType.L2_PREFETCH_LOOKUP_COMPLETED,
+                metadata={
+                    "request_id": request.request_id,
+                    "prefix_hit_count": prefix_length,
+                },
+            )
+        )
+        self._event_bus.publish(
+            Event(
+                event_type=EventType.L2_PREFETCH_LOAD_SUBMITTED,
+                metadata={
+                    "request_id": request.request_id,
+                    "key_count": len(reserved_key_set),
+                    "adapter_count": len(trimmed_plan),
+                },
+            )
+        )
 
         logger.debug(
             "Prefetch request %d: submitted load tasks to %d adapters for %d keys",
@@ -674,7 +723,7 @@ class PrefetchController(StorageControllerInterface):
         # Phase 2 unlock: release L2 locks for all keys in the load plan
         self._unlock_all_plan_keys(request)
 
-        l1_mgr = self.get_l1_manager()
+        l1_mgr = self._l1_manager
 
         # Transition loaded keys: write-locked -> read-locked
         # Use extra_count so that all TP workers each get their own read lock.
@@ -687,6 +736,17 @@ class PrefetchController(StorageControllerInterface):
         if failed_keys:
             l1_mgr.finish_write(failed_keys)
             l1_mgr.delete(failed_keys)
+
+        self._event_bus.publish(
+            Event(
+                event_type=EventType.L2_PREFETCH_LOAD_COMPLETED,
+                metadata={
+                    "request_id": request.request_id,
+                    "loaded_count": len(loaded_keys),
+                    "failed_count": len(failed_keys),
+                },
+            )
+        )
 
         # Partial load failures can create gaps in the prefix.
         # Release read locks for loaded keys beyond the prefix.
@@ -750,7 +810,7 @@ class PrefetchController(StorageControllerInterface):
 
     def _cleanup_in_flight_requests(self) -> None:
         """Release resources for any in-flight requests during shutdown."""
-        l1_mgr = self.get_l1_manager()
+        l1_mgr = self._l1_manager
         for request in self._in_flight_requests.values():
             if request.phase == PrefetchPhase.PLAN_AND_LOAD:
                 if request.write_reserved_keys:
