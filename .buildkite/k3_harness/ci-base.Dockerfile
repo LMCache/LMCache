@@ -4,7 +4,7 @@
 # Built automatically by setup-cluster.sh and imported into K3s containerd.
 # Rebuild when requirements/*.txt changes.
 
-FROM nvcr.io/nvidia/cuda-dl-base:25.04-cuda12.9-devel-ubuntu24.04
+FROM nvidia/cuda:13.0.2-devel-ubuntu24.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PATH="/opt/venv/bin:${PATH}"
@@ -15,7 +15,8 @@ RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
     && apt-get install -y --no-install-recommends \
         ccache software-properties-common git curl sudo jq lsof \
         python3 python3-dev python3-venv python3-pip tzdata libxcb1-dev \
-    && ldconfig /usr/local/cuda-12.9/compat/ \
+        libcudart12 \
+    && ldconfig \
     && curl -LsSf https://astral.sh/uv/install.sh | sh \
     && mv ~/.local/bin/uv /usr/local/bin/ \
     && mv ~/.local/bin/uvx /usr/local/bin/ \
