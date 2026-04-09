@@ -1,21 +1,22 @@
 #!/usr/bin/env bash
 # Wraps `buildkite-agent pipeline upload` with a path-based skip check.
 #
-# Usage (from a buildkite-pipeline.yml step):
+# Usage (called from each test's pipeline.yml shim):
 #   command: bash .buildkite/k3_tests/common_scripts/upload-pipeline.sh \
-#       .buildkite/k3_tests/<test-name>/pipeline.yml
+#       .buildkite/k3_tests/<test-name>/steps.yml
 #
-# If every changed file in this build is trivial (markdown, LICENSE, etc.) and
-# none touch .github/ or .buildkite/, this script:
+# If every changed file in this build is trivial (markdown, LICENSE, .github,
+# etc.) and none touch .buildkite/, this script:
 #   - Annotates the build with a "skipped" note
 #   - Exits 0 without uploading any further steps → the build is green
-# Otherwise it execs the normal pipeline upload.
+# Otherwise it execs `buildkite-agent pipeline upload <steps.yml>`, adding the
+# real test steps to the build.
 #
 # Set K3_PATH_FILTER_DISABLE=1 in the build environment to bypass the check.
 
 set -euo pipefail
 
-PIPELINE_FILE="${1:?Usage: upload-pipeline.sh <path/to/pipeline.yml>}"
+PIPELINE_FILE="${1:?Usage: upload-pipeline.sh <path/to/steps.yml>}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 # shellcheck source=path-filter.sh

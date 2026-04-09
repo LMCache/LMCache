@@ -5,7 +5,8 @@ Each subdirectory under `k3_tests/` is a self-contained test with these files:
 | File | Purpose |
 |------|---------|
 | `run.sh` | Test script (sources `k3_harness/setup-env.sh`, then runs tests) |
-| `pipeline.yml` | K8s pod spec — GPU count, volumes, timeouts |
+| `pipeline.yml` | Tiny path-filter shim — single step that decides whether to upload `steps.yml` or skip the build |
+| `steps.yml` | The real test steps (K8s pod spec, GPU count, volumes, timeouts) — uploaded by the filter |
 | `buildkite-pipeline.yml` | What to paste into the Buildkite UI "Steps" editor |
 | `BK_WEB_SETUP.md` | Full Buildkite UI setup instructions: env vars, trigger filters, recommendations |
 
@@ -31,18 +32,19 @@ Each directory has a `BK_WEB_SETUP.md` with the exact settings — env vars, Git
 
    steps:
      - label: ":pipeline: Upload pipeline"
-       command: bash .buildkite/k3_tests/common_scripts/upload-pipeline.sh .buildkite/k3_tests/<test-name>/pipeline.yml
+       command: buildkite-agent pipeline upload .buildkite/k3_tests/<test-name>/pipeline.yml
    ```
-   The `agents.queue` must match the queue you created above. This routes the initial upload step to agent-stack-k8s, which checks out the repo and uploads the real pipeline definition. Each subsequent step in `pipeline.yml` also targets the same queue.
+   The `agents.queue` must match the queue you created above. This routes the initial upload step to agent-stack-k8s, which checks out the repo and uploads `pipeline.yml` (which is a tiny shim that runs the path filter and then either skips or uploads the real `steps.yml`). Each subsequent step in `steps.yml` also targets the same queue.
 3. `HF_TOKEN` is needed for gated model access (e.g., Llama, Qwen). Set it in the `env` block as shown above, or under **Pipeline Settings → Environment Variables** in the UI — both work
 4. Under **GitHub Settings**, configure trigger filters per the test's `BK_WEB_SETUP.md`
 5. Save — jobs will run on the K8s queue automatically
 
 ### Path-based skip (auto-pass on docs-only changes)
 
-Every test's upload step runs `common_scripts/upload-pipeline.sh` instead of
-`buildkite-agent pipeline upload` directly. The wrapper inspects the changed
-files in the build and:
+Every test's `pipeline.yml` is a tiny shim that runs a single path-filter
+step before any test pods are spun up. The filter (`common_scripts/path-filter.sh`,
+invoked via `common_scripts/upload-pipeline.sh`) inspects the changed files
+in the build and:
 
 - **Skips** the build (uploads no further steps, exits 0 → green) when *all*
   changed files match a "trivial" pattern: `*.md`, `LICENSE*`, `NOTICE*`,
@@ -53,7 +55,8 @@ files in the build and:
 - **Force-runs** the build when any changed file lives under `.buildkite/` —
   those PRs are usually fixing the k3 CI itself, so we want them tested on
   the PR rather than after merge.
-- **Runs** the build whenever there is at least one non-trivial file.
+- **Runs** the build whenever there is at least one non-trivial file by
+  uploading `steps.yml`, which contains the real test steps.
 
 Detection:
 - PR builds diff against `origin/${BUILDKITE_PULL_REQUEST_BASE_BRANCH}`
@@ -65,6 +68,11 @@ Detection:
 To bypass the skip and force a full run for one build, set the env var
 `K3_PATH_FILTER_DISABLE=1` in the Buildkite UI ("New Build" → Environment
 Variables) or in the pipeline's env block.
+
+> **No UI changes needed when editing the filter.** `pipeline.yml` is fetched
+> fresh from the repo on every build, so changes to the shim,
+> `path-filter.sh`, or `upload-pipeline.sh` take effect on the next push
+> without anyone touching the Buildkite Web UI.
 
 ### Trigger strategy
 
@@ -90,7 +98,7 @@ Set **"Rebuild on PR label change"** to `Yes` for label-triggered pipelines so a
    # ... your test commands ...
    ```
 
-3. Write a `pipeline.yml`. Set the GPU limit to what your test needs:
+3. Write a `steps.yml` containing the real test steps. Set the GPU limit to what your test needs:
    ```yaml
    steps:
      - label: ":test_tube: My Test"
@@ -113,21 +121,27 @@ Set **"Rebuild on PR label change"** to `Yes` for label-triggered pipelines so a
                  - { name: hf-cache, hostPath: { path: /data/huggingface, type: DirectoryOrCreate } }
    ```
 
-4. Write a `buildkite-pipeline.yml` (the upload step for the Buildkite UI).
-   Use `common_scripts/upload-pipeline.sh` so the test gets the path-based
-   skip behavior described above:
+4. Write a `pipeline.yml` shim that runs the path filter and conditionally uploads `steps.yml`. Copy this template verbatim, only changing the `<test-name>`:
+   ```yaml
+   steps:
+     - label: ":mag: Path filter"
+       command: bash .buildkite/k3_tests/common_scripts/upload-pipeline.sh .buildkite/k3_tests/<test-name>/steps.yml
+       agents: { queue: "k8s" }
+   ```
+
+5. Write a `buildkite-pipeline.yml` (the snippet pasted into the Buildkite UI's Steps editor):
    ```yaml
    agents:
      queue: "k8s"
 
    steps:
      - label: ":pipeline: Upload pipeline"
-       command: bash .buildkite/k3_tests/common_scripts/upload-pipeline.sh .buildkite/k3_tests/<test-name>/pipeline.yml
+       command: buildkite-agent pipeline upload .buildkite/k3_tests/<test-name>/pipeline.yml
    ```
 
-5. Write a `BK_WEB_SETUP.md` documenting the Buildkite UI settings for this test (env vars, trigger filters, recommendations). Use an existing test's `BK_WEB_SETUP.md` as a template.
+6. Write a `BK_WEB_SETUP.md` documenting the Buildkite UI settings for this test (env vars, trigger filters, recommendations). Use an existing test's `BK_WEB_SETUP.md` as a template.
 
-6. `chmod +x` your `run.sh` and create the pipeline in the Buildkite UI.
+7. `chmod +x` your `run.sh` and create the pipeline in the Buildkite UI.
 
 ### Optional: datasets volume
 

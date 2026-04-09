@@ -5,7 +5,8 @@
 **GitHub trigger**: `build.pull_request.labels includes "blend" || build.pull_request.labels includes "full" || build.branch == 'dev'` — rebuild on label change: Yes; skip queued / cancel running: Yes.
 
 > Builds whose only changes are docs/`*.md`/`LICENSE`/`.github/**` auto-pass
-> via the [path filter](../README.md#path-based-skip-auto-pass-on-docs-only-changes).
-> Changes under `.buildkite/` always run. Set `K3_PATH_FILTER_DISABLE=1` to
-> bypass.
+> via the [path filter](../README.md#path-based-skip-auto-pass-on-docs-only-changes)
+> baked into `pipeline.yml`. Changes under `.buildkite/` always run. Set
+> `K3_PATH_FILTER_DISABLE=1` to bypass. The filter lives in the repo, not
+> in the Buildkite UI, so editing it never requires re-pasting anything.
  
