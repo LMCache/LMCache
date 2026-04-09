@@ -121,11 +121,12 @@ function renderOverview(data) {
 
     var sm = data.storage_manager || {};
     var l1 = sm.l1_manager || {};
-    var l1Capacity = l1.capacity || 0;
-    var l1Used = l1.used || 0;
-    var l1Pct = l1Capacity > 0
-        ? Math.round((l1Used / l1Capacity) * 100)
+    var l1TotalBytes = l1.memory_total_bytes || 0;
+    var l1UsedBytes = l1.memory_used_bytes || 0;
+    var l1Pct = l1TotalBytes > 0
+        ? Math.round((l1UsedBytes / l1TotalBytes) * 100)
         : 0;
+    var l1Objects = l1.total_object_count || 0;
 
     var barColor = l1Pct > 90
         ? "#dc3545"
@@ -203,7 +204,9 @@ function renderOverview(data) {
     html += l1Pct + "%</div>";
     html += "      </div>";
     html += '      <small class="text-muted mt-1 d-block">';
-    html += l1Used + " / " + l1Capacity + " objects</small>";
+    html += formatBytes(l1UsedBytes) + " / ";
+    html += formatBytes(l1TotalBytes);
+    html += " (" + l1Objects + " objects)</small>";
     html += "    </div>";
     html += "  </div>";
     html += "</div>";
@@ -496,4 +499,17 @@ function escapeHtml(str) {
     var div = document.createElement("div");
     div.appendChild(document.createTextNode(str));
     return div.innerHTML;
+}
+
+function formatBytes(bytes) {
+    if (bytes >= 1073741824) {
+        return (bytes / 1073741824).toFixed(2) + " GB";
+    }
+    if (bytes >= 1048576) {
+        return (bytes / 1048576).toFixed(1) + " MB";
+    }
+    if (bytes >= 1024) {
+        return (bytes / 1024).toFixed(1) + " KB";
+    }
+    return bytes + " B";
 }
