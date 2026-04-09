@@ -47,10 +47,12 @@ files in the build and:
 - **Skips** the build (uploads no further steps, exits 0 → green) when *all*
   changed files match a "trivial" pattern: `*.md`, `LICENSE*`, `NOTICE*`,
   `.gitignore`, `.gitattributes`, `.editorconfig`, `.mailmap`, `CODEOWNERS`,
-  or anything under `docs/`.
-- **Force-runs** the build when any changed file lives under `.github/` or
-  `.buildkite/` — those PRs are usually fixing CI itself, so we want them
-  tested on the PR rather than after merge.
+  or anything under `docs/` or `.github/`. (`.github/` is trivial here
+  because k3 tests run on Buildkite, not GitHub Actions, so workflow /
+  CODEOWNERS / template changes do not affect them.)
+- **Force-runs** the build when any changed file lives under `.buildkite/` —
+  those PRs are usually fixing the k3 CI itself, so we want them tested on
+  the PR rather than after merge.
 - **Runs** the build whenever there is at least one non-trivial file.
 
 Detection:

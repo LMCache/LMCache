@@ -9,11 +9,14 @@
 #   fi
 #
 # Rules:
-#   - If ANY changed file lives under .github/ or .buildkite/, the build runs.
-#     (Those PRs are usually fixing CI itself, so we want to test on the PR
-#     instead of waiting for it to land on main.)
+#   - If ANY changed file lives under .buildkite/, the build runs.
+#     (Those PRs are usually fixing the k3 CI itself, so we want to test on
+#     the PR instead of waiting for it to land on main.)
 #   - Otherwise, if EVERY changed file matches a "trivial" pattern (markdown,
-#     LICENSE, .gitignore, etc.), the build can be skipped.
+#     LICENSE, anything under docs/ or .github/, etc.), the build can be
+#     skipped. .github/ is trivial for k3 because k3 tests run on Buildkite,
+#     not GitHub Actions, so workflow/CODEOWNERS/template changes do not
+#     affect what the k3 tests do.
 #   - Anything else → build runs.
 #
 # Opt-out: set K3_PATH_FILTER_DISABLE=1 in the build env to disable skipping
@@ -32,7 +35,6 @@ set -uo pipefail
 
 _path_filter_is_always_trigger() {
     case "$1" in
-        .github/*) return 0 ;;
         .buildkite/*) return 0 ;;
     esac
     return 1
@@ -46,6 +48,7 @@ _path_filter_is_trivial() {
         .gitignore|.gitattributes|.editorconfig|.mailmap) return 0 ;;
         CODEOWNERS) return 0 ;;
         docs/*) return 0 ;;
+        .github/*) return 0 ;;
     esac
     return 1
 }
@@ -129,7 +132,7 @@ should_skip_ci() {
     echo "path-filter: ${total} files changed (${trivial_count} trivial)" >&2
 
     if [[ "$has_always_trigger" -eq 1 ]]; then
-        echo "path-filter: at least one file under .github/ or .buildkite/ → not skipping" >&2
+        echo "path-filter: at least one file under .buildkite/ → not skipping" >&2
         return 1
     fi
 
