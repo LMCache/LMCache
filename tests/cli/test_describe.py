@@ -36,7 +36,7 @@ SAMPLE_STATUS = {
             "kv_cache_layout": {
                 "num_layers": 32,
                 "block_size": 16,
-                "hidden_dim_size": 128,
+                "hidden_dim_sizes": 128,
                 "dtype": "torch.float16",
                 "is_mla": False,
                 "num_blocks": 2048,
@@ -181,7 +181,7 @@ class TestDescribeKvcacheFields:
         assert model["gpu_ids"] == "0"
         assert model["num_layers"] == 32
         assert model["block_size"] == 16
-        assert model["hidden_dim_size"] == 128
+        assert model["hidden_dim_sizes"] == 128
         assert model["dtype"] == "torch.float16"
         assert model["is_mla"] is False
         assert model["num_blocks"] == 2048
