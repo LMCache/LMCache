@@ -416,13 +416,10 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
                                 if key not in self._key_sizes:
                                     self._key_sizes[key] = size
                                     self._current_size_bytes += size
-                                    if key.user_id:
-                                        self._per_user_size_bytes[key.user_id] = (
-                                            self._per_user_size_bytes.get(
-                                                key.user_id, 0
-                                            )
-                                            + size
-                                        )
+                                    self._per_user_size_bytes[key.user_id] = (
+                                        self._per_user_size_bytes.get(key.user_id, 0)
+                                        + size
+                                    )
                             keys_stored.extend(store_keys)
                         os.eventfd_write(self._store_efd, 1)
 
@@ -465,13 +462,10 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
                                     key = lookup_keys[i]
                                     size = self._key_sizes.pop(key, 0)
                                     self._current_size_bytes -= size
-                                    if key.user_id:
-                                        self._per_user_size_bytes[key.user_id] = (
-                                            self._per_user_size_bytes.get(
-                                                key.user_id, 0
-                                            )
-                                            - size
-                                        )
+                                    self._per_user_size_bytes[key.user_id] = (
+                                        self._per_user_size_bytes.get(key.user_id, 0)
+                                        - size
+                                    )
                         evt = self._pending_delete_events.pop(task_id, None)
                         if evt is not None:
                             evt.set()

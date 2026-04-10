@@ -619,10 +619,9 @@ class NixlStoreL2Adapter(L2AdapterInterface):
                     continue
                 del self._memory_objects[key]
                 self.nixl_agent.pool.batched_free(obj.page_indices)
-                if key.user_id:
-                    self._per_user_size_bytes[key.user_id] = (
-                        self._per_user_size_bytes.get(key.user_id, 0) - obj.size
-                    )
+                self._per_user_size_bytes[key.user_id] = (
+                    self._per_user_size_bytes.get(key.user_id, 0) - obj.size
+                )
                 deleted_keys.append(key)
         if deleted_keys:
             self._notify_keys_deleted(deleted_keys)
@@ -770,11 +769,9 @@ class NixlStoreL2Adapter(L2AdapterInterface):
                 for key, storage_obj in zip(keys, storage_objs, strict=False):
                     self._memory_objects[key] = storage_obj
                     storage_obj.decrease_pin_count()
-                    if key.user_id:
-                        self._per_user_size_bytes[key.user_id] = (
-                            self._per_user_size_bytes.get(key.user_id, 0)
-                            + storage_obj.size
-                        )
+                    self._per_user_size_bytes[key.user_id] = (
+                        self._per_user_size_bytes.get(key.user_id, 0) + storage_obj.size
+                    )
             self._notify_keys_stored(keys)
 
         # success is only set to false for transfer failures

@@ -357,10 +357,9 @@ class MockL2Adapter(L2AdapterInterface):
                 obj = self._memory_objects.pop(key)
                 obj_size = obj.get_size()
                 self._current_size_bytes -= obj_size
-                if key.user_id:
-                    self._per_user_size_bytes[key.user_id] = (
-                        self._per_user_size_bytes.get(key.user_id, 0) - obj_size
-                    )
+                self._per_user_size_bytes[key.user_id] = (
+                    self._per_user_size_bytes.get(key.user_id, 0) - obj_size
+                )
                 deleted_keys.append(key)
         if deleted_keys:
             self._notify_keys_deleted(deleted_keys)
@@ -437,10 +436,9 @@ class MockL2Adapter(L2AdapterInterface):
                 self._current_size_bytes += obj_size
                 total_bytes += obj_size
                 stored_keys.append(key)
-                if key.user_id:
-                    self._per_user_size_bytes[key.user_id] = (
-                        self._per_user_size_bytes.get(key.user_id, 0) + obj_size
-                    )
+                self._per_user_size_bytes[key.user_id] = (
+                    self._per_user_size_bytes.get(key.user_id, 0) + obj_size
+                )
         except Exception:
             success = False
 
