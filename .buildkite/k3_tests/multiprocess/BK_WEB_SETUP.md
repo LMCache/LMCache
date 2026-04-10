@@ -9,9 +9,7 @@
 
 Heavy test (2 GPUs, Docker-in-Docker, ~45 min) — run on `"mp"`/`"full"` label or dev push, not every PR.
 
-> **One-time UI update required**: re-paste `buildkite-pipeline.yml` into the
-> Steps editor after merging. Builds whose only changes are
-> docs/`*.md`/`LICENSE`/`.github/**` then auto-pass via the
-> [path filter](../README.md#path-based-skip-auto-pass-on-docs-only-changes).
+> Builds whose only changes are docs/`*.md`/`LICENSE`/`.github/**` auto-pass
+> via the [path filter](../README.md#path-based-skip-auto-pass-on-docs-only-changes).
 > Changes under `.buildkite/` always run. Set `K3_PATH_FILTER_DISABLE=1` to
 > bypass.

@@ -69,11 +69,6 @@ To bypass the skip and force a full run for one build, set the env var
 `K3_PATH_FILTER_DISABLE=1` in the Buildkite UI ("New Build" → Environment
 Variables) or in the pipeline's env block.
 
-> **One-time UI update required.** After merging, re-paste each test's
-> `buildkite-pipeline.yml` into the Buildkite UI Steps editor. After that,
-> future edits to `path-filter.sh` or `upload-pipeline.sh` take effect on
-> the next push automatically — no further UI changes needed.
-
 ### Trigger strategy
 
 Not all tests should run on every push. The general pattern:
