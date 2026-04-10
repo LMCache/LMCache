@@ -171,7 +171,7 @@ class TokenDatabase(metaclass=abc.ABCMeta):
     def process_tokens(
         self,
         tokens: Optional[Union[torch.Tensor, List[int]]] = None,
-        hashes: Optional[List[int]] = None,
+        hashes: Optional[List[Union[int, bytes]]] = None,
         offsets: Optional[List[int]] = None,
         mask: Optional[torch.Tensor] = None,
         make_key: bool = True,
@@ -181,7 +181,8 @@ class TokenDatabase(metaclass=abc.ABCMeta):
 
         :param Optional[Union[torch.Tensor, List[int]]] tokens: The tokens to process.
 
-        :param Optional[List[int]] hashes: The hashes to process. If provided,
+        :param Optional[List[Union[int, bytes]]] hashes: The hashes to process.
+            If provided,
             it will be used instead of tokens to generate cache engine keys.
 
         :param Optional[List[int]] offsets: The number of tokens in each chunk.
@@ -339,7 +340,7 @@ class ChunkedTokenDatabase(TokenDatabase):
     def process_tokens(
         self,
         tokens: Optional[Union[torch.Tensor, List[int]]] = None,
-        hashes: Optional[List[int]] = None,
+        hashes: Optional[List[Union[int, bytes]]] = None,
         offsets: Optional[List[int]] = None,
         mask: Optional[torch.Tensor] = None,
         make_key: bool = True,
@@ -464,7 +465,7 @@ class SegmentTokenDatabase(TokenDatabase):
     def process_tokens(
         self,
         tokens: Optional[Union[torch.Tensor, List[int]]] = None,
-        hashes: Optional[List[int]] = None,
+        hashes: Optional[List[Union[int, bytes]]] = None,
         offsets: Optional[List[int]] = None,
         mask: Optional[torch.Tensor] = None,
         make_key: bool = True,

@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from typing import Dict, Optional
+from typing import Dict, Optional, Union
 
 # Third Party
 import msgspec
@@ -17,7 +17,7 @@ class LookupRequestMsg(AsyncLookupMsg):
     """Async lookup request message from scheduler to worker"""
 
     lookup_id: str
-    hashes: list[int]
+    hashes: list[Union[int, bytes]]
     offsets: list[int]
     request_configs: Optional[Dict[str, str]] = None
 

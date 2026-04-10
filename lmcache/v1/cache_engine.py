@@ -363,7 +363,7 @@ class LMCacheEngine:
     def store(
         self,
         tokens: Optional[Union[torch.Tensor, list[int]]] = None,
-        hashes: Optional[List[int]] = None,
+        hashes: Optional[List[Union[int, bytes]]] = None,
         offsets: Optional[List[int]] = None,
         mask: Optional[torch.Tensor] = None,
         **kwargs,
@@ -372,7 +372,8 @@ class LMCacheEngine:
 
         :param Optional[torch.Tensor] tokens: The tokens of the corresponding KV caches.
 
-        :param Optional[List[int]] hashes: The hashes of the corresponding KV caches.
+        :param Optional[List[Union[int, bytes]]] hashes: The hashes of the
+            corresponding KV caches.
 
         :param Optional[torch.Tensor] mask: The mask for the tokens. Should
             have the same length as tokens. And the mask should ALWAYS be like
@@ -1058,7 +1059,7 @@ class LMCacheEngine:
     def lookup(
         self,
         tokens: Optional[Union[torch.Tensor, List[int]]] = None,
-        hashes: Optional[List[int]] = None,
+        hashes: Optional[List[Union[int, bytes]]] = None,
         offsets: Optional[List[int]] = None,
         search_range: Optional[List[str]] = None,
         lookup_id: Optional[str] = None,
@@ -1249,7 +1250,7 @@ class LMCacheEngine:
         self,
         lookup_id: str,
         tokens: Optional[Union[torch.Tensor, List[int]]] = None,
-        hashes: Optional[List[int]] = None,
+        hashes: Optional[List[Union[int, bytes]]] = None,
         offsets: Optional[List[int]] = None,
         search_range: Optional[List[str]] = None,
         pin: bool = False,

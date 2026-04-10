@@ -341,7 +341,7 @@ class CacheEngineKey:
     model_name: str
     world_size: int
     worker_id: int
-    chunk_hash: int
+    chunk_hash: Union[int, bytes]
     dtype: torch.dtype
     request_configs: Optional[dict] = field(default_factory=dict)
     tags: Optional[tuple] = field(init=False, default=None)
