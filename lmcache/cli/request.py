@@ -202,9 +202,7 @@ def _stream(
     # Match V2RequestSender: server count if present, else max_tokens cap.
     num_generated = num_completion if num_completion > 0 else max_tokens
     if first_token_t is None:
-        # No non-empty content token observed (e.g. model emitted only EOS).
-        # Use total round-trip as a conservative TTFT approximation.
-        ttft_s = t1 - t0
+        ttft_s = -1.0
         decode_time = 0.0
     else:
         ttft_s = first_token_t - t0

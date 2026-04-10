@@ -8,9 +8,8 @@
 # Thus, we will still lock a torch version here because we can choose to release wheels
 # in sync with vllm and update our torch version accordingly
 requires = [
-    "ninja",
     "packaging>=24.2",
-    "setuptools>=77.0.3,<81.0.0",
+    "setuptools>=68.0.0",
     "setuptools_scm>=8",
     "wheel",
 ]
