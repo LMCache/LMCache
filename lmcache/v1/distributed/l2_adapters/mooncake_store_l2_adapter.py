@@ -34,7 +34,7 @@ from lmcache.v1.distributed.l2_adapters.factory import (
 logger = init_logger(__name__)
 
 # Keys consumed only by LMCache (never sent to mooncake).
-_LMCACHE_ONLY_KEYS = {"type", "num_workers", "eviction"}
+_LMCACHE_ONLY_KEYS = {"type", "num_workers", "eviction", "preregister_l1_memory"}
 
 
 class MooncakeStoreL2AdapterConfig(L2AdapterConfigBase):
@@ -55,16 +55,21 @@ class MooncakeStoreL2AdapterConfig(L2AdapterConfigBase):
         self,
         setup_config: Dict[str, str],
         num_workers: int = 4,
+        preregister_l1_memory: bool = False,
     ):
         super().__init__()
         self.setup_config: Dict[str, str] = dict(setup_config)
         self.num_workers = num_workers
+        self.preregister_l1_memory = preregister_l1_memory
 
     @classmethod
     def from_dict(cls, d: dict) -> "MooncakeStoreL2AdapterConfig":
         num_workers = d.get("num_workers", 4)
         if not isinstance(num_workers, int) or num_workers <= 0:
             raise ValueError("num_workers must be a positive integer")
+        preregister_l1_memory = d.get("preregister_l1_memory", False)
+        if not isinstance(preregister_l1_memory, bool):
+            raise ValueError("preregister_l1_memory must be a boolean")
 
         # Everything except LMCache-only keys is
         # forwarded to mooncake as str values.
@@ -78,6 +83,7 @@ class MooncakeStoreL2AdapterConfig(L2AdapterConfigBase):
         return cls(
             setup_config=setup,
             num_workers=num_workers,
+            preregister_l1_memory=preregister_l1_memory,
         )
 
     @classmethod
@@ -90,7 +96,10 @@ class MooncakeStoreL2AdapterConfig(L2AdapterConfigBase):
             "Refer to mooncake documentation for "
             "available setup keys.\n"
             "- num_workers (int): C++ worker threads "
-            "(default 4, >0)"
+            "(default 4, >0)\n"
+            "- preregister_l1_memory (bool): "
+            "pre-register the provided L1 memory descriptor with Mooncake "
+            "(default False)"
         )
 
 
@@ -119,13 +128,35 @@ def _create_mooncake_store_l2_adapter(
     )
 
     assert isinstance(config, MooncakeStoreL2AdapterConfig)
+    preregister_base = 0
+    preregister_size = 0
+    if config.preregister_l1_memory:
+        if l1_memory_desc is None:
+            logger.warning(
+                "preregister_l1_memory is enabled, but no L1 memory descriptor "
+                "was provided; falling back to lazy per-object registration."
+            )
+        elif l1_memory_desc.ptr == 0 or l1_memory_desc.size <= 0:
+            logger.warning(
+                "preregister_l1_memory is enabled, but the L1 memory descriptor "
+                "is invalid (ptr=%d, size=%d); falling back to lazy registration.",
+                l1_memory_desc.ptr,
+                l1_memory_desc.size,
+            )
+        else:
+            preregister_base = l1_memory_desc.ptr
+            preregister_size = l1_memory_desc.size
+
     native_client = LMCacheMooncakeClient(
         config=config.setup_config,
         num_workers=config.num_workers,
+        preregister_l1_base=preregister_base,
+        preregister_l1_size=preregister_size,
     )
     logger.info(
-        "Created Mooncake Store L2 adapter (workers=%d)",
+        "Created Mooncake Store L2 adapter (workers=%d, preregister_l1_memory=%s)",
         config.num_workers,
+        config.preregister_l1_memory and preregister_size > 0,
     )
     return NativeConnectorL2Adapter(native_client)
 
