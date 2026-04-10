@@ -165,3 +165,51 @@ class UserLRUEvictionPolicy(EvictionPolicy):
                     destination=destination,
                 )
             ]
+
+    # =========================================================================
+    # Methods below are NOT part of the EvictionPolicy interface.
+    # They are provided for testing and debugging purposes only.
+    # =========================================================================
+
+    def get_num_tracked_keys(self) -> int:
+        """Get the total number of keys tracked across all users.
+
+        Note:
+            This method is NOT part of the EvictionPolicy interface.
+            It is provided for testing and debugging purposes only.
+
+        Returns:
+            int: The total number of tracked keys.
+        """
+        with self._lock:
+            return sum(len(o) for o in self._per_user_order.values())
+
+    def get_num_tracked_keys_for_user(self, user_id: str) -> int:
+        """Get the number of keys tracked for a specific user.
+
+        Note:
+            This method is NOT part of the EvictionPolicy interface.
+            It is provided for testing and debugging purposes only.
+
+        Args:
+            user_id: The user to query.
+
+        Returns:
+            int: The number of tracked keys for the user.
+        """
+        with self._lock:
+            order = self._per_user_order.get(user_id)
+            return len(order) if order else 0
+
+    def get_num_tracked_users(self) -> int:
+        """Get the number of users currently being tracked.
+
+        Note:
+            This method is NOT part of the EvictionPolicy interface.
+            It is provided for testing and debugging purposes only.
+
+        Returns:
+            int: The number of tracked users.
+        """
+        with self._lock:
+            return len(self._per_user_order)
