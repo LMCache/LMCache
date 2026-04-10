@@ -21,9 +21,9 @@ from lmcache.v1.lookup_client.async_lookup_message import (
 
 
 class TestLookupRequestMsgWithIntHashes:
-    """原始 int 哈希：向后兼容性验证。"""
+    """Backward compatibility: int hashes must still serialize correctly."""
 
-    def test_serialization_roundtrip(self):
+    def test_serialization_roundtrip(self) -> None:
         hashes = [123456789, 987654321, 0, 2**32 - 1]
         offsets = [0, 128, 256, 384]
         msg = LookupRequestMsg(
@@ -37,22 +37,22 @@ class TestLookupRequestMsgWithIntHashes:
         assert decoded.hashes == hashes
         assert decoded.offsets == offsets
 
-    def test_describe(self):
+    def test_describe(self) -> None:
         msg = LookupRequestMsg(lookup_id="abc", hashes=[1, 2, 3], offsets=[0, 1, 2])
         assert "abc" in msg.describe()
         assert "3" in msg.describe()
 
 
 class TestLookupRequestMsgWithBytesHashes:
-    """sha256_cbor 返回 bytes：核心 bug 修复验证。"""
+    """Core bug fix: sha256_cbor returns bytes; LookupRequestMsg must accept them."""
 
     @staticmethod
     def _sha256_hash(data: bytes) -> bytes:
-        """模拟 vLLM sha256_cbor 哈希函数的输出（32 字节摘要）。"""
+        """Return the SHA-256 digest of *data*, mimicking vLLM sha256_cbor output."""
         return hashlib.sha256(data).digest()
 
-    def test_bytes_hash_serialization_roundtrip(self):
-        """LookupRequestMsg 应能序列化和反序列化 bytes 类型的 hashes。"""
+    def test_bytes_hash_serialization_roundtrip(self) -> None:
+        """LookupRequestMsg must serialize and deserialize bytes hashes unchanged."""
         hashes = [
             self._sha256_hash(b"chunk_0"),
             self._sha256_hash(b"chunk_1"),
@@ -71,8 +71,8 @@ class TestLookupRequestMsgWithBytesHashes:
         assert all(isinstance(h, bytes) for h in decoded.hashes)
         assert decoded.offsets == offsets
 
-    def test_bytes_hash_is_32_bytes(self):
-        """sha256_cbor 输出正好 32 字节，超出 int64 范围但应被接受。"""
+    def test_bytes_hash_is_32_bytes(self) -> None:
+        """sha256_cbor produces a 32-byte digest that exceeds int64 range."""
         sha256_digest = self._sha256_hash(b"some token chunk")
         assert len(sha256_digest) == 32
         msg = LookupRequestMsg(
@@ -84,8 +84,8 @@ class TestLookupRequestMsgWithBytesHashes:
         decoded = msgspec.msgpack.decode(raw, type=LookupRequestMsg)
         assert decoded.hashes[0] == sha256_digest
 
-    def test_mixed_int_and_bytes_hashes(self):
-        """混合 int 和 bytes 的哈希列表也应被支持。"""
+    def test_mixed_int_and_bytes_hashes(self) -> None:
+        """A hash list containing both int and bytes elements must round-trip."""
         hashes = [12345, self._sha256_hash(b"mixed"), 67890]
         offsets = [0, 128, 256]
         msg = LookupRequestMsg(
@@ -99,8 +99,8 @@ class TestLookupRequestMsgWithBytesHashes:
         assert isinstance(decoded.hashes[1], bytes)
         assert decoded.hashes[2] == 67890
 
-    def test_request_configs_preserved(self):
-        """带 request_configs 的消息序列化也应正常。"""
+    def test_request_configs_preserved(self) -> None:
+        """request_configs must survive serialization alongside bytes hashes."""
         hashes = [self._sha256_hash(b"cfg_chunk")]
         msg = LookupRequestMsg(
             lookup_id="cfg-test",
@@ -115,26 +115,26 @@ class TestLookupRequestMsgWithBytesHashes:
 
 
 class TestLookupResponseMsg:
-    def test_serialization_roundtrip(self):
+    def test_serialization_roundtrip(self) -> None:
         msg = LookupResponseMsg(lookup_id="resp-id", num_hit_tokens=512)
         raw = msgspec.msgpack.encode(msg)
         decoded = msgspec.msgpack.decode(raw, type=LookupResponseMsg)
         assert decoded.lookup_id == "resp-id"
         assert decoded.num_hit_tokens == 512
 
-    def test_describe(self):
+    def test_describe(self) -> None:
         msg = LookupResponseMsg(lookup_id="x", num_hit_tokens=256)
         assert "x" in msg.describe()
         assert "256" in msg.describe()
 
 
 class TestLookupCleanupMsg:
-    def test_serialization_roundtrip(self):
+    def test_serialization_roundtrip(self) -> None:
         msg = LookupCleanupMsg(lookup_id="cleanup-id")
         raw = msgspec.msgpack.encode(msg)
         decoded = msgspec.msgpack.decode(raw, type=LookupCleanupMsg)
         assert decoded.lookup_id == "cleanup-id"
 
-    def test_describe(self):
+    def test_describe(self) -> None:
         msg = LookupCleanupMsg(lookup_id="cl-123")
         assert "cl-123" in msg.describe()

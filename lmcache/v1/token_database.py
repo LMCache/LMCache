@@ -31,8 +31,9 @@ logger = init_logger(__name__)
 NONE_HASH = 0
 
 # Type alias for process_tokens return value
-# (start_index, end_index, cache_engine_key｜hash)
-ProcessTokensResult = Tuple[int, int, Union[CacheEngineKey, int]]
+# (start_index, end_index, cache_engine_key | hash)
+# hash may be int (builtin/sha256_cbor_64bit) or bytes (sha256_cbor)
+ProcessTokensResult = Tuple[int, int, Union[CacheEngineKey, int, bytes]]
 
 
 class TokenDatabase(metaclass=abc.ABCMeta):
@@ -206,7 +207,7 @@ class TokenDatabase(metaclass=abc.ABCMeta):
         raise NotImplementedError
 
     def _make_key_by_hash(
-        self, chunk_hash: int, request_configs: Optional[dict] = None
+        self, chunk_hash: Union[int, bytes], request_configs: Optional[dict] = None
     ):
         assert self.metadata is not None
         # When save_only_first_rank is enabled (for MLA), we deliberately
@@ -223,10 +224,10 @@ class TokenDatabase(metaclass=abc.ABCMeta):
 
     def _canonicalize_hash_inputs(
         self,
-        prefix_hash: Optional[int],
+        prefix_hash: Optional[Union[int, bytes]],
         tokens_tuple: Tuple[int, ...],
         extra_keys: Optional[List[Any]],
-    ) -> Tuple[int, Tuple[int, ...], Tuple[Any, ...]]:
+    ) -> Tuple[Union[int, bytes], Tuple[int, ...], Tuple[Any, ...]]:
         """
         Canonicalize hash inputs so that semantically identical requests
         produce structurally identical hash inputs across instances.
@@ -243,9 +244,9 @@ class TokenDatabase(metaclass=abc.ABCMeta):
     def _hash_tokens(
         self,
         tokens: Union[torch.Tensor, List[int]],
-        prefix_hash: Optional[int] = None,
+        prefix_hash: Optional[Union[int, bytes]] = None,
         extra_keys: Optional[list[Any]] = None,
-    ) -> int:
+    ) -> Union[int, bytes]:
         if isinstance(tokens, torch.Tensor):
             tokens_tuple = tuple(tokens.cpu().tolist())
         elif isinstance(tokens, list):
@@ -350,8 +351,10 @@ class ChunkedTokenDatabase(TokenDatabase):
 
         :param Optional[Union[torch.Tensor, List[int]]] tokens: The tokens to process.
 
-        :param Optional[List[int]] hashes: The hashes to process. If provided,
-            it will be used instead of tokens to generate cache engine keys.
+        :param Optional[List[Union[int, bytes]]] hashes: The hashes to process.
+            If provided, it will be used instead of tokens to generate cache engine
+            keys. Each hash may be an ``int`` (builtin hash) or ``bytes``
+            (sha256_cbor, 32-byte digest).
 
         :param Optional[List[int]] offsets: The number of tokens in each chunk.
 
@@ -475,8 +478,10 @@ class SegmentTokenDatabase(TokenDatabase):
 
         :param Union[torch.Tensor, List[int]] tokens: The tokens to process.
 
-        :param Optional[List[int]] hashes: The hashes to process. If provided,
-            it will be used instead of tokens to generate cache engine keys.
+        :param Optional[List[Union[int, bytes]]] hashes: The hashes to process.
+            If provided, it will be used instead of tokens to generate cache engine
+            keys. Each hash may be an ``int`` (builtin hash) or ``bytes``
+            (sha256_cbor, 32-byte digest).
 
         :param Optional[List[int]] offsets: The number of tokens in each chunk.
 

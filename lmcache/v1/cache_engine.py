@@ -1072,7 +1072,9 @@ class LMCacheEngine:
         :param Optional[Union[torch.Tensor, List[int]]] tokens: the input tokens,
         with shape [seq_len]
 
-        :param Optional[List[int]] hashes: the input hashes, with length [num_chunks]
+        :param Optional[List[Union[int, bytes]]] hashes: the input hashes, with
+        length [num_chunks]. Each element may be an int (builtin hash) or bytes
+        (sha256_cbor 32-byte digest).
         :param Optional[List[int]] offsets: the offsets of each chunk,
         with length [num_chunks]
 
@@ -1258,6 +1260,11 @@ class LMCacheEngine:
     ) -> None:
         """
         An async version of lookup + prefetch.
+
+        :param Optional[List[Union[int, bytes]]] hashes: pre-computed hashes,
+        one per chunk. Each element may be an int (builtin hash) or bytes
+        (sha256_cbor 32-byte digest). If provided, ``tokens`` is ignored for
+        key derivation.
 
         There are three categories of backends:
         (1) sync lookup + sync retrieval (e.g., cpu)

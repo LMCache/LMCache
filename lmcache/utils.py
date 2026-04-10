@@ -439,11 +439,17 @@ class CacheEngineKey:
                 if len(kvs) != 2:
                     raise ValueError(f"Invalid key string: {s}")
                 request_configs["lmcache.tag." + kvs[0]] = kvs[1]
+        # A 64-char hex string is a SHA-256 digest (32 bytes); decode as bytes
+        # so the reconstructed key matches keys produced by sha256_cbor.
+        hex_str = parts[3]
+        chunk_hash: Union[int, bytes] = (
+            bytes.fromhex(hex_str) if len(hex_str) == 64 else int(hex_str, 16)
+        )
         return CacheEngineKey(
             model_name=parts[0],
             world_size=int(parts[1]),
             worker_id=int(parts[2]),
-            chunk_hash=int(parts[3], 16),
+            chunk_hash=chunk_hash,
             dtype=STR_DTYPE_TO_TORCH_DTYPE[parts[4]],
             request_configs=request_configs,
         )
@@ -566,11 +572,17 @@ class LayerCacheEngineKey(CacheEngineKey):
                 if len(kvs) != 2:
                     raise ValueError(f"Invalid key string: {s}")
                 request_configs["lmcache.tag." + kvs[0]] = kvs[1]
+        # A 64-char hex string is a SHA-256 digest (32 bytes); decode as bytes
+        # so the reconstructed key matches keys produced by sha256_cbor.
+        hex_str = parts[3]
+        chunk_hash: Union[int, bytes] = (
+            bytes.fromhex(hex_str) if len(hex_str) == 64 else int(hex_str, 16)
+        )
         return LayerCacheEngineKey(
             model_name=parts[0],
             world_size=int(parts[1]),
             worker_id=int(parts[2]),
-            chunk_hash=int(parts[3], 16),
+            chunk_hash=chunk_hash,
             dtype=STR_DTYPE_TO_TORCH_DTYPE[parts[4]],
             request_configs=request_configs,
             layer_id=int(parts[5]),
