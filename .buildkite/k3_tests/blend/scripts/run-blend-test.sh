@@ -30,14 +30,16 @@ SERVER_WAIT_TIMEOUT="${SERVER_WAIT_TIMEOUT:-400}"
 
 BUILD_ID="${BUILDKITE_BUILD_ID:-local_$$}"
 WORK_LOG="/tmp/build_${BUILD_ID}_blend.log" 
-# Blend server, vLLM prefiller/decoder, and proxy stdout/stderr (main script uses WORK_LOG via tee).
-VLLM_LOG="/tmp/build_${BUILD_ID}_vllm.log"
+# Proxy stdout/stderr. Blend server/prefiller/decoder each get their own _blend_server/_prefiller_PORT/_decoder_PORT logs.
+VLLM_LOG="/tmp/build_${BUILD_ID}_proxy.log"
+BLEND_SERVER_LOG="/tmp/build_${BUILD_ID}_blend_server.log"
 ARTIFACT="build_${BUILD_ID}.log"
 # Benchmark wall-clock limit (seconds). Exit 124 from `timeout` => failure. Default stays under blend pipeline 90m.
 BENCHMARK_TIMEOUT_SEC="${BENCHMARK_TIMEOUT_SEC:-4800}"
 
 : > "${WORK_LOG}"
 : > "${VLLM_LOG}"
+: > "${BLEND_SERVER_LOG}"
 
 declare -A RESERVED_PORTS=()
 
@@ -89,7 +91,7 @@ resolve_port_csv() {
 
 collect_artifact() {
   echo "[INFO] Collecting logs into ${ARTIFACT}"
-  cat "${WORK_LOG}" "${VLLM_LOG}" > "${ARTIFACT}" 2>/dev/null || true
+  cat /tmp/build_"${BUILD_ID}"_*.log > "${ARTIFACT}" 2>/dev/null || true
 }
 
 finalize() {
@@ -198,7 +200,7 @@ export LD_LIBRARY_PATH=/opt/nvidia/nsight-compute/2025.1.0/host/linux-desktop-gl
   --eviction-policy LRU \
   --chunk-size 1024 \
   --l1-align-bytes 16777216 \
-  >>"${VLLM_LOG}" 2>&1 &
+  >>"${BLEND_SERVER_LOG}" 2>&1 &
 TRACKED_PIDS+=($!)
 
 sleep 10
@@ -209,6 +211,8 @@ GPU_IDX=0
 for port in "${PREFILLER_PORTS[@]}"; do
   GPU_END=$((GPU_IDX + TENSOR_PARALLEL - 1))
   CUDA_DEVS=$(seq -s, "$GPU_IDX" "$GPU_END")
+  PREFILLER_LOG="/tmp/build_${BUILD_ID}_prefiller_${port}.log"
+  : > "${PREFILLER_LOG}"
   echo "Starting prefiller on GPUs ${CUDA_DEVS}, port ${port}"
   CUDA_VISIBLE_DEVICES=$CUDA_DEVS \
     LMCACHE_REQUEST_TELEMETRY_TYPE=fastapi \
@@ -226,7 +230,7 @@ for port in "${PREFILLER_PORTS[@]}"; do
     --gpu-memory-utilization "$GPU_MEM_UTIL" \
     --kv-transfer-config \
       "{\"kv_connector\":\"LMCacheMPCBConnector\",\"kv_role\":\"kv_both\",\"kv_connector_extra_config\":{\"lmcache.mp.port\":${LMCACHE_MP_PORT}}}" \
-    >>"${VLLM_LOG}" 2>&1 &
+    >>"${PREFILLER_LOG}" 2>&1 &
   TRACKED_PIDS+=($!)
   GPU_IDX=$((GPU_IDX + TENSOR_PARALLEL))
 done
@@ -238,6 +242,8 @@ done
 for port in "${DECODER_PORTS[@]}"; do
   GPU_END=$((GPU_IDX + TENSOR_PARALLEL - 1))
   CUDA_DEVS=$(seq -s, "$GPU_IDX" "$GPU_END")
+  DECODER_LOG="/tmp/build_${BUILD_ID}_decoder_${port}.log"
+  : > "${DECODER_LOG}"
   echo "Starting decoder on GPUs ${CUDA_DEVS}, port ${port}"
   CUDA_VISIBLE_DEVICES=$CUDA_DEVS \
     VLLM_USE_FLASHINFER_MOE_FP8=0 \
@@ -252,7 +258,7 @@ for port in "${DECODER_PORTS[@]}"; do
     --gpu-memory-utilization "$GPU_MEM_UTIL" \
     --kv-transfer-config \
       "{\"kv_connector\":\"LMCacheMPConnector\",\"kv_role\":\"kv_both\",\"kv_connector_extra_config\":{\"lmcache.mp.port\":${LMCACHE_MP_PORT}}}" \
-    >>"${VLLM_LOG}" 2>&1 &
+    >>"${DECODER_LOG}" 2>&1 &
   TRACKED_PIDS+=($!)
   GPU_IDX=$((GPU_IDX + TENSOR_PARALLEL))
 done
