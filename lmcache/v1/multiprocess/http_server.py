@@ -6,6 +6,7 @@ import argparse
 # Third Party
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 import torch
 import uvicorn
 
@@ -143,6 +144,164 @@ async def status(request: Request):
             content={"error": "engine not initialized"},
         )
     return engine.report_status()
+
+
+# ----------------------------
+# Per-user quota management endpoints
+# ----------------------------
+
+
+class QuotaSetRequest(BaseModel):
+    """Request body for setting a user's quota."""
+
+    limit_gb: float
+
+
+def _get_quota_manager(request: Request):
+    """Extract the QuotaManager from the engine, or None.
+
+    Args:
+        request: The incoming HTTP request.
+
+    Returns:
+        QuotaManager instance or None.
+    """
+    engine = getattr(request.app.state, "engine", None)
+    if engine is None:
+        return None
+    return engine.get_quota_manager()
+
+
+def _get_per_user_usage(request: Request) -> dict[str, tuple[float, float]]:
+    """Aggregate per-user usage across all L2 adapters.
+
+    Args:
+        request: The incoming HTTP request.
+
+    Returns:
+        Mapping of user_id to (current_bytes, bytes_after_eviction).
+    """
+    engine = getattr(request.app.state, "engine", None)
+    if engine is None:
+        return {}
+    combined: dict[str, tuple[float, float]] = {}
+    for adapter in engine.get_l2_adapters():
+        for uid, (cur, after) in adapter.get_per_user_usage().items():
+            prev_cur, prev_after = combined.get(uid, (0.0, 0.0))
+            combined[uid] = (prev_cur + cur, prev_after + after)
+    return combined
+
+
+@app.put("/api/quota/{user_id}")
+async def set_quota(user_id: str, body: QuotaSetRequest, request: Request):
+    """Set or update the storage quota for a user.
+
+    Args:
+        user_id: The user to set a quota for.
+        body: JSON body with ``limit_gb`` field.
+        request: The incoming HTTP request.
+
+    Returns:
+        JSON with user_id, limit_gb, and status.
+    """
+    qm = _get_quota_manager(request)
+    if qm is None:
+        return JSONResponse(
+            status_code=503,
+            content={"status": "error", "reason": "quota manager not available"},
+        )
+    try:
+        qm.set_quota(user_id, body.limit_gb)
+    except ValueError as e:
+        return JSONResponse(
+            status_code=400,
+            content={"status": "error", "reason": str(e)},
+        )
+    return {"user_id": user_id, "limit_gb": body.limit_gb, "status": "ok"}
+
+
+@app.get("/api/quota/{user_id}")
+async def get_quota(user_id: str, request: Request):
+    """Get quota and current usage for a user.
+
+    Args:
+        user_id: The user to query.
+        request: The incoming HTTP request.
+
+    Returns:
+        JSON with user_id, limit_gb, current_usage_gb, and exists flag.
+    """
+    qm = _get_quota_manager(request)
+    if qm is None:
+        return JSONResponse(
+            status_code=503,
+            content={"status": "error", "reason": "quota manager not available"},
+        )
+    limit_bytes = qm.get_limit_bytes(user_id)
+    exists = limit_bytes > 0
+
+    per_user_usage = _get_per_user_usage(request)
+    current_bytes, _ = per_user_usage.get(user_id, (0.0, 0.0))
+
+    return {
+        "user_id": user_id,
+        "limit_gb": limit_bytes / (1024**3),
+        "current_usage_gb": current_bytes / (1024**3),
+        "exists": exists,
+    }
+
+
+@app.delete("/api/quota/{user_id}")
+async def delete_quota(user_id: str, request: Request):
+    """Remove the quota entry for a user.
+
+    The user's cached data will be evicted at the next eviction cycle.
+
+    Args:
+        user_id: The user whose quota should be removed.
+        request: The incoming HTTP request.
+
+    Returns:
+        JSON with user_id and status.
+    """
+    qm = _get_quota_manager(request)
+    if qm is None:
+        return JSONResponse(
+            status_code=503,
+            content={"status": "error", "reason": "quota manager not available"},
+        )
+    qm.remove_quota(user_id)
+    return {"user_id": user_id, "status": "removed"}
+
+
+@app.get("/api/quota")
+async def list_quotas(request: Request):
+    """List all registered quotas with per-user usage.
+
+    Args:
+        request: The incoming HTTP request.
+
+    Returns:
+        JSON with a ``users`` mapping of user_id to limit_gb and
+        current_usage_gb.
+    """
+    qm = _get_quota_manager(request)
+    if qm is None:
+        return JSONResponse(
+            status_code=503,
+            content={"status": "error", "reason": "quota manager not available"},
+        )
+    all_quotas = qm.get_all_quotas()
+    per_user_usage = _get_per_user_usage(request)
+
+    users = {}
+    for uid, limit_bytes in all_quotas.items():
+        current_bytes, _ = per_user_usage.get(uid, (0.0, 0.0))
+        users[uid] = {
+            "limit_gb": limit_bytes / (1024**3),
+            "current_usage_gb": current_bytes / (1024**3),
+        }
+    return {"users": users}
 
 
 def run_http_server(

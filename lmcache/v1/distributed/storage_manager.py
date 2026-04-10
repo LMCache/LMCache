@@ -20,6 +20,7 @@ from lmcache.v1.distributed.error import L1Error, strerror
 from lmcache.v1.distributed.l1_manager import L1Manager
 from lmcache.v1.distributed.l2_adapters import create_l2_adapter
 from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface
+from lmcache.v1.distributed.quota_manager import QuotaManager
 from lmcache.v1.distributed.storage_controllers import (
     L1EvictionController,
     L2AdapterEvictionState,
@@ -60,6 +61,30 @@ class PrefetchHandle:
     """Monotonic timestamp when the prefetch task was submitted."""
 
 
+def _compute_total_l2_capacity_bytes(
+    adapter_configs: list,
+) -> int:
+    """Sum the max capacity across all L2 adapter configs.
+
+    Inspects ``max_capacity_gb`` or ``max_size_gb`` attributes on each
+    config object.  Returns 0 if no adapter exposes a capacity value.
+
+    Args:
+        adapter_configs: List of L2 adapter config objects.
+
+    Returns:
+        Total capacity in bytes.
+    """
+    total = 0
+    for ac in adapter_configs:
+        gb = getattr(ac, "max_capacity_gb", None)
+        if gb is None:
+            gb = getattr(ac, "max_size_gb", None)
+        if gb and gb > 0:
+            total += int(gb * (1024**3))
+    return total
+
+
 class StorageManager:
     def __init__(self, config: StorageManagerConfig):
         self._l1_manager = L1Manager(config.l1_manager_config)
@@ -90,7 +115,19 @@ class StorageManager:
             )
             if ac.eviction_config is not None
         ]
-        self._l2_eviction_controller = L2EvictionController(l2_eviction_states)
+
+        # QuotaManager for per-user L2 quota enforcement
+        total_l2_capacity = _compute_total_l2_capacity_bytes(
+            config.l2_adapter_config.adapters
+        )
+        if total_l2_capacity > 0:
+            self._quota_manager: QuotaManager | None = QuotaManager(total_l2_capacity)
+        else:
+            self._quota_manager = None
+
+        self._l2_eviction_controller = L2EvictionController(
+            l2_eviction_states, quota_manager=self._quota_manager
+        )
         self._l2_eviction_controller.start()
 
         adapter_descriptors = [
@@ -502,6 +539,25 @@ class StorageManager:
             "l2_adapters": adapters,
             "num_l2_adapters": len(self._l2_adapters),
         }
+
+    def get_quota_manager(self) -> QuotaManager | None:
+        """Return the per-user quota manager, or None if L2 has no capacity.
+
+        Returns:
+            QuotaManager instance if L2 adapters have reported capacity,
+            None otherwise.
+        """
+        return self._quota_manager
+
+    def get_l2_adapters(self) -> list[L2AdapterInterface]:
+        """Return the list of L2 adapters.
+
+        Used by the HTTP API to query per-user usage from adapters.
+
+        Returns:
+            list[L2AdapterInterface]: The L2 adapter instances.
+        """
+        return self._l2_adapters
 
     # Functions for debugging and testing
     def memcheck(self) -> bool:

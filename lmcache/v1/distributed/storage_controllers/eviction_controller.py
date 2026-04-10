@@ -10,12 +10,16 @@ from lmcache.logging import init_logger
 from lmcache.v1.distributed.config import EvictionConfig
 from lmcache.v1.distributed.eviction import L1EvictionPolicy, L2EvictionPolicy
 from lmcache.v1.distributed.eviction_policy import CreateEvictionPolicy
+from lmcache.v1.distributed.eviction_policy.user_lru import (
+    UserLRUEvictionPolicy,
+)
 from lmcache.v1.distributed.internal_api import (
     EvictionAction,
     EvictionDestination,
 )
 from lmcache.v1.distributed.l1_manager import L1Manager
 from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface
+from lmcache.v1.distributed.quota_manager import QuotaManager
 from lmcache.v1.distributed.storage_controller import StorageControllerInterface
 
 logger = init_logger(__name__)
@@ -158,13 +162,27 @@ class L2EvictionController(StorageControllerInterface):
 
     Each adapter gets its own eviction policy and listener bridge, but a
     single background thread loops over all of them.
+
+    When a ``quota_manager`` is provided and the adapter uses
+    ``UserLRUEvictionPolicy``, eviction is triggered per-user based on
+    individual quota limits instead of global aggregate usage.
     """
 
     def __init__(
         self,
         l2_adapter_states: list[L2AdapterEvictionState],
+        quota_manager: QuotaManager | None = None,
     ):
+        """Initialize the L2 eviction controller.
+
+        Args:
+            l2_adapter_states: Per-adapter eviction state objects.
+            quota_manager: Optional per-user quota registry.  When
+                provided together with a UserLRU policy, enables
+                per-user watermark-based eviction.
+        """
         self._adapter_states = l2_adapter_states
+        self._quota_manager = quota_manager
         self._stop_flag = threading.Event()
         self._thread = threading.Thread(
             target=self._eviction_loop,
@@ -204,29 +222,58 @@ class L2EvictionController(StorageControllerInterface):
             for state in self._adapter_states:
                 self._check_and_evict(state)
 
-    def _check_and_evict(self, state: L2AdapterEvictionState):
+    def _check_and_evict(self, state: L2AdapterEvictionState) -> None:
+        """Check usage and evict if above watermark.
+
+        For ``UserLRUEvictionPolicy`` with a quota manager, eviction is
+        triggered per-user based on individual quota limits.  For all
+        other policies, eviction uses the global aggregate usage.
+
+        Args:
+            state: The per-adapter eviction state to check.
+        """
         watermark = state.eviction_config.trigger_watermark
         eviction_ratio = state.eviction_config.eviction_ratio
+        policy = state.eviction_policy
 
-        # `current usage = -1` means the adapter doesn't support usage
-        # based eviction, so we do not trigger eviction based on usage.
-        current_usage, _ = state.adapter.get_usage()
-        if current_usage < 0 or current_usage < watermark:
-            logger.debug(
-                "L2 usage %.2f below watermark %.2f; skipping eviction.",
+        if isinstance(policy, UserLRUEvictionPolicy) and self._quota_manager:
+            # UserLRU: per-user watermark check
+            per_user_usage = state.adapter.get_per_user_usage()
+            for user_id, (user_bytes, _) in per_user_usage.items():
+                limit = self._quota_manager.get_limit_bytes(user_id)
+                if user_bytes <= watermark * limit:
+                    continue
+
+                logger.info(
+                    "User %s L2 usage %.2f GB exceeds watermark "
+                    "(%.0f%%) of quota %.2f GB; evicting.",
+                    user_id,
+                    user_bytes / (1024**3),
+                    watermark * 100,
+                    limit / (1024**3),
+                )
+                actions = policy.get_eviction_actions(eviction_ratio, user_id=user_id)
+                for action in actions:
+                    self._execute_eviction_action(state.adapter, action)
+        else:
+            # LRU/NoOp: global aggregate watermark (unchanged)
+            current_usage, _ = state.adapter.get_usage()
+            if current_usage < 0 or current_usage < watermark:
+                logger.debug(
+                    "L2 usage %.2f below watermark %.2f; skipping eviction.",
+                    current_usage,
+                    watermark,
+                )
+                return
+
+            logger.info(
+                "L2 usage %.2f above watermark %.2f; triggering eviction.",
                 current_usage,
                 watermark,
             )
-            return
-
-        logger.info(
-            "L2 usage %.2f above watermark %.2f; triggering eviction.",
-            current_usage,
-            watermark,
-        )
-        actions = state.eviction_policy.get_eviction_actions(eviction_ratio)
-        for action in actions:
-            self._execute_eviction_action(state.adapter, action)
+            actions = policy.get_eviction_actions(eviction_ratio)
+            for action in actions:
+                self._execute_eviction_action(state.adapter, action)
 
     def _execute_eviction_action(
         self, adapter: L2AdapterInterface, action: EvictionAction

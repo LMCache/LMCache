@@ -278,7 +278,8 @@ class MPCacheEngine:
         st = time.perf_counter()
 
         assert key.worker_id is not None, "Must store with worker_id != None"
-        obj_keys = ipc_key_to_object_keys(key, chunk_hashes)
+        user_id = key.user_id or session.user_id
+        obj_keys = ipc_key_to_object_keys(key, chunk_hashes, user_id=user_id)
 
         assert instance_id in self.gpu_contexts, (
             f"KV cache not registered for GPU ID {instance_id}"
@@ -416,7 +417,8 @@ class MPCacheEngine:
         st = time.perf_counter()
 
         assert key.worker_id is not None, "Must retrieve with worker_id != None"
-        obj_keys = ipc_key_to_object_keys(key, chunk_hashes)
+        user_id = key.user_id or session.user_id
+        obj_keys = ipc_key_to_object_keys(key, chunk_hashes, user_id=user_id)
 
         assert instance_id in self.gpu_contexts, (
             f"KV cache not registered for GPU ID {instance_id}"
@@ -619,6 +621,12 @@ class MPCacheEngine:
 
         extra_count = compute_extra_count(tp_size, world_size)
 
+        # Resolve user_id from key and cache on session
+        session = self.session_manager.get_or_create(key.request_id)
+        if key.user_id:
+            session.user_id = key.user_id
+        user_id = session.user_id
+
         # Compute chunk hashes for all full chunks
         chunk_hashes = self.token_hasher.compute_chunk_hashes(list(key.token_ids))
         if not chunk_hashes:
@@ -635,7 +643,7 @@ class MPCacheEngine:
                     request_id=key.request_id,
                 )
             )
-        obj_keys = ipc_key_to_object_keys(key, chunk_hashes)
+        obj_keys = ipc_key_to_object_keys(key, chunk_hashes, user_id=user_id)
 
         handle = self.storage_manager.submit_prefetch_task(
             obj_keys,
@@ -763,7 +771,10 @@ class MPCacheEngine:
         )
         if not chunk_hashes:
             return
-        obj_keys = ipc_key_to_object_keys(key, chunk_hashes)
+
+        session = self.session_manager.get_or_create(key.request_id)
+        user_id = key.user_id or session.user_id
+        obj_keys = ipc_key_to_object_keys(key, chunk_hashes, user_id=user_id)
 
         extra_count = compute_extra_count(tp_size, key.world_size)
 
@@ -850,6 +861,22 @@ class MPCacheEngine:
                 metadata={"records": records},
             )
         )
+
+    def get_quota_manager(self):
+        """Return the per-user quota manager from the storage manager.
+
+        Returns:
+            QuotaManager instance or None if not available.
+        """
+        return self.storage_manager.get_quota_manager()
+
+    def get_l2_adapters(self):
+        """Return the list of L2 adapters from the storage manager.
+
+        Returns:
+            list[L2AdapterInterface]: The L2 adapter instances.
+        """
+        return self.storage_manager.get_l2_adapters()
 
     def debug(self) -> str:
         return "OK"

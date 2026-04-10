@@ -331,6 +331,19 @@ class L2AdapterInterface(ABC):
         """
         return (-1.0, -1.0)
 
+    def get_per_user_usage(self) -> dict[str, tuple[float, float]]:
+        """Return per-user L2 storage utilization.
+
+        Returns:
+            dict[str, tuple[float, float]]: Mapping of user_id to
+                ``(current_bytes, projected_bytes)`` where each value
+                is the number of bytes used (not a fraction). The
+                caller compares against the configured per-user limit.
+
+        The default returns an empty dict (no per-user tracking).
+        """
+        return {}
+
     #####################
     # Cleanup Interface
     #####################

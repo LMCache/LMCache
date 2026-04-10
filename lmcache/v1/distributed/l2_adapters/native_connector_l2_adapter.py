@@ -41,7 +41,16 @@ logger = init_logger(__name__)
 
 def _object_key_to_string(key: ObjectKey) -> str:
     """Serialize an ObjectKey to a deterministic string
-    for the native connector."""
+    for the native connector.
+
+    When ``key.user_id`` is non-empty, it is prepended so
+    that different users produce distinct remote keys even
+    for identical model/rank/hash combinations.
+    """
+    if key.user_id:
+        return (
+            f"{key.user_id}@{key.model_name}@{key.kv_rank:08x}@{key.chunk_hash.hex()}"
+        )
     return f"{key.model_name}@{key.kv_rank:08x}@{key.chunk_hash.hex()}"
 
 
@@ -117,6 +126,7 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
         self._max_capacity_bytes = int(max_capacity_gb * (1024**3))
         self._current_size_bytes: int = 0
         self._key_sizes: dict[ObjectKey, int] = {}
+        self._per_user_size_bytes: dict[str, int] = {}
         # Pending store sizes: native future_id -> (keys, per_key_sizes)
         self._pending_store_sizes: dict[int, tuple[list[ObjectKey], list[int]]] = {}
 
@@ -306,6 +316,21 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
             usage = self._current_size_bytes / self._max_capacity_bytes
             return (usage, usage)
 
+    def get_per_user_usage(self) -> dict[str, tuple[float, float]]:
+        """Return per-user L2 storage utilization in bytes.
+
+        Returns:
+            dict[str, tuple[float, float]]: Mapping of user_id to
+                ``(current_bytes, projected_bytes)``. Only users with
+                positive usage are included.
+        """
+        with self._lock:
+            return {
+                uid: (float(bytes_used), float(bytes_used))
+                for uid, bytes_used in self._per_user_size_bytes.items()
+                if bytes_used > 0
+            }
+
     # ---------------------------------------------------------------
     # Cleanup
     # ---------------------------------------------------------------
@@ -391,6 +416,13 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
                                 if key not in self._key_sizes:
                                     self._key_sizes[key] = size
                                     self._current_size_bytes += size
+                                    if key.user_id:
+                                        self._per_user_size_bytes[key.user_id] = (
+                                            self._per_user_size_bytes.get(
+                                                key.user_id, 0
+                                            )
+                                            + size
+                                        )
                             keys_stored.extend(store_keys)
                         os.eventfd_write(self._store_efd, 1)
 
@@ -433,6 +465,13 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
                                     key = lookup_keys[i]
                                     size = self._key_sizes.pop(key, 0)
                                     self._current_size_bytes -= size
+                                    if key.user_id:
+                                        self._per_user_size_bytes[key.user_id] = (
+                                            self._per_user_size_bytes.get(
+                                                key.user_id, 0
+                                            )
+                                            - size
+                                        )
                         evt = self._pending_delete_events.pop(task_id, None)
                         if evt is not None:
                             evt.set()

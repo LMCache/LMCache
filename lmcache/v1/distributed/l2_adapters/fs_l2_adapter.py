@@ -92,7 +92,11 @@ async def _async_readinto_full(
 def _object_key_to_filename(key: ObjectKey) -> str:
     """Build a reversible, filesystem-safe filename.
 
-    Format follows CacheEngineKey.to_string() convention::
+    When ``key.user_id`` is non-empty the format is::
+
+        <user_id>@<model_name>@<kv_rank_hex>@<chunk_hash_hex>.data
+
+    Otherwise the legacy format is used::
 
         <model_name>@<kv_rank_hex>@<chunk_hash_hex>.data
 
@@ -101,6 +105,14 @@ def _object_key_to_filename(key: ObjectKey) -> str:
     is directly readable.
     """
     safe_model = key.model_name.replace("/", _PATH_SLASH_REPLACEMENT)
+    if key.user_id:
+        return (
+            f"{key.user_id}"
+            f"{_KEY_SEP}{safe_model}"
+            f"{_KEY_SEP}{key.kv_rank:#010x}"
+            f"{_KEY_SEP}{key.chunk_hash.hex()}"
+            f"{_FILE_EXT}"
+        )
     return (
         f"{safe_model}"
         f"{_KEY_SEP}{key.kv_rank:#010x}"
@@ -114,6 +126,9 @@ def _filename_to_object_key(
 ) -> Optional[ObjectKey]:
     """Reverse ``_object_key_to_filename``.
 
+    Handles both the 3-field legacy format (no user_id) and
+    the 4-field format with a leading ``user_id`` segment.
+
     Returns ``None`` when the filename cannot be parsed.
     """
     stem = filename
@@ -122,26 +137,38 @@ def _filename_to_object_key(
     else:
         return None
 
-    # Split by ``@``.  Layout:
-    #   <model_name> @ <kv_rank> @ <chunk_hash_hex>
-    # model_name itself may contain ``@``, so we split
-    # from the right to reliably isolate the last two
-    # fields (kv_rank and chunk_hash).
+    # Both formats end with ``@<kv_rank>@<chunk_hash_hex>``.
+    # model_name may contain ``@``, so we split from the
+    # right to reliably isolate the last two fields.
     parts = stem.rsplit(_KEY_SEP, 2)
     if len(parts) != 3:
         return None
 
-    safe_model, kv_rank_str, chunk_hash_hex = parts
+    prefix, kv_rank_str, chunk_hash_hex = parts
     try:
         chunk_hash = bytes.fromhex(chunk_hash_hex)
         kv_rank = int(kv_rank_str, 16)
     except ValueError:
         return None
+
+    # Determine whether the prefix contains a user_id.
+    # The 4-field format has ``<user_id>@<model_name>`` as
+    # prefix.  user_id is guaranteed not to contain ``@``,
+    # so we can split on the first ``@`` to separate it.
+    # We detect the 4-field format by checking whether the
+    # prefix contains a ``@``.
+    if _KEY_SEP in prefix:
+        user_id, safe_model = prefix.split(_KEY_SEP, 1)
+    else:
+        user_id = ""
+        safe_model = prefix
+
     model_name = safe_model.replace(_PATH_SLASH_REPLACEMENT, "/")
     return ObjectKey(
         chunk_hash=chunk_hash,
         model_name=model_name,
         kv_rank=kv_rank,
+        user_id=user_id,
     )
 
 

@@ -353,6 +353,12 @@ class BlendEngineV2(MPCacheEngine):
             List of CBMatchResult for chunks that were actually found in storage,
             ready to be passed to cb_retrieve_pre_computed.
         """
+        # Resolve user_id from key and cache on session
+        session = self.session_manager.get_or_create(key.request_id)
+        if key.user_id:
+            session.user_id = key.user_id
+        user_id = session.user_id
+
         # Fast local pre-filter: find which stored chunks appear in this query
         cb_match_result = self._token_range_matcher.match_sub_sequence(
             list(key.token_ids)
@@ -396,7 +402,7 @@ class BlendEngineV2(MPCacheEngine):
         # Submit prefetch for each group using CBMatchResult.hash directly
         for group in groups:
             chunk_hashes = [r.hash for r in group]
-            obj_keys = ipc_key_to_object_keys(key, chunk_hashes)
+            obj_keys = ipc_key_to_object_keys(key, chunk_hashes, user_id=user_id)
             handle = self.storage_manager.submit_prefetch_task(
                 obj_keys,
                 layout_desc,
@@ -562,11 +568,15 @@ class BlendEngineV2(MPCacheEngine):
             This function will discard the last partial chunk and only store the full
             chunks
         """
+        # Resolve user_id from key/session
+        session = self.session_manager.get_or_create(key.request_id)
+        user_id = key.user_id or session.user_id
+
         # Compute normal prefix hashes so these chunks are accessible both via
         # the CB lookup path and via the standard lookup/retrieve path.
         chunk_hashes = self.token_hasher.compute_chunk_hashes(list(key.token_ids))
         # convert to object key
-        obj_keys = ipc_key_to_object_keys(key, chunk_hashes)
+        obj_keys = ipc_key_to_object_keys(key, chunk_hashes, user_id=user_id)
 
         assert instance_id in self._cb_gpu_contexts, (
             f"Instance ID {instance_id} not registered for CB KV cache"
@@ -631,10 +641,14 @@ class BlendEngineV2(MPCacheEngine):
         )
         gpu_context = self._cb_gpu_contexts[instance_id]
 
+        # Resolve user_id from key/session
+        session = self.session_manager.get_or_create(key.request_id)
+        user_id = key.user_id or session.user_id
+
         # One obj_key per match_result, in cur_st order
         cb_match_result = sorted(cb_match_result, key=lambda r: r.cur_st)
         chunk_hashes = [r.hash for r in cb_match_result]
-        all_obj_keys = ipc_key_to_object_keys(key, chunk_hashes)
+        all_obj_keys = ipc_key_to_object_keys(key, chunk_hashes, user_id=user_id)
 
         logger.debug("DEBUG object keys to retrieve: %s", all_obj_keys)
 
@@ -711,11 +725,15 @@ class BlendEngineV2(MPCacheEngine):
             IPC handle bytes for the event that signals the completion of storing the
             final chunks, and a boolean flag indicating if the store is successful.
         """
+        # Resolve user_id from key/session
+        session = self.session_manager.get_or_create(key.request_id)
+        user_id = key.user_id or session.user_id
+
         # Compute normal hash for the keys
         chunk_hashes = self.token_hasher.compute_chunk_hashes(list(key.token_ids))
 
         # convert to object key
-        obj_keys = ipc_key_to_object_keys(key, chunk_hashes)
+        obj_keys = ipc_key_to_object_keys(key, chunk_hashes, user_id=user_id)
 
         # Get GPU context
         assert instance_id in self._cb_gpu_contexts, (
