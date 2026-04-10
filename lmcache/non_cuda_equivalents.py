@@ -611,7 +611,7 @@ def single_layer_kv_transfer(
     slot_mapping: torch.Tensor,
     direction: TransferDirection,
     gpu_kv_format: GPUKVFormat,
-    token_major: bool,
+    token_major: bool = False,
 ):
     """
     Vectorized Python fallback for single_layer_kv_transfer
@@ -727,7 +727,7 @@ def single_layer_kv_transfer_sgl(
     sgl_value_cache: torch.Tensor,
     slot_mapping: torch.Tensor,
     direction: TransferDirection,
-    token_major: bool,
+    token_major: bool = False,
 ):
     """
     Python fallback implementation of single_layer_kv_transfer_sgl.
