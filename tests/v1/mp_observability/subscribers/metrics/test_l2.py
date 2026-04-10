@@ -53,7 +53,11 @@ def _read_counters() -> dict[str, int]:
         for scope_metrics in resource_metrics.scope_metrics:
             for metric in scope_metrics.metrics:
                 for dp in metric.data.data_points:
-                    result[metric.name] = int(dp.value)
+                    # Only counter/sum data points have .value;
+                    # skip histograms and other types that may be
+                    # registered on the same MeterProvider.
+                    if hasattr(dp, "value"):
+                        result[metric.name] = int(dp.value)
     return result
 
 
