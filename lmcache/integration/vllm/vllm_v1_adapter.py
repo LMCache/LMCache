@@ -1276,7 +1276,6 @@ class LMCacheConnectorV1Impl:
                 token_ids = token_ids.tolist()
 
             request_configs = extract_request_configs(request.sampling_params)
-            user_id = (request_configs or {}).get("lmcache.user_id", "")
             if self.skip_last_n_tokens > 0:
                 token_ids = token_ids[: -self.skip_last_n_tokens]
 
@@ -1284,7 +1283,6 @@ class LMCacheConnectorV1Impl:
                 token_ids,
                 lookup_id=req_id,
                 request_configs=request_configs,
-                user_id=user_id,
             )
 
         if num_external_hit_tokens is None:

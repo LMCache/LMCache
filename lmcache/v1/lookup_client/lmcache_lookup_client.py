@@ -88,7 +88,6 @@ class LMCacheLookupClient(LookupClientInterface):
         token_ids: Union[torch.Tensor, list[int]],
         lookup_id: str,
         request_configs: Optional[dict] = None,
-        user_id: str = "",
     ) -> Optional[int]:
         request_configs_str = ""
         if request_configs is not None and len(request_configs) != 0:
