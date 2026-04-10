@@ -12,7 +12,7 @@
 # Otherwise it execs `buildkite-agent pipeline upload <pipeline.yml>`, adding
 # the real test steps to the build.
 #
-# Set K3_PATH_FILTER_DISABLE=1 in the build environment to bypass the check.
+# Add a "force-ci" label to the PR on GitHub to bypass the check.
 
 set -euo pipefail
 
@@ -28,7 +28,7 @@ if should_skip_ci; then
         buildkite-agent annotate \
             --style success \
             --context "path-filter-skip" \
-            "Skipped: only trivial files (docs, license, etc.) changed. Set \`K3_PATH_FILTER_DISABLE=1\` to force a full run." \
+            "Skipped: only trivial files (docs, license, etc.) changed. Add a \`force-ci\` label to the PR to force a full run." \
             || true
     fi
     exit 0

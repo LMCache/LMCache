@@ -11,7 +11,7 @@ Heavy test (10 parallel GPU steps) — run on `"full"` label or dev push, not ev
 
 > Builds whose only changes are docs/`*.md`/`LICENSE`/`.github/**` auto-pass
 > via the [path filter](../README.md#path-based-skip-auto-pass-on-docs-only-changes).
-> Changes under `.buildkite/` always run. Set `K3_PATH_FILTER_DISABLE=1` to
+> Changes under `.buildkite/` always run. Add `force-ci` label to the PR to
 > bypass.
 
 ## Nightly Scheduled Build (rolling baselines)

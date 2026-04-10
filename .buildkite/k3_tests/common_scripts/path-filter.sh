@@ -19,8 +19,9 @@
 #     affect what the k3 tests do.
 #   - Anything else → build runs.
 #
-# Opt-out: set K3_PATH_FILTER_DISABLE=1 in the build env to disable skipping
-# entirely (useful when re-running a build that was wrongly skipped).
+# Opt-out: add a "force-ci" label to the PR on GitHub. Buildkite exposes
+# PR labels via BUILDKITE_PULL_REQUEST_LABELS; if "force-ci" is present
+# the filter is bypassed and the full pipeline runs.
 #
 # Detection of "changed files":
 #   - PR builds  → diff against the merge-base with BUILDKITE_PULL_REQUEST_BASE_BRANCH.
@@ -96,8 +97,9 @@ _path_filter_get_changed_files() {
 # Returns 0 if the build can be safely skipped, non-zero otherwise.
 # Prints a classification of every changed file to stderr for the build log.
 should_skip_ci() {
-    if [[ "${K3_PATH_FILTER_DISABLE:-0}" == "1" ]]; then
-        echo "path-filter: K3_PATH_FILTER_DISABLE=1 → not skipping" >&2
+    # PR label opt-out: adding "force-ci" on GitHub forces a full run.
+    if [[ ",${BUILDKITE_PULL_REQUEST_LABELS:-}," == *",force-ci,"* ]]; then
+        echo "path-filter: PR has 'force-ci' label → not skipping" >&2
         return 1
     fi
 

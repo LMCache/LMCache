@@ -65,9 +65,9 @@ Detection:
 - If the script can't determine the changed files (shallow clone with no
   parent, missing base branch, etc.) it falls back to "do not skip".
 
-To bypass the skip and force a full run for one build, set the env var
-`K3_PATH_FILTER_DISABLE=1` in the Buildkite UI ("New Build" → Environment
-Variables) or in the pipeline's env block.
+To bypass the skip and force a full run, add the **`force-ci`** label to the
+PR on GitHub. Buildkite picks up PR labels automatically; when the filter
+sees `force-ci` it runs the full pipeline regardless of which files changed.
 
 ### Trigger strategy
 
