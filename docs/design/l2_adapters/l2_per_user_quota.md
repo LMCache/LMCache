@@ -233,6 +233,11 @@ DELETE /api/quota/{user_id}          Remove quota (user's data evicted next cycl
 GET    /api/quota                    List all quotas and per-user usage
 ```
 
+**`_default` sentinel:** Empty strings cannot be URL path parameters. Use
+`_default` as the `user_id` in the URL to refer to the `user_id=""`
+namespace (legacy/anonymous traffic). For example,
+`PUT /api/quota/_default` sets the quota for `user_id=""`.
+
 **`PUT /api/quota/{user_id}`** — Set or update a user's quota.
 `limit_gb` is required.
 
