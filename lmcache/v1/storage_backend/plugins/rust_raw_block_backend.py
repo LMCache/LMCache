@@ -55,6 +55,11 @@ def _validate_per_tp_device_paths(per_tp_devices: PerTPDevicePaths) -> None:
 def _get_per_tp_device_path(
     per_tp_devices: PerTPDevicePaths, tp_rank: int
 ) -> Optional[str]:
+    """Return the configured device path for a TP rank.
+
+    Looks up both string and integer forms of ``tp_rank`` so YAML mappings
+    with either quoted or unquoted numeric keys are accepted.
+    """
     return per_tp_devices.get(str(tp_rank), per_tp_devices.get(tp_rank))
 
 
