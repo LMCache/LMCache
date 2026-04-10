@@ -5,6 +5,7 @@ from __future__ import annotations
 
 # Standard
 from collections import OrderedDict
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Callable, List, Optional, Sequence
 import asyncio
@@ -33,6 +34,8 @@ logger = init_logger(__name__)
 _DEFAULT_META_MAGIC = b"LMCIDX01"
 _DEFAULT_META_VERSION = 1
 _META_HEADER_STRUCT = struct.Struct("<8sIQQI")
+TPRankKey = int | str
+PerTPDevicePaths = Mapping[TPRankKey, str]
 
 
 def _round_up(x: int, align: int) -> int:
@@ -40,7 +43,7 @@ def _round_up(x: int, align: int) -> int:
     return ((x + align - 1) // align) * align
 
 
-def _validate_per_tp_device_paths(per_tp_devices: Any) -> None:
+def _validate_per_tp_device_paths(per_tp_devices: PerTPDevicePaths) -> None:
     """Validate per-TP device mapping and enforce unique paths."""
     values = list(per_tp_devices.values())
     if len(values) != len(set(values)):
@@ -49,7 +52,9 @@ def _validate_per_tp_device_paths(per_tp_devices: Any) -> None:
         )
 
 
-def _get_per_tp_device_path(per_tp_devices: dict[Any, Any], tp_rank: int) -> Any:
+def _get_per_tp_device_path(
+    per_tp_devices: PerTPDevicePaths, tp_rank: int
+) -> Optional[str]:
     return per_tp_devices.get(str(tp_rank), per_tp_devices.get(tp_rank))
 
 
@@ -129,6 +134,11 @@ class RustRawBlockBackend(StoragePluginInterface):
         if self.metadata is not None and self.metadata.world_size > 1:
             tp_rank = self.metadata.worker_id
             per_tp_devices = extra.get("rust_raw_block.per_tp_device_paths", {})
+            if not isinstance(per_tp_devices, Mapping):
+                raise ValueError(
+                    "rust_raw_block.per_tp_device_paths must be a mapping from "
+                    "TP rank to device path"
+                )
 
             if not per_tp_devices:
                 raise ValueError(
@@ -138,12 +148,13 @@ class RustRawBlockBackend(StoragePluginInterface):
             _validate_per_tp_device_paths(per_tp_devices)
 
             tp_rank_str = str(tp_rank)
-            self.device_path = _get_per_tp_device_path(per_tp_devices, tp_rank)
-            if not self.device_path:
+            device_path = _get_per_tp_device_path(per_tp_devices, tp_rank)
+            if not device_path:
                 raise ValueError(
                     f"No device path configured for TP rank {tp_rank_str}. "
                     f"Available ranks: {list(per_tp_devices.keys())}"
                 )
+            self.device_path = device_path
             logger.info(
                 f"RustRawBlockBackend: TP={self.metadata.world_size} mode, "
                 f"using explicit device path for rank {tp_rank}: {self.device_path}"
