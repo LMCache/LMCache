@@ -8,8 +8,9 @@
 
 Lightweight (1 GPU) — good candidate for a required GitHub status check.
 
-> Builds whose only changes are docs/`*.md`/`LICENSE`/`.github/**` auto-pass
-> via the [path filter](../README.md#path-based-skip-auto-pass-on-docs-only-changes)
-> baked into `pipeline.yml`. Changes under `.buildkite/` always run. Set
-> `K3_PATH_FILTER_DISABLE=1` to bypass. The filter lives in the repo, not
-> in the Buildkite UI, so editing it never requires re-pasting anything.
+> **One-time UI update required**: re-paste `buildkite-pipeline.yml` into the
+> Steps editor after merging. Builds whose only changes are
+> docs/`*.md`/`LICENSE`/`.github/**` then auto-pass via the
+> [path filter](../README.md#path-based-skip-auto-pass-on-docs-only-changes).
+> Changes under `.buildkite/` always run. Set `K3_PATH_FILTER_DISABLE=1` to
+> bypass.

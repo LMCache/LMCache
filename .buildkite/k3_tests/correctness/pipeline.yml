@@ -1,19 +1,27 @@
-# Path-filter shim. Single tiny step that decides whether to upload the
-# real test pipeline (steps.yml) or skip the build entirely.
-#
-# Why this file exists:
-# The Buildkite Web UI's upload command points at this pipeline.yml. Putting
-# the filter here means the filter logic can be edited freely in the repo
-# without anyone needing to re-paste anything in the Buildkite UI.
-#
-# - All trivial files changed → upload-pipeline.sh exits 0, no further steps
-#   are added, the build is green with just this filter step.
-# - Anything non-trivial changed → upload-pipeline.sh execs
-#   `buildkite-agent pipeline upload steps.yml`, the real test steps are
-#   added to the build, and they run as before.
-# - Set K3_PATH_FILTER_DISABLE=1 in the build env to bypass the filter.
+# Correctness test — verifies LMCache produces identical output to base vLLM.
+# Runs: base vLLM → LMCache vLLM → man bash prefix test → ShareGPT diff.
+# Requires pre-downloaded model weights and ShareGPT dataset.
 
 steps:
-  - label: ":mag: Path filter"
-    command: bash .buildkite/k3_tests/common_scripts/upload-pipeline.sh .buildkite/k3_tests/correctness/steps.yml
+  - label: ":white_check_mark: Correctness"
+    command: .buildkite/k3_tests/correctness/run.sh
+    timeout_in_minutes: 30
     agents: { queue: "k8s" }
+    plugins:
+      - kubernetes:
+          podSpec:
+            containers:
+              - name: container-0
+                image: lmcache/ci-base:latest
+                imagePullPolicy: Never
+                resources:
+                  limits:
+                    nvidia.com/gpu: "1"
+                volumeMounts:
+                  - { name: hf-cache, mountPath: /root/.cache/huggingface }
+                  - { name: datasets, mountPath: /root/correctness }
+            volumes:
+              - { name: hf-cache, hostPath: { path: /data/huggingface, type: DirectoryOrCreate } }
+              - { name: datasets, hostPath: { path: /data/datasets, type: DirectoryOrCreate } }
+    artifact_paths:
+      - "build_*.log"
