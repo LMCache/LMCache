@@ -444,6 +444,7 @@ class LocalDiskBackend(StorageBackendInterface):
     ) -> list[MemoryObj]:
         mem_objs: list[MemoryObj] = []
         paths: list[str] = []
+        pinned_disk_keys: list[CacheEngineKey] = []
 
         logger.debug(f"lookup_id: {lookup_id}; Prefetching {len(keys)} keys from disk.")
         for key in keys:
@@ -472,12 +473,26 @@ class LocalDiskBackend(StorageBackendInterface):
                 logger.error(
                     "Memory allocation failed during async disk load for key %s. "
                     "CPU staging pool may be exhausted (unpin() not called after "
-                    "a previous retrieve). Returning partial results.",
+                    "a previous retrieve). Unpinning %d previously pinned disk "
+                    "keys and returning partial results.",
                     key,
+                    len(pinned_disk_keys),
                 )
-                return mem_objs
+                # Unpin all disk entries we pinned in this batch to prevent
+                # pin deadlock — without this, pinned objects hold CPU memory
+                # references that can never be freed, eventually exhausting
+                # the CPU staging pool and hanging the engine.
+                for pinned_key in pinned_disk_keys:
+                    if pinned_key in self.dict:
+                        self.dict[pinned_key].unpin()
+                for mo in mem_objs:
+                    if mo.is_pinned:
+                        mo.unpin()
+                self.disk_lock.release()
+                return []
 
             self.dict[key].pin()
+            pinned_disk_keys.append(key)
 
             # NOTE(Jiayi): Currently, we consider prefetch as cache hit.
             # Update cache recency
