@@ -30,7 +30,15 @@ class PromptBuilder:
         prompt: str,
         documents_args: Optional[list[str]] = None,
     ) -> str:
-        """Expand placeholders and return the complete prompt text."""
+        """Expand placeholders and return the complete prompt text.
+
+        Args:
+            prompt: The prompt template string with {name} placeholders.
+            documents_args: Optional list of document paths or NAME=PATH strings.
+
+        Returns:
+            The expanded prompt string.
+        """
         docs_args = documents_args or []
         documents, appended_text = resolve_documents(prompt, docs_args)
 
@@ -53,7 +61,16 @@ class PromptBuilder:
 def resolve_documents(
     prompt_template: str, documents_args: list[str]
 ) -> tuple[dict[str, str], str]:
-    """Resolve ``--documents`` args into placeholder mapping and trailing text."""
+    """Resolve ``--documents`` args into placeholder mapping and trailing text.
+
+    Args:
+        prompt_template: The prompt string containing placeholders.
+        documents_args: List of document arguments from the CLI.
+
+    Returns:
+        A tuple containing a dictionary mapping placeholder names to document
+        content and a string containing any appended document text.
+    """
     placeholders = _unique_placeholders(prompt_template)
     documents: dict[str, str] = {}
     plain_docs: list[str] = []
@@ -83,7 +100,14 @@ def resolve_documents(
 
 
 def unknown_documents(key: str) -> None:
-    """Raise an error for a missing documents placeholder."""
+    """Raise an error for a missing documents placeholder.
+
+    Args:
+        key: The name of the missing placeholder.
+
+    Raises:
+        ValueError: Always raised with a descriptive message.
+    """
     raise ValueError(
         f"Unknown documents {key!r}. Define it with --documents {key}=PATH "
     )

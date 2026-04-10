@@ -137,10 +137,12 @@ class QueryCommand(BaseCommand):
             metrics.add("model", "Model", model_id)
             prompt_name, prompt_value = engine_stats["prompt_tokens"]
             metrics.add("prompt_tokens", prompt_name, int(prompt_value))
+            output_name, output_value = engine_stats["output_tokens"]
+            metrics.add("output_tokens", output_name, int(output_value))
 
             latency = metrics.add_section("latency", "Latency Metrics")
             for key, (name, value) in engine_stats.items():
-                if key in ("model", "prompt_tokens"):
+                if key in ("model", "prompt_tokens", "output_tokens"):
                     continue
                 latency.add(key, name, round(float(value), 2))
 
