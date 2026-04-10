@@ -7,7 +7,7 @@ from __future__ import annotations
 from collections import OrderedDict
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import Any, Callable, List, Literal, Optional, Sequence, cast, overload
+from typing import Any, Callable, List, Optional, Sequence, cast
 import asyncio
 import ctypes
 import mmap
@@ -621,9 +621,13 @@ class DaxBackend(StoragePluginInterface):
         if not keys:
             return []
 
+        dispatch_executor = self._restore_dispatch_executor
+        if dispatch_executor is None:
+            raise RuntimeError("DaxBackend restore dispatch executor is not available")
+
         loop = asyncio.get_running_loop()
         result = await loop.run_in_executor(
-            self._get_restore_dispatch_executor(),
+            dispatch_executor,
             self._restore_batch,
             list(keys),
             True,
@@ -650,14 +654,18 @@ class DaxBackend(StoragePluginInterface):
         if not keys:
             return []
 
+        dispatch_executor = self._restore_dispatch_executor
+        if dispatch_executor is None:
+            raise RuntimeError("DaxBackend restore dispatch executor is not available")
+
         batch_keys = list(keys)
-        if self._is_restore_dispatch_thread():
+        if threading.current_thread().name.startswith("dax-restore-dispatch"):
             return cast(
                 List[Optional[MemoryObj]],
                 self._restore_batch(batch_keys, False),
             )
 
-        future = self._get_restore_dispatch_executor().submit(
+        future = dispatch_executor.submit(
             self._restore_batch,
             batch_keys,
             False,
@@ -779,7 +787,6 @@ class DaxBackend(StoragePluginInterface):
         key: str,
         default: int,
     ) -> int:
-        """Parse a positive integer extra-config value with a fallback default."""
         value = extra_config.get(key, default)
         try:
             parsed = int(value)
@@ -793,13 +800,7 @@ class DaxBackend(StoragePluginInterface):
         self,
         restore_slab_ptr: Optional[int] = None,
     ) -> None:
-        """Shut down restore executors and free the pinned retrieve slab.
-
-        Args:
-            restore_slab_ptr: Optional slab pointer to free instead of the
-                backend-owned live slab pointer. ``close()`` uses this after it
-                clears the live pointer under the state lock.
-        """
+        """Shut down restore executors and free the pinned retrieve slab."""
         dispatch_executor = self._restore_dispatch_executor
         if dispatch_executor is not None:
             dispatch_executor.shutdown(wait=True)
@@ -832,13 +833,6 @@ class DaxBackend(StoragePluginInterface):
         mmap_obj: Optional[mmap.mmap],
         arena_view: Optional[memoryview],
     ) -> None:
-        """Release the mmap-backed DAX arena resources in reverse ownership order.
-
-        Args:
-            fd: File descriptor for the DAX device.
-            mmap_obj: Mapped arena object created from ``fd``.
-            arena_view: Python ``memoryview`` exposing ``mmap_obj``.
-        """
         if arena_view is not None:
             try:
                 arena_view.release()
@@ -858,11 +852,6 @@ class DaxBackend(StoragePluginInterface):
                 logger.warning("Failed to close DAX fd: %s", e)
 
     def _open_arena(self) -> None:
-        """Open and mmap the configured DAX device into backend-owned state.
-
-        Raises:
-            RuntimeError: If the device cannot be opened, sized, or mmapped.
-        """
         fd: Optional[int] = None
         mmap_obj: Optional[mmap.mmap] = None
         arena_view: Optional[memoryview] = None
@@ -1012,16 +1001,7 @@ class DaxBackend(StoragePluginInterface):
         *,
         prefix_only: bool,
     ) -> tuple[list[_RestoreItem], list[Optional[MemoryObj]]]:
-        """Reserve readable entries for one restore batch.
-
-        Args:
-            keys: Ordered cache keys requested by the caller.
-            prefix_only: If ``True``, stop at the first miss or unreadable entry.
-
-        Returns:
-            A tuple of the reserved restore items and a result list aligned with
-            ``keys``. Missing entries remain ``None`` in the result list.
-        """
+        """Reserve readable entries and build the aligned result list."""
         results: list[Optional[MemoryObj]] = [None] * len(keys)
         reserved: list[_RestoreItem] = []
 
@@ -1077,17 +1057,6 @@ class DaxBackend(StoragePluginInterface):
         return reserved, results
 
     def _allocate_restore_outputs(self, reserved: Sequence[_RestoreItem]) -> None:
-        """Allocate CPU restore outputs and attach them to reserved items.
-
-        Groups items by shape, dtype, and memory format so the local CPU backend
-        can reuse its batched allocator when possible.
-
-        Args:
-            reserved: Reserved restore items for one batch.
-
-        Raises:
-            RuntimeError: If output allocation fails for any reserved item.
-        """
         assert self.local_cpu_backend is not None
 
         grouped_items: OrderedDict[
@@ -1133,15 +1102,7 @@ class DaxBackend(StoragePluginInterface):
         self,
         reserved: Sequence[_RestoreItem],
     ) -> list[_RestoreWave]:
-        """Plan slab-backed restore work as sequential waves of parallel regions.
-
-        Args:
-            reserved: Reserved restore items with output buffers attached.
-
-        Returns:
-            A restore plan that respects the fixed staging slab capacity while
-            coalescing adjacent DAX spans inside each region.
-        """
+        """Plan slab-backed restore work as waves of parallel regions."""
         if not reserved:
             return []
 
@@ -1215,13 +1176,6 @@ class DaxBackend(StoragePluginInterface):
         dst_ptrs: Sequence[int],
         sizes: Sequence[int],
     ) -> None:
-        """Copy multiple pointer ranges, using the native helper when available.
-
-        Args:
-            src_ptrs: Source pointers for each copy.
-            dst_ptrs: Destination pointers for each copy.
-            sizes: Copy sizes in bytes for each source/destination pair.
-        """
         if not src_ptrs:
             return
         if hasattr(lmc_ops, "batched_memcpy"):
@@ -1236,12 +1190,6 @@ class DaxBackend(StoragePluginInterface):
             )
 
     def _restore_region(self, region: _RestoreRegion) -> None:
-        """Restore one region from DAX into the slab and then into outputs.
-
-        Args:
-            region: Planned restore region whose slab offsets are disjoint from
-                the other regions in the same wave.
-        """
         if region.total_bytes <= 0 or not region.items:
             return
         if self._retrieve_staging_slab_ptr == 0:
@@ -1259,18 +1207,6 @@ class DaxBackend(StoragePluginInterface):
         self._batched_memcpy(slab_src_ptrs, dst_ptrs, out_sizes)
 
     def _run_restore_waves(self, waves: Sequence[_RestoreWave]) -> None:
-        """Execute restore waves on the persistent worker pool.
-
-        Regions within a wave run in parallel, while waves run sequentially so
-        they can reuse the fixed-size staging slab safely.
-
-        Args:
-            waves: Planned restore waves for one batch.
-
-        Raises:
-            RuntimeError: If the restore worker pool is unavailable.
-            Exception: Propagates any worker failure from a restore region.
-        """
         restore_executor = self._restore_executor
         if restore_executor is None:
             raise RuntimeError("DaxBackend restore executor is not available")
@@ -1285,12 +1221,6 @@ class DaxBackend(StoragePluginInterface):
                 future.result()
 
     def _cleanup_restore_outputs(self, reserved: Sequence[_RestoreItem]) -> None:
-        """Release any allocated restore outputs after a restore failure.
-
-        Args:
-            reserved: Reserved restore items whose ``memory_obj`` values may
-                already own CPU buffers.
-        """
         for item in reserved:
             if item.memory_obj is not None:
                 item.memory_obj.ref_count_down()
@@ -1302,12 +1232,6 @@ class DaxBackend(StoragePluginInterface):
         *,
         touched_keys: Optional[set[CacheEngineKey]] = None,
     ) -> None:
-        """Release borrow state for reserved items and finalize slot bookkeeping.
-
-        Args:
-            reserved: Reserved restore items to release.
-            touched_keys: Keys whose successful restore should refresh LRU state.
-        """
         if not reserved:
             return
         touched_keys = touched_keys or set()
@@ -1339,37 +1263,12 @@ class DaxBackend(StoragePluginInterface):
 
             self._state_condition.notify_all()
 
-    @overload
-    def _restore_batch(
-        self,
-        keys: list[CacheEngineKey],
-        prefix_only: Literal[True],
-    ) -> list[MemoryObj]: ...
-
-    @overload
-    def _restore_batch(
-        self,
-        keys: list[CacheEngineKey],
-        prefix_only: Literal[False],
-    ) -> list[Optional[MemoryObj]]: ...
-
     def _restore_batch(
         self,
         keys: list[CacheEngineKey],
         prefix_only: bool,
-    ) -> list[MemoryObj] | list[Optional[MemoryObj]]:
-        """Restore one batch of keys through the staged DAX retrieve pipeline.
-
-        Args:
-            keys: Ordered cache keys to restore.
-            prefix_only: If ``True``, return only the consecutive restored hit
-                prefix. If ``False``, preserve positional alignment with
-                ``keys`` and keep misses as ``None``.
-
-        Returns:
-            The restored prefix or the input-aligned result list, depending on
-            ``prefix_only``.
-        """
+    ) -> list[Optional[MemoryObj]]:
+        """Restore one batch of keys through the staged DAX retrieve pipeline."""
         reserved, results = self._reserve_restore_items(keys, prefix_only=prefix_only)
         if not reserved:
             return [] if prefix_only else results
@@ -1392,26 +1291,10 @@ class DaxBackend(StoragePluginInterface):
         self._finalize_reserved_items(reserved, touched_keys=touched_keys)
         if prefix_only:
             return cast(
-                list[MemoryObj],
+                list[Optional[MemoryObj]],
                 [cast(MemoryObj, results[item.result_index]) for item in reserved],
             )
         return results
-
-    def _get_restore_dispatch_executor(self) -> ThreadPoolExecutor:
-        """Return the single-worker executor that serializes restore batches.
-
-        Raises:
-            RuntimeError: If the restore dispatch executor is unavailable.
-        """
-        dispatch_executor = self._restore_dispatch_executor
-        if dispatch_executor is None:
-            raise RuntimeError("DaxBackend restore dispatch executor is not available")
-        return dispatch_executor
-
-    @staticmethod
-    def _is_restore_dispatch_thread() -> bool:
-        """Return ``True`` when running on the restore dispatch worker thread."""
-        return threading.current_thread().name.startswith("dax-restore-dispatch")
 
     def _do_write(self, offset: int, memory_obj: MemoryObj, size: int) -> None:
         ctypes.memmove(
