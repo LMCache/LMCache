@@ -255,3 +255,19 @@ class TestLRUEvictionPolicyCandidates:
         policy.on_keys_created([make_key(1), make_key(2)])
         candidates = policy.get_eviction_candidates(10)
         assert len(candidates) == 2
+
+
+class TestLRUEvictionPolicyBackwardCompatibility:
+    """Tests for backward compatibility with the user_id parameter."""
+
+    def test_get_eviction_actions_ignores_user_id(self):
+        """LRU policy ignores user_id and returns global LRU results."""
+        policy = LRUEvictionPolicy()
+        policy.on_keys_created([make_key(i) for i in range(10)])
+
+        # Call with user_id — should be ignored, return global results
+        actions_with_user = policy.get_eviction_actions(0.5, user_id="alice")
+        actions_without_user = policy.get_eviction_actions(0.5)
+
+        assert len(actions_with_user) == len(actions_without_user)
+        assert len(actions_with_user[0].keys) == len(actions_without_user[0].keys)
