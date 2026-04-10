@@ -239,7 +239,6 @@ class L2EvictionController(StorageControllerInterface):
         if isinstance(policy, UserLRUEvictionPolicy) and self._quota_manager:
             # UserLRU: per-user watermark check
             per_user_usage = state.adapter.get_per_user_usage()
-            logger.info(str(per_user_usage))
             for user_id, (user_bytes, _) in per_user_usage.items():
                 limit = self._quota_manager.get_limit_bytes(user_id)
                 if user_bytes <= watermark * limit:
