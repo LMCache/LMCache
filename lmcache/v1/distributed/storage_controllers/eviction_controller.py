@@ -239,20 +239,25 @@ class L2EvictionController(StorageControllerInterface):
         if isinstance(policy, UserLRUEvictionPolicy) and self._quota_manager:
             # UserLRU: per-user watermark check
             per_user_usage = state.adapter.get_per_user_usage()
+            logger.info(str(per_user_usage))
             for user_id, (user_bytes, _) in per_user_usage.items():
                 limit = self._quota_manager.get_limit_bytes(user_id)
                 if user_bytes <= watermark * limit:
                     continue
 
+                # Quota 0 means unauthorized — evict everything.
+                # Otherwise evict the configured ratio.
+                effective_ratio = 1.0 if limit == 0 else eviction_ratio
                 logger.info(
                     "User %s L2 usage %.2f GB exceeds watermark "
-                    "(%.0f%%) of quota %.2f GB; evicting.",
+                    "(%.0f%%) of quota %.2f GB; evicting (ratio=%.2f).",
                     user_id,
                     user_bytes / (1024**3),
                     watermark * 100,
                     limit / (1024**3),
+                    effective_ratio,
                 )
-                actions = policy.get_eviction_actions(eviction_ratio, user_id=user_id)
+                actions = policy.get_eviction_actions(effective_ratio, user_id=user_id)
                 for action in actions:
                     self._execute_eviction_action(state.adapter, action)
         else:
