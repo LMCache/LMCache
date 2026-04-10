@@ -132,3 +132,30 @@ def test_segment_token_database(prefix_length, chunk_lengths):
         assert key.chunk_hash == hashes[i]
         # print(st, starts[i])
         # print(ed, ends[i])
+
+
+def test_hash_tokens_returns_int_for_bytes_hash_func() -> None:
+    """_hash_tokens must return int even when the underlying hash function
+    returns bytes (e.g. sha256_cbor). This ensures downstream code such as
+    msgpack serialisation and CacheEngineKey always receives plain ints.
+    """
+    import hashlib
+
+    cfg = LMCacheEngineConfig.from_legacy(chunk_size=16, backend="cpu")
+    metadata = dumb_metadata()
+    db = ChunkedTokenDatabase(cfg, metadata)
+
+    # Replace hash_func with a bytes-returning stub that mimics sha256_cbor.
+    def _bytes_hash(x) -> bytes:
+        import cbor2
+
+        return hashlib.sha256(cbor2.dumps(x)).digest()
+
+    db.hash_func = _bytes_hash
+
+    tokens = generate_tokens(32, "cpu")
+    result = db._hash_tokens(tokens[:16])
+
+    assert isinstance(result, int), f"Expected int, got {type(result)}"
+    # Must fit in uint64 (msgpack range)
+    assert 0 <= result <= 2**64 - 1

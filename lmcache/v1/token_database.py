@@ -263,7 +263,13 @@ class TokenDatabase(metaclass=abc.ABCMeta):
             prefix_hash, tokens_tuple, extra_keys
         )
 
-        return self.hash_func((canon_prefix, canon_tokens, canon_extra))
+        result = self.hash_func((canon_prefix, canon_tokens, canon_extra))
+        # sha256_cbor returns a 32-byte digest; fold it into a uint64 so that
+        # downstream code (msgpack serialisation, CacheEngineKey) always works
+        # with plain ints regardless of the configured hash algorithm.
+        if isinstance(result, bytes):
+            result = int.from_bytes(result[:8], "big")
+        return result
 
 
 class ChunkedTokenDatabase(TokenDatabase):
