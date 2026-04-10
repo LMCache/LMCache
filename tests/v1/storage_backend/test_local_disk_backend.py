@@ -463,6 +463,35 @@ class TestLocalDiskBackend:
             local_disk_backend.close()
             local_cpu_backend.memory_allocator.close()
 
+    def test_manifest_write_cleans_temp_file_when_dump_fails(
+        self, temp_disk_path, monkeypatch
+    ):
+        """Test manifest temp files are removed if JSON serialization fails."""
+        manifest = local_disk_backend_module._LocalDiskManifest(
+            cache_dir=temp_disk_path,
+            version=1,
+            entries={"key": {"path": "entry.pt", "size": 1}},
+        )
+        manifest_path = os.path.join(temp_disk_path, "manifest.json")
+        created_tmp_paths: list[str] = []
+
+        original_dump = local_disk_backend_module.json.dump
+
+        def failing_dump(obj, fp, *args, **kwargs):
+            created_tmp_paths.append(fp.name)
+            fp.write("{")
+            fp.flush()
+            raise OSError("disk full")
+
+        monkeypatch.setattr(local_disk_backend_module.json, "dump", failing_dump)
+
+        manifest.write(manifest_path)
+
+        assert created_tmp_paths
+        assert not os.path.exists(created_tmp_paths[0])
+        assert not os.path.exists(manifest_path)
+        monkeypatch.setattr(local_disk_backend_module.json, "dump", original_dump)
+
     def test_submit_put_task_saves_manifest_once_for_batched_eviction(
         self, temp_disk_path, loop_in_thread, memory_allocator, monkeypatch
     ):

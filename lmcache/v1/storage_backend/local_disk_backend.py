@@ -138,6 +138,7 @@ class _LocalDiskManifest:
                 suffix=".tmp",
                 delete=False,
             ) as f:
+                tmp_path = f.name
                 json.dump(
                     {
                         "version": self.version,
@@ -145,7 +146,6 @@ class _LocalDiskManifest:
                     },
                     f,
                 )
-                tmp_path = f.name
             os.replace(tmp_path, manifest_path)
         except FileNotFoundError:
             if os.path.isdir(manifest_dir):
