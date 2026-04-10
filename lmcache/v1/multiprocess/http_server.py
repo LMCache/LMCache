@@ -154,7 +154,14 @@ async def status(request: Request):
 class QuotaSetRequest(BaseModel):
     """Request body for setting a user's quota."""
 
+    user_id: str
     limit_gb: float
+
+
+class QuotaDeleteRequest(BaseModel):
+    """Request body for deleting a user's quota."""
+
+    user_id: str
 
 
 def _get_quota_manager(request: Request):
@@ -192,13 +199,12 @@ def _get_per_user_usage(request: Request) -> dict[str, tuple[float, float]]:
     return combined
 
 
-@app.put("/api/quota/{user_id}")
-async def set_quota(user_id: str, body: QuotaSetRequest, request: Request):
+@app.put("/api/quota")
+async def set_quota(body: QuotaSetRequest, request: Request):
     """Set or update the storage quota for a user.
 
     Args:
-        user_id: The user to set a quota for.
-        body: JSON body with ``limit_gb`` field.
+        body: JSON body with ``user_id`` and ``limit_gb`` fields.
         request: The incoming HTTP request.
 
     Returns:
@@ -211,21 +217,24 @@ async def set_quota(user_id: str, body: QuotaSetRequest, request: Request):
             content={"status": "error", "reason": "quota manager not available"},
         )
     try:
-        qm.set_quota(user_id, body.limit_gb)
+        qm.set_quota(body.user_id, body.limit_gb)
     except ValueError as e:
         return JSONResponse(
             status_code=400,
             content={"status": "error", "reason": str(e)},
         )
-    return {"user_id": user_id, "limit_gb": body.limit_gb, "status": "ok"}
+    return {"user_id": body.user_id, "limit_gb": body.limit_gb, "status": "ok"}
 
 
-@app.get("/api/quota/{user_id}")
-async def get_quota(user_id: str, request: Request):
+@app.post("/api/quota/get")
+async def get_quota(body: QuotaDeleteRequest, request: Request):
     """Get quota and current usage for a user.
 
+    Uses POST with JSON body instead of GET with path parameter so that
+    ``user_id=""`` (empty string) is supported.
+
     Args:
-        user_id: The user to query.
+        body: JSON body with ``user_id`` field.
         request: The incoming HTTP request.
 
     Returns:
@@ -237,6 +246,7 @@ async def get_quota(user_id: str, request: Request):
             status_code=503,
             content={"status": "error", "reason": "quota manager not available"},
         )
+    user_id = body.user_id
     limit_bytes = qm.get_limit_bytes(user_id)
     exists = limit_bytes > 0
 
@@ -251,14 +261,17 @@ async def get_quota(user_id: str, request: Request):
     }
 
 
-@app.delete("/api/quota/{user_id}")
-async def delete_quota(user_id: str, request: Request):
+@app.post("/api/quota/delete")
+async def delete_quota(body: QuotaDeleteRequest, request: Request):
     """Remove the quota entry for a user.
 
     The user's cached data will be evicted at the next eviction cycle.
 
+    Uses POST with JSON body instead of DELETE with path parameter so
+    that ``user_id=""`` (empty string) is supported.
+
     Args:
-        user_id: The user whose quota should be removed.
+        body: JSON body with ``user_id`` field.
         request: The incoming HTTP request.
 
     Returns:
@@ -270,8 +283,8 @@ async def delete_quota(user_id: str, request: Request):
             status_code=503,
             content={"status": "error", "reason": "quota manager not available"},
         )
-    qm.remove_quota(user_id)
-    return {"user_id": user_id, "status": "removed"}
+    qm.remove_quota(body.user_id)
+    return {"user_id": body.user_id, "status": "removed"}
 
 
 @app.get("/api/quota")
