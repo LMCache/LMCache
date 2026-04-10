@@ -156,6 +156,31 @@ class LocalDiskBackend(StorageBackendInterface):
         self.max_cache_size = int(config.max_local_disk_size * 1024**3)
         self.current_cache_size = 0.0
 
+        # Clean up leftover cache files from previous container lifecycle.
+        # Without this, current_cache_size=0 doesn't match the actual on-disk
+        # footprint, causing eviction to fire late and disk to exceed
+        # max_cache_size. See neuralwatt/inference_frontend#1900
+        # (startup-state-recovery bug).
+        import glob
+        leftover_pattern = os.path.join(self.path, "*.pt")
+        leftovers = glob.glob(leftover_pattern)
+        if leftovers:
+            leftover_bytes = sum(os.path.getsize(f) for f in leftovers)
+            logger.info(
+                "Cleaning up %d leftover cache files from %s (%.3f GiB) "
+                "to prevent eviction-accounting drift",
+                len(leftovers),
+                self.path,
+                leftover_bytes / (1024**3),
+            )
+            for f in leftovers:
+                try:
+                    os.remove(f)
+                except OSError as e:
+                    logger.warning(
+                        "Failed to remove leftover cache file %s: %s", f, e
+                    )
+
         # to help maintain suffix -> prefix order in the dict
         # assumption: only one request is looked up at a time
         # (only one worker per cache engine)
