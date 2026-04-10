@@ -396,7 +396,9 @@ def multi_layer_kv_transfer(
     page_buffer_size: int,
     direction: TransferDirection,
     gpu_kv_format: GPUKVFormat,
-    block_size: int,
+    block_size: int = 0,
+    head_size: int = 0,
+    skip_prefix_n_tokens: int = 0,
 ):
     """
     Fully vectorized Python fallback for multi_layer_kv_transfer.
@@ -407,12 +409,32 @@ def multi_layer_kv_transfer(
             f"Expected torch.Tensor or list, but got {type(key_value_ptrs).__name__}"
         )
 
+    # TODO: Implement head_size support for HND layouts (NL_X_TWO_NB_NH_BS_HS,
+    # NL_X_NB_TWO_NH_BS_HS) as next step.
+    if gpu_kv_format in (
+        GPUKVFormat.NL_X_TWO_NB_NH_BS_HS,
+        GPUKVFormat.NL_X_NB_TWO_NH_BS_HS,
+    ):
+        raise NotImplementedError(
+            "HND layouts (NL_X_TWO_NB_NH_BS_HS, NL_X_NB_TWO_NH_BS_HS) "
+            "are not supported in the non-CUDA fallback. "
+            "head_size parameter is required but not implemented in this path."
+        )
+
     # 1. Filter out invalid slots.
     #    valid_mask_kv:  on key_value.device, used to index key_value
     #    valid_slots:    on paged_memory_device, used to index paged_tensor
     kv_device = key_value.device
     slots_kv = slot_mapping.to(dtype=torch.long).to(kv_device)
     valid_mask_kv = slots_kv >= 0
+    # Skip the first skip_prefix_n_tokens tokens from transfer.
+    # This matches the CUDA kernel semantics where the grid starts at
+    # token_id=0 but indexes key_value/slot_mapping at
+    # kv_token_id = token_id + skip_prefix_n_tokens.
+    # By masking them as invalid, the vectorized indexing via valid_mask_kv
+    # naturally skips them while keeping key_value indices aligned.
+    if skip_prefix_n_tokens > 0:
+        valid_mask_kv[:skip_prefix_n_tokens] = False
     if not valid_mask_kv.any():
         return
 
