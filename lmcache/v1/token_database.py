@@ -71,6 +71,10 @@ class TokenDatabase(metaclass=abc.ABCMeta):
             if hasattr(kv_cache_utils, "init_none_hash"):
                 kv_cache_utils.init_none_hash(self.hash_func)
                 NONE_HASH = kv_cache_utils.NONE_HASH
+                # sha256_cbor returns bytes; fold to uint64 so the entire
+                # prefix chain uses a consistent int type.
+                if isinstance(NONE_HASH, bytes):
+                    NONE_HASH = int.from_bytes(NONE_HASH[:8], "big")
                 logger.info(
                     f"Initialized NONE_HASH={NONE_HASH} from vLLM (>= PR#20511)"
                 )

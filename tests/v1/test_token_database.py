@@ -134,10 +134,10 @@ def test_segment_token_database(prefix_length, chunk_lengths):
         # print(ed, ends[i])
 
 
-def test_hash_tokens_returns_int_for_bytes_hash_func() -> None:
-    """_hash_tokens must return int even when the underlying hash function
-    returns bytes (e.g. sha256_cbor). This ensures downstream code such as
-    msgpack serialisation and CacheEngineKey always receives plain ints.
+def test_process_tokens_returns_int_keys_for_bytes_hash_func() -> None:
+    """process_tokens must produce int chunk_hash keys even when the underlying
+    hash function returns bytes (e.g. sha256_cbor). This ensures downstream
+    code such as msgpack serialisation always receives plain ints.
     """
     import hashlib
 
@@ -145,17 +145,14 @@ def test_hash_tokens_returns_int_for_bytes_hash_func() -> None:
     metadata = dumb_metadata()
     db = ChunkedTokenDatabase(cfg, metadata)
 
-    # Replace hash_func with a bytes-returning stub that mimics sha256_cbor.
-    def _bytes_hash(x) -> bytes:
-        import cbor2
-
-        return hashlib.sha256(cbor2.dumps(x)).digest()
-
-    db.hash_func = _bytes_hash
+    # Stub that returns bytes, mimicking sha256_cbor without requiring cbor2.
+    db.hash_func = lambda x: hashlib.sha256(str(x).encode()).digest()
 
     tokens = generate_tokens(32, "cpu")
-    result = db._hash_tokens(tokens[:16])
+    results = list(db.process_tokens(tokens=tokens, make_key=False))
 
-    assert isinstance(result, int), f"Expected int, got {type(result)}"
-    # Must fit in uint64 (msgpack range)
-    assert 0 <= result <= 2**64 - 1
+    assert len(results) > 0
+    for _, _, hash_val in results:
+        assert isinstance(hash_val, int), f"Expected int, got {type(hash_val)}"
+        # Must fit in uint64 (msgpack range: 0 to 2**64 - 1)
+        assert 0 <= hash_val <= 2**64 - 1
