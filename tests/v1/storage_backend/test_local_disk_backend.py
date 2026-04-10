@@ -802,3 +802,110 @@ class TestLocalDiskBackendPrefetchUnpinOnAllocFailure:
         # Re-confirm seed key is unpinned (the cleanup path of the
         # successful call should also have unpinned the disk meta).
         assert backend.dict[seed_keys[0]].pin_count == 0
+
+
+# ----------------------------------------------------------------------------
+# Startup-state-recovery: leftover cache files from previous container
+# lifecycle must be cleaned up at init so current_cache_size=0 matches
+# actual disk state. neuralwatt/inference_frontend#1900
+# ----------------------------------------------------------------------------
+
+
+class TestLocalDiskBackendStartupRecovery:
+    """Tests for Bug 2 of the #1900 incident: startup-state-recovery.
+
+    When a container restarts but the disk mount (/mnt/lmcache) retains
+    leftover .pt files from the previous lifecycle, LocalDiskBackend.__init__
+    must clean them up so that current_cache_size=0 accurately reflects
+    the empty disk. Without cleanup, eviction doesn't fire until
+    current_cache_size (starting at 0) + new writes > max_cache_size,
+    meaning actual disk usage can exceed the configured cap by the size
+    of the leftover files (observed: 148 GiB over cap on verda-h200).
+    """
+
+    def test_init_cleans_leftover_files(
+        self, temp_disk_path, running_async_loop, local_cpu_backend
+    ):
+        """Leftover .pt files from a previous run are deleted at init.
+
+        1. Create several .pt files of known sizes in the disk directory
+        2. Init a LocalDiskBackend pointing at that directory
+        3. Assert: the .pt files are gone (deleted by init)
+        4. Assert: backend.current_cache_size == 0 (clean slate)
+        5. Assert: no .pt files remain in the directory
+        """
+        # Write some fake leftover cache files
+        leftover_sizes = [1024, 2048, 4096, 8192]  # bytes
+        leftover_paths = []
+        for i, size in enumerate(leftover_sizes):
+            path = os.path.join(temp_disk_path, f"leftover_chunk_{i}.pt")
+            with open(path, "wb") as f:
+                f.write(b"\x00" * size)
+            leftover_paths.append(path)
+
+        # Verify files exist before init
+        for p in leftover_paths:
+            assert os.path.exists(p), f"test setup: {p} should exist"
+        total_leftover = sum(leftover_sizes)
+        assert total_leftover == 15360  # sanity
+
+        # Init the backend — should clean up leftovers
+        config = create_test_config(temp_disk_path, max_disk_size=1.0)
+        backend = LocalDiskBackend(
+            config=config,
+            loop=running_async_loop,
+            local_cpu_backend=local_cpu_backend,
+            dst_device="cuda",
+        )
+
+        # All .pt files should be gone
+        remaining_pt = [
+            f for f in os.listdir(temp_disk_path) if f.endswith(".pt")
+        ]
+        assert remaining_pt == [], (
+            f"leftover .pt files should have been deleted at init, "
+            f"but found: {remaining_pt}"
+        )
+
+        # current_cache_size must be 0 (clean slate)
+        assert backend.current_cache_size == 0, (
+            f"current_cache_size should be 0 after cleaning leftovers, "
+            f"got {backend.current_cache_size}"
+        )
+
+        backend.close()
+
+    def test_init_with_empty_disk_is_noop(
+        self, temp_disk_path, running_async_loop, local_cpu_backend
+    ):
+        """Init on an empty directory is a no-op — no errors, size stays 0.
+
+        1. Create an empty temp disk directory
+        2. Init a LocalDiskBackend
+        3. Assert: backend.current_cache_size == 0 (unchanged)
+        4. Assert: no errors logged (implicit — test doesn't crash)
+        """
+        # Verify directory is empty
+        assert os.listdir(temp_disk_path) == [], "test setup: dir should be empty"
+
+        config = create_test_config(temp_disk_path, max_disk_size=1.0)
+        backend = LocalDiskBackend(
+            config=config,
+            loop=running_async_loop,
+            local_cpu_backend=local_cpu_backend,
+            dst_device="cuda",
+        )
+
+        # current_cache_size must still be 0
+        assert backend.current_cache_size == 0, (
+            f"current_cache_size should be 0 for empty disk, "
+            f"got {backend.current_cache_size}"
+        )
+
+        # Directory should still be empty (no files created by init)
+        assert os.listdir(temp_disk_path) == [], (
+            f"empty disk dir should remain empty after init, "
+            f"but found: {os.listdir(temp_disk_path)}"
+        )
+
+        backend.close()
