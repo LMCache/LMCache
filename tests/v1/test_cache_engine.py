@@ -1755,3 +1755,233 @@ def test_process_tokens_first_block_fails():
     assert tot_kv_size == 0
     assert not ret_mask.any()
     mem1.ref_count_down.assert_called_once()
+# ----------------------------------------------------------------------------
+# Regression test for the cache_engine.store() pin-leak fix.
+#
+# LMCacheEngine.store() wraps gpu_connector.batched_from_gpu(...) and
+# storage_manager.batched_put(...) in a try/except. When either raises,
+# the except branch unpins and ref_count_down's every memory_obj that
+# was allocated in the same call. Without this, a failed from_gpu /
+# batched_put leaves pins held, which on production verda-h200 (GLM-5,
+# 2026-04-09) led to CPU staging pool exhaustion and engine deadlock.
+#
+# This test does NOT spin up a full LMCacheEngine — that would require
+# CUDA. Instead it uses LMCacheEngine.store as an unbound function
+# called against a stub-self with the minimum mocked attributes the
+# function needs. The point is to lock down the unpin-on-exception
+# contract: if a future change strips the try/except, this test will
+# fail and the operator will know not to land it.
+#
+# Related: neuralwatt/inference_frontend#1900, #1903
+# ----------------------------------------------------------------------------
+
+
+class TestCacheEngineStoreUnpinOnFailure:
+    """Regression tests for the LMCacheEngine.store() try/except pin
+    cleanup added in the verda incident response."""
+
+    def _make_stub_engine(self, memory_objs, raise_in_from_gpu=True):
+        """Build a minimal stub-self that LMCacheEngine.store can run
+        against. Returns the stub plus the gpu_connector mock so the
+        caller can verify which path raised.
+        """
+        # Standard
+        from contextlib import contextmanager
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock
+
+        # Third Party
+        import torch as _torch
+
+        # First Party
+        from lmcache.utils import CacheEngineKey
+
+        @contextmanager
+        def _noop_cm():
+            yield
+
+        store_stats = MagicMock()
+        store_stats.profile_process_tokens = _noop_cm
+        store_stats.profile_from_gpu = _noop_cm
+        store_stats.profile_put = _noop_cm
+        store_stats.process_tokens_time = 0
+        store_stats.from_gpu_time = 0
+        store_stats.put_time = 0
+        store_stats.time_to_store = MagicMock(return_value=1.0)
+
+        stats_monitor = MagicMock()
+        stats_monitor.on_store_request = MagicMock(return_value=store_stats)
+        stats_monitor.on_store_finished = MagicMock()
+
+        gpu_connector = MagicMock()
+        if raise_in_from_gpu:
+            gpu_connector.batched_from_gpu = MagicMock(
+                side_effect=RuntimeError("simulated GPU connector failure")
+            )
+        else:
+            gpu_connector.batched_from_gpu = MagicMock(return_value=None)
+
+        storage_manager = MagicMock()
+        # The store() method allocates memory_objs in the loop ahead of
+        # the try/except. We pre-allocate them in the test and inject
+        # them via storage_manager.allocate, which store() calls.
+        storage_manager.allocate = MagicMock(side_effect=list(memory_objs))
+        storage_manager.batched_put = MagicMock(
+            side_effect=RuntimeError("simulated storage_manager failure")
+        )
+
+        token_database = MagicMock()
+        # process_tokens yields one (start, end, key) per memory_obj.
+        token_database.process_tokens = MagicMock(
+            return_value=[
+                (i * 16, (i + 1) * 16,
+                 CacheEngineKey(
+                     model_name="test_unpin",
+                     world_size=1,
+                     worker_id=0,
+                     chunk_hash=hash(("unpin", i)),
+                     dtype=_torch.bfloat16,
+                 ))
+                for i in range(len(memory_objs))
+            ]
+        )
+
+        metadata = MagicMock()
+        metadata.get_shapes = MagicMock(return_value=[_torch.Size([1, 4, 16, 132])])
+        metadata.get_dtypes = MagicMock(return_value=[_torch.uint8])
+        metadata.worker_id = 0
+
+        config = MagicMock()
+        config.get_extra_config_value = MagicMock(return_value=False)
+
+        stub = SimpleNamespace(
+            config=config,
+            gpu_connector=gpu_connector,
+            storage_manager=storage_manager,
+            token_database=token_database,
+            metadata=metadata,
+            stats_monitor=stats_monitor,
+            kv_events_enabled=False,
+            store_location=None,
+            fmt=None,
+            is_healthy=lambda: True,
+            _is_passive=lambda: False,
+            is_frozen=lambda: False,
+            _get_req_id=lambda kwargs: kwargs.get("req_id", "test"),
+            _log_kvcache_for_check=lambda **kwargs: None,
+        )
+        return stub, gpu_connector, storage_manager
+
+    def _make_pinned_memory_objs(self, count):
+        """Allocate `count` real TensorMemoryObj instances and pin them
+        + ref_count_up them, so we can verify they get unpinned by
+        store()'s except branch.
+        """
+        # Third Party
+        import torch as _torch
+
+        # First Party
+        from lmcache.v1.memory_management import (
+            MemoryFormat,
+            MixedMemoryAllocator,
+        )
+        from lmcache.v1.config import LMCacheEngineConfig
+        from lmcache.v1.pin_monitor import PinMonitor
+
+        # PinMonitor must be initialized before .pin() is called.
+        PinMonitor.GetOrCreate(LMCacheEngineConfig.from_legacy(chunk_size=16))
+
+        allocator = MixedMemoryAllocator(8 * 1024 * 1024)
+        shapes = [_torch.Size([1, 4, 16, 132])]
+        dtypes = [_torch.uint8]
+        objs = []
+        for _ in range(count):
+            mo = allocator.allocate(shapes, dtypes, fmt=MemoryFormat.KV_2LTD)
+            assert mo is not None
+            mo.pin()  # store() implicitly relies on objs being pinned by
+                      # the gpu_connector. We simulate that here so the
+                      # test can observe whether the except branch unpins.
+            objs.append(mo)
+        return objs, allocator
+
+    def test_store_unpins_memory_objs_when_from_gpu_raises(self):
+        """When gpu_connector.batched_from_gpu raises, store() must
+        unpin every memory_obj it had allocated and call ref_count_down
+        on each, so the CPU staging pool can reclaim them.
+        """
+        # First Party
+        from lmcache.v1.cache_engine import LMCacheEngine
+
+        memory_objs, allocator = self._make_pinned_memory_objs(count=3)
+        try:
+            for mo in memory_objs:
+                assert mo.is_pinned, "test setup: memory_obj should be pinned"
+                assert mo.get_ref_count() == 1, (
+                    "test setup: ref_count should be 1 after fresh alloc"
+                )
+
+            stub, gpu_conn, storage = self._make_stub_engine(
+                memory_objs, raise_in_from_gpu=True
+            )
+
+            # Call the unbound store() against the stub.
+            LMCacheEngine.store(stub, tokens=list(range(48)))
+
+            # gpu_connector.batched_from_gpu was called and raised
+            assert gpu_conn.batched_from_gpu.called, (
+                "test plumbing: gpu_connector.batched_from_gpu should "
+                "have been called"
+            )
+            # batched_put should NOT have been called (from_gpu raised first)
+            assert not storage.batched_put.called, (
+                "batched_put should not be reached when from_gpu raises"
+            )
+
+            # The actual contract under test:
+            for i, mo in enumerate(memory_objs):
+                assert not mo.is_pinned, (
+                    f"memory_obj[{i}] still pinned after store() "
+                    f"failed in from_gpu (pin_count={mo.metadata.pin_count})"
+                )
+        finally:
+            for mo in memory_objs:
+                if mo.is_valid() and mo.metadata.pin_count > 0:
+                    mo.unpin()
+            try:
+                allocator.close()
+            except Exception:
+                pass
+
+    def test_store_unpins_memory_objs_when_batched_put_raises(self):
+        """When storage_manager.batched_put raises (after a successful
+        from_gpu), store() must STILL unpin every memory_obj.
+        """
+        # First Party
+        from lmcache.v1.cache_engine import LMCacheEngine
+
+        memory_objs, allocator = self._make_pinned_memory_objs(count=2)
+        try:
+            stub, gpu_conn, storage = self._make_stub_engine(
+                memory_objs, raise_in_from_gpu=False
+            )
+
+            LMCacheEngine.store(stub, tokens=list(range(32)))
+
+            assert gpu_conn.batched_from_gpu.called
+            assert storage.batched_put.called, (
+                "batched_put should be reached when from_gpu succeeds"
+            )
+
+            for i, mo in enumerate(memory_objs):
+                assert not mo.is_pinned, (
+                    f"memory_obj[{i}] still pinned after store() "
+                    f"failed in batched_put (pin_count={mo.metadata.pin_count})"
+                )
+        finally:
+            for mo in memory_objs:
+                if mo.is_valid() and mo.metadata.pin_count > 0:
+                    mo.unpin()
+            try:
+                allocator.close()
+            except Exception:
+                pass
