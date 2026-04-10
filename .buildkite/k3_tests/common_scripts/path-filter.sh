@@ -58,11 +58,11 @@ _path_filter_is_trivial() {
 _path_filter_get_changed_files() {
     local base_branch base merge_base
 
-    if [[ "${BUILDKITE_PULL_REQUEST:-false}" != "false" && "${BUILDKITE_PULL_REQUEST:-}" != "" ]]; then
+    if [[ -n "${BUILDKITE_PULL_REQUEST:-}" && "${BUILDKITE_PULL_REQUEST:-}" != "false" ]]; then
         base_branch="${BUILDKITE_PULL_REQUEST_BASE_BRANCH:-main}"
         # Buildkite checks out shallow; fetch enough history to find the merge-base.
-        git fetch --no-tags --depth=200 origin "$base_branch" >&2 2>/dev/null || \
-            git fetch --no-tags origin "$base_branch" >&2 2>/dev/null || true
+        git fetch --no-tags --depth=200 origin "$base_branch" 2>/dev/null || \
+            git fetch --no-tags origin "$base_branch" 2>/dev/null || true
 
         if base=$(git rev-parse --verify "origin/${base_branch}" 2>/dev/null); then
             if merge_base=$(git merge-base HEAD "$base" 2>/dev/null); then
@@ -94,6 +94,12 @@ _path_filter_get_changed_files() {
 should_skip_ci() {
     if [[ "${K3_PATH_FILTER_DISABLE:-0}" == "1" ]]; then
         echo "path-filter: K3_PATH_FILTER_DISABLE=1 → not skipping" >&2
+        return 1
+    fi
+
+    # Never skip scheduled builds (e.g. nightly baselines with NEED_UPLOAD=true).
+    if [[ "${BUILDKITE_SOURCE:-}" == "schedule" ]]; then
+        echo "path-filter: scheduled build (BUILDKITE_SOURCE=schedule) → not skipping" >&2
         return 1
     fi
 
