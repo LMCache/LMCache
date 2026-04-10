@@ -58,6 +58,10 @@ _path_filter_is_trivial() {
 _path_filter_get_changed_files() {
     local base_branch base merge_base
 
+    # Ephemeral pods may not have GitHub's SSH host key yet.
+    # Accept new keys automatically so git-fetch doesn't hang on a prompt.
+    export GIT_SSH_COMMAND="ssh -o StrictHostKeyChecking=accept-new -o LogLevel=ERROR"
+
     if [[ -n "${BUILDKITE_PULL_REQUEST:-}" && "${BUILDKITE_PULL_REQUEST:-}" != "false" ]]; then
         base_branch="${BUILDKITE_PULL_REQUEST_BASE_BRANCH:-main}"
         # Buildkite checks out shallow; fetch enough history to find the merge-base.
