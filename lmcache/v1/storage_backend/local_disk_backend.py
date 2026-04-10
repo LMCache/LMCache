@@ -331,7 +331,10 @@ class LocalDiskBackend(StorageBackendInterface):
         self.disk_worker.insert_put_task(key)
 
         # TODO(Jiayi): Fragmentation is not considered here.
-        required_size = memory_obj.get_physical_size()
+        # #1900: use len(byte_array), not get_physical_size(), so multi-group
+        # MLA objects account against the true on-disk byte count (phy_size
+        # is 4096-aligned or zero for the AdHoc allocator path).
+        required_size = len(memory_obj.byte_array)
         all_evict_keys = []
         evict_success = True
         with self.disk_lock:
@@ -562,7 +565,9 @@ class LocalDiskBackend(StorageBackendInterface):
         # purposes (e.g., testing mem_leak).
         # TODO(Jiayi): This could be problematic if the
         # freed memory object is immediately reused.
-        size = memory_obj.get_physical_size()
+        # #1900: record the actual on-disk bytes written (== len(buffer))
+        # so meta.size matches the file size for multi-group MLA objects.
+        size = len(buffer)
         shape = memory_obj.metadata.shape
         dtype = memory_obj.metadata.dtype
         fmt = memory_obj.metadata.fmt
