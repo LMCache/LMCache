@@ -17,12 +17,16 @@ import torch
 
 # First Party
 from lmcache.v1.distributed.api import ObjectKey
+from lmcache.v1.distributed.internal_api import L1MemoryDesc
 from lmcache.v1.distributed.l2_adapters.config import (
     get_registered_l2_adapter_types,
     get_type_name_for_config,
 )
 from lmcache.v1.distributed.l2_adapters.factory import (
     create_l2_adapter_from_registry,
+)
+from lmcache.v1.distributed.l2_adapters import (
+    mooncake_store_l2_adapter as mooncake_store_module,
 )
 from lmcache.v1.distributed.l2_adapters.mooncake_store_l2_adapter import (
     MooncakeStoreL2AdapterConfig,
@@ -71,6 +75,25 @@ def create_memory_obj(size: int = 256, fill_value: float = 1.0) -> TensorMemoryO
         dtype=torch.float32,
         address=0,
         phy_size=size * 4,
+        fmt=MemoryFormat.KV_2LTD,
+        ref_count=1,
+    )
+    return TensorMemoryObj(raw_data, metadata, parent_allocator=None)
+
+
+def create_buffer_memory_obj(
+    buffer: torch.Tensor,
+    offset_bytes: int,
+    size_bytes: int,
+    fill_value: float = 1.0,
+) -> TensorMemoryObj:
+    raw_data = buffer[offset_bytes : offset_bytes + size_bytes].view(torch.float32)
+    raw_data.fill_(fill_value)
+    metadata = MemoryObjMetadata(
+        shape=torch.Size([size_bytes // 4]),
+        dtype=torch.float32,
+        address=offset_bytes,
+        phy_size=size_bytes,
         fmt=MemoryFormat.KV_2LTD,
         ref_count=1,
     )
@@ -238,6 +261,131 @@ class TestMooncakeStoreRegistration:
         )
         with pytest.raises(RuntimeError, match="Mooncake"):
             create_l2_adapter_from_registry(config)
+
+
+@requires_mooncake
+class TestMooncakeStorePreregisterFactory:
+    """Tests for preregister_l1_memory factory behavior."""
+
+    def test_from_dict_parses_preregister_flag(self):
+        config = MooncakeStoreL2AdapterConfig.from_dict(
+            {
+                "type": "mooncake_store",
+                "local_hostname": "127.0.0.1",
+                "preregister_l1_memory": True,
+            }
+        )
+
+        assert config.preregister_l1_memory is True
+        assert "preregister_l1_memory" not in config.setup_config
+
+    def test_from_dict_rejects_non_boolean_preregister_flag(self):
+        with pytest.raises(ValueError, match="preregister_l1_memory"):
+            MooncakeStoreL2AdapterConfig.from_dict(
+                {
+                    "type": "mooncake_store",
+                    "preregister_l1_memory": "true",
+                }
+            )
+
+    def test_factory_passes_l1_memory_descriptor_to_native_client(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        # First Party
+        from lmcache import lmcache_mooncake
+        from lmcache.v1.distributed.l2_adapters import native_connector_l2_adapter
+
+        captured: dict[str, object] = {}
+
+        class FakeClient:
+            def __init__(
+                self,
+                config: dict[str, str],
+                num_workers: int,
+                preregister_l1_base: int,
+                preregister_l1_size: int,
+            ):
+                captured["config"] = config
+                captured["num_workers"] = num_workers
+                captured["preregister_l1_base"] = preregister_l1_base
+                captured["preregister_l1_size"] = preregister_l1_size
+
+        monkeypatch.setattr(
+            lmcache_mooncake,
+            "LMCacheMooncakeClient",
+            FakeClient,
+        )
+        monkeypatch.setattr(
+            native_connector_l2_adapter,
+            "NativeConnectorL2Adapter",
+            lambda client: ("wrapped", client),
+        )
+
+        config = MooncakeStoreL2AdapterConfig.from_dict(
+            {
+                "type": "mooncake_store",
+                "local_hostname": "127.0.0.1",
+                "metadata_server": "P2PHANDSHAKE",
+                "num_workers": 3,
+                "preregister_l1_memory": True,
+            }
+        )
+        l1_desc = L1MemoryDesc(ptr=123456, size=65536, align_bytes=4096)
+
+        adapter = mooncake_store_module._create_mooncake_store_l2_adapter(
+            config,
+            l1_memory_desc=l1_desc,
+        )
+
+        assert adapter[0] == "wrapped"
+        assert captured["config"] == config.setup_config
+        assert captured["num_workers"] == 3
+        assert captured["preregister_l1_base"] == l1_desc.ptr
+        assert captured["preregister_l1_size"] == l1_desc.size
+
+    def test_factory_falls_back_without_l1_memory_descriptor(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        # First Party
+        from lmcache import lmcache_mooncake
+        from lmcache.v1.distributed.l2_adapters import native_connector_l2_adapter
+
+        captured: dict[str, int] = {}
+
+        class FakeClient:
+            def __init__(
+                self,
+                config: dict[str, str],
+                num_workers: int,
+                preregister_l1_base: int,
+                preregister_l1_size: int,
+            ):
+                captured["preregister_l1_base"] = preregister_l1_base
+                captured["preregister_l1_size"] = preregister_l1_size
+
+        monkeypatch.setattr(
+            lmcache_mooncake,
+            "LMCacheMooncakeClient",
+            FakeClient,
+        )
+        monkeypatch.setattr(
+            native_connector_l2_adapter,
+            "NativeConnectorL2Adapter",
+            lambda client: client,
+        )
+
+        config = MooncakeStoreL2AdapterConfig.from_dict(
+            {
+                "type": "mooncake_store",
+                "local_hostname": "127.0.0.1",
+                "preregister_l1_memory": True,
+            }
+        )
+
+        mooncake_store_module._create_mooncake_store_l2_adapter(config)
+
+        assert captured["preregister_l1_base"] == 0
+        assert captured["preregister_l1_size"] == 0
 
 
 # =============================================================================
@@ -453,5 +601,63 @@ class TestMooncakeStoreIntegration:
             assert adapter.get_store_event_fd() >= 0
             assert adapter.get_lookup_and_lock_event_fd() >= 0
             assert adapter.get_load_event_fd() >= 0
+        finally:
+            adapter.close()
+
+    def test_preregistered_l1_memory_store_lookup_load(self):
+        """Store and load objects backed by a preregistered L1 buffer."""
+        # First Party
+        from lmcache.v1.distributed.l2_adapters import create_l2_adapter
+
+        page_size = 4096
+        obj_size_bytes = page_size * 16
+        l1_buffer = torch.empty(page_size * 256, dtype=torch.uint8, device="cpu")
+        l1_desc = L1MemoryDesc(
+            ptr=l1_buffer.data_ptr(),
+            size=l1_buffer.numel(),
+            align_bytes=page_size,
+        )
+
+        config = MooncakeStoreL2AdapterConfig.from_dict(
+            {
+                "type": "mooncake_store",
+                "local_hostname": MOONCAKE_LOCAL_HOSTNAME,
+                "metadata_server": MOONCAKE_METADATA_SERVER,
+                "num_workers": 2,
+                "preregister_l1_memory": True,
+            }
+        )
+        adapter = create_l2_adapter(config, l1_memory_desc=l1_desc)
+        try:
+            key = create_object_key(9001, model_name="preregister_model")
+            store_obj = create_buffer_memory_obj(
+                l1_buffer,
+                offset_bytes=0,
+                size_bytes=obj_size_bytes,
+                fill_value=6.25,
+            )
+            load_obj = create_buffer_memory_obj(
+                l1_buffer,
+                offset_bytes=obj_size_bytes * 2,
+                size_bytes=obj_size_bytes,
+                fill_value=0.0,
+            )
+
+            store_tid = adapter.submit_store_task([key], [store_obj])
+            assert wait_for_event_fd(adapter.get_store_event_fd())
+            assert adapter.pop_completed_store_tasks()[store_tid] is True
+
+            lookup_tid = adapter.submit_lookup_and_lock_task([key])
+            assert wait_for_event_fd(adapter.get_lookup_and_lock_event_fd())
+            lookup_bitmap = adapter.query_lookup_and_lock_result(lookup_tid)
+            assert lookup_bitmap.test(0) is True
+
+            load_tid = adapter.submit_load_task([key], [load_obj])
+            assert wait_for_event_fd(adapter.get_load_event_fd())
+            load_bitmap = adapter.query_load_result(load_tid)
+            assert load_bitmap.test(0) is True
+            assert torch.equal(load_obj.tensor, store_obj.tensor)
+
+            adapter.submit_unlock([key])
         finally:
             adapter.close()
