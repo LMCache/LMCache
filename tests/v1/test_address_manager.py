@@ -1183,6 +1183,80 @@ class TestAddressManagerEdgeCases:
         assert manager.get_free_size() == size
         assert manager.total_allocated_size == 0
 
+    def test_prod_block_size_churn(self):
+        """Stress AddressManager with the exact production block size
+        observed in the verda-h200 GLM-5 logs (15734784 bytes per
+        chunk) under sustained random alloc/free churn.
+
+        ~5000 ops, fixed RNG seed, check_consistency() after every op.
+        Block size 15734784 is not 4096-aligned in any nice way; it
+        aligns up to 15736832. This test pins down that the allocator
+        stays consistent across many cycles at this exact production
+        size.
+
+        The allocator looks correct on inspection — this test is here
+        as a belt-and-braces guard against a regression that would
+        only show up at production block sizes / churn rates. It is
+        NOT marked xfail; it should pass on the buggy branch and on
+        any future branches.
+
+        Related: neuralwatt/inference_frontend#1900, #1903
+        """
+        # Standard
+        import random
+
+        # Production block size from verda-h200 logs.
+        block_size = 15_734_784
+        # Capacity for ~16 of these (about 240 MiB virtual).
+        capacity = block_size * 16
+        # Round capacity up so it's a multiple of the alignment.
+        align = 4096
+        capacity = ((capacity + align - 1) // align) * align
+
+        manager = AddressManager(capacity, align_bytes=align)
+        rng = random.Random(0xCAFEBABE)
+
+        live = []  # List[(address, alloc_size)]
+        for op_idx in range(5000):
+            # 60% allocate / 40% free, biased toward allocate when empty
+            do_alloc = (
+                not live
+                or rng.random() < 0.6
+            )
+            if do_alloc and len(live) < 16:
+                try:
+                    addr, alloc_size = manager.allocate(block_size)
+                except RuntimeError:
+                    # Out of capacity — fall through to a free instead.
+                    do_alloc = False
+                else:
+                    live.append((addr, alloc_size))
+                    assert manager.check_consistency(), (
+                        f"consistency violated after allocate at op {op_idx} "
+                        f"(live={len(live)})"
+                    )
+                    continue
+
+            if not do_alloc and live:
+                victim_idx = rng.randrange(len(live))
+                addr, alloc_size = live.pop(victim_idx)
+                manager.free(addr, alloc_size)
+                assert manager.check_consistency(), (
+                    f"consistency violated after free at op {op_idx} "
+                    f"(live={len(live)})"
+                )
+
+        # Final cleanup — free everything that's still live.
+        for addr, alloc_size in live:
+            manager.free(addr, alloc_size)
+            assert manager.check_consistency()
+
+        assert manager.get_free_size() == capacity, (
+            f"expected free_size={capacity} after final cleanup, "
+            f"got {manager.get_free_size()}"
+        )
+        assert manager.total_allocated_size == 0
+
 
 def _no_overlap(allocations: List[Tuple[int, int]]) -> bool:
     """
