@@ -660,3 +660,145 @@ class TestLocalDiskBackendMultiGroupAccounting:
             f"phy_size={phy}, len(buffer)={true_bytes}, "
             f"shapes={shapes}, dtypes={dtypes}"
         )
+
+
+# ----------------------------------------------------------------------------
+# Regression test for the batched_get_non_blocking pin-leak fix.
+# ----------------------------------------------------------------------------
+
+
+class TestLocalDiskBackendPrefetchUnpinOnAllocFailure:
+    """Regression test for the pin-cleanup added to
+    LocalDiskBackend.batched_get_non_blocking() in the verda incident
+    response (snapshot 6f7f47b).
+
+    When local_cpu_backend.allocate returns None mid-batch (CPU staging
+    pool exhausted), batched_get_non_blocking must:
+      1. Unpin every disk_meta it had pinned earlier in the same batch
+      2. Unpin every memory_obj it had already successfully allocated
+         in the same batch
+      3. Release self.disk_lock
+      4. Return [] (not a partial mem_objs list)
+
+    Without (1)+(2), pinned objects hold CPU memory references that
+    can never be freed, eventually exhausting the CPU staging pool and
+    deadlocking the engine. Without (3), the next operation that needs
+    disk_lock blocks forever. Without (4), callers may treat a partial
+    return as success and double-free.
+
+    Related: neuralwatt/inference_frontend#1900, #1903
+    """
+
+    def _seed_disk_backend(self, backend, num_keys: int):
+        """Populate the disk backend with `num_keys` MLA chunks via the
+        production code path. Returns the list of keys."""
+        cpu = backend.local_cpu_backend
+        shapes, dtypes = _mla_shapes_and_dtypes()
+        keys = []
+        for i in range(num_keys):
+            mo = cpu.allocate(
+                shapes, dtypes, fmt=MemoryFormat.KV_MLA_FMT,
+                eviction=False, busy_loop=False,
+            )
+            assert mo is not None, "test setup: cpu allocate failed"
+            key = _make_mla_key(1000 + i)
+            backend.submit_put_task(key, mo)
+            _wait_for_put(backend, key)
+            mo.ref_count_down()
+            keys.append(key)
+        return keys
+
+    def test_prefetch_unpins_disk_keys_on_allocation_failure(
+        self, small_local_disk_backend
+    ):
+        """Mock local_cpu_backend.allocate to return None after the
+        first N successful calls. Verify all previously-pinned disk
+        keys in the batch are unpinned, disk_lock is released, and
+        the function returned [].
+        """
+        # Standard
+        from unittest.mock import patch
+
+        # First Party
+        from lmcache.v1.config import LMCacheEngineConfig
+        from lmcache.v1.pin_monitor import PinMonitor
+
+        backend = small_local_disk_backend
+        cpu = backend.local_cpu_backend
+        # PinMonitor must be initialized before .pin() is called.
+        PinMonitor.GetOrCreate(LMCacheEngineConfig.from_legacy(chunk_size=16))
+
+        # Seed 4 entries
+        seed_keys = self._seed_disk_backend(backend, num_keys=4)
+
+        # All seed entries should start unpinned
+        for k in seed_keys:
+            assert backend.dict[k].pin_count == 0, (
+                f"test setup: seed key {k} should be unpinned"
+            )
+
+        # Patch allocate to succeed twice then return None.
+        original_allocate = cpu.allocate
+        call_count = {"n": 0}
+
+        def flaky_allocate(*args, **kwargs):
+            call_count["n"] += 1
+            if call_count["n"] <= 2:
+                return original_allocate(*args, **kwargs)
+            return None
+
+        with patch.object(cpu, "allocate", side_effect=flaky_allocate):
+            # Standard
+            import asyncio
+            coro = backend.batched_get_non_blocking(
+                "lookup_unpin_test", list(seed_keys)
+            )
+            fut = asyncio.run_coroutine_threadsafe(coro, backend.loop)
+            result = fut.result(timeout=5.0)
+
+        # Contract 4: returned [] (not partial)
+        assert result == [], (
+            f"batched_get_non_blocking should return [] on alloc failure, "
+            f"got {len(result) if result is not None else 'None'} objects"
+        )
+
+        # Contract 1: every disk_meta in the batch is unpinned
+        leaked = []
+        for k in seed_keys:
+            pc = backend.dict[k].pin_count
+            if pc != 0:
+                leaked.append((k, pc))
+        assert not leaked, (
+            f"disk metas left pinned after batched_get_non_blocking "
+            f"alloc failure: {leaked}"
+        )
+
+        # Contract 3: disk_lock is released
+        assert not backend.disk_lock.locked(), (
+            "disk_lock not released after batched_get_non_blocking "
+            "alloc failure — would deadlock the next operation"
+        )
+
+        # Contract 1+2 cumulative: a follow-up call should succeed
+        # (i.e. nothing is permanently stuck). Use the original
+        # (non-flaky) allocate this time.
+        coro2 = backend.batched_get_non_blocking(
+            "lookup_unpin_test_2", [seed_keys[0]]
+        )
+        fut2 = asyncio.run_coroutine_threadsafe(coro2, backend.loop)
+        result2 = fut2.result(timeout=5.0)
+        assert result2 is not None and len(result2) == 1, (
+            "follow-up batched_get_non_blocking should succeed after the "
+            "first one cleanly cleaned up its half-state"
+        )
+        # Cleanup the result so we don't leak in this test
+        for mo in result2:
+            try:
+                if mo.is_pinned:
+                    mo.unpin()
+                mo.ref_count_down()
+            except Exception:
+                pass
+        # Re-confirm seed key is unpinned (the cleanup path of the
+        # successful call should also have unpinned the disk meta).
+        assert backend.dict[seed_keys[0]].pin_count == 0
