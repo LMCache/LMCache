@@ -684,12 +684,6 @@ class TestValidateAndSetConfigValueTypeConversion:
 
 
 def test_lmcache_get_or_create_config_validates_pd_settings():
-    """Regression test for #2690 follow-up: env-only path must call validate().
-
-    lmcache_get_or_create_config() loads config via from_env() when no
-    config file is set. validate() must be called so that P/D auto-settings
-    like save_unfull_chunk=True are applied.
-    """
     # First Party
     from lmcache.integration.vllm.utils import (
         _config_instance,
