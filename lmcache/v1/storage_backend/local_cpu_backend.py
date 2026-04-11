@@ -528,34 +528,54 @@ class LocalCPUBackend(AllocatorBackendInterface):
         if memory_obj is not None or not eviction:
             return memory_obj
 
+        # Compute allocation size for proportional eviction (#1939).
+        if isinstance(shapes, list):
+            alloc_bytes = get_size_bytes(shapes, dtypes)
+        else:
+            alloc_bytes = shapes.numel() * dtypes.itemsize
+        # Target: free 2x the required size to account for fragmentation,
+        # with a 32 MiB floor to cover alignment overhead.
+        target_bytes = max(alloc_bytes * 2, 32 * 1024 * 1024)
+
         evict_keys_count = 0
         num_attempts = 0
         while True:
             # whether or not this request needs to wait or other requests
             wait_other_requests = True
             if self.use_hot:
-                # TODO(Jiayi): optimize `num_candidates` with estimation.
-                # Accurate estimation is hard due to fragmentation
-                num_candidates = 1
-                evict_keys = None
+                # #1939: evict proportionally to the required allocation size
+                # instead of 1 candidate per retry. This reduces warning spam
+                # from O(required_size / avg_entry_size) retries to O(1).
+                freed_bytes = 0
                 with self.cpu_lock:
-                    evict_keys = self.cache_policy.get_evict_candidates(
-                        self.hot_cache, num_candidates=num_candidates
-                    )
-                    if evict_keys:
-                        # we can continue trying to evict from the hot_cache
-                        # and don't need to wait for other requests yet
-                        wait_other_requests = False
-                        logger.debug(
-                            f"Evicting {len(evict_keys)} chunks from cpu memory"
+                    while freed_bytes < target_bytes:
+                        evict_keys = self.cache_policy.get_evict_candidates(
+                            self.hot_cache, num_candidates=1
                         )
-                        # remove
+                        if not evict_keys:
+                            break
+                        for key in evict_keys:
+                            if key in self.hot_cache:
+                                meta = self.hot_cache[key].metadata
+                                freed_bytes += (
+                                    meta.phy_size
+                                    if meta.phy_size > 0
+                                    else meta.get_size()
+                                )
                         self.batched_remove(evict_keys, force=False)
                         evict_keys_count += len(evict_keys)
-                    else:
-                        self.stats_monitor.update_local_cpu_evict_failed_count(
-                            num_candidates
+
+                    if freed_bytes > 0:
+                        wait_other_requests = False
+                        logger.debug(
+                            "Evicted %d entries (%.1f MiB) from cpu memory "
+                            "to free space for %.1f MiB allocation",
+                            evict_keys_count,
+                            freed_bytes / (1024 * 1024),
+                            alloc_bytes / (1024 * 1024),
                         )
+                    else:
+                        self.stats_monitor.update_local_cpu_evict_failed_count(1)
 
             if wait_other_requests:
                 if not busy_loop:
@@ -638,47 +658,75 @@ class LocalCPUBackend(AllocatorBackendInterface):
 
         assert isinstance(self.memory_allocator, MixedMemoryAllocator)
 
+        # Compute allocation size for proportional eviction (#1939).
+        # batched_allocate allocates batch_size copies of the shape/dtype.
+        if isinstance(shapes, list):
+            per_obj_bytes = get_size_bytes(shapes, dtypes)
+        else:
+            per_obj_bytes = shapes.numel() * dtypes.itemsize
+        alloc_bytes = per_obj_bytes * batch_size
+        # Target: free 2x the required size to account for fragmentation,
+        # with a 32 MiB floor to cover alignment overhead.
+        target_bytes = max(alloc_bytes * 2, 32 * 1024 * 1024)
+
         evict_keys_count = 0
         num_attempts = 0
         while True:
             wait_other_requests = True
             if self.use_hot:
-                # TODO(Jiayi): optimize `num_candidates` with estimation.
-                # Accurate estimation is hard due to fragmentation
-                num_candidates = 1
-                evict_keys = None
+                # #1939: evict proportionally to the required allocation size
+                # instead of 1 candidate per retry. This reduces warning spam
+                # from O(required_size / avg_entry_size) retries to O(1).
+                freed_bytes = 0
                 with self.cpu_lock:
-                    evict_keys = self.cache_policy.get_evict_candidates(
-                        self.hot_cache, num_candidates=num_candidates
-                    )
+                    while freed_bytes < target_bytes:
+                        evict_keys = self.cache_policy.get_evict_candidates(
+                            self.hot_cache, num_candidates=1
+                        )
+                        if not evict_keys:
+                            break
 
-                    # HACK: We assume batch_size=num_layers here.
-                    # FIXME: We also assume if the one layer's ref_count > 1 or pinned,
-                    # then the other layers are also ref_count > 1 or
-                    # pinned in the cpu memory. This might not be true.
-                    if evict_keys:
+                        # HACK: We assume batch_size=num_layers here.
+                        # FIXME: We also assume if the one layer's ref_count
+                        # > 1 or pinned, then the other layers are also
+                        # ref_count > 1 or pinned in the cpu memory.
+                        # This might not be true.
                         evict_keys_count += len(evict_keys)
-                        wait_other_requests = False
                         for evict_key in evict_keys:
-                            evict_key_all_layer = evict_key.split_layers(batch_size)
+                            evict_key_all_layer = evict_key.split_layers(
+                                batch_size
+                            )
 
-                            # TODO(Jiayi): batched allocate is not supported through
-                            # `batched_remove`. Therefore, features like usage tracking
-                            # is not supported.
+                            # TODO(Jiayi): batched allocate is not supported
+                            # through `batched_remove`. Therefore, features
+                            # like usage tracking is not supported.
                             old_mem_objs = []
                             for key in evict_key_all_layer:
-                                old_mem_objs.append(self.hot_cache[key])
+                                mem_obj = self.hot_cache[key]
+                                meta = mem_obj.metadata
+                                freed_bytes += (
+                                    meta.phy_size
+                                    if meta.phy_size > 0
+                                    else meta.get_size()
+                                )
+                                old_mem_objs.append(mem_obj)
                                 self.cache_policy.update_on_force_evict(key)
                                 self.hot_cache.pop(key, None)
 
                             self.memory_allocator.batched_free(old_mem_objs)
 
-                            logger.debug(
-                                f"Evicting {len(old_mem_objs)} chunks from cpu memory"
-                            )
+                    if freed_bytes > 0:
+                        wait_other_requests = False
+                        logger.debug(
+                            "Evicted %d entries (%.1f MiB) from cpu memory "
+                            "to free space for %.1f MiB batched allocation",
+                            evict_keys_count,
+                            freed_bytes / (1024 * 1024),
+                            alloc_bytes / (1024 * 1024),
+                        )
                     else:
                         self.stats_monitor.update_local_cpu_evict_failed_count(
-                            num_candidates
+                            1
                         )
 
             if wait_other_requests:
