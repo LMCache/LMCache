@@ -107,7 +107,8 @@ class RemoteConnector(metaclass=abc.ABCMeta):
 
         # NOTE: for unfull chunk, we have no way to verify
         shape_list = list(memory_obj.meta.shape)
-        shape_list[2] = bytes_read // self.single_token_size
+        token_count_dim = 0 if len(shape_list) == 2 else 2
+        shape_list[token_count_dim] = bytes_read // self.single_token_size
         actual_shape = torch.Size(shape_list)
         memory_obj.raw_data = memory_obj.raw_data[:bytes_read]
         memory_obj.meta.shape = actual_shape

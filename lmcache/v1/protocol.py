@@ -134,9 +134,10 @@ def strip_shape_padding(dims: list[int]) -> torch.Size:
     Returns:
         A :class:`torch.Size` with the padding removed.
     """
-    while len(dims) > 1 and dims[-1] == 0:
-        dims.pop()
-    return torch.Size(dims)
+    end = len(dims)
+    while end > 1 and dims[end - 1] == 0:
+        end -= 1
+    return torch.Size(dims[:end])
 
 
 @dataclass
