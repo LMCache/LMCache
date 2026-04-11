@@ -53,6 +53,40 @@ Source: ``lmcache/v1/multiprocess/config.py``
        for cross-request KV reuse.
        Choices: ``default``, ``blend``.
 
+Chunk Hash Logging
+------------------
+
+Source: ``lmcache/v1/mp_observability/subscribers/logging/chunk_hash.py``
+
+When enabled, the server publishes chunk hashes computed during ``lookup()``
+as ``MP_LOOKUP_CHUNK_HASHES`` events on the EventBus.  The
+``ChunkHashLoggingSubscriber`` writes these to rotating JSONL files for
+offline analysis.  Disabled by default.  These arguments are part of the
+Observability group.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 30 15 55
+
+   * - Argument
+     - Default
+     - Description
+   * - ``--chunk-hash-log-dir``
+     - ``""`` (disabled)
+     - Directory to write chunk hash JSONL files.
+       An empty string disables logging.
+   * - ``--chunk-hash-log-rotation-interval``
+     - ``21600`` (6 h)
+     - Time interval in seconds before rotating to a new log file.
+   * - ``--chunk-hash-log-rotation-max-size``
+     - ``104857600`` (100 MB)
+     - Max file size in bytes before rotating even if the time
+       interval has not elapsed.
+   * - ``--chunk-hash-log-max-files``
+     - ``100``
+     - Max number of log files to keep.  Oldest files are deleted
+       when this limit is exceeded.
+
 HTTP Frontend
 -------------
 
@@ -341,6 +375,10 @@ Full Example
         --max-gpu-workers 2 \
         --hash-algorithm blake3 \
         --engine-type default \
+        --chunk-hash-log-dir /data/lmcache/chunk_hashes \
+        --chunk-hash-log-rotation-interval 21600 \
+        --chunk-hash-log-rotation-max-size 104857600 \
+        --chunk-hash-log-max-files 100 \
         --l1-size-gb 100 \
         --l1-use-lazy \
         --l1-init-size-gb 20 \

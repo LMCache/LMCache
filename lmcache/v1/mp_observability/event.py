@@ -50,6 +50,9 @@ class EventType(Enum):
     MP_LOOKUP_PREFETCH_START = "mp.lookup_prefetch.start"
     MP_LOOKUP_PREFETCH_END = "mp.lookup_prefetch.end"
 
+    # Chunk hash logging events
+    MP_LOOKUP = "mp.lookup"
+
     # vLLM block allocation events
     MP_VLLM_BLOCK_ALLOCATION = "mp.vllm.block_allocation"
 

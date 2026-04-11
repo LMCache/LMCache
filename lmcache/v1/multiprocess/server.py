@@ -635,6 +635,24 @@ class MPCacheEngine:
                     request_id=key.request_id,
                 )
             )
+
+        # Publish lookup event via EventBus for observability subscribers
+        self._event_bus.publish(
+            Event(
+                event_type=EventType.MP_LOOKUP,
+                session_id=key.request_id,
+                metadata={
+                    "request_id": key.request_id,
+                    "chunk_hashes": chunk_hashes,
+                    "model_name": model_name,
+                    "chunk_size": self.chunk_size,
+                    "seq_len": len(key.token_ids),
+                    "dtypes": [str(d) for d in layout_desc.dtypes],
+                    "shapes": [list(s) for s in layout_desc.shapes],
+                },
+            )
+        )
+
         obj_keys = ipc_key_to_object_keys(key, chunk_hashes)
 
         handle = self.storage_manager.submit_prefetch_task(
