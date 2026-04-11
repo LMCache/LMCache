@@ -683,41 +683,44 @@ class TestValidateAndSetConfigValueTypeConversion:
         assert result is False
 
 
-def test_from_env_does_not_call_validate():
-    """Regression test: from_env() does not call validate().
+def test_lmcache_get_or_create_config_validates_pd_settings():
+    """Regression test for #2690 follow-up: env-only path must call validate().
 
-    When config is loaded via from_env() (the path used by
-    lmcache_get_or_create_config in vLLM/SGLang integrations),
-    validate() is never called. This means P/D auto-settings like
-    save_unfull_chunk=True are not applied, causing silent KV transfer
-    failures for prompts shorter than chunk_size.
+    lmcache_get_or_create_config() loads config via from_env() when no
+    config file is set. validate() must be called so that P/D auto-settings
+    like save_unfull_chunk=True are applied.
     """
+    # First Party
+    from lmcache.integration.vllm.utils import (
+        _config_instance,
+        _config_lock,
+        lmcache_get_or_create_config,
+    )
+    import lmcache.integration.vllm.utils as vllm_utils
+
     os.environ["LMCACHE_ENABLE_PD"] = "true"
     os.environ["LMCACHE_PD_ROLE"] = "sender"
     os.environ["LMCACHE_PD_BUFFER_SIZE"] = "1024"
     os.environ["LMCACHE_PD_BUFFER_DEVICE"] = "cpu"
-    # Do NOT set LMCACHE_SAVE_UNFULL_CHUNK — validate() should auto-set it
+    os.environ.pop("LMCACHE_CONFIG_FILE", None)
+    os.environ.pop("LMCACHE_SAVE_UNFULL_CHUNK", None)
+
+    # Reset singleton so we get a fresh config
+    old_instance = vllm_utils._config_instance
+    vllm_utils._config_instance = None
 
     try:
-        config = LMCacheEngineConfig.from_env()
-
-        # BUG: from_env() doesn't call validate(), so save_unfull_chunk
-        # stays at default (False) even though P/D mode requires True.
-        # This assertion documents the current broken behavior.
-        assert config.save_unfull_chunk is False, (
-            "If this fails, from_env() now calls validate() — "
-            "remove this test and the workaround in lmcache_get_or_create_config"
+        config = lmcache_get_or_create_config()
+        assert config.save_unfull_chunk is True, (
+            "validate() was not called — save_unfull_chunk should be "
+            "auto-set to True for P/D mode"
         )
-
-        # After manual validate(), it should be corrected
-        config.validate()
-        assert config.save_unfull_chunk is True
     finally:
+        vllm_utils._config_instance = old_instance
         del os.environ["LMCACHE_ENABLE_PD"]
         del os.environ["LMCACHE_PD_ROLE"]
         del os.environ["LMCACHE_PD_BUFFER_SIZE"]
         del os.environ["LMCACHE_PD_BUFFER_DEVICE"]
-        os.environ.pop("LMCACHE_SAVE_UNFULL_CHUNK", None)
 
 
 def test_update_config_from_env_calls_validate():
