@@ -717,6 +717,29 @@ def test_lmcache_get_or_create_config_validates_pd_settings():
         del os.environ["LMCACHE_PD_BUFFER_DEVICE"]
 
 
+def test_sglang_lmcache_get_config_validates_pd_settings():
+    from lmcache.integration.sglang.utils import lmcache_get_config
+
+    os.environ["LMCACHE_ENABLE_PD"] = "true"
+    os.environ["LMCACHE_PD_ROLE"] = "sender"
+    os.environ["LMCACHE_PD_BUFFER_SIZE"] = "1024"
+    os.environ["LMCACHE_PD_BUFFER_DEVICE"] = "cpu"
+    os.environ.pop("LMCACHE_CONFIG_FILE", None)
+    os.environ.pop("LMCACHE_SAVE_UNFULL_CHUNK", None)
+
+    try:
+        config = lmcache_get_config()
+        assert config.save_unfull_chunk is True, (
+            "validate() was not called — save_unfull_chunk should be "
+            "auto-set to True for P/D mode"
+        )
+    finally:
+        del os.environ["LMCACHE_ENABLE_PD"]
+        del os.environ["LMCACHE_PD_ROLE"]
+        del os.environ["LMCACHE_PD_BUFFER_SIZE"]
+        del os.environ["LMCACHE_PD_BUFFER_DEVICE"]
+
+
 def test_update_config_from_env_calls_validate():
     """Test that update_config_from_env() calls validate() method.
 
