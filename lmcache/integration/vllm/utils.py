@@ -108,11 +108,6 @@ def lmcache_get_or_create_config() -> LMCacheEngineConfig:
                     # Update config from environment variables
                     _config_instance.update_config_from_env()
 
-                # Validate configuration (auto-applies P/D settings
-                # like save_unfull_chunk=True)
-                if hasattr(_config_instance, "validate"):
-                    _config_instance.validate()
-
                 # Fetch and apply remote configuration if configured
                 remote_config_url = _config_instance.remote_config_url
                 if remote_config_url:
@@ -133,6 +128,10 @@ def lmcache_get_or_create_config() -> LMCacheEngineConfig:
                             "Using local configuration only.",
                             remote_config_url,
                         )
+
+                # Validate after all config sources are applied
+                # (auto-applies P/D settings like save_unfull_chunk=True)
+                _config_instance.validate()
     return _config_instance
 
 
