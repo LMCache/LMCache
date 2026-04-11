@@ -543,6 +543,166 @@ class TestLocalCPUBackend:
         local_cpu_backend.memory_allocator.close()
 
 
+class TestCPUEvictionProportionalSpace:
+    """Verify that allocate() evicts proportionally to the requested size (#1939).
+
+    Before the fix, the eviction loop removed 1 entry per outer-loop iteration,
+    causing O(required_size / avg_entry_size) retries (each producing a warning).
+    After the fix, the inner eviction loop accumulates freed_bytes >= target_bytes
+    before retrying the allocation, reducing the outer loop to O(1) retries.
+    """
+
+    def teardown_method(self, method):
+        LMCStatsMonitor.unregister_all_metrics()
+        LMCStatsMonitor.DestroyInstance()
+
+    def test_cpu_eviction_frees_proportional_space(self, memory_allocator):
+        """Fill the hot_cache, then request an allocation that requires eviction.
+
+        Assert that multiple entries are evicted in a single allocate() call
+        (not one-at-a-time across many retries).
+        """
+        config = create_test_config()
+        PinMonitor.GetOrCreate(config)
+        try:
+            backend = LocalCPUBackend(
+                config=config, memory_allocator=memory_allocator
+            )
+
+            # Shape: [2, 16, 8, 128] = 65536 bytes (bfloat16) = 64 KiB
+            entry_shape = torch.Size([2, 16, 8, 128])
+            entry_dtype = torch.bfloat16
+            num_entries = 20
+
+            # Fill the hot_cache with evictable entries.
+            # submit_put_task bumps ref_count from 1->2; we call
+            # ref_count_down on the original to leave only the cache's
+            # reference (ref_count=1), making the entry evictable.
+            for i in range(num_entries):
+                key = create_test_key(f"fill_{i}")
+                mem_obj = create_test_memory_obj(
+                    shape=entry_shape, dtype=entry_dtype
+                )
+                backend.submit_put_task(key, mem_obj)
+                mem_obj.ref_count_down()  # caller releases its reference
+
+            assert len(backend.hot_cache) == num_entries
+            # Verify entries are evictable
+            for v in backend.hot_cache.values():
+                assert v.can_evict, (
+                    f"Entry should be evictable (ref_count={v.get_ref_count()})"
+                )
+
+            # Patch allocator: first call fails (simulates full pool),
+            # second call succeeds (after eviction freed space).
+            real_allocate = memory_allocator.allocate
+            call_count = [0]
+
+            def patched_allocate(shapes, dtypes, fmt):
+                call_count[0] += 1
+                if call_count[0] <= 1:
+                    return None  # Pre-loop call fails
+                return real_allocate(shapes, dtypes, fmt)
+
+            backend.memory_allocator.allocate = patched_allocate
+
+            # Request an allocation to trigger the eviction loop.
+            #   alloc_bytes = 65536, target_bytes = max(131072, 32 MiB) = 32 MiB
+            # Each entry contributes 64 KiB via get_size() (phy_size=0 for AdHoc).
+            # The loop will exhaust all 20 entries (20*64K = 1.25 MiB < 32 MiB).
+            # Key: all evictions happen in ONE outer-loop iteration.
+            result = backend.allocate(
+                entry_shape, entry_dtype, eviction=True, busy_loop=False
+            )
+
+            assert result is not None, (
+                "allocate() should succeed after proportional eviction"
+            )
+            # Exactly 2 allocator calls: 1 initial (None) + 1 retry (success)
+            assert call_count[0] == 2, (
+                f"Expected 2 allocator calls (1 initial + 1 after eviction), "
+                f"got {call_count[0]}. The eviction loop may not be freeing "
+                f"enough in one pass."
+            )
+            # All entries evicted (target > total available)
+            assert len(backend.hot_cache) == 0, (
+                f"Expected all entries evicted, "
+                f"got {len(backend.hot_cache)} remaining"
+            )
+
+            backend.memory_allocator.allocate = real_allocate
+            backend.memory_allocator.close()
+        finally:
+            PinMonitor.DestroyInstance()
+
+    def test_cpu_eviction_stops_when_target_reached(self, memory_allocator):
+        """Verify that eviction stops once enough bytes are freed,
+        without evicting the entire cache unnecessarily.
+
+        Use entries with known phy_size > 0 to control when the target is hit.
+        """
+        config = create_test_config()
+        PinMonitor.GetOrCreate(config)
+        try:
+            backend = LocalCPUBackend(
+                config=config, memory_allocator=memory_allocator
+            )
+
+            # target_bytes = max(alloc_bytes * 2, 32 MiB) = 32 MiB
+            # With phy_size = 8 MiB per entry, need ceil(32/8) = 4 evictions.
+            entry_shape = torch.Size([2, 16, 8, 128])
+            entry_dtype = torch.bfloat16
+            large_phy_size = 8 * 1024 * 1024  # 8 MiB
+            num_entries = 10
+
+            for i in range(num_entries):
+                key = create_test_key(f"large_{i}")
+                mem_obj = create_test_memory_obj(
+                    shape=entry_shape, dtype=entry_dtype
+                )
+                # Patch phy_size to simulate large entries
+                mem_obj.metadata.phy_size = large_phy_size
+                backend.submit_put_task(key, mem_obj)
+                mem_obj.ref_count_down()  # caller releases its reference
+
+            assert len(backend.hot_cache) == num_entries
+
+            # Patch allocator: first call fails, second succeeds
+            real_allocate = memory_allocator.allocate
+            call_count = [0]
+
+            def patched_allocate(shapes, dtypes, fmt):
+                call_count[0] += 1
+                if call_count[0] <= 1:
+                    return None
+                return real_allocate(shapes, dtypes, fmt)
+
+            backend.memory_allocator.allocate = patched_allocate
+
+            result = backend.allocate(
+                entry_shape, entry_dtype, eviction=True, busy_loop=False
+            )
+
+            assert result is not None
+            assert call_count[0] == 2, (
+                f"Expected 2 allocator calls, got {call_count[0]}"
+            )
+
+            # With 8 MiB entries and 32 MiB target, exactly 4 should be
+            # evicted: freed_bytes reaches 32 MiB after 4 evictions.
+            expected_remaining = num_entries - 4
+            assert len(backend.hot_cache) == expected_remaining, (
+                f"Expected {expected_remaining} entries remaining, "
+                f"got {len(backend.hot_cache)}. Eviction should stop "
+                f"once target_bytes is reached."
+            )
+
+            backend.memory_allocator.allocate = real_allocate
+            backend.memory_allocator.close()
+        finally:
+            PinMonitor.DestroyInstance()
+
+
 class TestLocalCPUBackendAllocatorAlignment:
     def test_rust_odirect_auto_alignment_for_mixed_allocator(self, monkeypatch):
         config = create_test_config(local_cpu=True)
