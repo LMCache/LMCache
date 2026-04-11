@@ -38,6 +38,17 @@ const (
 
 func ptr[T any](v T) *T { return &v }
 
+func findArgValue(t *testing.T, args []string, flag string) string { //nolint:unparam // test helper, flag varies by caller
+	t.Helper()
+	for i, a := range args {
+		if a == flag && i+1 < len(args) {
+			return args[i+1]
+		}
+	}
+	t.Fatalf("expected %s flag in args", flag)
+	return ""
+}
+
 func minimalEngine() *lmcachev1alpha1.LMCacheEngine {
 	return &lmcachev1alpha1.LMCacheEngine{
 		ObjectMeta: metav1.ObjectMeta{
@@ -302,67 +313,167 @@ func TestBuildContainerArgs_CustomPrometheusPort(t *testing.T) {
 	assertArg(t, args, "--prometheus-port", "8888")
 }
 
-func TestBuildContainerArgs_L2Backends(t *testing.T) {
+func TestBuildContainerArgs_L2RESP(t *testing.T) {
 	spec := &lmcachev1alpha1.LMCacheEngineSpec{
 		L1: lmcachev1alpha1.L1BackendSpec{SizeGB: 10},
-		L2Backends: []lmcachev1alpha1.L2BackendSpec{
-			{
-				Type: "redis",
-				Config: map[string]apiextensionsv1.JSON{
-					"host": {Raw: []byte(`"localhost"`)},
-					"port": {Raw: []byte(`6379`)},
+		L2Backend: &lmcachev1alpha1.L2BackendSpec{
+			RESP: &lmcachev1alpha1.RESPL2AdapterSpec{
+				Host: "redis.default.svc",
+				Port: 6379,
+			},
+		},
+	}
+	args := BuildContainerArgs(spec)
+
+	// Default policies should be present
+	assertArg(t, args, "--l2-store-policy", "default")
+	assertArg(t, args, "--l2-prefetch-policy", "default")
+	assertArg(t, args, "--l2-prefetch-max-in-flight", "8")
+
+	l2JSON := findArgValue(t, args, "--l2-adapter")
+
+	var parsed map[string]any
+	if err := json.Unmarshal([]byte(l2JSON), &parsed); err != nil {
+		t.Fatalf("failed to parse L2 JSON: %v", err)
+	}
+	if parsed["type"] != "resp" {
+		t.Fatalf("expected type=resp, got %v", parsed["type"])
+	}
+	if parsed["host"] != "redis.default.svc" {
+		t.Fatalf("expected host=redis.default.svc, got %v", parsed["host"])
+	}
+	if parsed["port"] != float64(6379) {
+		t.Fatalf("expected port=6379, got %v", parsed["port"])
+	}
+	if parsed["num_workers"] != float64(8) {
+		t.Fatalf("expected num_workers=8, got %v", parsed["num_workers"])
+	}
+	// No auth — username/password should be absent
+	if _, ok := parsed["username"]; ok {
+		t.Fatal("expected no username without authSecretRef")
+	}
+}
+
+func TestBuildContainerArgs_L2RESPWithAuth(t *testing.T) {
+	spec := &lmcachev1alpha1.LMCacheEngineSpec{
+		L1: lmcachev1alpha1.L1BackendSpec{SizeGB: 10},
+		L2Backend: &lmcachev1alpha1.L2BackendSpec{
+			RESP: &lmcachev1alpha1.RESPL2AdapterSpec{
+				Host: "redis",
+				Port: 6379,
+				AuthSecretRef: &lmcachev1alpha1.SecretReference{
+					Name: "redis-auth",
 				},
 			},
 		},
 	}
 	args := BuildContainerArgs(spec)
 
-	// Find the --l2-adapter flag
-	var l2JSON string
-	for i, a := range args {
-		if a == "--l2-adapter" && i+1 < len(args) {
-			l2JSON = args[i+1]
-			break
-		}
+	l2JSON := findArgValue(t, args, "--l2-adapter")
+
+	// Credentials should NOT be in the JSON — they are passed via env vars.
+	var parsed map[string]any
+	if err := json.Unmarshal([]byte(l2JSON), &parsed); err != nil {
+		t.Fatalf("failed to parse L2 JSON: %v", err)
 	}
-	if l2JSON == "" {
-		t.Fatal("expected --l2-adapter flag")
+	if _, ok := parsed["username"]; ok {
+		t.Fatal("username should not be in L2 JSON — it is passed via env var")
 	}
+	if _, ok := parsed["password"]; ok {
+		t.Fatal("password should not be in L2 JSON — it is passed via env var")
+	}
+}
+
+func TestBuildContainerArgs_L2RESPCustomWorkers(t *testing.T) {
+	spec := &lmcachev1alpha1.LMCacheEngineSpec{
+		L1: lmcachev1alpha1.L1BackendSpec{SizeGB: 10},
+		L2Backend: &lmcachev1alpha1.L2BackendSpec{
+			RESP: &lmcachev1alpha1.RESPL2AdapterSpec{
+				Host:          "redis",
+				Port:          6379,
+				NumWorkers:    ptr(int32(16)),
+				MaxCapacityGB: ptr(50.0),
+			},
+		},
+	}
+	args := BuildContainerArgs(spec)
+
+	l2JSON := findArgValue(t, args, "--l2-adapter")
 
 	var parsed map[string]any
 	if err := json.Unmarshal([]byte(l2JSON), &parsed); err != nil {
 		t.Fatalf("failed to parse L2 JSON: %v", err)
 	}
-	if parsed["type"] != "redis" {
-		t.Fatalf("expected type=redis, got %v", parsed["type"])
+	if parsed["num_workers"] != float64(16) {
+		t.Fatalf("expected num_workers=16, got %v", parsed["num_workers"])
 	}
-	if parsed["host"] != "localhost" {
-		t.Fatalf("expected host=localhost, got %v", parsed["host"])
-	}
-	// JSON numbers are float64
-	if parsed["port"] != float64(6379) {
-		t.Fatalf("expected port=6379, got %v", parsed["port"])
+	if parsed["max_capacity_gb"] != float64(50) {
+		t.Fatalf("expected max_capacity_gb=50, got %v", parsed["max_capacity_gb"])
 	}
 }
 
-func TestBuildContainerArgs_MultipleL2Backends(t *testing.T) {
+func TestBuildContainerArgs_L2Raw(t *testing.T) {
 	spec := &lmcachev1alpha1.LMCacheEngineSpec{
 		L1: lmcachev1alpha1.L1BackendSpec{SizeGB: 10},
-		L2Backends: []lmcachev1alpha1.L2BackendSpec{
-			{Type: "mock"},
-			{Type: "disk"},
+		L2Backend: &lmcachev1alpha1.L2BackendSpec{
+			Raw: &lmcachev1alpha1.RawL2AdapterSpec{
+				Type: "mock",
+				Config: map[string]apiextensionsv1.JSON{
+					"max_size_gb":       {Raw: []byte(`256`)},
+					"mock_bandwidth_gb": {Raw: []byte(`10`)},
+				},
+			},
 		},
 	}
 	args := BuildContainerArgs(spec)
 
-	count := 0
+	l2JSON := findArgValue(t, args, "--l2-adapter")
+
+	var parsed map[string]any
+	if err := json.Unmarshal([]byte(l2JSON), &parsed); err != nil {
+		t.Fatalf("failed to parse L2 JSON: %v", err)
+	}
+	if parsed["type"] != "mock" {
+		t.Fatalf("expected type=mock, got %v", parsed["type"])
+	}
+	if parsed["max_size_gb"] != float64(256) {
+		t.Fatalf("expected max_size_gb=256, got %v", parsed["max_size_gb"])
+	}
+}
+
+func TestBuildContainerArgs_L2CustomPolicies(t *testing.T) {
+	spec := &lmcachev1alpha1.LMCacheEngineSpec{
+		L1: lmcachev1alpha1.L1BackendSpec{SizeGB: 10},
+		L2Backend: &lmcachev1alpha1.L2BackendSpec{
+			RESP: &lmcachev1alpha1.RESPL2AdapterSpec{
+				Host: "redis",
+				Port: 6379,
+			},
+			StorePolicy:         ptr("skip_l1"),
+			PrefetchPolicy:      ptr("default"),
+			PrefetchMaxInFlight: ptr(int32(16)),
+		},
+	}
+	args := BuildContainerArgs(spec)
+
+	assertArg(t, args, "--l2-store-policy", "skip_l1")
+	assertArg(t, args, "--l2-prefetch-policy", "default")
+	assertArg(t, args, "--l2-prefetch-max-in-flight", "16")
+}
+
+func TestBuildContainerArgs_NoL2Backend(t *testing.T) {
+	spec := &lmcachev1alpha1.LMCacheEngineSpec{
+		L1: lmcachev1alpha1.L1BackendSpec{SizeGB: 10},
+	}
+	args := BuildContainerArgs(spec)
+
 	for _, a := range args {
 		if a == "--l2-adapter" {
-			count++
+			t.Fatal("expected no --l2-adapter flag when L2Backend is nil")
 		}
-	}
-	if count != 2 {
-		t.Fatalf("expected 2 --l2-adapter flags, got %d", count)
+		if a == "--l2-store-policy" {
+			t.Fatal("expected no --l2-store-policy flag when L2Backend is nil")
+		}
 	}
 }
 
@@ -471,9 +582,9 @@ func TestBuildDaemonSet_Minimal(t *testing.T) {
 		t.Fatal("missing NVIDIA_VISIBLE_DEVICES env var")
 	}
 
-	// Should have 2 ports (server + metrics) by default
-	if len(c.Ports) != 2 {
-		t.Fatalf("expected 2 container ports, got %d", len(c.Ports))
+	// Should have 3 ports (server + http + metrics) by default
+	if len(c.Ports) != 3 {
+		t.Fatalf("expected 3 container ports, got %d", len(c.Ports))
 	}
 }
 
@@ -518,11 +629,11 @@ func TestBuildDaemonSet_PrometheusDisabled(t *testing.T) {
 	ds := BuildDaemonSet(engine)
 	c := ds.Spec.Template.Spec.Containers[0]
 
-	// Should only have server port, no metrics port
-	if len(c.Ports) != 1 {
-		t.Fatalf("expected 1 container port, got %d", len(c.Ports))
+	// Should have server + http ports, no metrics port
+	if len(c.Ports) != 2 {
+		t.Fatalf("expected 2 container ports, got %d", len(c.Ports))
 	}
-	if c.Ports[0].Name != "server" {
+	if c.Ports[0].Name != "server" { //nolint:goconst // test assertion
 		t.Fatalf("expected port name 'server', got %s", c.Ports[0].Name)
 	}
 }
@@ -599,6 +710,91 @@ func TestBuildDaemonSet_PodLabelsAndAnnotations(t *testing.T) {
 	}
 }
 
+func TestBuildDaemonSet_RESPNoAuth(t *testing.T) {
+	engine := minimalEngine()
+	engine.Spec.L2Backend = &lmcachev1alpha1.L2BackendSpec{
+		RESP: &lmcachev1alpha1.RESPL2AdapterSpec{
+			Host: "redis",
+			Port: 6379,
+		},
+	}
+
+	ds := BuildDaemonSet(engine)
+	c := ds.Spec.Template.Spec.Containers[0]
+
+	// Should use direct command, not shell wrapper
+	if c.Command[0] != "/opt/venv/bin/lmcache" || c.Command[1] != "server" {
+		t.Fatalf("expected lmcache server command, got %v", c.Command)
+	}
+
+	// Should have --l2-adapter in args
+	if !slices.Contains(c.Args, "--l2-adapter") {
+		t.Fatal("expected --l2-adapter in args")
+	}
+
+	// Should NOT have RESP auth env vars
+	for _, e := range c.Env {
+		if e.Name == "LMCACHE_RESP_USERNAME" || e.Name == "LMCACHE_RESP_PASSWORD" {
+			t.Fatalf("unexpected auth env var %s without authSecretRef", e.Name)
+		}
+	}
+}
+
+func TestBuildDaemonSet_RESPWithAuth(t *testing.T) {
+	engine := minimalEngine()
+	engine.Spec.L2Backend = &lmcachev1alpha1.L2BackendSpec{
+		RESP: &lmcachev1alpha1.RESPL2AdapterSpec{
+			Host: "redis",
+			Port: 6379,
+			AuthSecretRef: &lmcachev1alpha1.SecretReference{
+				Name: "redis-auth",
+			},
+		},
+	}
+
+	ds := BuildDaemonSet(engine)
+	c := ds.Spec.Template.Spec.Containers[0]
+
+	// Should use direct python command (no shell wrapper needed)
+	if c.Command[0] != "/opt/venv/bin/lmcache" || c.Command[1] != "server" {
+		t.Fatalf("expected lmcache server command, got %v", c.Command)
+	}
+
+	// Should have RESP auth env vars from secret
+	foundUser := false
+	foundPass := false
+	for _, e := range c.Env {
+		if e.Name == "LMCACHE_RESP_USERNAME" {
+			foundUser = true
+			if e.ValueFrom == nil || e.ValueFrom.SecretKeyRef == nil {
+				t.Fatal("expected secretKeyRef for LMCACHE_RESP_USERNAME")
+			}
+			expectedSecret := RESPAuthSecretName(testEngineName)
+			if e.ValueFrom.SecretKeyRef.Name != expectedSecret {
+				t.Fatalf("expected secret name %s, got %s", expectedSecret, e.ValueFrom.SecretKeyRef.Name)
+			}
+			if e.ValueFrom.SecretKeyRef.Key != "username" {
+				t.Fatalf("expected key username, got %s", e.ValueFrom.SecretKeyRef.Key)
+			}
+		}
+		if e.Name == "LMCACHE_RESP_PASSWORD" {
+			foundPass = true
+			if e.ValueFrom == nil || e.ValueFrom.SecretKeyRef == nil {
+				t.Fatal("expected secretKeyRef for LMCACHE_RESP_PASSWORD")
+			}
+			if e.ValueFrom.SecretKeyRef.Key != "password" {
+				t.Fatalf("expected key password, got %s", e.ValueFrom.SecretKeyRef.Key)
+			}
+		}
+	}
+	if !foundUser {
+		t.Fatal("missing LMCACHE_RESP_USERNAME env var")
+	}
+	if !foundPass {
+		t.Fatal("missing LMCACHE_RESP_PASSWORD env var")
+	}
+}
+
 // ===========================
 // BuildLookupService
 // ===========================
@@ -621,14 +817,20 @@ func TestBuildLookupService_Default(t *testing.T) {
 	if svc.Spec.InternalTrafficPolicy == nil || *svc.Spec.InternalTrafficPolicy != corev1.ServiceInternalTrafficPolicyLocal {
 		t.Fatal("expected internalTrafficPolicy=Local")
 	}
-	if len(svc.Spec.Ports) != 1 {
-		t.Fatalf("expected 1 port, got %d", len(svc.Spec.Ports))
+	if len(svc.Spec.Ports) != 2 {
+		t.Fatalf("expected 2 ports, got %d", len(svc.Spec.Ports))
 	}
 	if svc.Spec.Ports[0].Port != 5555 {
-		t.Fatalf("expected port 5555, got %d", svc.Spec.Ports[0].Port)
+		t.Fatalf("expected server port 5555, got %d", svc.Spec.Ports[0].Port)
 	}
 	if svc.Spec.Ports[0].Name != "server" {
 		t.Fatalf("expected port name server, got %s", svc.Spec.Ports[0].Name)
+	}
+	if svc.Spec.Ports[1].Port != 8080 {
+		t.Fatalf("expected http port 8080, got %d", svc.Spec.Ports[1].Port)
+	}
+	if svc.Spec.Ports[1].Name != "http" {
+		t.Fatalf("expected port name http, got %s", svc.Spec.Ports[1].Name)
 	}
 
 	sel := svc.Spec.Selector
