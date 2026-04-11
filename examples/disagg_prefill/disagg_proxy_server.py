@@ -8,6 +8,7 @@ import argparse
 import asyncio
 import itertools
 import json
+import math
 import os
 import time
 
@@ -28,6 +29,53 @@ from lmcache.v1.storage_backend.pd_backend import (
 )
 
 logger = init_logger(__name__)
+
+
+class WeightedSemaphore:
+    """Async semaphore with variable-weight acquire.
+
+    Limits in-flight PD token usage: each request holds ceil(L/chunk_size)
+    slots until decoding starts, preventing decoder buffer exhaustion deadlocks.
+    """
+
+    def __init__(self, capacity: int) -> None:
+        self._capacity = capacity
+        self._available = capacity
+        self._lock = asyncio.Condition()
+
+    async def acquire(self, slots: int) -> None:
+        """Acquire *slots* from the semaphore, blocking until available.
+
+        Args:
+            slots: Number of slots to acquire (must be <= capacity).
+
+        Raises:
+            ValueError: If slots exceeds total capacity (would block forever).
+        """
+        if slots > self._capacity:
+            raise ValueError(
+                f"Requested {slots} slots exceeds total capacity {self._capacity}"
+            )
+        async with self._lock:
+            await self._lock.wait_for(lambda: self._available >= slots)
+            self._available -= slots
+
+    async def release(self, slots: int) -> None:
+        """Return *slots* to the semaphore and wake waiting acquirers.
+
+        Args:
+            slots: Number of slots to release. No-op if <= 0.
+        """
+        if slots <= 0:
+            return
+        async with self._lock:
+            self._available += slots
+            self._lock.notify_all()
+
+    @property
+    def available(self) -> int:
+        """Number of slots currently available."""
+        return self._available
 
 
 @asynccontextmanager
@@ -125,6 +173,22 @@ async def lifespan(app: FastAPI):
 
     app.state.zmq_task = asyncio.create_task(zmq_pull_server())
 
+    global pd_buffer_semaphore
+    kv_bytes_per_token = compute_kv_bytes_per_token(global_args.model)
+    capacity_slots = global_args.pd_buffer_size // (
+        kv_bytes_per_token * global_args.chunk_size
+    )
+    pd_buffer_semaphore = WeightedSemaphore(capacity_slots)
+    logger.info(
+        "PD buffer semaphore: capacity=%d slots"
+        " (%d bytes / (%d bytes/tok * %d chunk_size)) for model %s.",
+        capacity_slots,
+        global_args.pd_buffer_size,
+        kv_bytes_per_token,
+        global_args.chunk_size,
+        global_args.model,
+    )
+
     yield
 
     # Shutdown: Close clients
@@ -182,6 +246,31 @@ def csv_strs(s):
     return [x.strip() for x in s.split(",")]
 
 
+def compute_kv_bytes_per_token(model_name: str) -> int:
+    """Return the number of KV cache bytes per token for *model_name*.
+
+    Reads num_hidden_layers, num_key_value_heads, head_dim, and torch_dtype
+    from the HuggingFace config without downloading model weights.
+
+    Args:
+        model_name: HuggingFace model id or local path.
+
+    Returns:
+        Bytes per token across all layers and both K/V tensors.
+    """
+    # Third Party
+    from transformers import AutoConfig
+
+    cfg = AutoConfig.from_pretrained(model_name)
+    num_layers: int = cfg.num_hidden_layers
+    num_kv_heads: int = getattr(cfg, "num_key_value_heads", cfg.num_attention_heads)
+    head_dim: int = getattr(cfg, "head_dim", cfg.hidden_size // cfg.num_attention_heads)
+    # 4 bytes for float32, 2 bytes for float16/bfloat16 (the common default)
+    torch_dtype = str(getattr(cfg, "torch_dtype", "bfloat16"))
+    dtype_bytes = 4 if "float32" in torch_dtype else 2
+    return 2 * num_layers * num_kv_heads * head_dim * dtype_bytes
+
+
 def parse_args():
     parser = argparse.ArgumentParser()
 
@@ -198,6 +287,36 @@ def parse_args():
     parser.add_argument("--num-decoders", type=int, default=1)
     parser.add_argument("--proxy-host", type=str, default="localhost")
     parser.add_argument("--proxy-port", type=int, default=8500)
+
+    # PD buffer concurrency limiting. A weighted semaphore caps in-flight
+    # chunk slots to prevent decoder buffer exhaustion deadlocks.
+    # capacity_slots = pd_buffer_size // (kv_bytes_per_token * chunk_size)
+    # kv_bytes_per_token is derived from the model config automatically.
+    parser.add_argument(
+        "--model",
+        type=str,
+        default="meta-llama/Llama-3.1-8B-Instruct",
+        help=(
+            "HuggingFace model name or local path. Used to derive"
+            " kv_bytes_per_token for the PD buffer semaphore capacity."
+        ),
+    )
+    parser.add_argument(
+        "--pd-buffer-size",
+        type=int,
+        default=2 * 1024 * 1024 * 1024,  # 2 GB
+        help=(
+            "PD transfer buffer size in bytes (must match the decoder's"
+            " LMCache config). Used to derive the in-flight slot capacity."
+            " Default: 2 GB."
+        ),
+    )
+    parser.add_argument(
+        "--chunk-size",
+        type=int,
+        default=256,
+        help="LMCache chunk size in tokens (must match the LMCache config).",
+    )
 
     args = parser.parse_args()
     return args
@@ -225,6 +344,8 @@ app.state.bound_clients = {}
 
 # Keep finished reqs
 app.state.finished_reqs = defaultdict(int)
+
+pd_buffer_semaphore: Optional[WeightedSemaphore] = None
 
 
 zmq_ctx = zmq.asyncio.Context()
@@ -357,6 +478,8 @@ async def handle_completions(request: Request):
     req_id = str(counter)  # we use counter as req_id
 
     st = time.time()
+    slots = 0  # slots to release on error; set after successful acquire only
+    acquired = False
     try:
         req_data = await request.json()
 
@@ -371,6 +494,12 @@ async def handle_completions(request: Request):
         org_max_tokens = req_data["max_tokens"]
         req_data["prompt"] = tokenize_output["tokens"]
         req_data["max_tokens"] = 1
+
+        # Acquire ceil(L/chunk_size) PD buffer slots before prefill.
+        slots = math.ceil(len(tokenize_output["tokens"]) / global_args.chunk_size)
+        if pd_buffer_semaphore is not None:
+            await pd_buffer_semaphore.acquire(slots)
+            acquired = True
 
         disagg_spec = {
             "req_id": req_id,
@@ -427,8 +556,11 @@ async def handle_completions(request: Request):
                 "data: " + json.dumps(head_chunk, separators=(",", ":")) + "\n\n"
             ).encode()
 
-            # Wait until decode node signals that kv is ready
-            await wait_decode_kv_ready(req_id, num_tp_rank)
+            try:
+                await wait_decode_kv_ready(req_id, num_tp_rank)
+            finally:
+                if pd_buffer_semaphore is not None:
+                    await pd_buffer_semaphore.release(slots)
 
             async for chunk in stream_service_response(
                 decode_client.client, "/v1/completions", req_data
@@ -438,6 +570,8 @@ async def handle_completions(request: Request):
         return StreamingResponse(generate_stream(), media_type="application/json")
 
     except Exception as e:
+        if pd_buffer_semaphore is not None and acquired:
+            await pd_buffer_semaphore.release(slots)
         # Standard
         import sys
         import traceback
@@ -456,6 +590,8 @@ async def handle_chat_completions(request: Request):
     req_id = str(counter)
 
     st = time.time()
+    slots = 0  # slots to release on error; set after successful acquire only
+    acquired = False
     try:
         req_data = await request.json()
 
@@ -476,6 +612,12 @@ async def handle_chat_completions(request: Request):
         if "max_completion_tokens" in req_data:
             org_max_completion_tokens = req_data["max_completion_tokens"]
             req_data["max_completion_tokens"] = 1
+
+        # Acquire ceil(L/chunk_size) PD buffer slots before prefill.
+        slots = math.ceil(len(tokenize_output["tokens"]) / global_args.chunk_size)
+        if pd_buffer_semaphore is not None:
+            await pd_buffer_semaphore.acquire(slots)
+            acquired = True
 
         disagg_spec = {
             "req_id": req_id,
@@ -554,7 +696,11 @@ async def handle_chat_completions(request: Request):
                 "data: " + json.dumps(head_chunk, separators=(",", ":")) + "\n\n"
             ).encode()
 
-            await wait_decode_kv_ready(req_id, num_tp_rank)
+            try:
+                await wait_decode_kv_ready(req_id, num_tp_rank)
+            finally:
+                if pd_buffer_semaphore is not None:
+                    await pd_buffer_semaphore.release(slots)
 
             # Stream and convert completion format chunks to chat completion format
             async for chunk in stream_service_response(
@@ -606,6 +752,8 @@ async def handle_chat_completions(request: Request):
         return StreamingResponse(generate_stream(), media_type="application/json")
 
     except Exception as e:
+        if pd_buffer_semaphore is not None and acquired:
+            await pd_buffer_semaphore.release(slots)
         # Standard
         import sys
         import traceback
