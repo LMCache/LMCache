@@ -683,6 +683,43 @@ class TestValidateAndSetConfigValueTypeConversion:
         assert result is False
 
 
+def test_from_env_does_not_call_validate():
+    """Regression test: from_env() does not call validate().
+
+    When config is loaded via from_env() (the path used by
+    lmcache_get_or_create_config in vLLM/SGLang integrations),
+    validate() is never called. This means P/D auto-settings like
+    save_unfull_chunk=True are not applied, causing silent KV transfer
+    failures for prompts shorter than chunk_size.
+    """
+    os.environ["LMCACHE_ENABLE_PD"] = "true"
+    os.environ["LMCACHE_PD_ROLE"] = "sender"
+    os.environ["LMCACHE_PD_BUFFER_SIZE"] = "1024"
+    os.environ["LMCACHE_PD_BUFFER_DEVICE"] = "cpu"
+    # Do NOT set LMCACHE_SAVE_UNFULL_CHUNK — validate() should auto-set it
+
+    try:
+        config = LMCacheEngineConfig.from_env()
+
+        # BUG: from_env() doesn't call validate(), so save_unfull_chunk
+        # stays at default (False) even though P/D mode requires True.
+        # This assertion documents the current broken behavior.
+        assert config.save_unfull_chunk is False, (
+            "If this fails, from_env() now calls validate() — "
+            "remove this test and the workaround in lmcache_get_or_create_config"
+        )
+
+        # After manual validate(), it should be corrected
+        config.validate()
+        assert config.save_unfull_chunk is True
+    finally:
+        del os.environ["LMCACHE_ENABLE_PD"]
+        del os.environ["LMCACHE_PD_ROLE"]
+        del os.environ["LMCACHE_PD_BUFFER_SIZE"]
+        del os.environ["LMCACHE_PD_BUFFER_DEVICE"]
+        os.environ.pop("LMCACHE_SAVE_UNFULL_CHUNK", None)
+
+
 def test_update_config_from_env_calls_validate():
     """Test that update_config_from_env() calls validate() method.
 
