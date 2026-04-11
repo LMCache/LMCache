@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
-"""Chunk hash file-logging subscriber.
+"""Lookup hash file-logging subscriber.
 
-Subscribes to ``MP_LOOKUP`` events and writes chunk hash data to
+Subscribes to ``MP_LOOKUP`` events and writes lookup hash data to
 rotating JSONL files for offline analysis.  Because the EventBus
 drain thread dispatches callbacks off the hot path, no extra queue
 or worker thread is needed — file I/O happens in the EventBus
@@ -28,7 +28,7 @@ from lmcache.v1.mp_observability.event_bus import EventCallback, EventSubscriber
 logger = init_logger(__name__)
 
 # Pattern for discovering existing log files on disk.
-_LOG_FILE_GLOB = "chunk_hashes_*.jsonl"
+_LOG_FILE_GLOB = "lookup_hashes_*.jsonl"
 
 
 def _format_timestamp(ts: float) -> str:
@@ -41,15 +41,15 @@ def _format_timestamp(ts: float) -> str:
 
 
 @dataclass
-class ChunkHashLogConfig:
-    """Configuration for chunk hash file logging.
+class LookupHashLogConfig:
+    """Configuration for lookup hash file logging.
 
     When ``output_dir`` is non-empty, chunk hashes computed during
     lookup are written to rotating JSONL files for offline analysis.
     """
 
     output_dir: str = ""
-    """Directory to write chunk hash JSONL files.
+    """Directory to write lookup hash JSONL files.
     Empty string disables logging."""
 
     rotation_interval_sec: int = 6 * 3600
@@ -65,22 +65,21 @@ class ChunkHashLogConfig:
 
     @property
     def enabled(self) -> bool:
-        """Whether chunk hash logging is enabled."""
+        """Whether lookup hash logging is enabled."""
         return bool(self.output_dir)
 
 
-class ChunkHashLoggingSubscriber(EventSubscriber):
-    """EventBus subscriber that writes chunk hashes to rotating JSONL files.
+class LookupHashLoggingSubscriber(EventSubscriber):
+    """EventBus subscriber that writes lookup hashes to rotating JSONL files.
 
-    Replaces the standalone ``ChunkHashLogger`` by leveraging the
-    EventBus drain thread for async I/O instead of maintaining its
-    own queue and worker.
+    Leverages the EventBus drain thread for async I/O instead of maintaining
+    its own queue and worker.
 
     Files rotate when either the time interval or file size limit is
     reached, whichever comes first.  File names include a
     human-readable timestamp, e.g.::
 
-        chunk_hashes_20260401_143025_000003.jsonl
+        lookup_hashes_20260401_143025_000003.jsonl
 
     Each JSONL line has the format::
 
@@ -92,7 +91,7 @@ class ChunkHashLoggingSubscriber(EventSubscriber):
          "chunk_hashes": ["0xab...", ...]}
     """
 
-    def __init__(self, config: ChunkHashLogConfig) -> None:
+    def __init__(self, config: LookupHashLogConfig) -> None:
         self._config = config
         self.output_dir = Path(config.output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -112,7 +111,7 @@ class ChunkHashLoggingSubscriber(EventSubscriber):
         self._file_count: int = len(self._file_list)
 
         logger.info(
-            "ChunkHashLoggingSubscriber started: output_dir=%s, "
+            "LookupHashLoggingSubscriber started: output_dir=%s, "
             "rotation_interval=%ds, "
             "rotation_max_size=%d, max_files=%d, "
             "existing_files=%d",
@@ -127,7 +126,7 @@ class ChunkHashLoggingSubscriber(EventSubscriber):
 
     def get_subscriptions(self) -> dict[EventType, EventCallback]:
         return {
-            EventType.MP_LOOKUP: self._on_chunk_hashes,
+            EventType.MP_LOOKUP: self._on_lookup_hashes,
         }
 
     def shutdown(self) -> None:
@@ -135,12 +134,12 @@ class ChunkHashLoggingSubscriber(EventSubscriber):
         if self._current_handle is not None:
             self._current_handle.close()
             self._current_handle = None
-        logger.info("ChunkHashLoggingSubscriber closed")
+        logger.info("LookupHashLoggingSubscriber closed")
 
     # -- Callback ----------------------------------------------------------
 
-    def _on_chunk_hashes(self, event: Event) -> None:
-        """Write a chunk hash event to the current JSONL file."""
+    def _on_lookup_hashes(self, event: Event) -> None:
+        """Write a lookup hash event to the current JSONL file."""
         meta = event.metadata
         timestamp = event.timestamp
 
@@ -167,7 +166,7 @@ class ChunkHashLoggingSubscriber(EventSubscriber):
             self._current_handle.flush()
             self._current_file_size += len(line)
 
-    # -- File rotation (same logic as the old ChunkHashLogger) -------------
+    # -- File rotation -----------------------------------------------------
 
     def _needs_rotation(self, now: float) -> bool:
         """Check if the current file needs rotation."""
@@ -188,7 +187,7 @@ class ChunkHashLoggingSubscriber(EventSubscriber):
 
         time_str = _format_timestamp(now)
         self._current_file = (
-            self.output_dir / f"chunk_hashes_{time_str}_{self._file_count:06d}.jsonl"
+            self.output_dir / f"lookup_hashes_{time_str}_{self._file_count:06d}.jsonl"
         )
         self._current_handle = open(self._current_file, "w", encoding="utf-8")
         self._current_file_opened_at = now
@@ -204,7 +203,7 @@ class ChunkHashLoggingSubscriber(EventSubscriber):
                     oldest.unlink()
             except Exception as e:
                 logger.error(
-                    "Failed to delete old chunk hash file %s: %s",
+                    "Failed to delete old lookup hash file %s: %s",
                     oldest,
                     e,
                 )

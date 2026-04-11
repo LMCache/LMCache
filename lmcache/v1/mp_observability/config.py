@@ -17,8 +17,8 @@ if TYPE_CHECKING:
     from lmcache.v1.mp_observability.event_bus import EventBus
 
 # First Party
-from lmcache.v1.mp_observability.subscribers.logging.chunk_hash import (
-    ChunkHashLogConfig,
+from lmcache.v1.mp_observability.subscribers.logging.lookup_hash import (
+    LookupHashLogConfig,
 )
 
 
@@ -54,8 +54,8 @@ class ObservabilityConfig:
     """Port for the Prometheus /metrics endpoint.  Only used when
     ``otlp_endpoint`` is ``None`` (Prometheus pull fallback)."""
 
-    chunk_hash_log: ChunkHashLogConfig = field(default_factory=ChunkHashLogConfig)
-    """Configuration for chunk hash file logging.  Disabled by default
+    lookup_hash_log: LookupHashLogConfig = field(default_factory=LookupHashLogConfig)
+    """Configuration for lookup hash file logging.  Disabled by default
     (empty ``output_dir``)."""
 
 
@@ -129,37 +129,37 @@ def add_observability_args(
         ),
     )
 
-    # Chunk hash logging config
+    # Lookup hash logging config
     log_group = parser.add_argument_group(
-        "Chunk Hash Logging",
-        "Configuration for chunk hash file logging (offline analysis)",
+        "Lookup Hash Logging",
+        "Configuration for lookup hash file logging (offline analysis)",
     )
     log_group.add_argument(
-        "--chunk-hash-log-dir",
+        "--lookup-hash-log-dir",
         type=str,
         default="",
-        help="Directory to write chunk hash JSONL files for offline analysis. "
+        help="Directory to write lookup hash JSONL files for offline analysis. "
         "Empty string (default) disables logging.",
     )
     log_group.add_argument(
-        "--chunk-hash-log-rotation-interval",
+        "--lookup-hash-log-rotation-interval",
         type=int,
         default=6 * 3600,
         help="Time interval in seconds before rotating to a new log file. "
         "Default is 21600 (6 hours).",
     )
     log_group.add_argument(
-        "--chunk-hash-log-rotation-max-size",
+        "--lookup-hash-log-rotation-max-size",
         type=int,
         default=100 * 1024 * 1024,
         help="Max file size in bytes before rotating even if the time "
         "interval has not elapsed. Default is 100MB (104857600).",
     )
     log_group.add_argument(
-        "--chunk-hash-log-max-files",
+        "--lookup-hash-log-max-files",
         type=int,
         default=100,
-        help="Max number of chunk hash log files to keep. "
+        help="Max number of lookup hash log files to keep. "
         "Oldest files are deleted when this limit is exceeded. Default is 100.",
     )
 
@@ -185,11 +185,11 @@ def parse_args_to_observability_config(
         tracing_enabled=args.enable_tracing,
         otlp_endpoint=args.otlp_endpoint,
         prometheus_port=args.prometheus_port,
-        chunk_hash_log=ChunkHashLogConfig(
-            output_dir=args.chunk_hash_log_dir,
-            rotation_interval_sec=args.chunk_hash_log_rotation_interval,
-            rotation_max_size=args.chunk_hash_log_rotation_max_size,
-            max_files=args.chunk_hash_log_max_files,
+        lookup_hash_log=LookupHashLogConfig(
+            output_dir=args.lookup_hash_log_dir,
+            rotation_interval_sec=args.lookup_hash_log_rotation_interval,
+            rotation_max_size=args.lookup_hash_log_rotation_max_size,
+            max_files=args.lookup_hash_log_max_files,
         ),
     )
 
@@ -272,15 +272,15 @@ def init_observability(obs_config: ObservabilityConfig) -> EventBus:
 
         bus.register_subscriber(MPServerTracingSubscriber())
 
-    # Chunk hash file logging (independent of the logging_enabled flag —
+    # Lookup hash file logging (independent of the logging_enabled flag —
     # it has its own enable gate via output_dir).
-    if obs_config.chunk_hash_log.enabled:
+    if obs_config.lookup_hash_log.enabled:
         # First Party
-        from lmcache.v1.mp_observability.subscribers.logging.chunk_hash import (
-            ChunkHashLoggingSubscriber,
+        from lmcache.v1.mp_observability.subscribers.logging.lookup_hash import (
+            LookupHashLoggingSubscriber,
         )
 
-        bus.register_subscriber(ChunkHashLoggingSubscriber(obs_config.chunk_hash_log))
+        bus.register_subscriber(LookupHashLoggingSubscriber(obs_config.lookup_hash_log))
 
     bus.start()
     return bus
