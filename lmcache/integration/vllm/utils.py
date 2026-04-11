@@ -110,7 +110,6 @@ def lmcache_get_or_create_config() -> LMCacheEngineConfig:
                     logger.info(f"Loading LMCache config file {config_file}")
                     _config_instance = LMCacheEngineConfig.from_file(config_file)
                     # Update config from environment variables
-                    # (calls validate() internally)
                     _config_instance.update_config_from_env()
 
                 # Fetch and apply remote configuration if configured

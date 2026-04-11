@@ -36,8 +36,6 @@ def lmcache_get_config() -> LMCacheEngineConfig:
         logger.info(f"Loading LMCache config file {config_file}")
         config = LMCacheEngineConfig.from_file(config_file)
 
-    # Validate after all config sources are applied
-    # (auto-applies P/D settings like save_unfull_chunk=True)
     config.validate()
 
     return config
