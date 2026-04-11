@@ -72,6 +72,16 @@ class LocalCPUBackend(AllocatorBackendInterface):
         self.instance_id = config.lmcache_instance_id
         self.cpu_lock = threading.Lock()
 
+        # Max number of retry attempts when busy-looping for memory.
+        # Each attempt sleeps alloc_attempt_delay_secs before retrying.
+        # Default: 300 attempts × 0.1s = 30s timeout.
+        self.max_alloc_attempts = config.get_extra_config_value(
+            "max_alloc_attempts", 300
+        )
+        self.alloc_attempt_delay_secs = config.get_extra_config_value(
+            "alloc_attempt_delay_secs", 0.1
+        )
+
         self.stats_monitor = LMCStatsMonitor.GetOrCreate()
 
         self.layerwise = config.use_layerwise
@@ -558,22 +568,28 @@ class LocalCPUBackend(AllocatorBackendInterface):
                         )
 
             if wait_other_requests:
-                if not busy_loop:
-                    logger.debug(
-                        "Not busy looping because we are not immediately able to evict"
-                    )
+                if not busy_loop or num_attempts >= self.max_alloc_attempts:
+                    if num_attempts >= self.max_alloc_attempts:
+                        logger.warning(
+                            f"LocalCPUBackend.allocate() timed out after "
+                            f"{num_attempts} attempts "
+                            f"({num_attempts * self.alloc_attempt_delay_secs:.1f}s). "
+                            "CPU memory is under sustained pressure. "
+                            "Returning None."
+                        )
+                    else:
+                        logger.debug(
+                            "Not busy looping because we are not immediately able to evict"
+                        )
                     break
 
-                # TODO: make time_to_wait a config
-                time_to_wait = 0.1
                 logger.warning(
                     "No eviction candidates found in local cpu backend. "
                     "Local cpu memory is under pressure. "
-                    f"Waiting for {time_to_wait} seconds before retrying."
+                    f"Waiting for {self.alloc_attempt_delay_secs}s before retrying "
+                    f"(attempt {num_attempts + 1}/{self.max_alloc_attempts})."
                 )
-                # self.memory_allocator.memcheck()
-                # do not hold the lock during sleep
-                time.sleep(time_to_wait)
+                time.sleep(self.alloc_attempt_delay_secs)
 
             memory_obj = self.memory_allocator.allocate(shapes, dtypes, fmt)
             if memory_obj is not None:
@@ -682,22 +698,28 @@ class LocalCPUBackend(AllocatorBackendInterface):
                         )
 
             if wait_other_requests:
-                if not busy_loop:
-                    logger.debug(
-                        "Not busy looping because we are not immediately able to evict"
-                    )
+                if not busy_loop or num_attempts >= self.max_alloc_attempts:
+                    if num_attempts >= self.max_alloc_attempts:
+                        logger.warning(
+                            f"LocalCPUBackend.batched_allocate() timed out after "
+                            f"{num_attempts} attempts "
+                            f"({num_attempts * self.alloc_attempt_delay_secs:.1f}s). "
+                            "CPU memory is under sustained pressure. "
+                            "Returning None."
+                        )
+                    else:
+                        logger.debug(
+                            "Not busy looping because we are not immediately able to evict"
+                        )
                     break
 
-                # TODO: make time_to_wait a config
-                time_to_wait = 0.1
                 logger.warning(
                     "No eviction candidates found in local cpu backend. "
                     "Local cpu memory is under pressure. "
-                    f"Waiting for {time_to_wait} seconds before retrying."
+                    f"Waiting for {self.alloc_attempt_delay_secs}s before retrying "
+                    f"(attempt {num_attempts + 1}/{self.max_alloc_attempts})."
                 )
-                # self.memory_allocator.memcheck()
-                # do not hold the lock during sleep
-                time.sleep(time_to_wait)
+                time.sleep(self.alloc_attempt_delay_secs)
 
             memory_objs = self.memory_allocator.batched_allocate(
                 shapes, dtypes, batch_size, fmt

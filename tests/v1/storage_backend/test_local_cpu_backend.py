@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 import threading
+import time
+from unittest.mock import MagicMock
 
 # Third Party
 import pytest
@@ -613,3 +615,304 @@ class TestLocalCPUBackendAllocatorAlignment:
             assert kwargs.get("align_bytes") == 4096
         finally:
             backend.memory_allocator.close()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Tests for allocate() / batched_allocate() busy-loop timeout (issue #4)
+#
+# Three properties verified:
+#   1. BOUNDED TIME     — thread returns within bounded time instead of hanging forever
+#   2. RELIABILITY — returns None gracefully; no exception, no deadlock
+#   3. OBSERVABILITY — warning is logged when timeout is reached
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _make_always_full_allocator():
+    """Return a mock allocator whose allocate/batched_allocate always return None."""
+    mock = MagicMock()
+    mock.allocate.return_value = None
+    mock.batched_allocate.return_value = None
+    mock.close.return_value = None
+    return mock
+
+
+def _make_backend_with_timeout(max_attempts: int, delay_secs: float):
+    """Create a LocalCPUBackend configured with a short alloc timeout."""
+    config = LMCacheEngineConfig.from_defaults(
+        chunk_size=256,
+        local_cpu=False,  # use_hot=False → no eviction candidates
+        use_layerwise=False,
+        enable_blending=False,
+        lmcache_instance_id="timeout_test",
+        extra_config={
+            "max_alloc_attempts": max_attempts,
+            "alloc_attempt_delay_secs": delay_secs,
+        },
+    )
+    PinMonitor.GetOrCreate(config)
+    return LocalCPUBackend(
+        config=config,
+        memory_allocator=_make_always_full_allocator(),
+        lmcache_worker=None,
+    )
+
+
+def _run_in_thread(fn, timeout_secs: float = 5.0):
+    """Run fn() in a daemon thread; return (finished, result, elapsed_secs)."""
+    result_box = [None]
+    done = threading.Event()
+
+    def worker():
+        result_box[0] = fn()
+        done.set()
+
+    t = threading.Thread(target=worker, daemon=True)
+    t0 = time.monotonic()
+    t.start()
+    finished = done.wait(timeout=timeout_secs)
+    return finished, result_box[0], time.monotonic() - t0
+
+
+class TestAllocateTimeout:
+    """
+    Verifies that LocalCPUBackend.allocate() and .batched_allocate()
+    return within a bounded time when memory is fully pinned (no eviction
+    candidates), instead of spinning forever.
+    """
+
+    def setup_method(self):
+        LMCStatsMonitor.GetOrCreate()
+
+    def teardown_method(self, method):
+        LMCStatsMonitor.unregister_all_metrics()
+        LMCStatsMonitor.DestroyInstance()
+        PinMonitor.DestroyInstance()
+
+    # ── 1. BOUNDED TIME ────────────────────────────────────────────────────────────
+
+    def test_allocate_returns_within_bounded_time(self):
+        """
+        BOUNDED TIME: allocate() must return before the test timeout even when
+        the allocator always returns None (all memory pinned).
+
+        Before fix: hangs forever (thread never returns).
+        After fix:  returns in max_attempts × delay_secs seconds.
+        """
+        max_attempts = 3
+        delay = 0.05
+        expected_max_secs = max_attempts * delay + 0.5  # +0.5s margin
+
+        backend = _make_backend_with_timeout(max_attempts, delay)
+        shape = torch.Size([2, 16, 8, 128])
+
+        finished, result, elapsed = _run_in_thread(
+            lambda: backend.allocate(shape, torch.bfloat16, busy_loop=True),
+            timeout_secs=expected_max_secs + 1.0,
+        )
+
+        assert finished, (
+            f"allocate() did not return within {expected_max_secs:.1f}s — "
+            "infinite busy-loop bug not fixed"
+        )
+        assert elapsed < expected_max_secs, (
+            f"allocate() took {elapsed:.2f}s, expected < {expected_max_secs:.2f}s"
+        )
+
+    def test_batched_allocate_returns_within_bounded_time(self):
+        """
+        BOUNDED TIME: batched_allocate() must also return within bounded time.
+        """
+        max_attempts = 3
+        delay = 0.05
+        expected_max_secs = max_attempts * delay + 0.5
+
+        backend = _make_backend_with_timeout(max_attempts, delay)
+        shape = torch.Size([2, 16, 8, 128])
+
+        finished, result, elapsed = _run_in_thread(
+            lambda: backend.batched_allocate(shape, torch.bfloat16,
+                                             batch_size=4, busy_loop=True),
+            timeout_secs=expected_max_secs + 1.0,
+        )
+
+        assert finished, (
+            f"batched_allocate() did not return within {expected_max_secs:.1f}s"
+        )
+        assert elapsed < expected_max_secs
+
+    def test_timeout_respects_max_alloc_attempts_config(self):
+        """
+        BOUNDED TIME: elapsed time scales with max_alloc_attempts × delay.
+        Two configs with different attempt counts should have proportional durations.
+        """
+        shape = torch.Size([2, 16, 8, 128])
+        delay = 0.05
+
+        backend_fast = _make_backend_with_timeout(max_attempts=2, delay_secs=delay)
+        _, _, elapsed_fast = _run_in_thread(
+            lambda: backend_fast.allocate(shape, torch.bfloat16, busy_loop=True),
+            timeout_secs=5.0,
+        )
+
+        backend_slow = _make_backend_with_timeout(max_attempts=6, delay_secs=delay)
+        _, _, elapsed_slow = _run_in_thread(
+            lambda: backend_slow.allocate(shape, torch.bfloat16, busy_loop=True),
+            timeout_secs=5.0,
+        )
+
+        # slow config should take noticeably longer
+        assert elapsed_slow > elapsed_fast, (
+            "longer max_alloc_attempts should take more time"
+        )
+
+    # ── 2. RELIABILITY ────────────────────────────────────────────────────────
+
+    def test_allocate_returns_none_gracefully(self):
+        """
+        RELIABILITY: allocate() returns None (not raises) after timeout.
+        The caller (storage_manager) handles None safely.
+        """
+        backend = _make_backend_with_timeout(max_attempts=2, delay_secs=0.01)
+        result = backend.allocate(
+            torch.Size([2, 16, 8, 128]), torch.bfloat16, busy_loop=True
+        )
+        assert result is None, "Expected None when memory is full, not an exception"
+
+    def test_batched_allocate_returns_none_gracefully(self):
+        """
+        RELIABILITY: batched_allocate() returns None (not raises) after timeout.
+        """
+        backend = _make_backend_with_timeout(max_attempts=2, delay_secs=0.01)
+        result = backend.batched_allocate(
+            torch.Size([2, 16, 8, 128]), torch.bfloat16,
+            batch_size=4, busy_loop=True
+        )
+        assert result is None
+
+    def test_busy_loop_false_returns_immediately(self):
+        """
+        RELIABILITY: busy_loop=False must still return immediately (no change to
+        existing fast-fail behaviour for store paths).
+        """
+        backend = _make_backend_with_timeout(max_attempts=9999, delay_secs=1.0)
+        shape = torch.Size([2, 16, 8, 128])
+
+        finished, result, elapsed = _run_in_thread(
+            lambda: backend.allocate(shape, torch.bfloat16, busy_loop=False),
+            timeout_secs=1.0,
+        )
+
+        assert finished, "busy_loop=False should return immediately"
+        assert elapsed < 0.5, f"busy_loop=False took {elapsed:.2f}s, expected < 0.5s"
+        assert result is None
+
+    def test_allocate_succeeds_when_memory_available(self):
+        """
+        RELIABILITY: allocate() still succeeds normally when the allocator has
+        free slots — timeout logic must not interfere with the happy path.
+        """
+        config = LMCacheEngineConfig.from_defaults(
+            chunk_size=256,
+            local_cpu=False,
+            use_layerwise=False,
+            enable_blending=False,
+            lmcache_instance_id="happy_path_test",
+            extra_config={"max_alloc_attempts": 3, "alloc_attempt_delay_secs": 0.05},
+        )
+        PinMonitor.GetOrCreate(config)
+
+        mock_obj = MagicMock()
+        good_allocator = MagicMock()
+        good_allocator.allocate.return_value = mock_obj  # always succeeds
+
+        backend = LocalCPUBackend(
+            config=config,
+            memory_allocator=good_allocator,
+            lmcache_worker=None,
+        )
+
+        result = backend.allocate(
+            torch.Size([2, 16, 8, 128]), torch.bfloat16, busy_loop=True
+        )
+        assert result is mock_obj, "Should return memory object when allocator succeeds"
+
+    # ── 3. OBSERVABILITY ──────────────────────────────────────────────────────
+
+    def test_allocate_logs_warning_on_timeout(self, caplog):
+        """
+        OBSERVABILITY: a warning must be logged when timeout is reached so
+        operators know CPU memory is under sustained pressure.
+        """
+        import logging
+
+        backend = _make_backend_with_timeout(max_attempts=2, delay_secs=0.01)
+        shape = torch.Size([2, 16, 8, 128])
+
+        with caplog.at_level(logging.WARNING):
+            backend.allocate(shape, torch.bfloat16, busy_loop=True)
+
+        timeout_warnings = [
+            r for r in caplog.records
+            if "timed out" in r.message.lower() and r.levelno == logging.WARNING
+        ]
+        assert timeout_warnings, (
+            "Expected a WARNING log containing 'timed out' when alloc timeout is hit"
+        )
+
+    def test_batched_allocate_logs_warning_on_timeout(self, caplog):
+        """
+        OBSERVABILITY: batched_allocate() also emits a timeout warning.
+        """
+        import logging
+
+        backend = _make_backend_with_timeout(max_attempts=2, delay_secs=0.01)
+
+        with caplog.at_level(logging.WARNING):
+            backend.batched_allocate(
+                torch.Size([2, 16, 8, 128]), torch.bfloat16,
+                batch_size=4, busy_loop=True
+            )
+
+        timeout_warnings = [
+            r for r in caplog.records
+            if "timed out" in r.message.lower() and r.levelno == logging.WARNING
+        ]
+        assert timeout_warnings, (
+            "Expected a WARNING log containing 'timed out' in batched_allocate()"
+        )
+
+    def test_no_warning_when_memory_available(self, caplog):
+        """
+        OBSERVABILITY: no timeout warning should appear when allocation succeeds
+        on the first try.
+        """
+        import logging
+
+        config = LMCacheEngineConfig.from_defaults(
+            chunk_size=256,
+            local_cpu=False,
+            use_layerwise=False,
+            enable_blending=False,
+            lmcache_instance_id="no_warn_test",
+            extra_config={"max_alloc_attempts": 3, "alloc_attempt_delay_secs": 0.05},
+        )
+        PinMonitor.GetOrCreate(config)
+
+        good_alloc = MagicMock()
+        good_alloc.allocate.return_value = MagicMock()
+        backend = LocalCPUBackend(
+            config=config, memory_allocator=good_alloc, lmcache_worker=None
+        )
+
+        with caplog.at_level(logging.WARNING):
+            backend.allocate(
+                torch.Size([2, 16, 8, 128]), torch.bfloat16, busy_loop=True
+            )
+
+        timeout_warnings = [
+            r for r in caplog.records
+            if "timed out" in r.message.lower()
+        ]
+        assert not timeout_warnings, (
+            "Should not log timeout warning when allocation succeeds immediately"
+        )
