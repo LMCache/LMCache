@@ -684,12 +684,7 @@ class TestValidateAndSetConfigValueTypeConversion:
 
 
 def test_lmcache_get_or_create_config_validates_pd_settings():
-    # First Party
-    from lmcache.integration.vllm.utils import (
-        _config_instance,
-        _config_lock,
-        lmcache_get_or_create_config,
-    )
+    from lmcache.integration.vllm.utils import lmcache_get_or_create_config
     import lmcache.integration.vllm.utils as vllm_utils
 
     os.environ["LMCACHE_ENABLE_PD"] = "true"
