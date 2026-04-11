@@ -101,11 +101,16 @@ def lmcache_get_or_create_config() -> LMCacheEngineConfig:
                         "the environment variable: LMCACHE_CONFIG_FILE"
                     )
                     _config_instance = LMCacheEngineConfig.from_env()
+                    # from_env() doesn't call validate(); the file path
+                    # gets it via update_config_from_env() below, but the
+                    # env-only path needs an explicit call.
+                    _config_instance.validate()
                 else:
                     config_file = os.environ["LMCACHE_CONFIG_FILE"]
                     logger.info(f"Loading LMCache config file {config_file}")
                     _config_instance = LMCacheEngineConfig.from_file(config_file)
                     # Update config from environment variables
+                    # (calls validate() internally)
                     _config_instance.update_config_from_env()
 
                 # Fetch and apply remote configuration if configured
@@ -128,10 +133,6 @@ def lmcache_get_or_create_config() -> LMCacheEngineConfig:
                             "Using local configuration only.",
                             remote_config_url,
                         )
-
-                # Validate after all config sources are applied
-                # (auto-applies P/D settings like save_unfull_chunk=True)
-                _config_instance.validate()
     return _config_instance
 
 
