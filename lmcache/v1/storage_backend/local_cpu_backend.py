@@ -34,6 +34,12 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+# Maximum retries for CPU allocation before giving up.
+# 50 attempts × 0.1s sleep = 5s max worker block time,
+# well under vLLM's RPC timeout (~30s).
+# See neuralwatt/inference_frontend#1939.
+MAX_ALLOC_ATTEMPTS = 50
+
 
 class LocalCPUBackend(AllocatorBackendInterface):
     """
@@ -600,6 +606,17 @@ class LocalCPUBackend(AllocatorBackendInterface):
                 break
 
             num_attempts += 1
+            if num_attempts >= MAX_ALLOC_ATTEMPTS:
+                logger.error(
+                    "CPU allocation failed after %d attempts. "
+                    "Giving up to prevent worker stall — "
+                    "this store will be skipped (graceful cache miss).",
+                    num_attempts,
+                )
+                self.stats_monitor.update_local_cpu_evict_metrics(
+                    evict_keys_count
+                )
+                return None
             logger.debug(
                 f"Unable to allocate memory object after {num_attempts}"
                 " attempts of local cpu backend allocate()"
@@ -754,6 +771,17 @@ class LocalCPUBackend(AllocatorBackendInterface):
                 break
 
             num_attempts += 1
+            if num_attempts >= MAX_ALLOC_ATTEMPTS:
+                logger.error(
+                    "CPU allocation failed after %d attempts. "
+                    "Giving up to prevent worker stall — "
+                    "this store will be skipped (graceful cache miss).",
+                    num_attempts,
+                )
+                self.stats_monitor.update_local_cpu_evict_metrics(
+                    evict_keys_count
+                )
+                return None
             logger.debug(
                 f"Unable to allocate memory object after {num_attempts}"
                 " attempts of local cpu backend batched_allocate()"
