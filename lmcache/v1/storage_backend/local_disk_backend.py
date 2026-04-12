@@ -458,6 +458,7 @@ class LocalDiskBackend(StorageBackendInterface):
                     "a previous retrieve). Returning partial results.",
                     key,
                 )
+                self.disk_lock.release()
                 return mem_objs
 
             self.dict[key].pin()
@@ -588,7 +589,7 @@ class LocalDiskBackend(StorageBackendInterface):
         Load bytearray from disk.
         """
 
-        memory_obj = self.local_cpu_backend.allocate(shape, dtype, fmt)
+        memory_obj = self.local_cpu_backend.allocate(shape, dtype, fmt, busy_loop=False)
         if memory_obj is None:
             logger.warning(
                 "LocalDiskBackend: CPU staging pool exhausted while loading "
