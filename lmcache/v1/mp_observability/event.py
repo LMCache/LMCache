@@ -47,6 +47,16 @@ class EventType(Enum):
     MP_STORE_END = "mp.store.end"
     MP_RETRIEVE_START = "mp.retrieve.start"
     MP_RETRIEVE_END = "mp.retrieve.end"
+
+    # MP Server sub-span events (child spans of store/retrieve)
+    MP_STORE_RESERVE_WRITE_START = "mp.store.reserve_write.start"
+    MP_STORE_RESERVE_WRITE_END = "mp.store.reserve_write.end"
+    MP_STORE_GPU_COPY_START = "mp.store.gpu_copy.start"
+    MP_STORE_GPU_COPY_END = "mp.store.gpu_copy.end"
+    MP_RETRIEVE_READ_PREFETCHED_START = "mp.retrieve.read_prefetched.start"
+    MP_RETRIEVE_READ_PREFETCHED_END = "mp.retrieve.read_prefetched.end"
+    MP_RETRIEVE_GPU_COPY_START = "mp.retrieve.gpu_copy.start"
+    MP_RETRIEVE_GPU_COPY_END = "mp.retrieve.gpu_copy.end"
     MP_LOOKUP_PREFETCH_START = "mp.lookup_prefetch.start"
     MP_LOOKUP_PREFETCH_END = "mp.lookup_prefetch.end"
 

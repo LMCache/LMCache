@@ -155,3 +155,109 @@ def free_shm_pinned_ptr(ptr: int, size: int = 0, shm_name: str = "") -> None:
     if shm is not None:
         shm.close()
         shm.unlink()
+
+
+# ------------------------------------------------------------------
+# GPU kernel stubs (no-op on CPU-only platforms)
+# ------------------------------------------------------------------
+
+
+class PageBufferShapeDesc:
+    """No-op stand-in for the CUDA PageBufferShapeDesc."""
+
+    kv_size: int = 2
+    nl: int = 0
+    nb: int = 0
+    bs: int = 0
+    nh: int = 0
+    hs: int = 0
+    element_size: int = 2
+
+
+def multi_layer_block_kv_transfer(
+    paged_buffer_ptrs_tensor: torch.Tensor,
+    lmcache_objects_ptrs: list[int],
+    block_ids: torch.Tensor,
+    device: torch.device,  # noqa: ARG001
+    direction: TransferDirection,
+    shape_desc: "PageBufferShapeDesc",
+    lmcache_chunk_size: int,
+    gpu_kv_format: "GPUKVFormat",  # noqa: ARG001
+    skip_prefix_n_blocks: int = 0,
+) -> None:
+    """CPU replacement for the CUDA block KV transfer kernel.
+
+    Transfers data between paged KV cache tensors and
+    contiguous LMCache memory objects.  Only the
+    ``NL_X_TWO_NB_BS_NH_HS`` layout is supported (the
+    default for ``CpuCacheContext``).
+
+    LMCache memory layout (contiguous, "2LTD"):
+        ``[2, NL, chunk_size, NH * HS]``  (in element units)
+    Paged buffer layout per layer (NL_X_TWO_NB_BS_NH_HS):
+        ``[2, NB, BS, NH, HS]``
+    """
+    num_objects = len(lmcache_objects_ptrs)
+    total_blocks = block_ids.shape[0]
+    blocks_per_obj = total_blocks // num_objects
+    nl = shape_desc.nl
+    bs = shape_desc.bs
+    nh = shape_desc.nh
+    hs = shape_desc.hs
+    nb = shape_desc.nb
+    elem_size = shape_desc.element_size
+    dtype = {2: torch.float16, 4: torch.float32}[elem_size]
+
+    # Reconstruct per-layer paged tensors from raw pointers
+    layer_ptrs = paged_buffer_ptrs_tensor.tolist()
+    paged_tensors: list[torch.Tensor] = []
+    paged_nbytes = 2 * nb * bs * nh * hs * elem_size
+    for ptr in layer_ptrs:
+        buf = (ctypes.c_uint8 * paged_nbytes).from_address(int(ptr))
+        t = torch.frombuffer(buf, dtype=dtype).view(2, nb, bs, nh, hs)
+        paged_tensors.append(t)
+
+    block_ids_list = block_ids.tolist()
+    is_d2h = direction == TransferDirection.D2H
+
+    for obj_idx in range(num_objects):
+        obj_ptr = lmcache_objects_ptrs[obj_idx]
+        obj_numel = 2 * nl * lmcache_chunk_size * nh * hs
+        obj_nbytes = obj_numel * elem_size
+        obj_buf = (ctypes.c_uint8 * obj_nbytes).from_address(obj_ptr)
+        obj_tensor = torch.frombuffer(obj_buf, dtype=dtype).view(
+            2, nl, lmcache_chunk_size, nh * hs
+        )
+
+        blk_start = obj_idx * blocks_per_obj
+        for local_blk in range(blocks_per_obj):
+            flat_blk = blk_start + local_blk
+            if flat_blk < skip_prefix_n_blocks:
+                continue
+            engine_blk = block_ids_list[flat_blk]
+            token_off = local_blk * bs
+
+            for layer_idx in range(nl):
+                paged = paged_tensors[layer_idx]
+                for kv in range(2):
+                    # paged: [2, NB, BS, NH, HS]
+                    src_p = paged[kv, engine_blk, :, :, :]
+                    # obj: [2, NL, chunk_size, NH*HS]
+                    t_st = token_off
+                    t_ed = token_off + bs
+                    if is_d2h:
+                        obj_tensor[kv, layer_idx, t_st:t_ed, :] = src_p.reshape(
+                            bs, nh * hs
+                        )
+                    else:
+                        paged[kv, engine_blk, :, :, :] = obj_tensor[
+                            kv, layer_idx, t_st:t_ed, :
+                        ].reshape(bs, nh, hs)
+
+
+def lmcache_memcpy_async(*args, **kwargs) -> None:  # noqa: ARG001
+    """No-op replacement for the CUDA async memcpy."""
+
+
+def record_event_on_stream(*args, **kwargs) -> None:  # noqa: ARG001
+    """No-op replacement for CUDA stream event recording."""

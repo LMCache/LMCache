@@ -19,6 +19,7 @@ import torch
 
 # First Party
 from lmcache.v1.platform import lmc_ops
+from lmcache.v1.platform.cache_context import CacheContextBase
 
 if torch.cuda.is_available():
     # Third Party
@@ -67,7 +68,7 @@ def list_to_gpu_tensor(lis: list[int], device: torch.device) -> torch.Tensor:
     )
 
 
-class GPUCacheContext:
+class GPUCacheContext(CacheContextBase):
     """
     Manages the shape and pointers to vLLM GPU KV cache tensors.
     """
@@ -304,7 +305,7 @@ class GPUCacheContext:
         given group."""
         return self.group_kv_pointers_[group_idx]
 
-    def get_tmp_gpu_buffer_flat(self, chunk_idx: int) -> torch.Tensor:
+    def get_tmp_gpu_buffer_flat(self, chunk_idx: int = 0) -> torch.Tensor:
         """Returns the flat uint8 view of the temporary GPU buffer for the
         given chunk index, covering all KV layer groups.
 

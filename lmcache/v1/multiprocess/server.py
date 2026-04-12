@@ -25,10 +25,6 @@ from lmcache.v1.distributed.config import (
     parse_args_to_config,
 )
 from lmcache.v1.distributed.storage_manager import PrefetchHandle, StorageManager
-from lmcache.v1.gpu_connector.gpu_ops import (
-    lmcache_memcpy_async_d2h,
-    lmcache_memcpy_async_h2d,
-)
 from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.mp_observability.config import (
@@ -49,9 +45,6 @@ from lmcache.v1.multiprocess.custom_types import (
     IPCCacheEngineKey,
     KVCache,
 )
-from lmcache.v1.multiprocess.gpu_context import (
-    GPUCacheContext,
-)
 from lmcache.v1.multiprocess.mq import MessageQueueServer
 from lmcache.v1.multiprocess.protocol import (
     RequestType,
@@ -60,7 +53,18 @@ from lmcache.v1.multiprocess.protocol import (
 )
 from lmcache.v1.multiprocess.session import SessionManager
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
-from lmcache.v1.platform import cuda_init, lmc_ops
+from lmcache.v1.platform import (
+    CacheContextBase,
+    create_cache_context,
+    create_ipc_event,
+    cuda_init,
+    device_guard,
+    event_from_ipc_handle,
+    lmc_ops,
+    lmcache_memcpy_async_d2h,
+    lmcache_memcpy_async_h2d,
+    stream_guard,
+)
 
 logger = init_logger(__name__)
 
@@ -106,7 +110,7 @@ def compute_extra_count(
     return tp - 1 if tp > world_size else 0
 
 
-def get_layout_desc(gpu_context: GPUCacheContext, num_tokens: int) -> MemoryLayoutDesc:
+def get_layout_desc(gpu_context: CacheContextBase, num_tokens: int) -> MemoryLayoutDesc:
     """Get the memory layout description for a given GPU context and number of tokens.
 
     Supports multiple KV layer groups with different shapes and dtypes.
@@ -163,7 +167,7 @@ class MPCacheEngine:
         hash_algorithm: str = "blake3",
     ):
         # GPU ID -> KV cache tensors
-        self.gpu_contexts: dict[int, GPUCacheContext] = {}
+        self.gpu_contexts: dict[int, CacheContextBase] = {}
 
         # GPU ID -> (model name, world size) as metadata
         # NOTE: This is mainly for determining the layout desc during prefetch
@@ -215,17 +219,17 @@ class MPCacheEngine:
             layout_hints: See :class:`LayoutHints`.  Forwarded to
                 :class:`GPUCacheContext` for GPU KV format detection.
         """
-        gpu_context = GPUCacheContext(
-            kv_caches,
-            self.chunk_size,
-            layout_hints=layout_hints or None,
+        ctx = create_cache_context(
+            chunk_size=self.chunk_size,
+            kv_caches=kv_caches,
+            layout_hints=layout_hints,
         )
-        self.gpu_contexts[instance_id] = gpu_context
+        self.gpu_contexts[instance_id] = ctx
         self.gpu_context_meta[instance_id] = (model_name, world_size)
         logger.info(
             "Registered KV cache for GPU ID %d with %d layers",
             instance_id,
-            gpu_context.num_layers,
+            ctx.num_layers,
         )
 
     def unregister_kv_cache(self, instance_id: int) -> None:
@@ -285,18 +289,16 @@ class MPCacheEngine:
         blocks_per_chunk = self.chunk_size // gpu_context.block_size
 
         with (
-            torch.cuda.device(gpu_context.device),
-            torch.cuda.stream(gpu_context.stream),
+            device_guard(gpu_context.device),
+            stream_guard(gpu_context.stream),
         ):
-            event = torch.cuda.Event(interprocess=True)
+            event = create_ipc_event()
 
             # Stage all block_ids to GPU once before the loop
             all_block_ids_gpu = gpu_context.stage_block_ids(gpu_block_ids)
 
             # Wait for vLLM to finish
-            vllm_event = torch.cuda.Event.from_ipc_handle(
-                gpu_context.device, event_ipc_handle
-            )
+            vllm_event = event_from_ipc_handle(gpu_context.device, event_ipc_handle)
             vllm_event.wait(stream=gpu_context.stream)
 
             self._event_bus.publish_on_stream(
@@ -309,14 +311,39 @@ class MPCacheEngine:
             )
 
             layout_desc = get_layout_desc(gpu_context, self.chunk_size)
+            self._event_bus.publish(
+                Event(
+                    event_type=EventType.MP_STORE_RESERVE_WRITE_START,
+                    session_id=key.request_id,
+                )
+            )
             reserved_dict = self.storage_manager.reserve_write(
                 obj_keys, layout_desc, "new"
+            )
+            self._event_bus.publish(
+                Event(
+                    event_type=EventType.MP_STORE_RESERVE_WRITE_END,
+                    session_id=key.request_id,
+                    metadata={
+                        "reserved_count": len(reserved_dict),
+                    },
+                )
             )
 
             # NOTE: Store is not batched because some obj_keys may be
             # skipped (not in reserved_dict), making block_ids
             # non-contiguous. Batching would require torch.cat to
             # reassemble block_ids, negating the benefit.
+            self._event_bus.publish_on_stream(
+                gpu_context.cupy_stream,
+                Event(
+                    event_type=EventType.MP_STORE_GPU_COPY_START,
+                    session_id=key.request_id,
+                    metadata={
+                        "num_chunks": len(reserved_dict),
+                    },
+                ),
+            )
             num_groups = gpu_context.kv_layer_groups_manager.num_groups
             for idx, obj_key in enumerate(obj_keys):
                 if obj_key in reserved_dict:
@@ -348,6 +375,16 @@ class MPCacheEngine:
                     gpu_context.get_tmp_gpu_buffer_flat(chunk_idx=0), memory_obj
                 )
 
+            self._event_bus.publish_on_stream(
+                gpu_context.cupy_stream,
+                Event(
+                    event_type=EventType.MP_STORE_GPU_COPY_END,
+                    session_id=key.request_id,
+                    metadata={
+                        "num_chunks": len(reserved_dict),
+                    },
+                ),
+            )
             event.record()
 
         self.gpu_contexts[instance_id].cupy_stream.launch_host_func(
@@ -496,17 +533,24 @@ class MPCacheEngine:
                     )
 
         with (
-            torch.cuda.device(gpu_context.device),
-            torch.cuda.stream(gpu_context.stream),
+            device_guard(gpu_context.device),
+            stream_guard(gpu_context.stream),
         ):
             # Stage all block_ids to GPU once before the loop
             all_block_ids_gpu = gpu_context.stage_block_ids(gpu_block_ids)
 
-            event = torch.cuda.Event(interprocess=True)
+            event = create_ipc_event()
 
             prefetched_keys: list[ObjectKey] = []
             retrieve_succeeded = False
             try:
+                self._event_bus.publish_on_stream(
+                    gpu_context.cupy_stream,
+                    Event(
+                        event_type=EventType.MP_RETRIEVE_READ_PREFETCHED_START,
+                        session_id=key.request_id,
+                    ),
+                )
                 with self.storage_manager.read_prefetched_results(
                     obj_keys
                 ) as memory_objs:
@@ -515,6 +559,26 @@ class MPCacheEngine:
                         return event.ipc_handle(), False
 
                     prefetched_keys = obj_keys[: len(memory_objs)]
+                    self._event_bus.publish_on_stream(
+                        gpu_context.cupy_stream,
+                        Event(
+                            event_type=EventType.MP_RETRIEVE_READ_PREFETCHED_END,
+                            session_id=key.request_id,
+                            metadata={
+                                "prefetched_count": len(memory_objs),
+                            },
+                        ),
+                    )
+                    self._event_bus.publish_on_stream(
+                        gpu_context.cupy_stream,
+                        Event(
+                            event_type=EventType.MP_RETRIEVE_GPU_COPY_START,
+                            session_id=key.request_id,
+                            metadata={
+                                "num_chunks": len(memory_objs),
+                            },
+                        ),
+                    )
                     _retrieve_loop(obj_keys, memory_objs)
                 # Only set True when with-block exits normally
                 retrieve_succeeded = True
@@ -524,6 +588,16 @@ class MPCacheEngine:
             finally:
                 event.record()
                 if retrieve_succeeded:
+                    self._event_bus.publish_on_stream(
+                        gpu_context.cupy_stream,
+                        Event(
+                            event_type=EventType.MP_RETRIEVE_GPU_COPY_END,
+                            session_id=key.request_id,
+                            metadata={
+                                "num_chunks": len(prefetched_keys),
+                            },
+                        ),
+                    )
                     gpu_context.cupy_stream.launch_host_func(
                         self.storage_manager.finish_read_prefetched,
                         prefetched_keys,

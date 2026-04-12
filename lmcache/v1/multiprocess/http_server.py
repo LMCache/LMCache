@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from contextlib import asynccontextmanager
+from typing import Optional
 import argparse
 import asyncio
+import hashlib
 import sys
 
 # Third Party
@@ -13,6 +15,10 @@ import uvicorn
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.utils import (
+    compress_slot_mapping,
+    parse_mixed_slot_mapping,
+)
 from lmcache.v1.distributed.config import (
     StorageManagerConfig,
     add_storage_manager_args,
@@ -145,6 +151,158 @@ async def status(request: Request):
             content={"error": "engine not initialized"},
         )
     return engine.report_status()
+
+
+@app.get("/api/kvcache/check")
+async def kvcache_check(
+    request: Request,
+    slot_mapping: Optional[str] = None,
+    chunk_size: Optional[int] = None,
+    instance_id: int = 0,
+    layerwise: bool = False,
+):
+    """Compute MD5 checksums for KV cache at specified slots.
+
+    Uses the same slot_mapping format as the vLLM cache API:
+    comma-separated integers and [start,end] range expressions.
+
+    Args:
+        slot_mapping: Slot indices in mixed format.
+            Examples: "0,1,2,3", "[0,511]",
+            "1,2,[9,12],17".
+        chunk_size: Group slots into chunks of this size.
+        instance_id: GPU context instance ID (default 0).
+        layerwise: Per-layer checksums if True.
+
+    Example::
+
+        curl "http://localhost:8080/api/kvcache/check?\
+    slot_mapping=[0,511]&chunk_size=256"
+    """
+    engine = getattr(request.app.state, "engine", None)
+    if engine is None:
+        return JSONResponse(
+            status_code=503,
+            content={"error": "engine not initialized"},
+        )
+
+    ctx = engine.gpu_contexts.get(instance_id)
+    if ctx is None:
+        return JSONResponse(
+            status_code=404,
+            content={
+                "error": ("instance_id %d not registered" % instance_id),
+            },
+        )
+
+    if not slot_mapping:
+        return JSONResponse(
+            status_code=400,
+            content={"error": "slot_mapping is required"},
+        )
+
+    slot_indices, error_info = parse_mixed_slot_mapping(
+        slot_mapping,
+    )
+    if error_info:
+        return JSONResponse(
+            status_code=400,
+            content=error_info,
+        )
+    assert slot_indices is not None
+
+    if chunk_size is None or chunk_size <= 0:
+        return JSONResponse(
+            status_code=400,
+            content={
+                "error": "chunk_size must be positive",
+            },
+        )
+
+    kv_tensors = ctx.kv_tensors
+    if not kv_tensors:
+        return JSONResponse(
+            status_code=404,
+            content={"error": "kv_caches empty"},
+        )
+
+    loop = asyncio.get_running_loop()
+    result = await loop.run_in_executor(
+        None,
+        lambda: _compute_mp_checksums(
+            kv_tensors,
+            slot_indices,
+            chunk_size,
+            layerwise,
+        ),
+    )
+
+    # Include compressed slot_mapping_ranges in response
+    result["slot_mapping_ranges"] = compress_slot_mapping(
+        slot_indices,
+    )
+
+    return JSONResponse(content=result)
+
+
+def _compute_mp_checksums(
+    kv_tensors: list,
+    slot_indices: list[int],
+    chunk_size: int,
+    layerwise: bool,
+) -> dict:
+    """Compute MD5 checksums over KV cache slots.
+
+    Each kv_tensor has shape [2, NB, BS, NH, HS]
+    (NL_X_TWO_NB_BS_NH_HS format).  A *slot* index maps
+    to (block_id, block_offset) via divmod by BS.
+    """
+    num_slots = len(slot_indices)
+    num_chunks = (num_slots + chunk_size - 1) // chunk_size
+    slot_t = torch.tensor(slot_indices, dtype=torch.long)
+
+    # Extract per-layer data at the requested slots
+    # kv: [2, NB, BS, NH, HS] -> [2, NB*BS, NH, HS]
+    layer_data: list[torch.Tensor] = []
+    for kv in kv_tensors:
+        reshaped = kv.reshape(2, -1, *kv.shape[3:])
+        layer_data.append(reshaped[:, slot_t, ...])
+
+    if layerwise:
+        checksums: dict[str, list[str]] = {}
+        for li, ld in enumerate(layer_data):
+            name = "layer_%d" % li
+            cks: list[str] = []
+            for ci in range(num_chunks):
+                s = ci * chunk_size
+                e = min(s + chunk_size, num_slots)
+                chunk = ld[:, s:e, ...].contiguous()
+                cks.append(hashlib.md5(chunk.numpy().tobytes()).hexdigest())
+            checksums[name] = cks
+        return {
+            "status": "success",
+            "chunk_size": chunk_size,
+            "num_chunks": num_chunks,
+            "chunk_checksums": checksums,
+            "layerwise": True,
+        }
+    else:
+        cks_list: list[str] = []
+        for ci in range(num_chunks):
+            s = ci * chunk_size
+            e = min(s + chunk_size, num_slots)
+            md5 = hashlib.md5()
+            for ld in layer_data:
+                chunk = ld[:, s:e, ...].contiguous()
+                md5.update(chunk.numpy().tobytes())
+            cks_list.append(md5.hexdigest())
+        return {
+            "status": "success",
+            "chunk_size": chunk_size,
+            "num_chunks": num_chunks,
+            "chunk_checksums": cks_list,
+            "layerwise": False,
+        }
 
 
 def run_http_server(
