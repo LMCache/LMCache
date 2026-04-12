@@ -169,13 +169,6 @@ class DefaultPrefetchPolicy(PrefetchPolicy):
 
         return plan
 
-    def select_l1_retentions(
-        self,
-        keys: list[ObjectKey],
-    ) -> list[bool]:
-        """All prefetched keys are temporary (not retained)."""
-        return [False] * len(keys)
-
 
 class RetainPrefetchPolicy(DefaultPrefetchPolicy):
     """Prefetch policy that retains all prefetched keys in L1.
