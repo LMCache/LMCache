@@ -1037,8 +1037,13 @@ class LMCacheEngine:
         # has been enqueued (mem_obj_consumer advanced past its sync point).
         # Without this, pin_count stays at 1 forever and the CPU staging pool
         # fills up, causing the next retrieve to deadlock inside allocate().
+        # NOTE: Skip LocalCPUBackend objects — they are pinned by lookup() and
+        # will be unpinned later by lookup_unpin() in wait_for_save(). Unpinning
+        # them here causes a double unpin (pin_count goes negative) because
+        # batched_get_non_blocking() returns the same Python object that
+        # lookup(pin=True) pinned, not a freshly-allocated staging buffer.
         for mem_obj in to_count_down:
-            if mem_obj.is_pinned:
+            if mem_obj.is_pinned and location != "LocalCPUBackend":
                 mem_obj.unpin()
 
         retrieved_tokens = torch.sum(ret_mask)
