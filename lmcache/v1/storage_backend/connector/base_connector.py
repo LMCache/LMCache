@@ -107,6 +107,13 @@ class RemoteConnector(metaclass=abc.ABCMeta):
 
         # NOTE: for unfull chunk, we have no way to verify
         shape_list = list(memory_obj.meta.shape)
+        # Determine the token dimension based on shape dimensionality.
+        # NOTE: We cannot use ``memory_obj.meta.fmt.token_dim()`` here
+        # because the remote connector always stores the full-chunk format
+        # (KV_2LTD / KV_MLA_FMT, both with token_dim=2), even when the
+        # actual per-layer shape in layerwise mode is 3D or 2D with tokens
+        # at dim 0.  Using fmt.token_dim() on a 3D shape would silently
+        # index into the wrong dimension.
         if len(shape_list) == 4:
             # Standard: [2, num_layers, num_tokens, hidden_dim]
             # or MLA:   [1, num_layers, num_tokens, hidden_dim]

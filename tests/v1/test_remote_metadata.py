@@ -4,9 +4,14 @@ import pytest
 import torch
 
 # First Party
+from lmcache.utils import CacheEngineKey
 from lmcache.v1.memory_management import MemoryFormat
 from lmcache.v1.protocol import (
+    ClientCommand,
+    ClientMetaMessage,
     RemoteMetadata,
+    ServerMetaMessage,
+    ServerReturnCode,
     get_remote_metadata_bytes,
     init_remote_metadata_info,
     pad_shape_to_4d,
@@ -99,3 +104,63 @@ def test_remote_metadata_roundtrip_sub4d(shape):
     )
     restored = RemoteMetadata.deserialize(original.serialize())
     assert restored.shapes[0] == shape
+
+
+# ---- ClientMetaMessage round-trip for sub-4D shapes ----
+
+
+@pytest.mark.parametrize(
+    "shape",
+    [
+        torch.Size([10, 128]),  # 2D (layerwise MLA)
+        torch.Size([10, 2, 128]),  # 3D (layerwise MHA)
+        torch.Size([2, 4, 10, 128]),  # 4D (standard)
+    ],
+    ids=["2D", "3D", "4D"],
+)
+def test_client_meta_message_roundtrip_sub4d(shape):
+    key = CacheEngineKey("model", 0, 1, "abc123")
+    original = ClientMetaMessage(
+        command=ClientCommand.PUT,
+        key=key,
+        length=1024,
+        fmt=MemoryFormat.KV_2LTD,
+        dtype=torch.float16,
+        shape=shape,
+        location=None,
+    )
+    restored = ClientMetaMessage.deserialize(original.serialize())
+    assert restored.shape == shape
+    assert restored.length == original.length
+    assert restored.fmt == original.fmt
+    assert restored.dtype == original.dtype
+    assert restored.command == original.command
+
+
+# ---- ServerMetaMessage round-trip for sub-4D shapes ----
+
+
+@pytest.mark.parametrize(
+    "shape",
+    [
+        torch.Size([10, 128]),  # 2D (layerwise MLA)
+        torch.Size([10, 2, 128]),  # 3D (layerwise MHA)
+        torch.Size([2, 4, 10, 128]),  # 4D (standard)
+    ],
+    ids=["2D", "3D", "4D"],
+)
+def test_server_meta_message_roundtrip_sub4d(shape):
+    original = ServerMetaMessage(
+        code=ServerReturnCode.SUCCESS,
+        length=2048,
+        fmt=MemoryFormat.KV_MLA_FMT,
+        dtype=torch.bfloat16,
+        shape=shape,
+        location=None,
+    )
+    restored = ServerMetaMessage.deserialize(original.serialize())
+    assert restored.shape == shape
+    assert restored.length == original.length
+    assert restored.fmt == original.fmt
+    assert restored.dtype == original.dtype
+    assert restored.code == original.code
