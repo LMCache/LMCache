@@ -191,3 +191,6 @@ def test_reshape_partial_chunk_invalid_bytes_raises(shape):
 
     with pytest.raises(ValueError):
         connector.reshape_partial_chunk(memory_obj, full_bytes + tok_size)
+
+    with pytest.raises(ValueError):
+        connector.reshape_partial_chunk(memory_obj, -tok_size)
