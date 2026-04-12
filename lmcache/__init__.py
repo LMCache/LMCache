@@ -27,13 +27,11 @@ def _get_backend() -> Any:
             "cuda_ops",
             lambda: torch.cuda.is_available(),
         ),
-        (
-            "lmcache.non_cuda_equivalents",
-            "python_ops",
-            lambda: True,
-        ),
         # should extend to more HWs..
     ]
+
+    imported = False
+    module = None
     for module_name, backend_name, predicate in backend_candidates:
         # 1 Check whether the backend is available before importing
         try:
@@ -54,14 +52,19 @@ def _get_backend() -> Any:
         try:
             module = importlib.import_module(module_name)
             logger.info("Using backend: %s", module_name)
-            return module
+            imported = True
+            break
         except ImportError as e:
             logger.warning("Failed to import backend %s: %s", module_name, e)
+
+    if not imported:
+        try:
             logger.warning("Fallback to python backend lmcache.non_cuda_equivalents")
             module = importlib.import_module("lmcache.non_cuda_equivalents")
             logger.info("Using backend: lmcache.non_cuda_equivalents")
-            return module
-    raise ImportError("No backend could be imported for lmcache.")
+        except ImportError as e:
+            raise ImportError("No backend could be imported for lmcache.") from e
+    return module
 
 
 # --------------------------
