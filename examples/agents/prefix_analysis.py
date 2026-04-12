@@ -17,6 +17,9 @@ import torch
 DEFAULT_TOKENIZER = "meta-llama/Llama-3.1-8B"
 DEFAULT_TOKENS_PER_GB = 8200  # Default for Llama-3.1; More details here: https://docs.lmcache.ai/getting_started/kv_cache_calculator.html
 DEFAULT_POOL_SIZES_GB: List[Union[int, float, str]] = [
+    0.1,
+    0.2,
+    0.4,
     1,
     2,
     4,
@@ -125,6 +128,12 @@ class LRUTokenPool:
         """
         Add a request to the pool, evicting LRU entries if necessary.
         """
+        # Trim tokens that exceed pool capacity to prevent current_tokens > max_tokens
+        capacity = int(self.max_tokens) if self.max_tokens != float("inf") else len(tokens)
+        tokens = tokens[:capacity]
+        if token_tensor is not None and capacity < token_tensor.size(1):
+            token_tensor[request_id, capacity:] = 0
+
         # Evict until we have space
         while self.current_tokens + len(tokens) > self.max_tokens and self.requests:
             old_id, old_tokens = self.requests.popitem(last=False)
@@ -252,7 +261,7 @@ def analyze_hit_rates_across_pool_sizes(
             token_desc = ""
         else:
             size_tokens = int(size_gb * tokens_per_gb)
-            x_labels.append(str(int(size_gb)))
+            x_labels.append(str(size_gb))
             pool_desc = f"{size_gb}GB"
             token_desc = f" ({size_tokens:,} tokens)"
 
