@@ -164,7 +164,7 @@ class LookupHashLoggingSubscriber(EventSubscriber):
         if self._current_handle is not None:
             self._current_handle.write(line)
             self._current_handle.flush()
-            self._current_file_size += len(line)
+            self._current_file_size = self._current_handle.tell()
 
     # -- File rotation -----------------------------------------------------
 
