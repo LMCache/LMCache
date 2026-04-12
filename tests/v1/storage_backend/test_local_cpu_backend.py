@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
+import logging
 import threading
+import time
 
 # Third Party
 import pytest
@@ -773,3 +775,205 @@ class TestLocalCPUBackendAllocatorAlignment:
             assert kwargs.get("align_bytes") == 4096
         finally:
             backend.memory_allocator.close()
+
+
+class TestAllocateMaxAttemptsGuard:
+    """Verify that allocate() and batched_allocate() give up after
+    MAX_ALLOC_ATTEMPTS iterations instead of looping forever (#1939).
+    """
+
+    def teardown_method(self, method):
+        LMCStatsMonitor.unregister_all_metrics()
+        LMCStatsMonitor.DestroyInstance()
+
+    def test_allocate_gives_up_after_max_attempts(
+        self, memory_allocator
+    ):
+        """When the allocator ALWAYS returns None, allocate() must:
+        - return None (not hang forever)
+        - complete in < 10 seconds
+        - log the "CPU allocation failed after N attempts" error message
+        """
+        config = create_test_config()
+        PinMonitor.GetOrCreate(config)
+        try:
+            backend = LocalCPUBackend(
+                config=config, memory_allocator=memory_allocator
+            )
+
+            # Save and patch allocator to always return None.
+            # The memory_allocator fixture is session-scoped, so we MUST
+            # restore the original after the test.
+            real_allocate = memory_allocator.allocate
+            backend.memory_allocator.allocate = lambda *a, **kw: None
+
+            shape = torch.Size([2, 16, 8, 128])
+            dtype = torch.bfloat16
+
+            # LMCache loggers set propagate=False, so caplog cannot
+            # capture via the root logger.  Attach a temporary handler
+            # directly to the module logger.
+            cpu_logger = logging.getLogger(
+                "lmcache.v1.storage_backend.local_cpu_backend"
+            )
+            captured_records: list[logging.LogRecord] = []
+            handler = logging.Handler()
+            handler.emit = lambda record: captured_records.append(record)
+            handler.setLevel(logging.ERROR)
+            cpu_logger.addHandler(handler)
+            try:
+                t0 = time.monotonic()
+                result = backend.allocate(
+                    shape, dtype, eviction=True, busy_loop=True
+                )
+                elapsed = time.monotonic() - t0
+            finally:
+                cpu_logger.removeHandler(handler)
+                # Restore the real allocate on the wrapper
+                backend.memory_allocator.allocate = real_allocate
+
+            assert result is None, (
+                "allocate() must return None when allocation is impossible"
+            )
+            assert elapsed < 10.0, (
+                f"allocate() took {elapsed:.1f}s; expected < 10s "
+                f"(MAX_ALLOC_ATTEMPTS guard should cap it)"
+            )
+            # Check that the error message was logged
+            assert any(
+                "CPU allocation failed after" in record.getMessage()
+                and record.levelno >= logging.ERROR
+                for record in captured_records
+            ), (
+                "Expected ERROR log with 'CPU allocation failed after' "
+                f"but got: {[r.getMessage() for r in captured_records]}"
+            )
+        finally:
+            PinMonitor.DestroyInstance()
+
+    def test_allocate_succeeds_within_retry_limit(self, memory_allocator):
+        """When the allocator fails the first 5 times then succeeds,
+        allocate() should return a valid MemoryObj and not hit the
+        MAX_ALLOC_ATTEMPTS ceiling.
+        """
+        config = create_test_config()
+        PinMonitor.GetOrCreate(config)
+        try:
+            backend = LocalCPUBackend(
+                config=config, memory_allocator=memory_allocator
+            )
+
+            shape = torch.Size([2, 16, 8, 128])
+            dtype = torch.bfloat16
+
+            # Save real allocate before patching (session-scoped fixture).
+            real_allocate = memory_allocator.allocate
+            call_count = [0]
+            fail_count = 5
+
+            def patched_allocate(shapes, dtypes, f):
+                call_count[0] += 1
+                if call_count[0] <= fail_count:
+                    return None
+                return real_allocate(shapes, dtypes, f)
+
+            backend.memory_allocator.allocate = patched_allocate
+            try:
+                result = backend.allocate(
+                    shape, dtype, eviction=True, busy_loop=True
+                )
+            finally:
+                # Restore the real allocate on the wrapper
+                backend.memory_allocator.allocate = real_allocate
+
+            assert result is not None, (
+                "allocate() should succeed when the allocator "
+                "recovers within the retry limit"
+            )
+            assert isinstance(result, MemoryObj)
+
+            # The initial call (before the loop) counts as call 1.
+            # The loop retries until success. Total calls should be
+            # fail_count + 1 (the successful one), and the loop
+            # iteration count should be well below MAX_ALLOC_ATTEMPTS.
+            max_attempts = getattr(
+                local_cpu_backend_module, "MAX_ALLOC_ATTEMPTS", 50
+            )
+            assert call_count[0] < max_attempts, (
+                f"allocate() used {call_count[0]} allocator calls, "
+                f"expected fewer than MAX_ALLOC_ATTEMPTS ({max_attempts})"
+            )
+        finally:
+            PinMonitor.DestroyInstance()
+
+    @pytest.mark.no_shared_allocator
+    def test_batched_allocate_gives_up_after_max_attempts(self):
+        """Same as allocate test but for batched_allocate().
+
+        When the allocator ALWAYS returns None, batched_allocate() must:
+        - return None (not hang forever)
+        - complete in < 10 seconds
+        - log the "CPU allocation failed after N attempts" error message
+
+        Uses a real MixedMemoryAllocator (not the session-scoped wrapper)
+        because batched_allocate's eviction path asserts
+        isinstance(memory_allocator, MixedMemoryAllocator).
+        """
+        from lmcache.v1.memory_management import MixedMemoryAllocator
+
+        config = create_test_config()
+        # Small allocator -- just enough to construct the backend.
+        alloc = MixedMemoryAllocator(64 * 1024 * 1024)  # 64 MiB
+        PinMonitor.GetOrCreate(config)
+        try:
+            backend = LocalCPUBackend(
+                config=config, memory_allocator=alloc
+            )
+
+            # Patch batched_allocate to always return None.
+            real_batched = alloc.batched_allocate
+            alloc.batched_allocate = lambda *a, **kw: None
+
+            shape = torch.Size([2, 16, 8, 128])
+            dtype = torch.bfloat16
+            batch_size = 4
+
+            # Attach a temporary handler to capture ERROR logs
+            cpu_logger = logging.getLogger(
+                "lmcache.v1.storage_backend.local_cpu_backend"
+            )
+            captured_records: list[logging.LogRecord] = []
+            handler = logging.Handler()
+            handler.emit = lambda record: captured_records.append(record)
+            handler.setLevel(logging.ERROR)
+            cpu_logger.addHandler(handler)
+            try:
+                t0 = time.monotonic()
+                result = backend.batched_allocate(
+                    shape, dtype, batch_size,
+                    eviction=True, busy_loop=True,
+                )
+                elapsed = time.monotonic() - t0
+            finally:
+                cpu_logger.removeHandler(handler)
+                alloc.batched_allocate = real_batched
+
+            assert result is None, (
+                "batched_allocate() must return None when allocation "
+                "is impossible"
+            )
+            assert elapsed < 10.0, (
+                f"batched_allocate() took {elapsed:.1f}s; expected < 10s "
+                f"(MAX_ALLOC_ATTEMPTS guard should cap it)"
+            )
+            assert any(
+                "CPU allocation failed after" in record.getMessage()
+                and record.levelno >= logging.ERROR
+                for record in captured_records
+            ), (
+                "Expected ERROR log with 'CPU allocation failed after' "
+                f"but got: {[r.getMessage() for r in captured_records]}"
+            )
+        finally:
+            PinMonitor.DestroyInstance()
+            alloc.close()
