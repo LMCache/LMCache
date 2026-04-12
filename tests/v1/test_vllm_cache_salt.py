@@ -17,8 +17,11 @@ pytest.importorskip("vllm")
 
 # First Party
 from lmcache.integration.vllm.vllm_v1_adapter import (
-    extract_request_configs,
+    LMCacheConnectorMetadata,
+    LMCacheConnectorV1Impl,
+    RequestTracker,
     _cache_salt_tag_value,
+    extract_request_configs,
 )
 
 _TAG_KEY = "lmcache.tag.cachesalt"
@@ -117,87 +120,172 @@ def test_cache_salt_tag_value_no_special_chars():
 
 
 def test_start_load_kv_layerwise_passes_request_configs():
-    """retrieve_layer() must receive request_configs so cache_salt tags are used."""
-    from lmcache.integration.vllm.vllm_v1_adapter import LMCacheConnectorV1Impl
-
-    req_configs = {_TAG_KEY: _cache_salt_tag_value("salt-a")}
-
-    mock_engine = MagicMock()
-    # retrieve_layer must return a generator (next() is called twice internally)
-    mock_engine.retrieve_layer.return_value = iter([None, None])
-
-    connector = LMCacheConnectorV1Impl.__new__(LMCacheConnectorV1Impl)
-    connector.lmcache_engine = mock_engine
-    connector.enable_blending = False
-    connector.use_layerwise = True
-    connector.layerwise_retrievers = []
-    connector.device = "cpu"
-    connector._lmcache_chunk_size = 8
-
+    """retrieve_layer() must receive request_configs when called via start_load_kv()."""
     import torch
 
-    kvcaches = {"layer0": torch.zeros(1)}
-    tokens = list(range(4))
-    token_mask = [True] * 4
-    slot_mapping = torch.arange(4, dtype=torch.long)
+    req_configs = {_TAG_KEY: _cache_salt_tag_value("salt-a")}
+    recorded: dict = {}
 
-    load_spec = SimpleNamespace(
-        lmcache_cached_tokens=4,
-        vllm_cached_tokens=0,
-    )
-    request = SimpleNamespace(
+    def _fake_retrieve_layer(token_ids, token_mask, **kwargs):
+        recorded.update(kwargs)
+        return iter([None, None, None])  # next() is called twice internally
+
+    req = SimpleNamespace(
         req_id="req-1",
+        token_ids=[1, 2, 3, 4],
+        slot_mapping=torch.arange(4, dtype=torch.long),
+        load_spec=SimpleNamespace(
+            lmcache_cached_tokens=4,
+            vllm_cached_tokens=0,
+            can_load=True,
+        ),
         request_configs=req_configs,
-        load_spec=load_spec,
     )
-
-    # Directly invoke the layerwise retrieve branch logic
-    connector.lmcache_engine.retrieve_layer(
-        tokens[:4],
-        token_mask[:4],
-        kvcaches=kvcaches,
-        slot_mapping=slot_mapping[:4],
-        vllm_cached_tokens=load_spec.vllm_cached_tokens,
-        sync=True,
-        request_configs=request.request_configs,
+    metadata = LMCacheConnectorMetadata(requests=[req])
+    connector = LMCacheConnectorV1Impl.__new__(LMCacheConnectorV1Impl)
+    connector._parent = SimpleNamespace(
+        _get_connector_metadata=lambda: metadata,
     )
+    connector.lmcache_engine = SimpleNamespace(retrieve_layer=_fake_retrieve_layer)
+    connector.enable_blending = False
+    connector.use_layerwise = True
+    connector.device = "cpu"
+    connector._lmcache_chunk_size = 8
+    connector.kv_caches = {"layer0": torch.zeros(1)}
+    connector.layerwise_retrievers = []
+    connector._stats_monitor = SimpleNamespace(
+        update_interval_vllm_hit_tokens=lambda x: None,
+        update_interval_prompt_tokens=lambda x: None,
+    )
+    forward_context = SimpleNamespace(attn_metadata=object())  # non-None triggers load
 
-    call_kwargs = mock_engine.retrieve_layer.call_args.kwargs
-    assert "request_configs" in call_kwargs
-    assert call_kwargs["request_configs"] == req_configs
+    connector.start_load_kv(forward_context)
+
+    assert "request_configs" in recorded, (
+        "retrieve_layer() was not called with request_configs"
+    )
+    assert recorded["request_configs"] == req_configs
 
 
 def test_save_kv_layer_layerwise_passes_request_configs():
-    """store_layer() must receive request_configs so cache_salt tags are used."""
-    from lmcache.integration.vllm.vllm_v1_adapter import LMCacheConnectorV1Impl
-
-    req_configs = {_TAG_KEY: _cache_salt_tag_value("salt-a")}
-
-    mock_engine = MagicMock()
-    mock_engine.store_layer.return_value = iter([None])
-
-    connector = LMCacheConnectorV1Impl.__new__(LMCacheConnectorV1Impl)
-    connector.lmcache_engine = mock_engine
-
+    """store_layer() must receive request_configs when called via save_kv_layer()."""
     import torch
 
-    kvcaches = {"layer0": torch.zeros(1)}
-    token_ids = list(range(4))
-    store_mask = [True] * 4
-    slot_mapping = torch.arange(4, dtype=torch.long)
+    req_configs = {_TAG_KEY: _cache_salt_tag_value("salt-a")}
+    recorded: dict = {}
 
-    # Directly invoke the layerwise store call with request_configs
-    connector.lmcache_engine.store_layer(
-        token_ids,
-        mask=store_mask,
-        kvcaches=kvcaches,
-        slot_mapping=slot_mapping,
-        offset=0,
-        sync=True,
+    def _fake_store_layer(token_ids, **kwargs):
+        recorded.update(kwargs)
+        return iter([None])
+
+    req = SimpleNamespace(
         req_id="req-1",
+        token_ids=[1, 2, 3, 4],
+        slot_mapping=torch.arange(4, dtype=torch.long),
+        save_spec=SimpleNamespace(skip_leading_tokens=0, can_save=True),
         request_configs=req_configs,
     )
+    metadata = LMCacheConnectorMetadata(requests=[req])
+    connector = LMCacheConnectorV1Impl.__new__(LMCacheConnectorV1Impl)
+    connector._parent = SimpleNamespace(
+        _connector_metadata=metadata,  # not-None guard at line 1049
+        _get_connector_metadata=lambda: metadata,
+    )
+    connector.lmcache_engine = SimpleNamespace(store_layer=_fake_store_layer)
+    connector.kv_role = "kv_producer"
+    connector.use_layerwise = True
+    connector.device = "cpu"
+    connector._lmcache_chunk_size = 8
+    connector.kv_caches = {"layer0": torch.zeros(1)}
+    connector._layerwise_save_storers = {}
 
-    call_kwargs = mock_engine.store_layer.call_args.kwargs
+    connector.save_kv_layer("layer0", torch.zeros(1), None)
+
+    assert "request_configs" in recorded, (
+        "store_layer() was not called with request_configs"
+    )
+    assert recorded["request_configs"] == req_configs
+
+
+# ---------------------------------------------------------------------------
+# from_new_request: cache_salt flows into RequestTracker.request_configs
+# ---------------------------------------------------------------------------
+
+
+def test_from_new_request_with_cache_salt():
+    """RequestTracker.from_new_request() stores the hashed salt in request_configs."""
+    new_request = SimpleNamespace(
+        req_id="req-1",
+        block_ids=[0, 1, 2, 3],
+        sampling_params=_make_sampling_params(),
+        prompt_token_ids=[1, 2, 3, 4, 5, 6, 7, 8],
+    )
+    tracker = RequestTracker.from_new_request(
+        None,  # lmcache_config is not used inside the function
+        new_request,
+        num_tokens_to_compute=8,
+        lmcache_cached_tokens=0,
+        skip_save=False,
+        cache_salt="salt-a",
+    )
+    assert tracker.request_configs is not None
+    assert _TAG_KEY in tracker.request_configs
+    expected = hashlib.sha256("salt-a".encode("utf-8")).hexdigest()
+    assert tracker.request_configs[_TAG_KEY] == expected
+
+
+def test_from_new_request_no_salt_leaves_request_configs_none():
+    """Without a cache_salt, request_configs should remain None."""
+    new_request = SimpleNamespace(
+        req_id="req-2",
+        block_ids=[0, 1, 2, 3],
+        sampling_params=_make_sampling_params(),
+        prompt_token_ids=[1, 2, 3, 4],
+    )
+    tracker = RequestTracker.from_new_request(
+        None,
+        new_request,
+        num_tokens_to_compute=4,
+        lmcache_cached_tokens=0,
+        skip_save=False,
+        cache_salt=None,
+    )
+    assert tracker.request_configs is None
+
+
+# ---------------------------------------------------------------------------
+# get_num_new_matched_tokens: request_configs with cache_salt reaches lookup()
+# ---------------------------------------------------------------------------
+
+
+def test_get_num_new_matched_tokens_passes_cache_salt_to_lookup():
+    """lookup() must be called with request_configs containing the cache_salt tag."""
+    lookup_client = MagicMock()
+    lookup_client.lookup_cache.return_value = -1  # first-time lookup
+    lookup_client.lookup.return_value = 4
+
+    connector = LMCacheConnectorV1Impl.__new__(LMCacheConnectorV1Impl)
+    connector.kv_role = "kv_consumer"
+    connector.lookup_client = lookup_client
+    connector.skip_last_n_tokens = 0
+    connector._requests_priority = {}
+    connector.config = SimpleNamespace(min_retrieve_tokens=0)
+    connector.load_specs = {}
+
+    request = SimpleNamespace(
+        request_id="req-1",
+        all_token_ids=[1, 2, 3, 4],
+        num_tokens=4,
+        sampling_params=_make_sampling_params(),
+        cache_salt="salt-a",
+    )
+
+    connector.get_num_new_matched_tokens(request, num_computed_tokens=0)
+
+    lookup_client.lookup.assert_called_once()
+    call_kwargs = lookup_client.lookup.call_args.kwargs
     assert "request_configs" in call_kwargs
-    assert call_kwargs["request_configs"] == req_configs
+    assert call_kwargs["request_configs"] is not None
+    assert _TAG_KEY in call_kwargs["request_configs"]
+    expected = hashlib.sha256("salt-a".encode("utf-8")).hexdigest()
+    assert call_kwargs["request_configs"][_TAG_KEY] == expected

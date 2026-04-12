@@ -865,6 +865,7 @@ class LMCacheConnectorV1Impl:
                         kvcaches=kvcaches,
                         slot_mapping=slot_mapping[:lmcache_cached_tokens],
                         vllm_cached_tokens=request.load_spec.vllm_cached_tokens,
+                        request_configs=request.request_configs,
                     )
                 else:
                     layerwise_retriever = self.lmcache_engine.retrieve_layer(
