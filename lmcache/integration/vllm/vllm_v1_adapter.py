@@ -3,6 +3,7 @@
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Generator, Optional, Union
+import hashlib
 import os
 
 # Third Party
@@ -90,7 +91,28 @@ class DisaggSpec:
 tmp_disagg_tracker: dict[str, DisaggSpec] = {}
 
 
-def extract_request_configs(sampling_params: SamplingParams) -> Optional[dict]:
+def extract_request_configs(
+    sampling_params: SamplingParams,
+    cache_salt: Optional[str] = None,
+) -> Optional[dict]:
+    """Build the ``request_configs`` dict that influences LMCache cache key
+    identity.
+
+    Extracts all ``lmcache.*`` keys from the vLLM
+    ``sampling_params.extra_args["kv_transfer_params"]`` dict and,
+    optionally, folds a vLLM ``cache_salt`` into the config as a
+    ``lmcache.tag.cachesalt`` entry so that requests with different salts
+    produce distinct cache keys.
+
+    Args:
+        sampling_params: The vLLM sampling parameters for the request.
+        cache_salt: The optional vLLM ``cache_salt`` string. An empty
+            string is treated as *no salt* (same as ``None``).
+
+    Returns:
+        A dict of ``lmcache.*`` config entries, or ``None`` if there are
+        no relevant entries.
+    """
     request_configs = None
     if sampling_params and sampling_params.extra_args is not None:
         if kv_transfer_params := sampling_params.extra_args.get("kv_transfer_params"):
@@ -99,7 +121,25 @@ def extract_request_configs(sampling_params: SamplingParams) -> Optional[dict]:
                     if request_configs is None:
                         request_configs = {}
                     request_configs[k] = v
+
+    if cache_salt:  # treats "" the same as None (no salt)
+        if request_configs is None:
+            request_configs = {}
+        request_configs["lmcache.tag.cachesalt"] = _cache_salt_tag_value(
+            cache_salt
+        )
+
     return request_configs
+
+
+def _cache_salt_tag_value(cache_salt: str) -> str:
+    """Return a tag-safe digest of a vLLM ``cache_salt`` string.
+
+    The LMCache tag serialization format uses ``%`` and ``@`` as
+    delimiters, so a raw salt could break parsing.  SHA-256 hex is
+    always safe and collision-resistant.
+    """
+    return hashlib.sha256(cache_salt.encode("utf-8")).hexdigest()
 
 
 @dataclass
@@ -147,6 +187,7 @@ class RequestTracker:
         num_tokens_to_compute: int,
         lmcache_cached_tokens: int,
         skip_save: bool,
+        cache_salt: Optional[str] = None,
     ) -> "RequestTracker":
         """Create the request tracker from a new request.
 
@@ -158,8 +199,10 @@ class RequestTracker:
                 local cache hit) and new tokens that will be scheduled.
             lmcache_cached_tokens (int): the number of tokens that are
                 cached in LMCache.
-            request_priority (int): the priority of the request
             skip_save (bool): whether the request cache should be saved
+            cache_salt (Optional[str]): the vLLM ``cache_salt`` for
+                this request, used to isolate cache entries. ``None``
+                or ``""`` means no salt.
         """
         # vLLM 0.9.0 update: request.block_ids changed from list[int] to
         # tuple[list[int]]
@@ -183,7 +226,9 @@ class RequestTracker:
         # NOTE: Initialized in `update_state_after_alloc`
         disagg_spec = tmp_disagg_tracker.pop(new_request.req_id, None)
 
-        request_configs = extract_request_configs(new_request.sampling_params)
+        request_configs = extract_request_configs(
+            new_request.sampling_params, cache_salt=cache_salt
+        )
 
         mm_hashes, mm_positions = extract_mm_features(new_request, modify=True)
 
@@ -829,6 +874,7 @@ class LMCacheConnectorV1Impl:
                         slot_mapping=slot_mapping[:lmcache_cached_tokens],
                         vllm_cached_tokens=request.load_spec.vllm_cached_tokens,
                         sync=sync,
+                        request_configs=request.request_configs,
                     )
                     # NOTE: retrieve for two layers at the first layer
                     next(layerwise_retriever)
@@ -1069,6 +1115,7 @@ class LMCacheConnectorV1Impl:
                     offset=skip_leading_tokens,
                     sync=is_first,
                     req_id=request.req_id,
+                    request_configs=request.request_configs,
                 )
                 self._layerwise_save_storers[request.req_id] = layerwise_storer
                 if is_first:
@@ -1275,7 +1322,10 @@ class LMCacheConnectorV1Impl:
                 apply_mm_hashes_to_token_ids(token_ids, mm_hashes, mm_positions)
                 token_ids = token_ids.tolist()
 
-            request_configs = extract_request_configs(request.sampling_params)
+            request_configs = extract_request_configs(
+                request.sampling_params,
+                cache_salt=getattr(request, "cache_salt", None),
+            )
             if self.skip_last_n_tokens > 0:
                 token_ids = token_ids[: -self.skip_last_n_tokens]
 
@@ -1468,12 +1518,23 @@ class LMCacheConnectorV1Impl:
                 and request_priority > self.config.priority_limit
             )
 
+            # Retrieve cache_salt from the full Request object stored
+            # during update_state_after_alloc; NewRequestData doesn't
+            # carry cache_salt.
+            vllm_request = self._unfinished_requests.get(request.req_id)
+            cache_salt = (
+                getattr(vllm_request, "cache_salt", None)
+                if vllm_request is not None
+                else None
+            )
+
             request_tracker = RequestTracker.from_new_request(
                 self.config,
                 request,
                 num_tokens_to_compute,
                 lmcache_cached_tokens,
                 skip_save,
+                cache_salt=cache_salt,
             )
             self._request_trackers[request.req_id] = request_tracker
 
