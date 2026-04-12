@@ -17,6 +17,23 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+# ------------------------------------------------------------------ #
+#  Constants                                                           #
+# ------------------------------------------------------------------ #
+
+DEFAULT_LAYER_NAME_PREFIX = "model.layers."
+
+# ------------------------------------------------------------------ #
+#  dtype mapping                                                       #
+# ------------------------------------------------------------------ #
+
+DTYPE_MAP: dict[str, torch.dtype] = {
+    "float16": torch.float16,
+    "float32": torch.float32,
+    "bfloat16": torch.bfloat16,
+    "uint8": torch.uint8,
+}
+
 
 # The 4-tuple that uniquely identifies a set of kernel-equivalent layers:
 # ``(kv_size, num_heads, head_size, dtype)``. Two layers share a transfer-
@@ -211,3 +228,78 @@ class KVLayerGroupsManager:
             IndexError: If *group_idx* is out of range.
         """
         return self.kv_layer_groups[group_idx].shape_desc
+
+
+# ------------------------------------------------------------------ #
+#  CLI shape-spec parser                                               #
+# ------------------------------------------------------------------ #
+
+
+def parse_kvcache_shape_spec(
+    spec_str: str,
+) -> list[KVLayerGroupInfo]:
+    """Parse KV shape specification into layer groups.
+
+    Format: ``(shape):dtype:layer_count[;...]``
+
+    Examples::
+
+        (2,1024,16,8,128):float16:32          # single group
+        (2,1024,16,8,128):float16:30;(2,1024,16,4,64):bfloat16:2
+
+    Returns a list of :class:`KVLayerGroupInfo`.
+    """
+    if not spec_str:
+        raise ValueError("KV shape specification cannot be empty")
+
+    groups: list[KVLayerGroupInfo] = []
+    layer_offset = 0
+
+    for group_spec in spec_str.split(";"):
+        group_spec = group_spec.strip()
+        if not group_spec:
+            continue
+
+        if not (group_spec.startswith("(") and "):" in group_spec):
+            raise ValueError("Invalid group spec format: %s" % group_spec)
+
+        shape_end = group_spec.find(")")
+        shape_str = group_spec[1:shape_end]
+
+        remaining = group_spec[shape_end + 2 :]  # Skip "):"
+        parts = remaining.split(":")
+        if len(parts) != 2:
+            raise ValueError("Invalid group spec format: %s" % group_spec)
+
+        dtype_str = parts[0].strip()
+        layer_count_str = parts[1].strip()
+
+        dtype_key = dtype_str.lower()
+        if dtype_key not in DTYPE_MAP:
+            raise ValueError(
+                "Unrecognized dtype '%s' in group spec: %s. "
+                "Supported: %s" % (dtype_str, group_spec, list(DTYPE_MAP.keys()))
+            )
+        try:
+            shape = tuple(int(p.strip()) for p in shape_str.split(","))
+            layer_count = int(layer_count_str)
+        except ValueError as exc:
+            raise ValueError("Invalid number in group spec: %s" % group_spec) from exc
+        dtype = DTYPE_MAP[dtype_key]
+
+        indices = list(range(layer_offset, layer_offset + layer_count))
+        names = ["%s%d" % (DEFAULT_LAYER_NAME_PREFIX, i) for i in indices]
+        groups.append(
+            KVLayerGroupInfo(
+                layer_names=names,
+                layer_indices=indices,
+                shape=torch.Size(shape),
+                dtype=dtype,
+            )
+        )
+        layer_offset += layer_count
+
+    if not groups:
+        raise ValueError("No valid layer groups found in spec")
+
+    return groups

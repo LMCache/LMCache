@@ -4,7 +4,12 @@ import pytest
 import torch
 
 # First Party
-from lmcache.v1.kv_layer_groups import KVLayerGroupInfo, KVLayerGroupsManager
+from lmcache.v1.kv_layer_groups import (
+    DEFAULT_LAYER_NAME_PREFIX,
+    KVLayerGroupInfo,
+    KVLayerGroupsManager,
+    parse_kvcache_shape_spec,
+)
 
 pytestmark = pytest.mark.skipif(
     not torch.cuda.is_available(), reason="PageBufferShapeDesc requires CUDA build"
@@ -129,6 +134,73 @@ class TestKVLayerGroupsManager:
         sd1 = manager.get_shape_desc(1)
         assert sd1.nh == 16
         assert sd1.hs == 64
+
+
+class TestParseKvcacheShapeSpec:
+    """Test cases for parse_kvcache_shape_spec function."""
+
+    def test_single_group(self):
+        """Test parsing a single group spec."""
+        groups = parse_kvcache_shape_spec("(2,1024,16,8,128):float16:32")
+        assert len(groups) == 1
+        g = groups[0]
+        assert g.num_layers == 32
+        assert g.shape == torch.Size([2, 1024, 16, 8, 128])
+        assert g.dtype == torch.float16
+        assert g.layer_indices == list(range(32))
+        assert g.layer_names[0] == "%s0" % DEFAULT_LAYER_NAME_PREFIX
+        assert g.layer_names[-1] == "%s31" % DEFAULT_LAYER_NAME_PREFIX
+
+    def test_multiple_groups(self):
+        """Test parsing multiple groups separated by semicolons."""
+        spec = "(2,1024,16,8,128):float16:30;(2,1024,16,4,64):bfloat16:2"
+        groups = parse_kvcache_shape_spec(spec)
+        assert len(groups) == 2
+
+        # First group: 30 layers
+        assert groups[0].num_layers == 30
+        assert groups[0].dtype == torch.float16
+        assert groups[0].layer_indices == list(range(30))
+
+        # Second group: 2 layers, offset by 30
+        assert groups[1].num_layers == 2
+        assert groups[1].dtype == torch.bfloat16
+        assert groups[1].shape == torch.Size([2, 1024, 16, 4, 64])
+        assert groups[1].layer_indices == [30, 31]
+
+    def test_empty_spec_raises(self):
+        """Test that empty spec raises ValueError."""
+        with pytest.raises(ValueError, match="cannot be empty"):
+            parse_kvcache_shape_spec("")
+
+    def test_invalid_format_raises(self):
+        """Test that invalid format raises ValueError."""
+        with pytest.raises(ValueError, match="Invalid group spec"):
+            parse_kvcache_shape_spec("bad_format")
+
+    def test_unrecognized_dtype_raises(self):
+        """Test that unrecognized dtype raises with helpful message."""
+        with pytest.raises(ValueError, match="Unrecognized dtype"):
+            parse_kvcache_shape_spec("(2,1024,16,8,128):float64:32")
+
+    def test_invalid_number_raises(self):
+        """Test that non-numeric shape values raise ValueError."""
+        with pytest.raises(ValueError, match="Invalid number"):
+            parse_kvcache_shape_spec("(2,abc,16,8,128):float16:32")
+
+    def test_whitespace_handling(self):
+        """Test that whitespace around group separators is handled."""
+        groups = parse_kvcache_shape_spec(
+            " (2,1024,16,8,128):float16:4 ; (2,1024,16,4,64):bfloat16:2 "
+        )
+        assert len(groups) == 2
+        assert groups[0].num_layers == 4
+        assert groups[1].num_layers == 2
+
+    def test_no_valid_groups_raises(self):
+        """Test that spec with only separators raises."""
+        with pytest.raises(ValueError, match="No valid layer groups"):
+            parse_kvcache_shape_spec(";;;")
 
 
 if __name__ == "__main__":
