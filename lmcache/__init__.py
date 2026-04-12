@@ -54,7 +54,7 @@ def _get_backend() -> Any:
             logger.info("Using backend: %s", module_name)
             imported = True
             break
-        except ImportError as e:
+        except Exception as e:
             logger.warning("Failed to import backend %s: %s", module_name, e)
 
     if not imported:
