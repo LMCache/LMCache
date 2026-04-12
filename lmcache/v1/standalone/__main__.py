@@ -32,11 +32,6 @@ from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.config_base import parse_command_line_extra_params
 from lmcache.v1.gpu_connector import CreateGPUConnector
 from lmcache.v1.metadata import LMCacheMetadata
-from lmcache.v1.standalone.kv_shape_spec import (
-    DTYPE_MAP,
-    LayerGroupSpec,
-    parse_kvcache_shape_spec,
-)
 from lmcache.v1.standalone.manager import StandaloneLMCacheManager
 
 # Third Party - Platform detection
@@ -48,6 +43,151 @@ except ImportError:
     current_platform = None
 
 logger = init_logger(__name__)
+
+dtype_map = {
+    "float16": torch.float16,
+    "float32": torch.float32,
+    "bfloat16": torch.bfloat16,
+    "uint8": torch.uint8,
+}
+
+
+class LayerGroupSpec:
+    """Specification for a layer group with KV shape and dtype
+
+    Attributes:
+        layer_count: Number of layers in this group
+        shape: Shape as tuple of integers
+         may be (num_layers, kv_dim, num_blocks, num_heads, head_size)
+        dtype: Data type for this layer group
+    """
+
+    def __init__(
+        self,
+        layer_count: int,
+        shape: Tuple[int, ...],
+        dtype: torch.dtype,
+    ):
+        self.layer_count = layer_count
+        # May be (num_layers, kv_dim, num_blocks, num_heads, head_size)
+        self.shape = shape
+        self.dtype = dtype
+
+    def __repr__(self) -> str:
+        return f"LayerGroupSpec({self.shape}):{self.dtype}:{self.layer_count}"
+
+
+def parse_kvcache_shape_spec(spec_str: str) -> List[LayerGroupSpec]:
+    """Parse KV shape specification with multiple layer groups.
+
+    Format examples:
+    - "(2,2,256,4,16):float16:2" (single group)
+    - "(2,2,256,4,16):float16:2;(3,2,256,4,4):bfloat16:2" (two groups)
+
+    Note: The shape string (inside parentheses) is not parsed and kept as string
+    to support different Attention implementations with varying shapes.
+
+    Returns a list of LayerGroupSpec objects.
+    """
+    if not spec_str:
+        raise ValueError("KV shape specification cannot be empty")
+
+    groups = []
+
+    # Split by semicolon to get individual group specifications
+    group_specs = spec_str.split(";")
+
+    for group_spec in group_specs:
+        group_spec = group_spec.strip()
+        if not group_spec:
+            continue
+
+        # Parse format: (shape_string):dtype:layer_count
+        if not (group_spec.startswith("(") and "):" in group_spec):
+            raise ValueError(f"Invalid group specification format: {group_spec}")
+
+        # Extract shape string inside parentheses and parse it
+        shape_end = group_spec.find(")")
+        shape_str = group_spec[1:shape_end]
+
+        # Extract dtype and layer_count after the shape
+        remaining = group_spec[shape_end + 2 :]  # Skip "):"
+        parts = remaining.split(":")
+
+        if len(parts) != 2:
+            raise ValueError(f"Invalid group specification format: {group_spec}")
+
+        dtype_str = parts[0].strip()
+        layer_count_str = parts[1].strip()
+
+        try:
+            # Parse shape tuple - support arbitrary dimensions
+            shape_parts = shape_str.split(",")
+            shape = tuple(int(part.strip()) for part in shape_parts)
+            layer_count = int(layer_count_str)
+            dtype = dtype_map.get(dtype_str.strip().lower(), torch.float16)
+
+            # Create LayerGroupSpec with parsed shape
+            groups.append(LayerGroupSpec(layer_count, shape, dtype))
+        except ValueError as e:
+            raise ValueError(
+                f"Invalid number format in group specification: {group_spec}"
+            ) from e
+
+    if not groups:
+        raise ValueError("No valid layer groups found in specification")
+
+    return groups
+
+
+def calculate_composite_kv_cache_shape(
+    layer_groups: List[LayerGroupSpec],
+) -> Tuple[int, int, int, int, int]:
+    """Calculate composite KV cache shape from multiple layer groups.
+
+    Returns a shape that represents the KV cache structure:
+    - num_layers: sum of all layer counts
+    - kv_dim: from first group's shape (assumed consistent)
+    - num_blocks: from first group's shape (assumed consistent)
+    - num_heads: maximum num_heads across groups
+    - head_size: maximum head_size across groups
+
+    Note: This returns the KV cache shape, where the third dimension is num_blocks.
+    For metadata KV shape, the third dimension should be chunk_size instead.
+    """
+    if not layer_groups:
+        raise ValueError("No layer groups provided")
+
+    # Get base dimensions from first group's shape
+    first_shape = layer_groups[0].shape
+    base_num_layers, base_kv_dim, base_num_blocks, base_num_heads, base_head_size = (
+        first_shape
+    )
+
+    total_layers = sum(group.layer_count for group in layer_groups)
+
+    # Find maximum num_heads and head_size across all groups
+    max_num_heads = base_num_heads
+    max_head_size = base_head_size
+
+    for group in layer_groups[1:]:
+        shape = group.shape
+        num_heads = shape[3]
+        head_size = shape[4]
+        max_num_heads = max(max_num_heads, num_heads)
+        max_head_size = max(max_head_size, head_size)
+
+    return (total_layers, base_kv_dim, base_num_blocks, max_num_heads, max_head_size)
+
+
+def get_composite_kv_dtype(layer_groups: List[LayerGroupSpec]) -> torch.dtype:
+    """Get a representative dtype for composite KV cache.
+
+    Returns the dtype of the first layer group for compatibility.
+    """
+    if not layer_groups:
+        raise ValueError("No layer groups provided")
+    return layer_groups[0].dtype
 
 
 class LMCacheStandaloneStarter:
@@ -397,7 +537,7 @@ def main():
                 )
 
         # Use single group specification - kv-shape directly assigned to metadata
-        kv_dtype = DTYPE_MAP.get(args.kv_dtype, torch.float16)
+        kv_dtype = dtype_map.get(args.kv_dtype, torch.float16)
         kv_shape = parse_kv_shape(args.kv_shape)
 
         logger.info("Using KV shape: %s", kv_shape)

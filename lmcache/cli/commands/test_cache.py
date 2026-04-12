@@ -50,16 +50,16 @@ import zmq
 # First Party
 from lmcache.cli.commands.base import BaseCommand
 from lmcache.utils import compress_slot_mapping
+from lmcache.v1.kv_layer_groups import (
+    DTYPE_MAP,
+    parse_kvcache_shape_spec,
+)
 from lmcache.v1.multiprocess.custom_types import (
     CudaIPCWrapper,
     IPCCacheEngineKey,
     get_customized_encoder,
 )
 from lmcache.v1.multiprocess.protocols.base import RequestType
-from lmcache.v1.standalone.kv_shape_spec import (
-    DTYPE_MAP,
-    parse_kvcache_shape_spec,
-)
 
 # ------------------------------------------------------------------ #
 #  Constants                                                           #
@@ -681,7 +681,7 @@ class TestCacheCommand(BaseCommand):
         first = layer_groups[0]
         # shape: (kv_dim, num_blocks, block_size,
         #         num_heads, head_size)
-        num_layers = sum(g.layer_count for g in layer_groups)
+        num_layers = sum(g.num_layers for g in layer_groups)
         num_heads = first.shape[3]
         head_size = first.shape[4]
         dtype = first.dtype
