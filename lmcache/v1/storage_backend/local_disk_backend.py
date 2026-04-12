@@ -589,7 +589,13 @@ class LocalDiskBackend(StorageBackendInterface):
         """
 
         memory_obj = self.local_cpu_backend.allocate(shape, dtype, fmt)
-        assert memory_obj is not None, "Memory allocation failed during disk load."
+        if memory_obj is None:
+            logger.warning(
+                "LocalDiskBackend: CPU staging pool exhausted while loading "
+                "key %s from disk. Returning cache miss.",
+                key,
+            )
+            return None
 
         buffer = memory_obj.byte_array
         self.read_file(key, buffer, path)

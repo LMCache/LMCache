@@ -589,6 +589,13 @@ class LocalCPUBackend(AllocatorBackendInterface):
         if memory_obj is not None or not eviction:
             return memory_obj
 
+        # When use_hot=False, hot_cache is always empty (batched_submit_put_task
+        # returns early without inserting into hot_cache), so eviction is
+        # structurally impossible. Busy-looping would spin forever; override to
+        # fail-fast so callers can handle the None return gracefully.
+        if not self.use_hot:
+            busy_loop = False
+
         evict_keys_count = 0
         num_attempts = 0
         while True:
@@ -698,6 +705,13 @@ class LocalCPUBackend(AllocatorBackendInterface):
             return memory_objs
 
         assert isinstance(self.memory_allocator, MixedMemoryAllocator)
+
+        # When use_hot=False, hot_cache is always empty (batched_submit_put_task
+        # returns early without inserting into hot_cache), so eviction is
+        # structurally impossible. Busy-looping would spin forever; override to
+        # fail-fast so callers can handle the None return gracefully.
+        if not self.use_hot:
+            busy_loop = False
 
         evict_keys_count = 0
         num_attempts = 0
