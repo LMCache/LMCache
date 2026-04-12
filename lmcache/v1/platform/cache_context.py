@@ -496,5 +496,10 @@ class CpuCacheContext(CacheContextBase):
         )
 
     def cache_size_per_token(self) -> int:
-        shape = self.get_kv_buffer_shape(1)
-        return shape.numel() * self._dtype.itemsize
+        total = 0
+        for group_idx, group in enumerate(
+            self.kv_layer_groups_manager_.kv_layer_groups
+        ):
+            numels = self.get_kv_buffer_shape(1, group_idx).numel()
+            total += numels * group.dtype.itemsize
+        return total
