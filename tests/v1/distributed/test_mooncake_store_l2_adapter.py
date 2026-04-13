@@ -8,6 +8,7 @@ extension is not available.
 """
 
 # Standard
+from typing import Any
 import os
 import select
 
@@ -18,15 +19,15 @@ import torch
 # First Party
 from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.distributed.internal_api import L1MemoryDesc
+from lmcache.v1.distributed.l2_adapters import (
+    mooncake_store_l2_adapter as mooncake_store_module,
+)
 from lmcache.v1.distributed.l2_adapters.config import (
     get_registered_l2_adapter_types,
     get_type_name_for_config,
 )
 from lmcache.v1.distributed.l2_adapters.factory import (
     create_l2_adapter_from_registry,
-)
-from lmcache.v1.distributed.l2_adapters import (
-    mooncake_store_l2_adapter as mooncake_store_module,
 )
 from lmcache.v1.distributed.l2_adapters.mooncake_store_l2_adapter import (
     MooncakeStoreL2AdapterConfig,
@@ -336,8 +337,9 @@ class TestMooncakeStorePreregisterFactory:
             config,
             l1_memory_desc=l1_desc,
         )
+        wrapped_adapter: Any = adapter
 
-        assert adapter[0] == "wrapped"
+        assert wrapped_adapter[0] == "wrapped"
         assert captured["config"] == config.setup_config
         assert captured["num_workers"] == 3
         assert captured["preregister_l1_base"] == l1_desc.ptr
