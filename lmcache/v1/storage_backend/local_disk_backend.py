@@ -270,8 +270,6 @@ class LocalDiskWorker:
             priority = 1
         elif task_type == "put":
             priority = 2
-        elif task_type == "manifest":
-            priority = 3
         else:
             raise ValueError(f"Unknown task type: {task_type}")
 
@@ -394,9 +392,7 @@ class LocalDiskBackend(StorageBackendInterface):
         self.stats_monitor = LMCStatsMonitor.GetOrCreate()
         self.usage = 0
         self.manifest_path = self._get_manifest_path()
-        self._manifest_state_lock = threading.Lock()
-        self._manifest_dirty = False
-        self._manifest_flush_enqueued = False
+        self._manifest_write_lock = threading.Lock()
 
         # Batched message sender for controller communication
         self.batched_msg_sender: Optional[BatchedMessageSender] = None
@@ -448,40 +444,14 @@ class LocalDiskBackend(StorageBackendInterface):
         manifest.write(self.manifest_path)
 
     def _save_manifest(self) -> None:
-        with self.disk_lock:
-            self._save_manifest_locked()
-
-    def _schedule_manifest_save(self) -> None:
-        """Coalesce manifest persistence after asynchronous disk writes."""
-        with self._manifest_state_lock:
-            self._manifest_dirty = True
-            if self._manifest_flush_enqueued:
-                return
-            self._manifest_flush_enqueued = True
-
-        try:
-            asyncio.run_coroutine_threadsafe(
-                self.disk_worker.submit_task(
-                    "manifest",
-                    self._flush_manifest_if_dirty,
-                ),
-                self.loop,
-            )
-        except RuntimeError:
-            with self._manifest_state_lock:
-                self._manifest_flush_enqueued = False
-            self._save_manifest()
-
-    def _flush_manifest_if_dirty(self) -> None:
-        """Persist the latest manifest snapshot once pending writes settle."""
-        while True:
-            with self._manifest_state_lock:
-                if not self._manifest_dirty:
-                    self._manifest_flush_enqueued = False
-                    return
-                self._manifest_dirty = False
-
-            self._save_manifest()
+        with self._manifest_write_lock:
+            with self.disk_lock:
+                manifest = _LocalDiskManifest.from_cache_entries(
+                    self.path,
+                    dict(self.dict.items()),
+                    self.MANIFEST_VERSION,
+                )
+            manifest.write(self.manifest_path)
 
     def _recompute_usage_locked(self) -> None:
         """Recompute disk usage while the caller holds ``disk_lock``."""
@@ -890,8 +860,8 @@ class LocalDiskBackend(StorageBackendInterface):
         memory_obj.ref_count_down()
 
         self.insert_key(key, size, shape, dtype, fmt, cached_positions=cached_positions)
+        self._save_manifest()
         self.disk_worker.remove_put_task(key)
-        self._schedule_manifest_save()
 
         # Call the completion callback if provided
         if on_complete_callback is not None:
