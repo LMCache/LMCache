@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 import asyncio
 import os
 import shutil
@@ -456,6 +456,216 @@ class TestPoolExhaustionHandling:
         assert local_disk_backend.dict[key].pin_count == 0, (
             "pin_count should be 0 — alloc failed before pin()"
         )
+
+        local_disk_backend.local_cpu_backend.memory_allocator.close()
+
+    # ------------------------------------------------------------------
+    # Partial-alloc failure tests (issue #3022)
+    # ------------------------------------------------------------------
+
+    def _insert_fake_entries(self, backend, keys):
+        """Insert fake DiskCacheMetadata for each key so lookups succeed."""
+        for key in keys:
+            path = backend._key_to_path(key)
+            backend.dict[key] = DiskCacheMetadata(
+                path=path,
+                size=1024,
+                shape=torch.Size([2, 28, 256, 8, 128]),
+                dtype=torch.bfloat16,
+                fmt=MemoryFormat.KV_2LTD,
+            )
+
+    def test_partial_alloc_cleanup_on_multi_key_failure(
+        self, local_disk_backend, async_loop
+    ):
+        """Issue #3022: When allocate fails on key 2 of 3, all side
+        effects from keys 0 and 1 (DiskCacheMetadata pins, MemoryObj
+        pins/refs) must be fully rolled back, and result must be []."""
+        keys = [create_test_key(400 + i) for i in range(3)]
+        self._insert_fake_entries(local_disk_backend, keys)
+
+        mock_objs = [MagicMock(name=f"MemoryObj_{i}") for i in range(2)]
+        allocate_returns = iter([mock_objs[0], mock_objs[1], None])
+
+        with patch.object(
+            local_disk_backend.local_cpu_backend,
+            "allocate",
+            side_effect=lambda *a, **kw: next(allocate_returns),
+        ):
+            result = async_loop.run_until_complete(
+                local_disk_backend.batched_get_non_blocking(
+                    lookup_id="test_multi", keys=keys
+                )
+            )
+
+        # Must return empty — no partial results
+        assert result == []
+
+        # DiskCacheMetadata pin_count must be 0 for ALL keys
+        for i, key in enumerate(keys):
+            assert local_disk_backend.dict[key].pin_count == 0, (
+                f"key {i}: pin_count should be 0 after rollback"
+            )
+
+        # MemoryObj cleanup: unpin + ref_count_down called on both
+        for i, obj in enumerate(mock_objs):
+            obj.unpin.assert_called_once()
+            obj.ref_count_down.assert_called_once()
+
+        # disk_lock must be released
+        acquired = local_disk_backend.disk_lock.acquire(timeout=1)
+        assert acquired, "disk_lock NOT released after partial alloc failure"
+        local_disk_backend.disk_lock.release()
+
+        local_disk_backend.local_cpu_backend.memory_allocator.close()
+
+    def test_partial_alloc_no_stale_data_returned(self, local_disk_backend, async_loop):
+        """CRITICAL (issue #3022): When first allocation succeeds but
+        second fails, the returned list must be empty — NOT contain the
+        first allocated-but-unloaded MemoryObj (stale/corrupt data)."""
+        keys = [create_test_key(500 + i) for i in range(2)]
+        self._insert_fake_entries(local_disk_backend, keys)
+
+        stale_obj = MagicMock(name="stale_MemoryObj")
+        allocate_returns = iter([stale_obj, None])
+
+        with patch.object(
+            local_disk_backend.local_cpu_backend,
+            "allocate",
+            side_effect=lambda *a, **kw: next(allocate_returns),
+        ):
+            result = async_loop.run_until_complete(
+                local_disk_backend.batched_get_non_blocking(
+                    lookup_id="test_stale", keys=keys
+                )
+            )
+
+        # THE critical assertion: empty list, not [stale_obj]
+        assert len(result) == 0, (
+            f"Expected 0 items but got {len(result)} — "
+            "allocated-but-unloaded MemoryObj would be stale/corrupt data"
+        )
+        assert stale_obj not in result
+
+        # Verify stale_obj was properly cleaned up
+        stale_obj.unpin.assert_called_once()
+        stale_obj.ref_count_down.assert_called_once()
+
+        # pin_count check
+        for key in keys:
+            assert local_disk_backend.dict[key].pin_count == 0
+
+        local_disk_backend.local_cpu_backend.memory_allocator.close()
+
+    def test_first_key_alloc_failure_multi_key_batch(
+        self, local_disk_backend, async_loop
+    ):
+        """First-key failure in a multi-key batch: no side effects on
+        any key, consistent with the single-key test above."""
+        keys = [create_test_key(700 + i) for i in range(3)]
+        self._insert_fake_entries(local_disk_backend, keys)
+
+        with patch.object(
+            local_disk_backend.local_cpu_backend,
+            "allocate",
+            return_value=None,
+        ):
+            result = async_loop.run_until_complete(
+                local_disk_backend.batched_get_non_blocking(
+                    lookup_id="test_first_fail", keys=keys
+                )
+            )
+
+        assert result == []
+        for key in keys:
+            assert local_disk_backend.dict[key].pin_count == 0
+
+        acquired = local_disk_backend.disk_lock.acquire(timeout=1)
+        assert acquired, "disk_lock NOT released after first-key failure"
+        local_disk_backend.disk_lock.release()
+
+        local_disk_backend.local_cpu_backend.memory_allocator.close()
+
+    def test_last_key_in_large_batch_fails(self, local_disk_backend, async_loop):
+        """Edge case: last key (of 5) fails — all 4 successful
+        allocations must be fully rolled back."""
+        n_keys = 5
+        keys = [create_test_key(800 + i) for i in range(n_keys)]
+        self._insert_fake_entries(local_disk_backend, keys)
+
+        mock_objs = [MagicMock(name=f"MemoryObj_{i}") for i in range(n_keys - 1)]
+        returns = mock_objs + [None]  # last one fails
+        allocate_returns = iter(returns)
+
+        with patch.object(
+            local_disk_backend.local_cpu_backend,
+            "allocate",
+            side_effect=lambda *a, **kw: next(allocate_returns),
+        ):
+            result = async_loop.run_until_complete(
+                local_disk_backend.batched_get_non_blocking(
+                    lookup_id="test_last_fail", keys=keys
+                )
+            )
+
+        assert result == []
+
+        for i, key in enumerate(keys):
+            assert local_disk_backend.dict[key].pin_count == 0, (
+                f"key {i}: pin_count should be 0 after rollback"
+            )
+
+        for obj in mock_objs:
+            obj.unpin.assert_called_once()
+            obj.ref_count_down.assert_called_once()
+
+        acquired = local_disk_backend.disk_lock.acquire(timeout=1)
+        assert acquired, "disk_lock NOT released after last-key failure"
+        local_disk_backend.disk_lock.release()
+
+        local_disk_backend.local_cpu_backend.memory_allocator.close()
+
+    def test_all_keys_succeed_returns_full_batch(self, local_disk_backend, async_loop):
+        """Happy path: all allocations succeed → result contains
+        exactly len(keys) items with all pins intact."""
+        keys = [create_test_key(600 + i) for i in range(3)]
+        self._insert_fake_entries(local_disk_backend, keys)
+
+        mock_objs = [MagicMock(name=f"MemoryObj_{i}") for i in range(3)]
+        allocate_returns = iter(mock_objs)
+
+        async def fake_submit_task(*args, **kwargs):
+            return kwargs.get("memory_objs", [])
+
+        with (
+            patch.object(
+                local_disk_backend.local_cpu_backend,
+                "allocate",
+                side_effect=lambda *a, **kw: next(allocate_returns),
+            ),
+            patch.object(
+                local_disk_backend.disk_worker,
+                "submit_task",
+                side_effect=fake_submit_task,
+            ),
+        ):
+            result = async_loop.run_until_complete(
+                local_disk_backend.batched_get_non_blocking(
+                    lookup_id="test_happy", keys=keys
+                )
+            )
+
+        assert len(result) == len(keys), (
+            f"Expected {len(keys)} items but got {len(result)}"
+        )
+
+        # DiskCacheMetadata should stay pinned (pin_count == 1)
+        for key in keys:
+            assert local_disk_backend.dict[key].pin_count == 1
+
+        # Each MemoryObj should have been pinned once
+        for obj in mock_objs:
+            obj.pin.assert_called_once()
 
         local_disk_backend.local_cpu_backend.memory_allocator.close()
 

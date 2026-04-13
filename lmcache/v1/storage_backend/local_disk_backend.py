@@ -463,13 +463,15 @@ class LocalDiskBackend(StorageBackendInterface):
                 # NOT run, so any returned mem_objs would contain stale
                 # memory — not valid KV cache data.  Clean up and return
                 # empty to avoid silent data corruption.
-                for prev_obj in mem_objs:
-                    prev_obj.unpin()
-                    prev_obj.ref_count_down()
-                for prev_key in keys[: len(mem_objs)]:
-                    if prev_key in self.dict:
-                        self.dict[prev_key].unpin()
-                self.disk_lock.release()
+                try:
+                    for prev_obj in mem_objs:
+                        prev_obj.unpin()
+                        prev_obj.ref_count_down()
+                    for prev_key in keys[: len(mem_objs)]:
+                        if prev_key in self.dict:
+                            self.dict[prev_key].unpin()
+                finally:
+                    self.disk_lock.release()
                 return []
 
             self.dict[key].pin()
