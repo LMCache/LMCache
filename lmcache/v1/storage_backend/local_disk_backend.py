@@ -675,15 +675,16 @@ class LocalDiskBackend(StorageBackendInterface):
         OOM) files will still be orphaned; cross-restart recovery requires a
         separate persistent index (see issue #1175 / PR #2734).
         """
-        try:
-            if self.batched_msg_sender is not None:
+        if self.batched_msg_sender is not None:
+            try:
                 self.batched_msg_sender.close()
+            except Exception:
+                logger.warning(
+                    "LocalDiskBackend.close(): error closing batched_msg_sender",
+                    exc_info=True,
+                )
+            finally:
                 self.batched_msg_sender = None
-        except Exception:
-            logger.warning(
-                "LocalDiskBackend.close(): error closing batched_msg_sender",
-                exc_info=True,
-            )
 
         # Drain all queued async disk I/O before snapshotting keys.
         # This MUST complete before we iterate self.dict so that any in-flight
@@ -697,11 +698,11 @@ class LocalDiskBackend(StorageBackendInterface):
             )
 
         deleted = 0
-        keys = list(self.dict.keys())
-        for key in keys:
-            meta = self.dict.pop(key, None)
-            if meta is None:
-                continue
+        with self.disk_lock:
+            items = list(self.dict.items())
+            self.dict.clear()
+
+        for _, meta in items:
             try:
                 os.remove(meta.path)
                 deleted += 1

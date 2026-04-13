@@ -543,3 +543,20 @@ class TestLocalDiskBackendClose:
         assert backend.batched_msg_sender is None
 
         local_cpu_backend.memory_allocator.close()
+
+    def test_close_sender_raises_still_cleared(
+        self, temp_disk_path, async_loop, local_cpu_backend
+    ):
+        """batched_msg_sender is set to None even if sender.close() raises."""
+        backend = self._make_backend(temp_disk_path, async_loop, local_cpu_backend)
+
+        mock_sender = MagicMock()
+        mock_sender.close.side_effect = RuntimeError("boom")
+        backend.batched_msg_sender = mock_sender
+
+        backend.close()  # must not raise
+
+        mock_sender.close.assert_called_once()
+        assert backend.batched_msg_sender is None
+
+        local_cpu_backend.memory_allocator.close()
