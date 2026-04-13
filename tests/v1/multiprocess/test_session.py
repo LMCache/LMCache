@@ -221,44 +221,49 @@ class TestSessionThreadSafety:
         assert not errors, "\n".join(errors)
 
 
-class TestSessionGetAllHashes:
-    """Tests for Session.get_all_hashes method."""
+class TestSessionGetHashesNegativeEnd:
+    """Tests for Session.get_hashes with negative end (auto-align)."""
 
-    def test_get_all_hashes_empty(self, session: Session) -> None:
-        """get_all_hashes should return empty list before any hash computation."""
-        assert session.get_all_hashes() == []
+    def test_get_hashes_negative_end_empty(self, session: Session) -> None:
+        """get_hashes(0, -1) should return empty list when no tokens set."""
+        assert session.get_hashes(0, -1) == []
 
-    def test_get_all_hashes_after_compute(self, session: Session) -> None:
-        """get_all_hashes should return all computed hashes."""
+    def test_get_hashes_negative_end_after_compute(self, session: Session) -> None:
+        """get_hashes(0, -1) should return all computed hashes."""
         session.set_tokens(list(range(12)))  # 3 chunks of 4
-        session.get_hashes(0, 12)
-        all_hashes = session.get_all_hashes()
+        all_hashes = session.get_hashes(0, -1)
         assert len(all_hashes) == 3
 
-    def test_get_all_hashes_incremental(self, session: Session) -> None:
-        """get_all_hashes should accumulate hashes from incremental calls."""
+    def test_get_hashes_negative_end_incremental(self, session: Session) -> None:
+        """get_hashes(0, -1) should accumulate hashes from incremental calls."""
         session.set_tokens(list(range(12)))  # 3 chunks of 4
         # First compute 2 chunks
         session.get_hashes(0, 8)
-        assert len(session.get_all_hashes()) == 2
-        # Then compute 1 more chunk
-        session.get_hashes(8, 12)
-        assert len(session.get_all_hashes()) == 3
+        # get_hashes(0, -1) should now compute all 3 chunks
+        assert len(session.get_hashes(0, -1)) == 3
 
-    def test_get_all_hashes_matches_get_hashes(self, session: Session) -> None:
-        """get_all_hashes should return the same hashes as get_hashes(0, total)."""
+    def test_get_hashes_negative_end_matches_explicit(self, session: Session) -> None:
+        """get_hashes(0, -1) should return the same as get_hashes(0, aligned_len)."""
         session.set_tokens(list(range(12)))
         expected = session.get_hashes(0, 12)
-        assert session.get_all_hashes() == expected
+        assert session.get_hashes(0, -1) == expected
 
-    def test_get_all_hashes_matches_hasher(
+    def test_get_hashes_negative_end_truncates_partial_chunk(
+        self, session: Session
+    ) -> None:
+        """get_hashes(0, -1) should ignore trailing tokens that don't fill a chunk."""
+        # 14 tokens with chunk_size=4 -> 3 full chunks (12 tokens), 2 leftover
+        session.set_tokens(list(range(14)))
+        hashes = session.get_hashes(0, -1)
+        assert len(hashes) == 3
+
+    def test_get_hashes_negative_end_matches_hasher(
         self, hasher: TokenHasher, session: Session
     ) -> None:
-        """get_all_hashes should match standalone TokenHasher results."""
+        """get_hashes(0, -1) should match standalone TokenHasher results."""
         tokens = list(range(12))
         session.set_tokens(tokens)
-        session.get_hashes(0, 12)
-        session_hashes = session.get_all_hashes()
+        session_hashes = session.get_hashes(0, -1)
         hasher_hashes = hasher.compute_chunk_hashes(tokens)
         # Convert session hashes to bytes for comparison
         converted = [TokenHasher.hash_to_bytes(h) for h in session_hashes]
@@ -311,7 +316,7 @@ class TestSessionManagerRemoveReturnsSession:
         removed = mgr.remove("req-1")
         assert removed is not None
         assert removed.request_id == "req-1"
-        assert len(removed.get_all_hashes()) == 2
+        assert len(removed.get_hashes(0, -1)) == 2
         assert removed.lookup_ipc_key is key
 
     def test_remove_clears_from_manager(self, hasher: TokenHasher) -> None:

@@ -873,7 +873,7 @@ class MPCacheEngine:
             )
             return
 
-        chunk_hashes = [TokenHasher.hash_to_bytes(h) for h in session.get_all_hashes()]
+        chunk_hashes = [TokenHasher.hash_to_bytes(h) for h in session.get_hashes(0, -1)]
         obj_keys = ipc_key_to_object_keys(session.lookup_ipc_key, chunk_hashes)
         # unified touch of all keys, which include retrieved and stored keys
         # TODO(chunxiaozheng): when l2 is enabled, the prefetched keys from l2 are temp

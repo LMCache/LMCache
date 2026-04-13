@@ -209,7 +209,7 @@ class TestEndSessionTouchKeys:
         assert removed is not None
         assert removed.lookup_ipc_key is not None
 
-        chunk_hashes = [TokenHasher.hash_to_bytes(h) for h in removed.get_all_hashes()]
+        chunk_hashes = [TokenHasher.hash_to_bytes(h) for h in removed.get_hashes(0, -1)]
         obj_keys = ipc_key_to_object_keys(removed.lookup_ipc_key, chunk_hashes)
 
         # With world_size=1 and worker_id=None, should have 3 keys
@@ -237,7 +237,7 @@ class TestEndSessionTouchKeys:
         assert removed is not None
         assert removed.lookup_ipc_key is not None
 
-        chunk_hashes = [TokenHasher.hash_to_bytes(h) for h in removed.get_all_hashes()]
+        chunk_hashes = [TokenHasher.hash_to_bytes(h) for h in removed.get_hashes(0, -1)]
         obj_keys = ipc_key_to_object_keys(removed.lookup_ipc_key, chunk_hashes)
 
         # 2 chunks * 2 workers = 4 keys
@@ -278,7 +278,7 @@ class TestEndSessionTouchKeys:
         assert removed is not None
         assert removed.lookup_ipc_key is not None
 
-        chunk_hashes = [TokenHasher.hash_to_bytes(h) for h in removed.get_all_hashes()]
+        chunk_hashes = [TokenHasher.hash_to_bytes(h) for h in removed.get_hashes(0, -1)]
         obj_keys = ipc_key_to_object_keys(removed.lookup_ipc_key, chunk_hashes)
         assert len(obj_keys) == 0
 
@@ -289,7 +289,7 @@ class TestEndSessionTouchKeys:
         1. lookup computes all hashes (but via TokenHasher, not Session)
         2. retrieve calls session.get_hashes(0, hit_end)
         3. store calls session.get_hashes(hit_end, total)
-        4. end_session uses session.get_all_hashes() to get all
+        4. end_session uses session.get_hashes(0, -1) to get all
         """
         mgr = SessionManager(hasher, ttl=600)
         session = mgr.get_or_create("req-1")
@@ -306,7 +306,7 @@ class TestEndSessionTouchKeys:
         assert len(store_hashes) == 2
 
         # All hashes should cover all 5 chunks
-        all_hashes = session.get_all_hashes()
+        all_hashes = session.get_hashes(0, -1)
         assert len(all_hashes) == 5
         assert all_hashes == retrieve_hashes + store_hashes
 

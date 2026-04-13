@@ -45,11 +45,6 @@ class Session:
         with self._lock:
             self.token_ids = full_token_ids
 
-    def get_all_hashes(self) -> list:
-        """Return all computed chunk hashes."""
-        with self._lock:
-            return self.chunk_hashes
-
     def get_hashes(self, start: int, end: int) -> list:
         """Compute and return chunk hashes for the [start, end) token range.
 
@@ -58,7 +53,8 @@ class Session:
 
         Args:
             start: Start token index.
-            end: End token index.
+            end: End token index. If negative, it is treated as the
+                last token and automatically aligned down to chunk_size.
 
         Returns:
             List of hash values for chunks in [start_chunk, end_chunk).
@@ -67,13 +63,20 @@ class Session:
         assert start % chunk_size == 0, (
             f"start ({start}) must be a multiple of chunk_size ({chunk_size})"
         )
-        assert end % chunk_size == 0, (
-            f"end ({end}) must be a multiple of chunk_size ({chunk_size})"
-        )
         start_chunk = start // chunk_size
-        end_chunk = end // chunk_size
 
         with self._lock:
+            # Lock must be held before resolving negative `end`, because
+            # it reads `self.token_ids` which may be concurrently replaced
+            # by `set_tokens` from another thread.
+            if end < 0:
+                # Negative end means "up to the last token",
+                # align down to chunk_size boundary.
+                end = len(self.token_ids) - (len(self.token_ids) % chunk_size)
+            assert end % chunk_size == 0, (
+                f"end ({end}) must be a multiple of chunk_size ({chunk_size})"
+            )
+            end_chunk = end // chunk_size
             self._compute_hash(end_chunk)
             return self.chunk_hashes[start_chunk:end_chunk]
 
