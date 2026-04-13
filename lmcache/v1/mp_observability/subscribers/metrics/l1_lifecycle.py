@@ -40,7 +40,8 @@ class L1LifecycleSubscriber(EventSubscriber):
     - ``lmcache_mp.l1_chunk_lifetime_seconds`` — allocation to eviction
     - ``lmcache_mp.l1_chunk_idle_before_evict_seconds`` — last access to eviction
     - ``lmcache_mp.l1_chunk_reuse_gap_seconds`` — gap between consecutive touches
-    - ``lmcache_mp.l1_chunk_evict_reuse_gap_seconds`` — eviction to next reuse (capped at ``max_evict_reuse_wait``)
+    - ``lmcache_mp.l1_chunk_evict_reuse_gap_seconds`` — eviction to
+      next reuse (capped at ``max_evict_reuse_wait``)
 
     Parameters:
         sample_rate: Fraction of chunks to track (0, 1.0].  Default 0.01 (1%).
