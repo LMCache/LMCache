@@ -663,9 +663,8 @@ class MPCacheEngine:
 
         Returns:
             The number of hits for the prefetched keys if the lookup phase is
-            done. None if the lookup phase is still in progress, or the prefetch
-            is already completed and consumed by query_prefetch_status, or the
-            request_id is invalid.
+            done. None if the lookup phase is still in progress. 0 if the
+            request_id is unknown (already completed and consumed, or invalid).
         """
         with self._prefetch_job_lock:
             job = self._prefetch_jobs.get(request_id)
@@ -675,7 +674,7 @@ class MPCacheEngine:
                 "Prefetch job for request %s not found (already completed or invalid)",
                 request_id,
             )
-            return None
+            return 0
 
         found_count = self.storage_manager.query_prefetch_lookup_hits(job.handle)
         if found_count is None:
@@ -699,8 +698,9 @@ class MPCacheEngine:
             request_id: The external request ID passed in the lookup key.
 
         Returns:
-            Chunk count (int) when done, None if still in progress
-            or the request_id is unknown.
+            Chunk count (int) when done, None if still in progress,
+            0 if the request_id is unknown (already completed and consumed,
+            or invalid).
         """
         with self._prefetch_job_lock:
             job = self._prefetch_jobs.get(request_id)
@@ -709,7 +709,7 @@ class MPCacheEngine:
                 "Prefetch job for request %s not found (already completed or invalid)",
                 request_id,
             )
-            return None
+            return 0
 
         found_count = self.storage_manager.query_prefetch_status(job.handle)
         if found_count is None:
