@@ -2,7 +2,6 @@
 # Standard
 from unittest.mock import patch
 import asyncio
-import logging
 import os
 import shutil
 import tempfile
@@ -387,7 +386,7 @@ class TestPoolExhaustionHandling:
     pool is exhausted during disk I/O."""
 
     def test_load_bytes_from_disk_returns_none_on_pool_exhaustion(
-        self, local_disk_backend, caplog
+        self, local_disk_backend, capsys
     ):
         """load_bytes_from_disk must return None (not crash) when allocate
         returns None, and emit a warning log."""
@@ -400,17 +399,19 @@ class TestPoolExhaustionHandling:
         with patch.object(
             local_disk_backend.local_cpu_backend, "allocate", return_value=None
         ):
-            with caplog.at_level(logging.WARNING):
-                result = local_disk_backend.load_bytes_from_disk(
-                    key, path, dtype, shape, fmt
-                )
+            result = local_disk_backend.load_bytes_from_disk(
+                key, path, dtype, shape, fmt
+            )
 
         assert result is None, (
             "Expected None when staging pool is exhausted, not an assertion error"
         )
-        assert any(
-            "CPU staging pool exhausted" in record.message for record in caplog.records
-        ), "Expected a warning about CPU staging pool exhaustion"
+        # LMCache uses its own logger that writes to stderr, not stdlib
+        # logging handlers, so we check capsys instead of caplog.
+        captured = capsys.readouterr()
+        assert "CPU staging pool exhausted" in captured.err, (
+            "Expected a warning about CPU staging pool exhaustion in stderr"
+        )
 
         local_disk_backend.local_cpu_backend.memory_allocator.close()
 
@@ -458,9 +459,7 @@ class TestPoolExhaustionHandling:
 
         local_disk_backend.local_cpu_backend.memory_allocator.close()
 
-    def test_get_blocking_returns_none_on_pool_exhaustion(
-        self, local_disk_backend, caplog
-    ):
+    def test_get_blocking_returns_none_on_pool_exhaustion(self, local_disk_backend):
         """get_blocking must return None when load_bytes_from_disk returns
         None due to pool exhaustion (issue #2942 synchronous path)."""
         key = create_test_key(300)
@@ -478,8 +477,7 @@ class TestPoolExhaustionHandling:
         with patch.object(
             local_disk_backend.local_cpu_backend, "allocate", return_value=None
         ):
-            with caplog.at_level(logging.WARNING):
-                result = local_disk_backend.get_blocking(key)
+            result = local_disk_backend.get_blocking(key)
 
         assert result is None, (
             "get_blocking should return None when staging pool is exhausted"
