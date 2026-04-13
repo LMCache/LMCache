@@ -268,20 +268,20 @@ class TestL1Sampling:
         time.sleep(_DRAIN_WAIT)
         bus.stop()
         assert len(subscriber._shadow) >= 10
-        assert len(subscriber._sampled) >= 10
+        assert len(subscriber._skipped) == 0
 
     def test_sample_rate_zero_tracks_none(self, bus, sampled_subscriber):
-        """With near-zero sample rate, keys should not be tracked."""
+        """With near-zero sample rate, keys should be skipped."""
         keys = _make_keys("nosamp", 100)
         bus.start()
         bus.publish(_make_event(EventType.L1_WRITE_FINISHED, keys))
         time.sleep(_DRAIN_WAIT)
         bus.stop()
         assert len(sampled_subscriber._shadow) == 0
-        assert len(sampled_subscriber._sampled) == 0
+        assert len(sampled_subscriber._skipped) == 100
 
-    def test_unsampled_key_ignored_on_eviction(self, bus, sampled_subscriber):
-        """Evicting an unsampled key should not record lifetime."""
+    def test_skipped_key_ignored_on_eviction(self, bus, sampled_subscriber):
+        """Evicting a skipped key should not record lifetime."""
         count_before = _get_histogram_count(
             "lmcache_mp.l1_chunk_lifetime_seconds"
         )
@@ -297,8 +297,8 @@ class TestL1Sampling:
         )
         assert count_after == count_before
 
-    def test_unsampled_key_stays_unsampled_on_rewrite(self, bus, sampled_subscriber):
-        """Re-writing an unsampled key should keep it unsampled."""
+    def test_skipped_key_stays_skipped_on_rewrite(self, bus, sampled_subscriber):
+        """Re-writing a skipped key should keep it skipped."""
         keys = ["skip-rw-1"]
         bus.start()
         bus.publish(_make_event(EventType.L1_WRITE_FINISHED, keys))
@@ -306,7 +306,7 @@ class TestL1Sampling:
         bus.publish(_make_event(EventType.L1_WRITE_FINISHED, keys))
         time.sleep(_DRAIN_WAIT)
         bus.stop()
-        assert "skip-rw-1" not in sampled_subscriber._sampled
+        assert "skip-rw-1" in sampled_subscriber._skipped
         assert "skip-rw-1" not in sampled_subscriber._shadow
 
 
