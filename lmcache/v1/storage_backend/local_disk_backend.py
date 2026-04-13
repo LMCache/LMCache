@@ -670,13 +670,31 @@ class LocalDiskBackend(StorageBackendInterface):
         Ordering is important: ``disk_worker.close()`` must be called before
         the file cleanup so that any in-flight async ``put`` tasks complete and
         all entries are present in ``self.dict`` before we snapshot the keys.
+
+        Note: this only handles graceful shutdown.  On a hard crash (SIGKILL,
+        OOM) files will still be orphaned; cross-restart recovery requires a
+        separate persistent index (see issue #1175 / PR #2734).
         """
-        if self.batched_msg_sender is not None:
-            self.batched_msg_sender.close()
-            self.batched_msg_sender = None
+        try:
+            if self.batched_msg_sender is not None:
+                self.batched_msg_sender.close()
+                self.batched_msg_sender = None
+        except Exception:
+            logger.warning(
+                "LocalDiskBackend.close(): error closing batched_msg_sender",
+                exc_info=True,
+            )
 
         # Drain all queued async disk I/O before snapshotting keys.
-        self.disk_worker.close()
+        # This MUST complete before we iterate self.dict so that any in-flight
+        # put tasks finish writing files and inserting entries.
+        try:
+            self.disk_worker.close()
+        except Exception:
+            logger.warning(
+                "LocalDiskBackend.close(): error draining disk_worker",
+                exc_info=True,
+            )
 
         deleted = 0
         keys = list(self.dict.keys())

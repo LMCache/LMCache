@@ -485,3 +485,61 @@ class TestLocalDiskBackendClose:
         assert len(backend.dict) == 0
 
         local_cpu_backend.memory_allocator.close()
+
+    def test_close_drains_disk_worker_before_file_removal(
+        self, temp_disk_path, async_loop, local_cpu_backend
+    ):
+        """disk_worker.close() MUST be called before os.remove() to prevent
+        in-flight async puts from leaking files (regression test for #2840)."""
+        backend = self._make_backend(temp_disk_path, async_loop, local_cpu_backend)
+
+        call_order: list = []
+        original_disk_worker_close = backend.disk_worker.close
+
+        def recording_disk_worker_close():
+            call_order.append("disk_worker.close")
+            original_disk_worker_close()
+
+        fpath = os.path.join(temp_disk_path, "ordering_test.pt")
+        with open(fpath, "wb") as f:
+            f.write(b"\x00" * 256)
+        key = create_test_key(999)
+        backend.dict[key] = DiskCacheMetadata(path=fpath, size=256)
+
+        original_os_remove = os.remove
+
+        def recording_os_remove(path):
+            call_order.append("os.remove")
+            original_os_remove(path)
+
+        with (
+            patch.object(
+                backend.disk_worker, "close", side_effect=recording_disk_worker_close
+            ),
+            patch("os.remove", side_effect=recording_os_remove),
+        ):
+            backend.close()
+
+        assert call_order[0] == "disk_worker.close", (
+            "disk_worker.close() must be called BEFORE any os.remove() — "
+            f"actual order: {call_order}"
+        )
+        assert "os.remove" in call_order
+
+        local_cpu_backend.memory_allocator.close()
+
+    def test_close_calls_batched_msg_sender_close(
+        self, temp_disk_path, async_loop, local_cpu_backend
+    ):
+        """close() should call batched_msg_sender.close() and set it to None."""
+        backend = self._make_backend(temp_disk_path, async_loop, local_cpu_backend)
+
+        mock_sender = MagicMock()
+        backend.batched_msg_sender = mock_sender
+
+        backend.close()
+
+        mock_sender.close.assert_called_once()
+        assert backend.batched_msg_sender is None
+
+        local_cpu_backend.memory_allocator.close()
