@@ -114,7 +114,6 @@ void MooncakeConnector::ensure_registered(const void* buf, size_t len) {
   }
 
   void* mutable_buf = const_cast<void*>(buf);
-  size_t existing_size = 0;
   while (true) {
     std::unique_lock<std::mutex> lock(registered_buffers_mu_);
     auto it = registered_buffers_.find(buf);
@@ -134,26 +133,12 @@ void MooncakeConnector::ensure_registered(const void* buf, size_t len) {
       break;
     }
 
-    existing_size = it->second.size;
-    it->second.registering = true;
-    break;
-  }
-
-  if (existing_size > 0) {
-    int unregister_rc = client_->unregister_buffer(mutable_buf);
-    if (unregister_rc != 0) {
-      {
-        std::lock_guard<std::mutex> guard(registered_buffers_mu_);
-        auto it = registered_buffers_.find(buf);
-        if (it != registered_buffers_.end()) {
-          it->second.size = existing_size;
-          it->second.registering = false;
-        }
-      }
-      registered_buffers_cv_.notify_all();
-      throw std::runtime_error(
-          "Mooncake unregister_buffer failed while resizing registration");
-    }
+    throw std::runtime_error(
+        "Mooncake lazy registration does not support resizing an existing "
+        "buffer registration (existing_size=" +
+        std::to_string(it->second.size) + ", requested_size=" +
+        std::to_string(len) +
+        "); use a stable buffer size or preregister L1 memory.");
   }
 
   int register_rc = client_->register_buffer(mutable_buf, len);

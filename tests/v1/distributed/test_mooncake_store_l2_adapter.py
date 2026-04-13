@@ -586,6 +586,38 @@ class TestMooncakeStoreIntegration:
 
         self.adapter.submit_unlock(stored_keys)
 
+    def test_lazy_registration_resize_fails(self):
+        """Lazy registration should reject growing the same buffer address."""
+        page_size = 4096
+        shared_buffer = torch.empty(
+            page_size * 8,
+            dtype=torch.uint8,
+            device="cpu",
+        )
+        small_obj = create_buffer_memory_obj(
+            shared_buffer,
+            offset_bytes=0,
+            size_bytes=page_size,
+            fill_value=1.0,
+        )
+        larger_obj = create_buffer_memory_obj(
+            shared_buffer,
+            offset_bytes=0,
+            size_bytes=page_size * 2,
+            fill_value=2.0,
+        )
+
+        first_key = create_object_key(7771, model_name="lazy_resize_model")
+        second_key = create_object_key(7772, model_name="lazy_resize_model")
+
+        first_tid = self.adapter.submit_store_task([first_key], [small_obj])
+        assert wait_for_event_fd(self.adapter.get_store_event_fd())
+        assert self.adapter.pop_completed_store_tasks()[first_tid] is True
+
+        second_tid = self.adapter.submit_store_task([second_key], [larger_obj])
+        assert wait_for_event_fd(self.adapter.get_store_event_fd())
+        assert self.adapter.pop_completed_store_tasks()[second_tid] is False
+
     def test_factory_creates_adapter(self):
         """Verify the factory can create a Mooncake Store L2 adapter."""
         # First Party
