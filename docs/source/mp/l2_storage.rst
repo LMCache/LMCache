@@ -261,6 +261,12 @@ Select policies via CLI:
    * - ``--l2-prefetch-policy``
      - ``default``
      - For each key, pick the first (lowest-indexed) adapter that has it.
+       Prefetched keys are **temporary** (deleted after the reader finishes).
+   * - ``--l2-prefetch-policy``
+     - ``retain``
+     - Same load plan as ``default``, but prefetched keys are **retained**
+       permanently in L1.  Useful when prefetched data is likely reused
+       by subsequent requests (e.g. shared system-prompt chunks).
 
 Prefetch Concurrency
 ~~~~~~~~~~~~~~~~~~~~~

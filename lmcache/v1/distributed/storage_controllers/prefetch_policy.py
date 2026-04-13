@@ -50,6 +50,32 @@ class PrefetchPolicy(ABC):
             of the union of the input bitmaps.
         """
 
+    def select_l1_retentions(
+        self,
+        keys: list[ObjectKey],
+    ) -> list[bool]:
+        """Determine which keys to retain in L1 after prefetched
+        objects are consumed.
+
+        Called by PrefetchController just before
+        ``l1_mgr.reserve_write`` to build the ``is_temporary``
+        flags.  A ``True`` value means the key is retained
+        (permanent); ``False`` means it is temporary and will be
+        deleted after the reader finishes.
+
+        The default implementation marks all keys as temporary
+        (not retained).  Override in subclasses to implement
+        hot-cache or selective-retention strategies.
+
+        Args:
+            keys: Keys about to be written into L1.
+
+        Returns:
+            A list of bools with the same length as *keys*.
+            ``True`` = retain (permanent), ``False`` = temporary.
+        """
+        return [False] * len(keys)
+
 
 # -----------------------------------------------------------------------------
 # Registry: prefetch policy name -> policy class
@@ -144,4 +170,24 @@ class DefaultPrefetchPolicy(PrefetchPolicy):
         return plan
 
 
+class RetainPrefetchPolicy(DefaultPrefetchPolicy):
+    """Prefetch policy that retains all prefetched keys in L1.
+
+    Inherits ``select_load_plan`` from ``DefaultPrefetchPolicy``
+    (first-adapter-wins) and only overrides the L1 retention
+    decision: all prefetched keys become permanent.
+
+    Use this when prefetched data is likely to be reused by
+    subsequent requests (e.g. shared system-prompt chunks).
+    """
+
+    def select_l1_retentions(
+        self,
+        keys: list[ObjectKey],
+    ) -> list[bool]:
+        """Retain all prefetched keys permanently in L1."""
+        return [True] * len(keys)
+
+
 register_prefetch_policy("default", DefaultPrefetchPolicy)
+register_prefetch_policy("retain", RetainPrefetchPolicy)

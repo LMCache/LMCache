@@ -161,20 +161,23 @@ def test_server_lookup_hits_returns_none_when_in_progress():
     assert result is None
 
 
-def test_server_lookup_hits_returns_none_for_invalid_request():
-    """Returns None for a request_id that doesn't exist."""
+def test_server_lookup_hits_returns_zero_for_invalid_request():
+    """Returns 0 for a request_id that doesn't exist (prevents infinite spin)."""
     engine = MagicMock()
     engine._prefetch_job_lock = threading.Lock()
     engine._prefetch_jobs = {}
 
     result = MPCacheEngine.query_prefetch_lookup_hits(engine, "nonexistent-req")
 
-    assert result is None
+    assert result == 0
     engine.storage_manager.query_prefetch_lookup_hits.assert_not_called()
 
 
-def test_server_lookup_hits_returns_none_after_prefetch_consumed():
-    """Returns None after query_prefetch_status has consumed the job."""
+def test_server_lookup_hits_returns_zero_after_prefetch_consumed():
+    """Returns 0 after query_prefetch_status has consumed the job.
+
+    This prevents the caller from spinning forever on a completed request.
+    """
     engine, request_id = _make_engine_with_job(world_size=1, storage_return=5)
 
     # Simulate query_prefetch_status consuming the job
@@ -182,7 +185,7 @@ def test_server_lookup_hits_returns_none_after_prefetch_consumed():
 
     result = MPCacheEngine.query_prefetch_lookup_hits(engine, request_id)
 
-    assert result is None
+    assert result == 0
 
 
 def test_server_lookup_hits_zero_count():
