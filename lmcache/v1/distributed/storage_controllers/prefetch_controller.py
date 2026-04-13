@@ -565,9 +565,12 @@ class PrefetchController(StorageControllerInterface):
         keys_to_reserve = merged_bitmap.gather(request.keys)
         l1_mgr = self._l1_manager
 
+        retentions = self._policy.select_l1_retentions(
+            keys_to_reserve,
+        )
         write_results = l1_mgr.reserve_write(
             keys=keys_to_reserve,
-            is_temporary=[True] * len(keys_to_reserve),
+            is_temporary=[not r for r in retentions],
             layout_desc=request.layout_desc,
             mode="new",
         )

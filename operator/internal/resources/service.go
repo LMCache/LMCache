@@ -30,6 +30,7 @@ import (
 // routes traffic only to the LMCache pod on the same node.
 func BuildLookupService(engine *lmcachev1alpha1.LMCacheEngine) *corev1.Service {
 	serverPort := derefInt32(getServerPort(&engine.Spec), 5555)
+	httpPort := getHTTPPort(&engine.Spec)
 	localPolicy := corev1.ServiceInternalTrafficPolicyLocal
 
 	return &corev1.Service{
@@ -45,6 +46,11 @@ func BuildLookupService(engine *lmcachev1alpha1.LMCacheEngine) *corev1.Service {
 				{
 					Name:     "server",
 					Port:     serverPort,
+					Protocol: corev1.ProtocolTCP,
+				},
+				{
+					Name:     "http",
+					Port:     httpPort,
 					Protocol: corev1.ProtocolTCP,
 				},
 			},
