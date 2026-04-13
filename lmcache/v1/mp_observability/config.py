@@ -49,6 +49,10 @@ class ObservabilityConfig:
     """Port for the Prometheus /metrics endpoint.  Only used when
     ``otlp_endpoint`` is ``None`` (Prometheus pull fallback)."""
 
+    metrics_sample_rate: float = 0.01
+    """Fraction of chunks/blocks to track for lifecycle histograms (0, 1.0].
+    Counters always count all events regardless of this setting."""
+
 
 DEFAULT_OBSERVABILITY_CONFIG = ObservabilityConfig(enabled=False)
 
@@ -119,6 +123,15 @@ def add_observability_args(
             "Only used when --otlp-endpoint is not set. Default is 9090."
         ),
     )
+    group.add_argument(
+        "--metrics-sample-rate",
+        type=float,
+        default=0.01,
+        help=(
+            "Fraction of chunks/blocks to track for lifecycle histograms "
+            "(0, 1.0]. Counters always count all events. Default is 0.01 (1%%)."
+        ),
+    )
     return parser
 
 
@@ -141,6 +154,7 @@ def parse_args_to_observability_config(
         tracing_enabled=args.enable_tracing,
         otlp_endpoint=args.otlp_endpoint,
         prometheus_port=args.prometheus_port,
+        metrics_sample_rate=args.metrics_sample_rate,
     )
 
     if config.tracing_enabled and config.otlp_endpoint is None:
@@ -197,7 +211,8 @@ def init_observability(obs_config: ObservabilityConfig) -> EventBus:
             SMMetricsSubscriber,
         )
 
-        bus.register_subscriber(L0LifecycleSubscriber())
+        sample_rate = obs_config.metrics_sample_rate
+        bus.register_subscriber(L0LifecycleSubscriber(sample_rate=sample_rate))
         bus.register_subscriber(L1MetricsSubscriber())
         bus.register_subscriber(L2MetricsSubscriber())
         bus.register_subscriber(SMMetricsSubscriber())

@@ -1,11 +1,22 @@
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests for L1MetricsSubscriber."""
+"""Tests for L1MetricsSubscriber.
+
+Uses ``InMemoryMetricReader`` to read back actual OTel histogram values
+and verify lifecycle tracking with sampling.
+
+NOTE: OTel only allows one MeterProvider per process. If these tests run
+in the same process as test_l0.py, the provider is already set. We
+re-read from the same global reader.
+"""
 
 # Standard
 import time
 
 # Third Party
+from opentelemetry import metrics
+from opentelemetry.sdk.metrics import MeterProvider
+from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 import pytest
 
 # First Party
@@ -15,66 +26,363 @@ from lmcache.v1.mp_observability.subscribers.metrics.l1 import (
     L1MetricsSubscriber,
 )
 
+# Time for the drain thread to process queued events.
+_DRAIN_WAIT = 0.15
 
-def _make_keys(count: int) -> list:
-    """Create a list of placeholder key objects for testing."""
-    return [f"key-{i}" for i in range(count)]
+# ---------------------------------------------------------------------------
+# Module-scoped OTel provider
+# ---------------------------------------------------------------------------
+
+_reader = InMemoryMetricReader()
+_provider = MeterProvider(metric_readers=[_reader])
+metrics.set_meter_provider(_provider)
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _make_keys(prefix: str, count: int) -> list:
+    return [f"{prefix}-{i}" for i in range(count)]
 
 
 def _make_event(event_type: EventType, keys: list) -> Event:
     return Event(event_type=event_type, metadata={"keys": keys})
 
 
+def _get_histogram_count(name: str) -> int:
+    data = _reader.get_metrics_data()
+    result: dict[str, list] = {}
+    if data is None:
+        return 0
+    for resource_metrics in data.resource_metrics:
+        for scope_metrics in resource_metrics.scope_metrics:
+            for metric in scope_metrics.metrics:
+                result[metric.name] = list(metric.data.data_points)
+    dps = result.get(name, [])
+    return sum(dp.count for dp in dps)
+
+
+# ---------------------------------------------------------------------------
+# Fixtures
+# ---------------------------------------------------------------------------
+
+
 @pytest.fixture
 def bus():
-    b = EventBus(EventBusConfig(enabled=True, max_queue_size=100))
-    return b
+    return EventBus(EventBusConfig(enabled=True, max_queue_size=100))
 
 
 @pytest.fixture
 def subscriber(bus):
-    sub = L1MetricsSubscriber()
+    sub = L1MetricsSubscriber(sample_rate=1.0)
     bus.register_subscriber(sub)
     return sub
 
 
-class TestL1MetricsSubscriber:
-    def test_read_finished_increments_counter(self, bus, subscriber):
-        bus.start()
-        bus.publish(_make_event(EventType.L1_READ_FINISHED, _make_keys(5)))
-        time.sleep(0.15)
-        bus.stop()
-        # Verify the counter was called — OTel counters are real objects,
-        # we check via the internal measurement
-        # (in a real integration test we'd scrape /metrics)
+@pytest.fixture
+def sampled_subscriber(bus):
+    """Subscriber with 0% sample rate — nothing should be tracked."""
+    sub = L1MetricsSubscriber(sample_rate=1e-9)
+    bus.register_subscriber(sub)
+    return sub
 
-    def test_write_finished_increments_counter(self, bus, subscriber):
+
+# ---------------------------------------------------------------------------
+# Tests: Basic counters (always count, regardless of sampling)
+# ---------------------------------------------------------------------------
+
+
+class TestL1Counters:
+    def test_read_counter(self, bus, subscriber):
         bus.start()
-        bus.publish(_make_event(EventType.L1_WRITE_FINISHED, _make_keys(3)))
-        time.sleep(0.15)
+        bus.publish(_make_event(EventType.L1_READ_FINISHED, _make_keys("r", 5)))
+        time.sleep(_DRAIN_WAIT)
+        bus.stop()
+        # No crash — OTel counter incremented (verified via Prometheus in E2E)
+
+    def test_write_counter(self, bus, subscriber):
+        bus.start()
+        bus.publish(_make_event(EventType.L1_WRITE_FINISHED, _make_keys("w", 3)))
+        time.sleep(_DRAIN_WAIT)
         bus.stop()
 
-    def test_write_finished_and_read_reserved_increments_write_counter(
-        self, bus, subscriber
-    ):
+    def test_evict_counter(self, bus, subscriber):
+        bus.start()
+        bus.publish(_make_event(EventType.L1_KEYS_EVICTED, _make_keys("e", 4)))
+        time.sleep(_DRAIN_WAIT)
+        bus.stop()
+
+    def test_write_finished_and_read_reserved(self, bus, subscriber):
         bus.start()
         bus.publish(
-            _make_event(EventType.L1_WRITE_FINISHED_AND_READ_RESERVED, _make_keys(7))
+            _make_event(
+                EventType.L1_WRITE_FINISHED_AND_READ_RESERVED,
+                _make_keys("wr", 7),
+            )
         )
-        time.sleep(0.15)
+        time.sleep(_DRAIN_WAIT)
         bus.stop()
 
-    def test_evicted_increments_counter(self, bus, subscriber):
+
+# ---------------------------------------------------------------------------
+# Tests: Shadow map and lifecycle
+# ---------------------------------------------------------------------------
+
+
+class TestL1Lifecycle:
+    def test_write_populates_shadow(self, bus, subscriber):
+        keys = ["life-a", "life-b"]
         bus.start()
-        bus.publish(_make_event(EventType.L1_KEYS_EVICTED, _make_keys(4)))
-        time.sleep(0.15)
+        bus.publish(_make_event(EventType.L1_WRITE_FINISHED, keys))
+        time.sleep(_DRAIN_WAIT)
+        bus.stop()
+        assert "life-a" in subscriber._shadow
+        assert "life-b" in subscriber._shadow
+
+    def test_eviction_records_lifetime(self, bus, subscriber):
+        count_before = _get_histogram_count(
+            "lmcache_mp.l1_chunk_lifetime_seconds"
+        )
+        keys = ["lt-1"]
+        bus.start()
+        bus.publish(_make_event(EventType.L1_WRITE_FINISHED, keys))
+        time.sleep(_DRAIN_WAIT)
+        bus.publish(_make_event(EventType.L1_KEYS_EVICTED, keys))
+        time.sleep(_DRAIN_WAIT)
+        bus.stop()
+        count_after = _get_histogram_count(
+            "lmcache_mp.l1_chunk_lifetime_seconds"
+        )
+        assert count_after == count_before + 1
+
+    def test_eviction_records_idle(self, bus, subscriber):
+        count_before = _get_histogram_count(
+            "lmcache_mp.l1_chunk_idle_before_evict_seconds"
+        )
+        keys = ["idle-1"]
+        bus.start()
+        bus.publish(_make_event(EventType.L1_WRITE_FINISHED, keys))
+        time.sleep(_DRAIN_WAIT)
+        bus.publish(_make_event(EventType.L1_KEYS_EVICTED, keys))
+        time.sleep(_DRAIN_WAIT)
+        bus.stop()
+        count_after = _get_histogram_count(
+            "lmcache_mp.l1_chunk_idle_before_evict_seconds"
+        )
+        assert count_after == count_before + 1
+
+    def test_eviction_removes_from_shadow(self, bus, subscriber):
+        keys = ["rm-1"]
+        bus.start()
+        bus.publish(_make_event(EventType.L1_WRITE_FINISHED, keys))
+        time.sleep(_DRAIN_WAIT)
+        bus.publish(_make_event(EventType.L1_KEYS_EVICTED, keys))
+        time.sleep(_DRAIN_WAIT)
+        bus.stop()
+        assert "rm-1" not in subscriber._shadow
+
+    def test_eviction_without_write_no_crash(self, bus, subscriber):
+        """Evicting a key that was never written should not crash."""
+        bus.start()
+        bus.publish(_make_event(EventType.L1_KEYS_EVICTED, ["ghost-1"]))
+        time.sleep(_DRAIN_WAIT)
         bus.stop()
 
-    def test_no_subscription_for_reserved_events(self, subscriber):
-        subs = subscriber.get_subscriptions()
-        assert EventType.L1_READ_RESERVED not in subs
-        assert EventType.L1_WRITE_RESERVED not in subs
 
+# ---------------------------------------------------------------------------
+# Tests: Reuse gap
+# ---------------------------------------------------------------------------
+
+
+class TestL1ReuseGap:
+    def test_read_after_write_records_reuse_gap(self, bus, subscriber):
+        count_before = _get_histogram_count(
+            "lmcache_mp.l1_chunk_reuse_gap_seconds"
+        )
+        keys = ["rg-1"]
+        bus.start()
+        bus.publish(_make_event(EventType.L1_WRITE_FINISHED, keys))
+        time.sleep(_DRAIN_WAIT)
+        bus.publish(_make_event(EventType.L1_READ_FINISHED, keys))
+        time.sleep(_DRAIN_WAIT)
+        bus.stop()
+        count_after = _get_histogram_count(
+            "lmcache_mp.l1_chunk_reuse_gap_seconds"
+        )
+        assert count_after == count_before + 1
+
+    def test_rewrite_records_reuse_gap(self, bus, subscriber):
+        count_before = _get_histogram_count(
+            "lmcache_mp.l1_chunk_reuse_gap_seconds"
+        )
+        keys = ["rg-2"]
+        bus.start()
+        bus.publish(_make_event(EventType.L1_WRITE_FINISHED, keys))
+        time.sleep(_DRAIN_WAIT)
+        bus.publish(_make_event(EventType.L1_WRITE_FINISHED, keys))
+        time.sleep(_DRAIN_WAIT)
+        bus.stop()
+        count_after = _get_histogram_count(
+            "lmcache_mp.l1_chunk_reuse_gap_seconds"
+        )
+        assert count_after == count_before + 1
+
+    def test_read_untracked_key_no_gap(self, bus, subscriber):
+        """Reading a key never written should not record a gap."""
+        count_before = _get_histogram_count(
+            "lmcache_mp.l1_chunk_reuse_gap_seconds"
+        )
+        bus.start()
+        bus.publish(_make_event(EventType.L1_READ_FINISHED, ["nowrite-1"]))
+        time.sleep(_DRAIN_WAIT)
+        bus.stop()
+        count_after = _get_histogram_count(
+            "lmcache_mp.l1_chunk_reuse_gap_seconds"
+        )
+        assert count_after == count_before
+
+
+# ---------------------------------------------------------------------------
+# Tests: Evict-reuse gap
+# ---------------------------------------------------------------------------
+
+
+class TestL1EvictReuseGap:
+    def test_rewrite_after_eviction_records_gap(self, bus, subscriber):
+        count_before = _get_histogram_count(
+            "lmcache_mp.l1_chunk_evict_reuse_gap_seconds"
+        )
+        keys = ["erg-1"]
+        bus.start()
+        bus.publish(_make_event(EventType.L1_WRITE_FINISHED, keys))
+        time.sleep(_DRAIN_WAIT)
+        bus.publish(_make_event(EventType.L1_KEYS_EVICTED, keys))
+        time.sleep(_DRAIN_WAIT)
+        bus.publish(_make_event(EventType.L1_WRITE_FINISHED, keys))
+        time.sleep(_DRAIN_WAIT)
+        bus.stop()
+        count_after = _get_histogram_count(
+            "lmcache_mp.l1_chunk_evict_reuse_gap_seconds"
+        )
+        assert count_after == count_before + 1
+
+    def test_evicted_key_tracked_in_evicted_at(self, bus, subscriber):
+        keys = ["erg-2"]
+        bus.start()
+        bus.publish(_make_event(EventType.L1_WRITE_FINISHED, keys))
+        time.sleep(_DRAIN_WAIT)
+        bus.publish(_make_event(EventType.L1_KEYS_EVICTED, keys))
+        time.sleep(_DRAIN_WAIT)
+        bus.stop()
+        assert "erg-2" in subscriber._evicted_at
+
+    def test_rewrite_clears_evicted_at(self, bus, subscriber):
+        keys = ["erg-3"]
+        bus.start()
+        bus.publish(_make_event(EventType.L1_WRITE_FINISHED, keys))
+        time.sleep(_DRAIN_WAIT)
+        bus.publish(_make_event(EventType.L1_KEYS_EVICTED, keys))
+        time.sleep(_DRAIN_WAIT)
+        bus.publish(_make_event(EventType.L1_WRITE_FINISHED, keys))
+        time.sleep(_DRAIN_WAIT)
+        bus.stop()
+        assert "erg-3" not in subscriber._evicted_at
+
+
+# ---------------------------------------------------------------------------
+# Tests: Sampling
+# ---------------------------------------------------------------------------
+
+
+class TestL1Sampling:
+    def test_sample_rate_1_tracks_all(self, bus, subscriber):
+        """With sample_rate=1.0, all keys should be tracked."""
+        keys = _make_keys("samp", 10)
+        bus.start()
+        bus.publish(_make_event(EventType.L1_WRITE_FINISHED, keys))
+        time.sleep(_DRAIN_WAIT)
+        bus.stop()
+        assert len(subscriber._shadow) >= 10
+        assert len(subscriber._sampled) >= 10
+
+    def test_sample_rate_zero_tracks_none(self, bus, sampled_subscriber):
+        """With near-zero sample rate, keys should not be tracked."""
+        keys = _make_keys("nosamp", 100)
+        bus.start()
+        bus.publish(_make_event(EventType.L1_WRITE_FINISHED, keys))
+        time.sleep(_DRAIN_WAIT)
+        bus.stop()
+        assert len(sampled_subscriber._shadow) == 0
+        assert len(sampled_subscriber._sampled) == 0
+
+    def test_unsampled_key_ignored_on_eviction(self, bus, sampled_subscriber):
+        """Evicting an unsampled key should not record lifetime."""
+        count_before = _get_histogram_count(
+            "lmcache_mp.l1_chunk_lifetime_seconds"
+        )
+        keys = ["skip-ev-1"]
+        bus.start()
+        bus.publish(_make_event(EventType.L1_WRITE_FINISHED, keys))
+        time.sleep(_DRAIN_WAIT)
+        bus.publish(_make_event(EventType.L1_KEYS_EVICTED, keys))
+        time.sleep(_DRAIN_WAIT)
+        bus.stop()
+        count_after = _get_histogram_count(
+            "lmcache_mp.l1_chunk_lifetime_seconds"
+        )
+        assert count_after == count_before
+
+    def test_unsampled_key_stays_unsampled_on_rewrite(self, bus, sampled_subscriber):
+        """Re-writing an unsampled key should keep it unsampled."""
+        keys = ["skip-rw-1"]
+        bus.start()
+        bus.publish(_make_event(EventType.L1_WRITE_FINISHED, keys))
+        time.sleep(_DRAIN_WAIT)
+        bus.publish(_make_event(EventType.L1_WRITE_FINISHED, keys))
+        time.sleep(_DRAIN_WAIT)
+        bus.stop()
+        assert "skip-rw-1" not in sampled_subscriber._sampled
+        assert "skip-rw-1" not in sampled_subscriber._shadow
+
+
+# ---------------------------------------------------------------------------
+# Tests: Sweep stale evictions
+# ---------------------------------------------------------------------------
+
+
+class TestL1SweepStaleEvictions:
+    def test_sweep_removes_old_entries(self, bus):
+        sub = L1MetricsSubscriber(sample_rate=1.0, max_evict_reuse_wait=0.1)
+        bus.register_subscriber(sub)
+
+        keys = ["sweep-1"]
+        bus.start()
+        bus.publish(_make_event(EventType.L1_WRITE_FINISHED, keys))
+        time.sleep(_DRAIN_WAIT)
+        bus.publish(_make_event(EventType.L1_KEYS_EVICTED, keys))
+        time.sleep(_DRAIN_WAIT)
+
+        # Wait longer than max_evict_reuse_wait
+        time.sleep(0.2)
+
+        # Trigger sweep via another write
+        bus.publish(
+            _make_event(EventType.L1_WRITE_FINISHED, ["sweep-trigger"])
+        )
+        time.sleep(_DRAIN_WAIT)
+        bus.stop()
+
+        assert "sweep-1" not in sub._evicted_at
+
+
+# ---------------------------------------------------------------------------
+# Tests: Subscriptions
+# ---------------------------------------------------------------------------
+
+
+class TestL1Subscriptions:
     def test_subscriptions_cover_expected_events(self, subscriber):
         subs = subscriber.get_subscriptions()
         assert EventType.L1_READ_FINISHED in subs
@@ -82,17 +390,15 @@ class TestL1MetricsSubscriber:
         assert EventType.L1_WRITE_FINISHED_AND_READ_RESERVED in subs
         assert EventType.L1_KEYS_EVICTED in subs
 
-    def test_multiple_events_accumulate(self, bus, subscriber):
-        bus.start()
-        for _ in range(10):
-            bus.publish(_make_event(EventType.L1_READ_FINISHED, _make_keys(2)))
-        time.sleep(0.15)
-        bus.stop()
-        # 10 events of 2 keys each = 20 total keys counted
-        # No assertion on internal OTel state — this verifies no exceptions
+    def test_no_subscription_for_reserved_events(self, subscriber):
+        subs = subscriber.get_subscriptions()
+        assert EventType.L1_READ_RESERVED not in subs
+        assert EventType.L1_WRITE_RESERVED not in subs
 
     def test_does_not_crash_on_empty_keys(self, bus, subscriber):
         bus.start()
         bus.publish(_make_event(EventType.L1_READ_FINISHED, []))
-        time.sleep(0.15)
+        bus.publish(_make_event(EventType.L1_WRITE_FINISHED, []))
+        bus.publish(_make_event(EventType.L1_KEYS_EVICTED, []))
+        time.sleep(_DRAIN_WAIT)
         bus.stop()
