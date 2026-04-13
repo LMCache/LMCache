@@ -374,13 +374,16 @@ class TestLocalDiskBackend:
             backend.close()
             local_cpu_backend.memory_allocator.close()
 
-    def test_manifest_save_serializes_overlapping_writes(
+    def test_manifest_write_cleans_temp_file_when_close_fails(
         self, temp_disk_path, loop_in_thread, memory_allocator, monkeypatch
     ):
-        """Test blocked manifest writes keep later saves from overtaking them."""
+        """Test close() removes manifest temp files when persistence fails."""
         config = create_test_config(temp_disk_path)
+        metadata = create_test_metadata()
         local_cpu_backend = LocalCPUBackend(
             config=config,
+            metadata=metadata,
+            dst_device="cpu",
             memory_allocator=memory_allocator,
         )
         local_disk_backend = LocalDiskBackend(
@@ -388,97 +391,17 @@ class TestLocalDiskBackend:
             loop=loop_in_thread,
             local_cpu_backend=local_cpu_backend,
             dst_device="cpu",
+            metadata=metadata,
         )
-        key1 = create_test_key(21)
-        key2 = create_test_key(22)
-        shape = torch.Size([1])
-        dtype = torch.bfloat16
-        fmt = MemoryFormat.KV_2LTD
-
-        first_path = local_disk_backend._key_to_path(key1)
-        with open(first_path, "wb") as f:
-            f.write(b"1")
-        local_disk_backend.insert_key(key1, 1, shape, dtype, fmt)
-
-        first_write_started = threading.Event()
-        allow_first_write = threading.Event()
-        second_save_done = threading.Event()
-        thread_errors: list[Exception] = []
-
-        original_write = local_disk_backend_module._LocalDiskManifest.write
-
-        def delayed_write(
-            self: local_disk_backend_module._LocalDiskManifest,
-            manifest_path: str,
-        ) -> None:
-            if (
-                set(self.entries) == {key1.to_string()}
-                and not first_write_started.is_set()
-            ):
-                first_write_started.set()
-                assert allow_first_write.wait(timeout=5)
-            return original_write(self, manifest_path)
-
-        monkeypatch.setattr(
-            local_disk_backend_module._LocalDiskManifest,
-            "write",
-            delayed_write,
+        key = create_test_key(31)
+        memory_obj = create_memory_obj(
+            local_cpu_backend,
+            metadata.get_shapes()[0],
+            metadata.get_dtypes()[0],
+            fill_value=3,
+            fmt=MemoryFormat.KV_2LTD,
         )
-
-        def save_second_manifest() -> None:
-            try:
-                second_path = local_disk_backend._key_to_path(key2)
-                with open(second_path, "wb") as f:
-                    f.write(b"2")
-                local_disk_backend.insert_key(key2, 1, shape, dtype, fmt)
-                local_disk_backend._save_manifest()
-            except Exception as e:
-                thread_errors.append(e)
-            finally:
-                second_save_done.set()
-
-        first_thread = threading.Thread(target=local_disk_backend._save_manifest)
-        second_thread = threading.Thread(target=save_second_manifest)
-
-        try:
-            first_thread.start()
-            assert first_write_started.wait(timeout=5)
-
-            second_thread.start()
-            assert not second_save_done.wait(timeout=1)
-
-            allow_first_write.set()
-            first_thread.join(timeout=5)
-            second_thread.join(timeout=5)
-
-            assert not thread_errors
-            assert not first_thread.is_alive()
-            assert not second_thread.is_alive()
-
-            with open(local_disk_backend.manifest_path, encoding="utf-8") as f:
-                manifest_data = json.load(f)
-            assert set(manifest_data["entries"]) == {
-                key1.to_string(),
-                key2.to_string(),
-            }
-        finally:
-            allow_first_write.set()
-            local_disk_backend.close()
-            local_cpu_backend.memory_allocator.close()
-
-    def test_manifest_write_cleans_temp_file_when_dump_fails(
-        self, temp_disk_path, monkeypatch
-    ):
-        """Test manifest temp files are removed if JSON serialization fails."""
-        manifest = local_disk_backend_module._LocalDiskManifest(
-            cache_dir=temp_disk_path,
-            version=1,
-            entries={"key": {"path": "entry.pt", "size": 1}},
-        )
-        manifest_path = os.path.join(temp_disk_path, "manifest.json")
         created_tmp_paths: list[str] = []
-
-        original_dump = local_disk_backend_module.json.dump
 
         def failing_dump(obj, fp, *args, **kwargs):
             created_tmp_paths.append(fp.name)
@@ -488,84 +411,86 @@ class TestLocalDiskBackend:
 
         monkeypatch.setattr(local_disk_backend_module.json, "dump", failing_dump)
 
-        manifest.write(manifest_path)
+        try:
+            local_disk_backend.submit_put_task(key, memory_obj)
+            wait_for_disk_store(local_disk_backend, key)
+            memory_obj.ref_count_down()
+            local_disk_backend.close()
 
-        assert created_tmp_paths
-        assert not os.path.exists(created_tmp_paths[0])
-        assert not os.path.exists(manifest_path)
-        monkeypatch.setattr(local_disk_backend_module.json, "dump", original_dump)
+            assert created_tmp_paths
+            assert not os.path.exists(created_tmp_paths[0])
+            assert not os.path.exists(local_disk_backend.manifest_path)
+        finally:
+            local_disk_backend.close()
+            local_cpu_backend.memory_allocator.close()
 
-    def test_submit_put_task_saves_manifest_once_for_batched_eviction(
+    def test_manifest_restore_skips_usage_recompute_stat_race(
         self, temp_disk_path, loop_in_thread, memory_allocator, monkeypatch
     ):
-        """Test batched eviction persists the manifest once after the loop."""
+        """Test restart restore tolerates getsize racing with file removal."""
         config = create_test_config(temp_disk_path)
+        metadata = create_test_metadata()
         local_cpu_backend = LocalCPUBackend(
             config=config,
+            metadata=metadata,
+            dst_device="cpu",
             memory_allocator=memory_allocator,
         )
-        local_disk_backend = LocalDiskBackend(
+        backend1 = LocalDiskBackend(
             config=config,
             loop=loop_in_thread,
             local_cpu_backend=local_cpu_backend,
             dst_device="cpu",
+            metadata=metadata,
         )
-
-        existing_keys = [create_test_key(i) for i in range(31, 34)]
-        new_key = create_test_key(34)
-        shape = torch.Size([1])
-        dtype = torch.bfloat16
-        fmt = MemoryFormat.KV_2LTD
-
-        class FakeMemoryObj:
-            def __init__(self) -> None:
-                self.tensor = object()
-
-            def get_physical_size(self) -> int:
-                return 2
-
-            def ref_count_up(self) -> None:
-                return
-
-        save_calls = 0
-
-        original_save_manifest_locked = local_disk_backend._save_manifest_locked
-
-        def counted_save_manifest_locked() -> None:
-            nonlocal save_calls
-            save_calls += 1
-            original_save_manifest_locked()
-
-        def fake_run_coroutine_threadsafe(coro, loop):
-            coro.close()
-            return None
-
-        monkeypatch.setattr(
-            local_disk_backend,
-            "_save_manifest_locked",
-            counted_save_manifest_locked,
-        )
-        monkeypatch.setattr(
-            local_disk_backend_module.asyncio,
-            "run_coroutine_threadsafe",
-            fake_run_coroutine_threadsafe,
+        key = create_test_key(32)
+        memory_obj = create_memory_obj(
+            local_cpu_backend,
+            metadata.get_shapes()[0],
+            metadata.get_dtypes()[0],
+            fill_value=4,
+            fmt=MemoryFormat.KV_2LTD,
         )
 
         try:
-            for key in existing_keys:
-                with open(local_disk_backend._key_to_path(key), "wb") as f:
-                    f.write(b"x")
-                local_disk_backend.insert_key(key, 1, shape, dtype, fmt)
+            backend1.submit_put_task(key, memory_obj)
+            wait_for_disk_store(backend1, key)
+            memory_obj.ref_count_down()
+            backend1.close()
 
-            local_disk_backend.max_cache_size = 3
-            local_disk_backend.current_cache_size = 3
+            path = os.path.join(
+                temp_disk_path, key.to_string().replace("/", "-") + ".pt"
+            )
+            original_getsize = local_disk_backend_module.os.path.getsize
+            getsize_calls = 0
 
-            local_disk_backend.submit_put_task(new_key, FakeMemoryObj())
+            def flaky_getsize(target_path: str) -> int:
+                nonlocal getsize_calls
+                if target_path == path:
+                    getsize_calls += 1
+                    if getsize_calls >= 2:
+                        raise FileNotFoundError(target_path)
+                return original_getsize(target_path)
 
-            assert save_calls == 1
+            monkeypatch.setattr(
+                local_disk_backend_module.os.path,
+                "getsize",
+                flaky_getsize,
+            )
+
+            backend2 = LocalDiskBackend(
+                config=config,
+                loop=loop_in_thread,
+                local_cpu_backend=local_cpu_backend,
+                dst_device="cpu",
+                metadata=metadata,
+            )
+            try:
+                assert backend2.contains(key)
+                assert backend2.usage == 0
+            finally:
+                backend2.close()
         finally:
-            monkeypatch.undo()
-            local_disk_backend.close()
             local_cpu_backend.memory_allocator.close()
 
 

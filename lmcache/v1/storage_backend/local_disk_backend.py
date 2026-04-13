@@ -451,8 +451,10 @@ class LocalDiskBackend(StorageBackendInterface):
         self.current_cache_size = sum(meta.size for meta in self.dict.values())
         self.usage = 0
         for meta in self.dict.values():
-            if os.path.exists(meta.path):
+            try:
                 self.usage += os.path.getsize(meta.path)
+            except OSError:
+                continue
 
     def _load_manifest(self) -> bool:
         manifest = _LocalDiskManifest.load(
