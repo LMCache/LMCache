@@ -14,9 +14,6 @@ from dataclasses import dataclass
 import time
 
 # Third Party
-from opentelemetry import metrics
-from opentelemetry.sdk.metrics import MeterProvider
-from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 import pytest
 
 # First Party
@@ -26,19 +23,10 @@ from lmcache.v1.mp_observability.subscribers.metrics.l0_lifecycle import (
     L0LifecycleSubscriber,
     _BlockStatus,
 )
+from tests.v1.mp_observability.subscribers.metrics.otel_setup import reader as _reader
 
 # Time for the drain thread to process queued events.
 _DRAIN_WAIT = 0.15
-
-
-# ---------------------------------------------------------------------------
-# Module-scoped OTel provider (single provider for entire test file)
-# ---------------------------------------------------------------------------
-
-_reader = InMemoryMetricReader()
-_provider = MeterProvider(metric_readers=[_reader])
-metrics.set_meter_provider(_provider)
-
 
 # ---------------------------------------------------------------------------
 # Helpers
