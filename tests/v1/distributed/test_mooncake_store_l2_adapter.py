@@ -158,6 +158,29 @@ class TestMooncakeStoreL2AdapterConfig:
         assert "num_workers" not in config.setup_config
         assert config.setup_config["local_hostname"] == "10.0.0.1"
 
+    def test_from_dict_parses_preregister_flag(self):
+        """preregister_l1_memory should be parsed and excluded."""
+        config = MooncakeStoreL2AdapterConfig.from_dict(
+            {
+                "type": "mooncake_store",
+                "local_hostname": "127.0.0.1",
+                "preregister_l1_memory": True,
+            }
+        )
+
+        assert config.preregister_l1_memory is True
+        assert "preregister_l1_memory" not in config.setup_config
+
+    def test_from_dict_rejects_non_boolean_preregister_flag(self):
+        """Non-boolean preregister_l1_memory should raise ValueError."""
+        with pytest.raises(ValueError, match="preregister_l1_memory"):
+            MooncakeStoreL2AdapterConfig.from_dict(
+                {
+                    "type": "mooncake_store",
+                    "preregister_l1_memory": "true",
+                }
+            )
+
     def test_from_dict_strips_lmcache_only_keys(self):
         """LMCache-only keys (type, num_workers, eviction) should
         not appear in setup_config."""
@@ -267,27 +290,6 @@ class TestMooncakeStoreRegistration:
 @requires_mooncake
 class TestMooncakeStorePreregisterFactory:
     """Tests for preregister_l1_memory factory behavior."""
-
-    def test_from_dict_parses_preregister_flag(self):
-        config = MooncakeStoreL2AdapterConfig.from_dict(
-            {
-                "type": "mooncake_store",
-                "local_hostname": "127.0.0.1",
-                "preregister_l1_memory": True,
-            }
-        )
-
-        assert config.preregister_l1_memory is True
-        assert "preregister_l1_memory" not in config.setup_config
-
-    def test_from_dict_rejects_non_boolean_preregister_flag(self):
-        with pytest.raises(ValueError, match="preregister_l1_memory"):
-            MooncakeStoreL2AdapterConfig.from_dict(
-                {
-                    "type": "mooncake_store",
-                    "preregister_l1_memory": "true",
-                }
-            )
 
     def test_factory_passes_l1_memory_descriptor_to_native_client(
         self, monkeypatch: pytest.MonkeyPatch

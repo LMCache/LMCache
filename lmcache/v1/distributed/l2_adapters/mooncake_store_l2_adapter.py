@@ -48,7 +48,8 @@ class MooncakeStoreL2AdapterConfig(L2AdapterConfigBase):
     defaults for any mooncake keys — that is mooncake's
     responsibility.
 
-    ``num_workers`` is the only LMCache-specific knob.
+    ``num_workers`` and ``preregister_l1_memory`` are
+    LMCache-specific knobs.
     """
 
     def __init__(
