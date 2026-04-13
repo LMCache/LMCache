@@ -76,6 +76,8 @@ def memory_allocator() -> Iterator[Any]:
         yield _NoCloseWrapper(_real)
     finally:
         _real.close()
+
+
 def _run_batched_get_prefix_stop(
     memory_allocator,
     loop_in_thread,
