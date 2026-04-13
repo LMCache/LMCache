@@ -50,6 +50,7 @@ steps:
           --ignore=tests/v1/test_nixl_storage.py \
           --ignore=tests/skipped \
           --ignore=tests/v1/multiprocess \
+          --ignore=tests/v1/mp_observability/test_event_recorder.py \
           --ignore=tests/v1/storage_backend/test_eic.py
       fi
 

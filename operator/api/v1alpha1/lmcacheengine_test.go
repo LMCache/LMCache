@@ -224,3 +224,124 @@ func TestValidateSpec_MultipleErrors(t *testing.T) {
 		t.Fatalf("expected 5 errors, got %d: %v", len(errs), errs)
 	}
 }
+
+// --- L2 Backend validation tests ---
+
+func TestValidateSpec_L2RESPValid(t *testing.T) {
+	e := &LMCacheEngine{Spec: LMCacheEngineSpec{
+		L1: L1BackendSpec{SizeGB: 10},
+		L2Backend: &L2BackendSpec{
+			RESP: &RESPL2AdapterSpec{
+				Host: "redis.default.svc",
+				Port: 6379,
+			},
+		},
+	}}
+	errs := e.ValidateSpec()
+	if len(errs) != 0 {
+		t.Fatalf("expected no errors, got %v", errs)
+	}
+}
+
+func TestValidateSpec_L2RESPEmptyHost(t *testing.T) {
+	e := &LMCacheEngine{Spec: LMCacheEngineSpec{
+		L1: L1BackendSpec{SizeGB: 10},
+		L2Backend: &L2BackendSpec{
+			RESP: &RESPL2AdapterSpec{
+				Host: "",
+				Port: 6379,
+			},
+		},
+	}}
+	errs := e.ValidateSpec()
+	if len(errs) != 1 {
+		t.Fatalf("expected 1 error, got %d: %v", len(errs), errs)
+	}
+	if errs[0].Field != "spec.l2Backend.resp.host" {
+		t.Fatalf("expected field spec.l2Backend.resp.host, got %s", errs[0].Field)
+	}
+}
+
+func TestValidateSpec_L2RESPInvalidPort(t *testing.T) {
+	e := &LMCacheEngine{Spec: LMCacheEngineSpec{
+		L1: L1BackendSpec{SizeGB: 10},
+		L2Backend: &L2BackendSpec{
+			RESP: &RESPL2AdapterSpec{
+				Host: "redis",
+				Port: 0,
+			},
+		},
+	}}
+	errs := e.ValidateSpec()
+	if len(errs) != 1 {
+		t.Fatalf("expected 1 error, got %d: %v", len(errs), errs)
+	}
+}
+
+func TestValidateSpec_L2RESPAuthSecretEmpty(t *testing.T) {
+	e := &LMCacheEngine{Spec: LMCacheEngineSpec{
+		L1: L1BackendSpec{SizeGB: 10},
+		L2Backend: &L2BackendSpec{
+			RESP: &RESPL2AdapterSpec{
+				Host:          "redis",
+				Port:          6379,
+				AuthSecretRef: &SecretReference{Name: ""},
+			},
+		},
+	}}
+	errs := e.ValidateSpec()
+	if len(errs) != 1 {
+		t.Fatalf("expected 1 error, got %d: %v", len(errs), errs)
+	}
+}
+
+func TestValidateSpec_L2RawValid(t *testing.T) {
+	e := &LMCacheEngine{Spec: LMCacheEngineSpec{
+		L1: L1BackendSpec{SizeGB: 10},
+		L2Backend: &L2BackendSpec{
+			Raw: &RawL2AdapterSpec{Type: "mock"},
+		},
+	}}
+	errs := e.ValidateSpec()
+	if len(errs) != 0 {
+		t.Fatalf("expected no errors, got %v", errs)
+	}
+}
+
+func TestValidateSpec_L2RawEmptyType(t *testing.T) {
+	e := &LMCacheEngine{Spec: LMCacheEngineSpec{
+		L1: L1BackendSpec{SizeGB: 10},
+		L2Backend: &L2BackendSpec{
+			Raw: &RawL2AdapterSpec{Type: ""},
+		},
+	}}
+	errs := e.ValidateSpec()
+	if len(errs) != 1 {
+		t.Fatalf("expected 1 error, got %d: %v", len(errs), errs)
+	}
+}
+
+func TestValidateSpec_L2NoneSet(t *testing.T) {
+	e := &LMCacheEngine{Spec: LMCacheEngineSpec{
+		L1:        L1BackendSpec{SizeGB: 10},
+		L2Backend: &L2BackendSpec{},
+	}}
+	errs := e.ValidateSpec()
+	if len(errs) != 1 {
+		t.Fatalf("expected 1 error, got %d: %v", len(errs), errs)
+	}
+}
+
+func TestValidateSpec_L2BothSet(t *testing.T) {
+	e := &LMCacheEngine{Spec: LMCacheEngineSpec{
+		L1: L1BackendSpec{SizeGB: 10},
+		L2Backend: &L2BackendSpec{
+			RESP: &RESPL2AdapterSpec{Host: "redis", Port: 6379},
+			Raw:  &RawL2AdapterSpec{Type: "mock"},
+		},
+	}}
+	errs := e.ValidateSpec()
+	if len(errs) != 1 {
+		t.Fatalf("expected 1 error, got %d: %v", len(errs), errs)
+	}
+}
