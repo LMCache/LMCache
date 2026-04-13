@@ -15,8 +15,8 @@ import torch
 # First Party
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.memory_management import MemoryFormat
 from lmcache.v1.config_base import _parse_local_disk
+from lmcache.v1.memory_management import MemoryFormat
 from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 from lmcache.v1.storage_backend.local_disk_backend import LocalDiskBackend
@@ -567,6 +567,7 @@ class TestLocalDiskBackend:
             monkeypatch.undo()
             local_disk_backend.close()
             local_cpu_backend.memory_allocator.close()
+
 
 class TestMultiPathDiskBackend:
     """Test cases for multi-path (multi-device) LocalDiskBackend."""
