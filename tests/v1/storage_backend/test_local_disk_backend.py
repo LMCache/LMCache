@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
+from unittest.mock import MagicMock, patch
 import asyncio
 import os
 import shutil
@@ -10,7 +11,7 @@ import pytest
 import torch
 
 # First Party
-from lmcache.utils import CacheEngineKey
+from lmcache.utils import CacheEngineKey, DiskCacheMetadata
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.config_base import _parse_local_disk
 from lmcache.v1.metadata import LMCacheMetadata
@@ -379,3 +380,108 @@ class TestParseLocalDisk:
 
     def test_empty_string(self):
         assert _parse_local_disk("") is None
+
+
+class TestLocalDiskBackendClose:
+    """Test cases for LocalDiskBackend.close() file cleanup (issue #2840)."""
+
+    def _make_backend(self, temp_dir, async_loop, local_cpu_backend):
+        """Create a LocalDiskBackend with os.statvfs mocked for Windows."""
+        config = create_test_config(temp_dir)
+        fake_stat = MagicMock()
+        fake_stat.f_bsize = 4096
+        fake_stat.f_bavail = 1000000
+        with patch("os.statvfs", return_value=fake_stat):
+            backend = LocalDiskBackend(
+                config=config,
+                loop=async_loop,
+                local_cpu_backend=local_cpu_backend,
+                dst_device="cuda:0",
+            )
+        return backend
+
+    def test_close_deletes_tracked_files(
+        self, temp_disk_path, async_loop, local_cpu_backend
+    ):
+        """close() should delete every file tracked in backend.dict."""
+        backend = self._make_backend(temp_disk_path, async_loop, local_cpu_backend)
+
+        paths = []
+        for i in range(3):
+            fpath = os.path.join(temp_disk_path, f"cache_{i}.pt")
+            with open(fpath, "wb") as f:
+                f.write(b"\x00" * 1024)
+            paths.append(fpath)
+            key = create_test_key(100 + i)
+            backend.dict[key] = DiskCacheMetadata(path=fpath, size=1024)
+
+        backend.close()
+
+        for fpath in paths:
+            assert not os.path.exists(fpath), f"{fpath} should have been deleted"
+        assert len(backend.dict) == 0
+
+        local_cpu_backend.memory_allocator.close()
+
+    def test_close_preserves_untracked_files(
+        self, temp_disk_path, async_loop, local_cpu_backend
+    ):
+        """close() must not delete files that are not tracked in backend.dict."""
+        backend = self._make_backend(temp_disk_path, async_loop, local_cpu_backend)
+
+        untracked = os.path.join(temp_disk_path, "untracked.txt")
+        with open(untracked, "wb") as f:
+            f.write(b"keep me")
+
+        backend.close()
+
+        assert os.path.exists(untracked), "Untracked file should not be removed"
+        os.remove(untracked)
+
+        local_cpu_backend.memory_allocator.close()
+
+    def test_close_missing_file_no_raise(
+        self, temp_disk_path, async_loop, local_cpu_backend
+    ):
+        """close() should not raise when a tracked path no longer exists."""
+        backend = self._make_backend(temp_disk_path, async_loop, local_cpu_backend)
+
+        key = create_test_key(200)
+        backend.dict[key] = DiskCacheMetadata(
+            path=os.path.join(temp_disk_path, "nonexistent.pt"),
+            size=512,
+        )
+
+        # Must not raise
+        backend.close()
+
+        local_cpu_backend.memory_allocator.close()
+
+    def test_close_idempotent(self, temp_disk_path, async_loop, local_cpu_backend):
+        """Calling close() twice should not raise."""
+        backend = self._make_backend(temp_disk_path, async_loop, local_cpu_backend)
+
+        fpath = os.path.join(temp_disk_path, "idem.pt")
+        with open(fpath, "wb") as f:
+            f.write(b"\x00" * 256)
+        key = create_test_key(300)
+        backend.dict[key] = DiskCacheMetadata(path=fpath, size=256)
+
+        backend.close()
+        backend.close()  # second call must not raise
+
+        assert len(backend.dict) == 0
+
+        local_cpu_backend.memory_allocator.close()
+
+    def test_close_empty_backend(self, temp_disk_path, async_loop, local_cpu_backend):
+        """close() on a backend with no tracked files should not raise."""
+        backend = self._make_backend(temp_disk_path, async_loop, local_cpu_backend)
+
+        assert len(backend.dict) == 0
+
+        backend.close()  # must not raise
+
+        assert len(backend.dict) == 0
+
+        local_cpu_backend.memory_allocator.close()

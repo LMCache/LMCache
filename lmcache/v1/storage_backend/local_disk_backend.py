@@ -665,6 +665,36 @@ class LocalDiskBackend(StorageBackendInterface):
         return self.local_cpu_backend
 
     def close(self) -> None:
+        """Shut down the backend and delete all tracked on-disk cache files.
+
+        Ordering is important: ``disk_worker.close()`` must be called before
+        the file cleanup so that any in-flight async ``put`` tasks complete and
+        all entries are present in ``self.dict`` before we snapshot the keys.
+        """
         if self.batched_msg_sender is not None:
             self.batched_msg_sender.close()
+            self.batched_msg_sender = None
+
+        # Drain all queued async disk I/O before snapshotting keys.
         self.disk_worker.close()
+
+        deleted = 0
+        keys = list(self.dict.keys())
+        for key in keys:
+            meta = self.dict.pop(key, None)
+            if meta is None:
+                continue
+            try:
+                os.remove(meta.path)
+                deleted += 1
+            except OSError as e:
+                logger.warning(
+                    "LocalDiskBackend.close(): failed to remove %s: %s",
+                    meta.path,
+                    e,
+                )
+        logger.info(
+            "LocalDiskBackend.close(): deleted %d cached file(s) from %s",
+            deleted,
+            self.path,
+        )
