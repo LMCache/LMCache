@@ -6,12 +6,13 @@ in the multiprocess cache server.
 
 # Standard
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Optional
 import threading
 import time
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.multiprocess.custom_types import IPCCacheEngineKey
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
 
 logger = init_logger(__name__)
@@ -32,6 +33,7 @@ class Session:
     last_prefix_hash: Any = None
     num_chunks_processed: int = 0
     created_at: float = field(default_factory=time.time)
+    lookup_ipc_key: Optional[IPCCacheEngineKey] = None
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     def set_tokens(self, full_token_ids: list[int]) -> None:
@@ -42,6 +44,11 @@ class Session:
         """
         with self._lock:
             self.token_ids = full_token_ids
+
+    def get_all_hashes(self) -> list:
+        """Return all computed chunk hashes."""
+        with self._lock:
+            return self.chunk_hashes
 
     def get_hashes(self, start: int, end: int) -> list:
         """Compute and return chunk hashes for the [start, end) token range.
@@ -124,16 +131,22 @@ class SessionManager:
                 logger.debug("Created session for request_id=%s", request_id)
             return self._sessions[request_id]
 
-    def remove(self, request_id: str) -> None:
+    def remove(self, request_id: str) -> Optional[Session]:
         """Remove a session by request_id.
 
         Args:
             request_id: Unique request identifier.
+
+        Returns:
+            The removed session, or None if no session was found.
         """
         with self._lock:
             if request_id in self._sessions:
+                session = self._sessions[request_id]
                 del self._sessions[request_id]
                 logger.debug("Removed session for request_id=%s", request_id)
+                return session
+            return None
 
     def cleanup_expired(self) -> int:
         """Remove sessions that have exceeded their TTL.
