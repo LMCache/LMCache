@@ -89,4 +89,18 @@ For implementation guidance on adding new events and subscribers, see [README.md
 
 ---
 
+## MPCacheEngine Observable Gauges
+
+These metrics are registered directly via `register_gauge` (pull-based OTel
+observable gauges) rather than through the EventBus, because they represent
+point-in-time state snapshots that do not correspond to discrete events.
+
+| OTel metric name | Prometheus name | Type | Source | Calculation |
+|---|---|---|---|---|
+| `lmcache_mp.active_prefetch_jobs` | `lmcache_mp_active_prefetch_jobs` | ObservableGauge | `MPCacheEngine._prefetch_jobs` | `len(_prefetch_jobs)` at scrape time |
+
+**What it answers:** How many prefetch jobs are currently in-flight? A sustained high value may indicate slow L2 backends or client-side polling delays.
+
+---
+
 For event metadata contracts (what keys each `EventType` carries), see [EVENTS.md](EVENTS.md).
