@@ -45,3 +45,4 @@ to correlate START/END pairs.
 | `MP_RETRIEVE_END` | `device`, `retrieved_count` | `str`, `int` |
 | `MP_LOOKUP_PREFETCH_START` | *(none)* | — |
 | `MP_LOOKUP_PREFETCH_END` | `found_count` | `int` |
+| `MP_LOOKUP` | `request_id`, `chunk_hashes`, `model_name`, `chunk_size`, `seq_len`, `dtypes`, `shapes` | `str`, `list[str]`, `str`, `int`, `int`, `list[str]`, `list[list[int]]` |
