@@ -70,7 +70,7 @@ class _L0BlockState:
     )
 
 
-class L0MetricsSubscriber(EventSubscriber):
+class L0LifecycleSubscriber(EventSubscriber):
     """Tracks GPU (L0) KV cache block lifecycle via shadow monitoring.
 
     Metrics (all histograms, in seconds):

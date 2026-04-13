@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests for L0MetricsSubscriber.
+"""Tests for L0LifecycleSubscriber.
 
 Uses ``InMemoryMetricReader`` to read back actual OTel histogram values
 and verifies shadow-map eviction detection logic with END_SESSION tracking.
@@ -22,8 +22,8 @@ import pytest
 # First Party
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import EventBus, EventBusConfig
-from lmcache.v1.mp_observability.subscribers.metrics.l0 import (
-    L0MetricsSubscriber,
+from lmcache.v1.mp_observability.subscribers.metrics.l0_lifecycle import (
+    L0LifecycleSubscriber,
     _BlockStatus,
 )
 
@@ -101,7 +101,7 @@ def bus():
 
 @pytest.fixture
 def subscriber(bus):
-    sub = L0MetricsSubscriber(sample_rate=1.0)
+    sub = L0LifecycleSubscriber(sample_rate=1.0)
     bus.register_subscriber(sub)
     return sub
 
@@ -384,7 +384,7 @@ class TestL0ReuseGaps:
 
 class TestL0Sampling:
     def test_full_sample_rate_tracks_all(self, bus):
-        sub = L0MetricsSubscriber(sample_rate=1.0)
+        sub = L0LifecycleSubscriber(sample_rate=1.0)
         bus.register_subscriber(sub)
         bus.start()
 
