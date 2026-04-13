@@ -613,3 +613,65 @@ class TestLocalCPUBackendAllocatorAlignment:
             assert kwargs.get("align_bytes") == 4096
         finally:
             backend.memory_allocator.close()
+
+
+@pytest.mark.no_shared_allocator
+def test_allocate_no_deadlock_use_hot_false():
+    """Regression test for #2942: allocate(busy_loop=True) must not hang
+    when use_hot=False and the memory pool is exhausted.
+
+    Before the fix, the while-loop in allocate() would spin forever because
+    hot_cache was always empty (no eviction candidates) yet busy_loop was
+    True.  The fix forces busy_loop=False when use_hot=False so allocate()
+    returns None instead of deadlocking.
+    """
+    # Standard
+    from concurrent.futures import ThreadPoolExecutor, TimeoutError
+
+    # First Party
+    from lmcache.v1.memory_management import MixedMemoryAllocator
+
+    # --- setup -----------------------------------------------------------
+    # Small pool: 3 MB – easy to exhaust with a few allocations.
+    pool_bytes = 3 * 1024 * 1024
+    allocator = MixedMemoryAllocator(pool_bytes)
+
+    config = create_test_config(local_cpu=False)  # use_hot = False
+    PinMonitor.GetOrCreate(config)
+
+    backend = LocalCPUBackend(
+        config=config, memory_allocator=allocator, dst_device="cpu"
+    )
+    assert backend.use_hot is False
+
+    shape = torch.Size([2, 16, 8, 128])
+    dtype = torch.bfloat16
+    fmt = MemoryFormat.KV_T2D
+
+    # --- exhaust the pool ------------------------------------------------
+    held_objs = []
+    while True:
+        obj = allocator.allocate([shape], [dtype], fmt)
+        if obj is None:
+            break
+        held_objs.append(obj)
+    assert len(held_objs) > 0, "Pool should have held at least one object"
+
+    # --- the actual regression check -------------------------------------
+    # allocate() with busy_loop=True must return None (not hang).
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(backend.allocate, shape, dtype, fmt, True, True)
+        try:
+            result = future.result(timeout=5)
+        except TimeoutError:
+            pytest.fail(
+                "allocate(busy_loop=True) deadlocked with use_hot=False (issue #2942)"
+            )
+
+    assert result is None, "Expected None when pool is exhausted with use_hot=False"
+
+    # --- cleanup ---------------------------------------------------------
+    for obj in held_objs:
+        obj.ref_count_down()
+    allocator.close()
+    PinMonitor.DestroyInstance()

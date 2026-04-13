@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
+from unittest.mock import patch
 import asyncio
+import logging
 import os
 import shutil
 import tempfile
@@ -10,9 +12,10 @@ import pytest
 import torch
 
 # First Party
-from lmcache.utils import CacheEngineKey
+from lmcache.utils import CacheEngineKey, DiskCacheMetadata
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.config_base import _parse_local_disk
+from lmcache.v1.memory_management import MemoryFormat
 from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 from lmcache.v1.storage_backend.local_disk_backend import LocalDiskBackend
@@ -377,3 +380,109 @@ class TestParseLocalDisk:
 
     def test_empty_string(self):
         assert _parse_local_disk("") is None
+
+
+class TestPoolExhaustionHandling:
+    """Regression tests for issue #2942: graceful handling when CPU staging
+    pool is exhausted during disk I/O."""
+
+    def test_load_bytes_from_disk_returns_none_on_pool_exhaustion(
+        self, local_disk_backend, caplog
+    ):
+        """load_bytes_from_disk must return None (not crash) when allocate
+        returns None, and emit a warning log."""
+        key = create_test_key(100)
+        path = local_disk_backend._key_to_path(key)
+        dtype = torch.bfloat16
+        shape = torch.Size([2, 28, 256, 8, 128])
+        fmt = MemoryFormat.KV_2LTD
+
+        with patch.object(
+            local_disk_backend.local_cpu_backend, "allocate", return_value=None
+        ):
+            with caplog.at_level(logging.WARNING):
+                result = local_disk_backend.load_bytes_from_disk(
+                    key, path, dtype, shape, fmt
+                )
+
+        assert result is None, (
+            "Expected None when staging pool is exhausted, not an assertion error"
+        )
+        assert any(
+            "CPU staging pool exhausted" in record.message for record in caplog.records
+        ), "Expected a warning about CPU staging pool exhaustion"
+
+        local_disk_backend.local_cpu_backend.memory_allocator.close()
+
+    def test_batched_get_non_blocking_releases_lock_on_alloc_failure(
+        self, local_disk_backend, async_loop
+    ):
+        """batched_get_non_blocking must release disk_lock even when allocate
+        returns None (issue #2942 lock leak)."""
+        key = create_test_key(200)
+        path = local_disk_backend._key_to_path(key)
+
+        # Insert a fake entry so the key lookup succeeds inside the method.
+        local_disk_backend.dict[key] = DiskCacheMetadata(
+            path=path,
+            size=1024,
+            shape=torch.Size([2, 28, 256, 8, 128]),
+            dtype=torch.bfloat16,
+            fmt=MemoryFormat.KV_2LTD,
+        )
+
+        with patch.object(
+            local_disk_backend.local_cpu_backend, "allocate", return_value=None
+        ):
+            result = async_loop.run_until_complete(
+                local_disk_backend.batched_get_non_blocking(
+                    lookup_id="test", keys=[key]
+                )
+            )
+
+        # The method should return an empty list (partial results before the
+        # failing key) rather than raising.
+        assert result == []
+
+        # The critical check: disk_lock must be released after the early
+        # return, so acquiring it here must succeed immediately.
+        acquired = local_disk_backend.disk_lock.acquire(timeout=1)
+        assert acquired, "disk_lock was NOT released after alloc failure — lock leak!"
+        local_disk_backend.disk_lock.release()
+
+        # pin() should NOT have been called on the metadata — the early
+        # return happens before the pin() call.
+        assert local_disk_backend.dict[key].pin_count == 0, (
+            "pin_count should be 0 — alloc failed before pin()"
+        )
+
+        local_disk_backend.local_cpu_backend.memory_allocator.close()
+
+    def test_get_blocking_returns_none_on_pool_exhaustion(
+        self, local_disk_backend, caplog
+    ):
+        """get_blocking must return None when load_bytes_from_disk returns
+        None due to pool exhaustion (issue #2942 synchronous path)."""
+        key = create_test_key(300)
+        path = local_disk_backend._key_to_path(key)
+
+        # Insert a fake entry so the key lookup succeeds.
+        local_disk_backend.dict[key] = DiskCacheMetadata(
+            path=path,
+            size=1024,
+            shape=torch.Size([2, 28, 256, 8, 128]),
+            dtype=torch.bfloat16,
+            fmt=MemoryFormat.KV_2LTD,
+        )
+
+        with patch.object(
+            local_disk_backend.local_cpu_backend, "allocate", return_value=None
+        ):
+            with caplog.at_level(logging.WARNING):
+                result = local_disk_backend.get_blocking(key)
+
+        assert result is None, (
+            "get_blocking should return None when staging pool is exhausted"
+        )
+
+        local_disk_backend.local_cpu_backend.memory_allocator.close()

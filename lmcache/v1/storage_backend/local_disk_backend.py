@@ -589,7 +589,7 @@ class LocalDiskBackend(StorageBackendInterface):
         Load bytearray from disk.
         """
 
-        memory_obj = self.local_cpu_backend.allocate(shape, dtype, fmt, busy_loop=False)
+        memory_obj = self.local_cpu_backend.allocate(shape, dtype, fmt)
         if memory_obj is None:
             logger.warning(
                 "LocalDiskBackend: CPU staging pool exhausted while loading "
