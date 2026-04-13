@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from pathlib import Path
-import importlib.util
+import importlib
 import pkgutil
 
 # Third Party

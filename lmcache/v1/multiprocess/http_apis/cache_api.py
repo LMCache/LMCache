@@ -1,4 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
+# Standard
+from typing import Any
+
 # Third Party
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
@@ -12,7 +15,7 @@ router = APIRouter()
 
 
 @router.post("/api/clear-cache")
-async def clear_cache(request: Request):
+async def clear_cache(request: Request) -> Any:
     """
     Force-clear all KV cache data stored in L1 (CPU) memory.
 

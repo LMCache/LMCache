@@ -6,5 +6,10 @@ router = APIRouter()
 
 
 @router.get("/")
-async def root():
+async def root() -> dict[str, str]:
+    """
+    Basic liveness check endpoint.
+    Returns:
+        dict: A dictionary containing the status and service name.
+    """
     return {"status": "ok", "service": "LMCache HTTP API"}
