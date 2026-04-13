@@ -12,6 +12,7 @@ from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.distributed.l2_adapters.mock_l2_adapter import MockL2AdapterConfig
 from lmcache.v1.distributed.storage_controllers.prefetch_policy import (
     DefaultPrefetchPolicy,
+    RetainPrefetchPolicy,
 )
 from lmcache.v1.distributed.storage_controllers.store_policy import (
     AdapterDescriptor,
@@ -213,3 +214,95 @@ class TestDefaultPrefetchPolicy:
         assert plan_to_indices(result) == {0: [0, 1, 2]}
         assert 1 not in result
         assert 2 not in result
+
+
+# =============================================================================
+# DefaultPrefetchPolicy.select_l1_retentions Tests
+# =============================================================================
+
+
+class TestDefaultPrefetchPolicyRetentions:
+    """Test DefaultPrefetchPolicy.select_l1_retentions."""
+
+    def test_returns_all_false(self):
+        """Default policy marks all keys as temporary."""
+        policy = DefaultPrefetchPolicy()
+        keys = [make_object_key(i) for i in range(5)]
+        result = policy.select_l1_retentions(keys)
+        assert result == [False] * 5
+
+    def test_empty_keys(self):
+        """Empty keys list returns empty list."""
+        policy = DefaultPrefetchPolicy()
+        result = policy.select_l1_retentions([])
+        assert result == []
+
+    def test_single_key(self):
+        """Single key returns single False."""
+        policy = DefaultPrefetchPolicy()
+        keys = [make_object_key(0)]
+        result = policy.select_l1_retentions(keys)
+        assert result == [False]
+
+    def test_length_matches_input(self):
+        """Output length always matches input length."""
+        policy = DefaultPrefetchPolicy()
+        for n in [0, 1, 10, 100]:
+            keys = [make_object_key(i) for i in range(n)]
+            result = policy.select_l1_retentions(keys)
+            assert len(result) == n
+
+
+# =============================================================================
+# RetainPrefetchPolicy Tests
+# =============================================================================
+
+
+class TestRetainPrefetchPolicyRetentions:
+    """Test RetainPrefetchPolicy.select_l1_retentions."""
+
+    def test_returns_all_true(self):
+        """Retain policy marks all keys as permanent."""
+        policy = RetainPrefetchPolicy()
+        keys = [make_object_key(i) for i in range(5)]
+        result = policy.select_l1_retentions(keys)
+        assert result == [True] * 5
+
+    def test_empty_keys(self):
+        """Empty keys list returns empty list."""
+        policy = RetainPrefetchPolicy()
+        result = policy.select_l1_retentions([])
+        assert result == []
+
+    def test_single_key(self):
+        """Single key returns single True."""
+        policy = RetainPrefetchPolicy()
+        keys = [make_object_key(0)]
+        result = policy.select_l1_retentions(keys)
+        assert result == [True]
+
+    def test_length_matches_input(self):
+        """Output length always matches input length."""
+        policy = RetainPrefetchPolicy()
+        for n in [0, 1, 10, 100]:
+            keys = [make_object_key(i) for i in range(n)]
+            result = policy.select_l1_retentions(keys)
+            assert len(result) == n
+
+
+class TestRetainPrefetchPolicyLoadPlan:
+    """RetainPrefetchPolicy inherits load plan from Default."""
+
+    def test_inherits_load_plan(self):
+        """Load plan should behave identically to Default."""
+        policy = RetainPrefetchPolicy()
+        keys = [make_object_key(i) for i in range(3)]
+        adapters = [make_descriptor(0), make_descriptor(1)]
+        lookup_results = {
+            0: make_bitmap(3, [0, 1]),
+            1: make_bitmap(3, [1, 2]),
+        }
+
+        result = policy.select_load_plan(keys, lookup_results, adapters)
+
+        assert plan_to_indices(result) == {0: [0, 1], 1: [2]}

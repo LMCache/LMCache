@@ -3,22 +3,20 @@
 # Should be mirrored in requirements/build.txt (for builds external to setuptools)
 # The recommended installation from source will avoid the requirements here in order
 # to stay flexible for the torch version with `--no-build-isolation`. Thus, these packages
-# should be installed before `pip install -e . --no-build-isolation`. 
+# should be installed before `pip install -e . --no-build-isolation`.
 # However, build isolation is still used for the cibuildwheel releases
 # Thus, we will still lock a torch version here because we can choose to release wheels
 # in sync with vllm and update our torch version accordingly
 requires = [
-    "ninja",
     "packaging>=24.2",
-    "setuptools>=77.0.3,<81.0.0",
+    "setuptools>=68.0.0",
     "setuptools_scm>=8",
-    "torch==2.10.0",
     "wheel",
 ]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "lmcache"
+name = "lmcache-cli"
 authors = [{name = "LMCache Team", email = "lmcacheteam@gmail.com"}]
 license = "Apache-2.0"
 license-files = ["LICENSE"]
@@ -26,8 +24,7 @@ readme = "README.md"
 description = "A LLM serving engine extension to reduce TTFT and increase throughput, especially under long-context scenarios."
 classifiers = [
     "Development Status :: 3 - Alpha",
-    "Operating System :: POSIX :: Linux",
-    "Environment :: GPU",
+    "Operating System :: OS Independent",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
@@ -44,9 +41,6 @@ dynamic = ["dependencies", "version"]
 
 [project.scripts]
 lmcache="lmcache.cli.main:main"
-lmcache_v0_server="lmcache.server.__main__:main"
-lmcache_server="lmcache.v1.server.__main__:main"
-lmcache_controller="lmcache.v1.api_server.__main__:main"
 
 [project.urls]
 homepage = "https://docs.lmcache.ai"
@@ -59,7 +53,7 @@ version_file = "lmcache/_version.py"
 local_scheme = "no-local-version"
 
 [tool.setuptools.dynamic]
-dependencies = { file = ["requirements/common.txt"] }
+dependencies = { file = ["requirements/cli.txt"] }
 
 [tool.setuptools.packages.find]
 where = [""]
@@ -68,9 +62,6 @@ include = ["lmcache", "lmcache*"]
 [tool.ruff]
 # same as Black's default line length
 line-length = 88
-exclude = [
-    "lmcache/integration/vllm/lmcache_mp_connector_*.py",
-]
 
 [tool.ruff.lint]
 select = [
@@ -110,20 +101,11 @@ ignore = [
 [tool.ruff.lint.isort]
 # same as .isort.cfg
 from-first = true
-# not supported yet
-# import-heading-future=Future
-# import-heading-stdlib=Standard
-# import-heading-thirdparty=Third Party
-# import-heading-firstparty=First Party
-# import-heading-localfolder=Local
 
 [tool.mypy]
 
 platform = "linux"
 modules = ["lmcache", "tests", "benchmarks"]
-exclude = [
-    'lmcache/integration/vllm/lmcache_mp_connector_.*\.py',
-]
 
 disable_error_code = [
     #"annotation-unchecked",
@@ -153,36 +135,4 @@ follow_imports = "silent"
 
 [tool.codespell]
 ignore-words-list = "afterall,allready,notin"
-skip = "operator/config/crd/bases/*,lmcache/integration/vllm/lmcache_mp_connector_*.py"
-
-[tool.cibuildwheel]
-build = "cp3*-manylinux_x86_64"
-
-# see https://developer.nvidia.com/cuda-gpus for compute capabilities
-# "CUDA-Enabled Datacenter Products"
-# 7.0:  V100
-# 7.5:  T4
-# 8.0:  A100, A30
-# 8.6:  A40, A10, A16, A2
-# 8.9:  L4, L40, L40S
-# 9.0:  GH200, H200, H100
-# 10.0: GB200, B200
-environment = {TORCH_CUDA_ARCH_LIST = "7.0;7.5;8.0;8.6;8.9;9.0;10.0", ENABLE_CXX11_ABI = "1"}
-
-# Use the PyTorch manylinux image version '2_28' that contains CUDA 12.8
-# and torch 2.7 supports (https://pypi.org/project/torch/2.7.0/#files)
-manylinux-x86_64-image = "docker.io/pytorch/manylinux2_28-builder:cuda12.8"
-
-[tool.cibuildwheel.linux]
-repair-wheel-command = """
-auditwheel repair \
-  --plat manylinux_2_28_x86_64 \
-  --exclude libtorch.so \
-  --exclude libtorch_cuda.so \
-  --exclude libtorch_python.so \
-  --exclude libtorch_cpu.so \
-  --exclude libc10.so \
-  --exclude libc10_cuda.so \
-  --exclude libcudart.so.12 \
-  -w {dest_dir} {wheel}
-"""
+skip = "operator/config/crd/bases/*"
