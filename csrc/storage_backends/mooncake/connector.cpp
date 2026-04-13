@@ -67,8 +67,8 @@ WorkerMooncakeConn MooncakeConnector::create_connection() {
 }
 
 void MooncakeConnector::close() {
-  unregister_all_buffers();
   ConnectorBase<WorkerMooncakeConn>::close();
+  unregister_all_buffers();
 }
 
 void MooncakeConnector::do_single_get(WorkerMooncakeConn& conn,
@@ -109,31 +109,71 @@ void MooncakeConnector::ensure_registered(const void* buf, size_t len) {
         "Mooncake buffer registration failed: null buffer");
   }
 
-  std::lock_guard<std::mutex> guard(registered_buffers_mu_);
   if (is_within_registered_region(buf, len)) {
     return;
   }
 
-  auto it = registered_buffers_.find(buf);
-  if (it != registered_buffers_.end() && it->second >= len) {
-    return;
+  void* mutable_buf = const_cast<void*>(buf);
+  size_t existing_size = 0;
+  while (true) {
+    std::unique_lock<std::mutex> lock(registered_buffers_mu_);
+    auto it = registered_buffers_.find(buf);
+    while (it != registered_buffers_.end() && it->second.registering) {
+      registered_buffers_cv_.wait(lock);
+      it = registered_buffers_.find(buf);
+    }
+
+    if (it != registered_buffers_.end() && it->second.size >= len) {
+      return;
+    }
+
+    if (it == registered_buffers_.end()) {
+      RegisteredBufferState state;
+      state.registering = true;
+      registered_buffers_.emplace(buf, state);
+      break;
+    }
+
+    existing_size = it->second.size;
+    it->second.registering = true;
+    break;
   }
 
-  void* mutable_buf = const_cast<void*>(buf);
-  if (it != registered_buffers_.end()) {
+  if (existing_size > 0) {
     int unregister_rc = client_->unregister_buffer(mutable_buf);
     if (unregister_rc != 0) {
+      {
+        std::lock_guard<std::mutex> guard(registered_buffers_mu_);
+        auto it = registered_buffers_.find(buf);
+        if (it != registered_buffers_.end()) {
+          it->second.size = existing_size;
+          it->second.registering = false;
+        }
+      }
+      registered_buffers_cv_.notify_all();
       throw std::runtime_error(
           "Mooncake unregister_buffer failed while resizing registration");
     }
-    registered_buffers_.erase(it);
   }
 
   int register_rc = client_->register_buffer(mutable_buf, len);
+  {
+    std::lock_guard<std::mutex> guard(registered_buffers_mu_);
+    auto it = registered_buffers_.find(buf);
+    if (register_rc != 0) {
+      if (it != registered_buffers_.end()) {
+        registered_buffers_.erase(it);
+      }
+    } else if (it != registered_buffers_.end()) {
+      it->second.size = len;
+      it->second.registering = false;
+    }
+  }
+  registered_buffers_cv_.notify_all();
+
   if (register_rc != 0) {
     throw std::runtime_error("Mooncake register_buffer failed");
   }
-  registered_buffers_[buf] = len;
 }
 
 void MooncakeConnector::preregister_l1_memory(std::uintptr_t base,
@@ -167,7 +207,6 @@ void MooncakeConnector::preregister_l1_memory(std::uintptr_t base,
     remaining -= segment_size;
   }
 
-  std::lock_guard<std::mutex> guard(registered_buffers_mu_);
   preregistered_regions_.insert(preregistered_regions_.end(),
                                 newly_registered_regions.begin(),
                                 newly_registered_regions.end());
@@ -184,7 +223,7 @@ bool MooncakeConnector::is_within_registered_region(const void* buf,
 }
 
 void MooncakeConnector::unregister_all_buffers() noexcept {
-  std::unordered_map<const void*, size_t> buffers_to_unregister;
+  std::unordered_map<const void*, RegisteredBufferState> buffers_to_unregister;
   std::vector<RegisteredMemoryRegion> regions_to_unregister;
   {
     std::lock_guard<std::mutex> guard(registered_buffers_mu_);
@@ -195,8 +234,10 @@ void MooncakeConnector::unregister_all_buffers() noexcept {
     regions_to_unregister.swap(preregistered_regions_);
   }
 
-  for (const auto& [buf, registered_size] : buffers_to_unregister) {
-    (void)registered_size;
+  for (const auto& [buf, state] : buffers_to_unregister) {
+    if (state.registering || state.size == 0) {
+      continue;
+    }
     if (client_ == nullptr) {
       break;
     }

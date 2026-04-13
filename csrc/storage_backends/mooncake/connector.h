@@ -2,6 +2,7 @@
 #pragma once
 
 // Standard
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -33,6 +34,11 @@ struct WorkerMooncakeConn {
 struct RegisteredMemoryRegion {
   const void* base{nullptr};
   size_t size{0};
+};
+
+struct RegisteredBufferState {
+  size_t size{0};
+  bool registering{false};
 };
 
 class MooncakeConnector : public ConnectorBase<WorkerMooncakeConn> {
@@ -72,7 +78,8 @@ class MooncakeConnector : public ConnectorBase<WorkerMooncakeConn> {
   ConfigDict config_;
 
   std::mutex registered_buffers_mu_;
-  std::unordered_map<const void*, size_t> registered_buffers_;
+  std::condition_variable registered_buffers_cv_;
+  std::unordered_map<const void*, RegisteredBufferState> registered_buffers_;
   std::vector<RegisteredMemoryRegion> preregistered_regions_;
 };
 
