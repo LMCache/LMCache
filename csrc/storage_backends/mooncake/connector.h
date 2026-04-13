@@ -36,10 +36,6 @@ class MooncakeConnector : public ConnectorBase<WorkerMooncakeConn> {
   MooncakeConnector(ConfigDict config, int num_workers,
                     std::uintptr_t preregister_l1_base = 0,
                     size_t preregister_l1_size = 0);
-  MooncakeConnector(std::shared_ptr<mooncake::PyClient> client,
-                    int num_workers,
-                    std::uintptr_t preregister_l1_base = 0,
-                    size_t preregister_l1_size = 0);
   ~MooncakeConnector() override;
 
   void close() override;
@@ -66,8 +62,7 @@ class MooncakeConnector : public ConnectorBase<WorkerMooncakeConn> {
   void copy_to_registered_staging_and_put() = delete;
 
   // Shared Mooncake RealClient instance.
-  std::shared_ptr<mooncake::PyClient> client_;
-  std::shared_ptr<mooncake::RealClient> owned_real_client_;
+  std::shared_ptr<mooncake::RealClient> client_;
 
   // The original config dict (kept for diagnostics).
   ConfigDict config_;

@@ -32,15 +32,14 @@ MooncakeConnector::MooncakeConnector(ConfigDict config, int num_workers,
                                      size_t preregister_l1_size)
     : ConnectorBase(num_workers), config_(std::move(config)) {
   // Create a RealClient via the static factory.
-  owned_real_client_ = mooncake::RealClient::create();
-  if (!owned_real_client_) {
+  client_ = mooncake::RealClient::create();
+  if (!client_) {
     throw std::runtime_error("Failed to create mooncake RealClient");
   }
-  client_ = owned_real_client_;
 
   // Forward the config dict to setup_internal().
   mooncake::ConfigDict mc_config(config_.begin(), config_.end());
-  auto result = owned_real_client_->setup_internal(mc_config);
+  auto result = client_->setup_internal(mc_config);
   if (!result.has_value()) {
     throw std::runtime_error("Mooncake setup_internal failed");
   }
@@ -52,11 +51,10 @@ MooncakeConnector::MooncakeConnector(ConfigDict config, int num_workers,
 
 MooncakeConnector::~MooncakeConnector() {
   close();
-  if (owned_real_client_) {
-    owned_real_client_->tearDownAll();
-    owned_real_client_.reset();
+  if (client_) {
+    client_->tearDownAll();
+    client_.reset();
   }
-  client_.reset();
 }
 
 WorkerMooncakeConn MooncakeConnector::create_connection() {
@@ -104,7 +102,8 @@ bool MooncakeConnector::do_single_exists(WorkerMooncakeConn& conn,
 
 void MooncakeConnector::ensure_registered(const void* buf, size_t len) {
   if (buf == nullptr) {
-    throw std::runtime_error("Mooncake buffer registration failed: null buffer");
+    throw std::runtime_error(
+        "Mooncake buffer registration failed: null buffer");
   }
 
   std::lock_guard<std::mutex> guard(registered_buffers_mu_);
@@ -134,7 +133,8 @@ void MooncakeConnector::ensure_registered(const void* buf, size_t len) {
   registered_buffers_[buf] = len;
 }
 
-void MooncakeConnector::preregister_l1_memory(std::uintptr_t base, size_t size) {
+void MooncakeConnector::preregister_l1_memory(std::uintptr_t base,
+                                              size_t size) {
   if (base == 0 || size == 0) {
     return;
   }
