@@ -125,10 +125,12 @@ per-operation instead of pre-allocating them at init. This enables:
 
 **Optional fields (for persist/recover):**
 
-- ``persist_path``: Path to write metadata JSON at shutdown. If not set,
-  all data files are deleted on shutdown.
-- ``recover_path``: Path to read metadata JSON at startup. If not set,
-  the adapter starts with an empty cache.
+- ``persist_enabled`` (bool, default ``false``): If ``true``, data files
+  are kept on disk at shutdown. If ``false``, all data files are deleted
+  on shutdown.
+- ``recover_enabled`` (bool, default ``false``): If ``true``, lookup
+  also checks secondary storage (disk) on miss and lazily populates
+  the in-memory index when a file is found.
 
 **Configuration examples:**
 
@@ -138,21 +140,20 @@ per-operation instead of pre-allocating them at init. This enables:
     --l2-adapter '{"type": "nixl_store_dynamic", "backend": "POSIX", "backend_params": {"file_path": "/data/lmcache/l2", "use_direct_io": "false", "max_capacity_gb": "10"}}'
 
     # With persist/recover
-    --l2-adapter '{"type": "nixl_store_dynamic", "backend": "POSIX", "backend_params": {"file_path": "/data/lmcache/l2", "use_direct_io": "false", "max_capacity_gb": "10"}, "persist_path": "/data/lmcache/metadata.json", "recover_path": "/data/lmcache/metadata.json"}'
+    --l2-adapter '{"type": "nixl_store_dynamic", "backend": "POSIX", "backend_params": {"file_path": "/data/lmcache/l2", "use_direct_io": "false", "max_capacity_gb": "10"}, "persist_enabled": true, "recover_enabled": true}'
 
     # With eviction
-    --l2-adapter '{"type": "nixl_store_dynamic", "backend": "GDS", "backend_params": {"file_path": "/data/nvme/l2", "use_direct_io": "true", "max_capacity_gb": "50"}, "persist_path": "/data/nvme/metadata.json", "recover_path": "/data/nvme/metadata.json", "eviction": {"eviction_policy": "LRU", "trigger_watermark": 0.9, "eviction_ratio": 0.1}}'
+    --l2-adapter '{"type": "nixl_store_dynamic", "backend": "GDS", "backend_params": {"file_path": "/data/nvme/l2", "use_direct_io": "true", "max_capacity_gb": "50"}, "persist_enabled": true, "recover_enabled": true, "eviction": {"eviction_policy": "LRU", "trigger_watermark": 0.9, "eviction_ratio": 0.1}}'
 
 **Persist/recover behaviour:**
 
-- On **shutdown**, if ``persist_path`` is set the adapter writes a JSON
-  file containing the ``ObjectKey`` → metadata mapping. The actual KV
-  data files remain on disk. If ``persist_path`` is *not* set, all data
-  files are deleted.
-- On **startup**, if ``recover_path`` is set the adapter reads the JSON
-  file and rebuilds its in-memory index. Keys whose data files are
-  missing on disk are skipped. Lookups return hits immediately after
-  recovery.
+- On **shutdown**, if ``persist_enabled`` is ``true`` the adapter keeps
+  data files on disk (no separate metadata file is written). If
+  ``false``, all data files are deleted to avoid orphaned storage.
+- On **startup**, the in-memory index is empty. When ``recover_enabled``
+  is ``true``, every lookup miss falls through to a secondary lookup on
+  disk: if the deterministic file exists, it is treated as a hit and
+  the in-memory index is populated lazily from the file size.
 
 ``fs`` -- File-system backed storage
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

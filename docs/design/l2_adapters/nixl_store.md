@@ -170,11 +170,15 @@ Same `L2AdapterInterface` contract as the static adapter. Differences:
   stops the batch if capacity is exceeded.
 - **Delete:** Removes the file from disk via `dynamic_delete_file` in
   addition to removing the key from `_memory_objects`.
-- **Capacity:** Tracks `_total_bytes` (incremented on store/recover,
-  decremented on delete). `get_usage()` returns
+- **Capacity:** Tracks `_total_bytes` (incremented on store and on
+  secondary lookup, decremented on delete). `get_usage()` returns
   `_total_bytes / _max_capacity_bytes` for the eviction controller.
-- **Close:** Stops the event loop first (waits for in-flight tasks), then
-  either persists metadata or deletes all data files.
+- **Close:** Stops the event loop first (waits for in-flight tasks);
+  when `persist_enabled`, data files are kept on disk, otherwise all
+  data files are deleted.
+- **Lookup:** When `recover_enabled`, a lookup miss falls through to a
+  synchronous secondary lookup on disk; see the Persist / Recover
+  section below.
 
 ### Operation Flow
 
@@ -207,73 +211,53 @@ lookup + pin count management).
 
 ## Persist / Recover
 
-### Interface
+### Config
 
-Defined in `L2AdapterInterface` (`l2_adapters/base.py`):
-
-```python
-def persist(self, config: PersistConfig) -> bool
-def recover(self, config: PersistConfig) -> bool
-```
-
-`PersistConfig` (`l2_adapters/config.py`) has two independent fields:
+`PersistConfig` (`l2_adapters/config.py`) has two independent boolean
+flags:
 
 | Field | Purpose |
 |---|---|
-| `persist_path` | Where to write metadata at shutdown. `None` = disabled. |
-| `recover_path` | Where to read metadata at startup. `None` = disabled. |
+| `persist_enabled` | If True, data files are kept on disk at shutdown. |
+| `recover_enabled` | If True, lookup also checks secondary storage (disk) on miss. |
 
-These are parsed from the adapter JSON config keys `"persist_path"` and
-`"recover_path"` by `L2AdapterConfigBase._parse_persist_config()`.
+These are parsed from the adapter JSON config keys `"persist_enabled"`
+and `"recover_enabled"` by `L2AdapterConfigBase._parse_persist_config()`.
 
-### Default Behavior
+Only the dynamic adapter (`nixl_store_dynamic`) uses these flags; the
+static adapter ignores them.
 
-The base class logs a warning and returns `False`. The static
-`NixlStoreL2Adapter` overrides with a specific warning pointing users
-to the dynamic adapter.
+### How it works
 
-### Dynamic Adapter Implementation
+There is no dedicated `persist()` or `recover()` method on the
+`L2AdapterInterface`. Persist and recover are implemented implicitly
+through two existing hooks:
 
-#### `persist(config)`
+#### Persist (file retention at shutdown)
 
-Called during `close()`, after the event loop has stopped (all in-flight
-tasks are complete).
+In `close()`, after the event loop has stopped:
 
-1. Iterate `_memory_objects` under lock.
-2. Serialize each entry to a JSON array:
-   ```json
-   [
-     {
-       "chunk_hash": "<hex>",
-       "model_name": "...",
-       "kv_rank": 123,
-       "size": 4096,
-       "layout": {"shapes": [[1024]], "dtypes": ["torch.float32"]}
-     }
-   ]
-   ```
-3. Write to `config.persist_path`.
+- If `persist_enabled`, data files are left on disk untouched.
+- Otherwise, every file in `_memory_objects` is `os.unlink`'d to avoid
+  orphaned storage.
 
-The actual data files are already on disk (one file per ObjectKey with a
-deterministic name). Only the metadata index needs to be persisted.
+No metadata JSON is written — the deterministic `ObjectKey → filename`
+mapping is sufficient to rediscover each file on restart.
 
-#### `recover(config)`
+#### Recover (lazy disk lookup)
 
-Called during `__init__`, after the Nixl agent is initialized.
+When `recover_enabled`, `_execute_lookup_in_the_loop` extends the
+in-memory index lookup with a secondary lookup on miss:
 
-1. Read and deserialize JSON from `config.recover_path`.
-2. For each entry, verify the data file still exists on disk (via the
-   deterministic `ObjectKey → filename` mapping).
-3. Rebuild `_memory_objects` and `_total_bytes` for entries with valid files.
-4. Skip entries with missing files (log warning).
+1. Compute deterministic file path from the ObjectKey.
+2. `os.stat(file_path)` — if the file exists, treat as a hit.
+3. Populate `_memory_objects[key]` lazily with `size` from the stat
+   result and `layout=None`.
+4. Update `_total_bytes`; enforce capacity (skip if it would exceed).
 
-After recovery, lookups immediately return hits. Nixl file registration
-happens on-demand when `submit_load_task` is called.
-
-#### Shutdown Without Persist
-
-If no `persist_path` is configured, `close()` deletes all data files from
-disk to avoid orphaned storage.
+The `NixlStoreObj.layout` field is left as `None` on recover. Layout
+information is only needed at load time, where the caller supplies it
+via the provided `MemoryObj`'s shape/dtype/phy_size.
 
 ---
 
@@ -304,8 +288,8 @@ disk to avoid orphaned storage.
     "use_direct_io": "false",
     "max_capacity_gb": "10"
   },
-  "persist_path": "/path/to/metadata.json",
-  "recover_path": "/path/to/metadata.json"
+  "persist_enabled": true,
+  "recover_enabled": true
 }
 ```
 

@@ -3,11 +3,13 @@
 Dynamic-file-mode Nixl L2 adapter.
 
 Unlike the static ``NixlStoreL2Adapter`` which pre-allocates all storage
-files at init time, this adapter opens/registers files per operation and
-supports persist/recover of cached KV metadata across restarts.
+files at init time, this adapter opens/registers files per operation.
 
-Another alternative is that we can still pre-allocates and register
-all files at start time.
+Persist / recover (both opt-in via ``persist_enabled`` / ``recover_enabled``):
+- Persist simply keeps data files on disk at shutdown (no metadata dump).
+- Recover lazily checks secondary storage (disk) during lookup and
+  populates the in-memory index on the fly when a file is found. File
+  names are derived deterministically from ObjectKey.
 """
 
 # Future
@@ -16,7 +18,6 @@ from __future__ import annotations
 # Standard
 from typing import Optional
 import asyncio
-import json
 import os
 import threading
 import uuid
@@ -27,7 +28,6 @@ from nixl._api import nixl_agent_config as NixlAgentConfig
 from nixl._api import (
     nixlBind,
 )
-import torch
 
 # First Party
 from lmcache.logging import init_logger
@@ -37,7 +37,6 @@ from lmcache.v1.distributed.internal_api import L1MemoryDesc
 from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface, L2TaskId
 from lmcache.v1.distributed.l2_adapters.config import (
     L2AdapterConfigBase,
-    PersistConfig,
     register_l2_adapter_type,
 )
 from lmcache.v1.distributed.l2_adapters.factory import (
@@ -279,7 +278,11 @@ class DynamicNixlStoreL2Adapter(L2AdapterInterface):
     """Nixl L2 adapter using dynamic per-operation file registration.
 
     Each store creates a new file on disk; each load re-opens the file.
-    Supports persist/recover to preserve cached KV metadata across restarts.
+
+    When ``persist_enabled`` is True, data files are kept on disk at
+    shutdown. When ``recover_enabled`` is True, lookup also checks
+    secondary storage (disk) for keys not in the in-memory index and
+    populates the index lazily.
     """
 
     def __init__(
@@ -322,9 +325,14 @@ class DynamicNixlStoreL2Adapter(L2AdapterInterface):
             l1_memory_desc=l1_memory_desc,
         )
 
-        # Recover if configured
-        if config.persist_config and config.persist_config.recover_path:
-            self.recover(config.persist_config)
+        # If recover is enabled, lookup will also check secondary storage
+        # (disk) on miss and populate _memory_objects lazily.
+        self._recover_enabled = bool(
+            config.persist_config and config.persist_config.recover_enabled
+        )
+        self._persist_enabled = bool(
+            config.persist_config and config.persist_config.persist_enabled
+        )
 
     # --------------------
     # Event Fd Interface
@@ -440,103 +448,6 @@ class DynamicNixlStoreL2Adapter(L2AdapterInterface):
         return (usage, usage)
 
     #####################
-    # Persist/Recover Interface
-    #####################
-
-    def persist(self, config: PersistConfig) -> bool:
-        """Persist the ObjectKey -> metadata mapping to disk as JSON."""
-        if config.persist_path is None:
-            logger.info("persist_path is None, skipping persist")
-            return False
-
-        entries = []
-        with self._lock:
-            for key, obj in self._memory_objects.items():
-                entry = {
-                    "chunk_hash": key.chunk_hash.hex(),
-                    "model_name": key.model_name,
-                    "kv_rank": key.kv_rank,
-                    "size": obj.size,
-                }
-                if obj.layout is not None:
-                    entry["layout"] = {
-                        "shapes": [list(s) for s in obj.layout.shapes],
-                        "dtypes": [str(d) for d in obj.layout.dtypes],
-                    }
-                entries.append(entry)
-
-        persist_dir = os.path.dirname(config.persist_path)
-        if persist_dir:
-            os.makedirs(persist_dir, exist_ok=True)
-        with open(config.persist_path, "w") as f:
-            json.dump(entries, f)
-
-        logger.info(
-            "Persisted %d object metadata entries to %s",
-            len(entries),
-            config.persist_path,
-        )
-        return True
-
-    def recover(self, config: PersistConfig) -> bool:
-        """Recover the ObjectKey -> metadata mapping from a persisted JSON file."""
-        if config.recover_path is None:
-            logger.warning("recover_path is None, skipping recover")
-            return False
-
-        if not os.path.exists(config.recover_path):
-            logger.warning(
-                "Recover path %s does not exist, skipping recover",
-                config.recover_path,
-            )
-            return False
-
-        with open(config.recover_path, "r") as f:
-            entries = json.load(f)
-
-        recovered = 0
-        skipped = 0
-        for entry in entries:
-            key = ObjectKey(
-                chunk_hash=bytes.fromhex(entry["chunk_hash"]),
-                model_name=entry["model_name"],
-                kv_rank=entry["kv_rank"],
-            )
-            # Verify the data file still exists on disk
-            file_path = self.nixl_agent.get_file_path_for_key(key)
-            if not os.path.exists(file_path):
-                logger.warning(
-                    "Data file missing for key %s: %s, skipping", key, file_path
-                )
-                skipped += 1
-                continue
-
-            layout = None
-            if "layout" in entry:
-                shapes = [torch.Size(s) for s in entry["layout"]["shapes"]]
-                dtypes_str = entry["layout"]["dtypes"]
-                dtypes = [getattr(torch, d.replace("torch.", "")) for d in dtypes_str]
-                layout = MemoryLayoutDesc(shapes, dtypes)
-
-            obj_size = entry["size"]
-            with self._lock:
-                self._memory_objects[key] = NixlStoreObj(
-                    page_indices=[],  # not used in dynamic mode
-                    size=obj_size,
-                    layout=layout,
-                )
-                self._total_bytes += obj_size
-            recovered += 1
-
-        logger.info(
-            "Recovered %d objects (%d skipped) from %s",
-            recovered,
-            skipped,
-            config.recover_path,
-        )
-        return True
-
-    #####################
     # Status Interface
     #####################
 
@@ -580,15 +491,11 @@ class DynamicNixlStoreL2Adapter(L2AdapterInterface):
         self._loop_thread.join()
         self._loop.close()
 
-        # Persist or clean up data files after all tasks are done
-        if self._config.persist_config and self._config.persist_config.persist_path:
-            logger.info(
-                "Persisting metadata to %s before shutdown",
-                self._config.persist_config.persist_path,
-            )
-            self.persist(self._config.persist_config)
+        # If persist is enabled, keep data files on disk; otherwise clean up.
+        if self._persist_enabled:
+            logger.info("persist_enabled=True, keeping data files on disk")
         else:
-            logger.info("No persist_path configured, deleting all data files")
+            logger.info("persist_enabled=False, deleting all data files")
             with self._lock:
                 for key in list(self._memory_objects.keys()):
                     file_path = self.nixl_agent.get_file_path_for_key(key)
@@ -683,16 +590,54 @@ class DynamicNixlStoreL2Adapter(L2AdapterInterface):
     def _execute_lookup_in_the_loop(
         self, keys: list[ObjectKey], task_id: L2TaskId
     ) -> None:
-        """Look up keys and pin found objects."""
+        """Look up keys and pin found objects.
+
+        If recover is enabled, also checks secondary storage (disk) for keys
+        not in the in-memory index and lazily populates ``_memory_objects``
+        for any data files found on disk.
+        """
         bitmap = Bitmap(len(keys))
         with self._lock:
             for i, key in enumerate(keys):
-                if (obj := self._memory_objects.get(key)) is None:
+                obj = self._memory_objects.get(key)
+                if obj is None and self._recover_enabled:
+                    obj = self._secondary_lookup_locked(key)
+                if obj is None:
                     continue
                 bitmap.set(i)
                 obj.increase_pin_count()
             self._completed_lookup_tasks[task_id] = bitmap
         self._signal_lookup_event()
+
+    def _secondary_lookup_locked(self, key: ObjectKey) -> NixlStoreObj | None:
+        """Check if a data file for ``key`` exists on disk; if so, populate
+        ``_memory_objects`` and return the entry. Caller must hold ``_lock``.
+
+        The file size is read via ``os.stat``. Layout is left as ``None`` and
+        will be supplied by the caller's MemoryObj at load time.
+        """
+        file_path = self.nixl_agent.get_file_path_for_key(key)
+        try:
+            obj_size = os.stat(file_path).st_size
+        except FileNotFoundError:
+            return None
+
+        # Enforce capacity when populating lazily too.
+        if self._total_bytes + obj_size > self._max_capacity_bytes:
+            logger.debug(
+                "Secondary lookup hit for %s but capacity exceeded, skipping",
+                key,
+            )
+            return None
+
+        obj = NixlStoreObj(
+            page_indices=[],  # not used in dynamic mode
+            size=obj_size,
+            layout=None,
+        )
+        self._memory_objects[key] = obj
+        self._total_bytes += obj_size
+        return obj
 
     async def _execute_load_in_loop(
         self,
@@ -793,10 +738,11 @@ class DynamicNixlStoreL2AdapterConfig(L2AdapterConfigBase):
             "- backend_params (dict): backend-specific "
             "string key-value pairs. Must include "
             "'file_path' and 'use_direct_io'.\n"
-            "- persist_path (str): path to persist metadata "
-            "at shutdown (optional)\n"
-            "- recover_path (str): path to recover metadata "
-            "at startup (optional)" % (_VALID_DYNAMIC_BACKENDS,)
+            "- persist_enabled (bool): if True, keep data files on disk "
+            "at shutdown (optional, default False)\n"
+            "- recover_enabled (bool): if True, lookup also checks "
+            "secondary storage (disk) on miss (optional, default False)"
+            % (_VALID_DYNAMIC_BACKENDS,)
         )
 
 

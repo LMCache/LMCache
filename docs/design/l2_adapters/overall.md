@@ -485,12 +485,13 @@ factory branch in `__init__.py`.
 
 ### Persist / Recover (Optional)
 
-Adapters that support persisting cached metadata across restarts can override
-`persist(config)` and `recover(config)` from `L2AdapterInterface`. These are
-no-ops by default (log warning + return `False`). Configuration is provided
-via `PersistConfig` (parsed from `"persist_path"` / `"recover_path"` JSON
-keys). See `nixl_store_dynamic_l2_adapter.py` for a reference implementation
-and [`nixl_store.md`](nixl_store.md) for design details.
+Adapters that support persisting cached data across restarts can opt in via
+`PersistConfig` (parsed from the JSON keys `"persist_enabled"` and
+`"recover_enabled"`). There is no dedicated interface method — adapters
+integrate the two flags into their existing `close()` (to keep data on
+disk) and lookup (to check secondary storage on miss) paths. See
+`nixl_store_dynamic_l2_adapter.py` for a reference implementation and
+[`nixl_store.md`](nixl_store.md) for design details.
 
 ### Native (C++/Rust) Storage Backends
 

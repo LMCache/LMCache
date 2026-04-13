@@ -33,16 +33,16 @@ T = TypeVar("T", bound="L2AdapterConfigBase")
 @dataclass(frozen=True)
 class PersistConfig:
     """
-    Configuration for persist/recover operations on an L2 adapter.
+    Configuration for persist/recover on an L2 adapter.
 
-    Either field can be None to disable that direction independently.
+    Each flag can be enabled independently.
     """
 
-    persist_path: str | None = None
-    """ Path on disk to persist adapter metadata at shutdown. None = disabled. """
+    persist_enabled: bool = False
+    """ If True, data files are kept on disk at shutdown instead of deleted. """
 
-    recover_path: str | None = None
-    """ Path on disk to recover adapter metadata at startup. None = disabled. """
+    recover_enabled: bool = False
+    """ If True, lookup also checks secondary storage on miss to recover keys. """
 
 
 # -----------------------------------------------------------------------------
@@ -169,27 +169,27 @@ class L2AdapterConfigBase(ABC):
     @staticmethod
     def _parse_persist_config(d: dict) -> PersistConfig | None:
         """
-        Parse optional ``"persist_path"`` and ``"recover_path"`` keys from
-        an adapter JSON spec.
+        Parse optional ``"persist_enabled"`` and ``"recover_enabled"`` keys
+        from an adapter JSON spec.
 
         Expected format::
 
             {
-                "type": "nixl_store",
+                "type": "nixl_store_dynamic",
                 ...
-                "persist_path": "/path/to/persist/metadata",
-                "recover_path": "/path/to/recover/metadata"
+                "persist_enabled": true,
+                "recover_enabled": true
             }
 
-        Returns ``None`` when both keys are absent.
+        Returns ``None`` when both keys are absent or both are False.
         """
-        persist_path = d.get("persist_path")
-        recover_path = d.get("recover_path")
-        if persist_path is None and recover_path is None:
+        persist_enabled = bool(d.get("persist_enabled", False))
+        recover_enabled = bool(d.get("recover_enabled", False))
+        if not persist_enabled and not recover_enabled:
             return None
         return PersistConfig(
-            persist_path=str(persist_path) if persist_path is not None else None,
-            recover_path=str(recover_path) if recover_path is not None else None,
+            persist_enabled=persist_enabled,
+            recover_enabled=recover_enabled,
         )
 
     @classmethod

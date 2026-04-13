@@ -7,7 +7,6 @@ persist/recover, and capacity management.
 """
 
 # Standard
-import json
 import os
 import select
 import shutil
@@ -158,13 +157,12 @@ def adapter():
 
 @pytest.fixture
 def adapter_with_persist():
-    """Create a DynamicNixlStoreL2Adapter with persist config.
+    """Create a DynamicNixlStoreL2Adapter with persist+recover enabled.
 
-    Yields (adapter, buffer, tmp_dir, persist_path) and does NOT call
+    Yields (adapter, buffer, tmp_dir, l1_memory, config) and does NOT call
     close() — tests manage the lifecycle themselves.
     """
     tmp_dir = tempfile.mkdtemp(prefix="nixl_dyn_l2_persist_test_")
-    persist_path = os.path.join(tmp_dir, "metadata.json")
 
     buffer = torch.empty(PAGE_SIZE * NUM_BUFFER_PAGES, dtype=torch.uint8, device="cpu")
 
@@ -183,12 +181,12 @@ def adapter_with_persist():
         },
     )
     config.persist_config = PersistConfig(
-        persist_path=persist_path,
-        recover_path=persist_path,
+        persist_enabled=True,
+        recover_enabled=True,
     )
     adpt = DynamicNixlStoreL2Adapter(config, l1_memory)
 
-    yield adpt, buffer, tmp_dir, persist_path, l1_memory, config
+    yield adpt, buffer, tmp_dir, l1_memory, config
 
     shutil.rmtree(tmp_dir, ignore_errors=True)
 
@@ -619,8 +617,9 @@ class TestCapacity:
 
 
 class TestPersistRecover:
-    def test_persist_creates_metadata_file(self, adapter_with_persist):
-        adpt, buf, _, persist_path, _, _ = adapter_with_persist
+    def test_persist_keeps_files_on_close(self, adapter_with_persist):
+        """With persist_enabled=True, data files remain on disk after close."""
+        adpt, buf, tmp_dir, _, _ = adapter_with_persist
         key = create_object_key(1)
         obj = create_memory_obj(buf, page_index=0)
 
@@ -628,29 +627,29 @@ class TestPersistRecover:
         wait_for_event_fd(adpt.get_store_event_fd())
         adpt.pop_completed_store_tasks()
 
+        data_file = os.path.join(tmp_dir, _object_key_to_filename(key))
+        assert os.path.exists(data_file)
+
         adpt.close()
 
-        assert os.path.exists(persist_path)
-        with open(persist_path, "r") as f:
-            entries = json.load(f)
-        assert len(entries) == 1
-        assert entries[0]["chunk_hash"] == key.chunk_hash.hex()
+        assert os.path.exists(data_file)
 
-    def test_recover_restores_metadata(self, adapter_with_persist):
-        adpt, buf, tmp_dir, persist_path, l1_memory, config = adapter_with_persist
+    def test_recover_finds_key_via_lookup(self, adapter_with_persist):
+        """With recover_enabled=True, lookup finds keys whose files exist."""
+        adpt, buf, _, l1_memory, config = adapter_with_persist
         key = create_object_key(1)
         obj = create_memory_obj(buf, page_index=0, fill_value=77.0)
 
-        # Store and close (triggers persist)
+        # Store and close (files are kept)
         adpt.submit_store_task([key], [obj])
         wait_for_event_fd(adpt.get_store_event_fd())
         adpt.pop_completed_store_tasks()
         adpt.close()
 
-        # Create new adapter with same config (triggers recover)
+        # New adapter with recover_enabled
         adpt2 = DynamicNixlStoreL2Adapter(config, l1_memory)
 
-        # Lookup should find the key
+        # Lookup should find the key via secondary lookup
         task_id = adpt2.submit_lookup_and_lock_task([key])
         wait_for_event_fd(adpt2.get_lookup_and_lock_event_fd())
         bitmap = adpt2.query_lookup_and_lock_result(task_id)
@@ -661,20 +660,19 @@ class TestPersistRecover:
         adpt2.close()
 
     def test_recover_and_load_data(self, adapter_with_persist):
-        adpt, buf, tmp_dir, persist_path, l1_memory, config = adapter_with_persist
+        """After recover, load returns the same data that was stored."""
+        adpt, buf, _, l1_memory, config = adapter_with_persist
         key = create_object_key(1)
         store_obj = create_memory_obj(buf, page_index=0, fill_value=55.0)
 
-        # Store and close
         adpt.submit_store_task([key], [store_obj])
         wait_for_event_fd(adpt.get_store_event_fd())
         adpt.pop_completed_store_tasks()
         adpt.close()
 
-        # Recover
         adpt2 = DynamicNixlStoreL2Adapter(config, l1_memory)
 
-        # Lookup + load
+        # Lookup (lazy recover) + load
         task_id = adpt2.submit_lookup_and_lock_task([key])
         wait_for_event_fd(adpt2.get_lookup_and_lock_event_fd())
         adpt2.query_lookup_and_lock_result(task_id)
@@ -686,15 +684,15 @@ class TestPersistRecover:
         assert bitmap is not None
         assert bitmap.test(0)
 
-        # Verify data integrity
         loaded = buf[2 * PAGE_SIZE : 3 * PAGE_SIZE].view(torch.float32)
         assert torch.all(loaded == 55.0)
 
         adpt2.submit_unlock([key])
         adpt2.close()
 
-    def test_recover_skips_missing_files(self, adapter_with_persist):
-        adpt, buf, tmp_dir, persist_path, l1_memory, config = adapter_with_persist
+    def test_recover_misses_when_file_deleted(self, adapter_with_persist):
+        """Lookup returns miss for keys whose files are absent on disk."""
+        adpt, buf, tmp_dir, l1_memory, config = adapter_with_persist
         key = create_object_key(1)
         obj = create_memory_obj(buf, page_index=0)
 
@@ -703,23 +701,23 @@ class TestPersistRecover:
         adpt.pop_completed_store_tasks()
         adpt.close()
 
-        # Delete the data file but keep metadata
+        # Delete the data file manually
         data_file = os.path.join(tmp_dir, _object_key_to_filename(key))
         os.unlink(data_file)
 
-        # Recover — should skip the missing file
         adpt2 = DynamicNixlStoreL2Adapter(config, l1_memory)
 
         task_id = adpt2.submit_lookup_and_lock_task([key])
         wait_for_event_fd(adpt2.get_lookup_and_lock_event_fd())
         bitmap = adpt2.query_lookup_and_lock_result(task_id)
         assert bitmap is not None
-        assert not bitmap.test(0)  # not found
+        assert not bitmap.test(0)
 
         adpt2.close()
 
-    def test_recover_restores_usage(self, adapter_with_persist):
-        adpt, buf, _, _, l1_memory, config = adapter_with_persist
+    def test_recover_usage_updates_on_lookup(self, adapter_with_persist):
+        """Secondary lookup populates _total_bytes so get_usage reflects disk files."""
+        adpt, buf, _, l1_memory, config = adapter_with_persist
         key = create_object_key(1)
         obj = create_memory_obj(buf, page_index=0)
 
@@ -730,14 +728,24 @@ class TestPersistRecover:
         usage_before, _ = adpt.get_usage()
         adpt.close()
 
+        # Right after init, usage is zero (no eager recovery)
         adpt2 = DynamicNixlStoreL2Adapter(config, l1_memory)
-        usage_after, _ = adpt2.get_usage()
+        usage_initial, _ = adpt2.get_usage()
+        assert usage_initial == 0.0
 
+        # After a lookup, the key is populated and usage matches
+        task_id = adpt2.submit_lookup_and_lock_task([key])
+        wait_for_event_fd(adpt2.get_lookup_and_lock_event_fd())
+        adpt2.query_lookup_and_lock_result(task_id)
+
+        usage_after, _ = adpt2.get_usage()
         assert usage_after == pytest.approx(usage_before, rel=1e-6)
+
+        adpt2.submit_unlock([key])
         adpt2.close()
 
     def test_close_without_persist_deletes_files(self):
-        """When no persist config is set, close() should delete all data files."""
+        """With persist_enabled=False, close() deletes all data files."""
         tmp_dir = tempfile.mkdtemp(prefix="nixl_dyn_cleanup_test_")
         try:
             buffer = torch.empty(
@@ -770,5 +778,44 @@ class TestPersistRecover:
             adpt.close()
 
             assert not os.path.exists(data_file)
+        finally:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    def test_lookup_without_recover_ignores_disk(self):
+        """Without recover_enabled, lookup does not check disk."""
+        tmp_dir = tempfile.mkdtemp(prefix="nixl_dyn_no_recover_test_")
+        try:
+            buffer = torch.empty(
+                PAGE_SIZE * NUM_BUFFER_PAGES, dtype=torch.uint8, device="cpu"
+            )
+            l1_memory = L1MemoryDesc(
+                ptr=buffer.data_ptr(),
+                size=buffer.numel(),
+                align_bytes=PAGE_SIZE,
+            )
+            # Pre-create a file that the adapter should NOT discover
+            key = create_object_key(42)
+            fake_path = os.path.join(tmp_dir, _object_key_to_filename(key))
+            with open(fake_path, "wb") as f:
+                f.write(b"\x00" * PAGE_SIZE)
+
+            config = DynamicNixlStoreL2AdapterConfig(
+                backend="POSIX",
+                backend_params={
+                    "file_path": tmp_dir,
+                    "use_direct_io": "false",
+                    "max_capacity_gb": str(MAX_CAPACITY_GB),
+                },
+            )
+            # Explicitly no persist_config
+            adpt = DynamicNixlStoreL2Adapter(config, l1_memory)
+
+            task_id = adpt.submit_lookup_and_lock_task([key])
+            wait_for_event_fd(adpt.get_lookup_and_lock_event_fd())
+            bitmap = adpt.query_lookup_and_lock_result(task_id)
+            assert bitmap is not None
+            assert not bitmap.test(0)  # not found (no recover)
+
+            adpt.close()
         finally:
             shutil.rmtree(tmp_dir, ignore_errors=True)
