@@ -31,26 +31,51 @@ class FSConnector(RemoteConnector):
 
     def __init__(
         self,
-        base_paths_str: str,
         loop: asyncio.AbstractEventLoop,
         local_cpu_backend: LocalCPUBackend,
         config: Optional[LMCacheEngineConfig],
+        plugin_name: Optional[str] = None,
+        base_paths_str: Optional[str] = None,
     ):
         """
         Args:
-            base_paths_str: Comma separated storage paths
             loop: Asyncio event loop
             local_cpu_backend: Memory allocator interface
             config: Lmcache engine config
+            plugin_name: Plugin instance name
+                (e.g. "fs", "fs.primary")
+            base_paths_str: Comma-separated base paths
+                (legacy, passed from adapter when using
+                fs:// URL)
         """
-        # initialize base class, which includes some common attributes
-        super().__init__(local_cpu_backend.config, local_cpu_backend.metadata)
+        # initialize base class
+        super().__init__(
+            local_cpu_backend.config,
+            local_cpu_backend.metadata,
+        )
+
+        base_path = base_paths_str
+        if base_path is None:
+            # Resolve from extra_config
+            extra_config = config.extra_config if config else None
+            if extra_config is not None:
+                key_prefix = plugin_name or "fs"
+                base_path = extra_config.get(
+                    "remote_storage_plugin.%s.base_path" % key_prefix
+                )
+            if base_path is None:
+                if extra_config is not None:
+                    base_path = extra_config.get("fs_base_path")
+            if base_path is None:
+                raise ValueError(
+                    "FS connector requires base_path via URL or extra_config"
+                )
 
         # Parse comma separated paths
         self.base_paths = (
-            [Path(p.strip()) for p in base_paths_str.split(",")]
-            if "," in base_paths_str
-            else [Path(base_paths_str)]
+            [Path(p.strip()) for p in base_path.split(",")]
+            if "," in base_path
+            else [Path(base_path)]
         )
 
         self.loop = loop

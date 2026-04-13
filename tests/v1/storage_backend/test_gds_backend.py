@@ -30,10 +30,11 @@ from lmcache.v1.storage_backend.gds_backend import (
 from tests.v1.utils import create_test_memory_obj, has_cufile, has_hipfile
 
 
-def create_test_config(gds_path: str):
+def create_test_config(gds_path: str, gds_path_sharding: str = "by_gpu"):
     config = LMCacheEngineConfig.from_defaults(
         chunk_size=256,
         gds_path=gds_path,
+        gds_path_sharding=gds_path_sharding,
         lmcache_instance_id="test_instance",
         cufile_buffer_size=256,
         extra_config={"use_direct_io": True},
@@ -492,7 +493,12 @@ class TestGdsMultiPath:
     """
 
     @staticmethod
-    def _make_backend(gds_path: str, dst_device: str, async_loop):
+    def _make_backend(
+        gds_path: str,
+        dst_device: str,
+        async_loop,
+        gds_path_sharding: str = "by_gpu",
+    ):
         """Create a GdsBackend with mocked allocator and fstype.
 
         Mocks are used so the tests run without cuFile / real NVMe.
@@ -505,7 +511,7 @@ class TestGdsMultiPath:
             def close(self):
                 pass
 
-        config = create_test_config(gds_path)
+        config = create_test_config(gds_path, gds_path_sharding=gds_path_sharding)
         metadata = create_test_metadata()
         with (
             mock.patch(
@@ -755,3 +761,34 @@ class TestGdsMultiPath:
         finally:
             for p in paths:
                 shutil.rmtree(p, ignore_errors=True)
+
+    def test_gds_path_sharding_default(self, temp_gds_path, async_loop):
+        """Default gds_path_sharding is 'by_gpu'."""
+        backend = self._make_backend(temp_gds_path, "cuda:0", async_loop)
+        try:
+            assert backend.gds_path_sharding == "by_gpu"
+        finally:
+            backend.close()
+
+    def test_gds_path_sharding_explicit_by_gpu(self, temp_gds_path, async_loop):
+        """Explicitly setting gds_path_sharding='by_gpu' works."""
+        backend = self._make_backend(
+            temp_gds_path,
+            "cuda:0",
+            async_loop,
+            gds_path_sharding="by_gpu",
+        )
+        try:
+            assert backend.gds_path_sharding == "by_gpu"
+        finally:
+            backend.close()
+
+    def test_gds_path_sharding_unsupported_raises(self, temp_gds_path, async_loop):
+        """Unsupported gds_path_sharding value raises AssertionError."""
+        with pytest.raises(AssertionError, match="Unsupported gds_path_sharding"):
+            self._make_backend(
+                temp_gds_path,
+                "cuda:0",
+                async_loop,
+                gds_path_sharding="round_robin",
+            )

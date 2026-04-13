@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Standard
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Optional
 import os
 import threading
 
@@ -14,6 +14,7 @@ import zmq
 from lmcache.integration.request_telemetry.factory import RequestTelemetryFactory
 from lmcache.utils import _lmcache_nvtx_annotate, init_logger
 from lmcache.v1.multiprocess.custom_types import (
+    BlockAllocationRecord,
     CudaIPCWrapper,
     IPCCacheEngineKey,
     KVCache,
@@ -93,6 +94,39 @@ def send_ping(
     except Exception:
         logger.debug("Ping failed with exception", exc_info=True)
         return False
+
+
+@dataclass
+class ParallelStrategy:
+    use_mla: bool
+    """Whether to use the MLA."""
+
+    kv_world_size: int
+    """
+    The kv world size, kv_world_size may not be equal to the actual_world_size, 
+    in the case of mla, it will 'exclude' the effect of TP, the value is 
+    calculated by `extract_world_size_and_kv_rank` in `lmcache_mp_connector.py`.
+    """
+
+    kv_worker_id: int
+    """
+    The kv worker id of the sub-process, kv_worker_id may not be equal to the 
+    actual_worker_id, in the case of mla, it will 'exclude' the effect of TP, 
+    the value is calculated by `extract_world_size_and_kv_rank` in 
+    `lmcache_mp_connector.py`.
+    """
+
+    actual_world_size: int
+    """The actual world size."""
+
+    actual_worker_id: int
+    """The actual worker id of the sub-process."""
+
+    tp_size: int
+    """The tensor parallel size."""
+
+    pp_size: int
+    """The pipeline parallel size."""
 
 
 class HeartbeatThread(PeriodicThread):
@@ -175,16 +209,19 @@ RetrieveResult = bool
 LookupResult = int
 
 
+# TODO(chunxiaozheng): To be compatible with older `lmcache_mp_connector`,
+#  world_size, kv_rank, tp_size are saved, use parallel_strategy instead
 class LMCacheMPSchedulerAdapter:
     def __init__(
         self,
         server_url: str,
         context: zmq.Context,
         model_name: str,
-        world_size: int,
-        kv_rank: int,
-        vllm_block_size: int,
+        world_size: int = 1,
+        kv_rank: int = 0,
+        vllm_block_size: int = 16,
         tp_size: int = 1,
+        parallel_strategy: Optional[ParallelStrategy] = None,
         mq_timeout: float = DEFAULT_MQ_TIMEOUT,
         heartbeat_interval: float = DEFAULT_HEARTBEAT_INTERVAL,
     ):
@@ -198,6 +235,9 @@ class LMCacheMPSchedulerAdapter:
             vllm_block_size: The block size used in vLLM
             tp_size: Tensor-parallel size for MLA
                 multi-reader locking (default 1).
+            parallel_strategy:
+                The parallel strategy, which includes `use_mla`,
+                `kv_world_size`, `kv_worker_id` and so on
             mq_timeout: Timeout in seconds for message queue requests.
             heartbeat_interval: Interval in seconds between heartbeat pings.
         """
@@ -212,8 +252,9 @@ class LMCacheMPSchedulerAdapter:
         self._finished_lookup_jobs: dict[int, int] = {}
 
         self.model_name = model_name
-        self.world_size = world_size
-        self.tp_size = tp_size
+        self.parallel_strategy = parallel_strategy
+        self._world_size = world_size
+        self._tp_size = tp_size
 
         # Read chunk size from lmcache
         try:
@@ -239,6 +280,24 @@ class LMCacheMPSchedulerAdapter:
         self._heartbeat_interval = heartbeat_interval
         self._heartbeat: HeartbeatThread | None = None
         self._heartbeat_lock = threading.Lock()
+
+    @property
+    def world_size(self) -> int:
+        """Get the kv world size."""
+        return (
+            self._world_size
+            if self.parallel_strategy is None
+            else self.parallel_strategy.kv_world_size
+        )
+
+    @property
+    def tp_size(self) -> int:
+        """The tensor parallel size."""
+        return (
+            self._tp_size
+            if self.parallel_strategy is None
+            else self.parallel_strategy.tp_size
+        )
 
     @property
     def is_healthy(self) -> bool:
@@ -447,6 +506,28 @@ class LMCacheMPSchedulerAdapter:
             [request_id],
         )
 
+    def report_block_allocations(
+        self,
+        records: list[BlockAllocationRecord],
+    ) -> None:
+        """Report vLLM GPU block allocation deltas to LMCache server.
+
+        Fire-and-forget: does not wait for a response. If the server
+        is unhealthy the report is silently dropped.
+
+        Args:
+            records: List of BlockAllocationRecord with per-request
+                block and token allocation deltas.
+        """
+        if not self.is_healthy or not records:
+            return
+
+        send_lmcache_request(
+            self.mq_client,
+            RequestType.REPORT_BLOCK_ALLOCATION,
+            [records],
+        )
+
     # Helper functions
     def _create_key(
         self,
@@ -475,9 +556,10 @@ class LMCacheMPWorkerAdapter:
         server_url: str,
         context: zmq.Context,
         model_name: str,
-        world_size: int,
-        kv_rank: int,
-        vllm_block_size: int,
+        world_size: int = 1,
+        kv_rank: int = 0,
+        vllm_block_size: int = 16,
+        parallel_strategy: Optional[ParallelStrategy] = None,
         mq_timeout: float = DEFAULT_MQ_TIMEOUT,
         heartbeat_interval: float = DEFAULT_HEARTBEAT_INTERVAL,
     ):
@@ -510,8 +592,9 @@ class LMCacheMPWorkerAdapter:
         self._returned_finished: set[str] = set()
 
         self.model_name = model_name
-        self.world_size = world_size
-        self.worker_id = kv_rank
+        self.parallel_strategy = parallel_strategy
+        self._world_size = world_size
+        self._worker_id = kv_rank
 
         # Read chunk size from lmcache
         try:
@@ -532,8 +615,9 @@ class LMCacheMPWorkerAdapter:
         self._health_event.set()
 
         # Heartbeat thread is created but NOT started yet.
-        # It will be started after register_kv_caches()
-        # completes, i.e. after vLLM is fully ready.
+        # It will be lazily started on the first store or retrieve
+        # request, by which time vLLM is fully ready (model loaded,
+        # KV caches allocated, warmup & CUDA graph capture done).
         self._heartbeat_interval = heartbeat_interval
         self._heartbeat: HeartbeatThread | None = None
         self._heartbeat_lock = threading.Lock()
@@ -555,6 +639,46 @@ class LMCacheMPWorkerAdapter:
     def is_healthy(self) -> bool:
         """Whether the LMCache server is healthy."""
         return self._health_event.is_set()
+
+    @property
+    def world_size(self) -> int:
+        """Get the kv world size."""
+        return (
+            self._world_size
+            if self.parallel_strategy is None
+            else self.parallel_strategy.kv_world_size
+        )
+
+    @property
+    def worker_id(self) -> int:
+        """Get the kv worker id."""
+        return (
+            self._worker_id
+            if self.parallel_strategy is None
+            else self.parallel_strategy.kv_worker_id
+        )
+
+    @property
+    def use_mla(self) -> bool:
+        """Whether to use MLA."""
+        # NOTE: use_mla only used in the latest `lmcache_mp_connector`,
+        # and the latest `lmcache_mp_connector` will set the parallel_strategy
+        if self.parallel_strategy is None:
+            raise RuntimeError("parallel_strategy is not set")
+        return self.parallel_strategy.use_mla
+
+    @property
+    def is_first_rank_of_pp_group(self) -> bool:
+        """Is the first rank of the pipeline parallel group."""
+        # NOTE: is_first_rank_of_pp_group only used in the latest
+        # `lmcache_mp_connector`, and the latest `lmcache_mp_connector`
+        # will set the parallel_strategy
+        if self.parallel_strategy is None:
+            raise RuntimeError("parallel_strategy is not set")
+        return (
+            self.parallel_strategy.actual_worker_id % self.parallel_strategy.tp_size
+            == 0
+        )
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """
@@ -600,12 +724,8 @@ class LMCacheMPWorkerAdapter:
                 f"{self._mq_timeout}s. Is the server running?"
             ) from None
 
-        # Start heartbeat only after vLLM is fully ready
-        # (model loaded, KV caches allocated, warmup done).
-        self._start_heartbeat()
-
-    def _start_heartbeat(self) -> None:
-        """Start the heartbeat thread (idempotent)."""
+    def _ensure_heartbeat_started(self) -> None:
+        """Lazily start the heartbeat thread on first use."""
         if self._heartbeat is not None:
             return
         with self._heartbeat_lock:
@@ -631,6 +751,8 @@ class LMCacheMPWorkerAdapter:
             event: The CUDA event that is recorded after the current
                 model inference step
         """
+        self._ensure_heartbeat_started()
+
         if not self.is_healthy:
             return
 
@@ -656,6 +778,8 @@ class LMCacheMPWorkerAdapter:
             event: The CUDA event that is recorded after the current
                 model inference step
         """
+        self._ensure_heartbeat_started()
+
         if not self.is_healthy:
             self.error_block_ids.update(op.block_ids)
             return
