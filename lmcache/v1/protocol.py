@@ -117,10 +117,13 @@ def pad_shape_to_4d(shape: torch.Size) -> list[int]:
     assert len(shape) <= 4, (
         f"Shape dimension must be <= 4 for serialization, got {len(shape)}"
     )
-    assert all(d > 0 for d in shape), (
-        f"Shape dimensions must all be > 0 for pad/strip round-tripping, "
-        f"got {list(shape)}"
-    )
+    if not all(d > 0 for d in shape):
+        logger.warning(
+            "Shape dimensions must all be > 0 for pad/strip round-tripping, "
+            "got %s. Trailing zeros will be indistinguishable from padding "
+            "in strip_shape_padding().",
+            list(shape),
+        )
     padded = list(shape) + [0] * (4 - len(shape))
     return padded
 
