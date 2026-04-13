@@ -41,6 +41,8 @@ logger = init_logger(__name__)
 
 
 class _LocalDiskManifest:
+    """JSON manifest for local disk entries restored across backend restarts."""
+
     def __init__(
         self,
         cache_dir: str,
@@ -417,6 +419,7 @@ class LocalDiskBackend(StorageBackendInterface):
         return os.path.join(self.path, key.to_string().replace("/", "-") + ".pt")
 
     def _get_manifest_path(self) -> str:
+        """Return the per-backend manifest path used for restart persistence."""
         if self.metadata is None:
             namespace = self.instance_id or "default"
         else:
