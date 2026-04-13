@@ -141,7 +141,21 @@ void MooncakeConnector::ensure_registered(const void* buf, size_t len) {
         "); use a stable buffer size or preregister L1 memory.");
   }
 
-  int register_rc = client_->register_buffer(mutable_buf, len);
+  int register_rc = 0;
+  try {
+    register_rc = client_->register_buffer(mutable_buf, len);
+  } catch (...) {
+    {
+      std::lock_guard<std::mutex> guard(registered_buffers_mu_);
+      auto it = registered_buffers_.find(buf);
+      if (it != registered_buffers_.end()) {
+        registered_buffers_.erase(it);
+      }
+    }
+    registered_buffers_cv_.notify_all();
+    throw;
+  }
+
   {
     std::lock_guard<std::mutex> guard(registered_buffers_mu_);
     auto it = registered_buffers_.find(buf);
