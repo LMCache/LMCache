@@ -5,6 +5,12 @@ Dynamic-file-mode Nixl L2 adapter.
 Unlike the static ``NixlStoreL2Adapter`` which pre-allocates all storage
 files at init time, this adapter opens/registers files per operation.
 
+Atomic publish:
+- Stores DMA-write to a per-operation ``<final_path>.tmp.<uuid>`` and
+  atomically ``rename()`` to the final deterministic path on completion.
+  This guarantees that readers (including other processes sharing the
+  same directory) never observe a partially-written file.
+
 Persist / recover (both opt-in via ``persist_enabled`` / ``recover_enabled``):
 - Persist simply keeps data files on disk at shutdown (no metadata dump).
 - Recover lazily checks secondary storage (disk) during lookup and
@@ -171,9 +177,17 @@ class DynamicNixlStorageAgent:
         file_path: str,
         page_size: int,
     ) -> None:
-        """Create a file, DMA write from L1 memory, then clean up nixl state."""
+        """Write-to-temp-then-rename to publish the final file atomically.
+
+        The DMA write goes to ``<file_path>.tmp.<uuid>`` in the same
+        directory. Only after the transfer completes successfully is the
+        temp file atomically renamed to the final path, ensuring that
+        concurrent readers (including other processes sharing the same
+        directory) never observe a partially-written file.
+        """
         file_size = len(mem_indices) * page_size
-        fd = os.open(file_path, self._open_flags(create=True))
+        tmp_path = f"{file_path}.tmp.{uuid.uuid4().hex}"
+        fd = os.open(tmp_path, self._open_flags(create=True))
         try:
             reg_descs, xfer_handler = self._register_single_file(
                 fd, file_size, page_size
@@ -191,8 +205,19 @@ class DynamicNixlStorageAgent:
                 self.nixl_agent.release_xfer_handle(handle)
             finally:
                 self._deregister_file(reg_descs, xfer_handler)
+        except BaseException:
+            # Best-effort cleanup of the temp file on failure.
+            try:
+                os.unlink(tmp_path)
+            except FileNotFoundError:
+                pass
+            raise
         finally:
             os.close(fd)
+
+        # Atomic publish: readers only ever see a complete file at file_path.
+        # TODO(Jiayi): Only guaranteed to be atomic within the local posix filesystems.
+        os.rename(tmp_path, file_path)
 
     async def dynamic_load_file(
         self,
@@ -262,6 +287,30 @@ class DynamicNixlStorageAgent:
             await asyncio.sleep(0.01)
         if state == "ERR":
             raise RuntimeError("NIXL transfer failed")
+
+    def cleanup_temp_files(self) -> None:
+        """Remove leftover ``*.tmp.*`` files in the storage directory.
+
+        These can be left behind if a store crashed between opening the
+        temp file and the atomic rename. Called at shutdown as a best-effort
+        GC; orphans don't affect correctness because they're never matched
+        by the deterministic ``ObjectKey → filename`` mapping.
+        """
+        try:
+            entries = os.listdir(self.file_path)
+        except FileNotFoundError:
+            return
+        for name in entries:
+            # Temp suffix format: "<final_name>.tmp.<hex>"
+            if ".tmp." in name:
+                try:
+                    os.unlink(os.path.join(self.file_path, name))
+                except FileNotFoundError:
+                    pass
+                except OSError as e:
+                    logger.warning(
+                        "Failed to remove leftover temp file %s: %s", name, e
+                    )
 
     def close(self):
         """Release L1 memory handlers."""
@@ -500,6 +549,9 @@ class DynamicNixlStoreL2Adapter(L2AdapterInterface):
                 for key in list(self._memory_objects.keys()):
                     file_path = self.nixl_agent.get_file_path_for_key(key)
                     self.nixl_agent.dynamic_delete_file(file_path)
+
+        # Best-effort cleanup of orphaned temp files from crashed stores.
+        self.nixl_agent.cleanup_temp_files()
 
         self.nixl_agent.close()
 
