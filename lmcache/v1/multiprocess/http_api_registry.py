@@ -1,14 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from pathlib import Path
-import importlib
-import pkgutil
 
 # Third Party
 from fastapi import APIRouter, FastAPI
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.utils.router_discovery import discover_api_routers
 
 logger = init_logger(__name__)
 
@@ -39,16 +38,7 @@ class HTTPAPIRegistry:
 
         apis_package = f"{__package__}.http_apis"
 
-        for _, module_name, _ in pkgutil.iter_modules([str(apis_path)]):
-            if not module_name.endswith("_api"):
-                continue
-            full_name = f"{apis_package}.{module_name}"
-            module = importlib.import_module(full_name)
-            if hasattr(module, "router") and isinstance(module.router, APIRouter):
-                self.router.include_router(module.router)
-                logger.info(
-                    "Registered HTTP API module: %s",
-                    module_name,
-                )
+        for r in discover_api_routers(apis_path, apis_package):
+            self.router.include_router(r)
 
         self.app.include_router(self.router)
