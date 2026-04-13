@@ -455,11 +455,22 @@ class LocalDiskBackend(StorageBackendInterface):
                 logger.error(
                     "Memory allocation failed during async disk load for key %s. "
                     "CPU staging pool may be exhausted (unpin() not called after "
-                    "a previous retrieve). Returning partial results.",
+                    "a previous retrieve). Dropping all partial results.",
                     key,
                 )
+                # Undo side effects for already-processed keys: the
+                # disk_worker.submit_task (which loads data from disk) will
+                # NOT run, so any returned mem_objs would contain stale
+                # memory — not valid KV cache data.  Clean up and return
+                # empty to avoid silent data corruption.
+                for prev_obj in mem_objs:
+                    prev_obj.unpin()
+                    prev_obj.ref_count_down()
+                for prev_key in keys[: len(mem_objs)]:
+                    if prev_key in self.dict:
+                        self.dict[prev_key].unpin()
                 self.disk_lock.release()
-                return mem_objs
+                return []
 
             self.dict[key].pin()
 
