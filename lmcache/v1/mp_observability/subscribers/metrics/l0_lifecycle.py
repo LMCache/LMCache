@@ -91,9 +91,8 @@ class L0LifecycleSubscriber(EventSubscriber):
 
         # Shadow map: physical block_id -> lifecycle state.
         self._shadow: dict[int, _L0BlockState] = {}
-        # Block IDs we decided to sample (much smaller than tracking
-        # the non-sampled set when sample_rate is low).
-        self._sampled: set[int] = set()
+        # Set of block_ids we decided NOT to sample.
+        self._skipped: set[int] = set()
         # Reverse index: req_id -> set of block_ids owned by that request.
         self._req_blocks: dict[str, set[int]] = {}
 
@@ -193,13 +192,15 @@ class L0LifecycleSubscriber(EventSubscriber):
         existing = self._shadow.get(block_id)
 
         if existing is None:
-            # Block not in shadow map — either new or previously not sampled.
-            # Re-roll for non-sampled blocks (cheaper than storing all skipped IDs).
-            if block_id not in self._sampled and not self._should_sample():
+            # Block not in shadow map.
+            if block_id in self._skipped:
+                return
+
+            if not self._should_sample():
+                self._skipped.add(block_id)
                 return
 
             # New allocation — start tracking.
-            self._sampled.add(block_id)
             self._shadow[block_id] = _L0BlockState(
                 token_ids=token_ids,
                 owners={req_id},
