@@ -68,6 +68,9 @@ include = ["lmcache", "lmcache*"]
 [tool.ruff]
 # same as Black's default line length
 line-length = 88
+exclude = [
+    "lmcache/integration/vllm/lmcache_mp_connector_*.py",
+]
 
 [tool.ruff.lint]
 select = [
@@ -118,6 +121,9 @@ from-first = true
 
 platform = "linux"
 modules = ["lmcache", "tests", "benchmarks"]
+exclude = [
+    'lmcache/integration/vllm/lmcache_mp_connector_.*\.py',
+]
 
 disable_error_code = [
     #"annotation-unchecked",
@@ -147,7 +153,7 @@ follow_imports = "silent"
 
 [tool.codespell]
 ignore-words-list = "afterall,allready,notin"
-skip = "operator/config/crd/bases/*"
+skip = "operator/config/crd/bases/*,lmcache/integration/vllm/lmcache_mp_connector_*.py"
 
 [tool.cibuildwheel]
 build = "cp3*-manylinux_x86_64"
