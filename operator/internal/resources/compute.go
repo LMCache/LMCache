@@ -54,6 +54,7 @@ func BuildContainerArgs(spec *lmcachev1alpha1.LMCacheEngineSpec) []string {
 	args := []string{
 		"--host", "0.0.0.0",
 		"--port", fmt.Sprintf("%d", derefInt32(getServerPort(spec), 5555)),
+		"--http-port", fmt.Sprintf("%d", getHTTPPort(spec)),
 		"--l1-size-gb", fmt.Sprintf("%.1f", spec.L1.SizeGB),
 		"--chunk-size", fmt.Sprintf("%d", getChunkSize(spec)),
 		"--max-workers", fmt.Sprintf("%d", getMaxWorkers(spec)),
@@ -90,10 +91,19 @@ func BuildContainerArgs(spec *lmcachev1alpha1.LMCacheEngineSpec) []string {
 		args = append(args, "--prometheus-port", fmt.Sprintf("%d", promPort))
 	}
 
-	// L2 backends
-	for _, backend := range spec.L2Backends {
-		l2JSON := mergeL2BackendToJSON(backend)
-		args = append(args, "--l2-adapter", l2JSON)
+	// L2 backend
+	if spec.L2Backend != nil {
+		l2JSON := buildL2AdapterJSON(spec.L2Backend)
+		if l2JSON != "" {
+			args = append(args, "--l2-adapter", l2JSON)
+		}
+
+		// L2 policies
+		args = append(args,
+			"--l2-store-policy", derefString(spec.L2Backend.StorePolicy, "default"),
+			"--l2-prefetch-policy", derefString(spec.L2Backend.PrefetchPolicy, "default"),
+			"--l2-prefetch-max-in-flight", fmt.Sprintf("%d", derefInt32(spec.L2Backend.PrefetchMaxInFlight, 8)),
+		)
 	}
 
 	// User-supplied extra args (appended last so they can override defaults)
@@ -102,11 +112,43 @@ func BuildContainerArgs(spec *lmcachev1alpha1.LMCacheEngineSpec) []string {
 	return args
 }
 
-// mergeL2BackendToJSON flattens {type, config} into the CLI-expected flat JSON.
-func mergeL2BackendToJSON(backend lmcachev1alpha1.L2BackendSpec) string {
+// buildL2AdapterJSON serializes an L2BackendSpec into the --l2-adapter JSON string.
+// For RESP adapters with authSecretRef, username/password are set to env var
+// placeholders that get interpolated by the shell wrapper (see BuildShellCommand).
+func buildL2AdapterJSON(backend *lmcachev1alpha1.L2BackendSpec) string {
+	if backend.RESP != nil {
+		return buildRESPL2JSON(backend.RESP)
+	}
+	if backend.Raw != nil {
+		return buildRawL2JSON(backend.Raw)
+	}
+	return ""
+}
+
+func buildRESPL2JSON(resp *lmcachev1alpha1.RESPL2AdapterSpec) string {
+	flat := map[string]any{
+		"type":        "resp",
+		"host":        resp.Host,
+		"port":        resp.Port,
+		"num_workers": derefInt32(resp.NumWorkers, 8),
+	}
+	if resp.MaxCapacityGB != nil && *resp.MaxCapacityGB > 0 {
+		flat["max_capacity_gb"] = *resp.MaxCapacityGB
+	}
+	// Auth credentials are passed via LMCACHE_RESP_USERNAME /
+	// LMCACHE_RESP_PASSWORD env vars (injected by the DaemonSet builder),
+	// not in the JSON config.
+	b, err := json.Marshal(flat)
+	if err != nil {
+		return ""
+	}
+	return string(b)
+}
+
+func buildRawL2JSON(raw *lmcachev1alpha1.RawL2AdapterSpec) string {
 	flat := make(map[string]any)
-	flat["type"] = backend.Type
-	for k, v := range backend.Config {
+	flat["type"] = raw.Type
+	for k, v := range raw.Config {
 		var parsed any
 		if err := json.Unmarshal(v.Raw, &parsed); err != nil {
 			flat[k] = string(v.Raw)
@@ -114,7 +156,10 @@ func mergeL2BackendToJSON(backend lmcachev1alpha1.L2BackendSpec) string {
 			flat[k] = parsed
 		}
 	}
-	b, _ := json.Marshal(flat)
+	b, err := json.Marshal(flat)
+	if err != nil {
+		return ""
+	}
 	return string(b)
 }
 
@@ -123,6 +168,13 @@ func getServerPort(spec *lmcachev1alpha1.LMCacheEngineSpec) *int32 {
 		return spec.Server.Port
 	}
 	return nil
+}
+
+func getHTTPPort(spec *lmcachev1alpha1.LMCacheEngineSpec) int32 {
+	if spec.Server != nil {
+		return derefInt32(spec.Server.HTTPPort, 8080)
+	}
+	return 8080
 }
 
 func getChunkSize(spec *lmcachev1alpha1.LMCacheEngineSpec) int32 {

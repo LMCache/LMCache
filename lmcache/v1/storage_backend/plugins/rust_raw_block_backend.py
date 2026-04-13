@@ -5,6 +5,7 @@ from __future__ import annotations
 
 # Standard
 from collections import OrderedDict
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Callable, List, Optional, Sequence
 import asyncio
@@ -33,11 +34,33 @@ logger = init_logger(__name__)
 _DEFAULT_META_MAGIC = b"LMCIDX01"
 _DEFAULT_META_VERSION = 1
 _META_HEADER_STRUCT = struct.Struct("<8sIQQI")
+TPRankKey = int | str
+PerTPDevicePaths = Mapping[TPRankKey, str]
 
 
 def _round_up(x: int, align: int) -> int:
     """Round up to nearest multiple of alignment (required for O_DIRECT)."""
     return ((x + align - 1) // align) * align
+
+
+def _validate_per_tp_device_paths(per_tp_devices: PerTPDevicePaths) -> None:
+    """Validate per-TP device mapping and enforce unique paths."""
+    values = list(per_tp_devices.values())
+    if len(values) != len(set(values)):
+        raise ValueError(
+            "Duplicate device path configured in rust_raw_block.per_tp_device_paths"
+        )
+
+
+def _get_per_tp_device_path(
+    per_tp_devices: PerTPDevicePaths, tp_rank: int
+) -> Optional[str]:
+    """Return the configured device path for a TP rank.
+
+    Looks up both string and integer forms of ``tp_rank`` so YAML mappings
+    with either quoted or unquoted numeric keys are accepted.
+    """
+    return per_tp_devices.get(str(tp_rank), per_tp_devices.get(tp_rank))
 
 
 @dataclass
@@ -67,8 +90,23 @@ class RustRawBlockBackend(StoragePluginInterface):
     - On-device metadata checkpoint for restart recovery
     - Efficient buffer operations via Rust extension
 
-    .. warning::
-       **This backend currently only supports TP=1 (single GPU) deployments.**
+    - TP > 1 support via per-TP partitions
+
+    TP > 1 Support:
+    ----------------
+    When using Tensor Parallelism (TP > 1), each TP worker must use a
+    separate partition to avoid metadata conflicts and data corruption.
+
+    Configuration:
+    For TP > 1, you must explicitly configure device paths for each TP worker:
+       extra_config:
+         rust_raw_block.per_tp_device_paths:
+           "0": "/dev/nvme0n1p1"
+           "1": "/dev/nvme0n1p2"
+           "2": "/dev/nvme0n1p3"
+           "3": "/dev/nvme0n1p4"
+
+    Note: Partitions must be pre-created on the device before use.
     """
 
     def __init__(
@@ -93,17 +131,45 @@ class RustRawBlockBackend(StoragePluginInterface):
         if self.config is None:
             raise ValueError("RustRawBlockBackend requires config")
 
-        if self.metadata is not None and self.metadata.world_size != 1:
-            raise ValueError(
-                "RustRawBlockBackend currently only supports TP=1 "
-                "(single GPU) deployments. "
-                f"Current world_size={self.metadata.world_size}."
-            )
-
         extra = self.config.extra_config or {}
-        self.device_path: str = extra.get("rust_raw_block.device_path", "")
-        if not self.device_path:
-            raise ValueError("extra_config['rust_raw_block.device_path'] is required")
+
+        # Support TP > 1 via per-TP device paths.
+        # Each TP worker uses its own partition to avoid conflicts.
+        self.device_path: str
+        if self.metadata is not None and self.metadata.world_size > 1:
+            tp_rank = self.metadata.worker_id
+            per_tp_devices = extra.get("rust_raw_block.per_tp_device_paths", {})
+            if not isinstance(per_tp_devices, Mapping):
+                raise ValueError(
+                    "rust_raw_block.per_tp_device_paths must be a mapping from "
+                    "TP rank to device path"
+                )
+
+            if not per_tp_devices:
+                raise ValueError(
+                    "For TP > 1, rust_raw_block.per_tp_device_paths is required. "
+                    "Each TP worker must have an explicit device path configured."
+                )
+            _validate_per_tp_device_paths(per_tp_devices)
+
+            tp_rank_str = str(tp_rank)
+            device_path = _get_per_tp_device_path(per_tp_devices, tp_rank)
+            if not device_path:
+                raise ValueError(
+                    f"No device path configured for TP rank {tp_rank_str}. "
+                    f"Available ranks: {list(per_tp_devices.keys())}"
+                )
+            self.device_path = device_path
+            logger.info(
+                f"RustRawBlockBackend: TP={self.metadata.world_size} mode, "
+                f"using explicit device path for rank {tp_rank}: {self.device_path}"
+            )
+        else:
+            self.device_path = extra.get("rust_raw_block.device_path", "")
+            if not self.device_path:
+                raise ValueError(
+                    "extra_config['rust_raw_block.device_path'] is required"
+                )
 
         self.capacity_bytes: int = int(extra.get("rust_raw_block.capacity_bytes", 0))
         self.block_align: int = int(extra.get("rust_raw_block.block_align", 4096))
@@ -651,81 +717,131 @@ class RustRawBlockBackend(StoragePluginInterface):
                 self._inflight_io_count -= 1
                 self._last_io_ts = time.monotonic()
 
-    def get_blocking(self, key: CacheEngineKey) -> Optional[MemoryObj]:
-        if logger.isEnabledFor(10):
-            self._dbg_get_calls += 1
+    def _batched_get_prefix(self, keys: Sequence[CacheEngineKey]) -> list[MemoryObj]:
+        if not keys:
+            return []
+
+        items: list[tuple[CacheEngineKey, _Entry]] = []
         with self._lock:
-            entry = self._index.get(key)
-        if entry is None:
-            return None
+            for key in keys:
+                entry = self._index.get(key)
+                if entry is None:
+                    break
+                items.append((key, entry))
+            if not items:
+                return []
+            self._inflight_io_count += 1
 
-        meta = entry.meta
-        assert meta.shape is not None and meta.dtype is not None
-        payload_len = int(meta.size)
-        total_len = (
-            _round_up(payload_len, self.block_align)
-            if self.use_odirect
-            else payload_len
-        )
-
-        if logger.isEnabledFor(10):
-            self._dbg_get_bytes += int(payload_len)
-            if self._dbg_should_log(self._dbg_get_calls):
-                logger.debug(
-                    "RustRawBlockBackend GET: %s offset=%d size=%d",
-                    self._dbg_key_short(key),
-                    int(entry.offset),
-                    int(payload_len),
-                )
-
-        assert self.local_cpu_backend is not None
-        memory_obj = self.local_cpu_backend.allocate(meta.shape, meta.dtype, meta.fmt)
-        assert memory_obj is not None
-        buf = memory_obj.byte_array
+        loaded: list[MemoryObj] = []
+        touched: list[CacheEngineKey] = []
         try:
-            buf = buf.cast("B")
+            raw_dev = self._rawdev()
+            for key, entry in items:
+                meta = entry.meta
+                assert meta.shape is not None and meta.dtype is not None
+                assert self.local_cpu_backend is not None
+                memory_obj = self.local_cpu_backend.allocate(
+                    meta.shape, meta.dtype, meta.fmt
+                )
+                if memory_obj is None:
+                    logger.error(
+                        "Failed to allocate memory for key %s",
+                        self._dbg_key_short(key),
+                    )
+                    break
+
+                try:
+                    payload_len = int(meta.size)
+                    total_len = (
+                        _round_up(payload_len, self.block_align)
+                        if self.use_odirect
+                        else payload_len
+                    )
+                    if logger.isEnabledFor(10):
+                        self._dbg_get_calls += 1
+                        self._dbg_get_bytes += payload_len
+                        if self._dbg_should_log(self._dbg_get_calls):
+                            logger.debug(
+                                "RustRawBlockBackend GET: %s offset=%d size=%d",
+                                self._dbg_key_short(key),
+                                int(entry.offset),
+                                payload_len,
+                            )
+
+                    buf = memory_obj.byte_array
+                    try:
+                        buf = buf.cast("B")
+                    except Exception:
+                        pass
+                    direct_view = self._build_direct_odirect_view(
+                        memory_obj=memory_obj,
+                        payload_len=payload_len,
+                        total_len=total_len,
+                        buffer_len=len(buf),
+                        zero_tail=False,
+                    )
+                    if direct_view is not None:
+                        raw_dev.pread_into(
+                            entry.offset + self.header_bytes,
+                            direct_view,
+                            total_len if len(direct_view) >= total_len else payload_len,
+                            total_len,
+                        )
+                    else:
+                        raw_dev.pread_into(
+                            entry.offset + self.header_bytes,
+                            buf,
+                            payload_len,
+                            total_len,
+                        )
+
+                    memory_obj.metadata.cached_positions = meta.cached_positions
+                except Exception as e:
+                    memory_obj.ref_count_down()
+                    logger.error(
+                        "Read failed for key %s: %s", self._dbg_key_short(key), e
+                    )
+                    raise
+
+                loaded.append(memory_obj)
+                touched.append(key)
         except Exception:
-            pass
-
-        try:
-            direct_view = self._build_direct_odirect_view(
-                memory_obj=memory_obj,
-                payload_len=payload_len,
-                total_len=total_len,
-                buffer_len=len(buf),
-                zero_tail=False,
-            )
-            with self._lock:
-                self._inflight_io_count += 1
-            if direct_view is not None:
-                read_payload_len = (
-                    total_len if len(direct_view) >= total_len else payload_len
-                )
-                self._rawdev().pread_into(
-                    entry.offset + self.header_bytes,
-                    direct_view,
-                    read_payload_len,
-                    total_len,
-                )
-            else:
-                self._rawdev().pread_into(
-                    entry.offset + self.header_bytes,
-                    buf,
-                    payload_len,
-                    total_len,
-                )
-        except Exception as e:
-            logger.error(f"Read failed for key {self._dbg_key_short(key)}: {e}")
+            for memory_obj in loaded:
+                memory_obj.ref_count_down()
+            loaded.clear()
+            touched.clear()
             raise
         finally:
             with self._lock:
+                for key in touched:
+                    self._touch(key)
                 self._inflight_io_count -= 1
                 self._last_io_ts = time.monotonic()
+        return loaded
 
-        memory_obj.metadata.cached_positions = meta.cached_positions
-        with self._lock:
-            self._touch(key)
-        return memory_obj
+    def get_blocking(self, key: CacheEngineKey) -> Optional[MemoryObj]:
+        loaded = self._batched_get_prefix([key])
+        return loaded[0] if loaded else None
+
+    def batched_get_blocking(
+        self,
+        keys: List[CacheEngineKey],
+    ) -> List[Optional[MemoryObj]]:
+        """
+        Get a batch of cache entries until the first miss.
+
+        :param List[CacheEngineKey] keys: Ordered keys to retrieve.
+
+        :return: A list aligned to ``keys`` where the successful prefix contains
+            loaded memory objects and the remaining suffix is ``None``.
+
+        :raises Exception: Propagates raw-device initialization or read failures.
+        """
+        if not keys:
+            return []
+
+        loaded = self._batched_get_prefix(keys)
+        return [*loaded, *([None] * (len(keys) - len(loaded)))]
 
     async def batched_async_contains(
         self,
@@ -733,6 +849,7 @@ class RustRawBlockBackend(StoragePluginInterface):
         keys: list[CacheEngineKey],
         pin: bool = False,
     ) -> int:
+        del lookup_id
         hit = 0
         with self._lock:
             for k in keys:
@@ -742,6 +859,26 @@ class RustRawBlockBackend(StoragePluginInterface):
                     self._pinned.add(k)
                 hit += 1
         return hit
+
+    async def batched_get_non_blocking(
+        self,
+        lookup_id: str,
+        keys: list[CacheEngineKey],
+        transfer_spec: Any = None,
+    ) -> list[MemoryObj]:
+        """
+        Asynchronously get a batch of cache entries until the first miss.
+
+        :param str lookup_id: Lookup identifier used by the storage manager.
+        :param list[CacheEngineKey] keys: Ordered keys to retrieve.
+        :param Any transfer_spec: Unused transfer hint for API compatibility.
+
+        :return: The successfully loaded prefix of ``keys`` in input order.
+
+        :raises Exception: Propagates raw-device initialization or read failures.
+        """
+        del lookup_id, transfer_spec
+        return await asyncio.to_thread(self._batched_get_prefix, keys)
 
     def get_allocator_backend(self) -> "AllocatorBackendInterface":
         assert self.local_cpu_backend is not None
@@ -1112,6 +1249,21 @@ class RustRawBlockBackend(StoragePluginInterface):
                         pin_count=0,
                     )
                     self._index[key] = _Entry(offset=offset, size=size, meta=meta)
+
+            if self.metadata is not None and self._index:
+                first_loaded_key = next(iter(self._index))
+                expected_worker_id = int(self.metadata.worker_id)
+                loaded_worker_id = int(first_loaded_key.worker_id)
+                if loaded_worker_id != expected_worker_id:
+                    logger.warning(
+                        "RustRawBlockBackend: loaded metadata may belong to another "
+                        "worker (device=%s, current_worker_id=%d, "
+                        "first_entry_worker_id=%d, first_entry_key=%s)",
+                        self.device_path,
+                        expected_worker_id,
+                        loaded_worker_id,
+                        first_loaded_key.to_string(),
+                    )
 
             # Remove free-slot entries that overlap with loaded index slots.
             used_slots = {

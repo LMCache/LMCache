@@ -170,6 +170,10 @@ Source: ``lmcache/v1/distributed/config.py``
      - L2 prefetch policy.  Determines which adapter loads each key
        when multiple adapters have it.
        The ``default`` policy picks the first adapter (lowest index).
+       Prefetched keys are temporary (deleted after the reader finishes).
+       The ``retain`` policy uses the same load plan but keeps
+       prefetched keys permanently in L1.
+       Choices: ``default``, ``retain``.
    * - ``--l2-prefetch-max-in-flight``
      - ``8``
      - Maximum number of concurrent prefetch (L2 load) requests.
