@@ -137,10 +137,36 @@ class RemoteConnector(metaclass=abc.ABCMeta):
         actual_shape = torch.Size(shape_list)
         memory_obj.raw_data = memory_obj.raw_data[:bytes_read]
         memory_obj.meta.shape = actual_shape
+
+        # Update shapes list if it exists (multi-group support)
+        if memory_obj.meta.shapes is not None:
+            new_shapes = []
+            for s in memory_obj.meta.shapes:
+                sl = list(s)
+                td = 2 if len(sl) == 4 else 0
+                sl[td] = num_tokens
+                new_shapes.append(torch.Size(sl))
+            memory_obj.meta.shapes = new_shapes
+
         # Sync group_prefix_sum so that get_size() / byte_array reflect the
         # truncated size rather than the original full-chunk size.
         if hasattr(memory_obj, "group_prefix_sum"):
-            memory_obj.group_prefix_sum = [0, bytes_read]  # type: ignore[attr-defined]
+            if (
+                memory_obj.meta.shapes is not None
+                and memory_obj.meta.dtypes is not None
+            ):
+                new_prefix_sum = [0]
+                current_offset = 0
+                for s, d in zip(
+                    memory_obj.meta.shapes,
+                    memory_obj.meta.dtypes,
+                    strict=True,
+                ):
+                    current_offset += s.numel() * d.itemsize
+                    new_prefix_sum.append(current_offset)
+                memory_obj.group_prefix_sum = new_prefix_sum
+            else:
+                memory_obj.group_prefix_sum = [0, bytes_read]  # type: ignore[attr-defined]
 
         return memory_obj
 

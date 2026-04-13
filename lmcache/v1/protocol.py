@@ -112,14 +112,12 @@ def pad_shape_to_4d(shape: torch.Size) -> list[int]:
         A list of exactly 4 integers representing the padded shape.
 
     Raises:
-        AssertionError: If the shape has more than 4 dimensions.
+        ValueError: If the shape has more than 4 dimensions.
     """
-    assert len(shape) <= 4, (
-        f"Shape dimension must be <= 4 for serialization, got {len(shape)}"
-    )
-    if len(shape) == 4:
-        return list(shape)
-
+    if len(shape) > 4:
+        raise ValueError(
+            f"Shape dimension must be <= 4 for serialization, got {len(shape)}"
+        )
     padded = list(shape) + [0] * (4 - len(shape))
     return padded
 

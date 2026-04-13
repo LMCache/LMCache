@@ -66,7 +66,7 @@ def test_pad_shape_to_4d_3d():
 
 
 def test_pad_shape_too_large():
-    with pytest.raises(AssertionError):
+    with pytest.raises(ValueError):
         pad_shape_to_4d(torch.Size([1, 2, 3, 4, 5]))
 
 
@@ -119,7 +119,7 @@ def test_remote_metadata_roundtrip_sub4d(shape):
     ids=["2D", "3D", "4D"],
 )
 def test_client_meta_message_roundtrip_sub4d(shape):
-    key = CacheEngineKey("model", 0, 1, "abc123")
+    key = CacheEngineKey("model", 0, 1, 12345, torch.float16)
     original = ClientMetaMessage(
         command=ClientCommand.PUT,
         key=key,
