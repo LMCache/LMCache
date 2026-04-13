@@ -126,7 +126,6 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
         self._max_capacity_bytes = int(max_capacity_gb * (1024**3))
         self._current_size_bytes: int = 0
         self._key_sizes: dict[ObjectKey, int] = {}
-        self._per_user_size_bytes: dict[str, int] = {}
         # Pending store sizes: native future_id -> (keys, per_key_sizes)
         self._pending_store_sizes: dict[int, tuple[list[ObjectKey], list[int]]] = {}
 
@@ -307,7 +306,8 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
             )
             return
 
-        self._notify_keys_deleted(keys)
+        # Note: _notify_keys_deleted is fired from the demux loop with
+        # the actual deleted keys + sizes. No extra notification here.
 
     def get_usage(self) -> tuple[float, float]:
         if self._max_capacity_bytes <= 0:
@@ -315,21 +315,6 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
         with self._lock:
             usage = self._current_size_bytes / self._max_capacity_bytes
             return (usage, usage)
-
-    def get_per_user_usage(self) -> dict[str, tuple[float, float]]:
-        """Return per-user L2 storage utilization in bytes.
-
-        Returns:
-            dict[str, tuple[float, float]]: Mapping of user_id to
-                ``(current_bytes, projected_bytes)``. Only users with
-                positive usage are included.
-        """
-        with self._lock:
-            return {
-                uid: (float(bytes_used), float(bytes_used))
-                for uid, bytes_used in self._per_user_size_bytes.items()
-                if bytes_used > 0
-            }
 
     # ---------------------------------------------------------------
     # Cleanup
@@ -381,7 +366,10 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
             # Collect listener notifications to fire after
             # releasing the lock.
             keys_stored: list[ObjectKey] = []
+            stored_sizes: list[int] = []
             keys_accessed: list[ObjectKey] = []
+            keys_deleted: list[ObjectKey] = []
+            deleted_sizes: list[int] = []
 
             with self._lock:
                 for (
@@ -416,11 +404,8 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
                                 if key not in self._key_sizes:
                                     self._key_sizes[key] = size
                                     self._current_size_bytes += size
-                                    self._per_user_size_bytes[key.user_id] = (
-                                        self._per_user_size_bytes.get(key.user_id, 0)
-                                        + size
-                                    )
-                            keys_stored.extend(store_keys)
+                                    keys_stored.append(key)
+                                    stored_sizes.append(size)
                         os.eventfd_write(self._store_efd, 1)
 
                     elif op_type == self._OP_LOOKUP:
@@ -462,16 +447,16 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
                                     key = lookup_keys[i]
                                     size = self._key_sizes.pop(key, 0)
                                     self._current_size_bytes -= size
-                                    self._per_user_size_bytes[key.user_id] = (
-                                        self._per_user_size_bytes.get(key.user_id, 0)
-                                        - size
-                                    )
+                                    keys_deleted.append(key)
+                                    deleted_sizes.append(size)
                         evt = self._pending_delete_events.pop(task_id, None)
                         if evt is not None:
                             evt.set()
 
             # Fire listener notifications outside the lock
             if keys_stored:
-                self._notify_keys_stored(keys_stored)
+                self._notify_keys_stored(keys_stored, sizes=stored_sizes)
             if keys_accessed:
                 self._notify_keys_accessed(keys_accessed)
+            if keys_deleted:
+                self._notify_keys_deleted(keys_deleted, sizes=deleted_sizes)

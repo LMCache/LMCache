@@ -121,7 +121,6 @@ class MockL2Adapter(L2AdapterInterface):
         self._memory_objects: dict[ObjectKey, MemoryObj] = {}
         self._locked_keys: dict[ObjectKey, int] = defaultdict(int)
         self._current_size_bytes: int = 0
-        self._per_user_size_bytes: dict[str, int] = {}
 
         # Task ID management
         self._next_task_id: L2TaskId = 0
@@ -350,6 +349,7 @@ class MockL2Adapter(L2AdapterInterface):
     def delete(self, keys: list[ObjectKey]) -> None:
         """Delete a batch of objects from the mock adapter."""
         deleted_keys: list[ObjectKey] = []
+        deleted_sizes: list[int] = []
         with self._lock:
             for key in keys:
                 if key not in self._memory_objects:
@@ -357,12 +357,10 @@ class MockL2Adapter(L2AdapterInterface):
                 obj = self._memory_objects.pop(key)
                 obj_size = obj.get_size()
                 self._current_size_bytes -= obj_size
-                self._per_user_size_bytes[key.user_id] = (
-                    self._per_user_size_bytes.get(key.user_id, 0) - obj_size
-                )
                 deleted_keys.append(key)
+                deleted_sizes.append(obj_size)
         if deleted_keys:
-            self._notify_keys_deleted(deleted_keys)
+            self._notify_keys_deleted(deleted_keys, sizes=deleted_sizes)
 
     def get_usage(self) -> tuple[float, float]:
         """Return (current_usage, usage_after_ongoing_eviction) in [0, 1]."""
@@ -371,21 +369,6 @@ class MockL2Adapter(L2AdapterInterface):
                 return (0.0, 0.0)
             usage = self._current_size_bytes / self._max_capacity_bytes
             return (usage, usage)
-
-    def get_per_user_usage(self) -> dict[str, tuple[float, float]]:
-        """Return per-user L2 storage utilization in bytes.
-
-        Returns:
-            dict[str, tuple[float, float]]: Mapping of user_id to
-                ``(current_bytes, projected_bytes)``. Only users with
-                positive usage are included.
-        """
-        with self._lock:
-            return {
-                uid: (float(bytes_used), float(bytes_used))
-                for uid, bytes_used in self._per_user_size_bytes.items()
-                if bytes_used > 0
-            }
 
     def _signal_store_event(self) -> None:
         """Signal the store event fd to notify completion."""
@@ -406,6 +389,7 @@ class MockL2Adapter(L2AdapterInterface):
         start = time.perf_counter()
 
         stored_keys: list[ObjectKey] = []
+        stored_sizes: list[int] = []
         try:
             for key, obj in zip(keys, objects, strict=False):
                 obj_size = obj.get_size()
@@ -436,9 +420,7 @@ class MockL2Adapter(L2AdapterInterface):
                 self._current_size_bytes += obj_size
                 total_bytes += obj_size
                 stored_keys.append(key)
-                self._per_user_size_bytes[key.user_id] = (
-                    self._per_user_size_bytes.get(key.user_id, 0) + obj_size
-                )
+                stored_sizes.append(obj_size)
         except Exception:
             success = False
 
@@ -456,7 +438,7 @@ class MockL2Adapter(L2AdapterInterface):
             self._completed_store_tasks[task_id] = success
 
         if stored_keys:
-            self._notify_keys_stored(stored_keys)
+            self._notify_keys_stored(stored_keys, sizes=stored_sizes)
         self._signal_store_event()
 
     def _signal_lookup_event(self) -> None:

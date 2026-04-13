@@ -9,6 +9,7 @@ from __future__ import annotations
 # Standard
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING
+import threading
 
 if TYPE_CHECKING:
     # First Party
@@ -65,6 +66,12 @@ class L2AdapterInterface(ABC):
 
     def __init__(self):
         self._listeners: list[L2AdapterListener] = []
+        # Per-user byte tracking, updated by _notify_keys_stored /
+        # _notify_keys_deleted. All non-abstract subclasses automatically
+        # gain per-user usage reporting by calling super().__init__() and
+        # passing ``sizes`` to the notification helpers.
+        self._per_user_size_bytes: dict[str, int] = {}
+        self._per_user_bytes_lock = threading.Lock()
 
     #####################
     # Event Fd Interface
@@ -278,7 +285,19 @@ class L2AdapterInterface(ABC):
         """Register a listener to receive L2 adapter events."""
         self._listeners.append(listener)
 
-    def _notify_keys_stored(self, keys: list[ObjectKey]) -> None:
+    def _notify_keys_stored(self, keys: list[ObjectKey], sizes: list[int]) -> None:
+        """Fire store notifications and update the per-user byte counter.
+
+        Args:
+            keys: The keys that were successfully stored.
+            sizes: Byte size of each stored object. Must have the same
+                length as ``keys``.
+        """
+        with self._per_user_bytes_lock:
+            for key, size in zip(keys, sizes, strict=True):
+                self._per_user_size_bytes[key.user_id] = (
+                    self._per_user_size_bytes.get(key.user_id, 0) + size
+                )
         for listener in self._listeners:
             listener.on_l2_keys_stored(keys)
 
@@ -286,7 +305,19 @@ class L2AdapterInterface(ABC):
         for listener in self._listeners:
             listener.on_l2_keys_accessed(keys)
 
-    def _notify_keys_deleted(self, keys: list[ObjectKey]) -> None:
+    def _notify_keys_deleted(self, keys: list[ObjectKey], sizes: list[int]) -> None:
+        """Fire delete notifications and update the per-user byte counter.
+
+        Args:
+            keys: The keys that were successfully deleted.
+            sizes: Byte size of each deleted object. Must have the same
+                length as ``keys``.
+        """
+        with self._per_user_bytes_lock:
+            for key, size in zip(keys, sizes, strict=True):
+                self._per_user_size_bytes[key.user_id] = (
+                    self._per_user_size_bytes.get(key.user_id, 0) - size
+                )
         for listener in self._listeners:
             listener.on_l2_keys_deleted(keys)
 
@@ -334,15 +365,23 @@ class L2AdapterInterface(ABC):
     def get_per_user_usage(self) -> dict[str, tuple[float, float]]:
         """Return per-user L2 storage utilization.
 
+        The value is maintained by ``_notify_keys_stored`` and
+        ``_notify_keys_deleted`` in the base class. Subclasses only
+        need to pass ``sizes`` to those notifications to participate.
+
         Returns:
             dict[str, tuple[float, float]]: Mapping of user_id to
                 ``(current_bytes, projected_bytes)`` where each value
                 is the number of bytes used (not a fraction). The
                 caller compares against the configured per-user limit.
-
-        The default returns an empty dict (no per-user tracking).
+                Only users with positive usage are included.
         """
-        return {}
+        with self._per_user_bytes_lock:
+            return {
+                uid: (float(b), float(b))
+                for uid, b in self._per_user_size_bytes.items()
+                if b > 0
+            }
 
     #####################
     # Cleanup Interface

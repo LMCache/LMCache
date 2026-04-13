@@ -420,11 +420,70 @@ def _create_key(self, token_ids, start, end, request_id, user_id=""):
 keys with `user_id=""`. The server resolves the actual user_id from the
 session (populated earlier during the scheduler's LOOKUP).
 
-### 4. L2 Adapter Interface — Add `get_per_user_usage()`
+### 4. Per-User Byte Tracking in the Adapter Base Class
+
+Per-user byte tracking is **built into `L2AdapterInterface`**. Adapters do
+not maintain their own per-user counters and do not override
+`get_per_user_usage()`. Instead, they pass `sizes` to the existing
+`_notify_*` helpers and the base class updates its internal per-user byte
+counter automatically. Future adapters get per-user tracking for free.
 
 **File:** `lmcache/v1/distributed/l2_adapters/base.py`
 
-Add a new method to `L2AdapterInterface`:
+Add state and real implementation of `get_per_user_usage()`:
+
+```python
+class L2AdapterInterface(ABC):
+    def __init__(self):
+        self._listeners: list[L2AdapterListener] = []
+        self._per_user_size_bytes: dict[str, int] = {}
+        self._per_user_bytes_lock = threading.Lock()
+```
+
+Extend the internal `_notify_*` signatures to require `sizes`:
+
+```python
+def _notify_keys_stored(
+    self, keys: list[ObjectKey], sizes: list[int]
+) -> None:
+    """Fire store notifications and update per-user byte counters.
+
+    Args:
+        keys: The keys that were successfully stored.
+        sizes: Byte size of each stored object. Must have the same
+            length as ``keys``.
+    """
+    with self._per_user_bytes_lock:
+        for key, size in zip(keys, sizes, strict=True):
+            self._per_user_size_bytes[key.user_id] = (
+                self._per_user_size_bytes.get(key.user_id, 0) + size
+            )
+    for listener in self._listeners:
+        listener.on_l2_keys_stored(keys)
+
+def _notify_keys_deleted(
+    self, keys: list[ObjectKey], sizes: list[int]
+) -> None:
+    """Fire delete notifications and update per-user byte counters.
+
+    Args:
+        keys: The keys that were successfully deleted.
+        sizes: Byte size of each deleted object. Must have the same
+            length as ``keys``.
+    """
+    with self._per_user_bytes_lock:
+        for key, size in zip(keys, sizes, strict=True):
+            self._per_user_size_bytes[key.user_id] = (
+                self._per_user_size_bytes.get(key.user_id, 0) - size
+            )
+    for listener in self._listeners:
+        listener.on_l2_keys_deleted(keys)
+```
+
+`_notify_keys_accessed(keys)` is unchanged — it does not affect byte counts.
+
+Implement `get_per_user_usage()` in the base class (no longer returns
+empty by default):
 
 ```python
 def get_per_user_usage(self) -> dict[str, tuple[float, float]]:
@@ -432,65 +491,88 @@ def get_per_user_usage(self) -> dict[str, tuple[float, float]]:
 
     Returns:
         dict[str, tuple[float, float]]: Mapping of user_id to
-            (current_usage, usage_after_ongoing_eviction) where
-            each value is bytes used (NOT a fraction). The caller
-            compares against the configured per-user limit.
-
-    The default returns an empty dict (no per-user tracking).
+            (current_bytes, projected_bytes). The caller compares
+            against the configured per-user limit (in bytes).
     """
-    return {}
+    with self._per_user_bytes_lock:
+        return {
+            uid: (float(b), float(b))
+            for uid, b in self._per_user_size_bytes.items()
+            if b > 0
+        }
 ```
 
 **Why return bytes, not fractions?** Per-user limits are absolute (e.g., 2GB),
 not fractions of total capacity. The controller compares
 `per_user_bytes > per_user_limit_bytes` directly.
 
-### 4. Adapter Implementations — Track per-user bytes
+**External listener interface is unchanged.** The `L2AdapterListener`
+interface (`on_l2_keys_stored`, `on_l2_keys_accessed`, `on_l2_keys_deleted`)
+still receives only keys. `sizes` is internal to the adapter/base-class
+boundary — external listeners (eviction policy bridge) are unaffected.
 
-Each adapter that supports eviction needs to maintain:
-- `_per_user_size_bytes: dict[str, int]` — bytes stored per user
+### 5. Adapter Implementations — Pass `sizes` to Notifications
 
-No separate `_key_to_user` mapping is needed because `user_id` is part of
-ObjectKey identity — `key.user_id` is always authoritative. The adapter reads
-it directly from the key.
+Each adapter already knows the size of data it stores and deletes. The
+only change required is to pass those sizes to the `_notify_*` helpers.
+Per-user tracking, the `_per_user_size_bytes` dict, and
+`get_per_user_usage()` are all handled by the base class.
 
 **File:** `lmcache/v1/distributed/l2_adapters/mock_l2_adapter.py`
 
-In `_execute_store_in_the_loop`, when a key is stored:
+In `_execute_store_in_the_loop`, collect sizes alongside stored keys:
+
 ```python
-user_id = key.user_id
-if user_id:
-    self._per_user_size_bytes[user_id] = (
-        self._per_user_size_bytes.get(user_id, 0) + obj_size
-    )
+stored_keys: list[ObjectKey] = []
+stored_sizes: list[int] = []
+for key, obj in zip(keys, objects, strict=False):
+    obj_size = obj.get_size()
+    ...
+    stored_keys.append(key)
+    stored_sizes.append(obj_size)
+...
+self._notify_keys_stored(stored_keys, sizes=stored_sizes)
 ```
 
-In `delete()`, when a key is removed:
-```python
-user_id = key.user_id
-if user_id:
-    self._per_user_size_bytes[user_id] = (
-        self._per_user_size_bytes.get(user_id, 0) - obj.get_size()
-    )
-```
+In `delete()`, collect sizes of removed objects:
 
-Implement `get_per_user_usage()`:
 ```python
-def get_per_user_usage(self) -> dict[str, tuple[float, float]]:
-    with self._lock:
-        return {
-            uid: (bytes_used, bytes_used)
-            for uid, bytes_used in self._per_user_size_bytes.items()
-            if bytes_used > 0
-        }
+deleted_keys: list[ObjectKey] = []
+deleted_sizes: list[int] = []
+for key in keys:
+    if key not in self._memory_objects:
+        continue
+    obj = self._memory_objects.pop(key)
+    deleted_keys.append(key)
+    deleted_sizes.append(obj.get_size())
+    self._current_size_bytes -= obj.get_size()
+self._notify_keys_deleted(deleted_keys, sizes=deleted_sizes)
 ```
 
 **File:** `lmcache/v1/distributed/l2_adapters/nixl_store_l2_adapter.py`
 **File:** `lmcache/v1/distributed/l2_adapters/native_connector_l2_adapter.py`
 
-Same pattern. The NixlStore adapter already tracks pool-based sizes; add a
-parallel per-user counter. The NativeConnector adapter already does client-side
-size tracking; extend it with per-user accounting.
+Same pattern. Both adapters already compute sizes during store
+(NixlStore: `storage_obj.size`; NativeConnector: `sizes` list from the
+pybind store result) and know sizes during delete (NixlStore: `obj.size`
+before free; NativeConnector: `self._key_sizes.pop(key)`). They just
+need to collect these into lists and pass to the `_notify_*` helpers.
+
+**Adapters to remove code from:** drop `_per_user_size_bytes` dict,
+`_per_user_bytes_lock` (if added separately), and any
+`get_per_user_usage()` override.
+
+### Future adapters
+
+Any new L2 adapter inherits per-user tracking automatically. As long as it:
+
+- Calls `super().__init__()` in `__init__`.
+- Fires `_notify_keys_stored(keys, sizes)` with real sizes after store.
+- Fires `_notify_keys_deleted(keys, sizes)` with real sizes after delete.
+
+— it will correctly report per-user usage via `get_per_user_usage()`
+inherited from the base class, and the eviction controller will enforce
+per-user quotas on it without any adapter-specific code.
 
 ### 5. `UserLRUEvictionPolicy` — Per-user LRU tracking
 
@@ -978,7 +1060,6 @@ global watermark fires before any user is over their individual limit.
 | `lmcache/v1/multiprocess/custom_types.py` | Append `user_id: str = ""` to `IPCCacheEngineKey` (after `request_id`, preserves wire compat); update `no_worker_id_version()` to preserve `user_id` |
 | `lmcache/v1/multiprocess/server.py` | Resolve `user_id` from IPC key or session; pass to `ipc_key_to_object_keys()` in `store()`, `retrieve()`, `lookup()` |
 | `lmcache/v1/multiprocess/session.py` | Add `user_id: str = ""` field to `Session` class |
-| `lmcache/integration/vllm/vllm_v1_adapter.py` | Extract `lmcache.user_id` from `request_configs`; pass `user_id` to scheduler lookup calls |
 | `lmcache/integration/vllm/vllm_multi_process_adapter.py` | Add `user_id=""` param to scheduler adapter's `maybe_submit_lookup_request`, `free_lookup_locks`, `_create_key`. Worker adapter unchanged. |
 | `lmcache/v1/distributed/eviction.py` | Add `user_id: str \| None = None` param to `EvictionPolicy.get_eviction_actions()` |
 | `lmcache/v1/distributed/eviction_policy/lru.py` | Accept (and ignore) `user_id` param in `get_eviction_actions()` |
@@ -987,12 +1068,12 @@ global watermark fires before any user is over their individual limit.
 | `lmcache/v1/distributed/eviction_policy/__init__.py` | Export `UserLRUEvictionPolicy` |
 | `lmcache/v1/distributed/config.py` | Add `"UserLRU"` to `eviction_policy` literal |
 | `lmcache/v1/distributed/l2_adapters/config.py` | Add `"UserLRU"` to allowed values in `_parse_eviction_config()` |
-| `lmcache/v1/distributed/l2_adapters/base.py` | Add `get_per_user_usage() -> dict[str, tuple[float, float]]` default method |
-| `lmcache/v1/distributed/l2_adapters/mock_l2_adapter.py` | Add `_per_user_size_bytes` tracking; implement `get_per_user_usage()`; update store/delete to maintain per-user byte counters |
-| `lmcache/v1/distributed/l2_adapters/nixl_store_l2_adapter.py` | Same per-user tracking pattern as mock adapter |
-| `lmcache/v1/distributed/l2_adapters/native_connector_l2_adapter.py` | Same per-user tracking; update `_object_key_to_string()` to include `user_id` |
-| `lmcache/v1/distributed/l2_adapters/fs_l2_adapter.py` | Update `_object_key_to_filename()` / `_filename_to_object_key()` to include `user_id`; add per-user tracking |
-| `lmcache/v1/distributed/l2_adapters/mooncake_store_l2_adapter.py` | Same per-user tracking pattern as mock adapter |
+| `lmcache/v1/distributed/l2_adapters/base.py` | Add `_per_user_size_bytes` + `_per_user_bytes_lock` state; extend `_notify_keys_stored/_notify_keys_deleted` with required `sizes` param; implement `get_per_user_usage()` using built-in counter |
+| `lmcache/v1/distributed/l2_adapters/mock_l2_adapter.py` | Pass `sizes` to `_notify_keys_stored/_notify_keys_deleted`. Remove any per-adapter `_per_user_size_bytes` dict and `get_per_user_usage()` override. |
+| `lmcache/v1/distributed/l2_adapters/nixl_store_l2_adapter.py` | Same: pass `sizes`, remove per-adapter tracking |
+| `lmcache/v1/distributed/l2_adapters/native_connector_l2_adapter.py` | Same: pass `sizes`, remove per-adapter tracking. Update `_object_key_to_string()` to include `user_id`. |
+| `lmcache/v1/distributed/l2_adapters/fs_l2_adapter.py` | Update `_object_key_to_filename()` / `_filename_to_object_key()` to include `user_id`. No per-user byte tracking needed (no eviction support). |
+| `lmcache/v1/distributed/l2_adapters/mooncake_store_l2_adapter.py` | Same: pass `sizes` if it fires `_notify_*` directly (otherwise inherits from native_connector) |
 | `lmcache/v1/multiprocess/blend_server_v2.py` | Pass `user_id` to `ipc_key_to_object_keys()` in all 4 call sites (same pattern as `server.py`) |
 | `csrc/storage_backends/fs/connector.cpp` | Update `key_to_filename()` parser to handle `user_id@` prefix in the `@`-separated key format |
 | `lmcache/v1/distributed/storage_controllers/eviction_controller.py` | Accept `QuotaManager`; add per-user usage trigger in `_check_and_evict()` |
