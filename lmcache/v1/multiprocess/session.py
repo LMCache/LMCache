@@ -6,7 +6,7 @@ in the multiprocess cache server.
 
 # Standard
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any, Optional, overload
 import threading
 import time
 
@@ -45,16 +45,28 @@ class Session:
         with self._lock:
             self.token_ids = full_token_ids
 
-    def get_hashes(self, start: int, end: int) -> list:
+    @overload
+    def get_hashes(self, start: int, end: int) -> list: ...
+
+    @overload
+    def get_hashes(self, start: int) -> list: ...
+
+    def get_hashes(self, start: int, end: int | None = None) -> list:
         """Compute and return chunk hashes for the [start, end) token range.
 
         Internally computes rolling hashes up to end_chunk, skipping
         already-computed chunks.
 
+        Two calling conventions are supported (declared via ``@overload``)::
+
+            get_hashes(start, end)  # explicit end
+            get_hashes(start)       # end = last full-chunk boundary
+
         Args:
-            start: Start token index.
-            end: End token index. If negative, it is treated as the
-                last token and automatically aligned down to chunk_size.
+            start: Start token index (must be aligned to chunk_size).
+            end: End token index (must be aligned to chunk_size).
+                When omitted (``None``), automatically set to the last
+                full-chunk boundary of the current token sequence.
 
         Returns:
             List of hash values for chunks in [start_chunk, end_chunk).
@@ -66,12 +78,10 @@ class Session:
         start_chunk = start // chunk_size
 
         with self._lock:
-            # Lock must be held before resolving negative `end`, because
-            # it reads `self.token_ids` which may be concurrently replaced
-            # by `set_tokens` from another thread.
-            if end < 0:
-                # Negative end means "up to the last token",
-                # align down to chunk_size boundary.
+            if end is None:
+                # No explicit end: use the last full-chunk boundary.
+                # Lock must be held here because `self.token_ids` may be
+                # concurrently replaced by `set_tokens` from another thread.
                 end = len(self.token_ids) - (len(self.token_ids) % chunk_size)
             assert end % chunk_size == 0, (
                 f"end ({end}) must be a multiple of chunk_size ({chunk_size})"

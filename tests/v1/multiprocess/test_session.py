@@ -221,49 +221,51 @@ class TestSessionThreadSafety:
         assert not errors, "\n".join(errors)
 
 
-class TestSessionGetHashesNegativeEnd:
-    """Tests for Session.get_hashes with negative end (auto-align)."""
+class TestSessionGetHashesOptionalEnd:
+    """
+    Tests for Session.get_hashes with optional end (auto-align to last full chunk).
+    """
 
-    def test_get_hashes_negative_end_empty(self, session: Session) -> None:
-        """get_hashes(0, -1) should return empty list when no tokens set."""
-        assert session.get_hashes(0, -1) == []
+    def test_get_hashes_optional_end_empty(self, session: Session) -> None:
+        """get_hashes(0) should return empty list when no tokens set."""
+        assert session.get_hashes(0) == []
 
-    def test_get_hashes_negative_end_after_compute(self, session: Session) -> None:
-        """get_hashes(0, -1) should return all computed hashes."""
+    def test_get_hashes_optional_end_after_compute(self, session: Session) -> None:
+        """get_hashes(0) should return all computed hashes."""
         session.set_tokens(list(range(12)))  # 3 chunks of 4
-        all_hashes = session.get_hashes(0, -1)
+        all_hashes = session.get_hashes(0)
         assert len(all_hashes) == 3
 
-    def test_get_hashes_negative_end_incremental(self, session: Session) -> None:
-        """get_hashes(0, -1) should accumulate hashes from incremental calls."""
+    def test_get_hashes_optional_end_incremental(self, session: Session) -> None:
+        """get_hashes(0) should accumulate hashes from incremental calls."""
         session.set_tokens(list(range(12)))  # 3 chunks of 4
         # First compute 2 chunks
         session.get_hashes(0, 8)
-        # get_hashes(0, -1) should now compute all 3 chunks
-        assert len(session.get_hashes(0, -1)) == 3
+        # get_hashes(0) should now compute all 3 chunks
+        assert len(session.get_hashes(0)) == 3
 
-    def test_get_hashes_negative_end_matches_explicit(self, session: Session) -> None:
-        """get_hashes(0, -1) should return the same as get_hashes(0, aligned_len)."""
+    def test_get_hashes_optional_end_matches_explicit(self, session: Session) -> None:
+        """get_hashes(0) should return the same as get_hashes(0, aligned_len)."""
         session.set_tokens(list(range(12)))
         expected = session.get_hashes(0, 12)
-        assert session.get_hashes(0, -1) == expected
+        assert session.get_hashes(0) == expected
 
-    def test_get_hashes_negative_end_truncates_partial_chunk(
+    def test_get_hashes_optional_end_truncates_partial_chunk(
         self, session: Session
     ) -> None:
-        """get_hashes(0, -1) should ignore trailing tokens that don't fill a chunk."""
+        """get_hashes(0) should ignore trailing tokens that don't fill a chunk."""
         # 14 tokens with chunk_size=4 -> 3 full chunks (12 tokens), 2 leftover
         session.set_tokens(list(range(14)))
-        hashes = session.get_hashes(0, -1)
+        hashes = session.get_hashes(0)
         assert len(hashes) == 3
 
-    def test_get_hashes_negative_end_matches_hasher(
+    def test_get_hashes_optional_end_matches_hasher(
         self, hasher: TokenHasher, session: Session
     ) -> None:
-        """get_hashes(0, -1) should match standalone TokenHasher results."""
+        """get_hashes(0) should match standalone TokenHasher results."""
         tokens = list(range(12))
         session.set_tokens(tokens)
-        session_hashes = session.get_hashes(0, -1)
+        session_hashes = session.get_hashes(0)
         hasher_hashes = hasher.compute_chunk_hashes(tokens)
         # Convert session hashes to bytes for comparison
         converted = [TokenHasher.hash_to_bytes(h) for h in session_hashes]
@@ -316,7 +318,7 @@ class TestSessionManagerRemoveReturnsSession:
         removed = mgr.remove("req-1")
         assert removed is not None
         assert removed.request_id == "req-1"
-        assert len(removed.get_hashes(0, -1)) == 2
+        assert len(removed.get_hashes(0)) == 2
         assert removed.lookup_ipc_key is key
 
     def test_remove_clears_from_manager(self, hasher: TokenHasher) -> None:
