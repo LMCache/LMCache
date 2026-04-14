@@ -7,6 +7,9 @@ immediately after being stored to L2 by the StoreController), there
 is no need for the eviction policy to track keys at all.
 """
 
+# Standard
+from collections.abc import Callable
+
 # First Party
 from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.distributed.eviction import EvictionPolicy
@@ -38,5 +41,9 @@ class NoOpEvictionPolicy(EvictionPolicy):
     def on_keys_removed(self, keys: list[ObjectKey]):
         pass
 
-    def get_eviction_actions(self, expected_ratio: float) -> list[EvictionAction]:
+    def get_eviction_actions(
+        self,
+        expected_ratio: float,
+        key_eligible_filter: Callable[[ObjectKey], bool] | None = None,
+    ) -> list[EvictionAction]:
         return []

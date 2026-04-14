@@ -53,6 +53,9 @@ class EventType(Enum):
     # vLLM block allocation events
     MP_VLLM_BLOCK_ALLOCATION = "mp.vllm.block_allocation"
 
+    # vLLM end session events
+    MP_VLLM_END_SESSION = "mp.vllm.end_session"
+
 
 @dataclass
 class Event:
