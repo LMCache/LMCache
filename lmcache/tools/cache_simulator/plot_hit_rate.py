@@ -50,12 +50,16 @@ def capacity_range_bytes(
     return sorted({round(10 ** (log_min + i * step)) for i in range(num_points)})
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(
-        description=(
-            "Plot token cache hit rate vs cache capacity from lookup-hash JSONL logs"
-        )
-    )
+def add_sweep_arguments(parser: argparse.ArgumentParser) -> None:
+    """Register all ``sweep`` CLI flags onto *parser*.
+
+    Called by both the module ``main()`` and by
+    :class:`~lmcache.cli.commands.tool.ToolCommand` so that flag definitions
+    live in exactly one place.
+
+    Args:
+        parser: The ``ArgumentParser`` (or sub-parser) to add flags to.
+    """
     parser.add_argument(
         "-i",
         "--input",
@@ -122,8 +126,19 @@ def main() -> None:
         help="Output image path (default: hit_rate_vs_capacity.png)",
     )
 
-    args = parser.parse_args()
 
+def run_sweep(args: argparse.Namespace) -> None:
+    """Execute the sweep workflow from a parsed argument namespace.
+
+    Loads events, resolves ``kv_bytes_per_chunk``, sweeps across a log-spaced
+    range of cache capacities, prints a results table, and saves a hit-rate vs
+    capacity PNG.  Called by both the module ``main()`` and by
+    :class:`~lmcache.cli.commands.tool.ToolCommand`.
+
+    Args:
+        args: Parsed CLI arguments.  Must have the attributes registered by
+            :func:`add_sweep_arguments`.
+    """
     paths = [Path(p) for p in args.input]
     print(f"Loading lookup events from {[str(p) for p in paths]} …")
     events = load_lookup_events(paths, model=args.model, max_samples=args.max_samples)
@@ -199,6 +214,17 @@ def main() -> None:
     fig.tight_layout()
     fig.savefig(args.output, dpi=150)
     print(f"\nPlot saved to '{args.output}'")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Plot token cache hit rate vs cache capacity from lookup-hash JSONL logs"
+        )
+    )
+    add_sweep_arguments(parser)
+    args = parser.parse_args()
+    run_sweep(args)
 
 
 if __name__ == "__main__":

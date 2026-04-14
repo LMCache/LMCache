@@ -657,17 +657,20 @@ def plot_statistics(
 
 
 # ---------------------------------------------------------------------------
-# CLI entry point
+# CLI helpers — shared between the module entry point and lmcache tool
 # ---------------------------------------------------------------------------
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(
-        description=(
-            "Simulate LRU token cache hit rate from lookup-hash JSONL logs. "
-            "Prints a text report and saves a multi-panel statistics chart."
-        )
-    )
+def add_simulate_arguments(parser: argparse.ArgumentParser) -> None:
+    """Register all ``simulate`` CLI flags onto *parser*.
+
+    Called by both the module ``main()`` and by
+    :class:`~lmcache.cli.commands.tool.ToolCommand` so that flag definitions
+    live in exactly one place.
+
+    Args:
+        parser: The ``ArgumentParser`` (or sub-parser) to add flags to.
+    """
     parser.add_argument(
         "-i",
         "--input",
@@ -715,8 +718,18 @@ def main() -> None:
         help="Output image path (default: cache_stats.png)",
     )
 
-    args = parser.parse_args()
 
+def run_simulate(args: argparse.Namespace) -> None:
+    """Execute the simulate workflow from a parsed argument namespace.
+
+    Loads events, resolves ``kv_bytes_per_chunk``, runs the simulator, prints
+    a text report, and saves a statistics PNG.  Called by both the module
+    ``main()`` and by :class:`~lmcache.cli.commands.tool.ToolCommand`.
+
+    Args:
+        args: Parsed CLI arguments.  Must have the attributes registered by
+            :func:`add_simulate_arguments`.
+    """
     paths = [Path(p) for p in args.input]
     print(f"Loading lookup events from {[str(p) for p in paths]} …")
     events = load_lookup_events(paths, model=args.model, max_samples=args.max_samples)
@@ -755,6 +768,27 @@ def main() -> None:
     results = simulate(events, capacity_bytes, kv_bpc)
     print_statistics(results)
     plot_statistics(results, events, args.output)
+
+
+# ---------------------------------------------------------------------------
+# CLI entry point
+# ---------------------------------------------------------------------------
+
+
+def main() -> None:
+    """CLI entry point for ``python -m lmcache.tools.cache_simulator.simulator``.
+
+    Parses command-line arguments and delegates to :func:`run_simulate`.
+    """
+    parser = argparse.ArgumentParser(
+        description=(
+            "Simulate LRU token cache hit rate from lookup-hash JSONL logs. "
+            "Prints a text report and saves a multi-panel statistics chart."
+        )
+    )
+    add_simulate_arguments(parser)
+    args = parser.parse_args()
+    run_simulate(args)
 
 
 if __name__ == "__main__":
