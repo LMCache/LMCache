@@ -269,7 +269,7 @@ class StorageManager:
         # Registry for backend-level pins made during async prefetch.
         # Only populated for backends with requires_backend_unpin=True.
         # Keyed by lookup_id -> {backend_name -> [keys]}.
-        self._async_pin_registry: dict[str, dict[str, list]] = {}
+        self._async_pin_registry: dict[str, dict[str, list[CacheEngineKey]]] = {}
         self._pin_registry_lock = threading.Lock()
 
         # The cuda stream for internal copies during put
@@ -1056,7 +1056,19 @@ class StorageManager:
     def pop_async_pins(
         self, lookup_id: str
     ) -> Optional[Dict[str, List[CacheEngineKey]]]:
-        """Pop and return async pin records for a lookup, or None."""
+        """Pop and return async pin records for a lookup.
+
+        Retrieves the backend-level pin records that were registered
+        during ``async_lookup_and_prefetch`` for the given *lookup_id*,
+        removing them from the registry.
+
+        Args:
+            lookup_id: The unique identifier for the lookup request.
+
+        Returns:
+            A dict mapping backend names to lists of pinned keys,
+            or ``None`` if no records exist for this *lookup_id*.
+        """
         with self._pin_registry_lock:
             return self._async_pin_registry.pop(lookup_id, None)
 
