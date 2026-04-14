@@ -284,7 +284,27 @@ lmcache/tools/cache_simulator/
     lru_cache.py        — LRUCache and LRUCacheFast implementations
     simulator.py        — event loading, simulation engine, text report, chart, CLI
     plot_hit_rate.py    — capacity sweep and matplotlib plot
+
+lmcache/cli/commands/tool/
+    __init__.py         — ToolCommand dispatcher (lmcache tool ...)
+    cache_simulator.py  — wires cache-simulator into the lmcache CLI
 ```
+
+### CLI integration
+
+The same functionality is also accessible via the `lmcache` CLI (see
+[Quick Start](#quick-start)).  The CLI entry point lives in
+`lmcache/cli/commands/tool/cache_simulator.py`, which calls
+`add_simulate_arguments` / `run_simulate` from `simulator.py` and
+`add_sweep_arguments` / `run_sweep` from `plot_hit_rate.py`.
+
+**When adding or removing a CLI flag**, update only the relevant
+`add_*_arguments` function in `simulator.py` or `plot_hit_rate.py` — the
+`lmcache tool` command picks up the change automatically.
+
+**When adding a new action** (e.g. `lmcache tool cache-simulator compare`),
+register it in `lmcache/cli/commands/tool/cache_simulator.py` alongside the
+existing `simulate` and `sweep` actions.
 
 ### `lru_cache.py`
 
