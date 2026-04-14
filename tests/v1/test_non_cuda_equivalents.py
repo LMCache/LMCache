@@ -1615,6 +1615,234 @@ def scenario_multi_layer_kv_transfer_unilateral(
     return results
 
 
+def scenario_multi_layer_block_kv_transfer(
+    ops: Any, device: str
+) -> dict[str, torch.Tensor]:
+    """Test multi_layer_block_kv_transfer D2H/H2D roundtrip.
+
+    Only the NL_X_TWO_NB_BS_NH_HS layout is supported by the
+    CPU fallback, so we test that single format with both
+    directions and skip_prefix_n_blocks.
+    """
+    torch.manual_seed(42)
+
+    nl = 2
+    nb = 8
+    bs = 4
+    nh = 2
+    hs = 8
+    chunk_size = 8  # tokens per object = nb_per_obj * bs
+    num_objects = 2
+    blocks_per_obj = chunk_size // bs  # 2
+    total_blocks = num_objects * blocks_per_obj  # 4
+    dtype = torch.float32
+    elem_size = dtype.itemsize
+    hidden = nh * hs
+
+    fmt = ops.GPUKVFormat.NL_X_TWO_NB_BS_NH_HS
+
+    # -- helper: build paged tensors and shape_desc --
+    def _make_paged(fill: bool = False):
+        tensors = []
+        for ly in range(nl):
+            t = torch.zeros(2, nb, bs, nh, hs, dtype=dtype, device=device)
+            if fill:
+                t.copy_(torch.arange(t.numel(), dtype=dtype).fmod_(1000).view_as(t))
+            tensors.append(t)
+        return tensors
+
+    def _make_objects(fill: bool = False):
+        objs = []
+        for i in range(num_objects):
+            t = torch.zeros(
+                2,
+                nl,
+                chunk_size,
+                hidden,
+                dtype=dtype,
+                device=device,
+            )
+            if fill:
+                t.copy_(
+                    torch.arange(t.numel(), dtype=dtype)
+                    .fmod_(500)
+                    .add_(i * 100)
+                    .view_as(t)
+                )
+            objs.append(t)
+        return objs
+
+    def _shape_desc():
+        sd = ops.PageBufferShapeDesc()
+        sd.kv_size = 2
+        sd.nl = nl
+        sd.nb = nb
+        sd.bs = bs
+        sd.nh = nh
+        sd.hs = hs
+        sd.element_size = elem_size
+        # C++ PageBufferShapeDesc has no dtype field;
+        # only the Python fallback needs it.
+        try:
+            sd.dtype = dtype
+        except AttributeError:
+            pass
+        return sd
+
+    # ── D2H then H2D roundtrip ──
+    src_paged = _make_paged(fill=True)
+    mem_objs = _make_objects(fill=False)
+    dst_paged = _make_paged(fill=False)
+
+    block_ids_d2h = list(range(total_blocks))
+    block_ids_h2d = list(range(total_blocks, 2 * total_blocks))
+
+    paged_ptrs = torch.tensor(
+        [t.data_ptr() for t in src_paged],
+        dtype=torch.int64,
+        device=device,
+    )
+    obj_ptrs = [t.data_ptr() for t in mem_objs]
+    block_ids_t = torch.tensor(
+        block_ids_d2h,
+        dtype=torch.int64,
+        device=device,
+    )
+
+    ops.multi_layer_block_kv_transfer(
+        paged_ptrs,
+        obj_ptrs,
+        block_ids_t,
+        torch.device(device),
+        ops.TransferDirection.D2H,
+        _shape_desc(),
+        chunk_size,
+        fmt,
+        0,
+    )
+
+    dst_ptrs = torch.tensor(
+        [t.data_ptr() for t in dst_paged],
+        dtype=torch.int64,
+        device=device,
+    )
+    block_ids_h = torch.tensor(
+        block_ids_h2d,
+        dtype=torch.int64,
+        device=device,
+    )
+
+    ops.multi_layer_block_kv_transfer(
+        dst_ptrs,
+        obj_ptrs,
+        block_ids_h,
+        torch.device(device),
+        ops.TransferDirection.H2D,
+        _shape_desc(),
+        chunk_size,
+        fmt,
+        0,
+    )
+
+    # Verify: dst_paged[h2d_block] == src_paged[d2h_block]
+    for obj_idx in range(num_objects):
+        for local_blk in range(blocks_per_obj):
+            flat = obj_idx * blocks_per_obj + local_blk
+            s_blk = block_ids_d2h[flat]
+            d_blk = block_ids_h2d[flat]
+            for ly in range(nl):
+                for kv in range(2):
+                    src_v = src_paged[ly][kv, s_blk].cpu()
+                    dst_v = dst_paged[ly][kv, d_blk].cpu()
+                    assert torch.equal(src_v, dst_v), (
+                        "Mismatch: obj=%d blk=%d "
+                        "ly=%d kv=%d" % (obj_idx, local_blk, ly, kv)
+                    )
+
+    # ── skip_prefix_n_blocks ──
+    skip = 2
+    mem_objs2 = _make_objects(fill=False)
+    obj_ptrs2 = [t.data_ptr() for t in mem_objs2]
+
+    ops.multi_layer_block_kv_transfer(
+        paged_ptrs,
+        obj_ptrs2,
+        block_ids_t,
+        torch.device(device),
+        ops.TransferDirection.D2H,
+        _shape_desc(),
+        chunk_size,
+        fmt,
+        skip,
+    )
+
+    # Skipped region should remain zero
+    for obj_idx in range(num_objects):
+        obj_t = mem_objs2[obj_idx]
+        blk_start = obj_idx * blocks_per_obj
+        for local_blk in range(blocks_per_obj):
+            flat = blk_start + local_blk
+            if flat < skip:
+                t_st = local_blk * bs
+                t_ed = t_st + bs
+                region = obj_t[:, :, t_st:t_ed, :].cpu()
+                assert region.abs().sum().item() == 0, (
+                    "Skipped block %d not zero" % flat
+                )
+
+    return {"multi_layer_block_kv_transfer": torch.tensor([1], dtype=torch.int32)}
+
+
+def scenario_page_buffer_shape_desc(ops: Any, device: str) -> dict[str, torch.Tensor]:
+    """Test PageBufferShapeDesc can be instantiated and
+    its fields can be read/written."""
+    sd = ops.PageBufferShapeDesc()
+
+    # NOTE: default values differ between the Python fallback
+    # (kv_size=2, element_size=2) and the C++ extension (all zero),
+    # so we only verify that fields are readable and writable.
+    sd.kv_size = 1
+    sd.nl = 32
+    sd.nb = 1024
+    sd.bs = 16
+    sd.nh = 8
+    sd.hs = 128
+    sd.element_size = 4
+
+    assert sd.kv_size == 1
+    assert sd.nl == 32
+    assert sd.nb == 1024
+    assert sd.bs == 16
+    assert sd.nh == 8
+    assert sd.hs == 128
+    assert sd.element_size == 4
+
+    return {"page_buffer_shape_desc": torch.tensor([1], dtype=torch.int32)}
+
+
+def scenario_record_event_on_stream(ops: Any, device: str) -> dict[str, torch.Tensor]:
+    """Test record_event_on_stream is callable and does
+    not crash (no-op on CPU fallback)."""
+    ops.record_event_on_stream(0, "test.event", "session-0", {}, {})
+    # Second call with metadata
+    ops.record_event_on_stream(
+        0,
+        "test.event.meta",
+        "session-1",
+        {"key": "value"},
+        {"count": 42},
+    )
+    return {"record_event_on_stream": torch.tensor([1], dtype=torch.int32)}
+
+
+def scenario_drain_recorded_events(ops: Any, device: str) -> dict[str, torch.Tensor]:
+    """Test drain_recorded_events returns a list
+    (empty on CPU fallback)."""
+    events = ops.drain_recorded_events()
+    assert isinstance(events, list)
+    return {"drain_recorded_events": torch.tensor([1], dtype=torch.int32)}
+
+
 def scenario_alloc_free_pinned_ptr(ops: Any, device: str) -> dict[str, torch.Tensor]:
     """Test alloc_pinned_ptr and free_pinned_ptr round-trip."""
     alloc_size = 4096
@@ -1731,6 +1959,10 @@ SCENARIO_REGISTRY = {
     "alloc_free_numa_ptr": scenario_alloc_free_numa_ptr,
     "alloc_free_shm_pinned_ptr": scenario_alloc_free_shm_pinned_ptr,
     "get_gpu_pci_bus_id": scenario_get_gpu_pci_bus_id,
+    "multi_layer_block_kv_transfer": scenario_multi_layer_block_kv_transfer,
+    "page_buffer_shape_desc": scenario_page_buffer_shape_desc,
+    "record_event_on_stream": scenario_record_event_on_stream,
+    "drain_recorded_events": scenario_drain_recorded_events,
 }
 
 

@@ -9,6 +9,7 @@ transparently.
 
 # Standard
 import os
+import struct
 
 HAS_EVENTFD: bool = hasattr(os, "eventfd")
 
@@ -35,25 +36,41 @@ def _compat_eventfd() -> int:
 
 
 def _compat_eventfd_write(efd: int, value: int = 1) -> None:
-    """Signal the pipe-based eventfd."""
+    """Signal the pipe-based eventfd.
+
+    Real eventfd_write always writes an 8-byte uint64 counter.
+    We replicate that here so the read side can decode properly.
+    """
     pair = _pipe_registry.get(efd)
     if pair is None:
         raise OSError("compat_eventfd_write: unknown fd %d" % efd)
     _, w = pair
     try:
-        os.write(w, b"\x01" * value)
+        os.write(w, struct.pack("<Q", value))
     except BlockingIOError:
         pass  # pipe buffer full, already signaled
 
 
 def _compat_eventfd_read(efd: int) -> int:
-    """Consume the pipe-based eventfd signal."""
+    """Consume the pipe-based eventfd signal.
+
+    Drains all pending 8-byte counter values and returns
+    their sum, matching real eventfd semantics.
+    """
+    total = 0
     try:
-        while os.read(efd, 4096):
-            pass
+        while True:
+            data = os.read(efd, 4096)
+            if not data:
+                break
+            # Each write is an 8-byte uint64 frame.
+            for off in range(0, len(data), 8):
+                chunk = data[off : off + 8]
+                if len(chunk) == 8:
+                    total += struct.unpack("<Q", chunk)[0]
     except (BlockingIOError, OSError):
         pass
-    return 1
+    return total if total else 1
 
 
 def install_eventfd_compat() -> None:

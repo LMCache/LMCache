@@ -1,18 +1,24 @@
 # SPDX-License-Identifier: Apache-2.0
-"""
-Verify that every public function/enum in non_cuda_equivalents that also
-exists in c_ops has a matching signature.
+"""Verify 1:1 parity between c_ops and non_cuda_equivalents.
 
-Does NOT require non_cuda_equivalents to implement everything in c_ops —
-only checks the intersection. If you implement a function in the fallback,
-its signature must match c_ops exactly.
+Two categories of checks:
+
+1. **Coverage (1:1 mapping)** — every public callable, enum, and
+   descriptor class in c_ops MUST have a counterpart in
+   non_cuda_equivalents.  Missing symbols cause a hard failure.
+
+2. **Signature / member parity** — for every symbol that exists in
+   both modules, signatures (parameter names, count, defaults) and
+   enum members must match exactly.
 
 Default value rules (relaxed):
-  - If c_ops has a default, fallback MUST also have one with the same value —
-    otherwise callers relying on the default will break.
-  - If c_ops has NO default, fallback MAY add one (superset, backward-compatible).
+  - If c_ops has a default, fallback MUST also have one with the
+    same value — otherwise callers relying on the default will break.
+  - If c_ops has NO default, fallback MAY add one
+    (superset, backward-compatible).
 
-Requires CUDA (c_ops must be importable). Automatically skipped on CPU-only CI.
+Requires CUDA (c_ops must be importable).  Automatically skipped
+on CPU-only CI.
 """
 
 # Standard
@@ -200,6 +206,26 @@ _c_ops_enums = _public_enums(c_ops) if HAS_C_OPS else {}
 _shared_enum_names = sorted(set(_fallback_enums) & set(_c_ops_enums))
 
 
+# ── Discover shared "descriptor" classes (non-enum, non-callable) ──
+
+
+def _public_descriptor_classes(module):
+    """Return {name: cls} for public classes that are
+    neither enums nor plain functions — e.g. PageBufferShapeDesc."""
+    return {
+        name: obj
+        for name, obj in inspect.getmembers(module, inspect.isclass)
+        if not name.startswith("_")
+        and not (issubclass(obj, enum.Enum) or hasattr(obj, "__members__"))
+        and callable(obj)
+    }
+
+
+_fallback_descs = _public_descriptor_classes(fallback)
+_c_ops_descs = _public_descriptor_classes(c_ops) if HAS_C_OPS else {}
+_shared_desc_names = sorted(set(_fallback_descs) & set(_c_ops_descs))
+
+
 # ── Tests ──
 
 
@@ -298,4 +324,85 @@ def test_enum_parity(enum_name):
 
     assert c_members == py_members, (
         f"{enum_name} mismatch:\n  c_ops:    {c_members}\n  fallback: {py_members}"
+    )
+
+
+@pytest.mark.skipif(not HAS_C_OPS, reason="c_ops not available (no CUDA)")
+@pytest.mark.parametrize(
+    "cls_name",
+    _shared_desc_names if _shared_desc_names else ["__placeholder__"],
+)
+def test_descriptor_class_parity(cls_name):
+    """For every descriptor class that non_cuda_equivalents
+    defines, its writable attributes must match c_ops.
+
+    Instantiates both classes with no arguments and compares
+    the set of public, non-dunder attributes that are present
+    on the c_ops instance.
+    """
+    if cls_name == "__placeholder__":
+        pytest.skip("No shared descriptor classes found")
+
+    c_cls = _c_ops_descs[cls_name]
+    py_cls = _fallback_descs[cls_name]
+
+    c_inst = c_cls()
+    py_inst = py_cls()
+
+    # Collect public non-dunder attributes from c_ops
+    c_attrs = {
+        a
+        for a in dir(c_inst)
+        if not a.startswith("_") and not callable(getattr(c_inst, a))
+    }
+    py_attrs = {
+        a
+        for a in dir(py_inst)
+        if not a.startswith("_") and not callable(getattr(py_inst, a))
+    }
+
+    missing = c_attrs - py_attrs
+    assert not missing, (
+        f"{cls_name}: fallback is missing attributes "
+        f"present in c_ops: {sorted(missing)}"
+    )
+
+
+# ── 1:1 mapping tests ──
+
+
+@pytest.mark.skipif(
+    not HAS_C_OPS,
+    reason="c_ops not available (no CUDA)",
+)
+def test_all_c_ops_callables_have_fallback():
+    """Every public callable in c_ops must exist in
+    non_cuda_equivalents (1:1 coverage)."""
+    missing = sorted(set(_c_ops_callables) - set(_fallback_callables))
+    assert not missing, (
+        "c_ops callables missing from non_cuda_equivalents: %s" % missing
+    )
+
+
+@pytest.mark.skipif(
+    not HAS_C_OPS,
+    reason="c_ops not available (no CUDA)",
+)
+def test_all_c_ops_enums_have_fallback():
+    """Every public enum in c_ops must exist in
+    non_cuda_equivalents (1:1 coverage)."""
+    missing = sorted(set(_c_ops_enums) - set(_fallback_enums))
+    assert not missing, "c_ops enums missing from non_cuda_equivalents: %s" % missing
+
+
+@pytest.mark.skipif(
+    not HAS_C_OPS,
+    reason="c_ops not available (no CUDA)",
+)
+def test_all_c_ops_descriptors_have_fallback():
+    """Every public descriptor class in c_ops must exist
+    in non_cuda_equivalents (1:1 coverage)."""
+    missing = sorted(set(_c_ops_descs) - set(_fallback_descs))
+    assert not missing, (
+        "c_ops descriptor classes missing from non_cuda_equivalents: %s" % missing
     )

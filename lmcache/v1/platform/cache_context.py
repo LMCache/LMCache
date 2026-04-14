@@ -108,7 +108,12 @@ class CpuCacheContext:
             sd.nh = num_heads
             sd.hs = head_size
             sd.element_size = dtype.itemsize
-            sd.dtype = dtype
+            # C++ PageBufferShapeDesc has no dtype field;
+            # only the Python fallback needs it.
+            try:
+                sd.dtype = dtype
+            except AttributeError:
+                pass
             self.shape_descs_.append(sd)
 
             self.group_kv_pointers_.append(
@@ -164,91 +169,133 @@ class CpuCacheContext:
 
     @property
     def dtype(self) -> torch.dtype:
+        """Returns the dtype of the KV cache tensors."""
         return self.kv_caches_[0].dtype
 
     @property
     def device(self) -> torch.device:
+        """Returns the device (always CPU)."""
         return self.device_
 
     @property
     def kv_tensors(self) -> list[torch.Tensor]:
+        """Returns the list of per-layer KV cache tensors."""
         return self.kv_caches_
 
     @property
     def kv_pointers(self) -> torch.Tensor:
+        """Returns a tensor of KV cache data pointers."""
         return self.kv_cache_pointers_
 
     @property
     def stream(self) -> torch.cuda.Stream:
+        """Returns the (mock) CUDA stream."""
         return self.cuda_stream_
 
     @property
     def cupy_stream(self) -> cupy.cuda.Stream:
+        """Returns the (mock) cupy stream."""
         return self.cupy_stream_
 
     @property
     def high_priority_stream(self) -> torch.cuda.Stream:
+        """Returns the high-priority (mock) CUDA stream."""
         return self.high_priority_cuda_stream_
 
     @property
     def high_priority_cupy_stream(self) -> cupy.cuda.Stream:
+        """Returns the high-priority (mock) cupy stream."""
         return self.high_priority_cupy_stream_
 
     @property
     def block_size(self) -> int:
+        """Returns the block size (tokens per block)."""
         return self.block_size_
 
     @property
     def num_layers(self) -> int:
+        """Returns the number of layers in the model."""
         return self.num_layers_
 
     @property
     def num_blocks(self) -> int:
+        """Returns the number of blocks in the KV cache."""
         return self.num_blocks_
 
     @property
     def is_mla(self) -> bool:
+        """Returns whether the model uses MLA."""
         return self.is_mla_
 
     @property
     def hidden_dim_sizes(self) -> list[int]:
+        """Returns hidden dimension sizes per KV layer group."""
         return self.hidden_dim_sizes_
 
     @property
     def kv_layer_groups_manager(
         self,
     ) -> KVLayerGroupsManager:
+        """Returns the KV layer groups manager."""
         return self.kv_layer_groups_manager_
 
     @property
     def gpu_kv_format_name(self) -> str:
+        """Returns the GPU KV format enum name."""
         return self.gpu_kv_format_.name
 
     @property
     def gpu_kv_shape(self) -> str:
+        """Returns the GPU KV cache layout description."""
         return "NL_X_TWO_NB_BS_NH_HS"
 
     @property
     def attention_backend(self) -> str:
+        """Returns the attention backend name."""
         return "cpu"
 
     @property
     def concrete_gpu_kv_shape(self) -> str:
+        """Returns the GPU KV shape with actual values."""
         return "cpu-context"
 
     def get_shape_desc(self, group_idx: int) -> "lmc_ops.PageBufferShapeDesc":
+        """Returns the PageBufferShapeDesc for the given group.
+
+        Args:
+            group_idx: Index of the KV layer group.
+        """
         return self.shape_descs_[group_idx]
 
     def get_group_kv_pointers(self, group_idx: int) -> torch.Tensor:
+        """Returns the KV cache pointer tensor for the given group.
+
+        Args:
+            group_idx: Index of the KV layer group.
+        """
         return self.group_kv_pointers_[group_idx]
 
     def get_kv_buffer_shape(self, num_tokens: int, group_idx: int = 0) -> torch.Size:
+        """Returns the KV buffer shape for the given token count.
+
+        Args:
+            num_tokens: Number of tokens.
+            group_idx: Index of the KV layer group.
+        """
         group = self.kv_layer_groups_manager_.kv_layer_groups[group_idx]
         num_layers_in_group = group.num_layers
         hidden_dim = self.hidden_dim_sizes_[group_idx]
         return torch.Size((2, num_layers_in_group, num_tokens, hidden_dim))
 
     def get_tmp_gpu_buffer_flat(self, chunk_idx: int) -> torch.Tensor:
+        """Returns the flat uint8 temp buffer for the given chunk.
+
+        Args:
+            chunk_idx: Chunk index (< max_batch_size).
+
+        Raises:
+            ValueError: If chunk_idx >= max_batch_size.
+        """
         if chunk_idx >= self.max_batch_size:
             raise ValueError(
                 "chunk_idx %d >= max_batch_size %d" % (chunk_idx, self.max_batch_size)
@@ -257,6 +304,11 @@ class CpuCacheContext:
         return self.tmp_gpu_buffer_[start : start + self.tmp_chunk_bytes_]
 
     def get_tmp_chunk_gpu_buffer(self, group_idx: int = 0) -> torch.Tensor:
+        """Returns a typed view of the temp buffer for one chunk.
+
+        Args:
+            group_idx: Index of the KV layer group.
+        """
         group = self.kv_layer_groups_manager_.kv_layer_groups[group_idx]
         shape = self.get_kv_buffer_shape(self.lmcache_chunk_size, group_idx)
         start = self.tmp_chunk_group_offsets_[group_idx]
@@ -266,6 +318,15 @@ class CpuCacheContext:
     def get_tmp_chunk_gpu_buffer_batched(
         self, batch_size: int, group_idx: int = 0
     ) -> list[torch.Tensor]:
+        """Returns a list of non-overlapping temp buffer views.
+
+        Args:
+            batch_size: Number of concurrent chunks.
+            group_idx: Index of the KV layer group.
+
+        Raises:
+            ValueError: If batch_size > max_batch_size.
+        """
         if batch_size > self.max_batch_size:
             raise ValueError(
                 "batch_size %d > max_batch_size %d" % (batch_size, self.max_batch_size)
@@ -283,6 +344,14 @@ class CpuCacheContext:
         ]
 
     def stage_block_ids(self, block_ids: list[int]) -> torch.Tensor:
+        """Copy block IDs into the pre-allocated buffer.
+
+        Args:
+            block_ids: Block indices as a Python list.
+
+        Returns:
+            A tensor view into the pre-allocated buffer.
+        """
         n = len(block_ids)
         cpu_tensor = torch.tensor(block_ids, dtype=torch.long)
         buf = self.block_ids_buffer_[:n]
@@ -290,6 +359,7 @@ class CpuCacheContext:
         return buf
 
     def cache_size_per_token(self) -> int:
+        """Returns cache size per token in bytes, summed across groups."""
         total = 0
         for group_idx, group in enumerate(
             self.kv_layer_groups_manager_.kv_layer_groups

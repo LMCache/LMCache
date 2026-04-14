@@ -1446,17 +1446,18 @@ def multi_layer_block_kv_transfer(
     paged_buffer_ptrs_tensor: torch.Tensor,
     lmcache_objects_ptrs: list[int],
     block_ids: torch.Tensor,
-    device: torch.device,  # noqa: ARG001
+    device: torch.device,
     direction: TransferDirection,
     shape_desc: "PageBufferShapeDesc",
     lmcache_chunk_size: int,
     gpu_kv_format: "GPUKVFormat",  # noqa: ARG001
     skip_prefix_n_blocks: int = 0,
 ) -> None:
-    """CPU replacement for the CUDA block KV transfer kernel.
+    """Pure-Python replacement for the CUDA block KV transfer kernel.
 
     Transfers data between paged KV cache tensors and
-    contiguous LMCache memory objects.  Only the
+    contiguous LMCache memory objects.  Supports both CPU
+    and CUDA device pointers.  Only the
     ``NL_X_TWO_NB_BS_NH_HS`` layout is supported (the
     default for ``CpuCacheContext``).
 
@@ -1480,10 +1481,15 @@ def multi_layer_block_kv_transfer(
         # for 2-byte types; prefer setting dtype attr).
         _ELEM_SIZE_MAP = {
             1: torch.uint8,
-            2: torch.float16,
             4: torch.float32,
             8: torch.float64,
         }
+        if elem_size == 2:
+            raise ValueError(
+                "element_size=2 is ambiguous "
+                "(float16 vs bfloat16). "
+                "Set shape_desc.dtype explicitly."
+            )
         if elem_size not in _ELEM_SIZE_MAP:
             raise ValueError("Unsupported element_size: %d" % elem_size)
         dtype = _ELEM_SIZE_MAP[elem_size]
@@ -1491,10 +1497,9 @@ def multi_layer_block_kv_transfer(
     # Reconstruct per-layer paged tensors from raw pointers
     layer_ptrs = paged_buffer_ptrs_tensor.tolist()
     paged_tensors: list[torch.Tensor] = []
-    paged_nbytes = 2 * nb * bs * nh * hs * elem_size
+    paged_shape = (2, nb, bs, nh, hs)
     for ptr in layer_ptrs:
-        buf = (ctypes.c_uint8 * paged_nbytes).from_address(int(ptr))
-        t = torch.frombuffer(buf, dtype=dtype).view(2, nb, bs, nh, hs)
+        t = _tensor_from_ptr(int(ptr), paged_shape, dtype, device)
         paged_tensors.append(t)
 
     block_ids_list = block_ids.tolist()
@@ -1502,12 +1507,8 @@ def multi_layer_block_kv_transfer(
 
     for obj_idx in range(num_objects):
         obj_ptr = lmcache_objects_ptrs[obj_idx]
-        obj_numel = 2 * nl * lmcache_chunk_size * nh * hs
-        obj_nbytes = obj_numel * elem_size
-        obj_buf = (ctypes.c_uint8 * obj_nbytes).from_address(obj_ptr)
-        obj_tensor = torch.frombuffer(obj_buf, dtype=dtype).view(
-            2, nl, lmcache_chunk_size, nh * hs
-        )
+        obj_shape = (2, nl, lmcache_chunk_size, nh * hs)
+        obj_tensor = _tensor_from_ptr(obj_ptr, obj_shape, dtype, device)
 
         blk_start = obj_idx * blocks_per_obj
         for local_blk in range(blocks_per_obj):
@@ -1536,8 +1537,11 @@ def multi_layer_block_kv_transfer(
 
 
 def record_event_on_stream(
-    *args,
-    **kwargs,  # noqa: ARG001
+    cuda_stream_ptr: int,  # noqa: ARG001
+    event_type_name: str,  # noqa: ARG001
+    session_id: str,  # noqa: ARG001
+    str_metadata: dict,  # noqa: ARG001
+    int_metadata: dict,  # noqa: ARG001
 ) -> None:
     """No-op replacement for CUDA stream event recording."""
 

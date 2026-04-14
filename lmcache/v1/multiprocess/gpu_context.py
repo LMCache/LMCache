@@ -268,6 +268,7 @@ class GPUCacheContext:
         """Returns the KV layer groups manager."""
         return self.kv_layer_groups_manager_
 
+    @property
     def gpu_kv_format_name(self) -> str:
         """Returns the GPU KV format enum name (e.g. ``'NL_X_TWO_NB_BS_NH_HS'``)."""
         return self.gpu_kv_format_.name
