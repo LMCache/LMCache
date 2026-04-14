@@ -105,6 +105,11 @@ def pad_shape_to_4d(shape: torch.Size) -> list[int]:
     This is consistent with the convention used by
     :class:`BinaryMemoryObj` (``[length, 0, 0, 0]``).
 
+    Note that shapes cannot contain a mix of zero and non-zero
+    dimensions (e.g., ``[2, 0, 3]``). Such shapes are considered
+    ambiguous for round-tripping (padding and later stripping) and
+    will be explicitly rejected.
+
     Args:
         shape: The original tensor shape (1-D to 4-D).
 
@@ -140,6 +145,10 @@ def strip_shape_padding(dims: list[int]) -> torch.Size:
     lose the original 4-D structure and round-trip to ``[length]``.
     This is by design -- the padding is not lossless for shapes that
     legitimately contain zero dimensions.
+
+    Note that this function assumes the input ``dims`` were generated
+    by :func:`pad_shape_to_4d`, which guarantees there are no mixed
+    zero and non-zero dimensions prior to padding.
 
     Args:
         dims: A list of 4 integers read from the serialized format.
