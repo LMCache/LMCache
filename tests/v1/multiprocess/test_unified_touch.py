@@ -3,7 +3,7 @@
 
 This module tests:
 1. L1EvictionPolicy.on_l1_keys_accessed bridges to policy.on_keys_touched
-2. L1EvictionPolicy.on_l1_keys_read_finished no longer triggers touch
+2. L1EvictionPolicy.on_l1_keys_read_finished also triggers touch
 3. L1Manager.touch_keys dispatches to all registered listeners
 4. MPCacheEngine.end_session performs unified touch with correct keys
 5. StorageManager.touch_l1_keys delegates to L1Manager
@@ -78,15 +78,15 @@ class TestL1EvictionPolicyAccessedBridge:
 
         mock_policy.on_keys_touched.assert_called_once_with(keys)
 
-    def test_on_l1_keys_read_finished_no_longer_touches(self):
-        """on_l1_keys_read_finished should NOT call on_keys_touched anymore."""
+    def test_on_l1_keys_read_finished_also_touches(self):
+        """on_l1_keys_read_finished should call on_keys_touched."""
         mock_policy = MagicMock()
         listener = L1EvictionPolicy(mock_policy)
         keys = [make_key(1), make_key(2)]
 
         listener.on_l1_keys_read_finished(keys)
 
-        mock_policy.on_keys_touched.assert_not_called()
+        mock_policy.on_keys_touched.assert_called_once_with(keys)
 
     def test_on_l1_keys_accessed_with_lru_policy(self):
         """on_l1_keys_accessed should update LRU order via real LRU policy."""
@@ -106,8 +106,8 @@ class TestL1EvictionPolicyAccessedBridge:
         assert ObjectKey.Bytes2IntHash(candidates[1].chunk_hash) == 2
         assert ObjectKey.Bytes2IntHash(candidates[2].chunk_hash) == 1
 
-    def test_on_l1_keys_read_finished_does_not_update_lru(self):
-        """on_l1_keys_read_finished should NOT update LRU order anymore."""
+    def test_on_l1_keys_read_finished_updates_lru(self):
+        """on_l1_keys_read_finished should update LRU order."""
         lru = LRUEvictionPolicy()
         listener = L1EvictionPolicy(lru)
 
@@ -115,10 +115,10 @@ class TestL1EvictionPolicyAccessedBridge:
         keys = [make_key(1), make_key(2), make_key(3)]
         lru.on_keys_created(keys)
 
-        # Call on_l1_keys_read_finished on key 1 - should be no-op
+        # Call on_l1_keys_read_finished on key 1 - should touch it
         listener.on_l1_keys_read_finished([make_key(1)])
 
-        # Eviction order should remain: 3, 2, 1 (unchanged)
+        # Key 1 is now most recently touched, eviction order: 2, 3, 1
         candidates = lru.get_eviction_candidates(3)
         assert ObjectKey.Bytes2IntHash(candidates[0].chunk_hash) == 3
         assert ObjectKey.Bytes2IntHash(candidates[1].chunk_hash) == 2
