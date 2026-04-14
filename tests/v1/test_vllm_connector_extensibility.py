@@ -16,6 +16,7 @@ from lmcache.integration.vllm.lmcache_connector_v1_085 import (
 )
 from lmcache.integration.vllm.vllm_service_factory import VllmServiceFactory
 from lmcache.integration.vllm.vllm_v1_adapter import LMCacheConnectorV1Impl
+from lmcache.v1.config import LMCacheEngineConfig
 
 
 class TestServiceFactoryClsHook:
@@ -57,9 +58,6 @@ class TestServiceFactoryClsHook:
             patch.object(LMCacheConnectorV1Impl, "_init_connector_state"),
             patch.object(LMCacheConnectorV1Impl, "_setup_metrics"),
         ):
-            # First Party
-            from lmcache.v1.config import LMCacheEngineConfig
-
             mock_get_config.return_value = LMCacheEngineConfig.from_defaults()
             PlatformImpl(vllm_config, role, parent)
 
@@ -97,8 +95,9 @@ class TestImplClsHook:
         vllm_config = MagicMock()
         role = MagicMock()
 
-        with patch.object(
-            LMCacheConnectorV1Dynamic.__mro__[1], "__init__", return_value=None
+        with patch(
+            "lmcache.integration.vllm.lmcache_connector_v1.KVConnectorBase_V1.__init__",
+            return_value=None,
         ):
             connector = PlatformDynamic(vllm_config, role)
 
