@@ -105,6 +105,7 @@ contribute to histograms; counters above always count all events.
 
 ---
 
+
 ## L2 Store Metrics
 
 | OTel metric name | Prometheus name | Type | Source event | Calculation |

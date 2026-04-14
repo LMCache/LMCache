@@ -163,7 +163,7 @@ def retrieve_handler(
 # ==============================================================================
 
 
-def lookup_handler(key: KeyType, tp_size: int) -> int:
+def lookup_handler(key: KeyType, tp_size: int) -> None:
     """
     Dummy handler for LOOKUP requests.
 
@@ -173,13 +173,12 @@ def lookup_handler(key: KeyType, tp_size: int) -> int:
             multi-reader locking
 
     Returns:
-        int: Number of matched chunks (always returns 1 for testing)
+        None: LOOKUP registers the job server-side; poll via QUERY_PREFETCH_STATUS.
     """
     # In a real implementation, this would look up the key in the cache
-    # For testing, we just validate the input and return a dummy result
+    # For testing, we just validate the input
     assert isinstance(key, KeyType), f"Expected key to be KeyType, got {type(key)}"
     assert isinstance(tp_size, int), f"Expected tp_size to be int, got {type(tp_size)}"
-    return 1
 
 
 # ==============================================================================

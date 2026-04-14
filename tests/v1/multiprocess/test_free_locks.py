@@ -178,7 +178,7 @@ def test_adapter_free_lookup_locks_sends_request():
     mock_future = MagicMock()
     mock_client.submit_request.return_value = mock_future
     adapter.mq_client = mock_client
-    adapter._lookup_job_ids = {}
+    adapter._pending_lookups = set()
 
     token_ids = list(range(512))
     adapter.free_lookup_locks(
@@ -229,10 +229,10 @@ def test_adapter_free_lookup_locks_key_matches_lookup():
 
     mock_client = MagicMock(spec=MessageQueueClient)
     mock_future = MagicMock()
-    mock_future.result.return_value = 42  # mock job_id
+    mock_future.result.return_value = None  # LOOKUP returns None
     mock_client.submit_request.return_value = mock_future
     adapter.mq_client = mock_client
-    adapter._lookup_job_ids = {}
+    adapter._pending_lookups = set()
 
     token_ids = list(range(512))
 
