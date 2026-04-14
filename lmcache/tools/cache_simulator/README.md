@@ -57,13 +57,13 @@ The simulator enforces the same prefix rule as LMCache: a chunk is only counted 
 lmcache server --lookup-hash-log-dir /data/lmcache/lookup_hashes ...
 
 # 2. Simulate at a fixed capacity — prints text report and saves a PNG chart
-python3 -m lmcache.tools.cache_simulator.simulator \
+lmcache tool cache-simulator simulate \
     -i /data/lmcache/lookup_hashes \
     --cache-capacity-gib 64 \
     -o stats.png
 
 # 3. Sweep across capacities to find the right cache size
-python3 -m lmcache.tools.cache_simulator.plot_hit_rate \
+lmcache tool cache-simulator sweep \
     -i /data/lmcache/lookup_hashes \
     --min-capacity-gib 1 \
     --max-capacity-gib 512 \
@@ -121,7 +121,7 @@ Note: `chunk_hashes` only covers **complete** chunks. The tail tokens (`seq_len 
 ## Step 2: Run the Simulator
 
 ```bash
-python3 -m lmcache.tools.cache_simulator.simulator \
+lmcache tool cache-simulator simulate \
     -i /data/lmcache/lookup_hashes \
     --cache-capacity-gib 64 \
     -o stats.png
@@ -130,7 +130,7 @@ python3 -m lmcache.tools.cache_simulator.simulator \
 This prints a full text report to the terminal **and** saves a 7-panel statistics chart to `stats.png`. The `kv_bytes_per_chunk` value is auto-detected from the `shapes` and `dtypes` fields of the first event. You can override it:
 
 ```bash
-python3 -m lmcache.tools.cache_simulator.simulator \
+lmcache tool cache-simulator simulate \
     -i /data/lmcache/lookup_hashes \
     --cache-capacity-gib 64 \
     --kv-bytes-per-chunk 20971520 \
@@ -140,7 +140,7 @@ python3 -m lmcache.tools.cache_simulator.simulator \
 To analyse only one model when the logs contain multiple:
 
 ```bash
-python3 -m lmcache.tools.cache_simulator.simulator \
+lmcache tool cache-simulator simulate \
     -i /data/lmcache/lookup_hashes \
     --cache-capacity-gib 64 \
     --model DeepSeek-V3 \
@@ -180,7 +180,7 @@ Stat 1 — Per-request token hit rate distribution
 The plot tool sweeps across a log-spaced range of cache sizes and shows how hit rate changes with capacity — the key curve for capacity planning.
 
 ```bash
-python3 -m lmcache.tools.cache_simulator.plot_hit_rate \
+lmcache tool cache-simulator sweep \
     -i /data/lmcache/lookup_hashes \
     --min-capacity-gib 1 \
     --max-capacity-gib 512 \
@@ -239,10 +239,10 @@ The saved PNG contains the same seven statistics as visual histograms:
 
 ## CLI Reference
 
-### `simulator` — single-run report and chart
+### `simulate` — single-run report and chart
 
 ```
-python3 -m lmcache.tools.cache_simulator.simulator [OPTIONS]
+lmcache tool cache-simulator simulate [OPTIONS]
 ```
 
 | Option | Default | Description |
@@ -254,10 +254,10 @@ python3 -m lmcache.tools.cache_simulator.simulator [OPTIONS]
 | `--model NAME` | all | Filter by `model_name` (exact match) |
 | `--kv-bytes-per-chunk BYTES` | auto | KV bytes per chunk; auto-computed from first event if omitted |
 
-### `plot_hit_rate` — capacity sweep and plot
+### `sweep` — capacity sweep and plot
 
 ```
-python3 -m lmcache.tools.cache_simulator.plot_hit_rate [OPTIONS]
+lmcache tool cache-simulator sweep [OPTIONS]
 ```
 
 | Option | Default | Description |
