@@ -37,7 +37,6 @@ from __future__ import annotations
 from collections import deque
 from dataclasses import dataclass, field
 from enum import Enum
-import random
 import time
 
 # Third Party
@@ -88,11 +87,13 @@ class L0LifecycleSubscriber(EventSubscriber):
             f"sample_rate must be in (0, 1.0], got {sample_rate}"
         )
         self._sample_rate = sample_rate
+        # Deterministic sampling via hash: hash(key) % _SAMPLE_PRIME < threshold.
+        # O(1) memory, no set growth, same key always gets the same decision.
+        self._sample_prime = 1_000_003
+        self._sample_threshold = int(sample_rate * self._sample_prime)
 
         # Shadow map: physical block_id -> lifecycle state.
         self._shadow: dict[int, _L0BlockState] = {}
-        # Set of block_ids we decided NOT to sample.
-        self._skipped: set[int] = set()
         # Reverse index: req_id -> set of block_ids owned by that request.
         self._req_blocks: dict[str, set[int]] = {}
 
@@ -192,12 +193,8 @@ class L0LifecycleSubscriber(EventSubscriber):
         existing = self._shadow.get(block_id)
 
         if existing is None:
-            # Block not in shadow map.
-            if block_id in self._skipped:
-                return
-
-            if not self._should_sample():
-                self._skipped.add(block_id)
+            # Block not in shadow map — check deterministic sampling.
+            if not self._should_sample(block_id):
                 return
 
             # New allocation — start tracking.
@@ -270,5 +267,5 @@ class L0LifecycleSubscriber(EventSubscriber):
 
     # -- Sampling ----------------------------------------------------------
 
-    def _should_sample(self) -> bool:
-        return random.random() < self._sample_rate
+    def _should_sample(self, key: int) -> bool:
+        return hash(key) % self._sample_prime < self._sample_threshold
