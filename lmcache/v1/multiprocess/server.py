@@ -62,10 +62,7 @@ from lmcache.v1.multiprocess.protocol import (
 )
 from lmcache.v1.multiprocess.session import SessionManager
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
-
-if torch.cuda.is_available():
-    # First Party
-    import lmcache.c_ops as lmc_ops
+import lmcache.c_ops as lmc_ops
 
 logger = init_logger(__name__)
 
@@ -823,6 +820,12 @@ class MPCacheEngine:
         Args:
             request_id: The request ID whose session should be removed.
         """
+        self._event_bus.publish(
+            Event(
+                event_type=EventType.MP_VLLM_END_SESSION,
+                metadata={"request_id": request_id},
+            )
+        )
         self.session_manager.remove(request_id)
 
     def report_status(self) -> dict:

@@ -89,6 +89,52 @@ For implementation guidance on adding new events and subscribers, see [README.md
 
 ---
 
+## L2 Store Metrics
+
+| OTel metric name | Prometheus name | Type | Source event | Calculation |
+|---|---|---|---|---|
+| `lmcache_mp.l2_store_tasks` | `lmcache_mp_l2_store_tasks_total` | Counter | `L2_STORE_SUBMITTED` | +1 per event |
+| `lmcache_mp.l2_store_keys` | `lmcache_mp_l2_store_keys_total` | Counter | `L2_STORE_SUBMITTED` | `+key_count` |
+| `lmcache_mp.l2_store_completed` | `lmcache_mp_l2_store_completed_total` | Counter | `L2_STORE_COMPLETED` | +1 per event |
+| `lmcache_mp.l2_store_succeeded_keys` | `lmcache_mp_l2_store_succeeded_keys_total` | Counter | `L2_STORE_COMPLETED` | `+succeeded_count` |
+| `lmcache_mp.l2_store_failed_keys` | `lmcache_mp_l2_store_failed_keys_total` | Counter | `L2_STORE_COMPLETED` | `+failed_count` |
+
+**What it answers:** How many keys are being pushed to L2? What fraction fail?
+
+---
+
+## L2 Prefetch Metrics
+
+| OTel metric name | Prometheus name | Type | Source event | Calculation |
+|---|---|---|---|---|
+| `lmcache_mp.l2_prefetch_lookups` | `lmcache_mp_l2_prefetch_lookups_total` | Counter | `L2_PREFETCH_LOOKUP_SUBMITTED` | +1 per event |
+| `lmcache_mp.l2_prefetch_lookup_keys` | `lmcache_mp_l2_prefetch_lookup_keys_total` | Counter | `L2_PREFETCH_LOOKUP_SUBMITTED` | `+key_count` |
+| `lmcache_mp.l2_prefetch_hit_keys` | `lmcache_mp_l2_prefetch_hit_keys_total` | Counter | `L2_PREFETCH_LOOKUP_COMPLETED` | `+prefix_hit_count` |
+| `lmcache_mp.l2_prefetch_load_tasks` | `lmcache_mp_l2_prefetch_load_tasks_total` | Counter | `L2_PREFETCH_LOAD_SUBMITTED` | `+adapter_count` |
+| `lmcache_mp.l2_prefetch_load_keys` | `lmcache_mp_l2_prefetch_load_keys_total` | Counter | `L2_PREFETCH_LOAD_SUBMITTED` | `+key_count` |
+| `lmcache_mp.l2_prefetch_loaded_keys` | `lmcache_mp_l2_prefetch_loaded_keys_total` | Counter | `L2_PREFETCH_LOAD_COMPLETED` | `+loaded_count` |
+| `lmcache_mp.l2_prefetch_failed_keys` | `lmcache_mp_l2_prefetch_failed_keys_total` | Counter | `L2_PREFETCH_LOAD_COMPLETED` | `+failed_count` |
+
+**What it answers:** How effective is L2 prefetching? What is the L2 hit rate? How many keys fail to load?
+
+---
+
+## L0 (GPU) Block Lifecycle Histograms
+
+Sampled (default 1%) GPU KV cache block lifecycle tracking via shadow monitoring
+of `MP_VLLM_BLOCK_ALLOCATION` and `MP_VLLM_END_SESSION` events.  Eviction is
+detected at reallocation time (when a block is assigned different tokens).
+
+| OTel metric name | Prometheus name | Type | Source event | Calculation |
+|---|---|---|---|---|
+| `lmcache_mp.l0_block_lifetime_seconds` | `lmcache_mp_l0_block_lifetime_seconds` | Histogram | `MP_VLLM_BLOCK_ALLOCATION` (eviction detected) | `eviction_time - alloc_time` per sampled block |
+| `lmcache_mp.l0_block_idle_before_evict_seconds` | `lmcache_mp_l0_block_idle_before_evict_seconds` | Histogram | `MP_VLLM_BLOCK_ALLOCATION` (eviction detected) | `eviction_time - last_access_time` per sampled block |
+| `lmcache_mp.l0_block_reuse_gap_seconds` | `lmcache_mp_l0_block_reuse_gap_seconds` | Histogram | `MP_VLLM_BLOCK_ALLOCATION` (cache hit) | Time gaps between consecutive accesses from access history |
+
+**What it answers:** How long do GPU blocks live before eviction? How idle are they? How frequently are cached blocks reused?
+
+---
+
 ## MPCacheEngine Observable Gauges
 
 These metrics are registered directly via `register_gauge` (pull-based OTel

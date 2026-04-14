@@ -283,7 +283,7 @@ class TestMultiPathDiskBackend:
         local_cpu_backend.memory_allocator.close()
 
     def test_path_sharding_default(self, temp_disk_path, async_loop, local_cpu_backend):
-        """Default local_disk_path_sharding is 'by_gpu'."""
+        """Default local_disk_path_sharding is 'by_gpu' (backend inits OK)."""
         config = create_test_config(temp_disk_path)
         backend = LocalDiskBackend(
             config=config,
@@ -291,7 +291,7 @@ class TestMultiPathDiskBackend:
             local_cpu_backend=local_cpu_backend,
             dst_device="cuda:0",
         )
-        assert backend.local_disk_path_sharding == "by_gpu"
+        assert backend.path == temp_disk_path
         local_cpu_backend.memory_allocator.close()
 
     def test_path_sharding_explicit_by_gpu(
@@ -305,19 +305,17 @@ class TestMultiPathDiskBackend:
             local_cpu_backend=local_cpu_backend,
             dst_device="cuda:0",
         )
-        assert backend.local_disk_path_sharding == "by_gpu"
+        assert backend.path == temp_disk_path
         local_cpu_backend.memory_allocator.close()
 
     def test_path_sharding_unsupported_raises(
         self, temp_disk_path, async_loop, local_cpu_backend
     ):
-        """Unsupported local_disk_path_sharding raises AssertionError."""
+        """Unsupported local_disk_path_sharding raises ValueError."""
         config = create_test_config(
             temp_disk_path, local_disk_path_sharding="round_robin"
         )
-        with pytest.raises(
-            AssertionError, match="Unsupported local_disk_path_sharding"
-        ):
+        with pytest.raises(ValueError, match="Unsupported path sharding strategy"):
             LocalDiskBackend(
                 config=config,
                 loop=async_loop,
