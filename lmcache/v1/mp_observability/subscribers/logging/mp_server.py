@@ -30,6 +30,7 @@ class MPServerLoggingSubscriber(EventSubscriber):
             EventType.MP_RETRIEVE_END: self._on_retrieve_end,
             EventType.MP_LOOKUP_PREFETCH_START: self._on_lookup_prefetch_start,
             EventType.MP_LOOKUP_PREFETCH_END: self._on_lookup_prefetch_end,
+            EventType.MP_VLLM_BLOCK_ALLOCATION: self._on_block_allocation,
         }
 
     def _on_store_start(self, event: Event) -> None:
@@ -74,3 +75,16 @@ class MPServerLoggingSubscriber(EventSubscriber):
             event.session_id,
             event.metadata.get("found_count"),
         )
+
+    def _on_block_allocation(self, event: Event) -> None:
+        records = event.metadata.get("records", [])
+        for rec in records:
+            logger.debug(
+                "vLLM block allocation: req_id=%s "
+                "new_blocks=%d new_tokens=%d "
+                "block_ids=%s",
+                rec.req_id,
+                len(rec.new_block_ids),
+                len(rec.new_token_ids),
+                rec.new_block_ids[:10],
+            )

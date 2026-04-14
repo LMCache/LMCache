@@ -68,7 +68,7 @@ fi
 
 # Launch LMCache with L1 config
 CUDA_VISIBLE_DEVICES="${GPU_DEVICE}" \
-python -m lmcache.v1.multiprocess.server \
+lmcache server \
     --l1-size-gb "$CPU_BUFFER_SIZE" \
     --eviction-policy LRU \
     --max-workers "$MAX_WORKERS" \
