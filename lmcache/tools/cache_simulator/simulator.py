@@ -278,8 +278,8 @@ def simulate(
                     global_span_distribution.append(
                         global_chunk_index + i - chunk_last_seen[h]
                     )
-                if hasattr(cache, "position"):
-                    cache_position_distribution.append(cache.position(h))  # type: ignore[union-attr]
+                if isinstance(cache, LRUCache):
+                    cache_position_distribution.append(cache.position(h))
 
         # ── Update cache ────────────────────────────────────────────────────
         for i, h in enumerate(hashes):
