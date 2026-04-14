@@ -27,6 +27,12 @@ from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.l1_manager import L1Manager
 from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface, L2TaskId
+from lmcache.v1.distributed.serde import (
+    SerdeProcessor,
+    SerdeTaskId,
+    make_temp_key,
+    serialized_layout_desc,
+)
 from lmcache.v1.distributed.storage_controller import StorageControllerInterface
 from lmcache.v1.distributed.storage_controllers.prefetch_policy import (
     PrefetchPolicy,
@@ -156,15 +162,36 @@ class InFlightPrefetchRequest:
     pending_load_tasks: dict[int, L2TaskId] = field(default_factory=dict)
     # Load phase: adapter_idx -> bitmap (populated as results arrive)
     load_results: dict[int, Bitmap] = field(default_factory=dict)
-    # Load phase: keys that were write-reserved in L1
+
+    # Load phase: real KV-shaped buffers (always original keys, always KV layout)
     write_reserved_keys: list[ObjectKey] = field(default_factory=list)
     write_reserved_objs: dict[ObjectKey, MemoryObj] = field(default_factory=dict)
+
+    # Per-adapter serde state.
+    # Each adapter independently decides whether it uses serde (based on
+    # self._serde_processors[adapter_idx]). A single request can mix
+    # serde and non-serde adapters within its load plan.
+    temp_reserved_keys: list[ObjectKey] = field(default_factory=list)
+    temp_reserved_objs: dict[ObjectKey, MemoryObj] = field(default_factory=dict)
+    original_to_temp_key: dict[ObjectKey, ObjectKey] = field(default_factory=dict)
+    """Maps original ObjectKey -> temp buffer ObjectKey.
+    Only contains keys whose adapter has serde enabled."""
+
+    # Deserialize tracking: adapter_idx -> serde task id (removed as results arrive).
+    # Only adapters with serde enabled appear here.
+    pending_deserialize_tasks: dict[int, SerdeTaskId] = field(default_factory=dict)
 
     def all_lookups_done(self) -> bool:
         return len(self.pending_lookup_tasks) == 0
 
     def all_loads_done(self) -> bool:
         return len(self.pending_load_tasks) == 0
+
+    def all_deserialize_done(self) -> bool:
+        return len(self.pending_deserialize_tasks) == 0
+
+    def is_ready_to_finalize(self) -> bool:
+        return self.all_loads_done() and self.all_deserialize_done()
 
 
 class PrefetchController(StorageControllerInterface):
@@ -185,6 +212,8 @@ class PrefetchController(StorageControllerInterface):
         adapter_descriptors: Descriptors for each L2 adapter (same order).
         policy: The prefetch policy for load plan decisions.
         max_in_flight: Maximum number of concurrent prefetch requests.
+        serde_processors: Optional list of SerdeProcessors, one per adapter.
+            None or [None]*N means serde disabled.
     """
 
     def __init__(
@@ -194,12 +223,21 @@ class PrefetchController(StorageControllerInterface):
         adapter_descriptors: list[AdapterDescriptor],
         policy: PrefetchPolicy,
         max_in_flight: int = 8,
+        serde_processors: list[SerdeProcessor | None] | None = None,
     ) -> None:
         self._l1_manager = l1_manager
         self._l2_adapters = l2_adapters
         self._adapter_descriptors = adapter_descriptors
         self._policy = policy
         self._max_in_flight = max_in_flight
+
+        if serde_processors is None:
+            self._serde_processors: list[SerdeProcessor | None] = [None] * len(
+                l2_adapters
+            )
+        else:
+            assert len(serde_processors) == len(l2_adapters)
+            self._serde_processors = serde_processors
 
         # In-flight request tracking (background thread only)
         self._in_flight_requests: dict[PrefetchRequestId, InFlightPrefetchRequest] = {}
@@ -238,6 +276,12 @@ class PrefetchController(StorageControllerInterface):
         for i, adapter in enumerate(self._l2_adapters):
             self._lookup_efd_to_adapter[adapter.get_lookup_and_lock_event_fd()] = i
             self._load_efd_to_adapter[adapter.get_load_event_fd()] = i
+
+        # Map serde deserialize eventfd -> adapter index
+        self._deserialize_efd_to_adapter: dict[int, int] = {}
+        for i, serde in enumerate(self._serde_processors):
+            if serde is not None:
+                self._deserialize_efd_to_adapter[serde.get_deserialize_event_fd()] = i
 
         self._event_bus = get_event_bus()
 
@@ -394,12 +438,15 @@ class PrefetchController(StorageControllerInterface):
         - The submission eventfd (new prefetch requests).
         - Each L2 adapter's lookup eventfd (completed lookups).
         - Each L2 adapter's load eventfd (completed loads).
+        - Each SerdeProcessor's deserialize eventfd (completed deserializations).
         """
         poller = select.poll()
         poller.register(self._submission_efd, select.POLLIN)
         for efd in self._lookup_efd_to_adapter:
             poller.register(efd, select.POLLIN)
         for efd in self._load_efd_to_adapter:
+            poller.register(efd, select.POLLIN)
+        for efd in self._deserialize_efd_to_adapter:
             poller.register(efd, select.POLLIN)
 
         while not self._stop_flag.is_set():
@@ -423,6 +470,10 @@ class PrefetchController(StorageControllerInterface):
                         )
                     elif fd in self._load_efd_to_adapter:
                         self._process_load_completions(self._load_efd_to_adapter[fd])
+                    elif fd in self._deserialize_efd_to_adapter:
+                        self._process_deserialize_completions(
+                            self._deserialize_efd_to_adapter[fd]
+                        )
                 except Exception:
                     logger.exception(
                         "Unexpected error in prefetch loop while processing fd %d",
@@ -560,7 +611,7 @@ class PrefetchController(StorageControllerInterface):
             self._complete_request(request.request_id, 0)
             return
 
-        # Step 3: reserve L1 write buffers
+        # Step 3: reserve real KV-shaped L1 write buffers (always original keys)
         merged_bitmap = merge_bitmaps(trimmed_plan.values(), len(request.keys))
         keys_to_reserve = merged_bitmap.gather(request.keys)
         l1_mgr = self._l1_manager
@@ -590,6 +641,46 @@ class PrefetchController(StorageControllerInterface):
                     err,
                 )
 
+        # Step 4b: per-adapter temp buffer allocation for serde-enabled adapters.
+        # Each adapter independently decides; a single request can mix.
+        for adapter_idx, plan_bitmap in trimmed_plan.items():
+            serde = self._serde_processors[adapter_idx]
+            if serde is None:
+                continue
+
+            # Keys this adapter is responsible for, restricted to those
+            # that successfully got a real KV buffer.
+            adapter_keys = [
+                k for k in plan_bitmap.gather(request.keys) if k in reserved_key_set
+            ]
+            if not adapter_keys:
+                continue
+
+            temp_layout = serialized_layout_desc(request.layout_desc, serde)
+            temp_keys = [make_temp_key(k, "deser") for k in adapter_keys]
+
+            temp_results = l1_mgr.reserve_write(
+                keys=temp_keys,
+                is_temporary=[True] * len(temp_keys),
+                layout_desc=temp_layout,
+                mode="new",
+            )
+
+            for orig_key, temp_key in zip(adapter_keys, temp_keys, strict=True):
+                result = temp_results.get(temp_key)
+                if result is not None and result[0] == L1Error.SUCCESS:
+                    request.temp_reserved_keys.append(temp_key)
+                    request.temp_reserved_objs[temp_key] = result[1]
+                    request.original_to_temp_key[orig_key] = temp_key
+                else:
+                    # Temp alloc failed — release the corresponding real buffer
+                    # and drop the key from the plan.
+                    l1_mgr.finish_write([orig_key])
+                    l1_mgr.delete([orig_key])
+                    request.write_reserved_keys.remove(orig_key)
+                    del request.write_reserved_objs[orig_key]
+                    reserved_key_set.discard(orig_key)
+
         # Step 5: recompute load plan excluding failed reservations
         reserved_bitmap = Bitmap(len(request.keys))
         for i, key in enumerate(request.keys):
@@ -606,10 +697,13 @@ class PrefetchController(StorageControllerInterface):
         self._unlock_unneeded_keys(request)
 
         if not trimmed_plan:
-            # Nothing loadable after filtering
+            # Nothing loadable after filtering — clean up both real and temp
             if request.write_reserved_keys:
                 l1_mgr.finish_write(request.write_reserved_keys)
                 l1_mgr.delete(request.write_reserved_keys)
+            if request.temp_reserved_keys:
+                l1_mgr.finish_write(request.temp_reserved_keys)
+                l1_mgr.delete(request.temp_reserved_keys)
             self._update_lookup_results(request.request_id, 0)
             self._event_bus.publish(
                 Event(
@@ -627,7 +721,7 @@ class PrefetchController(StorageControllerInterface):
         for adapter_idx, bitmap in trimmed_plan.items():
             per_adapter_keys = bitmap.gather(request.keys)
             per_adapter_objs = [
-                request.write_reserved_objs[key] for key in per_adapter_keys
+                self._get_load_buffer(request, key) for key in per_adapter_keys
             ]
             task_id = self._l2_adapters[adapter_idx].submit_load_task(
                 per_adapter_keys, per_adapter_objs
@@ -672,7 +766,15 @@ class PrefetchController(StorageControllerInterface):
             self._completed_lookups[request_id] = hit_chunks
 
     def _process_load_completions(self, adapter_index: int) -> None:
-        """Check all PLAN_AND_LOAD-phase requests for completed loads."""
+        """Process completed L2 loads for this adapter.
+
+        For each request whose load just completed for this adapter:
+        - Record the load result.
+        - If this adapter has serde, kick off async deserialize.
+        - Otherwise, the data is already in the real KV buffer.
+        - If all loads and deserializes are done, finalize.
+        """
+        serde = self._serde_processors[adapter_index]
         ready_to_finalize: list[InFlightPrefetchRequest] = []
 
         for request in list(self._in_flight_requests.values()):
@@ -683,13 +785,115 @@ class PrefetchController(StorageControllerInterface):
 
             task_id = request.pending_load_tasks[adapter_index]
             result = self._l2_adapters[adapter_index].query_load_result(task_id)
+            if result is None:
+                continue
 
-            if result is not None:
-                request.load_results[adapter_index] = result
-                del request.pending_load_tasks[adapter_index]
+            request.load_results[adapter_index] = result
+            del request.pending_load_tasks[adapter_index]
 
-                if request.all_loads_done():
-                    ready_to_finalize.append(request)
+            if serde is not None:
+                self._submit_deserialize_for_adapter(
+                    request, adapter_index, serde, result
+                )
+
+            if request.is_ready_to_finalize():
+                ready_to_finalize.append(request)
+
+        for request in ready_to_finalize:
+            self._finalize_load(request)
+
+    # =========================================================================
+    # Deserialize phase (per-adapter, serde-enabled adapters only)
+    # =========================================================================
+
+    def _submit_deserialize_for_adapter(
+        self,
+        request: InFlightPrefetchRequest,
+        adapter_index: int,
+        serde: SerdeProcessor,
+        load_result: Bitmap,
+    ) -> None:
+        """Submit async deserialize for the keys this adapter just loaded.
+
+        Only L2-loaded keys (per load_result bitmap) are deserialized.
+        Keys that L2 failed to load have invalid temp buffers; we skip
+        them and let the normal failed-key cleanup path handle them.
+        """
+        plan_bitmap = request.load_plan[adapter_index]
+        plan_indices = plan_bitmap.get_indices_list()
+
+        src_objs = []  # temp buffers (filled by L2)
+        dst_objs = []  # real KV buffers
+        for local_i, global_i in enumerate(plan_indices):
+            if not load_result.test(local_i):
+                continue
+            orig_key = request.keys[global_i]
+            temp_key = request.original_to_temp_key.get(orig_key)
+            if temp_key is None or orig_key not in request.write_reserved_objs:
+                continue
+            src_objs.append(request.temp_reserved_objs[temp_key])
+            dst_objs.append(request.write_reserved_objs[orig_key])
+
+        if not src_objs:
+            return
+
+        serde_task_id = serde.submit_deserialize(src_objs, dst_objs)
+        request.pending_deserialize_tasks[adapter_index] = serde_task_id
+
+    def _process_deserialize_completions(self, adapter_index: int) -> None:
+        """Handle completed deserialize tasks for this adapter.
+
+        Releases this adapter's temp buffers. If deserialize failed,
+        clears the load result bitmap so _finalize_load treats those
+        keys as failed (they'll get finish_write + delete).
+        Finalizes the request if all loads and deserializes are done.
+        """
+        serde = self._serde_processors[adapter_index]
+        l1_mgr = self._l1_manager
+        ready_to_finalize: list[InFlightPrefetchRequest] = []
+
+        for request in list(self._in_flight_requests.values()):
+            if adapter_index not in request.pending_deserialize_tasks:
+                continue
+
+            task_id = request.pending_deserialize_tasks[adapter_index]
+            result = serde.query_deserialize_result(task_id)
+            if result is None:
+                continue
+
+            del request.pending_deserialize_tasks[adapter_index]
+
+            # Release temp buffers belonging to this adapter
+            adapter_temp_keys: list[ObjectKey] = []
+            for orig_key in request.load_plan[adapter_index].gather(request.keys):
+                temp_key = request.original_to_temp_key.get(orig_key)
+                if temp_key is not None and temp_key in request.temp_reserved_objs:
+                    adapter_temp_keys.append(temp_key)
+
+            if adapter_temp_keys:
+                l1_mgr.finish_write(adapter_temp_keys)
+                l1_mgr.delete(adapter_temp_keys)
+                temp_set = set(adapter_temp_keys)
+                request.temp_reserved_keys = [
+                    k for k in request.temp_reserved_keys if k not in temp_set
+                ]
+                for tk in adapter_temp_keys:
+                    request.temp_reserved_objs.pop(tk, None)
+
+            if not result:
+                # Deserialize failed — clear this adapter's load_result
+                # so its keys become "failed" in _finalize_load.
+                logger.warning(
+                    "Prefetch request %d: deserialize failed for adapter %d",
+                    request.request_id,
+                    adapter_index,
+                )
+                load_bitmap = request.load_results.get(adapter_index)
+                if load_bitmap is not None:
+                    request.load_results[adapter_index] = Bitmap(load_bitmap.size())
+
+            if request.is_ready_to_finalize():
+                ready_to_finalize.append(request)
 
         for request in ready_to_finalize:
             self._finalize_load(request)
@@ -707,7 +911,7 @@ class PrefetchController(StorageControllerInterface):
 
         # Scatter per-adapter local load results into global positions.
         # Each adapter's load bitmap is locally indexed (size == adapter's
-        # key count).  The plan bitmap maps local → global indices via
+        # key count).  The plan bitmap maps local -> global indices via
         # get_indices_list().
         result_bitmap = Bitmap(num_keys)
         for adapter_idx, plan_bitmap in request.load_plan.items():
@@ -761,6 +965,29 @@ class PrefetchController(StorageControllerInterface):
             l1_mgr.finish_read(non_prefix_loaded, extra_count=request.extra_count)
 
         self._complete_request(request.request_id, prefix_hits)
+
+    @staticmethod
+    def _get_load_buffer(request: InFlightPrefetchRequest, key: ObjectKey) -> MemoryObj:
+        """Return the MemoryObj that L2 should load into for this key.
+
+        Per-key decision: if the key has a temp buffer (i.e. its adapter
+        has serde enabled), L2 loads the serialized data into the temp
+        buffer. Otherwise L2 loads directly into the real KV buffer.
+        """
+        temp_key = request.original_to_temp_key.get(key)
+        if temp_key is not None:
+            return request.temp_reserved_objs[temp_key]
+        return request.write_reserved_objs[key]
+
+    def _find_adapter_for_key(
+        self, request: InFlightPrefetchRequest, key: ObjectKey
+    ) -> int:
+        """Find which adapter was responsible for loading this key."""
+        key_idx = request.keys.index(key)
+        for adapter_idx, bitmap in request.load_plan.items():
+            if bitmap.test(key_idx):
+                return adapter_idx
+        raise RuntimeError(f"Key {key} not found in any adapter's load plan")
 
     # =========================================================================
     # Unlock helpers
@@ -819,6 +1046,9 @@ class PrefetchController(StorageControllerInterface):
                 if request.write_reserved_keys:
                     l1_mgr.finish_write(request.write_reserved_keys)
                     l1_mgr.delete(request.write_reserved_keys)
+                if request.temp_reserved_keys:
+                    l1_mgr.finish_write(request.temp_reserved_keys)
+                    l1_mgr.delete(request.temp_reserved_keys)
                 self._unlock_all_plan_keys(request)
             elif request.phase == PrefetchPhase.LOOKUP:
                 self._unlock_all_lookups(request)

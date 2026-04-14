@@ -107,6 +107,35 @@ class L2AdapterConfigBase(ABC):
     #: means L2 eviction is disabled for this adapter.
     eviction_config: EvictionConfig | None = None
 
+    #: Optional serde config dict (parsed from the "serde" sub-dict).
+    #: ``None`` means serde is disabled for this adapter, and the adapter
+    #: stores raw bytes directly. When set, StorageManager will instantiate
+    #: a SerdeProcessor via the serde factory.
+    serde_config: dict | None = None
+
+    @staticmethod
+    def _parse_serde_config(d: dict) -> dict | None:
+        """Parse an optional ``"serde"`` sub-dict from an adapter JSON spec.
+
+        Expected format::
+
+            {
+                "type": "fs",
+                ...,
+                "serde": {"type": "fp8", "fp8_dtype": "float8_e4m3fn"}
+            }
+
+        Returns ``None`` when the key is absent (serde disabled).
+        """
+        serde_dict = d.get("serde")
+        if serde_dict is None:
+            return None
+        if not isinstance(serde_dict, dict):
+            raise ValueError(f"'serde' must be a dict, got {type(serde_dict).__name__}")
+        if "type" not in serde_dict:
+            raise ValueError("'serde' dict must include a 'type' field")
+        return serde_dict
+
     @staticmethod
     def _parse_eviction_config(d: dict) -> EvictionConfig | None:
         """
@@ -297,6 +326,7 @@ def parse_args_to_l2_adapters_config(args: argparse.Namespace) -> L2AdaptersConf
         try:
             adapter_cfg = config_cls.from_dict(d)
             adapter_cfg.eviction_config = L2AdapterConfigBase._parse_eviction_config(d)
+            adapter_cfg.serde_config = L2AdapterConfigBase._parse_serde_config(d)
             adapter_configs.append(adapter_cfg)
         except (TypeError, ValueError) as e:
             logger.error(
