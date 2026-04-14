@@ -422,12 +422,12 @@ def alloc_hugepage_numa_ptr(size: int, numa_id: int = 0) -> int:
         RuntimeWarning,
         stacklevel=2,
     )
-    return alloc_pinned_numa_ptr(size, numa_id)
+    return alloc_numa_ptr(size, numa_id)
 
 
 def free_hugepage_numa_ptr(ptr: int, size: int = 0) -> None:
     """Non-CUDA fallback for free_hugepage_numa_ptr (no hugepage support)."""
-    free_pinned_numa_ptr(ptr, size)
+    free_numa_ptr(ptr, size)
 
 
 def alloc_numa_ptr(size: int, numa_id: int = 0) -> int:
