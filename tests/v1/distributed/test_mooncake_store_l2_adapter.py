@@ -158,28 +158,28 @@ class TestMooncakeStoreL2AdapterConfig:
         assert "num_workers" not in config.setup_config
         assert config.setup_config["local_hostname"] == "10.0.0.1"
 
-    def test_from_dict_parses_preregister_flag(self):
-        """preregister_l1_memory should be parsed and excluded."""
+    def test_from_dict_forwards_boolean_mooncake_keys_as_strings(self):
+        """Non-LMCache boolean keys should be forwarded as strings."""
         config = MooncakeStoreL2AdapterConfig.from_dict(
             {
                 "type": "mooncake_store",
                 "local_hostname": "127.0.0.1",
-                "preregister_l1_memory": True,
+                "mooncake_prefer_local_alloc": True,
             }
         )
 
-        assert config.preregister_l1_memory is True
-        assert "preregister_l1_memory" not in config.setup_config
+        assert config.setup_config["mooncake_prefer_local_alloc"] == "True"
 
-    def test_from_dict_rejects_non_boolean_preregister_flag(self):
-        """Non-boolean preregister_l1_memory should raise ValueError."""
-        with pytest.raises(ValueError, match="preregister_l1_memory"):
-            MooncakeStoreL2AdapterConfig.from_dict(
-                {
-                    "type": "mooncake_store",
-                    "preregister_l1_memory": "true",
-                }
-            )
+    def test_from_dict_forwards_unknown_keys(self):
+        """Unknown keys should be forwarded to mooncake unchanged."""
+        config = MooncakeStoreL2AdapterConfig.from_dict(
+            {
+                "type": "mooncake_store",
+                "experimental_key": "enabled",
+            }
+        )
+
+        assert config.setup_config["experimental_key"] == "enabled"
 
     def test_from_dict_strips_lmcache_only_keys(self):
         """LMCache-only keys (type, num_workers, eviction) should
@@ -288,30 +288,28 @@ class TestMooncakeStoreRegistration:
 
 
 @requires_mooncake
-class TestMooncakeStorePreregisterFactory:
-    """Tests for preregister_l1_memory factory behavior."""
+class TestMooncakeStoreL1RegistrationFactory:
+    """Tests for RDMA L1 registration factory behavior."""
 
-    def test_factory_passes_l1_memory_descriptor_to_native_client(
+    def test_factory_passes_disabled_l1_registration_for_tcp(
         self, monkeypatch: pytest.MonkeyPatch
     ):
         # First Party
         from lmcache import lmcache_mooncake
         from lmcache.v1.distributed.l2_adapters import native_connector_l2_adapter
 
-        captured: dict[str, object] = {}
+        captured: dict[str, Any] = {}
 
         class FakeClient:
             def __init__(
                 self,
                 config: dict[str, str],
                 num_workers: int,
-                preregister_l1_base: int,
-                preregister_l1_size: int,
+                l1_registration,
             ):
                 captured["config"] = config
                 captured["num_workers"] = num_workers
-                captured["preregister_l1_base"] = preregister_l1_base
-                captured["preregister_l1_size"] = preregister_l1_size
+                captured["l1_registration"] = l1_registration
 
         monkeypatch.setattr(
             lmcache_mooncake,
@@ -330,7 +328,7 @@ class TestMooncakeStorePreregisterFactory:
                 "local_hostname": "127.0.0.1",
                 "metadata_server": "P2PHANDSHAKE",
                 "num_workers": 3,
-                "preregister_l1_memory": True,
+                "protocol": "tcp",
             }
         )
         l1_desc = L1MemoryDesc(ptr=123456, size=65536, align_bytes=4096)
@@ -344,28 +342,30 @@ class TestMooncakeStorePreregisterFactory:
         assert wrapped_adapter[0] == "wrapped"
         assert captured["config"] == config.setup_config
         assert captured["num_workers"] == 3
-        assert captured["preregister_l1_base"] == l1_desc.ptr
-        assert captured["preregister_l1_size"] == l1_desc.size
+        registration = captured["l1_registration"]
+        assert registration.enabled is False
+        assert registration.base == 0
+        assert registration.size == 0
 
-    def test_factory_falls_back_without_l1_memory_descriptor(
+    def test_factory_passes_enabled_l1_registration_for_rdma(
         self, monkeypatch: pytest.MonkeyPatch
     ):
         # First Party
         from lmcache import lmcache_mooncake
         from lmcache.v1.distributed.l2_adapters import native_connector_l2_adapter
 
-        captured: dict[str, int] = {}
+        captured: dict[str, Any] = {}
 
         class FakeClient:
             def __init__(
                 self,
                 config: dict[str, str],
                 num_workers: int,
-                preregister_l1_base: int,
-                preregister_l1_size: int,
+                l1_registration,
             ):
-                captured["preregister_l1_base"] = preregister_l1_base
-                captured["preregister_l1_size"] = preregister_l1_size
+                captured["config"] = config
+                captured["num_workers"] = num_workers
+                captured["l1_registration"] = l1_registration
 
         monkeypatch.setattr(
             lmcache_mooncake,
@@ -375,21 +375,61 @@ class TestMooncakeStorePreregisterFactory:
         monkeypatch.setattr(
             native_connector_l2_adapter,
             "NativeConnectorL2Adapter",
-            lambda client: client,
+            lambda client: ("wrapped", client),
         )
 
         config = MooncakeStoreL2AdapterConfig.from_dict(
             {
                 "type": "mooncake_store",
                 "local_hostname": "127.0.0.1",
-                "preregister_l1_memory": True,
+                "metadata_server": "P2PHANDSHAKE",
+                "num_workers": 2,
+                "protocol": "rdma",
+            }
+        )
+        l1_desc = L1MemoryDesc(ptr=123456, size=65536, align_bytes=4096)
+
+        adapter = mooncake_store_module._create_mooncake_store_l2_adapter(
+            config,
+            l1_memory_desc=l1_desc,
+        )
+        wrapped_adapter: Any = adapter
+
+        assert wrapped_adapter[0] == "wrapped"
+        assert captured["config"] == config.setup_config
+        assert captured["num_workers"] == 2
+        registration = captured["l1_registration"]
+        assert registration.enabled is True
+        assert registration.base == l1_desc.ptr
+        assert registration.size == l1_desc.size
+
+    def test_factory_requires_l1_memory_descriptor_for_rdma(self):
+        config = MooncakeStoreL2AdapterConfig.from_dict(
+            {
+                "type": "mooncake_store",
+                "local_hostname": "127.0.0.1",
+                "protocol": "rdma",
             }
         )
 
-        mooncake_store_module._create_mooncake_store_l2_adapter(config)
+        with pytest.raises(ValueError, match="no L1 memory descriptor"):
+            mooncake_store_module._create_mooncake_store_l2_adapter(config)
 
-        assert captured["preregister_l1_base"] == 0
-        assert captured["preregister_l1_size"] == 0
+    def test_factory_rejects_invalid_l1_memory_descriptor_for_rdma(self):
+        config = MooncakeStoreL2AdapterConfig.from_dict(
+            {
+                "type": "mooncake_store",
+                "local_hostname": "127.0.0.1",
+                "protocol": "rdma",
+            }
+        )
+        invalid_desc = L1MemoryDesc(ptr=0, size=0, align_bytes=4096)
+
+        with pytest.raises(ValueError, match="invalid"):
+            mooncake_store_module._create_mooncake_store_l2_adapter(
+                config,
+                l1_memory_desc=invalid_desc,
+            )
 
 
 # =============================================================================
@@ -586,38 +626,6 @@ class TestMooncakeStoreIntegration:
 
         self.adapter.submit_unlock(stored_keys)
 
-    def test_lazy_registration_resize_fails(self):
-        """Lazy registration should reject growing the same buffer address."""
-        page_size = 4096
-        shared_buffer = torch.empty(
-            page_size * 8,
-            dtype=torch.uint8,
-            device="cpu",
-        )
-        small_obj = create_buffer_memory_obj(
-            shared_buffer,
-            offset_bytes=0,
-            size_bytes=page_size,
-            fill_value=1.0,
-        )
-        larger_obj = create_buffer_memory_obj(
-            shared_buffer,
-            offset_bytes=0,
-            size_bytes=page_size * 2,
-            fill_value=2.0,
-        )
-
-        first_key = create_object_key(7771, model_name="lazy_resize_model")
-        second_key = create_object_key(7772, model_name="lazy_resize_model")
-
-        first_tid = self.adapter.submit_store_task([first_key], [small_obj])
-        assert wait_for_event_fd(self.adapter.get_store_event_fd())
-        assert self.adapter.pop_completed_store_tasks()[first_tid] is True
-
-        second_tid = self.adapter.submit_store_task([second_key], [larger_obj])
-        assert wait_for_event_fd(self.adapter.get_store_event_fd())
-        assert self.adapter.pop_completed_store_tasks()[second_tid] is False
-
     def test_factory_creates_adapter(self):
         """Verify the factory can create a Mooncake Store L2 adapter."""
         # First Party
@@ -640,8 +648,8 @@ class TestMooncakeStoreIntegration:
         finally:
             adapter.close()
 
-    def test_preregistered_l1_memory_store_lookup_load(self):
-        """Store and load objects backed by a preregistered L1 buffer."""
+    def test_buffer_backed_store_lookup_load(self):
+        """Store and load objects backed by an explicit test buffer."""
         # First Party
         from lmcache.v1.distributed.l2_adapters import create_l2_adapter
 
@@ -660,7 +668,6 @@ class TestMooncakeStoreIntegration:
                 "local_hostname": MOONCAKE_LOCAL_HOSTNAME,
                 "metadata_server": MOONCAKE_METADATA_SERVER,
                 "num_workers": 2,
-                "preregister_l1_memory": True,
             }
         )
         adapter = create_l2_adapter(config, l1_memory_desc=l1_desc)

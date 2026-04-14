@@ -31,9 +31,10 @@ bool range_contains(const RegisteredMemoryRegion& region, const void* buf,
 }  // namespace
 
 MooncakeConnector::MooncakeConnector(ConfigDict config, int num_workers,
-                                     std::uintptr_t preregister_l1_base,
-                                     size_t preregister_l1_size)
-    : ConnectorBase(num_workers), config_(std::move(config)) {
+                                     L1RegistrationConfig l1_registration)
+    : ConnectorBase(num_workers),
+      config_(std::move(config)),
+      l1_registration_(l1_registration) {
   // Create a RealClient via the static factory.
   client_ = mooncake::RealClient::create();
   if (!client_) {
@@ -47,7 +48,9 @@ MooncakeConnector::MooncakeConnector(ConfigDict config, int num_workers,
     throw std::runtime_error("Mooncake setup_internal failed");
   }
 
-  preregister_l1_memory(preregister_l1_base, preregister_l1_size);
+  if (l1_registration.is_valid()) {
+    preregister_l1_memory(l1_registration.base, l1_registration.size);
+  }
 
   start_workers();  // IMPORTANT: call at END of ctor
 }
@@ -104,74 +107,15 @@ bool MooncakeConnector::do_single_exists(WorkerMooncakeConn& conn,
 }
 
 void MooncakeConnector::ensure_registered(const void* buf, size_t len) {
+  if (!l1_registration_.is_valid()) {
+    return;
+  }
   if (buf == nullptr) {
     throw std::runtime_error(
         "Mooncake buffer registration failed: null buffer");
   }
-
-  if (is_within_registered_region(buf, len)) {
-    return;
-  }
-
-  void* mutable_buf = const_cast<void*>(buf);
-  while (true) {
-    std::unique_lock<std::mutex> lock(registered_buffers_mu_);
-    auto it = registered_buffers_.find(buf);
-    while (it != registered_buffers_.end() && it->second.registering) {
-      registered_buffers_cv_.wait(lock);
-      it = registered_buffers_.find(buf);
-    }
-
-    if (it != registered_buffers_.end() && it->second.size >= len) {
-      return;
-    }
-
-    if (it == registered_buffers_.end()) {
-      RegisteredBufferState state;
-      state.registering = true;
-      registered_buffers_.emplace(buf, state);
-      break;
-    }
-
-    throw std::runtime_error(
-        "Mooncake lazy registration does not support resizing an existing "
-        "buffer registration (existing_size=" +
-        std::to_string(it->second.size) + ", requested_size=" +
-        std::to_string(len) +
-        "); use a stable buffer size or preregister L1 memory.");
-  }
-
-  int register_rc = 0;
-  try {
-    register_rc = client_->register_buffer(mutable_buf, len);
-  } catch (...) {
-    {
-      std::lock_guard<std::mutex> guard(registered_buffers_mu_);
-      auto it = registered_buffers_.find(buf);
-      if (it != registered_buffers_.end()) {
-        registered_buffers_.erase(it);
-      }
-    }
-    registered_buffers_cv_.notify_all();
-    throw;
-  }
-
-  {
-    std::lock_guard<std::mutex> guard(registered_buffers_mu_);
-    auto it = registered_buffers_.find(buf);
-    if (register_rc != 0) {
-      if (it != registered_buffers_.end()) {
-        registered_buffers_.erase(it);
-      }
-    } else if (it != registered_buffers_.end()) {
-      it->second.size = len;
-      it->second.registering = false;
-    }
-  }
-  registered_buffers_cv_.notify_all();
-
-  if (register_rc != 0) {
-    throw std::runtime_error("Mooncake register_buffer failed");
+  if (!is_within_registered_region(buf, len)) {
+    throw std::runtime_error("Buffer is outside of preregistered L1 region");
   }
 }
 
@@ -222,32 +166,15 @@ bool MooncakeConnector::is_within_registered_region(const void* buf,
 }
 
 void MooncakeConnector::unregister_all_buffers() noexcept {
-  std::unordered_map<const void*, RegisteredBufferState> buffers_to_unregister;
-  std::vector<RegisteredMemoryRegion> regions_to_unregister;
-  {
-    std::lock_guard<std::mutex> guard(registered_buffers_mu_);
-    if (registered_buffers_.empty() && preregistered_regions_.empty()) {
-      return;
-    }
-    buffers_to_unregister.swap(registered_buffers_);
-    regions_to_unregister.swap(preregistered_regions_);
+  if (client_ == nullptr || preregistered_regions_.empty()) {
+    return;
   }
 
-  for (const auto& [buf, state] : buffers_to_unregister) {
-    if (state.registering || state.size == 0) {
-      continue;
-    }
-    if (client_ == nullptr) {
-      break;
-    }
-    client_->unregister_buffer(const_cast<void*>(buf));
-  }
+  std::vector<RegisteredMemoryRegion> regions_to_unregister;
+  regions_to_unregister.swap(preregistered_regions_);
 
   for (auto it = regions_to_unregister.rbegin();
        it != regions_to_unregister.rend(); ++it) {
-    if (client_ == nullptr) {
-      break;
-    }
     client_->unregister_buffer(const_cast<void*>(it->base));
   }
 }

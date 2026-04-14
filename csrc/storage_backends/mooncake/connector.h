@@ -28,7 +28,7 @@ using ConfigDict = std::unordered_map<std::string, std::string>;
 // Each worker holds a raw pointer to the shared
 // RealClient (owned by MooncakeConnector).
 struct WorkerMooncakeConn {
-  mooncake::PyClient* client{nullptr};
+  mooncake::RealClient* client{nullptr};
 };
 
 struct RegisteredMemoryRegion {
@@ -36,16 +36,18 @@ struct RegisteredMemoryRegion {
   size_t size{0};
 };
 
-struct RegisteredBufferState {
+struct L1RegistrationConfig {
+  bool enabled{false};
+  std::uintptr_t base{0};
   size_t size{0};
-  bool registering{false};
+
+  bool is_valid() const { return enabled && base != 0 && size != 0; }
 };
 
 class MooncakeConnector : public ConnectorBase<WorkerMooncakeConn> {
  public:
   MooncakeConnector(ConfigDict config, int num_workers,
-                    std::uintptr_t preregister_l1_base = 0,
-                    size_t preregister_l1_size = 0);
+                    L1RegistrationConfig l1_registration = {});
   ~MooncakeConnector() override;
 
   void close() override;
@@ -67,19 +69,14 @@ class MooncakeConnector : public ConnectorBase<WorkerMooncakeConn> {
   void preregister_l1_memory(std::uintptr_t base, size_t size);
   bool is_within_registered_region(const void* buf, size_t len) const;
   void unregister_all_buffers() noexcept;
-  // Future extension point: use a pre-registered staging pool when
-  // buffers are too ephemeral to benefit from direct lazy registration.
-  void copy_to_registered_staging_and_put() = delete;
 
   // Shared Mooncake RealClient instance.
   std::shared_ptr<mooncake::RealClient> client_;
 
   // The original config dict (kept for diagnostics).
   ConfigDict config_;
+  L1RegistrationConfig l1_registration_;
 
-  std::mutex registered_buffers_mu_;
-  std::condition_variable registered_buffers_cv_;
-  std::unordered_map<const void*, RegisteredBufferState> registered_buffers_;
   std::vector<RegisteredMemoryRegion> preregistered_regions_;
 };
 
