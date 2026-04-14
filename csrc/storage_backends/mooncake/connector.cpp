@@ -70,7 +70,10 @@ WorkerMooncakeConn MooncakeConnector::create_connection() {
 }
 
 void MooncakeConnector::close() {
-  ConnectorBase<WorkerMooncakeConn>::close();
+  if (!ConnectorBase<WorkerMooncakeConn>::close_once_()) {
+    return;
+  }
+
   unregister_all_buffers();
 }
 

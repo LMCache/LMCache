@@ -196,8 +196,37 @@ class ConnectorBase : public IStorageConnector {
   }
 
   void close() override {
+    close_once_();
+  }
+
+ protected:
+  // call this at the END of your derived class constructor
+  void start_workers() {
+    workers_.reserve(static_cast<size_t>(num_workers_));
+    for (int i = 0; i < num_workers_; i++) {
+      workers_.emplace_back([this]() { this->worker_loop(); });
+    }
+  }
+
+  virtual ConnectionType create_connection() = 0;
+  virtual void do_single_get(ConnectionType& conn, const std::string& key,
+                             void* buf, size_t len, size_t chunk_size) = 0;
+  virtual void do_single_set(ConnectionType& conn, const std::string& key,
+                             const void* buf, size_t len,
+                             size_t chunk_size) = 0;
+  virtual bool do_single_exists(ConnectionType& conn,
+                                const std::string& key) = 0;
+  virtual bool do_single_delete(ConnectionType& conn, const std::string& key) {
+    (void)conn;
+    (void)key;
+    return false;  // no-op default for backward compat with plugins
+  }
+  virtual void shutdown_connections() {}
+
+  bool is_stopping() const { return stop_.load(std::memory_order_acquire); }
+  bool close_once_() {
     if (closed_.exchange(true, std::memory_order_acq_rel)) {
-      return;  // Already closed
+      return false;  // Already closed
     }
 
     // Signal all worker threads to stop
@@ -233,33 +262,9 @@ class ConnectorBase : public IStorageConnector {
         completions_.pop();
       }
     }
-  }
 
- protected:
-  // call this at the END of your derived class constructor
-  void start_workers() {
-    workers_.reserve(static_cast<size_t>(num_workers_));
-    for (int i = 0; i < num_workers_; i++) {
-      workers_.emplace_back([this]() { this->worker_loop(); });
-    }
+    return true;
   }
-
-  virtual ConnectionType create_connection() = 0;
-  virtual void do_single_get(ConnectionType& conn, const std::string& key,
-                             void* buf, size_t len, size_t chunk_size) = 0;
-  virtual void do_single_set(ConnectionType& conn, const std::string& key,
-                             const void* buf, size_t len,
-                             size_t chunk_size) = 0;
-  virtual bool do_single_exists(ConnectionType& conn,
-                                const std::string& key) = 0;
-  virtual bool do_single_delete(ConnectionType& conn, const std::string& key) {
-    (void)conn;
-    (void)key;
-    return false;  // no-op default for backward compat with plugins
-  }
-  virtual void shutdown_connections() {}
-
-  bool is_stopping() const { return stop_.load(std::memory_order_acquire); }
 
  private:
   void validate_batch_inputs(const std::vector<std::string>& keys,

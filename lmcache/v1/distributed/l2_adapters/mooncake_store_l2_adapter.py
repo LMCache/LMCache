@@ -87,6 +87,9 @@ class MooncakeStoreL2AdapterConfig(L2AdapterConfigBase):
             "All keys except LMCache-only keys are "
             "forwarded as-is to mooncake's "
             "setup_internal(ConfigDict).\n"
+            "When protocol=rdma, LMCache must provide "
+            "a valid L1 memory descriptor for "
+            "preregistration.\n"
             "Refer to mooncake documentation for "
             "available setup keys.\n"
             "- num_workers (int): C++ worker threads "
@@ -99,7 +102,19 @@ def _create_mooncake_store_l2_adapter(
     l1_memory_desc: "Optional[L1MemoryDesc]" = None,
 ) -> L2AdapterInterface:
     """Create a NativeConnectorL2Adapter backed by the
-    C++ Mooncake Store connector."""
+    C++ Mooncake Store connector.
+
+    When ``config.setup_config["protocol"] == "rdma"``,
+    a valid ``l1_memory_desc`` must be provided so the
+    native Mooncake client can preregister the L1 memory
+    region for RDMA access.
+
+    Raises:
+        RuntimeError: If the native C++ Mooncake extension
+            is unavailable.
+        ValueError: If RDMA protocol is requested but
+            ``l1_memory_desc`` is missing or invalid.
+    """
     try:
         # First Party
         from lmcache.lmcache_mooncake import (

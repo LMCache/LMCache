@@ -238,6 +238,12 @@ Configuration
 .. note::
    RDMA device(s) usually do not need to be specified; leaving ``device_name`` empty works for most deployments.
 
+.. important::
+   When using ``protocol: "rdma"`` with LMCache's native Mooncake L2 adapter,
+   adapter creation requires a valid ``L1MemoryDesc`` so the Mooncake client can
+   preregister LMCache's L1 memory for RDMA. If the L1 descriptor is missing or
+   invalid, LMCache raises ``ValueError`` during adapter creation.
+
 Additional Resources
 --------------------
 

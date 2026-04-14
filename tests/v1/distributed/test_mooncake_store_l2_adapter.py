@@ -289,7 +289,11 @@ class TestMooncakeStoreRegistration:
 
 @requires_mooncake
 class TestMooncakeStoreL1RegistrationFactory:
-    """Tests for RDMA L1 registration factory behavior."""
+    """Tests for Mooncake TCP/RDMA L1 registration factory behavior.
+
+    RDMA creation must receive a valid L1 memory descriptor; TCP creation
+    must not enable preregistration even if a descriptor is provided.
+    """
 
     def test_factory_passes_disabled_l1_registration_for_tcp(
         self, monkeypatch: pytest.MonkeyPatch
