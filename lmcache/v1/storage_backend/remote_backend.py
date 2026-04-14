@@ -31,14 +31,26 @@ class RemoteBackend(StorageBackendInterface):
         loop: asyncio.AbstractEventLoop,
         local_cpu_backend: Optional[LocalCPUBackend],
         dst_device: str = "cuda",
+        plugin_name: Optional[str] = None,
     ):
         super().__init__(dst_device=dst_device)
         self.put_tasks: Set[CacheEngineKey] = set()
         self.lock = threading.Lock()
 
-        assert config.remote_url is not None
+        self.plugin_name = plugin_name
 
-        self.remote_url = config.remote_url
+        # Determine if we're using legacy remote_url or new plugin-based approach
+        if plugin_name is not None:
+            # Using plugin-based approach
+            self.remote_url = f"plugin://{plugin_name}"
+            logger.info(f"Creating RemoteBackend for plugin: {plugin_name}")
+        else:
+            # Legacy remote_url approach
+            if config.remote_url is None:
+                raise ValueError(
+                    "remote_url must be provided when not using plugin_name"
+                )
+            self.remote_url = config.remote_url
 
         self.local_cpu_backend = local_cpu_backend
 
@@ -116,17 +128,29 @@ class RemoteBackend(StorageBackendInterface):
             )
             return
         try:
-            assert self.config.remote_url is not None
+            # Determine the URL to use for connection
+            if self.plugin_name is not None:
+                # Using plugin-based approach
+                # Create a virtual URL that the adapter can recognize
+                url = f"plugin://{self.plugin_name}"
+                logger.info(f"Creating connector for plugin: {self.plugin_name}")
+            else:
+                # Legacy remote_url approach
+                if self.config.remote_url is None:
+                    raise ValueError(
+                        "remote_url must be provided when not using plugin_name"
+                    )
+                url = self.config.remote_url
+
             self.connection = CreateConnector(
-                self.config.remote_url,
+                url,
                 self.loop,
                 self.local_cpu_backend,
                 self.config,
                 self.metadata,
+                plugin_name=self.plugin_name,
             )
-            logger.info(
-                f"Connection initialized/re-established at {self.config.remote_url}"
-            )
+            logger.info(f"Connection initialized/re-established at {url}")
         except IrrecoverableException:
             logger.error("Irrecoverable error during connection initialization")
             raise

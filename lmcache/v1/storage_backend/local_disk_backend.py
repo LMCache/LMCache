@@ -25,6 +25,7 @@ from lmcache.v1.storage_backend.job_executor.pq_executor import (
     AsyncPQThreadPoolExecutor,
 )
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
+from lmcache.v1.storage_backend.path_sharder import PathSharder
 
 if TYPE_CHECKING:
     # First Party
@@ -119,10 +120,21 @@ class LocalDiskBackend(StorageBackendInterface):
         self.disk_lock = threading.Lock()
 
         assert config.local_disk is not None
-        self.path: str = config.local_disk
-        if not os.path.exists(self.path):
-            os.makedirs(self.path)
-            logger.info(f"Created local disk cache directory: {self.path}")
+
+        sharder = PathSharder(
+            raw_csv=config.local_disk,
+            strategy=config.local_disk_path_sharding,
+            dst_device=dst_device,
+            create_dirs=True,
+        )
+        self.path: str = sharder.selected
+
+        logger.info(
+            "Local disk cache path: %s (device %s, %d path(s) configured)",
+            self.path,
+            dst_device,
+            len(sharder.all_paths),
+        )
 
         self.loop = loop
 

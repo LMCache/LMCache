@@ -191,23 +191,29 @@ def init_observability(obs_config: ObservabilityConfig) -> EventBus:
     if obs_config.metrics_enabled:
         # First Party
         from lmcache.v1.mp_observability.subscribers.metrics import (
+            L0LifecycleSubscriber,
             L1MetricsSubscriber,
+            L2MetricsSubscriber,
             SMMetricsSubscriber,
         )
 
+        bus.register_subscriber(L0LifecycleSubscriber())
         bus.register_subscriber(L1MetricsSubscriber())
+        bus.register_subscriber(L2MetricsSubscriber())
         bus.register_subscriber(SMMetricsSubscriber())
 
     if obs_config.logging_enabled:
         # First Party
         from lmcache.v1.mp_observability.subscribers.logging import (
             L1LoggingSubscriber,
+            L2LoggingSubscriber,
             MPServerLoggingSubscriber,
             SMLoggingSubscriber,
         )
 
         bus.register_subscriber(MPServerLoggingSubscriber())
         bus.register_subscriber(L1LoggingSubscriber())
+        bus.register_subscriber(L2LoggingSubscriber())
         bus.register_subscriber(SMLoggingSubscriber())
 
     if obs_config.tracing_enabled:

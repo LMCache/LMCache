@@ -1201,25 +1201,109 @@ spec:
                 required:
                 - sizeGB
                 type: object
-              l2Backends:
-                description: l2Backends defines L2 storage backends.
-                items:
-                  description: L2BackendSpec defines an L2 storage backend.
-                  properties:
-                    config:
-                      additionalProperties:
-                        x-kubernetes-preserve-unknown-fields: true
-                      description: config is type-specific configuration as a free-form
-                        map.
-                      type: object
-                    type:
-                      description: type is the adapter type name (mock, disk, redis,
-                        s3, p2p).
-                      type: string
-                  required:
-                  - type
-                  type: object
-                type: array
+              l2Backend:
+                description: |-
+                  l2Backend defines the L2 storage backend.
+                  Currently only a single adapter is supported.
+                properties:
+                  prefetchMaxInFlight:
+                    default: 8
+                    description: |-
+                      prefetchMaxInFlight limits the number of concurrent prefetch
+                      (L2→L1 load) requests, preventing excessive L1 memory pressure.
+                    format: int32
+                    minimum: 1
+                    type: integer
+                  prefetchPolicy:
+                    default: default
+                    description: |-
+                      prefetchPolicy controls how keys flow from L2 back to L1 on
+                      cache misses. "default" picks the first adapter that has the key.
+                    enum:
+                    - default
+                    type: string
+                  raw:
+                    description: |-
+                      raw is an escape hatch for adapter types not yet natively
+                      supported by the operator (e.g. nixl_store, fs, mock).
+                      The JSON is passed through to --l2-adapter as-is.
+                    properties:
+                      config:
+                        additionalProperties:
+                          x-kubernetes-preserve-unknown-fields: true
+                        description: config is type-specific configuration as a free-form
+                          map.
+                        type: object
+                      type:
+                        description: type is the adapter type name (e.g. "nixl_store",
+                          "fs", "mock").
+                        type: string
+                    required:
+                    - type
+                    type: object
+                  resp:
+                    description: |-
+                      resp configures a Redis/Valkey RESP L2 adapter backed by the
+                      native C++ connector.
+                    properties:
+                      authSecretRef:
+                        description: |-
+                          authSecretRef is a reference to a Secret containing "username"
+                          and "password" keys for Redis authentication.
+                          The Secret may live in a different namespace; the operator will
+                          create a managed copy in the LMCacheEngine's namespace.
+                          The credentials are injected via environment variables so they
+                          do not appear in container args or kubectl describe output.
+                        properties:
+                          name:
+                            description: name is the name of the Secret.
+                            type: string
+                          namespace:
+                            description: |-
+                              namespace is the namespace of the Secret.
+                              If empty, defaults to the namespace of the LMCacheEngine resource.
+                            type: string
+                        required:
+                        - name
+                        type: object
+                      host:
+                        description: host is the Redis/Valkey server hostname or IP.
+                        type: string
+                      maxCapacityGB:
+                        default: 0
+                        description: |-
+                          maxCapacityGB is the max L2 capacity in GB for usage tracking
+                          and eviction. 0 means disabled.
+                        type: number
+                      numWorkers:
+                        default: 8
+                        description: numWorkers is the number of C++ worker threads
+                          for I/O.
+                        format: int32
+                        minimum: 1
+                        type: integer
+                      port:
+                        description: port is the Redis/Valkey server port.
+                        format: int32
+                        maximum: 65535
+                        minimum: 1
+                        type: integer
+                    required:
+                    - host
+                    - port
+                    type: object
+                  storePolicy:
+                    default: default
+                    description: |-
+                      storePolicy controls how keys flow from L1 to L2.
+                      "default" stores all keys to the adapter and keeps L1.
+                      "skip_l1" stores all keys to the adapter and deletes them from L1
+                      (buffer-only mode — pair with eviction.policy=noop).
+                    enum:
+                    - default
+                    - skip_l1
+                    type: string
+                type: object
               logLevel:
                 default: INFO
                 description: logLevel is the log level for the LMCache server.
@@ -1355,6 +1439,14 @@ spec:
                     - sha256_cbor
                     - blake3
                     type: string
+                  httpPort:
+                    default: 8080
+                    description: httpPort is the HTTP frontend port (health checks,
+                      cache admin).
+                    format: int32
+                    maximum: 65535
+                    minimum: 1024
+                    type: integer
                   maxWorkers:
                     default: 1
                     description: maxWorkers is the number of worker threads.

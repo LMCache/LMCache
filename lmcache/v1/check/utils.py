@@ -20,28 +20,85 @@ from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.storage_backend.remote_backend import RemoteBackend
 from lmcache.v1.storage_backend.storage_manager import StorageManager
 
+DTYPE_MAP = {
+    "float32": torch.float32,
+    "float16": torch.float16,
+    "bfloat16": torch.bfloat16,
+}
 
-def _get_default_metadata(model: str) -> LMCacheMetadata:
-    """Get default metadata for testing"""
+DEFAULT_KV_DTYPE_STR = "bfloat16"
+DEFAULT_OBJ_SIZE = 1024
+
+
+def _compute_kv_shape(
+    obj_size: int,
+) -> tuple:
+    """Compute a kv_shape that yields the given obj_size.
+
+    The returned shape is in vllm format:
+    ``(num_layers, 2, num_tokens, num_heads, head_size)``.
+
+    The final KV_2LTD tensor has
+    ``2 * num_layers * num_tokens * (num_heads * head_size)``
+    elements, which equals *obj_size*.
+
+    We fix ``num_layers=1, num_heads=1`` and split the
+    remaining factor between ``num_tokens`` and ``head_size``
+    so that ``num_tokens * head_size = obj_size // 2``.
+    """
+    if obj_size % 2 != 0:
+        raise ValueError("obj_size must be even (got %d)" % obj_size)
+    half = obj_size // 2
+    # (num_layers, kv_dim, num_tokens, num_heads, head_size)
+    return (1, 2, half, 1, 1)
+
+
+def parse_kv_dtype(kv_dtype_str: str) -> Optional[torch.dtype]:
+    """Parse a kv_dtype string to a torch.dtype.
+
+    Returns None if the string is not recognized.
+    """
+    return DTYPE_MAP.get(kv_dtype_str)
+
+
+def _get_default_metadata(
+    model: str,
+    kv_dtype: torch.dtype = torch.bfloat16,
+    obj_size: Optional[int] = None,
+) -> LMCacheMetadata:
+    """Get default metadata for testing.
+
+    When *obj_size* is given the ``kv_shape`` is computed so
+    that the resulting KV_2LTD tensor has exactly *obj_size*
+    elements.  Otherwise a small default shape is used.
+    """
+    if obj_size is not None:
+        kv_shape = _compute_kv_shape(obj_size)
+    else:
+        kv_shape = _compute_kv_shape(DEFAULT_OBJ_SIZE)
     return LMCacheMetadata(
         model_name=model,
         world_size=8,
         local_world_size=8,
         worker_id=0,
         local_worker_id=0,
-        kv_dtype=torch.bfloat16,
-        kv_shape=(8, 2, 16, 8, 16),
+        kv_dtype=kv_dtype,
+        kv_shape=kv_shape,
     )
 
 
-def create_test_key(model: str, key_id: str = "test_key") -> CacheEngineKey:
+def create_test_key(
+    model: str,
+    key_id: str = "test_key",
+    kv_dtype: torch.dtype = torch.bfloat16,
+) -> CacheEngineKey:
     """Create a test CacheEngineKey."""
     return CacheEngineKey(
         model_name=model,
         world_size=8,
         worker_id=0,
         chunk_hash=int(hashlib.sha256(key_id.encode()).hexdigest(), 16),
-        dtype=torch.bfloat16,
+        dtype=kv_dtype,
     )
 
 
@@ -75,14 +132,18 @@ def create_test_memory_obj_for_storage_manager(
     return memory_obj
 
 
-def create_storage_manager_with_config(model: str):
+def create_storage_manager_with_config(
+    model: str,
+    kv_dtype: torch.dtype = torch.bfloat16,
+    obj_size: Optional[int] = None,
+):
     """Create storage manager with default configuration"""
     # First Party
     from lmcache.integration.vllm.utils import lmcache_get_or_create_config
     from lmcache.v1.event_manager import EventManager
 
     config = lmcache_get_or_create_config()
-    metadata = _get_default_metadata(model)
+    metadata = _get_default_metadata(model, kv_dtype=kv_dtype, obj_size=obj_size)
 
     # Create event manager
     event_manager = EventManager()
@@ -212,25 +273,79 @@ async def run_perf_test_with_timeout(func, args_list, timeout=30.0):
         return {"time_stats": {"avg": 0, "max": 0, "min": 0}, "results": []}
 
 
-def print_performance_results(stats_data):
-    """Print performance results in a formatted table"""
+def _format_throughput(avg_ms: float, obj_bytes: int) -> str:
+    """Format throughput as a human-readable string."""
+    if avg_ms <= 0 or obj_bytes <= 0:
+        return "N/A"
+    bps = obj_bytes / (avg_ms / 1000.0)
+    if bps >= 1 << 30:
+        return "%.2f GB/s" % (bps / (1 << 30))
+    if bps >= 1 << 20:
+        return "%.2f MB/s" % (bps / (1 << 20))
+    return "%.2f KB/s" % (bps / (1 << 10))
+
+
+def print_performance_results(
+    stats_data,
+    obj_bytes: int = 0,
+    throughput_ops: Optional[set] = None,
+):
+    """Print performance results in a formatted table.
+
+    Args:
+        stats_data: list of (op, stats, results, pass_count).
+        obj_bytes: size of one object in bytes.  When > 0 a
+            throughput column is shown for operations listed
+            in *throughput_ops*.
+        throughput_ops: set of operation name prefixes that
+            should show throughput (e.g. {"STORE", "LOAD"}).
+            Defaults to common data-transfer operations.
+    """
+    if throughput_ops is None:
+        throughput_ops = {
+            "STORE",
+            "LOAD",
+            "PUT",
+            "GET",
+        }
+    show_tp = obj_bytes > 0
+
+    sep_len = 118 if show_tp else 100
+    tp_hdr = " | %s" % "Throughput".center(14) if show_tp else ""
     print("\nPerformance Results:")
-    print("-" * 100)
+    print("-" * sep_len)
     print(
-        f"| {'Operation':<20} | {'Avg (ms)':>12} | {'Max (ms)':>12} "
-        f"| {'Min (ms)':>12} | {'Pass/All':>10} | {'Pass Rate':>10} |"
+        f"| {'Operation':<20} | {'Avg (ms)':>12} "
+        f"| {'Max (ms)':>12} "
+        f"| {'Min (ms)':>12} "
+        f"| {'Pass/All':>10} "
+        f"| {'Pass Rate':>10} |" + tp_hdr
     )
-    print("-" * 100)
+    print("-" * sep_len)
     for op, stats, results, pass_count in stats_data:
         total = len(results)
         pass_all = f"{pass_count}/{total}"
         pass_rate = pass_count / total * 100 if total > 0 else 0
+        tp_col = ""
+        if show_tp:
+            is_data_op = any(op.startswith(p) for p in throughput_ops)
+            if is_data_op:
+                tp_col = " | %s" % _format_throughput(
+                    stats["avg"],
+                    obj_bytes,
+                ).center(14)
+            else:
+                tp_col = " | %s" % "-".center(14)
 
         print(
-            f"| {op:<20} | {stats['avg']:>12.6f} | {stats['max']:>12.6f} "
-            f"| {stats['min']:>12.6f} | {pass_all:>10} | {pass_rate:>9.1f}% |"
+            f"| {op:<20} "
+            f"| {stats['avg']:>12.6f} "
+            f"| {stats['max']:>12.6f} "
+            f"| {stats['min']:>12.6f} "
+            f"| {pass_all:>10} "
+            f"| {pass_rate:>9.1f}% |" + tp_col
         )
-    print("-" * 100)
+    print("-" * sep_len)
 
 
 def validate_get_results(get_results, exist_keys, exist_memories, num_tests):
@@ -280,6 +395,7 @@ async def run_common_test_framework(
     test_context,
     model: str,
     num_tests: int = 5,
+    settle_time: float = 0.0,
 ):
     """
     Common test framework for both storage manager and remote backend tests.
@@ -300,14 +416,25 @@ async def run_common_test_framework(
 
     # Create test data using the provided function
     extra_args = test_context.get("extra_args", [])
+    extra_kwargs = {}
+    if "kv_dtype" in test_context:
+        extra_kwargs["kv_dtype"] = test_context["kv_dtype"]
     if extra_args:
         non_exist_keys, exist_keys, exist_memories, num_tests = test_context[
             "create_test_data_func"
-        ](test_context["test_object"], *extra_args, model, num_tests)
+        ](test_context["test_object"], *extra_args, model, num_tests, **extra_kwargs)
     else:
+        kv_dtype = test_context.get("kv_dtype")
+        obj_size = test_context.get("obj_size")
+        meta_kw = {}
+        if kv_dtype:
+            meta_kw["kv_dtype"] = kv_dtype
+        if obj_size is not None:
+            meta_kw["obj_size"] = obj_size
+        metadata = _get_default_metadata(model, **meta_kw)
         non_exist_keys, exist_keys, exist_memories, num_tests = test_context[
             "create_test_data_func"
-        ](test_context["test_object"], _get_default_metadata(model), model, num_tests)
+        ](test_context["test_object"], metadata, model, num_tests, **extra_kwargs)
 
     # Phase 1: exists test (key does not exist)
     print("Phase 1: Testing exists for non-existing keys...")
@@ -342,6 +469,10 @@ async def run_common_test_framework(
     put_pass_count = sum(1 for r in put_res["results"] if r is True)
     pass_rate = put_pass_count / num_tests * 100
     print(f"  Validation: {put_pass_count}/{num_tests} passed ({pass_rate:.1f}%)")
+
+    if settle_time > 0:
+        print("  Waiting %.1fs for data to settle..." % settle_time)
+        await asyncio.sleep(settle_time)
 
     # Phase 3: exists test (key exists)
     print("Phase 3: Testing exists for existing keys...")
@@ -390,8 +521,13 @@ async def run_common_test_framework(
         ("GET", get_stats, get_res["results"], get_pass_count),
     ]
 
+    # Compute per-object byte size for throughput display
+    tp_obj_size = test_context.get("obj_size") or DEFAULT_OBJ_SIZE
+    tp_kv_dtype = test_context.get("kv_dtype") or torch.bfloat16
+    obj_bytes = tp_obj_size * torch.tensor([], dtype=tp_kv_dtype).element_size()
+
     # Use common performance results printing
-    print_performance_results(stats_data)
+    print_performance_results(stats_data, obj_bytes=obj_bytes)
 
 
 class EventLoopManager:

@@ -257,7 +257,9 @@ void FSConnector::do_single_set(WorkerFSConn& conn, const std::string& key,
   std::error_code ec;
   std::filesystem::rename(tmp_path, file_path, ec);
   if (ec) {
-    std::filesystem::remove(tmp_path);
+    // Try to clean up, but prioritize reporting the original error.
+    std::error_code remove_ec;
+    std::filesystem::remove(tmp_path, remove_ec);
     throw std::runtime_error("rename failed: " + tmp_path.string() + " -> " +
                              file_path.string() + ": " + ec.message());
   }
@@ -267,6 +269,13 @@ bool FSConnector::do_single_exists(WorkerFSConn& conn, const std::string& key) {
   std::string filename = key_to_filename(key);
   auto file_path = conn.base_path / filename;
   return std::filesystem::exists(file_path);
+}
+
+bool FSConnector::do_single_delete(WorkerFSConn& conn, const std::string& key) {
+  std::string filename = key_to_filename(key);
+  auto file_path = conn.base_path / filename;
+  std::error_code ec;
+  return std::filesystem::remove(file_path, ec);
 }
 
 }  // namespace connector

@@ -46,6 +46,7 @@ class FSConnector : public ConnectorBase<WorkerFSConn> {
   void do_single_set(WorkerFSConn& conn, const std::string& key,
                      const void* buf, size_t len, size_t chunk_size) override;
   bool do_single_exists(WorkerFSConn& conn, const std::string& key) override;
+  bool do_single_delete(WorkerFSConn& conn, const std::string& key) override;
 
  private:
   // Build the filesystem-safe filename from a serialized key string.

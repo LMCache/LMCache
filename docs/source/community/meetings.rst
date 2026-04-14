@@ -42,7 +42,7 @@ Please find the meeting invite link below:
 LMCache Office Hours
 ++++++++++++++++++++
 
-Held monthly on the second Thursday at 2PM ET, 11AM PT.  
+Held monthly on the second Wednesday of the month at 2PM ET, 11AM PT.  
 
 - Topic announced on the LMCache #office-hour Slack channel
 - Request a calendar invite via `this form <https://lmcache-officehours.zapier.app/>`_

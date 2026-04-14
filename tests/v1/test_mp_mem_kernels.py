@@ -13,18 +13,13 @@ pytest.importorskip(
 )
 
 # First Party
-if torch.cuda.is_available():
-    try:
-        # First Party
-        import lmcache.c_ops as lmc_ops
-    except ImportError:
-        lmc_ops = None
-else:
-    lmc_ops = None
+import lmcache.c_ops as lmc_ops
 
-# Skip all tests if c_ops is unavailable
-pytestmark = pytest.mark.skipif(lmc_ops is None, reason="lmcache.c_ops not available")
-
+# Skip all tests if cuda is unavailable
+pytestmark = pytest.mark.skipif(
+    not torch.cuda.is_available() or torch.cuda.device_count() == 0,
+    reason="No CUDA GPU present",
+)
 
 # ---------------------------------------------------------------------------
 # Tensor factories (ported from kernel harness)
