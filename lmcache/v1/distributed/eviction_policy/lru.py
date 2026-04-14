@@ -122,7 +122,7 @@ class LRUEvictionPolicy(EvictionPolicy):
     def get_eviction_actions(
         self,
         expected_ratio: float,
-        key_filter: Callable[[ObjectKey], bool] | None = None,
+        key_eligible_filter: Callable[[ObjectKey], bool] | None = None,
     ) -> list[EvictionAction]:
         """
         Get the eviction actions to evict objects from L1 cache.
@@ -132,8 +132,8 @@ class LRUEvictionPolicy(EvictionPolicy):
             expected_ratio (float): A hint indicating approximately what fraction
                 of tracked keys should be evicted. Value should be in range [0.0, 1.0].
                 For example, 0.1 means roughly 10% of keys should be evicted.
-            key_filter: An optional callable that takes an ObjectKey and
-                returns True if the key is eligible for eviction. When
+            key_eligible_filter: An optional callable that takes an ObjectKey
+                and returns True if the key is eligible for eviction. When
                 provided, keys for which the filter returns False will be
                 skipped. This is useful for skipping locked keys that
                 cannot be deleted.
@@ -171,7 +171,7 @@ class LRUEvictionPolicy(EvictionPolicy):
             keys_to_evict: list[ObjectKey] = []
 
             for key in self._order:
-                if key_filter is not None and not key_filter(key):
+                if key_eligible_filter is not None and not key_eligible_filter(key):
                     # Skip keys that are not eligible for eviction
                     # (e.g. currently locked by read/write operations)
                     continue

@@ -44,6 +44,6 @@ class NoOpEvictionPolicy(EvictionPolicy):
     def get_eviction_actions(
         self,
         expected_ratio: float,
-        key_filter: Callable[[ObjectKey], bool] | None = None,
+        key_eligible_filter: Callable[[ObjectKey], bool] | None = None,
     ) -> list[EvictionAction]:
         return []

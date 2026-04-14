@@ -258,24 +258,26 @@ class TestLRUEvictionPolicyCandidates:
 
 
 # =============================================================================
-# Key Filter Tests
+# Key Eligible Filter Tests
 # =============================================================================
 
 
-class TestLRUEvictionPolicyKeyFilter:
-    """Tests for key_filter parameter in get_eviction_actions."""
+class TestLRUEvictionPolicyKeyEligibleFilter:
+    """Tests for key_eligible_filter parameter in get_eviction_actions."""
 
-    def test_key_filter_skips_filtered_keys(self):
+    def test_key_eligible_filter_skips_filtered_keys(self):
         """Keys that fail the filter should be skipped during eviction."""
         policy = LRUEvictionPolicy()
         keys = [make_key(i) for i in range(5)]
         policy.on_keys_created(keys)
 
         # Filter out keys with even chunk_hash
-        def key_filter(key: ObjectKey) -> bool:
+        def key_eligible_filter(key: ObjectKey) -> bool:
             return ObjectKey.Bytes2IntHash(key.chunk_hash) % 2 != 0
 
-        actions = policy.get_eviction_actions(1.0, key_filter=key_filter)
+        actions = policy.get_eviction_actions(
+            1.0, key_eligible_filter=key_eligible_filter
+        )
         assert len(actions) == 1
         evicted_hashes = {
             ObjectKey.Bytes2IntHash(k.chunk_hash) for k in actions[0].keys
@@ -283,26 +285,26 @@ class TestLRUEvictionPolicyKeyFilter:
         # Only odd keys should be evicted: 1, 3
         assert evicted_hashes == {1, 3}
 
-    def test_key_filter_none_evicts_all(self):
-        """When key_filter is None, all keys should be eligible."""
+    def test_key_eligible_filter_none_evicts_all(self):
+        """When key_eligible_filter is None, all keys should be eligible."""
         policy = LRUEvictionPolicy()
         keys = [make_key(i) for i in range(5)]
         policy.on_keys_created(keys)
 
-        actions = policy.get_eviction_actions(1.0, key_filter=None)
+        actions = policy.get_eviction_actions(1.0, key_eligible_filter=None)
         assert len(actions) == 1
         assert len(actions[0].keys) == 5
 
-    def test_key_filter_rejects_all_returns_empty(self):
+    def test_key_eligible_filter_rejects_all_returns_empty(self):
         """When filter rejects all keys, no eviction actions should be returned."""
         policy = LRUEvictionPolicy()
         keys = [make_key(i) for i in range(5)]
         policy.on_keys_created(keys)
 
-        actions = policy.get_eviction_actions(1.0, key_filter=lambda _: False)
+        actions = policy.get_eviction_actions(1.0, key_eligible_filter=lambda _: False)
         assert actions == []
 
-    def test_key_filter_respects_target_count(self):
+    def test_key_eligible_filter_respects_target_count(self):
         """Filter should stop collecting once target_count is reached."""
         policy = LRUEvictionPolicy()
         # Create 10 keys, all pass filter
@@ -310,11 +312,11 @@ class TestLRUEvictionPolicyKeyFilter:
         policy.on_keys_created(keys)
 
         # Request 50% eviction with a filter that accepts all
-        actions = policy.get_eviction_actions(0.5, key_filter=lambda _: True)
+        actions = policy.get_eviction_actions(0.5, key_eligible_filter=lambda _: True)
         assert len(actions) == 1
         assert len(actions[0].keys) == 5
 
-    def test_key_filter_with_partial_acceptance(self):
+    def test_key_eligible_filter_with_partial_acceptance(self):
         """When filter accepts some keys, only accepted keys up to
         target_count should be evicted."""
         policy = LRUEvictionPolicy()
@@ -323,17 +325,19 @@ class TestLRUEvictionPolicyKeyFilter:
         policy.on_keys_created(keys)
 
         # Filter: only accept keys with hash >= 5
-        def key_filter(key: ObjectKey) -> bool:
+        def key_eligible_filter(key: ObjectKey) -> bool:
             return ObjectKey.Bytes2IntHash(key.chunk_hash) >= 5
 
         # Request 100% eviction -> target_count = 10, but only 5 pass filter
-        actions = policy.get_eviction_actions(1.0, key_filter=key_filter)
+        actions = policy.get_eviction_actions(
+            1.0, key_eligible_filter=key_eligible_filter
+        )
         assert len(actions) == 1
         assert len(actions[0].keys) == 5
         for k in actions[0].keys:
             assert ObjectKey.Bytes2IntHash(k.chunk_hash) >= 5
 
-    def test_key_filter_preserves_lru_order(self):
+    def test_key_eligible_filter_preserves_lru_order(self):
         """Filtered eviction should still respect LRU order."""
         policy = LRUEvictionPolicy()
         # Create keys in order: 1, 2, 3, 4, 5
@@ -344,7 +348,7 @@ class TestLRUEvictionPolicyKeyFilter:
         policy.on_keys_touched([make_key(1)])
 
         # Filter: accept all keys
-        actions = policy.get_eviction_actions(0.6, key_filter=lambda _: True)
+        actions = policy.get_eviction_actions(0.6, key_eligible_filter=lambda _: True)
         assert len(actions) == 1
         evicted_hashes = [
             ObjectKey.Bytes2IntHash(k.chunk_hash) for k in actions[0].keys
@@ -353,7 +357,7 @@ class TestLRUEvictionPolicyKeyFilter:
         # 60% of 5 = 3 keys, should be 2, 3, 4
         assert evicted_hashes == [2, 3, 4]
 
-    def test_key_filter_skips_locked_simulated(self):
+    def test_key_eligible_filter_skips_locked_simulated(self):
         """Simulate the real use case: filter skips 'locked' keys."""
         policy = LRUEvictionPolicy()
         keys = [make_key(i) for i in range(1, 6)]
@@ -362,11 +366,13 @@ class TestLRUEvictionPolicyKeyFilter:
         # Simulate: keys 1 and 3 are "locked" (not evictable)
         locked_hashes = {1, 3}
 
-        def key_filter(key: ObjectKey) -> bool:
+        def key_eligible_filter(key: ObjectKey) -> bool:
             return ObjectKey.Bytes2IntHash(key.chunk_hash) not in locked_hashes
 
         # Request 100% eviction
-        actions = policy.get_eviction_actions(1.0, key_filter=key_filter)
+        actions = policy.get_eviction_actions(
+            1.0, key_eligible_filter=key_eligible_filter
+        )
         assert len(actions) == 1
         evicted_hashes = {
             ObjectKey.Bytes2IntHash(k.chunk_hash) for k in actions[0].keys
@@ -374,7 +380,7 @@ class TestLRUEvictionPolicyKeyFilter:
         # Keys 1 and 3 should be skipped
         assert evicted_hashes == {2, 4, 5}
 
-    def test_key_filter_with_small_ratio_and_many_filtered(self):
+    def test_key_eligible_filter_with_small_ratio_and_many_filtered(self):
         """When many keys are filtered, a small ratio should still
         collect enough eligible keys."""
         policy = LRUEvictionPolicy()
@@ -384,11 +390,13 @@ class TestLRUEvictionPolicyKeyFilter:
 
         # Filter: only accept keys with hash divisible by 5
         # Eligible: 0, 5, 10, 15 (4 keys)
-        def key_filter(key: ObjectKey) -> bool:
+        def key_eligible_filter(key: ObjectKey) -> bool:
             return ObjectKey.Bytes2IntHash(key.chunk_hash) % 5 == 0
 
         # Request 10% eviction -> target_count = 2
-        actions = policy.get_eviction_actions(0.1, key_filter=key_filter)
+        actions = policy.get_eviction_actions(
+            0.1, key_eligible_filter=key_eligible_filter
+        )
         assert len(actions) == 1
         assert len(actions[0].keys) == 2
         for k in actions[0].keys:

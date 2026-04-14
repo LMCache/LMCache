@@ -126,7 +126,7 @@ class L1EvictionController(EvictionController):
             )
             actions = self._eviction_policy.get_eviction_actions(
                 eviction_ratio,
-                key_filter=self._l1_manager.is_key_evictable,
+                key_eligible_filter=self._l1_manager.is_key_evictable,
             )
             for action in actions:
                 self.execute_eviction_action(action)
