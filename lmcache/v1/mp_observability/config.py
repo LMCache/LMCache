@@ -191,11 +191,13 @@ def init_observability(obs_config: ObservabilityConfig) -> EventBus:
     if obs_config.metrics_enabled:
         # First Party
         from lmcache.v1.mp_observability.subscribers.metrics import (
+            L0LifecycleSubscriber,
             L1MetricsSubscriber,
             L2MetricsSubscriber,
             SMMetricsSubscriber,
         )
 
+        bus.register_subscriber(L0LifecycleSubscriber())
         bus.register_subscriber(L1MetricsSubscriber())
         bus.register_subscriber(L2MetricsSubscriber())
         bus.register_subscriber(SMMetricsSubscriber())

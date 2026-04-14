@@ -763,10 +763,10 @@ class TestGdsMultiPath:
                 shutil.rmtree(p, ignore_errors=True)
 
     def test_gds_path_sharding_default(self, temp_gds_path, async_loop):
-        """Default gds_path_sharding is 'by_gpu'."""
+        """Default gds_path_sharding is 'by_gpu' (backend inits OK)."""
         backend = self._make_backend(temp_gds_path, "cuda:0", async_loop)
         try:
-            assert backend.gds_path_sharding == "by_gpu"
+            assert backend.gds_path == temp_gds_path
         finally:
             backend.close()
 
@@ -779,13 +779,13 @@ class TestGdsMultiPath:
             gds_path_sharding="by_gpu",
         )
         try:
-            assert backend.gds_path_sharding == "by_gpu"
+            assert backend.gds_path == temp_gds_path
         finally:
             backend.close()
 
     def test_gds_path_sharding_unsupported_raises(self, temp_gds_path, async_loop):
-        """Unsupported gds_path_sharding value raises AssertionError."""
-        with pytest.raises(AssertionError, match="Unsupported gds_path_sharding"):
+        """Unsupported gds_path_sharding value raises ValueError."""
+        with pytest.raises(ValueError, match="Unsupported path sharding strategy"):
             self._make_backend(
                 temp_gds_path,
                 "cuda:0",

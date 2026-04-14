@@ -798,6 +798,12 @@ class MPCacheEngine:
         Args:
             request_id: The request ID whose session should be removed.
         """
+        self._event_bus.publish(
+            Event(
+                event_type=EventType.MP_VLLM_END_SESSION,
+                metadata={"request_id": request_id},
+            )
+        )
         self.session_manager.remove(request_id)
 
     def report_status(self) -> dict:
