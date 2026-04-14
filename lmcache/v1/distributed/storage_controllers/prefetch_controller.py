@@ -837,6 +837,13 @@ class PrefetchController(StorageControllerInterface):
         if not src_objs:
             return
 
+        logger.debug(
+            "Prefetch request %d: submitting deserialize for adapter %d "
+            "(%d objects loaded from L2).",
+            request.request_id,
+            adapter_index,
+            len(src_objs),
+        )
         serde_task_id = serde.submit_deserialize(src_objs, dst_objs)
         request.pending_deserialize_tasks[adapter_index] = serde_task_id
 
@@ -863,6 +870,13 @@ class PrefetchController(StorageControllerInterface):
 
             del request.pending_deserialize_tasks[adapter_index]
 
+            if result:
+                logger.debug(
+                    "Prefetch request %d: deserialize completed for "
+                    "adapter %d — data ready in L1 KV buffers.",
+                    request.request_id,
+                    adapter_index,
+                )
             # Release temp buffers belonging to this adapter
             adapter_temp_keys: list[ObjectKey] = []
             for orig_key in request.load_plan[adapter_index].gather(request.keys):

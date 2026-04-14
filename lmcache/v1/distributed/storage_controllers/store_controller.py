@@ -516,6 +516,12 @@ class StoreController(StorageControllerInterface):
             l1_mgr.finish_read(task.read_locked_keys)
 
             if result:
+                logger.debug(
+                    "Serialize completed for adapter %d, %d keys — "
+                    "submitting serialized data to L2.",
+                    task.adapter_index,
+                    len(task.keys),
+                )
                 # Transition temp buffers: write-locked -> read-locked
                 # so L2 can safely read from them during store.
                 l1_mgr.finish_write_and_reserve_read(task.temp_keys)

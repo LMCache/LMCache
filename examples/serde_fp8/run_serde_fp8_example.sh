@@ -103,7 +103,7 @@ lmcache server \
 LMCACHE_PID=$!
 echo "lmcache server PID=$LMCACHE_PID"
 
-echo "Waiting for lmcache HTTP healthz..."
+echo "Waiting for lmcache HTTP health..."
 wait_for_url "http://localhost:${LMCACHE_HTTP_PORT}/api/healthcheck" 60 || {
     echo "lmcache failed to start. Last 50 lines of log:"
     tail -50 "$LOG_DIR/lmcache.log" || true
@@ -141,6 +141,7 @@ vllm serve "$MODEL" \
     --port "$VLLM_PORT" \
     --no-enable-prefix-caching \
     --enforce-eager \
+    --gpu-memory-utilization "${GPU_MEM_UTIL:-0.6}" \
     --kv-transfer-config "$KV_TRANSFER_CONFIG" \
     > "$LOG_DIR/vllm.log" 2>&1 &
 VLLM_PID=$!

@@ -83,6 +83,11 @@ class AsyncSerdeProcessor(SerdeProcessor):
         dst_objs: list[MemoryObj],
     ) -> SerdeTaskId:
         task_id = self._alloc_task_id()
+        logger.debug(
+            "Serde: submitted serialize task %d (%d objects)",
+            task_id,
+            len(src_objs),
+        )
         self._pool.submit(
             self._run_task,
             task_id,
@@ -104,6 +109,11 @@ class AsyncSerdeProcessor(SerdeProcessor):
         dst_objs: list[MemoryObj],
     ) -> SerdeTaskId:
         task_id = self._alloc_task_id()
+        logger.debug(
+            "Serde: submitted deserialize task %d (%d objects)",
+            task_id,
+            len(src_objs),
+        )
         self._pool.submit(
             self._run_task,
             task_id,
@@ -164,6 +174,21 @@ class AsyncSerdeProcessor(SerdeProcessor):
                 task_type.name,
             )
             success = False
+
+        if success:
+            logger.info(
+                "Serde: %s task %d completed successfully (%d objects)",
+                task_type.name.lower(),
+                task_id,
+                len(src_objs),
+            )
+        else:
+            logger.warning(
+                "Serde: %s task %d failed (%d objects)",
+                task_type.name.lower(),
+                task_id,
+                len(src_objs),
+            )
 
         with self._lock:
             if task_type == _TaskType.SERIALIZE:
