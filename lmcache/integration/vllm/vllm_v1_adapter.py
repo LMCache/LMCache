@@ -440,6 +440,9 @@ class LMCacheConnectorMetadata(KVConnectorMetadata):
 
 
 class LMCacheConnectorV1Impl:
+    # Extension point for platform integrations (e.g. Ascend, RBLN).
+    service_factory_cls: type[VllmServiceFactory] = VllmServiceFactory
+
     def __init__(
         self,
         vllm_config: "VllmConfig",
@@ -461,7 +464,9 @@ class LMCacheConnectorV1Impl:
         self._apply_extra_config(config, vllm_config)
         self.config = config
 
-        service_factory = VllmServiceFactory(config, vllm_config, role.name.lower())
+        service_factory = self.service_factory_cls(
+            config, vllm_config, role.name.lower()
+        )
         self._manager = LMCacheManager(config, service_factory, connector=self)
 
         # Start services managed by LMCacheManager

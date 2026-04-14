@@ -26,9 +26,12 @@ logger = init_logger(__name__)
 
 
 class LMCacheConnectorV1Dynamic(KVConnectorBase_V1):
+    # Extension point for platform integrations (e.g. Ascend, RBLN).
+    impl_cls: type[LMCacheConnectorV1Impl] = LMCacheConnectorV1Impl
+
     def __init__(self, vllm_config: "VllmConfig", role: KVConnectorRole):
         super().__init__(vllm_config=vllm_config, role=role)
-        self._lmcache_engine = LMCacheConnectorV1Impl(vllm_config, role, self)
+        self._lmcache_engine = self.impl_cls(vllm_config, role, self)
 
     # ==============================
     # Worker-side methods
