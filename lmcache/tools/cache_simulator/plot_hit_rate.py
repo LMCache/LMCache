@@ -22,9 +22,6 @@ import argparse
 import math
 import sys
 
-# Third Party
-import matplotlib.pyplot as plt
-
 # First Party
 from lmcache.tools.cache_simulator.simulator import (
     compute_kv_bytes_per_chunk,
@@ -186,6 +183,9 @@ def run_sweep(args: argparse.Namespace) -> None:
 
     # ── Plot ────────────────────────────────────────────────────────────────
     x_values = [c / _GIB for c in capacities_bytes]
+
+    # Third Party
+    import matplotlib.pyplot as plt  # noqa: PLC0415 — lazy import to avoid hard dependency
 
     fig, ax = plt.subplots(figsize=(9, 5))
     ax.plot(

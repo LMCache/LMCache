@@ -41,9 +41,6 @@ import math
 import sys
 import warnings
 
-# Third Party
-import matplotlib.pyplot as plt
-
 # First Party
 from lmcache.tools.cache_simulator.lru_cache import LRUCache, LRUCacheFast
 
@@ -479,6 +476,9 @@ def plot_statistics(
     input_lengths = results["input_lengths"]
     global_spans = results["global_span_distribution"]
     cache_positions = results["cache_position_distribution"]
+
+    # Third Party
+    import matplotlib.pyplot as plt  # noqa: PLC0415 — lazy import to avoid hard dependency
 
     fig, axes = plt.subplots(2, 4, figsize=(22, 10))
     fig.suptitle(
