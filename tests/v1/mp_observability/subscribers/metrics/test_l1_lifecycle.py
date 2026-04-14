@@ -242,20 +242,36 @@ class TestL1Sampling:
         time.sleep(_DRAIN_WAIT)
         bus.stop()
         assert len(subscriber._shadow) >= 10
-        assert len(subscriber._skipped) == 0
 
     def test_sample_rate_zero_tracks_none(self, bus, sampled_subscriber):
-        """With near-zero sample rate, keys should be skipped."""
+        """With near-zero sample rate, no keys should be tracked."""
         keys = _make_keys("nosamp", 100)
         bus.start()
         bus.publish(_make_event(EventType.L1_WRITE_FINISHED, keys))
         time.sleep(_DRAIN_WAIT)
         bus.stop()
         assert len(sampled_subscriber._shadow) == 0
-        assert len(sampled_subscriber._skipped) == 100
 
-    def test_skipped_key_ignored_on_eviction(self, bus, sampled_subscriber):
-        """Evicting a skipped key should not record lifetime."""
+    def test_deterministic_sampling_is_consistent(self, bus):
+        """Same key always gets the same sampling decision."""
+        sub = L1LifecycleSubscriber(sample_rate=0.5)
+        bus.register_subscriber(sub)
+        keys = ["det-1"]
+        bus.start()
+        bus.publish(_make_event(EventType.L1_WRITE_FINISHED, keys))
+        time.sleep(_DRAIN_WAIT)
+        tracked_first = "det-1" in sub._shadow
+        # Evict and re-write — should get same decision
+        bus.publish(_make_event(EventType.L1_KEYS_EVICTED, keys))
+        time.sleep(_DRAIN_WAIT)
+        bus.publish(_make_event(EventType.L1_WRITE_FINISHED, keys))
+        time.sleep(_DRAIN_WAIT)
+        bus.stop()
+        tracked_second = "det-1" in sub._shadow
+        assert tracked_first == tracked_second
+
+    def test_unsampled_key_ignored_on_eviction(self, bus, sampled_subscriber):
+        """Evicting an unsampled key should not record lifetime."""
         count_before = _get_histogram_count("lmcache_mp.l1_chunk_lifetime_seconds")
         keys = ["skip-ev-1"]
         bus.start()
@@ -266,18 +282,6 @@ class TestL1Sampling:
         bus.stop()
         count_after = _get_histogram_count("lmcache_mp.l1_chunk_lifetime_seconds")
         assert count_after == count_before
-
-    def test_skipped_key_stays_skipped_on_rewrite(self, bus, sampled_subscriber):
-        """Re-writing a skipped key should keep it skipped."""
-        keys = ["skip-rw-1"]
-        bus.start()
-        bus.publish(_make_event(EventType.L1_WRITE_FINISHED, keys))
-        time.sleep(_DRAIN_WAIT)
-        bus.publish(_make_event(EventType.L1_WRITE_FINISHED, keys))
-        time.sleep(_DRAIN_WAIT)
-        bus.stop()
-        assert "skip-rw-1" in sampled_subscriber._skipped
-        assert "skip-rw-1" not in sampled_subscriber._shadow
 
 
 # ---------------------------------------------------------------------------

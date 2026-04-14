@@ -14,7 +14,6 @@ from __future__ import annotations
 # Standard
 from dataclasses import dataclass
 from typing import Any
-import random
 import time
 
 # Third Party
@@ -59,6 +58,10 @@ class L1LifecycleSubscriber(EventSubscriber):
         )
         self._sample_rate = sample_rate
         self._max_evict_reuse_wait = max_evict_reuse_wait
+        # Deterministic sampling via hash: hash(key) % _SAMPLE_PRIME < threshold.
+        # O(1) memory, no set growth, same key always gets the same decision.
+        self._sample_prime = 1_000_003
+        self._sample_threshold = int(sample_rate * self._sample_prime)
         meter = metrics.get_meter("lmcache.l1")
         self._lifetime_hist = meter.create_histogram(
             "lmcache_mp.l1_chunk_lifetime_seconds",
@@ -93,8 +96,6 @@ class L1LifecycleSubscriber(EventSubscriber):
         self._shadow: dict[Any, _L1ChunkState] = {}
         # Evicted map: key -> eviction timestamp (waiting for reuse).
         self._evicted_at: dict[Any, float] = {}
-        # Keys we decided NOT to sample — ignored for lifecycle histograms.
-        self._skipped: set[Any] = set()
 
     def get_subscriptions(self) -> dict[EventType, EventCallback]:
         return {
@@ -130,11 +131,8 @@ class L1LifecycleSubscriber(EventSubscriber):
                     last_access_time=now,
                 )
             else:
-                # First time seeing this key — sample or skip.
-                if key in self._skipped:
-                    continue
-                if not self._should_sample():
-                    self._skipped.add(key)
+                # First time seeing this key — deterministic sample check.
+                if not self._should_sample(key):
                     continue
                 self._shadow[key] = _L1ChunkState(
                     alloc_time=now,
@@ -153,8 +151,8 @@ class L1LifecycleSubscriber(EventSubscriber):
                 self._evicted_at[key] = now
         self._sweep_stale_evictions(now)
 
-    def _should_sample(self) -> bool:
-        return random.random() < self._sample_rate
+    def _should_sample(self, key: object) -> bool:
+        return hash(key) % self._sample_prime < self._sample_threshold
 
     def _sweep_stale_evictions(self, now: float) -> None:
         """Report T and discard evicted entries older than max_evict_reuse_wait."""
