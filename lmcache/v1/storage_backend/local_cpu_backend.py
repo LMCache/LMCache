@@ -381,7 +381,8 @@ class LocalCPUBackend(AllocatorBackendInterface):
             )
 
         if config.enable_p2p:
-            assert not use_hugepages, "Hugepages are not supported for P2P mode"
+            if use_hugepages:
+                raise ValueError("Hugepages are not supported with P2P mode")
 
             # TODO(baoloongmao): Add lazy memory allocator support for P2P mode
             # For now, keep the original P2P implementation

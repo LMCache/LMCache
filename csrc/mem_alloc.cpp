@@ -1,8 +1,10 @@
 #include <cuda_runtime.h>
 #include <stdexcept>
 #include <string>
+#include <cassert>
 #include <sys/mman.h>
 #include <sys/syscall.h>
+#include <linux/mman.h>
 #include <unistd.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -10,12 +12,21 @@
 #include <linux/mempolicy.h>  // for MPOL_BIND, MPOL_MF_MOVE, MPOL_MF_STRICT
 #include "mem_alloc.h"
 
+static constexpr size_t HUGEPAGE_SIZE = 2UL * 1024 * 1024;  // MAP_HUGE_2MB
+
+static inline size_t _align_hugepage(size_t size) {
+  return (size + HUGEPAGE_SIZE - 1) & ~(HUGEPAGE_SIZE - 1);
+}
+
 static void* _mmap_anon(size_t size, bool hugepages) {
   int flags = MAP_PRIVATE | MAP_ANONYMOUS;
-  if (hugepages) flags |= MAP_HUGETLB;
+  if (hugepages) {
+    flags |= MAP_HUGETLB | MAP_HUGE_2MB;
+  }
   void* ptr = mmap(nullptr, size, PROT_READ | PROT_WRITE, flags, -1, 0);
-  if (ptr == MAP_FAILED)
+  if (ptr == MAP_FAILED) {
     throw std::runtime_error(std::string("mmap failed: ") + strerror(errno));
+  }
   return ptr;
 }
 
@@ -36,6 +47,7 @@ void free_pinned_ptr(uintptr_t ptr) {
 }
 
 uintptr_t alloc_hugepage_pinned_ptr(size_t size, unsigned int flags) {
+  size = _align_hugepage(size);
   void* ptr = _mmap_anon(size, true);
 
   cudaError_t st = cudaHostRegister(ptr, size, flags);
@@ -49,7 +61,9 @@ uintptr_t alloc_hugepage_pinned_ptr(size_t size, unsigned int flags) {
 }
 
 void free_hugepage_pinned_ptr(uintptr_t ptr, size_t size) {
+  size = _align_hugepage(size);
   void* p = reinterpret_cast<void*>(ptr);
+
   // Unpin first, then unmap.
   cudaError_t st = cudaHostUnregister(p);
   if (st != cudaSuccess) {
@@ -62,10 +76,11 @@ void free_hugepage_pinned_ptr(uintptr_t ptr, size_t size) {
   }
 }
 
-static void first_touch(void* p, size_t size) {
-  const long ps = sysconf(_SC_PAGESIZE);
+static void first_touch(void* p, size_t size, bool hugepages) {
+  const size_t ps =
+      hugepages ? HUGEPAGE_SIZE : static_cast<size_t>(sysconf(_SC_PAGESIZE));
   for (size_t off = 0; off < size; off += ps) {
-    volatile char* c = (volatile char*)p + off;
+    volatile char* c = static_cast<volatile char*>(p) + off;
     *c = 0;
   }
 }
@@ -78,6 +93,10 @@ static inline int mbind_sys(void* addr, unsigned long len, int mode,
 }
 
 static uintptr_t _alloc_numa_impl(size_t size, int node, bool hugepages) {
+  if (hugepages) {
+    assert(size % HUGEPAGE_SIZE == 0);
+  }
+
   void* ptr = _mmap_anon(size, hugepages);
 
   // Maximum of 64 numa nodes
@@ -90,7 +109,7 @@ static uintptr_t _alloc_numa_impl(size_t size, int node, bool hugepages) {
     throw std::runtime_error(std::string("mbind failed: ") + strerror(err));
   }
 
-  first_touch(ptr, size);
+  first_touch(ptr, size, hugepages);
 
   return reinterpret_cast<uintptr_t>(ptr);
 }
@@ -100,6 +119,7 @@ uintptr_t alloc_numa_ptr(size_t size, int node) {
 }
 
 uintptr_t alloc_hugepage_numa_ptr(size_t size, int node) {
+  size = _align_hugepage(size);
   return _alloc_numa_impl(size, node, true);
 }
 
@@ -111,7 +131,7 @@ void free_numa_ptr(uintptr_t ptr, size_t size) {
 }
 
 void free_hugepage_numa_ptr(uintptr_t ptr, size_t size) {
-  // Exactly the same as free_numa_ptr...
+  size = _align_hugepage(size);
   free_numa_ptr(ptr, size);
 }
 
@@ -134,6 +154,7 @@ uintptr_t alloc_pinned_numa_ptr(size_t size, int node) {
 }
 
 uintptr_t alloc_hugepage_pinned_numa_ptr(size_t size, int node) {
+  size = _align_hugepage(size);
   return _alloc_pinned_numa_impl(size, node, true);
 }
 
@@ -152,7 +173,7 @@ void free_pinned_numa_ptr(uintptr_t ptr, size_t size) {
 }
 
 void free_hugepage_pinned_numa_ptr(uintptr_t ptr, size_t size) {
-  // Exactly the same as free_pinned_numa_ptr...
+  size = _align_hugepage(size);
   free_pinned_numa_ptr(ptr, size);
 }
 
@@ -176,7 +197,7 @@ uintptr_t alloc_shm_pinned_ptr(size_t size, const std::string& shm_name) {
     throw std::runtime_error(std::string("mmap failed: ") + strerror(errno));
   }
 
-  first_touch(ptr, size);
+  first_touch(ptr, size, false);
 
   cudaError_t st = cudaHostRegister(ptr, size, 0);
   if (st != cudaSuccess) {

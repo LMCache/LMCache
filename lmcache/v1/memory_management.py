@@ -371,27 +371,44 @@ class MemoryObj(metaclass=abc.ABCMeta):
         raise NotImplementedError
 
 
+@dataclass
+class PinnedAllocFree:
+    """Resolved alloc/free function pair for pinned CPU memory."""
+
+    alloc_fn: Any
+    alloc_args: tuple
+    free_fn: Any
+    free_args: tuple
+
+    def alloc(self) -> int:
+        """Allocate pinned memory and return the raw pointer."""
+        return self.alloc_fn(*self.alloc_args)
+
+    def free(self, ptr: int) -> None:
+        """Free a previously allocated pinned-memory pointer."""
+        self.free_fn(ptr, *self.free_args)
+
+
 def _resolve_pinned_alloc_free(
     numa_mapping: Optional[NUMAMapping] = None,
     shm_name: Optional[str] = None,
     size: Optional[int] = None,
     use_hugepages: bool = False,
-) -> Tuple[
-    tuple,  # (alloc_fn, *alloc_args)
-    tuple,  # (free_fn, *free_args_after_ptr)
-]:
+) -> PinnedAllocFree:
     """Resolve the alloc/free function pair based on memory type.
 
     Returns:
-        A tuple of (alloc_info, free_info) where:
-        - alloc_info: (alloc_fn, *args) to call as alloc_fn(size, *args)
-        - free_info: (free_fn, *args) to call as free_fn(ptr, *args)
+        A PinnedAllocFree with the resolved functions and their extra
+        arguments.  Call ``ptr = resolved.alloc()`` and ``resolved.free(ptr)``.
     """
     if shm_name:
-        assert not use_hugepages, "Hugepages not supported with shm"
-        return (
-            (lmc_ops.alloc_shm_pinned_ptr, shm_name),
-            (lmc_ops.free_shm_pinned_ptr, size, shm_name),
+        if use_hugepages:
+            raise ValueError("Hugepages are not supported with shared memory (shm)")
+        return PinnedAllocFree(
+            alloc_fn=lmc_ops.alloc_shm_pinned_ptr,
+            alloc_args=(size, shm_name),
+            free_fn=lmc_ops.free_shm_pinned_ptr,
+            free_args=(size, shm_name),
         )
     elif numa_mapping:
         if torch.cuda.is_available():
@@ -404,26 +421,56 @@ def _resolve_pinned_alloc_free(
         )
         numa_id = gpu_to_numa_mapping[current_device_id]
         if use_hugepages:
-            return (
-                (lmc_ops.alloc_hugepage_pinned_numa_ptr, numa_id),
-                (lmc_ops.free_hugepage_pinned_numa_ptr, size),
+            return PinnedAllocFree(
+                alloc_fn=lmc_ops.alloc_hugepage_pinned_numa_ptr,
+                alloc_args=(size, numa_id),
+                free_fn=lmc_ops.free_hugepage_pinned_numa_ptr,
+                free_args=(size,),
             )
         else:
-            return (
-                (lmc_ops.alloc_pinned_numa_ptr, numa_id),
-                (lmc_ops.free_pinned_numa_ptr, size),
+            return PinnedAllocFree(
+                alloc_fn=lmc_ops.alloc_pinned_numa_ptr,
+                alloc_args=(size, numa_id),
+                free_fn=lmc_ops.free_pinned_numa_ptr,
+                free_args=(size,),
             )
     else:
+        flags = 0
         if use_hugepages:
-            return (
-                (lmc_ops.alloc_hugepage_pinned_ptr, 0),
-                (lmc_ops.free_hugepage_pinned_ptr, size),
+            return PinnedAllocFree(
+                alloc_fn=lmc_ops.alloc_hugepage_pinned_ptr,
+                alloc_args=(size, flags),
+                free_fn=lmc_ops.free_hugepage_pinned_ptr,
+                free_args=(size,),
             )
         else:
-            return (
-                (lmc_ops.alloc_pinned_ptr, 0),
-                (lmc_ops.free_pinned_ptr,),
+            return PinnedAllocFree(
+                alloc_fn=lmc_ops.alloc_pinned_ptr,
+                alloc_args=(size, flags),
+                free_fn=lmc_ops.free_pinned_ptr,
+                free_args=(),
             )
+
+
+def _read_hugepage_info() -> Optional[Tuple[int, int, int]]:
+    """Read hugepage stats from /proc/meminfo.
+
+    Returns:
+        (HugePages_Total, HugePages_Free, Hugepagesize_kB) or None on
+        failure (e.g. non-Linux).
+    """
+    try:
+        vals: dict[str, int] = {}
+        with open("/proc/meminfo") as f:
+            for line in f:
+                for key in ("HugePages_Total", "HugePages_Free", "Hugepagesize"):
+                    if line.startswith(key):
+                        vals[key] = int(line.split()[1])
+        if len(vals) == 3:
+            return vals["HugePages_Total"], vals["HugePages_Free"], vals["Hugepagesize"]
+    except OSError:
+        pass
+    return None
 
 
 def _allocate_cpu_memory(
@@ -435,21 +482,38 @@ def _allocate_cpu_memory(
     if size == 0:
         return torch.empty(0, dtype=torch.uint8)
 
-    alloc_info, _ = _resolve_pinned_alloc_free(
+    resolved = _resolve_pinned_alloc_free(
         numa_mapping,
         shm_name,
-        size=size,
-        use_hugepages=use_hugepages,
+        size,
+        use_hugepages,
     )
-    alloc_fn, *alloc_args = alloc_info
+
     try:
-        ptr = alloc_fn(size, *alloc_args)
+        ptr = resolved.alloc()
     except RuntimeError as e:
         if use_hugepages and "mmap failed" in str(e):
-            logger.error(
-                "Failed to allocate huge pages, please check `sysctl vm.nr_hugepages`"
-            )
-        raise e
+            diag = _read_hugepage_info()
+            if diag is not None:
+                total, free, page_kb = diag
+                needed = (size + page_kb * 1024 - 1) // (page_kb * 1024)
+                logger.error(
+                    "Failed to allocate huge pages. "
+                    "System has %d huge pages (%d free, each %d kB). "
+                    "Requested %d bytes (%d pages). "
+                    "Check `sysctl vm.nr_hugepages`.",
+                    total,
+                    free,
+                    page_kb,
+                    size,
+                    needed,
+                )
+            else:
+                logger.error(
+                    "Failed to allocate huge pages, "
+                    "please check `sysctl vm.nr_hugepages`"
+                )
+        raise
 
     array_type = ctypes.c_uint8 * size
     buf = array_type.from_address(ptr)
@@ -468,14 +532,13 @@ def _free_cpu_memory(
     if torch.cuda.is_available():
         torch.cuda.synchronize()
 
-    _, free_info = _resolve_pinned_alloc_free(
+    resolved = _resolve_pinned_alloc_free(
         numa_mapping,
         shm_name,
-        size=size,
-        use_hugepages=use_hugepages,
+        size,
+        use_hugepages,
     )
-    free_fn, *free_args = free_info
-    free_fn(buffer.data_ptr(), *free_args)
+    resolved.free(buffer.data_ptr())
 
 
 def _allocate_gpu_memory(
@@ -559,6 +622,7 @@ class TensorMemoryObj(MemoryObj):
         return self.meta.shape
 
     def get_dtype(self) -> torch.dtype:
+        assert self.meta.dtype is not None
         return self.meta.dtype
 
     def get_shapes(self) -> list[torch.Size]:

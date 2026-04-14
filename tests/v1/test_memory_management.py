@@ -21,8 +21,13 @@ from lmcache.v1.memory_management import (
     PinMemoryAllocator,
     TensorMemoryAllocator,
     TensorMemoryObj,
+    _allocate_cpu_memory,
+    _free_cpu_memory,
+    _read_hugepage_info,
 )
 from lmcache.v1.pin_monitor import PinMonitor
+
+HUGEPAGE_SIZE = 2 * 1024 * 1024  # MAP_HUGE_2MB
 
 
 def check_allocator(allocator, max_size):
@@ -885,3 +890,51 @@ class TestLazyMemoryAllocator:
 
         assert allocator.memcheck()
         allocator.close()
+
+
+def _system_has_hugepages() -> bool:
+    info = _read_hugepage_info()
+    if info is None:
+        return False
+    total, free, _ = info
+    return free >= 1
+
+
+@pytest.mark.skipif(
+    not _system_has_hugepages(),
+    reason="Requires at least 1 free huge page (sysctl vm.nr_hugepages)",
+)
+class TestHugepageAllocation:
+    """Tests for hugepage-backed CPU memory allocation.
+
+    Skipped unless the system has pre-allocated huge pages.
+    """
+
+    def test_allocate_and_free(self):
+        """Allocate one huge page worth of memory and free it."""
+        buf = _allocate_cpu_memory(HUGEPAGE_SIZE, use_hugepages=True)
+        assert buf.numel() == HUGEPAGE_SIZE
+        assert buf.dtype == torch.uint8
+        buf[0] = 42
+        buf[-1] = 99
+        assert buf[0].item() == 42
+        assert buf[-1].item() == 99
+        _free_cpu_memory(buf, size=HUGEPAGE_SIZE, use_hugepages=True)
+
+    def test_allocate_multiple_pages(self):
+        """Allocate several huge pages and verify the buffer is usable."""
+        size = 4 * HUGEPAGE_SIZE
+        buf = _allocate_cpu_memory(size, use_hugepages=True)
+        assert buf.numel() == size
+        buf.fill_(7)
+        assert buf[size // 2].item() == 7
+        _free_cpu_memory(buf, size=size, use_hugepages=True)
+
+    def test_read_hugepage_info(self):
+        """_read_hugepage_info returns valid data on Linux."""
+        info = _read_hugepage_info()
+        assert info is not None
+        total, free, page_kb = info
+        assert total > 0
+        assert free >= 0
+        assert page_kb > 0

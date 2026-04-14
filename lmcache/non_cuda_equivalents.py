@@ -6,6 +6,7 @@
 # Standard
 from multiprocessing import shared_memory
 import ctypes
+import warnings
 
 # Third Party
 import torch
@@ -127,6 +128,12 @@ def free_shm_pinned_ptr(ptr: int, size: int = 0, shm_name: str = "") -> None:
 
 def alloc_hugepage_pinned_ptr(size: int, device_id: int = 0) -> int:
     """Non-CUDA fallback for alloc_hugepage_pinned_ptr (no hugepage support)."""
+    warnings.warn(
+        "Hugepages requested but not available on non-CUDA platforms; "
+        "falling back to regular allocation.",
+        RuntimeWarning,
+        stacklevel=2,
+    )
     return alloc_pinned_ptr(size, device_id)
 
 
@@ -137,9 +144,31 @@ def free_hugepage_pinned_ptr(ptr: int, size: int = 0) -> None:
 
 def alloc_hugepage_pinned_numa_ptr(size: int, numa_id: int = 0) -> int:
     """Non-CUDA fallback for alloc_hugepage_pinned_numa_ptr (no hugepage support)."""
+    warnings.warn(
+        "Hugepages requested but not available on non-CUDA platforms; "
+        "falling back to regular allocation.",
+        RuntimeWarning,
+        stacklevel=2,
+    )
     return alloc_pinned_numa_ptr(size, numa_id)
 
 
 def free_hugepage_pinned_numa_ptr(ptr: int, size: int = 0) -> None:
     """Non-CUDA fallback for free_hugepage_pinned_numa_ptr (no hugepage support)."""
+    free_pinned_numa_ptr(ptr, size)
+
+
+def alloc_hugepage_numa_ptr(size: int, numa_id: int = 0) -> int:
+    """Non-CUDA fallback for alloc_hugepage_numa_ptr (no hugepage support)."""
+    warnings.warn(
+        "Hugepages requested but not available on non-CUDA platforms; "
+        "falling back to regular allocation.",
+        RuntimeWarning,
+        stacklevel=2,
+    )
+    return alloc_pinned_numa_ptr(size, numa_id)
+
+
+def free_hugepage_numa_ptr(ptr: int, size: int = 0) -> None:
+    """Non-CUDA fallback for free_hugepage_numa_ptr (no hugepage support)."""
     free_pinned_numa_ptr(ptr, size)
