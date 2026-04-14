@@ -13,6 +13,7 @@ The cache simulator replays recorded LMCache lookup events to measure **token ca
 - [Step 1: Enable Lookup Hash Logging](#step-1-enable-lookup-hash-logging)
 - [Step 2: Run the Simulator](#step-2-run-the-simulator)
 - [Step 3: Plot Hit Rate vs Capacity](#step-3-plot-hit-rate-vs-capacity)
+- [Step 4: Generate a vllm Benchmark Dataset](#step-4-generate-a-vllm-benchmark-dataset)
 - [Understanding the Output](#understanding-the-output)
 - [CLI Reference](#cli-reference)
 - [For Developers](#for-developers)
@@ -69,6 +70,13 @@ lmcache tool cache-simulator sweep \
     --max-capacity-gib 512 \
     --points 30 \
     -o sweep.png
+
+# 4. Generate a vllm bench serve dataset that replays the same workload pattern
+lmcache tool cache-simulator gen-dataset \
+    -i /data/lmcache/lookup_hashes \
+    --tokenizer /models/DeepSeek-V3 \
+    --output-len 128 \
+    -o bench_dataset.jsonl
 ```
 
 ---
@@ -213,6 +221,38 @@ The x-axis is in GiB (log scale by default). Use `--linear` for a linear scale.
 
 ---
 
+## Step 4: Generate a vllm Benchmark Dataset
+
+The `gen-dataset` command converts lookup-hash logs into a `vllm bench serve` custom dataset. The synthetic prompts preserve the **prefix-sharing structure** of the original workload: requests that shared a chunk hash in the logs will share the same token prefix in the output, so LMCache prefix caching sees the same hit/miss pattern when the dataset is replayed.
+
+```bash
+lmcache tool cache-simulator gen-dataset \
+    -i /data/lmcache/lookup_hashes \
+    --tokenizer /models/DeepSeek-V3 \
+    --output-len 128 \
+    -o bench_dataset.jsonl
+```
+
+This writes a standard custom-dataset JSONL file that can be replayed directly with `vllm bench serve`:
+
+```bash
+vllm bench serve \
+    --dataset-name custom \
+    --dataset-path bench_dataset.jsonl \
+    --model DeepSeek-V3 \
+    --host 127.0.0.1 \
+    --port 8000
+```
+
+### How token generation works
+
+1. A *safe vocabulary* is built from the tokenizer: token IDs that decode to printable text and round-trip stably through `encode(decode([id])) == [id]`. Tokens with a leading space are preferred to prevent BPE merges at chunk boundaries.
+2. Each unique chunk hash is mapped deterministically to `chunk_size` token IDs by seeding a PRNG with `SHA-256(hash)`. The same hash always produces the same tokens.
+3. Tail tokens (`seq_len mod chunk_size`) use a per-request seed so they are never accidentally shared across requests (matching LMCache's behaviour of never caching partial chunks).
+4. The full token list is decoded to text and written as the `"prompt"` field. `"output_tokens"` is set to `--output-len`.
+
+---
+
 ## Understanding the Output
 
 ### Text report statistics
@@ -280,6 +320,21 @@ lmcache tool cache-simulator sweep [OPTIONS]
 | `--model NAME` | all | Filter by model name |
 | `--kv-bytes-per-chunk BYTES` | auto | KV bytes per chunk |
 
+### `gen-dataset` — generate vllm bench serve dataset
+
+```
+lmcache tool cache-simulator gen-dataset [OPTIONS]
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `-i / --input PATH [PATH ...]` | required | JSONL files or directories |
+| `--tokenizer PATH` | required | HuggingFace tokenizer path or name |
+| `--output-len N` | `128` | `output_tokens` per request |
+| `-o / --output FILE` | `bench_dataset.jsonl` | Output JSONL path |
+| `-n / --max-samples N` | all | Truncate events |
+| `--model NAME` | all | Filter by model name |
+
 ---
 
 ## For Developers
@@ -288,14 +343,15 @@ lmcache tool cache-simulator sweep [OPTIONS]
 
 ```
 lmcache/tools/cache_simulator/
-    __init__.py         — package marker
-    lru_cache.py        — LRUCache and LRUCacheFast implementations
-    simulator.py        — event loading, simulation engine, text report, chart, CLI
-    plot_hit_rate.py    — capacity sweep and matplotlib plot
+    __init__.py             — package marker
+    lru_cache.py            — LRUCache and LRUCacheFast implementations
+    simulator.py            — event loading, simulation engine, text report, chart, CLI
+    plot_hit_rate.py        — capacity sweep and matplotlib plot
+    gen_bench_dataset.py    — lookup-hash → vllm bench serve dataset converter
 
 lmcache/cli/commands/tool/
-    __init__.py         — ToolCommand dispatcher (lmcache tool ...)
-    cache_simulator.py  — wires cache-simulator into the lmcache CLI
+    __init__.py             — ToolCommand dispatcher (lmcache tool ...)
+    cache_simulator.py      — wires cache-simulator into the lmcache CLI
 ```
 
 ### CLI integration
