@@ -153,7 +153,6 @@ class RequestTracker:
     # The number of tokens that are cached in LMCache for this request
     num_lmcache_cached_tokens: int = 0
 
-    @_lmcache_nvtx_annotate
     @staticmethod
     def _normalize_block_ids(
         block_ids: Union[Optional[tuple[list[int], ...]], list[int], tuple[Any, ...]],
@@ -269,7 +268,9 @@ class RequestTracker:
             # diff-cafd89ce8a698a56acb24ada62831cbc7a980782f78a52d1742ba238031f296cL94
             new_block_ids_by_group = tuple()
         else:
-            new_block_ids_by_group = self._normalize_block_ids(new_block_ids)
+            new_block_ids_by_group = RequestTracker._normalize_block_ids(
+                new_block_ids
+            )
 
         if preempted:
             assert all_token_ids is not None, (
@@ -348,18 +349,6 @@ class ReqMeta:
     request_configs: Optional[dict] = None
 
     @staticmethod
-    def _get_group_block_sizes(
-        num_groups: int,
-        fallback_block_size: int,
-        kv_cache_groups: Optional[list[Any]] = None,
-    ) -> tuple[int, ...]:
-        return _compute_group_block_sizes(
-            num_groups=num_groups,
-            fallback_block_size=fallback_block_size,
-            kv_cache_groups=kv_cache_groups,
-        )
-
-    @staticmethod
     def from_request_tracker(
         tracker: RequestTracker,
         block_size: int,
@@ -374,6 +363,8 @@ class ReqMeta:
         Args:
             tracker (RequestTracker): the request tracker.
             block_size (int): the block size in vLLM.
+            kv_cache_groups (Optional[list[Any]]): KV cache groups used to
+                derive per-group block sizes and per-layer slot mappings.
             lmcache_chunk_size (int): the chunk size for LMCache.
             load_spec (Optional[LoadSpec]): the load spec for KV cache loading.
             discard_partial_chunks (bool): whether to discard partial chunks.
@@ -447,10 +438,10 @@ class ReqMeta:
             )
             token_ids = token_ids.tolist()
 
-        group_block_sizes = ReqMeta._get_group_block_sizes(
-            len(tracker.allocated_block_ids_by_group),
-            block_size,
-            kv_cache_groups,
+        group_block_sizes = _compute_group_block_sizes(
+            num_groups=len(tracker.allocated_block_ids_by_group),
+            fallback_block_size=block_size,
+            kv_cache_groups=kv_cache_groups,
         )
         max_num_token_slots = max(
             (
@@ -658,15 +649,17 @@ class LMCacheConnectorV1Impl:
     def _resolve_full_slot_mapping(self, request: ReqMeta) -> torch.Tensor:
         token_count = len(request.token_ids)
         slot_mapping = request.slot_mapping
+        slot_mappings_by_group = getattr(request, "slot_mappings_by_group", None)
+        slot_mappings_by_layer = getattr(request, "slot_mappings_by_layer", None)
 
         if slot_mapping.shape[0] >= token_count:
             return slot_mapping[:token_count]
 
         candidate_mappings: list[torch.Tensor] = []
-        if request.slot_mappings_by_group is not None:
-            candidate_mappings.extend(request.slot_mappings_by_group)
-        if request.slot_mappings_by_layer is not None:
-            candidate_mappings.extend(request.slot_mappings_by_layer.values())
+        if slot_mappings_by_group is not None:
+            candidate_mappings.extend(slot_mappings_by_group)
+        if slot_mappings_by_layer is not None:
+            candidate_mappings.extend(slot_mappings_by_layer.values())
 
         if candidate_mappings:
             slot_mapping = max(
@@ -996,12 +989,13 @@ class LMCacheConnectorV1Impl:
             tokens = request.token_ids
             # TODO: have a pre-allocated buffer to hold the slot_mappings
             slot_mapping = self._resolve_full_slot_mapping(request).to(self.device)
+            slot_mappings_by_layer = getattr(request, "slot_mappings_by_layer", None)
             slot_mappings = (
                 {
                     layer_name: mapping.to(self.device)
-                    for layer_name, mapping in request.slot_mappings_by_layer.items()
+                    for layer_name, mapping in slot_mappings_by_layer.items()
                 }
-                if request.slot_mappings_by_layer is not None
+                if slot_mappings_by_layer is not None
                 else None
             )
             assert len(tokens) == len(slot_mapping)
@@ -1298,12 +1292,13 @@ class LMCacheConnectorV1Impl:
                 assert isinstance(token_ids, list)
 
                 slot_mapping = self._resolve_full_slot_mapping(request)
+                slot_mappings_by_layer = getattr(request, "slot_mappings_by_layer", None)
                 slot_mappings = (
                     {
                         layer_name: mapping.to(self.device)
-                        for layer_name, mapping in request.slot_mappings_by_layer.items()
+                        for layer_name, mapping in slot_mappings_by_layer.items()
                     }
-                    if request.slot_mappings_by_layer is not None
+                    if slot_mappings_by_layer is not None
                     else None
                 )
                 assert isinstance(slot_mapping, torch.Tensor)
@@ -1405,12 +1400,13 @@ class LMCacheConnectorV1Impl:
             token_ids = request.token_ids
 
             slot_mapping = self._resolve_full_slot_mapping(request)
+            slot_mappings_by_layer = getattr(request, "slot_mappings_by_layer", None)
             slot_mappings = (
                 {
                     layer_name: mapping.to(self.device)
-                    for layer_name, mapping in request.slot_mappings_by_layer.items()
+                    for layer_name, mapping in slot_mappings_by_layer.items()
                 }
-                if request.slot_mappings_by_layer is not None
+                if slot_mappings_by_layer is not None
                 else None
             )
             assert isinstance(slot_mapping, torch.Tensor)
