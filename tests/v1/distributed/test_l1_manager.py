@@ -1769,3 +1769,170 @@ class TestThreadSafety:
         assert len(errors) == 0, f"Thread safety errors: {errors}"
 
         manager.close()
+
+
+# =============================================================================
+# Tests for L1Manager.is_key_evictable()
+# =============================================================================
+
+
+class TestIsKeyEvictable:
+    """Tests for L1Manager.is_key_evictable() method."""
+
+    def test_evictable_key_in_ready_state(self, basic_l1_config, basic_layout):
+        """A key that has been written and finished should be evictable."""
+        manager = L1Manager(basic_l1_config)
+        key = make_object_key(1)
+
+        # Write and finish -> key is in ready state
+        manager.reserve_write([key], [False], basic_layout)
+        manager.finish_write([key])
+
+        assert manager.is_key_evictable(key) is True
+
+        manager.close()
+
+    def test_write_locked_key_is_not_evictable(self, basic_l1_config, basic_layout):
+        """A write-locked key should not be evictable."""
+        manager = L1Manager(basic_l1_config)
+        key = make_object_key(1)
+
+        # Reserve write but don't finish -> key is write-locked
+        manager.reserve_write([key], [False], basic_layout)
+
+        assert manager.is_key_evictable(key) is False
+
+        # Cleanup
+        manager.finish_write([key])
+        manager.close()
+
+    def test_read_locked_key_is_not_evictable(self, basic_l1_config, basic_layout):
+        """A read-locked key should not be evictable."""
+        manager = L1Manager(basic_l1_config)
+        key = make_object_key(1)
+
+        # Write, finish, then reserve read -> key is read-locked
+        manager.reserve_write([key], [False], basic_layout)
+        manager.finish_write([key])
+        manager.reserve_read([key])
+
+        assert manager.is_key_evictable(key) is False
+
+        # Cleanup
+        manager.finish_read([key])
+        manager.close()
+
+    def test_nonexistent_key_is_not_evictable(self, basic_l1_config):
+        """A key that does not exist should not be evictable."""
+        manager = L1Manager(basic_l1_config)
+        key = make_object_key(999)
+
+        assert manager.is_key_evictable(key) is False
+
+        manager.close()
+
+    def test_key_becomes_evictable_after_read_unlock(
+        self, basic_l1_config, basic_layout
+    ):
+        """A key should become evictable after all read locks are released."""
+        manager = L1Manager(basic_l1_config)
+        key = make_object_key(1)
+
+        # Write and finish
+        manager.reserve_write([key], [False], basic_layout)
+        manager.finish_write([key])
+
+        # Reserve read -> not evictable
+        manager.reserve_read([key])
+        assert manager.is_key_evictable(key) is False
+
+        # Finish read -> evictable again
+        manager.finish_read([key])
+        assert manager.is_key_evictable(key) is True
+
+        manager.close()
+
+    def test_key_becomes_evictable_after_write_unlock(
+        self, basic_l1_config, basic_layout
+    ):
+        """A key should become evictable after write lock is released."""
+        manager = L1Manager(basic_l1_config)
+        key = make_object_key(1)
+
+        # Reserve write -> not evictable
+        manager.reserve_write([key], [False], basic_layout)
+        assert manager.is_key_evictable(key) is False
+
+        # Finish write -> evictable
+        manager.finish_write([key])
+        assert manager.is_key_evictable(key) is True
+
+        manager.close()
+
+    def test_multiple_keys_mixed_evictability(self, basic_l1_config, basic_layout):
+        """Test evictability with multiple keys in different states."""
+        manager = L1Manager(basic_l1_config)
+        key_ready = make_object_key(1)
+        key_write_locked = make_object_key(2)
+        key_read_locked = make_object_key(3)
+
+        # key_ready: write + finish -> ready state
+        manager.reserve_write([key_ready], [False], basic_layout)
+        manager.finish_write([key_ready])
+
+        # key_write_locked: write only -> write-locked
+        manager.reserve_write([key_write_locked], [False], basic_layout)
+
+        # key_read_locked: write + finish + read -> read-locked
+        manager.reserve_write([key_read_locked], [False], basic_layout)
+        manager.finish_write([key_read_locked])
+        manager.reserve_read([key_read_locked])
+
+        assert manager.is_key_evictable(key_ready) is True
+        assert manager.is_key_evictable(key_write_locked) is False
+        assert manager.is_key_evictable(key_read_locked) is False
+
+        # Cleanup
+        manager.finish_write([key_write_locked])
+        manager.finish_read([key_read_locked])
+        manager.close()
+
+    def test_deleted_key_is_not_evictable(self, basic_l1_config, basic_layout):
+        """A key that has been deleted should not be evictable."""
+        manager = L1Manager(basic_l1_config)
+        key = make_object_key(1)
+
+        # Write, finish, then delete
+        manager.reserve_write([key], [False], basic_layout)
+        manager.finish_write([key])
+        manager.delete([key])
+
+        assert manager.is_key_evictable(key) is False
+
+        manager.close()
+
+    def test_key_with_multiple_read_locks_not_evictable(
+        self, basic_l1_config, basic_layout
+    ):
+        """A key with extra_count read locks should not be evictable
+        until all locks are released."""
+        manager = L1Manager(basic_l1_config)
+        key = make_object_key(1)
+
+        # Write and finish
+        manager.reserve_write([key], [False], basic_layout)
+        manager.finish_write([key])
+
+        # Reserve read with extra_count=2 (total 3 locks)
+        manager.reserve_read([key], extra_count=2)
+        assert manager.is_key_evictable(key) is False
+
+        # Release only 1 lock (extra_count=0) -> still locked
+        manager.finish_read([key], extra_count=0)
+        assert manager.is_key_evictable(key) is False
+
+        # Release remaining 2 locks (extra_count=1)
+        manager.finish_read([key], extra_count=1)
+        assert manager.is_key_evictable(key) is True
+
+        manager.close()

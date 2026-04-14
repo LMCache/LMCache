@@ -5,6 +5,7 @@ Eviction module to determine what to evict from L1 and L2 caches.
 
 # Standard
 from abc import abstractmethod
+from collections.abc import Callable
 
 # First Party
 from lmcache.v1.distributed.api import ObjectKey
@@ -68,7 +69,11 @@ class EvictionPolicy:
         pass
 
     @abstractmethod
-    def get_eviction_actions(self, expected_ratio: float) -> list[EvictionAction]:
+    def get_eviction_actions(
+        self,
+        expected_ratio: float,
+        key_eligible_filter: Callable[[ObjectKey], bool] | None = None,
+    ) -> list[EvictionAction]:
         """
         Get the eviction actions to evict objects from cache.
 
@@ -78,6 +83,11 @@ class EvictionPolicy:
                 in range [0.0, 1.0]. For example, 0.1 means roughly 10% of
                 keys should be evicted. This is a hint and the policy may
                 return more or fewer keys.
+            key_eligible_filter: An optional callable that takes an ObjectKey
+                and returns True if the key is eligible for eviction. When
+                provided, keys for which the filter returns False will be
+                skipped. This is useful for skipping locked keys that
+                cannot be deleted.
 
         Returns:
             list[EvictionAction]: The eviction actions to perform. Each
