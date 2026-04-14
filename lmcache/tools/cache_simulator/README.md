@@ -173,6 +173,10 @@ Stat 1 — Per-request token hit rate distribution
 ...
 ```
 
+### Example statistics chart
+
+![Simulation statistics chart](docs/simulate_example.png)
+
 ---
 
 ## Step 3: Plot Hit Rate vs Capacity
@@ -202,6 +206,10 @@ This prints a table and saves a PNG:
 ```
 
 The x-axis is in GiB (log scale by default). Use `--linear` for a linear scale.
+
+### Example capacity sweep chart
+
+![Hit rate vs capacity chart](docs/sweep_example.png)
 
 ---
 
