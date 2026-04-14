@@ -144,7 +144,7 @@ class L1EvictionPolicy(L1ManagerListener):
         pass
 
     def on_l1_keys_read_finished(self, keys: list[ObjectKey]):
-        pass
+        self._policy.on_keys_touched(keys)
 
     def on_l1_keys_reserved_write(self, keys: list[ObjectKey]):
         # No-op

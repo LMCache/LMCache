@@ -651,7 +651,7 @@ class L1Manager:
         return ret
 
     def touch_keys(self, keys: list[ObjectKey]):
-        """Touch the given keys to update their access time.
+        """Touch the given keys, marking the keys as accessed(retrieved or stored).
 
         Args:
             keys: The list of object keys to touch.

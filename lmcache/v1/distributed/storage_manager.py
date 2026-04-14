@@ -459,7 +459,8 @@ class StorageManager:
 
     def touch_l1_keys(self, keys: list[ObjectKey]):
         """
-        Touch the keys in L1 storage.
+        Touch the keys in L1 storage, marking the keys
+        as accessed(retrieved or stored).
 
         Args:
             keys (list[ObjectKey]): List of object keys to touch.
