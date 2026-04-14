@@ -33,14 +33,10 @@ from lmcache.v1.gpu_connector.utils import (
     is_mla,
 )
 from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
-
-if torch.cuda.is_available():
-    import lmcache.c_ops as lmc_ops
-
-# First Party
 from lmcache.v1.multiprocess.custom_types import (
     KVCache,
 )
+import lmcache.c_ops as lmc_ops
 
 logger = init_logger(__name__)
 

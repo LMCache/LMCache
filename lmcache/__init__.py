@@ -11,11 +11,16 @@ import torch
 # First Party
 from lmcache.logging import init_logger
 
+# Install cross-platform shims (eventfd, torch.cuda) early,
+# so every module can use ``os.eventfd`` transparently.
+import lmcache.v1.platform  # noqa: F401
+
 try:
     # First Party
     from lmcache._version import __version__
 except ImportError:
     __version__ = "unknown"
+
 
 logger = init_logger(__name__)
 __all__ = ["__version__"]
