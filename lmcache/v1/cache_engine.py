@@ -1308,6 +1308,16 @@ class LMCacheEngine:
                 return
             future = self.event_manager.pop_event(EventType.LOADING, lookup_id)
 
+            # Backend-level unpin for keys pinned during async prefetch.
+            # This is called from both lookup_unpin() and directly via
+            # LookupCleanupMsg for aborted requests, so the unpin
+            # must happen here to cover both paths.
+            if self.storage_manager is not None:
+                async_pins = self.storage_manager.pop_async_pins(lookup_id)
+                if async_pins:
+                    for location, keys in async_pins.items():
+                        self.storage_manager.batched_unpin(keys, [location])
+
             # Get memory objects from the future result
             memory_objs = future.result()
             # Flatten nested lists (each backend returns a list of chunks)
@@ -1459,16 +1469,6 @@ class LMCacheEngine:
             and self.event_manager.get_event_status(EventType.LOADING, lookup_id)
             != EventStatus.NOT_FOUND
         ):
-            assert self.storage_manager is not None
-            if (
-                self.event_manager.get_event_status(EventType.LOADING, lookup_id)
-                == EventStatus.DONE
-            ):
-                async_pins = self.storage_manager.pop_async_pins(lookup_id)
-                if async_pins:
-                    for location, keys in async_pins.items():
-                        self.storage_manager.batched_unpin(keys, [location])
-
             self.cleanup_memory_objs(lookup_id)
 
     @_lmcache_nvtx_annotate
