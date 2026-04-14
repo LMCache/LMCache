@@ -1,6 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests for vLLM integration, including platform extension hooks."""
 
+# Third Party
+import pytest
+
+pytest.importorskip("vllm", reason="vLLM is not installed")
+
 # Standard
 from unittest.mock import MagicMock, patch
 
