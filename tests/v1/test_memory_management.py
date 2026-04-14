@@ -892,16 +892,17 @@ class TestLazyMemoryAllocator:
         allocator.close()
 
 
-def _system_has_hugepages() -> bool:
+def _get_num_free_hugepages() -> int:
+    """Return the number of free huge pages, or 0 if unknown."""
     info = _read_hugepage_info()
     if info is None:
-        return False
-    total, free, _ = info
-    return free >= 1
+        return 0
+    _, free, _ = info
+    return free
 
 
 @pytest.mark.skipif(
-    not _system_has_hugepages(),
+    _get_num_free_hugepages() < 1,
     reason="Requires at least 1 free huge page (sysctl vm.nr_hugepages)",
 )
 class TestHugepageAllocation:
@@ -921,6 +922,10 @@ class TestHugepageAllocation:
         assert buf[-1].item() == 99
         _free_cpu_memory(buf, size=HUGEPAGE_SIZE, use_hugepages=True)
 
+    @pytest.mark.skipif(
+        _get_num_free_hugepages() < 4,
+        reason="Requires at least 4 free huge pages (sysctl vm.nr_hugepages)",
+    )
     def test_allocate_multiple_pages(self):
         """Allocate several huge pages and verify the buffer is usable."""
         size = 4 * HUGEPAGE_SIZE
