@@ -1459,6 +1459,12 @@ class LMCacheEngine:
             and self.event_manager.get_event_status(EventType.LOADING, lookup_id)
             != EventStatus.NOT_FOUND
         ):
+            assert self.storage_manager is not None
+            async_pins = self.storage_manager.pop_async_pins(lookup_id)
+            if async_pins:
+                for location, keys in async_pins.items():
+                    self.storage_manager.batched_unpin(keys, [location])
+
             self.cleanup_memory_objs(lookup_id)
 
     @_lmcache_nvtx_annotate

@@ -266,6 +266,12 @@ class StorageManager:
         )
         self.async_serializer: Optional[AsyncSerializer] = None
 
+        # Registry for backend-level pins made during async prefetch.
+        # Only populated for backends with requires_backend_unpin=True.
+        # Keyed by lookup_id -> {backend_name -> [keys]}.
+        self._async_pin_registry: dict[str, dict[str, list]] = {}
+        self._pin_registry_lock = threading.Lock()
+
         # The cuda stream for internal copies during put
         if is_cuda_worker(metadata):
             self.internal_copy_stream = torch.cuda.Stream()
@@ -696,6 +702,12 @@ class StorageManager:
             if num_hit_chunks == 0:
                 continue
 
+            if pin and backend.requires_backend_unpin:
+                with self._pin_registry_lock:
+                    self._async_pin_registry.setdefault(lookup_id, {})[backend_name] = (
+                        list(keys[:num_hit_chunks])
+                    )
+
             num_total_hit_chunks += num_hit_chunks
             tier_expected_chunks.append(num_hit_chunks)
 
@@ -1040,6 +1052,13 @@ class StorageManager:
                 num_removed += backend.batched_remove(keys)
 
         return num_removed
+
+    def pop_async_pins(
+        self, lookup_id: str
+    ) -> Optional[Dict[str, List[CacheEngineKey]]]:
+        """Pop and return async pin records for a lookup, or None."""
+        with self._pin_registry_lock:
+            return self._async_pin_registry.pop(lookup_id, None)
 
     def batched_unpin(
         self,

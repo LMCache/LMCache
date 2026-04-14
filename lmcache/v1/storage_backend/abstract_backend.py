@@ -204,6 +204,25 @@ class StorageBackendInterface(metaclass=abc.ABCMeta):
         """
         raise NotImplementedError
 
+    @property
+    def requires_backend_unpin(self) -> bool:
+        """Whether this backend needs explicit ``backend.unpin()`` in the
+        async retrieve path.
+
+        The default async cleanup (``cleanup_memory_objs``) only calls
+        ``memory_obj.unpin()`` which decrements the local, in-process
+        pin count.  Backends whose ``unpin()`` merely delegates to
+        ``memory_obj.unpin()`` (e.g. ``LocalCPUBackend``) can rely on
+        that default and should return ``False``.
+
+        Backends whose ``unpin()`` performs additional work that is not
+        reachable through ``memory_obj.unpin()`` — such as sending an
+        RPC to a remote server — should override this to return ``True``
+        so that ``StorageManager.batched_unpin()`` is called for them in
+        the async path as well.
+        """
+        return False
+
     @abc.abstractmethod
     def unpin(
         self,
