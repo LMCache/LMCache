@@ -28,7 +28,6 @@ from lmcache.v1.distributed.serde import (
     register_serde_factory,
 )
 
-
 # =============================================================================
 # Factory registration + dispatch
 # =============================================================================
@@ -120,6 +119,7 @@ def test_register_serde_factory_duplicate_raises() -> None:
 
 def _parse_adapter(spec: dict):  # type: ignore[no-untyped-def]
     """Helper: run the argparse plumbing on a single adapter JSON spec."""
+    # Standard
     import argparse
 
     parser = argparse.ArgumentParser()

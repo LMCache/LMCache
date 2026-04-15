@@ -36,13 +36,13 @@ class _FakeMemoryObj:
 
 def test_estimate_serialized_size_single_group() -> None:
     """Estimate includes 1.5x margin over exact fp8 size (1 byte/elem)."""
-    ser = Fp8QuantizationSerializer()
+    serializer = Fp8QuantizationSerializer()
     layout = MemoryLayoutDesc(
         shapes=[torch.Size([2, 4, 256, 128])],
         dtypes=[torch.bfloat16],
     )
     numel = 2 * 4 * 256 * 128
-    estimated = ser.estimate_serialized_size(layout)
+    estimated = serializer.estimate_serialized_size(layout)
     # Must be >= actual fp8 bytes (numel) and include the 1.5x margin
     assert estimated == int(numel * 1.5)
     assert estimated >= numel
@@ -50,13 +50,13 @@ def test_estimate_serialized_size_single_group() -> None:
 
 def test_estimate_serialized_size_multi_group() -> None:
     """Multi-group layouts sum element counts across groups, then apply margin."""
-    ser = Fp8QuantizationSerializer()
+    serializer = Fp8QuantizationSerializer()
     layout = MemoryLayoutDesc(
         shapes=[torch.Size([4, 8]), torch.Size([16])],
         dtypes=[torch.bfloat16, torch.float16],
     )
     numel = 32 + 16
-    estimated = ser.estimate_serialized_size(layout)
+    estimated = serializer.estimate_serialized_size(layout)
     assert estimated == int(numel * 1.5)
     assert estimated >= numel
 
@@ -77,8 +77,8 @@ def test_roundtrip_bfloat16_preserves_structure() -> None:
     # fp8 = 1 byte/elem; temp buffer is plain uint8.
     temp = _FakeMemoryObj(tensor=torch.zeros(original.numel(), dtype=torch.uint8))
 
-    ser = Fp8QuantizationSerializer()
-    n = ser.serialize(src, temp)  # type: ignore[arg-type]
+    serializer = Fp8QuantizationSerializer()
+    n = serializer.serialize(src, temp)  # type: ignore[arg-type]
     assert n == original.numel()
 
     # Round-trip: deserialize into a fresh buffer with the original shape.
@@ -94,16 +94,16 @@ def test_roundtrip_bfloat16_preserves_structure() -> None:
 
 def test_serialize_raises_on_missing_tensor() -> None:
     """A MemoryObj without ``.tensor`` is rejected rather than silently no-op'd."""
-    ser = Fp8QuantizationSerializer()
+    serializer = Fp8QuantizationSerializer()
     src = _FakeMemoryObj(tensor=None)
     dst = _FakeMemoryObj(tensor=torch.zeros(4, dtype=torch.uint8))
     with pytest.raises(ValueError):
-        ser.serialize(src, dst)  # type: ignore[arg-type]
+        serializer.serialize(src, dst)  # type: ignore[arg-type]
 
 
 def test_deserialize_raises_on_missing_tensor() -> None:
-    deser = Fp8QuantizationDeserializer()
+    deserializer = Fp8QuantizationDeserializer()
     src = _FakeMemoryObj(tensor=torch.zeros(4, dtype=torch.uint8))
     dst = _FakeMemoryObj(tensor=None)
     with pytest.raises(ValueError):
-        deser.deserialize(src, dst)  # type: ignore[arg-type]
+        deserializer.deserialize(src, dst)  # type: ignore[arg-type]

@@ -12,12 +12,10 @@ Verifies the async, eventfd-based contract:
 """
 
 # Standard
+from typing import Callable, Optional
 import os
 import select
 import time
-from typing import Callable, Optional
-
-# Third Party
 
 # First Party
 from lmcache.v1.distributed.api import MemoryLayoutDesc
@@ -81,28 +79,28 @@ def test_serialize_and_deserialize_fds_are_distinct() -> None:
 
 
 def test_serialize_signals_fd_and_result_is_true() -> None:
-    ser = _FakeSerializer()
-    processor = AsyncSerdeProcessor(ser, _FakeDeserializer())
+    serializer = _FakeSerializer()
+    processor = AsyncSerdeProcessor(serializer, _FakeDeserializer())
     try:
         task_id = processor.submit_serialize([object()], [object()])  # type: ignore[list-item]
         assert _wait_for_fd(processor.get_serialize_event_fd()), "fd never signaled"
         assert processor.query_serialize_result(task_id) is True
         # Non-idempotent: second query returns None.
         assert processor.query_serialize_result(task_id) is None
-        assert ser.calls == 1
+        assert serializer.calls == 1
     finally:
         processor.close()
 
 
 def test_deserialize_signals_fd_and_result_is_true() -> None:
-    deser = _FakeDeserializer()
-    processor = AsyncSerdeProcessor(_FakeSerializer(), deser)
+    deserializer = _FakeDeserializer()
+    processor = AsyncSerdeProcessor(_FakeSerializer(), deserializer)
     try:
         task_id = processor.submit_deserialize([object()], [object()])  # type: ignore[list-item]
         assert _wait_for_fd(processor.get_deserialize_event_fd()), "fd never signaled"
         assert processor.query_deserialize_result(task_id) is True
         assert processor.query_deserialize_result(task_id) is None
-        assert deser.calls == 1
+        assert deserializer.calls == 1
     finally:
         processor.close()
 
@@ -134,8 +132,8 @@ def test_query_returns_none_before_completion() -> None:
 
 
 def test_estimate_serialized_size_delegates_to_serializer() -> None:
-    ser = _FakeSerializer()
-    processor = AsyncSerdeProcessor(ser, _FakeDeserializer())
+    serializer = _FakeSerializer()
+    processor = AsyncSerdeProcessor(serializer, _FakeDeserializer())
     try:
         layout = MemoryLayoutDesc(shapes=[], dtypes=[])
         assert processor.estimate_serialized_size(layout) == 1
