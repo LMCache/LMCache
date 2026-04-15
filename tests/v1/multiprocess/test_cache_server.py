@@ -17,7 +17,7 @@ from lmcache.v1.distributed.config import (
     L1MemoryManagerConfig,
     StorageManagerConfig,
 )
-from lmcache.v1.mp_observability.config import DEFAULT_PROMETHEUS_CONFIG
+from lmcache.v1.mp_observability.config import DEFAULT_OBSERVABILITY_CONFIG
 from lmcache.v1.multiprocess.config import MPServerConfig
 from lmcache.v1.multiprocess.custom_types import (
     CudaIPCWrapper,
@@ -155,23 +155,23 @@ def lookup_all(
 ) -> int:
     """Lookup all keys individually and return total found count.
 
-    Uses the two-phase lookup protocol: LOOKUP returns a prefetch job ID,
-    then QUERY_PREFETCH_STATUS is polled until the result is ready.
+    Uses the two-phase lookup protocol: LOOKUP registers the job server-side,
+    then QUERY_PREFETCH_STATUS is polled by request_id until the result is ready.
     """
     total = 0
     for key in keys:
         lookup_key = key.no_worker_id_version()
-        # Phase 1: Get prefetch job ID
-        job_id = client.submit_request(
+        # Phase 1: Submit lookup (server tracks by request_id, returns None)
+        client.submit_request(
             RequestType.LOOKUP,
             [lookup_key, 1],
             get_response_class(RequestType.LOOKUP),
         ).result(timeout=timeout)
-        # Phase 2: Poll until done
+        # Phase 2: Poll by request_id until done
         while True:
             result = client.submit_request(
                 RequestType.QUERY_PREFETCH_STATUS,
-                [job_id],
+                [lookup_key.request_id],
                 get_response_class(RequestType.QUERY_PREFETCH_STATUS),
             ).result(timeout=timeout)
             if result is not None:
@@ -245,7 +245,7 @@ def server_process_runner(
     run_cache_server(
         mp_config=mp_config,
         storage_manager_config=storage_manager_config,
-        prometheus_config=DEFAULT_PROMETHEUS_CONFIG,
+        obs_config=DEFAULT_OBSERVABILITY_CONFIG,
     )
 
 
@@ -331,7 +331,7 @@ def registered_instance(
     # Register KV cache
     future = client.submit_request(
         RequestType.REGISTER_KV_CACHE,
-        [instance_id, client_context.get_kv_cache(), "testmodel", 1],
+        [instance_id, client_context.get_kv_cache(), "testmodel", 1, {}],
         get_response_class(RequestType.REGISTER_KV_CACHE),
     )
     result = future.result(timeout=DEFAULT_TIMEOUT)
@@ -381,7 +381,7 @@ def test_register_unregister_kv_cache(
     # Register
     future = client.submit_request(
         RequestType.REGISTER_KV_CACHE,
-        [instance_id, client_context.get_kv_cache(), "testmodel", 1],
+        [instance_id, client_context.get_kv_cache(), "testmodel", 1, {}],
         get_response_class(RequestType.REGISTER_KV_CACHE),
     )
     result = future.result(timeout=DEFAULT_TIMEOUT)

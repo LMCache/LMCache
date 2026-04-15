@@ -298,7 +298,7 @@ class S3Connector(RemoteConnector):
         self,
         key_str: str,
         mem_obj: MemoryObj,
-    ):
+    ) -> "s3.S3Request":
         """
         Download a file from S3.
         """
@@ -497,7 +497,7 @@ class S3Connector(RemoteConnector):
         self,
         key_str: str,
         memory_obj: MemoryObj,
-    ):
+    ) -> "s3.S3Request":
         """
         Upload a file to S3.
         """

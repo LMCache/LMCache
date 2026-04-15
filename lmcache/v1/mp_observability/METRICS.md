@@ -1,93 +1,169 @@
-# Distributed Storage Manager Observability Metrics
+# LMCache MP Mode Observability Metrics
 
 ## Overview
 
-The observability model is listener-based with **separate per-tier loggers**:
+The observability system uses an **EventBus with pub/sub dispatch** and
+**OpenTelemetry** for metrics instrumentation.
 
-- **`StorageManagerStatsLogger`** (`StorageManagerListener`) — events from the top-level `StorageManager` API (`submit_prefetch_task`, `reserve_write`, etc.)
-- **`L1ManagerStatsLogger`** (`L1ManagerListener`) — events from the L1 in-memory cache tier (key reads, writes, evictions)
+- **Producers** (`L1Manager`, `StorageManager`, `MPCacheEngine`) publish `Event` objects
+  to the EventBus.
+- **Metrics subscribers** (`L1MetricsSubscriber`, `SMMetricsSubscriber`) subscribe to
+  specific event types and update OTel counters.
+- **Logging subscribers** (`MPServerLoggingSubscriber`) log events at debug level.
+- **Tracing subscribers** (`MPServerTracingSubscriber`) create OTel spans from START/END pairs.
+- **Export** is via OTLP push to an OTel collector (production) or an in-process
+  Prometheus `/metrics` endpoint (dev/debug fallback).
 
-Each logger owns its own stats dataclass (`StorageManagerStats`, `L1Stats`) and independently
-implements the `PrometheusLogger` interface.
+All metrics use the `lmcache_mp.` prefix (mp = multiprocess), distinct from the main
+engine's `lmcache.` namespace. On Prometheus, `.` is converted to `_` and counters get
+a `_total` suffix (e.g., `lmcache_mp_l1_read_keys_total`).
 
-`PrometheusController` runs a background daemon thread that calls `log_prometheus()` on every
-registered logger at a configurable interval. `log_prometheus()` atomically snapshots `self.stats`,
-resets it to a fresh stats instance, and pushes all accumulated values to Prometheus.
-
-All metrics use the `lmcache_mp:` prefix (mp = multiprocess), distinct from the main engine's
-`lmcache:` namespace.
-
-For implementation guidance on adding new loggers, see [LOGGER_GUIDE.md](LOGGER_GUIDE.md).
+For implementation guidance on adding new events and subscribers, see [README.md](README.md).
 
 ---
 
 ## StorageManager Read Metrics
 
-| Python field | Prometheus name | Type | Source callback | Calculation |
+| OTel metric name | Prometheus name | Type | Source event | Calculation |
 |---|---|---|---|---|
-| `interval_sm_read_requests` | `lmcache_mp:sm_read_requests` | Counter | `on_sm_read_prefetched` | +1 per call |
-| `interval_sm_read_succeed_keys` | `lmcache_mp:sm_read_succeed_keys` | Counter | `on_sm_read_prefetched` | `+len(succeeded_keys)` per call |
-| `interval_sm_read_failed_keys` | `lmcache_mp:sm_read_failed_keys` | Counter | `on_sm_read_prefetched` | `+len(failed_keys)` per call |
+| `lmcache_mp.sm_read_requests` | `lmcache_mp_sm_read_requests_total` | Counter | `SM_READ_PREFETCHED` | +1 per event |
+| `lmcache_mp.sm_read_succeed_keys` | `lmcache_mp_sm_read_succeed_keys_total` | Counter | `SM_READ_PREFETCHED` | `+len(succeeded_keys)` |
+| `lmcache_mp.sm_read_failed_keys` | `lmcache_mp_sm_read_failed_keys_total` | Counter | `SM_READ_PREFETCHED` | `+len(failed_keys)` |
 
 **What it answers:** How often does the StorageManager receive read requests? What is the L1 hit rate?
 
-> **Note:** StorageManager-level read latency is not tracked. The `on_sm_read_prefetched` callback fires
-> during the `lookup()` RPC, while `on_sm_read_prefetched_finished` fires during the separate
-> `retrieve()` RPC. With concurrent workers these can complete out of order, making a simple
-> FIFO latency tracker unreliable.
+> **Note:** `SM_READ_PREFETCHED_FINISHED` is published but has no metrics subscriber —
+> it is available for logging subscribers only.
 
 ---
 
 ## StorageManager Write Metrics
 
-| Python field | Prometheus name | Type | Source callback | Calculation |
+| OTel metric name | Prometheus name | Type | Source event | Calculation |
 |---|---|---|---|---|
-| `interval_sm_write_requests` | `lmcache_mp:sm_write_requests` | Counter | `on_sm_reserved_write` | +1 per call |
-| `interval_sm_write_succeed_keys` | `lmcache_mp:sm_write_succeed_keys` | Counter | `on_sm_reserved_write` | `+len(succeeded_keys)` per call |
-| `interval_sm_write_failed_keys` | `lmcache_mp:sm_write_failed_keys` | Counter | `on_sm_reserved_write` | `+len(failed_keys)` per call |
+| `lmcache_mp.sm_write_requests` | `lmcache_mp_sm_write_requests_total` | Counter | `SM_WRITE_RESERVED` | +1 per event |
+| `lmcache_mp.sm_write_succeed_keys` | `lmcache_mp_sm_write_succeed_keys_total` | Counter | `SM_WRITE_RESERVED` | `+len(succeeded_keys)` |
+| `lmcache_mp.sm_write_failed_keys` | `lmcache_mp_sm_write_failed_keys_total` | Counter | `SM_WRITE_RESERVED` | `+len(failed_keys)` |
 
 **What it answers:** How often are writes attempted? What fraction fail due to OOM or write conflicts?
+
+> **Note:** `SM_WRITE_FINISHED` is published but has no metrics subscriber.
 
 ---
 
 ## L1 Read Metrics
 
-| Python field | Prometheus name | Type | Source callback | Calculation |
+| OTel metric name | Prometheus name | Type | Source event | Calculation |
 |---|---|---|---|---|
-| `interval_l1_read_keys` | `lmcache_mp:l1_read_keys` | Counter | `on_l1_keys_read_finished` | `+len(keys)` per call |
+| `lmcache_mp.l1_read_keys` | `lmcache_mp_l1_read_keys_total` | Counter | `L1_READ_FINISHED` | `+len(keys)` |
 
 **What it answers:** How many keys are being read from L1?
 
-> **Note:** `on_l1_keys_reserved_read` is a no-op — key counts are recorded only when the read
-> actually completes via `on_l1_keys_read_finished`, giving an accurate count of successfully
-> served reads.
+> **Note:** `L1_READ_RESERVED` is published but has no metrics subscriber — key counts
+> are recorded only when the read actually completes.
 
 ---
 
 ## L1 Write Metrics
 
-| Python field | Prometheus name | Type | Source callback | Calculation |
+| OTel metric name | Prometheus name | Type | Source event | Calculation |
 |---|---|---|---|---|
-| `interval_l1_write_keys` | `lmcache_mp:l1_write_keys` | Counter | `on_l1_keys_write_finished` | `+len(keys)` per call |
+| `lmcache_mp.l1_write_keys` | `lmcache_mp_l1_write_keys_total` | Counter | `L1_WRITE_FINISHED` | `+len(keys)` |
+| *(same counter)* | *(same)* | Counter | `L1_WRITE_FINISHED_AND_READ_RESERVED` | `+len(keys)` |
 
 **What it answers:** How many keys are being written to L1?
 
-> **Note:** `on_l1_keys_reserved_write` is a no-op — key counts are recorded only when the write
-> actually completes via `on_l1_keys_write_finished`.
+> **Note:** `L1_WRITE_RESERVED` is published but has no metrics subscriber.
+> `L1_WRITE_FINISHED_AND_READ_RESERVED` (atomic write-then-read used by prefetch)
+> increments the same write counter.
 
 ---
 
 ## L1 Eviction Metrics
 
-| Python field | Prometheus name | Type | Source callback | Calculation |
+| OTel metric name | Prometheus name | Type | Source event | Calculation |
 |---|---|---|---|---|
-| `interval_l1_evicted_keys` | `lmcache_mp:l1_evicted_keys` | Counter | `on_l1_keys_deleted_by_manager` | `+len(keys)` per call |
+| `lmcache_mp.l1_evicted_keys` | `lmcache_mp_l1_evicted_keys_total` | Counter | `L1_KEYS_EVICTED` | `+len(keys)` |
 
 **What it answers:** How aggressively is the eviction controller clearing L1? A high eviction rate relative to writes signals memory pressure.
 
 ---
 
-## L2 Placeholder
+## L1 Chunk Lifecycle Histograms
 
-`L2ManagerListener.on_l2_lookup_and_lock()` is currently a no-op. L2 metrics will be
-added to a new stats dataclass and logger once the L2 manager interface is finalized.
+Sampled (default 1%) chunk-level lifecycle tracking.  Only sampled chunks
+contribute to histograms; counters above always count all events.
+
+| OTel metric name | Prometheus name | Type | Source event | Calculation |
+|---|---|---|---|---|
+| `lmcache_mp.l1_chunk_lifetime_seconds` | `lmcache_mp_l1_chunk_lifetime_seconds` | Histogram | `L1_KEYS_EVICTED` | `eviction_time - alloc_time` per sampled chunk |
+| `lmcache_mp.l1_chunk_idle_before_evict_seconds` | `lmcache_mp_l1_chunk_idle_before_evict_seconds` | Histogram | `L1_KEYS_EVICTED` | `eviction_time - last_access_time` per sampled chunk |
+| `lmcache_mp.l1_chunk_reuse_gap_seconds` | `lmcache_mp_l1_chunk_reuse_gap_seconds` | Histogram | `L1_READ_FINISHED`, `L1_WRITE_FINISHED`, `L1_WRITE_FINISHED_AND_READ_RESERVED` | Time gap between consecutive touches of the same chunk |
+| `lmcache_mp.l1_chunk_evict_reuse_gap_seconds` | `lmcache_mp_l1_chunk_evict_reuse_gap_seconds` | Histogram | `L1_KEYS_EVICTED` → `L1_WRITE_FINISHED` | Time from eviction to next reuse (capped at 300 s) |
+
+**What it answers:** How long do L1 chunks live? How idle are they before eviction? How quickly are evicted chunks reused?
+
+---
+
+
+## L2 Store Metrics
+
+| OTel metric name | Prometheus name | Type | Source event | Calculation |
+|---|---|---|---|---|
+| `lmcache_mp.l2_store_tasks` | `lmcache_mp_l2_store_tasks_total` | Counter | `L2_STORE_SUBMITTED` | +1 per event |
+| `lmcache_mp.l2_store_keys` | `lmcache_mp_l2_store_keys_total` | Counter | `L2_STORE_SUBMITTED` | `+key_count` |
+| `lmcache_mp.l2_store_completed` | `lmcache_mp_l2_store_completed_total` | Counter | `L2_STORE_COMPLETED` | +1 per event |
+| `lmcache_mp.l2_store_succeeded_keys` | `lmcache_mp_l2_store_succeeded_keys_total` | Counter | `L2_STORE_COMPLETED` | `+succeeded_count` |
+| `lmcache_mp.l2_store_failed_keys` | `lmcache_mp_l2_store_failed_keys_total` | Counter | `L2_STORE_COMPLETED` | `+failed_count` |
+
+**What it answers:** How many keys are being pushed to L2? What fraction fail?
+
+---
+
+## L2 Prefetch Metrics
+
+| OTel metric name | Prometheus name | Type | Source event | Calculation |
+|---|---|---|---|---|
+| `lmcache_mp.l2_prefetch_lookups` | `lmcache_mp_l2_prefetch_lookups_total` | Counter | `L2_PREFETCH_LOOKUP_SUBMITTED` | +1 per event |
+| `lmcache_mp.l2_prefetch_lookup_keys` | `lmcache_mp_l2_prefetch_lookup_keys_total` | Counter | `L2_PREFETCH_LOOKUP_SUBMITTED` | `+key_count` |
+| `lmcache_mp.l2_prefetch_hit_keys` | `lmcache_mp_l2_prefetch_hit_keys_total` | Counter | `L2_PREFETCH_LOOKUP_COMPLETED` | `+prefix_hit_count` |
+| `lmcache_mp.l2_prefetch_load_tasks` | `lmcache_mp_l2_prefetch_load_tasks_total` | Counter | `L2_PREFETCH_LOAD_SUBMITTED` | `+adapter_count` |
+| `lmcache_mp.l2_prefetch_load_keys` | `lmcache_mp_l2_prefetch_load_keys_total` | Counter | `L2_PREFETCH_LOAD_SUBMITTED` | `+key_count` |
+| `lmcache_mp.l2_prefetch_loaded_keys` | `lmcache_mp_l2_prefetch_loaded_keys_total` | Counter | `L2_PREFETCH_LOAD_COMPLETED` | `+loaded_count` |
+| `lmcache_mp.l2_prefetch_failed_keys` | `lmcache_mp_l2_prefetch_failed_keys_total` | Counter | `L2_PREFETCH_LOAD_COMPLETED` | `+failed_count` |
+
+**What it answers:** How effective is L2 prefetching? What is the L2 hit rate? How many keys fail to load?
+
+---
+
+## L0 (GPU) Block Lifecycle Histograms
+
+Sampled (default 1%) GPU KV cache block lifecycle tracking via shadow monitoring
+of `MP_VLLM_BLOCK_ALLOCATION` and `MP_VLLM_END_SESSION` events.  Eviction is
+detected at reallocation time (when a block is assigned different tokens).
+
+| OTel metric name | Prometheus name | Type | Source event | Calculation |
+|---|---|---|---|---|
+| `lmcache_mp.l0_block_lifetime_seconds` | `lmcache_mp_l0_block_lifetime_seconds` | Histogram | `MP_VLLM_BLOCK_ALLOCATION` (eviction detected) | `eviction_time - alloc_time` per sampled block |
+| `lmcache_mp.l0_block_idle_before_evict_seconds` | `lmcache_mp_l0_block_idle_before_evict_seconds` | Histogram | `MP_VLLM_BLOCK_ALLOCATION` (eviction detected) | `eviction_time - last_access_time` per sampled block |
+| `lmcache_mp.l0_block_reuse_gap_seconds` | `lmcache_mp_l0_block_reuse_gap_seconds` | Histogram | `MP_VLLM_BLOCK_ALLOCATION` (cache hit) | Time gaps between consecutive accesses from access history |
+
+**What it answers:** How long do GPU blocks live before eviction? How idle are they? How frequently are cached blocks reused?
+
+---
+
+## MPCacheEngine Observable Gauges
+
+These metrics are registered directly via `register_gauge` (pull-based OTel
+observable gauges) rather than through the EventBus, because they represent
+point-in-time state snapshots that do not correspond to discrete events.
+
+| OTel metric name | Prometheus name | Type | Source | Calculation |
+|---|---|---|---|---|
+| `lmcache_mp.active_prefetch_jobs` | `lmcache_mp_active_prefetch_jobs` | ObservableGauge | `MPCacheEngine._prefetch_jobs` | `len(_prefetch_jobs)` at scrape time |
+
+**What it answers:** How many prefetch jobs are currently in-flight? A sustained high value may indicate slow L2 backends or client-side polling delays.
+
+---
+
+For event metadata contracts (what keys each `EventType` carries), see [EVENTS.md](EVENTS.md).

@@ -13,7 +13,11 @@ This module defines the protocol for:
 """
 
 # First Party
-from lmcache.v1.multiprocess.custom_types import IPCCacheEngineKey, KVCache
+from lmcache.v1.gpu_connector.utils import LayoutHints
+from lmcache.v1.multiprocess.custom_types import (
+    IPCCacheEngineKey,
+    KVCache,
+)
 from lmcache.v1.multiprocess.protocols.base import HandlerType, ProtocolDefinition
 
 # Define request names for this protocol group
@@ -24,6 +28,7 @@ REQUEST_NAMES = [
     "RETRIEVE",
     "LOOKUP",
     "QUERY_PREFETCH_STATUS",
+    "QUERY_PREFETCH_LOOKUP_HITS",
     "FREE_LOOKUP_LOCKS",
     "END_SESSION",
 ]
@@ -46,9 +51,10 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
         #   - kv_cache: KVCache - The KV cache configuration
         #   - model_name: str - Name of the model associated with the engine
         #   - world_size: int - World size of the engine
+        #   - layout_hints: LayoutHints - See custom_types.LayoutHints.
         # Returns: None
         "REGISTER_KV_CACHE": ProtocolDefinition(
-            payload_classes=[int, KVCache, str, int],
+            payload_classes=[int, KVCache, str, int, LayoutHints],
             response_class=None,
             handler_type=HandlerType.SYNC,
         ),
@@ -87,25 +93,34 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
             response_class=tuple[bytes, bool],
             handler_type=HandlerType.BLOCKING,
         ),
-        # Submit a prefix lookup and return a prefetch job ID
+        # Submit a prefix lookup; job is tracked server-side by request_id
         # Payload:
         #   - key: KeyType - Cache key to look up
         #   - tp_size: int - Tensor-parallel size for
         #       MLA multi-reader locking
-        # Returns: int - Prefetch job ID for polling via QUERY_PREFETCH_STATUS
+        # Returns: None
         "LOOKUP": ProtocolDefinition(
             payload_classes=[KeyType, int],
-            response_class=int,
+            response_class=None,
             handler_type=HandlerType.BLOCKING,
         ),
-        # Query the status of a prefetch job
+        # Query the status of a prefetch job by request_id
         # Payload:
-        #   - prefetch_job_id: int - Job ID returned by LOOKUP
+        #   - request_id: str - The external request ID passed in the lookup key
         # Returns: int | None - Chunk count when done, None if still in progress
         "QUERY_PREFETCH_STATUS": ProtocolDefinition(
-            payload_classes=[int],
+            payload_classes=[str],
             response_class=int | None,
-            handler_type=HandlerType.SYNC,
+            handler_type=HandlerType.BLOCKING,
+        ),
+        # Query the lookup hit chunks before the prefetch is done
+        # Payload:
+        #   - request_id: str - The external request ID passed in the lookup key
+        # Returns: int | None - Chunk count if lookup is done, None if still in progress
+        "QUERY_PREFETCH_LOOKUP_HITS": ProtocolDefinition(
+            payload_classes=[str],
+            response_class=int | None,
+            handler_type=HandlerType.BLOCKING,
         ),
         # Free locks (release read locks without a full RETRIEVE)
         # Payload:

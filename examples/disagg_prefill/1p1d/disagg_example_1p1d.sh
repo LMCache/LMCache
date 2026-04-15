@@ -100,6 +100,11 @@ wait_for_server() {
 
 
 main() {
+    # Usage: main [model] [pd_buffer_size_bytes]
+    # Defaults: meta-llama/Llama-3.1-8B-Instruct, 2147483648 (2 GB)
+    MODEL=${1:-meta-llama/Llama-3.1-8B-Instruct}
+    PD_BUFFER_SIZE=${2:-2147483648}
+
     check_hf_token
     check_num_gpus
     ensure_python_library_installed lmcache
@@ -112,6 +117,8 @@ main() {
     trap cleanup USR1
     trap cleanup TERM
 
+    echo "Model: $MODEL"
+    echo "PD buffer size: $PD_BUFFER_SIZE bytes"
     echo "Launching prefiller, decoder and proxy..."
     echo "Please check prefiller.log, decoder.log and proxy.log for logs."
 
@@ -129,20 +136,22 @@ main() {
         --proxy-host localhost \
         --proxy-port 7500 \
         --num-decoders 1 \
+        --model "$MODEL" \
+        --pd-buffer-size "$PD_BUFFER_SIZE" \
         > >(tee proxy.log)    2>&1 &
     proxy_pid=$!
     PIDS+=($proxy_pid)
 
 
     # Launch the decoder
-    bash disagg_vllm_launcher.sh decoder  \
+    bash disagg_vllm_launcher.sh decoder "$MODEL" \
         > >(tee decoder.log)  2>&1 &
     decoder_pid=$!
     PIDS+=($decoder_pid)
 
 
     # Launch the prefiller next
-    bash disagg_vllm_launcher.sh prefiller \
+    bash disagg_vllm_launcher.sh prefiller "$MODEL" \
         > >(tee prefiller.log) 2>&1 &
     prefiller_pid=$!
     PIDS+=($prefiller_pid)
@@ -164,4 +173,4 @@ main() {
     done
 }
 
-main
+main "$@"

@@ -36,10 +36,30 @@ If you require a different version of torch for the LMCache instance that you bu
 
    You're all set! You can now start using LMCache. For hands-on guides and more usage examples, see the :ref:`quickstart_examples` section.
 
+Install LMCache CLI Only (no GPU required)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+If you only need the ``lmcache`` CLI tool (e.g., to query, ping, or benchmark a
+remote LMCache server) and do not need to run the server itself, install the
+lightweight ``lmcache-cli`` package instead.  It has no CUDA dependency and
+works on any OS.
+
+.. code-block:: bash
+
+    pip install lmcache-cli
+
+
+.. note::
+
+   ``lmcache-cli`` and ``lmcache`` ship the same ``lmcache`` CLI command.
+   Do not install both in the same environment.
+
 Install Latest LMCache from TestPyPI
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-TestPyPI wheels are continually built from the latest LMCache source code (not officially stable release). 
+TestPyPI wheels are continually built from the latest LMCache source code (not officially stable release).
+
+Full package:
 
 .. code-block:: bash
 
@@ -49,6 +69,12 @@ TestPyPI wheels are continually built from the latest LMCache source code (not o
     # If you require a different version of torch for the LMCache instance that you built with (symbol undefined error), please
     # follow the install from source instructions below. 
     uv pip install --index-url https://pypi.org/simple --extra-index-url https://test.pypi.org/simple lmcache==0.3.4.dev61
+
+CLI-only package:
+
+.. code-block:: bash
+
+    pip install --index-url https://pypi.org/simple --extra-index-url https://test.pypi.org/simple lmcache-cli==0.3.4.dev61
 
 See the latest pre-release of LMCache: `latest LMCache pre-releases <https://test.pypi.org/project/lmcache/#history>`__ and replace `0.3.4.dev61` with the latest pre-release version.
 
@@ -138,19 +164,13 @@ This compatibility matrix accounts for dependencies as well as connector API cha
 - ❌: API incompatibility
 
 - ✅: compatible out of the box (wheels only)
+ 
 
-.. csv-table::
-   :header: "", "LMCache 0.3.9 (Oct 22)", "LMCache 0.3.8 (Oct 16)", "LMCache 0.3.7 (Sep 22)", "LMCache 0.3.6 (Sep 15)", "LMCache 0.3.5 (Aug 28)", "LMCache 0.3.4 (Aug 24)", "LMCache 0.3.3 (Aug 1)", "LMCache 0.3.2 (Jul 14)"
-   :widths: 20, 15, 15, 15, 15, 15, 15, 15, 15
+.. container:: compat-table-scroll
 
-    "vLLM 0.11.x (Oct 2)", "✅", "❌", "❌", "❌", "❌", "❌", "❌", "❌"
-   "vLLM 0.10.2.x (Sep 13)", "✅", "❌", "✅", "✅", "🕯️", "✅", "🕯️", "🕯️"
-   "vLLM 0.10.1.x (Aug 19)", "🕯️", "❌", "🕯️", "❌", "✅", "🕯️", "✅", "✅"
-   "vLLM 0.10.0.x (Jul 24)", "🕯️", "❌", "🕯️", "❌", "✅", "🕯️", "✅", "✅"
-   "vLLM 0.9.2.x (Jul 3)", "🕯️", "❌", "🕯️", "❌", "✅", "🕯️", "✅", "✅"
-   "vLLM 0.9.1.x (June 10)", "🕯️", "❌", "🕯️", "❌", "✅", "🕯️", "✅", "✅"
-   "vLLM 0.9.0.x (May 14)", "🕯️", "❌", "🕯️", "❌", "✅", "🕯️", "✅", "✅"
-   "vLLM 0.8.5.x (Apr 28)", "🕯️", "❌", "🕯️", "❌", "✅", "🕯️", "✅", "✅"
+   .. csv-table::
+      :file: Installation_compatibility_matrix.csv
+      :header-rows: 1
 
 Notable Change List: 
 

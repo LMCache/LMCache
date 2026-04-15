@@ -27,73 +27,6 @@ class EventListener(ABC):  # noqa: B024
     pass
 
 
-class StorageManagerListener(EventListener):
-    @abstractmethod
-    def on_sm_read_prefetched(
-        self,
-        succeeded_keys: list[ObjectKey],
-        failed_keys: list[ObjectKey],
-    ):
-        """
-        Notify the listener that keys have been reserved for read.
-
-        Args:
-            succeeded_keys (list[ObjectKey]): The keys that have been successfully
-                reserved
-            failed_keys (list[ObjectKey]): The keys that failed to be reserved
-        """
-        pass
-
-    @abstractmethod
-    def on_sm_read_prefetched_finished(
-        self,
-        succeeded_keys: list[ObjectKey],
-        failed_keys: list[ObjectKey],
-    ):
-        """
-        Notify the listener that read locks have been released.
-
-        Args:
-            succeeded_keys (list[ObjectKey]): The keys whose read locks were
-                successfully released
-            failed_keys (list[ObjectKey]): The keys that failed to release their read
-                locks
-        """
-        pass
-
-    @abstractmethod
-    def on_sm_reserved_write(
-        self,
-        succeeded_keys: list[ObjectKey],
-        failed_keys: list[ObjectKey],
-    ):
-        """
-        Notify the listener that keys have been reserved for write.
-
-        Args:
-            succeeded_keys (list[ObjectKey]): The keys that have been successfully
-                reserved
-            failed_keys (list[ObjectKey]): The keys that failed to be reserved
-        """
-        pass
-
-    @abstractmethod
-    def on_sm_write_finished(
-        self,
-        succeeded_keys: list[ObjectKey],
-        failed_keys: list[ObjectKey],
-    ):
-        """
-        Notify the listener that keys have been finished for writing.
-
-        Args:
-            succeeded_keys (list[ObjectKey]): The keys that have been successfully
-                written
-            failed_keys (list[ObjectKey]): The keys that failed to finish writing
-        """
-        pass
-
-
 # For L1 manager event notifications
 class L1ManagerListener(EventListener):
     """
@@ -167,10 +100,37 @@ class L1ManagerListener(EventListener):
         pass
 
 
-class L2ManagerListener(EventListener):
-    # Just a placeholder here. Waiting for L2 manager to be finalized.
+class L2AdapterListener(EventListener):
+    """Listener for L2 adapter events, analogous to L1ManagerListener."""
+
     @abstractmethod
-    def on_l2_lookup_and_lock(self):
+    def on_l2_keys_stored(self, keys: list[ObjectKey]):
+        """
+        Notify the listener that keys have been successfully stored in L2.
+
+        Args:
+            keys (list[ObjectKey]): The keys that have been stored.
+        """
+        pass
+
+    @abstractmethod
+    def on_l2_keys_accessed(self, keys: list[ObjectKey]):
+        """
+        Notify the listener that keys have been accessed (lookup hit) in L2.
+
+        Args:
+            keys (list[ObjectKey]): The keys that have been accessed.
+        """
+        pass
+
+    @abstractmethod
+    def on_l2_keys_deleted(self, keys: list[ObjectKey]):
+        """
+        Notify the listener that keys have been deleted from L2.
+
+        Args:
+            keys (list[ObjectKey]): The keys that have been deleted.
+        """
         pass
 
 

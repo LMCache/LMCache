@@ -62,21 +62,9 @@ from lmcache.v1.gpu_connector.gpu_ops import (
     lmcache_memcpy_async_h2d,
 )
 from lmcache.v1.mp_observability.config import (
-    PrometheusConfig,
-    parse_args_to_prometheus_config,
-)
-from lmcache.v1.mp_observability.prometheus_controller import (
-    get_prometheus_controller,
-    init_prometheus_controller,
-)
-from lmcache.v1.mp_observability.telemetry import (
-    TelemetryConfig,
-    get_telemetry_controller,
-    init_telemetry_controller,
-    parse_args_to_telemetry_config,
-)
-from lmcache.v1.mp_observability.telemetry.config import (
-    DEFAULT_TELEMETRY_CONFIG,
+    ObservabilityConfig,
+    init_observability,
+    parse_args_to_observability_config,
 )
 from lmcache.v1.multiprocess.config import (
     MPServerConfig,
@@ -109,8 +97,6 @@ logger = init_logger(__name__)
 
 class BlendTokenRangeMatcher:
     # TODO(Jiayi): Needs thread-safety for this class.
-    # TODO(Jiayi): Currently, the table size is fixed. We need to support
-    # dynamic expanding or eviction.
     """Fast token-range matcher using polynomial rolling/chunk hashes and a
     direct-address lookup table.
 
@@ -121,13 +107,18 @@ class BlendTokenRangeMatcher:
     sized by an arbitrary max hash — no memory explosion.
 
     Auxiliary storage:
-      _chunk_token_hash[i] : caller-supplied token_hash for chunk i
-      _token_hash_to_start : token_hash → start position in the registered seq
+      _chunk_token_hash[i]      : token_hash for chunk i (None if evicted)
+      _token_hash_to_start      : token_hash → start position in seq
+      _compact_id_to_slot[i]    : table slot for compact_id i
+      _token_hash_to_compact_id : token_hash → compact_chunk_id
 
-    on_new_token_hashes  – register a sequence; chunk_hash_windows_numba(token_hashes)
-                        builds fingerprints, update_table_id_numba writes compact IDs.
-    match_sub_sequence – rolling_hash_windows_numba + unique_hits_direct_id_numba
-                         (num_ids=_TABLE_SIZE) → compact IDs → token_hash → start.
+    Methods:
+      on_new_token_hashes  – register a sequence; builds fingerprints
+                             and writes compact IDs.
+      match_sub_sequence   – sliding-window probe → compact IDs →
+                             token_hash → start. Skips evicted entries.
+      remove_chunks        – lazily evict stale entries. Clears the
+                             table slot and auxiliary maps.
     """
 
     _TABLE_BITS: int = 20  # 2^20 ≈ 1 M entries
@@ -140,9 +131,13 @@ class BlendTokenRangeMatcher:
         self._table_id = np.full(self._TABLE_SIZE, -1, dtype=np.int64)
         self._mask = np.uint64(self._TABLE_SIZE - 1)
         # compact_chunk_id → caller-supplied token_hash (full bytes)
-        self._chunk_token_hash: list[bytes] = []
+        self._chunk_token_hash: list[bytes | None] = []
         # token_hash → start position in its registered sequence
         self._token_hash_to_start: dict[bytes, int] = {}
+        # compact_chunk_id → table slot index (for reverse lookup during eviction)
+        self._compact_id_to_slot = np.full(self._TABLE_SIZE, -1, dtype=np.int64)
+        # token_hash → compact_chunk_id (for eviction lookup)
+        self._token_hash_to_compact_id: dict[bytes, int] = {}
 
     def on_new_token_hashes(
         self,
@@ -174,11 +169,15 @@ class BlendTokenRangeMatcher:
         # Write table: poly_chunk_hash → compact_chunk_id
         update_table_id_numba(chunk_hashes, self._table_id, compact_ids)
 
-        # Persist compact_id → token_hash and token_hash → start
+        # Persist compact_id → token_hash, token_hash → start, and reverse maps
         for i in range(n):
             th = token_hashes[i]
+            cid = int(compact_ids[i])
+            slot = int(chunk_hashes[i]) & int(self._mask)
             self._chunk_token_hash.append(th)
             self._token_hash_to_start[th] = i * self.chunk_size
+            self._compact_id_to_slot[cid] = slot
+            self._token_hash_to_compact_id[th] = cid
 
     def match_sub_sequence(
         self,
@@ -187,7 +186,8 @@ class BlendTokenRangeMatcher:
         """Find stored chunks whose fingerprints appear anywhere in token_ids.
 
         Uses a sliding-window rolling hash so matches need not be aligned to
-        chunk_size boundaries in the query.
+        chunk_size boundaries in the query.  Entries previously evicted via
+        remove_chunks (token_hash set to None) are silently skipped.
 
         Args:
             token_ids: Query token sequence to probe (raw token IDs as uint64).
@@ -230,6 +230,8 @@ class BlendTokenRangeMatcher:
         for cid in hit_ids:
             cid_int = int(cid)
             th = self._chunk_token_hash[cid_int]
+            if th is None:
+                continue
             old_st = self._token_hash_to_start.get(th)
             cur_st = cid_to_query_pos.get(cid_int)
             if old_st is None or cur_st is None:
@@ -244,6 +246,32 @@ class BlendTokenRangeMatcher:
                 )
             )
         return results
+
+    def remove_chunks(self, token_hashes: list[bytes]) -> None:
+        """Evict stale entries whose backing data is no longer in storage.
+
+        Args:
+            token_hashes: Token hashes of chunks to remove from the table.
+        """
+        for th in token_hashes:
+            cid = self._token_hash_to_compact_id.get(th)
+            if cid is None:
+                continue
+            # Clear the table slot
+            slot = int(self._compact_id_to_slot[cid])
+            if slot < 0:
+                logger.warning(
+                    "compact_id %d has no valid table slot; "
+                    "entry may have been evicted twice",
+                    cid,
+                )
+                continue
+            self._table_id[slot] = -1
+            self._compact_id_to_slot[cid] = -1
+            # Clean up auxiliary maps
+            self._chunk_token_hash[cid] = None
+            self._token_hash_to_start.pop(th, None)
+            del self._token_hash_to_compact_id[th]
 
 
 # Main class and main functions
@@ -315,6 +343,8 @@ class BlendEngineV2(MPCacheEngine):
 
         Uses BlendTokenRangeMatcher for a fast local pre-filter, then submits
         prefetch tasks for matched chunks using their stored hashes directly.
+        Chunks that the fingerprint table matched but are no longer present in
+        storage are lazily evicted from the matcher via remove_chunks.
 
         Args:
             key: IPCCacheEngineKey containing the token ids to lookup
@@ -367,7 +397,11 @@ class BlendEngineV2(MPCacheEngine):
         for group in groups:
             chunk_hashes = [r.hash for r in group]
             obj_keys = ipc_key_to_object_keys(key, chunk_hashes)
-            handle = self.storage_manager.submit_prefetch_task(obj_keys, layout_desc)
+            handle = self.storage_manager.submit_prefetch_task(
+                obj_keys,
+                layout_desc,
+                external_request_id=key.request_id,
+            )
             prefetch_handles.append(handle)
 
             logger.debug(
@@ -379,6 +413,7 @@ class BlendEngineV2(MPCacheEngine):
         # TODO(Jiayi): We need to follow how lookup is handled in server.py
         # to optimize performance.
         # Collect only the CBMatchResults for chunks actually found in storage
+        stale_hashes: list[bytes] = []
         for handle, group in zip(prefetch_handles, groups, strict=False):
             found_count = None
             while True:
@@ -398,6 +433,8 @@ class BlendEngineV2(MPCacheEngine):
             end = group[-1].cur_ed
             if found_count > 0:
                 found_cb_match_result.extend(group[:found_count])
+                # Chunks after found_count in the group are stale
+                stale_hashes.extend(r.hash for r in group[found_count:])
                 logger.debug(
                     "Found %d pre-computed chunks for range (%d, %d)",
                     found_count,
@@ -405,11 +442,20 @@ class BlendEngineV2(MPCacheEngine):
                     end,
                 )
             else:
+                stale_hashes.extend(r.hash for r in group)
                 logger.debug(
                     "No pre-computed chunks found for range (%d, %d)",
                     start,
                     end,
                 )
+
+        # Evict stale entries from the fingerprint table
+        if stale_hashes:
+            self._token_range_matcher.remove_chunks(stale_hashes)
+            logger.debug(
+                "Evicted %d stale chunks from fingerprint table",
+                len(stale_hashes),
+            )
 
         return found_cb_match_result
 
@@ -619,8 +665,8 @@ class BlendEngineV2(MPCacheEngine):
                             lmcache_memcpy_async_h2d(memory_obj, tmp_buffer)
                             target_buffer.copy_(tmp_buffer, non_blocking=True)
 
-            except Exception as e:
-                logger.error("Error during retrieving prefetched results: %s", e)
+            except Exception:
+                logger.exception("Error during retrieving prefetched results")
                 return event.ipc_handle(), False
 
             finally:
@@ -705,8 +751,7 @@ def add_handler_helper(
 def run_cache_server(
     mp_config: MPServerConfig,
     storage_manager_config: StorageManagerConfig,
-    prometheus_config: PrometheusConfig,
-    telemetry_config: TelemetryConfig = DEFAULT_TELEMETRY_CONFIG,
+    obs_config: ObservabilityConfig,
     return_engine: bool = False,
 ):
     """
@@ -715,8 +760,7 @@ def run_cache_server(
     Args:
         mp_config: Configuration for the ZMQ multiprocess server
         storage_manager_config: Configuration for the storage manager
-        prometheus_config: Configuration for the Prometheus observability stack
-        telemetry_config: Configuration for the telemetry event system
+        obs_config: Configuration for the observability stack
         return_engine: If True, return (server, engine) after starting;
                        if False, run blocking loop to keep server alive
 
@@ -724,11 +768,7 @@ def run_cache_server(
         If return_engine is True: tuple of (MessageQueueServer, BlendEngineV2)
         If return_engine is False: None (blocks until interrupted)
     """
-    # Initialize global prometheus controller
-    init_prometheus_controller(prometheus_config)
-
-    # Initialize global telemetry controller
-    init_telemetry_controller(telemetry_config)
+    event_bus = init_observability(obs_config)
 
     # Initialize the engine (loggers self-register with the global controller)
     engine = BlendEngineV2(
@@ -742,7 +782,6 @@ def run_cache_server(
     server = MessageQueueServer(
         bind_url=f"tcp://{mp_config.host}:{mp_config.port}",
         context=context,
-        max_workers=mp_config.max_workers,
     )
 
     # Add handlers for original server
@@ -779,6 +818,31 @@ def run_cache_server(
         server, RequestType.CB_RETRIEVE_PRE_COMPUTED_V2, engine.cb_retrieve_pre_computed
     )
     add_handler_helper(server, RequestType.CB_STORE_FINAL, engine.cb_store_final)
+    add_handler_helper(server, RequestType.PING, engine.ping)
+
+    # Assign thread pools
+    server.add_affinity_thread_pool(
+        [
+            RequestType.STORE,
+            RequestType.RETRIEVE,
+            RequestType.CB_STORE_PRE_COMPUTED,
+            RequestType.CB_RETRIEVE_PRE_COMPUTED_V2,
+            RequestType.CB_STORE_FINAL,
+        ],
+        max_workers=mp_config.max_gpu_workers,
+    )
+    server.add_normal_thread_pool(
+        [
+            RequestType.LOOKUP,
+            RequestType.QUERY_PREFETCH_STATUS,
+            RequestType.FREE_LOOKUP_LOCKS,
+            RequestType.END_SESSION,
+            RequestType.CLEAR,
+            RequestType.CB_LOOKUP_PRE_COMPUTED_V2,
+            RequestType.PING,
+        ],
+        max_workers=mp_config.max_cpu_workers,
+    )
 
     logger.info(
         "LMCache ZMQ cache server is running on tcp://%s:%d",
@@ -789,11 +853,6 @@ def run_cache_server(
     torch.cuda.init()
     server.start()
 
-    # Start prometheus controller after engine creation (loggers are registered)
-    get_prometheus_controller().start()
-
-    # Start telemetry controller
-    get_telemetry_controller().start()
     logger.info("LMCache cache blend v2 server is running...")
 
     # Return server and engine if requested (for HTTP server integration)
@@ -806,8 +865,7 @@ def run_cache_server(
             time.sleep(1)
     except KeyboardInterrupt:
         logger.info("Shutting down server...")
-        get_telemetry_controller().stop()
-        get_prometheus_controller().stop()
+        event_bus.stop()
         server.close()
         engine.close()
 
@@ -816,11 +874,9 @@ if __name__ == "__main__":
     args = parse_args()
     mp_config = parse_args_to_mp_server_config(args)
     storage_manager_config = parse_args_to_config(args)
-    prometheus_config = parse_args_to_prometheus_config(args)
-    telemetry_config = parse_args_to_telemetry_config(args)
+    obs_config = parse_args_to_observability_config(args)
     run_cache_server(
         mp_config=mp_config,
         storage_manager_config=storage_manager_config,
-        prometheus_config=prometheus_config,
-        telemetry_config=telemetry_config,
+        obs_config=obs_config,
     )

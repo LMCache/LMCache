@@ -79,7 +79,10 @@ class LMCacheWorker:
         # Please consider removing it.
         self.config = config
         self.lmcache_instance_id = config.lmcache_instance_id
-        assert self.lmcache_instance_id is not None
+        if self.lmcache_instance_id is None:
+            raise ValueError(
+                "lmcache_instance_id is required when enable_controller=True"
+            )
         self.lmcache_engine = lmcache_engine
         self.worker_id = metadata.worker_id
 
@@ -93,7 +96,10 @@ class LMCacheWorker:
             "worker_socket_send_timeout_ms", DEFAULT_SOCKET_SEND_TIMEOUT_MS
         )
 
-        assert config.controller_pull_url is not None
+        if config.controller_pull_url is None:
+            raise ValueError(
+                "controller_pull_url is required when enable_controller=True"
+            )
 
         controller_pull_url = config.controller_pull_url
         self.push_socket = get_zmq_socket(
@@ -113,16 +119,40 @@ class LMCacheWorker:
         self.heartbeat_socket: Optional[zmq.asyncio.Socket] = None
         self.controller_heartbeat_url: Optional[str] = None
 
+        # metadata.world_size comes from vLLM's parallel_config.world_size.
+        # For MLA models, vLLM divides this by tp_size (e.g. TP=8 PP=1 on
+        # 8 GPUs → world_size=1), so it may be much smaller than the total
+        # GPU count.  For non-MLA models it equals TP × PP.
+        #
+        # get_lmcache_worker_ids() decides which workers run an LMCache
+        # instance: [0] for MLA (only one worker needed since KV caches
+        # are not TP-sharded), or range(world_size) for non-MLA.
+        #
+        # We use >= because extra ports are harmless — port selection
+        # indexes by worker_id or lmcache_worker_ids position, so
+        # trailing entries are never bound to sockets.
         lmcache_worker_ids = config.get_lmcache_worker_ids(
             metadata.use_mla, metadata.world_size
         )
         if not lmcache_worker_ids:
-            # start lmcache worker on all ranks
-            assert len(config.lmcache_worker_ports) == metadata.world_size
+            # start lmcache worker on all ranks;
+            # need at least one port per rank (world_size)
+            if len(config.lmcache_worker_ports) < metadata.world_size:
+                raise ValueError(
+                    f"lmcache_worker_ports must have at least {metadata.world_size} "
+                    f"port(s) (world_size), got {len(config.lmcache_worker_ports)}"
+                )
             lmcache_worker_port = config.lmcache_worker_ports[self.worker_id]
         else:
-            # start lmcache worker on given worker ids
-            assert len(lmcache_worker_ids) == len(config.lmcache_worker_ports)
+            # start lmcache worker on given worker ids;
+            # need at least one port per explicitly listed worker
+            if len(config.lmcache_worker_ports) < len(lmcache_worker_ids):
+                raise ValueError(
+                    f"lmcache_worker_ports must have at least "
+                    f"{len(lmcache_worker_ids)} "
+                    f"port(s) (one per lmcache worker), "
+                    f"got {len(config.lmcache_worker_ports)}"
+                )
             index = lmcache_worker_ids.index(self.worker_id)
             lmcache_worker_port = config.lmcache_worker_ports[index]
 
@@ -626,5 +656,10 @@ class LMCacheWorker:
             self.loop.call_soon_threadsafe(self.loop.stop)
         if self.thread.is_alive():
             self.thread.join()
+        self.loop.close()
         close_zmq_socket(self.push_socket)
         close_zmq_socket(self.reply_socket)
+        if self.heartbeat_socket is not None:
+            close_zmq_socket(self.heartbeat_socket)
+        if hasattr(self, "req_socket"):
+            close_zmq_socket(self.req_socket)
