@@ -38,10 +38,10 @@ LMCACHE_HTTP_PORT="${LMCACHE_HTTP_PORT:-8080}"  # HTTP port (clear-cache, status
 VLLM_PORT="${VLLM_PORT:-8000}"
 
 L1_SIZE_GB="${L1_SIZE_GB:-20}"              # CPU cache size
-L2_DISK_PATH="${L2_DISK_PATH:-/tmp/lmcache_serde_disk}"
 
-LOG_DIR="${LOG_DIR:-/tmp/lmcache_serde_example}"
-mkdir -p "$LOG_DIR"
+TMP_DIR="${TMP_DIR:-/tmp/lmcache_serde_example}"
+L2_DISK_PATH="${L2_DISK_PATH:-${TMP_DIR}/disk}"
+mkdir -p "$TMP_DIR"
 mkdir -p "$L2_DISK_PATH"
 
 # L2 adapter JSON: disk (fs) backend with fp8 serde enabled
@@ -99,14 +99,14 @@ lmcache server \
     --l2-adapter "$L2_ADAPTER_JSON" \
     --port "$LMCACHE_PORT" \
     --http-port "$LMCACHE_HTTP_PORT" \
-    > "$LOG_DIR/lmcache.log" 2>&1 &
+    2>&1 | tee "$TMP_DIR/lmcache.log" &
 LMCACHE_PID=$!
 echo "lmcache server PID=$LMCACHE_PID"
 
 echo "Waiting for lmcache HTTP health..."
 wait_for_url "http://localhost:${LMCACHE_HTTP_PORT}/api/healthcheck" 60 || {
     echo "lmcache failed to start. Last 50 lines of log:"
-    tail -50 "$LOG_DIR/lmcache.log" || true
+    tail -50 "$TMP_DIR/lmcache.log" || true
     exit 1
 }
 echo "lmcache server ready."
@@ -143,14 +143,14 @@ vllm serve "$MODEL" \
     --enforce-eager \
     --gpu-memory-utilization "${GPU_MEM_UTIL:-0.6}" \
     --kv-transfer-config "$KV_TRANSFER_CONFIG" \
-    > "$LOG_DIR/vllm.log" 2>&1 &
+    2>&1 | tee "$TMP_DIR/vllm.log" &
 VLLM_PID=$!
 echo "vLLM PID=$VLLM_PID"
 
 echo "Waiting for vLLM /v1/models (this can take a few minutes)..."
 wait_for_url "http://localhost:${VLLM_PORT}/v1/models" 600 || {
     echo "vLLM failed to start. Last 50 lines:"
-    tail -50 "$LOG_DIR/vllm.log" || true
+    tail -50 "$TMP_DIR/vllm.log" || true
     exit 1
 }
 echo "vLLM ready."
@@ -234,5 +234,5 @@ curl -s "http://localhost:${LMCACHE_HTTP_PORT}/api/status" \
 
 echo ""
 echo "============================================"
-echo "Done. Logs are under: $LOG_DIR"
+echo "Done. Logs are under: $TMP_DIR"
 echo "============================================"

@@ -59,13 +59,13 @@ You can override defaults via environment variables:
 MODEL="meta-llama/Llama-3.1-8B-Instruct" \
 GPU_DEVICE=0 \
 L1_SIZE_GB=20 \
-L2_DISK_PATH=/tmp/lmcache_serde_disk \
 LMCACHE_PORT=6555 \
 VLLM_PORT=8000 \
 ./run_serde_fp8_example.sh
 ```
 
-Logs are written to `/tmp/lmcache_serde_example/{lmcache,vllm}.log`.
+Server output is streamed to stdout. Logs are also saved under
+`/tmp/lmcache_serde_example/{lmcache,vllm}.log` (override with `TMP_DIR`).
 
 ## L2 adapter config syntax
 
