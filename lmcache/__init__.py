@@ -9,9 +9,11 @@ import sys
 import torch
 
 # First Party
+from lmcache._version import __version__
 from lmcache.logging import init_logger
 
 logger = init_logger(__name__)
+__all__ = ["__version__"]
 
 
 # --------------------------
