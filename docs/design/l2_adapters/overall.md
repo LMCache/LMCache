@@ -480,8 +480,20 @@ class PrefetchHandle:
 ### Pure-Python Adapters
 
 Implement `L2AdapterInterface` directly. See `mock_l2_adapter.py` for a
-reference implementation. Register a config class in `config.py` and add a
-factory branch in `__init__.py`.
+reference implementation. **No existing files need to be modified.** Create a
+new module (e.g., `my_l2_adapter.py`) in the `l2_adapters/` package and
+self-register at module level:
+
+```python
+# At the bottom of your module:
+register_l2_adapter_type("my_type", MyL2AdapterConfig)
+register_l2_adapter_factory("my_type", _create_my_l2_adapter)
+```
+
+The `__init__.py` uses `pkgutil.iter_modules()` to discover all
+`*_l2_adapter.py` modules automatically, but imports them **lazily** — a
+module (and its third-party dependencies) is only loaded when the
+corresponding adapter type is actually requested at runtime.
 
 ### Native (C++/Rust) Storage Backends
 

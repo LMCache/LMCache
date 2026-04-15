@@ -62,5 +62,48 @@ func (e *LMCacheEngine) ValidateSpec() field.ErrorList {
 		}
 	}
 
+	// L2 backend validation
+	if spec.L2Backend != nil {
+		l2Path := field.NewPath("spec", "l2Backend")
+		b := spec.L2Backend
+
+		setCount := 0
+		if b.RESP != nil {
+			setCount++
+		}
+		if b.Raw != nil {
+			setCount++
+		}
+		// For now we only support one kind at each LMCache server. LMCache
+		// MP mode is designed to support multiple ones at the same time
+		// but tests and performance validation is needed before we ship
+		// it into operator.
+		if setCount == 0 {
+			errs = append(errs, field.Required(l2Path, "exactly one of resp or raw must be set"))
+		} else if setCount > 1 {
+			errs = append(errs, field.Invalid(l2Path, "", "exactly one of resp or raw must be set, got multiple"))
+		}
+
+		if b.RESP != nil {
+			respPath := l2Path.Child("resp")
+			if b.RESP.Host == "" {
+				errs = append(errs, field.Required(respPath.Child("host"), "must be a non-empty string"))
+			}
+			if b.RESP.Port < 1 || b.RESP.Port > 65535 {
+				errs = append(errs, field.Invalid(respPath.Child("port"), b.RESP.Port, "must be in [1, 65535]"))
+			}
+			if b.RESP.AuthSecretRef != nil && b.RESP.AuthSecretRef.Name == "" {
+				errs = append(errs, field.Required(respPath.Child("authSecretRef", "name"), "must be non-empty"))
+			}
+		}
+
+		if b.Raw != nil {
+			rawPath := l2Path.Child("raw")
+			if b.Raw.Type == "" {
+				errs = append(errs, field.Required(rawPath.Child("type"), "must be a non-empty string"))
+			}
+		}
+	}
+
 	return errs
 }

@@ -65,6 +65,10 @@ Configuration
    * - ``--prometheus-port``
      - ``9090``
      - Port for the Prometheus ``/metrics`` HTTP endpoint.
+   * - ``--metrics-sample-rate``
+     - ``0.01``
+     - Fraction of chunks/blocks to track for lifecycle histograms
+       (0, 1.0]. Counters always count all events. Default is 1%.
 
 **Environment variables:**
 
@@ -140,6 +144,125 @@ L1 Metrics
    * - ``lmcache_mp.l1_evicted_keys``
      - Counter
      - Number of keys evicted by the EvictionController.
+
+L1 Chunk Lifecycle Histograms
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Sampled (default 1%) chunk-level lifecycle tracking via
+``L1LifecycleSubscriber``. Only sampled chunks contribute to histograms;
+counters above always count all events. Sampling is deterministic
+(hash-based), so the same key always gets the same decision with zero
+memory overhead.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 40 15 45
+
+   * - Metric
+     - Type
+     - Description
+   * - ``lmcache_mp.l1_chunk_lifetime_seconds``
+     - Histogram
+     - Time from allocation to eviction per sampled chunk.
+   * - ``lmcache_mp.l1_chunk_idle_before_evict_seconds``
+     - Histogram
+     - Time from last access to eviction per sampled chunk.
+   * - ``lmcache_mp.l1_chunk_reuse_gap_seconds``
+     - Histogram
+     - Time gap between consecutive touches (read or write) of the same chunk.
+   * - ``lmcache_mp.l1_chunk_evict_reuse_gap_seconds``
+     - Histogram
+     - Time from eviction to next reuse (capped at 300 s).
+
+L2 Metrics
+~~~~~~~~~~
+
+.. list-table::
+   :header-rows: 1
+   :widths: 40 15 45
+
+   * - Metric
+     - Type
+     - Description
+   * - ``lmcache_mp.l2_store_tasks``
+     - Counter
+     - Number of L2 store tasks submitted.
+   * - ``lmcache_mp.l2_store_keys``
+     - Counter
+     - Number of keys submitted for L2 store.
+   * - ``lmcache_mp.l2_store_completed``
+     - Counter
+     - Number of L2 store tasks completed.
+   * - ``lmcache_mp.l2_store_succeeded_keys``
+     - Counter
+     - Number of keys successfully stored to L2.
+   * - ``lmcache_mp.l2_store_failed_keys``
+     - Counter
+     - Number of keys that failed to store to L2.
+   * - ``lmcache_mp.l2_prefetch_lookups``
+     - Counter
+     - Number of L2 prefetch lookup requests.
+   * - ``lmcache_mp.l2_prefetch_lookup_keys``
+     - Counter
+     - Number of keys submitted for L2 prefetch lookup.
+   * - ``lmcache_mp.l2_prefetch_hit_keys``
+     - Counter
+     - Number of prefix keys found in L2 lookup.
+   * - ``lmcache_mp.l2_prefetch_load_tasks``
+     - Counter
+     - Number of L2 prefetch load tasks submitted.
+   * - ``lmcache_mp.l2_prefetch_load_keys``
+     - Counter
+     - Number of keys submitted for L2 load.
+   * - ``lmcache_mp.l2_prefetch_loaded_keys``
+     - Counter
+     - Number of keys successfully loaded from L2.
+   * - ``lmcache_mp.l2_prefetch_failed_keys``
+     - Counter
+     - Number of keys that failed to load from L2.
+
+L0 (GPU) Block Lifecycle Histograms
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Sampled (default 1%) GPU KV cache block lifecycle tracking via
+``L0LifecycleSubscriber``. Eviction is detected at reallocation time
+(when a block is assigned different tokens). Sampling is deterministic
+(hash-based).
+
+.. list-table::
+   :header-rows: 1
+   :widths: 40 15 45
+
+   * - Metric
+     - Type
+     - Description
+   * - ``lmcache_mp.l0_block_lifetime_seconds``
+     - Histogram
+     - Time from allocation to eviction per sampled GPU block.
+   * - ``lmcache_mp.l0_block_idle_before_evict_seconds``
+     - Histogram
+     - Time from last access to eviction per sampled GPU block.
+   * - ``lmcache_mp.l0_block_reuse_gap_seconds``
+     - Histogram
+     - Time gaps between consecutive accesses of the same GPU block.
+
+Observable Gauges
+~~~~~~~~~~~~~~~~~
+
+Point-in-time state snapshots registered via ``register_gauge``
+(pull-based OTel observable gauges).
+
+.. list-table::
+   :header-rows: 1
+   :widths: 40 15 45
+
+   * - Metric
+     - Type
+     - Description
+   * - ``lmcache_mp.active_prefetch_jobs``
+     - ObservableGauge
+     - Number of prefetch jobs currently in-flight. A sustained high
+       value may indicate slow L2 backends or polling delays.
 
 Prometheus Scrape Configuration
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

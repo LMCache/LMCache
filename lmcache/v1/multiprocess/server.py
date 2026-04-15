@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from dataclasses import dataclass
+from functools import partial
 from itertools import islice
 from typing import Generator
 import argparse
@@ -39,6 +40,7 @@ from lmcache.v1.mp_observability.config import (
 )
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import get_event_bus
+from lmcache.v1.mp_observability.otel_init import register_gauge
 from lmcache.v1.multiprocess.config import (
     MPServerConfig,
     add_mp_server_args,
@@ -60,10 +62,7 @@ from lmcache.v1.multiprocess.protocol import (
 )
 from lmcache.v1.multiprocess.session import SessionManager
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
-
-if torch.cuda.is_available():
-    # First Party
-    import lmcache.c_ops as lmc_ops
+import lmcache.c_ops as lmc_ops
 
 logger = init_logger(__name__)
 
@@ -192,12 +191,13 @@ class MPCacheEngine:
         # EventBus for observability
         self._event_bus = get_event_bus()
 
-        # Prefetch job tracking for two-phase lookup
+        # Prefetch job tracking for two-phase lookup, keyed by request_id.
         # TODO: implement periodic cleanup of stale _prefetch_jobs entries
         # for crash resilience (e.g., client calls lookup but never queries)
-        self._prefetch_jobs: dict[int, _PrefetchJob] = {}
-        self._next_prefetch_job_id: int = 0
+        self._prefetch_jobs: dict[str, _PrefetchJob] = {}
         self._prefetch_job_lock = threading.Lock()
+
+        self._setup_metrics()
 
     def register_kv_cache(
         self,
@@ -576,17 +576,16 @@ class MPCacheEngine:
         self,
         key: IPCCacheEngineKey,
         tp_size: int,
-    ) -> int:
-        """Submit a prefix lookup and return a prefetch job ID.
+    ) -> None:
+        """Submit a prefix lookup.
 
         Hashes the key, submits a prefetch task to the storage manager,
-        and returns a job ID that can be polled via query_prefetch_status.
+        and registers the job under ``key.request_id`` for later polling
+        via query_prefetch_status.
 
         Args:
             key: Cache key with request_id embedded.
-
-        Returns:
-            Prefetch job ID for polling via query_prefetch_status.
+            tp_size: Tensor-parallel size for MLA multi-reader locking.
         """
         model_name, world_size = key.model_name, key.world_size
         self._event_bus.publish(
@@ -603,7 +602,7 @@ class MPCacheEngine:
                 model_name,
                 world_size,
             )
-            return self._register_prefetch_job(
+            self._register_prefetch_job(
                 _PrefetchJob(
                     handle=PrefetchHandle(
                         prefetch_request_id=-1,
@@ -616,13 +615,14 @@ class MPCacheEngine:
                     request_id=key.request_id,
                 )
             )
+            return
 
         extra_count = compute_extra_count(tp_size, world_size)
 
         # Compute chunk hashes for all full chunks
         chunk_hashes = self.token_hasher.compute_chunk_hashes(list(key.token_ids))
         if not chunk_hashes:
-            return self._register_prefetch_job(
+            self._register_prefetch_job(
                 _PrefetchJob(
                     handle=PrefetchHandle(
                         prefetch_request_id=-1,
@@ -635,6 +635,30 @@ class MPCacheEngine:
                     request_id=key.request_id,
                 )
             )
+
+            return
+
+        # Publish lookup event via EventBus for observability subscribers.
+        # Guard with has_subscribers() to avoid allocating the metadata dict
+        # (including dtype/shape list comprehensions) when no subscriber is
+        # listening (e.g. lookup hash logger is disabled).
+        if self._event_bus.has_subscribers(EventType.MP_LOOKUP):
+            self._event_bus.publish(
+                Event(
+                    event_type=EventType.MP_LOOKUP,
+                    session_id=key.request_id,
+                    metadata={
+                        "request_id": key.request_id,
+                        "chunk_hashes": chunk_hashes,
+                        "model_name": model_name,
+                        "chunk_size": self.chunk_size,
+                        "seq_len": len(key.token_ids),
+                        "dtypes": [str(d) for d in layout_desc.dtypes],
+                        "shapes": [list(s) for s in layout_desc.shapes],
+                    },
+                )
+            )
+
         obj_keys = ipc_key_to_object_keys(key, chunk_hashes)
 
         handle = self.storage_manager.submit_prefetch_task(
@@ -643,7 +667,7 @@ class MPCacheEngine:
             extra_count=extra_count,
             external_request_id=key.request_id,
         )
-        return self._register_prefetch_job(
+        self._register_prefetch_job(
             _PrefetchJob(
                 handle=handle,
                 world_size=key.world_size,
@@ -651,34 +675,30 @@ class MPCacheEngine:
             )
         )
 
-    def _register_prefetch_job(self, job: _PrefetchJob) -> int:
+    def _register_prefetch_job(self, job: _PrefetchJob) -> None:
         with self._prefetch_job_lock:
-            job_id = self._next_prefetch_job_id
-            self._next_prefetch_job_id += 1
-            self._prefetch_jobs[job_id] = job
-        return job_id
+            self._prefetch_jobs[job.request_id] = job
 
     def query_prefetch_lookup_hits(
         self,
-        prefetch_job_id: int,
+        request_id: str,
     ) -> int | None:
-        """Query the number of hits for a prefetch request before it's finished
+        """Query the number of hits for a prefetch request before it's finished.
 
         Returns:
-            The number of hits for the prefetched keys if the lookup is all done.
-            None if the lookup phase is still in progress, or the prefetch is
-            already completed and consumed by query_prefetch_status, or the
-            prefetch_job_id is invalid.
+            The number of hits for the prefetched keys if the lookup phase is
+            done. None if the lookup phase is still in progress. 0 if the
+            request_id is unknown (already completed and consumed, or invalid).
         """
         with self._prefetch_job_lock:
-            job = self._prefetch_jobs.get(prefetch_job_id)
+            job = self._prefetch_jobs.get(request_id)
 
         if job is None:
             logger.warning(
-                "Prefetch job %d not found (already completed or invalid)",
-                prefetch_job_id,
+                "Prefetch job for request %s not found (already completed or invalid)",
+                request_id,
             )
-            return None
+            return 0
 
         found_count = self.storage_manager.query_prefetch_lookup_hits(job.handle)
         if found_count is None:
@@ -689,9 +709,9 @@ class MPCacheEngine:
 
     def query_prefetch_status(
         self,
-        prefetch_job_id: int,
+        request_id: str,
     ) -> int | None:
-        """Poll the status of a prefetch job.
+        """Poll the status of a prefetch job by request_id.
 
         Returns the chunk count when the prefetch is complete, or None
         if it is still in progress.  The job entry is automatically
@@ -699,20 +719,21 @@ class MPCacheEngine:
         semantics).
 
         Args:
-            prefetch_job_id: Job ID returned by lookup().
+            request_id: The external request ID passed in the lookup key.
 
         Returns:
-            Chunk count (int) when done, None if still in progress
-            or the job ID is unknown.
+            Chunk count (int) when done, None if still in progress,
+            0 if the request_id is unknown (already completed and consumed,
+            or invalid).
         """
         with self._prefetch_job_lock:
-            job = self._prefetch_jobs.get(prefetch_job_id)
+            job = self._prefetch_jobs.get(request_id)
         if job is None:
             logger.warning(
-                "Prefetch job %d not found (already completed or invalid)",
-                prefetch_job_id,
+                "Prefetch job for request %s not found (already completed or invalid)",
+                request_id,
             )
-            return None
+            return 0
 
         found_count = self.storage_manager.query_prefetch_status(job.handle)
         if found_count is None:
@@ -733,7 +754,7 @@ class MPCacheEngine:
         )
 
         with self._prefetch_job_lock:
-            self._prefetch_jobs.pop(prefetch_job_id, None)
+            self._prefetch_jobs.pop(request_id, None)
 
         return found_count
 
@@ -797,6 +818,12 @@ class MPCacheEngine:
         Args:
             request_id: The request ID whose session should be removed.
         """
+        self._event_bus.publish(
+            Event(
+                event_type=EventType.MP_VLLM_END_SESSION,
+                metadata={"request_id": request_id},
+            )
+        )
         self.session_manager.remove(request_id)
 
     def report_status(self) -> dict:
@@ -834,6 +861,7 @@ class MPCacheEngine:
             "registered_gpu_ids": list(self.gpu_contexts.keys()),
             "gpu_context_meta": gpu_context_meta,
             "active_sessions": self.session_manager.active_count(),
+            "active_prefetch_jobs": self._active_prefetch_count(),
             "storage_manager": sm,
         }
 
@@ -873,6 +901,20 @@ class MPCacheEngine:
 
         # Release GPU contexts
         self.gpu_contexts.clear()
+
+    def _active_prefetch_count(self) -> int:
+        """Return the number of active prefetch jobs (thread-safe)."""
+        with self._prefetch_job_lock:
+            return len(self._prefetch_jobs)
+
+    def _setup_metrics(self) -> None:
+        """Register OTel observable gauges for MP engine metrics."""
+        _gauge = partial(register_gauge, "lmcache.mp_engine")
+        _gauge(
+            "lmcache_mp.active_prefetch_jobs",
+            "Number of active prefetch jobs",
+            self._active_prefetch_count,
+        )
 
 
 def add_handler_helper(

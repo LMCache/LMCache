@@ -36,7 +36,10 @@ Basic cache settings that control the core functionality of LMCache.
      - Maximum CPU cache size in GB. Default: 5.0
    * - local_disk
      - LMCACHE_LOCAL_DISK
-     - Path to local disk cache. Format: "file:///path/to/cache".
+     - Path (or comma-separated paths) to local disk cache directories. Format: ``"file:///path/to/cache"`` or ``"/path/a,/path/b"`` for multi-device I/O. See ``local_disk_path_sharding`` for how paths are assigned to GPUs.
+   * - local_disk_path_sharding
+     - LMCACHE_LOCAL_DISK_PATH_SHARDING
+     - Strategy for selecting a path when multiple paths are provided. Currently only ``"by_gpu"`` is supported, which selects paths based on GPU device ID (default: "by_gpu").
    * - max_local_disk_size
      - LMCACHE_MAX_LOCAL_DISK_SIZE
      - Maximum disk cache size in GB. Default: 0.0
