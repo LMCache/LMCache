@@ -328,7 +328,10 @@ class PDBackend(AllocatorBackendInterface):
         if self.pd_config.skip_proxy_notification:
             logger.info(
                 "pd_skip_proxy_notification=True, "
-                "skipping ZMQ PUSH proxy notification setup."
+                "skipping ZMQ PUSH proxy notification setup. "
+                "This mode is for external orchestrators only "
+                "(e.g., vLLM Production Stack router). "
+                "Do not use with LMCache's built-in disagg proxy."
             )
             self.proxy_side_channel = None
         else:
