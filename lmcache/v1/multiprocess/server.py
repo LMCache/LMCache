@@ -302,6 +302,17 @@ class MPCacheEngine:
             )
             vllm_event.wait(stream=gpu_context.stream)
 
+            # CPU-synchronous sentinel: a GPU store is about to be enqueued.
+            # Must be published via publish() (not publish_on_stream) so the
+            # drain thread sees it before MP_SESSION_END can race MP_STORE_END.
+            self._event_bus.publish(
+                Event(
+                    event_type=EventType.MP_STORE_SUBMITTED,
+                    session_id=key.request_id,
+                    metadata={"device": str(gpu_context.device)},
+                )
+            )
+
             self._event_bus.publish_on_stream(
                 gpu_context.cupy_stream,
                 Event(
@@ -423,6 +434,17 @@ class MPCacheEngine:
         )
         gpu_context = self.gpu_contexts[instance_id]
 
+        # CPU-synchronous sentinel: a GPU retrieve is about to be enqueued.
+        # Must be published via publish() (not publish_on_stream) so the
+        # drain thread sees it before MP_SESSION_END can race MP_RETRIEVE_END.
+        self._event_bus.publish(
+            Event(
+                event_type=EventType.MP_RETRIEVE_SUBMITTED,
+                session_id=key.request_id,
+                metadata={"device": str(gpu_context.device)},
+            )
+        )
+
         self._event_bus.publish_on_stream(
             gpu_context.cupy_stream,
             Event(
@@ -542,7 +564,6 @@ class MPCacheEngine:
                         },
                     ),
                 )
-
         tokens_retrieved = len(obj_keys) * self.chunk_size
         ed = time.perf_counter()
         logger.info(
@@ -588,6 +609,12 @@ class MPCacheEngine:
             tp_size: Tensor-parallel size for MLA multi-reader locking.
         """
         model_name, world_size = key.model_name, key.world_size
+        self._event_bus.publish(
+            Event(
+                event_type=EventType.MP_REQUEST_START,
+                session_id=key.request_id,
+            )
+        )
         self._event_bus.publish(
             Event(
                 event_type=EventType.MP_LOOKUP_PREFETCH_START,
@@ -825,6 +852,12 @@ class MPCacheEngine:
             )
         )
         self.session_manager.remove(request_id)
+        self._event_bus.publish(
+            Event(
+                event_type=EventType.MP_SESSION_END,
+                session_id=request_id,
+            )
+        )
 
     def report_status(self) -> dict:
         """Return a status dict for the entire cache engine."""
