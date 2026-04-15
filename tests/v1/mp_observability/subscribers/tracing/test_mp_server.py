@@ -14,6 +14,9 @@ from lmcache.v1.mp_observability.event_bus import EventBus, EventBusConfig
 from lmcache.v1.mp_observability.subscribers.tracing import (
     MPServerTracingSubscriber,
 )
+from lmcache.v1.mp_observability.subscribers.tracing.span_registry import (
+    SpanRegistry,
+)
 
 
 @pytest.fixture
@@ -22,8 +25,13 @@ def bus():
 
 
 @pytest.fixture
-def subscriber(bus):
-    sub = MPServerTracingSubscriber()
+def registry():
+    return SpanRegistry()
+
+
+@pytest.fixture
+def subscriber(registry, bus):
+    sub = MPServerTracingSubscriber(registry)
     bus.register_subscriber(sub)
     return sub
 
@@ -53,21 +61,23 @@ class TestMPServerTracingSubscriber:
     # Root span creation
     # ------------------------------------------------------------------
 
-    def test_root_span_created_on_request_start(self, bus, subscriber):
+    def test_root_span_created_on_request_start(self, bus, registry, subscriber):
         bus.start()
         bus.publish(Event(event_type=EventType.MP_REQUEST_START, session_id="req-root"))
         time.sleep(0.15)
-        assert "req-root" in subscriber._root_spans
+        assert registry.get("req-root", "request") is not None
         bus.stop()
 
-    def test_no_root_span_before_any_event(self, subscriber):
-        assert len(subscriber._root_spans) == 0
+    def test_no_root_span_before_any_event(self, registry):
+        assert registry.get("any-session", "request") is None
 
     # ------------------------------------------------------------------
     # Session-end closes root immediately when no stores in flight
     # ------------------------------------------------------------------
 
-    def test_session_end_closes_root_immediately_when_no_store(self, bus, subscriber):
+    def test_session_end_closes_root_immediately_when_no_store(
+        self, bus, registry, subscriber
+    ):
         bus.start()
         now = time.time()
         bus.publish(
@@ -102,7 +112,7 @@ class TestMPServerTracingSubscriber:
         time.sleep(0.15)
         bus.stop()
 
-        assert "req-lookup-only" not in subscriber._root_spans
+        assert registry.get("req-lookup-only", "request") is None
         assert "req-lookup-only" not in subscriber._pending_store_count
         assert len(subscriber._pending) == 0
 
@@ -110,7 +120,7 @@ class TestMPServerTracingSubscriber:
     # Deferred close: SESSION_END races GPU store
     # ------------------------------------------------------------------
 
-    def test_session_end_deferred_until_store_finishes(self, bus, subscriber):
+    def test_session_end_deferred_until_store_finishes(self, bus, registry, subscriber):
         bus.start()
         now = time.time()
         sid = "req-deferred"
@@ -140,7 +150,7 @@ class TestMPServerTracingSubscriber:
         time.sleep(0.15)
 
         # Root should still be open (store in flight)
-        assert sid in subscriber._root_spans
+        assert registry.get(sid, "request") is not None
         assert sid in subscriber._deferred_session_end_ts
 
         # Now GPU store completes
@@ -164,7 +174,7 @@ class TestMPServerTracingSubscriber:
         bus.stop()
 
         # Root should now be closed
-        assert sid not in subscriber._root_spans
+        assert registry.get(sid, "request") is None
         assert sid not in subscriber._deferred_session_end_ts
         assert sid not in subscriber._pending_store_count
 
@@ -172,7 +182,7 @@ class TestMPServerTracingSubscriber:
     # Multiple stores: root stays open until all complete
     # ------------------------------------------------------------------
 
-    def test_multiple_stores_all_must_finish(self, bus, subscriber):
+    def test_multiple_stores_all_must_finish(self, bus, registry, subscriber):
         bus.start()
         now = time.time()
         sid = "req-multi-store"
@@ -208,7 +218,7 @@ class TestMPServerTracingSubscriber:
         time.sleep(0.15)
 
         # count=2 — still open
-        assert sid in subscriber._root_spans
+        assert registry.get(sid, "request") is not None
 
         # First store ends — count=1, still open
         bus.publish(
@@ -228,7 +238,7 @@ class TestMPServerTracingSubscriber:
             )
         )
         time.sleep(0.15)
-        assert sid in subscriber._root_spans
+        assert registry.get(sid, "request") is not None
 
         # Second store ends — count=0, closes now
         bus.publish(
@@ -250,14 +260,14 @@ class TestMPServerTracingSubscriber:
         time.sleep(0.15)
         bus.stop()
 
-        assert sid not in subscriber._root_spans
+        assert registry.get(sid, "request") is None
         assert sid not in subscriber._pending_store_count
 
     # ------------------------------------------------------------------
     # Lazy root creation on store-only path (no lookup)
     # ------------------------------------------------------------------
 
-    def test_lazy_root_on_store_only_path(self, bus, subscriber):
+    def test_lazy_root_on_store_only_path(self, bus, registry, subscriber):
         bus.start()
         now = time.time()
         sid = "req-store-only"
@@ -280,7 +290,7 @@ class TestMPServerTracingSubscriber:
         )
         time.sleep(0.15)
 
-        assert sid in subscriber._root_spans
+        assert registry.get(sid, "request") is not None
 
         bus.publish(
             Event(
@@ -300,13 +310,15 @@ class TestMPServerTracingSubscriber:
         time.sleep(0.15)
         bus.stop()
 
-        assert sid not in subscriber._root_spans
+        assert registry.get(sid, "request") is None
 
     # ------------------------------------------------------------------
     # Retrieve deferral: SESSION_END races GPU retrieve
     # ------------------------------------------------------------------
 
-    def test_session_end_deferred_until_retrieve_finishes(self, bus, subscriber):
+    def test_session_end_deferred_until_retrieve_finishes(
+        self, bus, registry, subscriber
+    ):
         bus.start()
         now = time.time()
         sid = "req-deferred-retrieve"
@@ -336,7 +348,7 @@ class TestMPServerTracingSubscriber:
         time.sleep(0.15)
 
         # Root should still be open (retrieve in flight)
-        assert sid in subscriber._root_spans
+        assert registry.get(sid, "request") is not None
         assert sid in subscriber._deferred_session_end_ts
 
         # Now GPU retrieve completes
@@ -360,12 +372,12 @@ class TestMPServerTracingSubscriber:
         bus.stop()
 
         # Root should now be closed
-        assert sid not in subscriber._root_spans
+        assert registry.get(sid, "request") is None
         assert sid not in subscriber._deferred_session_end_ts
         assert sid not in subscriber._pending_retrieve_count
 
     def test_session_end_deferred_until_both_store_and_retrieve_finish(
-        self, bus, subscriber
+        self, bus, registry, subscriber
     ):
         """Root span stays open until both a store and a retrieve finish."""
         bus.start()
@@ -403,7 +415,7 @@ class TestMPServerTracingSubscriber:
         time.sleep(0.15)
 
         # Both in flight — root still open
-        assert sid in subscriber._root_spans
+        assert registry.get(sid, "request") is not None
 
         # Store finishes first — retrieve still pending, root stays open
         bus.publish(
@@ -423,7 +435,7 @@ class TestMPServerTracingSubscriber:
             )
         )
         time.sleep(0.15)
-        assert sid in subscriber._root_spans
+        assert registry.get(sid, "request") is not None
 
         # Retrieve finishes — now both counters are zero → root closes
         bus.publish(
@@ -445,8 +457,52 @@ class TestMPServerTracingSubscriber:
         time.sleep(0.15)
         bus.stop()
 
-        assert sid not in subscriber._root_spans
+        assert registry.get(sid, "request") is None
         assert sid not in subscriber._deferred_session_end_ts
+
+    # ------------------------------------------------------------------
+    # Child spans registered in shared registry for sub-span parenting
+    # ------------------------------------------------------------------
+
+    def test_retrieve_span_registered_in_registry_while_open(
+        self, bus, registry, subscriber
+    ):
+        """An open mp.retrieve span is accessible in the registry under
+        ``span_name="retrieve"`` so that a future sub-span subscriber can
+        look it up as a parent."""
+        bus.start()
+        bus.publish(
+            Event(
+                event_type=EventType.MP_RETRIEVE_START,
+                session_id="req-reg",
+                metadata={"device": "cuda:0"},
+            )
+        )
+        time.sleep(0.15)
+        assert registry.get("req-reg", "retrieve") is not None
+        bus.stop()
+
+    def test_retrieve_span_deregistered_after_close(self, bus, registry, subscriber):
+        """Registry entry is cleaned up when mp.retrieve ends so stale
+        contexts do not leak into subsequent requests."""
+        bus.start()
+        bus.publish(
+            Event(
+                event_type=EventType.MP_RETRIEVE_START,
+                session_id="req-reg2",
+                metadata={"device": "cuda:0"},
+            )
+        )
+        bus.publish(
+            Event(
+                event_type=EventType.MP_RETRIEVE_END,
+                session_id="req-reg2",
+                metadata={"device": "cuda:0", "retrieved_count": 1},
+            )
+        )
+        time.sleep(0.15)
+        bus.stop()
+        assert registry.get("req-reg2", "retrieve") is None
 
     # ------------------------------------------------------------------
     # Existing lifecycle tests (unchanged behaviour)

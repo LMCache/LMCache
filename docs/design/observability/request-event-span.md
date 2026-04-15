@@ -184,5 +184,105 @@ root "request"  [═════════════════════
 |------|--------|
 | `lmcache/v1/mp_observability/event.py` | Add `MP_REQUEST_START`, `MP_STORE_SUBMITTED`, `MP_RETRIEVE_SUBMITTED`, `MP_SESSION_END` |
 | `lmcache/v1/multiprocess/server.py` | Emit the 4 events at `lookup_prefetch_start()`, `store()`, `retrieve()`, `end_session()` |
-| `lmcache/v1/mp_observability/subscribers/tracing/mp_server.py` | Root span logic: `_root_spans`, `_pending_store_count`, `_pending_retrieve_count`, `_deferred_session_end_ts`; handlers `_on_request_start`, `_on_store_submitted`, `_on_retrieve_submitted`, `_on_session_end`; helpers `_get_or_create_request_span`, `_close_request_span` |
+| `lmcache/v1/mp_observability/subscribers/tracing/mp_server.py` | Root span logic: `_pending_store_count`, `_pending_retrieve_count`, `_deferred_session_end_ts`; handlers `_on_request_start`, `_on_store_submitted`, `_on_retrieve_submitted`, `_on_session_end`; helpers `_get_or_create_request_span`, `_close_request_span` |
+| `lmcache/v1/mp_observability/subscribers/tracing/span_registry.py` | `SpanRegistry`: shared dict of open spans keyed by `(session_id, span_name)` for cross-subscriber parent lookup |
 | `tests/v1/mp_observability/subscribers/tracing/test_mp_server.py` | Tests for all scenarios including retrieve deferral |
+
+---
+
+## Extending the Span Hierarchy
+
+### How the registry works
+
+`MPServerTracingSubscriber` writes every open span into a shared
+`SpanRegistry` while it is live:
+
+```
+registry[(session_id, "request")]       → (root_span, root_ctx)       # open: REQUEST_START → SESSION_END
+registry[(session_id, "retrieve")]      → (retrieve_span, ctx)         # open: RETRIEVE_START → RETRIEVE_END
+registry[(session_id, "store")]         → (store_span, ctx)            # open: STORE_START → STORE_END
+registry[(session_id, "lookup_prefetch")] → (lp_span, ctx)            # open: LP_START → LP_END
+```
+
+Any subscriber that receives the same `SpanRegistry` instance can call
+`registry.get_context(session_id, "request")` (or any other name) to obtain
+the OTel context needed to nest a new span.
+
+---
+
+### Example 1 — new span at the same level
+
+To add an `l1.read` span nested directly under the root `"request"` span,
+create a new subscriber file and register it with the shared registry.
+No existing files need to change.
+
+**`subscribers/tracing/l1.py`**:
+
+```python
+# SPDX-License-Identifier: Apache-2.0
+from opentelemetry import trace
+
+from lmcache.v1.mp_observability.event import Event, EventType
+from lmcache.v1.mp_observability.event_bus import EventCallback, EventSubscriber
+from lmcache.v1.mp_observability.subscribers.tracing.span_registry import SpanRegistry
+
+_tracer = trace.get_tracer("lmcache_mp.l1")
+
+class L1TracingSubscriber(EventSubscriber):
+    def __init__(self, registry: SpanRegistry) -> None:
+        self._registry = registry
+        self._pending: dict[str, object] = {}
+
+    def get_subscriptions(self) -> dict[EventType, EventCallback]:
+        return {
+            EventType.L1_READ_RESERVED: self._on_start,
+            EventType.L1_READ_FINISHED: self._on_end,
+        }
+
+    def _on_start(self, event: Event) -> None:
+        parent_ctx = self._registry.get_context(event.session_id, "request")
+        span = _tracer.start_span(
+            "l1.read", context=parent_ctx, start_time=int(event.timestamp * 1e9)
+        )
+        self._pending[event.session_id] = span
+
+    def _on_end(self, event: Event) -> None:
+        span = self._pending.pop(event.session_id, None)
+        if span:
+            span.end(end_time=int(event.timestamp * 1e9))
+```
+
+**`config.py`** (the only change needed):
+
+```python
+registry = SpanRegistry()
+bus.register_subscriber(MPServerTracingSubscriber(registry))
+bus.register_subscriber(L1TracingSubscriber(registry))   # ← add this line
+```
+
+This produces: `request → l1.read` (alongside `mp.retrieve`, `mp.store`, etc.)
+
+---
+
+### Example 2 — sub-span nested under an existing child span
+
+To nest a span *inside* `mp.retrieve` (e.g. an L2 disk load that happens
+during a retrieve), look up `"retrieve"` as the parent instead of `"request"`.
+The `"retrieve"` entry is live in the registry from `MP_RETRIEVE_START` to
+`MP_RETRIEVE_END`.
+
+```python
+    def _on_detail_start(self, event: Event) -> None:
+        sid = event.session_id
+        # Prefer the immediate parent; fall back to root if retrieve has ended.
+        parent_ctx = (
+            self._registry.get_context(sid, "retrieve")
+            or self._registry.get_context(sid, "request")
+        )
+        span = _tracer.start_span(
+            "l2.disk_load", context=parent_ctx, start_time=int(event.timestamp * 1e9)
+        )
+        self._pending[sid] = span
+```
+
+This produces a three-level trace: `request → mp.retrieve → l2.disk_load`.

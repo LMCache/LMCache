@@ -14,6 +14,16 @@ in flight: ``MP_STORE_SUBMITTED`` and ``MP_RETRIEVE_SUBMITTED`` increment
 per-session counters before GPU work is enqueued, and the close is delayed
 until the last ``MP_STORE_END`` / ``MP_RETRIEVE_END`` decrements both counters
 to zero.
+
+**Extensibility via SpanRegistry**
+
+An optional
+:class:`~lmcache.v1.mp_observability.subscribers.tracing.span_registry.SpanRegistry`
+can be shared with other subscribers.  The root ``"request"`` span and all
+child spans (``"store"``, ``"retrieve"``, ``"lookup_prefetch"``) are registered
+in it while open, so new subscribers can look up a parent context without
+coupling to this class.  See
+``docs/design/observability/request-event-span.md`` for worked examples.
 """
 
 # Future
@@ -26,6 +36,7 @@ from typing import Any
 from lmcache.logging import init_logger
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import EventCallback, EventSubscriber
+from lmcache.v1.mp_observability.subscribers.tracing.span_registry import SpanRegistry
 
 logger = init_logger(__name__)
 
@@ -62,12 +73,26 @@ class MPServerTracingSubscriber(EventSubscriber):
         EventType.MP_LOOKUP_PREFETCH_END: EventType.MP_LOOKUP_PREFETCH_START,
     }
 
-    def __init__(self) -> None:
+    # Logical registry names for child spans.  When a child span is opened it
+    # is also stored under this name in the shared registry so that other
+    # subscribers (or future sub-span subscribers) can look up its context as
+    # a parent without coupling to this class.
+    _LOGICAL_NAMES: dict[EventType, str] = {
+        EventType.MP_STORE_START: "store",
+        EventType.MP_RETRIEVE_START: "retrieve",
+        EventType.MP_LOOKUP_PREFETCH_START: "lookup_prefetch",
+    }
+
+    def __init__(self, registry: SpanRegistry | None = None) -> None:
+        # Shared span registry.  When a registry is provided, other subscribers
+        # that share the same instance can look up the root "request" span or
+        # any child span ("store", "retrieve", "lookup_prefetch") as a parent
+        # context.  If None, a private registry is created so that the class
+        # remains usable without a shared registry.
+        self._registry = registry if registry is not None else SpanRegistry()
+
         # session_id -> (span, start_event_type) for pending child spans
         self._pending: dict[str, tuple[Any, EventType]] = {}
-
-        # session_id -> (root_span, root_otel_context)
-        self._root_spans: dict[str, tuple[Any, Any]] = {}
 
         # session_id -> number of MP_STORE_SUBMITTED events without a
         # matching MP_STORE_END; guards against SESSION_END racing GPU stores
@@ -110,12 +135,13 @@ class MPServerTracingSubscriber(EventSubscriber):
                 pass
         self._pending.clear()
 
-        for session_id, (span, _) in self._root_spans.items():
-            try:
-                span.end()
-            except Exception:
-                pass
-        self._root_spans.clear()
+        sessions = (
+            set(self._pending_store_count)
+            | set(self._pending_retrieve_count)
+            | set(self._deferred_session_end_ts)
+        )
+        for sid in sessions:
+            self._registry.clear_session(sid)
         self._pending_store_count.clear()
         self._pending_retrieve_count.clear()
         self._deferred_session_end_ts.clear()
@@ -213,6 +239,12 @@ class MPServerTracingSubscriber(EventSubscriber):
         key = f"{sid}:{event.event_type.value}"
         self._pending[key] = (span, event.event_type)
 
+        # Also register in the shared registry so other subscribers can use
+        # this span as a parent context for nested sub-spans.
+        logical = self._LOGICAL_NAMES.get(event.event_type)
+        if logical:
+            self._registry.open(sid, logical, span, trace.set_span_in_context(span))
+
     def _on_end(self, event: Event) -> None:
         """Close a pending child span and handle store-count deferral.
 
@@ -240,6 +272,11 @@ class MPServerTracingSubscriber(EventSubscriber):
             for k, v in event.metadata.items():
                 span.set_attribute(k, str(v))
             span.end(end_time=int(event.timestamp * 1e9))
+
+        # Remove the child span from the shared registry now that it is closed.
+        logical = self._LOGICAL_NAMES.get(start_type)
+        if logical:
+            self._registry.pop(sid, logical)
 
         if event.event_type == EventType.MP_STORE_END:
             count = self._pending_store_count.get(sid, 0)
@@ -276,6 +313,11 @@ class MPServerTracingSubscriber(EventSubscriber):
     ) -> tuple[Any, Any]:
         """Return the root span and its OTel context, creating them if absent.
 
+        The span is stored in the registry under ``span_name="request"`` so
+        that other subscribers sharing the same :class:`SpanRegistry` can
+        retrieve the parent context via
+        ``registry.get_context(session_id, "request")``.
+
         Args:
             session_id: The request session identifier.
             ts: Wall-clock timestamp (``time.time()``) to use as span start
@@ -284,15 +326,16 @@ class MPServerTracingSubscriber(EventSubscriber):
         Returns:
             ``(root_span, root_otel_context)`` tuple.
         """
-        if session_id in self._root_spans:
-            return self._root_spans[session_id]
+        entry = self._registry.get(session_id, "request")
+        if entry is not None:
+            return entry
         root_span = _tracer.start_span(
             "request",
             start_time=int(ts * 1e9),
         )
         root_span.set_attribute("session_id", session_id)
         root_ctx = trace.set_span_in_context(root_span)
-        self._root_spans[session_id] = (root_span, root_ctx)
+        self._registry.open(session_id, "request", root_span, root_ctx)
         return root_span, root_ctx
 
     def _close_request_span(self, session_id: str, end_ts: float) -> None:
@@ -302,7 +345,7 @@ class MPServerTracingSubscriber(EventSubscriber):
             session_id: The request session identifier.
             end_ts: Wall-clock timestamp to stamp as the span end time.
         """
-        entry = self._root_spans.pop(session_id, None)
+        entry = self._registry.pop(session_id, "request")
         if entry is not None:
             root_span, _ = entry
             try:
