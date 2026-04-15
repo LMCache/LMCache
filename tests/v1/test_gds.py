@@ -16,7 +16,11 @@ import torch
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.cache_engine import LMCacheEngineBuilder
 from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.memory_management import CuFileMemoryAllocator, MemoryFormat
+from lmcache.v1.memory_management import (
+    CuFileMemoryAllocator,
+    HipFileMemoryAllocator,
+    MemoryFormat,
+)
 from lmcache.v1.storage_backend import CreateStorageBackends
 from lmcache.v1.storage_backend.gds_backend import pack_metadata, unpack_metadata
 
@@ -81,7 +85,10 @@ def test_gds_backend_sanity():
         gds_backend = backends[BACKEND_NAME]
         assert gds_backend is not None
         assert gds_backend.memory_allocator is not None
-        assert isinstance(gds_backend.memory_allocator, CuFileMemoryAllocator)
+        assert isinstance(
+            gds_backend.memory_allocator,
+            (CuFileMemoryAllocator, HipFileMemoryAllocator),
+        )
 
         assert not gds_backend.contains(TEST_KEY, False)
         assert not gds_backend.exists_in_put_tasks(TEST_KEY)

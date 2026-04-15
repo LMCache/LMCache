@@ -9,16 +9,10 @@ on:
             - "release-**"
         tags:
             - "v*"
-        paths-ignore:
-            - 'operator/**'
-            - '.github/workflows/operator_*.yml'
     pull_request:
         branches:
             - dev
             - "release-**"
-        paths-ignore:
-            - 'operator/**'
-            - '.github/workflows/operator_*.yml'
     # Trigger the workflow for when a release is created
     release:
         types:
@@ -33,12 +27,44 @@ defaults:
 
 permissions:
     contents: read
+    pull-requests: read
 
 jobs:
+    changes:
+        name: Detect changes
+        runs-on: ubuntu-latest
+        permissions:
+            pull-requests: read
+        outputs:
+            lmcache: ${{ github.event_name == 'release' || startsWith(github.ref, 'refs/tags/') || steps.filter.outputs.lmcache == 'true' }}
+        steps:
+            - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+              if: github.event_name == 'push' && !startsWith(github.ref, 'refs/tags/')
+              with:
+                fetch-depth: 2
+
+            - uses: dorny/paths-filter@v3
+              if: (github.event_name == 'push' && !startsWith(github.ref, 'refs/tags/')) || github.event_name == 'pull_request'
+              id: filter
+              with:
+                filters: |
+                    lmcache:
+                        - '**.py'
+                        - 'pyproject.toml'
+                        - 'pyproject_cli.toml'
+                        - 'requirements/**.txt'
+                        - 'docker/**'
+                        - '.github/workflows/test.yml'
+                        - '.github/workflows/code_quality_checks.yml'
+                        - '.github/workflows/publish.yml'
+                        - '!operator/**'
+
     # Create release artifacts
     # - build source dist (tar ball) and wheel
     # - upload artifacts to GHA
     build-artifacts:
+        needs: changes
+        if: needs.changes.outputs.lmcache == 'true'
         name: Build artifacts
         runs-on: ubuntu-latest
         steps:
@@ -101,12 +127,66 @@ jobs:
                 name: release-artifacts
                 path: dist/
 
+    # Build lmcache-cli pure-Python wheel (no CUDA)
+    build-cli-artifacts:
+        needs: changes
+        if: needs.changes.outputs.lmcache == 'true'
+        name: Build CLI artifacts
+        runs-on: ubuntu-latest
+        steps:
+            - name: "Harden Runner"
+              uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
+              with:
+                disable-sudo-and-containers: false
+                egress-policy: block
+                allowed-endpoints: >
+                  api.github.com:443
+                  github.com:443
+                  azure.archive.ubuntu.com:80
+                  pypi.org:443
+                  files.pythonhosted.org:443
+                  objects.githubusercontent.com:443
+
+            - name: Checkout code
+              uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+              with:
+                fetch-depth: 0
+
+            - name: Setup Python 3.13
+              uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
+              with:
+                python-version: "3.13"
+
+            - name: Install build tooling
+              run: |
+                python -m pip install --upgrade pip
+                pip install build
+
+            - name: Clean up release artifacts
+              run: |
+                rm -rf dist/
+
+            - name: Build lmcache-cli wheel (pure Python, no CUDA)
+              run: |
+                cp pyproject_cli.toml pyproject.toml
+                NO_CUDA_EXT=1 python -m build --wheel
+
+            - name: Upload CLI release artifacts to GHA
+              uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+              with:
+                name: release-cli-artifacts
+                path: dist/
+
     # Run tests and code quality checks before publishing
     test:
+        needs: changes
+        if: needs.changes.outputs.lmcache == 'true'
         name: Run tests
         uses: ./.github/workflows/test.yml
 
     code-quality:
+        needs: changes
+        if: needs.changes.outputs.lmcache == 'true'
         name: Run code quality checks
         uses: ./.github/workflows/code_quality_checks.yml
 
@@ -116,6 +196,8 @@ jobs:
     publish-test-pypi:
         name: Publish packages to test.pypi.org
         if: |
+            !failure() && !cancelled() &&
+            needs.changes.outputs.lmcache == 'true' &&
             github.repository_owner == 'LMCache' && (
                 github.event.action == 'published' ||
                 (github.event_name == 'push' && github.ref == 'refs/heads/dev')
@@ -125,7 +207,7 @@ jobs:
             # see https://docs.pypi.org/trusted-publishers/
             id-token: write
         runs-on: ubuntu-latest
-        needs: [build-artifacts, test, code-quality]
+        needs: [changes, build-artifacts, test, code-quality]
 
         steps:
             - name: Harden Runner
@@ -153,11 +235,54 @@ jobs:
                   repository-url: https://test.pypi.org/legacy/
                   verbose: true
 
+    publish-cli-test-pypi:
+        name: Publish lmcache-cli packages to test.pypi.org
+        if: |
+            !failure() && !cancelled() &&
+            needs.changes.outputs.lmcache == 'true' &&
+            github.repository_owner == 'LMCache' && (
+                github.event.action == 'published' ||
+                (github.event_name == 'push' && github.ref == 'refs/heads/dev')
+            )
+        permissions:
+            contents: read
+            id-token: write
+        runs-on: ubuntu-latest
+        needs: [changes, build-cli-artifacts, test, code-quality]
+
+        steps:
+            - name: Harden Runner
+              uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
+              with:
+                disable-sudo-and-containers: false
+                egress-policy: block
+                allowed-endpoints: >
+                  ghcr.io:443
+                  pkg-containers.githubusercontent.com:443
+                  test.pypi.org:443
+                  tuf-repo-cdn.sigstore.dev:443
+                  fulcio.sigstore.dev:443
+                  rekor.sigstore.dev:443
+
+            - name: Fetch CLI release artifacts
+              uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+              with:
+                  name: release-cli-artifacts
+                  path: dist
+
+            - name: Upload lmcache-cli to Test PyPI
+              uses: pypa/gh-action-pypi-publish@ed0c53931b1dc9bd32cbe73a98c7f6766f8a527e # v1.13.0
+              with:
+                  repository-url: https://test.pypi.org/legacy/
+                  verbose: true
+
     # Push to PyPI (production) when:
     # - a new GitHub release is created
     publish-pypi:
         name: Publish release to pypi.org
         if: |
+            !failure() && !cancelled() &&
+            needs.changes.outputs.lmcache == 'true' &&
             github.repository_owner == 'LMCache' && github.event.action == 'published'
         permissions:
             # see https://docs.pypi.org/trusted-publishers/
@@ -166,7 +291,7 @@ jobs:
             contents: write
 
         runs-on: ubuntu-latest
-        needs: [build-artifacts, test, code-quality]
+        needs: [changes, build-artifacts, test, code-quality]
 
         steps:
             - name: Harden Runner
@@ -197,6 +322,51 @@ jobs:
                   gh release upload '${{ github.ref_name }}' dist/* --repo '${{ github.repository }}'
 
             - name: Upload to PyPI
+              uses: pypa/gh-action-pypi-publish@ed0c53931b1dc9bd32cbe73a98c7f6766f8a527e # v1.13.0
+              with:
+                verbose: true
+
+    publish-cli-pypi:
+        name: Publish lmcache-cli release to pypi.org
+        if: |
+            !failure() && !cancelled() &&
+            needs.changes.outputs.lmcache == 'true' &&
+            github.repository_owner == 'LMCache' && github.event.action == 'published'
+        permissions:
+            id-token: write
+            contents: write
+        runs-on: ubuntu-latest
+        needs: [changes, build-cli-artifacts, test, code-quality]
+
+        steps:
+            - name: Harden Runner
+              uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
+              with:
+                  disable-sudo-and-containers: false
+                  egress-policy: block
+                  allowed-endpoints: >
+                    api.github.com:443
+                    uploads.github.com:443
+                    ghcr.io:443
+                    pkg-containers.githubusercontent.com:443
+                    upload.pypi.org:443
+                    tuf-repo-cdn.sigstore.dev:443
+                    fulcio.sigstore.dev:443
+                    rekor.sigstore.dev:443
+
+            - name: Fetch CLI release artifacts
+              uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+              with:
+                  name: release-cli-artifacts
+                  path: dist
+
+            - name: Upload lmcache-cli release artifacts to GitHub release
+              env:
+                  GITHUB_TOKEN: ${{ github.token }}
+              run: >-
+                  gh release upload '${{ github.ref_name }}' dist/* --repo '${{ github.repository }}'
+
+            - name: Upload lmcache-cli to PyPI
               uses: pypa/gh-action-pypi-publish@ed0c53931b1dc9bd32cbe73a98c7f6766f8a527e # v1.13.0
               with:
                 verbose: true

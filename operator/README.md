@@ -8,7 +8,11 @@ See [DESIGN.md](DESIGN.md) for architecture details, reconciliation logic, and C
 
 - Kubernetes 1.20+
 - `kubectl` configured to access your cluster
+- NVIDIA GPU Operator with the `nvidia` RuntimeClass available on GPU nodes
 - (Optional) [Prometheus Operator](https://github.com/prometheus-operator/prometheus-operator) for ServiceMonitor support
+
+> [!IMPORTANT]
+> The operator runs LMCache pods with `runtimeClassName: nvidia` and `privileged: true` to gain GPU visibility without consuming GPU resources via the device plugin. This allows the serving engine (e.g., vLLM) to claim all GPUs on the node. Clusters using Pod Security Standards must allow the `privileged` profile for the LMCache namespace.
 
 ## Quick Start
 
@@ -56,7 +60,7 @@ spec:
 kubectl apply -f lmcache-engine.yaml
 ```
 
-The operator automatically handles `hostIPC`, node-local service routing, resource sizing, and Prometheus metrics — see [DESIGN.md](DESIGN.md) for details.
+The operator automatically handles `hostIPC`, GPU visibility (`runtimeClassName: nvidia`, `privileged: true`), node-local service routing, resource sizing, and Prometheus metrics — see [DESIGN.md](DESIGN.md) for details.
 
 ### 3. Connect vLLM to LMCache
 
@@ -116,6 +120,9 @@ Key points for vLLM pods:
 - **`PYTHONHASHSEED=0`** — ensures deterministic token hashing so vLLM and LMCache produce consistent cache keys.
 - **ConfigMap mount** — the `$(cat ...)` pattern reads the connection JSON and passes it inline to `--kv-transfer-config`. The ConfigMap name is always `<LMCacheEngine name>-connection`.
 - **No `hostNetwork` needed** — the operator creates a ClusterIP Service with `internalTrafficPolicy=Local`. kube-proxy routes traffic to the LMCache pod on the same node automatically. The ConfigMap points to the service DNS name, so neither LMCache nor vLLM pods need `hostNetwork`.
+
+> [!WARNING]
+> **Do NOT mount an emptyDir at `/dev/shm`** on either LMCache or vLLM pods. With `hostIPC: true`, both pods share the host's `/dev/shm`. Mounting an emptyDir (even with `medium: Memory`) shadows it with a private tmpfs, breaking CUDA IPC — `cudaIpcOpenMemHandle` fails because IPC handles from one pod become invisible to the other.
 
 ### 4. Verify the Deployment
 
@@ -211,6 +218,62 @@ spec:
     prometheus.io/port: "9090"
   priorityClassName: system-node-critical
 ```
+
+### L2 Storage: Redis/Valkey
+
+Add a Redis L2 adapter for persistent KV cache storage beyond L1 memory:
+
+```yaml
+apiVersion: lmcache.lmcache.ai/v1alpha1
+kind: LMCacheEngine
+metadata:
+  name: cache-with-redis
+spec:
+  l1:
+    sizeGB: 60
+  l2Backend:
+    resp:
+      host: redis.default.svc.cluster.local
+      port: 6379
+      numWorkers: 8
+```
+
+For Redis authentication, create a Secret with `username` and `password` keys and reference it. Credentials are injected as environment variables and never appear in pod args or `kubectl describe` output. The Secret can live in a different namespace — the operator creates a managed copy automatically:
+
+```yaml
+# Create the secret (or reference an existing one in another namespace):
+# kubectl create secret generic redis-auth \
+#   --from-literal=username=myuser \
+#   --from-literal=password=mypassword
+spec:
+  l2Backend:
+    resp:
+      host: redis.default.svc.cluster.local
+      port: 6379
+      authSecretRef:
+        name: redis-auth
+        namespace: redis    # omit if the Secret is in the same namespace
+```
+
+### L2 Storage: Other Adapters (Raw Escape Hatch)
+
+For adapter types not yet natively supported by the operator (e.g. `nixl_store`, `fs`, `mock`), use the `raw` escape hatch. The JSON is passed through to `--l2-adapter` as-is:
+
+```yaml
+spec:
+  l2Backend:
+    raw:
+      type: nixl_store
+      config:
+        backend: "POSIX"
+        backend_params:
+          file_path: "/data/lmcache/l2"
+          use_direct_io: "false"
+        pool_size: 64
+```
+
+> [!NOTE]
+> Currently only a single L2 adapter is supported at a time. While LMCache multiprocess mode is designed to support multiple L2 adapters in cascade, this functionality is not yet fully tested. Once the multi-adapter pipeline is validated and performance is confirmed, the operator will be updated to support multiple adapters.
 
 ### Override Auto-Computed Resources
 

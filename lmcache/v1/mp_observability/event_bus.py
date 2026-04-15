@@ -9,7 +9,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import Callable
+from typing import Any, Callable
 import collections
 import threading
 import time
@@ -17,6 +17,17 @@ import time
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.mp_observability.event import Event, EventType
+
+try:
+    # Third Party
+    import torch  # noqa: F401 — must be imported before lmcache.c_ops
+
+    # First Party
+    import lmcache.c_ops as _lmc_ops
+
+    _has_native_recorder = hasattr(_lmc_ops, "record_event_on_stream")
+except ImportError:
+    _has_native_recorder = False
 
 logger = init_logger(__name__)
 
@@ -119,6 +130,46 @@ class EventBus:
         with self._lock:
             self._registered_subscribers.append(subscriber)
 
+    def has_subscribers(self, event_type: EventType) -> bool:
+        """Return True if at least one callback is registered for *event_type*.
+
+        Use this to skip expensive event construction on the hot path when
+        no subscriber is listening::
+
+            if bus.has_subscribers(EventType.MP_LOOKUP):
+                bus.publish(Event(event_type=EventType.MP_LOOKUP, ...))
+        """
+        return bool(self._subscribers.get(event_type))
+
+    def publish_on_stream(self, stream: Any, event: Event) -> None:
+        """Schedule event recording as a CUDA host function on *stream*.
+
+        Uses a C++ callback via ``cudaLaunchHostFunc`` so the callback
+        never touches the GIL, avoiding the CUDA-driver/GIL deadlock.
+
+        No-op when the EventBus is disabled, avoiding the overhead of
+        scheduling a host function on the CUDA stream entirely.
+        """
+        if not self._config.enabled:
+            return
+        if _has_native_recorder:
+            str_metadata: dict[str, str] = {}
+            int_metadata: dict[str, int] = {}
+            for k, v in event.metadata.items():
+                if isinstance(v, int):
+                    int_metadata[k] = v
+                else:
+                    str_metadata[k] = str(v)
+            _lmc_ops.record_event_on_stream(
+                stream.ptr,
+                event.event_type.value,
+                event.session_id,
+                str_metadata,
+                int_metadata,
+            )
+        else:
+            stream.launch_host_func(self.publish, event)
+
     def publish(self, event: Event) -> None:
         """Submit an event (hot path — non-blocking).
 
@@ -197,6 +248,20 @@ class EventBus:
 
     def _drain_all(self) -> None:
         """Pop all queued events and dispatch to subscribers."""
+        # Drain events buffered on the C++ side (from CUDA host callbacks)
+        if _has_native_recorder:
+            for name, sid, ts, str_meta, int_meta in _lmc_ops.drain_recorded_events():
+                metadata: dict[str, Any] = dict(str_meta)
+                metadata.update(int_meta)
+                self._queue.append(
+                    Event(
+                        event_type=EventType(name),
+                        session_id=sid,
+                        timestamp=ts,
+                        metadata=metadata,
+                    )
+                )
+
         with self._lock:
             snapshot = dict(self._subscribers)
 
@@ -220,6 +285,16 @@ class EventBus:
 # ---------------------------------------------------------------------------
 
 _global_bus = EventBus(EventBusConfig(enabled=False))
+_observability_enabled: bool = False
+
+
+def is_observability_enabled() -> bool:
+    """Fast check for whether observability is active.
+
+    Use this to guard expensive event-construction or CUDA host-function
+    scheduling when observability is disabled.
+    """
+    return _observability_enabled
 
 
 def get_event_bus() -> EventBus:
@@ -232,6 +307,7 @@ def init_event_bus(config: EventBusConfig | None = None) -> EventBus:
 
     Returns the newly created bus.
     """
-    global _global_bus
+    global _global_bus, _observability_enabled
     _global_bus = EventBus(config)
+    _observability_enabled = config.enabled if config else True
     return _global_bus

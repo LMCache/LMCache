@@ -32,6 +32,16 @@ class EventType(Enum):
     SM_WRITE_RESERVED = "sm.write.reserved"
     SM_WRITE_FINISHED = "sm.write.finished"
 
+    # L2 Store Controller events
+    L2_STORE_SUBMITTED = "l2.store.submitted"
+    L2_STORE_COMPLETED = "l2.store.completed"
+
+    # L2 Prefetch Controller events
+    L2_PREFETCH_LOOKUP_SUBMITTED = "l2.prefetch.lookup.submitted"
+    L2_PREFETCH_LOOKUP_COMPLETED = "l2.prefetch.lookup.completed"
+    L2_PREFETCH_LOAD_SUBMITTED = "l2.prefetch.load.submitted"
+    L2_PREFETCH_LOAD_COMPLETED = "l2.prefetch.load.completed"
+
     # MP Server request-level events (start/end pairs)
     MP_STORE_START = "mp.store.start"
     MP_STORE_END = "mp.store.end"
@@ -39,6 +49,15 @@ class EventType(Enum):
     MP_RETRIEVE_END = "mp.retrieve.end"
     MP_LOOKUP_PREFETCH_START = "mp.lookup_prefetch.start"
     MP_LOOKUP_PREFETCH_END = "mp.lookup_prefetch.end"
+
+    # Chunk hash logging events
+    MP_LOOKUP = "mp.lookup"
+
+    # vLLM block allocation events
+    MP_VLLM_BLOCK_ALLOCATION = "mp.vllm.block_allocation"
+
+    # vLLM end session events
+    MP_VLLM_END_SESSION = "mp.vllm.end_session"
 
 
 @dataclass

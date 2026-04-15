@@ -34,6 +34,7 @@ struct WorkerConn {
   std::string get_prefix;
   std::string set_prefix;
   std::string exists_prefix;
+  std::string del_prefix;
 
   // reusable buffers for building headers (avoids repeated dynamic allocations)
   std::string key_header_buf;
@@ -53,7 +54,8 @@ struct WorkerConn {
   WorkerConn()
       : get_prefix("*2\r\n$3\r\nGET\r\n"),
         set_prefix("*3\r\n$3\r\nSET\r\n"),
-        exists_prefix("*2\r\n$6\r\nEXISTS\r\n") {
+        exists_prefix("*2\r\n$6\r\nEXISTS\r\n"),
+        del_prefix("*2\r\n$3\r\nDEL\r\n") {
     // pre-allocate key_header_buf to handle typical keys without reallocation
     // typical key format: model_name@world_size@worker_id@chunk_hash_hex@dtype
     // - model_name: 25-50 chars (e.g., "meta-llama/Llama-3-70b-instruct")
@@ -101,6 +103,7 @@ class RedisConnector : public ConnectorBase<WorkerConn> {
   void do_single_set(WorkerConn& conn, const std::string& key, const void* buf,
                      size_t len, size_t chunk_size) override;
   bool do_single_exists(WorkerConn& conn, const std::string& key) override;
+  bool do_single_delete(WorkerConn& conn, const std::string& key) override;
   void shutdown_connections() override;
 
  private:

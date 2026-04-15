@@ -1,13 +1,16 @@
-# Distributed Storage Manager Observability Metrics
+# LMCache MP Mode Observability Metrics
 
 ## Overview
 
 The observability system uses an **EventBus with pub/sub dispatch** and
 **OpenTelemetry** for metrics instrumentation.
 
-- **Producers** (`L1Manager`, `StorageManager`) publish `Event` objects to the EventBus.
+- **Producers** (`L1Manager`, `StorageManager`, `MPCacheEngine`) publish `Event` objects
+  to the EventBus.
 - **Metrics subscribers** (`L1MetricsSubscriber`, `SMMetricsSubscriber`) subscribe to
   specific event types and update OTel counters.
+- **Logging subscribers** (`MPServerLoggingSubscriber`) log events at debug level.
+- **Tracing subscribers** (`MPServerTracingSubscriber`) create OTel spans from START/END pairs.
 - **Export** is via OTLP push to an OTel collector (production) or an in-process
   Prometheus `/metrics` endpoint (dev/debug fallback).
 
@@ -86,19 +89,81 @@ For implementation guidance on adding new events and subscribers, see [README.md
 
 ---
 
-## Metadata Contracts
+## L1 Chunk Lifecycle Histograms
 
-Each `EventType` has a documented metadata schema. Subscribers rely on these keys:
+Sampled (default 1%) chunk-level lifecycle tracking.  Only sampled chunks
+contribute to histograms; counters above always count all events.
 
-| EventType | Metadata keys | Types |
-|---|---|---|
-| `L1_READ_RESERVED` | `keys` | `list[ObjectKey]` |
-| `L1_READ_FINISHED` | `keys` | `list[ObjectKey]` |
-| `L1_WRITE_RESERVED` | `keys` | `list[ObjectKey]` |
-| `L1_WRITE_FINISHED` | `keys` | `list[ObjectKey]` |
-| `L1_WRITE_FINISHED_AND_READ_RESERVED` | `keys` | `list[ObjectKey]` |
-| `L1_KEYS_EVICTED` | `keys` | `list[ObjectKey]` |
-| `SM_READ_PREFETCHED` | `succeeded_keys`, `failed_keys` | `list[ObjectKey]`, `list[ObjectKey]` |
-| `SM_READ_PREFETCHED_FINISHED` | `succeeded_keys`, `failed_keys` | `list[ObjectKey]`, `list[ObjectKey]` |
-| `SM_WRITE_RESERVED` | `succeeded_keys`, `failed_keys` | `list[ObjectKey]`, `list[ObjectKey]` |
-| `SM_WRITE_FINISHED` | `succeeded_keys`, `failed_keys` | `list[ObjectKey]`, `list[ObjectKey]` |
+| OTel metric name | Prometheus name | Type | Source event | Calculation |
+|---|---|---|---|---|
+| `lmcache_mp.l1_chunk_lifetime_seconds` | `lmcache_mp_l1_chunk_lifetime_seconds` | Histogram | `L1_KEYS_EVICTED` | `eviction_time - alloc_time` per sampled chunk |
+| `lmcache_mp.l1_chunk_idle_before_evict_seconds` | `lmcache_mp_l1_chunk_idle_before_evict_seconds` | Histogram | `L1_KEYS_EVICTED` | `eviction_time - last_access_time` per sampled chunk |
+| `lmcache_mp.l1_chunk_reuse_gap_seconds` | `lmcache_mp_l1_chunk_reuse_gap_seconds` | Histogram | `L1_READ_FINISHED`, `L1_WRITE_FINISHED`, `L1_WRITE_FINISHED_AND_READ_RESERVED` | Time gap between consecutive touches of the same chunk |
+| `lmcache_mp.l1_chunk_evict_reuse_gap_seconds` | `lmcache_mp_l1_chunk_evict_reuse_gap_seconds` | Histogram | `L1_KEYS_EVICTED` → `L1_WRITE_FINISHED` | Time from eviction to next reuse (capped at 300 s) |
+
+**What it answers:** How long do L1 chunks live? How idle are they before eviction? How quickly are evicted chunks reused?
+
+---
+
+
+## L2 Store Metrics
+
+| OTel metric name | Prometheus name | Type | Source event | Calculation |
+|---|---|---|---|---|
+| `lmcache_mp.l2_store_tasks` | `lmcache_mp_l2_store_tasks_total` | Counter | `L2_STORE_SUBMITTED` | +1 per event |
+| `lmcache_mp.l2_store_keys` | `lmcache_mp_l2_store_keys_total` | Counter | `L2_STORE_SUBMITTED` | `+key_count` |
+| `lmcache_mp.l2_store_completed` | `lmcache_mp_l2_store_completed_total` | Counter | `L2_STORE_COMPLETED` | +1 per event |
+| `lmcache_mp.l2_store_succeeded_keys` | `lmcache_mp_l2_store_succeeded_keys_total` | Counter | `L2_STORE_COMPLETED` | `+succeeded_count` |
+| `lmcache_mp.l2_store_failed_keys` | `lmcache_mp_l2_store_failed_keys_total` | Counter | `L2_STORE_COMPLETED` | `+failed_count` |
+
+**What it answers:** How many keys are being pushed to L2? What fraction fail?
+
+---
+
+## L2 Prefetch Metrics
+
+| OTel metric name | Prometheus name | Type | Source event | Calculation |
+|---|---|---|---|---|
+| `lmcache_mp.l2_prefetch_lookups` | `lmcache_mp_l2_prefetch_lookups_total` | Counter | `L2_PREFETCH_LOOKUP_SUBMITTED` | +1 per event |
+| `lmcache_mp.l2_prefetch_lookup_keys` | `lmcache_mp_l2_prefetch_lookup_keys_total` | Counter | `L2_PREFETCH_LOOKUP_SUBMITTED` | `+key_count` |
+| `lmcache_mp.l2_prefetch_hit_keys` | `lmcache_mp_l2_prefetch_hit_keys_total` | Counter | `L2_PREFETCH_LOOKUP_COMPLETED` | `+prefix_hit_count` |
+| `lmcache_mp.l2_prefetch_load_tasks` | `lmcache_mp_l2_prefetch_load_tasks_total` | Counter | `L2_PREFETCH_LOAD_SUBMITTED` | `+adapter_count` |
+| `lmcache_mp.l2_prefetch_load_keys` | `lmcache_mp_l2_prefetch_load_keys_total` | Counter | `L2_PREFETCH_LOAD_SUBMITTED` | `+key_count` |
+| `lmcache_mp.l2_prefetch_loaded_keys` | `lmcache_mp_l2_prefetch_loaded_keys_total` | Counter | `L2_PREFETCH_LOAD_COMPLETED` | `+loaded_count` |
+| `lmcache_mp.l2_prefetch_failed_keys` | `lmcache_mp_l2_prefetch_failed_keys_total` | Counter | `L2_PREFETCH_LOAD_COMPLETED` | `+failed_count` |
+
+**What it answers:** How effective is L2 prefetching? What is the L2 hit rate? How many keys fail to load?
+
+---
+
+## L0 (GPU) Block Lifecycle Histograms
+
+Sampled (default 1%) GPU KV cache block lifecycle tracking via shadow monitoring
+of `MP_VLLM_BLOCK_ALLOCATION` and `MP_VLLM_END_SESSION` events.  Eviction is
+detected at reallocation time (when a block is assigned different tokens).
+
+| OTel metric name | Prometheus name | Type | Source event | Calculation |
+|---|---|---|---|---|
+| `lmcache_mp.l0_block_lifetime_seconds` | `lmcache_mp_l0_block_lifetime_seconds` | Histogram | `MP_VLLM_BLOCK_ALLOCATION` (eviction detected) | `eviction_time - alloc_time` per sampled block |
+| `lmcache_mp.l0_block_idle_before_evict_seconds` | `lmcache_mp_l0_block_idle_before_evict_seconds` | Histogram | `MP_VLLM_BLOCK_ALLOCATION` (eviction detected) | `eviction_time - last_access_time` per sampled block |
+| `lmcache_mp.l0_block_reuse_gap_seconds` | `lmcache_mp_l0_block_reuse_gap_seconds` | Histogram | `MP_VLLM_BLOCK_ALLOCATION` (cache hit) | Time gaps between consecutive accesses from access history |
+
+**What it answers:** How long do GPU blocks live before eviction? How idle are they? How frequently are cached blocks reused?
+
+---
+
+## MPCacheEngine Observable Gauges
+
+These metrics are registered directly via `register_gauge` (pull-based OTel
+observable gauges) rather than through the EventBus, because they represent
+point-in-time state snapshots that do not correspond to discrete events.
+
+| OTel metric name | Prometheus name | Type | Source | Calculation |
+|---|---|---|---|---|
+| `lmcache_mp.active_prefetch_jobs` | `lmcache_mp_active_prefetch_jobs` | ObservableGauge | `MPCacheEngine._prefetch_jobs` | `len(_prefetch_jobs)` at scrape time |
+
+**What it answers:** How many prefetch jobs are currently in-flight? A sustained high value may indicate slow L2 backends or client-side polling delays.
+
+---
+
+For event metadata contracts (what keys each `EventType` carries), see [EVENTS.md](EVENTS.md).

@@ -212,10 +212,15 @@ class KVCacheDescriber:
             )
             sec.add("num_layers", "Num layers", layout["num_layers"])
             sec.add("block_size", "Block size", layout["block_size"])
-            sec.add("hidden_dim_size", "Hidden dim size", layout["hidden_dim_size"])
+            sec.add("hidden_dim_sizes", "Hidden dim sizes", layout["hidden_dim_sizes"])
             sec.add("dtype", "Dtype", layout["dtype"])
             sec.add("is_mla", "MLA", layout["is_mla"])
             sec.add("num_blocks", "Num blocks", layout["num_blocks"])
+            sec.add(
+                "cache_size_per_token",
+                "Cache size per token (bytes)",
+                layout["cache_size_per_token"],
+            )
 
     def add_l2_adapters(self) -> None:
         """L2 adapter sections."""
