@@ -141,11 +141,11 @@ care of the thread pool, event fds, task ids, and completion signaling.
 Implementation notes
 --------------------
 
-- **Temp buffer size.** The temp byte buffer is allocated at
-  ``SERDE_BUFFER_FACTOR * serializer.estimate_serialized_size(layout)``
-  (default 1.5x). Your estimate should be an upper bound; the 1.5x
-  margin absorbs compressors whose output exceeds the estimate on
-  adversarial inputs.
+- **Temp buffer size.** The temp byte buffer is allocated at exactly
+  ``serializer.estimate_serialized_size(layout)`` bytes. Your estimate
+  must be an upper bound on the actual serialized output — include any
+  safety margin directly in the estimate (e.g., the built-in fp8
+  serializer returns ``1.5 * num_elements``).
 - **Per-adapter independence.** A request can span adapters where some
   have serde and others do not. The prefetch controller waits for all
   L2 loads *and* all per-adapter deserializations before finalizing.

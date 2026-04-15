@@ -17,7 +17,6 @@ from lmcache.v1.distributed.serde.fp8 import (
     Fp8QuantizationSerializer,
 )
 from lmcache.v1.distributed.serde.utils import (
-    SERDE_BUFFER_FACTOR,
     make_temp_key,
     serialized_layout_desc,
 )
@@ -30,7 +29,6 @@ __all__ = [
     "SerdeProcessor",
     "SerdeTaskId",
     "Serializer",
-    "SERDE_BUFFER_FACTOR",
     "create_serde_processor",
     "get_registered_serde_types",
     "make_temp_key",

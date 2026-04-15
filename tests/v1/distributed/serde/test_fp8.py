@@ -35,23 +35,30 @@ class _FakeMemoryObj:
 
 
 def test_estimate_serialized_size_single_group() -> None:
-    """fp8 is 1 byte per element; estimate must equal element count."""
+    """Estimate includes 1.5x margin over exact fp8 size (1 byte/elem)."""
     ser = Fp8QuantizationSerializer()
     layout = MemoryLayoutDesc(
         shapes=[torch.Size([2, 4, 256, 128])],
         dtypes=[torch.bfloat16],
     )
-    assert ser.estimate_serialized_size(layout) == 2 * 4 * 256 * 128
+    numel = 2 * 4 * 256 * 128
+    estimated = ser.estimate_serialized_size(layout)
+    # Must be >= actual fp8 bytes (numel) and include the 1.5x margin
+    assert estimated == int(numel * 1.5)
+    assert estimated >= numel
 
 
 def test_estimate_serialized_size_multi_group() -> None:
-    """Multi-group layouts sum element counts across groups."""
+    """Multi-group layouts sum element counts across groups, then apply margin."""
     ser = Fp8QuantizationSerializer()
     layout = MemoryLayoutDesc(
         shapes=[torch.Size([4, 8]), torch.Size([16])],
         dtypes=[torch.bfloat16, torch.float16],
     )
-    assert ser.estimate_serialized_size(layout) == 32 + 16
+    numel = 32 + 16
+    estimated = ser.estimate_serialized_size(layout)
+    assert estimated == int(numel * 1.5)
+    assert estimated >= numel
 
 
 # =============================================================================

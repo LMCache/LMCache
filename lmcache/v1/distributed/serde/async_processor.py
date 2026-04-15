@@ -136,7 +136,7 @@ class AsyncSerdeProcessor(SerdeProcessor):
     # ----- Size estimation (delegates to sync serializer) -----
 
     def estimate_serialized_size(self, layout_desc: MemoryLayoutDesc) -> int:
-        """Delegate to the sync serializer's estimate."""
+        """Delegate to the sync serializer's estimate (includes margin)."""
         return self._serializer.estimate_serialized_size(layout_desc)
 
     # ----- Lifecycle -----

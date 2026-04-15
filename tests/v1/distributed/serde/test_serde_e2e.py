@@ -402,3 +402,123 @@ class TestSerdeNoHits:
             f"L1 memory leak after 0-hit prefetch: {get_l1_memory_used(sm)} bytes"
         )
         sm.close()
+
+
+# =============================================================================
+# Tests: Buffer sizing — no out-of-bound memory access
+# =============================================================================
+
+
+class TestSerdeBufferBounds:
+    """Verify that the temp buffer sizing chain does not cause OOB access.
+
+    The critical path:
+      estimate_serialized_size(layout) -> buffer size (includes 1.5x margin)
+      temp_buffer = estimate bytes as uint8
+      serialize: writes num_elements bytes into temp (must fit)
+      deserialize: reads num_elements bytes from temp (must fit)
+
+    OOB would manifest as a crash (segfault / CUDA illegal access),
+    wrong data, or a memory leak from corrupted L1 accounting.
+    """
+
+    def _run_roundtrip(
+        self,
+        layout: MemoryLayoutDesc,
+        num_keys: int = 3,
+        l1_size_mb: int = 512,
+    ) -> None:
+        """Helper: full store -> clear -> prefetch -> verify -> cleanup.
+
+        Crashes here indicate OOB in serialize or deserialize.
+        """
+        cfg = make_storage_manager_config(
+            [make_mock_adapter_config(serde_type="fp8")],
+            l1_size_mb=l1_size_mb,
+        )
+        sm = StorageManager(cfg)
+        keys = [make_object_key(i) for i in range(num_keys)]
+
+        write_and_wait_for_l2(sm, keys, layout)
+        time.sleep(0.1)
+        sm.clear()
+        assert get_l1_object_count(sm) == 0
+
+        handle = sm.submit_prefetch_task(keys, layout)
+        hits = wait_for_prefetch_status(sm, handle)
+        assert hits == num_keys, f"Expected {num_keys} hits, got {hits}"
+
+        with sm.read_prefetched_results(keys) as objs:
+            assert objs is not None
+            assert len(objs) == num_keys
+
+        sm.finish_read_prefetched(keys)
+
+        # Verify no memory leak (temp buffers fully cleaned up)
+        ok = wait_for_condition(
+            lambda: get_l1_memory_used(sm) == 0,
+            timeout=5.0,
+        )
+        assert ok, f"L1 memory leak: {get_l1_memory_used(sm)} bytes after full cycle"
+        sm.close()
+
+    def test_bfloat16_layout(self) -> None:
+        """bf16: 2 bytes/elem KV -> 1 byte/elem fp8. Buffer = 1.5 * numel."""
+        layout = MemoryLayoutDesc(
+            shapes=[torch.Size([100, 2, 512])],
+            dtypes=[torch.bfloat16],
+        )
+        self._run_roundtrip(layout)
+
+    def test_float16_layout(self) -> None:
+        """fp16: 2 bytes/elem KV -> 1 byte/elem fp8. Same ratio as bf16."""
+        layout = MemoryLayoutDesc(
+            shapes=[torch.Size([100, 2, 512])],
+            dtypes=[torch.float16],
+        )
+        self._run_roundtrip(layout)
+
+    def test_float32_layout(self) -> None:
+        """fp32: 4 bytes/elem KV -> 1 byte/elem fp8. 4x compression.
+
+        The temp buffer (1.5 * numel bytes) is much smaller than the
+        real KV buffer (4 * numel bytes). This is the highest compression
+        ratio and the most likely to trigger sizing bugs.
+        """
+        layout = MemoryLayoutDesc(
+            shapes=[torch.Size([50, 2, 256])],
+            dtypes=[torch.float32],
+        )
+        self._run_roundtrip(layout)
+
+    def test_large_tensor(self) -> None:
+        """Large tensor (~4M elements, ~8MB bf16). Stress the buffer boundary."""
+        layout = MemoryLayoutDesc(
+            shapes=[torch.Size([256, 4, 2, 2048])],
+            dtypes=[torch.bfloat16],
+        )
+        self._run_roundtrip(layout, num_keys=2, l1_size_mb=512)
+
+    def test_small_tensor(self) -> None:
+        """Tiny tensor (single element). Edge case for buffer sizing."""
+        layout = MemoryLayoutDesc(
+            shapes=[torch.Size([1])],
+            dtypes=[torch.bfloat16],
+        )
+        self._run_roundtrip(layout)
+
+    def test_odd_element_count(self) -> None:
+        """Non-power-of-2 element count. Tests alignment edge cases.
+
+        numel = 7 * 13 * 3 = 273, not divisible by any common alignment.
+        """
+        layout = MemoryLayoutDesc(
+            shapes=[torch.Size([7, 13, 3])],
+            dtypes=[torch.bfloat16],
+        )
+        self._run_roundtrip(layout)
+
+    # NOTE: Multi-group layouts (multiple shapes/dtypes) are not tested here
+    # because the fp8 serde accesses MemoryObj.tensor which only works for
+    # single-group layouts. Multi-group would require per-group
+    # serialize/deserialize via MemoryObj.get_tensor(index).

@@ -13,10 +13,6 @@ import torch
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.serde.base import SerdeProcessor
 
-# Fixed multiplier on top of estimate_serialized_size() for buffer allocation.
-# Can be replaced with custom logic later.
-SERDE_BUFFER_FACTOR = 1.5
-
 
 def serialized_layout_desc(
     layout_desc: MemoryLayoutDesc,
@@ -24,11 +20,11 @@ def serialized_layout_desc(
 ) -> MemoryLayoutDesc:
     """Compute a flat byte-buffer MemoryLayoutDesc for the serialized output.
 
-    Returns a single-group uint8 layout sized at SERDE_BUFFER_FACTOR *
-    the processor's estimated size.
+    Returns a single-group uint8 layout whose size is determined by the
+    serde processor's ``estimate_serialized_size`` (which already includes
+    any safety margin).
     """
-    estimated = serde.estimate_serialized_size(layout_desc)
-    buffer_size = int(estimated * SERDE_BUFFER_FACTOR)
+    buffer_size = serde.estimate_serialized_size(layout_desc)
     return MemoryLayoutDesc(
         shapes=[torch.Size([buffer_size])],
         dtypes=[torch.uint8],

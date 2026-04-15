@@ -45,16 +45,20 @@ class Fp8QuantizationSerializer(Serializer):
         dst_tensor.flatten()[:n_bytes].copy_(fp8_as_bytes)
         return n_bytes
 
+    # Safety margin applied to the exact fp8 size. The actual serialized
+    # output is exactly num_elements bytes; the 1.5x headroom absorbs
+    # alignment padding or future format changes.
+    _BUFFER_MARGIN: float = 1.5
+
     def estimate_serialized_size(self, layout_desc: MemoryLayoutDesc) -> int:
-        """Return total element count (fp8 = 1 byte per element)."""
-        # fp8 = 1 byte per element across all groups
+        """Return buffer size for fp8 output (1 byte/elem * safety margin)."""
         total_elements = 0
         for shape in layout_desc.shapes:
             n = 1
             for dim in shape:
                 n *= int(dim)
             total_elements += n
-        return total_elements
+        return int(total_elements * self._BUFFER_MARGIN)
 
 
 class Fp8QuantizationDeserializer(Deserializer):

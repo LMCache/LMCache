@@ -23,7 +23,7 @@ lmcache/v1/distributed/serde/
   base.py             # Serializer, Deserializer (sync ABCs)
                       # SerdeProcessor (async ABC)
   async_processor.py  # AsyncSerdeProcessor (thread pool wrapper)
-  utils.py            # serialized_layout_desc, make_temp_key, SERDE_BUFFER_FACTOR
+  utils.py            # serialized_layout_desc, make_temp_key
 ```
 
 ## Store Controller Data Flow
@@ -220,7 +220,7 @@ Both controllers register serde eventfds in their poll loop alongside L2 adapter
 
 ## Buffer Sizing
 
-Temp buffers are allocated at `SERDE_BUFFER_FACTOR` (1.5x) times the serializer's `estimate_serialized_size()`. This is a fixed factor for now and can be replaced with custom logic later.
+Temp buffers are allocated at exactly `estimate_serialized_size()` bytes. The serializer is responsible for including any safety margin in its estimate (e.g., the built-in fp8 serializer returns `1.5 * num_elements`).
 
 ## Failure Summary
 

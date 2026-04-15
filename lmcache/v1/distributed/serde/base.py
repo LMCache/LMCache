@@ -49,10 +49,18 @@ class Serializer(abc.ABC):
 
     @abc.abstractmethod
     def estimate_serialized_size(self, layout_desc: MemoryLayoutDesc) -> int:
-        """Estimate the byte size of serialized output for this layout.
+        """Return the byte size to allocate for the serialized temp buffer.
 
-        Called BEFORE serialization to allocate the temp buffer.
-        Actual buffer = SERDE_BUFFER_FACTOR * this value.
+        Called BEFORE serialization to allocate the temp buffer. The
+        returned value must be an upper bound on the actual serialized
+        output — include any safety margin here (e.g., 1.5x for
+        compressors whose output may occasionally exceed the estimate).
+
+        Args:
+            layout_desc: Memory layout of the source KV data.
+
+        Returns:
+            Number of bytes to allocate for the temp buffer.
         """
         raise NotImplementedError
 
@@ -171,9 +179,10 @@ class SerdeProcessor(abc.ABC):
 
     @abc.abstractmethod
     def estimate_serialized_size(self, layout_desc: MemoryLayoutDesc) -> int:
-        """Estimate byte size of serialized output for this layout.
+        """Return the byte size to allocate for the serialized temp buffer.
 
-        Called BEFORE serialization to allocate temp buffers.
+        The returned value is used directly as the buffer size — include
+        any safety margin. See :meth:`Serializer.estimate_serialized_size`.
         """
         raise NotImplementedError
 
