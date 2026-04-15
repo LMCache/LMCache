@@ -265,6 +265,9 @@ etc.), see `Mooncake <https://github.com/kvcache-ai/Mooncake>`_ .
 **RDMA notes:**
 
 - ``protocol: "rdma"`` requires a valid LMCache L1 memory descriptor.
+- When using ``protocol: "rdma"``, it is recommended to disable lazy L1
+  allocation with ``--no-l1-use-lazy`` so the L1 buffer is fully allocated
+  before Mooncake registers it.
 - ``protocol: "tcp"`` does not require L1 preregistration.
 - If Mooncake RDMA initialization fails at adapter creation time, verify that
   LMCache L1 memory is enabled and that the descriptor has a non-zero pointer
