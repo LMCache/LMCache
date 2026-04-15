@@ -214,17 +214,19 @@ class StoreController(StorageControllerInterface):
         self._adapter_descriptors = adapter_descriptors
         self._policy = policy
 
-        if serde_processors is None:
-            self._serde_processors: list[SerdeProcessor | None] = [None] * len(
-                l2_adapters
+        # Normalize to a list of the same length as l2_adapters.
+        # After this point, _serde_processors is always a list (never None).
+        # Individual elements may be None (serde disabled for that adapter).
+        if serde_processors is not None and len(serde_processors) != len(l2_adapters):
+            raise ValueError(
+                f"serde_processors length ({len(serde_processors)}) must "
+                f"match l2_adapters length ({len(l2_adapters)})"
             )
-        else:
-            if len(serde_processors) != len(l2_adapters):
-                raise ValueError(
-                    f"serde_processors length ({len(serde_processors)}) must "
-                    f"match l2_adapters length ({len(l2_adapters)})"
-                )
-            self._serde_processors = serde_processors
+        self._serde_processors: list[SerdeProcessor | None] = (
+            list(serde_processors)
+            if serde_processors is not None
+            else [None] * len(l2_adapters)
+        )
 
         self._listener = StoreListener()
         self._l1_manager.register_listener(self._listener)

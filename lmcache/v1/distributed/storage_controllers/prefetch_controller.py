@@ -171,7 +171,7 @@ class InFlightPrefetchRequest:
     # Each adapter independently decides whether it uses serde (based on
     # self._serde_processors[adapter_idx]). A single request can mix
     # serde and non-serde adapters within its load plan.
-    temp_reserved_keys: list[ObjectKey] = field(default_factory=list)
+    temp_reserved_keys_for_serde: list[ObjectKey] = field(default_factory=list)
     """Temp byte buffers for serde-enabled adapters' L2 loads.
 
     Populated during _transition_to_load_phase for adapters with serde.
@@ -179,13 +179,17 @@ class InFlightPrefetchRequest:
     as each adapter's deserialize finishes. Empty when serde is disabled
     or after all deserializations complete."""
 
-    temp_reserved_objs: dict[ObjectKey, MemoryObj] = field(default_factory=dict)
-    """Maps temp buffer key -> MemoryObj. Lifecycle mirrors temp_reserved_keys."""
+    temp_reserved_objs_for_serde: dict[ObjectKey, MemoryObj] = field(
+        default_factory=dict
+    )
+    """Maps temp buffer key -> MemoryObj.
+
+    Lifecycle mirrors temp_reserved_keys_for_serde."""
 
     original_to_temp_key: dict[ObjectKey, ObjectKey] = field(default_factory=dict)
     """Maps original ObjectKey -> temp buffer ObjectKey.
 
-    Populated alongside temp_reserved_keys during _transition_to_load_phase.
+    Populated alongside temp_reserved_keys_for_serde during _transition_to_load_phase.
     Used by _get_load_buffer to route L2 loads into temp buffers, and by
     _submit_deserialize_for_adapter to pair temp/real buffers. Only contains
     keys whose adapter has serde enabled. Empty when serde is disabled."""
@@ -249,17 +253,19 @@ class PrefetchController(StorageControllerInterface):
         self._policy = policy
         self._max_in_flight = max_in_flight
 
-        if serde_processors is None:
-            self._serde_processors: list[SerdeProcessor | None] = [None] * len(
-                l2_adapters
+        # Normalize to a list of the same length as l2_adapters.
+        # After this point, _serde_processors is always a list (never None).
+        # Individual elements may be None (serde disabled for that adapter).
+        if serde_processors is not None and len(serde_processors) != len(l2_adapters):
+            raise ValueError(
+                f"serde_processors length ({len(serde_processors)}) must "
+                f"match l2_adapters length ({len(l2_adapters)})"
             )
-        else:
-            if len(serde_processors) != len(l2_adapters):
-                raise ValueError(
-                    f"serde_processors length ({len(serde_processors)}) must "
-                    f"match l2_adapters length ({len(l2_adapters)})"
-                )
-            self._serde_processors = serde_processors
+        self._serde_processors: list[SerdeProcessor | None] = (
+            list(serde_processors)
+            if serde_processors is not None
+            else [None] * len(l2_adapters)
+        )
 
         # In-flight request tracking (background thread only)
         self._in_flight_requests: dict[PrefetchRequestId, InFlightPrefetchRequest] = {}
@@ -692,8 +698,8 @@ class PrefetchController(StorageControllerInterface):
             for orig_key, temp_key in zip(adapter_keys, temp_keys, strict=True):
                 result = temp_results.get(temp_key)
                 if result is not None and result[0] == L1Error.SUCCESS:
-                    request.temp_reserved_keys.append(temp_key)
-                    request.temp_reserved_objs[temp_key] = result[1]
+                    request.temp_reserved_keys_for_serde.append(temp_key)
+                    request.temp_reserved_objs_for_serde[temp_key] = result[1]
                     request.original_to_temp_key[orig_key] = temp_key
                 else:
                     failed_real_keys.append(orig_key)
@@ -733,9 +739,9 @@ class PrefetchController(StorageControllerInterface):
             if request.write_reserved_keys:
                 l1_mgr.finish_write(request.write_reserved_keys)
                 l1_mgr.delete(request.write_reserved_keys)
-            if request.temp_reserved_keys:
-                l1_mgr.finish_write(request.temp_reserved_keys)
-                l1_mgr.delete(request.temp_reserved_keys)
+            if request.temp_reserved_keys_for_serde:
+                l1_mgr.finish_write(request.temp_reserved_keys_for_serde)
+                l1_mgr.delete(request.temp_reserved_keys_for_serde)
             self._update_lookup_results(request.request_id, 0)
             self._event_bus.publish(
                 Event(
@@ -863,7 +869,7 @@ class PrefetchController(StorageControllerInterface):
             temp_key = request.original_to_temp_key.get(orig_key)
             if temp_key is None or orig_key not in request.write_reserved_objs:
                 continue
-            src_objs.append(request.temp_reserved_objs[temp_key])
+            src_objs.append(request.temp_reserved_objs_for_serde[temp_key])
             dst_objs.append(request.write_reserved_objs[orig_key])
 
         if not src_objs:
@@ -1027,7 +1033,7 @@ class PrefetchController(StorageControllerInterface):
         """
         temp_key = request.original_to_temp_key.get(key)
         if temp_key is not None:
-            return request.temp_reserved_objs[temp_key]
+            return request.temp_reserved_objs_for_serde[temp_key]
         return request.write_reserved_objs[key]
 
     def _release_adapter_temp_buffers(
@@ -1045,18 +1051,21 @@ class PrefetchController(StorageControllerInterface):
         adapter_temp_keys: list[ObjectKey] = []
         for orig_key in request.load_plan[adapter_index].gather(request.keys):
             temp_key = request.original_to_temp_key.get(orig_key)
-            if temp_key is not None and temp_key in request.temp_reserved_objs:
+            if (
+                temp_key is not None
+                and temp_key in request.temp_reserved_objs_for_serde
+            ):
                 adapter_temp_keys.append(temp_key)
 
         if adapter_temp_keys:
             l1_mgr.finish_write(adapter_temp_keys)
             l1_mgr.delete(adapter_temp_keys)
             temp_set = set(adapter_temp_keys)
-            request.temp_reserved_keys = [
-                k for k in request.temp_reserved_keys if k not in temp_set
+            request.temp_reserved_keys_for_serde = [
+                k for k in request.temp_reserved_keys_for_serde if k not in temp_set
             ]
             for tk in adapter_temp_keys:
-                request.temp_reserved_objs.pop(tk, None)
+                request.temp_reserved_objs_for_serde.pop(tk, None)
 
     # =========================================================================
     # Unlock helpers
@@ -1115,9 +1124,9 @@ class PrefetchController(StorageControllerInterface):
                 if request.write_reserved_keys:
                     l1_mgr.finish_write(request.write_reserved_keys)
                     l1_mgr.delete(request.write_reserved_keys)
-                if request.temp_reserved_keys:
-                    l1_mgr.finish_write(request.temp_reserved_keys)
-                    l1_mgr.delete(request.temp_reserved_keys)
+                if request.temp_reserved_keys_for_serde:
+                    l1_mgr.finish_write(request.temp_reserved_keys_for_serde)
+                    l1_mgr.delete(request.temp_reserved_keys_for_serde)
                 self._unlock_all_plan_keys(request)
             elif request.phase == PrefetchPhase.LOOKUP:
                 self._unlock_all_lookups(request)
