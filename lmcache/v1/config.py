@@ -626,9 +626,10 @@ def _validate_config(self):
         assert self.pd_buffer_size is not None
         assert self.pd_buffer_device is not None
         assert self.enable_p2p is False, "PD only supports enable_p2p=False"
-        assert self.pd_backend_mode in ("sync", "async"), (
-            f"pd_backend_mode must be 'sync' or 'async', got {self.pd_backend_mode!r}"
-        )
+        if self.pd_backend_mode not in ("sync", "async"):
+            raise ValueError(
+                f"pd_backend_mode must be 'sync' or 'async', got {self.pd_backend_mode!r}"
+            )
 
         # PD requires save_unfull_chunk=True for complete KV cache transfer
         # from prefill node to decode node. Without this, partial chunks would
