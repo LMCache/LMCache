@@ -39,10 +39,38 @@ from lmcache.v1.memory_management import MemoryObj
 logger = init_logger(__name__)
 
 
+# Key separator and salt marker — kept in sync with fs_l2_adapter.py
+# and csrc/storage_backends/fs/connector.cpp. cache_salt is forbidden
+# from containing ``@`` (enforced in ObjectKey.__post_init__) so the
+# ``@@`` prefix unambiguously marks the salted format.
+_KEY_SEP = "@"
+_SALT_MARKER = _KEY_SEP + _KEY_SEP
+
+
 def _object_key_to_string(key: ObjectKey) -> str:
     """Serialize an ObjectKey to a deterministic string
-    for the native connector."""
-    return f"{key.model_name}@{key.kv_rank:08x}@{key.chunk_hash.hex()}"
+    for the native connector.
+
+    Two formats, distinguished by a leading ``@@`` marker:
+
+        Legacy (cache_salt == ""):
+            <model_name>@<kv_rank_hex>@<chunk_hash_hex>
+
+        With cache_salt:
+            @@<cache_salt>@<model_name>@<kv_rank_hex>@<chunk_hash_hex>
+
+    Backward compatibility: keys with ``cache_salt=""`` use the legacy
+    format, so existing stored data remains readable.
+    """
+    if key.cache_salt:
+        return (
+            f"{_SALT_MARKER}{key.cache_salt}{_KEY_SEP}"
+            f"{key.model_name}{_KEY_SEP}"
+            f"{key.kv_rank:08x}{_KEY_SEP}{key.chunk_hash.hex()}"
+        )
+    return (
+        f"{key.model_name}{_KEY_SEP}{key.kv_rank:08x}{_KEY_SEP}{key.chunk_hash.hex()}"
+    )
 
 
 def _obj_to_memoryview(

@@ -227,6 +227,122 @@ class TestObjectKeySerialization:
         s = _object_key_to_string(key)
         assert s == "llama@000000ff@00010203"
 
+    def test_salted_serialization_format(self):
+        # Salted keys are marked by a leading ``@@`` so the parser can
+        # distinguish them from legacy keys regardless of whether
+        # model_name contains ``@``.
+        key = ObjectKey(
+            chunk_hash=b"\x00\x01\x02\x03",
+            model_name="llama",
+            kv_rank=255,
+            cache_salt="alice",
+        )
+        s = _object_key_to_string(key)
+        assert s == "@@alice@llama@000000ff@00010203"
+
+    def test_different_salts_produce_different_strings(self):
+        base = {
+            "chunk_hash": b"\x00\x01\x02\x03",
+            "model_name": "llama",
+            "kv_rank": 0,
+        }
+        k_empty = ObjectKey(**base)
+        k_alice = ObjectKey(**base, cache_salt="alice")
+        k_bob = ObjectKey(**base, cache_salt="bob")
+        s_empty = _object_key_to_string(k_empty)
+        s_alice = _object_key_to_string(k_alice)
+        s_bob = _object_key_to_string(k_bob)
+        assert s_empty != s_alice
+        assert s_alice != s_bob
+        # Legacy format must NOT start with @@.
+        assert not s_empty.startswith("@@")
+        # Salted format always starts with @@.
+        assert s_alice.startswith("@@")
+        assert s_bob.startswith("@@")
+
+    def test_salted_format_unambiguous_with_at_in_model(self):
+        # ``model_name`` may contain ``@``. The @@ prefix must still
+        # uniquely mark salted keys.
+        key = ObjectKey(
+            chunk_hash=b"\xca\xfe",
+            model_name="ns@model",
+            kv_rank=1,
+            cache_salt="u",
+        )
+        s = _object_key_to_string(key)
+        assert s.startswith("@@u@")
+        # Legacy key with the same @-in-model does NOT start with @@.
+        k_legacy = ObjectKey(
+            chunk_hash=b"\xca\xfe",
+            model_name="ns@model",
+            kv_rank=1,
+        )
+        assert not _object_key_to_string(k_legacy).startswith("@@")
+
+
+class TestObjectKeyCacheSaltValidation:
+    """cache_salt must not contain ``@`` — the L2 adapters use ``@`` as
+    the field separator and would otherwise misparse keys. The invariant
+    is enforced at construction time."""
+
+    def test_reject_at_in_salt(self):
+        with pytest.raises(ValueError, match="cache_salt"):
+            ObjectKey(
+                chunk_hash=b"\x00",
+                model_name="m",
+                kv_rank=0,
+                cache_salt="alice@bob",
+            )
+
+    def test_reject_leading_at_in_salt(self):
+        with pytest.raises(ValueError, match="cache_salt"):
+            ObjectKey(
+                chunk_hash=b"\x00",
+                model_name="m",
+                kv_rank=0,
+                cache_salt="@user",
+            )
+
+    def test_empty_salt_is_accepted(self):
+        # Default/legacy path.
+        key = ObjectKey(chunk_hash=b"\x00", model_name="m", kv_rank=0)
+        assert key.cache_salt == ""
+
+    def test_non_salt_chars_are_accepted(self):
+        # Common identifier chars are fine.
+        key = ObjectKey(
+            chunk_hash=b"\x00",
+            model_name="m",
+            kv_rank=0,
+            cache_salt="user-abc_123.xyz:42",
+        )
+        assert key.cache_salt == "user-abc_123.xyz:42"
+
+
+class TestObjectKeyIsolation:
+    """cache_salt must participate in eq/hash so the L1/L2 caches treat
+    same-content/different-user entries as distinct."""
+
+    def test_different_salts_are_unequal(self):
+        base = {"chunk_hash": b"x", "model_name": "m", "kv_rank": 0}
+        a = ObjectKey(**base, cache_salt="alice")
+        b = ObjectKey(**base, cache_salt="bob")
+        assert a != b
+        assert hash(a) != hash(b)
+
+    def test_empty_salt_is_unequal_to_any_salted(self):
+        base = {"chunk_hash": b"x", "model_name": "m", "kv_rank": 0}
+        unsalted = ObjectKey(**base)
+        salted = ObjectKey(**base, cache_salt="alice")
+        assert unsalted != salted
+
+    def test_same_salt_are_equal(self):
+        base = {"chunk_hash": b"x", "model_name": "m", "kv_rank": 0}
+        a = ObjectKey(**base, cache_salt="alice")
+        b = ObjectKey(**base, cache_salt="alice")
+        assert a == b
+        assert hash(a) == hash(b)
+
 
 # =============================================================================
 # Event Fd Interface Tests

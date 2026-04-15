@@ -46,6 +46,11 @@ from lmcache.v1.memory_management import MemoryObj
 logger = init_logger(__name__)
 
 _KEY_SEP = "@"
+# Salted keys are marked by a leading ``@@``. cache_salt is forbidden
+# from containing ``@`` (enforced in ObjectKey.__post_init__), so the
+# doubled separator is unambiguous. Kept in sync with
+# native_connector_l2_adapter.py and csrc/storage_backends/fs/connector.cpp.
+_SALT_MARKER = _KEY_SEP + _KEY_SEP
 _PATH_SLASH_REPLACEMENT = "-SEP-"
 _FILE_EXT = ".data"
 
@@ -92,15 +97,31 @@ async def _async_readinto_full(
 def _object_key_to_filename(key: ObjectKey) -> str:
     """Build a reversible, filesystem-safe filename.
 
-    Format follows CacheEngineKey.to_string() convention::
+    Two formats, distinguished by a leading ``@@`` marker:
 
-        <model_name>@<kv_rank_hex>@<chunk_hash_hex>.data
+        Legacy (cache_salt == ""):
+            <model_name>@<kv_rank_hex>@<chunk_hash_hex>.data
+
+        With cache_salt:
+            @@<cache_salt>@<model_name>@<kv_rank_hex>@<chunk_hash_hex>.data
+
+    The ``@@`` prefix marks the salted format unambiguously so the parser
+    can distinguish it from legacy filenames without relying on field
+    counts (``model_name`` may contain ``@``).
 
     ``kv_rank`` is written in ``0x`` prefixed hex so each byte
     of the bitmap ``(ws<<24)|(rank<<16)|(local_ws<<8)|local``
     is directly readable.
     """
     safe_model = key.model_name.replace("/", _PATH_SLASH_REPLACEMENT)
+    if key.cache_salt:
+        return (
+            f"{_SALT_MARKER}{key.cache_salt}"
+            f"{_KEY_SEP}{safe_model}"
+            f"{_KEY_SEP}{key.kv_rank:#010x}"
+            f"{_KEY_SEP}{key.chunk_hash.hex()}"
+            f"{_FILE_EXT}"
+        )
     return (
         f"{safe_model}"
         f"{_KEY_SEP}{key.kv_rank:#010x}"
@@ -114,6 +135,9 @@ def _filename_to_object_key(
 ) -> Optional[ObjectKey]:
     """Reverse ``_object_key_to_filename``.
 
+    Handles both the legacy 3-field format and the 4-field salted
+    format (marked by a leading ``@@`` prefix).
+
     Returns ``None`` when the filename cannot be parsed.
     """
     stem = filename
@@ -122,7 +146,19 @@ def _filename_to_object_key(
     else:
         return None
 
-    # Split by ``@``.  Layout:
+    cache_salt = ""
+    # The ``@@`` prefix indicates the new salted format:
+    #   @@<cache_salt>@<model_name>@<kv_rank>@<chunk_hash_hex>
+    # Otherwise parse as legacy 3-field format.
+    if stem.startswith(_SALT_MARKER):
+        # Strip the ``@@`` marker, then split the salt off the head.
+        rest = stem[len(_SALT_MARKER) :]
+        split = rest.split(_KEY_SEP, 1)
+        if len(split) != 2:
+            return None
+        cache_salt, stem = split
+
+    # Layout after salt handling:
     #   <model_name> @ <kv_rank> @ <chunk_hash_hex>
     # model_name itself may contain ``@``, so we split
     # from the right to reliably isolate the last two
@@ -142,6 +178,7 @@ def _filename_to_object_key(
         chunk_hash=chunk_hash,
         model_name=model_name,
         kv_rank=kv_rank,
+        cache_salt=cache_salt,
     )
 
 

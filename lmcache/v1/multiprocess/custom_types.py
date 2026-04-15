@@ -144,6 +144,25 @@ class IPCCacheEngineKey:
     # === Session tracking (not part of cache identity) ===
     request_id: str = field(compare=False)
 
+    # === Per-user isolation salt (part of cache identity) ===
+    # msgspec encodes dataclasses as maps, so forward wire compatibility
+    # works by field name: an old payload without ``cache_salt`` decodes
+    # on new code using the default "". Placing the field last is a style
+    # choice — all defaulted fields must come after non-defaulted ones.
+    #
+    # Invariant: must not contain ``@`` — same rationale as ObjectKey
+    # (see ObjectKey.cache_salt). Validated in __post_init__.
+    cache_salt: str = ""
+
+    def __post_init__(self) -> None:
+        # Enforce the "no @ in cache_salt" invariant at the deserialization
+        # boundary so any adapter downstream (including the C++ FS connector)
+        # can rely on it. Duplicated in ObjectKey for defense in depth.
+        if "@" in self.cache_salt:
+            raise ValueError(
+                f"cache_salt must not contain '@' (got {self.cache_salt!r})"
+            )
+
     # Helper function for unit tests only
     @classmethod
     def from_token_ids(
@@ -155,6 +174,7 @@ class IPCCacheEngineKey:
         start: int = 0,
         end: int = 0,
         request_id: str = "",
+        cache_salt: str = "",
     ) -> "IPCCacheEngineKey":
         """Create a key from token ids. Only used by the tests."""
         return cls(
@@ -165,6 +185,7 @@ class IPCCacheEngineKey:
             start=start,
             end=end,
             request_id=request_id,
+            cache_salt=cache_salt,
         )
 
     def no_worker_id_version(self) -> "IPCCacheEngineKey":
@@ -177,6 +198,7 @@ class IPCCacheEngineKey:
             start=self.start,
             end=self.end,
             request_id=self.request_id,
+            cache_salt=self.cache_salt,
         )
 
 

@@ -558,8 +558,6 @@ class LMCacheMPSchedulerAdapter:
         """
         # NOTE: for the scheduler adapter, we don't have a worker id,
         # so we set it to None in the key.
-        # NOTE: cache_salt is accepted here but not yet forwarded to
-        # IPCCacheEngineKey until that field is added (PR2).
         return IPCCacheEngineKey(
             model_name=self.model_name,
             world_size=self.world_size,
@@ -568,6 +566,7 @@ class LMCacheMPSchedulerAdapter:
             start=start,
             end=end,
             request_id=request_id,
+            cache_salt=cache_salt,
         )
 
 
@@ -1086,8 +1085,6 @@ class LMCacheMPWorkerAdapter:
         Returns:
             IPCCacheEngineKey: The constructed key.
         """
-        # NOTE: cache_salt is accepted here but not yet forwarded to
-        # IPCCacheEngineKey until that field is added (PR2).
         return IPCCacheEngineKey(
             model_name=self.model_name,
             world_size=self.world_size,
@@ -1096,4 +1093,5 @@ class LMCacheMPWorkerAdapter:
             start=start,
             end=end,
             request_id=request_id,
+            cache_salt=cache_salt,
         )

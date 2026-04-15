@@ -27,27 +27,55 @@ std::string FSConnector::replace_all(const std::string& str,
 
 std::string FSConnector::key_to_filename(const std::string& key) {
   // Input key format (from _object_key_to_string):
-  //   model_name@kv_rank_hex@chunk_hash_hex
-  //   e.g. "meta-llama/Llama-3@0000002a@deadbeef..."
+  //   Legacy (no cache_salt):
+  //     model_name@kv_rank_hex@chunk_hash_hex
+  //   Salted (marked by a leading @@ prefix):
+  //     @@cache_salt@model_name@kv_rank_hex@chunk_hash_hex
   //
   // Output filename (matching _object_key_to_filename):
-  //   model_name_safe@0xkv_rank_hex@chunk_hash_hex.data
-  //   e.g. "meta-llama-SEP-Llama-3@0x0000002a@deadbeef....data"
+  //   Legacy:
+  //     model_name_safe@0xkv_rank_hex@chunk_hash_hex.data
+  //   Salted (same @@ prefix marker carried through):
+  //     @@cache_salt@model_name_safe@0xkv_rank_hex@chunk_hash_hex.data
+  //
+  // The @@ prefix unambiguously marks the salted format so we do
+  // not have to disambiguate by field count (model_name may itself
+  // contain '@'). In the salted case we strip the @@ marker, peel
+  // off the cache_salt up to the next '@', and parse the remaining
+  // "model@rank@hash" identically to the legacy case.
+  // NOTE: cache_salt must not contain '@' — invariant enforced on
+  // the Python side.
 
-  // Split from the right on '@' to get exactly 3 parts
-  size_t last_sep = key.rfind(KEY_SEP);
+  std::string cache_salt;
+  std::string work_key = key;
+  if (work_key.size() >= 2 && work_key[0] == KEY_SEP &&
+      work_key[1] == KEY_SEP) {
+    // Salted format: @@<cache_salt>@<model>@<kv_rank>@<hash>
+    size_t salt_end = work_key.find(KEY_SEP, 2);
+    if (salt_end == std::string::npos) {
+      return key + FILE_EXT;
+    }
+    cache_salt = work_key.substr(2, salt_end - 2);
+    work_key = work_key.substr(salt_end + 1);
+  }
+
+  // Legacy layout (or salted remainder):
+  //   <model_name>@<kv_rank_hex>@<chunk_hash_hex>
+  // model_name may contain '@', so rsplit from the right to isolate
+  // kv_rank and chunk_hash reliably.
+  size_t last_sep = work_key.rfind(KEY_SEP);
   if (last_sep == std::string::npos) {
     return key + FILE_EXT;
   }
-  size_t second_sep = key.rfind(KEY_SEP, last_sep - 1);
+  size_t second_sep = work_key.rfind(KEY_SEP, last_sep - 1);
   if (second_sep == std::string::npos) {
     return key + FILE_EXT;
   }
 
-  std::string model_name = key.substr(0, second_sep);
+  std::string model_name = work_key.substr(0, second_sep);
   std::string kv_rank_hex =
-      key.substr(second_sep + 1, last_sep - second_sep - 1);
-  std::string chunk_hash = key.substr(last_sep + 1);
+      work_key.substr(second_sep + 1, last_sep - second_sep - 1);
+  std::string chunk_hash = work_key.substr(last_sep + 1);
 
   // Replace '/' with '-SEP-' for filesystem safety
   std::string safe_model = replace_all(model_name, "/", PATH_SLASH_REPLACEMENT);
@@ -56,8 +84,15 @@ std::string FSConnector::key_to_filename(const std::string& key) {
   // Input kv_rank_hex is 8 hex chars (e.g. "0000002a")
   // Output needs to be "0x0000002a"
   std::string result;
-  result.reserve(safe_model.size() + kv_rank_hex.size() + chunk_hash.size() +
-                 32);
+  result.reserve(cache_salt.size() + safe_model.size() + kv_rank_hex.size() +
+                 chunk_hash.size() + 32);
+  if (!cache_salt.empty()) {
+    // Leading @@ marker distinguishes salted format on deserialization.
+    result += KEY_SEP;
+    result += KEY_SEP;
+    result += cache_salt;
+    result += KEY_SEP;
+  }
   result += safe_model;
   result += KEY_SEP;
   result += "0x";

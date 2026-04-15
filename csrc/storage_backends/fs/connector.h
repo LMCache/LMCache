@@ -50,16 +50,19 @@ class FSConnector : public ConnectorBase<WorkerFSConn> {
 
  private:
   // Build the filesystem-safe filename from a serialized key string.
-  // The key string has the format: model_name@kv_rank_hex@chunk_hash_hex
-  // Output filename: model_name_safe@0xkv_rank_hex@chunk_hash_hex.data
   //
-  // NOTE: the key string from NativeConnectorL2Adapter uses
-  //   _object_key_to_string: "{model}@{kv_rank:08x}@{hash.hex()}"
-  // while fs_l2_adapter.py uses _object_key_to_filename:
-  //   "{safe_model}@{kv_rank:#010x}@{hash.hex()}.data"
+  // Input key (from NativeConnectorL2Adapter._object_key_to_string):
+  //   Legacy : "{model}@{kv_rank:08x}@{hash.hex()}"
+  //   Salted : "@@{cache_salt}@{model}@{kv_rank:08x}@{hash.hex()}"
   //
-  // The difference is the 0x prefix in kv_rank. We handle
-  // this by re-encoding here to match the Python FS layout.
+  // Output filename (matching fs_l2_adapter.py._object_key_to_filename):
+  //   Legacy : "{safe_model}@{kv_rank:#010x}@{hash.hex()}.data"
+  //   Salted : "@@{cache_salt}@{safe_model}@{kv_rank:#010x}@{hash.hex()}.data"
+  //
+  // Differences from the input: '/' in model becomes '-SEP-', kv_rank
+  // gains a '0x' prefix, and '.data' is appended. The @@ prefix is
+  // a marker for the salted format — unambiguous because cache_salt
+  // cannot contain '@' (invariant on the Python side).
   static std::string key_to_filename(const std::string& key);
 
   static std::string replace_all(const std::string& str,

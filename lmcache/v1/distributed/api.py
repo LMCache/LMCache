@@ -34,6 +34,25 @@ class ObjectKey:
     kv_rank: int
     """ The rank that uniquely identifies the slice of the KV cache """
 
+    cache_salt: str = ""
+    """ Per-user isolation salt. Same content from different users with
+    different cache_salt values produces different ObjectKeys, giving
+    strict per-user cache isolation. Defaults to empty string which
+    preserves the pre-cache-salt behavior (all keys share one namespace).
+
+    Invariant: must not contain ``@`` — the L2 adapters (native, fs, and
+    the C++ FS connector) use ``@`` as the field separator in serialized
+    forms and rely on this invariant for unambiguous parsing.
+    """
+
+    def __post_init__(self) -> None:
+        # Enforce the "no @ in cache_salt" invariant at the choke point
+        # so the serialization formats in the L2 adapters stay parseable.
+        if "@" in self.cache_salt:
+            raise ValueError(
+                f"cache_salt must not contain '@' (got {self.cache_salt!r})"
+            )
+
     @staticmethod
     def IntHash2Bytes(chunk_hash: int) -> bytes:
         # NOTE: this is only used by tests
@@ -124,13 +143,21 @@ def ipc_key_to_object_keys(
     When the ipc_key's worker_id is None, each chunk hash is exploded into
     multiple ObjectKeys (one per worker in world_size).
 
+    ``cache_salt`` is read directly from ``ipc_key`` so the produced
+    ObjectKeys are per-user isolated whenever the sender set a non-empty
+    salt. There is intentionally no separate ``cache_salt`` parameter —
+    duplicating the source of truth would risk silent isolation bugs
+    where a caller passes ``ipc_key`` but forgets the salt.
+
     Args:
-        ipc_key: The IPC key providing model_name, world_size, and worker_id.
+        ipc_key: The IPC key providing model_name, world_size, worker_id,
+            and cache_salt.
         chunk_hashes: List of chunk hash bytes, one per chunk.
 
     Returns:
         list[ObjectKey]: The converted list of ObjectKey.
     """
+    cache_salt = ipc_key.cache_salt
     storage_keys = []
     for chunk_hash in chunk_hashes:
         if ipc_key.worker_id is None:
@@ -150,6 +177,7 @@ def ipc_key_to_object_keys(
                         chunk_hash=chunk_hash,
                         model_name=ipc_key.model_name,
                         kv_rank=kv_rank,
+                        cache_salt=cache_salt,
                     )
                 )
         else:
@@ -165,6 +193,7 @@ def ipc_key_to_object_keys(
                     chunk_hash=chunk_hash,
                     model_name=ipc_key.model_name,
                     kv_rank=kv_rank,
+                    cache_salt=cache_salt,
                 )
             )
 

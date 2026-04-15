@@ -24,8 +24,8 @@ vLLM API Server
   │  sends cache_salt directly on IPCCacheEngineKey
   ▼
 LMCache MP Server
-  │  reads key.cache_salt
-  │  ipc_key_to_object_keys(..., cache_salt=key.cache_salt)
+  │  ipc_key_to_object_keys(key, chunk_hashes)
+  │    reads key.cache_salt internally and propagates
   ▼
 ObjectKey(chunk_hash, model_name, kv_rank, cache_salt="alice")
   │                                         ▲
@@ -152,7 +152,8 @@ Worker path (STORE/RETRIEVE):                              │
   → IPCCacheEngineKey(cache_salt="alice", ...) ──STORE──►  MP Server
                                                            │
                                               key.cache_salt = "alice"
-                                              ipc_key_to_object_keys(..., cache_salt="alice")
+                                              ipc_key_to_object_keys(key, hashes)
+                                                — reads key.cache_salt
                                               → ObjectKey(cache_salt="alice", ...)
 ```
 
@@ -287,22 +288,20 @@ See the **Configuration** section for the full JSON example.
 **File:** `lmcache/v1/distributed/api.py`
 
 Add `cache_salt: str = ""` to `ObjectKey` (as shown in section 1).
-Add `cache_salt: str = ""` parameter to `ipc_key_to_object_keys()` and
-pass it through to each constructed `ObjectKey`.
+`ipc_key_to_object_keys()` reads `ipc_key.cache_salt` directly and
+propagates it to each constructed `ObjectKey` — no separate parameter,
+so callers cannot accidentally drop the salt.
 
-### 2. Server — Pass `cache_salt` through to ObjectKeys
+### 2. Server — `cache_salt` is carried by `IPCCacheEngineKey`
 
 **File:** `lmcache/v1/multiprocess/server.py`
 
 Since both the scheduler and worker adapters set `cache_salt` on
-`IPCCacheEngineKey`, the server simply reads `key.cache_salt` directly in
-all code paths. No session-based fallback is needed.
-
-In `MPCacheEngine.store()`, `MPCacheEngine.retrieve()`, and
-`MPCacheEngine.lookup()`:
+`IPCCacheEngineKey`, the server simply calls `ipc_key_to_object_keys(...)`
+and the salt flows through automatically:
 
 ```python
-obj_keys = ipc_key_to_object_keys(key, chunk_hashes, cache_salt=key.cache_salt)
+obj_keys = ipc_key_to_object_keys(key, chunk_hashes)
 ```
 
 **`session.py` is unchanged** — no `cache_salt` field needed on `Session`.
@@ -804,13 +803,13 @@ it through. Update serialization. No behavioral change with `cache_salt=""`.
 
 | File | Change |
 |------|--------|
-| `lmcache/v1/distributed/api.py` | `cache_salt: str = ""` on `ObjectKey`; `cache_salt` param on `ipc_key_to_object_keys()` |
-| `lmcache/v1/multiprocess/custom_types.py` | `cache_salt: str = ""` on `IPCCacheEngineKey` (appended at end); update `no_worker_id_version()`, `from_token_ids()` |
-| `lmcache/v1/multiprocess/server.py` | Pass `key.cache_salt` to `ipc_key_to_object_keys()` in all handlers |
-| `lmcache/v1/multiprocess/blend_server_v2.py` | Same for all 4 call sites |
-| `lmcache/v1/distributed/l2_adapters/native_connector_l2_adapter.py` | Update `_object_key_to_string()` |
-| `lmcache/v1/distributed/l2_adapters/fs_l2_adapter.py` | Update `_object_key_to_filename()` / `_filename_to_object_key()` |
-| `csrc/storage_backends/fs/connector.cpp` | Update `key_to_filename()` parser |
+| `lmcache/v1/distributed/api.py` | `cache_salt: str = ""` on `ObjectKey` with `__post_init__` validation (no `@` allowed); `ipc_key_to_object_keys()` reads `ipc_key.cache_salt` directly (no separate param) |
+| `lmcache/v1/multiprocess/custom_types.py` | `cache_salt: str = ""` on `IPCCacheEngineKey` with `__post_init__` validation; update `no_worker_id_version()`, `from_token_ids()` |
+| `lmcache/v1/multiprocess/server.py` / `blend_server_v2.py` | No code changes — existing `ipc_key_to_object_keys(key, chunk_hashes)` calls now carry salt automatically |
+| `lmcache/integration/vllm/vllm_multi_process_adapter.py` | Scheduler + worker `_create_key()` now forward `cache_salt` to `IPCCacheEngineKey` |
+| `lmcache/v1/distributed/l2_adapters/native_connector_l2_adapter.py` | `_object_key_to_string()` emits `@@`-prefixed salted format |
+| `lmcache/v1/distributed/l2_adapters/fs_l2_adapter.py` | `_object_key_to_filename()` / `_filename_to_object_key()` roundtrip `@@`-prefixed salted format |
+| `csrc/storage_backends/fs/connector.cpp` | `key_to_filename()` parser handles both legacy and `@@`-prefixed salted input |
 
 ### PR3 — LMCache: Adapter interface refactor (LMCache repo)
 
