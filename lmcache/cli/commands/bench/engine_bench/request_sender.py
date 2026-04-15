@@ -155,9 +155,17 @@ class RequestSender:
             num_output = num_output_tokens if num_output_tokens > 0 else len(tokens)
             decode_speed = (num_output / decode_time) if decode_time > 0 else 0.0
 
-            # Compute average inter-token latency using server-reported
-            # token count (not chunk count) for accuracy when chunks
-            # contain multiple tokens.
+            # Compute average inter-token latency.
+            #
+            # Uses server-reported token count (num_output) rather than
+            # chunk count (len(token_times)) as the denominator.  This
+            # handles speculative decoding correctly: when >1 tokens
+            # arrive in a single SSE chunk, the chunk count
+            # under-represents the true token count.  The server's
+            # ``usage.completion_tokens`` reflects the actual number of
+            # generated tokens, so dividing the total decode wall-time
+            # by (num_output - 1) gives the correct average ITL
+            # regardless of how tokens are batched into SSE chunks.
             if len(token_times) >= 2 and num_output > 1:
                 inter_token_latency = (token_times[-1] - token_times[0]) / (
                     num_output - 1

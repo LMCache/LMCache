@@ -444,6 +444,13 @@ After completion, a summary table is printed:
    P99 ITL (ms):                     18.20
    ======================================================
 
+.. note::
+
+   ITL is computed as total decode wall-time divided by the server-reported
+   output token count (from ``usage.completion_tokens``), not by the number
+   of SSE chunks.  This gives correct results with speculative decoding,
+   where multiple tokens may arrive in a single SSE chunk.
+
 CSV and JSON
 ~~~~~~~~~~~~~
 
