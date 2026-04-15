@@ -27,12 +27,16 @@ class LRUCachePolicy(BaseCachePolicy[KeyType, OrderedDict[KeyType, Any]]):
     def init_mutable_mapping(self) -> OrderedDict[KeyType, Any]:
         return OrderedDict()
 
-    def update_chunk_hash_dict(self, key: KeyType) -> None:
-        curr_time = time.time()
+    def _normalize_key_hash(self, key: KeyType) -> Any:
         # HACK: doing type conversion here
         key_hash: Any = key
         if isinstance(key, CacheEngineKey):
             key_hash = key.chunk_hash
+        return key_hash
+
+    def update_chunk_hash_dict(self, key: KeyType) -> None:
+        curr_time = time.time()
+        key_hash = self._normalize_key_hash(key)
 
         if init_timestamp := self.chunk_hash_to_init_timestamp.get(key_hash, None):
             time_interval = curr_time - init_timestamp
@@ -62,6 +66,19 @@ class LRUCachePolicy(BaseCachePolicy[KeyType, OrderedDict[KeyType, Any]]):
         key: KeyType,
     ) -> None:
         pass
+
+    def restore_on_recover(
+        self,
+        key: KeyType,
+        cache_dict: OrderedDict[KeyType, Any],
+        metadata: Any,
+    ) -> None:
+        created_ts = float(getattr(metadata, "created_ts", 0.0) or 0.0)
+        if created_ts <= 0:
+            return
+
+        key_hash = self._normalize_key_hash(key)
+        self.chunk_hash_to_init_timestamp[key_hash] = created_ts
 
     # NOTE(Jiayi): We do best effort to get eviction candidates so the number
     # of returned keys mignt be smaller than num_candidates.

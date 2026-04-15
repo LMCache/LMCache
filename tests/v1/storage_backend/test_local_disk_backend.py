@@ -327,6 +327,61 @@ class TestLocalDiskBackend:
         )
         assert updated_payload["last_access_ts"] >= initial_payload["last_access_ts"]
 
+    def test_recover_persisted_index_restores_lru_reuse_tracking(
+        self, temp_disk_path, async_loop, local_cpu_backend, monkeypatch
+    ):
+        """Recovered LRU entries should count the first post-restart hit as reuse."""
+        config = create_test_config(temp_disk_path)
+        key = create_test_key(31)
+        payload = b"reuse"
+
+        backend = LocalDiskBackend(
+            config=config,
+            loop=async_loop,
+            local_cpu_backend=local_cpu_backend,
+            dst_device="cuda",
+        )
+        data_path = backend._key_to_path(key)
+        with open(data_path, "wb") as f:
+            f.write(payload)
+        with open(backend._key_to_meta_path(key), "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "key": key.to_string(),
+                    "size": len(payload),
+                    "shape": None,
+                    "dtype": None,
+                    "fmt": None,
+                    "cached_positions": None,
+                    "shapes": None,
+                    "dtypes": None,
+                    "created_ts": 10.0,
+                    "last_access_ts": 20.0,
+                    "hit_count": 2,
+                },
+                f,
+            )
+
+        recovered_backend = LocalDiskBackend(
+            config=config,
+            loop=async_loop,
+            local_cpu_backend=local_cpu_backend,
+            dst_device="cuda",
+        )
+
+        reuse_intervals: list[float] = []
+        monkeypatch.setattr(
+            recovered_backend.cache_policy.stats_monitor,
+            "on_chunk_reuse",
+            lambda interval: reuse_intervals.append(interval),
+        )
+
+        assert recovered_backend.contains(key, pin=True)
+        recovered_backend.touch_cache()
+
+        assert len(reuse_intervals) == 1
+        assert reuse_intervals[0] > 0
+
     def test_init_multi_path(self, async_loop, local_cpu_backend):
         """Comma-separated disk paths should remain supported."""
         dir_a = tempfile.mkdtemp()

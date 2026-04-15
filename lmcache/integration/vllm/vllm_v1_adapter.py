@@ -116,6 +116,19 @@ def _compute_group_block_sizes(
     return tuple(group_block_sizes)
 
 
+def _compute_max_token_slots(
+    block_ids_by_group: tuple[list[int], ...],
+    group_block_sizes: tuple[int, ...],
+) -> int:
+    return max(
+        (
+            len(block_ids_for_group) * group_block_sizes[gid]
+            for gid, block_ids_for_group in enumerate(block_ids_by_group)
+        ),
+        default=0,
+    )
+
+
 @dataclass
 class RequestTracker:
     # Request id
@@ -443,14 +456,9 @@ class ReqMeta:
             fallback_block_size=block_size,
             kv_cache_groups=kv_cache_groups,
         )
-        max_num_token_slots = max(
-            (
-                len(block_ids_for_group) * group_block_sizes[gid]
-                for gid, block_ids_for_group in enumerate(
-                    tracker.allocated_block_ids_by_group
-                )
-            ),
-            default=0,
+        max_num_token_slots = _compute_max_token_slots(
+            tracker.allocated_block_ids_by_group,
+            group_block_sizes,
         )
 
         if len(token_ids) > max_num_token_slots:
@@ -475,8 +483,10 @@ class ReqMeta:
             block_ids = torch.tensor(block_ids_for_group, dtype=torch.long)
             slot_mapping = (
                 block_offsets.reshape((1, group_block_size))
-                + block_ids.reshape((group_num_blocks, 1)).clamp_min(0)
-                * group_block_size
+                + (
+                    block_ids.reshape((group_num_blocks, 1)).clamp_min(0)
+                    * group_block_size
+                )
             )
             # vLLM reserves block_id=0 for the shared null block. These
             # placeholders represent skipped prefix tokens for sliding-window /
@@ -638,13 +648,7 @@ class LMCacheConnectorV1Impl:
         self, block_ids_by_group: tuple[list[int], ...]
     ) -> int:
         group_block_sizes = self._get_group_block_sizes(len(block_ids_by_group))
-        return max(
-            (
-                len(block_ids_for_group) * group_block_sizes[gid]
-                for gid, block_ids_for_group in enumerate(block_ids_by_group)
-            ),
-            default=0,
-        )
+        return _compute_max_token_slots(block_ids_by_group, group_block_sizes)
 
     def _resolve_full_slot_mapping(self, request: ReqMeta) -> torch.Tensor:
         token_count = len(request.token_ids)

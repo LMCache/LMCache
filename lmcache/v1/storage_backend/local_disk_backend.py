@@ -56,6 +56,7 @@ def _build_disk_cache_metadata(
     last_access_ts: float,
     hit_count: int,
 ) -> DiskCacheMetadata:
+    """Construct persisted disk-cache metadata for an entry."""
     return DiskCacheMetadata(
         path=path,
         size=size,
@@ -73,12 +74,14 @@ def _build_disk_cache_metadata(
 
 
 def _clone_disk_cache_metadata(metadata: DiskCacheMetadata) -> DiskCacheMetadata:
+    """Return a detached copy of persisted metadata for lock-free updates."""
     return replace(metadata)
 
 
 def _has_same_persisted_state(
     current: DiskCacheMetadata, snapshot: DiskCacheMetadata
 ) -> bool:
+    """Check whether the persisted fields still match a saved snapshot."""
     return (
         current.created_ts == snapshot.created_ts
         and current.last_access_ts == snapshot.last_access_ts
@@ -277,7 +280,12 @@ class LocalDiskBackend(StorageBackendInterface):
             return None
         return STR_DTYPE_TO_TORCH_DTYPE[dtype_str]
 
-    def _serialize_disk_metadata(self, key: CacheEngineKey, metadata: DiskCacheMetadata) -> dict:
+    def _serialize_disk_metadata(
+        self,
+        key: CacheEngineKey,
+        metadata: DiskCacheMetadata,
+    ) -> dict:
+        """Convert disk metadata into the JSON payload stored beside the tensor."""
         return {
             "key": key.to_string(),
             "size": metadata.size,
@@ -303,6 +311,7 @@ class LocalDiskBackend(StorageBackendInterface):
         key: CacheEngineKey,
         metadata: DiskCacheMetadata,
     ) -> None:
+        """Atomically persist a metadata sidecar for the given cache entry."""
         meta_path = self._key_to_meta_path(key)
         payload = self._serialize_disk_metadata(key, metadata)
         tmp_meta_path = meta_path + ".tmp"
@@ -314,6 +323,10 @@ class LocalDiskBackend(StorageBackendInterface):
         self,
         key: CacheEngineKey,
     ) -> DiskCacheMetadata:
+        """Update in-memory hit metadata and return a persistence snapshot.
+
+        This method must be called while ``disk_lock`` is held.
+        """
         metadata = self.dict[key]
         metadata.hit_count = max(1, int(metadata.hit_count or 1)) + 1
         metadata.last_access_ts = time.time()
@@ -321,6 +334,7 @@ class LocalDiskBackend(StorageBackendInterface):
         return _clone_disk_cache_metadata(metadata)
 
     def _recover_persisted_index(self) -> None:
+        """Rebuild the in-memory disk index and cache policy state from sidecars."""
         recovered = 0
         total_bytes = 0
         recovered_entries: list[tuple[CacheEngineKey, DiskCacheMetadata]] = []
@@ -393,7 +407,11 @@ class LocalDiskBackend(StorageBackendInterface):
                 total_bytes += size
                 recovered += 1
             except Exception as e:
-                logger.warning("Failed to recover disk cache metadata %s: %s", meta_path, e)
+                logger.warning(
+                    "Failed to recover disk cache metadata %s: %s",
+                    meta_path,
+                    e,
+                )
 
         if recovered_entries:
             recovered_entries.sort(
@@ -963,6 +981,7 @@ class LocalDiskBackend(StorageBackendInterface):
         key: CacheEngineKey,
         metadata_snapshot: DiskCacheMetadata,
     ) -> None:
+        """Persist metadata only if no newer in-memory state superseded it."""
         with self.disk_lock:
             current_metadata = self.dict.get(key)
             if current_metadata is None:
@@ -978,4 +997,5 @@ class LocalDiskBackend(StorageBackendInterface):
         key: CacheEngineKey,
         metadata_snapshot: DiskCacheMetadata,
     ) -> None:
+        """Persist a metadata snapshot after the caller releases ``disk_lock``."""
         self._persist_metadata_snapshot_if_current(key, metadata_snapshot)
