@@ -154,7 +154,7 @@ You should see LMCache logs like this (examples for each engine):
          Prefill batch, #new-seq: 1, #new-token: 35, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0,
          Decode batch, #running-req: 1, #token: 74, token usage: 0.00, cuda graph: True, gen throughput (token/s): 1.63, #queue-req: 0,
          Decode batch, #running-req: 1, #token: 114, token usage: 0.00, cuda graph: True, gen throughput (token/s): 87.95, #queue-req: 0,
-         LMCache INFO: Stored 128 out of total 135 tokens. size: 0.0195 GB, cost 12.8890 ms, throughput: 1.5153 GB/s (cache_engine.py:623:lmcache.v1.cache_engine)
+         LMCache INFO: Stored 128 out of total 135 tokens. size: 0.0195 GB, cost 12.8890 ms, throughput: 1.5153 GB/s (cache_engine.py:623:lmcache.cache_engine)
 
 **What this means:** The first request caches the prompt. The second reuses the cached prefix and only loads the missing chunk. You should see logs like this:
 
@@ -177,7 +177,7 @@ You should see LMCache logs like this (examples for each engine):
          Decode batch, #running-req: 1, #token: 64, token usage: 0.00, cuda graph: True, gen throughput (token/s): 8.29, #queue-req: 0,
          Decode batch, #running-req: 1, #token: 104, token usage: 0.00, cuda graph: True, gen throughput (token/s): 87.95, #queue-req: 0,
          Decode batch, #running-req: 1, #token: 144, token usage: 0.00, cuda graph: True, gen throughput (token/s): 87.89, #queue-req: 0,
-         LMCache INFO: Stored 112 out of total 140 tokens. size: 0.0171 GB, cost 11.1986 ms, throughput: 1.5261 GB/s (cache_engine.py:623:lmcache.v1.cache_engine)
+         LMCache INFO: Stored 112 out of total 140 tokens. size: 0.0171 GB, cost 11.1986 ms, throughput: 1.5261 GB/s (cache_engine.py:623:lmcache.cache_engine)
 
 **What this means (per engine):**
 

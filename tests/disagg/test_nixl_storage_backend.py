@@ -15,15 +15,15 @@ import torch
 pytest.importorskip("nixl", reason="nixl package is required for nixl tests")
 
 # First Party
+from lmcache.config import LMCacheEngineConfig
 from lmcache.logging import init_logger
-from lmcache.utils import CacheEngineKey
-from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.memory_management import AdHocMemoryAllocator, MemoryFormat, MemoryObj
-from lmcache.v1.metadata import LMCacheMetadata
-from lmcache.v1.storage_backend.nixl_storage_backend import (
+from lmcache.memory_management import AdHocMemoryAllocator, MemoryFormat, MemoryObj
+from lmcache.metadata import LMCacheMetadata
+from lmcache.storage_backend.nixl_storage_backend import (
     NixlStorageBackend,
     NixlStorageConfig,
 )
+from lmcache.utils import CacheEngineKey
 
 logger = init_logger(__name__)
 

@@ -24,15 +24,15 @@ import pytest
 import torch
 
 # First Party
-from lmcache.v1.distributed.api import ObjectKey
-from lmcache.v1.distributed.l2_adapters.config import (
+from lmcache.distributed.api import ObjectKey
+from lmcache.distributed.l2_adapters.config import (
     parse_args_to_l2_adapters_config,
 )
-from lmcache.v1.distributed.l2_adapters.factory import (
+from lmcache.distributed.l2_adapters.factory import (
     create_l2_adapter_from_registry,
 )
-from lmcache.v1.distributed.l2_adapters.plugin_l2_adapter import PluginL2AdapterConfig
-from lmcache.v1.memory_management import TensorMemoryObj
+from lmcache.distributed.l2_adapters.plugin_l2_adapter import PluginL2AdapterConfig
+from lmcache.memory_management import TensorMemoryObj
 
 if TYPE_CHECKING:
     pass
@@ -95,7 +95,7 @@ def _make_tensor_obj(
     if "metadata" in params:
         try:
             # First Party
-            from lmcache.v1.memory_management import (
+            from lmcache.memory_management import (
                 MemoryObjMetadata,
             )
 
@@ -206,7 +206,7 @@ class TestPluginConfigParsing:
         import argparse
 
         # First Party
-        from lmcache.v1.distributed.l2_adapters.config import (
+        from lmcache.distributed.l2_adapters.config import (
             add_l2_adapters_args,
         )
 
@@ -234,7 +234,7 @@ class TestPluginImport:
         )
 
         # First Party
-        from lmcache.v1.distributed.l2_adapters.base import (
+        from lmcache.distributed.l2_adapters.base import (
             L2AdapterInterface,
         )
 

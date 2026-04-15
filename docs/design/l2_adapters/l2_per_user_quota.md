@@ -215,7 +215,7 @@ policy — no special "disable" flag is needed.
 
 ### 4. HTTP API for Quota Management
 
-The existing FastAPI HTTP server (`lmcache/v1/multiprocess/http_server.py`)
+The existing FastAPI HTTP server (`lmcache/multiprocess/http_server.py`)
 already serves `/api/healthcheck`, `/api/status`, and `/api/clear-cache`.
 Add quota management endpoints:
 
@@ -284,7 +284,7 @@ See the **Configuration** section for the full JSON example.
 
 ### 1. `ObjectKey` and `ipc_key_to_object_keys()`
 
-**File:** `lmcache/v1/distributed/api.py`
+**File:** `lmcache/distributed/api.py`
 
 Add `cache_salt: str = ""` to `ObjectKey` (as shown in section 1).
 Add `cache_salt: str = ""` parameter to `ipc_key_to_object_keys()` and
@@ -292,7 +292,7 @@ pass it through to each constructed `ObjectKey`.
 
 ### 2. Server — Pass `cache_salt` through to ObjectKeys
 
-**File:** `lmcache/v1/multiprocess/server.py`
+**File:** `lmcache/multiprocess/server.py`
 
 Since both the scheduler and worker adapters set `cache_salt` on
 `IPCCacheEngineKey`, the server simply reads `key.cache_salt` directly in
@@ -378,7 +378,7 @@ Per-user quota is an MP-mode-only feature.
 
 ### 4. Unified Usage Tracking in the Adapter Base Class
 
-**File:** `lmcache/v1/distributed/l2_adapters/base.py`
+**File:** `lmcache/distributed/l2_adapters/base.py`
 
 All byte tracking — both aggregate and per-user — lives in the base class
 and is updated exclusively in `_notify_keys_stored` / `_notify_keys_deleted`.
@@ -506,7 +506,7 @@ sizes.
 
 ### 6. `EvictionPolicy` — `is_user_level` property
 
-**File:** `lmcache/v1/distributed/eviction.py`
+**File:** `lmcache/distributed/eviction.py`
 
 Add a property to the abstract base class. The eviction controller uses
 this to decide whether to check per-user quotas or aggregate usage —
@@ -533,7 +533,7 @@ class EvictionPolicy:
 
 ### 7. `UserLRUEvictionPolicy` — Per-user LRU tracking
 
-**File (new):** `lmcache/v1/distributed/eviction_policy/user_lru.py`
+**File (new):** `lmcache/distributed/eviction_policy/user_lru.py`
 
 Overrides `is_user_level` to return `True`. `get_eviction_actions` gains
 an optional `cache_salt` parameter. When set, eviction is scoped to that
@@ -629,7 +629,7 @@ to `get_eviction_actions`. Existing implementations (`LRUEvictionPolicy`,
 
 ### 8. L2 Eviction Controller — Per-user eviction trigger
 
-**File:** `lmcache/v1/distributed/storage_controllers/eviction_controller.py`
+**File:** `lmcache/distributed/storage_controllers/eviction_controller.py`
 
 The controller receives a reference to the `QuotaManager`. Each eviction
 cycle it finds **all** users who violate their watermark threshold and
@@ -804,12 +804,12 @@ it through. Update serialization. No behavioral change with `cache_salt=""`.
 
 | File | Change |
 |------|--------|
-| `lmcache/v1/distributed/api.py` | `cache_salt: str = ""` on `ObjectKey`; `cache_salt` param on `ipc_key_to_object_keys()` |
-| `lmcache/v1/multiprocess/custom_types.py` | `cache_salt: str = ""` on `IPCCacheEngineKey` (appended at end); update `no_worker_id_version()`, `from_token_ids()` |
-| `lmcache/v1/multiprocess/server.py` | Pass `key.cache_salt` to `ipc_key_to_object_keys()` in all handlers |
-| `lmcache/v1/multiprocess/blend_server_v2.py` | Same for all 4 call sites |
-| `lmcache/v1/distributed/l2_adapters/native_connector_l2_adapter.py` | Update `_object_key_to_string()` |
-| `lmcache/v1/distributed/l2_adapters/fs_l2_adapter.py` | Update `_object_key_to_filename()` / `_filename_to_object_key()` |
+| `lmcache/distributed/api.py` | `cache_salt: str = ""` on `ObjectKey`; `cache_salt` param on `ipc_key_to_object_keys()` |
+| `lmcache/multiprocess/custom_types.py` | `cache_salt: str = ""` on `IPCCacheEngineKey` (appended at end); update `no_worker_id_version()`, `from_token_ids()` |
+| `lmcache/multiprocess/server.py` | Pass `key.cache_salt` to `ipc_key_to_object_keys()` in all handlers |
+| `lmcache/multiprocess/blend_server_v2.py` | Same for all 4 call sites |
+| `lmcache/distributed/l2_adapters/native_connector_l2_adapter.py` | Update `_object_key_to_string()` |
+| `lmcache/distributed/l2_adapters/fs_l2_adapter.py` | Update `_object_key_to_filename()` / `_filename_to_object_key()` |
 | `csrc/storage_backends/fs/connector.cpp` | Update `key_to_filename()` parser |
 
 ### PR3 — LMCache: Adapter interface refactor (LMCache repo)
@@ -820,13 +820,13 @@ existing LRU eviction behavior unchanged.
 
 | File | Change |
 |------|--------|
-| `lmcache/v1/distributed/l2_adapters/base.py` | `AdapterUsage` dataclass; `max_capacity_bytes` + `supports_eviction`; `_notify_*` with `sizes`; unified `get_usage() -> AdapterUsage` |
-| `lmcache/v1/distributed/l2_adapters/mock_l2_adapter.py` | Pass `max_capacity_bytes` to super; pass `sizes` to `_notify_*`; remove `_current_size_bytes`, `get_usage()` |
-| `lmcache/v1/distributed/l2_adapters/nixl_store_l2_adapter.py` | Same |
-| `lmcache/v1/distributed/l2_adapters/native_connector_l2_adapter.py` | Same |
-| `lmcache/v1/distributed/l2_adapters/mooncake_store_l2_adapter.py` | Same (if fires `_notify_*` directly) |
-| `lmcache/v1/distributed/storage_controllers/eviction_controller.py` | Use `AdapterUsage.usage_fraction` instead of tuple |
-| `lmcache/v1/distributed/storage_manager.py` | Filter `L2AdapterEvictionState` by `adapter.supports_eviction` |
+| `lmcache/distributed/l2_adapters/base.py` | `AdapterUsage` dataclass; `max_capacity_bytes` + `supports_eviction`; `_notify_*` with `sizes`; unified `get_usage() -> AdapterUsage` |
+| `lmcache/distributed/l2_adapters/mock_l2_adapter.py` | Pass `max_capacity_bytes` to super; pass `sizes` to `_notify_*`; remove `_current_size_bytes`, `get_usage()` |
+| `lmcache/distributed/l2_adapters/nixl_store_l2_adapter.py` | Same |
+| `lmcache/distributed/l2_adapters/native_connector_l2_adapter.py` | Same |
+| `lmcache/distributed/l2_adapters/mooncake_store_l2_adapter.py` | Same (if fires `_notify_*` directly) |
+| `lmcache/distributed/storage_controllers/eviction_controller.py` | Use `AdapterUsage.usage_fraction` instead of tuple |
+| `lmcache/distributed/storage_manager.py` | Filter `L2AdapterEvictionState` by `adapter.supports_eviction` |
 
 ### PR4 — LMCache: Eviction policy interface (LMCache repo)
 
@@ -835,9 +835,9 @@ No new policies yet — just the interface extension.
 
 | File | Change |
 |------|--------|
-| `lmcache/v1/distributed/eviction.py` | `is_user_level` property (default `False`); `cache_salt` param on `get_eviction_actions()` |
-| `lmcache/v1/distributed/eviction_policy/lru.py` | Accept (ignore) `cache_salt` |
-| `lmcache/v1/distributed/eviction_policy/noop.py` | Accept (ignore) `cache_salt` |
+| `lmcache/distributed/eviction.py` | `is_user_level` property (default `False`); `cache_salt` param on `get_eviction_actions()` |
+| `lmcache/distributed/eviction_policy/lru.py` | Accept (ignore) `cache_salt` |
+| `lmcache/distributed/eviction_policy/noop.py` | Accept (ignore) `cache_salt` |
 
 ### PR5 — LMCache: Per-user LRU eviction (LMCache repo)
 
@@ -845,15 +845,15 @@ The feature PR. Depends on PR1a + PR1b + PR2 + PR3 + PR4.
 
 | File | Change |
 |------|--------|
-| `lmcache/v1/distributed/eviction_policy/user_lru.py` (new) | `UserLRUEvictionPolicy` |
-| `lmcache/v1/distributed/quota_manager.py` (new) | `QuotaManager` |
-| `lmcache/v1/distributed/eviction_policy/factory.py` | Register `"UserLRU"` |
-| `lmcache/v1/distributed/eviction_policy/__init__.py` | Export `UserLRUEvictionPolicy` |
-| `lmcache/v1/distributed/config.py` | Add `"UserLRU"` to literal |
-| `lmcache/v1/distributed/l2_adapters/config.py` | Add `"UserLRU"` to allowed values |
-| `lmcache/v1/distributed/storage_controllers/eviction_controller.py` | `QuotaManager`; per-user branch using `is_user_level` + `per_user_bytes` |
-| `lmcache/v1/distributed/storage_manager.py` | Create `QuotaManager`; wire to controller + HTTP |
-| `lmcache/v1/multiprocess/http_server.py` | Quota CRUD endpoints |
-| `tests/v1/distributed/test_user_lru_eviction_policy.py` (new) | Unit tests |
-| `tests/v1/distributed/test_quota_manager.py` (new) | Unit tests |
-| `tests/v1/distributed/test_per_user_l2_eviction.py` (new) | Integration tests |
+| `lmcache/distributed/eviction_policy/user_lru.py` (new) | `UserLRUEvictionPolicy` |
+| `lmcache/distributed/quota_manager.py` (new) | `QuotaManager` |
+| `lmcache/distributed/eviction_policy/factory.py` | Register `"UserLRU"` |
+| `lmcache/distributed/eviction_policy/__init__.py` | Export `UserLRUEvictionPolicy` |
+| `lmcache/distributed/config.py` | Add `"UserLRU"` to literal |
+| `lmcache/distributed/l2_adapters/config.py` | Add `"UserLRU"` to allowed values |
+| `lmcache/distributed/storage_controllers/eviction_controller.py` | `QuotaManager`; per-user branch using `is_user_level` + `per_user_bytes` |
+| `lmcache/distributed/storage_manager.py` | Create `QuotaManager`; wire to controller + HTTP |
+| `lmcache/multiprocess/http_server.py` | Quota CRUD endpoints |
+| `tests/distributed/test_user_lru_eviction_policy.py` (new) | Unit tests |
+| `tests/distributed/test_quota_manager.py` (new) | Unit tests |
+| `tests/distributed/test_per_user_l2_eviction.py` (new) | Integration tests |

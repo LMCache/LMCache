@@ -213,7 +213,7 @@ future management, and both sync and async methods.
 
 .. code-block:: python
 
-    # lmcache/v1/storage_backend/native_clients/mybackend_client.py
+    # lmcache/storage_backend/native_clients/mybackend_client.py
     from .connector_client_base import ConnectorClientBase
     from lmcache.lmcache_mybackend import LMCacheMyBackendClient
 
@@ -226,7 +226,7 @@ future management, and both sync and async methods.
 This gives you ``batch_get``, ``batch_set``, ``batch_exists`` (async), and their
 synchronous variants, all with automatic eventfd-driven completion handling.
 
-**Reference:** ``lmcache/v1/storage_backend/native_clients/resp_client.py``
+**Reference:** ``lmcache/storage_backend/native_clients/resp_client.py``
 
 
 Step 5: L2 Adapter (MP Mode)
@@ -241,21 +241,21 @@ Create a new file in the L2 adapters package:
 
 .. code-block:: python
 
-    # lmcache/v1/distributed/l2_adapters/mybackend_l2_adapter.py
+    # lmcache/distributed/l2_adapters/mybackend_l2_adapter.py
     from __future__ import annotations
     from typing import TYPE_CHECKING, Optional
 
     if TYPE_CHECKING:
-        from lmcache.v1.distributed.internal_api import L1MemoryDesc
+        from lmcache.distributed.internal_api import L1MemoryDesc
 
-    from lmcache.v1.distributed.l2_adapters.base import (
+    from lmcache.distributed.l2_adapters.base import (
         L2AdapterInterface,
     )
-    from lmcache.v1.distributed.l2_adapters.config import (
+    from lmcache.distributed.l2_adapters.config import (
         L2AdapterConfigBase,
         register_l2_adapter_type,
     )
-    from lmcache.v1.distributed.l2_adapters.factory import (
+    from lmcache.distributed.l2_adapters.factory import (
         register_l2_adapter_factory,
     )
 
@@ -298,7 +298,7 @@ Create a new file in the L2 adapters package:
         l1_memory_desc: "Optional[L1MemoryDesc]" = None,
     ) -> L2AdapterInterface:
         from lmcache.lmcache_mybackend import LMCacheMyBackendClient
-        from lmcache.v1.distributed.l2_adapters \
+        from lmcache.distributed.l2_adapters \
             .native_connector_l2_adapter import (
             NativeConnectorL2Adapter,
         )
@@ -320,7 +320,7 @@ Create a new file in the L2 adapters package:
 
 .. note::
    The L2 adapter package uses ``pkgutil.iter_modules`` to auto-discover all modules
-   in ``lmcache/v1/distributed/l2_adapters/``. Simply creating the file above is
+   in ``lmcache/distributed/l2_adapters/``. Simply creating the file above is
    sufficient -- no changes to ``__init__.py`` or any other existing file are needed.
 
 **Usage from the command line:**
@@ -612,7 +612,7 @@ Use this checklist when adding a new native connector:
 3. ``setup.py`` entry for the new ``CppExtension``
 4. Python client inheriting ``ConnectorClientBase`` (non-MP mode)
 5. L2 adapter module with config class + factory self-registration (MP mode)
-6. Unit tests (see ``tests/v1/distributed/test_native_connector_l2_adapter.py``)
+6. Unit tests (see ``tests/distributed/test_native_connector_l2_adapter.py``)
 7. Rebuild with ``pip install -e .`` and verify both modes work
 
 For **external** native connector plugins (``native_plugin``):
@@ -636,7 +636,7 @@ Additional Resources
 - External native connector example:
   ``examples/lmc_external_native_connector/``
 - Native plugin adapter source:
-  ``lmcache/v1/distributed/l2_adapters/native_connector_l2_adapter.py``
+  ``lmcache/distributed/l2_adapters/native_connector_l2_adapter.py``
 - Design document:
-  ``lmcache/v1/distributed/l2_adapters/design_docs/plugin.md``
+  ``lmcache/distributed/l2_adapters/design_docs/plugin.md``
 - RESP backend user guide: :doc:`RESP (Native Redis/Valkey) <../../kv_cache/storage_backends/resp>`

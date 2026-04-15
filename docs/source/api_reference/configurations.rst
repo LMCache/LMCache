@@ -219,7 +219,7 @@ Settings for the KV cache controller functionality.
 Disaggregated Prefill Configurations
 -------------------------------------------
 
-Settings for disaggregated prefill functionality. The latest/default PD is implemented inside of `lmcache/v1/storage_backend/pd_backend.py`.
+Settings for disaggregated prefill functionality. The latest/default PD is implemented inside of `lmcache/storage_backend/pd_backend.py`.
 
 .. note::
 

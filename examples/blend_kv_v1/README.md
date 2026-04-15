@@ -5,7 +5,7 @@ LMCache should be able to reduce the generation time of the second and following
 - In `vllm/vllm/v1/worker/gpu_worker.py`, comment out `ensure_kv_transfer_initialized(vllm_config)` in function `def init_worker_distributed_environment`.
 - In the same file, add 
 ```
-from lmcache.v1.compute.models.utils import VLLMModelTracker
+from lmcache.compute.models.utils import VLLMModelTracker
 from lmcache.integration.vllm.utils import ENGINE_NAME
         
 VLLMModelTracker.register_model(ENGINE_NAME, self.model_runner.model)

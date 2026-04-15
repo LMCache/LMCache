@@ -28,7 +28,7 @@ Configuration
 
    storage_plugins: ["dax"]
    extra_config:
-     storage_plugin.dax.module_path: lmcache.v1.storage_backend.plugins.dax_backend
+     storage_plugin.dax.module_path: lmcache.storage_backend.plugins.dax_backend
      storage_plugin.dax.class_name: DaxBackend
 
      dax.device_path: "/dev/dax1.0"

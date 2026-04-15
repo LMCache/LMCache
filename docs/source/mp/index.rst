@@ -45,10 +45,10 @@ LMCache ships three server entry points:
        for K8s probes, ``/api/clear-cache``, ``/api/status``).
        Use ``--engine-type blend`` to enable BlendEngineV2 for cross-request
        KV reuse.
-   * - ``python3 -m lmcache.v1.multiprocess.server``
+   * - ``python3 -m lmcache.multiprocess.server``
      - (Legacy) ZMQ-only server using MPCacheEngine (no HTTP endpoints).
        Prefer ``lmcache server``.
-   * - ``python3 -m lmcache.v1.multiprocess.blend_server_v2``
+   * - ``python3 -m lmcache.multiprocess.blend_server_v2``
      - (Legacy) CacheBlend-enabled server. Prefer ``lmcache server --engine-type blend``.
 
 .. toctree::

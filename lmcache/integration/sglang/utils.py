@@ -3,8 +3,8 @@
 import os
 
 # First Party
+from lmcache.config import LMCacheEngineConfig
 from lmcache.logging import init_logger
-from lmcache.v1.config import LMCacheEngineConfig
 
 logger = init_logger(__name__)
 ENGINE_NAME = "sglang-instance"

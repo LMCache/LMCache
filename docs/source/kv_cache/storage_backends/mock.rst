@@ -59,7 +59,7 @@ You should see logs similar to the following:
 .. code-block:: text
 
     (EngineCore_0 pid=586318) [2025-09-03 05:06:41,751] LMCache INFO: Reqid: cmpl-b34e7c5b2f3e46a592722db2c27f6fc0-0, Total tokens 12002, LMCache hit tokens: 12002, need to load: 12001 (vllm_v1_adapter.py:1049:lmcache.integration.vllm.vllm_v1_adapter)
-    (EngineCore_0 pid=586318) [2025-09-03 05:06:42,736] LMCache INFO: Retrieved 12002 out of total 12002 out of total 12002 tokens. size: 1.651 gb, cost 980.6983 ms, throughput: 1.8939 GB/s; (cache_engine.py:503:lmcache.v1.cache_engine)
+    (EngineCore_0 pid=586318) [2025-09-03 05:06:42,736] LMCache INFO: Retrieved 12002 out of total 12002 out of total 12002 tokens. size: 1.651 gb, cost 980.6983 ms, throughput: 1.8939 GB/s; (cache_engine.py:503:lmcache.cache_engine)
 
 The logs confirm that the throughput is slightly lower than 2 GB/s due to CPU <-> GPU allocation/transfer overhead.
 

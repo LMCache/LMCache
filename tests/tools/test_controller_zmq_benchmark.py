@@ -13,6 +13,14 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 # First Party
+from lmcache.cache_controller.message import (
+    BatchedKVOperationMsg,
+    BatchedP2PLookupMsg,
+    DeRegisterMsg,
+    HeartbeatMsg,
+    OpType,
+    RegisterMsg,
+)
 from lmcache.logging import init_logger
 from lmcache.tools.controller_benchmark.benchmark import ZMQControllerBenchmark
 from lmcache.tools.controller_benchmark.config import ZMQBenchmarkConfig
@@ -27,14 +35,6 @@ from lmcache.tools.controller_benchmark.handlers.evict import EvictHandler
 from lmcache.tools.controller_benchmark.handlers.heartbeat import HeartbeatHandler
 from lmcache.tools.controller_benchmark.handlers.p2p_lookup import P2PLookupHandler
 from lmcache.tools.controller_benchmark.handlers.register import RegisterHandler
-from lmcache.v1.cache_controller.message import (
-    BatchedKVOperationMsg,
-    BatchedP2PLookupMsg,
-    DeRegisterMsg,
-    HeartbeatMsg,
-    OpType,
-    RegisterMsg,
-)
 
 logger = init_logger(__name__)
 

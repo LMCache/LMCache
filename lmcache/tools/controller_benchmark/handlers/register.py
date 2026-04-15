@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any
 import random
 
 # First Party
-from lmcache.v1.cache_controller.message import RegisterMsg
+from lmcache.cache_controller.message import RegisterMsg
 
 if TYPE_CHECKING:
     # Local

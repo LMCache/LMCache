@@ -13,7 +13,7 @@ To enable the Controller WebUI, start your LMCache instance with the following c
 
 .. code-block:: bash
 
-    python3 -m lmcache.v1.api_server \
+    python3 -m lmcache.api_server \
         --host 0.0.0.0 \
         --port 9000 \
         --monitor-ports '{"pull":8300,"reply":8400}' \

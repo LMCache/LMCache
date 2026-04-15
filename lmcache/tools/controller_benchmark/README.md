@@ -32,7 +32,7 @@ The benchmark tool simulates multiple instances and workers sending various type
 ### Basic Usage
 - Start the controller
 ```bash
-python3 -m lmcache.v1.api_server --host 0.0.0.0 --port 9009 \
+python3 -m lmcache.api_server --host 0.0.0.0 --port 9009 \
   --monitor-ports "{\"pull\":7555,\"reply\":7556}" \
   --lmcache-worker-timeout 100 --health-check-interval 10 
 ```

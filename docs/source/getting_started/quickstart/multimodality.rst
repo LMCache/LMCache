@@ -184,9 +184,9 @@ Save as ``audio_query.py``
 .. code-block:: text
 
    [2025-08-05 09:58:06,965] LMCache INFO: Reqid: chatcmpl-dd6e8a131f2b455fa3cd133a9bfab26f, Total tokens 201, LMCache hit tokens: 201, need to load: 8 (vllm_v1_adapter.py:803:lmcache.integration.vllm.vllm_v1_adapter)
-   [2025-08-05 09:58:06,967] LMCache INFO: Retrieved 201 out of 201 out of total 201 tokens (cache_engine.py:500:lmcache.v1.cache_engine)
+   [2025-08-05 09:58:06,967] LMCache INFO: Retrieved 201 out of 201 out of total 201 tokens (cache_engine.py:500:lmcache.cache_engine)
    [2025-08-05 09:58:07,178] LMCache INFO: Storing KV cache for 256 out of 256 tokens (skip_leading_tokens=0) for request chatcmpl-dd6e8a131f2b455fa3cd133a9bfab26f (vllm_v1_adapter.py:709:lmcache.integration.vllm.vllm_v1_adapter)
-   [2025-08-05 09:58:07,178] LMCache INFO: Stored 256 out of total 256 tokens. size: 0.0078 gb, cost 0.5096 ms, throughput: 15.3291 GB/s; offload_time: 0.4897 ms, put_time: 0.0200 ms (cache_engine.py:251:lmcache.v1.cache_engine)
+   [2025-08-05 09:58:07,178] LMCache INFO: Stored 256 out of total 256 tokens. size: 0.0078 gb, cost 0.5096 ms, throughput: 15.3291 GB/s; offload_time: 0.4897 ms, put_time: 0.0200 ms (cache_engine.py:251:lmcache.cache_engine)
 
 *Example Output:*
 
@@ -206,9 +206,9 @@ Save as ``audio_query.py``
 .. code-block:: text
 
    [2025-08-05 09:58:07,371] LMCache INFO: Reqid: chatcmpl-2a130545a6a24f33b41e219ef0807a61, Total tokens 201, LMCache hit tokens: 201, need to load: 8 (vllm_v1_adapter.py:803:lmcache.integration.vllm.vllm_v1_adapter)
-   [2025-08-05 09:58:07,372] LMCache INFO: Retrieved 201 out of 201 out of total 201 tokens (cache_engine.py:500:lmcache.v1.cache_engine)
+   [2025-08-05 09:58:07,372] LMCache INFO: Retrieved 201 out of 201 out of total 201 tokens (cache_engine.py:500:lmcache.cache_engine)
    [2025-08-05 09:58:07,558] LMCache INFO: Storing KV cache for 256 out of 256 tokens (skip_leading_tokens=0) for request chatcmpl-2a130545a6a24f33b41e219ef0807a61 (vllm_v1_adapter.py:709:lmcache.integration.vllm.vllm_v1_adapter)
-   [2025-08-05 09:58:07,558] LMCache INFO: Stored 256 out of total 256 tokens. size: 0.0078 gb, cost 0.4962 ms, throughput: 15.7450 GB/s; offload_time: 0.4782 ms, put_time: 0.0179 ms (cache_engine.py:251:lmcache.v1.cache_engine)
+   [2025-08-05 09:58:07,558] LMCache INFO: Stored 256 out of total 256 tokens. size: 0.0078 gb, cost 0.4962 ms, throughput: 15.7450 GB/s; offload_time: 0.4782 ms, put_time: 0.0179 ms (cache_engine.py:251:lmcache.cache_engine)
 
 *Example Output:*
 

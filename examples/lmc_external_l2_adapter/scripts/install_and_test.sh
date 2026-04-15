@@ -27,7 +27,7 @@ print('  Class:', InMemoryL2Adapter)
 echo ""
 echo "=== Step 3: Verify LMCache recognises 'external' type ==="
 python -c "
-from lmcache.v1.distributed.l2_adapters.config import (
+from lmcache.distributed.l2_adapters.config import (
     get_registered_l2_adapter_types,
 )
 types = get_registered_l2_adapter_types()

@@ -7,26 +7,26 @@ This is an introduce of examples for the LMCache Basic Check Tool.
 ### Testing Storage Manager
 ```bash
 # Basic test
-python -m lmcache.v1.basic_check --mode test_storage_manager
+python -m lmcache.basic_check --mode test_storage_manager
 
 # With custom model
-python -m lmcache.v1.basic_check --mode test_storage_manager --model /my_model/
+python -m lmcache.basic_check --mode test_storage_manager --model /my_model/
 ```
 
 ### Testing Remote Backend
 ```bash
 # Basic remote test
-python -m lmcache.v1.basic_check --mode test_remote
+python -m lmcache.basic_check --mode test_remote
 
 ```
 
 ### Key Generation
 ```bash
 # Generate 100 keys with 8 concurrent workers
-python -m lmcache.v1.basic_check --mode gen --num-keys 100 --concurrency 8
+python -m lmcache.basic_check --mode gen --num-keys 100 --concurrency 8
 
 # Generate keys with offset (useful for distributed testing)
-python -m lmcache.v1.basic_check --mode gen --num-keys 100 --concurrency 8 --offset 1000
+python -m lmcache.basic_check --mode gen --num-keys 100 --concurrency 8 --offset 1000
 ```
 
 ## Configuration

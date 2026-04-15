@@ -90,7 +90,7 @@ docker build \
 docker run --runtime nvidia --gpus all -it \
   lmcache/standalone:latest \
   /opt/venv/bin/python3 \
-  -m lmcache.v1.multiprocess.server \
+  -m lmcache.multiprocess.server \
   --cpu-buffer-size 60 \
   --max-workers 4 \
   --max-gpu-workers 2 \

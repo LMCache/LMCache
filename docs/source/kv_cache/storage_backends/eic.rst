@@ -11,7 +11,7 @@ Deploy EIC
 ----------
 
 You can visit the official link https://console.volcengine.com/eic and deploy EIC KVCache on your compute cluster with web UI. In addition, we provide particular image in volcano engine, which integrates various optimizations based on the official image.
-You may use tests/v1/storage_backend/test_eic.py to detect the connectivity of EIC.
+You may use tests/storage_backend/test_eic.py to detect the connectivity of EIC.
 
 Deploy Model With EIC
 ---------------------

@@ -16,7 +16,7 @@ import sys
 import torch
 
 # First Party
-from lmcache.v1.protocol import (
+from lmcache.protocol import (
     CacheEngineKey,
     ClientCommand,
     ClientMetaMessage,

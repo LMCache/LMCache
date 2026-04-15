@@ -62,7 +62,7 @@ Quick Start
 
 .. code-block:: bash
 
-    python3 -m lmcache.v1.api_server
+    python3 -m lmcache.api_server
 
 Expected output:
 

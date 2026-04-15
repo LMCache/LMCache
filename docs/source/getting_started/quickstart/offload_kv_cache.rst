@@ -81,7 +81,7 @@ When the inference is complete, clean up the LMCache backend:
 
 .. code-block:: python
 
-    from lmcache.v1.cache_engine import LMCacheEngineBuilder
+    from lmcache.cache_engine import LMCacheEngineBuilder
     from lmcache.integration.vllm.utils import ENGINE_NAME
 
     LMCacheEngineBuilder.destroy(ENGINE_NAME)
@@ -189,7 +189,7 @@ Save the following script as ``cpu-offloading.py``:
     import torch
     import argparse
     import time
-    from lmcache.v1.cache_engine import LMCacheEngineBuilder
+    from lmcache.cache_engine import LMCacheEngineBuilder
     from lmcache.integration.vllm.utils import ENGINE_NAME
     from vllm import LLM, SamplingParams
     from vllm.config import KVTransferConfig
@@ -406,7 +406,7 @@ You can resolve this issue using one of the following methods:
     if __name__ == '__main__':
         from vllm import LLM, SamplingParams
         from vllm.config import KVTransferConfig
-        from lmcache.v1.cache_engine import LMCacheEngineBuilder
+        from lmcache.cache_engine import LMCacheEngineBuilder
         from lmcache.integration.vllm.utils import ENGINE_NAME
         main()
 

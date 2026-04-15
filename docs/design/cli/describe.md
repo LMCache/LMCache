@@ -179,7 +179,7 @@ available** from `/api/status`. The following changes surface them.
 
 ### 1. Add `start_time` to `MPCacheEngine` → expose `uptime_seconds`
 
-**File:** `lmcache/v1/multiprocess/server.py`
+**File:** `lmcache/multiprocess/server.py`
 
 `MPCacheEngine.__init__()` (line 147) records `self._start_time = time.monotonic()`
 at construction. `report_status()` (line 696) includes a new field:
@@ -192,7 +192,7 @@ The CLI formats this as a human-readable string (e.g., `2h 14m 32s`).
 
 ### 2. Pass endpoint addresses into `MPCacheEngine` → expose in status
 
-**File:** `lmcache/v1/multiprocess/server.py`
+**File:** `lmcache/multiprocess/server.py`
 
 Currently `MPCacheEngine` does not know the ZMQ or HTTP addresses — those live in
 `MPServerConfig` and `HTTPFrontendConfig`, which are only available in
@@ -240,7 +240,7 @@ endpoint is only known in `run_http_server()`. Since `run_http_server()` calls
 
 ### 3. Same changes for `BlendCacheEngine`
 
-**File:** `lmcache/v1/multiprocess/blend_server.py` (and `blend_server_v2.py`)
+**File:** `lmcache/multiprocess/blend_server.py` (and `blend_server_v2.py`)
 
 Mirror the same `start_time`, `zmq_endpoint`, and `http_endpoint` additions if
 `BlendCacheEngine` has its own `report_status()`. If it delegates to
@@ -256,7 +256,7 @@ Mirror the same `start_time`, `zmq_endpoint`, and `http_endpoint` additions if
 
 ### 4. Expose GPU KV format, shape, and attention backend in `kv_cache_layout`
 
-**Files:** `lmcache/v1/gpu_connector/utils.py`, `lmcache/v1/multiprocess/gpu_context.py`, `lmcache/v1/multiprocess/server.py`
+**Files:** `lmcache/gpu_connector/utils.py`, `lmcache/multiprocess/gpu_context.py`, `lmcache/multiprocess/server.py`
 
 Three new helper functions in `utils.py` (derived from `legible_print_gpu_kv_format()`):
 - `get_gpu_kv_shape_description(gpu_kv_format)` — symbolic shape (e.g., `List[num_layers] of [2, num_blocks, ...]`)

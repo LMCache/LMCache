@@ -21,5 +21,5 @@ curl -X POST http://localhost:8000/v1/completions   -H "Content-Type: applicatio
 Logs: 
 ```text
 (EngineCore_0 pid=586318) [2025-09-03 05:06:41,751] LMCache INFO: Reqid: cmpl-b34e7c5b2f3e46a592722db2c27f6fc0-0, Total tokens 12002, LMCache hit tokens: 12002, need to load: 12001 (vllm_v1_adapter.py:1049:lmcache.integration.vllm.vllm_v1_adapter)
-(EngineCore_0 pid=586318) [2025-09-03 05:06:42,736] LMCache INFO: Retrieved 12002 out of total 12002 out of total 12002 tokens. size: 1.4651 gb, cost 980.6983 ms, throughput: 1.4939 GB/s; (cache_engine.py:503:lmcache.v1.cache_engine)
+(EngineCore_0 pid=586318) [2025-09-03 05:06:42,736] LMCache INFO: Retrieved 12002 out of total 12002 out of total 12002 tokens. size: 1.4651 gb, cost 980.6983 ms, throughput: 1.4939 GB/s; (cache_engine.py:503:lmcache.cache_engine)
 ```

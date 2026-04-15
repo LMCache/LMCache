@@ -6,7 +6,7 @@ The LMCache Basic Check Tool is a testing and validation utility that helps you 
 Overview
 --------
 
-The basic check tool (``lmcache.v1.basic_check``) is designed to:
+The basic check tool (``lmcache.basic_check``) is designed to:
 
 * Test remote backend connectivity and functionality
 * Validate storage manager operations
@@ -32,7 +32,7 @@ Tests the remote backend functionality including:
 
 .. code-block:: bash
 
-   python -m lmcache.v1.basic_check --mode test_remote
+   python -m lmcache.basic_check --mode test_remote
 
 test_storage_manager
 ~~~~~~~~~~~~~~~~~~~~
@@ -47,7 +47,7 @@ Tests the storage manager operations including:
 
 .. code-block:: bash
 
-   python -m lmcache.v1.basic_check --mode test_storage_manager
+   python -m lmcache.basic_check --mode test_storage_manager
 
 gen (Key Generation)
 ~~~~~~~~~~~~~~~~~~~~
@@ -63,7 +63,7 @@ Generates test keys for performance testing and benchmarking:
 
 .. code-block:: bash
 
-   python -m lmcache.v1.basic_check --mode gen --num-keys 1000 --concurrency 16
+   python -m lmcache.basic_check --mode gen --num-keys 1000 --concurrency 16
 
 Command Line Interface
 ----------------------
@@ -73,14 +73,14 @@ Basic Usage
 
 .. code-block:: bash
 
-   python -m lmcache.v1.basic_check --mode <MODE> [OPTIONS]
+   python -m lmcache.basic_check --mode <MODE> [OPTIONS]
 
 List Available Modes
 ~~~~~~~~~~~~~~~~~~~~~
 
 .. code-block:: bash
 
-   python -m lmcache.v1.basic_check --mode list
+   python -m lmcache.basic_check --mode list
 
 Command Line Options
 ~~~~~~~~~~~~~~~~~~~~
@@ -116,7 +116,7 @@ Environment Variable
 .. code-block:: bash
 
    export LMCACHE_CONFIG_PATH=/path/to/config.yaml
-   python -m lmcache.v1.basic_check --mode test_remote
+   python -m lmcache.basic_check --mode test_remote
 
 Example Configuration
 ~~~~~~~~~~~~~~~~~~~~~

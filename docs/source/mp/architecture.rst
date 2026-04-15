@@ -158,7 +158,7 @@ Distributed Storage
 StorageManager
 ~~~~~~~~~~~~~~
 
-``lmcache/v1/distributed/storage_manager.py``
+``lmcache/distributed/storage_manager.py``
 
 The top-level manager that wires together L1, L2, and all controllers.  Key
 methods:
@@ -172,7 +172,7 @@ methods:
 L1Manager
 ~~~~~~~~~
 
-``lmcache/v1/distributed/l1_manager.py``
+``lmcache/distributed/l1_manager.py``
 
 Manages objects in CPU memory with a state machine:
 
@@ -193,7 +193,7 @@ up to ``--l1-size-gb``).
 L2 Adapters
 ~~~~~~~~~~~
 
-``lmcache/v1/distributed/l2_adapters/``
+``lmcache/distributed/l2_adapters/``
 
 The ``L2AdapterInterface`` (in ``base.py``) defines three async task methods:
 
@@ -338,37 +338,37 @@ Key Source Files
 
    * - File
      - Purpose
-   * - ``lmcache/v1/multiprocess/server.py``
+   * - ``lmcache/multiprocess/server.py``
      - MPCacheEngine + ZMQ server entry point
-   * - ``lmcache/v1/multiprocess/config.py``
+   * - ``lmcache/multiprocess/config.py``
      - MPServerConfig, HTTPFrontendConfig
-   * - ``lmcache/v1/multiprocess/blend_server_v2.py``
+   * - ``lmcache/multiprocess/blend_server_v2.py``
      - BlendEngineV2 (extends MPCacheEngine)
-   * - ``lmcache/v1/multiprocess/http_server.py``
+   * - ``lmcache/multiprocess/http_server.py``
      - FastAPI wrapper with health check and many other useful APIs
-   * - ``lmcache/v1/multiprocess/protocols/base.py``
+   * - ``lmcache/multiprocess/protocols/base.py``
      - RequestType, HandlerType, ProtocolDefinition
-   * - ``lmcache/v1/distributed/storage_manager.py``
+   * - ``lmcache/distributed/storage_manager.py``
      - StorageManager (top-level manager)
-   * - ``lmcache/v1/distributed/config.py``
+   * - ``lmcache/distributed/config.py``
      - StorageManagerConfig hierarchy
-   * - ``lmcache/v1/distributed/l1_manager.py``
+   * - ``lmcache/distributed/l1_manager.py``
      - L1Manager (object state machine)
-   * - ``lmcache/v1/distributed/l2_adapters/config.py``
+   * - ``lmcache/distributed/l2_adapters/config.py``
      - L2 adapter config registry
-   * - ``lmcache/v1/distributed/l2_adapters/base.py``
+   * - ``lmcache/distributed/l2_adapters/base.py``
      - L2AdapterInterface
-   * - ``lmcache/v1/distributed/storage_controllers/store_controller.py``
+   * - ``lmcache/distributed/storage_controllers/store_controller.py``
      - StoreController (event-driven L1->L2)
-   * - ``lmcache/v1/distributed/storage_controllers/eviction_controller.py``
+   * - ``lmcache/distributed/storage_controllers/eviction_controller.py``
      - EvictionController (watermark-triggered)
-   * - ``lmcache/v1/distributed/storage_controllers/prefetch_controller.py``
+   * - ``lmcache/distributed/storage_controllers/prefetch_controller.py``
      - PrefetchController (L2->L1 on miss)
-   * - ``lmcache/v1/mp_observability/config.py``
+   * - ``lmcache/mp_observability/config.py``
      - PrometheusConfig
-   * - ``lmcache/v1/mp_observability/prometheus_controller.py``
+   * - ``lmcache/mp_observability/prometheus_controller.py``
      - PrometheusController singleton
-   * - ``lmcache/v1/mp_observability/telemetry/config.py``
+   * - ``lmcache/mp_observability/telemetry/config.py``
      - TelemetryConfig
-   * - ``lmcache/v1/mp_observability/telemetry/controller.py``
+   * - ``lmcache/mp_observability/telemetry/controller.py``
      - TelemetryController singleton

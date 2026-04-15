@@ -63,30 +63,30 @@ Get or set the log level for Python loggers. Behavior depends on query parameter
     curl http://localhost:7000/loglevel
 
     # Get a specific logger level
-    curl "http://localhost:7000/loglevel?logger_name=lmcache.v1.cache_engine"
+    curl "http://localhost:7000/loglevel?logger_name=lmcache.cache_engine"
 
     # Set a specific logger level
-    curl "http://localhost:7000/loglevel?logger_name=lmcache.v1.cache_engine&level=DEBUG"
+    curl "http://localhost:7000/loglevel?logger_name=lmcache.cache_engine&level=DEBUG"
 
 **Example Response** (list all):
 
 .. code-block:: text
 
     === Loggers and Levels ===
-    lmcache.v1.cache_engine: WARNING
-    lmcache.v1.storage_backend: INFO
+    lmcache.cache_engine: WARNING
+    lmcache.storage_backend: INFO
 
 **Example Response** (get):
 
 .. code-block:: text
 
-    lmcache.v1.cache_engine: WARNING
+    lmcache.cache_engine: WARNING
 
 **Example Response** (set):
 
 .. code-block:: text
 
-    Set lmcache.v1.cache_engine level to DEBUG (including all handlers)
+    Set lmcache.cache_engine level to DEBUG (including all handlers)
 
 **Error Response** (invalid level, HTTP 400):
 

@@ -114,7 +114,7 @@ _create_plugin_adapter(config, ...)
 
 A plugin adapter class **must**:
 
-1. **Subclass `L2AdapterInterface`** from `lmcache.v1.distributed.l2_adapters.base`.
+1. **Subclass `L2AdapterInterface`** from `lmcache.distributed.l2_adapters.base`.
 2. **Implement all abstract methods**: store, lookup & lock, load, close,
    and all three event-fd getters.
 3. **Provide three distinct event fds** (store / lookup / load). The
@@ -174,7 +174,7 @@ This pattern is identical to the one used by `MockL2Adapter` and
 # my_plugin/adapter.py
 import asyncio, os, threading
 from lmcache.native_storage_ops import Bitmap
-from lmcache.v1.distributed.l2_adapters.base import (
+from lmcache.distributed.l2_adapters.base import (
     L2AdapterInterface, L2TaskId,
 )
 

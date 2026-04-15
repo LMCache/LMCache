@@ -11,28 +11,28 @@ from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Optional, Union
 
 # First Party
-from lmcache.logging import init_logger
-from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.health_monitor.base import HealthMonitor
-from lmcache.v1.health_monitor.constants import (
+from lmcache.config import LMCacheEngineConfig
+from lmcache.health_monitor.base import HealthMonitor
+from lmcache.health_monitor.constants import (
     DEFAULT_PING_INTERVAL,
     PING_INTERVAL_CONFIG_KEY,
 )
+from lmcache.logging import init_logger
 
 if TYPE_CHECKING:
     # First Party
-    from lmcache.observability import PrometheusLogger
-    from lmcache.v1.cache_engine import LMCacheEngine
-    from lmcache.v1.internal_api_server.api_server import InternalAPIServer
-    from lmcache.v1.lookup_client.abstract_client import LookupClientInterface
-    from lmcache.v1.lookup_client.lmcache_async_lookup_client import (
+    from lmcache.cache_engine import LMCacheEngine
+    from lmcache.internal_api_server.api_server import InternalAPIServer
+    from lmcache.lookup_client.abstract_client import LookupClientInterface
+    from lmcache.lookup_client.lmcache_async_lookup_client import (
         LMCacheAsyncLookupServer,
     )
-    from lmcache.v1.lookup_client.lmcache_lookup_client import LMCacheLookupServer
-    from lmcache.v1.manager import LMCacheManager
-    from lmcache.v1.metadata import LMCacheMetadata
-    from lmcache.v1.offload_server.zmq_server import ZMQOffloadServer
-    from lmcache.v1.plugin.runtime_plugin_launcher import RuntimePluginLauncher
+    from lmcache.lookup_client.lmcache_lookup_client import LMCacheLookupServer
+    from lmcache.manager import LMCacheManager
+    from lmcache.metadata import LMCacheMetadata
+    from lmcache.observability import PrometheusLogger
+    from lmcache.offload_server.zmq_server import ZMQOffloadServer
+    from lmcache.plugin.runtime_plugin_launcher import RuntimePluginLauncher
 
 logger = init_logger(__name__)
 
@@ -106,7 +106,7 @@ class BaseServiceFactory(ABC):
         """
         # First Party
         from lmcache.observability import PrometheusLogger
-        from lmcache.v1.periodic_thread import (
+        from lmcache.periodic_thread import (
             PeriodicThreadRegistry,
             ThreadLevel,
         )

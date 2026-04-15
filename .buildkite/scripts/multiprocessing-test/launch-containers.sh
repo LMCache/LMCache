@@ -63,7 +63,7 @@ docker run -d \
     --ipc host \
     --entrypoint /opt/venv/bin/python3 \
     lmcache/vllm-openai:test \
-    -m lmcache.v1.multiprocess.http_server \
+    -m lmcache.multiprocess.http_server \
     --l1-size-gb "$CPU_BUFFER_SIZE" \
     --eviction-policy LRU \
     --max-workers "$MAX_WORKERS" \

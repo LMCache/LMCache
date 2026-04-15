@@ -62,7 +62,7 @@ API Category & Route Discovery
 
 The server uses ``APIRegistry`` to automatically discover and register
 API endpoint modules. Any file named ``*_api.py`` under
-``lmcache/v1/internal_api_server/{common,vllm,controller}/`` that
+``lmcache/internal_api_server/{common,vllm,controller}/`` that
 exports a ``router = APIRouter()`` will be automatically included.
 
 

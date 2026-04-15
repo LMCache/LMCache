@@ -10,18 +10,18 @@ import torch
 import torch.distributed as dist
 
 # First Party
+from lmcache.cache_engine import LMCacheEngine, LMCacheEngineBuilder
+from lmcache.config import LMCacheEngineConfig
+from lmcache.gpu_connector import CreateGPUConnector
 from lmcache.integration.sglang.utils import ENGINE_NAME, lmcache_get_config
 from lmcache.logging import init_logger
+from lmcache.metadata import LMCacheMetadata
 from lmcache.utils import (
     CacheStoreEvent,
     EngineType,
     mock_up_broadcast_fn,
     mock_up_broadcast_object_fn,
 )
-from lmcache.v1.cache_engine import LMCacheEngine, LMCacheEngineBuilder
-from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.gpu_connector import CreateGPUConnector
-from lmcache.v1.metadata import LMCacheMetadata
 
 logger = init_logger(__name__)
 

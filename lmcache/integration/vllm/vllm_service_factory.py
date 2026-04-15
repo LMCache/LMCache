@@ -15,23 +15,23 @@ if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
     # First Party
-    from lmcache.v1.lookup_client.lmcache_async_lookup_client import (
+    from lmcache.lookup_client.lmcache_async_lookup_client import (
         LMCacheAsyncLookupServer,
     )
-    from lmcache.v1.lookup_client.lmcache_lookup_client import LMCacheLookupServer
-    from lmcache.v1.manager import LMCacheManager
+    from lmcache.lookup_client.lmcache_lookup_client import LMCacheLookupServer
+    from lmcache.manager import LMCacheManager
 
 # First Party
+from lmcache.cache_engine import LMCacheEngine, LMCacheEngineBuilder
+from lmcache.config import LMCacheEngineConfig
+from lmcache.health_monitor.base import HealthMonitor
 from lmcache.integration.base_service_factory import BaseServiceFactory
+from lmcache.internal_api_server.api_server import InternalAPIServer
 from lmcache.logging import init_logger
-from lmcache.v1.cache_engine import LMCacheEngine, LMCacheEngineBuilder
-from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.health_monitor.base import HealthMonitor
-from lmcache.v1.internal_api_server.api_server import InternalAPIServer
-from lmcache.v1.lookup_client.abstract_client import LookupClientInterface
-from lmcache.v1.metadata import LMCacheMetadata
-from lmcache.v1.offload_server.zmq_server import ZMQOffloadServer
-from lmcache.v1.plugin.runtime_plugin_launcher import RuntimePluginLauncher
+from lmcache.lookup_client.abstract_client import LookupClientInterface
+from lmcache.metadata import LMCacheMetadata
+from lmcache.offload_server.zmq_server import ZMQOffloadServer
+from lmcache.plugin.runtime_plugin_launcher import RuntimePluginLauncher
 
 logger = init_logger(__name__)
 
@@ -179,9 +179,9 @@ class VllmServiceFactory(BaseServiceFactory):
             return None
 
         # First Party
+        from lmcache.gpu_connector import CreateGPUConnector
         from lmcache.integration.vllm.utils import ENGINE_NAME
         from lmcache.utils import EngineType
-        from lmcache.v1.gpu_connector import CreateGPUConnector
 
         if curr_engine := LMCacheEngineBuilder.get(ENGINE_NAME):
             self.lmcache_engine = curr_engine
@@ -251,7 +251,7 @@ class VllmServiceFactory(BaseServiceFactory):
             return None
 
         # First Party
-        from lmcache.v1.lookup_client.factory import LookupClientFactory
+        from lmcache.lookup_client.factory import LookupClientFactory
 
         self._ensure_metadata()
         assert self.metadata is not None
@@ -269,7 +269,7 @@ class VllmServiceFactory(BaseServiceFactory):
             return None
 
         # First Party
-        from lmcache.v1.lookup_client.factory import LookupClientFactory
+        from lmcache.lookup_client.factory import LookupClientFactory
 
         self._ensure_metadata()
         self._ensure_engine()

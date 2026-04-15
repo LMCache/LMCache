@@ -33,7 +33,7 @@ len(kv_cache[0]) = B
 kv_cache[0][0].shape = (C, D, E)
 
 The logic for identifying the format currently lives in
-`lmcache/v1/gpu_connector/utils.py`
+`lmcache/gpu_connector/utils.py`
 */
 enum class GPUKVFormat : int {
   NB_NL_TWO_BS_NH_HS = 0,

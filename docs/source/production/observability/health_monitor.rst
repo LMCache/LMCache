@@ -38,7 +38,7 @@ Auto-Discovery
 
 The Health Monitor uses an auto-discovery mechanism to find and instantiate health checks:
 
-1. At startup, the monitor scans the ``lmcache.v1.health_monitor.checks`` package
+1. At startup, the monitor scans the ``lmcache.health_monitor.checks`` package
 2. All classes that inherit from ``HealthCheck`` are discovered
 3. Each check's ``create_from_engine()`` method is called to create instances
 4. The instances are registered with the monitor
@@ -183,6 +183,6 @@ The health check system uses the following error codes:
 Extending the Health Monitor
 ----------------------------
 
-You can add custom health checks by creating a new module in the ``lmcache/v1/health_monitor/checks/`` directory.
+You can add custom health checks by creating a new module in the ``lmcache/health_monitor/checks/`` directory.
 
 The custom check will be automatically discovered and registered when LMCache starts.

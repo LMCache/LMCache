@@ -178,7 +178,7 @@ Monitoring
 
 The prefiller instance will log the throughput of KV cache transfer:
 
-    LMCache INFO: Store 5271 tokens takes: 6.5000 ms, throughput: 98.9889 GB/s; offload_time: 2.6594 ms, put_time: 3.4539 ms (cache_engine.py:190:lmcache.v1.cache_engine)
+    LMCache INFO: Store 5271 tokens takes: 6.5000 ms, throughput: 98.9889 GB/s; offload_time: 2.6594 ms, put_time: 3.4539 ms (cache_engine.py:190:lmcache.cache_engine)
 
 The decoder instance will log how many tokens are fetched from the LMCache:
 

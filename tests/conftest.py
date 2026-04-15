@@ -16,9 +16,9 @@ import pytest
 import torch
 
 # First Party
-from lmcache.v1.cache_engine import LMCacheEngine, LMCacheEngineBuilder
-from lmcache.v1.memory_management import MixedMemoryAllocator
-from lmcache.v1.metadata import LMCacheMetadata
+from lmcache.cache_engine import LMCacheEngine, LMCacheEngineBuilder
+from lmcache.memory_management import MixedMemoryAllocator
+from lmcache.metadata import LMCacheMetadata
 
 if importlib.util.find_spec("pytest_benchmark") is None:
 
@@ -80,11 +80,11 @@ def patch_mixed_allocator():
 
     with (
         patch(
-            "lmcache.v1.memory_management.MixedMemoryAllocator.__init__",
+            "lmcache.memory_management.MixedMemoryAllocator.__init__",
             fake_mixed_init,
         ),
         patch(
-            "lmcache.v1.memory_management.MixedMemoryAllocator.close", fake_mixed_close
+            "lmcache.memory_management.MixedMemoryAllocator.close", fake_mixed_close
         ),
     ):
         yield
@@ -130,9 +130,9 @@ def patch_pin_allocator():
 
     with (
         patch(
-            "lmcache.v1.memory_management.PinMemoryAllocator.__init__", fake_pin_init
+            "lmcache.memory_management.PinMemoryAllocator.__init__", fake_pin_init
         ),
-        patch("lmcache.v1.memory_management.PinMemoryAllocator.close", fake_pin_close),
+        patch("lmcache.memory_management.PinMemoryAllocator.close", fake_pin_close),
     ):
         yield
 """
@@ -425,9 +425,7 @@ def lmserver_v1_process(request):
         port_number = random.randint(10000, 65500)
         print("Starting the lmcache v1 server process on port")
         proc = subprocess.Popen(
-            shlex.split(
-                f"python3 -m lmcache.v1.server localhost {port_number} {device}"
-            )
+            shlex.split(f"python3 -m lmcache.server localhost {port_number} {device}")
         )
 
         # Wait for lmcache process to start

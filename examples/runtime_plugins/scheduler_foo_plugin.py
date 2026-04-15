@@ -10,8 +10,8 @@ import signal
 import time
 
 # First Party
+from lmcache.config import LMCacheEngineConfig
 from lmcache.integration.vllm.utils import lmcache_get_or_create_config
-from lmcache.v1.config import LMCacheEngineConfig
 
 
 # Graceful exit handler

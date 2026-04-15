@@ -255,11 +255,11 @@ When the second request successfully retrieves the cache from the first instance
 
 .. code-block:: bash
 
-    (EngineCore_DP0 pid=305) [2025-11-16 07:24:11,522] LMCache INFO: Got layout info from controller: ('lmcache_instance_2', 'LocalCPUBackend', 3, 'localhost:8202') (p2p_backend.py:196:lmcache.v1.storage_backend.p2p_backend)                                                  
-    (EngineCore_DP0 pid=305) [2025-11-16 07:24:11,607] LMCache INFO: Established connection to peer_init_url localhost:8202. The peer_lookup_url: localhost:8203 (p2p_backend.py:349:lmcache.v1.storage_backend.p2p_backend)                                                      
-    (EngineCore_DP0 pid=305) [2025-11-16 07:24:11,706] LMCache INFO: Responding to scheduler for lookup id cmpl-e9ec2875bf954bd298ca26d14e083b80-0 with retrieved length 768 (storage_manager.py:531:lmcache.v1.storage_backend.storage_manager)                                  
+    (EngineCore_DP0 pid=305) [2025-11-16 07:24:11,522] LMCache INFO: Got layout info from controller: ('lmcache_instance_2', 'LocalCPUBackend', 3, 'localhost:8202') (p2p_backend.py:196:lmcache.storage_backend.p2p_backend)                                                  
+    (EngineCore_DP0 pid=305) [2025-11-16 07:24:11,607] LMCache INFO: Established connection to peer_init_url localhost:8202. The peer_lookup_url: localhost:8203 (p2p_backend.py:349:lmcache.storage_backend.p2p_backend)                                                      
+    (EngineCore_DP0 pid=305) [2025-11-16 07:24:11,706] LMCache INFO: Responding to scheduler for lookup id cmpl-e9ec2875bf954bd298ca26d14e083b80-0 with retrieved length 768 (storage_manager.py:531:lmcache.storage_backend.storage_manager)                                  
     (EngineCore_DP0 pid=305) [2025-11-16 07:24:11,708] LMCache INFO: Reqid: cmpl-e9ec2875bf954bd298ca26d14e083b80-0, Total tokens 1002, LMCache hit tokens: 768, need to load: 768 (vllm_v1_adapter.py:1330:lmcache.integration.vllm.vllm_v1_adapter)                             
-    (EngineCore_DP0 pid=305) [2025-11-16 07:24:11,724] LMCache INFO: Retrieved 768 out of 768 required tokens (from 768 total tokens). size: 0.0938 gb, cost 7.9816 ms, throughput: 11.7458 GB/s; (cache_engine.py:531:lmcache.v1.cache_engine)
+    (EngineCore_DP0 pid=305) [2025-11-16 07:24:11,724] LMCache INFO: Retrieved 768 out of 768 required tokens (from 768 total tokens). size: 0.0938 gb, cost 7.9816 ms, throughput: 11.7458 GB/s; (cache_engine.py:531:lmcache.cache_engine)
 
 
 These logs indicate that the peer connection was established and the cache was transferred successfully.

@@ -136,7 +136,7 @@ Plugin Contract
 
 A plugin adapter class **must**:
 
-1. Subclass ``L2AdapterInterface`` from ``lmcache.v1.distributed.l2_adapters.base``.
+1. Subclass ``L2AdapterInterface`` from ``lmcache.distributed.l2_adapters.base``.
 2. Implement all abstract methods: ``submit_store_task``, ``pop_completed_store_tasks``,
    ``submit_lookup_and_lock_task``, ``query_lookup_and_lock_result``, ``submit_unlock``,
    ``submit_load_task``, ``query_load_result``, ``close``, and all three event-fd getters.
@@ -196,7 +196,7 @@ Minimal Example
     import threading
 
     from lmcache.native_storage_ops import Bitmap
-    from lmcache.v1.distributed.l2_adapters.base import (
+    from lmcache.distributed.l2_adapters.base import (
         L2AdapterInterface,
         L2TaskId,
     )
@@ -247,7 +247,7 @@ See ``examples/lmc_external_l2_adapter/`` for a complete, pip-installable exampl
 Additional Resources
 ~~~~~~~~~~~~~~~~~~~~
 
-- Plugin adapter source: ``lmcache/v1/distributed/l2_adapters/plugin_l2_adapter.py``
-- Native plugin adapter: ``lmcache/v1/distributed/l2_adapters/native_connector_l2_adapter.py``
-- Design document: ``lmcache/v1/distributed/l2_adapters/design_docs/plugin.md``
-- L2 adapter base interface: ``lmcache/v1/distributed/l2_adapters/base.py``
+- Plugin adapter source: ``lmcache/distributed/l2_adapters/plugin_l2_adapter.py``
+- Native plugin adapter: ``lmcache/distributed/l2_adapters/native_connector_l2_adapter.py``
+- Design document: ``lmcache/distributed/l2_adapters/design_docs/plugin.md``
+- L2 adapter base interface: ``lmcache/distributed/l2_adapters/base.py``

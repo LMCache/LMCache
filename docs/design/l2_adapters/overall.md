@@ -530,12 +530,12 @@ module discovery. **To add a new policy, create a single file in
 3. Call `register_store_policy("tiered", TieredStorePolicy)` at module level.
 
 ```python
-from lmcache.v1.distributed.storage_controllers.store_policy import (
+from lmcache.distributed.storage_controllers.store_policy import (
     StorePolicy,
     AdapterDescriptor,
     register_store_policy,
 )
-from lmcache.v1.distributed.api import ObjectKey
+from lmcache.distributed.api import ObjectKey
 
 
 class TieredStorePolicy(StorePolicy):

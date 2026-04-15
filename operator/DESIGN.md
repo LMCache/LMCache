@@ -357,10 +357,10 @@ OnEvent(LMCacheEngine create/update/delete):
 
 | File | What it defines |
 |---|---|
-| `lmcache/v1/distributed/config.py` | `L1MemoryManagerConfig`, `L1ManagerConfig`, `EvictionConfig`, `StorageManagerConfig`, argparse |
-| `lmcache/v1/mp_observability/config.py` | `PrometheusConfig`, `add_prometheus_args`, `parse_args_to_prometheus_config` |
-| `lmcache/v1/multiprocess/server.py` | `MPCacheEngine`, server CLI entry point, argparse (lines 629–653) |
-| `lmcache/v1/multiprocess/http_server.py` | HTTP server with `/api/healthcheck` endpoint (FastAPI + ZMQ) |
-| `lmcache/v1/distributed/l2_adapters/config.py` | L2 adapter registry pattern, `L2AdapterConfigBase`, `L2AdaptersConfig` |
+| `lmcache/distributed/config.py` | `L1MemoryManagerConfig`, `L1ManagerConfig`, `EvictionConfig`, `StorageManagerConfig`, argparse |
+| `lmcache/mp_observability/config.py` | `PrometheusConfig`, `add_prometheus_args`, `parse_args_to_prometheus_config` |
+| `lmcache/multiprocess/server.py` | `MPCacheEngine`, server CLI entry point, argparse (lines 629–653) |
+| `lmcache/multiprocess/http_server.py` | HTTP server with `/api/healthcheck` endpoint (FastAPI + ZMQ) |
+| `lmcache/distributed/l2_adapters/config.py` | L2 adapter registry pattern, `L2AdapterConfigBase`, `L2AdaptersConfig` |
 | `examples/multi_process/lmcache-daemonset.yaml` | Reference DaemonSet manifest |
 | `examples/multi_process/vllm-deployment.yaml` | Reference vLLM deployment with kv-transfer-config |

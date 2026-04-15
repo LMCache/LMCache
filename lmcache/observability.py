@@ -22,13 +22,13 @@ import prometheus_client
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.metadata import LMCacheMetadata
 from lmcache.usage_context import ContinuousUsageContext
 from lmcache.utils import thread_safe
-from lmcache.v1.metadata import LMCacheMetadata
 
 if TYPE_CHECKING:
     # First Party
-    from lmcache.v1.config import LMCacheEngineConfig
+    from lmcache.config import LMCacheEngineConfig
 
 logger = init_logger(__name__)
 

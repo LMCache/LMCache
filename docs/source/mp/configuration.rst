@@ -11,7 +11,7 @@ server.  Arguments are grouped by the config module that defines them.
 MP Server
 ---------
 
-Source: ``lmcache/v1/multiprocess/config.py``
+Source: ``lmcache/multiprocess/config.py``
 
 .. list-table::
    :header-rows: 1
@@ -56,7 +56,7 @@ Source: ``lmcache/v1/multiprocess/config.py``
 Lookup Hash Logging
 -------------------
 
-Source: ``lmcache/v1/mp_observability/subscribers/logging/lookup_hash.py``
+Source: ``lmcache/mp_observability/subscribers/logging/lookup_hash.py``
 
 When enabled, the server publishes chunk hashes computed during ``lookup()``
 as ``MP_LOOKUP`` events on the EventBus.  The
@@ -90,7 +90,7 @@ Observability group.
 HTTP Frontend
 -------------
 
-Source: ``lmcache/v1/multiprocess/config.py``
+Source: ``lmcache/multiprocess/config.py``
 
 The HTTP frontend is included when running ``lmcache server``.
 
@@ -111,7 +111,7 @@ The HTTP frontend is included when running ``lmcache server``.
 L1 Memory Manager
 ------------------
 
-Source: ``lmcache/v1/distributed/config.py``
+Source: ``lmcache/distributed/config.py``
 
 .. list-table::
    :header-rows: 1
@@ -138,7 +138,7 @@ Source: ``lmcache/v1/distributed/config.py``
 L1 Manager TTLs
 ----------------
 
-Source: ``lmcache/v1/distributed/config.py``
+Source: ``lmcache/distributed/config.py``
 
 .. list-table::
    :header-rows: 1
@@ -157,7 +157,7 @@ Source: ``lmcache/v1/distributed/config.py``
 Eviction Policy
 ---------------
 
-Source: ``lmcache/v1/distributed/config.py``
+Source: ``lmcache/distributed/config.py``
 
 .. list-table::
    :header-rows: 1
@@ -182,7 +182,7 @@ Source: ``lmcache/v1/distributed/config.py``
 L2 Policies
 -----------
 
-Source: ``lmcache/v1/distributed/config.py``
+Source: ``lmcache/distributed/config.py``
 
 .. list-table::
    :header-rows: 1
@@ -217,7 +217,7 @@ Source: ``lmcache/v1/distributed/config.py``
 L2 Adapters
 -----------
 
-Source: ``lmcache/v1/distributed/l2_adapters/config.py``
+Source: ``lmcache/distributed/l2_adapters/config.py``
 
 L2 adapters are configured via repeatable ``--l2-adapter <JSON>`` arguments.
 Each JSON object must include a ``"type"`` field that selects the adapter type.
@@ -304,7 +304,7 @@ Pass ``--l2-adapter`` multiple times.  Adapters are used in the order given:
 Observability
 -------------
 
-Source: ``lmcache/v1/mp_observability/config.py``
+Source: ``lmcache/mp_observability/config.py``
 
 See :doc:`observability` for full details on the three modes (metrics,
 logging, tracing).

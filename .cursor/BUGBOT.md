@@ -48,7 +48,7 @@ Read these files for project standards:
 - Public APIs minimal and well-defined — no exposed internals
 - Module-level helpers at top of file; private methods at end of class
 - SLF discipline followed (no cross-class private member access), especially in
-  `lmcache/v1/multiprocess/` and `lmcache/v1/distributed/` where CI enforces it
+  `lmcache/multiprocess/` and `lmcache/distributed/` where CI enforces it
 
 ## Severity calibration
 

@@ -15,13 +15,13 @@ if TYPE_CHECKING:
 import torch
 
 # First Party
+from lmcache.config import LMCacheEngineConfig
+from lmcache.config_base import apply_remote_configs, fetch_remote_config
 from lmcache.logging import init_logger
-from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.config_base import apply_remote_configs, fetch_remote_config
 
 if TYPE_CHECKING:
     # First Party
-    from lmcache.v1.gpu_connector.utils import LayoutHints
+    from lmcache.gpu_connector.utils import LayoutHints
 
 logger = init_logger(__name__)
 ENGINE_NAME = "vllm-instance"
@@ -218,7 +218,7 @@ def create_lmcache_metadata(
         # Third Party
         from vllm.utils import get_kv_cache_torch_dtype
     # First Party
-    from lmcache.v1.metadata import LMCacheMetadata
+    from lmcache.metadata import LMCacheMetadata
 
     config = lmcache_get_or_create_config()
     # Support both vllm_config object and individual config parameters

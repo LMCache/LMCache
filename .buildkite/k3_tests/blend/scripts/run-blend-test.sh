@@ -193,7 +193,7 @@ export LD_LIBRARY_PATH=/opt/nvidia/nsight-compute/2025.1.0/host/linux-desktop-gl
 # 1. Start the LMCache blend server
 # ---------------------------------------------------------------------------
 
-"${DEFAULT_PYTHON}" -m lmcache.v1.multiprocess.blend_server_v2 \
+"${DEFAULT_PYTHON}" -m lmcache.multiprocess.blend_server_v2 \
   --max-workers 1 \
   --port "${LMCACHE_MP_PORT}" \
   --l1-size 70 \

@@ -180,7 +180,7 @@ Inherit from `ConnectorClientBase` which provides asyncio event loop
 integration, future management, and both sync and async methods.
 
 ```python
-# lmcache/v1/storage_backend/native_clients/mybackend_client.py
+# lmcache/storage_backend/native_clients/mybackend_client.py
 from .connector_client_base import ConnectorClientBase
 from lmcache.lmcache_mybackend import LMCacheMyBackendClient
 
@@ -193,7 +193,7 @@ class MyBackendClient(ConnectorClientBase[LMCacheMyBackendClient]):
 This gives you `async get/set/exists`, `batch_get/batch_set/batch_exists`,
 and sync variants, all with automatic eventfd-driven completion handling.
 
-**Reference:** `lmcache/v1/storage_backend/native_clients/resp_client.py`
+**Reference:** `lmcache/storage_backend/native_clients/resp_client.py`
 
 ### Step 5: MP mode integration — L2 adapter config + factory
 
@@ -201,7 +201,7 @@ To use your connector as an L2 adapter in MP mode, add a config class and
 register it in the factory. The `NativeConnectorL2Adapter` bridge handles
 all the complexity (eventfd demuxing, key serialization, locking).
 
-**a) Add config class** in `lmcache/v1/distributed/l2_adapters/config.py`:
+**a) Add config class** in `lmcache/distributed/l2_adapters/config.py`:
 
 ```python
 class MyBackendL2AdapterConfig(L2AdapterConfigBase):
@@ -233,12 +233,12 @@ class MyBackendL2AdapterConfig(L2AdapterConfigBase):
 register_l2_adapter_type("mybackend", MyBackendL2AdapterConfig)
 ```
 
-**b) Add factory branch** in `lmcache/v1/distributed/l2_adapters/__init__.py`:
+**b) Add factory branch** in `lmcache/distributed/l2_adapters/__init__.py`:
 
 ```python
 if isinstance(config, MyBackendL2AdapterConfig):
     from lmcache.lmcache_mybackend import LMCacheMyBackendClient
-    from lmcache.v1.distributed.l2_adapters.native_connector_l2_adapter import (
+    from lmcache.distributed.l2_adapters.native_connector_l2_adapter import (
         NativeConnectorL2Adapter,
     )
     native_client = LMCacheMyBackendClient(
@@ -285,4 +285,4 @@ Python eventfd.
 - [ ] `setup.py` entry for the new `CppExtension`
 - [ ] Python client inheriting `ConnectorClientBase` (non-MP mode)
 - [ ] L2 adapter config class + factory registration (MP mode)
-- [ ] Unit tests (see `tests/v1/distributed/test_native_connector_l2_adapter.py`)
+- [ ] Unit tests (see `tests/distributed/test_native_connector_l2_adapter.py`)

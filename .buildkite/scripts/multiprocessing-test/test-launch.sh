@@ -41,7 +41,7 @@ docker run -d \
     --ipc host \
     --entrypoint /opt/venv/bin/python3 \
     lmcache/vllm-openai:test \
-    -m lmcache.v1.multiprocess.server \
+    -m lmcache.multiprocess.server \
     --cpu-buffer-size "$CPU_BUFFER_SIZE" \
     --max-workers "$MAX_WORKERS" \
     --port "$LMCACHE_PORT"

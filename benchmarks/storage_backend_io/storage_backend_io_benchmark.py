@@ -20,20 +20,20 @@ import time
 import torch
 
 # First Party
-from lmcache.utils import CacheEngineKey
-from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.memory_management import (
+from lmcache.config import LMCacheEngineConfig
+from lmcache.memory_management import (
     AdHocMemoryAllocator,
     MemoryFormat,
     MemoryObjMetadata,
     TensorMemoryObj,
 )
-from lmcache.v1.metadata import LMCacheMetadata
-from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
-from lmcache.v1.storage_backend.local_disk_backend import LocalDiskBackend
-from lmcache.v1.storage_backend.plugins.rust_raw_block_backend import (
+from lmcache.metadata import LMCacheMetadata
+from lmcache.storage_backend.local_cpu_backend import LocalCPUBackend
+from lmcache.storage_backend.local_disk_backend import LocalDiskBackend
+from lmcache.storage_backend.plugins.rust_raw_block_backend import (
     RustRawBlockBackend,
 )
+from lmcache.utils import CacheEngineKey
 
 DEFAULT_SHAPE = torch.Size([2, 16, 8, 128])
 DEFAULT_DTYPE = torch.bfloat16

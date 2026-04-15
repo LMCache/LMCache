@@ -4,7 +4,7 @@
 
 ## Why
 
-Today users must remember `python3 -m lmcache.v1.multiprocess.http_server ...` and
+Today users must remember `python3 -m lmcache.multiprocess.http_server ...` and
 similar module paths. We need a single `lmcache` command as the front door to all
 LMCache functionality.
 
@@ -37,7 +37,7 @@ All client commands use a `--url` flag pointing to the **LMCache HTTP server**
 
 ### `lmcache server`
 
-Replaces `python3 -m lmcache.v1.multiprocess.http_server`. Runs in foreground,
+Replaces `python3 -m lmcache.multiprocess.http_server`. Runs in foreground,
 Ctrl-C to stop. HTTP frontend is enabled by default; use `--no-http` to run
 ZMQ-only.
 

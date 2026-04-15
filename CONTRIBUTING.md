@@ -47,17 +47,17 @@ BUILD_WITH_HIP=1 pip install -e .
 ```bash
 # Run standard test suite (mirrors CI)
 pytest -xvs --ignore=tests/disagg \
-  --ignore=tests/v1/test_nixl_storage.py \
-  --ignore=tests/v1/multiprocess/ \
-  --ignore=tests/v1/distributed/ \
+  --ignore=tests/test_nixl_storage.py \
+  --ignore=tests/multiprocess/ \
+  --ignore=tests/distributed/ \
   --ignore=tests/skipped \
-  --ignore=tests/v1/storage_backend/test_eic.py
+  --ignore=tests/storage_backend/test_eic.py
 
 # Run a single test file
-pytest -xvs tests/v1/test_cache_engine.py
+pytest -xvs tests/test_cache_engine.py
 
 # Run a single test
-pytest -xvs tests/v1/test_cache_engine.py::test_function_name
+pytest -xvs tests/test_cache_engine.py::test_function_name
 ```
 
 Test dependencies: `uv pip install -r requirements/test.txt`
@@ -101,7 +101,7 @@ import os
 import torch
 
 # First Party
-from lmcache.v1.config import LMCacheEngineConfig
+from lmcache.config import LMCacheEngineConfig
 
 # Local
 from .utils import helper
@@ -109,7 +109,7 @@ from .utils import helper
 
 ### SLF (Private Member Access)
 
-SLF lint rules are currently enforced by CI only in `lmcache/v1/multiprocess/` and `lmcache/v1/distributed/`. However, **all new code should follow SLF discipline regardless of location** — never access private members (prefixed with `_`) of other classes. Treat this as a project-wide coding standard for any new or modified code.
+SLF lint rules are currently enforced by CI only in `lmcache/multiprocess/` and `lmcache/distributed/`. However, **all new code should follow SLF discipline regardless of location** — never access private members (prefixed with `_`) of other classes. Treat this as a project-wide coding standard for any new or modified code.
 
 ## Coding Conventions
 

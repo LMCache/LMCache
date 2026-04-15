@@ -12,8 +12,8 @@ from vllm.config import KVTransferConfig
 from vllm.engine.arg_utils import EngineArgs
 
 # First Party
+from lmcache.cache_engine import LMCacheEngineBuilder
 from lmcache.integration.vllm.utils import ENGINE_NAME
-from lmcache.v1.cache_engine import LMCacheEngineBuilder
 
 
 def setup_environment_variables(vllm_version: str, use_disk: bool = False):

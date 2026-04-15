@@ -94,9 +94,9 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-# Ignore SLF everywhere except lmcache/v1/multiprocess/
-"!lmcache/v1/multiprocess/**" = ["SLF"]
-"!lmcache/v1/distributed/**" = ["SLF"]
+# Ignore SLF everywhere except lmcache/multiprocess/
+"!lmcache/multiprocess/**" = ["SLF"]
+"!lmcache/distributed/**" = ["SLF"]
 
 [tool.ruff.lint.isort]
 # same as .isort.cfg

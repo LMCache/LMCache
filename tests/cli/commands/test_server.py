@@ -127,7 +127,7 @@ class TestServerCommandExecute:
         )
         assert args.func == cmd.execute
 
-    @patch("lmcache.v1.multiprocess.http_server.run_http_server")
+    @patch("lmcache.multiprocess.http_server.run_http_server")
     def test_execute_calls_run_http_server(self, mock_run, parser):
         """execute() should call run_http_server with parsed configs."""
         args = parser.parse_args(
