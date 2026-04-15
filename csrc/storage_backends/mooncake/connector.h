@@ -58,6 +58,14 @@ class MooncakeConnector : public ConnectorBase<WorkerMooncakeConn> {
                         const std::string& key) override;
   void on_workers_stopped() override;
 
+  size_t choose_num_tiles(Op op, size_t num_items) const override;
+
+  void do_batch_get(WorkerMooncakeConn& conn, const Request& req) override;
+
+  void do_batch_set(WorkerMooncakeConn& conn, const Request& req) override;
+
+  void do_batch_exists(WorkerMooncakeConn& conn, const Request& req) override;
+
  private:
   void ensure_registered(const void* buf, size_t len);
   void preregister_l1_memory(std::uintptr_t base, size_t size);
