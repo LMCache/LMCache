@@ -30,6 +30,7 @@ configure two lmcache instances:
     chunk_size: 256
     local_cpu: True
     max_local_cpu_size: 5
+    enable_kv_events: True
 
     # cache controller configurations
     enable_controller: True
@@ -52,10 +53,11 @@ configure two lmcache instances:
     chunk_size: 256
     local_cpu: True
     max_local_cpu_size: 5
+    enable_kv_events: True
 
     # cache controller configurations
     enable_controller: True
-    lmcache_instance_id: "lmcache_instance_1"
+    lmcache_instance_id: "lmcache_instance_2"
     controller_pull_url: "localhost:8300"
     controller_reply_url: "localhost:8400"
     lmcache_worker_ports: 8501
@@ -78,6 +80,21 @@ Start two vllm engines:
 
     PYTHONHASHSEED=123 UCX_TLS=rc CUDA_VISIBLE_DEVICES=1 LMCACHE_CONFIG_FILE=instance2.yaml vllm serve meta-llama/Llama-3.1-8B-Instruct --max-model-len 4096 \
       --gpu-memory-utilization 0.8 --port 8001 --kv-transfer-config '{"kv_connector":"LMCacheConnectorV1", "kv_role":"kv_both"}'
+
+.. note::
+
+   The examples above use ``UCX_TLS=rc`` (InfiniBand RDMA). If your GPUs are
+   on the **same node**, replace it with CUDA IPC:
+
+   .. code-block:: bash
+
+      export UCX_TLS=cuda_ipc,cuda_copy,tcp
+
+   For environments **without RDMA or CUDA IPC**, use TCP as a fallback:
+
+   .. code-block:: bash
+
+      export UCX_TLS=tcp
 
 Start the lmcache controller at port 9000 and the monitor at port 9001:
 
