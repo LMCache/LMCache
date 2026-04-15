@@ -879,7 +879,18 @@ class PrefetchController(StorageControllerInterface):
             adapter_index,
             len(src_objs),
         )
-        serde_task_id = serde.submit_deserialize(src_objs, dst_objs)
+        # If submit_deserialize raises, release this adapter's temp buffers
+        # so they don't leak (no pending_deserialize_tasks entry is created).
+        try:
+            serde_task_id = serde.submit_deserialize(src_objs, dst_objs)
+        except Exception:
+            logger.exception(
+                "Prefetch request %d: failed to submit deserialize for adapter %d",
+                request.request_id,
+                adapter_index,
+            )
+            self._release_adapter_temp_buffers(request, adapter_index)
+            return
         request.pending_deserialize_tasks[adapter_index] = serde_task_id
 
     def _process_deserialize_completions(self, adapter_index: int) -> None:

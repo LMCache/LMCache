@@ -484,8 +484,20 @@ class StoreController(StorageControllerInterface):
         if not final_keys:
             return
 
-        # Submit async serialize to the SerdeProcessor
-        serde_task_id = serde.submit_serialize(final_read_objs, final_temp_objs)
+        # Submit async serialize to the SerdeProcessor.
+        # If submit_serialize raises, we must release the read locks and
+        # temp buffers that would otherwise be tracked in the in-flight dict.
+        try:
+            serde_task_id = serde.submit_serialize(final_read_objs, final_temp_objs)
+        except Exception:
+            logger.exception(
+                "Failed to submit serialize task for adapter %d",
+                adapter_index,
+            )
+            l1_mgr.finish_read(final_read_keys)
+            l1_mgr.finish_write(final_temp_keys)
+            l1_mgr.delete(final_temp_keys)
+            return
 
         self._in_flight_serialize_tasks[(adapter_index, serde_task_id)] = (
             InFlightSerializeTask(
