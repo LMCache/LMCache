@@ -12,7 +12,7 @@ from lmcache.utils import EngineType, _lmcache_nvtx_annotate
 from lmcache.v1.compute.blend.utils import LMCBlenderBuilder
 from lmcache.v1.gpu_connector.utils import (
     LayoutHints,
-    apply_engine_reshape_hints,
+    canonicalize_kv_caches,
     assert_is_vllm_flash_attn_or_flash_infer,
     discover_gpu_kv_format,
     ensure_contiguous_kv_caches,
@@ -1905,9 +1905,6 @@ class SGLangLayerwiseGPUConnector(GPUConnectorInterface):
         return torch.Size([num_tokens, 2, self.hidden_dim_size])
 
 
-# Max memory objects grouped into a single kernel launch. Empirically
-# 4 keeps kernel launch overhead amortized without blowing past shared
-# memory / register budgets on H100-class GPUs.
 _TRTLLM_KERNEL_BATCH_SIZE = 4
 
 
@@ -1967,7 +1964,7 @@ class TRTLLMGPUConnector(GPUConnectorInterface):
             "tokens_per_block": tokens_per_block,
             "head_dim": self.head_dim,
         }
-        kv_cache_tensor = apply_engine_reshape_hints([kv_cache_tensor], layout_hints)
+        kv_cache_tensor = canonicalize_kv_caches([kv_cache_tensor], layout_hints)
         self._kv_format = discover_gpu_kv_format(
             kv_cache_tensor, EngineType.TRTLLM, layout_hints=layout_hints
         )

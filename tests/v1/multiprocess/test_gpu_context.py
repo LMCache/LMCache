@@ -9,6 +9,9 @@ just the fields the buffer methods need, avoiding the full KVCache /
 CudaIPCWrapper construction.
 """
 
+# Standard Library
+from types import SimpleNamespace
+
 # Third Party
 import pytest
 import torch
@@ -58,6 +61,7 @@ def _make_context(
     )
     manager = KVLayerGroupsManager(kv_layer_groups=[group])
     ctx.kv_layer_groups_manager_ = manager
+    ctx.shape_descs_ = [SimpleNamespace(nl=num_layers)]
 
     # Build flat tmp_gpu_buffer_ with prefix-sum offsets (new layout)
     ctx.tmp_chunk_group_offsets_ = [0]
@@ -100,6 +104,7 @@ def _make_context_multi_group(
     kv_size = 1 if is_mla else 2
     kv_layer_groups = []
     hidden_dim_sizes = []
+    shape_descs = []
     layer_offset = 0
     for g in groups:
         nl = g["num_layers"]
@@ -117,10 +122,12 @@ def _make_context_multi_group(
                 dtype=dt,
             )
         )
+        shape_descs.append(SimpleNamespace(nl=nl))
         layer_offset += nl
 
     ctx.num_layers_ = layer_offset
     ctx.hidden_dim_sizes_ = hidden_dim_sizes
+    ctx.shape_descs_ = shape_descs
     manager = KVLayerGroupsManager(kv_layer_groups=kv_layer_groups)
     ctx.kv_layer_groups_manager_ = manager
 

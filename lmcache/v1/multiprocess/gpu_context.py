@@ -19,7 +19,7 @@ from lmcache.logging import init_logger
 from lmcache.utils import EngineType
 from lmcache.v1.gpu_connector.utils import (
     LayoutHints,
-    apply_engine_reshape_hints,
+    canonicalize_kv_caches,
     as_tensor_list,
     discover_gpu_kv_format,
     get_attention_backend,
@@ -80,7 +80,7 @@ class GPUCacheContext:
         # list of per-layer tensors, or a bare tensor for cross-layer
         # formats.
         unwrapped = unwrap_kv_cache_tensors(kv_caches)
-        self.kv_caches_ = apply_engine_reshape_hints(unwrapped, layout_hints)
+        self.kv_caches_ = canonicalize_kv_caches(unwrapped, layout_hints)
 
         self.gpu_kv_format_ = discover_gpu_kv_format(
             self.kv_caches_, engine_type, layout_hints=layout_hints
