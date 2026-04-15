@@ -94,12 +94,10 @@ class MooncakeStoreConfig:
 class MooncakestoreConnector(RemoteConnector):
     def __init__(
         self,
-        host: str,
-        port: int,
-        dev_name,
         loop: asyncio.AbstractEventLoop,
         local_cpu_backend: LocalCPUBackend,
         lmcache_config: Optional[LMCacheEngineConfig],
+        plugin_name: Optional[str] = None,
     ):
         # initialize base class, which includes some common attributes
         super().__init__(local_cpu_backend.config, local_cpu_backend.metadata)
@@ -129,11 +127,6 @@ class MooncakestoreConnector(RemoteConnector):
             else:
                 raise ValueError("MOONCAKE_CONFIG_PATH/lmcache_config must be provided")
 
-            if not self.config.master_server_address:
-                if host != "" and port != 0:
-                    self.config.master_server_address = host + ":" + str(port)
-            if dev_name != "":
-                self.config.device_name = dev_name
             logger.info("Mooncake Configuration loaded. config: %s", self.config)
 
             # Check if storage_root_dir exists and set environment variable

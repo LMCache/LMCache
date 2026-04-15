@@ -74,6 +74,11 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
         "default": None,
         "env_converter": _parse_local_disk,
     },
+    "local_disk_path_sharding": {
+        "type": str,
+        "default": "by_gpu",
+        "env_converter": str,
+    },
     "max_local_disk_size": {"type": float, "default": 0.0, "env_converter": float},
     "remote_url": {
         "type": Optional[str],
@@ -264,11 +269,9 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
     "extra_config": {
         "type": Optional[dict],
         "default": None,
-        "env_converter": lambda x: x
-        if isinstance(x, dict)
-        else json.loads(x)
-        if x
-        else None,
+        "env_converter": lambda x: (
+            x if isinstance(x, dict) else json.loads(x) if x else None
+        ),
     },
     "save_unfull_chunk": {
         "type": bool,
@@ -540,6 +543,25 @@ def _validate_config(self):
                 "enable_blending=True"
             )
             self.save_unfull_chunk = True
+
+    if self.enable_controller:
+        if self.lmcache_instance_id is None:
+            raise ValueError(
+                "lmcache_instance_id is required when enable_controller=True"
+            )
+        if self.controller_pull_url is None:
+            raise ValueError(
+                "controller_pull_url is required when enable_controller=True"
+            )
+        if self.controller_reply_url is None:
+            raise ValueError(
+                "controller_reply_url is required when enable_controller=True"
+            )
+        if not self.lmcache_worker_ports:
+            raise ValueError(
+                "lmcache_worker_ports is required and cannot be "
+                "empty when enable_controller=True"
+            )
 
     if self.enable_p2p:
         assert self.enable_controller
