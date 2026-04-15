@@ -1,29 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 
-"""MP Server span subscriber — OTel spans for store/retrieve/lookup operations.
+"""OTel tracing subscriber for MP server operations.
 
-Creates a root ``"request"`` span per session that wraps all child spans.
-The root span opens at
-:data:`~lmcache.v1.mp_observability.event.EventType.MP_REQUEST_START`
-(true request arrival) and closes at
-:data:`~lmcache.v1.mp_observability.event.EventType.MP_SESSION_END`.
+Creates a root ``"request"`` span per session wrapping all child spans.
+Opens at ``MP_REQUEST_START``; closes at ``MP_SESSION_END``, deferred until
+any in-flight GPU store/retrieve callbacks complete.
 
-Because ``end_session()`` is CPU-synchronous while GPU store/retrieve callbacks
-fire asynchronously, the root span close is deferred when operations are still
-in flight: ``MP_STORE_SUBMITTED`` and ``MP_RETRIEVE_SUBMITTED`` increment
-per-session counters before GPU work is enqueued, and the close is delayed
-until the last ``MP_STORE_END`` / ``MP_RETRIEVE_END`` decrements both counters
-to zero.
-
-**Extensibility via SpanRegistry**
-
-An optional
-:class:`~lmcache.v1.mp_observability.subscribers.tracing.span_registry.SpanRegistry`
-can be shared with other subscribers.  The root ``"request"`` span and all
-child spans (``"store"``, ``"retrieve"``, ``"lookup_prefetch"``) are registered
-in it while open, so new subscribers can look up a parent context without
-coupling to this class.  See
-``docs/design/observability/request-event-span.md`` for worked examples.
+Accepts an optional :class:`~lmcache.v1.mp_observability.subscribers.tracing\
+.span_registry.SpanRegistry` so other subscribers can nest spans under the
+root or any child span — see
+``docs/design/observability/request-event-span.md`` for examples.
 """
 
 # Future
