@@ -853,6 +853,9 @@ class PrefetchController(StorageControllerInterface):
             dst_objs.append(request.write_reserved_objs[orig_key])
 
         if not src_objs:
+            # All L2 loads failed for this adapter — release its temp buffers
+            # now, since _process_deserialize_completions won't fire.
+            self._release_adapter_temp_buffers(request, adapter_index)
             return
 
         logger.debug(
@@ -877,7 +880,6 @@ class PrefetchController(StorageControllerInterface):
         assert serde is not None, (
             f"deserialize completion for adapter {adapter_index} but no serde processor"
         )
-        l1_mgr = self._l1_manager
         ready_to_finalize: list[InFlightPrefetchRequest] = []
 
         for request in list(self._in_flight_requests.values()):
@@ -898,22 +900,7 @@ class PrefetchController(StorageControllerInterface):
                     request.request_id,
                     adapter_index,
                 )
-            # Release temp buffers belonging to this adapter
-            adapter_temp_keys: list[ObjectKey] = []
-            for orig_key in request.load_plan[adapter_index].gather(request.keys):
-                temp_key = request.original_to_temp_key.get(orig_key)
-                if temp_key is not None and temp_key in request.temp_reserved_objs:
-                    adapter_temp_keys.append(temp_key)
-
-            if adapter_temp_keys:
-                l1_mgr.finish_write(adapter_temp_keys)
-                l1_mgr.delete(adapter_temp_keys)
-                temp_set = set(adapter_temp_keys)
-                request.temp_reserved_keys = [
-                    k for k in request.temp_reserved_keys if k not in temp_set
-                ]
-                for tk in adapter_temp_keys:
-                    request.temp_reserved_objs.pop(tk, None)
+            self._release_adapter_temp_buffers(request, adapter_index)
 
             if not result:
                 # Deserialize failed — clear this adapter's load_result
@@ -1018,15 +1005,33 @@ class PrefetchController(StorageControllerInterface):
             return request.temp_reserved_objs[temp_key]
         return request.write_reserved_objs[key]
 
-    def _find_adapter_for_key(
-        self, request: InFlightPrefetchRequest, key: ObjectKey
-    ) -> int:
-        """Find which adapter was responsible for loading this key."""
-        key_idx = request.keys.index(key)
-        for adapter_idx, bitmap in request.load_plan.items():
-            if bitmap.test(key_idx):
-                return adapter_idx
-        raise RuntimeError(f"Key {key} not found in any adapter's load plan")
+    def _release_adapter_temp_buffers(
+        self,
+        request: InFlightPrefetchRequest,
+        adapter_index: int,
+    ) -> None:
+        """Release temp byte buffers belonging to a specific adapter.
+
+        Called after deserialization completes (success or failure) for an
+        adapter, or when all L2 loads failed for a serde adapter and no
+        deserialize was submitted.
+        """
+        l1_mgr = self._l1_manager
+        adapter_temp_keys: list[ObjectKey] = []
+        for orig_key in request.load_plan[adapter_index].gather(request.keys):
+            temp_key = request.original_to_temp_key.get(orig_key)
+            if temp_key is not None and temp_key in request.temp_reserved_objs:
+                adapter_temp_keys.append(temp_key)
+
+        if adapter_temp_keys:
+            l1_mgr.finish_write(adapter_temp_keys)
+            l1_mgr.delete(adapter_temp_keys)
+            temp_set = set(adapter_temp_keys)
+            request.temp_reserved_keys = [
+                k for k in request.temp_reserved_keys if k not in temp_set
+            ]
+            for tk in adapter_temp_keys:
+                request.temp_reserved_objs.pop(tk, None)
 
     # =========================================================================
     # Unlock helpers

@@ -231,8 +231,12 @@ class StoreController(StorageControllerInterface):
         # within a single adapter, not across adapters.
         self._in_flight_tasks: dict[tuple[int, L2TaskId], InFlightStoreTask] = {}
 
-        # serde_task_id -> InFlightSerializeTask
-        self._in_flight_serialize_tasks: dict[SerdeTaskId, InFlightSerializeTask] = {}
+        # (adapter_index, serde_task_id) -> InFlightSerializeTask
+        # Composite key needed because each SerdeProcessor allocates task IDs
+        # independently — bare task IDs would collide across adapters.
+        self._in_flight_serialize_tasks: dict[
+            tuple[int, SerdeTaskId], InFlightSerializeTask
+        ] = {}
 
         # Shadow counter for status reporting (updated in background loop)
         self._status_in_flight_count: int = 0
@@ -469,15 +473,9 @@ class StoreController(StorageControllerInterface):
         if failed_read_keys:
             l1_mgr.finish_read(failed_read_keys)
 
-        # Clean up failed temp allocs
-        failed_temp_keys = [
-            tk
-            for tk, ok in zip(temp_keys, successful_keys, strict=True)
-            if ok in failed_orig_keys_set
-        ]
-        if failed_temp_keys:
-            l1_mgr.finish_write(failed_temp_keys)
-            l1_mgr.delete(failed_temp_keys)
+        # Note: failed temp alloc keys were never added to L1's object store
+        # (reserve_write returned an error), so there's nothing to finish_write
+        # or delete — they simply don't exist.
 
         if not final_keys:
             return
@@ -485,13 +483,15 @@ class StoreController(StorageControllerInterface):
         # Submit async serialize to the SerdeProcessor
         serde_task_id = serde.submit_serialize(final_read_objs, final_temp_objs)
 
-        self._in_flight_serialize_tasks[serde_task_id] = InFlightSerializeTask(
-            adapter_index=adapter_index,
-            serde_task_id=serde_task_id,
-            keys=final_keys,
-            read_locked_keys=final_read_keys,
-            temp_keys=final_temp_keys,
-            temp_objs=final_temp_objs,
+        self._in_flight_serialize_tasks[(adapter_index, serde_task_id)] = (
+            InFlightSerializeTask(
+                adapter_index=adapter_index,
+                serde_task_id=serde_task_id,
+                keys=final_keys,
+                read_locked_keys=final_read_keys,
+                temp_keys=final_temp_keys,
+                temp_objs=final_temp_objs,
+            )
         )
 
     def _process_serialize_completions(self, adapter_index: int) -> None:
@@ -514,7 +514,7 @@ class StoreController(StorageControllerInterface):
             if result is None:
                 continue
 
-            del self._in_flight_serialize_tasks[task.serde_task_id]
+            del self._in_flight_serialize_tasks[(adapter_index, task.serde_task_id)]
 
             # Release original read locks — data is in temp now
             l1_mgr.finish_read(task.read_locked_keys)
