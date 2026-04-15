@@ -216,6 +216,51 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
     },
     "pd_proxy_host": {"type": Optional[str], "default": None, "env_converter": str},
     "pd_proxy_port": {"type": Optional[int], "default": None, "env_converter": int},
+    "pd_allocation_timeout_sec": {
+        "type": float,
+        "default": 5.0,
+        "env_converter": float,
+        "description": "Maximum seconds to retry memory allocation before giving up.",
+    },
+    "pd_shutdown_timeout_sec": {
+        "type": float,
+        "default": 5.0,
+        "env_converter": float,
+        "description": (
+            "Maximum seconds to wait for event loop shutdown and thread join."
+        ),
+    },
+    "pd_condition_poll_interval_sec": {
+        "type": float,
+        "default": 0.05,
+        "env_converter": float,
+        "description": (
+            "Polling interval in seconds when waiting on a threading/asyncio "
+            "Condition. Small enough to be responsive, large enough not to "
+            "spin-waste CPU."
+        ),
+    },
+    "pd_max_prefill_len": {
+        "type": int,
+        "default": 0,
+        "env_converter": int,
+        "description": (
+            "Maximum prefill token length that the PD buffer must be able to "
+            "hold. If > 0, initialization raises ValueError when the buffer "
+            "capacity (in tokens) is smaller than this value. "
+            "Set to 0 (default) to skip the check."
+        ),
+    },
+    "pd_backend_mode": {
+        "type": Optional[str],
+        "default": "async",
+        "env_converter": str,
+        "description": (
+            "Select the PD backend implementation: 'async' (default) uses the "
+            "asyncio-based implementation; 'sync' uses the original "
+            "thread-based synchronous implementation."
+        ),
+    },
     # Transfer-related configurations
     "transfer_channel": {"type": Optional[str], "default": None, "env_converter": str},
     # Nixl-related configurations
@@ -581,6 +626,9 @@ def _validate_config(self):
         assert self.pd_buffer_size is not None
         assert self.pd_buffer_device is not None
         assert self.enable_p2p is False, "PD only supports enable_p2p=False"
+        assert self.pd_backend_mode in ("sync", "async"), (
+            f"pd_backend_mode must be 'sync' or 'async', got {self.pd_backend_mode!r}"
+        )
 
         # PD requires save_unfull_chunk=True for complete KV cache transfer
         # from prefill node to decode node. Without this, partial chunks would

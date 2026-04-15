@@ -269,6 +269,21 @@ Settings for disaggregated prefill functionality. The latest/default PD is imple
    * - pd_proxy_port
      - LMCACHE_PD_PROXY_PORT
      - Port for proxy server. Required for senders to connect to inform the proxy when transfer to decoder has been completed
+   * - pd_allocation_timeout_sec
+     - LMCACHE_PD_ALLOCATION_TIMEOUT_SEC
+     - Maximum seconds to retry memory allocation before giving up. Default: 5.0
+   * - pd_shutdown_timeout_sec
+     - LMCACHE_PD_SHUTDOWN_TIMEOUT_SEC
+     - Maximum seconds to wait for event loop shutdown and thread join. Default: 5.0
+   * - pd_condition_poll_interval_sec
+     - LMCACHE_PD_CONDITION_POLL_INTERVAL_SEC
+     - Polling interval in seconds when waiting on a threading/asyncio Condition. Small enough to be responsive, large enough not to spin-waste CPU. Default: 0.05
+   * - pd_max_prefill_len
+     - LMCACHE_PD_MAX_PREFILL_LEN
+     - Maximum prefill token length that the PD buffer must be able to hold. If > 0, initialization raises ValueError when the buffer capacity (in tokens) is smaller than this value. Set to 0 (default) to skip the check.
+   * - pd_backend_mode
+     - LMCACHE_PD_BACKEND_MODE
+     - Select the PD backend implementation: 'async' (default) uses the asyncio-based implementation; 'sync' uses the original thread-based synchronous implementation. Default: "async"
 
 P2P Backend Configurations
 --------------------------
