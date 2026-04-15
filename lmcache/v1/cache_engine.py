@@ -1313,14 +1313,28 @@ class LMCacheEngine:
             # Flatten nested lists (each backend returns a list of chunks)
             memory_objs_flat = [mm for m in memory_objs for mm in m]
 
-            # Release each memory object
+            # Release each memory object's ref count first (while
+            # pin_count > 0 the object won't be freed prematurely).
             for key, memory_obj in memory_objs_flat:
                 try:
                     logger.debug("Releasing memory object for lookup_id=%s", lookup_id)
-                    memory_obj.unpin()
                     memory_obj.ref_count_down()
                 except Exception as e:
                     logger.error(f"Error releasing memory object: {e}")
+
+            # Unpin via storage_manager so backends with server-side
+            # pin state (e.g. MaruBackend) are properly notified.
+            # For LocalCPUBackend, backend.unpin(key) internally calls
+            # memory_obj.unpin(), so behavior is equivalent.
+            try:
+                keys_to_unpin = [key for key, _ in memory_objs_flat]
+                if keys_to_unpin:
+                    self.storage_manager.batched_unpin(keys_to_unpin)
+            except Exception as e:
+                logger.error(
+                    f"Error during batched_unpin for "
+                    f"lookup_id={lookup_id}: {e}"
+                )
         except Exception as e:
             logger.error(
                 f"Error during cleanup_memory_objs for lookup_id={lookup_id}: {e}"
