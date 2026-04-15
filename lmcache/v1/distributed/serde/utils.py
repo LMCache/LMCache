@@ -31,14 +31,13 @@ def serialized_layout_desc(
     )
 
 
-def make_temp_key(original_key: ObjectKey, purpose: str) -> ObjectKey:
+def make_temp_key(original_key: ObjectKey) -> ObjectKey:
     """Create a unique temporary key derived from the original.
 
     Uses a random suffix so it never collides with real keys.
 
     Args:
         original_key: The original ObjectKey to derive from.
-        purpose: "ser" or "deser", for debugging only.
     """
     random_suffix = os.urandom(8)
     temp_hash = original_key.chunk_hash + random_suffix

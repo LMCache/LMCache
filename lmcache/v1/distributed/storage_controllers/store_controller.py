@@ -437,7 +437,7 @@ class StoreController(StorageControllerInterface):
         """Allocate temp buffers and submit async serialize to SerdeProcessor."""
         l1_mgr = self._l1_manager
 
-        temp_keys = [make_temp_key(key, "ser") for key in successful_keys]
+        temp_keys = [make_temp_key(key) for key in successful_keys]
         ser_layout = serialized_layout_desc(
             MemoryLayoutDesc(
                 shapes=successful_objs[0].get_shapes(),

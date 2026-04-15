@@ -685,7 +685,7 @@ class PrefetchController(StorageControllerInterface):
                 continue
 
             temp_layout = serialized_layout_desc(request.layout_desc, serde)
-            temp_keys = [make_temp_key(k, "deser") for k in adapter_keys]
+            temp_keys = [make_temp_key(k) for k in adapter_keys]
 
             temp_results = l1_mgr.reserve_write(
                 keys=temp_keys,
@@ -896,6 +896,11 @@ class PrefetchController(StorageControllerInterface):
                 adapter_index,
             )
             self._release_adapter_temp_buffers(request, adapter_index)
+            # Clear load results so _finalize_load treats these keys as
+            # failed — the real KV buffers contain uninitialized data since
+            # the deserialize that would have populated them never ran.
+            n_keys = request.load_plan[adapter_index].popcount()
+            request.load_results[adapter_index] = Bitmap(n_keys)
             return
         request.pending_deserialize_tasks[adapter_index] = serde_task_id
 
