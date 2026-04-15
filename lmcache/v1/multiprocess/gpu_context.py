@@ -25,6 +25,7 @@ from lmcache.v1.gpu_connector.utils import (
     get_attention_backend,
     get_block_size,
     get_concrete_gpu_kv_shape,
+    get_device,
     get_dtype,
     get_gpu_kv_shape_description,
     get_head_size,
@@ -33,8 +34,10 @@ from lmcache.v1.gpu_connector.utils import (
     get_num_blocks,
     get_num_heads,
     get_num_layers,
-    is_mla,
+    group_element_size,
     group_first_layer_tensor,
+    group_num_layers,
+    is_mla,
 )
 from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
 
@@ -91,15 +94,14 @@ class GPUCacheContext:
         self.num_blocks_ = get_num_blocks(self.kv_caches_, self.gpu_kv_format_)
         self.block_size_ = get_block_size(self.kv_caches_, self.gpu_kv_format_)
 
-        # Per-layer tensor list for device inspection and group building.
-        tensors = as_tensor_list(self.kv_caches_, self.gpu_kv_format_)
-        self.device_ = tensors[0].device
+        self.device_ = get_device(self.kv_caches_, self.gpu_kv_format_)
 
         # Pointers
         pointers_list = get_kv_cache_data_ptrs(self.kv_caches_, self.gpu_kv_format_)
         self.kv_cache_pointers_ = list_to_gpu_tensor(pointers_list, self.device_)
 
         # Build per-layer KV groups (grouped by shape and dtype)
+        tensors = as_tensor_list(self.kv_caches_, self.gpu_kv_format_)
         self.kv_layer_groups_manager_ = KVLayerGroupsManager()
         self.kv_layer_groups_manager_.build_kv_layer_groups_from_list(tensors)
 
@@ -107,12 +109,7 @@ class GPUCacheContext:
         # shape_desc, and kv_pointers — all derived from the representative
         # first layer of each group. MLA formats have no independent num_heads
         # dimension; use nh=1 so the kernel thread block has a single row.
-        # For cross-layer formats the representative is the single shared
-        # tensor and one group spans every layer.
         kv_size = 1 if self.is_mla_ else 2
-        cross_layer_tensor = (
-            self.kv_caches_ if isinstance(self.kv_caches_, torch.Tensor) else None
-        )
         self.hidden_dim_sizes_: list[int] = []
         self.group_num_heads_: list[int] = []
         self.group_head_sizes_: list[int] = []
@@ -124,14 +121,10 @@ class GPUCacheContext:
             hidden_dim = get_hidden_dim_size(rep, self.gpu_kv_format_)
             nh = 1 if self.is_mla_ else get_num_heads(rep, self.gpu_kv_format_)
             hs = get_head_size(rep, self.gpu_kv_format_)
-            nl = (
-                self.num_layers_ if cross_layer_tensor is not None else group.num_layers
+            nl = group_num_layers(
+                self.kv_caches_, self.num_layers_, group.num_layers
             )
-            element_size = (
-                cross_layer_tensor.element_size()
-                if cross_layer_tensor is not None
-                else first_layer.element_size()
-            )
+            element_size = group_element_size(self.kv_caches_, first_layer)
 
             self.hidden_dim_sizes_.append(hidden_dim)
             self.group_num_heads_.append(nh)

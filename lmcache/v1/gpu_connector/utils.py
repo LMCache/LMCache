@@ -863,6 +863,47 @@ def as_tensor_list(
     return kv_caches
 
 
+def get_device(
+    kv_caches: KVCaches,
+    gpu_kv_format: "lmc_ops.GPUKVFormat",
+) -> torch.device:
+    """Device that hosts the KV cache allocation.
+
+    Cross-layer formats have a single bare tensor; per-layer formats
+    have a list whose entries all share a device (one worker = one GPU).
+    """
+    return as_tensor_list(kv_caches, gpu_kv_format)[0].device
+
+
+def group_num_layers(
+    kv_caches: KVCaches,
+    all_num_layers: int,
+    group_num_layers_: int,
+) -> int:
+    """Layers that a KV layer group spans in the LMCache buffer.
+
+    Cross-layer: every group spans every layer (one shared allocation).
+    Per-layer:   a group spans only its own layer indices.
+    """
+    if isinstance(kv_caches, torch.Tensor):
+        return all_num_layers
+    return group_num_layers_
+
+
+def group_element_size(
+    kv_caches: KVCaches,
+    first_layer: torch.Tensor,
+) -> int:
+    """Bytes per element for one KV layer group.
+
+    Cross-layer: the shared allocation's dtype governs every group.
+    Per-layer:   the group's first layer — groups may differ in dtype.
+    """
+    if isinstance(kv_caches, torch.Tensor):
+        return kv_caches.element_size()
+    return first_layer.element_size()
+
+
 def group_first_layer_tensor(
     kv_caches: KVCaches,
     first_layer: torch.Tensor,
