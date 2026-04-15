@@ -156,7 +156,7 @@ The ``ConnectorAdapter`` class is responsible for:
             # - context.url: the full remote URL
             # - context.loop: asyncio event loop
             # - context.config: LMCacheEngineConfig
-            # - context.metadata: LMCacheEngineMetadata
+            # - context.metadata: LMCacheMetadata
             # - context.plugin_name: plugin instance name
             #   (e.g. "mystore", "mystore.region_a")
             return MyStoreConnector(
@@ -172,9 +172,9 @@ The ``RemoteConnector`` class defines the interface for remote storage operation
 .. code-block:: python
 
     from typing import List, Optional
-    from lmcache.config import LMCacheEngineMetadata
     from lmcache.utils import CacheEngineKey
     from lmcache.v1.config import LMCacheEngineConfig
+    from lmcache.v1.metadata import LMCacheMetadata
     from lmcache.v1.memory_management import MemoryObj
     from lmcache.v1.storage_backend.connector.base_connector import RemoteConnector
 
@@ -184,7 +184,7 @@ The ``RemoteConnector`` class defines the interface for remote storage operation
         def __init__(
             self,
             config: LMCacheEngineConfig,
-            metadata: Optional[LMCacheEngineMetadata]
+            metadata: Optional[LMCacheMetadata]
         ):
             super().__init__(config, metadata)
             # Initialize your connection here
