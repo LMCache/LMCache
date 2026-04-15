@@ -593,9 +593,18 @@ class CacheStoreEvent:
     lora_name: str | None
 
 
-class EngineType(Enum):
+class EngineType(str, Enum):
+    """Serving engine identifier.
+
+    Inherits from ``str`` so members are drop-in strings: equality with
+    plain strings works (``EngineType.VLLM == "vllm"``) and msgspec
+    serializes them as their string value over ZMQ. Equivalent to
+    :class:`enum.StrEnum` but works on Python 3.10.
+    """
+
     VLLM = "vllm"
     SGLANG = "sglang"
+    TRTLLM = "trtllm"
     MOCK = "mock"
 
 

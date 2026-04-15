@@ -118,6 +118,88 @@ class CudaIPCWrapper:
         return pickle.loads(data)
 
 
+class RawCudaIPCWrapper(CudaIPCWrapper):
+    """IPC wrapper for CUDA tensors allocated outside PyTorch's caching allocator.
+
+    PyTorch's ``_share_cuda_()`` fails on tensors created via ``at::for_blob()``
+    (e.g., TensorRT-LLM wraps ``cudaMalloc``'d C++ memory this way). This wrapper
+    calls ``cudaIpcGetMemHandle`` directly on the raw data pointer and reconstructs
+    the tensor on the receiving side via ``cudaIpcOpenMemHandle`` + CuPy DLPack.
+
+    Follows the same ``__init__`` / ``to_tensor()`` interface as
+    :class:`CudaIPCWrapper` so it works with the existing server infrastructure.
+    """
+
+    def __init__(self, tensor: torch.Tensor):
+        # First Party
+        from lmcache.v1.gpu_connector.utils import assert_contiguous
+
+        assert_contiguous(tensor)
+
+        try:
+            # Third Party
+            from cuda.bindings import runtime as cudart
+        except ImportError:
+            # Third Party
+            from cuda import cudart
+
+        data_ptr = tensor.data_ptr()
+        err, ipc_handle = cudart.cudaIpcGetMemHandle(data_ptr)
+        if err != cudart.cudaError_t.cudaSuccess:
+            raise RuntimeError(
+                f"cudaIpcGetMemHandle failed: {err} (ptr=0x{data_ptr:x})"
+            )
+
+        # Store only what's needed for reconstruction
+        self._ipc_handle_reserved = bytes(ipc_handle.reserved)
+        self._nbytes = tensor.untyped_storage().nbytes()
+
+        # CudaIPCWrapper interface fields
+        self.handle = None  # Not used; to_tensor is overridden
+        self.dtype = tensor.dtype
+        self.shape = tuple(tensor.shape)
+        self.stride = tuple(tensor.stride())
+        self.storage_offset = int(tensor.storage_offset())
+
+        device_index = tensor.device.index
+        self.device_uuid = CudaIPCWrapper._get_device_uuid(device_index)
+
+    def to_tensor(self) -> torch.Tensor:
+        """Reconstruct the tensor in this process via CUDA IPC + CuPy DLPack."""
+        # Third Party
+        import cupy
+
+        try:
+            # Third Party
+            from cuda.bindings import runtime as cudart
+        except ImportError:
+            # Third Party
+            from cuda import cudart
+
+        device_index = CudaIPCWrapper._get_device_index_from_uuid(self.device_uuid)
+
+        # Open the IPC handle to get a usable pointer in this process
+        handle = cudart.cudaIpcMemHandle_t()
+        handle.reserved = self._ipc_handle_reserved
+        err, ptr = cudart.cudaIpcOpenMemHandle(
+            handle, cudart.cudaIpcMemLazyEnablePeerAccess
+        )
+        if err != cudart.cudaError_t.cudaSuccess:
+            raise RuntimeError(f"cudaIpcOpenMemHandle failed: {err}")
+
+        # Wrap the raw pointer as a flat uint8 CuPy array, DLPack to torch,
+        # then view as the original dtype/shape.  Using uint8 avoids any
+        # dtype conversion issues (bfloat16, fp8, etc. have no direct
+        # CuPy/NumPy equivalent without ml_dtypes).
+        with cupy.cuda.Device(device_index):
+            mem = cupy.cuda.UnownedMemory(ptr, self._nbytes, owner=self)
+            memptr = cupy.cuda.MemoryPointer(mem, 0)
+            cp_flat = cupy.ndarray(self._nbytes, dtype=cupy.uint8, memptr=memptr)
+
+        raw = torch.from_dlpack(cp_flat)
+        return raw.view(self.dtype).reshape(self.shape)
+
+
 @dataclass(order=True, frozen=True)
 class IPCCacheEngineKey:
     """Cache key for the IPC (multiprocess) protocol.

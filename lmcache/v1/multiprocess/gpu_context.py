@@ -19,6 +19,8 @@ from lmcache.logging import init_logger
 from lmcache.utils import EngineType
 from lmcache.v1.gpu_connector.utils import (
     LayoutHints,
+    apply_engine_reshape_hints,
+    as_tensor_list,
     discover_gpu_kv_format,
     get_attention_backend,
     get_block_size,
@@ -27,6 +29,7 @@ from lmcache.v1.gpu_connector.utils import (
     get_gpu_kv_shape_description,
     get_head_size,
     get_hidden_dim_size,
+    get_kv_cache_data_ptrs,
     get_num_blocks,
     get_num_heads,
     get_num_layers,
@@ -61,52 +64,76 @@ def list_to_gpu_tensor(lis: list[int], device: torch.device) -> torch.Tensor:
 
 class GPUCacheContext:
     """
-    Manages the shape and pointers to vLLM GPU KV cache tensors.
+    Manages the shape and pointers to GPU KV cache tensors.
     """
 
     def __init__(
         self,
         kv_caches: KVCache,
         lmcache_chunk_size: int = 256,
+        engine_type: EngineType = EngineType.VLLM,
         layout_hints: LayoutHints | None = None,
     ):
-        self.kv_caches_ = unwrap_kv_cache_tensors(kv_caches)
-        self.device_ = self.kv_caches_[0].device
+        # Unwrap IPC wrappers, then apply any engine-specific reshape
+        # (e.g. TRT-LLM 4D -> 6D) so format discovery sees the layout
+        # the inspection helpers expect.  After this, kv_caches_ is a
+        # list of per-layer tensors, or a bare tensor for cross-layer
+        # formats.
+        unwrapped = unwrap_kv_cache_tensors(kv_caches)
+        self.kv_caches_ = apply_engine_reshape_hints(unwrapped, layout_hints)
 
-        # Pointers
-        pointers_list = [t.data_ptr() for t in self.kv_caches_]
-        self.kv_cache_pointers_ = list_to_gpu_tensor(pointers_list, self.device_)
-
-        # TODO support creating GPUCacheContext for SGLang
         self.gpu_kv_format_ = discover_gpu_kv_format(
-            self.kv_caches_,
-            EngineType.VLLM,
-            layout_hints=layout_hints,
+            self.kv_caches_, engine_type, layout_hints=layout_hints
         )
         self.is_mla_ = is_mla(self.gpu_kv_format_)
         self.num_layers_ = get_num_layers(self.kv_caches_, self.gpu_kv_format_)
         self.num_blocks_ = get_num_blocks(self.kv_caches_, self.gpu_kv_format_)
         self.block_size_ = get_block_size(self.kv_caches_, self.gpu_kv_format_)
 
+        # Per-layer tensor list for device inspection and group building.
+        tensors = as_tensor_list(self.kv_caches_, self.gpu_kv_format_)
+        self.device_ = tensors[0].device
+
+        # Pointers
+        pointers_list = get_kv_cache_data_ptrs(self.kv_caches_, self.gpu_kv_format_)
+        self.kv_cache_pointers_ = list_to_gpu_tensor(pointers_list, self.device_)
+
         # Build per-layer KV groups (grouped by shape and dtype)
         self.kv_layer_groups_manager_ = KVLayerGroupsManager()
-        self.kv_layer_groups_manager_.build_kv_layer_groups_from_list(self.kv_caches_)
+        self.kv_layer_groups_manager_.build_kv_layer_groups_from_list(tensors)
 
         # Per-group attributes: hidden_dim_size, num_heads, head_size,
         # shape_desc, and kv_pointers — all derived from the representative
         # first layer of each group. MLA formats have no independent num_heads
         # dimension; use nh=1 so the kernel thread block has a single row.
+        # For cross-layer formats the representative is the single shared
+        # tensor and one group spans every layer.
         kv_size = 1 if self.is_mla_ else 2
+        cross_layer_tensor = (
+            self.kv_caches_ if isinstance(self.kv_caches_, torch.Tensor) else None
+        )
         self.hidden_dim_sizes_: list[int] = []
         self.group_num_heads_: list[int] = []
         self.group_head_sizes_: list[int] = []
         self.shape_descs_: list[lmc_ops.PageBufferShapeDesc] = []
         self.group_kv_pointers_: list[torch.Tensor] = []
         for group in self.kv_layer_groups_manager_.kv_layer_groups:
-            rep = [self.kv_caches_[group.layer_indices[0]]]
+            rep: "torch.Tensor | list[torch.Tensor]" = (
+                cross_layer_tensor
+                if cross_layer_tensor is not None
+                else [tensors[group.layer_indices[0]]]
+            )
             hidden_dim = get_hidden_dim_size(rep, self.gpu_kv_format_)
             nh = 1 if self.is_mla_ else get_num_heads(rep, self.gpu_kv_format_)
             hs = get_head_size(rep, self.gpu_kv_format_)
+            nl = (
+                self.num_layers_ if cross_layer_tensor is not None else group.num_layers
+            )
+            element_size = (
+                cross_layer_tensor.element_size()
+                if cross_layer_tensor is not None
+                else tensors[0].element_size()
+            )
 
             self.hidden_dim_sizes_.append(hidden_dim)
             self.group_num_heads_.append(nh)
@@ -114,20 +141,18 @@ class GPUCacheContext:
 
             sd = lmc_ops.PageBufferShapeDesc()
             sd.kv_size = kv_size
-            sd.nl = group.num_layers
+            sd.nl = nl
             sd.nb = self.num_blocks_
             sd.bs = self.block_size_
             sd.nh = nh
             sd.hs = hs
-            sd.element_size = rep[0].element_size()
+            sd.element_size = element_size
             self.shape_descs_.append(sd)
 
-            self.group_kv_pointers_.append(
-                list_to_gpu_tensor(
-                    [self.kv_caches_[i].data_ptr() for i in group.layer_indices],
-                    self.device_,
-                )
+            group_ptrs = get_kv_cache_data_ptrs(
+                self.kv_caches_, self.gpu_kv_format_, group.layer_indices
             )
+            self.group_kv_pointers_.append(list_to_gpu_tensor(group_ptrs, self.device_))
 
         # Pre-allocated GPU buffer for block IDs (up to 1M elements).
         # The caller copies block_ids into this buffer before launching the
@@ -381,13 +406,15 @@ class GPUCacheContext:
             num_tokens: Number of tokens.
             group_idx: Index of the KV layer group (default 0).
         """
-        group = self.kv_layer_groups_manager_.kv_layer_groups[group_idx]
-        num_layers_in_group = group.num_layers
-        hidden_dim = self.hidden_dim_sizes[group_idx]
-        if self.is_mla_:
-            return torch.Size((1, num_layers_in_group, num_tokens, hidden_dim))
-        else:
-            return torch.Size((2, num_layers_in_group, num_tokens, hidden_dim))
+        kv = 1 if self.is_mla_ else 2
+        return torch.Size(
+            (
+                kv,
+                self.shape_descs_[group_idx].nl,
+                num_tokens,
+                self.hidden_dim_sizes_[group_idx],
+            )
+        )
 
     def cache_size_per_token(self) -> int:
         """

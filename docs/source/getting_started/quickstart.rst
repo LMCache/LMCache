@@ -74,6 +74,65 @@ This guide helps you get LMCache running end-to-end in a couple of minutes. Use 
       .. note::
          Configure LMCache via the config file. See :doc:`../api_reference/configurations` for the full list.
 
+   .. tab-item:: TRT-LLM
+
+      **(Terminal 1) Set up TRT-LLM environment**
+
+      TRT-LLM requires CUDA 13.1+, a specific PyTorch build, and TensorRT. The easiest path is the NGC container:
+
+      .. code-block:: bash
+
+         docker run --gpus all -it --rm --shm-size=16g \
+           nvcr.io/nvidia/pytorch:26.02-py3
+
+         # Inside the container:
+         pip install tensorrt_llm lmcache
+
+      For other installation methods, see the `TRT-LLM installation guide <https://nvidia.github.io/TensorRT-LLM/installation/linux.html>`_.
+
+      **Start TRT-LLM with LMCache:**
+
+      .. code-block:: bash
+
+         cat > trtllm_lmcache.yaml <<'EOF'
+         kv_cache_config:
+           enable_block_reuse: true
+         kv_connector_config:
+           connector: lmcache
+         EOF
+
+         PYTHONHASHSEED=0 trtllm-serve Qwen/Qwen2-1.5B-Instruct \
+             --backend pytorch \
+             --extra_llm_api_options trtllm_lmcache.yaml
+
+      .. note::
+         ``PYTHONHASHSEED=0`` must be set before the Python process starts.
+         Configure LMCache via ``LMCACHE_CONFIG_FILE``. See :doc:`../api_reference/configurations` for all options.
+
+      **Multi-process mode (optional):**
+
+      For process isolation or sharing KV cache across multiple TRT-LLM instances, run a standalone LMCache server:
+
+      .. code-block:: bash
+
+         # Terminal A: start the LMCache server
+         python -m lmcache.v1.multiprocess.server \
+             --host 0.0.0.0 --port 5555 \
+             --l1-size-gb 10 --eviction-policy LRU --max-workers 4
+
+         # Terminal B: start TRT-LLM with the lmcache-mp connector
+         cat > trtllm_lmcache_mp.yaml <<'EOF'
+         kv_cache_config:
+           enable_block_reuse: true
+         kv_connector_config:
+           connector: lmcache-mp
+           server_url: tcp://localhost:5555
+         EOF
+
+         PYTHONHASHSEED=0 trtllm-serve Qwen/Qwen2-1.5B-Instruct \
+             --backend pytorch \
+             --extra_llm_api_options trtllm_lmcache_mp.yaml
+
 (Terminal 2) Test LMCache in Action
 -----------------------------------
 
@@ -137,6 +196,34 @@ Open a new terminal. Pick your engine tab, send the first request, then an overl
              "temperature": 0.7
            }'
 
+   .. tab-item:: TRT-LLM
+
+      **First request**
+
+      .. code-block:: bash
+
+         curl http://localhost:8000/v1/completions \
+           -H "Content-Type: application/json" \
+           -d '{
+             "model": "Qwen/Qwen2-1.5B-Instruct",
+             "prompt": "Qwen3 is the latest generation of large language models in Qwen series, offering a comprehensive suite of dense and mixture-of-experts",
+             "max_tokens": 100,
+             "temperature": 0.7
+           }'
+
+      **Second request (overlap)**
+
+      .. code-block:: bash
+
+         curl http://localhost:8000/v1/completions \
+           -H "Content-Type: application/json" \
+           -d '{
+             "model": "Qwen/Qwen2-1.5B-Instruct",
+             "prompt": "Qwen3 is the latest generation of large language models in Qwen series, offering a comprehensive suite of dense and mixture-of-experts (MoE) models",
+             "max_tokens": 100,
+             "temperature": 0.7
+           }'
+
 You should see LMCache logs like this (examples for each engine):
 
 .. tab-set::
@@ -155,6 +242,12 @@ You should see LMCache logs like this (examples for each engine):
          Decode batch, #running-req: 1, #token: 74, token usage: 0.00, cuda graph: True, gen throughput (token/s): 1.63, #queue-req: 0,
          Decode batch, #running-req: 1, #token: 114, token usage: 0.00, cuda graph: True, gen throughput (token/s): 87.95, #queue-req: 0,
          LMCache INFO: Stored 128 out of total 135 tokens. size: 0.0195 GB, cost 12.8890 ms, throughput: 1.5153 GB/s (cache_engine.py:623:lmcache.v1.cache_engine)
+
+   .. tab-item:: TRT-LLM
+
+      .. code-block:: text
+
+         LMCache INFO: LMCache TRT-LLM: created engine (chunk_size=256, tensor_shape=[...], dtype=torch.bfloat16)
 
 **What this means:** The first request caches the prompt. The second reuses the cached prefix and only loads the missing chunk. You should see logs like this:
 
@@ -179,6 +272,12 @@ You should see LMCache logs like this (examples for each engine):
          Decode batch, #running-req: 1, #token: 144, token usage: 0.00, cuda graph: True, gen throughput (token/s): 87.89, #queue-req: 0,
          LMCache INFO: Stored 112 out of total 140 tokens. size: 0.0171 GB, cost 11.1986 ms, throughput: 1.5261 GB/s (cache_engine.py:623:lmcache.v1.cache_engine)
 
+   .. tab-item:: TRT-LLM
+
+      .. code-block:: text
+
+         LMCache TRT-LLM worker: start_load_kv retrieve=X.XXXms stream_wait=X.XXXms num_loads=1
+
 **What this means (per engine):**
 
 .. tab-set::
@@ -199,7 +298,12 @@ You should see LMCache logs like this (examples for each engine):
       - **New tokens: 10**: Only 10 prompt tokens need prefill computation (40 prompt - 30 cached = 10).
       - **Stored 112 out of 140**: 24 tokens (3 full chunks) are already in LMCache and skipped. Of the remaining 116 tokens, 112 (14 full 8-token chunks) are stored.
 
-🎉 **You now have LMCache caching and reusing KV caches for both engines.**
+   .. tab-item:: TRT-LLM
+
+      - The second request with the same prefix triggers LMCache to retrieve cached KV blocks via ``engine.retrieve()``.
+      - TRT-LLM's block reuse (``enable_block_reuse=True``) works alongside LMCache's CPU offload for two-tier caching.
+
+🎉 **You now have LMCache caching and reusing KV caches across all three engines.**
 
 Next Steps
 ----------
