@@ -191,6 +191,7 @@ class NixlStorageConfig:
         assert pool_size is not None
         assert backend is not None
         assert use_direct_io in [False, True]
+        assert path is not None, "nixl_path cannot be None"
 
         dynamic_storage = pool_size == 0
         if dynamic_storage:
@@ -897,7 +898,7 @@ class NixlStaticStorageBackend(NixlStorageBackend):
             nixl_config.path,
             nixl_config.use_direct_io,
             nixl_config.path_sharding,
-            nixl_config.buffer_device,
+            f"cuda:{metadata.worker_id}",
         )
         assert self.pool is not None
 
@@ -920,6 +921,8 @@ class NixlStaticStorageBackend(NixlStorageBackend):
         path_sharding: str,
         dst_device: str,
     ) -> NixlDescPool:
+        assert path is not None, "nixl_path cannot be None"
+        
         if backend in ("GDS", "GDS_MT", "POSIX", "HF3FS"):
 <<<<<<< HEAD
 <<<<<<< HEAD
