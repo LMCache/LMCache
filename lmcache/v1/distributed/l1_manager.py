@@ -717,6 +717,25 @@ class L1Manager:
             locked_count,
         )
 
+    def is_key_evictable(self, key: ObjectKey) -> bool:
+        """Check if a key is eligible for eviction (not locked).
+
+        This method does NOT acquire the global L1Manager lock.
+        L1Manager.delete() will check again and safely reject a key
+        that became locked between the check and the actual deletion.
+
+        Args:
+            key: The object key to check.
+
+        Returns:
+            True if the key exists and is not locked (neither read-locked
+            nor write-locked), False otherwise.
+        """
+        entry = self._objects.get(key, None)
+        if entry is None:
+            return False
+        return not entry.read_lock.is_locked() and not entry.write_lock.is_locked()
+
     def get_memory_usage(self) -> tuple[int, int]:
         """Get the current memory usage of L1 cache.
 

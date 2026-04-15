@@ -130,6 +130,17 @@ class EventBus:
         with self._lock:
             self._registered_subscribers.append(subscriber)
 
+    def has_subscribers(self, event_type: EventType) -> bool:
+        """Return True if at least one callback is registered for *event_type*.
+
+        Use this to skip expensive event construction on the hot path when
+        no subscriber is listening::
+
+            if bus.has_subscribers(EventType.MP_LOOKUP):
+                bus.publish(Event(event_type=EventType.MP_LOOKUP, ...))
+        """
+        return bool(self._subscribers.get(event_type))
+
     def publish_on_stream(self, stream: Any, event: Event) -> None:
         """Schedule event recording as a CUDA host function on *stream*.
 

@@ -26,10 +26,7 @@ from lmcache.v1.gpu_connector.utils import (
 from lmcache.v1.memory_management import GPUMemoryAllocator  # noqa: E501
 from lmcache.v1.memory_management import MemoryFormat, MemoryObj
 from lmcache.v1.metadata import LMCacheMetadata
-
-if torch.cuda.is_available():
-    # First Party
-    import lmcache.c_ops as lmc_ops
+import lmcache.c_ops as lmc_ops
 
 logger = init_logger(__name__)
 
