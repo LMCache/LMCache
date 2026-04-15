@@ -99,7 +99,7 @@ inside `metadata` discriminates ops.
 
 ---
 
-## Cache Blending (CB) Lifecycle Sentinels
+## Blend Server Lifecycle Sentinels
 
 CPU-synchronous sentinels published by `blend_server_v2.py` to bracket
 request scope and guard GPU callback races.  Published via `EventBus.publish()`
@@ -115,7 +115,7 @@ request scope and guard GPU callback races.  Published via `EventBus.publish()`
 
 ---
 
-## Cache Blending (CB) Events
+## Blend Server Events
 
 These events use `session_id` on the `Event` dataclass (sourced from
 `IPCCacheEngineKey.request_id`) to correlate START/END pairs.
