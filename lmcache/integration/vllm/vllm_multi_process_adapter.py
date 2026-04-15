@@ -860,7 +860,8 @@ class LMCacheMPWorkerAdapter:
             event: The CUDA event that is recorded after the current
                 model inference step
             cache_salts: Per-user isolation salts, one per request. If None,
-                all requests use cache_salt="".
+                all requests use cache_salt="". The list length should be the same as
+                request_ids.
         """
         if cache_salts is None:
             cache_salts = [""] * len(request_ids)
@@ -885,7 +886,8 @@ class LMCacheMPWorkerAdapter:
             event: The CUDA event that is recorded after the current
                 model inference step
             cache_salts: Per-user isolation salts, one per request. If None,
-                all requests use cache_salt="".
+                all requests use cache_salt="". The list length should be same as
+                request_ids.
         """
         if cache_salts is None:
             cache_salts = [""] * len(request_ids)
