@@ -132,7 +132,7 @@ class GPUCacheContext:
             element_size = (
                 cross_layer_tensor.element_size()
                 if cross_layer_tensor is not None
-                else tensors[0].element_size()
+                else tensors[group.layer_indices[0]].element_size()
             )
 
             self.hidden_dim_sizes_.append(hidden_dim)
