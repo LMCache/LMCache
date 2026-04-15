@@ -23,11 +23,11 @@ from lmcache.v1.distributed.serde.base import SerdeProcessor
 logger = init_logger(__name__)
 
 # name -> factory(dict) -> SerdeProcessor
-_SERDE_FACTORY_REGISTRY: dict[str, Callable[[dict], SerdeProcessor]] = {}
+_SERDE_FACTORY_REGISTRY: dict[str, Callable[[dict[str, object]], SerdeProcessor]] = {}
 
 
 def register_serde_factory(
-    name: str, factory: Callable[[dict], SerdeProcessor]
+    name: str, factory: Callable[[dict[str, object]], SerdeProcessor]
 ) -> None:
     """Register a serde factory under a type name.
 
@@ -49,7 +49,7 @@ def get_registered_serde_types() -> list[str]:
     return list(_SERDE_FACTORY_REGISTRY)
 
 
-def create_serde_processor(config: dict) -> SerdeProcessor:
+def create_serde_processor(config: dict[str, object]) -> SerdeProcessor:
     """Build a SerdeProcessor from a config dict.
 
     The dict must include a ``"type"`` field naming a registered serde.
@@ -79,7 +79,7 @@ def create_serde_processor(config: dict) -> SerdeProcessor:
 # ---------------------------------------------------------------------------
 
 
-def _create_fp8_serde(config: dict) -> SerdeProcessor:
+def _create_fp8_serde(config: dict[str, object]) -> SerdeProcessor:
     # Third Party
     import torch
 

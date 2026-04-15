@@ -30,6 +30,7 @@ class Fp8QuantizationSerializer(Serializer):
         self._fp8_dtype = fp8_dtype
 
     def serialize(self, src: MemoryObj, dst: MemoryObj) -> int:
+        """Cast src tensor to fp8 and copy bytes into dst buffer."""
         src_tensor = src.tensor
         dst_tensor = dst.tensor
         if src_tensor is None or dst_tensor is None:
@@ -45,6 +46,7 @@ class Fp8QuantizationSerializer(Serializer):
         return n_bytes
 
     def estimate_serialized_size(self, layout_desc: MemoryLayoutDesc) -> int:
+        """Return total element count (fp8 = 1 byte per element)."""
         # fp8 = 1 byte per element across all groups
         total_elements = 0
         for shape in layout_desc.shapes:
@@ -62,6 +64,7 @@ class Fp8QuantizationDeserializer(Deserializer):
         self._fp8_dtype = fp8_dtype
 
     def deserialize(self, src: MemoryObj, dst: MemoryObj) -> None:
+        """Read fp8 bytes from src, cast to dst's dtype, copy into dst."""
         src_tensor = src.tensor
         dst_tensor = dst.tensor
         if src_tensor is None or dst_tensor is None:

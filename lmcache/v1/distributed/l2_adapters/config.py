@@ -107,14 +107,24 @@ class L2AdapterConfigBase(ABC):
     #: means L2 eviction is disabled for this adapter.
     eviction_config: EvictionConfig | None = None
 
-    #: Optional serde config dict (parsed from the "serde" sub-dict).
-    #: ``None`` means serde is disabled for this adapter, and the adapter
-    #: stores raw bytes directly. When set, StorageManager will instantiate
-    #: a SerdeProcessor via the serde factory.
-    serde_config: dict | None = None
+    serde_config: dict[str, object] | None = None
+    """Per-adapter serde configuration parsed from the ``"serde"`` JSON sub-dict.
+
+    ``None`` means serde is disabled for this adapter. When set, StorageManager
+    instantiates a SerdeProcessor via the serde factory.
+
+    Expected schema::
+
+        {
+            "type": "<registered_serde_name>",
+            ...type_specific_keys (forwarded to the factory)
+        }
+
+    Built-in types: ``"fp8"`` (see :class:`Fp8QuantizationSerializer`).
+    """
 
     @staticmethod
-    def _parse_serde_config(d: dict) -> dict | None:
+    def _parse_serde_config(d: dict[str, object]) -> dict[str, object] | None:
         """Parse an optional ``"serde"`` sub-dict from an adapter JSON spec.
 
         Expected format::

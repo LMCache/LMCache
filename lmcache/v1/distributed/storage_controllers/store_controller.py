@@ -34,6 +34,7 @@ from lmcache.v1.distributed.storage_controllers.store_policy import (
     AdapterDescriptor,
     StorePolicy,
 )
+from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import get_event_bus
 
@@ -143,7 +144,7 @@ class InFlightSerializeTask:
     temp_keys: list[ObjectKey]
     """Temp buffer keys (write-locked, being serialized into)."""
 
-    temp_objs: list
+    temp_objs: list[MemoryObj]
     """Temp buffer MemoryObjs (needed for submit_store_task after serialize)."""
 
 
@@ -421,7 +422,7 @@ class StoreController(StorageControllerInterface):
         adapter_index: int,
         serde: SerdeProcessor,
         successful_keys: list[ObjectKey],
-        successful_objs: list,
+        successful_objs: list[MemoryObj],
     ) -> None:
         """Allocate temp buffers and submit async serialize to SerdeProcessor."""
         l1_mgr = self._l1_manager
@@ -553,7 +554,7 @@ class StoreController(StorageControllerInterface):
         self,
         adapter_index: int,
         store_keys: list[ObjectKey],
-        store_objs: list,
+        store_objs: list[MemoryObj],
         read_locked_keys: list[ObjectKey],
         temp_keys: list[ObjectKey],
     ) -> None:

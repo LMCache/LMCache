@@ -70,9 +70,11 @@ class AsyncSerdeProcessor(SerdeProcessor):
     # ----- Event fds -----
 
     def get_serialize_event_fd(self) -> int:
+        """Return the eventfd signaled on serialize completion."""
         return self._serialize_efd
 
     def get_deserialize_event_fd(self) -> int:
+        """Return the eventfd signaled on deserialize completion."""
         return self._deserialize_efd
 
     # ----- Serialize -----
@@ -82,6 +84,7 @@ class AsyncSerdeProcessor(SerdeProcessor):
         src_objs: list[MemoryObj],
         dst_objs: list[MemoryObj],
     ) -> SerdeTaskId:
+        """Submit a batch serialize task to the thread pool."""
         task_id = self._alloc_task_id()
         logger.debug(
             "Serde: submitted serialize task %d (%d objects)",
@@ -98,6 +101,7 @@ class AsyncSerdeProcessor(SerdeProcessor):
         return task_id
 
     def query_serialize_result(self, task_id: SerdeTaskId) -> bool | None:
+        """Pop and return the serialize task result, or None if pending."""
         with self._lock:
             return self._completed_serialize.pop(task_id, None)
 
@@ -108,6 +112,7 @@ class AsyncSerdeProcessor(SerdeProcessor):
         src_objs: list[MemoryObj],
         dst_objs: list[MemoryObj],
     ) -> SerdeTaskId:
+        """Submit a batch deserialize task to the thread pool."""
         task_id = self._alloc_task_id()
         logger.debug(
             "Serde: submitted deserialize task %d (%d objects)",
@@ -124,17 +129,20 @@ class AsyncSerdeProcessor(SerdeProcessor):
         return task_id
 
     def query_deserialize_result(self, task_id: SerdeTaskId) -> bool | None:
+        """Pop and return the deserialize task result, or None if pending."""
         with self._lock:
             return self._completed_deserialize.pop(task_id, None)
 
     # ----- Size estimation (delegates to sync serializer) -----
 
     def estimate_serialized_size(self, layout_desc: MemoryLayoutDesc) -> int:
+        """Delegate to the sync serializer's estimate."""
         return self._serializer.estimate_serialized_size(layout_desc)
 
     # ----- Lifecycle -----
 
     def close(self) -> None:
+        """Shut down the thread pool and close event fds."""
         self._pool.shutdown(wait=True)
         os.close(self._serialize_efd)
         os.close(self._deserialize_efd)

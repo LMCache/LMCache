@@ -172,14 +172,30 @@ class InFlightPrefetchRequest:
     # self._serde_processors[adapter_idx]). A single request can mix
     # serde and non-serde adapters within its load plan.
     temp_reserved_keys: list[ObjectKey] = field(default_factory=list)
+    """Temp byte buffers for serde-enabled adapters' L2 loads.
+
+    Populated during _transition_to_load_phase for adapters with serde.
+    Entries are removed per-adapter in _process_deserialize_completions
+    as each adapter's deserialize finishes. Empty when serde is disabled
+    or after all deserializations complete."""
+
     temp_reserved_objs: dict[ObjectKey, MemoryObj] = field(default_factory=dict)
+    """Maps temp buffer key -> MemoryObj. Lifecycle mirrors temp_reserved_keys."""
+
     original_to_temp_key: dict[ObjectKey, ObjectKey] = field(default_factory=dict)
     """Maps original ObjectKey -> temp buffer ObjectKey.
-    Only contains keys whose adapter has serde enabled."""
 
-    # Deserialize tracking: adapter_idx -> serde task id (removed as results arrive).
-    # Only adapters with serde enabled appear here.
+    Populated alongside temp_reserved_keys during _transition_to_load_phase.
+    Used by _get_load_buffer to route L2 loads into temp buffers, and by
+    _submit_deserialize_for_adapter to pair temp/real buffers. Only contains
+    keys whose adapter has serde enabled. Empty when serde is disabled."""
+
     pending_deserialize_tasks: dict[int, SerdeTaskId] = field(default_factory=dict)
+    """Adapter index -> serde task id for in-flight deserialize tasks.
+
+    An entry is added when an adapter's L2 load completes (if serde enabled),
+    and removed when the deserialize result is queried. Empty when all
+    deserializations are done (is_ready_to_finalize returns True)."""
 
     def all_lookups_done(self) -> bool:
         return len(self.pending_lookup_tasks) == 0
@@ -188,9 +204,11 @@ class InFlightPrefetchRequest:
         return len(self.pending_load_tasks) == 0
 
     def all_deserialize_done(self) -> bool:
+        """Return True when all per-adapter deserialize tasks have completed."""
         return len(self.pending_deserialize_tasks) == 0
 
     def is_ready_to_finalize(self) -> bool:
+        """Return True when all loads and deserializations are done."""
         return self.all_loads_done() and self.all_deserialize_done()
 
 
