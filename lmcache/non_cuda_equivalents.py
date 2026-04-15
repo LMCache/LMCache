@@ -334,6 +334,24 @@ def free_pinned_ptr(ptr: int) -> None:
     _tensor_registry.pop(ptr, None)
 
 
+def batched_memcpy(src_ptrs: list[int], dst_ptrs: list[int], sizes: list[int]) -> None:
+    """Non-CUDA equivalent of the native batched memcpy helper."""
+
+    if len(src_ptrs) != len(dst_ptrs) or len(src_ptrs) != len(sizes):
+        raise ValueError(
+            "batched_memcpy expects equally sized src_ptrs, dst_ptrs, and sizes"
+        )
+
+    for src_ptr, dst_ptr, size in zip(src_ptrs, dst_ptrs, sizes, strict=True):
+        if size <= 0:
+            continue
+        ctypes.memmove(
+            ctypes.c_void_p(dst_ptr),
+            ctypes.c_void_p(src_ptr),
+            size,
+        )
+
+
 def alloc_shm_pinned_ptr(size: int, shm_name: str = "") -> int:
     """Non-CUDA equivalent of allocating shared memory pinned pointer.
     Uses multiprocessing.shared_memory for cross-platform POSIX shm."""
