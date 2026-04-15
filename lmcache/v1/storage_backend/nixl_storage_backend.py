@@ -921,9 +921,30 @@ class NixlStaticStorageBackend(NixlStorageBackend):
         path_sharding: str,
         dst_device: str,
     ) -> NixlDescPool:
-        assert path is not None, "nixl_path cannot be None"
-        
+        """Create a NIXL descriptor pool with path sharding support.
+
+        Args:
+            backend: Backend type (e.g., "GDS", "POSIX", "OBJ").
+            size: Pool size.
+            path: Single path string or list of paths for sharding.
+            use_direct_io: Whether to use direct I/O.
+            path_sharding: Sharding strategy (e.g., "by_gpu").
+            dst_device: Device string for path selection.
+
+        Returns:
+            NixlDescPool: The created descriptor pool.
+
+        Raises:
+            ValueError: If backend is unsupported or path is invalid.
+
+        Note:
+            When *path* is provided as a list, entries containing commas will be
+            split when joined for PathSharder. Avoid commas in path entries to
+            prevent unintended sharding.
+        """
+
         if backend in ("GDS", "GDS_MT", "POSIX", "HF3FS"):
+<<<<<<< HEAD
 <<<<<<< HEAD
 <<<<<<< HEAD
 <<<<<<< HEAD
@@ -937,6 +958,14 @@ class NixlStaticStorageBackend(NixlStorageBackend):
             return NixlFilePool(size, path, use_direct_io, path_sharding, worker_id)
 >>>>>>> e8ded938 (Fix code formatting (ruff format))
 =======
+=======
+            if isinstance(path, list) and any("," in p for p in path):
+                logger.warning(
+                    "nixl_path entries contain commas; joining for PathSharder may "
+                    "cause unintended sharding. Consider paths without commas or a "
+                    "single comma-separated string."
+                )
+>>>>>>> aaf537ab (Add docstring and warning for nixl createPool path sharding)
             sharder = PathSharder(
                 raw_csv=path if isinstance(path, str) else ",".join(path),
                 strategy=path_sharding,
