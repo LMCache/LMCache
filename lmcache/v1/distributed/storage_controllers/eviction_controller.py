@@ -185,14 +185,16 @@ class L2EvictionController(StorageControllerInterface):
     def report_status(self) -> dict:
         adapter_statuses = []
         for state in self._adapter_states:
-            current_usage, usage_after_eviction = state.adapter.get_usage()
+            usage = state.adapter.get_usage()
             adapter_statuses.append(
                 {
                     "eviction_policy": state.eviction_config.eviction_policy,
                     "trigger_watermark": state.eviction_config.trigger_watermark,
                     "eviction_ratio": state.eviction_config.eviction_ratio,
-                    "current_usage": current_usage,
-                    "usage_after_ongoing_eviction": usage_after_eviction,
+                    "current_usage": usage.usage_fraction,
+                    "total_bytes_used": usage.total_bytes_used,
+                    "total_capacity_bytes": usage.total_capacity_bytes,
+                    "per_cache_salt_bytes": dict(usage.per_cache_salt_bytes),
                 }
             )
         return {
@@ -211,9 +213,12 @@ class L2EvictionController(StorageControllerInterface):
         watermark = state.eviction_config.trigger_watermark
         eviction_ratio = state.eviction_config.eviction_ratio
 
-        # `current usage = -1` means the adapter doesn't support usage
-        # based eviction, so we do not trigger eviction based on usage.
-        current_usage, _ = state.adapter.get_usage()
+        # ``usage_fraction == -1`` means the adapter doesn't support
+        # usage-based eviction (no max_capacity_bytes declared), so we
+        # do not trigger eviction. Adapters with ``supports_global_eviction ==
+        # False`` should already have been filtered out at construction
+        # time in ``StorageManager``; this check is a defensive belt.
+        current_usage = state.adapter.get_usage().usage_fraction
         if current_usage < 0 or current_usage < watermark:
             logger.debug(
                 "L2 usage %.2f below watermark %.2f; skipping eviction.",

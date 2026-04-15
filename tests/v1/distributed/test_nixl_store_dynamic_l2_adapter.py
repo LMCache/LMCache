@@ -528,8 +528,8 @@ class TestEvictionInterface:
 class TestCapacity:
     def test_get_usage_empty_is_zero(self, adapter):
         adpt, _, _ = adapter
-        usage, _ = adpt.get_usage()
-        assert usage == 0.0
+        usage = adpt.get_usage()
+        assert usage.usage_fraction == 0.0
 
     def test_get_usage_increases_after_store(self, adapter):
         adpt, buf, _ = adapter
@@ -540,8 +540,8 @@ class TestCapacity:
         wait_for_event_fd(adpt.get_store_event_fd())
         adpt.pop_completed_store_tasks()
 
-        usage, _ = adpt.get_usage()
-        assert usage > 0.0
+        usage = adpt.get_usage()
+        assert usage.usage_fraction > 0.0
 
     def test_get_usage_decreases_after_delete(self, adapter):
         adpt, buf, _ = adapter
@@ -552,9 +552,9 @@ class TestCapacity:
         wait_for_event_fd(adpt.get_store_event_fd())
         adpt.pop_completed_store_tasks()
 
-        usage_before, _ = adpt.get_usage()
+        usage_before = adpt.get_usage().usage_fraction
         adpt.delete([key])
-        usage_after, _ = adpt.get_usage()
+        usage_after = adpt.get_usage().usage_fraction
 
         assert usage_after < usage_before
 
@@ -722,12 +722,12 @@ class TestPersistAndSecondaryLookup:
         wait_for_event_fd(adpt.get_store_event_fd())
         adpt.pop_completed_store_tasks()
 
-        usage_before, _ = adpt.get_usage()
+        usage_before = adpt.get_usage().usage_fraction
         adpt.close()
 
         # Right after init, usage is zero (no eager recovery)
         adpt2 = DynamicNixlStoreL2Adapter(config, l1_memory)
-        usage_initial, _ = adpt2.get_usage()
+        usage_initial = adpt2.get_usage().usage_fraction
         assert usage_initial == 0.0
 
         # After a lookup, the key is populated and usage matches
@@ -735,7 +735,7 @@ class TestPersistAndSecondaryLookup:
         wait_for_event_fd(adpt2.get_lookup_and_lock_event_fd())
         adpt2.query_lookup_and_lock_result(task_id)
 
-        usage_after, _ = adpt2.get_usage()
+        usage_after = adpt2.get_usage().usage_fraction
         assert usage_after == pytest.approx(usage_before, rel=1e-6)
 
         adpt2.submit_unlock([key])
