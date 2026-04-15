@@ -219,7 +219,11 @@ class StoreController(StorageControllerInterface):
                 l2_adapters
             )
         else:
-            assert len(serde_processors) == len(l2_adapters)
+            if len(serde_processors) != len(l2_adapters):
+                raise ValueError(
+                    f"serde_processors length ({len(serde_processors)}) must "
+                    f"match l2_adapters length ({len(l2_adapters)})"
+                )
             self._serde_processors = serde_processors
 
         self._listener = StoreListener()

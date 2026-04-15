@@ -254,7 +254,11 @@ class PrefetchController(StorageControllerInterface):
                 l2_adapters
             )
         else:
-            assert len(serde_processors) == len(l2_adapters)
+            if len(serde_processors) != len(l2_adapters):
+                raise ValueError(
+                    f"serde_processors length ({len(serde_processors)}) must "
+                    f"match l2_adapters length ({len(l2_adapters)})"
+                )
             self._serde_processors = serde_processors
 
         # In-flight request tracking (background thread only)
@@ -684,6 +688,7 @@ class PrefetchController(StorageControllerInterface):
                 mode="new",
             )
 
+            failed_real_keys: list[ObjectKey] = []
             for orig_key, temp_key in zip(adapter_keys, temp_keys, strict=True):
                 result = temp_results.get(temp_key)
                 if result is not None and result[0] == L1Error.SUCCESS:
@@ -691,13 +696,22 @@ class PrefetchController(StorageControllerInterface):
                     request.temp_reserved_objs[temp_key] = result[1]
                     request.original_to_temp_key[orig_key] = temp_key
                 else:
-                    # Temp alloc failed — release the corresponding real buffer
-                    # and drop the key from the plan.
-                    l1_mgr.finish_write([orig_key])
-                    l1_mgr.delete([orig_key])
-                    request.write_reserved_keys.remove(orig_key)
-                    del request.write_reserved_objs[orig_key]
-                    reserved_key_set.discard(orig_key)
+                    failed_real_keys.append(orig_key)
+
+            # Batch-release real buffers whose temp alloc failed.
+            if failed_real_keys:
+                l1_mgr.finish_write(failed_real_keys)
+                l1_mgr.delete(failed_real_keys)
+                failed_set = set(failed_real_keys)
+                request.write_reserved_keys = [
+                    k for k in request.write_reserved_keys if k not in failed_set
+                ]
+                request.write_reserved_objs = {
+                    k: v
+                    for k, v in request.write_reserved_objs.items()
+                    if k not in failed_set
+                }
+                reserved_key_set -= failed_set
 
         # Step 5: recompute load plan excluding failed reservations
         reserved_bitmap = Bitmap(len(request.keys))
