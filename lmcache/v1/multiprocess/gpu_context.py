@@ -34,6 +34,7 @@ from lmcache.v1.gpu_connector.utils import (
     get_num_heads,
     get_num_layers,
     is_mla,
+    group_first_layer_tensor,
 )
 from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
 
@@ -118,11 +119,8 @@ class GPUCacheContext:
         self.shape_descs_: list[lmc_ops.PageBufferShapeDesc] = []
         self.group_kv_pointers_: list[torch.Tensor] = []
         for group in self.kv_layer_groups_manager_.kv_layer_groups:
-            rep: "torch.Tensor | list[torch.Tensor]" = (
-                cross_layer_tensor
-                if cross_layer_tensor is not None
-                else [tensors[group.layer_indices[0]]]
-            )
+            first_layer = tensors[group.layer_indices[0]]
+            rep = group_first_layer_tensor(self.kv_caches_, first_layer)
             hidden_dim = get_hidden_dim_size(rep, self.gpu_kv_format_)
             nh = 1 if self.is_mla_ else get_num_heads(rep, self.gpu_kv_format_)
             hs = get_head_size(rep, self.gpu_kv_format_)
@@ -132,7 +130,7 @@ class GPUCacheContext:
             element_size = (
                 cross_layer_tensor.element_size()
                 if cross_layer_tensor is not None
-                else tensors[group.layer_indices[0]].element_size()
+                else first_layer.element_size()
             )
 
             self.hidden_dim_sizes_.append(hidden_dim)

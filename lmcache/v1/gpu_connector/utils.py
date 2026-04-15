@@ -863,6 +863,35 @@ def as_tensor_list(
     return kv_caches
 
 
+def group_first_layer_tensor(
+    kv_caches: KVCaches,
+    first_layer: torch.Tensor,
+) -> KVCaches:
+    """KVCaches-shaped representative for a single layer group.
+
+    The per-format shape helpers (``get_hidden_dim_size``,
+    ``get_num_heads``, ``get_head_size``, …) accept ``KVCaches`` and
+    peek at ``kv_caches[0].shape`` or ``kv_caches.shape`` depending on
+    the format.  To ask those helpers about one group in isolation we
+    need a value shaped like the original ``kv_caches`` but narrowed
+    to the group.
+
+    Cross-layer: the bare tensor already spans every layer, so it
+    represents every group unchanged.
+    Per-layer:   wrap the group's first layer in a single-element list
+    so that ``rep[0].shape`` yields that layer's shape.
+
+    Args:
+        kv_caches: The full KV caches (tensor or list).
+        first_layer: The first per-layer tensor of the group
+            (``tensors[group.layer_indices[0]]``).  Ignored when
+            *kv_caches* is cross-layer.
+    """
+    if isinstance(kv_caches, torch.Tensor):
+        return kv_caches
+    return [first_layer]
+
+
 def canonicalize_kv_caches(
     kv_caches: KVCaches,
     layout_hints: "LayoutHints | None" = None,
