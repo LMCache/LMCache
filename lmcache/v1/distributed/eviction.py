@@ -28,16 +28,16 @@ class EvictionPolicy:
     """
 
     @property
-    def is_user_level(self) -> bool:
-        """Whether this policy supports per-user eviction.
+    def support_isolation(self) -> bool:
+        """Whether this policy supports isolation eviction (e.g., per user isolation).
 
-        When True, the eviction controller checks per-user usage and
-        passes ``cache_salt`` to ``get_eviction_actions()`` to scope
-        eviction to individual users. When False, the controller uses
+        When True, the eviction controller checks isolated usage (e.g., per user usage)
+        and passes ``cache_salt`` to ``get_eviction_actions()`` to scope
+        eviction to specific cache_salt. When False, the controller uses
         aggregate usage only.
 
-        Default is False. Subclasses that support per-user eviction
-        (e.g., ``UserLRUEvictionPolicy``) should override to return True.
+        Default is False. Subclasses that support isolated eviction.
+        (e.g., ``IsolatedLRUEvictionPolicy``) should override to return True.
         """
         return False
 
@@ -106,7 +106,7 @@ class EvictionPolicy:
             cache_salt: When set, scope eviction to keys belonging to this
                 salt only (identified by ``ObjectKey.cache_salt``). When
                 None, evict globally across all salts. Only meaningful for
-                policies where ``is_user_level`` is True; other policies
+                policies where ``support_isolation`` is True; other policies
                 ignore this parameter.
 
         Returns:
