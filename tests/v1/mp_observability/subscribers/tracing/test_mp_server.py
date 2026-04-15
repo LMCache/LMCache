@@ -36,13 +36,6 @@ def subscriber(registry, bus):
     return sub
 
 
-def _drain(bus: EventBus) -> None:
-    """Start and stop the bus to flush all queued events."""
-    bus.start()
-    time.sleep(0.15)
-    bus.stop()
-
-
 class TestMPServerTracingSubscriber:
     def test_subscriptions_cover_all_mp_server_events(self, subscriber):
         subs = subscriber.get_subscriptions()

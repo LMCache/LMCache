@@ -100,6 +100,14 @@ class SpanRegistry:
         """
         return self._active.pop((session_id, span_name), None)
 
+    def all_session_ids(self) -> set[str]:
+        """Return the set of session IDs that have at least one open span.
+
+        Returns:
+            Set of session ID strings currently tracked in the registry.
+        """
+        return {k[0] for k in self._active}
+
     def clear_session(self, session_id: str) -> None:
         """End all open spans for *session_id* and remove them.
 
@@ -120,3 +128,21 @@ class SpanRegistry:
                     session_id,
                     k[1],
                 )
+
+
+_registry: SpanRegistry | None = None
+
+
+def get_span_registry() -> SpanRegistry:
+    """Return the process-level singleton :class:`SpanRegistry`.
+
+    The registry is created on first call.  Pass a fresh :class:`SpanRegistry`
+    directly to subscriber constructors when test isolation is needed.
+
+    Returns:
+        The shared :class:`SpanRegistry` instance.
+    """
+    global _registry
+    if _registry is None:
+        _registry = SpanRegistry()
+    return _registry

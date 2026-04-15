@@ -270,16 +270,10 @@ def init_observability(obs_config: ObservabilityConfig) -> EventBus:
         # First Party
         from lmcache.v1.mp_observability.subscribers.tracing import (
             MPServerTracingSubscriber,
-            SpanRegistry,
+            get_span_registry,
         )
 
-        # A single registry is shared across all tracing subscribers so that
-        # new subscribers (e.g. for L1/L2 operations) can look up parent
-        # span contexts via registry.get_context(session_id, "request") or
-        # registry.get_context(session_id, "retrieve") without coupling to
-        # MPServerTracingSubscriber.
-        registry = SpanRegistry()
-        bus.register_subscriber(MPServerTracingSubscriber(registry))
+        bus.register_subscriber(MPServerTracingSubscriber(get_span_registry()))
 
     # Lookup hash file logging (independent of the logging_enabled flag —
     # it has its own enable gate via output_dir).

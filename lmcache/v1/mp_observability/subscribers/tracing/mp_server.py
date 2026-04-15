@@ -125,6 +125,7 @@ class MPServerTracingSubscriber(EventSubscriber):
             set(self._pending_store_count)
             | set(self._pending_retrieve_count)
             | set(self._deferred_session_end_ts)
+            | self._registry.all_session_ids()
         )
         for sid in sessions:
             self._registry.clear_session(sid)
@@ -265,30 +266,19 @@ class MPServerTracingSubscriber(EventSubscriber):
             self._registry.pop(sid, logical)
 
         if event.event_type == EventType.MP_STORE_END:
-            count = self._pending_store_count.get(sid, 0)
-            if count > 0:
+            if (count := self._pending_store_count.get(sid, 0)) > 0:
                 self._pending_store_count[sid] = count - 1
-                count -= 1
-            if (
-                count == 0
-                and self._pending_retrieve_count.get(sid, 0) == 0
-                and sid in self._deferred_session_end_ts
-            ):
-                deferred_ts = self._deferred_session_end_ts.pop(sid)
-                self._close_request_span(sid, deferred_ts)
-
         elif event.event_type == EventType.MP_RETRIEVE_END:
-            count = self._pending_retrieve_count.get(sid, 0)
-            if count > 0:
+            if (count := self._pending_retrieve_count.get(sid, 0)) > 0:
                 self._pending_retrieve_count[sid] = count - 1
-                count -= 1
-            if (
-                count == 0
-                and self._pending_store_count.get(sid, 0) == 0
-                and sid in self._deferred_session_end_ts
-            ):
-                deferred_ts = self._deferred_session_end_ts.pop(sid)
-                self._close_request_span(sid, deferred_ts)
+
+        if (
+            sid in self._deferred_session_end_ts
+            and self._pending_store_count.get(sid, 0) == 0
+            and self._pending_retrieve_count.get(sid, 0) == 0
+        ):
+            deferred_ts = self._deferred_session_end_ts.pop(sid)
+            self._close_request_span(sid, deferred_ts)
 
     # ------------------------------------------------------------------
     # Private helpers

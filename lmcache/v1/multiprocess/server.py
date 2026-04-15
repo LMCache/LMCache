@@ -322,64 +322,67 @@ class MPCacheEngine:
                 ),
             )
 
-            layout_desc = get_layout_desc(gpu_context, self.chunk_size)
-            reserved_dict = self.storage_manager.reserve_write(
-                obj_keys, layout_desc, "new"
-            )
-
-            # NOTE: Store is not batched because some obj_keys may be
-            # skipped (not in reserved_dict), making block_ids
-            # non-contiguous. Batching would require torch.cat to
-            # reassemble block_ids, negating the benefit.
-            num_groups = gpu_context.kv_layer_groups_manager.num_groups
-            for idx, obj_key in enumerate(obj_keys):
-                if obj_key in reserved_dict:
-                    memory_obj = reserved_dict[obj_key]
-                else:
-                    continue
-
-                chunk_block_ids_gpu = all_block_ids_gpu[
-                    idx * blocks_per_chunk : (idx + 1) * blocks_per_chunk
-                ]
-
-                # Copy from GPU paged buffer to tmp buffer, then to CPU — per group
-                for group_idx in range(num_groups):
-                    tmp_buffer = gpu_context.get_tmp_chunk_gpu_buffer(group_idx)
-                    group_kv_pointers = gpu_context.get_group_kv_pointers(group_idx)
-                    lmc_ops.multi_layer_block_kv_transfer(
-                        group_kv_pointers,
-                        [tmp_buffer.data_ptr()],
-                        chunk_block_ids_gpu,
-                        gpu_context.device,
-                        lmc_ops.TransferDirection.D2H,
-                        gpu_context.get_shape_desc(group_idx),
-                        self.chunk_size,
-                        gpu_context.gpu_kv_format_,
-                        0,
-                    )
-                # Store is not batched, so we always use chunk_idx=0 (single slot)
-                lmcache_memcpy_async_d2h(
-                    gpu_context.get_tmp_gpu_buffer_flat(chunk_idx=0), memory_obj
+            reserved_dict: dict = {}
+            try:
+                layout_desc = get_layout_desc(gpu_context, self.chunk_size)
+                reserved_dict = self.storage_manager.reserve_write(
+                    obj_keys, layout_desc, "new"
                 )
 
-            event.record()
+                # NOTE: Store is not batched because some obj_keys may be
+                # skipped (not in reserved_dict), making block_ids
+                # non-contiguous. Batching would require torch.cat to
+                # reassemble block_ids, negating the benefit.
+                num_groups = gpu_context.kv_layer_groups_manager.num_groups
+                for idx, obj_key in enumerate(obj_keys):
+                    if obj_key in reserved_dict:
+                        memory_obj = reserved_dict[obj_key]
+                    else:
+                        continue
 
-        self.gpu_contexts[instance_id].cupy_stream.launch_host_func(
-            self.storage_manager.finish_write,
-            list(reserved_dict.keys()),
-        )
+                    chunk_block_ids_gpu = all_block_ids_gpu[
+                        idx * blocks_per_chunk : (idx + 1) * blocks_per_chunk
+                    ]
 
-        self._event_bus.publish_on_stream(
-            self.gpu_contexts[instance_id].cupy_stream,
-            Event(
-                event_type=EventType.MP_STORE_END,
-                session_id=key.request_id,
-                metadata={
-                    "stored_count": len(reserved_dict),
-                    "device": str(gpu_context.device),
-                },
-            ),
-        )
+                    # Copy from GPU paged buffer to tmp buffer, then to CPU — per group
+                    for group_idx in range(num_groups):
+                        tmp_buffer = gpu_context.get_tmp_chunk_gpu_buffer(group_idx)
+                        group_kv_pointers = gpu_context.get_group_kv_pointers(group_idx)
+                        lmc_ops.multi_layer_block_kv_transfer(
+                            group_kv_pointers,
+                            [tmp_buffer.data_ptr()],
+                            chunk_block_ids_gpu,
+                            gpu_context.device,
+                            lmc_ops.TransferDirection.D2H,
+                            gpu_context.get_shape_desc(group_idx),
+                            self.chunk_size,
+                            gpu_context.gpu_kv_format_,
+                            0,
+                        )
+                    # Store is not batched, so we always use chunk_idx=0 (single slot)
+                    lmcache_memcpy_async_d2h(
+                        gpu_context.get_tmp_gpu_buffer_flat(chunk_idx=0), memory_obj
+                    )
+            except Exception:
+                logger.exception("Cannot store keys due to exception")
+            finally:
+                event.record()
+                if reserved_dict:
+                    gpu_context.cupy_stream.launch_host_func(
+                        self.storage_manager.finish_write,
+                        list(reserved_dict.keys()),
+                    )
+                self._event_bus.publish_on_stream(
+                    gpu_context.cupy_stream,
+                    Event(
+                        event_type=EventType.MP_STORE_END,
+                        session_id=key.request_id,
+                        metadata={
+                            "stored_count": len(reserved_dict),
+                            "device": str(gpu_context.device),
+                        },
+                    ),
+                )
 
         ed = time.perf_counter()
         if length := len(reserved_dict):
