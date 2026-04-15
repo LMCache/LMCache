@@ -77,6 +77,25 @@ class EventType(Enum):
     #                         event later
     TRACE_CALL = "trace.call"
 
+    # Cache Blending (CB) events — GPU operation start/end pairs
+    CB_LOOKUP_START = "cb.lookup.start"
+    CB_LOOKUP_END = "cb.lookup.end"
+    CB_STORE_PRE_COMPUTED_START = "cb.store_pre_computed.start"
+    CB_STORE_PRE_COMPUTED_END = "cb.store_pre_computed.end"
+    CB_RETRIEVE_START = "cb.retrieve.start"
+    CB_RETRIEVE_END = "cb.retrieve.end"
+    CB_STORE_FINAL_START = "cb.store_final.start"
+    CB_STORE_FINAL_END = "cb.store_final.end"
+    CB_FINGERPRINTS_REGISTERED = "cb.fingerprints.registered"
+    CB_CHUNKS_EVICTED = "cb.chunks.evicted"
+
+    # Cache Blending (CB) events — lifecycle sentinels (CPU-synchronous)
+    CB_SESSION_START = "cb.session.start"
+    CB_STORE_PRE_COMPUTED_SUBMITTED = "cb.store_pre_computed.submitted"
+    CB_RETRIEVE_SUBMITTED = "cb.retrieve.submitted"
+    CB_STORE_FINAL_SUBMITTED = "cb.store_final.submitted"
+    CB_SESSION_END = "cb.session.end"
+
 
 @dataclass
 class Event:
