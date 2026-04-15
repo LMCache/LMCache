@@ -78,13 +78,14 @@ def test_roundtrip_bfloat16_preserves_structure() -> None:
     temp = _FakeMemoryObj(tensor=torch.zeros(original.numel(), dtype=torch.uint8))
 
     ser = Fp8QuantizationSerializer()
-    n = ser.serialize(src, temp)
+    n = ser.serialize(src, temp)  # type: ignore[arg-type]
     assert n == original.numel()
 
     # Round-trip: deserialize into a fresh buffer with the original shape.
     recovered = _FakeMemoryObj(tensor=torch.zeros(shape, dtype=torch.bfloat16))
-    Fp8QuantizationDeserializer().deserialize(temp, recovered)
+    Fp8QuantizationDeserializer().deserialize(temp, recovered)  # type: ignore[arg-type]
 
+    assert recovered.tensor is not None
     corr = torch.corrcoef(
         torch.stack([recovered.tensor.float().flatten(), original.float().flatten()])
     )[0, 1].item()
@@ -97,7 +98,7 @@ def test_serialize_raises_on_missing_tensor() -> None:
     src = _FakeMemoryObj(tensor=None)
     dst = _FakeMemoryObj(tensor=torch.zeros(4, dtype=torch.uint8))
     with pytest.raises(ValueError):
-        ser.serialize(src, dst)
+        ser.serialize(src, dst)  # type: ignore[arg-type]
 
 
 def test_deserialize_raises_on_missing_tensor() -> None:
@@ -105,4 +106,4 @@ def test_deserialize_raises_on_missing_tensor() -> None:
     src = _FakeMemoryObj(tensor=torch.zeros(4, dtype=torch.uint8))
     dst = _FakeMemoryObj(tensor=None)
     with pytest.raises(ValueError):
-        deser.deserialize(src, dst)
+        deser.deserialize(src, dst)  # type: ignore[arg-type]

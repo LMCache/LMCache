@@ -67,6 +67,9 @@ def create_serde_processor(config: dict[str, object]) -> SerdeProcessor:
     serde_type = config.get("type")
     if serde_type is None:
         raise ValueError("Serde config missing 'type' field")
+    if not isinstance(serde_type, str):
+        actual = type(serde_type).__name__
+        raise ValueError(f"Serde 'type' must be a string, got {actual}")
     factory = _SERDE_FACTORY_REGISTRY.get(serde_type)
     if factory is None:
         known = ", ".join(sorted(_SERDE_FACTORY_REGISTRY)) or "(none)"
@@ -89,12 +92,12 @@ def _create_fp8_serde(config: dict[str, object]) -> SerdeProcessor:
         Fp8QuantizationSerializer,
     )
 
-    dtype_name = config.get("fp8_dtype", "float8_e4m3fn")
+    dtype_name = str(config.get("fp8_dtype", "float8_e4m3fn"))
     fp8_dtype = getattr(torch, dtype_name, None)
     if fp8_dtype is None:
         raise ValueError(f"Unknown torch dtype: {dtype_name!r}")
 
-    max_workers = int(config.get("max_workers", 1))
+    max_workers = int(str(config.get("max_workers", 1)))
     return AsyncSerdeProcessor(
         Fp8QuantizationSerializer(fp8_dtype),
         Fp8QuantizationDeserializer(fp8_dtype),

@@ -126,7 +126,7 @@ def make_storage_manager_config(
             ),
         ),
         eviction_config=EvictionConfig(eviction_policy="LRU"),
-        l2_adapter_config=L2AdaptersConfig(adapters=adapter_configs),
+        l2_adapter_config=L2AdaptersConfig(adapters=list(adapter_configs)),
     )
 
 

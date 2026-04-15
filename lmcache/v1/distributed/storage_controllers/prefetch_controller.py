@@ -874,6 +874,9 @@ class PrefetchController(StorageControllerInterface):
         Finalizes the request if all loads and deserializes are done.
         """
         serde = self._serde_processors[adapter_index]
+        assert serde is not None, (
+            f"deserialize completion for adapter {adapter_index} but no serde processor"
+        )
         l1_mgr = self._l1_manager
         ready_to_finalize: list[InFlightPrefetchRequest] = []
 
@@ -920,9 +923,13 @@ class PrefetchController(StorageControllerInterface):
                     request.request_id,
                     adapter_index,
                 )
-                load_bitmap = request.load_results.get(adapter_index)
-                if load_bitmap is not None:
-                    request.load_results[adapter_index] = Bitmap(load_bitmap.size())
+                # Clear this adapter's load result so all its keys become
+                # "failed" in _finalize_load. The bitmap size equals the
+                # number of keys this adapter has in the load plan.
+                plan_bitmap = request.load_plan.get(adapter_index)
+                if plan_bitmap is not None:
+                    n_keys = plan_bitmap.popcount()
+                    request.load_results[adapter_index] = Bitmap(n_keys)
 
             if request.is_ready_to_finalize():
                 ready_to_finalize.append(request)

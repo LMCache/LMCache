@@ -501,6 +501,9 @@ class StoreController(StorageControllerInterface):
         On failure: release both read locks and temp buffers.
         """
         serde = self._serde_processors[adapter_index]
+        assert serde is not None, (
+            f"serialize completion for adapter {adapter_index} but no serde processor"
+        )
         l1_mgr = self._l1_manager
 
         for task in list(self._in_flight_serialize_tasks.values()):
@@ -691,15 +694,15 @@ class StoreController(StorageControllerInterface):
         self._in_flight_serialize_tasks.clear()
 
         # Clean up in-flight L2 store tasks
-        for (adapter_index, task_id), task in self._in_flight_tasks.items():
+        for (adapter_index, task_id), store_task in self._in_flight_tasks.items():
             logger.warning(
                 "Cleaning up in-flight store task %d (adapter %d, %d keys).",
                 task_id,
                 adapter_index,
-                len(task.read_locked_keys),
+                len(store_task.read_locked_keys),
             )
-            l1_mgr.finish_read(task.read_locked_keys)
-            if task.temp_keys:
-                l1_mgr.finish_write(task.temp_keys)
-                l1_mgr.delete(task.temp_keys)
+            l1_mgr.finish_read(store_task.read_locked_keys)
+            if store_task.temp_keys:
+                l1_mgr.finish_write(store_task.temp_keys)
+                l1_mgr.delete(store_task.temp_keys)
         self._in_flight_tasks.clear()

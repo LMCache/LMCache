@@ -84,7 +84,7 @@ def test_serialize_signals_fd_and_result_is_true() -> None:
     ser = _FakeSerializer()
     processor = AsyncSerdeProcessor(ser, _FakeDeserializer())
     try:
-        task_id = processor.submit_serialize([object()], [object()])
+        task_id = processor.submit_serialize([object()], [object()])  # type: ignore[list-item]
         assert _wait_for_fd(processor.get_serialize_event_fd()), "fd never signaled"
         assert processor.query_serialize_result(task_id) is True
         # Non-idempotent: second query returns None.
@@ -98,7 +98,7 @@ def test_deserialize_signals_fd_and_result_is_true() -> None:
     deser = _FakeDeserializer()
     processor = AsyncSerdeProcessor(_FakeSerializer(), deser)
     try:
-        task_id = processor.submit_deserialize([object()], [object()])
+        task_id = processor.submit_deserialize([object()], [object()])  # type: ignore[list-item]
         assert _wait_for_fd(processor.get_deserialize_event_fd()), "fd never signaled"
         assert processor.query_deserialize_result(task_id) is True
         assert processor.query_deserialize_result(task_id) is None
@@ -115,7 +115,7 @@ def test_serialize_failure_reports_false() -> None:
 
     processor = AsyncSerdeProcessor(_FakeSerializer(_boom), _FakeDeserializer())
     try:
-        task_id = processor.submit_serialize([object()], [object()])
+        task_id = processor.submit_serialize([object()], [object()])  # type: ignore[list-item]
         assert _wait_for_fd(processor.get_serialize_event_fd()), "fd never signaled"
         assert processor.query_serialize_result(task_id) is False
     finally:
