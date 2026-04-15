@@ -22,7 +22,7 @@ set -o pipefail
 
 # Prefer the LMCache repo's uv venv if present, so `lmcache` and `vllm` on PATH
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 if [ -d "${REPO_ROOT}/.venv/bin" ]; then
     export PATH="${REPO_ROOT}/.venv/bin:${PATH}"
 fi

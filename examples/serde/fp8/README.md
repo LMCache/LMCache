@@ -28,7 +28,7 @@ the original dtype on prefetch.
 If you just want to verify serde works end-to-end at the storage layer:
 
 ```bash
-python examples/serde_fp8/smoke_test.py
+python examples/serde/fp8/smoke_test.py
 ```
 
 Expected output includes:
