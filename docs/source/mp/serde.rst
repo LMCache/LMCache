@@ -164,6 +164,6 @@ Example
 An end-to-end script that starts an lmcache server with fp8 on a disk
 adapter, runs vLLM, clears L1, and re-runs the same request to trigger
 the L2 prefetch + fp8 deserialize path lives at
-:file:`examples/serde/fp8/`. A standalone Python smoke test (no vLLM
-required) that exercises the full L1 -> L2 -> L1 round-trip is at
-:file:`examples/serde/fp8/smoke_test.py`.
+:file:`examples/serde/fp8/`. A pytest-based filesystem round-trip test
+(no vLLM required) is at
+:file:`tests/v1/distributed/serde/test_serde_fs_e2e.py`.

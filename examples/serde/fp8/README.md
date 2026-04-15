@@ -21,23 +21,14 @@ the original dtype on prefetch.
 ## Files
 
 - `run_serde_fp8_example.sh` — full end-to-end: `lmcache server` + `vllm serve` + real inference, then clear L1 and re-infer to hit the L2 path.
-- `smoke_test.py` — standalone Python test that drives `StorageManager` directly (no vLLM). Exercises the exact same L1→L2 store and L2→L1 prefetch paths through the fp8 serde. Fast, deterministic, and verifies the fp8 round-trip numerically.
 
 ## Quick sanity check (no vLLM required)
 
-If you just want to verify serde works end-to-end at the storage layer:
+The pytest suite includes a filesystem-backed serde test that exercises
+the same L1 -> disk -> L1 round-trip without needing vLLM:
 
 ```bash
-python examples/serde/fp8/smoke_test.py
-```
-
-Expected output includes:
-
-```
-Step 2: Disk entries: 2       # L2 store succeeded (fp8 bytes on disk)
-Step 4: Prefix hits: 2/2      # L2 prefetch + fp8 deserialize succeeded
-Step 5: corr=0.9996           # fp8 round-trip error within expected range
-[PASS] fp8 serde end-to-end smoke test
+pytest tests/v1/distributed/serde/test_serde_fs_e2e.py -xvs
 ```
 
 ## Requirements
