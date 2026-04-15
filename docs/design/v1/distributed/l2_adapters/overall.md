@@ -502,7 +502,7 @@ connector framework. A single C++ connector implementation works in **both**
 non-MP mode (via `ConnectorClientBase`) and MP mode (via
 `NativeConnectorL2Adapter`).
 
-**Full guide:** [`csrc/storage_backends/README.md`](../../../../csrc/storage_backends/README.md)
+**Full guide:** [`csrc/storage_backends/README.md`](../../../../../csrc/storage_backends/README.md)
 
 The `NativeConnectorL2Adapter` (`native_connector_l2_adapter.py`) bridges any
 pybind-wrapped `IStorageConnector` to the `L2AdapterInterface`:

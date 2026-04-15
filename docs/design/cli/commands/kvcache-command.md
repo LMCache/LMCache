@@ -7,7 +7,7 @@
 Users need a way to manage KV cache state for **specific requests** from the
 command line — pin a request's cache to prevent eviction, compress it, or clear
 it. Part of **Phase 1** of the
-[CLI design](commands.md).
+[CLI design](../commands.md).
 
 ---
 
