@@ -272,6 +272,9 @@ class GPUKVFormat(IntEnum):
     # used by: vLLM non-MLA flash infer (HND layout)
     NL_X_NB_TWO_NH_BS_HS = 7
 
+    # used by: TRT-LLM cross-layer (HND layout)
+    NB_NL_TWO_NH_BS_HS = 8
+
 
 # On XPU (Intel GPU), PyTorch 2.4+ supports pin_memory=True via SYCL USM
 # host allocation, enabling fast DMA for XPU<->CPU transfers.
