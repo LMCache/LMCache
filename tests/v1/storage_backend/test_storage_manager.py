@@ -21,6 +21,8 @@ Key scenarios tested:
 
 # Standard
 import asyncio
+from contextlib import nullcontext
+from types import SimpleNamespace
 
 # Third Party
 import pytest
@@ -30,7 +32,10 @@ import torch
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.event_manager import EventManager, EventType
 from lmcache.v1.metadata import LMCacheMetadata
-from lmcache.v1.storage_backend.storage_manager import StorageManager
+from lmcache.v1.storage_backend.storage_manager import (
+    StorageManager,
+    allocate_and_copy_objects,
+)
 
 
 class MockMemoryObj:
@@ -317,3 +322,86 @@ class TestStorageManagerPrefetchCallback:
         # (no remaining chunks in current tier, no subsequent tiers)
         for obj in tier0_objs:
             assert not obj.ref_count_down_called
+
+
+class _FakeTensor:
+    def __init__(self):
+        self.copy_calls = 0
+
+    def copy_(self, src, non_blocking: bool = False):
+        self.copy_calls += 1
+        self.last_copy = (src, non_blocking)
+
+
+class _FakeGroupedMemoryObj:
+    def __init__(self, tensors, shape_count: int = 2):
+        self._tensors = tensors
+        self._shapes = [torch.Size([1])] * shape_count
+        self._dtypes = [torch.float32] * shape_count
+        self.meta = SimpleNamespace(fmt="grouped")
+        self.ref_count_down_called = False
+
+    def get_shapes(self):
+        return self._shapes
+
+    def get_dtypes(self):
+        return self._dtypes
+
+    def get_shape(self):
+        return self._shapes[0]
+
+    def get_dtype(self):
+        return self._dtypes[0]
+
+    def get_tensor(self, index: int):
+        return self._tensors[index]
+
+    def ref_count_down(self):
+        self.ref_count_down_called = True
+
+
+class _FakeAllocatorBackend:
+    def __init__(self, allocated_objects):
+        self._allocated_objects = iter(allocated_objects)
+
+    def contains(self, key):
+        return False
+
+    def allocate(self, *args, **kwargs):
+        return next(self._allocated_objects)
+
+
+class _FakeStream:
+    def __init__(self):
+        self.synchronize_calls = 0
+
+    def synchronize(self):
+        self.synchronize_calls += 1
+
+
+def test_allocate_and_copy_objects_synchronizes_after_grouped_copy_failure(
+    monkeypatch,
+):
+    monkeypatch.setattr(torch.cuda, "stream", lambda stream: nullcontext())
+
+    successful_dst = _FakeGroupedMemoryObj([_FakeTensor(), _FakeTensor()])
+    failed_dst = _FakeGroupedMemoryObj([_FakeTensor(), None])
+    allocator = _FakeAllocatorBackend([successful_dst, failed_dst])
+    stream = _FakeStream()
+
+    src_objects = [
+        _FakeGroupedMemoryObj([_FakeTensor(), _FakeTensor()]),
+        _FakeGroupedMemoryObj([_FakeTensor(), _FakeTensor()]),
+    ]
+
+    keys, allocated_objects = allocate_and_copy_objects(
+        allocator,
+        ["k0", "k1"],
+        src_objects,
+        stream,
+    )
+
+    assert list(keys) == ["k0"]
+    assert allocated_objects == [successful_dst]
+    assert failed_dst.ref_count_down_called
+    assert stream.synchronize_calls == 1

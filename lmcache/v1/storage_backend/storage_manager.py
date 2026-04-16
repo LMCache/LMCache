@@ -100,6 +100,7 @@ def allocate_and_copy_objects(
         if memory_obj is None:
             break
 
+        copy_failed = False
         with torch.cuda.stream(stream):
             if use_grouped_tensors:
                 for i in range(len(src_shapes)):
@@ -112,7 +113,8 @@ def allocate_and_copy_objects(
                             i,
                         )
                         memory_obj.ref_count_down()
-                        return keys[: len(allocated_objects)], allocated_objects
+                        copy_failed = True
+                        break
                     dst_tensor.copy_(src_tensor, non_blocking=True)
             else:
                 if memory_obj.tensor is None or src_memory_obj.tensor is None:
@@ -123,8 +125,11 @@ def allocate_and_copy_objects(
                         "Releasing the memory object."
                     )
                     memory_obj.ref_count_down()
-                    break
-                memory_obj.tensor.copy_(src_memory_obj.tensor, non_blocking=True)
+                    copy_failed = True
+                else:
+                    memory_obj.tensor.copy_(src_memory_obj.tensor, non_blocking=True)
+        if copy_failed:
+            break
         allocated_objects.append(memory_obj)
 
     if stream is not None:
