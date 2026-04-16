@@ -65,6 +65,12 @@ class EventType(Enum):
     # vLLM end session events
     MP_VLLM_END_SESSION = "mp.vllm.end_session"
 
+    # Trace recording — unified function-call entry event used by the
+    # ``@enable_tracing`` decorator.  Metadata layout:
+    #   ``qualname`` (str): fully-qualified function name
+    #   ``args``     (dict): name -> codec-encoded value
+    TRACE_CALL = "trace.call"
+
 
 @dataclass
 class Event:

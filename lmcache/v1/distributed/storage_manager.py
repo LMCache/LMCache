@@ -37,6 +37,14 @@ from lmcache.v1.distributed.storage_controllers.store_policy import (
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import get_event_bus
+from lmcache.v1.mp_observability.trace.codecs import (
+    register_prefetch_handle_codec,
+)
+from lmcache.v1.mp_observability.trace.decorator import (
+    enable_tracing,
+    is_tracing_enabled,
+    publish_call_event,
+)
 
 logger = init_logger(__name__)
 
@@ -117,6 +125,7 @@ class StorageManager:
         self._prefetch_controller.start()
 
     # External APIs for serving engine integration code to call
+    @enable_tracing()
     def reserve_write(
         self,
         keys: list[ObjectKey],
@@ -161,6 +170,7 @@ class StorageManager:
         )
         return result
 
+    @enable_tracing()
     def finish_write(
         self,
         keys: list[ObjectKey],
@@ -211,6 +221,18 @@ class StorageManager:
             If the caller raised exception during the processing of the yielded memory
             objects, this function will ensure that the read locks will be decreased.
         """
+        # Manual TRACE_CALL emission for the context manager.  The
+        # ``@enable_tracing`` decorator cannot wrap a ``@contextmanager``
+        # generator function (it would publish the call to the wrapper
+        # rather than to ``__enter__``).  Emit enter/exit events
+        # directly, gated on the tracing flag for zero overhead when
+        # disabled.
+        if is_tracing_enabled():
+            publish_call_event(
+                "lmcache.v1.distributed.storage_manager."
+                "StorageManager.read_prefetched_results.__enter__",
+                {"keys": keys},
+            )
         read_results = self._l1_manager.unsafe_read(keys)
         good_keys: list[ObjectKey] = []
         good_objs: list[MemoryObj] = []
@@ -254,7 +276,14 @@ class StorageManager:
                         },
                     )
                 )
+            if is_tracing_enabled():
+                publish_call_event(
+                    "lmcache.v1.distributed.storage_manager."
+                    "StorageManager.read_prefetched_results.__exit__",
+                    {"keys": keys},
+                )
 
+    @enable_tracing()
     def finish_read_prefetched(
         self,
         keys: list[ObjectKey],
@@ -280,6 +309,7 @@ class StorageManager:
             )
         )
 
+    @enable_tracing()
     def submit_prefetch_task(
         self,
         keys: list[ObjectKey],
@@ -512,3 +542,9 @@ class StorageManager:
             True if memory is consistent, False otherwise.
         """
         return self._l1_manager.memcheck()
+
+
+# Now that ``PrefetchHandle`` exists in this module's namespace, finish
+# wiring its trace codec.  Done here (rather than at codec import time)
+# to avoid a ``storage_manager → trace.codecs → storage_manager`` cycle.
+register_prefetch_handle_codec()
