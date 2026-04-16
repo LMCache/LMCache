@@ -197,9 +197,11 @@ class InFlightPrefetchRequest:
     pending_deserialize_tasks: dict[int, SerdeTaskId] = field(default_factory=dict)
     """Adapter index -> serde task id for in-flight deserialize tasks.
 
-    An entry is added when an adapter's L2 load completes (if serde enabled),
-    and removed when the deserialize result is queried. Empty when all
-    deserializations are done (is_ready_to_finalize returns True)."""
+    An entry is added in ``_submit_deserialize_for_adapter`` (called from
+    ``_process_load_completions`` when serde is enabled) and removed in
+    ``_process_deserialize_completions`` once the deserialize result is
+    queried. Empty when all deserializations are done
+    (``is_ready_to_finalize`` returns True)."""
 
     def all_lookups_done(self) -> bool:
         return len(self.pending_lookup_tasks) == 0
@@ -244,8 +246,8 @@ class PrefetchController(StorageControllerInterface):
         l2_adapters: list[L2AdapterInterface],
         adapter_descriptors: list[AdapterDescriptor],
         policy: PrefetchPolicy,
+        serde_processors: list[SerdeProcessor | None],
         max_in_flight: int = 8,
-        serde_processors: list[SerdeProcessor | None] | None = None,
     ) -> None:
         self._l1_manager = l1_manager
         self._l2_adapters = l2_adapters
@@ -253,19 +255,14 @@ class PrefetchController(StorageControllerInterface):
         self._policy = policy
         self._max_in_flight = max_in_flight
 
-        # Normalize to a list of the same length as l2_adapters.
-        # After this point, _serde_processors is always a list (never None).
+        # Caller must pass a list of the same length as l2_adapters.
         # Individual elements may be None (serde disabled for that adapter).
-        if serde_processors is not None and len(serde_processors) != len(l2_adapters):
+        if len(serde_processors) != len(l2_adapters):
             raise ValueError(
                 f"serde_processors length ({len(serde_processors)}) must "
                 f"match l2_adapters length ({len(l2_adapters)})"
             )
-        self._serde_processors: list[SerdeProcessor | None] = (
-            list(serde_processors)
-            if serde_processors is not None
-            else [None] * len(l2_adapters)
-        )
+        self._serde_processors: list[SerdeProcessor | None] = list(serde_processors)
 
         # In-flight request tracking (background thread only)
         self._in_flight_requests: dict[PrefetchRequestId, InFlightPrefetchRequest] = {}
@@ -804,13 +801,15 @@ class PrefetchController(StorageControllerInterface):
             self._completed_lookups[request_id] = hit_chunks
 
     def _process_load_completions(self, adapter_index: int) -> None:
-        """Process completed L2 loads for this adapter.
+        """Handle the L2 load eventfd for this adapter.
 
+        Triggered ONLY by the L2 load completion fd — not by deserialize.
         For each request whose load just completed for this adapter:
-        - Record the load result.
-        - If this adapter has serde, kick off async deserialize.
-        - Otherwise, the data is already in the real KV buffer.
-        - If all loads and deserializes are done, finalize.
+          - Record the load result.
+          - If this adapter has serde: submit the async deserialize task.
+            Finalize will fire later from _process_deserialize_completions.
+          - If no serde: the data is already in the real KV buffer; finalize
+            now if all loads (across all adapters) are done.
         """
         serde = self._serde_processors[adapter_index]
         ready_to_finalize: list[InFlightPrefetchRequest] = []
@@ -905,8 +904,10 @@ class PrefetchController(StorageControllerInterface):
         request.pending_deserialize_tasks[adapter_index] = serde_task_id
 
     def _process_deserialize_completions(self, adapter_index: int) -> None:
-        """Handle completed deserialize tasks for this adapter.
+        """Handle the deserialize eventfd for this adapter.
 
+        For serde-enabled adapters, this is where the request actually
+        finishes — _process_load_completions only kicks off the deserialize.
         Releases this adapter's temp buffers. If deserialize failed,
         clears the load result bitmap so _finalize_load treats those
         keys as failed (they'll get finish_write + delete).

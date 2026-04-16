@@ -106,9 +106,20 @@ if ! "${SCRIPT_DIR}/run-long-doc-qa-l2.sh"; then
 fi
 echo ""
 
-# Step 7: Fault tolerance test (kills LMCache server -- must be last)
+# Step 7: fp8 serde end-to-end test (relaunches LMCache with disk + fp8 serde)
 echo "============================================"
-echo "=== Step 7: Running fault tolerance test ==="
+echo "=== Step 7: Running fp8 serde test ==="
+echo "============================================"
+if ! "${SCRIPT_DIR}/run-fp8-serde.sh"; then
+    echo "fp8 serde test failed"
+    TEST_RESULT=1
+    exit 1
+fi
+echo ""
+
+# Step 8: Fault tolerance test (kills LMCache server -- must be last)
+echo "============================================"
+echo "=== Step 8: Running fault tolerance test ==="
 echo "============================================"
 if ! "${SCRIPT_DIR}/run-fault-tolerance.sh"; then
     echo "fault tolerance test failed"

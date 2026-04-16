@@ -3,6 +3,7 @@
 from lmcache.v1.distributed.serde.async_processor import AsyncSerdeProcessor
 from lmcache.v1.distributed.serde.base import (
     Deserializer,
+    SerdeConfig,
     SerdeProcessor,
     SerdeTaskId,
     Serializer,
@@ -26,6 +27,7 @@ __all__ = [
     "Deserializer",
     "Fp8QuantizationDeserializer",
     "Fp8QuantizationSerializer",
+    "SerdeConfig",
     "SerdeProcessor",
     "SerdeTaskId",
     "Serializer",

@@ -207,26 +207,21 @@ class StoreController(StorageControllerInterface):
         l2_adapters: list[L2AdapterInterface],
         adapter_descriptors: list[AdapterDescriptor],
         policy: StorePolicy,
-        serde_processors: list[SerdeProcessor | None] | None = None,
+        serde_processors: list[SerdeProcessor | None],
     ) -> None:
         self._l1_manager = l1_manager
         self._l2_adapters = l2_adapters
         self._adapter_descriptors = adapter_descriptors
         self._policy = policy
 
-        # Normalize to a list of the same length as l2_adapters.
-        # After this point, _serde_processors is always a list (never None).
+        # Caller must pass a list of the same length as l2_adapters.
         # Individual elements may be None (serde disabled for that adapter).
-        if serde_processors is not None and len(serde_processors) != len(l2_adapters):
+        if len(serde_processors) != len(l2_adapters):
             raise ValueError(
                 f"serde_processors length ({len(serde_processors)}) must "
                 f"match l2_adapters length ({len(l2_adapters)})"
             )
-        self._serde_processors: list[SerdeProcessor | None] = (
-            list(serde_processors)
-            if serde_processors is not None
-            else [None] * len(l2_adapters)
-        )
+        self._serde_processors: list[SerdeProcessor | None] = list(serde_processors)
 
         self._listener = StoreListener()
         self._l1_manager.register_listener(self._listener)
@@ -434,7 +429,17 @@ class StoreController(StorageControllerInterface):
         successful_keys: list[ObjectKey],
         successful_objs: list[MemoryObj],
     ) -> None:
-        """Allocate temp buffers and submit async serialize to SerdeProcessor."""
+        """Allocate temp buffers and submit async serialize to SerdeProcessor.
+
+        Args:
+            adapter_index: Index of the L2 adapter the data will be stored to.
+            serde: SerdeProcessor for that adapter.
+            successful_keys: Original ObjectKeys that L1 ``reserve_read`` just
+                succeeded for. These hold L1 read locks that must be released
+                eventually.
+            successful_objs: Corresponding read-locked MemoryObjs (same length
+                and order as ``successful_keys``); the source data to serialize.
+        """
         l1_mgr = self._l1_manager
 
         temp_keys = [make_temp_key(key) for key in successful_keys]
@@ -474,10 +479,11 @@ class StoreController(StorageControllerInterface):
             final_temp_keys.append(temp_key)
             final_temp_objs.append(temp_result[1])
 
-        # Release read locks for keys whose temp alloc failed
-        failed_read_keys = [k for k in successful_keys if k in failed_orig_keys_set]
-        if failed_read_keys:
-            l1_mgr.finish_read(failed_read_keys)
+        # Release read locks for keys whose temp alloc failed.
+        # failed_orig_keys_set is a subset of successful_keys, so we can
+        # convert directly without filtering.
+        if failed_orig_keys_set:
+            l1_mgr.finish_read(list(failed_orig_keys_set))
 
         # Note: failed temp alloc keys were never added to L1's object store
         # (reserve_write returned an error), so there's nothing to finish_write

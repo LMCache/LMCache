@@ -33,6 +33,7 @@ from lmcache.v1.distributed.config import (
 )
 from lmcache.v1.distributed.l2_adapters.config import L2AdaptersConfig
 from lmcache.v1.distributed.l2_adapters.mock_l2_adapter import MockL2AdapterConfig
+from lmcache.v1.distributed.serde import SerdeConfig
 from lmcache.v1.distributed.storage_manager import StorageManager
 
 # Skip all tests in this module if CUDA is not available
@@ -108,7 +109,7 @@ def make_mock_adapter_config(
         mock_bandwidth_gb=10.0,
     )
     if serde_type is not None:
-        cfg.serde_config = {"type": serde_type}
+        cfg.serde_config = SerdeConfig(type=serde_type)
     return cfg
 
 

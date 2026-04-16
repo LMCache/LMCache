@@ -99,6 +99,7 @@ sequenceDiagram
     L2Mgr ->> Main Loop: completed task id
     Main Loop ->> Main Loop: update internal "request" status and check finished "requests"
     Main Loop ->> L1Mgr: finish_read(storage_keys)
+    note right of Main Loop: For serde: storage_keys = tmp_keys (read-locked).<br/>finish_read auto-deletes them since is_temporary=True.
 
     alt L2 store succeeded
         Main Loop ->> Main Loop: determine keys to delete from L1

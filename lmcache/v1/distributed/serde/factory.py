@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """
-Factory for creating SerdeProcessor instances from config dicts.
+Factory for creating SerdeProcessor instances from SerdeConfig.
 
 Each serde type registers itself here so it can be referenced by name
 in L2 adapter configs:
@@ -18,11 +18,12 @@ from typing import Callable
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.distributed.serde.async_processor import AsyncSerdeProcessor
-from lmcache.v1.distributed.serde.base import SerdeProcessor
+from lmcache.v1.distributed.serde.base import SerdeConfig, SerdeProcessor
 
 logger = init_logger(__name__)
 
-# name -> factory(dict) -> SerdeProcessor
+# name -> factory(kwargs) -> SerdeProcessor.
+# Factories receive the type-specific kwargs (everything except "type").
 _SERDE_FACTORY_REGISTRY: dict[str, Callable[[dict[str, object]], SerdeProcessor]] = {}
 
 
@@ -33,8 +34,8 @@ def register_serde_factory(
 
     Args:
         name: Serde type name (used in the JSON config ``"type"`` field).
-        factory: Callable that takes the serde config dict and returns
-            a SerdeProcessor instance.
+        factory: Callable that takes the type-specific kwargs dict and
+            returns a SerdeProcessor instance.
 
     Raises:
         ValueError: If ``name`` is already registered.
@@ -49,32 +50,24 @@ def get_registered_serde_types() -> list[str]:
     return list(_SERDE_FACTORY_REGISTRY)
 
 
-def create_serde_processor(config: dict[str, object]) -> SerdeProcessor:
-    """Build a SerdeProcessor from a config dict.
-
-    The dict must include a ``"type"`` field naming a registered serde.
-    All other keys are forwarded to the type-specific factory.
+def create_serde_processor(config: SerdeConfig) -> SerdeProcessor:
+    """Build a SerdeProcessor from a SerdeConfig.
 
     Args:
-        config: Serde config dict (e.g., ``{"type": "fp8", ...}``).
+        config: Serde configuration. ``config.type`` must name a registered
+            serde; ``config.kwargs`` is forwarded to the factory.
 
     Returns:
         A SerdeProcessor instance ready to be passed to a controller.
 
     Raises:
-        ValueError: If ``"type"`` is missing or names an unregistered type.
+        ValueError: If ``config.type`` names an unregistered serde.
     """
-    serde_type = config.get("type")
-    if serde_type is None:
-        raise ValueError("Serde config missing 'type' field")
-    if not isinstance(serde_type, str):
-        actual = type(serde_type).__name__
-        raise ValueError(f"Serde 'type' must be a string, got {actual}")
-    factory = _SERDE_FACTORY_REGISTRY.get(serde_type)
+    factory = _SERDE_FACTORY_REGISTRY.get(config.type)
     if factory is None:
         known = ", ".join(sorted(_SERDE_FACTORY_REGISTRY)) or "(none)"
-        raise ValueError(f"Unknown serde type {serde_type!r}. Registered: {known}")
-    return factory(config)
+        raise ValueError(f"Unknown serde type {config.type!r}. Registered: {known}")
+    return factory(config.kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -82,7 +75,7 @@ def create_serde_processor(config: dict[str, object]) -> SerdeProcessor:
 # ---------------------------------------------------------------------------
 
 
-def _create_fp8_serde(config: dict[str, object]) -> SerdeProcessor:
+def _create_fp8_serde(kwargs: dict[str, object]) -> SerdeProcessor:
     # Third Party
     import torch
 
@@ -92,12 +85,12 @@ def _create_fp8_serde(config: dict[str, object]) -> SerdeProcessor:
         Fp8QuantizationSerializer,
     )
 
-    dtype_name = str(config.get("fp8_dtype", "float8_e4m3fn"))
+    dtype_name = str(kwargs.get("fp8_dtype", "float8_e4m3fn"))
     fp8_dtype = getattr(torch, dtype_name, None)
     if fp8_dtype is None:
         raise ValueError(f"Unknown torch dtype: {dtype_name!r}")
 
-    max_workers = int(str(config.get("max_workers", 1)))
+    max_workers = int(str(kwargs.get("max_workers", 1)))
     return AsyncSerdeProcessor(
         Fp8QuantizationSerializer(fp8_dtype),
         Fp8QuantizationDeserializer(fp8_dtype),

@@ -22,6 +22,7 @@ from lmcache.v1.distributed.l2_adapters.config import (
 )
 from lmcache.v1.distributed.serde import (
     AsyncSerdeProcessor,
+    SerdeConfig,
     SerdeProcessor,
     create_serde_processor,
     get_registered_serde_types,
@@ -40,7 +41,7 @@ def test_fp8_is_registered_by_default() -> None:
 
 def test_create_fp8_returns_async_processor() -> None:
     """fp8 config produces an AsyncSerdeProcessor with distinct event fds."""
-    processor = create_serde_processor({"type": "fp8"})
+    processor = create_serde_processor(SerdeConfig(type="fp8"))
     try:
         assert isinstance(processor, AsyncSerdeProcessor)
         s_fd = processor.get_serialize_event_fd()
@@ -50,14 +51,9 @@ def test_create_fp8_returns_async_processor() -> None:
         processor.close()
 
 
-def test_create_serde_missing_type_raises() -> None:
-    with pytest.raises(ValueError, match="missing 'type'"):
-        create_serde_processor({"fp8_dtype": "float8_e4m3fn"})
-
-
 def test_create_serde_unknown_type_raises() -> None:
     with pytest.raises(ValueError, match="Unknown serde type"):
-        create_serde_processor({"type": "does-not-exist"})
+        create_serde_processor(SerdeConfig(type="does-not-exist"))
 
 
 def test_register_serde_factory_dispatch() -> None:
@@ -90,16 +86,19 @@ def test_register_serde_factory_dispatch() -> None:
         def close(self) -> None:
             pass
 
-    def _factory(config: dict) -> SerdeProcessor:
-        seen["config"] = config
+    def _factory(kwargs: dict) -> SerdeProcessor:
+        seen["kwargs"] = kwargs
         return _DummyProcessor()
 
     # Use a unique name to avoid collisions if the test runs twice.
     register_serde_factory("test-dummy-ser-de-xyz", _factory)
 
-    processor = create_serde_processor({"type": "test-dummy-ser-de-xyz", "foo": "bar"})
+    processor = create_serde_processor(
+        SerdeConfig(type="test-dummy-ser-de-xyz", kwargs={"foo": "bar"})
+    )
     assert isinstance(processor, _DummyProcessor)
-    assert seen["config"] == {"type": "test-dummy-ser-de-xyz", "foo": "bar"}
+    # Factory only receives the type-specific kwargs, not the wrapping type.
+    assert seen["kwargs"] == {"foo": "bar"}
 
 
 def test_register_serde_factory_duplicate_raises() -> None:
@@ -139,7 +138,9 @@ def test_adapter_config_with_serde() -> None:
     adapter = _parse_adapter(
         {"type": "mock", "max_size_gb": 1, "mock_bandwidth_gb": 1, "serde": serde_spec}
     )
-    assert adapter.serde_config == serde_spec
+    assert adapter.serde_config is not None
+    assert adapter.serde_config.type == "fp8"
+    assert adapter.serde_config.kwargs == {"fp8_dtype": "float8_e4m3fn"}
 
 
 def test_adapter_config_rejects_non_dict_serde() -> None:

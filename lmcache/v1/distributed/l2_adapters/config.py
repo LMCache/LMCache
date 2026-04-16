@@ -24,6 +24,7 @@ if TYPE_CHECKING:
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.distributed.serde import SerdeConfig
 
 logger = init_logger(__name__)
 
@@ -107,24 +108,22 @@ class L2AdapterConfigBase(ABC):
     #: means L2 eviction is disabled for this adapter.
     eviction_config: EvictionConfig | None = None
 
-    serde_config: dict[str, object] | None = None
-    """Per-adapter serde configuration parsed from the ``"serde"`` JSON sub-dict.
-
-    ``None`` means serde is disabled for this adapter. When set, StorageManager
-    instantiates a SerdeProcessor via the serde factory.
-
-    Expected schema::
-
-        {
-            "type": "<registered_serde_name>",
-            ...type_specific_keys (forwarded to the factory)
-        }
-
-    Built-in types: ``"fp8"`` (see :class:`Fp8QuantizationSerializer`).
-    """
+    #: Populated by ``_parse_serde_config`` after ``from_dict``; ``None``
+    #: means serde is disabled for this adapter. When set, StorageManager
+    #: instantiates a SerdeProcessor via the serde factory.
+    #:
+    #: Expected JSON schema::
+    #:
+    #:     {
+    #:         "type": "<registered_serde_name>",
+    #:         ...type_specific_keys (forwarded to the factory)
+    #:     }
+    #:
+    #: Built-in types: ``"fp8"`` (see :class:`Fp8QuantizationSerializer`).
+    serde_config: SerdeConfig | None = None
 
     @staticmethod
-    def _parse_serde_config(d: dict[str, object]) -> dict[str, object] | None:
+    def _parse_serde_config(d: dict[str, object]) -> SerdeConfig | None:
         """Parse an optional ``"serde"`` sub-dict from an adapter JSON spec.
 
         Expected format::
@@ -142,9 +141,12 @@ class L2AdapterConfigBase(ABC):
             return None
         if not isinstance(serde_dict, dict):
             raise ValueError(f"'serde' must be a dict, got {type(serde_dict).__name__}")
-        if "type" not in serde_dict:
+        serde_type = serde_dict.get("type")
+        if not isinstance(serde_type, str):
             raise ValueError("'serde' dict must include a 'type' field")
-        return serde_dict
+        # Forward all keys except "type" as type-specific kwargs.
+        kwargs = {k: v for k, v in serde_dict.items() if k != "type"}
+        return SerdeConfig(type=serde_type, kwargs=kwargs)
 
     @staticmethod
     def _parse_eviction_config(d: dict) -> EvictionConfig | None:

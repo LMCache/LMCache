@@ -13,6 +13,7 @@ interface automatically.
 """
 
 # Standard
+from dataclasses import dataclass, field
 import abc
 
 # First Party
@@ -20,6 +21,23 @@ from lmcache.v1.distributed.api import MemoryLayoutDesc
 from lmcache.v1.memory_management import MemoryObj
 
 SerdeTaskId = int
+
+
+@dataclass
+class SerdeConfig:
+    """Per-adapter serde configuration.
+
+    Mirrors the role of ``EvictionConfig``: parsed from the ``"serde"``
+    JSON sub-dict on an L2 adapter spec, then handed to the serde factory
+    to build a SerdeProcessor.
+
+    Attributes:
+        type: Registered serde type name (e.g. ``"fp8"``).
+        kwargs: Type-specific keyword args forwarded to the factory.
+    """
+
+    type: str
+    kwargs: dict[str, object] = field(default_factory=dict)
 
 
 # ============================================================================

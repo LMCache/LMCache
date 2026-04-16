@@ -28,6 +28,7 @@ from lmcache.v1.distributed.config import (
 )
 from lmcache.v1.distributed.l2_adapters.config import L2AdaptersConfig
 from lmcache.v1.distributed.l2_adapters.fs_l2_adapter import FSL2AdapterConfig
+from lmcache.v1.distributed.serde import SerdeConfig
 from lmcache.v1.distributed.storage_manager import StorageManager
 
 pytestmark = pytest.mark.skipif(
@@ -109,7 +110,9 @@ class TestFp8SerdeFsRoundTrip:
             read_ahead_size=None,
             use_odirect=False,
         )
-        fs_cfg.serde_config = {"type": "fp8", "fp8_dtype": "float8_e4m3fn"}
+        fs_cfg.serde_config = SerdeConfig(
+            type="fp8", kwargs={"fp8_dtype": "float8_e4m3fn"}
+        )
 
         sm_cfg = StorageManagerConfig(
             l1_manager_config=L1ManagerConfig(
