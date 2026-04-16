@@ -71,9 +71,6 @@ PYBIND11_MODULE(c_ops, m) {
   m.def("alloc_numa_ptr", &alloc_numa_ptr,
         py::call_guard<py::gil_scoped_release>());
   m.def("free_numa_ptr", &free_numa_ptr);
-  m.def("alloc_hugepage_numa_ptr", &alloc_hugepage_numa_ptr,
-        py::call_guard<py::gil_scoped_release>());
-  m.def("free_hugepage_numa_ptr", &free_hugepage_numa_ptr);
   m.def("alloc_shm_pinned_ptr", &alloc_shm_pinned_ptr,
         py::call_guard<py::gil_scoped_release>());
   m.def("free_shm_pinned_ptr", &free_shm_pinned_ptr,

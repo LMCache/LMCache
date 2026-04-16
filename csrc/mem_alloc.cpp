@@ -118,21 +118,11 @@ uintptr_t alloc_numa_ptr(size_t size, int node) {
   return _alloc_numa_impl(size, node, false);
 }
 
-uintptr_t alloc_hugepage_numa_ptr(size_t size, int node) {
-  size = _align_hugepage(size);
-  return _alloc_numa_impl(size, node, true);
-}
-
 void free_numa_ptr(uintptr_t ptr, size_t size) {
   void* p = reinterpret_cast<void*>(ptr);
   if (munmap(p, size) != 0) {
     throw std::runtime_error(std::string("munmap failed: ") + strerror(errno));
   }
-}
-
-void free_hugepage_numa_ptr(uintptr_t ptr, size_t size) {
-  size = _align_hugepage(size);
-  free_numa_ptr(ptr, size);
 }
 
 static uintptr_t _alloc_pinned_numa_impl(size_t size, int node,

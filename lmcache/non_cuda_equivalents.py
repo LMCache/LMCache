@@ -414,22 +414,6 @@ def free_hugepage_pinned_numa_ptr(ptr: int, size: int = 0) -> None:
     free_pinned_numa_ptr(ptr, size)
 
 
-def alloc_hugepage_numa_ptr(size: int, numa_id: int = 0) -> int:
-    """Non-CUDA fallback for alloc_hugepage_numa_ptr (no hugepage support)."""
-    warnings.warn(
-        "Hugepages requested but not available on non-CUDA platforms; "
-        "falling back to regular allocation.",
-        RuntimeWarning,
-        stacklevel=2,
-    )
-    return alloc_numa_ptr(size, numa_id)
-
-
-def free_hugepage_numa_ptr(ptr: int, size: int = 0) -> None:
-    """Non-CUDA fallback for free_hugepage_numa_ptr (no hugepage support)."""
-    free_numa_ptr(ptr, size)
-
-
 def alloc_numa_ptr(size: int, numa_id: int = 0) -> int:
     """Non-CUDA equivalent of allocating numa memory and returning pointer
     to it. Note: Numa memory is not supported on non-CUDA."""
