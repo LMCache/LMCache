@@ -216,3 +216,19 @@ class LMCacheConnectorV1Dynamic(KVConnectorBase_V1):
             returned by the engine.
         """
         return self._lmcache_engine.request_finished(request, block_ids)
+
+    def request_finished_all_groups(
+        self,
+        request: "Request",
+        block_ids: tuple[list[int], ...],
+    ) -> tuple[bool, Optional[dict[str, Any]]]:
+        """Handle grouped request completion callbacks from vLLM.
+
+        Args:
+            request: The vLLM request that has finished.
+            block_ids: Request block ids grouped by KV cache group.
+
+        Returns:
+            The completion tuple returned by the LMCache adapter.
+        """
+        return self._lmcache_engine.request_finished_all_groups(request, block_ids)
