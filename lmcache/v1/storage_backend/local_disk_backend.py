@@ -337,6 +337,8 @@ class LocalDiskBackend(StorageBackendInterface):
         """Rebuild the in-memory disk index and cache policy state from sidecars."""
         recovered = 0
         total_bytes = 0
+        evicted_recovered = 0
+        evicted_bytes = 0
         recovered_entries: list[tuple[CacheEngineKey, DiskCacheMetadata]] = []
 
         for entry in os.scandir(self.path):
@@ -425,6 +427,36 @@ class LocalDiskBackend(StorageBackendInterface):
                 self.cache_policy.restore_on_recover(key, self.dict, metadata)
 
         if recovered:
+            while total_bytes > self.max_cache_size:
+                evict_keys = self.cache_policy.get_evict_candidates(
+                    self.dict,
+                    num_candidates=1,
+                )
+                if not evict_keys:
+                    logger.warning(
+                        "Recovered disk cache exceeds configured capacity "
+                        "(%d > %d bytes), but no eviction candidates were found.",
+                        total_bytes,
+                        self.max_cache_size,
+                    )
+                    break
+
+                for evict_key in evict_keys:
+                    metadata = self.dict.pop(evict_key, None)
+                    if metadata is None:
+                        continue
+
+                    total_bytes -= metadata.size
+                    evicted_recovered += 1
+                    evicted_bytes += metadata.size
+
+                    if os.path.exists(metadata.path):
+                        os.remove(metadata.path)
+
+                    meta_path = self._meta_path_from_data_path(metadata.path)
+                    if os.path.exists(meta_path):
+                        os.remove(meta_path)
+
             self.current_cache_size = total_bytes
             self.usage = total_bytes
             self.stats_monitor.update_local_storage_usage(self.usage)
@@ -434,6 +466,14 @@ class LocalDiskBackend(StorageBackendInterface):
                 total_bytes,
                 self.path,
             )
+            if evicted_recovered:
+                logger.info(
+                    "Evicted %d recovered disk cache entries (%d bytes) to fit "
+                    "the configured disk cache size (%d bytes)",
+                    evicted_recovered,
+                    evicted_bytes,
+                    self.max_cache_size,
+                )
 
     def contains(self, key: CacheEngineKey, pin: bool = False) -> bool:
         with self.disk_lock:
