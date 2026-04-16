@@ -62,29 +62,52 @@ for i in $(seq 1 "$MAX_AUTO_INSTALL"); do
     uv pip install "$mod"
 done
 
-echo "--- :wrench: Installing CUDA 12.8 nvcc for LMCache build"
-# The base image ships CUDA 13 (for nvcc 13), but vLLM nightly's torch wheel
-# is built against CUDA 12.8. torch.utils.cpp_extension._check_cuda_version
-# refuses to compile LMCache's C++/CUDA extension on a major-version
-# mismatch, and the pip-published `nvidia-cuda-nvcc-cu12` wheel only ships
-# ptxas + nvvm (no nvcc driver). Install just `cuda-compiler-12-8` from
-# NVIDIA's apt repo (~100MB) alongside the existing CUDA 13 toolchain.
-# Runtime still uses the libcudart12 already present in the base image.
-if [[ ! -x /usr/local/cuda-12.8/bin/nvcc ]]; then
-    apt-get update -y
-    apt-get install -y --no-install-recommends cuda-compiler-12-8
+echo "--- :wrench: Aligning nvcc with torch's reported CUDA version"
+# The base image's nvcc major version and vLLM nightly's torch CUDA major
+# version have drifted apart before (image bumped to CUDA 13 while torch
+# shipped cu128, then torch rolled to cu130). If they mismatch,
+# torch.utils.cpp_extension._check_cuda_version refuses to compile
+# LMCache's CUDAExtension. Detect the mismatch and install the matching
+# `cuda-compiler-<major>-<minor>` package via NVIDIA's apt repo so the
+# build gets a nvcc whose major version lines up with torch. No-op when
+# they already agree.
+read -r TORCH_CUDA TORCH_CUDA_MAJOR TORCH_CUDA_MINOR < <(python -c "
+import torch
+v = torch.version.cuda or ''
+parts = v.split('.') + ['0']
+print(v, parts[0], parts[1])
+")
+SYS_NVCC_MAJOR=$(nvcc --version 2>/dev/null | sed -n 's/.*release \([0-9]\+\).*/\1/p' | head -1)
+echo "torch.version.cuda=${TORCH_CUDA}; system nvcc major=${SYS_NVCC_MAJOR:-none}"
+
+if [[ -z "$TORCH_CUDA" ]]; then
+    echo "torch has no CUDA version (CPU-only build?); skipping nvcc alignment"
+    CUDA_HOME_BUILD=""
+elif [[ "$TORCH_CUDA_MAJOR" == "$SYS_NVCC_MAJOR" ]]; then
+    echo "System nvcc major matches torch; using system nvcc for LMCache build"
+    CUDA_HOME_BUILD=""
+else
+    APT_PKG="cuda-compiler-${TORCH_CUDA_MAJOR}-${TORCH_CUDA_MINOR}"
+    CUDA_HOME_BUILD="/usr/local/cuda-${TORCH_CUDA_MAJOR}.${TORCH_CUDA_MINOR}"
+    echo "Major version mismatch; installing ${APT_PKG} to get matching nvcc at ${CUDA_HOME_BUILD}"
+    if [[ ! -x "${CUDA_HOME_BUILD}/bin/nvcc" ]]; then
+        apt-get update -y
+        apt-get install -y --no-install-recommends "$APT_PKG"
+    fi
+    if [[ ! -x "${CUDA_HOME_BUILD}/bin/nvcc" ]]; then
+        echo "ERROR: nvcc still missing at ${CUDA_HOME_BUILD}/bin/nvcc after apt install" >&2
+        ls /usr/local/ >&2 || true
+        exit 1
+    fi
+    "${CUDA_HOME_BUILD}/bin/nvcc" --version
 fi
-if [[ ! -x /usr/local/cuda-12.8/bin/nvcc ]]; then
-    echo "ERROR: nvcc still missing at /usr/local/cuda-12.8/bin/nvcc after apt install" >&2
-    ls /usr/local/ >&2 || true
-    exit 1
-fi
-CUDA_HOME_CU12=/usr/local/cuda-12.8
-echo "Using CUDA_HOME=${CUDA_HOME_CU12} for LMCache build"
-"${CUDA_HOME_CU12}/bin/nvcc" --version
 
 echo "--- :python: Installing LMCache from source"
-CUDA_HOME="$CUDA_HOME_CU12" uv pip install -e . --no-build-isolation
+if [[ -n "$CUDA_HOME_BUILD" ]]; then
+    CUDA_HOME="$CUDA_HOME_BUILD" uv pip install -e . --no-build-isolation
+else
+    uv pip install -e . --no-build-isolation
+fi
 
 echo "--- :white_check_mark: Environment ready"
 python -c "import vllm; import lmcache; print(f'vLLM={vllm.__version__}, LMCache installed from source with no build isolation')"
