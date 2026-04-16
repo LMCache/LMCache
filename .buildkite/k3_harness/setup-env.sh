@@ -37,11 +37,30 @@ else
         --index-strategy unsafe-best-match
 fi
 
-# Workaround: recent vLLM nightlies eagerly `import pandas` in
-# vllm/_aiter_ops.py without declaring pandas as a dependency, which breaks
-# `vllm serve` in our CI venv. Install pandas explicitly until vLLM either
-# makes the import lazy or adds pandas to their declared deps.
-uv pip install pandas
+# vLLM nightlies periodically add eager imports of packages that aren't in
+# their declared deps (e.g. `pandas` from vllm/_aiter_ops.py). Probe-import
+# vllm's CLI entry point and auto-install any ModuleNotFoundError modules
+# so the job keeps going. Capped to avoid infinite loops; every auto-install
+# is logged so the drift is visible in the build output.
+MAX_AUTO_INSTALL=5
+for i in $(seq 1 "$MAX_AUTO_INSTALL"); do
+    if err=$(python -c "from vllm.entrypoints.cli.main import main" 2>&1); then
+        break
+    fi
+    mod=$(printf '%s\n' "$err" | sed -n "s/.*No module named '\([^']*\)'.*/\1/p" | head -1)
+    if [[ -z "$mod" ]]; then
+        echo "vLLM import failed with a non-ModuleNotFoundError:" >&2
+        echo "$err" >&2
+        exit 1
+    fi
+    if [[ "$i" == "$MAX_AUTO_INSTALL" ]]; then
+        echo "Hit $MAX_AUTO_INSTALL auto-install retries; last missing module: $mod" >&2
+        echo "$err" >&2
+        exit 1
+    fi
+    echo "Auto-installing missing vLLM runtime dep: $mod"
+    uv pip install "$mod"
+done
 
 echo "--- :python: Installing LMCache from source"
 uv pip install -e . --no-build-isolation
