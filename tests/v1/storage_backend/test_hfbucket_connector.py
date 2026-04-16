@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import List
 import asyncio
 
 # Third Party
@@ -56,11 +58,11 @@ class FakeBucketClient:
         """Return a trivial bucket info payload."""
         return {"id": bucket_id}
 
-    def get_paths_info(self, bucket_id: str, paths: list[str]) -> list[object]:
+    def get_paths_info(self, bucket_id: str, paths: Sequence[str]) -> List[object]:
         """Return exact metadata for the requested paths."""
         del bucket_id
         self.info_paths_calls.append(tuple(paths))
-        return [
+        entries: List[object] = [
             FakeBucketEntry(
                 path=path,
                 size=len(self.storage[path]) if path in self.storage else 0,
@@ -68,12 +70,13 @@ class FakeBucketClient:
             )
             for path in paths
         ]
+        return entries
 
-    def list_tree(self, bucket_id: str, prefix: str) -> list[object]:
+    def list_tree(self, bucket_id: str, prefix: str) -> List[object]:
         """List stored objects under the requested prefix."""
         del bucket_id
         prefix_with_separator = f"{prefix}/" if prefix else ""
-        entries = []
+        entries: List[object] = []
         for path, payload in sorted(self.storage.items()):
             if prefix and path != prefix and not path.startswith(prefix_with_separator):
                 continue
@@ -83,7 +86,7 @@ class FakeBucketClient:
     def upload_files(
         self,
         bucket_id: str,
-        add: list[tuple[bytes, str]],
+        add: Sequence[tuple[bytes, str]],
     ) -> None:
         """Store uploaded bytes under their remote object paths."""
         del bucket_id
@@ -95,7 +98,7 @@ class FakeBucketClient:
     def download_files(
         self,
         bucket_id: str,
-        files: list[tuple[str, str]],
+        files: Sequence[tuple[str, str]],
     ) -> None:
         """Write stored objects to the requested local paths."""
         del bucket_id
@@ -111,7 +114,7 @@ class FakeBucketClient:
     def delete_files(
         self,
         bucket_id: str,
-        delete: list[str],
+        delete: Sequence[str],
     ) -> None:
         """Remove stored objects."""
         del bucket_id
@@ -216,7 +219,7 @@ def create_full_chunk_memory_obj(
         MemoryFormat.KV_2LTD,
     )
     assert memory_obj is not None
-    byte_buffer = memory_obj.byte_array.cast("B")
+    byte_buffer = memoryview(memory_obj.byte_array).cast("B")
     payload = bytes([fill_byte]) * len(byte_buffer)
     byte_buffer[:] = payload
     return memory_obj, payload
@@ -224,7 +227,7 @@ def create_full_chunk_memory_obj(
 
 def memory_obj_to_bytes(memory_obj: MemoryObj) -> bytes:
     """Convert a test memory object to raw bytes."""
-    return memory_obj.byte_array.cast("B").tobytes()
+    return memoryview(memory_obj.byte_array).cast("B").tobytes()
 
 
 @pytest.mark.parametrize(
