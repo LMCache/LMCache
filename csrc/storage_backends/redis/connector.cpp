@@ -338,6 +338,32 @@ bool RedisConnector::do_single_exists(WorkerConn& conn,
   }
 }
 
+// RESP DEL
+bool RedisConnector::do_single_delete(WorkerConn& conn,
+                                      const std::string& key) {
+  // build key header using reusable buffer
+  const std::string& key_header = conn.make_key_header(key);
+
+  // send DEL cmd
+  conn.send_multipart({{conn.del_prefix.data(), conn.del_prefix.size()},
+                       {key_header.data(), key_header.size()}});
+
+  // parse response (either :0\r\n or :1\r\n, same format as EXISTS)
+  char response[WorkerConn::exists_response_len];
+  conn.recv_exactly(response, WorkerConn::exists_response_len);
+
+  if (std::memcmp(response, WorkerConn::exists_one.data(),
+                  WorkerConn::exists_response_len) == 0) {
+    return true;  // key was deleted
+  } else if (std::memcmp(response, WorkerConn::exists_zero.data(),
+                         WorkerConn::exists_response_len) == 0) {
+    return false;  // key did not exist
+  } else {
+    throw std::runtime_error(
+        "DEL returned invalid response that wasn't :0\r\n or :1\r\n");
+  }
+}
+
 void RedisConnector::shutdown_connections() {
   std::lock_guard<std::mutex> lk(worker_fds_mu_);
   for (int fd : worker_fds_) {

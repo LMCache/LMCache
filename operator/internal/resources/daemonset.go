@@ -72,6 +72,37 @@ func BuildDaemonSet(engine *lmcachev1alpha1.LMCacheEngine) *appsv1.DaemonSet {
 			Value: "all",
 		},
 	)
+	// Inject RESP auth credentials from Secret as env vars so they
+	// don't appear in container args or kubectl describe output.
+	// The DaemonSet references the local (same-namespace) managed copy
+	// created by the controller via reconcileRESPAuthSecret.
+	if spec.L2Backend != nil && spec.L2Backend.RESP != nil && spec.L2Backend.RESP.AuthSecretRef != nil {
+		secretName := RESPAuthSecretName(engine.Name)
+		optional := true
+		envVars = append(envVars,
+			corev1.EnvVar{
+				Name: "LMCACHE_RESP_PASSWORD",
+				ValueFrom: &corev1.EnvVarSource{
+					SecretKeyRef: &corev1.SecretKeySelector{
+						LocalObjectReference: corev1.LocalObjectReference{Name: secretName},
+						Key:                  "password",
+					},
+				},
+			},
+			corev1.EnvVar{
+				// Optional: if the managed secret has no "username" key
+				// (password-only auth), this env var is simply not set.
+				Name: "LMCACHE_RESP_USERNAME",
+				ValueFrom: &corev1.EnvVarSource{
+					SecretKeyRef: &corev1.SecretKeySelector{
+						LocalObjectReference: corev1.LocalObjectReference{Name: secretName},
+						Key:                  "username",
+						Optional:             &optional,
+					},
+				},
+			},
+		)
+	}
 	envVars = append(envVars, spec.Env...)
 
 	// No emptyDir /dev/shm mount — hostIPC: true exposes the host's /dev/shm
@@ -80,7 +111,13 @@ func BuildDaemonSet(engine *lmcachev1alpha1.LMCacheEngine) *appsv1.DaemonSet {
 	volumes := append([]corev1.Volume{}, spec.Volumes...)
 	volumeMounts := append([]corev1.VolumeMount{}, spec.VolumeMounts...)
 
-	// Build container args
+	// Build container args. Auth credentials are handled via env vars
+	// (LMCACHE_RESP_USERNAME / LMCACHE_RESP_PASSWORD) injected above,
+	// so no shell wrapper is needed.
+	containerCommand := []string{
+		"/opt/venv/bin/lmcache",
+		"server",
+	}
 	containerArgs := BuildContainerArgs(spec)
 
 	// Probes
@@ -112,10 +149,16 @@ func BuildDaemonSet(engine *lmcachev1alpha1.LMCacheEngine) *appsv1.DaemonSet {
 	}
 
 	// Container ports
+	httpPort := getHTTPPort(spec)
 	containerPorts := []corev1.ContainerPort{
 		{
 			Name:          "server",
 			ContainerPort: serverPort,
+			Protocol:      corev1.ProtocolTCP,
+		},
+		{
+			Name:          "http",
+			ContainerPort: httpPort,
 			Protocol:      corev1.ProtocolTCP,
 		},
 	}
@@ -164,15 +207,11 @@ func BuildDaemonSet(engine *lmcachev1alpha1.LMCacheEngine) *appsv1.DaemonSet {
 							Name:            "lmcache",
 							Image:           fmt.Sprintf("%s:%s", imgRepo, imgTag),
 							ImagePullPolicy: imgPullPolicy,
-							Command: []string{
-								"/opt/venv/bin/python3",
-								"-m",
-								"lmcache.v1.multiprocess.server",
-							},
-							Args:      containerArgs,
-							Ports:     containerPorts,
-							Env:       envVars,
-							Resources: ComputeResources(spec),
+							Command:         containerCommand,
+							Args:            containerArgs,
+							Ports:           containerPorts,
+							Env:             envVars,
+							Resources:       ComputeResources(spec),
 							SecurityContext: &corev1.SecurityContext{
 								Privileged: &privileged,
 							},

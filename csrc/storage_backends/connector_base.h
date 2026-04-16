@@ -25,6 +25,9 @@ class:
 - 3. do_single_set()
 - 4. do_single_exists()
 
+optionally override do_single_delete() to support eviction (default returns
+false for all keys).
+
 see the RedisConnector (csrc/redis/) implementing the RESP2 protocol over TCP
 for an example
 */
@@ -130,6 +133,39 @@ class ConnectorBase : public IStorageConnector {
     return batch_future_id;
   }
 
+  uint64_t submit_batch_delete(const std::vector<std::string>& keys) override {
+    if (keys.empty()) {
+      throw std::runtime_error("keys list is empty");
+    }
+
+    size_t num_items = keys.size();
+    auto [batch_future_id, batch_state, num_tiles, tile_size] =
+        prepare_batch_operation(num_items, Op::BATCH_TILE_DELETE);
+
+    // pre-allocate per-key results (1 = deleted, 0 = not found)
+    batch_state->per_key_results.assign(num_items, 0);
+
+    // fan out work to threads
+    for (size_t tile_idx = 0; tile_idx < num_tiles; ++tile_idx) {
+      size_t start = tile_idx * tile_size;
+      size_t end = std::min(start + tile_size, num_items);
+
+      Request tile_req;
+      tile_req.op = Op::BATCH_TILE_DELETE;
+      tile_req.future_id = batch_future_id;
+      tile_req.batch = batch_state;
+      tile_req.start_idx = start;
+
+      for (size_t i = start; i < end; ++i) {
+        tile_req.keys.push_back(keys[i]);
+      }
+
+      enqueue_request(std::move(tile_req));
+    }
+
+    return batch_future_id;
+  }
+
   std::vector<Completion> drain_completions() override {
     // Drain the eventfd that triggered this drain_completions callback
     drain_eventfd_();
@@ -216,6 +252,11 @@ class ConnectorBase : public IStorageConnector {
                              size_t chunk_size) = 0;
   virtual bool do_single_exists(ConnectionType& conn,
                                 const std::string& key) = 0;
+  virtual bool do_single_delete(ConnectionType& conn, const std::string& key) {
+    (void)conn;
+    (void)key;
+    return false;  // no-op default for backward compat with plugins
+  }
   virtual void shutdown_connections() {}
 
   bool is_stopping() const { return stop_.load(std::memory_order_acquire); }
@@ -393,6 +434,23 @@ class ConnectorBase : public IStorageConnector {
               }
               comp.ok = true;
               break;
+
+            case Op::BATCH_TILE_DELETE:
+              for (size_t i = 0; i < req.keys.size(); ++i) {
+                try {
+                  bool deleted = do_single_delete(conn, req.keys[i]);
+                  req.batch->per_key_results[req.start_idx + i] =
+                      deleted ? 1 : 0;
+                } catch (const std::exception& e) {
+                  // Per-key error tolerance: record failure
+                  // but continue processing remaining keys
+                  req.batch->per_key_results[req.start_idx + i] = 0;
+                  fprintf(stderr, "[LMCache DELETE] key %s failed: %s\n",
+                          req.keys[i].c_str(), e.what());
+                }
+              }
+              comp.ok = true;
+              break;
           }
         } catch (const std::exception& e) {
           comp.ok = false;
@@ -438,7 +496,8 @@ class ConnectorBase : public IStorageConnector {
       }
       // for batch exists and batch get, move per-key results
       if (req.batch->batch_op == Op::BATCH_TILE_EXISTS ||
-          req.batch->batch_op == Op::BATCH_TILE_GET) {
+          req.batch->batch_op == Op::BATCH_TILE_GET ||
+          req.batch->batch_op == Op::BATCH_TILE_DELETE) {
         batch_comp.result_bytes = std::move(req.batch->per_key_results);
       }
       push_completion(std::move(batch_comp));
