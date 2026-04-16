@@ -1998,8 +1998,8 @@ class TRTLLMGPUConnector(GPUConnectorInterface):
         direction: "lmc_ops.TransferDirection",
         stream: torch.cuda.Stream,
     ) -> None:
-        chunk_block_ids_gpu = self._stage_block_ids(block_ids)
         with torch.cuda.stream(stream):
+            chunk_block_ids_gpu = self._stage_block_ids(block_ids)
             lmc_ops.multi_layer_block_kv_transfer(
                 self.paged_buffer_ptrs,
                 [tensor_ptr],

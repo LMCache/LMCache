@@ -376,8 +376,6 @@ class LMCacheMPKvConnectorWorker(KvCacheConnectorWorker):
         try:
             future.result(timeout=self._mq_timeout)
             self._registered = True
-            self._tokens_per_block = tokens_per_block
-            self._blocks_per_chunk = self._chunk_size // tokens_per_block
             logger.info(
                 "LMCache MP worker: registered KV caches "
                 "(tensor_shape=%s, NH=%d, BS=%d, HS=%d)",
