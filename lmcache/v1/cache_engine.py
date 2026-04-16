@@ -1792,14 +1792,6 @@ class LMCacheEngine:
         """
         return self.save_only_first_rank and not self.metadata.is_first_rank()
 
-    def _is_async_pd_backend(self) -> bool:
-        """Check if the PD backend is the async variant.
-
-        :return: True when PD is enabled and ``pd_backend_mode`` is ``"async"``.
-        :rtype: bool
-        """
-        return self.config.enable_pd and self.config.pd_backend_mode == "async"
-
     def _is_sync_pd_backend(self) -> bool:
         """Check if the PD backend is the sync variant.
 

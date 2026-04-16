@@ -628,7 +628,8 @@ def _validate_config(self):
         assert self.enable_p2p is False, "PD only supports enable_p2p=False"
         if self.pd_backend_mode not in ("sync", "async"):
             raise ValueError(
-                f"pd_backend_mode must be 'sync' or 'async', got {self.pd_backend_mode!r}"
+                f"pd_backend_mode must be 'sync' or 'async', "
+                f"got {self.pd_backend_mode!r}"
             )
 
         # PD requires save_unfull_chunk=True for complete KV cache transfer

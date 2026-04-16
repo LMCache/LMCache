@@ -205,7 +205,6 @@ class PDBackendAsync(AllocatorBackendInterface):
         self.memory_allocator = self.initialize_allocator(config, metadata)
         assert isinstance(self.memory_allocator, PagedCpuGpuMemoryAllocator)
 
-        # TODO(Jiayi): add async zmq context if we want better asynchrony.
         self.zmq_context = get_zmq_context(use_asyncio=False)
         self.running_threads: list[threading.Thread] = []
         self.side_channels: list[zmq.Socket] = []
@@ -428,9 +427,19 @@ class PDBackendAsync(AllocatorBackendInterface):
         return paged_mem_allocator
 
     def get_memory_allocator(self) -> PagedCpuGpuMemoryAllocator:
+        """Return the underlying paged CPU/GPU memory allocator.
+
+        :return: The memory allocator instance used by this backend.
+        :rtype: PagedCpuGpuMemoryAllocator
+        """
         return self.memory_allocator
 
     def get_allocator_backend(self):
+        """Return the allocator backend instance (self).
+
+        :return: This backend instance, which implements AllocatorBackendInterface.
+        :rtype: PDBackendAsync
+        """
         return self
 
     def allocate(
@@ -441,6 +450,25 @@ class PDBackendAsync(AllocatorBackendInterface):
         eviction: bool = True,
         busy_loop: bool = True,
     ) -> Optional[MemoryObj]:
+        """Allocate a single memory object from the PD buffer.
+
+        For the sender role, this method enforces staging buffer flow control:
+        it blocks until inflight chunks drop below the threshold, then attempts
+        allocation with a configurable timeout. For the receiver role, allocation
+        is delegated directly to the underlying memory allocator.
+
+        Note: ``eviction`` and ``busy_loop`` parameters are accepted for interface
+        compatibility but are not used in the PD backend.
+
+        :param shapes: Shape(s) of the KV tensors to allocate.
+        :param dtypes: Data type(s) of the KV tensors.
+        :param fmt: Memory format, defaults to KV_2LTD.
+        :param eviction: Unused; kept for interface compatibility.
+        :param busy_loop: Unused; kept for interface compatibility.
+        :return: The allocated MemoryObj, or None if allocation failed or the
+            backend is shutting down.
+        :rtype: Optional[MemoryObj]
+        """
         if fmt is None:
             fmt = MemoryFormat.KV_2LTD
         # NOTE: no eviction and busy_loop in PD
@@ -527,7 +555,6 @@ class PDBackendAsync(AllocatorBackendInterface):
                 shapes, dtypes, fmt=fmt, allocator_type=alloc_type
             )
 
-    # TODO(Jiayi): Please implement batched allocate to reduce memory
     # allocation overhead.
     def batched_allocate(
         self,
@@ -538,8 +565,31 @@ class PDBackendAsync(AllocatorBackendInterface):
         eviction: bool = True,
         busy_loop: bool = True,
     ):
+        """Allocate a batch of memory objects from the PD buffer.
+
+        Delegates directly to the underlying memory allocator without sender
+        flow control. Currently a thin wrapper; see the TODO for planned
+        improvements.
+
+        :param shapes: Shape(s) of the KV tensors to allocate.
+        :param dtypes: Data type(s) of the KV tensors.
+        :param batch_size: Number of memory objects to allocate.
+        :param fmt: Memory format, defaults to KV_2LTD.
+        :param eviction: Unused; kept for interface compatibility.
+        :param busy_loop: Unused; kept for interface compatibility.
+        :return: A list of allocated MemoryObj instances, or None for slots
+            that failed to allocate.
+        :rtype: list[Optional[MemoryObj]]
+        """
         if fmt is None:
             fmt = MemoryFormat.KV_2LTD
+
+        if self.pd_config.role == "sender":
+            return [
+                self.allocate(shapes, dtypes, fmt, eviction, busy_loop)
+                for _ in range(batch_size)
+            ]
+
         alloc_type = "cpu" if self.corrected_device == "cpu" else "gpu"
         return self.memory_allocator.batched_allocate(
             shapes, dtypes, batch_size, fmt, allocator_type=alloc_type
@@ -548,6 +598,15 @@ class PDBackendAsync(AllocatorBackendInterface):
     # NOTE(Jiayi): If two requests have overlapped keys, will
     # the later one cause any problems here?
     def contains(self, key: CacheEngineKey, pin: bool = False) -> bool:
+        """Check whether the given key exists in the local data store.
+
+        :param key: The cache engine key to look up.
+        :param pin: If True and the key exists, increment the memory object's
+            reference count to prevent it from being freed.
+        :return: True if the key is present, False otherwise.
+        :rtype: bool
+        :raises AssertionError: If ``key`` is not a CacheEngineKey instance.
+        """
         assert isinstance(key, CacheEngineKey)
         with self.data_lock:
             if mem_obj := self.data.get(key, None):
@@ -557,6 +616,15 @@ class PDBackendAsync(AllocatorBackendInterface):
             return False
 
     def exists_in_put_tasks(self, key: CacheEngineKey) -> bool:
+        """Check whether the key is pending in any in-flight put task.
+
+        PDBackendAsync does not maintain a put task queue, so this always
+        returns False.
+
+        :param key: The cache engine key to check.
+        :return: Always False.
+        :rtype: bool
+        """
         return False
 
     ############################################################
@@ -571,6 +639,7 @@ class PDBackendAsync(AllocatorBackendInterface):
             zmq.PUSH,
             "connect",
         )
+        self._proxy_send_lock = asyncio.Lock()
 
     def _ensure_peer_connection(
         self,
@@ -764,10 +833,11 @@ class PDBackendAsync(AllocatorBackendInterface):
                 try:
                     notif_msg = ProxyNotif(req_id=transfer_spec.req_id)
                     notif_msg_bytes = msgspec.msgpack.encode(notif_msg)
-                    loop = asyncio.get_running_loop()
-                    await loop.run_in_executor(
-                        None, self.proxy_side_channel.send, notif_msg_bytes
-                    )
+                    async with self._proxy_send_lock:
+                        loop = asyncio.get_running_loop()
+                        await loop.run_in_executor(
+                            None, self.proxy_side_channel.send, notif_msg_bytes
+                        )
                 except Exception as e:
                     logger.error(
                         "Failed to send ProxyNotif for req %s: %s",
@@ -783,8 +853,9 @@ class PDBackendAsync(AllocatorBackendInterface):
                         logger.warning(
                             f"on_complete_callback failed for key {key}: {e}"
                         )
-        except Exception as e:
-            logger.error("Async transfer task failed: %s", str(e))
+        except BaseException as e:
+            if not isinstance(e, asyncio.CancelledError):
+                logger.error("Async transfer task failed: %s", str(e))
             # Release ref counts on error to avoid leaks (only those not yet released)
             for idx, mem_obj in enumerate(memory_objs):
                 if idx not in completed_indexes:
@@ -792,6 +863,8 @@ class PDBackendAsync(AllocatorBackendInterface):
                         mem_obj.ref_count_down()
                     except Exception:
                         pass
+            if isinstance(e, asyncio.CancelledError):
+                raise
         finally:
             # Release sender staging buffer slots so that allocate() waiters
             # can proceed.  num_chunks equals the number of memory objects that
@@ -1039,32 +1112,44 @@ class PDBackendAsync(AllocatorBackendInterface):
         for mem_obj in memory_objs:
             mem_obj.ref_count_up()
 
-        receiver_init_port = transfer_spec.receiver_init_port[self.tp_rank]
-        receiver_alloc_port = transfer_spec.receiver_alloc_port[self.tp_rank]
-        receiver_id = transfer_spec.receiver_host + str(receiver_init_port)
-        receiver_host = transfer_spec.receiver_host
+        try:
+            receiver_init_port = transfer_spec.receiver_init_port[self.tp_rank]
+            receiver_alloc_port = transfer_spec.receiver_alloc_port[self.tp_rank]
+            receiver_id = transfer_spec.receiver_host + str(receiver_init_port)
+            receiver_host = transfer_spec.receiver_host
 
-        self._ensure_peer_connection(
-            receiver_id=receiver_id,
-            receiver_host=receiver_host,
-            receiver_init_port=receiver_init_port,
-            receiver_alloc_port=receiver_alloc_port,
-        )
-
-        # Schedule via _enqueue_transfer so the item is placed on the
-        # per-request asyncio.Queue.  The dedicated consumer coroutine
-        # processes items sequentially, guaranteeing in-order RDMA writes and
-        # sending ProxyNotif only after all chunks are complete.
-        asyncio.run_coroutine_threadsafe(
-            self._enqueue_transfer(
-                keys=list(keys),
-                memory_objs=list(memory_objs),
+            self._ensure_peer_connection(
                 receiver_id=receiver_id,
-                on_complete_callback=on_complete_callback,
-                transfer_spec=transfer_spec,
-            ),
-            self._sender_loop,
-        )
+                receiver_host=receiver_host,
+                receiver_init_port=receiver_init_port,
+                receiver_alloc_port=receiver_alloc_port,
+            )
+
+            # Schedule via _enqueue_transfer so the item is placed on the
+            # per-request asyncio.Queue.  The dedicated consumer coroutine
+            # processes items sequentially, guaranteeing in-order RDMA writes and
+            # sending ProxyNotif only after all chunks are complete.
+            asyncio.run_coroutine_threadsafe(
+                self._enqueue_transfer(
+                    keys=list(keys),
+                    memory_objs=list(memory_objs),
+                    receiver_id=receiver_id,
+                    on_complete_callback=on_complete_callback,
+                    transfer_spec=transfer_spec,
+                ),
+                self._sender_loop,
+            )
+        except Exception as e:
+            # Roll back ref counts to prevent memory leak
+            for mem_obj in memory_objs:
+                try:
+                    mem_obj.ref_count_down()
+                except Exception:
+                    pass
+            logger.error(
+                "batched_submit_put_task failed, ref counts rolled back: %s", e
+            )
+            raise
 
     ############################################################
     # Prefiller functions end
@@ -1360,7 +1445,7 @@ class PDBackendAsync(AllocatorBackendInterface):
                 async with self._inflight_condition:
                     self._inflight_chunks += 1
                 current_batch_keys.append(key_str)
-        except Exception:
+        except BaseException:
             # Rollback: remove already-allocated chunks from this batch
             # to prevent memory and inflight counter leaks.
             for rollback_key_str in current_batch_keys:
@@ -1395,6 +1480,15 @@ class PDBackendAsync(AllocatorBackendInterface):
         key: CacheEngineKey,
         mem_obj: MemoryObj,
     ):
+        """Store a memory object in the local data dictionary.
+
+        If a memory object already exists for the given key, the old object is
+        released (ref_count_down) and the inflight counter is decremented on
+        the receiver side to prevent memory leaks.
+
+        :param key: The cache engine key to associate with the memory object.
+        :param mem_obj: The memory object to store.
+        """
         with self.data_lock:
             old = self.data.pop(key, None)
             if old is not None:
@@ -1412,6 +1506,16 @@ class PDBackendAsync(AllocatorBackendInterface):
             self.data[key] = mem_obj
 
     def get_blocking(self, key: CacheEngineKey) -> Optional[MemoryObj]:
+        """Retrieve the memory object for the given key (blocking).
+
+        Since PDBackendAsync uses push-based transfer, the key is expected to
+        already be present in local data.
+
+        :param key: The cache engine key to retrieve.
+        :return: The corresponding MemoryObj.
+        :rtype: MemoryObj
+        :raises AssertionError: If the key is not found in local data.
+        """
         with self.data_lock:
             # NOTE(Jiayi): we assume that the key must be in local data
             # because we are using a push-based transfer
@@ -1609,7 +1713,25 @@ class PDBackendAsync(AllocatorBackendInterface):
         self.zmq_context.term()
 
     def pin(self, key: CacheEngineKey) -> bool:
+        """Pin the memory object for the given key to prevent eviction.
+
+        PDBackendAsync has no eviction mechanism, so this is a no-op that
+        always returns True.
+
+        :param key: The cache engine key to pin.
+        :return: Always True.
+        :rtype: bool
+        """
         return True
 
     def unpin(self, key: CacheEngineKey) -> bool:
+        """Unpin the memory object for the given key.
+
+        PDBackendAsync has no eviction mechanism, so this is a no-op that
+        always returns True.
+
+        :param key: The cache engine key to unpin.
+        :return: Always True.
+        :rtype: bool
+        """
         return True
