@@ -70,8 +70,16 @@ echo "--- :python: Installing LMCache from source"
 # it for the editable-install build step only; runtime still uses the
 # libcudart12 already present in the base image.
 uv pip install nvidia-cuda-nvcc-cu12 nvidia-cuda-cccl-cu12 nvidia-cuda-runtime-cu12
-CUDA_HOME_CU12=$(python -c "import os, nvidia.cuda_nvcc as m; print(os.path.dirname(m.__file__))")
+# nvidia.cuda_nvcc is a PEP 420 namespace package (no __init__.py), so
+# __file__ is None — use __path__[0] to resolve its installed directory.
+CUDA_HOME_CU12=$(python -c "import nvidia.cuda_nvcc as m; print(m.__path__[0])")
+if [[ ! -x "${CUDA_HOME_CU12}/bin/nvcc" ]]; then
+    echo "ERROR: expected nvcc at ${CUDA_HOME_CU12}/bin/nvcc but it's missing; layout was:" >&2
+    ls -la "${CUDA_HOME_CU12}" >&2 || true
+    exit 1
+fi
 echo "Using CUDA_HOME=${CUDA_HOME_CU12} for LMCache build"
+"${CUDA_HOME_CU12}/bin/nvcc" --version || true
 CUDA_HOME="$CUDA_HOME_CU12" uv pip install -e . --no-build-isolation
 
 echo "--- :white_check_mark: Environment ready"
