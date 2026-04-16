@@ -68,9 +68,6 @@
 # CLI
 /lmcache/cli/                          @KuntaiDu @deng451e @royyhuang @ApostaC @sammshen
 
-# Server
-/lmcache/server/                       @ApostaC @YaoJiayi @KuntaiDu
-
 # Documentation
 /docs/source/mp/                       @ApostaC @YaoJiayi @KuntaiDu @royyhuang
 /docs/source/kv_cache/                 @sammshen @ApostaC

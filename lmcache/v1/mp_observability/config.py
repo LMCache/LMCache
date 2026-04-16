@@ -287,9 +287,10 @@ def init_observability(obs_config: ObservabilityConfig) -> EventBus:
         # First Party
         from lmcache.v1.mp_observability.subscribers.tracing import (
             MPServerTracingSubscriber,
+            get_span_registry,
         )
 
-        bus.register_subscriber(MPServerTracingSubscriber())
+        bus.register_subscriber(MPServerTracingSubscriber(get_span_registry()))
 
     # Lookup hash file logging (independent of the logging_enabled flag —
     # it has its own enable gate via output_dir).

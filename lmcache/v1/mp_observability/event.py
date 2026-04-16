@@ -53,6 +53,12 @@ class EventType(Enum):
     # Chunk hash logging events
     MP_LOOKUP = "mp.lookup"
 
+    # MP Server lifecycle sentinels (CPU-synchronous)
+    MP_REQUEST_START = "mp.request.start"
+    MP_RETRIEVE_SUBMITTED = "mp.retrieve.submitted"
+    MP_STORE_SUBMITTED = "mp.store.submitted"
+    MP_SESSION_END = "mp.session.end"
+
     # vLLM block allocation events
     MP_VLLM_BLOCK_ALLOCATION = "mp.vllm.block_allocation"
 
@@ -71,7 +77,8 @@ class Event:
             drain thread processes the event.  For CUDA host-callback events
             this captures GPU-accurate timing.
         metadata: Flat key-value payload.  Contents depend on ``event_type``;
-            see the metadata contracts in DESIGN.md Section 2.7.
+            see the metadata contracts in
+            ``docs/design/v1/mp_observability/event-bus.md`` Section 2.7.
         session_id: Caller-provided ID for correlating start/end pairs.
     """
 

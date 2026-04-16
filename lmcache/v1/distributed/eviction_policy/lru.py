@@ -123,6 +123,7 @@ class LRUEvictionPolicy(EvictionPolicy):
         self,
         expected_ratio: float,
         key_eligible_filter: Callable[[ObjectKey], bool] | None = None,
+        cache_salt: str | None = None,
     ) -> list[EvictionAction]:
         """
         Get the eviction actions to evict objects from L1 cache.
@@ -137,6 +138,7 @@ class LRUEvictionPolicy(EvictionPolicy):
                 provided, keys for which the filter returns False will be
                 skipped. This is useful for skipping locked keys that
                 cannot be deleted.
+            cache_salt: Ignored by LRU policy (not user-level).
 
         Returns:
             list[EvictionAction]: The eviction actions to perform. Each

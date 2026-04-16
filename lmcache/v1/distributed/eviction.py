@@ -27,6 +27,20 @@ class EvictionPolicy:
     L1EvictionPolicy and L2EvictionPolicy respectively.
     """
 
+    @property
+    def support_isolation(self) -> bool:
+        """Whether this policy supports isolation eviction (e.g., per user isolation).
+
+        When True, the eviction controller checks isolated usage (e.g., per user usage)
+        and passes ``cache_salt`` to ``get_eviction_actions()`` to scope
+        eviction to specific cache_salt. When False, the controller uses
+        aggregate usage only.
+
+        Default is False. Subclasses that support isolated eviction.
+        (e.g., ``IsolatedLRUEvictionPolicy``) should override to return True.
+        """
+        return False
+
     @abstractmethod
     def register_eviction_destination(self, destination: EvictionDestination):
         """
@@ -73,6 +87,7 @@ class EvictionPolicy:
         self,
         expected_ratio: float,
         key_eligible_filter: Callable[[ObjectKey], bool] | None = None,
+        cache_salt: str | None = None,
     ) -> list[EvictionAction]:
         """
         Get the eviction actions to evict objects from cache.
@@ -88,6 +103,11 @@ class EvictionPolicy:
                 provided, keys for which the filter returns False will be
                 skipped. This is useful for skipping locked keys that
                 cannot be deleted.
+            cache_salt: When set, scope eviction to keys belonging to this
+                salt only (identified by ``ObjectKey.cache_salt``). When
+                None, evict globally across all salts. Only meaningful for
+                policies where ``support_isolation`` is True; other policies
+                ignore this parameter.
 
         Returns:
             list[EvictionAction]: The eviction actions to perform. Each
