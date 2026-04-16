@@ -15,7 +15,7 @@ the contracts below change.
 
 3. **New subscriber class** — follow the step-by-step guide in `README.md`
    (co-located with this file; "How to Add a New Event and Subscriber") and
-   the design rules in `docs/design/v1/mp_observability/DESIGN.md`.
+   the design rules in `docs/design/v1/mp_observability/event-bus.md`.
 
 4. **CLI args** — if you add or change observability CLI flags in `config.py`,
    update `docs/source/mp/observability.rst` to match.

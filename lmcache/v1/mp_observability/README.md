@@ -7,7 +7,7 @@ For metrics, see [METRICS.md](../../../docs/design/v1/mp_observability/METRICS.m
 For event metadata contracts, see
 [EVENTS.md](../../../docs/design/v1/mp_observability/EVENTS.md).
 For design rationale, see
-[DESIGN.md](../../../docs/design/v1/mp_observability/DESIGN.md).
+[event-bus.md](../../../docs/design/v1/mp_observability/event-bus.md).
 
 ---
 

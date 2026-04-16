@@ -72,7 +72,7 @@ class Event:
             this captures GPU-accurate timing.
         metadata: Flat key-value payload.  Contents depend on ``event_type``;
             see the metadata contracts in
-            ``docs/design/v1/mp_observability/DESIGN.md`` Section 2.7.
+            ``docs/design/v1/mp_observability/event-bus.md`` Section 2.7.
         session_id: Caller-provided ID for correlating start/end pairs.
     """
 
