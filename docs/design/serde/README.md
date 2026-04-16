@@ -6,6 +6,10 @@ Serialization/deserialization (serde) support for the L1-L2 data path. When enab
 
 When serde is disabled (`None`), both controllers behave identically to the existing code path.
 
+## Design TL;DR
+
+Serde is an **in-CPU pipe in front of each L2 adapter** — every byte to/from the adapter goes through it. The choice is **per-adapter, all-or-nothing**: an adapter is either fully serde-enabled or fully raw, decided once by config. The pipe needs a temp buffer for the serialized bytes; that buffer is explicitly allocated and tracked by `L1Manager`, so the extra memory shows up in L1 accounting instead of being hidden. The pipe uses the same `submit → eventfd → query` shape as an L2 adapter so controllers poll it with no special case.
+
 ## Architecture
 
 Two-layer interface:

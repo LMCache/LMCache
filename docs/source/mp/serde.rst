@@ -11,6 +11,18 @@ asynchronously in a background thread so it does not stall the L1 path.
    :depth: 2
 
 
+Design in one paragraph
+-----------------------
+
+Serde is an **in-CPU pipe in front of each L2 adapter** — every byte
+between L1 and the adapter flows through it. The choice is
+**per-adapter and all-or-nothing**: an adapter either pipes everything
+through serde or has no pipe at all. The pipe needs a temp buffer to
+hold the serialized bytes; that buffer is explicitly allocated and
+tracked by L1, so the extra memory is visible in L1 accounting rather
+than hidden.
+
+
 When to use serde
 -----------------
 
