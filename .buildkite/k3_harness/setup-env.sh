@@ -62,32 +62,28 @@ for i in $(seq 1 "$MAX_AUTO_INSTALL"); do
     uv pip install "$mod"
 done
 
-echo "--- :python: Installing LMCache from source"
+echo "--- :wrench: Installing CUDA 12.8 nvcc for LMCache build"
 # The base image ships CUDA 13 (for nvcc 13), but vLLM nightly's torch wheel
-# is built against CUDA 12. torch.utils.cpp_extension._check_cuda_version
-# refuses to compile LMCache's C++/CUDA extension on that major-version
-# mismatch. Install a pip-shipped CUDA 12 toolchain and point CUDA_HOME at
-# it for the editable-install build step only; runtime still uses the
-# libcudart12 already present in the base image.
-# Pin to 12.8.* to match torch's reported CUDA version exactly; the 12.9
-# wheels of this package ship with an empty bin/ directory.
-uv pip install \
-    "nvidia-cuda-nvcc-cu12>=12.8,<12.9" \
-    "nvidia-cuda-cccl-cu12>=12.8,<12.9" \
-    "nvidia-cuda-runtime-cu12>=12.8,<12.9"
-# nvidia.cuda_nvcc is a PEP 420 namespace package (no __init__.py). Use
-# __path__[0] to locate it, and `find` so we don't depend on the wheel's
-# bin/ layout staying the same across versions.
-CUDA_NVCC_ROOT=$(python -c "import nvidia.cuda_nvcc as m; print(m.__path__[0])")
-NVCC_BIN=$(find "$CUDA_NVCC_ROOT" -name nvcc -type f -executable 2>/dev/null | head -1)
-if [[ -z "$NVCC_BIN" ]]; then
-    echo "ERROR: no executable nvcc found under ${CUDA_NVCC_ROOT}; tree was:" >&2
-    find "$CUDA_NVCC_ROOT" -maxdepth 3 -ls >&2 || true
+# is built against CUDA 12.8. torch.utils.cpp_extension._check_cuda_version
+# refuses to compile LMCache's C++/CUDA extension on a major-version
+# mismatch, and the pip-published `nvidia-cuda-nvcc-cu12` wheel only ships
+# ptxas + nvvm (no nvcc driver). Install just `cuda-compiler-12-8` from
+# NVIDIA's apt repo (~100MB) alongside the existing CUDA 13 toolchain.
+# Runtime still uses the libcudart12 already present in the base image.
+if [[ ! -x /usr/local/cuda-12.8/bin/nvcc ]]; then
+    apt-get update -y
+    apt-get install -y --no-install-recommends cuda-compiler-12-8
+fi
+if [[ ! -x /usr/local/cuda-12.8/bin/nvcc ]]; then
+    echo "ERROR: nvcc still missing at /usr/local/cuda-12.8/bin/nvcc after apt install" >&2
+    ls /usr/local/ >&2 || true
     exit 1
 fi
-CUDA_HOME_CU12="$(dirname "$(dirname "$NVCC_BIN")")"
-echo "Using CUDA_HOME=${CUDA_HOME_CU12} (nvcc=$NVCC_BIN) for LMCache build"
-"$NVCC_BIN" --version || true
+CUDA_HOME_CU12=/usr/local/cuda-12.8
+echo "Using CUDA_HOME=${CUDA_HOME_CU12} for LMCache build"
+"${CUDA_HOME_CU12}/bin/nvcc" --version
+
+echo "--- :python: Installing LMCache from source"
 CUDA_HOME="$CUDA_HOME_CU12" uv pip install -e . --no-build-isolation
 
 echo "--- :white_check_mark: Environment ready"
