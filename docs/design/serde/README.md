@@ -230,17 +230,3 @@ Both controllers register serde eventfds in their poll loop alongside L2 adapter
 
 Temp buffers are allocated at exactly `estimate_serialized_size()` bytes. The serializer is responsible for including any safety margin in its estimate (e.g., the built-in fp8 serializer returns `1.5 * num_elements`).
 
-## Failure Summary
-
-| Failure | Store handling | Prefetch handling |
-|---|---|---|
-| `reserve_read` fails | Skip key (best-effort) | N/A (prefetch uses reserve_write) |
-| `reserve_write(real)` fails | N/A | Drop key, recompute prefix |
-| `reserve_write(tmp)` fails | finish_read(orig key), drop from batch | finish_write+delete(real key), recompute prefix |
-| `submit_serialize` raises | finish_read(orig) + finish_write+delete(tmp), abort | N/A |
-| Serialize fails | finish_read(orig) + finish_write+delete(tmp), abort L2 store | N/A |
-| `submit_deserialize` raises | N/A | Release adapter tmp buffers, zero load bitmap |
-| Deserialize fails | N/A | Release adapter tmp buffers, zero load bitmap; real keys cleaned up in finalize |
-| L2 store fails | finish_read(storage_keys) — serde: auto-deletes tmp_keys. No L1 deletion | N/A |
-| L2 load partial failure | N/A | Failed keys: finish_write+delete. Non-prefix loaded: finish_read |
-| Shutdown (in-flight) | Release all read + temp locks | Release all write-reserved + temp buffers |
