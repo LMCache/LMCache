@@ -12,6 +12,7 @@ The controller runs a background thread with an event-driven loop that:
 
 # Standard
 from dataclasses import dataclass, field
+import enum
 import os
 import select
 import threading
@@ -129,45 +130,50 @@ class StoreListener(L1ManagerListener):
         os.close(self._event_fd)
 
 
-@dataclass
-class InFlightSerializeTask:
-    """Tracks an in-flight serialization task submitted to a SerdeProcessor."""
+class StorePhase(enum.Enum):
+    """Phase of a store request lifecycle."""
 
-    adapter_index: int
-    serde_task_id: SerdeTaskId
-    keys: list[ObjectKey]
-    """Original keys (the logical keys for L2)."""
+    SERIALIZE = enum.auto()
+    STORE = enum.auto()
 
-    read_locked_keys: list[ObjectKey]
-    """Original keys holding L1 read locks."""
 
-    temp_keys: list[ObjectKey]
-    """Temp buffer keys (write-locked, being serialized into)."""
-
-    temp_objs: list[MemoryObj]
-    """Temp buffer MemoryObjs (needed for submit_store_task after serialize)."""
+StoreRequestId = int
 
 
 @dataclass
-class InFlightStoreTask:
-    """
-    Tracks a single submitted L2 store task so the controller can
-    release L1 read locks and perform cleanup when it completes.
+class InFlightStoreRequest:
+    """Tracks a single store request across serialize and L2 store phases.
+
+    Mirrors the unified ``InFlightPrefetchRequest`` pattern: one struct
+    with a phase enum instead of separate serialize/store dataclasses.
     """
 
+    request_id: StoreRequestId
     adapter_index: int
-    """Which L2 adapter this task was submitted to."""
+    phase: StorePhase
 
     keys: list[ObjectKey]
-    """All keys that were submitted in this store task."""
+    """Original logical keys for L2."""
 
     read_locked_keys: list[ObjectKey]
-    """The subset of keys for which reserve_read succeeded
-    (i.e., keys holding an L1 read lock that must be released)."""
+    """Keys currently holding L1 read locks.
+    SERIALIZE phase: original keys (released when serialize completes).
+    STORE phase (no serde): original keys.
+    STORE phase (serde): temp keys (transitioned to read-locked after
+    serialize; auto-deleted on finish_read since is_temporary=True)."""
 
     temp_keys: list[ObjectKey] = field(default_factory=list)
-    """Temporary serialization buffer keys in L1 (write-locked during L2 I/O).
-    Empty list when serde is disabled."""
+    """Temp buffer keys for serde. Empty when serde is disabled."""
+
+    temp_objs: list[MemoryObj] = field(default_factory=list)
+    """Temp buffer MemoryObjs. Populated during SERIALIZE phase; used to
+    submit the L2 store task after serialize succeeds."""
+
+    serde_task_id: SerdeTaskId | None = None
+    """Serialize task ID (SERIALIZE phase only)."""
+
+    l2_task_id: L2TaskId | None = None
+    """L2 store task ID (STORE phase only)."""
 
 
 # Main class
@@ -227,17 +233,13 @@ class StoreController(StorageControllerInterface):
         self._l1_manager.register_listener(self._listener)
         self._event_bus = get_event_bus()
 
-        # (adapter_index, task_id) -> InFlightStoreTask
-        # Composite key is needed because task IDs are only unique
-        # within a single adapter, not across adapters.
-        self._in_flight_tasks: dict[tuple[int, L2TaskId], InFlightStoreTask] = {}
+        # All in-flight store requests, keyed by request_id.
+        self._in_flight_requests: dict[StoreRequestId, InFlightStoreRequest] = {}
+        self._next_request_id: StoreRequestId = 0
 
-        # (adapter_index, serde_task_id) -> InFlightSerializeTask
-        # Composite key needed because each SerdeProcessor allocates task IDs
-        # independently — bare task IDs would collide across adapters.
-        self._in_flight_serialize_tasks: dict[
-            tuple[int, SerdeTaskId], InFlightSerializeTask
-        ] = {}
+        # Secondary index: (adapter_index, l2_task_id) → request_id
+        # for O(1) lookup when L2 store tasks complete.
+        self._l2_task_to_request: dict[tuple[int, L2TaskId], StoreRequestId] = {}
 
         # Shadow counter for status reporting (updated in background loop)
         self._status_in_flight_count: int = 0
@@ -276,7 +278,7 @@ class StoreController(StorageControllerInterface):
         # Wake up the poll loop so it can exit promptly
         os.eventfd_write(self._listener.get_event_fd(), 1)
         self._thread.join()
-        self._cleanup_in_flight_tasks()
+        self._cleanup_in_flight_requests()
         self._listener.close()
 
     def report_status(self) -> dict:
@@ -409,14 +411,18 @@ class StoreController(StorageControllerInterface):
                 )
                 continue
 
-            # Serde disabled: submit directly (existing behavior)
-            self._submit_store_task(
-                adapter_index,
-                successful_keys,
-                successful_objs,
+            # Serde disabled: create STORE request and submit to L2
+            request = InFlightStoreRequest(
+                request_id=self._next_request_id,
+                adapter_index=adapter_index,
+                phase=StorePhase.STORE,
+                keys=list(successful_keys),
                 read_locked_keys=list(successful_keys),
-                temp_keys=[],
             )
+            self._next_request_id += 1
+            self._in_flight_requests[request.request_id] = request
+            self._status_in_flight_count += 1
+            self._submit_l2_store(request, successful_objs)
 
     # =========================================================================
     # Serialize phase (serde enabled only)
@@ -507,22 +513,26 @@ class StoreController(StorageControllerInterface):
             l1_mgr.delete(final_temp_keys)
             return
 
-        self._in_flight_serialize_tasks[(adapter_index, serde_task_id)] = (
-            InFlightSerializeTask(
-                adapter_index=adapter_index,
-                serde_task_id=serde_task_id,
-                keys=final_keys,
-                read_locked_keys=final_read_keys,
-                temp_keys=final_temp_keys,
-                temp_objs=final_temp_objs,
-            )
+        request = InFlightStoreRequest(
+            request_id=self._next_request_id,
+            adapter_index=adapter_index,
+            phase=StorePhase.SERIALIZE,
+            keys=final_keys,
+            read_locked_keys=final_read_keys,
+            temp_keys=final_temp_keys,
+            temp_objs=final_temp_objs,
+            serde_task_id=serde_task_id,
         )
+        self._next_request_id += 1
+        self._in_flight_requests[request.request_id] = request
+        self._status_in_flight_count += 1
 
     def _process_serialize_completions(self, adapter_index: int) -> None:
         """Handle completed serialize tasks from a SerdeProcessor.
 
-        On success: release original read locks, submit store to L2.
-        On failure: release both read locks and temp buffers.
+        On success: release original read locks, transition request to
+        STORE phase, and submit the L2 store task.
+        On failure: release both read locks and temp buffers, remove request.
         """
         serde = self._serde_processors[adapter_index]
         assert serde is not None, (
@@ -530,88 +540,82 @@ class StoreController(StorageControllerInterface):
         )
         l1_mgr = self._l1_manager
 
-        for task in list(self._in_flight_serialize_tasks.values()):
-            if task.adapter_index != adapter_index:
+        for request in list(self._in_flight_requests.values()):
+            if request.phase != StorePhase.SERIALIZE:
+                continue
+            if request.adapter_index != adapter_index:
                 continue
 
-            result = serde.query_serialize_result(task.serde_task_id)
+            assert request.serde_task_id is not None
+            result = serde.query_serialize_result(request.serde_task_id)
             if result is None:
                 continue
 
-            del self._in_flight_serialize_tasks[(adapter_index, task.serde_task_id)]
-
             # Release original read locks — data is in temp now
-            l1_mgr.finish_read(task.read_locked_keys)
+            l1_mgr.finish_read(request.read_locked_keys)
 
             if result:
                 logger.debug(
                     "Serialize completed for adapter %d, %d keys — "
                     "submitting serialized data to L2.",
-                    task.adapter_index,
-                    len(task.keys),
+                    request.adapter_index,
+                    len(request.keys),
                 )
                 # Transition temp buffers: write-locked -> read-locked
                 # so L2 can safely read from them during store.
-                l1_mgr.finish_write_and_reserve_read(task.temp_keys)
+                l1_mgr.finish_write_and_reserve_read(request.temp_keys)
 
-                # Submit to L2 with temp buffers (now read-locked)
-                self._submit_store_task(
-                    task.adapter_index,
-                    task.keys,
-                    task.temp_objs,
-                    read_locked_keys=list(task.temp_keys),
-                    temp_keys=[],
-                )
+                # Transition to STORE phase
+                request.phase = StorePhase.STORE
+                request.read_locked_keys = list(request.temp_keys)
+                request.serde_task_id = None
+                self._submit_l2_store(request, request.temp_objs)
             else:
-                # Serialize failed — clean up temp buffers
+                # Serialize failed — clean up temp buffers and remove request
                 logger.warning(
                     "Serialize task failed for adapter %d, %d keys",
-                    task.adapter_index,
-                    len(task.keys),
+                    request.adapter_index,
+                    len(request.keys),
                 )
-                if task.temp_keys:
-                    l1_mgr.finish_write(task.temp_keys)
-                    l1_mgr.delete(task.temp_keys)
+                if request.temp_keys:
+                    l1_mgr.finish_write(request.temp_keys)
+                    l1_mgr.delete(request.temp_keys)
+                del self._in_flight_requests[request.request_id]
+                self._status_in_flight_count -= 1
 
     # =========================================================================
     # L2 store phase
     # =========================================================================
 
-    def _submit_store_task(
+    def _submit_l2_store(
         self,
-        adapter_index: int,
-        store_keys: list[ObjectKey],
+        request: InFlightStoreRequest,
         store_objs: list[MemoryObj],
-        read_locked_keys: list[ObjectKey],
-        temp_keys: list[ObjectKey],
     ) -> None:
-        """Submit a store task to L2 and track it (shared for both paths)."""
-        adapter = self._l2_adapters[adapter_index]
-        task_id = adapter.submit_store_task(store_keys, store_objs)
+        """Submit the L2 store task for a request in STORE phase."""
+        adapter = self._l2_adapters[request.adapter_index]
+        l2_task_id = adapter.submit_store_task(request.keys, store_objs)
 
-        self._in_flight_tasks[(adapter_index, task_id)] = InFlightStoreTask(
-            adapter_index=adapter_index,
-            keys=store_keys,
-            read_locked_keys=read_locked_keys,
-            temp_keys=temp_keys,
+        request.l2_task_id = l2_task_id
+        self._l2_task_to_request[(request.adapter_index, l2_task_id)] = (
+            request.request_id
         )
-        self._status_in_flight_count += 1
 
         self._event_bus.publish(
             Event(
                 event_type=EventType.L2_STORE_SUBMITTED,
                 metadata={
-                    "adapter_index": adapter_index,
-                    "key_count": len(store_keys),
+                    "adapter_index": request.adapter_index,
+                    "key_count": len(request.keys),
                 },
             )
         )
 
         logger.debug(
             "Submitted store task %d to adapter %d with %d keys.",
-            task_id,
-            adapter_index,
-            len(store_keys),
+            l2_task_id,
+            request.adapter_index,
+            len(request.keys),
         )
 
     def _process_completed_tasks(self, adapter_index: int) -> None:
@@ -619,11 +623,11 @@ class StoreController(StorageControllerInterface):
         Process completed store tasks for a given adapter.
 
         1. Pop all completed tasks from the adapter.
-        2. Release L1 read locks for each task.
-        3. Release temp buffer write locks if serde was enabled.
+        2. Look up the corresponding in-flight request.
+        3. Release L1 read locks (auto-deletes temp keys if serde).
         4. If the task succeeded, ask the policy which keys to
            delete from L1 and delete them.
-        5. Remove the task from in-flight tracking.
+        5. Remove the request from in-flight tracking.
 
         Args:
             adapter_index (int): Index of the adapter whose eventfd
@@ -636,28 +640,31 @@ class StoreController(StorageControllerInterface):
 
         for task_id, success in completed.items():
             composite_key = (adapter_index, task_id)
-            task = self._in_flight_tasks.pop(composite_key, None)
-            if task is not None:
-                self._status_in_flight_count -= 1
-            if task is None:
+            request_id = self._l2_task_to_request.pop(composite_key, None)
+            if request_id is None:
                 logger.warning(
                     "Completed store task %d (adapter %d) not found in tracking.",
                     task_id,
                     adapter_index,
                 )
                 continue
+            request = self._in_flight_requests.pop(request_id, None)
+            if request is None:
+                logger.warning(
+                    "Completed store task %d (adapter %d): request %d missing.",
+                    task_id,
+                    adapter_index,
+                    request_id,
+                )
+                continue
+            self._status_in_flight_count -= 1
 
             # Release read locks.
             # No serde: these are the original l1_keys.
             # Serde: these are the temp_keys (transitioned to read-locked
             # after serialization). finish_read auto-deletes them since
             # is_temporary=True.
-            l1_mgr.finish_read(task.read_locked_keys)
-
-            # Release temp buffers if serde was enabled
-            if task.temp_keys:
-                l1_mgr.finish_write(task.temp_keys)
-                l1_mgr.delete(task.temp_keys)
+            l1_mgr.finish_read(request.read_locked_keys)
 
             if success:
                 self._event_bus.publish(
@@ -665,7 +672,7 @@ class StoreController(StorageControllerInterface):
                         event_type=EventType.L2_STORE_COMPLETED,
                         metadata={
                             "adapter_index": adapter_index,
-                            "succeeded_count": len(task.keys),
+                            "succeeded_count": len(request.keys),
                             "failed_count": 0,
                         },
                     )
@@ -674,9 +681,9 @@ class StoreController(StorageControllerInterface):
                     "L2 store task %d completed: adapter %d, %d keys.",
                     task_id,
                     adapter_index,
-                    len(task.keys),
+                    len(request.keys),
                 )
-                delete_keys = self._policy.select_l1_deletions(task.keys)
+                delete_keys = self._policy.select_l1_deletions(request.keys)
                 if delete_keys:
                     l1_mgr.delete(delete_keys)
             else:
@@ -686,7 +693,7 @@ class StoreController(StorageControllerInterface):
                         metadata={
                             "adapter_index": adapter_index,
                             "succeeded_count": 0,
-                            "failed_count": len(task.keys),
+                            "failed_count": len(request.keys),
                         },
                     )
                 )
@@ -694,39 +701,34 @@ class StoreController(StorageControllerInterface):
                     "Store task %d to adapter %d failed for keys: %s",
                     task_id,
                     adapter_index,
-                    task.keys,
+                    request.keys,
                 )
 
-    def _cleanup_in_flight_tasks(self) -> None:
+    def _cleanup_in_flight_requests(self) -> None:
         """
-        Release all held locks for any in-flight tasks that
+        Release all held locks for any in-flight requests that
         haven't completed. Called during stop().
         """
         l1_mgr = self._l1_manager
 
-        # Clean up in-flight serialize tasks
-        for task in self._in_flight_serialize_tasks.values():
+        for request in self._in_flight_requests.values():
             logger.warning(
-                "Cleaning up in-flight serialize task (adapter %d, %d keys).",
-                task.adapter_index,
-                len(task.keys),
+                "Cleaning up in-flight store request %d "
+                "(adapter %d, phase %s, %d keys).",
+                request.request_id,
+                request.adapter_index,
+                request.phase.name,
+                len(request.keys),
             )
-            l1_mgr.finish_read(task.read_locked_keys)
-            if task.temp_keys:
-                l1_mgr.finish_write(task.temp_keys)
-                l1_mgr.delete(task.temp_keys)
-        self._in_flight_serialize_tasks.clear()
+            if request.phase == StorePhase.SERIALIZE:
+                # Read locks on originals + write locks on temp buffers
+                l1_mgr.finish_read(request.read_locked_keys)
+                if request.temp_keys:
+                    l1_mgr.finish_write(request.temp_keys)
+                    l1_mgr.delete(request.temp_keys)
+            elif request.phase == StorePhase.STORE:
+                # Read locks on originals (no serde) or temp keys (serde)
+                l1_mgr.finish_read(request.read_locked_keys)
 
-        # Clean up in-flight L2 store tasks
-        for (adapter_index, task_id), store_task in self._in_flight_tasks.items():
-            logger.warning(
-                "Cleaning up in-flight store task %d (adapter %d, %d keys).",
-                task_id,
-                adapter_index,
-                len(store_task.read_locked_keys),
-            )
-            l1_mgr.finish_read(store_task.read_locked_keys)
-            if store_task.temp_keys:
-                l1_mgr.finish_write(store_task.temp_keys)
-                l1_mgr.delete(store_task.temp_keys)
-        self._in_flight_tasks.clear()
+        self._in_flight_requests.clear()
+        self._l2_task_to_request.clear()
