@@ -73,6 +73,7 @@ class LRUCachePolicy(BaseCachePolicy[KeyType, OrderedDict[KeyType, Any]]):
         cache_dict: OrderedDict[KeyType, Any],
         metadata: Any,
     ) -> None:
+        """Restore LRU reuse timestamps for recovered cache entries."""
         created_ts = float(getattr(metadata, "created_ts", 0.0) or 0.0)
         if created_ts <= 0:
             return

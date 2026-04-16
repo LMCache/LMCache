@@ -86,7 +86,7 @@ class BaseCachePolicy(Generic[KeyType, MapType], metaclass=abc.ABCMeta):
         """
         raise NotImplementedError
 
-    def get_recovery_sort_key(self, metadata: Any) -> tuple[float, float]:
+    def get_recovery_sort_key(self, metadata: Any) -> tuple[int | float, ...]:
         """
         Return a best-effort ordering key for rebuilding cache policy state
         after a process restart.
