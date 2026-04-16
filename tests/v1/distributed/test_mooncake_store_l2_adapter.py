@@ -88,6 +88,17 @@ def create_buffer_memory_obj(
     size_bytes: int,
     fill_value: float = 1.0,
 ) -> TensorMemoryObj:
+    """Create a tensor-backed memory object from a slice of a buffer.
+
+    Args:
+        buffer: Backing tensor containing the bytes to expose.
+        offset_bytes: Byte offset where the memory object starts in ``buffer``.
+        size_bytes: Size of the memory object in bytes.
+        fill_value: Value used to initialize the exposed float32 view.
+
+    Returns:
+        A ``TensorMemoryObj`` describing the requested buffer slice.
+    """
     raw_data = buffer[offset_bytes : offset_bytes + size_bytes].view(torch.float32)
     raw_data.fill_(fill_value)
     metadata = MemoryObjMetadata(
@@ -445,10 +456,19 @@ MOONCAKE_LOCAL_HOSTNAME = os.environ.get("MOONCAKE_LOCAL_HOSTNAME", "")
 MOONCAKE_METADATA_SERVER = os.environ.get(
     "MOONCAKE_METADATA_SERVER", "etcd://localhost:2379"
 )
+MOONCAKE_MASTER_SERVER_ADDRESS = os.environ.get(
+    "MOONCAKE_MASTER_SERVER_ADDRESS", "localhost:50051"
+)
+MOONCAKE_DEVICE_NAME = os.environ.get("MOONCAKE_DEVICE_NAME", "")
+MOONCAKE_RUN_RDMA_TESTS = os.environ.get("MOONCAKE_RUN_RDMA_TESTS") == "1"
 
 requires_mooncake_service = pytest.mark.skipif(
     not _native_mooncake_available() or not MOONCAKE_LOCAL_HOSTNAME,
     reason=("C++ Mooncake extension not available or MOONCAKE_LOCAL_HOSTNAME not set"),
+)
+requires_mooncake_rdma = pytest.mark.skipif(
+    not MOONCAKE_RUN_RDMA_TESTS,
+    reason="RDMA-specific Mooncake test requires MOONCAKE_RUN_RDMA_TESTS=1",
 )
 
 
@@ -652,8 +672,9 @@ class TestMooncakeStoreIntegration:
         finally:
             adapter.close()
 
+    @requires_mooncake_rdma
     def test_buffer_backed_store_lookup_load(self):
-        """Store and load objects backed by an explicit test buffer."""
+        """Store and load RDMA-preregistered objects backed by an explicit L1 buffer."""
         # First Party
         from lmcache.v1.distributed.l2_adapters import create_l2_adapter
 
@@ -671,7 +692,10 @@ class TestMooncakeStoreIntegration:
                 "type": "mooncake_store",
                 "local_hostname": MOONCAKE_LOCAL_HOSTNAME,
                 "metadata_server": MOONCAKE_METADATA_SERVER,
+                "master_server_address": MOONCAKE_MASTER_SERVER_ADDRESS,
                 "num_workers": 2,
+                "protocol": "rdma",
+                "device_name": MOONCAKE_DEVICE_NAME,
             }
         )
         adapter = create_l2_adapter(config, l1_memory_desc=l1_desc)

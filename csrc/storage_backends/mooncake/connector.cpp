@@ -112,6 +112,9 @@ void MooncakeConnector::ensure_registered(const void* buf, size_t len) {
         "Mooncake buffer registration failed: null buffer");
   }
   if (!is_within_registered_region(buf, len)) {
+    // TODO(fcczzz): When l1_use_lazy is enabled, support lazy/on-demand
+    // registration for buffers allocated after connector initialization, since
+    // they are not covered by the current preregistered L1 region.
     throw std::runtime_error("Buffer is outside of preregistered L1 region");
   }
 }
