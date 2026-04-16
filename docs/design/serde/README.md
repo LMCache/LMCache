@@ -98,8 +98,15 @@ sequenceDiagram
     Main Loop ->> L2Mgr: pop completed tasks
     L2Mgr ->> Main Loop: completed task id
     Main Loop ->> Main Loop: update internal "request" status and check finished "requests"
-    Main Loop ->> L1Mgr: finish_read(storage_keys)
-    note right of Main Loop: For serde: storage_keys = tmp_keys (read-locked).<br/>finish_read auto-deletes them since is_temporary=True.
+    rect rgba(200, 220, 255, 0.2)
+        alt no serde (storage_keys = l1_keys)
+            Main Loop ->> L1Mgr: finish_read(l1_keys)
+        else serde (storage_keys = tmp_keys)
+            Main Loop ->> L1Mgr: finish_read(tmp_keys)
+            L1Mgr ->> L1Mgr: auto-delete(tmp_keys)
+            note right of L1Mgr: is_temporary=True → finish_read<br/>triggers automatic deletion from L1.
+        end
+    end
 
     alt L2 store succeeded
         Main Loop ->> Main Loop: determine keys to delete from L1
@@ -185,14 +192,14 @@ sequenceDiagram
       Main Loop ->> SerdeMgr: query_deserialize_result(serde task id)
       SerdeMgr ->> Main Loop: success / failure
 
-      alt deserialize failed
-        Main Loop ->> L1Mgr: finish_write(keys_in_the_plan)
-        Main Loop ->> L1Mgr: delete(keys_in_the_plan)
-        Main Loop ->> Main Loop: clear write_reserved (all keys treated as failed)
-      end
+      Main Loop ->> L1Mgr: finish_write(adapter_tmp_keys)
+      Main Loop ->> L1Mgr: delete(adapter_tmp_keys)
+      note right of Main Loop: Temp buffers released regardless of<br/>deserialize success or failure.
 
-      Main Loop ->> L1Mgr: finish_write(tmp_keys)
-      Main Loop ->> L1Mgr: delete(tmp_keys)
+      alt deserialize failed
+        Main Loop ->> Main Loop: zero adapter's load_result bitmap
+        note right of Main Loop: Affected keys treated as "failed"<br/>in the finalize step below.
+      end
     end
   end
 
@@ -229,8 +236,11 @@ Temp buffers are allocated at exactly `estimate_serialized_size()` bytes. The se
 |---|---|---|
 | `reserve_read` fails | Skip key (best-effort) | N/A (prefetch uses reserve_write) |
 | `reserve_write(real)` fails | N/A | Drop key, recompute prefix |
-| `reserve_write(tmp)` fails | Release read lock for that key, drop from batch | Release real buffer for that key, recompute prefix |
-| Serialize fails | Release read locks + finish_write/delete temp, abort L2 store | N/A |
-| Deserialize fails | N/A | finish_write/delete real + temp, all keys treated as failed |
-| L2 store fails | Release read locks (+ temp if serde), no L1 deletion | N/A |
-| L2 load partial failure | N/A | Failed keys: finish_write + delete. Non-prefix loaded: finish_read |
+| `reserve_write(tmp)` fails | finish_read(orig key), drop from batch | finish_write+delete(real key), recompute prefix |
+| `submit_serialize` raises | finish_read(orig) + finish_write+delete(tmp), abort | N/A |
+| Serialize fails | finish_read(orig) + finish_write+delete(tmp), abort L2 store | N/A |
+| `submit_deserialize` raises | N/A | Release adapter tmp buffers, zero load bitmap |
+| Deserialize fails | N/A | Release adapter tmp buffers, zero load bitmap; real keys cleaned up in finalize |
+| L2 store fails | finish_read(storage_keys) — serde: auto-deletes tmp_keys. No L1 deletion | N/A |
+| L2 load partial failure | N/A | Failed keys: finish_write+delete. Non-prefix loaded: finish_read |
+| Shutdown (in-flight) | Release all read + temp locks | Release all write-reserved + temp buffers |
