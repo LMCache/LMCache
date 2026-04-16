@@ -324,6 +324,7 @@ class LMCacheMPSchedulerAdapter:
         self,
         request_id: str,
         token_ids: list[int],
+        cache_salt: str = "",
     ):
         """
         Submit a new lookup request to LMCache if there is no ongoing request.
@@ -336,6 +337,8 @@ class LMCacheMPSchedulerAdapter:
             request_id: The ID of the lookup request. The same ID indicates it's
                 from the same request
             token_ids: Token IDs to lookup from LMCache
+            cache_salt: Per-user isolation salt. Requests with different
+                cache_salt values produce separate cache entries.
 
         Returns:
             None
@@ -363,6 +366,7 @@ class LMCacheMPSchedulerAdapter:
             start=0,
             end=aligned_end,
             request_id=request_id,
+            cache_salt=cache_salt,
         ).no_worker_id_version()
 
         future = send_lmcache_request(
@@ -456,6 +460,7 @@ class LMCacheMPSchedulerAdapter:
         start: int,
         end: int,
         request_id: str,
+        cache_salt: str = "",
     ) -> None:
         """Release read locks acquired during lookup without a full retrieve.
 
@@ -475,12 +480,17 @@ class LMCacheMPSchedulerAdapter:
             start: Start token index.
             end: End token index.
             request_id: The request ID.
+            cache_salt: Per-user isolation salt.
         """
         if not self.is_healthy:
             return
 
         key = self._create_key(
-            token_ids, start=start, end=end, request_id=request_id
+            token_ids,
+            start=start,
+            end=end,
+            request_id=request_id,
+            cache_salt=cache_salt,
         ).no_worker_id_version()
         send_lmcache_request(
             self.mq_client,
@@ -532,10 +542,24 @@ class LMCacheMPSchedulerAdapter:
         start: int,
         end: int,
         request_id: str,
+        cache_salt: str = "",
     ) -> IPCCacheEngineKey:
-        """Convert token IDs to an IPC cache engine key"""
+        """Convert token IDs to an IPC cache engine key.
+
+        Args:
+            token_ids: The token IDs.
+            start: Start token index.
+            end: End token index.
+            request_id: The request ID.
+            cache_salt: Per-user isolation salt.
+
+        Returns:
+            IPCCacheEngineKey: The constructed key.
+        """
         # NOTE: for the scheduler adapter, we don't have a worker id,
         # so we set it to None in the key.
+        # NOTE: cache_salt is accepted here but not yet forwarded to
+        # IPCCacheEngineKey until that field is added (PR2).
         return IPCCacheEngineKey(
             model_name=self.model_name,
             world_size=self.world_size,
@@ -737,7 +761,11 @@ class LMCacheMPWorkerAdapter:
 
     @_lmcache_nvtx_annotate
     def submit_store_request(
-        self, request_id: str, op: LoadStoreOp, event: torch.cuda.Event
+        self,
+        request_id: str,
+        op: LoadStoreOp,
+        event: torch.cuda.Event,
+        cache_salt: str = "",
     ):
         """
         Submit a KV cache store request to LMCache
@@ -747,6 +775,7 @@ class LMCacheMPWorkerAdapter:
             op: The LoadStoreOp describing the store operation.
             event: The CUDA event that is recorded after the current
                 model inference step
+            cache_salt: Per-user isolation salt.
         """
         self._ensure_heartbeat_started()
 
@@ -754,7 +783,13 @@ class LMCacheMPWorkerAdapter:
             return
 
         assert op.token_ids is not None
-        key = self._create_key(op.token_ids, op.start, op.end, request_id=request_id)
+        key = self._create_key(
+            op.token_ids,
+            op.start,
+            op.end,
+            request_id=request_id,
+            cache_salt=cache_salt,
+        )
         future = send_lmcache_request(
             self.mq_client,
             RequestType.STORE,
@@ -764,7 +799,11 @@ class LMCacheMPWorkerAdapter:
 
     @_lmcache_nvtx_annotate
     def submit_retrieve_request(
-        self, request_id: str, op: LoadStoreOp, event: torch.cuda.Event
+        self,
+        request_id: str,
+        op: LoadStoreOp,
+        event: torch.cuda.Event,
+        cache_salt: str = "",
     ):
         """
         Submit a KV cache retrieve request to LMCache
@@ -774,6 +813,7 @@ class LMCacheMPWorkerAdapter:
             op: The LoadStoreOp describing the retrieve operation.
             event: The CUDA event that is recorded after the current
                 model inference step
+            cache_salt: Per-user isolation salt.
         """
         self._ensure_heartbeat_started()
 
@@ -782,7 +822,13 @@ class LMCacheMPWorkerAdapter:
             return
 
         assert op.token_ids is not None
-        key = self._create_key(op.token_ids, op.start, op.end, request_id=request_id)
+        key = self._create_key(
+            op.token_ids,
+            op.start,
+            op.end,
+            request_id=request_id,
+            cache_salt=cache_salt,
+        )
         future = send_lmcache_request(
             self.mq_client,
             RequestType.RETRIEVE,
@@ -802,6 +848,7 @@ class LMCacheMPWorkerAdapter:
         request_ids: list[str],
         ops: list[LoadStoreOp],
         event: torch.cuda.Event,
+        cache_salts: list[str] | None = None,
     ):
         """
         Submit a batched store request to LMCache
@@ -812,9 +859,14 @@ class LMCacheMPWorkerAdapter:
                 the same length as request_ids
             event: The CUDA event that is recorded after the current
                 model inference step
+            cache_salts: Per-user isolation salts, one per request. If None,
+                all requests use cache_salt="". The list length should be the same as
+                request_ids.
         """
-        for request_id, op in zip(request_ids, ops, strict=False):
-            self.submit_store_request(request_id, op, event)
+        if cache_salts is None:
+            cache_salts = [""] * len(request_ids)
+        for request_id, op, salt in zip(request_ids, ops, cache_salts, strict=False):
+            self.submit_store_request(request_id, op, event, cache_salt=salt)
 
     @_lmcache_nvtx_annotate
     def batched_submit_retrieve_requests(
@@ -822,6 +874,7 @@ class LMCacheMPWorkerAdapter:
         request_ids: list[str],
         ops: list[LoadStoreOp],
         event: torch.cuda.Event,
+        cache_salts: list[str] | None = None,
     ):
         """
         Submit a batched retrieve request to LMCache
@@ -832,9 +885,14 @@ class LMCacheMPWorkerAdapter:
                 the same length as request_ids
             event: The CUDA event that is recorded after the current
                 model inference step
+            cache_salts: Per-user isolation salts, one per request. If None,
+                all requests use cache_salt="". The list length should be same as
+                request_ids.
         """
-        for request_id, op in zip(request_ids, ops, strict=False):
-            self.submit_retrieve_request(request_id, op, event)
+        if cache_salts is None:
+            cache_salts = [""] * len(request_ids)
+        for request_id, op, salt in zip(request_ids, ops, cache_salts, strict=False):
+            self.submit_retrieve_request(request_id, op, event, cache_salt=salt)
 
     def _process_finished_stores(
         self,
@@ -1014,8 +1072,22 @@ class LMCacheMPWorkerAdapter:
         start: int,
         end: int,
         request_id: str,
+        cache_salt: str = "",
     ) -> IPCCacheEngineKey:
-        """Convert token IDs to an IPC cache engine key"""
+        """Convert token IDs to an IPC cache engine key.
+
+        Args:
+            token_ids: The token IDs.
+            start: Start token index.
+            end: End token index.
+            request_id: The request ID.
+            cache_salt: Per-user isolation salt.
+
+        Returns:
+            IPCCacheEngineKey: The constructed key.
+        """
+        # NOTE: cache_salt is accepted here but not yet forwarded to
+        # IPCCacheEngineKey until that field is added (PR2).
         return IPCCacheEngineKey(
             model_name=self.model_name,
             world_size=self.world_size,

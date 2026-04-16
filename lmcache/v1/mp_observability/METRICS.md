@@ -89,6 +89,23 @@ For implementation guidance on adding new events and subscribers, see [README.md
 
 ---
 
+## L1 Chunk Lifecycle Histograms
+
+Sampled (default 1%) chunk-level lifecycle tracking.  Only sampled chunks
+contribute to histograms; counters above always count all events.
+
+| OTel metric name | Prometheus name | Type | Source event | Calculation |
+|---|---|---|---|---|
+| `lmcache_mp.l1_chunk_lifetime_seconds` | `lmcache_mp_l1_chunk_lifetime_seconds` | Histogram | `L1_KEYS_EVICTED` | `eviction_time - alloc_time` per sampled chunk |
+| `lmcache_mp.l1_chunk_idle_before_evict_seconds` | `lmcache_mp_l1_chunk_idle_before_evict_seconds` | Histogram | `L1_KEYS_EVICTED` | `eviction_time - last_access_time` per sampled chunk |
+| `lmcache_mp.l1_chunk_reuse_gap_seconds` | `lmcache_mp_l1_chunk_reuse_gap_seconds` | Histogram | `L1_READ_FINISHED`, `L1_WRITE_FINISHED`, `L1_WRITE_FINISHED_AND_READ_RESERVED` | Time gap between consecutive touches of the same chunk |
+| `lmcache_mp.l1_chunk_evict_reuse_gap_seconds` | `lmcache_mp_l1_chunk_evict_reuse_gap_seconds` | Histogram | `L1_KEYS_EVICTED` → `L1_WRITE_FINISHED` | Time from eviction to next reuse (capped at 300 s) |
+
+**What it answers:** How long do L1 chunks live? How idle are they before eviction? How quickly are evicted chunks reused?
+
+---
+
+
 ## L2 Store Metrics
 
 | OTel metric name | Prometheus name | Type | Source event | Calculation |

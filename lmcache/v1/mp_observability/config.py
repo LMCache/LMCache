@@ -54,6 +54,10 @@ class ObservabilityConfig:
     """Port for the Prometheus /metrics endpoint.  Only used when
     ``otlp_endpoint`` is ``None`` (Prometheus pull fallback)."""
 
+    metrics_sample_rate: float = 0.01
+    """Fraction of chunks/blocks to track for lifecycle histograms (0, 1.0].
+    Counters always count all events regardless of this setting."""
+
     lookup_hash_log: LookupHashLogConfig = field(default_factory=LookupHashLogConfig)
     """Configuration for lookup hash file logging.  Disabled by default
     (empty ``output_dir``)."""
@@ -128,6 +132,15 @@ def add_observability_args(
             "Only used when --otlp-endpoint is not set. Default is 9090."
         ),
     )
+    group.add_argument(
+        "--metrics-sample-rate",
+        type=float,
+        default=0.01,
+        help=(
+            "Fraction of chunks/blocks to track for lifecycle histograms "
+            "(0, 1.0]. Counters always count all events. Default is 0.01 (1%%)."
+        ),
+    )
 
     # Lookup hash logging config
     log_group = parser.add_argument_group(
@@ -185,6 +198,7 @@ def parse_args_to_observability_config(
         tracing_enabled=args.enable_tracing,
         otlp_endpoint=args.otlp_endpoint,
         prometheus_port=args.prometheus_port,
+        metrics_sample_rate=args.metrics_sample_rate,
         lookup_hash_log=LookupHashLogConfig(
             output_dir=args.lookup_hash_log_dir,
             rotation_interval_sec=args.lookup_hash_log_rotation_interval,
@@ -242,13 +256,16 @@ def init_observability(obs_config: ObservabilityConfig) -> EventBus:
         # First Party
         from lmcache.v1.mp_observability.subscribers.metrics import (
             L0LifecycleSubscriber,
+            L1LifecycleSubscriber,
             L1MetricsSubscriber,
             L2MetricsSubscriber,
             SMMetricsSubscriber,
         )
 
-        bus.register_subscriber(L0LifecycleSubscriber())
+        sample_rate = obs_config.metrics_sample_rate
+        bus.register_subscriber(L0LifecycleSubscriber(sample_rate=sample_rate))
         bus.register_subscriber(L1MetricsSubscriber())
+        bus.register_subscriber(L1LifecycleSubscriber(sample_rate=sample_rate))
         bus.register_subscriber(L2MetricsSubscriber())
         bus.register_subscriber(SMMetricsSubscriber())
 
