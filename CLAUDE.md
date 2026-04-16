@@ -19,6 +19,23 @@ Key principles (see the full doc for details and rationale):
 
 For the quick-reference checklist and build/test/lint commands, see **[AGENTS.md](AGENTS.md)**.
 
+## Design Docs
+
+Design docs live under **`docs/design/`**, which **mirrors the `lmcache/` package tree**.
+A design doc for code at `lmcache/<path>/` is located at `docs/design/<path>/`:
+
+- `lmcache/cli/commands/ping.py` → `docs/design/cli/commands/ping.md`
+- `lmcache/v1/distributed/l2_adapters/` → `docs/design/v1/distributed/l2_adapters/`
+- `lmcache/v1/mp_observability/` → `docs/design/v1/mp_observability/`
+
+When investigating a module, always check the mirrored `docs/design/<path>/` first for
+design rationale, contracts, and extension guides. When adding or updating a design
+doc, place it at the path matching the module it describes. See
+[docs/design/README.md](docs/design/README.md) for the full convention.
+
+Module `README.md` files stay co-located with code (symlinked from `docs/design/`); do
+not relocate them.
+
 ## PR Review Instructions
 
 When asked to review a PR, use the `/pr-review` skill which implements the full review
