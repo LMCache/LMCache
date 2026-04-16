@@ -63,7 +63,16 @@ for i in $(seq 1 "$MAX_AUTO_INSTALL"); do
 done
 
 echo "--- :python: Installing LMCache from source"
-uv pip install -e . --no-build-isolation
+# The base image ships CUDA 13 (for nvcc 13), but vLLM nightly's torch wheel
+# is built against CUDA 12. torch.utils.cpp_extension._check_cuda_version
+# refuses to compile LMCache's C++/CUDA extension on that major-version
+# mismatch. Install a pip-shipped CUDA 12 toolchain and point CUDA_HOME at
+# it for the editable-install build step only; runtime still uses the
+# libcudart12 already present in the base image.
+uv pip install nvidia-cuda-nvcc-cu12 nvidia-cuda-cccl-cu12 nvidia-cuda-runtime-cu12
+CUDA_HOME_CU12=$(python -c "import os, nvidia.cuda_nvcc as m; print(os.path.dirname(m.__file__))")
+echo "Using CUDA_HOME=${CUDA_HOME_CU12} for LMCache build"
+CUDA_HOME="$CUDA_HOME_CU12" uv pip install -e . --no-build-isolation
 
 echo "--- :white_check_mark: Environment ready"
 python -c "import vllm; import lmcache; print(f'vLLM={vllm.__version__}, LMCache installed from source with no build isolation')"
