@@ -198,7 +198,7 @@ class InFlightPrefetchRequest:
     """Adapter index -> serde task id for in-flight deserialize tasks.
 
     An entry is added in ``_submit_deserialize_for_adapter`` (called from
-    ``_process_load_completions`` when serde is enabled) and removed in
+    ``_process_l2_load_and_maybe_deserialize`` when serde is enabled) and removed in
     ``_process_deserialize_completions`` once the deserialize result is
     queried. Empty when all deserializations are done
     (``is_ready_to_finalize`` returns True)."""
@@ -490,11 +490,13 @@ class PrefetchController(StorageControllerInterface):
                     if fd == self._submission_efd:
                         self._drain_submission_queue()
                     elif fd in self._lookup_efd_to_adapter:
-                        self._process_lookup_completions(
+                        self._process_l2_lookup_completions(
                             self._lookup_efd_to_adapter[fd]
                         )
                     elif fd in self._load_efd_to_adapter:
-                        self._process_load_completions(self._load_efd_to_adapter[fd])
+                        self._process_l2_load_and_maybe_deserialize(
+                            self._load_efd_to_adapter[fd]
+                        )
                     elif fd in self._deserialize_efd_to_adapter:
                         self._process_deserialize_completions(
                             self._deserialize_efd_to_adapter[fd]
@@ -574,7 +576,7 @@ class PrefetchController(StorageControllerInterface):
             )
         )
 
-    def _process_lookup_completions(self, adapter_index: int) -> None:
+    def _process_l2_lookup_completions(self, adapter_index: int) -> None:
         """Check all LOOKUP-phase requests for completed lookups from
         this adapter."""
         ready_to_transition: list[InFlightPrefetchRequest] = []
@@ -800,7 +802,7 @@ class PrefetchController(StorageControllerInterface):
         with self._lookup_results_lock:
             self._completed_lookups[request_id] = hit_chunks
 
-    def _process_load_completions(self, adapter_index: int) -> None:
+    def _process_l2_load_and_maybe_deserialize(self, adapter_index: int) -> None:
         """Handle the L2 load eventfd for this adapter.
 
         Triggered ONLY by the L2 load completion fd — not by deserialize.
@@ -907,7 +909,8 @@ class PrefetchController(StorageControllerInterface):
         """Handle the deserialize eventfd for this adapter.
 
         For serde-enabled adapters, this is where the request actually
-        finishes — _process_load_completions only kicks off the deserialize.
+        finishes — _process_l2_load_and_maybe_deserialize only kicks off
+        the deserialize.
         Releases this adapter's temp buffers. If deserialize failed,
         clears the load result bitmap so _finalize_load treats those
         keys as failed (they'll get finish_write + delete).

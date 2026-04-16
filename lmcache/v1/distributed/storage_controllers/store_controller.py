@@ -335,12 +335,12 @@ class StoreController(StorageControllerInterface):
                         if keys:
                             self._process_new_keys(keys)
                     elif fd in self._serialize_efd_to_adapter:
-                        self._process_serialize_completions(
+                        self._process_serialize_and_submit_l2_store(
                             self._serialize_efd_to_adapter[fd]
                         )
                     elif fd in self._store_efd_to_adapter:
                         adapter_index = self._store_efd_to_adapter[fd]
-                        self._process_completed_tasks(adapter_index)
+                        self._process_l2_store_completions(adapter_index)
                 except Exception:
                     logger.exception(
                         "Unexpected error in store loop while processing fd %d",
@@ -406,7 +406,7 @@ class StoreController(StorageControllerInterface):
 
             if serde is not None:
                 # Serde enabled: alloc temp, submit async serialize
-                self._submit_serialize_task(
+                self._submit_serialize(
                     adapter_index, serde, successful_keys, successful_objs
                 )
                 continue
@@ -428,7 +428,7 @@ class StoreController(StorageControllerInterface):
     # Serialize phase (serde enabled only)
     # =========================================================================
 
-    def _submit_serialize_task(
+    def _submit_serialize(
         self,
         adapter_index: int,
         serde: SerdeProcessor,
@@ -527,7 +527,7 @@ class StoreController(StorageControllerInterface):
         self._in_flight_requests[request.request_id] = request
         self._status_in_flight_count += 1
 
-    def _process_serialize_completions(self, adapter_index: int) -> None:
+    def _process_serialize_and_submit_l2_store(self, adapter_index: int) -> None:
         """Handle completed serialize tasks from a SerdeProcessor.
 
         On success: release original read locks, transition request to
@@ -618,7 +618,7 @@ class StoreController(StorageControllerInterface):
             len(request.keys),
         )
 
-    def _process_completed_tasks(self, adapter_index: int) -> None:
+    def _process_l2_store_completions(self, adapter_index: int) -> None:
         """
         Process completed store tasks for a given adapter.
 
