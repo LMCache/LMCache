@@ -13,6 +13,7 @@ import ctypes
 import mmap
 import os
 import threading
+import weakref
 
 # Third Party
 import torch
@@ -21,9 +22,18 @@ import torch
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey, DiskCacheMetadata
 from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.memory_management import MemoryFormat, MemoryObj
+from lmcache.v1.memory_management import (
+    MemoryAllocatorInterface,
+    MemoryFormat,
+    MemoryObj,
+    MemoryObjMetadata,
+    TensorMemoryObj,
+)
 from lmcache.v1.metadata import LMCacheMetadata
-from lmcache.v1.storage_backend.abstract_backend import StoragePluginInterface
+from lmcache.v1.storage_backend.abstract_backend import (
+    AllocatorBackendInterface,
+    StoragePluginInterface,
+)
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 
 if torch.cuda.is_available():
@@ -75,6 +85,23 @@ class _SlotState:
     pending_free: bool = False
 
 
+@dataclass(frozen=True)
+class _ArenaHandle:
+    """Ownership token for DAX-backed MemoryObjs."""
+
+    slot_id: int
+    generation: int
+    owner_kind: str
+
+
+@dataclass
+class _MemoryObjState:
+    """Internal state for a DAX-backed MemoryObj."""
+
+    handle: _ArenaHandle
+    released: bool = False
+
+
 @dataclass
 class _RestoreItem:
     """Reserved DAX read metadata for one item in a batched restore."""
@@ -120,7 +147,61 @@ class _RestoreWave:
     regions: list[_RestoreRegion]
 
 
-class DaxBackend(StoragePluginInterface):
+class _DaxArenaAllocator(MemoryAllocatorInterface):
+    """Allocator adapter for DAX-backed MemoryObjs."""
+
+    def __init__(self, backend: "DaxBackend") -> None:
+        self._backend = backend
+
+    def allocate(
+        self,
+        shapes: Sequence[torch.Size] | torch.Size,
+        dtypes: Sequence[torch.dtype] | torch.dtype,
+        fmt: MemoryFormat = MemoryFormat.UNDEFINED,
+        allocator_type: Optional[str] = None,
+    ) -> Optional[MemoryObj]:
+        """Allocate one DAX-backed memory object through the owning backend."""
+        del allocator_type
+        return self._backend.allocate(shapes, dtypes, fmt=fmt)
+
+    def batched_allocate(
+        self,
+        shapes: Sequence[torch.Size] | torch.Size,
+        dtypes: Sequence[torch.dtype] | torch.dtype,
+        batch_size: int,
+        fmt: MemoryFormat = MemoryFormat.UNDEFINED,
+        allocator_type: Optional[str] = None,
+    ) -> Optional[List[MemoryObj]]:
+        """Allocate a batch of DAX-backed memory objects."""
+        del allocator_type
+        return self._backend.batched_allocate(shapes, dtypes, batch_size, fmt=fmt)
+
+    def free(
+        self,
+        memory_obj: MemoryObj,
+        allocator_type: Optional[str] = None,
+    ) -> None:
+        """Release one DAX-backed memory object back to the owning backend."""
+        del allocator_type
+        self._backend._release_memory_obj(memory_obj)
+
+    def batched_free(
+        self,
+        memory_objs: List[MemoryObj],
+        allocator_type: Optional[str] = None,
+        update_stats: bool = True,
+    ) -> None:
+        """Release a batch of DAX-backed memory objects."""
+        del allocator_type, update_stats
+        for memory_obj in memory_objs:
+            self.free(memory_obj)
+
+    def memcheck(self) -> bool:
+        """Return whether the owning backend can still allocate DAX memory."""
+        return self._backend._allocator_memcheck()
+
+
+class DaxBackend(StoragePluginInterface, AllocatorBackendInterface):
     """Storage plugin backend for /dev/dax mmap-backed KV cache."""
 
     def __init__(
@@ -159,6 +240,24 @@ class DaxBackend(StoragePluginInterface):
         if not self.device_path:
             raise ValueError("extra_config['dax.device_path'] is required")
 
+        self.mode = str(extra.get("dax.mode", "tiered")).strip().lower()
+        if self.mode not in {"tiered", "primary"}:
+            raise ValueError("extra_config['dax.mode'] must be 'tiered' or 'primary'")
+
+        if self.mode == "primary" and (
+            self.config.local_cpu or self.config.max_local_cpu_size > 0
+        ):
+            raise ValueError(
+                "dax.mode='primary' conflicts with local_cpu=True or "
+                "max_local_cpu_size > 0. In primary mode DAX replaces "
+                "the CPU tier; set local_cpu=false and max_local_cpu_size=0."
+            )
+        if self.mode == "primary" and not dst_device.startswith("cuda"):
+            raise ValueError(
+                "dax.mode='primary' requires a CUDA dst_device because "
+                "it returns DAX-backed memory objects for GPU transfer."
+            )
+
         self.async_put = _to_bool(extra.get("dax.async_put", False))
         if self.async_put and self.loop is None:
             raise ValueError("DaxBackend async_put=true requires an asyncio event loop")
@@ -167,8 +266,8 @@ class DaxBackend(StoragePluginInterface):
         if self.max_dax_size <= 0:
             raise ValueError("extra_config['dax.max_dax_size'] must be > 0")
 
-        if self.local_cpu_backend is None:
-            raise ValueError("DaxBackend requires local_cpu_backend")
+        if self.mode == "tiered" and self.local_cpu_backend is None:
+            raise ValueError("DaxBackend tiered mode requires local_cpu_backend")
 
         # Total size in bytes of the mapped DAX arena.
         self._arena_bytes = int(self.max_dax_size * 1024**3)
@@ -180,6 +279,9 @@ class DaxBackend(StoragePluginInterface):
         self._base_ptr: int = 0
         # Python memoryview exposing the mapped arena for byte-level access.
         self._arena_view: Optional[memoryview] = None
+        self._arena_tensor: Optional[torch.Tensor] = None
+        self._cudart: Any = None
+        self._cuda_registered = False
         self._restore_executor: Optional[ThreadPoolExecutor] = None
         self._restore_dispatch_executor: Optional[ThreadPoolExecutor] = None
         self._retrieve_staging_slab_ptr: int = 0
@@ -189,8 +291,16 @@ class DaxBackend(StoragePluginInterface):
         self._restore_max_regions: int = 0
         self._open_arena()
         try:
-            assert self.local_cpu_backend is not None
-            full_chunk_size = int(self.local_cpu_backend.get_full_chunk_size_bytes())
+            if self.mode == "tiered":
+                if self.local_cpu_backend is None:
+                    raise RuntimeError(
+                        "DaxBackend tiered mode requires local_cpu_backend"
+                    )
+                full_chunk_size = int(
+                    self.local_cpu_backend.get_full_chunk_size_bytes()
+                )
+            else:
+                full_chunk_size = self._calculate_primary_slot_bytes()
             self.slot_bytes = max(1, int(full_chunk_size))
             self._max_slots = self._arena_bytes // self.slot_bytes
             if self._max_slots <= 0:
@@ -198,51 +308,52 @@ class DaxBackend(StoragePluginInterface):
                     "dax.max_dax_size is too small for the configured chunk size"
                 )
 
-            default_restore_workers = min(8, max(1, os.cpu_count() or 1))
-            self._restore_workers = self._get_positive_int_extra(
-                extra,
-                "dax.restore_workers",
-                default_restore_workers,
-            )
-            self._restore_max_regions = self._get_positive_int_extra(
-                extra,
-                "dax.restore_max_regions",
-                self._restore_workers,
-            )
-            default_staging_slab_bytes = max(
-                256 * 1024 * 1024,
-                self._restore_max_regions * self.slot_bytes,
-            )
-            self._retrieve_staging_slab_bytes = self._get_positive_int_extra(
-                extra,
-                "dax.retrieve_staging_slab_bytes",
-                default_staging_slab_bytes,
-            )
-            min_required_slab = self._restore_max_regions * self.slot_bytes
-            if self._retrieve_staging_slab_bytes < min_required_slab:
-                raise ValueError(
-                    "extra_config['dax.retrieve_staging_slab_bytes'] must be at "
-                    f"least {min_required_slab} bytes"
+            if self.mode == "tiered":
+                default_restore_workers = min(8, max(1, os.cpu_count() or 1))
+                self._restore_workers = self._get_positive_int_extra(
+                    extra,
+                    "dax.restore_workers",
+                    default_restore_workers,
                 )
-            self._restore_region_bytes = (
-                self._retrieve_staging_slab_bytes // self._restore_max_regions
-            )
-            if self._restore_region_bytes < self.slot_bytes:
-                raise ValueError(
-                    "dax.retrieve_staging_slab_bytes does not leave enough space "
-                    "per restore region for one full chunk"
+                self._restore_max_regions = self._get_positive_int_extra(
+                    extra,
+                    "dax.restore_max_regions",
+                    self._restore_workers,
                 )
-            self._retrieve_staging_slab_ptr = int(
-                lmc_ops.alloc_pinned_ptr(self._retrieve_staging_slab_bytes, 0)
-            )
-            self._restore_executor = ThreadPoolExecutor(
-                max_workers=self._restore_workers,
-                thread_name_prefix="dax-restore",
-            )
-            self._restore_dispatch_executor = ThreadPoolExecutor(
-                max_workers=1,
-                thread_name_prefix="dax-restore-dispatch",
-            )
+                default_staging_slab_bytes = max(
+                    256 * 1024 * 1024,
+                    self._restore_max_regions * self.slot_bytes,
+                )
+                self._retrieve_staging_slab_bytes = self._get_positive_int_extra(
+                    extra,
+                    "dax.retrieve_staging_slab_bytes",
+                    default_staging_slab_bytes,
+                )
+                min_required_slab = self._restore_max_regions * self.slot_bytes
+                if self._retrieve_staging_slab_bytes < min_required_slab:
+                    raise ValueError(
+                        "extra_config['dax.retrieve_staging_slab_bytes'] must be at "
+                        f"least {min_required_slab} bytes"
+                    )
+                self._restore_region_bytes = (
+                    self._retrieve_staging_slab_bytes // self._restore_max_regions
+                )
+                if self._restore_region_bytes < self.slot_bytes:
+                    raise ValueError(
+                        "dax.retrieve_staging_slab_bytes does not leave enough space "
+                        "per restore region for one full chunk"
+                    )
+                self._retrieve_staging_slab_ptr = int(
+                    lmc_ops.alloc_pinned_ptr(self._retrieve_staging_slab_bytes, 0)
+                )
+                self._restore_executor = ThreadPoolExecutor(
+                    max_workers=self._restore_workers,
+                    thread_name_prefix="dax-restore",
+                )
+                self._restore_dispatch_executor = ThreadPoolExecutor(
+                    max_workers=1,
+                    thread_name_prefix="dax-restore-dispatch",
+                )
 
             self._state_lock = threading.RLock()
             self._state_condition = threading.Condition(self._state_lock)
@@ -255,15 +366,21 @@ class DaxBackend(StoragePluginInterface):
 
             self._next_slot = 0
             self._free_slots: set[int] = set()
+            self._reserved_slots: set[int] = set()
+            self._arena_allocator = _DaxArenaAllocator(self)
+            self._memory_obj_states: weakref.WeakKeyDictionary[
+                MemoryObj, _MemoryObjState
+            ] = weakref.WeakKeyDictionary()
             self._active_ops = 0
             self._active_puts = 0
             self._closing = False
             self._closed = False
 
             logger.info(
-                "DaxBackend init: device=%s dax_size=%d slot=%d max_slots=%d "
+                "DaxBackend init: device=%s mode=%s dax_size=%d slot=%d max_slots=%d "
                 "restore_workers=%d restore_regions=%d restore_slab=%d",
                 self.device_path,
+                self.mode,
                 self._arena_bytes,
                 self.slot_bytes,
                 self._max_slots,
@@ -271,13 +388,21 @@ class DaxBackend(StoragePluginInterface):
                 self._restore_max_regions,
                 self._retrieve_staging_slab_bytes,
             )
+            if self.mode == "primary":
+                self._ensure_direct_gpu_ready()
         except Exception:
             fd, mmap_obj, arena_view = self._fd, self._mmap_obj, self._arena_view
+            base_ptr = self._base_ptr
+            cudart = self._cudart if self._cuda_registered else None
             self._fd = None
             self._mmap_obj = None
             self._base_ptr = 0
             self._arena_view = None
+            self._arena_tensor = None
+            self._cudart = None
+            self._cuda_registered = False
             self._release_restore_resources()
+            self._release_cuda_host_mapping(base_ptr, cudart)
             self._release_arena_resources(fd, mmap_obj, arena_view)
             raise
 
@@ -410,28 +535,56 @@ class DaxBackend(StoragePluginInterface):
                 shape = obj_metadata.shape
                 dtype = obj_metadata.dtype
                 cached_positions = obj_metadata.cached_positions
-                fmt = obj_metadata.fmt
+                fmt = (
+                    self._resolve_memory_format(obj_metadata.fmt)
+                    if self.mode == "primary"
+                    else obj_metadata.fmt
+                )
 
+                direct_commit = False
                 with self._state_lock:
                     if self._closing:
                         raise RuntimeError("DaxBackend is closing")
                     if key in self._index or key in self._inflight:
                         continue
 
+                    src_state = (
+                        self._get_memory_obj_state_locked(obj)
+                        if self.mode == "primary"
+                        else None
+                    )
+                    if src_state is not None and src_state.released:
+                        logger.warning(
+                            "Skipping DAX put for key %s: source MemoryObj already "
+                            "released",
+                            key,
+                        )
+                        continue
+                    src_handle = None if src_state is None else src_state.handle
+                    direct_commit = self._is_direct_commit_handle_locked(src_handle)
+
                     if size > self.slot_bytes:
                         raise ValueError(
                             f"DaxBackend: object size {size} for key {key} "
                             f"exceeds slot size {self.slot_bytes}"
                         )
-                    while True:
-                        try:
-                            slot_id = self._allocate_slot_locked()
-                            break
-                        except RuntimeError:
-                            if not self._evict_one_locked():
-                                raise
+                    if direct_commit:
+                        if src_handle is None:
+                            raise RuntimeError(
+                                "direct commit requires a valid source handle"
+                            )
+                        slot_id = src_handle.slot_id
+                        generation = src_handle.generation
+                    else:
+                        while True:
+                            try:
+                                slot_id = self._allocate_slot_locked()
+                                break
+                            except RuntimeError:
+                                if not self._evict_one_locked():
+                                    raise
+                        generation = self._reserve_slot_state_locked(slot_id)
                     offset = slot_id * self.slot_bytes
-                    generation = self._reserve_slot_state_locked(slot_id)
 
                     meta = DiskCacheMetadata(
                         path=f"{self.device_path}@{offset}",
@@ -443,15 +596,29 @@ class DaxBackend(StoragePluginInterface):
                         pin_count=0,
                     )
 
-                    self._inflight[key] = _Inflight(
-                        offset=offset,
-                        meta=meta,
-                        slot_id=slot_id,
-                        generation=generation,
-                        canceled=False,
-                    )
-                    self._active_puts += 1
-                    should_finish_put = True
+                    if direct_commit:
+                        self._mark_slot_committed_locked(slot_id, generation)
+                        self._index[key] = _Entry(
+                            offset=offset,
+                            meta=meta,
+                            slot_id=slot_id,
+                            generation=generation,
+                        )
+                        self._touch_locked(key)
+                    else:
+                        self._inflight[key] = _Inflight(
+                            offset=offset,
+                            meta=meta,
+                            slot_id=slot_id,
+                            generation=generation,
+                            canceled=False,
+                        )
+                        self._active_puts += 1
+                        should_finish_put = True
+
+                if direct_commit:
+                    self._invoke_on_complete_callback(key, on_complete_callback)
+                    continue
 
                 if self.async_put and self.loop is not None and self.loop.is_running():
                     obj.ref_count_up()
@@ -507,6 +674,8 @@ class DaxBackend(StoragePluginInterface):
 
     def get_blocking(self, key: CacheEngineKey) -> Optional[MemoryObj]:
         """Return the memory object for a key, or ``None`` if unavailable."""
+        borrow_handle: Optional[_ArenaHandle] = None
+        primary_borrow_transferred = False
         with self._state_lock:
             if self._closing:
                 return None
@@ -516,9 +685,9 @@ class DaxBackend(StoragePluginInterface):
             meta = entry.meta
             shape = meta.shape
             dtype = meta.dtype
-            fmt = meta.fmt
-            if shape is None or dtype is None or fmt is None:
+            if shape is None or dtype is None:
                 return None
+            fmt = self._resolve_memory_format(meta.fmt)
             state = self._slot_states.get(entry.slot_id)
             if (
                 state is None
@@ -531,17 +700,47 @@ class DaxBackend(StoragePluginInterface):
             offset, size = entry.offset, int(meta.size)
             cached_positions = meta.cached_positions
             slot_id, generation = entry.slot_id, entry.generation
+            if self.mode == "primary":
+                borrow_handle = _ArenaHandle(
+                    slot_id=slot_id,
+                    generation=generation,
+                    owner_kind="borrowed",
+                )
 
-        assert self.local_cpu_backend is not None
         memory_obj: Optional[MemoryObj] = None
         read_ok = False
         try:
+            if self.mode == "primary":
+                if borrow_handle is None:
+                    raise RuntimeError("primary get requires a valid borrow handle")
+                memory_obj = self._create_memory_obj(
+                    offset=offset,
+                    shape=shape,
+                    dtype=dtype,
+                    shapes=[shape],
+                    dtypes=[dtype],
+                    fmt=fmt,
+                    cached_positions=cached_positions,
+                )
+                with self._state_lock:
+                    self._register_memory_obj_locked(memory_obj, borrow_handle)
+                    current = self._index.get(key)
+                    if (
+                        current is not None
+                        and current.slot_id == slot_id
+                        and current.generation == generation
+                    ):
+                        self._touch_locked(key)
+                    primary_borrow_transferred = True
+                return memory_obj
+
+            if self.local_cpu_backend is None:
+                raise RuntimeError("DaxBackend tiered get requires local_cpu_backend")
             memory_obj = self.local_cpu_backend.allocate(shape, dtype, fmt)
-            if memory_obj is None:
-                return None
-            self._do_read(offset, memory_obj, size)
-            memory_obj.metadata.cached_positions = cached_positions
-            read_ok = True
+            if memory_obj is not None:
+                self._do_read(offset, memory_obj, size)
+                memory_obj.metadata.cached_positions = cached_positions
+                read_ok = True
             return memory_obj
         except Exception:
             if memory_obj is not None:
@@ -551,21 +750,25 @@ class DaxBackend(StoragePluginInterface):
             with self._state_lock:
                 if self._active_ops > 0:
                     self._active_ops -= 1
-                state = self._slot_states.get(slot_id)
-                if state is not None and state.generation == generation:
-                    if state.borrow_count > 0:
-                        state.borrow_count -= 1
-                    if read_ok:
-                        current = self._index.get(key)
-                        if (
-                            current is not None
-                            and current.slot_id == slot_id
-                            and current.generation == generation
-                        ):
-                            self._touch_locked(key)
-                    if state.pending_free and state.borrow_count == 0:
-                        state.pending_free = False
-                        self._free_slot_locked(slot_id)
+                if self.mode == "primary":
+                    if not primary_borrow_transferred and borrow_handle is not None:
+                        self._release_arena_handle_locked(borrow_handle)
+                else:
+                    state = self._slot_states.get(slot_id)
+                    if state is not None and state.generation == generation:
+                        if state.borrow_count > 0:
+                            state.borrow_count -= 1
+                        if read_ok:
+                            current = self._index.get(key)
+                            if (
+                                current is not None
+                                and current.slot_id == slot_id
+                                and current.generation == generation
+                            ):
+                                self._touch_locked(key)
+                        if state.pending_free and state.borrow_count == 0:
+                            state.pending_free = False
+                            self._free_slot_locked(slot_id)
                 self._state_condition.notify_all()
 
     async def batched_async_contains(
@@ -621,6 +824,15 @@ class DaxBackend(StoragePluginInterface):
         if not keys:
             return []
 
+        if self.mode == "primary":
+            results: list[MemoryObj] = []
+            for key in keys:
+                memory_obj = await asyncio.to_thread(self.get_blocking, key)
+                if memory_obj is None:
+                    break
+                results.append(memory_obj)
+            return results
+
         dispatch_executor = self._restore_dispatch_executor
         if dispatch_executor is None:
             raise RuntimeError("DaxBackend restore dispatch executor is not available")
@@ -653,6 +865,9 @@ class DaxBackend(StoragePluginInterface):
         """
         if not keys:
             return []
+
+        if self.mode == "primary":
+            return [self.get_blocking(key) for key in keys]
 
         dispatch_executor = self._restore_dispatch_executor
         if dispatch_executor is None:
@@ -717,21 +932,201 @@ class DaxBackend(StoragePluginInterface):
             removed += int(self.remove(key, force=force))
         return removed
 
-    def get_allocator_backend(self) -> LocalCPUBackend:
-        """Return the CPU allocator backend used for read buffers.
+    def get_allocator_backend(self) -> AllocatorBackendInterface:
+        """Return the allocator backend associated with this storage backend.
 
         Raises:
-            RuntimeError: If no ``local_cpu_backend`` is available.
+            RuntimeError: If no allocator backend is available.
         """
+        if self.mode == "primary":
+            return self
         if self.local_cpu_backend is None:
             raise RuntimeError("DaxBackend has no allocator backend available")
         return self.local_cpu_backend
+
+    def allocate(
+        self,
+        shapes: Sequence[torch.Size] | torch.Size,
+        dtypes: Sequence[torch.dtype] | torch.dtype,
+        fmt: Optional[MemoryFormat] = MemoryFormat.KV_2LTD,
+        eviction: bool = True,
+        busy_loop: bool = True,
+    ) -> Optional[MemoryObj]:
+        """Allocate a DAX-backed memory object in primary mode."""
+        if self.mode != "primary":
+            if self.local_cpu_backend is None:
+                return None
+            return self.local_cpu_backend.allocate(
+                shapes,
+                dtypes,
+                fmt,
+                eviction=eviction,
+                busy_loop=busy_loop,
+            )
+
+        del busy_loop
+        fmt = self._resolve_memory_format(fmt)
+        shape_list, dtype_list = self._normalize_shapes_and_dtypes(shapes, dtypes)
+        if len(shape_list) > 1:
+            logger.error(
+                "DaxBackend primary mode does not support multi-tensor allocations: "
+                "requested %d tensors",
+                len(shape_list),
+            )
+            return None
+
+        needed_bytes = self._calc_required_bytes(shape_list, dtype_list)
+        if needed_bytes > self.slot_bytes:
+            logger.error(
+                "DaxBackend allocation request (%d bytes) exceeds slot size (%d bytes)",
+                needed_bytes,
+                self.slot_bytes,
+            )
+            return None
+
+        slot_id: Optional[int] = None
+        generation: Optional[int] = None
+        offset = 0
+        op_started = False
+        try:
+            with self._state_lock:
+                if self._closing:
+                    return None
+                self._active_ops += 1
+                op_started = True
+                while True:
+                    try:
+                        slot_id = self._allocate_slot_locked()
+                        break
+                    except RuntimeError:
+                        if not eviction or not self._evict_one_locked():
+                            return None
+                generation = self._reserve_slot_state_locked(slot_id)
+                offset = slot_id * self.slot_bytes
+
+            memory_obj = self._create_memory_obj(
+                offset=offset,
+                shape=shape_list[0],
+                dtype=dtype_list[0],
+                shapes=shape_list,
+                dtypes=dtype_list,
+                fmt=fmt,
+            )
+            with self._state_lock:
+                if slot_id is None or generation is None:
+                    raise RuntimeError(
+                        "slot allocation did not produce valid slot state"
+                    )
+                self._register_memory_obj_locked(
+                    memory_obj,
+                    _ArenaHandle(
+                        slot_id=slot_id,
+                        generation=generation,
+                        owner_kind="reserved",
+                    ),
+                )
+            return memory_obj
+        except Exception:
+            if slot_id is not None and generation is not None:
+                with self._state_lock:
+                    self._schedule_slot_reclaim_locked(slot_id, generation)
+            raise
+        finally:
+            if op_started:
+                with self._state_lock:
+                    if self._active_ops > 0:
+                        self._active_ops -= 1
+                    else:
+                        logger.warning(
+                            "DaxBackend active op count underflow during allocate"
+                        )
+                    self._state_condition.notify_all()
+
+    def batched_allocate(
+        self,
+        shapes: Sequence[torch.Size] | torch.Size,
+        dtypes: Sequence[torch.dtype] | torch.dtype,
+        batch_size: int,
+        fmt: Optional[MemoryFormat] = MemoryFormat.KV_2LTD,
+        eviction: bool = True,
+        busy_loop: bool = True,
+    ) -> Optional[List[MemoryObj]]:
+        """Allocate multiple DAX-backed memory objects in primary mode."""
+        if self.mode != "primary":
+            if self.local_cpu_backend is None:
+                return None
+            return self.local_cpu_backend.batched_allocate(
+                shapes,
+                dtypes,
+                batch_size,
+                fmt,
+                eviction=eviction,
+                busy_loop=busy_loop,
+            )
+
+        objs: list[MemoryObj] = []
+        for _ in range(batch_size):
+            obj = self.allocate(
+                shapes=shapes,
+                dtypes=dtypes,
+                fmt=fmt,
+                eviction=eviction,
+                busy_loop=busy_loop,
+            )
+            if obj is None:
+                for allocated in objs:
+                    allocated.ref_count_down()
+                return None
+            objs.append(obj)
+        return objs
+
+    def calculate_chunk_budget(self) -> int:
+        """Return the number of chunks available from the active allocator."""
+        if self.mode != "primary":
+            if self.local_cpu_backend is None:
+                return 0
+            return self.local_cpu_backend.calculate_chunk_budget()
+        return self._max_slots
+
+    def initialize_allocator(
+        self,
+        config: LMCacheEngineConfig,
+        metadata: LMCacheMetadata,
+    ) -> MemoryAllocatorInterface:
+        """Initialize and return the memory allocator for the active mode."""
+        if self.mode != "primary":
+            if self.local_cpu_backend is None:
+                raise RuntimeError("DaxBackend has no allocator backend available")
+            return self.local_cpu_backend.initialize_allocator(config, metadata)
+        del config, metadata
+        return self._arena_allocator
+
+    def get_memory_allocator(self) -> MemoryAllocatorInterface:
+        """Return the memory allocator for the active mode."""
+        if self.mode != "primary":
+            if self.local_cpu_backend is None:
+                raise RuntimeError("DaxBackend has no allocator backend available")
+            return self.local_cpu_backend.get_memory_allocator()
+        return self._arena_allocator
+
+    def _allocator_memcheck(self) -> bool:
+        if self.mode != "primary":
+            return True
+        with self._state_lock:
+            return (
+                not self._closing
+                and self._mmap_obj is not None
+                and self._base_ptr != 0
+                and self._arena_tensor is not None
+            )
 
     def close(self) -> None:
         """Quiesce outstanding operations and release the mapped DAX arena."""
         restore_executor = None
         restore_dispatch_executor = None
         staging_slab_ptr = 0
+        cudart = None
+        base_ptr = 0
         with self._state_lock:
             if self._closed:
                 return
@@ -760,13 +1155,20 @@ class DaxBackend(StoragePluginInterface):
             self._pin_counts.clear()
             self._slot_states.clear()
             self._free_slots.clear()
+            self._reserved_slots.clear()
+            self._memory_obj_states.clear()
             fd = self._fd
             mmap_obj = self._mmap_obj
             arena_view = self._arena_view
+            base_ptr = self._base_ptr
+            cudart = self._cudart if self._cuda_registered else None
             self._fd = None
             self._mmap_obj = None
             self._base_ptr = 0
             self._arena_view = None
+            self._arena_tensor = None
+            self._cudart = None
+            self._cuda_registered = False
 
         if restore_dispatch_executor is not None:
             restore_dispatch_executor.shutdown(wait=True)
@@ -775,6 +1177,7 @@ class DaxBackend(StoragePluginInterface):
         self._release_restore_resources(
             restore_slab_ptr=staging_slab_ptr,
         )
+        self._release_cuda_host_mapping(base_ptr, cudart)
         self._release_arena_resources(fd, mmap_obj, arena_view)
 
     # ------------------------------------------------------------------
@@ -795,6 +1198,34 @@ class DaxBackend(StoragePluginInterface):
         if parsed <= 0:
             raise ValueError(f"extra_config['{key}'] must be a positive integer")
         return parsed
+
+    def _calculate_primary_slot_bytes(self) -> int:
+        """Calculate one full KV chunk size without a LocalCPUBackend."""
+        if self.config is None:
+            raise RuntimeError("DaxBackend requires config")
+        if self.metadata is None:
+            raise RuntimeError("DaxBackend requires metadata")
+        chunk_tokens = int(self.config.chunk_size)
+        kv_shape = self.metadata.kv_shape
+        kv_size = int(kv_shape[1])
+        num_layers = int(kv_shape[0])
+        hidden_dim = int(kv_shape[3]) * int(kv_shape[4])
+        dtype_size = int(self.metadata.kv_dtype.itemsize)
+        return kv_size * num_layers * chunk_tokens * hidden_dim * dtype_size
+
+    def _resolve_memory_format(
+        self,
+        fmt: Optional[MemoryFormat],
+    ) -> MemoryFormat:
+        if fmt is not None and fmt != MemoryFormat.UNDEFINED:
+            return fmt
+        if self.metadata is not None and self.metadata.use_mla:
+            return MemoryFormat.KV_MLA_FMT
+        if self.config is not None and self.config.use_layerwise:
+            if self.config.enable_blending:
+                return MemoryFormat.KV_2TD
+            return MemoryFormat.KV_T2D
+        return MemoryFormat.KV_2LTD
 
     def _release_restore_resources(
         self,
@@ -832,6 +1263,15 @@ class DaxBackend(StoragePluginInterface):
             self._retrieve_staging_slab_ptr = 0
             self._retrieve_staging_slab_bytes = 0
             self._restore_region_bytes = 0
+
+    @staticmethod
+    def _release_cuda_host_mapping(base_ptr: int, cudart: Any) -> None:
+        if cudart is None or base_ptr == 0:
+            return
+        try:
+            cudart.cudaHostUnregister(base_ptr)
+        except Exception as e:
+            logger.warning("Failed to unregister DAX host mapping: %s", e)
 
     @staticmethod
     def _release_arena_resources(
@@ -897,6 +1337,15 @@ class DaxBackend(StoragePluginInterface):
             )
             base_ptr = ctypes.addressof(ctypes.c_char.from_buffer(mmap_obj))
             arena_view = memoryview(mmap_obj)
+            if self.mode == "primary":
+                if hasattr(torch, "frombuffer"):
+                    self._arena_tensor = torch.frombuffer(arena_view, dtype=torch.uint8)
+                else:
+                    # Third Party
+                    import numpy as np
+
+                    arr = np.frombuffer(arena_view, dtype=np.uint8)
+                    self._arena_tensor = torch.from_numpy(arr)
             self._fd = fd
             self._mmap_obj = mmap_obj
             self._base_ptr = base_ptr
@@ -910,6 +1359,25 @@ class DaxBackend(StoragePluginInterface):
                 f"{self.device_path}: {e}"
             ) from e
 
+    def _ensure_direct_gpu_ready(self) -> None:
+        if self.mode != "primary" or self._cuda_registered:
+            return
+        if self._base_ptr == 0:
+            raise RuntimeError("DAX arena is not initialized")
+        try:
+            cudart = torch.cuda.cudart()
+            cudart.cudaHostRegister(
+                self._base_ptr,
+                self._arena_bytes,
+                2,  # cudaHostRegisterMapped
+            )
+            self._cudart = cudart
+            self._cuda_registered = True
+        except Exception as e:
+            raise RuntimeError(
+                f"DAX direct GPU setup failed during cudaHostRegister: {e}"
+            ) from e
+
     def _reserve_slot_state_locked(self, slot_id: int) -> int:
         existing = self._slot_states.get(slot_id)
         new_gen = (existing.generation if existing is not None else 0) + 1
@@ -920,6 +1388,7 @@ class DaxBackend(StoragePluginInterface):
         state = self._slot_states.get(slot_id)
         if state is None or state.generation != generation:
             return
+        self._reserved_slots.discard(slot_id)
         state.committed = True
         state.pending_free = False
 
@@ -957,6 +1426,66 @@ class DaxBackend(StoragePluginInterface):
         self._touch_locked(key)
         return True
 
+    def _register_memory_obj_locked(
+        self,
+        memory_obj: MemoryObj,
+        handle: _ArenaHandle,
+    ) -> None:
+        self._memory_obj_states[memory_obj] = _MemoryObjState(handle=handle)
+
+    def _get_memory_obj_state_locked(
+        self,
+        memory_obj: MemoryObj,
+    ) -> Optional[_MemoryObjState]:
+        return self._memory_obj_states.get(memory_obj)
+
+    def _mark_memory_obj_released_locked(
+        self,
+        memory_obj: MemoryObj,
+    ) -> Optional[_MemoryObjState]:
+        state = self._memory_obj_states.get(memory_obj)
+        if state is None or state.released:
+            return None
+        state.released = True
+        return state
+
+    def _is_direct_commit_handle_locked(
+        self,
+        handle: Optional[_ArenaHandle],
+    ) -> bool:
+        if handle is None or handle.owner_kind != "reserved":
+            return False
+        state = self._slot_states.get(handle.slot_id)
+        return (
+            state is not None
+            and state.generation == handle.generation
+            and not state.committed
+            and handle.slot_id in self._reserved_slots
+        )
+
+    def _release_memory_obj(self, memory_obj: MemoryObj) -> None:
+        with self._state_lock:
+            state = self._mark_memory_obj_released_locked(memory_obj)
+            if state is None:
+                return
+            self._release_arena_handle_locked(state.handle)
+
+    def _release_arena_handle_locked(self, handle: _ArenaHandle) -> None:
+        state = self._slot_states.get(handle.slot_id)
+        if state is None or state.generation != handle.generation:
+            return
+
+        if handle.owner_kind == "reserved":
+            if not state.committed:
+                self._schedule_slot_reclaim_locked(handle.slot_id, handle.generation)
+        elif handle.owner_kind == "borrowed":
+            if state.borrow_count > 0:
+                state.borrow_count -= 1
+            if state.pending_free and state.borrow_count == 0:
+                state.pending_free = False
+                self._free_slot_locked(handle.slot_id)
+        self._state_condition.notify_all()
+
     def _invoke_on_complete_callback(
         self,
         key: CacheEngineKey,
@@ -971,16 +1500,19 @@ class DaxBackend(StoragePluginInterface):
 
     def _allocate_slot_locked(self) -> int:
         if self._free_slots:
-            return self._free_slots.pop()
-        if self._next_slot < self._max_slots:
+            slot = self._free_slots.pop()
+        elif self._next_slot < self._max_slots:
             slot = self._next_slot
             self._next_slot += 1
-            return slot
-        raise RuntimeError("No free slots available; eviction required")
+        else:
+            raise RuntimeError("No free slots available; eviction required")
+        self._reserved_slots.add(slot)
+        return slot
 
     def _free_slot_locked(self, slot_id: int) -> None:
         if slot_id < 0:
             return
+        self._reserved_slots.discard(slot_id)
         self._free_slots.add(slot_id)
 
     def _touch_locked(self, key: CacheEngineKey) -> None:
@@ -1007,6 +1539,57 @@ class DaxBackend(StoragePluginInterface):
             self._schedule_slot_reclaim_locked(entry.slot_id, entry.generation)
             return True
         return False
+
+    def _normalize_shapes_and_dtypes(
+        self,
+        shapes: Sequence[torch.Size] | torch.Size,
+        dtypes: Sequence[torch.dtype] | torch.dtype,
+    ) -> tuple[list[torch.Size], list[torch.dtype]]:
+        shape_list = [shapes] if isinstance(shapes, torch.Size) else list(shapes)
+        dtype_list = [dtypes] if isinstance(dtypes, torch.dtype) else list(dtypes)
+        if len(shape_list) != len(dtype_list):
+            raise ValueError(
+                "shapes and dtypes must have the same length, "
+                f"got {len(shape_list)} and {len(dtype_list)}"
+            )
+        return shape_list, dtype_list
+
+    def _calc_required_bytes(
+        self,
+        shapes: list[torch.Size],
+        dtypes: list[torch.dtype],
+    ) -> int:
+        total = 0
+        for shape, dtype in zip(shapes, dtypes, strict=True):
+            total += int(shape.numel()) * int(dtype.itemsize)
+        return total
+
+    def _create_memory_obj(
+        self,
+        offset: int,
+        shape: torch.Size,
+        dtype: torch.dtype,
+        shapes: list[torch.Size],
+        dtypes: list[torch.dtype],
+        fmt: MemoryFormat,
+        cached_positions: Optional[torch.Tensor] = None,
+    ) -> MemoryObj:
+        if self._arena_tensor is None:
+            raise RuntimeError("DAX arena tensor is not initialized")
+        slot_slice = self._arena_tensor[offset : offset + self.slot_bytes]
+        meta = MemoryObjMetadata(
+            shape=shape,
+            dtype=dtype,
+            address=self._base_ptr + offset,
+            phy_size=self.slot_bytes,
+            ref_count=1,
+            pin_count=0,
+            fmt=fmt,
+            cached_positions=cached_positions,
+            shapes=shapes,
+            dtypes=dtypes,
+        )
+        return TensorMemoryObj(slot_slice, meta, self._arena_allocator)
 
     def _reserve_restore_items(
         self,
@@ -1090,7 +1673,8 @@ class DaxBackend(StoragePluginInterface):
             RuntimeError: If the local CPU allocator cannot provide enough
                 output buffers for the batch.
         """
-        assert self.local_cpu_backend is not None
+        if self.local_cpu_backend is None:
+            raise RuntimeError("DaxBackend tiered restore requires local_cpu_backend")
 
         grouped_items: OrderedDict[
             tuple[tuple[int, ...], torch.dtype, MemoryFormat], list[_RestoreItem]

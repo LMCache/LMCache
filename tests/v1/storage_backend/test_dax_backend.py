@@ -16,11 +16,14 @@ import torch
 # First Party
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
+from lmcache.v1.event_manager import EventManager
 from lmcache.v1.kv_layer_groups import KVLayerGroupInfo, KVLayerGroupsManager
 from lmcache.v1.memory_management import AdHocMemoryAllocator, MemoryFormat, MemoryObj
 from lmcache.v1.metadata import LMCacheMetadata
+from lmcache.v1.storage_backend.abstract_backend import AllocatorBackendInterface
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 from lmcache.v1.storage_backend.plugins.dax_backend import DaxBackend
+from lmcache.v1.storage_backend.storage_manager import StorageManager
 import lmcache.v1.storage_backend.plugins.dax_backend as dax_backend_module
 
 
@@ -31,6 +34,11 @@ def loop_in_thread() -> Generator[asyncio.AbstractEventLoop]:
         yield loop
     finally:
         loop.close()
+
+
+@pytest.fixture
+def disable_direct_gpu_ready(monkeypatch):
+    monkeypatch.setattr(DaxBackend, "_ensure_direct_gpu_ready", lambda self: None)
 
 
 def _create_metadata(
@@ -136,6 +144,27 @@ def _store_tensor(
                 future.result(timeout=5)
     finally:
         obj.ref_count_down()
+
+
+def _create_primary_backend(dev_path: str) -> DaxBackend:
+    config = _create_config(
+        chunk_size=16,
+        local_cpu=False,
+        max_local_cpu_size=0.0,
+        extra_config={
+            "dax.device_path": dev_path,
+            "dax.mode": "primary",
+            "dax.max_dax_size": 4096 / 1024**3,
+        },
+    )
+    metadata = _create_metadata(chunk_size=16)
+    return DaxBackend(
+        config=config,
+        metadata=metadata,
+        local_cpu_backend=None,
+        loop=None,
+        dst_device="cuda:0",
+    )
 
 
 def test_dax_backend_roundtrip(memory_allocator, loop_in_thread):
@@ -582,6 +611,126 @@ def test_dax_backend_requires_local_cpu_backend() -> None:
             )
 
 
+def test_dax_backend_primary_requires_cuda_dst_device() -> None:
+    with tempfile.TemporaryDirectory() as td:
+        dev_path = os.path.join(td, "dax.bin")
+        with open(dev_path, "wb") as fout:
+            fout.truncate(4096)
+
+        config = _create_config(
+            chunk_size=16,
+            local_cpu=False,
+            max_local_cpu_size=0.0,
+            extra_config={
+                "dax.device_path": dev_path,
+                "dax.mode": "primary",
+                "dax.max_dax_size": 4096 / 1024**3,
+            },
+        )
+        metadata = _create_metadata(chunk_size=16)
+
+        with pytest.raises(ValueError, match="requires a CUDA dst_device"):
+            DaxBackend(
+                config=config,
+                metadata=metadata,
+                local_cpu_backend=None,
+                loop=None,
+                dst_device="cpu",
+            )
+
+
+@pytest.mark.parametrize(
+    ("local_cpu", "max_local_cpu_size"),
+    [(True, 0.0), (False, 0.1)],
+)
+def test_dax_backend_primary_rejects_cpu_tier_config(
+    local_cpu: bool,
+    max_local_cpu_size: float,
+) -> None:
+    with tempfile.TemporaryDirectory() as td:
+        dev_path = os.path.join(td, "dax.bin")
+        with open(dev_path, "wb") as fout:
+            fout.truncate(4096)
+
+        config = _create_config(
+            chunk_size=16,
+            local_cpu=local_cpu,
+            max_local_cpu_size=max_local_cpu_size,
+            extra_config={
+                "dax.device_path": dev_path,
+                "dax.mode": "primary",
+                "dax.max_dax_size": 4096 / 1024**3,
+            },
+        )
+        metadata = _create_metadata(chunk_size=16)
+
+        with pytest.raises(ValueError, match="conflicts with local_cpu"):
+            DaxBackend(
+                config=config,
+                metadata=metadata,
+                local_cpu_backend=None,
+                loop=None,
+                dst_device="cuda:0",
+            )
+
+
+def test_storage_manager_can_use_dax_primary_as_allocator(
+    disable_direct_gpu_ready,
+    monkeypatch,
+) -> None:
+    del disable_direct_gpu_ready
+    monkeypatch.setattr(
+        "lmcache.v1.storage_backend.storage_manager.is_cuda_worker",
+        lambda metadata: True,
+    )
+    monkeypatch.setattr(
+        "lmcache.v1.storage_backend.storage_manager.torch.cuda.Stream",
+        lambda: object(),
+    )
+    monkeypatch.setattr(
+        "lmcache.v1.storage_backend.is_cuda_worker",
+        lambda metadata: True,
+    )
+    monkeypatch.setattr(
+        "lmcache.v1.storage_backend.torch.cuda.current_device",
+        lambda: 0,
+    )
+
+    with tempfile.TemporaryDirectory() as td:
+        dev_path = os.path.join(td, "dax.bin")
+        with open(dev_path, "wb") as fout:
+            fout.truncate(4096)
+
+        config = _create_config(
+            chunk_size=16,
+            local_cpu=False,
+            max_local_cpu_size=0.0,
+            storage_plugins=["dax"],
+            extra_config={
+                "storage_plugin.dax.module_path": (
+                    "lmcache.v1.storage_backend.plugins.dax_backend"
+                ),
+                "storage_plugin.dax.class_name": "DaxBackend",
+                "dax.device_path": dev_path,
+                "dax.mode": "primary",
+                "dax.max_dax_size": 4096 / 1024**3,
+            },
+        )
+        metadata = _create_metadata(chunk_size=16, role="worker")
+        manager = StorageManager(
+            config=config,
+            metadata=metadata,
+            event_manager=EventManager(),
+        )
+        try:
+            assert manager.allocator_backend is not None
+            assert manager.allocator_backend.__class__.__name__ == "DaxBackend"
+            assert isinstance(manager.allocator_backend, AllocatorBackendInterface)
+            assert manager.memcheck()
+        finally:
+            manager.close()
+
+
 def test_dax_backend_rejects_multi_group_metadata_at_init() -> None:
     with tempfile.TemporaryDirectory() as td:
         dev_path = os.path.join(td, "dax.bin")
@@ -607,6 +756,201 @@ def test_dax_backend_rejects_multi_group_metadata_at_init() -> None:
                 loop=None,
                 dst_device="cpu",
             )
+
+
+def test_dax_backend_primary_allocation_release_reuses_capacity(
+    disable_direct_gpu_ready,
+) -> None:
+    del disable_direct_gpu_ready
+    with tempfile.TemporaryDirectory() as td:
+        dev_path = os.path.join(td, "dax.bin")
+        with open(dev_path, "wb") as fout:
+            fout.truncate(4096)
+
+        backend = _create_primary_backend(dev_path)
+        try:
+            for _ in range(4):
+                obj = backend.allocate(
+                    torch.Size([2, 16, 8]),
+                    torch.bfloat16,
+                    fmt=MemoryFormat.KV_T2D,
+                    eviction=False,
+                )
+                assert obj is not None
+                obj.ref_count_down()
+
+            objs = backend.batched_allocate(
+                torch.Size([2, 16, 8]),
+                torch.bfloat16,
+                batch_size=2,
+                fmt=MemoryFormat.KV_T2D,
+                eviction=False,
+            )
+            assert objs is not None
+            for obj in objs:
+                obj.ref_count_down()
+        finally:
+            backend.close()
+
+
+def test_dax_backend_primary_direct_commit_skips_write(
+    disable_direct_gpu_ready,
+    monkeypatch,
+) -> None:
+    del disable_direct_gpu_ready
+    with tempfile.TemporaryDirectory() as td:
+        dev_path = os.path.join(td, "dax.bin")
+        with open(dev_path, "wb") as fout:
+            fout.truncate(4096)
+
+        backend = _create_primary_backend(dev_path)
+
+        def _unexpected_write(*args, **kwargs):
+            raise AssertionError("primary direct commit should not copy")
+
+        monkeypatch.setattr(backend, "_do_write", _unexpected_write)
+        try:
+            key = CacheEngineKey("test_model", 1, 0, 601, torch.bfloat16)
+            obj = backend.allocate(
+                torch.Size([2, 16, 8]),
+                torch.bfloat16,
+                fmt=MemoryFormat.KV_T2D,
+                eviction=False,
+            )
+            assert obj is not None
+            assert obj.tensor is not None
+            obj.tensor.fill_(11)
+
+            backend.batched_submit_put_task([key], [obj])
+            obj.ref_count_down()
+
+            out = backend.get_blocking(key)
+            assert out is not None
+            assert out.tensor is not None
+            assert torch.all(out.tensor == 11)
+            out.ref_count_down()
+        finally:
+            backend.close()
+
+
+def test_dax_backend_primary_defaults_none_fmt_for_retrieve(
+    disable_direct_gpu_ready,
+) -> None:
+    del disable_direct_gpu_ready
+    with tempfile.TemporaryDirectory() as td:
+        dev_path = os.path.join(td, "dax.bin")
+        with open(dev_path, "wb") as fout:
+            fout.truncate(4096)
+
+        backend = _create_primary_backend(dev_path)
+        try:
+            key = CacheEngineKey("test_model", 1, 0, 605, torch.bfloat16)
+            obj = backend.allocate(
+                torch.Size([2, 16, 8]),
+                torch.bfloat16,
+                fmt=None,
+                eviction=False,
+            )
+            assert obj is not None
+            assert obj.metadata.fmt == MemoryFormat.KV_2LTD
+            assert obj.tensor is not None
+            obj.tensor.fill_(13)
+
+            backend.batched_submit_put_task([key], [obj])
+            obj.ref_count_down()
+
+            out = backend.get_blocking(key)
+            assert out is not None
+            assert out.metadata.fmt == MemoryFormat.KV_2LTD
+            assert out.tensor is not None
+            assert torch.all(out.tensor == 13)
+            out.ref_count_down()
+        finally:
+            backend.close()
+
+
+def test_dax_backend_primary_view_reclaim_after_release(
+    disable_direct_gpu_ready,
+) -> None:
+    del disable_direct_gpu_ready
+    with tempfile.TemporaryDirectory() as td:
+        dev_path = os.path.join(td, "dax.bin")
+        with open(dev_path, "wb") as fout:
+            fout.truncate(4096)
+
+        backend = _create_primary_backend(dev_path)
+        try:
+            key1 = CacheEngineKey("test_model", 1, 0, 611, torch.bfloat16)
+            key2 = CacheEngineKey("test_model", 1, 0, 612, torch.bfloat16)
+
+            obj1 = backend.allocate(
+                torch.Size([2, 16, 8]),
+                torch.bfloat16,
+                fmt=MemoryFormat.KV_T2D,
+                eviction=False,
+            )
+            assert obj1 is not None
+            assert obj1.tensor is not None
+            obj1.tensor.fill_(1)
+            backend.batched_submit_put_task([key1], [obj1])
+            obj1.ref_count_down()
+
+            borrowed = backend.get_blocking(key1)
+            assert borrowed is not None
+            assert borrowed.tensor is not None
+            assert torch.all(borrowed.tensor == 1)
+            assert backend.remove(key1)
+
+            obj2 = backend.allocate(
+                torch.Size([2, 16, 8]),
+                torch.bfloat16,
+                fmt=MemoryFormat.KV_T2D,
+                eviction=False,
+            )
+            assert obj2 is not None
+            assert obj2.tensor is not None
+            obj2.tensor.fill_(9)
+            backend.batched_submit_put_task([key2], [obj2])
+            obj2.ref_count_down()
+
+            assert torch.all(borrowed.tensor == 1)
+            borrowed.ref_count_down()
+            assert backend.remove(key2)
+
+            recycled = backend.batched_allocate(
+                torch.Size([2, 16, 8]),
+                torch.bfloat16,
+                batch_size=2,
+                fmt=MemoryFormat.KV_T2D,
+                eviction=False,
+            )
+            assert recycled is not None
+            for memory_obj in recycled:
+                memory_obj.ref_count_down()
+        finally:
+            backend.close()
+
+
+def test_dax_backend_primary_rejects_multi_tensor_allocate(
+    disable_direct_gpu_ready,
+) -> None:
+    del disable_direct_gpu_ready
+    with tempfile.TemporaryDirectory() as td:
+        dev_path = os.path.join(td, "dax.bin")
+        with open(dev_path, "wb") as fout:
+            fout.truncate(4096)
+
+        backend = _create_primary_backend(dev_path)
+        try:
+            obj = backend.allocate(
+                [torch.Size([2, 16, 8]), torch.Size([2, 16, 8])],
+                [torch.bfloat16, torch.bfloat16],
+                fmt=MemoryFormat.KV_T2D,
+                eviction=False,
+            )
+            assert obj is None
+        finally:
+            backend.close()
 
 
 def test_dax_backend_failed_init_does_not_leak_fds() -> None:
