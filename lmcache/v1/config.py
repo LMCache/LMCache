@@ -216,6 +216,11 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
     },
     "pd_proxy_host": {"type": Optional[str], "default": None, "env_converter": str},
     "pd_proxy_port": {"type": Optional[int], "default": None, "env_converter": int},
+    "pd_skip_proxy_notification": {
+        "type": bool,
+        "default": False,
+        "env_converter": _to_bool,
+    },
     # Transfer-related configurations
     "transfer_channel": {"type": Optional[str], "default": None, "env_converter": str},
     # Nixl-related configurations
