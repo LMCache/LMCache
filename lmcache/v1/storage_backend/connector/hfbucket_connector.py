@@ -325,44 +325,52 @@ class HFBucketConnector(RemoteConnector):
 
         downloaded_data = await asyncio.to_thread(self._download_objects, downloads)
 
-        for index, data in downloaded_data.items():
-            if data is None:
-                continue
+        try:
+            for index, data in downloaded_data.items():
+                if data is None:
+                    continue
 
-            if len(data) != self.full_chunk_size_bytes:
-                key_str = key_strings[index]
-                logger.error(
-                    "Downloaded object for %s has %d bytes, expected %d bytes. "
-                    "Rejecting the load because hfbucket only supports full chunks.",
-                    key_str,
-                    len(data),
-                    self.full_chunk_size_bytes,
-                )
-                self._set_cached_object_size(key_str, len(data))
-                continue
-
-            memory_obj = self.local_cpu_backend.allocate(
-                self.meta_shapes,
-                self.meta_dtypes,
-                self.meta_fmt,
-            )
-            if memory_obj is None:
-                logger.debug(
-                    "Memory allocation failed while downloading from hfbucket."
-                )
-                continue
-
-            try:
-                buffer = memory_obj.byte_array.cast("B")
-                if len(buffer) < len(data):
-                    raise RuntimeError(
-                        "Allocated buffer is smaller than downloaded hfbucket object"
+                if len(data) != self.full_chunk_size_bytes:
+                    key_str = key_strings[index]
+                    logger.error(
+                        "Downloaded object for %s has %d bytes, expected %d bytes. "
+                        "Rejecting the load because hfbucket only supports full "
+                        "chunks.",
+                        key_str,
+                        len(data),
+                        self.full_chunk_size_bytes,
                     )
-                buffer[: len(data)] = data
-                results[index] = memory_obj
-            except Exception:
-                memory_obj.ref_count_down()
-                raise
+                    self._set_cached_object_size(key_str, len(data))
+                    continue
+
+                memory_obj = self.local_cpu_backend.allocate(
+                    self.meta_shapes,
+                    self.meta_dtypes,
+                    self.meta_fmt,
+                )
+                if memory_obj is None:
+                    logger.debug(
+                        "Memory allocation failed while downloading from hfbucket."
+                    )
+                    continue
+
+                try:
+                    buffer = memory_obj.byte_array.cast("B")
+                    if len(buffer) < len(data):
+                        raise RuntimeError(
+                            "Allocated buffer is smaller than downloaded "
+                            "hfbucket object"
+                        )
+                    buffer[: len(data)] = data
+                    results[index] = memory_obj
+                except Exception:
+                    memory_obj.ref_count_down()
+                    raise
+        except Exception:
+            for existing in results:
+                if existing is not None:
+                    existing.ref_count_down()
+            raise
 
         return results
 
