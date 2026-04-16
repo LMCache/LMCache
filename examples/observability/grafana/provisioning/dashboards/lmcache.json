@@ -1,0 +1,126 @@
+{
+  "title": "LMCache",
+  "uid": "lmcache-standard",
+  "refresh": "5s",
+  "time": { "from": "now-1h", "to": "now" },
+  "schemaVersion": 38,
+  "panels": [
+
+    {
+      "id": 1,
+      "title": "Cache Hit Rate",
+      "type": "gauge",
+      "gridPos": { "x": 0, "y": 0, "w": 6, "h": 8 },
+      "datasource": { "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1,
+          "thresholds": {
+            "steps": [
+              { "color": "red",    "value": 0 },
+              { "color": "yellow", "value": 0.4 },
+              { "color": "green",  "value": 0.7 }
+            ]
+          }
+        }
+      },
+      "targets": [
+        {
+          "expr": "clamp_min(sum(lmcache_mp_sm_read_succeed_keys_total), 0) / clamp_min(sum(lmcache_mp_sm_read_succeed_keys_total) + sum(lmcache_mp_sm_read_failed_keys_total), 0.001)",
+          "legendFormat": "hit rate"
+        }
+      ]
+    },
+
+    {
+      "id": 2,
+      "title": "StorageManager — Read Hits vs Misses",
+      "type": "timeseries",
+      "gridPos": { "x": 6, "y": 0, "w": 18, "h": 8 },
+      "datasource": { "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": { "unit": "ops", "custom": { "lineWidth": 2 } }
+      },
+      "targets": [
+        {
+          "expr": "rate(lmcache_mp_sm_read_succeed_keys_total[30s])",
+          "legendFormat": "read hits/s"
+        },
+        {
+          "expr": "rate(lmcache_mp_sm_read_failed_keys_total[30s])",
+          "legendFormat": "read misses/s"
+        },
+        {
+          "expr": "rate(lmcache_mp_sm_write_succeed_keys_total[30s])",
+          "legendFormat": "writes/s"
+        }
+      ]
+    },
+
+    {
+      "id": 3,
+      "title": "L1 Cache Operations",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 8, "w": 12, "h": 8 },
+      "datasource": { "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": { "unit": "ops", "custom": { "lineWidth": 2 } }
+      },
+      "targets": [
+        {
+          "expr": "rate(lmcache_mp_l1_read_keys_total[30s])",
+          "legendFormat": "l1 reads/s"
+        },
+        {
+          "expr": "rate(lmcache_mp_l1_write_keys_total[30s])",
+          "legendFormat": "l1 writes/s"
+        },
+        {
+          "expr": "rate(lmcache_mp_l1_evicted_keys_total[30s])",
+          "legendFormat": "l1 evictions/s"
+        }
+      ]
+    },
+
+    {
+      "id": 4,
+      "title": "Active Prefetch Jobs",
+      "type": "timeseries",
+      "gridPos": { "x": 12, "y": 8, "w": 12, "h": 8 },
+      "datasource": { "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": { "unit": "short", "custom": { "lineWidth": 2 } }
+      },
+      "targets": [
+        {
+          "expr": "lmcache_mp_active_prefetch_jobs",
+          "legendFormat": "active prefetch jobs"
+        }
+      ]
+    },
+
+    {
+      "id": 5,
+      "title": "Request Traces",
+      "description": "Waterfall view of per-request spans. Each trace shows the root 'request' span with child spans: mp.lookup_prefetch, mp.retrieve, mp.store. Click a row to open the full waterfall in Tempo.",
+      "type": "traces",
+      "gridPos": { "x": 0, "y": 16, "w": 24, "h": 12 },
+      "datasource": { "uid": "tempo" },
+      "targets": [
+        {
+          "queryType": "traceql",
+          "query": "{ name = \"request\" }",
+          "limit": 20,
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "dedupStrategy": "none",
+        "sortBy": [{ "displayName": "Start time", "desc": true }]
+      }
+    }
+
+  ]
+}
