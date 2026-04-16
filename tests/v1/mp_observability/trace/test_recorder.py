@@ -199,9 +199,29 @@ class TestReaderRobustness:
         assert isinstance(records, list)
 
     def test_bad_magic_rejected(self, trace_path):
+        # Build a structurally valid Header frame but with wrong magic
+        # so the reader's magic check (rather than msgspec's schema
+        # check) fires.
+        # First Party
+        from lmcache.v1.mp_observability.trace.format import (
+            FORMAT_VERSION,
+            Header,
+            encode_header,
+        )
+
+        bad = Header(
+            magic=b"WRNG",
+            format_version=FORMAT_VERSION,
+            level="storage",
+            lmcache_version="x",
+            t_mono_start=0.0,
+            t_wall_start=0.0,
+            sm_config_json="",
+            sm_config_digest="",
+        )
+        frame = encode_header(bad)
         with open(trace_path, "wb") as fh:
-            # 4 bytes length prefix + 4 bytes garbage payload
-            fh.write(b"\x00\x00\x00\x04XXXX")
+            fh.write(len(frame).to_bytes(4, "big") + frame)
         with pytest.raises(ValueError, match="bad magic"):
             TraceReader(trace_path)
 
