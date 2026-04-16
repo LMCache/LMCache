@@ -434,7 +434,7 @@ class PDBackendAsync(AllocatorBackendInterface):
         """
         return self.memory_allocator
 
-    def get_allocator_backend(self):
+    def get_allocator_backend(self) -> "PDBackendAsync":
         """Return the allocator backend instance (self).
 
         :return: This backend instance, which implements AllocatorBackendInterface.
@@ -1414,6 +1414,7 @@ class PDBackendAsync(AllocatorBackendInterface):
                             self._max_inflight_chunks,
                         )
                         await self._inflight_condition.wait()
+                    self._inflight_chunks += 1
 
                 mem_obj = self.allocate(torch.Size(shape), dtype, fmt)
                 # Event-driven retry: wait on _inflight_condition for notification
@@ -1423,6 +1424,9 @@ class PDBackendAsync(AllocatorBackendInterface):
                 while mem_obj is None:
                     remaining = deadline - asyncio.get_running_loop().time()
                     if remaining <= 0:
+                        async with self._inflight_condition:
+                            self._inflight_chunks -= 1
+                            self._inflight_condition.notify_all()
                         raise RuntimeError(
                             f"Failed to allocate memory for key {key} after "
                             f"timeout (~{self._allocation_timeout:.0f}s). "
@@ -1442,8 +1446,6 @@ class PDBackendAsync(AllocatorBackendInterface):
 
                 alloc_indexes.append(mem_obj.meta.address)
                 self.put(key, mem_obj)
-                async with self._inflight_condition:
-                    self._inflight_chunks += 1
                 current_batch_keys.append(key_str)
         except BaseException:
             # Rollback: remove already-allocated chunks from this batch
@@ -1479,7 +1481,7 @@ class PDBackendAsync(AllocatorBackendInterface):
         self,
         key: CacheEngineKey,
         mem_obj: MemoryObj,
-    ):
+    ) -> None:
         """Store a memory object in the local data dictionary.
 
         If a memory object already exists for the given key, the old object is
