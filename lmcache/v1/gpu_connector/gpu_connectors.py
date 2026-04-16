@@ -12,8 +12,8 @@ from lmcache.utils import EngineType, _lmcache_nvtx_annotate
 from lmcache.v1.compute.blend.utils import LMCBlenderBuilder
 from lmcache.v1.gpu_connector.utils import (
     LayoutHints,
-    canonicalize_kv_caches,
     assert_is_vllm_flash_attn_or_flash_infer,
+    canonicalize_kv_caches,
     discover_gpu_kv_format,
     ensure_contiguous_kv_caches,
     get_block_size,

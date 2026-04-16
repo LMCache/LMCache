@@ -19,8 +19,8 @@ from lmcache.logging import init_logger
 from lmcache.utils import EngineType
 from lmcache.v1.gpu_connector.utils import (
     LayoutHints,
-    canonicalize_kv_caches,
     as_tensor_list,
+    canonicalize_kv_caches,
     discover_gpu_kv_format,
     get_attention_backend,
     get_block_size,
@@ -121,9 +121,7 @@ class GPUCacheContext:
             hidden_dim = get_hidden_dim_size(rep, self.gpu_kv_format_)
             nh = 1 if self.is_mla_ else get_num_heads(rep, self.gpu_kv_format_)
             hs = get_head_size(rep, self.gpu_kv_format_)
-            nl = group_num_layers(
-                self.kv_caches_, self.num_layers_, group.num_layers
-            )
+            nl = group_num_layers(self.kv_caches_, self.num_layers_, group.num_layers)
             element_size = group_element_size(self.kv_caches_, first_layer)
 
             self.hidden_dim_sizes_.append(hidden_dim)

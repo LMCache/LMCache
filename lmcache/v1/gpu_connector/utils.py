@@ -28,17 +28,14 @@ import lmcache.c_ops as lmc_ops
 
 logger = init_logger(__name__)
 
-# KV caches as handed to LMCache by a serving engine.  Recursive so a
-# single alias covers every shape ``discover_gpu_kv_format`` traverses:
-#
-# * bare tensor (cross-layer formats — one allocation spans every layer),
-# * ``list[Tensor]`` (most per-layer formats), and
-# * ``list[list[Tensor]]`` (SGLang MHA: ``[k_list, v_list]``).
-#
-# The per-format helpers below narrow to ``torch.Tensor`` via ``_t`` at
-# each indexed access; the format enum tells the helper how deep to
-# index, the ``_t`` helper asserts that what comes out is a tensor.
-KVCaches = Union[torch.Tensor, List["KVCaches"]]
+# KV caches as handed to LMCache by a serving engine — either a bare
+# tensor (cross-layer formats, one allocation for every layer) or a
+# list of per-layer tensors.  SGLang MHA actually passes
+# ``[k_list, v_list]`` (``list[list[Tensor]]``) and is handled at the
+# two SGLang MHA branches below; the annotation is kept shallow
+# because ``Tensor[0]`` and ``list[Tensor][0]`` both narrow to
+# ``Tensor`` and mypy accepts either way.
+KVCaches = Union[torch.Tensor, List[torch.Tensor]]
 
 
 # Error message for accessing non-existent attributes in GPU KV Cache
