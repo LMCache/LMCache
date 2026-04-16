@@ -45,7 +45,6 @@ from lmcache.v1.distributed.internal_api import L1MemoryDesc
 from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface, L2TaskId
 from lmcache.v1.distributed.l2_adapters.config import (
     L2AdapterConfigBase,
-    PersistConfig,
     register_l2_adapter_type,
 )
 from lmcache.v1.distributed.l2_adapters.factory import (
@@ -350,6 +349,7 @@ class DynamicNixlStoreL2Adapter(L2AdapterInterface):
 
         # Cache data structures
         self._memory_objects: dict[ObjectKey, NixlStoreObj] = {}
+        self._inflight_stores: set[ObjectKey] = set()
         self._total_bytes: int = 0
         max_capacity_gb = float(config.backend_params.get("max_capacity_gb", 0))
         if max_capacity_gb <= 0:
@@ -376,14 +376,7 @@ class DynamicNixlStoreL2Adapter(L2AdapterInterface):
             l1_memory_desc=l1_memory_desc,
         )
 
-        # Persist defaults to True.  When persist_config is None (not
-        # parsed from CLI), fall back to the dataclass default.
-        pc = (
-            config.persist_config
-            if config.persist_config is not None
-            else PersistConfig()
-        )
-        self._persist_enabled = pc.persist_enabled
+        self._persist_enabled = config.persist_config.persist_enabled
 
     # --------------------
     # Event Fd Interface
@@ -471,7 +464,7 @@ class DynamicNixlStoreL2Adapter(L2AdapterInterface):
 
     def delete(self, keys: list[ObjectKey]) -> None:
         """Delete objects from storage, removing their files from disk."""
-        deleted_keys: list[ObjectKey] = []
+        to_delete: list[tuple[ObjectKey, str]] = []
         with self._lock:
             for key in keys:
                 obj = self._memory_objects.get(key)
@@ -486,9 +479,13 @@ class DynamicNixlStoreL2Adapter(L2AdapterInterface):
                     continue
                 self._total_bytes -= obj.size
                 del self._memory_objects[key]
-                file_path = self.nixl_agent.get_file_path_for_key(key)
-                self.nixl_agent.dynamic_delete_file(file_path)
-                deleted_keys.append(key)
+                to_delete.append((key, self.nixl_agent.get_file_path_for_key(key)))
+        # Filesystem I/O outside the lock to avoid blocking concurrent
+        # store/lookup/load operations.
+        deleted_keys: list[ObjectKey] = []
+        for key, file_path in to_delete:
+            self.nixl_agent.dynamic_delete_file(file_path)
+            deleted_keys.append(key)
         if deleted_keys:
             self._notify_keys_deleted(deleted_keys)
 
@@ -597,9 +594,11 @@ class DynamicNixlStoreL2Adapter(L2AdapterInterface):
                 mem_addr = obj.meta.address
                 mem_size = obj.meta.phy_size
 
-                # Skip if key already exists or capacity exceeded
+                # Reserve the key and capacity under the lock *before*
+                # the DMA write so that concurrent coroutines (other
+                # stores, secondary lookups) see the reservation.
                 with self._lock:
-                    if key in self._memory_objects:
+                    if key in self._memory_objects or key in self._inflight_stores:
                         continue
                     if self._total_bytes + mem_size > self._max_capacity_bytes:
                         logger.warning(
@@ -607,28 +606,38 @@ class DynamicNixlStoreL2Adapter(L2AdapterInterface):
                             key,
                         )
                         break
+                    self._inflight_stores.add(key)
+                    self._total_bytes += mem_size
 
-                mem_indices = self.nixl_agent.get_memory_indices(mem_addr, mem_size)
-                file_path = self.nixl_agent.get_file_path_for_key(key)
+                try:
+                    mem_indices = self.nixl_agent.get_memory_indices(mem_addr, mem_size)
+                    file_path = self.nixl_agent.get_file_path_for_key(key)
 
-                await self.nixl_agent.dynamic_store_file(
-                    mem_indices, file_path, self.nixl_agent.l1_align_bytes
-                )
+                    await self.nixl_agent.dynamic_store_file(
+                        mem_indices, file_path, self.nixl_agent.l1_align_bytes
+                    )
 
-                store_obj = NixlStoreObj(
-                    page_indices=[],  # not used in dynamic mode
-                    size=obj.meta.phy_size,
-                    layout=MemoryLayoutDesc(
-                        [obj.meta.shape],
-                        [obj.meta.dtype],
-                    ),
-                    pin_count=1,
-                )
-                with self._lock:
-                    self._memory_objects[key] = store_obj
-                    self._total_bytes += store_obj.size
-                    store_obj.decrease_pin_count()
-                stored_keys.append(key)
+                    store_obj = NixlStoreObj(
+                        page_indices=[],  # not used in dynamic mode
+                        size=mem_size,
+                        layout=MemoryLayoutDesc(
+                            [obj.meta.shape],
+                            [obj.meta.dtype],
+                        ),
+                        pin_count=1,
+                    )
+                    with self._lock:
+                        self._inflight_stores.discard(key)
+                        self._memory_objects[key] = store_obj
+                        store_obj.decrease_pin_count()
+                    stored_keys.append(key)
+                except Exception:
+                    # Un-reserve on failure so capacity accounting
+                    # stays correct.
+                    with self._lock:
+                        self._inflight_stores.discard(key)
+                        self._total_bytes -= mem_size
+                    raise
 
         except Exception:
             logger.exception("Dynamic NIXL store task %d failed", task_id)
@@ -670,6 +679,10 @@ class DynamicNixlStoreL2Adapter(L2AdapterInterface):
         The file size is read via ``os.stat``. Layout is left as ``None`` and
         will be supplied by the caller's MemoryObj at load time.
         """
+        # Skip keys with an in-flight store to avoid double-counting
+        # in _total_bytes.
+        if key in self._inflight_stores:
+            return None
         file_path = self.nixl_agent.get_file_path_for_key(key)
         try:
             obj_size = os.stat(file_path).st_size

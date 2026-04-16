@@ -122,9 +122,9 @@ class L2AdapterConfigBase(ABC):
     #: means L2 eviction is disabled for this adapter.
     eviction_config: EvictionConfig | None = None
 
-    #: Populated by ``_parse_persist_config`` after ``from_dict``; ``None``
-    #: means persist/recover is disabled for this adapter.
-    persist_config: PersistConfig | None = None
+    #: Populated by ``_parse_persist_config`` after ``from_dict``.
+    #: Defaults to ``PersistConfig()`` (persist enabled).
+    persist_config: PersistConfig = PersistConfig()
 
     @staticmethod
     def _parse_eviction_config(d: dict) -> EvictionConfig | None:
@@ -166,12 +166,11 @@ class L2AdapterConfigBase(ABC):
         )
 
     @staticmethod
-    def _parse_persist_config(d: dict) -> PersistConfig | None:
+    def _parse_persist_config(d: dict) -> PersistConfig:
         """
         Parse optional ``"persist_enabled"`` key from an adapter JSON spec.
 
-        Defaults to ``True``.  Returns ``None`` only when explicitly set
-        to ``False``.
+        Defaults to ``True``.
 
         Expected format::
 
@@ -182,8 +181,6 @@ class L2AdapterConfigBase(ABC):
             }
         """
         persist_enabled = bool(d.get("persist_enabled", True))
-        if not persist_enabled:
-            return None
         return PersistConfig(persist_enabled=persist_enabled)
 
     @classmethod
