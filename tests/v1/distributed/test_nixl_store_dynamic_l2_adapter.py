@@ -3,7 +3,7 @@
 Unit tests for DynamicNixlStoreL2Adapter with POSIX backend.
 
 Tests cover the L2AdapterInterface contract, dynamic file operations,
-persist/recover, and capacity management.
+persist, secondary lookup, and capacity management.
 """
 
 # Standard
@@ -157,7 +157,7 @@ def adapter():
 
 @pytest.fixture
 def adapter_with_persist():
-    """Create a DynamicNixlStoreL2Adapter with persist+recover enabled.
+    """Create a DynamicNixlStoreL2Adapter with persist enabled.
 
     Yields (adapter, buffer, tmp_dir, l1_memory, config) and does NOT call
     close() — tests manage the lifecycle themselves.
@@ -180,10 +180,7 @@ def adapter_with_persist():
             "max_capacity_gb": str(MAX_CAPACITY_GB),
         },
     )
-    config.persist_config = PersistConfig(
-        persist_enabled=True,
-        recover_enabled=True,
-    )
+    config.persist_config = PersistConfig(persist_enabled=True)
     adpt = DynamicNixlStoreL2Adapter(config, l1_memory)
 
     yield adpt, buffer, tmp_dir, l1_memory, config
@@ -612,11 +609,11 @@ class TestCapacity:
 
 
 # =============================================================================
-# Persist / Recover Tests
+# Persist / Secondary Lookup Tests
 # =============================================================================
 
 
-class TestPersistRecover:
+class TestPersistAndSecondaryLookup:
     def test_persist_keeps_files_on_close(self, adapter_with_persist):
         """With persist_enabled=True, data files remain on disk after close."""
         adpt, buf, tmp_dir, _, _ = adapter_with_persist
@@ -634,8 +631,8 @@ class TestPersistRecover:
 
         assert os.path.exists(data_file)
 
-    def test_recover_finds_key_via_lookup(self, adapter_with_persist):
-        """With recover_enabled=True, lookup finds keys whose files exist."""
+    def test_secondary_lookup_finds_key(self, adapter_with_persist):
+        """Lookup finds keys whose files exist on disk via secondary lookup."""
         adpt, buf, _, l1_memory, config = adapter_with_persist
         key = create_object_key(1)
         obj = create_memory_obj(buf, page_index=0, fill_value=77.0)
@@ -646,7 +643,7 @@ class TestPersistRecover:
         adpt.pop_completed_store_tasks()
         adpt.close()
 
-        # New adapter with recover_enabled
+        # New adapter — secondary lookup discovers the persisted file
         adpt2 = DynamicNixlStoreL2Adapter(config, l1_memory)
 
         # Lookup should find the key via secondary lookup
@@ -659,8 +656,8 @@ class TestPersistRecover:
         adpt2.submit_unlock([key])
         adpt2.close()
 
-    def test_recover_and_load_data(self, adapter_with_persist):
-        """After recover, load returns the same data that was stored."""
+    def test_secondary_lookup_and_load_data(self, adapter_with_persist):
+        """After secondary lookup, load returns the same data that was stored."""
         adpt, buf, _, l1_memory, config = adapter_with_persist
         key = create_object_key(1)
         store_obj = create_memory_obj(buf, page_index=0, fill_value=55.0)
@@ -690,8 +687,8 @@ class TestPersistRecover:
         adpt2.submit_unlock([key])
         adpt2.close()
 
-    def test_recover_misses_when_file_deleted(self, adapter_with_persist):
-        """Lookup returns miss for keys whose files are absent on disk."""
+    def test_secondary_lookup_misses_when_file_deleted(self, adapter_with_persist):
+        """Secondary lookup returns miss for keys whose files are absent on disk."""
         adpt, buf, tmp_dir, l1_memory, config = adapter_with_persist
         key = create_object_key(1)
         obj = create_memory_obj(buf, page_index=0)
@@ -715,7 +712,7 @@ class TestPersistRecover:
 
         adpt2.close()
 
-    def test_recover_usage_updates_on_lookup(self, adapter_with_persist):
+    def test_secondary_lookup_usage_updates(self, adapter_with_persist):
         """Secondary lookup populates _total_bytes so get_usage reflects disk files."""
         adpt, buf, _, l1_memory, config = adapter_with_persist
         key = create_object_key(1)
@@ -764,6 +761,7 @@ class TestPersistRecover:
                     "max_capacity_gb": str(MAX_CAPACITY_GB),
                 },
             )
+            config.persist_config = PersistConfig(persist_enabled=False)
             adpt = DynamicNixlStoreL2Adapter(config, l1_memory)
 
             key = create_object_key(1)
@@ -778,44 +776,5 @@ class TestPersistRecover:
             adpt.close()
 
             assert not os.path.exists(data_file)
-        finally:
-            shutil.rmtree(tmp_dir, ignore_errors=True)
-
-    def test_lookup_without_recover_ignores_disk(self):
-        """Without recover_enabled, lookup does not check disk."""
-        tmp_dir = tempfile.mkdtemp(prefix="nixl_dyn_no_recover_test_")
-        try:
-            buffer = torch.empty(
-                PAGE_SIZE * NUM_BUFFER_PAGES, dtype=torch.uint8, device="cpu"
-            )
-            l1_memory = L1MemoryDesc(
-                ptr=buffer.data_ptr(),
-                size=buffer.numel(),
-                align_bytes=PAGE_SIZE,
-            )
-            # Pre-create a file that the adapter should NOT discover
-            key = create_object_key(42)
-            fake_path = os.path.join(tmp_dir, _object_key_to_filename(key))
-            with open(fake_path, "wb") as f:
-                f.write(b"\x00" * PAGE_SIZE)
-
-            config = DynamicNixlStoreL2AdapterConfig(
-                backend="POSIX",
-                backend_params={
-                    "file_path": tmp_dir,
-                    "use_direct_io": "false",
-                    "max_capacity_gb": str(MAX_CAPACITY_GB),
-                },
-            )
-            # Explicitly no persist_config
-            adpt = DynamicNixlStoreL2Adapter(config, l1_memory)
-
-            task_id = adpt.submit_lookup_and_lock_task([key])
-            wait_for_event_fd(adpt.get_lookup_and_lock_event_fd())
-            bitmap = adpt.query_lookup_and_lock_result(task_id)
-            assert bitmap is not None
-            assert not bitmap.test(0)  # not found (no recover)
-
-            adpt.close()
         finally:
             shutil.rmtree(tmp_dir, ignore_errors=True)

@@ -7,10 +7,10 @@ The Nixl L2 adapter family implements `L2AdapterInterface` using the
 objects from L1 (DRAM/VRAM) to a secondary storage tier via DMA. There are
 two variants:
 
-| Adapter | Type name | Storage mode | Persist/Recover | Backends |
+| Adapter | Type name | Storage mode | Persist | Backends |
 |---|---|---|---|---|
 | `NixlStoreL2Adapter` | `nixl_store` | Static (pre-allocated files) | Not supported | GDS, GDS_MT, POSIX, HF3FS, OBJ |
-| `DynamicNixlStoreL2Adapter` | `nixl_store_dynamic` | Dynamic (per-operation files) | Supported | GDS, GDS_MT, POSIX, HF3FS |
+| `DynamicNixlStoreL2Adapter` | `nixl_store_dynamic` | Dynamic (per-operation files) | Supported (default on) | GDS, GDS_MT, POSIX, HF3FS |
 
 The **static** adapter pre-allocates all storage files at init and registers
 them with Nixl as a single prepped descriptor list. The **dynamic** adapter
@@ -176,9 +176,9 @@ Same `L2AdapterInterface` contract as the static adapter. Differences:
 - **Close:** Stops the event loop first (waits for in-flight tasks);
   when `persist_enabled`, data files are kept on disk, otherwise all
   data files are deleted.
-- **Lookup:** When `recover_enabled`, a lookup miss falls through to a
-  synchronous secondary lookup on disk; see the Persist / Recover
-  section below.
+- **Lookup:** A lookup miss always falls through to a synchronous
+  secondary lookup on disk; see the Persist / Secondary Lookup section
+  below.
 
 ### Operation Flow
 
@@ -209,23 +209,24 @@ lookup + pin count management).
 
 ---
 
-## Persist / Recover
+## Persist / Secondary Lookup
 
 ### Config
 
-`PersistConfig` (`l2_adapters/config.py`) has two independent boolean
-flags:
+`PersistConfig` (`l2_adapters/config.py`) has one boolean flag:
 
-| Field | Purpose |
-|---|---|
-| `persist_enabled` | If True, data files are kept on disk at shutdown. |
-| `recover_enabled` | If True, lookup also checks secondary storage (disk) on miss. |
+| Field | Default | Purpose |
+|---|---|---|
+| `persist_enabled` | `True` | If True, data files are kept on disk at shutdown. |
 
-These are parsed from the adapter JSON config keys `"persist_enabled"`
-and `"recover_enabled"` by `L2AdapterConfigBase._parse_persist_config()`.
+Parsed from the adapter JSON config key `"persist_enabled"` by
+`L2AdapterConfigBase._parse_persist_config()`.
 
-Only the dynamic adapter (`nixl_store_dynamic`) uses these flags; the
-static adapter ignores them.
+Lookup always checks secondary storage (disk) on miss — this is not
+configurable.
+
+Only the dynamic adapter (`nixl_store_dynamic`) uses persist; the
+static adapter ignores it.
 
 ### How it works
 
@@ -244,10 +245,10 @@ In `close()`, after the event loop has stopped:
 No metadata JSON is written — the deterministic `ObjectKey → filename`
 mapping is sufficient to rediscover each file on restart.
 
-#### Recover (lazy disk lookup)
+#### Secondary Lookup (lazy disk recovery)
 
-When `recover_enabled`, `_execute_lookup_in_the_loop` extends the
-in-memory index lookup with a secondary lookup on miss:
+`_execute_lookup_in_the_loop` always extends the in-memory index lookup
+with a secondary lookup on miss:
 
 1. Compute deterministic file path from the ObjectKey.
 2. `os.stat(file_path)` — if the file exists, treat as a hit.
@@ -255,7 +256,7 @@ in-memory index lookup with a secondary lookup on miss:
    result and `layout=None`.
 4. Update `_total_bytes`; enforce capacity (skip if it would exceed).
 
-The `NixlStoreObj.layout` field is left as `None` on recover. Layout
+The `NixlStoreObj.layout` field is left as `None` on secondary lookup. Layout
 information is only needed at load time, where the caller supplies it
 via the provided `MemoryObj`'s shape/dtype/phy_size.
 
@@ -288,8 +289,7 @@ via the provided `MemoryObj`'s shape/dtype/phy_size.
     "use_direct_io": "false",
     "max_capacity_gb": "10"
   },
-  "persist_enabled": true,
-  "recover_enabled": true
+  "persist_enabled": true
 }
 ```
 

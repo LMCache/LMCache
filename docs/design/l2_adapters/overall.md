@@ -485,11 +485,11 @@ factory branch in `__init__.py`.
 
 ### Persist / Recover (Optional)
 
-Adapters that support persisting cached data across restarts can opt in via
-`PersistConfig` (parsed from the JSON keys `"persist_enabled"` and
-`"recover_enabled"`). There is no dedicated interface method — adapters
-integrate the two flags into their existing `close()` (to keep data on
-disk) and lookup (to check secondary storage on miss) paths. See
+Adapters that support persisting cached data across restarts use
+`PersistConfig` (parsed from the JSON key `"persist_enabled"`, defaulting
+to ``True``). Lookup always checks secondary storage on miss. There is
+no dedicated interface method — adapters integrate persist into their
+existing `close()` (to keep data on disk) path. See
 `nixl_store_dynamic_l2_adapter.py` for a reference implementation and
 [`nixl_store.md`](nixl_store.md) for design details.
 

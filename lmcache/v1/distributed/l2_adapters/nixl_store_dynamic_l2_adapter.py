@@ -11,11 +11,13 @@ Atomic publish:
   This guarantees that readers (including other processes sharing the
   same directory) never observe a partially-written file.
 
-Persist / recover (both opt-in via ``persist_enabled`` / ``recover_enabled``):
-- Persist simply keeps data files on disk at shutdown (no metadata dump).
-- Recover lazily checks secondary storage (disk) during lookup and
-  populates the in-memory index on the fly when a file is found. File
-  names are derived deterministically from ObjectKey.
+Persist (enabled by default via ``persist_enabled``, can be opted out):
+- Keeps data files on disk at shutdown (no metadata dump).
+
+Secondary lookup (always on):
+- Lookup always checks secondary storage (disk) on miss and lazily
+  populates the in-memory index when a file is found. File names are
+  derived deterministically from ObjectKey.
 """
 
 # Future
@@ -43,6 +45,7 @@ from lmcache.v1.distributed.internal_api import L1MemoryDesc
 from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface, L2TaskId
 from lmcache.v1.distributed.l2_adapters.config import (
     L2AdapterConfigBase,
+    PersistConfig,
     register_l2_adapter_type,
 )
 from lmcache.v1.distributed.l2_adapters.factory import (
@@ -328,10 +331,9 @@ class DynamicNixlStoreL2Adapter(L2AdapterInterface):
 
     Each store creates a new file on disk; each load re-opens the file.
 
-    When ``persist_enabled`` is True, data files are kept on disk at
-    shutdown. When ``recover_enabled`` is True, lookup also checks
-    secondary storage (disk) for keys not in the in-memory index and
-    populates the index lazily.
+    When ``persist_enabled`` is True (the default), data files are kept
+    on disk at shutdown.  Lookup always checks secondary storage (disk)
+    for keys not in the in-memory index and populates the index lazily.
     """
 
     def __init__(
@@ -374,14 +376,14 @@ class DynamicNixlStoreL2Adapter(L2AdapterInterface):
             l1_memory_desc=l1_memory_desc,
         )
 
-        # If recover is enabled, lookup will also check secondary storage
-        # (disk) on miss and populate _memory_objects lazily.
-        self._recover_enabled = bool(
-            config.persist_config and config.persist_config.recover_enabled
+        # Persist defaults to True.  When persist_config is None (not
+        # parsed from CLI), fall back to the dataclass default.
+        pc = (
+            config.persist_config
+            if config.persist_config is not None
+            else PersistConfig()
         )
-        self._persist_enabled = bool(
-            config.persist_config and config.persist_config.persist_enabled
-        )
+        self._persist_enabled = pc.persist_enabled
 
     # --------------------
     # Event Fd Interface
@@ -644,15 +646,15 @@ class DynamicNixlStoreL2Adapter(L2AdapterInterface):
     ) -> None:
         """Look up keys and pin found objects.
 
-        If recover is enabled, also checks secondary storage (disk) for keys
-        not in the in-memory index and lazily populates ``_memory_objects``
-        for any data files found on disk.
+        Also checks secondary storage (disk) for keys not in the
+        in-memory index and lazily populates ``_memory_objects`` for any
+        data files found on disk.
         """
         bitmap = Bitmap(len(keys))
         with self._lock:
             for i, key in enumerate(keys):
                 obj = self._memory_objects.get(key)
-                if obj is None and self._recover_enabled:
+                if obj is None:
                     obj = self._secondary_lookup_locked(key)
                 if obj is None:
                     continue
@@ -791,9 +793,8 @@ class DynamicNixlStoreL2AdapterConfig(L2AdapterConfigBase):
             "string key-value pairs. Must include "
             "'file_path' and 'use_direct_io'.\n"
             "- persist_enabled (bool): if True, keep data files on disk "
-            "at shutdown (optional, default False)\n"
-            "- recover_enabled (bool): if True, lookup also checks "
-            "secondary storage (disk) on miss (optional, default False)"
+            "at shutdown (optional, default True)\n"
+            "Lookup always checks secondary storage (disk) on miss."
             % (_VALID_DYNAMIC_BACKENDS,)
         )
 

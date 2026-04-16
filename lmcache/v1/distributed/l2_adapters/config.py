@@ -33,16 +33,15 @@ T = TypeVar("T", bound="L2AdapterConfigBase")
 @dataclass(frozen=True)
 class PersistConfig:
     """
-    Configuration for persist/recover on an L2 adapter.
+    Configuration for persist on an L2 adapter.
 
-    Each flag can be enabled independently.
+    When enabled, data files are kept on disk at shutdown instead of
+    deleted. Lookup always checks secondary storage (disk) on miss
+    regardless of this setting.
     """
 
-    persist_enabled: bool = False
+    persist_enabled: bool = True
     """ If True, data files are kept on disk at shutdown instead of deleted. """
-
-    recover_enabled: bool = False
-    """ If True, lookup also checks secondary storage on miss to recover keys. """
 
 
 # -----------------------------------------------------------------------------
@@ -169,28 +168,23 @@ class L2AdapterConfigBase(ABC):
     @staticmethod
     def _parse_persist_config(d: dict) -> PersistConfig | None:
         """
-        Parse optional ``"persist_enabled"`` and ``"recover_enabled"`` keys
-        from an adapter JSON spec.
+        Parse optional ``"persist_enabled"`` key from an adapter JSON spec.
+
+        Defaults to ``True``.  Returns ``None`` only when explicitly set
+        to ``False``.
 
         Expected format::
 
             {
                 "type": "nixl_store_dynamic",
                 ...
-                "persist_enabled": true,
-                "recover_enabled": true
+                "persist_enabled": true
             }
-
-        Returns ``None`` when both keys are absent or both are False.
         """
-        persist_enabled = bool(d.get("persist_enabled", False))
-        recover_enabled = bool(d.get("recover_enabled", False))
-        if not persist_enabled and not recover_enabled:
+        persist_enabled = bool(d.get("persist_enabled", True))
+        if not persist_enabled:
             return None
-        return PersistConfig(
-            persist_enabled=persist_enabled,
-            recover_enabled=recover_enabled,
-        )
+        return PersistConfig(persist_enabled=persist_enabled)
 
     @classmethod
     @abstractmethod
