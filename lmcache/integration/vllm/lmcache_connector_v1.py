@@ -42,7 +42,12 @@ class LMCacheConnectorV1Dynamic(KVConnectorBase_V1):
             )
         else:
             super().__init__(vllm_config=vllm_config, role=role)
-        self._lmcache_engine = LMCacheConnectorV1Impl(vllm_config, role, self)
+        self._lmcache_engine = LMCacheConnectorV1Impl(
+            vllm_config,
+            role,
+            self,
+            kv_cache_config=kv_cache_config,
+        )
 
     # ==============================
     # Worker-side methods

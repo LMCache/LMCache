@@ -582,6 +582,7 @@ class LMCacheConnectorV1Impl:
         vllm_config: "VllmConfig",
         role: KVConnectorRole,
         parent: KVConnectorBase_V1,
+        kv_cache_config: Optional[Any] = None,
     ):
         self._parent = parent
         self._vllm_config = vllm_config
@@ -589,13 +590,13 @@ class LMCacheConnectorV1Impl:
         self.device = vllm_config.device_config.device
         self.kv_role = vllm_config.kv_transfer_config.kv_role
         self.worker_count = vllm_config.parallel_config.tensor_parallel_size
-        # The scheduler-side connector metadata path needs direct access to the
-        # resolved KV cache groups when HMA is enabled. vLLM's connector base
-        # stores the config on a private field today, so keep a fallback for
-        # forward/backward compatibility across nearby revisions.
-        self.kv_cache_config = getattr(parent, "kv_cache_config", None)
+        # The scheduler-side connector metadata path needs the resolved KV cache
+        # groups when HMA is enabled. Newer connector entrypoints should pass
+        # the config explicitly; keep a public-attribute fallback for nearby
+        # revisions that may expose it directly.
+        self.kv_cache_config = kv_cache_config
         if self.kv_cache_config is None:
-            self.kv_cache_config = getattr(parent, "_kv_cache_config", None)
+            self.kv_cache_config = getattr(parent, "kv_cache_config", None)
         if self.kv_cache_config is None:
             logger.warning(
                 "LMCacheConnectorV1Impl: kv_cache_config not found on parent "
