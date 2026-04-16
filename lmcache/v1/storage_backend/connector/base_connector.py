@@ -111,11 +111,22 @@ class RemoteConnector(metaclass=abc.ABCMeta):
             # Standard: [2, num_layers, num_tokens, hidden_dim]
             # or MLA:   [1, num_layers, num_tokens, hidden_dim]
             token_dim = 2
+            num_tokens = bytes_read // self.single_token_size
         else:
             # Layerwise 3D: [num_tokens, 2, hidden_dim]
             # Layerwise MLA 2D: [num_tokens, hidden_dim]
             token_dim = 0
-        shape_list[token_dim] = bytes_read // self.single_token_size
+            # single_token_size spans ALL layers, but bytes_read is
+            # for a single layer.  Compute per-layer token size from
+            # the non-token dimensions of the shape.
+            elements_per_token = 1
+            for i in range(1, len(shape_list)):
+                elements_per_token *= shape_list[i]
+            assert memory_obj.meta.dtype is not None
+            dtype_size = memory_obj.meta.dtype.itemsize
+            per_layer_token_size = elements_per_token * dtype_size
+            num_tokens = bytes_read // per_layer_token_size
+        shape_list[token_dim] = num_tokens
         actual_shape = torch.Size(shape_list)
         memory_obj.raw_data = memory_obj.raw_data[:bytes_read]
         memory_obj.meta.shape = actual_shape
