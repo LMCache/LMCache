@@ -150,6 +150,19 @@ class TestIPCCacheEngineKeyCacheSalt:
                 cache_salt="a@b",
             )
 
+    def test_reject_slash_in_salt(self):
+        # First Party
+        from lmcache.v1.multiprocess.custom_types import IPCCacheEngineKey
+
+        with pytest.raises(ValueError, match="cache_salt"):
+            IPCCacheEngineKey.from_token_ids(
+                model_name="m",
+                world_size=1,
+                worker_id=0,
+                token_ids=[1],
+                cache_salt="tenant/alice",
+            )
+
     def test_no_worker_id_version_preserves_salt(self):
         # First Party
         from lmcache.v1.multiprocess.custom_types import IPCCacheEngineKey

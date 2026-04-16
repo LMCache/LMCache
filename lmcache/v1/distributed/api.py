@@ -40,17 +40,27 @@ class ObjectKey:
     strict per-user cache isolation. Defaults to empty string which
     preserves the pre-cache-salt behavior (all keys share one namespace).
 
-    Invariant: must not contain ``@`` — the L2 adapters (native, fs, and
-    the C++ FS connector) use ``@`` as the field separator in serialized
-    forms and rely on this invariant for unambiguous parsing.
+    Invariant: must not contain ``@``, ``/``, ``\\``, or NUL. The L2
+    adapters use ``@`` as the field separator; ``/`` and ``\\`` are
+    filesystem path separators (FS adapter embeds the salt into
+    filenames); NUL terminates C strings (C++ connector).  Max length
+    128 to stay well within ``NAME_MAX`` (255) after the model, rank,
+    hash, and extension are added.
     """
 
+    _SALT_FORBIDDEN_CHARS = frozenset("@/\\\x00")
+    _SALT_MAX_LEN = 128
+
     def __post_init__(self) -> None:
-        # Enforce the "no @ in cache_salt" invariant at the choke point
-        # so the serialization formats in the L2 adapters stay parseable.
-        if "@" in self.cache_salt:
+        bad = self._SALT_FORBIDDEN_CHARS & set(self.cache_salt)
+        if bad:
             raise ValueError(
-                f"cache_salt must not contain '@' (got {self.cache_salt!r})"
+                f"cache_salt must not contain {bad!r} (got {self.cache_salt!r})"
+            )
+        if len(self.cache_salt) > self._SALT_MAX_LEN:
+            raise ValueError(
+                f"cache_salt exceeds max length {self._SALT_MAX_LEN} "
+                f"(got {len(self.cache_salt)})"
             )
 
     @staticmethod

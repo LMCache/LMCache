@@ -281,9 +281,9 @@ class TestObjectKeySerialization:
 
 
 class TestObjectKeyCacheSaltValidation:
-    """cache_salt must not contain ``@`` — the L2 adapters use ``@`` as
-    the field separator and would otherwise misparse keys. The invariant
-    is enforced at construction time."""
+    """cache_salt must not contain ``@``, ``/``, ``\\``, or NUL, and must
+    be <= 128 chars. The invariant is enforced at construction time so
+    all downstream serializers (Python + C++) can rely on it."""
 
     def test_reject_at_in_salt(self):
         with pytest.raises(ValueError, match="cache_salt"):
@@ -302,6 +302,51 @@ class TestObjectKeyCacheSaltValidation:
                 kv_rank=0,
                 cache_salt="@user",
             )
+
+    def test_reject_slash_in_salt(self):
+        with pytest.raises(ValueError, match="cache_salt"):
+            ObjectKey(
+                chunk_hash=b"\x00",
+                model_name="m",
+                kv_rank=0,
+                cache_salt="tenant/alice",
+            )
+
+    def test_reject_backslash_in_salt(self):
+        with pytest.raises(ValueError, match="cache_salt"):
+            ObjectKey(
+                chunk_hash=b"\x00",
+                model_name="m",
+                kv_rank=0,
+                cache_salt="tenant\\alice",
+            )
+
+    def test_reject_nul_in_salt(self):
+        with pytest.raises(ValueError, match="cache_salt"):
+            ObjectKey(
+                chunk_hash=b"\x00",
+                model_name="m",
+                kv_rank=0,
+                cache_salt="bad\x00salt",
+            )
+
+    def test_reject_too_long_salt(self):
+        with pytest.raises(ValueError, match="max length"):
+            ObjectKey(
+                chunk_hash=b"\x00",
+                model_name="m",
+                kv_rank=0,
+                cache_salt="x" * 129,
+            )
+
+    def test_max_length_salt_accepted(self):
+        key = ObjectKey(
+            chunk_hash=b"\x00",
+            model_name="m",
+            kv_rank=0,
+            cache_salt="x" * 128,
+        )
+        assert len(key.cache_salt) == 128
 
     def test_empty_salt_is_accepted(self):
         # Default/legacy path.

@@ -150,17 +150,26 @@ class IPCCacheEngineKey:
     # on new code using the default "". Placing the field last is a style
     # choice — all defaulted fields must come after non-defaulted ones.
     #
-    # Invariant: must not contain ``@`` — same rationale as ObjectKey
-    # (see ObjectKey.cache_salt). Validated in __post_init__.
+    # Invariant: must not contain ``@``, ``/``, ``\``, or NUL, and
+    # must be <= 128 chars — same rationale as ObjectKey (see
+    # ObjectKey.cache_salt). Validated in __post_init__.
     cache_salt: str = ""
 
+    # Duplicated from ObjectKey — cannot import ObjectKey here due to
+    # circular dependency (api.py imports IPCCacheEngineKey).
+    _SALT_FORBIDDEN_CHARS = frozenset("@/\\\x00")
+    _SALT_MAX_LEN = 128
+
     def __post_init__(self) -> None:
-        # Enforce the "no @ in cache_salt" invariant at the deserialization
-        # boundary so any adapter downstream (including the C++ FS connector)
-        # can rely on it. Duplicated in ObjectKey for defense in depth.
-        if "@" in self.cache_salt:
+        bad = self._SALT_FORBIDDEN_CHARS & set(self.cache_salt)
+        if bad:
             raise ValueError(
-                f"cache_salt must not contain '@' (got {self.cache_salt!r})"
+                f"cache_salt must not contain {bad!r} (got {self.cache_salt!r})"
+            )
+        if len(self.cache_salt) > self._SALT_MAX_LEN:
+            raise ValueError(
+                f"cache_salt exceeds max length {self._SALT_MAX_LEN} "
+                f"(got {len(self.cache_salt)})"
             )
 
     # Helper function for unit tests only
