@@ -124,7 +124,10 @@ def pad_shape_to_4d(shape: torch.Size) -> list[int]:
     return padded
 
 
-def strip_shape_padding(dims: list[int], fmt: MemoryFormat) -> torch.Size:
+def strip_shape_padding(
+    dims: list[int],
+    fmt: Optional[MemoryFormat] = MemoryFormat.UNDEFINED,
+) -> torch.Size:
     """Strip trailing-zero padding that was added by
     :func:`pad_shape_to_4d`.
 
