@@ -70,14 +70,14 @@ def make_layout() -> MemoryLayoutDesc:
 
 
 def wait_for_condition(
-    predicate: object,
+    predicate,
     timeout: float = 10.0,
     poll_interval: float = 0.05,
 ) -> bool:
     """Poll until a predicate returns True or timeout."""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        if predicate():  # type: ignore[operator]
+        if predicate():
             return True
         time.sleep(poll_interval)
     return False
@@ -85,14 +85,14 @@ def wait_for_condition(
 
 def wait_for_prefetch_status(
     sm: StorageManager,
-    handle: object,
+    handle,
     timeout: float = 10.0,
     poll_interval: float = 0.05,
 ) -> int | None:
     """Poll query_prefetch_status until it returns a non-None value."""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        result = sm.query_prefetch_status(handle)  # type: ignore[arg-type]
+        result = sm.query_prefetch_status(handle)
         if result is not None:
             return result
         time.sleep(poll_interval)

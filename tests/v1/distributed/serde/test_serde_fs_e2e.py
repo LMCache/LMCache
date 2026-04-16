@@ -50,32 +50,33 @@ def _make_key(chunk_hash: bytes) -> ObjectKey:
     )
 
 
-def _wait_for_condition(
-    predicate: object,
+def wait_for_condition(
+    predicate,
     timeout: float = 10.0,
     poll_interval: float = 0.1,
 ) -> bool:
     """Poll until predicate returns True or timeout."""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        if predicate():  # type: ignore[operator]
+        if predicate():
             return True
         time.sleep(poll_interval)
     return False
 
 
-def _wait_for_prefetch(
+def wait_for_prefetch_status(
     sm: StorageManager,
-    handle: object,
+    handle,
     timeout: float = 15.0,
+    poll_interval: float = 0.1,
 ) -> int | None:
     """Poll query_prefetch_status until non-None or timeout."""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        result = sm.query_prefetch_status(handle)  # type: ignore[arg-type]
+        result = sm.query_prefetch_status(handle)
         if result is not None:
             return result
-        time.sleep(0.1)
+        time.sleep(poll_interval)
     return None
 
 
@@ -149,13 +150,13 @@ class TestFp8SerdeFsRoundTrip:
         sm.finish_write(keys)
 
         # ---- Step 2: wait for L2 store to disk ----
-        ok = _wait_for_condition(
+        ok = wait_for_condition(
             lambda: any(e.is_file() for e in os.scandir(disk_path)),
             timeout=10.0,
         )
         assert ok, f"No files appeared under {disk_path}"
 
-        ok = _wait_for_condition(
+        ok = wait_for_condition(
             lambda: sm.report_status()["store_controller"]["in_flight_task_count"] == 0,
             timeout=10.0,
         )
@@ -167,7 +168,7 @@ class TestFp8SerdeFsRoundTrip:
 
         # ---- Step 4: prefetch (disk load + fp8 deserialize) ----
         handle = sm.submit_prefetch_task(keys, layout)
-        prefix_hits = _wait_for_prefetch(sm, handle)
+        prefix_hits = wait_for_prefetch_status(sm, handle)
         assert prefix_hits is not None, "Prefetch never completed"
         assert prefix_hits == len(keys), (
             f"Expected {len(keys)} prefix hits, got {prefix_hits}"
@@ -188,7 +189,7 @@ class TestFp8SerdeFsRoundTrip:
         sm.finish_read_prefetched(keys)
 
         # ---- Step 6: verify no memory leak ----
-        ok = _wait_for_condition(
+        ok = wait_for_condition(
             lambda: sm.report_status()["l1_manager"]["memory_used_bytes"] == 0,
             timeout=5.0,
         )
