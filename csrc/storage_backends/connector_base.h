@@ -196,7 +196,46 @@ class ConnectorBase : public IStorageConnector {
   }
 
   void close() override {
-    close_once_();
+    if (closed_.exchange(true, std::memory_order_acq_rel)) {
+      return;  // Already closed
+    }
+
+    // Signal all worker threads to stop
+    stop_.store(true, std::memory_order_release);
+    req_cv_.notify_all();
+
+    // Shutdown all connections (derived class specific)
+    shutdown_connections();
+
+    // Join all worker threads
+    for (auto& worker : workers_) {
+      if (worker.joinable()) {
+        worker.join();
+      }
+    }
+
+    // Derived cleanup that must only run after workers have stopped.
+    on_workers_stopped();
+
+    // Close eventfd
+    if (efd_ >= 0) {
+      ::close(efd_);
+      efd_ = -1;
+    }
+
+    // Clear queues (no GIL needed - python guarantees buffers stay alive)
+    {
+      std::lock_guard<std::mutex> lk(req_mu_);
+      while (!requests_.empty()) {
+        requests_.pop();
+      }
+    }
+    {
+      std::lock_guard<std::mutex> lk(comp_mu_);
+      while (!completions_.empty()) {
+        completions_.pop();
+      }
+    }
   }
 
  protected:
@@ -222,49 +261,9 @@ class ConnectorBase : public IStorageConnector {
     return false;  // no-op default for backward compat with plugins
   }
   virtual void shutdown_connections() {}
+  virtual void on_workers_stopped() {}
 
   bool is_stopping() const { return stop_.load(std::memory_order_acquire); }
-  bool close_once_() {
-    if (closed_.exchange(true, std::memory_order_acq_rel)) {
-      return false;  // Already closed
-    }
-
-    // Signal all worker threads to stop
-    stop_.store(true, std::memory_order_release);
-    req_cv_.notify_all();
-
-    // Shutdown all connections (derived class specific)
-    shutdown_connections();
-
-    // Join all worker threads
-    for (auto& worker : workers_) {
-      if (worker.joinable()) {
-        worker.join();
-      }
-    }
-
-    // Close eventfd
-    if (efd_ >= 0) {
-      ::close(efd_);
-      efd_ = -1;
-    }
-
-    // Clear queues (no GIL needed - python guarantees buffers stay alive)
-    {
-      std::lock_guard<std::mutex> lk(req_mu_);
-      while (!requests_.empty()) {
-        requests_.pop();
-      }
-    }
-    {
-      std::lock_guard<std::mutex> lk(comp_mu_);
-      while (!completions_.empty()) {
-        completions_.pop();
-      }
-    }
-
-    return true;
-  }
 
  private:
   void validate_batch_inputs(const std::vector<std::string>& keys,

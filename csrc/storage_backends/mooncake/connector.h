@@ -50,8 +50,6 @@ class MooncakeConnector : public ConnectorBase<WorkerMooncakeConn> {
                     L1RegistrationConfig l1_registration = {});
   ~MooncakeConnector() override;
 
-  void close() override;
-
  protected:
   WorkerMooncakeConn create_connection() override;
 
@@ -63,6 +61,7 @@ class MooncakeConnector : public ConnectorBase<WorkerMooncakeConn> {
 
   bool do_single_exists(WorkerMooncakeConn& conn,
                         const std::string& key) override;
+  void on_workers_stopped() override;
 
  private:
   void ensure_registered(const void* buf, size_t len);

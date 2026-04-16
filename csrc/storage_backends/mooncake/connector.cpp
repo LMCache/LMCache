@@ -69,14 +69,6 @@ WorkerMooncakeConn MooncakeConnector::create_connection() {
   return conn;
 }
 
-void MooncakeConnector::close() {
-  if (!ConnectorBase<WorkerMooncakeConn>::close_once_()) {
-    return;
-  }
-
-  unregister_all_buffers();
-}
-
 void MooncakeConnector::do_single_get(WorkerMooncakeConn& conn,
                                       const std::string& key, void* buf,
                                       size_t len, size_t chunk_size) {
@@ -108,6 +100,8 @@ bool MooncakeConnector::do_single_exists(WorkerMooncakeConn& conn,
   }
   return result == 1;
 }
+
+void MooncakeConnector::on_workers_stopped() { unregister_all_buffers(); }
 
 void MooncakeConnector::ensure_registered(const void* buf, size_t len) {
   if (!l1_registration_.is_valid()) {
