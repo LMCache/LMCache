@@ -172,6 +172,13 @@ bool ExampleFSConnector::do_single_exists(WorkerFSConn& conn,
   return std::filesystem::exists(path);
 }
 
+bool ExampleFSConnector::do_single_delete(WorkerFSConn& conn,
+                                          const std::string& key) {
+  auto path = conn.base_path / safe_filename(key);
+  std::error_code ec;
+  return std::filesystem::remove(path, ec);
+}
+
 // ---------------------------------------------------------------
 // ExampleMemoryConnector
 // ---------------------------------------------------------------
@@ -218,6 +225,12 @@ bool ExampleMemoryConnector::do_single_exists(WorkerMemConn& conn,
                                               const std::string& key) {
   std::lock_guard<std::mutex> lk(conn.store->mu);
   return conn.store->data.count(key) > 0;
+}
+
+bool ExampleMemoryConnector::do_single_delete(WorkerMemConn& conn,
+                                              const std::string& key) {
+  std::lock_guard<std::mutex> lk(conn.store->mu);
+  return conn.store->data.erase(key) > 0;
 }
 
 }  // namespace example_connector
