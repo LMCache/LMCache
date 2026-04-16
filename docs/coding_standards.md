@@ -126,7 +126,18 @@ A full docstring must include:
 
 ### 5.1 Design Documentation
 
-- **A design doc is required** for non-trivial new features or architectural changes. Place design docs in `docs/design/` under the appropriate module subdirectory.
+- **A design doc is required** for non-trivial new features or architectural changes.
+- **`docs/design/` mirrors the `lmcache/` package tree.** A design doc for code at
+  `lmcache/<path>/` lives at `docs/design/<path>/`. For example, design docs for
+  `lmcache/v1/distributed/l2_adapters/` go under
+  `docs/design/v1/distributed/l2_adapters/`. A doc that spans several sibling
+  submodules belongs at their common parent directory.
+- Use descriptive file names (e.g., `overall.md`, `l2_eviction.md`, `query-command.md`)
+  rather than mirroring module file names. See `docs/design/README.md` for the full
+  convention.
+- User-facing READMEs (`README.md` in module directories) stay next to the code and
+  are symlinked from the corresponding `docs/design/<path>/` location — do not move
+  them.
 
 ### 5.2 Testing
 

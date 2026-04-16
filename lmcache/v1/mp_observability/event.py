@@ -77,7 +77,8 @@ class Event:
             drain thread processes the event.  For CUDA host-callback events
             this captures GPU-accurate timing.
         metadata: Flat key-value payload.  Contents depend on ``event_type``;
-            see the metadata contracts in DESIGN.md Section 2.7.
+            see the metadata contracts in
+            ``docs/design/v1/mp_observability/event-bus.md`` Section 2.7.
         session_id: Caller-provided ID for correlating start/end pairs.
     """
 
