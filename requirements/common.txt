@@ -6,6 +6,7 @@ awscrt
 cufile-python
 fastapi
 httpx
+huggingface_hub>=1.5.0
 msgspec
 # if nixl decides to support >=3.13 in the future, we can remove this constraint
 nixl; python_version < "3.13"
