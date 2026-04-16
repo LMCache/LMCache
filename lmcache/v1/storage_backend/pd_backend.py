@@ -75,11 +75,12 @@ class PDConfig:
     peer_init_port: int
     peer_alloc_port: int
 
-    proxy_host: str
-    proxy_port: int
-
     buffer_size: int
     buffer_device: str
+
+    proxy_host: Optional[str] = None
+    proxy_port: Optional[int] = None
+    skip_proxy_notification: bool = False
 
     @staticmethod
     def from_cache_engine_config(
@@ -104,8 +105,9 @@ class PDConfig:
             assert config.pd_peer_init_port is not None
             assert config.pd_peer_alloc_port is not None
         elif role == "sender":
-            assert config.pd_proxy_host is not None
-            assert config.pd_proxy_port is not None
+            if not config.pd_skip_proxy_notification:
+                assert config.pd_proxy_host is not None
+                assert config.pd_proxy_port is not None
 
         corrected_device = get_correct_device(
             config.pd_buffer_device, metadata.worker_id
@@ -130,6 +132,7 @@ class PDConfig:
             proxy_port=config.pd_proxy_port,
             buffer_size=config.pd_buffer_size,
             buffer_device=corrected_device,
+            skip_proxy_notification=config.pd_skip_proxy_notification,
         )
 
 
@@ -322,14 +325,24 @@ class PDBackend(AllocatorBackendInterface):
     # Prefiller functions
     ############################################################
     def _init_sender(self):
-        proxy_url = f"{self.pd_config.proxy_host}:{self.pd_config.proxy_port}"
-        self.proxy_side_channel = get_zmq_socket(
-            self.zmq_context,
-            proxy_url,
-            "tcp",
-            zmq.PUSH,
-            "connect",
-        )
+        if self.pd_config.skip_proxy_notification:
+            logger.info(
+                "pd_skip_proxy_notification=True, "
+                "skipping ZMQ PUSH proxy notification setup. "
+                "This mode is for external orchestrators only "
+                "(e.g., vLLM Production Stack router). "
+                "Do not use with LMCache's built-in disagg proxy."
+            )
+            self.proxy_side_channel = None
+        else:
+            proxy_url = f"{self.pd_config.proxy_host}:{self.pd_config.proxy_port}"
+            self.proxy_side_channel = get_zmq_socket(
+                self.zmq_context,
+                proxy_url,
+                "tcp",
+                zmq.PUSH,
+                "connect",
+            )
 
     def _ensure_peer_connection(
         self,
@@ -471,9 +484,10 @@ class PDBackend(AllocatorBackendInterface):
 
         if transfer_spec.is_last_prefill:
             # Notify the proxy that the transfer is done
-            notif_msg = ProxyNotif(req_id=transfer_spec.req_id)
-            notif_msg_bytes = msgspec.msgpack.encode(notif_msg)
-            self.proxy_side_channel.send(notif_msg_bytes)
+            if self.proxy_side_channel is not None:
+                notif_msg = ProxyNotif(req_id=transfer_spec.req_id)
+                notif_msg_bytes = msgspec.msgpack.encode(notif_msg)
+                self.proxy_side_channel.send(notif_msg_bytes)
 
         # Call completion callback for all keys after transfer completes
         if on_complete_callback is not None:
