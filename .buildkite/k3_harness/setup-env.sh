@@ -37,6 +37,12 @@ else
         --index-strategy unsafe-best-match
 fi
 
+# Workaround: recent vLLM nightlies eagerly `import pandas` in
+# vllm/_aiter_ops.py without declaring pandas as a dependency, which breaks
+# `vllm serve` in our CI venv. Install pandas explicitly until vLLM either
+# makes the import lazy or adds pandas to their declared deps.
+uv pip install pandas
+
 echo "--- :python: Installing LMCache from source"
 uv pip install -e . --no-build-isolation
 
