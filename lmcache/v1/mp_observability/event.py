@@ -53,6 +53,12 @@ class EventType(Enum):
     # Chunk hash logging events
     MP_LOOKUP = "mp.lookup"
 
+    # MP Server lifecycle sentinels (CPU-synchronous)
+    MP_REQUEST_START = "mp.request.start"
+    MP_RETRIEVE_SUBMITTED = "mp.retrieve.submitted"
+    MP_STORE_SUBMITTED = "mp.store.submitted"
+    MP_SESSION_END = "mp.session.end"
+
     # vLLM block allocation events
     MP_VLLM_BLOCK_ALLOCATION = "mp.vllm.block_allocation"
 

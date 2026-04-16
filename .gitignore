@@ -128,7 +128,6 @@ lmcache/experimental/tests
 uv.lock
 
 # Coding agent instructions
-CLAUDE.md
 GEMINI.md
 COPILOT.md
 CURSOR.md
