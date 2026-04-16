@@ -105,11 +105,6 @@ def pad_shape_to_4d(shape: torch.Size) -> list[int]:
     This is consistent with the convention used by
     :class:`BinaryMemoryObj` (``[length, 0, 0, 0]``).
 
-    Note that shapes cannot contain a mix of zero and non-zero
-    dimensions (e.g., ``[2, 0, 3]``). Such shapes are considered
-    ambiguous for round-tripping (padding and later stripping) and
-    will be explicitly rejected.
-
     Args:
         shape: The original tensor shape (1-D to 4-D).
 
@@ -122,40 +117,36 @@ def pad_shape_to_4d(shape: torch.Size) -> list[int]:
     assert len(shape) <= 4, (
         f"Shape dimension must be <= 4 for serialization, got {len(shape)}"
     )
-    has_zero = any(d == 0 for d in shape)
-    has_nonzero = any(d != 0 for d in shape)
-    assert not (has_zero and has_nonzero), (
-        f"Shape has a mix of zero and non-zero dimensions which is "
-        f"ambiguous for pad/strip round-tripping, got {list(shape)}"
-    )
+    if len(shape) == 4:
+        return list(shape)
+
     padded = list(shape) + [0] * (4 - len(shape))
     return padded
 
 
-def strip_shape_padding(dims: list[int]) -> torch.Size:
+def strip_shape_padding(dims: list[int], fmt: MemoryFormat) -> torch.Size:
     """Strip trailing-zero padding that was added by
     :func:`pad_shape_to_4d`.
 
     Trailing zeros are removed so that the original dimensionality is
     restored.  At least one dimension is always preserved.
 
-    This function strips **all** trailing zeros, so shapes that
-    originally contained a trailing zero dimension (e.g.
-    ``[length, 0, 0, 0]`` from :class:`BytesBufferMemoryObj`) will
-    lose the original 4-D structure and round-trip to ``[length]``.
-    This is by design -- the padding is not lossless for shapes that
-    legitimately contain zero dimensions.
-
-    Note that this function assumes the input ``dims`` were generated
-    by :func:`pad_shape_to_4d`, which guarantees there are no mixed
-    zero and non-zero dimensions prior to padding.
+    For ``BINARY`` and ``BINARY_BUFFER`` formats, the shape is returned
+    as-is because these formats inherently use 4-D shapes with zero
+    padding (e.g., ``[length, 0, 0, 0]``).
 
     Args:
         dims: A list of 4 integers read from the serialized format.
+        fmt: The memory format of the serialized data.
 
     Returns:
         A :class:`torch.Size` with the padding removed.
     """
+    if fmt in (MemoryFormat.BINARY, MemoryFormat.BINARY_BUFFER):
+        # These formats use 4D shapes with legitimate zero dimensions.
+        # Skip stripping to preserve the original shape.
+        return torch.Size(dims)
+
     end = len(dims)
     while end > 1 and dims[end - 1] == 0:
         end -= 1
@@ -199,7 +190,7 @@ class RemoteMetadata:
         dtypes = []
         for i in range(2, len(result), 5):
             dims = list(result[i + 1 : i + 5])
-            shapes.append(strip_shape_padding(dims))
+            shapes.append(strip_shape_padding(dims, memory_fmt))
             dtypes.append(INT_TO_DTYPE[result[i]])
 
         return RemoteMetadata(
@@ -257,7 +248,7 @@ class ClientMetaMessage:
         command, length, fmt, dtype, location, shape0, shape1, shape2, shape3, key = (
             struct.unpack(f"iiiiiiiii{MAX_KEY_LENGTH}s", s)
         )
-        shape = strip_shape_padding([shape0, shape1, shape2, shape3])
+        shape = strip_shape_padding([shape0, shape1, shape2, shape3], MemoryFormat(fmt))
         return ClientMetaMessage(
             ClientCommand(command),
             parse_cache_key(key.decode().strip()),
@@ -312,7 +303,7 @@ class ServerMetaMessage:
         code, length, fmt, dtype, shape0, shape1, shape2, shape3, location = (
             struct.unpack("iiiiiiiii", s)
         )
-        shape = strip_shape_padding([shape0, shape1, shape2, shape3])
+        shape = strip_shape_padding([shape0, shape1, shape2, shape3], MemoryFormat(fmt))
         return ServerMetaMessage(
             ServerReturnCode(code),
             length,
