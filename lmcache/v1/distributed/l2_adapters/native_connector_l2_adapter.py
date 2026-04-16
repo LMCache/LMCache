@@ -51,25 +51,23 @@ def _object_key_to_string(key: ObjectKey) -> str:
     """Serialize an ObjectKey to a deterministic string
     for the native connector.
 
-    Two formats, distinguished by a leading ``@@`` marker:
+    Always uses the ``@@``-prefixed format::
 
-        Legacy (cache_salt == ""):
-            <model_name>@<kv_rank_hex>@<chunk_hash_hex>
+        @@<cache_salt>@<model_name>@<kv_rank_hex>@<chunk_hash_hex>
 
-        With cache_salt:
-            @@<cache_salt>@<model_name>@<kv_rank_hex>@<chunk_hash_hex>
+    For empty ``cache_salt`` the output starts with ``@@@``
+    (marker + empty salt + separator).
 
-    Backward compatibility: keys with ``cache_salt=""`` use the legacy
-    format, so existing stored data remains readable.
+    The legacy 3-field format (no ``@@`` prefix) is still
+    *readable* by the C++ and Python parsers, but new writes
+    always use the prefixed form. A deprecation warning is
+    logged on the **read** path when a legacy key is
+    encountered.
     """
-    if key.cache_salt:
-        return (
-            f"{_SALT_MARKER}{key.cache_salt}{_KEY_SEP}"
-            f"{key.model_name}{_KEY_SEP}"
-            f"{key.kv_rank:08x}{_KEY_SEP}{key.chunk_hash.hex()}"
-        )
     return (
-        f"{key.model_name}{_KEY_SEP}{key.kv_rank:08x}{_KEY_SEP}{key.chunk_hash.hex()}"
+        f"{_SALT_MARKER}{key.cache_salt}{_KEY_SEP}"
+        f"{key.model_name}{_KEY_SEP}"
+        f"{key.kv_rank:08x}{_KEY_SEP}{key.chunk_hash.hex()}"
     )
 
 

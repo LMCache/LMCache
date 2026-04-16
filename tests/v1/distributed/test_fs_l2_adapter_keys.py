@@ -40,16 +40,18 @@ class TestFilenameRoundtrip:
         )
         fn = _object_key_to_filename(key)
         assert fn.endswith(".data")
-        # Salted filenames are marked by the @@ prefix.
+        # All filenames now start with @@ (unified format).
+        assert fn.startswith("@@")
         if cache_salt:
             assert fn.startswith("@@" + cache_salt + "@")
         else:
-            assert not fn.startswith("@@")
+            assert fn.startswith("@@@")  # @@ + empty salt + @
         parsed = _filename_to_object_key(fn)
         assert parsed == key
 
     def test_legacy_format_still_parseable(self):
-        """Files written before cache_salt existed must remain readable."""
+        """Files written before the @@ prefix was required must remain
+        readable (with a deprecation warning)."""
         legacy = "llama@0x0000002a@deadbeef.data"
         parsed = _filename_to_object_key(legacy)
         assert parsed == ObjectKey(
@@ -67,6 +69,17 @@ class TestFilenameRoundtrip:
             model_name="llama",
             kv_rank=42,
             cache_salt="alice",
+        )
+
+    def test_empty_salt_format(self):
+        """Empty salt now uses @@@model@... (not legacy)."""
+        fn = "@@@llama@0x0000002a@deadbeef.data"
+        parsed = _filename_to_object_key(fn)
+        assert parsed == ObjectKey(
+            chunk_hash=b"\xde\xad\xbe\xef",
+            model_name="llama",
+            kv_rank=42,
+            cache_salt="",
         )
 
     def test_non_data_file_returns_none(self):

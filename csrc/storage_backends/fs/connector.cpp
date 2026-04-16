@@ -26,31 +26,24 @@ std::string FSConnector::replace_all(const std::string& str,
 }
 
 std::string FSConnector::key_to_filename(const std::string& key) {
-  // Input key format (from _object_key_to_string):
-  //   Legacy (no cache_salt):
-  //     model_name@kv_rank_hex@chunk_hash_hex
-  //   Salted (marked by a leading @@ prefix):
-  //     @@cache_salt@model_name@kv_rank_hex@chunk_hash_hex
+  // Input key format (from _object_key_to_string — always @@-prefixed):
+  //   @@<cache_salt>@<model_name>@<kv_rank_hex>@<chunk_hash_hex>
+  //   (empty salt: @@@model_name@kv_rank_hex@chunk_hash_hex)
   //
-  // Output filename (matching _object_key_to_filename):
-  //   Legacy:
-  //     model_name_safe@0xkv_rank_hex@chunk_hash_hex.data
-  //   Salted (same @@ prefix marker carried through):
-  //     @@cache_salt@model_name_safe@0xkv_rank_hex@chunk_hash_hex.data
+  // Legacy keys without @@ prefix are still accepted for backward
+  // compatibility but should no longer be produced by new code.
   //
-  // The @@ prefix unambiguously marks the salted format so we do
-  // not have to disambiguate by field count (model_name may itself
-  // contain '@'). In the salted case we strip the @@ marker, peel
-  // off the cache_salt up to the next '@', and parse the remaining
-  // "model@rank@hash" identically to the legacy case.
-  // NOTE: cache_salt must not contain '@' — invariant enforced on
-  // the Python side.
+  // Output filename always uses the @@-prefixed format:
+  //   @@<cache_salt>@<model_name_safe>@0x<kv_rank_hex>@<chunk_hash_hex>.data
+  //
+  // NOTE: cache_salt must not contain '@', '/', '\', or NUL —
+  // invariant enforced on the Python side.
 
   std::string cache_salt;
   std::string work_key = key;
   if (work_key.size() >= 2 && work_key[0] == KEY_SEP &&
       work_key[1] == KEY_SEP) {
-    // Salted format: @@<cache_salt>@<model>@<kv_rank>@<hash>
+    // @@-prefixed format: @@<salt>@<model>@<rank>@<hash>
     size_t salt_end = work_key.find(KEY_SEP, 2);
     if (salt_end == std::string::npos) {
       return key + FILE_EXT;
@@ -58,11 +51,13 @@ std::string FSConnector::key_to_filename(const std::string& key) {
     cache_salt = work_key.substr(2, salt_end - 2);
     work_key = work_key.substr(salt_end + 1);
   }
+  // else: legacy key without @@ prefix — still accepted for backward
+  // compatibility. The output filename will use the @@-prefixed format
+  // regardless, so re-storing migrates the entry.
 
-  // Legacy layout (or salted remainder):
+  // Remainder (or legacy input):
   //   <model_name>@<kv_rank_hex>@<chunk_hash_hex>
-  // model_name may contain '@', so rsplit from the right to isolate
-  // kv_rank and chunk_hash reliably.
+  // model_name may contain '@', so rsplit from the right.
   size_t last_sep = work_key.rfind(KEY_SEP);
   if (last_sep == std::string::npos) {
     return key + FILE_EXT;
@@ -80,19 +75,16 @@ std::string FSConnector::key_to_filename(const std::string& key) {
   // Replace '/' with '-SEP-' for filesystem safety
   std::string safe_model = replace_all(model_name, "/", PATH_SLASH_REPLACEMENT);
 
-  // Rebuild with 0x prefix to match Python's {kv_rank:#010x}
-  // Input kv_rank_hex is 8 hex chars (e.g. "0000002a")
-  // Output needs to be "0x0000002a"
+  // Always emit @@-prefixed filename (even for empty salt / legacy input)
+  // so all new files on disk use the unified format.
   std::string result;
   result.reserve(cache_salt.size() + safe_model.size() + kv_rank_hex.size() +
                  chunk_hash.size() + 32);
-  if (!cache_salt.empty()) {
-    // Leading @@ marker distinguishes salted format on deserialization.
-    result += KEY_SEP;
-    result += KEY_SEP;
-    result += cache_salt;
-    result += KEY_SEP;
-  }
+  // Leading @@ + salt + @
+  result += KEY_SEP;
+  result += KEY_SEP;
+  result += cache_salt;
+  result += KEY_SEP;
   result += safe_model;
   result += KEY_SEP;
   result += "0x";

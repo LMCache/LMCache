@@ -97,33 +97,25 @@ async def _async_readinto_full(
 def _object_key_to_filename(key: ObjectKey) -> str:
     """Build a reversible, filesystem-safe filename.
 
-    Two formats, distinguished by a leading ``@@`` marker:
+    Always uses the ``@@``-prefixed format::
 
-        Legacy (cache_salt == ""):
-            <model_name>@<kv_rank_hex>@<chunk_hash_hex>.data
+        @@<cache_salt>@<model_name>@<kv_rank_hex>@<chunk_hash_hex>.data
 
-        With cache_salt:
-            @@<cache_salt>@<model_name>@<kv_rank_hex>@<chunk_hash_hex>.data
+    For empty ``cache_salt`` the output starts with ``@@@``
+    (marker + empty salt + separator).
 
-    The ``@@`` prefix marks the salted format unambiguously so the parser
-    can distinguish it from legacy filenames without relying on field
-    counts (``model_name`` may contain ``@``).
+    The legacy 3-field format (no ``@@`` prefix) is still *readable*
+    by ``_filename_to_object_key`` (with a deprecation warning) but
+    new files always use the prefixed form.
 
     ``kv_rank`` is written in ``0x`` prefixed hex so each byte
     of the bitmap ``(ws<<24)|(rank<<16)|(local_ws<<8)|local``
     is directly readable.
     """
     safe_model = key.model_name.replace("/", _PATH_SLASH_REPLACEMENT)
-    if key.cache_salt:
-        return (
-            f"{_SALT_MARKER}{key.cache_salt}"
-            f"{_KEY_SEP}{safe_model}"
-            f"{_KEY_SEP}{key.kv_rank:#010x}"
-            f"{_KEY_SEP}{key.chunk_hash.hex()}"
-            f"{_FILE_EXT}"
-        )
     return (
-        f"{safe_model}"
+        f"{_SALT_MARKER}{key.cache_salt}"
+        f"{_KEY_SEP}{safe_model}"
         f"{_KEY_SEP}{key.kv_rank:#010x}"
         f"{_KEY_SEP}{key.chunk_hash.hex()}"
         f"{_FILE_EXT}"
@@ -147,9 +139,10 @@ def _filename_to_object_key(
         return None
 
     cache_salt = ""
-    # The ``@@`` prefix indicates the new salted format:
+    # The ``@@`` prefix indicates the current format:
     #   @@<cache_salt>@<model_name>@<kv_rank>@<chunk_hash_hex>
-    # Otherwise parse as legacy 3-field format.
+    # If absent, the file uses the deprecated legacy layout and
+    # should be re-written on the next store cycle.
     if stem.startswith(_SALT_MARKER):
         # Strip the ``@@`` marker, then split the salt off the head.
         rest = stem[len(_SALT_MARKER) :]
@@ -157,6 +150,13 @@ def _filename_to_object_key(
         if len(split) != 2:
             return None
         cache_salt, stem = split
+    else:
+        logger.warning(
+            "Legacy cache filename without @@ prefix detected: %s. "
+            "This format is deprecated and will be removed in a future "
+            "release. Re-storing this entry will write the new format.",
+            filename,
+        )
 
     # Layout after salt handling:
     #   <model_name> @ <kv_rank> @ <chunk_hash_hex>
