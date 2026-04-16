@@ -1414,8 +1414,9 @@ def get_gpu_pci_bus_id(device_id: int = 0) -> str | None:
             props = torch.cuda.get_device_properties(device_id)
             # PCI function number is always 0 for GPUs
             bus_id = (
-                f"{props.pci_domain_id:04x}:{props.pci_bus_id:02x}:"
-                f"{props.pci_device_id:02x}.0"
+                f"{props.pci_domain_id:04x}:"  # type: ignore[attr-defined]
+                f"{props.pci_bus_id:02x}:"  # type: ignore[attr-defined]
+                f"{props.pci_device_id:02x}.0"  # type: ignore[attr-defined]
             )
             return bus_id.upper()
     except Exception:
