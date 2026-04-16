@@ -466,3 +466,249 @@ def test_lookup_20k_tokens_v2(
             engine.lookup(t)
 
     benchmark.pedantic(run_func, iterations=1, rounds=num_repeats)
+
+
+# --------------------------
+# Raw transfer baselines (PyTorch per-layer indexing, no engine/Triton)
+# --------------------------
+def _baseline_scatter(kv_caches, staging, slots, num_layers, num_kv_heads,
+                      head_dim, block_size):
+    """Per-layer PyTorch fancy-indexing scatter (H2D baseline)."""
+    block_indices = slots // block_size
+    block_offsets = slots % block_size
+    for layer_id in range(num_layers):
+        paged = kv_caches[layer_id]
+        for kv in range(2):
+            src = staging[kv, layer_id, :, :]  # [T, H]
+            paged[kv, block_indices, block_offsets, :, :] = (
+                src.reshape(-1, num_kv_heads, head_dim)
+            )
+
+
+def _baseline_gather(kv_caches, staging, slots, num_layers, num_kv_heads,
+                     head_dim, block_size):
+    """Per-layer PyTorch fancy-indexing gather (D2H baseline)."""
+    block_indices = slots // block_size
+    block_offsets = slots % block_size
+    for layer_id in range(num_layers):
+        paged = kv_caches[layer_id]
+        for kv in range(2):
+            gathered = paged[kv, block_indices, block_offsets, :, :]
+            staging[kv, layer_id, :, :] = gathered.reshape(-1, num_kv_heads * head_dim)
+
+
+@pytest.mark.no_shared_allocator
+@pytest.mark.benchmark(group="raw-store")
+@pytest.mark.parametrize("device_type", DEVICE_PARAMS)
+def test_store_raw_baseline(benchmark, device_type):
+    """Baseline Store: bulk DMA + per-layer PyTorch scatter (no Triton)."""
+    _skip_if_no_xpu()
+    import gc; gc.collect(); torch.xpu.empty_cache()
+    num_heads = 8
+    head_dim = 128
+    num_layers = 28
+    hidden = num_heads * head_dim
+    dtype = torch.bfloat16
+    device = _device_from_type(device_type)
+    num_tokens = 2048
+    num_blocks = 1024
+    block_size = 64
+    num_requests = 4
+    num_repeats = 5
+
+    kv_caches = [
+        torch.rand(2, num_blocks, block_size, num_heads, head_dim,
+                    dtype=dtype, device=device)
+        for _ in range(num_layers)
+    ]
+    staging = torch.empty(2, num_layers, num_tokens, hidden,
+                          dtype=dtype, device=device)
+
+    cpu_buffers = [
+        torch.empty(2, num_layers, num_tokens, hidden,
+                    dtype=dtype, pin_memory=True).normal_()
+        for _ in range(num_requests)
+    ]
+    slot_mappings = [
+        generate_random_slot_mapping(num_blocks, block_size, num_tokens, device)
+        for _ in range(num_requests)
+    ]
+
+    def run_func():
+        for buf, slots in zip(cpu_buffers, slot_mappings):
+            staging.copy_(buf, non_blocking=True)
+            _baseline_scatter(kv_caches, staging, slots, num_layers,
+                              num_heads, head_dim, block_size)
+        torch.xpu.synchronize(device)
+
+    run_func()
+    benchmark.pedantic(run_func, rounds=num_repeats, iterations=1)
+
+
+@pytest.mark.no_shared_allocator
+@pytest.mark.benchmark(group="raw-retrieve")
+@pytest.mark.parametrize("device_type", DEVICE_PARAMS)
+def test_retrieve_raw_baseline(benchmark, device_type):
+    """Baseline Retrieve: per-layer PyTorch gather + bulk DMA (no Triton)."""
+    _skip_if_no_xpu()
+    import gc; gc.collect(); torch.xpu.empty_cache()
+    num_heads = 8
+    head_dim = 128
+    num_layers = 28
+    hidden = num_heads * head_dim
+    dtype = torch.bfloat16
+    device = _device_from_type(device_type)
+    num_tokens = 2048
+    num_blocks = 1024
+    block_size = 64
+    num_requests = 4
+    num_repeats = 5
+
+    kv_caches = [
+        torch.rand(2, num_blocks, block_size, num_heads, head_dim,
+                    dtype=dtype, device=device)
+        for _ in range(num_layers)
+    ]
+    staging = torch.empty(2, num_layers, num_tokens, hidden,
+                          dtype=dtype, device=device)
+
+    cpu_buffers = [
+        torch.empty(2, num_layers, num_tokens, hidden,
+                    dtype=dtype, pin_memory=True)
+        for _ in range(num_requests)
+    ]
+    slot_mappings = [
+        generate_random_slot_mapping(num_blocks, block_size, num_tokens, device)
+        for _ in range(num_requests)
+    ]
+
+    def run_func():
+        for buf, slots in zip(cpu_buffers, slot_mappings):
+            _baseline_gather(kv_caches, staging, slots, num_layers,
+                             num_heads, head_dim, block_size)
+            torch.xpu.synchronize(device)
+            buf.copy_(staging)
+        torch.xpu.synchronize(device)
+
+    run_func()
+    benchmark.pedantic(run_func, rounds=num_repeats, iterations=1)
+
+
+@pytest.mark.no_shared_allocator
+@pytest.mark.benchmark(group="raw-store")
+@pytest.mark.parametrize("device_type", DEVICE_PARAMS)
+def test_store_raw_triton(benchmark, device_type):
+    """Triton Store: bulk DMA + Triton scatter (production path)."""
+    _skip_if_no_xpu()
+    import gc; gc.collect(); torch.xpu.empty_cache()
+    import numpy as np
+    import lmcache.c_ops as lmc_ops
+    from lmcache.non_cuda_equivalents import TransferDirection, GPUKVFormat
+
+    num_heads = 8
+    head_dim = 128
+    num_layers = 28
+    hidden = num_heads * head_dim
+    dtype = torch.bfloat16
+    device = _device_from_type(device_type)
+    num_tokens = 2048
+    num_blocks = 1024
+    block_size = 64
+    num_requests = 4
+    num_repeats = 5
+
+    kv_caches = [
+        torch.rand(2, num_blocks, block_size, num_heads, head_dim,
+                    dtype=dtype, device=device)
+        for _ in range(num_layers)
+    ]
+    staging = torch.empty(2, num_layers, num_tokens, hidden,
+                          dtype=dtype, device=device)
+    page_buffer_size = num_blocks * block_size
+
+    ptrs_np = np.array([t.data_ptr() for t in kv_caches], dtype=np.uint64)
+    ptrs = torch.from_numpy(ptrs_np.view(np.int64).copy()).to(device)
+
+    cpu_buffers = [
+        torch.empty(2, num_layers, num_tokens, hidden,
+                    dtype=dtype, pin_memory=True).normal_()
+        for _ in range(num_requests)
+    ]
+    slot_mappings = [
+        generate_random_slot_mapping(num_blocks, block_size, num_tokens, device)
+        for _ in range(num_requests)
+    ]
+    gpu_kv_format = GPUKVFormat.NL_X_TWO_NB_BS_NH_HS
+
+    def run_func():
+        for buf, slots in zip(cpu_buffers, slot_mappings):
+            staging.copy_(buf, non_blocking=True)
+            lmc_ops.multi_layer_kv_transfer(
+                staging, ptrs, slots, device, page_buffer_size,
+                TransferDirection.H2D, gpu_kv_format,
+                block_size=block_size, head_size=head_dim,
+            )
+        torch.xpu.synchronize(device)
+
+    run_func()
+    benchmark.pedantic(run_func, rounds=num_repeats, iterations=1)
+
+
+@pytest.mark.no_shared_allocator
+@pytest.mark.benchmark(group="raw-retrieve")
+@pytest.mark.parametrize("device_type", DEVICE_PARAMS)
+def test_retrieve_raw_triton(benchmark, device_type):
+    """Triton Retrieve: Triton gather + bulk DMA (production path)."""
+    _skip_if_no_xpu()
+    import gc; gc.collect(); torch.xpu.empty_cache()
+    import numpy as np
+    import lmcache.c_ops as lmc_ops
+    from lmcache.non_cuda_equivalents import TransferDirection, GPUKVFormat
+
+    num_heads = 8
+    head_dim = 128
+    num_layers = 28
+    hidden = num_heads * head_dim
+    dtype = torch.bfloat16
+    device = _device_from_type(device_type)
+    num_tokens = 2048
+    num_blocks = 1024
+    block_size = 64
+    num_requests = 4
+    num_repeats = 5
+
+    kv_caches = [
+        torch.rand(2, num_blocks, block_size, num_heads, head_dim,
+                    dtype=dtype, device=device)
+        for _ in range(num_layers)
+    ]
+    staging = torch.empty(2, num_layers, num_tokens, hidden,
+                          dtype=dtype, device=device)
+    page_buffer_size = num_blocks * block_size
+
+    ptrs_np = np.array([t.data_ptr() for t in kv_caches], dtype=np.uint64)
+    ptrs = torch.from_numpy(ptrs_np.view(np.int64).copy()).to(device)
+
+    cpu_buffers = [
+        torch.empty(2, num_layers, num_tokens, hidden,
+                    dtype=dtype, pin_memory=True)
+        for _ in range(num_requests)
+    ]
+    slot_mappings = [
+        generate_random_slot_mapping(num_blocks, block_size, num_tokens, device)
+        for _ in range(num_requests)
+    ]
+    gpu_kv_format = GPUKVFormat.NL_X_TWO_NB_BS_NH_HS
+
+    def run_func():
+        for buf, slots in zip(cpu_buffers, slot_mappings):
+            lmc_ops.multi_layer_kv_transfer(
+                staging, ptrs, slots, device, page_buffer_size,
+                TransferDirection.D2H, gpu_kv_format,
+                block_size=block_size, head_size=head_dim,
+            )
+            buf.copy_(staging)
+        torch.xpu.synchronize(device)
+
+    run_func()
+    benchmark.pedantic(run_func, rounds=num_repeats, iterations=1)

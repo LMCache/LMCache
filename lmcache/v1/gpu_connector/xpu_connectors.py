@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # Standard
-from typing import List, Optional, Union, cast
+from typing import List, Optional, Union
 import os
 
 # Third Party
@@ -28,9 +28,8 @@ from lmcache.v1.gpu_connector.gpu_connectors import (
 )
 from lmcache.v1.gpu_connector.utils import (
     LayoutHints,
-    _get_head_size_view,
-    _split_token2d_kv,
     discover_gpu_kv_format,
+    ensure_contiguous_kv_caches,
     get_block_size,
     get_dtype,
     get_head_size,
@@ -47,6 +46,7 @@ from lmcache.v1.memory_management import (
     MemoryObj,
 )
 from lmcache.v1.metadata import LMCacheMetadata
+import lmcache.c_ops as lmc_ops
 
 logger = init_logger(__name__)
 
@@ -76,6 +76,10 @@ class VLLMPagedMemXPUConnectorV2(VLLMPagedMemGPUConnectorV2):
         self._attributes_initialized = False
         self.kvcaches: Optional[List[torch.Tensor]] = None
         self.use_gpu = use_gpu
+        self._kv_cache_pointers_on_xpu: Optional[torch.Tensor] = None
+        self._kv_cache_ptrs_cpu: Optional["np.ndarray"] = None
+        # Two-stage D2H staging buffer (allocated lazily on first from_gpu call)
+        self._d2h_staging: Optional[torch.Tensor] = None
 
     @classmethod
     def from_metadata(
@@ -100,6 +104,37 @@ class VLLMPagedMemXPUConnectorV2(VLLMPagedMemGPUConnectorV2):
         return cls(
             use_gpu=use_gpu,
         )
+
+    def _initialize_xpu_pointers(self, kv_caches: List[torch.Tensor]) -> torch.Tensor:
+        """Build a device tensor of raw data pointers for the Triton kernel.
+
+        Caches the result and only rebuilds when the underlying data
+        pointers change (e.g. when kvcaches are replaced by new tensors).
+        """
+        import numpy as np
+
+        kv_caches = ensure_contiguous_kv_caches(kv_caches)
+
+        # Device pointers may exceed signed int64 range on XPU.
+        # Use numpy uint64 → view as int64 to avoid overflow.
+        ptrs_np = np.array(
+            [t.data_ptr() for t in kv_caches], dtype=np.uint64
+        )
+        ptrs_i64 = ptrs_np.view(np.int64)
+
+        # Fast check: skip rebuild if pointers haven't changed.
+        if (
+            self._kv_cache_pointers_on_xpu is not None
+            and self._kv_cache_ptrs_cpu is not None
+            and len(ptrs_i64) == len(self._kv_cache_ptrs_cpu)
+            and (ptrs_i64 == self._kv_cache_ptrs_cpu).all()
+        ):
+            return self._kv_cache_pointers_on_xpu
+
+        self._kv_cache_ptrs_cpu = ptrs_i64.copy()
+        ptrs_cpu = torch.from_numpy(ptrs_i64)
+        self._kv_cache_pointers_on_xpu = ptrs_cpu.to(self.device)
+        return self._kv_cache_pointers_on_xpu
 
     def to_gpu(self, memory_obj: MemoryObj, start: int, end: int, **kwargs):
         """Expect a kwarg 'kvcaches' which is a nested tuple of K and V tensors.
@@ -130,25 +165,26 @@ class VLLMPagedMemXPUConnectorV2(VLLMPagedMemGPUConnectorV2):
             raise ValueError("'slot_mapping' should be provided in kwargs.")
 
         slot_mapping: torch.Tensor = kwargs["slot_mapping"]
-        slices = slot_mapping[start:end]
         self._initialize_attributes(self.kvcaches)
         self._validate_memory_format(memory_obj)
 
-        if self.use_mla:
-            tmp = memory_obj.tensor[0].to(slot_mapping.device)
-            total_blocks = self.num_blocks * self.block_size
-            for i, kvcache in enumerate(self.kvcaches):
-                kvcache.view(total_blocks, self.head_size).index_copy_(
-                    0, slices, tmp[i]
-                )
-        else:
-            tmp_k = memory_obj.tensor[0].to(slot_mapping.device)
-            tmp_v = memory_obj.tensor[1].to(slot_mapping.device)
-            total_blocks = self.num_blocks * self.block_size
-            d = self.num_heads * self.head_size
-            for i, (kcache, vcache) in enumerate(self.kvcaches):
-                kcache.view(total_blocks, d).index_copy_(0, slices, tmp_k[i])
-                vcache.view(total_blocks, d).index_copy_(0, slices, tmp_v[i])
+        kv_cache_pointers = self._initialize_xpu_pointers(self.kvcaches)
+
+        vllm_cached = kwargs.get("vllm_cached_tokens", 0)
+        skip_prefix_n_tokens = min(end - start, max(0, vllm_cached - start))
+
+        lmc_ops.multi_layer_kv_transfer(
+            memory_obj.tensor,
+            kv_cache_pointers,
+            slot_mapping[start:end],
+            self.device,
+            self.page_buffer_size,
+            lmc_ops.TransferDirection.H2D,
+            self.gpu_kv_format,
+            block_size=self.block_size,
+            head_size=self.head_size,
+            skip_prefix_n_tokens=skip_prefix_n_tokens,
+        )
 
     def from_gpu(self, memory_obj: MemoryObj, start: int, end: int, **kwargs):
         """Expect a kwarg 'kvcaches' which is a nested tuple of K and V tensors.
@@ -180,41 +216,50 @@ class VLLMPagedMemXPUConnectorV2(VLLMPagedMemGPUConnectorV2):
             raise ValueError("'slot_mapping' should be provided in kwargs.")
 
         slot_mapping: torch.Tensor = kwargs["slot_mapping"]
-        slices = slot_mapping[start:end]
         self._initialize_attributes(self.kvcaches)
         self._validate_memory_format(memory_obj)
 
-        if self.use_mla:
-            total_blocks = self.num_blocks * self.block_size
-            tmp = torch.stack(
-                [
-                    kvcache.view(total_blocks, self.head_size).index_select(0, slices)
-                    for kvcache in self.kvcaches
-                ]
-            )
-        else:
-            total_blocks = self.num_blocks * self.block_size
-            d = self.num_heads * self.head_size
-            tmp_k = torch.stack(
-                [
-                    kvcache[0].view(total_blocks, d).index_select(0, slices)
-                    for kvcache in self.kvcaches
-                ]
-            )
-            tmp_v = torch.stack(
-                [
-                    kvcache[1].view(total_blocks, d).index_select(0, slices)
-                    for kvcache in self.kvcaches
-                ]
-            )
-            tmp = torch.stack([tmp_k, tmp_v])
-        memory_obj.tensor.copy_(tmp, non_blocking=True)
+        kv_cache_pointers = self._initialize_xpu_pointers(self.kvcaches)
 
         if not memory_obj.tensor.is_xpu:
-            # Force a synchronize if the target buffer is NOT XPU device
-            # NOTE: for better performance, we may not want to sync for every
-            # memory object
+            # Two-stage: Triton gather → XPU staging (device-local),
+            # then staging → CPU pinned (bulk DMA).
+            # Direct scattered PCIe writes from GPU to CPU are very slow.
+            target_shape = memory_obj.tensor.shape
+            if (
+                self._d2h_staging is None
+                or self._d2h_staging.shape != target_shape
+            ):
+                self._d2h_staging = torch.empty(
+                    target_shape,
+                    dtype=memory_obj.tensor.dtype,
+                    device=self.kvcaches[0].device,
+                )
+            lmc_ops.multi_layer_kv_transfer(
+                self._d2h_staging,
+                kv_cache_pointers,
+                slot_mapping[start:end],
+                self.kvcaches[0].device,
+                self.page_buffer_size,
+                lmc_ops.TransferDirection.D2H,
+                self.gpu_kv_format,
+                block_size=self.block_size,
+                head_size=self.head_size,
+            )
+            memory_obj.tensor.copy_(self._d2h_staging)
             torch.xpu.synchronize()
+        else:
+            lmc_ops.multi_layer_kv_transfer(
+                memory_obj.tensor,
+                kv_cache_pointers,
+                slot_mapping[start:end],
+                self.kvcaches[0].device,
+                self.page_buffer_size,
+                lmc_ops.TransferDirection.D2H,
+                self.gpu_kv_format,
+                block_size=self.block_size,
+                head_size=self.head_size,
+            )
 
         if self.use_mla:
             memory_obj.metadata.fmt = MemoryFormat.KV_MLA_FMT
@@ -325,7 +370,8 @@ class VLLMPagedMemLayerwiseXPUConnector(GPUConnectorInterface):
       - batched_to_gpu(...) yields num_layers + 2 times
       - batched_from_gpu(...) yields num_layers + 1 times
 
-    Transfer is implemented with pure torch ops (index_copy_/index_select).
+    Transfer uses the Triton ``single_layer_kv_transfer`` kernel when
+    available, falling back to PyTorch index_copy_/index_select otherwise.
     """
 
     def __init__(
@@ -355,6 +401,15 @@ class VLLMPagedMemLayerwiseXPUConnector(GPUConnectorInterface):
 
         # Optional device staging buffer allocator (same pattern as CUDA class)
         self.gpu_buffer_allocator: Optional[MemoryAllocatorInterface] = None
+        self.gpu_kv_format = None
+
+    def initialize_kvcaches_ptr(self, **kwargs):
+        """Override to discover gpu_kv_format from the KV cache tensors."""
+        super().initialize_kvcaches_ptr(**kwargs)
+        if self.kvcaches is not None and self.gpu_kv_format is None:
+            self.gpu_kv_format = discover_gpu_kv_format(
+                self.kvcaches, EngineType.VLLM
+            )
 
     @classmethod
     def from_metadata(
@@ -507,16 +562,6 @@ class VLLMPagedMemLayerwiseXPUConnector(GPUConnectorInterface):
 
                 with torch.xpu.stream(self.load_stream):
                     dst_layer = self.kvcaches[layer_id]
-                    if self.use_mla:
-                        dst_flat = cast(
-                            torch.Tensor,
-                            _get_head_size_view(dst_layer, use_mla=True),
-                        )
-                    else:
-                        dst_k_flat, dst_v_flat = _get_head_size_view(  # type: ignore[misc]
-                            dst_layer, use_mla=False
-                        )
-
                     cursor = 0
 
                     if self.use_xpu:
@@ -537,52 +582,15 @@ class VLLMPagedMemLayerwiseXPUConnector(GPUConnectorInterface):
                             staged[cursor : cursor + n].copy_(src, non_blocking=True)
                             cursor += n
 
-                        sl = slot_mapping_full  # already intended to be on device
-                        sl = _ensure_xpu(sl)
-
-                        if self.use_mla:
-                            staged_xpu = _ensure_xpu(staged)
-                            if staged_xpu.dim() == 2:
-                                dst_flat.index_copy_(0, sl, staged_xpu)
-                            elif staged_xpu.dim() == 3 and staged_xpu.shape[0] == 1:
-                                dst_flat.index_copy_(0, sl, staged_xpu[0])
-                            else:
-                                raise ValueError(
-                                    f"Unexpected MLA staged tensor: {staged_xpu.shape}"
-                                )
-                        else:
-                            k_tok, v_tok = _split_token2d_kv(staged)
-
-                            # Make sure k_tok/v_tok are on XPU before index_copy_.
-                            k_tok = _ensure_xpu(k_tok)
-                            v_tok = _ensure_xpu(v_tok)
-
-                            # Keep your reshape logic as-is (only triggers when needed)
-                            if (
-                                k_tok.dim() == 2
-                                and dst_k_flat.dim() == 3
-                                and k_tok.shape[1]
-                                == dst_k_flat.shape[1] * dst_k_flat.shape[2]
-                            ):
-                                k_tok = k_tok.reshape(
-                                    k_tok.shape[0],
-                                    dst_k_flat.shape[1],
-                                    dst_k_flat.shape[2],
-                                )
-                            if (
-                                v_tok.dim() == 2
-                                and dst_v_flat.dim() == 3
-                                and v_tok.shape[1]
-                                == dst_v_flat.shape[1] * dst_v_flat.shape[2]
-                            ):
-                                v_tok = v_tok.reshape(
-                                    v_tok.shape[0],
-                                    dst_v_flat.shape[1],
-                                    dst_v_flat.shape[2],
-                                )
-
-                            dst_k_flat.index_copy_(0, sl, k_tok)
-                            dst_v_flat.index_copy_(0, sl, v_tok)
+                        sl = _ensure_xpu(slot_mapping_full)
+                        lmc_ops.single_layer_kv_transfer(
+                            staged[:num_tokens],
+                            dst_layer,
+                            sl,
+                            lmc_ops.TransferDirection.H2D,
+                            self.gpu_kv_format,
+                            token_major=True,
+                        )
 
                     else:
                         for s, e, mem in zip(
@@ -598,45 +606,20 @@ class VLLMPagedMemLayerwiseXPUConnector(GPUConnectorInterface):
                             sl = _ensure_xpu(sl)
                             cursor += n
 
-                            if self.use_mla:
-                                if src.dim() == 2:
-                                    dst_flat.index_copy_(0, sl, src)
-                                elif src.dim() == 3 and src.shape[0] == 1:
-                                    dst_flat.index_copy_(0, sl, src[0])
-                                else:
-                                    raise ValueError(
-                                        f"Unexpected MLA token tensor: {src.shape}"
-                                    )
+                            # Detect token_major from tensor shape
+                            if self.use_mla or src.dim() != 3:
+                                token_major = False
                             else:
-                                k_tok, v_tok = _split_token2d_kv(src)
-                                k_tok = _ensure_xpu(k_tok)
-                                v_tok = _ensure_xpu(v_tok)
+                                token_major = src.shape[1] == 2
 
-                                if (
-                                    k_tok.dim() == 2
-                                    and dst_k_flat.dim() == 3
-                                    and k_tok.shape[1]
-                                    == dst_k_flat.shape[1] * dst_k_flat.shape[2]
-                                ):
-                                    k_tok = k_tok.reshape(
-                                        k_tok.shape[0],
-                                        dst_k_flat.shape[1],
-                                        dst_k_flat.shape[2],
-                                    )
-                                if (
-                                    v_tok.dim() == 2
-                                    and dst_v_flat.dim() == 3
-                                    and v_tok.shape[1]
-                                    == dst_v_flat.shape[1] * dst_v_flat.shape[2]
-                                ):
-                                    v_tok = v_tok.reshape(
-                                        v_tok.shape[0],
-                                        dst_v_flat.shape[1],
-                                        dst_v_flat.shape[2],
-                                    )
-
-                                dst_k_flat.index_copy_(0, sl, k_tok)
-                                dst_v_flat.index_copy_(0, sl, v_tok)
+                            lmc_ops.single_layer_kv_transfer(
+                                src,
+                                dst_layer,
+                                sl,
+                                lmc_ops.TransferDirection.H2D,
+                                self.gpu_kv_format,
+                                token_major=token_major,
+                            )
 
             yield
 
@@ -672,82 +655,6 @@ class VLLMPagedMemLayerwiseXPUConnector(GPUConnectorInterface):
         self._lazy_initialize_buffer(self.kvcaches)
 
         current_stream = torch.xpu.current_stream()
-
-        # ---- helpers (keep local to minimize file-wide changes) ----
-        def _flatten_last2_if_needed(
-            src: torch.Tensor, dst: torch.Tensor
-        ) -> torch.Tensor:
-            """
-            Make src match dst for the common KV layouts:
-            - src: [..., H, HS] -> dst: [..., H*HS]
-            - or already matches
-            """
-            if src.shape == dst.shape:
-                return src
-
-            # dst has one less trailing dim: [..., D] where D=H*HS
-            if src.dim() == dst.dim() + 1:
-                # e.g., src [..., 8, 128] -> dst [..., 1024]
-                if dst.shape == (*src.shape[:-2], src.shape[-2] * src.shape[-1]):
-                    return src.reshape(*src.shape[:-2], -1)
-
-            # same ndim but dst last dim is flattened (dst ends with D)
-            if src.dim() == dst.dim():
-                if (
-                    dst.shape[:-1] == src.shape[:-2]
-                    and dst.shape[-1] == src.shape[-2] * src.shape[-1]
-                ):
-                    return src.reshape(*src.shape[:-2], -1)
-
-            return src  # caller will error if still incompatible
-
-        def _copy_kv_into_mem(
-            mem_tensor: torch.Tensor, k_src: torch.Tensor, v_src: torch.Tensor
-        ) -> None:
-            """
-            Copy K/V into mem.tensor supporting:
-            - [2, ..., D]  (K in 0, V in 1)
-            - [..., 2, D]  (K in [:,0,:], V in [:,1,:])
-            - [2, ..., H, HS] or [..., 2, H, HS] similarly
-            """
-            if mem_tensor.dim() < 3:
-                raise ValueError(
-                    f"Unexpected output token2d layout: {mem_tensor.shape}"
-                )
-
-            # Case A: mem is [2, ...]
-            if mem_tensor.shape[0] == 2:
-                k_dst = mem_tensor[0]
-                v_dst = mem_tensor[1]
-                k_src2 = _flatten_last2_if_needed(k_src, k_dst)
-                v_src2 = _flatten_last2_if_needed(v_src, v_dst)
-                if k_src2.shape != k_dst.shape or v_src2.shape != v_dst.shape:
-                    raise ValueError(
-                        f"KV shape mismatch after reshape: "
-                        f"k src {k_src.shape}->{k_src2.shape} vs dst {k_dst.shape}; "
-                        f"v src {v_src.shape}->{v_src2.shape} vs dst {v_dst.shape}"
-                    )
-                k_dst.copy_(k_src2.to(k_dst.device), non_blocking=True)
-                v_dst.copy_(v_src2.to(v_dst.device), non_blocking=True)
-                return
-
-            # Case B: mem is [..., 2, ...]
-            if mem_tensor.shape[1] == 2:
-                k_dst = mem_tensor[:, 0, ...]
-                v_dst = mem_tensor[:, 1, ...]
-                k_src2 = _flatten_last2_if_needed(k_src, k_dst)
-                v_src2 = _flatten_last2_if_needed(v_src, v_dst)
-                if k_src2.shape != k_dst.shape or v_src2.shape != v_dst.shape:
-                    raise ValueError(
-                        f"KV shape mismatch after reshape: "
-                        f"k src {k_src.shape}->{k_src2.shape} vs dst {k_dst.shape}; "
-                        f"v src {v_src.shape}->{v_src2.shape} vs dst {v_dst.shape}"
-                    )
-                k_dst.copy_(k_src2.to(k_dst.device), non_blocking=True)
-                v_dst.copy_(v_src2.to(v_dst.device), non_blocking=True)
-                return
-
-            raise ValueError(f"Unexpected output token2d layout: {mem_tensor.shape}")
 
         slot_mapping_on_device = slot_mapping.to(self.device)
 
@@ -805,90 +712,76 @@ class VLLMPagedMemLayerwiseXPUConnector(GPUConnectorInterface):
 
                     src_layer = self.kvcaches[layer_id]
 
-                    if self.use_mla:
-                        src_flat = cast(
-                            torch.Tensor,
-                            _get_head_size_view(src_layer, use_mla=True),
+                    if self.use_xpu:
+                        assert tmp_gpu_buffer_obj is not None
+                        tmp = tmp_gpu_buffer_obj.tensor
+
+                        # Gather from paged KV cache into staging buffer
+                        lmc_ops.single_layer_kv_transfer(
+                            tmp[:total_tokens],
+                            src_layer,
+                            slot_mapping_full,
+                            lmc_ops.TransferDirection.D2H,
+                            self.gpu_kv_format,
+                            token_major=not self.use_mla,
                         )
 
-                        if self.use_xpu:
-                            gathered_full = src_flat.index_select(0, slot_mapping_full)
-                            # Write into tmp if possible, else fallback to per-chunk
-                            tmp_src = (
-                                _flatten_last2_if_needed(gathered_full, tmp)
-                                if "tmp" in locals()
-                                else gathered_full
+                        # Copy chunks from staging to mem tensors
+                        off = 0
+                        for s, e, mem in zip(
+                            starts, ends, mem_layer, strict=False
+                        ):
+                            assert mem.tensor is not None
+                            n = e - s
+                            chunk = tmp[off : off + n]
+                            off += n
+                            mem.tensor.copy_(
+                                chunk.to(mem.tensor.device), non_blocking=True
                             )
-                            if "tmp" in locals() and tmp_src.shape == tmp.shape:
-                                tmp.copy_(tmp_src, non_blocking=True)
-                                off = 0
-                                for s, e, mem in zip(
-                                    starts, ends, mem_layer, strict=False
-                                ):
-                                    assert mem.tensor is not None
-                                    n = e - s
-                                    chunk = tmp[off : off + n]
-                                    off += n
-                                    mem.tensor.copy_(
-                                        chunk.to(mem.tensor.device), non_blocking=True
-                                    )
+                    else:
+                        # Non-staged: per-chunk gather with D2H staging
+                        for s, e, mem in zip(
+                            starts, ends, mem_layer, strict=False
+                        ):
+                            assert mem.tensor is not None
+                            sl = slot_mapping_on_device[s:e]
+
+                            if self.use_mla or mem.tensor.dim() != 3:
+                                token_major = False
                             else:
-                                for s, e, mem in zip(
-                                    starts, ends, mem_layer, strict=False
-                                ):
-                                    assert mem.tensor is not None
-                                    sl = slot_mapping_on_device[s:e]
-                                    gathered = src_flat.index_select(0, sl)
-                                    mem.tensor.copy_(
-                                        gathered.to(mem.tensor.device),
-                                        non_blocking=True,
-                                    )
-                        else:
-                            for s, e, mem in zip(starts, ends, mem_layer, strict=False):
-                                assert mem.tensor is not None
-                                sl = slot_mapping_on_device[s:e]
-                                gathered = src_flat.index_select(0, sl)
-                                mem.tensor.copy_(
-                                    gathered.to(mem.tensor.device), non_blocking=True
+                                token_major = mem.tensor.shape[1] == 2
+
+                            if not mem.tensor.is_xpu:
+                                # Two-stage: gather into device staging,
+                                # then bulk DMA to CPU (avoids slow
+                                # scattered PCIe writes).
+                                d2h_stg = torch.empty_like(
+                                    mem.tensor, device=self.device
+                                )
+                                lmc_ops.single_layer_kv_transfer(
+                                    d2h_stg,
+                                    src_layer,
+                                    sl,
+                                    lmc_ops.TransferDirection.D2H,
+                                    self.gpu_kv_format,
+                                    token_major=token_major,
+                                )
+                                mem.tensor.copy_(d2h_stg)
+                            else:
+                                lmc_ops.single_layer_kv_transfer(
+                                    mem.tensor,
+                                    src_layer,
+                                    sl,
+                                    lmc_ops.TransferDirection.D2H,
+                                    self.gpu_kv_format,
+                                    token_major=token_major,
                                 )
 
-                        # Keep memory format metadata consistent for downstream checks.
+                    if self.use_mla:
                         target_fmt = MemoryFormat.KV_MLA_FMT
                         for mem in mem_layer:
                             self._validate_format_transition(mem, target_fmt)
                             mem.metadata.fmt = target_fmt
-
-                    else:
-                        src_k_flat, src_v_flat = _get_head_size_view(
-                            src_layer, use_mla=False
-                        )
-
-                        if self.use_xpu:
-                            k_full = src_k_flat.index_select(0, slot_mapping_full)
-                            v_full = src_v_flat.index_select(0, slot_mapping_full)
-
-                            # Slice from staging. If tmp exists and can hold
-                            # the layout, use it; otherwise slice k/v directly.
-                            off = 0
-                            for s, e, mem in zip(starts, ends, mem_layer, strict=False):
-                                assert mem.tensor is not None
-                                n = e - s
-
-                                k_chunk = k_full[off : off + n]
-                                v_chunk = v_full[off : off + n]
-                                off += n
-
-                                _copy_kv_into_mem(mem.tensor, k_chunk, v_chunk)
-
-                        else:
-                            # per-chunk gather (original behavior);
-                            # avoids per-iteration H2D slot_mapping transfers
-                            for s, e, mem in zip(starts, ends, mem_layer, strict=False):
-                                assert mem.tensor is not None
-                                sl = slot_mapping_on_device[s:e]
-                                k = src_k_flat.index_select(0, sl)
-                                v = src_v_flat.index_select(0, sl)
-                                _copy_kv_into_mem(mem.tensor, k, v)
 
                 if sync:
                     self.store_stream.synchronize()
@@ -901,9 +794,6 @@ class VLLMPagedMemLayerwiseXPUConnector(GPUConnectorInterface):
 
     def batched_to_gpu(
         self,
-        memory_objs: Union[
-            List[List[MemoryObj]], List[MemoryObj], List[int], None
-        ] = None,
         starts: Optional[List[int]] = None,
         ends: Optional[List[int]] = None,
         **kwargs,

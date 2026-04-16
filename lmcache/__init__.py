@@ -27,7 +27,11 @@ def _get_backend() -> Any:
             "cuda_ops",
             lambda: torch.cuda.is_available(),
         ),
-        # should extend to more HWs..
+        (
+            "lmcache.xpu_ops",
+            "xpu_ops",
+            lambda: hasattr(torch, "xpu") and torch.xpu.is_available(),
+        ),
     ]
 
     imported = False
