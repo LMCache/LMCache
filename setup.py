@@ -21,6 +21,15 @@ BUILD_WITH_HIP = os.environ.get("BUILD_WITH_HIP", "0") == "1"
 ENABLE_CXX11_ABI = os.environ.get("ENABLE_CXX11_ABI", "1") == "1"
 
 
+def _read_requirements(path: Path) -> list[str]:
+    reqs: list[str] = []
+    for raw in path.read_text().splitlines():
+        line = raw.strip()
+        if line and not line.startswith("#"):
+            reqs.append(line)
+    return reqs
+
+
 def hipify_wrapper() -> None:
     # Third Party
     from torch.utils.hipify.hipify_python import hipify
@@ -299,6 +308,10 @@ if __name__ == "__main__":
 
     ext_modules, cmdclass = get_extension()
 
+    install_requires = _read_requirements(ROOT_DIR / "requirements" / "common.txt")
+    core_file = "rocm_core.txt" if BUILD_WITH_HIP else "cuda_core.txt"
+    install_requires += _read_requirements(ROOT_DIR / "requirements" / core_file)
+
     setup(
         packages=find_packages(
             exclude=("csrc",)
@@ -306,4 +319,5 @@ if __name__ == "__main__":
         ext_modules=ext_modules,
         cmdclass=cmdclass,
         include_package_data=True,
+        install_requires=install_requires,
     )
