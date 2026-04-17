@@ -46,6 +46,9 @@ Basic cache settings that control the core functionality of LMCache.
    * - remote_url
      - LMCACHE_REMOTE_URL
      - Remote storage URL. Format: "protocol://host:port".
+   * - remote_ttl
+     - LMCACHE_REMOTE_TTL
+     - TTL in seconds for remote KV cache keys (Redis/RESP only). Must be a positive integer or null (no expiry). Default: null
    * - remote_serde
      - LMCACHE_REMOTE_SERDE
      - Serialization format. Values: "naive" or "cachegen". Default: "naive"
