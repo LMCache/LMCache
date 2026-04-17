@@ -452,7 +452,16 @@ class LocalDiskBackend(StorageBackendInterface):
         dtypes_list = getattr(disk_meta, "_dtypes", None)
         if shapes is not None and dtypes_list is not None and len(shapes) > 1:
             memory_obj = self.local_cpu_backend.allocate(shapes, dtypes_list, fmt)
-            assert memory_obj is not None
+            if memory_obj is None:
+                # CPU pool exhausted. Return None so the caller treats this
+                # as a cache miss and cold-prefills, matching the non-MLA
+                # branch's behavior in load_bytes_from_disk.
+                logger.warning(
+                    "CPU memory allocation failed during multi-group MLA "
+                    "disk retrieve for key %s. Treating as cache miss.",
+                    key,
+                )
+                return None
             buffer = memory_obj.byte_array
             self.read_file(key, buffer, path)
             cached_positions = disk_meta.cached_positions
@@ -655,7 +664,15 @@ class LocalDiskBackend(StorageBackendInterface):
         """
 
         memory_obj = self.local_cpu_backend.allocate(shape, dtype, fmt)
-        assert memory_obj is not None, "Memory allocation failed during disk load."
+        if memory_obj is None:
+            # CPU pool exhausted. Return None so the caller treats this as a
+            # cache miss and cold-prefills, instead of crashing the worker.
+            logger.warning(
+                "CPU memory allocation failed during disk load for key %s. "
+                "Treating as cache miss.",
+                key,
+            )
+            return None
 
         buffer = memory_obj.byte_array
         self.read_file(key, buffer, path)

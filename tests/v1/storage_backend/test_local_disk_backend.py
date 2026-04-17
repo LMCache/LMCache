@@ -909,3 +909,83 @@ class TestLocalDiskBackendStartupRecovery:
         )
 
         backend.close()
+
+
+class TestCPUPoolExhaustionRecovery:
+    """Regression tests for issue #1918.
+
+    When the CPU staging pool is exhausted, `local_cpu_backend.allocate()`
+    returns None. Both the multi-group MLA branch of `get_blocking()` and
+    `load_bytes_from_disk()` used to assert on that return value, crashing
+    the worker process instead of gracefully returning a cache miss. The
+    non-MLA branch already returned None and handled this correctly.
+    """
+
+    def _insert_disk_meta(
+        self, backend: LocalDiskBackend, key: CacheEngineKey,
+        shapes=None, dtypes=None,
+    ):
+        """Install a disk_meta entry with an on-disk file so get_blocking
+        reaches the allocator call. The file contents don't matter — we
+        short-circuit before reading it."""
+        path = backend._key_to_path(key)
+        with open(path, "wb") as f:
+            f.write(b"\0" * 64)
+        backend.insert_key(
+            key,
+            size=64,
+            shape=torch.Size([1, 1, 256, 1, 128]),
+            dtype=torch.bfloat16,
+            fmt=MemoryFormat.KV_2LTD,
+            cached_positions=None,
+            shapes=shapes,
+            dtypes=dtypes,
+        )
+
+    def test_get_blocking_returns_none_on_multi_group_alloc_failure(
+        self, local_disk_backend, monkeypatch
+    ):
+        """#1918: multi-group MLA branch must return None, not assert."""
+        key = create_test_key(9918)
+        shapes = [torch.Size([256, 1, 132]), torch.Size([256, 1, 576])]
+        dtypes = [torch.uint8, torch.bfloat16]
+        self._insert_disk_meta(
+            local_disk_backend, key, shapes=shapes, dtypes=dtypes
+        )
+
+        # Force CPU-pool exhaustion during the retrieve.
+        monkeypatch.setattr(
+            local_disk_backend.local_cpu_backend,
+            "allocate",
+            lambda *a, **kw: None,
+        )
+
+        result = local_disk_backend.get_blocking(key)
+        assert result is None, (
+            "get_blocking should degrade to cache-miss (None) on CPU-pool "
+            "exhaustion, not raise AssertionError"
+        )
+
+        local_disk_backend.local_cpu_backend.memory_allocator.close()
+
+    def test_get_blocking_returns_none_on_non_mla_alloc_failure(
+        self, local_disk_backend, monkeypatch
+    ):
+        """#1918 companion: non-MLA branch (load_bytes_from_disk) must also
+        return None on allocation failure, not assert."""
+        key = create_test_key(9919)
+        self._insert_disk_meta(local_disk_backend, key)  # no shapes/dtypes
+
+        monkeypatch.setattr(
+            local_disk_backend.local_cpu_backend,
+            "allocate",
+            lambda *a, **kw: None,
+        )
+
+        result = local_disk_backend.get_blocking(key)
+        assert result is None, (
+            "load_bytes_from_disk should return None on CPU-pool "
+            "exhaustion, not raise AssertionError"
+        )
+
+        local_disk_backend.local_cpu_backend.memory_allocator.close()
