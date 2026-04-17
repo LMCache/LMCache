@@ -7,8 +7,7 @@ import pytest
 import torch
 
 # First Party
-from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
-from lmcache.v1.distributed.storage_manager import PrefetchHandle
+from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey, PrefetchHandle
 from lmcache.v1.mp_observability.trace import codecs
 
 
