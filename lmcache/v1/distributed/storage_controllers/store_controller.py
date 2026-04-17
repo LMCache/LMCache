@@ -592,9 +592,29 @@ class StoreController(StorageControllerInterface):
         request: InFlightStoreRequest,
         store_objs: list[MemoryObj],
     ) -> None:
-        """Submit the L2 store task for a request in STORE phase."""
+        """Submit the L2 store task for a request in STORE phase.
+
+        The caller must have already registered ``request`` in
+        ``_in_flight_requests`` and incremented ``_status_in_flight_count``.
+        If ``submit_store_task`` raises, this method releases the request's
+        read locks and removes it from tracking so resources do not leak.
+        """
         adapter = self._l2_adapters[request.adapter_index]
-        l2_task_id = adapter.submit_store_task(request.keys, store_objs)
+        try:
+            l2_task_id = adapter.submit_store_task(request.keys, store_objs)
+        except Exception:
+            logger.exception(
+                "submit_store_task raised for adapter %d, request %d — aborting",
+                request.adapter_index,
+                request.request_id,
+            )
+            # read_locked_keys covers both cases: original keys (non-serde) or
+            # temp keys (serde, post finish_write_and_reserve_read → temp
+            # buffers auto-delete on finish_read).
+            self._l1_manager.finish_read(request.read_locked_keys)
+            del self._in_flight_requests[request.request_id]
+            self._status_in_flight_count -= 1
+            return
 
         request.l2_task_id = l2_task_id
         self._l2_task_to_request[(request.adapter_index, l2_task_id)] = (
