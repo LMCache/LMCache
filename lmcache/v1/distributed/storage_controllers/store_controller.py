@@ -296,77 +296,78 @@ class StoreController(StorageControllerInterface):
         by_model = defaultdict(list)
         for key in keys:
             by_model[key.model_name].append(key)
+        for model_keys in by_model.values():
+            self._submit_store_for_single_model(model_keys)
+
+    def _submit_store_for_single_model(self, keys: list[ObjectKey]) -> None:
+        """Submit ``keys`` (all from one model) to their target adapters."""
+        plan = self._policy.select_store_targets(keys, self._adapter_descriptors)
 
         l1_mgr = self._l1_manager
 
-        for model_keys in by_model.values():
-            plan = self._policy.select_store_targets(
-                model_keys, self._adapter_descriptors
+        for adapter_index, target_keys in plan.items():
+            if not target_keys:
+                continue
+
+            if adapter_index >= len(self._l2_adapters):
+                logger.error(
+                    "StorePolicy returned invalid adapter index %d "
+                    "(only %d adapters available). Skipping.",
+                    adapter_index,
+                    len(self._l2_adapters),
+                )
+                continue
+
+            # Reserve read to get MemoryObj references and hold read locks
+            read_results = l1_mgr.reserve_read(target_keys)
+
+            successful_keys = []
+            successful_objs = []
+            for key in target_keys:
+                result = read_results.get(key)
+                if result is None:
+                    continue
+                err, obj = result
+                if err != L1Error.SUCCESS or obj is None:
+                    logger.debug(
+                        "Skipping key %s for L2 store (adapter %d): %s",
+                        key,
+                        adapter_index,
+                        err,
+                    )
+                    continue
+                successful_keys.append(key)
+                successful_objs.append(obj)
+
+            if not successful_keys:
+                continue
+
+            adapter = self._l2_adapters[adapter_index]
+            task_id = adapter.submit_store_task(successful_keys, successful_objs)
+
+            self._in_flight_tasks[(adapter_index, task_id)] = InFlightStoreTask(
+                adapter_index=adapter_index,
+                keys=successful_keys,
+                read_locked_keys=list(successful_keys),
+            )
+            self._status_in_flight_count += 1
+
+            self._event_bus.publish(
+                Event(
+                    event_type=EventType.L2_STORE_SUBMITTED,
+                    metadata={
+                        "adapter_index": adapter_index,
+                        "key_count": len(successful_keys),
+                    },
+                )
             )
 
-            for adapter_index, target_keys in plan.items():
-                if not target_keys:
-                    continue
-
-                if adapter_index >= len(self._l2_adapters):
-                    logger.error(
-                        "StorePolicy returned invalid adapter index %d "
-                        "(only %d adapters available). Skipping.",
-                        adapter_index,
-                        len(self._l2_adapters),
-                    )
-                    continue
-
-                # Reserve read to get MemoryObj references and hold read locks
-                read_results = l1_mgr.reserve_read(target_keys)
-
-                successful_keys = []
-                successful_objs = []
-                for key in target_keys:
-                    result = read_results.get(key)
-                    if result is None:
-                        continue
-                    err, obj = result
-                    if err != L1Error.SUCCESS or obj is None:
-                        logger.debug(
-                            "Skipping key %s for L2 store (adapter %d): %s",
-                            key,
-                            adapter_index,
-                            err,
-                        )
-                        continue
-                    successful_keys.append(key)
-                    successful_objs.append(obj)
-
-                if not successful_keys:
-                    continue
-
-                adapter = self._l2_adapters[adapter_index]
-                task_id = adapter.submit_store_task(successful_keys, successful_objs)
-
-                self._in_flight_tasks[(adapter_index, task_id)] = InFlightStoreTask(
-                    adapter_index=adapter_index,
-                    keys=successful_keys,
-                    read_locked_keys=list(successful_keys),
-                )
-                self._status_in_flight_count += 1
-
-                self._event_bus.publish(
-                    Event(
-                        event_type=EventType.L2_STORE_SUBMITTED,
-                        metadata={
-                            "adapter_index": adapter_index,
-                            "key_count": len(successful_keys),
-                        },
-                    )
-                )
-
-                logger.debug(
-                    "Submitted store task %d to adapter %d with %d keys.",
-                    task_id,
-                    adapter_index,
-                    len(successful_keys),
-                )
+            logger.debug(
+                "Submitted store task %d to adapter %d with %d keys.",
+                task_id,
+                adapter_index,
+                len(successful_keys),
+            )
 
     def _process_completed_tasks(self, adapter_index: int) -> None:
         """
