@@ -25,6 +25,7 @@ from __future__ import annotations
 from functools import wraps
 from typing import Any, Callable, Sequence, TypeVar
 import inspect
+import time
 
 # First Party
 from lmcache.v1.mp_observability.event import Event, EventType
@@ -66,14 +67,20 @@ def publish_call_event(qualname: str, args: dict[str, Any]) -> None:
         qualname: Fully-qualified name of the call site.
         args: Mapping of argument name to raw Python value.  Codec
             encoding happens later, in the recorder.
+
+    ``time.monotonic()`` is sampled **here** (not on the drain thread)
+    so the recorded ``t_mono`` aligns with ``Event.timestamp`` —
+    otherwise the two clocks would drift by however long the drain
+    lagged behind the publisher.
     """
     if not _tracing_enabled:
         return
+    t_mono = time.monotonic()
     bus = get_event_bus()
     bus.publish(
         Event(
             event_type=EventType.TRACE_CALL,
-            metadata={"qualname": qualname, "args": args},
+            metadata={"qualname": qualname, "args": args, "t_mono": t_mono},
         )
     )
 

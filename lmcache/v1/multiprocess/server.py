@@ -41,7 +41,7 @@ from lmcache.v1.mp_observability.config import (
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import get_event_bus
 from lmcache.v1.mp_observability.otel_init import register_gauge
-from lmcache.v1.mp_observability.trace import maybe_register_trace_recorder
+from lmcache.v1.mp_observability.trace import maybe_initialize_trace_recorder
 from lmcache.v1.multiprocess.config import (
     MPServerConfig,
     add_mp_server_args,
@@ -1003,7 +1003,7 @@ def run_cache_server(
     # Wire up the trace recorder (no-op when --trace-level is unset).
     # Registered before the engine handlers are added so any
     # storage-manager calls during engine init are captured too.
-    maybe_register_trace_recorder(event_bus, obs_config, storage_manager_config)
+    maybe_initialize_trace_recorder(event_bus, obs_config, storage_manager_config)
 
     # Initialize the engine (loggers self-register with the global controller)
     engine = MPCacheEngine(

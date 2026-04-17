@@ -24,7 +24,11 @@ from lmcache.v1.mp_observability.trace.decorator import (
     publish_call_event,
     set_tracing_enabled,
 )
-from lmcache.v1.mp_observability.trace.format import FORMAT_VERSION, MAGIC
+from lmcache.v1.mp_observability.trace.format import (
+    FORMAT_VERSION,
+    MAGIC,
+    TRACE_SCHEMA_VERSION,
+)
 from lmcache.v1.mp_observability.trace.reader import TraceReader
 from lmcache.v1.mp_observability.trace.recorder import StorageTraceRecorder
 import lmcache.v1.mp_observability.event_bus as _bus_module
@@ -74,6 +78,7 @@ class TestHeader:
             h = r.header
             assert h.magic == MAGIC
             assert h.format_version == FORMAT_VERSION
+            assert h.trace_schema_version == TRACE_SCHEMA_VERSION
             assert h.level == "storage"
             assert h.t_mono_start > 0
             assert h.t_wall_start > 0
@@ -213,7 +218,7 @@ class TestReaderRobustness:
             magic=b"WRNG",
             format_version=FORMAT_VERSION,
             level="storage",
-            lmcache_version="x",
+            trace_schema_version=TRACE_SCHEMA_VERSION,
             t_mono_start=0.0,
             t_wall_start=0.0,
             sm_config_json="",
@@ -261,3 +266,30 @@ class TestEvent:
             metadata={"qualname": "x", "args": {}},
         )
         assert ev.event_type == EventType.TRACE_CALL
+
+
+class TestShutdownContract:
+    def test_bus_stop_closes_recorder(self, trace_path):
+        """``EventBus.stop()`` alone must flush, fsync, and close the
+        recorder — without an explicit ``close()`` call.  Regression
+        guard for the server shutdown chain (event_bus.stop →
+        subscriber.shutdown → recorder.close)."""
+        bus = EventBus(EventBusConfig(enabled=True))
+        _bus_module._global_bus = bus
+        bus.start()
+
+        rec = StorageTraceRecorder(trace_path)
+        bus.register_subscriber(rec)
+        publish_call_event("a.b", {"x": 1})
+        _flush(bus)
+
+        # Only the bus is stopped; the recorder is not closed directly.
+        bus.stop()
+
+        # Gate must be off and the record must be readable from disk
+        # (i.e. the file was flushed + closed by shutdown()).
+        assert is_tracing_enabled() is False
+        with TraceReader(trace_path) as r:
+            records = list(r.records())
+        assert len(records) == 1
+        assert records[0].qualname == "a.b"

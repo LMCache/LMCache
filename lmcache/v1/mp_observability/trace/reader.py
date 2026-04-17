@@ -22,6 +22,7 @@ from lmcache.logging import init_logger
 from lmcache.v1.mp_observability.trace.format import (
     FORMAT_VERSION,
     MAGIC,
+    TRACE_SCHEMA_VERSION,
     Header,
     Record,
     decode_header,
@@ -120,6 +121,12 @@ class TraceReader:
             raise ValueError(
                 f"trace file {self._path!r}: unsupported format_version "
                 f"{header.format_version} (this build expects {FORMAT_VERSION})"
+            )
+        if header.trace_schema_version != TRACE_SCHEMA_VERSION:
+            raise ValueError(
+                f"trace file {self._path!r}: unsupported trace_schema_version "
+                f"{header.trace_schema_version} "
+                f"(this build expects {TRACE_SCHEMA_VERSION})"
             )
         return header
 

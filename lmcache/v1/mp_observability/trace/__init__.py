@@ -28,7 +28,7 @@ from lmcache.v1.mp_observability.trace.decorator import (
 )
 from lmcache.v1.mp_observability.trace.format import Header, Record
 from lmcache.v1.mp_observability.trace.lifecycle import (
-    maybe_register_trace_recorder,
+    maybe_initialize_trace_recorder,
 )
 from lmcache.v1.mp_observability.trace.reader import TraceReader
 from lmcache.v1.mp_observability.trace.recorder import (
@@ -44,7 +44,7 @@ __all__ = [
     "TraceRecorder",
     "enable_tracing",
     "is_tracing_enabled",
-    "maybe_register_trace_recorder",
+    "maybe_initialize_trace_recorder",
     "publish_call_event",
     "set_tracing_enabled",
 ]

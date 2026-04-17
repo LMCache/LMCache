@@ -5,7 +5,6 @@ Distributed multi-tier storage manager for MP mode
 
 # Standard
 from contextlib import contextmanager
-from dataclasses import dataclass
 from typing import Iterator, Literal
 import time
 
@@ -14,6 +13,7 @@ from lmcache.logging import init_logger
 from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
     ObjectKey,
+    PrefetchHandle,
 )
 from lmcache.v1.distributed.config import StorageManagerConfig
 from lmcache.v1.distributed.error import L1Error, strerror
@@ -37,9 +37,6 @@ from lmcache.v1.distributed.storage_controllers.store_policy import (
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import get_event_bus
-from lmcache.v1.mp_observability.trace.codecs import (
-    register_prefetch_handle_codec,
-)
 from lmcache.v1.mp_observability.trace.decorator import (
     enable_tracing,
     is_tracing_enabled,
@@ -47,25 +44,6 @@ from lmcache.v1.mp_observability.trace.decorator import (
 )
 
 logger = init_logger(__name__)
-
-
-@dataclass(frozen=True)
-class PrefetchHandle:
-    prefetch_request_id: int
-    """Opaque ID for tracking L2 prefetch in the controller.
-    -1 if no L2 request was submitted."""
-
-    external_request_id: str
-    """Request ID from the caller for end-to-end tracing."""
-
-    l1_prefix_hit_count: int
-    """Number of leading keys already in L1 at submission time."""
-
-    total_requested_keys: int
-    """Total number of keys originally requested."""
-
-    submit_time: float
-    """Monotonic timestamp when the prefetch task was submitted."""
 
 
 class StorageManager:
@@ -542,9 +520,3 @@ class StorageManager:
             True if memory is consistent, False otherwise.
         """
         return self._l1_manager.memcheck()
-
-
-# Now that ``PrefetchHandle`` exists in this module's namespace, finish
-# wiring its trace codec.  Done here (rather than at codec import time)
-# to avoid a ``storage_manager → trace.codecs → storage_manager`` cycle.
-register_prefetch_handle_codec()

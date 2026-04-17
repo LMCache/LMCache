@@ -168,4 +168,10 @@ class TestPublishCallEvent:
         ) as fake_bus:
             fake_bus.return_value.publish = lambda ev: seen.append(ev)
             publish_call_event("a.b", {"x": 1})
-        assert seen[0].metadata == {"qualname": "a.b", "args": {"x": 1}}
+        md = seen[0].metadata
+        assert md["qualname"] == "a.b"
+        assert md["args"] == {"x": 1}
+        # ``t_mono`` is stamped at publish time so the recorder's record
+        # timestamp is co-temporal with ``Event.timestamp``.
+        assert isinstance(md["t_mono"], float)
+        assert md["t_mono"] > 0

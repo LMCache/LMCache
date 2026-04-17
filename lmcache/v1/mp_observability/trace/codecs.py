@@ -27,12 +27,7 @@ from typing import Any, Callable
 import torch
 
 # First Party
-from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
-
-# ``PrefetchHandle`` lives in ``lmcache.v1.distributed.storage_manager``,
-# which imports the trace decorator at module level.  Importing it here
-# would create a cycle, so we defer the import to codec registration
-# time (see the bottom of this module).
+from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey, PrefetchHandle
 
 
 @dataclass(frozen=True)
@@ -65,11 +60,6 @@ def register_codec(t: type, codec: TypeCodec) -> None:
         raise ValueError(f"codec tag {codec.tag!r} already in use")
     _BY_TYPE[t] = codec
     _BY_TAG[codec.tag] = codec
-
-
-def has_codec(t: type) -> bool:
-    """Return True if a codec is registered for ``t``."""
-    return t in _BY_TYPE
 
 
 # ---------------------------------------------------------------------------
@@ -199,7 +189,7 @@ def _dec_layout_desc(d: dict[str, Any]) -> MemoryLayoutDesc:
     )
 
 
-def _enc_prefetch_handle(h: Any) -> dict[str, Any]:
+def _enc_prefetch_handle(h: PrefetchHandle) -> dict[str, Any]:
     return {
         "prefetch_request_id": h.prefetch_request_id,
         "external_request_id": h.external_request_id,
@@ -209,13 +199,7 @@ def _enc_prefetch_handle(h: Any) -> dict[str, Any]:
     }
 
 
-def _dec_prefetch_handle(d: dict[str, Any]) -> Any:
-    # Imported lazily to break the storage_manager → decorator → codecs
-    # → storage_manager cycle (PrefetchHandle is defined in the same
-    # module that imports the trace decorator at top level).
-    # First Party
-    from lmcache.v1.distributed.storage_manager import PrefetchHandle
-
+def _dec_prefetch_handle(d: dict[str, Any]) -> PrefetchHandle:
     return PrefetchHandle(
         prefetch_request_id=d["prefetch_request_id"],
         external_request_id=d["external_request_id"],
@@ -253,31 +237,14 @@ register_codec(
         decode=_dec_layout_desc,
     ),
 )
-
-
-def register_prefetch_handle_codec() -> None:
-    """Register the ``PrefetchHandle`` codec lazily.
-
-    The import is deferred to break the
-    ``storage_manager → decorator → codecs → storage_manager`` cycle.
-    Called from a hook in ``StorageManager`` after its module body has
-    finished executing.
-    """
-    # First Party
-    from lmcache.v1.distributed.storage_manager import PrefetchHandle
-
-    if has_codec(PrefetchHandle):
-        return
-    register_codec(
-        PrefetchHandle,
-        TypeCodec(
-            tag="PrefetchHandle",
-            encode=_enc_prefetch_handle,
-            decode=_dec_prefetch_handle,
-        ),
-    )
-
-
+register_codec(
+    PrefetchHandle,
+    TypeCodec(
+        tag="PrefetchHandle",
+        encode=_enc_prefetch_handle,
+        decode=_dec_prefetch_handle,
+    ),
+)
 register_codec(
     torch.Size,
     TypeCodec(tag="torch.Size", encode=_enc_torch_size, decode=_dec_torch_size),

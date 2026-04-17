@@ -31,9 +31,18 @@ import msgspec
 #: reader rejects files that do not begin with these bytes.
 MAGIC: bytes = b"LMCT"
 
-#: Bumped whenever the on-wire layout changes in a backwards-
-#: incompatible way.
+#: Bumped whenever the on-wire framing layout changes in a backwards-
+#: incompatible way (length prefix, header/record struct shape, etc.).
 FORMAT_VERSION: int = 1
+
+#: Bumped whenever the captured API surface changes in a way that makes
+#: older traces undecodable or incorrect to replay — e.g. a traced
+#: StorageManager method gains/loses an argument, an argument type's
+#: codec wire form changes, or a new codec tag is introduced.  Owned by
+#: the trace subsystem, independent of the LMCache package version,
+#: because ``lmcache.__version__`` bumps cover many changes irrelevant
+#: to the trace contract.
+TRACE_SCHEMA_VERSION: int = 1
 
 
 class Header(msgspec.Struct, tag="header", omit_defaults=True):
@@ -49,8 +58,10 @@ class Header(msgspec.Struct, tag="header", omit_defaults=True):
     """Trace level — currently ``"storage"``.  Future levels (``"mq"``,
     ``"gpu"``) will share this format."""
 
-    lmcache_version: str
-    """``lmcache.__version__`` of the recording process."""
+    trace_schema_version: int
+    """:data:`TRACE_SCHEMA_VERSION` at record time.  Replay drivers may
+    refuse mismatched schemas rather than silently misinterpreting old
+    traces."""
 
     t_mono_start: float
     """``time.monotonic()`` at recorder construction.  Record

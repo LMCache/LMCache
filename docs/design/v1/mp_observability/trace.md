@@ -73,7 +73,7 @@ Three pieces, each in its own module under
 | `format.py` | `Header` + `Record` msgspec structs; length-prefixed framing |
 | `recorder.py` | `TraceRecorder` ABC + `StorageTraceRecorder` `EventSubscriber` |
 | `reader.py` | Streaming `TraceReader` (used by `trace info` / replay in PR2) |
-| `lifecycle.py` | `maybe_register_trace_recorder` server-side wiring helper |
+| `lifecycle.py` | `maybe_initialize_trace_recorder` server-side wiring helper |
 
 ---
 
@@ -86,9 +86,11 @@ All captured calls publish the same `EventType.TRACE_CALL` event:
 ```python
 Event(
     event_type = EventType.TRACE_CALL,
+    timestamp  = <time.time() stamped by EventBus.publish()>,
     metadata   = {
         "qualname": "lmcache.v1.distributed.storage_manager.StorageManager.reserve_write",
         "args":     {"keys": [...], "layout_desc": {...}, "mode": "new"},
+        "t_mono":   <time.monotonic() captured inside publish_call_event>,
     },
 )
 ```
@@ -98,6 +100,12 @@ subscriber dispatch table small and lets new traced methods land
 without schema bumps. The `qualname` field discriminates ops; the
 `args` dict carries everything needed to reissue the call at replay
 time.
+
+`t_mono` is sampled inside `publish_call_event` (the publish-time
+path), not on the EventBus drain thread. Otherwise the `t_mono` and
+`t_wall` values recorded per call would drift by the drain queue
+latency, rendering relative-timing analyses off by up to a frame's
+worth of processing time.
 
 ### Signature-driven argument capture
 
@@ -145,15 +153,14 @@ can re-enter the context manager faithfully.
 
 The decorator publishes raw Python values; codec encoding happens later
 on the EventBus drain thread inside the recorder. This keeps the
-decorator import-cheap and breaks an otherwise circular dependency:
+decorator import-cheap: it has no dependency on `codecs.py`, so adding
+a new codec cannot pull the decorator's dependency graph.
 
-```
-StorageManager → @enable_tracing → codecs → PrefetchHandle (StorageManager)
-```
-
-`PrefetchHandle`'s codec is registered lazily by a hook
-(`register_prefetch_handle_codec`) called at the bottom of
-`storage_manager.py` once the symbol is in scope.
+All codec-targeted types (`ObjectKey`, `MemoryLayoutDesc`,
+`PrefetchHandle`, `torch.Size`, `torch.dtype`) live in
+`lmcache/v1/distributed/api.py`. Keeping them in a leaf module means
+`codecs.py` imports them eagerly and registers every codec at import
+time, with no cycle-break machinery.
 
 ---
 
@@ -213,6 +220,33 @@ ever called.
 `dropped_count` is exposed as a property for tests and (future)
 metrics integration.
 
+### Shutdown contract
+
+The recorder relies on `EventBus.stop()` to flush and close the file.
+The chain is:
+
+```
+<server shutdown>
+  → event_bus.stop()
+      → _drain_all()                       (process queued events)
+      → subscriber.shutdown() per sub      (EventBus contract)
+          → TraceRecorder.close()          (flush + fsync + close fd)
+```
+
+All three cache-server entry points already invoke `event_bus.stop()`
+in their shutdown paths:
+
+- `server.py :: run_cache_server` — in the `KeyboardInterrupt`
+  handler.
+- `blend_server_v2.py :: run_cache_server` — same.
+- `http_server.py :: lifespan` — in the FastAPI lifespan teardown
+  branch.
+
+`close()` is idempotent; calling it directly (for tests) and then
+letting `shutdown()` fire is safe. The trace gate is flipped off
+inside `close()`, so any events that race the shutdown after the
+final drain become cheap no-ops in the publisher.
+
 ---
 
 ## 6. On-disk format
@@ -232,9 +266,9 @@ Length-prefixed frames keep the reader simple and let truncated tails
 | Field | Type | Purpose |
 |-------|------|---------|
 | `magic` | `bytes` (`LMCT`) | Sanity check; reader rejects non-matching files |
-| `format_version` | `int` (1) | Bumped on incompatible layout changes; reader rejects unknown versions |
+| `format_version` | `int` (1) | Bumped on incompatible **framing** layout changes (length prefix, struct shape). Reader rejects unknown versions |
 | `level` | `str` (`storage`) | Trace level discriminator. Future `mq` / `gpu` levels will share this format and use this field for replay-driver dispatch |
-| `lmcache_version` | `str` | `lmcache.__version__` of the recording process |
+| `trace_schema_version` | `int` (1) | Bumped on incompatible changes to the captured API surface (e.g. a traced method's args change, a codec wire form changes). Owned by the trace subsystem, not tied to `lmcache.__version__`; reader rejects mismatches |
 | `t_mono_start` | `float` | `time.monotonic()` at recorder construction; record `t_mono` is relative to this |
 | `t_wall_start` | `float` | `time.time()` at construction, for absolute correlation with external logs |
 | `sm_config_json` | `str` | JSON dump of `StorageManagerConfig` at record time, or empty string if attach was skipped |
@@ -292,7 +326,7 @@ arg group:
 | `--trace-output FILE` | Output path. Optional; if omitted while `--trace-level` is set, a timestamped file under `$TMPDIR` is minted (`lmcache-trace-<pid>-<UTC>.lct`) and its path is logged at INFO. |
 
 Both flags flow through `ObservabilityConfig` and are consumed by
-`maybe_register_trace_recorder`, called from `run_cache_server` in
+`maybe_initialize_trace_recorder`, called from `run_cache_server` in
 both `multiprocess/server.py` and `multiprocess/blend_server_v2.py`.
 When `--trace-level` is unset, the helper returns `None` and no
 recorder is registered — true zero overhead.
@@ -318,11 +352,10 @@ file format:
    likely, the same `TRACE_CALL` mapping with a different `level`
    passed to the base).
 4. **Codec registry** — new arg types slot in by calling
-   `register_codec`. No format bump.
-5. **Lazy codec registration hook** — the
-   `register_prefetch_handle_codec` pattern handles import cycles for
-   any new codec whose target type lives in a module that itself
-   imports the decorator.
+   `register_codec`. No format bump. Keep newly-traced argument types
+   in `lmcache/v1/distributed/api.py` (or another leaf module) so
+   `codecs.py` can import them without pulling in modules that import
+   the trace decorator.
 
 ---
 

@@ -37,7 +37,7 @@ def _default_trace_path() -> str:
     )
 
 
-def maybe_register_trace_recorder(
+def maybe_initialize_trace_recorder(
     bus: EventBus,
     obs_config: ObservabilityConfig,
     storage_manager_config: StorageManagerConfig,
