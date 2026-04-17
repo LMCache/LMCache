@@ -167,6 +167,31 @@ def _create_primary_backend(dev_path: str) -> DaxBackend:
     )
 
 
+class _FakeCudaRuntime:
+    def __init__(
+        self,
+        register_status: int = 0,
+        unregister_status: int = 0,
+    ) -> None:
+        self.register_status = register_status
+        self.unregister_status = unregister_status
+        self.register_calls = 0
+        self.unregister_calls = 0
+
+    def cudaHostRegister(self, ptr: int, size: int, flags: int) -> int:
+        del ptr, size, flags
+        self.register_calls += 1
+        return self.register_status
+
+    def cudaHostUnregister(self, ptr: int) -> int:
+        del ptr
+        self.unregister_calls += 1
+        return self.unregister_status
+
+    def cudaGetErrorString(self, status: int) -> bytes:
+        return f"fake cuda error {status}".encode()
+
+
 def test_dax_backend_roundtrip(memory_allocator, loop_in_thread):
     with tempfile.TemporaryDirectory() as td:
         dev_path = os.path.join(td, "dax.bin")
@@ -345,6 +370,60 @@ def test_dax_backend_batched_get_blocking_passes_cached_fmt_to_allocator(
             for result in results:
                 assert result is not None
                 result.ref_count_down()
+        finally:
+            backend.close()
+
+
+def test_dax_backend_get_blocking_returns_none_for_missing_fmt(
+    memory_allocator,
+    loop_in_thread,
+) -> None:
+    with tempfile.TemporaryDirectory() as td:
+        dev_path = os.path.join(td, "dax.bin")
+        with open(dev_path, "wb") as fout:
+            fout.truncate(16 * 1024 * 1024)
+
+        config = _create_config(
+            chunk_size=16,
+            local_cpu=True,
+            max_local_cpu_size=0.1,
+            extra_config={
+                "dax.device_path": dev_path,
+                "dax.max_dax_size": 16 / 1024,
+            },
+        )
+        metadata = _create_metadata(chunk_size=16)
+        local_cpu = LocalCPUBackend(
+            config=config,
+            metadata=metadata,
+            dst_device="cpu",
+            memory_allocator=memory_allocator,
+        )
+        backend = DaxBackend(
+            config=config,
+            metadata=metadata,
+            local_cpu_backend=local_cpu,
+            loop=loop_in_thread,
+            dst_device="cpu",
+        )
+
+        try:
+            alloc = AdHocMemoryAllocator(device="cpu")
+            key = CacheEngineKey("test_model", 1, 0, 16, torch.bfloat16)
+            obj = alloc.allocate(
+                [torch.Size([2, 16, 8])],
+                [torch.bfloat16],
+                fmt=None,
+            )
+            assert obj is not None
+            assert obj.tensor is not None
+            obj.tensor.fill_(6)
+            backend.batched_submit_put_task([key], [obj])
+            obj.ref_count_down()
+
+            assert backend.contains(key)
+            assert backend.get_blocking(key) is None
+            assert backend.batched_get_blocking([key]) == [None]
         finally:
             backend.close()
 
@@ -756,6 +835,54 @@ def test_dax_backend_rejects_multi_group_metadata_at_init() -> None:
                 loop=None,
                 dst_device="cpu",
             )
+
+
+def test_dax_backend_primary_fails_on_cuda_host_register_error(monkeypatch) -> None:
+    fake_cudart = _FakeCudaRuntime(register_status=2)
+    monkeypatch.setattr(dax_backend_module.torch.cuda, "cudart", lambda: fake_cudart)
+
+    with tempfile.TemporaryDirectory() as td:
+        dev_path = os.path.join(td, "dax.bin")
+        with open(dev_path, "wb") as fout:
+            fout.truncate(4096)
+
+        with pytest.raises(RuntimeError, match="cudaHostRegister failed"):
+            _create_primary_backend(dev_path)
+
+    assert fake_cudart.register_calls == 1
+    assert fake_cudart.unregister_calls == 0
+
+
+def test_dax_backend_primary_checks_cuda_host_unregister_status(
+    monkeypatch,
+) -> None:
+    fake_cudart = _FakeCudaRuntime(unregister_status=3)
+    warnings: list[str] = []
+
+    def _capture_warning(message: str, *args: object, **kwargs: object) -> None:
+        del kwargs
+        warnings.append(message % args)
+
+    monkeypatch.setattr(dax_backend_module.torch.cuda, "cudart", lambda: fake_cudart)
+    monkeypatch.setattr(dax_backend_module.logger, "warning", _capture_warning)
+
+    with tempfile.TemporaryDirectory() as td:
+        dev_path = os.path.join(td, "dax.bin")
+        with open(dev_path, "wb") as fout:
+            fout.truncate(4096)
+
+        backend = _create_primary_backend(dev_path)
+        try:
+            assert fake_cudart.register_calls == 1
+            backend.close()
+        finally:
+            backend.close()
+
+    assert fake_cudart.unregister_calls == 1
+    assert warnings == [
+        "Failed to unregister DAX host mapping: "
+        "CUDA error code 3: fake cuda error 3"
+    ]
 
 
 def test_dax_backend_primary_allocation_release_reuses_capacity(

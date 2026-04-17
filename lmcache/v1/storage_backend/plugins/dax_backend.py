@@ -183,7 +183,7 @@ class _DaxArenaAllocator(MemoryAllocatorInterface):
     ) -> None:
         """Release one DAX-backed memory object back to the owning backend."""
         del allocator_type
-        self._backend._release_memory_obj(memory_obj)
+        self._backend.release_memory_obj(memory_obj)
 
     def batched_free(
         self,
@@ -198,7 +198,7 @@ class _DaxArenaAllocator(MemoryAllocatorInterface):
 
     def memcheck(self) -> bool:
         """Return whether the owning backend can still allocate DAX memory."""
-        return self._backend._allocator_memcheck()
+        return self._backend.allocator_memcheck()
 
 
 class DaxBackend(StoragePluginInterface, AllocatorBackendInterface):
@@ -685,9 +685,10 @@ class DaxBackend(StoragePluginInterface, AllocatorBackendInterface):
             meta = entry.meta
             shape = meta.shape
             dtype = meta.dtype
-            if shape is None or dtype is None:
+            fmt = meta.fmt
+            if shape is None or dtype is None or fmt is None:
                 return None
-            fmt = self._resolve_memory_format(meta.fmt)
+            fmt = self._resolve_memory_format(fmt)
             state = self._slot_states.get(entry.slot_id)
             if (
                 state is None
@@ -1109,7 +1110,8 @@ class DaxBackend(StoragePluginInterface, AllocatorBackendInterface):
             return self.local_cpu_backend.get_memory_allocator()
         return self._arena_allocator
 
-    def _allocator_memcheck(self) -> bool:
+    def allocator_memcheck(self) -> bool:
+        """Return whether the DAX allocator can still serve allocations."""
         if self.mode != "primary":
             return True
         with self._state_lock:
@@ -1271,9 +1273,36 @@ class DaxBackend(StoragePluginInterface, AllocatorBackendInterface):
         if cudart is None or base_ptr == 0:
             return
         try:
-            cudart.cudaHostUnregister(base_ptr)
+            status = cudart.cudaHostUnregister(base_ptr)
+            if not DaxBackend._cuda_status_ok(status):
+                logger.warning(
+                    "Failed to unregister DAX host mapping: %s",
+                    DaxBackend._format_cuda_error(cudart, status),
+                )
         except Exception as e:
             logger.warning("Failed to unregister DAX host mapping: %s", e)
+
+    @staticmethod
+    def _cuda_status_ok(status: Any) -> bool:
+        return status is None or status == 0
+
+    @staticmethod
+    def _format_cuda_error(cudart: Any, status: Any) -> str:
+        try:
+            error = cudart.cudaGetErrorString(status)
+        except Exception:
+            return f"CUDA error code {status}"
+        if isinstance(error, bytes):
+            error = error.decode("utf-8", errors="replace")
+        return f"CUDA error code {status}: {error}"
+
+    @classmethod
+    def _check_cuda_status(cls, cudart: Any, status: Any, operation: str) -> None:
+        if cls._cuda_status_ok(status):
+            return
+        raise RuntimeError(
+            f"{operation} failed: {cls._format_cuda_error(cudart, status)}"
+        )
 
     @staticmethod
     def _release_arena_resources(
@@ -1368,11 +1397,12 @@ class DaxBackend(StoragePluginInterface, AllocatorBackendInterface):
             raise RuntimeError("DAX arena is not initialized")
         try:
             cudart = torch.cuda.cudart()
-            cudart.cudaHostRegister(
+            status = cudart.cudaHostRegister(
                 self._base_ptr,
                 self._arena_bytes,
                 2,  # cudaHostRegisterMapped
             )
+            self._check_cuda_status(cudart, status, "cudaHostRegister")
             self._cudart = cudart
             self._cuda_registered = True
         except Exception as e:
@@ -1465,7 +1495,8 @@ class DaxBackend(StoragePluginInterface, AllocatorBackendInterface):
             and handle.slot_id in self._reserved_slots
         )
 
-    def _release_memory_obj(self, memory_obj: MemoryObj) -> None:
+    def release_memory_obj(self, memory_obj: MemoryObj) -> None:
+        """Release a DAX-backed memory object allocated by this backend."""
         with self._state_lock:
             state = self._mark_memory_obj_released_locked(memory_obj)
             if state is None:
