@@ -16,7 +16,7 @@ import torch
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.config import LMCacheEngineConfig
+from lmcache.v1.config import LMCacheEngineConfig, load_ec_engine_config
 from lmcache.v1.config_base import apply_remote_configs, fetch_remote_config
 
 if TYPE_CHECKING:
@@ -129,6 +129,11 @@ def lmcache_get_or_create_config() -> LMCacheEngineConfig:
                             remote_config_url,
                         )
     return _config_instance
+
+
+def lmcache_create_ec_config() -> LMCacheEngineConfig:
+    """Create EC config from LMCache config plus EC-specific overrides."""
+    return load_ec_engine_config(base_config=lmcache_get_or_create_config())
 
 
 def hex_hash_to_int16(s: str) -> int:

@@ -39,22 +39,6 @@ class ECCacheEngine:
         config: LMCacheEngineConfig,
         metadata: LMCacheMetadata,
     ):
-        # EC always stages through allocator-backed memory. If PD is not used,
-        # enforce a minimal LocalCPU allocator here so connector-side code does
-        # not need to duplicate this bootstrap logic.
-        if not config.enable_pd:
-            if not config.local_cpu:
-                logger.info("EC enabling local_cpu allocator backend")
-                config.local_cpu = True
-            if config.max_local_cpu_size <= 0:
-                logger.info("EC setting max_local_cpu_size to 1 GB")
-                config.max_local_cpu_size = 1
-
-        # Keep LocalDiskBackend backwards compatible when only the path is set.
-        if config.local_disk and config.max_local_disk_size <= 0:
-            logger.info("EC setting max_local_disk_size to 64 GB")
-            config.max_local_disk_size = 64
-
         self.config = config
         self.metadata = metadata
         self._model_name = metadata.model_name
@@ -124,7 +108,7 @@ class ECCacheEngine:
         mem_obj = self._storage_manager.allocate(
             shapes=tensor.shape,
             dtypes=tensor.dtype,
-            fmt=MemoryFormat.EC_T2D,
+            fmt=MemoryFormat.EC_TD,
             eviction=True,
             busy_loop=False,
         )
@@ -156,7 +140,6 @@ class ECCacheEngine:
             return False
 
         key = self._make_cache_key(mm_hash)
-        logger.debug("Getting encoder cache for key %s", key)
 
         mem_objs = self._storage_manager.batched_get(
             [key],

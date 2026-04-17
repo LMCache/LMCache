@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import copy
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -14,7 +13,7 @@ from vllm.v1.core.sched.output import SchedulerOutput
 from lmcache.integration.vllm.utils import (
     create_lmcache_metadata,
     get_vllm_device_type,
-    lmcache_get_or_create_config,
+    lmcache_create_ec_config,
 )
 from lmcache.v1.ec_engine import ECCacheEngine
 
@@ -55,22 +54,16 @@ class LMCacheECConnectorImpl:
     ) -> None:
         self._parent = parent
         self._vllm_config = vllm_config
-        self._role = role 
+        self._role = role
 
         # Scheduler-side state: set of multimodal hashes to load.
         self._mm_hashes_need_loads: set[str] = set()
 
-        transfer_config = vllm_config.ec_transfer_config
-        if transfer_config is None:
+        if vllm_config.ec_transfer_config is None:
             raise ValueError("ec_transfer_config must be set for ECConnectorBase")
 
-        # Mirror KV connector style: use LMCache config system.
-        config = copy.deepcopy(lmcache_get_or_create_config())
-        shared_storage_path = transfer_config.get_from_extra_config(
-            "shared_storage_path", None
-        )
-        if shared_storage_path:
-            config.local_disk = shared_storage_path
+        # Build EC config from standard LMCache config + EC-prefixed overrides.
+        config = lmcache_create_ec_config()
 
         # Build metadata from vLLM configuration.
         lmcache_metadata, _ = create_lmcache_metadata(vllm_config, role="worker")

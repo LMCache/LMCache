@@ -13,6 +13,9 @@ from typing import Any, Dict, Optional
 import json
 import os
 
+# Third Party
+import yaml
+
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.config_base import (
@@ -25,6 +28,7 @@ from lmcache.v1.config_base import (
     _to_str_list,
     create_config_class,
     load_config_with_overrides,
+    validate_and_set_config_value,
 )
 
 logger = init_logger(__name__)
@@ -56,6 +60,13 @@ _DEPRECATED_CONFIGS = {
     "external_backends": (
         "external_backends is deprecated, use storage_plugins instead"
     ),
+}
+
+_EC_ENV_PREFIXES = ("LMCACHE_EC_", "EC_")
+_EC_FILE_PREFIX = "ec_"
+_EC_COMPAT_ALIASES = {
+    "max_local_disk": "max_local_disk_size",
+    "max_local_cpu": "max_local_cpu_size",
 }
 
 # Single configuration definition center - add new config items only here
@@ -830,3 +841,164 @@ def load_engine_config_with_overrides(
         config_file_path=config_file_path,
         overrides=overrides,
     )
+
+
+def _normalize_ec_config_key(raw_key: str, source: str) -> Optional[str]:
+    """Normalize one EC-prefixed config key to a LMCache config key."""
+    key = raw_key.strip().lower()
+    if not key:
+        logger.warning("Empty EC config key from %s", source)
+        return None
+
+    key = _EC_COMPAT_ALIASES.get(key, key)
+    key = _CONFIG_ALIASES.get(key, key)
+    if key not in _CONFIG_DEFINITIONS:
+        logger.warning("Unknown EC config key '%s' from %s", raw_key, source)
+        return None
+    return key
+
+
+def _extract_prefixed_key(
+    key: str,
+    prefixes: tuple[str, ...],
+) -> Optional[str]:
+    """Extract key suffix when one of the prefixes matches."""
+    for prefix in prefixes:
+        if key.startswith(prefix):
+            return key[len(prefix) :]
+    return None
+
+
+def _collect_ec_overrides_from_env() -> dict[str, Any]:
+    """Collect EC-specific overrides from environment variables."""
+    overrides: dict[str, Any] = {}
+    for env_name, env_value in os.environ.items():
+        stripped = _extract_prefixed_key(env_name, _EC_ENV_PREFIXES)
+        if stripped is None:
+            continue
+
+        normalized_key = _normalize_ec_config_key(
+            stripped,
+            source=f"environment variable {env_name}",
+        )
+        if normalized_key is not None:
+            overrides[normalized_key] = env_value
+    return overrides
+
+
+def _collect_ec_overrides_from_file(
+    config_file_path: Optional[str],
+) -> dict[str, Any]:
+    """Collect EC-specific overrides from the LMCache YAML config file."""
+    if not config_file_path:
+        return {}
+
+    try:
+        with open(config_file_path, "r", encoding="utf-8") as fin:
+            loaded = yaml.safe_load(fin) or {}
+    except FileNotFoundError:
+        logger.warning(
+            "LMCache config file %s not found while loading EC overrides",
+            config_file_path,
+        )
+        return {}
+
+    if not isinstance(loaded, dict):
+        logger.warning(
+            "LMCache config file %s is not a mapping; skipping EC overrides",
+            config_file_path,
+        )
+        return {}
+
+    overrides: dict[str, Any] = {}
+    for raw_key, value in loaded.items():
+        if not isinstance(raw_key, str):
+            continue
+
+        lower_key = raw_key.lower()
+        if lower_key == "ec" and isinstance(value, dict):
+            for nested_key, nested_value in value.items():
+                if not isinstance(nested_key, str):
+                    continue
+                normalized_key = _normalize_ec_config_key(
+                    nested_key,
+                    source=f"config file nested key ec.{nested_key}",
+                )
+                if normalized_key is not None:
+                    overrides[normalized_key] = nested_value
+            continue
+
+        if not lower_key.startswith(_EC_FILE_PREFIX):
+            continue
+
+        normalized_key = _normalize_ec_config_key(
+            lower_key[len(_EC_FILE_PREFIX) :],
+            source=f"config file key {raw_key}",
+        )
+        if normalized_key is not None:
+            overrides[normalized_key] = value
+
+    return overrides
+
+
+def _clone_lmcache_engine_config(
+    base_config: "LMCacheEngineConfig",  # type: ignore[valid-type]
+) -> "LMCacheEngineConfig":  # type: ignore[valid-type]
+    """Create a detached LMCacheEngineConfig copy from an existing config."""
+    cloned_config = LMCacheEngineConfig.from_dict(base_config.to_dict())
+    object.__setattr__(
+        cloned_config,
+        "_user_set_keys",
+        set(getattr(base_config, "_user_set_keys", set())),
+    )
+    return cloned_config
+
+
+def _apply_ec_storage_defaults(
+    config: "LMCacheEngineConfig",  # type: ignore[valid-type]
+) -> None:
+    """Apply EC-only storage defaults after EC override ingestion."""
+    if not config.enable_pd:
+        if not config.local_cpu:
+            logger.info("EC config enabling local_cpu allocator backend")
+            config.local_cpu = True
+        if config.max_local_cpu_size <= 0:
+            logger.info("EC config setting max_local_cpu_size to 1 GB")
+            config.max_local_cpu_size = 1
+
+    if config.local_disk and config.max_local_disk_size <= 0:
+        logger.info("EC config setting max_local_disk_size to 64 GB")
+        config.max_local_disk_size = 64
+
+
+def load_ec_engine_config(
+    base_config: Optional["LMCacheEngineConfig"] = None,  # type: ignore[valid-type]
+    config_file_path: Optional[str] = None,
+) -> "LMCacheEngineConfig":  # type: ignore[valid-type]
+    """Build EC config from base config plus EC-prefixed overrides.
+
+    Precedence is:
+    1) base LMCache config,
+    2) YAML keys prefixed with ``ec_`` / ``EC_`` (or ``ec:`` nested map),
+    3) environment variables prefixed with ``LMCACHE_EC_`` / ``EC_``.
+    """
+    resolved_base_config = base_config
+    if resolved_base_config is None:
+        resolved_base_config = load_engine_config_with_overrides(
+            config_file_path=config_file_path,
+        )
+
+    ec_config = _clone_lmcache_engine_config(resolved_base_config)
+    resolved_config_file = config_file_path or os.getenv("LMCACHE_CONFIG_FILE")
+
+    file_overrides = _collect_ec_overrides_from_file(resolved_config_file)
+    env_overrides = _collect_ec_overrides_from_env()
+    merged_overrides = {**file_overrides, **env_overrides}
+
+    for key, value in merged_overrides.items():
+        if not validate_and_set_config_value(ec_config, key, value, override=True):
+            logger.warning("Failed to apply EC override %s=%r", key, value)
+
+    _apply_ec_storage_defaults(ec_config)
+    ec_config.validate()
+    return ec_config
