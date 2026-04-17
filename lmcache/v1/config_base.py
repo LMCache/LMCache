@@ -322,6 +322,8 @@ def create_config_class(
         instance = cls(**config_values)
         # Store user-set keys in the instance
         object.__setattr__(instance, "_user_set_keys", user_set_keys)
+        if hasattr(instance, "validate"):
+            instance.validate()
         return instance
 
     def _from_file(cls, file_path: str):
@@ -354,6 +356,8 @@ def create_config_class(
         instance = cls(**config_values)
         # Store user-set keys in the instance
         object.__setattr__(instance, "_user_set_keys", user_set_keys)
+        if hasattr(instance, "validate"):
+            instance.validate()
         return instance
 
     def _from_defaults(cls, **kwargs):
@@ -374,7 +378,8 @@ def create_config_class(
         instance = cls(**config_values)
         # Store user-set keys in the instance
         object.__setattr__(instance, "_user_set_keys", user_set_keys)
-        instance.validate() if hasattr(instance, "validate") else None
+        if hasattr(instance, "validate"):
+            instance.validate()
         return instance
 
     def _update_config_from_env(self):
