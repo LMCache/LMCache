@@ -168,13 +168,19 @@ void MooncakeConnector::unregister_all_buffers() noexcept {
     return;
   }
 
+  auto current = l1_registration_.base;
   size_t remaining = l1_registration_.size;
   while (remaining > 0) {
     const auto segment_size = std::min(remaining, preregistered_block_size_);
+    void* segment_ptr = reinterpret_cast<void*>(current);
+    try {
+      client_->unregister_buffer(segment_ptr);
+    } catch (...) {
+      // Preserve noexcept during teardown and keep attempting the remaining
+      // segments so earlier failures do not strand later registrations.
+    }
+    current += segment_size;
     remaining -= segment_size;
-    void* segment_ptr =
-        reinterpret_cast<void*>(l1_registration_.base + remaining);
-    client_->unregister_buffer(segment_ptr);
   }
 
   preregistered_block_size_ = 0;
