@@ -5,6 +5,7 @@ LRU (Least Recently Used) eviction policy implementation
 
 # Standard
 from collections import OrderedDict
+from collections.abc import Callable
 import threading
 
 # First Party
@@ -77,7 +78,10 @@ class LRUEvictionPolicy(EvictionPolicy):
             keys (list[ObjectKey]): The keys that have been created
         """
         with self._lock:
-            for key in keys:
+            # NOTE: for the request, the later keys should be evicted first.
+            # For example, the request has (key1, key2, key3), if we first
+            # evict key1, due to prefix match, key2 and key3 will not be hit.
+            for key in reversed(keys):
                 # If key already exists, move it to the end (most recently used)
                 if key in self._order:
                     self._order.move_to_end(key)
@@ -94,7 +98,9 @@ class LRUEvictionPolicy(EvictionPolicy):
             keys (list[ObjectKey]): The keys that have been accessed
         """
         with self._lock:
-            for key in keys:
+            # NOTE: for the request, the later keys should be evicted first.
+            # The example is the same as `on_keys_created`.
+            for key in reversed(keys):
                 if key in self._order:
                     # Move to end (most recently used)
                     self._order.move_to_end(key)
@@ -113,7 +119,12 @@ class LRUEvictionPolicy(EvictionPolicy):
                 if key in self._order:
                     del self._order[key]
 
-    def get_eviction_actions(self, expected_ratio: float) -> list[EvictionAction]:
+    def get_eviction_actions(
+        self,
+        expected_ratio: float,
+        key_eligible_filter: Callable[[ObjectKey], bool] | None = None,
+        cache_salt: str | None = None,
+    ) -> list[EvictionAction]:
         """
         Get the eviction actions to evict objects from L1 cache.
         Returns keys in LRU order (least recently used first).
@@ -122,6 +133,12 @@ class LRUEvictionPolicy(EvictionPolicy):
             expected_ratio (float): A hint indicating approximately what fraction
                 of tracked keys should be evicted. Value should be in range [0.0, 1.0].
                 For example, 0.1 means roughly 10% of keys should be evicted.
+            key_eligible_filter: An optional callable that takes an ObjectKey
+                and returns True if the key is eligible for eviction. When
+                provided, keys for which the filter returns False will be
+                skipped. This is useful for skipping locked keys that
+                cannot be deleted.
+            cache_salt: Ignored by LRU policy (not user-level).
 
         Returns:
             list[EvictionAction]: The eviction actions to perform. Each
@@ -151,10 +168,15 @@ class LRUEvictionPolicy(EvictionPolicy):
             if target_count == 0:
                 return []
 
-            # Get keys in LRU order (from beginning - least recently used)
+            # Get keys in LRU order (from beginning - least recently used),
+            # skipping keys that fail the filter (e.g. locked keys).
             keys_to_evict: list[ObjectKey] = []
 
             for key in self._order:
+                if key_eligible_filter is not None and not key_eligible_filter(key):
+                    # Skip keys that are not eligible for eviction
+                    # (e.g. currently locked by read/write operations)
+                    continue
                 keys_to_evict.append(key)
                 if len(keys_to_evict) >= target_count:
                     break

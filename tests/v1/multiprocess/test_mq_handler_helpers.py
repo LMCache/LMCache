@@ -7,7 +7,8 @@ and passed between processes during multiprocessing tests.
 """
 
 # First Party
-from lmcache.v1.multiprocess.custom_types import KVCache
+from lmcache.v1.gpu_connector.utils import LayoutHints
+from lmcache.v1.multiprocess.custom_types import BlockAllocationRecord, KVCache
 from lmcache.v1.multiprocess.protocol import KeyType
 
 # ==============================================================================
@@ -29,7 +30,11 @@ def noop_handler() -> str:
 
 
 def register_kv_cache_handler(
-    gpu_id: int, kv_cache: KVCache, model_name: str, world_size: int
+    gpu_id: int,
+    kv_cache: KVCache,
+    model_name: str,
+    world_size: int,
+    layout_hints: LayoutHints,
 ) -> None:
     """
     Dummy handler for REGISTER_KV_CACHE requests.
@@ -39,6 +44,7 @@ def register_kv_cache_handler(
         kv_cache: List of CudaIPCWrapper objects representing KV cache
         model_name: Name of the model associated with this KV cache
         world_size: World size associated with this KV cache
+        layout_hints: Engine-provided hints dict
 
     Returns:
         None
@@ -54,6 +60,9 @@ def register_kv_cache_handler(
     )
     assert isinstance(world_size, int), (
         f"Expected world_size to be int, got {type(world_size)}"
+    )
+    assert isinstance(layout_hints, dict), (
+        f"Expected layout_hints to be dict, got {type(layout_hints)}"
     )
     # No return value (returns None implicitly)
 
@@ -116,7 +125,11 @@ def store_handler(
 
 
 def retrieve_handler(
-    key: KeyType, gpu_id: int, gpu_block_ids: list[int], event_handler: bytes
+    key: KeyType,
+    gpu_id: int,
+    gpu_block_ids: list[int],
+    event_handler: bytes,
+    skip_first_n_tokens: int = 0,
 ) -> tuple[bytes, bool]:
     """
     Dummy handler for RETRIEVE requests.
@@ -126,6 +139,7 @@ def retrieve_handler(
         gpu_id: GPU device ID
         gpu_block_ids: List of GPU block IDs
         event_handler: CUDA event IPC handle
+        skip_first_n_tokens: Number of tokens to skip at retrieve start
 
     Returns:
         tuple[bytes, bool]: (event handle, success flag)
@@ -138,6 +152,9 @@ def retrieve_handler(
     assert isinstance(event_handler, bytes), (
         f"Expected event_handler to be bytes, got {type(event_handler)}"
     )
+    assert isinstance(skip_first_n_tokens, int), (
+        f"Expected skip_first_n_tokens to be int, got {type(skip_first_n_tokens)}"
+    )
     return b"\x01" * 64, True
 
 
@@ -146,20 +163,22 @@ def retrieve_handler(
 # ==============================================================================
 
 
-def lookup_handler(key: KeyType) -> int:
+def lookup_handler(key: KeyType, tp_size: int) -> None:
     """
     Dummy handler for LOOKUP requests.
 
     Args:
         key: Cache key to look up (request_id embedded in the key)
+        tp_size: Tensor-parallel size for MLA
+            multi-reader locking
 
     Returns:
-        int: Number of matched chunks (always returns 1 for testing)
+        None: LOOKUP registers the job server-side; poll via QUERY_PREFETCH_STATUS.
     """
     # In a real implementation, this would look up the key in the cache
-    # For testing, we just validate the input and return a dummy result
+    # For testing, we just validate the input
     assert isinstance(key, KeyType), f"Expected key to be KeyType, got {type(key)}"
-    return 1
+    assert isinstance(tp_size, int), f"Expected tp_size to be int, got {type(tp_size)}"
 
 
 # ==============================================================================
@@ -167,14 +186,51 @@ def lookup_handler(key: KeyType) -> int:
 # ==============================================================================
 
 
-def free_locks_handler(key: KeyType) -> None:
+def free_locks_handler(key: KeyType, tp_size: int) -> None:
     """
     Dummy handler for FREE_LOOKUP_LOCKS requests.
 
     Args:
         key: Cache key whose read locks should be released
+        tp_size: Tensor-parallel size for MLA
+            multi-reader locking
 
     Returns:
         None
     """
     assert isinstance(key, KeyType), f"Expected key to be KeyType, got {type(key)}"
+    assert isinstance(tp_size, int), f"Expected tp_size to be int, got {type(tp_size)}"
+
+
+# ==============================================================================
+# REPORT_BLOCK_ALLOCATION Request Handlers
+# ==============================================================================
+
+
+def report_block_allocations_handler(
+    instance_id: int,
+    model_name: str,
+    records: list[BlockAllocationRecord],
+) -> None:
+    """
+    Dummy handler for REPORT_BLOCK_ALLOCATION requests.
+
+    Args:
+        instance_id: The scheduler instance ID.
+        model_name: The model name from the adapter.
+        records: List of BlockAllocationRecord with per-request
+            block and token allocation deltas.
+
+    Returns:
+        None
+    """
+    assert isinstance(records, list), (
+        f"Expected records to be list, got {type(records)}"
+    )
+    for rec in records:
+        assert isinstance(rec, BlockAllocationRecord), (
+            f"Expected BlockAllocationRecord, got {type(rec)}"
+        )
+        assert isinstance(rec.req_id, str)
+        assert isinstance(rec.new_block_ids, list)
+        assert isinstance(rec.new_token_ids, list)

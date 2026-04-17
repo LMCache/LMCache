@@ -11,6 +11,13 @@ import pytest
 from lmcache.v1.internal_api_server.api_server import app
 
 
+def _make_metadata(role: str) -> MagicMock:
+    """Create a mock metadata with the given role."""
+    metadata = MagicMock()
+    metadata.role = role
+    return metadata
+
+
 class TestLookupAPI:
     """Test suite for the /lookup/* API endpoints."""
 
@@ -18,11 +25,10 @@ class TestLookupAPI:
     def mock_scheduler_manager(self):
         """Create a mock LMCacheManager for scheduler role."""
         manager = MagicMock()
-        manager.role = "scheduler"
+        manager.lmcache_engine_metadata = _make_metadata("scheduler")
         manager.get_lookup_info.return_value = {
             "client": "HitLimitLookupClient(LMCacheBypassLookupClient)",
             "server": "None",
-            "role": "scheduler",
         }
         manager.close_lookup_client.return_value = {
             "old": "HitLimitLookupClient(LMCacheBypassLookupClient)"
@@ -38,11 +44,10 @@ class TestLookupAPI:
     def mock_worker_manager(self):
         """Create a mock LMCacheManager for worker role."""
         manager = MagicMock()
-        manager.role = "worker"
+        manager.lmcache_engine_metadata = _make_metadata("worker")
         manager.get_lookup_info.return_value = {
             "client": "None",
             "server": "LMCacheLookupServer",
-            "role": "worker",
         }
         manager.close_lookup_server.return_value = {"old": "LMCacheLookupServer"}
         manager.create_lookup_server.return_value = {"new": "LMCacheAsyncLookupServer"}
@@ -56,13 +61,17 @@ class TestLookupAPI:
     def scheduler_client(self, mock_scheduler_manager):
         """Create a test client with mocked scheduler manager."""
         app.state.lmcache_adapter = mock_scheduler_manager
-        return TestClient(app)
+        client = TestClient(app)
+        yield client
+        client.close()
 
     @pytest.fixture
     def worker_client(self, mock_worker_manager):
         """Create a test client with mocked worker manager."""
         app.state.lmcache_adapter = mock_worker_manager
-        return TestClient(app)
+        client = TestClient(app)
+        yield client
+        client.close()
 
     # ==================== GET /lookup/info Tests ====================
 
@@ -74,7 +83,6 @@ class TestLookupAPI:
         data = json.loads(response.text)
         assert "LMCacheBypassLookupClient" in data["client"]
         assert data["server"] == "None"
-        assert data["role"] == "scheduler"
         mock_scheduler_manager.get_lookup_info.assert_called_once()
 
     def test_get_lookup_info_worker(self, worker_client, mock_worker_manager):
@@ -85,7 +93,6 @@ class TestLookupAPI:
         data = json.loads(response.text)
         assert data["client"] == "None"
         assert data["server"] == "LMCacheLookupServer"
-        assert data["role"] == "worker"
         mock_worker_manager.get_lookup_info.assert_called_once()
 
     def test_get_lookup_info_not_supported(self):
@@ -95,9 +102,8 @@ class TestLookupAPI:
             pass
 
         app.state.lmcache_adapter = SimpleAdapter()
-        client = TestClient(app)
-
-        response = client.get("/lookup/info")
+        with TestClient(app) as client:
+            response = client.get("/lookup/info")
 
         assert response.status_code == 503
         data = json.loads(response.text)
@@ -232,11 +238,22 @@ class TestLookupAPI:
     def test_recreate_lookup_unknown_role(self):
         """Test recreation with unknown role."""
         manager = MagicMock()
-        manager.role = "unknown"
+        manager.lmcache_engine_metadata = _make_metadata("unknown")
         app.state.lmcache_adapter = manager
-        client = TestClient(app)
+        with TestClient(app) as client:
+            response = client.post("/lookup/recreate")
 
-        response = client.post("/lookup/recreate")
+        assert response.status_code == 400
+        data = json.loads(response.text)
+        assert data["error"] == "Unknown role"
+
+    def test_recreate_lookup_no_metadata(self):
+        """Test recreation when metadata is not available."""
+        manager = MagicMock()
+        manager.lmcache_engine_metadata = None
+        app.state.lmcache_adapter = manager
+        with TestClient(app) as client:
+            response = client.post("/lookup/recreate")
 
         assert response.status_code == 400
         data = json.loads(response.text)
@@ -246,12 +263,11 @@ class TestLookupAPI:
         """Test recreation when manager doesn't support it."""
 
         class SimpleAdapter:
-            role = "scheduler"
+            lmcache_engine_metadata = _make_metadata("scheduler")
 
         app.state.lmcache_adapter = SimpleAdapter()
-        client = TestClient(app)
-
-        response = client.post("/lookup/recreate")
+        with TestClient(app) as client:
+            response = client.post("/lookup/recreate")
 
         assert response.status_code == 503
         data = json.loads(response.text)
@@ -271,9 +287,8 @@ class TestLookupAPI:
         """
         # Step 1: Worker side - recreate server
         app.state.lmcache_adapter = mock_worker_manager
-        worker_client = TestClient(app)
-
-        response = worker_client.post("/lookup/recreate")
+        with TestClient(app) as worker_client:
+            response = worker_client.post("/lookup/recreate")
         assert response.status_code == 200
         data = json.loads(response.text)
         assert data["old"] == "LMCacheLookupServer"
@@ -282,9 +297,8 @@ class TestLookupAPI:
 
         # Step 2: Scheduler side - recreate client
         app.state.lmcache_adapter = mock_scheduler_manager
-        scheduler_client = TestClient(app)
-
-        response = scheduler_client.post("/lookup/recreate")
+        with TestClient(app) as scheduler_client:
+            response = scheduler_client.post("/lookup/recreate")
         assert response.status_code == 200
         data = json.loads(response.text)
         assert "LMCacheBypassLookupClient" in data["old"]
@@ -296,26 +310,25 @@ class TestLookupAPI:
         Test step-by-step flow: dryrun -> close -> create.
         """
         app.state.lmcache_adapter = mock_scheduler_manager
-        client = TestClient(app)
+        with TestClient(app) as client:
+            # Step 1: Dryrun - check what would be created
+            mock_scheduler_manager.create_lookup_client.return_value = {
+                "new": "LMCacheLookupClient",
+                "dryrun": True,
+            }
+            response = client.post("/lookup/create?dryrun=true")
+            assert response.status_code == 200
+            data = json.loads(response.text)
+            assert data["dryrun"] is True
 
-        # Step 1: Dryrun - check what would be created
-        mock_scheduler_manager.create_lookup_client.return_value = {
-            "new": "LMCacheLookupClient",
-            "dryrun": True,
-        }
-        response = client.post("/lookup/create?dryrun=true")
-        assert response.status_code == 200
-        data = json.loads(response.text)
-        assert data["dryrun"] is True
+            # Step 2: Close current client
+            response = client.post("/lookup/close")
+            assert response.status_code == 200
+            mock_scheduler_manager.close_lookup_client.assert_called_once()
 
-        # Step 2: Close current client
-        response = client.post("/lookup/close")
-        assert response.status_code == 200
-        mock_scheduler_manager.close_lookup_client.assert_called_once()
-
-        # Step 3: Create new client
-        mock_scheduler_manager.create_lookup_client.return_value = {
-            "new": "LMCacheLookupClient"
-        }
-        response = client.post("/lookup/create")
-        assert response.status_code == 200
+            # Step 3: Create new client
+            mock_scheduler_manager.create_lookup_client.return_value = {
+                "new": "LMCacheLookupClient"
+            }
+            response = client.post("/lookup/create")
+            assert response.status_code == 200

@@ -14,9 +14,13 @@ from __future__ import annotations
 # Standard
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import TypeVar
+from typing import TYPE_CHECKING, TypeVar
 import argparse
 import json
+
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.v1.distributed.config import EvictionConfig
 
 # First Party
 from lmcache.logging import init_logger
@@ -25,6 +29,21 @@ logger = init_logger(__name__)
 
 T = TypeVar("T", bound="L2AdapterConfigBase")
 
+
+@dataclass(frozen=True)
+class PersistConfig:
+    """
+    Configuration for persist on an L2 adapter.
+
+    When enabled, data files are kept on disk at shutdown instead of
+    deleted. Lookup always checks secondary storage (disk) on miss
+    regardless of this setting.
+    """
+
+    persist_enabled: bool = True
+    """ If True, data files are kept on disk at shutdown instead of deleted. """
+
+
 # -----------------------------------------------------------------------------
 # Registry: adapter type name -> config class
 # -----------------------------------------------------------------------------
@@ -32,36 +51,68 @@ T = TypeVar("T", bound="L2AdapterConfigBase")
 _L2_ADAPTER_CONFIG_REGISTRY: dict[str, type[L2AdapterConfigBase]] = {}
 
 
-def register_l2_adapter_type(name: str, config_cls: type[L2AdapterConfigBase]) -> None:
+def register_l2_adapter_type(
+    name: str,
+    config_cls: type[L2AdapterConfigBase],
+) -> None:
     """
     Register an L2 adapter config class under a type name.
 
-    The type name is used in JSON specs as the "type" field. Each adapter
-    module should call this at import time.
+    The type name is used in JSON specs as the "type" field.
+    Each adapter config module should call this at import time.
 
     Args:
-        name: Adapter type name (e.g. "disk", "redis").
-        config_cls: Config class that can parse from dict via from_dict().
+        name: Adapter type name (e.g. "fs", "mock").
+        config_cls: Config class that can parse from dict
+            via ``from_dict()``.
     """
     if name in _L2_ADAPTER_CONFIG_REGISTRY:
-        raise ValueError(f"L2 adapter type already registered: {name!r}")
+        raise ValueError("L2 adapter type already registered: %s" % repr(name))
     _L2_ADAPTER_CONFIG_REGISTRY[name] = config_cls
 
 
-def get_registered_l2_adapter_types() -> list[str]:
-    """Return the list of registered adapter type names."""
-    return list(_L2_ADAPTER_CONFIG_REGISTRY)
+def _ensure_config_loaded(name: str) -> None:
+    """Trigger lazy import for *name* if it is not
+    yet in the config registry.
 
-
-def get_type_name_for_config(config: L2AdapterConfigBase) -> str:
+    Raises:
+        ImportError: If the adapter module cannot be
+            imported (missing dependency).
     """
-    Reverse-lookup the registered type name for a config instance.
+    if name in _L2_ADAPTER_CONFIG_REGISTRY:
+        return
+    # Lazy import lives in factory to avoid circular deps
+    # First Party
+    from lmcache.v1.distributed.l2_adapters.factory import (  # noqa: PLC0415
+        ensure_adapter_loaded,
+    )
+
+    ensure_adapter_loaded(name)
+
+
+def get_registered_l2_adapter_types() -> list[str]:
+    """Return all known adapter type names (eager
+    and lazy)."""
+    # First Party
+    from lmcache.v1.distributed.l2_adapters.factory import (  # noqa: PLC0415
+        get_all_registered_names,
+    )
+
+    return get_all_registered_names()
+
+
+def get_type_name_for_config(
+    config: L2AdapterConfigBase,
+) -> str:
+    """
+    Reverse-lookup the registered type name for a config
+    instance.
 
     Args:
         config: An L2 adapter config instance.
 
     Returns:
-        The registered type name string (e.g., "mock", "disk").
+        The registered type name (e.g., "mock", "fs").
 
     Raises:
         ValueError: If the config's class is not registered.
@@ -69,7 +120,7 @@ def get_type_name_for_config(config: L2AdapterConfigBase) -> str:
     for name, cls in _L2_ADAPTER_CONFIG_REGISTRY.items():
         if type(config) is cls:
             return name
-    raise ValueError(f"Unregistered L2 adapter config type: {type(config).__name__}")
+    raise ValueError("Unregistered L2 adapter config type: %s" % type(config).__name__)
 
 
 # -----------------------------------------------------------------------------
@@ -85,7 +136,77 @@ class L2AdapterConfigBase(ABC):
     - Subclasses this base.
     - Implements from_dict() to parse a dict (from JSON) into an instance.
     - Is registered via register_l2_adapter_type("type_name", ConfigClass).
+
+    An optional ``"eviction"`` key in the JSON dict enables per-adapter L2
+    eviction. When present it is parsed by ``_parse_eviction_config()`` and
+    stored on ``eviction_config``; the L2EvictionController is then created
+    for this adapter in the StorageManager.
     """
+
+    #: Populated by ``_parse_eviction_config`` after ``from_dict``; ``None``
+    #: means L2 eviction is disabled for this adapter.
+    eviction_config: EvictionConfig | None = None
+
+    #: Populated by ``_parse_persist_config`` after ``from_dict``.
+    #: Defaults to ``PersistConfig()`` (persist enabled).
+    persist_config: PersistConfig = PersistConfig()
+
+    @staticmethod
+    def _parse_eviction_config(d: dict) -> EvictionConfig | None:
+        """
+        Parse an optional ``"eviction"`` sub-dict from an adapter JSON spec.
+
+        Expected format::
+
+            {
+                "type": "mock",
+                ...
+                "eviction": {
+                    "eviction_policy": "LRU",
+                    "trigger_watermark": 0.8,
+                    "eviction_ratio": 0.2
+                }
+            }
+
+        Returns ``None`` when the key is absent (eviction disabled).
+        """
+        eviction_dict = d.get("eviction")
+        if eviction_dict is None:
+            return None
+
+        # Lazy import to avoid circular dependency:
+        # l2_adapters/config.py <- config.py <- l2_adapters/config.py
+        # First Party
+        from lmcache.v1.distributed.config import EvictionConfig  # noqa: PLC0415
+
+        policy = eviction_dict.get("eviction_policy")
+        if policy not in ("LRU", "noop"):
+            raise ValueError(
+                f"eviction.eviction_policy must be 'LRU' or 'noop', got {policy!r}"
+            )
+        return EvictionConfig(
+            eviction_policy=policy,
+            trigger_watermark=float(eviction_dict.get("trigger_watermark", 0.8)),
+            eviction_ratio=float(eviction_dict.get("eviction_ratio", 0.2)),
+        )
+
+    @staticmethod
+    def _parse_persist_config(d: dict) -> PersistConfig:
+        """
+        Parse optional ``"persist_enabled"`` key from an adapter JSON spec.
+
+        Defaults to ``True``.
+
+        Expected format::
+
+            {
+                "type": "nixl_store_dynamic",
+                ...
+                "persist_enabled": true
+            }
+        """
+        persist_enabled = bool(d.get("persist_enabled", True))
+        return PersistConfig(persist_enabled=persist_enabled)
 
     @classmethod
     @abstractmethod
@@ -121,43 +242,6 @@ class L2AdapterConfigBase(ABC):
         """
         ...
 
-
-### Detailed config classes for each L2 adapter
-class MockL2AdapterConfig(L2AdapterConfigBase):
-    """
-    Config for a mock L2 adapter (for testing).
-
-    Fields:
-    - max_size_gb: maximum size of the adapter in GB.
-    - mock_bandwidth_gb: simulated bandwidth in GB/sec (for testing load times).
-    """
-
-    def __init__(self, max_size_gb: float, mock_bandwidth_gb: float):
-        self.max_size_gb = max_size_gb
-        self.mock_bandwidth_gb = mock_bandwidth_gb
-
-    @classmethod
-    def from_dict(cls, d: dict) -> MockL2AdapterConfig:
-        max_size_gb = d.get("max_size_gb")
-        if not isinstance(max_size_gb, (int, float)) or max_size_gb <= 0:
-            raise ValueError("max_size_gb must be a positive number")
-
-        mock_bandwidth_gb = d.get("mock_bandwidth_gb")
-        if not isinstance(mock_bandwidth_gb, (int, float)) or mock_bandwidth_gb <= 0:
-            raise ValueError("mock_bandwidth_gb must be a positive number")
-
-        return cls(max_size_gb=max_size_gb, mock_bandwidth_gb=mock_bandwidth_gb)
-
-    @classmethod
-    def help(cls) -> str:
-        return (
-            "Mock L2 adapter config fields:\n"
-            "- max_size_gb (float): maximum size of the adapter in GB (required, >0)\n"
-            "- mock_bandwidth_gb (float): simulated bandwidth in GB/sec (required, >0)"
-        )
-
-
-register_l2_adapter_type("mock", MockL2AdapterConfig)
 
 # -----------------------------------------------------------------------------
 # Main config: list of adapter configs (order = adapter order)
@@ -263,7 +347,11 @@ def parse_args_to_l2_adapters_config(args: argparse.Namespace) -> L2AdaptersConf
 
         type_name = d.get("type")
         if type_name is None:
-            raise ValueError(f"--l2-adapter #{i + 1}: missing 'type' field")
+            raise ValueError("--l2-adapter #%d: missing 'type' field" % (i + 1))
+
+        # Trigger lazy import for this adapter type
+        _ensure_config_loaded(type_name)
+
         if type_name not in _L2_ADAPTER_CONFIG_REGISTRY:
             known = ", ".join(sorted(_L2_ADAPTER_CONFIG_REGISTRY)) or "(none)"
             raise ValueError(
@@ -273,7 +361,10 @@ def parse_args_to_l2_adapters_config(args: argparse.Namespace) -> L2AdaptersConf
 
         config_cls = _L2_ADAPTER_CONFIG_REGISTRY[type_name]
         try:
-            adapter_configs.append(config_cls.from_dict(d))
+            adapter_cfg = config_cls.from_dict(d)
+            adapter_cfg.eviction_config = L2AdapterConfigBase._parse_eviction_config(d)
+            adapter_cfg.persist_config = L2AdapterConfigBase._parse_persist_config(d)
+            adapter_configs.append(adapter_cfg)
         except (TypeError, ValueError) as e:
             logger.error(
                 "Error parsing --l2-adapter #%d (type %r): %s",

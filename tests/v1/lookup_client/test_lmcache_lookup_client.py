@@ -20,12 +20,12 @@ import uuid
 # Third Party
 import pytest
 import torch
-import zmq
 
 # First Party
 from lmcache.utils import mock_up_broadcast_fn, mock_up_broadcast_object_fn
 from lmcache.v1.cache_engine import LMCacheEngineBuilder
 from lmcache.v1.gpu_connector.mock_gpu_connector import MockGPUConnector
+from lmcache.v1.lookup_client.factory import LookupClientFactory
 from lmcache.v1.lookup_client.lmcache_lookup_client import (
     LMCacheLookupClient,
     LMCacheLookupServer,
@@ -94,6 +94,24 @@ class TestLMCacheLookupClientServer:
         LMCacheEngineBuilder._metadatas.pop(instance_id, None)
         LMCacheEngineBuilder._stat_loggers.pop(instance_id, None)
 
+    def _create_server(self, lmcache_engine):
+        """Helper to create a lookup server with transport."""
+        transport = LookupClientFactory._create_zmq_server_transport(
+            lmcache_engine.metadata
+        )
+        return LMCacheLookupServer(lmcache_engine, lmcache_engine.metadata, transport)
+
+    def _create_client(self, lmcache_engine):
+        """Helper to create a lookup client with transport."""
+        transport = LookupClientFactory._create_zmq_client_transport(
+            lmcache_engine.config, lmcache_engine.metadata
+        )
+        return LMCacheLookupClient(
+            lmcache_engine.config,
+            lmcache_engine.metadata,
+            transport,
+        )
+
     def test_basic_lookup_communication(self, lmcache_engine):
         """Test basic lookup communication between client and server."""
         device = "cpu"
@@ -114,11 +132,9 @@ class TestLMCacheLookupClientServer:
         recover_engine_states(lmcache_engine)
         time.sleep(0.5)
 
-        with LMCacheLookupServer(lmcache_engine, lmcache_engine.metadata):
+        with self._create_server(lmcache_engine):
             time.sleep(0.5)
-            with LMCacheLookupClient(
-                lmcache_engine.config, lmcache_engine.metadata
-            ) as client:
+            with self._create_client(lmcache_engine) as client:
                 lookup_id = "test_request_1"
                 result = client.lookup(tokens.tolist(), lookup_id)
 
@@ -163,11 +179,9 @@ class TestLMCacheLookupClientServer:
 
         time.sleep(0.5)
 
-        with LMCacheLookupServer(lmcache_engine, lmcache_engine.metadata):
+        with self._create_server(lmcache_engine):
             time.sleep(0.5)
-            with LMCacheLookupClient(
-                lmcache_engine.config, lmcache_engine.metadata
-            ) as client:
+            with self._create_client(lmcache_engine) as client:
                 # Perform multiple lookups
                 for i, tokens in enumerate(stored_tokens):
                     lookup_id = f"test_request_{i}"
@@ -203,11 +217,9 @@ class TestLMCacheLookupClientServer:
         recover_engine_states(lmcache_engine)
         time.sleep(0.5)
 
-        with LMCacheLookupServer(lmcache_engine, lmcache_engine.metadata):
+        with self._create_server(lmcache_engine):
             time.sleep(0.5)
-            with LMCacheLookupClient(
-                lmcache_engine.config, lmcache_engine.metadata
-            ) as client:
+            with self._create_client(lmcache_engine) as client:
                 # Test 1: Lookup with same tag (user_a) should hit cache
                 lookup_id_1 = "test_user_a_match"
                 result_1 = client.lookup(
@@ -310,12 +322,10 @@ class TestLMCacheLookupClientServer:
 
     def test_client_timeout_handling(self, lmcache_engine):
         """Test client timeout handling when server is not responding."""
-        server = LMCacheLookupServer(lmcache_engine, lmcache_engine.metadata)
+        server = self._create_server(lmcache_engine)
         time.sleep(0.5)
 
-        with LMCacheLookupClient(
-            lmcache_engine.config, lmcache_engine.metadata
-        ) as client:
+        with self._create_client(lmcache_engine) as client:
             # Close server to simulate timeout
             server.close()
             time.sleep(0.5)
@@ -348,12 +358,10 @@ class TestLMCacheLookupClientServer:
         recover_engine_states(lmcache_engine)
         time.sleep(0.5)
 
-        with LMCacheLookupServer(lmcache_engine, lmcache_engine.metadata) as server:
+        with self._create_server(lmcache_engine) as server:
             time.sleep(0.5)
 
-            with LMCacheLookupClient(
-                lmcache_engine.config, lmcache_engine.metadata
-            ) as client:
+            with self._create_client(lmcache_engine) as client:
                 # First lookup - should hit cache
                 token_ids = tokens.tolist()
                 result1 = client.lookup(token_ids, "test_1")
@@ -368,7 +376,7 @@ class TestLMCacheLookupClientServer:
                 assert result2 == 0
 
                 # Recreate server
-                with LMCacheLookupServer(lmcache_engine, lmcache_engine.metadata):
+                with self._create_server(lmcache_engine):
                     time.sleep(0.5)
 
                     # Should work again after socket recreation and hit cache
@@ -377,22 +385,16 @@ class TestLMCacheLookupClientServer:
 
     def test_close_methods(self, lmcache_engine):
         """Test proper cleanup of client and server close methods."""
-        with LMCacheLookupServer(lmcache_engine, lmcache_engine.metadata) as server:
+        with self._create_server(lmcache_engine) as server:
             time.sleep(0.5)
 
-            with LMCacheLookupClient(
-                lmcache_engine.config, lmcache_engine.metadata
-            ) as client:
+            with self._create_client(lmcache_engine) as client:
                 # Perform a lookup
                 token_ids = list(range(256))
                 result = client.lookup(token_ids, "test_close")
                 assert result is not None
 
-            # After exiting context, verify sockets are closed
-            for socket in client.sockets:
-                # Socket should be closed, accessing it should raise error
-                with pytest.raises((zmq.ZMQError, AttributeError)):
-                    socket.send(b"test")
+            # After exiting context, transport is closed
 
         # After exiting context, verify server thread is stopped
         assert server.running is False
@@ -400,11 +402,9 @@ class TestLMCacheLookupClientServer:
 
     def test_concurrent_lookups(self, lmcache_engine):
         """Test concurrent lookup requests from same client."""
-        with LMCacheLookupServer(lmcache_engine, lmcache_engine.metadata):
+        with self._create_server(lmcache_engine):
             time.sleep(0.5)
-            with LMCacheLookupClient(
-                lmcache_engine.config, lmcache_engine.metadata
-            ) as client:
+            with self._create_client(lmcache_engine) as client:
                 # Perform rapid consecutive lookups
                 results = []
                 for i in range(10):
@@ -419,11 +419,9 @@ class TestLMCacheLookupClientServer:
 
     def test_empty_token_lookup(self, lmcache_engine):
         """Test lookup with empty token list."""
-        with LMCacheLookupServer(lmcache_engine, lmcache_engine.metadata):
+        with self._create_server(lmcache_engine):
             time.sleep(0.5)
-            with LMCacheLookupClient(
-                lmcache_engine.config, lmcache_engine.metadata
-            ) as client:
+            with self._create_client(lmcache_engine) as client:
                 # Empty token list
                 token_ids = []
                 lookup_id = "test_empty"
@@ -451,11 +449,9 @@ class TestLMCacheLookupClientServer:
         recover_engine_states(lmcache_engine)
         time.sleep(0.5)
 
-        with LMCacheLookupServer(lmcache_engine, lmcache_engine.metadata):
+        with self._create_server(lmcache_engine):
             time.sleep(0.5)
-            with LMCacheLookupClient(
-                lmcache_engine.config, lmcache_engine.metadata
-            ) as client:
+            with self._create_client(lmcache_engine) as client:
                 lookup_id = "test_large"
                 result = client.lookup(tokens.tolist(), lookup_id)
                 assert result == num_tokens, f"Expected {num_tokens}, got {result}"

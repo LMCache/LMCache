@@ -28,13 +28,13 @@ kubectl create secret generic buildkite-git-creds \
 
 # Install or upgrade agent-stack-k8s
 # - git-credentials-secret: checkout container uses HTTPS instead of SSH
-# - pod-spec-patch: injects GITHUB_TOKEN into job containers for push operations
+# - GITHUB_TOKEN is injected per-step in pipeline.yml (not via global pod-spec-patch)
 helm upgrade --install agent-stack-k8s oci://ghcr.io/buildkite/helm/agent-stack-k8s \
+    --version 0.38.0 \
     --namespace buildkite --create-namespace \
     --set agentToken="${TOKEN}" \
     --set config.queue="${QUEUE}" \
     --set-json 'config.git-credentials-secret={"name":"buildkite-git-creds","key":"git-credentials"}' \
-    --set-json 'config.pod-spec-patch={"containers":[{"name":"container-0","env":[{"name":"GITHUB_TOKEN","valueFrom":{"secretKeyRef":{"name":"buildkite-git-creds","key":"GITHUB_TOKEN"}}}]}]}' \
     --wait --timeout 3m
 
 echo "agent-stack-k8s installed (queue=${QUEUE})"

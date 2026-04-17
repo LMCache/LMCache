@@ -74,6 +74,11 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
         "default": None,
         "env_converter": _parse_local_disk,
     },
+    "local_disk_path_sharding": {
+        "type": str,
+        "default": "by_gpu",
+        "env_converter": str,
+    },
     "max_local_disk_size": {"type": float, "default": 0.0, "env_converter": float},
     "remote_url": {
         "type": Optional[str],
@@ -120,6 +125,8 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
     },
     "blend_min_tokens": {"type": int, "default": 256, "env_converter": int},
     "blend_special_str": {"type": str, "default": " # # ", "env_converter": str},
+    "retrieve_locations": {"type": Optional[list[str]], "default": None},
+    "store_location": {"type": Optional[str], "default": None},
     # P2P configurations
     "enable_p2p": {
         "type": bool,
@@ -209,6 +216,11 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
     },
     "pd_proxy_host": {"type": Optional[str], "default": None, "env_converter": str},
     "pd_proxy_port": {"type": Optional[int], "default": None, "env_converter": int},
+    "pd_skip_proxy_notification": {
+        "type": bool,
+        "default": False,
+        "env_converter": _to_bool,
+    },
     # Transfer-related configurations
     "transfer_channel": {"type": Optional[str], "default": None, "env_converter": str},
     # Nixl-related configurations
@@ -229,10 +241,22 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
     },
     # Storage paths
     "gds_path": {"type": Optional[str], "default": None, "env_converter": str},
+    "gds_path_sharding": {
+        "type": str,
+        "default": "by_gpu",
+        "env_converter": str,
+    },
     "cufile_buffer_size": {
         "type": Optional[int],
         "default": None,
         "env_converter": int,
+    },
+    # Maru CXL shared memory backend
+    "maru_path": {"type": Optional[str], "default": None, "env_converter": str},
+    "maru_pool_size": {
+        "type": float,
+        "default": 4.0,
+        "env_converter": float,
     },
     # Other configurations
     # (Deprecated) The url of the actual remote lmcache instance for auditing.
@@ -250,11 +274,9 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
     "extra_config": {
         "type": Optional[dict],
         "default": None,
-        "env_converter": lambda x: x
-        if isinstance(x, dict)
-        else json.loads(x)
-        if x
-        else None,
+        "env_converter": lambda x: (
+            x if isinstance(x, dict) else json.loads(x) if x else None
+        ),
     },
     "save_unfull_chunk": {
         "type": bool,
@@ -527,6 +549,25 @@ def _validate_config(self):
             )
             self.save_unfull_chunk = True
 
+    if self.enable_controller:
+        if self.lmcache_instance_id is None:
+            raise ValueError(
+                "lmcache_instance_id is required when enable_controller=True"
+            )
+        if self.controller_pull_url is None:
+            raise ValueError(
+                "controller_pull_url is required when enable_controller=True"
+            )
+        if self.controller_reply_url is None:
+            raise ValueError(
+                "controller_reply_url is required when enable_controller=True"
+            )
+        if not self.lmcache_worker_ports:
+            raise ValueError(
+                "lmcache_worker_ports is required and cannot be "
+                "empty when enable_controller=True"
+            )
+
     if self.enable_p2p:
         assert self.enable_controller
         assert self.controller_pull_url is not None
@@ -544,11 +585,6 @@ def _validate_config(self):
         assert self.pd_role is not None
         assert self.pd_buffer_size is not None
         assert self.pd_buffer_device is not None
-
-        assert self.remote_url is None, "PD only supports remote_url=None"
-        assert self.save_decode_cache is False, (
-            "PD only supports save_decode_cache=False"
-        )
         assert self.enable_p2p is False, "PD only supports enable_p2p=False"
 
         # PD requires save_unfull_chunk=True for complete KV cache transfer
@@ -566,6 +602,19 @@ def _validate_config(self):
             logger.info(
                 "PD mode enabled with save_unfull_chunk=True - all KV cache "
                 "including partial chunks will be transferred to decode node"
+            )
+
+        # for receiver, PDBackend is for retrieve location
+        # can't take PDBackend as store location
+        # as PDBackend is now one way from producer to receiver only
+        if self.pd_role == "receiver":
+            assert self.store_location != "PDBackend", (
+                "store_location cannot be PDBackend for receiver"
+            )
+            assert self.retrieve_locations in (None, ["PDBackend"]), (
+                "for pd receiver, "
+                'retrieve_locations are expected to be ["PDBackend"], '
+                f"now, it is {self.retrieve_locations}"
             )
 
     if enable_nixl_storage:
@@ -712,7 +761,17 @@ def _update_config_from_env(self):
             env_config[deprecated_name] = env_value
 
     # Resolve aliases and handle deprecated configurations
-    resolved_config = _resolve_config_aliases(env_config, "environment variables")
+    resolved_config = _resolve_config_aliases(
+        env_config,
+        "environment variables",
+        _CONFIG_DEFINITIONS,
+        _CONFIG_ALIASES,
+        _DEPRECATED_CONFIGS,
+    )
+
+    # Ensure _user_set_keys exists
+    if not hasattr(self, "_user_set_keys"):
+        object.__setattr__(self, "_user_set_keys", set())
 
     # Update config object with environment values
     for name, config in _CONFIG_DEFINITIONS.items():
@@ -723,6 +782,8 @@ def _update_config_from_env(self):
                 value = _parse_quoted_string(raw_value)
                 converted_value = config["env_converter"](value)
                 setattr(self, name, converted_value)
+                # Mark as user-set
+                self._user_set_keys.add(name)
             except (ValueError, json.JSONDecodeError) as e:
                 logger.warning(
                     f"Failed to parse {get_env_name(name)}={raw_value!r}: {e}"
@@ -745,6 +806,7 @@ LMCacheEngineConfig = create_config_class(
         "get_lmcache_worker_ids": _get_lmcache_worker_ids,
         "get_lookup_server_worker_ids": _get_lookup_server_worker_ids,
         "from_legacy": classmethod(_from_legacy),
+        "update_config_from_env": _update_config_from_env,
     },
 )
 

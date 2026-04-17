@@ -9,10 +9,12 @@ from lmcache.v1.check import check_mode
 
 # Import shared utilities
 from lmcache.v1.check.utils import (
+    DEFAULT_KV_DTYPE_STR,
     create_storage_manager_with_config,
     create_test_key,
     create_test_memory_obj_for_storage_manager,
     find_remote_backend,
+    parse_kv_dtype,
     run_common_test_framework,
     validate_get_results,
     wait_put_tasks_complete,
@@ -49,15 +51,22 @@ async def async_submit_put_storage_manager(storage_manager, key, memory_obj):
         return False
 
 
-def create_test_data_for_storage_manager(storage_manager, metadata, model, num_tests):
+def create_test_data_for_storage_manager(
+    storage_manager,
+    metadata,
+    model,
+    num_tests,
+    kv_dtype=None,
+):
     """Create test data for storage manager based tests"""
     # Group 1: Non-existing keys
+    kw = {} if kv_dtype is None else {"kv_dtype": kv_dtype}
     non_exist_keys = [
-        create_test_key(model, f"non_exist_{i}") for i in range(num_tests)
+        create_test_key(model, f"non_exist_{i}", **kw) for i in range(num_tests)
     ]
 
     # Group 2: Existing keys
-    exist_keys = [create_test_key(model, f"exist_{i}") for i in range(num_tests)]
+    exist_keys = [create_test_key(model, f"exist_{i}", **kw) for i in range(num_tests)]
     exist_memories = []
     for i in range(num_tests):
         memory_obj = create_test_memory_obj_for_storage_manager(
@@ -85,8 +94,20 @@ def create_test_data_for_storage_manager(storage_manager, metadata, model, num_t
 @check_mode("test_storage_manager")
 async def run_test_mode(model: str, **kwargs):
     """Run connector test mode"""
+    kv_dtype_str = kwargs.get("kv_dtype") or DEFAULT_KV_DTYPE_STR
+    kv_dtype = parse_kv_dtype(kv_dtype_str)
+    if kv_dtype is None:
+        print("Error: unsupported --kv-dtype '%s'" % kv_dtype_str)
+        return
+
+    obj_size = kwargs.get("obj_size")
+
     # Create storage manager using common function
-    storage_manager = create_storage_manager_with_config(model)
+    storage_manager = create_storage_manager_with_config(
+        model,
+        kv_dtype=kv_dtype,
+        obj_size=obj_size,
+    )
 
     try:
         print("Test: Passed - Created storage manager with valid config")
@@ -99,10 +120,16 @@ async def run_test_mode(model: str, **kwargs):
             "async_get_func": async_get_storage_manager,
             "validate_get_func": validate_get_results,
             "test_object": storage_manager,
+            "kv_dtype": kv_dtype,
+            "obj_size": obj_size,
         }
 
         # Run the common test framework
-        await run_common_test_framework(test_context, model, num_tests=5)
+        num_tests = kwargs.get("num_keys", 5)
+        settle_time = kwargs.get("settle_time", 0.0)
+        await run_common_test_framework(
+            test_context, model, num_tests=num_tests, settle_time=settle_time
+        )
 
     except Exception as e:
         print(f"Test Failed - Error: {e}")

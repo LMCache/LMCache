@@ -12,7 +12,7 @@ requires = [
     "packaging>=24.2",
     "setuptools>=77.0.3,<81.0.0",
     "setuptools_scm>=8",
-    "torch==2.8.0",
+    "torch==2.10.0",
     "wheel",
 ]
 build-backend = "setuptools.build_meta"
@@ -43,7 +43,7 @@ requires-python = ">=3.10,<3.14"
 dynamic = ["dependencies", "version"]
 
 [project.scripts]
-lmcache_v0_server="lmcache.server.__main__:main"
+lmcache="lmcache.cli.main:main"
 lmcache_server="lmcache.v1.server.__main__:main"
 lmcache_controller="lmcache.v1.api_server.__main__:main"
 
@@ -67,6 +67,9 @@ include = ["lmcache", "lmcache*"]
 [tool.ruff]
 # same as Black's default line length
 line-length = 88
+exclude = [
+    "lmcache/integration/vllm/lmcache_mp_connector_*.py",
+]
 
 [tool.ruff.lint]
 select = [
@@ -117,6 +120,9 @@ from-first = true
 
 platform = "linux"
 modules = ["lmcache", "tests", "benchmarks"]
+exclude = [
+    'lmcache/integration/vllm/lmcache_mp_connector_.*\.py',
+]
 
 disable_error_code = [
     #"annotation-unchecked",
@@ -143,6 +149,10 @@ disallow_untyped_calls = false
 warn_return_any = false
 
 follow_imports = "silent"
+
+[tool.codespell]
+ignore-words-list = "afterall,allready,notin"
+skip = "operator/config/crd/bases/*,lmcache/integration/vllm/lmcache_mp_connector_*.py"
 
 [tool.cibuildwheel]
 build = "cp3*-manylinux_x86_64"

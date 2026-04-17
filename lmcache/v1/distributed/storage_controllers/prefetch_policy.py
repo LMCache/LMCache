@@ -50,6 +50,81 @@ class PrefetchPolicy(ABC):
             of the union of the input bitmaps.
         """
 
+    def select_l1_retentions(
+        self,
+        keys: list[ObjectKey],
+    ) -> list[bool]:
+        """Determine which keys to retain in L1 after prefetched
+        objects are consumed.
+
+        Called by PrefetchController just before
+        ``l1_mgr.reserve_write`` to build the ``is_temporary``
+        flags.  A ``True`` value means the key is retained
+        (permanent); ``False`` means it is temporary and will be
+        deleted after the reader finishes.
+
+        The default implementation marks all keys as temporary
+        (not retained).  Override in subclasses to implement
+        hot-cache or selective-retention strategies.
+
+        Args:
+            keys: Keys about to be written into L1.
+
+        Returns:
+            A list of bools with the same length as *keys*.
+            ``True`` = retain (permanent), ``False`` = temporary.
+        """
+        return [False] * len(keys)
+
+
+# -----------------------------------------------------------------------------
+# Registry: prefetch policy name -> policy class
+# -----------------------------------------------------------------------------
+
+_PREFETCH_POLICY_REGISTRY: dict[str, type[PrefetchPolicy]] = {}
+
+
+def register_prefetch_policy(
+    name: str,
+    policy_cls: type[PrefetchPolicy],
+) -> None:
+    """
+    Register a prefetch policy class under a name.
+
+    Each policy module should call this at import time.
+
+    Args:
+        name: Policy name (e.g. "default").
+        policy_cls: A concrete PrefetchPolicy subclass.
+    """
+    if name in _PREFETCH_POLICY_REGISTRY:
+        raise ValueError(f"Prefetch policy already registered: {name!r}")
+    _PREFETCH_POLICY_REGISTRY[name] = policy_cls
+
+
+def get_registered_prefetch_policies() -> list[str]:
+    """Return the list of registered prefetch policy names."""
+    return list(_PREFETCH_POLICY_REGISTRY)
+
+
+def create_prefetch_policy(name: str) -> PrefetchPolicy:
+    """
+    Create a prefetch policy instance by name.
+
+    Args:
+        name: Registered policy name.
+
+    Returns:
+        A new PrefetchPolicy instance.
+
+    Raises:
+        ValueError: If no policy is registered under the given name.
+    """
+    if name not in _PREFETCH_POLICY_REGISTRY:
+        known = ", ".join(sorted(_PREFETCH_POLICY_REGISTRY)) or "(none)"
+        raise ValueError(f"Unknown prefetch policy {name!r}. Known: {known}")
+    return _PREFETCH_POLICY_REGISTRY[name]()
+
 
 class DefaultPrefetchPolicy(PrefetchPolicy):
     """
@@ -93,3 +168,26 @@ class DefaultPrefetchPolicy(PrefetchPolicy):
             plan[ad.index] = local_bitmap
 
         return plan
+
+
+class RetainPrefetchPolicy(DefaultPrefetchPolicy):
+    """Prefetch policy that retains all prefetched keys in L1.
+
+    Inherits ``select_load_plan`` from ``DefaultPrefetchPolicy``
+    (first-adapter-wins) and only overrides the L1 retention
+    decision: all prefetched keys become permanent.
+
+    Use this when prefetched data is likely to be reused by
+    subsequent requests (e.g. shared system-prompt chunks).
+    """
+
+    def select_l1_retentions(
+        self,
+        keys: list[ObjectKey],
+    ) -> list[bool]:
+        """Retain all prefetched keys permanently in L1."""
+        return [True] * len(keys)
+
+
+register_prefetch_policy("default", DefaultPrefetchPolicy)
+register_prefetch_policy("retain", RetainPrefetchPolicy)

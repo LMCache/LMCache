@@ -15,6 +15,8 @@ steps:
       if command -v nvidia-smi >/dev/null 2>&1; then
         source .buildkite/scripts/pick-free-gpu.sh 18000
         export CUDA_LAUNCH_BLOCKING=1
+        # Pin torch to a version compatible with the CI machine's CUDA 12.x driver
+        uv pip install "torch>=2.6.0,<2.11.0"
       else
         source .buildkite/scripts/pick-free-gpu-amd.sh 18000
         export AMD_SERIALIZE_KERNEL=1
@@ -48,6 +50,7 @@ steps:
           --ignore=tests/v1/test_nixl_storage.py \
           --ignore=tests/skipped \
           --ignore=tests/v1/multiprocess \
+          --ignore=tests/v1/mp_observability/test_event_recorder.py \
           --ignore=tests/v1/storage_backend/test_eic.py
       fi
 

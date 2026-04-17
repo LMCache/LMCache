@@ -44,12 +44,18 @@ class RequestType(enum.Enum):
     STORE = enum.auto()
     RETRIEVE = enum.auto()
     LOOKUP = enum.auto()
+    QUERY_PREFETCH_STATUS = enum.auto()
+    QUERY_PREFETCH_LOOKUP_HITS = enum.auto()
     FREE_LOOKUP_LOCKS = enum.auto()
     END_SESSION = enum.auto()
 
     # Controller operations
     CLEAR = enum.auto()
     GET_CHUNK_SIZE = enum.auto()
+    PING = enum.auto()
+
+    # Observability operations
+    REPORT_BLOCK_ALLOCATION = enum.auto()
 
     # Debug operations
     NOOP = enum.auto()
@@ -61,6 +67,10 @@ class RequestType(enum.Enum):
     CB_LOOKUP_PRE_COMPUTED = enum.auto()
     CB_RETRIEVE_PRE_COMPUTED = enum.auto()
     CB_STORE_FINAL = enum.auto()
+
+    # Blend V2 operations (use CBMatchResult instead of list[tuple[int, int]])
+    CB_LOOKUP_PRE_COMPUTED_V2 = enum.auto()
+    CB_RETRIEVE_PRE_COMPUTED_V2 = enum.auto()
 
 
 @dataclass
