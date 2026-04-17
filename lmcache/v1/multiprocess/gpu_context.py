@@ -35,6 +35,7 @@ from lmcache.v1.gpu_connector.utils import (
     get_num_heads,
     get_num_layers,
     group_first_layer_tensor,
+    is_cross_layer_format,
     is_mla,
 )
 from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
@@ -104,7 +105,8 @@ class GPUCacheContext:
         # downstream code can trust group.num_layers uniformly.
         tensors = as_tensor_list(self.kv_caches_, self.gpu_kv_format_)
         self.kv_layer_groups_manager_ = KVLayerGroupsManager()
-        if isinstance(self.kv_caches_, torch.Tensor):
+        if is_cross_layer_format(self.gpu_kv_format_):
+            assert isinstance(self.kv_caches_, torch.Tensor)
             self.kv_layer_groups_manager_.build_kv_layer_groups_from_cross_layer_tensor(
                 self.kv_caches_, self.num_layers_
             )
