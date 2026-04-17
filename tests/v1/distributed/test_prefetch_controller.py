@@ -192,6 +192,7 @@ class TestPrefetchControllerLifecycle:
         ctrl = PrefetchController(
             l1_manager=l1_manager,
             l2_adapters=[adapter],
+            serde_processors=[None],
             adapter_descriptors=[make_descriptor(0)],
             policy=DefaultPrefetchPolicy(),
         )
@@ -204,6 +205,7 @@ class TestPrefetchControllerLifecycle:
         ctrl = PrefetchController(
             l1_manager=l1_manager,
             l2_adapters=[],
+            serde_processors=[],
             adapter_descriptors=[],
             policy=DefaultPrefetchPolicy(),
         )
@@ -230,6 +232,7 @@ class TestSingleAdapterPrefetch:
         ctrl = PrefetchController(
             l1_manager=l1_manager,
             l2_adapters=[adapter],
+            serde_processors=[None],
             adapter_descriptors=[make_descriptor(0)],
             policy=DefaultPrefetchPolicy(),
         )
@@ -263,6 +266,7 @@ class TestSingleAdapterPrefetch:
         ctrl = PrefetchController(
             l1_manager=l1_manager,
             l2_adapters=[adapter],
+            serde_processors=[None],
             adapter_descriptors=[make_descriptor(0)],
             policy=DefaultPrefetchPolicy(),
         )
@@ -301,6 +305,7 @@ class TestSingleAdapterPrefetch:
         ctrl = PrefetchController(
             l1_manager=l1_manager,
             l2_adapters=[adapter],
+            serde_processors=[None],
             adapter_descriptors=[make_descriptor(0)],
             policy=DefaultPrefetchPolicy(),
         )
@@ -341,6 +346,7 @@ class TestMultiAdapterPrefetch:
         ctrl = PrefetchController(
             l1_manager=l1_manager,
             l2_adapters=adapters,
+            serde_processors=[None] * len(adapters),
             adapter_descriptors=descriptors,
             policy=DefaultPrefetchPolicy(),
         )
@@ -374,6 +380,7 @@ class TestMultiAdapterPrefetch:
         ctrl = PrefetchController(
             l1_manager=l1_manager,
             l2_adapters=adapters,
+            serde_processors=[None] * len(adapters),
             adapter_descriptors=descriptors,
             policy=DefaultPrefetchPolicy(),
         )
@@ -412,6 +419,7 @@ class TestNoHits:
         ctrl = PrefetchController(
             l1_manager=l1_manager,
             l2_adapters=[adapter],
+            serde_processors=[None],
             adapter_descriptors=[make_descriptor(0)],
             policy=DefaultPrefetchPolicy(),
         )
@@ -433,6 +441,7 @@ class TestNoHits:
         ctrl = PrefetchController(
             l1_manager=l1_manager,
             l2_adapters=[],
+            serde_processors=[],
             adapter_descriptors=[],
             policy=DefaultPrefetchPolicy(),
         )
@@ -464,6 +473,7 @@ class TestQueryResult:
         ctrl = PrefetchController(
             l1_manager=l1_manager,
             l2_adapters=[adapter],
+            serde_processors=[None],
             adapter_descriptors=[make_descriptor(0)],
             policy=DefaultPrefetchPolicy(),
         )
@@ -485,6 +495,7 @@ class TestQueryResult:
         ctrl = PrefetchController(
             l1_manager=l1_manager,
             l2_adapters=[],
+            serde_processors=[],
             adapter_descriptors=[],
             policy=DefaultPrefetchPolicy(),
         )
@@ -513,6 +524,7 @@ class TestPrefetchL2LockRelease:
         ctrl = PrefetchController(
             l1_manager=l1_manager,
             l2_adapters=[adapter],
+            serde_processors=[None],
             adapter_descriptors=[make_descriptor(0)],
             policy=DefaultPrefetchPolicy(),
         )
@@ -545,6 +557,7 @@ class TestPrefetchL2LockRelease:
         ctrl = PrefetchController(
             l1_manager=l1_manager,
             l2_adapters=[adapter],
+            serde_processors=[None],
             adapter_descriptors=[make_descriptor(0)],
             policy=DefaultPrefetchPolicy(),
         )
@@ -575,6 +588,7 @@ class TestPrefetchL2LockRelease:
         ctrl = PrefetchController(
             l1_manager=l1_manager,
             l2_adapters=[adapter],
+            serde_processors=[None],
             adapter_descriptors=[make_descriptor(0)],
             policy=DefaultPrefetchPolicy(),
         )
@@ -607,6 +621,7 @@ class TestPrefetchL2LockRelease:
         ctrl = PrefetchController(
             l1_manager=l1_manager,
             l2_adapters=adapters,
+            serde_processors=[None] * len(adapters),
             adapter_descriptors=descriptors,
             policy=DefaultPrefetchPolicy(),
         )
@@ -650,6 +665,7 @@ class TestMaxInFlight:
         ctrl = PrefetchController(
             l1_manager=l1_manager,
             l2_adapters=[adapter],
+            serde_processors=[None],
             adapter_descriptors=[make_descriptor(0)],
             policy=DefaultPrefetchPolicy(),
             max_in_flight=2,
@@ -700,6 +716,7 @@ class TestMultipleRequests:
         ctrl = PrefetchController(
             l1_manager=l1_manager,
             l2_adapters=[adapter],
+            serde_processors=[None],
             adapter_descriptors=[make_descriptor(0)],
             policy=DefaultPrefetchPolicy(),
         )
@@ -752,6 +769,7 @@ class TestExtraCountPrefetch:
         ctrl = PrefetchController(
             l1_manager=l1_manager,
             l2_adapters=[adapter],
+            serde_processors=[None],
             adapter_descriptors=[make_descriptor(0)],
             policy=DefaultPrefetchPolicy(),
         )
@@ -785,6 +803,7 @@ class TestExtraCountPrefetch:
         ctrl = PrefetchController(
             l1_manager=l1_manager,
             l2_adapters=[adapter],
+            serde_processors=[None],
             adapter_descriptors=[make_descriptor(0)],
             policy=DefaultPrefetchPolicy(),
         )
@@ -831,6 +850,7 @@ class TestExtraCountPrefetch:
         ctrl = PrefetchController(
             l1_manager=l1_manager,
             l2_adapters=[adapter],
+            serde_processors=[None],
             adapter_descriptors=[make_descriptor(0)],
             policy=DefaultPrefetchPolicy(),
         )
@@ -876,6 +896,7 @@ class TestExtraCountPrefetch:
         ctrl = PrefetchController(
             l1_manager=l1_manager,
             l2_adapters=[adapter],
+            serde_processors=[None],
             adapter_descriptors=[make_descriptor(0)],
             policy=DefaultPrefetchPolicy(),
         )
@@ -943,6 +964,7 @@ class TestExtraCountPrefetch:
         ctrl = PrefetchController(
             l1_manager=l1_manager,
             l2_adapters=[adapter],
+            serde_processors=[None],
             adapter_descriptors=[make_descriptor(0)],
             policy=DefaultPrefetchPolicy(),
         )
@@ -994,6 +1016,7 @@ class TestQueryLookupResult:
         ctrl = PrefetchController(
             l1_manager=l1_manager,
             l2_adapters=[adapter],
+            serde_processors=[None],
             adapter_descriptors=[make_descriptor(0)],
             policy=DefaultPrefetchPolicy(),
         )
@@ -1026,6 +1049,7 @@ class TestQueryLookupResult:
         ctrl = PrefetchController(
             l1_manager=l1_manager,
             l2_adapters=[adapter],
+            serde_processors=[None],
             adapter_descriptors=[make_descriptor(0)],
             policy=DefaultPrefetchPolicy(),
         )
@@ -1054,6 +1078,7 @@ class TestQueryLookupResult:
         ctrl = PrefetchController(
             l1_manager=l1_manager,
             l2_adapters=[adapter],
+            serde_processors=[None],
             adapter_descriptors=[make_descriptor(0)],
             policy=DefaultPrefetchPolicy(),
         )
@@ -1080,6 +1105,7 @@ class TestQueryLookupResult:
         ctrl = PrefetchController(
             l1_manager=l1_manager,
             l2_adapters=[adapter],
+            serde_processors=[None],
             adapter_descriptors=[make_descriptor(0)],
             policy=DefaultPrefetchPolicy(),
         )
@@ -1109,6 +1135,7 @@ class TestQueryLookupResult:
         ctrl = PrefetchController(
             l1_manager=l1_manager,
             l2_adapters=[adapter],
+            serde_processors=[None],
             adapter_descriptors=[make_descriptor(0)],
             policy=DefaultPrefetchPolicy(),
         )
@@ -1134,6 +1161,7 @@ class TestQueryLookupResult:
         ctrl = PrefetchController(
             l1_manager=l1_manager,
             l2_adapters=[],
+            serde_processors=[],
             adapter_descriptors=[],
             policy=DefaultPrefetchPolicy(),
         )
