@@ -3,7 +3,6 @@
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List
 import asyncio
 
 # Third Party
@@ -58,11 +57,11 @@ class FakeBucketClient:
         """Return a trivial bucket info payload."""
         return {"id": bucket_id}
 
-    def get_paths_info(self, bucket_id: str, paths: Sequence[str]) -> List[object]:
+    def get_paths_info(self, bucket_id: str, paths: Sequence[str]) -> list[object]:
         """Return exact metadata for the requested paths."""
         del bucket_id
         self.info_paths_calls.append(tuple(paths))
-        entries: List[object] = [
+        entries: list[object] = [
             FakeBucketEntry(
                 path=path,
                 size=len(self.storage[path]) if path in self.storage else 0,
@@ -72,11 +71,11 @@ class FakeBucketClient:
         ]
         return entries
 
-    def list_tree(self, bucket_id: str, prefix: str) -> List[object]:
+    def list_tree(self, bucket_id: str, prefix: str) -> list[object]:
         """List stored objects under the requested prefix."""
         del bucket_id
         prefix_with_separator = f"{prefix}/" if prefix else ""
-        entries: List[object] = []
+        entries: list[object] = []
         for path, payload in sorted(self.storage.items()):
             if prefix and path != prefix and not path.startswith(prefix_with_separator):
                 continue

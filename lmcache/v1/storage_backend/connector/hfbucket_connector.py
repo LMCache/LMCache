@@ -8,9 +8,10 @@ from copy import copy
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Lock
-from typing import Dict, List, Protocol, Tuple
+from typing import Protocol
 from urllib.parse import quote, unquote
 import asyncio
+import builtins
 import os
 import shutil
 import tempfile
@@ -209,7 +210,7 @@ class HFBucketConnector(RemoteConnector):
         else:
             self._bucket_client = bucket_client
 
-        self._metadata_cache: Dict[str, _CachedObjectMetadata] = {}
+        self._metadata_cache: dict[str, _CachedObjectMetadata] = {}
         self._metadata_cache_lock = Lock()
         self._metadata_cache_updates = 0
 
@@ -249,7 +250,7 @@ class HFBucketConnector(RemoteConnector):
         """Store a full chunk in Hugging Face Buckets."""
         await self.batched_put([key], [memory_obj])
 
-    async def list(self) -> List[str]:
+    async def list(self) -> builtins.list[str]:
         """List LMCache keys currently stored under this connector prefix."""
         return await asyncio.to_thread(self._list_sync)
 
@@ -276,8 +277,8 @@ class HFBucketConnector(RemoteConnector):
 
     async def batched_put(
         self,
-        keys: List[CacheEngineKey],
-        memory_objs: List[MemoryObj],
+        keys: builtins.list[CacheEngineKey],
+        memory_objs: builtins.list[MemoryObj],
     ) -> None:
         """Upload multiple full chunks in a single Hugging Face batch call."""
         if len(keys) != len(memory_objs):
@@ -293,8 +294,8 @@ class HFBucketConnector(RemoteConnector):
 
     async def batched_get(
         self,
-        keys: List[CacheEngineKey],
-    ) -> List[MemoryObj | None]:
+        keys: builtins.list[CacheEngineKey],
+    ) -> builtins.list[MemoryObj | None]:
         """Download multiple chunks while preserving input order."""
         if not keys:
             return []
@@ -302,8 +303,8 @@ class HFBucketConnector(RemoteConnector):
         key_strings = [key.to_string() for key in keys]
         object_sizes = await asyncio.to_thread(self._resolve_object_sizes, key_strings)
 
-        downloads: List[Tuple[int, str]] = []
-        results: List[MemoryObj | None] = [None] * len(keys)
+        downloads: builtins.list[tuple[int, str]] = []
+        results: builtins.list[MemoryObj | None] = [None] * len(keys)
 
         for index, (key_str, object_size) in enumerate(
             zip(key_strings, object_sizes, strict=False)
@@ -378,7 +379,7 @@ class HFBucketConnector(RemoteConnector):
         """Report support for synchronous prefix contains checks."""
         return True
 
-    def batched_contains(self, keys: List[CacheEngineKey]) -> int:
+    def batched_contains(self, keys: builtins.list[CacheEngineKey]) -> int:
         """Return the number of consecutive prefix keys that exist as full chunks."""
         key_strings = [key.to_string() for key in keys]
         object_sizes = self._resolve_object_sizes(key_strings)
@@ -396,7 +397,7 @@ class HFBucketConnector(RemoteConnector):
     async def batched_async_contains(
         self,
         lookup_id: str,
-        keys: List[CacheEngineKey],
+        keys: builtins.list[CacheEngineKey],
         pin: bool = False,
     ) -> int:
         """Asynchronously return the number of consecutive prefix hits."""
@@ -411,12 +412,12 @@ class HFBucketConnector(RemoteConnector):
     async def batched_get_non_blocking(
         self,
         lookup_id: str,
-        keys: List[CacheEngineKey],
-    ) -> List[MemoryObj]:
+        keys: builtins.list[CacheEngineKey],
+    ) -> builtins.list[MemoryObj]:
         """Return the successful prefix of ``batched_get`` results."""
         del lookup_id
         results = await self.batched_get(keys)
-        prefix_results: List[MemoryObj] = []
+        prefix_results: builtins.list[MemoryObj] = []
         found_failure = False
         for result in results:
             if found_failure:
@@ -470,8 +471,8 @@ class HFBucketConnector(RemoteConnector):
         """Upload all provided chunks using a single batch request."""
         self._ensure_bucket_for_writes()
 
-        additions: List[Tuple[bytes, str]] = []
-        key_strings: List[str] = []
+        additions: builtins.list[tuple[bytes, str]] = []
+        key_strings: builtins.list[str] = []
         for key, memory_obj in zip(keys, memory_objs, strict=True):
             key_str = key.to_string()
             self._validate_full_chunk_for_upload(key_str, memory_obj)
@@ -519,7 +520,7 @@ class HFBucketConnector(RemoteConnector):
                 "Partial/unfull chunks are not supported by hfbucket."
             )
 
-    def _list_sync(self) -> List[str]:
+    def _list_sync(self) -> builtins.list[str]:
         """Return LMCache key strings discovered under the configured prefix."""
         try:
             entries = self._bucket_client.list_tree(self.bucket_id, self.object_prefix)
@@ -528,7 +529,7 @@ class HFBucketConnector(RemoteConnector):
                 return []
             raise
 
-        keys: List[str] = []
+        keys: builtins.list[str] = []
         for entry in entries:
             if _get_object_type(entry) != "file":
                 continue
@@ -546,8 +547,8 @@ class HFBucketConnector(RemoteConnector):
 
     def _download_objects(
         self,
-        downloads: Sequence[Tuple[int, str]],
-    ) -> Dict[int, bytes | None]:
+        downloads: Sequence[tuple[int, str]],
+    ) -> dict[int, bytes | None]:
         """Download requested object paths and return their bytes by result index."""
         if not downloads:
             return {}
@@ -555,8 +556,8 @@ class HFBucketConnector(RemoteConnector):
         batch_dir = Path(
             tempfile.mkdtemp(prefix="download-", dir=self._download_session_dir)
         )
-        local_mappings: List[Tuple[int, Path]] = []
-        files: List[Tuple[str, str]] = []
+        local_mappings: builtins.list[tuple[int, Path]] = []
+        files: builtins.list[tuple[str, str]] = []
         for index, object_path in downloads:
             local_path = batch_dir / f"{index}.bin"
             local_mappings.append((index, local_path))
@@ -569,7 +570,7 @@ class HFBucketConnector(RemoteConnector):
                 if not _is_not_found_error(exc):
                     logger.warning("Batch download from hfbucket raised: %s", exc)
 
-            results: Dict[int, bytes | None] = {}
+            results: dict[int, bytes | None] = {}
             for index, local_path in local_mappings:
                 if not local_path.exists():
                     results[index] = None
@@ -592,10 +593,10 @@ class HFBucketConnector(RemoteConnector):
         self._set_cached_object_size(key_str, object_size)
         return object_size
 
-    def _resolve_object_sizes(self, key_strings: Sequence[str]) -> List[int]:
+    def _resolve_object_sizes(self, key_strings: Sequence[str]) -> builtins.list[int]:
         """Resolve cached and uncached object sizes while preserving order."""
-        cached_results: Dict[str, int] = {}
-        unresolved: List[str] = []
+        cached_results: dict[str, int] = {}
+        unresolved: builtins.list[str] = []
 
         for key_str in key_strings:
             cached_size = self._get_cached_object_size(key_str)
@@ -615,7 +616,7 @@ class HFBucketConnector(RemoteConnector):
     def _fetch_object_sizes_sync(
         self,
         key_strings: Sequence[str],
-    ) -> Dict[str, int]:
+    ) -> dict[str, int]:
         """Fetch exact object sizes for ``key_strings`` in one metadata request."""
         if not key_strings:
             return {}
@@ -632,7 +633,7 @@ class HFBucketConnector(RemoteConnector):
                 return {key_str: 0 for key_str in key_strings}
             raise
 
-        size_by_key: Dict[str, int] = {key_str: 0 for key_str in key_strings}
+        size_by_key: dict[str, int] = {key_str: 0 for key_str in key_strings}
         if len(path_infos) == len(object_paths):
             for key_str, object_path, path_info in zip(
                 key_strings,
@@ -646,7 +647,7 @@ class HFBucketConnector(RemoteConnector):
                 )
             return size_by_key
 
-        size_by_path: Dict[str, int] = {}
+        size_by_path: dict[str, int] = {}
         for path_info in path_infos:
             path = _get_object_path(path_info)
             if path:
@@ -685,7 +686,7 @@ class HFBucketConnector(RemoteConnector):
 
     def _prune_expired_cache_entries_locked(self, now: float) -> None:
         """Remove expired cache entries while holding ``_metadata_cache_lock``."""
-        expired_keys: List[str] = [
+        expired_keys: builtins.list[str] = [
             key_str
             for key_str, cache_entry in self._metadata_cache.items()
             if cache_entry.expires_at <= now
