@@ -376,7 +376,7 @@ Five modules:
 | Module | Responsibility |
 |--------|----------------|
 | `tools/trace_replay/dispatch.py` | `CallDispatcher`, `ReplayContext`, default v1 handler table |
-| `tools/trace_replay/driver.py` | `StorageReplayDriver`, `ReplayPace`, `ReplayResult` |
+| `tools/trace_replay/driver.py` | `StorageReplayDriver`, `ReplayResult` |
 | `tools/trace_replay/stats.py` | `ReplayStatsCollector` + `OpStats`; CSV/JSON export |
 | `cli/commands/trace/__init__.py` | `lmcache trace info|replay|record` |
 
@@ -416,14 +416,17 @@ consistent state.
 
 ### 9.4 Pacing
 
-`ReplayPace.ASAP` (default) runs as fast as possible.  Useful for
-storage-stress / latency characterization.
+The driver always sleeps just long enough to align each dispatch to
+the recorded `t_mono` offset from replay start.  **Never speeds a
+trace up** — if the replay host is slower than recording, the loop
+lags the recorded schedule.  This reproduces the original pressure on
+eviction/prefetch queues.
 
-`ReplayPace.REALTIME` sleeps just long enough to align each dispatch
-to the recorded `t_mono` offset from replay start.  **Never speeds
-a trace up** — if the replay host is slower than recording, the
-loop lags the recorded schedule.  Reproduces the original pressure
-on eviction/prefetch queues.
+There is no as-fast-as-possible mode.  `StorageManager` reads and
+writes are async and carry cross-call dependencies (e.g. a retrieve
+may depend on an earlier L2 load completing); collapsing the recorded
+inter-call gaps races those queues and turns reproducible traces
+into non-deterministic retrieve misses.
 
 ### 9.5 `ReplayResult`
 
@@ -444,7 +447,7 @@ on eviction/prefetch queues.
 | Command | Purpose |
 |---------|---------|
 | `lmcache trace info FILE` | Header metadata + per-qualname record counts + total duration. |
-| `lmcache trace replay FILE <storage-manager flags> [--pace {asap,realtime}] [--verbose] [--jsonl-out PATH] [--output-dir DIR] [--no-csv] [--json] [-q]` | Replay the trace. Emits a terminal metrics table (unless `-q`) and writes `trace_replay_ops.csv` / `trace_replay_summary.json` in `--output-dir` (CSV by default; JSON with `--json`). `--verbose` and `--jsonl-out` stream per-record output for post-hoc analysis. |
+| `lmcache trace replay FILE <storage-manager flags> [--verbose] [--jsonl-out PATH] [--output-dir DIR] [--no-csv] [--json] [-q]` | Replay the trace, always honoring the recorded inter-call timings (see §9.4). Logs progress (`[N/total] qualname ...`) per record. Emits a terminal metrics table (unless `-q`) with count / mean / p50 / p99 per qualname, and writes `trace_replay_ops.csv` / `trace_replay_summary.json` in `--output-dir` (CSV by default; JSON with `--json`). `--verbose` and `--jsonl-out` stream per-record output for post-hoc analysis. |
 | `lmcache trace record` | v1 stub: prints the equivalent `lmcache server --trace-level storage` invocation and exits 2. Holds the slot for future runtime capture. |
 
 The `replay` command accepts the full `lmcache/v1/distributed/config.py`

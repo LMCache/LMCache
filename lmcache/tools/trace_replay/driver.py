@@ -5,7 +5,7 @@
 Usage::
 
     driver = StorageReplayDriver(sm_config, trace_path)
-    result = driver.run(pace=ReplayPace.ASAP)
+    result = driver.run()
     driver.close()
 
 The driver:
@@ -19,7 +19,12 @@ The driver:
    local-filesystem adapter.
 3. Iterates records, decodes their argument dicts via the trace
    codec registry, and dispatches each to a live StorageManager call
-   through a :class:`CallDispatcher`.
+   through a :class:`CallDispatcher`.  Each dispatch is aligned to
+   the recorded ``t_mono`` offset via ``time.sleep`` — the replay
+   never runs ahead of the recording.  Dispatching as-fast-as-
+   possible is unsafe because reads and writes are async in
+   ``StorageManager`` and carry cross-call dependencies; collapsing
+   the recorded gaps races the async queues.
 4. Records per-qualname timings into a :class:`ReplayStatsCollector`.
 
 Replay is deliberately single-threaded: the recorder captures calls
@@ -34,7 +39,6 @@ from __future__ import annotations
 
 # Standard
 from dataclasses import dataclass
-from enum import Enum
 from typing import Callable
 import hashlib
 import json
@@ -55,20 +59,6 @@ from lmcache.v1.mp_observability.trace.reader import TraceReader
 from lmcache.v1.mp_observability.trace.recorder import safe_storage_config_dict
 
 logger = init_logger(__name__)
-
-
-class ReplayPace(Enum):
-    """Pacing strategy for the replay loop."""
-
-    ASAP = "asap"
-    """Dispatch each record as fast as possible, ignoring recorded
-    inter-call intervals.  Useful for storage-stress and latency
-    characterization."""
-
-    REALTIME = "realtime"
-    """Honor recorded inter-call intervals using ``time.sleep``.
-    Reproduces the original pressure on eviction/prefetch queues.
-    Never speeds a trace up — only slows down to match."""
 
 
 @dataclass
@@ -170,17 +160,22 @@ class StorageReplayDriver:
 
     def run(
         self,
-        pace: ReplayPace = ReplayPace.ASAP,
         on_record: RecordCallback | None = None,
     ) -> ReplayResult:
         """Replay every record in the trace.
 
+        Dispatch is always paced to the recorded ``t_mono`` offsets
+        via ``time.sleep``: the replay never runs *ahead* of the
+        recording.  Running ahead is unsafe because ``StorageManager``
+        reads and writes are async — collapsing the recorded gaps
+        races the async queues and leads to retrieve misses.  If the
+        replay host is slower than recording, the loop simply lags
+        the recorded schedule.
+
         Args:
-            pace: Pacing strategy; see :class:`ReplayPace`.
             on_record: Optional per-record callback invoked after
                 dispatch with ``(qualname, latency_s, failed)``.
-                Used by the CLI's ``--jsonl-out`` feature and by
-                bench integrations.
+                Used by the CLI's ``--jsonl-out`` feature.
 
         Returns:
             A :class:`ReplayResult` summarizing the run.
@@ -195,15 +190,14 @@ class StorageReplayDriver:
         t_wall_origin = time.monotonic()
 
         for record in self._reader.records():
-            if pace is ReplayPace.REALTIME:
-                # Sleep just long enough to align to the recorded
-                # offset from the start of replay.  No speedup — if
-                # the replay machine is slower than recording, the
-                # loop simply runs behind.
-                target = t_wall_origin + record.t_mono
-                now = time.monotonic()
-                if now < target:
-                    time.sleep(target - now)
+            # Sleep just long enough to align to the recorded
+            # offset from the start of replay.  No speedup — if
+            # the replay machine is slower than recording, the
+            # loop simply runs behind.
+            target = t_wall_origin + record.t_mono
+            now = time.monotonic()
+            if now < target:
+                time.sleep(target - now)
 
             try:
                 decoded_args = codecs.decode_args(record.args)

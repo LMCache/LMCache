@@ -7,12 +7,13 @@ Subcommands:
 * ``info FILE`` — print a summary (header metadata + per-qualname
   record counts).
 * ``replay FILE ...`` — reissue every recorded call against a fresh
-  StorageManager.  Takes the standard storage-manager CLI flags (see
+  StorageManager, honoring the recorded inter-call timings.  Takes
+  the standard storage-manager CLI flags (see
   :func:`lmcache.v1.distributed.config.add_storage_manager_args`),
-  plus pacing (``--pace``), per-record output (``--verbose`` /
-  ``--jsonl-out``), aggregated CSV/JSON summary export
-  (``--output-dir`` / ``--no-csv`` / ``--json``), and a terminal
-  metrics table (suppressible with ``-q``).
+  plus per-record output (``--verbose`` / ``--jsonl-out``),
+  aggregated CSV/JSON summary export (``--output-dir`` / ``--no-csv``
+  / ``--json``), and a terminal metrics table (suppressible with
+  ``-q``).
 * ``record`` — v1 stub.  Prints the equivalent
   ``lmcache server --trace-level storage …`` invocation and exits.
 """
@@ -32,11 +33,7 @@ import sys
 from lmcache.cli.commands.base import BaseCommand
 from lmcache.cli.metrics import Metrics, StreamHandler, get_formatter
 from lmcache.logging import init_logger
-from lmcache.tools.trace_replay.driver import (
-    ReplayPace,
-    ReplayResult,
-    StorageReplayDriver,
-)
+from lmcache.tools.trace_replay.driver import ReplayResult, StorageReplayDriver
 from lmcache.tools.trace_replay.stats import ReplayStatsCollector
 from lmcache.v1.distributed.config import (
     StorageManagerConfig,
@@ -163,12 +160,6 @@ class TraceCommand(BaseCommand):
             help="Path to a .lct trace file.",
         )
         parser.add_argument(
-            "--pace",
-            choices=[p.value for p in ReplayPace],
-            default=ReplayPace.ASAP.value,
-            help="Pacing strategy (default: asap).",
-        )
-        parser.add_argument(
             "--verbose",
             action="store_true",
             default=False,
@@ -216,23 +207,81 @@ class TraceCommand(BaseCommand):
 
         Produces three kinds of output:
 
-        * Per-record stream: ``--verbose`` (stdout) and ``--jsonl-out``
-          (one JSON object per line).  Useful for post-hoc analysis.
+        * Per-record stream: every dispatch is logged at INFO with its
+          progress (``[N/total]``), qualname, and latency.
+          ``--verbose`` additionally mirrors each record to stdout,
+          and ``--jsonl-out PATH`` writes one JSON object per record
+          to ``PATH`` for post-hoc analysis.
         * Aggregated per-qualname summary: CSV (unless ``--no-csv``)
           and JSON (with ``--json``) written under ``--output-dir``.
         * Terminal metrics table (unless ``--quiet``) using the shared
           :class:`~lmcache.cli.metrics.Metrics` renderer.
         """
         sm_config: StorageManagerConfig = parse_args_to_config(args)
-        pace = ReplayPace(args.pace)
+
+        # ANSI: bold + yellow for the banner text, reset at the end.
+        # The lmcache log formatter only colors the WARNING prefix;
+        # these codes highlight the message body too.  Writing them
+        # into a file via shell redirection leaves the escape bytes
+        # visible but still readable.
+        bold = "\033[1;33m"
+        reset = "\033[0m"
+        bar = "=" * 78
+        logger.warning(
+            "\n%s%s\n"
+            "  !! REPLAY ENVIRONMENT MISMATCH MAY CAUSE RETRIEVE MISSES !!\n"
+            "%s%s\n"
+            "  * Replay uses the *replay-side* StorageManager config, which\n"
+            "    may differ from the config recorded in the trace.\n"
+            "  * Replay runs on a host whose performance may differ from\n"
+            "    the recording host.\n"
+            "  * StorageManager reads/writes are async — an L2 load that\n"
+            "    had finished at record time may not have finished yet at\n"
+            "    replay time, so the matching retrieve can miss.\n"
+            "\n"
+            "  Treat retrieve-miss counts as a signal about the replay\n"
+            "  environment, not as a defect in the trace.\n"
+            "%s%s",
+            bold,
+            bar,
+            bar,
+            reset,
+            bar,
+            reset,
+        )
+
+        # Pre-scan to count total records so progress logs can show
+        # [N/total].  The reader streams frames, so counting is cheap
+        # relative to replay (which actually dispatches StorageManager
+        # calls).
+        with TraceReader(args.trace_path) as r:
+            total_records = sum(1 for _ in r.records())
+        logger.info(
+            "trace replay: file=%s records=%d",
+            args.trace_path,
+            total_records,
+        )
 
         jsonl_fh = open(args.jsonl_out, "w") if args.jsonl_out else None
         verbose = args.verbose
+        counter = {"n": 0}
 
         def _on_record(qualname: str, latency_s: float, failed: bool) -> None:
+            counter["n"] += 1
+            status = "FAIL" if failed else "OK"
+            logger.info(
+                "[%d/%d] %s %s (%.3fms)",
+                counter["n"],
+                total_records,
+                status,
+                qualname,
+                latency_s * 1000.0,
+            )
             if verbose:
-                status = "FAIL" if failed else "OK  "
-                print(f"  {status}  {latency_s * 1000:8.3f}ms  {qualname}")
+                print(
+                    f"  [{counter['n']}/{total_records}]  "
+                    f"{status:<4}  {latency_s * 1000:8.3f}ms  {qualname}"
+                )
             if jsonl_fh is not None:
                 jsonl_fh.write(
                     json.dumps(
@@ -245,15 +294,9 @@ class TraceCommand(BaseCommand):
                     + "\n"
                 )
 
-        logger.info(
-            "trace replay: file=%s pace=%s",
-            args.trace_path,
-            pace.value,
-        )
-
         try:
             with StorageReplayDriver(sm_config, args.trace_path) as driver:
-                result = driver.run(pace=pace, on_record=_on_record)
+                result = driver.run(on_record=_on_record)
         finally:
             if jsonl_fh is not None:
                 jsonl_fh.close()
@@ -315,17 +358,17 @@ class TraceCommand(BaseCommand):
             ops_section = metrics.add_section("ops", "Per-Op Latency (ms)")
             for qn in sorted(summary):
                 s = summary[qn]
-                short = qn.split(".")[-1]
+                short = _short_op_name(qn)
                 ops_section.add(f"{short}_count", f"{short} count", s.count)
+                ops_section.add(
+                    f"{short}_mean",
+                    f"{short} mean",
+                    round(s.mean_ms, 3),
+                )
                 ops_section.add(
                     f"{short}_p50",
                     f"{short} p50",
                     round(s.p50_ms, 3),
-                )
-                ops_section.add(
-                    f"{short}_p90",
-                    f"{short} p90",
-                    round(s.p90_ms, 3),
                 )
                 ops_section.add(
                     f"{short}_p99",
@@ -368,3 +411,29 @@ class TraceCommand(BaseCommand):
             "a follow-up release.",
         )
         sys.exit(2)
+
+
+def _short_op_name(qualname: str) -> str:
+    """Return a compact, human-readable label for a traced qualname.
+
+    Plain methods collapse to the method name: the table has limited
+    column width and the fully-qualified path is verbose.
+
+    Context-manager handlers (``__enter__`` / ``__exit__``) instead
+    collapse to ``<owning_method>.enter`` / ``<owning_method>.exit``,
+    so the reader can tell *which* context manager the pair belongs
+    to — the bare ``__enter__`` / ``__exit__`` label is useless when
+    multiple context-manager-returning methods are traced.
+
+    Args:
+        qualname: Dotted qualname recorded by the tracer, e.g.
+            ``lmcache.v1.distributed.storage_manager.StorageManager.read_prefetched_results.__enter__``.
+
+    Returns:
+        A short label suitable as a metrics row prefix.
+    """
+    parts = qualname.split(".")
+    last = parts[-1]
+    if last in ("__enter__", "__exit__") and len(parts) >= 2:
+        return f"{parts[-2]}.{last.strip('_')}"
+    return last

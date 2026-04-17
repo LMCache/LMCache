@@ -26,10 +26,7 @@ from lmcache.tools.trace_replay.dispatch import (
     ReplayContext,
     build_default_dispatcher,
 )
-from lmcache.tools.trace_replay.driver import (
-    ReplayPace,
-    StorageReplayDriver,
-)
+from lmcache.tools.trace_replay.driver import StorageReplayDriver
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.config import (
     EvictionConfig,
@@ -156,7 +153,7 @@ class TestRecordReplayRoundtrip:
         _record_sequence(trace_path, sm_config, script)
 
         with StorageReplayDriver(_make_sm_config(), trace_path) as driver:
-            result = driver.run(pace=ReplayPace.ASAP)
+            result = driver.run()
 
         assert result.records_failed == 0
         assert result.records_replayed >= 2  # reserve_write + finish_write
@@ -181,7 +178,7 @@ class TestRecordReplayRoundtrip:
         _record_sequence(trace_path, sm_config, script)
 
         with StorageReplayDriver(_make_sm_config(), trace_path) as driver:
-            result = driver.run(pace=ReplayPace.ASAP)
+            result = driver.run()
 
         # Everything replayed, no failures.
         assert result.records_failed == 0
@@ -217,7 +214,7 @@ class TestRecordReplayRoundtrip:
             seen.append((qualname, failed))
 
         with StorageReplayDriver(_make_sm_config(), trace_path) as driver:
-            result = driver.run(pace=ReplayPace.ASAP, on_record=on_record)
+            result = driver.run(on_record=on_record)
 
         assert len(seen) == result.records_replayed
         assert all(not failed for _, failed in seen)
@@ -240,7 +237,7 @@ class TestMismatchHandling:
         with StorageReplayDriver(
             _make_sm_config(), trace_path, dispatcher=empty
         ) as driver:
-            result = driver.run(pace=ReplayPace.ASAP)
+            result = driver.run()
         assert result.records_replayed == 0
         assert result.records_skipped >= 1
 
@@ -285,17 +282,20 @@ class TestMismatchHandling:
         with StorageReplayDriver(
             _make_sm_config(), trace_path, dispatcher=failing
         ) as driver:
-            result = driver.run(pace=ReplayPace.ASAP)
+            result = driver.run()
 
         assert result.records_failed >= 1
 
 
 class TestPacing:
-    def test_realtime_does_not_regress_past_monotonic(self, trace_path):
-        """Realtime pacing never runs *before* the recorded offset.
+    def test_replay_does_not_regress_past_monotonic(self, trace_path):
+        """Replay never runs *before* the recorded offset.
 
-        Records have t_mono=0 and positive values; realtime pacing
-        should run in at least the recorded inter-op delay.
+        Records have t_mono=0 and a positive value; the driver always
+        honors the recorded gap — there is no as-fast-as-possible
+        mode, because async read/write dependencies inside
+        ``StorageManager`` make it unsafe to collapse the recorded
+        inter-call intervals.
         """
         sm_config = _make_sm_config()
         layout = _make_layout()
@@ -310,37 +310,10 @@ class TestPacing:
 
         start = time.monotonic()
         with StorageReplayDriver(_make_sm_config(), trace_path) as driver:
-            result = driver.run(pace=ReplayPace.REALTIME)
+            result = driver.run()
         elapsed = time.monotonic() - start
 
         assert result.records_failed == 0
-        # Realtime replay should have slept ≈ 50ms at minimum.  Use a
-        # generous bound to avoid flakes under load.
+        # Replay should have slept ≈ 50ms at minimum.  Use a generous
+        # bound to avoid flakes under load.
         assert elapsed >= 0.04
-
-    def test_asap_is_faster_than_realtime(self, trace_path):
-        """Sanity: ASAP finishes faster than REALTIME for the same
-        trace with a 50ms gap.  Not a strict perf guarantee —
-        exactly the signal we want to verify pacing kicks in."""
-        sm_config = _make_sm_config()
-        layout = _make_layout()
-        keys = [_make_key(0)]
-
-        def script(sm: StorageManager) -> None:
-            sm.reserve_write(keys, layout, mode="new")
-            time.sleep(0.05)
-            sm.finish_write(keys)
-
-        _record_sequence(trace_path, sm_config, script)
-
-        t0 = time.monotonic()
-        with StorageReplayDriver(_make_sm_config(), trace_path) as d:
-            d.run(pace=ReplayPace.ASAP)
-        asap_elapsed = time.monotonic() - t0
-
-        t0 = time.monotonic()
-        with StorageReplayDriver(_make_sm_config(), trace_path) as d:
-            d.run(pace=ReplayPace.REALTIME)
-        realtime_elapsed = time.monotonic() - t0
-
-        assert realtime_elapsed > asap_elapsed

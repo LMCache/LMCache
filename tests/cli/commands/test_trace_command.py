@@ -74,7 +74,6 @@ def _replay_namespace(
     defaults = dict(
         trace_target="replay",
         trace_path=trace_path,
-        pace="asap",
         verbose=False,
         jsonl_out=None,
         output_dir=output_dir,
@@ -206,12 +205,9 @@ class TestArgumentParsing:
                 "0.0625",  # 64 MB
                 "--eviction-policy",
                 "LRU",
-                "--pace",
-                "asap",
             ]
         )
         assert args.trace_target == "replay"
-        assert args.pace == "asap"
         assert args.l1_size_gb == 0.0625
         assert args.eviction_policy == "LRU"
 

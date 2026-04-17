@@ -30,7 +30,6 @@ from lmcache.tools.trace_replay.dispatch import (
     build_default_dispatcher,
 )
 from lmcache.tools.trace_replay.driver import (
-    ReplayPace,
     ReplayResult,
     StorageReplayDriver,
 )
@@ -43,7 +42,6 @@ __all__ = [
     "CallDispatcher",
     "OpStats",
     "ReplayContext",
-    "ReplayPace",
     "ReplayResult",
     "ReplayStatsCollector",
     "StorageReplayDriver",
