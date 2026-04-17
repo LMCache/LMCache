@@ -54,6 +54,8 @@ Example ``config.yaml``:
 
     # TTL in seconds for remote KV cache keys (Redis/RESP only, null = no expiry)
     # remote_ttl: 3600
+
+Remote Storage Explanation:
 ----------------------------
 
 LMCache's backend is obeys the natural memory hierarchy of prioritizing CPU RAM offloading, then Local Storage
