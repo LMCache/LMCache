@@ -402,11 +402,21 @@ class LocalCPUBackend(AllocatorBackendInterface):
                 f"Auto align cpu size bytes, origin: {origin_cpu_size_bytes}, "
                 f"aligned: {align_cpu_size_bytes}, chunk size: {chunk_size_bytes}"
             )
+            # MLA fix: resolve format from metadata.use_mla instead of
+            # hardcoding KV_2LTD. For MLA models (GLM-5, DeepSeek V3), the
+            # P2PBackend allocates with KV_MLA_FMT, so the allocator's
+            # underlying pages must also be laid out for the MLA format —
+            # otherwise token_dim() diverges between allocator and backend
+            # and unfull-chunk shape adjustment targets the wrong axis.
+            p2p_fmt = (
+                MemoryFormat.KV_MLA_FMT if metadata.use_mla
+                else MemoryFormat.KV_2LTD
+            )
             paged_mem_allocator.init_cpu_memory_allocator(
                 align_cpu_size_bytes,
                 shapes=shapes,
                 dtypes=dtypes,
-                fmt=MemoryFormat.KV_2LTD,  # TODO: remove this hardcode
+                fmt=p2p_fmt,
                 numa_mapping=numa_mapping,
             )
             return paged_mem_allocator

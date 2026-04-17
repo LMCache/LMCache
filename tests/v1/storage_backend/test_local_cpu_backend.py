@@ -977,3 +977,99 @@ class TestAllocateMaxAttemptsGuard:
         finally:
             PinMonitor.DestroyInstance()
             alloc.close()
+
+
+class TestP2PMLAFormatResolution:
+    """Regression tests for the P2P + MLA format hardcode.
+
+    Prior to the fix, `initialize_allocator` hardcoded
+    `fmt=MemoryFormat.KV_2LTD` in the P2P branch regardless of
+    `metadata.use_mla`. The P2PBackend itself uses `KV_MLA_FMT` for MLA
+    models, causing `token_dim()` to diverge between the allocator and
+    the backend and breaking unfull-chunk shape adjustment.
+    """
+
+    def _make_p2p_config(self) -> LMCacheEngineConfig:
+        """Build a minimal P2P-enabled config that bypasses strict
+        validation. `_validate_config` requires controller URLs and port
+        lists, but `initialize_allocator` only reads `enable_p2p`,
+        `max_local_cpu_size`, and a few others — so we build a relaxed
+        config via from_defaults and flip `enable_p2p` directly."""
+        config = LMCacheEngineConfig.from_defaults(
+            chunk_size=256,
+            local_cpu=True,
+            max_local_cpu_size=0.1,  # 100 MiB — enough for a couple pages
+            lmcache_instance_id="test_instance",
+        )
+        object.__setattr__(config, "enable_p2p", True)
+        return config
+
+    def _make_metadata(self, use_mla: bool) -> LMCacheMetadata:
+        return LMCacheMetadata(
+            model_name="test_model",
+            world_size=1,
+            local_world_size=1,
+            worker_id=0,
+            local_worker_id=0,
+            kv_dtype=torch.bfloat16,
+            kv_shape=(4, 2, 256, 8, 128),
+            use_mla=use_mla,
+        )
+
+    def _capture_fmt(self, monkeypatch):
+        """Patch PagedCpuGpuMemoryAllocator.init_cpu_memory_allocator to
+        capture the fmt arg without actually allocating."""
+        captured = {}
+
+        def fake_init(self, size, shapes, dtypes, fmt, numa_mapping=None):
+            captured["fmt"] = fmt
+            captured["shapes"] = shapes
+            captured["dtypes"] = dtypes
+            # stub the minimum state the backend reads post-init
+            self.cpu_allocator = type("StubCpu", (), {
+                "shapes": shapes, "dtypes": dtypes,
+                "buffer_ptr": 0, "buffer_size": 0, "align_bytes": 1,
+            })()
+
+        from lmcache.v1.memory_management import PagedCpuGpuMemoryAllocator
+        monkeypatch.setattr(
+            PagedCpuGpuMemoryAllocator,
+            "init_cpu_memory_allocator",
+            fake_init,
+        )
+        return captured
+
+    def test_p2p_with_mla_uses_kv_mla_fmt(self, monkeypatch):
+        """MLA model → allocator must init with KV_MLA_FMT."""
+        captured = self._capture_fmt(monkeypatch)
+        config = self._make_p2p_config()
+        metadata = self._make_metadata(use_mla=True)
+
+        PinMonitor.GetOrCreate(config)
+        try:
+            LocalCPUBackend(config=config, metadata=metadata)
+        finally:
+            PinMonitor.DestroyInstance()
+
+        assert captured.get("fmt") == MemoryFormat.KV_MLA_FMT, (
+            f"P2P + MLA should init allocator with KV_MLA_FMT, "
+            f"got {captured.get('fmt')}"
+        )
+
+    def test_p2p_without_mla_uses_kv_2ltd(self, monkeypatch):
+        """Non-MLA model → allocator must init with KV_2LTD (backward
+        compat for existing P2P deployments)."""
+        captured = self._capture_fmt(monkeypatch)
+        config = self._make_p2p_config()
+        metadata = self._make_metadata(use_mla=False)
+
+        PinMonitor.GetOrCreate(config)
+        try:
+            LocalCPUBackend(config=config, metadata=metadata)
+        finally:
+            PinMonitor.DestroyInstance()
+
+        assert captured.get("fmt") == MemoryFormat.KV_2LTD, (
+            f"P2P + non-MLA should init allocator with KV_2LTD, "
+            f"got {captured.get('fmt')}"
+        )
