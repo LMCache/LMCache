@@ -52,6 +52,21 @@ these events see [METRICS.md](METRICS.md).
 
 ---
 
+## MP Server Lifecycle Sentinels
+
+CPU-synchronous sentinels published by `server.py` to bracket request scope.
+Published via `EventBus.publish()` (not `publish_on_stream`) so the drain
+thread processes them in strict order before any GPU-callback events.
+
+| EventType | Metadata keys | Types | Published by / when |
+|---|---|---|---|
+| `MP_REQUEST_START` | *(none)* | — | `MPServer.handle_request` — at request arrival, before any GPU work |
+| `MP_STORE_SUBMITTED` | `device` | `str` | `MPServer.store` — CPU-synchronous, before the GPU store is enqueued |
+| `MP_RETRIEVE_SUBMITTED` | `device` | `str` | `MPServer.retrieve` — CPU-synchronous, before the GPU retrieve is enqueued |
+| `MP_SESSION_END` | *(none)* | — | `MPServer.handle_request` — after all CPU work; may precede GPU callbacks |
+
+---
+
 ## MP Server Events
 
 These events use `session_id` on the `Event` dataclass (not in `metadata`)
@@ -66,5 +81,5 @@ to correlate START/END pairs.
 | `MP_LOOKUP_PREFETCH_START` | *(none)* | — |
 | `MP_LOOKUP_PREFETCH_END` | `found_count` | `int` |
 | `MP_LOOKUP` | `request_id`, `chunk_hashes`, `model_name`, `chunk_size`, `seq_len`, `dtypes`, `shapes` | `str`, `list[str]`, `str`, `int`, `int`, `list[str]`, `list[list[int]]` |
-| `MP_VLLM_BLOCK_ALLOCATION` | `records` | `list[BlockAllocationRecord]` (each has `req_id: str`, `new_block_ids: list[int]`, `new_token_ids: list[int]`) |
+| `MP_VLLM_BLOCK_ALLOCATION` | `instance_id`, `model_name`, `records` | `int`, `str`, `list[BlockAllocationRecord]` (each has `req_id: str`, `new_block_ids: list[int]`, `new_token_ids: list[int]`) |
 | `MP_VLLM_END_SESSION` | `request_id` | `str` |

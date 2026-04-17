@@ -532,7 +532,7 @@ class LMCacheMPSchedulerAdapter:
         send_lmcache_request(
             self.mq_client,
             RequestType.REPORT_BLOCK_ALLOCATION,
-            [records],
+            [os.getpid(), self.model_name, records],
         )
 
     # Helper functions
