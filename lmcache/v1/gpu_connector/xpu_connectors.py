@@ -502,12 +502,7 @@ class VLLMPagedMemLayerwiseXPUConnector(GPUConnectorInterface):
         slot_mapping_chunks = [
             slot_mapping[s:e] for s, e in zip(starts, ends, strict=False)
         ]
-        slot_mapping_full = torch.cat(slot_mapping_chunks, dim=0)
-
-        # Move mapping ONCE to device (fixes multiple small H2D copies).
-        slot_mapping_full = _ensure_xpu(slot_mapping_full)
-
-        num_tokens = int(slot_mapping_full.numel())
+        num_tokens = sum(c.numel() for c in slot_mapping_chunks)
         if num_tokens <= 0:
             for _ in range(self.num_layers):
                 _ = yield
@@ -516,6 +511,11 @@ class VLLMPagedMemLayerwiseXPUConnector(GPUConnectorInterface):
                 torch.xpu.current_stream().wait_stream(self.load_stream)
             yield
             return
+
+        slot_mapping_full = torch.cat(slot_mapping_chunks, dim=0)
+
+        # Move mapping ONCE to device (fixes multiple small H2D copies).
+        slot_mapping_full = _ensure_xpu(slot_mapping_full)
 
         tmp_gpu_buffer_obj: Optional[MemoryObj] = None
         if self.use_xpu:
@@ -660,11 +660,18 @@ class VLLMPagedMemLayerwiseXPUConnector(GPUConnectorInterface):
         # Precompute “full” mapping for batched gather
         # NOTE: this assumes starts/ends partition slot_mapping contiguously.
         # If not contiguous, concatenation is still correct.
-        slot_mapping_full = torch.cat(
-            [slot_mapping_on_device[s:e] for s, e in zip(starts, ends, strict=False)],
-            dim=0,
-        )
-        total_tokens = int(slot_mapping_full.numel())
+        slot_chunks = [
+            slot_mapping_on_device[s:e]
+            for s, e in zip(starts, ends, strict=False)
+        ]
+        total_tokens = sum(c.numel() for c in slot_chunks)
+        if total_tokens <= 0:
+            for _ in range(self.num_layers):
+                yield
+            yield
+            return
+
+        slot_mapping_full = torch.cat(slot_chunks, dim=0)
 
         # Optional staging buffer (will be USED when self.use_xpu=True)
         tmp_gpu_buffer_obj: Optional[MemoryObj] = None
