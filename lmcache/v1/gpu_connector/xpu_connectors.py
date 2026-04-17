@@ -17,6 +17,7 @@ from typing import List, Optional, Union
 import os
 
 # Third Party
+import numpy as np
 import torch
 
 # First Party
@@ -111,8 +112,6 @@ class VLLMPagedMemXPUConnectorV2(VLLMPagedMemGPUConnectorV2):
         Caches the result and only rebuilds when the underlying data
         pointers change (e.g. when kvcaches are replaced by new tensors).
         """
-        import numpy as np
-
         kv_caches = ensure_contiguous_kv_caches(kv_caches)
 
         # Device pointers may exceed signed int64 range on XPU.
@@ -247,7 +246,7 @@ class VLLMPagedMemXPUConnectorV2(VLLMPagedMemGPUConnectorV2):
                 head_size=self.head_size,
             )
             memory_obj.tensor.copy_(self._d2h_staging)
-            torch.xpu.synchronize()
+            torch.xpu.synchronize(self.device)
         else:
             lmc_ops.multi_layer_kv_transfer(
                 memory_obj.tensor,
@@ -794,6 +793,9 @@ class VLLMPagedMemLayerwiseXPUConnector(GPUConnectorInterface):
 
     def batched_to_gpu(
         self,
+        memory_objs: Union[
+            List[List[MemoryObj]], List[MemoryObj], List[int], None
+        ] = None,
         starts: Optional[List[int]] = None,
         ends: Optional[List[int]] = None,
         **kwargs,

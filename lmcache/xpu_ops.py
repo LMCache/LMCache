@@ -12,6 +12,9 @@ from lmcache.non_cuda_equivalents import (
     GPUKVFormat,
     TransferDirection,
     _tensor_from_ptr,
+    multi_layer_kv_transfer as _fallback_multi_layer_kv_transfer,
+    multi_layer_kv_transfer_unilateral as _fallback_multi_layer_kv_transfer_unilateral,
+    single_layer_kv_transfer as _fallback_single_layer_kv_transfer,
 )
 
 # Third Party
@@ -95,14 +98,14 @@ def _multi_layer_kv_transfer_kernel(
         # NL_X_NB_BS_HS (3) and NL_X_NBBS_ONE_HS (5) — MLA:
         #   slot * SPT + i
 
-        if FORMAT == 1:
+        if FORMAT == 1:  # _FMT_NL_X_TWO_NB_BS_NH_HS
             # NL_X_TWO_NB_BS_NH_HS (vLLM flash attention NHD)
             page_off = (
                 k_or_v * page_buffer_size * scalars_per_token
                 + slot_idx * scalars_per_token
                 + i
             )
-        elif FORMAT == 3 or FORMAT == 5:
+        elif FORMAT == 3 or FORMAT == 5:  # _FMT_NL_X_NB_BS_HS / _FMT_NL_X_NBBS_ONE_HS
             # MLA: NL_X_NB_BS_HS / NL_X_NBBS_ONE_HS
             page_off = slot_idx * scalars_per_token + i
         else:
@@ -298,9 +301,6 @@ def multi_layer_kv_transfer(
     # If pointers come as a list of tensors, we can't use pointer-of-pointers.
     # Fall back to the per-layer PyTorch path (imported from non_cuda_equivalents).
     if isinstance(key_value_ptrs, list):
-        from lmcache.non_cuda_equivalents import (
-            multi_layer_kv_transfer as _fallback_multi_layer_kv_transfer,
-        )
         _fallback_multi_layer_kv_transfer(
             key_value, key_value_ptrs, slot_mapping, paged_memory_device,
             page_buffer_size, direction, gpu_kv_format, block_size,
@@ -365,10 +365,7 @@ def multi_layer_kv_transfer_unilateral(
         )
 
     if isinstance(key_value_ptrs, list):
-        from lmcache.non_cuda_equivalents import (
-            multi_layer_kv_transfer_unilateral as _fallback,
-        )
-        _fallback(
+        _fallback_multi_layer_kv_transfer_unilateral(
             key_value, key_value_ptrs, slot_mapping,
             paged_memory_device, page_buffer_size,
             direction, gpu_kv_format,
@@ -417,10 +414,7 @@ def single_layer_kv_transfer(
 
     # Fall back for non-XPU tensors or unsupported formats
     if not vllm_key_value_cache.is_xpu:
-        from lmcache.non_cuda_equivalents import (
-            single_layer_kv_transfer as _fallback,
-        )
-        return _fallback(
+        return _fallback_single_layer_kv_transfer(
             lmc_key_value_cache, vllm_key_value_cache, slot_mapping,
             direction, gpu_kv_format, token_major,
         )
