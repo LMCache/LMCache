@@ -374,9 +374,10 @@ def test_dax_backend_batched_get_blocking_passes_cached_fmt_to_allocator(
             backend.close()
 
 
-def test_dax_backend_get_blocking_returns_none_for_missing_fmt(
+def test_dax_backend_get_blocking_handles_missing_and_undefined_fmt(
     memory_allocator,
     loop_in_thread,
+    monkeypatch,
 ) -> None:
     with tempfile.TemporaryDirectory() as td:
         dev_path = os.path.join(td, "dax.bin")
@@ -424,6 +425,40 @@ def test_dax_backend_get_blocking_returns_none_for_missing_fmt(
             assert backend.contains(key)
             assert backend.get_blocking(key) is None
             assert backend.batched_get_blocking([key]) == [None]
+
+            seen_formats: list[MemoryFormat | None] = []
+            output_allocator = AdHocMemoryAllocator(device="cpu")
+
+            def _tracking_allocate(
+                shapes: torch.Size | list[torch.Size],
+                dtypes: torch.dtype | list[torch.dtype],
+                fmt: MemoryFormat | None = None,
+                eviction: bool = True,
+                busy_loop: bool = True,
+            ) -> MemoryObj | None:
+                del eviction, busy_loop
+                seen_formats.append(fmt)
+                if fmt is None:
+                    return None
+                return output_allocator.allocate(shapes, dtypes, fmt=fmt)
+
+            monkeypatch.setattr(local_cpu, "allocate", _tracking_allocate)
+
+            undefined_key = CacheEngineKey("test_model", 1, 0, 17, torch.bfloat16)
+            undefined_obj = alloc.allocate(
+                [torch.Size([2, 16, 8])],
+                [torch.bfloat16],
+                fmt=MemoryFormat.UNDEFINED,
+            )
+            assert undefined_obj is not None
+            backend.batched_submit_put_task([undefined_key], [undefined_obj])
+            undefined_obj.ref_count_down()
+
+            result = backend.get_blocking(undefined_key)
+            assert seen_formats == [MemoryFormat.UNDEFINED]
+            assert result is not None
+            assert result.metadata.fmt == MemoryFormat.UNDEFINED
+            result.ref_count_down()
         finally:
             backend.close()
 

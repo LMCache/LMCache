@@ -688,7 +688,8 @@ class DaxBackend(StoragePluginInterface, AllocatorBackendInterface):
             fmt = meta.fmt
             if shape is None or dtype is None or fmt is None:
                 return None
-            fmt = self._resolve_memory_format(fmt)
+            if self.mode == "primary":
+                fmt = self._resolve_memory_format(fmt)
             state = self._slot_states.get(entry.slot_id)
             if (
                 state is None
