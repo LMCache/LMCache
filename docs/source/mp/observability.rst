@@ -226,8 +226,14 @@ L0 (GPU) Block Lifecycle Histograms
 
 Sampled (default 1%) GPU KV cache block lifecycle tracking via
 ``L0LifecycleSubscriber``. Eviction is detected at reallocation time
-(when a block is assigned different tokens). Sampling is deterministic
-(hash-based).
+(when a block is assigned different tokens). Sampling uses random
+selection with a ``_skipped`` set (bounded by the finite number of
+physical GPU blocks).
+
+All L0 histograms are emitted with ``instance_id`` and ``model_name``
+OTel attributes, enabling per-instance and per-model metric slicing
+in Prometheus (e.g.
+``lmcache_mp_l0_block_lifetime_seconds{instance_id="12345",model_name="llama-7b"}``).
 
 .. list-table::
    :header-rows: 1

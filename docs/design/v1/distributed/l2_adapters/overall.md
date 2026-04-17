@@ -495,6 +495,16 @@ The `__init__.py` uses `pkgutil.iter_modules()` to discover all
 module (and its third-party dependencies) is only loaded when the
 corresponding adapter type is actually requested at runtime.
 
+### Persist / Recover (Optional)
+
+Adapters that support persisting cached data across restarts use
+`PersistConfig` (parsed from the JSON key `"persist_enabled"`, defaulting
+to ``True``). Lookup always checks secondary storage on miss. There is
+no dedicated interface method — adapters integrate persist into their
+existing `close()` (to keep data on disk) path. See
+`nixl_store_dynamic_l2_adapter.py` for a reference implementation and
+[`nixl_store.md`](nixl_store.md) for design details.
+
 ### Native (C++/Rust) Storage Backends
 
 For high-performance backends written in C++ or Rust, use the shared native
@@ -502,7 +512,7 @@ connector framework. A single C++ connector implementation works in **both**
 non-MP mode (via `ConnectorClientBase`) and MP mode (via
 `NativeConnectorL2Adapter`).
 
-**Full guide:** [`csrc/storage_backends/README.md`](../../../../csrc/storage_backends/README.md)
+**Full guide:** [`csrc/storage_backends/README.md`](../../../../../csrc/storage_backends/README.md)
 
 The `NativeConnectorL2Adapter` (`native_connector_l2_adapter.py`) bridges any
 pybind-wrapped `IStorageConnector` to the `L2AdapterInterface`:

@@ -25,12 +25,15 @@ all quality checks. Also read `AGENTS.md` for the quick-reference checklist.
 1. Fetch the PR metadata (`get`) to understand the title, description, author, and base branch.
 2. Fetch the diff (`get_diff`) to see exactly what changed.
 3. Fetch the list of changed files (`get_files`) for a structural overview.
-4. Read any design docs referenced in the PR description or located in the module directory (e.g., `docs/design/<module>/`).
+4. Read any design docs referenced in the PR description. `docs/design/` mirrors
+   the `lmcache/` package tree, so for each changed module `lmcache/<path>/`
+   check `docs/design/<path>/` for relevant docs.
 5. For each **changed public symbol** (function, method, class, field), note its fully qualified name. You will use these in Step 4 to find callers.
 
 ### Step 2 -- Design Doc Compliance
 
-If a relevant design doc exists (check `docs/design/` and any `DESIGN.md` in the changed module directories):
+If a relevant design doc exists (check `docs/design/<path>/` for each changed
+module `lmcache/<path>/`; `docs/design/` mirrors the `lmcache/` package tree):
 
 - Check that the implementation conforms to documented contracts, invariants, and assumptions.
 - Present compliance as a table:

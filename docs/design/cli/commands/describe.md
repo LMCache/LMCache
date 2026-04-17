@@ -6,7 +6,7 @@
 
 The CLI framework (Phase 0) is complete — `BaseCommand`, `Metrics`, `MockCommand`,
 and entry point are all working. The next step (Phase 1 per
-[commands.md](commands.md)) is to implement `lmcache describe kvcache`, which
+[commands.md](../commands.md)) is to implement `lmcache describe kvcache`, which
 provides a rich status dashboard of a running LMCache KV cache service.
 
 `describe engine` is Phase 2 scope and stubbed but not implemented here.
@@ -128,7 +128,7 @@ lmcache describe engine  --url http://localhost:8000   # (Phase 2)
 
 Uses a positional `target` argument with `choices=["kvcache"]` (extend to
 `"engine"` in Phase 2). Matches the `describe {kvcache,engine}` pattern in
-[commands.md](commands.md).
+[commands.md](../commands.md).
 
 ### 2. `--url` points to the HTTP endpoint
 

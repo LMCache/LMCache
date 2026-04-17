@@ -72,7 +72,7 @@ lmcache ping engine  --url http://localhost:8000
 ```
 
 Uses a positional `target` argument with `choices=["kvcache", "engine"]`.
-Matches the `ping {kvcache,engine}` pattern in [commands.md](commands.md).
+Matches the `ping {kvcache,engine}` pattern in [commands.md](../commands.md).
 
 ### 2. Both targets use HTTP
 

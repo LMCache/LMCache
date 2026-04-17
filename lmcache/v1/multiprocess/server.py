@@ -901,17 +901,28 @@ class MPCacheEngine:
             "storage_manager": sm,
         }
 
-    def report_block_allocations(self, records: list[BlockAllocationRecord]) -> None:
+    def report_block_allocations(
+        self,
+        instance_id: int,
+        model_name: str,
+        records: list[BlockAllocationRecord],
+    ) -> None:
         """Publish vLLM block allocation records to the EventBus.
 
         Args:
+            instance_id: The scheduler instance ID.
+            model_name: The model name from the adapter.
             records: List of BlockAllocationRecord with per-request
                 block and token allocation deltas.
         """
         self._event_bus.publish(
             Event(
                 event_type=EventType.MP_VLLM_BLOCK_ALLOCATION,
-                metadata={"records": records},
+                metadata={
+                    "instance_id": instance_id,
+                    "model_name": model_name,
+                    "records": records,
+                },
             )
         )
 
