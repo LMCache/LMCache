@@ -1,11 +1,14 @@
-# Trace Recording (`lmcache trace`)
+# Trace Recording & Replay (`lmcache trace`)
 
 Trace recording captures LMCache's operational stream during a real run so
 the same workload can be **replayed** later for testing, regression hunting,
 and benchmarking — without needing vLLM or, eventually, a GPU. This
-document covers the **capture** half (PR1).  The replay tooling
-(`lmcache trace info|replay`, `lmcache bench trace-replay`) is built on
-top of this format and lands in PR2.
+document covers both halves:
+
+- **PR1 — capture.** `lmcache server --trace-level storage --trace-output
+  FILE` and the decorator/recorder/format machinery.
+- **PR2 — replay.** `lmcache trace info|replay|record`, the
+  `StorageReplayDriver`, and `lmcache bench trace-replay`.
 
 For configuration reference see [README.md](README.md). For event metadata
 contracts see [EVENTS.md](EVENTS.md).
@@ -331,13 +334,150 @@ both `multiprocess/server.py` and `multiprocess/blend_server_v2.py`.
 When `--trace-level` is unset, the helper returns `None` and no
 recorder is registered — true zero overhead.
 
-The complementary `lmcache trace info|replay` and `lmcache bench
-trace-replay` subcommands are deferred to PR2; they read the format
-defined here.
+`lmcache trace info|replay|record` and `lmcache bench trace-replay`
+read the format defined here; see §9 for details.
 
 ---
 
-## 9. Extensibility seams
+## 9. Replay (`lmcache trace` + `lmcache bench trace-replay`)
+
+The replay half lives under `lmcache/tools/trace_replay/` and
+`lmcache/cli/commands/{trace,bench/trace_replay}`.  It reads trace
+files written by the recorder and reissues each captured call against
+a fresh `StorageManager` that the caller configures independently.
+
+### 9.1 Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  trace file: [Header][Record]…                                  │
+│         │                                                        │
+│         ▼                                                        │
+│  TraceReader.records()                                           │
+│         │                                                        │
+│         │  codecs.decode_args(record.args)                       │
+│         ▼                                                        │
+│  CallDispatcher.dispatch(qualname, ctx, decoded_args)            │
+│         │                                                        │
+│         │  handler registered in build_default_dispatcher()      │
+│         ▼                                                        │
+│  StorageManager.<method>(**decoded_args)   ── timed, counted ──► │
+│                                                            │     │
+│                                        ReplayStatsCollector│     │
+│                                       (per-qualname p50/p90/p99) │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+Five modules:
+
+| Module | Responsibility |
+|--------|----------------|
+| `tools/trace_replay/dispatch.py` | `CallDispatcher`, `ReplayContext`, default v1 handler table |
+| `tools/trace_replay/driver.py` | `StorageReplayDriver`, `ReplayPace`, `ReplayResult` |
+| `tools/trace_replay/stats.py` | `ReplayStatsCollector` + `OpStats`; CSV/JSON export |
+| `cli/commands/trace/__init__.py` | `lmcache trace info|replay|record` |
+| `cli/commands/bench/trace_replay.py` | `lmcache bench trace-replay` |
+
+### 9.2 Auto-resolve: no per-op glue
+
+Adding a new traced method is a two-line change:
+
+1. Decorate it with `@enable_tracing()` (PR1's decorator picks up
+   the `qualname` from `f.__module__ + "." + f.__qualname__`).
+2. Register a handler under that `qualname` in
+   `build_default_dispatcher`.
+
+For plain methods on `StorageManager`, step 2 is literally
+`_call_sm_method("<method_name>")`, which `getattr`s the live
+instance and calls it with `**decoded_args`.  Context managers use
+two handlers (`_enter_read_prefetched` + `_exit_read_prefetched`)
+because the decorator cannot wrap a generator-based `@contextmanager`.
+
+No per-op schemas live on either side.  Decoded arg names feed
+straight into `**kwargs`, matching the signature the recorder bound
+with `inspect.signature` at decoration time.
+
+### 9.3 Dispatcher & context
+
+`CallDispatcher` is a simple `qualname → Handler` map with
+`register`, `has`, `dispatch`.  `ReplayContext` carries:
+
+- The live `StorageManager` (owned by the driver).
+- `open_read_contexts: dict[tuple[ObjectKey, ...], deque[CM]]` — a
+  FIFO per key tuple so overlapping `read_prefetched_results`
+  contexts entered and exited via the trace pair up correctly.
+
+Unmatched `__exit__` records (typically from a truncated tail) log a
+warning and are ignored; the driver's final sweep calls `__exit__`
+on any still-open contexts to keep the StorageManager in a
+consistent state.
+
+### 9.4 Pacing
+
+`ReplayPace.ASAP` (default) runs as fast as possible.  Useful for
+storage-stress / latency characterization.
+
+`ReplayPace.REALTIME` sleeps just long enough to align each dispatch
+to the recorded `t_mono` offset from replay start.  **Never speeds
+a trace up** — if the replay host is slower than recording, the
+loop lags the recorded schedule.  Reproduces the original pressure
+on eviction/prefetch queues.
+
+### 9.5 `ReplayResult`
+
+`StorageReplayDriver.run()` returns:
+
+| Field | Meaning |
+|-------|---------|
+| `records_replayed` | Successful dispatches. |
+| `records_skipped` | Records whose `qualname` had no handler (likely from a newer trace level). |
+| `records_failed` | Records whose handler raised. |
+| `stats` | `ReplayStatsCollector` with per-qualname latency and duration. |
+| `header_level` | Copied from trace header for the caller to dispatch on. |
+| `header_digest` | `sm_config_digest` from the header. |
+| `replay_config_digest` | SHA-256 of the replay-side StorageManagerConfig (same algorithm as `safe_storage_config_dict` used by the recorder). Mismatch vs. `header_digest` indicates the replay config differs from recording. |
+
+### 9.6 CLI
+
+| Command | Purpose |
+|---------|---------|
+| `lmcache trace info FILE` | Header metadata + per-qualname record counts + total duration. |
+| `lmcache trace replay FILE <storage-manager flags> [--pace {asap,realtime}] [--verbose] [--jsonl-out PATH]` | Debug-style replay. Terminal summary, optional per-record verbose log, optional JSONL output. |
+| `lmcache trace record` | v1 stub: prints the equivalent `lmcache server --trace-level storage` invocation and exits 2. Holds the slot for future runtime capture. |
+| `lmcache bench trace-replay FILE <storage-manager flags> [--pace] [--output-dir DIR] [--no-csv] [--json] [-q]` | Bench-style replay. Writes `trace_replay_ops.csv` / `trace_replay_summary.json` in the output dir; prints bench-style metrics table unless `-q`. |
+
+Both replay commands accept the full `lmcache/v1/distributed/config.py`
+`add_storage_manager_args` flag set (`--l1-size-gb`,
+`--eviction-policy`, `--l2-adapter`, …), so replay can target any
+L1/L2 configuration the production StorageManager supports.
+
+### 9.7 Data correctness
+
+The replay-side `StorageManager` does not receive real KV bytes —
+the trace does not carry them.  Memory objects returned by
+`reserve_write` are zero-filled and `finish_write` is called without
+writing to them.  Replay therefore exercises:
+
+- L1 bookkeeping (reserve/finish, read-lock counts)
+- Eviction controllers
+- Prefetch controller
+- L2 adapter lifecycles (when an L2 adapter is configured on the
+  replay side)
+
+Replay does **not** validate KV payloads or GPU copy correctness —
+those layers are intentionally out of scope.
+
+### 9.8 Forward compatibility
+
+`Header.level` is checked by the replay driver via `header_level`
+on the result; unknown levels simply pass through with every record
+"skipped" (no handler registered).  A future `lmcache trace replay
+--level mq …` would register a different dispatcher; the file
+format itself does not change.
+
+---
+
+## 10. Extensibility seams
 
 Future MQ / GPU trace levels reuse this design without breaking the
 file format:
@@ -359,9 +499,9 @@ file format:
 
 ---
 
-## 10. Test coverage
+## 11. Test coverage
 
-Three test files under `tests/v1/mp_observability/trace/`:
+### Capture (PR1) — `tests/v1/mp_observability/trace/`
 
 - `test_decorator.py` — gate on/off; zero-overhead semantics when off;
   arg capture; `capture` / `redact` filters; entry-only on exception.
@@ -374,3 +514,23 @@ Three test files under `tests/v1/mp_observability/trace/`:
   publish-via-EventBus end-to-end (codec encode → file → reader → codec
   decode); truncated-tail tolerance; bad-magic rejection;
   `dropped_count` increments on unencodable args.
+
+### Replay (PR2) — `tests/tools/trace_replay/` and `tests/cli/`
+
+- `test_stats.py` — percentile math; CSV/JSON export; thread safety of
+  `record()`; failed-call bucketing.
+- `test_dispatch.py` — dispatcher registration semantics; default v1
+  qualname coverage; FIFO context-manager pairing; exit-without-enter
+  warns without crashing.
+- `test_driver.py` — record-then-replay round trips against a real
+  `StorageManager` (CPU memory, no GPU): `reserve_write` +
+  `finish_write`, full prefetch cycle including
+  `read_prefetched_results`, `on_record` callback firing, unknown-
+  qualname skipping, handler-failure counting, and pacing
+  (`REALTIME` waits, `ASAP` does not).
+- `tests/cli/commands/test_trace_command.py` — subparser wiring
+  (positional + required flags), `info` end-to-end against a tiny
+  fixture, `record` stub exits with code 2.
+- `tests/cli/commands/bench/test_trace_replay.py` — `bench
+  trace-replay` registration, pace-choice enforcement, CSV/JSON
+  output, `-q` suppresses terminal summary.
