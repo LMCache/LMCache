@@ -95,6 +95,66 @@ The ``OBJ`` backend (object store) does not require ``file_path``.
     # OBJ backend
     --l2-adapter '{"type": "nixl_store", "backend": "OBJ", "backend_params": {}, "pool_size": 32}'
 
+``nixl_store_dynamic`` -- NIXL-based dynamic storage with persist/recover
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+A dynamic variant of the NIXL adapter that opens and registers files
+per-operation instead of pre-allocating them at init. This enables:
+
+- **Persist/recover** -- cached KV metadata survives restarts.
+- **No fd limits** -- files are opened and closed per transfer, so the
+  cache can grow beyond OS open-file-descriptor limits.
+
+.. note::
+
+   Only file-based backends are supported (``POSIX``, ``GDS``, ``GDS_MT``,
+   ``HF3FS``). The ``OBJ`` backend is not supported yet.
+
+**Required fields:**
+
+- ``backend``: Storage backend -- one of ``POSIX``, ``GDS``, ``GDS_MT``,
+  ``HF3FS``.
+
+**Backend-specific parameters (``backend_params``):**
+
+- ``file_path``: Directory path for storing L2 data files.
+- ``use_direct_io``: ``"true"`` or ``"false"``.
+- ``max_capacity_gb``: Maximum storage capacity in GB. The adapter
+  rejects stores when this limit is reached. Required for the eviction
+  controller to compute usage.
+
+**Optional fields (for persist):**
+
+- ``persist_enabled`` (bool, default ``true``): If ``true``, data files
+  are kept on disk at shutdown. If ``false``, all data files are deleted
+  on shutdown.
+
+Lookup always checks secondary storage (disk) on miss and lazily
+populates the in-memory index when a file is found.
+
+**Configuration examples:**
+
+.. code-block:: bash
+
+    # Basic dynamic POSIX backend (persist enabled by default)
+    --l2-adapter '{"type": "nixl_store_dynamic", "backend": "POSIX", "backend_params": {"file_path": "/data/lmcache/l2", "use_direct_io": "false", "max_capacity_gb": "10"}}'
+
+    # Explicitly disable persist
+    --l2-adapter '{"type": "nixl_store_dynamic", "backend": "POSIX", "backend_params": {"file_path": "/data/lmcache/l2", "use_direct_io": "false", "max_capacity_gb": "10"}, "persist_enabled": false}'
+
+    # With eviction
+    --l2-adapter '{"type": "nixl_store_dynamic", "backend": "GDS", "backend_params": {"file_path": "/data/nvme/l2", "use_direct_io": "true", "max_capacity_gb": "50"}, "eviction": {"eviction_policy": "LRU", "trigger_watermark": 0.9, "eviction_ratio": 0.1}}'
+
+**Persist / secondary lookup behaviour:**
+
+- On **shutdown**, the adapter keeps data files on disk by default
+  (``persist_enabled`` defaults to ``true``). If explicitly set to
+  ``false``, all data files are deleted to avoid orphaned storage.
+- On **startup**, the in-memory index is empty. Every lookup miss falls
+  through to a secondary lookup on disk: if the deterministic file
+  exists, it is treated as a hit and the in-memory index is populated
+  lazily from the file size.
+
 ``fs`` -- File-system backed storage
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -127,6 +187,74 @@ object is stored as a raw ``.data`` file whose name encodes the full
 
     # With O_DIRECT for bypassing page cache
     --l2-adapter '{"type": "fs", "base_path": "/data/lmcache/l2", "use_odirect": true}'
+
+``mooncake_store`` -- Mooncake Store native connector
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+An L2 adapter backed by the native C++ Mooncake Store connector.  Uses
+`Mooncake <https://github.com/kvcache-ai/Mooncake>`_ for high-performance
+distributed KV cache storage with RDMA support.
+
+**Prerequisites -- Building with Mooncake support:**
+
+The Mooncake extension is **not** built by default.  You must explicitly
+enable it:
+
+.. code-block:: bash
+
+    BUILD_MOONCAKE=1 pip install -e . --verbose
+
+The ``BUILD_MOONCAKE`` environment variable controls compilation:
+
+- ``BUILD_MOONCAKE=1``: Enable the Mooncake C++ extension.
+- ``BUILD_MOONCAKE=0``: Force disable (highest priority), even if
+  ``MOONCAKE_INCLUDE_DIR`` is set.
+- **Not set**: Falls back to checking ``MOONCAKE_INCLUDE_DIR`` for
+  backward compatibility.  If ``MOONCAKE_INCLUDE_DIR`` is also unset,
+  the extension is skipped.
+
+If the Mooncake headers are not installed in the system include path
+(e.g., ``/usr/local/include``), you must point to them explicitly:
+
+.. code-block:: bash
+
+    BUILD_MOONCAKE=1 \
+    MOONCAKE_INCLUDE_DIR=/path/to/mooncake/include \
+    MOONCAKE_LIB_DIR=/path/to/mooncake/lib \
+    pip install -e . --verbose
+
+**LMCache-specific fields:**
+
+- ``num_workers``: Number of C++ worker threads (default ``4``, must
+  be > 0).
+
+**Mooncake fields:**
+
+All other keys in the JSON config (except ``type``, ``num_workers``,
+and ``eviction``) are forwarded **as-is** to Mooncake's
+``setup_internal(ConfigDict)``.  Refer to the
+`Mooncake documentation <https://github.com/kvcache-ai/Mooncake>`_
+for available setup keys (e.g., ``local_hostname``,
+``metadata_server``, ``master_server_address``, ``protocol``,
+``device_name``, ``global_segment_size``).
+
+**Configuration example:**
+
+.. code-block:: bash
+
+    --l2-adapter '{
+      "type": "mooncake_store",
+      "num_workers": 4,
+      "local_hostname": "node01",
+      "metadata_server": "http://localhost:8080/metadata",
+      "master_server_address": "localhost:50051",
+      "protocol": "tcp",
+      "local_buffer_size": "3221225472"
+      "global_segment_size": "3221225472"
+    }'
+
+For full Mooncake setup instructions (master service, metadata server,
+etc.), see `Mooncake <https://github.com/kvcache-ai/Mooncake>`_ .
 
 ``mock`` -- Mock adapter for testing
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -193,6 +321,12 @@ Select policies via CLI:
    * - ``--l2-prefetch-policy``
      - ``default``
      - For each key, pick the first (lowest-indexed) adapter that has it.
+       Prefetched keys are **temporary** (deleted after the reader finishes).
+   * - ``--l2-prefetch-policy``
+     - ``retain``
+     - Same load plan as ``default``, but prefetched keys are **retained**
+       permanently in L1.  Useful when prefetched data is likely reused
+       by subsequent requests (e.g. shared system-prompt chunks).
 
 Prefetch Concurrency
 ~~~~~~~~~~~~~~~~~~~~~
@@ -332,9 +466,15 @@ drops by ``eviction_ratio``.
    * - ``nixl_store``
      - Full support. ``delete`` frees pool slots; pinned keys (in-flight
        loads) are skipped and retried on the next cycle.
+   * - ``nixl_store_dynamic``
+     - Full support. ``delete`` removes data files from disk; pinned
+       keys are skipped. ``get_usage`` is byte-based
+       (``_total_bytes / max_capacity_bytes``).
    * - ``mock``
      - Full support. Useful for testing eviction behaviour without
        real storage hardware.
+   * - ``mooncake_store``
+     - No eviction support (native connector adapter).
    * - ``fs``
      - No eviction support (``delete`` and ``get_usage`` are no-ops).
    * - native connectors

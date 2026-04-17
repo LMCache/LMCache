@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Per-job environment setup: installs vLLM nightly + LMCache from source.
+# Per-job environment setup: installs vLLM (nightly cu128 wheels) + LMCache from source.
 # Called at the start of every CI job.
 set -euo pipefail
 
@@ -17,7 +17,7 @@ fi
 source "${REPO_ROOT}/.buildkite/k3_tests/common_scripts/helpers.sh"
 check_gpu_health 80
 
-echo "--- :python: Installing vLLM nightly"
+echo "--- :python: Installing vLLM (nightly cu128 wheels)"
 
 
 DEFAULT_VENV_BIN="/opt/venv/bin"
@@ -51,35 +51,25 @@ else
 fi
 TEST_VENV_BIN="/workspace/.venv/bin"
 
-# Resolve the latest nightly wheel URL directly from the nightly index.
-# PEP 440 ranks stable releases (0.17.0) above pre-release nightlies
-# (0.17.0rc1.devN), so pip/uv always picks the stable version when both
-# indexes are available. We work around this by parsing the nightly index
-# page and installing the wheel by URL.
-ARCH=$(uname -m)  # x86_64 or aarch64
-VLLM_NIGHTLY_INDEX="https://wheels.vllm.ai/nightly/vllm/"
-INDEX_HTML=$(curl -sfL "$VLLM_NIGHTLY_INDEX" 2>&1) || true
-VLLM_NIGHTLY_URL=$(echo "$INDEX_HTML" \
-    | grep -oP 'href="\K[^"]+'"${ARCH}"'\.whl' \
-    | head -1) || true
-if [[ -z "$VLLM_NIGHTLY_URL" ]]; then
-    echo "WARNING: Could not find vLLM nightly wheel for ${ARCH} — falling back to latest stable" >&2
-    "${UV_BIN}" pip install -p "${TEST_VENV_BIN}/python" "vllm[runai,tensorizer,flashinfer]"
-else
-    # href is relative (../../<commit>/vllm-....whl), resolve to absolute URL
-    VLLM_WHEEL_URL="https://wheels.vllm.ai/nightly/vllm/${VLLM_NIGHTLY_URL}"
-    echo "Resolved nightly wheel: $VLLM_WHEEL_URL"
-    "${UV_BIN}" pip install -p "${TEST_VENV_BIN}/python" --prerelease=allow \
-        "${VLLM_WHEEL_URL}[runai,tensorizer,flashinfer]" \
-        --extra-index-url https://pypi.org/simple \
-        --index-strategy unsafe-best-match
-fi
+# When flashinfer and flashinfer-cubin resolve to different patch versions, skip strict check.
+export FLASHINFER_DISABLE_VERSION_CHECK=1
+
+"${UV_BIN}" pip install -p "${TEST_VENV_BIN}/python" -U vllm "torch==2.10.0+cu128" --pre \
+    --extra-index-url https://wheels.vllm.ai/nightly/cu128 \
+    --extra-index-url https://download.pytorch.org/whl/cu128 \
+    --index-strategy unsafe-best-match
+
 
 # install LMCache from source twice as two torch version might be different
+ 
+"${DEFAULT_VENV_BIN}/python" -c 'import vllm; print(f"default venv vllm={vllm.__version__}")' 
+"${TEST_VENV_BIN}/python" -c 'import vllm; print(f"test venv vllm={vllm.__version__}")'
+"${DEFAULT_VENV_BIN}/python" -c 'import torch; print(f"default venv torch={torch.__version__}, torch.version.cuda={torch.version.cuda}")' 
+"${TEST_VENV_BIN}/python" -c 'import torch; print(f"test venv torch={torch.__version__}, torch.version.cuda={torch.version.cuda}")'
+
 echo "--- :python: Installing LMCache from source"
 "${UV_BIN}" pip install -p "${DEFAULT_VENV_BIN}/python" -e . --no-build-isolation
 "${UV_BIN}" pip install -p "${TEST_VENV_BIN}/python" -e . --no-build-isolation
-
 # Work around openai_harmony vocab download/load issues for GPT-OSS (vLLM recipes troubleshooting).
 # related github issue: https://github.com/openai/harmony/pull/41
 TIKTOKEN_ENCODINGS_DIR="${REPO_ROOT}/tiktoken_encodings"
@@ -94,8 +84,11 @@ fi
 if [[ ! -s "${TIKTOKEN_ENCODINGS_DIR}/cl100k_base.tiktoken" ]]; then
   curl -fsSL "https://openaipublic.blob.core.windows.net/encodings/cl100k_base.tiktoken" -o "${TIKTOKEN_ENCODINGS_DIR}/cl100k_base.tiktoken"
 fi
+
+
 export TIKTOKEN_ENCODINGS_BASE="${TIKTOKEN_ENCODINGS_DIR}"
 echo "Using TIKTOKEN_ENCODINGS_BASE=${TIKTOKEN_ENCODINGS_BASE}"
+
 
 echo "--- :white_check_mark: Environment ready"
 "${DEFAULT_VENV_BIN}/python" -c "import vllm; import lmcache; print(f'vLLM={vllm.__version__}, LMCache installed from source with no build isolation in default venv')"

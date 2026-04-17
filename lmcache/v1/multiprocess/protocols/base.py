@@ -54,6 +54,9 @@ class RequestType(enum.Enum):
     GET_CHUNK_SIZE = enum.auto()
     PING = enum.auto()
 
+    # Observability operations
+    REPORT_BLOCK_ALLOCATION = enum.auto()
+
     # Debug operations
     NOOP = enum.auto()
 

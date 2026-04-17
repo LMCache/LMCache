@@ -10,6 +10,7 @@ import torch
 
 # First Party
 from lmcache.v1.multiprocess.custom_types import (
+    BlockAllocationRecord,
     CudaIPCWrapper,
     IPCCacheEngineKey,
     get_customized_decoder,
@@ -219,3 +220,45 @@ def test_cudaipc_wrapper_multiprocess_serialization():
             f"Tensor {i}: post-modification checksum mismatch. "
             f"Expected {new_expected_checksum}, got {actual_checksum}"
         )
+
+
+def test_block_allocation_record_serialization():
+    """Test encoding and decoding of BlockAllocationRecord using msgspec."""
+    original = BlockAllocationRecord(
+        req_id="req-42",
+        new_block_ids=[10, 20, 30],
+        new_token_ids=[100, 200, 300, 400],
+    )
+
+    encoded = msgspec.msgpack.encode(original)
+    decoded = msgspec.msgpack.decode(encoded, type=BlockAllocationRecord)
+
+    assert decoded.req_id == original.req_id
+    assert decoded.new_block_ids == original.new_block_ids
+    assert decoded.new_token_ids == original.new_token_ids
+
+
+def test_block_allocation_record_list_serialization():
+    """Test encoding and decoding of a list of BlockAllocationRecord."""
+    records = [
+        BlockAllocationRecord(
+            req_id="req-1",
+            new_block_ids=[1, 2],
+            new_token_ids=[10, 20, 30],
+        ),
+        BlockAllocationRecord(
+            req_id="req-2",
+            new_block_ids=[],
+            new_token_ids=[40, 50],
+        ),
+    ]
+
+    encoded = msgspec.msgpack.encode(records)
+    decoded = msgspec.msgpack.decode(encoded, type=list[BlockAllocationRecord])
+
+    assert len(decoded) == 2
+    assert decoded[0].req_id == "req-1"
+    assert decoded[0].new_block_ids == [1, 2]
+    assert decoded[1].req_id == "req-2"
+    assert decoded[1].new_block_ids == []
+    assert decoded[1].new_token_ids == [40, 50]

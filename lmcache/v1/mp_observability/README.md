@@ -3,8 +3,11 @@
 Event-driven observability for LMCache's multiprocess (MP) mode, built on
 [OpenTelemetry](https://opentelemetry.io/).
 
-For metrics, see [METRICS.md](METRICS.md).  For event metadata contracts,
-see [EVENTS.md](EVENTS.md).
+For metrics, see [METRICS.md](../../../docs/design/v1/mp_observability/METRICS.md).
+For event metadata contracts, see
+[EVENTS.md](../../../docs/design/v1/mp_observability/EVENTS.md).
+For design rationale, see
+[event-bus.md](../../../docs/design/v1/mp_observability/event-bus.md).
 
 ---
 
@@ -178,7 +181,8 @@ if obs_config.metrics_enabled:
 
 ### Step 6 — Document the metadata contract
 
-Add a row to the metadata contracts table in [EVENTS.md](EVENTS.md) so
+Add a row to the metadata contracts table in
+[EVENTS.md](../../../docs/design/v1/mp_observability/EVENTS.md) so
 subscribers can rely on the schema:
 
 ```markdown
@@ -193,6 +197,6 @@ subscribers can rely on the schema:
 |---|---|
 | Create meters and counters in `__init__()`, not at module level | `MeterProvider` must be set before `get_meter()` is called. Module-level calls happen at import time, before setup. |
 | Prefix OTel metric names with `lmcache_mp.` | Keeps the MP namespace separate from `lmcache.` (the single-process engine namespace). |
-| Use `metadata: dict[str, Any]` for event payloads | Flexible, no coupling between producers and subscribers. See metadata contracts in [EVENTS.md](EVENTS.md). |
+| Use `metadata: dict[str, Any]` for event payloads | Flexible, no coupling between producers and subscribers. See metadata contracts in [EVENTS.md](../../../docs/design/v1/mp_observability/EVENTS.md). |
 | Separate metrics, logging, and tracing subscribers | Single responsibility. Can enable/disable independently via config. |
 | Store `self._event_bus = get_event_bus()` in `__init__` | Avoids calling the singleton getter on every publish. |

@@ -8,6 +8,7 @@
 #include "pos_kernels.cuh"
 #include "mem_alloc.h"
 #include "utils.h"
+#include "event_recorder.h"
 #include <torch/torch.h>
 #include <torch/extension.h>
 #include <iostream>
@@ -68,6 +69,9 @@ PYBIND11_MODULE(c_ops, m) {
         py::call_guard<py::gil_scoped_release>());
   m.def("free_shm_pinned_ptr", &free_shm_pinned_ptr,
         py::call_guard<py::gil_scoped_release>());
+  m.def("batched_memcpy", &batched_memcpy, py::arg("src_ptrs"),
+        py::arg("dst_ptrs"), py::arg("sizes"),
+        py::call_guard<py::gil_scoped_release>());
   m.def("get_gpu_pci_bus_id", &get_gpu_pci_bus_id);
   m.def("multi_layer_block_kv_transfer", &multi_layer_block_kv_transfer,
         py::arg("paged_buffer_ptrs_tensor"), py::arg("lmcache_objects_ptrs"),
@@ -84,4 +88,9 @@ PYBIND11_MODULE(c_ops, m) {
       .def_readwrite("nh", &PageBufferShapeDesc::nh)
       .def_readwrite("hs", &PageBufferShapeDesc::hs)
       .def_readwrite("element_size", &PageBufferShapeDesc::element_size);
+  m.def("record_event_on_stream", &record_event_on_stream,
+        py::arg("cuda_stream_ptr"), py::arg("event_type_name"),
+        py::arg("session_id"), py::arg("str_metadata"), py::arg("int_metadata"),
+        py::call_guard<py::gil_scoped_release>());
+  m.def("drain_recorded_events", &drain_recorded_events);
 }
