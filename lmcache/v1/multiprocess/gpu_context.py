@@ -34,9 +34,7 @@ from lmcache.v1.gpu_connector.utils import (
     get_num_blocks,
     get_num_heads,
     get_num_layers,
-    group_element_size,
     group_first_layer_tensor,
-    group_num_layers,
     is_mla,
 )
 from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
@@ -100,10 +98,18 @@ class GPUCacheContext:
         pointers_list = get_kv_cache_data_ptrs(self.kv_caches_, self.gpu_kv_format_)
         self.kv_cache_pointers_ = list_to_gpu_tensor(pointers_list, self.device_)
 
-        # Build per-layer KV groups (grouped by shape and dtype)
+        # Build per-layer KV groups (grouped by shape and dtype).  Cross-layer
+        # formats have a single shared tensor whose NL dim spans every layer;
+        # we build one group with layer_indices = [0..num_layers) so
+        # downstream code can trust group.num_layers uniformly.
         tensors = as_tensor_list(self.kv_caches_, self.gpu_kv_format_)
         self.kv_layer_groups_manager_ = KVLayerGroupsManager()
-        self.kv_layer_groups_manager_.build_kv_layer_groups_from_list(tensors)
+        if isinstance(self.kv_caches_, torch.Tensor):
+            self.kv_layer_groups_manager_.build_kv_layer_groups_from_cross_layer_tensor(
+                self.kv_caches_, self.num_layers_
+            )
+        else:
+            self.kv_layer_groups_manager_.build_kv_layer_groups_from_list(tensors)
 
         # Per-group attributes: hidden_dim_size, num_heads, head_size,
         # shape_desc, and kv_pointers — all derived from the representative
@@ -121,8 +127,8 @@ class GPUCacheContext:
             hidden_dim = get_hidden_dim_size(rep, self.gpu_kv_format_)
             nh = 1 if self.is_mla_ else get_num_heads(rep, self.gpu_kv_format_)
             hs = get_head_size(rep, self.gpu_kv_format_)
-            nl = group_num_layers(self.kv_caches_, self.num_layers_, group.num_layers)
-            element_size = group_element_size(self.kv_caches_, first_layer)
+            nl = group.num_layers
+            element_size = first_layer.element_size()
 
             self.hidden_dim_sizes_.append(hidden_dim)
             self.group_num_heads_.append(nh)

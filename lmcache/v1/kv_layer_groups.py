@@ -265,3 +265,28 @@ class KVLayerGroupsManager:
 
         self.kv_layer_groups = kv_layer_groups
         logger.info("KV layer groups (from list): %s", kv_layer_groups)
+
+    def build_kv_layer_groups_from_cross_layer_tensor(
+        self, tensor: torch.Tensor, num_layers: int
+    ) -> None:
+        """Build a single KV layer group spanning every layer of a cross-layer
+        allocation.
+
+        For cross-layer formats the serving engine hands LMCache one shared
+        tensor whose NL dimension holds data for every layer.  This method
+        produces a single group whose ``layer_indices`` covers all layers, so
+        downstream code can rely on ``group.num_layers`` without consulting
+        the format.
+        """
+        if len(self.kv_layer_groups) > 0:
+            return
+        indices = list(range(num_layers))
+        self.kv_layer_groups = [
+            KVLayerGroupInfo(
+                layer_names=[str(i) for i in indices],
+                layer_indices=indices,
+                shape=tensor.shape,
+                dtype=tensor.dtype,
+            )
+        ]
+        logger.info("KV layer groups (cross-layer): %s", self.kv_layer_groups)
