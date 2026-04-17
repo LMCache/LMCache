@@ -78,6 +78,14 @@ class TestFilenameRoundtrip:
     def test_too_many_fields_returns_none(self):
         assert _filename_to_object_key("a@b@c@d@e.data") is None
 
+    def test_salt_with_forbidden_char_returns_none(self):
+        # A filename that parses into 4 fields but whose trailing "salt"
+        # slot contains a char ObjectKey.__post_init__ rejects (NUL here
+        # is impossible in filenames, so use the length cap instead).
+        too_long_salt = "x" * 129
+        fn = f"llama@0x0000002a@deadbeef@{too_long_salt}.data"
+        assert _filename_to_object_key(fn) is None
+
 
 class TestIpcKeyToObjectKeys:
     """ipc_key_to_object_keys reads cache_salt from the ipc_key itself —

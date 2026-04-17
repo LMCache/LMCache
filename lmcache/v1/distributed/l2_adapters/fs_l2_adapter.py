@@ -141,18 +141,23 @@ def _filename_to_object_key(
     else:
         return None
 
+    model_name = safe_model.replace(_PATH_SLASH_REPLACEMENT, "/")
     try:
         chunk_hash = bytes.fromhex(chunk_hash_hex)
         kv_rank = int(kv_rank_str, 16)
+        # ObjectKey.__post_init__ raises ValueError when the decoded
+        # model_name / cache_salt violate the forbidden-char or length
+        # invariants (e.g. a stray file from another tool on disk).
+        # The contract here is to return None for anything unparsable,
+        # so keep the constructor inside the try block.
+        return ObjectKey(
+            chunk_hash=chunk_hash,
+            model_name=model_name,
+            kv_rank=kv_rank,
+            cache_salt=cache_salt,
+        )
     except ValueError:
         return None
-    model_name = safe_model.replace(_PATH_SLASH_REPLACEMENT, "/")
-    return ObjectKey(
-        chunk_hash=chunk_hash,
-        model_name=model_name,
-        kv_rank=kv_rank,
-        cache_salt=cache_salt,
-    )
 
 
 class FSL2AdapterConfig(L2AdapterConfigBase):
