@@ -1200,7 +1200,7 @@ class DaxBackend(StoragePluginInterface, AllocatorBackendInterface):
         return parsed
 
     def _calculate_primary_slot_bytes(self) -> int:
-        """Calculate one full KV chunk size without a LocalCPUBackend."""
+        """Calculate one primary KV slot size without a LocalCPUBackend."""
         if self.config is None:
             raise RuntimeError("DaxBackend requires config")
         if self.metadata is None:
@@ -1211,6 +1211,8 @@ class DaxBackend(StoragePluginInterface, AllocatorBackendInterface):
         num_layers = int(kv_shape[0])
         hidden_dim = int(kv_shape[3]) * int(kv_shape[4])
         dtype_size = int(self.metadata.kv_dtype.itemsize)
+        if self.config.use_layerwise:
+            return kv_size * chunk_tokens * hidden_dim * dtype_size
         return kv_size * num_layers * chunk_tokens * hidden_dim * dtype_size
 
     def _resolve_memory_format(
