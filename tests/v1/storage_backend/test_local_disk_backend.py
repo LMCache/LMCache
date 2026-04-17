@@ -19,6 +19,7 @@ from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_management import MemoryFormat
 from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
+from lmcache.v1.storage_backend import local_disk_backend as local_disk_backend_module
 from lmcache.v1.storage_backend.local_disk_backend import LocalDiskBackend
 
 
@@ -383,7 +384,7 @@ class TestLocalDiskBackend:
         assert reuse_intervals[0] > 0
 
     def test_recover_persisted_index_enforces_max_cache_size(
-        self, temp_disk_path, async_loop, local_cpu_backend
+        self, temp_disk_path, async_loop, local_cpu_backend, monkeypatch
     ):
         """Recovery should evict old entries if the configured disk budget shrinks."""
         payload = b"x" * 1024
@@ -425,6 +426,12 @@ class TestLocalDiskBackend:
                     f,
                 )
 
+        logged_messages = []
+
+        def capture_info(message, *args):
+            logged_messages.append(message % args)
+
+        monkeypatch.setattr(local_disk_backend_module.logger, "info", capture_info)
         recovered_backend = LocalDiskBackend(
             config=config,
             loop=async_loop,
@@ -437,6 +444,12 @@ class TestLocalDiskBackend:
         assert recovered_backend.usage == len(payload)
         assert not os.path.exists(recovered_backend._key_to_path(key_old))
         assert not os.path.exists(recovered_backend._key_to_meta_path(key_old))
+        assert any(
+            message.startswith(
+                f"Recovered 1 persisted disk cache entries ({len(payload)} bytes)"
+            )
+            for message in logged_messages
+        )
 
     def test_init_multi_path(self, async_loop, local_cpu_backend):
         """Comma-separated disk paths should remain supported."""

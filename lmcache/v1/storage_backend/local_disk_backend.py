@@ -417,6 +417,7 @@ class LocalDiskBackend(StorageBackendInterface):
                 self.cache_policy.restore_on_recover(key, self.dict, metadata)
 
         if recovered:
+            recovered_after_eviction = recovered
             while total_bytes > self.max_cache_size:
                 evict_keys = self.cache_policy.get_evict_candidates(
                     self.dict,
@@ -440,6 +441,7 @@ class LocalDiskBackend(StorageBackendInterface):
                     total_bytes -= metadata.size
                     evicted_recovered += 1
                     evicted_bytes += metadata.size
+                    recovered_after_eviction -= 1
 
                     if os.path.exists(metadata.path):
                         os.remove(metadata.path)
@@ -453,7 +455,7 @@ class LocalDiskBackend(StorageBackendInterface):
             self.stats_monitor.update_local_storage_usage(self.usage)
             logger.info(
                 "Recovered %d persisted disk cache entries (%d bytes) from %s",
-                recovered,
+                recovered_after_eviction,
                 total_bytes,
                 self.path,
             )

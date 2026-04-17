@@ -638,7 +638,7 @@ class LMCacheConnectorV1Impl:
     def _get_group_block_sizes(
         self, num_groups: Optional[int] = None
     ) -> tuple[int, ...]:
-        kv_cache_groups = getattr(self.kv_cache_config, "kv_cache_groups", [])
+        kv_cache_groups = getattr(self.kv_cache_config, "kv_cache_groups", None) or []
         if num_groups is None:
             num_groups = len(kv_cache_groups)
         return _compute_group_block_sizes(

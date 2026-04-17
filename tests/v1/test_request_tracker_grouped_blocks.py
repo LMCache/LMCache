@@ -10,7 +10,11 @@ pytest.importorskip("vllm")
 
 # First Party
 from lmcache.integration.vllm.lmcache_connector_v1 import LMCacheConnectorV1Dynamic
-from lmcache.integration.vllm.vllm_v1_adapter import ReqMeta, RequestTracker
+from lmcache.integration.vllm.vllm_v1_adapter import (
+    LMCacheConnectorV1Impl,
+    ReqMeta,
+    RequestTracker,
+)
 
 
 def test_request_tracker_update_accepts_grouped_block_ids() -> None:
@@ -67,3 +71,11 @@ def test_req_meta_masks_vllm_null_block_slots() -> None:
 
     assert req_meta is not None
     assert req_meta.slot_mapping.tolist() == [-1, -1, -1, -1]
+
+
+def test_get_group_block_sizes_treats_none_kv_cache_groups_as_empty() -> None:
+    connector = LMCacheConnectorV1Impl.__new__(LMCacheConnectorV1Impl)
+    connector.kv_cache_config = SimpleNamespace(kv_cache_groups=None)
+    connector._block_size = 16
+
+    assert connector._get_group_block_sizes() == ()
