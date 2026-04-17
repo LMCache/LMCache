@@ -52,6 +52,14 @@ class _FakeManager:
         self.lmcache_engine = engine
 
 
+class _NoopStatsMonitor:
+    def update_interval_vllm_hit_tokens(self, _: int) -> None:
+        pass
+
+    def update_interval_prompt_tokens(self, _: int) -> None:
+        pass
+
+
 def _make_req(req_id: str, can_save: bool = True):
     return SimpleNamespace(
         req_id=req_id,
@@ -74,6 +82,21 @@ def _make_connector(requests):
     connector.kv_caches = {"layer0": torch.zeros(1)}
     connector._layerwise_save_storers = {}
     return connector, metadata, engine
+
+
+def _make_load_req(req_id: str):
+    return SimpleNamespace(
+        req_id=req_id,
+        token_ids=[1, 2, 3, 4],
+        slot_mapping=torch.arange(4, dtype=torch.long),
+        slot_mappings_by_layer={"layer0": torch.arange(4, dtype=torch.long)},
+        load_spec=SimpleNamespace(
+            can_load=True,
+            lmcache_cached_tokens=2,
+            vllm_cached_tokens=0,
+        ),
+        request_configs={},
+    )
 
 
 def test_layerwise_storer_is_request_scoped_across_interleaved_finalize() -> None:
@@ -148,3 +171,33 @@ def test_layerwise_save_kv_producer_ignores_can_save_flag() -> None:
     connector.wait_for_save()
     assert engine.store_steps["req-1"] == 2
     assert connector._layerwise_save_storers == {}
+
+
+def test_start_load_kv_slices_per_layer_slot_mappings() -> None:
+    metadata = LMCacheConnectorMetadata(requests=[_make_load_req("req-1")])
+    captured: dict[str, object] = {}
+
+    class _FakeLoadEngine:
+        def retrieve(self, token_ids, token_mask, **kwargs):
+            captured["token_ids"] = token_ids
+            captured["token_mask"] = token_mask
+            captured["slot_mapping"] = kwargs["slot_mapping"]
+            captured["slot_mappings"] = kwargs["slot_mappings"]
+            return torch.ones(len(token_ids), dtype=torch.bool)
+
+    connector = LMCacheConnectorV1Impl.__new__(LMCacheConnectorV1Impl)
+    connector._parent = _FakeParent(metadata)
+    connector._manager = SimpleNamespace(lmcache_engine=_FakeLoadEngine())
+    connector._stats_monitor = _NoopStatsMonitor()
+    connector.device = "cpu"
+    connector._lmcache_chunk_size = 8
+    connector.use_layerwise = False
+    connector.kv_caches = {"layer0": torch.zeros(1)}
+    connector.enable_blending = False
+    connector.layerwise_retrievers = []
+
+    connector.start_load_kv(SimpleNamespace(attn_metadata=object()))
+
+    assert captured["token_ids"] == [1, 2]
+    assert captured["slot_mapping"].tolist() == [0, 1]
+    assert captured["slot_mappings"]["layer0"].tolist() == [0, 1]

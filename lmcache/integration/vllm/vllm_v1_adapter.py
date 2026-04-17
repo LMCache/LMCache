@@ -996,15 +996,6 @@ class LMCacheConnectorV1Impl:
             tokens = request.token_ids
             # TODO: have a pre-allocated buffer to hold the slot_mappings
             slot_mapping = self._resolve_full_slot_mapping(request).to(self.device)
-            slot_mappings_by_layer = getattr(request, "slot_mappings_by_layer", None)
-            slot_mappings = (
-                {
-                    layer_name: mapping.to(self.device)
-                    for layer_name, mapping in slot_mappings_by_layer.items()
-                }
-                if slot_mappings_by_layer is not None
-                else None
-            )
             assert len(tokens) == len(slot_mapping)
 
             token_mask = torch.ones(len(tokens), dtype=torch.bool)
@@ -1016,6 +1007,15 @@ class LMCacheConnectorV1Impl:
             token_mask[:masked_token_count] = False
 
             lmcache_cached_tokens = request.load_spec.lmcache_cached_tokens
+            slot_mappings_by_layer = getattr(request, "slot_mappings_by_layer", None)
+            slot_mappings = (
+                {
+                    layer_name: mapping[:lmcache_cached_tokens].to(self.device)
+                    for layer_name, mapping in slot_mappings_by_layer.items()
+                }
+                if slot_mappings_by_layer is not None
+                else None
+            )
             if self.use_layerwise:
                 if idx == last_idx:
                     sync = True
