@@ -184,6 +184,27 @@ class HFBucketConnector(RemoteConnector):
         connector_config: HFBucketConnectorConfig,
         bucket_client: HFBucketClientInterface | None = None,
     ) -> None:
+        """Initialize the HFBucket connector.
+
+        Args:
+            local_cpu_backend: Local CPU backend used to allocate
+                ``MemoryObj`` instances for downloaded chunks.
+            config: LMCache engine config. ``save_unfull_chunk`` must be
+                ``False``; an omitted ``save_chunk_meta`` is treated as
+                ``False`` by this connector.
+            metadata: LMCache engine metadata used to derive the expected
+                full-chunk layout.
+            connector_config: Resolved plugin-scoped configuration, including
+                the bucket handle, token source, and metadata cache TTL.
+            bucket_client: Optional test seam. When ``None`` (the default), a
+                real ``HFBucketClient`` is constructed from the resolved
+                token.
+
+        Raises:
+            ValueError: If ``save_chunk_meta`` is ``True`` or
+                ``save_unfull_chunk`` is ``True``. This backend only supports
+                full chunks without inline chunk metadata.
+        """
         normalized_config = _normalize_save_chunk_meta_config(config)
         super().__init__(normalized_config, metadata)
 
@@ -633,20 +654,10 @@ class HFBucketConnector(RemoteConnector):
                 return {key_str: 0 for key_str in key_strings}
             raise
 
-        size_by_key: dict[str, int] = {key_str: 0 for key_str in key_strings}
-        if len(path_infos) == len(object_paths):
-            for key_str, object_path, path_info in zip(
-                key_strings,
-                object_paths,
-                path_infos,
-                strict=False,
-            ):
-                size_by_key[key_str] = _extract_exact_object_size(
-                    path_info,
-                    expected_path=object_path,
-                )
-            return size_by_key
-
+        # Match by path, not by request order: the HF API does not document
+        # any ordering guarantee, and assuming positional correspondence can
+        # silently cache zero sizes (= "missing") for existing objects when
+        # the server reorders the response.
         size_by_path: dict[str, int] = {}
         for path_info in path_infos:
             path = _get_object_path(path_info)
@@ -656,9 +667,10 @@ class HFBucketConnector(RemoteConnector):
                     expected_path=path,
                 )
 
-        for key_str, object_path in zip(key_strings, object_paths, strict=False):
-            size_by_key[key_str] = size_by_path.get(object_path, 0)
-        return size_by_key
+        return {
+            key_str: size_by_path.get(object_path, 0)
+            for key_str, object_path in zip(key_strings, object_paths, strict=False)
+        }
 
     def _get_cached_object_size(self, key_str: str) -> int | None:
         """Return a live cache entry, pruning expired metadata opportunistically."""
