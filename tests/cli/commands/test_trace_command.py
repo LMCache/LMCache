@@ -93,6 +93,24 @@ def _replay_namespace(
         l2_prefetch_policy="default",
         l2_prefetch_max_in_flight=8,
         l2_adapter=[],
+        # Observability flags mirrored from ``add_observability_args``.
+        # Defaults chosen to be safe for unit tests: the bus is enabled
+        # so internal SM events flow, but metrics are off to avoid
+        # binding a Prometheus port inside the test runner.
+        disable_observability=False,
+        disable_metrics=True,
+        disable_logging=False,
+        enable_tracing=False,
+        otlp_endpoint=None,
+        event_bus_queue_size=10_000,
+        prometheus_port=9090,
+        metrics_sample_rate=0.01,
+        lookup_hash_log_dir="",
+        lookup_hash_log_rotation_interval=6 * 3600,
+        lookup_hash_log_rotation_max_size=100 * 1024 * 1024,
+        lookup_hash_log_max_files=100,
+        trace_level=None,
+        trace_output=None,
     )
     defaults.update(overrides)
     return argparse.Namespace(**defaults)

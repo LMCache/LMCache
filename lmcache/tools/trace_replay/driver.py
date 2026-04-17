@@ -54,11 +54,29 @@ from lmcache.tools.trace_replay.dispatch import (
 from lmcache.tools.trace_replay.stats import ReplayStatsCollector
 from lmcache.v1.distributed.config import StorageManagerConfig
 from lmcache.v1.distributed.storage_manager import StorageManager
+from lmcache.v1.mp_observability.config import (
+    ObservabilityConfig,
+    init_observability,
+)
 from lmcache.v1.mp_observability.trace import codecs
 from lmcache.v1.mp_observability.trace.reader import TraceReader
 from lmcache.v1.mp_observability.trace.recorder import safe_storage_config_dict
 
 logger = init_logger(__name__)
+
+#: Default :class:`ObservabilityConfig` for replay sessions.
+#:
+#: Enables the EventBus and its logging subscribers so users can see
+#: SM/L1/L2 log output during replay.  Metrics and tracing are off:
+#: the OTel / Prometheus pipelines bind a port, which would collide
+#: across concurrent replays.  Declared at module scope to avoid
+#: Ruff B008 (mutable default argument).
+DEFAULT_REPLAY_OBS_CONFIG: ObservabilityConfig = ObservabilityConfig(
+    enabled=True,
+    metrics_enabled=False,
+    logging_enabled=True,
+    tracing_enabled=False,
+)
 
 
 @dataclass
@@ -101,8 +119,22 @@ class StorageReplayDriver:
         sm_config: StorageManagerConfig,
         trace_path: str,
         dispatcher: CallDispatcher | None = None,
+        obs_config: ObservabilityConfig = DEFAULT_REPLAY_OBS_CONFIG,
     ) -> None:
         """Construct a driver.
+
+        Initializes the global observability EventBus **before**
+        constructing the StorageManager so internal events
+        (L0/L1/L2 lifecycle, eviction, etc.) flow through a live bus
+        during replay.  This lets the same logging and monitoring
+        subscribers that run in the real server attach to the replay
+        session — e.g. operators can eyeball L1/L2 log output to
+        spot eviction churn or L2 bottlenecks.
+
+        Metrics (OTel / Prometheus) are **off by default** because
+        the metrics pipeline binds a Prometheus port; running two
+        replays concurrently with the same port would fail.  Callers
+        who want metrics can pass their own ``obs_config``.
 
         Args:
             sm_config: Replay-side StorageManager configuration.
@@ -116,11 +148,18 @@ class StorageReplayDriver:
                 :func:`build_default_dispatcher` is used; passing one
                 explicitly is useful for tests that register extra
                 handlers.
+            obs_config: Observability configuration for the replay
+                session.  Defaults to an enabled bus with logging
+                subscribers and no metrics/tracing.  The driver
+                installs this config as the global singleton via
+                :func:`init_observability` and stops the resulting
+                bus on :meth:`close`.
         """
         self._sm_config = sm_config
         self._trace_path = trace_path
         self._dispatcher = dispatcher or build_default_dispatcher()
         self._reader = TraceReader(trace_path)
+        self._bus = init_observability(obs_config)
         self._sm = StorageManager(sm_config)
         self._closed = False
 
@@ -147,14 +186,21 @@ class StorageReplayDriver:
         return self._sm
 
     def close(self) -> None:
-        """Close the StorageManager and reader.  Idempotent."""
+        """Close the StorageManager, stop the bus, and close the reader.
+
+        Idempotent.  The order matters: the StorageManager may
+        publish teardown events, so the bus outlives it briefly.
+        """
         if self._closed:
             return
         self._closed = True
         try:
             self._sm.close()
         finally:
-            self._reader.close()
+            try:
+                self._bus.stop()
+            finally:
+                self._reader.close()
 
     # ------------------------------------------------------------------
 
