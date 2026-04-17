@@ -31,11 +31,6 @@ struct WorkerMooncakeConn {
   mooncake::RealClient* client{nullptr};
 };
 
-struct RegisteredMemoryRegion {
-  const void* base{nullptr};
-  size_t size{0};
-};
-
 struct L1RegistrationConfig {
   bool enabled{false};
   std::uintptr_t base{0};
@@ -66,7 +61,6 @@ class MooncakeConnector : public ConnectorBase<WorkerMooncakeConn> {
  private:
   void ensure_registered(const void* buf, size_t len);
   void preregister_l1_memory(std::uintptr_t base, size_t size);
-  bool is_within_registered_region(const void* buf, size_t len) const;
   void unregister_all_buffers() noexcept;
 
   // Shared Mooncake RealClient instance.
@@ -75,8 +69,7 @@ class MooncakeConnector : public ConnectorBase<WorkerMooncakeConn> {
   // The original config dict (kept for diagnostics).
   ConfigDict config_;
   L1RegistrationConfig l1_registration_;
-
-  std::vector<RegisteredMemoryRegion> preregistered_regions_;
+  size_t preregistered_block_size_{0};
 };
 
 }  // namespace connector
