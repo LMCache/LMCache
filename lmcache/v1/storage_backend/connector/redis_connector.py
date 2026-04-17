@@ -599,8 +599,8 @@ class RedisSentinelConnector(RemoteConnector):
         key_str = key.to_string()
         # kv bytes needs to be set first to avoid race condition
         # if remote_ttl is set, keys will auto-expire after that many seconds
-        self.master.set(key_str + "kv_bytes", kv_bytes, ex=self.remote_ttl)
-        self.master.set(key_str + "metadata", metadata_bytes, ex=self.remote_ttl)
+        await self.master.set(key_str + "kv_bytes", kv_bytes, ex=self.remote_ttl)
+        await self.master.set(key_str + "metadata", metadata_bytes, ex=self.remote_ttl)
 
     # TODO
     @no_type_check

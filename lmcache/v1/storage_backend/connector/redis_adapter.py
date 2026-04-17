@@ -62,9 +62,7 @@ class RESPConnectorAdapter(ConnectorAdapter):
         )
 
         # Optional TTL (seconds) for remote KV cache keys; None = no expiry
-        self.remote_ttl = (
-            config.remote_ttl if hasattr(config, "remote_ttl") else None
-        )
+        self.remote_ttl = config.remote_ttl if config else None
 
         logger.info("Creating RESP connector for %s:%d", host, port)
         return RESPConnector(
@@ -93,7 +91,7 @@ class RedisConnectorAdapter(ConnectorAdapter):
         from .redis_connector import RedisConnector
 
         config = context.config
-        remote_ttl = config.remote_ttl if (config and hasattr(config, "remote_ttl")) else None
+        remote_ttl = config.remote_ttl if config else None
 
         logger.info(f"Creating Redis connector for URL: {context.url}")
         return RedisConnector(
@@ -118,7 +116,7 @@ class RedisSentinelConnectorAdapter(ConnectorAdapter):
         remote_ttl = config.remote_ttl if (config and hasattr(config, "remote_ttl")) else None
 
         logger.info(f"Creating Redis Sentinel connector for URL: {context.url}")
-        url = self.schema and context.url[len(self.schema):] or context.url
+        url = context.url.removeprefix(self.schema) if self.schema else context.url
 
         # Parse username and password
         username: str = ""
