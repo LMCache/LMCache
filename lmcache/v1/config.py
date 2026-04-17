@@ -543,6 +543,11 @@ def _validate_config(self):
             "min_retrieve_tokens must be >= 0, got %d" % self.min_retrieve_tokens
         )
 
+    if self.remote_ttl is not None and self.remote_ttl <= 0:
+        raise ValueError(
+            "remote_ttl must be a positive integer (seconds), got %d" % self.remote_ttl
+        )
+
     if self.enable_blending:
         if not self.save_unfull_chunk:
             logger.warning(

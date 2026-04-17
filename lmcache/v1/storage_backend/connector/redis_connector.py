@@ -62,6 +62,10 @@ class RESPConnector(RemoteConnector):
 
         self.client = RESPClient(host, port, num_threads, loop, username, password)
         self.pq_executor = AsyncPQExecutor(loop)
+        if remote_ttl is not None and remote_ttl <= 0:
+            raise ValueError(
+                f"remote_ttl must be a positive integer (seconds), got {remote_ttl}"
+            )
         self.remote_ttl = remote_ttl  # seconds; None = no expiry
 
         if self.remote_ttl is not None:
@@ -270,6 +274,10 @@ class RedisConnector(RemoteConnector):
         self.connection = redis.Redis.from_pool(self.pool)
         self.loop = loop
         self.local_cpu_backend = local_cpu_backend
+        if remote_ttl is not None and remote_ttl <= 0:
+            raise ValueError(
+                f"remote_ttl must be a positive integer (seconds), got {remote_ttl}"
+            )
         self.remote_ttl = remote_ttl  # seconds; None = no expiry
 
         self.pq_executor = AsyncPQExecutor(loop)
@@ -521,6 +529,10 @@ class RedisSentinelConnector(RemoteConnector):
         )
 
         self.local_cpu_backend = local_cpu_backend
+        if remote_ttl is not None and remote_ttl <= 0:
+            raise ValueError(
+                f"remote_ttl must be a positive integer (seconds), got {remote_ttl}"
+            )
         self.remote_ttl = remote_ttl  # seconds; None = no expiry
 
     async def exists(self, key: CacheEngineKey) -> bool:
@@ -654,6 +666,10 @@ class RedisClusterConnector(RemoteConnector):
         )
         self.loop = loop
         self.local_cpu_backend = local_cpu_backend
+        if remote_ttl is not None and remote_ttl <= 0:
+            raise ValueError(
+                f"remote_ttl must be a positive integer (seconds), got {remote_ttl}"
+            )
         self.remote_ttl = remote_ttl  # seconds; None = no expiry
 
         self.pq_executor = AsyncPQExecutor(loop)

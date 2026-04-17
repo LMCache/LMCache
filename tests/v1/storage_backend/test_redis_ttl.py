@@ -420,13 +420,21 @@ class TestRemoteTTLConfig:
         )
         assert config.remote_ttl == 3600
 
-    def test_ttl_zero_is_valid(self):
-        """remote_ttl=0 is technically valid (immediate expiry)."""
-        config = LMCacheEngineConfig.from_defaults(
-            remote_url="redis://localhost:6379",
-            remote_ttl=0,
-        )
-        assert config.remote_ttl == 0
+    def test_ttl_zero_is_rejected(self):
+        """remote_ttl=0 should be rejected — Redis requires positive integers for EX."""
+        with pytest.raises(ValueError, match="remote_ttl must be a positive integer"):
+            LMCacheEngineConfig.from_defaults(
+                remote_url="redis://localhost:6379",
+                remote_ttl=0,
+            )
+
+    def test_ttl_negative_is_rejected(self):
+        """Negative remote_ttl should be rejected."""
+        with pytest.raises(ValueError, match="remote_ttl must be a positive integer"):
+            LMCacheEngineConfig.from_defaults(
+                remote_url="redis://localhost:6379",
+                remote_ttl=-10,
+            )
 
     def test_ttl_from_env(self):
         """remote_ttl should be settable via LMCACHE_REMOTE_TTL env var."""
