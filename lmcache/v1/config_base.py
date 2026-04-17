@@ -85,6 +85,15 @@ def _parse_local_disk(local_disk) -> Optional[str]:
     return ",".join(parsed)
 
 
+def _to_int_or_none(
+    value: Optional[Union[str, int]],
+) -> Optional[int]:
+    """Convert value to int or None (for optional integer config fields)."""
+    if value is None or (isinstance(value, str) and value.lower() in ("", "none", "null")):
+        return None
+    return int(value)
+
+
 def _to_int_list(
     value: Optional[Union[str, int, list[Any]]],
 ) -> Optional[list[int]]:

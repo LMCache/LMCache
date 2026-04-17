@@ -49,6 +49,7 @@ class RESPConnector(RemoteConnector):
         num_threads: int = 8,
         username: str = "",
         password: str = "",
+        remote_ttl: Optional[int] = None,
     ):
         # this gives us access to self.full_chunk_size_bytes
         super().__init__(local_cpu_backend.config, local_cpu_backend.metadata)
@@ -61,6 +62,15 @@ class RESPConnector(RemoteConnector):
 
         self.client = RESPClient(host, port, num_threads, loop, username, password)
         self.pq_executor = AsyncPQExecutor(loop)
+        self.remote_ttl = remote_ttl  # seconds; None = no expiry
+
+        if self.remote_ttl is not None:
+            logger.warning(
+                "remote_ttl is set to %d seconds but the RESP native client "
+                "does not support TTL. Keys will NOT expire automatically. "
+                "Use redis:// or redis-cluster:// connectors for TTL support.",
+                self.remote_ttl,
+            )
 
     async def _exists(self, key: CacheEngineKey) -> bool:
         return await self.client.exists(key.to_string())
@@ -245,6 +255,7 @@ class RedisConnector(RemoteConnector):
         url: str,
         loop: asyncio.AbstractEventLoop,
         local_cpu_backend: LocalCPUBackend,
+        remote_ttl: Optional[int] = None,
     ):
         # initialize base class, which includes some common attributes
         super().__init__(local_cpu_backend.config, local_cpu_backend.metadata)
@@ -259,6 +270,7 @@ class RedisConnector(RemoteConnector):
         self.connection = redis.Redis.from_pool(self.pool)
         self.loop = loop
         self.local_cpu_backend = local_cpu_backend
+        self.remote_ttl = remote_ttl  # seconds; None = no expiry
 
         self.pq_executor = AsyncPQExecutor(loop)
 
@@ -374,9 +386,10 @@ class RedisConnector(RemoteConnector):
 
         key_str = key.to_string()
         # kv bytes needs to be set first to avoid race condition
+        # if remote_ttl is set, keys will auto-expire after that many seconds
         async with self.sem:
-            await self.connection.set(key_str + "kv_bytes", kv_bytes)
-            await self.connection.set(key_str + "metadata", metadata_bytes)
+            await self.connection.set(key_str + "kv_bytes", kv_bytes, ex=self.remote_ttl)
+            await self.connection.set(key_str + "metadata", metadata_bytes, ex=self.remote_ttl)
 
     async def put(self, key: CacheEngineKey, memory_obj: MemoryObj):
         await self.pq_executor.submit_job(
@@ -473,6 +486,7 @@ class RedisSentinelConnector(RemoteConnector):
         password: str,
         loop: asyncio.AbstractEventLoop,
         local_cpu_backend: LocalCPUBackend,
+        remote_ttl: Optional[int] = None,
     ):
         # initialize base class, which includes some common attributes
         super().__init__(local_cpu_backend.config, local_cpu_backend.metadata)
@@ -507,6 +521,7 @@ class RedisSentinelConnector(RemoteConnector):
         )
 
         self.local_cpu_backend = local_cpu_backend
+        self.remote_ttl = remote_ttl  # seconds; None = no expiry
 
     async def exists(self, key: CacheEngineKey) -> bool:
         return bool(self.slave.exists(key.to_string() + "metadata"))
@@ -583,8 +598,9 @@ class RedisSentinelConnector(RemoteConnector):
 
         key_str = key.to_string()
         # kv bytes needs to be set first to avoid race condition
-        self.master.set(key_str + "kv_bytes", kv_bytes)
-        self.master.set(key_str + "metadata", metadata_bytes)
+        # if remote_ttl is set, keys will auto-expire after that many seconds
+        self.master.set(key_str + "kv_bytes", kv_bytes, ex=self.remote_ttl)
+        self.master.set(key_str + "metadata", metadata_bytes, ex=self.remote_ttl)
 
     # TODO
     @no_type_check
@@ -615,6 +631,7 @@ class RedisClusterConnector(RemoteConnector):
         password: str,
         loop: asyncio.AbstractEventLoop,
         local_cpu_backend: LocalCPUBackend,
+        remote_ttl: Optional[int] = None,
     ):
         # initialize base class, which includes some common attributes
         super().__init__(local_cpu_backend.config, local_cpu_backend.metadata)
@@ -637,6 +654,7 @@ class RedisClusterConnector(RemoteConnector):
         )
         self.loop = loop
         self.local_cpu_backend = local_cpu_backend
+        self.remote_ttl = remote_ttl  # seconds; None = no expiry
 
         self.pq_executor = AsyncPQExecutor(loop)
 
@@ -754,8 +772,8 @@ class RedisClusterConnector(RemoteConnector):
         key_str = key.to_string()
         # kv bytes needs to be set first to avoid race condition
         async with self.sem:
-            await self.cluster.set(key_str + "kv_bytes", kv_bytes)
-            await self.cluster.set(key_str + "metadata", metadata_bytes)
+            await self.cluster.set(key_str + "kv_bytes", kv_bytes, ex=self.remote_ttl)
+            await self.cluster.set(key_str + "metadata", metadata_bytes, ex=self.remote_ttl)
 
     async def put(self, key: CacheEngineKey, memory_obj: MemoryObj):
         await self.pq_executor.submit_job(

@@ -22,6 +22,7 @@ from lmcache.v1.config_base import (
     _to_bool,
     _to_float_list,
     _to_int_list,
+    _to_int_or_none,
     _to_str_list,
     create_config_class,
     load_config_with_overrides,
@@ -86,6 +87,7 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
         "env_converter": str,
     },
     "remote_serde": {"type": Optional[str], "default": "naive", "env_converter": str},
+    "remote_ttl": {"type": Optional[int], "default": None, "env_converter": _to_int_or_none},  # TTL in seconds for remote KV cache keys (None = no expiry)
     # Feature toggles
     "use_layerwise": {
         "type": bool,
