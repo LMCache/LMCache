@@ -19,8 +19,8 @@ Public API:
   registry mapping recorded qualnames to live callables.  Useful
   when a caller needs to extend the replay with custom ops.
 * :class:`~lmcache.tools.trace_replay.stats.ReplayStatsCollector` —
-  per-qualname latency aggregator used by
-  ``lmcache bench trace-replay``.
+  per-qualname latency aggregator used by ``lmcache trace replay``
+  for CSV/JSON summary export and the terminal metrics table.
 """
 
 # First Party

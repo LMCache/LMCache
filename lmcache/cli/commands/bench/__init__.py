@@ -9,7 +9,6 @@ import sys
 
 # First Party
 from lmcache.cli.commands.base import BaseCommand
-from lmcache.cli.commands.bench import trace_replay as trace_replay_cmd
 from lmcache.cli.commands.bench.engine_bench.config import (
     EngineBenchConfig,
     parse_args_to_config,
@@ -53,29 +52,9 @@ class BenchCommand(BaseCommand):
         inner = parser.add_subparsers(
             dest="bench_target",
             required=True,
-            metavar="{engine,trace-replay}",
+            metavar="{engine}",
         )
         self._register_engine(inner)
-        self._register_trace_replay(inner)
-
-    def _register_trace_replay(
-        self,
-        subparsers: argparse._SubParsersAction,
-    ) -> None:
-        """Register the ``trace-replay`` sub-target.
-
-        The actual argument-building and execution logic live in
-        :mod:`lmcache.cli.commands.bench.trace_replay`.  Keeping the
-        module thin here lets the two files evolve independently —
-        the trace-replay flow has almost nothing in common with the
-        inference-engine flow.
-        """
-        parser = subparsers.add_parser(
-            "trace-replay",
-            help="Replay a .lct trace against a fresh StorageManager.",
-        )
-        trace_replay_cmd.add_arguments(parser)
-        parser.set_defaults(func=self.execute)
 
     def _register_engine(
         self,
@@ -305,7 +284,6 @@ class BenchCommand(BaseCommand):
     def execute(self, args: argparse.Namespace) -> None:
         handlers = {
             "engine": self._bench_engine,
-            "trace-replay": trace_replay_cmd.run,
         }
         handler = handlers.get(args.bench_target)
         if handler is None:

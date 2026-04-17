@@ -9,14 +9,12 @@ Subcommands:
 * ``replay FILE ...`` — reissue every recorded call against a fresh
   StorageManager.  Takes the standard storage-manager CLI flags (see
   :func:`lmcache.v1.distributed.config.add_storage_manager_args`),
-  plus ``--pace`` / ``--verbose`` / ``--jsonl-out``.
+  plus pacing (``--pace``), per-record output (``--verbose`` /
+  ``--jsonl-out``), aggregated CSV/JSON summary export
+  (``--output-dir`` / ``--no-csv`` / ``--json``), and a terminal
+  metrics table (suppressible with ``-q``).
 * ``record`` — v1 stub.  Prints the equivalent
   ``lmcache server --trace-level storage …`` invocation and exits.
-
-The ``replay`` subcommand ships under ``lmcache trace`` for
-exploratory/debug use.  Bench-style replay with CSV/JSON stats lives
-under ``lmcache bench trace-replay``; both share the same underlying
-:class:`~lmcache.tools.trace_replay.driver.StorageReplayDriver`.
 """
 
 # Future
@@ -27,16 +25,19 @@ from collections import Counter
 from typing import Callable
 import argparse
 import json
+import os
 import sys
 
 # First Party
 from lmcache.cli.commands.base import BaseCommand
+from lmcache.cli.metrics import Metrics, StreamHandler, get_formatter
 from lmcache.logging import init_logger
 from lmcache.tools.trace_replay.driver import (
     ReplayPace,
     ReplayResult,
     StorageReplayDriver,
 )
+from lmcache.tools.trace_replay.stats import ReplayStatsCollector
 from lmcache.v1.distributed.config import (
     StorageManagerConfig,
     add_storage_manager_args,
@@ -128,12 +129,12 @@ class TraceCommand(BaseCommand):
                     max_mono = record.t_mono
 
         print(f"Trace file: {args.trace_path}")
-        print(f"  level:            {header.level}")
-        print(f"  format_version:   {header.format_version}")
-        print(f"  lmcache_version:  {header.lmcache_version}")
-        print(f"  duration:         {max_mono:.3f}s")
-        print(f"  sm_config_digest: {header.sm_config_digest or '(none)'}")
-        print(f"  total_records:    {sum(counts.values())}")
+        print(f"  level:                {header.level}")
+        print(f"  format_version:       {header.format_version}")
+        print(f"  trace_schema_version: {header.trace_schema_version}")
+        print(f"  duration:             {max_mono:.3f}s")
+        print(f"  sm_config_digest:     {header.sm_config_digest or '(none)'}")
+        print(f"  total_records:        {sum(counts.values())}")
         if counts:
             print("  ops:")
             for qn in sorted(counts):
@@ -183,11 +184,45 @@ class TraceCommand(BaseCommand):
                 "analysis."
             ),
         )
+        parser.add_argument(
+            "--output-dir",
+            default=".",
+            help=(
+                "Directory for aggregated CSV/JSON summary output "
+                "(default: current directory)."
+            ),
+        )
+        parser.add_argument(
+            "--no-csv",
+            action="store_true",
+            help="Skip the aggregated CSV summary export.",
+        )
+        parser.add_argument(
+            "--json",
+            action="store_true",
+            help="Also export an aggregated JSON summary.",
+        )
+        parser.add_argument(
+            "-q",
+            "--quiet",
+            action="store_true",
+            help="Suppress the terminal metrics table (files are still written).",
+        )
         add_storage_manager_args(parser)
         parser.set_defaults(func=self.execute)
 
     def _run_replay(self, args: argparse.Namespace) -> None:
-        """Construct a StorageManager from *args* and drive replay."""
+        """Construct a StorageManager from *args* and drive replay.
+
+        Produces three kinds of output:
+
+        * Per-record stream: ``--verbose`` (stdout) and ``--jsonl-out``
+          (one JSON object per line).  Useful for post-hoc analysis.
+        * Aggregated per-qualname summary: CSV (unless ``--no-csv``)
+          and JSON (with ``--json``) written under ``--output-dir``.
+        * Terminal metrics table (unless ``--quiet``) using the shared
+          :class:`~lmcache.cli.metrics.Metrics` renderer.
+        """
         sm_config: StorageManagerConfig = parse_args_to_config(args)
         pace = ReplayPace(args.pace)
 
@@ -210,6 +245,12 @@ class TraceCommand(BaseCommand):
                     + "\n"
                 )
 
+        logger.info(
+            "trace replay: file=%s pace=%s",
+            args.trace_path,
+            pace.value,
+        )
+
         try:
             with StorageReplayDriver(sm_config, args.trace_path) as driver:
                 result = driver.run(pace=pace, on_record=_on_record)
@@ -217,49 +258,82 @@ class TraceCommand(BaseCommand):
             if jsonl_fh is not None:
                 jsonl_fh.close()
 
-        self._print_replay_summary(result)
+        os.makedirs(args.output_dir, exist_ok=True)
+        if not args.no_csv:
+            csv_path = os.path.join(args.output_dir, "trace_replay_ops.csv")
+            result.stats.export_csv(csv_path)
+            logger.info("CSV written to %s", csv_path)
+        if args.json:
+            json_path = os.path.join(args.output_dir, "trace_replay_summary.json")
+            result.stats.export_json(json_path)
+            logger.info("JSON written to %s", json_path)
+
+        if not args.quiet:
+            self._emit_replay_metrics(result.stats, result)
+
         if result.records_failed > 0:
             sys.exit(1)
 
     @staticmethod
-    def _print_replay_summary(result: ReplayResult) -> None:
-        """Emit a terminal-friendly summary of a replay result.
+    def _emit_replay_metrics(
+        stats: ReplayStatsCollector,
+        result: ReplayResult,
+    ) -> None:
+        """Print the replay summary using the shared :class:`Metrics` renderer.
 
         Args:
-            result: The :class:`ReplayResult` returned by the driver.
+            stats: The stats collector populated during replay.
+            result: The full :class:`ReplayResult` — used for the
+                replayed/skipped/failed totals and digest comparison.
         """
-        print("Replay result:")
-        print(f"  level:           {result.header_level}")
-        print(f"  replayed:        {result.records_replayed}")
-        print(f"  skipped:         {result.records_skipped}")
-        print(f"  failed:          {result.records_failed}")
-        print(f"  duration:        {result.stats.total_duration_s():.3f}s")
-        mismatch = (
-            result.header_digest
-            and result.replay_config_digest
-            and result.header_digest != result.replay_config_digest
-        )
-        if mismatch:
-            print(
-                "  config_digest:   MISMATCH "
-                f"(recorded={result.header_digest[:12]}…, "
-                f"replay={result.replay_config_digest[:12]}…)"
-            )
-        elif result.header_digest:
-            print(f"  config_digest:   match ({result.header_digest[:12]}…)")
+        metrics = Metrics(title="Trace Replay Result")
+        metrics.add_handler(StreamHandler(get_formatter("terminal", width=64)))
 
-        summary = result.stats.summary()
+        overall = metrics.add_section("overall", "Overall")
+        overall.add("level", "Trace level", result.header_level)
+        overall.add("replayed", "Records replayed", result.records_replayed)
+        overall.add("skipped", "Records skipped", result.records_skipped)
+        overall.add("failed", "Records failed", result.records_failed)
+        overall.add(
+            "duration",
+            "Replay duration (s)",
+            round(stats.total_duration_s(), 3),
+        )
+        header_digest = result.header_digest
+        replay_digest = result.replay_config_digest
+        if header_digest and replay_digest and header_digest != replay_digest:
+            overall.add(
+                "digest",
+                "Config digest",
+                f"MISMATCH (rec={header_digest[:8]}, run={replay_digest[:8]})",
+            )
+        elif header_digest:
+            overall.add("digest", "Config digest", f"match ({header_digest[:8]})")
+
+        summary = stats.summary()
         if summary:
-            print("  per-op:")
+            ops_section = metrics.add_section("ops", "Per-Op Latency (ms)")
             for qn in sorted(summary):
                 s = summary[qn]
-                print(
-                    f"    {qn}: count={s.count} "
-                    f"mean={s.mean_ms:.3f}ms "
-                    f"p50={s.p50_ms:.3f}ms "
-                    f"p90={s.p90_ms:.3f}ms "
-                    f"p99={s.p99_ms:.3f}ms"
+                short = qn.split(".")[-1]
+                ops_section.add(f"{short}_count", f"{short} count", s.count)
+                ops_section.add(
+                    f"{short}_p50",
+                    f"{short} p50",
+                    round(s.p50_ms, 3),
                 )
+                ops_section.add(
+                    f"{short}_p90",
+                    f"{short} p90",
+                    round(s.p90_ms, 3),
+                )
+                ops_section.add(
+                    f"{short}_p99",
+                    f"{short} p99",
+                    round(s.p99_ms, 3),
+                )
+
+        metrics.emit()
 
     # ------------------------------------------------------------------
     # ``record`` (stub)

@@ -7,8 +7,11 @@ document covers both halves:
 
 - **PR1 — capture.** `lmcache server --trace-level storage --trace-output
   FILE` and the decorator/recorder/format machinery.
-- **PR2 — replay.** `lmcache trace info|replay|record`, the
-  `StorageReplayDriver`, and `lmcache bench trace-replay`.
+- **PR2 — replay.** `lmcache trace info|replay|record` and the
+  `StorageReplayDriver`.  All replay output (per-record stream,
+  aggregated CSV/JSON summary, terminal metrics table) lives under
+  `lmcache trace replay`; there is no separate `bench trace-replay`
+  command.
 
 For configuration reference see [README.md](README.md). For event metadata
 contracts see [EVENTS.md](EVENTS.md).
@@ -334,17 +337,17 @@ both `multiprocess/server.py` and `multiprocess/blend_server_v2.py`.
 When `--trace-level` is unset, the helper returns `None` and no
 recorder is registered — true zero overhead.
 
-`lmcache trace info|replay|record` and `lmcache bench trace-replay`
-read the format defined here; see §9 for details.
+`lmcache trace info|replay|record` reads the format defined here;
+see §9 for details.
 
 ---
 
-## 9. Replay (`lmcache trace` + `lmcache bench trace-replay`)
+## 9. Replay (`lmcache trace`)
 
 The replay half lives under `lmcache/tools/trace_replay/` and
-`lmcache/cli/commands/{trace,bench/trace_replay}`.  It reads trace
-files written by the recorder and reissues each captured call against
-a fresh `StorageManager` that the caller configures independently.
+`lmcache/cli/commands/trace/`.  It reads trace files written by the
+recorder and reissues each captured call against a fresh
+`StorageManager` that the caller configures independently.
 
 ### 9.1 Architecture
 
@@ -376,7 +379,6 @@ Five modules:
 | `tools/trace_replay/driver.py` | `StorageReplayDriver`, `ReplayPace`, `ReplayResult` |
 | `tools/trace_replay/stats.py` | `ReplayStatsCollector` + `OpStats`; CSV/JSON export |
 | `cli/commands/trace/__init__.py` | `lmcache trace info|replay|record` |
-| `cli/commands/bench/trace_replay.py` | `lmcache bench trace-replay` |
 
 ### 9.2 Auto-resolve: no per-op glue
 
@@ -442,11 +444,10 @@ on eviction/prefetch queues.
 | Command | Purpose |
 |---------|---------|
 | `lmcache trace info FILE` | Header metadata + per-qualname record counts + total duration. |
-| `lmcache trace replay FILE <storage-manager flags> [--pace {asap,realtime}] [--verbose] [--jsonl-out PATH]` | Debug-style replay. Terminal summary, optional per-record verbose log, optional JSONL output. |
+| `lmcache trace replay FILE <storage-manager flags> [--pace {asap,realtime}] [--verbose] [--jsonl-out PATH] [--output-dir DIR] [--no-csv] [--json] [-q]` | Replay the trace. Emits a terminal metrics table (unless `-q`) and writes `trace_replay_ops.csv` / `trace_replay_summary.json` in `--output-dir` (CSV by default; JSON with `--json`). `--verbose` and `--jsonl-out` stream per-record output for post-hoc analysis. |
 | `lmcache trace record` | v1 stub: prints the equivalent `lmcache server --trace-level storage` invocation and exits 2. Holds the slot for future runtime capture. |
-| `lmcache bench trace-replay FILE <storage-manager flags> [--pace] [--output-dir DIR] [--no-csv] [--json] [-q]` | Bench-style replay. Writes `trace_replay_ops.csv` / `trace_replay_summary.json` in the output dir; prints bench-style metrics table unless `-q`. |
 
-Both replay commands accept the full `lmcache/v1/distributed/config.py`
+The `replay` command accepts the full `lmcache/v1/distributed/config.py`
 `add_storage_manager_args` flag set (`--l1-size-gb`,
 `--eviction-policy`, `--l2-adapter`, …), so replay can target any
 L1/L2 configuration the production StorageManager supports.
@@ -529,8 +530,8 @@ file format:
   qualname skipping, handler-failure counting, and pacing
   (`REALTIME` waits, `ASAP` does not).
 - `tests/cli/commands/test_trace_command.py` — subparser wiring
-  (positional + required flags), `info` end-to-end against a tiny
-  fixture, `record` stub exits with code 2.
-- `tests/cli/commands/bench/test_trace_replay.py` — `bench
-  trace-replay` registration, pace-choice enforcement, CSV/JSON
-  output, `-q` suppresses terminal summary.
+  (positional + required flags, output-flag parsing), `info` end-to-
+  end against a tiny fixture, `record` stub exits with code 2,
+  `replay` end-to-end: CSV/JSON export and `-q` terminal-summary
+  suppression against a recorded `reserve_write` + `finish_write`
+  fixture.

@@ -5,8 +5,10 @@
 End-to-end: ``info`` is smoke-tested against a tiny trace file written
 through the real recorder.  ``replay`` is exercised against the same
 fixture via the driver (argparse wiring only — the driver itself has
-its own tests in ``tests/tools/trace_replay``).  ``record`` is a stub
-and simply asserts its non-zero exit code.
+its own tests in ``tests/tools/trace_replay``) plus an end-to-end
+replay that exercises the CSV/JSON summary export and terminal
+metrics output.  ``record`` is a stub and simply asserts its non-zero
+exit code.
 """
 
 # Future
@@ -14,13 +16,24 @@ from __future__ import annotations
 
 # Standard
 import argparse
+import json
+import os
 import time
 
 # Third Party
 import pytest
+import torch
 
 # First Party
 from lmcache.cli.commands.trace import TraceCommand
+from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
+from lmcache.v1.distributed.config import (
+    EvictionConfig,
+    L1ManagerConfig,
+    L1MemoryManagerConfig,
+    StorageManagerConfig,
+)
+from lmcache.v1.distributed.storage_manager import StorageManager
 from lmcache.v1.mp_observability.event_bus import EventBus, EventBusConfig
 from lmcache.v1.mp_observability.trace.decorator import (
     publish_call_event,
@@ -28,6 +41,62 @@ from lmcache.v1.mp_observability.trace.decorator import (
 )
 from lmcache.v1.mp_observability.trace.recorder import StorageTraceRecorder
 import lmcache.v1.mp_observability.event_bus as _bus_module
+
+
+def _should_use_lazy() -> bool:
+    return torch.cuda.is_available()
+
+
+def _make_sm_config() -> StorageManagerConfig:
+    memory = L1MemoryManagerConfig(
+        size_in_bytes=64 * 1024 * 1024,
+        use_lazy=_should_use_lazy(),
+        init_size_in_bytes=32 * 1024 * 1024,
+        align_bytes=0x1000,
+    )
+    l1 = L1ManagerConfig(memory_config=memory)
+    return StorageManagerConfig(
+        l1_manager_config=l1,
+        eviction_config=EvictionConfig(eviction_policy="LRU"),
+    )
+
+
+def _replay_namespace(
+    trace_path: str, output_dir: str, **overrides
+) -> argparse.Namespace:
+    """Build a Namespace matching the ``trace replay`` parser defaults.
+
+    Callers override the handful of fields they care about (``no_csv``,
+    ``json``, ``quiet``); everything else is pinned to values that
+    reproduce :func:`_make_sm_config` so the recorded trace replays
+    cleanly.
+    """
+    defaults = dict(
+        trace_target="replay",
+        trace_path=trace_path,
+        pace="asap",
+        verbose=False,
+        jsonl_out=None,
+        output_dir=output_dir,
+        no_csv=False,
+        json=False,
+        quiet=True,
+        l1_size_gb=0.0625,
+        l1_use_lazy=_should_use_lazy(),
+        l1_init_size_gb=0.03125,
+        l1_align_bytes=0x1000,
+        l1_write_ttl_seconds=600,
+        l1_read_ttl_seconds=300,
+        eviction_policy="LRU",
+        eviction_trigger_watermark=0.8,
+        eviction_ratio=0.2,
+        l2_store_policy="default",
+        l2_prefetch_policy="default",
+        l2_prefetch_max_in_flight=8,
+        l2_adapter=[],
+    )
+    defaults.update(overrides)
+    return argparse.Namespace(**defaults)
 
 
 @pytest.fixture(autouse=True)
@@ -68,6 +137,37 @@ def small_trace(tmp_path):
         bus._drain_all()
     finally:
         bus.stop()
+    return path
+
+
+@pytest.fixture
+def replayable_trace(tmp_path):
+    """Record reserve_write + finish_write into a replayable trace file.
+
+    Uses the real StorageManager stack so the trace references
+    qualnames that the default dispatcher actually handles — needed
+    for the end-to-end replay tests below.
+    """
+    path = str(tmp_path / "replay.lct")
+    sm_config = _make_sm_config()
+    layout = MemoryLayoutDesc(shapes=[torch.Size([16, 16])], dtypes=[torch.float16])
+    keys = [ObjectKey(chunk_hash=b"\x01", model_name="t", kv_rank=0)]
+
+    bus = EventBus(EventBusConfig(enabled=True))
+    _bus_module._global_bus = bus
+    bus.start()
+    sm = StorageManager(sm_config)
+    rec = StorageTraceRecorder(path)
+    rec.attach_storage_config(sm_config)
+    bus.register_subscriber(rec)
+    try:
+        sm.reserve_write(keys, layout, mode="new")
+        sm.finish_write(keys)
+        time.sleep(0.2)
+        bus._drain_all()
+    finally:
+        bus.stop()
+        sm.close()
     return path
 
 
@@ -115,6 +215,30 @@ class TestArgumentParsing:
         assert args.l1_size_gb == 0.0625
         assert args.eviction_policy == "LRU"
 
+    def test_replay_accepts_output_flags(self, parser):
+        """``--output-dir`` / ``--no-csv`` / ``--json`` / ``-q`` are
+        part of ``trace replay`` after the bench merge."""
+        args = parser.parse_args(
+            [
+                "trace",
+                "replay",
+                "/tmp/x.lct",
+                "--l1-size-gb",
+                "0.0625",
+                "--eviction-policy",
+                "LRU",
+                "--output-dir",
+                "/tmp/out",
+                "--no-csv",
+                "--json",
+                "-q",
+            ]
+        )
+        assert args.output_dir == "/tmp/out"
+        assert args.no_csv is True
+        assert args.json is True
+        assert args.quiet is True
+
     def test_record_parses(self, parser):
         args = parser.parse_args(["trace", "record"])
         assert args.trace_target == "record"
@@ -132,6 +256,64 @@ class TestInfoSubcommand:
         assert "level:" in out
         assert "pkg.mod.foo" in out
         assert "pkg.mod.bar" in out
+
+
+class TestReplaySubcommand:
+    def test_replay_writes_csv_and_json(self, cmd, replayable_trace, tmp_path):
+        """End-to-end: ``trace replay`` writes both CSV and JSON
+        summaries under ``--output-dir`` and the JSON includes one
+        entry per recorded qualname."""
+        output_dir = str(tmp_path / "out")
+        args = _replay_namespace(
+            replayable_trace,
+            output_dir,
+            no_csv=False,
+            json=True,
+            quiet=True,
+        )
+        cmd.execute(args)
+
+        csv_path = os.path.join(output_dir, "trace_replay_ops.csv")
+        json_path = os.path.join(output_dir, "trace_replay_summary.json")
+        assert os.path.exists(csv_path)
+        assert os.path.exists(json_path)
+
+        with open(json_path) as f:
+            data = json.load(f)
+        assert "ops" in data
+        qns = list(data["ops"])
+        assert any("reserve_write" in qn for qn in qns)
+        assert any("finish_write" in qn for qn in qns)
+
+    def test_replay_quiet_suppresses_terminal_output(
+        self, cmd, replayable_trace, tmp_path, capsys
+    ):
+        output_dir = str(tmp_path / "out")
+        args = _replay_namespace(
+            replayable_trace,
+            output_dir,
+            no_csv=True,
+            json=False,
+            quiet=True,
+        )
+        cmd.execute(args)
+        captured = capsys.readouterr()
+        assert "Trace Replay Result" not in captured.out
+
+    def test_replay_emits_terminal_summary(
+        self, cmd, replayable_trace, tmp_path, capsys
+    ):
+        output_dir = str(tmp_path / "out")
+        args = _replay_namespace(
+            replayable_trace,
+            output_dir,
+            no_csv=True,
+            json=False,
+            quiet=False,
+        )
+        cmd.execute(args)
+        out = capsys.readouterr().out
+        assert "Trace Replay Result" in out
 
 
 class TestRecordSubcommandStub:

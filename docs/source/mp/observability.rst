@@ -413,8 +413,11 @@ the EventBus stop path).
 Replay
 ~~~~~~
 
-Replaying a recorded trace is delivered separately via the
-``lmcache trace`` and ``lmcache bench trace-replay`` CLIs.
+Replaying a recorded trace is delivered via the ``lmcache trace
+replay`` CLI.  It supports per-record streaming (``--verbose`` /
+``--jsonl-out``), aggregated CSV/JSON summary export
+(``--output-dir`` / ``--no-csv`` / ``--json``), and a terminal
+metrics table (suppressible with ``-q``).
 
 What is captured (and what is not)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

@@ -54,13 +54,6 @@ from lmcache.v1.mp_observability.trace import codecs
 from lmcache.v1.mp_observability.trace.reader import TraceReader
 from lmcache.v1.mp_observability.trace.recorder import safe_storage_config_dict
 
-# Import to trigger lazy registration of the PrefetchHandle codec.
-# Done at import time on the replay side so
-# :func:`codecs.decode_args` handles PrefetchHandle values from older
-# traces that included them.  PR1's storage_manager.py registers this
-# codec on its own import path too; the call is idempotent.
-codecs.register_prefetch_handle_codec()
-
 logger = init_logger(__name__)
 
 
