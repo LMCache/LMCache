@@ -4,6 +4,7 @@
 
 # Standard
 import json
+import threading
 
 # Third Party
 import pytest
@@ -111,9 +112,6 @@ class TestReplayStatsCollector:
         assert data["ops"]["op.a"]["count"] == 1
 
     def test_thread_safety(self):
-        # Standard
-        import threading
-
         s = ReplayStatsCollector()
 
         def worker():
