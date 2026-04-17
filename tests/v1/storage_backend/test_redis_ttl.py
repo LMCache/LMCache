@@ -268,8 +268,8 @@ class TestRedisSentinelConnectorTTL:
 
     @pytest.fixture
     def mock_master(self):
-        master = AsyncMock()
-        master.set = AsyncMock(return_value=True)
+        master = MagicMock()
+        master.set = MagicMock(return_value=True)
         return master
 
     @pytest.fixture
