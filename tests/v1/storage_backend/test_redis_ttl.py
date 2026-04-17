@@ -144,7 +144,7 @@ class TestRedisConnectorTTL:
     async def test_put_without_ttl(self, mock_redis_conn, loop, lcb):
         """When remote_ttl is None, set() should NOT pass ex= to Redis."""
         connector = self._make_connector(mock_redis_conn, loop, lcb, None)
-        await connector._put(_make_key(), _make_memory_obj())
+        await connector.put(_make_key(), _make_memory_obj())
 
         assert mock_redis_conn.set.call_count == 2
         for c in mock_redis_conn.set.call_args_list:
@@ -155,7 +155,7 @@ class TestRedisConnectorTTL:
     async def test_put_with_ttl_3600(self, mock_redis_conn, loop, lcb):
         """When remote_ttl=3600, both SET calls should receive ex=3600."""
         connector = self._make_connector(mock_redis_conn, loop, lcb, 3600)
-        await connector._put(_make_key(), _make_memory_obj())
+        await connector.put(_make_key(), _make_memory_obj())
 
         assert mock_redis_conn.set.call_count == 2
         for c in mock_redis_conn.set.call_args_list:
@@ -165,7 +165,7 @@ class TestRedisConnectorTTL:
     async def test_put_with_ttl_1800(self, mock_redis_conn, loop, lcb):
         """When remote_ttl=1800, both SET calls should receive ex=1800."""
         connector = self._make_connector(mock_redis_conn, loop, lcb, 1800)
-        await connector._put(_make_key(), _make_memory_obj())
+        await connector.put(_make_key(), _make_memory_obj())
 
         for c in mock_redis_conn.set.call_args_list:
             assert c.kwargs.get("ex") == 1800
@@ -174,7 +174,7 @@ class TestRedisConnectorTTL:
     async def test_ttl_applies_to_both_kv_and_metadata_keys(self, mock_redis_conn, loop, lcb):
         """Both kv_bytes and metadata keys must receive the same TTL."""
         connector = self._make_connector(mock_redis_conn, loop, lcb, 600)
-        await connector._put(_make_key(), _make_memory_obj())
+        await connector.put(_make_key(), _make_memory_obj())
 
         calls = mock_redis_conn.set.call_args_list
         assert len(calls) == 2
@@ -229,7 +229,7 @@ class TestRedisClusterConnectorTTL:
                 remote_ttl=7200,
             )
 
-        await connector._put(_make_key(), _make_memory_obj())
+        await connector.put(_make_key(), _make_memory_obj())
 
         assert mock_cluster.set.call_count == 2
         for c in mock_cluster.set.call_args_list:
@@ -251,7 +251,7 @@ class TestRedisClusterConnectorTTL:
                 remote_ttl=None,
             )
 
-        await connector._put(_make_key(), _make_memory_obj())
+        await connector.put(_make_key(), _make_memory_obj())
 
         for c in mock_cluster.set.call_args_list:
             ex_val = c.kwargs.get("ex")
