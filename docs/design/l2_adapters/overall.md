@@ -157,10 +157,15 @@ _store_loop: poll wakes up
   ▼
 _process_new_keys(keys)
   │
-  ├─ 1. StorePolicy.select_store_targets(keys, adapters)
-  │     → dict[adapter_index, list[ObjectKey]]
+  ├─ 1. Group keys by model_name (L1 is a shared pool across models,
+  │     so one drain may span models with different KV shapes; each
+  │     submit_store_task must see a uniform (shape, dtype)).
   │
-  ├─ 2. For each adapter target:
+  ├─ 2. For each per-model group:
+  │     StorePolicy.select_store_targets(model_keys, adapters)
+  │       → dict[adapter_index, list[ObjectKey]]
+  │
+  ├─ 3. For each adapter target:
   │     L1Manager.reserve_read(target_keys)  → get MemoryObj + read lock
   │     adapter.submit_store_task(keys, objs)
   │     Track as InFlightStoreTask
@@ -168,9 +173,9 @@ _process_new_keys(keys)
   ▼ (later, when adapter signals store_efd)
 _process_completed_tasks(adapter_index)
   │
-  ├─ 3. adapter.pop_completed_store_tasks()
+  ├─ 4. adapter.pop_completed_store_tasks()
   │
-  ├─ 4. For each completed task:
+  ├─ 5. For each completed task:
   │     L1Manager.finish_read(read_locked_keys)  → release read locks
   │     If success: StorePolicy.select_l1_deletions(keys) → delete from L1
   │     If failure: log warning (best-effort, no retry)
