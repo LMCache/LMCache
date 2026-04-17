@@ -446,6 +446,7 @@ class LocalDiskBackend(StorageBackendInterface):
                     if metadata is None:
                         continue
 
+                    self.cache_policy.update_on_force_evict(evict_key)
                     total_bytes -= metadata.size
                     evicted_recovered += 1
                     evicted_bytes += metadata.size

@@ -10,7 +10,7 @@ pytest.importorskip("vllm")
 
 # First Party
 from lmcache.integration.vllm.lmcache_connector_v1 import LMCacheConnectorV1Dynamic
-from lmcache.integration.vllm.vllm_v1_adapter import RequestTracker
+from lmcache.integration.vllm.vllm_v1_adapter import ReqMeta, RequestTracker
 
 
 def test_request_tracker_update_accepts_grouped_block_ids() -> None:
@@ -49,3 +49,21 @@ def test_connector_delegates_grouped_request_finished() -> None:
     connector._lmcache_engine = _FakeEngine()
 
     assert connector.request_finished_all_groups(request, block_ids) == expected
+
+
+def test_req_meta_masks_vllm_null_block_slots() -> None:
+    tracker = RequestTracker(
+        req_id="req-null",
+        prompt_len=4,
+        token_ids=[10, 11, 12, 13],
+        allocated_block_ids_by_group=([0],),
+    )
+
+    req_meta = ReqMeta.from_request_tracker(
+        tracker,
+        block_size=4,
+        discard_partial_chunks=False,
+    )
+
+    assert req_meta is not None
+    assert req_meta.slot_mapping.tolist() == [-1, -1, -1, -1]

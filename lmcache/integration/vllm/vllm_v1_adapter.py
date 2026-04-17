@@ -18,6 +18,7 @@ from vllm.distributed.parallel_state import (
     get_pp_group,
 )
 from vllm.sampling_params import SamplingParams
+from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.request import RequestStatus
 from vllm.version import __version__ as VLLM_VERSION
@@ -488,11 +489,12 @@ class ReqMeta:
                     * group_block_size
                 )
             )
-            # vLLM reserves block_id=0 for the shared null block. These
-            # placeholders represent skipped prefix tokens for sliding-window /
-            # hybrid attention and must stay as PAD slots instead of pointing at
-            # a real KV page.
-            null_block_mask = block_ids.eq(0).reshape((group_num_blocks, 1))
+            # vLLM reserves NULL_BLOCK_ID globally for the shared null block.
+            # These placeholders can appear in padded / skipped regions and
+            # must stay as PAD slots instead of pointing at a real KV page.
+            null_block_mask = block_ids.eq(NULL_BLOCK_ID).reshape(
+                (group_num_blocks, 1)
+            )
             if null_block_mask.any():
                 slot_mapping = slot_mapping.masked_fill(null_block_mask, -1)
             slot_mapping = slot_mapping.flatten()[: len(token_ids)]
