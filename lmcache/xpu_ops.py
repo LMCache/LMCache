@@ -21,16 +21,12 @@ import triton.language as tl
 
 # ======================================================================
 # GPUKVFormat constants (mirrors the IntEnum values for use in Triton
-# constexpr dispatch).
+# constexpr dispatch).  Only XPU-supported formats are defined here.
 # ======================================================================
-_FMT_NB_NL_TWO_BS_NH_HS = int(GPUKVFormat.NB_NL_TWO_BS_NH_HS)  # 0
 _FMT_NL_X_TWO_NB_BS_NH_HS = int(GPUKVFormat.NL_X_TWO_NB_BS_NH_HS)  # 1
-_FMT_NL_X_NB_TWO_BS_NH_HS = int(GPUKVFormat.NL_X_NB_TWO_BS_NH_HS)  # 2
 _FMT_NL_X_NB_BS_HS = int(GPUKVFormat.NL_X_NB_BS_HS)  # 3
 _FMT_TWO_X_NL_X_NBBS_NH_HS = int(GPUKVFormat.TWO_X_NL_X_NBBS_NH_HS)  # 4
 _FMT_NL_X_NBBS_ONE_HS = int(GPUKVFormat.NL_X_NBBS_ONE_HS)  # 5
-_FMT_NL_X_TWO_NB_NH_BS_HS = int(GPUKVFormat.NL_X_TWO_NB_NH_BS_HS)  # 6
-_FMT_NL_X_NB_TWO_NH_BS_HS = int(GPUKVFormat.NL_X_NB_TWO_NH_BS_HS)  # 7
 
 
 # ======================================================================
@@ -53,8 +49,6 @@ def _multi_layer_kv_transfer_kernel(
     num_tokens,  # total tokens in key_value (including skipped prefix)
     num_layers,
     page_buffer_size,  # NB * BS
-    block_size,
-    head_size,  # only used by HND formats
     skip_prefix_n_tokens,
     # Compile-time constants
     DIRECTION: tl.constexpr,  # 0 = H2D (lmc→paged), 1 = D2H (paged→lmc)
@@ -95,66 +89,22 @@ def _multi_layer_kv_transfer_kernel(
         )
 
         # ── Paged buffer offset (depends on format) ──
-        # NB_NL_TWO_BS_NH_HS (0) and NL_X_TWO_NB_BS_NH_HS (1):
+        # Only XPU-supported formats are implemented here.
+        # NL_X_TWO_NB_BS_NH_HS (1) — vLLM flash attention NHD:
         #   k_or_v * PBS * SPT + slot * SPT + i
-        # NL_X_NB_TWO_BS_NH_HS (2) — flash infer NHD:
-        #   block_idx * 2 * BS * SPT + k_or_v * BS * SPT + block_off * SPT + i
         # NL_X_NB_BS_HS (3) and NL_X_NBBS_ONE_HS (5) — MLA:
         #   slot * SPT + i
-        # NL_X_TWO_NB_NH_BS_HS (6) — flash attn HND:
-        #   k_or_v * PBS * SPT + block_idx * NH * BS * HS
-        #   + head_idx * BS * HS + block_off * HS + head_off
-        # NL_X_NB_TWO_NH_BS_HS (7) — flash infer HND:
-        #   block_idx * 2 * NH * BS * HS + k_or_v * NH * BS * HS
-        #   + head_idx * BS * HS + block_off * HS + head_off
 
-        if FORMAT == 0 or FORMAT == 1:
-            # NB_NL_TWO_BS_NH_HS / NL_X_TWO_NB_BS_NH_HS
+        if FORMAT == 1:
+            # NL_X_TWO_NB_BS_NH_HS (vLLM flash attention NHD)
             page_off = (
                 k_or_v * page_buffer_size * scalars_per_token
                 + slot_idx * scalars_per_token
                 + i
             )
-        elif FORMAT == 2:
-            # NL_X_NB_TWO_BS_NH_HS (flash infer NHD)
-            block_idx = slot_idx // block_size
-            block_off = slot_idx % block_size
-            page_off = (
-                block_idx * 2 * block_size * scalars_per_token
-                + k_or_v * block_size * scalars_per_token
-                + block_off * scalars_per_token
-                + i
-            )
         elif FORMAT == 3 or FORMAT == 5:
             # MLA: NL_X_NB_BS_HS / NL_X_NBBS_ONE_HS
             page_off = slot_idx * scalars_per_token + i
-        elif FORMAT == 6:
-            # NL_X_TWO_NB_NH_BS_HS (flash attn HND)
-            block_idx = slot_idx // block_size
-            block_off = slot_idx % block_size
-            head_idx = i // head_size
-            head_off = i % head_size
-            page_off = (
-                k_or_v * page_buffer_size * scalars_per_token
-                + block_idx * (scalars_per_token // head_size) * block_size * head_size
-                + head_idx * block_size * head_size
-                + block_off * head_size
-                + head_off
-            )
-        elif FORMAT == 7:
-            # NL_X_NB_TWO_NH_BS_HS (flash infer HND)
-            block_idx = slot_idx // block_size
-            block_off = slot_idx % block_size
-            head_idx = i // head_size
-            head_off = i % head_size
-            num_heads = scalars_per_token // head_size
-            page_off = (
-                block_idx * 2 * num_heads * block_size * head_size
-                + k_or_v * num_heads * block_size * head_size
-                + head_idx * block_size * head_size
-                + block_off * head_size
-                + head_off
-            )
         else:
             # Unsupported format — should not reach here
             page_off = i
@@ -245,11 +195,9 @@ def _single_layer_kv_transfer_kernel(
     vllm_value_offset, # offset from K to V in vllm cache
     scalars_per_token,  # num_heads * head_size in int16 units
     block_size,
-    head_size,  # in int16 units, only for HND
     # Compile-time
     DIRECTION: tl.constexpr,  # 0=H2D, 1=D2H
     IS_MLA: tl.constexpr,
-    IS_HND: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
     # Cast raw int64 pointers to typed pointers (needed when CPU pinned
@@ -279,23 +227,12 @@ def _single_layer_kv_transfer_kernel(
         if not IS_MLA:
             lmc_off = lmc_off + k_or_v * lmc_value_offset
 
-        # vLLM offset depends on layout
-        if IS_HND:
-            head_idx = i // head_size
-            head_off = i % head_size
-            vllm_off = (
-                block_idx * vllm_block_stride
-                + head_idx * block_size * head_size
-                + block_offset * head_size
-                + head_off
-            )
-        else:
-            # NHD (also correct for MLA where num_heads==1)
-            vllm_off = (
-                block_idx * vllm_block_stride
-                + block_offset * scalars_per_token
-                + i
-            )
+        # vLLM offset: NHD layout (also correct for MLA where num_heads==1)
+        vllm_off = (
+            block_idx * vllm_block_stride
+            + block_offset * scalars_per_token
+            + i
+        )
         if not IS_MLA:
             vllm_off = vllm_off + k_or_v * vllm_value_offset
 
@@ -375,9 +312,6 @@ def multi_layer_kv_transfer(
     is_mla = fmt in (_FMT_NL_X_NB_BS_HS, _FMT_NL_X_NBBS_ONE_HS)
 
     scalars_per_token, kv_view = _get_scalars_and_view(key_value)
-    # Convert head_size from element units to int16 units
-    elem_size = key_value.element_size()
-    head_size_i16 = head_size * elem_size // 2 if head_size > 0 else 0
 
     num_layers = key_value.size(1)
     num_tokens = key_value.size(2)
@@ -403,8 +337,6 @@ def multi_layer_kv_transfer(
         num_tokens,
         num_layers,
         page_buffer_size,
-        block_size,
-        head_size_i16,
         skip_prefix_n_tokens,
         DIRECTION=direction_int,
         FORMAT=fmt,
@@ -482,7 +414,6 @@ def single_layer_kv_transfer(
     """
     fmt = int(gpu_kv_format)
     is_mla = fmt in (_FMT_NL_X_NB_BS_HS, _FMT_NL_X_NBBS_ONE_HS)
-    is_hnd = fmt in (_FMT_NL_X_TWO_NB_NH_BS_HS, _FMT_NL_X_NB_TWO_NH_BS_HS)
 
     # Fall back for non-XPU tensors or unsupported formats
     if not vllm_key_value_cache.is_xpu:
@@ -504,7 +435,6 @@ def single_layer_kv_transfer(
         hidden = lmc_key_value_cache.size(1)
         block_size = vllm_key_value_cache.size(1)
         scalars_per_token = hidden * elem_size // 2
-        head_size_i16 = 0
 
         lmc_view = lmc_key_value_cache.view(torch.int16)
         vllm_view = vllm_key_value_cache.view(torch.int16)
@@ -521,29 +451,18 @@ def single_layer_kv_transfer(
             lmc_arg, vllm_view, slot_mapping,
             lmc_stride, lmc_value_offset,
             vllm_block_stride, vllm_value_offset,
-            scalars_per_token, block_size, head_size_i16,
-            DIRECTION=direction_int, IS_MLA=True, IS_HND=False,
+            scalars_per_token, block_size,
+            DIRECTION=direction_int, IS_MLA=True,
             BLOCK=_TRITON_BLOCK,
         )
     else:
-        # Non-MLA
-        is_two_major = fmt in (
-            _FMT_NL_X_TWO_NB_BS_NH_HS,
-            _FMT_NL_X_TWO_NB_NH_BS_HS,
-        )
-        if is_hnd:
-            # [prefix, num_heads, block_size, head_size]
-            num_heads = vllm_key_value_cache.size(2)
-            block_size = vllm_key_value_cache.size(3)
-            head_dim = vllm_key_value_cache.size(4)
-        else:
-            # [prefix, block_size, num_heads, head_size]
-            block_size = vllm_key_value_cache.size(2)
-            num_heads = vllm_key_value_cache.size(3)
-            head_dim = vllm_key_value_cache.size(4)
+        # Non-MLA: only NHD layout (format 1) is supported on XPU.
+        # vllm shape: [prefix, block_size, num_heads, head_size]
+        block_size = vllm_key_value_cache.size(2)
+        num_heads = vllm_key_value_cache.size(3)
+        head_dim = vllm_key_value_cache.size(4)
         hidden = num_heads * head_dim
         scalars_per_token = hidden * elem_size // 2
-        head_size_i16 = head_dim * elem_size // 2
 
         if token_major:
             # lmc: [num_tokens, 2, hidden]
@@ -560,15 +479,11 @@ def single_layer_kv_transfer(
         vllm_view = vllm_key_value_cache.view(torch.int16)
 
         # vllm block stride and value offset in int16 units
-        if is_two_major:
-            # [2, num_blocks, ...] → value is num_blocks * block_size * hidden away
-            num_blocks = vllm_key_value_cache.size(1)
-            vllm_block_stride = block_size * scalars_per_token
-            vllm_value_offset = num_blocks * block_size * scalars_per_token
-        else:
-            # [num_blocks, 2, ...] → value is block_size * hidden away
-            vllm_block_stride = 2 * block_size * scalars_per_token
-            vllm_value_offset = block_size * scalars_per_token
+        # Format 1 (NL_X_TWO_NB_BS_NH_HS): [2, num_blocks, BS, NH, HS]
+        #   value is num_blocks * block_size * hidden away
+        num_blocks = vllm_key_value_cache.size(1)
+        vllm_block_stride = block_size * scalars_per_token
+        vllm_value_offset = num_blocks * block_size * scalars_per_token
 
         lmc_arg = lmc_view if lmc_view.is_xpu else lmc_view.data_ptr()
 
@@ -577,7 +492,7 @@ def single_layer_kv_transfer(
             lmc_arg, vllm_view, slot_mapping,
             lmc_stride, lmc_value_offset,
             vllm_block_stride, vllm_value_offset,
-            scalars_per_token, block_size, head_size_i16,
-            DIRECTION=direction_int, IS_MLA=False, IS_HND=is_hnd,
+            scalars_per_token, block_size,
+            DIRECTION=direction_int, IS_MLA=False,
             BLOCK=_TRITON_BLOCK,
         )
