@@ -2,9 +2,9 @@
 """
 Unit tests for fs_l2_adapter key serialization helpers.
 
-These helpers round-trip ObjectKey <-> filename. Salted keys are marked
-by a leading ``@@`` prefix so legacy keys with ``@`` in the model name
-are still parseable.
+These helpers round-trip ObjectKey <-> filename. ``cache_salt`` is
+appended as a trailing field when non-empty; unsalted keys use the
+3-field shape that matches what older LMCache builds wrote to disk.
 """
 
 # Third Party
@@ -19,15 +19,15 @@ from lmcache.v1.distributed.l2_adapters.fs_l2_adapter import (
 
 
 class TestFilenameRoundtrip:
-    """_object_key_to_filename and _filename_to_object_key must be
-    exact inverses for both legacy and salted keys."""
+    """``_object_key_to_filename`` and ``_filename_to_object_key`` are
+    exact inverses for both the 3-field (unsalted) and 4-field (salted)
+    shapes."""
 
     @pytest.mark.parametrize(
         "model_name",
         [
             "llama",
             "meta-llama/Llama-3",  # has '/', must survive PATH_SLASH_REPLACEMENT
-            "ns@model",  # has '@', exercises rsplit parsing
         ],
     )
     @pytest.mark.parametrize("cache_salt", ["", "alice", "user-abc_123.xyz:42"])
@@ -40,20 +40,17 @@ class TestFilenameRoundtrip:
         )
         fn = _object_key_to_filename(key)
         assert fn.endswith(".data")
-        # All filenames now start with @@ (unified format).
-        assert fn.startswith("@@")
+        # Salted filenames gain a trailing "@<salt>" before ".data".
         if cache_salt:
-            assert fn.startswith("@@" + cache_salt + "@")
-        else:
-            assert fn.startswith("@@@")  # @@ + empty salt + @
+            assert fn.endswith("@" + cache_salt + ".data")
         parsed = _filename_to_object_key(fn)
         assert parsed == key
 
-    def test_legacy_format_still_parseable(self):
-        """Files written before the @@ prefix was required must remain
-        readable (with a deprecation warning)."""
-        legacy = "llama@0x0000002a@deadbeef.data"
-        parsed = _filename_to_object_key(legacy)
+    def test_unsalted_format(self):
+        """Unsalted keys use the 3-field shape — identical to the
+        pre-cache_salt filename format, so existing caches stay valid."""
+        fn = "llama@0x0000002a@deadbeef.data"
+        parsed = _filename_to_object_key(fn)
         assert parsed == ObjectKey(
             chunk_hash=b"\xde\xad\xbe\xef",
             model_name="llama",
@@ -62,7 +59,8 @@ class TestFilenameRoundtrip:
         )
 
     def test_salted_format(self):
-        fn = "@@alice@llama@0x0000002a@deadbeef.data"
+        """Salted keys append ``@<cache_salt>`` before the extension."""
+        fn = "llama@0x0000002a@deadbeef@alice.data"
         parsed = _filename_to_object_key(fn)
         assert parsed == ObjectKey(
             chunk_hash=b"\xde\xad\xbe\xef",
@@ -71,27 +69,14 @@ class TestFilenameRoundtrip:
             cache_salt="alice",
         )
 
-    def test_empty_salt_format(self):
-        """Empty salt now uses @@@model@... (not legacy)."""
-        fn = "@@@llama@0x0000002a@deadbeef.data"
-        parsed = _filename_to_object_key(fn)
-        assert parsed == ObjectKey(
-            chunk_hash=b"\xde\xad\xbe\xef",
-            model_name="llama",
-            kv_rank=42,
-            cache_salt="",
-        )
-
     def test_non_data_file_returns_none(self):
         assert _filename_to_object_key("not-a-data-file.txt") is None
 
-    def test_malformed_filename_returns_none(self):
-        # Missing field separator — cannot split into model/rank/hash.
-        assert _filename_to_object_key("garbage.data") is None
+    def test_too_few_fields_returns_none(self):
+        assert _filename_to_object_key("just-one-field.data") is None
 
-    def test_malformed_salted_filename_returns_none(self):
-        # @@ prefix but nothing else — no salt separator.
-        assert _filename_to_object_key("@@onlyprefix.data") is None
+    def test_too_many_fields_returns_none(self):
+        assert _filename_to_object_key("a@b@c@d@e.data") is None
 
 
 class TestIpcKeyToObjectKeys:

@@ -219,16 +219,19 @@ class TestObjectKeySerialization:
         assert _object_key_to_string(k1) != _object_key_to_string(k2)
 
     def test_serialization_format(self):
-        # Empty-salt keys now use @@-prefixed format (@@@ = marker + empty salt + sep)
+        """Unsalted keys use the 3-field shape — identical to the
+        pre-cache_salt wire format, so existing remote storage
+        stays valid."""
         key = ObjectKey(
             chunk_hash=b"\x00\x01\x02\x03",
             model_name="llama",
             kv_rank=255,
         )
         s = _object_key_to_string(key)
-        assert s == "@@@llama@000000ff@00010203"
+        assert s == "llama@000000ff@00010203"
 
     def test_salted_serialization_format(self):
+        """Salted keys append ``@<cache_salt>`` as a 4th field."""
         key = ObjectKey(
             chunk_hash=b"\x00\x01\x02\x03",
             model_name="llama",
@@ -236,7 +239,7 @@ class TestObjectKeySerialization:
             cache_salt="alice",
         )
         s = _object_key_to_string(key)
-        assert s == "@@alice@llama@000000ff@00010203"
+        assert s == "llama@000000ff@00010203@alice"
 
     def test_different_salts_produce_different_strings(self):
         base = {
@@ -252,29 +255,33 @@ class TestObjectKeySerialization:
         s_bob = _object_key_to_string(k_bob)
         assert s_empty != s_alice
         assert s_alice != s_bob
-        # All formats now start with @@.
-        assert s_empty.startswith("@@@")  # @@<empty>@...
-        assert s_alice.startswith("@@alice@")
-        assert s_bob.startswith("@@bob@")
+        # Empty salt has no trailing "@salt", salted keys do.
+        assert s_empty.count("@") == 2  # 3 fields
+        assert s_alice.endswith("@alice")
+        assert s_bob.endswith("@bob")
 
-    def test_format_with_at_in_model(self):
-        # ``model_name`` may contain ``@``. The @@ prefix
-        # unambiguously marks all keys.
+
+class TestObjectKeyModelNameValidation:
+    """model_name must not contain ``@`` — the L2 adapters split keys
+    and filenames on ``@`` and rely on this invariant."""
+
+    def test_reject_at_in_model_name(self):
+        with pytest.raises(ValueError, match="model_name"):
+            ObjectKey(
+                chunk_hash=b"\x00",
+                model_name="ns@model",
+                kv_rank=0,
+            )
+
+    def test_slash_in_model_name_is_accepted(self):
+        # '/' is sanitized to '-SEP-' by the FS adapter; the invariant
+        # is only about '@'.
         key = ObjectKey(
-            chunk_hash=b"\xca\xfe",
-            model_name="ns@model",
-            kv_rank=1,
-            cache_salt="u",
+            chunk_hash=b"\x00",
+            model_name="meta-llama/Llama-3",
+            kv_rank=0,
         )
-        s = _object_key_to_string(key)
-        assert s.startswith("@@u@")
-        # Empty salt with @-in-model also uses @@-prefix.
-        k_empty = ObjectKey(
-            chunk_hash=b"\xca\xfe",
-            model_name="ns@model",
-            kv_rank=1,
-        )
-        assert _object_key_to_string(k_empty).startswith("@@@")
+        assert key.model_name == "meta-llama/Llama-3"
 
 
 class TestObjectKeyCacheSaltValidation:
@@ -346,7 +353,7 @@ class TestObjectKeyCacheSaltValidation:
         assert len(key.cache_salt) == 128
 
     def test_empty_salt_is_accepted(self):
-        # Default/legacy path.
+        # Default (unsalted) path.
         key = ObjectKey(chunk_hash=b"\x00", model_name="m", kv_rank=0)
         assert key.cache_salt == ""
 

@@ -29,7 +29,14 @@ class ObjectKey:
     """ Content hash of this particular chunk """
 
     model_name: str
-    """ Name of the model this chunk belongs to """
+    """ Name of the model this chunk belongs to.
+
+    Invariant: must not contain ``@``. The L2 adapters use ``@`` as the
+    field separator in serialized keys/filenames and rely on this
+    invariant for unambiguous parsing. HuggingFace model IDs use
+    alphanumerics + ``/-_.`` so this rejects nothing that appears in
+    practice.
+    """
 
     kv_rank: int
     """ The rank that uniquely identifies the slice of the KV cache """
@@ -37,13 +44,15 @@ class ObjectKey:
     cache_salt: str = ""
     """ Per-user isolation salt. Same content from different users with
     different cache_salt values produces different ObjectKeys, giving
-    strict per-user cache isolation. Defaults to empty string which
-    preserves the pre-cache-salt behavior (all keys share one namespace).
+    strict per-user cache isolation. Defaults to empty string, in which
+    case serialized keys and filenames match the pre-cache_salt shape
+    (no trailing salt field) — no migration is needed for un-salted
+    deployments.
 
     Invariant: must not contain ``@``, ``/``, ``\\``, or NUL. The L2
     adapters use ``@`` as the field separator; ``/`` and ``\\`` are
     filesystem path separators (FS adapter embeds the salt into
-    filenames); NUL terminates C strings (C++ connector).  Max length
+    filenames); NUL terminates C strings (C++ connector). Max length
     128 to stay well within ``NAME_MAX`` (255) after the model, rank,
     hash, and extension are added.
     """
@@ -52,6 +61,10 @@ class ObjectKey:
     _SALT_MAX_LEN = 128
 
     def __post_init__(self) -> None:
+        if "@" in self.model_name:
+            raise ValueError(
+                f"model_name must not contain '@' (got {self.model_name!r})"
+            )
         bad = self._SALT_FORBIDDEN_CHARS & set(self.cache_salt)
         if bad:
             raise ValueError(

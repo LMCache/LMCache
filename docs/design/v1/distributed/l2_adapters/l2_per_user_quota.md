@@ -229,7 +229,7 @@ GET    /api/quota                    List all quotas and per-user usage
 
 **`_default` sentinel:** Empty strings cannot be URL path parameters. Use
 `_default` as the `cache_salt` in the URL to refer to the `cache_salt=""`
-namespace (legacy/anonymous traffic). For example,
+namespace (anonymous / un-isolated traffic). For example,
 `PUT /api/quota/_default` sets the quota for `cache_salt=""`.
 
 **`PUT /api/quota/{cache_salt}`** — Set or update a user's quota.
@@ -716,45 +716,36 @@ curl -X DELETE http://localhost:8000/api/quota/alice
 curl http://localhost:8000/api/quota
 ```
 
-## Backward Compatibility
+## Behavioral Notes
 
 - **No cache_salt from API:** When the API caller doesn't set `cache_salt`,
   `request.cache_salt` is `None`, which maps to `cache_salt=""`.
-  `IPCCacheEngineKey.cache_salt` defaults to `""`. All keys share the same
-  (empty-user) namespace — exactly like today's behavior.
+  `IPCCacheEngineKey.cache_salt` defaults to `""`. All such keys share the
+  same (anonymous) namespace.
 - **`eviction_policy: "LRU"`:** Per-user quota logic is not active. The
   watermark is applied against aggregate capacity as before. Existing
   behavior is fully unchanged.
-- **ObjectKey equality change:** Adding `cache_salt` to ObjectKey identity IS a
-  behavioral change, but since `cache_salt` defaults to `""`, all existing keys
-  (with no cache_salt) remain equal to each other. Only when cache_salt is
-  actively set do keys diverge. Existing tests that construct
-  `ObjectKey(hash, model, rank)` continue to work — the 3-arg form uses
-  `cache_salt=""` by default.
-- **Serialization — what if an adapter doesn't update?** Each adapter uses
-  ObjectKey differently as a storage key:
+- **ObjectKey equality:** `cache_salt` is part of identity (eq/hash). Two
+  `ObjectKey`s with different salts are distinct, preventing cross-user
+  collisions. With the default `cache_salt=""` all un-salted traffic
+  hashes identically (unchanged from the pre-cache_salt adapter).
+- **Serialization format — trailing salt:** ``cache_salt`` is appended as
+  a 4th field when non-empty; unsalted keys use the 3-field shape, which
+  is bit-identical to the pre-cache_salt format:
 
-  | Adapter | How ObjectKey is used as storage key | Impact |
-  |---------|-------------------------------------|--------|
-  | `MockL2Adapter` | Python dict key (`dict[ObjectKey, ...]`) | **No change needed.** `__hash__` includes `cache_salt` automatically. With `cache_salt=""` (LRU mode), hashes are unchanged from today. |
-  | `NixlStoreL2Adapter` | Python dict key (`dict[ObjectKey, ...]`) | **No change needed.** Same as mock. |
-  | `NativeConnectorL2Adapter` | Explicit string serialization via `_object_key_to_string()`: `"{model}@{kv_rank}@{hash}"` | **Must update** to include `cache_salt` for UserLRU. Without the update, different users' keys serialize to the same string → storage collision. |
-
-  **With regular `LRU` policy (no cache_salt set):** All keys have `cache_salt=""`.
-  Even if `_object_key_to_string()` is not updated, there are no collisions
-  because all keys share the same empty cache_salt. **Adapters work unchanged.**
-
-  **With `UserLRU` policy (cache_salt set):** Adapters with explicit string
-  serialization (currently only `NativeConnectorL2Adapter`) must include
-  `cache_salt` in the serialized form, e.g.:
   ```python
   def _object_key_to_string(key: ObjectKey) -> str:
+      base = f"{key.model_name}@{key.kv_rank:08x}@{key.chunk_hash.hex()}"
       if key.cache_salt:
-          return f"{key.cache_salt}@{key.model_name}@{key.kv_rank:08x}@{key.chunk_hash.hex()}"
-      return f"{key.model_name}@{key.kv_rank:08x}@{key.chunk_hash.hex()}"
+          return f"{base}@{key.cache_salt}"
+      return base
   ```
-  The empty-cache_salt branch preserves the existing format for backward
-  compatibility with data already stored in Redis/FS.
+
+  Because un-salted wire keys and filenames are unchanged, existing
+  cache directories and remote stores need **no migration**. Parsers
+  split on ``@`` and dispatch by field count (3 vs 4); both
+  ``model_name`` and ``cache_salt`` are forbidden from containing
+  ``@`` so the parse is unambiguous.
 
 - **Listener interface:** `L2AdapterListener` method signatures are unchanged.
   `cache_salt` flows through `ObjectKey.cache_salt`, not through callback
@@ -803,13 +794,13 @@ it through. Update serialization. No behavioral change with `cache_salt=""`.
 
 | File | Change |
 |------|--------|
-| `lmcache/v1/distributed/api.py` | `cache_salt: str = ""` on `ObjectKey` with `__post_init__` validation (no `@` allowed); `ipc_key_to_object_keys()` reads `ipc_key.cache_salt` directly (no separate param) |
+| `lmcache/v1/distributed/api.py` | `cache_salt: str = ""` on `ObjectKey` with `__post_init__` validation (`@`, `/`, `\`, NUL, length cap on `cache_salt`; `@` rejected on `model_name`); `ipc_key_to_object_keys()` reads `ipc_key.cache_salt` directly (no separate param) |
 | `lmcache/v1/multiprocess/custom_types.py` | `cache_salt: str = ""` on `IPCCacheEngineKey` with `__post_init__` validation; update `no_worker_id_version()`, `from_token_ids()` |
 | `lmcache/v1/multiprocess/server.py` / `blend_server_v2.py` | No code changes — existing `ipc_key_to_object_keys(key, chunk_hashes)` calls now carry salt automatically |
 | `lmcache/integration/vllm/vllm_multi_process_adapter.py` | Scheduler + worker `_create_key()` now forward `cache_salt` to `IPCCacheEngineKey` |
-| `lmcache/v1/distributed/l2_adapters/native_connector_l2_adapter.py` | `_object_key_to_string()` emits `@@`-prefixed salted format |
-| `lmcache/v1/distributed/l2_adapters/fs_l2_adapter.py` | `_object_key_to_filename()` / `_filename_to_object_key()` roundtrip `@@`-prefixed salted format |
-| `csrc/storage_backends/fs/connector.cpp` | `key_to_filename()` parser handles both legacy and `@@`-prefixed salted input |
+| `lmcache/v1/distributed/l2_adapters/native_connector_l2_adapter.py` | `_object_key_to_string()` appends trailing `@<cache_salt>` when salted; un-salted output is unchanged |
+| `lmcache/v1/distributed/l2_adapters/fs_l2_adapter.py` | `_object_key_to_filename()` / `_filename_to_object_key()` accept 3-field (unsalted) or 4-field (salted) shapes |
+| `csrc/storage_backends/fs/connector.cpp` | `key_to_filename()` splits on `@` and dispatches by field count |
 
 ### PR3 — LMCache: Adapter interface refactor (LMCache repo)
 

@@ -64,71 +64,55 @@ std::string ExampleFSConnector::replace_all(const std::string& str,
 }
 
 std::string ExampleFSConnector::safe_filename(const std::string& key) {
-  // Input key format (from _object_key_to_string — always @@-prefixed):
-  //   @@<cache_salt>@<model_name>@<kv_rank_hex>@<chunk_hash_hex>
-  //   (empty salt: @@@model_name@kv_rank_hex@chunk_hash_hex)
+  // Input key format (from _object_key_to_string):
+  //   Unsalted: <model_name>@<kv_rank_hex>@<chunk_hash_hex>
+  //   Salted  : <model_name>@<kv_rank_hex>@<chunk_hash_hex>@<cache_salt>
   //
-  // Legacy keys without @@ prefix are still accepted for backward
-  // compatibility but should no longer be produced by new code.
+  // Output filename:
+  //   Unsalted: <model_name_safe>@0x<kv_rank_hex>@<chunk_hash_hex>.data
+  //   Salted  :
+  //   <model_name_safe>@0x<kv_rank_hex>@<chunk_hash_hex>@<cache_salt>.data
   //
-  // Output filename always uses the @@-prefixed format:
-  //   @@<cache_salt>@<model_name_safe>@0x<kv_rank_hex>@<chunk_hash_hex>.data
-  //
-  // NOTE: cache_salt must not contain '@', '/', '\', or NUL —
-  // invariant enforced on the Python side.
+  // Both model_name and cache_salt are forbidden from containing '@'
+  // (invariant enforced on the Python side), so splitting on '@' is
+  // unambiguous.
 
-  // Strip the @@ prefix and extract cache_salt if present.
-  std::string cache_salt;
-  std::string work_key = key;
-  if (work_key.size() >= 2 && work_key[0] == KEY_SEP &&
-      work_key[1] == KEY_SEP) {
-    size_t salt_end = work_key.find(KEY_SEP, 2);
-    if (salt_end == std::string::npos) {
-      return key + FILE_EXT;
+  std::vector<std::string> parts;
+  size_t start = 0;
+  for (size_t pos = 0; pos <= key.size(); ++pos) {
+    if (pos == key.size() || key[pos] == KEY_SEP) {
+      parts.emplace_back(key.substr(start, pos - start));
+      start = pos + 1;
     }
-    cache_salt = work_key.substr(2, salt_end - 2);
-    work_key = work_key.substr(salt_end + 1);
   }
-  // else: legacy key without @@ prefix — still accepted for backward
-  // compatibility. The output filename will use the @@-prefixed format
-  // regardless, so re-storing migrates the entry.
-
-  // Remainder (or legacy input):
-  //   model_name@kv_rank_hex@chunk_hash_hex
-  // model_name may contain '@', so rsplit from the right.
-  size_t last_sep = work_key.rfind(KEY_SEP);
-  if (last_sep == std::string::npos) {
-    return key + FILE_EXT;
-  }
-  size_t second_sep = work_key.rfind(KEY_SEP, last_sep - 1);
-  if (second_sep == std::string::npos) {
-    return key + FILE_EXT;
+  if (parts.size() != 3 && parts.size() != 4) {
+    throw std::runtime_error(
+        "ExampleFSConnector: malformed key "
+        "(expected 3 or 4 '@'-separated fields): " +
+        key);
   }
 
-  std::string model = work_key.substr(0, second_sep);
-  std::string kv_rank_hex =
-      work_key.substr(second_sep + 1, last_sep - second_sep - 1);
-  std::string chunk_hash = work_key.substr(last_sep + 1);
+  const std::string& model = parts[0];
+  const std::string& kv_rank_hex = parts[1];
+  const std::string& chunk_hash = parts[2];
+  const std::string cache_salt = parts.size() == 4 ? parts[3] : std::string();
 
   // Replace '/' with '-SEP-' for filesystem safety
   std::string safe_model = replace_all(model, "/", PATH_SLASH_REPLACEMENT);
 
-  // Always emit @@-prefixed filename (even for empty salt / legacy input)
-  // so all new files on disk use the unified format.
   std::string result;
-  result.reserve(cache_salt.size() + safe_model.size() + kv_rank_hex.size() +
-                 chunk_hash.size() + 32);
-  // Leading @@ + salt + @
-  result += KEY_SEP;
-  result += KEY_SEP;
-  result += cache_salt;
-  result += KEY_SEP;
+  result.reserve(safe_model.size() + kv_rank_hex.size() + chunk_hash.size() +
+                 cache_salt.size() + 32);
   result += safe_model;
   result += KEY_SEP;
   result += "0x";
   result += kv_rank_hex;
   result += KEY_SEP;
   result += chunk_hash;
+  if (!cache_salt.empty()) {
+    result += KEY_SEP;
+    result += cache_salt;
+  }
   result += FILE_EXT;
   return result;
 }

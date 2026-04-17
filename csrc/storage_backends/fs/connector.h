@@ -52,17 +52,17 @@ class FSConnector : public ConnectorBase<WorkerFSConn> {
   // Build the filesystem-safe filename from a serialized key string.
   //
   // Input key (from NativeConnectorL2Adapter._object_key_to_string):
-  //   Legacy : "{model}@{kv_rank:08x}@{hash.hex()}"
-  //   Salted : "@@{cache_salt}@{model}@{kv_rank:08x}@{hash.hex()}"
+  //   Unsalted: "{model}@{kv_rank:08x}@{hash.hex()}"
+  //   Salted  : "{model}@{kv_rank:08x}@{hash.hex()}@{cache_salt}"
   //
   // Output filename (matching fs_l2_adapter.py._object_key_to_filename):
-  //   Legacy : "{safe_model}@{kv_rank:#010x}@{hash.hex()}.data"
-  //   Salted : "@@{cache_salt}@{safe_model}@{kv_rank:#010x}@{hash.hex()}.data"
+  //   Unsalted: "{safe_model}@{kv_rank:#010x}@{hash.hex()}.data"
+  //   Salted  : "{safe_model}@{kv_rank:#010x}@{hash.hex()}@{cache_salt}.data"
   //
   // Differences from the input: '/' in model becomes '-SEP-', kv_rank
-  // gains a '0x' prefix, and '.data' is appended. The @@ prefix is
-  // a marker for the salted format — unambiguous because cache_salt
-  // cannot contain '@' (invariant on the Python side).
+  // gains a '0x' prefix, and '.data' is appended. Both model_name and
+  // cache_salt are forbidden from containing '@' (enforced on the
+  // Python side), so the parse is unambiguous.
   static std::string key_to_filename(const std::string& key);
 
   static std::string replace_all(const std::string& str,

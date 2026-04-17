@@ -46,11 +46,10 @@ from lmcache.v1.memory_management import MemoryObj
 logger = init_logger(__name__)
 
 _KEY_SEP = "@"
-# Salted keys are marked by a leading ``@@``. cache_salt is forbidden
-# from containing ``@`` (enforced in ObjectKey.__post_init__), so the
-# doubled separator is unambiguous. Kept in sync with
-# native_connector_l2_adapter.py and csrc/storage_backends/fs/connector.cpp.
-_SALT_MARKER = _KEY_SEP + _KEY_SEP
+# ``@`` in both ``model_name`` and ``cache_salt`` is rejected by
+# ObjectKey.__post_init__, so splitting on ``@`` is unambiguous.
+# Kept in sync with native_connector_l2_adapter.py and
+# csrc/storage_backends/fs/connector.cpp.
 _PATH_SLASH_REPLACEMENT = "-SEP-"
 _FILE_EXT = ".data"
 
@@ -97,29 +96,27 @@ async def _async_readinto_full(
 def _object_key_to_filename(key: ObjectKey) -> str:
     """Build a reversible, filesystem-safe filename.
 
-    Always uses the ``@@``-prefixed format::
+    Unsalted::
 
-        @@<cache_salt>@<model_name>@<kv_rank_hex>@<chunk_hash_hex>.data
+        <safe_model>@0x<kv_rank_hex>@<chunk_hash_hex>.data
 
-    For empty ``cache_salt`` the output starts with ``@@@``
-    (marker + empty salt + separator).
+    Salted (trailing ``cache_salt``)::
 
-    The legacy 3-field format (no ``@@`` prefix) is still *readable*
-    by ``_filename_to_object_key`` (with a deprecation warning) but
-    new files always use the prefixed form.
+        <safe_model>@0x<kv_rank_hex>@<chunk_hash_hex>@<cache_salt>.data
+
+    The 3-field unsalted shape is bit-identical to the pre-cache_salt
+    format, so existing un-salted cache directories remain valid and
+    no migration is needed.
 
     ``kv_rank`` is written in ``0x`` prefixed hex so each byte
     of the bitmap ``(ws<<24)|(rank<<16)|(local_ws<<8)|local``
     is directly readable.
     """
     safe_model = key.model_name.replace("/", _PATH_SLASH_REPLACEMENT)
-    return (
-        f"{_SALT_MARKER}{key.cache_salt}"
-        f"{_KEY_SEP}{safe_model}"
-        f"{_KEY_SEP}{key.kv_rank:#010x}"
-        f"{_KEY_SEP}{key.chunk_hash.hex()}"
-        f"{_FILE_EXT}"
-    )
+    base = f"{safe_model}{_KEY_SEP}{key.kv_rank:#010x}{_KEY_SEP}{key.chunk_hash.hex()}"
+    if key.cache_salt:
+        return f"{base}{_KEY_SEP}{key.cache_salt}{_FILE_EXT}"
+    return f"{base}{_FILE_EXT}"
 
 
 def _filename_to_object_key(
@@ -127,47 +124,23 @@ def _filename_to_object_key(
 ) -> Optional[ObjectKey]:
     """Reverse ``_object_key_to_filename``.
 
-    Handles both the legacy 3-field format and the 4-field salted
-    format (marked by a leading ``@@`` prefix).
-
-    Returns ``None`` when the filename cannot be parsed.
+    Accepts both the 3-field unsalted shape and the 4-field salted
+    shape (trailing ``cache_salt``). Returns ``None`` for anything
+    else. Since ``model_name`` is guaranteed not to contain ``@``,
+    plain ``split`` suffices — no marker, no rsplit.
     """
-    stem = filename
-    if stem.endswith(_FILE_EXT):
-        stem = stem[: -len(_FILE_EXT)]
+    if not filename.endswith(_FILE_EXT):
+        return None
+    stem = filename[: -len(_FILE_EXT)]
+    parts = stem.split(_KEY_SEP)
+    if len(parts) == 3:
+        safe_model, kv_rank_str, chunk_hash_hex = parts
+        cache_salt = ""
+    elif len(parts) == 4:
+        safe_model, kv_rank_str, chunk_hash_hex, cache_salt = parts
     else:
         return None
 
-    cache_salt = ""
-    # The ``@@`` prefix indicates the current format:
-    #   @@<cache_salt>@<model_name>@<kv_rank>@<chunk_hash_hex>
-    # If absent, the file uses the deprecated legacy layout and
-    # should be re-written on the next store cycle.
-    if stem.startswith(_SALT_MARKER):
-        # Strip the ``@@`` marker, then split the salt off the head.
-        rest = stem[len(_SALT_MARKER) :]
-        split = rest.split(_KEY_SEP, 1)
-        if len(split) != 2:
-            return None
-        cache_salt, stem = split
-    else:
-        logger.warning(
-            "Legacy cache filename without @@ prefix detected: %s. "
-            "This format is deprecated and will be removed in a future "
-            "release. Re-storing this entry will write the new format.",
-            filename,
-        )
-
-    # Layout after salt handling:
-    #   <model_name> @ <kv_rank> @ <chunk_hash_hex>
-    # model_name itself may contain ``@``, so we split
-    # from the right to reliably isolate the last two
-    # fields (kv_rank and chunk_hash).
-    parts = stem.rsplit(_KEY_SEP, 2)
-    if len(parts) != 3:
-        return None
-
-    safe_model, kv_rank_str, chunk_hash_hex = parts
     try:
         chunk_hash = bytes.fromhex(chunk_hash_hex)
         kv_rank = int(kv_rank_str, 16)
