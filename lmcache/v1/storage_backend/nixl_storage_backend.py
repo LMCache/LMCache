@@ -1089,7 +1089,10 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
         elif self.agent.mem_type == "FILE":
             for idx in range(len(keys)):
                 file_name = self._format_object_key(keys[idx])
-                fd = os.open(os.path.join(self.path, file_name), os.O_RDONLY | self.direct_io_flag)
+                fd = os.open(
+                    os.path.join(self.path, file_name),
+                    os.O_RDONLY | self.direct_io_flag,
+                )
                 descs.append(NixlDesc(device_id=fd, meta_info=""))
         else:
             # Already validated in validate_nixl_backend
@@ -1115,7 +1118,9 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
             xfer_state = False
 
         self.agent.release_handle(handle)
-        self.agent.release_storage_handler(storage_reg_descs, storage_xfer_handler, descs)
+        self.agent.release_storage_handler(
+            storage_reg_descs, storage_xfer_handler, descs
+        )
 
         if xfer_state:
             for i in range(len(keys)):
@@ -1159,7 +1164,9 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
         finally:
             # Release the handle after transfer completes (success or failure)
             self.agent.release_handle(handle)
-            self.agent.release_storage_handler(storage_reg_descs, storage_xfer_handler, descs)
+            self.agent.release_storage_handler(
+                storage_reg_descs, storage_xfer_handler, descs
+            )
 
             if state == "DONE":
                 for key in keys:
@@ -1189,7 +1196,10 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
         elif self.agent.mem_type == "FILE":
             for idx in range(len(keys)):
                 file_name = self._format_object_key(keys[idx])
-                fd = os.open(os.path.join(self.path, file_name), os.O_CREAT | os.O_RDWR | self.direct_io_flag)
+                fd = os.open(
+                    os.path.join(self.path, file_name),
+                    os.O_CREAT | os.O_RDWR | self.direct_io_flag,
+                )
                 descs.append(NixlDesc(device_id=fd, meta_info=""))
         else:
             # Already validated in validate_nixl_backend
@@ -1220,7 +1230,9 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
         else:
             self.agent.post_blocking(handle)
             self.agent.release_handle(handle)
-            self.agent.release_storage_handler(storage_reg_descs, storage_xfer_handler, descs)
+            self.agent.release_storage_handler(
+                storage_reg_descs, storage_xfer_handler, descs
+            )
 
             end_time = time.time()
             duration = end_time - start_time
