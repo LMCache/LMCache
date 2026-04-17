@@ -151,7 +151,12 @@ void MooncakeConnector::preregister_l1_memory(std::uintptr_t base,
             std::min(rollback_remaining, max_registration_size);
         rollback_remaining -= rollback_size;
         void* rollback_ptr = reinterpret_cast<void*>(base + rollback_remaining);
-        client_->unregister_buffer(rollback_ptr);
+        try {
+          client_->unregister_buffer(rollback_ptr);
+        } catch (...) {
+          // Keep rolling back the remaining segments so a cleanup failure does
+          // not mask the original registration error or strand later regions.
+        }
       }
       preregistered_block_size_ = 0;
       throw std::runtime_error("Mooncake preregister_l1_memory failed");
