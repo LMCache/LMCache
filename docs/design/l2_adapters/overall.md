@@ -166,13 +166,16 @@ _process_new_keys(keys)
   │     Track as InFlightStoreRequest
   │
   ▼ (later, when adapter signals store_efd)
-_process_l2_store_completions(adapter_index)
+_drain_l2_store_completions()
+  │  adapter.pop_completed_store_tasks() → deposit success/failure
+  │  on each InFlightStoreRequest.l2_store_result
   │
-  ├─ 3. adapter.pop_completed_store_tasks()
+  ▼
+_advance_request(request)  [STORE branch]
   │
-  ├─ 4. For each completed task:
-  │     L1Manager.finish_read(read_locked_keys)  → release read locks
-  │     If success: StorePolicy.select_l1_deletions(keys) → delete from L1
+  ├─ 3. L1Manager.finish_read(read_locked_keys)  → release read locks
+  │
+  ├─ 4. If success: StorePolicy.select_l1_deletions(keys) → delete from L1
   │     If failure: log warning (best-effort, no retry)
   │
   ▼
@@ -291,8 +294,8 @@ _start_lookup_phase(request_id, keys, layout_desc)
   ├─ Submit lookup_and_lock_task(keys) to EVERY adapter
   │
   ▼ (wait for all adapter lookups to complete)
-_process_l2_lookup_completions(adapter_index)
-  │  query each adapter's lookup result
+_advance_request(request)  [LOOKUP branch]
+  │  poll each pending adapter's lookup result
   │  when all_lookups_done():
   │
   ▼
@@ -313,9 +316,11 @@ _transition_to_load_phase(request)
   │
   ├─ 6. Submit load_task(keys, objs) per adapter
   │
-  ▼ (wait for all adapter loads to complete)
-_process_l2_load_and_maybe_deserialize(adapter_index)
-  │  when all_loads_done():
+  ▼ (wait for all adapter loads + deserializes to complete)
+_advance_request(request)  [PLAN_AND_LOAD branch]
+  │  poll pending loads (kicking off deserialize if serde enabled)
+  │  poll pending deserializes (release temp buffers; zero bitmap on failure)
+  │  when is_ready_to_finalize():
   │
   ▼
 _finalize_load(request)

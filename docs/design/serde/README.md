@@ -227,8 +227,8 @@ Both controllers register serde eventfds in their poll loop alongside L2 adapter
 
 | Controller | Polls | Handler |
 |---|---|---|
-| Store | `serialize_event_fd` | `_process_serialize_and_submit_l2_store` |
-| Prefetch | `deserialize_event_fd` | `_process_deserialize_completions` |
+| Store | `serialize_event_fd` | `_advance_request` (SERIALIZE branch) |
+| Prefetch | `deserialize_event_fd` | `_advance_request` (PLAN_AND_LOAD branch) |
 
 ## Buffer Sizing
 

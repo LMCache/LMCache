@@ -175,6 +175,12 @@ class InFlightStoreRequest:
     l2_task_id: L2TaskId | None = None
     """L2 store task ID (STORE phase only)."""
 
+    l2_store_result: bool | None = None
+    """L2 store outcome (True=success, False=failure). Populated by
+    ``_drain_l2_store_completions`` when the adapter signals its store
+    eventfd. Read by ``_advance_request`` to drive the terminal
+    transition. ``None`` while the L2 store is still in flight."""
+
 
 # Main class
 
@@ -319,32 +325,48 @@ class StoreController(StorageControllerInterface):
         while not self._stop_flag.is_set():
             ready = poller.poll(STORE_LOOP_POLL_TIMEOUT_MS)
 
+            new_keys: list[ObjectKey] = []
+            advance_needed = False
             for fd, events in ready:
                 if not (events & select.POLLIN):
                     continue
 
-                # Consume the eventfd value
                 try:
                     os.eventfd_read(fd)
                 except (OSError, BlockingIOError):
                     pass
 
-                try:
-                    if fd == listener_efd:
-                        keys = self._listener.pop_pending_keys()
-                        if keys:
-                            self._process_new_keys(keys)
-                    elif fd in self._serialize_efd_to_adapter:
-                        self._process_serialize_and_submit_l2_store(
-                            self._serialize_efd_to_adapter[fd]
+                if fd == listener_efd:
+                    try:
+                        new_keys.extend(self._listener.pop_pending_keys())
+                    except Exception:
+                        logger.exception(
+                            "Unexpected error popping pending keys from listener"
                         )
-                    elif fd in self._store_efd_to_adapter:
-                        adapter_index = self._store_efd_to_adapter[fd]
-                        self._process_l2_store_completions(adapter_index)
+                else:
+                    # Any adapter eventfd (serialize / store) — actual
+                    # dispatch lives in _advance_request.
+                    advance_needed = True
+
+            if new_keys:
+                try:
+                    self._process_new_keys(new_keys)
                 except Exception:
                     logger.exception(
-                        "Unexpected error in store loop while processing fd %d",
-                        fd,
+                        "Unexpected error processing new keys in store loop"
+                    )
+
+            if advance_needed:
+                try:
+                    self._drain_l2_store_completions()
+                except Exception:
+                    logger.exception("Unexpected error draining L2 store completions")
+                try:
+                    for request in list(self._in_flight_requests.values()):
+                        self._advance_request(request)
+                except Exception:
+                    logger.exception(
+                        "Unexpected error advancing in-flight store requests"
                     )
 
     def _process_new_keys(self, keys: list[ObjectKey]) -> None:
@@ -527,62 +549,6 @@ class StoreController(StorageControllerInterface):
         self._in_flight_requests[request.request_id] = request
         self._status_in_flight_count += 1
 
-    def _process_serialize_and_submit_l2_store(self, adapter_index: int) -> None:
-        """Handle completed serialize tasks from a SerdeProcessor.
-
-        On success: release original read locks, transition request to
-        STORE phase, and submit the L2 store task.
-        On failure: release both read locks and temp buffers, remove request.
-        """
-        serde = self._serde_processors[adapter_index]
-        assert serde is not None, (
-            f"serialize completion for adapter {adapter_index} but no serde processor"
-        )
-        l1_mgr = self._l1_manager
-
-        for request in list(self._in_flight_requests.values()):
-            if request.phase != StorePhase.SERIALIZE:
-                continue
-            if request.adapter_index != adapter_index:
-                continue
-
-            assert request.serde_task_id is not None
-            result = serde.query_serialize_result(request.serde_task_id)
-            if result is None:
-                continue
-
-            # Release original read locks — data is in temp now
-            l1_mgr.finish_read(request.read_locked_keys)
-
-            if result:
-                logger.debug(
-                    "Serialize completed for adapter %d, %d keys — "
-                    "submitting serialized data to L2.",
-                    request.adapter_index,
-                    len(request.keys),
-                )
-                # Transition temp buffers: write-locked -> read-locked
-                # so L2 can safely read from them during store.
-                l1_mgr.finish_write_and_reserve_read(request.temp_keys)
-
-                # Transition to STORE phase
-                request.phase = StorePhase.STORE
-                request.read_locked_keys = list(request.temp_keys)
-                request.serde_task_id = None
-                self._submit_l2_store(request, request.temp_objs)
-            else:
-                # Serialize failed — clean up temp buffers and remove request
-                logger.warning(
-                    "Serialize task failed for adapter %d, %d keys",
-                    request.adapter_index,
-                    len(request.keys),
-                )
-                if request.temp_keys:
-                    l1_mgr.finish_write(request.temp_keys)
-                    l1_mgr.delete(request.temp_keys)
-                del self._in_flight_requests[request.request_id]
-                self._status_in_flight_count -= 1
-
     # =========================================================================
     # L2 store phase
     # =========================================================================
@@ -638,53 +604,119 @@ class StoreController(StorageControllerInterface):
             len(request.keys),
         )
 
-    def _process_l2_store_completions(self, adapter_index: int) -> None:
+    def _drain_l2_store_completions(self) -> None:
+        """Pop completed L2 store tasks from every adapter and deposit
+        the outcome on the corresponding in-flight request.
+
+        Done in a separate pass (rather than inside ``_advance_request``)
+        because ``pop_completed_store_tasks`` is a batch drain that
+        returns all completed tasks at once — calling it per request
+        would lose results for other requests sharing the adapter.
+        ``_advance_request`` then reads ``request.l2_store_result`` to
+        drive the terminal transition.
         """
-        Process completed store tasks for a given adapter.
+        for adapter_idx, adapter in enumerate(self._l2_adapters):
+            completed = adapter.pop_completed_store_tasks()
+            for task_id, success in completed.items():
+                composite_key = (adapter_idx, task_id)
+                request_id = self._l2_task_to_request.pop(composite_key, None)
+                if request_id is None:
+                    logger.warning(
+                        "Completed store task %d (adapter %d) not found in tracking.",
+                        task_id,
+                        adapter_idx,
+                    )
+                    continue
+                request = self._in_flight_requests.get(request_id)
+                if request is None:
+                    logger.warning(
+                        "Completed store task %d (adapter %d): request %d missing.",
+                        task_id,
+                        adapter_idx,
+                        request_id,
+                    )
+                    continue
+                request.l2_store_result = success
 
-        1. Pop all completed tasks from the adapter.
-        2. Look up the corresponding in-flight request.
-        3. Release L1 read locks (auto-deletes temp keys if serde).
-        4. If the task succeeded, ask the policy which keys to
-           delete from L1 and delete them.
-        5. Remove the request from in-flight tracking.
+    def _advance_request(self, request: InFlightStoreRequest) -> None:
+        """Single dispatcher for store request state transitions.
 
-        Args:
-            adapter_index (int): Index of the adapter whose eventfd
-                was signaled.
+        Called for every in-flight request on each eventfd wakeup. Polls
+        the request's pending result for its current phase and triggers
+        the corresponding transition:
+
+          - ``SERIALIZE``: query the serialize result. On success,
+            release original read locks, transition temp buffers to
+            read-locked, move to ``STORE``, and submit the L2 store
+            task. On failure, release read locks and temp buffers and
+            remove the request.
+          - ``STORE``: if ``_drain_l2_store_completions`` deposited a
+            result, release read locks (temp buffers auto-delete since
+            ``is_temporary=True``), publish ``L2_STORE_COMPLETED``,
+            apply policy L1 deletions on success, and remove the
+            request.
+
+        The poll loop never dispatches to per-event handlers — it
+        relays adapter events here, so all per-phase logic lives in
+        this method.
         """
-        adapter = self._l2_adapters[adapter_index]
-        completed = adapter.pop_completed_store_tasks()
-
         l1_mgr = self._l1_manager
 
-        for task_id, success in completed.items():
-            composite_key = (adapter_index, task_id)
-            request_id = self._l2_task_to_request.pop(composite_key, None)
-            if request_id is None:
-                logger.warning(
-                    "Completed store task %d (adapter %d) not found in tracking.",
-                    task_id,
-                    adapter_index,
-                )
-                continue
-            request = self._in_flight_requests.pop(request_id, None)
-            if request is None:
-                logger.warning(
-                    "Completed store task %d (adapter %d): request %d missing.",
-                    task_id,
-                    adapter_index,
-                    request_id,
-                )
-                continue
-            self._status_in_flight_count -= 1
+        if request.phase == StorePhase.SERIALIZE:
+            assert request.serde_task_id is not None
+            serde = self._serde_processors[request.adapter_index]
+            assert serde is not None, (
+                f"SERIALIZE request for adapter {request.adapter_index} "
+                f"but no serde processor"
+            )
+            result = serde.query_serialize_result(request.serde_task_id)
+            if result is None:
+                return
 
-            # Release read locks.
-            # No serde: these are the original l1_keys.
-            # Serde: these are the temp_keys (transitioned to read-locked
-            # after serialization). finish_read auto-deletes them since
-            # is_temporary=True.
+            # Release original read locks — data is in temp now
             l1_mgr.finish_read(request.read_locked_keys)
+
+            if result:
+                logger.debug(
+                    "Serialize completed for adapter %d, %d keys — "
+                    "submitting serialized data to L2.",
+                    request.adapter_index,
+                    len(request.keys),
+                )
+                # Transition temp buffers: write-locked -> read-locked
+                # so L2 can safely read from them during store.
+                l1_mgr.finish_write_and_reserve_read(request.temp_keys)
+
+                # Transition to STORE phase
+                request.phase = StorePhase.STORE
+                request.read_locked_keys = list(request.temp_keys)
+                request.serde_task_id = None
+                self._submit_l2_store(request, request.temp_objs)
+            else:
+                logger.warning(
+                    "Serialize task failed for adapter %d, %d keys",
+                    request.adapter_index,
+                    len(request.keys),
+                )
+                if request.temp_keys:
+                    l1_mgr.finish_write(request.temp_keys)
+                    l1_mgr.delete(request.temp_keys)
+                del self._in_flight_requests[request.request_id]
+                self._status_in_flight_count -= 1
+
+        elif request.phase == StorePhase.STORE:
+            if request.l2_store_result is None:
+                return
+
+            success = request.l2_store_result
+            adapter_index = request.adapter_index
+
+            # Release read locks. No serde: original keys. Serde: temp
+            # keys (transitioned to read-locked after serialize; auto-
+            # delete on finish_read since is_temporary=True).
+            l1_mgr.finish_read(request.read_locked_keys)
+            del self._in_flight_requests[request.request_id]
+            self._status_in_flight_count -= 1
 
             if success:
                 self._event_bus.publish(
@@ -698,9 +730,9 @@ class StoreController(StorageControllerInterface):
                     )
                 )
                 logger.debug(
-                    "L2 store task %d completed: adapter %d, %d keys.",
-                    task_id,
+                    "L2 store completed: adapter %d, request %d, %d keys.",
                     adapter_index,
+                    request.request_id,
                     len(request.keys),
                 )
                 delete_keys = self._policy.select_l1_deletions(request.keys)
@@ -718,8 +750,8 @@ class StoreController(StorageControllerInterface):
                     )
                 )
                 logger.warning(
-                    "Store task %d to adapter %d failed for keys: %s",
-                    task_id,
+                    "Store request %d to adapter %d failed for keys: %s",
+                    request.request_id,
                     adapter_index,
                     request.keys,
                 )

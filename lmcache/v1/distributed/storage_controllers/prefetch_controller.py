@@ -175,9 +175,9 @@ class InFlightPrefetchRequest:
     """Temp byte buffers for serde-enabled adapters' L2 loads.
 
     Populated during _transition_to_load_phase for adapters with serde.
-    Entries are removed per-adapter in _process_deserialize_completions
-    as each adapter's deserialize finishes. Empty when serde is disabled
-    or after all deserializations complete."""
+    Entries are removed per-adapter in _advance_request as each adapter's
+    deserialize finishes. Empty when serde is disabled or after all
+    deserializations complete."""
 
     temp_reserved_objs_for_serde: dict[ObjectKey, MemoryObj] = field(
         default_factory=dict
@@ -197,10 +197,10 @@ class InFlightPrefetchRequest:
     pending_deserialize_tasks: dict[int, SerdeTaskId] = field(default_factory=dict)
     """Adapter index -> serde task id for in-flight deserialize tasks.
 
-    An entry is added in ``_submit_deserialize_for_adapter`` (called from
-    ``_process_l2_load_and_maybe_deserialize`` when serde is enabled) and removed in
-    ``_process_deserialize_completions`` once the deserialize result is
-    queried. Empty when all deserializations are done
+    An entry is added in ``_submit_deserialize_for_adapter`` (called
+    from the PLAN_AND_LOAD branch of ``_advance_request`` when serde is
+    enabled) and removed in the same branch once the deserialize result
+    is queried. Empty when all deserializations are done
     (``is_ready_to_finalize`` returns True)."""
 
     def all_lookups_done(self) -> bool:
@@ -477,6 +477,7 @@ class PrefetchController(StorageControllerInterface):
         while not self._stop_flag.is_set():
             ready = poller.poll(PREFETCH_LOOP_POLL_TIMEOUT_MS)
 
+            advance_needed = False
             for fd, events in ready:
                 if not (events & select.POLLIN):
                     continue
@@ -486,25 +487,23 @@ class PrefetchController(StorageControllerInterface):
                 except (OSError, BlockingIOError):
                     pass
 
-                try:
-                    if fd == self._submission_efd:
+                if fd == self._submission_efd:
+                    try:
                         self._drain_submission_queue()
-                    elif fd in self._lookup_efd_to_adapter:
-                        self._process_l2_lookup_completions(
-                            self._lookup_efd_to_adapter[fd]
-                        )
-                    elif fd in self._load_efd_to_adapter:
-                        self._process_l2_load_and_maybe_deserialize(
-                            self._load_efd_to_adapter[fd]
-                        )
-                    elif fd in self._deserialize_efd_to_adapter:
-                        self._process_deserialize_completions(
-                            self._deserialize_efd_to_adapter[fd]
-                        )
+                    except Exception:
+                        logger.exception("Unexpected error draining submission queue")
+                else:
+                    # Any adapter eventfd (lookup / load / deserialize) —
+                    # actual dispatch lives in _advance_request.
+                    advance_needed = True
+
+            if advance_needed:
+                try:
+                    for request in list(self._in_flight_requests.values()):
+                        self._advance_request(request)
                 except Exception:
                     logger.exception(
-                        "Unexpected error in prefetch loop while processing fd %d",
-                        fd,
+                        "Unexpected error advancing in-flight prefetch requests"
                     )
 
             try:
@@ -575,32 +574,6 @@ class PrefetchController(StorageControllerInterface):
                 },
             )
         )
-
-    def _process_l2_lookup_completions(self, adapter_index: int) -> None:
-        """Check all LOOKUP-phase requests for completed lookups from
-        this adapter."""
-        ready_to_transition: list[InFlightPrefetchRequest] = []
-
-        for request in list(self._in_flight_requests.values()):
-            if request.phase != PrefetchPhase.LOOKUP:
-                continue
-            if adapter_index not in request.pending_lookup_tasks:
-                continue
-
-            task_id = request.pending_lookup_tasks[adapter_index]
-            result = self._l2_adapters[adapter_index].query_lookup_and_lock_result(
-                task_id
-            )
-
-            if result is not None:
-                request.lookup_results[adapter_index] = result
-                del request.pending_lookup_tasks[adapter_index]
-
-                if request.all_lookups_done():
-                    ready_to_transition.append(request)
-
-        for request in ready_to_transition:
-            self._transition_to_load_phase(request)
 
     # =========================================================================
     # Load phase
@@ -802,45 +775,6 @@ class PrefetchController(StorageControllerInterface):
         with self._lookup_results_lock:
             self._completed_lookups[request_id] = hit_chunks
 
-    def _process_l2_load_and_maybe_deserialize(self, adapter_index: int) -> None:
-        """Handle the L2 load eventfd for this adapter.
-
-        Triggered ONLY by the L2 load completion fd — not by deserialize.
-        For each request whose load just completed for this adapter:
-          - Record the load result.
-          - If this adapter has serde: submit the async deserialize task.
-            Finalize will fire later from _process_deserialize_completions.
-          - If no serde: the data is already in the real KV buffer; finalize
-            now if all loads (across all adapters) are done.
-        """
-        serde = self._serde_processors[adapter_index]
-        ready_to_finalize: list[InFlightPrefetchRequest] = []
-
-        for request in list(self._in_flight_requests.values()):
-            if request.phase != PrefetchPhase.PLAN_AND_LOAD:
-                continue
-            if adapter_index not in request.pending_load_tasks:
-                continue
-
-            task_id = request.pending_load_tasks[adapter_index]
-            result = self._l2_adapters[adapter_index].query_load_result(task_id)
-            if result is None:
-                continue
-
-            request.load_results[adapter_index] = result
-            del request.pending_load_tasks[adapter_index]
-
-            if serde is not None:
-                self._submit_deserialize_for_adapter(
-                    request, adapter_index, serde, result
-                )
-
-            if request.is_ready_to_finalize():
-                ready_to_finalize.append(request)
-
-        for request in ready_to_finalize:
-            self._finalize_load(request)
-
     # =========================================================================
     # Deserialize phase (per-adapter, serde-enabled adapters only)
     # =========================================================================
@@ -874,8 +808,10 @@ class PrefetchController(StorageControllerInterface):
             dst_objs.append(request.write_reserved_objs[orig_key])
 
         if not src_objs:
-            # All L2 loads failed for this adapter — release its temp buffers
-            # now, since _process_deserialize_completions won't fire.
+            # All L2 loads failed for this adapter — release its temp
+            # buffers now, since no pending_deserialize_tasks entry will
+            # be added and the deserialize branch of _advance_request
+            # won't run for this adapter.
             self._release_adapter_temp_buffers(request, adapter_index)
             return
 
@@ -905,64 +841,97 @@ class PrefetchController(StorageControllerInterface):
             return
         request.pending_deserialize_tasks[adapter_index] = serde_task_id
 
-    def _process_deserialize_completions(self, adapter_index: int) -> None:
-        """Handle the deserialize eventfd for this adapter.
+    def _advance_request(self, request: InFlightPrefetchRequest) -> None:
+        """Single dispatcher for request state transitions.
 
-        For serde-enabled adapters, this is where the request actually
-        finishes — _process_l2_load_and_maybe_deserialize only kicks off
-        the deserialize.
-        Releases this adapter's temp buffers. If deserialize failed,
-        clears the load result bitmap so _finalize_load treats those
-        keys as failed (they'll get finish_write + delete).
-        Finalizes the request if all loads and deserializes are done.
+        Polls any pending per-adapter results for the request's current
+        phase, records them, and triggers a phase transition if the
+        phase's work is complete. Called from the poll loop for every
+        in-flight request on each eventfd wakeup; each ``query_*`` is
+        cheap and returns ``None`` when the result isn't ready.
+
+          - ``LOOKUP``: poll pending ``lookup_and_lock`` results.
+            Transition to ``PLAN_AND_LOAD`` when all lookups are done.
+          - ``PLAN_AND_LOAD``: poll pending L2 loads (submitting
+            deserialize for serde-enabled adapters) and pending
+            deserializations (releasing temp buffers; zeroing the
+            adapter's load bitmap on deserialize failure so those keys
+            are treated as failed). Finalize when all loads and
+            deserializes are done.
+
+        The poll loop never dispatches to per-event handlers — it just
+        relays adapter events here, so all per-phase logic lives in
+        this method.
         """
-        serde = self._serde_processors[adapter_index]
-        assert serde is not None, (
-            f"deserialize completion for adapter {adapter_index} but no serde processor"
-        )
-        ready_to_finalize: list[InFlightPrefetchRequest] = []
+        if request.phase == PrefetchPhase.LOOKUP:
+            for adapter_idx in list(request.pending_lookup_tasks):
+                task_id = request.pending_lookup_tasks[adapter_idx]
+                lookup_result = self._l2_adapters[
+                    adapter_idx
+                ].query_lookup_and_lock_result(task_id)
+                if lookup_result is None:
+                    continue
+                request.lookup_results[adapter_idx] = lookup_result
+                del request.pending_lookup_tasks[adapter_idx]
 
-        for request in list(self._in_flight_requests.values()):
-            if adapter_index not in request.pending_deserialize_tasks:
-                continue
+            if request.all_lookups_done():
+                self._transition_to_load_phase(request)
 
-            task_id = request.pending_deserialize_tasks[adapter_index]
-            result = serde.query_deserialize_result(task_id)
-            if result is None:
-                continue
+        elif request.phase == PrefetchPhase.PLAN_AND_LOAD:
+            serdes = self._serde_processors
 
-            del request.pending_deserialize_tasks[adapter_index]
+            # Poll pending L2 loads; kick off deserialize for serde-enabled adapters.
+            for adapter_idx in list(request.pending_load_tasks):
+                task_id = request.pending_load_tasks[adapter_idx]
+                load_result = self._l2_adapters[adapter_idx].query_load_result(task_id)
+                if load_result is None:
+                    continue
+                request.load_results[adapter_idx] = load_result
+                del request.pending_load_tasks[adapter_idx]
+                serde = serdes[adapter_idx]
+                if serde is not None:
+                    self._submit_deserialize_for_adapter(
+                        request, adapter_idx, serde, load_result
+                    )
 
-            if result:
-                logger.debug(
-                    "Prefetch request %d: deserialize completed for "
-                    "adapter %d — data ready in L1 KV buffers.",
-                    request.request_id,
-                    adapter_index,
+            # Poll pending deserializations.
+            for adapter_idx in list(request.pending_deserialize_tasks):
+                serde = serdes[adapter_idx]
+                assert serde is not None, (
+                    f"pending deserialize task for adapter {adapter_idx} "
+                    f"but no serde processor"
                 )
-            self._release_adapter_temp_buffers(request, adapter_index)
+                task_id = request.pending_deserialize_tasks[adapter_idx]
+                deserialize_ok = serde.query_deserialize_result(task_id)
+                if deserialize_ok is None:
+                    continue
+                del request.pending_deserialize_tasks[adapter_idx]
 
-            if not result:
-                # Deserialize failed — clear this adapter's load_result
-                # so its keys become "failed" in _finalize_load.
-                logger.warning(
-                    "Prefetch request %d: deserialize failed for adapter %d",
-                    request.request_id,
-                    adapter_index,
-                )
-                # Clear this adapter's load result so all its keys become
-                # "failed" in _finalize_load. The bitmap size equals the
-                # number of keys this adapter has in the load plan.
-                plan_bitmap = request.load_plan.get(adapter_index)
-                if plan_bitmap is not None:
-                    n_keys = plan_bitmap.popcount()
-                    request.load_results[adapter_index] = Bitmap(n_keys)
+                if deserialize_ok:
+                    logger.debug(
+                        "Prefetch request %d: deserialize completed for "
+                        "adapter %d — data ready in L1 KV buffers.",
+                        request.request_id,
+                        adapter_idx,
+                    )
+                self._release_adapter_temp_buffers(request, adapter_idx)
+
+                if not deserialize_ok:
+                    # Deserialize failed — zero this adapter's load
+                    # result so its keys become "failed" in
+                    # _finalize_load.
+                    logger.warning(
+                        "Prefetch request %d: deserialize failed for adapter %d",
+                        request.request_id,
+                        adapter_idx,
+                    )
+                    plan_bitmap = request.load_plan.get(adapter_idx)
+                    if plan_bitmap is not None:
+                        n_keys = plan_bitmap.popcount()
+                        request.load_results[adapter_idx] = Bitmap(n_keys)
 
             if request.is_ready_to_finalize():
-                ready_to_finalize.append(request)
-
-        for request in ready_to_finalize:
-            self._finalize_load(request)
+                self._finalize_load(request)
 
     def _finalize_load(self, request: InFlightPrefetchRequest) -> None:
         """
