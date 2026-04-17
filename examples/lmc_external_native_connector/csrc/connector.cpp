@@ -64,20 +64,18 @@ std::string ExampleFSConnector::replace_all(const std::string& str,
 }
 
 std::string ExampleFSConnector::safe_filename(const std::string& key) {
-  // Input key format (from _object_key_to_string):
-  //   Legacy (no cache_salt):
-  //     model_name@kv_rank_hex@chunk_hash_hex
-  //   Salted (marked by a leading @@ prefix):
-  //     @@cache_salt@model_name@kv_rank_hex@chunk_hash_hex
+  // Input key format (from _object_key_to_string — always @@-prefixed):
+  //   @@<cache_salt>@<model_name>@<kv_rank_hex>@<chunk_hash_hex>
+  //   (empty salt: @@@model_name@kv_rank_hex@chunk_hash_hex)
   //
-  // Output filename (matching _object_key_to_filename):
-  //   Legacy:
-  //     model_name_safe@0xkv_rank_hex@chunk_hash_hex.data
-  //   Salted:
-  //     @@cache_salt@model_name_safe@0xkv_rank_hex@chunk_hash_hex.data
+  // Legacy keys without @@ prefix are still accepted for backward
+  // compatibility but should no longer be produced by new code.
   //
-  // The @@ prefix unambiguously marks the salted format.
-  // cache_salt must not contain '@' (enforced on the Python side).
+  // Output filename always uses the @@-prefixed format:
+  //   @@<cache_salt>@<model_name_safe>@0x<kv_rank_hex>@<chunk_hash_hex>.data
+  //
+  // NOTE: cache_salt must not contain '@', '/', '\', or NUL —
+  // invariant enforced on the Python side.
 
   // Strip the @@ prefix and extract cache_salt if present.
   std::string cache_salt;
@@ -91,8 +89,11 @@ std::string ExampleFSConnector::safe_filename(const std::string& key) {
     cache_salt = work_key.substr(2, salt_end - 2);
     work_key = work_key.substr(salt_end + 1);
   }
+  // else: legacy key without @@ prefix — still accepted for backward
+  // compatibility. The output filename will use the @@-prefixed format
+  // regardless, so re-storing migrates the entry.
 
-  // Legacy layout (or salted remainder):
+  // Remainder (or legacy input):
   //   model_name@kv_rank_hex@chunk_hash_hex
   // model_name may contain '@', so rsplit from the right.
   size_t last_sep = work_key.rfind(KEY_SEP);
@@ -112,16 +113,16 @@ std::string ExampleFSConnector::safe_filename(const std::string& key) {
   // Replace '/' with '-SEP-' for filesystem safety
   std::string safe_model = replace_all(model, "/", PATH_SLASH_REPLACEMENT);
 
-  // Rebuild with 0x prefix to match Python {kv_rank:#010x}
+  // Always emit @@-prefixed filename (even for empty salt / legacy input)
+  // so all new files on disk use the unified format.
   std::string result;
   result.reserve(cache_salt.size() + safe_model.size() + kv_rank_hex.size() +
                  chunk_hash.size() + 32);
-  if (!cache_salt.empty()) {
-    result += KEY_SEP;
-    result += KEY_SEP;
-    result += cache_salt;
-    result += KEY_SEP;
-  }
+  // Leading @@ + salt + @
+  result += KEY_SEP;
+  result += KEY_SEP;
+  result += cache_salt;
+  result += KEY_SEP;
   result += safe_model;
   result += KEY_SEP;
   result += "0x";
