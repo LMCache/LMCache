@@ -1124,22 +1124,21 @@ class LMCacheMPWorkerAdapter:
 
             success, failed_block_ids = r_result
             if failed_block_ids:
-                logger.warning(
-                    "Retrieve for request_id=%s had %d failed block(s) out of %d total",
-                    request_id,
-                    len(failed_block_ids),
-                    len(r_block_ids),
-                )
+                if not success:
+                    logger.error(
+                        "Retrieve for request_id=%s failed entirely; "
+                        "%d block(s) marked as failed",
+                        request_id,
+                        len(failed_block_ids),
+                    )
+                else:
+                    logger.warning(
+                        "Retrieve for request_id=%s: %d/%d block(s) failed",
+                        request_id,
+                        len(failed_block_ids),
+                        len(r_block_ids),
+                    )
                 self.error_block_ids.update(failed_block_ids)
-            elif not success:
-                # No block-level detail available; mark all blocks as failed.
-                logger.error(
-                    "Retrieve for request_id=%s failed with no block details; "
-                    "marking all %d block(s) as failed",
-                    request_id,
-                    len(r_block_ids),
-                )
-                self.error_block_ids.update(r_block_ids)
 
         # Remove the finished requests from the tracking dicts
         for request_id in finished_stores:

@@ -578,8 +578,19 @@ class MPCacheEngine:
             good_objs: list[MemoryObj],
             good_indices: list[int],
         ) -> None:
+            """Copy a sparse subset of memory objects to GPU.
+
+            Used when only some chunks were found (partial cache hit), so
+            objects must be processed individually because their positions
+            within the full block-ID list are non-contiguous.
+
+            Args:
+                good_objs: Memory objects that were successfully retrieved
+                good_indices: Chunk indices that correspond to each entry in good_objs.
+            """
             # Partial failure path: indices are non-contiguous so process
             # each chunk individually instead of batching.
+            num_groups = gpu_context.kv_layer_groups_manager.num_groups
             for memory_obj, chunk_idx in zip(good_objs, good_indices, strict=True):
                 chunk_start_token = chunk_idx * self.chunk_size
                 effective_start = max(chunk_start_token, skip_first_n_tokens)
@@ -603,22 +614,26 @@ class MPCacheEngine:
                 block_end = block_start + blocks_per_chunk
                 chunk_block_ids_gpu = all_block_ids_gpu[block_start:block_end]
 
-                tmp_buffers = gpu_context.get_tmp_gpu_buffer_batched(self.chunk_size, 1)
-                tmp_buffer = tmp_buffers[0]
-                assert memory_obj.tensor is not None
-                lmcache_memcpy_async_h2d(memory_obj, tmp_buffer)
-
-                lmc_ops.multi_layer_block_kv_transfer(
-                    gpu_context.kv_pointers,
-                    [tmp_buffer.data_ptr()],
-                    chunk_block_ids_gpu,
-                    gpu_context.device,
-                    lmc_ops.TransferDirection.H2D,
-                    gpu_context.shape_desc,
-                    self.chunk_size,
-                    gpu_context.gpu_kv_format_,
-                    skip_blocks_in_chunk,
+                lmcache_memcpy_async_h2d(
+                    memory_obj,
+                    gpu_context.get_tmp_gpu_buffer_flat(chunk_idx=0),
                 )
+                for group_idx in range(num_groups):
+                    tmp_buffers = gpu_context.get_tmp_chunk_gpu_buffer_batched(
+                        1, group_idx
+                    )
+                    group_kv_pointers = gpu_context.get_group_kv_pointers(group_idx)
+                    lmc_ops.multi_layer_block_kv_transfer(
+                        group_kv_pointers,
+                        [tmp_buffers[0].data_ptr()],
+                        chunk_block_ids_gpu,
+                        gpu_context.device,
+                        lmc_ops.TransferDirection.H2D,
+                        gpu_context.get_shape_desc(group_idx),
+                        self.chunk_size,
+                        gpu_context.gpu_kv_format_,
+                        skip_blocks_in_chunk,
+                    )
 
         with (
             torch.cuda.device(gpu_context.device),
