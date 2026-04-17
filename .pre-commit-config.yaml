@@ -1,3 +1,4 @@
+exclude: 'lmcache/integration/vllm/lmcache_mp_connector_.*\.py'
 repos:
 - repo: local
   hooks:

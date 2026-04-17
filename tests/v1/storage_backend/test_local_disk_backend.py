@@ -487,19 +487,56 @@ class TestLocalDiskBackend:
             shutil.rmtree(dir_b, ignore_errors=True)
             local_cpu_backend.memory_allocator.close()
 
-    def test_unsupported_path_sharding_raises(
+    def test_single_path_works_as_before(
         self, temp_disk_path, async_loop, local_cpu_backend
     ):
-        """Unsupported sharding modes should fail fast."""
+        """A single path (no commas) works exactly as before."""
+        config = create_test_config(temp_disk_path)
+        backend = LocalDiskBackend(
+            config=config,
+            loop=async_loop,
+            local_cpu_backend=local_cpu_backend,
+            dst_device="cuda:0",
+        )
+        assert backend.path == temp_disk_path
+        local_cpu_backend.memory_allocator.close()
+
+    def test_path_sharding_default(self, temp_disk_path, async_loop, local_cpu_backend):
+        """Default local_disk_path_sharding is 'by_gpu' (backend inits OK)."""
+        config = create_test_config(temp_disk_path)
+        backend = LocalDiskBackend(
+            config=config,
+            loop=async_loop,
+            local_cpu_backend=local_cpu_backend,
+            dst_device="cuda:0",
+        )
+        assert backend.path == temp_disk_path
+        local_cpu_backend.memory_allocator.close()
+
+    def test_path_sharding_explicit_by_gpu(
+        self, temp_disk_path, async_loop, local_cpu_backend
+    ):
+        """Explicitly setting local_disk_path_sharding='by_gpu' works."""
+        config = create_test_config(temp_disk_path, local_disk_path_sharding="by_gpu")
+        backend = LocalDiskBackend(
+            config=config,
+            loop=async_loop,
+            local_cpu_backend=local_cpu_backend,
+            dst_device="cuda:0",
+        )
+        assert backend.path == temp_disk_path
+        local_cpu_backend.memory_allocator.close()
+
+    def test_path_sharding_unsupported_raises(
+        self, temp_disk_path, async_loop, local_cpu_backend
+    ):
+        """Unsupported local_disk_path_sharding raises ValueError."""
         config = create_test_config(
             temp_disk_path,
             local_disk_path_sharding="round_robin",
         )
 
-        with pytest.raises(
-            AssertionError,
-            match="Unsupported local_disk_path_sharding",
-        ):
+        with pytest.raises(ValueError, match="Unsupported path sharding strategy"):
             LocalDiskBackend(
                 config=config,
                 loop=async_loop,

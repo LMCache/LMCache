@@ -406,6 +406,209 @@ class TestPluginInitialization:
 
 
 # =========================================================
+# Tests: lazy loading (add_pending_module,
+# ensure_adapter_loaded, load_all_adapters,
+# get_all_registered_names)
+# =========================================================
+
+
+class TestLazyLoading:
+    """Tests for the deferred module import mechanism."""
+
+    @pytest.fixture(autouse=True)
+    def _isolate_registry(self, monkeypatch):
+        """Snapshot and restore the factory registry and
+        pending-module list around each test."""
+        # First Party
+        from lmcache.v1.distributed.l2_adapters import factory as fmod
+
+        orig_reg = fmod._L2_ADAPTER_FACTORY_REGISTRY.copy()
+        orig_pending = list(fmod._PENDING_MODULES)
+        # Start each test with a clean slate
+        fmod._PENDING_MODULES.clear()
+        yield
+        fmod._L2_ADAPTER_FACTORY_REGISTRY.clear()
+        fmod._L2_ADAPTER_FACTORY_REGISTRY.update(orig_reg)
+        fmod._PENDING_MODULES.clear()
+        fmod._PENDING_MODULES.extend(orig_pending)
+
+    # -- add_pending_module --
+
+    def test_add_pending_module_appends(self):
+        """Module path is appended to the pending list."""
+        # First Party
+        from lmcache.v1.distributed.l2_adapters.factory import (
+            _PENDING_MODULES,
+            add_pending_module,
+        )
+
+        add_pending_module("fake.mod.a")
+        assert "fake.mod.a" in _PENDING_MODULES
+
+    def test_add_pending_module_dedup(self):
+        """Duplicate paths are not added twice."""
+        # First Party
+        from lmcache.v1.distributed.l2_adapters.factory import (
+            _PENDING_MODULES,
+            add_pending_module,
+        )
+
+        add_pending_module("fake.mod.b")
+        add_pending_module("fake.mod.b")
+        assert _PENDING_MODULES.count("fake.mod.b") == 1
+
+    # -- ensure_adapter_loaded --
+
+    def test_ensure_already_registered(self):
+        """No import happens when name is already in the
+        registry."""
+        # First Party
+        from lmcache.v1.distributed.l2_adapters.factory import (
+            _L2_ADAPTER_FACTORY_REGISTRY,
+            _PENDING_MODULES,
+            ensure_adapter_loaded,
+        )
+
+        _L2_ADAPTER_FACTORY_REGISTRY["pre"] = lambda c, d: None
+        _PENDING_MODULES.append("should.not.import")
+        ensure_adapter_loaded("pre")
+        # Pending list untouched
+        assert "should.not.import" in _PENDING_MODULES
+
+    def test_ensure_imports_until_found(self, monkeypatch):
+        """Modules are imported one-by-one until the
+        requested name appears in the registry."""
+        # First Party
+        from lmcache.v1.distributed.l2_adapters import factory as fmod
+
+        imported: list[str] = []
+
+        def _fake_import(path):
+            imported.append(path)
+            if path == "mod_b":
+                fmod._L2_ADAPTER_FACTORY_REGISTRY["lazy_b"] = lambda c, d: None
+
+        monkeypatch.setattr("importlib.import_module", _fake_import)
+        fmod._PENDING_MODULES.extend(["mod_a", "mod_b", "mod_c"])
+        fmod.ensure_adapter_loaded("lazy_b")
+
+        assert imported == ["mod_a", "mod_b"]
+        # mod_c should remain pending
+        assert "mod_c" in fmod._PENDING_MODULES
+
+    def test_ensure_raises_last_import_error(self, monkeypatch):
+        """When all pending modules fail, the last
+        ImportError is raised."""
+        # First Party
+        from lmcache.v1.distributed.l2_adapters import factory as fmod
+
+        def _fail_import(path):
+            raise ImportError(path)
+
+        monkeypatch.setattr("importlib.import_module", _fail_import)
+        fmod._PENDING_MODULES.extend(["bad_a", "bad_b"])
+
+        with pytest.raises(ImportError, match="bad_b"):
+            fmod.ensure_adapter_loaded("missing")
+
+    def test_ensure_no_error_when_not_found_silently(self, monkeypatch):
+        """When pending modules import OK but name is
+        still missing, no error is raised (no last_err).
+        """
+        # First Party
+        from lmcache.v1.distributed.l2_adapters import factory as fmod
+
+        monkeypatch.setattr("importlib.import_module", lambda p: None)
+        fmod._PENDING_MODULES.extend(["ok_a", "ok_b"])
+
+        # Should not raise
+        fmod.ensure_adapter_loaded("nonexistent")
+
+    # -- load_all_adapters --
+
+    def test_load_all_adapters_imports_everything(self, monkeypatch):
+        """All pending modules are imported."""
+        # First Party
+        from lmcache.v1.distributed.l2_adapters import factory as fmod
+
+        imported: list[str] = []
+        monkeypatch.setattr(
+            "importlib.import_module",
+            lambda p: imported.append(p),
+        )
+        fmod._PENDING_MODULES.extend(["m1", "m2", "m3"])
+        fmod.load_all_adapters()
+
+        assert imported == ["m1", "m2", "m3"]
+        assert len(fmod._PENDING_MODULES) == 0
+
+    def test_load_all_adapters_skips_failures(self, monkeypatch):
+        """Modules that fail to import are silently
+        skipped."""
+        # First Party
+        from lmcache.v1.distributed.l2_adapters import factory as fmod
+
+        imported: list[str] = []
+
+        def _selective_import(path):
+            if path == "bad":
+                raise ImportError(path)
+            imported.append(path)
+
+        monkeypatch.setattr("importlib.import_module", _selective_import)
+        fmod._PENDING_MODULES.extend(["good1", "bad", "good2"])
+        fmod.load_all_adapters()
+
+        assert imported == ["good1", "good2"]
+        assert len(fmod._PENDING_MODULES) == 0
+
+    # -- get_all_registered_names --
+
+    def test_get_all_registered_names_sorted(self, monkeypatch):
+        """Returns sorted list after loading all pending
+        modules."""
+        # First Party
+        from lmcache.v1.distributed.l2_adapters import factory as fmod
+
+        def _register_import(path):
+            fmod._L2_ADAPTER_FACTORY_REGISTRY[path] = lambda c, d: None
+
+        monkeypatch.setattr("importlib.import_module", _register_import)
+        fmod._PENDING_MODULES.extend(["z_mod", "a_mod"])
+
+        names = fmod.get_all_registered_names()
+        # Should contain at least the two we just added
+        assert "z_mod" in names
+        assert "a_mod" in names
+        # Must be sorted
+        assert names == sorted(names)
+
+    def test_lazy_module_not_in_sys_modules(self, monkeypatch):
+        """Pending modules are NOT in sys.modules until
+        ensure_adapter_loaded triggers the import."""
+        # Standard
+        import sys
+
+        # First Party
+        from lmcache.v1.distributed.l2_adapters import factory as fmod
+
+        sentinel = "test.lazy.sentinel.module"
+        fmod._PENDING_MODULES.append(sentinel)
+        assert sentinel not in sys.modules
+
+        def _fake_import(path):
+            mod = types.ModuleType(path)
+            sys.modules[path] = mod
+            fmod._L2_ADAPTER_FACTORY_REGISTRY["sentinel"] = lambda c, d: None
+
+        monkeypatch.setattr("importlib.import_module", _fake_import)
+        fmod.ensure_adapter_loaded("sentinel")
+        assert sentinel in sys.modules
+        # Cleanup
+        sys.modules.pop(sentinel, None)
+
+
+# =========================================================
 # Tests: create_l2_adapter public API
 # =========================================================
 

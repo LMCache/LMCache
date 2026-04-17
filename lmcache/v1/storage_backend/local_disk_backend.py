@@ -34,6 +34,7 @@ from lmcache.v1.storage_backend.job_executor.pq_executor import (
     AsyncPQThreadPoolExecutor,
 )
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
+from lmcache.v1.storage_backend.path_sharder import PathSharder
 
 if TYPE_CHECKING:
     # First Party
@@ -175,30 +176,19 @@ class LocalDiskBackend(StorageBackendInterface):
         self.disk_lock = threading.Lock()
 
         assert config.local_disk is not None
-        paths = [p.strip() for p in config.local_disk.split(",") if p.strip()]
-        assert len(paths) > 0, "At least one disk path must be provided"
-
-        self.local_disk_path_sharding = config.local_disk_path_sharding
-        assert self.local_disk_path_sharding == "by_gpu", (
-            f"Unsupported local_disk_path_sharding "
-            f"'{self.local_disk_path_sharding}'. "
-            "Only 'by_gpu' is supported currently."
+        sharder = PathSharder(
+            raw_csv=config.local_disk,
+            strategy=config.local_disk_path_sharding,
+            dst_device=dst_device,
+            create_dirs=True,
         )
-
-        device_id = (
-            int(dst_device.split(":")[1])
-            if ":" in dst_device
-            else (torch.cuda.current_device() if torch.cuda.is_available() else 0)
-        )
-        self.path = paths[device_id % len(paths)]
-
-        for path in paths:
-            os.makedirs(path, exist_ok=True)
+        self.local_disk_path_sharding = sharder.strategy
+        self.path: str = sharder.selected
         logger.info(
             "Local disk cache path: %s (device %s, %d path(s) configured)",
             self.path,
             dst_device,
-            len(paths),
+            len(sharder.all_paths),
         )
 
         self.loop = loop
