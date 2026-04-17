@@ -753,7 +753,9 @@ def test_dax_backend_primary_rejects_cpu_tier_config(
             )
 
 
+@pytest.mark.parametrize("dax_mode", ["primary", " PRIMARY "])
 def test_storage_manager_can_use_dax_primary_as_allocator(
+    dax_mode: str,
     disable_direct_gpu_ready,
     monkeypatch,
 ) -> None:
@@ -791,7 +793,7 @@ def test_storage_manager_can_use_dax_primary_as_allocator(
                 ),
                 "storage_plugin.dax.class_name": "DaxBackend",
                 "dax.device_path": dev_path,
-                "dax.mode": "primary",
+                "dax.mode": dax_mode,
                 "dax.max_dax_size": 4096 / 1024**3,
             },
         )
@@ -880,8 +882,7 @@ def test_dax_backend_primary_checks_cuda_host_unregister_status(
 
     assert fake_cudart.unregister_calls == 1
     assert warnings == [
-        "Failed to unregister DAX host mapping: "
-        "CUDA error code 3: fake cuda error 3"
+        "Failed to unregister DAX host mapping: CUDA error code 3: fake cuda error 3"
     ]
 
 

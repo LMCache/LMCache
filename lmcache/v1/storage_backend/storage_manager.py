@@ -314,10 +314,7 @@ class StorageManager:
     ) -> AllocatorBackendInterface:
         if self.enable_pd:
             allocator_backend = self.storage_backends["PDBackend"]
-        elif (
-            "dax" in self.storage_backends
-            and (config.extra_config or {}).get("dax.mode") == "primary"
-        ):
+        elif getattr(self.storage_backends.get("dax"), "mode", None) == "primary":
             allocator_backend = self.storage_backends["dax"]
         elif "MaruBackend" in self.storage_backends:
             if "LocalCPUBackend" in self.storage_backends:
