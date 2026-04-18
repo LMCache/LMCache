@@ -176,7 +176,9 @@ class RequestTracker:
         if isinstance(block_ids, tuple):
             if len(block_ids) == 0:
                 return tuple()
-            return tuple(list(group) for group in block_ids)
+            if isinstance(block_ids[0], (list, tuple)):
+                return tuple(list(group) for group in block_ids)
+            return (list(block_ids),)
         if isinstance(block_ids, list):
             if len(block_ids) == 0:
                 return tuple()
