@@ -259,10 +259,6 @@ class TestArgumentParsing:
         assert args.json is True
         assert args.quiet is True
 
-    def test_record_parses(self, parser):
-        args = parser.parse_args(["trace", "record"])
-        assert args.trace_target == "record"
-
 
 class TestInfoSubcommand:
     def test_info_prints_summary(self, cmd, small_trace, capsys):
@@ -336,12 +332,45 @@ class TestReplaySubcommand:
         assert "Trace Replay Result" in out
 
 
-class TestRecordSubcommandStub:
-    def test_record_exits_with_code_2(self, cmd, capsys):
-        args = argparse.Namespace(trace_target="record")
+class TestCLIOnlyInstall:
+    """Simulate the ``lmcache-cli``-only install: the heavy
+    ``lmcache.v1.*`` imports in :mod:`lmcache.cli.commands.trace`
+    failed at module load.  ``info`` / ``replay`` must surface a
+    clear install hint instead of crashing.
+
+    The install hint is printed directly to ``sys.stderr``; tests
+    capture via ``capsys``.
+    """
+
+    def test_info_exits_with_install_hint(self, cmd, capsys, monkeypatch):
+        # First Party
+        import lmcache.cli.commands.trace as trace_mod
+
+        monkeypatch.setattr(
+            trace_mod,
+            "_IMPORT_ERROR",
+            ImportError("No module named 'lmcache.v1.distributed'"),
+        )
+        args = argparse.Namespace(trace_target="info", trace_path="/tmp/x.lct")
         with pytest.raises(SystemExit) as ei:
             cmd.execute(args)
         assert ei.value.code == 2
-        out = capsys.readouterr().out
-        assert "lmcache server" in out
-        assert "--trace-level storage" in out
+        err = capsys.readouterr().err
+        assert "full LMCache package" in err
+        assert "pip install lmcache" in err
+
+    def test_replay_exits_with_install_hint(self, cmd, capsys, monkeypatch):
+        # First Party
+        import lmcache.cli.commands.trace as trace_mod
+
+        monkeypatch.setattr(
+            trace_mod,
+            "_IMPORT_ERROR",
+            ImportError("No module named 'lmcache.v1.mp_observability'"),
+        )
+        args = argparse.Namespace(trace_target="replay", trace_path="/tmp/x.lct")
+        with pytest.raises(SystemExit) as ei:
+            cmd.execute(args)
+        assert ei.value.code == 2
+        err = capsys.readouterr().err
+        assert "full LMCache package" in err

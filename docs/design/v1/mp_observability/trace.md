@@ -449,7 +449,12 @@ into non-deterministic retrieve misses.
 |---------|---------|
 | `lmcache trace info FILE` | Header metadata + per-qualname record counts + total duration. |
 | `lmcache trace replay FILE <storage-manager flags> [--verbose] [--jsonl-out PATH] [--output-dir DIR] [--no-csv] [--json] [-q]` | Replay the trace, always honoring the recorded inter-call timings (see §9.4). Logs progress (`[N/total] qualname ...`) per record. Emits a terminal metrics table (unless `-q`) with count / mean / p50 / p99 per qualname, and writes `trace_replay_ops.csv` / `trace_replay_summary.json` in `--output-dir` (CSV by default; JSON with `--json`). `--verbose` and `--jsonl-out` stream per-record output for post-hoc analysis. |
-| `lmcache trace record` | v1 stub: prints the equivalent `lmcache server --trace-level storage` invocation and exits 2. Holds the slot for future runtime capture. |
+
+Trace *capture* is intentionally not a `trace` subcommand: recording
+is bound to a live process, so it is enabled via
+`lmcache server --trace-level storage [--trace-output ...]`.  A
+separate `trace record` stub would only duplicate that flag while
+suggesting a runtime-capture CLI that does not yet exist.
 
 The `replay` command accepts the full `lmcache/v1/distributed/config.py`
 `add_storage_manager_args` flag set (`--l1-size-gb`,

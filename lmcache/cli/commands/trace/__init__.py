@@ -14,8 +14,12 @@ Subcommands:
   aggregated CSV/JSON summary export (``--output-dir`` / ``--no-csv``
   / ``--json``), and a terminal metrics table (suppressible with
   ``-q``).
-* ``record`` — v1 stub.  Prints the equivalent
-  ``lmcache server --trace-level storage …`` invocation and exits.
+
+Trace *capture* is not a ``trace`` subcommand — recording is bound to
+the live process via ``lmcache server --trace-level storage
+[--trace-output ...]``.  Surfacing a CLI stub here would only
+duplicate that flag while leaving the user wondering why it cannot
+start a recorder against an already-running server.
 """
 
 # Future
@@ -31,22 +35,75 @@ import sys
 
 # First Party
 from lmcache.cli.commands.base import BaseCommand
-from lmcache.cli.commands.trace.driver import ReplayResult, StorageReplayDriver
-from lmcache.cli.commands.trace.stats import ReplayStatsCollector
 from lmcache.cli.metrics import Metrics, StreamHandler, get_formatter
 from lmcache.logging import init_logger
-from lmcache.v1.distributed.config import (
-    StorageManagerConfig,
-    add_storage_manager_args,
-    parse_args_to_config,
-)
-from lmcache.v1.mp_observability.config import (
-    add_observability_args,
-    parse_args_to_observability_config,
-)
-from lmcache.v1.mp_observability.trace.reader import TraceReader
 
 logger = init_logger(__name__)
+
+# ``lmcache trace`` drives a real StorageManager and decodes a binary
+# trace file — both pulled from the full LMCache runtime
+# (``lmcache.v1.*``, torch kernels, native ops).  Users who installed
+# the thin ``lmcache-cli`` shell lack those modules, so importing them
+# unconditionally at the top of this file would kill the *entire*
+# ``lmcache`` CLI with an opaque ImportError the first time
+# ``lmcache/cli/commands/__init__.py`` loads the command registry.
+#
+# Wrap the heavy imports and remember the error so each subcommand
+# handler can bail out with an actionable install hint.  ``record`` is
+# a stub that needs no runtime, so it keeps working on a CLI-only
+# install.
+_IMPORT_ERROR: ImportError | None = None
+try:
+    # First Party
+    from lmcache.cli.commands.trace.driver import (
+        ReplayResult,
+        StorageReplayDriver,
+    )
+    from lmcache.cli.commands.trace.stats import ReplayStatsCollector
+    from lmcache.v1.distributed.config import (
+        StorageManagerConfig,
+        add_storage_manager_args,
+        parse_args_to_config,
+    )
+    from lmcache.v1.mp_observability.config import (
+        add_observability_args,
+        parse_args_to_observability_config,
+    )
+    from lmcache.v1.mp_observability.trace.reader import TraceReader
+except ImportError as _exc:
+    _IMPORT_ERROR = _exc
+
+
+def _require_full_install() -> None:
+    """Exit with an install hint if the full LMCache runtime is missing.
+
+    ``lmcache trace info`` and ``lmcache trace replay`` both need
+    ``lmcache.v1.*`` (StorageManager, trace codecs, TraceReader).
+    When those imports failed at module load — almost always because
+    the user installed ``lmcache-cli`` instead of the full package —
+    this helper prints the shortest actionable message to stderr and
+    exits with status ``2`` so scripts can detect the install gap
+    programmatically.
+
+    Writes directly to :data:`sys.stderr` rather than going through
+    :mod:`logging` so the message reaches the user even when the
+    lmcache logger has been suppressed or its handlers redirected.
+
+    No-op when imports succeeded, so it is safe to call
+    unconditionally at the top of every trace handler.
+    """
+    if _IMPORT_ERROR is None:
+        return
+    print(
+        "ERROR: `lmcache trace` needs the full LMCache package "
+        "(StorageManager, trace codecs, etc.), but only the `lmcache-cli` "
+        "shell appears to be installed.\n"
+        "  Install the full package with `pip install lmcache` and try "
+        "again.\n"
+        f"  Original import error: {_IMPORT_ERROR}",
+        file=sys.stderr,
+    )
+    sys.exit(2)
 
 
 class TraceCommand(BaseCommand):
@@ -67,11 +124,11 @@ class TraceCommand(BaseCommand):
         """Register ``trace`` with the root parser.
 
         Overrides :meth:`BaseCommand.register` because ``trace`` has
-        its own nested subparsers (``info``, ``replay``, ``record``).
-        The base-class ``--format``/``--output``/``--quiet`` flags do
-        not apply uniformly across the subcommands — ``replay`` has
-        its own ``--jsonl-out`` output channel — so they are added
-        only to ``info``.
+        its own nested subparsers (``info`` and ``replay``).  The
+        base-class ``--format``/``--output``/``--quiet`` flags do not
+        apply uniformly across the subcommands — ``replay`` has its
+        own ``--jsonl-out`` output channel — so they are added only
+        to ``info``.
         """
         parser = subparsers.add_parser(
             self.name(),
@@ -81,18 +138,16 @@ class TraceCommand(BaseCommand):
         inner = parser.add_subparsers(
             dest="trace_target",
             required=True,
-            metavar="{info,replay,record}",
+            metavar="{info,replay}",
         )
         self._register_info(inner)
         self._register_replay(inner)
-        self._register_record(inner)
 
     def execute(self, args: argparse.Namespace) -> None:
         """Dispatch the parsed subcommand."""
         handlers: dict[str, Callable[[argparse.Namespace], None]] = {
             "info": self._run_info,
             "replay": self._run_replay,
-            "record": self._run_record,
         }
         handler = handlers.get(args.trace_target)
         if handler is None:
@@ -120,6 +175,7 @@ class TraceCommand(BaseCommand):
 
     def _run_info(self, args: argparse.Namespace) -> None:
         """Read a trace file and print a one-screen summary."""
+        _require_full_install()
         with TraceReader(args.trace_path) as r:
             header = r.header
             counts: Counter[str] = Counter()
@@ -203,15 +259,24 @@ class TraceCommand(BaseCommand):
             action="store_true",
             help="Suppress the terminal metrics table (files are still written).",
         )
-        add_storage_manager_args(parser)
-        # Share the full observability surface with ``lmcache server``
-        # so that metrics / logging / OTLP flags work identically on
-        # the replay side.  ``--trace-level`` / ``--trace-output``
-        # configure *recording* and have no effect during replay;
-        # :meth:`_run_replay` overrides them to ``None`` before
-        # constructing the observability config rather than duplicating
-        # the argparse registration to strip them.
-        add_observability_args(parser)
+        # ``add_storage_manager_args`` and ``add_observability_args``
+        # live in the full LMCache runtime (``lmcache.v1.*``) and are
+        # unavailable in the CLI-only install.  When those imports
+        # failed at module load, register ``replay`` with only the
+        # CLI-local flags above so ``--help`` still works; the actual
+        # execute path bails via :func:`_require_full_install` before
+        # it would try to parse the missing-flag namespace.
+        #
+        # When the full runtime *is* present we share the whole
+        # observability surface with ``lmcache server``.
+        # ``--trace-level`` / ``--trace-output`` configure *recording*
+        # and have no effect during replay; :meth:`_run_replay`
+        # overrides them to ``None`` before constructing the
+        # observability config rather than duplicating the argparse
+        # registration to strip them.
+        if _IMPORT_ERROR is None:
+            add_storage_manager_args(parser)
+            add_observability_args(parser)
         parser.set_defaults(func=self.execute)
 
     def _run_replay(self, args: argparse.Namespace) -> None:
@@ -229,6 +294,7 @@ class TraceCommand(BaseCommand):
         * Terminal metrics table (unless ``--quiet``) using the shared
           :class:`~lmcache.cli.metrics.Metrics` renderer.
         """
+        _require_full_install()
         sm_config: StorageManagerConfig = parse_args_to_config(args)
 
         # ``--trace-level`` / ``--trace-output`` belong to the recording
@@ -411,40 +477,6 @@ class TraceCommand(BaseCommand):
                 )
 
         metrics.emit()
-
-    # ------------------------------------------------------------------
-    # ``record`` (stub)
-    # ------------------------------------------------------------------
-
-    def _register_record(self, subparsers: argparse._SubParsersAction) -> None:
-        subparsers.add_parser(
-            "record",
-            help=(
-                "(v1 stub) print the equivalent 'lmcache server "
-                "--trace-level storage' invocation."
-            ),
-        ).set_defaults(func=self.execute)
-
-    def _run_record(self, _args: argparse.Namespace) -> None:
-        """Print the server-flag equivalent and exit.
-
-        Kept as a visible subcommand so future runtime-capture work
-        lands at a discoverable name.  Exits with status 2 to
-        distinguish "intentional no-op" from "successful run".
-        """
-        print(
-            "'lmcache trace record' is a v1 stub.  "
-            "To capture a trace, restart the server with:",
-        )
-        print(
-            "  lmcache server --trace-level storage "
-            "[--trace-output /path/to/trace.lct] ...",
-        )
-        print(
-            "Runtime start/stop of tracing from the CLI is planned for "
-            "a follow-up release.",
-        )
-        sys.exit(2)
 
 
 def _short_op_name(qualname: str) -> str:
