@@ -57,9 +57,6 @@ version_file = "lmcache/_version.py"
 # do not include +gREV local version, required for Test PyPI upload
 local_scheme = "no-local-version"
 
-[tool.setuptools.dynamic]
-dependencies = { file = ["requirements/common.txt"] }
-
 [tool.setuptools.packages.find]
 where = [""]
 include = ["lmcache", "lmcache*"]
