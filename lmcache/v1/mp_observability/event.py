@@ -65,6 +65,18 @@ class EventType(Enum):
     # vLLM end session events
     MP_VLLM_END_SESSION = "mp.vllm.end_session"
 
+    # Trace recording — unified function-call entry event used by the
+    # ``@enable_tracing`` decorator.  Metadata layout:
+    #   ``qualname`` (str):   fully-qualified function name
+    #   ``args``     (dict):  name -> raw Python value (codec-encoded at
+    #                         record time by the recorder)
+    #   ``t_mono``   (float): ``time.monotonic()`` captured at publish
+    #                         time, so it is comparable to
+    #                         ``Event.timestamp`` (wall-clock) even
+    #                         though the drain thread processes the
+    #                         event later
+    TRACE_CALL = "trace.call"
+
 
 @dataclass
 class Event:
@@ -77,7 +89,8 @@ class Event:
             drain thread processes the event.  For CUDA host-callback events
             this captures GPU-accurate timing.
         metadata: Flat key-value payload.  Contents depend on ``event_type``;
-            see the metadata contracts in DESIGN.md Section 2.7.
+            see the metadata contracts in
+            ``docs/design/v1/mp_observability/event-bus.md`` Section 2.7.
         session_id: Caller-provided ID for correlating start/end pairs.
     """
 

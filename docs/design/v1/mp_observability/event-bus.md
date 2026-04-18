@@ -1,4 +1,4 @@
-# MP Observability Design
+# MP Observability: EventBus Design
 
 This document describes the design rationale behind the EventBus-based
 observability system.  For configuration reference see [README.md](README.md).

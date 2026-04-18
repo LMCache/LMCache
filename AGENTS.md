@@ -125,7 +125,20 @@ Every public function and method must have a clear docstring covering:
 
 ### Writing Documentation
 
-User-facing and design documentation lives in the `docs/source/` directory and is built with **Sphinx**. Documentation files use reStructuredText (`.rst`). When adding or modifying docs, place them in the appropriate subdirectory under `docs/source/` (e.g., `developer_guide/`, `getting_started/`, `kv_cache/`) and make sure any new pages are linked from a `toctree` so they appear in the built site.
+LMCache has three documentation surfaces:
+
+1. **User-facing docs** (`docs/source/`, reStructuredText, Sphinx-built). When adding
+   or modifying user docs, place them in the appropriate subdirectory under
+   `docs/source/` (e.g., `developer_guide/`, `getting_started/`, `kv_cache/`) and link
+   new pages from a `toctree` so they appear in the built site.
+2. **Design docs** (`docs/design/`, Markdown). **`docs/design/` mirrors the `lmcache/`
+   package tree** — a design doc for `lmcache/<path>/` lives at `docs/design/<path>/`.
+   For example, `lmcache/v1/distributed/l2_adapters/` → `docs/design/v1/distributed/l2_adapters/`.
+   When adding a design doc, place it at the path matching the module it describes;
+   when touching existing docs, find them at the mirrored location. See
+   `docs/design/README.md` for the full convention.
+3. **Module READMEs** (`README.md` next to code). Stay in place as user-entry-points;
+   they are symlinked from `docs/design/<path>/README.md`. Do not move them.
 
 When writing or updating documentation, follow these principles:
 

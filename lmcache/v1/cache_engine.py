@@ -1663,6 +1663,7 @@ class LMCacheEngine:
                 location=location,
             )
 
+            used_keys: set[CacheEngineKey] = set()
             for (key, start, end), memory_obj in zip(blocks, memory_objs, strict=False):
                 if memory_obj is None:
                     logger.warning(
@@ -1670,13 +1671,25 @@ class LMCacheEngine:
                     )
                     if (
                         last_failed_block_start is None
-                        or last_failed_block_start < start
+                        # The minimum value should be taken here to ensure that
+                        # the prefix keys are all consecutive successful.
+                        or last_failed_block_start > start
                     ):
                         last_failed_block_start = start
                     break
                 reordered_chunks.append((key, memory_obj, start, end))
                 tot_kv_size += memory_obj.get_size()
                 ret_mask[start:end] = True
+                used_keys.add(key)
+
+            for (key, _, _), memory_obj in zip(blocks, memory_objs, strict=False):
+                if memory_obj is not None and key not in used_keys:
+                    logger.debug(
+                        "ref_count_down for %s of %s as the previous key failed",
+                        key,
+                        location,
+                    )
+                    memory_obj.ref_count_down()
 
         if last_failed_block_start is not None:
             ret_mask[last_failed_block_start:] = False
@@ -1686,6 +1699,7 @@ class LMCacheEngine:
                 if end < last_failed_block_start:
                     kept_chunks.append((key, memory_obj, start, end))
                 else:
+                    tot_kv_size -= memory_obj.get_size()
                     # This chunk will not be used. If the engine is configured
                     # to remove-after-retrieve, the caller would normally call
                     # remove (which frees the block), but since we are dropping

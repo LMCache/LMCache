@@ -646,7 +646,12 @@ class TensorMemoryObj(MemoryObj):
         #   "byte_array only works with CPU tensors"
         # return memoryview(self.raw_data.contiguous().numpy())
 
-        num_bytes = self.raw_data.numel() * self.raw_data.element_size()
+        # Use logical size (get_size) rather than raw_data physical size.
+        # The raw_data buffer may include alignment padding (e.g. from
+        # batched_allocate) that must not be exposed to callers such as
+        # remote-backend put/get which rely on byte_array length matching
+        # the metadata length.
+        num_bytes = self.get_size()
         ptr = self.raw_data.data_ptr()
         ubyte_ptr = ctypes.cast(ptr, ctypes.POINTER(ctypes.c_ubyte))
         byte_array = (ctypes.c_ubyte * num_bytes).from_address(
