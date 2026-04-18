@@ -57,7 +57,7 @@ class EventType(Enum):
     MP_REQUEST_START = "mp.request.start"
     MP_RETRIEVE_SUBMITTED = "mp.retrieve.submitted"
     MP_STORE_SUBMITTED = "mp.store.submitted"
-    MP_SESSION_END = "mp.session.end"
+    MP_REQUEST_END = "mp.request.end"
 
     # vLLM block allocation events
     MP_VLLM_BLOCK_ALLOCATION = "mp.vllm.block_allocation"
@@ -90,11 +90,11 @@ class EventType(Enum):
     CB_CHUNKS_EVICTED = "cb.chunks.evicted"
 
     # Cache Blending (CB) events — lifecycle sentinels (CPU-synchronous)
-    CB_SESSION_START = "cb.session.start"
+    CB_REQUEST_START = "cb.request.start"
     CB_STORE_PRE_COMPUTED_SUBMITTED = "cb.store_pre_computed.submitted"
     CB_RETRIEVE_SUBMITTED = "cb.retrieve.submitted"
     CB_STORE_FINAL_SUBMITTED = "cb.store_final.submitted"
-    CB_SESSION_END = "cb.session.end"
+    CB_REQUEST_END = "cb.request.end"
 
 
 @dataclass

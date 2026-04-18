@@ -3,7 +3,7 @@
 """OTel tracing subscriber for Cache Blending (CB) operations.
 
 Creates a root ``"cb.request"`` span per session wrapping all CB child spans.
-Opens at ``CB_SESSION_START``; closes at ``CB_SESSION_END``, deferred until
+Opens at ``CB_REQUEST_START``; closes at ``CB_REQUEST_END``, deferred until
 any in-flight GPU store/retrieve callbacks complete.
 
 Accepts an optional :class:`~lmcache.v1.mp_observability.subscribers.tracing\
@@ -41,8 +41,8 @@ class BlendTracingSubscriber(EventSubscriber):
 
     Each session gets one root ``"cb.request"`` span that nests all child
     spans (``cb.lookup``, ``cb.store_pre_computed``, ``cb.retrieve``,
-    ``cb.store_final``).  The root is opened at ``CB_SESSION_START`` and
-    closed at ``CB_SESSION_END``, with deferral if GPU ops are still in
+    ``cb.store_final``).  The root is opened at ``CB_REQUEST_START`` and
+    closed at ``CB_REQUEST_END``, with deferral if GPU ops are still in
     flight.
 
     When a shared :class:`SpanRegistry` is provided, ``"cb.request"`` is
@@ -82,18 +82,18 @@ class BlendTracingSubscriber(EventSubscriber):
         # session_id -> number of in-flight GPU ops (SUBMITTED without matching END)
         self._pending_gpu_ops: dict[str, int] = {}
 
-        # session_id -> SESSION_END timestamp saved when GPU ops are in flight
+        # session_id -> REQUEST_END timestamp saved when GPU ops are in flight
         self._deferred_session_end_ts: dict[str, float] = {}
 
     def get_subscriptions(self) -> dict[EventType, EventCallback]:
         """Return the event-to-callback mapping for this subscriber."""
         return {
             # Root span lifecycle
-            EventType.CB_SESSION_START: self._on_request_start,
+            EventType.CB_REQUEST_START: self._on_request_start,
             EventType.CB_STORE_PRE_COMPUTED_SUBMITTED: self._on_submitted,
             EventType.CB_RETRIEVE_SUBMITTED: self._on_submitted,
             EventType.CB_STORE_FINAL_SUBMITTED: self._on_submitted,
-            EventType.CB_SESSION_END: self._on_session_end,
+            EventType.CB_REQUEST_END: self._on_session_end,
             # Child spans
             EventType.CB_STORE_PRE_COMPUTED_START: self._on_start,
             EventType.CB_STORE_PRE_COMPUTED_END: self._on_end,
@@ -139,7 +139,7 @@ class BlendTracingSubscriber(EventSubscriber):
         """Create the ``"cb.request"`` root span, nested under MP's root if present.
 
         Args:
-            event: ``CB_SESSION_START`` event with ``session_id`` set.
+            event: ``CB_REQUEST_START`` event with ``session_id`` set.
         """
         if not _HAS_OTEL:
             return
@@ -172,7 +172,7 @@ class BlendTracingSubscriber(EventSubscriber):
         """Close the root span, or defer if GPU ops are still in flight.
 
         Args:
-            event: ``CB_SESSION_END`` event carrying the logical end timestamp.
+            event: ``CB_REQUEST_END`` event carrying the logical end timestamp.
         """
         if not _HAS_OTEL:
             return

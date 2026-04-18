@@ -361,7 +361,7 @@ class BlendEngineV2(MPCacheEngine):
         num_tokens = len(key.token_ids)
         self._event_bus.publish(
             Event(
-                event_type=EventType.CB_SESSION_START,
+                event_type=EventType.CB_REQUEST_START,
                 session_id=key.request_id,
             )
         )
@@ -393,7 +393,7 @@ class BlendEngineV2(MPCacheEngine):
             )
             self._event_bus.publish(
                 Event(
-                    event_type=EventType.CB_SESSION_END,
+                    event_type=EventType.CB_REQUEST_END,
                     session_id=key.request_id,
                 )
             )
@@ -445,7 +445,7 @@ class BlendEngineV2(MPCacheEngine):
             )
             self._event_bus.publish(
                 Event(
-                    event_type=EventType.CB_SESSION_END,
+                    event_type=EventType.CB_REQUEST_END,
                     session_id=key.request_id,
                 )
             )
@@ -924,7 +924,7 @@ class BlendEngineV2(MPCacheEngine):
         )
         self._event_bus.publish(
             Event(
-                event_type=EventType.CB_SESSION_END,
+                event_type=EventType.CB_REQUEST_END,
                 session_id=key.request_id,
             )
         )
