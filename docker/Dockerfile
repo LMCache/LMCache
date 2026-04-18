@@ -60,9 +60,6 @@ ENV NVCC_THREADS=$nvcc_threads
 
 ARG CUDA_VERSION
 ARG VLLM_VERSION=nightly
-# Set to 1 to install triton-kernels from source (slow git clone); off by default
-# as LMCache does not use triton-kernels directly.
-ARG BUILD_TRITON=0
 
 RUN --mount=type=cache,target=/root/.cache/pip \
     . /opt/venv/bin/activate && \
@@ -81,18 +78,15 @@ RUN --mount=type=cache,target=/root/.cache/ccache,id=ccache \
     --mount=type=cache,target=/root/.cache/uv,id=uv-cache,sharing=locked \
     . /opt/venv/bin/activate && \
     CUDA_TAG=cu$(echo ${CUDA_VERSION} | tr -d '.') && \
-    TRITON_PKG=$([ "${BUILD_TRITON}" = "1" ] && echo "triton-kernels@git+https://github.com/triton-lang/triton.git@v3.5.0#subdirectory=python/triton_kernels" || echo "") && \
     if [ "$VLLM_VERSION" = "nightly" ]; then \
         uv pip install --prerelease=allow \
             'vllm[runai,tensorizer,flashinfer]' \
-            ${TRITON_PKG} \
             --extra-index-url https://wheels.vllm.ai/nightly/${CUDA_TAG} \
             --extra-index-url https://download.pytorch.org/whl/${CUDA_TAG} \
             --index-strategy unsafe-best-match ; \
     else \
         uv pip install --prerelease=allow \
-            "vllm[runai,tensorizer,flashinfer]==${VLLM_VERSION}" \
-            ${TRITON_PKG} ; \
+            "vllm[runai,tensorizer,flashinfer]==${VLLM_VERSION}" ; \
     fi && \
     python3 -c 'import torch; print("TORCH=", torch.__version__)' && \
     python3 setup.py bdist_wheel --dist-dir=dist_lmcache && \
