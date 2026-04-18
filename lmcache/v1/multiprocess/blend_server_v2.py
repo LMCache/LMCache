@@ -361,7 +361,7 @@ class BlendEngineV2(MPCacheEngine):
         num_tokens = len(key.token_ids)
         self._event_bus.publish(
             Event(
-                event_type=EventType.CB_REQUEST_START,
+                event_type=EventType.CB_SESSION_START,
                 session_id=key.request_id,
             )
         )
@@ -389,6 +389,12 @@ class BlendEngineV2(MPCacheEngine):
                         "stale_chunks": 0,
                         "no_gpu_context": False,
                     },
+                )
+            )
+            self._event_bus.publish(
+                Event(
+                    event_type=EventType.CB_SESSION_END,
+                    session_id=key.request_id,
                 )
             )
             return []
@@ -435,6 +441,12 @@ class BlendEngineV2(MPCacheEngine):
                         "stale_chunks": 0,
                         "no_gpu_context": True,
                     },
+                )
+            )
+            self._event_bus.publish(
+                Event(
+                    event_type=EventType.CB_SESSION_END,
+                    session_id=key.request_id,
                 )
             )
             return []
@@ -675,6 +687,7 @@ class BlendEngineV2(MPCacheEngine):
                 self._event_bus.publish(
                     Event(
                         event_type=EventType.CB_FINGERPRINTS_REGISTERED,
+                        session_id=key.request_id,
                         metadata={
                             "num_chunks": len(token_hashes),
                             "num_tokens": len(list(key.token_ids)),

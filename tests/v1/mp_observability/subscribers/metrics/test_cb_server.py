@@ -44,7 +44,7 @@ class TestBlendMetricsSubscriber:
 
     def test_no_subscription_for_lifecycle_sentinels(self, subscriber):
         subs = subscriber.get_subscriptions()
-        assert EventType.CB_REQUEST_START not in subs
+        assert EventType.CB_SESSION_START not in subs
         assert EventType.CB_SESSION_END not in subs
         assert EventType.CB_STORE_PRE_COMPUTED_SUBMITTED not in subs
         assert EventType.CB_RETRIEVE_SUBMITTED not in subs

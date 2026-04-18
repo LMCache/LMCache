@@ -3,7 +3,7 @@
 """OTel tracing subscriber for Cache Blending (CB) operations.
 
 Creates a root ``"cb.request"`` span per session wrapping all CB child spans.
-Opens at ``CB_REQUEST_START``; closes at ``CB_SESSION_END``, deferred until
+Opens at ``CB_SESSION_START``; closes at ``CB_SESSION_END``, deferred until
 any in-flight GPU store/retrieve callbacks complete.
 
 Accepts an optional :class:`~lmcache.v1.mp_observability.subscribers.tracing\
@@ -41,7 +41,7 @@ class BlendTracingSubscriber(EventSubscriber):
 
     Each session gets one root ``"cb.request"`` span that nests all child
     spans (``cb.lookup``, ``cb.store_pre_computed``, ``cb.retrieve``,
-    ``cb.store_final``).  The root is opened at ``CB_REQUEST_START`` and
+    ``cb.store_final``).  The root is opened at ``CB_SESSION_START`` and
     closed at ``CB_SESSION_END``, with deferral if GPU ops are still in
     flight.
 
@@ -49,6 +49,7 @@ class BlendTracingSubscriber(EventSubscriber):
     nested under the MP server ``"request"`` span for the same session.
     """
 
+    # Maps each START event to its span name (used for creation and registry key).
     _SPAN_DEFS: dict[EventType, str] = {
         EventType.CB_STORE_PRE_COMPUTED_START: "cb.store_pre_computed",
         EventType.CB_LOOKUP_START: "cb.lookup",
@@ -61,13 +62,6 @@ class BlendTracingSubscriber(EventSubscriber):
         EventType.CB_LOOKUP_END: EventType.CB_LOOKUP_START,
         EventType.CB_RETRIEVE_END: EventType.CB_RETRIEVE_START,
         EventType.CB_STORE_FINAL_END: EventType.CB_STORE_FINAL_START,
-    }
-
-    _LOGICAL_NAMES: dict[EventType, str] = {
-        EventType.CB_STORE_PRE_COMPUTED_START: "cb.store_pre_computed",
-        EventType.CB_LOOKUP_START: "cb.lookup",
-        EventType.CB_RETRIEVE_START: "cb.retrieve",
-        EventType.CB_STORE_FINAL_START: "cb.store_final",
     }
 
     # END events that correspond to a SUBMITTED sentinel (decrement ops counter)
@@ -95,7 +89,7 @@ class BlendTracingSubscriber(EventSubscriber):
         """Return the event-to-callback mapping for this subscriber."""
         return {
             # Root span lifecycle
-            EventType.CB_REQUEST_START: self._on_request_start,
+            EventType.CB_SESSION_START: self._on_request_start,
             EventType.CB_STORE_PRE_COMPUTED_SUBMITTED: self._on_submitted,
             EventType.CB_RETRIEVE_SUBMITTED: self._on_submitted,
             EventType.CB_STORE_FINAL_SUBMITTED: self._on_submitted,
@@ -145,7 +139,7 @@ class BlendTracingSubscriber(EventSubscriber):
         """Create the ``"cb.request"`` root span, nested under MP's root if present.
 
         Args:
-            event: ``CB_REQUEST_START`` event with ``session_id`` set.
+            event: ``CB_SESSION_START`` event with ``session_id`` set.
         """
         if not _HAS_OTEL:
             return
@@ -216,7 +210,7 @@ class BlendTracingSubscriber(EventSubscriber):
         key = f"{sid}:{event.event_type.value}"
         self._pending[key] = (span, event.event_type)
 
-        logical = self._LOGICAL_NAMES.get(event.event_type)
+        logical = self._SPAN_DEFS.get(event.event_type)
         if logical:
             self._registry.open(sid, logical, span, trace.set_span_in_context(span))
 
@@ -248,13 +242,16 @@ class BlendTracingSubscriber(EventSubscriber):
                 span.set_attribute(k, str(v))
             span.end(end_time=int(event.timestamp * 1e9))
 
-        logical = self._LOGICAL_NAMES.get(start_type)
+        logical = self._SPAN_DEFS.get(start_type)
         if logical:
             self._registry.pop(sid, logical)
 
         if event.event_type in self._GPU_OP_END_EVENTS:
             if (count := self._pending_gpu_ops.get(sid, 0)) > 0:
-                self._pending_gpu_ops[sid] = count - 1
+                if count == 1:
+                    self._pending_gpu_ops.pop(sid)
+                else:
+                    self._pending_gpu_ops[sid] = count - 1
             if (
                 sid in self._deferred_session_end_ts
                 and self._pending_gpu_ops.get(sid, 0) == 0

@@ -39,7 +39,7 @@ def subscriber(registry, bus):
 class TestBlendTracingSubscriber:
     def test_subscriptions_cover_all_cb_events(self, subscriber):
         subs = subscriber.get_subscriptions()
-        assert EventType.CB_REQUEST_START in subs
+        assert EventType.CB_SESSION_START in subs
         assert EventType.CB_SESSION_END in subs
         assert EventType.CB_STORE_PRE_COMPUTED_SUBMITTED in subs
         assert EventType.CB_RETRIEVE_SUBMITTED in subs
@@ -61,7 +61,7 @@ class TestBlendTracingSubscriber:
 
     def test_root_span_created_on_request_start(self, bus, registry, subscriber):
         bus.start()
-        bus.publish(Event(event_type=EventType.CB_REQUEST_START, session_id="req-root"))
+        bus.publish(Event(event_type=EventType.CB_SESSION_START, session_id="req-root"))
         time.sleep(0.15)
         assert registry.get("req-root", "cb.request") is not None
         bus.stop()
@@ -82,7 +82,7 @@ class TestBlendTracingSubscriber:
 
         bus.publish(
             Event(
-                event_type=EventType.CB_REQUEST_START,
+                event_type=EventType.CB_SESSION_START,
                 session_id=sid,
                 timestamp=now,
             )
@@ -136,7 +136,7 @@ class TestBlendTracingSubscriber:
 
         bus.publish(
             Event(
-                event_type=EventType.CB_REQUEST_START,
+                event_type=EventType.CB_SESSION_START,
                 session_id=sid,
                 timestamp=now,
             )
@@ -200,7 +200,7 @@ class TestBlendTracingSubscriber:
 
         bus.publish(
             Event(
-                event_type=EventType.CB_REQUEST_START,
+                event_type=EventType.CB_SESSION_START,
                 session_id=sid,
                 timestamp=now,
             )
@@ -261,7 +261,7 @@ class TestBlendTracingSubscriber:
 
         bus.publish(
             Event(
-                event_type=EventType.CB_REQUEST_START,
+                event_type=EventType.CB_SESSION_START,
                 session_id=sid,
                 timestamp=now,
             )
@@ -320,7 +320,7 @@ class TestBlendTracingSubscriber:
 
         bus.publish(
             Event(
-                event_type=EventType.CB_REQUEST_START,
+                event_type=EventType.CB_SESSION_START,
                 session_id=sid,
                 timestamp=now,
             )
