@@ -260,6 +260,7 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
             "asyncio-based implementation; 'sync' uses the original "
             "thread-based synchronous implementation."
         ),
+    },
     "pd_skip_proxy_notification": {
         "type": bool,
         "default": False,
