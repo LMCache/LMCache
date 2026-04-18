@@ -282,9 +282,7 @@ class BenchCommand(BaseCommand):
         parser.set_defaults(func=self.execute)
 
     def execute(self, args: argparse.Namespace) -> None:
-        handlers = {
-            "engine": self._bench_engine,
-        }
+        handlers = {"engine": self._bench_engine}
         handler = handlers.get(args.bench_target)
         if handler is None:
             print(

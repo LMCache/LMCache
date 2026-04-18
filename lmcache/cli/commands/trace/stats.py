@@ -20,7 +20,6 @@ from __future__ import annotations
 
 # Standard
 from dataclasses import dataclass, field
-import bisect
 import csv
 import json
 import statistics
@@ -151,12 +150,12 @@ class ReplayStatsCollector:
             if failed:
                 bucket.errors += 1
                 return
-            # Keep samples sorted on insert for O(log n) insertion +
-            # O(1) percentile extraction.  For large traces (>1M
-            # records per qualname), the driver should sample or
-            # switch to an approximation; for now, exact percentiles
-            # suffice.
-            bisect.insort(bucket.latencies_ms, latency_s * 1000.0)
+            # Append is O(1); the one-shot sort in :meth:`summary` is
+            # O(N log N), which beats the O(N) shift from keeping the
+            # list sorted on insert.  For large traces (>1M records
+            # per qualname) the driver should sample or switch to an
+            # approximation; for now, exact percentiles suffice.
+            bucket.latencies_ms.append(latency_s * 1000.0)
 
     def total_duration_s(self) -> float:
         """Return replay wall-clock duration in seconds.
@@ -179,7 +178,10 @@ class ReplayStatsCollector:
         with self._lock:
             result: dict[str, OpStats] = {}
             for qualname, bucket in self._buckets.items():
-                lats = bucket.latencies_ms
+                # Sort once per summary call — ``record`` keeps the
+                # list unsorted (O(1) append) so the total work is
+                # O(N log N) per summary rather than O(N) per insert.
+                lats = sorted(bucket.latencies_ms)
                 if lats:
                     mean = statistics.fmean(lats)
                     total_s = sum(lats) / 1000.0

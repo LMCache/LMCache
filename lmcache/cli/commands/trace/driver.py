@@ -39,19 +39,19 @@ from __future__ import annotations
 
 # Standard
 from dataclasses import dataclass
-from typing import Callable
+from typing import TYPE_CHECKING, Callable
 import hashlib
 import json
 import time
 
 # First Party
-from lmcache.logging import init_logger
-from lmcache.tools.trace_replay.dispatch import (
+from lmcache.cli.commands.trace.dispatch import (
     CallDispatcher,
     ReplayContext,
     build_default_dispatcher,
 )
-from lmcache.tools.trace_replay.stats import ReplayStatsCollector
+from lmcache.cli.commands.trace.stats import ReplayStatsCollector
+from lmcache.logging import init_logger
 from lmcache.v1.distributed.config import StorageManagerConfig
 from lmcache.v1.distributed.storage_manager import StorageManager
 from lmcache.v1.mp_observability.config import (
@@ -61,6 +61,10 @@ from lmcache.v1.mp_observability.config import (
 from lmcache.v1.mp_observability.trace import codecs
 from lmcache.v1.mp_observability.trace.reader import TraceReader
 from lmcache.v1.mp_observability.trace.recorder import safe_storage_config_dict
+
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.v1.mp_observability.event_bus import EventBus
 
 logger = init_logger(__name__)
 
@@ -158,10 +162,44 @@ class StorageReplayDriver:
         self._sm_config = sm_config
         self._trace_path = trace_path
         self._dispatcher = dispatcher or build_default_dispatcher()
-        self._reader = TraceReader(trace_path)
-        self._bus = init_observability(obs_config)
-        self._sm = StorageManager(sm_config)
         self._closed = False
+
+        # Each resource is acquired under its own try/except so that a
+        # failure partway through __init__ still releases what has
+        # already been opened.  Without this, ``__exit__`` / ``close``
+        # never runs (the caller never got a valid instance), and the
+        # reader / bus would leak — see Cursor bugbot comment on
+        # PR #3075.
+        reader: TraceReader | None = None
+        bus: EventBus | None = None
+        try:
+            reader = TraceReader(trace_path)
+            bus = init_observability(obs_config)
+            self._sm = StorageManager(sm_config)
+        except BaseException:
+            # ``BaseException`` to also cover KeyboardInterrupt /
+            # SystemExit raised from inside StorageManager setup —
+            # the resources below must still be released.
+            if bus is not None:
+                try:
+                    bus.stop()
+                except Exception:
+                    logger.warning(
+                        "trace replay: error stopping bus during failed driver init",
+                        exc_info=True,
+                    )
+            if reader is not None:
+                try:
+                    reader.close()
+                except Exception:
+                    logger.warning(
+                        "trace replay: error closing reader during failed driver init",
+                        exc_info=True,
+                    )
+            raise
+
+        self._reader = reader
+        self._bus = bus
 
     def __enter__(self) -> StorageReplayDriver:
         return self

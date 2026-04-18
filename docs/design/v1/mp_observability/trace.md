@@ -344,8 +344,9 @@ see §9 for details.
 
 ## 9. Replay (`lmcache trace`)
 
-The replay half lives under `lmcache/tools/trace_replay/` and
-`lmcache/cli/commands/trace/`.  It reads trace files written by the
+The replay half lives under `lmcache/cli/commands/trace/` — the CLI
+entry point and its supporting driver/dispatcher/stats modules are
+co-located in a single package.  It reads trace files written by the
 recorder and reissues each captured call against a fresh
 `StorageManager` that the caller configures independently.
 
@@ -371,14 +372,14 @@ recorder and reissues each captured call against a fresh
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-Five modules:
+Four modules, all under `lmcache/cli/commands/trace/`:
 
 | Module | Responsibility |
 |--------|----------------|
-| `tools/trace_replay/dispatch.py` | `CallDispatcher`, `ReplayContext`, default v1 handler table |
-| `tools/trace_replay/driver.py` | `StorageReplayDriver`, `ReplayResult` |
-| `tools/trace_replay/stats.py` | `ReplayStatsCollector` + `OpStats`; CSV/JSON export |
 | `cli/commands/trace/__init__.py` | `lmcache trace info|replay|record` |
+| `cli/commands/trace/dispatch.py` | `CallDispatcher`, `ReplayContext`, default v1 handler table |
+| `cli/commands/trace/driver.py` | `StorageReplayDriver`, `ReplayResult` |
+| `cli/commands/trace/stats.py` | `ReplayStatsCollector` + `OpStats`; CSV/JSON export |
 
 ### 9.2 Auto-resolve: no per-op glue
 
@@ -519,7 +520,7 @@ file format:
   decode); truncated-tail tolerance; bad-magic rejection;
   `dropped_count` increments on unencodable args.
 
-### Replay (PR2) — `tests/tools/trace_replay/` and `tests/cli/`
+### Replay (PR2) — `tests/cli/commands/trace/`
 
 - `test_stats.py` — percentile math; CSV/JSON export; thread safety of
   `record()`; failed-call bucketing.

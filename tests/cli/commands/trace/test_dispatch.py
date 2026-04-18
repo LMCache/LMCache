@@ -12,7 +12,7 @@ from typing import Any
 import pytest
 
 # First Party
-from lmcache.tools.trace_replay.dispatch import (
+from lmcache.cli.commands.trace.dispatch import (
     CallDispatcher,
     ReplayContext,
     build_default_dispatcher,

@@ -22,7 +22,7 @@ server via ``lmcache trace replay``. The feature is designed for:
    replayable binary file for offline analysis. Both can be enabled
    simultaneously.
 
-.. _trace-recording:
+.. _trace-recording-guide:
 
 Recording a Trace
 -----------------

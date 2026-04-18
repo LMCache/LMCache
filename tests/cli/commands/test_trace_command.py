@@ -5,7 +5,7 @@
 End-to-end: ``info`` is smoke-tested against a tiny trace file written
 through the real recorder.  ``replay`` is exercised against the same
 fixture via the driver (argparse wiring only — the driver itself has
-its own tests in ``tests/tools/trace_replay``) plus an end-to-end
+its own tests in ``tests/cli/commands/trace``) plus an end-to-end
 replay that exercises the CSV/JSON summary export and terminal
 metrics output.  ``record`` is a stub and simply asserts its non-zero
 exit code.
@@ -109,6 +109,12 @@ def _replay_namespace(
         lookup_hash_log_rotation_interval=6 * 3600,
         lookup_hash_log_rotation_max_size=100 * 1024 * 1024,
         lookup_hash_log_max_files=100,
+        # ``--trace-level`` / ``--trace-output`` are registered on the
+        # replay parser (shared with ``lmcache server``) but ignored at
+        # runtime — ``_run_replay`` clobbers them to ``None`` before
+        # building the ObservabilityConfig.  We mirror both states
+        # (the parser-default ``None`` and the explicit override) by
+        # pinning them here.
         trace_level=None,
         trace_output=None,
     )

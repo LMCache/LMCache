@@ -31,10 +31,10 @@ import sys
 
 # First Party
 from lmcache.cli.commands.base import BaseCommand
+from lmcache.cli.commands.trace.driver import ReplayResult, StorageReplayDriver
+from lmcache.cli.commands.trace.stats import ReplayStatsCollector
 from lmcache.cli.metrics import Metrics, StreamHandler, get_formatter
 from lmcache.logging import init_logger
-from lmcache.tools.trace_replay.driver import ReplayResult, StorageReplayDriver
-from lmcache.tools.trace_replay.stats import ReplayStatsCollector
 from lmcache.v1.distributed.config import (
     StorageManagerConfig,
     add_storage_manager_args,
@@ -204,15 +204,14 @@ class TraceCommand(BaseCommand):
             help="Suppress the terminal metrics table (files are still written).",
         )
         add_storage_manager_args(parser)
+        # Share the full observability surface with ``lmcache server``
+        # so that metrics / logging / OTLP flags work identically on
+        # the replay side.  ``--trace-level`` / ``--trace-output``
+        # configure *recording* and have no effect during replay;
+        # :meth:`_run_replay` overrides them to ``None`` before
+        # constructing the observability config rather than duplicating
+        # the argparse registration to strip them.
         add_observability_args(parser)
-        # ``--trace-level`` / ``--trace-output`` configure *recording*
-        # and are meaningless on the replay side.  We keep
-        # ``add_observability_args`` unmodified so the CLI stays in
-        # lockstep with the server's observability flags; then strip
-        # the recording-only group here so ``--help`` doesn't surface
-        # them and a caller passing them programmatically is ignored
-        # by :meth:`_run_replay`.
-        _remove_argparse_group(parser, "Trace Recording")
         parser.set_defaults(func=self.execute)
 
     def _run_replay(self, args: argparse.Namespace) -> None:
@@ -232,13 +231,26 @@ class TraceCommand(BaseCommand):
         """
         sm_config: StorageManagerConfig = parse_args_to_config(args)
 
-        # Recording-only flags are ignored on the replay side.  The
-        # parser suppresses them from --help; this clears them in case
-        # a caller passes them programmatically or the defaults ever
-        # change upstream.
+        # ``--trace-level`` / ``--trace-output`` belong to the recording
+        # surface.  They are still registered on the parser (see
+        # :meth:`_register_replay`) so the flag set stays in lock-step
+        # with ``lmcache server``, but they have no meaning here — any
+        # value a caller passes is silently clobbered to ``None`` so
+        # the replay-side ``ObservabilityConfig`` never tries to start
+        # a recorder.
         args.trace_level = None
         args.trace_output = None
         obs_config = parse_args_to_observability_config(args)
+
+        # Create output directories *before* replay starts.  A replay
+        # can run for minutes; surfacing a bad ``--output-dir`` or
+        # unwritable ``--jsonl-out`` parent now avoids silently losing
+        # the summary/stream after the work has already happened.
+        os.makedirs(args.output_dir, exist_ok=True)
+        if args.jsonl_out:
+            jsonl_parent = os.path.dirname(os.path.abspath(args.jsonl_out))
+            if jsonl_parent:
+                os.makedirs(jsonl_parent, exist_ok=True)
 
         # ANSI: bold + yellow for the banner text, reset at the end.
         # The lmcache log formatter only colors the WARNING prefix;
@@ -324,7 +336,6 @@ class TraceCommand(BaseCommand):
             if jsonl_fh is not None:
                 jsonl_fh.close()
 
-        os.makedirs(args.output_dir, exist_ok=True)
         if not args.no_csv:
             csv_path = os.path.join(args.output_dir, "trace_replay_ops.csv")
             result.stats.export_csv(csv_path)
@@ -434,39 +445,6 @@ class TraceCommand(BaseCommand):
             "a follow-up release.",
         )
         sys.exit(2)
-
-
-def _remove_argparse_group(parser: argparse.ArgumentParser, group_title: str) -> None:
-    """Remove an argparse argument group (and its actions) by title.
-
-    Argparse has no public API for dropping a group after it has been
-    added, so this reaches into the documented-but-underscored
-    attributes to (1) remove each action from the parser's action
-    list and option-string registry, and (2) drop the group itself
-    from the parser's group list so ``--help`` doesn't render an
-    empty header.
-
-    Used by the replay subparser to strip ``--trace-level`` /
-    ``--trace-output``, which are added by
-    :func:`add_observability_args` but only meaningful for recording.
-
-    Args:
-        parser: The parser to mutate.
-        group_title: The ``title`` of the group to remove.  A no-op
-            if no group with that title exists.
-    """
-    group = next(
-        (g for g in parser._action_groups if g.title == group_title),
-        None,
-    )
-    if group is None:
-        return
-    for action in list(group._group_actions):
-        if action in parser._actions:
-            parser._actions.remove(action)
-        for opt in action.option_strings:
-            parser._option_string_actions.pop(opt, None)
-    parser._action_groups.remove(group)
 
 
 def _short_op_name(qualname: str) -> str:
