@@ -83,3 +83,16 @@ to correlate START/END pairs.
 | `MP_LOOKUP` | `request_id`, `chunk_hashes`, `model_name`, `chunk_size`, `seq_len`, `dtypes`, `shapes` | `str`, `list[str]`, `str`, `int`, `int`, `list[str]`, `list[list[int]]` |
 | `MP_VLLM_BLOCK_ALLOCATION` | `instance_id`, `model_name`, `records` | `int`, `str`, `list[BlockAllocationRecord]` (each has `req_id: str`, `new_block_ids: list[int]`, `new_token_ids: list[int]`) |
 | `MP_VLLM_END_SESSION` | `request_id` | `str` |
+
+---
+
+## Trace Recording Events
+
+A single unified event used by the `@enable_tracing` decorator (see
+[trace.md](trace.md)). All instrumented call sites publish the same
+`EventType` regardless of which method or layer; the `qualname` field
+inside `metadata` discriminates ops.
+
+| EventType | Metadata keys | Types |
+|---|---|---|
+| `TRACE_CALL` | `qualname`, `args` | `str`, `dict[str, Any]` (codec-encoded; see `lmcache.v1.mp_observability.trace.codecs`) |

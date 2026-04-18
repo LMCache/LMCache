@@ -62,6 +62,16 @@ class ObservabilityConfig:
     """Configuration for lookup hash file logging.  Disabled by default
     (empty ``output_dir``)."""
 
+    trace_level: str | None = None
+    """If set, enables trace recording at the given level.  Currently
+    only ``"storage"`` is supported.  See
+    :mod:`lmcache.v1.mp_observability.trace` for details."""
+
+    trace_output: str | None = None
+    """Path to write the trace file.  When :attr:`trace_level` is set
+    but this is ``None``, a timestamped path under ``$TMPDIR`` is
+    minted and logged at INFO."""
+
 
 DEFAULT_OBSERVABILITY_CONFIG = ObservabilityConfig(enabled=False)
 
@@ -176,6 +186,28 @@ def add_observability_args(
         "Oldest files are deleted when this limit is exceeded. Default is 100.",
     )
 
+    trace_group = parser.add_argument_group(
+        "Trace Recording",
+        "Capture LMCache operations to a binary trace file for replay "
+        "(see `lmcache trace`).",
+    )
+    trace_group.add_argument(
+        "--trace-level",
+        type=str,
+        choices=["storage"],
+        default=None,
+        help="Enable trace recording at the given level. Currently only "
+        "'storage' is supported (records StorageManager public-API calls).",
+    )
+    trace_group.add_argument(
+        "--trace-output",
+        type=str,
+        default=None,
+        help="Path to write the trace file. Defaults to a timestamped "
+        "file under $TMPDIR when --trace-level is set without an explicit "
+        "output path.",
+    )
+
     return parser
 
 
@@ -205,6 +237,8 @@ def parse_args_to_observability_config(
             rotation_max_size=args.lookup_hash_log_rotation_max_size,
             max_files=args.lookup_hash_log_max_files,
         ),
+        trace_level=args.trace_level,
+        trace_output=args.trace_output,
     )
 
     if config.tracing_enabled and config.otlp_endpoint is None:

@@ -46,6 +46,10 @@ from lmcache.v1.memory_management import MemoryObj
 logger = init_logger(__name__)
 
 _KEY_SEP = "@"
+# ``@`` in both ``model_name`` and ``cache_salt`` is rejected by
+# ObjectKey.__post_init__, so splitting on ``@`` is unambiguous.
+# Kept in sync with native_connector_l2_adapter.py and
+# csrc/storage_backends/fs/connector.cpp.
 _PATH_SLASH_REPLACEMENT = "-SEP-"
 _FILE_EXT = ".data"
 
@@ -92,21 +96,27 @@ async def _async_readinto_full(
 def _object_key_to_filename(key: ObjectKey) -> str:
     """Build a reversible, filesystem-safe filename.
 
-    Format follows CacheEngineKey.to_string() convention::
+    Unsalted::
 
-        <model_name>@<kv_rank_hex>@<chunk_hash_hex>.data
+        <safe_model>@0x<kv_rank_hex>@<chunk_hash_hex>.data
+
+    Salted (trailing ``cache_salt``)::
+
+        <safe_model>@0x<kv_rank_hex>@<chunk_hash_hex>@<cache_salt>.data
+
+    The 3-field unsalted shape is bit-identical to the pre-cache_salt
+    format, so existing un-salted cache directories remain valid and
+    no migration is needed.
 
     ``kv_rank`` is written in ``0x`` prefixed hex so each byte
     of the bitmap ``(ws<<24)|(rank<<16)|(local_ws<<8)|local``
     is directly readable.
     """
     safe_model = key.model_name.replace("/", _PATH_SLASH_REPLACEMENT)
-    return (
-        f"{safe_model}"
-        f"{_KEY_SEP}{key.kv_rank:#010x}"
-        f"{_KEY_SEP}{key.chunk_hash.hex()}"
-        f"{_FILE_EXT}"
-    )
+    base = f"{safe_model}{_KEY_SEP}{key.kv_rank:#010x}{_KEY_SEP}{key.chunk_hash.hex()}"
+    if key.cache_salt:
+        return f"{base}{_KEY_SEP}{key.cache_salt}{_FILE_EXT}"
+    return f"{base}{_FILE_EXT}"
 
 
 def _filename_to_object_key(
@@ -114,35 +124,40 @@ def _filename_to_object_key(
 ) -> Optional[ObjectKey]:
     """Reverse ``_object_key_to_filename``.
 
-    Returns ``None`` when the filename cannot be parsed.
+    Accepts both the 3-field unsalted shape and the 4-field salted
+    shape (trailing ``cache_salt``). Returns ``None`` for anything
+    else. Since ``model_name`` is guaranteed not to contain ``@``,
+    plain ``split`` suffices — no marker, no rsplit.
     """
-    stem = filename
-    if stem.endswith(_FILE_EXT):
-        stem = stem[: -len(_FILE_EXT)]
+    if not filename.endswith(_FILE_EXT):
+        return None
+    stem = filename[: -len(_FILE_EXT)]
+    parts = stem.split(_KEY_SEP)
+    if len(parts) == 3:
+        safe_model, kv_rank_str, chunk_hash_hex = parts
+        cache_salt = ""
+    elif len(parts) == 4:
+        safe_model, kv_rank_str, chunk_hash_hex, cache_salt = parts
     else:
         return None
 
-    # Split by ``@``.  Layout:
-    #   <model_name> @ <kv_rank> @ <chunk_hash_hex>
-    # model_name itself may contain ``@``, so we split
-    # from the right to reliably isolate the last two
-    # fields (kv_rank and chunk_hash).
-    parts = stem.rsplit(_KEY_SEP, 2)
-    if len(parts) != 3:
-        return None
-
-    safe_model, kv_rank_str, chunk_hash_hex = parts
+    model_name = safe_model.replace(_PATH_SLASH_REPLACEMENT, "/")
     try:
         chunk_hash = bytes.fromhex(chunk_hash_hex)
         kv_rank = int(kv_rank_str, 16)
+        # ObjectKey.__post_init__ raises ValueError when the decoded
+        # model_name / cache_salt violate the forbidden-char or length
+        # invariants (e.g. a stray file from another tool on disk).
+        # The contract here is to return None for anything unparsable,
+        # so keep the constructor inside the try block.
+        return ObjectKey(
+            chunk_hash=chunk_hash,
+            model_name=model_name,
+            kv_rank=kv_rank,
+            cache_salt=cache_salt,
+        )
     except ValueError:
         return None
-    model_name = safe_model.replace(_PATH_SLASH_REPLACEMENT, "/")
-    return ObjectKey(
-        chunk_hash=chunk_hash,
-        model_name=model_name,
-        kv_rank=kv_rank,
-    )
 
 
 class FSL2AdapterConfig(L2AdapterConfigBase):
