@@ -1466,6 +1466,11 @@ class LMCacheConnectorV1Impl:
                     token_ids = token_ids[:aligned_token_len]
                     store_mask = store_mask[:aligned_token_len]
                     slot_mapping = slot_mapping[:aligned_token_len]
+                    if slot_mappings is not None:
+                        slot_mappings = {
+                            layer_name: mapping[:aligned_token_len]
+                            for layer_name, mapping in slot_mappings.items()
+                        }
 
             self.lmcache_engine.store(
                 token_ids,

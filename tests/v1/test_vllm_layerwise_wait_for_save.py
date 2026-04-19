@@ -10,6 +10,7 @@ import torch
 pytest.importorskip("vllm")
 
 # First Party
+from lmcache.integration.vllm import vllm_v1_adapter
 from lmcache.integration.vllm.vllm_v1_adapter import (
     LMCacheConnectorMetadata,
     LMCacheConnectorV1Impl,
@@ -30,9 +31,17 @@ class _FakeEngine:
         self.unpinned: list[str] = []
         self.store_steps: dict[str, int] = {}
         self.store_calls: list[str] = []
+        self.store_kwargs: dict[str, object] = {}
 
     def lookup_unpin(self, req_id: str) -> None:
         self.unpinned.append(req_id)
+
+    def store(self, token_ids, **kwargs) -> None:
+        self.store_calls.append(kwargs["req_id"])
+        self.store_kwargs = {
+            "token_ids": token_ids,
+            **kwargs,
+        }
 
     def store_layer(self, token_ids, **kwargs):
         req_id = kwargs["req_id"]
@@ -97,6 +106,37 @@ def _make_load_req(req_id: str):
         ),
         request_configs={},
     )
+
+
+def test_save_kv_slices_per_layer_slot_mappings_for_chunk_alignment(
+    monkeypatch,
+) -> None:
+    request = SimpleNamespace(
+        req_id="req-1",
+        token_ids=[1, 2, 3, 4, 5],
+        slot_mapping=torch.arange(5, dtype=torch.long),
+        slot_mappings_by_layer={"layer0": torch.arange(5, dtype=torch.long)},
+        save_spec=SaveSpec(skip_leading_tokens=0, can_save=True),
+        is_last_prefill=False,
+        disagg_spec=None,
+        request_configs={},
+    )
+    connector, _, engine = _make_connector([request])
+    connector.use_layerwise = False
+    connector.enable_blending = False
+    connector._lmcache_chunk_size = 4
+    monkeypatch.setattr(
+        vllm_v1_adapter,
+        "get_pp_group",
+        lambda: SimpleNamespace(is_last_rank=False),
+    )
+
+    connector.wait_for_save()
+
+    assert engine.store_kwargs["token_ids"] == [1, 2, 3, 4]
+    assert engine.store_kwargs["mask"].tolist() == [True, True, True, True]
+    assert engine.store_kwargs["slot_mapping"].tolist() == [0, 1, 2, 3]
+    assert engine.store_kwargs["slot_mappings"]["layer0"].tolist() == [0, 1, 2, 3]
 
 
 def test_layerwise_storer_is_request_scoped_across_interleaved_finalize() -> None:
