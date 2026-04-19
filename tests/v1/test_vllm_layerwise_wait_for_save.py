@@ -241,3 +241,21 @@ def test_start_load_kv_slices_per_layer_slot_mappings() -> None:
     assert captured["token_ids"] == [1, 2]
     assert captured["slot_mapping"].tolist() == [0, 1]
     assert captured["slot_mappings"]["layer0"].tolist() == [0, 1]
+
+
+def test_record_failed_blocks_uses_null_block_constant(monkeypatch) -> None:
+    connector = LMCacheConnectorV1Impl.__new__(LMCacheConnectorV1Impl)
+    connector.kv_cache_config = SimpleNamespace(kv_cache_groups=None)
+    connector._block_size = 2
+
+    monkeypatch.setattr(vllm_v1_adapter, "NULL_BLOCK_ID", -1)
+
+    missing_blocks = connector.record_failed_blocks(
+        request_id="req-null-constant",
+        expected_mask=torch.tensor([True, True, True, True]),
+        ret_mask=torch.tensor([False, False, False, False]),
+        slot_mapping=torch.arange(4, dtype=torch.long),
+        block_ids_by_group=([0, -1, 2],),
+    )
+
+    assert missing_blocks == {0, 2}

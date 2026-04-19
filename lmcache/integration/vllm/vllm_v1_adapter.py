@@ -1177,7 +1177,7 @@ class LMCacheConnectorV1Impl:
                 missing_blocks.update(
                     block_id
                     for block_id in group_block_ids[group_start_idx:]
-                    if block_id > 0
+                    if block_id != NULL_BLOCK_ID
                 )
         else:
             mapping_tensors = slot_mappings_by_group or (slot_mapping,)
