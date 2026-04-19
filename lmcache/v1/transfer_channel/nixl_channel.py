@@ -12,6 +12,7 @@ import msgspec
 import zmq
 
 # First Party
+from lmcache import torch_device_type
 from lmcache.logging import init_logger
 from lmcache.v1.memory_management import (
     MemoryObj,
@@ -621,7 +622,7 @@ class NixlAgentWrapper:
         # The four fields are (base_addr, length, dev_id, meta_info)
         # https://github.com/ai-dynamo/nixl/blob/main/src/api/cpp/nixl_descriptors.h#L152
         memory_desc = [(buffer_ptr, buffer_size, tp_rank, "")]
-        mem_type = "cpu" if device == "cpu" else "cuda"
+        mem_type = "cpu" if device == "cpu" else torch_device_type
 
         reg_descs = nixl_agent.get_reg_descs(memory_desc, mem_type=mem_type)
         nixl_agent.register_memory(reg_descs)

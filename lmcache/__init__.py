@@ -18,7 +18,34 @@ except ImportError:
     __version__ = "unknown"
 
 logger = init_logger(__name__)
-__all__ = ["__version__"]
+__all__ = ["__version__", "torch_dev", "torch_device_type"]
+
+
+# --------------------------
+# Device detection
+# --------------------------
+def _detect_device() -> tuple[Any, str]:
+    """
+    Detect the available accelerator and return the corresponding torch
+    device module and device type string.
+
+    Returns:
+        tuple[Any, str]: A tuple of (torch_device_module, device_type_string),
+            e.g. ``(torch.cuda, "cuda")`` or ``(torch.xpu, "xpu")``.
+
+    Raises:
+        RuntimeError: If no supported accelerator is found (checked CUDA, XPU, HPU).
+    """
+    if hasattr(torch, "xpu") and torch.xpu.is_available():
+        return torch.xpu, "xpu"
+    elif hasattr(torch, "hpu") and torch.hpu.is_available():
+        return torch.hpu, "hpu"
+    elif torch.cuda.is_available():
+        return torch.cuda, "cuda"
+    raise RuntimeError("No supported accelerator found. Checked for: CUDA, XPU, HPU.")
+
+
+torch_dev, torch_device_type = _detect_device()
 
 
 # --------------------------
@@ -32,7 +59,7 @@ def _get_backend() -> Any:
         (
             "lmcache.c_ops",
             "cuda_ops",
-            lambda: torch.cuda.is_available(),
+            lambda: torch_dev.is_available(),
         ),
         # should extend to more HWs..
     ]

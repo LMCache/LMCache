@@ -5,10 +5,8 @@ from typing import TYPE_CHECKING, AbstractSet, Optional
 import asyncio
 import importlib  # Added for dynamic import
 
-# Third Party
-import torch
-
 # First Party
+from lmcache import torch_dev, torch_device_type
 from lmcache.logging import init_logger
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.metadata import LMCacheMetadata
@@ -28,15 +26,15 @@ logger = init_logger(__name__)
 
 def is_cuda_worker(metadata: LMCacheMetadata) -> bool:
     """
-    Check if the current role is worker and CUDA is available.
+    Check if the current role is worker and a GPU accelerator is available.
 
     Args:
         metadata: The LMCache engine metadata.
 
     Returns:
-        True if the worker is not a scheduler and CUDA is available.
+        True if the worker is not a scheduler and a GPU accelerator is available.
     """
-    return metadata.role != "scheduler" and torch.cuda.is_available()
+    return metadata.role != "scheduler" and torch_dev.is_available()
 
 
 def storage_plugin_launcher(
@@ -114,15 +112,13 @@ def CreateStorageBackends(
     config: LMCacheEngineConfig,
     metadata: LMCacheMetadata,
     loop: asyncio.AbstractEventLoop,
-    dst_device: str = "cuda",
+    dst_device: str = torch_device_type,
     lmcache_worker: Optional["LMCacheWorker"] = None,
     skip_backends: Optional[AbstractSet[str]] = None,
     existing_backends: Optional[OrderedDict[str, StorageBackendInterface]] = None,
 ) -> OrderedDict[str, StorageBackendInterface]:
     if is_cuda_worker(metadata):
-        dst_device = f"cuda:{torch.cuda.current_device()}"
-    elif dst_device == "xpu":
-        dst_device = f"xpu:{torch.xpu.current_device()}"
+        dst_device = f"{torch_device_type}:{torch_dev.current_device()}"
     else:
         dst_device = "cpu"
     storage_backends: OrderedDict[str, StorageBackendInterface] = OrderedDict()

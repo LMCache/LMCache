@@ -18,6 +18,7 @@ import threading
 import torch
 
 # First Party
+from lmcache import torch_dev
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey, DiskCacheMetadata
 from lmcache.v1.config import LMCacheEngineConfig
@@ -26,7 +27,7 @@ from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.storage_backend.abstract_backend import StoragePluginInterface
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 
-if torch.cuda.is_available():
+if torch_dev.is_available():
     # First Party
     import lmcache.c_ops as lmc_ops
 else:

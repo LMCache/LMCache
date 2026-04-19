@@ -16,6 +16,9 @@ from numba import njit
 import numpy as np
 import torch
 
+# First Party
+from lmcache import torch_dev
+
 # Store the tensor objects in memory so that they can be accessed
 # outside the scope of this file
 _tensor_registry: dict[int, torch.Tensor] = {}
@@ -275,7 +278,7 @@ class GPUKVFormat(IntEnum):
 
 # On XPU (Intel GPU), PyTorch 2.4+ supports pin_memory=True via SYCL USM
 # host allocation, enabling fast DMA for XPU<->CPU transfers.
-_XPU_PIN_MEMORY = hasattr(torch, "xpu") and torch.xpu.is_available()
+_XPU_PIN_MEMORY = torch_dev.is_available()
 
 
 def alloc_pinned_numa_ptr(size: int, numa_id: int = 0) -> int:
@@ -1410,8 +1413,8 @@ def get_gpu_pci_bus_id(device_id: int = 0) -> str | None:
         str | None: PCI bus ID (e.g., "0000:29:00.0") or None if unavailable.
     """
     try:
-        if torch.cuda.is_available() and device_id < torch.cuda.device_count():
-            props = torch.cuda.get_device_properties(device_id)
+        if torch_dev.is_available() and device_id < torch_dev.device_count():
+            props = torch_dev.get_device_properties(device_id)
             # PCI function number is always 0 for GPUs
             bus_id = (
                 f"{props.pci_domain_id:04x}:{props.pci_bus_id:02x}:"

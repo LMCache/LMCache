@@ -35,6 +35,7 @@ from nixl._api import (
 import torch
 
 # First Party
+from lmcache import torch_dev, torch_device_type
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
@@ -72,12 +73,12 @@ class NixlStorageConfig:
     def validate_nixl_backend(dynamic_storage: bool, backend: str, device: str):
         if dynamic_storage:  # For now only supports OBJ backend
             if backend in ("OBJ",):
-                return device == "cpu" or device == "cuda"
+                return device == "cpu" or device == torch_device_type
             else:
                 return False
         else:
             if backend in ("GDS", "GDS_MT", "OBJ"):
-                return device == "cpu" or device == "cuda"
+                return device == "cpu" or device == torch_device_type
             elif backend in ("POSIX", "HF3FS"):
                 return device == "cpu"
             else:
@@ -279,7 +280,7 @@ class NixlStorageAgent(ABC):
         self.nixl_agent = NixlAgent(self.agent_name, nixl_conf)
         self.nixl_agent.create_backend(backend, backend_params)
 
-        device_id = torch.cuda.current_device()
+        device_id = torch_dev.current_device()
         self.init_mem_handlers(device, buffer_ptr, buffer_size, page_size, device_id)
 
     def init_mem_handlers(self, device, buffer_ptr, buffer_size, page_size, device_id):
@@ -537,7 +538,7 @@ class NixlStorageBackend(AllocatorBackendInterface, ABC):
             base_buffer, self.buffer = _allocate_gpu_memory(
                 config.nixl_buffer_size, corrected_device
             )
-            torch.cuda.set_device(corrected_device)
+            torch_dev.set_device(corrected_device)
             self.base_buffer = base_buffer  # Prevents early GC of the aligned tensor.
             self.free_pinned_buffer = False
 

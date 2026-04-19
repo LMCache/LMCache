@@ -38,14 +38,15 @@ Workflow (example: chunk_size = 3)
 """
 
 # Standard
+from typing import Any
 import time
 
 # Third Party
 import numpy as np
-import torch
 import zmq
 
 # First Party
+from lmcache import torch_dev, torch_device_type
 from lmcache.logging import init_logger
 from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
@@ -466,7 +467,7 @@ class BlendEngineV2(MPCacheEngine):
         gpu_context: PlainGPUCacheContext,
         offset: int,
         event_ipc_handle: bytes,
-    ) -> tuple[torch.cuda.Event, dict]:
+    ) -> tuple[Any, dict]:
         """
         Helper function to perform GPU-to-CPU copy operations for storing chunks.
 
@@ -474,21 +475,35 @@ class BlendEngineV2(MPCacheEngine):
             obj_keys: List of object keys to store.
             gpu_context: GPU context for the blend engine instance.
             offset: The starting offset in the CB KV cache buffer.
-            event_ipc_handle: The IPC handle for the CUDA event that signals the
+            event_ipc_handle: The IPC handle for the GPU event that signals the
                 completion of LLM inference.
 
         Returns:
-            A tuple of (event, reserved_dict) where event is the CUDA event and
+            A tuple of (event, reserved_dict) where event is the GPU event and
             reserved_dict is the dictionary of reserved memory objects.
         """
         with (
-            torch.cuda.device(gpu_context.device),
-            torch.cuda.stream(gpu_context.stream),
+            torch_dev.device(gpu_context.device),
+            torch_dev.stream(gpu_context.stream),
         ):
-            event = torch.cuda.Event(interprocess=True)
+            # Not all backends support interprocess Events (CUDA IPC specific)
+            if not hasattr(torch_dev, "Event"):
+                raise RuntimeError(
+                    f"Backend '{torch_device_type}' does not support interprocess "
+                    "Events (torch_dev.Event not available). "
+                    "Multiprocess IPC requires CUDA."
+                )
+            event = torch_dev.Event(interprocess=True)
 
             # Wait for vLLM event to finish
-            vllm_event = torch.cuda.Event.from_ipc_handle(
+            # Not all backends support IPC event handles (CUDA IPC specific)
+            if not hasattr(torch_dev.Event, "from_ipc_handle"):
+                raise RuntimeError(
+                    f"Backend '{torch_device_type}' does not support IPC event "
+                    "handles (Event.from_ipc_handle not available). "
+                    "Multiprocess IPC requires CUDA."
+                )
+            vllm_event = torch_dev.Event.from_ipc_handle(
                 gpu_context.device, event_ipc_handle
             )
             vllm_event.wait(stream=gpu_context.stream)
@@ -640,10 +655,17 @@ class BlendEngineV2(MPCacheEngine):
         logger.debug("DEBUG object keys to retrieve: %s", all_obj_keys)
 
         with (
-            torch.cuda.device(gpu_context.device),
-            torch.cuda.stream(gpu_context.stream),
+            torch_dev.device(gpu_context.device),
+            torch_dev.stream(gpu_context.stream),
         ):
-            event = torch.cuda.Event(interprocess=True)
+            # Not all backends support interprocess Events (CUDA IPC specific)
+            if not hasattr(torch_dev, "Event"):
+                raise RuntimeError(
+                    f"Backend '{torch_device_type}' does not support interprocess "
+                    "Events (torch_dev.Event not available). "
+                    "Multiprocess IPC requires CUDA."
+                )
+            event = torch_dev.Event(interprocess=True)
 
             try:
                 with self.storage_manager.read_prefetched_results(
@@ -854,7 +876,14 @@ def run_cache_server(
         mp_config.port,
     )
     # Start the ZMQ server
-    torch.cuda.init()
+    # Not all backends expose init(); some auto-initialize on first use
+    if not hasattr(torch_dev, "init"):
+        logger.warning(
+            "Backend '%s' does not support init(), skipping device init",
+            torch_device_type,
+        )
+    else:
+        torch_dev.init()
     server.start()
 
     logger.info("LMCache cache blend v2 server is running...")

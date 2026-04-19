@@ -763,7 +763,7 @@ class LMCacheMPWorkerAdapter:
         self,
         request_id: str,
         op: LoadStoreOp,
-        event: torch.cuda.Event,
+        event: Any,
         cache_salt: str = "",
     ):
         """
@@ -801,7 +801,7 @@ class LMCacheMPWorkerAdapter:
         self,
         request_id: str,
         op: LoadStoreOp,
-        event: torch.cuda.Event,
+        event: Any,
         cache_salt: str = "",
     ):
         """
@@ -846,7 +846,7 @@ class LMCacheMPWorkerAdapter:
         self,
         request_ids: list[str],
         ops: list[LoadStoreOp],
-        event: torch.cuda.Event,
+        event: Any,
         cache_salts: list[str] | None = None,
     ):
         """
@@ -872,7 +872,7 @@ class LMCacheMPWorkerAdapter:
         self,
         request_ids: list[str],
         ops: list[LoadStoreOp],
-        event: torch.cuda.Event,
+        event: Any,
         cache_salts: list[str] | None = None,
     ):
         """
