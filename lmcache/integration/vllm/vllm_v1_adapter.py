@@ -215,18 +215,6 @@ class RequestTracker:
             return []
         return self.allocated_block_ids_by_group[0]
 
-    @property
-    def num_allocated_blocks(self) -> int:
-        """Return the maximum allocated block count across all KV groups.
-
-        Returns:
-            The largest block count among all tracked KV groups, or 0 when the
-            request has not allocated any blocks yet.
-        """
-        if not self.allocated_block_ids_by_group:
-            return 0
-        return max(len(group) for group in self.allocated_block_ids_by_group)
-
     @_lmcache_nvtx_annotate
     @staticmethod
     def from_new_request(
@@ -664,8 +652,8 @@ class LMCacheConnectorV1Impl:
     def _resolve_full_slot_mapping(self, request: ReqMeta) -> torch.Tensor:
         token_count = len(request.token_ids)
         slot_mapping = request.slot_mapping
-        slot_mappings_by_group = getattr(request, "slot_mappings_by_group", None)
-        slot_mappings_by_layer = getattr(request, "slot_mappings_by_layer", None)
+        slot_mappings_by_group = request.slot_mappings_by_group
+        slot_mappings_by_layer = request.slot_mappings_by_layer
 
         if slot_mapping.shape[0] >= token_count:
             return slot_mapping[:token_count]
@@ -1015,7 +1003,7 @@ class LMCacheConnectorV1Impl:
             token_mask[:masked_token_count] = False
 
             lmcache_cached_tokens = request.load_spec.lmcache_cached_tokens
-            slot_mappings_by_layer = getattr(request, "slot_mappings_by_layer", None)
+            slot_mappings_by_layer = request.slot_mappings_by_layer
             slot_mappings = (
                 {
                     layer_name: mapping[:lmcache_cached_tokens].to(self.device)
@@ -1307,9 +1295,7 @@ class LMCacheConnectorV1Impl:
                 assert isinstance(token_ids, list)
 
                 slot_mapping = self._resolve_full_slot_mapping(request)
-                slot_mappings_by_layer = getattr(
-                    request, "slot_mappings_by_layer", None
-                )
+                slot_mappings_by_layer = request.slot_mappings_by_layer
                 slot_mappings = (
                     {
                         layer_name: mapping.to(self.device)
@@ -1417,7 +1403,7 @@ class LMCacheConnectorV1Impl:
             token_ids = request.token_ids
 
             slot_mapping = self._resolve_full_slot_mapping(request)
-            slot_mappings_by_layer = getattr(request, "slot_mappings_by_layer", None)
+            slot_mappings_by_layer = request.slot_mappings_by_layer
             slot_mappings = (
                 {
                     layer_name: mapping.to(self.device)

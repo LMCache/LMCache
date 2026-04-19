@@ -90,6 +90,15 @@ class BaseCachePolicy(Generic[KeyType, MapType], metaclass=abc.ABCMeta):
         """
         Return a best-effort ordering key for rebuilding cache policy state
         after a process restart.
+
+        Args:
+            metadata: Recovered metadata object for a disk cache entry.
+
+        Returns:
+            Tuple used to order recovered entries before restoring policy state.
+
+        Raises:
+            None.
         """
         last_access_ts = float(getattr(metadata, "last_access_ts", 0.0) or 0.0)
         created_ts = float(getattr(metadata, "created_ts", 0.0) or 0.0)
@@ -103,5 +112,16 @@ class BaseCachePolicy(Generic[KeyType, MapType], metaclass=abc.ABCMeta):
     ) -> None:
         """
         Restore in-memory policy state for a recovered cache entry.
+
+        Args:
+            key: Cache key being restored.
+            cache_dict: Mutable cache mapping that contains recovered entries.
+            metadata: Recovered metadata object for the cache entry.
+
+        Returns:
+            None.
+
+        Raises:
+            None.
         """
         return None

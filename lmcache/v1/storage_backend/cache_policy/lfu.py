@@ -36,7 +36,19 @@ class LFUCachePolicy(BaseCachePolicy[KeyType, dict[KeyType, Any]]):
         return {}
 
     def get_recovery_sort_key(self, metadata: Any) -> tuple[int, float, float]:
-        """Return LFU recovery ordering keyed by frequency, then recency."""
+        """
+        Return LFU recovery ordering keyed by frequency, then recency.
+
+        Args:
+            metadata: Recovered metadata object with persisted hit-count and
+                timestamp fields.
+
+        Returns:
+            Tuple ordered by hit count, last access time, then creation time.
+
+        Raises:
+            None.
+        """
         hit_count = int(getattr(metadata, "hit_count", 1) or 1)
         created_ts = float(getattr(metadata, "created_ts", 0.0) or 0.0)
         last_access_ts = float(getattr(metadata, "last_access_ts", 0.0) or 0.0)
@@ -89,7 +101,20 @@ class LFUCachePolicy(BaseCachePolicy[KeyType, dict[KeyType, Any]]):
         cache_dict: dict[KeyType, Any],
         metadata: Any,
     ) -> None:
-        """Restore LFU frequency buckets from recovered hit-count metadata."""
+        """
+        Restore LFU frequency buckets from recovered hit-count metadata.
+
+        Args:
+            key: Cache key being restored.
+            cache_dict: Mutable cache mapping that contains recovered entries.
+            metadata: Recovered metadata object with persisted hit-count data.
+
+        Returns:
+            None.
+
+        Raises:
+            None.
+        """
         freq = max(1, int(getattr(metadata, "hit_count", 1) or 1))
         self.key_to_freq[key] = freq
         if freq not in self.freq_to_keys:

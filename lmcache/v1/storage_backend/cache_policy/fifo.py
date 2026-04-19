@@ -58,7 +58,18 @@ class FIFOCachePolicy(BaseCachePolicy[KeyType, dict[KeyType, Any]]):
         return evict_keys
 
     def get_recovery_sort_key(self, metadata: Any) -> tuple[float, float]:
-        """Return FIFO recovery ordering keyed by insertion time then access time."""
+        """
+        Return FIFO recovery ordering keyed by insertion time then access time.
+
+        Args:
+            metadata: Recovered metadata object with persisted timestamp fields.
+
+        Returns:
+            Tuple ordered by creation time, then last access time.
+
+        Raises:
+            None.
+        """
         created_ts = float(getattr(metadata, "created_ts", 0.0) or 0.0)
         last_access_ts = float(getattr(metadata, "last_access_ts", 0.0) or 0.0)
         return (created_ts, last_access_ts)
