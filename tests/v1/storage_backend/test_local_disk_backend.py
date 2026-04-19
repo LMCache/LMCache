@@ -383,6 +383,50 @@ class TestLocalDiskBackend:
         assert len(reuse_intervals) == 1
         assert reuse_intervals[0] > 0
 
+    def test_recover_persisted_index_preserves_zero_last_access_ts(
+        self, temp_disk_path, async_loop, local_cpu_backend
+    ):
+        """Recovered metadata should preserve explicit zero-valued timestamps."""
+        config = create_test_config(temp_disk_path)
+        key = create_test_key(32)
+        payload = b"zero-ts"
+
+        backend = LocalDiskBackend(
+            config=config,
+            loop=async_loop,
+            local_cpu_backend=local_cpu_backend,
+            dst_device="cuda",
+        )
+        data_path = backend._key_to_path(key)
+        with open(data_path, "wb") as f:
+            f.write(payload)
+        with open(backend._key_to_meta_path(key), "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "key": key.to_string(),
+                    "size": len(payload),
+                    "shape": None,
+                    "dtype": None,
+                    "fmt": None,
+                    "cached_positions": None,
+                    "shapes": None,
+                    "dtypes": None,
+                    "created_ts": 10.0,
+                    "last_access_ts": 0.0,
+                    "hit_count": 1,
+                },
+                f,
+            )
+
+        recovered_backend = LocalDiskBackend(
+            config=config,
+            loop=async_loop,
+            local_cpu_backend=local_cpu_backend,
+            dst_device="cuda",
+        )
+
+        assert recovered_backend.dict[key].last_access_ts == 0.0
+
     def test_recover_persisted_index_enforces_max_cache_size(
         self, temp_disk_path, async_loop, local_cpu_backend, monkeypatch
     ):

@@ -293,7 +293,8 @@ class RequestTracker:
                 f"Preempted request {self.req_id} has no all_token_ids"
             )
             # the block ids will change after preemption
-            self.allocated_block_ids_by_group = new_block_ids_by_group
+            if new_block_ids_by_group:
+                self.allocated_block_ids_by_group = new_block_ids_by_group
             # reset the number of saved tokens
             self.num_saved_tokens = lmcache_cached_tokens
             num_computed_tokens = max(lmcache_cached_tokens, vllm_cached_tokens)

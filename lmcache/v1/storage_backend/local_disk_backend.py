@@ -361,11 +361,17 @@ class LocalDiskBackend(StorageBackendInterface):
                 cached_positions = payload.get("cached_positions")
                 shapes = payload.get("shapes")
                 dtypes = payload.get("dtypes")
-                created_ts = float(
-                    payload.get("created_ts", os.path.getmtime(path)) or 0.0
+                stored_created_ts = payload.get("created_ts")
+                created_ts = (
+                    float(stored_created_ts)
+                    if stored_created_ts is not None
+                    else os.path.getmtime(path)
                 )
-                last_access_ts = float(
-                    payload.get("last_access_ts", created_ts) or created_ts
+                stored_last_access_ts = payload.get("last_access_ts")
+                last_access_ts = (
+                    float(stored_last_access_ts)
+                    if stored_last_access_ts is not None
+                    else created_ts
                 )
                 hit_count = max(1, int(payload.get("hit_count", 1) or 1))
 

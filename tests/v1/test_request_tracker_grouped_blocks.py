@@ -50,6 +50,27 @@ def test_request_tracker_update_accepts_flat_tuple_block_ids() -> None:
     assert tracker.allocated_block_ids_by_group == ([1, 2, 3],)
 
 
+def test_preempted_request_preserves_grouped_blocks_without_new_block_ids() -> None:
+    tracker = RequestTracker(
+        req_id="req-preempted",
+        prompt_len=2,
+        token_ids=[10, 11],
+        allocated_block_ids_by_group=([1, 2], [5, 6]),
+    )
+
+    tracker.update(
+        new_token_ids=[12],
+        new_block_ids=None,
+        preempted=True,
+        lmcache_cached_tokens=1,
+        vllm_cached_tokens=1,
+        all_token_ids=[10, 11, 12],
+    )
+
+    assert tracker.allocated_block_ids_by_group == ([1, 2], [5, 6])
+    assert tracker.token_ids == [10, 11]
+
+
 def test_connector_delegates_grouped_request_finished() -> None:
     expected = (True, {"first_tok": 7})
     request = SimpleNamespace(request_id="req-1")
