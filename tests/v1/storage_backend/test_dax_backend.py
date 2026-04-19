@@ -51,19 +51,33 @@ def _create_metadata(
 
 
 def _create_multi_group_metadata(chunk_size: int = 16) -> LMCacheMetadata:
+    # First Party
+    import lmcache.c_ops as lmc_ops
+
+    def _sd(nh: int, hs: int) -> "lmc_ops.PageBufferShapeDesc":
+        sd = lmc_ops.PageBufferShapeDesc()
+        sd.kv_size = 2
+        sd.nl = 1
+        sd.nb = 1
+        sd.bs = chunk_size
+        sd.nh = nh
+        sd.hs = hs
+        sd.element_size = torch.bfloat16.itemsize
+        return sd
+
     metadata = _create_metadata(chunk_size=chunk_size)
-    metadata.kv_layer_groups_manager = KVLayerGroupsManager(
-        kv_layer_groups=[
+    metadata.kv_layer_groups_manager = KVLayerGroupsManager.from_layer_groups(
+        [
             KVLayerGroupInfo(
                 layer_names=["layer0"],
                 layer_indices=[0],
-                shape=torch.Size([2, 1, chunk_size, 1, 8]),
+                shape_desc=_sd(nh=1, hs=8),
                 dtype=torch.bfloat16,
             ),
             KVLayerGroupInfo(
                 layer_names=["layer1"],
                 layer_indices=[1],
-                shape=torch.Size([2, 1, chunk_size, 1, 16]),
+                shape_desc=_sd(nh=1, hs=16),
                 dtype=torch.bfloat16,
             ),
         ]

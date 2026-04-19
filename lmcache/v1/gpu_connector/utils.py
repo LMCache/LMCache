@@ -779,6 +779,159 @@ def get_dtype(kv_caches: Any, gpu_kv_format: "lmc_ops.GPUKVFormat") -> torch.dty
         raise ValueError(f"Unknown GPU KV Format: {gpu_kv_format}")
 
 
+def _per_layer_list_formats() -> frozenset:
+    """Formats whose kv_caches is a flat list ``[layer_0_tensor, ...]``."""
+    return frozenset(
+        {
+            lmc_ops.GPUKVFormat.NL_X_TWO_NB_BS_NH_HS,
+            lmc_ops.GPUKVFormat.NL_X_NB_TWO_BS_NH_HS,
+            lmc_ops.GPUKVFormat.NL_X_TWO_NB_NH_BS_HS,
+            lmc_ops.GPUKVFormat.NL_X_NB_TWO_NH_BS_HS,
+            lmc_ops.GPUKVFormat.NL_X_NB_BS_HS,
+            lmc_ops.GPUKVFormat.NL_X_NBBS_ONE_HS,
+        }
+    )
+
+
+def get_layer_kv_caches(
+    kv_caches: Any,
+    gpu_kv_format: "lmc_ops.GPUKVFormat",
+    layer_idx: int,
+) -> Any:
+    """Return a single-layer sub-structure of *kv_caches*, preserving the
+    list-nesting convention of *gpu_kv_format* so it is reusable as input
+    to other format-aware helpers.
+
+    Args:
+        kv_caches: KV cache structure accepted by :func:`discover_gpu_kv_format`.
+        gpu_kv_format: Format returned by :func:`discover_gpu_kv_format`.
+        layer_idx: 0-based layer index.
+
+    Returns:
+        A list or tensor view representing the single layer's KV cache.
+
+    Raises:
+        ValueError: If *gpu_kv_format* is not recognized.
+    """
+    if gpu_kv_format in _per_layer_list_formats():
+        return [kv_caches[layer_idx]]
+    if gpu_kv_format == lmc_ops.GPUKVFormat.TWO_X_NL_X_NBBS_NH_HS:
+        return [[kv_caches[0][layer_idx]], [kv_caches[1][layer_idx]]]
+    if gpu_kv_format == lmc_ops.GPUKVFormat.NB_NL_TWO_BS_NH_HS:
+        return kv_caches[:, layer_idx : layer_idx + 1, ...]
+    raise ValueError(f"Unknown GPU KV Format: {gpu_kv_format}")
+
+
+def get_layer_data_ptrs(
+    kv_caches: Any,
+    gpu_kv_format: "lmc_ops.GPUKVFormat",
+    layer_idx: int,
+) -> List[int]:
+    """Return the GPU data pointer(s) for a single layer, in the order the
+    transfer kernels expect (K first for the SGLang two-list format).
+
+    Args:
+        kv_caches: Full kv_caches structure.
+        gpu_kv_format: Format returned by :func:`discover_gpu_kv_format`.
+        layer_idx: 0-based layer index.
+
+    Returns:
+        Device pointers (int) covering the layer's K and V data.
+
+    Raises:
+        ValueError: If *gpu_kv_format* is not recognized.
+    """
+    if gpu_kv_format in _per_layer_list_formats():
+        return [kv_caches[layer_idx].data_ptr()]
+    if gpu_kv_format == lmc_ops.GPUKVFormat.TWO_X_NL_X_NBBS_NH_HS:
+        return [
+            kv_caches[0][layer_idx].data_ptr(),
+            kv_caches[1][layer_idx].data_ptr(),
+        ]
+    if gpu_kv_format == lmc_ops.GPUKVFormat.NB_NL_TWO_BS_NH_HS:
+        # NL dim's stride gives bytes per layer within the shared tensor.
+        layer_stride_bytes = kv_caches.stride(1) * kv_caches.element_size()
+        return [kv_caches.data_ptr() + layer_idx * layer_stride_bytes]
+    raise ValueError(f"Unknown GPU KV Format: {gpu_kv_format}")
+
+
+def get_layer_dtype(
+    kv_caches: Any,
+    gpu_kv_format: "lmc_ops.GPUKVFormat",
+    layer_idx: int,
+) -> torch.dtype:
+    """Return the dtype of a single layer's KV cache tensor.
+
+    Args:
+        kv_caches: Full kv_caches structure.
+        gpu_kv_format: Format returned by :func:`discover_gpu_kv_format`.
+        layer_idx: 0-based layer index.
+
+    Returns:
+        The torch dtype for that layer.
+    """
+    return get_dtype(
+        get_layer_kv_caches(kv_caches, gpu_kv_format, layer_idx), gpu_kv_format
+    )
+
+
+def get_layer_shape_signature(
+    kv_caches: Any,
+    gpu_kv_format: "lmc_ops.GPUKVFormat",
+    layer_idx: int,
+) -> Tuple[int, ...]:
+    """Return a hashable grouping key ``(kv_size, num_heads, head_size)`` for
+    a single layer. Two layers with identical keys are kernel-equivalent
+    regardless of physical layout.
+
+    Args:
+        kv_caches: Full kv_caches structure.
+        gpu_kv_format: Format returned by :func:`discover_gpu_kv_format`.
+        layer_idx: 0-based layer index.
+
+    Returns:
+        ``(kv_size, num_heads, head_size)``.
+    """
+    rep = get_layer_kv_caches(kv_caches, gpu_kv_format, layer_idx)
+    kv_size = 1 if is_mla(gpu_kv_format) else 2
+    nh = 1 if is_mla(gpu_kv_format) else get_num_heads(rep, gpu_kv_format)
+    hs = get_head_size(rep, gpu_kv_format)
+    return (kv_size, nh, hs)
+
+
+def make_page_buffer_shape_desc(
+    kv_caches: Any,
+    gpu_kv_format: "lmc_ops.GPUKVFormat",
+    layer_idx: int,
+    num_layers_in_group: int,
+    num_blocks: int,
+    block_size: int,
+) -> "lmc_ops.PageBufferShapeDesc":
+    """Build a :class:`PageBufferShapeDesc` from a representative layer.
+
+    Args:
+        kv_caches: Full kv_caches structure.
+        gpu_kv_format: Format returned by :func:`discover_gpu_kv_format`.
+        layer_idx: 0-based index of the representative layer.
+        num_layers_in_group: Number of layers in the group (``nl``).
+        num_blocks: Number of paged blocks (``nb``).
+        block_size: Tokens per block (``bs``).
+
+    Returns:
+        A populated ``PageBufferShapeDesc``.
+    """
+    rep = get_layer_kv_caches(kv_caches, gpu_kv_format, layer_idx)
+    desc = lmc_ops.PageBufferShapeDesc()
+    desc.kv_size = 1 if is_mla(gpu_kv_format) else 2
+    desc.nl = num_layers_in_group
+    desc.nb = num_blocks
+    desc.bs = block_size
+    desc.nh = 1 if is_mla(gpu_kv_format) else get_num_heads(rep, gpu_kv_format)
+    desc.hs = get_head_size(rep, gpu_kv_format)
+    desc.element_size = get_dtype(rep, gpu_kv_format).itemsize
+    return desc
+
+
 def _split_token2d_kv(token2d: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Accepts either:

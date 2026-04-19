@@ -699,12 +699,42 @@ class LMCacheConnectorV1Impl:
 
     def _build_kv_layer_groups(self):
         # Build KV layer groups structure if not already built
-        if self.lmcache_engine is not None:
-            assert len(self.kv_caches) > 0
-            kv_layer_groups_manager = (
-                self.lmcache_engine.metadata.kv_layer_groups_manager
-            )
-            kv_layer_groups_manager.build_kv_layer_groups(self.kv_caches)
+        if self.lmcache_engine is None:
+            return
+        if self.lmcache_engine.metadata.kv_layer_groups_manager is not None:
+            return
+        assert len(self.kv_caches) > 0
+
+        # First Party
+        from lmcache.utils import EngineType
+        from lmcache.v1.gpu_connector.utils import (
+            discover_gpu_kv_format,
+            ensure_contiguous_kv_caches,
+            get_block_size,
+            get_num_blocks,
+        )
+        from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
+
+        layout_hints = (
+            getattr(self.lmcache_engine.gpu_connector, "layout_hints", None) or {}
+        )
+        # Permute any non-contiguous tensors (e.g. HND) so logical and physical
+        # views match before format discovery and pointer capture.
+        self.kv_caches = ensure_contiguous_kv_caches(
+            self.kv_caches, kv_layout=layout_hints.get("kv_layout")
+        )
+        layer_names = list(self.kv_caches.keys())
+        kv_list = list(self.kv_caches.values())
+        gpu_kv_format = discover_gpu_kv_format(
+            kv_list, EngineType.VLLM, layout_hints=layout_hints
+        )
+        self.lmcache_engine.metadata.kv_layer_groups_manager = KVLayerGroupsManager(
+            kv_list,
+            gpu_kv_format=gpu_kv_format,
+            num_blocks=get_num_blocks(kv_list, gpu_kv_format),
+            block_size=get_block_size(kv_list, gpu_kv_format),
+            layer_names=layer_names,
+        )
 
     # TODO(chunxiaozheng): in the latest lmcache_connector, we use `register_kv_caches`
     #  to init self.kv_caches, we keep it in order to be compatible with old versions

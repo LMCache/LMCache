@@ -19,6 +19,7 @@ from lmcache.v1.gpu_connector.utils import (
     get_block_size,
     get_elements_per_layer,
     get_head_size,
+    get_layer_data_ptrs,
     get_num_blocks,
     get_page_buffer_size,
     get_tokens_per_layer,
@@ -453,12 +454,27 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
     def _initialize_kv_cache_pointers(self):
         if self.init:
             return
-        assert self.metadata.kv_layer_groups_manager.kv_layer_groups
+        manager = self.metadata.kv_layer_groups_manager
+        assert manager is not None, (
+            "KVLayerGroupsManager must be registered before connector init; "
+            "the serving-engine adapter is expected to construct it when KV "
+            "caches are registered."
+        )
+        assert manager.kv_layer_groups
 
-        # permute to contiguous before capturing pointers or doing format discovery
+        # permute to contiguous before capturing pointers. Format discovery
+        # and (num_blocks, block_size) are already cached on the manager
+        # (populated when the adapter constructed KVLayerGroupsManager);
+        # this avoids re-parsing layout that the manager already resolved.
         self.kvcaches = ensure_contiguous_kv_caches(
             self.kvcaches, kv_layout=self.layout_hints.get("kv_layout")
         )
+        self.gpu_kv_format = manager.gpu_kv_format
+        if self.gpu_kv_format is None:
+            # Fallback: the manager was built outside the adapter path.
+            self.gpu_kv_format = discover_gpu_kv_format(
+                self.kvcaches, EngineType.VLLM, layout_hints=self.layout_hints
+            )
 
         if self.use_gpu:
             # init tmp buffer
@@ -472,26 +488,31 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
                 )
             ]
         self.group_kv_cache_pointers_on_gpu = []
-        for group in self.metadata.kv_layer_groups_manager.kv_layer_groups:
-            # init kv cache pointers
+        for group in manager.kv_layer_groups:
             num_layers = group.num_layers
+            ptrs: list[int] = []
+            for layer_idx in group.layer_indices:
+                ptrs.extend(
+                    get_layer_data_ptrs(self.kvcaches, self.gpu_kv_format, layer_idx)
+                )
             kv_cache_pointers = torch.empty(num_layers, dtype=torch.int64, device="cpu")
-            kv_cache_pointers.numpy()[:] = [
-                t.data_ptr()
-                for i, t in enumerate(self.kvcaches)
-                if i in group.layer_indices
-            ]
+            kv_cache_pointers.numpy()[:] = ptrs
             kv_cache_pointers_on_gpu = torch.empty(
                 num_layers, dtype=torch.int64, device=self.device
             )
             kv_cache_pointers_on_gpu.copy_(kv_cache_pointers)
             self.group_kv_cache_pointers_on_gpu.append(kv_cache_pointers_on_gpu)
 
-        self.gpu_kv_format = discover_gpu_kv_format(
-            self.kvcaches, EngineType.VLLM, layout_hints=self.layout_hints
+        self.num_blocks = (
+            manager.num_blocks
+            if manager.num_blocks
+            else get_num_blocks(self.kvcaches, self.gpu_kv_format)
         )
-        self.num_blocks = get_num_blocks(self.kvcaches, self.gpu_kv_format)
-        self.block_size = get_block_size(self.kvcaches, self.gpu_kv_format)
+        self.block_size = (
+            manager.block_size
+            if manager.block_size
+            else get_block_size(self.kvcaches, self.gpu_kv_format)
+        )
         self.page_buffer_size = self.num_blocks * self.block_size
         self.head_size = get_head_size(self.kvcaches, self.gpu_kv_format)
 
