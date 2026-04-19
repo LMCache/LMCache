@@ -9,7 +9,7 @@ Configuration system for LMCache Engine that:
 """
 
 # Standard
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, cast
 import json
 import os
 
@@ -945,11 +945,12 @@ def _clone_lmcache_engine_config(
     base_config: "LMCacheEngineConfig",  # type: ignore[valid-type]
 ) -> "LMCacheEngineConfig":  # type: ignore[valid-type]
     """Create a detached LMCacheEngineConfig copy from an existing config."""
-    cloned_config = LMCacheEngineConfig.from_dict(base_config.to_dict())
+    base_cfg = cast(Any, base_config)
+    cloned_config = LMCacheEngineConfig.from_dict(base_cfg.to_dict())
     object.__setattr__(
         cloned_config,
         "_user_set_keys",
-        set(getattr(base_config, "_user_set_keys", set())),
+        set(getattr(base_cfg, "_user_set_keys", set())),
     )
     return cloned_config
 
@@ -958,17 +959,19 @@ def _apply_ec_storage_defaults(
     config: "LMCacheEngineConfig",  # type: ignore[valid-type]
 ) -> None:
     """Apply EC-only storage defaults after EC override ingestion."""
-    if not config.enable_pd:
-        if not config.local_cpu:
-            logger.info("EC config enabling local_cpu allocator backend")
-            config.local_cpu = True
-        if config.max_local_cpu_size <= 0:
-            logger.info("EC config setting max_local_cpu_size to 1 GB")
-            config.max_local_cpu_size = 1
+    cfg = cast(Any, config)
 
-    if config.local_disk and config.max_local_disk_size <= 0:
+    if not cfg.enable_pd:
+        if not cfg.local_cpu:
+            logger.info("EC config enabling local_cpu allocator backend")
+            cfg.local_cpu = True
+        if cfg.max_local_cpu_size <= 0:
+            logger.info("EC config setting max_local_cpu_size to 1 GB")
+            cfg.max_local_cpu_size = 1
+
+    if cfg.local_disk and cfg.max_local_disk_size <= 0:
         logger.info("EC config setting max_local_disk_size to 64 GB")
-        config.max_local_disk_size = 64
+        cfg.max_local_disk_size = 64
 
 
 def load_ec_engine_config(
