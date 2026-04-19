@@ -1,13 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 import asyncio
+from concurrent.futures import Future
 import json
 import os
 import shutil
 import tempfile
 import threading
 import time
-from typing import Callable
+from typing import Any, Callable
 
 # Third Party
 import pytest
@@ -327,6 +328,59 @@ class TestLocalDiskBackend:
             lambda payload: payload["hit_count"] == 2,
         )
         assert updated_payload["last_access_ts"] >= initial_payload["last_access_ts"]
+
+    def test_touch_cache_offloads_metadata_persist(
+        self, local_disk_backend, monkeypatch
+    ) -> None:
+        """Pinned cache hits should queue sidecar writes."""
+        key = create_test_key(33)
+        local_disk_backend.insert_key(
+            key,
+            size=16,
+            shape=torch.Size([16]),
+            dtype=torch.uint8,
+            fmt=MemoryFormat.BINARY,
+        )
+
+        submitted_tasks = []
+        called_inline = False
+
+        def persist_metadata_if_current(**kwargs: Any) -> None:
+            nonlocal called_inline
+            called_inline = True
+
+        class CapturingDiskWorker:
+            def submit_metadata_task(
+                self,
+                task: Callable[..., None],
+                *args: Any,
+                **kwargs: Any,
+            ) -> Future:
+                submitted_tasks.append((task, args, kwargs))
+                future: Future = Future()
+                future.set_result(None)
+                return future
+
+        local_disk_backend.disk_worker = CapturingDiskWorker()
+        monkeypatch.setattr(
+            local_disk_backend,
+            "_persist_metadata_snapshot_if_current",
+            persist_metadata_if_current,
+        )
+
+        assert local_disk_backend.contains(key, pin=True)
+        local_disk_backend.touch_cache()
+
+        deadline = time.time() + 2.0
+        while not submitted_tasks and time.time() < deadline:
+            time.sleep(0.01)
+
+        assert submitted_tasks
+        task, args, kwargs = submitted_tasks[0]
+        assert task is persist_metadata_if_current
+        assert args == ()
+        assert kwargs["key"] == key
+        assert called_inline is False
 
     def test_recover_persisted_index_restores_lru_reuse_tracking(
         self, temp_disk_path, async_loop, local_cpu_backend, monkeypatch

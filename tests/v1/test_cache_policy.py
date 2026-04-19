@@ -58,6 +58,18 @@ def test_lru_with_pin():
     assert evict_candidates == [key3, key1]
 
 
+def test_lru_restore_on_recover_with_zero_created_ts() -> None:
+    policy = get_cache_policy("LRU")
+    cache_dict = policy.init_mutable_mapping()
+    key = dumb_cache_engine_key(10)
+
+    cache_dict[key] = DummyMemoryObj()
+    policy.restore_on_recover(key, cache_dict, SimpleNamespace(created_ts=0.0))
+
+    assert key.chunk_hash in policy.chunk_hash_to_init_timestamp
+    assert policy.chunk_hash_to_init_timestamp[key.chunk_hash] > 0
+
+
 def test_fifo():
     policy = get_cache_policy("FIFO")
     cache_dict = policy.init_mutable_mapping()

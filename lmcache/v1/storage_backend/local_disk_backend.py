@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from concurrent.futures import Future
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Callable, List, Optional, Sequence
 import asyncio
@@ -101,6 +101,7 @@ class LocalDiskWorker:
 
         # TODO(Jiayi): make executor and its parameters configurable
         self.executor = AsyncPQThreadPoolExecutor(loop, max_workers=4)
+        self.metadata_executor = ThreadPoolExecutor(max_workers=1)
         self.loop = loop
         self._closed = False
 
@@ -143,11 +144,21 @@ class LocalDiskWorker:
         with self.put_lock:
             return key in self.put_tasks
 
+    def submit_metadata_task(
+        self,
+        task: Callable[..., None],
+        *args: Any,
+        **kwargs: Any,
+    ) -> Future:
+        """Submit metadata sidecar I/O without blocking request hot paths."""
+        return self.metadata_executor.submit(task, *args, **kwargs)
+
     def close(self):
         # Gracefully shut down the executor
         if self._closed:
             return
         self._closed = True
+        self.metadata_executor.shutdown(wait=True)
         self.executor.shutdown(wait=True)
 
 
@@ -343,7 +354,9 @@ class LocalDiskBackend(StorageBackendInterface):
                 key = parse_cache_key(payload["key"])
                 path = self._key_to_path(key)
                 if not os.path.exists(path):
-                    logger.warning("Skipping stale disk metadata without data file: %s", meta_path)
+                    logger.warning(
+                        "Skipping stale disk metadata without data file: %s", meta_path
+                    )
                     continue
 
                 size = os.path.getsize(path)
@@ -1036,5 +1049,17 @@ class LocalDiskBackend(StorageBackendInterface):
         key: CacheEngineKey,
         metadata_snapshot: DiskCacheMetadata,
     ) -> None:
-        """Persist a metadata snapshot after the caller releases ``disk_lock``."""
-        self._persist_metadata_snapshot_if_current(key, metadata_snapshot)
+        """Queue sidecar persistence after the caller releases ``disk_lock``."""
+        future = self.disk_worker.submit_metadata_task(
+            self._persist_metadata_snapshot_if_current,
+            key=key,
+            metadata_snapshot=metadata_snapshot,
+        )
+        future.add_done_callback(self._log_metadata_persist_result)
+
+    def _log_metadata_persist_result(self, future: Future) -> None:
+        """Log asynchronous metadata persistence failures."""
+        try:
+            future.result()
+        except Exception as e:
+            logger.warning("Failed to persist disk metadata sidecar: %s", e)

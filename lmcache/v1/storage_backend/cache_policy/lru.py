@@ -76,7 +76,7 @@ class LRUCachePolicy(BaseCachePolicy[KeyType, OrderedDict[KeyType, Any]]):
         """Restore LRU reuse timestamps for recovered cache entries."""
         created_ts = float(getattr(metadata, "created_ts", 0.0) or 0.0)
         if created_ts <= 0:
-            return
+            created_ts = time.time()
 
         key_hash = self._normalize_key_hash(key)
         self.chunk_hash_to_init_timestamp[key_hash] = created_ts
