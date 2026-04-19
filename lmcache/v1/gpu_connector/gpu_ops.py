@@ -5,7 +5,36 @@ import torch
 # First Party
 from lmcache.v1.lazy_memory_allocator import LazyMemoryAllocator
 from lmcache.v1.memory_management import MemoryObj
-import lmcache.c_ops as lmc_ops
+
+
+# The LazyMemoryAllocator registers its host buffer with cudaHostRegister /
+# hipHostRegister in PIN_CHUNK_SIZE-sized chunks. The HIP runtime will reject
+# a single async memcpy that crosses two independently-registered regions, so
+# any transfer touching more than one pin chunk must be split at the chunk
+# boundaries. The split is implemented in Python (rather than inside the C++
+# kernel) so that the arithmetic uses Python's arbitrary-precision integers
+# and is safe for offsets past the 2 GB mark.
+def _lazy_split_copy(
+    host_view: torch.Tensor,
+    gpu_view: torch.Tensor,
+    host_offset: int,
+    h2d: bool,
+) -> None:
+    pin_size = LazyMemoryAllocator.PIN_CHUNK_SIZE
+    mask = pin_size - 1
+    nbytes = host_view.nbytes
+    offset = 0
+    while offset < nbytes:
+        aligned_end = ((offset + host_offset) & ~mask) + pin_size
+        real_end = min(host_offset + nbytes, aligned_end)
+        chunk_nbytes = real_end - offset - host_offset
+        host_chunk = host_view[offset : offset + chunk_nbytes]
+        gpu_chunk = gpu_view[offset : offset + chunk_nbytes]
+        if h2d:
+            gpu_chunk.copy_(host_chunk, non_blocking=True)
+        else:
+            host_chunk.copy_(gpu_chunk, non_blocking=True)
+        offset += chunk_nbytes
 
 
 # Helper functions
@@ -32,19 +61,18 @@ def lmcache_memcpy_async_h2d(
             f"Size mismatch: memory_obj nbytes={mem_obj_size}, "
             f"gpu_buffer nbytes={gpu_buffer.nbytes}"
         )
+    src_view = src_tensor.view(torch.uint8)[:mem_obj_size]
+    gpu_view = gpu_buffer.view(torch.uint8)
     if isinstance(memory_obj.parent(), LazyMemoryAllocator):
-        lmc_ops.lmcache_memcpy_async(
-            gpu_buffer.data_ptr(),
-            memory_obj.data_ptr,
-            mem_obj_size,
-            lmc_ops.TransferDirection.H2D,
+        # _lazy_split_copy slices in bytes, so it needs 1-D byte views.
+        _lazy_split_copy(
+            src_view.reshape(-1),
+            gpu_view.reshape(-1),
             memory_obj.meta.address,
-            LazyMemoryAllocator.PIN_CHUNK_SIZE,
+            h2d=True,
         )
     else:
-        gpu_buffer.view(torch.uint8).copy_(
-            src_tensor.view(torch.uint8)[:mem_obj_size], non_blocking=True
-        )
+        gpu_view.copy_(src_view, non_blocking=True)
 
 
 def lmcache_memcpy_async_d2h(
@@ -70,16 +98,15 @@ def lmcache_memcpy_async_d2h(
             f"Size mismatch: memory_obj nbytes={mem_obj_size}, "
             f"gpu_buffer nbytes={gpu_buffer.nbytes}"
         )
+    dst_view = dst_tensor.view(torch.uint8)[:mem_obj_size]
+    gpu_view = gpu_buffer.view(torch.uint8)
     if isinstance(memory_obj.parent(), LazyMemoryAllocator):
-        lmc_ops.lmcache_memcpy_async(
-            memory_obj.data_ptr,
-            gpu_buffer.data_ptr(),
-            mem_obj_size,
-            lmc_ops.TransferDirection.D2H,
+        # _lazy_split_copy slices in bytes, so it needs 1-D byte views.
+        _lazy_split_copy(
+            dst_view.reshape(-1),
+            gpu_view.reshape(-1),
             memory_obj.meta.address,
-            LazyMemoryAllocator.PIN_CHUNK_SIZE,
+            h2d=False,
         )
     else:
-        dst_tensor.view(torch.uint8)[:mem_obj_size].copy_(
-            gpu_buffer.view(torch.uint8), non_blocking=True
-        )
+        dst_view.copy_(gpu_view, non_blocking=True)
