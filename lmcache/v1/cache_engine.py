@@ -1804,7 +1804,8 @@ class LMCacheEngine:
 
         :param slot_mapping: The slot_mapping to convert,
             can be a torch.Tensor, List[int], Dict[str, torch.Tensor], or None.
-            Dict inputs use the first mapping value for backward compatibility.
+            Dict inputs flatten all mapping values in sorted key order so
+            grouped-KV logging includes every per-layer mapping.
         :type slot_mapping: Optional[Union[torch.Tensor, List[int], Dict[str, torch.Tensor]]]
         :return: The slot_mapping as a List[int], or None if input is None or an
             empty dict.
@@ -1815,7 +1816,10 @@ class LMCacheEngine:
         if isinstance(slot_mapping, dict):
             if not slot_mapping:
                 return None
-            slot_mapping = next(iter(slot_mapping.values()))
+            slot_mapping_list: List[int] = []
+            for layer_name in sorted(slot_mapping):
+                slot_mapping_list.extend(slot_mapping[layer_name].tolist())
+            return slot_mapping_list
         if isinstance(slot_mapping, torch.Tensor):
             return slot_mapping.tolist()
         # At this point, slot_mapping must be List[int]

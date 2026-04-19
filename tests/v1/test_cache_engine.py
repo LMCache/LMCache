@@ -54,6 +54,17 @@ def get_expected_count(token_len, save_unfull_chunk, chunk_size):
     return (token_len // chunk_size) * chunk_size
 
 
+def test_get_slot_mapping_list_flattens_dict_mappings_deterministically():
+    """Dict slot mappings should include every per-layer mapping in log output."""
+    cache_engine = LMCacheEngine.__new__(LMCacheEngine)
+    slot_mapping = {
+        "layer_b": torch.tensor([4, 5], dtype=torch.long),
+        "layer_a": torch.tensor([1, 2, 3], dtype=torch.long),
+    }
+
+    assert cache_engine._get_slot_mapping_list(slot_mapping) == [1, 2, 3, 4, 5]
+
+
 @pytest.mark.parametrize("save_unfull_chunk", [False, True])
 @pytest.mark.skipif(
     not torch.cuda.is_available(),
