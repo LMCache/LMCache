@@ -25,6 +25,9 @@ def main():
     # Load model configuration using AutoConfig
     try:
         config = AutoConfig.from_pretrained(args.model)
+        get_text_config = getattr(config, "get_text_config", None)
+        if callable(get_text_config):
+            config = get_text_config(decoder=True)
 
         # Prepare configuration data in a dictionary format
         config_data = {
@@ -40,7 +43,7 @@ def main():
 
         # Check for Qwen3 models (fuzzy matching) or GLM4 models
         if (
-            "qwen/qwen3-" in args.model.lower()
+            "qwen/qwen3" in args.model.lower()
             or "zai-org/glm-4." in args.model.lower()
         ):
             config_data["head_dim"] = getattr(config, "head_dim", None)
