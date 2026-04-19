@@ -11,6 +11,10 @@ import torch
 # First Party
 from lmcache.logging import init_logger
 
+# Install cross-platform shims (eventfd) early,
+# so every module can use ``os.eventfd`` transparently.
+import lmcache.v1.platform  # noqa: F401
+
 try:
     # First Party
     from lmcache._version import __version__
