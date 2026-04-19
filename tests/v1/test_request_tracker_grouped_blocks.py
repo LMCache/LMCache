@@ -66,7 +66,7 @@ def test_request_tracker_update_accepts_list_of_tuple_block_groups() -> None:
     assert tracker.allocated_block_ids_by_group == ([1, 2], [5, 6])
 
 
-def test_preempted_request_preserves_grouped_blocks_without_new_block_ids() -> None:
+def test_preempted_request_clears_stale_grouped_blocks_without_new_block_ids() -> None:
     tracker = RequestTracker(
         req_id="req-preempted",
         prompt_len=2,
@@ -83,7 +83,7 @@ def test_preempted_request_preserves_grouped_blocks_without_new_block_ids() -> N
         all_token_ids=[10, 11, 12],
     )
 
-    assert tracker.allocated_block_ids_by_group == ([1, 2], [5, 6])
+    assert tracker.allocated_block_ids_by_group == tuple()
     assert tracker.token_ids == [10, 11]
 
 

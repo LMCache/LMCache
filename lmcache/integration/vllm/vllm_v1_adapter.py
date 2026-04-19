@@ -108,6 +108,18 @@ def _compute_group_block_sizes(
     fallback_block_size: int,
     kv_cache_groups: Optional[list[Any]] = None,
 ) -> tuple[int, ...]:
+    """Return the token capacity of each KV cache group block.
+
+    Args:
+        num_groups: Number of KV cache groups tracked for the request.
+        fallback_block_size: Block size to use when no group-specific
+            configuration is available.
+        kv_cache_groups: Optional vLLM KV cache group descriptors. When
+            provided, each group's KV cache spec supplies that group's block size.
+
+    Returns:
+        A tuple of block sizes ordered by KV cache group id.
+    """
     group_block_sizes: list[int] = []
     for gid in range(num_groups):
         group_block_size = fallback_block_size
@@ -121,6 +133,16 @@ def _compute_max_token_slots(
     block_ids_by_group: tuple[list[int], ...],
     group_block_sizes: tuple[int, ...],
 ) -> int:
+    """Return the largest token slot capacity across all KV cache groups.
+
+    Args:
+        block_ids_by_group: Allocated block ids ordered by KV cache group id.
+        group_block_sizes: Per-group block sizes ordered by KV cache group id.
+
+    Returns:
+        The maximum number of token slots covered by any group, or 0 when no
+        groups are tracked.
+    """
     return max(
         (
             len(block_ids_for_group) * group_block_sizes[gid]
@@ -173,13 +195,7 @@ class RequestTracker:
     ) -> tuple[list[int], ...]:
         if block_ids is None:
             return tuple()
-        if isinstance(block_ids, tuple):
-            if len(block_ids) == 0:
-                return tuple()
-            if isinstance(block_ids[0], (list, tuple)):
-                return tuple(list(group) for group in block_ids)
-            return (list(block_ids),)
-        if isinstance(block_ids, list):
+        if isinstance(block_ids, (list, tuple)):
             if len(block_ids) == 0:
                 return tuple()
             if isinstance(block_ids[0], (list, tuple)):
@@ -284,17 +300,15 @@ class RequestTracker:
             # diff-cafd89ce8a698a56acb24ada62831cbc7a980782f78a52d1742ba238031f296cL94
             new_block_ids_by_group = tuple()
         else:
-            new_block_ids_by_group = RequestTracker._normalize_block_ids(
-                new_block_ids
-            )
+            new_block_ids_by_group = RequestTracker._normalize_block_ids(new_block_ids)
 
         if preempted:
             assert all_token_ids is not None, (
                 f"Preempted request {self.req_id} has no all_token_ids"
             )
-            # the block ids will change after preemption
-            if new_block_ids_by_group:
-                self.allocated_block_ids_by_group = new_block_ids_by_group
+            # vLLM frees the old blocks during preemption. An empty update means
+            # no fresh block mapping is valid yet, not that old blocks survive.
+            self.allocated_block_ids_by_group = new_block_ids_by_group
             # reset the number of saved tokens
             self.num_saved_tokens = lmcache_cached_tokens
             num_computed_tokens = max(lmcache_cached_tokens, vllm_cached_tokens)
@@ -485,19 +499,13 @@ class ReqMeta:
             block_offsets = torch.arange(0, group_block_size, dtype=torch.long)
             group_num_blocks = len(block_ids_for_group)
             block_ids = torch.tensor(block_ids_for_group, dtype=torch.long)
-            slot_mapping = (
-                block_offsets.reshape((1, group_block_size))
-                + (
-                    block_ids.reshape((group_num_blocks, 1)).clamp_min(0)
-                    * group_block_size
-                )
+            slot_mapping = block_offsets.reshape((1, group_block_size)) + (
+                block_ids.reshape((group_num_blocks, 1)).clamp_min(0) * group_block_size
             )
             # vLLM reserves NULL_BLOCK_ID globally for the shared null block.
             # These placeholders can appear in padded / skipped regions and
             # must stay as PAD slots instead of pointing at a real KV page.
-            null_block_mask = block_ids.eq(NULL_BLOCK_ID).reshape(
-                (group_num_blocks, 1)
-            )
+            null_block_mask = block_ids.eq(NULL_BLOCK_ID).reshape((group_num_blocks, 1))
             if null_block_mask.any():
                 slot_mapping = slot_mapping.masked_fill(null_block_mask, -1)
             slot_mapping = slot_mapping.flatten()[: len(token_ids)]
@@ -553,8 +561,7 @@ class ReqMeta:
             req_id=tracker.req_id,
             token_ids=token_ids,
             block_ids_by_group=tuple(
-                list(block_ids)
-                for block_ids in tracker.allocated_block_ids_by_group
+                list(block_ids) for block_ids in tracker.allocated_block_ids_by_group
             ),
             slot_mapping=slot_mapping,
             slot_mappings_by_group=ordered_slot_mappings_by_group,
@@ -650,9 +657,7 @@ class LMCacheConnectorV1Impl:
             kv_cache_groups=kv_cache_groups,
         )
 
-    def _get_max_token_slots(
-        self, block_ids_by_group: tuple[list[int], ...]
-    ) -> int:
+    def _get_max_token_slots(self, block_ids_by_group: tuple[list[int], ...]) -> int:
         group_block_sizes = self._get_group_block_sizes(len(block_ids_by_group))
         return _compute_max_token_slots(block_ids_by_group, group_block_sizes)
 
@@ -1302,7 +1307,9 @@ class LMCacheConnectorV1Impl:
                 assert isinstance(token_ids, list)
 
                 slot_mapping = self._resolve_full_slot_mapping(request)
-                slot_mappings_by_layer = getattr(request, "slot_mappings_by_layer", None)
+                slot_mappings_by_layer = getattr(
+                    request, "slot_mappings_by_layer", None
+                )
                 slot_mappings = (
                     {
                         layer_name: mapping.to(self.device)
