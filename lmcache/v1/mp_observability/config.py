@@ -8,13 +8,18 @@ Configuration for the MP-mode observability stack.
 from __future__ import annotations
 
 # Standard
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 import argparse
 
 if TYPE_CHECKING:
     # First Party
     from lmcache.v1.mp_observability.event_bus import EventBus
+
+# First Party
+from lmcache.v1.mp_observability.subscribers.logging.lookup_hash import (
+    LookupHashLogConfig,
+)
 
 
 @dataclass
@@ -48,6 +53,24 @@ class ObservabilityConfig:
     prometheus_port: int = 9090
     """Port for the Prometheus /metrics endpoint.  Only used when
     ``otlp_endpoint`` is ``None`` (Prometheus pull fallback)."""
+
+    metrics_sample_rate: float = 0.01
+    """Fraction of chunks/blocks to track for lifecycle histograms (0, 1.0].
+    Counters always count all events regardless of this setting."""
+
+    lookup_hash_log: LookupHashLogConfig = field(default_factory=LookupHashLogConfig)
+    """Configuration for lookup hash file logging.  Disabled by default
+    (empty ``output_dir``)."""
+
+    trace_level: str | None = None
+    """If set, enables trace recording at the given level.  Currently
+    only ``"storage"`` is supported.  See
+    :mod:`lmcache.v1.mp_observability.trace` for details."""
+
+    trace_output: str | None = None
+    """Path to write the trace file.  When :attr:`trace_level` is set
+    but this is ``None``, a timestamped path under ``$TMPDIR`` is
+    minted and logged at INFO."""
 
 
 DEFAULT_OBSERVABILITY_CONFIG = ObservabilityConfig(enabled=False)
@@ -119,6 +142,72 @@ def add_observability_args(
             "Only used when --otlp-endpoint is not set. Default is 9090."
         ),
     )
+    group.add_argument(
+        "--metrics-sample-rate",
+        type=float,
+        default=0.01,
+        help=(
+            "Fraction of chunks/blocks to track for lifecycle histograms "
+            "(0, 1.0]. Counters always count all events. Default is 0.01 (1%%)."
+        ),
+    )
+
+    # Lookup hash logging config
+    log_group = parser.add_argument_group(
+        "Lookup Hash Logging",
+        "Configuration for lookup hash file logging (offline analysis)",
+    )
+    log_group.add_argument(
+        "--lookup-hash-log-dir",
+        type=str,
+        default="",
+        help="Directory to write lookup hash JSONL files for offline analysis. "
+        "Empty string (default) disables logging.",
+    )
+    log_group.add_argument(
+        "--lookup-hash-log-rotation-interval",
+        type=int,
+        default=6 * 3600,
+        help="Time interval in seconds before rotating to a new log file. "
+        "Default is 21600 (6 hours).",
+    )
+    log_group.add_argument(
+        "--lookup-hash-log-rotation-max-size",
+        type=int,
+        default=100 * 1024 * 1024,
+        help="Max file size in bytes before rotating even if the time "
+        "interval has not elapsed. Default is 100MB (104857600).",
+    )
+    log_group.add_argument(
+        "--lookup-hash-log-max-files",
+        type=int,
+        default=100,
+        help="Max number of lookup hash log files to keep. "
+        "Oldest files are deleted when this limit is exceeded. Default is 100.",
+    )
+
+    trace_group = parser.add_argument_group(
+        "Trace Recording",
+        "Capture LMCache operations to a binary trace file for replay "
+        "(see `lmcache trace`).",
+    )
+    trace_group.add_argument(
+        "--trace-level",
+        type=str,
+        choices=["storage"],
+        default=None,
+        help="Enable trace recording at the given level. Currently only "
+        "'storage' is supported (records StorageManager public-API calls).",
+    )
+    trace_group.add_argument(
+        "--trace-output",
+        type=str,
+        default=None,
+        help="Path to write the trace file. Defaults to a timestamped "
+        "file under $TMPDIR when --trace-level is set without an explicit "
+        "output path.",
+    )
+
     return parser
 
 
@@ -141,6 +230,15 @@ def parse_args_to_observability_config(
         tracing_enabled=args.enable_tracing,
         otlp_endpoint=args.otlp_endpoint,
         prometheus_port=args.prometheus_port,
+        metrics_sample_rate=args.metrics_sample_rate,
+        lookup_hash_log=LookupHashLogConfig(
+            output_dir=args.lookup_hash_log_dir,
+            rotation_interval_sec=args.lookup_hash_log_rotation_interval,
+            rotation_max_size=args.lookup_hash_log_rotation_max_size,
+            max_files=args.lookup_hash_log_max_files,
+        ),
+        trace_level=args.trace_level,
+        trace_output=args.trace_output,
     )
 
     if config.tracing_enabled and config.otlp_endpoint is None:
@@ -191,12 +289,17 @@ def init_observability(obs_config: ObservabilityConfig) -> EventBus:
     if obs_config.metrics_enabled:
         # First Party
         from lmcache.v1.mp_observability.subscribers.metrics import (
+            L0LifecycleSubscriber,
+            L1LifecycleSubscriber,
             L1MetricsSubscriber,
             L2MetricsSubscriber,
             SMMetricsSubscriber,
         )
 
+        sample_rate = obs_config.metrics_sample_rate
+        bus.register_subscriber(L0LifecycleSubscriber(sample_rate=sample_rate))
         bus.register_subscriber(L1MetricsSubscriber())
+        bus.register_subscriber(L1LifecycleSubscriber(sample_rate=sample_rate))
         bus.register_subscriber(L2MetricsSubscriber())
         bus.register_subscriber(SMMetricsSubscriber())
 
@@ -218,9 +321,20 @@ def init_observability(obs_config: ObservabilityConfig) -> EventBus:
         # First Party
         from lmcache.v1.mp_observability.subscribers.tracing import (
             MPServerTracingSubscriber,
+            get_span_registry,
         )
 
-        bus.register_subscriber(MPServerTracingSubscriber())
+        bus.register_subscriber(MPServerTracingSubscriber(get_span_registry()))
+
+    # Lookup hash file logging (independent of the logging_enabled flag —
+    # it has its own enable gate via output_dir).
+    if obs_config.lookup_hash_log.enabled:
+        # First Party
+        from lmcache.v1.mp_observability.subscribers.logging.lookup_hash import (
+            LookupHashLoggingSubscriber,
+        )
+
+        bus.register_subscriber(LookupHashLoggingSubscriber(obs_config.lookup_hash_log))
 
     bus.start()
     return bus

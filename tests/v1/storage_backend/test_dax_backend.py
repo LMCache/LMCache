@@ -21,6 +21,7 @@ from lmcache.v1.memory_management import AdHocMemoryAllocator, MemoryFormat, Mem
 from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 from lmcache.v1.storage_backend.plugins.dax_backend import DaxBackend
+import lmcache.v1.storage_backend.plugins.dax_backend as dax_backend_module
 
 
 @pytest.fixture
@@ -84,11 +85,57 @@ def _create_config(
         max_local_cpu_size=max_local_cpu_size,
         lmcache_instance_id="test_dax_backend",
     )
+    merged_extra_config = {
+        "dax.restore_workers": 1,
+        "dax.restore_max_regions": 1,
+        "dax.retrieve_staging_slab_bytes": 8 * 1024 * 1024,
+    }
     if extra_config is not None:
-        config.extra_config = extra_config
+        merged_extra_config.update(extra_config)
+    config.extra_config = merged_extra_config
     if storage_plugins is not None:
         config.storage_plugins = storage_plugins
     return config
+
+
+def _allocate_kv_obj(
+    *,
+    num_tokens: int,
+    hidden_dim: int = 8,
+    fill_value: int = 0,
+) -> MemoryObj:
+    alloc = AdHocMemoryAllocator(device="cpu")
+    obj = alloc.allocate(
+        [torch.Size([2, num_tokens, hidden_dim])],
+        [torch.bfloat16],
+        fmt=MemoryFormat.KV_T2D,
+    )
+    assert obj is not None
+    assert obj.tensor is not None
+    obj.tensor.fill_(fill_value)
+    return obj
+
+
+def _store_tensor(
+    backend: DaxBackend,
+    key: CacheEngineKey,
+    *,
+    num_tokens: int,
+    hidden_dim: int = 8,
+    fill_value: int = 0,
+) -> None:
+    obj = _allocate_kv_obj(
+        num_tokens=num_tokens,
+        hidden_dim=hidden_dim,
+        fill_value=fill_value,
+    )
+    try:
+        futures = backend.batched_submit_put_task([key], [obj])
+        if futures:
+            for future in futures:
+                future.result(timeout=5)
+    finally:
+        obj.ref_count_down()
 
 
 def test_dax_backend_roundtrip(memory_allocator, loop_in_thread):
@@ -145,6 +192,340 @@ def test_dax_backend_roundtrip(memory_allocator, loop_in_thread):
             obj.ref_count_down()
         finally:
             backend.close()
+
+
+def test_dax_backend_batched_get_blocking_keeps_positional_holes(
+    memory_allocator,
+    loop_in_thread,
+) -> None:
+    with tempfile.TemporaryDirectory() as td:
+        dev_path = os.path.join(td, "dax.bin")
+        with open(dev_path, "wb") as fout:
+            fout.truncate(16 * 1024 * 1024)
+
+        config = _create_config(
+            chunk_size=16,
+            local_cpu=True,
+            max_local_cpu_size=0.1,
+            extra_config={
+                "dax.device_path": dev_path,
+                "dax.max_dax_size": 16 / 1024,
+            },
+        )
+        metadata = _create_metadata(chunk_size=16)
+        local_cpu = LocalCPUBackend(
+            config=config,
+            metadata=metadata,
+            dst_device="cpu",
+            memory_allocator=memory_allocator,
+        )
+        backend = DaxBackend(
+            config=config,
+            metadata=metadata,
+            local_cpu_backend=local_cpu,
+            loop=loop_in_thread,
+            dst_device="cpu",
+        )
+
+        try:
+            key1 = CacheEngineKey("test_model", 1, 0, 11, torch.bfloat16)
+            key2 = CacheEngineKey("test_model", 1, 0, 12, torch.bfloat16)
+            key3 = CacheEngineKey("test_model", 1, 0, 13, torch.bfloat16)
+            _store_tensor(backend, key1, num_tokens=16, fill_value=3)
+            _store_tensor(backend, key3, num_tokens=16, fill_value=7)
+
+            results = backend.batched_get_blocking([key1, key2, key3])
+            assert len(results) == 3
+            assert results[1] is None
+            assert results[0] is not None
+            assert results[2] is not None
+            assert torch.all(results[0].tensor == 3)
+            assert torch.all(results[2].tensor == 7)
+            results[0].ref_count_down()
+            results[2].ref_count_down()
+        finally:
+            backend.close()
+
+
+def test_dax_backend_batched_get_blocking_passes_cached_fmt_to_allocator(
+    memory_allocator,
+    loop_in_thread,
+    monkeypatch,
+) -> None:
+    with tempfile.TemporaryDirectory() as td:
+        dev_path = os.path.join(td, "dax.bin")
+        with open(dev_path, "wb") as fout:
+            fout.truncate(16 * 1024 * 1024)
+
+        config = _create_config(
+            chunk_size=16,
+            local_cpu=True,
+            max_local_cpu_size=0.1,
+            extra_config={
+                "dax.device_path": dev_path,
+                "dax.max_dax_size": 16 / 1024,
+            },
+        )
+        metadata = _create_metadata(chunk_size=16)
+        local_cpu = LocalCPUBackend(
+            config=config,
+            metadata=metadata,
+            dst_device="cpu",
+            memory_allocator=memory_allocator,
+        )
+        backend = DaxBackend(
+            config=config,
+            metadata=metadata,
+            local_cpu_backend=local_cpu,
+            loop=loop_in_thread,
+            dst_device="cpu",
+        )
+
+        seen_formats: list[MemoryFormat] = []
+        original_batched_allocate = local_cpu.batched_allocate
+
+        def _tracking_batched_allocate(
+            shapes: torch.Size | list[torch.Size],
+            dtypes: torch.dtype | list[torch.dtype],
+            batch_size: int,
+            fmt: MemoryFormat | None = None,
+            eviction: bool = True,
+            busy_loop: bool = True,
+        ) -> list[MemoryObj] | None:
+            assert fmt is not None
+            seen_formats.append(fmt)
+            return original_batched_allocate(
+                shapes,
+                dtypes,
+                batch_size,
+                fmt,
+                eviction=eviction,
+                busy_loop=busy_loop,
+            )
+
+        monkeypatch.setattr(local_cpu, "batched_allocate", _tracking_batched_allocate)
+
+        try:
+            key1 = CacheEngineKey("test_model", 1, 0, 14, torch.bfloat16)
+            key2 = CacheEngineKey("test_model", 1, 0, 15, torch.bfloat16)
+            _store_tensor(backend, key1, num_tokens=16, fill_value=4)
+            _store_tensor(backend, key2, num_tokens=16, fill_value=8)
+
+            results = backend.batched_get_blocking([key1, key2])
+            assert seen_formats == [MemoryFormat.KV_T2D]
+            for result in results:
+                assert result is not None
+                result.ref_count_down()
+        finally:
+            backend.close()
+
+
+def test_dax_backend_batched_get_blocking_handles_heterogeneous_chunk_shapes(
+    memory_allocator,
+    loop_in_thread,
+) -> None:
+    with tempfile.TemporaryDirectory() as td:
+        dev_path = os.path.join(td, "dax.bin")
+        with open(dev_path, "wb") as fout:
+            fout.truncate(16 * 1024 * 1024)
+
+        config = _create_config(
+            chunk_size=16,
+            local_cpu=True,
+            max_local_cpu_size=0.1,
+            extra_config={
+                "dax.device_path": dev_path,
+                "dax.max_dax_size": 16 / 1024,
+            },
+        )
+        metadata = _create_metadata(chunk_size=16)
+        local_cpu = LocalCPUBackend(
+            config=config,
+            metadata=metadata,
+            dst_device="cpu",
+            memory_allocator=memory_allocator,
+        )
+        backend = DaxBackend(
+            config=config,
+            metadata=metadata,
+            local_cpu_backend=local_cpu,
+            loop=loop_in_thread,
+            dst_device="cpu",
+        )
+
+        try:
+            full_key = CacheEngineKey("test_model", 1, 0, 21, torch.bfloat16)
+            tail_key = CacheEngineKey("test_model", 1, 0, 22, torch.bfloat16)
+            _store_tensor(backend, full_key, num_tokens=16, fill_value=5)
+            _store_tensor(backend, tail_key, num_tokens=8, fill_value=9)
+
+            results = backend.batched_get_blocking([full_key, tail_key])
+            assert [result.get_shape() for result in results if result is not None] == [
+                torch.Size([2, 16, 8]),
+                torch.Size([2, 8, 8]),
+            ]
+            assert results[0] is not None
+            assert results[1] is not None
+            assert torch.all(results[0].tensor == 5)
+            assert torch.all(results[1].tensor == 9)
+            for result in results:
+                assert result is not None
+                result.ref_count_down()
+        finally:
+            backend.close()
+
+
+def test_dax_backend_batched_get_non_blocking_stops_at_first_miss(
+    memory_allocator,
+    loop_in_thread,
+) -> None:
+    with tempfile.TemporaryDirectory() as td:
+        dev_path = os.path.join(td, "dax.bin")
+        with open(dev_path, "wb") as fout:
+            fout.truncate(16 * 1024 * 1024)
+
+        config = _create_config(
+            chunk_size=16,
+            local_cpu=True,
+            max_local_cpu_size=0.1,
+            extra_config={
+                "dax.device_path": dev_path,
+                "dax.max_dax_size": 16 / 1024,
+            },
+        )
+        metadata = _create_metadata(chunk_size=16)
+        local_cpu = LocalCPUBackend(
+            config=config,
+            metadata=metadata,
+            dst_device="cpu",
+            memory_allocator=memory_allocator,
+        )
+        backend = DaxBackend(
+            config=config,
+            metadata=metadata,
+            local_cpu_backend=local_cpu,
+            loop=loop_in_thread,
+            dst_device="cpu",
+        )
+
+        try:
+            key1 = CacheEngineKey("test_model", 1, 0, 31, torch.bfloat16)
+            key2 = CacheEngineKey("test_model", 1, 0, 32, torch.bfloat16)
+            key3 = CacheEngineKey("test_model", 1, 0, 33, torch.bfloat16)
+            _store_tensor(backend, key1, num_tokens=16, fill_value=1)
+            _store_tensor(backend, key3, num_tokens=16, fill_value=2)
+
+            results = asyncio.run(
+                backend.batched_get_non_blocking("lookup", [key1, key2, key3])
+            )
+            assert len(results) == 1
+            assert torch.all(results[0].tensor == 1)
+            results[0].ref_count_down()
+        finally:
+            backend.close()
+
+
+def test_dax_backend_blocking_and_async_share_restore_dispatch(
+    memory_allocator,
+    loop_in_thread,
+    monkeypatch,
+) -> None:
+    with tempfile.TemporaryDirectory() as td:
+        dev_path = os.path.join(td, "dax.bin")
+        with open(dev_path, "wb") as fout:
+            fout.truncate(16 * 1024 * 1024)
+
+        config = _create_config(
+            chunk_size=16,
+            local_cpu=True,
+            max_local_cpu_size=0.1,
+            extra_config={
+                "dax.device_path": dev_path,
+                "dax.max_dax_size": 16 / 1024,
+            },
+        )
+        metadata = _create_metadata(chunk_size=16)
+        local_cpu = LocalCPUBackend(
+            config=config,
+            metadata=metadata,
+            dst_device="cpu",
+            memory_allocator=memory_allocator,
+        )
+        backend = DaxBackend(
+            config=config,
+            metadata=metadata,
+            local_cpu_backend=local_cpu,
+            loop=loop_in_thread,
+            dst_device="cpu",
+        )
+
+        key1 = CacheEngineKey("test_model", 1, 0, 43, torch.bfloat16)
+        key2 = CacheEngineKey("test_model", 1, 0, 44, torch.bfloat16)
+        first_restore_started = threading.Event()
+        allow_first_restore = threading.Event()
+        second_restore_started = threading.Event()
+        original_restore_batch = backend._restore_batch
+        call_count = 0
+        call_count_lock = threading.Lock()
+
+        def _gated_restore_batch(keys, prefix_only):
+            nonlocal call_count
+            with call_count_lock:
+                call_count += 1
+                current_call = call_count
+            if current_call == 1:
+                first_restore_started.set()
+                assert allow_first_restore.wait(timeout=1)
+            elif current_call == 2:
+                second_restore_started.set()
+            return original_restore_batch(keys, prefix_only)
+
+        def _read_async() -> list[MemoryObj]:
+            return asyncio.run(backend.batched_get_non_blocking("lookup", [key2]))
+
+        monkeypatch.setattr(backend, "_restore_batch", _gated_restore_batch)
+
+        try:
+            _store_tensor(backend, key1, num_tokens=16, fill_value=12)
+            _store_tensor(backend, key2, num_tokens=16, fill_value=13)
+
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                blocking_future = executor.submit(backend.batched_get_blocking, [key1])
+                assert first_restore_started.wait(timeout=1)
+
+                async_future = executor.submit(_read_async)
+                assert not second_restore_started.wait(timeout=0.2)
+
+                allow_first_restore.set()
+
+                blocking_results = blocking_future.result(timeout=2)
+                assert second_restore_started.wait(timeout=1)
+                async_results = async_future.result(timeout=2)
+
+            assert len(blocking_results) == 1
+            assert len(async_results) == 1
+            assert blocking_results[0] is not None
+            assert torch.all(blocking_results[0].tensor == 12)
+            assert torch.all(async_results[0].tensor == 13)
+            blocking_results[0].ref_count_down()
+            async_results[0].ref_count_down()
+        finally:
+            backend.close()
+
+
+def test_dax_backend_batched_memcpy_helper() -> None:
+    src = torch.arange(16, dtype=torch.uint8)
+    dst = torch.zeros(16, dtype=torch.uint8)
+    dst2 = torch.zeros(4, dtype=torch.uint8)
+
+    dax_backend_module.lmc_ops.batched_memcpy(
+        [src.data_ptr(), src.data_ptr() + 4],
+        [dst.data_ptr(), dst2.data_ptr()],
+        [8, 4],
+    )
+
+    assert torch.equal(dst[:8], src[:8])
+    assert torch.equal(dst2, src[4:8])
 
 
 def test_dax_backend_rejects_tp_gt_1(loop_in_thread):
@@ -534,6 +915,95 @@ def test_dax_backend_get_blocking_releases_lock_during_read(
             backend.close()
 
 
+def test_dax_backend_batched_get_blocking_releases_lock_during_restore(
+    memory_allocator,
+    loop_in_thread,
+    monkeypatch,
+) -> None:
+    with tempfile.TemporaryDirectory() as td:
+        dev_path = os.path.join(td, "dax.bin")
+        with open(dev_path, "wb") as fout:
+            fout.truncate(16 * 1024 * 1024)
+
+        config = _create_config(
+            chunk_size=16,
+            local_cpu=True,
+            max_local_cpu_size=0.1,
+            extra_config={
+                "dax.device_path": dev_path,
+                "dax.max_dax_size": 16 / 1024,
+            },
+        )
+        metadata = _create_metadata(chunk_size=16)
+        local_cpu = LocalCPUBackend(
+            config=config,
+            metadata=metadata,
+            dst_device="cpu",
+            memory_allocator=memory_allocator,
+        )
+        backend = DaxBackend(
+            config=config,
+            metadata=metadata,
+            local_cpu_backend=local_cpu,
+            loop=loop_in_thread,
+            dst_device="cpu",
+        )
+
+        key1 = CacheEngineKey("test_model", 1, 0, 711, torch.bfloat16)
+        key2 = CacheEngineKey("test_model", 1, 0, 712, torch.bfloat16)
+        restore_started = threading.Event()
+        allow_restore = threading.Event()
+        remove_finished = threading.Event()
+        reader_result: list[list[MemoryObj | None]] = []
+        remove_result: list[bool] = []
+        original_batched_memcpy = backend._batched_memcpy
+        call_count = 0
+
+        def _blocking_batched_memcpy(src_ptrs, dst_ptrs, sizes) -> None:
+            nonlocal call_count
+            if call_count == 0:
+                restore_started.set()
+                assert allow_restore.wait(timeout=1)
+            call_count += 1
+            original_batched_memcpy(src_ptrs, dst_ptrs, sizes)
+
+        monkeypatch.setattr(backend, "_batched_memcpy", _blocking_batched_memcpy)
+
+        try:
+            _store_tensor(backend, key1, num_tokens=16, fill_value=3)
+            _store_tensor(backend, key2, num_tokens=16, fill_value=4)
+
+            def _reader() -> None:
+                reader_result.append(backend.batched_get_blocking([key1]))
+
+            def _remover() -> None:
+                remove_result.append(backend.remove(key2))
+                remove_finished.set()
+
+            reader = threading.Thread(target=_reader)
+            reader.start()
+            assert restore_started.wait(timeout=1)
+
+            remover = threading.Thread(target=_remover)
+            remover.start()
+            assert remove_finished.wait(timeout=0.2)
+            assert remove_result == [True]
+
+            allow_restore.set()
+            reader.join(timeout=1)
+            remover.join(timeout=1)
+            assert not reader.is_alive()
+            assert not remover.is_alive()
+
+            results = reader_result[0]
+            assert len(results) == 1
+            assert results[0] is not None
+            assert torch.all(results[0].tensor == 3)
+            results[0].ref_count_down()
+        finally:
+            backend.close()
+
+
 def test_dax_backend_remove_during_read_defers_slot_reclaim(
     memory_allocator,
     loop_in_thread,
@@ -635,6 +1105,99 @@ def test_dax_backend_remove_during_read_defers_slot_reclaim(
             assert recycled_out is not None
             recycled_out.ref_count_down()
             recycled.ref_count_down()
+            assert backend.get_blocking(key) is None
+        finally:
+            backend.close()
+
+
+def test_dax_backend_remove_during_batched_restore_defers_slot_reclaim(
+    memory_allocator,
+    loop_in_thread,
+    monkeypatch,
+) -> None:
+    with tempfile.TemporaryDirectory() as td:
+        dev_path = os.path.join(td, "dax.bin")
+        with open(dev_path, "wb") as fout:
+            fout.truncate(1024 * 1024)
+
+        config = _create_config(
+            chunk_size=256,
+            local_cpu=True,
+            max_local_cpu_size=0.1,
+            extra_config={
+                "dax.device_path": dev_path,
+                "dax.max_dax_size": 32 / (1024 * 1024),
+                "dax.restore_workers": 1,
+                "dax.restore_max_regions": 1,
+                "dax.retrieve_staging_slab_bytes": 65536,
+            },
+        )
+        metadata = _create_metadata(chunk_size=256)
+        local_cpu = LocalCPUBackend(
+            config=config,
+            metadata=metadata,
+            dst_device="cpu",
+            memory_allocator=memory_allocator,
+        )
+        backend = DaxBackend(
+            config=config,
+            metadata=metadata,
+            local_cpu_backend=local_cpu,
+            loop=loop_in_thread,
+            dst_device="cpu",
+        )
+
+        key = CacheEngineKey("test_model", 1, 0, 713, torch.bfloat16)
+        restore_started = threading.Event()
+        allow_restore = threading.Event()
+        reader_result: list[list[MemoryObj | None]] = []
+        original_batched_memcpy = backend._batched_memcpy
+        call_count = 0
+
+        def _blocking_batched_memcpy(src_ptrs, dst_ptrs, sizes) -> None:
+            nonlocal call_count
+            if call_count == 0:
+                restore_started.set()
+                assert allow_restore.wait(timeout=1)
+            call_count += 1
+            original_batched_memcpy(src_ptrs, dst_ptrs, sizes)
+
+        monkeypatch.setattr(backend, "_batched_memcpy", _blocking_batched_memcpy)
+
+        try:
+            _store_tensor(backend, key, num_tokens=256, fill_value=7)
+
+            def _reader() -> None:
+                reader_result.append(backend.batched_get_blocking([key]))
+
+            reader = threading.Thread(target=_reader)
+            reader.start()
+            assert restore_started.wait(timeout=1)
+
+            assert backend.remove(key)
+            blocked_key = CacheEngineKey("test_model", 1, 0, 714, torch.bfloat16)
+            blocked = _allocate_kv_obj(num_tokens=256, fill_value=11)
+            try:
+                with pytest.raises(RuntimeError, match="No free slots available"):
+                    backend.batched_submit_put_task([blocked_key], [blocked])
+            finally:
+                blocked.ref_count_down()
+
+            allow_restore.set()
+            reader.join(timeout=1)
+            assert not reader.is_alive()
+
+            results = reader_result[0]
+            assert len(results) == 1
+            assert results[0] is not None
+            assert torch.all(results[0].tensor == 7)
+            results[0].ref_count_down()
+
+            recycled_key = CacheEngineKey("test_model", 1, 0, 715, torch.bfloat16)
+            _store_tensor(backend, recycled_key, num_tokens=256, fill_value=9)
+            recycled_results = backend.batched_get_blocking([recycled_key])
+            assert recycled_results[0] is not None
+            recycled_results[0].ref_count_down()
             assert backend.get_blocking(key) is None
         finally:
             backend.close()
@@ -1279,6 +1842,94 @@ def test_dax_backend_sync_close_waits_for_active_get(
             assert result.tensor is not None
             assert torch.all(result.tensor == 6)
             result.ref_count_down()
+        finally:
+            backend.close()
+
+
+def test_dax_backend_sync_close_waits_for_active_batched_restore(
+    memory_allocator,
+    loop_in_thread,
+    monkeypatch,
+) -> None:
+    with tempfile.TemporaryDirectory() as td:
+        dev_path = os.path.join(td, "dax.bin")
+        with open(dev_path, "wb") as fout:
+            fout.truncate(16 * 1024 * 1024)
+
+        config = _create_config(
+            chunk_size=16,
+            local_cpu=True,
+            max_local_cpu_size=0.1,
+            extra_config={
+                "dax.device_path": dev_path,
+                "dax.max_dax_size": 16 / 1024,
+            },
+        )
+        metadata = _create_metadata(chunk_size=16)
+        local_cpu = LocalCPUBackend(
+            config=config,
+            metadata=metadata,
+            dst_device="cpu",
+            memory_allocator=memory_allocator,
+        )
+        backend = DaxBackend(
+            config=config,
+            metadata=metadata,
+            local_cpu_backend=local_cpu,
+            loop=loop_in_thread,
+            dst_device="cpu",
+        )
+
+        restore_started = threading.Event()
+        allow_restore = threading.Event()
+        close_returned = threading.Event()
+        reader_result: list[list[MemoryObj | None]] = []
+        original_batched_memcpy = backend._batched_memcpy
+        call_count = 0
+
+        def _blocking_batched_memcpy(src_ptrs, dst_ptrs, sizes) -> None:
+            nonlocal call_count
+            if call_count == 0:
+                restore_started.set()
+                assert allow_restore.wait(timeout=1)
+            call_count += 1
+            original_batched_memcpy(src_ptrs, dst_ptrs, sizes)
+
+        monkeypatch.setattr(backend, "_batched_memcpy", _blocking_batched_memcpy)
+
+        key = CacheEngineKey("test_model", 1, 0, 719, torch.bfloat16)
+
+        try:
+            _store_tensor(backend, key, num_tokens=16, fill_value=6)
+
+            def _reader() -> None:
+                reader_result.append(backend.batched_get_blocking([key]))
+
+            reader = threading.Thread(target=_reader)
+            reader.start()
+            assert restore_started.wait(timeout=1)
+
+            def _closer() -> None:
+                backend.close()
+                close_returned.set()
+
+            closer = threading.Thread(target=_closer)
+            closer.start()
+
+            time.sleep(0.1)
+            assert not close_returned.is_set()
+
+            allow_restore.set()
+            reader.join(timeout=1)
+            closer.join(timeout=1)
+            assert close_returned.is_set()
+            assert not reader.is_alive()
+            assert not closer.is_alive()
+
+            results = reader_result[0]
+            assert len(results) == 1
+            assert results[0] is not None
+            results[0].ref_count_down()
         finally:
             backend.close()
 

@@ -711,8 +711,14 @@ class NixlStoreL2Adapter(L2AdapterInterface):
             # Get memory page indices and storage slot indices
             mem_indices_flat = []
             storage_indices_flat = []
+            stored_keys = []
             storage_objs = []
             for key, obj in zip(keys, objects, strict=False):
+                # Skip if key already exists to avoid leaking pool slots
+                with self._lock:
+                    if key in self._memory_objects:
+                        continue
+
                 mem_addr = obj.meta.address
                 mem_size = obj.meta.phy_size
                 mem_indices = self.nixl_agent.get_memory_indices(mem_addr, mem_size)
@@ -726,6 +732,7 @@ class NixlStoreL2Adapter(L2AdapterInterface):
                 mem_indices_flat.extend(mem_indices)
                 storage_indices_flat.extend(storage_indices)
 
+                stored_keys.append(key)
                 storage_objs.append(
                     NixlStoreObj(
                         page_indices=storage_indices,
@@ -738,6 +745,13 @@ class NixlStoreL2Adapter(L2AdapterInterface):
                     )
                 )
 
+            if not mem_indices_flat:
+                # Nothing to store (all keys already existed or pool empty)
+                with self._lock:
+                    self._completed_store_tasks[task_id] = True
+                self._signal_store_event()
+                return
+
             handle = self.nixl_agent.get_mem_to_storage_handle(
                 mem_indices_flat,
                 storage_indices_flat,
@@ -747,10 +761,10 @@ class NixlStoreL2Adapter(L2AdapterInterface):
             self.nixl_agent.release_handle(handle)
 
             with self._lock:
-                for key, storage_obj in zip(keys, storage_objs, strict=False):
+                for key, storage_obj in zip(stored_keys, storage_objs, strict=False):
                     self._memory_objects[key] = storage_obj
                     storage_obj.decrease_pin_count()
-            self._notify_keys_stored(keys)
+            self._notify_keys_stored(stored_keys)
 
         # success is only set to false for transfer failures
         except Exception:

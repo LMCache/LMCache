@@ -492,13 +492,14 @@ def test_mq_retrieve():
 def test_mq_lookup():
     """
     Test MessageQueue with LOOKUP request type.
-    LOOKUP takes (key: KeyType) and returns int.
+    LOOKUP takes (key: KeyType, tp_size: int) and returns None.
+    The job is tracked server-side by request_id; poll via QUERY_PREFETCH_STATUS.
     """
     # Create a single test key
     key = create_cache_key(0)
 
-    # Expected response: 1 (dummy handler always returns 1)
-    expected_response = 1
+    # Expected response: None (LOOKUP no longer returns a job_id)
+    expected_response = None
 
     # Create test helper and register handler
     helper = MessageQueueTestHelper(server_url="tcp://127.0.0.1:5564")
@@ -521,8 +522,8 @@ def test_mq_lookup_with_different_key():
     # Create a different test key
     key = create_cache_key(42)
 
-    # Expected response: 1 (dummy handler always returns 1)
-    expected_response = 1
+    # Expected response: None (LOOKUP no longer returns a job_id)
+    expected_response = None
 
     # Create test helper and register handler
     helper = MessageQueueTestHelper(server_url="tcp://127.0.0.1:5565")
@@ -540,7 +541,7 @@ def test_mq_lookup_with_different_key():
 def test_mq_report_block_allocation():
     """
     Test MessageQueue with REPORT_BLOCK_ALLOCATION request type.
-    REPORT_BLOCK_ALLOCATION takes (records: list[BlockAllocationRecord])
+    REPORT_BLOCK_ALLOCATION takes (instance_id, model_name, records)
     and returns None.
     """
     records = [
@@ -564,7 +565,7 @@ def test_mq_report_block_allocation():
 
     helper.run_test(
         request_type=RequestType.REPORT_BLOCK_ALLOCATION,
-        payloads=[records],
+        payloads=[42, "test-model", records],
         expected_response=None,
         num_requests=1,
     )
@@ -584,7 +585,7 @@ def test_mq_report_block_allocation_empty():
 
     helper.run_test(
         request_type=RequestType.REPORT_BLOCK_ALLOCATION,
-        payloads=[records],
+        payloads=[0, "", records],
         expected_response=None,
         num_requests=1,
     )

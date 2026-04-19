@@ -8,4 +8,4 @@ env:
 
 steps:
   - label: ":pipeline: Upload pipeline"
-    command: buildkite-agent pipeline upload .buildkite/k3_tests/comprehensive/pipeline.yml
+    command: bash .buildkite/k3_tests/common_scripts/upload-pipeline.sh .buildkite/k3_tests/comprehensive/pipeline.yml
