@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from pathlib import Path
+from typing import Any, cast
 import os
 
 # Third Party
@@ -61,7 +62,7 @@ def test_load_ec_engine_config_prefixed_file_and_env_overrides(
     monkeypatch.setenv("EC_REMOTE_URL", "http://ec.example.com")
 
     base_config = LMCacheEngineConfig.from_file(config_path)
-    ec_config = load_ec_engine_config(base_config=base_config)
+    ec_config = cast(Any, load_ec_engine_config(base_config=base_config))
 
     assert base_config.chunk_size == 256
     assert base_config.local_disk == "/tmp/base-disk"
@@ -82,7 +83,7 @@ def test_load_ec_engine_config_applies_storage_defaults():
         max_local_disk_size=0,
     )
 
-    ec_config = load_ec_engine_config(base_config=base_config)
+    ec_config = cast(Any, load_ec_engine_config(base_config=base_config))
 
     assert ec_config.local_cpu is True
     assert ec_config.max_local_cpu_size == 1
