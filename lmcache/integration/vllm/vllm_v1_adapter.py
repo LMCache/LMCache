@@ -182,7 +182,7 @@ class RequestTracker:
         if isinstance(block_ids, list):
             if len(block_ids) == 0:
                 return tuple()
-            if isinstance(block_ids[0], list):
+            if isinstance(block_ids[0], (list, tuple)):
                 return tuple(list(group) for group in block_ids)
             return (list(block_ids),)
         raise ValueError(f"Unsupported block_ids type {type(block_ids)}")
