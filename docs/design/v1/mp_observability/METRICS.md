@@ -28,9 +28,17 @@ originating request (see [EVENTS.md](EVENTS.md) and the cache_salt feature
 docs). An empty string (`cache_salt=""`) is emitted for legacy / unsalted
 callers and is a stable series.
 
-Batch counters (L1, SM, L2 store) **group by `cache_salt`** within a single
-event: an event whose key list touches two tenants produces two distinct
-`.add()` calls.
+Batch counters (L1, SM, L2 store **key** counters) **group by `cache_salt`**
+within a single event: an event whose key list touches two tenants produces
+two distinct `.add()` calls.
+
+**Task-level counters are not tagged.** `lmcache_mp.l2_store_tasks` and
+`lmcache_mp.l2_store_completed` count *tasks*, not tenant operations. An L2
+store task batches keys across concurrent vLLM requests (via the
+`StoreListener` eventfd coalescing in the L2 store controller), so a task
+is not attributable to a single tenant. Use the key counters
+(`l2_store_keys`, `l2_store_succeeded_keys`, `l2_store_failed_keys`) for
+per-tenant throughput.
 
 Cardinality warning: `cache_salt` is passed through raw. Operators who
 expect a large salt space should configure their Prometheus retention or

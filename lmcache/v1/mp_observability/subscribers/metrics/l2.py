@@ -11,11 +11,7 @@ from opentelemetry import metrics
 # First Party
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import EventCallback, EventSubscriber
-from lmcache.v1.mp_observability.subscribers.metrics.utils import (
-    emit_by_salt,
-    group_by_salt,
-    unique_salts,
-)
+from lmcache.v1.mp_observability.subscribers.metrics.utils import emit_by_salt
 
 
 class L2MetricsSubscriber(EventSubscriber):
@@ -108,27 +104,25 @@ class L2MetricsSubscriber(EventSubscriber):
     # -- Store -------------------------------------------------------------
 
     def _on_store_submitted(self, event: Event) -> None:
+        # Task counter is per-task, not per-tenant: one task can batch
+        # keys from multiple tenants via StoreListener pooling.
+        self._store_tasks.add(1)
         keys = event.metadata.get("keys", [])
         if keys:
-            for salt, count in group_by_salt(keys).items():
-                self._store_tasks.add(1, {"cache_salt": salt})
-                self._store_keys.add(count, {"cache_salt": salt})
+            emit_by_salt(self._store_keys, keys)
         else:
             # Legacy producer that didn't supply the key list.
-            self._store_tasks.add(1, {"cache_salt": ""})
             self._store_keys.add(event.metadata["key_count"], {"cache_salt": ""})
 
     def _on_store_completed(self, event: Event) -> None:
+        # Task counter is per-task; see _on_store_submitted.
+        self._store_completed.add(1)
         succeeded = event.metadata.get("succeeded_keys", [])
         failed = event.metadata.get("failed_keys", [])
-        task_salts = unique_salts(succeeded, failed)
-        if task_salts:
-            for salt in task_salts:
-                self._store_completed.add(1, {"cache_salt": salt})
+        if succeeded or failed:
             emit_by_salt(self._store_succeeded_keys, succeeded)
             emit_by_salt(self._store_failed_keys, failed)
         else:
-            self._store_completed.add(1, {"cache_salt": ""})
             self._store_succeeded_keys.add(
                 event.metadata["succeeded_count"], {"cache_salt": ""}
             )

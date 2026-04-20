@@ -183,8 +183,8 @@ class TestL2PrefetchSingleSalt:
         delta = _delta(before, after)
         assert delta.get("prefetch-user", 0) == 7
 
-    def test_store_submitted_groups_by_salt(self, bus):
-        before_tasks = _snapshot_by_salt("lmcache_mp.l2_store_tasks")
+    def test_store_submitted_groups_keys_by_salt(self, bus):
+        """Task counter is per-task (tenant-agnostic); key counter splits."""
         before_keys = _snapshot_by_salt("lmcache_mp.l2_store_keys")
 
         bus.register_subscriber(L2MetricsSubscriber())
@@ -202,12 +202,7 @@ class TestL2PrefetchSingleSalt:
         time.sleep(_DRAIN_WAIT)
         bus.stop()
 
-        after_tasks = _snapshot_by_salt("lmcache_mp.l2_store_tasks")
         after_keys = _snapshot_by_salt("lmcache_mp.l2_store_keys")
-
-        task_delta = _delta(before_tasks, after_tasks)
         key_delta = _delta(before_keys, after_keys)
-        assert task_delta.get("x", 0) == 1
-        assert task_delta.get("y", 0) == 1
         assert key_delta.get("x", 0) == 2
         assert key_delta.get("y", 0) == 3
