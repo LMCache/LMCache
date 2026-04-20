@@ -827,8 +827,15 @@ def get_layer_data_ptrs(
     gpu_kv_format: "lmc_ops.GPUKVFormat",
     layer_idx: int,
 ) -> List[int]:
-    """Return the GPU data pointer(s) for a single layer, in the order the
-    transfer kernels expect (K first for the SGLang two-list format).
+    """Return the GPU data pointer(s) belonging to a single layer.
+
+    Most formats produce one pointer per layer. The SGLang two-list format
+    (``TWO_X_NL_X_NBBS_NH_HS``) produces ``[K_ptr, V_ptr]`` for the layer.
+
+    Note: callers assembling a group-level pointer array should use
+    :func:`get_group_data_ptrs`, not naively ``extend`` over per-layer
+    results — the SGLang kernel expects K's and V's grouped, not
+    interleaved per layer.
 
     Args:
         kv_caches: Full kv_caches structure.
@@ -853,6 +860,43 @@ def get_layer_data_ptrs(
         layer_stride_bytes = kv_caches.stride(1) * kv_caches.element_size()
         return [kv_caches.data_ptr() + layer_idx * layer_stride_bytes]
     raise ValueError(f"Unknown GPU KV Format: {gpu_kv_format}")
+
+
+def get_group_data_ptrs(
+    kv_caches: Any,
+    gpu_kv_format: "lmc_ops.GPUKVFormat",
+    layer_indices: list[int],
+) -> List[int]:
+    """Return device pointers for a group of layers in the order the transfer
+    kernels expect for *gpu_kv_format*.
+
+    For most formats this is the per-layer pointers flattened in layer order.
+    For :obj:`GPUKVFormat.TWO_X_NL_X_NBBS_NH_HS` (SGLang MHA) the kernel
+    contract is K-pointers grouped ahead of V-pointers, so this helper
+    returns ``[K_{i0}, ..., K_{iN}, V_{i0}, ..., V_{iN}]`` rather than the
+    per-layer interleaving ``[K_{i0}, V_{i0}, K_{i1}, V_{i1}, ...]`` that
+    :func:`get_layer_data_ptrs` would produce when naively extended.
+
+    Args:
+        kv_caches: Full kv_caches structure.
+        gpu_kv_format: Format returned by :func:`discover_gpu_kv_format`.
+        layer_indices: 0-based layer indices in the group, in the order
+            the kernel should iterate them.
+
+    Returns:
+        Device pointers (int), in kernel-expected order.
+
+    Raises:
+        ValueError: If *gpu_kv_format* is not recognized.
+    """
+    if gpu_kv_format == lmc_ops.GPUKVFormat.TWO_X_NL_X_NBBS_NH_HS:
+        k_ptrs = [kv_caches[0][i].data_ptr() for i in layer_indices]
+        v_ptrs = [kv_caches[1][i].data_ptr() for i in layer_indices]
+        return k_ptrs + v_ptrs
+    ptrs: list[int] = []
+    for layer_idx in layer_indices:
+        ptrs.extend(get_layer_data_ptrs(kv_caches, gpu_kv_format, layer_idx))
+    return ptrs
 
 
 def get_layer_dtype(

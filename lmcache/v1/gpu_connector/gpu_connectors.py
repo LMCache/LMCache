@@ -18,8 +18,8 @@ from lmcache.v1.gpu_connector.utils import (
     ensure_contiguous_kv_caches,
     get_block_size,
     get_elements_per_layer,
+    get_group_data_ptrs,
     get_head_size,
-    get_layer_data_ptrs,
     get_num_blocks,
     get_page_buffer_size,
     get_tokens_per_layer,
@@ -489,14 +489,11 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
             ]
         self.group_kv_cache_pointers_on_gpu = []
         for group in manager.kv_layer_groups:
-            ptrs: list[int] = []
-            for layer_idx in group.layer_indices:
-                ptrs.extend(
-                    get_layer_data_ptrs(self.kvcaches, self.gpu_kv_format, layer_idx)
-                )
-            # Size by len(ptrs), not num_layers: get_layer_data_ptrs may return
-            # multiple pointers per layer (e.g. 2 for TWO_X_NL_X_NBBS_NH_HS),
-            # and callers must not bake per-format counts in here.
+            ptrs = get_group_data_ptrs(
+                self.kvcaches, self.gpu_kv_format, group.layer_indices
+            )
+            # Size by len(ptrs): some formats produce more than one pointer
+            # per layer (e.g. 2 for TWO_X_NL_X_NBBS_NH_HS).
             kv_cache_pointers = torch.empty(len(ptrs), dtype=torch.int64, device="cpu")
             kv_cache_pointers.numpy()[:] = ptrs
             kv_cache_pointers_on_gpu = torch.empty(

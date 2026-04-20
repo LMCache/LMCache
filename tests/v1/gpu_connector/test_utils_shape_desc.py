@@ -15,6 +15,7 @@ pytestmark = pytest.mark.skipif(
 
 # First Party
 from lmcache.v1.gpu_connector.utils import (  # noqa: E402
+    get_group_data_ptrs,
     get_layer_data_ptrs,
     get_layer_dtype,
     get_layer_kv_caches,
@@ -134,6 +135,41 @@ def test_get_layer_helpers_sglang_mha():
 
     ptrs = get_layer_data_ptrs(kv_caches, fmt, layer_idx=0)
     assert ptrs == [k[0].data_ptr(), v[0].data_ptr()]
+
+
+def test_get_group_data_ptrs_per_layer_list_flattens_in_order():
+    kv_caches = [
+        torch.randn(2, 32, 16, 8, 64, dtype=torch.float16, device="cuda")
+        for _ in range(4)
+    ]
+    fmt = lmc_ops.GPUKVFormat.NL_X_TWO_NB_BS_NH_HS
+
+    ptrs = get_group_data_ptrs(kv_caches, fmt, [0, 2, 3])
+    assert ptrs == [
+        kv_caches[0].data_ptr(),
+        kv_caches[2].data_ptr(),
+        kv_caches[3].data_ptr(),
+    ]
+
+
+def test_get_group_data_ptrs_sglang_mha_groups_k_before_v():
+    """SGLang MHA kernel contract: [K0, K1, ..., KN, V0, V1, ..., VN] —
+    not per-layer [K0, V0, K1, V1, ...]."""
+    k = [torch.randn(512, 8, 64, dtype=torch.bfloat16, device="cuda") for _ in range(3)]
+    v = [torch.randn(512, 8, 64, dtype=torch.bfloat16, device="cuda") for _ in range(3)]
+    kv_caches = [k, v]
+    fmt = lmc_ops.GPUKVFormat.TWO_X_NL_X_NBBS_NH_HS
+
+    ptrs = get_group_data_ptrs(kv_caches, fmt, [0, 1, 2])
+    expected = [
+        k[0].data_ptr(),
+        k[1].data_ptr(),
+        k[2].data_ptr(),
+        v[0].data_ptr(),
+        v[1].data_ptr(),
+        v[2].data_ptr(),
+    ]
+    assert ptrs == expected
 
 
 def test_shape_signature_equal_for_same_shape():

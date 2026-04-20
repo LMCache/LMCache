@@ -25,7 +25,7 @@ from lmcache.v1.gpu_connector.utils import (
     get_concrete_gpu_kv_shape,
     get_dtype,
     get_gpu_kv_shape_description,
-    get_layer_data_ptrs,
+    get_group_data_ptrs,
     get_num_blocks,
     get_num_layers,
     is_mla,
@@ -98,11 +98,9 @@ class GPUCacheContext:
 
         self.group_kv_pointers_: list[torch.Tensor] = []
         for group in self.kv_layer_groups_manager_.kv_layer_groups:
-            ptrs: list[int] = []
-            for layer_idx in group.layer_indices:
-                ptrs.extend(
-                    get_layer_data_ptrs(self.kv_caches_, self.gpu_kv_format_, layer_idx)
-                )
+            ptrs = get_group_data_ptrs(
+                self.kv_caches_, self.gpu_kv_format_, group.layer_indices
+            )
             self.group_kv_pointers_.append(list_to_gpu_tensor(ptrs, self.device_))
 
         # Pre-allocated GPU buffer for block IDs (up to 1M elements).
