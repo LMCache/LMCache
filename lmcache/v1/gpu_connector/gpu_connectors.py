@@ -489,16 +489,18 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
             ]
         self.group_kv_cache_pointers_on_gpu = []
         for group in manager.kv_layer_groups:
-            num_layers = group.num_layers
             ptrs: list[int] = []
             for layer_idx in group.layer_indices:
                 ptrs.extend(
                     get_layer_data_ptrs(self.kvcaches, self.gpu_kv_format, layer_idx)
                 )
-            kv_cache_pointers = torch.empty(num_layers, dtype=torch.int64, device="cpu")
+            # Size by len(ptrs), not num_layers: get_layer_data_ptrs may return
+            # multiple pointers per layer (e.g. 2 for TWO_X_NL_X_NBBS_NH_HS),
+            # and callers must not bake per-format counts in here.
+            kv_cache_pointers = torch.empty(len(ptrs), dtype=torch.int64, device="cpu")
             kv_cache_pointers.numpy()[:] = ptrs
             kv_cache_pointers_on_gpu = torch.empty(
-                num_layers, dtype=torch.int64, device=self.device
+                len(ptrs), dtype=torch.int64, device=self.device
             )
             kv_cache_pointers_on_gpu.copy_(kv_cache_pointers)
             self.group_kv_cache_pointers_on_gpu.append(kv_cache_pointers_on_gpu)
