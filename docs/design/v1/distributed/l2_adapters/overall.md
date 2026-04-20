@@ -163,16 +163,19 @@ _process_new_keys(keys)
   ├─ 2. For each adapter target:
   │     L1Manager.reserve_read(target_keys)  → get MemoryObj + read lock
   │     adapter.submit_store_task(keys, objs)
-  │     Track as InFlightStoreTask
+  │     Track as InFlightStoreRequest
   │
-  ▼ (later, when adapter signals store_efd)
-_process_completed_tasks(adapter_index)
+  ▼ (later, when any adapter signals store_efd)
+_drain_l2_store_completions()
+  │  adapter.pop_completed_store_tasks() → deposit success/failure
+  │  on each InFlightStoreRequest.l2_store_result
   │
-  ├─ 3. adapter.pop_completed_store_tasks()
+  ▼
+_advance_request(request)  [terminal transition]
   │
-  ├─ 4. For each completed task:
-  │     L1Manager.finish_read(read_locked_keys)  → release read locks
-  │     If success: StorePolicy.select_l1_deletions(keys) → delete from L1
+  ├─ 3. L1Manager.finish_read(read_locked_keys)  → release read locks
+  │
+  ├─ 4. If success: StorePolicy.select_l1_deletions(keys) → delete from L1
   │     If failure: log warning (best-effort, no retry)
   │
   ▼
@@ -189,8 +192,8 @@ Done. Keys remain in L1 unless the policy deletes them.
 
 - **Read locks during store** prevent eviction from removing L1 data while the
   adapter is reading it.
-- **Always released:** `stop()` calls `_cleanup_in_flight_tasks()` which releases
-  all in-flight read locks, even if tasks haven't completed.
+- **Always released:** `stop()` calls `_cleanup_in_flight_requests()` which releases
+  all in-flight read locks, even if requests haven't completed.
 
 ### StorePolicy
 
@@ -291,8 +294,8 @@ _start_lookup_phase(request_id, keys, layout_desc)
   ├─ Submit lookup_and_lock_task(keys) to EVERY adapter
   │
   ▼ (wait for all adapter lookups to complete)
-_process_lookup_completions(adapter_index)
-  │  query each adapter's lookup result
+_advance_request(request)  [LOOKUP branch]
+  │  poll each pending adapter's lookup result
   │  when all_lookups_done():
   │
   ▼
@@ -314,7 +317,8 @@ _transition_to_load_phase(request)
   ├─ 6. Submit load_task(keys, objs) per adapter
   │
   ▼ (wait for all adapter loads to complete)
-_process_load_completions(adapter_index)
+_advance_request(request)  [PLAN_AND_LOAD branch]
+  │  poll each pending adapter's load result
   │  when all_loads_done():
   │
   ▼

@@ -405,6 +405,7 @@ class PrefetchController(StorageControllerInterface):
         while not self._stop_flag.is_set():
             ready = poller.poll(PREFETCH_LOOP_POLL_TIMEOUT_MS)
 
+            advance_needed = False
             for fd, events in ready:
                 if not (events & select.POLLIN):
                     continue
@@ -414,19 +415,23 @@ class PrefetchController(StorageControllerInterface):
                 except (OSError, BlockingIOError):
                     pass
 
-                try:
-                    if fd == self._submission_efd:
+                if fd == self._submission_efd:
+                    try:
                         self._drain_submission_queue()
-                    elif fd in self._lookup_efd_to_adapter:
-                        self._process_lookup_completions(
-                            self._lookup_efd_to_adapter[fd]
-                        )
-                    elif fd in self._load_efd_to_adapter:
-                        self._process_load_completions(self._load_efd_to_adapter[fd])
+                    except Exception:
+                        logger.exception("Unexpected error draining submission queue")
+                else:
+                    # Any adapter eventfd (lookup / load) — actual dispatch
+                    # lives in _advance_request.
+                    advance_needed = True
+
+            if advance_needed:
+                try:
+                    for request in list(self._in_flight_requests.values()):
+                        self._advance_request(request)
                 except Exception:
                     logger.exception(
-                        "Unexpected error in prefetch loop while processing fd %d",
-                        fd,
+                        "Unexpected error advancing in-flight prefetch requests"
                     )
 
             try:
@@ -497,32 +502,6 @@ class PrefetchController(StorageControllerInterface):
                 },
             )
         )
-
-    def _process_lookup_completions(self, adapter_index: int) -> None:
-        """Check all LOOKUP-phase requests for completed lookups from
-        this adapter."""
-        ready_to_transition: list[InFlightPrefetchRequest] = []
-
-        for request in list(self._in_flight_requests.values()):
-            if request.phase != PrefetchPhase.LOOKUP:
-                continue
-            if adapter_index not in request.pending_lookup_tasks:
-                continue
-
-            task_id = request.pending_lookup_tasks[adapter_index]
-            result = self._l2_adapters[adapter_index].query_lookup_and_lock_result(
-                task_id
-            )
-
-            if result is not None:
-                request.lookup_results[adapter_index] = result
-                del request.pending_lookup_tasks[adapter_index]
-
-                if request.all_lookups_done():
-                    ready_to_transition.append(request)
-
-        for request in ready_to_transition:
-            self._transition_to_load_phase(request)
 
     # =========================================================================
     # Load phase
@@ -671,28 +650,53 @@ class PrefetchController(StorageControllerInterface):
         with self._lookup_results_lock:
             self._completed_lookups[request_id] = hit_chunks
 
-    def _process_load_completions(self, adapter_index: int) -> None:
-        """Check all PLAN_AND_LOAD-phase requests for completed loads."""
-        ready_to_finalize: list[InFlightPrefetchRequest] = []
+    def _advance_request(self, request: InFlightPrefetchRequest) -> None:
+        """Single dispatcher for prefetch request state transitions.
 
-        for request in list(self._in_flight_requests.values()):
-            if request.phase != PrefetchPhase.PLAN_AND_LOAD:
-                continue
-            if adapter_index not in request.pending_load_tasks:
-                continue
+        Polls pending per-adapter results for the request's current
+        phase, records them, and triggers a phase transition if the
+        phase's work is complete. Called from the poll loop for every
+        in-flight request on each adapter eventfd wakeup; the
+        ``query_*`` calls are cheap and return ``None`` when the result
+        isn't ready.
 
-            task_id = request.pending_load_tasks[adapter_index]
-            result = self._l2_adapters[adapter_index].query_load_result(task_id)
+          - ``LOOKUP``: poll pending ``lookup_and_lock`` results.
+            Transition to ``PLAN_AND_LOAD`` when all lookups are done.
+          - ``PLAN_AND_LOAD``: poll pending L2 load results. Finalize
+            when all loads are done.
 
-            if result is not None:
-                request.load_results[adapter_index] = result
-                del request.pending_load_tasks[adapter_index]
+        The poll loop never dispatches to per-event-type handlers — it
+        just relays adapter events here, so all per-phase logic lives
+        in this method.
 
-                if request.all_loads_done():
-                    ready_to_finalize.append(request)
+        Args:
+            request: The in-flight request whose state to advance.
+        """
+        if request.phase == PrefetchPhase.LOOKUP:
+            for adapter_idx in list(request.pending_lookup_tasks):
+                task_id = request.pending_lookup_tasks[adapter_idx]
+                lookup_result = self._l2_adapters[
+                    adapter_idx
+                ].query_lookup_and_lock_result(task_id)
+                if lookup_result is None:
+                    continue
+                request.lookup_results[adapter_idx] = lookup_result
+                del request.pending_lookup_tasks[adapter_idx]
 
-        for request in ready_to_finalize:
-            self._finalize_load(request)
+            if request.all_lookups_done():
+                self._transition_to_load_phase(request)
+
+        elif request.phase == PrefetchPhase.PLAN_AND_LOAD:
+            for adapter_idx in list(request.pending_load_tasks):
+                task_id = request.pending_load_tasks[adapter_idx]
+                load_result = self._l2_adapters[adapter_idx].query_load_result(task_id)
+                if load_result is None:
+                    continue
+                request.load_results[adapter_idx] = load_result
+                del request.pending_load_tasks[adapter_idx]
+
+            if request.all_loads_done():
+                self._finalize_load(request)
 
     def _finalize_load(self, request: InFlightPrefetchRequest) -> None:
         """
