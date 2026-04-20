@@ -8,6 +8,8 @@ For event metadata contracts, see
 [EVENTS.md](../../../docs/design/v1/mp_observability/EVENTS.md).
 For design rationale, see
 [event-bus.md](../../../docs/design/v1/mp_observability/event-bus.md).
+For the trace recording subsystem (`lmcache trace`), see
+[trace.md](../../../docs/design/v1/mp_observability/trace.md).
 
 ---
 

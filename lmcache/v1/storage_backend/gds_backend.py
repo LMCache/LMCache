@@ -148,6 +148,18 @@ async def save_metadata(path: str, tmp: str, metadata: bytes):
 
 
 def get_extra_config_bool(key, config: LMCacheEngineConfig) -> bool | None:
+    """Extract a boolean value from the config's extra_config dict.
+
+    Args:
+        key: The key to look up in extra_config.
+        config: The LMCacheEngineConfig instance.
+
+    Returns:
+        The boolean value if present, or None if not set.
+
+    Raises:
+        RuntimeError: If the value is not a valid boolean representation.
+    """
     value = config.extra_config.get(key, None)
     if value is None:
         return None
@@ -166,17 +178,21 @@ def get_extra_config_bool(key, config: LMCacheEngineConfig) -> bool | None:
 class GdsBackend(AllocatorBackendInterface):
     """
     Originally based on the open sourced WekaGdsBackend, this is a backend that
-    leverages NVIDIA's cuFile API to issue GDS requests directly to the
+    leverages GPU Direct Storage APIs to issue GDS requests directly to the
     GDS-supported remote filesystem.  In order to use it, users need to specify
-    `gds_path` and `cufile_buffer_size` in their LMCache config.
+    `gds_path` and `gds_buffer_size` in their LMCache config.
+
+    The GDS library to use is controlled by the `gds_backend` config field
+    (default: ``"cufile"``). Setting ``use_gds=False`` disables the GDS API
+    and falls back to POSIX I/O via cudart.
 
     Cache Directory Structure created by this Backend:
     /{gds_path}/{first_level}/{second_level}/{data & metadata} This structure
     is semi-arbitrary. We create two levels in the directory hierarchy to
     parallelize loading the data during initialization in the Python code.
 
-    NOTE: If GPUDirect is not supported on that other filesystem, then CuFile will
-    fall back to POSIX I/O.
+    NOTE: If GPUDirect is not supported on that other filesystem, then the GDS
+    library will fall back to POSIX I/O.
     """
 
     def __init__(
@@ -211,50 +227,41 @@ class GdsBackend(AllocatorBackendInterface):
             f" ({len(self.gds_paths)} path(s) configured)"
         )
 
-        # Initialize use_cufile and use_hipfile before creating the memory allocator
-        self.use_cufile = True
-        self.use_hipfile = False
-        use_cufile_from_config = False
-        use_hipfile_from_config = False
+        self.use_gds = config.use_gds
+        self.gds_backend = config.gds_backend
+        # _user_set_keys is populated by LMCacheEngineConfig when a field is
+        # explicitly provided via a config file, environment variable, or
+        # keyword argument — as opposed to falling back to its default value.
+        # We check it here so that the tmpfs/overlayfs auto-disable logic
+        # below can distinguish "the user never mentioned use_gds (default
+        # True)" from "the user explicitly wrote use_gds: true".  In the
+        # first case we auto-disable GDS on unsupported filesystems; in the
+        # second we respect the user's explicit intent and leave it enabled.
+        user_set_keys: set[str] = getattr(config, "_user_set_keys", set())
+        use_gds_explicitly_set = "use_gds" in user_set_keys
 
-        if config.extra_config is not None:
-            use_cufile = get_extra_config_bool("use_cufile", config)
-            if use_cufile is not None:
-                self.use_cufile = use_cufile
-                use_cufile_from_config = True
-
-            use_hipfile = get_extra_config_bool("use_hipfile", config)
-            if use_hipfile is not None:
-                self.use_hipfile = use_hipfile
-                use_hipfile_from_config = True
-
-        # Now initialize the memory allocator after use_hipfile is set
+        # Now initialize the memory allocator
         self.memory_allocator = self.initialize_allocator(config, metadata)
 
         self.data_suffix = _DATA_FILE_SUFFIX
         self._thread_pool = None
 
         if self.fstype in ["tmpfs", "overlayfs"]:
-            # TODO: we can replace the auto-detection of unsupported cufile
-            # file systems by doing a small cufile API test on them. If as
-            # read/write test fails, we can fallback to not using cufile APIs.
-            if use_cufile_from_config or use_hipfile_from_config:
-                logger.warning(
-                    "No automatic disabling of cufile/hipfile usage due to fstype"
-                )
+            # TODO: we can replace the auto-detection of unsupported GDS
+            # file systems by doing a small GDS API test on them. If a
+            # read/write test fails, we can fallback to not using GDS APIs.
+            if use_gds_explicitly_set:
+                logger.warning("No automatic disabling of GDS usage due to fstype")
             else:
-                logger.info("Automatic disabling of cufile/hipfile usage due to fstype")
-                self.use_cufile = False
-                self.use_hipfile = False
+                logger.info("Automatic disabling of GDS usage due to fstype")
+                self.use_gds = False
         elif self.fstype == "wekafs":
-            logger.info("Weka filesystem detected, cufile/hipfile usage is enforced")
-            assert self.use_cufile or self.use_hipfile, (
-                "Weka filesystem requires either cufile or hipfile to be enabled"
-            )
+            logger.info("Weka filesystem detected, GDS usage is enforced")
+            assert self.use_gds
             self.data_suffix = _WEKA_DATA_FILE_SUFFIX
 
         # Always enable the thread pool for parallel I/O
-        self.use_thread_pool = self.use_cufile or self.use_hipfile
+        self.use_thread_pool = self.use_gds
 
         if self.use_thread_pool:
             thread_count = _DEFAULT_THREAD_COUNT
@@ -266,29 +273,31 @@ class GdsBackend(AllocatorBackendInterface):
                 max_workers=thread_count, thread_name_prefix="gds-io"
             )
 
-        if self.use_cufile:
-            logger.info("Using cufile")
-            # HACK(Jiayi): cufile import is buggy on some hardware
-            # (e.g., without GPUDirect), so it's temporarily put here.
-            # Third Party
-            import cufile
+        if self.use_gds:
+            logger.info("Using GDS backend '%s'", self.gds_backend)
+            if self.gds_backend == "cufile":
+                # HACK(Jiayi): cufile import is buggy on some hardware
+                # (e.g., without GPUDirect), so it's temporarily put here.
+                # Third Party
+                import cufile
 
-            self.cudart = None
-            self.cufile = cufile
-            self._cufile_driver = self.cufile.CuFileDriver()
-        elif self.use_hipfile:
-            logger.info("Using hipfile")
-            # HACK: hipfile import may be buggy on some hardware
-            # (e.g., without GPUDirect), so it's temporarily put here.
-            # Third Party
-            import hipfile
+                self.cudart = None
+                self.gds_module = cufile
+                self._gds_driver = self.gds_module.CuFileDriver()
+            elif self.gds_backend == "hipfile":
+                # HACK: hipfile import may be buggy on some hardware
+                # (e.g., without GPUDirect), so it's temporarily put here.
+                # Third Party
+                import hipfile
 
-            self.cudart = None
-            self.cufile = hipfile  # Reuse the same attribute name for compatibility
-            self._cufile_driver = self.cufile.CuFileDriver()
+                self.cudart = None
+                self.gds_module = hipfile
+                self._gds_driver = self.gds_module.CuFileDriver()
+            else:
+                raise ValueError(f"Unsupported gds_backend '{self.gds_backend}'")
         else:
-            logger.info("Not using cufile or hipfile")
-            self.cufile = None
+            logger.info("GDS disabled, using POSIX fallback")
+            self.gds_module = None
             self.cudart = ctypes.CDLL("libcudart.so")
 
         self.use_direct_io = False
@@ -321,10 +330,10 @@ class GdsBackend(AllocatorBackendInterface):
 
         if hasattr(self.memory_allocator, "base_pointer"):
             logger.debug(f"Using base pointer {self.memory_allocator.base_pointer}")
-            self.cufile_base_pointer = self.memory_allocator.base_pointer
+            self.gds_base_pointer = self.memory_allocator.base_pointer
         else:
-            logger.info("No base pointer found, cufile will use bounce buffers")
-            self.cufile_base_pointer = None
+            logger.info("No base pointer found, GDS will use bounce buffers")
+            self.gds_base_pointer = None
         self._scan_metadata_future = asyncio.run_coroutine_threadsafe(
             self._scan_metadata(), self.loop
         )
@@ -608,12 +617,12 @@ class GdsBackend(AllocatorBackendInterface):
                     tmp,
                     kv_chunk,
                     fmt,
-                    self.cufile_base_pointer,
+                    self.gds_base_pointer,
                     memory_obj.metadata.address,
                 )
             except Exception as e:
                 logger.error(
-                    f"GDS/cuFile write operation failed for key {key.to_string()} at "
+                    f"GDS write operation failed for key {key.to_string()} at "
                     f"path {path}: tensor_shape={kv_chunk.shape}, "
                     f"tensor_dtype={kv_chunk.dtype}, "
                     f"tensor_size_bytes={kv_chunk.nbytes}, error={e}",
@@ -809,7 +818,7 @@ class GdsBackend(AllocatorBackendInterface):
             return None
 
         offset = _METADATA_MAX_SIZE
-        if self.cufile_base_pointer is None:
+        if self.gds_base_pointer is None:
             tensor = memory_obj.tensor
             assert tensor is not None
             if self._debug_asserts:
@@ -818,7 +827,7 @@ class GdsBackend(AllocatorBackendInterface):
             addr = ctypes.c_void_p(tensor.data_ptr())
             dev_offset = 0
         else:
-            addr = ctypes.c_void_p(self.cufile_base_pointer)
+            addr = ctypes.c_void_p(self.gds_base_pointer)
             dev_offset = memory_obj.metadata.address
         ret = self._load_gds(path, offset, addr, memory_obj.get_size(), dev_offset)
         if ret != memory_obj.get_size():
@@ -937,8 +946,8 @@ class GdsBackend(AllocatorBackendInterface):
         try:
             with open(tmp_path, "wb") as f:
                 f.write(metadata)
-            if self.cufile:
-                with self.cufile.CuFile(
+            if self.gds_module:
+                with self.gds_module.CuFile(
                     tmp_path, "r+", use_direct_io=self.use_direct_io
                 ) as f:
                     f.write(
@@ -986,8 +995,8 @@ class GdsBackend(AllocatorBackendInterface):
     ) -> int:
         """Read data from disk into a GPU buffer"""
         try:
-            if self.cufile:
-                with self.cufile.CuFile(
+            if self.gds_module:
+                with self.gds_module.CuFile(
                     gds_path, "r", use_direct_io=self.use_direct_io
                 ) as f:
                     return f.read(
@@ -1036,13 +1045,13 @@ class GdsBackend(AllocatorBackendInterface):
                 return size_in_bytes
             else:
                 raise RuntimeError(
-                    "Both cufile and cudart are None, this should not happen"
+                    "Both gds_module and cudart are None, this should not happen"
                 )
         except Exception as e:
             # return -1 on any exception, and log the error.
             # The caller will handle the error by removing the cache entry and
             # returning None.
-            logger.error(f"CuFile read failed for {gds_path}: {e}", exc_info=True)
+            logger.error(f"GDS read failed for {gds_path}: {e}", exc_info=True)
             return -1
 
     def pin(self, key: CacheEngineKey) -> bool:
@@ -1061,12 +1070,13 @@ class GdsBackend(AllocatorBackendInterface):
     def initialize_allocator(
         self, config: LMCacheEngineConfig, metadata: LMCacheMetadata
     ) -> Union[CuFileMemoryAllocator, HipFileMemoryAllocator]:
-        assert config.cufile_buffer_size is not None
-        # Use HipFileMemoryAllocator if hipfile is enabled in the backend
+        assert config.gds_buffer_size is not None
         allocator_cls = (
-            HipFileMemoryAllocator if self.use_hipfile else CuFileMemoryAllocator
+            HipFileMemoryAllocator
+            if self.gds_backend == "hipfile"
+            else CuFileMemoryAllocator
         )
-        return allocator_cls(config.cufile_buffer_size * 1024**2)
+        return allocator_cls(config.gds_buffer_size * 1024**2)
 
     def allocate(
         self,

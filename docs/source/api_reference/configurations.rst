@@ -351,9 +351,15 @@ Settings for different storage backends and paths.
    * - gds_path_sharding
      - LMCACHE_GDS_PATH_SHARDING
      - Strategy for selecting a path when multiple paths are provided. Currently only ``"by_gpu"`` is supported, which selects paths based on GPU device ID (default: "by_gpu").
-   * - cufile_buffer_size
-     - LMCACHE_CUFILE_BUFFER_SIZE
-     - Buffer size for cuFile/hipFile operations
+   * - gds_buffer_size
+     - LMCACHE_GDS_BUFFER_SIZE
+     - Buffer size for GDS operations
+   * - use_gds
+     - LMCACHE_USE_GDS
+     - Enable or disable GPU Direct Storage API usage (default: true)
+   * - gds_backend
+     - LMCACHE_GDS_BACKEND
+     - GDS library backend to use (default: "cufile")
 
 Custom Prometheus Histogram Buckets
 ------------------------------------

@@ -41,6 +41,7 @@ from lmcache.v1.mp_observability.config import (
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import get_event_bus
 from lmcache.v1.mp_observability.otel_init import register_gauge
+from lmcache.v1.mp_observability.trace import maybe_initialize_trace_recorder
 from lmcache.v1.multiprocess.config import (
     MPServerConfig,
     add_mp_server_args,
@@ -665,7 +666,6 @@ class MPCacheEngine:
                     request_id=key.request_id,
                 )
             )
-
             return
 
         # Publish lookup event via EventBus for observability subscribers.
@@ -688,6 +688,11 @@ class MPCacheEngine:
                     },
                 )
             )
+
+        # set lookup ipc key, for session manager to use and generate object keys
+        session = self.session_manager.get_or_create(key.request_id)
+        session.set_tokens(list(key.token_ids))
+        session.lookup_ipc_key = key
 
         obj_keys = ipc_key_to_object_keys(key, chunk_hashes)
 
@@ -854,13 +859,29 @@ class MPCacheEngine:
                 metadata={"request_id": request_id},
             )
         )
-        self.session_manager.remove(request_id)
+        session = self.session_manager.remove(request_id)
         self._event_bus.publish(
             Event(
                 event_type=EventType.MP_SESSION_END,
                 session_id=request_id,
             )
         )
+        if session is None:
+            logger.warning("Session %s not found, skipping touch", request_id)
+            return
+        if session.lookup_ipc_key is None:
+            logger.warning(
+                "Session %s has no lookup ipc key, skipping touch", request_id
+            )
+            return
+
+        chunk_hashes = [TokenHasher.hash_to_bytes(h) for h in session.get_hashes(0)]
+        obj_keys = ipc_key_to_object_keys(session.lookup_ipc_key, chunk_hashes)
+        # unified touch of all keys, which include retrieved and stored keys
+        # TODO(chunxiaozheng): when l2 is enabled, the prefetched keys from l2 are temp
+        #  and will be deleted after finish_read_prefetched, when we touch all keys,
+        #  these keys has been deleted and will not be touched.
+        self.storage_manager.touch_l1_keys(obj_keys)
 
     def report_status(self) -> dict:
         """Return a status dict for the entire cache engine."""
@@ -998,6 +1019,11 @@ def run_cache_server(
         If return_engine is False: None (blocks until interrupted)
     """
     event_bus = init_observability(obs_config)
+
+    # Wire up the trace recorder (no-op when --trace-level is unset).
+    # Registered before the engine handlers are added so any
+    # storage-manager calls during engine init are captured too.
+    maybe_initialize_trace_recorder(event_bus, obs_config, storage_manager_config)
 
     # Initialize the engine (loggers self-register with the global controller)
     engine = MPCacheEngine(
