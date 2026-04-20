@@ -1070,6 +1070,43 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
         # URL encode for safety
         return url_quote(flat_key_str, safe="")
 
+    def _build_descs(
+        self, keys: Sequence[CacheEngineKey], *, write: bool
+    ) -> List[NixlDesc]:
+        """
+        Build NixlDescs for ``keys``. For FILE backends this opens one fd per
+        key; the caller owns FD lifetime once this method returns successfully.
+        On mid-loop ``os.open`` failure, every already-opened fd is closed
+        before the exception is re-raised.
+
+        :param write: If True, opens with O_CREAT | O_RDWR (mem_to_storage).
+            If False, opens with O_RDONLY (storage_to_mem).
+        """
+        if self.agent.mem_type == "OBJ":
+            return [
+                NixlDesc(device_id=i, meta_info=self._format_object_key(k))
+                for i, k in enumerate(keys)
+            ]
+        if self.agent.mem_type == "FILE":
+            flags = (os.O_CREAT | os.O_RDWR) if write else os.O_RDONLY
+            flags |= self.direct_io_flag
+            mode_args = (0o644,) if write else ()
+            descs: List[NixlDesc] = []
+            try:
+                for k in keys:
+                    fd = os.open(
+                        os.path.join(self.path, self._format_object_key(k)),
+                        flags,
+                        *mode_args,
+                    )
+                    descs.append(NixlDesc(device_id=fd, meta_info=""))
+                return descs
+            except OSError:
+                _close_file_descs(descs)
+                raise
+        # Already validated in validate_nixl_backend
+        raise ValueError(f"unexpected mem_type: {self.agent.mem_type}")
+
     def key_exists(self, key: CacheEngineKey) -> bool:
         meta_info = self._format_object_key(key)
 
@@ -1109,21 +1146,7 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
         storage_xfer_handler = None
         xfer_state = False
         try:
-            if self.agent.mem_type == "OBJ":
-                for idx in range(len(keys)):
-                    object_key = self._format_object_key(keys[idx])
-                    descs.append(NixlDesc(device_id=idx, meta_info=object_key))
-            elif self.agent.mem_type == "FILE":
-                for idx in range(len(keys)):
-                    file_name = self._format_object_key(keys[idx])
-                    fd = os.open(
-                        os.path.join(self.path, file_name),
-                        os.O_RDONLY | self.direct_io_flag,
-                    )
-                    descs.append(NixlDesc(device_id=fd, meta_info=""))
-            else:
-                # Already validated in validate_nixl_backend
-                raise ValueError(f"unexpected mem_type: {self.agent.mem_type}")
+            descs = self._build_descs(keys, write=False)
 
             # Create batched storage handler
             storage_reg_descs, storage_xfer_handler = (
@@ -1226,22 +1249,7 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
         storage_reg_descs = None
         storage_xfer_handler = None
         try:
-            if self.agent.mem_type == "OBJ":
-                for idx in range(len(keys)):
-                    object_key = self._format_object_key(keys[idx])
-                    descs.append(NixlDesc(device_id=idx, meta_info=object_key))
-            elif self.agent.mem_type == "FILE":
-                for idx in range(len(keys)):
-                    file_name = self._format_object_key(keys[idx])
-                    fd = os.open(
-                        os.path.join(self.path, file_name),
-                        os.O_CREAT | os.O_RDWR | self.direct_io_flag,
-                        0o644,
-                    )
-                    descs.append(NixlDesc(device_id=fd, meta_info=""))
-            else:
-                # Already validated in validate_nixl_backend
-                raise ValueError(f"unexpected mem_type: {self.agent.mem_type}")
+            descs = self._build_descs(keys, write=True)
 
             storage_reg_descs, storage_xfer_handler = (
                 self.agent.create_batched_storage_handler(descs, page_size)
