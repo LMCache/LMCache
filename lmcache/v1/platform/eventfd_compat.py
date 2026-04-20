@@ -21,7 +21,7 @@ _pipe_registry: dict[int, tuple[int, int]] = {}
 _eventfd_compat_installed: bool = False
 
 
-def _compat_eventfd(initval: int = 0, flags: int = 0) -> int:
+def _compat_eventfd(initval: int, flags: int = 0) -> int:
     """Create an eventfd-like file descriptor via ``os.pipe``."""
     # Standard
     import fcntl
@@ -39,7 +39,7 @@ def _compat_eventfd(initval: int = 0, flags: int = 0) -> int:
     return r
 
 
-def _compat_eventfd_write(efd: int, value: int = 1) -> None:
+def _compat_eventfd_write(efd: int, value: int) -> None:
     """Signal the pipe-based eventfd.
 
     Real eventfd_write always writes an 8-byte uint64 counter.
