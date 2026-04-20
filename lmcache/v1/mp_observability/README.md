@@ -78,6 +78,25 @@ CLI, pass the flags below; when embedding programmatically, construct an
 > **Note:** OTel counters only appear on `/metrics` after the first increment.
 > If you see only Python runtime metrics, trigger a store/retrieve first.
 
+### Tenant tagging
+
+Every exported metric and span carries a `cache_salt` attribute identifying
+the tenant the event belongs to (one `cache_salt` per user). The value
+flows off the originating request's `ObjectKey` / `IPCCacheEngineKey`; no
+additional configuration is required beyond whatever produces
+`cache_salt` upstream (PR #3042 and follow-ups).
+
+MP server process identity (e.g. which node emitted the metric) is left
+to the metrics backend: Prometheus node_exporter / k8s scrape labels
+already identify the host, and one MP server per node means hostname
+uniquely identifies the process. No OTel Resource attributes are set by
+LMCache.
+
+Cardinality: `cache_salt` is passed to the backend as a raw string. For
+deployments with many tenants, configure Prometheus retention, remote
+write filters, or use an OTel collector processor to bucket or drop high-
+cardinality series before they reach long-term storage.
+
 ### Tracing
 
 Tracing is opt-in (`--enable-tracing`).  When enabled, `MPServerTracingSubscriber`

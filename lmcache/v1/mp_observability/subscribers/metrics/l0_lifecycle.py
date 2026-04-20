@@ -67,6 +67,7 @@ class _L0BlockState:
     status: _BlockStatus
     alloc_time: float
     last_access_time: float
+    cache_salt: str = ""  # Tenant salt of the most recent allocator.
     access_history: deque[float] = field(
         default_factory=lambda: deque(maxlen=_MAX_ACCESS_HISTORY)
     )
@@ -167,6 +168,7 @@ class L0LifecycleSubscriber(EventSubscriber):
         req_id: str = record.req_id  # type: ignore[attr-defined]
         block_ids: list[int] = record.new_block_ids  # type: ignore[attr-defined]
         token_ids: list[int] = record.new_token_ids  # type: ignore[attr-defined]
+        cache_salt: str = getattr(record, "cache_salt", "")
 
         if not block_ids:
             return
@@ -183,7 +185,13 @@ class L0LifecycleSubscriber(EventSubscriber):
             if not chunk_tokens:
                 continue
             self._process_block(
-                instance_id, model_name, block_id, chunk_tokens, req_id, now
+                instance_id,
+                model_name,
+                block_id,
+                chunk_tokens,
+                req_id,
+                now,
+                cache_salt,
             )
 
     def _process_block(
@@ -194,6 +202,7 @@ class L0LifecycleSubscriber(EventSubscriber):
         token_ids: list[int],
         req_id: str,
         now: float,
+        cache_salt: str,
     ) -> None:
         """Update shadow map for a single physical block."""
         block_key = (instance_id, block_id)
@@ -217,6 +226,7 @@ class L0LifecycleSubscriber(EventSubscriber):
                 status=_BlockStatus.ACTIVE,
                 alloc_time=now,
                 last_access_time=now,
+                cache_salt=cache_salt,
             )
             self._req_blocks.setdefault(req_id, set()).add(block_key)
             return
@@ -261,6 +271,7 @@ class L0LifecycleSubscriber(EventSubscriber):
                 status=_BlockStatus.ACTIVE,
                 alloc_time=now,
                 last_access_time=now,
+                cache_salt=cache_salt,
             )
             self._req_blocks.setdefault(req_id, set()).add(block_key)
 
@@ -273,6 +284,7 @@ class L0LifecycleSubscriber(EventSubscriber):
         attrs = {
             "instance_id": str(state.instance_id),
             "model_name": state.model_name,
+            "cache_salt": state.cache_salt,
         }
 
         self._lifetime_hist.record(lifetime, attrs)

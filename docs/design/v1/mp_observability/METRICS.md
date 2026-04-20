@@ -20,6 +20,22 @@ a `_total` suffix (e.g., `lmcache_mp_l1_read_keys_total`).
 
 For implementation guidance on adding new events and subscribers, see [README.md](README.md).
 
+## Tenant identity (`cache_salt` attribute)
+
+Every metric in this document also carries a `cache_salt` attribute on
+each emission. The attribute value is the per-user salt from the
+originating request (see [EVENTS.md](EVENTS.md) and the cache_salt feature
+docs). An empty string (`cache_salt=""`) is emitted for legacy / unsalted
+callers and is a stable series.
+
+Batch counters (L1, SM, L2 store) **group by `cache_salt`** within a single
+event: an event whose key list touches two tenants produces two distinct
+`.add()` calls.
+
+Cardinality warning: `cache_salt` is passed through raw. Operators who
+expect a large salt space should configure their Prometheus retention or
+relabeling accordingly.
+
 ---
 
 ## StorageManager Read Metrics
@@ -142,9 +158,10 @@ Sampled (default 1%) GPU KV cache block lifecycle tracking via shadow monitoring
 of `MP_VLLM_BLOCK_ALLOCATION` and `MP_VLLM_END_SESSION` events.  Eviction is
 detected at reallocation time (when a block is assigned different tokens).
 
-All L0 histograms carry `instance_id` and `model_name` OTel attributes, enabling
-per-instance and per-model Prometheus metric slicing (e.g.
-`lmcache_mp_l0_block_lifetime_seconds{instance_id="12345",model_name="llama-7b"}`).
+All L0 histograms carry `instance_id`, `model_name`, and `cache_salt` OTel
+attributes, enabling per-instance, per-model, and per-tenant Prometheus metric
+slicing (e.g.
+`lmcache_mp_l0_block_lifetime_seconds{instance_id="12345",model_name="llama-7b",cache_salt="user-42"}`).
 
 | OTel metric name | Prometheus name | Type | Source event | Calculation |
 |---|---|---|---|---|

@@ -5,6 +5,9 @@
 # Future
 from __future__ import annotations
 
+# Standard
+from collections import Counter
+
 # Third Party
 from opentelemetry import metrics
 
@@ -15,6 +18,10 @@ from lmcache.v1.mp_observability.event_bus import EventCallback, EventSubscriber
 
 class L2MetricsSubscriber(EventSubscriber):
     """Maintains OTel counters for L2 store and prefetch operations.
+
+    Metrics carry the ``cache_salt`` attribute. Store events group by the
+    salt on each ``ObjectKey`` in the batch. Prefetch events are per-request
+    and carry the single ``cache_salt`` from the originating request.
 
     Metrics:
     - ``lmcache_mp.l2_store_tasks``         — store tasks submitted to L2
@@ -96,26 +103,83 @@ class L2MetricsSubscriber(EventSubscriber):
             EventType.L2_PREFETCH_LOAD_COMPLETED: self._on_load_completed,
         }
 
+    # -- Store -------------------------------------------------------------
+
     def _on_store_submitted(self, event: Event) -> None:
-        self._store_tasks.add(1)
-        self._store_keys.add(event.metadata["key_count"])
+        keys = event.metadata.get("keys", [])
+        if keys:
+            for salt, count in _group_by_salt(keys).items():
+                self._store_tasks.add(1, {"cache_salt": salt})
+                self._store_keys.add(count, {"cache_salt": salt})
+        else:
+            # Legacy producer that didn't supply the key list.
+            self._store_tasks.add(1, {"cache_salt": ""})
+            self._store_keys.add(event.metadata["key_count"], {"cache_salt": ""})
 
     def _on_store_completed(self, event: Event) -> None:
-        self._store_completed.add(1)
-        self._store_succeeded_keys.add(event.metadata["succeeded_count"])
-        self._store_failed_keys.add(event.metadata["failed_count"])
+        succeeded = event.metadata.get("succeeded_keys", [])
+        failed = event.metadata.get("failed_keys", [])
+        task_salts = _unique_salts(succeeded, failed)
+        if task_salts:
+            for salt in task_salts:
+                self._store_completed.add(1, {"cache_salt": salt})
+            _emit_by_salt(self._store_succeeded_keys, succeeded)
+            _emit_by_salt(self._store_failed_keys, failed)
+        else:
+            self._store_completed.add(1, {"cache_salt": ""})
+            self._store_succeeded_keys.add(
+                event.metadata["succeeded_count"], {"cache_salt": ""}
+            )
+            self._store_failed_keys.add(
+                event.metadata["failed_count"], {"cache_salt": ""}
+            )
+
+    # -- Prefetch ----------------------------------------------------------
 
     def _on_lookup_submitted(self, event: Event) -> None:
-        self._prefetch_lookups.add(1)
-        self._prefetch_lookup_keys.add(event.metadata["key_count"])
+        salt = event.metadata.get("cache_salt", "")
+        self._prefetch_lookups.add(1, {"cache_salt": salt})
+        self._prefetch_lookup_keys.add(
+            event.metadata["key_count"], {"cache_salt": salt}
+        )
 
     def _on_lookup_completed(self, event: Event) -> None:
-        self._prefetch_hit_keys.add(event.metadata["prefix_hit_count"])
+        salt = event.metadata.get("cache_salt", "")
+        self._prefetch_hit_keys.add(
+            event.metadata["prefix_hit_count"], {"cache_salt": salt}
+        )
 
     def _on_load_submitted(self, event: Event) -> None:
-        self._prefetch_load_tasks.add(event.metadata["adapter_count"])
-        self._prefetch_load_keys.add(event.metadata["key_count"])
+        salt = event.metadata.get("cache_salt", "")
+        self._prefetch_load_tasks.add(
+            event.metadata["adapter_count"], {"cache_salt": salt}
+        )
+        self._prefetch_load_keys.add(event.metadata["key_count"], {"cache_salt": salt})
 
     def _on_load_completed(self, event: Event) -> None:
-        self._prefetch_loaded_keys.add(event.metadata["loaded_count"])
-        self._prefetch_failed_keys.add(event.metadata["failed_count"])
+        salt = event.metadata.get("cache_salt", "")
+        self._prefetch_loaded_keys.add(
+            event.metadata["loaded_count"], {"cache_salt": salt}
+        )
+        self._prefetch_failed_keys.add(
+            event.metadata["failed_count"], {"cache_salt": salt}
+        )
+
+
+def _group_by_salt(keys: list) -> Counter:
+    return Counter(getattr(k, "cache_salt", "") for k in keys)
+
+
+def _unique_salts(*key_lists: list) -> set[str]:
+    out: set[str] = set()
+    for keys in key_lists:
+        for k in keys:
+            out.add(getattr(k, "cache_salt", ""))
+    return out
+
+
+def _emit_by_salt(counter: metrics.Counter, keys: list) -> None:
+    if not keys:
+        return
+    for salt, count in _group_by_salt(keys).items():
+        counter.add(count, {"cache_salt": salt})

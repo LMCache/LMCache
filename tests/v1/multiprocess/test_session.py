@@ -146,6 +146,38 @@ class TestSessionManager:
         removed = session_manager.cleanup_expired()
         assert removed == 0
 
+    def test_cache_salt_recorded_on_create(
+        self, session_manager: SessionManager
+    ) -> None:
+        session = session_manager.get_or_create("req-1", cache_salt="user-42")
+        assert session.cache_salt == "user-42"
+        assert session_manager.get_cache_salt("req-1") == "user-42"
+
+    def test_cache_salt_upgrade_for_empty_session(
+        self, session_manager: SessionManager
+    ) -> None:
+        """A session created without a salt should adopt one on a later
+        call that supplies it."""
+        first = session_manager.get_or_create("req-1")
+        assert first.cache_salt == ""
+        second = session_manager.get_or_create("req-1", cache_salt="user-42")
+        assert second is first
+        assert first.cache_salt == "user-42"
+
+    def test_cache_salt_preserved_against_mismatch(
+        self, session_manager: SessionManager
+    ) -> None:
+        """Once a salt is recorded, a subsequent call with a different
+        non-empty salt must not silently overwrite it."""
+        session_manager.get_or_create("req-1", cache_salt="user-42")
+        session_manager.get_or_create("req-1", cache_salt="user-99")
+        assert session_manager.get_cache_salt("req-1") == "user-42"
+
+    def test_get_cache_salt_unknown_request(
+        self, session_manager: SessionManager
+    ) -> None:
+        assert session_manager.get_cache_salt("never-seen") == ""
+
 
 class TestSessionThreadSafety:
     """Verify Session is safe under concurrent access

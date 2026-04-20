@@ -351,6 +351,7 @@ class StoreController(StorageControllerInterface):
                     metadata={
                         "adapter_index": adapter_index,
                         "key_count": len(successful_keys),
+                        "keys": successful_keys,
                     },
                 )
             )
@@ -405,6 +406,8 @@ class StoreController(StorageControllerInterface):
                             "adapter_index": adapter_index,
                             "succeeded_count": len(task.keys),
                             "failed_count": 0,
+                            "succeeded_keys": task.keys,
+                            "failed_keys": [],
                         },
                     )
                 )
@@ -425,6 +428,8 @@ class StoreController(StorageControllerInterface):
                             "adapter_index": adapter_index,
                             "succeeded_count": 0,
                             "failed_count": len(task.keys),
+                            "succeeded_keys": [],
+                            "failed_keys": task.keys,
                         },
                     )
                 )

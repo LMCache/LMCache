@@ -494,6 +494,7 @@ class PrefetchController(StorageControllerInterface):
                     "request_id": request_id,
                     "key_count": len(keys),
                     "adapter_count": len(pending_lookup_tasks),
+                    "cache_salt": keys[0].cache_salt if keys else "",
                 },
             )
         )
@@ -554,6 +555,9 @@ class PrefetchController(StorageControllerInterface):
                     metadata={
                         "request_id": request.request_id,
                         "prefix_hit_count": 0,
+                        "cache_salt": request.keys[0].cache_salt
+                        if request.keys
+                        else "",
                     },
                 )
             )
@@ -617,6 +621,9 @@ class PrefetchController(StorageControllerInterface):
                     metadata={
                         "request_id": request.request_id,
                         "prefix_hit_count": 0,
+                        "cache_salt": request.keys[0].cache_salt
+                        if request.keys
+                        else "",
                     },
                 )
             )
@@ -637,12 +644,14 @@ class PrefetchController(StorageControllerInterface):
         ## Step 8: update the lookup result based on the final load plan
         self._update_lookup_results(request.request_id, prefix_length)
 
+        req_salt = request.keys[0].cache_salt if request.keys else ""
         self._event_bus.publish(
             Event(
                 event_type=EventType.L2_PREFETCH_LOOKUP_COMPLETED,
                 metadata={
                     "request_id": request.request_id,
                     "prefix_hit_count": prefix_length,
+                    "cache_salt": req_salt,
                 },
             )
         )
@@ -653,6 +662,7 @@ class PrefetchController(StorageControllerInterface):
                     "request_id": request.request_id,
                     "key_count": len(reserved_key_set),
                     "adapter_count": len(trimmed_plan),
+                    "cache_salt": req_salt,
                 },
             )
         )
@@ -747,6 +757,7 @@ class PrefetchController(StorageControllerInterface):
                     "request_id": request.request_id,
                     "loaded_count": len(loaded_keys),
                     "failed_count": len(failed_keys),
+                    "cache_salt": request.keys[0].cache_salt if request.keys else "",
                 },
             )
         )

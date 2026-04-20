@@ -155,6 +155,7 @@ class _PrefetchJob:
     handle: PrefetchHandle
     world_size: int
     request_id: str
+    cache_salt: str = ""
 
 
 # Main class for the mp cache engine
@@ -270,7 +271,9 @@ class MPCacheEngine:
                 that signals the completion of the store operation. The second
                 element indicates whether the store operation was successful.
         """
-        session = self.session_manager.get_or_create(key.request_id)
+        session = self.session_manager.get_or_create(
+            key.request_id, cache_salt=key.cache_salt
+        )
         session.set_tokens(list(key.token_ids))
         chunk_hashes = [
             TokenHasher.hash_to_bytes(h) for h in session.get_hashes(key.start, key.end)
@@ -310,7 +313,10 @@ class MPCacheEngine:
                 Event(
                     event_type=EventType.MP_STORE_SUBMITTED,
                     session_id=key.request_id,
-                    metadata={"device": str(gpu_context.device)},
+                    metadata={
+                        "device": str(gpu_context.device),
+                        "cache_salt": key.cache_salt,
+                    },
                 )
             )
 
@@ -319,7 +325,10 @@ class MPCacheEngine:
                 Event(
                     event_type=EventType.MP_STORE_START,
                     session_id=key.request_id,
-                    metadata={"device": str(gpu_context.device)},
+                    metadata={
+                        "device": str(gpu_context.device),
+                        "cache_salt": key.cache_salt,
+                    },
                 ),
             )
 
@@ -381,6 +390,7 @@ class MPCacheEngine:
                         metadata={
                             "stored_count": len(reserved_dict),
                             "device": str(gpu_context.device),
+                            "cache_salt": key.cache_salt,
                         },
                     ),
                 )
@@ -422,7 +432,9 @@ class MPCacheEngine:
                 that signals the completion of the retrieve operation. The second
                 element indicates whether the key was successfully retrieved.
         """
-        session = self.session_manager.get_or_create(key.request_id)
+        session = self.session_manager.get_or_create(
+            key.request_id, cache_salt=key.cache_salt
+        )
         session.set_tokens(list(key.token_ids))
         chunk_hashes = [
             TokenHasher.hash_to_bytes(h) for h in session.get_hashes(key.start, key.end)
@@ -445,7 +457,10 @@ class MPCacheEngine:
             Event(
                 event_type=EventType.MP_RETRIEVE_SUBMITTED,
                 session_id=key.request_id,
-                metadata={"device": str(gpu_context.device)},
+                metadata={
+                    "device": str(gpu_context.device),
+                    "cache_salt": key.cache_salt,
+                },
             )
         )
 
@@ -454,7 +469,10 @@ class MPCacheEngine:
             Event(
                 event_type=EventType.MP_RETRIEVE_START,
                 session_id=key.request_id,
-                metadata={"device": str(gpu_context.device)},
+                metadata={
+                    "device": str(gpu_context.device),
+                    "cache_salt": key.cache_salt,
+                },
             ),
         )
 
@@ -565,6 +583,7 @@ class MPCacheEngine:
                         metadata={
                             "retrieved_count": len(prefetched_keys),
                             "device": str(gpu_context.device),
+                            "cache_salt": key.cache_salt,
                         },
                     ),
                 )
@@ -617,12 +636,14 @@ class MPCacheEngine:
             Event(
                 event_type=EventType.MP_REQUEST_START,
                 session_id=key.request_id,
+                metadata={"cache_salt": key.cache_salt},
             )
         )
         self._event_bus.publish(
             Event(
                 event_type=EventType.MP_LOOKUP_PREFETCH_START,
                 session_id=key.request_id,
+                metadata={"cache_salt": key.cache_salt},
             )
         )
 
@@ -644,6 +665,7 @@ class MPCacheEngine:
                     ),
                     world_size=1,
                     request_id=key.request_id,
+                    cache_salt=key.cache_salt,
                 )
             )
             return
@@ -664,6 +686,7 @@ class MPCacheEngine:
                     ),
                     world_size=1,
                     request_id=key.request_id,
+                    cache_salt=key.cache_salt,
                 )
             )
             return
@@ -685,6 +708,7 @@ class MPCacheEngine:
                         "seq_len": len(key.token_ids),
                         "dtypes": [str(d) for d in layout_desc.dtypes],
                         "shapes": [list(s) for s in layout_desc.shapes],
+                        "cache_salt": key.cache_salt,
                     },
                 )
             )
@@ -707,6 +731,7 @@ class MPCacheEngine:
                 handle=handle,
                 world_size=key.world_size,
                 request_id=key.request_id,
+                cache_salt=key.cache_salt,
             )
         )
 
@@ -784,7 +809,10 @@ class MPCacheEngine:
             Event(
                 event_type=EventType.MP_LOOKUP_PREFETCH_END,
                 session_id=job.request_id,
-                metadata={"found_count": found_count},
+                metadata={
+                    "found_count": found_count,
+                    "cache_salt": job.cache_salt,
+                },
             )
         )
 
@@ -853,10 +881,14 @@ class MPCacheEngine:
         Args:
             request_id: The request ID whose session should be removed.
         """
+        cache_salt = self.session_manager.get_cache_salt(request_id)
         self._event_bus.publish(
             Event(
                 event_type=EventType.MP_VLLM_END_SESSION,
-                metadata={"request_id": request_id},
+                metadata={
+                    "request_id": request_id,
+                    "cache_salt": cache_salt,
+                },
             )
         )
         session = self.session_manager.remove(request_id)
@@ -864,6 +896,7 @@ class MPCacheEngine:
             Event(
                 event_type=EventType.MP_SESSION_END,
                 session_id=request_id,
+                metadata={"cache_salt": cache_salt},
             )
         )
         if session is None:
@@ -936,6 +969,9 @@ class MPCacheEngine:
             records: List of BlockAllocationRecord with per-request
                 block and token allocation deltas.
         """
+        for record in records:
+            if not record.cache_salt:
+                record.cache_salt = self.session_manager.get_cache_salt(record.req_id)
         self._event_bus.publish(
             Event(
                 event_type=EventType.MP_VLLM_BLOCK_ALLOCATION,

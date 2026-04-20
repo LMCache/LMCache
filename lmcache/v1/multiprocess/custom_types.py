@@ -260,6 +260,7 @@ class BlockAllocationRecord:
     req_id: str
     new_block_ids: list[int]
     new_token_ids: list[int]
+    cache_salt: str = ""
 
 
 @dataclass

@@ -145,7 +145,11 @@ class MPServerTracingSubscriber(EventSubscriber):
         """
         if not _HAS_OTEL:
             return
-        self._get_or_create_request_span(event.session_id, event.timestamp)
+        self._get_or_create_request_span(
+            event.session_id,
+            event.timestamp,
+            cache_salt=event.metadata.get("cache_salt", ""),
+        )
 
     def _on_store_submitted(self, event: Event) -> None:
         """Increment the in-flight store counter for the session.
@@ -211,7 +215,11 @@ class MPServerTracingSubscriber(EventSubscriber):
         if not _HAS_OTEL:
             return
         sid = event.session_id
-        _, root_ctx = self._get_or_create_request_span(sid, event.timestamp)
+        _, root_ctx = self._get_or_create_request_span(
+            sid,
+            event.timestamp,
+            cache_salt=event.metadata.get("cache_salt", ""),
+        )
 
         span_name = self._SPAN_NAMES[event.event_type]
         span = _tracer.start_span(
@@ -285,7 +293,7 @@ class MPServerTracingSubscriber(EventSubscriber):
     # ------------------------------------------------------------------
 
     def _get_or_create_request_span(
-        self, session_id: str, ts: float
+        self, session_id: str, ts: float, cache_salt: str = ""
     ) -> tuple[Any, Any]:
         """Return the root span and its OTel context, creating them if absent.
 
@@ -298,6 +306,8 @@ class MPServerTracingSubscriber(EventSubscriber):
             session_id: The request session identifier.
             ts: Wall-clock timestamp (``time.time()``) to use as span start
                 if the root is created now.
+            cache_salt: Per-user tenant salt to tag on the root span.
+                Ignored when an entry already exists.
 
         Returns:
             ``(root_span, root_otel_context)`` tuple.
@@ -310,6 +320,7 @@ class MPServerTracingSubscriber(EventSubscriber):
             start_time=int(ts * 1e9),
         )
         root_span.set_attribute("session_id", session_id)
+        root_span.set_attribute("cache_salt", cache_salt)
         root_ctx = trace.set_span_in_context(root_span)
         self._registry.open(session_id, "request", root_span, root_ctx)
         return root_span, root_ctx

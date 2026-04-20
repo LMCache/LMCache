@@ -28,6 +28,7 @@ class Session:
 
     request_id: str
     hasher: TokenHasher
+    cache_salt: str = ""
     token_ids: list[int] = field(default_factory=list)
     chunk_hashes: list = field(default_factory=list)
     last_prefix_hash: Any = None
@@ -127,11 +128,12 @@ class SessionManager:
         self._sessions: dict[str, Session] = {}
         self._lock = threading.Lock()
 
-    def get_or_create(self, request_id: str) -> Session:
+    def get_or_create(self, request_id: str, cache_salt: str = "") -> Session:
         """Get existing session or create a new one.
 
         Args:
             request_id: Unique request identifier.
+            cache_salt: Per-user isolation salt. Empty string for unsalted requests.
 
         Returns:
             The Session for this request_id.
@@ -139,10 +141,29 @@ class SessionManager:
         with self._lock:
             if request_id not in self._sessions:
                 self._sessions[request_id] = Session(
-                    request_id=request_id, hasher=self._hasher
+                    request_id=request_id,
+                    hasher=self._hasher,
+                    cache_salt=cache_salt,
                 )
                 logger.debug("Created session for request_id=%s", request_id)
+            elif cache_salt and not self._sessions[request_id].cache_salt:
+                self._sessions[request_id].cache_salt = cache_salt
             return self._sessions[request_id]
+
+    def get_cache_salt(self, request_id: str) -> str:
+        """Return the cache_salt recorded for *request_id*, or ``""`` if
+        no session exists for it.
+
+        Args:
+            request_id: Unique request identifier.
+
+        Returns:
+            The cache_salt string. Empty when the session does not exist
+            or was created without a salt.
+        """
+        with self._lock:
+            session = self._sessions.get(request_id)
+            return session.cache_salt if session is not None else ""
 
     def remove(self, request_id: str) -> Optional[Session]:
         """Remove a session by request_id.

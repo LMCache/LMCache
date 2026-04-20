@@ -30,6 +30,7 @@ class _L1ChunkState:
 
     alloc_time: float
     last_access_time: float
+    cache_salt: str = ""
 
 
 class L1LifecycleSubscriber(EventSubscriber):
@@ -94,8 +95,8 @@ class L1LifecycleSubscriber(EventSubscriber):
 
         # Shadow map: key -> chunk lifecycle state (live chunks).
         self._shadow: dict[Any, _L1ChunkState] = {}
-        # Evicted map: key -> eviction timestamp (waiting for reuse).
-        self._evicted_at: dict[Any, float] = {}
+        # Evicted map: key -> (eviction timestamp, cache_salt).
+        self._evicted_at: dict[Any, tuple[float, str]] = {}
 
     def get_subscriptions(self) -> dict[EventType, EventCallback]:
         return {
@@ -110,25 +111,34 @@ class L1LifecycleSubscriber(EventSubscriber):
         for key in event.metadata["keys"]:
             state = self._shadow.get(key)
             if state is not None:
-                self._reuse_gap_hist.record(now - state.last_access_time)
+                self._reuse_gap_hist.record(
+                    now - state.last_access_time,
+                    {"cache_salt": state.cache_salt},
+                )
                 state.last_access_time = now
 
     def _on_write_finished(self, event: Event) -> None:
         now = event.timestamp or time.time()
         for key in event.metadata["keys"]:
+            salt = getattr(key, "cache_salt", "")
             # Check if this is a reuse of an evicted chunk.
-            evict_time = self._evicted_at.pop(key, None)
-            if evict_time is not None:
+            evict_entry = self._evicted_at.pop(key, None)
+            if evict_entry is not None:
+                evict_time, evict_salt = evict_entry
                 gap = min(now - evict_time, self._max_evict_reuse_wait)
-                self._evict_reuse_gap_hist.record(gap)
+                self._evict_reuse_gap_hist.record(gap, {"cache_salt": evict_salt})
 
             state = self._shadow.get(key)
             if state is not None:
                 # Re-write of existing chunk counts as a touch.
-                self._reuse_gap_hist.record(now - state.last_access_time)
+                self._reuse_gap_hist.record(
+                    now - state.last_access_time,
+                    {"cache_salt": state.cache_salt},
+                )
                 self._shadow[key] = _L1ChunkState(
                     alloc_time=now,
                     last_access_time=now,
+                    cache_salt=salt,
                 )
             else:
                 # First time seeing this key — deterministic sample check.
@@ -137,6 +147,7 @@ class L1LifecycleSubscriber(EventSubscriber):
                 self._shadow[key] = _L1ChunkState(
                     alloc_time=now,
                     last_access_time=now,
+                    cache_salt=salt,
                 )
         self._sweep_stale_evictions(now)
 
@@ -145,10 +156,11 @@ class L1LifecycleSubscriber(EventSubscriber):
         for key in event.metadata["keys"]:
             state = self._shadow.pop(key, None)
             if state is not None:
-                self._lifetime_hist.record(now - state.alloc_time)
-                self._idle_hist.record(now - state.last_access_time)
+                attrs = {"cache_salt": state.cache_salt}
+                self._lifetime_hist.record(now - state.alloc_time, attrs)
+                self._idle_hist.record(now - state.last_access_time, attrs)
                 # Start tracking eviction-to-reuse gap (only for sampled).
-                self._evicted_at[key] = now
+                self._evicted_at[key] = (now, state.cache_salt)
         self._sweep_stale_evictions(now)
 
     def _should_sample(self, key: object) -> bool:
@@ -157,10 +169,12 @@ class L1LifecycleSubscriber(EventSubscriber):
     def _sweep_stale_evictions(self, now: float) -> None:
         """Report T and discard evicted entries older than max_evict_reuse_wait."""
         stale = [
-            key
-            for key, evict_time in self._evicted_at.items()
-            if now - evict_time >= self._max_evict_reuse_wait
+            (key, entry[1])
+            for key, entry in self._evicted_at.items()
+            if now - entry[0] >= self._max_evict_reuse_wait
         ]
-        for key in stale:
+        for key, salt in stale:
             self._evicted_at.pop(key, None)
-            self._evict_reuse_gap_hist.record(self._max_evict_reuse_wait)
+            self._evict_reuse_gap_hist.record(
+                self._max_evict_reuse_wait, {"cache_salt": salt}
+            )

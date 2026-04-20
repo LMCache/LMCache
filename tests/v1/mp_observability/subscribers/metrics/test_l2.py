@@ -32,7 +32,12 @@ _DRAIN_WAIT = 0.15
 
 
 def _read_counters() -> dict[str, int]:
-    """Snapshot all counter values from the module-level reader."""
+    """Snapshot all counter values from the module-level reader.
+
+    Sums across all data points per metric name so that per-attribute
+    datapoints (e.g. one per ``cache_salt``) are aggregated into a single
+    value for the legacy assertions that do not care about the split.
+    """
     data = _reader.get_metrics_data()
     result: dict[str, int] = {}
     if data is None:
@@ -43,7 +48,7 @@ def _read_counters() -> dict[str, int]:
                 for dp in metric.data.data_points:
                     if not hasattr(dp, "value"):
                         continue  # skip histogram data points
-                    result[metric.name] = int(dp.value)
+                    result[metric.name] = result.get(metric.name, 0) + int(dp.value)
     return result
 
 
