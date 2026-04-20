@@ -157,12 +157,12 @@ _store_loop: poll wakes up
   ▼
 _process_new_keys(keys)
   │
-  ├─ 1. Group keys by model_name (L1 is a shared pool across models,
-  │     so one drain may span models with different KV shapes; each
-  │     submit_store_task must see a uniform (shape, dtype)).
+  ├─ 1. Group keys by shape (today: (model_name, kv_rank); L1 is a shared
+  │     pool so one drain may span models/parallelism configs with different
+  │     KV shapes, and each submit_store_task must see uniform (shape, dtype)).
   │
-  ├─ 2. For each per-model group:
-  │     StorePolicy.select_store_targets(model_keys, adapters)
+  ├─ 2. For each per-shape group:
+  │     StorePolicy.select_store_targets(group_keys, adapters)
   │       → dict[adapter_index, list[ObjectKey]]
   │
   ├─ 3. For each adapter target:
