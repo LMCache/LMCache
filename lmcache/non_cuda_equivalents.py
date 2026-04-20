@@ -1465,9 +1465,43 @@ def multi_layer_block_kv_transfer(
         ``[2, NL, chunk_size, NH * HS]``  (in element units)
     Paged buffer layout per layer (NL_X_TWO_NB_BS_NH_HS):
         ``[2, NB, BS, NH, HS]``
+
+    Args:
+        paged_buffer_ptrs_tensor: int64 tensor of data pointers into the
+            vLLM paged buffers (one per layer).
+        lmcache_objects_ptrs: Raw pointers (``int``) to LMCache memory
+            objects.  Must be non-empty.
+        block_ids: int64 tensor of block indices within the paged buffer.
+            ``block_ids.shape[0]`` must be a multiple of
+            ``len(lmcache_objects_ptrs)``.
+        device: Device on which both the paged buffers and the LMCache
+            objects reside for this fallback.  The C++ kernel supports
+            GPU paged buffers with host-resident LMCache objects; this
+            Python fallback assumes they share ``device`` and callers
+            should stage CPU<->GPU copies separately if needed.
+        direction: ``TransferDirection.D2H`` (paged -> objects) or
+            ``TransferDirection.H2D`` (objects -> paged).
+        shape_desc: Paged buffer shape descriptor.
+        lmcache_chunk_size: Tokens per LMCache memory object.
+        gpu_kv_format: GPU KV format identifier (only
+            ``NL_X_TWO_NB_BS_NH_HS`` is supported here).
+        skip_prefix_n_blocks: Number of leading blocks to skip.
+
+    Raises:
+        ValueError: If ``lmcache_objects_ptrs`` is empty, if
+            ``block_ids.shape[0]`` is not a multiple of the number of
+            objects, or if ``shape_desc`` carries an unsupported /
+            ambiguous ``element_size``.
     """
+    if not lmcache_objects_ptrs:
+        raise ValueError("lmcache_objects_ptrs must be non-empty")
     num_objects = len(lmcache_objects_ptrs)
     total_blocks = block_ids.shape[0]
+    if total_blocks % num_objects != 0:
+        raise ValueError(
+            "total_blocks (%d) must be a multiple of "
+            "num_objects (%d)" % (total_blocks, num_objects)
+        )
     blocks_per_obj = total_blocks // num_objects
     nl = shape_desc.nl
     bs = shape_desc.bs

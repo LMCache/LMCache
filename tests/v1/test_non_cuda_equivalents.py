@@ -2062,3 +2062,58 @@ class TestScenarios:
                         pytest.fail(
                             f"{name}/{key}: '{bid}'={val} != '{base_bid}'={base_val}"
                         )
+
+
+# ==========================================
+# 5. Python-fallback-only validation tests
+# ==========================================
+
+
+def _make_shape_desc_for_validation() -> Any:
+    sd = _py_ops.PageBufferShapeDesc()
+    sd.kv_size = 2
+    sd.nl = 1
+    sd.nb = 4
+    sd.bs = 2
+    sd.nh = 1
+    sd.hs = 2
+    sd.element_size = 4
+    sd.dtype = torch.float32
+    return sd
+
+
+def test_multi_layer_block_kv_transfer_empty_objects_raises() -> None:
+    """Empty ``lmcache_objects_ptrs`` must raise ``ValueError``."""
+    paged_ptrs = torch.zeros(1, dtype=torch.int64)
+    block_ids = torch.zeros(0, dtype=torch.int64)
+    with pytest.raises(ValueError, match="non-empty"):
+        _py_ops.multi_layer_block_kv_transfer(
+            paged_ptrs,
+            [],
+            block_ids,
+            torch.device("cpu"),
+            _py_ops.TransferDirection.D2H,
+            _make_shape_desc_for_validation(),
+            4,
+            _py_ops.GPUKVFormat.NL_X_TWO_NB_BS_NH_HS,
+            0,
+        )
+
+
+def test_multi_layer_block_kv_transfer_indivisible_blocks_raises() -> None:
+    """``total_blocks`` not divisible by ``num_objects`` must raise."""
+    paged_ptrs = torch.zeros(1, dtype=torch.int64)
+    # 3 blocks, 2 objects -> not divisible.
+    block_ids = torch.arange(3, dtype=torch.int64)
+    with pytest.raises(ValueError, match="multiple of"):
+        _py_ops.multi_layer_block_kv_transfer(
+            paged_ptrs,
+            [1, 2],
+            block_ids,
+            torch.device("cpu"),
+            _py_ops.TransferDirection.D2H,
+            _make_shape_desc_for_validation(),
+            4,
+            _py_ops.GPUKVFormat.NL_X_TWO_NB_BS_NH_HS,
+            0,
+        )

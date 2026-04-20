@@ -36,7 +36,12 @@ from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
 from lmcache.v1.multiprocess.custom_types import (
     KVCache,
 )
-import lmcache.c_ops as lmc_ops
+
+# Backend selection (c_ops when CUDA is available, otherwise a pure-Python
+# fallback) is handled once in ``lmcache/__init__.py`` via ``_get_backend``,
+# which aliases the chosen module as ``lmcache.c_ops`` in ``sys.modules``.
+# Importing it here transparently works in both CUDA and CPU-only envs.
+import lmcache.c_ops as lmc_ops  # noqa: E402
 
 logger = init_logger(__name__)
 
