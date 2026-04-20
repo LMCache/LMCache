@@ -354,7 +354,7 @@ class RequestTracker:
                     f"got {len(new_block_ids_by_group)}"
                 )
             else:
-                self.allocated_block_ids_by_group = tuple(
+                updated_block_ids_by_group = tuple(
                     current + new
                     for current, new in zip(
                         self.allocated_block_ids_by_group,
@@ -362,6 +362,7 @@ class RequestTracker:
                         strict=True,
                     )
                 )
+                self.allocated_block_ids_by_group = updated_block_ids_by_group
             self.token_ids.extend(new_token_ids)
 
         # When a request is scheduled again, and the number of new tokens
