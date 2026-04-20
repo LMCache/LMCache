@@ -89,7 +89,7 @@ class PDConfig:
     peer_host: str
     peer_init_port: int
     peer_alloc_port: int
-    peer_query_port: int
+    peer_query_port: Optional[int]
 
     buffer_size: int
     buffer_device: str
@@ -199,6 +199,18 @@ class PDBackend(AllocatorBackendInterface):
         self.data: dict[CacheEngineKey, MemoryObj] = {}
         self.data_lock = threading.Lock()
 
+        # Async transfer support: use a dedicated NIXL worker thread with a
+        # queue so the vLLM worker thread is not blocked during KV transfer.
+        # All NIXL GPU operations run on this single thread to avoid CUDA
+        # context contention. This prevents RPC timeouts in vLLM v0.19.0's
+        # multiprocess executor.
+        # Standard
+        import queue as queue_mod
+
+        self._nixl_queue: queue_mod.Queue = queue_mod.Queue()
+        # Started after transfer_channel init
+        self._nixl_thread: threading.Thread | None = None
+
         # Direct registration mode: when True, vLLM's KV cache is registered
         # directly with NIXL instead of using an intermediate pd_buffer.
         self.use_direct_registration = getattr(config, "pd_direct_registration", False)
@@ -247,6 +259,15 @@ class PDBackend(AllocatorBackendInterface):
             device=self.corrected_device,
         )
         self._nixl_backends = config.nixl_backends or ["UCX"]
+
+        # Start the NIXL worker thread now that transfer_channel is ready
+        self._nixl_thread = threading.Thread(
+            target=self._nixl_worker_loop,
+            name=f"nixl-worker-tp{metadata.worker_id}",
+            daemon=True,
+        )
+        self._nixl_thread.start()
+        self.running_threads.append(self._nixl_thread)
 
         # Shared state for sender and "both" roles
         self.initialized_peers: set[str] = set()
@@ -543,6 +564,10 @@ class PDBackend(AllocatorBackendInterface):
         """
         Submit batched put tasks to transfer KV caches to peer.
 
+        The NIXL transfer is offloaded to a background thread to avoid blocking
+        the vLLM worker thread (which would cause RPC timeouts in vLLM v0.19.0's
+        multiprocess executor).
+
         :param on_complete_callback: Optional callback invoked once per key
             after the transfer completes. Callback exceptions are caught and logged.
         """
@@ -581,44 +606,104 @@ class PDBackend(AllocatorBackendInterface):
                 mem_objs_to_send.append(mem_obj)
 
         if mem_objs_to_send:
-            # TODO(Jiayi): make this decoupled with transfer channel
             # Construct transfer spec
             channel_transfer_spec = {
                 "receiver_id": receiver_id,
                 "remote_indexes": remote_indexes,
             }
 
-            # TODO(Jiayi): Consider making this real async
-            # Perform the actual transfer
-            self.transfer_channel.batched_write(
-                objects=mem_objs_to_send,
-                transfer_spec=channel_transfer_spec,
+            # Submit to the dedicated NIXL worker thread via queue.
+            # The worker thread handles the blocking batched_write() call.
+            self._nixl_queue.put(
+                (
+                    "write",
+                    mem_objs_to_send,
+                    channel_transfer_spec,
+                    keys,
+                    on_complete_callback,
+                    transfer_spec,
+                )
             )
-
-            # TODO(Jiayi): consider moving this to the transfer channel
-            # since we might want the transfer to be async.
-            for mem_obj in mem_objs_to_send:
-                mem_obj.ref_count_down()
         else:
             logger.debug(
                 "All memory objects have been already sent to the remote peer."
                 " Skipping transfer."
             )
+            # Route notification through worker thread to avoid ZMQ
+            # thread-safety issues (all socket access on one thread).
+            if transfer_spec.is_last_prefill or on_complete_callback is not None:
+                self._nixl_queue.put(
+                    (
+                        "notify_only",
+                        keys,
+                        on_complete_callback,
+                        transfer_spec,
+                    )
+                )
 
-        if transfer_spec.is_last_prefill:
-            # Notify the proxy that the transfer is done
-            if self.proxy_side_channel is not None:
-                notif_msg = ProxyNotif(req_id=transfer_spec.req_id)
-                notif_msg_bytes = msgspec.msgpack.encode(notif_msg)
-                self.proxy_side_channel.send(notif_msg_bytes)
+    def _nixl_worker_loop(self) -> None:
+        """Dedicated NIXL worker thread. Processes transfer requests from queue.
 
-        # Call completion callback for all keys after transfer completes
-        if on_complete_callback is not None:
-            for key in keys:
+        All NIXL GPU operations (batched_write, batched_read) run on this
+        single thread to avoid CUDA context contention with the vLLM worker.
+        """
+        # Standard
+        import queue as queue_mod
+
+        while self.running:
+            try:
+                item = self._nixl_queue.get(timeout=1.0)
+            except queue_mod.Empty:
+                continue
+
+            if item is None:
+                break  # Shutdown signal
+
+            op_type = item[0]
+            if op_type == "write":
+                _, mem_objs, channel_spec, keys, callback, transfer_spec = item
+                success = False
                 try:
-                    on_complete_callback(key)
+                    self.transfer_channel.batched_write(
+                        objects=mem_objs,
+                        transfer_spec=channel_spec,
+                    )
+                    success = True
                 except Exception as e:
-                    logger.warning(f"on_complete_callback failed for key {key}: {e}")
+                    logger.error(f"NIXL write failed in worker thread: {e}")
+                finally:
+                    for mem_obj in mem_objs:
+                        mem_obj.ref_count_down()
+
+                if success and transfer_spec.is_last_prefill:
+                    if self.proxy_side_channel is not None:
+                        notif_msg = ProxyNotif(req_id=transfer_spec.req_id)
+                        notif_msg_bytes = msgspec.msgpack.encode(notif_msg)
+                        self.proxy_side_channel.send(notif_msg_bytes)
+
+                if success and callback is not None:
+                    for key in keys:
+                        try:
+                            callback(key)
+                        except Exception as e:
+                            logger.warning(
+                                f"on_complete_callback failed for key {key}: {e}"
+                            )
+            elif op_type == "notify_only":
+                _, keys, callback, transfer_spec = item
+                if transfer_spec.is_last_prefill:
+                    if self.proxy_side_channel is not None:
+                        notif_msg = ProxyNotif(req_id=transfer_spec.req_id)
+                        notif_msg_bytes = msgspec.msgpack.encode(notif_msg)
+                        self.proxy_side_channel.send(notif_msg_bytes)
+                if callback is not None:
+                    for key in keys:
+                        try:
+                            callback(key)
+                        except Exception as e:
+                            logger.warning(
+                                f"on_complete_callback failed for key {key}: {e}"
+                            )
 
     ############################################################
     # Prefiller functions end
@@ -657,12 +742,21 @@ class PDBackend(AllocatorBackendInterface):
         Query the decoder for which keys are cached in its GPU memory.
 
         Returns a CacheQueryResponse with cached_keys and cached_indexes.
+        Uses a timeout to avoid blocking the vLLM worker indefinitely.
         """
         query_socket = self.cache_query_sockets[receiver_id]
         str_keys = [key.to_string() for key in keys]
         query = CacheQueryRequest(keys=str_keys)
         query_socket.send(msgspec.msgpack.encode(query))
-        resp_bytes = query_socket.recv()
+        # Use poll with timeout to avoid blocking indefinitely
+        if query_socket.poll(timeout=5000):  # 5 second timeout
+            resp_bytes = query_socket.recv()
+        else:
+            logger.warning(
+                "Cache query timed out after 5s for receiver %s",
+                receiver_id,
+            )
+            return CacheQueryResponse(cached_keys=[], cached_indexes=[])
         resp = msgspec.msgpack.decode(resp_bytes, type=PDMsg)
         assert isinstance(resp, CacheQueryResponse)
         return resp
@@ -930,12 +1024,8 @@ class PDBackend(AllocatorBackendInterface):
                 logger.error("Failed to process cache query: %s", str(e))
                 # Send empty response to unblock the REP socket
                 try:
-                    empty_resp = CacheQueryResponse(
-                        cached_keys=[], cached_indexes=[]
-                    )
-                    self.query_side_channel.send(
-                        msgspec.msgpack.encode(empty_resp)
-                    )
+                    empty_resp = CacheQueryResponse(cached_keys=[], cached_indexes=[])
+                    self.query_side_channel.send(msgspec.msgpack.encode(empty_resp))
                 except Exception:
                     pass  # Socket may be broken, nothing we can do
 
@@ -975,8 +1065,10 @@ class PDBackend(AllocatorBackendInterface):
         Close the storage backend.
         """
         self.running = False
+        # Signal the NIXL worker thread to exit
+        self._nixl_queue.put(None)
         for thread in self.running_threads:
-            thread.join()
+            thread.join(timeout=5.0)
         self.transfer_channel.close()
         self.zmq_context.term()
 
