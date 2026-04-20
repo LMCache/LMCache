@@ -5,9 +5,6 @@ from typing import Any
 import importlib
 import sys
 
-# Third Party
-import torch
-
 # First Party
 from lmcache.logging import init_logger
 
@@ -21,6 +18,9 @@ def _get_backend() -> Any:
     """
     Try backends in order, first successful import wins.
     """
+    # Third Party
+    import torch
+
     backend_candidates = [
         (
             "lmcache.c_ops",
@@ -70,6 +70,8 @@ def _get_backend() -> Any:
 # --------------------------
 # Backend instance
 # --------------------------
-_ops = _get_backend()
-
-sys.modules["lmcache.c_ops"] = _ops
+try:
+    _ops = _get_backend()
+    sys.modules["lmcache.c_ops"] = _ops
+except (ImportError, ModuleNotFoundError):
+    pass  # torch not installed; CLI-only usage does not need CUDA ops
