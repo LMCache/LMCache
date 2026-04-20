@@ -1422,3 +1422,130 @@ def get_gpu_pci_bus_id(device_id: int = 0) -> str | None:
         pass
 
     return None
+
+
+# ------------------------------------------------------------------
+# GPU kernel stubs (no-op on CPU-only platforms)
+# ------------------------------------------------------------------
+
+
+class PageBufferShapeDesc:
+    """No-op stand-in for the CUDA PageBufferShapeDesc."""
+
+    kv_size: int = 2
+    nl: int = 0
+    nb: int = 0
+    bs: int = 0
+    nh: int = 0
+    hs: int = 0
+    element_size: int = 2
+    dtype: torch.dtype | None = None
+
+
+def multi_layer_block_kv_transfer(
+    paged_buffer_ptrs_tensor: torch.Tensor,
+    lmcache_objects_ptrs: list[int],
+    block_ids: torch.Tensor,
+    device: torch.device,
+    direction: TransferDirection,
+    shape_desc: "PageBufferShapeDesc",
+    lmcache_chunk_size: int,
+    gpu_kv_format: "GPUKVFormat",  # noqa: ARG001
+    skip_prefix_n_blocks: int = 0,
+) -> None:
+    """Pure-Python replacement for the CUDA block KV transfer kernel.
+
+    Transfers data between paged KV cache tensors and
+    contiguous LMCache memory objects.  Supports both CPU
+    and CUDA device pointers.  Only the
+    ``NL_X_TWO_NB_BS_NH_HS`` layout is supported (the
+    default for ``CpuCacheContext``).
+
+    LMCache memory layout (contiguous, "2LTD"):
+        ``[2, NL, chunk_size, NH * HS]``  (in element units)
+    Paged buffer layout per layer (NL_X_TWO_NB_BS_NH_HS):
+        ``[2, NB, BS, NH, HS]``
+    """
+    num_objects = len(lmcache_objects_ptrs)
+    total_blocks = block_ids.shape[0]
+    blocks_per_obj = total_blocks // num_objects
+    nl = shape_desc.nl
+    bs = shape_desc.bs
+    nh = shape_desc.nh
+    hs = shape_desc.hs
+    nb = shape_desc.nb
+    elem_size = shape_desc.element_size
+    dtype = getattr(shape_desc, "dtype", None)
+    if dtype is None:
+        # Fallback: infer from element_size (ambiguous
+        # for 2-byte types; prefer setting dtype attr).
+        _ELEM_SIZE_MAP = {
+            1: torch.uint8,
+            4: torch.float32,
+            8: torch.float64,
+        }
+        if elem_size == 2:
+            raise ValueError(
+                "element_size=2 is ambiguous "
+                "(float16 vs bfloat16). "
+                "Set shape_desc.dtype explicitly."
+            )
+        if elem_size not in _ELEM_SIZE_MAP:
+            raise ValueError("Unsupported element_size: %d" % elem_size)
+        dtype = _ELEM_SIZE_MAP[elem_size]
+
+    # Reconstruct per-layer paged tensors from raw pointers
+    layer_ptrs = paged_buffer_ptrs_tensor.tolist()
+    paged_tensors: list[torch.Tensor] = []
+    paged_shape = (2, nb, bs, nh, hs)
+    for ptr in layer_ptrs:
+        t = _tensor_from_ptr(int(ptr), paged_shape, dtype, device)
+        paged_tensors.append(t)
+
+    block_ids_list = block_ids.tolist()
+    is_d2h = direction == TransferDirection.D2H
+
+    for obj_idx in range(num_objects):
+        obj_ptr = lmcache_objects_ptrs[obj_idx]
+        obj_shape = (2, nl, lmcache_chunk_size, nh * hs)
+        obj_tensor = _tensor_from_ptr(obj_ptr, obj_shape, dtype, device)
+
+        blk_start = obj_idx * blocks_per_obj
+        for local_blk in range(blocks_per_obj):
+            flat_blk = blk_start + local_blk
+            if flat_blk < skip_prefix_n_blocks:
+                continue
+            engine_blk = block_ids_list[flat_blk]
+            token_off = local_blk * bs
+
+            for layer_idx in range(nl):
+                paged = paged_tensors[layer_idx]
+                for kv in range(2):
+                    # paged: [2, NB, BS, NH, HS]
+                    src_p = paged[kv, engine_blk, :, :, :]
+                    # obj: [2, NL, chunk_size, NH*HS]
+                    t_st = token_off
+                    t_ed = token_off + bs
+                    if is_d2h:
+                        obj_tensor[kv, layer_idx, t_st:t_ed, :] = src_p.reshape(
+                            bs, nh * hs
+                        )
+                    else:
+                        paged[kv, engine_blk, :, :, :] = obj_tensor[
+                            kv, layer_idx, t_st:t_ed, :
+                        ].reshape(bs, nh, hs)
+
+
+def record_event_on_stream(
+    cuda_stream_ptr: int,  # noqa: ARG001
+    event_type_name: str,  # noqa: ARG001
+    session_id: str,  # noqa: ARG001
+    str_metadata: dict,  # noqa: ARG001
+    int_metadata: dict,  # noqa: ARG001
+) -> None:
+    """No-op replacement for CUDA stream event recording."""
+
+
+def drain_recorded_events() -> list:
+    """No-op replacement: no native events to drain on CPU."""
+    return []
