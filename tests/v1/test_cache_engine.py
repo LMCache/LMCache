@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
+from collections import OrderedDict
 from copy import deepcopy
+from unittest.mock import MagicMock
 import os
 import random
 import shlex
@@ -14,10 +16,11 @@ import torch
 
 # First Party
 from lmcache.utils import (
+    CacheEngineKey,
     mock_up_broadcast_fn,
     mock_up_broadcast_object_fn,
 )
-from lmcache.v1.cache_engine import LMCacheEngineBuilder
+from lmcache.v1.cache_engine import LMCacheEngine, LMCacheEngineBuilder
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.event_manager import EventStatus, EventType
 
@@ -1505,3 +1508,246 @@ def test_multi_device_backends(save_unfull_chunk, autorelease_v1):
         )
 
         LMCacheEngineBuilder.destroy("engine")
+
+
+def _make_key(chunk_hash: int) -> CacheEngineKey:
+    """Create a CacheEngineKey for testing."""
+    return CacheEngineKey("test", 1, 0, chunk_hash, torch.bfloat16)
+
+
+def _make_mock_memory_obj(size: int = 1024) -> MagicMock:
+    """Create a mock MemoryObj that tracks ref_count_down calls."""
+    mock = MagicMock()
+    mock.get_size.return_value = size
+    return mock
+
+
+def _make_mock_engine(
+    process_tokens_results: list,
+    block_mapping: dict,
+    batched_get_side_effect: list,
+) -> MagicMock:
+    """Create a mock engine with the attributes needed by
+    _process_tokens_internal.
+
+    Args:
+        process_tokens_results: list of (start, end, key) tuples that
+            token_database.process_tokens will yield.
+        block_mapping: dict returned by storage_manager.get_block_mapping.
+        batched_get_side_effect: list of return values for successive
+            storage_manager.batched_get calls (one per location).
+
+    Returns:
+        A MagicMock configured as a minimal LMCacheEngine.
+    """
+    engine = MagicMock()
+    engine.token_database.process_tokens.return_value = process_tokens_results
+    engine.storage_manager.get_block_mapping.return_value = block_mapping
+    engine.storage_manager.batched_get.side_effect = batched_get_side_effect
+    engine.lookup_pins = {}
+    return engine
+
+
+def test_process_tokens_single_location_boundary_failure():
+    """The block whose end equals last_failed_block_start covers
+    [start, last_failed_block_start) — entirely before the gap — and
+    must be kept."""
+    k0, k1 = _make_key(0), _make_key(1)
+    mem0 = _make_mock_memory_obj()
+
+    engine = _make_mock_engine(
+        process_tokens_results=[(0, 10, k0), (10, 20, k1)],
+        block_mapping=OrderedDict(
+            [
+                ("LocationA", [(k0, 0, 10), (k1, 10, 20)]),
+            ]
+        ),
+        batched_get_side_effect=[[mem0, None]],
+    )
+
+    ret_mask = torch.zeros(20, dtype=torch.bool)
+    chunks, tot_kv_size = LMCacheEngine._process_tokens_internal(
+        engine, torch.zeros(20, dtype=torch.long), None, ret_mask
+    )
+
+    assert len(chunks) == 1
+    assert chunks[0][0] == k0
+    assert chunks[0][1] is mem0
+    assert tot_kv_size == 1024
+    assert ret_mask[:10].all()
+    assert not ret_mask[10:].any()
+    mem0.ref_count_down.assert_not_called()
+
+
+def test_process_tokens_early_failure_truncates_later_location():
+    """When an early location fails, blocks successfully retrieved from
+    a later location (covering higher positions) must be discarded and
+    freed because they are past the gap."""
+    k0, k1 = _make_key(0), _make_key(1)
+    k2, k3 = _make_key(2), _make_key(3)
+    mem0 = _make_mock_memory_obj()
+    mem2 = _make_mock_memory_obj()
+    mem3 = _make_mock_memory_obj()
+
+    engine = _make_mock_engine(
+        process_tokens_results=[
+            (0, 10, k0),
+            (10, 20, k1),
+            (20, 30, k2),
+            (30, 40, k3),
+        ],
+        block_mapping=OrderedDict(
+            [
+                ("LocationA", [(k0, 0, 10), (k1, 10, 20)]),
+                ("LocationB", [(k2, 20, 30), (k3, 30, 40)]),
+            ]
+        ),
+        batched_get_side_effect=[
+            [mem0, None],
+            [mem2, mem3],
+        ],
+    )
+
+    ret_mask = torch.zeros(40, dtype=torch.bool)
+    chunks, tot_kv_size = LMCacheEngine._process_tokens_internal(
+        engine, torch.zeros(40, dtype=torch.long), None, ret_mask
+    )
+
+    assert len(chunks) == 1
+    assert chunks[0][0] == k0
+    assert tot_kv_size == 1024
+    assert ret_mask[:10].all()
+    assert not ret_mask[10:].any()
+    mem0.ref_count_down.assert_not_called()
+    mem2.ref_count_down.assert_called_once()
+    mem3.ref_count_down.assert_called_once()
+
+
+def test_process_tokens_multi_location_both_fail_takes_min():
+    """When failures occur in multiple locations, the earliest failure
+    start (MIN) should be used so that everything after the first gap
+    is discarded."""
+    k0, k1 = _make_key(0), _make_key(1)
+    k2, k3 = _make_key(2), _make_key(3)
+    mem0 = _make_mock_memory_obj()
+    mem2 = _make_mock_memory_obj()
+
+    engine = _make_mock_engine(
+        process_tokens_results=[
+            (0, 10, k0),
+            (10, 20, k1),
+            (20, 30, k2),
+            (30, 40, k3),
+        ],
+        block_mapping=OrderedDict(
+            [
+                ("LocationA", [(k0, 0, 10), (k1, 10, 20)]),
+                ("LocationB", [(k2, 20, 30), (k3, 30, 40)]),
+            ]
+        ),
+        batched_get_side_effect=[
+            [mem0, None],
+            [mem2, None],
+        ],
+    )
+
+    ret_mask = torch.zeros(40, dtype=torch.bool)
+    chunks, tot_kv_size = LMCacheEngine._process_tokens_internal(
+        engine, torch.zeros(40, dtype=torch.long), None, ret_mask
+    )
+
+    assert len(chunks) == 1
+    assert chunks[0][0] == k0
+    assert tot_kv_size == 1024
+    assert ret_mask[:10].all()
+    assert not ret_mask[10:].any()
+    mem0.ref_count_down.assert_not_called()
+    mem2.ref_count_down.assert_called_once()
+
+
+def test_process_tokens_no_failure():
+    """When all blocks are retrieved successfully, every chunk should
+    be returned and no ref_count_down should be called."""
+    k0, k1 = _make_key(0), _make_key(1)
+    mem0 = _make_mock_memory_obj()
+    mem1 = _make_mock_memory_obj()
+
+    engine = _make_mock_engine(
+        process_tokens_results=[(0, 10, k0), (10, 20, k1)],
+        block_mapping=OrderedDict(
+            [
+                ("LocationA", [(k0, 0, 10), (k1, 10, 20)]),
+            ]
+        ),
+        batched_get_side_effect=[[mem0, mem1]],
+    )
+
+    ret_mask = torch.zeros(20, dtype=torch.bool)
+    chunks, tot_kv_size = LMCacheEngine._process_tokens_internal(
+        engine, torch.zeros(20, dtype=torch.long), None, ret_mask
+    )
+
+    assert len(chunks) == 2
+    assert tot_kv_size == 2048
+    assert ret_mask[:20].all()
+    mem0.ref_count_down.assert_not_called()
+    mem1.ref_count_down.assert_not_called()
+
+
+def test_process_tokens_unused_keys_no_double_free():
+    """A key returned non-None by batched_get but coming after a None
+    (unused) should be freed exactly once in the per-location cleanup
+    and never again in post-processing."""
+    k0, k1, k2 = _make_key(0), _make_key(1), _make_key(2)
+    mem0 = _make_mock_memory_obj()
+    mem2 = _make_mock_memory_obj()
+
+    engine = _make_mock_engine(
+        process_tokens_results=[(0, 10, k0), (10, 20, k1), (20, 30, k2)],
+        block_mapping=OrderedDict(
+            [
+                ("LocationA", [(k0, 0, 10), (k1, 10, 20), (k2, 20, 30)]),
+            ]
+        ),
+        batched_get_side_effect=[[mem0, None, mem2]],
+    )
+
+    ret_mask = torch.zeros(30, dtype=torch.bool)
+    chunks, tot_kv_size = LMCacheEngine._process_tokens_internal(
+        engine, torch.zeros(30, dtype=torch.long), None, ret_mask
+    )
+
+    assert len(chunks) == 1
+    assert chunks[0][0] == k0
+    assert tot_kv_size == 1024
+    assert ret_mask[:10].all()
+    assert not ret_mask[10:].any()
+    mem0.ref_count_down.assert_not_called()
+    mem2.ref_count_down.assert_called_once()
+
+
+def test_process_tokens_first_block_fails():
+    """When the very first block fails, no chunks should be returned
+    and ret_mask should be all False."""
+    k0, k1 = _make_key(0), _make_key(1)
+    mem1 = _make_mock_memory_obj()
+
+    engine = _make_mock_engine(
+        process_tokens_results=[(0, 10, k0), (10, 20, k1)],
+        block_mapping=OrderedDict(
+            [
+                ("LocationA", [(k0, 0, 10), (k1, 10, 20)]),
+            ]
+        ),
+        batched_get_side_effect=[[None, mem1]],
+    )
+
+    ret_mask = torch.zeros(20, dtype=torch.bool)
+    chunks, tot_kv_size = LMCacheEngine._process_tokens_internal(
+        engine, torch.zeros(20, dtype=torch.long), None, ret_mask
+    )
+
+    assert len(chunks) == 0
+    assert tot_kv_size == 0
+    assert not ret_mask.any()
+    mem1.ref_count_down.assert_called_once()

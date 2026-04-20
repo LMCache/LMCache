@@ -29,6 +29,21 @@ logger = init_logger(__name__)
 
 T = TypeVar("T", bound="L2AdapterConfigBase")
 
+
+@dataclass(frozen=True)
+class PersistConfig:
+    """
+    Configuration for persist on an L2 adapter.
+
+    When enabled, data files are kept on disk at shutdown instead of
+    deleted. Lookup always checks secondary storage (disk) on miss
+    regardless of this setting.
+    """
+
+    persist_enabled: bool = True
+    """ If True, data files are kept on disk at shutdown instead of deleted. """
+
+
 # -----------------------------------------------------------------------------
 # Registry: adapter type name -> config class
 # -----------------------------------------------------------------------------
@@ -52,13 +67,38 @@ def register_l2_adapter_type(
             via ``from_dict()``.
     """
     if name in _L2_ADAPTER_CONFIG_REGISTRY:
-        raise ValueError(f"L2 adapter type already registered: {name!r}")
+        raise ValueError("L2 adapter type already registered: %s" % repr(name))
     _L2_ADAPTER_CONFIG_REGISTRY[name] = config_cls
 
 
+def _ensure_config_loaded(name: str) -> None:
+    """Trigger lazy import for *name* if it is not
+    yet in the config registry.
+
+    Raises:
+        ImportError: If the adapter module cannot be
+            imported (missing dependency).
+    """
+    if name in _L2_ADAPTER_CONFIG_REGISTRY:
+        return
+    # Lazy import lives in factory to avoid circular deps
+    # First Party
+    from lmcache.v1.distributed.l2_adapters.factory import (  # noqa: PLC0415
+        ensure_adapter_loaded,
+    )
+
+    ensure_adapter_loaded(name)
+
+
 def get_registered_l2_adapter_types() -> list[str]:
-    """Return the list of registered adapter type names."""
-    return list(_L2_ADAPTER_CONFIG_REGISTRY)
+    """Return all known adapter type names (eager
+    and lazy)."""
+    # First Party
+    from lmcache.v1.distributed.l2_adapters.factory import (  # noqa: PLC0415
+        get_all_registered_names,
+    )
+
+    return get_all_registered_names()
 
 
 def get_type_name_for_config(
@@ -80,7 +120,7 @@ def get_type_name_for_config(
     for name, cls in _L2_ADAPTER_CONFIG_REGISTRY.items():
         if type(config) is cls:
             return name
-    raise ValueError(f"Unregistered L2 adapter config type: {type(config).__name__}")
+    raise ValueError("Unregistered L2 adapter config type: %s" % type(config).__name__)
 
 
 # -----------------------------------------------------------------------------
@@ -106,6 +146,10 @@ class L2AdapterConfigBase(ABC):
     #: Populated by ``_parse_eviction_config`` after ``from_dict``; ``None``
     #: means L2 eviction is disabled for this adapter.
     eviction_config: EvictionConfig | None = None
+
+    #: Populated by ``_parse_persist_config`` after ``from_dict``.
+    #: Defaults to ``PersistConfig()`` (persist enabled).
+    persist_config: PersistConfig = PersistConfig()
 
     @staticmethod
     def _parse_eviction_config(d: dict) -> EvictionConfig | None:
@@ -145,6 +189,24 @@ class L2AdapterConfigBase(ABC):
             trigger_watermark=float(eviction_dict.get("trigger_watermark", 0.8)),
             eviction_ratio=float(eviction_dict.get("eviction_ratio", 0.2)),
         )
+
+    @staticmethod
+    def _parse_persist_config(d: dict) -> PersistConfig:
+        """
+        Parse optional ``"persist_enabled"`` key from an adapter JSON spec.
+
+        Defaults to ``True``.
+
+        Expected format::
+
+            {
+                "type": "nixl_store_dynamic",
+                ...
+                "persist_enabled": true
+            }
+        """
+        persist_enabled = bool(d.get("persist_enabled", True))
+        return PersistConfig(persist_enabled=persist_enabled)
 
     @classmethod
     @abstractmethod
@@ -285,7 +347,11 @@ def parse_args_to_l2_adapters_config(args: argparse.Namespace) -> L2AdaptersConf
 
         type_name = d.get("type")
         if type_name is None:
-            raise ValueError(f"--l2-adapter #{i + 1}: missing 'type' field")
+            raise ValueError("--l2-adapter #%d: missing 'type' field" % (i + 1))
+
+        # Trigger lazy import for this adapter type
+        _ensure_config_loaded(type_name)
+
         if type_name not in _L2_ADAPTER_CONFIG_REGISTRY:
             known = ", ".join(sorted(_L2_ADAPTER_CONFIG_REGISTRY)) or "(none)"
             raise ValueError(
@@ -297,6 +363,7 @@ def parse_args_to_l2_adapters_config(args: argparse.Namespace) -> L2AdaptersConf
         try:
             adapter_cfg = config_cls.from_dict(d)
             adapter_cfg.eviction_config = L2AdapterConfigBase._parse_eviction_config(d)
+            adapter_cfg.persist_config = L2AdapterConfigBase._parse_persist_config(d)
             adapter_configs.append(adapter_cfg)
         except (TypeError, ValueError) as e:
             logger.error(

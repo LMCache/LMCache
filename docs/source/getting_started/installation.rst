@@ -36,10 +36,30 @@ If you require a different version of torch for the LMCache instance that you bu
 
    You're all set! You can now start using LMCache. For hands-on guides and more usage examples, see the :ref:`quickstart_examples` section.
 
+Install LMCache CLI Only (no GPU required)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+If you only need the ``lmcache`` CLI tool (e.g., to query, ping, or benchmark a
+remote LMCache server) and do not need to run the server itself, install the
+lightweight ``lmcache-cli`` package instead.  It has no CUDA dependency and
+works on any OS.
+
+.. code-block:: bash
+
+    pip install lmcache-cli
+
+
+.. note::
+
+   ``lmcache-cli`` and ``lmcache`` ship the same ``lmcache`` CLI command.
+   Do not install both in the same environment.
+
 Install Latest LMCache from TestPyPI
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-TestPyPI wheels are continually built from the latest LMCache source code (not officially stable release). 
+TestPyPI wheels are continually built from the latest LMCache source code (not officially stable release).
+
+Full package:
 
 .. code-block:: bash
 
@@ -49,6 +69,12 @@ TestPyPI wheels are continually built from the latest LMCache source code (not o
     # If you require a different version of torch for the LMCache instance that you built with (symbol undefined error), please
     # follow the install from source instructions below. 
     uv pip install --index-url https://pypi.org/simple --extra-index-url https://test.pypi.org/simple lmcache==0.3.4.dev61
+
+CLI-only package:
+
+.. code-block:: bash
+
+    pip install --index-url https://pypi.org/simple --extra-index-url https://test.pypi.org/simple lmcache-cli==0.3.4.dev61
 
 See the latest pre-release of LMCache: `latest LMCache pre-releases <https://test.pypi.org/project/lmcache/#history>`__ and replace `0.3.4.dev61` with the latest pre-release version.
 
@@ -177,10 +203,13 @@ You can get the nightly build of latest code of LMcache and vLLM as follows:
 
 
 LMCache on ROCm
-------------------
+---------------
+
+With vLLM docker base image
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Get started through using vLLM docker image as base image
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 The `AMD Infinity hub <https://hub.docker.com/r/rocm/vllm-dev>`__ for vLLM offers a prebuilt, optimized docker image designed for validating inference performance on the AMD Instinct™ MI300X accelerator.
 The image is based on the latest vLLM v1. Please check `LLM inference performance validation on AMD Instinct MI300X <https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference/benchmark-docker/vllm.html?model=pyt_vllm_llama-3.1-8b>`__ for instructions on how to use this prebuilt docker image.
@@ -209,7 +238,7 @@ As of the date of writing, the steps are validated on the following environment:
     bash
 
 Install Latest LMCache from Source for ROCm
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 To install from source, clone the repository and install in editable mode.
 
@@ -230,3 +259,36 @@ Example on MI300X (gfx942):
     CXX=hipcc \
     BUILD_WITH_HIP=1 \
     python3 -m pip install --no-build-isolation -e .
+
+
+On a bare ROCm host 
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Install Latest LMCache from Source for ROCm
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+To install from source on a bare ROCm host (no ``rocm/vllm-dev`` base image),
+torch must be installed from the ROCm wheel index before building LMCache.
+This mirrors the CUDA from-source flow above, with the ROCm wheel index and
+HIP build flags in place of their CUDA equivalents.
+
+.. code-block:: bash
+
+    git clone https://github.com/LMCache/LMCache.git
+    cd LMCache
+
+    uv venv --python 3.12
+    source .venv/bin/activate
+
+    # Need to install these packages manually to avoid build isolation
+    uv pip install -r requirements/build.txt
+
+    # Install torch from the ROCm wheel index
+    uv pip install torch torchvision --index-url https://download.pytorch.org/whl/rocm7.0
+
+    # Build LMCache. BUILD_WITH_HIP=1 makes setup.py pick cupy-rocm-7-0 automatically.
+    PYTORCH_ROCM_ARCH="gfx942" \
+    TORCH_DONT_CHECK_COMPILER_ABI=1 \
+    CXX=hipcc \
+    BUILD_WITH_HIP=1 \
+    uv pip install -e . --no-build-isolation

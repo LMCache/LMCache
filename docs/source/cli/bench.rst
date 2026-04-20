@@ -114,8 +114,8 @@ General Options
        Set ``OPENAI_API_KEY`` env var if authentication is needed.
    * - ``--workload TYPE``
      - Yes
-     - Workload type: ``long-doc-qa``, ``multi-round-chat``, or
-       ``random-prefill``.
+     - Workload type: ``long-doc-qa``, ``multi-round-chat``,
+       ``long-doc-permutator``, or ``random-prefill``.
    * - ``--tokens-per-gb-kvcache N``
      - \*
      - Tokens per GB of KV cache. Required unless ``--lmcache-url`` is set.
@@ -257,6 +257,57 @@ session history so each subsequent query includes prior context.
        --mrc-duration 120
 
 
+long-doc-permutator
+~~~~~~~~~~~~~~~~~~~~
+
+Stress-tests blended KV cache reuse by sending permutations of a set of context
+documents. Each request concatenates all context documents in a different order:
+
+.. code-block:: text
+
+   [System Prompt] + [Doc_i1] + [Doc_i2] + ... + [Doc_iN]
+
+A single dummy warmup request is sent before the benchmark phase. Requests are
+dispatched with semaphore-controlled concurrency.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 35 10 55
+
+   * - Flag
+     - Default
+     - Description
+   * - ``--ldp-num-contexts``
+     - 5
+     - Number of unique context documents.
+   * - ``--ldp-context-length``
+     - 5000
+     - Token length of each context document.
+   * - ``--ldp-system-prompt-length``
+     - 1000
+     - Token length of the shared system prompt. Use ``0`` for no system prompt.
+   * - ``--ldp-num-permutations``
+     - 10
+     - Number of distinct permutations to send. Capped at N! where
+       N = ``--ldp-num-contexts``.
+   * - ``--ldp-num-inflight-requests``
+     - 1
+     - Maximum concurrent in-flight requests.
+
+**Example:**
+
+.. code-block:: bash
+
+   lmcache bench engine \
+       --engine-url http://localhost:8000 \
+       --workload long-doc-permutator \
+       --lmcache-url http://localhost:8080 \
+       --ldp-num-contexts 4 \
+       --ldp-context-length 8000 \
+       --ldp-num-permutations 24 \
+       --ldp-num-inflight-requests 2
+
+
 random-prefill
 ~~~~~~~~~~~~~~~
 
@@ -324,9 +375,10 @@ text and number prompts accept typed input with defaults shown in brackets.
      The type of benchmark workload to run.
      Use up/down to navigate, Enter to select.
 
-     * long-doc-qa       Repeated Q&A over long documents
-       multi-round-chat   Multi-turn chat with stateful sessions
-       random-prefill     Prefill-only requests fired simultaneously
+     * long-doc-qa           Repeated Q&A over long documents
+       multi-round-chat       Multi-turn chat with stateful sessions
+       long-doc-permutator    Permutations of context documents
+       random-prefill         Prefill-only requests fired simultaneously
 
    LMCache Server
      Do you have a running LMCache server?

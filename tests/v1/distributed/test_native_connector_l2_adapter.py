@@ -219,6 +219,9 @@ class TestObjectKeySerialization:
         assert _object_key_to_string(k1) != _object_key_to_string(k2)
 
     def test_serialization_format(self):
+        """Unsalted keys use the 3-field shape — identical to the
+        pre-cache_salt wire format, so existing remote storage
+        stays valid."""
         key = ObjectKey(
             chunk_hash=b"\x00\x01\x02\x03",
             model_name="llama",
@@ -226,6 +229,168 @@ class TestObjectKeySerialization:
         )
         s = _object_key_to_string(key)
         assert s == "llama@000000ff@00010203"
+
+    def test_salted_serialization_format(self):
+        """Salted keys append ``@<cache_salt>`` as a 4th field."""
+        key = ObjectKey(
+            chunk_hash=b"\x00\x01\x02\x03",
+            model_name="llama",
+            kv_rank=255,
+            cache_salt="alice",
+        )
+        s = _object_key_to_string(key)
+        assert s == "llama@000000ff@00010203@alice"
+
+    def test_different_salts_produce_different_strings(self):
+        base = {
+            "chunk_hash": b"\x00\x01\x02\x03",
+            "model_name": "llama",
+            "kv_rank": 0,
+        }
+        k_empty = ObjectKey(**base)
+        k_alice = ObjectKey(**base, cache_salt="alice")
+        k_bob = ObjectKey(**base, cache_salt="bob")
+        s_empty = _object_key_to_string(k_empty)
+        s_alice = _object_key_to_string(k_alice)
+        s_bob = _object_key_to_string(k_bob)
+        assert s_empty != s_alice
+        assert s_alice != s_bob
+        # Empty salt has no trailing "@salt", salted keys do.
+        assert s_empty.count("@") == 2  # 3 fields
+        assert s_alice.endswith("@alice")
+        assert s_bob.endswith("@bob")
+
+
+class TestObjectKeyModelNameValidation:
+    """model_name must not contain ``@`` — the L2 adapters split keys
+    and filenames on ``@`` and rely on this invariant."""
+
+    def test_reject_at_in_model_name(self):
+        with pytest.raises(ValueError, match="model_name"):
+            ObjectKey(
+                chunk_hash=b"\x00",
+                model_name="ns@model",
+                kv_rank=0,
+            )
+
+    def test_slash_in_model_name_is_accepted(self):
+        # '/' is sanitized to '-SEP-' by the FS adapter; the invariant
+        # is only about '@'.
+        key = ObjectKey(
+            chunk_hash=b"\x00",
+            model_name="meta-llama/Llama-3",
+            kv_rank=0,
+        )
+        assert key.model_name == "meta-llama/Llama-3"
+
+
+class TestObjectKeyCacheSaltValidation:
+    """cache_salt must not contain ``@``, ``/``, ``\\``, or NUL, and must
+    be <= 128 chars. The invariant is enforced at construction time so
+    all downstream serializers (Python + C++) can rely on it."""
+
+    def test_reject_at_in_salt(self):
+        with pytest.raises(ValueError, match="cache_salt"):
+            ObjectKey(
+                chunk_hash=b"\x00",
+                model_name="m",
+                kv_rank=0,
+                cache_salt="alice@bob",
+            )
+
+    def test_reject_leading_at_in_salt(self):
+        with pytest.raises(ValueError, match="cache_salt"):
+            ObjectKey(
+                chunk_hash=b"\x00",
+                model_name="m",
+                kv_rank=0,
+                cache_salt="@user",
+            )
+
+    def test_reject_slash_in_salt(self):
+        with pytest.raises(ValueError, match="cache_salt"):
+            ObjectKey(
+                chunk_hash=b"\x00",
+                model_name="m",
+                kv_rank=0,
+                cache_salt="tenant/alice",
+            )
+
+    def test_reject_backslash_in_salt(self):
+        with pytest.raises(ValueError, match="cache_salt"):
+            ObjectKey(
+                chunk_hash=b"\x00",
+                model_name="m",
+                kv_rank=0,
+                cache_salt="tenant\\alice",
+            )
+
+    def test_reject_nul_in_salt(self):
+        with pytest.raises(ValueError, match="cache_salt"):
+            ObjectKey(
+                chunk_hash=b"\x00",
+                model_name="m",
+                kv_rank=0,
+                cache_salt="bad\x00salt",
+            )
+
+    def test_reject_too_long_salt(self):
+        with pytest.raises(ValueError, match="max length"):
+            ObjectKey(
+                chunk_hash=b"\x00",
+                model_name="m",
+                kv_rank=0,
+                cache_salt="x" * 129,
+            )
+
+    def test_max_length_salt_accepted(self):
+        key = ObjectKey(
+            chunk_hash=b"\x00",
+            model_name="m",
+            kv_rank=0,
+            cache_salt="x" * 128,
+        )
+        assert len(key.cache_salt) == 128
+
+    def test_empty_salt_is_accepted(self):
+        # Default (unsalted) path.
+        key = ObjectKey(chunk_hash=b"\x00", model_name="m", kv_rank=0)
+        assert key.cache_salt == ""
+
+    def test_non_salt_chars_are_accepted(self):
+        # Common identifier chars are fine.
+        key = ObjectKey(
+            chunk_hash=b"\x00",
+            model_name="m",
+            kv_rank=0,
+            cache_salt="user-abc_123.xyz:42",
+        )
+        assert key.cache_salt == "user-abc_123.xyz:42"
+
+
+class TestObjectKeyIsolation:
+    """cache_salt must participate in eq/hash so the L1/L2 caches treat
+    same-content/different-user entries as distinct."""
+
+    def test_different_salts_are_unequal(self):
+        base = {"chunk_hash": b"x", "model_name": "m", "kv_rank": 0}
+        a = ObjectKey(**base, cache_salt="alice")
+        b = ObjectKey(**base, cache_salt="bob")
+        assert a != b
+        assert hash(a) != hash(b)
+
+    def test_empty_salt_is_unequal_to_any_salted(self):
+        base = {"chunk_hash": b"x", "model_name": "m", "kv_rank": 0}
+        unsalted = ObjectKey(**base)
+        salted = ObjectKey(**base, cache_salt="alice")
+        assert unsalted != salted
+
+    def test_same_salt_are_equal(self):
+        base = {"chunk_hash": b"x", "model_name": "m", "kv_rank": 0}
+        a = ObjectKey(**base, cache_salt="alice")
+        b = ObjectKey(**base, cache_salt="alice")
+        assert a == b
+        assert hash(a) == hash(b)
 
 
 # =============================================================================

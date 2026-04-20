@@ -36,7 +36,10 @@ Basic cache settings that control the core functionality of LMCache.
      - Maximum CPU cache size in GB. Default: 5.0
    * - local_disk
      - LMCACHE_LOCAL_DISK
-     - Path to local disk cache. Format: "file:///path/to/cache".
+     - Path (or comma-separated paths) to local disk cache directories. Format: ``"file:///path/to/cache"`` or ``"/path/a,/path/b"`` for multi-device I/O. See ``local_disk_path_sharding`` for how paths are assigned to GPUs.
+   * - local_disk_path_sharding
+     - LMCACHE_LOCAL_DISK_PATH_SHARDING
+     - Strategy for selecting a path when multiple paths are provided. Currently only ``"by_gpu"`` is supported, which selects paths based on GPU device ID (default: "by_gpu").
    * - max_local_disk_size
      - LMCACHE_MAX_LOCAL_DISK_SIZE
      - Maximum disk cache size in GB. Default: 0.0
@@ -266,6 +269,9 @@ Settings for disaggregated prefill functionality. The latest/default PD is imple
    * - pd_proxy_port
      - LMCACHE_PD_PROXY_PORT
      - Port for proxy server. Required for senders to connect to inform the proxy when transfer to decoder has been completed
+   * - pd_skip_proxy_notification
+     - LMCACHE_PD_SKIP_PROXY_NOTIFICATION
+     - When true, the sender skips ZMQ proxy notification after KV transfer and does not require pd_proxy_host/pd_proxy_port. This option is intended for external orchestrators only (e.g., vLLM Production Stack router) that manage the prefill-decode request flow via HTTP and do not rely on ZMQ notifications. It must not be used with LMCache's built-in disaggregation proxy (``disagg_proxy_server.py``), which depends on ZMQ notifications to know when KV transfer is complete before forwarding the decode request. Values: true/false. Default: false
 
 P2P Backend Configurations
 --------------------------

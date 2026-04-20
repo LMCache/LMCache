@@ -7,17 +7,15 @@ cufile-python
 fastapi
 httpx
 msgspec
-# if nixl decides to support >=3.13 in the future, we can remove this constraint
-nixl; python_version < "3.13"
 # nixl uses numba which requires numpy<=2.2.6
 numpy<=2.2.6
 numba
 nvtx
-opentelemetry-api >= 1.20.0
+opentelemetry-api >= 1.20.0, <= 1.40.0
 opentelemetry-sdk >= 1.20.0
 opentelemetry-exporter-otlp >= 1.20.0
-opentelemetry-exporter-prometheus >= 0.50b0
-prometheus_client >= 0.18.0
+opentelemetry-exporter-prometheus >= 0.50b0, <= 0.61b0
+prometheus_client >= 0.18.0, <= 0.24.1
 psutil
 py-cpuinfo
 pyyaml
@@ -42,5 +40,3 @@ torch
 transformers >= 4.51.1
 uvicorn
 httptools
-# Right now we are using cuda 12.x to align with serving engines
-cupy-cuda12x
