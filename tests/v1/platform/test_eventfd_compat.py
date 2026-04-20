@@ -9,6 +9,7 @@ import pytest
 
 # First Party
 from lmcache.v1.platform.eventfd_compat import (
+    HAS_EVENTFD,
     _compat_eventfd,
     _compat_eventfd_read,
     _compat_eventfd_write,
@@ -166,6 +167,10 @@ class TestEventfdClose:
             os.fstat(r)
 
 
+@pytest.mark.skipif(
+    HAS_EVENTFD,
+    reason="os.close patch only installed on non-Linux platforms",
+)
 class TestOsClosePatched:
     """Tests for the os.close safety-net patch."""
 
