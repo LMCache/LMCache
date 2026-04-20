@@ -115,16 +115,11 @@ class TestRedisConnectorTTL:
         return conn
 
     @pytest.fixture
-    def loop(self):
-        loop = asyncio.new_event_loop()
-        yield loop
-        loop.close()
-
-    @pytest.fixture
     def lcb(self):
         return _mock_local_cpu_backend()
 
-    def _make_connector(self, mock_redis_conn, loop, lcb, remote_ttl):
+    def _make_connector(self, mock_redis_conn, lcb, remote_ttl):
+        loop = asyncio.get_running_loop()
         mock_pool = MagicMock()
         with patch(
             "lmcache.v1.storage_backend.connector.redis_connector.redis",
@@ -141,9 +136,9 @@ class TestRedisConnectorTTL:
             )
 
     @pytest.mark.asyncio
-    async def test_put_without_ttl(self, mock_redis_conn, loop, lcb):
+    async def test_put_without_ttl(self, mock_redis_conn, lcb):
         """When remote_ttl is None, set() should NOT pass ex= to Redis."""
-        connector = self._make_connector(mock_redis_conn, loop, lcb, None)
+        connector = self._make_connector(mock_redis_conn, lcb, None)
         await connector.put(_make_key(), _make_memory_obj())
 
         assert mock_redis_conn.set.call_count == 2
@@ -152,9 +147,9 @@ class TestRedisConnectorTTL:
             assert ex_val is None, f"Expected ex=None, got ex={ex_val}"
 
     @pytest.mark.asyncio
-    async def test_put_with_ttl_3600(self, mock_redis_conn, loop, lcb):
+    async def test_put_with_ttl_3600(self, mock_redis_conn, lcb):
         """When remote_ttl=3600, both SET calls should receive ex=3600."""
-        connector = self._make_connector(mock_redis_conn, loop, lcb, 3600)
+        connector = self._make_connector(mock_redis_conn, lcb, 3600)
         await connector.put(_make_key(), _make_memory_obj())
 
         assert mock_redis_conn.set.call_count == 2
@@ -162,18 +157,18 @@ class TestRedisConnectorTTL:
             assert c.kwargs.get("ex") == 3600, f"Expected ex=3600, got {c.kwargs}"
 
     @pytest.mark.asyncio
-    async def test_put_with_ttl_1800(self, mock_redis_conn, loop, lcb):
+    async def test_put_with_ttl_1800(self, mock_redis_conn, lcb):
         """When remote_ttl=1800, both SET calls should receive ex=1800."""
-        connector = self._make_connector(mock_redis_conn, loop, lcb, 1800)
+        connector = self._make_connector(mock_redis_conn, lcb, 1800)
         await connector.put(_make_key(), _make_memory_obj())
 
         for c in mock_redis_conn.set.call_args_list:
             assert c.kwargs.get("ex") == 1800
 
     @pytest.mark.asyncio
-    async def test_ttl_applies_to_both_kv_and_metadata_keys(self, mock_redis_conn, loop, lcb):
+    async def test_ttl_applies_to_both_kv_and_metadata_keys(self, mock_redis_conn, lcb):
         """Both kv_bytes and metadata keys must receive the same TTL."""
-        connector = self._make_connector(mock_redis_conn, loop, lcb, 600)
+        connector = self._make_connector(mock_redis_conn, lcb, 600)
         await connector.put(_make_key(), _make_memory_obj())
 
         calls = mock_redis_conn.set.call_args_list
@@ -204,18 +199,13 @@ class TestRedisClusterConnectorTTL:
         return cluster
 
     @pytest.fixture
-    def loop(self):
-        loop = asyncio.new_event_loop()
-        yield loop
-        loop.close()
-
-    @pytest.fixture
     def lcb(self):
         return _mock_local_cpu_backend()
 
     @pytest.mark.asyncio
-    async def test_cluster_put_with_ttl(self, mock_cluster, loop, lcb):
+    async def test_cluster_put_with_ttl(self, mock_cluster, lcb):
         """RedisClusterConnector should pass ex= to cluster.set()."""
+        loop = asyncio.get_running_loop()
         with patch(
             "lmcache.v1.storage_backend.connector.redis_connector.RedisCluster",
             return_value=mock_cluster,
@@ -236,8 +226,9 @@ class TestRedisClusterConnectorTTL:
             assert c.kwargs.get("ex") == 7200
 
     @pytest.mark.asyncio
-    async def test_cluster_put_without_ttl(self, mock_cluster, loop, lcb):
+    async def test_cluster_put_without_ttl(self, mock_cluster, lcb):
         """Without TTL, cluster.set() should not receive ex=."""
+        loop = asyncio.get_running_loop()
         with patch(
             "lmcache.v1.storage_backend.connector.redis_connector.RedisCluster",
             return_value=mock_cluster,
@@ -280,18 +271,13 @@ class TestRedisSentinelConnectorTTL:
         return slave
 
     @pytest.fixture
-    def loop(self):
-        loop = asyncio.new_event_loop()
-        yield loop
-        loop.close()
-
-    @pytest.fixture
     def lcb(self):
         return _mock_local_cpu_backend()
 
     @pytest.mark.asyncio
-    async def test_sentinel_put_with_ttl(self, mock_master, mock_slave, loop, lcb):
+    async def test_sentinel_put_with_ttl(self, mock_master, mock_slave, lcb):
         """RedisSentinelConnector should pass ex= to master.set()."""
+        loop = asyncio.get_running_loop()
         with patch(
             "lmcache.v1.storage_backend.connector.redis_connector.redis.Sentinel",
             return_value=MagicMock(
@@ -315,8 +301,9 @@ class TestRedisSentinelConnectorTTL:
             assert c.kwargs.get("ex") == 300
 
     @pytest.mark.asyncio
-    async def test_sentinel_put_without_ttl(self, mock_master, mock_slave, loop, lcb):
+    async def test_sentinel_put_without_ttl(self, mock_master, mock_slave, lcb):
         """Without TTL, master.set() should not receive ex=."""
+        loop = asyncio.get_running_loop()
         with patch(
             "lmcache.v1.storage_backend.connector.redis_connector.redis.Sentinel",
             return_value=MagicMock(
