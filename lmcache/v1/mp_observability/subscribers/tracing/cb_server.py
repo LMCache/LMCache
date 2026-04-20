@@ -144,6 +144,9 @@ class BlendTracingSubscriber(EventSubscriber):
         if not _HAS_OTEL:
             return
         sid = event.session_id
+        if self._registry.get_context(sid, "cb.request") is not None:
+            logger.warning("CB_REQUEST_START fired twice for session=%s; ignoring", sid)
+            return
         # Nest under the MP server's "request" span when running alongside it.
         mp_root_ctx = self._registry.get_context(sid, "request")
         root_span = _tracer.start_span(
@@ -210,9 +213,7 @@ class BlendTracingSubscriber(EventSubscriber):
         key = f"{sid}:{event.event_type.value}"
         self._pending[key] = (span, event.event_type)
 
-        logical = self._SPAN_DEFS.get(event.event_type)
-        if logical:
-            self._registry.open(sid, logical, span, trace.set_span_in_context(span))
+        self._registry.open(sid, span_name, span, trace.set_span_in_context(span))
 
     def _on_end(self, event: Event) -> None:
         """Close a pending child span and handle GPU-ops counter deferral.
@@ -242,9 +243,7 @@ class BlendTracingSubscriber(EventSubscriber):
                 span.set_attribute(k, str(v))
             span.end(end_time=int(event.timestamp * 1e9))
 
-        logical = self._SPAN_DEFS.get(start_type)
-        if logical:
-            self._registry.pop(sid, logical)
+        self._registry.pop(sid, self._SPAN_DEFS[start_type])
 
         if event.event_type in self._GPU_OP_END_EVENTS:
             if (count := self._pending_gpu_ops.get(sid, 0)) > 0:
