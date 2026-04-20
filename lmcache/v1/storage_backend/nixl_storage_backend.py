@@ -114,6 +114,9 @@ class NixlStorageConfig:
             backend, config.nixl_buffer_device
         ), "Invalid NIXL backend & device combination"
 
+        if backend in ("GDS", "GDS_MT", "POSIX", "HF3FS"):
+            assert path is not None, f"nixl_path must be provided for {backend} backend"
+
         return NixlStorageConfig(
             buffer_size=config.nixl_buffer_size,
             pool_size=pool_size,
@@ -173,7 +176,7 @@ class NixlFilePool(NixlDescPool):
         for i in reversed(range(size)):
             filename = f"obj_{i}_{uuid.uuid4().hex[0:4]}.bin"
             tmp_path = os.path.join(path, filename)
-            fd = os.open(tmp_path, flags)
+            fd = os.open(tmp_path, flags, 0o644)
             self.fds.append(fd)
 
     def close(self):
@@ -220,6 +223,15 @@ PresenceCache = Union[SetPresenceCache]
 class NixlDesc:
     device_id: int
     meta_info: str
+
+
+def _close_file_descs(descs: List[NixlDesc]) -> None:
+    """Best-effort close of the FDs in descs."""
+    for d in descs:
+        try:
+            os.close(d.device_id)
+        except OSError:
+            pass
 
 
 @dataclass
@@ -453,8 +465,19 @@ class NixlDynamicStorageAgent(NixlStorageAgent):
         state = self.nixl_agent.transfer(handle)
         return state
 
-    def release_storage_handler(self, reg_descs, xfer_handler, descs):
-        """Release storage handler resources"""
+    def release_storage_handler(
+        self,
+        reg_descs: nixlBind.nixlRegDList,
+        xfer_handler: NixlDlistHandle,
+        descs: List[NixlDesc],
+    ) -> None:
+        """
+        Release storage handler resources.
+
+        :param reg_descs: Memory descriptors to deregister.
+        :param xfer_handler: Ttransfer dlist handle to release.
+        :param descs: Descriptors used for this transfer.
+        """
         if self.mem_type == "FILE":
             for desc in descs:
                 os.close(desc.device_id)
@@ -1082,45 +1105,56 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
             mem_indices.append(obj.meta.address)
             storage_indices.append(idx)
 
-        if self.agent.mem_type == "OBJ":
-            for idx in range(len(keys)):
-                object_key = self._format_object_key(keys[idx])
-                descs.append(NixlDesc(device_id=idx, meta_info=object_key))
-        elif self.agent.mem_type == "FILE":
-            for idx in range(len(keys)):
-                file_name = self._format_object_key(keys[idx])
-                fd = os.open(
-                    os.path.join(self.path, file_name),
-                    os.O_RDONLY | self.direct_io_flag,
-                )
-                descs.append(NixlDesc(device_id=fd, meta_info=""))
-        else:
-            # Already validated in validate_nixl_backend
-            raise ValueError(f"unexpected mem_type: {self.agent.mem_type}")
-
-        # Create batched storage handler
-        storage_reg_descs, storage_xfer_handler = (
-            self.agent.create_batched_storage_handler(descs, page_size)
-        )
-        # Create transfer handle
-        handle = self.agent.get_storage_to_mem_handle(
-            mem_indices, storage_xfer_handler, storage_indices
-        )
-
-        # Try to read the object
+        storage_reg_descs = None
+        storage_xfer_handler = None
+        xfer_state = False
         try:
-            self.agent.post_blocking(handle)
-            xfer_state = True
-        except nixlBind.nixlBackendError as exc:
-            logger.warning(f"Batch Transfer failed: {exc}")
-            # Treat "not found", timeout or other transfer failures as recoverable
-            # Do not raise exception to avoid terminating the program
-            xfer_state = False
+            if self.agent.mem_type == "OBJ":
+                for idx in range(len(keys)):
+                    object_key = self._format_object_key(keys[idx])
+                    descs.append(NixlDesc(device_id=idx, meta_info=object_key))
+            elif self.agent.mem_type == "FILE":
+                for idx in range(len(keys)):
+                    file_name = self._format_object_key(keys[idx])
+                    fd = os.open(
+                        os.path.join(self.path, file_name),
+                        os.O_RDONLY | self.direct_io_flag,
+                    )
+                    descs.append(NixlDesc(device_id=fd, meta_info=""))
+            else:
+                # Already validated in validate_nixl_backend
+                raise ValueError(f"unexpected mem_type: {self.agent.mem_type}")
 
-        self.agent.release_handle(handle)
-        self.agent.release_storage_handler(
-            storage_reg_descs, storage_xfer_handler, descs
-        )
+            # Create batched storage handler
+            storage_reg_descs, storage_xfer_handler = (
+                self.agent.create_batched_storage_handler(descs, page_size)
+            )
+            # Create transfer handle
+            handle = self.agent.get_storage_to_mem_handle(
+                mem_indices, storage_xfer_handler, storage_indices
+            )
+
+            # Try to read the object
+            try:
+                self.agent.post_blocking(handle)
+                xfer_state = True
+            except nixlBind.nixlBackendError as exc:
+                logger.warning(f"Batch Transfer failed: {exc}")
+                # Treat transfer failures (not found, timeout, etc.) as a
+                # miss rather than raising and terminating the program.
+                xfer_state = False
+            finally:
+                self.agent.release_handle(handle)
+        except Exception:
+            # Failed before the storage handler took ownership of the FDs.
+            if self.agent.mem_type == "FILE" and storage_reg_descs is None:
+                _close_file_descs(descs)
+            raise
+        finally:
+            if storage_reg_descs is not None:
+                self.agent.release_storage_handler(
+                    storage_reg_descs, storage_xfer_handler, descs
+                )
 
         if xfer_state:
             for i in range(len(keys)):
@@ -1189,51 +1223,78 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
         page_size = self.memory_allocator.align_bytes
         descs = []
 
-        if self.agent.mem_type == "OBJ":
-            for idx in range(len(keys)):
-                object_key = self._format_object_key(keys[idx])
-                descs.append(NixlDesc(device_id=idx, meta_info=object_key))
-        elif self.agent.mem_type == "FILE":
-            for idx in range(len(keys)):
-                file_name = self._format_object_key(keys[idx])
-                fd = os.open(
-                    os.path.join(self.path, file_name),
-                    os.O_CREAT | os.O_RDWR | self.direct_io_flag,
-                )
-                descs.append(NixlDesc(device_id=fd, meta_info=""))
-        else:
-            # Already validated in validate_nixl_backend
-            raise ValueError(f"unexpected mem_type: {self.agent.mem_type}")
+        storage_reg_descs = None
+        storage_xfer_handler = None
+        try:
+            if self.agent.mem_type == "OBJ":
+                for idx in range(len(keys)):
+                    object_key = self._format_object_key(keys[idx])
+                    descs.append(NixlDesc(device_id=idx, meta_info=object_key))
+            elif self.agent.mem_type == "FILE":
+                for idx in range(len(keys)):
+                    file_name = self._format_object_key(keys[idx])
+                    fd = os.open(
+                        os.path.join(self.path, file_name),
+                        os.O_CREAT | os.O_RDWR | self.direct_io_flag,
+                        0o644,
+                    )
+                    descs.append(NixlDesc(device_id=fd, meta_info=""))
+            else:
+                # Already validated in validate_nixl_backend
+                raise ValueError(f"unexpected mem_type: {self.agent.mem_type}")
 
-        storage_reg_descs, storage_xfer_handler = (
-            self.agent.create_batched_storage_handler(descs, page_size)
-        )
-
-        handle = self.agent.get_mem_to_storage_handle(
-            mem_indices, storage_xfer_handler, storage_indices
-        )
-
-        if self.async_mode:
-            initial_state = self.agent.post_async(handle)
-            # Submit the async wait to the event loop and return immediately
-            asyncio.create_task(
-                self._wait_for_transfer(
-                    handle,
-                    initial_state,
-                    keys,
-                    storage_reg_descs,
-                    storage_xfer_handler,
-                    descs,
-                    mem_objs,
-                )
-            )
-        else:
-            self.agent.post_blocking(handle)
-            self.agent.release_handle(handle)
-            self.agent.release_storage_handler(
-                storage_reg_descs, storage_xfer_handler, descs
+            storage_reg_descs, storage_xfer_handler = (
+                self.agent.create_batched_storage_handler(descs, page_size)
             )
 
+            handle = self.agent.get_mem_to_storage_handle(
+                mem_indices, storage_xfer_handler, storage_indices
+            )
+
+            if self.async_mode:
+                try:
+                    initial_state = self.agent.post_async(handle)
+                    # Submit the async wait to the event loop and return immediately
+                    asyncio.create_task(
+                        self._wait_for_transfer(
+                            handle,
+                            initial_state,
+                            keys,
+                            storage_reg_descs,
+                            storage_xfer_handler,
+                            descs,
+                            mem_objs,
+                        )
+                    )
+                except Exception:
+                    # Ownership did not transfer; release everything ourselves.
+                    self.agent.release_handle(handle)
+                    self.agent.release_storage_handler(
+                        storage_reg_descs, storage_xfer_handler, descs
+                    )
+                    storage_reg_descs = None
+                    raise
+                else:
+                    # Ownership transferred to _wait_for_transfer.
+                    storage_reg_descs = None
+            else:
+                try:
+                    self.agent.post_blocking(handle)
+                finally:
+                    self.agent.release_handle(handle)
+        except Exception:
+            # Failed before the storage handler took ownership of the FDs.
+            if self.agent.mem_type == "FILE" and storage_reg_descs is None:
+                _close_file_descs(descs)
+            raise
+        finally:
+            if storage_reg_descs is not None:
+                self.agent.release_storage_handler(
+                    storage_reg_descs, storage_xfer_handler, descs
+                )
+
+        # Async path performs the equivalent inside _wait_for_transfer.
+        if not self.async_mode:
             end_time = time.time()
             duration = end_time - start_time
             logger.debug(
@@ -1401,10 +1462,14 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
 
         :param key: The key to remove.
         :param force: Whether to force removal (not used in this implementation)
+        :return: True if the key is removed, False otherwise.
         """
         self._cache_discard(key.chunk_hash)
         if self.agent.mem_type == "FILE":
-            os.unlink(os.path.join(self.path, self._format_object_key(key)))
+            try:
+                os.unlink(os.path.join(self.path, self._format_object_key(key)))
+            except FileNotFoundError:
+                return False
 
         return True
 
