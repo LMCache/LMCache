@@ -67,7 +67,7 @@ def test_gds_backend_sanity():
     try:
         os.makedirs(GDS_DIR, exist_ok=True)
         config_gds = LMCacheEngineConfig.from_file(BASE_DIR / "data/gds.yaml")
-        assert config_gds.cufile_buffer_size == 128
+        assert config_gds.gds_buffer_size == 128
 
         thread_loop = asyncio.new_event_loop()
         thread = threading.Thread(target=thread_loop.run_forever)

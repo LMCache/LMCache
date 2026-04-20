@@ -3,10 +3,12 @@
 Docker deployment
 =================
 
-Running the container image
----------------------------
+**Prerequisites:** Docker Engine 27.0+
 
-You can run the LMCache integrated with vLLM image using Docker as follows:
+See :ref:`installation_guide` for pulling images.
+
+Running the container
+---------------------
 
 .. code-block:: bash
 
@@ -22,15 +24,30 @@ You can run the LMCache integrated with vLLM image using Docker as follows:
         meta-llama/Llama-3.1-8B-Instruct --kv-transfer-config \
         '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}'
 
+See the `docker run example <https://github.com/LMCache/LMCache/tree/dev/docker>`_ for more details.
 
-The image name and tag can be found on DockerHub - `LMCache/vllm-openai <https://hub.docker.com/r/lmcache/vllm-openai>`_.
-See example run file in `docker <https://github.com/LMCache/LMCache/tree/dev/docker>`_ for more details.
+ROCm (AMD)
+----------
 
-.. note::
+The `AMD Infinity hub <https://hub.docker.com/r/rocm/vllm-dev>`__ for vLLM offers a prebuilt,
+optimized image for the AMD Instinct™ MI300X. See
+`LLM inference performance validation on AMD Instinct MI300X <https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference/benchmark-docker/vllm.html?model=pyt_vllm_llama-3.1-8b>`__
+for full instructions.
 
-    DockerHub contains the following image types:
+Validated environment: ``rocm/vllm-dev:nightly_0624_rc2_0624_rc2_20250620``, MI300X, vLLM V1.
 
-    - Nightly build images of LMCache and vLLM latest code (e.g. tagged with `latest-nightly` and `nightly-<date>`)
-    - Images of stable releases of LMCache and vLLM (tagged with `v0.x.x`, the exact version of vllm a version of lmcache was built with can be discovered by consulting the compatibility matrix inside of `installation <../installation.rst>`_)
-    
-    - Lightweight image that cannot run PD disaggregation (tagged with `lightweight`)
+.. code-block:: bash
+
+    docker run -it \
+        --network=host \
+        --group-add=video \
+        --ipc=host \
+        --cap-add=SYS_PTRACE \
+        --security-opt seccomp=unconfined \
+        --device /dev/kfd \
+        --device /dev/dri \
+        -v <path_to_your_models>:/app/model \
+        -e HF_HOME="/app/model" \
+        --name lmcache_rocm \
+        rocm/vllm-dev:nightly_0624_rc2_0624_rc2_20250620 \
+        bash

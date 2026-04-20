@@ -208,12 +208,16 @@ def free_locks_handler(key: KeyType, tp_size: int) -> None:
 
 
 def report_block_allocations_handler(
+    instance_id: int,
+    model_name: str,
     records: list[BlockAllocationRecord],
 ) -> None:
     """
     Dummy handler for REPORT_BLOCK_ALLOCATION requests.
 
     Args:
+        instance_id: The scheduler instance ID.
+        model_name: The model name from the adapter.
         records: List of BlockAllocationRecord with per-request
             block and token allocation deltas.
 

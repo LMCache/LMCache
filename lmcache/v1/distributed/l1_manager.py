@@ -650,6 +650,15 @@ class L1Manager:
         )
         return ret
 
+    def touch_keys(self, keys: list[ObjectKey]):
+        """Touch the given keys, marking the keys as accessed(retrieved or stored).
+
+        Args:
+            keys: The list of object keys to touch.
+        """
+        for listener in self._registered_listeners:
+            listener.on_l1_keys_accessed(keys)
+
     @l1_mgr_synchronized
     def clear(self, force: bool = False) -> None:
         """Clear objects from L1 cache.

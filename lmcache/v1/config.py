@@ -216,6 +216,11 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
     },
     "pd_proxy_host": {"type": Optional[str], "default": None, "env_converter": str},
     "pd_proxy_port": {"type": Optional[int], "default": None, "env_converter": int},
+    "pd_skip_proxy_notification": {
+        "type": bool,
+        "default": False,
+        "env_converter": _to_bool,
+    },
     # Transfer-related configurations
     "transfer_channel": {"type": Optional[str], "default": None, "env_converter": str},
     # Nixl-related configurations
@@ -241,7 +246,7 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
         "default": "by_gpu",
         "env_converter": str,
     },
-    "cufile_buffer_size": {
+    "gds_buffer_size": {
         "type": Optional[int],
         "default": None,
         "env_converter": int,
@@ -252,6 +257,17 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
         "type": float,
         "default": 4.0,
         "env_converter": float,
+    },
+    # GDS (GPU Direct Storage) settings
+    "use_gds": {
+        "type": bool,
+        "default": True,
+        "env_converter": _to_bool,
+    },
+    "gds_backend": {
+        "type": str,
+        "default": "cufile",
+        "env_converter": str,
     },
     # Other configurations
     # (Deprecated) The url of the actual remote lmcache instance for auditing.

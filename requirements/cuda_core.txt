@@ -1,0 +1,9 @@
+# Vendor-specific runtime deps baked into install_requires by setup.py
+# when building for CUDA (i.e. BUILD_WITH_HIP is unset).
+# Kept separate from cuda.txt so `pip install -e .` stays lightweight
+# (no ray/xformers/torchvision) while Docker's `pip install -r cuda.txt`
+# still pulls these through the -r chain.
+
+cupy-cuda12x
+# nixl on PyPI is a meta-package that pulls nixl-cu12 (CUDA-only).
+nixl; python_version < "3.13"
