@@ -1474,11 +1474,15 @@ def multi_layer_block_kv_transfer(
         block_ids: int64 tensor of block indices within the paged buffer.
             ``block_ids.shape[0]`` must be a multiple of
             ``len(lmcache_objects_ptrs)``.
-        device: Device on which both the paged buffers and the LMCache
+        device: Device on which both the paged buffers *and* the LMCache
             objects reside for this fallback.  The C++ kernel supports
-            GPU paged buffers with host-resident LMCache objects; this
-            Python fallback assumes they share ``device`` and callers
-            should stage CPU<->GPU copies separately if needed.
+            GPU paged buffers with host-resident LMCache objects, but
+            this Python fallback assumes both pointers live on the same
+            device (wrapping a CPU pointer with a CUDA ``device`` or
+            vice-versa would produce invalid tensor views and crash).
+            Callers that need cross-device transfers must stage the
+            CPU<->GPU copy separately and invoke this fallback only for
+            the same-device portion.
         direction: ``TransferDirection.D2H`` (paged -> objects) or
             ``TransferDirection.H2D`` (objects -> paged).
         shape_desc: Paged buffer shape descriptor.
@@ -1495,6 +1499,18 @@ def multi_layer_block_kv_transfer(
     """
     if not lmcache_objects_ptrs:
         raise ValueError("lmcache_objects_ptrs must be non-empty")
+    # Normalize and validate the same-device assumption upfront so that
+    # callers get a clear error instead of a silent crash inside
+    # ``_tensor_from_ptr`` when a CPU pointer is wrapped as CUDA (or
+    # vice-versa).
+    if not isinstance(device, torch.device):
+        device = torch.device(device)
+    if device.type not in ("cpu", "cuda"):
+        raise ValueError(
+            "multi_layer_block_kv_transfer fallback only supports "
+            "'cpu' or 'cuda' device, got %r. For cross-device "
+            "transfers, stage CPU<->GPU copies separately." % device.type
+        )
     num_objects = len(lmcache_objects_ptrs)
     total_blocks = block_ids.shape[0]
     if total_blocks % num_objects != 0:
