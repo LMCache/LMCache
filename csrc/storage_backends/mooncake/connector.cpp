@@ -99,7 +99,8 @@ void MooncakeConnector::ensure_registered(const void* buf, size_t len) {
         "Mooncake buffer registration failed: null buffer");
   }
   if (len == 0) {
-    return;
+    throw std::runtime_error(
+        "Mooncake buffer registration failed: zero length");
   }
 
   if (preregistered_block_size_ == 0) {
