@@ -164,6 +164,39 @@ def ensure_contiguous_kv_caches(
     return result
 
 
+def normalize_kv_caches_for_discovery(
+    kv_caches: Any,
+    layout_hints: "LayoutHints | None" = None,
+) -> Tuple[Any, Optional[List[str]]]:
+    """Normalize an engine-provided KV cache structure for format discovery.
+
+    Bridges engine-specific contracts (e.g. vLLM's
+    ``dict[str, torch.Tensor]``) to the canonical ``KVCaches`` form that
+    :func:`discover_gpu_kv_format` and downstream format-aware helpers
+    accept. Applies :func:`ensure_contiguous_kv_caches` first so callers
+    never need to do it separately.
+
+    Args:
+        kv_caches: Engine-provided KV caches. Accepts the dict form used
+            by the vLLM adapter, or any structure already accepted by
+            :func:`discover_gpu_kv_format` (list, nested lists, tensor).
+        layout_hints: Passed through to
+            :func:`ensure_contiguous_kv_caches` so HND-layout permutation
+            logs the correct reason.
+
+    Returns:
+        ``(normalized_kv_caches, layer_names)``. ``layer_names`` is the
+        ordered list of keys when the input was a dict, and ``None``
+        otherwise.
+    """
+    kv_caches = ensure_contiguous_kv_caches(
+        kv_caches, kv_layout=(layout_hints or {}).get("kv_layout")
+    )
+    if isinstance(kv_caches, dict):
+        return list(kv_caches.values()), list(kv_caches.keys())
+    return kv_caches, None
+
+
 def need_gpu_interm_buffer(lmcache_config: LMCacheEngineConfig):
     """
     Check if the GPU Connector needs to create an intermediate

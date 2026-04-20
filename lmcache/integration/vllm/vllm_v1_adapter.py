@@ -709,22 +709,23 @@ class LMCacheConnectorV1Impl:
         from lmcache.utils import EngineType
         from lmcache.v1.gpu_connector.utils import (
             discover_gpu_kv_format,
-            ensure_contiguous_kv_caches,
             get_block_size,
             get_num_blocks,
+            normalize_kv_caches_for_discovery,
         )
         from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
 
         layout_hints = (
             getattr(self.lmcache_engine.gpu_connector, "layout_hints", None) or {}
         )
-        # Permute any non-contiguous tensors (e.g. HND) so logical and physical
-        # views match before format discovery and pointer capture.
-        self.kv_caches = ensure_contiguous_kv_caches(
-            self.kv_caches, kv_layout=layout_hints.get("kv_layout")
+        kv_list, layer_names = normalize_kv_caches_for_discovery(
+            self.kv_caches, layout_hints=layout_hints
         )
-        layer_names = list(self.kv_caches.keys())
-        kv_list = list(self.kv_caches.values())
+        # Keep self.kv_caches aligned with any contiguous views produced by the
+        # normalization so downstream store/retrieve paths (which pass
+        # list(self.kv_caches.values()) to the connector) see the same memory.
+        if isinstance(self.kv_caches, dict) and layer_names is not None:
+            self.kv_caches = dict(zip(layer_names, kv_list, strict=True))
         gpu_kv_format = discover_gpu_kv_format(
             kv_list, EngineType.VLLM, layout_hints=layout_hints
         )
