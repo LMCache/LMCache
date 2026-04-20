@@ -201,7 +201,7 @@ class MockRedis:
 class MockAsyncRedis(MockRedis):
     """Async version of MockRedis"""
 
-    async def set(self, key, value):
+    async def set(self, key, value, **kwargs):
         self.store[key] = value
         return True
 
