@@ -37,7 +37,7 @@ High-Level Architecture
          |--- EvictionController ----> L1Manager (watermark-triggered eviction)
          |
          v
-    PrometheusController + TelemetryController (observability)
+    EventBus + Subscribers (metrics / logging / tracing, see mp_observability/)
 
 Server Variants
 ---------------
@@ -146,10 +146,9 @@ Each config module exposes a composable triple:
     add_mp_server_args(parser)        # from multiprocess/config.py
     add_storage_manager_args(parser)  # from distributed/config.py
       # which internally calls add_l2_adapters_args(parser)
-    add_prometheus_args(parser)       # from mp_observability/config.py
-    add_telemetry_args(parser)        # from mp_observability/telemetry/config.py
+    add_observability_args(parser)    # from mp_observability/config.py
 
-Both ``blend_server_v2.py`` and ``http_server.py`` reuse this pattern, adding
+``http_server.py`` reuses this pattern, additionally calling
 ``add_http_frontend_args()`` for the HTTP variant.
 
 Distributed Storage
@@ -201,11 +200,16 @@ The ``L2AdapterInterface`` (in ``base.py``) defines three async task methods:
 - ``submit_lookup_and_lock_task(keys)`` -- Check if keys exist in L2.
 - ``submit_load_task(keys, layout_desc)`` -- Load data from L2 into L1.
 
-The factory function ``create_l2_adapter()`` (in ``__init__.py``) uses
-``isinstance()`` on the config type to instantiate the correct adapter.
+The factory function ``create_l2_adapter()`` (in ``__init__.py``) delegates
+to ``create_l2_adapter_from_registry()`` (in ``factory.py``), which looks
+up the adapter by its registered type name. Built-in adapter modules are
+auto-discovered via ``pkgutil`` and lazily imported on first use, so
+third-party optional dependencies are not loaded until their adapter type
+is actually requested.
 
-New adapter types are registered via ``register_l2_adapter_type()`` in
-``config.py``.
+New adapter types register both their config and factory at module import
+time via ``register_l2_adapter_type()`` (in ``config.py``) and
+``register_l2_adapter_factory()`` (in ``factory.py``).
 
 Controllers
 ~~~~~~~~~~~
@@ -285,15 +289,26 @@ RETRIEVE Flow
 Observability Internals
 -----------------------
 
-**PrometheusController** is a global singleton (initialized at server startup).
-It runs a daemon thread that periodically calls ``log_prometheus()`` on all
-registered loggers (``StorageManagerStatsLogger``, ``L1ManagerStatsLogger``).
-Each logger atomically snapshots its stats, resets to zero, and pushes values
-to Prometheus counters.
+Observability is built on an **EventBus** (``mp_observability/event_bus.py``):
+producers (L1Manager, StorageManager, MPCacheEngine, L0 tracker) publish
+typed events, and a background drain thread dispatches each event to every
+registered subscriber. Subscribers are pluggable and grouped by concern:
 
-**TelemetryController** is also a global singleton.  It maintains an in-memory
-event queue (bounded by ``--telemetry-max-queue-size``).  A drain thread reads
-events and dispatches them to registered processors (e.g., ``LoggingProcessor``).
+- **Metrics subscribers** (``subscribers/metrics/``) translate events into
+  OpenTelemetry counters and histograms. When no ``--otlp-endpoint`` is
+  configured they are exposed via an in-process Prometheus ``/metrics``
+  endpoint on ``--prometheus-port``.
+- **Logging subscribers** (``subscribers/logging/``) emit Python log records
+  for store/retrieve/lookup/L1/L2 activity. The optional
+  ``LookupHashLoggingSubscriber`` rotates chunk-hash JSONL files for
+  offline analysis.
+- **Tracing subscribers** (``subscribers/tracing/``) build OTel spans from
+  START/END event pairs and export them via OTLP (enabled with
+  ``--enable-tracing`` + ``--otlp-endpoint``).
+
+The EventBus queue is bounded by ``--event-bus-queue-size`` (tail-drop on
+overflow). Lifecycle histograms are sampled at ``--metrics-sample-rate``;
+counters always count all events.
 
 How to Extend
 -------------
@@ -301,24 +316,32 @@ How to Extend
 Adding a new L2 adapter
 ~~~~~~~~~~~~~~~~~~~~~~~~
 
-1. Create a config class subclassing ``L2AdapterConfigBase`` with
-   ``from_dict()`` and ``help()`` methods.
-2. Call ``register_l2_adapter_type("my_adapter", MyAdapterConfig)`` at module
-   level.
-3. Create an adapter class implementing ``L2AdapterInterface``.
-4. Add an ``isinstance()`` branch in ``create_l2_adapter()``
-   (``l2_adapters/__init__.py``).
+1. Create a new module named ``*_l2_adapter.py`` under
+   ``lmcache/v1/distributed/l2_adapters/``. The filename suffix matters --
+   ``__init__.py`` auto-discovers any module matching this pattern via
+   ``pkgutil`` and defers its import until first use.
+2. Define a config class that subclasses ``L2AdapterConfigBase`` and
+   implements ``from_dict()`` and ``help()``. Register it at module level
+   with ``register_l2_adapter_type("my_adapter", MyAdapterConfig)``.
+3. Define an adapter class implementing ``L2AdapterInterface`` and
+   register a factory at module level with
+   ``register_l2_adapter_factory("my_adapter", my_factory)``.
 
-Adding a telemetry processor
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+No changes to ``__init__.py`` or ``factory.py`` are required -- registration
+is entirely self-contained in the new module.
 
-1. Create a config class subclassing ``TelemetryProcessorConfig`` with
-   ``from_dict()`` and ``help()`` methods.
-2. Call ``register_telemetry_processor_type("my_proc", MyProcConfig)`` at
-   module level.
-3. Create a processor class implementing ``TelemetryProcessor``
-   (``on_new_event()``, ``shutdown()``).
-4. Add a factory branch in the telemetry controller's processor creation code.
+Adding a new observability subscriber
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+1. Create a subclass of the appropriate ``Subscriber`` base (see
+   ``mp_observability/subscribers/``). Implement the ``handle(event)``
+   method for the event types of interest.
+2. Register it inside ``init_observability()`` in
+   ``mp_observability/config.py`` under the matching gate
+   (``metrics_enabled``, ``logging_enabled``, or ``tracing_enabled``).
+3. If the subscriber is user-configurable, extend ``ObservabilityConfig``
+   and ``add_observability_args()`` with the new flag; they are already
+   threaded through ``parse_args_to_observability_config()``.
 
 Adding a new request type
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -355,7 +378,9 @@ Key Source Files
    * - ``lmcache/v1/distributed/l1_manager.py``
      - L1Manager (object state machine)
    * - ``lmcache/v1/distributed/l2_adapters/config.py``
-     - L2 adapter config registry
+     - L2 adapter config registry (``register_l2_adapter_type``)
+   * - ``lmcache/v1/distributed/l2_adapters/factory.py``
+     - L2 adapter factory registry and lazy module loader
    * - ``lmcache/v1/distributed/l2_adapters/base.py``
      - L2AdapterInterface
    * - ``lmcache/v1/distributed/storage_controllers/store_controller.py``
@@ -365,10 +390,10 @@ Key Source Files
    * - ``lmcache/v1/distributed/storage_controllers/prefetch_controller.py``
      - PrefetchController (L2->L1 on miss)
    * - ``lmcache/v1/mp_observability/config.py``
-     - PrometheusConfig
-   * - ``lmcache/v1/mp_observability/prometheus_controller.py``
-     - PrometheusController singleton
-   * - ``lmcache/v1/mp_observability/telemetry/config.py``
-     - TelemetryConfig
-   * - ``lmcache/v1/mp_observability/telemetry/controller.py``
-     - TelemetryController singleton
+     - ObservabilityConfig + ``init_observability`` (EventBus bootstrap)
+   * - ``lmcache/v1/mp_observability/event_bus.py``
+     - EventBus (publishes/drains events to subscribers)
+   * - ``lmcache/v1/mp_observability/subscribers/``
+     - Metrics, logging, and tracing subscribers
+   * - ``lmcache/v1/mp_observability/otel_init.py``
+     - OTel meter/tracer provider setup (Prometheus/OTLP export)

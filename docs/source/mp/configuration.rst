@@ -223,7 +223,9 @@ L2 adapters are configured via repeatable ``--l2-adapter <JSON>`` arguments.
 Each JSON object must include a ``"type"`` field that selects the adapter type.
 The order of ``--l2-adapter`` arguments determines the adapter order (cascade).
 
-Registered adapter types: ``nixl_store``, ``fs``, ``mock``.
+Registered adapter types: ``fs``, ``fs_native``, ``mock``, ``mooncake_store``,
+``native_plugin``, ``nixl_store``, ``nixl_store_dynamic``, ``plugin``, ``resp``.
+See :doc:`l2_storage` for per-adapter field details.
 
 ``nixl_store`` -- NIXL-based persistent storage
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -337,6 +339,19 @@ logging, tracing).
    * - ``--prometheus-port``
      - ``9090``
      - Port for the Prometheus ``/metrics`` endpoint.
+   * - ``--metrics-sample-rate``
+     - ``0.01``
+     - Fraction (0, 1.0] of chunks/blocks to track for lifecycle histograms.
+       Counters always count all events regardless of this setting.
+   * - ``--trace-level``
+     - *(none)*
+     - Enable offline trace recording at the given level. Currently only
+       ``storage`` is supported (records ``StorageManager`` public-API
+       calls for replay). Distinct from ``--enable-tracing`` (OTel spans).
+   * - ``--trace-output``
+     - *(none)*
+     - Path to write the trace file. When ``--trace-level`` is set but
+       this is omitted, a timestamped file under ``$TMPDIR`` is used.
 
 vLLM Client Configuration
 --------------------------
@@ -397,6 +412,4 @@ Full Example
         --l2-prefetch-max-in-flight 8 \
         --l2-adapter '{"type": "nixl_store", "backend": "POSIX", "backend_params": {"file_path": "/data/lmcache/l2", "use_direct_io": "false"}, "pool_size": 64}' \
         --prometheus-port 9090 \
-        --prometheus-log-interval 10 \
-        --enable-telemetry \
-        --telemetry-processor '{"type": "logging", "log_level": "DEBUG"}'
+        --metrics-sample-rate 0.01
