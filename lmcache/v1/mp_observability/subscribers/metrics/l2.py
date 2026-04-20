@@ -5,15 +5,17 @@
 # Future
 from __future__ import annotations
 
-# Standard
-from collections import Counter
-
 # Third Party
 from opentelemetry import metrics
 
 # First Party
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import EventCallback, EventSubscriber
+from lmcache.v1.mp_observability.subscribers.metrics.utils import (
+    emit_by_salt,
+    group_by_salt,
+    unique_salts,
+)
 
 
 class L2MetricsSubscriber(EventSubscriber):
@@ -108,7 +110,7 @@ class L2MetricsSubscriber(EventSubscriber):
     def _on_store_submitted(self, event: Event) -> None:
         keys = event.metadata.get("keys", [])
         if keys:
-            for salt, count in _group_by_salt(keys).items():
+            for salt, count in group_by_salt(keys).items():
                 self._store_tasks.add(1, {"cache_salt": salt})
                 self._store_keys.add(count, {"cache_salt": salt})
         else:
@@ -119,12 +121,12 @@ class L2MetricsSubscriber(EventSubscriber):
     def _on_store_completed(self, event: Event) -> None:
         succeeded = event.metadata.get("succeeded_keys", [])
         failed = event.metadata.get("failed_keys", [])
-        task_salts = _unique_salts(succeeded, failed)
+        task_salts = unique_salts(succeeded, failed)
         if task_salts:
             for salt in task_salts:
                 self._store_completed.add(1, {"cache_salt": salt})
-            _emit_by_salt(self._store_succeeded_keys, succeeded)
-            _emit_by_salt(self._store_failed_keys, failed)
+            emit_by_salt(self._store_succeeded_keys, succeeded)
+            emit_by_salt(self._store_failed_keys, failed)
         else:
             self._store_completed.add(1, {"cache_salt": ""})
             self._store_succeeded_keys.add(
@@ -164,22 +166,3 @@ class L2MetricsSubscriber(EventSubscriber):
         self._prefetch_failed_keys.add(
             event.metadata["failed_count"], {"cache_salt": salt}
         )
-
-
-def _group_by_salt(keys: list) -> Counter:
-    return Counter(getattr(k, "cache_salt", "") for k in keys)
-
-
-def _unique_salts(*key_lists: list) -> set[str]:
-    out: set[str] = set()
-    for keys in key_lists:
-        for k in keys:
-            out.add(getattr(k, "cache_salt", ""))
-    return out
-
-
-def _emit_by_salt(counter: metrics.Counter, keys: list) -> None:
-    if not keys:
-        return
-    for salt, count in _group_by_salt(keys).items():
-        counter.add(count, {"cache_salt": salt})

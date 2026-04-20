@@ -5,15 +5,16 @@
 # Future
 from __future__ import annotations
 
-# Standard
-from collections import Counter
-
 # Third Party
 from opentelemetry import metrics
 
 # First Party
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import EventCallback, EventSubscriber
+from lmcache.v1.mp_observability.subscribers.metrics.utils import (
+    emit_by_salt,
+    emit_request_per_salt,
+)
 
 
 class SMMetricsSubscriber(EventSubscriber):
@@ -68,40 +69,13 @@ class SMMetricsSubscriber(EventSubscriber):
     def _on_read_prefetched(self, event: Event) -> None:
         succeeded = event.metadata.get("succeeded_keys", [])
         failed = event.metadata.get("failed_keys", [])
-        self._emit_request(self._read_requests, succeeded, failed)
-        self._emit_by_salt(self._read_succeed, succeeded)
-        self._emit_by_salt(self._read_failed, failed)
+        emit_request_per_salt(self._read_requests, succeeded, failed)
+        emit_by_salt(self._read_succeed, succeeded)
+        emit_by_salt(self._read_failed, failed)
 
     def _on_write_reserved(self, event: Event) -> None:
         succeeded = event.metadata.get("succeeded_keys", [])
         failed = event.metadata.get("failed_keys", [])
-        self._emit_request(self._write_requests, succeeded, failed)
-        self._emit_by_salt(self._write_succeed, succeeded)
-        self._emit_by_salt(self._write_failed, failed)
-
-    @staticmethod
-    def _emit_by_salt(counter: metrics.Counter, keys: list) -> None:
-        """Group ``keys`` by ``cache_salt`` and emit one ``add`` per group."""
-        if not keys:
-            return
-        groups = Counter(getattr(k, "cache_salt", "") for k in keys)
-        for salt, count in groups.items():
-            counter.add(count, {"cache_salt": salt})
-
-    @staticmethod
-    def _emit_request(counter: metrics.Counter, *key_lists: list) -> None:
-        """Emit one request increment per distinct ``cache_salt`` touched.
-
-        When no keys are present (should not happen for a real SM call),
-        record the request against an empty-salt tenant so the series
-        still reflects that the call occurred.
-        """
-        salts: set[str] = set()
-        for keys in key_lists:
-            for k in keys:
-                salts.add(getattr(k, "cache_salt", ""))
-        if not salts:
-            counter.add(1, {"cache_salt": ""})
-            return
-        for salt in salts:
-            counter.add(1, {"cache_salt": salt})
+        emit_request_per_salt(self._write_requests, succeeded, failed)
+        emit_by_salt(self._write_succeed, succeeded)
+        emit_by_salt(self._write_failed, failed)

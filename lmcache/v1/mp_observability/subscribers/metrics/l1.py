@@ -5,19 +5,20 @@
 # Future
 from __future__ import annotations
 
-# Standard
-from collections import Counter
-
 # Third Party
 from opentelemetry import metrics
 
 # First Party
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import EventCallback, EventSubscriber
+from lmcache.v1.mp_observability.subscribers.metrics.utils import emit_by_salt
 
 
 class L1MetricsSubscriber(EventSubscriber):
     """Maintains OTel counters for L1Manager operations.
+
+    Metrics are tagged with ``cache_salt`` so operators can attribute L1
+    traffic to individual tenants.
 
     Metric parity with the old ``L1ManagerStatsLogger``:
     - ``lmcache_mp.l1_read_keys``  — keys read from L1
@@ -49,19 +50,10 @@ class L1MetricsSubscriber(EventSubscriber):
         }
 
     def _on_read_finished(self, event: Event) -> None:
-        self._emit_by_salt(self._read_counter, event.metadata.get("keys", []))
+        emit_by_salt(self._read_counter, event.metadata.get("keys", []))
 
     def _on_write_finished(self, event: Event) -> None:
-        self._emit_by_salt(self._write_counter, event.metadata.get("keys", []))
+        emit_by_salt(self._write_counter, event.metadata.get("keys", []))
 
     def _on_evicted(self, event: Event) -> None:
-        self._emit_by_salt(self._evicted_counter, event.metadata.get("keys", []))
-
-    @staticmethod
-    def _emit_by_salt(counter: metrics.Counter, keys: list) -> None:
-        """Group ``keys`` by ``cache_salt`` and emit one ``add`` per group."""
-        if not keys:
-            return
-        groups = Counter(getattr(k, "cache_salt", "") for k in keys)
-        for salt, count in groups.items():
-            counter.add(count, {"cache_salt": salt})
+        emit_by_salt(self._evicted_counter, event.metadata.get("keys", []))
