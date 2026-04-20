@@ -263,7 +263,10 @@ def test_nixl_posix_backend():
     run(config, shape, dtype)
 
 
-def _build_dynamic_file_backend(config, shape, dtype):
+_DYNAMIC_KV_SHAPE = (4, 2, 256, 8, 128)
+
+
+def _build_dynamic_file_backend(config, dtype):
     """
     Build a NixlStorageBackend in dynamic-FILE mode and the surrounding
     event-loop thread. Returns (backend, backends, thread_loop, thread, keys,
@@ -288,7 +291,7 @@ def _build_dynamic_file_backend(config, shape, dtype):
         worker_id=0,
         local_worker_id=0,
         kv_dtype=dtype,
-        kv_shape=shape,
+        kv_shape=_DYNAMIC_KV_SHAPE,
     )
 
     backends = CreateStorageBackends(
@@ -300,15 +303,28 @@ def _build_dynamic_file_backend(config, shape, dtype):
     nixl_backend = backends[BACKEND_NAME]
     assert isinstance(nixl_backend, NixlStorageBackend)
 
+    # In dynamic mode the backend internally allocates with meta_shape
+    # (derived from kv_shape via init_chunk_meta), so allocate the test
+    # objects with the same shape so put/get round-trip shapes match.
+    obj_shape = nixl_backend.meta_shape
+    obj_dtype = nixl_backend.meta_dtype
+    assert obj_shape is not None
+    assert obj_dtype is not None
+
+    obj_fmt = nixl_backend.meta_fmt
+    assert obj_fmt is not None
+
     objs = []
     for _ in keys:
-        obj = nixl_backend.memory_allocator.allocate(shape=shape, dtype=dtype)
+        obj = nixl_backend.memory_allocator.allocate(obj_shape, obj_dtype, obj_fmt)
         assert obj is not None
         assert obj.tensor is not None
         objs.append(obj)
 
-    objs[0].tensor[100, 200] = 1e-3
-    objs[1].tensor[300, 400] = 1e-2
+    objs[0].tensor.zero_()
+    objs[1].tensor.zero_()
+    objs[0].tensor[0, 0, 100, 200] = 1
+    objs[1].tensor[1, 0, 50, 300] = 1
 
     return nixl_backend, backends, thread_loop, thread, keys, objs
 
@@ -322,13 +338,13 @@ def _teardown_dynamic_file_backend(backends, thread_loop, thread):
         thread.join()
 
 
-def run_dynamic_file(config, shape, dtype, tmp_path):
+def run_dynamic_file(config, dtype, tmp_path):
     """
     Exercise the dynamic-FILE backend's new code paths: contains/key_exists,
     put/get round-trip, and remove for both present and missing files.
     """
     nixl_backend, backends, thread_loop, thread, keys, objs = (
-        _build_dynamic_file_backend(config, shape, dtype)
+        _build_dynamic_file_backend(config, dtype)
     )
 
     try:
@@ -375,7 +391,6 @@ def test_nixl_posix_dynamic_file_backend(tmp_path):
     config = LMCacheEngineConfig.from_file(BASE_DIR / "data/nixl.yaml")
 
     dtype = torch.bfloat16
-    shape = [2048, 2048]
 
     config.nixl_buffer_device = "cpu"
     config.extra_config["nixl_backend"] = "POSIX"
@@ -383,7 +398,7 @@ def test_nixl_posix_dynamic_file_backend(tmp_path):
     config.extra_config["nixl_path"] = str(tmp_path)
     config.extra_config["enable_cuda"] = False
 
-    run_dynamic_file(config, shape, dtype, tmp_path)
+    run_dynamic_file(config, dtype, tmp_path)
 
 
 def _count_open_fds() -> int:
@@ -406,7 +421,6 @@ def test_nixl_dynamic_file_fd_leak_on_setup_failure(tmp_path, monkeypatch):
     config = LMCacheEngineConfig.from_file(BASE_DIR / "data/nixl.yaml")
 
     dtype = torch.bfloat16
-    shape = [2048, 2048]
 
     config.nixl_buffer_device = "cpu"
     config.extra_config["nixl_backend"] = "POSIX"
@@ -416,7 +430,7 @@ def test_nixl_dynamic_file_fd_leak_on_setup_failure(tmp_path, monkeypatch):
     config.extra_config["enable_cuda"] = False
 
     nixl_backend, backends, thread_loop, thread, keys, objs = (
-        _build_dynamic_file_backend(config, shape, dtype)
+        _build_dynamic_file_backend(config, dtype)
     )
 
     try:
