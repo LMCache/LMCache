@@ -273,6 +273,26 @@ class GPUKVFormat(IntEnum):
     NL_X_NB_TWO_NH_BS_HS = 7
 
 
+class PageBufferShapeDesc:
+    """Python stand-in for the C++ ``PageBufferShapeDesc`` struct.
+
+    Mirrors the pybind ``def_readwrite`` attributes in ``csrc/pybind.cpp``
+    so non-CUDA code paths can construct and inspect shape descriptors
+    without the compiled extension.
+    """
+
+    __slots__ = ("kv_size", "nl", "nb", "bs", "nh", "hs", "element_size")
+
+    def __init__(self) -> None:
+        self.kv_size: int = 0
+        self.nl: int = 0
+        self.nb: int = 0
+        self.bs: int = 0
+        self.nh: int = 0
+        self.hs: int = 0
+        self.element_size: int = 0
+
+
 # On XPU (Intel GPU), PyTorch 2.4+ supports pin_memory=True via SYCL USM
 # host allocation, enabling fast DMA for XPU<->CPU transfers.
 _XPU_PIN_MEMORY = hasattr(torch, "xpu") and torch.xpu.is_available()
