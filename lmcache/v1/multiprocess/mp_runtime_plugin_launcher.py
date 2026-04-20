@@ -13,7 +13,7 @@ via the LMCACHE_RUNTIME_PLUGIN_CONFIG environment variable.
 
 # Standard
 from dataclasses import asdict, dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 import json
 
 # First Party
@@ -21,6 +21,12 @@ from lmcache.logging import init_logger
 from lmcache.v1.plugin.runtime_plugin_launcher import (
     RuntimePluginLauncher,
 )
+
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.v1.multiprocess.config import (
+        RuntimePluginConfig,
+    )
 
 logger = init_logger(__name__)
 
@@ -54,10 +60,14 @@ class _MPPluginConfig:
     to_json)."""
 
     runtime_plugin_locations: list[str]
+    extra_config: dict[str, Any]
     configs_dict: dict[str, Any]
 
     def to_json(self) -> str:
-        return json.dumps(self.configs_dict)
+        merged = dict(self.configs_dict)
+        if self.extra_config:
+            merged["runtime_plugin_extra_config"] = self.extra_config
+        return json.dumps(merged)
 
 
 class MPRuntimePluginLauncher:
@@ -67,7 +77,7 @@ class MPRuntimePluginLauncher:
     Usage::
 
         launcher = MPRuntimePluginLauncher(
-            runtime_plugin_locations=["/path/to/plugins"],
+            runtime_plugin_config=runtime_plugin_config,
             mp_config=mp_config,
             storage_manager_config=sm_config,
             obs_config=obs_config,
@@ -79,7 +89,7 @@ class MPRuntimePluginLauncher:
 
     def __init__(
         self,
-        runtime_plugin_locations: list[str],
+        runtime_plugin_config: "RuntimePluginConfig",
         **configs: object,
     ) -> None:
         """Initialize the MP runtime plugin launcher.
@@ -88,8 +98,8 @@ class MPRuntimePluginLauncher:
         JSON blob and delegates to RuntimePluginLauncher.
 
         Args:
-            runtime_plugin_locations: Paths to plugin scripts
-                or directories.
+            runtime_plugin_config: RuntimePluginConfig with
+                locations and extra_config fields.
             **configs: Dataclass config objects to serialize
                 and pass to plugins via environment variable.
         """
@@ -99,7 +109,8 @@ class MPRuntimePluginLauncher:
             aggregated[name] = _safe_asdict(cfg)
 
         wrapper = _MPPluginConfig(
-            runtime_plugin_locations=runtime_plugin_locations,
+            runtime_plugin_locations=runtime_plugin_config.locations,
+            extra_config=getattr(runtime_plugin_config, "extra_config", {}),
             configs_dict=aggregated,
         )
         self._inner = RuntimePluginLauncher(

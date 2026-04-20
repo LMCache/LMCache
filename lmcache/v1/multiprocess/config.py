@@ -7,6 +7,7 @@ Configuration for the multiprocess (ZMQ) server and HTTP frontend.
 # Standard
 from dataclasses import dataclass, field
 import argparse
+import json
 
 
 @dataclass
@@ -41,8 +42,24 @@ class MPServerConfig:
     ('default' for MPCacheEngine, 'blend' for BlendEngineV2).
     """
 
-    runtime_plugin_locations: list[str] = field(default_factory=list)
+    runtime_plugin_config: "RuntimePluginConfig" = field(
+        default_factory=lambda: RuntimePluginConfig()
+    )
+    """Runtime plugin configuration (locations + extra config)."""
+
+
+@dataclass
+class RuntimePluginConfig:
+    """Configuration for runtime plugins."""
+
+    locations: list[str] = field(default_factory=list)
     """Paths to runtime plugin scripts or directories."""
+
+    extra_config: dict = field(default_factory=dict)
+    """Extra key-value config forwarded to runtime plugins
+    via the JSON config blob.
+    Accepts a JSON string on the command line.
+    """
 
 
 DEFAULT_MP_SERVER_CONFIG = MPServerConfig()
@@ -141,6 +158,15 @@ def add_mp_server_args(
         help="Paths to runtime plugin scripts or "
         "directories to launch alongside the server.",
     )
+    mp_group.add_argument(
+        "--runtime-plugin-config",
+        type=str,
+        default="{}",
+        help="JSON string of extra key-value config forwarded to runtime "
+        "plugins via LMCACHE_RUNTIME_PLUGIN_EXTRA_CONFIG. "
+        'Example: \'{"plugin.frontend.heartbeat_url": '
+        '"http://localhost:5000/heartbeat"}\'',
+    )
     return parser
 
 
@@ -159,6 +185,10 @@ def parse_args_to_mp_server_config(
     base = args.max_workers
     max_gpu = args.max_gpu_workers if args.max_gpu_workers is not None else base
     max_cpu = args.max_cpu_workers if args.max_cpu_workers is not None else base
+    try:
+        plugin_extra = json.loads(getattr(args, "runtime_plugin_config", None) or "{}")
+    except json.JSONDecodeError as exc:
+        raise ValueError("--runtime-plugin-config is not valid JSON: %s" % exc) from exc
     return MPServerConfig(
         host=args.host,
         port=args.port,
@@ -168,7 +198,10 @@ def parse_args_to_mp_server_config(
         max_cpu_workers=max_cpu,
         hash_algorithm=args.hash_algorithm,
         engine_type=args.engine_type,
-        runtime_plugin_locations=(args.runtime_plugin_locations or []),
+        runtime_plugin_config=RuntimePluginConfig(
+            locations=(args.runtime_plugin_locations or []),
+            extra_config=plugin_extra,
+        ),
     )
 
 

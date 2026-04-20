@@ -27,7 +27,7 @@ delegates all process management to `RuntimePluginLauncher`.
 
 | Method | Description |
 |---|---|
-| `__init__(locations, **configs)` | Aggregate configs → JSON, create inner launcher |
+| `__init__(runtime_plugin_config, **configs)` | Aggregate configs → JSON, create inner launcher |
 | `launch_plugins()` | Delegate to `RuntimePluginLauncher.launch_plugins()` |
 | `stop_plugins()` | Delegate to `RuntimePluginLauncher.stop_plugins()` |
 
@@ -39,6 +39,17 @@ Key design decisions:
 - **`worker_count=1, worker_id=0`**: The MP server runs a single
   process instance; there is no TP-style worker sharding.
 
+### `RuntimePluginConfig`
+
+A dataclass that holds plugin configuration:
+
+| Field | Type | Description |
+|---|---|---|
+| `locations` | `list[str]` | Plugin file / directory paths |
+| `extra_config` | `dict` | Extra key-value config forwarded to plugins via JSON blob |
+
+Accepted via `--runtime-plugin-config` CLI argument as a JSON string.
+
 ### `_MPPluginConfig`
 
 A thin `@dataclass` wrapper that satisfies the duck-type contract
@@ -47,8 +58,9 @@ expected by `RuntimePluginLauncher`:
 | Field / Method | Type | Description |
 |---|---|---|
 | `runtime_plugin_locations` | `list[str]` | Plugin file / directory paths |
+| `extra_config` | `dict` | Extra config from `RuntimePluginConfig.extra_config` |
 | `configs_dict` | `dict` | Aggregated config sections |
-| `to_json()` | `str` | Serialize `configs_dict` to JSON string |
+| `to_json()` | `str` | Serialize `configs_dict` + `extra_config` to JSON string |
 
 ### `_safe_asdict` / `_make_json_safe`
 
@@ -90,13 +102,19 @@ classDiagram
         -_should_skip_plugin(file, parts)
         -_capture_plugin_output(proc, name)
     }
+    class RuntimePluginConfig {
+        +locations: list~str~
+        +extra_config: dict
+    }
     class _MPPluginConfig {
         +runtime_plugin_locations: list~str~
+        +extra_config: dict
         +configs_dict: dict
         +to_json() str
     }
     MPRuntimePluginLauncher --> RuntimePluginLauncher : delegates
     MPRuntimePluginLauncher ..> _MPPluginConfig : creates
+    MPRuntimePluginLauncher ..> RuntimePluginConfig : reads
     RuntimePluginLauncher --> _MPPluginConfig : uses as config
 ```
 
@@ -111,7 +129,7 @@ sequenceDiagram
     participant RPL as RuntimePluginLauncher
     participant P as Plugin Process
 
-    S->>MPL: init(locations, mp_config, storage_config, ...)
+    S->>MPL: init(runtime_plugin_config, mp_config, storage_config, ...)
     MPL->>MPL: _safe_asdict() each config
     MPL->>MPL: Build _MPPluginConfig wrapper
     MPL->>RPL: init(config=wrapper, role=None)
@@ -149,6 +167,33 @@ each plugin subprocess:
 Legacy aliases (`LMCACHE_PLUGIN_*`) are also set for backwards
 compatibility.
 
+---
+
+## Input from LMCache to Plugin
+
+LMCache passes configuration to plugins via **environment
+variables**. The core variable is `LMCACHE_RUNTIME_PLUGIN_CONFIG`,
+whose value is a JSON string containing the full LMCache server
+configuration.
+
+### Input Sources
+
+```
+CLI arguments
+  --runtime-plugin-locations  ->  RuntimePluginConfig.locations
+  --runtime-plugin-config     ->  RuntimePluginConfig.extra_config (JSON)
+  --http-host / --http-port   ->  HTTPFrontendConfig
+                                  (optional, forwarded by http_server.py)
+
+MPRuntimePluginLauncher.__init__(
+    runtime_plugin_config,   # locations + extra_config
+    mp_config,               # ZMQ server config
+    storage_manager_config,  # storage config
+    obs_config,              # observability config
+    http_frontend_config,    # HTTP frontend config (optional)
+)
+```
+
 ### Config JSON Structure
 
 ```json
@@ -160,9 +205,10 @@ compatibility.
     "max_workers": 1,
     "hash_algorithm": "blake3",
     "engine_type": "default",
-    "runtime_plugin_locations": [
-      "examples/mp_runtime_plugins/"
-    ]
+    "runtime_plugin_config": {
+      "locations": ["examples/mp_runtime_plugins/"],
+      "extra_config": {}
+    }
   },
   "storage_manager_config": {
     "l1_manager_config": {
@@ -182,12 +228,115 @@ compatibility.
     "metrics_enabled": true,
     "logging_enabled": true,
     "tracing_enabled": false
+  },
+  "http_frontend_config": {
+    "http_host": "0.0.0.0",
+    "http_port": 8080
+  },
+  "runtime_plugin_extra_config": {
+    "plugin.frontend.heartbeat_url": "http://discover-service:5000/heartbeat"
   }
 }
 ```
 
-The exact sections depend on which `**configs` keyword arguments
-are passed to `MPRuntimePluginLauncher.__init__()`.
+`runtime_plugin_extra_config` is only present when
+`RuntimePluginConfig.extra_config` is non-empty; it is merged in by
+`_MPPluginConfig.to_json()`.
+
+### How Plugins Read the Config
+
+```python
+import json
+import os
+
+raw = os.getenv("LMCACHE_RUNTIME_PLUGIN_CONFIG", "{}")
+config = json.loads(raw)
+
+mp_cfg = config.get("mp_config", {})
+http_cfg = config.get("http_frontend_config", {})
+extra = config.get("runtime_plugin_extra_config", {})
+```
+
+---
+
+## Use Cases
+
+### Use Case 1: Frontend Plugin (Service Discovery Heartbeat)
+
+**Scenario**: Run an HTTP frontend process alongside the LMCache MP
+server; the process periodically sends heartbeats to a discovery
+service so that a centralized frontend can track live LMCache nodes.
+
+**Components**:
+
+| Component | Repository | Description |
+|---|---|---|
+| `lmcache_mp_frontend_plugin.py` | [lmcache_frontend](https://github.com/LMCache/lmcache_frontend/blob/lmcache_mp_frontend/lmcache_frontend/lmcache_mp_plugin/lmcache_mp_frontend_plugin.py) | Plugin script; reads config and launches the frontend app |
+| `simple_discover_service.py` | [lmcache_frontend](https://github.com/LMCache/lmcache_frontend/blob/lmcache_mp_frontend/lmcache_frontend/simple_discover_service.py) | Simple discovery service that receives heartbeats |
+| `app.py` | [lmcache_frontend](https://github.com/LMCache/lmcache_frontend/blob/lmcache_mp_frontend/lmcache_frontend/app.py) | Centralized LMCache frontend; proxies requests to backend nodes |
+
+**Data Flow**:
+
+```mermaid
+sequenceDiagram
+    participant CLI as CLI / server.py
+    participant P as lmcache_mp_frontend_plugin.py
+    participant FA as Frontend App (app.py)
+    participant DS as Discover Service
+
+    CLI->>P: LMCACHE_RUNTIME_PLUGIN_CONFIG (env)
+    P->>P: Parse http_frontend_config + extra_config
+    P->>FA: app.main(--nodes [...] --port ... --no-http)
+    loop Every N seconds
+        FA->>DS: GET /heartbeat?api_address=http://localhost:8080
+    end
+    DS->>DS: Store heartbeat data
+    Note over DS: GET /lmcache_infos returns active nodes
+```
+
+**Startup Commands**:
+
+```bash
+# 1. Start discover service
+python -m lmcache_frontend.simple_discover_service
+
+# 2. Start LMCache MP server with frontend plugin
+python -m lmcache.v1.multiprocess.http_server \
+    --host localhost --port 5555 \
+    --l1-size-gb 10 \
+    --http-host 0.0.0.0 --http-port 8080 \
+    --runtime-plugin-locations /path/to/lmcache_frontend/lmcache_frontend/lmcache_mp_plugin/ \
+    --runtime-plugin-config '{"plugin.frontend.heartbeat_url": "http://localhost:5000/heartbeat"}'
+```
+
+**How the Plugin Uses the Config**:
+
+1. Reads `http_host` / `http_port` from `http_frontend_config` to
+   auto-build the `--nodes` argument, avoiding duplicate CLI flags.
+2. Reads `plugin.frontend.*` keys from `runtime_plugin_extra_config`
+   and converts them into `app.main()` CLI arguments (e.g.
+   `--heartbeat-url`).
+
+---
+
+### Use Case 2: Chunk Hash File Upload Agent
+
+**Scenario**: LMCache produces JSONL-format chunk hash files during
+operation (see [PR #2928](https://github.com/LMCache/LMCache/pull/2928)).
+A plugin acts as an agent that periodically scans and uploads those
+files to a remote storage service (S3, HDFS, OSS, etc.).
+
+**Plugin Responsibilities**:
+
+1. Read `storage_manager_config` from
+   `LMCACHE_RUNTIME_PLUGIN_CONFIG` to determine the chunk hash file
+   output directory.
+2. Read upload target settings from `runtime_plugin_extra_config`
+   (e.g. `plugin.uploader.s3_bucket`, `plugin.uploader.prefix`).
+3. Periodically scan the output directory and upload newly
+   produced `.jsonl` files to remote storage.
+4. Optionally archive or delete local files after successful
+   upload.
 
 ---
 
@@ -252,7 +401,7 @@ See `examples/mp_runtime_plugins/` for reference implementations:
 ### Quick Start
 
 ```bash
-python -m lmcache.v1.multiprocess.server \
+python -m lmcache.v1.multiprocess.http_server \
     --host localhost --port 5555 \
     --l1-size-gb 10 \
     --eviction-policy LRU \

@@ -4,7 +4,7 @@ Unit tests for MPRuntimePluginLauncher.
 """
 
 # Standard
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from unittest.mock import patch
 import json
@@ -20,6 +20,12 @@ from lmcache.v1.multiprocess.mp_runtime_plugin_launcher import (
 # ---------------------------------------------------------------------------
 # Test dataclasses used as config fixtures
 # ---------------------------------------------------------------------------
+
+
+@dataclass
+class _FakeRuntimePluginConfig:
+    locations: list[str] = field(default_factory=list)
+    extra_config: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -54,9 +60,10 @@ class TestMPRuntimePluginLauncher:
         """Configs are aggregated into a single JSON dict."""
         srv = _FakeServerConfig(host="0.0.0.0", port=9090)
         stg = _FakeStorageConfig(backend="redis", capacity=2048)
+        rpc = _FakeRuntimePluginConfig(locations=["/plugins"])
 
         MPRuntimePluginLauncher(
-            runtime_plugin_locations=["/plugins"],
+            runtime_plugin_config=rpc,
             server=srv,
             storage=stg,
         )
@@ -76,9 +83,10 @@ class TestMPRuntimePluginLauncher:
     def test_init_with_non_serializable_fields(self, mock_rpl_cls):
         """Non-serializable fields are converted to str."""
         cfg = _FakeConfigWithPath(name="test", path=Path("/data"))
+        rpc = _FakeRuntimePluginConfig(locations=["/p"])
 
         MPRuntimePluginLauncher(
-            runtime_plugin_locations=["/p"],
+            runtime_plugin_config=rpc,
             my_config=cfg,
         )
 
@@ -89,17 +97,19 @@ class TestMPRuntimePluginLauncher:
     @patch("lmcache.v1.multiprocess.mp_runtime_plugin_launcher.RuntimePluginLauncher")
     def test_init_rejects_non_dataclass(self, mock_rpl_cls):
         """Passing a non-dataclass config raises TypeError."""
+        rpc = _FakeRuntimePluginConfig(locations=["/p"])
         with pytest.raises(TypeError, match="Expected a dataclass"):
             MPRuntimePluginLauncher(
-                runtime_plugin_locations=["/p"],
+                runtime_plugin_config=rpc,
                 bad_config={"not": "a dataclass"},
             )
 
     @patch("lmcache.v1.multiprocess.mp_runtime_plugin_launcher.RuntimePluginLauncher")
     def test_init_no_configs(self, mock_rpl_cls):
         """Launcher works with zero extra configs."""
+        rpc = _FakeRuntimePluginConfig(locations=["/p"])
         MPRuntimePluginLauncher(
-            runtime_plugin_locations=["/p"],
+            runtime_plugin_config=rpc,
         )
 
         wrapper = mock_rpl_cls.call_args[1]["config"]
@@ -108,8 +118,9 @@ class TestMPRuntimePluginLauncher:
     @patch("lmcache.v1.multiprocess.mp_runtime_plugin_launcher.RuntimePluginLauncher")
     def test_init_passes_no_role(self, mock_rpl_cls):
         """MP mode has no role; inner launcher gets role=None."""
+        rpc = _FakeRuntimePluginConfig(locations=["/p"])
         MPRuntimePluginLauncher(
-            runtime_plugin_locations=["/p"],
+            runtime_plugin_config=rpc,
         )
 
         call_kwargs = mock_rpl_cls.call_args[1]
@@ -118,8 +129,9 @@ class TestMPRuntimePluginLauncher:
     @patch("lmcache.v1.multiprocess.mp_runtime_plugin_launcher.RuntimePluginLauncher")
     def test_launch_plugins_delegates(self, mock_rpl_cls):
         """launch_plugins delegates to inner launcher."""
+        rpc = _FakeRuntimePluginConfig(locations=["/p"])
         launcher = MPRuntimePluginLauncher(
-            runtime_plugin_locations=["/p"],
+            runtime_plugin_config=rpc,
         )
         launcher.launch_plugins()
         mock_rpl_cls.return_value.launch_plugins.assert_called_once()
@@ -127,8 +139,9 @@ class TestMPRuntimePluginLauncher:
     @patch("lmcache.v1.multiprocess.mp_runtime_plugin_launcher.RuntimePluginLauncher")
     def test_stop_plugins_delegates(self, mock_rpl_cls):
         """stop_plugins delegates to inner launcher."""
+        rpc = _FakeRuntimePluginConfig(locations=["/p"])
         launcher = MPRuntimePluginLauncher(
-            runtime_plugin_locations=["/p"],
+            runtime_plugin_config=rpc,
         )
         launcher.stop_plugins()
         mock_rpl_cls.return_value.stop_plugins.assert_called_once()

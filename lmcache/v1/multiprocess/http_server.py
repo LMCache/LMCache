@@ -30,6 +30,9 @@ from lmcache.v1.multiprocess.config import (
     parse_args_to_http_frontend_config,
     parse_args_to_mp_server_config,
 )
+from lmcache.v1.multiprocess.mp_runtime_plugin_launcher import (
+    MPRuntimePluginLauncher,
+)
 
 logger = init_logger(__name__)
 
@@ -70,7 +73,26 @@ async def lifespan(app: FastAPI):
         return_engine=True,
     )
     assert result is not None, "run_cache_server returned None with return_engine=True"
-    zmq_server, engine, plugin_launcher = result
+    zmq_server, engine = result
+
+    # Launch runtime plugins if configured. Plugins receive the full
+    # server config (including HTTP frontend host/port) via the
+    # LMCACHE_RUNTIME_PLUGIN_CONFIG environment variable.
+    plugin_launcher = None
+    if mp_config.runtime_plugin_config.locations:
+        extra_kwargs = {}
+        http_frontend_config = _configs.get("http_frontend")
+        if http_frontend_config is not None:
+            extra_kwargs["http_frontend_config"] = http_frontend_config
+        plugin_launcher = MPRuntimePluginLauncher(
+            runtime_plugin_config=mp_config.runtime_plugin_config,
+            mp_config=mp_config,
+            storage_manager_config=_configs["storage_manager"],
+            obs_config=_configs["observability"],
+            **extra_kwargs,
+        )
+        plugin_launcher.launch_plugins()
+
     app.state.zmq_server = zmq_server
     app.state.engine = engine
     app.state.plugin_launcher = plugin_launcher
@@ -169,6 +191,7 @@ def run_http_server(
     _configs["mp"] = mp_config
     _configs["storage_manager"] = storage_manager_config
     _configs["observability"] = obs_config
+    _configs["http_frontend"] = http_config
 
     config = uvicorn.Config(
         app=app,
