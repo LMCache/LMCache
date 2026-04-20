@@ -156,6 +156,31 @@ class MemoryLayoutDesc:
             )
 
 
+@dataclass(frozen=True)
+class PrefetchHandle:
+    """Opaque handle returned by ``StorageManager.submit_prefetch_task``.
+
+    Carries the bookkeeping needed to later query lookup / prefetch status
+    without exposing controller internals.
+    """
+
+    prefetch_request_id: int
+    """Opaque ID for tracking L2 prefetch in the controller.
+    -1 if no L2 request was submitted."""
+
+    external_request_id: str
+    """Request ID from the caller for end-to-end tracing."""
+
+    l1_prefix_hit_count: int
+    """Number of leading keys already in L1 at submission time."""
+
+    total_requested_keys: int
+    """Total number of keys originally requested."""
+
+    submit_time: float
+    """Monotonic timestamp when the prefetch task was submitted."""
+
+
 def ipc_key_to_object_keys(
     ipc_key: IPCCacheEngineKey,
     chunk_hashes: list[bytes],

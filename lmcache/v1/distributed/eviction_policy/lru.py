@@ -77,6 +77,8 @@ class LRUEvictionPolicy(EvictionPolicy):
         Args:
             keys (list[ObjectKey]): The keys that have been created
         """
+        if not keys:
+            return
         with self._lock:
             # NOTE: for the request, the later keys should be evicted first.
             # For example, the request has (key1, key2, key3), if we first
@@ -97,6 +99,8 @@ class LRUEvictionPolicy(EvictionPolicy):
         Args:
             keys (list[ObjectKey]): The keys that have been accessed
         """
+        if not keys:
+            return
         with self._lock:
             # NOTE: for the request, the later keys should be evicted first.
             # The example is the same as `on_keys_created`.
@@ -113,6 +117,8 @@ class LRUEvictionPolicy(EvictionPolicy):
         Args:
             keys (list[ObjectKey]): The keys that have been deleted
         """
+        if not keys:
+            return
         with self._lock:
             for key in keys:
                 # Remove from LRU order tracking
