@@ -152,6 +152,35 @@ def _compute_max_token_slots(
     )
 
 
+def _build_layer_slot_mappings(
+    slot_mappings_by_layer: Optional[dict[str, torch.Tensor]],
+    device: str | torch.device,
+    token_limit: Optional[int] = None,
+) -> Optional[dict[str, torch.Tensor]]:
+    """Build per-layer slot mappings on the target device.
+
+    Args:
+        slot_mappings_by_layer: Optional mapping from layer name to full slot
+            mapping tensor.
+        device: Target device for the resulting tensors.
+        token_limit: Optional number of leading token slots to keep.
+
+    Returns:
+        A per-layer slot mapping dict on ``device``, or None when no per-layer
+        mappings were provided.
+    """
+    if slot_mappings_by_layer is None:
+        return None
+    return {
+        layer_name: (
+            mapping[:token_limit].to(device)
+            if token_limit is not None
+            else mapping.to(device)
+        )
+        for layer_name, mapping in slot_mappings_by_layer.items()
+    }
+
+
 @dataclass
 class RequestTracker:
     # Request id
@@ -1003,14 +1032,10 @@ class LMCacheConnectorV1Impl:
             token_mask[:masked_token_count] = False
 
             lmcache_cached_tokens = request.load_spec.lmcache_cached_tokens
-            slot_mappings_by_layer = request.slot_mappings_by_layer
-            slot_mappings = (
-                {
-                    layer_name: mapping[:lmcache_cached_tokens].to(self.device)
-                    for layer_name, mapping in slot_mappings_by_layer.items()
-                }
-                if slot_mappings_by_layer is not None
-                else None
+            slot_mappings = _build_layer_slot_mappings(
+                request.slot_mappings_by_layer,
+                self.device,
+                token_limit=lmcache_cached_tokens,
             )
             if self.use_layerwise:
                 if idx == last_idx:
@@ -1295,14 +1320,9 @@ class LMCacheConnectorV1Impl:
                 assert isinstance(token_ids, list)
 
                 slot_mapping = self._resolve_full_slot_mapping(request)
-                slot_mappings_by_layer = request.slot_mappings_by_layer
-                slot_mappings = (
-                    {
-                        layer_name: mapping.to(self.device)
-                        for layer_name, mapping in slot_mappings_by_layer.items()
-                    }
-                    if slot_mappings_by_layer is not None
-                    else None
+                slot_mappings = _build_layer_slot_mappings(
+                    request.slot_mappings_by_layer,
+                    self.device,
                 )
                 assert isinstance(slot_mapping, torch.Tensor)
                 assert len(slot_mapping) == len(token_ids)
@@ -1403,14 +1423,9 @@ class LMCacheConnectorV1Impl:
             token_ids = request.token_ids
 
             slot_mapping = self._resolve_full_slot_mapping(request)
-            slot_mappings_by_layer = request.slot_mappings_by_layer
-            slot_mappings = (
-                {
-                    layer_name: mapping.to(self.device)
-                    for layer_name, mapping in slot_mappings_by_layer.items()
-                }
-                if slot_mappings_by_layer is not None
-                else None
+            slot_mappings = _build_layer_slot_mappings(
+                request.slot_mappings_by_layer,
+                self.device,
             )
             assert isinstance(slot_mapping, torch.Tensor)
             assert len(slot_mapping) == len(token_ids)
