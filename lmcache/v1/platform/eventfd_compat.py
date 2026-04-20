@@ -21,16 +21,20 @@ _pipe_registry: dict[int, tuple[int, int]] = {}
 _eventfd_compat_installed: bool = False
 
 
-def _compat_eventfd() -> int:
+def _compat_eventfd(initval: int = 0, flags: int = 0) -> int:
     """Create an eventfd-like file descriptor via ``os.pipe``."""
     # Standard
     import fcntl
 
     r, w = os.pipe()
     for fd in (r, w):
-        flags = fcntl.fcntl(fd, fcntl.F_GETFL)
-        fcntl.fcntl(fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
+        fl = fcntl.fcntl(fd, fcntl.F_GETFL)
+        fcntl.fcntl(fd, fcntl.F_SETFL, fl | os.O_NONBLOCK)
         fcntl.fcntl(fd, fcntl.F_SETFD, fcntl.FD_CLOEXEC)
+
+    if initval > 0:
+        os.write(w, struct.pack("<Q", initval))
+
     _pipe_registry[r] = (r, w)
     return r
 
@@ -69,8 +73,28 @@ def _compat_eventfd_read(efd: int) -> int:
                 if len(chunk) == 8:
                     total += struct.unpack("<Q", chunk)[0]
     except (BlockingIOError, OSError):
-        pass
-    return total if total else 1
+        if total == 0:
+            raise
+    return total
+
+
+def eventfd_close(efd: int) -> None:
+    """Close a compat eventfd and its hidden write-end.
+
+    Prefer this over ``os.close`` for pipe-based eventfds so
+    that both ends of the underlying pipe are released.  On
+    native Linux eventfds this simply delegates to ``os.close``.
+    """
+    pair = _pipe_registry.pop(efd, None)
+    if pair is not None:
+        r, w = pair
+        for fd in (r, w):
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+    else:
+        os.close(efd)
 
 
 def install_eventfd_compat() -> None:
@@ -83,28 +107,26 @@ def install_eventfd_compat() -> None:
         return
     _eventfd_compat_installed = True
 
-    os.eventfd = lambda _i=0, _f=0: _compat_eventfd()  # type: ignore[attr-defined,misc]
+    os.eventfd = _compat_eventfd  # type: ignore[attr-defined,misc]
     os.eventfd_read = _compat_eventfd_read  # type: ignore[attr-defined,assignment]
     os.eventfd_write = _compat_eventfd_write  # type: ignore[attr-defined,assignment]
     os.EFD_NONBLOCK = 0  # type: ignore[attr-defined]
     os.EFD_CLOEXEC = 0  # type: ignore[attr-defined]
 
-    # Wrap os.close so that closing a pipe-based efd also
-    # closes the hidden write-end.
+    # Wrap os.close as a lightweight safety net so that
+    # callers who forget to use eventfd_close still clean
+    # up the hidden write-end.
     _orig_close = os.close
 
     def _patched_close(fd: int) -> None:
         pair = _pipe_registry.pop(fd, None)
         if pair is not None:
             r, w = pair
-            try:
-                _orig_close(r)
-            except OSError:
-                pass
-            try:
-                _orig_close(w)
-            except OSError:
-                pass
+            for f in (r, w):
+                try:
+                    _orig_close(f)
+                except OSError:
+                    pass
         else:
             _orig_close(fd)
 
