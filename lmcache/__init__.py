@@ -74,4 +74,4 @@ try:
     _ops = _get_backend()
     sys.modules["lmcache.c_ops"] = _ops
 except (ImportError, ModuleNotFoundError):
-    pass  # torch not installed; CLI-only usage does not need CUDA ops
+    logger.debug("No compute backend loaded; CLI-only mode (torch/numba not installed)")
