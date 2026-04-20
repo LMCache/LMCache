@@ -49,10 +49,7 @@ def _compat_eventfd_write(efd: int, value: int) -> None:
     if pair is None:
         raise OSError("compat_eventfd_write: unknown fd %d" % efd)
     _, w = pair
-    try:
-        os.write(w, struct.pack("<Q", value))
-    except BlockingIOError:
-        pass  # pipe buffer full, already signaled
+    os.write(w, struct.pack("<Q", value))
 
 
 def _compat_eventfd_read(efd: int) -> int:
@@ -83,7 +80,15 @@ def eventfd_close(efd: int) -> None:
 
     Prefer this over ``os.close`` for pipe-based eventfds so
     that both ends of the underlying pipe are released.  On
-    native Linux eventfds this simply delegates to ``os.close``.
+    native Linux eventfds this simply delegates to
+    ``os.close``.
+
+    Args:
+        efd: The eventfd file descriptor to close.
+
+    Raises:
+        OSError: If the underlying ``os.close`` fails on a
+            non-compat file descriptor.
     """
     pair = _pipe_registry.pop(efd, None)
     if pair is not None:
@@ -100,7 +105,14 @@ def eventfd_close(efd: int) -> None:
 def install_eventfd_compat() -> None:
     """Patch ``os`` with eventfd shims when missing.
 
-    Must be called exactly once, at platform package init time.
+    Must be called exactly once, at platform package init
+    time.  After this call, ``os.eventfd``,
+    ``os.eventfd_read``, ``os.eventfd_write``,
+    ``os.EFD_NONBLOCK``, and ``os.EFD_CLOEXEC`` are
+    available as pipe-backed emulations.
+
+    This is a no-op if native ``os.eventfd`` already exists
+    or if the shims have already been installed.
     """
     global _eventfd_compat_installed  # noqa: PLW0603
     if _eventfd_compat_installed or HAS_EVENTFD:
