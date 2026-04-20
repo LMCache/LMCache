@@ -163,6 +163,9 @@ class L1EvictionPolicy(L1ManagerListener):
     def on_l1_keys_finish_write_and_reserve_read(self, keys: list[ObjectKey]):
         self._policy.on_keys_created(keys)
 
+    def on_l1_keys_accessed(self, keys: list[ObjectKey]):
+        self._policy.on_keys_touched(keys)
+
 
 class L2EvictionPolicy(L2AdapterListener):
     """
