@@ -143,7 +143,7 @@ class MockSyncGlideClient:
 
     _store: dict[bytes, bytes] = {}
 
-    def set(self, key: bytes, value) -> None:
+    def set(self, key: bytes, value, **kwargs) -> None:
         self._store[key] = bytes(value)
 
     def get(self, key: bytes):
@@ -167,7 +167,7 @@ class MockRedis:
         self.url = url
         self.decode_responses = decode_responses
 
-    def set(self, key, value):
+    def set(self, key, value, **kwargs):
         self.store[key] = value
         return True
 
@@ -340,7 +340,7 @@ class MockRedisCluster:
         self.decode_responses = decode_responses
         self.store = {}
 
-    async def set(self, key, value):
+    async def set(self, key, value, **kwargs):
         self.store[key] = value
         return True
 
