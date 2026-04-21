@@ -15,12 +15,14 @@ pytestmark = pytest.mark.skipif(
 
 # First Party
 from lmcache.v1.gpu_connector.utils import (  # noqa: E402
+    get_device,
     get_group_data_ptrs,
     get_layer_data_ptrs,
     get_layer_dtype,
     get_layer_kv_caches,
     get_layer_shape_signature,
     make_page_buffer_shape_desc,
+    normalize_kv_caches_for_discovery,
 )
 import lmcache.c_ops as lmc_ops  # noqa: E402
 
@@ -198,6 +200,30 @@ def test_shape_signature_mla_forces_nh_one():
     fmt = lmc_ops.GPUKVFormat.NL_X_NB_BS_HS
     sig = get_layer_shape_signature(kv_caches, fmt, layer_idx=0)
     assert sig == (1, 1, 512)
+
+
+def test_normalize_preserves_bare_tensor():
+    """A bare torch.Tensor input (cross-layer shape) must pass through
+    normalize unchanged — no list wrapping — so the KVCaches recursive
+    union is respected end-to-end."""
+    big = torch.empty(32, 80, 2, 16, 8, 64, dtype=torch.bfloat16, device="cuda")
+    out, names = normalize_kv_caches_for_discovery(big)
+    assert isinstance(out, torch.Tensor)
+    assert out is big
+    assert names is None
+
+
+def test_get_device_handles_every_kvcaches_shape():
+    """get_device must work for every KVCaches shape without format hints."""
+    t = torch.empty(8, dtype=torch.bfloat16, device="cuda")
+    assert get_device(t) == t.device
+
+    flat = [torch.empty(4, dtype=torch.bfloat16, device="cuda") for _ in range(3)]
+    assert get_device(flat) == flat[0].device
+
+    k = [torch.empty(4, dtype=torch.bfloat16, device="cuda") for _ in range(2)]
+    v = [torch.empty(4, dtype=torch.bfloat16, device="cuda") for _ in range(2)]
+    assert get_device([k, v]) == k[0].device
 
 
 if __name__ == "__main__":
