@@ -70,15 +70,17 @@ class NixlStorageConfig:
 
     @staticmethod
     def validate_nixl_backend(dynamic_storage: bool, backend: str, device: str):
-        if dynamic_storage:  # For now only supports OBJ backend
+        if dynamic_storage:  # For now only supports OBJ and AZURE_BLOB backend
             if backend in ("OBJ",):
                 return device == "cpu" or device == "cuda"
+            elif backend in ("AZURE_BLOB",):
+                return device == "cpu"
             else:
                 return False
         else:
             if backend in ("GDS", "GDS_MT", "OBJ"):
                 return device == "cpu" or device == "cuda"
-            elif backend in ("POSIX", "HF3FS"):
+            elif backend in ("POSIX", "HF3FS", "AZURE_BLOB"):
                 return device == "cpu"
             else:
                 return False
@@ -434,7 +436,7 @@ class NixlDynamicStorageAgent(NixlStorageAgent):
     ):
         super().__init__(allocator, device, backend, backend_params)
 
-        if backend == "OBJ":
+        if backend in ("OBJ", "AZURE_BLOB"):
             self.mem_type = "OBJ"
         else:
             # Already validated in validate_nixl_backend
@@ -684,7 +686,7 @@ class NixlStaticStorageBackend(NixlStorageBackend):
     def createPool(backend: str, size: int, path: str, use_direct_io: bool):
         if backend in ("GDS", "GDS_MT", "POSIX", "HF3FS"):
             return NixlFilePool(size, path, use_direct_io)
-        elif backend in ("OBJ"):
+        elif backend in ("OBJ", "AZURE_BLOB"):
             return NixlObjectPool(size)
         else:
             raise ValueError(f"Unsupported NIXL backend: {backend}")
