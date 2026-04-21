@@ -171,9 +171,10 @@ class S3Connector(RemoteConnector):
     def _format_safe_path(self, key_str: str) -> str:
         """
         Generate a safe HTTP path for the S3 key.
-        Flattens the key by replacing slashes with underscores and URL-encodes
-        any special characters. If s3_bucket is set, prepends the bucket name
-        to the path for path-style access (for non-AWS S3 servers like Dell ObjectScale).
+        Flattens the key by replacing slashes with underscores and
+        URL-encodes any special characters. If s3_bucket is set,
+        prepends the bucket name to the path for path-style access
+        (for non-AWS S3 servers like Dell ObjectScale).
         """
         flat_key_str = key_str.replace("/", "_")
         if self.s3_bucket:
