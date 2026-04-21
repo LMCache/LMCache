@@ -190,7 +190,7 @@ MPRuntimePluginLauncher.__init__(
     mp_config,               # ZMQ server config
     storage_manager_config,  # storage config
     obs_config,              # observability config
-    http_frontend_config,    # HTTP frontend config (optional)
+    http_config,             # HTTP config (optional)
 )
 ```
 
@@ -229,7 +229,7 @@ MPRuntimePluginLauncher.__init__(
     "logging_enabled": true,
     "tracing_enabled": false
   },
-  "http_frontend_config": {
+  "http_config": {
     "http_host": "0.0.0.0",
     "http_port": 8080
   },
@@ -253,7 +253,7 @@ raw = os.getenv("LMCACHE_RUNTIME_PLUGIN_CONFIG", "{}")
 config = json.loads(raw)
 
 mp_cfg = config.get("mp_config", {})
-http_cfg = config.get("http_frontend_config", {})
+http_cfg = config.get("http_config", {})
 extra = config.get("runtime_plugin_extra_config", {})
 ```
 
@@ -285,7 +285,7 @@ sequenceDiagram
     participant DS as Discover Service
 
     CLI->>P: LMCACHE_RUNTIME_PLUGIN_CONFIG (env)
-    P->>P: Parse http_frontend_config + extra_config
+    P->>P: Parse http_config + extra_config
     P->>FA: app.main(--nodes [...] --port ... --no-http)
     loop Every N seconds
         FA->>DS: GET /heartbeat?api_address=http://localhost:8080
@@ -311,7 +311,7 @@ python -m lmcache.v1.multiprocess.http_server \
 
 **How the Plugin Uses the Config**:
 
-1. Reads `http_host` / `http_port` from `http_frontend_config` to
+1. Reads `http_host` / `http_port` from `http_config` to
    auto-build the `--nodes` argument, avoiding duplicate CLI flags.
 2. Reads `plugin.frontend.*` keys from `runtime_plugin_extra_config`
    and converts them into `app.main()` CLI arguments (e.g.

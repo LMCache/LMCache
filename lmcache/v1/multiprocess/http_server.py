@@ -76,14 +76,14 @@ async def lifespan(app: FastAPI):
     zmq_server, engine = result
 
     # Launch runtime plugins if configured. Plugins receive the full
-    # server config (including HTTP frontend host/port) via the
+    # server config (including HTTP host/port) via the
     # LMCACHE_RUNTIME_PLUGIN_CONFIG environment variable.
     plugin_launcher = None
     if mp_config.runtime_plugin_config.locations:
         extra_kwargs = {}
-        http_frontend_config = _configs.get("http_frontend")
-        if http_frontend_config is not None:
-            extra_kwargs["http_frontend_config"] = http_frontend_config
+        http_config = _configs.get("http")
+        if http_config is not None:
+            extra_kwargs["http_config"] = http_config
         plugin_launcher = MPRuntimePluginLauncher(
             runtime_plugin_config=mp_config.runtime_plugin_config,
             mp_config=mp_config,
@@ -191,7 +191,7 @@ def run_http_server(
     _configs["mp"] = mp_config
     _configs["storage_manager"] = storage_manager_config
     _configs["observability"] = obs_config
-    _configs["http_frontend"] = http_config
+    _configs["http"] = http_config
 
     config = uvicorn.Config(
         app=app,
