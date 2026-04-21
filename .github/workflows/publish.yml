@@ -173,6 +173,12 @@ jobs:
                 cp pyproject_cli.toml pyproject.toml
                 NO_CUDA_EXT=1 python -m build --wheel
 
+            - name: Smoke-test CLI wheel (no torch)
+              run: |
+                pip install dist/lmcache_cli-*.whl
+                python -c "import lmcache"
+                lmcache --help
+
             - name: Upload CLI release artifacts to GHA
               uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
               with:
