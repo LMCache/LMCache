@@ -163,19 +163,19 @@ _process_new_keys(keys)
   ├─ 2. For each adapter target:
   │     L1Manager.reserve_read(target_keys)  → get MemoryObj + read lock
   │     adapter.submit_store_task(keys, objs)
-  │     Track as InFlightStoreRequest
+  │     Track as InFlightStoreTask
   │
   ▼ (later, for each adapter whose store_efd signaled)
 _drain_l2_store_completions(signaled_adapters)
   │  adapter.pop_completed_store_tasks() → deposit success/failure
-  │  on each InFlightStoreRequest.l2_store_result
+  │  on each InFlightStoreTask.l2_store_result
   │
   ▼
-_advance_request(task_key, request, signaled_adapters)  [state transition]
+_advance_request(task_key, task, signaled)  [state transition]
   │  skip if adapter not signaled or l2_store_result still None
   │
   ▼
-_finalize_store(task_key, request)  [terminal execution]
+_finalize_store(task_key, task)  [terminal execution]
   │
   ├─ 3. L1Manager.finish_read(read_locked_keys)  → release read locks
   │
@@ -196,8 +196,8 @@ Done. Keys remain in L1 unless the policy deletes them.
 
 - **Read locks during store** prevent eviction from removing L1 data while the
   adapter is reading it.
-- **Always released:** `stop()` calls `_cleanup_in_flight_requests()` which releases
-  all in-flight read locks, even if requests haven't completed.
+- **Always released:** `stop()` calls `_cleanup_in_flight_tasks()` which releases
+  all in-flight read locks, even if tasks haven't completed.
 
 ### StorePolicy
 
