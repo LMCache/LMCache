@@ -1917,8 +1917,8 @@ class LMCacheEngineBuilder:
             )
 
         if config.gds_path is not None:
-            assert config.cufile_buffer_size is not None
-            return CuFileMemoryAllocator(config.cufile_buffer_size * 1024**2)
+            assert config.gds_buffer_size is not None
+            return CuFileMemoryAllocator(config.gds_buffer_size * 1024**2)
 
         max_local_cpu_size = config.max_local_cpu_size
         # save_only_first_rank only works when use mla

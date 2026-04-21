@@ -116,6 +116,9 @@ class StoreListener(L1ManagerListener):
         # objects are prefetched to L1.
         pass
 
+    def on_l1_keys_accessed(self, keys: list[ObjectKey]) -> None:
+        pass
+
     def close(self) -> None:
         """Close the eventfd."""
         os.close(self._event_fd)
