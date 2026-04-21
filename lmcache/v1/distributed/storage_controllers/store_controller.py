@@ -11,6 +11,7 @@ The controller runs a background thread with an event-driven loop that:
 
 # Standard
 from dataclasses import dataclass
+import enum
 import os
 import select
 import threading
@@ -122,6 +123,15 @@ class StoreListener(L1ManagerListener):
     def close(self) -> None:
         """Close the eventfd."""
         os.close(self._event_fd)
+
+
+class StorePhase(enum.Enum):
+    """Phases a store request may be in. Currently there is only an
+    L2_STORE phase; new phases (e.g. verify, ack) would be added here and
+    threaded through ``signaled`` without changing ``_advance_request``'s
+    signature."""
+
+    L2_STORE = enum.auto()
 
 
 @dataclass
@@ -260,7 +270,9 @@ class StoreController(StorageControllerInterface):
         while not self._stop_flag.is_set():
             ready = poller.poll(STORE_LOOP_POLL_TIMEOUT_MS)
 
-            signaled_adapters: set[int] = set()
+            signaled: dict[StorePhase, set[int]] = {
+                phase: set() for phase in StorePhase
+            }
             for fd, events in ready:
                 if not (events & select.POLLIN):
                     continue
@@ -279,19 +291,18 @@ class StoreController(StorageControllerInterface):
                     else:
                         adapter_idx = self._efd_to_adapter_index.get(fd)
                         if adapter_idx is not None:
-                            signaled_adapters.add(adapter_idx)
+                            signaled[StorePhase.L2_STORE].add(adapter_idx)
                 except Exception:
                     logger.exception(
                         "Unexpected error in store loop while processing fd %d",
                         fd,
                     )
 
-            if signaled_adapters:
+            if any(signaled.values()):
                 try:
-                    self._drain_l2_store_completions(signaled_adapters)
+                    self._drain_l2_store_completions(signaled[StorePhase.L2_STORE])
                     for task_key, request in list(self._in_flight_requests.items()):
-                        if request.adapter_index in signaled_adapters:
-                            self._advance_request(task_key, request)
+                        self._advance_request(task_key, request, signaled)
                 except Exception:
                     logger.exception(
                         "Unexpected error advancing in-flight store requests"
@@ -399,9 +410,13 @@ class StoreController(StorageControllerInterface):
         self,
         task_key: tuple[int, L2TaskId],
         request: InFlightStoreRequest,
+        signaled: dict[StorePhase, set[int]],
     ) -> None:
-        """State-transition step. Delegate to ``_finalize_store`` once the
-        L2 outcome has been recorded."""
+        """State-transition dispatcher. With only one phase today, delegate
+        to ``_finalize_store`` when the owning adapter's L2 store efd has
+        signaled and the outcome has been recorded."""
+        if request.adapter_index not in signaled[StorePhase.L2_STORE]:
+            return
         if request.l2_store_result is None:
             return
         self._finalize_store(task_key, request)
