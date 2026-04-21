@@ -698,44 +698,11 @@ class LMCacheConnectorV1Impl:
         return VLLM_VERSION
 
     def _build_kv_layer_groups(self):
-        # Build KV layer groups structure if not already built
-        if self.lmcache_engine is None:
-            return
-        if self.lmcache_engine.metadata.kv_layer_groups_manager is not None:
-            return
-        assert len(self.kv_caches) > 0
-
-        # First Party
-        from lmcache.utils import EngineType
-        from lmcache.v1.gpu_connector.utils import (
-            discover_gpu_kv_format,
-            get_block_size,
-            get_num_blocks,
-            normalize_kv_caches_for_discovery,
-        )
-        from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
-
-        layout_hints = (
-            getattr(self.lmcache_engine.gpu_connector, "layout_hints", None) or {}
-        )
-        kv_list, layer_names = normalize_kv_caches_for_discovery(
-            self.kv_caches, layout_hints=layout_hints
-        )
-        # Keep self.kv_caches aligned with any contiguous views produced by the
-        # normalization so downstream store/retrieve paths (which pass
-        # list(self.kv_caches.values()) to the connector) see the same memory.
-        if isinstance(self.kv_caches, dict) and layer_names is not None:
-            self.kv_caches = dict(zip(layer_names, kv_list, strict=True))
-        gpu_kv_format = discover_gpu_kv_format(
-            kv_list, EngineType.VLLM, layout_hints=layout_hints
-        )
-        self.lmcache_engine.metadata.kv_layer_groups_manager = KVLayerGroupsManager(
-            kv_list,
-            gpu_kv_format=gpu_kv_format,
-            num_blocks=get_num_blocks(kv_list, gpu_kv_format),
-            block_size=get_block_size(kv_list, gpu_kv_format),
-            layer_names=layer_names,
-        )
+        # The KVLayerGroupsManager is built lazily by the connector's
+        # _initialize_kv_cache_pointers on the first store/retrieve, where
+        # layout_hints, format discovery, and contiguity all already live.
+        # Nothing to do at register time beyond storing self.kv_caches.
+        return
 
     # TODO(chunxiaozheng): in the latest lmcache_connector, we use `register_kv_caches`
     #  to init self.kv_caches, we keep it in order to be compatible with old versions

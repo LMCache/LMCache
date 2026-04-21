@@ -28,6 +28,7 @@ from lmcache.v1.gpu_connector.utils import (
     normalize_kv_caches_for_discovery,
     permute_kv_caches_to_contiguous,
 )
+from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
 from lmcache.v1.memory_management import GPUMemoryAllocator  # noqa: E501
 from lmcache.v1.memory_management import MemoryFormat, MemoryObj
 from lmcache.v1.metadata import LMCacheMetadata
@@ -454,31 +455,35 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
         return cls(metadata, device, use_gpu, layout_hints=layout_hints)
 
     def _initialize_kv_cache_pointers(self):
-        """Build per-group GPU pointer tensors and cache discovery results
-        on the connector.
+        """Discover KV-cache layout, build the layer-groups manager, and
+        capture per-group GPU pointer tensors.
 
-        The manager is the single source of truth for ``gpu_kv_format``,
-        ``num_blocks``, and ``block_size`` — these are populated when the
-        serving-engine adapter constructs the manager at KV-cache
-        registration. This method trusts those fields; no re-discovery.
+        All layout-adjacent work lives here: the connector already owns
+        ``layout_hints`` and the actual ``self.kvcaches`` tensors, so the
+        serving-engine adapter stays agnostic to format.
         """
         if self.init:
             return
-        manager = self.metadata.kv_layer_groups_manager
-        assert manager is not None, (
-            "KVLayerGroupsManager must be registered before connector init; "
-            "the serving-engine adapter constructs it when KV caches register."
-        )
-        assert manager.kv_layer_groups
 
         self.kvcaches, _ = normalize_kv_caches_for_discovery(
             self.kvcaches, layout_hints=self.layout_hints
         )
-        self.gpu_kv_format = manager.gpu_kv_format
-        self.num_blocks = manager.num_blocks
-        self.block_size = manager.block_size
+        self.gpu_kv_format = discover_gpu_kv_format(
+            self.kvcaches, EngineType.VLLM, layout_hints=self.layout_hints
+        )
+        self.num_blocks = get_num_blocks(self.kvcaches, self.gpu_kv_format)
+        self.block_size = get_block_size(self.kvcaches, self.gpu_kv_format)
         self.page_buffer_size = self.num_blocks * self.block_size
         self.head_size = get_head_size(self.kvcaches, self.gpu_kv_format)
+
+        if self.metadata.kv_layer_groups_manager is None:
+            self.metadata.kv_layer_groups_manager = KVLayerGroupsManager(
+                self.kvcaches,
+                gpu_kv_format=self.gpu_kv_format,
+                num_blocks=self.num_blocks,
+                block_size=self.block_size,
+            )
+        manager = self.metadata.kv_layer_groups_manager
 
         if self.use_gpu:
             tmp_buf_shapes = self.metadata.get_shapes(self.chunk_size)
