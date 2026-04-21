@@ -337,6 +337,19 @@ logging, tracing).
    * - ``--prometheus-port``
      - ``9090``
      - Port for the Prometheus ``/metrics`` endpoint.
+   * - ``--metrics-sample-rate``
+     - ``0.01``
+     - Fraction of chunks/blocks to track for lifecycle histograms
+       (0, 1.0]. Counters always count all events.
+   * - ``--trace-level``
+     - *(none)*
+     - Enable trace recording at the given level. Currently only
+       ``storage`` is supported (records ``StorageManager`` public-API
+       calls for offline replay). See :doc:`observability` for details.
+   * - ``--trace-output``
+     - *(none)*
+     - Path to write the trace file. If omitted while ``--trace-level``
+       is set, a timestamped file under ``$TMPDIR`` is minted.
 
 vLLM Client Configuration
 --------------------------
@@ -397,6 +410,5 @@ Full Example
         --l2-prefetch-max-in-flight 8 \
         --l2-adapter '{"type": "nixl_store", "backend": "POSIX", "backend_params": {"file_path": "/data/lmcache/l2", "use_direct_io": "false"}, "pool_size": 64}' \
         --prometheus-port 9090 \
-        --prometheus-log-interval 10 \
-        --enable-telemetry \
-        --telemetry-processor '{"type": "logging", "log_level": "DEBUG"}'
+        --metrics-sample-rate 0.01 \
+        --enable-tracing --otlp-endpoint http://localhost:4317

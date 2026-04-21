@@ -38,20 +38,20 @@ All client commands use a `--url` flag pointing to the **LMCache HTTP server**
 ### `lmcache server`
 
 Replaces `python3 -m lmcache.v1.multiprocess.http_server`. Runs in foreground,
-Ctrl-C to stop. HTTP frontend is enabled by default; use `--no-http` to run
-ZMQ-only.
+Ctrl-C to stop. Always starts both the ZMQ server and the HTTP frontend
+(bind the HTTP frontend to a loopback interface via `--http-host 127.0.0.1`
+if the management endpoints should not be externally reachable).
 
 ```bash
 lmcache server \
     --engine-type blend --host 0.0.0.0 --port 5555 \
     --max-gpu-workers 2 \
-    --l1-size-gb 60 --eviction-policy LRU \
-    --no-http  # opt out of HTTP frontend
+    --l1-size-gb 60 --eviction-policy LRU
 ```
 
 Server args are composed from existing helpers: `add_mp_server_args()`,
-`add_storage_manager_args()`, `add_prometheus_args()`, `add_telemetry_args()`,
-`add_http_frontend_args()`.
+`add_storage_manager_args()`, `add_http_frontend_args()`,
+`add_observability_args()`.
 
 ### `lmcache describe`
 
