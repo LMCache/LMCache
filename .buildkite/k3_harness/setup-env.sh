@@ -31,13 +31,18 @@ uv pip install -U "vllm[runai,tensorizer,flashinfer]" --pre \
     --extra-index-url https://download.pytorch.org/whl/cu130 \
     --index-strategy unsafe-best-match
 
-# Probe the vLLM CLI import chain. This is the same chain that `vllm serve`
-# runs at startup, so anything that fails here would otherwise surface 180s
-# later as a silent "vLLM failed to start on port 8000" timeout in the test
-# harness. Shared between the pre-install auto-heal loop below and the
-# post-install hard probe at the end of this script.
+# Probe the vLLM CLI by invoking `vllm --help` as a subprocess. This is the
+# only probe that exercises the full import chain that `vllm serve` runs:
+# vllm.entrypoints.cli.main.main() triggers `import vllm.entrypoints.cli.
+# benchmark.main` *inside* the function body, which in turn loads
+# vllm.config.model -> vllm.transformers_utils.config -> `from transformers
+# import GenerationConfig, PretrainedConfig`. A plain `from vllm.entrypoints.
+# cli.main import main` only resolves the `main` symbol; it never executes
+# the function, so it silently passes even when the CLI is broken. Shared
+# between the pre-install auto-heal loop below and the post-install hard
+# probe at the end of this script.
 probe_vllm_cli() {
-    python -c "from vllm.entrypoints.cli.main import main" 2>&1
+    vllm --help 2>&1 >/dev/null
 }
 
 # vLLM nightlies periodically add eager imports of packages that aren't in
@@ -108,14 +113,32 @@ if ! diff -q /tmp/env-before-lmcache.txt /tmp/env-after-lmcache.txt >/dev/null; 
     diff /tmp/env-before-lmcache.txt /tmp/env-after-lmcache.txt || true
 fi
 
+echo "--- :broom: Evict stale bytecode from base-image layers"
+# The CI base image pre-installs packages from requirements/*.txt at build
+# time, which populates /opt/venv/lib/python3.12/site-packages/<pkg>/
+# __pycache__/*.pyc. When setup-env.sh later upgrades those packages via
+# `uv pip install -U vllm ...`, uv extracts the new wheel with the mtimes
+# recorded in the wheel itself -- frequently older than the pre-existing
+# .pyc files from the base-image build. Python's import system compares
+# .py vs .pyc mtimes and will keep using the older .pyc, so code runs the
+# 5.5.0 bytecode for transformers/__init__.py even though the .py on disk
+# is 5.5.4. That produces:
+#   ImportError: cannot import name 'GenerationConfig' from 'transformers'
+# at `vllm serve` time, despite a clean install log. Wipe __pycache__ for
+# every site-packages entry so Python is forced to re-byte-compile from
+# the current .py sources on next import.
+find /opt/venv/lib/python3.12/site-packages -type d -name __pycache__ \
+    -exec rm -rf {} + 2>/dev/null || true
+
 echo "--- :mag: Post-install CLI chain probe"
 # The LMCache editable install can downgrade transitive deps to honor the
 # caps in requirements/common.txt. If that leaves the env in a state where
-# the vLLM CLI import chain (vllm.entrypoints.cli.main → vllm.config →
-# vllm.transformers_utils.config → `from transformers import ...`) fails,
-# the only other signal is a 180s `wait_for_server` timeout inside each
-# test harness. Re-probe the full chain here so broken envs fail fast with
-# the actual traceback instead of a generic timeout.
+# `vllm --help` cannot complete its import chain (vllm.entrypoints.cli.
+# main.main() -> vllm.entrypoints.cli.benchmark.main -> vllm.config ->
+# vllm.transformers_utils.config -> `from transformers import ...`), the
+# only other signal is a 180s `wait_for_server` timeout inside each test
+# harness. Re-probe the full chain here so broken envs fail fast with the
+# actual traceback instead of a generic timeout.
 if err=$(probe_vllm_cli); then
     echo "vLLM CLI import chain OK post-install."
 else
