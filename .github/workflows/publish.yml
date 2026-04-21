@@ -118,6 +118,8 @@ jobs:
               # this will build lmcache with the latest version of torch
               # building from source will be required if a serving engine uses
               # an earlier non-ABI compatible version of torch
+              env:
+                CIBW_TEST_COMMAND: "python -c 'import lmcache.c_ops'"
               run: |
                 python -m cibuildwheel --output-dir dist
 
@@ -175,6 +177,96 @@ jobs:
               uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
               with:
                 name: release-cli-artifacts
+                path: dist/
+
+    # Build cu130 wheel and upload to GHA artifact storage
+    # The cu13 wheel carries no local version suffix and is published to a
+    # dedicated v{tag}-cu13 GitHub Release (not PyPI).
+    build-cu130-artifacts:
+        needs: changes
+        if: needs.changes.outputs.lmcache == 'true'
+        name: Build cu130 artifacts
+        runs-on: ubuntu-latest
+        steps:
+            - name: "Harden Runner"
+              uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
+              with:
+                disable-sudo-and-containers: false
+                egress-policy: block
+                allowed-endpoints: >
+                  api.github.com:443
+                  github.com:443
+                  registry-1.docker.io:443
+                  index.docker.io:443
+                  production.cloudflare.docker.com:443
+                  auth.docker.io:443
+                  azure.archive.ubuntu.com:80
+                  pypi.org:443
+                  files.pythonhosted.org:443
+                  codeload.github.com:443
+                  objects.githubusercontent.com:443
+                  releases.githubusercontent.com:443
+                  download.pytorch.org:443
+                  download-r2.pytorch.org:443
+                  pypi.nvidia.com:443
+
+            - name: Checkout code
+              uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+              with:
+                fetch-depth: 0
+
+            - name: Login to DockerHub
+              if: vars.DOCKERHUB_USERNAME != ''
+              uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef # v3.6.0
+              with:
+                username: ${{ vars.DOCKERHUB_USERNAME }}
+                password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+            - name: Free disk space
+              uses: ./.github/actions/free-disk-space
+
+            - name: Setup Python 3.13
+              uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
+              with:
+                python-version: "3.13"
+
+            - name: Install build tooling
+              run: |
+                python -m pip install --upgrade pip
+                pip install build cibuildwheel
+
+            - name: Clean up release artifacts
+              run: |
+                rm -rf dist/
+
+            - name: Get base version for cu13 wheel
+              run: |
+                BASE=$(git describe --tags --abbrev=0 2>/dev/null | sed 's/^v//' || echo "0.0.0.dev")
+                echo "CU130_VERSION=${BASE}" >> "$GITHUB_ENV"
+
+            - name: Build cu130 CUDA wheels with cibuildwheel
+              env:
+                CIBW_MANYLINUX_X86_64_IMAGE: docker.io/pytorch/manylinux2_28-builder:cuda13.0
+                CIBW_ENVIRONMENT: 'TORCH_CUDA_ARCH_LIST="8.0;8.6;8.9;9.0;10.0;12.0" ENABLE_CXX11_ABI=1 SETUPTOOLS_SCM_PRETEND_VERSION=${{ env.CU130_VERSION }} PIP_EXTRA_INDEX_URL=https://download.pytorch.org/whl/cu130'
+                CIBW_REPAIR_WHEEL_COMMAND_LINUX: >-
+                  auditwheel repair
+                  --plat manylinux_2_28_x86_64
+                  --exclude libtorch.so
+                  --exclude libtorch_cuda.so
+                  --exclude libtorch_python.so
+                  --exclude libtorch_cpu.so
+                  --exclude libc10.so
+                  --exclude libc10_cuda.so
+                  --exclude libcudart.so.13
+                  -w {dest_dir} {wheel}
+                CIBW_TEST_COMMAND: "python -c 'import lmcache.c_ops'"
+              run: |
+                python -m cibuildwheel --output-dir dist
+
+            - name: Upload cu130 release artifacts to GHA
+              uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+              with:
+                name: release-cu130-artifacts
                 path: dist/
 
     # Run tests and code quality checks before publishing
@@ -371,15 +463,64 @@ jobs:
               with:
                 verbose: true
 
+    # Publish cu130 wheel to GitHub Release (not PyPI) when a release is published
+    publish-cu130-github-release:
+        name: Publish cu130 wheel to GitHub Release
+        if: |
+            !failure() && !cancelled() &&
+            needs.changes.outputs.lmcache == 'true' &&
+            github.repository_owner == 'LMCache' && github.event.action == 'published'
+        permissions:
+            contents: write
+        runs-on: ubuntu-latest
+        needs: [changes, build-cu130-artifacts, test, code-quality]
+
+        steps:
+            - name: Harden Runner
+              uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
+              with:
+                  disable-sudo-and-containers: false
+                  egress-policy: block
+                  allowed-endpoints: >
+                    api.github.com:443
+                    uploads.github.com:443
+
+            - name: Fetch cu130 release artifacts
+              uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+              with:
+                  name: release-cu130-artifacts
+                  path: dist
+
+            - name: Publish cu13.0 wheel to dedicated GitHub Release
+              env:
+                  GITHUB_TOKEN: ${{ github.token }}
+              run: |
+                  gh release create "${{ github.ref_name }}-cu13" \
+                    --repo ${{ github.repository }} \
+                    --latest=false \
+                    --title "Release ${{ github.ref_name }} · CUDA 13.0" \
+                    --notes "CUDA 13.0 wheel for LMCache ${{ github.ref_name }}.
+
+                  \`\`\`
+                  VERSION=${{ github.ref_name }}
+                  uv pip install lmcache==${VERSION#v} \\
+                    --extra-index-url https://download.pytorch.org/whl/cu130 \\
+                    --find-links https://github.com/${{ github.repository }}/releases/expanded_assets/${VERSION}-cu13 \\
+                    --index-strategy unsafe-best-match
+                  \`\`\`" \
+                    dist/*.whl
+
     # Build container image and push to DockerHub when:
     # - a new GitHub release is created
     publish-image:
         name: Publish image to DockerHub
         if: |
+            needs.publish-pypi.result == 'success' &&
+            !cancelled() &&
             github.repository_owner == 'LMCache' && github.event.action == 'published'
 
         runs-on: ubuntu-latest
-        needs: publish-pypi
+        needs: [publish-pypi, publish-cu130-github-release]
 
         steps:
             - name: "Harden Runner"
@@ -403,6 +544,8 @@ jobs:
                   wrapdb.mesonbuild.com:443
                   nvcr.io:443
                   layers.nvcr.io:443
+                  wheels.vllm.ai:443
+                  download.pytorch.org:443
 
             - name: Login to DockerHub
               uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef # v3.6.0
@@ -426,10 +569,11 @@ jobs:
               run: |
                 echo "LATEST_TAG=$(git describe --tags --abbrev=0)" >> "$GITHUB_ENV"
 
-            - name: Build lmcache/vllm-openai container image with latest releases
+            - name: Build lmcache/vllm-openai container image (cu12.9)
               run: |
                 docker build \
-                --build-arg CUDA_VERSION=12.8 --build-arg UBUNTU_VERSION=24.04 \
+                --build-arg BASE_IMAGE=nvcr.io/nvidia/cuda-dl-base:25.06-cuda12.9-devel-ubuntu24.04 \
+                --build-arg CUDA_VERSION=12.9 \
                 --target image-release \
                 --tag lmcache/vllm-openai:latest --tag lmcache/vllm-openai:${{ env.LATEST_TAG }} \
                 --file docker/Dockerfile .
@@ -438,18 +582,18 @@ jobs:
               run: |
                 docker push lmcache/vllm-openai:latest
                 docker push lmcache/vllm-openai:${{ env.LATEST_TAG }}
-            
+
             - name: Clean up Docker layers and cache
               run: |
                 docker system prune -f --all
                 docker builder prune -af
 
             - name: Build lmcache/vllm-openai:lightweight
-              run: | 
+              run: |
                 docker build \
                 --tag lmcache/vllm-openai:lightweight --tag lmcache/vllm-openai:${{ env.LATEST_TAG }}-lightweight \
                 --file docker/Dockerfile.lightweight .
-            
+
             - name: Push lmcache/vllm-openai:lightweight image to DockerHub
               run: |
                 docker push lmcache/vllm-openai:lightweight
@@ -460,15 +604,61 @@ jobs:
                 docker system prune -f --all
                 docker builder prune -af
 
-            - name: Build lmcache/standalone container image
+            - name: Build lmcache/standalone container image (cu12.9)
               run: |
                 docker build \
-                --build-arg CUDA_VERSION=12.8 --build-arg UBUNTU_VERSION=24.04 \
+                --build-arg BASE_IMAGE=nvcr.io/nvidia/cuda-dl-base:25.06-cuda12.9-devel-ubuntu24.04 \
+                --build-arg CUDA_VERSION=12.9 \
                 --target lmcache-final \
                 --tag lmcache/standalone:latest --tag lmcache/standalone:${{ env.LATEST_TAG }} \
                 --file docker/Dockerfile.standalone .
-            
+
             - name: Push lmcache/standalone container image to DockerHub
               run: |
                 docker push lmcache/standalone:latest
                 docker push lmcache/standalone:${{ env.LATEST_TAG }}
+
+            - name: Clean up Docker layers and cache
+              run: |
+                docker system prune -f --all
+                docker builder prune -af
+
+            - name: Build lmcache/vllm-openai container image (cu13)
+              if: needs.publish-cu130-github-release.result == 'success'
+              run: |
+                docker build \
+                --build-arg BASE_IMAGE=nvcr.io/nvidia/cuda-dl-base:25.09-cuda13.0-devel-ubuntu24.04 \
+                --build-arg CUDA_VERSION=13.0 \
+                --build-arg torch_cuda_arch_list='7.5 8.0 8.6 8.9 9.0 10.0 12.0+PTX' \
+                --build-arg LMCACHE_VERSION=${{ env.LATEST_TAG }} \
+                --target image-release-cu13 \
+                --tag lmcache/vllm-openai:latest-cu13 --tag lmcache/vllm-openai:${{ env.LATEST_TAG }}-cu13 \
+                --file docker/Dockerfile .
+
+            - name: Push lmcache/vllm-openai cu13 container image to DockerHub
+              if: needs.publish-cu130-github-release.result == 'success'
+              run: |
+                docker push lmcache/vllm-openai:latest-cu13
+                docker push lmcache/vllm-openai:${{ env.LATEST_TAG }}-cu13
+
+            - name: Clean up Docker layers and cache
+              run: |
+                docker system prune -f --all
+                docker builder prune -af
+
+            - name: Build lmcache/standalone container image (cu13)
+              if: needs.publish-cu130-github-release.result == 'success'
+              run: |
+                docker build \
+                --build-arg BASE_IMAGE=nvcr.io/nvidia/cuda-dl-base:25.09-cuda13.0-devel-ubuntu24.04 \
+                --build-arg CUDA_VERSION=13.0 \
+                --build-arg torch_cuda_arch_list='7.5 8.0 8.6 8.9 9.0 10.0 12.0+PTX' \
+                --target lmcache-final \
+                --tag lmcache/standalone:latest-cu13 --tag lmcache/standalone:${{ env.LATEST_TAG }}-cu13 \
+                --file docker/Dockerfile.standalone .
+
+            - name: Push lmcache/standalone cu13 container image to DockerHub
+              if: needs.publish-cu130-github-release.result == 'success'
+              run: |
+                docker push lmcache/standalone:latest-cu13
+                docker push lmcache/standalone:${{ env.LATEST_TAG }}-cu13

@@ -165,9 +165,9 @@ build = "cp3*-manylinux_x86_64"
 # 10.0: GB200, B200
 environment = {TORCH_CUDA_ARCH_LIST = "7.0;7.5;8.0;8.6;8.9;9.0;10.0", ENABLE_CXX11_ABI = "1"}
 
-# Use the PyTorch manylinux image version '2_28' that contains CUDA 12.8
+# Use the PyTorch manylinux image version '2_28' that contains CUDA 12.9
 # and torch 2.7 supports (https://pypi.org/project/torch/2.7.0/#files)
-manylinux-x86_64-image = "docker.io/pytorch/manylinux2_28-builder:cuda12.8"
+manylinux-x86_64-image = "docker.io/pytorch/manylinux2_28-builder:cuda12.9"
 
 [tool.cibuildwheel.linux]
 repair-wheel-command = """
