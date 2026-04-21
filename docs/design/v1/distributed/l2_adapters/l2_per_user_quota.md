@@ -37,7 +37,7 @@ L1 Manager → StoreController → L2 Adapter
   │                                │
   │                    _notify_keys_stored(keys, sizes)
   │                      → base class updates _total_bytes_used
-  │                        and _per_cache_salt_size_bytes
+  │                        and _bytes_by_cache_salt
   ▼
 Listeners:  L2EvictionPolicy bridge → UserLRUEvictionPolicy
             ┌──────────────────────┐
@@ -49,7 +49,7 @@ L2EvictionController (every 1s):
   for each adapter state:
     usage = adapter.get_usage()  → AdapterUsage dataclass
     if policy.is_user_level:
-      for cache_salt, bytes in usage.per_cache_salt_bytes:
+      for cache_salt, bytes in usage.bytes_by_cache_salt:
         if bytes > watermark * quota(cache_salt):
           policy.get_eviction_actions(ratio, cache_salt=cache_salt)
     else:
@@ -399,7 +399,7 @@ class AdapterUsage:
     total_capacity_bytes: int
     """Adapter's maximum capacity. 0 means unknown/unlimited."""
 
-    per_cache_salt_bytes: dict[str, int]
+    bytes_by_cache_salt: dict[str, int]
     """Bytes used per cache_salt. Only entries with positive usage."""
 
     @property
@@ -418,7 +418,7 @@ class L2AdapterInterface(ABC):
         self._listeners: list[L2AdapterListener] = []
         self._max_capacity_bytes = max_capacity_bytes
         self._total_bytes_used: int = 0
-        self._per_cache_salt_size_bytes: dict[str, int] = {}
+        self._bytes_by_cache_salt: dict[str, int] = {}
         self._usage_lock = threading.Lock()
 
     @property
@@ -437,8 +437,8 @@ class L2AdapterInterface(ABC):
         with self._usage_lock:
             for key, size in zip(keys, sizes, strict=True):
                 self._total_bytes_used += size
-                self._per_cache_salt_size_bytes[key.cache_salt] = (
-                    self._per_cache_salt_size_bytes.get(key.cache_salt, 0) + size
+                self._bytes_by_cache_salt[key.cache_salt] = (
+                    self._bytes_by_cache_salt.get(key.cache_salt, 0) + size
                 )
         for listener in self._listeners:
             listener.on_l2_keys_stored(keys)
@@ -449,8 +449,8 @@ class L2AdapterInterface(ABC):
         with self._usage_lock:
             for key, size in zip(keys, sizes, strict=True):
                 self._total_bytes_used -= size
-                self._per_cache_salt_size_bytes[key.cache_salt] = (
-                    self._per_cache_salt_size_bytes.get(key.cache_salt, 0) - size
+                self._bytes_by_cache_salt[key.cache_salt] = (
+                    self._bytes_by_cache_salt.get(key.cache_salt, 0) - size
                 )
         for listener in self._listeners:
             listener.on_l2_keys_deleted(keys)
@@ -460,8 +460,8 @@ class L2AdapterInterface(ABC):
             return AdapterUsage(
                 total_bytes_used=self._total_bytes_used,
                 total_capacity_bytes=self._max_capacity_bytes,
-                per_cache_salt_bytes={
-                    k: v for k, v in self._per_cache_salt_size_bytes.items()
+                bytes_by_cache_salt={
+                    k: v for k, v in self._bytes_by_cache_salt.items()
                     if v > 0
                 },
             )
@@ -653,7 +653,7 @@ class L2EvictionController(StorageControllerInterface):
 
         if policy.is_user_level and self._quota_manager:
             # Per-user watermark check
-            for cache_salt, user_bytes in usage.per_cache_salt_bytes.items():
+            for cache_salt, user_bytes in usage.bytes_by_cache_salt.items():
                 limit = self._quota_manager.get_limit_bytes(cache_salt)
                 if user_bytes <= watermark * limit:
                     continue
@@ -673,7 +673,7 @@ class L2EvictionController(StorageControllerInterface):
 ```
 
 The controller uses `policy.is_user_level` (not `isinstance`) to branch:
-- **`is_user_level=True`**: reads `usage.per_cache_salt_bytes`, checks each user
+- **`is_user_level=True`**: reads `usage.bytes_by_cache_salt`, checks each user
   against `watermark * quota`. Unregistered users (quota=0) get ratio=1.0.
 - **`is_user_level=False`**: reads `usage.usage_fraction` for global check.
 
@@ -841,7 +841,7 @@ The feature PR. Depends on PR1a + PR1b + PR2 + PR3 + PR4.
 | `lmcache/v1/distributed/eviction_policy/__init__.py` | Export `UserLRUEvictionPolicy` |
 | `lmcache/v1/distributed/config.py` | Add `"UserLRU"` to literal |
 | `lmcache/v1/distributed/l2_adapters/config.py` | Add `"UserLRU"` to allowed values |
-| `lmcache/v1/distributed/storage_controllers/eviction_controller.py` | `QuotaManager`; per-user branch using `is_user_level` + `per_cache_salt_bytes` |
+| `lmcache/v1/distributed/storage_controllers/eviction_controller.py` | `QuotaManager`; per-user branch using `is_user_level` + `bytes_by_cache_salt` |
 | `lmcache/v1/distributed/storage_manager.py` | Create `QuotaManager`; wire to controller + HTTP |
 | `lmcache/v1/multiprocess/http_server.py` | Quota CRUD endpoints |
 | `tests/v1/distributed/test_user_lru_eviction_policy.py` (new) | Unit tests |

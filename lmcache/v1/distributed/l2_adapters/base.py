@@ -28,7 +28,7 @@ logger = init_logger(__name__)
 L2TaskId = int
 
 
-_EMPTY_PER_CACHE_SALT: Mapping[str, int] = MappingProxyType({})
+_EMPTY_BY_CACHE_SALT: Mapping[str, int] = MappingProxyType({})
 
 
 @dataclass(frozen=True)
@@ -36,13 +36,13 @@ class AdapterUsage:
     """Unified usage report for an L2 adapter.
 
     Replaces the old ``tuple[float, float]`` return shape with a structured
-    record that exposes both aggregate and per-cache_salt byte counts.
+    record that exposes both aggregate and per cache_salt byte counts.
     Buckets are keyed by ``ObjectKey.cache_salt`` directly — the salt may
     represent a user, a vLLM deployment, or any other isolation
     granularity the caller chooses; the adapter stays agnostic.
 
     Instances are returned as immutable snapshots:
-    ``per_cache_salt_bytes`` is a read-only ``Mapping``
+    ``bytes_by_cache_salt`` is a read-only ``Mapping``
     (``MappingProxyType``) so callers cannot mutate the snapshot after
     the fact. Each ``get_usage()`` call returns a fresh snapshot so a
     held reference will never reflect later state.
@@ -55,8 +55,8 @@ class AdapterUsage:
     """Adapter's maximum capacity. ``0`` means unknown / unlimited; the
     adapter does not support aggregate (global) usage-based eviction."""
 
-    per_cache_salt_bytes: Mapping[str, int] = field(
-        default_factory=lambda: _EMPTY_PER_CACHE_SALT
+    bytes_by_cache_salt: Mapping[str, int] = field(
+        default_factory=lambda: _EMPTY_BY_CACHE_SALT
     )
     """Bytes used per ``cache_salt``. Only entries with positive usage
     appear; an empty mapping means no traffic has been tracked yet.
@@ -131,11 +131,11 @@ class L2AdapterInterface(ABC):
 
         # Centralized byte accounting. Subclasses pass ``sizes`` to
         # ``_notify_keys_stored`` / ``_notify_keys_deleted`` and the base
-        # class maintains both aggregate and per-cache_salt totals so
+        # class maintains both aggregate and per cache_salt totals so
         # every adapter exposes the same shape via ``get_usage()``.
         self._max_capacity_bytes: int = max_capacity_bytes
         self._total_bytes_used: int = 0
-        self._per_cache_salt_size_bytes: dict[str, int] = {}
+        self._bytes_by_cache_salt: dict[str, int] = {}
         self._usage_lock = threading.Lock()
 
     #####################
@@ -358,7 +358,7 @@ class L2AdapterInterface(ABC):
         outside the lock so a slow listener cannot stall further notifies.
         """
         # Aggregate per-salt deltas before touching
-        # ``_per_cache_salt_size_bytes`` — one dict read/write per unique
+        # ``_bytes_by_cache_salt`` — one dict read/write per unique
         # salt instead of one per key. This matters when the registry is
         # large (10k+ salts) and keys/sizes are bulky.
         delta: dict[str, int] = {}
@@ -370,8 +370,8 @@ class L2AdapterInterface(ABC):
         with self._usage_lock:
             self._total_bytes_used += total_delta
             for salt, d in delta.items():
-                self._per_cache_salt_size_bytes[salt] = (
-                    self._per_cache_salt_size_bytes.get(salt, 0) + d
+                self._bytes_by_cache_salt[salt] = (
+                    self._bytes_by_cache_salt.get(salt, 0) + d
                 )
         for listener in self._listeners:
             listener.on_l2_keys_stored(keys)
@@ -388,7 +388,7 @@ class L2AdapterInterface(ABC):
         the same value the adapter passed to ``_notify_keys_stored``).
 
         Per-cache_salt buckets that drop to zero are removed so the
-        ``per_cache_salt_bytes`` snapshot in ``AdapterUsage`` stays compact.
+        ``bytes_by_cache_salt`` snapshot in ``AdapterUsage`` stays compact.
 
         Counters are clamped at zero — a delete that would drive
         ``_total_bytes_used`` negative indicates an accounting bug in the
@@ -420,11 +420,11 @@ class L2AdapterInterface(ABC):
                 )
                 self._total_bytes_used = 0
             for salt, d in delta.items():
-                new_total = self._per_cache_salt_size_bytes.get(salt, 0) - d
+                new_total = self._bytes_by_cache_salt.get(salt, 0) - d
                 if new_total <= 0:
-                    self._per_cache_salt_size_bytes.pop(salt, None)
+                    self._bytes_by_cache_salt.pop(salt, None)
                 else:
-                    self._per_cache_salt_size_bytes[salt] = new_total
+                    self._bytes_by_cache_salt[salt] = new_total
         for listener in self._listeners:
             listener.on_l2_keys_deleted(keys)
 
@@ -484,7 +484,7 @@ class L2AdapterInterface(ABC):
         """
         with self._usage_lock:
             per_salt_snapshot = {
-                k: v for k, v in self._per_cache_salt_size_bytes.items() if v > 0
+                k: v for k, v in self._bytes_by_cache_salt.items() if v > 0
             }
             return AdapterUsage(
                 total_bytes_used=self._total_bytes_used,
@@ -492,7 +492,7 @@ class L2AdapterInterface(ABC):
                 # Wrap in a read-only view so callers can't mutate the
                 # snapshot. The underlying dict is a fresh copy so the
                 # view is fully detached from the adapter's live state.
-                per_cache_salt_bytes=MappingProxyType(per_salt_snapshot),
+                bytes_by_cache_salt=MappingProxyType(per_salt_snapshot),
             )
 
     #####################

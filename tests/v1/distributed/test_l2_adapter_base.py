@@ -2,7 +2,7 @@
 """
 Unit tests for the L2 adapter base class accounting + AdapterUsage.
 
-The base class owns ``_total_bytes_used`` / ``_per_cache_salt_size_bytes`` and
+The base class owns ``_total_bytes_used`` / ``_bytes_by_cache_salt`` and
 exposes them through ``get_usage()``. Adapters drive accounting by passing
 ``sizes`` to ``_notify_keys_stored`` / ``_notify_keys_deleted``.
 """
@@ -89,9 +89,9 @@ class TestAdapterUsage:
         u = AdapterUsage(total_bytes_used=10, total_capacity_bytes=-1)
         assert u.usage_fraction == -1.0
 
-    def test_per_cache_salt_bytes_default_empty(self):
+    def test_bytes_by_cache_salt_default_empty(self):
         u = AdapterUsage(total_bytes_used=0, total_capacity_bytes=100)
-        assert u.per_cache_salt_bytes == {}
+        assert u.bytes_by_cache_salt == {}
 
     def test_frozen(self):
         # Standard
@@ -136,7 +136,7 @@ class TestBaseAccounting:
         a._notify_keys_stored([k_alice, k_bob, k_alice2], [100, 200, 50])
         u = a.get_usage()
         assert u.total_bytes_used == 350
-        assert u.per_cache_salt_bytes == {"alice": 150, "bob": 200}
+        assert u.bytes_by_cache_salt == {"alice": 150, "bob": 200}
 
     def test_delete_decrements_aggregate_and_per_user(self):
         a = _StubAdapter(max_capacity_bytes=10_000)
@@ -146,7 +146,7 @@ class TestBaseAccounting:
         a._notify_keys_deleted([k_alice], [100])
         u = a.get_usage()
         assert u.total_bytes_used == 200
-        assert u.per_cache_salt_bytes == {"bob": 200}
+        assert u.bytes_by_cache_salt == {"bob": 200}
 
     def test_per_user_bucket_dropped_when_zero(self):
         """Per-user bookkeeping should not retain stale ``0`` entries — it
@@ -158,29 +158,29 @@ class TestBaseAccounting:
         a._notify_keys_deleted([k], [100])
         u = a.get_usage()
         assert u.total_bytes_used == 0
-        assert "alice" not in u.per_cache_salt_bytes
-        assert u.per_cache_salt_bytes == {}
+        assert "alice" not in u.bytes_by_cache_salt
+        assert u.bytes_by_cache_salt == {}
 
     def test_empty_salt_is_a_real_bucket(self):
         """Un-salted traffic accumulates under the empty-string key.
-        ``per_cache_salt_bytes`` must reflect that so legacy/unisolated traffic
+        ``bytes_by_cache_salt`` must reflect that so legacy/unisolated traffic
         is observable too."""
         a = _StubAdapter(max_capacity_bytes=10_000)
         k = _make_key(1, salt="")
         a._notify_keys_stored([k], [100])
         u = a.get_usage()
-        assert u.per_cache_salt_bytes == {"": 100}
+        assert u.bytes_by_cache_salt == {"": 100}
 
     def test_get_usage_filters_zero_buckets(self):
         """Snapshot only includes positive-byte buckets."""
         a = _StubAdapter(max_capacity_bytes=10_000)
         # Manually inject a ``0`` entry as if accounting drift left one
         # behind.
-        a._per_cache_salt_size_bytes["ghost"] = 0
-        a._per_cache_salt_size_bytes["alice"] = 100
+        a._bytes_by_cache_salt["ghost"] = 0
+        a._bytes_by_cache_salt["alice"] = 100
         a._total_bytes_used = 100
         u = a.get_usage()
-        assert u.per_cache_salt_bytes == {"alice": 100}
+        assert u.bytes_by_cache_salt == {"alice": 100}
 
     def test_size_list_length_mismatch_raises(self):
         """``zip(strict=True)`` catches caller bugs where keys/sizes drift
@@ -204,7 +204,7 @@ class TestBaseAccounting:
         assert u.usage_fraction == 0.0  # not the -1 sentinel
 
     def test_get_usage_returns_immutable_per_user_view(self):
-        """``per_cache_salt_bytes`` is a read-only ``Mapping`` so a caller
+        """``bytes_by_cache_salt`` is a read-only ``Mapping`` so a caller
         cannot mutate the snapshot or the adapter's live state."""
         a = _StubAdapter(max_capacity_bytes=10_000)
         k = _make_key(1, salt="alice")
@@ -212,9 +212,9 @@ class TestBaseAccounting:
         u = a.get_usage()
         # MappingProxyType raises TypeError on mutation attempts.
         with pytest.raises(TypeError):
-            u.per_cache_salt_bytes["bob"] = 999  # type: ignore[index]
+            u.bytes_by_cache_salt["bob"] = 999  # type: ignore[index]
         # Original snapshot still intact.
-        assert dict(u.per_cache_salt_bytes) == {"alice": 100}
+        assert dict(u.bytes_by_cache_salt) == {"alice": 100}
 
     def test_get_usage_snapshot_is_detached(self):
         """A held ``AdapterUsage`` reference does not see later
@@ -226,11 +226,11 @@ class TestBaseAccounting:
         a._notify_keys_stored([_make_key(2, salt="bob")], [200])
         # u1 is the snapshot at the earlier moment.
         assert u1.total_bytes_used == 100
-        assert dict(u1.per_cache_salt_bytes) == {"alice": 100}
+        assert dict(u1.bytes_by_cache_salt) == {"alice": 100}
         # Live state is now 300 / {alice, bob}.
         u2 = a.get_usage()
         assert u2.total_bytes_used == 300
-        assert dict(u2.per_cache_salt_bytes) == {"alice": 100, "bob": 200}
+        assert dict(u2.bytes_by_cache_salt) == {"alice": 100, "bob": 200}
 
     def test_zero_size_notify_is_listener_only(self):
         """Calling ``_notify_keys_stored`` with size=0 fires the listener
@@ -245,7 +245,7 @@ class TestBaseAccounting:
         a._notify_keys_stored([k], [0])
         u = a.get_usage()
         assert u.total_bytes_used == 100
-        assert dict(u.per_cache_salt_bytes) == {"alice": 100}
+        assert dict(u.bytes_by_cache_salt) == {"alice": 100}
         # Listener fired twice (LRU policy can move_to_end on second).
         assert lst.stored == [[k], [k]]
 

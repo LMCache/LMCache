@@ -708,7 +708,7 @@ class TestEvictionInterface:
         usage = adapter.get_usage()
         assert usage.total_bytes_used == 0
         assert usage.usage_fraction == 0.0
-        assert usage.per_cache_salt_bytes == {}
+        assert usage.bytes_by_cache_salt == {}
 
     def test_get_usage_increases_after_store(self, adapter):
         """get_usage() should report positive bytes after a store."""
@@ -734,7 +734,7 @@ class TestEvictionInterface:
         assert usage.total_bytes_used == 0
         assert usage.usage_fraction == 0.0
 
-    def test_per_cache_salt_bytes_populated_from_cache_salt(self, adapter):
+    def test_bytes_by_cache_salt_populated_from_cache_salt(self, adapter):
         """End-to-end: storing keys with different ``cache_salt`` values
         should drive the per-user byte buckets in ``AdapterUsage`` —
         proves the salt actually flows through the real adapter into the
@@ -761,22 +761,22 @@ class TestEvictionInterface:
             _store_and_wait(adapter, k, obj)
 
         usage = adapter.get_usage()
-        assert usage.per_cache_salt_bytes == {"alice": 1024, "bob": 512}
+        assert usage.bytes_by_cache_salt == {"alice": 1024, "bob": 512}
         assert usage.total_bytes_used == 1536
 
         # Deleting one of alice's keys should shrink alice's bucket but
         # leave bob's untouched.
         adapter.delete([alice_keys[0]])
         usage = adapter.get_usage()
-        assert usage.per_cache_salt_bytes == {"alice": 512, "bob": 512}
+        assert usage.bytes_by_cache_salt == {"alice": 512, "bob": 512}
         assert usage.total_bytes_used == 1024
 
         # Deleting alice's last key should drop the bucket entirely so
         # the snapshot stays compact.
         adapter.delete([alice_keys[1]])
         usage = adapter.get_usage()
-        assert "alice" not in usage.per_cache_salt_bytes
-        assert usage.per_cache_salt_bytes == {"bob": 512}
+        assert "alice" not in usage.bytes_by_cache_salt
+        assert usage.bytes_by_cache_salt == {"bob": 512}
 
     def test_listener_notified_on_store(self, adapter):
         """Listener.on_l2_keys_stored should be called after a store completes."""
