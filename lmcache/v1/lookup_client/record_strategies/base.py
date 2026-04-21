@@ -142,9 +142,11 @@ class RecordStrategy(ABC):
             lambda: self.unique_chunks_count
         )
         prometheus_logger.chunk_statistics_reuse_rate.set_function(
-            lambda: (self.total_chunks - self.unique_chunks_count) / self.total_chunks
-            if self.total_chunks > 0
-            else 0.0
+            lambda: (
+                (self.total_chunks - self.unique_chunks_count) / self.total_chunks
+                if self.total_chunks > 0
+                else 0.0
+            )
         )
 
     def close(self) -> None:  # noqa: B027

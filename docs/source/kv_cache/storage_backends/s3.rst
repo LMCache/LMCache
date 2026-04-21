@@ -66,10 +66,78 @@ CoreWeave (S3-compatible)
 Check out the blog post between LMCache, Cohere, and CoreWeave: https://blog.lmcache.ai/en/2025/10/29/breaking-the-memory-barrier-how-lmcache-and-coreweave-power-efficient-llm-inference-for-cohere/
 
 
+Dell ObjectScale with RDMA Acceleration
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. note::
+
+   RDMA-accelerated S3 is currently supported by `Dell's ObjectScale <https://www.dell.com/en-us/dt/storage/objectscale.htm>`_ object storage.
+
+To enable RDMA acceleration, use the ``cuobj+s3://`` URL scheme instead of ``s3://``.
+LMCache will negotiate RDMA transfers with the server automatically. If RDMA is
+unavailable at runtime, it falls back to standard HTTP transfers transparently.
+
+.. code-block:: yaml
+
+   chunk_size: 256
+   local_cpu: True
+   max_local_cpu_size: 10
+   save_unfull_chunk: False
+   remote_url: "cuobj+s3://your-objectscale-endpoint.example.com"
+   remote_serde: "naive"
+   blocking_timeout_secs: 10
+   extra_config:
+     s3_region: "us-east-1"
+     s3_bucket: "your-bucket-name"
+     s3_num_io_threads: 64
+     s3_prefer_http2: False
+     s3_enable_s3express: False
+     save_chunk_meta: False
+     disable_tls: True
+     aws_access_key_id: "your-access-key"
+     aws_secret_access_key: "your-secret-key"
+
+Key differences from a standard S3 configuration:
+
+* **remote_url** uses the ``cuobj+s3://`` scheme to enable RDMA.
+* **s3_bucket** is required for Dell ObjectScale because it uses path-style bucket addressing.
+* **disable_tls** is typically ``True`` for on-premises ObjectScale deployments.
+* RDMA NIC selection is configured via ``rdma_dev_addr_list`` in ``cufile.json``, not in the LMCache config.
+
+**Prerequisites:**
+
+* Dell ObjectScale with RDMA support enabled
+* RDMA-capable NIC (e.g., Mellanox ConnectX)
+* LMCache built with the cuObject extension (requires CUDA Toolkit >= 13.1). Use the provided ``docker/Dockerfile.cuobject`` for a pre-configured build environment.
+* A ``cufile.json`` configuration file (see below). Set the ``CUFILE_ENV_PATH_JSON`` environment variable to point to it.
+
+**cufile.json Configuration:**
+
+The cuObject client reads RDMA settings from ``CUFILE_ENV_PATH_JSON``:
+
+.. code-block:: json
+
+   {
+       "properties": {
+           "allow_compat_mode": true,
+           "use_pci_p2pdma": true,
+           "rdma_peer_type": "dmabuf",
+           "rdma_dev_addr_list": ["10.0.1.2", "10.0.2.2"],
+           "rdma_load_balancing_policy": "RoundRobin"
+       }
+   }
+
+* **rdma_dev_addr_list** (required): Client RDMA NIC IPs — use ``ip addr show`` to find them.
+* **allow_compat_mode**: Enable cuFile compat mode when GDS kernel driver is absent (recommended ``true``).
+* **use_pci_p2pdma**: Enable PCIe P2P DMA for GPU-direct RDMA transfers (recommended ``true``).
+* **rdma_peer_type**: GPU memory sharing mechanism — ``"dmabuf"`` for Linux 5.12+, ``"nvidia"`` for legacy.
+* **rdma_load_balancing_policy**: Multi-NIC distribution policy (default ``"RoundRobin"``).
+
+
 Configuration Parameters
 ------------------------
 
-* **remote_url**: S3 bucket URL (`s3://bucket-name`)
+* **remote_url**: S3 endpoint URL. Use ``s3://bucket-name`` for standard S3, or ``cuobj+s3://endpoint`` for RDMA-accelerated S3 with Dell ObjectScale.
 * **save_unfull_chunk**: Save partial chunks (default: False, **must be False for S3**)
 * **enable_async_loading**: Async loading (default: False)
 * **blocking_timeout_secs**: Timeout seconds (default: 10)
@@ -84,8 +152,10 @@ S3-Specific (in extra_config)
 * **save_chunk_meta**: Whether to save chunk metadata in the object store along with your data (False required for S3)
 * **aws_access_key_id**: AWS access key ID (or log in with `aws configure` in your environment)
 * **aws_secret_access_key**: AWS secret access key (or log in with `aws configure` in your environment)
+* **s3_bucket**: Bucket name for path-style access. Required for Dell ObjectScale and other non-AWS S3 servers that do not support virtual-hosted-style URLs.
+* **disable_tls**: Disable TLS (default: False). Set to ``True`` for on-premises S3-compatible services.
 
-**Tips:**::
+**Tips:**
 
 - Use same region for compute and S3
 
