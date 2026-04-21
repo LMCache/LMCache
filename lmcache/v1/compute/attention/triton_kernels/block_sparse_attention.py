@@ -56,6 +56,9 @@ def _block_sparse_attn_fwd_kernel(
     q_offs = q_start + tl.arange(0, BLOCK_M)
     q_mask = q_offs < seq_len_q
 
+    # Dimension offsets (needed in early-return branch too)
+    d_offs = tl.arange(0, HEAD_DIM)
+
     # Load the sparse KV block range for this query block
     # Guard against grid blocks exceeding CSR rows (partial block case)
     if q_block_idx >= num_csr_rows:
@@ -69,9 +72,6 @@ def _block_sparse_attn_fwd_kernel(
     kv_block_start = tl.load(block_indptr_ptr + q_block_idx)
     kv_block_end = tl.load(block_indptr_ptr + q_block_idx + 1)
     num_kv_blocks = kv_block_end - kv_block_start
-
-    # Dimension offsets
-    d_offs = tl.arange(0, HEAD_DIM)
 
     # Load Q block: [BLOCK_M, HEAD_DIM]
     q_ptrs = Q_ptr + q_offs[:, None] * stride_qm + head_idx * stride_qh + d_offs[None, :] * stride_qd

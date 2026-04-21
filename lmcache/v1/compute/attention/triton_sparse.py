@@ -31,7 +31,7 @@ class LMCTritonSparseBackend(AttentionInterface):
     Does NOT require flashinfer.
     """
 
-    def __init__(self, vllm_attn):
+    def __init__(self, vllm_attn: "torch.nn.Module") -> None:
         """Initialize from a vLLM Attention module.
 
         Args:
