@@ -92,6 +92,9 @@ jobs:
                 # for setuptools-scm
                 fetch-depth: 0
 
+            - name: Remove non-release tags
+              run: git tag -l | grep -v '^v' | xargs -r git tag -d
+
             - name: Free disk space
               uses: ./.github/actions/free-disk-space
 
@@ -154,6 +157,9 @@ jobs:
               with:
                 fetch-depth: 0
 
+            - name: Remove non-release tags
+              run: git tag -l | grep -v '^v' | xargs -r git tag -d
+
             - name: Setup Python 3.13
               uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
               with:
@@ -172,6 +178,12 @@ jobs:
               run: |
                 cp pyproject_cli.toml pyproject.toml
                 NO_CUDA_EXT=1 python -m build --wheel
+
+            - name: Smoke-test CLI wheel (no torch)
+              run: |
+                pip install dist/lmcache_cli-*.whl
+                python -c "import lmcache"
+                lmcache --help
 
             - name: Upload CLI release artifacts to GHA
               uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
@@ -214,6 +226,9 @@ jobs:
               uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
               with:
                 fetch-depth: 0
+
+            - name: Remove non-release tags
+              run: git tag -l | grep -v '^v' | xargs -r git tag -d
 
             - name: Login to DockerHub
               if: vars.DOCKERHUB_USERNAME != ''
