@@ -15,6 +15,10 @@ from lmcache.v1.compute.attention.metadata import (
     LMCAttnMetadata,
     LMCTritonSparseMetadata,
 )
+from lmcache.v1.compute.attention.triton_kernels import (
+    block_sparse_attention,
+    causal_prefill_attention,
+)
 
 logger = init_logger(__name__)
 
@@ -68,11 +72,6 @@ class LMCTritonSparseBackend(AttentionInterface):
         For causal (full prefill): uses causal_prefill_attention.
         For non-causal (sparse CacheBlend): uses block_sparse_attention.
         """
-        from lmcache.v1.compute.attention.triton_kernels import (
-            block_sparse_attention,
-            causal_prefill_attention,
-        )
-
         assert isinstance(attn_metadata, LMCTritonSparseMetadata)
 
         if attn_metadata.is_causal:

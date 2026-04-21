@@ -109,14 +109,8 @@ def _block_mask_to_csr(
             torch.zeros(0, dtype=torch.int32, device=device),
             block_indptr,
         )
-    block_indices = torch.zeros(total_nnz, dtype=torch.int32, device=device)
-    offset = 0
-    for row in range(num_q_blocks):
-        cols = torch.where(block_mask[row])[0].to(torch.int32)
-        n = cols.numel()
-        if n > 0:
-            block_indices[offset : offset + n] = cols
-        offset += n
+    # Vectorized CSR column index extraction
+    block_indices = torch.where(block_mask)[1].to(torch.int32)
     return block_indices, block_indptr
 
 

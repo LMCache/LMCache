@@ -111,15 +111,15 @@ def _block_sparse_attn_fwd_kernel(
         m_i = m_new
         l_i = l_new
 
-    # Final normalization
-    acc = acc / l_i[:, None]
+    # Final normalization — guard against zero-block case (l_i == 0)
+    acc = tl.where(l_i[:, None] > 0, acc / l_i[:, None], 0.0)
 
-    # Compute LSE = m_i + log(l_i)
-    lse = m_i + tl.log(l_i)
+    # Compute LSE = m_i + log(l_i); -inf when no blocks attended
+    lse = tl.where(l_i > 0, m_i + tl.log(l_i), float("-inf"))
 
-    # Store output
+    # Store output — use input dtype to support both fp16 and bf16
     o_ptrs = O_ptr + q_offs[:, None] * stride_om + head_idx * stride_oh + d_offs[None, :] * stride_od
-    tl.store(o_ptrs, acc.to(tl.float16), mask=q_mask[:, None])
+    tl.store(o_ptrs, acc.to(Q_ptr.dtype.element_ty), mask=q_mask[:, None])
 
     # Store LSE
     lse_ptrs = LSE_ptr + q_offs * stride_lm + head_idx * stride_lh
@@ -195,7 +195,7 @@ def _causal_prefill_attention_kernel(
     acc = acc / l_i[:, None]
 
     o_ptrs = O_ptr + q_offs[:, None] * stride_om + head_idx * stride_oh + d_offs[None, :] * stride_od
-    tl.store(o_ptrs, acc.to(tl.float16), mask=q_mask[:, None])
+    tl.store(o_ptrs, acc.to(Q_ptr.dtype.element_ty), mask=q_mask[:, None])
 
 
 @triton.jit
@@ -225,14 +225,18 @@ def _merge_attention_kernel(
     d_offs = tl.arange(0, HEAD_DIM)
 
     # Load LSE values
-    lse1 = tl.load(LSE1_ptr + offs * stride_lm + head_idx * stride_lh, mask=mask, other=0.0)
-    lse2 = tl.load(LSE2_ptr + offs * stride_lm + head_idx * stride_lh, mask=mask, other=0.0)
+    lse1 = tl.load(LSE1_ptr + offs * stride_lm + head_idx * stride_lh, mask=mask, other=float("-inf"))
+    lse2 = tl.load(LSE2_ptr + offs * stride_lm + head_idx * stride_lh, mask=mask, other=float("-inf"))
 
-    # Numerically stable: subtract max
+    # Numerically stable blending — guard against both-inf case
     max_lse = tl.maximum(lse1, lse2)
-    w1 = tl.exp(lse1 - max_lse)
-    w2 = tl.exp(lse2 - max_lse)
+    # When both are -inf, set max_lse to 0 to avoid NaN in exp(-inf - -inf)
+    safe_max = tl.where(max_lse == float("-inf"), 0.0, max_lse)
+    w1 = tl.exp(lse1 - safe_max)
+    w2 = tl.exp(lse2 - safe_max)
     w_sum = w1 + w2
+    # Guard against w_sum == 0 (both paths had no valid blocks)
+    w_sum = tl.where(w_sum > 0, w_sum, 1.0)
 
     # Normalize weights
     w1 = w1 / w_sum
@@ -248,7 +252,7 @@ def _merge_attention_kernel(
     out = o1 * w1[:, None] + o2 * w2[:, None]
 
     out_ptrs = Out_ptr + offs[:, None] * stride_om + head_idx * stride_oh + d_offs[None, :] * stride_od
-    tl.store(out_ptrs, out.to(tl.float16), mask=mask[:, None])
+    tl.store(out_ptrs, out.to(O1_ptr.dtype.element_ty), mask=mask[:, None])
 
 
 # ============================================================
