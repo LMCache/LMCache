@@ -405,8 +405,9 @@ class PrefetchController(StorageControllerInterface):
         while not self._stop_flag.is_set():
             ready = poller.poll(PREFETCH_LOOP_POLL_TIMEOUT_MS)
 
-            signaled_lookup: set[int] = set()
-            signaled_load: set[int] = set()
+            signaled: dict[PrefetchPhase, set[int]] = {
+                phase: set() for phase in PrefetchPhase
+            }
             for fd, events in ready:
                 if not (events & select.POLLIN):
                     continue
@@ -420,19 +421,23 @@ class PrefetchController(StorageControllerInterface):
                     if fd == self._submission_efd:
                         self._drain_submission_queue()
                     elif fd in self._lookup_efd_to_adapter:
-                        signaled_lookup.add(self._lookup_efd_to_adapter[fd])
+                        signaled[PrefetchPhase.LOOKUP].add(
+                            self._lookup_efd_to_adapter[fd]
+                        )
                     elif fd in self._load_efd_to_adapter:
-                        signaled_load.add(self._load_efd_to_adapter[fd])
+                        signaled[PrefetchPhase.PLAN_AND_LOAD].add(
+                            self._load_efd_to_adapter[fd]
+                        )
                 except Exception:
                     logger.exception(
                         "Unexpected error in prefetch loop while processing fd %d",
                         fd,
                     )
 
-            if signaled_lookup or signaled_load:
+            if any(signaled.values()):
                 try:
                     for request in list(self._in_flight_requests.values()):
-                        self._advance_request(request, signaled_lookup, signaled_load)
+                        self._advance_request(request, signaled)
                 except Exception:
                     logger.exception(
                         "Unexpected error advancing in-flight prefetch requests"
@@ -657,17 +662,20 @@ class PrefetchController(StorageControllerInterface):
     def _advance_request(
         self,
         request: InFlightPrefetchRequest,
-        signaled_lookup: set[int],
-        signaled_load: set[int],
+        signaled: dict[PrefetchPhase, set[int]],
     ) -> None:
-        """State-transition dispatcher by phase: poll signaled adapters via
-        the per-phase helper, then trigger the phase transition when done."""
+        """State-transition dispatcher by phase: poll signaled adapters for
+        the request's current phase via the per-phase helper, then trigger
+        the phase transition when done."""
+        phase_adapters = signaled[request.phase]
+        if not phase_adapters:
+            return
         if request.phase == PrefetchPhase.LOOKUP:
-            self._poll_lookup_results(request, signaled_lookup)
+            self._poll_lookup_results(request, phase_adapters)
             if request.all_lookups_done():
                 self._transition_to_load_phase(request)
         elif request.phase == PrefetchPhase.PLAN_AND_LOAD:
-            self._poll_load_results(request, signaled_load)
+            self._poll_load_results(request, phase_adapters)
             if request.all_loads_done():
                 self._finalize_load(request)
 

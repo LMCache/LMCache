@@ -298,8 +298,8 @@ _start_lookup_phase(request_id, keys, layout_desc)
   ├─ Submit lookup_and_lock_task(keys) to EVERY adapter
   │
   ▼ (wait for all adapter lookups to complete)
-_advance_request(request, signaled_lookup, signaled_load)  [LOOKUP branch]
-  │  _poll_lookup_results(request, signaled_lookup)
+_advance_request(request, signaled)  [LOOKUP branch]
+  │  _poll_lookup_results(request, signaled[LOOKUP])
   │  when all_lookups_done():
   │
   ▼
@@ -321,8 +321,8 @@ _transition_to_load_phase(request)
   ├─ 6. Submit load_task(keys, objs) per adapter
   │
   ▼ (wait for all adapter loads to complete)
-_advance_request(request, signaled_lookup, signaled_load)  [PLAN_AND_LOAD branch]
-  │  _poll_load_results(request, signaled_load)
+_advance_request(request, signaled)  [PLAN_AND_LOAD branch]
+  │  _poll_load_results(request, signaled[PLAN_AND_LOAD])
   │  when all_loads_done():
   │
   ▼
