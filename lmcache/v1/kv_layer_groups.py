@@ -2,7 +2,7 @@
 # Standard
 from collections import defaultdict
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Optional
 
 # Third Party
 import torch
@@ -10,6 +10,10 @@ import torch
 # First Party
 from lmcache.logging import init_logger
 import lmcache.c_ops as lmc_ops
+
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.v1.gpu_connector.utils import KVCaches
 
 logger = init_logger(__name__)
 
@@ -83,7 +87,7 @@ class KVLayerGroupsManager:
 
     def __init__(
         self,
-        kv_caches: Any,
+        kv_caches: "KVCaches",
         gpu_kv_format: "lmc_ops.GPUKVFormat",
         num_blocks: int,
         block_size: int,

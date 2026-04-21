@@ -9,6 +9,7 @@ from typing import (
     Tuple,
     TypedDict,
     Union,
+    cast,
     overload,
 )
 
@@ -28,6 +29,17 @@ if TYPE_CHECKING:
 import lmcache.c_ops as lmc_ops
 
 logger = init_logger(__name__)
+
+# Recursive alias for the canonical KV-caches structure consumed by
+# :func:`discover_gpu_kv_format` and all downstream format-aware helpers.
+# A KV-caches value is either:
+#   - a single :class:`torch.Tensor` (e.g. vLLM cross-layer, TRT-LLM), or
+#   - a list of nested ``KVCaches`` (per-layer lists, SGLang's two-list MHA,
+#     or deeper nesting).
+# Engine adapters that hand us other containers (e.g. the vLLM
+# ``dict[str, torch.Tensor]``) must pass through
+# :func:`normalize_kv_caches_for_discovery` first.
+KVCaches = Union[torch.Tensor, List["KVCaches"]]
 
 # Error message for accessing non-existent attributes in GPU KV Cache
 _ATTRIBUTE_NOT_EXIST_ERROR = "trying to access an attribute of the GPU KV Cache "
@@ -165,21 +177,21 @@ def ensure_contiguous_kv_caches(
 
 
 def normalize_kv_caches_for_discovery(
-    kv_caches: Any,
+    kv_caches: "Union[dict[str, torch.Tensor], KVCaches]",
     layout_hints: "LayoutHints | None" = None,
-) -> Tuple[Any, Optional[List[str]]]:
+) -> Tuple[KVCaches, Optional[List[str]]]:
     """Normalize an engine-provided KV cache structure for format discovery.
 
     Bridges engine-specific contracts (e.g. vLLM's
-    ``dict[str, torch.Tensor]``) to the canonical ``KVCaches`` form that
-    :func:`discover_gpu_kv_format` and downstream format-aware helpers
-    accept. Applies :func:`ensure_contiguous_kv_caches` first so callers
-    never need to do it separately.
+    ``dict[str, torch.Tensor]``) to the canonical :data:`KVCaches` form
+    that :func:`discover_gpu_kv_format` and downstream format-aware
+    helpers accept. Applies :func:`ensure_contiguous_kv_caches` first so
+    callers never need to do it separately.
 
     Args:
         kv_caches: Engine-provided KV caches. Accepts the dict form used
-            by the vLLM adapter, or any structure already accepted by
-            :func:`discover_gpu_kv_format` (list, nested lists, tensor).
+            by the vLLM adapter, or any :data:`KVCaches` value (list,
+            nested lists, tensor).
         layout_hints: Passed through to
             :func:`ensure_contiguous_kv_caches` so HND-layout permutation
             logs the correct reason.
@@ -827,10 +839,10 @@ def _per_layer_list_formats() -> frozenset:
 
 
 def get_layer_kv_caches(
-    kv_caches: Any,
+    kv_caches: KVCaches,
     gpu_kv_format: "lmc_ops.GPUKVFormat",
     layer_idx: int,
-) -> Any:
+) -> KVCaches:
     """Return a single-layer sub-structure of *kv_caches*, preserving the
     list-nesting convention of *gpu_kv_format* so it is reusable as input
     to other format-aware helpers.
@@ -847,16 +859,19 @@ def get_layer_kv_caches(
         ValueError: If *gpu_kv_format* is not recognized.
     """
     if gpu_kv_format in _per_layer_list_formats():
-        return [kv_caches[layer_idx]]
+        layers = cast(List[torch.Tensor], kv_caches)
+        return [layers[layer_idx]]
     if gpu_kv_format == lmc_ops.GPUKVFormat.TWO_X_NL_X_NBBS_NH_HS:
-        return [[kv_caches[0][layer_idx]], [kv_caches[1][layer_idx]]]
+        k, v = cast(List[List[torch.Tensor]], kv_caches)
+        return [[k[layer_idx]], [v[layer_idx]]]
     if gpu_kv_format == lmc_ops.GPUKVFormat.NB_NL_TWO_BS_NH_HS:
-        return kv_caches[:, layer_idx : layer_idx + 1, ...]
+        tensor = cast(torch.Tensor, kv_caches)
+        return tensor[:, layer_idx : layer_idx + 1, ...]
     raise ValueError(f"Unknown GPU KV Format: {gpu_kv_format}")
 
 
 def get_layer_data_ptrs(
-    kv_caches: Any,
+    kv_caches: KVCaches,
     gpu_kv_format: "lmc_ops.GPUKVFormat",
     layer_idx: int,
 ) -> List[int]:
@@ -882,21 +897,21 @@ def get_layer_data_ptrs(
         ValueError: If *gpu_kv_format* is not recognized.
     """
     if gpu_kv_format in _per_layer_list_formats():
-        return [kv_caches[layer_idx].data_ptr()]
+        layers = cast(List[torch.Tensor], kv_caches)
+        return [layers[layer_idx].data_ptr()]
     if gpu_kv_format == lmc_ops.GPUKVFormat.TWO_X_NL_X_NBBS_NH_HS:
-        return [
-            kv_caches[0][layer_idx].data_ptr(),
-            kv_caches[1][layer_idx].data_ptr(),
-        ]
+        k, v = cast(List[List[torch.Tensor]], kv_caches)
+        return [k[layer_idx].data_ptr(), v[layer_idx].data_ptr()]
     if gpu_kv_format == lmc_ops.GPUKVFormat.NB_NL_TWO_BS_NH_HS:
         # NL dim's stride gives bytes per layer within the shared tensor.
-        layer_stride_bytes = kv_caches.stride(1) * kv_caches.element_size()
-        return [kv_caches.data_ptr() + layer_idx * layer_stride_bytes]
+        tensor = cast(torch.Tensor, kv_caches)
+        layer_stride_bytes = tensor.stride(1) * tensor.element_size()
+        return [tensor.data_ptr() + layer_idx * layer_stride_bytes]
     raise ValueError(f"Unknown GPU KV Format: {gpu_kv_format}")
 
 
 def get_group_data_ptrs(
-    kv_caches: Any,
+    kv_caches: KVCaches,
     gpu_kv_format: "lmc_ops.GPUKVFormat",
     layer_indices: list[int],
 ) -> List[int]:
@@ -923,8 +938,9 @@ def get_group_data_ptrs(
         ValueError: If *gpu_kv_format* is not recognized.
     """
     if gpu_kv_format == lmc_ops.GPUKVFormat.TWO_X_NL_X_NBBS_NH_HS:
-        k_ptrs = [kv_caches[0][i].data_ptr() for i in layer_indices]
-        v_ptrs = [kv_caches[1][i].data_ptr() for i in layer_indices]
+        k, v = cast(List[List[torch.Tensor]], kv_caches)
+        k_ptrs = [k[i].data_ptr() for i in layer_indices]
+        v_ptrs = [v[i].data_ptr() for i in layer_indices]
         return k_ptrs + v_ptrs
     ptrs: list[int] = []
     for layer_idx in layer_indices:
@@ -933,7 +949,7 @@ def get_group_data_ptrs(
 
 
 def get_layer_dtype(
-    kv_caches: Any,
+    kv_caches: KVCaches,
     gpu_kv_format: "lmc_ops.GPUKVFormat",
     layer_idx: int,
 ) -> torch.dtype:
@@ -953,7 +969,7 @@ def get_layer_dtype(
 
 
 def get_layer_shape_signature(
-    kv_caches: Any,
+    kv_caches: KVCaches,
     gpu_kv_format: "lmc_ops.GPUKVFormat",
     layer_idx: int,
 ) -> Tuple[int, ...]:
@@ -977,7 +993,7 @@ def get_layer_shape_signature(
 
 
 def make_page_buffer_shape_desc(
-    kv_caches: Any,
+    kv_caches: KVCaches,
     gpu_kv_format: "lmc_ops.GPUKVFormat",
     layer_idx: int,
     num_layers_in_group: int,
