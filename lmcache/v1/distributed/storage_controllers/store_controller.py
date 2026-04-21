@@ -142,8 +142,7 @@ class InFlightStoreRequest:
     (i.e., keys holding an L1 read lock that must be released)."""
 
     l2_store_result: bool | None = None
-    """L2 store outcome set by ``_drain_l2_store_completions``
-    (True=success, False=failure, None=still in flight)."""
+    """L2 outcome (True=success, False=failure, None=still in flight)."""
 
 
 # Main class
@@ -291,7 +290,8 @@ class StoreController(StorageControllerInterface):
                 try:
                     self._drain_l2_store_completions(signaled_adapters)
                     for task_key, request in list(self._in_flight_requests.items()):
-                        self._advance_request(task_key, request, signaled_adapters)
+                        if request.adapter_index in signaled_adapters:
+                            self._advance_request(task_key, request)
                 except Exception:
                     logger.exception(
                         "Unexpected error advancing in-flight store requests"
@@ -379,11 +379,8 @@ class StoreController(StorageControllerInterface):
             )
 
     def _drain_l2_store_completions(self, signaled_adapters: set[int]) -> None:
-        """
-        Pop completed L2 store tasks from each signaled adapter and
-        deposit the outcome on the owning in-flight request, to be
-        consumed by ``_advance_request``.
-        """
+        """Deposit each signaled adapter's L2 outcomes onto their in-flight
+        requests, to be consumed by ``_advance_request``."""
         for adapter_index in signaled_adapters:
             adapter = self._l2_adapters[adapter_index]
             completed = adapter.pop_completed_store_tasks()
@@ -402,17 +399,9 @@ class StoreController(StorageControllerInterface):
         self,
         task_key: tuple[int, L2TaskId],
         request: InFlightStoreRequest,
-        signaled_adapters: set[int],
     ) -> None:
-        """
-        Pure state-transition step for one in-flight store request.
-
-        Checks whether the terminal transition is reachable (the owning
-        adapter signaled and the L2 outcome is recorded) and delegates
-        the actual execution to ``_finalize_store``.
-        """
-        if request.adapter_index not in signaled_adapters:
-            return
+        """State-transition step. Delegate to ``_finalize_store`` once the
+        L2 outcome has been recorded."""
         if request.l2_store_result is None:
             return
         self._finalize_store(task_key, request)
@@ -422,11 +411,8 @@ class StoreController(StorageControllerInterface):
         task_key: tuple[int, L2TaskId],
         request: InFlightStoreRequest,
     ) -> None:
-        """
-        Execute the terminal transition for a completed store request:
-        release L1 read locks, publish ``L2_STORE_COMPLETED``, apply
-        policy L1 deletions on success, and remove the tracking entry.
-        """
+        """Release read locks, publish completion, apply policy L1 deletions
+        on success, and remove the tracking entry."""
         adapter_index, task_id = task_key
         l1_mgr = self._l1_manager
         success = request.l2_store_result

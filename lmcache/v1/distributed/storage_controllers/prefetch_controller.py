@@ -660,13 +660,8 @@ class PrefetchController(StorageControllerInterface):
         signaled_lookup: set[int],
         signaled_load: set[int],
     ) -> None:
-        """
-        Pure state-transition step for one in-flight prefetch request.
-
-        Dispatches polling to the helper that matches the current phase
-        (restricted to signaled adapters) and triggers the phase
-        transition when the phase's work is complete.
-        """
+        """State-transition dispatcher by phase: poll signaled adapters via
+        the per-phase helper, then trigger the phase transition when done."""
         if request.phase == PrefetchPhase.LOOKUP:
             self._poll_lookup_results(request, signaled_lookup)
             if request.all_lookups_done():
