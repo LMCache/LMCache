@@ -162,24 +162,23 @@ def test_adapter_free_lookup_locks_sends_request():
     # First Party
     from lmcache.integration.vllm.vllm_multi_process_adapter import (
         LMCacheMPSchedulerAdapter,
+        ParallelStrategy,
     )
 
     adapter = LMCacheMPSchedulerAdapter.__new__(LMCacheMPSchedulerAdapter)
     adapter.model_name = "test_model"
-    adapter.world_size = 1
-    adapter.worker_id = 0
     adapter.chunk_size = 256
     adapter.blocks_in_chunk = 16
+    adapter.parallel_strategy = ParallelStrategy(False, 1, 0, 1, 0, 1, 1)
     adapter._health_event = threading.Event()
     adapter._health_event.set()
-    adapter.tp_size = 1
     adapter._mq_timeout = 30.0
 
     mock_client = MagicMock(spec=MessageQueueClient)
     mock_future = MagicMock()
     mock_client.submit_request.return_value = mock_future
     adapter.mq_client = mock_client
-    adapter._lookup_job_ids = {}
+    adapter._pending_lookups = set()
 
     token_ids = list(range(512))
     adapter.free_lookup_locks(
@@ -213,17 +212,16 @@ def test_adapter_free_lookup_locks_key_matches_lookup():
     # First Party
     from lmcache.integration.vllm.vllm_multi_process_adapter import (
         LMCacheMPSchedulerAdapter,
+        ParallelStrategy,
     )
 
     adapter = LMCacheMPSchedulerAdapter.__new__(LMCacheMPSchedulerAdapter)
     adapter.model_name = "test_model"
-    adapter.world_size = 1
-    adapter.worker_id = 0
     adapter.chunk_size = 256
     adapter.blocks_in_chunk = 16
+    adapter.parallel_strategy = ParallelStrategy(False, 1, 0, 1, 0, 1, 1)
     adapter._health_event = threading.Event()
     adapter._health_event.set()
-    adapter.tp_size = 1
     adapter._mq_timeout = 30.0
     adapter._heartbeat = None
     adapter._heartbeat_lock = threading.Lock()
@@ -231,10 +229,10 @@ def test_adapter_free_lookup_locks_key_matches_lookup():
 
     mock_client = MagicMock(spec=MessageQueueClient)
     mock_future = MagicMock()
-    mock_future.result.return_value = 42  # mock job_id
+    mock_future.result.return_value = None  # LOOKUP returns None
     mock_client.submit_request.return_value = mock_future
     adapter.mq_client = mock_client
-    adapter._lookup_job_ids = {}
+    adapter._pending_lookups = set()
 
     token_ids = list(range(512))
 

@@ -22,14 +22,7 @@ from lmcache.observability import LMCStatsMonitor
 from lmcache.utils import _lmcache_nvtx_annotate
 from lmcache.v1.pin_monitor import PinMonitor
 from lmcache.v1.system_detection import NUMAMapping
-
-if torch.cuda.is_available():
-    # First Party
-    import lmcache.c_ops as lmc_ops
-else:
-    # First Party
-    import lmcache.non_cuda_equivalents as lmc_ops
-
+import lmcache.c_ops as lmc_ops
 
 logger = init_logger(__name__)
 
@@ -653,7 +646,12 @@ class TensorMemoryObj(MemoryObj):
         #   "byte_array only works with CPU tensors"
         # return memoryview(self.raw_data.contiguous().numpy())
 
-        num_bytes = self.raw_data.numel() * self.raw_data.element_size()
+        # Use logical size (get_size) rather than raw_data physical size.
+        # The raw_data buffer may include alignment padding (e.g. from
+        # batched_allocate) that must not be exposed to callers such as
+        # remote-backend put/get which rely on byte_array length matching
+        # the metadata length.
+        num_bytes = self.get_size()
         ptr = self.raw_data.data_ptr()
         ubyte_ptr = ctypes.cast(ptr, ctypes.POINTER(ctypes.c_ubyte))
         byte_array = (ctypes.c_ubyte * num_bytes).from_address(

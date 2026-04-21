@@ -93,32 +93,32 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
             response_class=tuple[bytes, bool],
             handler_type=HandlerType.BLOCKING,
         ),
-        # Submit a prefix lookup and return a prefetch job ID
+        # Submit a prefix lookup; job is tracked server-side by request_id
         # Payload:
         #   - key: KeyType - Cache key to look up
         #   - tp_size: int - Tensor-parallel size for
         #       MLA multi-reader locking
-        # Returns: int - Prefetch job ID for polling via QUERY_PREFETCH_STATUS
+        # Returns: None
         "LOOKUP": ProtocolDefinition(
             payload_classes=[KeyType, int],
-            response_class=int,
+            response_class=None,
+            handler_type=HandlerType.BLOCKING,
+        ),
+        # Query the status of a prefetch job by request_id
+        # Payload:
+        #   - request_id: str - The external request ID passed in the lookup key
+        # Returns: int | None - Chunk count when done, None if still in progress
+        "QUERY_PREFETCH_STATUS": ProtocolDefinition(
+            payload_classes=[str],
+            response_class=int | None,
             handler_type=HandlerType.BLOCKING,
         ),
         # Query the lookup hit chunks before the prefetch is done
         # Payload:
-        #   - prefetch_job_id: int - Job ID returned by LOOKUP
+        #   - request_id: str - The external request ID passed in the lookup key
         # Returns: int | None - Chunk count if lookup is done, None if still in progress
         "QUERY_PREFETCH_LOOKUP_HITS": ProtocolDefinition(
-            payload_classes=[int],
-            response_class=int | None,
-            handler_type=HandlerType.BLOCKING,
-        ),
-        # Query the status of a prefetch job
-        # Payload:
-        #   - prefetch_job_id: int - Job ID returned by LOOKUP
-        # Returns: int | None - Chunk count when done, None if still in progress
-        "QUERY_PREFETCH_STATUS": ProtocolDefinition(
-            payload_classes=[int],
+            payload_classes=[str],
             response_class=int | None,
             handler_type=HandlerType.BLOCKING,
         ),

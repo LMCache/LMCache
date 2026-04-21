@@ -95,14 +95,24 @@ spec:
   # If you don't use the Prometheus Operator, leave serviceMonitor.enabled=false
   # and use the pod annotations (prometheus.io/scrape, prometheus.io/port) instead.
 
-  # -- L2 storage backends (extensible, mirrors l2_adapters registry) --
-  # Note: the CLI expects a flat JSON with "type" as a peer key
-  # (e.g. --l2-adapter '{"type":"disk","path":"/data"}').
-  # The operator must merge {type} + config into a flat dict when
-  # serializing to container args.
-  l2Backends:
-    - type: string            # adapter type name (mock, disk, redis, s3, p2p)
-      config: map[string]any  # type-specific config as free-form map
+  # -- L2 storage backend (single adapter) --
+  # Currently only one L2 adapter is supported at a time.
+  # LMCache MP mode supports multiple adapters, but this is not yet
+  # fully tested. Once validated, the operator will support multiple.
+  # Exactly one of resp or raw must be set.
+  l2Backend:
+    # Option A: Native RESP (Redis/Valkey) adapter
+    resp:
+      host: string              # REQUIRED
+      port: int                 # REQUIRED, 1-65535
+      numWorkers: int           # default: 8
+      maxCapacityGB: float      # default: 0 (disabled)
+      authSecretRef:            # optional, Secret with "username"/"password" keys
+        name: string
+    # Option B: Raw escape hatch for other adapter types
+    raw:
+      type: string              # adapter type name (nixl_store, fs, mock, etc.)
+      config: map[string]any    # type-specific config as free-form map
 
   # -- Resources (auto-computed, no user input needed) --
   # The operator derives resource requests/limits from l1.sizeGB:
@@ -295,7 +305,7 @@ The ConfigMap uses the lookup Service's cluster DNS name. Because the Service ha
 In addition to the auto-managed pod settings above (`hostIPC`, `--host 0.0.0.0`),
 the operator injects:
 
-- Container command: `/opt/venv/bin/python3 -m lmcache.v1.multiprocess.server`
+- Container command: `/opt/venv/bin/lmcache server`
 - Container args: serialized from spec fields
 - Env: `LMCACHE_LOG_LEVEL` from `spec.logLevel`
 - Probes:
@@ -336,7 +346,7 @@ OnEvent(LMCacheEngine create/update/delete):
 
 ## Future Extensibility
 
-- **L2 backends:** `l2Backends` uses free-form config maps matching the codebase's adapter registry pattern. New adapter types (disk, Redis, S3, P2P) need no CRD schema changes. The operator can create PVCs or inject Secret env vars based on type.
+- **L2 backends:** The RESP (Redis/Valkey) adapter is natively supported with typed CRD fields and Secret-based auth injection. Other adapter types (nixl_store, fs, mock, mooncake_store) can be configured via the `raw` escape hatch. Currently only a single L2 adapter is supported at a time. LMCache MP mode is designed to support multiple adapters in cascade, but this is not yet fully tested — once validated, the operator will support multiple adapters.
 - **Blend mode:** Future `LMCacheEngine` field `blend.enabled` to switch entrypoint from `server.py` to `blend_server.py` (deferred from v1alpha1).
 - **Update strategy:** Future `spec.updateStrategy` field for `RollingUpdate`/`OnDelete` control on the DaemonSet.
 - **Additional CRDs:** `LMCacheKeyManager` (global key management), `LMCacheMonitor` (engine state monitoring), `LMCacheFederation` (cross-cluster P2P topology).

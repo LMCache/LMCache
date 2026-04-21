@@ -44,7 +44,6 @@ dynamic = ["dependencies", "version"]
 
 [project.scripts]
 lmcache="lmcache.cli.main:main"
-lmcache_v0_server="lmcache.server.__main__:main"
 lmcache_server="lmcache.v1.server.__main__:main"
 lmcache_controller="lmcache.v1.api_server.__main__:main"
 
@@ -58,9 +57,6 @@ version_file = "lmcache/_version.py"
 # do not include +gREV local version, required for Test PyPI upload
 local_scheme = "no-local-version"
 
-[tool.setuptools.dynamic]
-dependencies = { file = ["requirements/common.txt"] }
-
 [tool.setuptools.packages.find]
 where = [""]
 include = ["lmcache", "lmcache*"]
@@ -68,6 +64,9 @@ include = ["lmcache", "lmcache*"]
 [tool.ruff]
 # same as Black's default line length
 line-length = 88
+exclude = [
+    "lmcache/integration/vllm/lmcache_mp_connector_*.py",
+]
 
 [tool.ruff.lint]
 select = [
@@ -118,6 +117,9 @@ from-first = true
 
 platform = "linux"
 modules = ["lmcache", "tests", "benchmarks"]
+exclude = [
+    'lmcache/integration/vllm/lmcache_mp_connector_.*\.py',
+]
 
 disable_error_code = [
     #"annotation-unchecked",
@@ -147,7 +149,7 @@ follow_imports = "silent"
 
 [tool.codespell]
 ignore-words-list = "afterall,allready,notin"
-skip = "operator/config/crd/bases/*"
+skip = "operator/config/crd/bases/*,lmcache/integration/vllm/lmcache_mp_connector_*.py"
 
 [tool.cibuildwheel]
 build = "cp3*-manylinux_x86_64"
@@ -163,9 +165,9 @@ build = "cp3*-manylinux_x86_64"
 # 10.0: GB200, B200
 environment = {TORCH_CUDA_ARCH_LIST = "7.0;7.5;8.0;8.6;8.9;9.0;10.0", ENABLE_CXX11_ABI = "1"}
 
-# Use the PyTorch manylinux image version '2_28' that contains CUDA 12.8
+# Use the PyTorch manylinux image version '2_28' that contains CUDA 12.9
 # and torch 2.7 supports (https://pypi.org/project/torch/2.7.0/#files)
-manylinux-x86_64-image = "docker.io/pytorch/manylinux2_28-builder:cuda12.8"
+manylinux-x86_64-image = "docker.io/pytorch/manylinux2_28-builder:cuda12.9"
 
 [tool.cibuildwheel.linux]
 repair-wheel-command = """
