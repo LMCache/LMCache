@@ -413,8 +413,9 @@ the EventBus stop path).
 Replay
 ~~~~~~
 
-Replaying a recorded trace is delivered separately via the
-``lmcache trace`` and ``lmcache bench trace-replay`` CLIs.
+Replaying a recorded trace, plus the full set of CLI flags for
+driving, monitoring, and exporting replay results, is covered in
+its own page: :doc:`tracing_and_debugging`.
 
 What is captured (and what is not)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
