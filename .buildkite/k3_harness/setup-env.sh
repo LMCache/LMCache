@@ -79,6 +79,57 @@ probe_vllm_cli() {
 # the build output. ImportError with a missing top-level name (e.g. a
 # transformers/vLLM API break) bails immediately since reinstalling the
 # package wouldn't recover.
+dump_transformers_state() {
+    # Called whenever a CLI probe fails with anything other than a clean
+    # ModuleNotFoundError. This failure mode has been reproducible only on
+    # the K3s pods, never on a fresh local venv with identical versions,
+    # so we need a direct view of the running pod's filesystem + Python
+    # state to make progress.
+    echo "=================== DIAGNOSTIC DUMP ===================" >&2
+    echo "--- uv pip list (relevant packages) ---" >&2
+    uv pip list 2>/dev/null | grep -iE "^(transformers|tokenizers|huggingface|safetensors|vllm|torch) " >&2 || true
+    local tf_dir=/opt/venv/lib/python3.12/site-packages/transformers
+    echo "--- transformers directory listing ---" >&2
+    ls -la "${tf_dir}/__init__.py" "${tf_dir}/__pycache__/__init__.cpython-312.pyc" 2>&1 >&2 || true
+    echo "--- dist-info METADATA version ---" >&2
+    grep -m1 "^Version:" /opt/venv/lib/python3.12/site-packages/transformers-*.dist-info/METADATA 2>/dev/null >&2 || true
+    echo "--- transformers/__init__.py: __version__ line ---" >&2
+    grep -n "^__version__" "${tf_dir}/__init__.py" 2>/dev/null >&2 || true
+    echo "--- transformers/__init__.py: 'generation' key in _import_structure ---" >&2
+    awk '/"generation":/,/\]/' "${tf_dir}/__init__.py" 2>/dev/null | head -20 >&2 || true
+    echo "--- Python sees: ---" >&2
+    python - <<'PY' >&2 2>&1 || true
+import sys, importlib
+print(f"sys.executable = {sys.executable}")
+print(f"sys.path = {sys.path}")
+try:
+    import transformers
+    print(f"transformers.__file__ = {transformers.__file__}")
+    print(f"transformers.__version__ = {transformers.__version__}")
+    print(f"type(transformers) = {type(transformers).__name__}")
+    print(f"'GenerationConfig' in dir(transformers) = {'GenerationConfig' in dir(transformers)}")
+    cs2m = getattr(transformers, "_class_to_module", None)
+    print(f"has _class_to_module = {cs2m is not None}")
+    if cs2m is not None:
+        print(f"GenerationConfig in _class_to_module = {'GenerationConfig' in cs2m}")
+        print(f"first 5 keys = {list(cs2m.keys())[:5]}")
+    import_struct = getattr(transformers, "_import_structure", None)
+    print(f"has _import_structure = {import_struct is not None}")
+    if import_struct is not None:
+        print(f"'generation' in _import_structure = {'generation' in import_struct}")
+        print(f"_import_structure['generation'] = {import_struct.get('generation')}")
+    try:
+        from transformers import GenerationConfig
+        print("DIRECT IMPORT of GenerationConfig WORKED")
+    except Exception as e:
+        print(f"DIRECT IMPORT failed: {type(e).__name__}: {e}")
+except Exception as e:
+    import traceback
+    traceback.print_exc()
+PY
+    echo "=================== END DIAGNOSTIC DUMP ===================" >&2
+}
+
 MAX_AUTO_INSTALL=5
 for i in $(seq 1 "$MAX_AUTO_INSTALL"); do
     if err=$(probe_vllm_cli); then
@@ -88,6 +139,7 @@ for i in $(seq 1 "$MAX_AUTO_INSTALL"); do
     if [[ -z "$mod" ]]; then
         echo "vLLM import failed with a non-ModuleNotFoundError:" >&2
         echo "$err" >&2
+        dump_transformers_state
         exit 1
     fi
     if [[ "$i" == "$MAX_AUTO_INSTALL" ]]; then
