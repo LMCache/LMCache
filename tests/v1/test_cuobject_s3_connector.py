@@ -783,10 +783,11 @@ class TestRDMAUploadCallbacks:
 
     # Scenario: No x-amz-rdma-reply header in the response (e.g. the
     # server does not support RDMA but still returns 200).  rdma_state
-    # reply remains None.  on_done should NOT call parse_rdma_reply and
-    # should not raise.
-    # Verification: parse_rdma_reply is NOT called when reply is None.
-    def test_upload_on_done_no_rdma_reply_header(
+    # reply remains None.  on_done should raise RuntimeError because
+    # the RDMA transfer was not confirmed — the server may have accepted
+    # an empty HTTP body while the actual data was never transferred.
+    # Verification: RuntimeError is raised with "did not return" message.
+    def test_upload_on_done_raises_on_missing_rdma_reply(
         self, mock_crt, async_loop, local_cpu_backend
     ):
         connector, mock_client = self._build_connector(
@@ -809,7 +810,8 @@ class TestRDMAUploadCallbacks:
 
         # No x-amz-rdma-reply header
         on_headers(200, [("content-type", "application/xml")])
-        on_done(error=None, status_code=200)  # should not raise
+        with pytest.raises(RuntimeError, match="did not return x-amz-rdma-reply"):
+            on_done(error=None, status_code=200)
         mock_client.parse_rdma_reply.assert_not_called()
 
 
@@ -854,8 +856,10 @@ class TestRDMADownloadCallbacks:
         return connector, mock_client
 
     # Scenario: s3.S3Request is called with operation_name="GetObject"
-    # and type=S3RequestType.DEFAULT (no on_body callback for RDMA).
-    # Verification: The operation_name kwarg is "GetObject".
+    # and type=S3RequestType.DEFAULT.  An on_body callback is registered
+    # to detect HTTP-body fallback (it does NOT write into mem_obj).
+    # Verification: The operation_name kwarg is "GetObject" and on_body
+    # is present.
     def test_download_s3_request_has_correct_operation(
         self, mock_crt, async_loop, local_cpu_backend
     ):
@@ -875,8 +879,8 @@ class TestRDMADownloadCallbacks:
 
         call_kwargs = s3_mock.S3Request.call_args
         assert call_kwargs.kwargs["operation_name"] == "GetObject"
-        # No on_body callback for RDMA downloads
-        assert "on_body" not in call_kwargs.kwargs
+        # on_body is registered to detect HTTP-body fallback
+        assert call_kwargs.kwargs["on_body"] is not None
 
     # Scenario: Successful download with HTTP 200 and valid RDMA reply.
     # Verification: on_done completes without raising.
@@ -988,9 +992,10 @@ class TestRDMADownloadCallbacks:
 
     # Scenario: on_done receives status_code=None (CRT sometimes omits it).
     # The download callback treats None status as OK (server may not send
-    # a final status code in all paths).
-    # Verification: on_done does not raise when status_code is None and
-    # there is no error.
+    # a final status code in all paths).  With a valid RDMA reply header,
+    # on_done should not raise.
+    # Verification: on_done does not raise when status_code is None,
+    # there is no error, and the RDMA reply is valid.
     def test_download_on_done_none_status_is_ok(
         self, mock_crt, async_loop, local_cpu_backend
     ):
@@ -1012,8 +1017,74 @@ class TestRDMADownloadCallbacks:
         on_headers = call_kwargs.kwargs["on_headers"]
         on_done = call_kwargs.kwargs["on_done"]
 
-        on_headers(200, [])
+        on_headers(200, [("x-amz-rdma-reply", "ok")])
         on_done(error=None, status_code=None)  # should not raise
+
+    # Scenario: Server returns HTTP 200 but no x-amz-rdma-reply header
+    # and no HTTP body data.  This means the server did not confirm the
+    # RDMA transfer, risking stale buffer contents.  on_done should raise
+    # to prevent silent data corruption.
+    # Verification: RuntimeError with "did not return" message.
+    def test_download_on_done_raises_on_missing_rdma_reply(
+        self, mock_crt, async_loop, local_cpu_backend
+    ):
+        connector, mock_client = self._build_connector(
+            mock_crt, async_loop, local_cpu_backend
+        )
+        mem_shape = torch.Size([_KV_SHAPE[1], _KV_SHAPE[3], 256, _KV_SHAPE[4]])
+        mem_obj = local_cpu_backend.allocate(mem_shape, _DTYPE)
+        mem_obj.ref_count_up()
+
+        # First Party
+        import lmcache.v1.storage_backend.connector.cuobject_s3_connector as mod
+
+        s3_mock = mod.s3
+
+        connector._rdma_download("test-key", mem_obj)
+
+        call_kwargs = s3_mock.S3Request.call_args
+        on_headers = call_kwargs.kwargs["on_headers"]
+        on_done = call_kwargs.kwargs["on_done"]
+
+        # No x-amz-rdma-reply header
+        on_headers(200, [("content-type", "application/xml")])
+        with pytest.raises(RuntimeError, match="did not return x-amz-rdma-reply"):
+            on_done(error=None, status_code=200)
+        mock_client.parse_rdma_reply.assert_not_called()
+
+    # Scenario: Server ignores x-amz-rdma-token and sends data via HTTP
+    # body instead of RDMA.  The on_body callback fires, but since the
+    # body is not written into mem_obj, the buffer contains stale data.
+    # on_done should detect this via the body_received flag and raise
+    # with a specific error message.
+    # Verification: RuntimeError mentioning "HTTP body".
+    def test_download_on_done_raises_on_http_body_fallback(
+        self, mock_crt, async_loop, local_cpu_backend
+    ):
+        connector, mock_client = self._build_connector(
+            mock_crt, async_loop, local_cpu_backend
+        )
+        mem_shape = torch.Size([_KV_SHAPE[1], _KV_SHAPE[3], 256, _KV_SHAPE[4]])
+        mem_obj = local_cpu_backend.allocate(mem_shape, _DTYPE)
+        mem_obj.ref_count_up()
+
+        # First Party
+        import lmcache.v1.storage_backend.connector.cuobject_s3_connector as mod
+
+        s3_mock = mod.s3
+
+        connector._rdma_download("test-key", mem_obj)
+
+        call_kwargs = s3_mock.S3Request.call_args
+        on_headers = call_kwargs.kwargs["on_headers"]
+        on_body = call_kwargs.kwargs["on_body"]
+        on_done = call_kwargs.kwargs["on_done"]
+
+        # Server responds with HTTP body (no RDMA)
+        on_headers(200, [("content-type", "application/octet-stream")])
+        on_body(b"fake-data-chunk", 0)
+        with pytest.raises(RuntimeError, match="HTTP body"):
+            on_done(error=None, status_code=200)
 
 
 # ---------------------------------------------------------------------------

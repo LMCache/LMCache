@@ -90,12 +90,13 @@ int CuObjectClient::close() noexcept {
 
   // Deregister any active pool before destroying the client to avoid
   // leaking the RDMA memory registration (cuMemObjPutDescriptor).
+  int rc = CU_OBJ_SUCCESS;
   if (pool_base_ != 0) {
-    deregister_pool(pool_base_);
+    rc = deregister_pool(pool_base_);
   }
 
   client_.reset();
-  return CU_OBJ_SUCCESS;
+  return rc;
 }
 
 // ---------------------------------------------------------------------------

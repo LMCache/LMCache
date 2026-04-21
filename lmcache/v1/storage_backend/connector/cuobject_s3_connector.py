@@ -216,9 +216,13 @@ class CuObjectS3Connector(S3Connector):
                     f"RDMA upload failed for {key_str}: "
                     f"error={rdma_state['err']}, status={final_status}"
                 )
-            # Verify RDMA completion if the server returned a reply
             if rdma_state["reply"] is None:
-                return
+                raise RuntimeError(
+                    f"RDMA upload failed for {key_str}: server "
+                    f"did not return x-amz-rdma-reply header, "
+                    f"RDMA transfer not confirmed (uploaded data "
+                    f"may be empty or corrupt)"
+                )
             if not self._cuobj_client.parse_rdma_reply(rdma_state["reply"]):
                 raise RuntimeError(
                     f"RDMA upload verification failed for {key_str}: "
@@ -246,8 +250,10 @@ class CuObjectS3Connector(S3Connector):
 
         If RDMA is enabled, injects ``x-amz-rdma-token`` into the HTTP
         GET request — the cuObject-enabled server performs
-        ``RDMA_WRITE`` directly into our pinned memory buffer.  No
-        ``on_body`` callback is needed.
+        ``RDMA_WRITE`` directly into our pinned memory buffer.  An
+        ``on_body`` callback is registered solely to detect servers
+        that ignore the RDMA token and fall back to HTTP body
+        transfer (which would otherwise cause silent data corruption).
 
         Falls back to the parent's HTTP body download on any RDMA
         failure.
@@ -277,13 +283,26 @@ class CuObjectS3Connector(S3Connector):
 
         req = HttpRequest("GET", self._format_safe_path(key_str), headers)
 
-        rdma_state = {"reply": None, "err": None, "status": None}
+        rdma_state = {
+            "reply": None,
+            "err": None,
+            "status": None,
+            "body_received": False,
+        }
 
         def on_headers(status_code, headers, **kwargs):
             rdma_state["status"] = status_code
             for name, value in headers:
                 if name.lower() == "x-amz-rdma-reply":
                     rdma_state["reply"] = value
+
+        def on_body(chunk, offset, **kwargs):
+            # If we receive HTTP body data the server ignored our
+            # x-amz-rdma-token and fell back to a regular HTTP
+            # response.  Track this so on_done can report the
+            # correct failure mode (the body is NOT written into
+            # mem_obj — there is no safe offset map here).
+            rdma_state["body_received"] = True
 
         def on_done(error=None, status_code=None, **kwargs):
             rdma_state["err"] = error
@@ -294,22 +313,35 @@ class CuObjectS3Connector(S3Connector):
                     f"RDMA download failed for {key_str}: "
                     f"error={rdma_state['err']}, status={final_status}"
                 )
-            # Verify RDMA completion if the server returned a reply
             if rdma_state["reply"] is None:
-                return
+                if rdma_state["body_received"]:
+                    raise RuntimeError(
+                        f"RDMA download failed for {key_str}: server "
+                        f"ignored x-amz-rdma-token and sent data via "
+                        f"HTTP body (body data discarded, buffer is "
+                        f"stale)"
+                    )
+                raise RuntimeError(
+                    f"RDMA download failed for {key_str}: server "
+                    f"did not return x-amz-rdma-reply header, "
+                    f"RDMA transfer not confirmed (buffer may be "
+                    f"stale)"
+                )
             if not self._cuobj_client.parse_rdma_reply(rdma_state["reply"]):
                 raise RuntimeError(
                     f"RDMA download verification failed for "
                     f"{key_str}: reply={rdma_state['reply']!r}"
                 )
 
-        # No on_body — data arrives via RDMA_WRITE, not HTTP body
+        # on_body is registered to *detect* an HTTP-body fallback;
+        # it does not write into mem_obj (data arrives via RDMA_WRITE).
         s3_req = s3.S3Request(
             client=self.s3_client,
             type=s3.S3RequestType.DEFAULT,
             operation_name="GetObject",
             request=req,
             on_headers=on_headers,
+            on_body=on_body,
             credential_provider=self.credentials_provider,
             region=self.s3_region,
             on_done=on_done,
