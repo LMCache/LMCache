@@ -714,7 +714,9 @@ class MPCacheEngine:
             )
 
         # set lookup ipc key, for session manager to use and generate object keys
-        session = self.session_manager.get_or_create(key.request_id)
+        session = self.session_manager.get_or_create(
+            key.request_id, cache_salt=key.cache_salt
+        )
         session.set_tokens(list(key.token_ids))
         session.lookup_ipc_key = key
 
