@@ -230,7 +230,7 @@
             } else if (isQwen3Model) {
                 total_elements = 2 * effective_kv_layers * tokens * num_key_value_heads * head_dim;
             } else if (isGLM4Model) {
-                total_elements = 2 * effective_kv_layers * tokens * num_key_value_heads * head_dim;
+                total_elements = 2 * num_hidden_layers * tokens * num_key_value_heads * head_dim;
             } else {
                 total_elements = 2 * num_hidden_layers * tokens * num_key_value_heads * head_size;
             }
