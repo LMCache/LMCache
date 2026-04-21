@@ -36,7 +36,7 @@ def create_test_config(gds_path: str, gds_path_sharding: str = "by_gpu"):
         gds_path=gds_path,
         gds_path_sharding=gds_path_sharding,
         lmcache_instance_id="test_instance",
-        cufile_buffer_size=256,
+        gds_buffer_size=256,
         extra_config={"use_direct_io": True},
     )
     return config
@@ -443,11 +443,11 @@ class TestGdsBackend:
                     path, _, _, _ = backend._key_to_path(key)
                     assert path.endswith(".weka1")
                     assert backend.data_suffix == ".weka1"
-                    assert backend.use_cufile
+                    assert backend.use_gds
                 finally:
                     backend.close()
 
-    def test_weka_disallows_disabling_cufile(self, temp_gds_path, async_loop):
+    def test_weka_disallows_disabling_gds(self, temp_gds_path, async_loop):
         class DummyAllocator:
             def __init__(self):
                 self.base_pointer = 0
@@ -467,7 +467,7 @@ class TestGdsBackend:
             ),
         ):
             config = create_test_config(temp_gds_path)
-            config.extra_config["use_cufile"] = False
+            config.use_gds = False
             metadata = create_test_metadata()
 
             with pytest.raises(AssertionError):
