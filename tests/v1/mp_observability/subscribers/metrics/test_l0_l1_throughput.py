@@ -8,8 +8,8 @@ deterministic; the end-to-end test drives through ``EventBus``.
 """
 
 # Standard
-import time
 from unittest.mock import patch
+import time
 
 # Third Party
 import pytest
@@ -141,7 +141,9 @@ class TestStoreThroughput:
 
         # 2 GB in 0.1 s → 20 GB/s
         subscriber._on_store_start(
-            _start_event(EventType.MP_STORE_START, "req-1", 1000.0, engine_id=7, gpu_id=3)
+            _start_event(
+                EventType.MP_STORE_START, "req-1", 1000.0, engine_id=7, gpu_id=3
+            )
         )
         subscriber._on_store_end(
             _end_event(
