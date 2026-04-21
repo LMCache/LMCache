@@ -156,6 +156,30 @@ per-instance and per-model Prometheus metric slicing (e.g.
 
 ---
 
+## L0 ↔ L1 Throughput Histograms
+
+Sampled (default 1%) per-request throughput of GPU↔CPU copies via
+`L0L1ThroughputSubscriber`. Correlates `MP_{STORE,RETRIEVE}_START` → `MP_{STORE,RETRIEVE}_END`
+pairs by `session_id`, computes `total_bytes / (end_ts - start_ts)` in GB/s.
+START/END events fire on the GPU cupy stream (`publish_on_stream`), so
+timestamps reflect true GPU-stream copy time — not Python/lock overhead.
+
+All throughput histograms carry `engine_id` (vLLM worker instance id) and
+`gpu_id` OTel attributes, enabling per-worker and per-GPU slicing in
+Prometheus (e.g.
+`lmcache_mp_l0_l1_store_throughput_gbs{engine_id="0",gpu_id="3"}`).
+
+| OTel metric name | Prometheus name | Type | Source event | Calculation |
+|---|---|---|---|---|
+| `lmcache_mp.l0_l1_store_throughput_gbs` | `lmcache_mp_l0_l1_store_throughput_gbs` | Histogram | `MP_STORE_START` → `MP_STORE_END` | `total_bytes / (end_ts - start_ts) / 1e9` per sampled request |
+| `lmcache_mp.l0_l1_load_throughput_gbs` | `lmcache_mp_l0_l1_load_throughput_gbs` | Histogram | `MP_RETRIEVE_START` → `MP_RETRIEVE_END` | `total_bytes / (end_ts - start_ts) / 1e9` per sampled request |
+
+**What it answers:** What GPU↔CPU throughput is each vLLM worker actually
+achieving for KV store/load? Does it match the theoretical PCIe bandwidth?
+Are some workers or GPUs underperforming?
+
+---
+
 ## MPCacheEngine Observable Gauges
 
 These metrics are registered directly via `register_gauge` (pull-based OTel
