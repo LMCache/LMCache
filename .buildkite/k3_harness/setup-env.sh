@@ -12,6 +12,21 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 source "${REPO_ROOT}/.buildkite/k3_tests/common_scripts/helpers.sh"
 check_gpu_health 80
 
+echo "--- :broom: Pre-install bytecode/cache eviction"
+# The CI base image pre-installs packages from requirements/*.txt at image
+# build time. We've observed k3 jobs (integration + correctness) fail with
+#   ImportError: cannot import name 'GenerationConfig' from 'transformers'
+# after `uv pip install -U vllm ...` upgrades transformers, even though the
+# installed .py files clearly expose GenerationConfig (verified both 5.5.0
+# and 5.5.4). The same install recipe replayed in a fresh venv outside CI
+# always succeeds, so the failure is tied to base-image filesystem state
+# (stale __pycache__, partial upgrades via overlayfs, etc.). Evict all
+# bytecode caches and uv's download cache up front so later steps operate
+# on clean ground; this is cheap (few seconds) and idempotent.
+find /opt/venv/lib/python3.12/site-packages -type d -name __pycache__ \
+    -exec rm -rf {} + 2>/dev/null || true
+uv cache clean 2>/dev/null || true
+
 echo "--- :python: Installing vLLM nightly (pinned to cu130 index)"
 # The base image is nvidia/cuda:13.0.2-devel-ubuntu24.04 (system nvcc 13).
 # vLLM's generic nightly index (wheels.vllm.ai/nightly/vllm/) non-deterministically
@@ -26,7 +41,19 @@ echo "--- :python: Installing vLLM nightly (pinned to cu130 index)"
 # matches the base image. This also lets us drop the HTML-scraping + apt
 # cuda-compiler alignment dance that lived here before.
 # (See https://docs.vllm.ai/ install tips → Nightly → CUDA 13.0.)
+#
+# --reinstall-package for transformers / tokenizers / huggingface-hub /
+# safetensors / vllm forces uv to uninstall-and-reinstall those packages
+# even when it thinks the existing install is up to date. That is the
+# minimum set to put the full `vllm serve` import chain on a freshly
+# extracted wheel, which bypasses whatever filesystem-level mismatch in
+# the base image was causing the GenerationConfig ImportError.
 uv pip install -U "vllm[runai,tensorizer,flashinfer]" --pre \
+    --reinstall-package transformers \
+    --reinstall-package tokenizers \
+    --reinstall-package huggingface-hub \
+    --reinstall-package safetensors \
+    --reinstall-package vllm \
     --extra-index-url https://wheels.vllm.ai/nightly/cu130 \
     --extra-index-url https://download.pytorch.org/whl/cu130 \
     --index-strategy unsafe-best-match
@@ -113,20 +140,11 @@ if ! diff -q /tmp/env-before-lmcache.txt /tmp/env-after-lmcache.txt >/dev/null; 
     diff /tmp/env-before-lmcache.txt /tmp/env-after-lmcache.txt || true
 fi
 
-echo "--- :broom: Evict stale bytecode from base-image layers"
-# The CI base image pre-installs packages from requirements/*.txt at build
-# time, which populates /opt/venv/lib/python3.12/site-packages/<pkg>/
-# __pycache__/*.pyc. When setup-env.sh later upgrades those packages via
-# `uv pip install -U vllm ...`, uv extracts the new wheel with the mtimes
-# recorded in the wheel itself -- frequently older than the pre-existing
-# .pyc files from the base-image build. Python's import system compares
-# .py vs .pyc mtimes and will keep using the older .pyc, so code runs the
-# 5.5.0 bytecode for transformers/__init__.py even though the .py on disk
-# is 5.5.4. That produces:
-#   ImportError: cannot import name 'GenerationConfig' from 'transformers'
-# at `vllm serve` time, despite a clean install log. Wipe __pycache__ for
-# every site-packages entry so Python is forced to re-byte-compile from
-# the current .py sources on next import.
+echo "--- :broom: Post-install bytecode eviction"
+# Belt-and-suspenders companion to the pre-install eviction above: clear
+# __pycache__ again after the LMCache editable install, which may have
+# triggered fresh imports (setuptools_scm, pyproject build backend) and
+# deposited new .pyc files that reference now-downgraded packages.
 find /opt/venv/lib/python3.12/site-packages -type d -name __pycache__ \
     -exec rm -rf {} + 2>/dev/null || true
 
