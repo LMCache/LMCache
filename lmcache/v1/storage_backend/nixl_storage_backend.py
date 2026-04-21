@@ -475,14 +475,13 @@ class NixlDynamicStorageAgent(NixlStorageAgent):
         Release storage handler resources.
 
         :param reg_descs: Memory descriptors to deregister.
-        :param xfer_handler: Ttransfer dlist handle to release.
+        :param xfer_handler: Transfer dlist handle to release.
         :param descs: Descriptors used for this transfer.
         """
-        if self.mem_type == "FILE":
-            for desc in descs:
-                os.close(desc.device_id)
         self.nixl_agent.release_dlist_handle(xfer_handler)
         self.nixl_agent.deregister_memory(reg_descs)
+        if self.mem_type == "FILE":
+            _close_file_descs(descs)
 
     def nixl_desc_exists(self, meta_info: str, path: str) -> bool:
         if self.mem_type == "FILE":
