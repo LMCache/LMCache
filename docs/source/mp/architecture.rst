@@ -37,7 +37,7 @@ High-Level Architecture
          |--- EvictionController ----> L1Manager (watermark-triggered eviction)
          |
          v
-    PrometheusController + TelemetryController (observability)
+    EventBus + OTel providers (observability)
 
 Server Variants
 ---------------
@@ -146,8 +146,7 @@ Each config module exposes a composable triple:
     add_mp_server_args(parser)        # from multiprocess/config.py
     add_storage_manager_args(parser)  # from distributed/config.py
       # which internally calls add_l2_adapters_args(parser)
-    add_prometheus_args(parser)       # from mp_observability/config.py
-    add_telemetry_args(parser)        # from mp_observability/telemetry/config.py
+    add_observability_args(parser)    # from mp_observability/config.py
 
 Both ``blend_server_v2.py`` and ``http_server.py`` reuse this pattern, adding
 ``add_http_frontend_args()`` for the HTTP variant.
@@ -285,15 +284,26 @@ RETRIEVE Flow
 Observability Internals
 -----------------------
 
-**PrometheusController** is a global singleton (initialized at server startup).
-It runs a daemon thread that periodically calls ``log_prometheus()`` on all
-registered loggers (``StorageManagerStatsLogger``, ``L1ManagerStatsLogger``).
-Each logger atomically snapshots its stats, resets to zero, and pushes values
-to Prometheus counters.
+**EventBus** (``lmcache/v1/mp_observability/event_bus.py``) is a global
+singleton initialized at server startup by ``init_observability()``.
+Producers (L1Manager, StorageManager, MPCacheEngine) publish ``Event``
+objects to a bounded queue (``--event-bus-queue-size``, default 10000,
+tail-drop on overflow).  A background drain thread dispatches each
+event to all registered subscribers.
 
-**TelemetryController** is also a global singleton.  It maintains an in-memory
-event queue (bounded by ``--telemetry-max-queue-size``).  A drain thread reads
-events and dispatches them to registered processors (e.g., ``LoggingProcessor``).
+**Subscribers** live under ``lmcache/v1/mp_observability/subscribers/``
+and are grouped by concern: ``metrics/`` (OTel counters and lifecycle
+histograms), ``logging/`` (Python logging handlers, lookup-hash JSONL),
+and ``tracing/`` (OTel spans built from START/END event pairs).
+``init_observability()`` registers the set selected by CLI flags
+(``--disable-metrics``, ``--disable-logging``, ``--enable-tracing``).
+
+**OTel providers** are set up via ``otel_init.py`` before subscribers
+are constructed, so module-level ``get_meter()`` / ``get_tracer()``
+calls bind to the real provider. Metrics are exported both to an
+in-process Prometheus ``/metrics`` endpoint (``--prometheus-port``,
+default 9090) and, when ``--otlp-endpoint`` is set, pushed to an OTel
+collector.
 
 How to Extend
 -------------
@@ -309,16 +319,22 @@ Adding a new L2 adapter
 4. Add an ``isinstance()`` branch in ``create_l2_adapter()``
    (``l2_adapters/__init__.py``).
 
-Adding a telemetry processor
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Adding an observability subscriber
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-1. Create a config class subclassing ``TelemetryProcessorConfig`` with
-   ``from_dict()`` and ``help()`` methods.
-2. Call ``register_telemetry_processor_type("my_proc", MyProcConfig)`` at
-   module level.
-3. Create a processor class implementing ``TelemetryProcessor``
-   (``on_new_event()``, ``shutdown()``).
-4. Add a factory branch in the telemetry controller's processor creation code.
+1. Create a subscriber class subclassing ``EventSubscriber`` (defined
+   in ``lmcache/v1/mp_observability/event_bus.py``): implement
+   ``get_subscriptions()`` to return an ``{EventType: callback}``
+   mapping; optionally override ``shutdown()`` for cleanup.
+2. Place the class under the appropriate concern group
+   (``subscribers/metrics/``, ``subscribers/logging/``, or
+   ``subscribers/tracing/``) and export it from that package's
+   ``__init__.py``.
+3. Register the subscriber in ``init_observability()``
+   (``lmcache/v1/mp_observability/config.py``) via
+   ``bus.register_subscriber(...)`` inside the branch matching its
+   concern (metrics / logging / tracing), gated on the corresponding
+   CLI flag if needed.
 
 Adding a new request type
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -365,10 +381,14 @@ Key Source Files
    * - ``lmcache/v1/distributed/storage_controllers/prefetch_controller.py``
      - PrefetchController (L2->L1 on miss)
    * - ``lmcache/v1/mp_observability/config.py``
-     - PrometheusConfig
-   * - ``lmcache/v1/mp_observability/prometheus_controller.py``
-     - PrometheusController singleton
-   * - ``lmcache/v1/mp_observability/telemetry/config.py``
-     - TelemetryConfig
-   * - ``lmcache/v1/mp_observability/telemetry/controller.py``
-     - TelemetryController singleton
+     - ObservabilityConfig + ``init_observability()`` entry point
+   * - ``lmcache/v1/mp_observability/event_bus.py``
+     - EventBus singleton and ``EventSubscriber`` base class
+   * - ``lmcache/v1/mp_observability/event.py``
+     - ``Event`` / ``EventType`` definitions
+   * - ``lmcache/v1/mp_observability/otel_init.py``
+     - OTel metrics / tracing provider setup
+   * - ``lmcache/v1/mp_observability/subscribers/``
+     - Metrics, logging, and tracing subscribers
+   * - ``lmcache/v1/mp_observability/trace/``
+     - Trace recording (``--trace-level storage``) capture stack
