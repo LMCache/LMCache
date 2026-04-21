@@ -183,6 +183,11 @@ class L2EvictionController(StorageControllerInterface):
         self._thread.join()
 
     def report_status(self) -> dict:
+        # NOTE: ``usage.per_cache_salt_bytes`` is intentionally NOT
+        # surfaced here. A deployment can have 10k+ salts, so embedding
+        # the full bucket map in the status response would blow up the
+        # payload. A separate paginated / queried endpoint is the right
+        # home for per-salt inspection if we need it.
         adapter_statuses = []
         for state in self._adapter_states:
             usage = state.adapter.get_usage()
@@ -194,7 +199,7 @@ class L2EvictionController(StorageControllerInterface):
                     "current_usage": usage.usage_fraction,
                     "total_bytes_used": usage.total_bytes_used,
                     "total_capacity_bytes": usage.total_capacity_bytes,
-                    "per_cache_salt_bytes": dict(usage.per_cache_salt_bytes),
+                    "num_cache_salt_buckets": len(usage.per_cache_salt_bytes),
                 }
             )
         return {

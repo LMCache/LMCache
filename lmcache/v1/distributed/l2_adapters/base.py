@@ -357,11 +357,21 @@ class L2AdapterInterface(ABC):
         Accounting is held under ``_usage_lock``; listener callbacks fire
         outside the lock so a slow listener cannot stall further notifies.
         """
+        # Aggregate per-salt deltas before touching
+        # ``_per_cache_salt_size_bytes`` — one dict read/write per unique
+        # salt instead of one per key. This matters when the registry is
+        # large (10k+ salts) and keys/sizes are bulky.
+        delta: dict[str, int] = {}
+        total_delta = 0
+        for key, size in zip(keys, sizes, strict=True):
+            delta[key.cache_salt] = delta.get(key.cache_salt, 0) + size
+            total_delta += size
+
         with self._usage_lock:
-            for key, size in zip(keys, sizes, strict=True):
-                self._total_bytes_used += size
-                self._per_cache_salt_size_bytes[key.cache_salt] = (
-                    self._per_cache_salt_size_bytes.get(key.cache_salt, 0) + size
+            self._total_bytes_used += total_delta
+            for salt, d in delta.items():
+                self._per_cache_salt_size_bytes[salt] = (
+                    self._per_cache_salt_size_bytes.get(salt, 0) + d
                 )
         for listener in self._listeners:
             listener.on_l2_keys_stored(keys)
@@ -386,28 +396,35 @@ class L2AdapterInterface(ABC):
         sentinel ``usage_fraction == -1`` would silently disable eviction
         forever; with it we log a warning and recover.
         """
+        # Same batching rationale as ``_notify_keys_stored`` — aggregate
+        # per-salt deltas first so the hot path does one dict read/write
+        # per unique salt, not per key.
+        delta: dict[str, int] = {}
+        total_delta = 0
+        for key, size in zip(keys, sizes, strict=True):
+            delta[key.cache_salt] = delta.get(key.cache_salt, 0) + size
+            total_delta += size
+
         with self._usage_lock:
-            for key, size in zip(keys, sizes, strict=True):
-                self._total_bytes_used -= size
-                if self._total_bytes_used < 0:
-                    logger.warning(
-                        "L2 adapter byte accounting underflow: "
-                        "_total_bytes_used dropped to %d after deleting "
-                        "key=%s size=%d. Clamping to 0; this indicates "
-                        "an accounting bug (double-delete or size "
-                        "mismatch) in the adapter.",
-                        self._total_bytes_used,
-                        key,
-                        size,
-                    )
-                    self._total_bytes_used = 0
-                new_total = (
-                    self._per_cache_salt_size_bytes.get(key.cache_salt, 0) - size
+            self._total_bytes_used -= total_delta
+            if self._total_bytes_used < 0:
+                logger.warning(
+                    "L2 adapter byte accounting underflow: "
+                    "_total_bytes_used dropped to %d after deleting %d "
+                    "keys (total size %d). Clamping to 0; this indicates "
+                    "an accounting bug (double-delete or size mismatch) "
+                    "in the adapter.",
+                    self._total_bytes_used,
+                    len(keys),
+                    total_delta,
                 )
+                self._total_bytes_used = 0
+            for salt, d in delta.items():
+                new_total = self._per_cache_salt_size_bytes.get(salt, 0) - d
                 if new_total <= 0:
-                    self._per_cache_salt_size_bytes.pop(key.cache_salt, None)
+                    self._per_cache_salt_size_bytes.pop(salt, None)
                 else:
-                    self._per_cache_salt_size_bytes[key.cache_salt] = new_total
+                    self._per_cache_salt_size_bytes[salt] = new_total
         for listener in self._listeners:
             listener.on_l2_keys_deleted(keys)
 
