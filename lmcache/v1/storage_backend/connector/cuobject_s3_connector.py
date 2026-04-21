@@ -125,12 +125,17 @@ class CuObjectS3Connector(S3Connector):
                 self._rdma_pool_handle = self._cuobj_client.register_pool(
                     base_ptr, size_bytes
                 )
+                self._rdma_enabled = True
                 logger.info(
                     f"cuObject RDMA pool registered: "
                     f"ptr=0x{base_ptr:x}, size={size_bytes} bytes"
                 )
-            self._rdma_enabled = True
-            logger.info("cuObject RDMA data plane enabled")
+                logger.info("cuObject RDMA data plane enabled")
+            else:
+                logger.warning(
+                    "Allocator pool size is 0 bytes; skipping RDMA "
+                    "registration, falling back to HTTP data plane"
+                )
         except Exception as exc:
             logger.warning(
                 f"cuObject initialisation failed, falling back to "

@@ -506,7 +506,7 @@ class TestGetAllocatorBufferInfo:
         allocator = MagicMock(spec=PinMemoryAllocator)
         buf = MagicMock()
         buf.data_ptr.return_value = 0xDEAD
-        buf.numel.return_value = 8192
+        buf.nbytes = 8192
         allocator.buffer = buf
 
         ptr, size = _get_allocator_buffer_info(allocator)
@@ -525,7 +525,7 @@ class TestGetAllocatorBufferInfo:
         allocator = MagicMock(spec=MixedMemoryAllocator)
         buf = MagicMock()
         buf.data_ptr.return_value = 0xBEEF
-        buf.numel.return_value = 4096
+        buf.nbytes = 4096
         allocator.buffer = buf
 
         ptr, size = _get_allocator_buffer_info(allocator)
@@ -546,7 +546,7 @@ class TestGetAllocatorBufferInfo:
         allocator = MagicMock(spec=LazyMemoryAllocator)
         buf = MagicMock()
         buf.data_ptr.return_value = 0xCAFE
-        buf.numel.return_value = 16384
+        buf.nbytes = 16384
         allocator.get_underlying_buffer.return_value = buf
 
         ptr, size = _get_allocator_buffer_info(allocator)
