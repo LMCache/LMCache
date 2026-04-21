@@ -218,7 +218,7 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
     "pd_proxy_port": {"type": Optional[int], "default": None, "env_converter": int},
     "pd_allocation_timeout_sec": {
         "type": float,
-        "default": 5.0,
+        "default": float("inf"),
         "env_converter": float,
         "description": "Maximum seconds to retry memory allocation before giving up.",
     },

@@ -1391,6 +1391,34 @@ class PDBackendAsync(AllocatorBackendInterface):
         current_batch_keys: list[str] = []
 
         try:
+            # Global inflight pre-check: wait until there are enough free slots
+            # for the entire batch before entering the per-chunk loop.
+            # This prevents the mid-allocation deadlock that occurs when residual
+            # inflight chunks from a previous request fill the buffer: without this
+            # check, a request can acquire admission, allocate some chunks, then
+            # block mid-loop on _inflight_condition.  Since the request hasn't
+            # finished sending, no ProxyNotif is issued, the decoder never starts
+            # consuming, inflight never decreases, and the system deadlocks.
+            async with self._inflight_condition:
+                while (
+                    self._max_inflight_chunks - self._inflight_chunks
+                ) < total_allocs:
+                    if not self.running:
+                        await _release_admission()
+                        remaining_allocs = total_allocs - len(alloc_indexes)
+                        alloc_indexes.extend([-1] * remaining_allocs)
+                        return AllocResponse(remote_indexes=alloc_indexes)
+                    logger.info(
+                        "Req %s admitted but waiting to allocate %d chunks "
+                        "(inflight=%d, max=%d, free=%d)",
+                        req_id,
+                        total_allocs,
+                        self._inflight_chunks,
+                        self._max_inflight_chunks,
+                        self._max_inflight_chunks - self._inflight_chunks,
+                    )
+                    await self._inflight_condition.wait()
+
             for idx, key_str in enumerate(alloc_request.keys):
                 key = CacheEngineKey.from_string(key_str)
 
