@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Triton block-sparse attention kernel for LMCache CacheBlend.
 
 Replaces flashinfer's VariableBlockSparseAttentionWrapper for ROCm support.

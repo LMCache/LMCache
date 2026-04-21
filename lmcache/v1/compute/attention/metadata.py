@@ -152,9 +152,12 @@ class LMCTritonSparseMetadata(LMCAttnMetadata):
         device = top_indices.device
         top_k_num = len(top_indices)
 
-        num_block_row = (
-            top_k_num + self.sparse_blk_row_size - 1
-        ) // self.sparse_blk_row_size
+        # Use floor division to match flashinfer behavior — partial
+        # trailing blocks are absorbed into the last full block row,
+        # avoiding empty CSR rows that would cause NaN in the kernel.
+        num_block_row = top_k_num // self.sparse_blk_row_size
+        if num_block_row == 0:
+            num_block_row = 1
         num_block_col = (
             self.seq_len + self.sparse_blk_col_size - 1
         ) // self.sparse_blk_col_size
