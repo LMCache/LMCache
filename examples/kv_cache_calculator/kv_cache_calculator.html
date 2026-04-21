@@ -116,8 +116,8 @@
 
         // Load model configurations from GitHub
         async function loadModelConfigs() {
-            const url = 'https://raw.githubusercontent.com/LMCache/LMCache/refs/heads/dev/examples/kv_cache_calculator/modelconfig.json';
-            // const url = './modelConfig.json';
+            // const url = 'https://raw.githubusercontent.com/LMCache/LMCache/refs/heads/dev/examples/kv_cache_calculator/modelconfig.json';
+            const url = './modelConfig.json';
             try {
                 const response = await fetch(url);
                 if (!response.ok) {
@@ -175,6 +175,7 @@
             let hidden_size, num_attention_heads, num_hidden_layers, num_key_value_heads;
             let kv_lora_rank, qk_rope_head_dim; // for deepseek-ai/DeepSeek-V3
             let head_size;
+            let head_dim, full_attention_interval;
 
             // Check for DeepSeek models (exact matching)
             const isDeepSeekModel = model === "deepseek-ai/DeepSeek-V3" || model === "deepseek-ai/DeepSeek-R1";
@@ -185,14 +186,14 @@
             // Check for GLM4 models (prefix matching)
             const isGLM4Model = model.startsWith("zai-org/GLM-4.");
 
-            const isGQAWithHeadDimModel = isQwen3Model || isGLM4Model;
-
             if (isDeepSeekModel) {
                 ({ hidden_size, num_attention_heads, num_hidden_layers, num_key_value_heads, kv_lora_rank, qk_rope_head_dim } = config);
-            } else if (isGQAWithHeadDimModel) {
-                // The Qwen3 series and GLM use GQA, and `head_dim` needs to be read from config file.
+            } else if (isQwen3Model) {
+                // Qwen3 series uses GQA and may include hybrid attention metadata.
+                ({ hidden_size, num_attention_heads, num_hidden_layers, num_key_value_heads, head_dim, full_attention_interval } = config);
+            } else if (isGLM4Model) {
+                // GLM4 series uses GQA with explicit head_dim.
                 ({ hidden_size, num_attention_heads, num_hidden_layers, num_key_value_heads, head_dim } = config);
-                console.log(config);
             } else {
                 ({ hidden_size, num_attention_heads, num_hidden_layers, num_key_value_heads } = config);
                 head_size = hidden_size / num_attention_heads;
@@ -214,10 +215,22 @@
 
             // Calculate KV cache size
             let total_elements;
+            let effective_kv_layers = num_hidden_layers;
+
+            if (
+                isQwen3Model
+                && Number.isFinite(full_attention_interval)
+                && full_attention_interval > 0
+            ) {
+                effective_kv_layers = num_hidden_layers / full_attention_interval;
+            }
+
             if (isDeepSeekModel) {
                 total_elements = num_hidden_layers * tokens * (kv_lora_rank + qk_rope_head_dim);
-            } else if (isGQAWithHeadDimModel) {
-                total_elements = 2 * num_hidden_layers * tokens * num_key_value_heads * head_dim;
+            } else if (isQwen3Model) {
+                total_elements = 2 * effective_kv_layers * tokens * num_key_value_heads * head_dim;
+            } else if (isGLM4Model) {
+                total_elements = 2 * effective_kv_layers * tokens * num_key_value_heads * head_dim;
             } else {
                 total_elements = 2 * num_hidden_layers * tokens * num_key_value_heads * head_size;
             }
@@ -241,7 +254,26 @@
                 <b>Total Bytes:</b> ${total_elements} × ${dtype_size} = ${total_bytes} bytes<br>
                 <b>KV Cache Size:</b> ${total_bytes} / (1024³) ≈ ${kvCacheSizeGB.toFixed(4)} GB
                 `;
-            } else if (isGQAWithHeadDimModel) {
+            } else if (isQwen3Model) {
+                const usesFullAttentionInterval =
+                    isQwen3Model
+                    && Number.isFinite(full_attention_interval)
+                    && full_attention_interval > 0;
+
+                steps = `
+                <strong>Calculation Details:</strong><br><br>
+                <b>Selected Model:</b> ${model}<br>
+                <b>Number of Hidden Layers:</b> ${num_hidden_layers}<br>
+                ${usesFullAttentionInterval ? `<b>Full Attention Interval:</b> ${full_attention_interval} <br>` : ''}
+                ${usesFullAttentionInterval ? `<b>Effective Full-Attention Layers for KV:</b> ${num_hidden_layers} / ${full_attention_interval} = ${effective_kv_layers}<br>` : ''}
+                <b>Number of Key-Value Heads:</b> ${num_key_value_heads}<br>
+                <b>Head dim:</b> ${head_dim}<br>
+                <b>Data Type Size:</b> ${dtype_size} bytes<br>
+                <b>Total Elements:</b> 2 × ${usesFullAttentionInterval ? effective_kv_layers : num_hidden_layers} × ${tokens} × ${num_key_value_heads} × ${head_dim} = ${total_elements}<br>
+                <b>Total Bytes:</b> ${total_elements} × ${dtype_size} = ${total_bytes} bytes<br>
+                <b>KV Cache Size:</b> ${total_bytes} / (1024³) ≈ ${kvCacheSizeGB.toFixed(4)} GB
+                `;
+            } else if (isGLM4Model) {
                 steps = `
                 <strong>Calculation Details:</strong><br><br>
                 <b>Selected Model:</b> ${model}<br>
@@ -283,7 +315,6 @@
         window.onload = function() {
             loadModelConfigs();
         };
-
     </script>
 </body>
 </html>

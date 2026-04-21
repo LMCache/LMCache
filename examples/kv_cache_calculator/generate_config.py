@@ -41,12 +41,16 @@ def main():
             config_data["kv_lora_rank"] = getattr(config, "kv_lora_rank", None)
             config_data["qk_rope_head_dim"] = getattr(config, "qk_rope_head_dim", None)
 
-        # Check for Qwen3 models (fuzzy matching) or GLM4 models
-        if (
-            "qwen/qwen3" in args.model.lower()
-            or "zai-org/glm-4." in args.model.lower()
-        ):
+        # Check for GLM4 models
+        if ("zai-org/glm-4." in args.model.lower()):
             config_data["head_dim"] = getattr(config, "head_dim", None)
+
+        # Check for Qwen3 / Qwen3.5 / Qwen3.6 models (fuzzy matching)
+        if args.model.lower().startswith("qwen/qwen3"):
+            config_data["head_dim"] = getattr(config, "head_dim", None)
+            full_attention_interval = getattr(config, "full_attention_interval", None)
+            if full_attention_interval is not None:
+                config_data["full_attention_interval"] = full_attention_interval
 
         # Convert to JSON and print
         string = json.dumps(config_data, indent=4)
