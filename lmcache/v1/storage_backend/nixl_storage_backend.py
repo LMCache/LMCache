@@ -1114,7 +1114,12 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
         storage_indices: Sequence[int],
         page_size: int,
         write: bool,
-    ):
+    ) -> Tuple[
+        List[NixlDesc],
+        nixlBind.nixlRegDList,
+        NixlDlistHandle,
+        NixlXferHandle,
+    ]:
         """Open FDs, register the storage handler, and build the transfer handle.
 
         On any failure, releases everything already acquired before re-raising,
@@ -1191,10 +1196,10 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
         if obj_list is None:
             return [None] * len(keys)
 
-        descs, reg_descs, xfer_handler, handle = self._acquire_storage_handle(
-            keys, mem_indices, storage_indices, page_size, write=False
-        )
         try:
+            descs, reg_descs, xfer_handler, handle = self._acquire_storage_handle(
+                keys, mem_indices, storage_indices, page_size, write=False
+            )
             try:
                 self.agent.post_blocking(handle)
                 xfer_state = True
@@ -1205,8 +1210,13 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
                 xfer_state = False
             finally:
                 self.agent.release_handle(handle)
-        finally:
-            self.agent.release_storage_handler(reg_descs, xfer_handler, descs)
+                self.agent.release_storage_handler(reg_descs, xfer_handler, descs)
+        except Exception:
+            # Acquisition or transfer raised; return the allocated MemoryObj
+            # slots to the allocator so they aren't leaked.
+            for obj in obj_list:
+                self.memory_allocator.free(obj)
+            raise
 
         if xfer_state:
             for key in keys:
@@ -1326,11 +1336,9 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
     ) -> None:
         start_time = time.time()
         try:
-            try:
-                self.agent.post_blocking(handle)
-            finally:
-                self.agent.release_handle(handle)
+            self.agent.post_blocking(handle)
         finally:
+            self.agent.release_handle(handle)
             self.agent.release_storage_handler(reg_descs, xfer_handler, descs)
 
         duration = time.time() - start_time
