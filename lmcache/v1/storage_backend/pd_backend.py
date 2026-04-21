@@ -743,6 +743,9 @@ class PDBackend(AllocatorBackendInterface):
 
         Returns a CacheQueryResponse with cached_keys and cached_indexes.
         Uses a timeout to avoid blocking the vLLM worker indefinitely.
+        On timeout, the REQ socket is closed and removed so it will be
+        recreated on the next call (REQ requires strict send/recv
+        alternation — a missed recv leaves the socket in an unusable state).
         """
         query_socket = self.cache_query_sockets[receiver_id]
         str_keys = [key.to_string() for key in keys]
@@ -753,9 +756,13 @@ class PDBackend(AllocatorBackendInterface):
             resp_bytes = query_socket.recv()
         else:
             logger.warning(
-                "Cache query timed out after 5s for receiver %s",
+                "Cache query timed out after 5s for receiver %s, resetting socket",
                 receiver_id,
             )
+            # Close the stuck socket — REQ socket is in recv-expected
+            # state after send() without recv(), making it unusable.
+            query_socket.close()
+            del self.cache_query_sockets[receiver_id]
             return CacheQueryResponse(cached_keys=[], cached_indexes=[])
         resp = msgspec.msgpack.decode(resp_bytes, type=PDMsg)
         assert isinstance(resp, CacheQueryResponse)
