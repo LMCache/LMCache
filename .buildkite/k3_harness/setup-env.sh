@@ -58,6 +58,60 @@ uv pip install -U "vllm[runai,tensorizer,flashinfer]" --pre \
     --extra-index-url https://download.pytorch.org/whl/cu130 \
     --index-strategy unsafe-best-match
 
+echo "--- :wrench: Patch vllm CLI to eliminate transformers BG-thread race"
+# vllm/entrypoints/cli/main.py module-scope spawns a daemon thread
+# (_bg_preload_torch) that calls `import torch` and then `import
+# transformers` to warm the module cache before main() runs. The main
+# thread races against it through the chain
+#   vllm.entrypoints.cli.benchmark.main
+#     -> vllm.entrypoints.utils
+#     -> vllm.engine.arg_utils
+#     -> vllm.config
+#     -> vllm.config.model
+#     -> vllm.transformers_utils.config:18
+#         `from transformers import GenerationConfig, PretrainedConfig`
+# On the K3s pods this race deterministically lands in a state where
+# _LazyModule's _class_to_module lookup for 'GenerationConfig' cannot
+# resolve, producing:
+#   ImportError: cannot import name 'GenerationConfig' from 'transformers'
+# Build #2653's diagnostic dump proved the transformers install itself
+# is correct (isolated `from transformers import GenerationConfig`
+# succeeds; _class_to_module and _import_structure both contain
+# GenerationConfig). The failure is only observable through vllm's CLI
+# entry point on the K3s pods -- a fresh venv with identical versions
+# cannot reproduce it, which is consistent with a timing-sensitive race.
+#
+# Force the main thread to fully import transformers at module load of
+# vllm.entrypoints.cli.main, before the BG thread is spawned. Once
+# transformers is in sys.modules with _LazyModule fully initialized,
+# the BG thread's `import transformers` becomes a no-op and the later
+# `from transformers import ...` on the main thread is just an
+# attribute lookup against a fully-ready module.
+python - <<'PY'
+import pathlib
+p = pathlib.Path("/opt/venv/lib/python3.12/site-packages/vllm/entrypoints/cli/main.py")
+src = p.read_text()
+marker = "# CI patch: pre-import transformers on main thread"
+if marker in src:
+    print("vllm main.py already patched; skipping")
+else:
+    needle = "_threading.Thread(\n    target=_bg_preload_torch"
+    if needle not in src:
+        raise SystemExit(
+            "vllm/entrypoints/cli/main.py layout unexpected; "
+            "BG-thread race patch could not be applied. Inspect the "
+            "vllm nightly and update this patch."
+        )
+    patched = (
+        "# CI patch: pre-import transformers on main thread to avoid race\n"
+        "# with the _bg_preload_torch thread below. See setup-env.sh.\n"
+        "import transformers  # noqa: F401,E402\n\n"
+        + needle
+    )
+    p.write_text(src.replace(needle, patched))
+    print("vllm main.py patched: transformers pre-imported on main thread")
+PY
+
 # Probe the vLLM CLI by invoking `vllm --help` as a subprocess. This is the
 # only probe that exercises the full import chain that `vllm serve` runs:
 # vllm.entrypoints.cli.main.main() triggers `import vllm.entrypoints.cli.
