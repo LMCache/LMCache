@@ -92,6 +92,9 @@ jobs:
                 # for setuptools-scm
                 fetch-depth: 0
 
+            - name: Remove non-release tags
+              run: git tag -l | grep -v '^v' | xargs -r git tag -d
+
             - name: Free disk space
               uses: ./.github/actions/free-disk-space
 
@@ -153,6 +156,9 @@ jobs:
               uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
               with:
                 fetch-depth: 0
+
+            - name: Remove non-release tags
+              run: git tag -l | grep -v '^v' | xargs -r git tag -d
 
             - name: Setup Python 3.13
               uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
@@ -220,6 +226,9 @@ jobs:
               uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
               with:
                 fetch-depth: 0
+
+            - name: Remove non-release tags
+              run: git tag -l | grep -v '^v' | xargs -r git tag -d
 
             - name: Login to DockerHub
               if: vars.DOCKERHUB_USERNAME != ''
