@@ -12,10 +12,9 @@ Covers:
 
 # Standard
 import sys
-import types
 
 # Third Party
-from fastapi import APIRouter, FastAPI
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 import pytest
 
@@ -24,22 +23,6 @@ from lmcache.v1.multiprocess.http_api_registry import (
     HTTPAPIRegistry,
 )
 from lmcache.v1.utils.router_discovery import discover_api_routers
-
-# ------------------------------------------------------------------ #
-#  Helpers
-# ------------------------------------------------------------------ #
-
-
-def _make_api_module(
-    name: str,
-    router: APIRouter | None = None,
-) -> types.ModuleType:
-    """Create a fake module with an optional ``router`` attr."""
-    mod = types.ModuleType(name)
-    if router is not None:
-        mod.router = router  # type: ignore[attr-defined]
-    return mod
-
 
 # ------------------------------------------------------------------ #
 #  discover_api_routers
