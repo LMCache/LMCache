@@ -158,6 +158,7 @@ jobs:
               archive.ubuntu.com:80
               security.ubuntu.com:80
               astral.sh:443
+              releases.astral.sh:443
               download.pytorch.org:443
 
       - name: Login to DockerHub

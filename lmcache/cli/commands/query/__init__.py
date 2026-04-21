@@ -2,17 +2,13 @@
 """Run one OpenAI-compatible inference request and report token/latency metrics."""
 
 # Standard
-from typing import Any
 import argparse
 import sys
 
 # First Party
 from lmcache.cli.commands.base import BaseCommand, _add_output_args
-from lmcache.cli.prompt import PromptBuilder
-from lmcache.cli.request import Request
-
-MetricValue = tuple[str, Any]
-MetricMap = dict[str, MetricValue]
+from lmcache.cli.commands.query.prompt import PromptBuilder
+from lmcache.cli.commands.query.request import Request
 
 
 class QueryCommand(BaseCommand):
@@ -137,17 +133,16 @@ class QueryCommand(BaseCommand):
             engine_stats = sender.send_request(prompt_builder.complete_prompt)
 
             model_id = args.model or str(engine_stats["model"][1])
-            prompt_stats = prompt_builder.get_token_stats(model_id)
             metrics = self.create_metrics("Query Engine", args)
             metrics.add("model", "Model", model_id)
-            for key, (name, value) in prompt_stats.items():
-                if key == "prompt_tokens":
-                    continue
-                metrics.add(key, name, int(value))
+            prompt_name, prompt_value = engine_stats["prompt_tokens"]
+            metrics.add("prompt_tokens", prompt_name, int(prompt_value))
+            output_name, output_value = engine_stats["output_tokens"]
+            metrics.add("output_tokens", output_name, int(output_value))
 
             latency = metrics.add_section("latency", "Latency Metrics")
             for key, (name, value) in engine_stats.items():
-                if key == "model":
+                if key in ("model", "prompt_tokens", "output_tokens"):
                     continue
                 latency.add(key, name, round(float(value), 2))
 

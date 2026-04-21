@@ -275,10 +275,11 @@ The ``gpu_kv_shape`` field uses short names from the ``GPUKVFormat`` enum:
 ``query``
 ---------
 
-The ``query engine`` subcommand sends one request to the engine API and reports metrics.
-``--prompt`` supports placeholders: ``{lmcache}`` loads
+The ``query engine`` subcommand sends one request to the engine API and reports
+metrics. ``--prompt`` supports placeholders: ``{lmcache}`` loads
 ``lmcache/cli/documents/lmcache.txt``, and custom documents can be passed with
-``--documents NAME=PATH``.
+``--documents NAME=PATH``. The prompt token count is taken directly from the
+usage data reported by the engine (``stream_options: {include_usage: true}``).
 
 .. code-block:: bash
 
@@ -286,14 +287,12 @@ The ``query engine`` subcommand sends one request to the engine API and reports 
      --prompt "{lmcache} Summarize LMCache usage." \
      --format terminal \
      --max-tokens 128
-    
+
   ================= Query Engine =================
   Model:                         facebook/opt-125m
-  Prompt documents lmcache:                    608
-  Prompt query:                                  9
+  Input tokens:                                618
   --------------- Latency Metrics ----------------
-  Input tokens:                             618.00
-  Output tokens:                              9.00
+  Output tokens:                                 9
   TTFT (ms):                                 26.88
   TPOT (ms/token):                            0.91
   Total latency (ms):                        35.05
