@@ -243,16 +243,37 @@ class TraceRecorder(EventSubscriber, ABC):
         """Best-effort conversion of a StorageManagerConfig to a JSON
         dict.
 
-        Falls back to ``str(config)`` for fields that are not directly
-        serializable.  The result is used only for the header digest
-        and human inspection — it does not need to be replay-faithful.
+        Delegates to the module-level
+        :func:`safe_storage_config_dict` so the replay driver can
+        reproduce the exact digest the recorder writes.  Kept as a
+        staticmethod for backwards-compatible access.
         """
-        if is_dataclass(config):
-            try:
-                return _coerce_jsonable(asdict(config))
-            except Exception:
-                pass
-        return {"repr": str(config)}
+        return safe_storage_config_dict(config)
+
+
+def safe_storage_config_dict(config: StorageManagerConfig) -> dict[str, Any]:
+    """Best-effort JSON-serializable dict view of a StorageManagerConfig.
+
+    Falls back to ``str(config)`` for fields that are not directly
+    serializable.  The result is used only for the header digest and
+    human inspection — it does not need to be replay-faithful.
+
+    Exposed publicly so that the replay driver can compute a digest
+    of its *own* config using the same algorithm the recorder used,
+    for mismatch detection.
+
+    Args:
+        config: The StorageManagerConfig to serialize.
+
+    Returns:
+        A JSON-friendly dict.
+    """
+    if is_dataclass(config):
+        try:
+            return _coerce_jsonable(asdict(config))
+        except Exception:
+            pass
+    return {"repr": str(config)}
 
 
 def _coerce_jsonable(obj: Any) -> Any:
