@@ -8,6 +8,7 @@ This module defines the protocol for:
 - STORE: Store KV cache blocks to the server
 - RETRIEVE: Retrieve KV cache blocks from the server
 - LOOKUP: Submit a prefix lookup and return a prefetch job ID
+- SYNC_LOOKUP: Submit a prefix lookup and synchronously return hit count
 - QUERY_PREFETCH_STATUS: Poll a prefetch job for its result
 - END_SESSION: End a session and clean up associated resources
 """
@@ -27,6 +28,7 @@ REQUEST_NAMES = [
     "STORE",
     "RETRIEVE",
     "LOOKUP",
+    "SYNC_LOOKUP",
     "QUERY_PREFETCH_STATUS",
     "QUERY_PREFETCH_LOOKUP_HITS",
     "FREE_LOOKUP_LOCKS",
@@ -102,6 +104,21 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
         "LOOKUP": ProtocolDefinition(
             payload_classes=[KeyType, int],
             response_class=None,
+            handler_type=HandlerType.BLOCKING,
+        ),
+        # Submit a prefix lookup and synchronously return the hit chunk count.
+        # Equivalent to LOOKUP followed by blocking polls of
+        # QUERY_PREFETCH_LOOKUP_HITS, collapsed into one server-side round
+        # trip.  The prefetch job remains registered under ``request_id`` so
+        # worker adapters can poll QUERY_PREFETCH_STATUS before issuing
+        # RETRIEVE.
+        # Payload:
+        #   - key: KeyType - Cache key to look up
+        #   - tp_size: int - Tensor-parallel size for MLA multi-reader locking
+        # Returns: int - Hit chunk count (L1 + L2 prefix hits)
+        "SYNC_LOOKUP": ProtocolDefinition(
+            payload_classes=[KeyType, int],
+            response_class=int,
             handler_type=HandlerType.BLOCKING,
         ),
         # Query the status of a prefetch job by request_id

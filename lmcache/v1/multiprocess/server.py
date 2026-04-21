@@ -714,6 +714,63 @@ class MPCacheEngine:
         with self._prefetch_job_lock:
             self._prefetch_jobs[job.request_id] = job
 
+    # Poll interval used by sync_lookup to wait on the L2 lookup phase.
+    _SYNC_LOOKUP_POLL_INTERVAL_S: float = 0.005
+
+    def sync_lookup(
+        self,
+        key: IPCCacheEngineKey,
+        tp_size: int,
+    ) -> int:
+        """Submit a prefix lookup and synchronously return the hit chunk count.
+
+        Equivalent to :meth:`lookup` followed by a blocking poll of
+        :meth:`query_prefetch_lookup_hits`, but collapsed into a single
+        server-side round trip so the scheduler adapter does not have to
+        poll.  The prefetch job remains registered under ``key.request_id``
+        so worker adapters can subsequently poll
+        :meth:`query_prefetch_status` before issuing RETRIEVE.
+
+        Args:
+            key: Cache key with ``request_id`` embedded.
+            tp_size: Tensor-parallel size for MLA multi-reader locking.
+
+        Returns:
+            Number of prefix hit chunks (L1 + L2 combined).  Returns ``0``
+            when no GPU context is registered for the key's
+            ``(model_name, world_size)`` or the key has no full chunks.
+        """
+        self.lookup(key, tp_size)
+
+        with self._prefetch_job_lock:
+            job = self._prefetch_jobs.get(key.request_id)
+        if job is None:
+            # lookup() always registers a job; this only happens if another
+            # caller popped it between lookup() and this read (e.g. a racing
+            # query_prefetch_status).  Treat as zero hits.
+            return 0
+
+        # Poll the lookup phase (non-destructive — does not pop the job).
+        while True:
+            found = self.storage_manager.query_prefetch_lookup_hits(job.handle)
+            if found is not None:
+                break
+            time.sleep(self._SYNC_LOOKUP_POLL_INTERVAL_S)
+
+        hit_chunks = found // job.world_size
+
+        # Zero hits: the worker will never call RETRIEVE, so there is
+        # nothing to wait on in the L2-to-L1 transfer.  Drain the job
+        # eagerly so _prefetch_jobs and the prefetch controller's
+        # _completed_results don't leak until end_session.
+        if hit_chunks == 0:
+            with self._prefetch_job_lock:
+                self._prefetch_jobs.pop(key.request_id, None)
+            # Consume the completed result in the prefetch controller.
+            self.storage_manager.query_prefetch_status(job.handle)
+
+        return hit_chunks
+
     def query_prefetch_lookup_hits(
         self,
         request_id: str,
@@ -850,6 +907,11 @@ class MPCacheEngine:
     def end_session(self, request_id: str) -> None:
         """Remove the session for a finished request.
 
+        Also drains any lingering prefetch job registered under
+        ``request_id``.  Under normal SYNC_LOOKUP flow the worker adapter
+        consumes the job via QUERY_PREFETCH_STATUS before RETRIEVE; this
+        is a fallback for worker crashes or early cancellation.
+
         Args:
             request_id: The request ID whose session should be removed.
         """
@@ -866,6 +928,15 @@ class MPCacheEngine:
                 session_id=request_id,
             )
         )
+
+        # Fallback cleanup of lingering prefetch job, if any.
+        with self._prefetch_job_lock:
+            stale_job = self._prefetch_jobs.pop(request_id, None)
+        if stale_job is not None:
+            # Drain the completed result so the prefetch controller's
+            # _completed_results doesn't leak.
+            self.storage_manager.query_prefetch_status(stale_job.handle)
+
         if session is None:
             logger.warning("Session %s not found, skipping touch", request_id)
             return
@@ -1046,6 +1117,7 @@ def run_cache_server(
     )
     add_handler_helper(server, RequestType.STORE, engine.store)
     add_handler_helper(server, RequestType.LOOKUP, engine.lookup)
+    add_handler_helper(server, RequestType.SYNC_LOOKUP, engine.sync_lookup)
     add_handler_helper(
         server, RequestType.QUERY_PREFETCH_STATUS, engine.query_prefetch_status
     )
@@ -1084,6 +1156,13 @@ def run_cache_server(
             RequestType.REPORT_BLOCK_ALLOCATION,
         ],
         max_workers=mp_config.max_cpu_workers,
+    )
+    # SYNC_LOOKUP runs a blocking poll loop until the L2 lookup phase
+    # finishes, so it gets its own dedicated pool to avoid starving
+    # the short operations above (especially PING heartbeats).
+    server.add_normal_thread_pool(
+        [RequestType.SYNC_LOOKUP],
+        max_workers=mp_config.max_sync_lookup_workers,
     )
 
     logger.info(

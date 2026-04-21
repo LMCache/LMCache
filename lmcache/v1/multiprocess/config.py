@@ -33,6 +33,13 @@ class MPServerConfig:
     """Worker threads for the normal (CPU) pool (LOOKUP, END_SESSION, etc.).
     Resolved from --max-cpu-workers or --max-workers."""
 
+    max_sync_lookup_workers: int = 16
+    """Worker threads for the dedicated SYNC_LOOKUP pool.
+    SYNC_LOOKUP handlers block on the L2 lookup phase, so they need
+    their own pool to avoid starving short CPU-pool operations
+    (PING, END_SESSION, QUERY_PREFETCH_STATUS) under concurrent traffic.
+    Should be >= the scheduler's expected concurrent lookup depth."""
+
     hash_algorithm: str = "blake3"
     """Hash algorithm for token-based operations (builtin, sha256_cbor, blake3)."""
 
@@ -115,6 +122,15 @@ def add_mp_server_args(
         "Defaults to --max-workers if not specified.",
     )
     mp_group.add_argument(
+        "--max-sync-lookup-workers",
+        type=int,
+        default=16,
+        help="Worker threads for the dedicated SYNC_LOOKUP pool. "
+        "SYNC_LOOKUP blocks on the L2 lookup phase, so it runs on its "
+        "own pool to avoid starving heartbeat and session operations. "
+        "Default is 16.",
+    )
+    mp_group.add_argument(
         "--hash-algorithm",
         type=str,
         default="blake3",
@@ -155,6 +171,7 @@ def parse_args_to_mp_server_config(
         max_workers=base,
         max_gpu_workers=max_gpu,
         max_cpu_workers=max_cpu,
+        max_sync_lookup_workers=args.max_sync_lookup_workers,
         hash_algorithm=args.hash_algorithm,
         engine_type=args.engine_type,
     )

@@ -551,6 +551,96 @@ class LMCacheMPSchedulerAdapter:
         )
 
 
+class LMCacheMPSyncLookupSchedulerAdapter(LMCacheMPSchedulerAdapter):
+    """Scheduler adapter that resolves lookups via a single SYNC_LOOKUP RPC.
+
+    The default :class:`LMCacheMPSchedulerAdapter` performs a two-phase
+    lookup (LOOKUP then repeated QUERY_PREFETCH_STATUS polls from the
+    scheduler loop).  This subclass replaces that with a single blocking
+    SYNC_LOOKUP request: the server completes the L2 lookup phase before
+    returning, and the scheduler learns the hit count immediately.
+
+    The prefetch job remains alive on the server so that the matching
+    :class:`LMCacheMPSyncLookupWorkerAdapter` can poll
+    QUERY_PREFETCH_STATUS to gate the eventual RETRIEVE.
+    """
+
+    @_lmcache_nvtx_annotate
+    def maybe_submit_lookup_request(
+        self,
+        request_id: str,
+        token_ids: list[int],
+        cache_salt: str = "",
+    ) -> None:
+        """Submit a SYNC_LOOKUP request if there is no ongoing lookup.
+
+        Blocks until the server returns the hit chunk count and caches
+        the result for :meth:`check_lookup_result`.
+
+        Args:
+            request_id: The ID of the lookup request.
+            token_ids: Token IDs to look up in LMCache.
+            cache_salt: Per-user isolation salt. Requests with different
+                cache_salt values produce separate cache entries.
+        """
+        self._ensure_heartbeat_started()
+
+        if not self.is_healthy:
+            return
+
+        if (
+            request_id in self._pending_lookups
+            or request_id in self._finished_lookup_results
+        ):
+            return
+
+        aligned_end = (len(token_ids) // self.chunk_size) * self.chunk_size
+
+        key = self._create_key(
+            token_ids,
+            start=0,
+            end=aligned_end,
+            request_id=request_id,
+            cache_salt=cache_salt,
+        ).no_worker_id_version()
+
+        self._pending_lookups.add(request_id)
+        try:
+            hit_chunks = send_lmcache_request(
+                self.mq_client,
+                RequestType.SYNC_LOOKUP,
+                [key, self.tp_size],
+            ).result(timeout=self._mq_timeout)
+        except TimeoutError:
+            logger.warning(
+                "SYNC_LOOKUP request timed out after %ss. Marking server as unhealthy.",
+                self._mq_timeout,
+            )
+            self._health_event.clear()
+            self._pending_lookups.discard(request_id)
+            return
+
+        self._finished_lookup_results[request_id] = hit_chunks * self.chunk_size
+
+    @_lmcache_nvtx_annotate
+    def check_lookup_result(self, request_id: str) -> int | None:
+        """Return the cached SYNC_LOOKUP result for ``request_id``.
+
+        SYNC_LOOKUP completes the lookup phase synchronously, so the
+        result is always available the moment
+        :meth:`maybe_submit_lookup_request` returns.  This method simply
+        reads the cached token count and never returns ``None``.
+
+        Args:
+            request_id: The ID of the lookup request.
+
+        Returns:
+            Number of tokens matched in LMCache (prefix matching). Zero
+            when the server was unhealthy or the lookup timed out.
+        """
+        return self._finished_lookup_results.get(request_id, 0)
+
+
 class LMCacheMPWorkerAdapter:
     def __init__(
         self,
@@ -1055,3 +1145,173 @@ class LMCacheMPWorkerAdapter:
             request_id=request_id,
             cache_salt=cache_salt,
         )
+
+
+# Interval (seconds) between QUERY_PREFETCH_STATUS polls from the worker
+# adapter's background thread.
+_PREFETCH_POLL_INTERVAL_S: float = 0.001
+
+
+class LMCacheMPSyncLookupWorkerAdapter(LMCacheMPWorkerAdapter):
+    """Worker adapter that defers RETRIEVE until prefetch is ready.
+
+    Pairs with :class:`LMCacheMPSyncLookupSchedulerAdapter`: the server's
+    SYNC_LOOKUP returns the hit chunk count before the L2->L1 transfer
+    has finished, so the scheduler may call :meth:`submit_retrieve_request`
+    while the underlying data is still moving.  Issuing RETRIEVE at that
+    point would occupy a GPU affinity thread on the server waiting for
+    the transfer.
+
+    Instead, this subclass queues retrieve requests and lets a background
+    thread poll QUERY_PREFETCH_STATUS.  Once the server reports the
+    prefetch as complete, the queued RETRIEVE is forwarded via the base
+    class path.
+
+    Thread safety: ``error_block_ids`` is written from the background
+    polling thread and read/cleared from the main thread, so all accesses
+    go through ``_error_block_ids_lock``.
+    """
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+
+        # request_id -> (LoadStoreOp, cuda event, cache_salt) for retrieves
+        # awaiting prefetch completion.
+        self._pending_retrieves: dict[
+            str, tuple[LoadStoreOp, torch.cuda.Event, str]
+        ] = {}
+        self._pending_retrieves_lock = threading.Lock()
+
+        self._prefetch_poll_stop = threading.Event()
+        self._prefetch_poll_thread: threading.Thread | None = None
+
+        # Protects error_block_ids against the background polling thread.
+        self._error_block_ids_lock = threading.Lock()
+
+    def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]) -> None:
+        """Register KV caches and start the prefetch polling thread."""
+        super().register_kv_caches(kv_caches)
+        self._prefetch_poll_thread = threading.Thread(
+            target=self._prefetch_ready_loop,
+            name="lmcache-prefetch-poll",
+            daemon=True,
+        )
+        self._prefetch_poll_thread.start()
+
+    @_lmcache_nvtx_annotate
+    def submit_retrieve_request(
+        self,
+        request_id: str,
+        op: LoadStoreOp,
+        event: torch.cuda.Event,
+        cache_salt: str = "",
+    ) -> None:
+        """Queue a retrieve request until the prefetch is confirmed ready.
+
+        Args:
+            request_id: The ID of the request.
+            op: The LoadStoreOp describing the retrieve operation.
+            event: CUDA event recorded after the current inference step.
+            cache_salt: Per-user isolation salt.
+        """
+        self._ensure_heartbeat_started()
+
+        if not self.is_healthy:
+            with self._error_block_ids_lock:
+                self.error_block_ids.update(op.block_ids)
+            return
+
+        with self._pending_retrieves_lock:
+            self._pending_retrieves[request_id] = (op, event, cache_salt)
+
+    def _prefetch_ready_loop(self) -> None:
+        """Background thread: poll prefetch status and dispatch RETRIEVE.
+
+        For each pending request, issues QUERY_PREFETCH_STATUS.  A
+        non-``None`` response (including ``0``, which the server returns
+        for a request another worker already consumed) means the
+        prefetch is complete; the queued RETRIEVE is then forwarded
+        through the base class.  ``None`` means the L2->L1 transfer is
+        still running and we retry on the next tick.
+        """
+        while not self._prefetch_poll_stop.is_set():
+            with self._pending_retrieves_lock:
+                pending_ids = list(self._pending_retrieves.keys())
+
+            for request_id in pending_ids:
+                if self._prefetch_poll_stop.is_set():
+                    break
+
+                if not self.is_healthy:
+                    with self._pending_retrieves_lock:
+                        entry = self._pending_retrieves.pop(request_id, None)
+                    if entry is not None:
+                        op, _event, _salt = entry
+                        with self._error_block_ids_lock:
+                            self.error_block_ids.update(op.block_ids)
+                    continue
+
+                try:
+                    result = send_lmcache_request(
+                        self.mq_client,
+                        RequestType.QUERY_PREFETCH_STATUS,
+                        [request_id],
+                    ).result(timeout=self._mq_timeout)
+                except TimeoutError:
+                    logger.debug(
+                        "QUERY_PREFETCH_STATUS poll timed out for %s", request_id
+                    )
+                    continue
+                except Exception:
+                    logger.debug(
+                        "QUERY_PREFETCH_STATUS poll failed for %s",
+                        request_id,
+                        exc_info=True,
+                    )
+                    continue
+
+                if result is None:
+                    # Prefetch still in progress.
+                    continue
+
+                with self._pending_retrieves_lock:
+                    entry = self._pending_retrieves.pop(request_id, None)
+                if entry is None:
+                    continue
+                op, event, cache_salt = entry
+                super().submit_retrieve_request(
+                    request_id, op, event, cache_salt=cache_salt
+                )
+
+            self._prefetch_poll_stop.wait(timeout=_PREFETCH_POLL_INTERVAL_S)
+
+    @_lmcache_nvtx_annotate
+    def get_finished(
+        self, finished_req_ids_from_engine: set[str]
+    ) -> tuple[set[str] | None, set[str] | None]:
+        """Drain queued retrieves on unhealthy, then delegate to base."""
+        if not self.is_healthy:
+            with self._pending_retrieves_lock:
+                for _rid, (op, _event, _salt) in self._pending_retrieves.items():
+                    with self._error_block_ids_lock:
+                        self.error_block_ids.update(op.block_ids)
+                self._pending_retrieves.clear()
+        return super().get_finished(finished_req_ids_from_engine)
+
+    def get_block_ids_with_load_errors(self) -> set[int]:
+        """Return and clear block IDs that failed during retrieve.
+
+        Holds ``_error_block_ids_lock`` across the copy/clear to avoid
+        racing with the background polling thread.
+        """
+        with self._error_block_ids_lock:
+            errors = self.error_block_ids.copy()
+            self.error_block_ids.clear()
+        return errors
+
+    def shutdown(self) -> None:
+        """Stop the polling thread, then delegate to the base adapter."""
+        self._prefetch_poll_stop.set()
+        if self._prefetch_poll_thread is not None:
+            self._prefetch_poll_thread.join(timeout=5.0)
+        super().shutdown()
