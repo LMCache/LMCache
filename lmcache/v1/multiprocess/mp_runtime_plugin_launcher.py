@@ -66,7 +66,7 @@ class _MPPluginConfig:
     def to_json(self) -> str:
         merged = dict(self.configs_dict)
         if self.extra_config:
-            merged["runtime_plugin_extra_config"] = self.extra_config
+            merged["runtime_plugin_extra_config"] = _make_json_safe(self.extra_config)
         return json.dumps(merged)
 
 
