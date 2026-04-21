@@ -144,6 +144,34 @@ class IPCCacheEngineKey:
     # === Session tracking (not part of cache identity) ===
     request_id: str = field(compare=False)
 
+    # === Per-user isolation salt (part of cache identity) ===
+    # msgspec encodes dataclasses as maps, so forward wire compatibility
+    # works by field name: an old payload without ``cache_salt`` decodes
+    # on new code using the default "". Placing the field last is a style
+    # choice — all defaulted fields must come after non-defaulted ones.
+    #
+    # Invariant: must not contain ``@``, ``/``, ``\``, or NUL, and
+    # must be <= 128 chars — same rationale as ObjectKey (see
+    # ObjectKey.cache_salt). Validated in __post_init__.
+    cache_salt: str = ""
+
+    # Duplicated from ObjectKey — cannot import ObjectKey here due to
+    # circular dependency (api.py imports IPCCacheEngineKey).
+    _SALT_FORBIDDEN_CHARS = frozenset("@/\\\x00")
+    _SALT_MAX_LEN = 128
+
+    def __post_init__(self) -> None:
+        bad = self._SALT_FORBIDDEN_CHARS & set(self.cache_salt)
+        if bad:
+            raise ValueError(
+                f"cache_salt must not contain {bad!r} (got {self.cache_salt!r})"
+            )
+        if len(self.cache_salt) > self._SALT_MAX_LEN:
+            raise ValueError(
+                f"cache_salt exceeds max length {self._SALT_MAX_LEN} "
+                f"(got {len(self.cache_salt)})"
+            )
+
     # Helper function for unit tests only
     @classmethod
     def from_token_ids(
@@ -155,6 +183,7 @@ class IPCCacheEngineKey:
         start: int = 0,
         end: int = 0,
         request_id: str = "",
+        cache_salt: str = "",
     ) -> "IPCCacheEngineKey":
         """Create a key from token ids. Only used by the tests."""
         return cls(
@@ -165,6 +194,7 @@ class IPCCacheEngineKey:
             start=start,
             end=end,
             request_id=request_id,
+            cache_salt=cache_salt,
         )
 
     def no_worker_id_version(self) -> "IPCCacheEngineKey":
@@ -177,6 +207,7 @@ class IPCCacheEngineKey:
             start=self.start,
             end=self.end,
             request_id=self.request_id,
+            cache_salt=self.cache_salt,
         )
 
 

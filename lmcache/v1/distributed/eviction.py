@@ -5,6 +5,7 @@ Eviction module to determine what to evict from L1 and L2 caches.
 
 # Standard
 from abc import abstractmethod
+from collections.abc import Callable
 
 # First Party
 from lmcache.v1.distributed.api import ObjectKey
@@ -25,6 +26,20 @@ class EvictionPolicy:
     The binding to a specific cache tier (L1 or L2) is provided by
     L1EvictionPolicy and L2EvictionPolicy respectively.
     """
+
+    @property
+    def support_isolation(self) -> bool:
+        """Whether this policy supports isolation eviction (e.g., per user isolation).
+
+        When True, the eviction controller checks isolated usage (e.g., per user usage)
+        and passes ``cache_salt`` to ``get_eviction_actions()`` to scope
+        eviction to specific cache_salt. When False, the controller uses
+        aggregate usage only.
+
+        Default is False. Subclasses that support isolated eviction.
+        (e.g., ``IsolatedLRUEvictionPolicy``) should override to return True.
+        """
+        return False
 
     @abstractmethod
     def register_eviction_destination(self, destination: EvictionDestination):
@@ -68,7 +83,12 @@ class EvictionPolicy:
         pass
 
     @abstractmethod
-    def get_eviction_actions(self, expected_ratio: float) -> list[EvictionAction]:
+    def get_eviction_actions(
+        self,
+        expected_ratio: float,
+        key_eligible_filter: Callable[[ObjectKey], bool] | None = None,
+        cache_salt: str | None = None,
+    ) -> list[EvictionAction]:
         """
         Get the eviction actions to evict objects from cache.
 
@@ -78,6 +98,16 @@ class EvictionPolicy:
                 in range [0.0, 1.0]. For example, 0.1 means roughly 10% of
                 keys should be evicted. This is a hint and the policy may
                 return more or fewer keys.
+            key_eligible_filter: An optional callable that takes an ObjectKey
+                and returns True if the key is eligible for eviction. When
+                provided, keys for which the filter returns False will be
+                skipped. This is useful for skipping locked keys that
+                cannot be deleted.
+            cache_salt: When set, scope eviction to keys belonging to this
+                salt only (identified by ``ObjectKey.cache_salt``). When
+                None, evict globally across all salts. Only meaningful for
+                policies where ``support_isolation`` is True; other policies
+                ignore this parameter.
 
         Returns:
             list[EvictionAction]: The eviction actions to perform. Each
@@ -132,6 +162,9 @@ class L1EvictionPolicy(L1ManagerListener):
 
     def on_l1_keys_finish_write_and_reserve_read(self, keys: list[ObjectKey]):
         self._policy.on_keys_created(keys)
+
+    def on_l1_keys_accessed(self, keys: list[ObjectKey]):
+        self._policy.on_keys_touched(keys)
 
 
 class L2EvictionPolicy(L2AdapterListener):

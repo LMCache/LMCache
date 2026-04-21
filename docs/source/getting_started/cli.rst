@@ -8,6 +8,30 @@ with KV cache servers, running benchmarks, and inspecting cache state.
 
    lmcache <command> [options]
 
+Installation
+------------
+
+The ``lmcache`` CLI is available in two packages:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 30 30 40
+
+   * - Package
+     - Install
+     - When to use
+   * - ``lmcache``
+     - ``pip install lmcache``
+     - Full install: server, CLI, and CUDA extensions. Requires Linux + GPU.
+   * - ``lmcache-cli``
+     - ``pip install lmcache-cli``
+     - CLI only: query, ping, bench, describe. No GPU required, any OS.
+
+.. note::
+
+   Do not install both packages in the same environment — they both provide
+   the ``lmcache`` entry point.
+
 Quick Start
 -----------
 
@@ -50,7 +74,7 @@ Available Commands
    * - ``query``
      - Single-shot query interface for both the serving engine and KV cache worker.
    * - ``server``
-     - Launch the LMCache server (ZMQ + HTTP).
+     - Launch the LMCache server (ZMQ + HTTP). Requires full ``lmcache`` install.
    * - ``ping``
      - Liveness check for LMCache or vLLM servers.
    * - ``bench``

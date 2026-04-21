@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Standard
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any
 import os
 import threading
 
@@ -209,19 +209,14 @@ RetrieveResult = bool
 LookupResult = int
 
 
-# TODO(chunxiaozheng): To be compatible with older `lmcache_mp_connector`,
-#  world_size, kv_rank, tp_size are saved, use parallel_strategy instead
 class LMCacheMPSchedulerAdapter:
     def __init__(
         self,
         server_url: str,
         context: zmq.Context,
         model_name: str,
-        world_size: int = 1,
-        kv_rank: int = 0,
-        vllm_block_size: int = 16,
-        tp_size: int = 1,
-        parallel_strategy: Optional[ParallelStrategy] = None,
+        vllm_block_size: int,
+        parallel_strategy: ParallelStrategy,
         mq_timeout: float = DEFAULT_MQ_TIMEOUT,
         heartbeat_interval: float = DEFAULT_HEARTBEAT_INTERVAL,
     ):
@@ -230,11 +225,7 @@ class LMCacheMPSchedulerAdapter:
             server_url: The server URL for the LMCache message queue
             context: The ZMQ context
             model_name: The model name used for LMCache keys
-            world_size: The world size used for LMCache keys
-            kv_rank: The kv rank used for LMCache keys
             vllm_block_size: The block size used in vLLM
-            tp_size: Tensor-parallel size for MLA
-                multi-reader locking (default 1).
             parallel_strategy:
                 The parallel strategy, which includes `use_mla`,
                 `kv_world_size`, `kv_worker_id` and so on
@@ -244,17 +235,16 @@ class LMCacheMPSchedulerAdapter:
         self.mq_client = MessageQueueClient(server_url, context)
         self._mq_timeout = mq_timeout
 
-        # Two-phase lookup state:
-        # - phase 1: request_id -> server prefetch job ID
-        # - phase 2: job_id -> matched chunk count (will be cached)
-        # The cached lookup result will be cleared by `cleanup_lookup_result`
-        self._lookup_job_ids: dict[str, int] = {}
-        self._finished_lookup_jobs: dict[int, int] = {}
+        # Lookup state tracking:
+        # - _pending_lookups: request_ids submitted but not yet resolved
+        # - _finished_lookup_results: cached chunk count keyed by request_id,
+        #   so that repeated calls to check_lookup_result return the same value
+        #   even after the server has already popped the job (exactly-once).
+        self._pending_lookups: set[str] = set()
+        self._finished_lookup_results: dict[str, int] = {}
 
         self.model_name = model_name
         self.parallel_strategy = parallel_strategy
-        self._world_size = world_size
-        self._tp_size = tp_size
 
         # Read chunk size from lmcache
         try:
@@ -284,20 +274,12 @@ class LMCacheMPSchedulerAdapter:
     @property
     def world_size(self) -> int:
         """Get the kv world size."""
-        return (
-            self._world_size
-            if self.parallel_strategy is None
-            else self.parallel_strategy.kv_world_size
-        )
+        return self.parallel_strategy.kv_world_size
 
     @property
     def tp_size(self) -> int:
         """The tensor parallel size."""
-        return (
-            self._tp_size
-            if self.parallel_strategy is None
-            else self.parallel_strategy.tp_size
-        )
+        return self.parallel_strategy.tp_size
 
     @property
     def is_healthy(self) -> bool:
@@ -323,6 +305,7 @@ class LMCacheMPSchedulerAdapter:
         self,
         request_id: str,
         token_ids: list[int],
+        cache_salt: str = "",
     ):
         """
         Submit a new lookup request to LMCache if there is no ongoing request.
@@ -335,6 +318,8 @@ class LMCacheMPSchedulerAdapter:
             request_id: The ID of the lookup request. The same ID indicates it's
                 from the same request
             token_ids: Token IDs to lookup from LMCache
+            cache_salt: Per-user isolation salt. Requests with different
+                cache_salt values produce separate cache entries.
 
         Returns:
             None
@@ -351,7 +336,7 @@ class LMCacheMPSchedulerAdapter:
         if not self.is_healthy:
             return
 
-        if request_id in self._lookup_job_ids:
+        if request_id in self._pending_lookups:
             # Skip if there is already a lookup request
             return
 
@@ -362,6 +347,7 @@ class LMCacheMPSchedulerAdapter:
             start=0,
             end=aligned_end,
             request_id=request_id,
+            cache_salt=cache_salt,
         ).no_worker_id_version()
 
         future = send_lmcache_request(
@@ -370,7 +356,7 @@ class LMCacheMPSchedulerAdapter:
             [key, self.tp_size],
         )
         try:
-            job_id = future.result(timeout=self._mq_timeout)
+            future.result(timeout=self._mq_timeout)
         except TimeoutError:
             logger.warning(
                 "LOOKUP request timed out after %ss. Marking server as unhealthy.",
@@ -378,7 +364,7 @@ class LMCacheMPSchedulerAdapter:
             )
             self._health_event.clear()
             return
-        self._lookup_job_ids[request_id] = job_id
+        self._pending_lookups.add(request_id)
 
     @_lmcache_nvtx_annotate
     def check_lookup_result(self, request_id: str) -> int | None:
@@ -398,26 +384,24 @@ class LMCacheMPSchedulerAdapter:
             in LMCache (prefix matching), or
             None if the lookup request is not finished yet.
         """
-        if request_id not in self._lookup_job_ids:
-            # No job — either unhealthy at submit time or already cleaned up
-            return 0
+        if request_id not in self._pending_lookups:
+            # No job — either unhealthy at submit time or already cleaned up.
+            # If we have a cached result, return it to handle repeated calls.
+            return self._finished_lookup_results.get(request_id, 0)
 
         if not self.is_healthy:
             # Server went down — give up on this lookup
-            self._lookup_job_ids.pop(request_id, None)
             return 0
 
-        job_id = self._lookup_job_ids[request_id]
-
-        if job_id in self._finished_lookup_jobs:
+        if request_id in self._finished_lookup_results:
             # Return cached result if the job is already finished
-            return self._finished_lookup_jobs[job_id] * self.chunk_size
+            return self._finished_lookup_results[request_id]
 
         try:
             result = send_lmcache_request(
                 self.mq_client,
                 RequestType.QUERY_PREFETCH_STATUS,
-                [job_id],
+                [request_id],
             ).result(timeout=self._mq_timeout)
         except TimeoutError:
             logger.warning(
@@ -426,15 +410,14 @@ class LMCacheMPSchedulerAdapter:
                 self._mq_timeout,
             )
             self._health_event.clear()
-            self._lookup_job_ids.pop(request_id, None)
             return 0
 
         if result is None:
             return None
 
-        self._finished_lookup_jobs[job_id] = result
-
-        return result * self.chunk_size
+        token_count = result * self.chunk_size
+        self._finished_lookup_results[request_id] = token_count
+        return token_count
 
     def num_blocks_per_chunk(self) -> int:
         """
@@ -449,9 +432,8 @@ class LMCacheMPSchedulerAdapter:
         Args:
             request_id: The ID of the finished request.
         """
-        job_id = self._lookup_job_ids.pop(request_id, None)
-        if job_id is not None:
-            self._finished_lookup_jobs.pop(job_id, None)
+        self._pending_lookups.discard(request_id)
+        self._finished_lookup_results.pop(request_id, None)
 
     def free_lookup_locks(
         self,
@@ -459,6 +441,7 @@ class LMCacheMPSchedulerAdapter:
         start: int,
         end: int,
         request_id: str,
+        cache_salt: str = "",
     ) -> None:
         """Release read locks acquired during lookup without a full retrieve.
 
@@ -478,12 +461,17 @@ class LMCacheMPSchedulerAdapter:
             start: Start token index.
             end: End token index.
             request_id: The request ID.
+            cache_salt: Per-user isolation salt.
         """
         if not self.is_healthy:
             return
 
         key = self._create_key(
-            token_ids, start=start, end=end, request_id=request_id
+            token_ids,
+            start=start,
+            end=end,
+            request_id=request_id,
+            cache_salt=cache_salt,
         ).no_worker_id_version()
         send_lmcache_request(
             self.mq_client,
@@ -525,7 +513,7 @@ class LMCacheMPSchedulerAdapter:
         send_lmcache_request(
             self.mq_client,
             RequestType.REPORT_BLOCK_ALLOCATION,
-            [records],
+            [os.getpid(), self.model_name, records],
         )
 
     # Helper functions
@@ -535,8 +523,20 @@ class LMCacheMPSchedulerAdapter:
         start: int,
         end: int,
         request_id: str,
+        cache_salt: str = "",
     ) -> IPCCacheEngineKey:
-        """Convert token IDs to an IPC cache engine key"""
+        """Convert token IDs to an IPC cache engine key.
+
+        Args:
+            token_ids: The token IDs.
+            start: Start token index.
+            end: End token index.
+            request_id: The request ID.
+            cache_salt: Per-user isolation salt.
+
+        Returns:
+            IPCCacheEngineKey: The constructed key.
+        """
         # NOTE: for the scheduler adapter, we don't have a worker id,
         # so we set it to None in the key.
         return IPCCacheEngineKey(
@@ -547,6 +547,7 @@ class LMCacheMPSchedulerAdapter:
             start=start,
             end=end,
             request_id=request_id,
+            cache_salt=cache_salt,
         )
 
 
@@ -556,10 +557,8 @@ class LMCacheMPWorkerAdapter:
         server_url: str,
         context: zmq.Context,
         model_name: str,
-        world_size: int = 1,
-        kv_rank: int = 0,
-        vllm_block_size: int = 16,
-        parallel_strategy: Optional[ParallelStrategy] = None,
+        vllm_block_size: int,
+        parallel_strategy: ParallelStrategy,
         mq_timeout: float = DEFAULT_MQ_TIMEOUT,
         heartbeat_interval: float = DEFAULT_HEARTBEAT_INTERVAL,
     ):
@@ -593,8 +592,6 @@ class LMCacheMPWorkerAdapter:
 
         self.model_name = model_name
         self.parallel_strategy = parallel_strategy
-        self._world_size = world_size
-        self._worker_id = kv_rank
 
         # Read chunk size from lmcache
         try:
@@ -643,38 +640,21 @@ class LMCacheMPWorkerAdapter:
     @property
     def world_size(self) -> int:
         """Get the kv world size."""
-        return (
-            self._world_size
-            if self.parallel_strategy is None
-            else self.parallel_strategy.kv_world_size
-        )
+        return self.parallel_strategy.kv_world_size
 
     @property
     def worker_id(self) -> int:
         """Get the kv worker id."""
-        return (
-            self._worker_id
-            if self.parallel_strategy is None
-            else self.parallel_strategy.kv_worker_id
-        )
+        return self.parallel_strategy.kv_worker_id
 
     @property
     def use_mla(self) -> bool:
         """Whether to use MLA."""
-        # NOTE: use_mla only used in the latest `lmcache_mp_connector`,
-        # and the latest `lmcache_mp_connector` will set the parallel_strategy
-        if self.parallel_strategy is None:
-            raise RuntimeError("parallel_strategy is not set")
         return self.parallel_strategy.use_mla
 
     @property
     def is_first_rank_of_pp_group(self) -> bool:
         """Is the first rank of the pipeline parallel group."""
-        # NOTE: is_first_rank_of_pp_group only used in the latest
-        # `lmcache_mp_connector`, and the latest `lmcache_mp_connector`
-        # will set the parallel_strategy
-        if self.parallel_strategy is None:
-            raise RuntimeError("parallel_strategy is not set")
         return (
             self.parallel_strategy.actual_worker_id % self.parallel_strategy.tp_size
             == 0
@@ -740,7 +720,11 @@ class LMCacheMPWorkerAdapter:
 
     @_lmcache_nvtx_annotate
     def submit_store_request(
-        self, request_id: str, op: LoadStoreOp, event: torch.cuda.Event
+        self,
+        request_id: str,
+        op: LoadStoreOp,
+        event: torch.cuda.Event,
+        cache_salt: str = "",
     ):
         """
         Submit a KV cache store request to LMCache
@@ -750,6 +734,7 @@ class LMCacheMPWorkerAdapter:
             op: The LoadStoreOp describing the store operation.
             event: The CUDA event that is recorded after the current
                 model inference step
+            cache_salt: Per-user isolation salt.
         """
         self._ensure_heartbeat_started()
 
@@ -757,7 +742,13 @@ class LMCacheMPWorkerAdapter:
             return
 
         assert op.token_ids is not None
-        key = self._create_key(op.token_ids, op.start, op.end, request_id=request_id)
+        key = self._create_key(
+            op.token_ids,
+            op.start,
+            op.end,
+            request_id=request_id,
+            cache_salt=cache_salt,
+        )
         future = send_lmcache_request(
             self.mq_client,
             RequestType.STORE,
@@ -767,7 +758,11 @@ class LMCacheMPWorkerAdapter:
 
     @_lmcache_nvtx_annotate
     def submit_retrieve_request(
-        self, request_id: str, op: LoadStoreOp, event: torch.cuda.Event
+        self,
+        request_id: str,
+        op: LoadStoreOp,
+        event: torch.cuda.Event,
+        cache_salt: str = "",
     ):
         """
         Submit a KV cache retrieve request to LMCache
@@ -777,6 +772,7 @@ class LMCacheMPWorkerAdapter:
             op: The LoadStoreOp describing the retrieve operation.
             event: The CUDA event that is recorded after the current
                 model inference step
+            cache_salt: Per-user isolation salt.
         """
         self._ensure_heartbeat_started()
 
@@ -785,7 +781,13 @@ class LMCacheMPWorkerAdapter:
             return
 
         assert op.token_ids is not None
-        key = self._create_key(op.token_ids, op.start, op.end, request_id=request_id)
+        key = self._create_key(
+            op.token_ids,
+            op.start,
+            op.end,
+            request_id=request_id,
+            cache_salt=cache_salt,
+        )
         future = send_lmcache_request(
             self.mq_client,
             RequestType.RETRIEVE,
@@ -805,6 +807,7 @@ class LMCacheMPWorkerAdapter:
         request_ids: list[str],
         ops: list[LoadStoreOp],
         event: torch.cuda.Event,
+        cache_salts: list[str] | None = None,
     ):
         """
         Submit a batched store request to LMCache
@@ -815,9 +818,14 @@ class LMCacheMPWorkerAdapter:
                 the same length as request_ids
             event: The CUDA event that is recorded after the current
                 model inference step
+            cache_salts: Per-user isolation salts, one per request. If None,
+                all requests use cache_salt="". The list length should be the same as
+                request_ids.
         """
-        for request_id, op in zip(request_ids, ops, strict=False):
-            self.submit_store_request(request_id, op, event)
+        if cache_salts is None:
+            cache_salts = [""] * len(request_ids)
+        for request_id, op, salt in zip(request_ids, ops, cache_salts, strict=False):
+            self.submit_store_request(request_id, op, event, cache_salt=salt)
 
     @_lmcache_nvtx_annotate
     def batched_submit_retrieve_requests(
@@ -825,6 +833,7 @@ class LMCacheMPWorkerAdapter:
         request_ids: list[str],
         ops: list[LoadStoreOp],
         event: torch.cuda.Event,
+        cache_salts: list[str] | None = None,
     ):
         """
         Submit a batched retrieve request to LMCache
@@ -835,9 +844,14 @@ class LMCacheMPWorkerAdapter:
                 the same length as request_ids
             event: The CUDA event that is recorded after the current
                 model inference step
+            cache_salts: Per-user isolation salts, one per request. If None,
+                all requests use cache_salt="". The list length should be same as
+                request_ids.
         """
-        for request_id, op in zip(request_ids, ops, strict=False):
-            self.submit_retrieve_request(request_id, op, event)
+        if cache_salts is None:
+            cache_salts = [""] * len(request_ids)
+        for request_id, op, salt in zip(request_ids, ops, cache_salts, strict=False):
+            self.submit_retrieve_request(request_id, op, event, cache_salt=salt)
 
     def _process_finished_stores(
         self,
@@ -1017,8 +1031,20 @@ class LMCacheMPWorkerAdapter:
         start: int,
         end: int,
         request_id: str,
+        cache_salt: str = "",
     ) -> IPCCacheEngineKey:
-        """Convert token IDs to an IPC cache engine key"""
+        """Convert token IDs to an IPC cache engine key.
+
+        Args:
+            token_ids: The token IDs.
+            start: Start token index.
+            end: End token index.
+            request_id: The request ID.
+            cache_salt: Per-user isolation salt.
+
+        Returns:
+            IPCCacheEngineKey: The constructed key.
+        """
         return IPCCacheEngineKey(
             model_name=self.model_name,
             world_size=self.world_size,
@@ -1027,4 +1053,5 @@ class LMCacheMPWorkerAdapter:
             start=start,
             end=end,
             request_id=request_id,
+            cache_salt=cache_salt,
         )

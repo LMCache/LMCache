@@ -13,9 +13,6 @@ provider and assert on counter **deltas** between before/after snapshots.
 import time
 
 # Third Party
-from opentelemetry import metrics
-from opentelemetry.sdk.metrics import MeterProvider
-from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 import pytest
 
 # First Party
@@ -24,19 +21,10 @@ from lmcache.v1.mp_observability.event_bus import EventBus, EventBusConfig
 from lmcache.v1.mp_observability.subscribers.metrics.l2 import (
     L2MetricsSubscriber,
 )
+from tests.v1.mp_observability.subscribers.metrics.otel_setup import reader as _reader
 
 # Time for the drain thread to process queued events.
 _DRAIN_WAIT = 0.15
-
-
-# ---------------------------------------------------------------------------
-# Module-scoped OTel provider (single provider for entire test file)
-# ---------------------------------------------------------------------------
-
-_reader = InMemoryMetricReader()
-_provider = MeterProvider(metric_readers=[_reader])
-metrics.set_meter_provider(_provider)
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -53,6 +41,8 @@ def _read_counters() -> dict[str, int]:
         for scope_metrics in resource_metrics.scope_metrics:
             for metric in scope_metrics.metrics:
                 for dp in metric.data.data_points:
+                    if not hasattr(dp, "value"):
+                        continue  # skip histogram data points
                     result[metric.name] = int(dp.value)
     return result
 

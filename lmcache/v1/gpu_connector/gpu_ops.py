@@ -5,10 +5,7 @@ import torch
 # First Party
 from lmcache.v1.lazy_memory_allocator import LazyMemoryAllocator
 from lmcache.v1.memory_management import MemoryObj
-
-if torch.cuda.is_available():
-    # First Party
-    import lmcache.c_ops as lmc_ops
+import lmcache.c_ops as lmc_ops
 
 
 # Helper functions

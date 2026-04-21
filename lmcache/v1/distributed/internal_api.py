@@ -99,6 +99,16 @@ class L1ManagerListener(EventListener):
         """
         pass
 
+    @abstractmethod
+    def on_l1_keys_accessed(self, keys: list[ObjectKey]):
+        """
+        Notify the listener that keys have been accessed on L1.
+
+        Args:
+            keys (list[ObjectKey]): The keys that have been accessed
+        """
+        pass
+
 
 class L2AdapterListener(EventListener):
     """Listener for L2 adapter events, analogous to L1ManagerListener."""
