@@ -28,6 +28,10 @@ ENABLE_CXX11_ABI = os.environ.get("ENABLE_CXX11_ABI", "1") == "1"
 def _find_cuobject_paths() -> tuple[Optional[str], Optional[str]]:
     """Locate the cuObjClient SDK (cuobjclient.h + libcuobjclient.so).
 
+    Both the header and the shared library must be present; a partial
+    install (header only) is treated as "not found" to avoid confusing
+    linker errors.
+
     Returns (include_dir, lib_dir) or (None, None) if not found.
     Override with CUOBJECT_INCLUDE_DIR / CUOBJECT_LIB_DIR env vars.
     """
@@ -44,7 +48,9 @@ def _find_cuobject_paths() -> tuple[Optional[str], Optional[str]]:
     )
     inc_dir = os.path.join(cuda_home, "include")
     lib_dir = os.path.join(cuda_home, "lib64")
-    if os.path.isfile(os.path.join(inc_dir, "cuobjclient.h")):
+    if os.path.isfile(os.path.join(inc_dir, "cuobjclient.h")) and os.path.isfile(
+        os.path.join(lib_dir, "libcuobjclient.so")
+    ):
         return inc_dir, lib_dir
 
     return None, None

@@ -69,6 +69,16 @@ class CuObjClientWrapper:
     """
 
     def __init__(self, config: Optional[CuObjConfig] = None):
+        """Create and initialise the cuObject pybind11 C++ client.
+
+        Args:
+            config: Transport configuration.  When ``None`` a default
+                :class:`CuObjConfig` (RDMA DC v1) is used.
+
+        Raises:
+            ImportError: If the ``lmcache_cuobject`` C++ extension was
+                not compiled (e.g. cuObjClient SDK missing at build time).
+        """
         if config is None:
             config = CuObjConfig()
         self._config = config
