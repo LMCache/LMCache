@@ -102,9 +102,9 @@ class NixlStorageConfig:
 
         dynamic_storage = pool_size == 0
         if dynamic_storage:
-            assert not config.save_unfull_chunk, (
-                "save_unfull_chunk should be set to False when using dynamic storage"
-            )
+            assert (
+                not config.save_unfull_chunk
+            ), "save_unfull_chunk should be set to False when using dynamic storage"
 
         corrected_device = get_correct_device(
             config.nixl_buffer_device, metadata.worker_id
@@ -1199,6 +1199,17 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
             descs, reg_descs, xfer_handler, handle = self._acquire_storage_handle(
                 keys, mem_indices, storage_indices, page_size, write=False
             )
+        except FileNotFoundError:
+            # FILE backend: at least one key's file does not exist,
+            # treat the whole batch as a miss.
+            logger.warning("storage_to_mem: missing file in FILE backend")
+            for obj in obj_list:
+                self.memory_allocator.free(obj)
+            for key in keys:
+                self._cache_discard(key.chunk_hash)
+            return [None] * len(keys)
+
+        try:
             try:
                 self.agent.post_blocking(handle)
                 xfer_state = True
