@@ -31,14 +31,25 @@ uv pip install -U "vllm[runai,tensorizer,flashinfer]" --pre \
     --extra-index-url https://download.pytorch.org/whl/cu130 \
     --index-strategy unsafe-best-match
 
+# Probe the vLLM CLI import chain. This is the same chain that `vllm serve`
+# runs at startup, so anything that fails here would otherwise surface 180s
+# later as a silent "vLLM failed to start on port 8000" timeout in the test
+# harness. Shared between the pre-install auto-heal loop below and the
+# post-install hard probe at the end of this script.
+probe_vllm_cli() {
+    python -c "from vllm.entrypoints.cli.main import main" 2>&1
+}
+
 # vLLM nightlies periodically add eager imports of packages that aren't in
-# their declared deps (e.g. `pandas` from vllm/_aiter_ops.py). Probe-import
-# vllm's CLI entry point and auto-install any ModuleNotFoundError modules
-# so the job keeps going. Capped to avoid infinite loops; every auto-install
-# is logged so the drift is visible in the build output.
+# their declared deps (e.g. `pandas` from vllm/_aiter_ops.py). Auto-install
+# any ModuleNotFoundError modules so the job keeps going. Capped to avoid
+# infinite loops; every auto-install is logged so the drift is visible in
+# the build output. ImportError with a missing top-level name (e.g. a
+# transformers/vLLM API break) bails immediately since reinstalling the
+# package wouldn't recover.
 MAX_AUTO_INSTALL=5
 for i in $(seq 1 "$MAX_AUTO_INSTALL"); do
-    if err=$(python -c "from vllm.entrypoints.cli.main import main" 2>&1); then
+    if err=$(probe_vllm_cli); then
         break
     fi
     mod=$(printf '%s\n' "$err" | sed -n "s/.*No module named '\([^']*\)'.*/\1/p" | head -1)
@@ -83,7 +94,38 @@ if torch_major and sys_major and torch_major != sys_major:
 PY
 
 echo "--- :python: Installing LMCache from source"
+# Snapshot env before/after so silent downgrades triggered by LMCache's
+# transitive pins (requirements/common.txt caps opentelemetry-*, prometheus,
+# etc.) are visible in the build log. Without this, a version-cap-induced
+# downgrade can leave /opt/venv in a state that passes the pre-install CLI
+# probe but breaks at `vllm serve` time, which is the failure mode that
+# motivated this script's post-install hard probe below.
+uv pip freeze | sort > /tmp/env-before-lmcache.txt
 uv pip install -e . --no-build-isolation
+uv pip freeze | sort > /tmp/env-after-lmcache.txt
+if ! diff -q /tmp/env-before-lmcache.txt /tmp/env-after-lmcache.txt >/dev/null; then
+    echo "--- :warning: Packages changed during LMCache install"
+    diff /tmp/env-before-lmcache.txt /tmp/env-after-lmcache.txt || true
+fi
+
+echo "--- :mag: Post-install CLI chain probe"
+# The LMCache editable install can downgrade transitive deps to honor the
+# caps in requirements/common.txt. If that leaves the env in a state where
+# the vLLM CLI import chain (vllm.entrypoints.cli.main → vllm.config →
+# vllm.transformers_utils.config → `from transformers import ...`) fails,
+# the only other signal is a 180s `wait_for_server` timeout inside each
+# test harness. Re-probe the full chain here so broken envs fail fast with
+# the actual traceback instead of a generic timeout.
+if err=$(probe_vllm_cli); then
+    echo "vLLM CLI import chain OK post-install."
+else
+    echo "FATAL: vLLM CLI import chain broken after LMCache install." >&2
+    echo "--- Traceback ---" >&2
+    echo "$err" >&2
+    echo "--- Installed packages ---" >&2
+    uv pip freeze >&2 || true
+    exit 1
+fi
 
 echo "--- :white_check_mark: Environment ready"
 python -c "import vllm; import lmcache; print(f'vLLM={vllm.__version__}, LMCache installed from source with no build isolation')"
