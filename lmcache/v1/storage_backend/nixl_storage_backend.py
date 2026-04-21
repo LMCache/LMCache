@@ -16,7 +16,7 @@
 # Standard
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any, Callable, List, Optional, Sequence, Set, Union, cast
+from typing import Any, Callable, List, Optional, Sequence, Set, Tuple, Union, cast
 from urllib.parse import quote as url_quote
 import asyncio
 import os
@@ -69,7 +69,7 @@ class NixlStorageConfig:
     path: str
 
     @staticmethod
-    def validate_nixl_backend(backend: str, device: str):
+    def validate_nixl_backend(backend: str, device: str) -> bool:
         if backend in ("GDS", "GDS_MT", "OBJ"):
             return device == "cpu" or device == "cuda"
         elif backend in ("POSIX", "HF3FS"):
@@ -1107,57 +1107,94 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
         # Already validated in validate_nixl_backend
         raise ValueError(f"unexpected mem_type: {self.agent.mem_type}")
 
+    def _acquire_storage_handle(
+        self,
+        keys: Sequence[CacheEngineKey],
+        mem_indices: List[int],
+        storage_indices: Sequence[int],
+        page_size: int,
+        write: bool,
+    ):
+        """Open FDs, register the storage handler, and build the transfer handle.
+
+        On any failure, releases everything already acquired before re-raising,
+        so the caller either gets a fully-acquired tuple or an exception with
+        no leaked FDs / NIXL state.
+        """
+        descs = self._build_descs(keys, write=write)
+        try:
+            reg_descs, xfer_handler = self.agent.create_batched_storage_handler(
+                descs, page_size
+            )
+        except Exception:
+            if self.agent.mem_type == "FILE":
+                _close_file_descs(descs)
+            raise
+
+        try:
+            if write:
+                handle = self.agent.get_mem_to_storage_handle(
+                    mem_indices, xfer_handler, storage_indices
+                )
+            else:
+                handle = self.agent.get_storage_to_mem_handle(
+                    mem_indices, xfer_handler, storage_indices
+                )
+        except Exception:
+            # release_storage_handler closes the FDs and releases the dlist.
+            self.agent.release_storage_handler(reg_descs, xfer_handler, descs)
+            raise
+
+        return descs, reg_descs, xfer_handler, handle
+
     def key_exists(self, key: CacheEngineKey) -> bool:
         meta_info = self._format_object_key(key)
 
         return self.agent.nixl_desc_exists(meta_info, self.path)
 
-    def storage_to_mem(
-        self, keys: list[CacheEngineKey], pin: bool = False
-    ) -> list[Optional[MemoryObj]]:
-        obj_list: list[Optional[MemoryObj]] = []
-        page_size = self.memory_allocator.align_bytes
-        start_time = time.time()
-        storage_indices = []
-        mem_indices = []
-        descs = []
+    def _allocate_for_read(
+        self, keys: Sequence[CacheEngineKey]
+    ) -> Tuple[Optional[List[MemoryObj]], List[int], List[int]]:
+        """Allocate one MemoryObj per key.
 
-        # Prepare mem and storage indices
+        Returns ``(None, [], [])`` if any allocation fails, after freeing
+        what was already taken; otherwise returns the allocated objects
+        and the parallel mem/storage index lists.
+        """
+        assert self.meta_shape is not None
+        assert self.meta_dtype is not None
+        assert self.meta_fmt is not None
+        obj_list: List[MemoryObj] = []
+        mem_indices: List[int] = []
+        storage_indices: List[int] = []
         for idx in range(len(keys)):
-            # Allocate memory for the object
-            assert self.meta_shape is not None
-            assert self.meta_dtype is not None
-            assert self.meta_fmt is not None
             obj = self.memory_allocator.allocate(
                 self.meta_shape, self.meta_dtype, self.meta_fmt
             )
             if obj is None:
-                # free previous allocated objects
                 logger.warning("Failed to allocate memory")
-                for obj in obj_list:
-                    self.memory_allocator.free(obj)
-                return [None] * len(keys)
-
+                for prev in obj_list:
+                    self.memory_allocator.free(prev)
+                return None, [], []
             obj_list.append(obj)
             mem_indices.append(obj.meta.address)
             storage_indices.append(idx)
+        return obj_list, mem_indices, storage_indices
 
-        storage_reg_descs = None
-        storage_xfer_handler = None
-        xfer_state = False
+    def storage_to_mem(
+        self, keys: list[CacheEngineKey], pin: bool = False
+    ) -> list[Optional[MemoryObj]]:
+        page_size = self.memory_allocator.align_bytes
+        start_time = time.time()
+
+        obj_list, mem_indices, storage_indices = self._allocate_for_read(keys)
+        if obj_list is None:
+            return [None] * len(keys)
+
+        descs, reg_descs, xfer_handler, handle = self._acquire_storage_handle(
+            keys, mem_indices, storage_indices, page_size, write=False
+        )
         try:
-            descs = self._build_descs(keys, write=False)
-
-            # Create batched storage handler
-            storage_reg_descs, storage_xfer_handler = (
-                self.agent.create_batched_storage_handler(descs, page_size)
-            )
-            # Create transfer handle
-            handle = self.agent.get_storage_to_mem_handle(
-                mem_indices, storage_xfer_handler, storage_indices
-            )
-
-            # Try to read the object
             try:
                 self.agent.post_blocking(handle)
                 xfer_state = True
@@ -1168,35 +1205,24 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
                 xfer_state = False
             finally:
                 self.agent.release_handle(handle)
-        except Exception:
-            # Failed before the storage handler took ownership of the FDs.
-            if self.agent.mem_type == "FILE" and storage_reg_descs is None:
-                _close_file_descs(descs)
-            raise
         finally:
-            if storage_reg_descs is not None:
-                self.agent.release_storage_handler(
-                    storage_reg_descs, storage_xfer_handler, descs
-                )
+            self.agent.release_storage_handler(reg_descs, xfer_handler, descs)
 
         if xfer_state:
-            for i in range(len(keys)):
-                key = keys[i]
+            for key in keys:
                 self._cache_add(key.chunk_hash)
-            end_time = time.time()
-            duration = end_time - start_time
+            duration = time.time() - start_time
             logger.debug(
-                f"storage_to_mem for {len(keys)} objects size {page_size * len(keys)} "
-                f"took {duration:.6f} seconds"
+                f"storage_to_mem for {len(keys)} objects size "
+                f"{page_size * len(keys)} took {duration:.6f} seconds"
             )
             return obj_list
-        else:
-            # Free the allocated memory and discard cache if transfer failed
-            for obj in obj_list:
-                self.memory_allocator.free(obj)
-            for key in keys:
-                self._cache_discard(key.chunk_hash)
-            return [None] * len(keys)
+
+        for obj in obj_list:
+            self.memory_allocator.free(obj)
+        for key in keys:
+            self._cache_discard(key.chunk_hash)
+        return [None] * len(keys)
 
     async def _wait_for_transfer(
         self,
@@ -1237,83 +1263,85 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
     async def mem_to_storage(
         self, keys: Sequence[CacheEngineKey], mem_objs: List[MemoryObj]
     ) -> None:
-        start_time = time.time()
-        if len(keys) == 0:
+        if not keys:
             return
 
+        page_size = self.memory_allocator.align_bytes
         storage_indices = range(len(keys))
         mem_indices = [mem_obj.meta.address for mem_obj in mem_objs]
-        page_size = self.memory_allocator.align_bytes
-        descs = []
 
-        storage_reg_descs = None
-        storage_xfer_handler = None
+        descs, reg_descs, xfer_handler, handle = self._acquire_storage_handle(
+            keys, mem_indices, storage_indices, page_size, write=True
+        )
+
+        if self.async_mode:
+            self._submit_async_mem_to_storage(
+                handle, keys, reg_descs, xfer_handler, descs, mem_objs
+            )
+        else:
+            self._run_sync_mem_to_storage(
+                handle, keys, reg_descs, xfer_handler, descs, page_size
+            )
+
+    def _submit_async_mem_to_storage(
+        self,
+        handle: NixlXferHandle,
+        keys: Sequence[CacheEngineKey],
+        reg_descs: nixlBind.nixlRegDList,
+        xfer_handler: NixlDlistHandle,
+        descs: List[NixlDesc],
+        mem_objs: List[MemoryObj],
+    ) -> None:
+        """Post the transfer and hand cleanup off to a background task.
+
+        On any failure before the task is scheduled, ownership has not
+        transferred, so we release everything ourselves.
+        """
         try:
-            descs = self._build_descs(keys, write=True)
-
-            storage_reg_descs, storage_xfer_handler = (
-                self.agent.create_batched_storage_handler(descs, page_size)
-            )
-
-            handle = self.agent.get_mem_to_storage_handle(
-                mem_indices, storage_xfer_handler, storage_indices
-            )
-
-            if self.async_mode:
-                try:
-                    initial_state = self.agent.post_async(handle)
-                    # Submit the async wait to the event loop and return immediately
-                    asyncio.create_task(
-                        self._wait_for_transfer(
-                            handle,
-                            initial_state,
-                            keys,
-                            storage_reg_descs,
-                            storage_xfer_handler,
-                            descs,
-                            mem_objs,
-                        )
-                    )
-                except Exception:
-                    # Ownership did not transfer; release everything ourselves.
-                    self.agent.release_handle(handle)
-                    self.agent.release_storage_handler(
-                        storage_reg_descs, storage_xfer_handler, descs
-                    )
-                    storage_reg_descs = None
-                    raise
-                else:
-                    # Ownership transferred to _wait_for_transfer.
-                    storage_reg_descs = None
-            else:
-                try:
-                    self.agent.post_blocking(handle)
-                finally:
-                    self.agent.release_handle(handle)
-        except Exception:
-            # Failed before the storage handler took ownership of the FDs.
-            if self.agent.mem_type == "FILE" and storage_reg_descs is None:
-                _close_file_descs(descs)
-            raise
-        finally:
-            if storage_reg_descs is not None:
-                self.agent.release_storage_handler(
-                    storage_reg_descs, storage_xfer_handler, descs
+            initial_state = self.agent.post_async(handle)
+            asyncio.create_task(
+                self._wait_for_transfer(
+                    handle,
+                    initial_state,
+                    keys,
+                    reg_descs,
+                    xfer_handler,
+                    descs,
+                    mem_objs,
                 )
-
-        # Async path performs the equivalent inside _wait_for_transfer.
-        if not self.async_mode:
-            end_time = time.time()
-            duration = end_time - start_time
-            logger.debug(
-                f"mem_to_storage for {len(keys)} objects size {page_size * len(keys)} "
-                f"took {duration:.3f} seconds"
             )
+        except Exception:
+            self.agent.release_handle(handle)
+            self.agent.release_storage_handler(reg_descs, xfer_handler, descs)
+            raise
 
-            for key in keys:
-                with self.progress_lock:
-                    self.progress_set.discard(key)
-                self._cache_add(key.chunk_hash)
+    def _run_sync_mem_to_storage(
+        self,
+        handle: NixlXferHandle,
+        keys: Sequence[CacheEngineKey],
+        reg_descs: nixlBind.nixlRegDList,
+        xfer_handler: NixlDlistHandle,
+        descs: List[NixlDesc],
+        page_size: int,
+    ) -> None:
+        start_time = time.time()
+        try:
+            try:
+                self.agent.post_blocking(handle)
+            finally:
+                self.agent.release_handle(handle)
+        finally:
+            self.agent.release_storage_handler(reg_descs, xfer_handler, descs)
+
+        duration = time.time() - start_time
+        logger.debug(
+            f"mem_to_storage for {len(keys)} objects size "
+            f"{page_size * len(keys)} took {duration:.3f} seconds"
+        )
+        for key in keys:
+            with self.progress_lock:
+                self.progress_set.discard(key)
+            self._cache_add(key.chunk_hash)
 
     def exists_in_put_tasks(self, key: CacheEngineKey) -> bool:
         """
