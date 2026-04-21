@@ -57,6 +57,12 @@ std::pair<uintptr_t, size_t> CuObjectClient::register_pool(uintptr_t ptr,
 }
 
 int CuObjectClient::deregister_pool(uintptr_t ptr) noexcept {
+  if (!client_) {
+    // Already closed — nothing to deregister.
+    pool_base_ = 0;
+    pool_size_ = 0;
+    return CU_OBJ_SUCCESS;
+  }
   cuObjErr_t rc =
       client_->cuMemObjPutDescriptor(reinterpret_cast<void *>(ptr));
   if (ptr == pool_base_) {
@@ -80,6 +86,14 @@ bool CuObjectClient::is_connected() const {
 }
 
 int CuObjectClient::close() noexcept {
+  if (!client_) return CU_OBJ_SUCCESS;
+
+  // Deregister any active pool before destroying the client to avoid
+  // leaking the RDMA memory registration (cuMemObjPutDescriptor).
+  if (pool_base_ != 0) {
+    deregister_pool(pool_base_);
+  }
+
   client_.reset();
   return CU_OBJ_SUCCESS;
 }
