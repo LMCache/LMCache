@@ -405,7 +405,7 @@ class PrefetchController(StorageControllerInterface):
         while not self._stop_flag.is_set():
             ready = poller.poll(PREFETCH_LOOP_POLL_TIMEOUT_MS)
 
-            advance_needed = False
+            adapter_events = False
             for fd, events in ready:
                 if not (events & select.POLLIN):
                     continue
@@ -415,17 +415,20 @@ class PrefetchController(StorageControllerInterface):
                 except (OSError, BlockingIOError):
                     pass
 
-                if fd == self._submission_efd:
-                    try:
+                try:
+                    if fd == self._submission_efd:
                         self._drain_submission_queue()
-                    except Exception:
-                        logger.exception("Unexpected error draining submission queue")
-                else:
-                    # Any adapter eventfd (lookup / load) — actual dispatch
-                    # lives in _advance_request.
-                    advance_needed = True
+                    else:
+                        # Adapter lookup / load eventfds — dispatch lives in
+                        # _advance_request, run once after draining events.
+                        adapter_events = True
+                except Exception:
+                    logger.exception(
+                        "Unexpected error in prefetch loop while processing fd %d",
+                        fd,
+                    )
 
-            if advance_needed:
+            if adapter_events:
                 try:
                     for request in list(self._in_flight_requests.values()):
                         self._advance_request(request)
@@ -651,26 +654,10 @@ class PrefetchController(StorageControllerInterface):
             self._completed_lookups[request_id] = hit_chunks
 
     def _advance_request(self, request: InFlightPrefetchRequest) -> None:
-        """Single dispatcher for prefetch request state transitions.
-
-        Polls pending per-adapter results for the request's current
-        phase, records them, and triggers a phase transition if the
-        phase's work is complete. Called from the poll loop for every
-        in-flight request on each adapter eventfd wakeup; the
-        ``query_*`` calls are cheap and return ``None`` when the result
-        isn't ready.
-
-          - ``LOOKUP``: poll pending ``lookup_and_lock`` results.
-            Transition to ``PLAN_AND_LOAD`` when all lookups are done.
-          - ``PLAN_AND_LOAD``: poll pending L2 load results. Finalize
-            when all loads are done.
-
-        The poll loop never dispatches to per-event-type handlers — it
-        just relays adapter events here, so all per-phase logic lives
-        in this method.
-
-        Args:
-            request: The in-flight request whose state to advance.
+        """
+        Poll pending per-adapter results for the request's current phase,
+        record them, and trigger a phase transition when the phase's work
+        is complete. ``query_*`` calls return ``None`` when not ready.
         """
         if request.phase == PrefetchPhase.LOOKUP:
             for adapter_idx in list(request.pending_lookup_tasks):
