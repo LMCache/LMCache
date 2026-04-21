@@ -10,9 +10,6 @@ from lmcache.logging import init_logger
 
 logger = init_logger(__name__)
 
-# Local
-from .flash_attn import LMCFlashAttnBackend
-
 
 def _is_rocm() -> bool:
     """Check if we're running on ROCm (AMD GPU)."""
@@ -58,6 +55,8 @@ def infer_attn_backend_from_vllm(vllm_attn, enable_sparse=False):
             return LMCTritonSparseBackend(vllm_attn)
 
     elif attn_name == "FlashAttentionImpl" and not enable_sparse:
+        from .flash_attn import LMCFlashAttnBackend
+
         return LMCFlashAttnBackend(vllm_attn)
     else:
         raise ValueError(
