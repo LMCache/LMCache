@@ -14,7 +14,7 @@ This directory contains example runtime plugins designed for the
 ## Design
 
 For architecture details, component diagrams, and data flow, see
-[docs/design/mp_runtime_plugin.md](../../docs/design/mp_runtime_plugin.md).
+[docs/design/v1/multiprocess/mp_runtime_plugin.md](../../docs/design/v1/multiprocess/mp_runtime_plugin.md).
 
 ## Files
 
