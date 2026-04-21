@@ -69,6 +69,17 @@ Configuration
      - ``0.01``
      - Fraction of chunks/blocks to track for lifecycle histograms
        (0, 1.0]. Counters always count all events. Default is 1%.
+   * - ``--trace-level``
+     - *(none)*
+     - Enable trace recording at the given level. Currently only
+       ``storage`` is supported (records ``StorageManager`` public-API
+       calls for offline replay). When unset, trace recording is off.
+       See :ref:`trace-recording` for details.
+   * - ``--trace-output``
+     - *(none)*
+     - Path to write the trace file. If omitted while ``--trace-level``
+       is set, a timestamped file under ``$TMPDIR`` is minted
+       (``lmcache-trace-<pid>-<UTC>.lct``) and its path is logged at INFO.
 
 **Environment variables:**
 
@@ -349,3 +360,105 @@ View traces in any OTel-compatible backend such as **Jaeger** or
     lmcache server \
         --l1-size-gb 100 --eviction-policy LRU \
         --enable-tracing --otlp-endpoint http://localhost:4317
+
+.. _trace-recording:
+
+Trace Recording
+---------------
+
+.. note::
+
+   Trace recording is **distinct from** ``--enable-tracing`` (OTel
+   spans). Trace recording captures every ``StorageManager`` public-API
+   call to a binary file so the same workload can be **replayed** later
+   for testing, regression hunting, and benchmarking — without needing
+   vLLM and (eventually) without a GPU. ``--enable-tracing`` exports
+   live OTel spans to an OTLP endpoint for online observability.
+   The two features are independent and can be used together.
+
+When ``--trace-level storage`` is set, LMCache records every call to
+``StorageManager.{reserve_write, finish_write, submit_prefetch_task,
+read_prefetched_results, finish_read_prefetched}`` to a binary file
+for later replay.
+
+Recording is **off by default** and adds near-zero overhead when off
+(a single boolean check per ``StorageManager`` call). When on,
+recording happens on the EventBus drain thread, off the request path.
+
+Capturing a trace
+~~~~~~~~~~~~~~~~~
+
+With an explicit output path:
+
+.. code-block:: bash
+
+    lmcache server \
+        --l1-size-gb 100 --eviction-policy LRU \
+        --trace-level storage --trace-output /tmp/run.lct
+
+With an implicit timestamped output path under ``$TMPDIR``:
+
+.. code-block:: bash
+
+    lmcache server \
+        --l1-size-gb 100 --eviction-policy LRU \
+        --trace-level storage
+    # → INFO log: "trace recording enabled (level=storage); no
+    #   --trace-output given, writing to
+    #   /tmp/lmcache-trace-<pid>-<UTC>.lct"
+
+The trace file is closed cleanly on shutdown (SIGTERM is handled by
+the EventBus stop path).
+
+Replay
+~~~~~~
+
+Replaying a recorded trace is delivered separately via the
+``lmcache trace`` and ``lmcache bench trace-replay`` CLIs.
+
+What is captured (and what is not)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+**Captured:**
+
+- The fully-qualified name of every decorated ``StorageManager`` call.
+- Each call's input arguments (e.g. ``keys``, ``layout_desc``,
+  ``mode``, ``extra_count``, ``external_request_id``).
+- Wall-clock and monotonic timestamps of each call.
+- A header carrying ``lmcache`` version, start times, and a SHA-256
+  digest of the active ``StorageManagerConfig`` so replay can detect
+  mismatched configurations.
+
+**Not captured:**
+
+- KV tensor bytes. Replay exercises bookkeeping and controller logic;
+  payloads at replay time are zeros.
+- Calls inside the ``MPCacheEngine``, the message queue, or any
+  GPU-copy code. These layers are **out of scope** for the storage
+  trace level.
+
+File format
+~~~~~~~~~~~
+
+A length-prefixed `msgpack <https://msgpack.org/>`_ stream:
+
+::
+
+    [4-byte big-endian length][msgpack Header]
+    [4-byte big-endian length][msgpack Record]
+    [4-byte big-endian length][msgpack Record]
+    ...
+
+The ``Header`` carries a magic prefix (``LMCT``), a format version,
+the trace level (``storage`` today), the LMCache version, start
+timestamps, and the StorageManagerConfig digest. Each ``Record``
+carries a relative timestamp, a wall-clock timestamp, the
+fully-qualified call site (``qualname``), and an argument dict.
+
+The format is deliberately extensible: future trace **levels**
+(``mq``, ``gpu``) will share this layout and use the ``level`` header
+field to discriminate. Additional captured ops add new ``qualname``
+strings without bumping the format version.
+
+For the full design rationale see
+``docs/design/v1/mp_observability/trace.md`` in the source tree.
