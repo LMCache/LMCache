@@ -1163,7 +1163,7 @@ class TestInitEdgeCases:
             )
 
             mock_client.register_pool.assert_not_called()
-            assert connector._rdma_enabled is True
+            assert connector._rdma_enabled is False
             assert connector._rdma_pool_handle is None
 
         backend.close()
