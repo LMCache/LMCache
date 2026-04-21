@@ -23,12 +23,14 @@ from lmcache.v1.gpu_connector.utils import (
     get_attention_backend,
     get_block_size,
     get_concrete_gpu_kv_shape,
+    get_device,
     get_dtype,
     get_gpu_kv_shape_description,
     get_group_data_ptrs,
     get_num_blocks,
     get_num_layers,
     is_mla,
+    normalize_kv_caches_for_discovery,
 )
 from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
 
@@ -68,12 +70,11 @@ class GPUCacheContext:
         lmcache_chunk_size: int = 256,
         layout_hints: LayoutHints | None = None,
     ):
-        self.kv_caches_ = unwrap_kv_cache_tensors(kv_caches)
-        self.device_ = self.kv_caches_[0].device
-
-        # Pointers
-        pointers_list = [t.data_ptr() for t in self.kv_caches_]
-        self.kv_cache_pointers_ = list_to_gpu_tensor(pointers_list, self.device_)
+        unwrapped = unwrap_kv_cache_tensors(kv_caches)
+        self.kv_caches_, _ = normalize_kv_caches_for_discovery(
+            unwrapped, layout_hints=layout_hints
+        )
+        self.device_ = get_device(self.kv_caches_)
 
         # TODO support creating GPUCacheContext for SGLang
         self.gpu_kv_format_ = discover_gpu_kv_format(
@@ -177,13 +178,6 @@ class GPUCacheContext:
     @property
     def kv_tensors(self) -> list[torch.Tensor]:
         return self.kv_caches_
-
-    @property
-    def kv_pointers(self) -> torch.Tensor:
-        """
-        Returns a GPU tensor of the KV cache pointers
-        """
-        return self.kv_cache_pointers_
 
     @property
     def stream(self) -> torch.cuda.Stream:

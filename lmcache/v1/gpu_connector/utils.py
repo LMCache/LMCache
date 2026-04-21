@@ -118,9 +118,24 @@ def assert_contiguous(tensor: torch.Tensor) -> None:
     assert tensor.is_contiguous(), "tensor is not contiguous"
 
 
-def any_non_contiguous(kv_caches: dict[str, torch.Tensor] | List[torch.Tensor]) -> bool:
-    """Return True if any tensor in *kv_caches* is non-contiguous."""
-    tensors = kv_caches.values() if isinstance(kv_caches, dict) else kv_caches
+def any_non_contiguous(
+    kv_caches: "Union[dict[str, torch.Tensor], KVCaches]",
+) -> bool:
+    """Return True if any tensor in *kv_caches* is non-contiguous.
+
+    Only dict-of-tensors and flat-list-of-tensors shapes are inspected;
+    other :data:`KVCaches` shapes (single tensor, nested lists) return
+    ``False`` because those shapes are not produced by the HND-permute
+    path that motivated this check.
+    """
+    if isinstance(kv_caches, dict):
+        tensors: Any = kv_caches.values()
+    elif isinstance(kv_caches, list) and all(
+        isinstance(t, torch.Tensor) for t in kv_caches
+    ):
+        tensors = kv_caches
+    else:
+        return False
     return not all(t.is_contiguous() for t in tensors)
 
 
@@ -180,26 +195,20 @@ def normalize_kv_caches_for_discovery(
     kv_caches: "Union[dict[str, torch.Tensor], KVCaches]",
     layout_hints: "LayoutHints | None" = None,
 ) -> Tuple[KVCaches, Optional[List[str]]]:
-    """Normalize an engine-provided KV cache structure for format discovery.
+    """Bridge engine-specific KV-cache containers to the canonical
+    :data:`KVCaches` form consumed by :func:`discover_gpu_kv_format`.
 
-    Bridges engine-specific contracts (e.g. vLLM's
-    ``dict[str, torch.Tensor]``) to the canonical :data:`KVCaches` form
-    that :func:`discover_gpu_kv_format` and downstream format-aware
-    helpers accept. Applies :func:`ensure_contiguous_kv_caches` first so
-    callers never need to do it separately.
+    Applies :func:`ensure_contiguous_kv_caches` and, for dict inputs
+    (vLLM adapter contract), unwraps to positional values + keys.
 
     Args:
-        kv_caches: Engine-provided KV caches. Accepts the dict form used
-            by the vLLM adapter, or any :data:`KVCaches` value (list,
-            nested lists, tensor).
-        layout_hints: Passed through to
-            :func:`ensure_contiguous_kv_caches` so HND-layout permutation
-            logs the correct reason.
+        kv_caches: vLLM-style ``dict[str, Tensor]`` or any
+            :data:`KVCaches` value.
+        layout_hints: Forwarded to :func:`ensure_contiguous_kv_caches`.
 
     Returns:
-        ``(normalized_kv_caches, layer_names)``. ``layer_names`` is the
-        ordered list of keys when the input was a dict, and ``None``
-        otherwise.
+        ``(normalized_kv_caches, layer_names)`` — ``layer_names`` is the
+        ordered dict keys when the input was a dict, else ``None``.
     """
     kv_caches = ensure_contiguous_kv_caches(
         kv_caches, kv_layout=(layout_hints or {}).get("kv_layout")
@@ -946,6 +955,19 @@ def get_group_data_ptrs(
     for layer_idx in layer_indices:
         ptrs.extend(get_layer_data_ptrs(kv_caches, gpu_kv_format, layer_idx))
     return ptrs
+
+
+def get_device(kv_caches: KVCaches) -> torch.device:
+    """Return the device of the KV cache tensors.
+
+    Descends into any list nesting until a tensor is found; assumes all
+    tensors in *kv_caches* live on the same device (true for every
+    current :class:`GPUKVFormat`).
+    """
+    probe: Any = kv_caches
+    while isinstance(probe, list):
+        probe = probe[0]
+    return probe.device
 
 
 def get_layer_dtype(
