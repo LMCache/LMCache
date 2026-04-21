@@ -261,7 +261,7 @@ class StoreController(StorageControllerInterface):
         while not self._stop_flag.is_set():
             ready = poller.poll(STORE_LOOP_POLL_TIMEOUT_MS)
 
-            adapter_events = False
+            signaled_adapters: set[int] = set()
             for fd, events in ready:
                 if not (events & select.POLLIN):
                     continue
@@ -278,18 +278,20 @@ class StoreController(StorageControllerInterface):
                         if keys:
                             self._process_new_keys(keys)
                     else:
-                        adapter_events = True
+                        adapter_idx = self._efd_to_adapter_index.get(fd)
+                        if adapter_idx is not None:
+                            signaled_adapters.add(adapter_idx)
                 except Exception:
                     logger.exception(
                         "Unexpected error in store loop while processing fd %d",
                         fd,
                     )
 
-            if adapter_events:
+            if signaled_adapters:
                 try:
-                    self._drain_l2_store_completions()
+                    self._drain_l2_store_completions(signaled_adapters)
                     for task_key, request in list(self._in_flight_requests.items()):
-                        self._advance_request(task_key, request)
+                        self._advance_request(task_key, request, signaled_adapters)
                 except Exception:
                     logger.exception(
                         "Unexpected error advancing in-flight store requests"
@@ -376,13 +378,14 @@ class StoreController(StorageControllerInterface):
                 len(successful_keys),
             )
 
-    def _drain_l2_store_completions(self) -> None:
+    def _drain_l2_store_completions(self, signaled_adapters: set[int]) -> None:
         """
-        Pop completed L2 store tasks from every adapter and deposit
-        the outcome on the corresponding in-flight request, to be
+        Pop completed L2 store tasks from each signaled adapter and
+        deposit the outcome on the owning in-flight request, to be
         consumed by ``_advance_request``.
         """
-        for adapter_index, adapter in enumerate(self._l2_adapters):
+        for adapter_index in signaled_adapters:
+            adapter = self._l2_adapters[adapter_index]
             completed = adapter.pop_completed_store_tasks()
             for task_id, success in completed.items():
                 request = self._in_flight_requests.get((adapter_index, task_id))
@@ -399,27 +402,39 @@ class StoreController(StorageControllerInterface):
         self,
         task_key: tuple[int, L2TaskId],
         request: InFlightStoreRequest,
+        signaled_adapters: set[int],
     ) -> None:
         """
-        Drive the terminal transition for a single in-flight store request
-        once its L2 outcome has been recorded.
+        Pure state-transition step for one in-flight store request.
 
-        Releases L1 read locks, publishes ``L2_STORE_COMPLETED``, and on
-        success applies ``StorePolicy.select_l1_deletions``. No-op while
-        the L2 store is still in flight (``l2_store_result is None``).
+        Checks whether the terminal transition is reachable (the owning
+        adapter signaled and the L2 outcome is recorded) and delegates
+        the actual execution to ``_finalize_store``.
         """
+        if request.adapter_index not in signaled_adapters:
+            return
         if request.l2_store_result is None:
             return
+        self._finalize_store(task_key, request)
 
-        success = request.l2_store_result
-        adapter_index = request.adapter_index
+    def _finalize_store(
+        self,
+        task_key: tuple[int, L2TaskId],
+        request: InFlightStoreRequest,
+    ) -> None:
+        """
+        Execute the terminal transition for a completed store request:
+        release L1 read locks, publish ``L2_STORE_COMPLETED``, apply
+        policy L1 deletions on success, and remove the tracking entry.
+        """
+        adapter_index, task_id = task_key
         l1_mgr = self._l1_manager
+        success = request.l2_store_result
 
         l1_mgr.finish_read(request.read_locked_keys)
         del self._in_flight_requests[task_key]
         self._status_in_flight_count -= 1
 
-        _, task_id = task_key
         if success:
             self._event_bus.publish(
                 Event(
