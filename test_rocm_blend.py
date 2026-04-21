@@ -49,7 +49,7 @@ def build_llm(model: str):
         model=model,
         kv_transfer_config=ktc,
         max_model_len=8192,
-        gpu_memory_utilization=0.8,
+        gpu_memory_utilization=0.1,
         enable_prefix_caching=False,
         enforce_eager=True,
         tensor_parallel_size=1,
