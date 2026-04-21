@@ -26,12 +26,14 @@ def _block_sparse_attn_fwd_kernel(
     sm_scale: tl.constexpr,
     seq_len_q,          # total query length
     seq_len_k,          # total KV length
+    num_csr_rows,       # number of rows in CSR (may differ from grid dim 0)
     stride_qm, stride_qh, stride_qd,
     stride_km, stride_kh, stride_kd,
     stride_vm, stride_vh, stride_vd,
     stride_om, stride_oh, stride_od,
     stride_lm, stride_lh,
     NUM_HEADS: tl.constexpr,
+    NUM_KV_HEADS: tl.constexpr,
     HEAD_DIM: tl.constexpr,
     BLOCK_M: tl.constexpr,     # query block size (typically 64 or 128)
     BLOCK_N: tl.constexpr,     # KV block size (typically 64 or 128)
@@ -41,9 +43,13 @@ def _block_sparse_attn_fwd_kernel(
     Grid: (num_q_blocks, NUM_HEADS)
     Each program instance computes attention for one query block × one head,
     iterating only over the KV blocks specified by block_indices.
+    Supports GQA: maps query head_idx to kv_head_idx.
     """
     q_block_idx = tl.program_id(0)
     head_idx = tl.program_id(1)
+
+    # GQA: map query head to KV head
+    kv_head_idx = head_idx * NUM_KV_HEADS // NUM_HEADS
 
     # Query block range
     q_start = q_block_idx * BLOCK_M
@@ -51,6 +57,15 @@ def _block_sparse_attn_fwd_kernel(
     q_mask = q_offs < seq_len_q
 
     # Load the sparse KV block range for this query block
+    # Guard against grid blocks exceeding CSR rows (partial block case)
+    if q_block_idx >= num_csr_rows:
+        # No CSR entry for this block — write zeros and -inf LSE
+        o_ptrs = O_ptr + q_offs[:, None] * stride_om + head_idx * stride_oh + d_offs[None, :] * stride_od
+        tl.store(o_ptrs, tl.zeros([BLOCK_M, HEAD_DIM], dtype=Q_ptr.dtype.element_ty), mask=q_mask[:, None])
+        lse_ptrs = LSE_ptr + q_offs * stride_lm + head_idx * stride_lh
+        tl.store(lse_ptrs, tl.full([BLOCK_M], float("-inf"), dtype=tl.float32), mask=q_mask)
+        return
+
     kv_block_start = tl.load(block_indptr_ptr + q_block_idx)
     kv_block_end = tl.load(block_indptr_ptr + q_block_idx + 1)
     num_kv_blocks = kv_block_end - kv_block_start
@@ -75,8 +90,8 @@ def _block_sparse_attn_fwd_kernel(
         kv_offs = kv_start + tl.arange(0, BLOCK_N)
         kv_mask = kv_offs < seq_len_k
 
-        # Load K block: [BLOCK_N, HEAD_DIM]
-        k_ptrs = K_ptr + kv_offs[:, None] * stride_km + head_idx * stride_kh + d_offs[None, :] * stride_kd
+        # Load K block: [BLOCK_N, HEAD_DIM] — use kv_head_idx for GQA
+        k_ptrs = K_ptr + kv_offs[:, None] * stride_km + kv_head_idx * stride_kh + d_offs[None, :] * stride_kd
         k = tl.load(k_ptrs, mask=kv_mask[:, None], other=0.0)
 
         # Compute QK^T: [BLOCK_M, BLOCK_N]
@@ -101,8 +116,8 @@ def _block_sparse_attn_fwd_kernel(
         # Rescale accumulator
         acc = acc * alpha[:, None]
 
-        # Load V block: [BLOCK_N, HEAD_DIM]
-        v_ptrs = V_ptr + kv_offs[:, None] * stride_vm + head_idx * stride_vh + d_offs[None, :] * stride_vd
+        # Load V block: [BLOCK_N, HEAD_DIM] — use kv_head_idx for GQA
+        v_ptrs = V_ptr + kv_offs[:, None] * stride_vm + kv_head_idx * stride_vh + d_offs[None, :] * stride_vd
         v = tl.load(v_ptrs, mask=kv_mask[:, None], other=0.0)
 
         # Accumulate: acc += P @ V
@@ -137,6 +152,7 @@ def _causal_prefill_attention_kernel(
     stride_vm, stride_vh, stride_vd,
     stride_om, stride_oh, stride_od,
     NUM_HEADS: tl.constexpr,
+    NUM_KV_HEADS: tl.constexpr,
     HEAD_DIM: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
@@ -144,9 +160,13 @@ def _causal_prefill_attention_kernel(
     """Standard causal prefill attention for the is_causal=True path.
 
     Grid: (cdiv(seq_len, BLOCK_M), NUM_HEADS)
+    Supports GQA: maps query head_idx to kv_head_idx.
     """
     q_block_idx = tl.program_id(0)
     head_idx = tl.program_id(1)
+
+    # GQA: map query head to KV head
+    kv_head_idx = head_idx * NUM_KV_HEADS // NUM_HEADS
 
     q_start = q_block_idx * BLOCK_M
     q_offs = q_start + tl.arange(0, BLOCK_M)
@@ -169,7 +189,7 @@ def _causal_prefill_attention_kernel(
         kv_offs = kv_start + tl.arange(0, BLOCK_N)
         kv_mask = kv_offs < seq_len
 
-        k_ptrs = K_ptr + kv_offs[:, None] * stride_km + head_idx * stride_kh + d_offs[None, :] * stride_kd
+        k_ptrs = K_ptr + kv_offs[:, None] * stride_km + kv_head_idx * stride_kh + d_offs[None, :] * stride_kd
         k = tl.load(k_ptrs, mask=kv_mask[:, None], other=0.0)
 
         qk = tl.dot(q, tl.trans(k)) * sm_scale
@@ -186,7 +206,7 @@ def _causal_prefill_attention_kernel(
         l_new = alpha * l_i + l_ij
         acc = acc * alpha[:, None]
 
-        v_ptrs = V_ptr + kv_offs[:, None] * stride_vm + head_idx * stride_vh + d_offs[None, :] * stride_vd
+        v_ptrs = V_ptr + kv_offs[:, None] * stride_vm + kv_head_idx * stride_vh + d_offs[None, :] * stride_vd
         v = tl.load(v_ptrs, mask=kv_mask[:, None], other=0.0)
         acc += tl.dot(p.to(v.dtype), v)
 
@@ -286,11 +306,14 @@ def block_sparse_attention(
     """
     M, H, D = query.shape
     N = key.shape[0]
+    KV_H = key.shape[1]  # num_kv_heads (may differ from H for GQA)
 
     output = torch.empty_like(query)
     lse = torch.empty(M, H, dtype=torch.float32, device=query.device)
 
     num_q_blocks = (M + block_size - 1) // block_size
+    # CSR rows may be fewer than grid blocks (partial trailing block)
+    num_csr_rows = block_indptr.shape[0] - 1
 
     grid = (num_q_blocks, H)
 
@@ -299,12 +322,14 @@ def block_sparse_attention(
         block_indices, block_indptr,
         sm_scale,
         M, N,
+        num_csr_rows,
         query.stride(0), query.stride(1), query.stride(2),
         key.stride(0), key.stride(1), key.stride(2),
         value.stride(0), value.stride(1), value.stride(2),
         output.stride(0), output.stride(1), output.stride(2),
         lse.stride(0), lse.stride(1),
         NUM_HEADS=H,
+        NUM_KV_HEADS=KV_H,
         HEAD_DIM=D,
         BLOCK_M=block_size,
         BLOCK_N=block_size,
@@ -332,6 +357,7 @@ def causal_prefill_attention(
         output: [M, H, D]
     """
     M, H, D = query.shape
+    KV_H = key.shape[1]  # num_kv_heads (may differ from H for GQA)
     output = torch.empty_like(query)
 
     grid = ((M + block_size - 1) // block_size, H)
@@ -344,6 +370,7 @@ def causal_prefill_attention(
         value.stride(0), value.stride(1), value.stride(2),
         output.stride(0), output.stride(1), output.stride(2),
         NUM_HEADS=H,
+        NUM_KV_HEADS=KV_H,
         HEAD_DIM=D,
         BLOCK_M=block_size,
         BLOCK_N=block_size,
