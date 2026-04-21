@@ -319,7 +319,11 @@ class MPCacheEngine:
                 Event(
                     event_type=EventType.MP_STORE_START,
                     session_id=key.request_id,
-                    metadata={"device": str(gpu_context.device)},
+                    metadata={
+                        "device": str(gpu_context.device),
+                        "engine_id": instance_id,
+                        "gpu_id": gpu_context.device.index,
+                    },
                 ),
             )
 
@@ -373,6 +377,7 @@ class MPCacheEngine:
                         self.storage_manager.finish_write,
                         list(reserved_dict.keys()),
                     )
+                total_bytes = sum(mo.get_size() for mo in reserved_dict.values())
                 self._event_bus.publish_on_stream(
                     gpu_context.cupy_stream,
                     Event(
@@ -381,6 +386,9 @@ class MPCacheEngine:
                         metadata={
                             "stored_count": len(reserved_dict),
                             "device": str(gpu_context.device),
+                            "engine_id": instance_id,
+                            "gpu_id": gpu_context.device.index,
+                            "total_bytes": total_bytes,
                         },
                     ),
                 )
@@ -454,7 +462,11 @@ class MPCacheEngine:
             Event(
                 event_type=EventType.MP_RETRIEVE_START,
                 session_id=key.request_id,
-                metadata={"device": str(gpu_context.device)},
+                metadata={
+                    "device": str(gpu_context.device),
+                    "engine_id": instance_id,
+                    "gpu_id": gpu_context.device.index,
+                },
             ),
         )
 
@@ -535,6 +547,7 @@ class MPCacheEngine:
 
             prefetched_keys: list[ObjectKey] = []
             retrieve_succeeded = False
+            total_bytes = 0
             try:
                 with self.storage_manager.read_prefetched_results(
                     obj_keys
@@ -544,6 +557,7 @@ class MPCacheEngine:
                         return event.ipc_handle(), False
 
                     prefetched_keys = obj_keys[: len(memory_objs)]
+                    total_bytes = sum(mo.get_size() for mo in memory_objs)
                     _retrieve_loop(obj_keys, memory_objs)
                 # Only set True when with-block exits normally
                 retrieve_succeeded = True
@@ -565,6 +579,9 @@ class MPCacheEngine:
                         metadata={
                             "retrieved_count": len(prefetched_keys),
                             "device": str(gpu_context.device),
+                            "engine_id": instance_id,
+                            "gpu_id": gpu_context.device.index,
+                            "total_bytes": total_bytes,
                         },
                     ),
                 )
