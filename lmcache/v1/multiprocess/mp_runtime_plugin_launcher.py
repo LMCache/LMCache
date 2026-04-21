@@ -119,6 +119,7 @@ class MPRuntimePluginLauncher:
             worker_count=1,
             worker_id=0,
         )
+        logger.info(f"MPRuntimePluginLauncher initialized with {wrapper}")
 
     def launch_plugins(self) -> None:
         """Launch all configured plugins."""
