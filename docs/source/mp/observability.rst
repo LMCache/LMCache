@@ -65,6 +65,13 @@ Configuration
    * - ``--prometheus-port``
      - ``9090``
      - Port for the Prometheus ``/metrics`` HTTP endpoint.
+   * - ``--service-instance-id``
+     - *(unset, default UUID v4)*
+     - Identifier for this MP server instance. Attached as the OTel
+       Resource attribute ``service.instance.id`` on every metric and
+       span. When the flag is not passed, defaults to a random UUID v4
+       minted at startup. Pass ``--service-instance-id=""`` to force an
+       explicit empty value. See :ref:`mp-observability-resource`.
    * - ``--metrics-sample-rate``
      - ``0.01``
      - Fraction of chunks/blocks to track for lifecycle histograms
@@ -106,6 +113,32 @@ collector.
 All metrics use the ``lmcache_mp.`` prefix (multiprocess). On Prometheus,
 dots are converted to underscores and counters get a ``_total`` suffix
 (e.g. ``lmcache_mp_l1_read_keys_total``).
+
+.. _mp-observability-resource:
+
+Global Resource Attributes
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Every metric and span exported by an MP server carries Resource-level
+attributes built at startup. These identify the process producing the
+telemetry and are orthogonal to per-metric attributes such as
+``cache_salt``.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 30 25 45
+
+   * - Attribute
+     - CLI flag / config
+     - Default when unset
+   * - ``service.instance.id``
+     - ``--service-instance-id`` / ``ObservabilityConfig.service_instance_id``
+     - Random UUID v4 minted at startup.
+
+Resource attributes attach to the ``MeterProvider`` / ``TracerProvider``
+and propagate to every exported datapoint via OTLP. On Prometheus, SDK
+resource attributes surface on the ``target_info`` series rather than
+on each time-series — this is standard OTel behavior.
 
 StorageManager Metrics
 ~~~~~~~~~~~~~~~~~~~~~~
