@@ -29,17 +29,6 @@ MAX_CONCURRENCY=40
 # K8s assigns GPUs via device plugin
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 
-# Force deterministic cuBLAS workspace so two separately-started vllm
-# servers (base vs LMCache phases) pick the same kernel variants and
-# produce identical output. Without this, cuBLAS's default workspace
-# allocation yields different kernel plans per process and the
-# restart-based comparison diverges on ~50% of prompts even though
-# vllm + LMCache are both operating correctly. Verified locally on
-# the K3s host: with this set and same vllm nightly, two separate
-# server instances return 0/20 different outputs; without it,
-# ~55/100 differ. See PyTorch docs on deterministic algorithms.
-export CUBLAS_WORKSPACE_CONFIG=":4096:8"
-
 ###############
 # DATA SETUP  #
 ###############
