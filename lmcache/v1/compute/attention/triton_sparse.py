@@ -97,7 +97,7 @@ class LMCTritonSparseBackend(AttentionInterface):
                 block_size=attn_metadata.sparse_blk_col_size,
             )
             # Store LSE for downstream blending if needed
-            attn_metadata._lse = lse
+            attn_metadata.lse = lse
 
         return output
 

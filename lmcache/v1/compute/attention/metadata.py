@@ -138,7 +138,7 @@ class LMCTritonSparseMetadata(LMCAttnMetadata):
     block_col_sizes: Optional[torch.Tensor] = None
 
     # LSE from sparse attention (for downstream merge if needed)
-    _lse: Optional[torch.Tensor] = None
+    lse: Optional[torch.Tensor] = None
 
     # Match flashinfer metadata interface
     q_data_dtype: torch.dtype = torch.bfloat16
