@@ -69,7 +69,7 @@ def _compat_eventfd_read(efd: int) -> int:
                 chunk = data[off : off + 8]
                 if len(chunk) == 8:
                     total += struct.unpack("<Q", chunk)[0]
-    except (BlockingIOError, OSError):
+    except BlockingIOError:
         if total == 0:
             raise
     return total
