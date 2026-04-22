@@ -314,26 +314,27 @@ def legible_print_gpu_kv_format(gpu_kv_format: "lmc_ops.GPUKVFormat"):
         logger.info("Currently used by:\n  - %s", backend)
 
 
-def _list_depth_tensor_dim(kv_caches: Any) -> tuple[int, int]:
-    """
-    Get the number of external wrapping lists in the kv_caches.
+def _list_depth_tensor_dim(kv_caches: DiscoverableKVCache) -> tuple[int, int]:
+    """Return ``(list_depth, tensor_ndim)`` for a
+    :data:`DiscoverableKVCache` value by descending the first element
+    until a tensor is reached.
 
-    Assumption: kv_caches is of the form
-    list[list[...list[torch.Tensor]]]
+    Raises:
+        ValueError: If an empty list is encountered during descent.
     """
     depth = 0
-    while isinstance(kv_caches, list):
+    probe: Any = kv_caches
+    while isinstance(probe, list):
         depth += 1
-        if not kv_caches:
+        if not probe:
             raise ValueError("encountered an empty list")
-        kv_caches = kv_caches[0]
-    if not isinstance(kv_caches, torch.Tensor):
-        raise ValueError("encountered a non-tensor inside")
-    return depth, kv_caches.ndim
+        probe = probe[0]
+    assert isinstance(probe, torch.Tensor)  # DiscoverableKVCache invariant
+    return depth, probe.ndim
 
 
 def discover_gpu_kv_format(
-    kv_caches: Any,
+    kv_caches: DiscoverableKVCache,
     serving_engine: EngineType,
     layout_hints: "LayoutHints | None" = None,
 ) -> "lmc_ops.GPUKVFormat":
@@ -357,15 +358,18 @@ def discover_gpu_kv_format(
     # tensor_dim: number of dimensions of the internal tensor
     list_depth, tensor_dim = _list_depth_tensor_dim(kv_caches)
     logger.info("list_depth: %d, tensor_dim: %d", list_depth, tensor_dim)
+    # `probe` walks the union; this function is the single place allowed
+    # to index the raw structure, so Any-typing the local avoids noisy
+    # casts at every `.shape` / `[i]` access below.
+    probe: Any = kv_caches
     list_dims = []
-    ptr = kv_caches
     for _ in range(list_depth):
-        list_dims.append(len(ptr))
-        ptr = ptr[0]
-    # ptr is now the tensor
-    assert_contiguous(ptr)
+        list_dims.append(len(probe))
+        probe = probe[0]
+    # probe is now the tensor
+    assert_contiguous(probe)
 
-    tensor_dims = list(ptr.shape)
+    tensor_dims = list(probe.shape)
     dims_str = (
         "".join(f"[{d}]" for d in list_dims) + f"[{', '.join(map(str, tensor_dims))}]"
     )
@@ -390,13 +394,13 @@ def discover_gpu_kv_format(
             detected_format = lmc_ops.GPUKVFormat.NB_NL_TWO_BS_NH_HS
         elif list_depth == 1:
             if tensor_dim == 5:
-                if kv_caches[0].shape[0] == 2:
+                if probe.shape[0] == 2:
                     # vllm non-MLA flash attention
                     if is_hnd:
                         detected_format = lmc_ops.GPUKVFormat.NL_X_TWO_NB_NH_BS_HS
                     else:
                         detected_format = lmc_ops.GPUKVFormat.NL_X_TWO_NB_BS_NH_HS
-                elif kv_caches[0].shape[1] == 2:
+                elif probe.shape[1] == 2:
                     # vllm non-MLA flash infer
                     if is_hnd:
                         detected_format = lmc_ops.GPUKVFormat.NL_X_NB_TWO_NH_BS_HS
@@ -407,7 +411,7 @@ def discover_gpu_kv_format(
                 detected_format = lmc_ops.GPUKVFormat.NL_X_NB_BS_HS
     elif serving_engine == EngineType.SGLANG:
         if list_depth == 1:
-            if kv_caches[0].shape[1] == 1:
+            if probe.shape[1] == 1:
                 # sglang MLA
                 detected_format = lmc_ops.GPUKVFormat.NL_X_NBBS_ONE_HS
         elif list_depth == 2:
