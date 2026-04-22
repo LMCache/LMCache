@@ -36,9 +36,12 @@ class Session:
     total_tokens: int = 0
     _retrieved_start: int = 0
     _retrieved_end: int = 0
+    _retrieved_initialized: bool = False
+    # Accumulated storage-path time (excludes token hashing in server.py).
     lookup_time: float = 0.0
     retrieve_time: float = 0.0
     store_time: float = 0.0
+    # Number of chunks processed on the storage path, independent of time.
     lookup_chunks: int = 0
     store_chunks: int = 0
     lookup_ipc_key: Optional[IPCCacheEngineKey] = None
@@ -66,10 +69,11 @@ class Session:
             end: End token index of the retrieved range.
         """
         with self._lock:
-            if self._retrieved_start == self._retrieved_end:
+            if not self._retrieved_initialized:
                 # First call: initialize the range
                 self._retrieved_start = start
                 self._retrieved_end = end
+                self._retrieved_initialized = True
             else:
                 self._retrieved_start = min(self._retrieved_start, start)
                 self._retrieved_end = max(self._retrieved_end, end)

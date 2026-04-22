@@ -98,6 +98,44 @@ class TestSession:
         assert store_hashes == all_hashes[1:]
         assert session.num_chunks_processed == 3  # no extra computation
 
+    def test_retrieved_range_initial_zero(self, session: Session) -> None:
+        """Before any update, retrieved range derives 0 tokens / 0 chunks."""
+        assert session.retrieved_tokens == 0
+        assert session.retrieve_chunks == 0
+
+    def test_retrieved_range_first_update(self, session: Session) -> None:
+        """First update sets the range exactly as provided."""
+        session.update_retrieved_range(8, 20)
+        assert session.retrieved_tokens == 12
+        # chunk_size=4 -> 3 chunks in [8, 20)
+        assert session.retrieve_chunks == 3
+
+    def test_retrieved_range_union(self, session: Session) -> None:
+        """Subsequent updates union (min start, max end)."""
+        session.update_retrieved_range(4, 12)
+        session.update_retrieved_range(8, 20)
+        # Union = [4, 20) -> 16 tokens, 4 chunks
+        assert session.retrieved_tokens == 16
+        assert session.retrieve_chunks == 4
+
+    def test_retrieved_range_first_update_zero_range(self, session: Session) -> None:
+        """First update with (0, 0) must still mark the range as
+        initialized so later (0, 12) unions correctly instead of being
+        treated as a fresh init that overwrites. Regression test for
+        the ``_retrieved_initialized`` flag."""
+        session.update_retrieved_range(0, 0)
+        session.update_retrieved_range(0, 12)
+        assert session.retrieved_tokens == 12
+        assert session.retrieve_chunks == 3
+
+    def test_retrieved_range_idempotent_same_range(self, session: Session) -> None:
+        """Repeated identical updates (as from multiple TP workers) must
+        not double-count."""
+        for _ in range(4):
+            session.update_retrieved_range(0, 16)
+        assert session.retrieved_tokens == 16
+        assert session.retrieve_chunks == 4
+
 
 class TestSessionManager:
     def test_get_or_create_new(self, session_manager: SessionManager) -> None:

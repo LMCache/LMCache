@@ -386,11 +386,15 @@ class MPCacheEngine:
                 )
 
         ed = time.perf_counter()
-        if length := len(reserved_dict):
+        elapsed = ed - st
+        session.store_time += elapsed
+        stored_chunks = len(reserved_dict)
+        session.store_chunks += stored_chunks
+        if stored_chunks:
             logger.info(
                 "Stored %d tokens in %.3f seconds",
-                length * self.chunk_size,
-                ed - st,
+                stored_chunks * self.chunk_size,
+                elapsed,
             )
         return event.ipc_handle(), True
 
@@ -615,106 +619,117 @@ class MPCacheEngine:
             key: Cache key with request_id embedded.
             tp_size: Tensor-parallel size for MLA multi-reader locking.
         """
-        model_name, world_size = key.model_name, key.world_size
-        self._event_bus.publish(
-            Event(
-                event_type=EventType.MP_REQUEST_START,
-                session_id=key.request_id,
-            )
-        )
-        self._event_bus.publish(
-            Event(
-                event_type=EventType.MP_LOOKUP_PREFETCH_START,
-                session_id=key.request_id,
-            )
-        )
-
-        layout_desc = self._find_layout_desc(model_name, world_size)
-        if layout_desc is None:
-            logger.error(
-                "No GPU context found for model %s with world size %d during lookup!",
-                model_name,
-                world_size,
-            )
-            self._register_prefetch_job(
-                _PrefetchJob(
-                    handle=PrefetchHandle(
-                        prefetch_request_id=-1,
-                        external_request_id=key.request_id,
-                        l1_prefix_hit_count=0,
-                        total_requested_keys=0,
-                        submit_time=time.monotonic(),
-                    ),
-                    world_size=1,
-                    request_id=key.request_id,
-                )
-            )
-            return
-
-        extra_count = compute_extra_count(tp_size, world_size)
-
-        # Compute chunk hashes for all full chunks
-        chunk_hashes = self.token_hasher.compute_chunk_hashes(list(key.token_ids))
-        if not chunk_hashes:
-            self._register_prefetch_job(
-                _PrefetchJob(
-                    handle=PrefetchHandle(
-                        prefetch_request_id=-1,
-                        external_request_id=key.request_id,
-                        l1_prefix_hit_count=0,
-                        total_requested_keys=0,
-                        submit_time=time.monotonic(),
-                    ),
-                    world_size=1,
-                    request_id=key.request_id,
-                )
-            )
-            return
-
-        # Publish lookup event via EventBus for observability subscribers.
-        # Guard with has_subscribers() to avoid allocating the metadata dict
-        # (including dtype/shape list comprehensions) when no subscriber is
-        # listening (e.g. lookup hash logger is disabled).
-        if self._event_bus.has_subscribers(EventType.MP_LOOKUP):
+        st = time.perf_counter()
+        # Track session up-front so early-return paths still contribute to
+        # the lookup_time/lookup_chunks stats exposed in END_SESSION logs.
+        session = self.session_manager.get_or_create(key.request_id)
+        obj_keys: list = []
+        try:
+            model_name, world_size = key.model_name, key.world_size
             self._event_bus.publish(
                 Event(
-                    event_type=EventType.MP_LOOKUP,
+                    event_type=EventType.MP_REQUEST_START,
                     session_id=key.request_id,
-                    metadata={
-                        "request_id": key.request_id,
-                        "chunk_hashes": chunk_hashes,
-                        "model_name": model_name,
-                        "chunk_size": self.chunk_size,
-                        "seq_len": len(key.token_ids),
-                        "dtypes": [str(d) for d in layout_desc.dtypes],
-                        "shapes": [list(s) for s in layout_desc.shapes],
-                    },
+                )
+            )
+            self._event_bus.publish(
+                Event(
+                    event_type=EventType.MP_LOOKUP_PREFETCH_START,
+                    session_id=key.request_id,
                 )
             )
 
-        # set lookup ipc key, for session manager to use and generate object keys
-        session = self.session_manager.get_or_create(key.request_id)
-        session.set_tokens(list(key.token_ids))
-        session.lookup_ipc_key = key
+            layout_desc = self._find_layout_desc(model_name, world_size)
+            if layout_desc is None:
+                logger.error(
+                    "No GPU context found for model %s with world size %d "
+                    "during lookup!",
+                    model_name,
+                    world_size,
+                )
+                self._register_prefetch_job(
+                    _PrefetchJob(
+                        handle=PrefetchHandle(
+                            prefetch_request_id=-1,
+                            external_request_id=key.request_id,
+                            l1_prefix_hit_count=0,
+                            total_requested_keys=0,
+                            submit_time=time.monotonic(),
+                        ),
+                        world_size=1,
+                        request_id=key.request_id,
+                    )
+                )
+                return
 
-        # Record total tokens for hit-rate tracking
-        session.total_tokens = len(key.token_ids)
+            extra_count = compute_extra_count(tp_size, world_size)
 
-        obj_keys = ipc_key_to_object_keys(key, chunk_hashes)
+            # Compute chunk hashes for all full chunks
+            chunk_hashes = self.token_hasher.compute_chunk_hashes(list(key.token_ids))
+            if not chunk_hashes:
+                self._register_prefetch_job(
+                    _PrefetchJob(
+                        handle=PrefetchHandle(
+                            prefetch_request_id=-1,
+                            external_request_id=key.request_id,
+                            l1_prefix_hit_count=0,
+                            total_requested_keys=0,
+                            submit_time=time.monotonic(),
+                        ),
+                        world_size=1,
+                        request_id=key.request_id,
+                    )
+                )
+                return
 
-        handle = self.storage_manager.submit_prefetch_task(
-            obj_keys,
-            layout_desc,
-            extra_count=extra_count,
-            external_request_id=key.request_id,
-        )
-        self._register_prefetch_job(
-            _PrefetchJob(
-                handle=handle,
-                world_size=key.world_size,
-                request_id=key.request_id,
+            # Publish lookup event via EventBus for observability subscribers.
+            # Guard with has_subscribers() to avoid allocating the metadata dict
+            # (including dtype/shape list comprehensions) when no subscriber is
+            # listening (e.g. lookup hash logger is disabled).
+            if self._event_bus.has_subscribers(EventType.MP_LOOKUP):
+                self._event_bus.publish(
+                    Event(
+                        event_type=EventType.MP_LOOKUP,
+                        session_id=key.request_id,
+                        metadata={
+                            "request_id": key.request_id,
+                            "chunk_hashes": chunk_hashes,
+                            "model_name": model_name,
+                            "chunk_size": self.chunk_size,
+                            "seq_len": len(key.token_ids),
+                            "dtypes": [str(d) for d in layout_desc.dtypes],
+                            "shapes": [list(s) for s in layout_desc.shapes],
+                        },
+                    )
+                )
+
+            # set lookup ipc key, for session manager to use and
+            # generate object keys
+            session.set_tokens(list(key.token_ids))
+            session.lookup_ipc_key = key
+
+            # Record total tokens for hit-rate tracking
+            session.total_tokens = len(key.token_ids)
+
+            obj_keys = ipc_key_to_object_keys(key, chunk_hashes)
+
+            handle = self.storage_manager.submit_prefetch_task(
+                obj_keys,
+                layout_desc,
+                extra_count=extra_count,
+                external_request_id=key.request_id,
             )
-        )
+            self._register_prefetch_job(
+                _PrefetchJob(
+                    handle=handle,
+                    world_size=key.world_size,
+                    request_id=key.request_id,
+                )
+            )
+        finally:
+            elapsed = time.perf_counter() - st
+            session.lookup_time += elapsed
+            session.lookup_chunks += len(obj_keys)
 
     def _register_prefetch_job(self, job: _PrefetchJob) -> None:
         with self._prefetch_job_lock:
