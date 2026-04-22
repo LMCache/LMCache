@@ -198,6 +198,27 @@ class TestBatchedSubmitReadTask:
         backend.transfer_channel = MagicMock()
         backend.transfer_channel.batched_read.return_value = 3
 
+        # Mock NIXL worker queue: drain puts synchronously so read futures
+        # resolve via a direct batched_read call (mimics the worker thread).
+        class _SyncQueue:
+            def __init__(self, inner_backend):
+                self._backend = inner_backend
+
+            def put(self, item):
+                op_type = item[0]
+                if op_type == "read":
+                    _, buffers, channel_spec, completion_future = item
+                    try:
+                        result = self._backend.transfer_channel.batched_read(
+                            buffers=buffers,
+                            transfer_spec=channel_spec,
+                        )
+                        completion_future.set_result(result)
+                    except Exception as e:  # pragma: no cover - defensive
+                        completion_future.set_exception(e)
+
+        backend._nixl_queue = _SyncQueue(backend)
+
         # Mock zmq context
         backend.zmq_context = MagicMock()
 

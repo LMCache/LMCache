@@ -211,6 +211,12 @@ class PDBackend(AllocatorBackendInterface):
         self._nixl_queue: queue_mod.Queue = queue_mod.Queue()
         # Started after transfer_channel init
         self._nixl_thread: threading.Thread | None = None
+        # Serializes all mutations and reads of the NIXL agent state
+        # (peer handshake, xfer handlers, batched_write, batched_read).
+        # The worker thread holds it around each GPU op; the main thread
+        # holds it around peer-connection setup so the two never touch
+        # nixl_agent concurrently.
+        self._nixl_agent_lock = threading.Lock()
 
         self.memory_allocator = self.initialize_allocator(config, metadata)
         assert isinstance(self.memory_allocator, PagedCpuGpuMemoryAllocator)
@@ -423,10 +429,15 @@ class PDBackend(AllocatorBackendInterface):
         receiver_init_url = f"{receiver_host}:{receiver_init_port}"
         receiver_mem_alloc_url = f"{receiver_host}:{receiver_alloc_port}"
 
-        # Establish the connection with the receiver/decoder
-        self.transfer_channel.lazy_init_peer_connection(
-            local_id=self.local_id, peer_id=receiver_id, peer_init_url=receiver_init_url
-        )
+        # lazy_init_peer_connection mutates nixl_agent state
+        # (remote_xfer_handlers_dict) that the worker thread also touches,
+        # so serialize with the worker's GPU ops.
+        with self._nixl_agent_lock:
+            self.transfer_channel.lazy_init_peer_connection(
+                local_id=self.local_id,
+                peer_id=receiver_id,
+                peer_init_url=receiver_init_url,
+            )
 
         # Set up the memory allocation socket
         mem_alloc_socket = get_zmq_socket(
@@ -616,10 +627,11 @@ class PDBackend(AllocatorBackendInterface):
                 write_error: Optional[BaseException] = None
                 num_written = 0
                 try:
-                    num_written = self.transfer_channel.batched_write(
-                        objects=mem_objs,
-                        transfer_spec=channel_spec,
-                    )
+                    with self._nixl_agent_lock:
+                        num_written = self.transfer_channel.batched_write(
+                            objects=mem_objs,
+                            transfer_spec=channel_spec,
+                        )
                     success = True
                 except Exception as e:
                     write_error = e
@@ -670,6 +682,18 @@ class PDBackend(AllocatorBackendInterface):
                                 )
                     completion_future.set_result(0)
                 except Exception as e:
+                    completion_future.set_exception(e)
+            elif op_type == "read":
+                _, buffers, channel_spec, completion_future = item
+                try:
+                    with self._nixl_agent_lock:
+                        num_read = self.transfer_channel.batched_read(
+                            buffers=buffers,
+                            transfer_spec=channel_spec,
+                        )
+                    completion_future.set_result(num_read)
+                except Exception as e:
+                    logger.error(f"NIXL read failed in worker thread: {e}")
                     completion_future.set_exception(e)
 
     ############################################################
@@ -810,16 +834,23 @@ class PDBackend(AllocatorBackendInterface):
             logger.debug("No matching local buffers for cached remote blocks.")
             return 0
 
-        # Perform NIXL READ: read from decoder's GPU into local buffers
+        # Perform NIXL READ on the worker thread so that writes, reads,
+        # and peer-handshake never touch nixl_agent concurrently.
         channel_transfer_spec = {
             "sender_id": receiver_id,
             "remote_indexes": remote_indexes,
         }
 
-        num_read = self.transfer_channel.batched_read(
-            buffers=local_objs_to_read,
-            transfer_spec=channel_transfer_spec,
+        read_future: Future = Future()
+        self._nixl_queue.put(
+            (
+                "read",
+                local_objs_to_read,
+                channel_transfer_spec,
+                read_future,
+            )
         )
+        num_read = read_future.result()
 
         logger.info(
             "Bidirectional NIXL: read %d/%d cached blocks from decoder %s",
