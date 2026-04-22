@@ -114,19 +114,23 @@ def assert_contiguous(tensor: torch.Tensor) -> None:
 
 
 def any_non_contiguous(kv_caches: DiscoverableKVCache) -> bool:
-    """Return True if any tensor in *kv_caches* is non-contiguous.
+    """Return True if any tensor anywhere in *kv_caches* is non-contiguous.
 
-    Only flat-list-of-tensors shapes are inspected; other
-    :data:`DiscoverableKVCache` shapes (single tensor, nested lists)
-    return ``False`` because those are not produced by the HND-permute
-    path that motivated this check.
+    Walks the full :data:`DiscoverableKVCache` recursive structure
+    (bare tensor, flat list, nested lists) and inspects every tensor
+    leaf.
     """
-    if not (
-        isinstance(kv_caches, list)
-        and all(isinstance(t, torch.Tensor) for t in kv_caches)
-    ):
-        return False
-    return not all(t.is_contiguous() for t in kv_caches)
+    if isinstance(kv_caches, torch.Tensor):
+        return not kv_caches.is_contiguous()
+    return any(any_non_contiguous(sub) for sub in kv_caches)
+
+
+def _permute_all_to_contiguous(kv_caches: DiscoverableKVCache) -> DiscoverableKVCache:
+    """Apply :func:`permute_to_contiguous` to every tensor leaf,
+    preserving list structure."""
+    if isinstance(kv_caches, torch.Tensor):
+        return permute_to_contiguous(kv_caches)
+    return [_permute_all_to_contiguous(sub) for sub in kv_caches]
 
 
 def ensure_contiguous_kv_caches(
@@ -136,14 +140,15 @@ def ensure_contiguous_kv_caches(
     """Permute non-contiguous KV caches to contiguous physical shape.
 
     LMCache assumes tensors have matching logical and physical views;
-    known reason for non-contiguity is vLLM's HND layout. Returns the
-    input unchanged if already contiguous (or if the shape isn't one
-    the permute path handles — e.g. single tensor or nested lists).
+    known reason for non-contiguity is vLLM's HND layout. Walks the
+    full :data:`DiscoverableKVCache` structure and permutes every tensor
+    leaf; returns the input unchanged if every tensor is already
+    contiguous.
     """
     if not any_non_contiguous(kv_caches):
         return kv_caches
 
-    result = permute_kv_caches_to_contiguous(cast(list[torch.Tensor], kv_caches))
+    result = _permute_all_to_contiguous(kv_caches)
 
     if kv_layout == "HND":
         logger.info("Permuted HND tensors to contiguous physical shape")

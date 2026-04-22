@@ -232,6 +232,37 @@ def test_ensure_contiguous_preserves_bare_tensor():
     assert out is big
 
 
+def test_ensure_contiguous_recurses_all_shapes():
+    """ensure_contiguous must descend into every DiscoverableKVCache
+    shape and permute non-contiguous tensor leaves."""
+    # Build a flash-attention HND-layout tensor (non-contiguous after
+    # logical→physical permute exposure — the vLLM HND case).
+    nhd_view = (
+        torch.empty(2, 32, 8, 16, 64, dtype=torch.bfloat16, device="cuda")
+        .permute(0, 1, 3, 2, 4)
+        .contiguous()
+        .permute(0, 1, 3, 2, 4)  # NHD logical view over HND physical
+    )
+    assert not nhd_view.is_contiguous()
+
+    # bare tensor
+    out_tensor = ensure_contiguous_kv_caches(nhd_view, kv_layout="HND")
+    assert out_tensor.is_contiguous()
+
+    # flat list
+    lst = [nhd_view.clone() for _ in range(2)]
+    out_list = ensure_contiguous_kv_caches(lst, kv_layout="HND")
+    assert isinstance(out_list, list)
+    assert all(t.is_contiguous() for t in out_list)
+
+    # nested list (SGLang-shaped)
+    k = [nhd_view.clone() for _ in range(2)]
+    v = [nhd_view.clone() for _ in range(2)]
+    out_nested = ensure_contiguous_kv_caches([k, v], kv_layout="HND")
+    assert isinstance(out_nested, list)
+    assert all(t.is_contiguous() for sublist in out_nested for t in sublist)
+
+
 def test_get_device_handles_every_kvcaches_shape():
     """get_device must work for every DiscoverableKVCache shape without format hints."""
     t = torch.empty(8, dtype=torch.bfloat16, device="cuda")
