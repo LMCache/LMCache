@@ -22,7 +22,7 @@ from lmcache.v1.gpu_connector.utils import (  # noqa: E402
     get_layer_kv_caches,
     get_layer_shape_signature,
     make_page_buffer_shape_desc,
-    normalize_kv_caches_for_discovery,
+    prepare_for_discovery,
 )
 import lmcache.c_ops as lmc_ops  # noqa: E402
 
@@ -222,19 +222,18 @@ def test_get_layer_data_ptrs_cross_layer_rejects():
         get_layer_data_ptrs(big, fmt, layer_idx=0)
 
 
-def test_normalize_preserves_bare_tensor():
+def test_prepare_preserves_bare_tensor():
     """A bare torch.Tensor input (cross-layer shape) must pass through
-    normalize unchanged — no list wrapping — so the KVCaches recursive
-    union is respected end-to-end."""
+    prepare_for_discovery unchanged — no list wrapping — so the
+    DiscoverableKVCache recursive union is respected end-to-end."""
     big = torch.empty(32, 80, 2, 16, 8, 64, dtype=torch.bfloat16, device="cuda")
-    out, names = normalize_kv_caches_for_discovery(big)
+    out = prepare_for_discovery(big)
     assert isinstance(out, torch.Tensor)
     assert out is big
-    assert names is None
 
 
 def test_get_device_handles_every_kvcaches_shape():
-    """get_device must work for every KVCaches shape without format hints."""
+    """get_device must work for every DiscoverableKVCache shape without format hints."""
     t = torch.empty(8, dtype=torch.bfloat16, device="cuda")
     assert get_device(t) == t.device
 

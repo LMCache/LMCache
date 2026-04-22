@@ -70,7 +70,6 @@ def _make_context(
     # Build a minimal KVLayerGroupsManager with a single group
     kv_size = 1 if is_mla else 2
     group = KVLayerGroupInfo(
-        layer_names=[str(i) for i in range(num_layers)],
         layer_indices=list(range(num_layers)),
         shape_desc=_make_shape_desc(
             kv_size=kv_size,
@@ -132,7 +131,6 @@ def _make_context_multi_group(
         dt = g.get("dtype", torch.bfloat16)
         kv_layer_groups.append(
             KVLayerGroupInfo(
-                layer_names=[str(i) for i in range(layer_offset, layer_offset + nl)],
                 layer_indices=list(range(layer_offset, layer_offset + nl)),
                 shape_desc=_make_shape_desc(
                     kv_size=kv_size,

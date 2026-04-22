@@ -13,7 +13,7 @@ import lmcache.c_ops as lmc_ops
 
 if TYPE_CHECKING:
     # First Party
-    from lmcache.v1.gpu_connector.utils import KVCaches
+    from lmcache.v1.gpu_connector.utils import DiscoverableKVCache
 
 logger = init_logger(__name__)
 
@@ -27,8 +27,6 @@ class KVLayerGroupInfo:
     cannot distinguish dtypes with equal byte width (e.g. bfloat16 vs float16).
     """
 
-    layer_names: list[str]
-    """Layer names, ordered by layer index."""
     layer_indices: list[int]
     """0-based layer indices in this group."""
     shape_desc: "lmc_ops.PageBufferShapeDesc"
@@ -37,11 +35,9 @@ class KVLayerGroupInfo:
     """Torch dtype of the KV cache tensors for this group."""
 
     _layer_indices_set: set[int] = field(init=False, repr=False)
-    _layer_names_set: set[str] = field(init=False, repr=False)
 
     def __post_init__(self):
         self._layer_indices_set = set(self.layer_indices)
-        self._layer_names_set = set(self.layer_names)
 
     def __repr__(self) -> str:
         if not self.layer_indices:
@@ -50,7 +46,7 @@ class KVLayerGroupInfo:
             indices_repr = f"{self.layer_indices[0]}-{self.layer_indices[-1]}"
         sd = self.shape_desc
         return (
-            f"KVLayerGroupInfo(layers={len(self.layer_names)}, "
+            f"KVLayerGroupInfo(layers={len(self.layer_indices)}, "
             f"indices={indices_repr}, "
             f"shape_desc=(kv={sd.kv_size}, nl={sd.nl}, nb={sd.nb}, "
             f"bs={sd.bs}, nh={sd.nh}, hs={sd.hs}, "
@@ -60,7 +56,7 @@ class KVLayerGroupInfo:
     @property
     def num_layers(self) -> int:
         """Number of layers in this group."""
-        return len(self.layer_names)
+        return len(self.layer_indices)
 
     @property
     def hidden_dim_size(self) -> int:
@@ -70,10 +66,6 @@ class KVLayerGroupInfo:
     def contains_layer(self, layer_idx: int) -> bool:
         """Return True if *layer_idx* is in this group."""
         return layer_idx in self._layer_indices_set
-
-    def contains_layer_name(self, layer_name: str) -> bool:
-        """Return True if *layer_name* is in this group."""
-        return layer_name in self._layer_names_set
 
 
 class KVLayerGroupsManager:
@@ -87,11 +79,10 @@ class KVLayerGroupsManager:
 
     def __init__(
         self,
-        kv_caches: "KVCaches",
+        kv_caches: "DiscoverableKVCache",
         gpu_kv_format: "lmc_ops.GPUKVFormat",
         num_blocks: int,
         block_size: int,
-        layer_names: Optional[list[str]] = None,
     ) -> None:
         """Partition layers into groups with matching kernel-facing shape.
 
@@ -104,12 +95,6 @@ class KVLayerGroupsManager:
             gpu_kv_format: Format returned by :func:`discover_gpu_kv_format`.
             num_blocks: Number of paged blocks.
             block_size: Tokens per block.
-            layer_names: Optional layer names indexed by layer position;
-                synthetic ``["0", "1", ...]`` are used if omitted.
-
-        Raises:
-            ValueError: If *layer_names* length disagrees with the number
-                of layers reported by :func:`get_num_layers`.
         """
         # Import here to break a circular import via
         # lmcache.v1.gpu_connector.__init__ → metadata → kv_layer_groups.
@@ -131,28 +116,18 @@ class KVLayerGroupsManager:
             logger.debug("No KV caches available, skipping KV layer groups building")
             return
 
-        if layer_names is None:
-            layer_names = [str(i) for i in range(num_layers)]
-        elif len(layer_names) != num_layers:
-            raise ValueError(
-                f"layer_names has {len(layer_names)} entries but "
-                f"get_num_layers returned {num_layers}"
-            )
-
-        groups_dict: dict[
-            tuple[tuple[int, ...], torch.dtype], list[tuple[str, int]]
-        ] = defaultdict(list)
+        groups_dict: dict[tuple[tuple[int, ...], torch.dtype], list[int]] = defaultdict(
+            list
+        )
         for idx in range(num_layers):
             sig = get_layer_shape_signature(kv_caches, gpu_kv_format, idx)
             dt = get_layer_dtype(kv_caches, gpu_kv_format, idx)
-            groups_dict[(sig, dt)].append((layer_names[idx], idx))
+            groups_dict[(sig, dt)].append(idx)
 
-        sorted_keys = sorted(groups_dict.keys(), key=lambda k: groups_dict[k][0][1])
+        sorted_keys = sorted(groups_dict.keys(), key=lambda k: groups_dict[k][0])
 
         for key in sorted_keys:
-            members = groups_dict[key]
-            names = [name for name, _ in members]
-            indices = [idx for _, idx in members]
+            indices = groups_dict[key]
             _, dt = key
             shape_desc = make_page_buffer_shape_desc(
                 kv_caches,
@@ -164,7 +139,6 @@ class KVLayerGroupsManager:
             )
             self.kv_layer_groups.append(
                 KVLayerGroupInfo(
-                    layer_names=names,
                     layer_indices=indices,
                     shape_desc=shape_desc,
                     dtype=dt,
@@ -211,13 +185,6 @@ class KVLayerGroupsManager:
         """Return the group containing *layer_idx*, or ``None`` if absent."""
         for group in self.kv_layer_groups:
             if group.contains_layer(layer_idx):
-                return group
-        return None
-
-    def get_group_by_layer_name(self, layer_name: str) -> Optional[KVLayerGroupInfo]:
-        """Return the group containing *layer_name*, or ``None`` if absent."""
-        for group in self.kv_layer_groups:
-            if group.contains_layer_name(layer_name):
                 return group
         return None
 

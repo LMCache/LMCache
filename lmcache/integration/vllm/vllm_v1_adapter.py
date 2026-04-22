@@ -697,13 +697,6 @@ class LMCacheConnectorV1Impl:
         """
         return VLLM_VERSION
 
-    def _build_kv_layer_groups(self):
-        # The KVLayerGroupsManager is built lazily by the connector's
-        # _initialize_kv_cache_pointers on the first store/retrieve, where
-        # layout_hints, format discovery, and contiguity all already live.
-        # Nothing to do at register time beyond storing self.kv_caches.
-        return
-
     # TODO(chunxiaozheng): in the latest lmcache_connector, we use `register_kv_caches`
     #  to init self.kv_caches, we keep it in order to be compatible with old versions
     #  and will be removed in the future.
@@ -720,8 +713,6 @@ class LMCacheConnectorV1Impl:
                     forward_context.virtual_engine
                 ]
 
-        self._build_kv_layer_groups()
-
     ####################
     # Worker side APIs
     ####################
@@ -732,7 +723,6 @@ class LMCacheConnectorV1Impl:
         #  not called, we should consider removing it.
         assert len(self.kv_caches) == 0 and len(kv_caches) > 0
         self.kv_caches = kv_caches
-        self._build_kv_layer_groups()
         self._manager.post_init()
 
     @_lmcache_nvtx_annotate

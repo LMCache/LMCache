@@ -11,7 +11,7 @@ from lmcache.logging import init_logger
 from lmcache.utils import EngineType, _lmcache_nvtx_annotate
 from lmcache.v1.compute.blend.utils import LMCBlenderBuilder
 from lmcache.v1.gpu_connector.utils import (
-    KVCaches,
+    DiscoverableKVCache,
     LayoutHints,
     assert_is_vllm_flash_attn_or_flash_infer,
     assert_is_vllm_mla_or_flash_attn_or_flash_infer,
@@ -25,8 +25,8 @@ from lmcache.v1.gpu_connector.utils import (
     get_num_layers,
     get_page_buffer_size,
     get_tokens_per_layer,
-    normalize_kv_caches_for_discovery,
     permute_kv_caches_to_contiguous,
+    prepare_for_discovery,
 )
 from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
 from lmcache.v1.memory_management import GPUMemoryAllocator  # noqa: E501
@@ -245,9 +245,7 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
         if idx in self.kv_cache_pointers_on_gpu:
             return self.kv_cache_pointers_on_gpu[idx]
 
-        kv_caches, _ = normalize_kv_caches_for_discovery(
-            kv_caches, layout_hints=self.layout_hints
-        )
+        kv_caches = prepare_for_discovery(kv_caches, layout_hints=self.layout_hints)
 
         self.kv_cache_pointers.numpy()[:] = [t.data_ptr() for t in kv_caches]
         self.kv_cache_pointers_on_gpu[idx] = torch.empty(
@@ -465,7 +463,7 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
         if self.init:
             return
 
-        self.kvcaches, _ = normalize_kv_caches_for_discovery(
+        self.kvcaches = prepare_for_discovery(
             self.kvcaches, layout_hints=self.layout_hints
         )
         self.gpu_kv_format = discover_gpu_kv_format(
@@ -714,9 +712,7 @@ class VLLMBufferLayerwiseGPUConnector(GPUConnectorInterface):
             # is okay since fragmentation shouldn't exist in the `gpu_buffer_allocator`
             # in layerwise mode.
 
-            kv_caches, _ = normalize_kv_caches_for_discovery(
-                kv_caches, layout_hints=self.layout_hints
-            )
+            kv_caches = prepare_for_discovery(kv_caches, layout_hints=self.layout_hints)
             self.kvcaches = kv_caches
             self.gpu_kv_format = discover_gpu_kv_format(
                 kv_caches, EngineType.VLLM, layout_hints=self.layout_hints
@@ -1130,9 +1126,7 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
             # is okay since fragmentation shouldn't exist in the `gpu_buffer_allocator`
             # in layerwise mode.
 
-            kv_caches, _ = normalize_kv_caches_for_discovery(
-                kv_caches, layout_hints=self.layout_hints
-            )
+            kv_caches = prepare_for_discovery(kv_caches, layout_hints=self.layout_hints)
             self.kvcaches = kv_caches
             self.gpu_kv_format = discover_gpu_kv_format(
                 kv_caches, EngineType.VLLM, layout_hints=self.layout_hints
@@ -1456,8 +1450,8 @@ class SGLangGPUConnector(GPUConnectorInterface):
             )
             logger.info(f"GPU buffer: {self.gpu_buffer.shape}")
 
-    def _initialize_pointers(self, kv_caches: KVCaches) -> torch.Tensor:
-        kv_caches, _ = normalize_kv_caches_for_discovery(kv_caches)
+    def _initialize_pointers(self, kv_caches: DiscoverableKVCache) -> torch.Tensor:
+        kv_caches = prepare_for_discovery(kv_caches)
         self.gpu_kv_format = discover_gpu_kv_format(kv_caches, EngineType.SGLANG)
         num_layers = get_num_layers(kv_caches, self.gpu_kv_format)
         ptrs = get_group_data_ptrs(
@@ -1664,7 +1658,7 @@ class SGLangLayerwiseGPUConnector(GPUConnectorInterface):
         Also, the first request might be a bit slower due to buffer creation.
         """
         if self.use_gpu and self.gpu_buffer_allocator is None:
-            kv_caches, _ = normalize_kv_caches_for_discovery(kv_caches)
+            kv_caches = prepare_for_discovery(kv_caches)
             self.gpu_kv_format = discover_gpu_kv_format(kv_caches, EngineType.SGLANG)
             self.tokens_per_layer = get_tokens_per_layer(kv_caches, self.gpu_kv_format)
             self.elements_per_layer = get_elements_per_layer(

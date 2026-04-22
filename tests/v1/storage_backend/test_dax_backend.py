@@ -69,13 +69,11 @@ def _create_multi_group_metadata(chunk_size: int = 16) -> LMCacheMetadata:
     metadata.kv_layer_groups_manager = KVLayerGroupsManager.from_layer_groups(
         [
             KVLayerGroupInfo(
-                layer_names=["layer0"],
                 layer_indices=[0],
                 shape_desc=_sd(nh=1, hs=8),
                 dtype=torch.bfloat16,
             ),
             KVLayerGroupInfo(
-                layer_names=["layer1"],
                 layer_indices=[1],
                 shape_desc=_sd(nh=1, hs=16),
                 dtype=torch.bfloat16,

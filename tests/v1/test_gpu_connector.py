@@ -955,6 +955,5 @@ def _create_metadata(use_mla, kv_caches, gpu_kv_format):
         gpu_kv_format=gpu_kv_format,
         num_blocks=get_num_blocks(kv_list, gpu_kv_format),
         block_size=get_block_size(kv_list, gpu_kv_format),
-        layer_names=list(kv_caches.keys()),
     )
     return metadata

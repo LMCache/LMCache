@@ -3,10 +3,8 @@
 from typing import (
     TYPE_CHECKING,
     Any,
-    List,
     Literal,
     Optional,
-    Tuple,
     TypedDict,
     Union,
     cast,
@@ -30,16 +28,14 @@ import lmcache.c_ops as lmc_ops
 
 logger = init_logger(__name__)
 
-# Recursive alias for the canonical KV-caches structure consumed by
-# :func:`discover_gpu_kv_format` and all downstream format-aware helpers.
-# A KV-caches value is either:
-#   - a single :class:`torch.Tensor` (e.g. vLLM cross-layer, TRT-LLM), or
-#   - a list of nested ``KVCaches`` (per-layer lists, SGLang's two-list MHA,
-#     or deeper nesting).
-# Engine adapters that hand us other containers (e.g. the vLLM
-# ``dict[str, torch.Tensor]``) must pass through
-# :func:`normalize_kv_caches_for_discovery` first.
-KVCaches = Union[torch.Tensor, List["KVCaches"]]
+# Canonical recursive type consumed by :func:`discover_gpu_kv_format` and
+# the downstream format-aware helpers. A value is either a single
+# :class:`torch.Tensor` (e.g. vLLM cross-layer, TRT-LLM) or a list of
+# nested ``DiscoverableKVCache`` values (per-layer lists, SGLang's two-list
+# MHA, deeper nesting). Engine adapters that hand us other containers
+# (e.g. vLLM's ``dict[str, torch.Tensor]``) must pass through
+# :func:`prepare_for_discovery` first.
+DiscoverableKVCache = Union[torch.Tensor, list["DiscoverableKVCache"]]
 
 # Error message for accessing non-existent attributes in GPU KV Cache
 _ATTRIBUTE_NOT_EXIST_ERROR = "trying to access an attribute of the GPU KV Cache "
@@ -96,8 +92,8 @@ def permute_to_contiguous(tensor: torch.Tensor) -> torch.Tensor:
 
 
 def permute_kv_caches_to_contiguous(
-    kv_caches: List[torch.Tensor],
-) -> List[torch.Tensor]:
+    kv_caches: list[torch.Tensor],
+) -> list[torch.Tensor]:
     """Apply :func:`permute_to_contiguous` to each tensor in *kv_caches*.
 
     The returned list shares the same underlying storage as the input.
@@ -119,12 +115,12 @@ def assert_contiguous(tensor: torch.Tensor) -> None:
 
 
 def any_non_contiguous(
-    kv_caches: "Union[dict[str, torch.Tensor], KVCaches]",
+    kv_caches: "Union[dict[str, torch.Tensor], DiscoverableKVCache]",
 ) -> bool:
     """Return True if any tensor in *kv_caches* is non-contiguous.
 
     Only dict-of-tensors and flat-list-of-tensors shapes are inspected;
-    other :data:`KVCaches` shapes (single tensor, nested lists) return
+    other :data:`DiscoverableKVCache` shapes (single tensor, nested lists) return
     ``False`` because those shapes are not produced by the HND-permute
     path that motivated this check.
     """
@@ -148,15 +144,15 @@ def ensure_contiguous_kv_caches(
 
 @overload
 def ensure_contiguous_kv_caches(
-    kv_caches: List[torch.Tensor],
+    kv_caches: list[torch.Tensor],
     kv_layout: str | None = None,
-) -> List[torch.Tensor]: ...
+) -> list[torch.Tensor]: ...
 
 
 def ensure_contiguous_kv_caches(
-    kv_caches: dict[str, torch.Tensor] | List[torch.Tensor],
+    kv_caches: dict[str, torch.Tensor] | list[torch.Tensor],
     kv_layout: str | None = None,
-) -> dict[str, torch.Tensor] | List[torch.Tensor]:
+) -> dict[str, torch.Tensor] | list[torch.Tensor]:
     """Permute non-contiguous KV caches to contiguous physical shape.
 
     LMCache assumes tensors have matching logical and physical views.
@@ -169,7 +165,7 @@ def ensure_contiguous_kv_caches(
         return kv_caches
 
     if isinstance(kv_caches, dict):
-        result: dict[str, torch.Tensor] | List[torch.Tensor] = dict(
+        result: dict[str, torch.Tensor] | list[torch.Tensor] = dict(
             zip(
                 kv_caches.keys(),
                 permute_kv_caches_to_contiguous(list(kv_caches.values())),
@@ -191,31 +187,31 @@ def ensure_contiguous_kv_caches(
     return result
 
 
-def normalize_kv_caches_for_discovery(
-    kv_caches: "Union[dict[str, torch.Tensor], KVCaches]",
+def prepare_for_discovery(
+    kv_caches: "Union[dict[str, torch.Tensor], DiscoverableKVCache]",
     layout_hints: "LayoutHints | None" = None,
-) -> Tuple[KVCaches, Optional[List[str]]]:
+) -> DiscoverableKVCache:
     """Bridge engine-specific KV-cache containers to the canonical
-    :data:`KVCaches` form consumed by :func:`discover_gpu_kv_format`.
+    :data:`DiscoverableKVCache` form consumed by :func:`discover_gpu_kv_format`.
 
     Applies :func:`ensure_contiguous_kv_caches` and, for dict inputs
-    (vLLM adapter contract), unwraps to positional values + keys.
+    (vLLM adapter contract), unwraps to positional values.
 
     Args:
         kv_caches: vLLM-style ``dict[str, Tensor]`` or any
-            :data:`KVCaches` value.
+            :data:`DiscoverableKVCache` value.
         layout_hints: Forwarded to :func:`ensure_contiguous_kv_caches`.
 
     Returns:
-        ``(normalized_kv_caches, layer_names)`` — ``layer_names`` is the
-        ordered dict keys when the input was a dict, else ``None``.
+        A :data:`DiscoverableKVCache` value ready for
+        :func:`discover_gpu_kv_format`.
     """
     kv_caches = ensure_contiguous_kv_caches(
         kv_caches, kv_layout=(layout_hints or {}).get("kv_layout")
     )
     if isinstance(kv_caches, dict):
-        return list(kv_caches.values()), list(kv_caches.keys())
-    return kv_caches, None
+        return list(kv_caches.values())
+    return kv_caches
 
 
 def need_gpu_interm_buffer(lmcache_config: LMCacheEngineConfig):
@@ -370,12 +366,12 @@ def legible_print_gpu_kv_format(gpu_kv_format: "lmc_ops.GPUKVFormat"):
         logger.info("Currently used by:\n  - %s", backend)
 
 
-def _list_depth_tensor_dim(kv_caches: Any) -> Tuple[int, int]:
+def _list_depth_tensor_dim(kv_caches: Any) -> tuple[int, int]:
     """
     Get the number of external wrapping lists in the kv_caches.
 
     Assumption: kv_caches is of the form
-    List[List[...List[torch.Tensor]]]
+    list[list[...list[torch.Tensor]]]
     """
     depth = 0
     while isinstance(kv_caches, list):
@@ -566,27 +562,27 @@ def get_page_buffer_size(kv_caches: Any, gpu_kv_format: "lmc_ops.GPUKVFormat") -
         # [num_blocks, num_layers, 2, block_size, num_heads, head_size]
         return kv_caches.shape[0] * kv_caches.shape[3]
     elif gpu_kv_format == lmc_ops.GPUKVFormat.NL_X_TWO_NB_BS_NH_HS:
-        # List[num_layers] of [2, num_blocks, block_size, num_heads, head_size]
+        # list[num_layers] of [2, num_blocks, block_size, num_heads, head_size]
         return kv_caches[0].shape[1] * kv_caches[0].shape[2]
     elif gpu_kv_format == lmc_ops.GPUKVFormat.NL_X_TWO_NB_NH_BS_HS:
-        # List[num_layers] of [2, num_blocks, num_heads, block_size, head_size]
+        # list[num_layers] of [2, num_blocks, num_heads, block_size, head_size]
         # num_blocks=shape[1], block_size=shape[3]
         return kv_caches[0].shape[1] * kv_caches[0].shape[3]
     elif gpu_kv_format == lmc_ops.GPUKVFormat.NL_X_NB_TWO_BS_NH_HS:
-        # List[num_layers] of [num_blocks, 2, block_size, num_heads, head_size]
+        # list[num_layers] of [num_blocks, 2, block_size, num_heads, head_size]
         return kv_caches[0].shape[0] * kv_caches[0].shape[2]
     elif gpu_kv_format == lmc_ops.GPUKVFormat.NL_X_NB_TWO_NH_BS_HS:
-        # List[num_layers] of [num_blocks, 2, num_heads, block_size, head_size]
+        # list[num_layers] of [num_blocks, 2, num_heads, block_size, head_size]
         # num_blocks=shape[0], block_size=shape[3]
         return kv_caches[0].shape[0] * kv_caches[0].shape[3]
     elif gpu_kv_format == lmc_ops.GPUKVFormat.NL_X_NB_BS_HS:
-        # List[num_layers] of [num_blocks, block_size, head_size]
+        # list[num_layers] of [num_blocks, block_size, head_size]
         return kv_caches[0].shape[0] * kv_caches[0].shape[1]
     elif gpu_kv_format == lmc_ops.GPUKVFormat.TWO_X_NL_X_NBBS_NH_HS:
-        # List[2] -> List[num_layers] of [page_buffer_size, num_heads, head_size]
+        # list[2] -> list[num_layers] of [page_buffer_size, num_heads, head_size]
         return kv_caches[0][0].shape[0]
     elif gpu_kv_format == lmc_ops.GPUKVFormat.NL_X_NBBS_ONE_HS:
-        # List[num_layers] of [page_buffer_size, 1, head_size]
+        # list[num_layers] of [page_buffer_size, 1, head_size]
         return kv_caches[0].shape[0]
     else:
         raise ValueError(f"Unknown GPU KV Format: {gpu_kv_format}")
@@ -682,31 +678,31 @@ def get_tokens_per_layer(kv_caches: Any, gpu_kv_format: "lmc_ops.GPUKVFormat") -
         # [num_blocks, num_layers, 2, block_size, num_heads, head_size]
         return kv_caches.shape[0] * kv_caches.shape[3]
     elif gpu_kv_format == lmc_ops.GPUKVFormat.NL_X_TWO_NB_BS_NH_HS:
-        # List[num_layers] of [2, num_blocks, block_size, num_heads, head_size]
+        # list[num_layers] of [2, num_blocks, block_size, num_heads, head_size]
         k_cache_shape = kv_caches[0][0].shape
         return k_cache_shape[0] * k_cache_shape[1]
     elif gpu_kv_format == lmc_ops.GPUKVFormat.NL_X_TWO_NB_NH_BS_HS:
-        # List[num_layers] of [2, num_blocks, num_heads, block_size, head_size]
+        # list[num_layers] of [2, num_blocks, num_heads, block_size, head_size]
         # k_cache = kv_caches[0][0] → (NB, NH, BS, HS); tokens = NB * BS
         k_cache_shape = kv_caches[0][0].shape
         return k_cache_shape[0] * k_cache_shape[2]
     elif gpu_kv_format == lmc_ops.GPUKVFormat.NL_X_NB_TWO_BS_NH_HS:
-        # List[num_layers] of [num_blocks, 2, block_size, num_heads, head_size]
+        # list[num_layers] of [num_blocks, 2, block_size, num_heads, head_size]
         k_cache_shape = kv_caches[0][:, 0].shape
         return k_cache_shape[0] * k_cache_shape[1]
     elif gpu_kv_format == lmc_ops.GPUKVFormat.NL_X_NB_TWO_NH_BS_HS:
-        # List[num_layers] of [num_blocks, 2, num_heads, block_size, head_size]
+        # list[num_layers] of [num_blocks, 2, num_heads, block_size, head_size]
         # k_cache = kv_caches[0][:, 0] → (NB, NH, BS, HS); tokens = NB * BS
         k_cache_shape = kv_caches[0][:, 0].shape
         return k_cache_shape[0] * k_cache_shape[2]
     elif gpu_kv_format == lmc_ops.GPUKVFormat.NL_X_NB_BS_HS:
-        # List[num_layers] of [num_blocks, block_size, head_size]
+        # list[num_layers] of [num_blocks, block_size, head_size]
         return kv_caches[0].shape[0] * kv_caches[0].shape[1]
     elif gpu_kv_format == lmc_ops.GPUKVFormat.TWO_X_NL_X_NBBS_NH_HS:
-        # List[2] -> List[num_layers] of [page_buffer_size, num_heads, head_size]
+        # list[2] -> list[num_layers] of [page_buffer_size, num_heads, head_size]
         return kv_caches[0][0].shape[0]
     elif gpu_kv_format == lmc_ops.GPUKVFormat.NL_X_NBBS_ONE_HS:
-        # List[num_layers] of [page_buffer_size, 1, head_size]
+        # list[num_layers] of [page_buffer_size, 1, head_size]
         return kv_caches[0].shape[0]
     else:
         raise ValueError(f"Unknown GPU KV Format: {gpu_kv_format}")
@@ -740,14 +736,14 @@ def get_elements_per_layer(kv_caches: Any, gpu_kv_format: "lmc_ops.GPUKVFormat")
         k_cache_shape = kv_caches[0][:, 0].shape
         return k_cache_shape.numel() * 2
     elif gpu_kv_format == lmc_ops.GPUKVFormat.NL_X_NB_BS_HS:
-        # List[num_layers] of [num_blocks, block_size, head_size] (MLA)
+        # list[num_layers] of [num_blocks, block_size, head_size] (MLA)
         return kv_caches[0].numel()
     elif gpu_kv_format == lmc_ops.GPUKVFormat.TWO_X_NL_X_NBBS_NH_HS:
-        # List[2] -> List[num_layers] of
+        # list[2] -> list[num_layers] of
         # [page_buffer_size, num_heads, head_size] (separate K and V)
         return kv_caches[0][0].numel() * 2
     elif gpu_kv_format == lmc_ops.GPUKVFormat.NL_X_NBBS_ONE_HS:
-        # List[num_layers] of [page_buffer_size, 1, head_size] (MLA)
+        # list[num_layers] of [page_buffer_size, 1, head_size] (MLA)
         return kv_caches[0].numel()
     else:
         raise ValueError(f"Unknown GPU KV Format: {gpu_kv_format}")
@@ -848,10 +844,10 @@ def _per_layer_list_formats() -> frozenset:
 
 
 def get_layer_kv_caches(
-    kv_caches: KVCaches,
+    kv_caches: DiscoverableKVCache,
     gpu_kv_format: "lmc_ops.GPUKVFormat",
     layer_idx: int,
-) -> KVCaches:
+) -> DiscoverableKVCache:
     """Return a single-layer sub-structure of *kv_caches*, preserving the
     list-nesting convention of *gpu_kv_format* so it is reusable as input
     to other format-aware helpers.
@@ -868,10 +864,10 @@ def get_layer_kv_caches(
         ValueError: If *gpu_kv_format* is not recognized.
     """
     if gpu_kv_format in _per_layer_list_formats():
-        layers = cast(List[torch.Tensor], kv_caches)
+        layers = cast(list[torch.Tensor], kv_caches)
         return [layers[layer_idx]]
     if gpu_kv_format == lmc_ops.GPUKVFormat.TWO_X_NL_X_NBBS_NH_HS:
-        k, v = cast(List[List[torch.Tensor]], kv_caches)
+        k, v = cast(list[list[torch.Tensor]], kv_caches)
         return [[k[layer_idx]], [v[layer_idx]]]
     if gpu_kv_format == lmc_ops.GPUKVFormat.NB_NL_TWO_BS_NH_HS:
         tensor = cast(torch.Tensor, kv_caches)
@@ -880,10 +876,10 @@ def get_layer_kv_caches(
 
 
 def get_layer_data_ptrs(
-    kv_caches: KVCaches,
+    kv_caches: DiscoverableKVCache,
     gpu_kv_format: "lmc_ops.GPUKVFormat",
     layer_idx: int,
-) -> List[int]:
+) -> list[int]:
     """Return the GPU data pointer(s) belonging to a single layer.
 
     Most formats produce one pointer per layer. The SGLang two-list format
@@ -907,10 +903,10 @@ def get_layer_data_ptrs(
             :func:`get_group_data_ptrs` returns the single shared base).
     """
     if gpu_kv_format in _per_layer_list_formats():
-        layers = cast(List[torch.Tensor], kv_caches)
+        layers = cast(list[torch.Tensor], kv_caches)
         return [layers[layer_idx].data_ptr()]
     if gpu_kv_format == lmc_ops.GPUKVFormat.TWO_X_NL_X_NBBS_NH_HS:
-        k, v = cast(List[List[torch.Tensor]], kv_caches)
+        k, v = cast(list[list[torch.Tensor]], kv_caches)
         return [k[layer_idx].data_ptr(), v[layer_idx].data_ptr()]
     if gpu_kv_format == lmc_ops.GPUKVFormat.NB_NL_TWO_BS_NH_HS:
         raise ValueError(
@@ -921,10 +917,10 @@ def get_layer_data_ptrs(
 
 
 def get_group_data_ptrs(
-    kv_caches: KVCaches,
+    kv_caches: DiscoverableKVCache,
     gpu_kv_format: "lmc_ops.GPUKVFormat",
     layer_indices: list[int],
-) -> List[int]:
+) -> list[int]:
     """Return device pointers for a group of layers in the order the transfer
     kernels expect for *gpu_kv_format*.
 
@@ -955,7 +951,7 @@ def get_group_data_ptrs(
         tensor = cast(torch.Tensor, kv_caches)
         return [tensor.data_ptr()]
     if gpu_kv_format == lmc_ops.GPUKVFormat.TWO_X_NL_X_NBBS_NH_HS:
-        k, v = cast(List[List[torch.Tensor]], kv_caches)
+        k, v = cast(list[list[torch.Tensor]], kv_caches)
         k_ptrs = [k[i].data_ptr() for i in layer_indices]
         v_ptrs = [v[i].data_ptr() for i in layer_indices]
         return k_ptrs + v_ptrs
@@ -965,7 +961,7 @@ def get_group_data_ptrs(
     return ptrs
 
 
-def get_device(kv_caches: KVCaches) -> torch.device:
+def get_device(kv_caches: DiscoverableKVCache) -> torch.device:
     """Return the device of the KV cache tensors.
 
     Descends into any list nesting until a tensor is found; assumes all
@@ -979,7 +975,7 @@ def get_device(kv_caches: KVCaches) -> torch.device:
 
 
 def get_layer_dtype(
-    kv_caches: KVCaches,
+    kv_caches: DiscoverableKVCache,
     gpu_kv_format: "lmc_ops.GPUKVFormat",
     layer_idx: int,
 ) -> torch.dtype:
@@ -999,10 +995,10 @@ def get_layer_dtype(
 
 
 def get_layer_shape_signature(
-    kv_caches: KVCaches,
+    kv_caches: DiscoverableKVCache,
     gpu_kv_format: "lmc_ops.GPUKVFormat",
     layer_idx: int,
-) -> Tuple[int, ...]:
+) -> tuple[int, ...]:
     """Return a hashable grouping key ``(kv_size, num_heads, head_size)`` for
     a single layer. Two layers with identical keys are kernel-equivalent
     regardless of physical layout.
@@ -1023,7 +1019,7 @@ def get_layer_shape_signature(
 
 
 def make_page_buffer_shape_desc(
-    kv_caches: KVCaches,
+    kv_caches: DiscoverableKVCache,
     gpu_kv_format: "lmc_ops.GPUKVFormat",
     layer_idx: int,
     num_layers_in_group: int,
@@ -1055,7 +1051,7 @@ def make_page_buffer_shape_desc(
     return desc
 
 
-def _split_token2d_kv(token2d: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+def _split_token2d_kv(token2d: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Accepts either:
       - [2, T, D]
@@ -1074,11 +1070,11 @@ def _split_token2d_kv(token2d: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor
 
 
 def _get_head_size_view(
-    kv_cache_layer: Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]],
+    kv_cache_layer: Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]],
     *,
     use_mla: bool,
     gpu_kv_format: Optional["lmc_ops.GPUKVFormat"] = None,
-) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
     """
     Returns flattened views for index_copy/index_select.
 

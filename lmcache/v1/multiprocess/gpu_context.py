@@ -30,7 +30,7 @@ from lmcache.v1.gpu_connector.utils import (
     get_num_blocks,
     get_num_layers,
     is_mla,
-    normalize_kv_caches_for_discovery,
+    prepare_for_discovery,
 )
 from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
 
@@ -71,9 +71,7 @@ class GPUCacheContext:
         layout_hints: LayoutHints | None = None,
     ):
         unwrapped = unwrap_kv_cache_tensors(kv_caches)
-        self.kv_caches_, _ = normalize_kv_caches_for_discovery(
-            unwrapped, layout_hints=layout_hints
-        )
+        self.kv_caches_ = prepare_for_discovery(unwrapped, layout_hints=layout_hints)
         self.device_ = get_device(self.kv_caches_)
 
         # TODO support creating GPUCacheContext for SGLang
