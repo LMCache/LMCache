@@ -10,14 +10,20 @@ FROM vllm/vllm-openai-rocm:latest
 ARG PYTORCH_ROCM_ARCH="gfx942,gfx950"
 ENV PYTORCH_ROCM_ARCH=${PYTORCH_ROCM_ARCH}
 
-# Install build dependencies from the same source of truth as Dockerfile.rocm.
-# Note: We inline the deps here because the lightweight image does not COPY
-# the repo context. Keep in sync with requirements/build.txt.
+# Install build dependencies (keep in sync with requirements/build.txt).
 COPY requirements/build.txt /tmp/build.txt
 RUN uv pip install --system --no-cache -r /tmp/build.txt && rm /tmp/build.txt
 
-RUN BUILD_WITH_HIP=1 CXX=hipcc \
-    uv pip install --system --no-cache --no-build-isolation --no-binary lmcache lmcache
+# Build LMCache from source with HIP extensions.
+# PyPI lmcache>=0.4 ships only binary wheels (no sdist), so `--no-binary`
+# cannot force a source build.  Cloning the repo ensures HIP extensions
+# are compiled against the ROCm torch already present in the base image.
+ARG LMCACHE_VERSION=dev
+RUN git clone --depth 1 -b ${LMCACHE_VERSION} https://github.com/LMCache/LMCache.git /tmp/lmcache && \
+    cd /tmp/lmcache && \
+    BUILD_WITH_HIP=1 CXX=hipcc \
+    uv pip install --system --no-cache --no-build-isolation . && \
+    rm -rf /tmp/lmcache
 
 
 # Build:

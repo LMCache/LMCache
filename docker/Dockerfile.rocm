@@ -107,16 +107,21 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     . /opt/venv/bin/activate && \
     uv pip install -r build.txt
 
-# Install vLLM-ROCm and LMCache stable releases.
-# - Use ROCm index URL to avoid installing CUDA wheels
-# - --no-build-isolation: build against the ROCm torch from vLLM
-# - CXX=hipcc BUILD_WITH_HIP=1: compile HIP extensions
+# Install vLLM-ROCm and build LMCache from source with HIP extensions.
+# PyPI lmcache>=0.4 ships only binary wheels (no sdist), so --no-binary
+# cannot force a source build.  Cloning from git ensures HIP extensions
+# are compiled against the ROCm torch installed by vLLM.
+ARG LMCACHE_RELEASE_VERSION=dev
 RUN . /opt/venv/bin/activate && \
     ROCM_TAG=rocm$(echo ${ROCM_VERSION} | tr -d '.') && \
     uv pip install --prerelease=allow 'vllm[runai,tensorizer]' \
         --extra-index-url https://wheels.vllm.ai/${ROCM_TAG} \
         --index-strategy unsafe-best-match && \
-    BUILD_WITH_HIP=1 CXX=hipcc uv pip install --no-build-isolation --no-binary lmcache lmcache --verbose
+    git clone --depth 1 -b ${LMCACHE_RELEASE_VERSION} \
+        https://github.com/LMCache/LMCache.git /tmp/lmcache && \
+    cd /tmp/lmcache && \
+    BUILD_WITH_HIP=1 CXX=hipcc uv pip install --no-build-isolation . --verbose && \
+    rm -rf /tmp/lmcache
 
 WORKDIR /workspace
 ENTRYPOINT ["/opt/venv/bin/vllm", "serve"]
