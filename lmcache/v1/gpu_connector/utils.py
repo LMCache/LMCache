@@ -315,9 +315,18 @@ def legible_print_gpu_kv_format(gpu_kv_format: "lmc_ops.GPUKVFormat"):
 
 
 def _list_depth_tensor_dim(kv_caches: DiscoverableKVCache) -> tuple[int, int]:
-    """Return ``(list_depth, tensor_ndim)`` for a
-    :data:`DiscoverableKVCache` value by descending the first element
-    until a tensor is reached.
+    """Measure the structural shape of a :data:`DiscoverableKVCache`.
+
+    Descends the first element of each list until a tensor is reached,
+    counting list-wrapping layers along the way.
+
+    Args:
+        kv_caches: A :data:`DiscoverableKVCache` value.
+
+    Returns:
+        ``(list_depth, tensor_ndim)`` — the number of list-wrapping
+        layers (0 for a bare tensor, 1 for a flat list, 2 for nested
+        lists) and the ``ndim`` of the innermost tensor.
 
     Raises:
         ValueError: If an empty list is encountered during descent.
@@ -428,9 +437,28 @@ def discover_gpu_kv_format(
         )
 
 
+# -----------------------------------------------------------------------------
+# Format-aware scalar accessors.
+#
+# These helpers take a :data:`DiscoverableKVCache` and dispatch on
+# ``GPUKVFormat`` to pull a single scalar (num_layers, num_blocks,
+# head_size, etc.) out of the structure. The ``kv_caches`` parameter is
+# typed ``Any`` rather than ``DiscoverableKVCache`` on purpose: these
+# functions are the one layer that performs format-dispatched raw
+# indexing (``kv_caches.shape[i]``, ``kv_caches[0][j]``) — the exact
+# access pattern that mypy cannot verify against the recursive
+# ``Union[Tensor, list[...]]`` without pervasive casts. Callers pass a
+# ``DiscoverableKVCache`` value; the ``gpu_kv_format`` argument is the
+# proof that the structural indexing below is well-defined.
+# -----------------------------------------------------------------------------
+
+
 def get_num_layers(kv_caches: Any, gpu_kv_format: "lmc_ops.GPUKVFormat") -> int:
-    """
-    Get the number of layers from the kv_caches
+    """Return the number of layers encoded in *kv_caches* for *gpu_kv_format*.
+
+    Args:
+        kv_caches: A :data:`DiscoverableKVCache` value.
+        gpu_kv_format: Format returned by :func:`discover_gpu_kv_format`.
     """
     if gpu_kv_format == lmc_ops.GPUKVFormat.NB_NL_TWO_BS_NH_HS:
         return kv_caches.shape[1]
