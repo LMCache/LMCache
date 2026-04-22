@@ -4,7 +4,24 @@
 
 Creates a root ``"cb.request"`` span per session wrapping all CB child spans.
 Opens at ``CB_REQUEST_START``; closes at ``CB_REQUEST_END``, deferred until
-any in-flight GPU store/retrieve callbacks complete.
+any in-flight GPU store/retrieve callbacks complete **and** until
+``CB_STORE_FINAL_SUBMITTED`` has been received (if a retrieve was submitted).
+
+On the HIT path the lifecycle is:
+
+  CB_RETRIEVE_SUBMITTED → [retrieve GPU op] → CB_RETRIEVE_END
+      → [inference, ~hundreds of ms, pending_gpu_ops==0 here]
+  CB_STORE_FINAL_SUBMITTED → CB_REQUEST_END → [store GPU op] → CB_STORE_FINAL_END
+
+During inference ``_pending_gpu_ops`` is 0, so a stray ``CB_REQUEST_END``
+(e.g. from a second ``cb_lookup_pre_computed`` call that misses) would
+otherwise close the root span prematurely.  ``_waiting_for_store_final``
+bridges this gap: it is populated by ``CB_RETRIEVE_SUBMITTED`` and cleared by
+``CB_STORE_FINAL_SUBMITTED``, so the root span cannot close until both
+conditions hold simultaneously:
+
+* ``_pending_gpu_ops[sid] == 0``
+* ``sid not in _waiting_for_store_final``
 
 Accepts an optional :class:`~lmcache.v1.mp_observability.subscribers.tracing\
 .span_registry.SpanRegistry` so the ``"cb.request"`` span is automatically
@@ -83,7 +100,13 @@ class BlendTracingSubscriber(EventSubscriber):
         self._pending_gpu_ops: dict[str, int] = {}
 
         # session_id -> REQUEST_END timestamp saved when GPU ops are in flight
+        # or when a store_final is still expected
         self._deferred_session_end_ts: dict[str, float] = {}
+
+        # Sessions where CB_RETRIEVE_SUBMITTED was seen but CB_STORE_FINAL_SUBMITTED
+        # has not yet arrived.  Prevents premature root-span closure during the
+        # inference window when _pending_gpu_ops is transiently 0.
+        self._waiting_for_store_final: set[str] = set()
 
     def get_subscriptions(self) -> dict[EventType, EventCallback]:
         """Return the event-to-callback mapping for this subscriber."""
@@ -130,6 +153,7 @@ class BlendTracingSubscriber(EventSubscriber):
             self._registry.clear_session(sid)
         self._pending_gpu_ops.clear()
         self._deferred_session_end_ts.clear()
+        self._waiting_for_store_final.clear()
 
     # ------------------------------------------------------------------
     # Root span handlers
@@ -160,7 +184,11 @@ class BlendTracingSubscriber(EventSubscriber):
         )
 
     def _on_submitted(self, event: Event) -> None:
-        """Increment the in-flight GPU-ops counter for the session.
+        """Increment the in-flight GPU-ops counter and update store-final tracking.
+
+        ``CB_RETRIEVE_SUBMITTED`` marks the session as waiting for a store_final,
+        bridging the inference gap where ``_pending_gpu_ops`` is transiently 0.
+        ``CB_STORE_FINAL_SUBMITTED`` clears that marker (store_final has arrived).
 
         Args:
             event: One of ``CB_STORE_PRE_COMPUTED_SUBMITTED``,
@@ -170,9 +198,23 @@ class BlendTracingSubscriber(EventSubscriber):
             return
         sid = event.session_id
         self._pending_gpu_ops[sid] = self._pending_gpu_ops.get(sid, 0) + 1
+        if event.event_type == EventType.CB_RETRIEVE_SUBMITTED:
+            self._waiting_for_store_final.add(sid)
+        elif event.event_type == EventType.CB_STORE_FINAL_SUBMITTED:
+            self._waiting_for_store_final.discard(sid)
 
     def _on_session_end(self, event: Event) -> None:
-        """Close the root span, or defer if GPU ops are still in flight.
+        """Close the root span, or defer if GPU ops are in flight or store_final
+        is pending.
+
+        Defers when either condition holds:
+        * ``_pending_gpu_ops[sid] > 0`` — a GPU callback is still in flight.
+        * ``sid in _waiting_for_store_final`` — retrieve completed but
+          ``CB_STORE_FINAL_SUBMITTED`` has not yet arrived (inference window).
+
+        Always overwrites any previously saved deferred timestamp so the
+        ``CB_REQUEST_END`` from ``cb_store_final`` (the correct logical end)
+        supersedes an earlier one from a concurrent lookup miss.
 
         Args:
             event: ``CB_REQUEST_END`` event carrying the logical end timestamp.
@@ -180,7 +222,10 @@ class BlendTracingSubscriber(EventSubscriber):
         if not _HAS_OTEL:
             return
         sid = event.session_id
-        if self._pending_gpu_ops.get(sid, 0) == 0:
+        if (
+            self._pending_gpu_ops.get(sid, 0) == 0
+            and sid not in self._waiting_for_store_final
+        ):
             self._close_request_span(sid, event.timestamp)
         else:
             self._deferred_session_end_ts[sid] = event.timestamp
@@ -220,7 +265,9 @@ class BlendTracingSubscriber(EventSubscriber):
 
         For GPU-backed END events (store_pre_computed, retrieve, store_final),
         decrements the in-flight counter; if it reaches zero and a deferred
-        session-end timestamp exists, closes the root span.
+        session-end timestamp exists, closes the root span using the GPU
+        callback timestamp so that ``cb.request`` end_time reflects when
+        inference and the GPU copy actually completed.
 
         Args:
             event: One of the CB ``*_END`` event types.
@@ -254,9 +301,13 @@ class BlendTracingSubscriber(EventSubscriber):
             if (
                 sid in self._deferred_session_end_ts
                 and self._pending_gpu_ops.get(sid, 0) == 0
+                and sid not in self._waiting_for_store_final
             ):
-                deferred_ts = self._deferred_session_end_ts.pop(sid)
-                self._close_request_span(sid, deferred_ts)
+                self._deferred_session_end_ts.pop(sid)
+                # Use the GPU callback timestamp so cb.request end_time reflects
+                # when inference + the GPU copy actually finished, not when
+                # cb_store_final was submitted on the CPU.
+                self._close_request_span(sid, event.timestamp)
 
     def _on_point(self, event: Event) -> None:
         """Emit an instant span for point events (no paired END).
@@ -299,3 +350,4 @@ class BlendTracingSubscriber(EventSubscriber):
                 pass
         self._pending_gpu_ops.pop(session_id, None)
         self._deferred_session_end_ts.pop(session_id, None)
+        self._waiting_for_store_final.discard(session_id)

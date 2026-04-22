@@ -542,6 +542,7 @@ class BlendEngineV2(MPCacheEngine):
         gpu_context: PlainGPUCacheContext,
         offset: int,
         event_ipc_handle: bytes,
+        start_event: Event | None = None,
     ) -> tuple[torch.cuda.Event, dict]:
         """
         Helper function to perform GPU-to-CPU copy operations for storing chunks.
@@ -552,6 +553,8 @@ class BlendEngineV2(MPCacheEngine):
             offset: The starting offset in the CB KV cache buffer.
             event_ipc_handle: The IPC handle for the CUDA event that signals the
                 completion of LLM inference.
+            start_event: Optional event to publish on the stream after waiting for
+                the vLLM GPU event, marking the true start of the store operation.
 
         Returns:
             A tuple of (event, reserved_dict) where event is the CUDA event and
@@ -568,6 +571,9 @@ class BlendEngineV2(MPCacheEngine):
                 gpu_context.device, event_ipc_handle
             )
             vllm_event.wait(stream=gpu_context.stream)
+
+            if start_event is not None:
+                self._event_bus.publish_on_stream(gpu_context.cupy_stream, start_event)
 
             # Prepare for the copy
             num_tokens = self.chunk_size
@@ -929,15 +935,6 @@ class BlendEngineV2(MPCacheEngine):
             )
         )
 
-        self._event_bus.publish_on_stream(
-            gpu_context.cupy_stream,
-            Event(
-                event_type=EventType.CB_STORE_FINAL_START,
-                session_id=key.request_id,
-                metadata={"instance_id": instance_id, "num_tokens": num_tokens},
-            ),
-        )
-
         # Compute normal hash for the keys
         chunk_hashes = self.token_hasher.compute_chunk_hashes(list(key.token_ids))
 
@@ -947,7 +944,15 @@ class BlendEngineV2(MPCacheEngine):
         reserved_dict: dict = {}
         try:
             event, reserved_dict = self._cb_store_gpu_copy(
-                obj_keys, gpu_context, offset, event_ipc_handle
+                obj_keys,
+                gpu_context,
+                offset,
+                event_ipc_handle,
+                start_event=Event(
+                    event_type=EventType.CB_STORE_FINAL_START,
+                    session_id=key.request_id,
+                    metadata={"instance_id": instance_id, "num_tokens": num_tokens},
+                ),
             )
             logger.info(
                 "Stored final doc with %d tokens, num stored chunks: %d",
