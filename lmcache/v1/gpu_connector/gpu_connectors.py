@@ -1521,7 +1521,7 @@ class SGLangGPUConnector(GPUConnectorInterface):
 
         offset = kwargs.get("offset", 0)
 
-        kvcaches: List[torch.Tensor] = kwargs["kvcaches"]
+        kvcaches: DiscoverableKVCache = kwargs["kvcaches"]
         slot_mapping: torch.Tensor = kwargs["slot_mapping"]
 
         kv_cache_pointers = self._initialize_pointers(kvcaches)
@@ -1529,7 +1529,7 @@ class SGLangGPUConnector(GPUConnectorInterface):
             memory_obj.tensor,
             kv_cache_pointers,
             slot_mapping[start - offset : end - offset],
-            kvcaches[0][0].device,
+            get_device(kvcaches),
             self.page_buffer_size,
             lmc_ops.TransferDirection.H2D,
             self.gpu_kv_format,
@@ -1562,7 +1562,7 @@ class SGLangGPUConnector(GPUConnectorInterface):
         if "slot_mapping" not in kwargs:
             raise ValueError("'slot_mapping' should be provided in kwargs.")
 
-        kvcaches: List[torch.Tensor] = kwargs["kvcaches"]
+        kvcaches: DiscoverableKVCache = kwargs["kvcaches"]
         slot_mapping: torch.Tensor = kwargs["slot_mapping"]
 
         kv_cache_pointers = self._initialize_pointers(kvcaches)
@@ -1572,20 +1572,20 @@ class SGLangGPUConnector(GPUConnectorInterface):
                 memory_obj.tensor,
                 kv_cache_pointers,
                 slot_mapping[start:end],
-                kvcaches[0][0].device,
+                get_device(kvcaches),
                 self.page_buffer_size,
                 lmc_ops.TransferDirection.D2H,
                 self.gpu_kv_format,
             )
         else:
             # kvcaches -> gpu_buffer -> memobj
-            assert self.gpu_buffer.device == kvcaches[0][0].device
+            assert self.gpu_buffer.device == get_device(kvcaches)
             tmp_gpu_buffer = self.gpu_buffer[:, :, : end - start, :]
             lmc_ops.multi_layer_kv_transfer_unilateral(
                 tmp_gpu_buffer,
                 kv_cache_pointers,
                 slot_mapping[start:end],
-                kvcaches[0][0].device,
+                get_device(kvcaches),
                 self.page_buffer_size,
                 lmc_ops.TransferDirection.D2H,
                 self.gpu_kv_format,
