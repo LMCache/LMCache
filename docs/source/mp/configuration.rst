@@ -397,6 +397,6 @@ Full Example
         --l2-prefetch-max-in-flight 8 \
         --l2-adapter '{"type": "nixl_store", "backend": "POSIX", "backend_params": {"file_path": "/data/lmcache/l2", "use_direct_io": "false"}, "pool_size": 64}' \
         --prometheus-port 9090 \
-        --prometheus-log-interval 10 \
-        --enable-telemetry \
-        --telemetry-processor '{"type": "logging", "log_level": "DEBUG"}'
+        --metrics-sample-rate 0.01 \
+        --enable-tracing \
+        --otlp-endpoint http://localhost:4317

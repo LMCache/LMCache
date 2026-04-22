@@ -4,9 +4,6 @@
 from typing import Any
 import importlib
 
-# Third Party
-import torch
-
 # First Party
 from lmcache.logging import init_logger
 
@@ -28,6 +25,8 @@ def _get_backend() -> Any:
     Try backends in order, first successful import wins.
     """
     module = importlib.import_module("lmcache.non_cuda_equivalents")
+    # Third Party
+    import torch
 
     backend_candidates = [
         (
@@ -77,9 +76,12 @@ def _get_backend() -> Any:
 # --------------------------
 # Backend instance
 # --------------------------
-_ops = _get_backend()
-# override lmcache.c_ops with merged module,
-# in which:
-#     non_cuda_equivalents as base,
-#     use backend implementation if exists
-c_ops = _ops
+try:
+    _ops = _get_backend()
+    # override lmcache.c_ops with merged module,
+    # in which:
+    #     non_cuda_equivalents as base,
+    #     use backend implementation if exists
+    c_ops = _ops
+except (ImportError, ModuleNotFoundError):
+    logger.debug("No compute backend loaded; CLI-only mode (torch/numba not installed)")
