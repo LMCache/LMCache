@@ -1,6 +1,11 @@
 # The LMCache ROCm Dockerfile builds an LMCache image integrated with
 # vLLM-ROCm for AMD Instinct GPUs (MI300X/MI325X, MI350X/MI355X).
 #
+# Please update any changes made here to:
+# docs/source/developer_guide/docker_file.rst
+# docs/source/getting_started/installation.rst
+# docs/production/docker_deployment.rst
+#
 # Key differences from the CUDA Dockerfile:
 # - Uses ROCm base image instead of CUDA
 # - Builds HIP extensions (BUILD_WITH_HIP=1, CXX=hipcc)

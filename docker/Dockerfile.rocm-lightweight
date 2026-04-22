@@ -2,10 +2,12 @@
 # No NIXL, no Prefill-Decode Disaggregation.
 # For AMD Instinct GPUs (MI300X/MI325X, MI350X/MI355X).
 #
-# Note: lmcache is installed from source with HIP extensions.
-# --no-build-isolation ensures we build against the ROCm torch
-# already installed in the vllm-openai-rocm base image.
+# Note: lmcache is built from source with HIP extensions using
+# --no-build-isolation to link against the ROCm torch in the base image.
 FROM vllm/vllm-openai-rocm:latest
+
+# Install build dependencies required for source build with --no-build-isolation
+RUN uv pip install --system --no-cache ninja "setuptools>=77" setuptools_scm wheel packaging
 
 RUN BUILD_WITH_HIP=1 CXX=hipcc \
     uv pip install --system --no-cache --no-build-isolation --no-binary lmcache lmcache
