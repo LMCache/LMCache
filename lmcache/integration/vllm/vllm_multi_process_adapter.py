@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Standard
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Optional
 import os
 import threading
 
@@ -210,13 +210,20 @@ LookupResult = int
 
 
 class LMCacheMPSchedulerAdapter:
+    # Signature kept backward-compatible with the vllm-bundled caller
+    # at vllm/distributed/kv_transfer/kv_connector/v1/lmcache_mp_connector.py,
+    # which still passes (world_size, kv_rank, vllm_block_size) positionally
+    # and `mq_timeout` as a kwarg. Pass `parallel_strategy` for the new form.
     def __init__(
         self,
         server_url: str,
         context: zmq.Context,
         model_name: str,
-        vllm_block_size: int,
-        parallel_strategy: ParallelStrategy,
+        world_size: int = 1,
+        kv_rank: int = 0,
+        vllm_block_size: int = 16,
+        tp_size: int = 1,
+        parallel_strategy: Optional[ParallelStrategy] = None,
         mq_timeout: float = DEFAULT_MQ_TIMEOUT,
         heartbeat_interval: float = DEFAULT_HEARTBEAT_INTERVAL,
     ):
@@ -228,10 +235,21 @@ class LMCacheMPSchedulerAdapter:
             vllm_block_size: The block size used in vLLM
             parallel_strategy:
                 The parallel strategy, which includes `use_mla`,
-                `kv_world_size`, `kv_worker_id` and so on
+                `kv_world_size`, `kv_worker_id` and so on. If None,
+                synthesised from world_size/kv_rank/tp_size.
             mq_timeout: Timeout in seconds for message queue requests.
             heartbeat_interval: Interval in seconds between heartbeat pings.
         """
+        if parallel_strategy is None:
+            parallel_strategy = ParallelStrategy(
+                use_mla=False,
+                kv_world_size=world_size,
+                kv_worker_id=kv_rank,
+                actual_world_size=world_size,
+                actual_worker_id=kv_rank,
+                tp_size=tp_size,
+                pp_size=1,
+            )
         self.mq_client = MessageQueueClient(server_url, context)
         self._mq_timeout = mq_timeout
 
@@ -552,16 +570,31 @@ class LMCacheMPSchedulerAdapter:
 
 
 class LMCacheMPWorkerAdapter:
+    # Signature kept backward-compatible with the vllm-bundled caller; see
+    # LMCacheMPSchedulerAdapter above for details.
     def __init__(
         self,
         server_url: str,
         context: zmq.Context,
         model_name: str,
-        vllm_block_size: int,
-        parallel_strategy: ParallelStrategy,
+        world_size: int = 1,
+        kv_rank: int = 0,
+        vllm_block_size: int = 16,
+        tp_size: int = 1,
+        parallel_strategy: Optional[ParallelStrategy] = None,
         mq_timeout: float = DEFAULT_MQ_TIMEOUT,
         heartbeat_interval: float = DEFAULT_HEARTBEAT_INTERVAL,
     ):
+        if parallel_strategy is None:
+            parallel_strategy = ParallelStrategy(
+                use_mla=False,
+                kv_world_size=world_size,
+                kv_worker_id=kv_rank,
+                actual_world_size=world_size,
+                actual_worker_id=kv_rank,
+                tp_size=tp_size,
+                pp_size=1,
+            )
         self.mq_client = MessageQueueClient(server_url, context)
         self._mq_timeout = mq_timeout
 
