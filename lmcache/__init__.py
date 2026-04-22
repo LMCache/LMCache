@@ -3,6 +3,7 @@
 # Standard
 from typing import Any
 import importlib
+import types
 
 # First Party
 from lmcache.logging import init_logger
@@ -24,7 +25,7 @@ def _get_backend() -> Any:
     """
     Try backends in order, first successful import wins.
     """
-    module = importlib.import_module("lmcache.non_cuda_equivalents")
+    default_module = importlib.import_module("lmcache.non_cuda_equivalents")
     # Third Party
     import torch
 
@@ -61,16 +62,15 @@ def _get_backend() -> Any:
         # 2 Run availability check for the backend
         try:
             backend_module = importlib.import_module(module_name)
-            for name in dir(backend_module):
-                # If backend implements kernels, use them but not
-                # the one in non_cuda_equivalents
-                setattr(module, name, getattr(backend_module, name))
+            merged_module = types.ModuleType("lmcache.c_ops")
+            merged_module.__dict__.update(default_module.__dict__)
+            merged_module.__dict__.update(backend_module.__dict__)
             logger.info("Using backend: %s", module_name)
-            break
+            return merged_module
         except Exception as e:
             logger.warning("Failed to import backend %s: %s", module_name, e)
 
-    return module
+    return default_module
 
 
 # --------------------------
