@@ -20,8 +20,6 @@ from lmcache.v1.system_detection import NUMADetector
 
 logger = init_logger(__name__)
 
-METADATA_BYTES_LEN = 28
-
 # TODO(baoloongmao): Remove these in the future
 # Legacy positional-arg key order for old mooncake setup API
 _LEGACY_SETUP_KEYS = [
