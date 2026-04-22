@@ -301,12 +301,18 @@ class StoreController(StorageControllerInterface):
             if any(signaled.values()):
                 try:
                     self._drain_l2_store_completions(signaled[StorePhase.L2_STORE])
-                    for task_key, task in list(self._in_flight_tasks.items()):
-                        self._advance_request(task_key, task, signaled)
                 except Exception:
-                    logger.exception(
-                        "Unexpected error advancing in-flight store tasks"
-                    )
+                    logger.exception("Unexpected error draining L2 store completions")
+                for task_key, task in list(self._in_flight_tasks.items()):
+                    try:
+                        self._advance_request(task_key, task)
+                    except Exception:
+                        logger.exception(
+                            "Unexpected error advancing in-flight store task "
+                            "(adapter %d, task %d)",
+                            task_key[0],
+                            task_key[1],
+                        )
 
     def _process_new_keys(self, keys: list[ObjectKey]) -> None:
         """
@@ -410,13 +416,10 @@ class StoreController(StorageControllerInterface):
         self,
         task_key: tuple[int, L2TaskId],
         task: InFlightStoreTask,
-        signaled: dict[StorePhase, set[int]],
     ) -> None:
-        """State-transition dispatcher. With only one phase today, delegate
-        to ``_finalize_store`` when the owning adapter's L2 store efd has
-        signaled and the outcome has been recorded."""
-        if task.adapter_index not in signaled[StorePhase.L2_STORE]:
-            return
+        """State-transition dispatcher. Delegate to ``_finalize_store``
+        once the L2 outcome has been recorded by
+        ``_drain_l2_store_completions``."""
         if task.l2_store_result is None:
             return
         self._finalize_store(task_key, task)

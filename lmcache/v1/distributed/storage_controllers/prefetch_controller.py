@@ -435,13 +435,15 @@ class PrefetchController(StorageControllerInterface):
                     )
 
             if any(signaled.values()):
-                try:
-                    for request in list(self._in_flight_requests.values()):
+                for request in list(self._in_flight_requests.values()):
+                    try:
                         self._advance_request(request, signaled)
-                except Exception:
-                    logger.exception(
-                        "Unexpected error advancing in-flight prefetch requests"
-                    )
+                    except Exception:
+                        logger.exception(
+                            "Unexpected error advancing in-flight prefetch "
+                            "request %d",
+                            request.request_id,
+                        )
 
             try:
                 self._start_pending_requests()

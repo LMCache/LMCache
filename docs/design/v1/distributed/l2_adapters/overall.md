@@ -171,8 +171,8 @@ _drain_l2_store_completions(signaled_adapters)
   │  on each InFlightStoreTask.l2_store_result
   │
   ▼
-_advance_request(task_key, task, signaled)  [state transition]
-  │  skip if adapter not signaled or l2_store_result still None
+_advance_request(task_key, task)  [state transition]
+  │  skip if l2_store_result still None
   │
   ▼
 _finalize_store(task_key, task)  [terminal execution]
