@@ -3,6 +3,7 @@ name: Build nightly container image of latest code
 on:
   schedule:
     - cron: '30 7 * * *'
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -41,6 +42,9 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Remove non-release tags
+        run: git tag -l | grep -v '^v' | xargs -r git tag -d
+
       - name: Free disk space
         uses: ./.github/actions/free-disk-space
 
@@ -61,15 +65,9 @@ jobs:
           python -m pip install --upgrade pip
           pip install cibuildwheel
 
-      - name: Compute nightly version string
-        run: |
-          BASE=$(git describe --tags --abbrev=0 2>/dev/null | sed 's/^v//' || echo "0.0.0")
-          NOW=$(date +'%Y%m%d')
-          echo "NIGHTLY_VERSION=${BASE}.dev${NOW}" >> "$GITHUB_ENV"
-
       - name: Build cu12.9 nightly wheel
         env:
-          CIBW_ENVIRONMENT: 'TORCH_CUDA_ARCH_LIST="7.0;7.5;8.0;8.6;8.9;9.0;10.0;12.0" ENABLE_CXX11_ABI=1 SETUPTOOLS_SCM_PRETEND_VERSION=${{ env.NIGHTLY_VERSION }}'
+          CIBW_ENVIRONMENT: 'TORCH_CUDA_ARCH_LIST="7.0;7.5;8.0;8.6;8.9;9.0;10.0;12.0" ENABLE_CXX11_ABI=1'
           CIBW_TEST_COMMAND: "python -c 'import lmcache.c_ops'"
         run: |
           python -m cibuildwheel --output-dir dist/cu129
@@ -78,8 +76,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
-          gh release delete nightly --yes --repo ${{ github.repository }} 2>/dev/null || true
-          git push origin :refs/tags/nightly 2>/dev/null || true
+          gh release delete nightly --yes --cleanup-tag --repo ${{ github.repository }} 2>/dev/null || true
           gh release create nightly \
             --repo ${{ github.repository }} \
             --title "Nightly $(date +'%Y-%m-%d') · CUDA 12.9" \
@@ -97,7 +94,7 @@ jobs:
       - name: Build cu13.0 nightly wheel
         env:
           CIBW_MANYLINUX_X86_64_IMAGE: docker.io/pytorch/manylinux2_28-builder:cuda13.0
-          CIBW_ENVIRONMENT: 'TORCH_CUDA_ARCH_LIST="8.0;8.6;8.9;9.0;10.0;12.0" ENABLE_CXX11_ABI=1 SETUPTOOLS_SCM_PRETEND_VERSION=${{ env.NIGHTLY_VERSION }} PIP_EXTRA_INDEX_URL=https://download.pytorch.org/whl/cu130'
+          CIBW_ENVIRONMENT: 'TORCH_CUDA_ARCH_LIST="8.0;8.6;8.9;9.0;10.0;12.0" ENABLE_CXX11_ABI=1 PIP_EXTRA_INDEX_URL=https://download.pytorch.org/whl/cu130'
           CIBW_REPAIR_WHEEL_COMMAND_LINUX: >-
             auditwheel repair
             --plat manylinux_2_28_x86_64
@@ -117,8 +114,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
-          gh release delete nightly-cu13 --yes --repo ${{ github.repository }} 2>/dev/null || true
-          git push origin :refs/tags/nightly-cu13 2>/dev/null || true
+          gh release delete nightly-cu13 --yes --cleanup-tag --repo ${{ github.repository }} 2>/dev/null || true
           gh release create nightly-cu13 \
             --repo ${{ github.repository }} \
             --title "Nightly $(date +'%Y-%m-%d') · CUDA 13.0" \
