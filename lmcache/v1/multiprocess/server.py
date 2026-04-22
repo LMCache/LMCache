@@ -793,6 +793,62 @@ class MPCacheEngine:
 
         return found_count
 
+    @_lmcache_nvtx_annotate
+    def sync_lookup(
+        self,
+        key: IPCCacheEngineKey,
+        tp_size: int,
+    ) -> int:
+        """Synchronous prefix lookup — returns hit count directly.
+
+        Internally calls :meth:`lookup` to submit a prefetch request
+        to the background prefetch loop, then polls
+        :meth:`query_prefetch_lookup_hits` until the lookup phase
+        (L1 prefix scan + L2 existence check) completes.
+
+        The prefetch job is left registered under ``key.request_id``
+        so that RETRIEVE workers can wait for the L2→L1 data transfer
+        to complete via :meth:`query_prefetch_status`.  When there are
+        zero hits, no RETRIEVE will follow, so the job is drained here
+        (otherwise it leaks until ``end_session``).
+
+        Args:
+            key: Cache key with request_id embedded.
+            tp_size: Tensor-parallel size for MLA multi-reader locking.
+
+        Returns:
+            Number of matched chunks (prefix hit count).
+        """
+        # NOTE: lookup() already publishes MP_LOOKUP_PREFETCH_START,
+        # so we do not emit it here to avoid duplicate events.
+
+        # Step 1: submit to the existing background prefetch loop.
+        self.lookup(key, tp_size)
+
+        # Step 2: poll until the lookup phase finishes.
+        while True:
+            found_count = self.query_prefetch_lookup_hits(key.request_id)
+            if found_count is not None:
+                break
+            time.sleep(0.005)  # 5 ms
+
+        # Step 3: on zero hits, eagerly drain the job.  No RETRIEVE will
+        # follow, so query_prefetch_status won't run to pop it.
+        if found_count == 0:
+            with self._prefetch_job_lock:
+                job = self._prefetch_jobs.pop(key.request_id, None)
+            if job is not None and job.handle.prefetch_request_id != -1:
+                self.storage_manager.query_prefetch_status(job.handle)
+
+        logger.info(
+            "SYNC_LOOKUP[%s]: found_count=%d, world_size=%d",
+            key.request_id,
+            found_count,
+            key.world_size,
+        )
+
+        return found_count
+
     def free_lookup_locks(
         self,
         key: IPCCacheEngineKey,
@@ -848,7 +904,7 @@ class MPCacheEngine:
         return self.chunk_size
 
     def end_session(self, request_id: str) -> None:
-        """Remove the session for a finished request.
+        """Remove the session and all associated prefetch state.
 
         Args:
             request_id: The request ID whose session should be removed.
@@ -882,6 +938,17 @@ class MPCacheEngine:
         #  and will be deleted after finish_read_prefetched, when we touch all keys,
         #  these keys has been deleted and will not be touched.
         self.storage_manager.touch_l1_keys(obj_keys)
+
+        # SYNC_LOOKUP path: the prefetch job is popped either by a
+        # follow-up query_prefetch_status poll (normal path) or by
+        # sync_lookup itself on zero hits.  As a safety net for the
+        # "client called SYNC_LOOKUP but never issued RETRIEVE" case
+        # (e.g. worker crash, early cancellation), drain any lingering
+        # job here so the prefetch controller result does not leak.
+        with self._prefetch_job_lock:
+            job = self._prefetch_jobs.pop(request_id, None)
+        if job is not None and job.handle.prefetch_request_id != -1:
+            self.storage_manager.query_prefetch_status(job.handle)
 
     def report_status(self) -> dict:
         """Return a status dict for the entire cache engine."""
@@ -1046,6 +1113,7 @@ def run_cache_server(
     )
     add_handler_helper(server, RequestType.STORE, engine.store)
     add_handler_helper(server, RequestType.LOOKUP, engine.lookup)
+    add_handler_helper(server, RequestType.SYNC_LOOKUP, engine.sync_lookup)
     add_handler_helper(
         server, RequestType.QUERY_PREFETCH_STATUS, engine.query_prefetch_status
     )
@@ -1075,6 +1143,7 @@ def run_cache_server(
     server.add_normal_thread_pool(
         [
             RequestType.LOOKUP,
+            RequestType.SYNC_LOOKUP,
             RequestType.QUERY_PREFETCH_STATUS,
             RequestType.QUERY_PREFETCH_LOOKUP_HITS,
             RequestType.FREE_LOOKUP_LOCKS,

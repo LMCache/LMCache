@@ -26,12 +26,14 @@ from vllm.v1.utils import ConstantList
 try:
     from lmcache.integration.vllm.vllm_multi_process_adapter import (
         LMCacheMPSchedulerAdapter,
+        LMCacheMPSyncLookUpSchedulerAdapter,
         LMCacheMPWorkerAdapter,
         LoadStoreOp,
     )
 except ImportError:
     from vllm.distributed.kv_transfer.kv_connector.v1.lmcache_integration import (
         LMCacheMPSchedulerAdapter,
+        LMCacheMPSyncLookUpSchedulerAdapter,
         LMCacheMPWorkerAdapter,
         LoadStoreOp,
     )
@@ -106,6 +108,7 @@ def create_scheduler_adapter(
     vllm_config: VllmConfig,
     mq_timeout: float,
     heartbeat_interval: float,
+    sync_mode: bool = False,
 ) -> LMCacheMPSchedulerAdapter:
     world_size, kv_rank = extract_world_size_and_kv_rank(
         vllm_config.parallel_config.world_size,
@@ -120,7 +123,12 @@ def create_scheduler_adapter(
     if _adapter_accepts_tp_size():
         kwargs["tp_size"] = tp_size
 
-    return LMCacheMPSchedulerAdapter(
+    adapter_cls = (
+        LMCacheMPSyncLookUpSchedulerAdapter
+        if sync_mode
+        else LMCacheMPSchedulerAdapter
+    )
+    return adapter_cls(
         server_url,
         zmq_context,
         vllm_config.model_config.model,
@@ -139,6 +147,7 @@ def create_worker_adapter(
     vllm_config: VllmConfig,
     mq_timeout: float,
     heartbeat_interval: float,
+    sync_mode: bool = False,
 ) -> LMCacheMPWorkerAdapter:
     world_size, kv_rank = extract_world_size_and_kv_rank(
         vllm_config.parallel_config.world_size,
@@ -154,6 +163,7 @@ def create_worker_adapter(
         vllm_config.cache_config.block_size,
         mq_timeout=mq_timeout,
         heartbeat_interval=heartbeat_interval,
+        sync_mode=sync_mode,
     )
 
 
@@ -477,6 +487,12 @@ class LMCacheMPConnector(KVConnectorBase_V1):
             )
         )
 
+        self.sync_mode: bool = (
+            vllm_config.kv_transfer_config.get_from_extra_config(
+                "lmcache.mp.sync_mode", False
+            )
+        )
+
         server_url = f"{server_host}:{server_port}"
         zmq_context = zmq.Context.instance()
         if self.role == KVConnectorRole.SCHEDULER:
@@ -486,6 +502,7 @@ class LMCacheMPConnector(KVConnectorBase_V1):
                 vllm_config,
                 mq_timeout,
                 heartbeat_interval,
+                sync_mode=self.sync_mode,
             )
             self.request_trackers: dict[str, LMCacheMPRequestTracker] = {}
         elif self.role == KVConnectorRole.WORKER:
@@ -495,6 +512,7 @@ class LMCacheMPConnector(KVConnectorBase_V1):
                 vllm_config,
                 mq_timeout,
                 heartbeat_interval,
+                sync_mode=self.sync_mode,
             )
         else:
             raise ValueError(f"Unknown KVConnectorRole: {self.role}")
@@ -729,17 +747,28 @@ class LMCacheMPConnector(KVConnectorBase_V1):
         if request.status == RequestStatus.PREEMPTED:
             return 0, False
 
-        self.scheduler_adapter.maybe_submit_lookup_request(
-            request.request_id,
-            token_ids=list(request.all_token_ids),
-        )
+        if self.sync_mode:
+            assert isinstance(
+                self.scheduler_adapter, LMCacheMPSyncLookUpSchedulerAdapter
+            )
+            ret = self.scheduler_adapter.sync_lookup(
+                request.request_id,
+                token_ids=list(request.all_token_ids),
+            )
+            if ret == 0:
+                return 0, False
+        else:
+            self.scheduler_adapter.maybe_submit_lookup_request(
+                request.request_id,
+                token_ids=list(request.all_token_ids),
+            )
 
-        ret = self.scheduler_adapter.check_lookup_result(request.request_id)
-        if ret is None:
-            return None, True
+            ret = self.scheduler_adapter.check_lookup_result(request.request_id)
+            if ret is None:
+                return None, True
 
-        if ret == 0:
-            return 0, False
+            if ret == 0:
+                return 0, False
 
         assert (
             ret % (self.scheduler_adapter.num_blocks_per_chunk() * self.vllm_block_size)
@@ -759,7 +788,7 @@ class LMCacheMPConnector(KVConnectorBase_V1):
         logger.debug(
             "vLLM hit is: %d, Need to load is %d", num_computed_tokens, need_to_load
         )
-        return need_to_load, need_to_load > 0
+        return need_to_load, False if self.sync_mode else need_to_load > 0
 
     def update_state_after_alloc(
         self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int

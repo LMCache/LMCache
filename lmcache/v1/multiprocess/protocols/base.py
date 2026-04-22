@@ -44,6 +44,7 @@ class RequestType(enum.Enum):
     STORE = enum.auto()
     RETRIEVE = enum.auto()
     LOOKUP = enum.auto()
+    SYNC_LOOKUP = enum.auto()
     QUERY_PREFETCH_STATUS = enum.auto()
     QUERY_PREFETCH_LOOKUP_HITS = enum.auto()
     FREE_LOOKUP_LOCKS = enum.auto()

@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Any
 import os
 import threading
+import time
 
 # Third Party
 import torch
@@ -551,6 +552,73 @@ class LMCacheMPSchedulerAdapter:
         )
 
 
+class LMCacheMPSyncLookUpSchedulerAdapter(LMCacheMPSchedulerAdapter):
+    """LMCacheMPSchedulerAdapter subclass that uses the synchronous
+    SYNC_LOOKUP protocol instead of the two-phase LOOKUP + polling path.
+
+    ``sync_lookup`` performs the entire lookup in a single blocking
+    round-trip and returns the matched token count directly.
+    """
+
+    @_lmcache_nvtx_annotate
+    def sync_lookup(
+        self,
+        request_id: str,
+        token_ids: list[int],
+    ) -> int:
+        """Synchronous prefix lookup — single blocking round-trip.
+
+        Sends a SYNC_LOOKUP request to the server that performs the L1
+        prefix scan and L2 existence check atomically.  Returns the
+        number of matched **tokens** (not chunks).
+
+        Args:
+            request_id: The request ID.
+            token_ids: Full token sequence for the request.
+
+        Returns:
+            Number of matched tokens (always a multiple of
+            ``chunk_size``), or 0 on error / unhealthy server.
+        """
+        self._ensure_heartbeat_started()
+
+        if not self.is_healthy:
+            return 0
+
+        aligned_end = (len(token_ids) // self.chunk_size) * self.chunk_size
+
+        key = self._create_key(
+            token_ids,
+            start=0,
+            end=aligned_end,
+            request_id=request_id,
+        ).no_worker_id_version()
+
+        future = send_lmcache_request(
+            self.mq_client,
+            RequestType.SYNC_LOOKUP,
+            [key, self.tp_size],
+        )
+        try:
+            hit_chunks = future.result(timeout=self._mq_timeout)
+        except TimeoutError:
+            logger.warning(
+                "SYNC_LOOKUP request timed out after %ss. Marking server as unhealthy.",
+                self._mq_timeout,
+            )
+            self._health_event.clear()
+            return 0
+
+        hit_tokens = hit_chunks * self.chunk_size
+        logger.debug(
+            "SYNC_LOOKUP: request_id=%s hit %d chunks (%d tokens)",
+            request_id,
+            hit_chunks,
+            hit_tokens,
+        )
+        return hit_tokens
+
+
 class LMCacheMPWorkerAdapter:
     def __init__(
         self,
@@ -561,9 +629,16 @@ class LMCacheMPWorkerAdapter:
         parallel_strategy: ParallelStrategy,
         mq_timeout: float = DEFAULT_MQ_TIMEOUT,
         heartbeat_interval: float = DEFAULT_HEARTBEAT_INTERVAL,
+        sync_mode: bool = False,
     ):
         self.mq_client = MessageQueueClient(server_url, context)
         self._mq_timeout = mq_timeout
+        # When True, submit_retrieve_request polls QUERY_PREFETCH_STATUS
+        # until the server-side L2→L1 prefetch is complete, and
+        # batched_submit_retrieve_requests blocks until all retrieves
+        # finish.  Activated by the connector when
+        # lmcache.mp.sync_mode=true in kv_connector_extra_config.
+        self.sync_mode = sync_mode
 
         # Instance id for GPU worker
         self.instance_id = os.getpid()
@@ -780,6 +855,23 @@ class LMCacheMPWorkerAdapter:
             self.error_block_ids.update(op.block_ids)
             return
 
+        # In sync mode, SYNC_LOOKUP has already confirmed the prefetch
+        # hits but the L2→L1 data transfer may still be in flight.  Poll
+        # QUERY_PREFETCH_STATUS until the server reports the prefetch
+        # complete before sending RETRIEVE.  A non-None response
+        # (including 0 — meaning another TP worker has already consumed
+        # the job entry) signals "ready"; we can dispatch.
+        if self.sync_mode:
+            while True:
+                result = send_lmcache_request(
+                    self.mq_client,
+                    RequestType.QUERY_PREFETCH_STATUS,
+                    [request_id],
+                ).result(timeout=self._mq_timeout)
+                if result is not None:
+                    break
+                time.sleep(0.005)
+
         assert op.token_ids is not None
         key = self._create_key(
             op.token_ids,
@@ -852,6 +944,14 @@ class LMCacheMPWorkerAdapter:
             cache_salts = [""] * len(request_ids)
         for request_id, op, salt in zip(request_ids, ops, cache_salts, strict=False):
             self.submit_retrieve_request(request_id, op, event, cache_salt=salt)
+
+        # In sync mode, block until all retrieves complete so that KV is
+        # ready in L1 before vLLM proceeds to the forward pass. This
+        # mirrors the native (non-MP) connector's synchronous flow.
+        if self.sync_mode:
+            for request_id, (r_future, _) in self.retrieve_futures.items():
+                r_future.result()
+            self.retrieve_futures.clear()
 
     def _process_finished_stores(
         self,

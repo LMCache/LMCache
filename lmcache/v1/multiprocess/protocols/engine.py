@@ -27,6 +27,7 @@ REQUEST_NAMES = [
     "STORE",
     "RETRIEVE",
     "LOOKUP",
+    "SYNC_LOOKUP",
     "QUERY_PREFETCH_STATUS",
     "QUERY_PREFETCH_LOOKUP_HITS",
     "FREE_LOOKUP_LOCKS",
@@ -111,6 +112,17 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
         "QUERY_PREFETCH_STATUS": ProtocolDefinition(
             payload_classes=[str],
             response_class=int | None,
+            handler_type=HandlerType.BLOCKING,
+        ),
+        # Synchronous lookup (L1 + L2 existence check in a single blocking call)
+        # Payload:
+        #   - key: KeyType - Cache key to look up
+        #   - tp_size: int - Tensor-parallel size for
+        #       MLA multi-reader locking
+        # Returns: int - Number of matched chunks (prefix hit count)
+        "SYNC_LOOKUP": ProtocolDefinition(
+            payload_classes=[KeyType, int],
+            response_class=int,
             handler_type=HandlerType.BLOCKING,
         ),
         # Query the lookup hit chunks before the prefetch is done
