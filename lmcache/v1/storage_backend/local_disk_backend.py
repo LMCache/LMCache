@@ -668,13 +668,25 @@ class LocalDiskBackend(StorageBackendInterface):
         """Shut down the backend and delete all tracked on-disk cache files.
 
         Ordering is important: ``disk_worker.close()`` must be called before
-        the file cleanup so that any in-flight async ``put`` tasks complete and
-        all entries are present in ``self.dict`` before we snapshot the keys.
+        the controller sender is closed or file cleanup begins so that any
+        in-flight async ``put`` tasks complete and all entries are present in
+        ``self.dict`` before we snapshot the keys.
 
         Note: this only handles graceful shutdown.  On a hard crash (SIGKILL,
         OOM) files will still be orphaned; cross-restart recovery requires a
         separate persistent index (see issue #1175 / PR #2734).
         """
+        # Drain all queued async disk I/O before closing the sender or
+        # snapshotting keys. This MUST complete first so that in-flight put
+        # tasks can still report admissions without racing on a cleared sender.
+        try:
+            self.disk_worker.close()
+        except Exception:
+            logger.warning(
+                "LocalDiskBackend.close(): error draining disk_worker",
+                exc_info=True,
+            )
+
         if self.batched_msg_sender is not None:
             try:
                 self.batched_msg_sender.close()
@@ -686,21 +698,13 @@ class LocalDiskBackend(StorageBackendInterface):
             finally:
                 self.batched_msg_sender = None
 
-        # Drain all queued async disk I/O before snapshotting keys.
-        # This MUST complete before we iterate self.dict so that any in-flight
-        # put tasks finish writing files and inserting entries.
-        try:
-            self.disk_worker.close()
-        except Exception:
-            logger.warning(
-                "LocalDiskBackend.close(): error draining disk_worker",
-                exc_info=True,
-            )
-
         deleted = 0
         with self.disk_lock:
             items = list(self.dict.items())
             self.dict.clear()
+            self.usage = 0
+            self.current_cache_size = 0.0
+            self.stats_monitor.update_local_storage_usage(0)
 
         for _, meta in items:
             try:

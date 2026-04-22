@@ -14,6 +14,7 @@ import torch
 from lmcache.utils import CacheEngineKey, DiskCacheMetadata
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.config_base import _parse_local_disk
+from lmcache.v1.memory_management import MemoryFormat
 from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 from lmcache.v1.storage_backend.local_disk_backend import LocalDiskBackend
@@ -391,13 +392,18 @@ class TestLocalDiskBackendClose:
         fake_stat = MagicMock()
         fake_stat.f_bsize = 4096
         fake_stat.f_bavail = 1000000
-        with patch("os.statvfs", return_value=fake_stat):
+        with patch(
+            "lmcache.v1.storage_backend.local_disk_backend.os.statvfs",
+            return_value=fake_stat,
+            create=True,
+        ):
             backend = LocalDiskBackend(
                 config=config,
                 loop=async_loop,
                 local_cpu_backend=local_cpu_backend,
                 dst_device="cuda:0",
             )
+        backend.disk_worker.close = MagicMock()
         return backend
 
     def test_close_deletes_tracked_files(
@@ -544,6 +550,36 @@ class TestLocalDiskBackendClose:
 
         local_cpu_backend.memory_allocator.close()
 
+    def test_close_keeps_sender_alive_until_disk_worker_drains(
+        self, temp_disk_path, async_loop, local_cpu_backend
+    ):
+        """In-flight put completion must not race on a cleared sender."""
+        backend = self._make_backend(temp_disk_path, async_loop, local_cpu_backend)
+
+        mock_sender = MagicMock()
+        backend.batched_msg_sender = mock_sender
+        late_key = create_test_key(301)
+
+        def recording_disk_worker_close():
+            backend.insert_key(
+                late_key,
+                128,
+                torch.Size([1]),
+                torch.float16,
+                MemoryFormat.UNDEFINED,
+            )
+
+        with patch.object(
+            backend.disk_worker, "close", side_effect=recording_disk_worker_close
+        ):
+            backend.close()
+
+        mock_sender.add_kv_op.assert_called_once()
+        mock_sender.close.assert_called_once()
+        assert backend.batched_msg_sender is None
+
+        local_cpu_backend.memory_allocator.close()
+
     def test_close_sender_raises_still_cleared(
         self, temp_disk_path, async_loop, local_cpu_backend
     ):
@@ -558,5 +594,29 @@ class TestLocalDiskBackendClose:
 
         mock_sender.close.assert_called_once()
         assert backend.batched_msg_sender is None
+
+        local_cpu_backend.memory_allocator.close()
+
+    def test_close_resets_usage_and_metrics_under_lock(
+        self, temp_disk_path, async_loop, local_cpu_backend
+    ):
+        """close() should leave cache bookkeeping in a consistent empty state."""
+        backend = self._make_backend(temp_disk_path, async_loop, local_cpu_backend)
+
+        fpath = os.path.join(temp_disk_path, "usage_reset.pt")
+        with open(fpath, "wb") as f:
+            f.write(b"\x00" * 64)
+
+        key = create_test_key(302)
+        backend.dict[key] = DiskCacheMetadata(path=fpath, size=64)
+        backend.usage = 64
+        backend.current_cache_size = 64
+        backend.stats_monitor = MagicMock()
+
+        backend.close()
+
+        assert backend.usage == 0
+        assert backend.current_cache_size == 0
+        backend.stats_monitor.update_local_storage_usage.assert_called_once_with(0)
 
         local_cpu_backend.memory_allocator.close()
