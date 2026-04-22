@@ -30,6 +30,9 @@ from lmcache.v1.multiprocess.config import (
     parse_args_to_http_frontend_config,
     parse_args_to_mp_server_config,
 )
+from lmcache.v1.multiprocess.mp_runtime_plugin_launcher import (
+    MPRuntimePluginLauncher,
+)
 
 logger = init_logger(__name__)
 
@@ -63,20 +66,45 @@ async def lifespan(app: FastAPI):
         # First Party
         from lmcache.v1.multiprocess.server import run_cache_server
 
-    zmq_server, engine = run_cache_server(
+    result = run_cache_server(
         mp_config=mp_config,
         storage_manager_config=_configs["storage_manager"],
         obs_config=_configs["observability"],
         return_engine=True,
     )
+    assert result is not None, "run_cache_server returned None with return_engine=True"
+    zmq_server, engine = result
+
+    # Launch runtime plugins if configured. Plugins receive the full
+    # server config (including HTTP host/port) via the
+    # LMCACHE_RUNTIME_PLUGIN_CONFIG environment variable.
+    plugin_launcher = None
+    if mp_config.runtime_plugin_config.locations:
+        extra_kwargs = {}
+        http_config = _configs.get("http")
+        if http_config is not None:
+            extra_kwargs["http_config"] = http_config
+        plugin_launcher = MPRuntimePluginLauncher(
+            runtime_plugin_config=mp_config.runtime_plugin_config,
+            mp_config=mp_config,
+            storage_manager_config=_configs["storage_manager"],
+            obs_config=_configs["observability"],
+            **extra_kwargs,
+        )
+        plugin_launcher.launch_plugins()
+
     app.state.zmq_server = zmq_server
     app.state.engine = engine
+    app.state.plugin_launcher = plugin_launcher
     logger.info("LMCache HTTP server initialized")
 
     yield
 
     # Shutdown
     logger.info("Shutting down LMCache HTTP server...")
+    launcher = getattr(app.state, "plugin_launcher", None)
+    if launcher is not None:
+        launcher.stop_plugins()
     get_event_bus().stop()
     if hasattr(app.state, "zmq_server") and app.state.zmq_server is not None:
         app.state.zmq_server.close()
@@ -163,6 +191,7 @@ def run_http_server(
     _configs["mp"] = mp_config
     _configs["storage_manager"] = storage_manager_config
     _configs["observability"] = obs_config
+    _configs["http"] = http_config
 
     config = uvicorn.Config(
         app=app,

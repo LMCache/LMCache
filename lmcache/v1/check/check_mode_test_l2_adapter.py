@@ -19,6 +19,7 @@ from lmcache.v1.check.utils import (
     print_performance_results,
 )
 from lmcache.v1.distributed.api import ObjectKey
+from lmcache.v1.distributed.internal_api import L1MemoryDesc
 from lmcache.v1.distributed.l2_adapters import create_l2_adapter
 from lmcache.v1.distributed.l2_adapters.config import (
     parse_args_to_l2_adapters_config,
@@ -42,22 +43,45 @@ def _create_object_key(model: str, key_id: str) -> ObjectKey:
 
 
 def _create_memory_obj(
+    raw_data: torch.Tensor | None = None,
     fill_value: float = 0.0,
     obj_size: int = DEFAULT_OBJ_SIZE,
     dtype: torch.dtype = torch.float32,
 ) -> TensorMemoryObj:
     """Create a test TensorMemoryObj."""
-    raw_data = torch.empty(obj_size, dtype=dtype)
+    if raw_data is None:
+        raw_data = torch.empty(obj_size, dtype=dtype)
+    else:
+        raw_data = raw_data.view(-1)
+        if raw_data.numel() != obj_size:
+            raise ValueError(
+                "raw_data size mismatch: expected %d elements, got %d"
+                % (obj_size, raw_data.numel())
+            )
+        if raw_data.dtype != dtype:
+            raise ValueError(
+                "raw_data dtype mismatch: expected %s, got %s" % (dtype, raw_data.dtype)
+            )
     raw_data.fill_(fill_value)
     metadata = MemoryObjMetadata(
         shape=torch.Size([obj_size]),
         dtype=dtype,
-        address=0,
+        address=raw_data.data_ptr(),
         phy_size=obj_size * raw_data.element_size(),
         fmt=MemoryFormat.KV_2LTD,
         ref_count=1,
     )
     return TensorMemoryObj(raw_data, metadata, parent_allocator=None)
+
+
+def _create_l1_memory_desc(buffer: torch.Tensor) -> L1MemoryDesc:
+    """Create an L1 memory descriptor for a contiguous test buffer."""
+    flat_buffer = buffer.view(-1)
+    return L1MemoryDesc(
+        ptr=flat_buffer.data_ptr(),
+        size=flat_buffer.numel() * flat_buffer.element_size(),
+        align_bytes=flat_buffer.element_size(),
+    )
 
 
 def _wait_event_fd(efd: int, timeout_ms: int = _POLL_TIMEOUT_MS) -> bool:
@@ -144,7 +168,9 @@ async def run_test_mode(model: str, **kwargs):
     settle_time = kwargs.get("settle_time", 0.0)
 
     for idx, adapter_cfg in enumerate(l2_cfg.adapters):
-        adapter = create_l2_adapter(adapter_cfg)
+        l1_buffer = torch.empty(2 * num_tests * obj_size, dtype=kv_dtype)
+        l1_memory_desc = _create_l1_memory_desc(l1_buffer)
+        adapter = create_l2_adapter(adapter_cfg, l1_memory_desc=l1_memory_desc)
         print("=== Testing L2 adapter #%d (%s) ===" % (idx, type(adapter).__name__))
 
         try:
@@ -152,6 +178,7 @@ async def run_test_mode(model: str, **kwargs):
                 adapter,
                 model,
                 num_tests,
+                l1_buffer=l1_buffer,
                 obj_size=obj_size,
                 kv_dtype=kv_dtype,
                 settle_time=settle_time,
@@ -166,6 +193,7 @@ def _test_single_adapter(
     adapter,
     model,
     num_tests,
+    l1_buffer,
     obj_size=DEFAULT_OBJ_SIZE,
     kv_dtype=torch.float32,
     settle_time=0.0,
@@ -176,8 +204,15 @@ def _test_single_adapter(
     non_exist_keys = [
         _create_object_key(model, "nonexist_%d" % i) for i in range(num_tests)
     ]
+    flat_l1_buffer = l1_buffer.view(-1)
     store_objs = [
-        _create_memory_obj(float(i + 1), obj_size, kv_dtype) for i in range(num_tests)
+        _create_memory_obj(
+            raw_data=flat_l1_buffer[i * obj_size : (i + 1) * obj_size],
+            fill_value=float(i + 1),
+            obj_size=obj_size,
+            dtype=kv_dtype,
+        )
+        for i in range(num_tests)
     ]
 
     # -- Phase 1: lookup non-existing keys -------------------
@@ -215,7 +250,15 @@ def _test_single_adapter(
     # -- Phase 4: load existing keys -------------------------
     print("Phase 4: Load operations...")
     load_buffers = [
-        _create_memory_obj(0.0, obj_size, kv_dtype) for _ in range(num_tests)
+        _create_memory_obj(
+            raw_data=flat_l1_buffer[
+                (num_tests + i) * obj_size : (num_tests + i + 1) * obj_size
+            ],
+            fill_value=0.0,
+            obj_size=obj_size,
+            dtype=kv_dtype,
+        )
+        for i in range(num_tests)
     ]
     ld_ms, ld_bitmap = _run_load_phase(adapter, exist_keys, load_buffers)
     load_pass = 0
