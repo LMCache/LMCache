@@ -94,7 +94,12 @@ class LMCTritonSparseBackend(AttentionInterface):
                 block_indices=attn_metadata.block_indices,
                 block_indptr=attn_metadata.block_indptr,
                 sm_scale=self.sm_scale,
-                block_size=attn_metadata.sparse_blk_col_size,
+                # block_size controls BLOCK_M and BLOCK_N in the kernel.
+                # Use sparse_blk_row_size to match the CSR row structure
+                # built by update_from_top_indices.
+                # Note: sparse_blk_row_size == sparse_blk_col_size (both 32)
+                # in the current implementation.
+                block_size=attn_metadata.sparse_blk_row_size,
             )
             # Store LSE for downstream blending if needed
             attn_metadata.lse = lse

@@ -1,7 +1,4 @@
 # SPDX-License-Identifier: Apache-2.0
-# Standard
-import os
-
 # Third Party
 import torch
 
