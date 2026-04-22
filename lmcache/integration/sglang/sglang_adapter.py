@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from dataclasses import dataclass
-from typing import Any, Iterable, List, Optional
+from typing import Any, Iterable, List, Optional, Union
 import uuid
 
 # Third Party
@@ -134,7 +134,7 @@ class LMCacheConnector:
         self.lmcache_engine.post_init(kvcaches=self.kvcaches)
 
     def _to_runtime_device(
-        self, value: List[int] | torch.Tensor, dtype: torch.dtype
+        self, value: Union[List[int], torch.Tensor], dtype: torch.dtype
     ) -> torch.Tensor:
         if isinstance(value, torch.Tensor):
             return value.to(device=self.device, dtype=dtype)

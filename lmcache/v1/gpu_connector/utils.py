@@ -93,16 +93,99 @@ def attempt_permute_to_contiguous_view(
             We refuse to fall back to ``.contiguous()`` (which would
             copy) so the caller's invariant is never silently violated.
     """
-    if isinstance(kv_caches, torch.Tensor):
-        if kv_caches.is_contiguous():
-            return kv_caches
-        strides = kv_caches.stride()
-        perm = sorted(range(kv_caches.ndim), key=lambda i: strides[i], reverse=True)
-        result = kv_caches.permute(perm)
-        if not result.is_contiguous():
-            raise ValueError(
-                "tensor is non-contiguous for reasons other than permutation "
-                "(e.g. slicing or as_strided). Cannot recover contiguous view."
+    if tensor.is_contiguous():
+        return tensor
+
+    strides = tensor.stride()
+    perm = sorted(range(tensor.ndim), key=lambda i: strides[i], reverse=True)
+    result = tensor.permute(perm)
+
+    if not result.is_contiguous():
+        raise ValueError(
+            "tensor is non-contiguous for reasons other than permutation "
+            "(e.g., slicing or as_strided). Cannot recover contiguous view."
+        )
+    return result
+
+
+def permute_kv_caches_to_contiguous(
+    kv_caches: Union[List[torch.Tensor],  List[List[torch.Tensor]] ],
+) -> Union[ List[torch.Tensor], List[List[torch.Tensor]] ]:
+    """Apply :func:`permute_to_contiguous` to each tensor in *kv_caches*.
+
+    The returned list shares the same underlying storage as the input.
+    """
+    result: Union [List[torch.Tensor], List[List[torch.Tensor]] ] = []
+    for tensor_or_list in kv_caches:
+        if isinstance(tensor_or_list, list):
+            result.append(permute_kv_caches_to_contiguous(tensor_or_list))
+        else:
+            result.append(permute_to_contiguous(tensor_or_list))
+    return result
+
+
+def assert_contiguous(tensor: torch.Tensor) -> None:
+    """Assert that a tensor has a contiguous physical layout with zero offset.
+
+    LMCache transfer kernels assume logical and physical views match
+    for coalesced memory accesses. Do NOT blindly call ``.contiguous()``
+    or ``.permute()`` to fix failures here — identify the root cause.
+    """
+    assert tensor.storage_offset() == 0, (
+        f"expected storage_offset 0, got {tensor.storage_offset()}"
+    )
+    assert tensor.is_contiguous(), "tensor is not contiguous"
+
+
+def any_non_contiguous(
+    kv_caches: Union[ dict[str, torch.Tensor],  List[torch.Tensor],  List[List[torch.Tensor]] ],
+) -> bool:
+    """Return True if any tensor in *kv_caches* is non-contiguous."""
+    tensors = kv_caches.values() if isinstance(kv_caches, dict) else kv_caches
+    for tensor_or_list in tensors:
+        if isinstance(tensor_or_list, list):
+            if any_non_contiguous(tensor_or_list):
+                return True
+        elif not tensor_or_list.is_contiguous():
+            return True
+    return False
+
+
+@overload
+def ensure_contiguous_kv_caches(
+    kv_caches: dict[str, torch.Tensor],
+    kv_layout: str | None = None,
+) -> dict[str, torch.Tensor]: ...
+
+
+@overload
+def ensure_contiguous_kv_caches(
+    kv_caches: Union[List[torch.Tensor], List[List[torch.Tensor]] ],
+    kv_layout: Union[ str, None ]= None,
+) -> List[torch.Tensor] | List[List[torch.Tensor]]: ...
+
+
+def ensure_contiguous_kv_caches(
+    kv_caches: Union[ dict[str, torch.Tensor], List[torch.Tensor], List[List[torch.Tensor]] ],
+    kv_layout: Union[ str, None ] = None,
+) -> Union[dict[str, torch.Tensor], List[torch.Tensor],  List[List[torch.Tensor]] ]:
+    """Permute non-contiguous KV caches to contiguous physical shape.
+
+    LMCache assumes tensors have matching logical and physical views.
+    Known reasons for non-contiguity: HND format from vLLM.
+
+    Accepts both ``dict`` and ``list`` forms.
+    Returns *kv_caches* unchanged if already contiguous.
+    """
+    if not any_non_contiguous(kv_caches):
+        return kv_caches
+
+    if isinstance(kv_caches, dict):
+        result: dict[str, torch.Tensor] | List[torch.Tensor] = dict(
+            zip(
+                kv_caches.keys(),
+                permute_kv_caches_to_contiguous(list(kv_caches.values())),
+                strict=False,
             )
         return result
     return [attempt_permute_to_contiguous_view(sub) for sub in kv_caches]
