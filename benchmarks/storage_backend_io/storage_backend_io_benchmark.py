@@ -331,9 +331,10 @@ def _bench_rust_raw_block(
     keys = _make_keys(num_ops)
     # Use the memory allocator from LocalCPUBackend
     shapes = metadata.get_shapes()
+    use_aligned = use_odirect and not use_uring
     objs = _make_memory_objs(
         num_ops,
-        False,
+        use_aligned,
         alignment,
         [],
         memory_allocator=local_cpu.memory_allocator,
@@ -506,9 +507,10 @@ def _bench_rust_raw_block_read(
 
     keys = _make_keys(num_ops)
     shapes = metadata.get_shapes()
+    use_aligned = use_odirect and not use_uring
     objs = _make_memory_objs(
         num_ops,
-        False,
+        use_aligned,
         alignment,
         [],
         memory_allocator=local_cpu.memory_allocator,
