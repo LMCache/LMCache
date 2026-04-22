@@ -82,9 +82,10 @@ Interactive mode triggers because ``--engine-url`` and ``--workload`` are
 missing, and ``--lmcache-url`` auto-detects ``tokens-per-gb-kvcache`` from
 the server. Walk through the prompts and pick:
 
+- Engine URL: ``http://localhost:8000``
 - Workload: ``long-doc-qa``
 - Model: auto-detected from the engine (or type ``Qwen/Qwen3-8B``)
-- KV cache volume (GB): ``100``
+- KV cache volume (GB): ``10``
 - ``ldqa-query-per-document``: ``1``
 - ``ldqa-shuffle-policy``: ``tile``
 - ``ldqa-num-inflight-requests``: ``4``
@@ -98,7 +99,7 @@ exit"** and save to ``bench_config.json``. The file looks like:
     {
       "model": "Qwen/Qwen3-8B",
       "workload": "long-doc-qa",
-      "kv_cache_volume": 100.0,
+      "kv_cache_volume": 10.0,
       "tokens_per_gb_kvcache": 46020,
       "ldqa_document_length": 10000,
       "ldqa_query_per_document": 1,
