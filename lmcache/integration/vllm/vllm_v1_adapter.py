@@ -733,10 +733,6 @@ class LMCacheConnectorV1Impl:
         Args:
             forward_context (ForwardContext): the forward context.
             **kwargs: additional arguments for the load operation
-
-        Note:
-            The number of elements in kv_caches and layer_names should be
-            the same.
         """
         self.current_layer = 0
 
