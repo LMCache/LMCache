@@ -405,7 +405,7 @@ class PrefetchController(StorageControllerInterface):
         while not self._stop_flag.is_set():
             ready = poller.poll(PREFETCH_LOOP_POLL_TIMEOUT_MS)
 
-            signaled: dict[PrefetchPhase, set[int]] = {
+            signaled_adapters: dict[PrefetchPhase, set[int]] = {
                 phase: set() for phase in PrefetchPhase
             }
             for fd, events in ready:
@@ -421,11 +421,11 @@ class PrefetchController(StorageControllerInterface):
                     if fd == self._submission_efd:
                         self._drain_submission_queue()
                     elif fd in self._lookup_efd_to_adapter:
-                        signaled[PrefetchPhase.LOOKUP].add(
+                        signaled_adapters[PrefetchPhase.LOOKUP].add(
                             self._lookup_efd_to_adapter[fd]
                         )
                     elif fd in self._load_efd_to_adapter:
-                        signaled[PrefetchPhase.PLAN_AND_LOAD].add(
+                        signaled_adapters[PrefetchPhase.PLAN_AND_LOAD].add(
                             self._load_efd_to_adapter[fd]
                         )
                 except Exception:
@@ -434,10 +434,10 @@ class PrefetchController(StorageControllerInterface):
                         fd,
                     )
 
-            if any(signaled.values()):
+            if any(signaled_adapters.values()):
                 for request in list(self._in_flight_requests.values()):
                     try:
-                        self._advance_request(request, signaled)
+                        self._advance_request(request, signaled_adapters)
                     except Exception:
                         logger.exception(
                             "Unexpected error advancing in-flight prefetch "
@@ -664,12 +664,12 @@ class PrefetchController(StorageControllerInterface):
     def _advance_request(
         self,
         request: InFlightPrefetchRequest,
-        signaled: dict[PrefetchPhase, set[int]],
+        signaled_adapters: dict[PrefetchPhase, set[int]],
     ) -> None:
         """State-transition dispatcher by phase: poll signaled adapters for
         the request's current phase via the per-phase helper, then trigger
         the phase transition when done."""
-        phase_adapters = signaled[request.phase]
+        phase_adapters = signaled_adapters[request.phase]
         if not phase_adapters:
             return
         if request.phase == PrefetchPhase.LOOKUP:

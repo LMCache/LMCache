@@ -128,8 +128,8 @@ class StoreListener(L1ManagerListener):
 class StorePhase(enum.Enum):
     """Phases a store task may be in. Currently there is only an
     L2_STORE phase; new phases (e.g. verify, ack) would be added here and
-    threaded through ``signaled`` without changing ``_advance_request``'s
-    signature."""
+    threaded through ``signaled_adapters`` without changing
+    ``_advance_request``'s signature."""
 
     L2_STORE = enum.auto()
 
@@ -270,7 +270,7 @@ class StoreController(StorageControllerInterface):
         while not self._stop_flag.is_set():
             ready = poller.poll(STORE_LOOP_POLL_TIMEOUT_MS)
 
-            signaled: dict[StorePhase, set[int]] = {
+            signaled_adapters: dict[StorePhase, set[int]] = {
                 phase: set() for phase in StorePhase
             }
             for fd, events in ready:
@@ -291,16 +291,18 @@ class StoreController(StorageControllerInterface):
                     else:
                         adapter_idx = self._efd_to_adapter_index.get(fd)
                         if adapter_idx is not None:
-                            signaled[StorePhase.L2_STORE].add(adapter_idx)
+                            signaled_adapters[StorePhase.L2_STORE].add(adapter_idx)
                 except Exception:
                     logger.exception(
                         "Unexpected error in store loop while processing fd %d",
                         fd,
                     )
 
-            if any(signaled.values()):
+            if any(signaled_adapters.values()):
                 try:
-                    self._drain_l2_store_completions(signaled[StorePhase.L2_STORE])
+                    self._drain_l2_store_completions(
+                        signaled_adapters[StorePhase.L2_STORE]
+                    )
                 except Exception:
                     logger.exception("Unexpected error draining L2 store completions")
                 for task_key, task in list(self._in_flight_tasks.items()):
