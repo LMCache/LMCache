@@ -678,9 +678,12 @@ class LMCacheMPWorkerAdapter:
         logger.info("Registering kv caches")
 
         layout_hints = vllm_layout_hints()
-        kv_caches = ensure_contiguous_kv_caches(
-            kv_caches, kv_layout=layout_hints.get("kv_layout")
+        # ensure_contiguous_kv_caches works on DiscoverableKVCache values, so
+        # bridge the vLLM dict contract here: unwrap, permute, rewrap.
+        permuted_values = ensure_contiguous_kv_caches(
+            list(kv_caches.values()), kv_layout=layout_hints.get("kv_layout")
         )
+        kv_caches = dict(zip(kv_caches.keys(), permuted_values, strict=True))
 
         self.kv_caches = kv_caches
 

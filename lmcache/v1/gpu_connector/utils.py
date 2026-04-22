@@ -8,7 +8,6 @@ from typing import (
     TypedDict,
     Union,
     cast,
-    overload,
 )
 
 # Third Party
@@ -114,65 +113,37 @@ def assert_contiguous(tensor: torch.Tensor) -> None:
     assert tensor.is_contiguous(), "tensor is not contiguous"
 
 
-def any_non_contiguous(
-    kv_caches: "Union[dict[str, torch.Tensor], DiscoverableKVCache]",
-) -> bool:
+def any_non_contiguous(kv_caches: DiscoverableKVCache) -> bool:
     """Return True if any tensor in *kv_caches* is non-contiguous.
 
-    Only dict-of-tensors and flat-list-of-tensors shapes are inspected;
-    other :data:`DiscoverableKVCache` shapes (single tensor, nested lists) return
-    ``False`` because those shapes are not produced by the HND-permute
+    Only flat-list-of-tensors shapes are inspected; other
+    :data:`DiscoverableKVCache` shapes (single tensor, nested lists)
+    return ``False`` because those are not produced by the HND-permute
     path that motivated this check.
     """
-    if isinstance(kv_caches, dict):
-        tensors: Any = kv_caches.values()
-    elif isinstance(kv_caches, list) and all(
-        isinstance(t, torch.Tensor) for t in kv_caches
+    if not (
+        isinstance(kv_caches, list)
+        and all(isinstance(t, torch.Tensor) for t in kv_caches)
     ):
-        tensors = kv_caches
-    else:
         return False
-    return not all(t.is_contiguous() for t in tensors)
+    return not all(t.is_contiguous() for t in kv_caches)
 
 
-@overload
-def ensure_contiguous_kv_caches(
-    kv_caches: dict[str, torch.Tensor],
-    kv_layout: str | None = None,
-) -> dict[str, torch.Tensor]: ...
-
-
-@overload
 def ensure_contiguous_kv_caches(
     kv_caches: DiscoverableKVCache,
     kv_layout: str | None = None,
-) -> DiscoverableKVCache: ...
-
-
-def ensure_contiguous_kv_caches(
-    kv_caches: "Union[dict[str, torch.Tensor], DiscoverableKVCache]",
-    kv_layout: str | None = None,
-) -> "Union[dict[str, torch.Tensor], DiscoverableKVCache]":
+) -> DiscoverableKVCache:
     """Permute non-contiguous KV caches to contiguous physical shape.
 
     LMCache assumes tensors have matching logical and physical views;
     known reason for non-contiguity is vLLM's HND layout. Returns the
     input unchanged if already contiguous (or if the shape isn't one
-    the permute path handles — e.g. SGLang's nested lists).
+    the permute path handles — e.g. single tensor or nested lists).
     """
     if not any_non_contiguous(kv_caches):
         return kv_caches
 
-    if isinstance(kv_caches, dict):
-        result: "Union[dict[str, torch.Tensor], DiscoverableKVCache]" = dict(
-            zip(
-                kv_caches.keys(),
-                permute_kv_caches_to_contiguous(list(kv_caches.values())),
-                strict=False,
-            )
-        )
-    else:
-        result = permute_kv_caches_to_contiguous(cast(list[torch.Tensor], kv_caches))
+    result = permute_kv_caches_to_contiguous(cast(list[torch.Tensor], kv_caches))
 
     if kv_layout == "HND":
         logger.info("Permuted HND tensors to contiguous physical shape")
