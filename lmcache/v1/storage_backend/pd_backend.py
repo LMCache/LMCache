@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Standard
+from concurrent.futures import Future
 from dataclasses import dataclass
 from typing import Any, Callable, List, Optional, Sequence, Union
 import threading
@@ -560,7 +561,7 @@ class PDBackend(AllocatorBackendInterface):
         memory_objs: List[MemoryObj],
         transfer_spec: Any = None,
         on_complete_callback: Optional[Callable[[CacheEngineKey], None]] = None,
-    ) -> None:
+    ) -> Optional[List[Future]]:
         """
         Submit batched put tasks to transfer KV caches to peer.
 
@@ -570,11 +571,17 @@ class PDBackend(AllocatorBackendInterface):
 
         :param on_complete_callback: Optional callback invoked once per key
             after the transfer completes. Callback exceptions are caught and logged.
+        :return: A single-element list containing a Future that resolves to the
+            number of objects written once the NIXL RDMA transfer completes and
+            the proxy notification has been sent. ``result()`` raises if the
+            transfer fails. Returns ``None`` for local (no-transfer) requests.
+            Callers can ignore it for fire-and-forget semantics or ``result()``
+            it for synchronous completion.
         """
         # Skip PD transfer for local requests (no transfer_spec).
         # With conditional routing, direct-to-decoder requests have no disagg_spec.
         if transfer_spec is None:
-            return
+            return None
 
         for mem_obj in memory_objs:
             mem_obj.ref_count_up()
@@ -605,6 +612,8 @@ class PDBackend(AllocatorBackendInterface):
             else:
                 mem_objs_to_send.append(mem_obj)
 
+        completion_future: Future = Future()
+
         if mem_objs_to_send:
             # Construct transfer spec
             channel_transfer_spec = {
@@ -622,6 +631,7 @@ class PDBackend(AllocatorBackendInterface):
                     keys,
                     on_complete_callback,
                     transfer_spec,
+                    completion_future,
                 )
             )
         else:
@@ -638,8 +648,14 @@ class PDBackend(AllocatorBackendInterface):
                         keys,
                         on_complete_callback,
                         transfer_spec,
+                        completion_future,
                     )
                 )
+            else:
+                # Nothing to do — resolve immediately with 0 writes.
+                completion_future.set_result(0)
+
+        return [completion_future]
 
     def _nixl_worker_loop(self) -> None:
         """Dedicated NIXL worker thread. Processes transfer requests from queue.
@@ -661,15 +677,26 @@ class PDBackend(AllocatorBackendInterface):
 
             op_type = item[0]
             if op_type == "write":
-                _, mem_objs, channel_spec, keys, callback, transfer_spec = item
+                (
+                    _,
+                    mem_objs,
+                    channel_spec,
+                    keys,
+                    callback,
+                    transfer_spec,
+                    completion_future,
+                ) = item
                 success = False
+                write_error: Optional[BaseException] = None
+                num_written = 0
                 try:
-                    self.transfer_channel.batched_write(
+                    num_written = self.transfer_channel.batched_write(
                         objects=mem_objs,
                         transfer_spec=channel_spec,
                     )
                     success = True
                 except Exception as e:
+                    write_error = e
                     logger.error(f"NIXL write failed in worker thread: {e}")
                 finally:
                     for mem_obj in mem_objs:
@@ -689,21 +716,35 @@ class PDBackend(AllocatorBackendInterface):
                             logger.warning(
                                 f"on_complete_callback failed for key {key}: {e}"
                             )
+
+                # Resolve the Future AFTER proxy notification + callbacks so
+                # that future.result() returning means everything downstream
+                # has observed the completion.
+                if success:
+                    completion_future.set_result(num_written)
+                else:
+                    completion_future.set_exception(
+                        write_error or RuntimeError("NIXL write failed")
+                    )
             elif op_type == "notify_only":
-                _, keys, callback, transfer_spec = item
-                if transfer_spec.is_last_prefill:
-                    if self.proxy_side_channel is not None:
-                        notif_msg = ProxyNotif(req_id=transfer_spec.req_id)
-                        notif_msg_bytes = msgspec.msgpack.encode(notif_msg)
-                        self.proxy_side_channel.send(notif_msg_bytes)
-                if callback is not None:
-                    for key in keys:
-                        try:
-                            callback(key)
-                        except Exception as e:
-                            logger.warning(
-                                f"on_complete_callback failed for key {key}: {e}"
-                            )
+                _, keys, callback, transfer_spec, completion_future = item
+                try:
+                    if transfer_spec.is_last_prefill:
+                        if self.proxy_side_channel is not None:
+                            notif_msg = ProxyNotif(req_id=transfer_spec.req_id)
+                            notif_msg_bytes = msgspec.msgpack.encode(notif_msg)
+                            self.proxy_side_channel.send(notif_msg_bytes)
+                    if callback is not None:
+                        for key in keys:
+                            try:
+                                callback(key)
+                            except Exception as e:
+                                logger.warning(
+                                    f"on_complete_callback failed for key {key}: {e}"
+                                )
+                    completion_future.set_result(0)
+                except Exception as e:
+                    completion_future.set_exception(e)
 
     ############################################################
     # Prefiller functions end
