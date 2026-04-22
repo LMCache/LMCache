@@ -10,24 +10,22 @@ FROM vllm/vllm-openai-rocm:latest
 ARG PYTORCH_ROCM_ARCH="gfx942,gfx950"
 ENV PYTORCH_ROCM_ARCH=${PYTORCH_ROCM_ARCH}
 
-# Install build dependencies (keep in sync with requirements/build.txt).
-COPY requirements/build.txt /tmp/build.txt
-RUN uv pip install --system --no-cache -r /tmp/build.txt && rm /tmp/build.txt
-
 # Build LMCache from source with HIP extensions.
 # PyPI lmcache>=0.4 ships only binary wheels (no sdist), so `--no-binary`
 # cannot force a source build.  Cloning the repo ensures HIP extensions
 # are compiled against the ROCm torch already present in the base image.
+# Build deps are installed from the cloned source to stay version-consistent.
 ARG LMCACHE_VERSION=dev
 RUN git clone --depth 1 -b ${LMCACHE_VERSION} https://github.com/LMCache/LMCache.git /tmp/lmcache && \
     cd /tmp/lmcache && \
+    uv pip install --system --no-cache -r requirements/build.txt && \
     BUILD_WITH_HIP=1 CXX=hipcc \
     uv pip install --system --no-cache --no-build-isolation . && \
     rm -rf /tmp/lmcache
 
 
-# Build (from repo root):
-# docker build -f docker/Dockerfile.rocm-lightweight -t 'lmcache/vllm-openai-rocm:light' .
+# Build (no repo context needed — everything is cloned from git):
+# docker build -f docker/Dockerfile.rocm-lightweight -t 'lmcache/vllm-openai-rocm:light' docker/
 
 # Run:
 # export HF_TOKEN=<your_huggingface_token>
