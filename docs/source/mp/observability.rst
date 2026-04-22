@@ -413,8 +413,9 @@ the EventBus stop path).
 Replay
 ~~~~~~
 
-Replaying a recorded trace is delivered separately via the
-``lmcache trace`` and ``lmcache bench trace-replay`` CLIs.
+Replaying a recorded trace, plus the full set of CLI flags for
+driving, monitoring, and exporting replay results, is covered in
+its own page: :doc:`tracing_and_debugging`.
 
 What is captured (and what is not)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -425,9 +426,9 @@ What is captured (and what is not)
 - Each call's input arguments (e.g. ``keys``, ``layout_desc``,
   ``mode``, ``extra_count``, ``external_request_id``).
 - Wall-clock and monotonic timestamps of each call.
-- A header carrying ``lmcache`` version, start times, and a SHA-256
-  digest of the active ``StorageManagerConfig`` so replay can detect
-  mismatched configurations.
+- A header carrying a trace schema version, start times, and a
+  SHA-256 digest of the active ``StorageManagerConfig`` so replay can
+  detect mismatched configurations.
 
 **Not captured:**
 
@@ -450,7 +451,7 @@ A length-prefixed `msgpack <https://msgpack.org/>`_ stream:
     ...
 
 The ``Header`` carries a magic prefix (``LMCT``), a format version,
-the trace level (``storage`` today), the LMCache version, start
+the trace level (``storage`` today), a trace schema version, start
 timestamps, and the StorageManagerConfig digest. Each ``Record``
 carries a relative timestamp, a wall-clock timestamp, the
 fully-qualified call site (``qualname``), and an argument dict.
