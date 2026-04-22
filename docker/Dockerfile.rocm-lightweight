@@ -8,7 +8,7 @@
 FROM vllm/vllm-openai-rocm:latest
 
 RUN BUILD_WITH_HIP=1 CXX=hipcc \
-    uv pip install --system --no-cache --no-build-isolation lmcache
+    uv pip install --system --no-cache --no-build-isolation --no-binary lmcache lmcache
 
 
 # Build:

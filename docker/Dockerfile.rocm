@@ -111,7 +111,7 @@ RUN . /opt/venv/bin/activate && \
     uv pip install --prerelease=allow 'vllm[runai,tensorizer]' \
         --extra-index-url https://wheels.vllm.ai/${ROCM_TAG} \
         --index-strategy unsafe-best-match && \
-    BUILD_WITH_HIP=1 CXX=hipcc uv pip install --no-build-isolation lmcache --verbose
+    BUILD_WITH_HIP=1 CXX=hipcc uv pip install --no-build-isolation --no-binary lmcache lmcache --verbose
 
 WORKDIR /workspace
 ENTRYPOINT ["/opt/venv/bin/vllm", "serve"]
