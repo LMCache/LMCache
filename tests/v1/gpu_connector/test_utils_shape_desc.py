@@ -202,6 +202,26 @@ def test_shape_signature_mla_forces_nh_one():
     assert sig == (1, 1, 512)
 
 
+def test_get_group_data_ptrs_cross_layer_returns_single_base():
+    """Cross-layer format packs every layer into one tensor; the kernel
+    (csrc/mp_mem_kernels.cu) reads paged_buffer_ptrs[0] and computes
+    per-layer offsets from shape_desc.nl internally. The group helper
+    must return a single base pointer, not num_layers entries."""
+    big = torch.empty(32, 80, 2, 16, 8, 64, dtype=torch.bfloat16, device="cuda")
+    fmt = lmc_ops.GPUKVFormat.NB_NL_TWO_BS_NH_HS
+    ptrs = get_group_data_ptrs(big, fmt, list(range(80)))
+    assert ptrs == [big.data_ptr()]
+
+
+def test_get_layer_data_ptrs_cross_layer_rejects():
+    """No per-layer pointer exists for cross-layer; callers must use
+    get_group_data_ptrs instead."""
+    big = torch.empty(32, 80, 2, 16, 8, 64, dtype=torch.bfloat16, device="cuda")
+    fmt = lmc_ops.GPUKVFormat.NB_NL_TWO_BS_NH_HS
+    with pytest.raises(ValueError, match="cross-layer"):
+        get_layer_data_ptrs(big, fmt, layer_idx=0)
+
+
 def test_normalize_preserves_bare_tensor():
     """A bare torch.Tensor input (cross-layer shape) must pass through
     normalize unchanged — no list wrapping — so the KVCaches recursive

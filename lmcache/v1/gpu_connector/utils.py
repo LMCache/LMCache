@@ -888,11 +888,10 @@ def get_layer_data_ptrs(
 
     Most formats produce one pointer per layer. The SGLang two-list format
     (``TWO_X_NL_X_NBBS_NH_HS``) produces ``[K_ptr, V_ptr]`` for the layer.
-
-    Note: callers assembling a group-level pointer array should use
-    :func:`get_group_data_ptrs`, not naively ``extend`` over per-layer
-    results — the SGLang kernel expects K's and V's grouped, not
-    interleaved per layer.
+    Cross-layer formats (``NB_NL_TWO_BS_NH_HS``) share one tensor across
+    every layer; there is no per-layer pointer to return. Callers that
+    need a group-level pointer array should use :func:`get_group_data_ptrs`
+    instead.
 
     Args:
         kv_caches: Full kv_caches structure.
@@ -903,7 +902,9 @@ def get_layer_data_ptrs(
         Device pointers (int) covering the layer's K and V data.
 
     Raises:
-        ValueError: If *gpu_kv_format* is not recognized.
+        ValueError: If *gpu_kv_format* is not recognized, or if the format
+            is cross-layer (no per-layer pointer exists —
+            :func:`get_group_data_ptrs` returns the single shared base).
     """
     if gpu_kv_format in _per_layer_list_formats():
         layers = cast(List[torch.Tensor], kv_caches)
@@ -912,10 +913,10 @@ def get_layer_data_ptrs(
         k, v = cast(List[List[torch.Tensor]], kv_caches)
         return [k[layer_idx].data_ptr(), v[layer_idx].data_ptr()]
     if gpu_kv_format == lmc_ops.GPUKVFormat.NB_NL_TWO_BS_NH_HS:
-        # NL dim's stride gives bytes per layer within the shared tensor.
-        tensor = cast(torch.Tensor, kv_caches)
-        layer_stride_bytes = tensor.stride(1) * tensor.element_size()
-        return [tensor.data_ptr() + layer_idx * layer_stride_bytes]
+        raise ValueError(
+            "NB_NL_TWO_BS_NH_HS is cross-layer: no per-layer pointer. "
+            "Use get_group_data_ptrs (returns the single shared base)."
+        )
     raise ValueError(f"Unknown GPU KV Format: {gpu_kv_format}")
 
 
@@ -927,12 +928,16 @@ def get_group_data_ptrs(
     """Return device pointers for a group of layers in the order the transfer
     kernels expect for *gpu_kv_format*.
 
-    For most formats this is the per-layer pointers flattened in layer order.
-    For :obj:`GPUKVFormat.TWO_X_NL_X_NBBS_NH_HS` (SGLang MHA) the kernel
-    contract is K-pointers grouped ahead of V-pointers, so this helper
-    returns ``[K_{i0}, ..., K_{iN}, V_{i0}, ..., V_{iN}]`` rather than the
-    per-layer interleaving ``[K_{i0}, V_{i0}, K_{i1}, V_{i1}, ...]`` that
-    :func:`get_layer_data_ptrs` would produce when naively extended.
+    Per-format layout (mirrors the kernel dispatch in
+    ``csrc/mp_mem_kernels.cu``):
+
+    - Per-layer list formats: ``[p_{i0}, p_{i1}, ..., p_{iN}]`` — one
+      pointer per layer, in the order requested.
+    - ``TWO_X_NL_X_NBBS_NH_HS`` (SGLang MHA): K's grouped first,
+      then V's: ``[K_{i0}, ..., K_{iN}, V_{i0}, ..., V_{iN}]``.
+    - ``NB_NL_TWO_BS_NH_HS`` (cross-layer): a single base pointer,
+      ``[base]``. The kernel iterates layers by computing offsets from
+      ``shape_desc.nl`` internally; no per-layer pointer exists.
 
     Args:
         kv_caches: Full kv_caches structure.
@@ -946,6 +951,9 @@ def get_group_data_ptrs(
     Raises:
         ValueError: If *gpu_kv_format* is not recognized.
     """
+    if gpu_kv_format == lmc_ops.GPUKVFormat.NB_NL_TWO_BS_NH_HS:
+        tensor = cast(torch.Tensor, kv_caches)
+        return [tensor.data_ptr()]
     if gpu_kv_format == lmc_ops.GPUKVFormat.TWO_X_NL_X_NBBS_NH_HS:
         k, v = cast(List[List[torch.Tensor]], kv_caches)
         k_ptrs = [k[i].data_ptr() for i in layer_indices]
