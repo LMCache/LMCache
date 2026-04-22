@@ -3,7 +3,7 @@
 #
 # Key differences from the CUDA Dockerfile:
 # - Uses ROCm base image instead of CUDA
-# - Builds HIP extensions (BUILD_WITH_HIP=1)
+# - Builds HIP extensions (BUILD_WITH_HIP=1, CXX=hipcc)
 # - Skips flashinfer (not available on ROCm)
 # - Skips NIXL (not yet available on ROCm)
 
@@ -34,9 +34,10 @@ RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
 
 WORKDIR /workspace
 
-# ROCm GPU architectures
-ARG AMDGPU_TARGETS="gfx942;gfx950"
-ENV AMDGPU_TARGETS=${AMDGPU_TARGETS}
+# ROCm GPU architectures — use PYTORCH_ROCM_ARCH (comma-separated)
+# which is what PyTorch's extension builder reads for ROCm targets.
+ARG PYTORCH_ROCM_ARCH="gfx942,gfx950"
+ENV PYTORCH_ROCM_ARCH=${PYTORCH_ROCM_ARCH}
 
 #################### vLLM-ROCm & LMCache (Build) ##########################
 
@@ -62,7 +63,9 @@ WORKDIR /workspace/LMCache
 
 # Build LMCache with HIP extensions and install vLLM-ROCm.
 # - BUILD_WITH_HIP=1: compile HIP kernels instead of CUDA
-# - vLLM ROCm wheels from vllm.ai nightly index
+# - CXX=hipcc: required by setup.py for HIP compilation
+# - --no-build-isolation: use the ROCm torch installed by vLLM
+# - vLLM ROCm wheels from vllm.ai index (dynamic ROCM_TAG)
 # - Skip flashinfer (CUDA-only)
 RUN --mount=type=cache,target=/root/.cache/ccache,id=ccache \
     --mount=type=cache,target=/root/.cache/uv,id=uv-cache,sharing=locked \
@@ -80,7 +83,7 @@ RUN --mount=type=cache,target=/root/.cache/ccache,id=ccache \
             --index-strategy unsafe-best-match ; \
     fi && \
     python3 -c 'import torch; print("TORCH=", torch.__version__, "HIP=", torch.version.hip)' && \
-    BUILD_WITH_HIP=1 python3 setup.py bdist_wheel --dist-dir=dist_lmcache && \
+    BUILD_WITH_HIP=1 CXX=hipcc python3 setup.py bdist_wheel --dist-dir=dist_lmcache && \
     uv pip install ./dist_lmcache/*.whl --verbose
 
 WORKDIR /workspace
@@ -99,13 +102,16 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     . /opt/venv/bin/activate && \
     uv pip install -r build.txt
 
-# Install LMCache and vLLM-ROCm stable releases.
+# Install vLLM-ROCm and LMCache stable releases.
+# - Use ROCm index URL to avoid installing CUDA wheels
+# - --no-build-isolation: build against the ROCm torch from vLLM
+# - CXX=hipcc BUILD_WITH_HIP=1: compile HIP extensions
 RUN . /opt/venv/bin/activate && \
     ROCM_TAG=rocm$(echo ${ROCM_VERSION} | tr -d '.') && \
     uv pip install --prerelease=allow 'vllm[runai,tensorizer]' \
         --extra-index-url https://wheels.vllm.ai/${ROCM_TAG} \
         --index-strategy unsafe-best-match && \
-    BUILD_WITH_HIP=1 uv pip install lmcache --verbose
+    BUILD_WITH_HIP=1 CXX=hipcc uv pip install --no-build-isolation lmcache --verbose
 
 WORKDIR /workspace
 ENTRYPOINT ["/opt/venv/bin/vllm", "serve"]

@@ -2,12 +2,13 @@
 # No NIXL, no Prefill-Decode Disaggregation.
 # For AMD Instinct GPUs (MI300X/MI325X, MI350X/MI355X).
 #
-# Note: lmcache is installed from PyPI. If no pre-built ROCm wheel is
-# available, this will build HIP extensions from source, which requires
-# hipcc (provided by the vllm-openai-rocm base image).
+# Note: lmcache is installed from source with HIP extensions.
+# --no-build-isolation ensures we build against the ROCm torch
+# already installed in the vllm-openai-rocm base image.
 FROM vllm/vllm-openai-rocm:latest
 
-RUN BUILD_WITH_HIP=1 uv pip install --system --no-cache lmcache
+RUN BUILD_WITH_HIP=1 CXX=hipcc \
+    uv pip install --system --no-cache --no-build-isolation lmcache
 
 
 # Build:
