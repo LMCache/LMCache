@@ -19,6 +19,36 @@ logger = init_logger(__name__)
 
 
 @dataclass
+class TokenRange:
+    """Union of [start, end) token ranges reported by multiple TP workers.
+
+    Each TP worker reports the same logical token range for a given
+    storage-path invocation; storing the min/max produces the union,
+    which represents the actual token coverage regardless of TP degree.
+    """
+
+    start: int = 0
+    end: int = 0
+    initialized: bool = False
+
+    def update(self, start: int, end: int) -> None:
+        if not self.initialized:
+            self.start = start
+            self.end = end
+            self.initialized = True
+        else:
+            self.start = min(self.start, start)
+            self.end = max(self.end, end)
+
+    @property
+    def tokens(self) -> int:
+        return self.end - self.start
+
+    def chunks(self, chunk_size: int) -> int:
+        return self.tokens // chunk_size
+
+
+@dataclass
 class Session:
     """Tracks accumulated token IDs and computed chunk hashes for a request.
 
@@ -34,49 +64,113 @@ class Session:
     num_chunks_processed: int = 0
     created_at: float = field(default_factory=time.time)
     total_tokens: int = 0
-    _retrieved_start: int = 0
-    _retrieved_end: int = 0
-    _retrieved_initialized: bool = False
+    # Token coverage ranges, deduplicated across TP workers via union.
+    retrieved_range: TokenRange = field(default_factory=TokenRange)
+    lookup_range: TokenRange = field(default_factory=TokenRange)
+    store_range: TokenRange = field(default_factory=TokenRange)
     # Accumulated storage-path time (excludes token hashing in server.py).
     lookup_time: float = 0.0
     retrieve_time: float = 0.0
     store_time: float = 0.0
-    # Number of chunks processed on the storage path, independent of time.
-    lookup_chunks: int = 0
-    store_chunks: int = 0
     lookup_ipc_key: Optional[IPCCacheEngineKey] = None
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     @property
     def retrieved_tokens(self) -> int:
         """Number of retrieved tokens, derived from the range."""
-        return self._retrieved_end - self._retrieved_start
+        return self.retrieved_range.tokens
 
     @property
     def retrieve_chunks(self) -> int:
         """Number of retrieved chunks, derived from the range."""
-        chunk_size = self.hasher.chunk_size
-        return (self._retrieved_end - self._retrieved_start) // chunk_size
+        return self.retrieved_range.chunks(self.hasher.chunk_size)
+
+    @property
+    def lookup_chunks(self) -> int:
+        """Number of looked-up chunks, derived from the range."""
+        return self.lookup_range.chunks(self.hasher.chunk_size)
+
+    @property
+    def store_chunks(self) -> int:
+        """Number of stored chunks, derived from the range.
+
+        This reflects the token-level coverage, not the per-TP-worker
+        physical write count; it is deduplicated across TP workers.
+        """
+        return self.store_range.chunks(self.hasher.chunk_size)
 
     def update_retrieved_range(self, start: int, end: int) -> None:
-        """Update the retrieved token range (idempotent union).
+        """Union-update the retrieved token range (thread-safe).
 
-        Multiple TP workers may call this with the same range;
-        the result is always the union of all reported ranges.
-
-        Args:
-            start: Start token index of the retrieved range.
-            end: End token index of the retrieved range.
+        Prefer :meth:`record_retrieve` to update time and range in a
+        single lock acquisition; this method is kept for callers that
+        only need the range operation (e.g. unit tests or out-of-band
+        updates).
         """
         with self._lock:
-            if not self._retrieved_initialized:
-                # First call: initialize the range
-                self._retrieved_start = start
-                self._retrieved_end = end
-                self._retrieved_initialized = True
-            else:
-                self._retrieved_start = min(self._retrieved_start, start)
-                self._retrieved_end = max(self._retrieved_end, end)
+            self.retrieved_range.update(start, end)
+
+    def update_lookup_range(self, start: int, end: int) -> None:
+        """Union-update the lookup token range (thread-safe).
+
+        See :meth:`update_retrieved_range` for the relationship with
+        the combined :meth:`record_lookup` API.
+        """
+        with self._lock:
+            self.lookup_range.update(start, end)
+
+    def update_store_range(self, start: int, end: int) -> None:
+        """Union-update the store token range (thread-safe).
+
+        See :meth:`update_retrieved_range` for the relationship with
+        the combined :meth:`record_store` API.
+        """
+        with self._lock:
+            self.store_range.update(start, end)
+
+    def record_lookup(
+        self, elapsed: float, token_range: Optional[tuple[int, int]] = None
+    ) -> None:
+        """Accumulate lookup-path time and (optionally) union the range.
+
+        Pass ``token_range=None`` for early-return paths that consumed
+        wall-clock time but covered no tokens (e.g. lookup miss before
+        any object key is produced). Single lock acquisition for both
+        time and range update, reducing contention under multi-TP.
+
+        Args:
+            elapsed: Seconds spent on this lookup invocation.
+            token_range: Optional (start, end) of tokens actually looked
+                up; when provided, unioned into ``lookup_range``.
+        """
+        with self._lock:
+            self.lookup_time += elapsed
+            if token_range is not None:
+                self.lookup_range.update(*token_range)
+
+    def record_retrieve(
+        self, elapsed: float, token_range: Optional[tuple[int, int]] = None
+    ) -> None:
+        """Accumulate retrieve-path time and (optionally) union the range.
+
+        See :meth:`record_lookup` for the ``token_range=None`` semantics.
+        """
+        with self._lock:
+            self.retrieve_time += elapsed
+            if token_range is not None:
+                self.retrieved_range.update(*token_range)
+
+    def record_store(
+        self, elapsed: float, token_range: Optional[tuple[int, int]] = None
+    ) -> None:
+        """Accumulate store-path time and (optionally) union the range.
+
+        See :meth:`record_lookup` for the ``token_range=None`` semantics.
+        """
+        with self._lock:
+            self.store_time += elapsed
+            if token_range is not None:
+                self.store_range.update(*token_range)
 
     def set_tokens(self, full_token_ids: list[int]) -> None:
         """Update the token sequence (idempotent, replaces not extends).

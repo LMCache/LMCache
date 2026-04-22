@@ -396,3 +396,84 @@ class TestSessionManagerRemoveReturnsSession:
         """remove() on a non-existent request_id should return None."""
         mgr = SessionManager(hasher, ttl=600)
         assert mgr.remove("no-such-id") is None
+
+
+class TestSessionRecordStats:
+    """Tests for the thread-safe time accumulators and range unions.
+
+    ``*_chunks`` properties derive from the union of [start, end) ranges
+    reported by multiple TP workers (token-level coverage), so they are
+    deduplicated across workers - not simple accumulators.
+    """
+
+    def test_record_lookup_accumulates_time_and_range(self, session: Session) -> None:
+        chunk_size = session.hasher.chunk_size
+        session.record_lookup(0.1)
+        session.record_lookup(0.2)
+        session.update_lookup_range(0, 2 * chunk_size)
+        session.update_lookup_range(0, 3 * chunk_size)
+        assert session.lookup_time == pytest.approx(0.3)
+        # Union is [0, 3 * chunk_size) -> 3 chunks.
+        assert session.lookup_chunks == 3
+
+    def test_record_retrieve_accumulates_time(self, session: Session) -> None:
+        session.record_retrieve(0.25)
+        session.record_retrieve(0.75)
+        assert session.retrieve_time == pytest.approx(1.0)
+
+    def test_record_store_accumulates_time_and_range(self, session: Session) -> None:
+        chunk_size = session.hasher.chunk_size
+        session.record_store(0.1)
+        session.record_store(0.3)
+        session.update_store_range(0, 4 * chunk_size)
+        session.update_store_range(0, 6 * chunk_size)
+        assert session.store_time == pytest.approx(0.4)
+        # Union is [0, 6 * chunk_size) -> 6 chunks.
+        assert session.store_chunks == 6
+
+    def test_store_range_idempotent_across_tp_workers(self, session: Session) -> None:
+        """Repeated identical store-range updates (as from multiple TP
+        workers with differing reserved_dict keys but identical token
+        ranges) must not double-count at the token level."""
+        chunk_size = session.hasher.chunk_size
+        for _ in range(8):
+            session.update_store_range(0, 5 * chunk_size)
+        assert session.store_chunks == 5
+
+    def test_record_store_concurrent_no_lost_updates(self, session: Session) -> None:
+        """Many threads each calling record_store must not lose
+        any update (regression for non-atomic += under concurrent
+        writers, mirroring the multi-TP-worker STORE path)."""
+        n_threads = 16
+        n_calls = 500
+
+        def worker() -> None:
+            for _ in range(n_calls):
+                session.record_store(0.001)
+
+        threads = [threading.Thread(target=worker) for _ in range(n_threads)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        expected_total = n_threads * n_calls * 0.001
+        assert session.store_time == pytest.approx(expected_total, rel=1e-6)
+
+    def test_record_lookup_concurrent_no_lost_updates(self, session: Session) -> None:
+        """Same regression for the LOOKUP path (normal thread pool)."""
+        n_threads = 8
+        n_calls = 500
+
+        def worker() -> None:
+            for _ in range(n_calls):
+                session.record_lookup(0.001)
+
+        threads = [threading.Thread(target=worker) for _ in range(n_threads)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        expected_total = n_threads * n_calls * 0.001
+        assert session.lookup_time == pytest.approx(expected_total, rel=1e-6)

@@ -387,9 +387,15 @@ class MPCacheEngine:
 
         ed = time.perf_counter()
         elapsed = ed - st
-        session.store_time += elapsed
         stored_chunks = len(reserved_dict)
-        session.store_chunks += stored_chunks
+        # Single lock acquisition: time + (optional) range union.
+        # Different TP workers produce different reserved_dict keys but
+        # report the same [key.start, key.end); union deduplicates at
+        # the token level.
+        session.record_store(
+            elapsed,
+            token_range=(key.start, key.end) if stored_chunks else None,
+        )
         if stored_chunks:
             logger.info(
                 "Stored %d tokens in %.3f seconds",
@@ -573,10 +579,9 @@ class MPCacheEngine:
                     ),
                 )
         tokens_retrieved = len(obj_keys) * self.chunk_size
-        session.update_retrieved_range(key.start, key.end)
         ed = time.perf_counter()
         elapsed = ed - st
-        session.retrieve_time += elapsed
+        session.record_retrieve(elapsed, token_range=(key.start, key.end))
         logger.info(
             "Retrieved %d tokens in %.3f seconds",
             tokens_retrieved,
@@ -728,8 +733,14 @@ class MPCacheEngine:
             )
         finally:
             elapsed = time.perf_counter() - st
-            session.lookup_time += elapsed
-            session.lookup_chunks += len(obj_keys)
+            # Lookup covers the full token range carried by the key;
+            # union across TP workers yields the true token coverage.
+            # ``token_range=None`` on early-return (no obj_keys produced)
+            # keeps the time account but leaves range untouched.
+            session.record_lookup(
+                elapsed,
+                token_range=(key.start, key.end) if obj_keys else None,
+            )
 
     def _register_prefetch_job(self, job: _PrefetchJob) -> None:
         with self._prefetch_job_lock:
