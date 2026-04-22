@@ -29,11 +29,15 @@ source .buildkite/k3_tests/common_scripts/helpers.sh
 SERVER_WAIT_TIMEOUT="${SERVER_WAIT_TIMEOUT:-400}"
 
 BUILD_ID="${BUILDKITE_BUILD_ID:-local_$$}"
-WORK_LOG="/tmp/build_${BUILD_ID}_blend.log" 
+# Write logs under REPO_ROOT so they are visible on the host immediately via the bind mount.
+# /tmp logs would be invisible until docker cp runs after the container exits.
+LOG_DIR="${REPO_ROOT}/logs_${BUILD_ID}"
+mkdir -p "${LOG_DIR}"
+WORK_LOG="${LOG_DIR}/build_${BUILD_ID}_blend.log"
 # Proxy stdout/stderr. Blend server/prefiller/decoder each get their own _blend_server/_prefiller_PORT/_decoder_PORT logs.
-VLLM_LOG="/tmp/build_${BUILD_ID}_proxy.log"
-BLEND_SERVER_LOG="/tmp/build_${BUILD_ID}_blend_server.log"
-ARTIFACT="build_${BUILD_ID}.log"
+VLLM_LOG="${LOG_DIR}/build_${BUILD_ID}_proxy.log"
+BLEND_SERVER_LOG="${LOG_DIR}/build_${BUILD_ID}_blend_server.log"
+ARTIFACT="${REPO_ROOT}/build_${BUILD_ID}.log"
 # Benchmark wall-clock limit (seconds). Exit 124 from `timeout` => failure. Default stays under blend pipeline 90m.
 BENCHMARK_TIMEOUT_SEC="${BENCHMARK_TIMEOUT_SEC:-4800}"
 
@@ -90,8 +94,11 @@ resolve_port_csv() {
 }
 
 collect_artifact() {
-  echo "[INFO] Collecting logs into ${ARTIFACT}"
-  cat /tmp/build_"${BUILD_ID}"_*.log > "${ARTIFACT}" 2>/dev/null || true
+  # Individual logs are already in LOG_DIR (written there directly).
+  # Just produce the merged artifact for CI / backward-compatible harnesses.
+  cat "${LOG_DIR}"/build_"${BUILD_ID}"_*.log > "${ARTIFACT}" 2>/dev/null || true
+  echo "[INFO] Logs:     ${LOG_DIR}/"
+  echo "[INFO] Artifact: ${ARTIFACT}"
 }
 
 finalize() {
@@ -107,17 +114,14 @@ trap finalize EXIT INT TERM
 
 exec > >(tee -a "${WORK_LOG}") 2>&1
 
-# Scan every /tmp/build_${BUILD_ID}_*.log for severe/error lines (same family as other k3 build logs).
-# Strip bash xtrace lines first: `set -x` tees "+ grep ... \\berror\\b ..." into the same log and
-# would false-positive this check.
 check_build_logs_for_errors() {
   local -a logs=()
   local f
   shopt -s nullglob
-  logs=(/tmp/build_"${BUILD_ID}"_*.log)
+  logs=("${LOG_DIR}"/build_"${BUILD_ID}"_*.log)
   shopt -u nullglob
   if [[ ${#logs[@]} -eq 0 ]]; then
-    echo "[WARN] No /tmp/build_${BUILD_ID}_*.log files found for error scan"
+    echo "[WARN] No build logs found in ${LOG_DIR}/ for error scan"
     return 0
   fi
   for f in "${logs[@]}"; do
@@ -180,8 +184,8 @@ echo "  Service port:    ${SERVICE_PORT}"
 echo "  Telemetry port:  ${TELEMETRY_PORT}"
 echo "  Blend MP port:   ${LMCACHE_MP_PORT}"
 echo "  GPUs per instance: ${TENSOR_PARALLEL}"
-echo "  Default venv dir: ${DEFAULT_VENV_DIR} (prefiller / blend server python: ${DEFAULT_PYTHON})"
-echo "  Test venv dir:    ${TEST_VENV_DIR} (decoder / proxy / benchmark python: ${TEST_PYTHON})"
+echo "  Default venv dir: ${DEFAULT_VENV_DIR} (prefiller vLLM: image-built)"
+echo "  Test venv dir:    ${TEST_VENV_DIR} (blend server / decoder vLLM / proxy / benchmark: nightly)"
 echo "  Prefiller vLLM:   ${PREFILLER_VLLM_BIN}"
 echo "  Decoder vLLM:     ${DECODER_VLLM_BIN}"
 
@@ -193,7 +197,7 @@ export LD_LIBRARY_PATH=/opt/nvidia/nsight-compute/2025.1.0/host/linux-desktop-gl
 # 1. Start the LMCache blend server
 # ---------------------------------------------------------------------------
 
-"${DEFAULT_PYTHON}" -m lmcache.v1.multiprocess.blend_server_v2 \
+"${TEST_PYTHON}" -m lmcache.v1.multiprocess.blend_server_v2 \
   --max-workers 1 \
   --port "${LMCACHE_MP_PORT}" \
   --l1-size 70 \
@@ -211,7 +215,7 @@ GPU_IDX=0
 for port in "${PREFILLER_PORTS[@]}"; do
   GPU_END=$((GPU_IDX + TENSOR_PARALLEL - 1))
   CUDA_DEVS=$(seq -s, "$GPU_IDX" "$GPU_END")
-  PREFILLER_LOG="/tmp/build_${BUILD_ID}_prefiller_${port}.log"
+  PREFILLER_LOG="${LOG_DIR}/build_${BUILD_ID}_prefiller_${port}.log"
   : > "${PREFILLER_LOG}"
   echo "Starting prefiller on GPUs ${CUDA_DEVS}, port ${port}"
   CUDA_VISIBLE_DEVICES=$CUDA_DEVS \
@@ -242,7 +246,7 @@ done
 for port in "${DECODER_PORTS[@]}"; do
   GPU_END=$((GPU_IDX + TENSOR_PARALLEL - 1))
   CUDA_DEVS=$(seq -s, "$GPU_IDX" "$GPU_END")
-  DECODER_LOG="/tmp/build_${BUILD_ID}_decoder_${port}.log"
+  DECODER_LOG="${LOG_DIR}/build_${BUILD_ID}_decoder_${port}.log"
   : > "${DECODER_LOG}"
   echo "Starting decoder on GPUs ${CUDA_DEVS}, port ${port}"
   CUDA_VISIBLE_DEVICES=$CUDA_DEVS \
