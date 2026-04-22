@@ -804,7 +804,11 @@ def run_cache_server(
     add_handler_helper(server, RequestType.GET_CHUNK_SIZE, engine.get_chunk_size)
     add_handler_helper(server, RequestType.END_SESSION, engine.end_session)
     add_handler_helper(server, RequestType.NOOP, engine.debug)
-
+    add_handler_helper(
+        server,
+        RequestType.REPORT_BLOCK_ALLOCATION,
+        engine.report_block_allocations,
+    )
     # Add handler for blend operations
     add_handler_helper(
         server, RequestType.CB_REGISTER_KV_CACHE, engine.cb_register_kv_cache
@@ -832,6 +836,7 @@ def run_cache_server(
             RequestType.CB_STORE_PRE_COMPUTED,
             RequestType.CB_RETRIEVE_PRE_COMPUTED_V2,
             RequestType.CB_STORE_FINAL,
+            RequestType.REPORT_BLOCK_ALLOCATION,
         ],
         max_workers=mp_config.max_gpu_workers,
     )
