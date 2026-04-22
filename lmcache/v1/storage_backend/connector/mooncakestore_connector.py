@@ -35,7 +35,37 @@ _LEGACY_SETUP_KEYS = [
 ]
 
 
-def _setup_mooncake_store(
+# Legacy keys that must be passed as ``int`` to the old
+# positional-arg ``store.setup()`` API (C++/pybind11).
+_LEGACY_INT_KEYS = {"global_segment_size", "local_buffer_size"}
+
+# Keys whose values may contain credentials and must be
+# redacted when the setup dict is logged.
+_SENSITIVE_SETUP_KEYS = {"metadata_server", "master_server_address"}
+
+
+def _sanitize_setup_config(
+    setup_config: Dict[str, str],
+) -> Dict[str, str]:
+    """Return a copy of *setup_config* with sensitive values
+    redacted, safe for logging."""
+    sanitized: Dict[str, str] = {}
+    for k, v in setup_config.items():
+        lower_k = k.lower()
+        if (
+            k in _SENSITIVE_SETUP_KEYS
+            or "password" in lower_k
+            or "token" in lower_k
+            or "secret" in lower_k
+            or "key" in lower_k
+        ):
+            sanitized[k] = "***REDACTED***"
+        else:
+            sanitized[k] = v
+    return sanitized
+
+
+def setup_mooncake_store(
     store: Any,
     config: "MooncakeStoreConfig",
 ) -> None:
@@ -48,12 +78,21 @@ def _setup_mooncake_store(
         store.setup(setup_dict)
         logger.info("Using dict-based setup API (new)")
     except TypeError:
-        # Legacy API: setup with positional arguments
+        # Legacy API: setup with positional arguments.
+        # Some keys (e.g. ``global_segment_size``) must be int.
         logger.info(
             "Dict-based setup not available, "
             "falling back to positional-arg API (legacy)"
         )
-        args = [setup_dict.get(k, "") for k in _LEGACY_SETUP_KEYS]
+        args: List[Any] = []
+        for k in _LEGACY_SETUP_KEYS:
+            v: Any = setup_dict.get(k, "")
+            if k in _LEGACY_INT_KEYS:
+                try:
+                    v = int(v) if v != "" else 0
+                except (TypeError, ValueError):
+                    v = 0
+            args.append(v)
         store.setup(*args)
 
 
@@ -66,6 +105,8 @@ _LMCACHE_ONLY_KEYS = {
     "transfer_timeout",
     "storage_root_dir",
     "prefer_local_alloc",
+    "mooncake_transfer_timeout",
+    "mooncake_storage_root_dir",
     "mooncake_prefer_local_alloc",
 }
 
@@ -115,6 +156,7 @@ class MooncakeStoreConfig:
         self.prefer_local_alloc = prefer_local_alloc
 
     def __repr__(self) -> str:
+        # Redact sensitive values to keep logs safe.
         return (
             "MooncakeStoreConfig("
             "setup_config=%r, "
@@ -122,7 +164,7 @@ class MooncakeStoreConfig:
             "storage_root_dir=%r, "
             "prefer_local_alloc=%r)"
             % (
-                self.setup_config,
+                _sanitize_setup_config(self.setup_config),
                 self.transfer_timeout,
                 self.storage_root_dir,
                 self.prefer_local_alloc,
@@ -196,23 +238,23 @@ class MooncakeStoreConfig:
         Missing keys with known defaults are filled in.
         """
         setup: Dict[str, str] = {}
-
-        # Pass 1: legacy passthrough keys (lower priority)
-        for k, v in raw.items():
-            if k in _LMCACHE_ONLY_KEYS:
-                continue
-            if k in _LEGACY_PASSTHROUGH_KEYS and v is not None:
-                setup[k] = str(v)
-
-        # Pass 2: mooncake_ prefixed keys (higher priority)
+        # Prefixed keys have higher priority than legacy keys;
+        # collect them separately and apply last.
+        prefixed_setup: Dict[str, str] = {}
         prefix_len = len(_MOONCAKE_PREFIX)
+
         for k, v in raw.items():
-            if k in _LMCACHE_ONLY_KEYS:
+            if k in _LMCACHE_ONLY_KEYS or v is None:
                 continue
             if k.startswith(_MOONCAKE_PREFIX):
                 stripped = k[prefix_len:]
-                if stripped and v is not None:
-                    setup[stripped] = str(v)
+                if stripped:
+                    prefixed_setup[stripped] = str(v)
+            elif k in _LEGACY_PASSTHROUGH_KEYS:
+                setup[k] = str(v)
+
+        # Prefixed keys override legacy keys on conflict.
+        setup.update(prefixed_setup)
 
         # Apply defaults for keys not provided
         for k, default_v in _SETUP_DEFAULTS.items():
@@ -307,7 +349,7 @@ class MooncakestoreConnector(RemoteConnector):
 
             logger.info(
                 "Setting up Mooncake store with setup_config: %s",
-                self.config.setup_config,
+                _sanitize_setup_config(self.config.setup_config),
             )
 
             try:
@@ -349,7 +391,7 @@ class MooncakestoreConnector(RemoteConnector):
                     f"Failed to determine NUMA mapping before Mooncake setup: {e}"
                 )
 
-            _setup_mooncake_store(self.store, self.config)
+            setup_mooncake_store(self.store, self.config)
             logger.info("Mooncake store setup completed successfully")
 
         except ValueError as e:

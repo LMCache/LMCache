@@ -13,7 +13,7 @@ from lmcache.v1.lookup_client.abstract_client import LookupClientInterface
 from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.storage_backend.connector.mooncakestore_connector import (
     MooncakeStoreConfig,
-    _setup_mooncake_store,
+    setup_mooncake_store,
 )
 
 logger = init_logger(__name__)
@@ -43,7 +43,7 @@ class MooncakeLookupClient(LookupClientInterface):
                 "master_server_address": master_addr,
             },
         )
-        _setup_mooncake_store(self.store, lookup_config)
+        setup_mooncake_store(self.store, lookup_config)
 
         # Initialize token database for processing tokens
         assert isinstance(config, LMCacheEngineConfig), (
