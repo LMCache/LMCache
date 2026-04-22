@@ -290,8 +290,10 @@ def init_observability(obs_config: ObservabilityConfig) -> EventBus:
         # First Party
         from lmcache.v1.mp_observability.subscribers.metrics import (
             L0LifecycleSubscriber,
+            L1FailureMetricsSubscriber,
             L1LifecycleSubscriber,
             L1MetricsSubscriber,
+            L2FailureMetricsSubscriber,
             L2MetricsSubscriber,
             SMMetricsSubscriber,
         )
@@ -300,7 +302,9 @@ def init_observability(obs_config: ObservabilityConfig) -> EventBus:
         bus.register_subscriber(L0LifecycleSubscriber(sample_rate=sample_rate))
         bus.register_subscriber(L1MetricsSubscriber())
         bus.register_subscriber(L1LifecycleSubscriber(sample_rate=sample_rate))
+        bus.register_subscriber(L1FailureMetricsSubscriber())
         bus.register_subscriber(L2MetricsSubscriber())
+        bus.register_subscriber(L2FailureMetricsSubscriber())
         bus.register_subscriber(SMMetricsSubscriber())
 
     if obs_config.logging_enabled:
