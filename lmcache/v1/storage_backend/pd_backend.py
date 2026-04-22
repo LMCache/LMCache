@@ -212,11 +212,6 @@ class PDBackend(AllocatorBackendInterface):
         # Started after transfer_channel init
         self._nixl_thread: threading.Thread | None = None
 
-        # Direct registration mode: when True, vLLM's KV cache is registered
-        # directly with NIXL instead of using an intermediate pd_buffer.
-        self.use_direct_registration = getattr(config, "pd_direct_registration", False)
-        self.external_kv_caches: dict[str, "torch.Tensor"] | None = None
-
         self.memory_allocator = self.initialize_allocator(config, metadata)
         assert isinstance(self.memory_allocator, PagedCpuGpuMemoryAllocator)
 
@@ -343,75 +338,6 @@ class PDBackend(AllocatorBackendInterface):
 
     def get_allocator_backend(self):
         return self
-
-    def register_external_kv_caches(
-        self,
-        kv_caches: dict[str, "torch.Tensor"],
-        page_size: int | None = None,
-    ) -> None:
-        """Register vLLM's KV cache tensors directly with NIXL.
-
-        Called by LMCacheConnectorV1 after vLLM's register_kv_caches().
-        This enables zero-copy DPD transfer by eliminating the pd_buffer.
-
-        Args:
-            kv_caches: Dict mapping layer names to KV cache tensors.
-                Each tensor is the full paged KV buffer for one layer.
-            page_size: Transfer descriptor granularity in bytes.
-                If None, uses the memory allocator's align_bytes.
-        """
-        if not self.use_direct_registration:
-            logger.info(
-                "register_external_kv_caches called but "
-                "pd_direct_registration is False — skipping"
-            )
-            return
-
-        self.external_kv_caches = kv_caches
-
-        # Build memory regions from KV cache tensors
-        memory_regions: list[tuple[int, int, int, str]] = []
-        for layer_name, kv_tensor in kv_caches.items():
-            base_addr = kv_tensor.data_ptr()
-            size = kv_tensor.nelement() * kv_tensor.element_size()
-            memory_regions.append((base_addr, size, self.tp_rank, layer_name))
-
-        if page_size is None:
-            page_size = self.memory_allocator.gpu_allocator.align_bytes
-
-        # Re-initialize the transfer channel with direct memory regions
-        # First Party
-        from lmcache.v1.transfer_channel.nixl_channel import NixlAgentWrapper
-
-        nixl_wrapper = NixlAgentWrapper.from_memory_regions(
-            memory_regions=memory_regions,
-            page_size=page_size,
-            tp_rank=self.tp_rank,
-            backends=getattr(self, "_nixl_backends", ["UCX"]),
-        )
-
-        # Replace the transfer channel's nixl_wrapper
-        if hasattr(self.transfer_channel, "nixl_wrapper"):
-            old_wrapper = self.transfer_channel.nixl_wrapper
-            # Clean up old wrapper
-            old_wrapper.agent.deregister_memory(old_wrapper.reg_descs)
-            old_wrapper.agent.release_dlist_handle(old_wrapper.xfer_handler)
-
-            self.transfer_channel.nixl_wrapper = nixl_wrapper  # type: ignore[attr-defined]
-            self.transfer_channel.nixl_agent = nixl_wrapper.agent  # type: ignore[attr-defined]
-
-            logger.info(
-                "Registered %d external KV cache regions with NIXL "
-                "(direct registration mode, page_size=%d)",
-                len(memory_regions),
-                page_size,
-            )
-        else:
-            logger.warning(
-                "Transfer channel has no nixl_wrapper attribute; "
-                "direct registration created a new NIXL agent but "
-                "could not replace the transfer channel's wrapper"
-            )
 
     def allocate(
         self,

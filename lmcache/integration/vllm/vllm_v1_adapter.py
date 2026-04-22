@@ -738,13 +738,6 @@ class LMCacheConnectorV1Impl:
         self._build_kv_layer_groups()
         self._manager.post_init()
 
-        # Register vLLM's KV cache tensors directly with NIXL
-        if self.lmcache_engine is not None:
-            sm = self.lmcache_engine.storage_manager
-            if sm is not None and sm.allocator_backend is not None:
-                if hasattr(sm.allocator_backend, "register_external_kv_caches"):
-                    sm.allocator_backend.register_external_kv_caches(kv_caches)
-
     @_lmcache_nvtx_annotate
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
         """Start loading the KV cache from the connector buffer to vLLM's

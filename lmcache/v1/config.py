@@ -226,11 +226,6 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
         "default": False,
         "env_converter": _to_bool,
     },
-    "pd_direct_registration": {
-        "type": bool,
-        "default": False,
-        "env_converter": _to_bool,
-    },
     "pd_bidirectional": {
         "type": bool,
         "default": False,

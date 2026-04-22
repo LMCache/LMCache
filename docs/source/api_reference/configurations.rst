@@ -278,9 +278,6 @@ Settings for disaggregated prefill functionality. The latest/default PD is imple
    * - pd_peer_query_port
      - LMCACHE_PD_PEER_QUERY_PORT
      - ZMQ ports for the bidirectional cache query channel (one per TP rank). Required on both prefiller and decoder when pd_bidirectional=true. Example: [7500, 7501, 7502, 7503]
-   * - pd_direct_registration
-     - LMCACHE_PD_DIRECT_REGISTRATION
-     - When true, registers vLLM's KV cache tensors directly with NIXL instead of using the pd_buffer. Enables RDMA read/write directly from/to vLLM's KV cache pages. Values: true/false. Default: false
 
 P2P Backend Configurations
 --------------------------
