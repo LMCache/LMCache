@@ -427,6 +427,7 @@ class LocalDiskBackend(StorageBackendInterface):
     ) -> list[MemoryObj]:
         mem_objs: list[MemoryObj] = []
         paths: list[str] = []
+        hit_keys: list[CacheEngineKey] = []
 
         logger.debug(f"lookup_id: {lookup_id}; Prefetching {len(keys)} keys from disk.")
         for key in keys:
@@ -475,16 +476,20 @@ class LocalDiskBackend(StorageBackendInterface):
                 return []
 
             self.dict[key].pin()
-
-            # NOTE(Jiayi): Currently, we consider prefetch as cache hit.
-            # Update cache recency
-            self.cache_policy.update_on_hit(key, self.dict)
+            hit_keys.append(key)
 
             self.disk_lock.release()
             logger.debug(f"Prefetching {key} from disk.")
             memory_obj.pin()
             mem_objs.append(memory_obj)
             paths.append(path)
+
+        # NOTE(Jiayi): Currently, we consider prefetch as cache hit.
+        # Only record those hits after the whole batch is staged to avoid
+        # phantom cache-policy updates on partial-allocation failure.
+        with self.disk_lock:
+            for key in hit_keys:
+                self.cache_policy.update_on_hit(key, self.dict)
 
         return await self.disk_worker.submit_task(
             "prefetch",

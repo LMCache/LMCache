@@ -483,6 +483,7 @@ class TestPoolExhaustionHandling:
         pins/refs) must be fully rolled back, and result must be []."""
         keys = [create_test_key(400 + i) for i in range(3)]
         self._insert_fake_entries(local_disk_backend, keys)
+        original_order = list(local_disk_backend.dict.keys())
 
         mock_objs = [MagicMock(name=f"MemoryObj_{i}") for i in range(2)]
         allocate_returns = iter([mock_objs[0], mock_objs[1], None])
@@ -511,6 +512,9 @@ class TestPoolExhaustionHandling:
         for i, obj in enumerate(mock_objs):
             obj.unpin.assert_called_once()
             obj.ref_count_down.assert_called_once()
+
+        # Cache policy state must also roll back on failed batch prefetch.
+        assert list(local_disk_backend.dict.keys()) == original_order
 
         # disk_lock must be released
         acquired = local_disk_backend.disk_lock.acquire(timeout=1)
