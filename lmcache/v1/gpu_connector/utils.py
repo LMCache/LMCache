@@ -437,28 +437,9 @@ def discover_gpu_kv_format(
         )
 
 
-# -----------------------------------------------------------------------------
-# Format-aware scalar accessors.
-#
-# These helpers take a :data:`DiscoverableKVCache` and dispatch on
-# ``GPUKVFormat`` to pull a single scalar (num_layers, num_blocks,
-# head_size, etc.) out of the structure. The ``kv_caches`` parameter is
-# typed ``Any`` rather than ``DiscoverableKVCache`` on purpose: these
-# functions are the one layer that performs format-dispatched raw
-# indexing (``kv_caches.shape[i]``, ``kv_caches[0][j]``) — the exact
-# access pattern that mypy cannot verify against the recursive
-# ``Union[Tensor, list[...]]`` without pervasive casts. Callers pass a
-# ``DiscoverableKVCache`` value; the ``gpu_kv_format`` argument is the
-# proof that the structural indexing below is well-defined.
-# -----------------------------------------------------------------------------
-
-
 def get_num_layers(kv_caches: Any, gpu_kv_format: "lmc_ops.GPUKVFormat") -> int:
-    """Return the number of layers encoded in *kv_caches* for *gpu_kv_format*.
-
-    Args:
-        kv_caches: A :data:`DiscoverableKVCache` value.
-        gpu_kv_format: Format returned by :func:`discover_gpu_kv_format`.
+    """
+    Get the number of layers from the kv_caches
     """
     if gpu_kv_format == lmc_ops.GPUKVFormat.NB_NL_TWO_BS_NH_HS:
         return kv_caches.shape[1]
