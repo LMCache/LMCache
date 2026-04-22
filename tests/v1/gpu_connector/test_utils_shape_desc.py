@@ -15,6 +15,7 @@ pytestmark = pytest.mark.skipif(
 
 # First Party
 from lmcache.v1.gpu_connector.utils import (  # noqa: E402
+    ensure_contiguous_kv_caches,
     get_device,
     get_group_data_ptrs,
     get_layer_data_ptrs,
@@ -22,7 +23,6 @@ from lmcache.v1.gpu_connector.utils import (  # noqa: E402
     get_layer_kv_caches,
     get_layer_shape_signature,
     make_page_buffer_shape_desc,
-    prepare_for_discovery,
 )
 import lmcache.c_ops as lmc_ops  # noqa: E402
 
@@ -222,12 +222,12 @@ def test_get_layer_data_ptrs_cross_layer_rejects():
         get_layer_data_ptrs(big, fmt, layer_idx=0)
 
 
-def test_prepare_preserves_bare_tensor():
+def test_ensure_contiguous_preserves_bare_tensor():
     """A bare torch.Tensor input (cross-layer shape) must pass through
-    prepare_for_discovery unchanged — no list wrapping — so the
+    ensure_contiguous_kv_caches unchanged — no list wrapping — so the
     DiscoverableKVCache recursive union is respected end-to-end."""
     big = torch.empty(32, 80, 2, 16, 8, 64, dtype=torch.bfloat16, device="cuda")
-    out = prepare_for_discovery(big)
+    out = ensure_contiguous_kv_caches(big)
     assert isinstance(out, torch.Tensor)
     assert out is big
 

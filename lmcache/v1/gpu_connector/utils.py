@@ -33,8 +33,8 @@ logger = init_logger(__name__)
 # :class:`torch.Tensor` (e.g. vLLM cross-layer, TRT-LLM) or a list of
 # nested ``DiscoverableKVCache`` values (per-layer lists, SGLang's two-list
 # MHA, deeper nesting). Engine adapters that hand us other containers
-# (e.g. vLLM's ``dict[str, torch.Tensor]``) must pass through
-# :func:`prepare_for_discovery` first.
+# (e.g. vLLM's ``dict[str, torch.Tensor]``) are responsible for unwrapping
+# to this form before calling the helpers.
 DiscoverableKVCache = Union[torch.Tensor, list["DiscoverableKVCache"]]
 
 # Error message for accessing non-existent attributes in GPU KV Cache
@@ -144,28 +144,27 @@ def ensure_contiguous_kv_caches(
 
 @overload
 def ensure_contiguous_kv_caches(
-    kv_caches: list[torch.Tensor],
+    kv_caches: DiscoverableKVCache,
     kv_layout: str | None = None,
-) -> list[torch.Tensor]: ...
+) -> DiscoverableKVCache: ...
 
 
 def ensure_contiguous_kv_caches(
-    kv_caches: dict[str, torch.Tensor] | list[torch.Tensor],
+    kv_caches: "Union[dict[str, torch.Tensor], DiscoverableKVCache]",
     kv_layout: str | None = None,
-) -> dict[str, torch.Tensor] | list[torch.Tensor]:
+) -> "Union[dict[str, torch.Tensor], DiscoverableKVCache]":
     """Permute non-contiguous KV caches to contiguous physical shape.
 
-    LMCache assumes tensors have matching logical and physical views.
-    Known reasons for non-contiguity: HND format from vLLM.
-
-    Accepts both ``dict`` and ``list`` forms.
-    Returns *kv_caches* unchanged if already contiguous.
+    LMCache assumes tensors have matching logical and physical views;
+    known reason for non-contiguity is vLLM's HND layout. Returns the
+    input unchanged if already contiguous (or if the shape isn't one
+    the permute path handles — e.g. SGLang's nested lists).
     """
     if not any_non_contiguous(kv_caches):
         return kv_caches
 
     if isinstance(kv_caches, dict):
-        result: dict[str, torch.Tensor] | list[torch.Tensor] = dict(
+        result: "Union[dict[str, torch.Tensor], DiscoverableKVCache]" = dict(
             zip(
                 kv_caches.keys(),
                 permute_kv_caches_to_contiguous(list(kv_caches.values())),
@@ -173,7 +172,7 @@ def ensure_contiguous_kv_caches(
             )
         )
     else:
-        result = permute_kv_caches_to_contiguous(kv_caches)
+        result = permute_kv_caches_to_contiguous(cast(list[torch.Tensor], kv_caches))
 
     if kv_layout == "HND":
         logger.info("Permuted HND tensors to contiguous physical shape")
@@ -185,33 +184,6 @@ def ensure_contiguous_kv_caches(
         )
 
     return result
-
-
-def prepare_for_discovery(
-    kv_caches: "Union[dict[str, torch.Tensor], DiscoverableKVCache]",
-    layout_hints: "LayoutHints | None" = None,
-) -> DiscoverableKVCache:
-    """Bridge engine-specific KV-cache containers to the canonical
-    :data:`DiscoverableKVCache` form consumed by :func:`discover_gpu_kv_format`.
-
-    Applies :func:`ensure_contiguous_kv_caches` and, for dict inputs
-    (vLLM adapter contract), unwraps to positional values.
-
-    Args:
-        kv_caches: vLLM-style ``dict[str, Tensor]`` or any
-            :data:`DiscoverableKVCache` value.
-        layout_hints: Forwarded to :func:`ensure_contiguous_kv_caches`.
-
-    Returns:
-        A :data:`DiscoverableKVCache` value ready for
-        :func:`discover_gpu_kv_format`.
-    """
-    kv_caches = ensure_contiguous_kv_caches(
-        kv_caches, kv_layout=(layout_hints or {}).get("kv_layout")
-    )
-    if isinstance(kv_caches, dict):
-        return list(kv_caches.values())
-    return kv_caches
 
 
 def need_gpu_interm_buffer(lmcache_config: LMCacheEngineConfig):
