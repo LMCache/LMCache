@@ -836,7 +836,6 @@ def run_cache_server(
             RequestType.CB_STORE_PRE_COMPUTED,
             RequestType.CB_RETRIEVE_PRE_COMPUTED_V2,
             RequestType.CB_STORE_FINAL,
-            RequestType.REPORT_BLOCK_ALLOCATION,
         ],
         max_workers=mp_config.max_gpu_workers,
     )
@@ -849,6 +848,7 @@ def run_cache_server(
             RequestType.CLEAR,
             RequestType.CB_LOOKUP_PRE_COMPUTED_V2,
             RequestType.PING,
+            RequestType.REPORT_BLOCK_ALLOCATION,
         ],
         max_workers=mp_config.max_cpu_workers,
     )
