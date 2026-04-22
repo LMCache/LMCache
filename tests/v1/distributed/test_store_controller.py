@@ -388,19 +388,23 @@ class TestStoreControllerSingleAdapter:
         assert ok, "Both batches should reach L2"
 
         # Every key must be updatable: read locks from both requests released.
-        ok = wait_for_condition(
-            lambda: all(
-                l1_manager.reserve_write(
+        # ``reserve_write`` acquires a write lock on success, so release it
+        # via ``finish_write`` after each successful check — otherwise the
+        # second poll would find already-locked keys and time out.
+        def all_keys_updatable() -> bool:
+            for k in all_keys:
+                result = l1_manager.reserve_write(
                     keys=[k],
                     is_temporary=[False],
                     layout_desc=layout,
                     mode="update",
-                )[k][1]
-                is not None
-                for k in all_keys
-            ),
-            timeout=5.0,
-        )
+                )
+                if result[k][1] is None:
+                    return False
+                l1_manager.finish_write([k])
+            return True
+
+        ok = wait_for_condition(all_keys_updatable, timeout=5.0)
         assert ok, "Read locks must be released for every concurrent request"
 
         ctrl.stop()
