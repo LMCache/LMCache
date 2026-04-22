@@ -67,7 +67,28 @@ export FLASHINFER_DISABLE_VERSION_CHECK=1
 "${DEFAULT_VENV_BIN}/python" -c 'import torch; print(f"default venv torch={torch.__version__}, torch.version.cuda={torch.version.cuda}")' 
 "${TEST_VENV_BIN}/python" -c 'import torch; print(f"test venv torch={torch.__version__}, torch.version.cuda={torch.version.cuda}")'
 
+echo "--- :wrench: Install sitecustomize.py in both venvs (transformers pre-import)"
+# The blend test runs prefiller in /opt/venv and decoder in
+# /workspace/.venv. Both launch vllm, which spawns a BG thread that
+# calls `import transformers` concurrently with the main thread's
+# later `from transformers import GenerationConfig, ...`. Pre-import
+# on the main thread via sitecustomize.py so the race is closed in
+# both venvs (see setup-env.sh for the full write-up).
+for site in \
+    /opt/venv/lib/python3.12/site-packages \
+    /workspace/.venv/lib/python3.12/site-packages; do
+    cat > "${site}/sitecustomize.py" <<'PY'
+try:
+    import transformers  # noqa: F401
+except Exception:
+    pass
+PY
+done
+
 echo "--- :python: Installing LMCache from source"
+# Skip setuptools_scm git describe; the repo carries non-PEP-440 tags
+# (nightly, nightly-cu13) that crash the newer vcs_versioning backend.
+export SETUPTOOLS_SCM_PRETEND_VERSION_FOR_LMCACHE="${SETUPTOOLS_SCM_PRETEND_VERSION_FOR_LMCACHE:-0.0.0+ci}"
 "${UV_BIN}" pip install -p "${DEFAULT_VENV_BIN}/python" -e . --no-build-isolation
 "${UV_BIN}" pip install -p "${TEST_VENV_BIN}/python" -e . --no-build-isolation
 # Work around openai_harmony vocab download/load issues for GPT-OSS (vLLM recipes troubleshooting).
