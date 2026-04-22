@@ -569,11 +569,14 @@ class MPCacheEngine:
                     ),
                 )
         tokens_retrieved = len(obj_keys) * self.chunk_size
+        session.update_retrieved_range(key.start, key.end)
         ed = time.perf_counter()
+        elapsed = ed - st
+        session.retrieve_time += elapsed
         logger.info(
             "Retrieved %d tokens in %.3f seconds",
             tokens_retrieved,
-            ed - st,
+            elapsed,
         )
 
         return event.ipc_handle(), True
@@ -693,6 +696,9 @@ class MPCacheEngine:
         session = self.session_manager.get_or_create(key.request_id)
         session.set_tokens(list(key.token_ids))
         session.lookup_ipc_key = key
+
+        # Record total tokens for hit-rate tracking
+        session.total_tokens = len(key.token_ids)
 
         obj_keys = ipc_key_to_object_keys(key, chunk_hashes)
 
@@ -919,6 +925,7 @@ class MPCacheEngine:
             "gpu_context_meta": gpu_context_meta,
             "active_sessions": self.session_manager.active_count(),
             "active_prefetch_jobs": self._active_prefetch_count(),
+            "hit_stats": self.session_manager.report_hit_stats(),
             "storage_manager": sm,
         }
 

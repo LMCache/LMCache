@@ -45,6 +45,12 @@ SAMPLE_STATUS = {
         },
     },
     "active_sessions": 3,
+    "hit_stats": {
+        "total_requests": 50,
+        "total_tokens": 12800,
+        "total_retrieved_tokens": 8960,
+        "hit_rate": 0.7,
+    },
     "storage_manager": {
         "is_healthy": True,
         "l1_manager": {
@@ -172,6 +178,14 @@ class TestDescribeKvcacheFields:
         assert m["eviction_policy"] == "LRU"
         assert m["cached_objects"] == 1024
         assert m["active_sessions"] == 3
+
+        # Hit statistics section (list)
+        assert "hit_stats" in m
+        hs = m["hit_stats"]
+        assert hs["total_requests"] == 50
+        assert hs["total_tokens"] == 12800
+        assert hs["retrieved_tokens"] == 8960
+        assert hs["hit_rate"] == "70.0%"
 
         # Per-model section (list)
         assert "models" in m

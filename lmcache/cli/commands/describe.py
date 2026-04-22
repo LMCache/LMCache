@@ -110,6 +110,7 @@ class KVCacheDescriber:
     def describe(self) -> None:
         """Run all section builders and emit."""
         self.add_overview()
+        self.add_hit_stats()
         self.add_l1_storage()
         self.add_models()
         self.add_l2_adapters()
@@ -123,6 +124,35 @@ class KVCacheDescriber:
         self.metrics.add("url", "URL", self.base_url)
         self.metrics.add("engine_type", "Engine type", self.data.get("engine_type"))
         self.metrics.add("chunk_size", "Chunk size", self.data.get("chunk_size"))
+
+    def add_hit_stats(self) -> None:
+        """Cumulative hit statistics since server startup."""
+        hs = self.data.get("hit_stats")
+        if not hs:
+            return
+        sec = self.metrics.add_section("hit_stats", "Hit Statistics")
+        sec.add(
+            "total_requests",
+            "Total requests",
+            hs.get("total_requests"),
+        )
+        sec.add(
+            "total_tokens",
+            "Total tokens",
+            hs.get("total_tokens"),
+        )
+        sec.add(
+            "retrieved_tokens",
+            "Retrieved tokens (GPU hit)",
+            hs.get("total_retrieved_tokens"),
+        )
+        hit_rate = hs.get("hit_rate")
+        if hit_rate is not None:
+            sec.add(
+                "hit_rate",
+                "Hit rate",
+                f"{hit_rate * 100:.1f}%",
+            )
 
     def add_l1_storage(self) -> None:
         """L1 cache capacity, usage, eviction, and object count."""

@@ -33,8 +33,46 @@ class Session:
     last_prefix_hash: Any = None
     num_chunks_processed: int = 0
     created_at: float = field(default_factory=time.time)
+    total_tokens: int = 0
+    _retrieved_start: int = 0
+    _retrieved_end: int = 0
+    lookup_time: float = 0.0
+    retrieve_time: float = 0.0
+    store_time: float = 0.0
+    lookup_chunks: int = 0
+    store_chunks: int = 0
     lookup_ipc_key: Optional[IPCCacheEngineKey] = None
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+
+    @property
+    def retrieved_tokens(self) -> int:
+        """Number of retrieved tokens, derived from the range."""
+        return self._retrieved_end - self._retrieved_start
+
+    @property
+    def retrieve_chunks(self) -> int:
+        """Number of retrieved chunks, derived from the range."""
+        chunk_size = self.hasher.chunk_size
+        return (self._retrieved_end - self._retrieved_start) // chunk_size
+
+    def update_retrieved_range(self, start: int, end: int) -> None:
+        """Update the retrieved token range (idempotent union).
+
+        Multiple TP workers may call this with the same range;
+        the result is always the union of all reported ranges.
+
+        Args:
+            start: Start token index of the retrieved range.
+            end: End token index of the retrieved range.
+        """
+        with self._lock:
+            if self._retrieved_start == self._retrieved_end:
+                # First call: initialize the range
+                self._retrieved_start = start
+                self._retrieved_end = end
+            else:
+                self._retrieved_start = min(self._retrieved_start, start)
+                self._retrieved_end = max(self._retrieved_end, end)
 
     def set_tokens(self, full_token_ids: list[int]) -> None:
         """Update the token sequence (idempotent, replaces not extends).
@@ -127,6 +165,12 @@ class SessionManager:
         self._sessions: dict[str, Session] = {}
         self._lock = threading.Lock()
 
+        # Cumulative stats accumulated when sessions end
+        self._stats_lock = threading.Lock()
+        self._total_requests: int = 0
+        self._total_tokens: int = 0
+        self._total_retrieved_tokens: int = 0
+
     def get_or_create(self, request_id: str) -> Session:
         """Get existing session or create a new one.
 
@@ -144,22 +188,49 @@ class SessionManager:
                 logger.debug("Created session for request_id=%s", request_id)
             return self._sessions[request_id]
 
-    def remove(self, request_id: str) -> Optional[Session]:
-        """Remove a session by request_id.
+    def remove(self, request_id: str, reason: str = "normal") -> Optional[Session]:
+        """Remove a session and accumulate its stats.
 
         Args:
             request_id: Unique request identifier.
+            reason: Why the session is being removed, e.g. ``"normal"``
+                for an explicit end_session from vLLM or ``"expired"``
+                for TTL-based cleanup. Included in the END_SESSION log.
 
         Returns:
             The removed session, or None if no session was found.
         """
         with self._lock:
-            if request_id in self._sessions:
-                session = self._sessions[request_id]
-                del self._sessions[request_id]
-                logger.debug("Removed session for request_id=%s", request_id)
-                return session
-            return None
+            session = self._sessions.pop(request_id, None)
+        if session is not None:
+            with self._stats_lock:
+                self._total_requests += 1
+                self._total_tokens += session.total_tokens
+                self._total_retrieved_tokens += session.retrieved_tokens
+            hit_rate = (
+                session.retrieved_tokens / session.total_tokens
+                if session.total_tokens > 0
+                else 0.0
+            )
+            logger.info(
+                "END_SESSION[%s] reason=%s: total_tokens=%d, "
+                "retrieved_tokens=%d, hit_rate=%.2f%%, "
+                "lookup=%d chunks/%.3fs, "
+                "retrieve=%d chunks/%.3fs, "
+                "store=%d chunks/%.3fs",
+                request_id,
+                reason,
+                session.total_tokens,
+                session.retrieved_tokens,
+                hit_rate * 100,
+                session.lookup_chunks,
+                session.lookup_time,
+                session.retrieve_chunks,
+                session.retrieve_time,
+                session.store_chunks,
+                session.store_time,
+            )
+        return session
 
     def cleanup_expired(self) -> int:
         """Remove sessions that have exceeded their TTL.
@@ -168,13 +239,15 @@ class SessionManager:
             Number of sessions removed.
         """
         now = time.time()
-        expired = []
         with self._lock:
-            for rid, session in self._sessions.items():
-                if now - session.created_at > self._ttl:
-                    expired.append(rid)
-            for rid in expired:
-                del self._sessions[rid]
+            expired = [
+                rid
+                for rid, s in self._sessions.items()
+                if now - s.created_at > self._ttl
+            ]
+
+        for rid in expired:
+            self.remove(rid, reason="expired")
 
         if expired:
             logger.info("Cleaned up %d expired sessions", len(expired))
@@ -188,3 +261,22 @@ class SessionManager:
         """
         with self._lock:
             return len(self._sessions)
+
+    def report_hit_stats(self) -> dict[str, int | float]:
+        """Return cumulative hit statistics.
+
+        Returns:
+            Dict with total_requests, total_tokens,
+            total_retrieved_tokens, and hit_rate.
+        """
+        with self._stats_lock:
+            total_req = self._total_requests
+            total_tok = self._total_tokens
+            retrieved_tok = self._total_retrieved_tokens
+        hit_rate = round(retrieved_tok / total_tok, 4) if total_tok > 0 else 0.0
+        return {
+            "total_requests": total_req,
+            "total_tokens": total_tok,
+            "total_retrieved_tokens": retrieved_tok,
+            "hit_rate": hit_rate,
+        }
