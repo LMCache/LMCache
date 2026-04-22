@@ -6,13 +6,14 @@
 # docs/source/getting_started/installation.rst
 # docs/production/docker_deployment.rst
 
-ARG CUDA_VERSION=12.8
+ARG CUDA_VERSION=12.9
 ARG UBUNTU_VERSION=24.04
+ARG BASE_IMAGE=nvcr.io/nvidia/cuda-dl-base:25.06-cuda${CUDA_VERSION}-devel-ubuntu${UBUNTU_VERSION}
 
 #################### BASE BUILD IMAGE ####################
 # Prepare basic build environment
 
-FROM nvcr.io/nvidia/cuda-dl-base:25.03-cuda${CUDA_VERSION}-devel-ubuntu${UBUNTU_VERSION} AS base
+FROM ${BASE_IMAGE} AS base
 
 ARG CUDA_VERSION
 ARG PYTHON_VERSION=3.12
@@ -37,13 +38,6 @@ RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
 
 WORKDIR /workspace
 
-# Install runtime dependencies
-COPY ./requirements/common.txt common.txt
-COPY ./requirements/cuda.txt cuda.txt
-RUN --mount=type=cache,target=/root/.cache/pip \
-    . /opt/venv/bin/activate && \
-    uv pip install -r cuda.txt
-
 # CUDA arch list used by torch
 ARG torch_cuda_arch_list='7.0 7.5 8.0 8.6 8.9 9.0 10.0 12.0+PTX'
 ENV TORCH_CUDA_ARCH_LIST=${torch_cuda_arch_list}
@@ -64,6 +58,7 @@ ENV MAX_JOBS=${max_jobs}
 ARG nvcc_threads=8
 ENV NVCC_THREADS=$nvcc_threads
 
+ARG CUDA_VERSION
 ARG VLLM_VERSION=nightly
 
 RUN --mount=type=cache,target=/root/.cache/pip \
@@ -82,16 +77,16 @@ WORKDIR /workspace/LMCache
 RUN --mount=type=cache,target=/root/.cache/ccache,id=ccache \
     --mount=type=cache,target=/root/.cache/uv,id=uv-cache,sharing=locked \
     . /opt/venv/bin/activate && \
+    CUDA_TAG=cu$(echo ${CUDA_VERSION} | tr -d '.') && \
     if [ "$VLLM_VERSION" = "nightly" ]; then \
         uv pip install --prerelease=allow \
             'vllm[runai,tensorizer,flashinfer]' \
-            'triton-kernels @ git+https://github.com/triton-lang/triton.git@v3.5.0#subdirectory=python/triton_kernels' \
-            --extra-index-url https://wheels.vllm.ai/nightly \
+            --extra-index-url https://wheels.vllm.ai/nightly/${CUDA_TAG} \
+            --extra-index-url https://download.pytorch.org/whl/${CUDA_TAG} \
             --index-strategy unsafe-best-match ; \
     else \
         uv pip install --prerelease=allow \
-            "vllm[runai,tensorizer,flashinfer]==${VLLM_VERSION}" \
-            'triton-kernels @ git+https://github.com/triton-lang/triton.git@v3.5.0#subdirectory=python/triton_kernels' ; \
+            "vllm[runai,tensorizer,flashinfer]==${VLLM_VERSION}" ; \
     fi && \
     python3 -c 'import torch; print("TORCH=", torch.__version__)' && \
     python3 setup.py bdist_wheel --dist-dir=dist_lmcache && \
@@ -100,17 +95,40 @@ RUN --mount=type=cache,target=/root/.cache/ccache,id=ccache \
 WORKDIR /workspace
 ENTRYPOINT ["/opt/venv/bin/vllm", "serve"]
 
-#################### vLLM IMAGE & LMCache (Release) #######################
+#################### vLLM IMAGE & LMCache (Release, cu12) #######################
 # Integrate vLLM and LMCache stable releases, and expose vLLM OpenAI API
 
 FROM base AS image-release
 
 # Install LMCache and vLLM stable releases.
-# It is imperative that LMCache uses the same torch version as the 
+# It is imperative that LMCache uses the same torch version as the
 # vLLM stable release.
 RUN . /opt/venv/bin/activate && \
     uv pip install --prerelease=allow vllm[runai,tensorizer,flashinfer] && \
     uv pip install lmcache --verbose
+
+WORKDIR /workspace
+ENTRYPOINT ["/opt/venv/bin/vllm", "serve"]
+
+#################### vLLM IMAGE & LMCache (Release, cu13) #######################
+# Installs stable vLLM with cu13 index and lmcache from the v{tag}-cu13 GitHub Release.
+
+FROM base AS image-release-cu13
+
+ARG CUDA_VERSION
+ARG LMCACHE_VERSION
+
+RUN . /opt/venv/bin/activate && \
+    CUDA_TAG=cu$(echo ${CUDA_VERSION} | tr -d '.') && \
+    VER=$(echo ${LMCACHE_VERSION} | sed 's/^v//') && \
+    uv pip install --prerelease=allow \
+        vllm[runai,tensorizer,flashinfer] \
+        --extra-index-url https://download.pytorch.org/whl/${CUDA_TAG} \
+        --index-strategy unsafe-best-match && \
+    uv pip install lmcache==${VER} \
+        --extra-index-url https://download.pytorch.org/whl/${CUDA_TAG} \
+        --find-links https://github.com/LMCache/LMCache/releases/expanded_assets/v${VER}-cu13 \
+        --index-strategy unsafe-best-match --verbose
 
 WORKDIR /workspace
 ENTRYPOINT ["/opt/venv/bin/vllm", "serve"]

@@ -42,25 +42,30 @@ echo "vLLM baseline port: $VLLM_BASELINE_PORT"
 echo "Results dir: $RESULTS_DIR"
 echo ""
 
-# ── Step 1: Launch native processes ──────────────────────────
-echo "============================================"
-echo "=== Launching native processes ==="
-echo "============================================"
-if ! "${SCRIPT_DIR}/launch-processes.sh"; then
-    echo "Failed to launch processes"
-    exit 1
-fi
-echo ""
+# Tests that handle their own server lifecycle (different GPU/model config)
+SELF_CONTAINED_TESTS=" deadlock "
 
-# ── Step 2: Wait for vLLM to be ready ───────────────────────
-echo "============================================"
-echo "=== Waiting for vLLM to be ready ==="
-echo "============================================"
-if ! "${SCRIPT_DIR}/wait-for-servers.sh"; then
-    echo "vLLM failed to become ready"
-    exit 1
+if [[ "$SELF_CONTAINED_TESTS" != *" $TEST_NAME "* ]]; then
+    # ── Step 1: Launch native processes ──────────────────────────
+    echo "============================================"
+    echo "=== Launching native processes ==="
+    echo "============================================"
+    if ! "${SCRIPT_DIR}/launch-processes.sh"; then
+        echo "Failed to launch processes"
+        exit 1
+    fi
+    echo ""
+
+    # ── Step 2: Wait for vLLM to be ready ───────────────────────
+    echo "============================================"
+    echo "=== Waiting for vLLM to be ready ==="
+    echo "============================================"
+    if ! "${SCRIPT_DIR}/wait-for-servers.sh"; then
+        echo "vLLM failed to become ready"
+        exit 1
+    fi
+    echo ""
 fi
-echo ""
 
 # ── Step 3: Run the requested test ──────────────────────────
 echo "============================================"
@@ -83,9 +88,12 @@ case "$TEST_NAME" in
     fault_tolerance)
         exec_script="${SCRIPT_DIR}/run-fault-tolerance.sh"
         ;;
+    deadlock)
+        exec_script="${SCRIPT_DIR}/run-deadlock.sh"
+        ;;
     *)
         echo "Unknown test: $TEST_NAME"
-        echo "Valid tests: lm_eval, vllm_bench, long_doc_qa, long_doc_qa_l2, fault_tolerance"
+        echo "Valid tests: lm_eval, vllm_bench, long_doc_qa, long_doc_qa_l2, fault_tolerance, deadlock"
         exit 1
         ;;
 esac

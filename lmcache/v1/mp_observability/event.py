@@ -50,8 +50,32 @@ class EventType(Enum):
     MP_LOOKUP_PREFETCH_START = "mp.lookup_prefetch.start"
     MP_LOOKUP_PREFETCH_END = "mp.lookup_prefetch.end"
 
+    # Chunk hash logging events
+    MP_LOOKUP = "mp.lookup"
+
+    # MP Server lifecycle sentinels (CPU-synchronous)
+    MP_REQUEST_START = "mp.request.start"
+    MP_RETRIEVE_SUBMITTED = "mp.retrieve.submitted"
+    MP_STORE_SUBMITTED = "mp.store.submitted"
+    MP_SESSION_END = "mp.session.end"
+
     # vLLM block allocation events
     MP_VLLM_BLOCK_ALLOCATION = "mp.vllm.block_allocation"
+
+    # vLLM end session events
+    MP_VLLM_END_SESSION = "mp.vllm.end_session"
+
+    # Trace recording — unified function-call entry event used by the
+    # ``@enable_tracing`` decorator.  Metadata layout:
+    #   ``qualname`` (str):   fully-qualified function name
+    #   ``args``     (dict):  name -> raw Python value (codec-encoded at
+    #                         record time by the recorder)
+    #   ``t_mono``   (float): ``time.monotonic()`` captured at publish
+    #                         time, so it is comparable to
+    #                         ``Event.timestamp`` (wall-clock) even
+    #                         though the drain thread processes the
+    #                         event later
+    TRACE_CALL = "trace.call"
 
 
 @dataclass
@@ -65,7 +89,8 @@ class Event:
             drain thread processes the event.  For CUDA host-callback events
             this captures GPU-accurate timing.
         metadata: Flat key-value payload.  Contents depend on ``event_type``;
-            see the metadata contracts in DESIGN.md Section 2.7.
+            see the metadata contracts in
+            ``docs/design/v1/mp_observability/event-bus.md`` Section 2.7.
         session_id: Caller-provided ID for correlating start/end pairs.
     """
 
