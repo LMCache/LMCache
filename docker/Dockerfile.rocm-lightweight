@@ -6,13 +6,15 @@
 # --no-build-isolation to link against the ROCm torch in the base image.
 FROM vllm/vllm-openai-rocm:latest
 
-# Install build dependencies matching requirements/build.txt constraints
-RUN uv pip install --system --no-cache \
-    ninja \
-    "packaging>=24.2" \
-    "setuptools>=77.0.3,<81.0.0" \
-    "setuptools_scm>=8" \
-    wheel
+# ROCm GPU architectures — required during build (no GPU present)
+ARG PYTORCH_ROCM_ARCH="gfx942,gfx950"
+ENV PYTORCH_ROCM_ARCH=${PYTORCH_ROCM_ARCH}
+
+# Install build dependencies from the same source of truth as Dockerfile.rocm.
+# Note: We inline the deps here because the lightweight image does not COPY
+# the repo context. Keep in sync with requirements/build.txt.
+COPY requirements/build.txt /tmp/build.txt
+RUN uv pip install --system --no-cache -r /tmp/build.txt && rm /tmp/build.txt
 
 RUN BUILD_WITH_HIP=1 CXX=hipcc \
     uv pip install --system --no-cache --no-build-isolation --no-binary lmcache lmcache
