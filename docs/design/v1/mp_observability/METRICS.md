@@ -129,7 +129,7 @@ contribute to histograms; counters above always count all events.
 |---|---|---|---|---|
 | `lmcache_mp.l2_store_tasks` | `lmcache_mp_l2_store_tasks_total` | Counter | `L2_STORE_SUBMITTED` | +1 per event |
 | `lmcache_mp.l2_store_keys` | `lmcache_mp_l2_store_keys_total` | Counter | `L2_STORE_SUBMITTED` | `+key_count` |
-| `lmcache_mp.l2_store_completed` | `lmcache_mp_l2_store_completed_total` | Counter | `L2_STORE_COMPLETED` | +1 per event |
+| `lmcache_mp.l2_store_completed` | `lmcache_mp_l2_store_completed_total` | Counter (attr: `l2_name`) | `L2_STORE_COMPLETED` | +1 per event |
 | `lmcache_mp.l2_store_succeeded_keys` | `lmcache_mp_l2_store_succeeded_keys_total` | Counter | `L2_STORE_COMPLETED` | `+succeeded_count` |
 | `lmcache_mp.l2_store_failed_keys` | `lmcache_mp_l2_store_failed_keys_total` | Counter | `L2_STORE_COMPLETED` | `+failed_count` |
 
@@ -148,8 +148,17 @@ contribute to histograms; counters above always count all events.
 | `lmcache_mp.l2_prefetch_load_keys` | `lmcache_mp_l2_prefetch_load_keys_total` | Counter | `L2_PREFETCH_LOAD_SUBMITTED` | `+key_count` |
 | `lmcache_mp.l2_prefetch_loaded_keys` | `lmcache_mp_l2_prefetch_loaded_keys_total` | Counter | `L2_PREFETCH_LOAD_COMPLETED` | `+loaded_count` |
 | `lmcache_mp.l2_prefetch_failed_keys` | `lmcache_mp_l2_prefetch_failed_keys_total` | Counter | `L2_PREFETCH_LOAD_COMPLETED` | `+failed_count` |
+| `lmcache_mp.l2_load_completed` | `lmcache_mp_l2_load_completed_total` | Counter (attr: `l2_name`) | `L2_LOAD_TASK_COMPLETED` | +1 per event |
 
 **What it answers:** How effective is L2 prefetching? What is the L2 hit rate? How many keys fail to load?
+
+**Per-backend IOPS.**  `lmcache_mp.l2_store_completed` (attr `l2_name`) counts
+completed L1→L2 store tasks; `lmcache_mp.l2_load_completed` (attr `l2_name`)
+counts completed per-adapter L2→L1 load tasks.  Derive per-backend ops/sec on
+the dashboard with
+`rate(lmcache_mp_l2_store_completed_total{l2_name="..."}[1m])`
+(and the equivalent for loads).  No separate `*_iops` metric is exported — the
+raw counter keeps the window choice in the dashboard.
 
 ---
 

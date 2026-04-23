@@ -235,8 +235,8 @@ L2 Metrics
      - Counter
      - Number of keys submitted for L2 store.
    * - ``lmcache_mp.l2_store_completed``
-     - Counter
-     - Number of L2 store tasks completed.
+     - Counter (attr: ``l2_name``)
+     - Number of L2 store tasks completed, labeled by adapter type.
    * - ``lmcache_mp.l2_store_succeeded_keys``
      - Counter
      - Number of keys successfully stored to L2.
@@ -264,6 +264,15 @@ L2 Metrics
    * - ``lmcache_mp.l2_prefetch_failed_keys``
      - Counter
      - Number of keys that failed to load from L2.
+   * - ``lmcache_mp.l2_load_completed``
+     - Counter (attr: ``l2_name``)
+     - Number of per-adapter L2 load tasks completed, labeled by adapter type.
+
+The ``l2_name``-labeled counters (``l2_store_completed`` and
+``l2_load_completed``) exist so dashboards can compute per-backend IOPS on
+demand via ``rate(lmcache_mp_l2_store_completed_total{l2_name="..."}[1m])``
+(and the equivalent for loads).  No separate ``*_iops`` metric is exported;
+keeping the raw counter lets dashboard users pick their own window.
 
 L0 (GPU) Block Lifecycle Histograms
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
