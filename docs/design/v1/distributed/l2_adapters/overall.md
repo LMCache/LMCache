@@ -157,10 +157,15 @@ _store_loop: poll wakes up
   ▼
 _process_new_keys(keys)
   │
-  ├─ 1. StorePolicy.select_store_targets(keys, adapters)
-  │     → dict[adapter_index, list[ObjectKey]]
+  ├─ 1. Group keys by shape (today: (model_name, kv_rank); L1 is a shared
+  │     pool so one drain may span models/parallelism configs with different
+  │     KV shapes, and each submit_store_task must see uniform (shape, dtype)).
   │
-  ├─ 2. For each adapter target:
+  ├─ 2. For each per-shape group:
+  │     StorePolicy.select_store_targets(group_keys, adapters)
+  │       → dict[adapter_index, list[ObjectKey]]
+  │
+  ├─ 3. For each adapter target:
   │     L1Manager.reserve_read(target_keys)  → get MemoryObj + read lock
   │     adapter.submit_store_task(keys, objs)
   │     Track as InFlightStoreTask
@@ -177,9 +182,9 @@ _advance_request(task_key, task)  [state transition]
   ▼
 _finalize_store(task_key, task)  [terminal execution]
   │
-  ├─ 3. L1Manager.finish_read(read_locked_keys)  → release read locks
+  ├─ 4. L1Manager.finish_read(read_locked_keys)  → release read locks
   │
-  ├─ 4. If success: StorePolicy.select_l1_deletions(keys) → delete from L1
+  ├─ 5. If success: StorePolicy.select_l1_deletions(keys) → delete from L1
   │     If failure: log warning (best-effort, no retry)
   │
   ▼

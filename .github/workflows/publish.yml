@@ -92,6 +92,9 @@ jobs:
                 # for setuptools-scm
                 fetch-depth: 0
 
+            - name: Remove non-release tags
+              run: git tag -l | grep -vE '^v[0-9]+\.[0-9]+\.[0-9]+$' | xargs -r git tag -d
+
             - name: Free disk space
               uses: ./.github/actions/free-disk-space
 
@@ -154,6 +157,9 @@ jobs:
               with:
                 fetch-depth: 0
 
+            - name: Remove non-release tags
+              run: git tag -l | grep -vE '^v[0-9]+\.[0-9]+\.[0-9]+$' | xargs -r git tag -d
+
             - name: Setup Python 3.13
               uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
               with:
@@ -172,6 +178,12 @@ jobs:
               run: |
                 cp pyproject_cli.toml pyproject.toml
                 NO_CUDA_EXT=1 python -m build --wheel
+
+            - name: Smoke-test CLI wheel (no torch)
+              run: |
+                pip install dist/lmcache_cli-*.whl
+                python -c "import lmcache"
+                lmcache --help
 
             - name: Upload CLI release artifacts to GHA
               uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
@@ -215,6 +227,9 @@ jobs:
               with:
                 fetch-depth: 0
 
+            - name: Remove non-release tags
+              run: git tag -l | grep -vE '^v[0-9]+\.[0-9]+\.[0-9]+$' | xargs -r git tag -d
+
             - name: Login to DockerHub
               if: vars.DOCKERHUB_USERNAME != ''
               uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef # v3.6.0
@@ -241,7 +256,7 @@ jobs:
 
             - name: Get base version for cu13 wheel
               run: |
-                BASE=$(git describe --tags --abbrev=0 2>/dev/null | sed 's/^v//' || echo "0.0.0.dev")
+                BASE=$(git tag --list 'v[0-9]*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1 | sed 's/^v//' || echo "0.0.0.dev")
                 echo "CU130_VERSION=${BASE}" >> "$GITHUB_ENV"
 
             - name: Build cu130 CUDA wheels with cibuildwheel
@@ -537,6 +552,7 @@ jobs:
                   archive.ubuntu.com:80
                   security.ubuntu.com:80
                   astral.sh:443
+                  releases.astral.sh:443
                   objects.githubusercontent.com:443
                   pypi.org:443
                   files.pythonhosted.org:443
@@ -546,6 +562,7 @@ jobs:
                   layers.nvcr.io:443
                   wheels.vllm.ai:443
                   download.pytorch.org:443
+                  download-r2.pytorch.org:443
 
             - name: Login to DockerHub
               uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef # v3.6.0
@@ -567,7 +584,7 @@ jobs:
 
             - name: Get the latest tag (corresponds to release cut in publish-pypi job)
               run: |
-                echo "LATEST_TAG=$(git describe --tags --abbrev=0)" >> "$GITHUB_ENV"
+                echo "LATEST_TAG=$(git tag --list 'v[0-9]*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1)" >> "$GITHUB_ENV"
 
             - name: Build lmcache/vllm-openai container image (cu12.9)
               run: |
