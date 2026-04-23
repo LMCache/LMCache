@@ -655,16 +655,19 @@ class RustRawBlockBackend(StoragePluginInterface):
     ):
         """Batched put using io_uring"""
 
-        if self._raw is None:
-            raise RuntimeError("device is closed")
-
         # Collect all write requests
-        write_requests = []
-        valid_keys = []
-        valid_objs = []
+        write_requests: list[tuple[CacheEngineKey, int, bytes, MemoryObj]] = []
+        valid_keys: list[CacheEngineKey] = []
+        valid_objs: list[MemoryObj] = []
 
         # Track which items had inflight_io_count incremented
-        successfully_submitted = []
+        successfully_submitted: list[CacheEngineKey] = []
+
+        # Track which objects have incremented ref counts
+        objs_with_inc_ref = list(objs)
+
+        if self._raw is None:
+            raise RuntimeError("device is closed")
 
         write_error: Optional[Exception] = None
         try:
@@ -672,6 +675,7 @@ class RustRawBlockBackend(StoragePluginInterface):
                 with self._put_lock:
                     if key in self._put_tasks:
                         obj.ref_count_down()
+                        objs_with_inc_ref.remove(obj)
                         continue
                     self._put_tasks.add(key)
 
@@ -680,6 +684,7 @@ class RustRawBlockBackend(StoragePluginInterface):
                         with self._put_lock:
                             self._put_tasks.discard(key)
                         obj.ref_count_down()
+                        objs_with_inc_ref.remove(obj)
                         continue
                     while True:
                         try:
@@ -761,7 +766,7 @@ class RustRawBlockBackend(StoragePluginInterface):
                     self._inflight_io_count -= 1
                     self._last_io_ts = time.monotonic()
 
-            for obj in valid_objs:
+            for obj in objs_with_inc_ref:
                 obj.ref_count_down()
 
             with self._put_lock:
@@ -976,7 +981,10 @@ class RustRawBlockBackend(StoragePluginInterface):
                         "Failed to allocate memory for key %s",
                         self._dbg_key_short(key),
                     )
-                    break
+
+                    for obj in valid_objs:
+                        obj.ref_count_down()
+                    return []
 
                 total_len = int(meta.size)
                 assert (total_len % self.block_align) == 0

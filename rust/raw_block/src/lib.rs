@@ -590,7 +590,7 @@ impl RawBlockDevice {
                                     in_flight_cvar_clone.notify_all();
                                 }
                                 // Decrement per-batch in-flight count and notify if batch is complete
-                                {
+                                if batch_id != 0 {
                                     let batch_map = batch_in_flight_clone.lock().unwrap();
                                     if let Some((batch_count, batch_cvar)) =
                                         batch_map.get(&batch_id)
@@ -753,7 +753,7 @@ impl RawBlockDevice {
                                                 in_flight_cvar_clone.notify_all();
                                             }
                                             // Decrement per-batch in-flight count and notify if batch is complete
-                                            {
+                                            if batch_id != 0 {
                                                 let batch_map =
                                                     batch_in_flight_clone.lock().unwrap();
                                                 if let Some((batch_count, batch_cvar)) =
@@ -789,7 +789,7 @@ impl RawBlockDevice {
                             "io_uring worker shutting down",
                         )));
                         // Decrement per-batch in-flight count and notify if batch is complete
-                        {
+                        if batch_id != 0 {
                             let batch_map = batch_in_flight_clone.lock().unwrap();
                             if let Some((batch_count, batch_cvar)) = batch_map.get(&batch_id) {
                                 let prev_batch = batch_count.fetch_sub(1, Ordering::Relaxed);
@@ -858,7 +858,7 @@ impl RawBlockDevice {
                                 in_flight_cvar_clone.notify_all();
                             }
                             // Decrement per-batch in-flight count and notify if batch is complete
-                            {
+                            if batch_id != 0 {
                                 let batch_map = batch_in_flight_clone.lock().unwrap();
                                 if let Some((batch_count, batch_cvar)) = batch_map.get(&batch_id) {
                                     let prev_batch = batch_count.fetch_sub(1, Ordering::Relaxed);
@@ -883,7 +883,7 @@ impl RawBlockDevice {
                         "io_uring worker shutting down - request cancelled",
                     )));
                     // Decrement per-batch in-flight count and notify if batch is complete
-                    {
+                    if batch_id != 0 {
                         let batch_map = batch_in_flight_clone.lock().unwrap();
                         if let Some((batch_count, batch_cvar)) = batch_map.get(&batch_id) {
                             let prev_batch = batch_count.fetch_sub(1, Ordering::Relaxed);
