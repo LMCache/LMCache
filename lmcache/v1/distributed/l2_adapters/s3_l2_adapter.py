@@ -784,7 +784,14 @@ class S3L2Adapter(L2AdapterInterface):
                 success = False
                 last_error = str(result)
                 continue
-            size = obj.get_physical_size()
+            # Use logical size (``get_size``) to match the number of
+            # bytes actually PUT to S3 via ``obj.byte_array`` — which
+            # excludes any alignment padding in the underlying buffer.
+            # ``get_physical_size`` would inflate ``total_bytes_used``
+            # relative to the on-wire payload and cause premature
+            # aggregate-watermark eviction. Matches the convention used
+            # by ``native_connector_l2_adapter`` and ``mock_l2_adapter``.
+            size = obj.get_size()
             with self._lock:
                 is_new = key not in self._key_sizes
                 self._key_sizes[key] = size
