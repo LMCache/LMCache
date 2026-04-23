@@ -65,7 +65,9 @@ class LayoutHints(TypedDict, total=False):
     kv_layout: Literal["NHD", "HND"]
 
 
-def permute_to_contiguous_view(kv_caches: DiscoverableKVCache) -> DiscoverableKVCache:
+def attempt_permute_to_contiguous_view(
+    kv_caches: DiscoverableKVCache,
+) -> DiscoverableKVCache:
     """Return a contiguous view of *kv_caches*, metadata-only (no copy).
 
     For a tensor leaf: reorders the dims by stride magnitude so shape
@@ -97,7 +99,7 @@ def permute_to_contiguous_view(kv_caches: DiscoverableKVCache) -> DiscoverableKV
                 "(e.g. slicing or as_strided). Cannot recover contiguous view."
             )
         return result
-    return [permute_to_contiguous_view(sub) for sub in kv_caches]
+    return [attempt_permute_to_contiguous_view(sub) for sub in kv_caches]
 
 
 def any_non_contiguous(kv_caches: DiscoverableKVCache) -> bool:
@@ -127,7 +129,7 @@ def ensure_contiguous_kv_caches(
     if not any_non_contiguous(kv_caches):
         return kv_caches
 
-    result = permute_to_contiguous_view(kv_caches)
+    result = attempt_permute_to_contiguous_view(kv_caches)
 
     if kv_layout == "HND":
         logger.info("Permuted HND tensors to contiguous physical shape")
@@ -354,7 +356,7 @@ def discover_gpu_kv_format(
     # physical (not permuted-logical) layout — critical for HND format
     # detection. No-op if already contiguous; raises for non-permutation
     # sources of non-contiguity (slicing, as_strided).
-    probe = permute_to_contiguous_view(probe)
+    probe = attempt_permute_to_contiguous_view(probe)
 
     tensor_dims = list(probe.shape)
     dims_str = (
