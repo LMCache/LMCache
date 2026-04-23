@@ -537,6 +537,7 @@ jobs:
                   archive.ubuntu.com:80
                   security.ubuntu.com:80
                   astral.sh:443
+                  releases.astral.sh:443
                   objects.githubusercontent.com:443
                   pypi.org:443
                   files.pythonhosted.org:443
