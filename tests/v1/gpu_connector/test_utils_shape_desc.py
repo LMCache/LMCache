@@ -21,7 +21,6 @@ from lmcache.v1.gpu_connector.utils import (  # noqa: E402
     get_group_data_ptrs,
     get_head_size,
     get_layer_data_ptrs,
-    get_layer_shape_signature,
     get_num_heads,
     make_page_buffer_shape_desc,
 )
@@ -173,34 +172,6 @@ def test_get_group_data_ptrs_sglang_mha_groups_k_before_v():
         v[2].data_ptr(),
     ]
     assert ptrs == expected
-
-
-def test_shape_signature_equal_for_same_shape():
-    kv_caches = [torch.empty(2, 32, 16, 8, 64, dtype=torch.bfloat16) for _ in range(3)]
-    fmt = lmc_ops.GPUKVFormat.NL_X_TWO_NB_BS_NH_HS
-    sig0 = get_layer_shape_signature(kv_caches, fmt, layer_idx=0)
-    sig1 = get_layer_shape_signature(kv_caches, fmt, layer_idx=1)
-    assert sig0 == sig1
-    assert sig0 == (2, 8, 64)
-
-
-def test_shape_signature_distinguishes_num_heads():
-    kv_caches = [
-        torch.empty(2, 32, 16, 8, 64, dtype=torch.bfloat16),
-        torch.empty(2, 32, 16, 16, 64, dtype=torch.bfloat16),
-    ]
-    fmt = lmc_ops.GPUKVFormat.NL_X_TWO_NB_BS_NH_HS
-    sig0 = get_layer_shape_signature(kv_caches, fmt, layer_idx=0)
-    sig1 = get_layer_shape_signature(kv_caches, fmt, layer_idx=1)
-    assert sig0 != sig1
-    assert sig0[1] == 8 and sig1[1] == 16
-
-
-def test_shape_signature_mla_forces_nh_one():
-    kv_caches = [torch.empty(32, 16, 512, dtype=torch.bfloat16) for _ in range(2)]
-    fmt = lmc_ops.GPUKVFormat.NL_X_NB_BS_HS
-    sig = get_layer_shape_signature(kv_caches, fmt, layer_idx=0)
-    assert sig == (1, 1, 512)
 
 
 def test_get_group_data_ptrs_cross_layer_returns_single_base():

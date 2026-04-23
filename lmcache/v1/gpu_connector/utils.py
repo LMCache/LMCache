@@ -870,25 +870,6 @@ def get_device(kv_caches: DiscoverableKVCache) -> torch.device:
     return probe.device
 
 
-def get_layer_shape_signature(
-    kv_caches: DiscoverableKVCache,
-    gpu_kv_format: "lmc_ops.GPUKVFormat",
-    layer_idx: int,
-) -> tuple[int, ...]:
-    """Return a hashable grouping key ``(kv_size, num_heads, head_size)`` for
-    a single layer. Two layers with identical keys are kernel-equivalent
-    regardless of physical layout.
-    """
-    kv_size = 1 if is_mla(gpu_kv_format) else 2
-    nh = (
-        1
-        if is_mla(gpu_kv_format)
-        else get_num_heads(kv_caches, gpu_kv_format, layer_idx)
-    )
-    hs = get_head_size(kv_caches, gpu_kv_format, layer_idx)
-    return (kv_size, nh, hs)
-
-
 def make_page_buffer_shape_desc(
     kv_caches: DiscoverableKVCache,
     gpu_kv_format: "lmc_ops.GPUKVFormat",

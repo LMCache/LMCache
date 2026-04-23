@@ -101,8 +101,10 @@ class KVLayerGroupsManager:
         # First Party
         from lmcache.v1.gpu_connector.utils import (
             get_dtype,
-            get_layer_shape_signature,
+            get_head_size,
+            get_num_heads,
             get_num_layers,
+            is_mla,
             make_page_buffer_shape_desc,
         )
 
@@ -116,19 +118,24 @@ class KVLayerGroupsManager:
             logger.debug("No KV caches available, skipping KV layer groups building")
             return
 
-        groups_dict: dict[tuple[tuple[int, ...], torch.dtype], list[int]] = defaultdict(
+        # Grouping key: two layers are kernel-equivalent iff they share
+        # (kv_size, num_heads, head_size, dtype).
+        mla = is_mla(gpu_kv_format)
+        kv_size = 1 if mla else 2
+        groups_dict: dict[tuple[int, int, int, torch.dtype], list[int]] = defaultdict(
             list
         )
         for idx in range(num_layers):
-            sig = get_layer_shape_signature(kv_caches, gpu_kv_format, idx)
+            nh = 1 if mla else get_num_heads(kv_caches, gpu_kv_format, idx)
+            hs = get_head_size(kv_caches, gpu_kv_format, idx)
             dt = get_dtype(kv_caches, gpu_kv_format, idx)
-            groups_dict[(sig, dt)].append(idx)
+            groups_dict[(kv_size, nh, hs, dt)].append(idx)
 
         sorted_keys = sorted(groups_dict.keys(), key=lambda k: groups_dict[k][0])
 
         for key in sorted_keys:
             indices = groups_dict[key]
-            _, dt = key
+            _, _, _, dt = key
             shape_desc = make_page_buffer_shape_desc(
                 kv_caches,
                 gpu_kv_format,
