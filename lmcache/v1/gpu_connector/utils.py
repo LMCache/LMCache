@@ -65,7 +65,7 @@ class LayoutHints(TypedDict, total=False):
     kv_layout: Literal["NHD", "HND"]
 
 
-def permute_to_contiguous(tensor: torch.Tensor) -> torch.Tensor:
+def permute_to_contiguous_view(tensor: torch.Tensor) -> torch.Tensor:
     """Permute a tensor back to contiguous state (metadata-only, no copy).
 
     Assumption: the tensor is only non-contiguous because of a previous
@@ -96,17 +96,17 @@ def permute_to_contiguous(tensor: torch.Tensor) -> torch.Tensor:
     return result
 
 
-def permute_kv_caches_to_contiguous(
+def permute_kv_caches_to_contiguous_views(
     kv_caches: list[torch.Tensor],
 ) -> list[torch.Tensor]:
-    """Apply :func:`permute_to_contiguous` to each tensor in *kv_caches*.
+    """Apply :func:`permute_to_contiguous_view` to each tensor in *kv_caches*.
 
     The returned list shares the same underlying storage as the input.
     """
-    return [permute_to_contiguous(t) for t in kv_caches]
+    return [permute_to_contiguous_view(t) for t in kv_caches]
 
 
-def assert_contiguous(tensor: torch.Tensor) -> None:
+def assert_contiguous_and_aligned(tensor: torch.Tensor) -> None:
     """Assert that a tensor has a contiguous physical layout with zero offset.
 
     LMCache transfer kernels assume logical and physical views match
@@ -131,12 +131,14 @@ def any_non_contiguous(kv_caches: DiscoverableKVCache) -> bool:
     return any(any_non_contiguous(sub) for sub in kv_caches)
 
 
-def _permute_all_to_contiguous(kv_caches: DiscoverableKVCache) -> DiscoverableKVCache:
-    """Apply :func:`permute_to_contiguous` to every tensor leaf,
+def _permute_all_to_contiguous_views(
+    kv_caches: DiscoverableKVCache,
+) -> DiscoverableKVCache:
+    """Apply :func:`permute_to_contiguous_view` to every tensor leaf,
     preserving list structure."""
     if isinstance(kv_caches, torch.Tensor):
-        return permute_to_contiguous(kv_caches)
-    return [_permute_all_to_contiguous(sub) for sub in kv_caches]
+        return permute_to_contiguous_view(kv_caches)
+    return [_permute_all_to_contiguous_views(sub) for sub in kv_caches]
 
 
 def ensure_contiguous_kv_caches(
@@ -154,7 +156,7 @@ def ensure_contiguous_kv_caches(
     if not any_non_contiguous(kv_caches):
         return kv_caches
 
-    result = _permute_all_to_contiguous(kv_caches)
+    result = _permute_all_to_contiguous_views(kv_caches)
 
     if kv_layout == "HND":
         logger.info("Permuted HND tensors to contiguous physical shape")
@@ -378,7 +380,7 @@ def discover_gpu_kv_format(
         list_dims.append(len(probe))
         probe = probe[0]
     # probe is now the tensor
-    assert_contiguous(probe)
+    assert_contiguous_and_aligned(probe)
 
     tensor_dims = list(probe.shape)
     dims_str = (

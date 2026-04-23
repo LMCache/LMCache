@@ -65,9 +65,9 @@ class CudaIPCWrapper:
 
     def __init__(self, tensor: torch.Tensor):
         # First Party
-        from lmcache.v1.gpu_connector.utils import assert_contiguous
+        from lmcache.v1.gpu_connector.utils import assert_contiguous_and_aligned
 
-        assert_contiguous(tensor)
+        assert_contiguous_and_aligned(tensor)
 
         storage = tensor.untyped_storage()
         handle = storage._share_cuda_()

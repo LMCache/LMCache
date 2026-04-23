@@ -26,7 +26,7 @@ from lmcache.v1.gpu_connector.utils import (
     get_num_layers,
     get_page_buffer_size,
     get_tokens_per_layer,
-    permute_kv_caches_to_contiguous,
+    permute_kv_caches_to_contiguous_views,
 )
 from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
 from lmcache.v1.memory_management import GPUMemoryAllocator  # noqa: E501
@@ -136,8 +136,8 @@ class GPUConnectorInterface(metaclass=abc.ABCMeta):
             # Ensure contiguity on every call.  HND tensors from vLLM have a
             # non-contiguous logical view (NHD) that must be permuted back to
             # the physical (HND) shape for correct kernel indexing.
-            # permute_kv_caches_to_contiguous is a no-op when already contiguous.
-            self.kvcaches = permute_kv_caches_to_contiguous(self.kvcaches)
+            # permute_kv_caches_to_contiguous_views is a no-op when already contiguous.
+            self.kvcaches = permute_kv_caches_to_contiguous_views(self.kvcaches)
 
 
 class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
