@@ -155,17 +155,13 @@ class LMCacheConnector:
         )
         slot_mapping = load_metadata.slot_mapping.to(torch_device_type)
         offset = load_metadata.offset
-
-        assert isinstance(token_ids, torch.Tensor)
-        assert isinstance(slot_mapping, torch.Tensor)
-        assert (len(token_ids) - offset) == len(slot_mapping)
-
+        if (len(token_ids) - offset) != len(slot_mapping):
+            raise ValueError(
+                "Length of token_ids (minus offset) must match slot_mapping length"
+            )
         load_mask = torch.ones_like(token_ids, dtype=torch.bool)
         load_mask[:offset] = False
-
         ret_token_mask = self.lmcache_engine.retrieve(
-            token_ids,
-            mask=load_mask,
             kvcaches=self.kvcaches,
             slot_mapping=slot_mapping,
             offset=offset,
@@ -181,11 +177,8 @@ class LMCacheConnector:
         )
         slot_mapping = store_metadata.kv_indices.to(torch.int64).to(torch_device_type)
         offset = store_metadata.offset
-
-        assert isinstance(token_ids, torch.Tensor)
-        assert isinstance(slot_mapping, torch.Tensor)
-        assert len(token_ids) == len(slot_mapping)
-
+        if len(token_ids) != len(slot_mapping):
+            raise ValueError("Length of token_ids must match slot_mapping length")
         store_mask = torch.ones_like(token_ids, dtype=torch.bool)
 
         self.lmcache_engine.store(
