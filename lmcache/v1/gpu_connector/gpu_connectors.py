@@ -483,7 +483,7 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
                 num_blocks=self.num_blocks,
                 block_size=self.block_size,
             )
-        manager = self.metadata.kv_layer_groups_manager
+        klg_manager = self.metadata.kv_layer_groups_manager
 
         if self.use_gpu:
             tmp_buf_shapes = self.metadata.get_shapes(self.chunk_size)
@@ -495,7 +495,7 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
             ]
 
         self.group_kv_cache_pointers_on_gpu = []
-        for group in manager.kv_layer_groups:
+        for group in klg_manager.kv_layer_groups:
             ptrs = get_group_data_ptrs(
                 self.kvcaches, self.gpu_kv_format, group.layer_indices
             )
