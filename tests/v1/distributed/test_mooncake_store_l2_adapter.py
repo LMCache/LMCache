@@ -8,6 +8,7 @@ extension is not available.
 """
 
 # Standard
+from typing import Any
 import os
 import select
 
@@ -17,6 +18,10 @@ import torch
 
 # First Party
 from lmcache.v1.distributed.api import ObjectKey
+from lmcache.v1.distributed.internal_api import L1MemoryDesc
+from lmcache.v1.distributed.l2_adapters import (
+    mooncake_store_l2_adapter as mooncake_store_module,
+)
 from lmcache.v1.distributed.l2_adapters.config import (
     get_registered_l2_adapter_types,
     get_type_name_for_config,
@@ -71,6 +76,36 @@ def create_memory_obj(size: int = 256, fill_value: float = 1.0) -> TensorMemoryO
         dtype=torch.float32,
         address=0,
         phy_size=size * 4,
+        fmt=MemoryFormat.KV_2LTD,
+        ref_count=1,
+    )
+    return TensorMemoryObj(raw_data, metadata, parent_allocator=None)
+
+
+def create_buffer_memory_obj(
+    buffer: torch.Tensor,
+    offset_bytes: int,
+    size_bytes: int,
+    fill_value: float = 1.0,
+) -> TensorMemoryObj:
+    """Create a tensor-backed memory object from a slice of a buffer.
+
+    Args:
+        buffer: Backing tensor containing the bytes to expose.
+        offset_bytes: Byte offset where the memory object starts in ``buffer``.
+        size_bytes: Size of the memory object in bytes.
+        fill_value: Value used to initialize the exposed float32 view.
+
+    Returns:
+        A ``TensorMemoryObj`` describing the requested buffer slice.
+    """
+    raw_data = buffer[offset_bytes : offset_bytes + size_bytes].view(torch.float32)
+    raw_data.fill_(fill_value)
+    metadata = MemoryObjMetadata(
+        shape=torch.Size([size_bytes // 4]),
+        dtype=torch.float32,
+        address=offset_bytes,
+        phy_size=size_bytes,
         fmt=MemoryFormat.KV_2LTD,
         ref_count=1,
     )
@@ -133,6 +168,29 @@ class TestMooncakeStoreL2AdapterConfig:
         assert config.num_workers == 8
         assert "num_workers" not in config.setup_config
         assert config.setup_config["local_hostname"] == "10.0.0.1"
+
+    def test_from_dict_forwards_boolean_mooncake_keys_as_strings(self):
+        """Non-LMCache boolean keys should be forwarded as strings."""
+        config = MooncakeStoreL2AdapterConfig.from_dict(
+            {
+                "type": "mooncake_store",
+                "local_hostname": "127.0.0.1",
+                "mooncake_prefer_local_alloc": True,
+            }
+        )
+
+        assert config.setup_config["mooncake_prefer_local_alloc"] == "True"
+
+    def test_from_dict_forwards_unknown_keys(self):
+        """Unknown keys should be forwarded to mooncake unchanged."""
+        config = MooncakeStoreL2AdapterConfig.from_dict(
+            {
+                "type": "mooncake_store",
+                "experimental_key": "enabled",
+            }
+        )
+
+        assert config.setup_config["experimental_key"] == "enabled"
 
     def test_from_dict_strips_lmcache_only_keys(self):
         """LMCache-only keys (type, num_workers, eviction) should
@@ -240,6 +298,155 @@ class TestMooncakeStoreRegistration:
             create_l2_adapter_from_registry(config)
 
 
+@requires_mooncake
+class TestMooncakeStoreL1RegistrationFactory:
+    """Tests for Mooncake TCP/RDMA L1 registration factory behavior.
+
+    RDMA creation must receive a valid L1 memory descriptor; TCP creation
+    must not enable preregistration even if a descriptor is provided.
+    """
+
+    def test_factory_passes_disabled_l1_registration_for_tcp(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        # First Party
+        from lmcache import lmcache_mooncake
+        from lmcache.v1.distributed.l2_adapters import native_connector_l2_adapter
+
+        captured: dict[str, Any] = {}
+
+        class FakeClient:
+            def __init__(
+                self,
+                config: dict[str, str],
+                num_workers: int,
+                l1_registration,
+            ):
+                captured["config"] = config
+                captured["num_workers"] = num_workers
+                captured["l1_registration"] = l1_registration
+
+        monkeypatch.setattr(
+            lmcache_mooncake,
+            "LMCacheMooncakeClient",
+            FakeClient,
+        )
+        monkeypatch.setattr(
+            native_connector_l2_adapter,
+            "NativeConnectorL2Adapter",
+            lambda client: ("wrapped", client),
+        )
+
+        config = MooncakeStoreL2AdapterConfig.from_dict(
+            {
+                "type": "mooncake_store",
+                "local_hostname": "127.0.0.1",
+                "metadata_server": "P2PHANDSHAKE",
+                "num_workers": 3,
+                "protocol": "tcp",
+            }
+        )
+        l1_desc = L1MemoryDesc(ptr=123456, size=65536, align_bytes=4096)
+
+        adapter = mooncake_store_module._create_mooncake_store_l2_adapter(
+            config,
+            l1_memory_desc=l1_desc,
+        )
+        wrapped_adapter: Any = adapter
+
+        assert wrapped_adapter[0] == "wrapped"
+        assert captured["config"] == config.setup_config
+        assert captured["num_workers"] == 3
+        registration = captured["l1_registration"]
+        assert registration.enabled is False
+        assert registration.base == 0
+        assert registration.size == 0
+
+    def test_factory_passes_enabled_l1_registration_for_rdma(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        # First Party
+        from lmcache import lmcache_mooncake
+        from lmcache.v1.distributed.l2_adapters import native_connector_l2_adapter
+
+        captured: dict[str, Any] = {}
+
+        class FakeClient:
+            def __init__(
+                self,
+                config: dict[str, str],
+                num_workers: int,
+                l1_registration,
+            ):
+                captured["config"] = config
+                captured["num_workers"] = num_workers
+                captured["l1_registration"] = l1_registration
+
+        monkeypatch.setattr(
+            lmcache_mooncake,
+            "LMCacheMooncakeClient",
+            FakeClient,
+        )
+        monkeypatch.setattr(
+            native_connector_l2_adapter,
+            "NativeConnectorL2Adapter",
+            lambda client: ("wrapped", client),
+        )
+
+        config = MooncakeStoreL2AdapterConfig.from_dict(
+            {
+                "type": "mooncake_store",
+                "local_hostname": "127.0.0.1",
+                "metadata_server": "P2PHANDSHAKE",
+                "num_workers": 2,
+                "protocol": "rdma",
+            }
+        )
+        l1_desc = L1MemoryDesc(ptr=123456, size=65536, align_bytes=4096)
+
+        adapter = mooncake_store_module._create_mooncake_store_l2_adapter(
+            config,
+            l1_memory_desc=l1_desc,
+        )
+        wrapped_adapter: Any = adapter
+
+        assert wrapped_adapter[0] == "wrapped"
+        assert captured["config"] == config.setup_config
+        assert captured["num_workers"] == 2
+        registration = captured["l1_registration"]
+        assert registration.enabled is True
+        assert registration.base == l1_desc.ptr
+        assert registration.size == l1_desc.size
+
+    def test_factory_requires_l1_memory_descriptor_for_rdma(self):
+        config = MooncakeStoreL2AdapterConfig.from_dict(
+            {
+                "type": "mooncake_store",
+                "local_hostname": "127.0.0.1",
+                "protocol": "rdma",
+            }
+        )
+
+        with pytest.raises(ValueError, match="no L1 memory descriptor"):
+            mooncake_store_module._create_mooncake_store_l2_adapter(config)
+
+    def test_factory_rejects_invalid_l1_memory_descriptor_for_rdma(self):
+        config = MooncakeStoreL2AdapterConfig.from_dict(
+            {
+                "type": "mooncake_store",
+                "local_hostname": "127.0.0.1",
+                "protocol": "rdma",
+            }
+        )
+        invalid_desc = L1MemoryDesc(ptr=0, size=0, align_bytes=4096)
+
+        with pytest.raises(ValueError, match="invalid"):
+            mooncake_store_module._create_mooncake_store_l2_adapter(
+                config,
+                l1_memory_desc=invalid_desc,
+            )
+
+
 # =============================================================================
 # Integration Tests (require C++ Mooncake extension + running service)
 # =============================================================================
@@ -249,10 +456,19 @@ MOONCAKE_LOCAL_HOSTNAME = os.environ.get("MOONCAKE_LOCAL_HOSTNAME", "")
 MOONCAKE_METADATA_SERVER = os.environ.get(
     "MOONCAKE_METADATA_SERVER", "etcd://localhost:2379"
 )
+MOONCAKE_MASTER_SERVER_ADDRESS = os.environ.get(
+    "MOONCAKE_MASTER_SERVER_ADDRESS", "localhost:50051"
+)
+MOONCAKE_DEVICE_NAME = os.environ.get("MOONCAKE_DEVICE_NAME", "")
+MOONCAKE_RUN_RDMA_TESTS = os.environ.get("MOONCAKE_RUN_RDMA_TESTS") == "1"
 
 requires_mooncake_service = pytest.mark.skipif(
     not _native_mooncake_available() or not MOONCAKE_LOCAL_HOSTNAME,
     reason=("C++ Mooncake extension not available or MOONCAKE_LOCAL_HOSTNAME not set"),
+)
+requires_mooncake_rdma = pytest.mark.skipif(
+    not MOONCAKE_RUN_RDMA_TESTS,
+    reason="RDMA-specific Mooncake test requires MOONCAKE_RUN_RDMA_TESTS=1",
 )
 
 
@@ -453,5 +669,66 @@ class TestMooncakeStoreIntegration:
             assert adapter.get_store_event_fd() >= 0
             assert adapter.get_lookup_and_lock_event_fd() >= 0
             assert adapter.get_load_event_fd() >= 0
+        finally:
+            adapter.close()
+
+    @requires_mooncake_rdma
+    def test_buffer_backed_store_lookup_load(self):
+        """Store and load RDMA-preregistered objects backed by an explicit L1 buffer."""
+        # First Party
+        from lmcache.v1.distributed.l2_adapters import create_l2_adapter
+
+        page_size = 4096
+        obj_size_bytes = page_size * 16
+        l1_buffer = torch.empty(page_size * 256, dtype=torch.uint8, device="cpu")
+        l1_desc = L1MemoryDesc(
+            ptr=l1_buffer.data_ptr(),
+            size=l1_buffer.numel(),
+            align_bytes=page_size,
+        )
+
+        config = MooncakeStoreL2AdapterConfig.from_dict(
+            {
+                "type": "mooncake_store",
+                "local_hostname": MOONCAKE_LOCAL_HOSTNAME,
+                "metadata_server": MOONCAKE_METADATA_SERVER,
+                "master_server_address": MOONCAKE_MASTER_SERVER_ADDRESS,
+                "num_workers": 2,
+                "protocol": "rdma",
+                "device_name": MOONCAKE_DEVICE_NAME,
+            }
+        )
+        adapter = create_l2_adapter(config, l1_memory_desc=l1_desc)
+        try:
+            key = create_object_key(9001, model_name="preregister_model")
+            store_obj = create_buffer_memory_obj(
+                l1_buffer,
+                offset_bytes=0,
+                size_bytes=obj_size_bytes,
+                fill_value=6.25,
+            )
+            load_obj = create_buffer_memory_obj(
+                l1_buffer,
+                offset_bytes=obj_size_bytes * 2,
+                size_bytes=obj_size_bytes,
+                fill_value=0.0,
+            )
+
+            store_tid = adapter.submit_store_task([key], [store_obj])
+            assert wait_for_event_fd(adapter.get_store_event_fd())
+            assert adapter.pop_completed_store_tasks()[store_tid] is True
+
+            lookup_tid = adapter.submit_lookup_and_lock_task([key])
+            assert wait_for_event_fd(adapter.get_lookup_and_lock_event_fd())
+            lookup_bitmap = adapter.query_lookup_and_lock_result(lookup_tid)
+            assert lookup_bitmap.test(0) is True
+
+            load_tid = adapter.submit_load_task([key], [load_obj])
+            assert wait_for_event_fd(adapter.get_load_event_fd())
+            load_bitmap = adapter.query_load_result(load_tid)
+            assert load_bitmap.test(0) is True
+            assert torch.equal(load_obj.tensor, store_obj.tensor)
+
+            adapter.submit_unlock([key])
         finally:
             adapter.close()

@@ -337,6 +337,12 @@ logging, tracing).
    * - ``--prometheus-port``
      - ``9090``
      - Port for the Prometheus ``/metrics`` endpoint.
+   * - ``--service-instance-id``
+     - *(unset, default UUID v4)*
+     - Identifier for this MP server instance, attached as the OTel
+       Resource attribute ``service.instance.id`` on every metric and
+       span. When the flag is not passed, defaults to a random UUID v4.
+       Pass ``--service-instance-id=""`` to force an empty value.
 
 vLLM Client Configuration
 --------------------------
