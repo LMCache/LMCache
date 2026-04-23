@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from collections import defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Optional
 
 # Third Party
@@ -34,11 +34,6 @@ class KVLayerGroupInfo:
     dtype: torch.dtype
     """Torch dtype of the KV cache tensors for this group."""
 
-    _layer_indices_set: set[int] = field(init=False, repr=False)
-
-    def __post_init__(self):
-        self._layer_indices_set = set(self.layer_indices)
-
     def __repr__(self) -> str:
         if not self.layer_indices:
             indices_repr = "[]"
@@ -62,10 +57,6 @@ class KVLayerGroupInfo:
     def hidden_dim_size(self) -> int:
         """Hidden dimension size (``num_heads * head_size``)."""
         return self.shape_desc.nh * self.shape_desc.hs
-
-    def contains_layer(self, layer_idx: int) -> bool:
-        """Return True if *layer_idx* is in this group."""
-        return layer_idx in self._layer_indices_set
 
 
 class KVLayerGroupsManager:
@@ -164,7 +155,9 @@ class KVLayerGroupsManager:
     ) -> "KVLayerGroupsManager":
         """Construct from pre-built groups, bypassing the grouping pass.
 
-        Intended for test fixtures and callers that already hold
+        Test-only: production code should call ``__init__`` with a
+        ``DiscoverableKVCache`` so the manager owns the grouping logic
+        end-to-end. This shortcut exists for fixtures that already hold
         :class:`KVLayerGroupInfo` instances.
 
         Args:
@@ -187,18 +180,6 @@ class KVLayerGroupsManager:
     def num_groups(self) -> int:
         """Number of KV layer groups."""
         return len(self.kv_layer_groups)
-
-    def get_group_by_layer_idx(self, layer_idx: int) -> Optional[KVLayerGroupInfo]:
-        """Return the group containing *layer_idx*, or ``None`` if absent."""
-        for group in self.kv_layer_groups:
-            if group.contains_layer(layer_idx):
-                return group
-        return None
-
-    def get_layer_dtype(self, layer_idx: int) -> Optional[torch.dtype]:
-        """Return the dtype for *layer_idx*, or ``None`` if not found."""
-        group = self.get_group_by_layer_idx(layer_idx)
-        return group.dtype if group else None
 
     def get_shape_desc(self, group_idx: int) -> "lmc_ops.PageBufferShapeDesc":
         """Return the :class:`PageBufferShapeDesc` for *group_idx*.

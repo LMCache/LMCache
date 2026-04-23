@@ -124,28 +124,6 @@ class TestKVLayerGroupsManager:
         assert manager.num_blocks == 32
         assert manager.block_size == 256
 
-    def test_get_group_by_layer_idx(self):
-        tensors = [
-            torch.randn(2, 32, 256, 8, 64, dtype=torch.float16),
-            torch.randn(2, 32, 256, 8, 64, dtype=torch.float16),
-            torch.randn(2, 32, 256, 16, 64, dtype=torch.float16),
-        ]
-        manager = _build_manager(tensors, num_blocks=32, block_size=256)
-
-        group0 = manager.get_group_by_layer_idx(0)
-        assert group0 is not None
-        assert group0.contains_layer(0)
-        assert group0.contains_layer(1)
-        assert not group0.contains_layer(2)
-
-        group2 = manager.get_group_by_layer_idx(2)
-        assert group2 is not None
-        assert group2.contains_layer(2)
-        assert not group2.contains_layer(0)
-
-        assert manager.get_layer_dtype(0) == torch.float16
-        assert manager.get_layer_dtype(2) == torch.float16
-
     def test_get_shape_desc_by_group_idx(self):
         tensors = [
             torch.randn(2, 32, 256, 8, 64, dtype=torch.float16),
