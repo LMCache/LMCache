@@ -7,3 +7,4 @@
 # per the "LMCache on ROCm / Without vLLM docker base image" docs.
 
 cupy-rocm-7-0
+hipfile
