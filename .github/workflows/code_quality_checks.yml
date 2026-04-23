@@ -3,8 +3,6 @@ name: Code Quality
 on:
   workflow_call:
   pull_request:
-  push:
-    branches: [dev]
 
 permissions:
   contents: read

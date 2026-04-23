@@ -3,10 +3,6 @@ name: Test
 on:
   workflow_call:
   workflow_dispatch:
-  push:
-    branches:
-      - "dev"
-      - "release-**"
   pull_request:
     branches:
       - "dev"
