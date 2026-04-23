@@ -1451,6 +1451,7 @@ class SGLangGPUConnector(GPUConnectorInterface):
         kv_caches = attempt_permute_to_contiguous_view(kv_caches)
         self.gpu_kv_format = discover_gpu_kv_format(kv_caches, EngineType.SGLANG)
         num_layers = get_num_layers(kv_caches, self.gpu_kv_format)
+        # SGLang registers every layer as one group; pass all indices in order.
         ptrs = get_group_data_ptrs(
             kv_caches, self.gpu_kv_format, list(range(num_layers))
         )
