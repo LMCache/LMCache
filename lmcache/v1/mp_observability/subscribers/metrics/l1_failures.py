@@ -36,7 +36,7 @@ class L1FailureMetricsSubscriber(EventSubscriber):
     """Maintains OTel counters for L1 allocation and read failures."""
 
     def __init__(self) -> None:
-        meter = metrics.get_meter("lmcache.l1")
+        meter = metrics.get_meter("lmcache_mp.health")
         self._allocation_counter = meter.create_counter(
             "lmcache_mp.l1_allocation_failure",
             description=(

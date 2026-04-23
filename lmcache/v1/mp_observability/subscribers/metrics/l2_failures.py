@@ -36,7 +36,7 @@ class L2FailureMetricsSubscriber(EventSubscriber):
     """Maintains OTel counters for L2 prefetch failures."""
 
     def __init__(self) -> None:
-        meter = metrics.get_meter("lmcache.l2")
+        meter = metrics.get_meter("lmcache_mp.health")
         self._prefetch_counter = meter.create_counter(
             "lmcache_mp.l2_prefetch_failure",
             description=(
