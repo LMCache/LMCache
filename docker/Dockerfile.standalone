@@ -1,13 +1,14 @@
 # The LMCache Standalone Dockerfile is used to build a LMCache image
 # without vLLM integration.
 
-ARG CUDA_VERSION=12.8
+ARG CUDA_VERSION=12.9
 ARG UBUNTU_VERSION=24.04
+ARG BASE_IMAGE=nvcr.io/nvidia/cuda-dl-base:25.06-cuda${CUDA_VERSION}-devel-ubuntu${UBUNTU_VERSION}
 
 #################### BASE BUILD IMAGE ####################
 # Prepare basic build environment
 
-FROM nvcr.io/nvidia/cuda-dl-base:25.03-cuda${CUDA_VERSION}-devel-ubuntu${UBUNTU_VERSION} AS base
+FROM ${BASE_IMAGE} AS base
 
 ARG CUDA_VERSION
 ARG PYTHON_VERSION=3.12
@@ -33,12 +34,11 @@ RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
 
 WORKDIR /workspace
 
-# Install runtime dependencies
-COPY ./requirements/common.txt common.txt
-COPY ./requirements/cuda.txt cuda.txt
+# Install small non-torch runtime dependencies; torch is installed in lmcache-build
+# against the exact CUDA version so the compiled C extensions match at runtime.
 RUN --mount=type=cache,target=/root/.cache/uv \
     . /opt/venv/bin/activate && \
-    uv pip install -r cuda.txt
+    uv pip install ray nvidia-ml-py
 
 # CUDA arch list used by torch
 ARG torch_cuda_arch_list='7.0 7.5 8.0 8.6 8.9 9.0 10.0 12.0+PTX'
@@ -48,6 +48,8 @@ ENV TORCH_CUDA_ARCH_LIST=${torch_cuda_arch_list}
 # Build LMCache wheel
 
 FROM base AS lmcache-build
+
+ARG CUDA_VERSION
 
 # install build dependencies
 COPY ./requirements/build.txt build.txt
@@ -62,6 +64,10 @@ ENV NVCC_THREADS=$nvcc_threads
 
 RUN --mount=type=cache,target=/root/.cache/uv \
     . /opt/venv/bin/activate && \
+    CUDA_TAG=cu$(echo ${CUDA_VERSION} | tr -d '.') && \
+    uv pip install torch \
+        --extra-index-url https://download.pytorch.org/whl/${CUDA_TAG} \
+        --index-strategy unsafe-best-match && \
     uv pip install -r build.txt
 
 ARG LMCACHE_COMMIT_ID=1
@@ -81,14 +87,21 @@ RUN --mount=type=cache,target=/root/.cache/ccache,id=ccache \
 
 FROM base AS lmcache-final
 
+ARG CUDA_VERSION
+
 # Copy the built wheel from build stage
 COPY --from=lmcache-build /workspace/LMCache/dist_lmcache/*.whl /tmp/
 
-# Install LMCache from wheel
+# Install LMCache from wheel; use the same CUDA index as the build stage
+# so torch resolves to the matching CUDA variant (e.g. cu130 for CUDA 13.0).
 RUN --mount=type=cache,target=/root/.cache/uv \
     . /opt/venv/bin/activate && \
-    uv pip install /tmp/*.whl --verbose && \
-    rm -rf /tmp/*.whl 
+    CUDA_TAG=cu$(echo ${CUDA_VERSION} | tr -d '.') && \
+    uv pip install /tmp/*.whl \
+        --extra-index-url https://download.pytorch.org/whl/${CUDA_TAG} \
+        --index-strategy unsafe-best-match \
+        --verbose && \
+    rm -rf /tmp/*.whl
 
 WORKDIR /workspace
 

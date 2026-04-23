@@ -157,10 +157,15 @@ _store_loop: poll wakes up
   ▼
 _process_new_keys(keys)
   │
-  ├─ 1. StorePolicy.select_store_targets(keys, adapters)
-  │     → dict[adapter_index, list[ObjectKey]]
+  ├─ 1. Group keys by shape (today: (model_name, kv_rank); L1 is a shared
+  │     pool so one drain may span models/parallelism configs with different
+  │     KV shapes, and each submit_store_task must see uniform (shape, dtype)).
   │
-  ├─ 2. For each adapter target:
+  ├─ 2. For each per-shape group:
+  │     StorePolicy.select_store_targets(group_keys, adapters)
+  │       → dict[adapter_index, list[ObjectKey]]
+  │
+  ├─ 3. For each adapter target:
   │     L1Manager.reserve_read(target_keys)  → get MemoryObj + read lock
   │     adapter.submit_store_task(keys, objs)
   │     Track as InFlightStoreTask
@@ -168,9 +173,9 @@ _process_new_keys(keys)
   ▼ (later, when adapter signals store_efd)
 _process_completed_tasks(adapter_index)
   │
-  ├─ 3. adapter.pop_completed_store_tasks()
+  ├─ 4. adapter.pop_completed_store_tasks()
   │
-  ├─ 4. For each completed task:
+  ├─ 5. For each completed task:
   │     L1Manager.finish_read(read_locked_keys)  → release read locks
   │     If success: StorePolicy.select_l1_deletions(keys) → delete from L1
   │     If failure: log warning (best-effort, no retry)
@@ -494,6 +499,16 @@ The `__init__.py` uses `pkgutil.iter_modules()` to discover all
 `*_l2_adapter.py` modules automatically, but imports them **lazily** — a
 module (and its third-party dependencies) is only loaded when the
 corresponding adapter type is actually requested at runtime.
+
+### Persist / Recover (Optional)
+
+Adapters that support persisting cached data across restarts use
+`PersistConfig` (parsed from the JSON key `"persist_enabled"`, defaulting
+to ``True``). Lookup always checks secondary storage on miss. There is
+no dedicated interface method — adapters integrate persist into their
+existing `close()` (to keep data on disk) path. See
+`nixl_store_dynamic_l2_adapter.py` for a reference implementation and
+[`nixl_store.md`](nixl_store.md) for design details.
 
 ### Native (C++/Rust) Storage Backends
 

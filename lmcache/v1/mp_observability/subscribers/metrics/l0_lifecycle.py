@@ -60,6 +60,8 @@ class _BlockStatus(Enum):
 class _L0BlockState:
     """Per-block lifecycle state in the shadow map."""
 
+    instance_id: int
+    model_name: str
     token_ids: list[int]
     owners: set[str]  # Set of req_ids currently using this block.
     status: _BlockStatus
@@ -89,12 +91,12 @@ class L0LifecycleSubscriber(EventSubscriber):
         )
         self._sample_rate = sample_rate
 
-        # Shadow map: physical block_id -> lifecycle state.
-        self._shadow: dict[int, _L0BlockState] = {}
-        # Set of block_ids we decided NOT to sample.
-        self._skipped: set[int] = set()
-        # Reverse index: req_id -> set of block_ids owned by that request.
-        self._req_blocks: dict[str, set[int]] = {}
+        # Shadow map: (instance_id, block_id) -> lifecycle state.
+        self._shadow: dict[tuple[int, int], _L0BlockState] = {}
+        # Set of (instance_id, block_id) we decided NOT to sample.
+        self._skipped: set[tuple[int, int]] = set()
+        # Reverse index: req_id -> set of (instance_id, block_id) owned.
+        self._req_blocks: dict[str, set[tuple[int, int]]] = {}
 
         meter = metrics.get_meter("lmcache.l0")
         self._lifetime_hist = meter.create_histogram(
@@ -133,11 +135,13 @@ class L0LifecycleSubscriber(EventSubscriber):
 
     def _on_block_allocation(self, event: Event) -> None:
         """Process a batch of ``BlockAllocationRecord`` from vLLM."""
+        instance_id = event.metadata.get("instance_id", 0)
+        model_name = event.metadata.get("model_name", "")
         records = event.metadata.get("records", [])
         now = event.timestamp or time.time()
 
         for record in records:
-            self._process_record(record, now)
+            self._process_record(instance_id, model_name, record, now)
 
     def _on_end_session(self, event: Event) -> None:
         """Handle request completion — release blocks owned by this request."""
@@ -145,9 +149,9 @@ class L0LifecycleSubscriber(EventSubscriber):
         if not req_id:
             return
 
-        block_ids = self._req_blocks.pop(req_id, set())
-        for block_id in block_ids:
-            state = self._shadow.get(block_id)
+        block_keys = self._req_blocks.pop(req_id, set())
+        for block_key in block_keys:
+            state = self._shadow.get(block_key)
             if state is None:
                 continue
             state.owners.discard(req_id)
@@ -156,7 +160,9 @@ class L0LifecycleSubscriber(EventSubscriber):
 
     # -- Record processing -------------------------------------------------
 
-    def _process_record(self, record: object, now: float) -> None:
+    def _process_record(
+        self, instance_id: int, model_name: str, record: object, now: float
+    ) -> None:
         """Process a single BlockAllocationRecord."""
         req_id: str = record.req_id  # type: ignore[attr-defined]
         block_ids: list[int] = record.new_block_ids  # type: ignore[attr-defined]
@@ -175,40 +181,44 @@ class L0LifecycleSubscriber(EventSubscriber):
             end = min(start + block_size, len(token_ids))
             chunk_tokens = token_ids[start:end]
             if not chunk_tokens:
-                # Block reported with no token IDs — this is a block that
-                # already existed (e.g., cached request with no new tokens).
-                # Not a real allocation event; skip.
                 continue
-            self._process_block(block_id, chunk_tokens, req_id, now)
+            self._process_block(
+                instance_id, model_name, block_id, chunk_tokens, req_id, now
+            )
 
     def _process_block(
         self,
+        instance_id: int,
+        model_name: str,
         block_id: int,
         token_ids: list[int],
         req_id: str,
         now: float,
     ) -> None:
         """Update shadow map for a single physical block."""
-        existing = self._shadow.get(block_id)
+        block_key = (instance_id, block_id)
+        existing = self._shadow.get(block_key)
 
         if existing is None:
             # Block not in shadow map.
-            if block_id in self._skipped:
+            if block_key in self._skipped:
                 return
 
             if not self._should_sample():
-                self._skipped.add(block_id)
+                self._skipped.add(block_key)
                 return
 
             # New allocation — start tracking.
-            self._shadow[block_id] = _L0BlockState(
+            self._shadow[block_key] = _L0BlockState(
+                instance_id=instance_id,
+                model_name=model_name,
                 token_ids=token_ids,
                 owners={req_id},
                 status=_BlockStatus.ACTIVE,
                 alloc_time=now,
                 last_access_time=now,
             )
-            self._req_blocks.setdefault(req_id, set()).add(block_id)
+            self._req_blocks.setdefault(req_id, set()).add(block_key)
             return
 
         # Block exists in shadow map.
@@ -223,7 +233,7 @@ class L0LifecycleSubscriber(EventSubscriber):
                 # Case 3: Prefix sharing — another request is using this
                 # block while original request(s) still active. Not a reuse.
                 existing.owners.add(req_id)
-                self._req_blocks.setdefault(req_id, set()).add(block_id)
+                self._req_blocks.setdefault(req_id, set()).add(block_key)
             else:
                 # Case 4: Block was RELEASED, now reused with same content.
                 # This is a true cache hit.
@@ -231,7 +241,7 @@ class L0LifecycleSubscriber(EventSubscriber):
                 existing.status = _BlockStatus.ACTIVE
                 existing.last_access_time = now
                 existing.access_history.append(now)
-                self._req_blocks.setdefault(req_id, set()).add(block_id)
+                self._req_blocks.setdefault(req_id, set()).add(block_key)
         else:
             # Case 5: Different content — eviction detected.
             self._emit_eviction_metrics(existing, now)
@@ -240,17 +250,19 @@ class L0LifecycleSubscriber(EventSubscriber):
             for old_req in existing.owners:
                 block_set = self._req_blocks.get(old_req)
                 if block_set:
-                    block_set.discard(block_id)
+                    block_set.discard(block_key)
 
             # Start fresh.
-            self._shadow[block_id] = _L0BlockState(
+            self._shadow[block_key] = _L0BlockState(
+                instance_id=instance_id,
+                model_name=model_name,
                 token_ids=token_ids,
                 owners={req_id},
                 status=_BlockStatus.ACTIVE,
                 alloc_time=now,
                 last_access_time=now,
             )
-            self._req_blocks.setdefault(req_id, set()).add(block_id)
+            self._req_blocks.setdefault(req_id, set()).add(block_key)
 
     # -- Metrics emission --------------------------------------------------
 
@@ -258,15 +270,19 @@ class L0LifecycleSubscriber(EventSubscriber):
         """Record histogram observations for an evicted block."""
         lifetime = now - state.alloc_time
         idle_time = now - state.last_access_time
+        attrs = {
+            "instance_id": str(state.instance_id),
+            "model_name": state.model_name,
+        }
 
-        self._lifetime_hist.record(lifetime)
-        self._idle_hist.record(idle_time)
+        self._lifetime_hist.record(lifetime, attrs)
+        self._idle_hist.record(idle_time, attrs)
 
         # Reuse gaps from access history.
         history = list(state.access_history)
         for i in range(1, len(history)):
             gap = history[i] - history[i - 1]
-            self._reuse_gap_hist.record(gap)
+            self._reuse_gap_hist.record(gap, attrs)
 
     # -- Sampling ----------------------------------------------------------
 

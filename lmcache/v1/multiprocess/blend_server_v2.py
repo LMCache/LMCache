@@ -66,6 +66,7 @@ from lmcache.v1.mp_observability.config import (
     init_observability,
     parse_args_to_observability_config,
 )
+from lmcache.v1.mp_observability.trace import maybe_initialize_trace_recorder
 from lmcache.v1.multiprocess.config import (
     MPServerConfig,
     parse_args_to_mp_server_config,
@@ -770,6 +771,9 @@ def run_cache_server(
     """
     event_bus = init_observability(obs_config)
 
+    # Wire up the trace recorder (no-op when --trace-level is unset).
+    maybe_initialize_trace_recorder(event_bus, obs_config, storage_manager_config)
+
     # Initialize the engine (loggers self-register with the global controller)
     engine = BlendEngineV2(
         storage_manager_config=storage_manager_config,
@@ -800,7 +804,11 @@ def run_cache_server(
     add_handler_helper(server, RequestType.GET_CHUNK_SIZE, engine.get_chunk_size)
     add_handler_helper(server, RequestType.END_SESSION, engine.end_session)
     add_handler_helper(server, RequestType.NOOP, engine.debug)
-
+    add_handler_helper(
+        server,
+        RequestType.REPORT_BLOCK_ALLOCATION,
+        engine.report_block_allocations,
+    )
     # Add handler for blend operations
     add_handler_helper(
         server, RequestType.CB_REGISTER_KV_CACHE, engine.cb_register_kv_cache
@@ -840,6 +848,7 @@ def run_cache_server(
             RequestType.CLEAR,
             RequestType.CB_LOOKUP_PRE_COMPUTED_V2,
             RequestType.PING,
+            RequestType.REPORT_BLOCK_ALLOCATION,
         ],
         max_workers=mp_config.max_cpu_workers,
     )

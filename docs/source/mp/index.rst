@@ -61,4 +61,5 @@ LMCache ships three server entry points:
    deployment
    operator
    observability
+   tracing_and_debugging
    architecture

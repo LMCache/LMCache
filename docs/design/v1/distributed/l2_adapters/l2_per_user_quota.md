@@ -24,8 +24,8 @@ vLLM API Server
   │  sends cache_salt directly on IPCCacheEngineKey
   ▼
 LMCache MP Server
-  │  reads key.cache_salt
-  │  ipc_key_to_object_keys(..., cache_salt=key.cache_salt)
+  │  ipc_key_to_object_keys(key, chunk_hashes)
+  │    reads key.cache_salt internally and propagates
   ▼
 ObjectKey(chunk_hash, model_name, kv_rank, cache_salt="alice")
   │                                         ▲
@@ -37,7 +37,7 @@ L1 Manager → StoreController → L2 Adapter
   │                                │
   │                    _notify_keys_stored(keys, sizes)
   │                      → base class updates _total_bytes_used
-  │                        and _per_user_size_bytes
+  │                        and _bytes_by_cache_salt
   ▼
 Listeners:  L2EvictionPolicy bridge → UserLRUEvictionPolicy
             ┌──────────────────────┐
@@ -49,7 +49,7 @@ L2EvictionController (every 1s):
   for each adapter state:
     usage = adapter.get_usage()  → AdapterUsage dataclass
     if policy.is_user_level:
-      for cache_salt, bytes in usage.per_user_bytes:
+      for cache_salt, bytes in usage.bytes_by_cache_salt:
         if bytes > watermark * quota(cache_salt):
           policy.get_eviction_actions(ratio, cache_salt=cache_salt)
     else:
@@ -152,7 +152,8 @@ Worker path (STORE/RETRIEVE):                              │
   → IPCCacheEngineKey(cache_salt="alice", ...) ──STORE──►  MP Server
                                                            │
                                               key.cache_salt = "alice"
-                                              ipc_key_to_object_keys(..., cache_salt="alice")
+                                              ipc_key_to_object_keys(key, hashes)
+                                                — reads key.cache_salt
                                               → ObjectKey(cache_salt="alice", ...)
 ```
 
@@ -228,7 +229,7 @@ GET    /api/quota                    List all quotas and per-user usage
 
 **`_default` sentinel:** Empty strings cannot be URL path parameters. Use
 `_default` as the `cache_salt` in the URL to refer to the `cache_salt=""`
-namespace (legacy/anonymous traffic). For example,
+namespace (anonymous / un-isolated traffic). For example,
 `PUT /api/quota/_default` sets the quota for `cache_salt=""`.
 
 **`PUT /api/quota/{cache_salt}`** — Set or update a user's quota.
@@ -287,22 +288,20 @@ See the **Configuration** section for the full JSON example.
 **File:** `lmcache/v1/distributed/api.py`
 
 Add `cache_salt: str = ""` to `ObjectKey` (as shown in section 1).
-Add `cache_salt: str = ""` parameter to `ipc_key_to_object_keys()` and
-pass it through to each constructed `ObjectKey`.
+`ipc_key_to_object_keys()` reads `ipc_key.cache_salt` directly and
+propagates it to each constructed `ObjectKey` — no separate parameter,
+so callers cannot accidentally drop the salt.
 
-### 2. Server — Pass `cache_salt` through to ObjectKeys
+### 2. Server — `cache_salt` is carried by `IPCCacheEngineKey`
 
 **File:** `lmcache/v1/multiprocess/server.py`
 
 Since both the scheduler and worker adapters set `cache_salt` on
-`IPCCacheEngineKey`, the server simply reads `key.cache_salt` directly in
-all code paths. No session-based fallback is needed.
-
-In `MPCacheEngine.store()`, `MPCacheEngine.retrieve()`, and
-`MPCacheEngine.lookup()`:
+`IPCCacheEngineKey`, the server simply calls `ipc_key_to_object_keys(...)`
+and the salt flows through automatically:
 
 ```python
-obj_keys = ipc_key_to_object_keys(key, chunk_hashes, cache_salt=key.cache_salt)
+obj_keys = ipc_key_to_object_keys(key, chunk_hashes)
 ```
 
 **`session.py` is unchanged** — no `cache_salt` field needed on `Session`.
@@ -400,7 +399,7 @@ class AdapterUsage:
     total_capacity_bytes: int
     """Adapter's maximum capacity. 0 means unknown/unlimited."""
 
-    per_user_bytes: dict[str, int]
+    bytes_by_cache_salt: dict[str, int]
     """Bytes used per cache_salt. Only entries with positive usage."""
 
     @property
@@ -419,11 +418,11 @@ class L2AdapterInterface(ABC):
         self._listeners: list[L2AdapterListener] = []
         self._max_capacity_bytes = max_capacity_bytes
         self._total_bytes_used: int = 0
-        self._per_user_size_bytes: dict[str, int] = {}
+        self._bytes_by_cache_salt: dict[str, int] = {}
         self._usage_lock = threading.Lock()
 
     @property
-    def supports_eviction(self) -> bool:
+    def supports_global_eviction(self) -> bool:
         """Whether this adapter supports eviction.
 
         True when the adapter declared a positive capacity via
@@ -438,8 +437,8 @@ class L2AdapterInterface(ABC):
         with self._usage_lock:
             for key, size in zip(keys, sizes, strict=True):
                 self._total_bytes_used += size
-                self._per_user_size_bytes[key.cache_salt] = (
-                    self._per_user_size_bytes.get(key.cache_salt, 0) + size
+                self._bytes_by_cache_salt[key.cache_salt] = (
+                    self._bytes_by_cache_salt.get(key.cache_salt, 0) + size
                 )
         for listener in self._listeners:
             listener.on_l2_keys_stored(keys)
@@ -450,8 +449,8 @@ class L2AdapterInterface(ABC):
         with self._usage_lock:
             for key, size in zip(keys, sizes, strict=True):
                 self._total_bytes_used -= size
-                self._per_user_size_bytes[key.cache_salt] = (
-                    self._per_user_size_bytes.get(key.cache_salt, 0) - size
+                self._bytes_by_cache_salt[key.cache_salt] = (
+                    self._bytes_by_cache_salt.get(key.cache_salt, 0) - size
                 )
         for listener in self._listeners:
             listener.on_l2_keys_deleted(keys)
@@ -461,8 +460,8 @@ class L2AdapterInterface(ABC):
             return AdapterUsage(
                 total_bytes_used=self._total_bytes_used,
                 total_capacity_bytes=self._max_capacity_bytes,
-                per_user_bytes={
-                    k: v for k, v in self._per_user_size_bytes.items()
+                bytes_by_cache_salt={
+                    k: v for k, v in self._bytes_by_cache_salt.items()
                     if v > 0
                 },
             )
@@ -488,7 +487,7 @@ sizes)`. The base class handles all byte accounting.
 - `_notify_keys_stored(stored_keys, sizes=stored_sizes)` after store
 - `_notify_keys_deleted(deleted_keys, sizes=deleted_sizes)` after delete
 
-| Adapter | `max_capacity_bytes` source | `supports_eviction` |
+| Adapter | `max_capacity_bytes` source | `supports_global_eviction` |
 |---------|-----------------------------|---------------------|
 | MockL2Adapter | `int(config.max_size_gb * 1024**3)` | `True` |
 | NixlStoreL2Adapter | Pool total size | `True` |
@@ -496,7 +495,7 @@ sizes)`. The base class handles all byte accounting.
 | FSL2Adapter | 0 | `False` |
 
 `L2AdapterEvictionState` is only created for adapters where both
-`eviction_config is not None` AND `adapter.supports_eviction` are true.
+`eviction_config is not None` AND `adapter.supports_global_eviction` are true.
 Adapters that don't support eviction are excluded from the eviction loop
 entirely — no runtime checks needed.
 
@@ -654,7 +653,7 @@ class L2EvictionController(StorageControllerInterface):
 
         if policy.is_user_level and self._quota_manager:
             # Per-user watermark check
-            for cache_salt, user_bytes in usage.per_user_bytes.items():
+            for cache_salt, user_bytes in usage.bytes_by_cache_salt.items():
                 limit = self._quota_manager.get_limit_bytes(cache_salt)
                 if user_bytes <= watermark * limit:
                     continue
@@ -674,7 +673,7 @@ class L2EvictionController(StorageControllerInterface):
 ```
 
 The controller uses `policy.is_user_level` (not `isinstance`) to branch:
-- **`is_user_level=True`**: reads `usage.per_user_bytes`, checks each user
+- **`is_user_level=True`**: reads `usage.bytes_by_cache_salt`, checks each user
   against `watermark * quota`. Unregistered users (quota=0) get ratio=1.0.
 - **`is_user_level=False`**: reads `usage.usage_fraction` for global check.
 
@@ -717,45 +716,36 @@ curl -X DELETE http://localhost:8000/api/quota/alice
 curl http://localhost:8000/api/quota
 ```
 
-## Backward Compatibility
+## Behavioral Notes
 
 - **No cache_salt from API:** When the API caller doesn't set `cache_salt`,
   `request.cache_salt` is `None`, which maps to `cache_salt=""`.
-  `IPCCacheEngineKey.cache_salt` defaults to `""`. All keys share the same
-  (empty-user) namespace — exactly like today's behavior.
+  `IPCCacheEngineKey.cache_salt` defaults to `""`. All such keys share the
+  same (anonymous) namespace.
 - **`eviction_policy: "LRU"`:** Per-user quota logic is not active. The
   watermark is applied against aggregate capacity as before. Existing
   behavior is fully unchanged.
-- **ObjectKey equality change:** Adding `cache_salt` to ObjectKey identity IS a
-  behavioral change, but since `cache_salt` defaults to `""`, all existing keys
-  (with no cache_salt) remain equal to each other. Only when cache_salt is
-  actively set do keys diverge. Existing tests that construct
-  `ObjectKey(hash, model, rank)` continue to work — the 3-arg form uses
-  `cache_salt=""` by default.
-- **Serialization — what if an adapter doesn't update?** Each adapter uses
-  ObjectKey differently as a storage key:
+- **ObjectKey equality:** `cache_salt` is part of identity (eq/hash). Two
+  `ObjectKey`s with different salts are distinct, preventing cross-user
+  collisions. With the default `cache_salt=""` all un-salted traffic
+  hashes identically (unchanged from the pre-cache_salt adapter).
+- **Serialization format — trailing salt:** ``cache_salt`` is appended as
+  a 4th field when non-empty; unsalted keys use the 3-field shape, which
+  is bit-identical to the pre-cache_salt format:
 
-  | Adapter | How ObjectKey is used as storage key | Impact |
-  |---------|-------------------------------------|--------|
-  | `MockL2Adapter` | Python dict key (`dict[ObjectKey, ...]`) | **No change needed.** `__hash__` includes `cache_salt` automatically. With `cache_salt=""` (LRU mode), hashes are unchanged from today. |
-  | `NixlStoreL2Adapter` | Python dict key (`dict[ObjectKey, ...]`) | **No change needed.** Same as mock. |
-  | `NativeConnectorL2Adapter` | Explicit string serialization via `_object_key_to_string()`: `"{model}@{kv_rank}@{hash}"` | **Must update** to include `cache_salt` for UserLRU. Without the update, different users' keys serialize to the same string → storage collision. |
-
-  **With regular `LRU` policy (no cache_salt set):** All keys have `cache_salt=""`.
-  Even if `_object_key_to_string()` is not updated, there are no collisions
-  because all keys share the same empty cache_salt. **Adapters work unchanged.**
-
-  **With `UserLRU` policy (cache_salt set):** Adapters with explicit string
-  serialization (currently only `NativeConnectorL2Adapter`) must include
-  `cache_salt` in the serialized form, e.g.:
   ```python
   def _object_key_to_string(key: ObjectKey) -> str:
+      base = f"{key.model_name}@{key.kv_rank:08x}@{key.chunk_hash.hex()}"
       if key.cache_salt:
-          return f"{key.cache_salt}@{key.model_name}@{key.kv_rank:08x}@{key.chunk_hash.hex()}"
-      return f"{key.model_name}@{key.kv_rank:08x}@{key.chunk_hash.hex()}"
+          return f"{base}@{key.cache_salt}"
+      return base
   ```
-  The empty-cache_salt branch preserves the existing format for backward
-  compatibility with data already stored in Redis/FS.
+
+  Because un-salted wire keys and filenames are unchanged, existing
+  cache directories and remote stores need **no migration**. Parsers
+  split on ``@`` and dispatch by field count (3 vs 4); both
+  ``model_name`` and ``cache_salt`` are forbidden from containing
+  ``@`` so the parse is unambiguous.
 
 - **Listener interface:** `L2AdapterListener` method signatures are unchanged.
   `cache_salt` flows through `ObjectKey.cache_salt`, not through callback
@@ -804,29 +794,29 @@ it through. Update serialization. No behavioral change with `cache_salt=""`.
 
 | File | Change |
 |------|--------|
-| `lmcache/v1/distributed/api.py` | `cache_salt: str = ""` on `ObjectKey`; `cache_salt` param on `ipc_key_to_object_keys()` |
-| `lmcache/v1/multiprocess/custom_types.py` | `cache_salt: str = ""` on `IPCCacheEngineKey` (appended at end); update `no_worker_id_version()`, `from_token_ids()` |
-| `lmcache/v1/multiprocess/server.py` | Pass `key.cache_salt` to `ipc_key_to_object_keys()` in all handlers |
-| `lmcache/v1/multiprocess/blend_server_v2.py` | Same for all 4 call sites |
-| `lmcache/v1/distributed/l2_adapters/native_connector_l2_adapter.py` | Update `_object_key_to_string()` |
-| `lmcache/v1/distributed/l2_adapters/fs_l2_adapter.py` | Update `_object_key_to_filename()` / `_filename_to_object_key()` |
-| `csrc/storage_backends/fs/connector.cpp` | Update `key_to_filename()` parser |
+| `lmcache/v1/distributed/api.py` | `cache_salt: str = ""` on `ObjectKey` with `__post_init__` validation (`@`, `/`, `\`, NUL, length cap on `cache_salt`; `@` rejected on `model_name`); `ipc_key_to_object_keys()` reads `ipc_key.cache_salt` directly (no separate param) |
+| `lmcache/v1/multiprocess/custom_types.py` | `cache_salt: str = ""` on `IPCCacheEngineKey` with `__post_init__` validation; update `no_worker_id_version()`, `from_token_ids()` |
+| `lmcache/v1/multiprocess/server.py` / `blend_server_v2.py` | No code changes — existing `ipc_key_to_object_keys(key, chunk_hashes)` calls now carry salt automatically |
+| `lmcache/integration/vllm/vllm_multi_process_adapter.py` | Scheduler + worker `_create_key()` now forward `cache_salt` to `IPCCacheEngineKey` |
+| `lmcache/v1/distributed/l2_adapters/native_connector_l2_adapter.py` | `_object_key_to_string()` appends trailing `@<cache_salt>` when salted; un-salted output is unchanged |
+| `lmcache/v1/distributed/l2_adapters/fs_l2_adapter.py` | `_object_key_to_filename()` / `_filename_to_object_key()` accept 3-field (unsalted) or 4-field (salted) shapes |
+| `csrc/storage_backends/fs/connector.cpp` | `key_to_filename()` splits on `@` and dispatches by field count |
 
 ### PR3 — LMCache: Adapter interface refactor (LMCache repo)
 
-`AdapterUsage` dataclass, `supports_eviction` property, unified
+`AdapterUsage` dataclass, `supports_global_eviction` property, unified
 `get_usage()`, `_notify_*` with `sizes`. Purely internal refactor —
 existing LRU eviction behavior unchanged.
 
 | File | Change |
 |------|--------|
-| `lmcache/v1/distributed/l2_adapters/base.py` | `AdapterUsage` dataclass; `max_capacity_bytes` + `supports_eviction`; `_notify_*` with `sizes`; unified `get_usage() -> AdapterUsage` |
+| `lmcache/v1/distributed/l2_adapters/base.py` | `AdapterUsage` dataclass; `max_capacity_bytes` + `supports_global_eviction`; `_notify_*` with `sizes`; unified `get_usage() -> AdapterUsage` |
 | `lmcache/v1/distributed/l2_adapters/mock_l2_adapter.py` | Pass `max_capacity_bytes` to super; pass `sizes` to `_notify_*`; remove `_current_size_bytes`, `get_usage()` |
 | `lmcache/v1/distributed/l2_adapters/nixl_store_l2_adapter.py` | Same |
 | `lmcache/v1/distributed/l2_adapters/native_connector_l2_adapter.py` | Same |
 | `lmcache/v1/distributed/l2_adapters/mooncake_store_l2_adapter.py` | Same (if fires `_notify_*` directly) |
 | `lmcache/v1/distributed/storage_controllers/eviction_controller.py` | Use `AdapterUsage.usage_fraction` instead of tuple |
-| `lmcache/v1/distributed/storage_manager.py` | Filter `L2AdapterEvictionState` by `adapter.supports_eviction` |
+| `lmcache/v1/distributed/storage_manager.py` | Filter `L2AdapterEvictionState` by `adapter.supports_global_eviction` |
 
 ### PR4 — LMCache: Eviction policy interface (LMCache repo)
 
@@ -851,7 +841,7 @@ The feature PR. Depends on PR1a + PR1b + PR2 + PR3 + PR4.
 | `lmcache/v1/distributed/eviction_policy/__init__.py` | Export `UserLRUEvictionPolicy` |
 | `lmcache/v1/distributed/config.py` | Add `"UserLRU"` to literal |
 | `lmcache/v1/distributed/l2_adapters/config.py` | Add `"UserLRU"` to allowed values |
-| `lmcache/v1/distributed/storage_controllers/eviction_controller.py` | `QuotaManager`; per-user branch using `is_user_level` + `per_user_bytes` |
+| `lmcache/v1/distributed/storage_controllers/eviction_controller.py` | `QuotaManager`; per-user branch using `is_user_level` + `bytes_by_cache_salt` |
 | `lmcache/v1/distributed/storage_manager.py` | Create `QuotaManager`; wire to controller + HTTP |
 | `lmcache/v1/multiprocess/http_server.py` | Quota CRUD endpoints |
 | `tests/v1/distributed/test_user_lru_eviction_policy.py` (new) | Unit tests |
