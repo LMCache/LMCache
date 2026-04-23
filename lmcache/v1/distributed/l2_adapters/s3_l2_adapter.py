@@ -57,8 +57,26 @@ logger = init_logger(__name__)
 
 
 def _object_key_to_string(key: ObjectKey) -> str:
-    """Serialize an ObjectKey to a deterministic S3 object name."""
-    return f"{key.model_name}@{key.kv_rank:08x}@{key.chunk_hash.hex()}"
+    """Serialize an ObjectKey to a deterministic S3 object name.
+
+    Unsalted::
+
+        <model_name>@<kv_rank_hex>@<chunk_hash_hex>
+
+    Salted (trailing ``cache_salt``)::
+
+        <model_name>@<kv_rank_hex>@<chunk_hash_hex>@<cache_salt>
+
+    Keys with ``cache_salt=""`` produce the 3-field shape (bit-identical
+    to the pre-``cache_salt`` format), so existing un-salted caches
+    remain valid with no migration. ``@`` in ``model_name`` and
+    ``cache_salt`` is rejected by ``ObjectKey.__post_init__``, so the
+    format is unambiguous.
+    """
+    base = f"{key.model_name}@{key.kv_rank:08x}@{key.chunk_hash.hex()}"
+    if key.cache_salt:
+        return f"{base}@{key.cache_salt}"
+    return base
 
 
 def _format_safe_path(key_str: str) -> str:
@@ -126,7 +144,9 @@ class S3L2AdapterConfig(L2AdapterConfigBase):
     - s3_enable_s3express (bool): enable S3 Express signing.
     - disable_tls (bool): bypass TLS (for non-AWS HTTP endpoints).
     - aws_access_key_id / aws_secret_access_key (str): optional static creds.
-    - max_capacity_gb (float): for ``get_usage()``; 0 → returns (-1, -1).
+    - max_capacity_gb (float): aggregate capacity used by
+      ``get_usage()``; ``0`` disables aggregate eviction
+      (``usage_fraction == -1.0``).
     """
 
     def __init__(
@@ -241,7 +261,7 @@ class S3L2Adapter(L2AdapterInterface):
     max_connection_failures = 3
 
     def __init__(self, config: S3L2AdapterConfig):
-        super().__init__()
+        super().__init__(max_capacity_bytes=int(config.max_capacity_gb * (1024**3)))
         self._config = config
 
         endpoint = config.s3_endpoint
@@ -314,9 +334,11 @@ class S3L2Adapter(L2AdapterInterface):
         # Refcounted locks (like NativeConnectorL2Adapter).
         self._locked_keys: dict[ObjectKey, int] = defaultdict(int)
 
-        # Capacity tracking.
-        self._max_capacity_bytes = int(config.max_capacity_gb * (1024**3))
-        self._current_size_bytes: int = 0
+        # Per-key size map — retained so ``delete`` can recover each
+        # key's stored size and pass it to ``_notify_keys_deleted``.
+        # Aggregate byte accounting lives in the base class via
+        # ``_notify_keys_stored``/``_notify_keys_deleted``; we do not
+        # maintain a parallel total here.
         self._key_sizes: dict[ObjectKey, int] = {}
 
         # Cached HEAD-verified object sizes (keyed by S3 object name).
@@ -489,20 +511,19 @@ class S3L2Adapter(L2AdapterInterface):
             self._loop,
         )
         try:
-            deleted = fut.result(timeout=30.0)
+            deleted_keys, deleted_sizes = fut.result(timeout=30.0)
         except Exception as e:
             logger.warning("S3L2Adapter delete failed: %s", e)
             return
 
-        if deleted:
-            self._notify_keys_deleted(deleted)
+        if deleted_keys:
+            self._notify_keys_deleted(deleted_keys, deleted_sizes)
 
-    def get_usage(self) -> tuple[float, float]:
-        if self._max_capacity_bytes <= 0:
-            return (-1.0, -1.0)
-        with self._lock:
-            usage = self._current_size_bytes / self._max_capacity_bytes
-            return (usage, usage)
+    # ``get_usage()`` is inherited from ``L2AdapterInterface``. The base
+    # class maintains the aggregate and per-``cache_salt`` byte totals
+    # via ``_notify_keys_stored`` / ``_notify_keys_deleted`` and returns
+    # an ``AdapterUsage`` snapshot with ``usage_fraction == -1.0`` when
+    # ``max_capacity_gb`` was 0 (unlimited / no eviction signal).
 
     # ------------------------------------------------------------------
     # Status / Cleanup
@@ -512,7 +533,7 @@ class S3L2Adapter(L2AdapterInterface):
         with self._lock:
             failures = self._connection_failures
             disabled = self._connection_disabled
-            current = self._current_size_bytes
+        usage = self.get_usage()
         return {
             "is_healthy": self._loop_thread.is_alive() and not disabled,
             "type": "S3L2Adapter",
@@ -520,8 +541,8 @@ class S3L2Adapter(L2AdapterInterface):
             "region": self._region,
             "connection_failures": failures,
             "connection_disabled": disabled,
-            "current_size_bytes": current,
-            "max_capacity_bytes": self._max_capacity_bytes,
+            "current_size_bytes": usage.total_bytes_used,
+            "max_capacity_bytes": usage.total_capacity_bytes,
         }
 
     def close(self) -> None:
@@ -750,7 +771,12 @@ class S3L2Adapter(L2AdapterInterface):
                 results.append(next(real_iter))
 
         success = True
-        stored_keys: list[ObjectKey] = []
+        # Track net-new keys for accounting notification. Same chunk_hash
+        # re-stored is identical content (content-addressed), so skipping
+        # re-notify here prevents the base class from double-counting
+        # bytes for the same object.
+        newly_stored_keys: list[ObjectKey] = []
+        newly_stored_sizes: list[int] = []
         last_error: Optional[str] = None
         for indexed_entry, result in zip(indexed, results, strict=True):
             i, key, obj, opt_key_str = indexed_entry
@@ -760,12 +786,13 @@ class S3L2Adapter(L2AdapterInterface):
                 continue
             size = obj.get_physical_size()
             with self._lock:
-                if key not in self._key_sizes:
-                    self._key_sizes[key] = size
-                    self._current_size_bytes += size
+                is_new = key not in self._key_sizes
+                self._key_sizes[key] = size
                 if opt_key_str is not None:
                     self._object_size_cache[opt_key_str] = size
-            stored_keys.append(key)
+            if is_new:
+                newly_stored_keys.append(key)
+                newly_stored_sizes.append(size)
 
         self._record_connection_outcome(last_error if not success else None)
 
@@ -773,8 +800,8 @@ class S3L2Adapter(L2AdapterInterface):
             self._completed_store_tasks[task_id] = success
         os.eventfd_write(self._store_efd, 1)
 
-        if stored_keys:
-            self._notify_keys_stored(stored_keys)
+        if newly_stored_keys:
+            self._notify_keys_stored(newly_stored_keys, newly_stored_sizes)
 
     async def _execute_lookup(
         self,
@@ -894,7 +921,18 @@ class S3L2Adapter(L2AdapterInterface):
             self._completed_load_tasks[task_id] = bitmap
         os.eventfd_write(self._load_efd, 1)
 
-    async def _execute_delete(self, keys: list[ObjectKey]) -> list[ObjectKey]:
+    async def _execute_delete(
+        self, keys: list[ObjectKey]
+    ) -> tuple[list[ObjectKey], list[int]]:
+        """Run DELETE for each key and drop its size-tracking entry.
+
+        Returns parallel lists of successfully deleted keys and their
+        stored sizes, suitable for passing straight to
+        ``_notify_keys_deleted``. Keys whose size we never learned
+        (delete of an unknown key) are reported with size ``0`` so
+        listener fanout still fires while base-class byte accounting
+        stays balanced.
+        """
         futures = []
         indexed = []
         for key in keys:
@@ -907,18 +945,18 @@ class S3L2Adapter(L2AdapterInterface):
                 logger.exception("S3L2Adapter failed to launch DELETE")
 
         results = await asyncio.gather(*futures, return_exceptions=True)
-        deleted: list[ObjectKey] = []
+        deleted_keys: list[ObjectKey] = []
+        deleted_sizes: list[int] = []
         for (key, key_str), result in zip(indexed, results, strict=True):
             if isinstance(result, Exception):
                 logger.warning("S3L2Adapter DELETE failed for %s: %s", key_str, result)
                 continue
             with self._lock:
                 sz = self._key_sizes.pop(key, None)
-                if sz is not None:
-                    self._current_size_bytes -= sz
                 self._object_size_cache.pop(key_str, None)
-            deleted.append(key)
-        return deleted
+            deleted_keys.append(key)
+            deleted_sizes.append(sz if sz is not None else 0)
+        return deleted_keys, deleted_sizes
 
 
 # ---------------------------------------------------------------------------

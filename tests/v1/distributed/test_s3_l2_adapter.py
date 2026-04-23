@@ -316,6 +316,25 @@ class TestObjectKeySerialization:
         )
         assert _object_key_to_string(key) == "llama@000000ff@00010203"
 
+    def test_cache_salt_appended(self):
+        """A non-empty cache_salt must be included in the S3 object name so
+        two users with the same model/rank/chunk map to distinct objects.
+        """
+        base_key = ObjectKey(
+            chunk_hash=b"\x00\x01\x02\x03",
+            model_name="llama",
+            kv_rank=255,
+        )
+        salted = ObjectKey(
+            chunk_hash=b"\x00\x01\x02\x03",
+            model_name="llama",
+            kv_rank=255,
+            cache_salt="user-42",
+        )
+        assert _object_key_to_string(base_key) == "llama@000000ff@00010203"
+        assert _object_key_to_string(salted) == "llama@000000ff@00010203@user-42"
+        assert _object_key_to_string(base_key) != _object_key_to_string(salted)
+
 
 # =============================================================================
 # Event fd interface
@@ -470,7 +489,10 @@ class TestGetUsage:
         )
         a = S3L2Adapter(cfg)
         try:
-            assert a.get_usage() == (-1.0, -1.0)
+            usage = a.get_usage()
+            assert usage.usage_fraction == -1.0
+            assert usage.total_bytes_used == 0
+            assert usage.total_capacity_bytes == 0
         finally:
             a.close()
 
@@ -484,14 +506,17 @@ class TestGetUsage:
         wait_for_event_fd(adapter.get_store_event_fd())
         adapter.pop_completed_store_tasks()
 
-        used, _ = adapter.get_usage()
         total = 4 * 64
         capacity = int(0.001 * 1024**3)
-        assert used == pytest.approx(total / capacity)
+        usage = adapter.get_usage()
+        assert usage.total_bytes_used == total
+        assert usage.total_capacity_bytes == capacity
+        assert usage.usage_fraction == pytest.approx(total / capacity)
 
         adapter.delete(keys)
-        used, _ = adapter.get_usage()
-        assert used == 0.0
+        usage = adapter.get_usage()
+        assert usage.total_bytes_used == 0
+        assert usage.usage_fraction == 0.0
 
 
 # =============================================================================
