@@ -65,45 +65,39 @@ class LayoutHints(TypedDict, total=False):
     kv_layout: Literal["NHD", "HND"]
 
 
-def permute_to_contiguous_view(tensor: torch.Tensor) -> torch.Tensor:
-    """Permute a tensor back to contiguous state (metadata-only, no copy).
+def permute_to_contiguous_view(kv_caches: DiscoverableKVCache) -> DiscoverableKVCache:
+    """Return a contiguous view of *kv_caches*, metadata-only (no copy).
 
-    Assumption: the tensor is only non-contiguous because of a previous
-    permutation.  Raises if this assumption is not met.
+    For a tensor leaf: reorders the dims by stride magnitude so shape
+    lines up with a contiguous layout. For a list: recurses into each
+    element. Tensor leaves alias the input's storage; list nodes are
+    freshly allocated but hold the same tensor objects (or their
+    permuted views).
 
-    The only known case is HND: vLLM allocates physically as HND
-    (e.g. [2, NB, NH, BS, HS]) but exposes an NHD logical view via
-    permute/transpose.  This function recovers the underlying HND
-    physical shape so that ``discover_gpu_kv_format`` (with the
-    ``kv_layout="HND"`` hint) sees the true memory layout and selects
-    the correct HND format enum.  The reverse — physically NHD but
-    logically permuted to HND — does not occur in practice.
+    Recovers the vLLM HND case: tensors allocated physically as
+    ``[2, NB, NH, BS, HS]`` but exposed logically as
+    ``[2, NB, BS, NH, HS]`` via a dim permute. Sorting dims by stride
+    undoes the permute without touching storage.
 
-    Returns the tensor unchanged if already contiguous.
+    Raises:
+        ValueError: If a tensor leaf is non-contiguous for a reason
+            other than dim permutation (e.g. slicing, ``as_strided``).
+            We refuse to fall back to ``.contiguous()`` (which would
+            copy) so the caller's invariant is never silently violated.
     """
-    if tensor.is_contiguous():
-        return tensor
-
-    strides = tensor.stride()
-    perm = sorted(range(tensor.ndim), key=lambda i: strides[i], reverse=True)
-    result = tensor.permute(perm)
-
-    if not result.is_contiguous():
-        raise ValueError(
-            "tensor is non-contiguous for reasons other than permutation "
-            "(e.g., slicing or as_strided). Cannot recover contiguous view."
-        )
-    return result
-
-
-def permute_kv_caches_to_contiguous_views(
-    kv_caches: list[torch.Tensor],
-) -> list[torch.Tensor]:
-    """Apply :func:`permute_to_contiguous_view` to each tensor in *kv_caches*.
-
-    The returned list shares the same underlying storage as the input.
-    """
-    return [permute_to_contiguous_view(t) for t in kv_caches]
+    if isinstance(kv_caches, torch.Tensor):
+        if kv_caches.is_contiguous():
+            return kv_caches
+        strides = kv_caches.stride()
+        perm = sorted(range(kv_caches.ndim), key=lambda i: strides[i], reverse=True)
+        result = kv_caches.permute(perm)
+        if not result.is_contiguous():
+            raise ValueError(
+                "tensor is non-contiguous for reasons other than permutation "
+                "(e.g. slicing or as_strided). Cannot recover contiguous view."
+            )
+        return result
+    return [permute_to_contiguous_view(sub) for sub in kv_caches]
 
 
 def assert_contiguous_and_aligned(tensor: torch.Tensor) -> None:
@@ -131,16 +125,6 @@ def any_non_contiguous(kv_caches: DiscoverableKVCache) -> bool:
     return any(any_non_contiguous(sub) for sub in kv_caches)
 
 
-def _permute_all_to_contiguous_views(
-    kv_caches: DiscoverableKVCache,
-) -> DiscoverableKVCache:
-    """Apply :func:`permute_to_contiguous_view` to every tensor leaf,
-    preserving list structure."""
-    if isinstance(kv_caches, torch.Tensor):
-        return permute_to_contiguous_view(kv_caches)
-    return [_permute_all_to_contiguous_views(sub) for sub in kv_caches]
-
-
 def ensure_contiguous_kv_caches(
     kv_caches: DiscoverableKVCache,
     kv_layout: str | None = None,
@@ -156,7 +140,7 @@ def ensure_contiguous_kv_caches(
     if not any_non_contiguous(kv_caches):
         return kv_caches
 
-    result = _permute_all_to_contiguous_views(kv_caches)
+    result = permute_to_contiguous_view(kv_caches)
 
     if kv_layout == "HND":
         logger.info("Permuted HND tensors to contiguous physical shape")
