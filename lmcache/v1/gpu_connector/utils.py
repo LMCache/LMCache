@@ -9,7 +9,6 @@
 # Standard
 from typing import (
     TYPE_CHECKING,
-    Any,
     Literal,
     Optional,
     TypedDict,
@@ -339,13 +338,12 @@ def _list_depth_tensor_dim(kv_caches: DiscoverableKVCache) -> tuple[int, int]:
         ValueError: If an empty list is encountered during descent.
     """
     depth = 0
-    probe: Any = kv_caches
+    probe: DiscoverableKVCache = kv_caches
     while isinstance(probe, list):
         depth += 1
         if not probe:
             raise ValueError("encountered an empty list")
         probe = probe[0]
-    assert isinstance(probe, torch.Tensor)  # DiscoverableKVCache invariant
     return depth, probe.ndim
 
 
@@ -374,10 +372,7 @@ def discover_gpu_kv_format(
     # tensor_dim: number of dimensions of the internal tensor
     list_depth, tensor_dim = _list_depth_tensor_dim(kv_caches)
     logger.info("list_depth: %d, tensor_dim: %d", list_depth, tensor_dim)
-    # `probe` walks the union; this function is the single place allowed
-    # to index the raw structure, so Any-typing the local avoids noisy
-    # casts at every `.shape` / `[i]` access below.
-    probe: Any = kv_caches
+    probe: DiscoverableKVCache = kv_caches
     list_dims = []
     for _ in range(list_depth):
         list_dims.append(len(probe))
@@ -956,7 +951,7 @@ def get_device(kv_caches: DiscoverableKVCache) -> torch.device:
     tensors in *kv_caches* live on the same device (true for every
     current :class:`GPUKVFormat`).
     """
-    probe: Any = kv_caches
+    probe: DiscoverableKVCache = kv_caches
     while isinstance(probe, list):
         probe = probe[0]
     return probe.device
