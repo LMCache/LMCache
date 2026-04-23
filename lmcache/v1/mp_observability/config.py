@@ -329,6 +329,7 @@ def init_observability(obs_config: ObservabilityConfig) -> EventBus:
             L1LifecycleSubscriber,
             L1MetricsSubscriber,
             L2MetricsSubscriber,
+            L2ThroughputSubscriber,
             SMMetricsSubscriber,
         )
 
@@ -338,6 +339,7 @@ def init_observability(obs_config: ObservabilityConfig) -> EventBus:
         bus.register_subscriber(L1LifecycleSubscriber(sample_rate=sample_rate))
         bus.register_subscriber(L0L1ThroughputSubscriber(sample_rate=sample_rate))
         bus.register_subscriber(L2MetricsSubscriber())
+        bus.register_subscriber(L2ThroughputSubscriber(sample_rate=sample_rate))
         bus.register_subscriber(SMMetricsSubscriber())
 
     if obs_config.logging_enabled:

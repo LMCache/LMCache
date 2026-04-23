@@ -154,6 +154,10 @@ class InFlightPrefetchRequest:
     load_plan: dict[int, Bitmap] = field(default_factory=dict)
     # Load phase: adapter_idx -> task_id (removed as results arrive)
     pending_load_tasks: dict[int, L2TaskId] = field(default_factory=dict)
+    # Load phase: adapter_idx -> total bytes submitted to that adapter.
+    # Carried across submit->complete so the L2_LOAD_TASK_COMPLETED event
+    # can report the same value as SUBMITTED without re-reading MemoryObjs.
+    pending_load_bytes: dict[int, int] = field(default_factory=dict)
     # Load phase: adapter_idx -> bitmap (populated as results arrive)
     load_results: dict[int, Bitmap] = field(default_factory=dict)
     # Load phase: keys that were write-reserved in L1
@@ -633,6 +637,28 @@ class PrefetchController(StorageControllerInterface):
                 per_adapter_keys, per_adapter_objs
             )
             request.pending_load_tasks[adapter_idx] = task_id
+            # Per-adapter byte accounting for L2_LOAD_TASK_* throughput
+            # events.  Uniform layout per chunk -> size * count.
+            total_bytes = (
+                per_adapter_objs[0].get_size() * len(per_adapter_objs)
+                if per_adapter_objs
+                else 0
+            )
+            request.pending_load_bytes[adapter_idx] = total_bytes
+
+            self._event_bus.publish(
+                Event(
+                    event_type=EventType.L2_LOAD_TASK_SUBMITTED,
+                    metadata={
+                        "request_id": request.request_id,
+                        "adapter_index": adapter_idx,
+                        "task_id": task_id,
+                        "l2_name": self._adapter_descriptors[adapter_idx].type_name,
+                        "key_count": len(per_adapter_keys),
+                        "total_bytes": total_bytes,
+                    },
+                )
+            )
 
         ## Step 8: update the lookup result based on the final load plan
         self._update_lookup_results(request.request_id, prefix_length)
@@ -687,6 +713,22 @@ class PrefetchController(StorageControllerInterface):
             if result is not None:
                 request.load_results[adapter_index] = result
                 del request.pending_load_tasks[adapter_index]
+                total_bytes = request.pending_load_bytes.pop(adapter_index, 0)
+
+                self._event_bus.publish(
+                    Event(
+                        event_type=EventType.L2_LOAD_TASK_COMPLETED,
+                        metadata={
+                            "request_id": request.request_id,
+                            "adapter_index": adapter_index,
+                            "task_id": task_id,
+                            "l2_name": self._adapter_descriptors[
+                                adapter_index
+                            ].type_name,
+                            "total_bytes": total_bytes,
+                        },
+                    )
+                )
 
                 if request.all_loads_done():
                     ready_to_finalize.append(request)

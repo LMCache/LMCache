@@ -307,9 +307,10 @@ published on the GPU cupy stream, so they reflect true GPU-stream copy
 time — not Python/lock overhead.
 
 All throughput histograms are emitted with ``engine_id`` (vLLM worker
-instance id) and ``gpu_id`` OTel attributes, enabling per-worker and
-per-GPU slicing in Prometheus (e.g.
-``lmcache_mp_l0_l1_store_throughput_gbs{engine_id="0",gpu_id="3"}``).
+instance id), ``device`` (e.g. ``"cuda:3"``), and ``model_name`` OTel
+attributes, enabling per-worker, per-device, and per-model slicing in
+Prometheus (e.g.
+``lmcache_mp_l0_l1_store_throughput_gbs{engine_id="0",device="cuda:3",model_name="meta-llama/Llama-3.1-8B"}``).
 
 .. list-table::
    :header-rows: 1
@@ -324,6 +325,43 @@ per-GPU slicing in Prometheus (e.g.
    * - ``lmcache_mp.l0_l1_load_throughput_gbs``
      - Histogram
      - CPU→GPU (L1→L0) load throughput in GB/s per sampled request.
+
+L1 ↔ L2 Throughput Histograms
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Sampled (default 1%) per-task throughput of L1↔L2 transfers via
+``L2ThroughputSubscriber``. The store path correlates
+``L2_STORE_SUBMITTED`` → ``L2_STORE_COMPLETED`` by
+``(adapter_index, task_id)``. The load path correlates the per-adapter
+``L2_LOAD_TASK_SUBMITTED`` → ``L2_LOAD_TASK_COMPLETED`` events by
+``(request_id, adapter_index)``; the request-level
+``L2_PREFETCH_LOAD_*`` events used by the key-count counters aggregate
+across adapters and cannot be attributed to a specific ``l2_name``.
+
+Timestamps span **submit → complete**, so the duration includes adapter
+queue, network, and disk I/O — the value is *bytes / end-to-end
+latency*, not raw transfer rate. Use these histograms to compare
+adapter types and catch regressions; use the L0↔L1 histograms when you
+need pure copy-time throughput.
+
+All L1↔L2 throughput histograms carry a single ``l2_name`` OTel
+attribute — the registered adapter type (e.g. ``"fs"``, ``"nixl_store"``,
+``"mooncake_store"``) — enabling per-backend slicing in Prometheus (e.g.
+``lmcache_mp_l2_store_throughput_gbs{l2_name="nixl_store"}``).
+
+.. list-table::
+   :header-rows: 1
+   :widths: 40 15 45
+
+   * - Metric
+     - Type
+     - Description
+   * - ``lmcache_mp.l2_store_throughput_gbs``
+     - Histogram
+     - L1→L2 store throughput in GB/s per sampled task.
+   * - ``lmcache_mp.l2_load_throughput_gbs``
+     - Histogram
+     - L2→L1 load throughput in GB/s per sampled (request, adapter) pair.
 
 Observable Gauges
 ~~~~~~~~~~~~~~~~~

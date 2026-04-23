@@ -141,6 +141,11 @@ class InFlightStoreTask:
     """The subset of keys for which reserve_read succeeded
     (i.e., keys holding an L1 read lock that must be released)."""
 
+    total_bytes: int = 0
+    """Total bytes submitted for this task, carried forward so the
+    L2_STORE_COMPLETED event can report the same value as SUBMITTED
+    without re-reading MemoryObjs after their locks are released."""
+
 
 # Main class
 
@@ -338,10 +343,16 @@ class StoreController(StorageControllerInterface):
             adapter = self._l2_adapters[adapter_index]
             task_id = adapter.submit_store_task(successful_keys, successful_objs)
 
+            # All objects for a single store task share one layout (L1
+            # allocates uniform MemoryObjs per chunk), so total bytes is
+            # size * count — avoids summing N identical values.
+            total_bytes = successful_objs[0].get_size() * len(successful_objs)
+
             self._in_flight_tasks[(adapter_index, task_id)] = InFlightStoreTask(
                 adapter_index=adapter_index,
                 keys=successful_keys,
                 read_locked_keys=list(successful_keys),
+                total_bytes=total_bytes,
             )
             self._status_in_flight_count += 1
 
@@ -350,7 +361,10 @@ class StoreController(StorageControllerInterface):
                     event_type=EventType.L2_STORE_SUBMITTED,
                     metadata={
                         "adapter_index": adapter_index,
+                        "task_id": task_id,
+                        "l2_name": self._adapter_descriptors[adapter_index].type_name,
                         "key_count": len(successful_keys),
+                        "total_bytes": total_bytes,
                     },
                 )
             )
@@ -397,14 +411,18 @@ class StoreController(StorageControllerInterface):
             # Always release read locks
             l1_mgr.finish_read(task.read_locked_keys)
 
+            l2_name = self._adapter_descriptors[adapter_index].type_name
             if success:
                 self._event_bus.publish(
                     Event(
                         event_type=EventType.L2_STORE_COMPLETED,
                         metadata={
                             "adapter_index": adapter_index,
+                            "task_id": task_id,
+                            "l2_name": l2_name,
                             "succeeded_count": len(task.keys),
                             "failed_count": 0,
+                            "total_bytes": task.total_bytes,
                         },
                     )
                 )
@@ -423,8 +441,11 @@ class StoreController(StorageControllerInterface):
                         event_type=EventType.L2_STORE_COMPLETED,
                         metadata={
                             "adapter_index": adapter_index,
+                            "task_id": task_id,
+                            "l2_name": l2_name,
                             "succeeded_count": 0,
                             "failed_count": len(task.keys),
+                            "total_bytes": task.total_bytes,
                         },
                     )
                 )

@@ -12,6 +12,9 @@ from lmcache.v1.mp_observability.subscribers.metrics.l1_lifecycle import (
     L1LifecycleSubscriber,
 )
 from lmcache.v1.mp_observability.subscribers.metrics.l2 import L2MetricsSubscriber
+from lmcache.v1.mp_observability.subscribers.metrics.l2_throughput import (
+    L2ThroughputSubscriber,
+)
 from lmcache.v1.mp_observability.subscribers.metrics.sm import SMMetricsSubscriber
 
 __all__ = [
@@ -20,5 +23,6 @@ __all__ = [
     "L1LifecycleSubscriber",
     "L1MetricsSubscriber",
     "L2MetricsSubscriber",
+    "L2ThroughputSubscriber",
     "SMMetricsSubscriber",
 ]
