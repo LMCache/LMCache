@@ -14,15 +14,6 @@ import asyncio
 import os
 import threading
 
-# Third Party
-from hf3fs_fuse.io import (
-    deregister_fd,
-    extract_mount_point,
-    make_ioring,
-    make_iovec,
-    register_fd,
-)
-
 # First Party
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey
@@ -30,6 +21,19 @@ from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.protocol import RemoteMetadata
 from lmcache.v1.storage_backend.connector.fs_connector import FSConnector
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
+
+HF3FS_AVAILABLE = True
+try:
+    # Third Party
+    from hf3fs_fuse.io import (
+        deregister_fd,
+        extract_mount_point,
+        make_ioring,
+        make_iovec,
+        register_fd,
+    )
+except ImportError:
+    HF3FS_AVAILABLE = False
 
 logger = init_logger(__name__)
 
@@ -63,6 +67,13 @@ class HF3fsConnector(FSConnector):
             base_paths_str: Comma-separated base paths
                 (legacy, passed from adapter when using hf3fs://URL)
         """
+        if not HF3FS_AVAILABLE:
+            logger.error(
+                "hf3fs_fuse.io is not available. Please install the hf3fs_fuse package"
+            )
+            raise ImportError(
+                "hf3fs_fuse.io is not available. Please install the hf3fs_fuse package."
+            )
         super().__init__(
             loop,
             local_cpu_backend,
@@ -216,7 +227,7 @@ class HF3fsConnector(FSConnector):
 
         try:
             # Prepare metadata
-            buffer = memory_obj.byte_array
+            buffer = memoryview(memory_obj.byte_array)
             metadata = (
                 RemoteMetadata(
                     len(buffer),

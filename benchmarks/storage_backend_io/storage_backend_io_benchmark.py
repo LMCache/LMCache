@@ -1,4 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 Samsung Electronics Co., Ltd.All Rights Reserved
+#
+# 2026/4/20 support benchmark write performance of hf3fs and fs backend
+#   Wenwen Chen <wenwen.chen@samsung.com>
+#   Ruyi Zhang <ruyi.zhang@samsung.com>
+
 """Benchmark storage backends under high write concurrency.
 This module provides a framework for benchmarking different storage backends
 (LocalDiskBackend, RustRawBlockBackend, RemoteBackend, etc.) with consistent
