@@ -17,7 +17,6 @@ from lmcache.v1.gpu_connector.utils import (
     assert_is_vllm_mla_or_flash_attn_or_flash_infer,
     attempt_permute_to_contiguous_view,
     discover_gpu_kv_format,
-    ensure_contiguous_kv_caches,
     get_block_size,
     get_device,
     get_elements_per_layer,
@@ -245,9 +244,7 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
         if idx in self.kv_cache_pointers_on_gpu:
             return self.kv_cache_pointers_on_gpu[idx]
 
-        kv_caches = ensure_contiguous_kv_caches(
-            kv_caches, kv_layout=self.layout_hints.get("kv_layout")
-        )
+        kv_caches = attempt_permute_to_contiguous_view(kv_caches)
 
         self.kv_cache_pointers.numpy()[:] = [t.data_ptr() for t in kv_caches]
         self.kv_cache_pointers_on_gpu[idx] = torch.empty(
@@ -465,9 +462,7 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
         if self.init:
             return
 
-        self.kvcaches = ensure_contiguous_kv_caches(
-            self.kvcaches, kv_layout=self.layout_hints.get("kv_layout")
-        )
+        self.kvcaches = attempt_permute_to_contiguous_view(self.kvcaches)
         self.gpu_kv_format = discover_gpu_kv_format(
             self.kvcaches, EngineType.VLLM, layout_hints=self.layout_hints
         )
@@ -714,9 +709,7 @@ class VLLMBufferLayerwiseGPUConnector(GPUConnectorInterface):
             # is okay since fragmentation shouldn't exist in the `gpu_buffer_allocator`
             # in layerwise mode.
 
-            kv_caches = ensure_contiguous_kv_caches(
-                kv_caches, kv_layout=self.layout_hints.get("kv_layout")
-            )
+            kv_caches = attempt_permute_to_contiguous_view(kv_caches)
             self.kvcaches = kv_caches
             self.gpu_kv_format = discover_gpu_kv_format(
                 kv_caches, EngineType.VLLM, layout_hints=self.layout_hints
@@ -1130,9 +1123,7 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
             # is okay since fragmentation shouldn't exist in the `gpu_buffer_allocator`
             # in layerwise mode.
 
-            kv_caches = ensure_contiguous_kv_caches(
-                kv_caches, kv_layout=self.layout_hints.get("kv_layout")
-            )
+            kv_caches = attempt_permute_to_contiguous_view(kv_caches)
             self.kvcaches = kv_caches
             self.gpu_kv_format = discover_gpu_kv_format(
                 kv_caches, EngineType.VLLM, layout_hints=self.layout_hints
@@ -1457,7 +1448,7 @@ class SGLangGPUConnector(GPUConnectorInterface):
             logger.info(f"GPU buffer: {self.gpu_buffer.shape}")
 
     def _initialize_pointers(self, kv_caches: DiscoverableKVCache) -> torch.Tensor:
-        kv_caches = ensure_contiguous_kv_caches(kv_caches)
+        kv_caches = attempt_permute_to_contiguous_view(kv_caches)
         self.gpu_kv_format = discover_gpu_kv_format(kv_caches, EngineType.SGLANG)
         num_layers = get_num_layers(kv_caches, self.gpu_kv_format)
         ptrs = get_group_data_ptrs(
@@ -1664,7 +1655,7 @@ class SGLangLayerwiseGPUConnector(GPUConnectorInterface):
         Also, the first request might be a bit slower due to buffer creation.
         """
         if self.use_gpu and self.gpu_buffer_allocator is None:
-            kv_caches = ensure_contiguous_kv_caches(kv_caches)
+            kv_caches = attempt_permute_to_contiguous_view(kv_caches)
             self.gpu_kv_format = discover_gpu_kv_format(kv_caches, EngineType.SGLANG)
             self.tokens_per_layer = get_tokens_per_layer(kv_caches, self.gpu_kv_format)
             self.elements_per_layer = get_elements_per_layer(

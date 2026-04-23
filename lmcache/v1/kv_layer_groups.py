@@ -100,7 +100,7 @@ class KVLayerGroupsManager:
         # lmcache.v1.gpu_connector.__init__ → metadata → kv_layer_groups.
         # First Party
         from lmcache.v1.gpu_connector.utils import (
-            get_layer_dtype,
+            get_dtype,
             get_layer_shape_signature,
             get_num_layers,
             make_page_buffer_shape_desc,
@@ -121,7 +121,7 @@ class KVLayerGroupsManager:
         )
         for idx in range(num_layers):
             sig = get_layer_shape_signature(kv_caches, gpu_kv_format, idx)
-            dt = get_layer_dtype(kv_caches, gpu_kv_format, idx)
+            dt = get_dtype(kv_caches, gpu_kv_format, idx)
             groups_dict[(sig, dt)].append(idx)
 
         sorted_keys = sorted(groups_dict.keys(), key=lambda k: groups_dict[k][0])

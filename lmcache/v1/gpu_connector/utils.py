@@ -114,35 +114,6 @@ def any_non_contiguous(kv_caches: DiscoverableKVCache) -> bool:
     return any(any_non_contiguous(sub) for sub in kv_caches)
 
 
-def ensure_contiguous_kv_caches(
-    kv_caches: DiscoverableKVCache,
-    kv_layout: str | None = None,
-) -> DiscoverableKVCache:
-    """Permute non-contiguous KV caches to contiguous physical shape.
-
-    LMCache assumes tensors have matching logical and physical views;
-    known reason for non-contiguity is vLLM's HND layout. Walks the
-    full :data:`DiscoverableKVCache` structure and permutes every tensor
-    leaf; returns the input unchanged if every tensor is already
-    contiguous.
-    """
-    if not any_non_contiguous(kv_caches):
-        return kv_caches
-
-    result = attempt_permute_to_contiguous_view(kv_caches)
-
-    if kv_layout == "HND":
-        logger.info("Permuted HND tensors to contiguous physical shape")
-    else:
-        logger.warning(
-            "Non-contiguous KV tensors detected with layout=%s; "
-            "permuted to contiguous. Please identify the underlying reason.",
-            kv_layout,
-        )
-
-    return result
-
-
 def need_gpu_interm_buffer(lmcache_config: LMCacheEngineConfig):
     """
     Check if the GPU Connector needs to create an intermediate
@@ -538,41 +509,45 @@ def get_page_buffer_size(
 
 
 def get_num_heads(
-    kv_caches: DiscoverableKVCache, gpu_kv_format: "lmc_ops.GPUKVFormat"
+    kv_caches: DiscoverableKVCache,
+    gpu_kv_format: "lmc_ops.GPUKVFormat",
+    layer_idx: int = 0,
 ) -> int:
     """
-    Get the number of heads from the kv_caches
+    Get the number of heads for a layer (defaults to layer 0).
     """
     if gpu_kv_format == lmc_ops.GPUKVFormat.NB_NL_TWO_BS_NH_HS:
-        return kv_caches.shape[4]
+        return kv_caches.shape[4]  # global for cross-layer
     elif gpu_kv_format in (
         lmc_ops.GPUKVFormat.NL_X_TWO_NB_BS_NH_HS,
         lmc_ops.GPUKVFormat.NL_X_NB_TWO_BS_NH_HS,
     ):
         # NHD: [..., BS, NH, HS] — num_heads at shape[3]
-        return kv_caches[0].shape[3]
+        return kv_caches[layer_idx].shape[3]
     elif gpu_kv_format in (
         lmc_ops.GPUKVFormat.NL_X_TWO_NB_NH_BS_HS,
         lmc_ops.GPUKVFormat.NL_X_NB_TWO_NH_BS_HS,
     ):
         # HND: [..., NH, BS, HS] — num_heads at shape[2]
-        return kv_caches[0].shape[2]
+        return kv_caches[layer_idx].shape[2]
     elif gpu_kv_format == lmc_ops.GPUKVFormat.NL_X_NB_BS_HS:
         # MLA: heads are absorbed into hidden dim, so num_heads = 1
         return 1
     elif gpu_kv_format == lmc_ops.GPUKVFormat.TWO_X_NL_X_NBBS_NH_HS:
-        return kv_caches[0][0].shape[1]
+        return kv_caches[0][layer_idx].shape[1]
     elif gpu_kv_format == lmc_ops.GPUKVFormat.NL_X_NBBS_ONE_HS:
-        return kv_caches[0].shape[1]
+        return kv_caches[layer_idx].shape[1]
     else:
         raise ValueError(f"Unknown GPU KV Format: {gpu_kv_format}")
 
 
 def get_hidden_dim_size(
-    kv_caches: DiscoverableKVCache, gpu_kv_format: "lmc_ops.GPUKVFormat"
+    kv_caches: DiscoverableKVCache,
+    gpu_kv_format: "lmc_ops.GPUKVFormat",
+    layer_idx: int = 0,
 ) -> int:
     """
-    Get the hidden dimension from the kv_caches
+    Get the hidden dimension for a layer (defaults to layer 0).
     """
     if gpu_kv_format == lmc_ops.GPUKVFormat.NB_NL_TWO_BS_NH_HS:
         return kv_caches.shape[4] * kv_caches.shape[5]
@@ -581,28 +556,30 @@ def get_hidden_dim_size(
         lmc_ops.GPUKVFormat.NL_X_NB_TWO_BS_NH_HS,
     ):
         # NHD: [..., NH, HS] — hidden_dim = shape[3] * shape[4]
-        return kv_caches[0].shape[3] * kv_caches[0].shape[4]
+        return kv_caches[layer_idx].shape[3] * kv_caches[layer_idx].shape[4]
     elif gpu_kv_format in (
         lmc_ops.GPUKVFormat.NL_X_TWO_NB_NH_BS_HS,
         lmc_ops.GPUKVFormat.NL_X_NB_TWO_NH_BS_HS,
     ):
         # HND: [..., NH, BS, HS] — hidden_dim = NH * HS = shape[2] * shape[4]
-        return kv_caches[0].shape[2] * kv_caches[0].shape[4]
+        return kv_caches[layer_idx].shape[2] * kv_caches[layer_idx].shape[4]
     elif gpu_kv_format == lmc_ops.GPUKVFormat.NL_X_NB_BS_HS:
-        return kv_caches[0].shape[2]
+        return kv_caches[layer_idx].shape[2]
     elif gpu_kv_format == lmc_ops.GPUKVFormat.TWO_X_NL_X_NBBS_NH_HS:
-        return kv_caches[0][0].shape[1] * kv_caches[0][0].shape[2]
+        return kv_caches[0][layer_idx].shape[1] * kv_caches[0][layer_idx].shape[2]
     elif gpu_kv_format == lmc_ops.GPUKVFormat.NL_X_NBBS_ONE_HS:
-        return kv_caches[0].shape[2]
+        return kv_caches[layer_idx].shape[2]
     else:
         raise ValueError(f"Unknown GPU KV Format: {gpu_kv_format}")
 
 
 def get_head_size(
-    kv_caches: DiscoverableKVCache, gpu_kv_format: "lmc_ops.GPUKVFormat"
+    kv_caches: DiscoverableKVCache,
+    gpu_kv_format: "lmc_ops.GPUKVFormat",
+    layer_idx: int = 0,
 ) -> int:
     """
-    Get the head size from the kv_caches
+    Get the head size for a layer (defaults to layer 0).
     """
     if gpu_kv_format == lmc_ops.GPUKVFormat.NB_NL_TWO_BS_NH_HS:
         return kv_caches.shape[5]
@@ -613,13 +590,13 @@ def get_head_size(
         lmc_ops.GPUKVFormat.NL_X_NB_TWO_NH_BS_HS,
     ):
         # Both NHD [..., NH, HS] and HND [..., BS, HS] have head_size last
-        return kv_caches[0].shape[4]
+        return kv_caches[layer_idx].shape[4]
     elif gpu_kv_format == lmc_ops.GPUKVFormat.NL_X_NB_BS_HS:
-        return kv_caches[0].shape[2]
+        return kv_caches[layer_idx].shape[2]
     elif gpu_kv_format == lmc_ops.GPUKVFormat.TWO_X_NL_X_NBBS_NH_HS:
-        return kv_caches[0][0].shape[2]
+        return kv_caches[0][layer_idx].shape[2]
     elif gpu_kv_format == lmc_ops.GPUKVFormat.NL_X_NBBS_ONE_HS:
-        return kv_caches[0].shape[2]
+        return kv_caches[layer_idx].shape[2]
     else:
         raise ValueError(f"Unknown GPU KV Format: {gpu_kv_format}")
 
@@ -768,10 +745,12 @@ def is_mla(gpu_kv_format: "lmc_ops.GPUKVFormat") -> bool:
 
 
 def get_dtype(
-    kv_caches: DiscoverableKVCache, gpu_kv_format: "lmc_ops.GPUKVFormat"
+    kv_caches: DiscoverableKVCache,
+    gpu_kv_format: "lmc_ops.GPUKVFormat",
+    layer_idx: int = 0,
 ) -> torch.dtype:
     """
-    Get the dtype from the kv_caches
+    Get the dtype for a layer (defaults to layer 0).
     """
     if gpu_kv_format == lmc_ops.GPUKVFormat.NB_NL_TWO_BS_NH_HS:
         return kv_caches.dtype
@@ -783,9 +762,9 @@ def get_dtype(
         lmc_ops.GPUKVFormat.NL_X_NB_TWO_NH_BS_HS,
         lmc_ops.GPUKVFormat.NL_X_NBBS_ONE_HS,
     ):
-        return kv_caches[0].dtype
+        return kv_caches[layer_idx].dtype
     elif gpu_kv_format == lmc_ops.GPUKVFormat.TWO_X_NL_X_NBBS_NH_HS:
-        return kv_caches[0][0].dtype
+        return kv_caches[0][layer_idx].dtype
     else:
         raise ValueError(f"Unknown GPU KV Format: {gpu_kv_format}")
 
@@ -802,38 +781,6 @@ def _per_layer_list_formats() -> frozenset:
             lmc_ops.GPUKVFormat.NL_X_NBBS_ONE_HS,
         }
     )
-
-
-def get_layer_kv_caches(
-    kv_caches: DiscoverableKVCache,
-    gpu_kv_format: "lmc_ops.GPUKVFormat",
-    layer_idx: int,
-) -> DiscoverableKVCache:
-    """Return a single-layer sub-structure of *kv_caches*, preserving the
-    list-nesting convention of *gpu_kv_format* so it is reusable as input
-    to other format-aware helpers.
-
-    Args:
-        kv_caches: KV cache structure accepted by :func:`discover_gpu_kv_format`.
-        gpu_kv_format: Format returned by :func:`discover_gpu_kv_format`.
-        layer_idx: 0-based layer index.
-
-    Returns:
-        A list or tensor view representing the single layer's KV cache.
-
-    Raises:
-        ValueError: If *gpu_kv_format* is not recognized.
-    """
-    if gpu_kv_format in _per_layer_list_formats():
-        layers = cast(list[torch.Tensor], kv_caches)
-        return [layers[layer_idx]]
-    if gpu_kv_format == lmc_ops.GPUKVFormat.TWO_X_NL_X_NBBS_NH_HS:
-        k, v = cast(list[list[torch.Tensor]], kv_caches)
-        return [[k[layer_idx]], [v[layer_idx]]]
-    if gpu_kv_format == lmc_ops.GPUKVFormat.NB_NL_TWO_BS_NH_HS:
-        tensor = cast(torch.Tensor, kv_caches)
-        return tensor[:, layer_idx : layer_idx + 1, ...]
-    raise ValueError(f"Unknown GPU KV Format: {gpu_kv_format}")
 
 
 def get_layer_data_ptrs(
@@ -935,26 +882,6 @@ def get_device(kv_caches: DiscoverableKVCache) -> torch.device:
     return probe.device
 
 
-def get_layer_dtype(
-    kv_caches: DiscoverableKVCache,
-    gpu_kv_format: "lmc_ops.GPUKVFormat",
-    layer_idx: int,
-) -> torch.dtype:
-    """Return the dtype of a single layer's KV cache tensor.
-
-    Args:
-        kv_caches: Full kv_caches structure.
-        gpu_kv_format: Format returned by :func:`discover_gpu_kv_format`.
-        layer_idx: 0-based layer index.
-
-    Returns:
-        The torch dtype for that layer.
-    """
-    return get_dtype(
-        get_layer_kv_caches(kv_caches, gpu_kv_format, layer_idx), gpu_kv_format
-    )
-
-
 def get_layer_shape_signature(
     kv_caches: DiscoverableKVCache,
     gpu_kv_format: "lmc_ops.GPUKVFormat",
@@ -963,19 +890,14 @@ def get_layer_shape_signature(
     """Return a hashable grouping key ``(kv_size, num_heads, head_size)`` for
     a single layer. Two layers with identical keys are kernel-equivalent
     regardless of physical layout.
-
-    Args:
-        kv_caches: Full kv_caches structure.
-        gpu_kv_format: Format returned by :func:`discover_gpu_kv_format`.
-        layer_idx: 0-based layer index.
-
-    Returns:
-        ``(kv_size, num_heads, head_size)``.
     """
-    rep = get_layer_kv_caches(kv_caches, gpu_kv_format, layer_idx)
     kv_size = 1 if is_mla(gpu_kv_format) else 2
-    nh = 1 if is_mla(gpu_kv_format) else get_num_heads(rep, gpu_kv_format)
-    hs = get_head_size(rep, gpu_kv_format)
+    nh = (
+        1
+        if is_mla(gpu_kv_format)
+        else get_num_heads(kv_caches, gpu_kv_format, layer_idx)
+    )
+    hs = get_head_size(kv_caches, gpu_kv_format, layer_idx)
     return (kv_size, nh, hs)
 
 
@@ -1000,15 +922,18 @@ def make_page_buffer_shape_desc(
     Returns:
         A populated ``PageBufferShapeDesc``.
     """
-    rep = get_layer_kv_caches(kv_caches, gpu_kv_format, layer_idx)
     desc = lmc_ops.PageBufferShapeDesc()
     desc.kv_size = 1 if is_mla(gpu_kv_format) else 2
     desc.nl = num_layers_in_group
     desc.nb = num_blocks
     desc.bs = block_size
-    desc.nh = 1 if is_mla(gpu_kv_format) else get_num_heads(rep, gpu_kv_format)
-    desc.hs = get_head_size(rep, gpu_kv_format)
-    desc.element_size = get_dtype(rep, gpu_kv_format).itemsize
+    desc.nh = (
+        1
+        if is_mla(gpu_kv_format)
+        else get_num_heads(kv_caches, gpu_kv_format, layer_idx)
+    )
+    desc.hs = get_head_size(kv_caches, gpu_kv_format, layer_idx)
+    desc.element_size = get_dtype(kv_caches, gpu_kv_format, layer_idx).itemsize
     return desc
 
 

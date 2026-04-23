@@ -19,8 +19,8 @@ from lmcache.logging import init_logger
 from lmcache.utils import EngineType
 from lmcache.v1.gpu_connector.utils import (
     LayoutHints,
+    attempt_permute_to_contiguous_view,
     discover_gpu_kv_format,
-    ensure_contiguous_kv_caches,
     get_attention_backend,
     get_block_size,
     get_concrete_gpu_kv_shape,
@@ -71,9 +71,7 @@ class GPUCacheContext:
         layout_hints: LayoutHints | None = None,
     ):
         unwrapped = unwrap_kv_cache_tensors(kv_caches)
-        self.kv_caches_ = ensure_contiguous_kv_caches(
-            unwrapped, kv_layout=(layout_hints or {}).get("kv_layout")
-        )
+        self.kv_caches_ = attempt_permute_to_contiguous_view(unwrapped)
         self.device_ = get_device(self.kv_caches_)
 
         # TODO support creating GPUCacheContext for SGLang

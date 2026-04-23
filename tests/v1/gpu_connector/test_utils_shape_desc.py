@@ -15,13 +15,14 @@ pytestmark = pytest.mark.skipif(
 
 # First Party
 from lmcache.v1.gpu_connector.utils import (  # noqa: E402
-    ensure_contiguous_kv_caches,
+    attempt_permute_to_contiguous_view,
     get_device,
+    get_dtype,
     get_group_data_ptrs,
+    get_head_size,
     get_layer_data_ptrs,
-    get_layer_dtype,
-    get_layer_kv_caches,
     get_layer_shape_signature,
+    get_num_heads,
     make_page_buffer_shape_desc,
 )
 import lmcache.c_ops as lmc_ops  # noqa: E402
@@ -108,32 +109,32 @@ def test_make_shape_desc_sglang_mha():
     assert sd.hs == 64
 
 
-def test_get_layer_helpers_per_layer_list():
+def test_per_layer_scalar_accessors_per_layer_list():
+    """For per-layer list formats, each scalar accessor honours layer_idx."""
     kv_caches = [
-        torch.randn(2, 32, 16, 8, 64, dtype=torch.float16, device="cuda")
-        for _ in range(3)
+        torch.randn(2, 32, 16, 8 + i, 64, dtype=torch.float16, device="cuda")
+        for i in range(3)  # distinct num_heads per layer: 8, 9, 10
     ]
     fmt = lmc_ops.GPUKVFormat.NL_X_TWO_NB_BS_NH_HS
 
-    rep = get_layer_kv_caches(kv_caches, fmt, layer_idx=1)
-    assert isinstance(rep, list) and len(rep) == 1
-    assert rep[0].data_ptr() == kv_caches[1].data_ptr()
+    assert get_num_heads(kv_caches, fmt, layer_idx=0) == 8
+    assert get_num_heads(kv_caches, fmt, layer_idx=2) == 10
+    assert get_head_size(kv_caches, fmt, layer_idx=1) == 64
+    assert get_dtype(kv_caches, fmt, layer_idx=0) == torch.float16
 
     ptrs = get_layer_data_ptrs(kv_caches, fmt, layer_idx=2)
     assert ptrs == [kv_caches[2].data_ptr()]
 
-    assert get_layer_dtype(kv_caches, fmt, layer_idx=0) == torch.float16
 
-
-def test_get_layer_helpers_sglang_mha():
+def test_per_layer_scalar_accessors_sglang_mha():
+    """For SGLang MHA (nested list), accessors walk into [k_list|v_list]."""
     k = [torch.randn(512, 8, 64, dtype=torch.bfloat16, device="cuda") for _ in range(2)]
     v = [torch.randn(512, 8, 64, dtype=torch.bfloat16, device="cuda") for _ in range(2)]
     kv_caches = [k, v]
     fmt = lmc_ops.GPUKVFormat.TWO_X_NL_X_NBBS_NH_HS
 
-    rep = get_layer_kv_caches(kv_caches, fmt, layer_idx=1)
-    assert rep[0][0].data_ptr() == k[1].data_ptr()
-    assert rep[1][0].data_ptr() == v[1].data_ptr()
+    assert get_num_heads(kv_caches, fmt, layer_idx=0) == 8
+    assert get_dtype(kv_caches, fmt, layer_idx=1) == torch.bfloat16
 
     ptrs = get_layer_data_ptrs(kv_caches, fmt, layer_idx=0)
     assert ptrs == [k[0].data_ptr(), v[0].data_ptr()]
@@ -224,10 +225,10 @@ def test_get_layer_data_ptrs_cross_layer_rejects():
 
 def test_ensure_contiguous_preserves_bare_tensor():
     """A bare torch.Tensor input (cross-layer shape) must pass through
-    ensure_contiguous_kv_caches unchanged — no list wrapping — so the
+    attempt_permute_to_contiguous_view unchanged — no list wrapping — so the
     DiscoverableKVCache recursive union is respected end-to-end."""
     big = torch.empty(32, 80, 2, 16, 8, 64, dtype=torch.bfloat16, device="cuda")
-    out = ensure_contiguous_kv_caches(big)
+    out = attempt_permute_to_contiguous_view(big)
     assert isinstance(out, torch.Tensor)
     assert out is big
 
@@ -246,19 +247,19 @@ def test_ensure_contiguous_recurses_all_shapes():
     assert not nhd_view.is_contiguous()
 
     # bare tensor
-    out_tensor = ensure_contiguous_kv_caches(nhd_view, kv_layout="HND")
+    out_tensor = attempt_permute_to_contiguous_view(nhd_view)
     assert out_tensor.is_contiguous()
 
     # flat list
     lst = [nhd_view.clone() for _ in range(2)]
-    out_list = ensure_contiguous_kv_caches(lst, kv_layout="HND")
+    out_list = attempt_permute_to_contiguous_view(lst)
     assert isinstance(out_list, list)
     assert all(t.is_contiguous() for t in out_list)
 
     # nested list (SGLang-shaped)
     k = [nhd_view.clone() for _ in range(2)]
     v = [nhd_view.clone() for _ in range(2)]
-    out_nested = ensure_contiguous_kv_caches([k, v], kv_layout="HND")
+    out_nested = attempt_permute_to_contiguous_view([k, v], kv_layout="HND")
     assert isinstance(out_nested, list)
     assert all(t.is_contiguous() for sublist in out_nested for t in sublist)
 
