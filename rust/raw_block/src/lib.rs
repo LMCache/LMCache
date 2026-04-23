@@ -471,7 +471,8 @@ impl RawBlockDevice {
                     //   - Wake up any threads waiting for all I/O to complete
                     {
                         let mut ring = ring_clone.lock().unwrap();
-                        for cqe in ring.completion() {
+                        let completions: Vec<_> = ring.completion().collect();
+                        for cqe in completions {
                             let user_data = cqe.user_data();
                             if let Some(mut sub) = in_flight.remove(&user_data) {
                                 let batch_id = sub.batch_id;
@@ -482,6 +483,89 @@ impl RawBlockDevice {
                                     sub.completion
                                         .set(Err(PyOSError::new_err((code, "io_uring I/O error"))));
                                 } else {
+                                    let bytes_transferred = cqe.result() as usize;
+                                    if bytes_transferred < sub.len {
+                                        // Short read/write: update offset and length, then resubmit
+                                        sub.offset += bytes_transferred as u64;
+                                        sub.len -= bytes_transferred;
+                                        // Update buffer pointer for writes and direct reads
+                                        if sub.is_write || sub.bounce.is_none() {
+                                            sub.ptr_addr += bytes_transferred;
+                                        }
+                                        // For read with bounce buffer, copy partial data back
+                                        if !sub.is_write {
+                                            if let (
+                                                Some(bounce),
+                                                Some(orig_ptr),
+                                                Some(payload_len),
+                                            ) = (
+                                                sub.bounce.as_ref(),
+                                                sub.original_ptr,
+                                                sub.payload_len,
+                                            ) {
+                                                unsafe {
+                                                    libc::memcpy(
+                                                        orig_ptr as *mut libc::c_void,
+                                                        bounce.as_ptr() as *const libc::c_void,
+                                                        bytes_transferred.min(payload_len),
+                                                    );
+                                                }
+                                                sub.original_ptr =
+                                                    Some(orig_ptr + bytes_transferred);
+                                                sub.payload_len = Some(
+                                                    payload_len.saturating_sub(bytes_transferred),
+                                                );
+                                            }
+                                        }
+                                        // Re-insert into in_flight with updated values
+                                        // Don't decrement in_flight_count since we're resubmitting
+                                        in_flight.insert(user_data, sub.clone());
+                                        // Push a new SQE for the remaining data
+                                        let ptr = sub.ptr_addr as *mut u8;
+                                        let sqe = if sub.is_write {
+                                            if let Some(idx) = sub.fixed_buffer_idx {
+                                                opcode::WriteFixed::new(
+                                                    Fd(sub.fd),
+                                                    ptr as *const u8,
+                                                    sub.len as u32,
+                                                    idx,
+                                                )
+                                                .offset(sub.offset)
+                                                .build()
+                                            } else {
+                                                opcode::Write::new(
+                                                    Fd(sub.fd),
+                                                    ptr as *const u8,
+                                                    sub.len as u32,
+                                                )
+                                                .offset(sub.offset)
+                                                .build()
+                                            }
+                                        } else if let Some(idx) = sub.fixed_buffer_idx {
+                                            opcode::ReadFixed::new(
+                                                Fd(sub.fd),
+                                                ptr,
+                                                sub.len as u32,
+                                                idx,
+                                            )
+                                            .offset(sub.offset)
+                                            .build()
+                                        } else {
+                                            opcode::Read::new(Fd(sub.fd), ptr, sub.len as u32)
+                                                .offset(sub.offset)
+                                                .build()
+                                        };
+                                        let sqe = sqe.user_data(user_data);
+                                        unsafe {
+                                            ring.submission()
+                                                .push(&sqe)
+                                                .expect("failed to push sqe for short read/write");
+                                        }
+                                        // Submit the new SQE to the kernel
+                                        let _ = ring.submitter().submit();
+                                        continue;
+                                    }
+                                    // Full completion
                                     // For reads with bounce buffer, copy data back to original buffer
                                     if !sub.is_write {
                                         if let (Some(bounce), Some(orig_ptr), Some(payload_len)) =
@@ -737,24 +821,37 @@ impl RawBlockDevice {
                                 sub.completion
                                     .set(Err(PyOSError::new_err((code, "io_uring I/O error"))));
                             } else {
-                                // For reads with bounce buffer, copy data back to original buffer
-                                if !sub.is_write {
-                                    if let (Some(bounce), Some(orig_ptr), Some(payload_len)) =
-                                        (sub.bounce.take(), sub.original_ptr, sub.payload_len)
-                                    {
-                                        unsafe {
-                                            libc::memcpy(
-                                                orig_ptr as *mut libc::c_void,
-                                                bounce.as_ptr() as *const libc::c_void,
-                                                payload_len,
-                                            );
-                                        }
-                                    }
-                                } else {
+                                let bytes_transferred = cqe.result() as usize;
+                                if bytes_transferred < sub.len {
+                                    // Short read/write during shutdown: fail the request
+                                    // We cannot resubmit because the worker is about to exit
                                     // Drop any bounce buffer associated with this submission.
                                     let _ = sub.bounce.take();
+                                    sub.completion.set(Err(PyRuntimeError::new_err(
+                                        "io_uring worker shutting down - short I/O during shutdown",
+                                    )));
+                                    // Continue to decrement in_flight_count below
+                                } else {
+                                    // Full completion
+                                    // For reads with bounce buffer, copy data back to original buffer
+                                    if !sub.is_write {
+                                        if let (Some(bounce), Some(orig_ptr), Some(payload_len)) =
+                                            (sub.bounce.take(), sub.original_ptr, sub.payload_len)
+                                        {
+                                            unsafe {
+                                                libc::memcpy(
+                                                    orig_ptr as *mut libc::c_void,
+                                                    bounce.as_ptr() as *const libc::c_void,
+                                                    payload_len,
+                                                );
+                                            }
+                                        }
+                                    } else {
+                                        // Drop any bounce buffer associated with this submission.
+                                        let _ = sub.bounce.take();
+                                    }
+                                    sub.completion.set(Ok(()));
                                 }
-                                sub.completion.set(Ok(()));
                             }
                             let prev = in_flight_count_clone.fetch_sub(1, Ordering::Relaxed);
                             if prev == 1 {
