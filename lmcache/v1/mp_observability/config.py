@@ -11,6 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 import argparse
+import uuid
 
 if TYPE_CHECKING:
     # First Party
@@ -71,6 +72,16 @@ class ObservabilityConfig:
     """Path to write the trace file.  When :attr:`trace_level` is set
     but this is ``None``, a timestamped path under ``$TMPDIR`` is
     minted and logged at INFO."""
+
+    service_instance_id: str | None = None
+    """Identifier for this MP server instance.  Attached as the OTel
+    Resource attribute ``service.instance.id`` on every metric and span.
+    One MP server has exactly one instance id.
+
+    ``None`` (the default, also the state when the CLI flag is not
+    passed) falls back to a random UUID v4 at ``init_observability``
+    time.  An explicit empty string is preserved verbatim so operators
+    who want the attribute to report ``""`` can ask for it."""
 
 
 DEFAULT_OBSERVABILITY_CONFIG = ObservabilityConfig(enabled=False)
@@ -149,6 +160,18 @@ def add_observability_args(
         help=(
             "Fraction of chunks/blocks to track for lifecycle histograms "
             "(0, 1.0]. Counters always count all events. Default is 0.01 (1%%)."
+        ),
+    )
+    group.add_argument(
+        "--service-instance-id",
+        type=str,
+        default=None,
+        help=(
+            "Identifier for this MP server instance. Attached as the OTel "
+            "Resource attribute 'service.instance.id' on every metric and "
+            "span. When the flag is not passed, defaults to a random "
+            "UUID v4 minted at startup. Pass --service-instance-id='' to "
+            "force an empty attribute value."
         ),
     )
 
@@ -239,6 +262,7 @@ def parse_args_to_observability_config(
         ),
         trace_level=args.trace_level,
         trace_output=args.trace_output,
+        service_instance_id=args.service_instance_id,
     )
 
     if config.tracing_enabled and config.otlp_endpoint is None:
@@ -264,6 +288,13 @@ def init_observability(obs_config: ObservabilityConfig) -> EventBus:
 
     # Set up OTel providers BEFORE creating subscribers so that
     # module-level get_meter()/get_tracer() calls bind to the real provider
+    instance_id = (
+        obs_config.service_instance_id
+        if obs_config.service_instance_id is not None
+        else str(uuid.uuid4())
+    )
+    resource_attrs = {"service.instance.id": instance_id}
+
     if obs_config.enabled and obs_config.metrics_enabled:
         # First Party
         from lmcache.v1.mp_observability.otel_init import init_otel_metrics
@@ -271,13 +302,17 @@ def init_observability(obs_config: ObservabilityConfig) -> EventBus:
         init_otel_metrics(
             otlp_endpoint=obs_config.otlp_endpoint,
             prometheus_port=obs_config.prometheus_port,
+            resource_attributes=resource_attrs,
         )
 
     if obs_config.enabled and obs_config.tracing_enabled:
         # First Party
         from lmcache.v1.mp_observability.otel_init import init_otel_tracing
 
-        init_otel_tracing(otlp_endpoint=obs_config.otlp_endpoint)
+        init_otel_tracing(
+            otlp_endpoint=obs_config.otlp_endpoint,
+            resource_attributes=resource_attrs,
+        )
 
     bus = init_event_bus(
         EventBusConfig(

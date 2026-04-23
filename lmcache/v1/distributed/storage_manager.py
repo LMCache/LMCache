@@ -65,17 +65,34 @@ class StorageManager:
             for ac in config.l2_adapter_config.adapters
         ]
 
-        # Unified L2 eviction controller for all adapters with eviction config
-        l2_eviction_states = [
-            L2AdapterEvictionState(
-                adapter=adapter,
-                eviction_config=ac.eviction_config,
+        # Unified L2 eviction controller for all adapters with eviction config.
+        # Adapters that don't support global (aggregate) eviction
+        # (``supports_global_eviction == False``, i.e. no
+        # ``max_capacity_bytes`` declared — e.g. the FS adapter) are
+        # skipped here even if an ``eviction_config`` is present — the
+        # eviction controller has no aggregate-usage signal to act on.
+        # Per-cache_salt eviction policies (future: quota-based) would
+        # be wired up separately and don't go through this filter.
+        l2_eviction_states: list[L2AdapterEvictionState] = []
+        for adapter, ac in zip(
+            self._l2_adapters, config.l2_adapter_config.adapters, strict=True
+        ):
+            if ac.eviction_config is None:
+                continue
+            if not adapter.supports_global_eviction:
+                logger.warning(
+                    "L2 adapter %s has eviction_config but does not support "
+                    "global eviction (max_capacity_bytes=0); skipping "
+                    "aggregate-usage eviction setup.",
+                    type(adapter).__name__,
+                )
+                continue
+            l2_eviction_states.append(
+                L2AdapterEvictionState(
+                    adapter=adapter,
+                    eviction_config=ac.eviction_config,
+                )
             )
-            for adapter, ac in zip(
-                self._l2_adapters, config.l2_adapter_config.adapters, strict=False
-            )
-            if ac.eviction_config is not None
-        ]
         self._l2_eviction_controller = L2EvictionController(l2_eviction_states)
         self._l2_eviction_controller.start()
 

@@ -20,6 +20,23 @@ a `_total` suffix (e.g., `lmcache_mp_l1_read_keys_total`).
 
 For implementation guidance on adding new events and subscribers, see [README.md](README.md).
 
+## Global Resource Attributes
+
+Every metric (and span) exported by an MP server carries Resource-level
+attributes built at startup:
+
+| Attribute | CLI flag | Source | Applies to |
+|---|---|---|---|
+| `service.instance.id` | `--service-instance-id` | `ObservabilityConfig.service_instance_id` (`None` defaults to a random UUID v4; explicit `""` preserved) | All metrics + spans |
+
+Resource attributes are attached to the `MeterProvider` / `TracerProvider`
+in `otel_init.py` and therefore appear on every datapoint exported via
+OTLP.  On Prometheus, SDK resource attributes are typically surfaced via
+the `target_info` series rather than on each time-series.
+
+Per-metric attributes (e.g. `cache_salt`) remain on the individual
+datapoints and are orthogonal to these Resource attributes.
+
 ---
 
 ## StorageManager Read Metrics
