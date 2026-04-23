@@ -65,9 +65,12 @@ class CudaIPCWrapper:
 
     def __init__(self, tensor: torch.Tensor):
         # First Party
-        from lmcache.v1.gpu_connector.utils import assert_contiguous_and_aligned
+        from lmcache.v1.gpu_connector.utils import permute_to_contiguous_view
 
-        assert_contiguous_and_aligned(tensor)
+        # Permute any non-contiguous view (e.g. vLLM's NHD-over-HND) so the
+        # shape/stride we encode across IPC reflects the physical layout.
+        # Offset is preserved by the wrapper's storage_offset field.
+        tensor = permute_to_contiguous_view(tensor)
 
         storage = tensor.untyped_storage()
         handle = storage._share_cuda_()

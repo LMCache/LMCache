@@ -100,19 +100,6 @@ def permute_to_contiguous_view(kv_caches: DiscoverableKVCache) -> DiscoverableKV
     return [permute_to_contiguous_view(sub) for sub in kv_caches]
 
 
-def assert_contiguous_and_aligned(tensor: torch.Tensor) -> None:
-    """Assert that a tensor has a contiguous physical layout with zero offset.
-
-    LMCache transfer kernels assume logical and physical views match
-    for coalesced memory accesses. Do NOT blindly call ``.contiguous()``
-    or ``.permute()`` to fix failures here — identify the root cause.
-    """
-    assert tensor.storage_offset() == 0, (
-        f"expected storage_offset 0, got {tensor.storage_offset()}"
-    )
-    assert tensor.is_contiguous(), "tensor is not contiguous"
-
-
 def any_non_contiguous(kv_caches: DiscoverableKVCache) -> bool:
     """Return True if any tensor anywhere in *kv_caches* is non-contiguous.
 
@@ -363,8 +350,11 @@ def discover_gpu_kv_format(
     for _ in range(list_depth):
         list_dims.append(len(probe))
         probe = probe[0]
-    # probe is now the tensor
-    assert_contiguous_and_aligned(probe)
+    # Ensure the innermost tensor is contiguous so .shape below reflects the
+    # physical (not permuted-logical) layout — critical for HND format
+    # detection. No-op if already contiguous; raises for non-permutation
+    # sources of non-contiguity (slicing, as_strided).
+    probe = permute_to_contiguous_view(probe)
 
     tensor_dims = list(probe.shape)
     dims_str = (
