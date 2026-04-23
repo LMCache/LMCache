@@ -102,18 +102,6 @@ def attempt_permute_to_contiguous_view(
     return [attempt_permute_to_contiguous_view(sub) for sub in kv_caches]
 
 
-def any_non_contiguous(kv_caches: DiscoverableKVCache) -> bool:
-    """Return True if any tensor anywhere in *kv_caches* is non-contiguous.
-
-    Walks the full :data:`DiscoverableKVCache` recursive structure
-    (bare tensor, flat list, nested lists) and inspects every tensor
-    leaf.
-    """
-    if isinstance(kv_caches, torch.Tensor):
-        return not kv_caches.is_contiguous()
-    return any(any_non_contiguous(sub) for sub in kv_caches)
-
-
 def need_gpu_interm_buffer(lmcache_config: LMCacheEngineConfig):
     """
     Check if the GPU Connector needs to create an intermediate
