@@ -1,4 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
+# This module is the single layer that performs format-dispatched raw
+# indexing on DiscoverableKVCache values (kv_caches.shape[i],
+# kv_caches[0][j]); the gpu_kv_format argument is the proof the
+# indexing is well-defined. Silence union-attr errors only for this
+# file so the accessors can take DiscoverableKVCache without 50+
+# per-line type: ignore comments.
+# mypy: disable-error-code="union-attr,call-overload"
 # Standard
 from typing import (
     TYPE_CHECKING,
@@ -241,7 +248,7 @@ def get_attention_backend(gpu_kv_format: "lmc_ops.GPUKVFormat") -> str:
 
 
 def get_concrete_gpu_kv_shape(
-    kv_caches: Any, gpu_kv_format: "lmc_ops.GPUKVFormat"
+    kv_caches: DiscoverableKVCache, gpu_kv_format: "lmc_ops.GPUKVFormat"
 ) -> str:
     """Return the shape with actual numeric values substituted.
 
@@ -437,7 +444,9 @@ def discover_gpu_kv_format(
         )
 
 
-def get_num_layers(kv_caches: Any, gpu_kv_format: "lmc_ops.GPUKVFormat") -> int:
+def get_num_layers(
+    kv_caches: DiscoverableKVCache, gpu_kv_format: "lmc_ops.GPUKVFormat"
+) -> int:
     """
     Get the number of layers from the kv_caches
     """
@@ -459,7 +468,9 @@ def get_num_layers(kv_caches: Any, gpu_kv_format: "lmc_ops.GPUKVFormat") -> int:
         raise ValueError(f"Unknown GPU KV Format: {gpu_kv_format}")
 
 
-def get_num_blocks(kv_caches: Any, gpu_kv_format: "lmc_ops.GPUKVFormat") -> int:
+def get_num_blocks(
+    kv_caches: DiscoverableKVCache, gpu_kv_format: "lmc_ops.GPUKVFormat"
+) -> int:
     """
     Get the number of blocks from the kv_caches
     """
@@ -487,7 +498,9 @@ def get_num_blocks(kv_caches: Any, gpu_kv_format: "lmc_ops.GPUKVFormat") -> int:
         raise ValueError(f"Unknown GPU KV Format: {gpu_kv_format}")
 
 
-def get_block_size(kv_caches: Any, gpu_kv_format: "lmc_ops.GPUKVFormat") -> int:
+def get_block_size(
+    kv_caches: DiscoverableKVCache, gpu_kv_format: "lmc_ops.GPUKVFormat"
+) -> int:
     """
     Get the block size from the kv_caches
     """
@@ -515,7 +528,9 @@ def get_block_size(kv_caches: Any, gpu_kv_format: "lmc_ops.GPUKVFormat") -> int:
         raise ValueError(f"Unknown GPU KV Format: {gpu_kv_format}")
 
 
-def get_page_buffer_size(kv_caches: Any, gpu_kv_format: "lmc_ops.GPUKVFormat") -> int:
+def get_page_buffer_size(
+    kv_caches: DiscoverableKVCache, gpu_kv_format: "lmc_ops.GPUKVFormat"
+) -> int:
     """
     Get page buffer size (num_blocks * block_size) from the kv_caches
     """
@@ -549,7 +564,9 @@ def get_page_buffer_size(kv_caches: Any, gpu_kv_format: "lmc_ops.GPUKVFormat") -
         raise ValueError(f"Unknown GPU KV Format: {gpu_kv_format}")
 
 
-def get_num_heads(kv_caches: Any, gpu_kv_format: "lmc_ops.GPUKVFormat") -> int:
+def get_num_heads(
+    kv_caches: DiscoverableKVCache, gpu_kv_format: "lmc_ops.GPUKVFormat"
+) -> int:
     """
     Get the number of heads from the kv_caches
     """
@@ -578,7 +595,9 @@ def get_num_heads(kv_caches: Any, gpu_kv_format: "lmc_ops.GPUKVFormat") -> int:
         raise ValueError(f"Unknown GPU KV Format: {gpu_kv_format}")
 
 
-def get_hidden_dim_size(kv_caches: Any, gpu_kv_format: "lmc_ops.GPUKVFormat") -> int:
+def get_hidden_dim_size(
+    kv_caches: DiscoverableKVCache, gpu_kv_format: "lmc_ops.GPUKVFormat"
+) -> int:
     """
     Get the hidden dimension from the kv_caches
     """
@@ -606,7 +625,9 @@ def get_hidden_dim_size(kv_caches: Any, gpu_kv_format: "lmc_ops.GPUKVFormat") ->
         raise ValueError(f"Unknown GPU KV Format: {gpu_kv_format}")
 
 
-def get_head_size(kv_caches: Any, gpu_kv_format: "lmc_ops.GPUKVFormat") -> int:
+def get_head_size(
+    kv_caches: DiscoverableKVCache, gpu_kv_format: "lmc_ops.GPUKVFormat"
+) -> int:
     """
     Get the head size from the kv_caches
     """
@@ -630,7 +651,9 @@ def get_head_size(kv_caches: Any, gpu_kv_format: "lmc_ops.GPUKVFormat") -> int:
         raise ValueError(f"Unknown GPU KV Format: {gpu_kv_format}")
 
 
-def get_tokens_per_layer(kv_caches: Any, gpu_kv_format: "lmc_ops.GPUKVFormat") -> int:
+def get_tokens_per_layer(
+    kv_caches: DiscoverableKVCache, gpu_kv_format: "lmc_ops.GPUKVFormat"
+) -> int:
     """
     Get the number of tokens per layer from the kv_caches
     (num_blocks * block_size or page_buffer_size)
@@ -669,7 +692,9 @@ def get_tokens_per_layer(kv_caches: Any, gpu_kv_format: "lmc_ops.GPUKVFormat") -
         raise ValueError(f"Unknown GPU KV Format: {gpu_kv_format}")
 
 
-def get_elements_per_layer(kv_caches: Any, gpu_kv_format: "lmc_ops.GPUKVFormat") -> int:
+def get_elements_per_layer(
+    kv_caches: DiscoverableKVCache, gpu_kv_format: "lmc_ops.GPUKVFormat"
+) -> int:
     """
     Get the number of elements per layer from the kv_caches
     (including both K and V for non-MLA)
@@ -769,7 +794,9 @@ def is_mla(gpu_kv_format: "lmc_ops.GPUKVFormat") -> bool:
     )
 
 
-def get_dtype(kv_caches: Any, gpu_kv_format: "lmc_ops.GPUKVFormat") -> torch.dtype:
+def get_dtype(
+    kv_caches: DiscoverableKVCache, gpu_kv_format: "lmc_ops.GPUKVFormat"
+) -> torch.dtype:
     """
     Get the dtype from the kv_caches
     """
