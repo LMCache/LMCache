@@ -670,21 +670,13 @@ class LMCacheMPWorkerAdapter:
         """
         # First Party
         from lmcache.integration.vllm.utils import vllm_layout_hints
-        from lmcache.v1.gpu_connector.utils import (
-            ensure_contiguous_kv_caches,
-        )
 
         # Register kv cache and send the request
         logger.info("Registering kv caches")
 
         layout_hints = vllm_layout_hints()
-        # ensure_contiguous_kv_caches works on DiscoverableKVCache values, so
-        # bridge the vLLM dict contract here: unwrap, permute, rewrap.
-        permuted_values = ensure_contiguous_kv_caches(
-            list(kv_caches.values()), kv_layout=layout_hints.get("kv_layout")
-        )
-        kv_caches = dict(zip(kv_caches.keys(), permuted_values, strict=True))
-
+        # Per-tensor contiguity is enforced inside CudaIPCWrapper; no
+        # pre-permute needed here.
         self.kv_caches = kv_caches
 
         future = send_lmcache_request(
