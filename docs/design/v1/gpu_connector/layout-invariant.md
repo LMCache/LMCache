@@ -4,104 +4,120 @@
 
 > **`discover_gpu_kv_format` is the only place that parses KV-cache layout.**
 > Every other module queries KV-cache information via helpers in
-> `lmcache/v1/gpu_connector/utils.py` that accept a `GPUKVFormat` argument.
+> `lmcache/v1/gpu_connector/utils.py` that accept a `GPUKVFormat`
+> argument.
 
-Layout parsing means: list-nesting depth, tensor-dimension ordering,
-distinguishing HND from NHD, MLA from MHA, per-layer from cross-layer. All
-of this is encoded in the `GPUKVFormat` enum; downstream code must not
-re-derive it from raw shapes.
+"Layout parsing" means: list-nesting depth, tensor-dimension ordering,
+HND vs NHD, MLA vs MHA, per-layer vs cross-layer. All of that is
+encoded in `GPUKVFormat`; downstream code must never re-derive it from
+raw shapes.
 
-## Why this matters
-
-Supporting a new serving engine or KV-cache layout (e.g. TRT-LLM's cross-layer
-single-tensor format) should require:
-
-1. Adding a new `GPUKVFormat` enum value.
-2. Extending the `gpu_connector/utils.py` helpers to branch on that value.
-
-Nothing else should need to change. The alternative — scattering
-`isinstance(kv_cache, (tuple, list))`, `len(shape) == 5`, or `kv_caches[0][0]`
-across call sites — forces every new format to touch every consumer and
-tempts "canonicalization" shims that rewrite the inputs to the shape callers
-expect.
-
-## Allowed patterns (inside `gpu_connector/utils.py`)
-
-Helpers in `utils.py` dispatch on `GPUKVFormat` using a flat
-if/elif chain. This is deliberate: every supported format is visible in one
-place, and adding a new format's row is a mechanical change.
+## Canonical type
 
 ```python
-# lmcache/v1/gpu_connector/utils.py — allowed
-if gpu_kv_format == lmc_ops.GPUKVFormat.NB_NL_TWO_BS_NH_HS:
-    return kv_caches.shape[1]
-elif gpu_kv_format in (
-    lmc_ops.GPUKVFormat.NL_X_TWO_NB_BS_NH_HS,
-    lmc_ops.GPUKVFormat.NL_X_NB_TWO_BS_NH_HS,
-    ...
-):
-    return len(kv_caches)
+DiscoverableKVCache = Union[torch.Tensor, list["DiscoverableKVCache"]]
 ```
 
-## Forbidden patterns (outside `gpu_connector/utils.py`)
+Every KV-cache value in LMCache is one of these shapes:
 
-Any of the following in a module that is not `utils.py` or `discover_gpu_kv_format`:
+- a single `torch.Tensor` (vLLM cross-layer, TRT-LLM),
+- a flat `list[torch.Tensor]` (vLLM per-layer, SGLang MLA),
+- a nested `list[list[torch.Tensor]]` (SGLang MHA's `[K_list, V_list]`).
 
-- `isinstance(kv_cache, (tuple, list))` to distinguish layouts.
-- Indexing raw tensor shapes (`kv_cache.shape[3]`, `len(shape) == 5`) to
-  derive dimensions.
-- Wrapping a tensor with `[tensor]` to adapt to a helper's list-depth
-  expectation. Use `get_layer_kv_caches` instead.
-- "Canonicalize" functions that rewrite `kv_caches` into a uniform shape
-  before passing to helpers. The helpers already canonicalize by accepting
-  `GPUKVFormat`.
+Engine adapters that hand us other containers (vLLM's `dict[str, Tensor]`)
+are responsible for unwrapping to this form before calling any helper.
+
+## Adding a new format
+
+1. Add the enum value in `csrc/mem_kernels.cuh` and `csrc/pybind.cpp`.
+2. Extend `discover_gpu_kv_format` to detect it.
+3. Add a branch in every `utils.py` helper that raises "Unknown GPU KV
+   Format" — the exhaustive chain makes it mechanical.
+4. Add a row in `tests/v1/gpu_connector/test_utils_shape_desc.py`.
+
+No other Python module should need edits. If you're editing
+`kv_layer_groups.py`, `gpu_context.py`, or any `KVLayerGroupInfo`
+consumer for a new layout — the branching belongs in `utils.py`.
 
 ## Helper surface
 
-The following per-layer helpers are the only way for code outside `utils.py`
-to reach layer-specific KV-cache data:
+Every helper below takes `DiscoverableKVCache` and (where layout matters)
+a `GPUKVFormat`. Nothing else may index raw shapes.
 
-| Helper | Purpose |
-|---|---|
-| `get_layer_kv_caches(kv_caches, fmt, layer_idx)` | Returns the sub-structure (list or narrowed tensor) representing a single layer, in a shape other helpers can accept. |
-| `get_layer_data_ptrs(kv_caches, fmt, layer_idx)` | Returns the device pointer(s) for one layer, used to build per-group GPU pointer tensors. |
-| `get_layer_dtype(kv_caches, fmt, layer_idx)` | Returns the dtype of a layer's KV tensor. |
-| `get_layer_shape_signature(kv_caches, fmt, layer_idx)` | Returns a hashable `(kv_size, num_heads, head_size)` tuple used as a grouping key. |
-| `make_page_buffer_shape_desc(kv_caches, fmt, layer_idx, num_layers_in_group, num_blocks, block_size)` | Builds a complete `PageBufferShapeDesc` for the layer's group. |
+### Whole-structure queries
 
-Existing extractors (`get_num_layers`, `get_num_blocks`, `get_block_size`,
-`get_num_heads`, `get_head_size`, `get_hidden_dim_size`, `get_dtype`,
-`is_mla`, `is_hnd`) remain the canonical accessors for whole-`kv_caches`
-queries.
+| Helper | Returns | Notes |
+|---|---|---|
+| `discover_gpu_kv_format(kv_caches, engine, layout_hints)` | `GPUKVFormat` | The one parser. |
+| `get_num_layers`, `get_num_blocks`, `get_block_size`, `get_num_heads`, `get_head_size`, `get_hidden_dim_size`, `get_dtype`, `get_page_buffer_size`, `get_tokens_per_layer`, `get_elements_per_layer` | `int` / `dtype` | Format-dispatched scalar accessors. |
+| `is_mla(fmt)`, `is_hnd(fmt)` | `bool` | Format predicates. |
+| `get_device(kv_caches)` | `torch.device` | Format-agnostic (descends to any leaf). |
+
+### Per-layer queries
+
+| Helper | Returns | Notes |
+|---|---|---|
+| `get_layer_kv_caches(kv_caches, fmt, layer_idx)` | `DiscoverableKVCache` | Sub-structure for one layer, reusable as input to other helpers. |
+| `get_layer_dtype(kv_caches, fmt, layer_idx)` | `torch.dtype` | |
+| `get_layer_shape_signature(kv_caches, fmt, layer_idx)` | `tuple[int, ...]` | `(kv_size, num_heads, head_size)` grouping key. |
+| `get_layer_data_ptrs(kv_caches, fmt, layer_idx)` | `list[int]` | Per-layer pointer(s). **Raises** for cross-layer (no per-layer pointer exists). |
+
+### Group-level + builders
+
+| Helper | Returns | Notes |
+|---|---|---|
+| `get_group_data_ptrs(kv_caches, fmt, layer_indices)` | `list[int]` | Pointer array in **kernel-expected order**: `[base]` for cross-layer, `[K_0…K_N, V_0…V_N]` for SGLang MHA, per-layer flat elsewhere. Matches the dispatch in `csrc/mp_mem_kernels.cu:161-169`. |
+| `make_page_buffer_shape_desc(kv_caches, fmt, layer_idx, num_layers_in_group, num_blocks, block_size)` | `PageBufferShapeDesc` | The kernel-facing shape struct. |
+
+### Contiguity
+
+| Helper | Returns | Notes |
+|---|---|---|
+| `any_non_contiguous(kv_caches)` | `bool` | Recursive check. |
+| `attempt_permute_to_contiguous_view(kv_caches)` | `DiscoverableKVCache` | Recursive, metadata-only. No-op if already contiguous; raises `ValueError` for non-permutation-recoverable cases (slicing, `as_strided`). **Never copies.** |
+| `ensure_contiguous_kv_caches(kv_caches, kv_layout)` | `DiscoverableKVCache` | Thin wrapper adding HND-vs-other logging. |
+
+## Forbidden outside `utils.py`
+
+- `isinstance(kv_cache, (tuple, list))` to distinguish layouts.
+- Indexing raw shapes (`tensor.shape[3]`, `len(shape) == 5`) to derive
+  dimensions.
+- Wrapping a tensor with `[tensor]` to adapt to a helper's list-depth
+  expectation — use `get_layer_kv_caches`.
+- Hand-rolled pointer assembly (`[t.data_ptr() for t in kv_caches]`) —
+  use `get_group_data_ptrs`.
+- Hand-rolled device discovery (`kv_caches[0][0].device`) — use
+  `get_device`.
+- "Canonicalize" functions that rewrite `kv_caches` to a uniform shape
+  before passing to helpers. The helpers already canonicalize by
+  accepting `GPUKVFormat`.
 
 ## Consumers
 
-- `lmcache/v1/kv_layer_groups.py::KVLayerGroupsManager.__init__` uses
-  `get_layer_shape_signature` + `get_layer_dtype` to partition layers, then
-  calls `make_page_buffer_shape_desc` per group. The per-group
-  `PageBufferShapeDesc` is stored on the `KVLayerGroupInfo`. The manager
-  is a proper constructor, not a two-phase "build" — a classmethod
-  `from_layer_groups` exists for test fixtures that already hold groups.
-- `lmcache/v1/multiprocess/gpu_context.py::GPUCacheContext` constructs the
-  manager directly, delegates `get_shape_desc(group_idx)` to it, and uses
-  `get_layer_data_ptrs` to assemble per-group GPU pointer tensors. It
-  holds no parallel `shape_descs_` / `hidden_dim_sizes_` lists.
-- `lmcache/integration/vllm/vllm_v1_adapter.py::_build_kv_layer_groups`
-  calls `discover_gpu_kv_format`, `get_num_blocks`, `get_block_size` at
-  register time, then constructs
-  `KVLayerGroupsManager(kv_list, gpu_kv_format=..., num_blocks=..., ...)`
-  and assigns it to `metadata.kv_layer_groups_manager`.
+- **`lmcache/v1/kv_layer_groups.py::KVLayerGroupsManager.__init__`** —
+  partitions layers via `get_layer_shape_signature` + `get_layer_dtype`,
+  builds a `PageBufferShapeDesc` per group via
+  `make_page_buffer_shape_desc`. Proper constructor; no side-effectful
+  `build_*` method. Classmethod `from_layer_groups` exists for test
+  fixtures.
+- **`lmcache/v1/multiprocess/gpu_context.py::GPUCacheContext`** —
+  constructs the manager directly at init, delegates
+  `get_shape_desc(group_idx)` to it, assembles per-group GPU pointer
+  tensors via `get_group_data_ptrs`. No parallel `shape_descs_` /
+  `hidden_dim_sizes_` state.
+- **`lmcache/v1/gpu_connector/gpu_connectors.py::VLLMPagedMemGPUConnectorV3._initialize_kv_cache_pointers`**
+  — for the in-process vLLM path, discovers format and constructs
+  `metadata.kv_layer_groups_manager` lazily on first store/retrieve.
+  The adapter (`vllm_v1_adapter.py`) does not participate in format
+  discovery — it only stores `self.kv_caches` at register time.
 
-## Extending to a new format
+## Implementation note: mypy and the recursive union
 
-1. Add the enum value in `csrc/mem_kernels.cuh` and `csrc/pybind.cpp`.
-2. Add a branch for the new value in every helper in `utils.py` that raises
-   "Unknown GPU KV Format". The compiler-style exhaustiveness ensures
-   nothing is missed.
-3. Extend `discover_gpu_kv_format` to recognize and return the new value.
-4. Add a row in the tests at `tests/v1/gpu_connector/test_utils_shape_desc.py`
-   covering `make_page_buffer_shape_desc` and the layer-level helpers.
-
-No other Python module should need edits. If you find yourself editing
-`kv_layer_groups.py`, `gpu_context.py`, or any consumer of `KVLayerGroupInfo`
-to support a new layout, pause — the branching probably belongs in `utils.py`.
+`utils.py` sets `# mypy: disable-error-code="union-attr,call-overload"`
+at the file level. This is the **one module** that does format-
+dispatched raw indexing on `DiscoverableKVCache` (`kv_caches.shape[i]`,
+`kv_caches[0][j]`) — the `gpu_kv_format` argument is the proof the
+indexing is well-defined, but mypy can't carry that proof through a
+recursive Union without per-line casts. The file-level directive
+replaces 50+ `# type: ignore` comments scattered through the
+accessors. All other type checks remain live.
