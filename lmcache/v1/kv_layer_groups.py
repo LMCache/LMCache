@@ -18,6 +18,13 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
+# The 4-tuple that uniquely identifies a set of kernel-equivalent layers:
+# ``(kv_size, num_heads, head_size, dtype)``. Two layers share a transfer-
+# kernel launch iff they share this identity — see the grouping loop in
+# :meth:`KVLayerGroupsManager.__init__` for the derivation.
+LayerGroupIdentity = tuple[int, int, int, torch.dtype]
+
+
 @dataclass
 class KVLayerGroupInfo:
     """Identity + kernel-facing shape descriptor for a group of KV layers.
@@ -105,12 +112,10 @@ class KVLayerGroupsManager:
             return
 
         # Grouping key: two layers are kernel-equivalent iff they share
-        # (kv_size, num_heads, head_size, dtype).
+        # (kv_size, num_heads, head_size, dtype) — see LayerGroupIdentity.
         mla = is_mla(gpu_kv_format)
         kv_size = 1 if mla else 2
-        groups_dict: dict[tuple[int, int, int, torch.dtype], list[int]] = defaultdict(
-            list
-        )
+        groups_dict: dict[LayerGroupIdentity, list[int]] = defaultdict(list)
         for idx in range(num_layers):
             nh = 1 if mla else get_num_heads(kv_caches, gpu_kv_format, idx)
             hs = get_head_size(kv_caches, gpu_kv_format, idx)
