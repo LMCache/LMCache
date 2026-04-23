@@ -194,7 +194,7 @@ def test_get_layer_data_ptrs_cross_layer_rejects():
         get_layer_data_ptrs(big, fmt, layer_idx=0)
 
 
-def test_ensure_contiguous_preserves_bare_tensor():
+def test_attempt_permute_preserves_bare_tensor():
     """A bare torch.Tensor input (cross-layer shape) must pass through
     attempt_permute_to_contiguous_view unchanged — no list wrapping — so the
     DiscoverableKVCache recursive union is respected end-to-end."""
@@ -204,9 +204,9 @@ def test_ensure_contiguous_preserves_bare_tensor():
     assert out is big
 
 
-def test_ensure_contiguous_recurses_all_shapes():
-    """ensure_contiguous must descend into every DiscoverableKVCache
-    shape and permute non-contiguous tensor leaves."""
+def test_attempt_permute_recurses_all_shapes():
+    """attempt_permute_to_contiguous_view must descend into every
+    DiscoverableKVCache shape and permute non-contiguous tensor leaves."""
     # Build a flash-attention HND-layout tensor (non-contiguous after
     # logical→physical permute exposure — the vLLM HND case).
     nhd_view = (
@@ -230,7 +230,7 @@ def test_ensure_contiguous_recurses_all_shapes():
     # nested list (SGLang-shaped)
     k = [nhd_view.clone() for _ in range(2)]
     v = [nhd_view.clone() for _ in range(2)]
-    out_nested = attempt_permute_to_contiguous_view([k, v], kv_layout="HND")
+    out_nested = attempt_permute_to_contiguous_view([k, v])
     assert isinstance(out_nested, list)
     assert all(t.is_contiguous() for sublist in out_nested for t in sublist)
 
