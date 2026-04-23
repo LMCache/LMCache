@@ -3,14 +3,14 @@
 Quickstart
 ==========
 
-This guide helps you get LMCache running end-to-end in a couple of minutes. Use the tabs below to switch the engine (similar to an environment toggle). Steps are the same; only the libraries and launch commands change.
+This guide helps you get LMCache running end-to-end in a couple of minutes. Use the tabs below to switch the engine. Steps are the same; only the libraries and launch commands change.
 
 .. tab-set::
    :sync-group: engine
 
    .. tab-item:: vLLM
 
-      **(Terminal 1) Install LMCache**
+      **Install LMCache**
 
       .. code-block:: bash
 
@@ -18,33 +18,188 @@ This guide helps you get LMCache running end-to-end in a couple of minutes. Use 
          source .venv/bin/activate
          uv pip install lmcache vllm
 
-      **Start vLLM with LMCache:**
+      LMCache supports two deployment modes with vLLM:
 
-      .. code-block:: bash
+      - **Multiprocess (MP) mode** -- **recommended.** LMCache runs as a
+        standalone service and vLLM attaches via ``LMCacheMPConnector``.
+        Scales better, exposes management/observability endpoints, and
+        supports sharing one cache across multiple engine instances.
+      - **In-process mode** -- LMCache runs inside the vLLM process via
+        ``LMCacheConnectorV1``. Single command, convenient for quick
+        single-node experiments.
 
-         # The chunk size here is only for illustration purpose, use default one (256) later
-         LMCACHE_CHUNK_SIZE=8 \
-         vllm serve Qwen/Qwen3-8B-Instruct \
-             --port 8000 --kv-transfer-config \
-             '{"kv_connector":"LMCacheConnectorV1", "kv_role":"kv_both"}'
+      .. tab-set::
+         :sync-group: vllm-mode
 
-      .. note::
-         To customize further, create a config file. See :doc:`../api_reference/configurations` for all options.
+         .. tab-item:: MP mode (recommended)
+            :sync: mp
 
-      **Alternative simpler command:**
+            Start the LMCache server:
 
-      .. code-block:: bash
+            .. code-block:: bash
 
-         vllm serve <MODEL NAME> \
-             --kv-offloading-backend lmcache \
-             --kv-offloading-size <SIZE IN GB> \
-             --disable-hybrid-kv-cache-manager
+               # chunk-size 16 is an illustrative demo value so a short
+               # prompt produces visible cache traffic; use the default
+               # (256) in production.
+               lmcache server \
+                   --l1-size-gb 20 --eviction-policy LRU --chunk-size 16
 
-      The ``--disable-hybrid-kv-cache-manager`` flag is mandatory. All configuration options from the :doc:`../api_reference/configurations` page still apply.
+            The ZMQ port (default **5555**) accepts connections from vLLM;
+            the HTTP frontend (default **8080**) serves the management and
+            metrics endpoints. See :doc:`../mp/quickstart` and
+            :doc:`../mp/configuration` for the full list of
+            ``lmcache server`` and connector options.
+
+            Start vLLM with the MP connector in a separate terminal:
+
+            .. code-block:: bash
+
+               vllm serve Qwen/Qwen3-8B-Instruct \
+                   --port 8000 --kv-transfer-config \
+                   '{"kv_connector":"LMCacheMPConnector", "kv_role":"kv_both"}'
+
+            **Test** -- open a new terminal and send two requests whose
+            prompts share a prefix:
+
+            **First request**
+
+            .. code-block:: bash
+
+               curl http://localhost:8000/v1/completions \
+                 -H "Content-Type: application/json" \
+                 -d '{
+                   "model": "Qwen/Qwen3-8B-Instruct",
+                   "prompt": "Qwen3 is the latest generation of large language models in Qwen series, offering a comprehensive suite of dense and mixture-of-experts",
+                   "max_tokens": 100,
+                   "temperature": 0.7
+                 }'
+
+            **Second request**
+
+            .. code-block:: bash
+
+               curl http://localhost:8000/v1/completions \
+                 -H "Content-Type: application/json" \
+                 -d '{
+                   "model": "Qwen/Qwen3-8B-Instruct",
+                   "prompt": "Qwen3 is the latest generation of large language models in Qwen series, offering a comprehensive suite of dense and mixture-of-experts (MoE) models",
+                   "max_tokens": 100,
+                   "temperature": 0.7
+                 }'
+
+            **You should see LMCache logs like this** -- in MP mode the
+            store/retrieve logs come from the standalone ``lmcache server``
+            process, one entry per chunk.
+
+            **First request** -- cache is empty, so every aligned chunk is
+            offloaded:
+
+            .. code-block:: text
+
+               [2026-04-22 19:49:56,316] LMCache INFO: Stored 16 tokens in 0.023 seconds (server.py:390:lmcache.v1.multiprocess.server)
+               [2026-04-22 19:49:56,555] LMCache INFO: Stored 16 tokens in 0.005 seconds (server.py:390:lmcache.v1.multiprocess.server)
+               [2026-04-22 19:49:56,691] LMCache INFO: Stored 16 tokens in 0.005 seconds (server.py:390:lmcache.v1.multiprocess.server)
+               ...
+
+            **Second request** -- the shared prefix is retrieved from CPU
+            RAM; only the new tail is stored:
+
+            .. code-block:: text
+
+               [2026-04-22 19:50:04,686] LMCache INFO: Retrieved 16 tokens in 0.003 seconds (server.py:573:lmcache.v1.multiprocess.server)
+               [2026-04-22 19:50:04,832] LMCache INFO: Stored 16 tokens in 0.005 seconds (server.py:390:lmcache.v1.multiprocess.server)
+               [2026-04-22 19:50:04,968] LMCache INFO: Stored 16 tokens in 0.005 seconds (server.py:390:lmcache.v1.multiprocess.server)
+               ...
+
+            For request-level statistics (hit ratio, bytes transferred) see
+            :doc:`../mp/observability`.
+
+         .. tab-item:: In-process mode
+            :sync: inproc
+
+            Start vLLM with LMCache embedded in the engine process:
+
+            .. code-block:: bash
+
+               # The chunk size here is only for illustration purpose, use default one (256) later
+               LMCACHE_CHUNK_SIZE=8 \
+               vllm serve Qwen/Qwen3-8B-Instruct \
+                   --port 8000 --kv-transfer-config \
+                   '{"kv_connector":"LMCacheConnectorV1", "kv_role":"kv_both"}'
+
+            .. note::
+               To customize further, create a config file. See
+               :doc:`../api_reference/configurations` for all options.
+
+            **Alternative simpler command:**
+
+            .. code-block:: bash
+
+               vllm serve <MODEL NAME> \
+                   --kv-offloading-backend lmcache \
+                   --kv-offloading-size <SIZE IN GB> \
+                   --disable-hybrid-kv-cache-manager
+
+            The ``--disable-hybrid-kv-cache-manager`` flag is mandatory.
+            All configuration options from the
+            :doc:`../api_reference/configurations` page still apply.
+
+            **Test** -- open a new terminal and send two requests whose
+            prompts share a prefix:
+
+            **First request**
+
+            .. code-block:: bash
+
+               curl http://localhost:8000/v1/completions \
+                 -H "Content-Type: application/json" \
+                 -d '{
+                   "model": "Qwen/Qwen3-8B-Instruct",
+                   "prompt": "Qwen3 is the latest generation of large language models in Qwen series, offering a comprehensive suite of dense and mixture-of-experts",
+                   "max_tokens": 100,
+                   "temperature": 0.7
+                 }'
+
+            **Second request**
+
+            .. code-block:: bash
+
+               curl http://localhost:8000/v1/completions \
+                 -H "Content-Type: application/json" \
+                 -d '{
+                   "model": "Qwen/Qwen3-8B-Instruct",
+                   "prompt": "Qwen3 is the latest generation of large language models in Qwen series, offering a comprehensive suite of dense and mixture-of-experts (MoE) models",
+                   "max_tokens": 100,
+                   "temperature": 0.7
+                 }'
+
+            **You should see LMCache logs like this** -- in-process mode
+            emits the logs inline with the vLLM engine core.
+
+            **First request** -- prompt is offloaded to LMCache:
+
+            .. code-block:: text
+
+               (EngineCore_DP0 pid=458469) [2025-09-30 00:08:43,982] LMCache INFO: Stored 31 out of total 31 tokens. size: 0.0040 gb, cost 1.95 ms, throughput: 1.98 GB/s; offload_time: 1.88 ms, put_time: 0.07 ms
+
+            **Second request** -- hits the cache and stores the new tail:
+
+            .. code-block:: text
+
+               Reqid: cmpl-6709d8795d3c4464b01999c9f3fffede-0, Total tokens 32, LMCache hit tokens: 24, need to load: 8
+               (EngineCore_DP0 pid=494270) [2025-09-30 01:12:36,502] LMCache INFO: Retrieved 8 out of 24 required tokens (from 32 total tokens). size: 0.0011 gb, cost 0.55 ms, throughput: 1.98 GB/s;
+               (EngineCore_DP0 pid=494270) [2025-09-30 01:12:36,509] LMCache INFO: Storing KV cache for 8 out of 32 tokens (skip_leading_tokens=24)
+               (EngineCore_DP0 pid=494270) [2025-09-30 01:12:36,510] LMCache INFO: Stored 8 out of total 8 tokens. size: 0.0011 gb, cost 0.43 ms, throughput: 2.57 GB/s; offload_time: 0.40 ms, put_time: 0.03 ms
+
+            - **Total tokens 32**: The new prompt has 32 tokens after tokenization.
+            - **LMCache hit tokens: 24**: 24 tokens (full 8-token chunks) were found in the cache from the first request that stored 31 tokens.
+            - **Need to load: 8**: vLLM auto prefix caching uses block size 16; 16 tokens already sit in GPU RAM, so LMCache only loads 24-16=8.
+            - **Why 24 hit tokens instead of 31?** LMCache hashes every 8 tokens (8, 16, 24, 31). It matches page-aligned chunks, so it uses the 24-token hash.
+            - **Stored another 8 tokens**: The new 8 tokens form a full chunk and are stored for future reuse.
 
    .. tab-item:: SGLang
 
-      **(Terminal 1) Install SGLang**
+      **Install SGLang**
 
       .. code-block:: bash
 
@@ -74,42 +229,8 @@ This guide helps you get LMCache running end-to-end in a couple of minutes. Use 
       .. note::
          Configure LMCache via the config file. See :doc:`../api_reference/configurations` for the full list.
 
-(Terminal 2) Test LMCache in Action
------------------------------------
-
-Open a new terminal. Pick your engine tab, send the first request, then an overlapping second request:
-
-.. tab-set::
-
-   .. tab-item:: vLLM
-
-      **First request**
-
-      .. code-block:: bash
-
-         curl http://localhost:8000/v1/completions \
-           -H "Content-Type: application/json" \
-           -d '{
-             "model": "Qwen/Qwen3-8B-Instruct",
-             "prompt": "Qwen3 is the latest generation of large language models in Qwen series, offering a comprehensive suite of dense and mixture-of-experts",
-             "max_tokens": 100,
-             "temperature": 0.7
-           }'
-
-      **Second request (overlap)**
-
-      .. code-block:: bash
-
-         curl http://localhost:8000/v1/completions \
-           -H "Content-Type: application/json" \
-           -d '{
-             "model": "Qwen/Qwen3-8B-Instruct",
-             "prompt": "Qwen3 is the latest generation of large language models in Qwen series, offering a comprehensive suite of dense and mixture-of-experts (MoE) models",
-             "max_tokens": 100,
-             "temperature": 0.7
-           }'
-
-   .. tab-item:: SGLang
+      **Test** -- open a new terminal and send two requests whose prompts
+      share a prefix:
 
       **First request**
 
@@ -124,7 +245,7 @@ Open a new terminal. Pick your engine tab, send the first request, then an overl
              "temperature": 0.7
            }'
 
-      **Second request (overlap)**
+      **Second request**
 
       .. code-block:: bash
 
@@ -137,17 +258,9 @@ Open a new terminal. Pick your engine tab, send the first request, then an overl
              "temperature": 0.7
            }'
 
-You should see LMCache logs like this (examples for each engine):
+      **You should see LMCache logs like this:**
 
-.. tab-set::
-
-   .. tab-item:: vLLM
-
-      .. code-block:: text
-
-         (EngineCore_DP0 pid=458469) [2025-09-30 00:08:43,982] LMCache INFO: Stored 31 out of total 31 tokens. size: 0.0040 gb, cost 1.95 ms, throughput: 1.98 GB/s; offload_time: 1.88 ms, put_time: 0.07 ms
-
-   .. tab-item:: SGLang
+      **First request** -- prompt plus generated tokens are stored:
 
       .. code-block:: text
 
@@ -156,20 +269,7 @@ You should see LMCache logs like this (examples for each engine):
          Decode batch, #running-req: 1, #token: 114, token usage: 0.00, cuda graph: True, gen throughput (token/s): 87.95, #queue-req: 0,
          LMCache INFO: Stored 128 out of total 135 tokens. size: 0.0195 GB, cost 12.8890 ms, throughput: 1.5153 GB/s (cache_engine.py:623:lmcache.v1.cache_engine)
 
-**What this means:** The first request caches the prompt. The second reuses the cached prefix and only loads the missing chunk. You should see logs like this:
-
-.. tab-set::
-
-   .. tab-item:: vLLM
-
-      .. code-block:: text
-
-         Reqid: cmpl-6709d8795d3c4464b01999c9f3fffede-0, Total tokens 32, LMCache hit tokens: 24, need to load: 8
-         (EngineCore_DP0 pid=494270) [2025-09-30 01:12:36,502] LMCache INFO: Retrieved 8 out of 24 required tokens (from 32 total tokens). size: 0.0011 gb, cost 0.55 ms, throughput: 1.98 GB/s;
-         (EngineCore_DP0 pid=494270) [2025-09-30 01:12:36,509] LMCache INFO: Storing KV cache for 8 out of 32 tokens (skip_leading_tokens=24)
-         (EngineCore_DP0 pid=494270) [2025-09-30 01:12:36,510] LMCache INFO: Stored 8 out of total 8 tokens. size: 0.0011 gb, cost 0.43 ms, throughput: 2.57 GB/s; offload_time: 0.40 ms, put_time: 0.03 ms
-
-   .. tab-item:: SGLang
+      **Second request** -- Radix Cache and LMCache share the prefix; only the new portion is stored:
 
       .. code-block:: text
 
@@ -178,20 +278,6 @@ You should see LMCache logs like this (examples for each engine):
          Decode batch, #running-req: 1, #token: 104, token usage: 0.00, cuda graph: True, gen throughput (token/s): 87.95, #queue-req: 0,
          Decode batch, #running-req: 1, #token: 144, token usage: 0.00, cuda graph: True, gen throughput (token/s): 87.89, #queue-req: 0,
          LMCache INFO: Stored 112 out of total 140 tokens. size: 0.0171 GB, cost 11.1986 ms, throughput: 1.5261 GB/s (cache_engine.py:623:lmcache.v1.cache_engine)
-
-**What this means (per engine):**
-
-.. tab-set::
-
-   .. tab-item:: vLLM
-
-      - **Total tokens 32**: The new prompt has 32 tokens after tokenization.
-      - **LMCache hit tokens: 24**: 24 tokens (full 8-token chunks) were found in the cache from the first request that stored 31 tokens.
-      - **Need to load: 8**: vLLM auto prefix caching uses block size 16; 16 tokens already sit in GPU RAM, so LMCache only loads 24-16=8.
-      - **Why 24 hit tokens instead of 31?** LMCache hashes every 8 tokens (8, 16, 24, 31). It matches page-aligned chunks, so it uses the 24-token hash.
-      - **Stored another 8 tokens**: The new 8 tokens form a full chunk and are stored for future reuse.
-
-   .. tab-item:: SGLang
 
       - **Total tokens 140**: SGLang stores KV cache for both prefill and decode tokens together, so total = 40 prompt + 100 generated = 140 tokens.
       - **Cached tokens: 30**: SGLang's Radix Attention Cache reused 30 tokens from the first request.
