@@ -20,7 +20,6 @@ from lmcache.v1.gpu_connector.utils import (  # noqa: E402
     get_dtype,
     get_group_data_ptrs,
     get_head_size,
-    get_layer_data_ptrs,
     get_num_heads,
     make_page_buffer_shape_desc,
 )
@@ -121,9 +120,6 @@ def test_per_layer_scalar_accessors_per_layer_list():
     assert get_head_size(kv_caches, fmt, layer_idx=1) == 64
     assert get_dtype(kv_caches, fmt, layer_idx=0) == torch.float16
 
-    ptrs = get_layer_data_ptrs(kv_caches, fmt, layer_idx=2)
-    assert ptrs == [kv_caches[2].data_ptr()]
-
 
 def test_per_layer_scalar_accessors_sglang_mha():
     """For SGLang MHA (nested list), accessors walk into [k_list|v_list]."""
@@ -134,9 +130,6 @@ def test_per_layer_scalar_accessors_sglang_mha():
 
     assert get_num_heads(kv_caches, fmt, layer_idx=0) == 8
     assert get_dtype(kv_caches, fmt, layer_idx=1) == torch.bfloat16
-
-    ptrs = get_layer_data_ptrs(kv_caches, fmt, layer_idx=0)
-    assert ptrs == [k[0].data_ptr(), v[0].data_ptr()]
 
 
 def test_get_group_data_ptrs_per_layer_list_flattens_in_order():
@@ -183,15 +176,6 @@ def test_get_group_data_ptrs_cross_layer_returns_single_base():
     fmt = lmc_ops.GPUKVFormat.NB_NL_TWO_BS_NH_HS
     ptrs = get_group_data_ptrs(big, fmt, list(range(80)))
     assert ptrs == [big.data_ptr()]
-
-
-def test_get_layer_data_ptrs_cross_layer_rejects():
-    """No per-layer pointer exists for cross-layer; callers must use
-    get_group_data_ptrs instead."""
-    big = torch.empty(32, 80, 2, 16, 8, 64, dtype=torch.bfloat16, device="cuda")
-    fmt = lmc_ops.GPUKVFormat.NB_NL_TWO_BS_NH_HS
-    with pytest.raises(ValueError, match="cross-layer"):
-        get_layer_data_ptrs(big, fmt, layer_idx=0)
 
 
 def test_attempt_permute_preserves_bare_tensor():

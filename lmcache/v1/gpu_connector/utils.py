@@ -757,61 +757,6 @@ def get_dtype(
         raise ValueError(f"Unknown GPU KV Format: {gpu_kv_format}")
 
 
-def _per_layer_list_formats() -> frozenset:
-    """Formats whose kv_caches is a flat list ``[layer_0_tensor, ...]``."""
-    return frozenset(
-        {
-            lmc_ops.GPUKVFormat.NL_X_TWO_NB_BS_NH_HS,
-            lmc_ops.GPUKVFormat.NL_X_NB_TWO_BS_NH_HS,
-            lmc_ops.GPUKVFormat.NL_X_TWO_NB_NH_BS_HS,
-            lmc_ops.GPUKVFormat.NL_X_NB_TWO_NH_BS_HS,
-            lmc_ops.GPUKVFormat.NL_X_NB_BS_HS,
-            lmc_ops.GPUKVFormat.NL_X_NBBS_ONE_HS,
-        }
-    )
-
-
-def get_layer_data_ptrs(
-    kv_caches: DiscoverableKVCache,
-    gpu_kv_format: "lmc_ops.GPUKVFormat",
-    layer_idx: int,
-) -> list[int]:
-    """Return the GPU data pointer(s) belonging to a single layer.
-
-    Most formats produce one pointer per layer. The SGLang two-list format
-    (``TWO_X_NL_X_NBBS_NH_HS``) produces ``[K_ptr, V_ptr]`` for the layer.
-    Cross-layer formats (``NB_NL_TWO_BS_NH_HS``) share one tensor across
-    every layer; there is no per-layer pointer to return. Callers that
-    need a group-level pointer array should use :func:`get_group_data_ptrs`
-    instead.
-
-    Args:
-        kv_caches: Full kv_caches structure.
-        gpu_kv_format: Format returned by :func:`discover_gpu_kv_format`.
-        layer_idx: 0-based layer index.
-
-    Returns:
-        Device pointers (int) covering the layer's K and V data.
-
-    Raises:
-        ValueError: If *gpu_kv_format* is not recognized, or if the format
-            is cross-layer (no per-layer pointer exists —
-            :func:`get_group_data_ptrs` returns the single shared base).
-    """
-    if gpu_kv_format in _per_layer_list_formats():
-        layers = cast(list[torch.Tensor], kv_caches)
-        return [layers[layer_idx].data_ptr()]
-    if gpu_kv_format == lmc_ops.GPUKVFormat.TWO_X_NL_X_NBBS_NH_HS:
-        k, v = cast(list[list[torch.Tensor]], kv_caches)
-        return [k[layer_idx].data_ptr(), v[layer_idx].data_ptr()]
-    if gpu_kv_format == lmc_ops.GPUKVFormat.NB_NL_TWO_BS_NH_HS:
-        raise ValueError(
-            "NB_NL_TWO_BS_NH_HS is cross-layer: no per-layer pointer. "
-            "Use get_group_data_ptrs (returns the single shared base)."
-        )
-    raise ValueError(f"Unknown GPU KV Format: {gpu_kv_format}")
-
-
 def get_group_data_ptrs(
     kv_caches: DiscoverableKVCache,
     gpu_kv_format: "lmc_ops.GPUKVFormat",
@@ -820,22 +765,23 @@ def get_group_data_ptrs(
     """Return device pointers for a group of layers in the order the transfer
     kernels expect for *gpu_kv_format*.
 
-    Per-format layout (mirrors the kernel dispatch in
-    ``csrc/mp_mem_kernels.cu``):
+    The pointer array's *shape* is a property of the format, not of the
+    caller. Three buckets, mirroring the kernel dispatch in
+    ``csrc/mp_mem_kernels.cu:160-169``:
 
     - Per-layer list formats: ``[p_{i0}, p_{i1}, ..., p_{iN}]`` — one
-      pointer per layer, in the order requested.
+      pointer per requested layer, in the given order.
     - ``TWO_X_NL_X_NBBS_NH_HS`` (SGLang MHA): K's grouped first,
       then V's: ``[K_{i0}, ..., K_{iN}, V_{i0}, ..., V_{iN}]``.
     - ``NB_NL_TWO_BS_NH_HS`` (cross-layer): a single base pointer,
-      ``[base]``. The kernel iterates layers by computing offsets from
-      ``shape_desc.nl`` internally; no per-layer pointer exists.
+      ``[base]``. The kernel walks layers by computing offsets from
+      ``shape_desc.nl`` internally; ``layer_indices`` is unused.
 
     Args:
         kv_caches: Full kv_caches structure.
         gpu_kv_format: Format returned by :func:`discover_gpu_kv_format`.
         layer_indices: 0-based layer indices in the group, in the order
-            the kernel should iterate them.
+            the kernel should iterate them. Ignored for cross-layer.
 
     Returns:
         Device pointers (int), in kernel-expected order.
@@ -843,18 +789,26 @@ def get_group_data_ptrs(
     Raises:
         ValueError: If *gpu_kv_format* is not recognized.
     """
-    if gpu_kv_format == lmc_ops.GPUKVFormat.NB_NL_TWO_BS_NH_HS:
+    F = lmc_ops.GPUKVFormat
+    if gpu_kv_format == F.NB_NL_TWO_BS_NH_HS:
         tensor = cast(torch.Tensor, kv_caches)
         return [tensor.data_ptr()]
-    if gpu_kv_format == lmc_ops.GPUKVFormat.TWO_X_NL_X_NBBS_NH_HS:
+    if gpu_kv_format == F.TWO_X_NL_X_NBBS_NH_HS:
         k, v = cast(list[list[torch.Tensor]], kv_caches)
-        k_ptrs = [k[i].data_ptr() for i in layer_indices]
-        v_ptrs = [v[i].data_ptr() for i in layer_indices]
-        return k_ptrs + v_ptrs
-    ptrs: list[int] = []
-    for layer_idx in layer_indices:
-        ptrs.extend(get_layer_data_ptrs(kv_caches, gpu_kv_format, layer_idx))
-    return ptrs
+        return [k[i].data_ptr() for i in layer_indices] + [
+            v[i].data_ptr() for i in layer_indices
+        ]
+    if gpu_kv_format in (
+        F.NL_X_TWO_NB_BS_NH_HS,
+        F.NL_X_NB_TWO_BS_NH_HS,
+        F.NL_X_TWO_NB_NH_BS_HS,
+        F.NL_X_NB_TWO_NH_BS_HS,
+        F.NL_X_NB_BS_HS,
+        F.NL_X_NBBS_ONE_HS,
+    ):
+        layers = cast(list[torch.Tensor], kv_caches)
+        return [layers[i].data_ptr() for i in layer_indices]
+    raise ValueError(f"Unknown GPU KV Format: {gpu_kv_format}")
 
 
 def get_device(kv_caches: DiscoverableKVCache) -> torch.device:

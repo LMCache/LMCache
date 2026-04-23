@@ -80,8 +80,7 @@ helper.
 
 | Helper | Returns | Notes |
 |---|---|---|
-| `get_layer_data_ptrs(kv, fmt, layer_idx)` | `list[int]` | Per-layer pointer(s). **Raises** for cross-layer (no per-layer pointer exists — the kernel reads a single shared base). |
-| `get_group_data_ptrs(kv, fmt, layer_indices)` | `list[int]` | Pointer array in **kernel-expected order**: `[base]` for cross-layer, `[K_0…K_N, V_0…V_N]` for SGLang MHA, per-layer flat elsewhere. Matches the dispatch in `csrc/mp_mem_kernels.cu:161-169`. |
+| `get_group_data_ptrs(kv, fmt, layer_indices)` | `list[int]` | Pointer array in **kernel-expected order**: `[base]` for cross-layer (`layer_indices` ignored), `[K_0…K_N, V_0…V_N]` for SGLang MHA, per-layer flat elsewhere. Matches the dispatch in `csrc/mp_mem_kernels.cu:161-169`. The pointer-array shape is a property of the format — callers never ask "does this format have per-layer pointers?". |
 | `make_page_buffer_shape_desc(kv, fmt, layer_idx, num_layers_in_group, num_blocks, block_size)` | `PageBufferShapeDesc` | The kernel-facing shape struct. |
 
 ### Contiguity
