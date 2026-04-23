@@ -103,7 +103,7 @@ def _mooncake_extension(
             sources=mooncake_sources,
             include_dirs=mc_include_dirs,
             library_dirs=mc_library_dirs,
-            libraries=["store"],
+            libraries=["mooncake_store"],
             runtime_library_dirs=mc_library_dirs,
             extra_compile_args={
                 "cxx": extra_cxx_flags + ["-O3", "-std=c++20", "-DYLT_ENABLE_IBV"],
