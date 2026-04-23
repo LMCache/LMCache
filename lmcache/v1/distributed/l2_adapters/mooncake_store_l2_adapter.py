@@ -34,7 +34,14 @@ from lmcache.v1.distributed.l2_adapters.factory import (
 logger = init_logger(__name__)
 
 # Keys consumed only by LMCache (never sent to mooncake).
-_LMCACHE_ONLY_KEYS = {"type", "num_workers", "eviction"}
+_LMCACHE_ONLY_KEYS = {
+    "type",
+    "num_workers",
+    "eviction",
+    "lookup_workers",
+    "retrieve_workers",
+    "store_workers",
+}
 
 
 class MooncakeStoreL2AdapterConfig(L2AdapterConfigBase):
@@ -48,23 +55,43 @@ class MooncakeStoreL2AdapterConfig(L2AdapterConfigBase):
     defaults for any mooncake keys — that is mooncake's
     responsibility.
 
-    ``num_workers`` is the only LMCache-specific knob.
+    ``num_workers`` and optional per-operation worker counts are
+    LMCache-specific knobs.
     """
 
     def __init__(
         self,
         setup_config: Dict[str, str],
         num_workers: int = 4,
+        lookup_workers: Optional[int] = None,
+        retrieve_workers: Optional[int] = None,
+        store_workers: Optional[int] = None,
     ):
         super().__init__()
+        self.num_workers = self._validate_num_workers(num_workers)
+        self._validate_per_op_worker_counts(
+            lookup_workers,
+            retrieve_workers,
+            store_workers,
+        )
         self.setup_config: Dict[str, str] = dict(setup_config)
-        self.num_workers = num_workers
+        self.lookup_workers = lookup_workers
+        self.retrieve_workers = retrieve_workers
+        self.store_workers = store_workers
 
     @classmethod
-    def from_dict(cls, d: dict) -> "MooncakeStoreL2AdapterConfig":
-        num_workers = d.get("num_workers", 4)
-        if not isinstance(num_workers, int) or num_workers <= 0:
-            raise ValueError("num_workers must be a positive integer")
+    def from_dict(cls, d: dict[str, object]) -> "MooncakeStoreL2AdapterConfig":
+        num_workers: int = 4
+        if "num_workers" in d:
+            num_workers = cls._validate_num_workers(d["num_workers"])
+        lookup_workers = cls._parse_optional_worker_count(d, "lookup_workers")
+        retrieve_workers = cls._parse_optional_worker_count(d, "retrieve_workers")
+        store_workers = cls._parse_optional_worker_count(d, "store_workers")
+        cls._validate_per_op_worker_counts(
+            lookup_workers,
+            retrieve_workers,
+            store_workers,
+        )
 
         # Everything except LMCache-only keys is
         # forwarded to mooncake as str values.
@@ -78,7 +105,45 @@ class MooncakeStoreL2AdapterConfig(L2AdapterConfigBase):
         return cls(
             setup_config=setup,
             num_workers=num_workers,
+            lookup_workers=lookup_workers,
+            retrieve_workers=retrieve_workers,
+            store_workers=store_workers,
         )
+
+    @staticmethod
+    def _parse_optional_worker_count(d: dict[str, object], key: str) -> Optional[int]:
+        value = d.get(key)
+        if value is None:
+            return None
+        if not isinstance(value, int) or value <= 0:
+            raise ValueError(f"{key} must be a positive integer")
+        return value
+
+    @staticmethod
+    def _validate_num_workers(raw: object) -> int:
+        if not isinstance(raw, int) or raw <= 0:
+            raise ValueError("num_workers must be a positive integer")
+        return raw
+
+    @staticmethod
+    def _validate_per_op_worker_counts(
+        lookup_workers: Optional[int],
+        retrieve_workers: Optional[int],
+        store_workers: Optional[int],
+    ) -> None:
+        values = {
+            "lookup_workers": lookup_workers,
+            "retrieve_workers": retrieve_workers,
+            "store_workers": store_workers,
+        }
+        specified = [name for name, value in values.items() if value is not None]
+        if not specified:
+            return
+        if len(specified) != len(values):
+            raise ValueError(
+                "lookup_workers, retrieve_workers, and store_workers must "
+                "all be set together"
+            )
 
     @classmethod
     def help(cls) -> str:
@@ -93,7 +158,13 @@ class MooncakeStoreL2AdapterConfig(L2AdapterConfigBase):
             "Refer to mooncake documentation for "
             "available setup keys.\n"
             "- num_workers (int): C++ worker threads "
-            "(default 4, >0)"
+            "(default 4, >0)\n"
+            "- lookup_workers (int): EXISTS worker threads (>0); must be set "
+            "together with retrieve_workers and store_workers\n"
+            "- retrieve_workers (int): GET/load worker threads (>0); must be "
+            "set together with lookup_workers and store_workers\n"
+            "- store_workers (int): SET/put worker threads (>0); must be set "
+            "together with lookup_workers and retrieve_workers"
         )
 
 
@@ -134,7 +205,8 @@ def _create_mooncake_store_l2_adapter(
         NativeConnectorL2Adapter,
     )
 
-    assert isinstance(config, MooncakeStoreL2AdapterConfig)
+    if not isinstance(config, MooncakeStoreL2AdapterConfig):
+        raise ValueError(f"Expected MooncakeStoreL2AdapterConfig, got {type(config)}")
     l1_registration = L1RegistrationConfig()
     if config.setup_config.get("protocol") == "rdma":
         if l1_memory_desc is None:
@@ -153,14 +225,33 @@ def _create_mooncake_store_l2_adapter(
             l1_registration.base = l1_memory_desc.ptr
             l1_registration.size = l1_memory_desc.size
 
-    native_client = LMCacheMooncakeClient(
-        config=config.setup_config,
-        num_workers=config.num_workers,
-        l1_registration=l1_registration,
-    )
+    native_client_kwargs = {
+        "config": config.setup_config,
+        "num_workers": config.num_workers,
+        "l1_registration": l1_registration,
+    }
+    if (
+        config.lookup_workers is not None
+        or config.retrieve_workers is not None
+        or config.store_workers is not None
+    ):
+        native_client_kwargs.update(
+            {
+                "lookup_workers": config.lookup_workers,
+                "retrieve_workers": config.retrieve_workers,
+                "store_workers": config.store_workers,
+            }
+        )
+
+    native_client = LMCacheMooncakeClient(**native_client_kwargs)
     logger.info(
-        "Created Mooncake Store L2 adapter (workers=%d, preregister_l1_memory=%s)",
+        "Created Mooncake Store L2 adapter "
+        "(workers=%d, lookup_workers=%s, retrieve_workers=%s, "
+        "store_workers=%s, preregister_l1_memory=%s)",
         config.num_workers,
+        config.lookup_workers,
+        config.retrieve_workers,
+        config.store_workers,
         l1_registration.enabled and l1_registration.size > 0,
     )
     return NativeConnectorL2Adapter(native_client)

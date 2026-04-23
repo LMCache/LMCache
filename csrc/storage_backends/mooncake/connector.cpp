@@ -23,18 +23,46 @@ template <typename T>
 void ensure_batch_result_size(const std::vector<T>& results, size_t expected,
                               const char* op_name) {
   if (results.size() != expected) {
-    throw std::runtime_error(std::string("Mooncake ") + op_name +
-                             " returned " + std::to_string(results.size()) +
-                             " results for " + std::to_string(expected) +
-                             " keys");
+    throw std::runtime_error(std::string("Mooncake ") + op_name + " returned " +
+                             std::to_string(results.size()) + " results for " +
+                             std::to_string(expected) + " keys");
   }
+}
+
+WorkerPoolConfig make_worker_pool_config(int lookup_workers,
+                                         int retrieve_workers,
+                                         int store_workers) {
+  const bool enable_separate_pools =
+      lookup_workers != 0 || retrieve_workers != 0 || store_workers != 0;
+  if (!enable_separate_pools) {
+    return WorkerPoolConfig{};
+  }
+  if (lookup_workers < 0 || retrieve_workers < 0 || store_workers < 0) {
+    throw std::runtime_error("Mooncake worker counts must be positive");
+  }
+  if (lookup_workers == 0 || retrieve_workers == 0 || store_workers == 0) {
+    throw std::runtime_error(
+        "lookup_workers, retrieve_workers, and store_workers must all be set "
+        "together");
+  }
+
+  WorkerPoolConfig config;
+  config.enable_separate_pools = true;
+  config.lookup_workers = lookup_workers;
+  config.retrieve_workers = retrieve_workers;
+  config.store_workers = store_workers;
+  return config;
 }
 
 }  // namespace
 
 MooncakeConnector::MooncakeConnector(ConfigDict config, int num_workers,
-                                     L1RegistrationConfig l1_registration)
-    : ConnectorBase(num_workers),
+                                     L1RegistrationConfig l1_registration,
+                                     int lookup_workers, int retrieve_workers,
+                                     int store_workers)
+    : ConnectorBase(num_workers,
+                    make_worker_pool_config(lookup_workers, retrieve_workers,
+                                            store_workers)),
       config_(std::move(config)),
       l1_registration_(l1_registration) {
   // Create a RealClient via the static factory.
@@ -103,9 +131,13 @@ bool MooncakeConnector::do_single_exists(WorkerMooncakeConn& conn,
   return result == 1;
 }
 
+void MooncakeConnector::on_workers_stopped() { unregister_all_buffers(); }
+
 size_t MooncakeConnector::choose_num_tiles(Op op, size_t num_items) const {
   (void)op;
   (void)num_items;
+  // Mooncake's batch APIs already parallelize internally. Keep each LMCache
+  // batch as one tile so we do not split a single backend batch across workers.
   return 1;
 }
 
@@ -126,6 +158,7 @@ void MooncakeConnector::do_batch_get(WorkerMooncakeConn& conn,
               "[LMCache GET] key %s failed: Mooncake batch_get_into "
               "returned %lld\n",
               req.keys[i].c_str(), static_cast<long long>(results[i]));
+      req.batch->any_failed.store(true, std::memory_order_relaxed);
       continue;
     }
     req.batch->per_key_results[req.start_idx + i] = 1;
@@ -138,15 +171,21 @@ void MooncakeConnector::do_batch_set(WorkerMooncakeConn& conn,
     ensure_registered(req.buf_ptrs[i], req.buf_lens[i]);
   }
 
-  auto results = conn.client->batch_put_from(req.keys, req.buf_ptrs,
-                                             req.buf_lens);
+  auto results =
+      conn.client->batch_put_from(req.keys, req.buf_ptrs, req.buf_lens);
   ensure_batch_result_size(results, req.keys.size(), "batch_put_from");
 
   for (size_t i = 0; i < results.size(); ++i) {
     if (results[i] != 0) {
-      throw std::runtime_error("Mooncake batch_put_from failed for key: " +
-                               req.keys[i]);
+      req.batch->per_key_results[req.start_idx + i] = 0;
+      fprintf(stderr,
+              "[LMCache SET] key %s failed: Mooncake batch_put_from "
+              "returned %lld\n",
+              req.keys[i].c_str(), static_cast<long long>(results[i]));
+      req.batch->any_failed.store(true, std::memory_order_relaxed);
+      continue;
     }
+    req.batch->per_key_results[req.start_idx + i] = 1;
   }
 }
 
@@ -157,11 +196,15 @@ void MooncakeConnector::do_batch_exists(WorkerMooncakeConn& conn,
 
   for (size_t i = 0; i < results.size(); ++i) {
     if (results[i] < 0) {
-      throw std::runtime_error("Mooncake batchIsExist failed for key: " +
-                               req.keys[i]);
+      req.batch->per_key_results[req.start_idx + i] = 0;
+      fprintf(stderr,
+              "[LMCache EXISTS] key %s failed: Mooncake batchIsExist "
+              "returned %lld\n",
+              req.keys[i].c_str(), static_cast<long long>(results[i]));
+      req.batch->any_failed.store(true, std::memory_order_relaxed);
+      continue;
     }
-    req.batch->per_key_results[req.start_idx + i] =
-        results[i] == 1 ? 1 : 0;
+    req.batch->per_key_results[req.start_idx + i] = results[i] == 1 ? 1 : 0;
   }
 }
 

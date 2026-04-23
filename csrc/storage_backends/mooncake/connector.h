@@ -42,7 +42,9 @@ struct L1RegistrationConfig {
 class MooncakeConnector : public ConnectorBase<WorkerMooncakeConn> {
  public:
   MooncakeConnector(ConfigDict config, int num_workers,
-                    L1RegistrationConfig l1_registration = {});
+                    L1RegistrationConfig l1_registration = {},
+                    int lookup_workers = 0, int retrieve_workers = 0,
+                    int store_workers = 0);
   ~MooncakeConnector() override;
 
  protected:
