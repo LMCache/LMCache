@@ -164,10 +164,10 @@ pairs by `session_id`, computes `total_bytes / (end_ts - start_ts)` in GB/s.
 START/END events fire on the GPU cupy stream (`publish_on_stream`), so
 timestamps reflect true GPU-stream copy time — not Python/lock overhead.
 
-All throughput histograms carry `engine_id` (vLLM worker instance id) and
-`gpu_id` OTel attributes, enabling per-worker and per-GPU slicing in
-Prometheus (e.g.
-`lmcache_mp_l0_l1_store_throughput_gbs{engine_id="0",gpu_id="3"}`).
+All throughput histograms carry `engine_id` (vLLM worker instance id),
+`device` (e.g. `"cuda:3"`), and `model_name` OTel attributes, enabling
+per-worker, per-device, and per-model slicing in Prometheus (e.g.
+`lmcache_mp_l0_l1_store_throughput_gbs{engine_id="0",device="cuda:3",model_name="meta-llama/Llama-3.1-8B"}`).
 
 | OTel metric name | Prometheus name | Type | Source event | Calculation |
 |---|---|---|---|---|

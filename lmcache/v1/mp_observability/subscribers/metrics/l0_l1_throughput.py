@@ -2,14 +2,18 @@
 
 """L0↔L1 throughput metrics subscriber.
 
-Emits two OTel histograms in GB/s, labeled by ``engine_id`` and ``gpu_id``:
+Emits two OTel histograms in GB/s, labeled by ``engine_id``, ``device``,
+and ``model_name``:
   - ``lmcache_mp.l0_l1_store_throughput_gbs``  — GPU→CPU (L0→L1) store
   - ``lmcache_mp.l0_l1_load_throughput_gbs``   — CPU→GPU (L1→L0) load
 
 Implementation:
   - Correlates ``MP_STORE_START`` → ``MP_STORE_END`` and
-    ``MP_RETRIEVE_START`` → ``MP_RETRIEVE_END`` pairs by ``session_id``
-    (= vLLM ``request_id``).
+    ``MP_RETRIEVE_START`` → ``MP_RETRIEVE_END`` pairs by the compound key
+    ``(session_id, device)``.  ``session_id`` alone is not sufficient
+    because one MP server process serves multiple vLLM workers, so TP/PP
+    replicas of the same request fire concurrent START/END pairs on
+    different GPUs.
   - START/END events fire on the GPU cupy stream (``publish_on_stream``),
     so their timestamps reflect true GPU-stream time for the D2H/H2D
     copies — not Python/lock overhead.
@@ -46,11 +50,13 @@ class L0L1ThroughputSubscriber(EventSubscriber):
         )
         self._sample_rate = sample_rate
 
-        # session_id -> t_start. Populated only for sampled sessions.
-        self._pending_store: dict[str, float] = {}
-        self._pending_load: dict[str, float] = {}
+        # (session_id, device) -> t_start. Populated only for sampled
+        # sessions. Compound key avoids collisions when one MP server
+        # handles the same request_id from multiple GPUs (TP/PP).
+        self._pending_store: dict[tuple[str, str], float] = {}
+        self._pending_load: dict[tuple[str, str], float] = {}
 
-        meter = metrics.get_meter("lmcache.l0_l1")
+        meter = metrics.get_meter("lmcache_mp.perf")
         self._store_hist = meter.create_histogram(
             "lmcache_mp.l0_l1_store_throughput_gbs",
             description=(
@@ -85,8 +91,9 @@ class L0L1ThroughputSubscriber(EventSubscriber):
     def _on_store_start(self, event: Event) -> None:
         if random.random() >= self._sample_rate:
             return
-        if event.session_id:
-            self._pending_store[event.session_id] = event.timestamp
+        key = self._correlation_key(event)
+        if key is not None:
+            self._pending_store[key] = event.timestamp
 
     def _on_store_end(self, event: Event) -> None:
         self._record(
@@ -100,8 +107,9 @@ class L0L1ThroughputSubscriber(EventSubscriber):
     def _on_retrieve_start(self, event: Event) -> None:
         if random.random() >= self._sample_rate:
             return
-        if event.session_id:
-            self._pending_load[event.session_id] = event.timestamp
+        key = self._correlation_key(event)
+        if key is not None:
+            self._pending_load[key] = event.timestamp
 
     def _on_retrieve_end(self, event: Event) -> None:
         self._record(
@@ -113,12 +121,28 @@ class L0L1ThroughputSubscriber(EventSubscriber):
     # -- Core computation --------------------------------------------------
 
     @staticmethod
+    def _correlation_key(event: Event) -> tuple[str, str] | None:
+        """Build the ``(session_id, device)`` correlation key.
+
+        Returns ``None`` if either field is missing — such events cannot
+        be paired safely and are dropped.
+        """
+        device = event.metadata.get("device")
+        if not event.session_id or device is None:
+            return None
+        return (event.session_id, str(device))
+
+    @classmethod
     def _record(
+        cls,
         event: Event,
-        pending: dict[str, float],
+        pending: dict[tuple[str, str], float],
         hist: Any,
     ) -> None:
-        t_start = pending.pop(event.session_id, None)
+        key = cls._correlation_key(event)
+        if key is None:
+            return
+        t_start = pending.pop(key, None)
         if t_start is None:
             return  # session wasn't sampled
 
@@ -131,11 +155,11 @@ class L0L1ThroughputSubscriber(EventSubscriber):
             return
 
         engine_id = event.metadata.get("engine_id")
-        gpu_id = event.metadata.get("gpu_id")
-        attrs: dict[str, Any] = {}
+        model_name = event.metadata.get("model_name")
+        attrs: dict[str, Any] = {"device": key[1]}
         if engine_id is not None:
             attrs["engine_id"] = str(engine_id)
-        if gpu_id is not None:
-            attrs["gpu_id"] = str(gpu_id)
+        if model_name is not None:
+            attrs["model_name"] = str(model_name)
 
         hist.record(total_bytes / dt / 1e9, attributes=attrs)

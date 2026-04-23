@@ -37,13 +37,18 @@ def _start_event(
     session_id: str,
     t: float,
     engine_id: int = 0,
-    gpu_id: int = 0,
+    device: str = "cuda:0",
+    model_name: str = "test-model",
 ) -> Event:
     return Event(
         event_type=event_type,
         timestamp=t,
         session_id=session_id,
-        metadata={"engine_id": engine_id, "gpu_id": gpu_id},
+        metadata={
+            "engine_id": engine_id,
+            "device": device,
+            "model_name": model_name,
+        },
     )
 
 
@@ -53,7 +58,8 @@ def _end_event(
     t: float,
     total_bytes: int,
     engine_id: int = 0,
-    gpu_id: int = 0,
+    device: str = "cuda:0",
+    model_name: str = "test-model",
 ) -> Event:
     return Event(
         event_type=event_type,
@@ -61,7 +67,8 @@ def _end_event(
         session_id=session_id,
         metadata={
             "engine_id": engine_id,
-            "gpu_id": gpu_id,
+            "device": device,
+            "model_name": model_name,
             "total_bytes": total_bytes,
         },
     )
@@ -142,7 +149,7 @@ class TestStoreThroughput:
         # 2 GB in 0.1 s → 20 GB/s
         subscriber._on_store_start(
             _start_event(
-                EventType.MP_STORE_START, "req-1", 1000.0, engine_id=7, gpu_id=3
+                EventType.MP_STORE_START, "req-1", 1000.0, engine_id=7, device="cuda:3"
             )
         )
         subscriber._on_store_end(
@@ -152,7 +159,7 @@ class TestStoreThroughput:
                 1000.1,
                 total_bytes=2_000_000_000,
                 engine_id=7,
-                gpu_id=3,
+                device="cuda:3",
             )
         )
 
@@ -161,18 +168,23 @@ class TestStoreThroughput:
         assert observed_delta == pytest.approx(20.0, rel=1e-6)
 
         attrs = _attrs_of_nonzero_dps(_STORE_METRIC)
-        assert any(a.get("engine_id") == "7" and a.get("gpu_id") == "3" for a in attrs)
+        assert any(
+            a.get("engine_id") == "7"
+            and a.get("device") == "cuda:3"
+            and a.get("model_name") == "test-model"
+            for a in attrs
+        )
 
     def test_drains_pending_dict_on_end(self, subscriber):
         subscriber._on_store_start(
             _start_event(EventType.MP_STORE_START, "req-drain", 0.0)
         )
-        assert "req-drain" in subscriber._pending_store
+        assert ("req-drain", "cuda:0") in subscriber._pending_store
 
         subscriber._on_store_end(
             _end_event(EventType.MP_STORE_END, "req-drain", 0.1, total_bytes=1_000)
         )
-        assert "req-drain" not in subscriber._pending_store
+        assert ("req-drain", "cuda:0") not in subscriber._pending_store
 
 
 class TestLoadThroughput:
@@ -183,7 +195,11 @@ class TestLoadThroughput:
         # 500 MB in 0.05 s → 10 GB/s
         subscriber._on_retrieve_start(
             _start_event(
-                EventType.MP_RETRIEVE_START, "req-r1", 2000.0, engine_id=2, gpu_id=0
+                EventType.MP_RETRIEVE_START,
+                "req-r1",
+                2000.0,
+                engine_id=2,
+                device="cuda:0",
             )
         )
         subscriber._on_retrieve_end(
@@ -193,7 +209,7 @@ class TestLoadThroughput:
                 2000.05,
                 total_bytes=500_000_000,
                 engine_id=2,
-                gpu_id=0,
+                device="cuda:0",
             )
         )
 
@@ -202,7 +218,12 @@ class TestLoadThroughput:
         assert observed_delta == pytest.approx(10.0, rel=1e-6)
 
         attrs = _attrs_of_nonzero_dps(_LOAD_METRIC)
-        assert any(a.get("engine_id") == "2" and a.get("gpu_id") == "0" for a in attrs)
+        assert any(
+            a.get("engine_id") == "2"
+            and a.get("device") == "cuda:0"
+            and a.get("model_name") == "test-model"
+            for a in attrs
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -221,7 +242,7 @@ class TestSampling:
         ):
             sub._on_store_start(_start_event(EventType.MP_STORE_START, "req-skip", 0.0))
 
-        assert "req-skip" not in sub._pending_store
+        assert ("req-skip", "cuda:0") not in sub._pending_store
 
     def test_unsampled_session_does_not_record(self):
         sub = L0L1ThroughputSubscriber(sample_rate=0.01)
@@ -282,10 +303,23 @@ class TestEdgeCases:
                 event_type=EventType.MP_STORE_START,
                 timestamp=1.0,
                 session_id="",
-                metadata={"engine_id": 1, "gpu_id": 0},
+                metadata={"engine_id": 1, "device": "cuda:0"},
             )
         )
-        assert "" not in subscriber._pending_store
+        assert len(subscriber._pending_store) == 0
+
+    def test_missing_device_skips_tracking(self, subscriber):
+        # Without "device" in metadata the correlation key is ambiguous
+        # across GPUs — event must be dropped.
+        subscriber._on_store_start(
+            Event(
+                event_type=EventType.MP_STORE_START,
+                timestamp=1.0,
+                session_id="req-no-dev",
+                metadata={"engine_id": 1},
+            )
+        )
+        assert len(subscriber._pending_store) == 0
 
     def test_store_and_load_dicts_are_independent(self, subscriber):
         # Same session_id used for both paths — must not cross-pollinate.
@@ -300,8 +334,61 @@ class TestEdgeCases:
         subscriber._on_store_end(
             _end_event(EventType.MP_STORE_END, "req-dual", 0.1, total_bytes=10**9)
         )
-        assert "req-dual" not in subscriber._pending_store
-        assert "req-dual" in subscriber._pending_load
+        assert ("req-dual", "cuda:0") not in subscriber._pending_store
+        assert ("req-dual", "cuda:0") in subscriber._pending_load
+
+    def test_same_session_id_different_devices_do_not_collide(self, subscriber):
+        # One MP server handles multiple GPUs; TP replicas of the same
+        # request_id must not stomp on each other's pending START timestamp.
+        count_before = _total_count(_STORE_METRIC)
+
+        # Two concurrent STARTs, same session_id, different devices.
+        subscriber._on_store_start(
+            _start_event(
+                EventType.MP_STORE_START,
+                "tp-req",
+                100.0,
+                engine_id=0,
+                device="cuda:0",
+            )
+        )
+        subscriber._on_store_start(
+            _start_event(
+                EventType.MP_STORE_START,
+                "tp-req",
+                100.0,
+                engine_id=1,
+                device="cuda:1",
+            )
+        )
+        assert ("tp-req", "cuda:0") in subscriber._pending_store
+        assert ("tp-req", "cuda:1") in subscriber._pending_store
+
+        # Both END independently — both must record.
+        subscriber._on_store_end(
+            _end_event(
+                EventType.MP_STORE_END,
+                "tp-req",
+                100.1,
+                total_bytes=1_000_000_000,
+                engine_id=0,
+                device="cuda:0",
+            )
+        )
+        subscriber._on_store_end(
+            _end_event(
+                EventType.MP_STORE_END,
+                "tp-req",
+                100.1,
+                total_bytes=1_000_000_000,
+                engine_id=1,
+                device="cuda:1",
+            )
+        )
+
+        assert _total_count(_STORE_METRIC) == count_before + 2
+        assert ("tp-req", "cuda:0") not in subscriber._pending_store
+        assert ("tp-req", "cuda:1") not in subscriber._pending_store
 
 
 # ---------------------------------------------------------------------------
@@ -319,7 +406,11 @@ class TestEventBusIntegration:
         bus.start()
         bus.publish(
             _start_event(
-                EventType.MP_STORE_START, "bus-req", 100.0, engine_id=9, gpu_id=1
+                EventType.MP_STORE_START,
+                "bus-req",
+                100.0,
+                engine_id=9,
+                device="cuda:1",
             )
         )
         bus.publish(
@@ -329,7 +420,7 @@ class TestEventBusIntegration:
                 100.2,
                 total_bytes=4_000_000_000,
                 engine_id=9,
-                gpu_id=1,
+                device="cuda:1",
             )
         )
         time.sleep(_DRAIN_WAIT)
@@ -337,4 +428,6 @@ class TestEventBusIntegration:
 
         assert _total_count(_STORE_METRIC) == count_before + 1
         attrs = _attrs_of_nonzero_dps(_STORE_METRIC)
-        assert any(a.get("engine_id") == "9" and a.get("gpu_id") == "1" for a in attrs)
+        assert any(
+            a.get("engine_id") == "9" and a.get("device") == "cuda:1" for a in attrs
+        )
