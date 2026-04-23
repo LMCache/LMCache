@@ -26,6 +26,7 @@ Supported Backends
    sagemaker_hyperpod
    valkey
    weka
+   3fs
    
    
   
