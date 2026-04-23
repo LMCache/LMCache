@@ -675,8 +675,6 @@ class LMCacheMPWorkerAdapter:
         logger.info("Registering kv caches")
 
         layout_hints = vllm_layout_hints()
-        # Per-tensor contiguity is enforced inside CudaIPCWrapper; no
-        # pre-permute needed here.
         self.kv_caches = kv_caches
 
         future = send_lmcache_request(
