@@ -32,27 +32,14 @@ steps:
       uv pip install -e . --no-build-isolation
       uv pip freeze
 
-      if command -v nvidia-smi >/dev/null 2>&1; then
-        LMCACHE_TRACK_USAGE="false" \
-        pytest --maxfail=1 --cov=lmcache \
-          --cov-report term --cov-report=html:coverage-test \
-          --cov-report=xml:coverage-test.xml --html=durations/test.html \
-          --ignore=tests/disagg --ignore=tests/v1/test_pos_kernels.py \
-          --ignore=tests/v1/test_nixl_storage.py \
-          --ignore=tests/skipped \
-          --ignore=tests/v1/storage_backend/test_eic.py
-      else
-        LMCACHE_TRACK_USAGE="false" \
-        pytest --maxfail=1 --cov=lmcache \
-          --cov-report term --cov-report=html:coverage-test \
-          --cov-report=xml:coverage-test.xml --html=durations/test.html \
-          --ignore=tests/disagg --ignore=tests/v1/test_pos_kernels.py \
-          --ignore=tests/v1/test_nixl_storage.py \
-          --ignore=tests/skipped \
-          --ignore=tests/v1/multiprocess \
-          --ignore=tests/v1/mp_observability/test_event_recorder.py \
-          --ignore=tests/v1/storage_backend/test_eic.py
-      fi
+      LMCACHE_TRACK_USAGE="false" \
+      pytest --maxfail=1 --cov=lmcache \
+        --cov-report term --cov-report=html:coverage-test \
+        --cov-report=xml:coverage-test.xml --html=durations/test.html \
+        --ignore=tests/disagg --ignore=tests/v1/test_pos_kernels.py \
+        --ignore=tests/v1/test_nixl_storage.py \
+        --ignore=tests/skipped \
+        --ignore=tests/v1/storage_backend/test_eic.py
 
 
       cat << EOF | buildkite-agent annotate --style "info"

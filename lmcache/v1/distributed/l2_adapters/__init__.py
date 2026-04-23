@@ -45,7 +45,8 @@ def create_l2_adapter(
         config: The adapter-specific config object.
         l1_memory_desc: Descriptor of the L1 memory buffer,
             required for adapters that register L1 memory
-            with an external backend (e.g. Nixl).
+            with an external backend (e.g. Nixl or
+            Mooncake when ``protocol == "rdma"``).
 
     Returns:
         L2AdapterInterface: A new adapter instance.
