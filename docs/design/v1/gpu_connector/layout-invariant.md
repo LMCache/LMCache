@@ -116,9 +116,10 @@ helper.
   partitions layers by the 4-tuple `(kv_size, num_heads, head_size,
   dtype)` using `is_mla`, `get_num_heads`, `get_head_size`, and
   `get_dtype` with each layer's index. Builds a `PageBufferShapeDesc`
-  per group via `make_page_buffer_shape_desc`. Proper constructor; no
-  side-effectful `build_*` method. Classmethod `from_layer_groups`
-  exists for test fixtures.
+  per group via `make_page_buffer_shape_desc`. The real constructor is
+  the only way in — no test-only shortcuts, no cached topology fields;
+  the manager exposes only `kv_layer_groups`, `num_groups`, and
+  `get_shape_desc`.
 - **`lmcache/v1/multiprocess/gpu_context.py::GPUCacheContext`** —
   constructs the manager directly at init, delegates
   `get_shape_desc(group_idx)` to it, assembles per-group GPU pointer
