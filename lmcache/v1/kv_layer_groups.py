@@ -2,7 +2,7 @@
 # Standard
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 # Third Party
 import torch
@@ -60,9 +60,7 @@ class KVLayerGroupInfo:
 
 
 class KVLayerGroupsManager:
-    """Owns the per-group :class:`PageBufferShapeDesc` objects and the
-    topology (``num_blocks``, ``block_size``, ``gpu_kv_format``) shared by
-    every group.
+    """Owns the per-group :class:`PageBufferShapeDesc` objects.
 
     Layout parsing is delegated to :mod:`lmcache.v1.gpu_connector.utils`;
     this class only drives the grouping and look-up.
@@ -99,9 +97,6 @@ class KVLayerGroupsManager:
             make_page_buffer_shape_desc,
         )
 
-        self.gpu_kv_format: "lmc_ops.GPUKVFormat" = gpu_kv_format
-        self.num_blocks: int = num_blocks
-        self.block_size: int = block_size
         self.kv_layer_groups: list[KVLayerGroupInfo] = []
 
         num_layers = get_num_layers(kv_caches, gpu_kv_format)
@@ -144,37 +139,6 @@ class KVLayerGroupsManager:
             )
 
         logger.info("KV layer groups: %s", self.kv_layer_groups)
-
-    @classmethod
-    def from_layer_groups(
-        cls,
-        kv_layer_groups: list[KVLayerGroupInfo],
-        gpu_kv_format: Optional["lmc_ops.GPUKVFormat"] = None,
-        num_blocks: int = 0,
-        block_size: int = 0,
-    ) -> "KVLayerGroupsManager":
-        """Construct from pre-built groups, bypassing the grouping pass.
-
-        Test-only: production code should call ``__init__`` with a
-        ``DiscoverableKVCache`` so the manager owns the grouping logic
-        end-to-end. This shortcut exists for fixtures that already hold
-        :class:`KVLayerGroupInfo` instances.
-
-        Args:
-            kv_layer_groups: Pre-built groups.
-            gpu_kv_format: Optional cached format.
-            num_blocks: Optional cached number of paged blocks.
-            block_size: Optional cached tokens per block.
-
-        Returns:
-            A manager populated with the given groups.
-        """
-        instance = cls.__new__(cls)
-        instance.kv_layer_groups = list(kv_layer_groups)
-        instance.gpu_kv_format = gpu_kv_format
-        instance.num_blocks = num_blocks
-        instance.block_size = block_size
-        return instance
 
     @property
     def num_groups(self) -> int:

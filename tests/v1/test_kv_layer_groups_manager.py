@@ -114,16 +114,6 @@ class TestKVLayerGroupsManager:
         assert groups_by_key[(16, torch.float16)].layer_indices == [2]
         assert groups_by_key[(16, torch.float32)].layer_indices == [4]
 
-    def test_build_stores_format_and_topology(self):
-        # First Party
-        import lmcache.c_ops as lmc_ops
-
-        tensors = [torch.randn(2, 32, 256, 8, 64, dtype=torch.float16)]
-        manager = _build_manager(tensors, num_blocks=32, block_size=256)
-        assert manager.gpu_kv_format == lmc_ops.GPUKVFormat.NL_X_TWO_NB_BS_NH_HS
-        assert manager.num_blocks == 32
-        assert manager.block_size == 256
-
     def test_get_shape_desc_by_group_idx(self):
         tensors = [
             torch.randn(2, 32, 256, 8, 64, dtype=torch.float16),
