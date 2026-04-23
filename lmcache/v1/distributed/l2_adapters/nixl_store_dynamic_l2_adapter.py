@@ -340,7 +340,10 @@ class DynamicNixlStoreL2Adapter(L2AdapterInterface):
         config: DynamicNixlStoreL2AdapterConfig,
         l1_memory_desc: L1MemoryDesc,
     ):
-        super().__init__()
+        max_capacity_gb = float(config.backend_params.get("max_capacity_gb", 0))
+        if max_capacity_gb <= 0:
+            raise ValueError("backend_params must include a positive 'max_capacity_gb'")
+        super().__init__(max_capacity_bytes=int(max_capacity_gb * (1024**3)))
         self._config = config
 
         self._store_efd = os.eventfd(0, os.EFD_NONBLOCK | os.EFD_CLOEXEC)
@@ -351,10 +354,6 @@ class DynamicNixlStoreL2Adapter(L2AdapterInterface):
         self._memory_objects: dict[ObjectKey, NixlStoreObj] = {}
         self._inflight_stores: set[ObjectKey] = set()
         self._total_bytes: int = 0
-        max_capacity_gb = float(config.backend_params.get("max_capacity_gb", 0))
-        if max_capacity_gb <= 0:
-            raise ValueError("backend_params must include a positive 'max_capacity_gb'")
-        self._max_capacity_bytes: int = int(max_capacity_gb * (1024**3))
 
         # Task ID management
         self._next_task_id: L2TaskId = 0
@@ -464,7 +463,7 @@ class DynamicNixlStoreL2Adapter(L2AdapterInterface):
 
     def delete(self, keys: list[ObjectKey]) -> None:
         """Delete objects from storage, removing their files from disk."""
-        to_delete: list[tuple[ObjectKey, str]] = []
+        to_delete: list[tuple[ObjectKey, int, str]] = []
         with self._lock:
             for key in keys:
                 obj = self._memory_objects.get(key)
@@ -479,21 +478,22 @@ class DynamicNixlStoreL2Adapter(L2AdapterInterface):
                     continue
                 self._total_bytes -= obj.size
                 del self._memory_objects[key]
-                to_delete.append((key, self.nixl_agent.get_file_path_for_key(key)))
+                to_delete.append(
+                    (key, obj.size, self.nixl_agent.get_file_path_for_key(key))
+                )
         # Filesystem I/O outside the lock to avoid blocking concurrent
         # store/lookup/load operations.
         deleted_keys: list[ObjectKey] = []
-        for key, file_path in to_delete:
+        deleted_sizes: list[int] = []
+        for key, size, file_path in to_delete:
             self.nixl_agent.dynamic_delete_file(file_path)
             deleted_keys.append(key)
+            deleted_sizes.append(size)
         if deleted_keys:
-            self._notify_keys_deleted(deleted_keys)
+            self._notify_keys_deleted(deleted_keys, deleted_sizes)
 
-    def get_usage(self) -> tuple[float, float]:
-        """Return (current_usage, usage_after_ongoing_eviction) in [0, 1]."""
-        with self._lock:
-            usage = self._total_bytes / self._max_capacity_bytes
-        return (usage, usage)
+    # ``get_usage`` is inherited from L2AdapterInterface; byte accounting
+    # is driven by ``_notify_keys_*`` through the base class now.
 
     #####################
     # Status Interface
@@ -589,6 +589,7 @@ class DynamicNixlStoreL2Adapter(L2AdapterInterface):
         """Store each key-object pair to its own file via dynamic DMA write."""
         success = True
         stored_keys: list[ObjectKey] = []
+        stored_sizes: list[int] = []
         try:
             for key, obj in zip(keys, objects, strict=False):
                 mem_addr = obj.meta.address
@@ -631,6 +632,7 @@ class DynamicNixlStoreL2Adapter(L2AdapterInterface):
                         self._memory_objects[key] = store_obj
                         store_obj.decrease_pin_count()
                     stored_keys.append(key)
+                    stored_sizes.append(mem_size)
                 except Exception:
                     # Un-reserve on failure so capacity accounting
                     # stays correct.
@@ -644,7 +646,7 @@ class DynamicNixlStoreL2Adapter(L2AdapterInterface):
             success = False
 
         if stored_keys:
-            self._notify_keys_stored(stored_keys)
+            self._notify_keys_stored(stored_keys, stored_sizes)
 
         with self._lock:
             self._completed_store_tasks[task_id] = success
@@ -660,16 +662,25 @@ class DynamicNixlStoreL2Adapter(L2AdapterInterface):
         data files found on disk.
         """
         bitmap = Bitmap(len(keys))
+        # Keys populated by secondary lookup need a ``_notify_keys_stored``
+        # so the base class accounting stays in sync with disk state.
+        recovered_keys: list[ObjectKey] = []
+        recovered_sizes: list[int] = []
         with self._lock:
             for i, key in enumerate(keys):
                 obj = self._memory_objects.get(key)
                 if obj is None:
                     obj = self._secondary_lookup_locked(key)
+                    if obj is not None:
+                        recovered_keys.append(key)
+                        recovered_sizes.append(obj.size)
                 if obj is None:
                     continue
                 bitmap.set(i)
                 obj.increase_pin_count()
             self._completed_lookup_tasks[task_id] = bitmap
+        if recovered_keys:
+            self._notify_keys_stored(recovered_keys, recovered_sizes)
         self._signal_lookup_event()
 
     def _secondary_lookup_locked(self, key: ObjectKey) -> NixlStoreObj | None:

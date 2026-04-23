@@ -4,8 +4,7 @@ from contextlib import asynccontextmanager
 import argparse
 
 # Third Party
-from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI
 import torch
 import uvicorn
 
@@ -29,6 +28,12 @@ from lmcache.v1.multiprocess.config import (
     add_mp_server_args,
     parse_args_to_http_frontend_config,
     parse_args_to_mp_server_config,
+)
+from lmcache.v1.multiprocess.http_api_registry import (
+    HTTPAPIRegistry,
+)
+from lmcache.v1.multiprocess.mp_runtime_plugin_launcher import (
+    MPRuntimePluginLauncher,
 )
 
 logger = init_logger(__name__)
@@ -63,20 +68,45 @@ async def lifespan(app: FastAPI):
         # First Party
         from lmcache.v1.multiprocess.server import run_cache_server
 
-    zmq_server, engine = run_cache_server(
+    result = run_cache_server(
         mp_config=mp_config,
         storage_manager_config=_configs["storage_manager"],
         obs_config=_configs["observability"],
         return_engine=True,
     )
+    assert result is not None, "run_cache_server returned None with return_engine=True"
+    zmq_server, engine = result
+
+    # Launch runtime plugins if configured. Plugins receive the full
+    # server config (including HTTP host/port) via the
+    # LMCACHE_RUNTIME_PLUGIN_CONFIG environment variable.
+    plugin_launcher = None
+    if mp_config.runtime_plugin_config.locations:
+        extra_kwargs = {}
+        http_config = _configs.get("http")
+        if http_config is not None:
+            extra_kwargs["http_config"] = http_config
+        plugin_launcher = MPRuntimePluginLauncher(
+            runtime_plugin_config=mp_config.runtime_plugin_config,
+            mp_config=mp_config,
+            storage_manager_config=_configs["storage_manager"],
+            obs_config=_configs["observability"],
+            **extra_kwargs,
+        )
+        plugin_launcher.launch_plugins()
+
     app.state.zmq_server = zmq_server
     app.state.engine = engine
+    app.state.plugin_launcher = plugin_launcher
     logger.info("LMCache HTTP server initialized")
 
     yield
 
     # Shutdown
     logger.info("Shutting down LMCache HTTP server...")
+    launcher = getattr(app.state, "plugin_launcher", None)
+    if launcher is not None:
+        launcher.stop_plugins()
     get_event_bus().stop()
     if hasattr(app.state, "zmq_server") and app.state.zmq_server is not None:
         app.state.zmq_server.close()
@@ -85,64 +115,9 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="LMCache HTTP API", version="1.0.0", lifespan=lifespan)
 
-
-@app.get("/")
-async def root():
-    return {"status": "ok", "service": "LMCache HTTP API"}
-
-
-@app.get("/api/healthcheck")
-async def healthcheck(request: Request):
-    """
-    Health check endpoint for k8s liveness/readiness probes.
-
-    Checks:
-        - HTTP server is alive (implicit: if you get a response)
-        - Cache engine is alive
-    """
-    engine = getattr(request.app.state, "engine", None)
-    if engine is None:
-        return JSONResponse(
-            status_code=503,
-            content={"status": "unhealthy", "reason": "engine not initialized"},
-        )
-
-    return {"status": "healthy"}
-
-
-@app.post("/api/clear-cache")
-async def clear_cache(request: Request):
-    """
-    Force-clear all KV cache data stored in L1 (CPU) memory.
-
-    This clears all objects including those with active read/write locks.
-    In-flight store or prefetch operations may be corrupted.
-    """
-    engine = getattr(request.app.state, "engine", None)
-    if engine is None:
-        return JSONResponse(
-            status_code=503,
-            content={"status": "error", "reason": "engine not initialized"},
-        )
-
-    engine.clear()
-    logger.info("Cache cleared via HTTP API")
-    return {"status": "ok"}
-
-
-@app.get("/api/status")
-async def status(request: Request):
-    """
-    Detailed status endpoint for inspecting internal state of all
-    MP components (L1 cache, L2 adapters, controllers, sessions).
-    """
-    engine = getattr(request.app.state, "engine", None)
-    if engine is None:
-        return JSONResponse(
-            status_code=503,
-            content={"error": "engine not initialized"},
-        )
-    return engine.report_status()
+# Automatically discover and register all HTTP API endpoints
+registry = HTTPAPIRegistry(app)
+registry.register_all_apis()
 
 
 def run_http_server(
@@ -163,6 +138,7 @@ def run_http_server(
     _configs["mp"] = mp_config
     _configs["storage_manager"] = storage_manager_config
     _configs["observability"] = obs_config
+    _configs["http"] = http_config
 
     config = uvicorn.Config(
         app=app,

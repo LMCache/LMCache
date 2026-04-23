@@ -10,6 +10,7 @@ The controller runs a background thread with an event-driven loop that:
 """
 
 # Standard
+from collections import defaultdict
 from dataclasses import dataclass
 import os
 import select
@@ -34,6 +35,24 @@ logger = init_logger(__name__)
 
 # Poll timeout in milliseconds for the store loop
 STORE_LOOP_POLL_TIMEOUT_MS = 500
+
+
+def _group_keys_by_shape(
+    keys: list[ObjectKey],
+) -> dict[tuple, list[ObjectKey]]:
+    """Group ``keys`` by the fields that determine their KV cache shape.
+
+    Each bucket shares a single ``(shape, dtype)``, so each bucket can be
+    submitted as one ``submit_store_task`` call. Today the shape is pinned
+    by ``(model_name, kv_rank)`` — ``kv_rank`` packs ``world_size`` and
+    parallelism config, so different TP/PP setups land in different
+    buckets. Extend the grouping tuple when a new shape-affecting field is
+    added to ``ObjectKey``.
+    """
+    groups: dict[tuple, list[ObjectKey]] = defaultdict(list)
+    for key in keys:
+        groups[(key.model_name, key.kv_rank)].append(key)
+    return groups
 
 
 # Helper classes (module-level, before main class)
@@ -294,6 +313,12 @@ class StoreController(StorageControllerInterface):
         Args:
             keys (list[ObjectKey]): Keys that finished writing to L1.
         """
+
+        for group in _group_keys_by_shape(keys).values():
+            self._submit_store_for_single_shape(group)
+
+    def _submit_store_for_single_shape(self, keys: list[ObjectKey]) -> None:
+        """Submit ``keys`` (all same shape) to their target adapters."""
         plan = self._policy.select_store_targets(keys, self._adapter_descriptors)
 
         l1_mgr = self._l1_manager

@@ -54,17 +54,15 @@ TEST_VENV_BIN="/workspace/.venv/bin"
 # When flashinfer and flashinfer-cubin resolve to different patch versions, skip strict check.
 export FLASHINFER_DISABLE_VERSION_CHECK=1
 
-"${UV_BIN}" pip install -p "${TEST_VENV_BIN}/python" -U vllm "torch==2.10.0+cu128" --pre \
+"${UV_BIN}" pip install -p "${TEST_VENV_BIN}/python" -U vllm --pre \
     --extra-index-url https://wheels.vllm.ai/nightly/cu128 \
     --extra-index-url https://download.pytorch.org/whl/cu128 \
     --index-strategy unsafe-best-match
 
 
-# install LMCache from source twice as two torch version might be different
- 
-"${DEFAULT_VENV_BIN}/python" -c 'import vllm; print(f"default venv vllm={vllm.__version__}")' 
+"${DEFAULT_VENV_BIN}/python" -c 'import vllm; print(f"default venv vllm={vllm.__version__}")'
 "${TEST_VENV_BIN}/python" -c 'import vllm; print(f"test venv vllm={vllm.__version__}")'
-"${DEFAULT_VENV_BIN}/python" -c 'import torch; print(f"default venv torch={torch.__version__}, torch.version.cuda={torch.version.cuda}")' 
+"${DEFAULT_VENV_BIN}/python" -c 'import torch; print(f"default venv torch={torch.__version__}, torch.version.cuda={torch.version.cuda}")'
 "${TEST_VENV_BIN}/python" -c 'import torch; print(f"test venv torch={torch.__version__}, torch.version.cuda={torch.version.cuda}")'
 
 echo "--- :wrench: Install sitecustomize.py in both venvs (transformers pre-import)"
