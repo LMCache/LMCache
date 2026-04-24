@@ -18,11 +18,9 @@ pytestmark = pytest.mark.skipif(
 )
 
 # First Party
-from lmcache.v1.kv_layer_groups import (  # noqa: E402
-    KVLayerGroupInfo,
-    KVLayerGroupsManager,
-)
+from lmcache.v1.kv_layer_groups import KVLayerGroupsManager  # noqa: E402
 from lmcache.v1.multiprocess.gpu_context import GPUCacheContext  # noqa: E402
+import lmcache.c_ops as lmc_ops  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -44,19 +42,20 @@ def _make_context(
     ctx.num_layers_ = num_layers
     ctx.max_batch_size = 4
 
-    hidden_dim = num_heads * head_size
-    ctx.hidden_dim_sizes_ = [hidden_dim]
-
-    # Build a minimal KVLayerGroupsManager with a single group
-    kv_size = 1 if is_mla else 2
-    dummy_shape = torch.Size([kv_size, 1, 1, num_heads, head_size])
-    group = KVLayerGroupInfo(
-        layer_names=[str(i) for i in range(num_layers)],
-        layer_indices=list(range(num_layers)),
-        shape=dummy_shape,
-        dtype=dtype,
-    )
-    manager = KVLayerGroupsManager(kv_layer_groups=[group])
+    # Build a real KVLayerGroupsManager from synthetic tensors shaped to
+    # match the grouping signature the tests care about.
+    if is_mla:
+        kv_caches = [
+            torch.empty(1, 1, head_size, dtype=dtype) for _ in range(num_layers)
+        ]
+        fmt = lmc_ops.GPUKVFormat.NL_X_NB_BS_HS
+    else:
+        kv_caches = [
+            torch.empty(2, 1, 1, num_heads, head_size, dtype=dtype)
+            for _ in range(num_layers)
+        ]
+        fmt = lmc_ops.GPUKVFormat.NL_X_TWO_NB_BS_NH_HS
+    manager = KVLayerGroupsManager(kv_caches, fmt, num_blocks=1, block_size=1)
     ctx.kv_layer_groups_manager_ = manager
 
     # Build flat tmp_gpu_buffer_ with prefix-sum offsets (new layout)
@@ -93,35 +92,26 @@ def _make_context_multi_group(
         chunk_size: Tokens per chunk.
         is_mla: Whether to use MLA (kv_dim=1) layout.
     """
+    assert not is_mla, "multi-group helper only exercises the non-MLA path"
     ctx = object.__new__(GPUCacheContext)
     ctx.is_mla_ = is_mla
     ctx.max_batch_size = 4
 
-    kv_size = 1 if is_mla else 2
-    kv_layer_groups = []
-    hidden_dim_sizes = []
-    layer_offset = 0
+    kv_caches: list[torch.Tensor] = []
     for g in groups:
         nl = g["num_layers"]
         nh = g["num_heads"]
         hs = g["head_size"]
         dt = g.get("dtype", torch.bfloat16)
-        hidden_dim = nh * hs
-        hidden_dim_sizes.append(hidden_dim)
-        dummy_shape = torch.Size([kv_size, 1, 1, nh, hs])
-        kv_layer_groups.append(
-            KVLayerGroupInfo(
-                layer_names=[str(i) for i in range(layer_offset, layer_offset + nl)],
-                layer_indices=list(range(layer_offset, layer_offset + nl)),
-                shape=dummy_shape,
-                dtype=dt,
-            )
-        )
-        layer_offset += nl
+        kv_caches.extend(torch.empty(2, 1, 1, nh, hs, dtype=dt) for _ in range(nl))
 
-    ctx.num_layers_ = layer_offset
-    ctx.hidden_dim_sizes_ = hidden_dim_sizes
-    manager = KVLayerGroupsManager(kv_layer_groups=kv_layer_groups)
+    ctx.num_layers_ = len(kv_caches)
+    manager = KVLayerGroupsManager(
+        kv_caches,
+        lmc_ops.GPUKVFormat.NL_X_TWO_NB_BS_NH_HS,
+        num_blocks=1,
+        block_size=1,
+    )
     ctx.kv_layer_groups_manager_ = manager
 
     # Build flat tmp_gpu_buffer_ with prefix-sum offsets

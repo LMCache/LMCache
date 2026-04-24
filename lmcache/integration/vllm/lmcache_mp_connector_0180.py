@@ -543,11 +543,6 @@ class LMCacheMPConnector(KVConnectorBase_V1):
         Args:
             forward_context (ForwardContext): the forward context.
             **kwargs: additional arguments for the load operation
-
-        Note:
-            The number of elements in kv_caches and layer_names should be
-            the same.
-
         """
         metadata = self._get_connector_metadata()
         assert isinstance(metadata, LMCacheMPConnectorMetadata)

@@ -74,10 +74,10 @@ to correlate START/END pairs.
 
 | EventType | Metadata keys | Types |
 |---|---|---|
-| `MP_STORE_START` | `device` | `str` |
-| `MP_STORE_END` | `device`, `stored_count` | `str`, `int` |
-| `MP_RETRIEVE_START` | `device` | `str` |
-| `MP_RETRIEVE_END` | `device`, `retrieved_count` | `str`, `int` |
+| `MP_STORE_START` | `device`, `engine_id`, `gpu_id` | `str`, `int`, `int` |
+| `MP_STORE_END` | `device`, `stored_count`, `engine_id`, `gpu_id`, `total_bytes` | `str`, `int`, `int`, `int`, `int` |
+| `MP_RETRIEVE_START` | `device`, `engine_id`, `gpu_id` | `str`, `int`, `int` |
+| `MP_RETRIEVE_END` | `device`, `retrieved_count`, `engine_id`, `gpu_id`, `total_bytes` | `str`, `int`, `int`, `int`, `int` |
 | `MP_LOOKUP_PREFETCH_START` | *(none)* | — |
 | `MP_LOOKUP_PREFETCH_END` | `found_count` | `int` |
 | `MP_LOOKUP` | `request_id`, `chunk_hashes`, `model_name`, `chunk_size`, `seq_len`, `dtypes`, `shapes` | `str`, `list[str]`, `str`, `int`, `int`, `list[str]`, `list[list[int]]` |

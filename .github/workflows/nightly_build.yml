@@ -158,6 +158,7 @@ jobs:
               releases.astral.sh:443
               download.pytorch.org:443
               download-r2.pytorch.org:443
+              pypi.nvidia.com:443
 
       - name: Login to DockerHub
         if: vars.DOCKERHUB_USERNAME != ''
