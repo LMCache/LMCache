@@ -36,6 +36,12 @@ from .utils import (
     recover_engine_states,
 )
 
+# Optional override for tempfile root. In CI we point this at a GDS-capable
+# host-backed mount (see .buildkite/k3_tests/unit/run.sh); locally it's
+# unset and tempfile falls back to its default. Direct-I/O-backed paths are
+# required for GDS tests (cuFile err=5027 on overlayfs/tmpfs).
+_TEST_TMPDIR = os.environ.get("LMCACHE_TEST_TMPDIR") or None
+
 
 def get_expected_count(token_len, save_unfull_chunk, chunk_size):
     """Calculate expected token count based on save_unfull_chunk setting.
@@ -1258,9 +1264,8 @@ def test_force_store_wait(autorelease_v1):
         for _ in range(num_requests)
     ]
 
-    homedir = os.environ.get("HOME", "/tmp")
     with tempfile.TemporaryDirectory(
-        dir=homedir, ignore_cleanup_errors=True
+        dir=_TEST_TMPDIR, ignore_cleanup_errors=True
     ) as temp_dir:
         cfg = LMCacheEngineConfig.from_defaults(
             local_cpu=False,
@@ -1449,9 +1454,8 @@ def test_multi_device_backends(save_unfull_chunk, autorelease_v1):
     with pytest.raises(AssertionError):
         check_paged_kv_cache_equal(retrieved_cache, kv_cache, slot_mapping)
 
-    homedir = os.environ.get("HOME", "/tmp")
     with tempfile.TemporaryDirectory(
-        dir=homedir, ignore_cleanup_errors=True
+        dir=_TEST_TMPDIR, ignore_cleanup_errors=True
     ) as temp_dir:
         cfg = LMCacheEngineConfig.from_dict(
             {
