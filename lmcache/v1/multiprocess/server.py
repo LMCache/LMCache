@@ -285,6 +285,7 @@ class MPCacheEngine:
             f"KV cache not registered for GPU ID {instance_id}"
         )
         gpu_context = self.gpu_contexts[instance_id]
+        model_name = self.gpu_context_meta[instance_id][0]
 
         blocks_per_chunk = self.chunk_size // gpu_context.block_size
 
@@ -319,7 +320,11 @@ class MPCacheEngine:
                 Event(
                     event_type=EventType.MP_STORE_START,
                     session_id=key.request_id,
-                    metadata={"device": str(gpu_context.device)},
+                    metadata={
+                        "device": str(gpu_context.device),
+                        "engine_id": instance_id,
+                        "model_name": model_name,
+                    },
                 ),
             )
 
@@ -373,6 +378,13 @@ class MPCacheEngine:
                         self.storage_manager.finish_write,
                         list(reserved_dict.keys()),
                     )
+                # All reserved MemoryObjs share one layout_desc, so per-object
+                # size is identical — avoid summing N identical values.
+                total_bytes = (
+                    next(iter(reserved_dict.values())).get_size() * len(reserved_dict)
+                    if reserved_dict
+                    else 0
+                )
                 self._event_bus.publish_on_stream(
                     gpu_context.cupy_stream,
                     Event(
@@ -381,6 +393,9 @@ class MPCacheEngine:
                         metadata={
                             "stored_count": len(reserved_dict),
                             "device": str(gpu_context.device),
+                            "engine_id": instance_id,
+                            "model_name": model_name,
+                            "total_bytes": total_bytes,
                         },
                     ),
                 )
@@ -437,6 +452,7 @@ class MPCacheEngine:
             f"KV cache not registered for GPU ID {instance_id}"
         )
         gpu_context = self.gpu_contexts[instance_id]
+        model_name = self.gpu_context_meta[instance_id][0]
 
         # CPU-synchronous sentinel: a GPU retrieve is about to be enqueued.
         # Must be published via publish() (not publish_on_stream) so the
@@ -454,7 +470,11 @@ class MPCacheEngine:
             Event(
                 event_type=EventType.MP_RETRIEVE_START,
                 session_id=key.request_id,
-                metadata={"device": str(gpu_context.device)},
+                metadata={
+                    "device": str(gpu_context.device),
+                    "engine_id": instance_id,
+                    "model_name": model_name,
+                },
             ),
         )
 
@@ -535,6 +555,7 @@ class MPCacheEngine:
 
             prefetched_keys: list[ObjectKey] = []
             retrieve_succeeded = False
+            total_bytes = 0
             try:
                 with self.storage_manager.read_prefetched_results(
                     obj_keys
@@ -544,6 +565,7 @@ class MPCacheEngine:
                         return event.ipc_handle(), False
 
                     prefetched_keys = obj_keys[: len(memory_objs)]
+                    total_bytes = sum(mo.get_size() for mo in memory_objs)
                     _retrieve_loop(obj_keys, memory_objs)
                 # Only set True when with-block exits normally
                 retrieve_succeeded = True
@@ -565,6 +587,9 @@ class MPCacheEngine:
                         metadata={
                             "retrieved_count": len(prefetched_keys),
                             "device": str(gpu_context.device),
+                            "engine_id": instance_id,
+                            "model_name": model_name,
+                            "total_bytes": total_bytes,
                         },
                     ),
                 )

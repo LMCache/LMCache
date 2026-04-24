@@ -4,6 +4,9 @@
 from lmcache.v1.mp_observability.subscribers.metrics.cb_server import (
     BlendMetricsSubscriber,
 )
+from lmcache.v1.mp_observability.subscribers.metrics.l0_l1_throughput import (
+    L0L1ThroughputSubscriber,
+)
 from lmcache.v1.mp_observability.subscribers.metrics.l0_lifecycle import (
     L0LifecycleSubscriber,
 )
@@ -22,6 +25,7 @@ from lmcache.v1.mp_observability.subscribers.metrics.sm import SMMetricsSubscrib
 
 __all__ = [
     "BlendMetricsSubscriber",
+    "L0L1ThroughputSubscriber",
     "L0LifecycleSubscriber",
     "L1FailureMetricsSubscriber",
     "L1LifecycleSubscriber",

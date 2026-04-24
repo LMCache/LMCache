@@ -296,6 +296,35 @@ in Prometheus (e.g.
      - Histogram
      - Time gaps between consecutive accesses of the same GPU block.
 
+L0 ↔ L1 Throughput Histograms
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Sampled (default 1%) per-request throughput of GPU↔CPU copies via
+``L0L1ThroughputSubscriber``. Each sampled request contributes one sample
+to the appropriate histogram: ``total_bytes / (end_ts - start_ts)`` in
+GB/s. Timestamps come from ``MP_{STORE,RETRIEVE}_{START,END}`` events
+published on the GPU cupy stream, so they reflect true GPU-stream copy
+time — not Python/lock overhead.
+
+All throughput histograms are emitted with ``engine_id`` (vLLM worker
+instance id) and ``gpu_id`` OTel attributes, enabling per-worker and
+per-GPU slicing in Prometheus (e.g.
+``lmcache_mp_l0_l1_store_throughput_gbs{engine_id="0",gpu_id="3"}``).
+
+.. list-table::
+   :header-rows: 1
+   :widths: 40 15 45
+
+   * - Metric
+     - Type
+     - Description
+   * - ``lmcache_mp.l0_l1_store_throughput_gbs``
+     - Histogram
+     - GPU→CPU (L0→L1) store throughput in GB/s per sampled request.
+   * - ``lmcache_mp.l0_l1_load_throughput_gbs``
+     - Histogram
+     - CPU→GPU (L1→L0) load throughput in GB/s per sampled request.
+
 Observable Gauges
 ~~~~~~~~~~~~~~~~~
 
