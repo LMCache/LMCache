@@ -15,13 +15,13 @@ steps:
                 imagePullPolicy: Never
                 env:
                   - { name: CUDA_LAUNCH_BLOCKING, value: "1" }
-                  # POD_NAME is used as subPathExpr for the /tmp hostPath
-                  # below, giving each concurrent pod its own scratch dir
-                  # under /data/gds-scratch on the host.
-                  - name: POD_NAME
-                    valueFrom:
-                      fieldRef:
-                        fieldPath: metadata.name
+                  # Route tempfile.mkdtemp() to the host-backed /scratch
+                  # mount. Overlayfs (default /tmp) fails GDS (cuFile) with
+                  # CU_FILE_IO_NOT_SUPPORTED (err=5027); the /scratch mount
+                  # is on the host's ext4/xfs NVMe. A hostPath + subPathExpr
+                  # at /tmp was also tried and fails GDS — the bind mount
+                  # used by subPath confuses cuFile's fs-type detection.
+                  - { name: TMPDIR, value: /scratch }
                 resources:
                   requests:
                     cpu: "32"
@@ -36,17 +36,15 @@ steps:
                   # tests/v1/shm_allocator (allocates 5 GiB via SharedMemory).
                   # Mount a 16 GiB tmpfs to give shm tests headroom.
                   - { name: dshm, mountPath: /dev/shm }
-                  # Replace the pod's overlay /tmp with a host-backed ext4/xfs
-                  # mount so GDS (cuFile) works. Overlayfs fails with
-                  # CU_FILE_IO_NOT_SUPPORTED (err=5027). subPathExpr gives
-                  # each concurrent pod its own isolated subdirectory.
-                  - name: tmp
-                    mountPath: /tmp
-                    subPathExpr: $(POD_NAME)
+                  # GDS-capable scratch dir on the host's local NVMe. Direct
+                  # hostPath (no subPath) — K8s' subPath bind-mount breaks
+                  # cuFile's fs detection. TMPDIR above redirects
+                  # tempfile.mkdtemp() here.
+                  - { name: scratch, mountPath: /scratch }
             volumes:
               - { name: hf-cache, hostPath: { path: /data/huggingface, type: DirectoryOrCreate } }
               - { name: dshm, emptyDir: { medium: Memory, sizeLimit: 16Gi } }
-              - { name: tmp, hostPath: { path: /data/gds-scratch, type: DirectoryOrCreate } }
+              - { name: scratch, hostPath: { path: /data/gds-scratch, type: DirectoryOrCreate } }
     artifact_paths:
       - "durations/test.html"
       - "coverage-test.xml"

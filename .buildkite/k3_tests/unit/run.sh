@@ -8,11 +8,6 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 
 cd "${REPO_ROOT}"
 
-# /tmp is a hostPath-backed per-pod subdir (see pipeline.yml). K8s doesn't
-# auto-clean hostPath subPaths when the pod dies, so wipe our contents on
-# exit to keep the host's /data/gds-scratch from growing unbounded.
-trap 'rm -rf /tmp/* /tmp/.[!.]* 2>/dev/null || true' EXIT
-
 # ── Environment setup ────────────────────────────────────────
 source .buildkite/k3_harness/setup-lmcache-only-env.sh
 uv pip install -r requirements/test.txt
