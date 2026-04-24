@@ -20,6 +20,10 @@ from lmcache.v1.distributed.error import L1Error, strerror
 from lmcache.v1.distributed.l1_manager import L1Manager
 from lmcache.v1.distributed.l2_adapters import create_l2_adapter
 from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface
+from lmcache.v1.distributed.serde import (
+    SerdeProcessor,
+    create_serde_processor,
+)
 from lmcache.v1.distributed.storage_controllers import (
     L1EvictionController,
     L2AdapterEvictionState,
@@ -101,11 +105,20 @@ class StorageManager:
             for i, ac in enumerate(config.l2_adapter_config.adapters)
         ]
 
+        # Per-adapter serde processors (None = serde disabled for that adapter)
+        self._serde_processors: list[SerdeProcessor | None] = [
+            create_serde_processor(ac.serde_config)
+            if ac.serde_config is not None
+            else None
+            for ac in config.l2_adapter_config.adapters
+        ]
+
         self._store_controller = StoreController(
             l1_manager=self._l1_manager,
             l2_adapters=self._l2_adapters,
             adapter_descriptors=adapter_descriptors,
             policy=create_store_policy(config.store_policy),
+            serde_processors=self._serde_processors,
         )
         self._store_controller.start()
 
@@ -116,6 +129,7 @@ class StorageManager:
             adapter_descriptors=adapter_descriptors,
             policy=create_prefetch_policy(config.prefetch_policy),
             max_in_flight=config.prefetch_max_in_flight,
+            serde_processors=self._serde_processors,
         )
         self._prefetch_controller.start()
 
@@ -515,6 +529,10 @@ class StorageManager:
 
         for adapter in self._l2_adapters:
             adapter.close()
+
+        for serde in self._serde_processors:
+            if serde is not None:
+                serde.close()
 
         self._l1_manager.close()
 

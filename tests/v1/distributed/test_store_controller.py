@@ -245,6 +245,7 @@ class TestStoreControllerLifecycle:
         ctrl = StoreController(
             l1_manager=l1_manager,
             l2_adapters=[adapter],
+            serde_processors=[None],
             adapter_descriptors=[make_descriptor(0)],
             policy=DefaultStorePolicy(),
         )
@@ -257,6 +258,7 @@ class TestStoreControllerLifecycle:
         ctrl = StoreController(
             l1_manager=l1_manager,
             l2_adapters=[],
+            serde_processors=[],
             adapter_descriptors=[],
             policy=DefaultStorePolicy(),
         )
@@ -273,6 +275,7 @@ class TestStoreControllerSingleAdapter:
         ctrl = StoreController(
             l1_manager=l1_manager,
             l2_adapters=[adapter],
+            serde_processors=[None],
             adapter_descriptors=[make_descriptor(0)],
             policy=DefaultStorePolicy(),
         )
@@ -299,6 +302,7 @@ class TestStoreControllerSingleAdapter:
         ctrl = StoreController(
             l1_manager=l1_manager,
             l2_adapters=[adapter],
+            serde_processors=[None],
             adapter_descriptors=[make_descriptor(0)],
             policy=DefaultStorePolicy(),
         )
@@ -325,6 +329,7 @@ class TestStoreControllerSingleAdapter:
         ctrl = StoreController(
             l1_manager=l1_manager,
             l2_adapters=[adapter],
+            serde_processors=[None],
             adapter_descriptors=[make_descriptor(0)],
             policy=DefaultStorePolicy(),
         )
@@ -368,6 +373,7 @@ class TestStoreControllerSingleAdapter:
         ctrl = StoreController(
             l1_manager=l1_manager,
             l2_adapters=[adapter],
+            serde_processors=[None],
             adapter_descriptors=[make_descriptor(0)],
             policy=DefaultStorePolicy(),
         )
@@ -422,6 +428,7 @@ class TestStoreControllerMultipleAdapters:
         ctrl = StoreController(
             l1_manager=l1_manager,
             l2_adapters=adapters,
+            serde_processors=[None] * len(adapters),
             adapter_descriptors=descriptors,
             policy=DefaultStorePolicy(),
         )
@@ -450,6 +457,7 @@ class TestStoreControllerMultipleAdapters:
         ctrl = StoreController(
             l1_manager=l1_manager,
             l2_adapters=adapters,
+            serde_processors=[None] * len(adapters),
             adapter_descriptors=descriptors,
             policy=DefaultStorePolicy(),
         )
@@ -491,6 +499,7 @@ class TestStoreControllerNoAdapters:
         ctrl = StoreController(
             l1_manager=l1_manager,
             l2_adapters=[],
+            serde_processors=[],
             adapter_descriptors=[],
             policy=DefaultStorePolicy(),
         )
@@ -534,6 +543,7 @@ class TestStoreControllerCustomPolicy:
         ctrl = StoreController(
             l1_manager=l1_manager,
             l2_adapters=[adapter],
+            serde_processors=[None],
             adapter_descriptors=[make_descriptor(0)],
             policy=SkipAllPolicy(),
         )
@@ -569,6 +579,7 @@ class TestStoreControllerCustomPolicy:
         ctrl = StoreController(
             l1_manager=l1_manager,
             l2_adapters=[adapter],
+            serde_processors=[None],
             adapter_descriptors=[make_descriptor(0)],
             policy=DeleteAfterStorePolicy(),
         )
@@ -622,6 +633,7 @@ class TestStoreControllerCustomPolicy:
         ctrl = StoreController(
             l1_manager=l1_manager,
             l2_adapters=adapters,
+            serde_processors=[None] * len(adapters),
             adapter_descriptors=descriptors,
             policy=FirstAdapterOnlyPolicy(),
         )
@@ -658,6 +670,7 @@ class TestBufferOnlyMode:
         ctrl = StoreController(
             l1_manager=l1_manager,
             l2_adapters=[adapter],
+            serde_processors=[None],
             adapter_descriptors=[make_descriptor(0)],
             policy=BufferOnlyStorePolicy(),
         )
@@ -698,6 +711,7 @@ class TestBufferOnlyMode:
         ctrl = StoreController(
             l1_manager=l1_manager,
             l2_adapters=[adapter],
+            serde_processors=[None],
             adapter_descriptors=[make_descriptor(0)],
             policy=BufferOnlyStorePolicy(),
         )
