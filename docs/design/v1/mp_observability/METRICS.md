@@ -187,4 +187,63 @@ point-in-time state snapshots that do not correspond to discrete events.
 
 ---
 
+## Cache Blending (CB) Metrics
+
+Metrics for Cache Blending operations use the `lmcache_blend.` prefix (distinct from the
+MP mode `lmcache_mp.` namespace).  On Prometheus, `.` becomes `_` and counters get
+`_total` suffix (e.g., `lmcache_blend_lookup_requests_total`).
+
+### CB Lookup Metrics
+
+| OTel metric name | Prometheus name | Type | Source event | Calculation |
+|---|---|---|---|---|
+| `lmcache_blend.lookup_requests` | `lmcache_blend_lookup_requests_total` | Counter | `CB_LOOKUP_START` | +1 per event |
+| `lmcache_blend.lookup_fingerprint_hits` | `lmcache_blend_lookup_fingerprint_hits_total` | Counter | `CB_LOOKUP_END` | `+fingerprint_hits` |
+| `lmcache_blend.lookup_storage_hits` | `lmcache_blend_lookup_storage_hits_total` | Counter | `CB_LOOKUP_END` | `+storage_hits` |
+| `lmcache_blend.lookup_stale_chunks` | `lmcache_blend_lookup_stale_chunks_total` | Counter | `CB_LOOKUP_END` | `+stale_chunks` |
+| `lmcache_blend.lookup_no_gpu_context_errors` | `lmcache_blend_lookup_no_gpu_context_errors_total` | Counter | `CB_LOOKUP_END` | +1 when `no_gpu_context=True` |
+
+**What it answers:** How often does the CB server receive lookup requests? What fraction hit the fingerprint table? What fraction are confirmed in storage? How many stale evictions occur?
+
+### CB Retrieve Metrics
+
+| OTel metric name | Prometheus name | Type | Source event | Calculation |
+|---|---|---|---|---|
+| `lmcache_blend.retrieve_requests` | `lmcache_blend_retrieve_requests_total` | Counter | `CB_RETRIEVE_START` | +1 per event |
+| `lmcache_blend.retrieve_chunks` | `lmcache_blend_retrieve_chunks_total` | Counter | `CB_RETRIEVE_START` | `+num_chunks` |
+| `lmcache_blend.retrieve_failures` | `lmcache_blend_retrieve_failures_total` | Counter | `CB_RETRIEVE_END` | +1 when `success=False` |
+
+**What it answers:** How often is CB retrieval invoked? How many chunks are retrieved per call? What is the failure rate?
+
+### CB Store Pre-computed Metrics
+
+| OTel metric name | Prometheus name | Type | Source event | Calculation |
+|---|---|---|---|---|
+| `lmcache_blend.store_pre_computed_requests` | `lmcache_blend_store_pre_computed_requests_total` | Counter | `CB_STORE_PRE_COMPUTED_START` | +1 per event |
+| `lmcache_blend.store_pre_computed_chunks` | `lmcache_blend_store_pre_computed_chunks_total` | Counter | `CB_STORE_PRE_COMPUTED_END` | `+stored_chunks` |
+| `lmcache_blend.store_pre_computed_failures` | `lmcache_blend_store_pre_computed_failures_total` | Counter | `CB_STORE_PRE_COMPUTED_END` | +1 when `success=False` |
+
+**What it answers:** How often is pre-computed CB storage invoked? How many chunks are written? What is the failure rate?
+
+### CB Store Final Metrics
+
+| OTel metric name | Prometheus name | Type | Source event | Calculation |
+|---|---|---|---|---|
+| `lmcache_blend.store_final_requests` | `lmcache_blend_store_final_requests_total` | Counter | `CB_STORE_FINAL_START` | +1 per event |
+| `lmcache_blend.store_final_chunks` | `lmcache_blend_store_final_chunks_total` | Counter | `CB_STORE_FINAL_END` | `+stored_chunks` |
+| `lmcache_blend.store_final_failures` | `lmcache_blend_store_final_failures_total` | Counter | `CB_STORE_FINAL_END` | +1 when `success=False` |
+
+**What it answers:** How often is final CB storage invoked? How many chunks are committed? What is the failure rate?
+
+### CB Fingerprint Table Metrics
+
+| OTel metric name | Prometheus name | Type | Source event | Calculation |
+|---|---|---|---|---|
+| `lmcache_blend.fingerprints_registered` | `lmcache_blend_fingerprints_registered_total` | Counter | `CB_FINGERPRINTS_REGISTERED` | `+num_chunks` |
+| `lmcache_blend.chunks_evicted` | `lmcache_blend_chunks_evicted_total` | Counter | `CB_CHUNKS_EVICTED` | `+num_chunks` |
+
+**What it answers:** How many chunks are indexed into the fingerprint table? How many stale entries are evicted?
+
+---
+
 For event metadata contracts (what keys each `EventType` carries), see [EVENTS.md](EVENTS.md).
