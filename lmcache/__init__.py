@@ -35,8 +35,11 @@ def _detect_device() -> tuple[Any, str]:
     Raises:
         RuntimeError: If no supported accelerator is found (checked CUDA, XPU, HPU).
     """
-    # Third Party
-    import torch
+    try:
+        # Third Party
+        import torch
+    except ImportError:
+        return None, "cuda"  # fallback，CLI-only
 
     if hasattr(torch, "xpu") and torch.xpu.is_available():
         return torch.xpu, "xpu"
