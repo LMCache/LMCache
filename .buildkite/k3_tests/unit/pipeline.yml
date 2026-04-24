@@ -1,0 +1,28 @@
+# Unit tests — runs pytest with coverage against LMCache source.
+# No vLLM required; uses setup-lmcache-only-env.sh for a lighter install.
+
+steps:
+  - label: ":test_tube: Unit Tests"
+    command: .buildkite/k3_tests/unit/run.sh
+    timeout_in_minutes: 60
+    agents: { queue: "k3-h200-local" }
+    plugins:
+      - kubernetes:
+          podSpec:
+            containers:
+              - name: container-0
+                image: lmcache/ci-base:latest
+                imagePullPolicy: Never
+                env:
+                  - { name: CUDA_LAUNCH_BLOCKING, value: "1" }
+                resources:
+                  limits:
+                    nvidia.com/gpu: "1"
+                volumeMounts:
+                  - { name: hf-cache, mountPath: /root/.cache/huggingface }
+            volumes:
+              - { name: hf-cache, hostPath: { path: /data/huggingface, type: DirectoryOrCreate } }
+    artifact_paths:
+      - "durations/test.html"
+      - "coverage-test.xml"
+      - "coverage-test/**/*"
