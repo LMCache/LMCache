@@ -41,7 +41,7 @@ def CreateGPUConnector(
         num_layer, _, chunk_size, num_kv_head, head_dim = metadata.kv_shape
         hidden_dim_size = num_kv_head * head_dim
         local_worker_id = metadata.local_worker_id
-        torch_dev.device(local_worker_id)
+        torch_dev.set_device(local_worker_id)
         device = torch.device(f"{torch_device_type}:{local_worker_id}")
         kv_dtype = metadata.kv_dtype
         if config.use_layerwise:
