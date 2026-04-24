@@ -20,10 +20,8 @@ from lmcache.v1.distributed.error import L1Error, strerror
 from lmcache.v1.distributed.l1_manager import L1Manager
 from lmcache.v1.distributed.l2_adapters import create_l2_adapter
 from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface
-from lmcache.v1.distributed.serde import (
-    SerdeProcessor,
-    create_serde_processor,
-)
+from lmcache.v1.distributed.l2_adapters.serde_wrapper import SerdeL2AdapterWrapper
+from lmcache.v1.distributed.serde import create_serde_processor
 from lmcache.v1.distributed.storage_controllers import (
     L1EvictionController,
     L2AdapterEvictionState,
@@ -62,12 +60,21 @@ class StorageManager:
         )
         self._eviction_controller.start()
 
-        # L2 adapters and store controller
+        # L2 adapters and store controller. When an adapter config carries
+        # a ``serde_config``, the adapter is wrapped with
+        # ``SerdeL2AdapterWrapper`` so controllers see a plain L2 adapter
+        # and serde is transparent.
         l1_memory_desc = self._l1_manager.get_l1_memory_desc()
-        self._l2_adapters: list[L2AdapterInterface] = [
-            create_l2_adapter(ac, l1_memory_desc)
-            for ac in config.l2_adapter_config.adapters
-        ]
+        self._l2_adapters: list[L2AdapterInterface] = []
+        for ac in config.l2_adapter_config.adapters:
+            adapter: L2AdapterInterface = create_l2_adapter(ac, l1_memory_desc)
+            if ac.serde_config is not None:
+                adapter = SerdeL2AdapterWrapper(
+                    inner=adapter,
+                    serde=create_serde_processor(ac.serde_config),
+                    l1_manager=self._l1_manager,
+                )
+            self._l2_adapters.append(adapter)
 
         # Unified L2 eviction controller for all adapters with eviction config.
         # Adapters that don't support global (aggregate) eviction
@@ -105,20 +112,11 @@ class StorageManager:
             for i, ac in enumerate(config.l2_adapter_config.adapters)
         ]
 
-        # Per-adapter serde processors (None = serde disabled for that adapter)
-        self._serde_processors: list[SerdeProcessor | None] = [
-            create_serde_processor(ac.serde_config)
-            if ac.serde_config is not None
-            else None
-            for ac in config.l2_adapter_config.adapters
-        ]
-
         self._store_controller = StoreController(
             l1_manager=self._l1_manager,
             l2_adapters=self._l2_adapters,
             adapter_descriptors=adapter_descriptors,
             policy=create_store_policy(config.store_policy),
-            serde_processors=self._serde_processors,
         )
         self._store_controller.start()
 
@@ -129,7 +127,6 @@ class StorageManager:
             adapter_descriptors=adapter_descriptors,
             policy=create_prefetch_policy(config.prefetch_policy),
             max_in_flight=config.prefetch_max_in_flight,
-            serde_processors=self._serde_processors,
         )
         self._prefetch_controller.start()
 
@@ -529,10 +526,6 @@ class StorageManager:
 
         for adapter in self._l2_adapters:
             adapter.close()
-
-        for serde in self._serde_processors:
-            if serde is not None:
-                serde.close()
 
         self._l1_manager.close()
 
