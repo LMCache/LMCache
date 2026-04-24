@@ -16,12 +16,22 @@ steps:
                 env:
                   - { name: CUDA_LAUNCH_BLOCKING, value: "1" }
                 resources:
+                  requests:
+                    cpu: "32"
+                    memory: "96Gi"
                   limits:
                     nvidia.com/gpu: "1"
+                    cpu: "64"
+                    memory: "200Gi"
                 volumeMounts:
                   - { name: hf-cache, mountPath: /root/.cache/huggingface }
+                  # K8s defaults /dev/shm to 64 MiB, which causes SIGBUS in
+                  # tests/v1/shm_allocator (allocates 5 GiB via SharedMemory).
+                  # Mount an 8 GiB tmpfs to give shm tests headroom.
+                  - { name: dshm, mountPath: /dev/shm }
             volumes:
               - { name: hf-cache, hostPath: { path: /data/huggingface, type: DirectoryOrCreate } }
+              - { name: dshm, emptyDir: { medium: Memory, sizeLimit: 16Gi } }
     artifact_paths:
       - "durations/test.html"
       - "coverage-test.xml"
