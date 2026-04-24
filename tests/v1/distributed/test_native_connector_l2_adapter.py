@@ -1256,13 +1256,15 @@ def adapter_with_capacity():
 
 class TestUsageTracking:
     def test_get_usage_without_capacity(self, adapter):
-        """Without max_capacity_bytes, get_usage returns (-1, -1)."""
+        """Without max_capacity_bytes, usage_fraction == -1 (sentinel)."""
         usage = adapter.get_usage()
-        assert usage == (-1.0, -1.0)
+        assert usage.usage_fraction == -1.0
+        assert usage.total_capacity_bytes == 0
 
     def test_get_usage_starts_at_zero(self, adapter_with_capacity):
-        usage, _ = adapter_with_capacity.get_usage()
-        assert usage == 0.0
+        usage = adapter_with_capacity.get_usage()
+        assert usage.usage_fraction == 0.0
+        assert usage.total_bytes_used == 0
 
     def test_get_usage_after_store(self, adapter_with_capacity):
         adp = adapter_with_capacity
@@ -1275,9 +1277,10 @@ class TestUsageTracking:
         wait_for_event_fd(store_fd, timeout=5.0)
         adp.pop_completed_store_tasks()
 
-        usage, _ = adp.get_usage()
+        usage = adp.get_usage()
         # 400 bytes / 2000 bytes = 0.2
-        assert usage == pytest.approx(0.2)
+        assert usage.usage_fraction == pytest.approx(0.2)
+        assert usage.total_bytes_used == 400
 
     def test_get_usage_after_delete(self, adapter_with_capacity):
         adp = adapter_with_capacity
@@ -1291,12 +1294,13 @@ class TestUsageTracking:
         wait_for_event_fd(store_fd, timeout=5.0)
         adp.pop_completed_store_tasks()
 
-        assert adp.get_usage()[0] == pytest.approx(0.2)
+        assert adp.get_usage().usage_fraction == pytest.approx(0.2)
 
         # Delete
         adp.delete([key])
 
-        assert adp.get_usage()[0] == pytest.approx(0.0)
+        assert adp.get_usage().usage_fraction == pytest.approx(0.0)
+        assert adp.get_usage().total_bytes_used == 0
 
     def test_get_usage_store_delete_cycle(self, adapter_with_capacity):
         adp = adapter_with_capacity
@@ -1310,14 +1314,16 @@ class TestUsageTracking:
         wait_for_event_fd(store_fd, timeout=5.0)
         adp.pop_completed_store_tasks()
 
-        usage, _ = adp.get_usage()
-        assert usage == pytest.approx(1200 / 2000)
+        usage = adp.get_usage()
+        assert usage.usage_fraction == pytest.approx(1200 / 2000)
+        assert usage.total_bytes_used == 1200
 
         # Delete 2
         adp.delete(keys[:2])
 
-        usage, _ = adp.get_usage()
-        assert usage == pytest.approx(400 / 2000)
+        usage = adp.get_usage()
+        assert usage.usage_fraction == pytest.approx(400 / 2000)
+        assert usage.total_bytes_used == 400
 
     def test_idempotent_store_no_double_count(self, adapter_with_capacity):
         adp = adapter_with_capacity
@@ -1336,5 +1342,6 @@ class TestUsageTracking:
         adp.pop_completed_store_tasks()
 
         # Should only count once
-        usage, _ = adp.get_usage()
-        assert usage == pytest.approx(0.2)
+        usage = adp.get_usage()
+        assert usage.usage_fraction == pytest.approx(0.2)
+        assert usage.total_bytes_used == 400

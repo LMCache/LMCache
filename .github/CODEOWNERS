@@ -12,6 +12,7 @@
 /lmcache/v1/multiprocess/              @ApostaC @OasisGit
 /lmcache/v1/multiprocess/protocols/observability.py  @royyhuang @ApostaC
 /lmcache/v1/multiprocess/http_server.py              @royyhuang @ApostaC @OasisGit
+/lmcache/v1/mp_observability             @royyhuang @ApostaC @OasisGit @sammshen
 
 # Distributed / L2
 /lmcache/v1/distributed/               @ApostaC @maobaolong @chunxiaozheng

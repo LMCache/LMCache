@@ -85,6 +85,11 @@ class NixlObjPool:
         self._total = num_total_objs
         self._lock = threading.Lock()
 
+    @property
+    def total_objs(self) -> int:
+        """Total number of storage slots this pool manages (allocated + free)."""
+        return self._total
+
     def batched_allocate(self, num_objs: int) -> list[int]:
         """
         Allocate a batch of storage slot indices.
@@ -116,9 +121,12 @@ class NixlObjPool:
         with self._lock:
             self.indices.extend(obj_indices)
 
-    def get_usage(self) -> tuple[float, float]:
+    def get_slot_usage(self) -> tuple[float, float]:
         """
-        Return (current_usage, usage_after_ongoing_eviction) in [0, 1].
+        Return (current_usage, usage_after_ongoing_eviction) in [0, 1] for
+        the slot pool. Renamed from ``get_usage`` to avoid colliding with
+        the byte-based ``L2AdapterInterface.get_usage`` shape — this is
+        an internal pool helper, not the adapter-level usage report.
 
         Both values are identical because slot frees are synchronous.
         """
@@ -422,7 +430,21 @@ class NixlStoreL2Adapter(L2AdapterInterface):
             l1_memory_desc: Descriptor of the L1 memory buffer to register with the
                 Nixl backend for DMA transfers.
         """
-        super().__init__()
+        # Initialize Nixl agent first so we know the actual page count the
+        # backend allocated; we then forward the byte capacity to the base
+        # class so ``get_usage()`` / ``supports_global_eviction`` reflect the real
+        # storage size.
+        self.nixl_agent = NixlStorageAgent(
+            device="cpu",
+            backend=config.backend,
+            backend_params=config.backend_params,
+            pool_size=config.pool_size,
+            l1_memory_desc=l1_memory_desc,
+        )
+        max_capacity_bytes = (
+            self.nixl_agent.pool.total_objs * l1_memory_desc.align_bytes
+        )
+        super().__init__(max_capacity_bytes=max_capacity_bytes)
         self._config = config
 
         self._store_efd = os.eventfd(0, os.EFD_NONBLOCK | os.EFD_CLOEXEC)
@@ -443,15 +465,6 @@ class NixlStoreL2Adapter(L2AdapterInterface):
         self._loop = asyncio.new_event_loop()
         self._loop_thread = threading.Thread(target=self._run_event_loop, daemon=True)
         self._loop_thread.start()
-
-        # Initialize Nixl agent
-        self.nixl_agent = NixlStorageAgent(
-            device="cpu",
-            backend=config.backend,
-            backend_params=config.backend_params,
-            pool_size=config.pool_size,
-            l1_memory_desc=l1_memory_desc,
-        )
 
     # --------------------
     # Event Fd Interface
@@ -604,6 +617,7 @@ class NixlStoreL2Adapter(L2AdapterInterface):
         """
         # TODO(Jiayi): Optimize lock usage here
         deleted_keys: list[ObjectKey] = []
+        deleted_sizes: list[int] = []
         with self._lock:
             for key in keys:
                 obj = self._memory_objects.get(key)
@@ -619,14 +633,16 @@ class NixlStoreL2Adapter(L2AdapterInterface):
                 del self._memory_objects[key]
                 self.nixl_agent.pool.batched_free(obj.page_indices)
                 deleted_keys.append(key)
+                deleted_sizes.append(obj.size)
         if deleted_keys:
-            self._notify_keys_deleted(deleted_keys)
+            self._notify_keys_deleted(deleted_keys, deleted_sizes)
 
-    def get_usage(self) -> tuple[float, float]:
-        """
-        Return (current_usage, usage_after_ongoing_eviction) based on pool slots.
-        """
-        return self.nixl_agent.pool.get_usage()
+    # ``get_usage()`` is inherited from ``L2AdapterInterface``. The base
+    # class derives the report from ``_notify_keys_*`` totals which we
+    # update with the byte sizes from each store/delete. The Nixl pool's
+    # own slot-based ``get_usage()`` is still used internally for
+    # capacity-check style decisions but is no longer exposed via the
+    # adapter interface.
 
     #####################
     # Status Interface
@@ -764,7 +780,12 @@ class NixlStoreL2Adapter(L2AdapterInterface):
                 for key, storage_obj in zip(stored_keys, storage_objs, strict=False):
                     self._memory_objects[key] = storage_obj
                     storage_obj.decrease_pin_count()
-            self._notify_keys_stored(stored_keys)
+            # ``stored_keys`` and ``storage_objs`` are built together in the
+            # pre-alloc loop above, so the size lists stay aligned even
+            # when the pool ran out of slots mid-batch.
+            if stored_keys:
+                stored_sizes = [obj.size for obj in storage_objs]
+                self._notify_keys_stored(stored_keys, stored_sizes)
 
         # success is only set to false for transfer failures
         except Exception:

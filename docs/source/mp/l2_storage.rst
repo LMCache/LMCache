@@ -195,6 +195,12 @@ An L2 adapter backed by the native C++ Mooncake Store connector.  Uses
 `Mooncake <https://github.com/kvcache-ai/Mooncake>`_ for high-performance
 distributed KV cache storage with RDMA support.
 
+When Mooncake is configured with ``"protocol": "rdma"``, LMCache must also
+have a valid contiguous L1 memory region available.  The distributed storage
+manager passes this L1 memory descriptor to the adapter factory automatically
+in MP mode.  If the descriptor is missing or invalid, adapter creation fails
+with ``ValueError`` instead of silently falling back to a non-RDMA path.
+
 **Prerequisites -- Building with Mooncake support:**
 
 The Mooncake extension is **not** built by default.  You must explicitly
@@ -255,6 +261,17 @@ for available setup keys (e.g., ``local_hostname``,
 
 For full Mooncake setup instructions (master service, metadata server,
 etc.), see `Mooncake <https://github.com/kvcache-ai/Mooncake>`_ .
+
+**RDMA notes:**
+
+- ``protocol: "rdma"`` requires a valid LMCache L1 memory descriptor.
+- When using ``protocol: "rdma"``, it is recommended to disable lazy L1
+  allocation with ``--no-l1-use-lazy`` so the L1 buffer is fully allocated
+  before Mooncake registers it.
+- ``protocol: "tcp"`` does not require L1 preregistration.
+- If Mooncake RDMA initialization fails at adapter creation time, verify that
+  LMCache L1 memory is enabled and that the descriptor has a non-zero pointer
+  and size.
 
 ``mock`` -- Mock adapter for testing
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

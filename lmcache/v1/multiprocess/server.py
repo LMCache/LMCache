@@ -319,7 +319,7 @@ class MPCacheEngine:
 
             # CPU-synchronous sentinel: a GPU store is about to be enqueued.
             # Must be published via publish() (not publish_on_stream) so the
-            # drain thread sees it before MP_SESSION_END can race MP_STORE_END.
+            # drain thread sees it before MP_REQUEST_END can race MP_STORE_END.
             self._event_bus.publish(
                 Event(
                     event_type=EventType.MP_STORE_SUBMITTED,
@@ -454,7 +454,7 @@ class MPCacheEngine:
 
         # CPU-synchronous sentinel: a GPU retrieve is about to be enqueued.
         # Must be published via publish() (not publish_on_stream) so the
-        # drain thread sees it before MP_SESSION_END can race MP_RETRIEVE_END.
+        # drain thread sees it before MP_REQUEST_END can race MP_RETRIEVE_END.
         self._event_bus.publish(
             Event(
                 event_type=EventType.MP_RETRIEVE_SUBMITTED,
@@ -687,7 +687,6 @@ class MPCacheEngine:
                     request_id=key.request_id,
                 )
             )
-
             return
 
         # Publish lookup event via EventBus for observability subscribers.
@@ -710,6 +709,11 @@ class MPCacheEngine:
                     },
                 )
             )
+
+        # set lookup ipc key, for session manager to use and generate object keys
+        session = self.session_manager.get_or_create(key.request_id)
+        session.set_tokens(list(key.token_ids))
+        session.lookup_ipc_key = key
 
         obj_keys = ipc_key_to_object_keys(key, chunk_hashes)
 
@@ -876,13 +880,29 @@ class MPCacheEngine:
                 metadata={"request_id": request_id},
             )
         )
-        self.session_manager.remove(request_id)
+        session = self.session_manager.remove(request_id)
         self._event_bus.publish(
             Event(
-                event_type=EventType.MP_SESSION_END,
+                event_type=EventType.MP_REQUEST_END,
                 session_id=request_id,
             )
         )
+        if session is None:
+            logger.warning("Session %s not found, skipping touch", request_id)
+            return
+        if session.lookup_ipc_key is None:
+            logger.warning(
+                "Session %s has no lookup ipc key, skipping touch", request_id
+            )
+            return
+
+        chunk_hashes = [TokenHasher.hash_to_bytes(h) for h in session.get_hashes(0)]
+        obj_keys = ipc_key_to_object_keys(session.lookup_ipc_key, chunk_hashes)
+        # unified touch of all keys, which include retrieved and stored keys
+        # TODO(chunxiaozheng): when l2 is enabled, the prefetched keys from l2 are temp
+        #  and will be deleted after finish_read_prefetched, when we touch all keys,
+        #  these keys has been deleted and will not be touched.
+        self.storage_manager.touch_l1_keys(obj_keys)
 
     def report_status(self) -> dict:
         """Return a status dict for the entire cache engine."""

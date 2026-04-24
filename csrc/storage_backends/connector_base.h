@@ -214,6 +214,9 @@ class ConnectorBase : public IStorageConnector {
       }
     }
 
+    // Derived cleanup that must only run after workers have stopped.
+    on_workers_stopped();
+
     // Close eventfd
     if (efd_ >= 0) {
       ::close(efd_);
@@ -258,6 +261,7 @@ class ConnectorBase : public IStorageConnector {
     return false;  // no-op default for backward compat with plugins
   }
   virtual void shutdown_connections() {}
+  virtual void on_workers_stopped() {}
 
   bool is_stopping() const { return stop_.load(std::memory_order_acquire); }
 
