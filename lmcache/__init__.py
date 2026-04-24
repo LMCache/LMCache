@@ -15,6 +15,8 @@ except ImportError:
     __version__ = "unknown"
 
 logger = init_logger(__name__)
+from typing import Any
+
 __all__ = ["__version__", "torch_dev", "torch_device_type"]
 
 
