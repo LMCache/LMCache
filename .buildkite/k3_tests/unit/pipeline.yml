@@ -31,8 +31,8 @@ steps:
                   - { name: dshm, mountPath: /dev/shm }
                   # GDS-capable scratch dir on the host's local NVMe. Direct
                   # hostPath (no subPath) — K8s' subPath bind-mount breaks
-                  # cuFile's fs detection. TMPDIR above redirects
-                  # tempfile.mkdtemp() here.
+                  # cuFile's fs-type detection. run.sh creates a per-build
+                  # subdir here and exposes it via LMCACHE_TEST_TMPDIR.
                   - { name: scratch, mountPath: /scratch }
             volumes:
               - { name: hf-cache, hostPath: { path: /data/huggingface, type: DirectoryOrCreate } }

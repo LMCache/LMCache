@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from functools import partial
+import os
 import random
 import tempfile
 import time
@@ -22,6 +23,10 @@ from tests.v1.utils import (
 
 DEVICE_PARAMS = ["xpu"]
 BACKENDS = ["cpu", "disk"]
+
+# Optional override for tempfile root; see tests/v1/test_cache_engine.py
+# for rationale.
+_TEST_TMPDIR = os.environ.get("LMCACHE_TEST_TMPDIR") or None
 
 
 def _skip_if_no_xpu():
@@ -253,7 +258,9 @@ def create_config():
             case _:
                 raise ValueError(f"Unknown backend: {backend}")
 
-    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
+    with tempfile.TemporaryDirectory(
+        dir=_TEST_TMPDIR, ignore_cleanup_errors=True
+    ) as temp_dir:
         yield partial(make_config, path=temp_dir)
 
 

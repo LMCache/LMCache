@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from functools import partial
+import os
 import random
 import shlex
 import subprocess
@@ -21,6 +22,10 @@ from tests.v1.utils import (
     generate_kv_cache_paged_list_tensors,
     generate_tokens,
 )
+
+# Optional override for tempfile root; see tests/v1/test_cache_engine.py
+# for rationale.
+_TEST_TMPDIR = os.environ.get("LMCACHE_TEST_TMPDIR") or None
 
 
 # helper functions
@@ -90,7 +95,9 @@ def create_config():
                 print("Supported backends: 'cpu', 'disk', and 'fsconnector'")
                 raise ValueError(f"Unknown backend: {backend}")
 
-    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
+    with tempfile.TemporaryDirectory(
+        dir=_TEST_TMPDIR, ignore_cleanup_errors=True
+    ) as temp_dir:
         print("Temp dir is:", temp_dir)
         yield partial(make_config, path=temp_dir)
 

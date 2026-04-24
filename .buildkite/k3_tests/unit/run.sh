@@ -9,15 +9,21 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 cd "${REPO_ROOT}"
 
 # ── Per-build scratch dir ────────────────────────────────────
-# /scratch is a shared hostPath mount (see pipeline.yml). Give this build
-# its own subdirectory so concurrent pods can't clobber each other, and
-# clean it up on exit so /data/gds-scratch on the host doesn't grow. Using
-# a direct subdir instead of K8s subPathExpr because the latter breaks GDS
-# (cuFile rejects bind-mounted paths).
+# /scratch is a shared hostPath mount (see pipeline.yml) backed by ext4/xfs
+# on local NVMe — the only place GDS (cuFile) works in this pod (overlayfs
+# /tmp fails with CU_FILE_IO_NOT_SUPPORTED). Give this build its own
+# subdirectory so concurrent pods don't collide, and clean it up on exit.
+# Direct subdir rather than K8s subPathExpr since the latter's bind mount
+# breaks cuFile's fs-type detection.
+#
+# LMCACHE_TEST_TMPDIR is consumed by the handful of test files that need
+# GDS-capable scratch (test_gds_backend, test_cache_engine, the xpu
+# benchmarks). Leaving TMPDIR unset means /tmp stays pod-internal overlay
+# for pip/uv/build caches — those don't need direct I/O.
 BUILD_TAG="${BUILDKITE_BUILD_ID:-manual-$$}"
-export TMPDIR="/scratch/bk-${BUILD_TAG}"
-mkdir -p "${TMPDIR}"
-trap 'rm -rf "${TMPDIR}" 2>/dev/null || true' EXIT
+export LMCACHE_TEST_TMPDIR="/scratch/bk-${BUILD_TAG}"
+mkdir -p "${LMCACHE_TEST_TMPDIR}"
+trap 'rm -rf "${LMCACHE_TEST_TMPDIR}" 2>/dev/null || true' EXIT
 
 # ── Environment setup ────────────────────────────────────────
 source .buildkite/k3_harness/setup-lmcache-only-env.sh
