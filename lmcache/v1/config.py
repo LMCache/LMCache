@@ -232,7 +232,7 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
     },
     "pd_condition_poll_interval_sec": {
         "type": float,
-        "default": 0.05,
+        "default": 0.005,
         "env_converter": float,
         "description": (
             "Polling interval in seconds when waiting on a threading/asyncio "

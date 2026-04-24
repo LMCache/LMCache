@@ -7,6 +7,7 @@ import asyncio
 import os
 import threading
 import time
+import traceback
 import uuid
 
 # Third Party
@@ -30,7 +31,7 @@ from lmcache.v1.memory_management import (
     PagedCpuGpuMemoryAllocator,
 )
 from lmcache.v1.metadata import LMCacheMetadata
-from lmcache.v1.rpc_utils import get_zmq_context, get_zmq_socket
+from lmcache.v1.rpc_utils import get_zmq_context
 from lmcache.v1.storage_backend.abstract_backend import AllocatorBackendInterface
 from lmcache.v1.transfer_channel import CreateTransferChannel
 from lmcache.v1.transfer_channel.transfer_utils import get_correct_device
@@ -53,7 +54,7 @@ class AllocRequest(PDMsgBase):
     dtype: str
     last_chunk_toks: int
     # req_id is used by the receiver for per-request chunk accounting and
-    # fail-fast detection when C_req > max_inflight_chunks.  An empty string
+    # fail-fast detection when C_req > total_chunks.  An empty string
     # means the sender does not provide an identifier (backwards-compatible);
     # in that case per-request chunk accounting and fail-fast detection are
     # skipped for this allocation request.
@@ -61,6 +62,7 @@ class AllocRequest(PDMsgBase):
     # is_last_batch signals the final batch for this req_id so the receiver
     # can release admission and clean up per-request tracking.
     is_last_batch: bool = False
+    total_chunks: int = 0  # total chunks for this request (for receiver reservation)
 
 
 class AllocResponse(PDMsgBase):
@@ -80,18 +82,129 @@ class ProxyNotif(PDMsgBase):
     req_id: str  # The request id to notify the proxy
 
 
-PDMsg = Union[AllocRequest, AllocResponse, ProxyNotif]
+class CancelNotif(PDMsgBase):
+    """Sent from sender to receiver when a request is aborted."""
+
+    req_id: str
+    keys: list[str]  # keys that receiver should release
 
 
-@dataclass
-class _TransferItem:
-    """Item placed onto a per-request transfer queue."""
+PDMsg = Union[AllocRequest, AllocResponse, ProxyNotif, CancelNotif]
 
-    keys: Sequence[CacheEngineKey]
-    memory_objs: List[MemoryObj]
-    receiver_id: str
-    on_complete_callback: Optional[Callable[[CacheEngineKey], None]]
-    transfer_spec: Any
+
+class ReservationManager:
+    """
+    Manages reservation-based admission control for the receiver PD buffer.
+
+    Prevents deadlock where N concurrent requests each allocate partial chunks,
+    fill the buffer, and none can complete. When a request is admitted, its
+    total_chunks are reserved upfront. Subsequent physical allocations draw
+    from that reservation.
+
+    Used exclusively on the receiver side via asyncio primitives.
+    """
+
+    def __init__(
+        self,
+        total_chunks: int,
+        allocation_timeout: float,
+        condition_poll_interval: float,
+    ) -> None:
+        """Initialize the ReservationManager.
+
+        :param total_chunks: Total number of chunks in the buffer.
+        :param allocation_timeout: Max seconds to wait for admission.
+        :param condition_poll_interval: Poll interval for condition waits.
+        """
+        self._total_chunks = total_chunks
+        self._allocation_timeout = allocation_timeout
+        self._condition_poll_interval = condition_poll_interval
+
+        # Shared data
+        self._reservations: dict[str, int] = {}  # req_id -> reserved chunks
+        self._total_reserved: int = 0
+
+        # Asyncio variant (receiver, created lazily on receiver event loop)
+        self._async_admit_condition: asyncio.Condition | None = None
+
+    def init_async_admit_condition(self) -> None:
+        """Create asyncio.Condition bound to the current event loop.
+
+        Must be called from within the target event loop.
+        """
+        self._async_admit_condition = asyncio.Condition()
+
+    async def async_try_admit(self, req_id: str, total_chunks: int) -> bool:
+        """Async (asyncio) admission for receiver.
+
+        :param req_id: The request identifier to admit.
+        :param total_chunks: Number of chunks to reserve.
+        :return: True if admitted, False if timed out.
+        """
+        assert self._async_admit_condition is not None
+        async with self._async_admit_condition:
+            deadline = asyncio.get_running_loop().time() + self._allocation_timeout
+            while True:
+                available = self._total_chunks - self._total_reserved
+                if available >= total_chunks:
+                    self._reservations[req_id] = total_chunks
+                    self._total_reserved += total_chunks
+                    logger.debug(
+                        "[ADMIT] req=%s admitted (async), reserved=%d, "
+                        "total_reserved=%d/%d",
+                        req_id,
+                        total_chunks,
+                        self._total_reserved,
+                        self._total_chunks,
+                    )
+                    return True
+                remaining = deadline - asyncio.get_running_loop().time()
+                if remaining <= 0:
+                    logger.warning(
+                        "[ADMIT] req=%s async admission timed out: need=%d, "
+                        "available=%d, total_reserved=%d/%d",
+                        req_id,
+                        total_chunks,
+                        available,
+                        self._total_reserved,
+                        self._total_chunks,
+                    )
+                    return False
+                try:
+                    await asyncio.wait_for(
+                        self._async_admit_condition.wait(),
+                        timeout=min(remaining, self._condition_poll_interval),
+                    )
+                except asyncio.TimeoutError:
+                    pass
+
+    async def async_release_reservation(self, req_id: str) -> None:
+        """Release reservation (asyncio variant). Notifies all waiters.
+
+        :param req_id: The request identifier whose reservation to release.
+        """
+        assert self._async_admit_condition is not None
+        async with self._async_admit_condition:
+            count = self._reservations.pop(req_id, 0)
+            if count > 0:
+                self._total_reserved -= count
+                logger.debug(
+                    "[ADMIT] req=%s reservation released (async), freed=%d, "
+                    "total_reserved=%d/%d",
+                    req_id,
+                    count,
+                    self._total_reserved,
+                    self._total_chunks,
+                )
+                self._async_admit_condition.notify_all()
+
+    def get_total_chunks(self) -> int:
+        """Return the total buffer capacity in chunks.
+
+        :return: Total number of chunks this manager was initialised with.
+        :rtype: int
+        """
+        return self._total_chunks
 
 
 @dataclass
@@ -273,88 +386,54 @@ class PDBackendAsync(AllocatorBackendInterface):
         )
 
         if self.pd_config.role == "sender":
-            self._init_sender()
             self.initialized_peers: set[str] = set()
             self._peer_connection_lock = threading.Lock()
             # Separate async ZMQ context for sender coroutines
             self._async_zmq_context = zmq.asyncio.Context()
             self._async_alloc_sockets: dict[str, zmq.asyncio.Socket] = {}
             self._async_alloc_locks: dict[str, asyncio.Lock] = {}
-            # Sender staging buffer flow control: block cache_engine.store()
-            # (which runs in a vLLM worker thread) when the staging buffer is
-            # near-full so that in-flight RDMA transfers can drain before new
-            # allocations are allowed.  threading.Condition is required because
-            # allocate() is called from a worker thread, not the asyncio loop.
-            total_chunks = self._aligned_buffer_size // self._chunk_size_bytes
-            self._sender_staging_lock = threading.Lock()
-            self._sender_staging_condition = threading.Condition(
-                self._sender_staging_lock
-            )
-            self._sender_inflight_chunks = 0
-            self._sender_max_inflight_chunks = total_chunks
-            logger.info(
-                "PDBackendAsync sender: staging flow control initialized with "
-                "max_inflight=%d (total_chunks=%d)",
-                self._sender_max_inflight_chunks,
-                total_chunks,
-            )
-            # Two-level queue structure:
-            #
-            #   _receiver_req_queues:  {
-            #       "recv-1": Queue([ req-A, req-C ]),   # requests for Decoder-1
-            #       "recv-2": Queue([ req-B ]),           # requests for Decoder-2
-            #   }
-            #                          │
-            #                          ▼
-            #   _transfer_queues:  {
-            #       "req-A": Queue([ chunk1, chunk2, chunk3 ]),
-            #       "req-B": Queue([ chunk1, chunk2 ]),
-            #       "req-C": Queue([ chunk1 ]),
-            #   }
-            #
-            # A per-receiver worker picks req-A from _receiver_req_queues[recv-1],
-            # drains all its chunks from _transfer_queues["req-A"], then moves on
-            # to req-C.  A separate worker does the same for recv-2.  This lets
-            # req-B→Decoder-2 proceed concurrently with req-A→Decoder-1 (1PxD),
-            # while still guaranteeing that req-A and req-C to the same Decoder-1
-            # are serialized (preventing receiver-buffer fragmentation/deadlock).
-            #
-            # Workers are created on demand in _enqueue_transfer when a new
-            # receiver_id is first seen.
-            #
-            # Only accessed from coroutines on _sender_loop, no lock needed.
-            self._transfer_queues: dict[str, asyncio.Queue] = {}
-            self._receiver_req_queues: dict[str, asyncio.Queue] = {}
-            self._receiver_worker_tasks: dict[str, asyncio.Task] = {}
+            # Physical memory wait condition (woken when RDMA completes and
+            # ref_count_down() frees buffer slots).
+            self._staging_lock = threading.Lock()
+            self._staging_condition = threading.Condition(self._staging_lock)
+            # Per-request tracking for ProxyNotif ordering and abort.
+            # All accessed only from coroutines on _sender_loop (no extra lock).
+            self._completed_chunks: dict[str, int] = {}
+            self._req_has_last: dict[str, bool] = {}
+            self._req_total_chunks: dict[str, int] = {}
+            self._sent_keys: dict[str, list[str]] = {}
+            self._req_receiver: dict[str, str] = {}
+            self._init_sender()
         elif self.pd_config.role == "receiver":
-            self._init_receiver()
             total_chunks = self._aligned_buffer_size // self._chunk_size_bytes
-            self._max_inflight_chunks = total_chunks
-            self._inflight_chunks = 0
-            # The condition must be created on the receiver event loop
+            # Reservation-based admission control for receiver.
+            self._recv_reservation_mgr = ReservationManager(
+                total_chunks,
+                self._allocation_timeout,
+                self._condition_poll_interval,
+            )
+            # The asyncio primitives must be created on the receiver event loop.
             future = asyncio.run_coroutine_threadsafe(
-                self._create_inflight_condition(), self._recv_loop
+                self._create_recv_primitives(), self._recv_loop
             )
             future.result(timeout=5)
             logger.info(
-                "PDBackendAsync receiver: inflight flow control initialized with "
-                "max_inflight_chunks=%d (total_chunks=%d, buffer=%d bytes, "
-                "chunk=%d bytes)",
-                self._max_inflight_chunks,
+                "PDBackendAsync receiver: reservation-based admission control "
+                "initialized with total_chunks=%d "
+                "(buffer=%d bytes, chunk=%d bytes)",
                 total_chunks,
                 self._aligned_buffer_size,
                 self._chunk_size_bytes,
             )
-            # Per-request key tracking for fail-fast detection and rollback.
+            # Per-request key tracking for rollback.
             # Maps req_id → list of key strings allocated across all batches.
             self._req_allocated_keys: dict[str, list[str]] = {}
-            # Admission control: only one req_id's batches processed at a time.
-            self._admission_owner: str = ""
+            self._init_receiver()
 
         self.full_chunk_size_bytes = config.chunk_size
 
     def __str__(self):
-        return self.__class__.__name__
+        return "PDBackend"
 
     def initialize_allocator(
         self, config: LMCacheEngineConfig, metadata: LMCacheMetadata
@@ -475,79 +554,31 @@ class PDBackendAsync(AllocatorBackendInterface):
         alloc_type = "cpu" if self.corrected_device == "cpu" else "gpu"
 
         if self.pd_config.role == "sender":
-            # Single unified loop: flow-control check and allocation attempt are
-            # combined so a thread can never pass flow control only to have
-            # another thread steal the last memory slot before it allocates.
-            #
-            # The loop body, executed under _sender_staging_condition, does:
-            #   1. Check running flag — exit immediately on shutdown.
-            #   2. Check flow-control threshold — only attempt allocation when
-            #      inflight_chunks < max; otherwise fall through to wait.
-            #   3. Attempt allocation — on success, increment the counter and
-            #      return; the check + allocate + increment form an atomic unit
-            #      protected by the condition lock.
-            #   4. Wait — either the threshold is exceeded or allocation failed
-            #      (fragmentation / pool exhausted).  In both cases we wait for
-            #      _release_sender_staging_chunks to call notify_all().
-            #
-            # Flow-control waits are not counted against the allocation deadline:
-            # they loop back to the top and re-check the threshold, so a long
-            # backpressure pause does not consume the 5-second allocation budget.
-            # Once the threshold is satisfied we start a fresh deadline for the
-            # actual allocation attempts.
-            with self._sender_staging_condition:
-                # deadline is initialised here and reset whenever backpressure
-                # is active so that flow-control waits do not consume the
-                # allocation budget.
-                deadline: float = time.monotonic() + self._allocation_timeout
-                last_near_full_log = 0.0
+            # Fast path: try allocation immediately.
+            mem_obj = self.memory_allocator.allocate(
+                shapes, dtypes, fmt=fmt, allocator_type=alloc_type
+            )
+            if mem_obj is not None:
+                return mem_obj
+            # Slow path: staging buffer physically full; wait for RDMA
+            # completions to free slots.  _notify_staging_freed() wakes us
+            # whenever ref_count_down() returns a slot.
+            deadline = time.monotonic() + self._allocation_timeout
+            with self._staging_condition:
                 while True:
                     if not self.running:
                         return None
-
-                    at_threshold = (
-                        self._sender_inflight_chunks >= self._sender_max_inflight_chunks
-                    )
-
-                    if at_threshold:
-                        # Log near-full warning at most once per second to avoid
-                        # spamming.
-                        now = time.monotonic()
-                        if now - last_near_full_log >= 1.0:
-                            logger.warning(
-                                "Sender staging buffer near-full: "
-                                "inflight_chunks=%d >= max=%d, waiting for "
-                                "transfers to complete...",
-                                self._sender_inflight_chunks,
-                                self._sender_max_inflight_chunks,
-                            )
-                            last_near_full_log = now
-                        # Reset the allocation deadline so that once
-                        # backpressure clears the thread gets a fresh
-                        # 5-second window for actual allocation attempts.
-                        deadline = time.monotonic() + self._allocation_timeout
-                        self._sender_staging_condition.wait(
-                            timeout=self._condition_poll_interval
-                        )
-                        continue
-
-                    # Under threshold: attempt allocation.  deadline is always
-                    # a valid float at this point (set above or reset in the
-                    # at_threshold branch on a previous iteration).
                     mem_obj = self.memory_allocator.allocate(
                         shapes, dtypes, fmt=fmt, allocator_type=alloc_type
                     )
                     if mem_obj is not None:
-                        self._sender_inflight_chunks += 1
                         return mem_obj
-
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
                         break
-                    self._sender_staging_condition.wait(
+                    self._staging_condition.wait(
                         timeout=min(remaining, self._condition_poll_interval)
                     )
-
             logger.error("Sender staging allocation failed after timeout")
             return None
         else:
@@ -630,15 +661,24 @@ class PDBackendAsync(AllocatorBackendInterface):
     ############################################################
     # Prefiller functions
     ############################################################
-    def _init_sender(self):
+    def _init_sender(self) -> None:
+        """Initialize sender-side sockets and locks on the sender event loop."""
         proxy_url = f"{self.pd_config.proxy_host}:{self.pd_config.proxy_port}"
-        self.proxy_side_channel = get_zmq_socket(
-            self.zmq_context,
-            proxy_url,
-            "tcp",
-            zmq.PUSH,
-            "connect",
+        future = asyncio.run_coroutine_threadsafe(
+            self._async_init_proxy_socket(proxy_url),
+            self._sender_loop,
         )
+        future.result(timeout=10)
+
+    async def _async_init_proxy_socket(self, proxy_url: str) -> None:
+        """Create the async ZMQ PUSH socket for ProxyNotif messages.
+
+        Must run on the sender event loop so the socket is loop-bound.
+
+        :param proxy_url: The proxy host:port string.
+        """
+        self._async_proxy_socket = self._async_zmq_context.socket(zmq.PUSH)
+        self._async_proxy_socket.connect(f"tcp://{proxy_url}")
         self._proxy_send_lock = asyncio.Lock()
 
     def _ensure_peer_connection(
@@ -696,8 +736,14 @@ class PDBackendAsync(AllocatorBackendInterface):
         self._async_alloc_sockets[receiver_id] = async_alloc_socket
 
     async def _async_remote_allocate(
-        self, receiver_id: str, alloc_request: AllocRequest
+        self, receiver_id: str, alloc_request: "Union[AllocRequest, CancelNotif]"
     ) -> AllocResponse:
+        """Send an allocation or cancellation request to the remote receiver.
+
+        :param receiver_id: The remote receiver identifier.
+        :param alloc_request: AllocRequest for allocation or CancelNotif for abort.
+        :return: AllocResponse from the receiver.
+        """
         if receiver_id not in self._async_alloc_locks:
             self._async_alloc_locks[receiver_id] = asyncio.Lock()
         async with self._async_alloc_locks[receiver_id]:
@@ -714,6 +760,7 @@ class PDBackendAsync(AllocatorBackendInterface):
         mem_objs: List[MemoryObj],
         req_id: str = "",
         is_last_batch: bool = False,
+        total_chunks: int = 0,
     ) -> AllocRequest:
         """
         Get the allocation request given the keys and memory objects.
@@ -742,6 +789,7 @@ class PDBackendAsync(AllocatorBackendInterface):
             last_chunk_toks=last_chunk_toks,
             req_id=req_id,
             is_last_batch=is_last_batch,
+            total_chunks=total_chunks,
         )
 
     async def _async_transfer_task(
@@ -752,24 +800,21 @@ class PDBackendAsync(AllocatorBackendInterface):
         on_complete_callback: Optional[Callable[[CacheEngineKey], None]],
         transfer_spec: Any = None,
     ) -> None:
-        """
-        Async coroutine that performs the full KV transfer:
-        remote alloc → async_batched_write → ref_count_down → callback.
-        Runs in the dedicated sender event loop (_sender_loop).
+        """Perform a single-batch KV transfer: remote alloc → RDMA write → callbacks.
 
-        ``remote_indexes`` has one entry per key (1:1 with memory_objs).
-        A value of ``-1`` means allocation failed on the receiver; in that
-        case the entire request is aborted — all local objects are released
-        and no RDMA write or ProxyNotif is sent.
+        Runs as an independent concurrent coroutine on _sender_loop. Multiple
+        batches for the same request may execute concurrently. ProxyNotif is
+        sent only after ALL batches for a request have completed.
+
+        :param keys: Cache keys for this batch.
+        :param memory_objs: Memory objects to transfer (already ref_count_up'd).
+        :param receiver_id: Remote receiver identifier.
+        :param on_complete_callback: Optional per-key completion callback.
+        :param transfer_spec: Carries req_id, is_last_prefill, etc.
         """
         completed_indexes: set[int] = set()
         num_chunks = len(memory_objs)
 
-        # Extract req_id for per-request allocation accounting on the receiver.
-        # Using getattr with a default of "" keeps this backwards-compatible with
-        # any transfer_spec that pre-dates the req_id field.  An empty string
-        # causes the receiver to skip per-request chunk counting (no fail-fast
-        # detection), which is acceptable for legacy callers.
         req_id: str = (
             getattr(transfer_spec, "req_id", "") if transfer_spec is not None else ""
         )
@@ -779,18 +824,37 @@ class PDBackendAsync(AllocatorBackendInterface):
             else False
         )
 
+        # Track which receiver this request is going to (for abort).
+        if req_id:
+            self._req_receiver[req_id] = receiver_id
+
+        # Lazily initialize per-request tracking on first batch seen by the
+        # sender loop.
+        if req_id and req_id not in self._req_total_chunks:
+            tc = (
+                getattr(transfer_spec, "total_chunks", 0)
+                if transfer_spec is not None
+                else 0
+            )
+            self._req_total_chunks[req_id] = tc
+            self._completed_chunks[req_id] = 0
+            self._req_has_last[req_id] = False
+            self._sent_keys[req_id] = []
+
         try:
             alloc_request = self._get_remote_alloc_request(
-                keys, memory_objs, req_id=req_id, is_last_batch=is_last_batch
+                keys,
+                memory_objs,
+                req_id=req_id,
+                is_last_batch=is_last_batch,
+                total_chunks=self._req_total_chunks.get(req_id, 0),
             )
             alloc_response = await self._async_remote_allocate(
                 receiver_id, alloc_request
             )
             remote_indexes = alloc_response.remote_indexes
 
-            # Abort the whole request if any slot failed to allocate.
-            # The decoder requires all chunks before it can start consuming;
-            # a partial transfer wastes receiver buffer and can never complete.
+            # Abort if any remote slot failed to allocate.
             for idx, (mem_obj, remote_addr) in enumerate(
                 zip(memory_objs, remote_indexes, strict=True)
             ):
@@ -818,32 +882,37 @@ class PDBackendAsync(AllocatorBackendInterface):
                 )
                 for idx, mem_obj in enumerate(memory_objs):
                     if idx not in completed_indexes:
+                        before = mem_obj.get_ref_count()
                         mem_obj.ref_count_down()
-                        completed_indexes.add(idx)
-
-            # Send ProxyNotif if this is the last prefill chunk, BEFORE invoking
-            # on_complete_callback.  The worker processes chunks sequentially,
-            # so all prior chunks have already completed by the time we reach
-            # this point.  Sending here (inside _async_transfer_task) guarantees
-            # the notification is observable the moment the callback fires.
-            is_last_prefill = transfer_spec is not None and getattr(
-                transfer_spec, "is_last_prefill", False
-            )
-            if is_last_prefill:
-                try:
-                    notif_msg = ProxyNotif(req_id=transfer_spec.req_id)
-                    notif_msg_bytes = msgspec.msgpack.encode(notif_msg)
-                    async with self._proxy_send_lock:
-                        loop = asyncio.get_running_loop()
-                        await loop.run_in_executor(
-                            None, self.proxy_side_channel.send, notif_msg_bytes
+                        logger.debug(
+                            "[SENDER] chunk %d ref_count: %d -> %d",
+                            idx,
+                            before,
+                            before - 1,
                         )
-                except Exception as e:
-                    logger.error(
-                        "Failed to send ProxyNotif for req %s: %s",
-                        transfer_spec.req_id,
-                        e,
-                    )
+                        completed_indexes.add(idx)
+                logger.debug(
+                    "[SENDER] req=%s batch done, freed %d chunks, free_chunks=%d",
+                    req_id,
+                    num_chunks,
+                    self._get_free_chunks(),
+                )
+            # Track sent keys for abort cleanup.
+            if req_id:
+                sent = self._sent_keys.setdefault(req_id, [])
+                sent.extend(k.to_string() for k in keys)
+
+            # Update per-request completion tracking.
+            if req_id:
+                self._completed_chunks[req_id] = (
+                    self._completed_chunks.get(req_id, 0) + num_chunks
+                )
+                if is_last_batch:
+                    self._req_has_last[req_id] = True
+                await self._check_and_send_proxy_notif(req_id, transfer_spec)
+            elif is_last_batch:
+                # Legacy path: no req_id, send ProxyNotif immediately.
+                await self._send_proxy_notif(transfer_spec)
 
             if on_complete_callback is not None:
                 for key in keys:
@@ -851,250 +920,89 @@ class PDBackendAsync(AllocatorBackendInterface):
                         on_complete_callback(key)
                     except Exception as e:
                         logger.warning(
-                            f"on_complete_callback failed for key {key}: {e}"
+                            "on_complete_callback failed for key %s: %s", key, e
                         )
         except BaseException as e:
             if not isinstance(e, asyncio.CancelledError):
-                logger.error("Async transfer task failed: %s", str(e))
-            # Release ref counts on error to avoid leaks (only those not yet released)
+                logger.error(
+                    "Async transfer task failed: %s\n%s",
+                    str(e),
+                    traceback.format_exc(),
+                )
             for idx, mem_obj in enumerate(memory_objs):
                 if idx not in completed_indexes:
                     try:
                         mem_obj.ref_count_down()
                     except Exception:
                         pass
+            # Update completion tracking even on error so ProxyNotif
+            # doesn't stall waiting for a batch that errored out.
+            if req_id and not isinstance(e, asyncio.CancelledError):
+                self._completed_chunks[req_id] = (
+                    self._completed_chunks.get(req_id, 0) + num_chunks
+                )
+                if is_last_batch:
+                    self._req_has_last[req_id] = True
+                await self._check_and_send_proxy_notif(req_id, transfer_spec)
             if isinstance(e, asyncio.CancelledError):
                 raise
         finally:
-            # Release sender staging buffer slots so that allocate() waiters
-            # can proceed.  num_chunks equals the number of memory objects that
-            # were allocated from the staging buffer via allocate().
-            self._release_sender_staging_chunks(num_chunks)
+            self._notify_staging_freed()
 
-    def _release_sender_staging_chunks(self, count: int) -> None:
-        """Decrement sender staging inflight counter and notify waiters.
+    def _notify_staging_freed(self) -> None:
+        """Wake threads blocked in allocate() so they can retry after RDMA frees memory.
 
-        Called from ``_async_transfer_task`` (asyncio) after all staging
-        buffers for a transfer have been freed via ``ref_count_down()``.
-        ``threading.Condition.notify_all()`` is non-blocking and safe to call
-        from an asyncio coroutine.
-
-        :param count: Number of staging slots to release.
+        Called from _async_transfer_task finally block (on sender event loop)
+        after ref_count_down() has returned buffer slots to the allocator.
+        threading.Condition.notify_all() is non-blocking and safe to call from
+        an asyncio coroutine.
         """
-        if self.pd_config.role == "sender" and count > 0:
-            with self._sender_staging_condition:
-                self._sender_inflight_chunks = max(
-                    0, self._sender_inflight_chunks - count
-                )
-                self._sender_staging_condition.notify_all()
+        if self.pd_config.role == "sender":
+            with self._staging_condition:
+                self._staging_condition.notify_all()
 
-    async def _enqueue_transfer(
-        self,
-        keys: Sequence[CacheEngineKey],
-        memory_objs: List[MemoryObj],
-        receiver_id: str,
-        on_complete_callback: Optional[Callable[[CacheEngineKey], None]],
-        transfer_spec: Any,
+    async def _check_and_send_proxy_notif(
+        self, req_id: str, transfer_spec: Any
     ) -> None:
-        """Enqueue a transfer item onto the per-request asyncio.Queue.
+        """Send ProxyNotif once all RDMA batches for req_id are complete.
 
-        If no queue exists for the request yet, one is created and the req_id
-        is placed onto the per-receiver FIFO queue so the receiver's worker
-        will process it.  Within a single receiver, requests are serialized in
-        FIFO order (one request fully occupies the decoder buffer at a time,
-        preventing fragmentation/deadlock).  Requests to *different* receivers
-        are handled by independent workers and proceed concurrently (1PxD).
+        Fires only when both conditions hold:
+        1. All reserved chunks have completed RDMA (completed >= total), OR
+           total_chunks==0 (legacy sender without reservation).
+        2. The is_last_prefill batch has been seen (_req_has_last is True).
 
-        Workers are created on demand: the first time a new receiver_id is
-        seen a worker task is started; if an existing worker has already
-        finished (e.g. after draining all queued requests) a new one is
-        started transparently.
-
-        Must be called as a coroutine on ``_sender_loop`` (via
-        ``asyncio.run_coroutine_threadsafe``).  All dict accesses are therefore
-        single-threaded on the event loop.
-
-        :param keys: Cache keys for this transfer batch.
-        :param memory_objs: Memory objects to transfer.
-        :param receiver_id: Identifier of the remote receiver.
-        :param on_complete_callback: Optional per-key completion callback.
-        :param transfer_spec: Transfer specification (carries ``req_id`` and
-            ``is_last_prefill``).
+        :param req_id: The request identifier.
+        :param transfer_spec: Used to extract req_id for the notification.
         """
-        req_id: str = (
-            getattr(transfer_spec, "req_id", "unknown")
-            if transfer_spec is not None
-            else "unknown"
-        )
-        if req_id not in self._transfer_queues:
-            q: asyncio.Queue[_TransferItem] = asyncio.Queue()
-            self._transfer_queues[req_id] = q
-            # Ensure a per-receiver queue exists and register this req_id.
-            if receiver_id not in self._receiver_req_queues:
-                self._receiver_req_queues[receiver_id] = asyncio.Queue()
-            await self._receiver_req_queues[receiver_id].put(req_id)
-            # Start (or restart) the per-receiver worker if needed.
-            existing = self._receiver_worker_tasks.get(receiver_id)
-            if existing is None or existing.done():
-                self._receiver_worker_tasks[receiver_id] = asyncio.create_task(
-                    self._receiver_req_worker(receiver_id)
-                )
-        item = _TransferItem(
-            keys=keys,
-            memory_objs=memory_objs,
-            receiver_id=receiver_id,
-            on_complete_callback=on_complete_callback,
-            transfer_spec=transfer_spec,
-        )
-        self._transfer_queues[req_id].put_nowait(item)
+        total = self._req_total_chunks.get(req_id, 0)
+        completed = self._completed_chunks.get(req_id, 0)
+        has_last = self._req_has_last.get(req_id, False)
 
-    async def _drain_transfer_queue(
-        self, req_id: str, q: "asyncio.Queue[_TransferItem]"
-    ) -> None:
-        """Drain remaining items from a per-request transfer queue after failure.
+        if has_last and (total == 0 or completed >= total):
+            await self._send_proxy_notif(transfer_spec)
+            # Release sender reservation now that RDMA is complete.
+            # Clean up per-request state.
+            self._completed_chunks.pop(req_id, None)
+            self._req_has_last.pop(req_id, None)
+            self._req_total_chunks.pop(req_id, None)
+            self._sent_keys.pop(req_id, None)
+            self._req_receiver.pop(req_id, None)
 
-        Releases ref counts on all memory objects to prevent memory leaks and
-        releases sender staging chunks to unblock allocate() waiters.
+    async def _send_proxy_notif(self, transfer_spec: Any) -> None:
+        """Encode and send a ProxyNotif to the proxy side channel.
 
-        :param req_id: The request identifier (used for logging).
-        :param q: The asyncio.Queue to drain.
+        :param transfer_spec: Provides the req_id for the notification.
         """
-        drained = 0
-        while not q.empty():
-            try:
-                item = q.get_nowait()
-            except asyncio.QueueEmpty:
-                break
-            for mem_obj in item.memory_objs:
-                try:
-                    mem_obj.ref_count_down()
-                except Exception as e:
-                    logger.warning(
-                        "ref_count_down() failed during drain for req %s: %s",
-                        req_id,
-                        e,
-                    )
-            self._release_sender_staging_chunks(len(item.memory_objs))
-            q.task_done()
-            drained += 1
-        if drained > 0:
-            logger.warning(
-                "Drained %d remaining transfer items for req %s after failure.",
-                drained,
-                req_id,
-            )
-
-    async def _receiver_req_worker(self, receiver_id: str) -> None:
-        """Per-receiver FIFO worker: process one request at a time for a receiver.
-
-        Pulls req_ids from ``_receiver_req_queues[receiver_id]`` in arrival
-        order and drains each request's per-request transfer queue serially
-        until the item flagged with ``is_last_prefill=True`` is processed.
-        Only then is the next req_id dequeued.
-
-        This prevents receiver-buffer fragmentation: at most one request's
-        chunks occupy a given decoder's buffer at any time, guaranteeing that
-        the decoder can always find a complete request to process.  Having
-        independent workers per receiver means req-A→Decoder-1 and
-        req-B→Decoder-2 proceed concurrently (1PxD), while req-A and req-C
-        to the same Decoder-1 remain serialized.
-
-        If a transfer fails mid-request, remaining items are drained (ref
-        counts released) and the worker moves on to the next request.
-
-        On ANY exit (including CancelledError), the outer finally block drains
-        all remaining transfer queues for this receiver to prevent memory leaks.
-
-        :param receiver_id: Identifier of the remote receiver this worker
-            services.
-        """
-        req_queue = self._receiver_req_queues[receiver_id]
-        # Collect req_ids belonging to this receiver for cleanup in finally.
-        receiver_req_ids: set[str] = set()
+        req_id = getattr(transfer_spec, "req_id", "") if transfer_spec else ""
+        if not req_id:
+            return
         try:
-            while True:
-                try:
-                    req_id: str = await req_queue.get()
-                except asyncio.CancelledError:
-                    return
-
-                receiver_req_ids.add(req_id)
-                q = self._transfer_queues.get(req_id)
-                if q is None:
-                    # Queue was removed before we could process it — skip.
-                    continue
-
-                try:
-                    while True:
-                        try:
-                            item: _TransferItem = await asyncio.wait_for(
-                                q.get(),
-                                timeout=self._allocation_timeout * 2,
-                            )
-                        except asyncio.TimeoutError:
-                            logger.error(
-                                "Timed out waiting for next chunk of req %s "
-                                "(no chunk arrived within %.1fs). "
-                                "Sender may have crashed. Draining and moving on.",
-                                req_id,
-                                self._allocation_timeout * 2,
-                            )
-                            await self._drain_transfer_queue(req_id, q)
-                            break
-                        except asyncio.CancelledError:
-                            return
-
-                        transfer_failed = False
-                        try:
-                            await self._async_transfer_task(
-                                keys=item.keys,
-                                memory_objs=item.memory_objs,
-                                receiver_id=item.receiver_id,
-                                on_complete_callback=item.on_complete_callback,
-                                transfer_spec=item.transfer_spec,
-                            )
-                        except Exception as e:
-                            logger.error(
-                                "Transfer worker error for req %s: %s. "
-                                "Aborting remaining transfers for this request.",
-                                req_id,
-                                e,
-                            )
-                            transfer_failed = True
-                        finally:
-                            q.task_done()
-
-                        is_last = item.transfer_spec is not None and getattr(
-                            item.transfer_spec, "is_last_prefill", False
-                        )
-                        if transfer_failed:
-                            # Drain remaining items and release their memory.
-                            await self._drain_transfer_queue(req_id, q)
-                            break
-                        if is_last:
-                            break
-                finally:
-                    # Drain any remaining items to prevent memory leaks on
-                    # unexpected exit (e.g. CancelledError between the try and
-                    # the is_last check).
-                    await self._drain_transfer_queue(req_id, q)
-                    self._transfer_queues.pop(req_id, None)
-                    receiver_req_ids.discard(req_id)
-        finally:
-            # Drain any req_ids still in the per-receiver queue that we never
-            # processed (e.g. enqueued during shutdown after our last get()).
-            while True:
-                try:
-                    remaining_id = req_queue.get_nowait()
-                    receiver_req_ids.add(remaining_id)
-                except asyncio.QueueEmpty:
-                    break
-            # On ANY exit (including CancelledError), drain all remaining
-            # transfer queues for this receiver to prevent memory leaks.
-            for remaining_req_id in receiver_req_ids:
-                remaining_q = self._transfer_queues.pop(remaining_req_id, None)
-                if remaining_q is not None:
-                    await self._drain_transfer_queue(remaining_req_id, remaining_q)
+            notif_msg = ProxyNotif(req_id=req_id)
+            notif_msg_bytes = msgspec.msgpack.encode(notif_msg)
+            async with self._proxy_send_lock:
+                await self._async_proxy_socket.send(notif_msg_bytes)
+        except Exception as e:
+            logger.error("Failed to send ProxyNotif for req %s: %s", req_id, e)
 
     def batched_submit_put_task(
         self,
@@ -1103,11 +1011,16 @@ class PDBackendAsync(AllocatorBackendInterface):
         transfer_spec: Any = None,
         on_complete_callback: Optional[Callable[[CacheEngineKey], None]] = None,
     ) -> None:
-        """
-        Submit batched put tasks to transfer KV caches to peer.
+        """Submit a transfer batch as a concurrent coroutine on the sender loop.
 
-        :param on_complete_callback: Optional callback invoked once per key
-            after the transfer completes. Callback exceptions are caught and logged.
+        Each batch runs as an independent concurrent coroutine — no per-receiver
+        serialization. ProxyNotif is sent after all batches for a request
+        complete (tracked via _completed_chunks and _req_has_last).
+
+        :param keys: Cache keys for this batch.
+        :param memory_objs: Memory objects to transfer.
+        :param transfer_spec: Transfer specification (carries req_id, etc.).
+        :param on_complete_callback: Optional per-key completion callback.
         """
         for mem_obj in memory_objs:
             mem_obj.ref_count_up()
@@ -1125,12 +1038,8 @@ class PDBackendAsync(AllocatorBackendInterface):
                 receiver_alloc_port=receiver_alloc_port,
             )
 
-            # Schedule via _enqueue_transfer so the item is placed on the
-            # per-request asyncio.Queue.  The dedicated consumer coroutine
-            # processes items sequentially, guaranteeing in-order RDMA writes and
-            # sending ProxyNotif only after all chunks are complete.
             asyncio.run_coroutine_threadsafe(
-                self._enqueue_transfer(
+                self._async_transfer_task(
                     keys=list(keys),
                     memory_objs=list(memory_objs),
                     receiver_id=receiver_id,
@@ -1140,7 +1049,6 @@ class PDBackendAsync(AllocatorBackendInterface):
                 self._sender_loop,
             )
         except Exception as e:
-            # Roll back ref counts to prevent memory leak
             for mem_obj in memory_objs:
                 try:
                     mem_obj.ref_count_down()
@@ -1151,6 +1059,53 @@ class PDBackendAsync(AllocatorBackendInterface):
             )
             raise
 
+    def cancel_request(self, req_id: str) -> None:
+        """Cancel an in-flight or pending request.
+
+        Wakes staging allocate() waiters and schedules cleanup on
+        the sender event loop.
+
+        :param req_id: The request identifier to cancel.
+        """
+        logger.info("[CANCEL] req=%s cancel_request called", req_id)
+        if hasattr(self, "_staging_condition"):
+            with self._staging_condition:
+                self._staging_condition.notify_all()
+        if hasattr(self, "_sender_loop"):
+            asyncio.run_coroutine_threadsafe(
+                self._abort_request(req_id), self._sender_loop
+            )
+
+    async def _abort_request(self, req_id: str) -> None:
+        """Clean up request state and notify receiver of cancellation.
+
+        Sends CancelNotif to the receiver so it can release allocated
+        keys and reservation. Then clears all per-request tracking.
+
+        :param req_id: The request identifier to abort.
+        """
+        logger.info("[ABORT] req=%s _abort_request starting", req_id)
+        sent_keys = self._sent_keys.get(req_id, [])
+        if sent_keys:
+            receiver_id = self._req_receiver.get(req_id)
+            if receiver_id:
+                try:
+                    cancel_notif = CancelNotif(req_id=req_id, keys=sent_keys)
+                    await self._async_remote_allocate(receiver_id, cancel_notif)
+                except Exception as e:
+                    logger.warning(
+                        "[ABORT] req=%s failed to send CancelNotif: %s",
+                        req_id,
+                        e,
+                    )
+
+        # Clean up per-request state.
+        self._completed_chunks.pop(req_id, None)
+        self._req_has_last.pop(req_id, None)
+        self._req_total_chunks.pop(req_id, None)
+        self._sent_keys.pop(req_id, None)
+        self._req_receiver.pop(req_id, None)
+
     ############################################################
     # Prefiller functions end
     ############################################################
@@ -1158,16 +1113,18 @@ class PDBackendAsync(AllocatorBackendInterface):
     ############################################################
     # Decoder functions
     ############################################################
-    async def _create_inflight_condition(self) -> None:
-        """Create asyncio.Conditions for inflight flow control and admission control.
+    async def _create_recv_primitives(self) -> None:
+        """Create asyncio primitives bound to the receiver event loop.
 
-        Must be called from within the receiver event loop so that the
-        Conditions are bound to the correct loop.
+        Must be called from within the receiver event loop.
         """
-        self._inflight_condition = asyncio.Condition()
-        self._admission_condition = asyncio.Condition()
         self._router_send_lock = asyncio.Lock()
         self._pending_alloc_tasks: set[asyncio.Task] = set()
+        # Initialize the async condition for reservation-based admission.
+        self._recv_reservation_mgr.init_async_admit_condition()
+        # Condition notified when remove() frees a chunk, allowing blocked
+        # allocation retries to wake up immediately instead of polling.
+        self._alloc_freed_condition: asyncio.Condition = asyncio.Condition()
 
     def _init_receiver(self):
         """
@@ -1226,33 +1183,52 @@ class PDBackendAsync(AllocatorBackendInterface):
         identity: bytes,
         payload: bytes,
     ) -> None:
-        """Handle a single allocation request from a sender.
+        """Handle a single allocation or cancellation request from a sender.
 
-        Runs as an independent coroutine so that multiple requests from
-        different senders can be processed concurrently. Admission control
-        inside ``_async_allocate_and_put`` ensures only one req_id allocates
-        memory at a time, but blocking on admission no longer prevents the
-        ROUTER socket from receiving other messages.
+        Dispatches AllocRequest to _async_allocate_and_put. CancelNotif
+        releases allocated keys and the receiver reservation for the request.
 
-        On any exception (including allocation failures), an error response
-        with all ``-1`` remote_indexes is sent back so the sender is never
-        left waiting indefinitely on ``recv_multipart``.
+        On any exception, sends an error AllocResponse so the sender is
+        never left waiting on recv_multipart.
 
         :param socket: The ROUTER socket to send the response on.
-        :param identity: The sender identity frame returned by ROUTER.
-        :param payload: The raw msgpack-encoded AllocRequest bytes.
+        :param identity: The sender identity frame.
+        :param payload: The raw msgpack-encoded message bytes.
         """
         n_keys = 0
         try:
-            alloc_req = msgspec.msgpack.decode(payload, type=PDMsg)
-            assert isinstance(alloc_req, AllocRequest), (
-                "The request from the remote peer is not an AllocRequest"
-            )
-            n_keys = len(alloc_req.keys)
-            # NOTE: it's okay to put the memory objs into the storage backend
-            # first because decode vllm will not be able to see the decode
-            # request until proxy receives the ack.
-            alloc_resp = await self._async_allocate_and_put(alloc_req)
+            msg = msgspec.msgpack.decode(payload, type=PDMsg)
+
+            if isinstance(msg, CancelNotif):
+                # Release keys and reservation for the cancelled request.
+                req_id = msg.req_id
+                for key_str in msg.keys:
+                    try:
+                        key = CacheEngineKey.from_string(key_str)
+                        self.remove(key)
+                    except Exception as exc:
+                        logger.warning(
+                            "Failed to remove key %s during cancel for req %s: %s",
+                            key_str,
+                            req_id,
+                            exc,
+                        )
+                await self._recv_reservation_mgr.async_release_reservation(req_id)
+                self._req_allocated_keys.pop(req_id, None)
+                # Send a no-op response so the sender's recv_multipart unblocks.
+                resp = AllocResponse(remote_indexes=[])
+                async with self._router_send_lock:
+                    await socket.send_multipart(
+                        [identity, b"", msgspec.msgpack.encode(resp)]
+                    )
+                return
+
+            if not isinstance(msg, AllocRequest):
+                raise ValueError(
+                    f"Expected AllocRequest from remote peer, got {type(msg).__name__}"
+                )
+            n_keys = len(msg.keys)
+            alloc_resp = await self._async_allocate_and_put(msg)
             resp_bytes = msgspec.msgpack.encode(alloc_resp)
             async with self._router_send_lock:
                 await socket.send_multipart([identity, b"", resp_bytes])
@@ -1264,8 +1240,6 @@ class PDBackendAsync(AllocatorBackendInterface):
                 identity,
                 str(e),
             )
-            # Send an error response so the sender is not left hanging
-            # forever on recv_multipart().
             try:
                 error_resp = AllocResponse(remote_indexes=[-1] * max(n_keys, 1))
                 async with self._router_send_lock:
@@ -1278,147 +1252,74 @@ class PDBackendAsync(AllocatorBackendInterface):
     async def _async_allocate_and_put(
         self, alloc_request: AllocRequest
     ) -> AllocResponse:
-        """
-        Async version of _allocate_and_put.
-        Uses event-driven waiting on ``_inflight_condition`` instead of
-        ``asyncio.sleep`` polling so the event loop stays responsive while
-        waiting for free memory.
-        pin=False: PDBackendAsync has no eviction; pinning is unnecessary and
-        causes ref_count leaks.
+        """Allocate remote memory slots and register KV objects.
 
-        ``remote_indexes`` has exactly one entry per key in the request.
+        Uses reservation-based admission: on the first batch for a request,
+        reserves total_chunks upfront so the buffer is never over-committed.
+        Subsequent batches draw against the existing reservation.
 
-        Error semantics:
-        - Fail-fast (cumulative chunks > max_inflight_chunks): raises
-          ``RuntimeError`` immediately; no rollback is performed.
-        - Allocator timeout (allocate() returns None after
-          ``self._allocation_timeout`` seconds): raises ``RuntimeError``;
-          already-allocated chunks in the current batch are rolled back via
-          ``remove()`` to prevent memory and inflight counter leaks.
-        - Backpressure wait (inflight >= max_inflight_chunks): indefinite
-          while ``self.running``.  The sender will not submit new chunks
-          until the decoder frees some, so this wait is expected to resolve.
+        :param alloc_request: The allocation request from the sender.
+        :return: AllocResponse with one remote_index per key (-1 on failure).
+        :raises RuntimeError: On fail-fast overflow or allocation timeout.
         """
         total_allocs = len(alloc_request.keys)
         req_id = alloc_request.req_id
 
-        # Admission control: ensure only one req_id's batches are processed at
-        # a time, preventing multi-sender interleaving deadlock.
-        # Skip entirely for legacy senders that provide no req_id.
-        #
-        # Timeout guard: if the current admission owner's Sender crashes
-        # before sending is_last_batch=True, _admission_owner would never
-        # be cleared.  After ``_allocation_timeout`` seconds we forcibly
-        # evict the stale owner so subsequent requests can proceed.
-        if req_id:
-            async with self._admission_condition:
-                deadline = asyncio.get_running_loop().time() + self._allocation_timeout
-                while self._admission_owner and self._admission_owner != req_id:
-                    if not self.running:
-                        raise RuntimeError(
-                            f"Receiver shutting down while req {req_id} "
-                            f"waits for admission (owner={self._admission_owner})"
-                        )
-                    remaining = deadline - asyncio.get_running_loop().time()
-                    if remaining <= 0:
-                        stale_owner = self._admission_owner
-                        logger.warning(
-                            "Admission wait timed out for req %s after "
-                            "%.1fs (stale owner=%s). Forcibly evicting "
-                            "stale owner — its Sender likely crashed.",
-                            req_id,
-                            self._allocation_timeout,
-                            stale_owner,
-                        )
-                        # Clean up stale owner's per-request tracking to
-                        # prevent the fail-fast check from accumulating
-                        # ghost chunk counts.
-                        self._req_allocated_keys.pop(stale_owner, None)
-                        # Fall through to claim admission below.
-                        break
-                    try:
-                        await asyncio.wait_for(
-                            self._admission_condition.wait(),
-                            timeout=min(remaining, self._condition_poll_interval),
-                        )
-                    except asyncio.TimeoutError:
-                        pass
-                self._admission_owner = req_id
+        # Reservation-based admission: admit on first batch for this req_id.
+        is_first_batch = req_id and (req_id not in self._req_allocated_keys)
+        if is_first_batch:
+            if alloc_request.total_chunks == 0:
+                raise RuntimeError(
+                    f"Receiver requires total_chunks > 0 for req {req_id}. "
+                    f"Legacy senders (total_chunks=0) are no longer supported."
+                )
+            admitted = await self._recv_reservation_mgr.async_try_admit(
+                req_id, alloc_request.total_chunks
+            )
+            if not admitted:
+                raise RuntimeError(
+                    f"Receiver reservation admission timed out or was aborted "
+                    f"for req {req_id} (total_chunks={alloc_request.total_chunks}). "
+                    f"Buffer may be over-subscribed."
+                )
 
-        async def _release_admission() -> None:
-            """Clear the admission owner and notify all waiting coroutines.
-
-            No-op when req_id is empty (legacy senders without a req_id).
-            """
-            if req_id:
-                async with self._admission_condition:
-                    self._admission_owner = ""
-                    self._admission_condition.notify_all()
-
-        # Fail-fast: detect if this request can never complete because it
-        # requires more chunks than the decoder buffer can ever hold at once.
-        # The decoder needs all chunks present before it can start consuming,
-        # so C_req > max_inflight_chunks is an impossible configuration.
+        # Fail-fast: detect if cumulative chunks exceed declared total_chunks.
         if req_id:
             prev_count = len(self._req_allocated_keys.get(req_id, []))
             new_total = prev_count + total_allocs
-            if new_total > self._max_inflight_chunks:
-                await _release_admission()
+
+            if new_total > alloc_request.total_chunks:
+                # Rollback any prior batches
+                prior_keys = self._req_allocated_keys.get(req_id, [])
+                for prior_key_str in prior_keys:
+                    try:
+                        self.remove(CacheEngineKey.from_string(prior_key_str))
+                    except Exception as e:
+                        logger.warning(
+                            "Rollback failed for key %s: %s", prior_key_str, e
+                        )
+
+                # Clean up tracking and release reservation
+                self._req_allocated_keys.pop(req_id, None)
+                await self._recv_reservation_mgr.async_release_reservation(req_id)
                 raise RuntimeError(
-                    f"Request {req_id} requires {new_total} total chunks "
-                    f"(already allocated {prev_count}, new batch {total_allocs}) "
-                    f"but max_inflight_chunks={self._max_inflight_chunks}. "
-                    f"This request can never complete because the decoder requires "
-                    f"all chunks before it can start consuming. "
-                    f"To fix: increase pd_buffer_size so that "
-                    f"max_inflight_chunks >= total chunks needed for the largest "
-                    f"request, or reduce prompt length / chunk size."
+                    f"Request {req_id} protocol violation: declared total_chunks="
+                    f"{alloc_request.total_chunks} but attempting {new_total} chunks."
                 )
         else:
-            # No req_id provided (legacy sender or untracked call); per-request
-            # fail-fast detection is unavailable.  Log at debug level so operators
-            # can diagnose potential buffer exhaustion if needed.
             logger.debug(
                 "AllocRequest has no req_id — per-request chunk accounting "
-                "is disabled for this batch (C_req > T fail-fast will not fire)"
+                "is disabled for this batch"
             )
 
         fmt = MemoryFormat(alloc_request.fmt)
         dtype = STR_DTYPE_TO_TORCH_DTYPE[alloc_request.dtype]
-        shape = list(alloc_request.shape)  # copy — we mutate token_dim
+        shape = list(alloc_request.shape)
 
         alloc_indexes: list[int] = []
         current_batch_keys: list[str] = []
 
         try:
-            # Global inflight pre-check: wait until there are enough free slots
-            # for the entire batch before entering the per-chunk loop.
-            # This prevents the mid-allocation deadlock that occurs when residual
-            # inflight chunks from a previous request fill the buffer: without this
-            # check, a request can acquire admission, allocate some chunks, then
-            # block mid-loop on _inflight_condition.  Since the request hasn't
-            # finished sending, no ProxyNotif is issued, the decoder never starts
-            # consuming, inflight never decreases, and the system deadlocks.
-            async with self._inflight_condition:
-                while (
-                    self._max_inflight_chunks - self._inflight_chunks
-                ) < total_allocs:
-                    if not self.running:
-                        await _release_admission()
-                        remaining_allocs = total_allocs - len(alloc_indexes)
-                        alloc_indexes.extend([-1] * remaining_allocs)
-                        return AllocResponse(remote_indexes=alloc_indexes)
-                    logger.info(
-                        "Req %s admitted but waiting to allocate %d chunks "
-                        "(inflight=%d, max=%d, free=%d)",
-                        req_id,
-                        total_allocs,
-                        self._inflight_chunks,
-                        self._max_inflight_chunks,
-                        self._max_inflight_chunks - self._inflight_chunks,
-                    )
-                    await self._inflight_condition.wait()
-
             for idx, key_str in enumerate(alloc_request.keys):
                 key = CacheEngineKey.from_string(key_str)
 
@@ -1426,46 +1327,20 @@ class PDBackendAsync(AllocatorBackendInterface):
                     token_dim = fmt.token_dim()
                     shape[token_dim] = alloc_request.last_chunk_toks
 
-                # Wait until inflight count is below threshold before allocating.
-                async with self._inflight_condition:
-                    while self._inflight_chunks >= self._max_inflight_chunks:
-                        if not self.running:
-                            # Release admission and return failure on shutdown.
-                            await _release_admission()
-                            remaining_allocs = total_allocs - len(alloc_indexes)
-                            alloc_indexes.extend([-1] * remaining_allocs)
-                            return AllocResponse(remote_indexes=alloc_indexes)
-                        logger.warning(
-                            "Decoder buffer near-full: inflight_chunks=%d >= max=%d, "
-                            "waiting for buffers to be freed...",
-                            self._inflight_chunks,
-                            self._max_inflight_chunks,
-                        )
-                        await self._inflight_condition.wait()
-                    self._inflight_chunks += 1
-
                 mem_obj = self.allocate(torch.Size(shape), dtype, fmt)
-                # Event-driven retry: wait on _inflight_condition for notification
-                # instead of asyncio.sleep polling so the coroutine wakes up
-                # immediately when _notify_inflight_freed fires.
                 deadline = asyncio.get_running_loop().time() + self._allocation_timeout
                 while mem_obj is None:
                     remaining = deadline - asyncio.get_running_loop().time()
                     if remaining <= 0:
-                        async with self._inflight_condition:
-                            self._inflight_chunks -= 1
-                            self._inflight_condition.notify_all()
                         raise RuntimeError(
                             f"Failed to allocate memory for key {key} after "
                             f"timeout (~{self._allocation_timeout:.0f}s). "
-                            f"req_id={req_id}, key_index={idx}/{total_allocs}, "
-                            f"inflight_chunks={self._inflight_chunks}, "
-                            f"max_inflight_chunks={self._max_inflight_chunks}."
+                            f"req_id={req_id}, key_index={idx}/{total_allocs}."
                         )
-                    async with self._inflight_condition:
+                    async with self._alloc_freed_condition:
                         try:
                             await asyncio.wait_for(
-                                self._inflight_condition.wait(),
+                                self._alloc_freed_condition.wait(),
                                 timeout=min(remaining, self._condition_poll_interval),
                             )
                         except asyncio.TimeoutError:
@@ -1474,10 +1349,24 @@ class PDBackendAsync(AllocatorBackendInterface):
 
                 alloc_indexes.append(mem_obj.meta.address)
                 self.put(key, mem_obj)
+                logger.debug(
+                    "[RECEIVER] alloc key=%s addr=%d ref_count=%d",
+                    key_str,
+                    mem_obj.meta.address,
+                    mem_obj.get_ref_count(),
+                )
+
                 current_batch_keys.append(key_str)
+                logger.debug(
+                    "[PD-ALLOC] req=%s alloc chunk %d/%d, free_chunks=%d, data_size=%d",
+                    req_id,
+                    idx + 1,
+                    total_allocs,
+                    self._get_free_chunks(),
+                    len(self.data),
+                )
         except BaseException:
-            # Rollback: remove already-allocated chunks from this batch
-            # to prevent memory and inflight counter leaks.
+            # Rollback: remove chunks from the current batch.
             for rollback_key_str in current_batch_keys:
                 try:
                     rollback_key = CacheEngineKey.from_string(rollback_key_str)
@@ -1488,20 +1377,43 @@ class PDBackendAsync(AllocatorBackendInterface):
                         rollback_key_str,
                         re,
                     )
-            # Also clean up per-request tracking for this batch.
+
+            # If this request has prior successful batches, clean them up too.
+            # Any batch failure means the entire request is invalid since the
+            # decoder needs all chunks to proceed.
             if req_id:
+                prior_keys = self._req_allocated_keys.get(req_id, [])
+                if prior_keys:
+                    logger.warning(
+                        "[PD-ALLOC] req=%s batch failed, rolling back %d chunks "
+                        "from prior batches",
+                        req_id,
+                        len(prior_keys),
+                    )
+                    for prior_key_str in prior_keys:
+                        try:
+                            prior_key = CacheEngineKey.from_string(prior_key_str)
+                            self.remove(prior_key)
+                        except Exception as re:
+                            logger.warning(
+                                "Rollback remove failed for prior key %s: %s",
+                                prior_key_str,
+                                re,
+                            )
+
+                # Clean up tracking and release reservation.
                 self._req_allocated_keys.pop(req_id, None)
-            await _release_admission()
+                await self._recv_reservation_mgr.async_release_reservation(req_id)
             raise
 
-        # All allocations in this batch succeeded.
+        # All allocations succeeded.
         if req_id:
             if req_id not in self._req_allocated_keys:
                 self._req_allocated_keys[req_id] = []
             self._req_allocated_keys[req_id].extend(current_batch_keys)
             if alloc_request.is_last_batch:
                 self._req_allocated_keys.pop(req_id, None)
-                await _release_admission()
+                await self._recv_reservation_mgr.async_release_reservation(req_id)
 
         return AllocResponse(remote_indexes=alloc_indexes)
 
@@ -1513,8 +1425,7 @@ class PDBackendAsync(AllocatorBackendInterface):
         """Store a memory object in the local data dictionary.
 
         If a memory object already exists for the given key, the old object is
-        released (ref_count_down) and the inflight counter is decremented on
-        the receiver side to prevent memory leaks.
+        released (ref_count_down) to prevent memory leaks.
 
         :param key: The cache engine key to associate with the memory object.
         :param mem_obj: The memory object to store.
@@ -1522,17 +1433,13 @@ class PDBackendAsync(AllocatorBackendInterface):
         with self.data_lock:
             old = self.data.pop(key, None)
             if old is not None:
-                logger.warning(
+                logger.debug(
                     "Overwriting existing MemoryObj for key %s in "
                     "PDBackendAsync.put(). "
                     "Releasing old object to prevent memory leak.",
                     key,
                 )
                 old.ref_count_down()
-                if self.pd_config.role == "receiver":
-                    asyncio.run_coroutine_threadsafe(
-                        self._notify_inflight_freed(), self._recv_loop
-                    )
             self.data[key] = mem_obj
 
     def get_blocking(self, key: CacheEngineKey) -> Optional[MemoryObj]:
@@ -1566,30 +1473,68 @@ class PDBackendAsync(AllocatorBackendInterface):
         with self.data_lock:
             mem_obj = self.data.pop(key, None)
             if mem_obj is not None:
+                logger.debug(
+                    "[PD-FREE] remove key=%s, addr=%d, ref_count=%d, "
+                    "data_size=%d, free_chunks_before=%d",
+                    key,
+                    mem_obj.meta.address,
+                    mem_obj.get_ref_count(),
+                    len(self.data),
+                    self._get_free_chunks(),
+                )
                 mem_obj.ref_count_down()
-                if self.pd_config.role == "receiver":
-                    asyncio.run_coroutine_threadsafe(
-                        self._notify_inflight_freed(), self._recv_loop
-                    )
+                # Notify any coroutines blocked waiting for free memory.
+                # _alloc_freed_condition and _recv_loop only exist on the
+                # receiver; remove() is also called on the sender, so the
+                # hasattr guards are intentional.  run_coroutine_threadsafe is
+                # used because remove() may be called from any OS thread while
+                # the receiver event loop runs on a dedicated thread.
+                if hasattr(self, "_alloc_freed_condition") and hasattr(
+                    self, "_recv_loop"
+                ):
+                    loop = self._recv_loop
+                    if loop.is_running():
+
+                        async def _notify_freed() -> None:
+                            async with self._alloc_freed_condition:
+                                self._alloc_freed_condition.notify_all()
+
+                        asyncio.run_coroutine_threadsafe(_notify_freed(), loop)
                 return True
+            logger.debug("[PD-FREE] remove: key=%s NOT FOUND", key)
             return False
 
-    async def _notify_inflight_freed(self) -> None:
-        """Decrement the inflight chunk counter and notify waiting allocations.
+    def _get_free_chunks(self) -> int:
+        """Return number of free chunks in the PD buffer allocator.
 
-        Scheduled on the receiver event loop from ``remove()`` (which runs in
-        a vLLM worker thread) so that asyncio.Condition operations are always
-        called from within the correct event loop.
+        Reads ``free_blocks`` from the appropriate underlying allocator
+        (CPU or GPU depending on ``corrected_device``).  This is a
+        best-effort diagnostic value: it is read without holding any
+        additional lock, so the count may be stale by the time it is logged.
+
+        :return: Number of currently free blocks in the allocator, or -1 if
+            the allocator does not expose a ``free_blocks`` attribute.
+        :rtype: int
         """
-        async with self._inflight_condition:
-            if self._inflight_chunks == 0:
-                logger.warning(
-                    "inflight_chunks is already 0 before decrement; "
-                    "this indicates a counter synchronization bug."
-                )
-            else:
-                self._inflight_chunks -= 1
-            self._inflight_condition.notify_all()
+        alloc = (
+            self.memory_allocator.cpu_allocator
+            if self.corrected_device == "cpu"
+            else self.memory_allocator.gpu_allocator
+        )
+        try:
+            return len(alloc.free_blocks)
+        except AttributeError:
+            return -1
+
+    def _get_total_chunks(self) -> int:
+        """Return total number of chunks in the PD buffer.
+
+        Computed as ``_aligned_buffer_size // _chunk_size_bytes``.
+
+        :return: Total number of fixed-size chunks in the PD buffer.
+        :rtype: int
+        """
+        return self._aligned_buffer_size // self._chunk_size_bytes
 
     ############################################################
     # Decoder functions end
@@ -1643,20 +1588,13 @@ class PDBackendAsync(AllocatorBackendInterface):
         self.running = False
         # Wake up any threads blocked on the sender staging condition so they
         # can observe running=False and exit cleanly.
-        if hasattr(self, "_sender_staging_condition"):
-            with self._sender_staging_condition:
-                self._sender_staging_condition.notify_all()
+        if hasattr(self, "_staging_condition"):
+            with self._staging_condition:
+                self._staging_condition.notify_all()
         for thread in self.running_threads:
             thread.join()
         # Shut down sender async loop if present
         if hasattr(self, "_sender_loop"):
-            # Cancel all per-receiver worker tasks before stopping the loop.
-            # _shutdown_loop also cancels all tasks, but being explicit here
-            # ensures each worker sees CancelledError promptly.
-            if hasattr(self, "_receiver_worker_tasks"):
-                for task in self._receiver_worker_tasks.values():
-                    if task is not None:
-                        task.cancel()
             self._shutdown_loop(
                 self._sender_loop,
                 self._sender_thread,
@@ -1675,9 +1613,7 @@ class PDBackendAsync(AllocatorBackendInterface):
         # Shut down receiver async loop if present
         if hasattr(self, "_recv_loop"):
             # Wait for any in-flight allocation tasks to finish gracefully
-            # before tearing down the loop.  This lets _async_allocate_and_put
-            # complete (and release admission) rather than being cancelled mid-
-            # allocation, which would leak the admission lock on graceful restart.
+            # before tearing down the loop.
             if hasattr(self, "_pending_alloc_tasks"):
                 try:
 
@@ -1693,46 +1629,10 @@ class PDBackendAsync(AllocatorBackendInterface):
                     future = asyncio.run_coroutine_threadsafe(
                         _wait_pending(), self._recv_loop
                     )
-                    future.result(
-                        # Add 1 second buffer beyond the inner asyncio.wait timeout
-                        # so that future.result() does not expire before asyncio.wait
-                        # has a chance to return naturally.
-                        timeout=self.pd_config.shutdown_timeout_sec + 1
-                    )
+                    future.result(timeout=self.pd_config.shutdown_timeout_sec + 1)
                 except Exception:
                     logger.debug(
                         "Timed out waiting for pending alloc tasks during shutdown"
-                    )
-            # Wake up any coroutines blocked on _inflight_condition or
-            # _admission_condition so they can observe running=False and exit
-            # cleanly before the loop is stopped.
-            if hasattr(self, "_inflight_condition"):
-                try:
-
-                    async def _wake_inflight() -> None:
-                        async with self._inflight_condition:
-                            self._inflight_condition.notify_all()
-
-                    asyncio.run_coroutine_threadsafe(_wake_inflight(), self._recv_loop)
-                except Exception as exc:
-                    logger.debug(
-                        "Could not schedule _inflight_condition wake-up "
-                        "(loop may already be stopped): %s",
-                        exc,
-                    )
-            if hasattr(self, "_admission_condition"):
-                try:
-
-                    async def _wake_admission() -> None:
-                        async with self._admission_condition:
-                            self._admission_condition.notify_all()
-
-                    asyncio.run_coroutine_threadsafe(_wake_admission(), self._recv_loop)
-                except Exception as exc:
-                    logger.debug(
-                        "Could not schedule _admission_condition wake-up "
-                        "(loop may already be stopped): %s",
-                        exc,
                     )
             self._shutdown_loop(
                 self._recv_loop,
