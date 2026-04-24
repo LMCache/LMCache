@@ -1765,7 +1765,11 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
             if not memory_obj.is_valid():
                 logger.warning("Trying to free an invalidated MemoryObj")
                 continue
-            # memory_obj.invalidate()
+            # PATCH: invalidate MemoryObj on free so stale references see is_valid=False
+            # instead of silently pointing at a page that may have been re-allocated.
+            # PinMemoryAllocator.batched_free already invalidates; this brings
+            # PagedTensorMemoryAllocator in line with that contract.
+            memory_obj.invalidate()
             if memory_obj.meta.shapes != self.shapes:
                 page_idx = memory_obj.meta.address
                 memory_obj.raw_data = self.paged_buffers[page_idx]
