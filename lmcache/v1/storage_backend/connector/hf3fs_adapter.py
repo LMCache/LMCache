@@ -126,7 +126,7 @@ class HF3fsConnectorAdapter(ConnectorAdapter):
         except (TypeError, ValueError) as e:
             logger.error(f"Invalid value for {key}: {value}, must be positive integer")
             raise ValueError(
-                f"Invalid value for {key}: {value},must be positive integer"
+                f"Invalid value for {key}: {value}, must be positive integer"
             ) from e
 
     def _get_int(self, key: str, default: int) -> int:
@@ -138,7 +138,7 @@ class HF3fsConnectorAdapter(ConnectorAdapter):
         Returns:
             Validated integer
         Raises:
-            ValueError: If value is not a integer
+            ValueError: If value is not an integer
         """
         value = self.extra_config.get(key, default)
         try:

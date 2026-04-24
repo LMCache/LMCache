@@ -108,7 +108,7 @@ class HF3fsConnector(FSConnector):
             )
 
         self.io_executor = ThreadPoolExecutor(
-            max_workers=io_thread_num, thread_name_prefix="Hf3fsConector_executor"
+            max_workers=io_thread_num, thread_name_prefix="HF3fsConnector_executor"
         )
         # create Hf3fsClient instance in main thread
         self.client = Hf3fsClient.get_instance(self.config)

@@ -61,8 +61,6 @@ OnCompleteCallback = Callable[[CacheEngineKey], None]
 
 DEFAULT_SHAPE = torch.Size([2, 16, 8, 128])
 DEFAULT_DTYPE = torch.bfloat16  # 2Bytes
-# DEFAULT_SHAPE = torch.Size([8, 64, 8, 128])
-# DEFAULT_DTYPE = torch.float32 # 4Bytes
 
 # ============================================================================
 # Helper Functions

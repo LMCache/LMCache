@@ -9,7 +9,7 @@ Overview
 3FS (Fire-Flyer File System) is an AI native distributed file-system which provides high performance and 
 low latency. It is a supported option for KV Cache offloading in LMCache. Even though the FSConnector 
 backend can work with 3FS storage cluster, but it access data in 3FS storage cluster by FUSE interfaces.
-It can't leaverage 3FS high performance. This particular backend uses 3FS nvative USRBIO(User Space Ring 
+It can't leverage 3FS high performance. This particular backend uses 3FS native USRBIO(User Space Ring 
 Based IO) interfaces to access 3FS storage cluster which get high performance.
 
 Configure LMCache 3FS Offloading
@@ -29,7 +29,7 @@ Example ``config.yaml``:
     remote_storage_plugins: ["hf3fs.primary"]
     
     # URL mode, obtain base_path from the URL
-    #remote_url: "hfs3fs:///3fs/stage/hello, /3fs/stage/world"
+    #remote_url: "hf3fs:///3fs/stage/hello, /3fs/stage/world"
 
     extra_config:
 
@@ -44,20 +44,20 @@ Example ``config.yaml``:
 
         # Shared memory size for Iov in hf3fs client, 
         # range in [104857600(100MB), 2147483648(2GB)], default:209715200
-        hfs3fs_iov_size: 209715200 #200MB
+        hf3fs_iov_size: 209715200 #200MB
 
         # Max num of concurrent requests that can be submitted in Ior
         # range in [128,1024], default: 256
-        hfs3fs_ior_entries: 256
+        hf3fs_ior_entries: 256
 
         # Control with I/O depth. 0, no control
         # >0, only when io_depth requests are in queue, and issue them in one batch
         # <0, wait for at most -io_depth requests are in queue and issue them in one batch
         # range in [128, 128], default: 0
-        hfs3fs_io_depth: 0
+        hf3fs_io_depth: 0
 
         # NUMA ID for Ior shared memory, -1 for current process NUMA ID.
-        hfs3fs_numa_id: -1
+        hf3fs_numa_id: -1
 
         # Number of io thread
         # range in [2,16], default: 4
@@ -133,20 +133,20 @@ Installation
 
             # Shared memory size for Iov in hf3fs client, 
             # range in [104857600(100MB), 2147483648(2GB)], default:209715200 (200MB)
-            hfs3fs_iov_size: 209715200 
+            hf3fs_iov_size: 209715200 
 
             # Max num of concurrent requests that can be submitted in Ior
             # range in [128,1024], default: 256
-            hfs3fs_ior_entries: 256
+            hf3fs_ior_entries: 256
 
             # Control with I/O depth. 0, no control
             # >0, only when io_depth requests are in queue, and issue them in one batch
             # <0, wait for at most -io_depth requests are in queue and issue them in one batch
             # range in [128, 128], default: 0
-            hfs3fs_io_depth: 0
+            hf3fs_io_depth: 0
 
             # NUMA ID for Ior shared memory, -1 for current process NUMA ID.
-            hfs3fs_numa_id: -1
+            hf3fs_numa_id: -1
 
             # Number of io thread
             # range in [2,16], default: 4
