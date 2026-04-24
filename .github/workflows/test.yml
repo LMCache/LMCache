@@ -3,10 +3,6 @@ name: Test
 on:
   workflow_call:
   workflow_dispatch:
-  push:
-    branches:
-      - "dev"
-      - "release-**"
   pull_request:
     branches:
       - "dev"
@@ -19,6 +15,12 @@ env:
 defaults:
   run:
     shell: bash
+
+# Cancel older in-flight runs on the same PR / branch. github.ref is
+# refs/pull/<N>/merge on pull_request events, so each PR gets its own group.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
