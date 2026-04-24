@@ -37,7 +37,7 @@ these events see [METRICS.md](METRICS.md).
 | EventType | Metadata keys | Types |
 |---|---|---|
 | `L2_STORE_SUBMITTED` | `adapter_index`, `task_id`, `l2_name`, `key_count`, `total_bytes` | `int`, `int`, `str`, `int`, `int` |
-| `L2_STORE_COMPLETED` | `adapter_index`, `task_id`, `l2_name`, `succeeded_count`, `failed_count`, `total_bytes` | `int`, `int`, `str`, `int`, `int`, `int` |
+| `L2_STORE_COMPLETED` | `adapter_index`, `task_id`, `l2_name`, `succeeded_count`, `failed_count` | `int`, `int`, `str`, `int`, `int` |
 
 ---
 
@@ -50,7 +50,7 @@ these events see [METRICS.md](METRICS.md).
 | `L2_PREFETCH_LOAD_SUBMITTED` | `request_id`, `key_count`, `adapter_count` | `int`, `int`, `int` |
 | `L2_PREFETCH_LOAD_COMPLETED` | `request_id`, `loaded_count`, `failed_count` | `int`, `int`, `int` |
 | `L2_LOAD_TASK_SUBMITTED` | `request_id`, `adapter_index`, `task_id`, `l2_name`, `key_count`, `total_bytes` | `int`, `int`, `int`, `str`, `int`, `int` |
-| `L2_LOAD_TASK_COMPLETED` | `request_id`, `adapter_index`, `task_id`, `l2_name`, `total_bytes` | `int`, `int`, `int`, `str`, `int` |
+| `L2_LOAD_TASK_COMPLETED` | `request_id`, `adapter_index`, `task_id`, `l2_name` | `int`, `int`, `int`, `str` |
 
 `L2_LOAD_TASK_*` events fire once per `(request_id, adapter_index)` pair
 — unlike the request-level `L2_PREFETCH_LOAD_*` events above, which

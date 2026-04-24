@@ -154,10 +154,6 @@ class InFlightPrefetchRequest:
     load_plan: dict[int, Bitmap] = field(default_factory=dict)
     # Load phase: adapter_idx -> task_id (removed as results arrive)
     pending_load_tasks: dict[int, L2TaskId] = field(default_factory=dict)
-    # Load phase: adapter_idx -> total bytes submitted to that adapter.
-    # Carried across submit->complete so the L2_LOAD_TASK_COMPLETED event
-    # can report the same value as SUBMITTED without re-reading MemoryObjs.
-    pending_load_bytes: dict[int, int] = field(default_factory=dict)
     # Load phase: adapter_idx -> bitmap (populated as results arrive)
     load_results: dict[int, Bitmap] = field(default_factory=dict)
     # Load phase: keys that were write-reserved in L1
@@ -633,7 +629,6 @@ class PrefetchController(StorageControllerInterface):
                 if per_adapter_objs
                 else 0
             )
-            request.pending_load_bytes[adapter_idx] = total_bytes
 
             self._event_bus.publish(
                 Event(
@@ -739,7 +734,6 @@ class PrefetchController(StorageControllerInterface):
                 continue
             request.load_results[adapter_idx] = result
             del request.pending_load_tasks[adapter_idx]
-            total_bytes = request.pending_load_bytes.pop(adapter_idx, 0)
 
             self._event_bus.publish(
                 Event(
@@ -749,7 +743,6 @@ class PrefetchController(StorageControllerInterface):
                         "adapter_index": adapter_idx,
                         "task_id": task_id,
                         "l2_name": self._adapter_descriptors[adapter_idx].type_name,
-                        "total_bytes": total_bytes,
                     },
                 )
             )

@@ -55,10 +55,11 @@ def _store_submitted(
 def _store_completed(
     task_id: int,
     t: float,
-    total_bytes: int,
     adapter_index: int = 0,
     l2_name: str = "fs",
 ) -> Event:
+    # L2_STORE_COMPLETED does not carry total_bytes; the subscriber
+    # looks up the bytes it cached at SUBMITTED time.
     return Event(
         event_type=EventType.L2_STORE_COMPLETED,
         timestamp=t,
@@ -68,7 +69,6 @@ def _store_completed(
             "l2_name": l2_name,
             "succeeded_count": 1,
             "failed_count": 0,
-            "total_bytes": total_bytes,
         },
     )
 
@@ -98,11 +98,12 @@ def _load_submitted(
 def _load_completed(
     request_id: int,
     t: float,
-    total_bytes: int,
     adapter_index: int = 0,
     l2_name: str = "fs",
     task_id: int = 0,
 ) -> Event:
+    # L2_LOAD_TASK_COMPLETED does not carry total_bytes; bytes are
+    # looked up from the subscriber's SUBMITTED-time cache.
     return Event(
         event_type=EventType.L2_LOAD_TASK_COMPLETED,
         timestamp=t,
@@ -111,7 +112,6 @@ def _load_completed(
             "adapter_index": adapter_index,
             "task_id": task_id,
             "l2_name": l2_name,
-            "total_bytes": total_bytes,
         },
     )
 
@@ -192,16 +192,16 @@ class TestStoreThroughput:
 
         # 2 GB in 0.1 s -> 20 GB/s
         subscriber._on_store_submitted(
-            _store_submitted(task_id=1, t=1000.0, adapter_index=0, l2_name="nixl")
-        )
-        subscriber._on_store_completed(
-            _store_completed(
+            _store_submitted(
                 task_id=1,
-                t=1000.1,
-                total_bytes=2_000_000_000,
+                t=1000.0,
                 adapter_index=0,
                 l2_name="nixl",
+                total_bytes=2_000_000_000,
             )
+        )
+        subscriber._on_store_completed(
+            _store_completed(task_id=1, t=1000.1, adapter_index=0, l2_name="nixl")
         )
 
         assert _total_count(_STORE_METRIC) == count_before + 1
@@ -211,12 +211,12 @@ class TestStoreThroughput:
         assert any(a.get("l2_name") == "nixl" for a in attrs)
 
     def test_drains_pending_dict_on_completed(self, subscriber):
-        subscriber._on_store_submitted(_store_submitted(task_id=7, t=0.0))
+        subscriber._on_store_submitted(
+            _store_submitted(task_id=7, t=0.0, total_bytes=1_000)
+        )
         assert (0, 7) in subscriber._pending_store
 
-        subscriber._on_store_completed(
-            _store_completed(task_id=7, t=0.1, total_bytes=1_000)
-        )
+        subscriber._on_store_completed(_store_completed(task_id=7, t=0.1))
         assert (0, 7) not in subscriber._pending_store
 
 
@@ -228,14 +228,17 @@ class TestLoadThroughput:
         # 500 MB in 0.05 s -> 10 GB/s
         subscriber._on_load_submitted(
             _load_submitted(
-                request_id=42, t=2000.0, adapter_index=1, l2_name="mooncake_store"
+                request_id=42,
+                t=2000.0,
+                adapter_index=1,
+                l2_name="mooncake_store",
+                total_bytes=500_000_000,
             )
         )
         subscriber._on_load_completed(
             _load_completed(
                 request_id=42,
                 t=2000.05,
-                total_bytes=500_000_000,
                 adapter_index=1,
                 l2_name="mooncake_store",
             )
@@ -274,9 +277,11 @@ class TestSampling:
             "l2_throughput.random.random",
             return_value=0.99,
         ):
-            sub._on_store_submitted(_store_submitted(task_id=11, t=0.0))
+            sub._on_store_submitted(
+                _store_submitted(task_id=11, t=0.0, total_bytes=10**9)
+            )
         # COMPLETED arrives but SUBMITTED wasn't tracked.
-        sub._on_store_completed(_store_completed(task_id=11, t=0.1, total_bytes=10**9))
+        sub._on_store_completed(_store_completed(task_id=11, t=0.1))
 
         assert _total_count(_STORE_METRIC) == count_before
 
@@ -289,25 +294,23 @@ class TestSampling:
 class TestEdgeCases:
     def test_completed_without_submitted_is_noop(self, subscriber):
         count_before = _total_count(_STORE_METRIC)
-        subscriber._on_store_completed(
-            _store_completed(task_id=999, t=1.0, total_bytes=10**9)
-        )
+        subscriber._on_store_completed(_store_completed(task_id=999, t=1.0))
         assert _total_count(_STORE_METRIC) == count_before
 
     def test_zero_bytes_is_noop(self, subscriber):
         count_before = _total_count(_STORE_METRIC)
-        subscriber._on_store_submitted(_store_submitted(task_id=3, t=0.0))
-        subscriber._on_store_completed(
-            _store_completed(task_id=3, t=0.1, total_bytes=0)
+        subscriber._on_store_submitted(
+            _store_submitted(task_id=3, t=0.0, total_bytes=0)
         )
+        subscriber._on_store_completed(_store_completed(task_id=3, t=0.1))
         assert _total_count(_STORE_METRIC) == count_before
 
     def test_nonpositive_duration_is_noop(self, subscriber):
         count_before = _total_count(_STORE_METRIC)
-        subscriber._on_store_submitted(_store_submitted(task_id=4, t=5.0))
-        subscriber._on_store_completed(
-            _store_completed(task_id=4, t=5.0, total_bytes=10**9)
+        subscriber._on_store_submitted(
+            _store_submitted(task_id=4, t=5.0, total_bytes=10**9)
         )
+        subscriber._on_store_completed(_store_completed(task_id=4, t=5.0))
         assert _total_count(_STORE_METRIC) == count_before
 
     def test_missing_correlation_fields_skips(self, subscriber):
@@ -327,31 +330,31 @@ class TestEdgeCases:
         count_before = _total_count(_STORE_METRIC)
 
         subscriber._on_store_submitted(
-            _store_submitted(task_id=1, t=100.0, adapter_index=0, l2_name="fs")
+            _store_submitted(
+                task_id=1,
+                t=100.0,
+                adapter_index=0,
+                l2_name="fs",
+                total_bytes=1_000_000_000,
+            )
         )
         subscriber._on_store_submitted(
-            _store_submitted(task_id=1, t=100.0, adapter_index=1, l2_name="nixl")
+            _store_submitted(
+                task_id=1,
+                t=100.0,
+                adapter_index=1,
+                l2_name="nixl",
+                total_bytes=1_000_000_000,
+            )
         )
         assert (0, 1) in subscriber._pending_store
         assert (1, 1) in subscriber._pending_store
 
         subscriber._on_store_completed(
-            _store_completed(
-                task_id=1,
-                t=100.1,
-                total_bytes=1_000_000_000,
-                adapter_index=0,
-                l2_name="fs",
-            )
+            _store_completed(task_id=1, t=100.1, adapter_index=0, l2_name="fs")
         )
         subscriber._on_store_completed(
-            _store_completed(
-                task_id=1,
-                t=100.1,
-                total_bytes=1_000_000_000,
-                adapter_index=1,
-                l2_name="nixl",
-            )
+            _store_completed(task_id=1, t=100.1, adapter_index=1, l2_name="nixl")
         )
 
         assert _total_count(_STORE_METRIC) == count_before + 2
@@ -361,14 +364,14 @@ class TestEdgeCases:
     def test_store_and_load_dicts_are_independent(self, subscriber):
         # Store and load use structurally similar compound keys but
         # different pending dicts; no cross-pollination.
-        subscriber._on_store_submitted(_store_submitted(task_id=5, t=0.0))
+        subscriber._on_store_submitted(
+            _store_submitted(task_id=5, t=0.0, total_bytes=10**9)
+        )
         subscriber._on_load_submitted(
-            _load_submitted(request_id=5, t=0.0, adapter_index=0)
+            _load_submitted(request_id=5, t=0.0, adapter_index=0, total_bytes=10**9)
         )
 
-        subscriber._on_store_completed(
-            _store_completed(task_id=5, t=0.1, total_bytes=10**9)
-        )
+        subscriber._on_store_completed(_store_completed(task_id=5, t=0.1))
         assert (0, 5) not in subscriber._pending_store
         # Load pending dict untouched — different key space (request_id).
         assert (5, 0) in subscriber._pending_load
@@ -388,16 +391,16 @@ class TestEventBusIntegration:
         count_before = _total_count(_STORE_METRIC)
         bus.start()
         bus.publish(
-            _store_submitted(task_id=77, t=100.0, adapter_index=2, l2_name="fs")
-        )
-        bus.publish(
-            _store_completed(
+            _store_submitted(
                 task_id=77,
-                t=100.2,
-                total_bytes=4_000_000_000,
+                t=100.0,
                 adapter_index=2,
                 l2_name="fs",
+                total_bytes=4_000_000_000,
             )
+        )
+        bus.publish(
+            _store_completed(task_id=77, t=100.2, adapter_index=2, l2_name="fs")
         )
         time.sleep(_DRAIN_WAIT)
         bus.stop()

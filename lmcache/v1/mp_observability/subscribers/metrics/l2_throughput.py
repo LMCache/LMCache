@@ -14,8 +14,10 @@ Implementation:
     by ``(request_id, adapter_index)``.  One prefetch request may fan out
     across multiple adapters, so per-adapter correlation is required to
     attribute throughput to the right ``l2_name``.
-  - ``total_bytes`` is carried on the COMPLETED event so the subscriber
-    records it directly without tracking bytes in its own state.
+  - ``total_bytes`` is read from the SUBMITTED event and cached in the
+    subscriber's pending dict alongside the start timestamp, so the
+    COMPLETED event does not need to carry it.  This keeps the byte
+    accounting out of the controllers' in-flight task state.
   - ``(end_ts - start_ts)`` spans submit -> complete and therefore
     includes adapter queue, network, and disk time — not just transfer.
     The histogram is "bytes / end-to-end latency", not raw transfer rate.
@@ -52,12 +54,13 @@ class L2ThroughputSubscriber(EventSubscriber):
         )
         self._sample_rate = sample_rate
 
-        # (adapter_index, task_id) -> t_start.  Populated only for
-        # sampled store tasks.
-        self._pending_store: dict[tuple[int, int], float] = {}
-        # (request_id, adapter_index) -> t_start.  Populated only for
-        # sampled load tasks.
-        self._pending_load: dict[tuple[int, int], float] = {}
+        # (adapter_index, task_id) -> (t_start, total_bytes).  Populated
+        # only for sampled store tasks; bytes are read from SUBMITTED and
+        # retrieved at COMPLETED time.
+        self._pending_store: dict[tuple[int, int], tuple[float, int]] = {}
+        # (request_id, adapter_index) -> (t_start, total_bytes).  Populated
+        # only for sampled load tasks.
+        self._pending_load: dict[tuple[int, int], tuple[float, int]] = {}
 
         meter = metrics.get_meter("lmcache_mp.perf")
         self._store_hist = meter.create_histogram(
@@ -98,7 +101,8 @@ class L2ThroughputSubscriber(EventSubscriber):
             return
         key = self._store_key(event)
         if key is not None:
-            self._pending_store[key] = event.timestamp
+            total_bytes = int(event.metadata.get("total_bytes", 0))
+            self._pending_store[key] = (event.timestamp, total_bytes)
 
     def _on_store_completed(self, event: Event) -> None:
         key = self._store_key(event)
@@ -118,7 +122,8 @@ class L2ThroughputSubscriber(EventSubscriber):
             return
         key = self._load_key(event)
         if key is not None:
-            self._pending_load[key] = event.timestamp
+            total_bytes = int(event.metadata.get("total_bytes", 0))
+            self._pending_load[key] = (event.timestamp, total_bytes)
 
     def _on_load_completed(self, event: Event) -> None:
         key = self._load_key(event)
@@ -163,14 +168,14 @@ class L2ThroughputSubscriber(EventSubscriber):
     def _record(
         event: Event,
         correlation_key: tuple[int, int],
-        pending: dict[tuple[int, int], float],
+        pending: dict[tuple[int, int], tuple[float, int]],
         hist: Any,
     ) -> None:
-        t_start = pending.pop(correlation_key, None)
-        if t_start is None:
+        pending_entry = pending.pop(correlation_key, None)
+        if pending_entry is None:
             return  # task wasn't sampled
+        t_start, total_bytes = pending_entry
 
-        total_bytes = event.metadata.get("total_bytes", 0)
         if total_bytes <= 0:
             return
 
