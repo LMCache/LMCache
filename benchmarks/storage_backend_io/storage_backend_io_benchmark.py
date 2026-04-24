@@ -324,7 +324,6 @@ class StorageBackendBenchmark(ABC):
 
         # Run benchmark
         logger.info(f"Start benchmark with {self.backend_name} ...")
-        self._start_time = time.perf_counter()
         result = self._execute_benchmark()
         logger.info(f"End benchmark with {self.backend_name} ...")
         # Cleanup
@@ -338,13 +337,13 @@ class StorageBackendBenchmark(ABC):
 
     def _execute_benchmark(self) -> dict:
         """Execute the benchmark with concurrent writes."""
+
+        self._start_time = time.perf_counter()
         # Submit tasks
         pending_ops = self._submit_put_tasks(self._keys, self._objs)
-
         # Wait for completion
-        start = time.perf_counter()
         self._wait_for_completion(pending_ops)
-        elapsed = time.perf_counter() - start
+        elapsed = time.perf_counter() - self._start_time
 
         return {
             "backend": self.backend_name,
