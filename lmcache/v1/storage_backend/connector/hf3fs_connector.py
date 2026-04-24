@@ -290,7 +290,7 @@ class Hf3fsClientConfig:
     def __init__(
         self,
         mount_point: str,
-        iov_size: int = 2 * (1 << 20),  # 200MB
+        iov_size: int = 200 * (1 << 20),  # 200MB
         ior_entries: int = 256,
         io_depth: int = 0,
         timeout: int = 200,
@@ -586,16 +586,21 @@ class Hf3fsFile:
 
     @staticmethod
     def remove(fname: Path) -> None:
-        if os.path.exists(fname):
-            logger.debug(f"file '{fname}' exists, remove it")
-        else:
+        if not os.path.exists(fname):
             logger.warning(f"file '{fname}' not exists, no need to remove")
-        return os.remove(fname)
+            return
+
+        logger.debug(f"file '{fname}' exists, remove it")
+        try:
+            os.remove(fname)
+        except OSError as e:
+            logger.error(f"Failed to remove file {fname}: {e}")
+        return
 
     @staticmethod
     def rename(old_fname: Path, new_fname: Path):
         if not os.path.exists(old_fname):
-            logger.warning(f"rename failed, old file{old_fname} exist")
+            logger.warning(f"rename failed, old file{old_fname} not exist")
             return
 
         try:
