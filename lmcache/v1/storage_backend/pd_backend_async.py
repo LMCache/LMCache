@@ -869,6 +869,8 @@ class PDBackendAsync(AllocatorBackendInterface):
                         if j not in completed_indexes:
                             mo.ref_count_down()
                             completed_indexes.add(j)
+                    if req_id:
+                        await self._abort_request(req_id)
                     return
 
             if memory_objs:
