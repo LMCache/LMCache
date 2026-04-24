@@ -279,6 +279,11 @@ def adapter():
         s3_endpoint="s3://test-bucket",
         s3_region="us-east-1",
         s3_prefer_http2=False,  # skip TLS ALPN setup for faster init
+        # Keep awscrt EventLoopGroup tiny so CI runners with tight FD
+        # ulimits (each epoll event loop costs a few fds) don't exhaust
+        # file descriptors across ~15 adapter fixtures in this module.
+        # Production callers should leave this at the default 64.
+        s3_num_io_threads=1,
         max_capacity_gb=0.001,  # 1 MB
     )
     a = S3L2Adapter(config)
@@ -485,6 +490,7 @@ class TestGetUsage:
             s3_endpoint="s3://b",
             s3_region="r",
             s3_prefer_http2=False,
+            s3_num_io_threads=1,
             max_capacity_gb=0.0,
         )
         a = S3L2Adapter(cfg)
@@ -658,6 +664,7 @@ class TestFactoryRegistration:
                 "s3_endpoint": "s3://fac-test",
                 "s3_region": "us-east-1",
                 "s3_prefer_http2": False,
+                "s3_num_io_threads": 1,
             }
         )
         adp = create_l2_adapter(cfg)

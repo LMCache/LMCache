@@ -579,6 +579,15 @@ class S3L2Adapter(L2AdapterInterface):
         os.close(self._store_efd)
         os.close(self._lookup_efd)
         os.close(self._load_efd)
+
+        # Drop awscrt references so their native event loops / host
+        # resolver threads / epoll fds can be reaped immediately rather
+        # than surviving until this adapter is garbage-collected. Without
+        # this, spinning up many adapters in a process (e.g. a test
+        # module with per-test fixtures) can pile up FDs and exhaust
+        # ``ulimit -n`` on CI runners.
+        self._s3_client = None
+        self._credentials_provider = None
         logger.info("S3L2Adapter closed")
 
     # ------------------------------------------------------------------
