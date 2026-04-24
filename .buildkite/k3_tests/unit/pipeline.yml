@@ -15,13 +15,6 @@ steps:
                 imagePullPolicy: Never
                 env:
                   - { name: CUDA_LAUNCH_BLOCKING, value: "1" }
-                  # Route tempfile.mkdtemp() to the host-backed /scratch
-                  # mount. Overlayfs (default /tmp) fails GDS (cuFile) with
-                  # CU_FILE_IO_NOT_SUPPORTED (err=5027); the /scratch mount
-                  # is on the host's ext4/xfs NVMe. A hostPath + subPathExpr
-                  # at /tmp was also tried and fails GDS — the bind mount
-                  # used by subPath confuses cuFile's fs-type detection.
-                  - { name: TMPDIR, value: /scratch }
                 resources:
                   requests:
                     cpu: "32"

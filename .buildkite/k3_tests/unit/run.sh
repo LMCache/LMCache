@@ -8,6 +8,17 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 
 cd "${REPO_ROOT}"
 
+# ── Per-build scratch dir ────────────────────────────────────
+# /scratch is a shared hostPath mount (see pipeline.yml). Give this build
+# its own subdirectory so concurrent pods can't clobber each other, and
+# clean it up on exit so /data/gds-scratch on the host doesn't grow. Using
+# a direct subdir instead of K8s subPathExpr because the latter breaks GDS
+# (cuFile rejects bind-mounted paths).
+BUILD_TAG="${BUILDKITE_BUILD_ID:-manual-$$}"
+export TMPDIR="/scratch/bk-${BUILD_TAG}"
+mkdir -p "${TMPDIR}"
+trap 'rm -rf "${TMPDIR}" 2>/dev/null || true' EXIT
+
 # ── Environment setup ────────────────────────────────────────
 source .buildkite/k3_harness/setup-lmcache-only-env.sh
 uv pip install -r requirements/test.txt
