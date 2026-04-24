@@ -198,7 +198,6 @@ class HF3fsConnector(FSConnector):
                     # logger.info("get, before read", file_path)
                     data_len = f.read(data_view, len(data_view), 0)
 
-                assert data_len == len(data_view)
                 memory_obj = self.reshape_partial_chunk(memory_obj, data_len)
             return memory_obj
 
@@ -492,13 +491,13 @@ class Hf3fsClient:
                     fd, buffer[offset : offset + sub_len], sub_len, offset + start
                 )
                 total_bytes_read += bytes_read
-                if bytes_read != sub_len:
-                    logger.error(
-                        f"{self.client_name} read: requested {sub_len}, \
-                                 got {bytes_read}"
-                    )
-                    break
                 offset += bytes_read
+
+            if total_bytes_read != length:
+                logger.warning(
+                    f"{self.client_name} read: requested {length}, "
+                    f"got {total_bytes_read}"
+                )
             return total_bytes_read
 
     def _write(self, fd: int, buffer: memoryview, length: int, file_offset: int) -> int:
@@ -532,15 +531,16 @@ class Hf3fsClient:
                 written = self._write(
                     fd, buffer[offset : offset + sub_len], sub_len, offset + start
                 )
-                if written != sub_len:
-                    logger.error(
-                        f"{self.client_name} _write: requested {sub_len}, got {written}"
-                    )
-                    assert written == sub_len
-                    break
-
                 total_bytes_written += written
                 offset += written
+            if total_bytes_written != length:
+                logger.error(
+                    f"{self.client_name} write: requested {sub_len}, got {written}"
+                )
+                raise RuntimeError(
+                    f"{self.client_name} write: requested {sub_len}, got {written}"
+                )
+
             return total_bytes_written
 
 
