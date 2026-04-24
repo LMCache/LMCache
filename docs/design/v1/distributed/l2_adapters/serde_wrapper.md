@@ -12,54 +12,85 @@ that stitches serde into the distributed storage pipeline.
 ## Design Summary
 
 `SerdeL2AdapterWrapper` implements `L2AdapterInterface` by composing
-an inner L2 adapter with a `SerdeProcessor` and an `L1Manager`. It
-presents a normal L2 adapter face to the rest of the system —
-`StoreController` and `PrefetchController` never learn that serde
-exists.
+an inner L2 adapter with a `SerdeProcessor` and an `L1Manager`. The
+caller sees the wrapper's public API only; the wrapper's internal
+thread is the sole consumer of the inner adapter's and serde's event
+fds.
+
+Step numbers below show **call ordering**. Solid `─►` arrows are
+direct synchronous calls; dotted `╌►` arrows are eventfd wakeups
+consumed by the wrapper's internal thread.
+
+### Store path
 
 ```
-   ┌─────────────────────────────────────────────────────────────────┐
-   │                  SerdeL2AdapterWrapper                          │
-   │                  (implements L2AdapterInterface)                │
-   │                                                                 │
-   │   submit_store_task(keys, objs)                                 │
-   │   ┌───────────────┐   serialize_efd     ┌──────────────────┐    │
-   │   │ SerdeProcessor│ ──────────────────► │  internal thread │    │
-   │   └───────────────┘                     │  ┌─────────────┐ │    │
-   │          ▲                              │  │  _loop      │ │    │
-   │ submit_  │                              │  │  _drain_*   │ │    │
-   │ serialize│                              │  └──────┬──────┘ │    │
-   │          │                              │         │        │    │
-   │   ┌──────┴────────┐   inner.store_efd   │         ▼        │    │
-   │   │ inner adapter │ ──────────────────► │   signal         │    │
-   │   │ (fs/mock/...) │                     │   wrapper.store_ │    │
-   │   └───────────────┘                     │   efd            │    │
-   │                                         └──────────────────┘    │
-   └─────────────────────────────────────────────────────────────────┘
+   caller                                                          
+     │                                                             
+     │ (1) submit_store_task(keys, objs)                           
+     ▼                                                             
+   ┌─────────────────┐  (2) reserve_write(tmp)   ┌──────────────┐  
+   │  wrapper (API)  │ ─────────────────────────►│  L1Manager   │  
+   │                 │ ◄────── tmp_objs ─────────│              │  
+   └────────┬────────┘                           └──────────────┘  
+            │ (3) submit_serialize(objs, tmp_objs)                 
+            ▼                                                      
+   ┌─────────────────┐                                             
+   │ SerdeProcessor  │   transforms objs → tmp_objs                
+   └────────┬────────┘                                             
+            ╎ (4) serialize_efd                                    
+            ▼                                                      
+   ┌─────────────────┐  (5) inner.submit_store_   ┌──────────────┐ 
+   │ wrapper thread  │      task(keys, tmp_objs)  │   inner L2   │ 
+   │   (_loop)       │ ─────────────────────────► │   adapter    │ 
+   └────────┬────────┘                            └──────┬───────┘ 
+            ▲                                            │         
+            ╎ (6) inner.store_efd ◄──────────────────────┘         
+            │                                                      
+   ┌────────┴────────┐                                             
+   │ wrapper thread  │  (7) finish_read(tmp_objs)  → auto-delete   
+   │                 │      signal wrapper.store_efd               
+   └────────┬────────┘                                             
+            │                                                      
+            │ (8) pop_completed_store_tasks() → {wrapped_id: True} 
+            ▼                                                      
+          caller                                                   
 ```
 
-Callers only see the wrapper's public API — submit / query / pop /
-eventfds. The internal thread is the only consumer of the inner
-adapter's and serde's event fds.
+### Load path
 
-## Why a Wrapper, Not Controller-Side Code
-
-Two alternatives were considered:
-
-| Option | Controller edits | New code | Threading |
-|---|---|---|---|
-| **Serde inside controllers** | Large — new phases, new dataclass fields, new dispatch branches | Per-controller helpers | None extra |
-| Serde as controller mixin | Medium — inheritance, shared state | Mixin files | None extra |
-| **Wrapper adapter (chosen)** | ~2 files, ~60 lines | One file, `~600` lines | +1 thread per serde adapter |
-
-The wrapper trades one extra thread per serde-enabled adapter for
-**zero edits** to `StoreController` and `PrefetchController` and
-**zero changes** to the request-tracking dataclasses. It also keeps
-the serde failure policy (all-or-nothing) contained in one place
-instead of spreading partial-failure logic across two controllers.
-
-See the original discussion in the PR description for the full
-trade-off analysis.
+```
+   caller                                                          
+     │                                                             
+     │ (1) submit_load_task(keys, dst_objs)                        
+     ▼                                                             
+   ┌─────────────────┐  (2) reserve_write(tmp)   ┌──────────────┐  
+   │  wrapper (API)  │ ─────────────────────────►│  L1Manager   │  
+   │                 │ ◄────── tmp_objs ─────────│              │  
+   └────────┬────────┘                           └──────────────┘  
+            │ (3) inner.submit_load_task(keys, tmp_objs)           
+            ▼                                                      
+   ┌─────────────────┐                                             
+   │  inner L2       │   loads serialized bytes into tmp_objs      
+   │  adapter        │                                             
+   └────────┬────────┘                                             
+            ╎ (4) inner.load_efd                                   
+            ▼                                                      
+   ┌─────────────────┐  (5) submit_deserialize    ┌──────────────┐ 
+   │ wrapper thread  │      (tmp_objs, dst_objs)  │   Serde      │ 
+   │   (_loop)       │ ─────────────────────────► │  Processor   │ 
+   └────────┬────────┘                            └──────┬───────┘ 
+            ▲                                            │         
+            ╎ (6) deserialize_efd ◄──────────────────────┘         
+            │                                                      
+   ┌────────┴────────┐                                             
+   │ wrapper thread  │  (7) finish_write + delete(tmp_objs)        
+   │                 │      signal wrapper.load_efd                
+   └────────┬────────┘                                             
+            │                                                      
+            │ (8) query_load_result() → per-key bitmap             
+            ▼                                                      
+          caller                                                   
+```
 
 ## Store Path
 
