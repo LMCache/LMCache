@@ -1696,7 +1696,7 @@ class LMCacheEngine:
 
             kept_chunks: List[ProcessedChunk] = []
             for key, memory_obj, start, end in reordered_chunks:
-                if end < last_failed_block_start:
+                if end <= last_failed_block_start:
                     kept_chunks.append((key, memory_obj, start, end))
                 else:
                     tot_kv_size -= memory_obj.get_size()
