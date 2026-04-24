@@ -42,10 +42,16 @@ logger = init_logger(__name__)
 # to this form before calling the helpers.
 DiscoverableKVCache = Union[torch.Tensor, list["DiscoverableKVCache"]]
 
-# Error message for accessing non-existent attributes in GPU KV Cache
-_ATTRIBUTE_NOT_EXIST_ERROR = "trying to access an attribute of the GPU KV Cache "
-"that does not exist for the format detected {format}. "
-"A misalignment with the GPUKVFormat must be resolved"
+# Error message for accessing non-existent attributes in GPU KV Cache.
+# Parenthesized so Python actually concatenates the three string literals —
+# adjacent literals on *separate lines* at module scope do NOT concatenate
+# implicitly; without the parens, only the first fragment survives and the
+# {format} placeholder is lost.
+_ATTRIBUTE_NOT_EXIST_ERROR = (
+    "trying to access an attribute of the GPU KV Cache "
+    "that does not exist for the format detected {format}. "
+    "A misalignment with the GPUKVFormat must be resolved"
+)
 
 
 class LayoutHints(TypedDict, total=False):

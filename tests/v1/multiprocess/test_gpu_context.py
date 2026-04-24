@@ -103,9 +103,7 @@ def _make_context_multi_group(
         nh = g["num_heads"]
         hs = g["head_size"]
         dt = g.get("dtype", torch.bfloat16)
-        kv_caches.extend(
-            torch.empty(2, 1, 1, nh, hs, dtype=dt) for _ in range(nl)
-        )
+        kv_caches.extend(torch.empty(2, 1, 1, nh, hs, dtype=dt) for _ in range(nl))
 
     ctx.num_layers_ = len(kv_caches)
     manager = KVLayerGroupsManager(
