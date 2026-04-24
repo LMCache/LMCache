@@ -15,6 +15,12 @@ steps:
                 imagePullPolicy: Never
                 env:
                   - { name: CUDA_LAUNCH_BLOCKING, value: "1" }
+                  # Redirect tempfile.mkdtemp() away from the pod's overlay
+                  # rootfs onto a host-backed ext4/xfs mount. GDS (cuFile)
+                  # fails on overlayfs/tmpfs with CU_FILE_IO_NOT_SUPPORTED
+                  # (err=5027); tests under storage_backend/test_gds_backend
+                  # need a real direct-I/O-capable filesystem.
+                  - { name: TMPDIR, value: /scratch }
                 resources:
                   requests:
                     cpu: "32"
@@ -29,9 +35,14 @@ steps:
                   # tests/v1/shm_allocator (allocates 5 GiB via SharedMemory).
                   # Mount an 8 GiB tmpfs to give shm tests headroom.
                   - { name: dshm, mountPath: /dev/shm }
+                  # GDS-capable scratch dir on the host's local NVMe. Paired
+                  # with TMPDIR=/scratch above so tempfile.mkdtemp() lands on
+                  # ext4/xfs instead of the pod's overlay rootfs.
+                  - { name: scratch, mountPath: /scratch }
             volumes:
               - { name: hf-cache, hostPath: { path: /data/huggingface, type: DirectoryOrCreate } }
               - { name: dshm, emptyDir: { medium: Memory, sizeLimit: 16Gi } }
+              - { name: scratch, hostPath: { path: /data/gds-scratch, type: DirectoryOrCreate } }
     artifact_paths:
       - "durations/test.html"
       - "coverage-test.xml"
