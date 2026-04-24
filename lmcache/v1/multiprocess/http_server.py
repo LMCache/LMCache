@@ -4,9 +4,7 @@ from contextlib import asynccontextmanager
 import argparse
 
 # Third Party
-from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
-import torch
+from fastapi import FastAPI
 import uvicorn
 
 # First Party

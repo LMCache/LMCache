@@ -543,6 +543,7 @@ class BlendEngineV2(MPCacheEngine):
         gpu_context: PlainGPUCacheContext,
         offset: int,
         event_ipc_handle: bytes,
+        start_event: Event | None = None,
     ) -> tuple[Any, dict]:
         """
         Helper function to perform GPU-to-CPU copy operations for storing chunks.
