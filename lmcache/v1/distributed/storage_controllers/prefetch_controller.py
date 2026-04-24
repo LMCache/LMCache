@@ -440,8 +440,7 @@ class PrefetchController(StorageControllerInterface):
                         self._advance_request(request, signaled_adapters)
                     except Exception:
                         logger.exception(
-                            "Unexpected error advancing in-flight prefetch "
-                            "request %d",
+                            "Unexpected error advancing in-flight prefetch request %d",
                             request.request_id,
                         )
 
