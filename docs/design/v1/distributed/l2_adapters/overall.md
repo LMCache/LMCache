@@ -170,14 +170,21 @@ _process_new_keys(keys)
   │     adapter.submit_store_task(keys, objs)
   │     Track as InFlightStoreTask
   │
-  ▼ (later, when adapter signals store_efd)
-_process_completed_tasks(adapter_index)
+  ▼ (later, for each adapter whose store_efd signaled)
+_drain_l2_store_completions(signaled_adapters)
+  │  adapter.pop_completed_store_tasks() → deposit success/failure
+  │  on each InFlightStoreTask.l2_store_result
   │
-  ├─ 4. adapter.pop_completed_store_tasks()
+  ▼
+_advance_request(task_key, task)  [state transition]
+  │  skip if l2_store_result still None
   │
-  ├─ 5. For each completed task:
-  │     L1Manager.finish_read(read_locked_keys)  → release read locks
-  │     If success: StorePolicy.select_l1_deletions(keys) → delete from L1
+  ▼
+_finalize_store(task_key, task)  [terminal execution]
+  │
+  ├─ 4. L1Manager.finish_read(read_locked_keys)  → release read locks
+  │
+  ├─ 5. If success: StorePolicy.select_l1_deletions(keys) → delete from L1
   │     If failure: log warning (best-effort, no retry)
   │
   ▼
@@ -296,8 +303,8 @@ _start_lookup_phase(request_id, keys, layout_desc)
   ├─ Submit lookup_and_lock_task(keys) to EVERY adapter
   │
   ▼ (wait for all adapter lookups to complete)
-_process_lookup_completions(adapter_index)
-  │  query each adapter's lookup result
+_advance_request(request, signaled_adapters)  [LOOKUP branch]
+  │  _poll_lookup_results(request, signaled_adapters[LOOKUP])
   │  when all_lookups_done():
   │
   ▼
@@ -319,7 +326,8 @@ _transition_to_load_phase(request)
   ├─ 6. Submit load_task(keys, objs) per adapter
   │
   ▼ (wait for all adapter loads to complete)
-_process_load_completions(adapter_index)
+_advance_request(request, signaled_adapters)  [PLAN_AND_LOAD branch]
+  │  _poll_load_results(request, signaled_adapters[PLAN_AND_LOAD])
   │  when all_loads_done():
   │
   ▼

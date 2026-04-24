@@ -17,7 +17,7 @@ fi
 source "${REPO_ROOT}/.buildkite/k3_tests/common_scripts/helpers.sh"
 check_gpu_health 80
 
-echo "--- :python: Installing vLLM (nightly cu128 wheels)"
+echo "--- :python: Installing vLLM (nightly wheels)"
 
 
 DEFAULT_VENV_BIN="/opt/venv/bin"
@@ -38,7 +38,6 @@ vllm_default_out="$("${DEFAULT_VENV_BIN}/python" -c "import vllm; print(vllm.__v
 }
 echo "vLLM in default venv (${DEFAULT_VENV_BIN}): ${vllm_default_out}"
 
-
 # If uv prompts because /workspace/.venv already exists: use the `--clear` flag or set UV_VENV_CLEAR=1
 # to skip the prompt and recreate; this script defaults to --allow-existing (reuse, non-interactive).
 UV_VENV_CLEAR="${UV_VENV_CLEAR:-0}"
@@ -55,8 +54,8 @@ TEST_VENV_BIN="/workspace/.venv/bin"
 export FLASHINFER_DISABLE_VERSION_CHECK=1
 
 "${UV_BIN}" pip install -p "${TEST_VENV_BIN}/python" -U vllm --pre \
-    --extra-index-url https://wheels.vllm.ai/nightly/cu128 \
-    --extra-index-url https://download.pytorch.org/whl/cu128 \
+    --extra-index-url "https://wheels.vllm.ai/nightly/cu129" \
+    --extra-index-url "https://download.pytorch.org/whl/cu129" \
     --index-strategy unsafe-best-match
 
 

@@ -1,6 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # First Party
+from lmcache.v1.mp_observability.subscribers.metrics.cb_server import (
+    BlendMetricsSubscriber,
+)
 from lmcache.v1.mp_observability.subscribers.metrics.l0_l1_throughput import (
     L0L1ThroughputSubscriber,
 )
@@ -15,6 +18,7 @@ from lmcache.v1.mp_observability.subscribers.metrics.l2 import L2MetricsSubscrib
 from lmcache.v1.mp_observability.subscribers.metrics.sm import SMMetricsSubscriber
 
 __all__ = [
+    "BlendMetricsSubscriber",
     "L0L1ThroughputSubscriber",
     "L0LifecycleSubscriber",
     "L1LifecycleSubscriber",
