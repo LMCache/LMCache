@@ -52,6 +52,17 @@ Source: ``lmcache/v1/multiprocess/config.py``
        ``default`` uses MPCacheEngine; ``blend`` uses BlendEngineV2
        for cross-request KV reuse.
        Choices: ``default``, ``blend``.
+   * - ``--runtime-plugin-locations``
+     - ``[]``
+     - Zero or more paths to runtime plugin scripts or directories to
+       launch alongside the server. Plugins are spawned by
+       ``MPRuntimePluginLauncher`` and receive the full server config
+       via the ``LMCACHE_RUNTIME_PLUGIN_CONFIG`` environment variable.
+   * - ``--runtime-plugin-config``
+     - ``"{}"``
+     - JSON string of extra key-value config forwarded to runtime
+       plugins via ``LMCACHE_RUNTIME_PLUGIN_EXTRA_CONFIG``. Example:
+       ``'{"plugin.frontend.heartbeat_url": "http://localhost:5000/heartbeat"}'``.
 
 Lookup Hash Logging
 -------------------
@@ -223,7 +234,9 @@ L2 adapters are configured via repeatable ``--l2-adapter <JSON>`` arguments.
 Each JSON object must include a ``"type"`` field that selects the adapter type.
 The order of ``--l2-adapter`` arguments determines the adapter order (cascade).
 
-Registered adapter types: ``nixl_store``, ``fs``, ``mock``.
+Registered adapter types: ``nixl_store``, ``nixl_store_dynamic``, ``fs``,
+``fs_native``, ``mock``, ``mooncake_store``, ``s3``, ``resp``, ``plugin``,
+``native_plugin``.
 
 ``nixl_store`` -- NIXL-based persistent storage
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -290,6 +303,34 @@ Example:
 .. code-block:: bash
 
     --l2-adapter '{"type": "mock", "max_size_gb": 256, "mock_bandwidth_gb": 10}'
+
+``s3`` -- S3-compatible object store
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+S3-backed L2 adapter using the AWS CRT (Common Runtime) for high-throughput
+transfers to AWS S3 or any S3-compatible endpoint. See
+:doc:`l2_storage` for details.
+
+Fields:
+
+- ``s3_endpoint`` *(required)*: Bucket URL, either ``"s3://<bucket>"`` or
+  the bare host form.
+- ``s3_region`` *(required)*: AWS region string.
+- ``s3_num_io_threads`` *(optional, default ``64``)*: CRT I/O threads.
+- ``s3_prefer_http2`` *(optional, default ``true``)*: Negotiate HTTP/2 via ALPN.
+- ``s3_enable_s3express`` *(optional, default ``false``)*: Enable S3 Express signing.
+- ``disable_tls`` *(optional, default ``false``)*: Bypass TLS (for
+  non-AWS HTTP endpoints).
+- ``aws_access_key_id`` / ``aws_secret_access_key`` *(optional)*:
+  Static credentials; omit to use the default credential provider chain.
+- ``max_capacity_gb`` *(optional, default ``0.0``)*: Aggregate capacity
+  used by ``get_usage()``. A value of ``0`` disables aggregate eviction.
+
+Example:
+
+.. code-block:: bash
+
+    --l2-adapter '{"type": "s3", "s3_endpoint": "s3://my-bucket", "s3_region": "us-west-2"}'
 
 Multiple adapters (cascade)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~
