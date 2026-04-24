@@ -3,7 +3,7 @@
 """OTel tracing subscriber for MP server operations.
 
 Creates a root ``"request"`` span per session wrapping all child spans.
-Opens at ``MP_REQUEST_START``; closes at ``MP_SESSION_END``, deferred until
+Opens at ``MP_REQUEST_START``; closes at ``MP_REQUEST_END``, deferred until
 any in-flight GPU store/retrieve callbacks complete.
 
 Accepts an optional :class:`~lmcache.v1.mp_observability.subscribers.tracing\
@@ -43,7 +43,7 @@ class MPServerTracingSubscriber(EventSubscriber):
     (``mp.lookup_prefetch``, ``mp.retrieve``, ``mp.store``) beneath it.
 
     The root span is opened eagerly at ``MP_REQUEST_START`` and closed at
-    ``MP_SESSION_END``, with deferral if GPU stores are still in flight.
+    ``MP_REQUEST_END``, with deferral if GPU stores are still in flight.
     """
 
     # Maps START event types to span names
@@ -81,14 +81,14 @@ class MPServerTracingSubscriber(EventSubscriber):
         self._pending: dict[str, tuple[Any, EventType]] = {}
 
         # session_id -> number of MP_STORE_SUBMITTED events without a
-        # matching MP_STORE_END; guards against SESSION_END racing GPU stores
+        # matching MP_STORE_END; guards against REQUEST_END racing GPU stores
         self._pending_store_count: dict[str, int] = {}
 
         # session_id -> number of MP_RETRIEVE_SUBMITTED events without a
-        # matching MP_RETRIEVE_END; guards against SESSION_END racing GPU retrieves
+        # matching MP_RETRIEVE_END; guards against REQUEST_END racing GPU retrieves
         self._pending_retrieve_count: dict[str, int] = {}
 
-        # session_id -> SESSION_END timestamp saved when stores/retrieves are in
+        # session_id -> REQUEST_END timestamp saved when stores/retrieves are in
         # flight; the last MP_STORE_END / MP_RETRIEVE_END uses this to close the
         # root span
         self._deferred_session_end_ts: dict[str, float] = {}
@@ -99,7 +99,7 @@ class MPServerTracingSubscriber(EventSubscriber):
             EventType.MP_REQUEST_START: self._on_request_start,
             EventType.MP_STORE_SUBMITTED: self._on_store_submitted,
             EventType.MP_RETRIEVE_SUBMITTED: self._on_retrieve_submitted,
-            EventType.MP_SESSION_END: self._on_session_end,
+            EventType.MP_REQUEST_END: self._on_session_end,
             EventType.MP_STORE_START: self._on_start,
             EventType.MP_STORE_END: self._on_end,
             EventType.MP_RETRIEVE_START: self._on_start,
@@ -151,7 +151,7 @@ class MPServerTracingSubscriber(EventSubscriber):
         """Increment the in-flight store counter for the session.
 
         Called CPU-synchronously before the GPU store is enqueued, ensuring
-        the counter is non-zero before ``MP_SESSION_END`` can arrive.
+        the counter is non-zero before ``MP_REQUEST_END`` can arrive.
 
         Args:
             event: ``MP_STORE_SUBMITTED`` event.
@@ -165,7 +165,7 @@ class MPServerTracingSubscriber(EventSubscriber):
         """Increment the in-flight retrieve counter for the session.
 
         Called CPU-synchronously before the GPU retrieve is enqueued, ensuring
-        the counter is non-zero before ``MP_SESSION_END`` can arrive.
+        the counter is non-zero before ``MP_REQUEST_END`` can arrive.
 
         Args:
             event: ``MP_RETRIEVE_SUBMITTED`` event.
@@ -179,7 +179,7 @@ class MPServerTracingSubscriber(EventSubscriber):
         """Close the root span, or defer if GPU stores/retrieves are still in flight.
 
         Args:
-            event: ``MP_SESSION_END`` event carrying the logical end timestamp.
+            event: ``MP_REQUEST_END`` event carrying the logical end timestamp.
         """
         if not _HAS_OTEL:
             return

@@ -63,7 +63,7 @@ thread processes them in strict order before any GPU-callback events.
 | `MP_REQUEST_START` | *(none)* | — | `MPServer.handle_request` — at request arrival, before any GPU work |
 | `MP_STORE_SUBMITTED` | `device` | `str` | `MPServer.store` — CPU-synchronous, before the GPU store is enqueued |
 | `MP_RETRIEVE_SUBMITTED` | `device` | `str` | `MPServer.retrieve` — CPU-synchronous, before the GPU retrieve is enqueued |
-| `MP_SESSION_END` | *(none)* | — | `MPServer.handle_request` — after all CPU work; may precede GPU callbacks |
+| `MP_REQUEST_END` | *(none)* | — | `MPServer.handle_request` — after all CPU work; may precede GPU callbacks |
 
 ---
 
@@ -96,3 +96,39 @@ inside `metadata` discriminates ops.
 | EventType | Metadata keys | Types |
 |---|---|---|
 | `TRACE_CALL` | `qualname`, `args` | `str`, `dict[str, Any]` (codec-encoded; see `lmcache.v1.mp_observability.trace.codecs`) |
+
+---
+
+## Blend Server Lifecycle Sentinels
+
+CPU-synchronous sentinels published by `blend_server_v2.py` to bracket
+request scope and guard GPU callback races.  Published via `EventBus.publish()`
+(not `publish_on_stream`).
+
+| EventType | Metadata keys | Types | Published by / when |
+|---|---|---|---|
+| `CB_REQUEST_START` | *(none)* | — | `BlendEngineV2.cb_lookup_pre_computed` — at request arrival |
+| `CB_STORE_PRE_COMPUTED_SUBMITTED` | `instance_id` | `int` | `BlendEngineV2.cb_store_pre_computed` — before GPU store enqueue |
+| `CB_RETRIEVE_SUBMITTED` | `instance_id` | `int` | `BlendEngineV2.cb_retrieve_pre_computed` — before GPU retrieve enqueue |
+| `CB_STORE_FINAL_SUBMITTED` | `instance_id` | `int` | `BlendEngineV2.cb_store_final` — before GPU store enqueue |
+| `CB_REQUEST_END` | *(none)* | — | `BlendEngineV2.cb_lookup_pre_computed` (early return: no matches or no GPU context) **or** `BlendEngineV2.cb_store_final` — after SUBMITTED, before GPU work |
+
+---
+
+## Blend Server Events
+
+These events use `session_id` on the `Event` dataclass (sourced from
+`IPCCacheEngineKey.request_id`) to correlate START/END pairs.
+
+| EventType | Metadata keys | Types |
+|---|---|---|
+| `CB_LOOKUP_START` | `num_tokens` | `int` |
+| `CB_LOOKUP_END` | `num_tokens`, `fingerprint_hits`, `storage_hits`, `stale_chunks`, `no_gpu_context` | `int`, `int`, `int`, `int`, `bool` |
+| `CB_STORE_PRE_COMPUTED_START` | `instance_id`, `num_tokens` | `int`, `int` |
+| `CB_STORE_PRE_COMPUTED_END` | `instance_id`, `num_tokens`, `stored_chunks`, `success` | `int`, `int`, `int`, `bool` |
+| `CB_RETRIEVE_START` | `instance_id`, `num_chunks` | `int`, `int` |
+| `CB_RETRIEVE_END` | `instance_id`, `num_chunks`, `success` | `int`, `int`, `bool` |
+| `CB_STORE_FINAL_START` | `instance_id`, `num_tokens` | `int`, `int` |
+| `CB_STORE_FINAL_END` | `instance_id`, `num_tokens`, `stored_chunks`, `success` | `int`, `int`, `int`, `bool` |
+| `CB_FINGERPRINTS_REGISTERED` | `num_chunks`, `num_tokens` | `int`, `int` |
+| `CB_CHUNKS_EVICTED` | `num_chunks` | `int` |
