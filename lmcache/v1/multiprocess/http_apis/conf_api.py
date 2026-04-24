@@ -1,12 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from dataclasses import asdict
+from dataclasses import is_dataclass
 from typing import Any
 import json
 
 # Third Party
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
+
+# First Party
+from lmcache.v1.utils.json_utils import make_json_safe, safe_asdict
 
 router = APIRouter()
 
@@ -22,22 +25,23 @@ class _IndentedJSONResponse(JSONResponse):
         ).encode("utf-8")
 
 
-def _make_json_safe(obj: Any) -> Any:
-    """Recursively ensure all values are JSON-serializable."""
-    if isinstance(obj, dict):
-        return {k: _make_json_safe(v) for k, v in obj.items()}
-    if isinstance(obj, (list, tuple)):
-        return [_make_json_safe(v) for v in obj]
-    if isinstance(obj, (str, int, float, bool, type(None))):
-        return obj
-    return str(obj)
-
-
 @router.get("/conf")
 async def conf(request: Request) -> Any:
     """
     Return all server configurations (mp, storage_manager,
     observability) as a single JSON object.
+
+    Args:
+        request (Request): The incoming HTTP request; its
+            ``app.state.configs`` mapping is serialized.
+
+    Returns:
+        Any: A JSON response whose body is a dict keyed by
+        config name. Returns HTTP 503 if ``configs`` is not
+        initialized yet.
+
+    Exceptions:
+        None.
     """
     configs = getattr(request.app.state, "configs", None)
     if configs is None:
@@ -47,8 +51,8 @@ async def conf(request: Request) -> Any:
         )
     result = {}
     for name, cfg in configs.items():
-        if hasattr(cfg, "__dataclass_fields__"):
-            result[name] = _make_json_safe(asdict(cfg))
+        if is_dataclass(cfg):
+            result[name] = safe_asdict(cfg)
         else:
-            result[name] = _make_json_safe(cfg)
+            result[name] = make_json_safe(cfg)
     return _IndentedJSONResponse(content=result)
