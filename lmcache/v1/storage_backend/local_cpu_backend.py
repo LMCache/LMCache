@@ -661,20 +661,22 @@ class LocalCPUBackend(AllocatorBackendInterface):
                         wait_other_requests = False
                         for evict_key in evict_keys:
                             evict_key_all_layer = evict_key.split_layers(batch_size)
-
-                            # TODO(Jiayi): batched allocate is not supported through
-                            # `batched_remove`. Therefore, features like usage tracking
-                            # is not supported.
-                            old_mem_objs = []
+                            # PATCH: drop ref via ref_count_down() instead of calling
+                            # allocator.batched_free() directly. The memory_management
+                            # module docstring says: "this function shouldn't be explicitly
+                            # called. Instead, use `ref_count_down` to decrease ref count."
+                            # Skipping it leaks MemoryObj wrappers (ref_count stuck at 1)
+                            # and can corrupt buffers if any other holder still references
+                            # them at eviction time.
+                            evicted_count = 0
                             for key in evict_key_all_layer:
-                                old_mem_objs.append(self.hot_cache[key])
-                                self.cache_policy.update_on_force_evict(key)
-                                self.hot_cache.pop(key, None)
-
-                            self.memory_allocator.batched_free(old_mem_objs)
-
+                                memory_obj = self.hot_cache.pop(key, None)
+                                if memory_obj is not None:
+                                    self.cache_policy.update_on_force_evict(key)
+                                    memory_obj.ref_count_down()
+                                    evicted_count += 1
                             logger.debug(
-                                f"Evicting {len(old_mem_objs)} chunks from cpu memory"
+                                f"Evicting {evicted_count} chunks from cpu memory"
                             )
                     else:
                         self.stats_monitor.update_local_cpu_evict_failed_count(
