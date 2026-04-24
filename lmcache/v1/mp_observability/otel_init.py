@@ -15,6 +15,11 @@ from __future__ import annotations
 
 # Standard
 from collections.abc import Callable
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    # Third Party
+    from opentelemetry.sdk.resources import Resource
 
 # First Party
 from lmcache.logging import init_logger
@@ -22,9 +27,24 @@ from lmcache.logging import init_logger
 logger = init_logger(__name__)
 
 
+def _build_resource(resource_attributes: dict[str, str] | None) -> "Resource":
+    """Build an OTel ``Resource`` from the given attribute dict.
+
+    Returns an empty ``Resource`` when *resource_attributes* is empty or
+    ``None`` so that telemetry carries no stale process-level tags.
+    """
+    # Third Party
+    from opentelemetry.sdk.resources import Resource
+
+    if not resource_attributes:
+        return Resource.create({})
+    return Resource.create(dict(resource_attributes))
+
+
 def init_otel_metrics(
     otlp_endpoint: str | None = None,
     prometheus_port: int | None = None,
+    resource_attributes: dict[str, str] | None = None,
 ) -> None:
     """Set up the OpenTelemetry MeterProvider.
 
@@ -35,10 +55,17 @@ def init_otel_metrics(
         prometheus_port: Port for the fallback Prometheus ``/metrics``
             endpoint.  Only used when *otlp_endpoint* is ``None``.
             Defaults to 9090.
+        resource_attributes: Optional ``{attr_name: value}`` map attached
+            to the ``MeterProvider`` ``Resource``.  Every metric emitted
+            through the provider carries these attributes.  Intended for
+            process-level identity (e.g. ``service.instance.id``) — never
+            for per-request tags.
     """
     # Third Party
     from opentelemetry import metrics
     from opentelemetry.sdk.metrics import MeterProvider
+
+    resource = _build_resource(resource_attributes)
 
     if otlp_endpoint is not None:
         # OTLP push mode
@@ -52,11 +79,12 @@ def init_otel_metrics(
 
         exporter = OTLPMetricExporter(endpoint=otlp_endpoint, insecure=True)
         reader = PeriodicExportingMetricReader(exporter, export_interval_millis=10000)
-        provider = MeterProvider(metric_readers=[reader])
+        provider = MeterProvider(metric_readers=[reader], resource=resource)
         metrics.set_meter_provider(provider)
         logger.info(
-            "OTel MeterProvider initialised with OTLP exporter (%s)",
+            "OTel MeterProvider initialised with OTLP exporter (%s), resource=%s",
             otlp_endpoint,
+            dict(resource.attributes),
         )
     else:
         # Prometheus pull fallback — no collector needed
@@ -68,17 +96,21 @@ def init_otel_metrics(
             prometheus_port = 9090
 
         reader = PrometheusMetricReader()
-        provider = MeterProvider(metric_readers=[reader])
+        provider = MeterProvider(metric_readers=[reader], resource=resource)
         metrics.set_meter_provider(provider)
         prometheus_client.start_http_server(prometheus_port)
         logger.info(
             "OTel MeterProvider initialised with Prometheus fallback "
-            "(http://0.0.0.0:%d/metrics)",
+            "(http://0.0.0.0:%d/metrics), resource=%s",
             prometheus_port,
+            dict(resource.attributes),
         )
 
 
-def init_otel_tracing(otlp_endpoint: str | None = None) -> None:
+def init_otel_tracing(
+    otlp_endpoint: str | None = None,
+    resource_attributes: dict[str, str] | None = None,
+) -> None:
     """Set up the OpenTelemetry TracerProvider with an OTLP exporter.
 
     Tracing requires an OTLP endpoint — there is no local fallback.
@@ -87,6 +119,9 @@ def init_otel_tracing(otlp_endpoint: str | None = None) -> None:
     Args:
         otlp_endpoint: OTLP gRPC endpoint.  When ``None``, tracing
             init is skipped (no-op).
+        resource_attributes: Optional ``{attr_name: value}`` map attached
+            to the ``TracerProvider`` ``Resource``.  Every span emitted
+            through the provider carries these attributes.
     """
     if otlp_endpoint is None:
         logger.debug("No OTLP endpoint configured, skipping tracing init")
@@ -100,13 +135,15 @@ def init_otel_tracing(otlp_endpoint: str | None = None) -> None:
     from opentelemetry.sdk.trace import TracerProvider
     from opentelemetry.sdk.trace.export import BatchSpanProcessor
 
+    resource = _build_resource(resource_attributes)
     exporter = OTLPSpanExporter(endpoint=otlp_endpoint, insecure=True)
-    provider = TracerProvider()
+    provider = TracerProvider(resource=resource)
     provider.add_span_processor(BatchSpanProcessor(exporter))
     trace.set_tracer_provider(provider)
     logger.info(
-        "OTel TracerProvider initialised with OTLP exporter (%s)",
+        "OTel TracerProvider initialised with OTLP exporter (%s), resource=%s",
         otlp_endpoint,
+        dict(resource.attributes),
     )
 
 

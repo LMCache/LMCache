@@ -1458,7 +1458,7 @@ def test_multi_device_backends(save_unfull_chunk, autorelease_v1):
                 "local_cpu": True,
                 "max_local_cpu_size": 5,
                 "gds_path": temp_dir,
-                "cufile_buffer_size": 1024,
+                "gds_buffer_size": 1024,
                 "save_unfull_chunk": save_unfull_chunk,
                 "extra_config": {
                     "use_direct_io": True,

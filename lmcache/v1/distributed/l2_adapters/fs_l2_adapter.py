@@ -411,9 +411,11 @@ class FSL2Adapter(L2AdapterInterface):
         # Not implemented for the filesystem adapter.
         pass
 
-    def get_usage(self) -> tuple[float, float]:
-        # Not implemented for the filesystem adapter.
-        return (-1.0, -1.0)
+    # ``get_usage()`` is inherited from ``L2AdapterInterface``. The FS
+    # adapter declares no max capacity (default 0) so ``supports_global_eviction``
+    # returns ``False`` and ``usage_fraction == -1.0`` — the eviction
+    # controller treats this as "no eviction signal" and skips the
+    # adapter entirely.
 
     # ------------------------------------------------------------------
     # Cleanup

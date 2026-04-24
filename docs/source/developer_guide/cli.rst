@@ -26,8 +26,6 @@ File Layout
    lmcache/cli/
    ├── __init__.py
    ├── main.py              # Entry point
-   ├── prompt.py            # Prompt placeholder expansion
-   ├── request.py           # OpenAI-compatible HTTP requests
    ├── metrics/             # Metrics system
    │   ├── __init__.py      # Re-exports
    │   ├── metrics.py       # Metrics collector
@@ -41,7 +39,10 @@ File Layout
        ├── kvcache.py       # lmcache kvcache
        ├── mock.py          # Example command
        ├── ping.py          # lmcache ping
-       ├── query.py         # lmcache query engine and kvcache
+       ├── query/           # lmcache query
+       │   ├── __init__.py  # QueryCommand
+       │   ├── prompt.py    # Prompt placeholder expansion
+       │   └── request.py   # OpenAI-compatible HTTP requests
        └── server.py        # lmcache server
 
 Step-by-Step: Adding a New Command
