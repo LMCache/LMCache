@@ -576,7 +576,7 @@ class Hf3fsFile:
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.close()
         if exc_type:
-            logger.error(f"Hf3fsFile {self.fname} closed with exception: {exc_val}")
+            logger.error(f"Hf3fsFile closed with exception: {exc_val}")
         return False  # False, exceptions are not suppressed
 
     @staticmethod
