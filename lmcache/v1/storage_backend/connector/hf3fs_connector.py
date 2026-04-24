@@ -471,8 +471,9 @@ class Hf3fsClient:
         try:
             done = self.ior_read.submit().wait(min_results=1)[0]
         except Exception as e:
-            logger.error(f"{self.client_name} _read submit failed: {e}")
-            return total_bytes_read
+            logger.error(f"{self.client_name} read submit failed: {e}")
+            raise RuntimeError(f"{self.client_name} read submit failed") from e
+
         total_bytes_read = done.result
 
         # read from shm
@@ -490,6 +491,8 @@ class Hf3fsClient:
                 bytes_read = self._read(
                     fd, buffer[offset : offset + sub_len], sub_len, offset + start
                 )
+                if bytes_read != sub_len
+                    break
                 total_bytes_read += bytes_read
                 offset += bytes_read
 
@@ -515,7 +518,7 @@ class Hf3fsClient:
             done = self.ior_write.submit().wait(min_results=1)[0]
         except Exception as e:
             logger.error(f"{self.client_name} write submit failed: {e}")
-            return total_bytes_written
+            raise RuntimeError(f"{self.client_name} write submit failed") from e
 
         total_bytes_written = done.result
         return total_bytes_written
@@ -531,14 +534,16 @@ class Hf3fsClient:
                 written = self._write(
                     fd, buffer[offset : offset + sub_len], sub_len, offset + start
                 )
+                if written != sub_len
+                    break
                 total_bytes_written += written
                 offset += written
             if total_bytes_written != length:
                 logger.error(
-                    f"{self.client_name} write: requested {sub_len}, got {written}"
+                    f"{self.client_name} write: requested {length}, got {total_bytes_written}"
                 )
                 raise RuntimeError(
-                    f"{self.client_name} write: requested {sub_len}, got {written}"
+                    f"{self.client_name} write: requested {length}, got {total_bytes_written}"
                 )
 
             return total_bytes_written
