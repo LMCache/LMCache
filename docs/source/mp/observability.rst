@@ -359,6 +359,26 @@ per-GPU slicing in Prometheus (e.g.
      - Histogram
      - CPU→GPU (L1→L0) load throughput in GB/s per sampled request.
 
+Engine Counters
+~~~~~~~~~~~~~~~
+
+Worker-scoped counters tied to what the MP server delivers back to each
+vLLM worker via ``retrieve()``.  Labeled by ``worker_id`` (the vLLM
+worker instance id) — distinct from any scheduler-scoped id that may
+appear on other metrics.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 40 25 35
+
+   * - Metric
+     - Type
+     - Description
+   * - ``lmcache_mp.num_chunks_loaded``
+     - Counter (attr: ``worker_id``)
+     - Total number of LMCache chunks loaded into the engine, summed
+       over all ``retrieve()`` completions and labeled per vLLM worker.
+
 Observable Gauges
 ~~~~~~~~~~~~~~~~~
 

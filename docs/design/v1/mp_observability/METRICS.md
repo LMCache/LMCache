@@ -225,6 +225,22 @@ Are some workers or GPUs underperforming?
 
 ---
 
+## Engine Counters
+
+Worker-scoped counters tied to what the MP server delivers back to each
+vLLM worker.  Labeled by `worker_id` — the vLLM worker instance id,
+distinct from any scheduler-scoped id used elsewhere.
+
+| OTel metric name | Prometheus name | Type | Source event | Calculation |
+|---|---|---|---|---|
+| `lmcache_mp.num_chunks_loaded` | `lmcache_mp_num_chunks_loaded_total` | Counter (attr: `worker_id`) | `MP_RETRIEVE_END` | `+retrieved_count` per event |
+
+**What it answers:** How many LMCache chunks is each vLLM worker loading
+from LMCache into its engine?  Compare across workers to spot uneven
+demand or underserved ranks.
+
+---
+
 ## MPCacheEngine Observable Gauges
 
 These metrics are registered directly via `register_gauge` (pull-based OTel
