@@ -388,7 +388,7 @@ jobs:
             - name: Build lmcache/vllm-openai container image (cu12.9)
               run: |
                 docker build \
-                --build-arg BASE_IMAGE=nvcr.io/nvidia/cuda-dl-base:25.06-cuda12.9-devel-ubuntu24.04 \
+                --build-arg BASE_IMAGE=nvcr.io/nvidia/cuda-dl-base:25.05-cuda12.9-devel-ubuntu24.04 \
                 --build-arg CUDA_VERSION=12.9 \
                 --target image-release \
                 --tag lmcache/vllm-openai:latest --tag lmcache/vllm-openai:${{ env.LATEST_TAG }} \
@@ -423,7 +423,7 @@ jobs:
             - name: Build lmcache/standalone container image (cu12.9)
               run: |
                 docker build \
-                --build-arg BASE_IMAGE=nvcr.io/nvidia/cuda-dl-base:25.06-cuda12.9-devel-ubuntu24.04 \
+                --build-arg BASE_IMAGE=nvcr.io/nvidia/cuda-dl-base:25.05-cuda12.9-devel-ubuntu24.04 \
                 --build-arg CUDA_VERSION=12.9 \
                 --target lmcache-final \
                 --tag lmcache/standalone:latest --tag lmcache/standalone:${{ env.LATEST_TAG }} \
