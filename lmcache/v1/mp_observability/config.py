@@ -324,6 +324,7 @@ def init_observability(obs_config: ObservabilityConfig) -> EventBus:
     if obs_config.metrics_enabled:
         # First Party
         from lmcache.v1.mp_observability.subscribers.metrics import (
+            BlendMetricsSubscriber,
             L0LifecycleSubscriber,
             L1LifecycleSubscriber,
             L1MetricsSubscriber,
@@ -337,10 +338,12 @@ def init_observability(obs_config: ObservabilityConfig) -> EventBus:
         bus.register_subscriber(L1LifecycleSubscriber(sample_rate=sample_rate))
         bus.register_subscriber(L2MetricsSubscriber())
         bus.register_subscriber(SMMetricsSubscriber())
+        bus.register_subscriber(BlendMetricsSubscriber())
 
     if obs_config.logging_enabled:
         # First Party
         from lmcache.v1.mp_observability.subscribers.logging import (
+            BlendLoggingSubscriber,
             L1LoggingSubscriber,
             L2LoggingSubscriber,
             MPServerLoggingSubscriber,
@@ -351,15 +354,19 @@ def init_observability(obs_config: ObservabilityConfig) -> EventBus:
         bus.register_subscriber(L1LoggingSubscriber())
         bus.register_subscriber(L2LoggingSubscriber())
         bus.register_subscriber(SMLoggingSubscriber())
+        bus.register_subscriber(BlendLoggingSubscriber())
 
     if obs_config.tracing_enabled:
         # First Party
         from lmcache.v1.mp_observability.subscribers.tracing import (
+            BlendTracingSubscriber,
             MPServerTracingSubscriber,
             get_span_registry,
         )
 
-        bus.register_subscriber(MPServerTracingSubscriber(get_span_registry()))
+        registry = get_span_registry()
+        bus.register_subscriber(MPServerTracingSubscriber(registry))
+        bus.register_subscriber(BlendTracingSubscriber(registry))
 
     # Lookup hash file logging (independent of the logging_enabled flag —
     # it has its own enable gate via output_dir).

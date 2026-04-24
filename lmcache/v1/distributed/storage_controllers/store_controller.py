@@ -12,6 +12,7 @@ The controller runs a background thread with an event-driven loop that:
 # Standard
 from collections import defaultdict
 from dataclasses import dataclass
+import enum
 import os
 import select
 import threading
@@ -143,6 +144,15 @@ class StoreListener(L1ManagerListener):
         os.close(self._event_fd)
 
 
+class StorePhase(enum.Enum):
+    """Phases a store task may be in. Currently there is only an
+    L2_STORE phase; new phases (e.g. verify, ack) would be added here and
+    threaded through ``signaled_adapters`` without changing
+    ``_advance_request``'s signature."""
+
+    L2_STORE = enum.auto()
+
+
 @dataclass
 class InFlightStoreTask:
     """
@@ -159,6 +169,9 @@ class InFlightStoreTask:
     read_locked_keys: list[ObjectKey]
     """The subset of keys for which reserve_read succeeded
     (i.e., keys holding an L1 read lock that must be released)."""
+
+    l2_store_result: bool | None = None
+    """L2 outcome (True=success, False=failure, None=still in flight)."""
 
 
 # Main class
@@ -276,6 +289,9 @@ class StoreController(StorageControllerInterface):
         while not self._stop_flag.is_set():
             ready = poller.poll(STORE_LOOP_POLL_TIMEOUT_MS)
 
+            signaled_adapters: dict[StorePhase, set[int]] = {
+                phase: set() for phase in StorePhase
+            }
             for fd, events in ready:
                 if not (events & select.POLLIN):
                     continue
@@ -291,14 +307,33 @@ class StoreController(StorageControllerInterface):
                         keys = self._listener.pop_pending_keys()
                         if keys:
                             self._process_new_keys(keys)
-                    elif fd in self._efd_to_adapter_index:
-                        adapter_index = self._efd_to_adapter_index[fd]
-                        self._process_completed_tasks(adapter_index)
+                    else:
+                        adapter_idx = self._efd_to_adapter_index.get(fd)
+                        if adapter_idx is not None:
+                            signaled_adapters[StorePhase.L2_STORE].add(adapter_idx)
                 except Exception:
                     logger.exception(
                         "Unexpected error in store loop while processing fd %d",
                         fd,
                     )
+
+            if any(signaled_adapters.values()):
+                try:
+                    self._drain_l2_store_completions(
+                        signaled_adapters[StorePhase.L2_STORE]
+                    )
+                except Exception:
+                    logger.exception("Unexpected error draining L2 store completions")
+                for task_key, task in list(self._in_flight_tasks.items()):
+                    try:
+                        self._advance_request(task_key, task)
+                    except Exception:
+                        logger.exception(
+                            "Unexpected error advancing in-flight store task "
+                            "(adapter %d, task %d)",
+                            task_key[0],
+                            task_key[1],
+                        )
 
     def _process_new_keys(self, keys: list[ObjectKey]) -> None:
         """
@@ -387,78 +422,87 @@ class StoreController(StorageControllerInterface):
                 len(successful_keys),
             )
 
-    def _process_completed_tasks(self, adapter_index: int) -> None:
-        """
-        Process completed store tasks for a given adapter.
+    def _drain_l2_store_completions(self, signaled_adapters: set[int]) -> None:
+        """Deposit each signaled adapter's L2 outcomes onto their in-flight
+        tasks, to be consumed by ``_advance_request``."""
+        for adapter_index in signaled_adapters:
+            adapter = self._l2_adapters[adapter_index]
+            completed = adapter.pop_completed_store_tasks()
+            for task_id, success in completed.items():
+                task = self._in_flight_tasks.get((adapter_index, task_id))
+                if task is None:
+                    logger.warning(
+                        "Completed store task %d (adapter %d) not found in tracking.",
+                        task_id,
+                        adapter_index,
+                    )
+                    continue
+                task.l2_store_result = success
 
-        1. Pop all completed tasks from the adapter.
-        2. Release L1 read locks for each task.
-        3. If the task succeeded, ask the policy which keys to
-           delete from L1 and delete them.
-        4. Remove the task from in-flight tracking.
+    def _advance_request(
+        self,
+        task_key: tuple[int, L2TaskId],
+        task: InFlightStoreTask,
+    ) -> None:
+        """State-transition dispatcher. Delegate to ``_finalize_store``
+        once the L2 outcome has been recorded by
+        ``_drain_l2_store_completions``."""
+        if task.l2_store_result is None:
+            return
+        self._finalize_store(task_key, task)
 
-        Args:
-            adapter_index (int): Index of the adapter whose eventfd
-                was signaled.
-        """
-        adapter = self._l2_adapters[adapter_index]
-        completed = adapter.pop_completed_store_tasks()
-
+    def _finalize_store(
+        self,
+        task_key: tuple[int, L2TaskId],
+        task: InFlightStoreTask,
+    ) -> None:
+        """Release read locks, publish completion, apply policy L1 deletions
+        on success, and remove the tracking entry."""
+        adapter_index, task_id = task_key
         l1_mgr = self._l1_manager
+        success = task.l2_store_result
 
-        for task_id, success in completed.items():
-            composite_key = (adapter_index, task_id)
-            task = self._in_flight_tasks.pop(composite_key, None)
-            if task is not None:
-                self._status_in_flight_count -= 1
-            if task is None:
-                logger.warning(
-                    "Completed store task %d (adapter %d) not found in tracking.",
-                    task_id,
-                    adapter_index,
-                )
-                continue
+        l1_mgr.finish_read(task.read_locked_keys)
+        del self._in_flight_tasks[task_key]
+        self._status_in_flight_count -= 1
 
-            # Always release read locks
-            l1_mgr.finish_read(task.read_locked_keys)
-
-            if success:
-                self._event_bus.publish(
-                    Event(
-                        event_type=EventType.L2_STORE_COMPLETED,
-                        metadata={
-                            "adapter_index": adapter_index,
-                            "succeeded_count": len(task.keys),
-                            "failed_count": 0,
-                        },
-                    )
+        if success:
+            self._event_bus.publish(
+                Event(
+                    event_type=EventType.L2_STORE_COMPLETED,
+                    metadata={
+                        "adapter_index": adapter_index,
+                        "succeeded_count": len(task.keys),
+                        "failed_count": 0,
+                    },
                 )
-                logger.debug(
-                    "L2 store task %d completed: adapter %d, %d keys.",
-                    task_id,
-                    adapter_index,
-                    len(task.keys),
+            )
+            logger.debug(
+                "L2 store task %d completed: adapter %d, %d keys.",
+                task_id,
+                adapter_index,
+                len(task.keys),
+            )
+            delete_keys = self._policy.select_l1_deletions(task.keys)
+            if delete_keys:
+                l1_mgr.delete(delete_keys)
+        else:
+            self._event_bus.publish(
+                Event(
+                    event_type=EventType.L2_STORE_COMPLETED,
+                    metadata={
+                        "adapter_index": adapter_index,
+                        "succeeded_count": 0,
+                        "failed_count": len(task.keys),
+                    },
                 )
-                delete_keys = self._policy.select_l1_deletions(task.keys)
-                if delete_keys:
-                    l1_mgr.delete(delete_keys)
-            else:
-                self._event_bus.publish(
-                    Event(
-                        event_type=EventType.L2_STORE_COMPLETED,
-                        metadata={
-                            "adapter_index": adapter_index,
-                            "succeeded_count": 0,
-                            "failed_count": len(task.keys),
-                        },
-                    )
-                )
-                logger.warning(
-                    "Store task %d to adapter %d failed for keys: %s",
-                    task_id,
-                    adapter_index,
-                    task.keys,
-                )
+            )
+            logger.warning(
+                "Store task %d to adapter %d failed for keys: %s",
+                task_id,
+                adapter_index,
+                task.keys,
+            )
 
     def _cleanup_in_flight_tasks(self) -> None:
         """

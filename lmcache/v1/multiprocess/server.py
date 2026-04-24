@@ -305,7 +305,7 @@ class MPCacheEngine:
 
             # CPU-synchronous sentinel: a GPU store is about to be enqueued.
             # Must be published via publish() (not publish_on_stream) so the
-            # drain thread sees it before MP_SESSION_END can race MP_STORE_END.
+            # drain thread sees it before MP_REQUEST_END can race MP_STORE_END.
             self._event_bus.publish(
                 Event(
                     event_type=EventType.MP_STORE_SUBMITTED,
@@ -440,7 +440,7 @@ class MPCacheEngine:
 
         # CPU-synchronous sentinel: a GPU retrieve is about to be enqueued.
         # Must be published via publish() (not publish_on_stream) so the
-        # drain thread sees it before MP_SESSION_END can race MP_RETRIEVE_END.
+        # drain thread sees it before MP_REQUEST_END can race MP_RETRIEVE_END.
         self._event_bus.publish(
             Event(
                 event_type=EventType.MP_RETRIEVE_SUBMITTED,
@@ -862,7 +862,7 @@ class MPCacheEngine:
         session = self.session_manager.remove(request_id)
         self._event_bus.publish(
             Event(
-                event_type=EventType.MP_SESSION_END,
+                event_type=EventType.MP_REQUEST_END,
                 session_id=request_id,
             )
         )
