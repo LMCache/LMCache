@@ -15,6 +15,15 @@ steps:
                 imagePullPolicy: Never
                 env:
                   - { name: CUDA_LAUNCH_BLOCKING, value: "1" }
+                  # Force cuFile into POSIX-fallback mode. The host runs the
+                  # k3s master, so we can't reboot to swap proprietary NVIDIA
+                  # kernel modules for the open variant that nvidia-fs needs.
+                  # Compat mode routes cuFile through pread/pwrite + staging
+                  # buffer — API surface is identical, only DMA performance
+                  # is sacrificed. Unit tests validate backend correctness,
+                  # not GDS throughput, so this is a clean trade.
+                  - { name: CUFILE_FORCE_COMPAT_MODE, value: "true" }
+                  - { name: CUFILE_ALLOW_COMPAT_MODE, value: "true" }
                 resources:
                   requests:
                     cpu: "32"
