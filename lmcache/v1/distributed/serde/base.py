@@ -101,22 +101,25 @@ class Deserializer(abc.ABC):
 
 
 # ============================================================================
-# Async interface (controller-facing)
+# Async interface (consumed by SerdeL2AdapterWrapper)
 # ============================================================================
 
 
 class SerdeProcessor(abc.ABC):
     """Async serde processor with eventfd-based completion notification.
 
-    Provides non-blocking serialize/deserialize with the same
-    submit -> eventfd -> query pattern as L2 adapters.
+    Provides non-blocking serialize / deserialize with the same
+    ``submit → eventfd → query`` pattern as L2 adapters.
 
-    The serialize event fd is consumed by the store controller.
-    The deserialize event fd is consumed by the prefetch controller.
-    They must be distinct file descriptors.
+    The serialize and deserialize event fds are consumed by
+    :class:`lmcache.v1.distributed.l2_adapters.serde_wrapper.SerdeL2AdapterWrapper`'s
+    internal thread, which chains serialize → inner.store on the store
+    path and inner.load → deserialize on the load path so controllers
+    see a plain L2 adapter. The two fds must be distinct file
+    descriptors so the wrapper's poll loop can disambiguate completions.
 
     Users should NOT implement this directly. Instead, implement
-    Serializer/Deserializer and wrap with AsyncSerdeProcessor.
+    ``Serializer`` / ``Deserializer`` and wrap with ``AsyncSerdeProcessor``.
     """
 
     # ----- Event fds -----

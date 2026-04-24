@@ -30,7 +30,7 @@ invariants don't need to change.
 from __future__ import annotations
 
 # Standard
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import enum
 import os
 import select
@@ -73,8 +73,9 @@ class _StoreTaskState:
     temp_keys: list[ObjectKey]
     temp_objs: list[MemoryObj]
     phase: _StorePhase
-    serde_task_id: SerdeTaskId | None = None
-    inner_task_id: L2TaskId | None = None
+    """SERIALIZE while temps are write-locked; INNER_STORE after the
+    serialize→store transition. Only read on shutdown to pick the right
+    lock-release path; assignment is done under ``self._lock``."""
 
 
 @dataclass
@@ -84,9 +85,12 @@ class _LoadTaskState:
     dst_objs: list[MemoryObj]
     temp_keys: list[ObjectKey]
     temp_objs: list[MemoryObj]
-    inner_task_id: L2TaskId | None = None
-    serde_task_id: SerdeTaskId | None = None
-    load_bitmap: Bitmap | None = None
+    load_bitmap: Bitmap = field(default_factory=lambda: Bitmap(0))
+    """Inner adapter's per-key load bitmap; populated in
+    ``_drain_inner_load`` before the task transitions to the deserialize
+    stage. ``Bitmap(0)`` means "not populated yet" — by the time
+    ``_drain_deserialize`` reads it, this placeholder has been
+    overwritten with the real bitmap."""
 
 
 class SerdeL2AdapterWrapper(L2AdapterInterface):
@@ -198,7 +202,6 @@ class SerdeL2AdapterWrapper(L2AdapterInterface):
             temp_keys=temp_keys,
             temp_objs=temp_objs,
             phase=_StorePhase.SERIALIZE,
-            serde_task_id=serde_task_id,
         )
         with self._lock:
             self._store_tasks[wrapped_id] = state
@@ -268,7 +271,6 @@ class SerdeL2AdapterWrapper(L2AdapterInterface):
             dst_objs=list(objects),
             temp_keys=temp_keys,
             temp_objs=temp_objs,
-            inner_task_id=inner_task_id,
         )
         with self._lock:
             self._load_tasks[wrapped_id] = state
@@ -325,6 +327,10 @@ class SerdeL2AdapterWrapper(L2AdapterInterface):
                 write_locked.extend(load.temp_keys)
             self._store_tasks.clear()
             self._load_tasks.clear()
+            self._serde_to_store.clear()
+            self._inner_to_store.clear()
+            self._inner_to_load.clear()
+            self._serde_to_load.clear()
 
         if write_locked:
             try:
@@ -382,9 +388,7 @@ class SerdeL2AdapterWrapper(L2AdapterInterface):
                     elif fd == deserialize_efd:
                         self._drain_deserialize()
                 except Exception:
-                    logger.exception(
-                        "Serde wrapper: internal loop error on fd %d", fd
-                    )
+                    logger.exception("Serde wrapper: internal loop error on fd %d", fd)
 
     def _drain_serialize(self) -> None:
         """Poll pending serialize tasks; on success submit inner store."""
@@ -413,9 +417,7 @@ class SerdeL2AdapterWrapper(L2AdapterInterface):
             # can safely read them during the store.
             self._l1_manager.finish_write_and_reserve_read(state.temp_keys)
             try:
-                inner_id = self._inner.submit_store_task(
-                    state.keys, state.temp_objs
-                )
+                inner_id = self._inner.submit_store_task(state.keys, state.temp_objs)
             except Exception:
                 logger.exception(
                     "Serde wrapper: inner.submit_store_task raised for task %d",
@@ -427,9 +429,11 @@ class SerdeL2AdapterWrapper(L2AdapterInterface):
                 self._finalize_store(wrapped_id, success=False)
                 continue
 
-            state.phase = _StorePhase.INNER_STORE
-            state.inner_task_id = inner_id
+            # Phase flip and reverse-map insert happen under the same
+            # lock so ``close()``'s cleanup can't observe a half-way
+            # transition.
             with self._lock:
+                state.phase = _StorePhase.INNER_STORE
                 self._inner_to_store[inner_id] = wrapped_id
 
     def _drain_inner_store(self) -> None:
@@ -466,9 +470,7 @@ class SerdeL2AdapterWrapper(L2AdapterInterface):
             with self._lock:
                 wrapped_id = self._inner_to_load.pop(inner_id, None)
                 state = (
-                    self._load_tasks.get(wrapped_id)
-                    if wrapped_id is not None
-                    else None
+                    self._load_tasks.get(wrapped_id) if wrapped_id is not None else None
                 )
             if wrapped_id is None or state is None:
                 continue
@@ -497,7 +499,6 @@ class SerdeL2AdapterWrapper(L2AdapterInterface):
                 self._release_write_temps(state.temp_keys)
                 self._finalize_load(wrapped_id, Bitmap(len(state.keys)))
                 continue
-            state.serde_task_id = serde_id
             with self._lock:
                 self._serde_to_load[serde_id] = wrapped_id
 
@@ -513,17 +514,16 @@ class SerdeL2AdapterWrapper(L2AdapterInterface):
             with self._lock:
                 wrapped_id = self._serde_to_load.pop(serde_id, None)
                 state = (
-                    self._load_tasks.get(wrapped_id)
-                    if wrapped_id is not None
-                    else None
+                    self._load_tasks.get(wrapped_id) if wrapped_id is not None else None
                 )
             if wrapped_id is None or state is None:
                 continue
 
-            # ``load_bitmap`` is set by _drain_inner_load before submitting
-            # deserialize, so it's non-None here. Fall back defensively.
-            final_bitmap = state.load_bitmap or Bitmap(len(state.keys))
-            if not result:
+            if result:
+                # ``load_bitmap`` was populated by _drain_inner_load before
+                # the task was registered in ``_serde_to_load``.
+                final_bitmap = state.load_bitmap
+            else:
                 logger.warning(
                     "Serde wrapper: deserialize failed for task %d; "
                     "reporting all keys as failed",
@@ -543,17 +543,34 @@ class SerdeL2AdapterWrapper(L2AdapterInterface):
         keys: list[ObjectKey],
         objects: list[MemoryObj],
     ) -> tuple[list[ObjectKey], list[MemoryObj] | None]:
-        """Reserve one temp byte buffer per input key. All-or-nothing —
+        """Reserve one temp byte buffer per input key. All-or-nothing:
         any single failure releases the partial successes and returns
         ``(temp_keys, None)``.
+
+        Args:
+            keys: Original logical keys; used only to derive temp keys.
+            objects: Source (store) or destination (load) MemoryObjs.
+                All entries must share a single ``(shape, dtype)`` — the
+                caller (store/prefetch controller) is responsible for
+                shape-grouping before submission.
+
+        Raises:
+            ValueError: if ``objects`` is non-empty and elements have
+                differing shapes or dtypes.
         """
+        shape_0 = objects[0].get_shapes()
+        dtype_0 = objects[0].get_dtypes()
+        for obj in objects[1:]:
+            if obj.get_shapes() != shape_0 or obj.get_dtypes() != dtype_0:
+                raise ValueError(
+                    "Serde wrapper: all MemoryObjs in one submit must "
+                    "share a single (shape, dtype); the temp layout is "
+                    "derived from objects[0]."
+                )
+
         temp_keys = [make_temp_key(k) for k in keys]
         layout = serialized_layout_desc(
-            MemoryLayoutDesc(
-                shapes=objects[0].get_shapes(),
-                dtypes=objects[0].get_dtypes(),
-            ),
-            self._serde,
+            MemoryLayoutDesc(shapes=shape_0, dtypes=dtype_0), self._serde
         )
         results = self._l1_manager.reserve_write(
             keys=temp_keys,
@@ -562,20 +579,14 @@ class SerdeL2AdapterWrapper(L2AdapterInterface):
             mode="new",
         )
         temp_objs: list[MemoryObj] = []
+        successful_temp_keys: list[ObjectKey] = []
         for temp_key in temp_keys:
             r = results.get(temp_key)
             if r is None or r[0] != L1Error.SUCCESS:
-                # Roll back the partial successes.
-                got = [
-                    tk
-                    for tk in temp_keys
-                    if (rr := results.get(tk)) is not None
-                    and rr[0] == L1Error.SUCCESS
-                ]
-                if got:
-                    self._release_write_temps(got)
+                self._release_write_temps(successful_temp_keys)
                 return temp_keys, None
             temp_objs.append(r[1])
+            successful_temp_keys.append(temp_key)
         return temp_keys, temp_objs
 
     def _release_write_temps(self, temp_keys: list[ObjectKey]) -> None:
@@ -586,9 +597,7 @@ class SerdeL2AdapterWrapper(L2AdapterInterface):
             self._l1_manager.finish_write(temp_keys)
             self._l1_manager.delete(temp_keys)
         except Exception:
-            logger.exception(
-                "Serde wrapper: failed releasing write-locked temps"
-            )
+            logger.exception("Serde wrapper: failed releasing write-locked temps")
 
     def _finalize_store(self, wrapped_id: L2TaskId, success: bool) -> None:
         with self._lock:

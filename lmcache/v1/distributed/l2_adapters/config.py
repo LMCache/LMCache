@@ -153,17 +153,23 @@ class L2AdapterConfigBase(ABC):
     persist_config: PersistConfig = PersistConfig()
 
     #: Populated by ``_parse_serde_config`` after ``from_dict``; ``None``
-    #: means serde is disabled for this adapter. When set, StorageManager
-    #: instantiates a SerdeProcessor via the serde factory.
+    #: means serde is disabled for this adapter. When set,
+    #: ``StorageManager`` wraps the adapter with
+    #: ``SerdeL2AdapterWrapper`` so controllers see a plain L2 adapter
+    #: and serde runs transparently around store / load.
     #:
-    #: Expected JSON schema::
+    #: JSON schema::
     #:
     #:     {
     #:         "type": "<registered_serde_name>",
     #:         ...type_specific_keys (forwarded to the factory)
     #:     }
     #:
-    #: Built-in types: ``"fp8"`` (see :class:`Fp8QuantizationSerializer`).
+    #: Built-in types and their kwargs:
+    #:   - ``"fp8"`` — see :class:`Fp8QuantizationSerializer`.
+    #:     Accepts ``fp8_dtype`` (torch dtype name, default
+    #:     ``"float8_e4m3fn"``) and ``max_workers`` (thread-pool size
+    #:     for async (de)serialize, default ``1``).
     serde_config: SerdeConfig | None = None
 
     @staticmethod

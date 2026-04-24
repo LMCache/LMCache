@@ -1,24 +1,28 @@
-# Serde Integration for Distributed Storage Controllers
+# `lmcache.v1.distributed.serde` — Serialization / Deserialization Package
 
-## Overview
+## Scope
 
-Serialization/deserialization (serde) support for the L1-L2 data path. When enabled, all data transferred between L1 and L2 passes through a `SerdeProcessor` that compresses/decompresses using temporary byte buffers allocated from L1.
+This package holds the **generic serde primitives** used by the
+distributed storage stack. It does not know anything about L2 adapters
+or controllers — it just defines:
 
-When serde is disabled (`None`), both controllers behave identically to the existing code path.
+- A pair of **sync interfaces** users implement (`Serializer`,
+  `Deserializer`) for the actual byte transform.
+- An **async interface** (`SerdeProcessor`) with the same
+  `submit → eventfd → query` shape as an L2 adapter, so downstream
+  consumers can poll it uniformly.
+- A default implementation (`AsyncSerdeProcessor`) that turns any pair
+  of sync implementations into the async interface by running them in
+  a thread pool and signaling an eventfd on completion.
+- A factory / registration mechanism so adapters can reference a serde
+  by name (`{"type": "fp8", ...}` in JSON config).
+- One built-in serde: **fp8 quantization**.
 
-## Design TL;DR
+How the async interface is actually plugged into the L2 path lives in
+[`docs/design/v1/distributed/l2_adapters/serde_wrapper.md`][wrapper-doc]
+— the wrapper is the sole consumer of `SerdeProcessor`'s event fds.
 
-Serde is an **in-CPU pipe in front of each L2 adapter** — every byte to/from the adapter goes through it. The choice is **per-adapter, all-or-nothing**: an adapter is either fully serde-enabled or fully raw, decided once by config. The pipe needs a temp buffer for the serialized bytes; that buffer is explicitly allocated and tracked by `L1Manager`, so the extra memory shows up in L1 accounting instead of being hidden. The pipe uses the same `submit → eventfd → query` shape as an L2 adapter so controllers poll it with no special case.
-
-## Architecture
-
-Two-layer interface:
-- **Sync** (`Serializer`/`Deserializer`): users implement pure transform logic
-- **Async** (`SerdeProcessor`): eventfd-driven interface consumed by controllers, wraps sync implementations via `AsyncSerdeProcessor`
-
-The `SerdeProcessor` follows the same submit/eventfd/query pattern as L2 adapters, integrating naturally into the poll-based event loops.
-
-**Serde is per-adapter:** each L2 adapter has its own optional `SerdeProcessor`. A single prefetch/store request can mix serde-enabled and serde-disabled adapters within its plan. Each adapter independently decides whether to use temp buffers and async serialize/deserialize.
+[wrapper-doc]: ../l2_adapters/serde_wrapper.md
 
 ## Module Layout
 
@@ -26,211 +30,148 @@ The `SerdeProcessor` follows the same submit/eventfd/query pattern as L2 adapter
 lmcache/v1/distributed/serde/
   base.py             # Serializer, Deserializer (sync ABCs)
                       # SerdeProcessor (async ABC)
-  async_processor.py  # AsyncSerdeProcessor (thread pool wrapper)
+                      # SerdeConfig, SerdeTaskId
+  async_processor.py  # AsyncSerdeProcessor (thread-pool + eventfd wrapper)
+  factory.py          # register_serde_factory / create_serde_processor
+  fp8.py              # Fp8QuantizationSerializer / Deserializer
   utils.py            # serialized_layout_desc, make_temp_key
 ```
 
-## Store Controller Data Flow
+## Two-Layer Interface
 
-```mermaid
-sequenceDiagram
-    participant L1Mgr
-    participant StoreListener
-    participant Main Loop
-    participant L2Mgr
-    participant SerdeMgr as SerdeProcessor
-
-    L1Mgr ->> StoreListener: on_write_finished(keys)
-    activate StoreListener
-    StoreListener ->> Main Loop: submit store "request"
-    deactivate StoreListener
-    activate Main Loop
-    Main Loop ->> Main Loop: determine keys to store in L2
-    Main Loop ->> L1Mgr: reserve_read(l1_keys)
-    L1Mgr ->> Main Loop: l1_keys
-
-    opt some reserve_read failed
-        Main Loop ->> Main Loop: skip failed keys (best-effort)
-    end
-
-    Main Loop ->> Main Loop: storage_keys = l1_keys
-
-    rect rgba(255, 200, 100, 0.2)
-        alt if serde is enabled (this adapter)
-            Main Loop ->> L1Mgr: reserve_write(tmp_keys, byte layout)
-            L1Mgr ->> Main Loop: reserved tmp_keys
-
-            opt some reserve_write(tmp) failed
-                Main Loop ->> L1Mgr: finish_read(failed l1_keys)
-                Main Loop ->> L1Mgr: finish_write(failed tmp_keys)
-                Main Loop ->> L1Mgr: delete(failed tmp_keys)
-                Main Loop ->> Main Loop: drop failed keys from batch
-            end
-
-            Main Loop ->> SerdeMgr: submit_serialize(l1_objs, tmp_objs)
-            SerdeMgr ->> Main Loop: serde task id
-            deactivate Main Loop
-            activate SerdeMgr
-            SerdeMgr ->> SerdeMgr: serialize(l1_objs -> tmp_objs)
-            SerdeMgr -->> Main Loop: serialize_fd is ready
-            deactivate SerdeMgr
-            activate Main Loop
-            Main Loop ->> SerdeMgr: query_serialize_result(serde task id)
-            SerdeMgr ->> Main Loop: success / failure
-
-            alt serialize succeeded
-                Main Loop ->> L1Mgr: finish_read(l1_keys)
-                Main Loop ->> L1Mgr: finish_write_and_reserve_read(tmp_keys)
-                Main Loop ->> Main Loop: storage_keys = tmp_keys
-            else serialize failed
-                Main Loop ->> L1Mgr: finish_read(l1_keys)
-                Main Loop ->> L1Mgr: finish_write(tmp_keys)
-                Main Loop ->> L1Mgr: delete(tmp_keys)
-                Main Loop ->> Main Loop: abort (no L2 store)
-            end
-        end
-    end
-
-    Main Loop ->> L2Mgr: submit_store_task(storage_keys)
-    L2Mgr ->> Main Loop: store task id
-    deactivate Main Loop
-    activate L2Mgr
-    L2Mgr ->> L2Mgr: execute real store operation
-    L2Mgr -->> Main Loop: event fd is ready
-    deactivate L2Mgr
-    activate Main Loop
-    Main Loop ->> L2Mgr: pop completed tasks
-    L2Mgr ->> Main Loop: completed task id
-    Main Loop ->> Main Loop: update internal "request" status and check finished "requests"
-    rect rgba(200, 220, 255, 0.2)
-        alt no serde (storage_keys = l1_keys)
-            Main Loop ->> L1Mgr: finish_read(l1_keys)
-        else serde (storage_keys = tmp_keys)
-            Main Loop ->> L1Mgr: finish_read(tmp_keys)
-            L1Mgr ->> L1Mgr: auto-delete(tmp_keys)
-            note right of L1Mgr: is_temporary=True → finish_read<br/>triggers automatic deletion from L1.
-        end
-    end
-
-    alt L2 store succeeded
-        Main Loop ->> Main Loop: determine keys to delete from L1
-        Main Loop ->> L1Mgr: delete(l1_keys)
-    else L2 store failed
-        Main Loop ->> Main Loop: log warning, no L1 deletion
-    end
-
-    deactivate Main Loop
+```
+                 ┌────────────────────────────────┐
+ user writes →   │  Serializer / Deserializer     │  sync transform
+                 │  (pure: src MemoryObj → dst)   │
+                 └──────────────┬─────────────────┘
+                                │ wrapped by AsyncSerdeProcessor
+                                ▼
+                 ┌────────────────────────────────┐
+ wrapper uses →  │  SerdeProcessor                │  async:
+                 │    submit_serialize(...) → id  │   submit / eventfd /
+                 │    query_serialize_result(id)  │   query
+                 │    get_serialize_event_fd()    │
+                 │    (plus deserialize pair)     │
+                 └────────────────────────────────┘
 ```
 
-## Prefetch Controller Data Flow
+- **Sync layer** is where the user cares. Pure Python (or torch) code,
+  no threads, no fds. Two abstract methods: `serialize(src, dst)` and
+  `estimate_serialized_size(layout_desc)`.
+- **Async layer** is what the `SerdeL2AdapterWrapper` talks to. It
+  owns two eventfds (one for serialize, one for deserialize) that
+  must be distinct, and queues completed tasks in a dict the wrapper
+  drains.
 
-```mermaid
-sequenceDiagram
-  participant Main Loop
-  participant L1Mgr
-  participant L2Mgr
-  participant SerdeMgr as SerdeProcessor
+`AsyncSerdeProcessor` is the default and typically only implementation
+of the async layer — most custom serdes only need to provide the sync
+classes and register a factory.
 
-  Main Loop ->> Main Loop: execute a new prefetch task with keys
-  activate Main Loop 
-  Main Loop ->> L2Mgr: submit_lookup_and_lock(keys)
-  L2Mgr ->> Main Loop: lookup_and_lock task id
-  deactivate Main Loop
-  activate L2Mgr
-  L2Mgr ->> L2Mgr: execute the lookup and lock
-  L2Mgr -->> Main Loop: trigger lookup event fd
-  deactivate L2Mgr
-  activate Main Loop 
-  Main Loop ->> L2Mgr: check lookup and lock results
-  L2Mgr ->> Main Loop: lookup and lock results
-  Main Loop ->> Main Loop: update task internal states
-  note right of Main Loop: ...wait for other L2 mgr lookup
-  Main Loop ->> Main Loop: determine real load plan
-  Main Loop ->> L1Mgr: reserve_write(keys_in_the_plan, KV layout)
-  L1Mgr ->> Main Loop: reserved keys_in_the_plan
+## Contracts
 
-  opt some reserve_write(real) failed
-    Main Loop ->> Main Loop: drop failed keys, recompute prefix
-  end
+### `Serializer.serialize(src, dst) -> int`
 
-  Main Loop ->> Main Loop: load_buffers = keys_in_the_plan
+- `src` is a `MemoryObj` holding KV data (read-locked by the caller).
+- `dst` is a `MemoryObj` byte buffer (write-locked by the caller),
+  sized ≥ `estimate_serialized_size(layout_of_src)`.
+- Must return the number of bytes actually written to `dst`.
+- Must be **deterministic** given the same `src` — the wrapper relies
+  on the serialize step being reproducible across retries.
 
-  rect rgba(255, 200, 100, 0.2)
-    alt if serde is enabled (this adapter)
-      Main Loop ->> L1Mgr: reserve_write(tmp_keys, byte layout)
-      L1Mgr ->> Main Loop: reserved tmp_keys
+### `Serializer.estimate_serialized_size(layout_desc) -> int`
 
-      opt some reserve_write(tmp) failed
-        Main Loop ->> L1Mgr: finish_write(real keys whose tmp failed)
-        Main Loop ->> L1Mgr: delete(real keys whose tmp failed)
-        Main Loop ->> Main Loop: drop failed keys, recompute prefix
-      end
+- Called once per batch to size the temp buffer **before** any work.
+- Must be an **upper bound** on the actual serialized output. Include
+  any safety margin inside this method (the fp8 serializer returns
+  `1.5 × num_elements` for exactly this reason).
+- Must only depend on `layout_desc` (shapes + dtypes). The wrapper
+  uses the first object's layout to size temps for the whole batch,
+  so a data-dependent estimate would break all-or-nothing allocation.
 
-      Main Loop ->> Main Loop: load_buffers = tmp_keys
-    end
-  end
+### `Deserializer.deserialize(src, dst) -> None`
 
-  Main Loop ->> Main Loop: update the real load plan
-  Main Loop ->> L2Mgr: unlock(keys_not_in_the_plan)
-  Main Loop ->> L2Mgr: submit_load_task(keys_in_the_plan, load_buffers)
-  L2Mgr ->> Main Loop: load task id
-  deactivate Main Loop
-  activate L2Mgr
-  L2Mgr ->> L2Mgr: execute the load (not release locks)
-  L2Mgr -->> Main Loop: update load fd 
-  deactivate L2Mgr
-  activate Main Loop
-  Main Loop ->> L2Mgr: query_load_status(load task id)
-  Main Loop ->> L2Mgr: unlock(keys in the plan)
+- `src` is a byte-buffer MemoryObj filled by L2 load.
+- `dst` is a KV-shaped MemoryObj (write-locked), already the correct
+  shape and dtype.
+- No return value — the caller observes completion via the async
+  layer's event fd.
 
-  rect rgba(255, 200, 100, 0.2)
-    alt if serde is enabled (this adapter)
-      Main Loop ->> SerdeMgr: submit_deserialize(tmp_keys, keys_in_the_plan)
-      SerdeMgr ->> Main Loop: serde task id
-      deactivate Main Loop
-      activate SerdeMgr
-      SerdeMgr ->> SerdeMgr: deserialize(tmp_keys -> keys_in_the_plan)
-      SerdeMgr -->> Main Loop: deserialize_fd is ready
-      deactivate SerdeMgr
-      activate Main Loop
-      Main Loop ->> SerdeMgr: query_deserialize_result(serde task id)
-      SerdeMgr ->> Main Loop: success / failure
+### `SerdeProcessor` (async)
 
-      Main Loop ->> L1Mgr: finish_write(adapter_tmp_keys)
-      Main Loop ->> L1Mgr: delete(adapter_tmp_keys)
-      note right of Main Loop: Temp buffers released regardless of<br/>deserialize success or failure.
+- `submit_serialize(src_objs, dst_objs) → SerdeTaskId` must be
+  non-blocking. The actual transform runs asynchronously.
+- `query_serialize_result(task_id) → bool | None` is
+  **non-idempotent**: it returns a non-None value exactly once per
+  task id. `None` means the task is still in flight.
+- `get_serialize_event_fd()` returns an eventfd signaled once per
+  completed serialize task; distinct from the deserialize fd.
+- The deserialize side has the identical shape.
+- `close()` must release both event fds and any worker threads.
 
-      alt deserialize failed
-        Main Loop ->> Main Loop: zero adapter's load_result bitmap
-        note right of Main Loop: Affected keys treated as "failed"<br/>in the finalize step below.
-      end
-    end
-  end
+## `AsyncSerdeProcessor`
 
-  Main Loop ->> Main Loop: compute loaded vs failed from result bitmap
-  note right of Main Loop: failed = write_reserved but not in loaded bitmap <br> (includes surplus non-prefix keys)
-  Main Loop ->> L1Mgr: finish_write_and_reserve_read(loaded_keys) if successful
-  Main Loop ->> L1Mgr: finish_write(failed_keys) + delete(failed_keys)
+Wraps any `(Serializer, Deserializer)` pair. Internal design:
 
-  Main Loop ->> Main Loop: compute prefix hits
-  opt loaded keys beyond prefix (gap from partial load failure)
-    Main Loop ->> L1Mgr: finish_read(non_prefix_loaded_keys)
-  end
+- One `ThreadPoolExecutor(max_workers=N)` runs both serialize and
+  deserialize tasks; they're independent, so the pool is shared.
+- One task-id counter under a single lock; two `_completed_*` dicts
+  (one per direction) protected by the same lock.
+- Two `os.eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC)` file descriptors —
+  one per direction, signaled after the result is written to the
+  completion dict.
 
-  Main Loop ->> Main Loop: update task status
-  deactivate Main Loop
+**Why a pool, not an asyncio executor:** the CPU-bound fp8 / encryption
+transforms release the GIL under torch / native calls, so a real
+thread pool is useful. `N=1` is a safe default (one in-flight
+transform at a time), and the fp8 factory accepts `max_workers` to
+bump it.
+
+## Factory / Registration
+
+```python
+from lmcache.v1.distributed.serde import (
+    AsyncSerdeProcessor, Deserializer, Serializer,
+    register_serde_factory,
+)
+
+def _create_my_serde(kwargs: dict[str, object]) -> SerdeProcessor:
+    return AsyncSerdeProcessor(MySerializer(...), MyDeserializer(...))
+
+register_serde_factory("mine", _create_my_serde)
 ```
 
-## Event Loop Integration
+The factory receives the type-specific kwargs from the JSON config
+(everything except `"type"`). The registry is process-global and
+rejects duplicate names, matching the pattern already used by
+`register_l2_adapter_type`.
 
-Both controllers register serde eventfds in their poll loop alongside L2 adapter fds:
+The factory is called exactly once per `SerdeL2AdapterWrapper`
+construction — each wrapped adapter gets its own `SerdeProcessor`
+instance.
 
-| Controller | Polls | Handler |
-|---|---|---|
-| Store | `serialize_event_fd` | `_advance_request` (SERIALIZE branch) |
-| Prefetch | `deserialize_event_fd` | `_advance_request` (PLAN_AND_LOAD branch) |
+## Built-in fp8
 
-## Buffer Sizing
+`Fp8QuantizationSerializer` / `Fp8QuantizationDeserializer`:
 
-Temp buffers are allocated at exactly `estimate_serialized_size()` bytes. The serializer is responsible for including any safety margin in its estimate (e.g., the built-in fp8 serializer returns `1.5 * num_elements`).
+- Cast each element to `torch.float8_e4m3fn` (default) or
+  `torch.float8_e5m2`, reinterpret the bytes as `uint8`, and copy into
+  the temp buffer.
+- Deserialize reinterprets the `uint8` bytes as the chosen fp8 dtype,
+  reshapes back to the original KV shape, and casts to the destination
+  tensor's dtype.
+- `estimate_serialized_size` returns `int(total_elements × 1.5)` — the
+  exact fp8 size is `num_elements × 1 byte`, and the 1.5× headroom
+  absorbs future format changes or alignment padding.
 
+## Extension Guide
+
+Most custom serdes only need:
+
+1. Two classes implementing `Serializer` / `Deserializer`.
+2. A factory function registered at import time.
+3. A JSON `serde` sub-dict on the adapter config: `{"type": "mine", ...}`.
+
+Everything else — temp buffer allocation, eventfd plumbing, lock /
+lifecycle transitions, all-or-nothing failure handling — is provided
+by `AsyncSerdeProcessor` and the wrapper. Users never need to touch
+controllers, eventfds, or L1 locks.

@@ -17,10 +17,15 @@ Design in one paragraph
 Serde is an **in-CPU pipe in front of each L2 adapter** — every byte
 between L1 and the adapter flows through it. The choice is
 **per-adapter and all-or-nothing**: an adapter either pipes everything
-through serde or has no pipe at all. The pipe needs a temp buffer to
-hold the serialized bytes; that buffer is explicitly allocated and
-tracked by L1, so the extra memory is visible in L1 accounting rather
-than hidden.
+through serde or has no pipe at all. Internally, a serde-enabled
+adapter is wrapped by ``SerdeL2AdapterWrapper``, which presents a
+normal ``L2AdapterInterface`` to the controllers while transparently
+serializing / deserializing via an injected ``SerdeProcessor``. The
+pipe needs a temp buffer to hold the serialized bytes; that buffer is
+explicitly allocated through ``L1Manager`` so the extra memory is
+visible in L1 accounting rather than hidden. From the caller's point
+of view, nothing about the L2 interface changes — lookup, load, store,
+and eviction all behave the same whether or not serde is attached.
 
 
 When to use serde
@@ -36,40 +41,50 @@ When to use serde
   ``Deserializer`` ABCs.
 
 Serde is **opt-in per adapter**: one ``--l2-adapter`` may use fp8 while
-another stores raw bytes. When omitted, the adapter behaves exactly as
-before (no temp buffers, no extra allocations).
+another stores raw bytes. When omitted, the adapter is instantiated
+directly (no wrapper, no temp buffers, no extra threads).
 
 
-Data Flow
+Data flow
 ---------
 
-**Store path** (L1 KV -> L2 bytes)::
+**Store path** (L1 KV → L2 bytes), driven by the wrapper's internal
+thread::
 
-    reserve_read(l1_keys)
-        -> reserve_write(tmp_keys, byte layout)       # temp byte buffer
-        -> serde.submit_serialize(l1_objs, tmp_objs)  # async
-        -> [serialize_event_fd]                       # wake up
-        -> finish_read(l1_keys)                       # release originals
-        -> finish_write_and_reserve_read(tmp_keys)    # temp now readable
-        -> L2 submit_store_task(tmp_objs)             # L2 reads temp
-        -> [L2 store fd]
-        -> finish_read(tmp_keys)                      # auto-deletes temp
+    caller: submit_store_task(l1_keys, l1_objs)
+        wrapper: reserve_write(tmp_keys, byte layout)          # temp buffer
+        wrapper: serde.submit_serialize(l1_objs, tmp_objs)     # async
+        -> [serialize_event_fd]
+        wrapper: finish_write_and_reserve_read(tmp_keys)       # temp → readable
+        wrapper: inner.submit_store_task(l1_keys, tmp_objs)
+        -> [inner store_event_fd]
+        wrapper: finish_read(tmp_keys)                         # auto-deletes
+    caller: pop_completed_store_tasks() → {id: True}
 
-**Prefetch path** (L2 bytes -> L1 KV)::
+**Prefetch path** (L2 bytes → L1 KV)::
 
-    reserve_write(keys_in_plan, KV layout)            # real KV buffer
-        + reserve_write(tmp_keys, byte layout)        # temp byte buffer
-        -> L2 submit_load_task(tmp_objs)              # L2 writes temp
-        -> [L2 load fd]
-        -> serde.submit_deserialize(tmp_objs, real_objs)   # async
-        -> [deserialize_event_fd]                     # wake up
-        -> finish_write(tmp_keys) + delete
-        -> finish_write_and_reserve_read(keys_in_plan)
+    caller: submit_load_task(keys, dst_objs)
+        wrapper: reserve_write(tmp_keys, byte layout)          # temp buffer
+        wrapper: inner.submit_load_task(keys, tmp_objs)
+        -> [inner load_event_fd]
+        wrapper: serde.submit_deserialize(tmp_objs, dst_objs)  # async
+        -> [deserialize_event_fd]
+        wrapper: finish_write + delete tmp_keys
+    caller: query_load_result(id) → per-key bitmap
 
-The serde processor registers two event fds — one for serialize, one
-for deserialize — which the StoreController and PrefetchController
-poll alongside the L2 adapter fds. Temp buffers are always allocated
-through ``L1Manager`` so they count against L1 memory accounting.
+The ``SerdeProcessor`` owns two event fds (one per direction);
+``SerdeL2AdapterWrapper``'s internal thread polls them along with the
+inner adapter's store / load fds. The controllers poll only the
+wrapper's own store / load fds — they never see the serde fds or the
+inner's fds. Temp buffers are always allocated through ``L1Manager``
+so they count against L1 memory accounting.
+
+If **any** key's temp allocation fails, the whole submitted task
+fails (``pop_completed_store_tasks`` returns ``False`` for the store
+path; ``query_load_result`` returns an all-zeros bitmap for the load
+path). This all-or-nothing policy keeps the failure semantics
+identical to a raw L2 adapter — controllers need no special handling
+for "partial serde failure."
 
 
 Configuring serde on an L2 adapter
@@ -148,6 +163,9 @@ Reference it from your adapter config:
 
 Only the sync ABC methods are required; ``AsyncSerdeProcessor`` takes
 care of the thread pool, event fds, task ids, and completion signaling.
+``SerdeL2AdapterWrapper`` takes care of temp-buffer allocation, lock
+transitions, and chaining into the inner adapter — so custom serdes
+never need to touch L1Manager, event fds, or the controllers directly.
 
 
 Implementation notes
@@ -158,16 +176,24 @@ Implementation notes
   must be an upper bound on the actual serialized output — include any
   safety margin directly in the estimate (e.g., the built-in fp8
   serializer returns ``1.5 * num_elements``).
-- **Per-adapter independence.** A request can span adapters where some
-  have serde and others do not. The prefetch controller waits for all
-  L2 loads *and* all per-adapter deserializations before finalizing.
-- **Failure handling.** If serialize fails, the temp buffer is cleaned
-  up and no L2 store is submitted. If deserialize fails, the affected
-  keys are treated as failed loads and cleaned up through the normal
-  failed-key path.
+- **Homogeneous batches.** Every ``submit_store_task`` /
+  ``submit_load_task`` passed to a serde-wrapped adapter must carry
+  MemoryObjs that share a single ``(shape, dtype)`` — the wrapper sizes
+  temp buffers from ``objects[0]``. The store controller already
+  shape-groups keys per submission; the prefetch controller uses one
+  layout per request. The wrapper raises ``ValueError`` if the
+  invariant is violated.
+- **Failure handling.** If any step fails (temp alloc, serialize,
+  inner store / load, deserialize), the whole wrapped task fails —
+  partial success within one submit is not reported. This keeps the
+  coarse-grained success semantic of ``L2AdapterInterface`` intact
+  and avoids surprising partial writes.
 - **Thread pool.** ``AsyncSerdeProcessor(max_workers=N)`` controls the
   pool size. Serde transforms that release the GIL (e.g., torch ops)
   benefit from ``N > 1``; pure-Python transforms do not.
+- **Per-adapter independence.** A single prefetch / store request can
+  mix serde-enabled and serde-disabled adapters — each serde-wrapped
+  adapter runs its own internal thread and temp-buffer lifecycle.
 
 
 Example
@@ -179,3 +205,13 @@ the L2 prefetch + fp8 deserialize path lives at
 :file:`examples/serde/fp8/`. A pytest-based filesystem round-trip test
 (no vLLM required) is at
 :file:`tests/v1/distributed/serde/test_serde_fs_e2e.py`.
+
+
+Design references
+-----------------
+
+- :file:`docs/design/v1/distributed/serde/README.md` — the serde
+  package (Serializer / Deserializer / SerdeProcessor / factory).
+- :file:`docs/design/v1/distributed/l2_adapters/serde_wrapper.md` — the
+  ``SerdeL2AdapterWrapper`` adapter that integrates serde into the L2
+  path.
