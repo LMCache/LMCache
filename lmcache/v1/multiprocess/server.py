@@ -155,6 +155,12 @@ class _PrefetchJob:
     handle: PrefetchHandle
     world_size: int
     request_id: str
+    # Number of tokens submitted for lookup (denominator for the L1+L2
+    # token-level hit-rate metric).  Equals ``len(chunk_hashes) * chunk_size``
+    # on the happy path; 0 for early-exit paths (no GPU context matches
+    # or chunk_hashes is empty).  Consumed at ``MP_LOOKUP_PREFETCH_END``
+    # emission time in ``query_prefetch_status``.
+    requested_tokens: int
 
 
 # Main class for the mp cache engine
@@ -669,6 +675,7 @@ class MPCacheEngine:
                     ),
                     world_size=1,
                     request_id=key.request_id,
+                    requested_tokens=0,
                 )
             )
             return
@@ -689,9 +696,17 @@ class MPCacheEngine:
                     ),
                     world_size=1,
                     request_id=key.request_id,
+                    requested_tokens=0,
                 )
             )
             return
+
+        # Total chunk-aligned tokens submitted for lookup; surfaces as the
+        # denominator of the L1+L2 token-level hit-rate via the
+        # ``requested_tokens`` field on ``MP_LOOKUP_PREFETCH_END``.  Sub-chunk
+        # trailing tokens are intentionally excluded — they cannot hit at
+        # chunk granularity.
+        requested_tokens = len(chunk_hashes) * self.chunk_size
 
         # Publish lookup event via EventBus for observability subscribers.
         # Guard with has_subscribers() to avoid allocating the metadata dict
@@ -732,6 +747,7 @@ class MPCacheEngine:
                 handle=handle,
                 world_size=key.world_size,
                 request_id=key.request_id,
+                requested_tokens=requested_tokens,
             )
         )
 
@@ -809,7 +825,11 @@ class MPCacheEngine:
             Event(
                 event_type=EventType.MP_LOOKUP_PREFETCH_END,
                 session_id=job.request_id,
-                metadata={"found_count": found_count},
+                metadata={
+                    "found_count": found_count,
+                    "requested_tokens": job.requested_tokens,
+                    "hit_tokens": found_count * self.chunk_size,
+                },
             )
         )
 

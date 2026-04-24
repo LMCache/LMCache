@@ -330,6 +330,7 @@ def init_observability(obs_config: ObservabilityConfig) -> EventBus:
             L1LifecycleSubscriber,
             L1MetricsSubscriber,
             L2MetricsSubscriber,
+            LookupMetricsSubscriber,
             SMMetricsSubscriber,
         )
 
@@ -339,6 +340,7 @@ def init_observability(obs_config: ObservabilityConfig) -> EventBus:
         bus.register_subscriber(L1LifecycleSubscriber(sample_rate=sample_rate))
         bus.register_subscriber(L0L1ThroughputSubscriber(sample_rate=sample_rate))
         bus.register_subscriber(L2MetricsSubscriber())
+        bus.register_subscriber(LookupMetricsSubscriber())
         bus.register_subscriber(SMMetricsSubscriber())
         bus.register_subscriber(BlendMetricsSubscriber())
 

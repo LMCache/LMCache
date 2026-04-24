@@ -79,10 +79,27 @@ to correlate START/END pairs.
 | `MP_RETRIEVE_START` | `device`, `engine_id`, `gpu_id` | `str`, `int`, `int` |
 | `MP_RETRIEVE_END` | `device`, `retrieved_count`, `engine_id`, `gpu_id`, `total_bytes` | `str`, `int`, `int`, `int`, `int` |
 | `MP_LOOKUP_PREFETCH_START` | *(none)* | — |
-| `MP_LOOKUP_PREFETCH_END` | `found_count` | `int` |
+| `MP_LOOKUP_PREFETCH_END` | `found_count`, `requested_tokens`, `hit_tokens` | `int`, `int`, `int` |
 | `MP_LOOKUP` | `request_id`, `chunk_hashes`, `model_name`, `chunk_size`, `seq_len`, `dtypes`, `shapes` | `str`, `list[str]`, `str`, `int`, `int`, `list[str]`, `list[list[int]]` |
 | `MP_VLLM_BLOCK_ALLOCATION` | `instance_id`, `model_name`, `records` | `int`, `str`, `list[BlockAllocationRecord]` (each has `req_id: str`, `new_block_ids: list[int]`, `new_token_ids: list[int]`) |
 | `MP_VLLM_END_SESSION` | `request_id` | `str` |
+
+### `MP_LOOKUP_PREFETCH_END` metadata
+
+`found_count` is the contiguous prefix hit at chunk granularity, already
+divided by `world_size` at the emit site.  `requested_tokens` and
+`hit_tokens` are denormalized token-level counts so subscribers need not
+know `chunk_size`:
+
+- `requested_tokens = len(chunk_hashes) * chunk_size` on the happy path; `0`
+  on the two early-exit paths in `lookup()` (no matching GPU context,
+  empty `chunk_hashes`).  Sub-chunk trailing tokens are excluded — they
+  cannot hit at chunk granularity.
+- `hit_tokens = found_count * chunk_size`.
+
+Together they drive the `lmcache_mp.lookup_*_tokens` counters used to
+compute the L1+L2 token-level hit rate.  See
+[L1_L2_HIT_RATE_PLAN.md](L1_L2_HIT_RATE_PLAN.md) for the design.
 
 ---
 

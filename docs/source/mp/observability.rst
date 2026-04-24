@@ -265,6 +265,40 @@ L2 Metrics
      - Counter
      - Number of keys that failed to load from L2.
 
+Lookup Hit-Rate Metrics
+~~~~~~~~~~~~~~~~~~~~~~~
+
+Token-level counters whose ratio gives the fraction of tokens requested by
+a lookup that were served from either L1 or L2. L0 (GPU prefix cache) is
+intentionally excluded — it is vLLM-owned and not observable from LMCache.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 40 15 45
+
+   * - Metric
+     - Type
+     - Description
+   * - ``lmcache_mp.lookup_requested_tokens``
+     - Counter
+     - Total tokens submitted for lookup (denominator of the L1+L2
+       token-level hit rate). Only chunk-aligned tokens are counted.
+   * - ``lmcache_mp.lookup_hit_tokens``
+     - Counter
+     - Total tokens found in L1 or L2 during lookup (numerator of the
+       L1+L2 token-level hit rate). Counts the contiguous prefix hit only.
+
+Both counters are driven by the same event (``MP_LOOKUP_PREFETCH_END``),
+so they always advance together per completed lookup. Early-exit lookups
+contribute ``0`` to both, and abandoned lookups contribute to neither.
+
+**PromQL for hit rate:**
+
+.. code-block:: promql
+
+    rate(lmcache_mp_lookup_hit_tokens_total[5m])
+    / rate(lmcache_mp_lookup_requested_tokens_total[5m])
+
 L0 (GPU) Block Lifecycle Histograms
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 

@@ -153,6 +153,34 @@ contribute to histograms; counters above always count all events.
 
 ---
 
+## Lookup Hit-Rate Metrics (L1 + L2 combined)
+
+Token-level counters derived from the `MP_LOOKUP_PREFETCH_END` event.  Their
+ratio is the fraction of tokens requested by a lookup that were served from
+either L1 or L2.  L0 (GPU prefix cache) is intentionally excluded — it is
+vLLM-owned and not observable from LMCache.
+
+| OTel metric name | Prometheus name | Type | Source event | Calculation |
+|---|---|---|---|---|
+| `lmcache_mp.lookup_requested_tokens` | `lmcache_mp_lookup_requested_tokens_total` | Counter | `MP_LOOKUP_PREFETCH_END` | `+requested_tokens` |
+| `lmcache_mp.lookup_hit_tokens` | `lmcache_mp_lookup_hit_tokens_total` | Counter | `MP_LOOKUP_PREFETCH_END` | `+hit_tokens` |
+
+**What it answers:** What fraction of tokens requested by a lookup were served from cache (L1 or L2)?
+
+```promql
+rate(lmcache_mp_lookup_hit_tokens_total[5m])
+/ rate(lmcache_mp_lookup_requested_tokens_total[5m])
+```
+
+> **Note:** Both counters are driven by the *same* event, so they always
+> advance together per completed lookup.  Early-exit lookups (no GPU
+> context matches, empty `chunk_hashes`) contribute `0` to both, and
+> abandoned lookups (client never polls `query_prefetch_status`)
+> contribute to neither.  See
+> [L1_L2_HIT_RATE_PLAN.md](L1_L2_HIT_RATE_PLAN.md) for the full rationale.
+
+---
+
 ## L0 (GPU) Block Lifecycle Histograms
 
 Sampled (default 1%) GPU KV cache block lifecycle tracking via shadow monitoring
