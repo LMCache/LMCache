@@ -278,7 +278,7 @@ class GPUKVFormat(IntEnum):
 
 # On XPU (Intel GPU), PyTorch 2.4+ supports pin_memory=True via SYCL USM
 # host allocation, enabling fast DMA for XPU<->CPU transfers.
-_XPU_PIN_MEMORY = torch_dev.is_available()
+_XPU_PIN_MEMORY = hasattr(torch, "xpu") and torch.xpu.is_available()
 
 
 def alloc_pinned_numa_ptr(size: int, numa_id: int = 0) -> int:
