@@ -15,7 +15,7 @@ except ImportError:
     __version__ = "unknown"
 
 logger = init_logger(__name__)
-from typing import Any
+# Standard
 
 __all__ = ["__version__", "torch_dev", "torch_device_type"]
 
@@ -35,6 +35,9 @@ def _detect_device() -> tuple[Any, str]:
     Raises:
         RuntimeError: If no supported accelerator is found (checked CUDA, XPU, HPU).
     """
+    # Third Party
+    import torch
+
     if hasattr(torch, "xpu") and torch.xpu.is_available():
         return torch.xpu, "xpu"
     elif hasattr(torch, "hpu") and torch.hpu.is_available():
@@ -53,9 +56,6 @@ def _get_backend() -> Any:
     """
     Try backends in order, first successful import wins.
     """
-    # Third Party
-    import torch
-
     backend_candidates = [
         (
             "lmcache.c_ops",
