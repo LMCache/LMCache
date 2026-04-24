@@ -935,15 +935,10 @@ class PDBackendAsync(AllocatorBackendInterface):
                         mem_obj.ref_count_down()
                     except Exception:
                         pass
-            # Update completion tracking even on error so ProxyNotif
-            # doesn't stall waiting for a batch that errored out.
+            # Abort the entire request so ProxyNotif is never sent
+            # for data that was never written to the receiver.
             if req_id and not isinstance(e, asyncio.CancelledError):
-                self._completed_chunks[req_id] = (
-                    self._completed_chunks.get(req_id, 0) + num_chunks
-                )
-                if is_last_batch:
-                    self._req_has_last[req_id] = True
-                await self._check_and_send_proxy_notif(req_id, transfer_spec)
+                await self._abort_request(req_id)
             if isinstance(e, asyncio.CancelledError):
                 raise
         finally:
