@@ -736,10 +736,10 @@ class TestEvictionInterface:
 
     def test_bytes_by_cache_salt_populated_from_cache_salt(self, adapter):
         """End-to-end: storing keys with different ``cache_salt`` values
-        should drive the per-user byte buckets in ``AdapterUsage`` —
-        proves the salt actually flows through the real adapter into the
-        base-class accounting (not just verified by the stub tests)."""
-        # Two keys per user so we know the totals are summed, not
+        should drive the byte buckets in ``AdapterUsage`` — proves the
+        salt actually flows through the real adapter into the base-class
+        accounting (not just verified by the stub tests)."""
+        # Two keys per cache_salt so we know the totals are summed, not
         # just per-key-overwritten.
         alice_keys = [
             ObjectKey(
