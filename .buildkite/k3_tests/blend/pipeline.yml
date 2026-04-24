@@ -25,4 +25,4 @@ steps:
             volumes:
               - { name: hf-cache, hostPath: { path: /data/huggingface, type: DirectoryOrCreate } }
     artifact_paths:
-      - "build_*.log"
+      - "logs_*/*.log"

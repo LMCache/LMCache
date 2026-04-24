@@ -57,7 +57,7 @@ class EventType(Enum):
     MP_REQUEST_START = "mp.request.start"
     MP_RETRIEVE_SUBMITTED = "mp.retrieve.submitted"
     MP_STORE_SUBMITTED = "mp.store.submitted"
-    MP_SESSION_END = "mp.session.end"
+    MP_REQUEST_END = "mp.request.end"
 
     # vLLM block allocation events
     MP_VLLM_BLOCK_ALLOCATION = "mp.vllm.block_allocation"
@@ -76,6 +76,25 @@ class EventType(Enum):
     #                         though the drain thread processes the
     #                         event later
     TRACE_CALL = "trace.call"
+
+    # Cache Blending (CB) events — GPU operation start/end pairs
+    CB_LOOKUP_START = "cb.lookup.start"
+    CB_LOOKUP_END = "cb.lookup.end"
+    CB_STORE_PRE_COMPUTED_START = "cb.store_pre_computed.start"
+    CB_STORE_PRE_COMPUTED_END = "cb.store_pre_computed.end"
+    CB_RETRIEVE_START = "cb.retrieve.start"
+    CB_RETRIEVE_END = "cb.retrieve.end"
+    CB_STORE_FINAL_START = "cb.store_final.start"
+    CB_STORE_FINAL_END = "cb.store_final.end"
+    CB_FINGERPRINTS_REGISTERED = "cb.fingerprints.registered"
+    CB_CHUNKS_EVICTED = "cb.chunks.evicted"
+
+    # Cache Blending (CB) events — lifecycle sentinels (CPU-synchronous)
+    CB_REQUEST_START = "cb.request.start"
+    CB_STORE_PRE_COMPUTED_SUBMITTED = "cb.store_pre_computed.submitted"
+    CB_RETRIEVE_SUBMITTED = "cb.retrieve.submitted"
+    CB_STORE_FINAL_SUBMITTED = "cb.store_final.submitted"
+    CB_REQUEST_END = "cb.request.end"
 
 
 @dataclass

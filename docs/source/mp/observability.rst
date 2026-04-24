@@ -65,6 +65,13 @@ Configuration
    * - ``--prometheus-port``
      - ``9090``
      - Port for the Prometheus ``/metrics`` HTTP endpoint.
+   * - ``--service-instance-id``
+     - *(unset, default UUID v4)*
+     - Identifier for this MP server instance. Attached as the OTel
+       Resource attribute ``service.instance.id`` on every metric and
+       span. When the flag is not passed, defaults to a random UUID v4
+       minted at startup. Pass ``--service-instance-id=""`` to force an
+       explicit empty value. See :ref:`mp-observability-resource`.
    * - ``--metrics-sample-rate``
      - ``0.01``
      - Fraction of chunks/blocks to track for lifecycle histograms
@@ -106,6 +113,32 @@ collector.
 All metrics use the ``lmcache_mp.`` prefix (multiprocess). On Prometheus,
 dots are converted to underscores and counters get a ``_total`` suffix
 (e.g. ``lmcache_mp_l1_read_keys_total``).
+
+.. _mp-observability-resource:
+
+Global Resource Attributes
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Every metric and span exported by an MP server carries Resource-level
+attributes built at startup. These identify the process producing the
+telemetry and are orthogonal to per-metric attributes such as
+``cache_salt``.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 30 25 45
+
+   * - Attribute
+     - CLI flag / config
+     - Default when unset
+   * - ``service.instance.id``
+     - ``--service-instance-id`` / ``ObservabilityConfig.service_instance_id``
+     - Random UUID v4 minted at startup.
+
+Resource attributes attach to the ``MeterProvider`` / ``TracerProvider``
+and propagate to every exported datapoint via OTLP. On Prometheus, SDK
+resource attributes surface on the ``target_info`` series rather than
+on each time-series — this is standard OTel behavior.
 
 StorageManager Metrics
 ~~~~~~~~~~~~~~~~~~~~~~
@@ -413,8 +446,9 @@ the EventBus stop path).
 Replay
 ~~~~~~
 
-Replaying a recorded trace is delivered separately via the
-``lmcache trace`` and ``lmcache bench trace-replay`` CLIs.
+Replaying a recorded trace, plus the full set of CLI flags for
+driving, monitoring, and exporting replay results, is covered in
+its own page: :doc:`tracing_and_debugging`.
 
 What is captured (and what is not)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -425,9 +459,9 @@ What is captured (and what is not)
 - Each call's input arguments (e.g. ``keys``, ``layout_desc``,
   ``mode``, ``extra_count``, ``external_request_id``).
 - Wall-clock and monotonic timestamps of each call.
-- A header carrying ``lmcache`` version, start times, and a SHA-256
-  digest of the active ``StorageManagerConfig`` so replay can detect
-  mismatched configurations.
+- A header carrying a trace schema version, start times, and a
+  SHA-256 digest of the active ``StorageManagerConfig`` so replay can
+  detect mismatched configurations.
 
 **Not captured:**
 
@@ -450,7 +484,7 @@ A length-prefixed `msgpack <https://msgpack.org/>`_ stream:
     ...
 
 The ``Header`` carries a magic prefix (``LMCT``), a format version,
-the trace level (``storage`` today), the LMCache version, start
+the trace level (``storage`` today), a trace schema version, start
 timestamps, and the StorageManagerConfig digest. Each ``Record``
 carries a relative timestamp, a wall-clock timestamp, the
 fully-qualified call site (``qualname``), and an argument dict.

@@ -337,6 +337,12 @@ logging, tracing).
    * - ``--prometheus-port``
      - ``9090``
      - Port for the Prometheus ``/metrics`` endpoint.
+   * - ``--service-instance-id``
+     - *(unset, default UUID v4)*
+     - Identifier for this MP server instance, attached as the OTel
+       Resource attribute ``service.instance.id`` on every metric and
+       span. When the flag is not passed, defaults to a random UUID v4.
+       Pass ``--service-instance-id=""`` to force an empty value.
 
 vLLM Client Configuration
 --------------------------
@@ -397,6 +403,6 @@ Full Example
         --l2-prefetch-max-in-flight 8 \
         --l2-adapter '{"type": "nixl_store", "backend": "POSIX", "backend_params": {"file_path": "/data/lmcache/l2", "use_direct_io": "false"}, "pool_size": 64}' \
         --prometheus-port 9090 \
-        --prometheus-log-interval 10 \
-        --enable-telemetry \
-        --telemetry-processor '{"type": "logging", "log_level": "DEBUG"}'
+        --metrics-sample-rate 0.01 \
+        --enable-tracing \
+        --otlp-endpoint http://localhost:4317
