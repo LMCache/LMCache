@@ -37,7 +37,6 @@ WORK_LOG="${LOG_DIR}/build_${BUILD_ID}_blend.log"
 # Proxy stdout/stderr. Blend server/prefiller/decoder each get their own _blend_server/_prefiller_PORT/_decoder_PORT logs.
 VLLM_LOG="${LOG_DIR}/build_${BUILD_ID}_proxy.log"
 BLEND_SERVER_LOG="${LOG_DIR}/build_${BUILD_ID}_blend_server.log"
-ARTIFACT="${REPO_ROOT}/build_${BUILD_ID}.log"
 # Benchmark wall-clock limit (seconds). Exit 124 from `timeout` => failure. Default stays under blend pipeline 90m.
 BENCHMARK_TIMEOUT_SEC="${BENCHMARK_TIMEOUT_SEC:-4800}"
 
@@ -93,20 +92,12 @@ resolve_port_csv() {
   echo "${joined}"
 }
 
-collect_artifact() {
-  # Individual logs are already in LOG_DIR (written there directly).
-  # Just produce the merged artifact for CI / backward-compatible harnesses.
-  cat "${LOG_DIR}"/build_"${BUILD_ID}"_*.log > "${ARTIFACT}" 2>/dev/null || true
-  echo "[INFO] Logs:     ${LOG_DIR}/"
-  echo "[INFO] Artifact: ${ARTIFACT}"
-}
-
 finalize() {
   local rc=$?
   echo ""
   echo "[INFO] Shutting down all processes..."
   cleanup_pids
-  collect_artifact
+  echo "[INFO] Logs: ${LOG_DIR}/"
   exit "$rc"
 }
 

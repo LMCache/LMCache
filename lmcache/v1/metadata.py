@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
 
 # Third Party
@@ -56,10 +56,14 @@ class LMCacheMetadata:
     served_model_name: Optional[str] = None
     """chunk size"""
     chunk_size: int = 256
-    """ Manager for groups of layers with identical KV cache structure """
-    kv_layer_groups_manager: KVLayerGroupsManager = field(
-        default_factory=KVLayerGroupsManager
-    )
+    """Manager for groups of layers with identical KV cache structure.
+
+    ``None`` until the serving-engine adapter (e.g. the vLLM connector)
+    registers KV caches and constructs the manager via
+    :class:`KVLayerGroupsManager`. Consumers must guard against ``None``
+    when accessed before registration.
+    """
+    kv_layer_groups_manager: Optional[KVLayerGroupsManager] = None
     """ engine_id for RPC path (used by lookup client/server) """
     engine_id: Optional[str] = None
     """ extra config from kv_connector (e.g., lmcache_rpc_port) """
@@ -69,46 +73,46 @@ class LMCacheMetadata:
         """Check if the current worker is the first rank"""
         return self.worker_id == self.first_rank
 
-    # TODO(chunxiaozheng): some uts do not `build_kv_layer_groups`
     def get_dtypes(self) -> list[torch.dtype]:
-        if self.kv_layer_groups_manager.kv_layer_groups:
-            return [
-                group.dtype for group in self.kv_layer_groups_manager.kv_layer_groups
-            ]
+        """Return per-group dtypes, or the legacy single dtype if the
+        manager has not been registered yet (e.g. some unit tests)."""
+        klg_manager = self.kv_layer_groups_manager
+        if klg_manager is not None and klg_manager.kv_layer_groups:
+            return [group.dtype for group in klg_manager.kv_layer_groups]
         return [self.kv_dtype]
 
     def get_shapes(self, num_tokens: Optional[int] = None) -> list[torch.Size]:
         """Get the shapes of the KV cache in LMCache"""
         if num_tokens is None:
             num_tokens = self.chunk_size
-        if self.kv_layer_groups_manager.kv_layer_groups:
-            shapes = []
-            kv_size = 1 if self.use_mla else 2
-            for group in self.kv_layer_groups_manager.kv_layer_groups:
-                shapes.append(
-                    torch.Size(
-                        [
-                            kv_size,
-                            group.num_layers,
-                            num_tokens,
-                            group.hidden_dim_size,
-                        ]
-                    )
-                )
-            return shapes
-        else:
+        klg_manager = self.kv_layer_groups_manager
+        if klg_manager is not None and klg_manager.kv_layer_groups:
+            # Read kv_size from each group's shape_desc rather than self.use_mla
+            # so heterogeneous groups (should any ever co-exist) are handled.
             return [
                 torch.Size(
                     [
-                        self.kv_shape[1],
-                        self.kv_shape[0],
+                        group.shape_desc.kv_size,
+                        group.num_layers,
                         num_tokens,
-                        self.kv_shape[3] * self.kv_shape[4],
+                        group.hidden_dim_size,
                     ]
                 )
+                for group in klg_manager.kv_layer_groups
             ]
+        return [
+            torch.Size(
+                [
+                    self.kv_shape[1],
+                    self.kv_shape[0],
+                    num_tokens,
+                    self.kv_shape[3] * self.kv_shape[4],
+                ]
+            )
+        ]
 
     def get_num_groups(self) -> int:
-        if self.kv_layer_groups_manager.kv_layer_groups:
-            return self.kv_layer_groups_manager.num_groups
+        klg_manager = self.kv_layer_groups_manager
+        if klg_manager is not None and klg_manager.kv_layer_groups:
+            return klg_manager.num_groups
         return 1
