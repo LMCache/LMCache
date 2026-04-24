@@ -186,7 +186,13 @@ jobs:
               run: git tag -l | grep -vE '^v[0-9]+\.[0-9]+\.[0-9]+$' | xargs -r git tag -d
 
             - name: Login to DockerHub
-              if: vars.DOCKERHUB_USERNAME != ''
+              # Skip when either the username var or the token secret is
+              # absent. Secrets are not inherited into reusable workflows
+              # without `secrets: inherit`, and fork PRs never get secrets,
+              # so the token can legitimately be empty on some runs.
+              if: vars.DOCKERHUB_USERNAME != '' && env.DOCKERHUB_TOKEN != ''
+              env:
+                DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
               uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef # v3.6.0
               with:
                 username: ${{ vars.DOCKERHUB_USERNAME }}
