@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from functools import partial
-import os
 import random
 import tempfile
 import time
@@ -169,10 +168,7 @@ def create_config():
             case _:
                 raise ValueError(f"Unknown backend: {backend}")
 
-    homedir = os.environ.get("HOME", "/tmp")
-    with tempfile.TemporaryDirectory(
-        dir=homedir, ignore_cleanup_errors=True
-    ) as temp_dir:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
         yield partial(make_config, path=temp_dir)
 
 

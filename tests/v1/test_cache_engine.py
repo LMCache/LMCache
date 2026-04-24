@@ -3,7 +3,6 @@
 from collections import OrderedDict
 from copy import deepcopy
 from unittest.mock import MagicMock
-import os
 import random
 import shlex
 import subprocess
@@ -1258,10 +1257,7 @@ def test_force_store_wait(autorelease_v1):
         for _ in range(num_requests)
     ]
 
-    homedir = os.environ.get("HOME", "/tmp")
-    with tempfile.TemporaryDirectory(
-        dir=homedir, ignore_cleanup_errors=True
-    ) as temp_dir:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
         cfg = LMCacheEngineConfig.from_defaults(
             local_cpu=False,
             max_local_cpu_size=2,  # small cpu buffer
@@ -1449,10 +1445,7 @@ def test_multi_device_backends(save_unfull_chunk, autorelease_v1):
     with pytest.raises(AssertionError):
         check_paged_kv_cache_equal(retrieved_cache, kv_cache, slot_mapping)
 
-    homedir = os.environ.get("HOME", "/tmp")
-    with tempfile.TemporaryDirectory(
-        dir=homedir, ignore_cleanup_errors=True
-    ) as temp_dir:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
         cfg = LMCacheEngineConfig.from_dict(
             {
                 "local_cpu": True,
