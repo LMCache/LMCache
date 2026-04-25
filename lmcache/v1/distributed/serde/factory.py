@@ -90,7 +90,7 @@ def _create_fp8_serde(kwargs: dict[str, object]) -> SerdeProcessor:
     if fp8_dtype is None:
         raise ValueError(f"Unknown torch dtype: {dtype_name!r}")
 
-    max_workers = int(str(kwargs.get("max_workers", 1)))
+    max_workers = int(kwargs.get("max_workers", 1))  # type: ignore[call-overload]
     return AsyncSerdeProcessor(
         Fp8QuantizationSerializer(fp8_dtype),
         Fp8QuantizationDeserializer(fp8_dtype),

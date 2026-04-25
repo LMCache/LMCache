@@ -56,6 +56,22 @@ def test_create_serde_unknown_type_raises() -> None:
         create_serde_processor(SerdeConfig(type="does-not-exist"))
 
 
+def test_create_fp8_accepts_float_max_workers() -> None:
+    """``max_workers`` from a YAML float (e.g. 2.0) must round to int.
+
+    Regression: the old ``int(str(...))`` parse rejected float-encoded
+    integers; direct ``int(...)`` handles ints, floats, and digit
+    strings uniformly.
+    """
+    processor = create_serde_processor(
+        SerdeConfig(type="fp8", kwargs={"max_workers": 2.0})
+    )
+    try:
+        assert isinstance(processor, AsyncSerdeProcessor)
+    finally:
+        processor.close()
+
+
 def test_register_serde_factory_dispatch() -> None:
     """A custom factory is dispatched by its registered name."""
 

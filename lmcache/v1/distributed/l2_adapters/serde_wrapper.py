@@ -185,17 +185,10 @@ class SerdeL2AdapterWrapper(L2AdapterInterface):
             self._finalize_store(wrapped_id, success=False)
             return wrapped_id
 
-        try:
-            serde_task_id = self._serde.submit_serialize(objects, temp_objs)
-        except Exception:
-            logger.exception(
-                "Serde wrapper: submit_serialize raised for store task %d",
-                wrapped_id,
-            )
-            self._release_write_temps(temp_keys)
-            self._finalize_store(wrapped_id, success=False)
-            return wrapped_id
-
+        # Hold the wrapper lock across submit + reverse-map registration
+        # so the internal drain thread cannot observe a half-state where
+        # the serde already signaled completion but ``_serde_to_store``
+        # has no entry — which would leave the wrapped task hanging.
         state = _StoreTaskState(
             wrapped_id=wrapped_id,
             keys=list(keys),
@@ -203,9 +196,21 @@ class SerdeL2AdapterWrapper(L2AdapterInterface):
             temp_objs=temp_objs,
             phase=_StorePhase.SERIALIZE,
         )
-        with self._lock:
-            self._store_tasks[wrapped_id] = state
-            self._serde_to_store[serde_task_id] = wrapped_id
+        try:
+            with self._lock:
+                self._store_tasks[wrapped_id] = state
+                serde_task_id = self._serde.submit_serialize(objects, temp_objs)
+                self._serde_to_store[serde_task_id] = wrapped_id
+        except Exception:
+            logger.exception(
+                "Serde wrapper: submit_serialize raised for store task %d",
+                wrapped_id,
+            )
+            with self._lock:
+                self._store_tasks.pop(wrapped_id, None)
+            self._release_write_temps(temp_keys)
+            self._finalize_store(wrapped_id, success=False)
+            return wrapped_id
         return wrapped_id
 
     def pop_completed_store_tasks(self) -> dict[L2TaskId, bool]:
@@ -254,17 +259,10 @@ class SerdeL2AdapterWrapper(L2AdapterInterface):
             self._finalize_load(wrapped_id, Bitmap(len(keys)))
             return wrapped_id
 
-        try:
-            inner_task_id = self._inner.submit_load_task(keys, temp_objs)
-        except Exception:
-            logger.exception(
-                "Serde wrapper: inner.submit_load_task raised for task %d",
-                wrapped_id,
-            )
-            self._release_write_temps(temp_keys)
-            self._finalize_load(wrapped_id, Bitmap(len(keys)))
-            return wrapped_id
-
+        # Hold the wrapper lock across submit + reverse-map registration
+        # so the internal drain thread cannot observe a half-state where
+        # the inner already signaled completion but ``_inner_to_load``
+        # has no entry.
         state = _LoadTaskState(
             wrapped_id=wrapped_id,
             keys=list(keys),
@@ -272,9 +270,21 @@ class SerdeL2AdapterWrapper(L2AdapterInterface):
             temp_keys=temp_keys,
             temp_objs=temp_objs,
         )
-        with self._lock:
-            self._load_tasks[wrapped_id] = state
-            self._inner_to_load[inner_task_id] = wrapped_id
+        try:
+            with self._lock:
+                self._load_tasks[wrapped_id] = state
+                inner_task_id = self._inner.submit_load_task(keys, temp_objs)
+                self._inner_to_load[inner_task_id] = wrapped_id
+        except Exception:
+            logger.exception(
+                "Serde wrapper: inner.submit_load_task raised for task %d",
+                wrapped_id,
+            )
+            with self._lock:
+                self._load_tasks.pop(wrapped_id, None)
+            self._release_write_temps(temp_keys)
+            self._finalize_load(wrapped_id, Bitmap(len(keys)))
+            return wrapped_id
         return wrapped_id
 
     def query_load_result(self, task_id: L2TaskId) -> Bitmap | None:
@@ -311,10 +321,19 @@ class SerdeL2AdapterWrapper(L2AdapterInterface):
         self._stop_flag.set()
         self._thread.join()
 
-        # Release leftover temp buffers from any in-flight tasks. Store
-        # tasks in SERIALIZE phase hold write locks on their temps;
-        # tasks in INNER_STORE phase hold read locks (transitioned after
-        # serialize). Load tasks always hold write locks on their temps.
+        # Shut down the inner adapter and serde processor BEFORE
+        # releasing temp buffers. Both ``close()`` calls block until
+        # their in-flight reads / writes against the temp MemoryObjs
+        # finish; releasing the temps first would let L1 reclaim memory
+        # that the inner adapter or serde thread pool is still touching
+        # (use-after-free).
+        self._inner.close()
+        self._serde.close()
+
+        # Now safe to release leftover temp buffers. Store tasks in
+        # SERIALIZE phase hold write locks on their temps; tasks in
+        # INNER_STORE phase hold read locks (transitioned after
+        # serialize). Load tasks always hold write locks.
         with self._lock:
             write_locked: list[ObjectKey] = []
             read_locked: list[ObjectKey] = []
@@ -350,8 +369,6 @@ class SerdeL2AdapterWrapper(L2AdapterInterface):
 
         os.close(self._store_efd)
         os.close(self._load_efd)
-        self._inner.close()
-        self._serde.close()
 
     # ------------------------------------------------------------------
     # Internal loop
@@ -578,15 +595,18 @@ class SerdeL2AdapterWrapper(L2AdapterInterface):
             layout_desc=layout,
             mode="new",
         )
-        temp_objs: list[MemoryObj] = []
+        # First pass: collect every key whose reserve_write succeeded.
+        # We must scan the full list (not bail on the first failure)
+        # so a mixed-success result still releases all reserved keys.
         successful_temp_keys: list[ObjectKey] = []
         for temp_key in temp_keys:
             r = results.get(temp_key)
-            if r is None or r[0] != L1Error.SUCCESS:
-                self._release_write_temps(successful_temp_keys)
-                return temp_keys, None
-            temp_objs.append(r[1])
-            successful_temp_keys.append(temp_key)
+            if r is not None and r[0] == L1Error.SUCCESS:
+                successful_temp_keys.append(temp_key)
+        if len(successful_temp_keys) != len(temp_keys):
+            self._release_write_temps(successful_temp_keys)
+            return temp_keys, None
+        temp_objs = [results[tk][1] for tk in temp_keys]
         return temp_keys, temp_objs
 
     def _release_write_temps(self, temp_keys: list[ObjectKey]) -> None:
