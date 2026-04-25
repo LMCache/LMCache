@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from contextlib import contextmanager
+from copy import copy
 from dataclasses import dataclass, field
 from typing import (
     TYPE_CHECKING,
@@ -1822,23 +1823,44 @@ class PrometheusLogger:
         return labels
 
     _instance = None
+    _instances: Dict[tuple[tuple[str, str], ...], "PrometheusLogger"] = {}
+
+    @staticmethod
+    def _metadata_to_key(metadata: LMCacheMetadata) -> tuple[tuple[str, str], ...]:
+        labels = PrometheusLogger._metadata_to_labels(metadata)
+        return tuple(sorted((name, str(value)) for name, value in labels.items()))
+
+    @staticmethod
+    def _create_label_view(
+        base_logger: "PrometheusLogger",
+        metadata: LMCacheMetadata,
+    ) -> "PrometheusLogger":
+        """Reuse registered collectors with a different metadata/label view."""
+        label_view = copy(base_logger)
+        label_view.metadata = metadata
+        label_view.labels = PrometheusLogger._metadata_to_labels(metadata)
+        return label_view
 
     @staticmethod
     def GetOrCreate(
         metadata: LMCacheMetadata,
         config: Optional["LMCacheEngineConfig"] = None,
     ) -> "PrometheusLogger":
+        metadata_key = PrometheusLogger._metadata_to_key(metadata)
+        if metadata_key in PrometheusLogger._instances:
+            return PrometheusLogger._instances[metadata_key]
+
         if PrometheusLogger._instance is None:
-            PrometheusLogger._instance = PrometheusLogger(metadata, config=config)
-        # assert PrometheusLogger._instance.metadata == metadata, \
-        #    "PrometheusLogger instance already created with different metadata"
-        if PrometheusLogger._instance.metadata != metadata:
-            logger.error(
-                "PrometheusLogger instance already created with "
-                "different metadata. This should not happen except "
-                "in test"
+            logger_instance = PrometheusLogger(metadata, config=config)
+            PrometheusLogger._instance = logger_instance
+        else:
+            logger_instance = PrometheusLogger._create_label_view(
+                PrometheusLogger._instance,
+                metadata,
             )
-        return PrometheusLogger._instance
+
+        PrometheusLogger._instances[metadata_key] = logger_instance
+        return logger_instance
 
     @staticmethod
     def GetInstance() -> "PrometheusLogger":
