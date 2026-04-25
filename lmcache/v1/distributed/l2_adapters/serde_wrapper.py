@@ -570,21 +570,9 @@ class SerdeL2AdapterWrapper(L2AdapterInterface):
                 All entries must share a single ``(shape, dtype)`` — the
                 caller (store/prefetch controller) is responsible for
                 shape-grouping before submission.
-
-        Raises:
-            ValueError: if ``objects`` is non-empty and elements have
-                differing shapes or dtypes.
         """
         shape_0 = objects[0].get_shapes()
         dtype_0 = objects[0].get_dtypes()
-        for obj in objects[1:]:
-            if obj.get_shapes() != shape_0 or obj.get_dtypes() != dtype_0:
-                raise ValueError(
-                    "Serde wrapper: all MemoryObjs in one submit must "
-                    "share a single (shape, dtype); the temp layout is "
-                    "derived from objects[0]."
-                )
-
         temp_keys = [make_temp_key(k) for k in keys]
         layout = serialized_layout_desc(
             MemoryLayoutDesc(shapes=shape_0, dtypes=dtype_0), self._serde
