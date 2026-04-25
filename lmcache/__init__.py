@@ -39,14 +39,16 @@ def _detect_device() -> tuple[Any, str]:
         # Third Party
         import torch
     except ImportError:
-        return None, "cuda"  # fallback，CLI-only
+        return None, "cpu"  # fallback，CLI-only
 
     if hasattr(torch, "xpu") and torch.xpu.is_available():
         return torch.xpu, "xpu"
     elif hasattr(torch, "hpu") and torch.hpu.is_available():
         return torch.hpu, "hpu"
-    else:
+    elif torch.cuda.is_available():
         return torch.cuda, "cuda"
+    else:
+        return torch, "cpu"
 
 
 torch_dev, torch_device_type = _detect_device()
@@ -59,11 +61,14 @@ def _get_backend() -> Any:
     """
     Try backends in order, first successful import wins.
     """
+    # Third Party
+    import torch
+
     backend_candidates = [
         (
             "lmcache.c_ops",
             "cuda_ops",
-            lambda: torch_dev.is_available(),
+            lambda: torch.cuda.is_available(),
         ),
         # should extend to more HWs..
     ]
