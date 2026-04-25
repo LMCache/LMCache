@@ -148,11 +148,11 @@ class PdL2AdapterConfig(L2AdapterConfigBase):
             peer_init_port=list(peer_init_port),
             peer_alloc_port=list(peer_alloc_port),
             proxy_host=proxy_host,
-            proxy_port=int(d.get("proxy_port", 6688)),
-            buffer_size=int(d.get("buffer_size", 1073741824)),
+            proxy_port=int(d.get("proxy_port") or 6688),
+            buffer_size=int(d.get("buffer_size") or 1073741824),
             buffer_device=buffer_device,
             transfer_channel=transfer_channel,
-            nixl_backends=list(d.get("nixl_backends", ["tcp"])),
+            nixl_backends=list(d.get("nixl_backends") or ["tcp"]),
         )
         return cfg
 
@@ -203,7 +203,7 @@ class PdL2Adapter(L2AdapterInterface):
                 settings.
             l1_memory_desc: Optional L1 memory descriptor (unused in this
                 skeleton; required by adapters that register L1 memory with
-                external backends in PR 5/7).
+                external backends in following PRs).
 
         Raises:
             OSError: If eventfd creation fails.
@@ -221,17 +221,18 @@ class PdL2Adapter(L2AdapterInterface):
         self._role = config.role
 
         # Create three distinct eventfds for store, lookup, load events
-        self._store_efd = os.eventfd(0, os.EFD_NONBLOCK)
-        self._lookup_efd = os.eventfd(0, os.EFD_NONBLOCK)
-        self._load_efd = os.eventfd(0, os.EFD_NONBLOCK)
+        self._store_efd = os.eventfd(0, os.EFD_NONBLOCK | os.EFD_CLOEXEC)
+        self._lookup_efd = os.eventfd(0, os.EFD_NONBLOCK | os.EFD_CLOEXEC)
+        self._load_efd = os.eventfd(0, os.EFD_NONBLOCK | os.EFD_CLOEXEC)
 
-        # Stubs for resources initialized in PR 5/7
+        # Stubs for resources initialized in following PRs
         self._staging_allocator: Optional[Any] = None
         self._transfer_channel: Optional[Any] = None
         self._zmq_context: Optional[Any] = None
 
         # Shutdown coordination
         self._stop_flag = threading.Event()
+        self._lock = threading.Lock()
 
     #####################
     # Event Fd Interface
@@ -270,7 +271,7 @@ class PdL2Adapter(L2AdapterInterface):
         keys: list[ObjectKey],
         objects: list[MemoryObj],
     ) -> L2TaskId:
-        """Submit a store task (stub; implementation in PR 4/7).
+        """Submit a store task (stub; implementation in following PRs).
 
         Args:
             keys: List of keys to be stored.
@@ -280,21 +281,23 @@ class PdL2Adapter(L2AdapterInterface):
             Task ID for the submitted store task.
 
         Raises:
-            NotImplementedError: Always (placeholder for PR 4/7).
+            NotImplementedError: Always (placeholder for following PRs).
         """
-        raise NotImplementedError("PdL2Adapter.submit_store_task: impl in PR 4/7")
+        raise NotImplementedError(
+            "PdL2Adapter.submit_store_task: impl in following PRs"
+        )
 
     def pop_completed_store_tasks(self) -> dict[L2TaskId, bool]:
-        """Pop completed store tasks (stub; implementation in PR 4/7).
+        """Pop completed store tasks (stub; implementation in following PRs).
 
         Returns:
             Mapping from task ID to success flag.
 
         Raises:
-            NotImplementedError: Always (placeholder for PR 4/7).
+            NotImplementedError: Always (placeholder for following PRs)
         """
         raise NotImplementedError(
-            "PdL2Adapter.pop_completed_store_tasks: impl in PR 4/7"
+            "PdL2Adapter.pop_completed_store_tasks: impl in following PRs"
         )
 
     #####################
@@ -305,7 +308,7 @@ class PdL2Adapter(L2AdapterInterface):
         self,
         keys: list[ObjectKey],
     ) -> L2TaskId:
-        """Submit a lookup and lock task (stub; implementation in PR 4/7).
+        """Submit a lookup and lock task (stub; implementation in following PRs).
 
         Args:
             keys: List of keys to look up and lock.
@@ -314,14 +317,14 @@ class PdL2Adapter(L2AdapterInterface):
             Task ID for the submitted lookup and lock task.
 
         Raises:
-            NotImplementedError: Always (placeholder for PR 4/7).
+            NotImplementedError: Always (placeholder for following PRs).
         """
         raise NotImplementedError(
-            "PdL2Adapter.submit_lookup_and_lock_task: impl in PR 4/7"
+            "PdL2Adapter.submit_lookup_and_lock_task: impl in following PRs"
         )
 
     def query_lookup_and_lock_result(self, task_id: L2TaskId) -> "Bitmap | None":
-        """Query lookup and lock result (stub; implementation in PR 4/7).
+        """Query lookup and lock result (stub; implementation in following PRs).
 
         Args:
             task_id: Task ID of the lookup and lock task.
@@ -330,25 +333,25 @@ class PdL2Adapter(L2AdapterInterface):
             Bitmap indicating success/failure per key, or None if not complete.
 
         Raises:
-            NotImplementedError: Always (placeholder for PR 4/7).
+            NotImplementedError: Always (placeholder for following PRs).
         """
         raise NotImplementedError(
-            "PdL2Adapter.query_lookup_and_lock_result: impl in PR 4/7"
+            "PdL2Adapter.query_lookup_and_lock_result: impl in following PRs"
         )
 
     def submit_unlock(
         self,
         keys: list[ObjectKey],
     ) -> None:
-        """Submit an unlock task (stub; implementation in PR 4/7).
+        """Submit an unlock task (stub; implementation in following PRs).
 
         Args:
             keys: List of keys to unlock.
 
         Raises:
-            NotImplementedError: Always (placeholder for PR 4/7).
+            NotImplementedError: Always (placeholder for following PRs).
         """
-        raise NotImplementedError("PdL2Adapter.submit_unlock: impl in PR 4/7")
+        raise NotImplementedError("PdL2Adapter.submit_unlock: impl in following PRs")
 
     #####################
     # Load Interface
@@ -359,7 +362,7 @@ class PdL2Adapter(L2AdapterInterface):
         keys: list[ObjectKey],
         objects: list[MemoryObj],
     ) -> L2TaskId:
-        """Submit a load task (stub; implementation in PR 4/7).
+        """Submit a load task (stub; implementation in following PRs).
 
         Args:
             keys: List of keys to load.
@@ -369,12 +372,12 @@ class PdL2Adapter(L2AdapterInterface):
             Task ID for the submitted load task.
 
         Raises:
-            NotImplementedError: Always (placeholder for PR 4/7).
+            NotImplementedError: Always (placeholder for following PRs).
         """
-        raise NotImplementedError("PdL2Adapter.submit_load_task: impl in PR 4/7")
+        raise NotImplementedError("PdL2Adapter.submit_load_task: impl in following PRs")
 
     def query_load_result(self, task_id: L2TaskId) -> "Bitmap | None":
-        """Query load result (stub; implementation in PR 4/7).
+        """Query load result (stub; implementation in following PRs).
 
         Args:
             task_id: Task ID of the load task.
@@ -383,9 +386,11 @@ class PdL2Adapter(L2AdapterInterface):
             Bitmap indicating success/failure per key, or None if not complete.
 
         Raises:
-            NotImplementedError: Always (placeholder for PR 4/7).
+            NotImplementedError: Always (placeholder for following PRs).
         """
-        raise NotImplementedError("PdL2Adapter.query_load_result: impl in PR 4/7")
+        raise NotImplementedError(
+            "PdL2Adapter.query_load_result: impl in following PRs"
+        )
 
     #####################
     # Cleanup Interface
@@ -397,17 +402,16 @@ class PdL2Adapter(L2AdapterInterface):
         Closes the three eventfds (store, lookup, load) and sets the stop
         flag for graceful shutdown coordination. Safe to call multiple times.
         """
-        # Early return if already closed
-        if self._stop_flag.is_set():
-            return
-
-        # Set stop flag first to signal any background threads
-        self._stop_flag.set()
-
-        # Close eventfds
-        os.close(self._store_efd)
-        os.close(self._lookup_efd)
-        os.close(self._load_efd)
+        with self._lock:
+            if self._stop_flag.is_set():
+                return
+            self._stop_flag.set()
+            fds_to_close = [self._store_efd, self._lookup_efd, self._load_efd]
+        for fd in fds_to_close:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
 
 
 # Factory registration
@@ -423,8 +427,13 @@ def _create_pd_adapter(
 
     Returns:
         A new PdL2Adapter instance.
+
+    Raises:
+        TypeError: If config is not an instance of PdL2AdapterConfig.
     """
-    return PdL2Adapter(config, l1_memory_desc)  # type: ignore[arg-type]
+    if not isinstance(config, PdL2AdapterConfig):
+        raise TypeError("config must be an instance of PdL2AdapterConfig")
+    return PdL2Adapter(config, l1_memory_desc)
 
 
 register_l2_adapter_factory("pd", _create_pd_adapter)
