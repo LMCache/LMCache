@@ -41,7 +41,7 @@ from lmcache.v1.multiprocess.custom_types import (
 # fallback) is handled once in ``lmcache/__init__.py`` via ``_get_backend``,
 # which aliases the chosen module as ``lmcache.c_ops`` in ``sys.modules``.
 # Importing it here transparently works in both CUDA and CPU-only envs.
-import lmcache.c_ops as lmc_ops  # noqa: E402
+import lmcache.c_ops as lmc_ops
 
 logger = init_logger(__name__)
 
