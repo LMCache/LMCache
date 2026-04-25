@@ -153,6 +153,34 @@ contribute to histograms; counters above always count all events.
 
 ---
 
+## Lookup Hit-Rate Metrics (L1 + L2 combined)
+
+Token-level counters derived from the `MP_LOOKUP_PREFETCH_END` event.  Their
+ratio is the fraction of tokens requested by a lookup that were served from
+either L1 or L2.  L0 (GPU prefix cache) is intentionally excluded — it is
+vLLM-owned and not observable from LMCache.
+
+| OTel metric name | Prometheus name | Type | Source event | Calculation |
+|---|---|---|---|---|
+| `lmcache_mp.lookup_requested_tokens` | `lmcache_mp_lookup_requested_tokens_total` | Counter | `MP_LOOKUP_PREFETCH_END` | `+requested_tokens` |
+| `lmcache_mp.lookup_hit_tokens` | `lmcache_mp_lookup_hit_tokens_total` | Counter | `MP_LOOKUP_PREFETCH_END` | `+hit_tokens` |
+
+**What it answers:** What fraction of tokens requested by a lookup were served from cache (L1 or L2)?
+
+```promql
+rate(lmcache_mp_lookup_hit_tokens_total[5m])
+/ rate(lmcache_mp_lookup_requested_tokens_total[5m])
+```
+
+> **Note:** Both counters are driven by the *same* event, so they always
+> advance together per completed lookup.  Early-exit lookups (no GPU
+> context matches, empty `chunk_hashes`) contribute `0` to both, and
+> abandoned lookups (client never polls `query_prefetch_status`)
+> contribute to neither.  See
+> [L1_L2_HIT_RATE_PLAN.md](L1_L2_HIT_RATE_PLAN.md) for the full rationale.
+
+---
+
 ## L0 (GPU) Block Lifecycle Histograms
 
 Sampled (default 1%) GPU KV cache block lifecycle tracking via shadow monitoring
@@ -170,6 +198,30 @@ per-instance and per-model Prometheus metric slicing (e.g.
 | `lmcache_mp.l0_block_reuse_gap_seconds` | `lmcache_mp_l0_block_reuse_gap_seconds` | Histogram | `MP_VLLM_BLOCK_ALLOCATION` (cache hit) | Time gaps between consecutive accesses from access history |
 
 **What it answers:** How long do GPU blocks live before eviction? How idle are they? How frequently are cached blocks reused? Which instance/model is experiencing the most churn?
+
+---
+
+## L0 ↔ L1 Throughput Histograms
+
+Sampled (default 1%) per-request throughput of GPU↔CPU copies via
+`L0L1ThroughputSubscriber`. Correlates `MP_{STORE,RETRIEVE}_START` → `MP_{STORE,RETRIEVE}_END`
+pairs by `session_id`, computes `total_bytes / (end_ts - start_ts)` in GB/s.
+START/END events fire on the GPU cupy stream (`publish_on_stream`), so
+timestamps reflect true GPU-stream copy time — not Python/lock overhead.
+
+All throughput histograms carry `engine_id` (vLLM worker instance id),
+`device` (e.g. `"cuda:3"`), and `model_name` OTel attributes, enabling
+per-worker, per-device, and per-model slicing in Prometheus (e.g.
+`lmcache_mp_l0_l1_store_throughput_gbs{engine_id="0",device="cuda:3",model_name="meta-llama/Llama-3.1-8B"}`).
+
+| OTel metric name | Prometheus name | Type | Source event | Calculation |
+|---|---|---|---|---|
+| `lmcache_mp.l0_l1_store_throughput_gbs` | `lmcache_mp_l0_l1_store_throughput_gbs` | Histogram | `MP_STORE_START` → `MP_STORE_END` | `total_bytes / (end_ts - start_ts) / 1e9` per sampled request |
+| `lmcache_mp.l0_l1_load_throughput_gbs` | `lmcache_mp_l0_l1_load_throughput_gbs` | Histogram | `MP_RETRIEVE_START` → `MP_RETRIEVE_END` | `total_bytes / (end_ts - start_ts) / 1e9` per sampled request |
+
+**What it answers:** What GPU↔CPU throughput is each vLLM worker actually
+achieving for KV store/load? Does it match the theoretical PCIe bandwidth?
+Are some workers or GPUs underperforming?
 
 ---
 
