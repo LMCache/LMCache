@@ -63,7 +63,7 @@ def _make_scheduler_manager(cfg: LMCacheEngineConfig) -> MagicMock:
     return manager
 
 
-def test_scheduler_does_not_overwrite_worker_adapter():
+def test_scheduler_does_not_overwrite_worker_adapter() -> None:
     """Scheduler initialized after worker must not break worker endpoints."""
     cfg = _make_config(port_start=17000)
 
@@ -95,7 +95,7 @@ def test_scheduler_does_not_overwrite_worker_adapter():
     assert response.status_code == 503
 
 
-def test_worker_after_scheduler_still_works():
+def test_worker_after_scheduler_still_works() -> None:
     """Reverse order: worker initialized after scheduler also stays healthy."""
     cfg = _make_config(port_start=17100)
 

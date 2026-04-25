@@ -21,23 +21,20 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+
+def _build_app() -> FastAPI:
+    """Create a fresh FastAPI app with all internal API routes registered."""
+    new_app = FastAPI()
+    APIRegistry(new_app).register_all_apis()
+    return new_app
+
+
 # Module-level app kept for backward compatibility with existing tests that
 # import `app` directly. Production code no longer relies on this shared
 # singleton; each InternalAPIServer owns its own FastAPI app so that
 # multiple instances in the same process (e.g. scheduler + worker in TP=1
 # non-MP mode) do not overwrite each other's app.state.lmcache_adapter.
-app = FastAPI()
-
-# Automatically register common, vllm, and controller APIs
-registry = APIRegistry(app)
-registry.register_all_apis(categories=["common", "vllm", "controller"])
-
-
-def _build_app() -> FastAPI:
-    """Create a fresh FastAPI app with all internal API routes registered."""
-    new_app = FastAPI()
-    APIRegistry(new_app).register_all_apis(categories=["common", "vllm", "controller"])
-    return new_app
+app = _build_app()
 
 
 class InternalAPIServer:
