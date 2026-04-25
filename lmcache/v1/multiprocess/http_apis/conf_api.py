@@ -52,7 +52,7 @@ async def conf(request: Request) -> Any:
         )
     result = {}
     for name, cfg in configs.items():
-        if is_dataclass(cfg):
+        if is_dataclass(cfg) and not isinstance(cfg, type):
             result[name] = safe_asdict(cfg)
         else:
             result[name] = make_json_safe(cfg)
