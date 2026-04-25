@@ -148,11 +148,11 @@ class PdL2AdapterConfig(L2AdapterConfigBase):
             peer_init_port=list(peer_init_port),
             peer_alloc_port=list(peer_alloc_port),
             proxy_host=proxy_host,
-            proxy_port=int(d.get("proxy_port") or 6688),
-            buffer_size=int(d.get("buffer_size") or 1073741824),
+            proxy_port=int(d.get("proxy_port", 6688)),
+            buffer_size=int(d.get("buffer_size", 1073741824)),
             buffer_device=buffer_device,
             transfer_channel=transfer_channel,
-            nixl_backends=list(d.get("nixl_backends") or ["tcp"]),
+            nixl_backends=list(d.get("nixl_backends", ["tcp"])),
         )
         return cfg
 
