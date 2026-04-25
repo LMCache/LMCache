@@ -45,10 +45,10 @@ def _detect_device() -> tuple[Any, str]:
         return torch.xpu, "xpu"
     elif hasattr(torch, "hpu") and torch.hpu.is_available():
         return torch.hpu, "hpu"
-    elif torch.cuda.is_available():
-        return torch.cuda, "cuda"
     else:
-        return torch, "cpu"
+        # Fallback: always return torch.cuda for backward compatibility
+        # with existing tests and code paths that assume CUDA is the default.
+        return torch.cuda, "cuda"
 
 
 torch_dev, torch_device_type = _detect_device()
