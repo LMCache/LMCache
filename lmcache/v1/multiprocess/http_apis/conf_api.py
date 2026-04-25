@@ -21,6 +21,7 @@ class _IndentedJSONResponse(JSONResponse):
         return json.dumps(
             content,
             ensure_ascii=False,
+            allow_nan=False,
             indent=2,
         ).encode("utf-8")
 
