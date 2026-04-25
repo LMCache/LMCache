@@ -488,23 +488,42 @@ class LocalDiskBackend(StorageBackendInterface):
             self.disk_lock.acquire()
             assert key in self.dict, f"Key {key} not found in disk cache after pinning"
 
-            path = self.dict[key].path
-            dtype = self.dict[key].dtype
-            shape = self.dict[key].shape
-            fmt = self.dict[key].fmt
+            disk_meta = self.dict[key]
+            path = disk_meta.path
+            dtype = disk_meta.dtype
+            shape = disk_meta.shape
+            fmt = disk_meta.fmt
 
             assert dtype is not None
             assert shape is not None
 
+            # MLA fix: mirror the blocking get path — when multi-group
+            # shapes/dtypes are present (DeepSeek-V3 / GLM-5 MLA), allocate
+            # a buffer sized for ALL groups. Without this, allocate()
+            # returns a buffer sized for the first group only, and the
+            # subsequent read_file silently truncates the second group's
+            # bytes → on-the-wire data corruption that surfaces as garbled
+            # decode tokens (not an error).
+            #
             # busy_loop=False prevents spinning on the event loop thread;
             # if staging memory is exhausted the caller will get a logged
             # error rather than a silent deadlock.
-            memory_obj = self.local_cpu_backend.allocate(
-                shape,
-                dtype,
-                fmt,
-                busy_loop=False,
-            )
+            shapes_mg = getattr(disk_meta, "_shapes", None)
+            dtypes_mg = getattr(disk_meta, "_dtypes", None)
+            if shapes_mg is not None and dtypes_mg is not None and len(shapes_mg) > 1:
+                memory_obj = self.local_cpu_backend.allocate(
+                    shapes_mg,
+                    dtypes_mg,
+                    fmt,
+                    busy_loop=False,
+                )
+            else:
+                memory_obj = self.local_cpu_backend.allocate(
+                    shape,
+                    dtype,
+                    fmt,
+                    busy_loop=False,
+                )
 
             if memory_obj is None:
                 logger.error(
