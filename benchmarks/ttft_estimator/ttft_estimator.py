@@ -12,7 +12,7 @@ vllm serve meta-llama/Llama-3.1-8B-Instruct \
     --max-num-seqs 1
 
 Example Usage: 
-python ttft-estimator.py \
+python ttft_estimator.py \
     --model meta-llama/Llama-3.1-8B-Instruct \
     --host localhost --port 8000\
     --context-lengths 2000,5000,10000,20000,30000,50000,75000,100000,128000

@@ -32,7 +32,7 @@ done
 echo "Service started successfully."
 
 # Run benchmark scripts
-python3 benchmarks/multi-round-qa.py \
+python3 benchmarks/multi_round_qa/multi_round_qa.py \
     --num-users 10 \
     --num-rounds 5 \
     --qps 0.5 \
