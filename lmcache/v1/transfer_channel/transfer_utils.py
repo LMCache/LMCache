@@ -19,8 +19,8 @@ def get_correct_device(device: str, worker_id: int) -> str:
     """
     if device == "cpu":
         return "cpu"
-    else:
-        return f"{device}:{worker_id}"
+    base_device = device.split(":")[0]
+    return f"{base_device}:{worker_id}"
 
 
 class SideMsgBase(msgspec.Struct, tag=True):
