@@ -563,6 +563,106 @@ class LMCacheEngine:
             store_stats.put_time * 1000,
         )
 
+    @torch.inference_mode()
+    def store_hidden_states(
+        self,
+        tokens: Union[torch.Tensor, list[int]],
+        mask: Optional[torch.Tensor] = None,
+        hidden_states: Optional[torch.Tensor] = None,
+        **kwargs,
+    ) -> None:
+        """Store hidden states alongside KV cache using the same chunk keys.
+
+        Hidden states are stored as separate entries with a derived key
+        (``CacheEngineKey.to_hs_key()``).  Unlike KV store, this does not
+        use the GPU connector — the caller is expected to pass a CPU tensor.
+
+        Args:
+            tokens: Token IDs for chunk boundary computation.
+            mask: Boolean mask (same semantics as ``store()``).
+            hidden_states: CPU tensor of shape ``[num_tokens, hidden_dim]``.
+                If ``None``, this is a no-op.
+            **kwargs: Passed to ``token_database.process_tokens()``.
+        """
+        if hidden_states is None:
+            return
+        if not self.is_healthy() or self.storage_manager is None or self.is_frozen():
+            return
+
+        request_configs = kwargs.get("request_configs")
+        hs_keys: list[CacheEngineKey] = []
+        hs_objs: list[MemoryObj] = []
+
+        for start, end, key in self.token_database.process_tokens(
+            tokens, mask=mask, request_configs=request_configs,
+        ):
+            hs_key = key.to_hs_key()
+            hs_chunk = hidden_states[start:end].contiguous()
+            hs_shape = torch.Size(list(hs_chunk.shape))
+            hs_dtype = hs_chunk.dtype
+
+            memory_obj = self.storage_manager.allocate(
+                hs_shape, hs_dtype, fmt=MemoryFormat.HS_TD,
+                eviction=True, busy_loop=False,
+            )
+            if memory_obj is None:
+                logger.warning("CPU memory pressure, skipping HS store")
+                break
+            memory_obj.tensor[:] = hs_chunk
+            hs_keys.append(hs_key)
+            hs_objs.append(memory_obj)
+
+        if hs_keys:
+            self.storage_manager.batched_put(
+                hs_keys, hs_objs, location=self.store_location,
+            )
+            logger.debug("Stored hidden states for %d chunks", len(hs_keys))
+
+    @torch.inference_mode()
+    def retrieve_hidden_states(
+        self,
+        tokens: Union[torch.Tensor, list[int]],
+        mask: Optional[torch.Tensor] = None,
+        **kwargs,
+    ) -> Optional[torch.Tensor]:
+        """Retrieve hidden states stored alongside KV cache.
+
+        Args:
+            tokens: Token IDs for chunk boundary computation.
+            mask: Boolean mask (same semantics as ``retrieve()``).
+            **kwargs: Passed to ``token_database.process_tokens()``.
+
+        Returns:
+            A contiguous CPU tensor of shape ``[num_tokens, hidden_dim]``,
+            or ``None`` if any chunk is missing.
+        """
+        if not self.is_healthy() or self.storage_manager is None:
+            return None
+
+        request_configs = kwargs.get("request_configs")
+        chunks: list[tuple[int, int, torch.Tensor]] = []
+
+        for start, end, key in self.token_database.process_tokens(
+            tokens, mask=mask, request_configs=request_configs,
+        ):
+            hs_key = key.to_hs_key()
+            memory_obj = self.storage_manager.get(hs_key)
+            if memory_obj is None:
+                logger.debug("HS chunk miss for hash %s", hs_key.chunk_hash)
+                return None
+            chunks.append((start, end, memory_obj.tensor.clone()))
+            memory_obj.ref_count_down()
+
+        if not chunks:
+            return None
+
+        total_tokens = max(end for _, end, _ in chunks)
+        hidden_dim = chunks[0][2].shape[-1]
+        result = torch.zeros(total_tokens, hidden_dim, dtype=chunks[0][2].dtype)
+        for start, end, tensor in chunks:
+            result[start:end] = tensor
+        return result
+
     @_lmcache_nvtx_annotate
     @torch.inference_mode()
     def store_layer(

@@ -857,6 +857,7 @@ class LMCacheConnectorV1Impl:
                     )
                     self._invalid_block_ids.update(missing_blocks)
 
+
     def record_failed_blocks(
         self,
         request_id: str,

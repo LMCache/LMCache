@@ -396,6 +396,22 @@ class CacheEngineKey:
             s += "@" + "@".join(tags)
         return s
 
+    def to_hs_key(self) -> "CacheEngineKey":
+        """Derive a parallel key for hidden-state storage.
+
+        Returns:
+            A new ``CacheEngineKey`` with ``:hs`` appended to ``model_name``.
+            All other fields (``chunk_hash``, ``world_size``, etc.) are copied.
+        """
+        return CacheEngineKey(
+            model_name=self.model_name + ":hs",
+            world_size=self.world_size,
+            worker_id=self.worker_id,
+            chunk_hash=self.chunk_hash,
+            dtype=self.dtype,
+            request_configs=self.request_configs,
+        )
+
     def split_layers(self, num_layers: int) -> List["LayerCacheEngineKey"]:
         """Split the key into multiple keys for each layer"""
         keys = []
