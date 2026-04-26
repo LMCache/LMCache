@@ -1834,48 +1834,11 @@ class PrometheusLogger:
             self.gauge_pinned_memory_objs_count, stats.pinned_memory_objs_count
         )
 
-    @staticmethod
-    def _metadata_to_labels(metadata: LMCacheMetadata):
-        labels = {
-            "model_name": metadata.model_name,
-            "worker_id": metadata.worker_id,
-            "role": metadata.role,
-            "served_model_name": metadata.served_model_name or "",
-        }
-        return labels
-
     _instance = None
     _instances: Dict[tuple[tuple[str, str], ...], "PrometheusLogger"] = {}
 
     @staticmethod
-    def _metadata_to_key(metadata: LMCacheMetadata) -> tuple[tuple[str, str], ...]:
-        labels = PrometheusLogger._metadata_to_labels(metadata)
-        return tuple(sorted((name, str(value)) for name, value in labels.items()))
-
-    @staticmethod
-    def _create_label_view(
-        base_logger: "PrometheusLogger",
-        metadata: LMCacheMetadata,
-    ) -> "PrometheusLogger":
-        """Reuse registered collectors with a different metadata/label view."""
-        label_view = copy(base_logger)
-        label_view.metadata = metadata
-        label_view.labels = PrometheusLogger._metadata_to_labels(metadata)
-        label_view._bind_dynamic_metric_children()
-        return label_view
-
-    def _reset_label_views(self) -> List["PrometheusLogger"]:
-        """Return label views whose children must be restored after clear().
-
-        Counter.clear() and Histogram.clear() remove every child from the
-        shared collector, so reset must recreate children for all known labels.
-        """
-        views = list(PrometheusLogger._instances.values())
-        if self not in views:
-            views.append(self)
-        return views
-
-    @staticmethod
+    @thread_safe
     def GetOrCreate(
         metadata: LMCacheMetadata,
         config: Optional["LMCacheEngineConfig"] = None,
@@ -1936,6 +1899,44 @@ class PrometheusLogger:
             # Re-initialize all known label views to keep each series visible.
             for label_view in label_views:
                 histogram.labels(**label_view.labels)
+
+    @staticmethod
+    def _metadata_to_labels(metadata: LMCacheMetadata):
+        labels = {
+            "model_name": metadata.model_name,
+            "worker_id": metadata.worker_id,
+            "role": metadata.role,
+            "served_model_name": metadata.served_model_name or "",
+        }
+        return labels
+
+    @staticmethod
+    def _metadata_to_key(metadata: LMCacheMetadata) -> tuple[tuple[str, str], ...]:
+        labels = PrometheusLogger._metadata_to_labels(metadata)
+        return tuple(sorted((name, str(value)) for name, value in labels.items()))
+
+    @staticmethod
+    def _create_label_view(
+        base_logger: "PrometheusLogger",
+        metadata: LMCacheMetadata,
+    ) -> "PrometheusLogger":
+        """Reuse registered collectors with a different metadata/label view."""
+        label_view = copy(base_logger)
+        label_view.metadata = metadata
+        label_view.labels = PrometheusLogger._metadata_to_labels(metadata)
+        label_view._bind_dynamic_metric_children()
+        return label_view
+
+    def _reset_label_views(self) -> List["PrometheusLogger"]:
+        """Return label views whose children must be restored after clear().
+
+        Counter.clear() and Histogram.clear() remove every child from the
+        shared collector, so reset must recreate children for all known labels.
+        """
+        views = list(PrometheusLogger._instances.values())
+        if self not in views:
+            views.append(self)
+        return views
 
 
 def reset_observability_metrics() -> None:
