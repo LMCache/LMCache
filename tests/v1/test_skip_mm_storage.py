@@ -8,8 +8,16 @@ first multimodal token, so KV for varying mm content is not written to CPU.
 # Standard
 from dataclasses import dataclass
 
+# Third Party
+import pytest
+
+pytest.importorskip("vllm")
+
 # First Party
-from lmcache.integration.vllm.vllm_v1_adapter import ReqMeta, RequestTracker
+from lmcache.integration.vllm.vllm_v1_adapter import (  # noqa: E402
+    ReqMeta,
+    RequestTracker,
+)
 
 
 @dataclass
