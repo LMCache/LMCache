@@ -104,12 +104,19 @@ def init_otel_metrics(
         metrics.set_meter_provider(provider)
         if start_http_server:
             prometheus_client.start_http_server(prometheus_port)
-        logger.info(
-            "OTel MeterProvider initialised with Prometheus fallback "
-            "(http://0.0.0.0:%d/metrics), resource=%s",
-            prometheus_port,
-            dict(resource.attributes),
-        )
+            logger.info(
+                "OTel MeterProvider initialised with Prometheus fallback "
+                "(http://0.0.0.0:%d/metrics), resource=%s",
+                prometheus_port,
+                dict(resource.attributes),
+            )
+        else:
+            logger.info(
+                "OTel MeterProvider initialised with Prometheus fallback "
+                "(standalone metrics HTTP server disabled; "
+                "/metrics must be exposed by the caller), resource=%s",
+                dict(resource.attributes),
+            )
 
 
 def init_otel_tracing(
