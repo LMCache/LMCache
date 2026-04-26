@@ -1906,7 +1906,7 @@ class PrometheusLogger:
                 histogram.labels(**label_view.labels)
 
     @staticmethod
-    def _metadata_to_labels(metadata: LMCacheMetadata):
+    def _metadata_to_labels(metadata: LMCacheMetadata) -> Dict[str, Any]:
         labels = {
             "model_name": metadata.model_name,
             "worker_id": metadata.worker_id,
