@@ -366,9 +366,7 @@ class ReqMeta:
         # reused across requests, so storing it wastes CPU bandwidth.
         if skip_mm_storage and tracker.mm_positions:
             first_mm_offset = min(p.offset for p in tracker.mm_positions)
-            first_mm_offset = (
-                first_mm_offset // lmcache_chunk_size * lmcache_chunk_size
-            )
+            first_mm_offset = first_mm_offset // lmcache_chunk_size * lmcache_chunk_size
             num_tokens_to_save = min(num_tokens_to_save, first_mm_offset)
 
         # If we need to save, update the number of saved tokens
@@ -870,7 +868,6 @@ class LMCacheConnectorV1Impl:
                         slot_mapping[:lmcache_cached_tokens],
                     )
                     self._invalid_block_ids.update(missing_blocks)
-
 
     def record_failed_blocks(
         self,

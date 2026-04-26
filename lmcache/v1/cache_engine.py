@@ -592,9 +592,12 @@ class LMCacheEngine:
         request_configs = kwargs.get("request_configs")
         hs_keys: list[CacheEngineKey] = []
         hs_objs: list[MemoryObj] = []
+        partial = False
 
         for start, end, key in self.token_database.process_tokens(
-            tokens, mask=mask, request_configs=request_configs,
+            tokens,
+            mask=mask,
+            request_configs=request_configs,
         ):
             hs_key = key.to_hs_key()
             hs_chunk = hidden_states[start:end].contiguous()
@@ -602,19 +605,33 @@ class LMCacheEngine:
             hs_dtype = hs_chunk.dtype
 
             memory_obj = self.storage_manager.allocate(
-                hs_shape, hs_dtype, fmt=MemoryFormat.HS_TD,
-                eviction=True, busy_loop=False,
+                hs_shape,
+                hs_dtype,
+                fmt=MemoryFormat.HS_TD,
+                eviction=True,
+                busy_loop=False,
             )
             if memory_obj is None:
                 logger.warning("CPU memory pressure, skipping HS store")
+                partial = True
                 break
             memory_obj.tensor[:] = hs_chunk
             hs_keys.append(hs_key)
             hs_objs.append(memory_obj)
 
+        # retrieve_hidden_states is all-or-nothing: any missing chunk causes
+        # the whole retrieve to return None.  Drop a partial allocation
+        # instead of writing orphaned, unreachable entries to storage.
+        if partial:
+            for obj in hs_objs:
+                obj.ref_count_down()
+            return
+
         if hs_keys:
             self.storage_manager.batched_put(
-                hs_keys, hs_objs, location=self.store_location,
+                hs_keys,
+                hs_objs,
+                location=self.store_location,
             )
             logger.debug("Stored hidden states for %d chunks", len(hs_keys))
 
@@ -643,7 +660,9 @@ class LMCacheEngine:
         chunks: list[tuple[int, int, torch.Tensor]] = []
 
         for start, end, key in self.token_database.process_tokens(
-            tokens, mask=mask, request_configs=request_configs,
+            tokens,
+            mask=mask,
+            request_configs=request_configs,
         ):
             hs_key = key.to_hs_key()
             memory_obj = self.storage_manager.get(hs_key)

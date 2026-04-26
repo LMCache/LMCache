@@ -5,10 +5,10 @@ When set, storage is limited to the contiguous text-only prefix before the
 first multimodal token, so KV for varying mm content is not written to CPU.
 """
 
+# Standard
 from dataclasses import dataclass
 
-import torch
-
+# First Party
 from lmcache.integration.vllm.vllm_v1_adapter import ReqMeta, RequestTracker
 
 
