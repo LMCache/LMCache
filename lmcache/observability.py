@@ -849,6 +849,11 @@ class LMCStatsMonitor:
 
 
 class PrometheusLogger:
+    lmcache_is_healthy: prometheus_client.Gauge
+    periodic_threads_total_count: prometheus_client.Gauge
+    periodic_threads_running_count: prometheus_client.Gauge
+    periodic_threads_active_count: prometheus_client.Gauge
+
     _gauge_cls = prometheus_client.Gauge
     _counter_cls = prometheus_client.Counter
     _histogram_cls = prometheus_client.Histogram
