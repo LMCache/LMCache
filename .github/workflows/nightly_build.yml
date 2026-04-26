@@ -176,6 +176,9 @@ jobs:
           # for setuptools-scm
           fetch-depth: 0
 
+      - name: Remove non-release tags
+        run: git tag -l | grep -vE '^v[0-9]+\.[0-9]+\.[0-9]+$' | xargs -r git tag -d
+
       - name: Free disk space
         uses: ./.github/actions/free-disk-space
 

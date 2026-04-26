@@ -622,6 +622,27 @@ class PrefetchController(StorageControllerInterface):
                 per_adapter_keys, per_adapter_objs
             )
             request.pending_load_tasks[adapter_idx] = task_id
+            # Per-adapter byte accounting for L2_LOAD_TASK_* throughput
+            # events.  Uniform layout per chunk -> size * count.
+            total_bytes = (
+                per_adapter_objs[0].get_size() * len(per_adapter_objs)
+                if per_adapter_objs
+                else 0
+            )
+
+            self._event_bus.publish(
+                Event(
+                    event_type=EventType.L2_LOAD_TASK_SUBMITTED,
+                    metadata={
+                        "request_id": request.request_id,
+                        "adapter_index": adapter_idx,
+                        "task_id": task_id,
+                        "l2_name": self._adapter_descriptors[adapter_idx].type_name,
+                        "key_count": len(per_adapter_keys),
+                        "total_bytes": total_bytes,
+                    },
+                )
+            )
 
         ## Step 8: update the lookup result based on the final load plan
         self._update_lookup_results(request.request_id, prefix_length)
@@ -713,6 +734,18 @@ class PrefetchController(StorageControllerInterface):
                 continue
             request.load_results[adapter_idx] = result
             del request.pending_load_tasks[adapter_idx]
+
+            self._event_bus.publish(
+                Event(
+                    event_type=EventType.L2_LOAD_TASK_COMPLETED,
+                    metadata={
+                        "request_id": request.request_id,
+                        "adapter_index": adapter_idx,
+                        "task_id": task_id,
+                        "l2_name": self._adapter_descriptors[adapter_idx].type_name,
+                    },
+                )
+            )
 
     def _finalize_load(self, request: InFlightPrefetchRequest) -> None:
         """
