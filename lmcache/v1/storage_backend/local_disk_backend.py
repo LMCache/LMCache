@@ -394,15 +394,20 @@ class LocalDiskBackend(StorageBackendInterface):
         key: CacheEngineKey,
     ) -> Optional[MemoryObj]:
         """
-        Blocking get function.
+        Load a cached KV chunk from disk synchronously.
+
+        The cache policy is updated only after a successful load so that a
+        failed load (``load_bytes_from_disk`` returning ``None``) does not
+        record a phantom cache hit and skew future eviction decisions.
+
+        :param key: The cache key identifying the KV chunk.
+        :returns: A ``MemoryObj`` containing the loaded KV data, or ``None``
+            if the key is not present or the load fails.
         """
         self.disk_lock.acquire()
         if key not in self.dict:
             self.disk_lock.release()
             return None
-
-        # Update cache recency
-        self.cache_policy.update_on_hit(key, self.dict)
 
         disk_meta = self.dict[key]
         path = disk_meta.path
@@ -416,6 +421,16 @@ class LocalDiskBackend(StorageBackendInterface):
         memory_obj = self.load_bytes_from_disk(
             key, path, dtype=dtype, shape=shape, fmt=fmt
         )
+
+        if memory_obj is not None:
+            # Update cache recency only after the load succeeds; calling
+            # update_on_hit() before confirming success would record a phantom
+            # hit and skew eviction order when load_bytes_from_disk() returns
+            # None (e.g. CPU staging pool exhausted after PR #3006).
+            self.disk_lock.acquire()
+            if key in self.dict:
+                self.cache_policy.update_on_hit(key, self.dict)
+            self.disk_lock.release()
 
         return memory_obj
 
