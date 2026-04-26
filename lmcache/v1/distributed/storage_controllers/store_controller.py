@@ -405,12 +405,19 @@ class StoreController(StorageControllerInterface):
             )
             self._status_in_flight_count += 1
 
+            # All objects for a single store task share one layout (L1
+            # allocates uniform MemoryObjs per chunk), so total bytes is
+            # size * count — avoids summing N identical values.
+            total_bytes = successful_objs[0].get_size() * len(successful_objs)
             self._event_bus.publish(
                 Event(
                     event_type=EventType.L2_STORE_SUBMITTED,
                     metadata={
                         "adapter_index": adapter_index,
+                        "task_id": task_id,
+                        "l2_name": self._adapter_descriptors[adapter_index].type_name,
                         "key_count": len(successful_keys),
+                        "total_bytes": total_bytes,
                     },
                 )
             )
@@ -466,12 +473,15 @@ class StoreController(StorageControllerInterface):
         del self._in_flight_tasks[task_key]
         self._status_in_flight_count -= 1
 
+        l2_name = self._adapter_descriptors[adapter_index].type_name
         if success:
             self._event_bus.publish(
                 Event(
                     event_type=EventType.L2_STORE_COMPLETED,
                     metadata={
                         "adapter_index": adapter_index,
+                        "task_id": task_id,
+                        "l2_name": l2_name,
                         "succeeded_count": len(task.keys),
                         "failed_count": 0,
                     },
@@ -492,6 +502,8 @@ class StoreController(StorageControllerInterface):
                     event_type=EventType.L2_STORE_COMPLETED,
                     metadata={
                         "adapter_index": adapter_index,
+                        "task_id": task_id,
+                        "l2_name": l2_name,
                         "succeeded_count": 0,
                         "failed_count": len(task.keys),
                     },
