@@ -74,10 +74,11 @@ class SaveSpec:
     skip_leading_tokens: int
     # Whether the scheduler allow us to save the tokens
     can_save: bool
-    # Optional cap on how many tokens to save (storage path only).
-    # When set, tokens at index >= max_save_tokens are masked out before
-    # storing.  Leaves the load path unaffected so that token_ids remains
-    # the full length expected by start_load_kv.
+    # Upper bound (token index) for the storage path; tokens at index
+    # >= max_save_tokens are masked out of store_mask.  Leaves the load
+    # path (token_ids length) unaffected so retrieves can still address
+    # the full chunk-aligned sequence.  Used by skip_mm_storage to cap
+    # storage at the text-only prefix before any multimodal token.
     max_save_tokens: Optional[int] = None
 
 
@@ -1164,10 +1165,11 @@ class LMCacheConnectorV1Impl:
 
             logger.debug(
                 "Storing KV cache for %d out of %d tokens "
-                "(skip_leading_tokens=%d) for request %s",
-                len(token_ids) - skip_leading_tokens,
+                "(skip_leading_tokens=%d, max_save_tokens=%s) for request %s",
+                int(store_mask.sum().item()),
                 len(token_ids),
                 skip_leading_tokens,
+                save_spec.max_save_tokens,
                 request.req_id,
             )
 
