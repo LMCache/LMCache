@@ -1,20 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
-# Standard
-from typing import Any
+"""Expose Prometheus metrics endpoints for the multiprocess HTTP server.
 
-# Third Party
-from fastapi import APIRouter
-from prometheus_client import REGISTRY, generate_latest
-from starlette.responses import PlainTextResponse
+Reuses the shared router from
+``lmcache.v1.internal_api_server.common.metrics_api`` so that the
+``/metrics`` and ``/metrics/reset`` endpoints stay in sync across
+deployments. The auto-discovery mechanism in
+``lmcache.v1.utils.router_discovery`` picks up the re-exported
+``router`` attribute below.
+"""
 
-router = APIRouter()
+# First Party
+from lmcache.v1.internal_api_server.common.metrics_api import router
 
-
-@router.get("/metrics")
-async def get_metrics() -> Any:
-    """
-    Provide Prometheus metrics data in the standard
-    exposition format.
-    """
-    metrics_data = generate_latest(REGISTRY)
-    return PlainTextResponse(content=metrics_data, media_type="text/plain")
+__all__ = ["router"]
