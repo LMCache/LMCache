@@ -298,6 +298,7 @@ class ReqMeta:
         load_spec: Optional[LoadSpec] = None,
         discard_partial_chunks: bool = True,
         save_decode_cache: bool = False,
+        skip_mm_storage: bool = False,
     ) -> Optional["ReqMeta"]:
         """Create the request metadata from a request tracker.
 
@@ -308,6 +309,9 @@ class ReqMeta:
             load_spec (Optional[LoadSpec]): the load spec for KV cache loading.
             discard_partial_chunks (bool): whether to discard partial chunks.
             save_decode_cache (bool): whether to save the cache in decode phase.
+            skip_mm_storage (bool): if True, limit storage to the contiguous
+                text-only prefix before any multimodal tokens. Useful for
+                random/varying multimodal inputs where mm KV is rarely reused.
 
         Returns:
             the request metadata if we need to perform load/save
@@ -356,6 +360,16 @@ class ReqMeta:
             )
         else:
             num_tokens_to_save = input_token_len
+
+        # Limit storage to the text-only prefix before any multimodal tokens.
+        # Multimodal KV with varying mm content (e.g., random images) is rarely
+        # reused across requests, so storing it wastes CPU bandwidth.
+        if skip_mm_storage and tracker.mm_positions:
+            first_mm_offset = min(p.offset for p in tracker.mm_positions)
+            first_mm_offset = (
+                first_mm_offset // lmcache_chunk_size * lmcache_chunk_size
+            )
+            num_tokens_to_save = min(num_tokens_to_save, first_mm_offset)
 
         # If we need to save, update the number of saved tokens
         if not skip_save:
@@ -1469,6 +1483,7 @@ class LMCacheConnectorV1Impl:
                 load_spec=load_spec,
                 discard_partial_chunks=self._discard_partial_chunks,
                 save_decode_cache=self.config.save_decode_cache,
+                skip_mm_storage=self.config.skip_mm_storage,
             )
             if req_meta is not None:
                 meta.add_request(req_meta)
@@ -1515,6 +1530,7 @@ class LMCacheConnectorV1Impl:
                     load_spec=load_spec,
                     discard_partial_chunks=self._discard_partial_chunks,
                     save_decode_cache=self.config.save_decode_cache,
+                    skip_mm_storage=self.config.skip_mm_storage,
                 )
                 if req_meta is not None:
                     meta.add_request(req_meta)
@@ -1638,6 +1654,7 @@ class LMCacheConnectorV1Impl:
                 load_spec=load_spec,
                 discard_partial_chunks=self._discard_partial_chunks,
                 save_decode_cache=self.config.save_decode_cache,
+                skip_mm_storage=self.config.skip_mm_storage,
             )
             if req_meta is not None:
                 meta.add_request(req_meta)
