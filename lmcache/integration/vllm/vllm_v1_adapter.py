@@ -74,6 +74,11 @@ class SaveSpec:
     skip_leading_tokens: int
     # Whether the scheduler allow us to save the tokens
     can_save: bool
+    # Optional cap on how many tokens to save (storage path only).
+    # When set, tokens at index >= max_save_tokens are masked out before
+    # storing.  Leaves the load path unaffected so that token_ids remains
+    # the full length expected by start_load_kv.
+    max_save_tokens: Optional[int] = None
 
 
 @dataclass
@@ -364,15 +369,23 @@ class ReqMeta:
         # Limit storage to the text-only prefix before any multimodal tokens.
         # Multimodal KV with varying mm content (e.g., random images) is rarely
         # reused across requests, so storing it wastes CPU bandwidth.
+        # Apply only to the save path: leave token_ids/load path full so
+        # subsequent retrieves can address up to lmcache_cached_tokens
+        # without indexing past the end.
+        max_save_tokens: Optional[int] = None
         if skip_mm_storage and tracker.mm_positions:
             first_mm_offset = min(p.offset for p in tracker.mm_positions)
             first_mm_offset = first_mm_offset // lmcache_chunk_size * lmcache_chunk_size
-            num_tokens_to_save = min(num_tokens_to_save, first_mm_offset)
+            if first_mm_offset < num_tokens_to_save:
+                max_save_tokens = first_mm_offset
 
         # If we need to save, update the number of saved tokens
         if not skip_save:
-            tracker.num_saved_tokens = num_tokens_to_save
-        save_spec = SaveSpec(skip_leading_tokens, not skip_save)
+            effective_save = (
+                max_save_tokens if max_save_tokens is not None else num_tokens_to_save
+            )
+            tracker.num_saved_tokens = effective_save
+        save_spec = SaveSpec(skip_leading_tokens, not skip_save, max_save_tokens)
 
         # Calculate the token ids and slot mappings for load and save
         token_ids = input_token_ids[:num_tokens_to_save]
@@ -1144,6 +1157,10 @@ class LMCacheConnectorV1Impl:
 
             store_mask = torch.ones(len(token_ids), dtype=torch.bool)
             store_mask[:skip_leading_tokens] = False
+            # Cap on storage extent (e.g. skip_mm_storage clamps trailing
+            # tokens beyond the text-only prefix).  Load path is unaffected.
+            if save_spec.max_save_tokens is not None:
+                store_mask[save_spec.max_save_tokens :] = False
 
             logger.debug(
                 "Storing KV cache for %d out of %d tokens "
