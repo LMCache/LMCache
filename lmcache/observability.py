@@ -1840,9 +1840,8 @@ class PrometheusLogger:
             "model_name": metadata.model_name,
             "worker_id": metadata.worker_id,
             "role": metadata.role,
+            "served_model_name": metadata.served_model_name or "",
         }
-        if metadata.served_model_name:
-            labels["served_model_name"] = metadata.served_model_name
         return labels
 
     _instance = None
