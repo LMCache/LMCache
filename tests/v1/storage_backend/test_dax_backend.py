@@ -4,6 +4,7 @@
 from collections.abc import Generator
 from concurrent.futures import ThreadPoolExecutor
 import asyncio
+import gc
 import os
 import tempfile
 import threading
@@ -1081,6 +1082,70 @@ def test_dax_backend_primary_view_reclaim_after_release(
             borrowed.ref_count_down()
             assert backend.remove(key2)
 
+            recycled = backend.batched_allocate(
+                torch.Size([2, 16, 8]),
+                torch.bfloat16,
+                batch_size=2,
+                fmt=MemoryFormat.KV_T2D,
+                eviction=False,
+            )
+            assert recycled is not None
+            for memory_obj in recycled:
+                memory_obj.ref_count_down()
+        finally:
+            backend.close()
+
+
+def test_dax_backend_primary_view_reclaim_after_cycle_gc(
+    disable_direct_gpu_ready,
+) -> None:
+    del disable_direct_gpu_ready
+    with tempfile.TemporaryDirectory() as td:
+        dev_path = os.path.join(td, "dax.bin")
+        with open(dev_path, "wb") as fout:
+            fout.truncate(4096)
+
+        backend = _create_primary_backend(dev_path)
+        try:
+            assert backend.calculate_chunk_budget() == 2
+            key1 = CacheEngineKey("test_model", 1, 0, 613, torch.bfloat16)
+            key2 = CacheEngineKey("test_model", 1, 0, 614, torch.bfloat16)
+
+            obj1 = backend.allocate(
+                torch.Size([2, 16, 8]),
+                torch.bfloat16,
+                fmt=MemoryFormat.KV_T2D,
+                eviction=False,
+            )
+            assert obj1 is not None
+            assert obj1.tensor is not None
+            obj1.tensor.fill_(1)
+            backend.batched_submit_put_task([key1], [obj1])
+            obj1.ref_count_down()
+
+            borrowed = backend.get_blocking(key1)
+            assert borrowed is not None
+            assert borrowed.tensor is not None
+            assert torch.all(borrowed.tensor == 1)
+            assert backend.remove(key1)
+
+            obj2 = backend.allocate(
+                torch.Size([2, 16, 8]),
+                torch.bfloat16,
+                fmt=MemoryFormat.KV_T2D,
+                eviction=False,
+            )
+            assert obj2 is not None
+            assert obj2.tensor is not None
+            obj2.tensor.fill_(9)
+            backend.batched_submit_put_task([key2], [obj2])
+            obj2.ref_count_down()
+
+            borrowed.cycle = borrowed
+            del borrowed
+            gc.collect()
+
+            assert backend.remove(key2)
             recycled = backend.batched_allocate(
                 torch.Size([2, 16, 8]),
                 torch.bfloat16,

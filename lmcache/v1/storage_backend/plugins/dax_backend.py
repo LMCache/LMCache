@@ -99,6 +99,7 @@ class _MemoryObjState:
     """Internal state for a DAX-backed MemoryObj."""
 
     handle: _ArenaHandle
+    finalizer: Optional[weakref.finalize] = None
     released: bool = False
 
 
@@ -937,6 +938,10 @@ class DaxBackend(StoragePluginInterface, AllocatorBackendInterface):
     def get_allocator_backend(self) -> AllocatorBackendInterface:
         """Return the allocator backend associated with this storage backend.
 
+        Returns:
+            The DAX backend itself in primary mode, otherwise the local CPU
+            backend used for allocations.
+
         Raises:
             RuntimeError: If no allocator backend is available.
         """
@@ -954,7 +959,24 @@ class DaxBackend(StoragePluginInterface, AllocatorBackendInterface):
         eviction: bool = True,
         busy_loop: bool = True,
     ) -> Optional[MemoryObj]:
-        """Allocate a DAX-backed memory object in primary mode."""
+        """Allocate one memory object from the active allocator.
+
+        Args:
+            shapes: Tensor shape or shapes requested by the caller.
+            dtypes: Tensor dtype or dtypes matching ``shapes``.
+            fmt: Logical memory format to assign to the returned object.
+            eviction: If ``True``, evict an unpinned DAX slot when primary
+                mode has no free slots.
+            busy_loop: Passed through to the local CPU allocator in tiered mode.
+
+        Returns:
+            A ``MemoryObj`` on success, or ``None`` when allocation cannot be
+            satisfied.
+
+        Raises:
+            ValueError: If ``shapes`` and ``dtypes`` have different lengths.
+            RuntimeError: If DAX arena state is inconsistent or unavailable.
+        """
         if self.mode != "primary":
             if self.local_cpu_backend is None:
                 return None
@@ -1053,7 +1075,25 @@ class DaxBackend(StoragePluginInterface, AllocatorBackendInterface):
         eviction: bool = True,
         busy_loop: bool = True,
     ) -> Optional[List[MemoryObj]]:
-        """Allocate multiple DAX-backed memory objects in primary mode."""
+        """Allocate a batch of memory objects from the active allocator.
+
+        Args:
+            shapes: Tensor shape or shapes for each allocated object.
+            dtypes: Tensor dtype or dtypes matching ``shapes``.
+            batch_size: Number of memory objects to allocate.
+            fmt: Logical memory format to assign to each returned object.
+            eviction: If ``True``, evict unpinned DAX slots when primary mode
+                has no free slots.
+            busy_loop: Passed through to the local CPU allocator in tiered mode.
+
+        Returns:
+            A list of ``MemoryObj`` instances on success, or ``None`` if any
+            allocation fails.
+
+        Raises:
+            ValueError: If ``shapes`` and ``dtypes`` have different lengths.
+            RuntimeError: If an underlying allocation raises.
+        """
         if self.mode != "primary":
             if self.local_cpu_backend is None:
                 return None
@@ -1083,7 +1123,12 @@ class DaxBackend(StoragePluginInterface, AllocatorBackendInterface):
         return objs
 
     def calculate_chunk_budget(self) -> int:
-        """Return the number of chunks available from the active allocator."""
+        """Return the number of chunks available from the active allocator.
+
+        Returns:
+            The number of DAX slots in primary mode, or the local CPU backend's
+            chunk budget in tiered mode.
+        """
         if self.mode != "primary":
             if self.local_cpu_backend is None:
                 return 0
@@ -1095,7 +1140,19 @@ class DaxBackend(StoragePluginInterface, AllocatorBackendInterface):
         config: LMCacheEngineConfig,
         metadata: LMCacheMetadata,
     ) -> MemoryAllocatorInterface:
-        """Initialize and return the memory allocator for the active mode."""
+        """Initialize and return the memory allocator for the active mode.
+
+        Args:
+            config: LMCache engine configuration for allocator initialization.
+            metadata: Runtime metadata describing the KV cache layout.
+
+        Returns:
+            The DAX arena allocator in primary mode, otherwise the initialized
+            local CPU allocator.
+
+        Raises:
+            RuntimeError: If tiered mode has no local CPU allocator backend.
+        """
         if self.mode != "primary":
             if self.local_cpu_backend is None:
                 raise RuntimeError("DaxBackend has no allocator backend available")
@@ -1104,7 +1161,15 @@ class DaxBackend(StoragePluginInterface, AllocatorBackendInterface):
         return self._arena_allocator
 
     def get_memory_allocator(self) -> MemoryAllocatorInterface:
-        """Return the memory allocator for the active mode."""
+        """Return the memory allocator for the active mode.
+
+        Returns:
+            The DAX arena allocator in primary mode, otherwise the local CPU
+            allocator.
+
+        Raises:
+            RuntimeError: If tiered mode has no local CPU allocator backend.
+        """
         if self.mode != "primary":
             if self.local_cpu_backend is None:
                 raise RuntimeError("DaxBackend has no allocator backend available")
@@ -1112,7 +1177,12 @@ class DaxBackend(StoragePluginInterface, AllocatorBackendInterface):
         return self._arena_allocator
 
     def allocator_memcheck(self) -> bool:
-        """Return whether the DAX allocator can still serve allocations."""
+        """Return whether the active allocator can still serve allocations.
+
+        Returns:
+            ``True`` when the allocator is usable. Tiered mode delegates
+            allocation health to the local CPU backend and returns ``True``.
+        """
         if self.mode != "primary":
             return True
         with self._state_lock:
@@ -1464,7 +1534,14 @@ class DaxBackend(StoragePluginInterface, AllocatorBackendInterface):
         memory_obj: MemoryObj,
         handle: _ArenaHandle,
     ) -> None:
-        self._memory_obj_states[memory_obj] = _MemoryObjState(handle=handle)
+        state = _MemoryObjState(handle=handle)
+        # Cyclic GC can clear WeakKeyDictionary entries before __del__ runs.
+        state.finalizer = weakref.finalize(
+            memory_obj,
+            self._release_finalized_memory_obj_state,
+            state,
+        )
+        self._memory_obj_states[memory_obj] = state
 
     def _get_memory_obj_state_locked(
         self,
@@ -1480,6 +1557,9 @@ class DaxBackend(StoragePluginInterface, AllocatorBackendInterface):
         if state is None or state.released:
             return None
         state.released = True
+        if state.finalizer is not None:
+            state.finalizer.detach()
+            state.finalizer = None
         return state
 
     def _is_direct_commit_handle_locked(
@@ -1497,10 +1577,28 @@ class DaxBackend(StoragePluginInterface, AllocatorBackendInterface):
         )
 
     def release_memory_obj(self, memory_obj: MemoryObj) -> None:
-        """Release a DAX-backed memory object allocated by this backend."""
+        """Release a DAX-backed memory object allocated by this backend.
+
+        Args:
+            memory_obj: The DAX-backed object whose reserved or borrowed arena
+                handle should be released.
+
+        Returns:
+            None.
+        """
         with self._state_lock:
             state = self._mark_memory_obj_released_locked(memory_obj)
             if state is None:
+                return
+            self._release_arena_handle_locked(state.handle)
+
+    def _release_finalized_memory_obj_state(self, state: _MemoryObjState) -> None:
+        with self._state_lock:
+            if state.released:
+                return
+            state.released = True
+            state.finalizer = None
+            if self._closed:
                 return
             self._release_arena_handle_locked(state.handle)
 
