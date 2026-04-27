@@ -41,6 +41,11 @@ class EventType(Enum):
     L2_PREFETCH_LOOKUP_COMPLETED = "l2.prefetch.lookup.completed"
     L2_PREFETCH_LOAD_SUBMITTED = "l2.prefetch.load.submitted"
     L2_PREFETCH_LOAD_COMPLETED = "l2.prefetch.load.completed"
+    # Per-adapter load task events, for throughput correlation.  Fire once
+    # per (request_id, adapter_index) pair, unlike the request-level
+    # L2_PREFETCH_LOAD_* events above which aggregate across adapters.
+    L2_LOAD_TASK_SUBMITTED = "l2.load_task.submitted"
+    L2_LOAD_TASK_COMPLETED = "l2.load_task.completed"
 
     # MP Server request-level events (start/end pairs)
     MP_STORE_START = "mp.store.start"
@@ -57,13 +62,44 @@ class EventType(Enum):
     MP_REQUEST_START = "mp.request.start"
     MP_RETRIEVE_SUBMITTED = "mp.retrieve.submitted"
     MP_STORE_SUBMITTED = "mp.store.submitted"
-    MP_SESSION_END = "mp.session.end"
+    MP_REQUEST_END = "mp.request.end"
 
     # vLLM block allocation events
     MP_VLLM_BLOCK_ALLOCATION = "mp.vllm.block_allocation"
 
     # vLLM end session events
     MP_VLLM_END_SESSION = "mp.vllm.end_session"
+
+    # Trace recording — unified function-call entry event used by the
+    # ``@enable_tracing`` decorator.  Metadata layout:
+    #   ``qualname`` (str):   fully-qualified function name
+    #   ``args``     (dict):  name -> raw Python value (codec-encoded at
+    #                         record time by the recorder)
+    #   ``t_mono``   (float): ``time.monotonic()`` captured at publish
+    #                         time, so it is comparable to
+    #                         ``Event.timestamp`` (wall-clock) even
+    #                         though the drain thread processes the
+    #                         event later
+    TRACE_CALL = "trace.call"
+
+    # Cache Blending (CB) events — GPU operation start/end pairs
+    CB_LOOKUP_START = "cb.lookup.start"
+    CB_LOOKUP_END = "cb.lookup.end"
+    CB_STORE_PRE_COMPUTED_START = "cb.store_pre_computed.start"
+    CB_STORE_PRE_COMPUTED_END = "cb.store_pre_computed.end"
+    CB_RETRIEVE_START = "cb.retrieve.start"
+    CB_RETRIEVE_END = "cb.retrieve.end"
+    CB_STORE_FINAL_START = "cb.store_final.start"
+    CB_STORE_FINAL_END = "cb.store_final.end"
+    CB_FINGERPRINTS_REGISTERED = "cb.fingerprints.registered"
+    CB_CHUNKS_EVICTED = "cb.chunks.evicted"
+
+    # Cache Blending (CB) events — lifecycle sentinels (CPU-synchronous)
+    CB_REQUEST_START = "cb.request.start"
+    CB_STORE_PRE_COMPUTED_SUBMITTED = "cb.store_pre_computed.submitted"
+    CB_RETRIEVE_SUBMITTED = "cb.retrieve.submitted"
+    CB_STORE_FINAL_SUBMITTED = "cb.store_final.submitted"
+    CB_REQUEST_END = "cb.request.end"
 
 
 @dataclass
@@ -77,7 +113,8 @@ class Event:
             drain thread processes the event.  For CUDA host-callback events
             this captures GPU-accurate timing.
         metadata: Flat key-value payload.  Contents depend on ``event_type``;
-            see the metadata contracts in DESIGN.md Section 2.7.
+            see the metadata contracts in
+            ``docs/design/v1/mp_observability/event-bus.md`` Section 2.7.
         session_id: Caller-provided ID for correlating start/end pairs.
     """
 

@@ -704,20 +704,21 @@ class TestEvictionInterface:
             assert bitmap.test(i) is False
 
     def test_get_usage_empty_adapter_is_zero(self, adapter):
-        """get_usage() on a fresh adapter should return (0.0, 0.0)."""
-        current, projected = adapter.get_usage()
-        assert current == 0.0
-        assert projected == 0.0
+        """get_usage() on a fresh adapter should report 0 bytes."""
+        usage = adapter.get_usage()
+        assert usage.total_bytes_used == 0
+        assert usage.usage_fraction == 0.0
+        assert usage.bytes_by_cache_salt == {}
 
     def test_get_usage_increases_after_store(self, adapter):
-        """get_usage() current value should be > 0 after storing an object."""
+        """get_usage() should report positive bytes after a store."""
         key = create_object_key(1)
         obj = create_memory_obj(size=1024)
         _store_and_wait(adapter, key, obj)
 
-        current, _ = adapter.get_usage()
-        assert current > 0.0
-        assert current <= 1.0
+        usage = adapter.get_usage()
+        assert usage.total_bytes_used > 0
+        assert 0.0 < usage.usage_fraction <= 1.0
 
     def test_get_usage_decreases_after_delete(self, adapter):
         """get_usage() should drop back to 0 after deleting the only stored key."""
@@ -725,13 +726,57 @@ class TestEvictionInterface:
         obj = create_memory_obj(size=1024)
         _store_and_wait(adapter, key, obj)
 
-        usage_before, _ = adapter.get_usage()
-        assert usage_before > 0.0
+        assert adapter.get_usage().total_bytes_used > 0
 
         adapter.delete([key])
 
-        current, _ = adapter.get_usage()
-        assert current == 0.0
+        usage = adapter.get_usage()
+        assert usage.total_bytes_used == 0
+        assert usage.usage_fraction == 0.0
+
+    def test_bytes_by_cache_salt_populated_from_cache_salt(self, adapter):
+        """End-to-end: storing keys with different ``cache_salt`` values
+        should drive the per-user byte buckets in ``AdapterUsage`` —
+        proves the salt actually flows through the real adapter into the
+        base-class accounting (not just verified by the stub tests)."""
+        # Two keys per user so we know the totals are summed, not
+        # just per-key-overwritten.
+        alice_keys = [
+            ObjectKey(
+                chunk_hash=ObjectKey.IntHash2Bytes(i),
+                model_name="m",
+                kv_rank=0,
+                cache_salt="alice",
+            )
+            for i in (1, 2)
+        ]
+        bob_key = ObjectKey(
+            chunk_hash=ObjectKey.IntHash2Bytes(3),
+            model_name="m",
+            kv_rank=0,
+            cache_salt="bob",
+        )
+        obj = create_memory_obj(size=128)  # 128 floats * 4 bytes = 512 B
+        for k in alice_keys + [bob_key]:
+            _store_and_wait(adapter, k, obj)
+
+        usage = adapter.get_usage()
+        assert usage.bytes_by_cache_salt == {"alice": 1024, "bob": 512}
+        assert usage.total_bytes_used == 1536
+
+        # Deleting one of alice's keys should shrink alice's bucket but
+        # leave bob's untouched.
+        adapter.delete([alice_keys[0]])
+        usage = adapter.get_usage()
+        assert usage.bytes_by_cache_salt == {"alice": 512, "bob": 512}
+        assert usage.total_bytes_used == 1024
+
+        # Deleting alice's last key should drop the bucket entirely so
+        # the snapshot stays compact.
+        adapter.delete([alice_keys[1]])
+        usage = adapter.get_usage()
+        assert "alice" not in usage.bytes_by_cache_salt
+        assert usage.bytes_by_cache_salt == {"bob": 512}
 
     def test_listener_notified_on_store(self, adapter):
         """Listener.on_l2_keys_stored should be called after a store completes."""

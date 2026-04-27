@@ -246,7 +246,7 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
         "default": "by_gpu",
         "env_converter": str,
     },
-    "cufile_buffer_size": {
+    "gds_buffer_size": {
         "type": Optional[int],
         "default": None,
         "env_converter": int,
@@ -257,6 +257,17 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
         "type": float,
         "default": 4.0,
         "env_converter": float,
+    },
+    # GDS (GPU Direct Storage) settings
+    "use_gds": {
+        "type": bool,
+        "default": True,
+        "env_converter": _to_bool,
+    },
+    "gds_backend": {
+        "type": str,
+        "default": "cufile",
+        "env_converter": str,
     },
     # Other configurations
     # (Deprecated) The url of the actual remote lmcache instance for auditing.

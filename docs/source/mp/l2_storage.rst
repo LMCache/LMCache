@@ -95,6 +95,66 @@ The ``OBJ`` backend (object store) does not require ``file_path``.
     # OBJ backend
     --l2-adapter '{"type": "nixl_store", "backend": "OBJ", "backend_params": {}, "pool_size": 32}'
 
+``nixl_store_dynamic`` -- NIXL-based dynamic storage with persist/recover
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+A dynamic variant of the NIXL adapter that opens and registers files
+per-operation instead of pre-allocating them at init. This enables:
+
+- **Persist/recover** -- cached KV metadata survives restarts.
+- **No fd limits** -- files are opened and closed per transfer, so the
+  cache can grow beyond OS open-file-descriptor limits.
+
+.. note::
+
+   Only file-based backends are supported (``POSIX``, ``GDS``, ``GDS_MT``,
+   ``HF3FS``). The ``OBJ`` backend is not supported yet.
+
+**Required fields:**
+
+- ``backend``: Storage backend -- one of ``POSIX``, ``GDS``, ``GDS_MT``,
+  ``HF3FS``.
+
+**Backend-specific parameters (``backend_params``):**
+
+- ``file_path``: Directory path for storing L2 data files.
+- ``use_direct_io``: ``"true"`` or ``"false"``.
+- ``max_capacity_gb``: Maximum storage capacity in GB. The adapter
+  rejects stores when this limit is reached. Required for the eviction
+  controller to compute usage.
+
+**Optional fields (for persist):**
+
+- ``persist_enabled`` (bool, default ``true``): If ``true``, data files
+  are kept on disk at shutdown. If ``false``, all data files are deleted
+  on shutdown.
+
+Lookup always checks secondary storage (disk) on miss and lazily
+populates the in-memory index when a file is found.
+
+**Configuration examples:**
+
+.. code-block:: bash
+
+    # Basic dynamic POSIX backend (persist enabled by default)
+    --l2-adapter '{"type": "nixl_store_dynamic", "backend": "POSIX", "backend_params": {"file_path": "/data/lmcache/l2", "use_direct_io": "false", "max_capacity_gb": "10"}}'
+
+    # Explicitly disable persist
+    --l2-adapter '{"type": "nixl_store_dynamic", "backend": "POSIX", "backend_params": {"file_path": "/data/lmcache/l2", "use_direct_io": "false", "max_capacity_gb": "10"}, "persist_enabled": false}'
+
+    # With eviction
+    --l2-adapter '{"type": "nixl_store_dynamic", "backend": "GDS", "backend_params": {"file_path": "/data/nvme/l2", "use_direct_io": "true", "max_capacity_gb": "50"}, "eviction": {"eviction_policy": "LRU", "trigger_watermark": 0.9, "eviction_ratio": 0.1}}'
+
+**Persist / secondary lookup behaviour:**
+
+- On **shutdown**, the adapter keeps data files on disk by default
+  (``persist_enabled`` defaults to ``true``). If explicitly set to
+  ``false``, all data files are deleted to avoid orphaned storage.
+- On **startup**, the in-memory index is empty. Every lookup miss falls
+  through to a secondary lookup on disk: if the deterministic file
+  exists, it is treated as a hit and the in-memory index is populated
+  lazily from the file size.
+
 ``fs`` -- File-system backed storage
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -134,6 +194,12 @@ object is stored as a raw ``.data`` file whose name encodes the full
 An L2 adapter backed by the native C++ Mooncake Store connector.  Uses
 `Mooncake <https://github.com/kvcache-ai/Mooncake>`_ for high-performance
 distributed KV cache storage with RDMA support.
+
+When Mooncake is configured with ``"protocol": "rdma"``, LMCache must also
+have a valid contiguous L1 memory region available.  The distributed storage
+manager passes this L1 memory descriptor to the adapter factory automatically
+in MP mode.  If the descriptor is missing or invalid, adapter creation fails
+with ``ValueError`` instead of silently falling back to a non-RDMA path.
 
 **Prerequisites -- Building with Mooncake support:**
 
@@ -195,6 +261,58 @@ for available setup keys (e.g., ``local_hostname``,
 
 For full Mooncake setup instructions (master service, metadata server,
 etc.), see `Mooncake <https://github.com/kvcache-ai/Mooncake>`_ .
+
+**RDMA notes:**
+
+- ``protocol: "rdma"`` requires a valid LMCache L1 memory descriptor.
+- When using ``protocol: "rdma"``, it is recommended to disable lazy L1
+  allocation with ``--no-l1-use-lazy`` so the L1 buffer is fully allocated
+  before Mooncake registers it.
+- ``protocol: "tcp"`` does not require L1 preregistration.
+- If Mooncake RDMA initialization fails at adapter creation time, verify that
+  LMCache L1 memory is enabled and that the descriptor has a non-zero pointer
+  and size.
+
+``s3`` -- S3-compatible object store
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+An L2 adapter that stores KV cache objects as S3 objects using the AWS
+Common Runtime (CRT).  Works with AWS S3, S3 Express One Zone, and any
+S3-compatible endpoint (MinIO, Ceph RGW, etc.).
+
+**Required fields:**
+
+- ``s3_endpoint``: Bucket URL -- either ``"s3://<bucket>"`` or the bare host form
+  (used for non-AWS endpoints).
+- ``s3_region``: AWS region string (e.g. ``"us-west-2"``).
+
+**Optional fields:**
+
+- ``s3_num_io_threads`` (int, default ``64``): Number of CRT I/O threads.
+- ``s3_prefer_http2`` (bool, default ``true``): Negotiate HTTP/2 via ALPN.
+- ``s3_enable_s3express`` (bool, default ``false``): Enable S3 Express signing
+  for S3 Express One Zone buckets.
+- ``disable_tls`` (bool, default ``false``): Bypass TLS when pointing at a
+  plain-HTTP endpoint (e.g. a local MinIO).
+- ``aws_access_key_id`` / ``aws_secret_access_key`` (string): Static
+  credentials; omit both to use the AWS default credential provider chain
+  (environment, EC2 instance profile, etc.).
+- ``max_capacity_gb`` (float, default ``0.0``): Aggregate capacity used by
+  ``get_usage()``.  A value of ``0`` disables aggregate eviction
+  (``usage_fraction == -1.0``).
+
+**Configuration examples:**
+
+.. code-block:: bash
+
+    # AWS S3 with default credentials
+    --l2-adapter '{"type": "s3", "s3_endpoint": "s3://my-bucket", "s3_region": "us-west-2"}'
+
+    # Static credentials, HTTP/2 disabled
+    --l2-adapter '{"type": "s3", "s3_endpoint": "s3://my-bucket", "s3_region": "us-west-2", "s3_prefer_http2": false, "aws_access_key_id": "AKIA...", "aws_secret_access_key": "..."}'
+
+    # Local MinIO over plain HTTP
+    --l2-adapter '{"type": "s3", "s3_endpoint": "minio.local:9000", "s3_region": "us-east-1", "disable_tls": true, "aws_access_key_id": "minio", "aws_secret_access_key": "minio123"}'
 
 ``mock`` -- Mock adapter for testing
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -406,9 +524,19 @@ drops by ``eviction_ratio``.
    * - ``nixl_store``
      - Full support. ``delete`` frees pool slots; pinned keys (in-flight
        loads) are skipped and retried on the next cycle.
+   * - ``nixl_store_dynamic``
+     - Full support. ``delete`` removes data files from disk; pinned
+       keys are skipped. ``get_usage`` is byte-based
+       (``_total_bytes / max_capacity_bytes``).
    * - ``mock``
      - Full support. Useful for testing eviction behaviour without
        real storage hardware.
+   * - ``s3``
+     - ``delete`` removes objects from the bucket and frees aggregate
+       byte accounting. ``get_usage`` reports ``usage_fraction == -1.0``
+       when ``max_capacity_gb`` is ``0`` (disabled); set a non-zero
+       ``max_capacity_gb`` to enable the watermark-triggered eviction
+       controller.
    * - ``mooncake_store``
      - No eviction support (native connector adapter).
    * - ``fs``

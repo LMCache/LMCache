@@ -109,9 +109,9 @@ class MockL2Adapter(L2AdapterInterface):
     """
 
     def __init__(self, config: MockL2AdapterConfig):
-        super().__init__()
+        max_capacity_bytes = int(config.max_size_gb * (1024**3))
+        super().__init__(max_capacity_bytes=max_capacity_bytes)
         self._config = config
-        self._max_capacity_bytes = int(config.max_size_gb * (1024**3))
         self._bandwidth_byte_ps = int(config.mock_bandwidth_gb * (1024**3))
 
         self._store_efd = os.eventfd(0, os.EFD_NONBLOCK | os.EFD_CLOEXEC)
@@ -349,23 +349,24 @@ class MockL2Adapter(L2AdapterInterface):
     def delete(self, keys: list[ObjectKey]) -> None:
         """Delete a batch of objects from the mock adapter."""
         deleted_keys: list[ObjectKey] = []
+        deleted_sizes: list[int] = []
         with self._lock:
             for key in keys:
                 if key not in self._memory_objects:
                     continue
                 obj = self._memory_objects.pop(key)
-                self._current_size_bytes -= obj.get_size()
+                size = obj.get_size()
+                self._current_size_bytes -= size
                 deleted_keys.append(key)
+                deleted_sizes.append(size)
         if deleted_keys:
-            self._notify_keys_deleted(deleted_keys)
+            self._notify_keys_deleted(deleted_keys, deleted_sizes)
 
-    def get_usage(self) -> tuple[float, float]:
-        """Return (current_usage, usage_after_ongoing_eviction) in [0, 1]."""
-        with self._lock:
-            if self._max_capacity_bytes == 0:
-                return (0.0, 0.0)
-            usage = self._current_size_bytes / self._max_capacity_bytes
-            return (usage, usage)
+    # ``get_usage()`` is inherited from ``L2AdapterInterface``, which derives
+    # the report from the byte counters maintained by ``_notify_keys_*``.
+    # ``_current_size_bytes`` above is a local within-batch accumulator
+    # used for the synchronous capacity check inside the store loop and is
+    # NOT the source of truth for external reporting.
 
     def _signal_store_event(self) -> None:
         """Signal the store event fd to notify completion."""
@@ -386,8 +387,9 @@ class MockL2Adapter(L2AdapterInterface):
         start = time.perf_counter()
 
         stored_keys: list[ObjectKey] = []
+        stored_sizes: list[int] = []
         try:
-            for key, obj in zip(keys, objects, strict=False):
+            for key, obj in zip(keys, objects, strict=True):
                 obj_size = obj.get_size()
 
                 # If the object is larger than max capacity, skip it
@@ -416,6 +418,7 @@ class MockL2Adapter(L2AdapterInterface):
                 self._current_size_bytes += obj_size
                 total_bytes += obj_size
                 stored_keys.append(key)
+                stored_sizes.append(obj_size)
         except Exception:
             success = False
 
@@ -433,7 +436,7 @@ class MockL2Adapter(L2AdapterInterface):
             self._completed_store_tasks[task_id] = success
 
         if stored_keys:
-            self._notify_keys_stored(stored_keys)
+            self._notify_keys_stored(stored_keys, stored_sizes)
         self._signal_store_event()
 
     def _signal_lookup_event(self) -> None:
