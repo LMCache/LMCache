@@ -87,6 +87,7 @@ class DisaggSpec:
     is_last_prefill: bool = False
     num_transferred_tokens: int = 0
     total_chunks: int = 0
+    receiver_query_port: Optional[list[int]] = None
 
 
 tmp_disagg_tracker: dict[str, DisaggSpec] = {}
