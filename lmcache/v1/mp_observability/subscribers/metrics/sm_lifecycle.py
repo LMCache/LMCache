@@ -63,9 +63,7 @@ class SMLifecycleSubscriber(EventSubscriber):
 
     def __init__(self, sample_rate: float = 0.01) -> None:
         if not 0 < sample_rate <= 1.0:
-            raise ValueError(
-                f"sample_rate must be in (0, 1.0], got {sample_rate}"
-            )
+            raise ValueError(f"sample_rate must be in (0, 1.0], got {sample_rate}")
         self._sample_rate = sample_rate
         self._sample_prime = 1_000_003
         self._sample_threshold = int(sample_rate * self._sample_prime)
@@ -144,9 +142,7 @@ class SMLifecycleSubscriber(EventSubscriber):
                 last_time, last_counter = prior
                 attrs = {"cache_salt": cache_salt}
                 self._real_reuse_gap_seconds_hist.record(now - last_time, attrs)
-                self._real_reuse_gap_chunks_hist.record(
-                    counter - last_counter, attrs
-                )
+                self._real_reuse_gap_chunks_hist.record(counter - last_counter, attrs)
                 self._reuse_track[track_key] = (now, counter)
             elif self._should_sample(track_key):
                 self._admit_track(track_key, now, counter)

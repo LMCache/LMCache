@@ -128,9 +128,7 @@ class TestReadEmitsGap:
         bus.stop()
 
         time_d = _delta(before_t, _totals_by_salt("lmcache_mp.real_reuse_gap_seconds"))
-        chunks_d = _delta(
-            before_c, _totals_by_salt("lmcache_mp.real_reuse_gap_chunks")
-        )
+        chunks_d = _delta(before_c, _totals_by_salt("lmcache_mp.real_reuse_gap_chunks"))
         assert time_d.get("t-a", (0.0, 0))[1] == 1
         assert chunks_d.get("t-a", (0.0, 0)) == (1.0, 1)
 
@@ -316,9 +314,7 @@ class TestSampling:
 class TestTPFanout:
     def test_read_dedupes_tp_fanout(self, bus, subscriber):
         """Same logical chunk fanned across TP ranks counts as one access."""
-        keys = [
-            _Key("tp-chunk", cache_salt="t-tp", kv_rank=r) for r in range(4)
-        ]
+        keys = [_Key("tp-chunk", cache_salt="t-tp", kv_rank=r) for r in range(4)]
         before = _totals_by_salt("lmcache_mp.real_reuse_gap_chunks")
 
         bus.start()
@@ -351,9 +347,7 @@ class TestBounds:
     def test_track_dict_bounded_by_cap(self, bus, subscriber, monkeypatch):
         """Random eviction on overflow: dict size never exceeds cap."""
         # First Party
-        from lmcache.v1.mp_observability.subscribers.metrics import (
-            sm_lifecycle as smlc,
-        )
+        from lmcache.v1.mp_observability.subscribers.metrics import sm_lifecycle as smlc
 
         monkeypatch.setattr(smlc, "_REUSE_TRACK_CAP", 8)
 
