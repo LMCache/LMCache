@@ -15,6 +15,7 @@ from lmcache.observability import LMCStatsMonitor, PrometheusLogger
 from lmcache.utils import CacheEngineKey, _lmcache_nvtx_annotate
 from lmcache.v1.cache_controller.message import OpType
 from lmcache.v1.config import LMCacheEngineConfig
+from lmcache.v1.lazy_memory_allocator import LazyMemoryAllocator
 from lmcache.v1.memory_management import (
     MemoryAllocatorInterface,
     MemoryFormat,
@@ -427,11 +428,26 @@ class LocalCPUBackend(AllocatorBackendInterface):
                 and cpu_size > config.lazy_memory_safe_size
             )
             if use_lazy:
-                logger.warning(
-                    "LazyMixedMemoryAllocator is temporarily unavailable; "
-                    "falling back to MixedMemoryAllocator with full allocation. "
-                    "Disable enable_lazy_memory_allocator or reduce "
-                    "max_local_cpu_size to avoid large pinned allocations."
+                init_size = int(
+                    cpu_size_bytes * config.lazy_memory_initial_ratio
+                )
+                align = (
+                    allocator_align_bytes
+                    if allocator_align_bytes is not None
+                    else 256
+                )
+                logger.info(
+                    "Using LazyMemoryAllocator: init %.1f GB, "
+                    "final %.1f GB, align %d",
+                    init_size / (1 << 30),
+                    cpu_size_bytes / (1 << 30),
+                    align,
+                )
+                return LazyMemoryAllocator(
+                    init_size,
+                    cpu_size_bytes,
+                    align_bytes=align,
+                    numa_mapping=numa_mapping,
                 )
             elif config.enable_lazy_memory_allocator:
                 logger.info(
