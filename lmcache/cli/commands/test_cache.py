@@ -52,6 +52,7 @@ from lmcache.cli.commands.base import BaseCommand
 from lmcache.utils import compress_slot_mapping
 from lmcache.v1.kv_layer_groups import (
     DTYPE_MAP,
+    format_kvcache_shape_spec,
     parse_kvcache_shape_spec,
 )
 from lmcache.v1.multiprocess.custom_types import (
@@ -719,9 +720,13 @@ class TestCacheCommand(BaseCommand):
             type=str,
             default=_DEFAULT_SHAPE_SPEC,
             help=(
-                "KV shape spec. Format: "
-                "'(shape):dtype:layers[;...]'. "
-                "Default: '%s'" % _DEFAULT_SHAPE_SPEC
+                "KV shape spec. One or more groups separated by ';'. "
+                "Each group is '(kv_size,NB,BS,NH,HS):dtype:layers' "
+                "where NB=num_blocks, BS=block_size, NH=num_heads, "
+                "HS=head_size. Supported dtypes: %s. "
+                "See lmcache.v1.kv_layer_groups.parse_kvcache_shape_spec "
+                "for full docs. Default: '%s'"
+                % (", ".join(DTYPE_MAP.keys()), _DEFAULT_SHAPE_SPEC)
             ),
         )
         kv.add_argument(
@@ -784,6 +789,12 @@ class TestCacheCommand(BaseCommand):
             # Parse KV shape spec
             layer_groups = parse_kvcache_shape_spec(
                 args.kvcache_shape_spec,
+            )
+            # Echo the resolved spec so operators can verify that
+            # their input was interpreted as intended. The echoed
+            # string is a valid ``--kvcache-shape-spec`` itself.
+            print(
+                "Resolved KV shape spec: %s" % format_kvcache_shape_spec(layer_groups)
             )
             # Use the first group to derive shape parameters.
             # ``nb``/``bs``/``kv_size`` from the spec take

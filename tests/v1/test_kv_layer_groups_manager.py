@@ -7,6 +7,7 @@ import torch
 from lmcache.v1.kv_layer_groups import (
     KVLayerGroupInfo,
     KVLayerGroupsManager,
+    format_kvcache_shape_spec,
     parse_kvcache_shape_spec,
 )
 
@@ -204,6 +205,35 @@ class TestParseKvcacheShapeSpec:
         """Test that spec with only separators raises."""
         with pytest.raises(ValueError, match="No valid layer groups"):
             parse_kvcache_shape_spec(";;;")
+
+
+class TestFormatKvcacheShapeSpec:
+    """Test cases for format_kvcache_shape_spec function."""
+
+    def test_single_group(self):
+        spec = "(2,1024,16,8,128):float16:32"
+        groups = parse_kvcache_shape_spec(spec)
+        assert format_kvcache_shape_spec(groups) == spec
+
+    def test_multiple_groups(self):
+        spec = "(2,1024,16,8,128):float16:30;(1,512,8,4,64):bfloat16:2"
+        groups = parse_kvcache_shape_spec(spec)
+        assert format_kvcache_shape_spec(groups) == spec
+
+    def test_uint8_dtype(self):
+        spec = "(2,1024,16,8,128):uint8:32"
+        groups = parse_kvcache_shape_spec(spec)
+        assert format_kvcache_shape_spec(groups) == spec
+
+    def test_round_trip_normalizes_whitespace(self):
+        """format() always produces the canonical (whitespace-free) form."""
+        messy = " (2,1024,16,8,128):float16:4 ; (2,1024,16,4,64):bfloat16:2 "
+        canonical = "(2,1024,16,8,128):float16:4;(2,1024,16,4,64):bfloat16:2"
+        assert format_kvcache_shape_spec(parse_kvcache_shape_spec(messy)) == canonical
+
+    def test_empty_groups_raises(self):
+        with pytest.raises(ValueError, match="empty"):
+            format_kvcache_shape_spec([])
 
 
 if __name__ == "__main__":
