@@ -907,7 +907,12 @@ class NixlStaticStorageBackend(NixlStorageBackend):
         transfer_spec: Any = None,
     ) -> list[MemoryObj]:
         obj_list = await self.storage_to_mem(keys)
-        assert None not in obj_list
+        for i, obj in enumerate(obj_list):
+            if obj is None:
+                for tail_obj in obj_list[i + 1 :]:
+                    if tail_obj is not None:
+                        tail_obj.ref_count_down()
+                return cast(list[MemoryObj], obj_list[:i])
         return cast(list[MemoryObj], obj_list)
 
     def remove(self, key: CacheEngineKey, force: bool = True) -> bool:
@@ -1379,7 +1384,12 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
         :return: a list of memory objects.
         """
         obj_list = self.storage_to_mem(keys, False)
-        assert None not in obj_list
+        for i, obj in enumerate(obj_list):
+            if obj is None:
+                for tail_obj in obj_list[i + 1 :]:
+                    if tail_obj is not None:
+                        tail_obj.ref_count_down()
+                return cast(list[MemoryObj], obj_list[:i])
         return cast(list[MemoryObj], obj_list)
 
     def remove(self, key: CacheEngineKey, force: bool = True) -> bool:
