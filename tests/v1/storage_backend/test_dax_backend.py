@@ -17,7 +17,7 @@ import torch
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.event_manager import EventManager
-from lmcache.v1.kv_layer_groups import KVLayerGroupInfo, KVLayerGroupsManager
+from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
 from lmcache.v1.memory_management import AdHocMemoryAllocator, MemoryFormat, MemoryObj
 from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.storage_backend.abstract_backend import AllocatorBackendInterface
@@ -931,6 +931,7 @@ def test_dax_backend_primary_allocation_release_reuses_capacity(
 
         backend = _create_primary_backend(dev_path)
         try:
+            assert backend.calculate_chunk_budget() == 2
             for _ in range(4):
                 obj = backend.allocate(
                     torch.Size([2, 16, 8]),
@@ -1042,6 +1043,7 @@ def test_dax_backend_primary_view_reclaim_after_release(
 
         backend = _create_primary_backend(dev_path)
         try:
+            assert backend.calculate_chunk_budget() == 2
             key1 = CacheEngineKey("test_model", 1, 0, 611, torch.bfloat16)
             key2 = CacheEngineKey("test_model", 1, 0, 612, torch.bfloat16)
 
