@@ -76,6 +76,23 @@ void free_hugepage_pinned_ptr(uintptr_t ptr, size_t size) {
   }
 }
 
+void batched_memcpy(const std::vector<uintptr_t>& src_ptrs,
+                    const std::vector<uintptr_t>& dst_ptrs,
+                    const std::vector<size_t>& sizes) {
+  if (src_ptrs.size() != dst_ptrs.size() || src_ptrs.size() != sizes.size()) {
+    throw std::invalid_argument(
+        "batched_memcpy expects equally sized src_ptrs, dst_ptrs, and sizes");
+  }
+
+  for (size_t i = 0; i < src_ptrs.size(); ++i) {
+    if (sizes[i] == 0) {
+      continue;
+    }
+    std::memmove(reinterpret_cast<void*>(dst_ptrs[i]),
+                 reinterpret_cast<const void*>(src_ptrs[i]), sizes[i]);
+  }
+}
+
 static void first_touch(void* p, size_t size, bool hugepages) {
   const size_t ps =
       hugepages ? HUGEPAGE_SIZE : static_cast<size_t>(sysconf(_SC_PAGESIZE));

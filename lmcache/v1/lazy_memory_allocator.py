@@ -67,6 +67,7 @@ class LazyMemoryAllocator(MemoryAllocatorInterface):
 
     PIN_CHUNK_SIZE = 1 << 26  # 64 MB pin chunk
     COMMIT_SIZE = 1 << 30  # Do a commit every 1 GB
+    LOG_INTERVAL = 10 << 30  # Log expansion progress every 10 GB
 
     def __init__(
         self,
@@ -240,10 +241,19 @@ class LazyMemoryAllocator(MemoryAllocatorInterface):
         Call sbrk in the address manager to commit the expansion.
         """
         self._address_manager.sbrk(expand_size)
+
+    def _log_expansion_progress(self, expanded_since_last_log: int):
+        """
+        Log the cumulative expansion progress since the last log.
+        """
+        percent = 100.0 * self._curr_size / self._final_size
         logger.info(
-            "LazyMemoryAllocator: Expanded %s MB pinned memory, now total is %s MB",
-            expand_size >> 20,
+            "LazyMemoryAllocator: Expanded %s MB pinned memory, "
+            "now total is %s MB / %s MB (%.1f%%)",
+            expanded_since_last_log >> 20,
             self._curr_size >> 20,
+            self._final_size >> 20,
+            percent,
         )
 
     def _expand_worker(self):
@@ -251,6 +261,7 @@ class LazyMemoryAllocator(MemoryAllocatorInterface):
         Background worker to expand the pinned memory.
         """
         last_commit_size = self._curr_size
+        last_log_size = self._curr_size
         while self._curr_size < self._final_size and not self._stop_expand.is_set():
             # Expand chunk by chunk and commit
             for i in range(self.COMMIT_SIZE // self.PIN_CHUNK_SIZE):
@@ -262,3 +273,12 @@ class LazyMemoryAllocator(MemoryAllocatorInterface):
             expand_size = self._curr_size - last_commit_size
             self._commit_expansion(expand_size)
             last_commit_size = self._curr_size
+
+            # Log every LOG_INTERVAL bytes, and always on the final commit.
+            expanded_since_last_log = self._curr_size - last_log_size
+            if (
+                expanded_since_last_log >= self.LOG_INTERVAL
+                or self._curr_size >= self._final_size
+            ):
+                self._log_expansion_progress(expanded_since_last_log)
+                last_log_size = self._curr_size

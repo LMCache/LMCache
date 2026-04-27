@@ -24,6 +24,10 @@ from tests.v1.utils import (
 DEVICE_PARAMS = ["xpu"]
 BACKENDS = ["cpu", "disk"]
 
+# Optional override for tempfile root; see tests/v1/test_cache_engine.py
+# for rationale.
+_TEST_TMPDIR = os.environ.get("LMCACHE_TEST_TMPDIR") or None
+
 
 def _skip_if_no_xpu():
     if not hasattr(torch, "xpu") or not torch.xpu.is_available():
@@ -254,9 +258,8 @@ def create_config():
             case _:
                 raise ValueError(f"Unknown backend: {backend}")
 
-    homedir = os.environ.get("HOME", "/tmp")
     with tempfile.TemporaryDirectory(
-        dir=homedir, ignore_cleanup_errors=True
+        dir=_TEST_TMPDIR, ignore_cleanup_errors=True
     ) as temp_dir:
         yield partial(make_config, path=temp_dir)
 

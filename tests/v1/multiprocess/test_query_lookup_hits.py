@@ -126,7 +126,12 @@ def _make_engine_with_job(
         submit_time=time.monotonic(),
     )
     request_id = "req-1"
-    job = _PrefetchJob(handle=handle, world_size=world_size, request_id=request_id)
+    job = _PrefetchJob(
+        handle=handle,
+        world_size=world_size,
+        request_id=request_id,
+        requested_tokens=0,
+    )
     engine._prefetch_jobs = {request_id: job}
     engine.storage_manager.query_prefetch_lookup_hits.return_value = storage_return
 

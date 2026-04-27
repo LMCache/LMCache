@@ -5,7 +5,6 @@ Distributed multi-tier storage manager for MP mode
 
 # Standard
 from contextlib import contextmanager
-from dataclasses import dataclass
 from typing import Iterator, Literal
 import time
 
@@ -14,6 +13,7 @@ from lmcache.logging import init_logger
 from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
     ObjectKey,
+    PrefetchHandle,
 )
 from lmcache.v1.distributed.config import StorageManagerConfig
 from lmcache.v1.distributed.error import L1Error, strerror
@@ -37,27 +37,13 @@ from lmcache.v1.distributed.storage_controllers.store_policy import (
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import get_event_bus
+from lmcache.v1.mp_observability.trace.decorator import (
+    enable_tracing,
+    is_tracing_enabled,
+    publish_call_event,
+)
 
 logger = init_logger(__name__)
-
-
-@dataclass(frozen=True)
-class PrefetchHandle:
-    prefetch_request_id: int
-    """Opaque ID for tracking L2 prefetch in the controller.
-    -1 if no L2 request was submitted."""
-
-    external_request_id: str
-    """Request ID from the caller for end-to-end tracing."""
-
-    l1_prefix_hit_count: int
-    """Number of leading keys already in L1 at submission time."""
-
-    total_requested_keys: int
-    """Total number of keys originally requested."""
-
-    submit_time: float
-    """Monotonic timestamp when the prefetch task was submitted."""
 
 
 class StorageManager:
@@ -79,17 +65,34 @@ class StorageManager:
             for ac in config.l2_adapter_config.adapters
         ]
 
-        # Unified L2 eviction controller for all adapters with eviction config
-        l2_eviction_states = [
-            L2AdapterEvictionState(
-                adapter=adapter,
-                eviction_config=ac.eviction_config,
+        # Unified L2 eviction controller for all adapters with eviction config.
+        # Adapters that don't support global (aggregate) eviction
+        # (``supports_global_eviction == False``, i.e. no
+        # ``max_capacity_bytes`` declared — e.g. the FS adapter) are
+        # skipped here even if an ``eviction_config`` is present — the
+        # eviction controller has no aggregate-usage signal to act on.
+        # Per-cache_salt eviction policies (future: quota-based) would
+        # be wired up separately and don't go through this filter.
+        l2_eviction_states: list[L2AdapterEvictionState] = []
+        for adapter, ac in zip(
+            self._l2_adapters, config.l2_adapter_config.adapters, strict=True
+        ):
+            if ac.eviction_config is None:
+                continue
+            if not adapter.supports_global_eviction:
+                logger.warning(
+                    "L2 adapter %s has eviction_config but does not support "
+                    "global eviction (max_capacity_bytes=0); skipping "
+                    "aggregate-usage eviction setup.",
+                    type(adapter).__name__,
+                )
+                continue
+            l2_eviction_states.append(
+                L2AdapterEvictionState(
+                    adapter=adapter,
+                    eviction_config=ac.eviction_config,
+                )
             )
-            for adapter, ac in zip(
-                self._l2_adapters, config.l2_adapter_config.adapters, strict=False
-            )
-            if ac.eviction_config is not None
-        ]
         self._l2_eviction_controller = L2EvictionController(l2_eviction_states)
         self._l2_eviction_controller.start()
 
@@ -117,6 +120,7 @@ class StorageManager:
         self._prefetch_controller.start()
 
     # External APIs for serving engine integration code to call
+    @enable_tracing()
     def reserve_write(
         self,
         keys: list[ObjectKey],
@@ -161,6 +165,7 @@ class StorageManager:
         )
         return result
 
+    @enable_tracing()
     def finish_write(
         self,
         keys: list[ObjectKey],
@@ -211,6 +216,18 @@ class StorageManager:
             If the caller raised exception during the processing of the yielded memory
             objects, this function will ensure that the read locks will be decreased.
         """
+        # Manual TRACE_CALL emission for the context manager.  The
+        # ``@enable_tracing`` decorator cannot wrap a ``@contextmanager``
+        # generator function (it would publish the call to the wrapper
+        # rather than to ``__enter__``).  Emit enter/exit events
+        # directly, gated on the tracing flag for zero overhead when
+        # disabled.
+        if is_tracing_enabled():
+            publish_call_event(
+                "lmcache.v1.distributed.storage_manager."
+                "StorageManager.read_prefetched_results.__enter__",
+                {"keys": keys},
+            )
         read_results = self._l1_manager.unsafe_read(keys)
         good_keys: list[ObjectKey] = []
         good_objs: list[MemoryObj] = []
@@ -254,7 +271,14 @@ class StorageManager:
                         },
                     )
                 )
+            if is_tracing_enabled():
+                publish_call_event(
+                    "lmcache.v1.distributed.storage_manager."
+                    "StorageManager.read_prefetched_results.__exit__",
+                    {"keys": keys},
+                )
 
+    @enable_tracing()
     def finish_read_prefetched(
         self,
         keys: list[ObjectKey],
@@ -280,6 +304,7 @@ class StorageManager:
             )
         )
 
+    @enable_tracing()
     def submit_prefetch_task(
         self,
         keys: list[ObjectKey],
@@ -456,6 +481,16 @@ class StorageManager:
                 handle.prefetch_request_id,
             )
         return total_hits
+
+    def touch_l1_keys(self, keys: list[ObjectKey]):
+        """
+        Touch the keys in L1 storage, marking the keys
+        as accessed(retrieved or stored).
+
+        Args:
+            keys (list[ObjectKey]): List of object keys to touch.
+        """
+        self._l1_manager.touch_keys(keys)
 
     def clear(self, force: bool = False):
         """

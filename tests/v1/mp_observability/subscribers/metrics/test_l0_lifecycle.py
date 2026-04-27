@@ -44,10 +44,16 @@ class FakeBlockAllocationRecord:
 
 def _make_allocation_event(
     records: list[FakeBlockAllocationRecord],
+    instance_id: int = 0,
+    model_name: str = "test-model",
 ) -> Event:
     return Event(
         event_type=EventType.MP_VLLM_BLOCK_ALLOCATION,
-        metadata={"records": records},
+        metadata={
+            "instance_id": instance_id,
+            "model_name": model_name,
+            "records": records,
+        },
     )
 
 
@@ -75,6 +81,13 @@ def _get_histogram_count(name: str) -> int:
     histograms = _read_histograms()
     dps = histograms.get(name, [])
     return sum(dp.count for dp in dps)
+
+
+def _get_histogram_attrs(name: str) -> list[dict]:
+    """Return a list of attribute dicts from all data points of a histogram."""
+    histograms = _read_histograms()
+    dps = histograms.get(name, [])
+    return [dict(dp.attributes) for dp in dps if dp.count > 0]
 
 
 # ---------------------------------------------------------------------------
@@ -124,9 +137,9 @@ class TestL0NewAllocation:
         time.sleep(_DRAIN_WAIT)
         bus.stop()
 
-        assert 10 in subscriber._shadow
-        assert 11 in subscriber._shadow
-        assert subscriber._shadow[10].status == _BlockStatus.ACTIVE
+        assert (0, 10) in subscriber._shadow
+        assert (0, 11) in subscriber._shadow
+        assert subscriber._shadow[(0, 10)].status == _BlockStatus.ACTIVE
 
 
 # ---------------------------------------------------------------------------
@@ -171,7 +184,7 @@ class TestL0PrefixSharing:
         time.sleep(_DRAIN_WAIT)
         bus.stop()
 
-        state = subscriber._shadow[6]
+        state = subscriber._shadow[(0, 6)]
         assert "req-A" in state.owners
         assert "req-B" in state.owners
         assert state.status == _BlockStatus.ACTIVE
@@ -195,7 +208,7 @@ class TestL0EndSessionAndReuse:
         time.sleep(_DRAIN_WAIT)
         bus.stop()
 
-        assert subscriber._shadow[7].status == _BlockStatus.RELEASED
+        assert subscriber._shadow[(0, 7)].status == _BlockStatus.RELEASED
 
     def test_end_session_with_coowner_stays_active(self, bus, subscriber):
         """If another request still owns the block, it stays ACTIVE."""
@@ -213,7 +226,7 @@ class TestL0EndSessionAndReuse:
         time.sleep(_DRAIN_WAIT)
         bus.stop()
 
-        state = subscriber._shadow[8]
+        state = subscriber._shadow[(0, 8)]
         assert state.status == _BlockStatus.ACTIVE
         assert "req-A" not in state.owners
         assert "req-B" in state.owners
@@ -249,7 +262,7 @@ class TestL0EndSessionAndReuse:
         time.sleep(_DRAIN_WAIT)
         bus.stop()
 
-        state = subscriber._shadow[9]
+        state = subscriber._shadow[(0, 9)]
         # Two true reuses → 2 access history entries → 1 reuse gap.
         assert len(state.access_history) == 2
 
@@ -313,7 +326,7 @@ class TestL0EvictionDetection:
         time.sleep(_DRAIN_WAIT)
         bus.stop()
 
-        state = subscriber._shadow[40]
+        state = subscriber._shadow[(0, 40)]
         assert state.owners == {"req-2"}
         assert state.token_ids == [2]
 
@@ -419,7 +432,7 @@ class TestL0EdgeCases:
         time.sleep(_DRAIN_WAIT)
         bus.stop()
 
-        state = subscriber._shadow[50]
+        state = subscriber._shadow[(0, 50)]
         # No access recorded — it was the same request.
         assert len(state.access_history) == 0
 
@@ -430,3 +443,39 @@ class TestL0EdgeCases:
         time.sleep(_DRAIN_WAIT)
         bus.stop()
         # No crash = pass.
+
+
+# ---------------------------------------------------------------------------
+# Tests: OTel attributes (instance_id, model_name)
+# ---------------------------------------------------------------------------
+
+
+class TestL0MetricAttributes:
+    def test_eviction_emits_instance_id_and_model_name(self, bus, subscriber):
+        """Histogram data points should carry instance_id and model_name."""
+        bus.start()
+        bus.publish(
+            _make_allocation_event(
+                [FakeBlockAllocationRecord("req-1", [60], [10])],
+                instance_id=42,
+                model_name="llama-7b",
+            )
+        )
+        time.sleep(_DRAIN_WAIT)
+        bus.publish(
+            _make_allocation_event(
+                [FakeBlockAllocationRecord("req-2", [60], [99])],
+                instance_id=42,
+                model_name="llama-7b",
+            )
+        )
+        time.sleep(_DRAIN_WAIT)
+        bus.stop()
+
+        attrs_list = _get_histogram_attrs("lmcache_mp.l0_block_lifetime_seconds")
+        matching = [
+            a
+            for a in attrs_list
+            if a.get("instance_id") == "42" and a.get("model_name") == "llama-7b"
+        ]
+        assert len(matching) > 0
