@@ -115,32 +115,6 @@ def _validate_extra_count(extra_count: int) -> int:
 # Main classes
 
 
-def _register_l1_memory_usage_gauge() -> None:
-    """Register the L1 memory usage gauge exactly once per process.
-
-    L1Manager is a singleton in MP mode (one per cache server process), so
-    a single OTel ObservableGauge with a single callback is the correct
-    shape.  Tests that construct multiple L1Manager instances would
-    otherwise stack multiple callbacks on the same metric name with the
-    same (empty) attribute set, leaving the reported value undefined.
-    The callback dispatches via the class-level ``_gauge_target`` so the
-    most recently constructed L1Manager owns the reported value.
-    """
-    if L1Manager._gauge_registered:
-        return
-    L1Manager._gauge_registered = True
-    register_gauge(
-        "lmcache.l1_manager",
-        "lmcache_mp.l1_memory_usage_bytes",
-        "Bytes currently held in L1 cache",
-        lambda: (
-            L1Manager._gauge_target._memory_manager.get_memory_usage()[0]
-            if L1Manager._gauge_target is not None
-            else 0
-        ),
-    )
-
-
 class L1Manager:
     """
     Object lifecycle state machine for L1 cache
@@ -185,9 +159,41 @@ class L1Manager:
     """
 
     # Class-level state for the singleton ``lmcache_mp.l1_memory_usage_bytes``
-    # gauge.  See ``_register_l1_memory_usage_gauge``.
+    # gauge.  See ``_ensure_memory_usage_gauge_registered``.
     _gauge_registered: bool = False
     _gauge_target: "L1Manager | None" = None
+
+    @classmethod
+    def _ensure_memory_usage_gauge_registered(cls) -> None:
+        """Register ``lmcache_mp.l1_memory_usage_bytes`` exactly once per
+        process.
+
+        L1Manager is a singleton in MP mode (one per cache server
+        process), so a single OTel ObservableGauge with a single callback
+        is the correct shape.  Tests that construct multiple L1Manager
+        instances would otherwise stack multiple callbacks on the same
+        metric name with the same (empty) attribute set, leaving the
+        reported value undefined.  The callback dispatches via
+        ``_gauge_target`` so the most recently constructed L1Manager owns
+        the reported value.
+        """
+        if cls._gauge_registered:
+            return
+        cls._gauge_registered = True
+        register_gauge(
+            "lmcache.l1_manager",
+            "lmcache_mp.l1_memory_usage_bytes",
+            "Bytes currently held in L1 cache",
+            cls._read_current_memory_usage_bytes,
+        )
+
+    @classmethod
+    def _read_current_memory_usage_bytes(cls) -> int:
+        """Gauge callback: return the current L1 instance's used bytes."""
+        target = cls._gauge_target
+        if target is None:
+            return 0
+        return target.get_memory_usage()[0]
 
     def __init__(self, config: L1ManagerConfig):
         self._lock = threading.Lock()
@@ -204,7 +210,7 @@ class L1Manager:
         self._event_bus = get_event_bus()
 
         L1Manager._gauge_target = self
-        _register_l1_memory_usage_gauge()
+        L1Manager._ensure_memory_usage_gauge_registered()
 
     def register_listener(self, listener: L1ManagerListener) -> None:
         """Register a listener for L1Manager events.

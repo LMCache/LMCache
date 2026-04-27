@@ -72,8 +72,8 @@ def make_layout() -> MemoryLayoutDesc:
     )
 
 
-def make_adapter() -> MockL2Adapter:
-    config = MockL2AdapterConfig(max_size_gb=0.01, mock_bandwidth_gb=10.0)
+def make_adapter(bandwidth_gb: float = 10.0) -> MockL2Adapter:
+    config = MockL2AdapterConfig(max_size_gb=0.01, mock_bandwidth_gb=bandwidth_gb)
     return MockL2Adapter(config)
 
 
@@ -335,17 +335,20 @@ class TestNumInflightL2Loads:
         adapter.close()
 
     def test_cleanup_decrements_counters_on_shutdown(self, l1_manager):
-        # If the controller is stopped with in-flight loads, _cleanup
-        # must decrement the counters so they return to baseline.
-        adapter = make_adapter()
-        # Use an absurdly slow mock bandwidth so the load is still
-        # in-flight when we stop().
-        adapter._config.mock_bandwidth_gb = 0.0001  # type: ignore[attr-defined]
+        # When the controller is stopped while a load is still in flight,
+        # ``_cleanup_in_flight_requests`` must decrement the counters so
+        # they return to baseline.  We use a slow MockL2Adapter (bandwidth
+        # set at construction, since ``_bandwidth_byte_ps`` is computed
+        # once in ``__init__``) and assert via the metric snapshot that
+        # the load is observably in-flight before calling ``stop()``.
+        slow_gb = 0.001  # 1 MB/s — a 200 KB key takes ~200 ms.
+        adapter = make_adapter(bandwidth_gb=slow_gb)
         adapter_index = 0
         attrs = {"l2_name": "mock", "adapter_index": adapter_index}
         layout = make_layout()
         keys = [make_object_key(400 + i) for i in range(4)]
 
+        # Seed L2 (also slow at this bandwidth, so allow plenty of time).
         store_keys_in_l2(adapter, keys, layout)
 
         ctrl = PrefetchController(
@@ -360,10 +363,25 @@ class TestNumInflightL2Loads:
         before_bytes = _value_for("lmcache_mp.inflight_load_memory_usage_bytes", attrs)
 
         ctrl.submit_prefetch_request(keys, layout)
-        # Don't wait for completion; stop() should clean up regardless.
+
+        # Wait until the load is actually in flight on this adapter; only
+        # then is ``_cleanup_in_flight_requests`` the path that brings the
+        # counters back down.  Without this wait, the test could pass via
+        # the normal completion path instead.
+        assert wait_for_condition(
+            lambda: (
+                _value_for("lmcache_mp.num_inflight_l2_loads", attrs) > before_loads
+            ),
+            timeout=10.0,
+        ), "Load never entered the in-flight state"
+        assert (
+            _value_for("lmcache_mp.inflight_load_memory_usage_bytes", attrs)
+            > before_bytes
+        )
+
+        # Stop while the load is still in flight; cleanup must decrement.
         ctrl.stop()
 
-        # After cleanup the counters must be back at baseline.
         assert _value_for("lmcache_mp.num_inflight_l2_loads", attrs) == before_loads
         assert (
             _value_for("lmcache_mp.inflight_load_memory_usage_bytes", attrs)
