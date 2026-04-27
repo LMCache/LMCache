@@ -231,32 +231,59 @@ If the Mooncake headers are not installed in the system include path
 
 **LMCache-specific fields:**
 
-- ``num_workers``: Number of C++ worker threads (default ``4``, must
-  be > 0).
+- ``num_workers``: Number of C++ worker threads for the shared pool
+  (default ``4``, must be > 0).  Only used when per-operation worker
+  counts are not set.
+
+- ``lookup_workers``, ``retrieve_workers``, ``store_workers``
+  (``int``, optional): Per-operation worker thread counts.  When set,
+  the adapter allocates three independent thread pools so that
+  different operation types cannot block each other:
+
+  - ``lookup_workers`` — threads for ``EXISTS`` operations.
+  - ``retrieve_workers`` — threads for ``GET`` / load operations.
+  - ``store_workers`` — threads for ``SET`` / put operations.
+
+  All three must be set together (or all left unset).  When set, the
+  shared ``num_workers`` pool is **not used**.
 
 **Mooncake fields:**
 
 All other keys in the JSON config (except ``type``, ``num_workers``,
-and ``eviction``) are forwarded **as-is** to Mooncake's
+``lookup_workers``, ``retrieve_workers``, ``store_workers``, and
+``eviction``) are forwarded **as-is** to Mooncake's
 ``setup_internal(ConfigDict)``.  Refer to the
 `Mooncake documentation <https://github.com/kvcache-ai/Mooncake>`_
 for available setup keys (e.g., ``local_hostname``,
-``metadata_server``, ``master_server_address``, ``protocol``,
-``device_name``, ``global_segment_size``).
+``metadata_server``, ``master_server_addr``, ``protocol``,
+``rdma_devices``, ``global_segment_size``).
 
 **Configuration example:**
 
 .. code-block:: bash
 
+    # Shared pool (default)
     --l2-adapter '{
       "type": "mooncake_store",
       "num_workers": 4,
       "local_hostname": "node01",
       "metadata_server": "http://localhost:8080/metadata",
-      "master_server_address": "localhost:50051",
+      "master_server_addr": "localhost:50051",
       "protocol": "tcp",
-      "local_buffer_size": "3221225472"
+      "local_buffer_size": "3221225472",
       "global_segment_size": "3221225472"
+    }'
+
+    # Per-operation pools (GET-heavy workload)
+    --l2-adapter '{
+      "type": "mooncake_store",
+      "lookup_workers": 2,
+      "retrieve_workers": 16,
+      "store_workers": 4,
+      "local_hostname": "node01",
+      "metadata_server": "http://localhost:8080/metadata",
+      "master_server_addr": "localhost:50051",
+      "protocol": "tcp"
     }'
 
 For full Mooncake setup instructions (master service, metadata server,
