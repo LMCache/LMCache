@@ -48,15 +48,30 @@ class MooncakeStoreL2AdapterConfig(L2AdapterConfigBase):
     """Config for an L2 adapter backed by the native
     C++ Mooncake Store connector.
 
-    ``setup_config`` is a string-to-string dict that is
-    forwarded **as-is** to mooncake's
+    ``setup_config`` is a string-to-string dict forwarded
+    **as-is** to mooncake's
     ``RealClient::setup_internal(ConfigDict)``.
     LMCache does NOT interpret, validate, or fill in
     defaults for any mooncake keys — that is mooncake's
     responsibility.
 
-    ``num_workers`` and optional per-operation worker counts are
-    LMCache-specific knobs.
+    Fields:
+        setup_config: Mooncake SDK configuration forwarded
+            as-is to ``RealClient::setup_internal()``.
+        num_workers: Shared worker thread count (default 4,
+            must be > 0).  Ignored when per-operation
+            worker counts are set.
+        lookup_workers: Optional dedicated worker count
+            for EXISTS operations.  Must be set together
+            with ``retrieve_workers`` and
+            ``store_workers``.
+        retrieve_workers: Optional dedicated worker count
+            for GET/load operations.  Must be set together
+            with ``lookup_workers`` and
+            ``store_workers``.
+        store_workers: Optional dedicated worker count for
+            SET/put operations.  Must be set together with
+            ``lookup_workers`` and ``retrieve_workers``.
     """
 
     def __init__(

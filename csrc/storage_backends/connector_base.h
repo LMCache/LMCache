@@ -319,6 +319,7 @@ class ConnectorBase : public IStorageConnector {
         req.batch->per_key_results[req.start_idx + i] = 0;
         fprintf(stderr, "[LMCache GET] key %s failed: %s\n",
                 req.keys[i].c_str(), e.what());
+        req.batch->any_failed.store(true, std::memory_order_relaxed);
       }
     }
   }
@@ -351,6 +352,7 @@ class ConnectorBase : public IStorageConnector {
         req.batch->per_key_results[req.start_idx + i] = 0;
         fprintf(stderr, "[LMCache DELETE] key %s failed: %s\n",
                 req.keys[i].c_str(), e.what());
+        req.batch->any_failed.store(true, std::memory_order_relaxed);
       }
     }
   }
