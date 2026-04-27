@@ -380,12 +380,12 @@ class ReqMeta:
             if first_mm_offset < num_tokens_to_save:
                 max_save_tokens = first_mm_offset
 
-        # If we need to save, update the number of saved tokens
+        # If we need to save, advance num_saved_tokens to the full aligned
+        # range so subsequent iterations skip these tokens via
+        # skip_leading_tokens.  max_save_tokens caps only the current
+        # iteration's store_mask, not the progress tracker.
         if not skip_save:
-            effective_save = (
-                max_save_tokens if max_save_tokens is not None else num_tokens_to_save
-            )
-            tracker.num_saved_tokens = effective_save
+            tracker.num_saved_tokens = num_tokens_to_save
         save_spec = SaveSpec(skip_leading_tokens, not skip_save, max_save_tokens)
 
         # Calculate the token ids and slot mappings for load and save
