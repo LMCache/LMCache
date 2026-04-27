@@ -139,6 +139,8 @@ contribute to histograms; counters above always count all events.
 | `lmcache_mp.l1_chunk_idle_before_evict_seconds` | `lmcache_mp_l1_chunk_idle_before_evict_seconds` | Histogram | `L1_KEYS_EVICTED` | `eviction_time - last_access_time` per sampled chunk |
 | `lmcache_mp.l1_chunk_reuse_gap_seconds` | `lmcache_mp_l1_chunk_reuse_gap_seconds` | Histogram | `L1_READ_FINISHED`, `L1_WRITE_FINISHED`, `L1_WRITE_FINISHED_AND_READ_RESERVED` | Time gap between consecutive touches of the same chunk |
 | `lmcache_mp.l1_chunk_evict_reuse_gap_seconds` | `lmcache_mp_l1_chunk_evict_reuse_gap_seconds` | Histogram | `L1_KEYS_EVICTED` → `L1_WRITE_FINISHED` | Time from eviction to next reuse (capped at 300 s) |
+| `lmcache_mp.real_reuse_gap_seconds` | `lmcache_mp_real_reuse_gap_seconds` | Histogram (tagged `cache_salt`) | `SM_READ_PREFETCHED_FINISHED`, `SM_WRITE_FINISHED` | Time gap between a chunk's last access (read or write) and the next read.  Captures **storage cost**.  Emitted only on read events. |
+| `lmcache_mp.real_reuse_gap_chunks` | `lmcache_mp_real_reuse_gap_chunks` | Histogram (tagged `cache_salt`) | `SM_READ_PREFETCHED_FINISHED`, `SM_WRITE_FINISHED` | Per-`cache_salt` access-counter gap between two reads of the same chunk.  Counter bumps on every read and write of every chunk; histogram emitted only on read events for sampled chunks.  Captures **storage volume**. |
 
 **What it answers:** How long do L1 chunks live? How idle are they before eviction? How quickly are evicted chunks reused?
 

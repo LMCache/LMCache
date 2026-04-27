@@ -218,6 +218,40 @@ memory overhead.
      - Histogram
      - Time from eviction to next reuse (capped at 300 s).
 
+StorageManager Real-Reuse Metrics
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Workload-level reuse histograms emitted by ``SMLifecycleSubscriber``,
+driven by caller-facing StorageManager events
+(``SM_READ_PREFETCHED_FINISHED``, ``SM_WRITE_FINISHED``).  Internal
+read-lock releases by the store/prefetch controllers are excluded so
+the signal reflects user-driven access only.
+
+Both histograms are tagged with ``cache_salt`` for per-tenant
+isolation.  The per-salt access counter advances on every read and
+write of every chunk (regardless of sampling) so the chunks-gap
+reflects true storage volume; the histogram itself records gaps only
+for chunks that pass the (deterministic, hash-based) sampling gate.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 40 15 45
+
+   * - Metric
+     - Type
+     - Description
+   * - ``lmcache_mp.real_reuse_gap_seconds``
+     - Histogram (tag: ``cache_salt``)
+     - Time gap between a chunk's last access (read or write) and its
+       next read.  Captures storage cost — how long a stored chunk sat
+       between accesses.  Emitted only on read events.
+   * - ``lmcache_mp.real_reuse_gap_chunks``
+     - Histogram (tag: ``cache_salt``)
+     - Per-``cache_salt`` access-counter gap between two reads of the
+       same chunk.  Captures storage volume — how many chunk-accesses
+       occurred while this chunk waited for its next read.  Emitted on
+       read events for sampled chunks.
+
 L2 Metrics
 ~~~~~~~~~~
 
