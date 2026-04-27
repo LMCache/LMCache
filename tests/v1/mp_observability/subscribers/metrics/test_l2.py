@@ -32,7 +32,11 @@ _DRAIN_WAIT = 0.15
 
 
 def _read_counters() -> dict[str, int]:
-    """Snapshot all counter values from the module-level reader."""
+    """Snapshot all counter values from the module-level reader, summed
+    across attribute combinations.  A counter with multiple labeled data
+    points (e.g. ``l2_name="fs"`` and ``l2_name="nixl"``) reports the
+    aggregate; tests that need per-label values use ``_read_counters_by_attrs``.
+    """
     data = _reader.get_metrics_data()
     result: dict[str, int] = {}
     if data is None:
@@ -40,10 +44,32 @@ def _read_counters() -> dict[str, int]:
     for resource_metrics in data.resource_metrics:
         for scope_metrics in resource_metrics.scope_metrics:
             for metric in scope_metrics.metrics:
+                total = 0
+                any_value = False
                 for dp in metric.data.data_points:
                     if not hasattr(dp, "value"):
                         continue  # skip histogram data points
-                    result[metric.name] = int(dp.value)
+                    total += int(dp.value)
+                    any_value = True
+                if any_value:
+                    result[metric.name] = total
+    return result
+
+
+def _read_counters_by_attrs() -> dict[str, dict[tuple, int]]:
+    """Snapshot counter values keyed by (metric_name, frozenset(attrs))."""
+    data = _reader.get_metrics_data()
+    result: dict[str, dict[tuple, int]] = {}
+    if data is None:
+        return result
+    for resource_metrics in data.resource_metrics:
+        for scope_metrics in resource_metrics.scope_metrics:
+            for metric in scope_metrics.metrics:
+                for dp in metric.data.data_points:
+                    if not hasattr(dp, "value"):
+                        continue
+                    key = tuple(sorted(dict(dp.attributes).items()))
+                    result.setdefault(metric.name, {})[key] = int(dp.value)
     return result
 
 
@@ -281,11 +307,103 @@ class TestL2MetricsSubscriptions:
         subs = subscriber.get_subscriptions()
         assert EventType.L2_STORE_SUBMITTED in subs
         assert EventType.L2_STORE_COMPLETED in subs
+        assert EventType.L2_LOAD_TASK_COMPLETED in subs
         assert EventType.L2_PREFETCH_LOOKUP_SUBMITTED in subs
         assert EventType.L2_PREFETCH_LOOKUP_COMPLETED in subs
         assert EventType.L2_PREFETCH_LOAD_SUBMITTED in subs
         assert EventType.L2_PREFETCH_LOAD_COMPLETED in subs
-        assert len(subs) == 6
+        assert len(subs) == 7
+
+
+# ---------------------------------------------------------------------------
+# l2_name-labeled counters (for per-backend IOPS via rate())
+# ---------------------------------------------------------------------------
+
+
+class TestL2NameLabeledCounters:
+    def test_store_completed_carries_l2_name(self, bus, subscriber):
+        bus.start()
+        before = _read_counters_by_attrs().get("lmcache_mp.l2_store_completed", {})
+        bus.publish(
+            Event(
+                event_type=EventType.L2_STORE_COMPLETED,
+                metadata={
+                    "adapter_index": 0,
+                    "task_id": 1,
+                    "l2_name": "fs",
+                    "succeeded_count": 5,
+                    "failed_count": 0,
+                    "total_bytes": 1_000,
+                },
+            )
+        )
+        time.sleep(_DRAIN_WAIT)
+        bus.stop()
+
+        after = _read_counters_by_attrs().get("lmcache_mp.l2_store_completed", {})
+        fs_key = (("l2_name", "fs"),)
+        assert after.get(fs_key, 0) == before.get(fs_key, 0) + 1
+
+    def test_load_task_completed_carries_l2_name(self, bus, subscriber):
+        bus.start()
+        before = _read_counters_by_attrs().get("lmcache_mp.l2_load_completed", {})
+        bus.publish(
+            Event(
+                event_type=EventType.L2_LOAD_TASK_COMPLETED,
+                metadata={
+                    "request_id": 7,
+                    "adapter_index": 1,
+                    "task_id": 42,
+                    "l2_name": "nixl_store",
+                    "total_bytes": 2_000,
+                },
+            )
+        )
+        time.sleep(_DRAIN_WAIT)
+        bus.stop()
+
+        after = _read_counters_by_attrs().get("lmcache_mp.l2_load_completed", {})
+        nixl_key = (("l2_name", "nixl_store"),)
+        assert after.get(nixl_key, 0) == before.get(nixl_key, 0) + 1
+
+    def test_different_l2_names_accumulate_independently(self, bus, subscriber):
+        bus.start()
+        before = _read_counters_by_attrs().get("lmcache_mp.l2_load_completed", {})
+        # 3x fs, 2x nixl_store completions.
+        for _ in range(3):
+            bus.publish(
+                Event(
+                    event_type=EventType.L2_LOAD_TASK_COMPLETED,
+                    metadata={
+                        "request_id": 1,
+                        "adapter_index": 0,
+                        "task_id": 1,
+                        "l2_name": "fs",
+                        "total_bytes": 1,
+                    },
+                )
+            )
+        for _ in range(2):
+            bus.publish(
+                Event(
+                    event_type=EventType.L2_LOAD_TASK_COMPLETED,
+                    metadata={
+                        "request_id": 1,
+                        "adapter_index": 1,
+                        "task_id": 1,
+                        "l2_name": "nixl_store",
+                        "total_bytes": 1,
+                    },
+                )
+            )
+        time.sleep(_DRAIN_WAIT)
+        bus.stop()
+
+        after = _read_counters_by_attrs().get("lmcache_mp.l2_load_completed", {})
+        fs_key = (("l2_name", "fs"),)
+        nixl_key = (("l2_name", "nixl_store"),)
+        assert after.get(fs_key, 0) == before.get(fs_key, 0) + 3
+        assert after.get(nixl_key, 0) == before.get(nixl_key, 0) + 2
 
 
 # ---------------------------------------------------------------------------
