@@ -78,53 +78,92 @@ _DEFAULT_SHAPE_SPEC = "(2,1024,16,8,128):float16:32"
 #  Low-level helpers                                                   #
 # ------------------------------------------------------------------ #
 
-_REQUEST_UID_COUNTER = 0
 
-
-def _next_uid() -> int:
-    global _REQUEST_UID_COUNTER
-    uid = _REQUEST_UID_COUNTER
-    _REQUEST_UID_COUNTER += 1
-    return uid
-
-
-_VOID_RESPONSE: tuple[bytes, ...] = ()
+VOID_RESPONSE: tuple[bytes, ...] = ()
 """Immutable sentinel returned when a response carries no payload
 frames (or is malformed with < 2 frames). Distinguishes a successful
 void reply from a timeout (``None``)."""
 
 
-def _send_request(
-    sock: zmq.Socket,
-    request_type: RequestType,
-    payloads: list[bytes] | None = None,
-    timeout_ms: int = 10000,
-) -> list[bytes] | tuple[bytes, ...] | None:
-    """Send a request and wait for the response.
+class ZmqClient:
+    """Thin wrapper around a DEALER ``zmq.Socket``.
 
-    Returns the raw response frames (excluding uid and type),
-    an empty sentinel for a successful void response (no payload),
-    or *None* on timeout.
+    Encapsulates the per-connection monotonic request UID counter
+    (previously a module-level global) and adds UID-matching on
+    ``recv_multipart`` so late replies from prior timed-out requests
+    are discarded instead of being mis-interpreted as the next
+    request's response.
     """
-    uid = _next_uid()
-    b_uid = msgspec.msgpack.encode(uid)
-    b_type = msgspec.msgpack.encode(request_type)
 
-    frames: list[bytes] = [b_uid, b_type]
-    if payloads:
-        frames.extend(payloads)
+    def __init__(self, sock: zmq.Socket) -> None:
+        self._sock = sock
+        self._uid_counter = 0
 
-    sock.send_multipart(frames)
+    @property
+    def sock(self) -> zmq.Socket:
+        """Expose the underlying socket (read-only)."""
+        return self._sock
 
-    if sock.poll(timeout_ms, zmq.POLLIN):
-        resp = sock.recv_multipart()
-        # resp[0]=uid, resp[1]=type; payload starts at [2].
-        # When there are >=2 frames we return the payload slice
-        # (may be empty); when the reply is malformed (<2 frames)
-        # we fall back to the immutable _VOID_RESPONSE sentinel so
-        # callers can still distinguish it from a timeout (None).
-        return resp[2:] if len(resp) >= 2 else _VOID_RESPONSE
-    return None
+    def _next_uid(self) -> int:
+        uid = self._uid_counter
+        self._uid_counter += 1
+        return uid
+
+    def send_request(
+        self,
+        request_type: RequestType,
+        payloads: list[bytes] | None = None,
+        timeout_ms: int = 10000,
+    ) -> list[bytes] | tuple[bytes, ...] | None:
+        """Send a request and wait for the matching response.
+
+        Returns the raw response frames (excluding uid and type),
+        an empty sentinel for a successful void response (no
+        payload), or *None* on timeout.
+
+        Late replies from previous timed-out calls are dropped by
+        matching ``resp[0]`` against the request UID.
+        """
+        uid = self._next_uid()
+        b_uid = msgspec.msgpack.encode(uid)
+        b_type = msgspec.msgpack.encode(request_type)
+
+        frames: list[bytes] = [b_uid, b_type]
+        if payloads:
+            frames.extend(payloads)
+
+        self._sock.send_multipart(frames)
+
+        # Deadline-based loop: poll & recv until we see a reply
+        # whose UID matches ours, or the overall budget expires.
+        deadline = time.monotonic() + timeout_ms / 1000.0
+        while True:
+            remaining_ms = int((deadline - time.monotonic()) * 1000)
+            if remaining_ms <= 0:
+                return None
+            if not self._sock.poll(remaining_ms, zmq.POLLIN):
+                return None
+
+            resp = self._sock.recv_multipart()
+            if len(resp) < 2:
+                # Malformed reply — treat as void sentinel so
+                # callers can still distinguish it from a
+                # timeout (None).
+                return VOID_RESPONSE
+
+            try:
+                resp_uid = msgspec.msgpack.decode(resp[0], type=int)
+            except msgspec.DecodeError:
+                # Unparsable UID — skip and keep waiting.
+                continue
+
+            if resp_uid != uid:
+                # Stale response from a previously timed-out
+                # request. Drop and keep polling.
+                continue
+
+            # resp[0]=uid, resp[1]=type; payload starts at [2].
+            return resp[2:]
 
 
 # ------------------------------------------------------------------ #
@@ -201,7 +240,7 @@ def _allocate_gpu_kv_cache(
 
 
 def _send_register_kv_cache(
-    sock: zmq.Socket,
+    client: ZmqClient,
     instance_id: int = 0,
     model_name: str = _MODEL_NAME,
     world_size: int = _WORLD_SIZE,
@@ -240,8 +279,7 @@ def _send_register_kv_cache(
         msgspec.msgpack.encode(world_size),
         msgspec.msgpack.encode(hints),
     ]
-    resp = _send_request(
-        sock,
+    resp = client.send_request(
         RequestType.REGISTER_KV_CACHE,
         payloads,
     )
@@ -249,7 +287,7 @@ def _send_register_kv_cache(
 
 
 def _send_lookup(
-    sock: zmq.Socket,
+    client: ZmqClient,
     key: IPCCacheEngineKey,
 ) -> int | None:
     """LOOKUP — returns prefetch job ID, or None on timeout."""
@@ -257,14 +295,14 @@ def _send_lookup(
         msgspec.msgpack.encode(key),
         msgspec.msgpack.encode(1),  # tp_size
     ]
-    resp = _send_request(sock, RequestType.LOOKUP, payloads)
+    resp = client.send_request(RequestType.LOOKUP, payloads)
     if not resp:
         return None
     return msgspec.msgpack.decode(resp[0], type=int)
 
 
 def _poll_prefetch_status(
-    sock: zmq.Socket,
+    client: ZmqClient,
     job_id: int,
     max_polls: int = 50,
     poll_interval: float = 0.05,
@@ -275,8 +313,7 @@ def _poll_prefetch_status(
     """
     for _ in range(max_polls):
         payloads = [msgspec.msgpack.encode(job_id)]
-        resp = _send_request(
-            sock,
+        resp = client.send_request(
             RequestType.QUERY_PREFETCH_STATUS,
             payloads,
         )
@@ -300,7 +337,7 @@ def _make_event_handle() -> bytes:
 
 
 def _send_store(
-    sock: zmq.Socket,
+    client: ZmqClient,
     key: IPCCacheEngineKey,
     block_offset: int = 0,
     block_size: int = 16,
@@ -315,7 +352,7 @@ def _send_store(
         msgspec.msgpack.encode(block_ids),
         msgspec.msgpack.encode(_make_event_handle()),
     ]
-    resp = _send_request(sock, RequestType.STORE, payloads)
+    resp = client.send_request(RequestType.STORE, payloads)
     if not resp:
         return "timeout"
     result = msgspec.msgpack.decode(
@@ -326,7 +363,7 @@ def _send_store(
 
 
 def _send_retrieve(
-    sock: zmq.Socket,
+    client: ZmqClient,
     key: IPCCacheEngineKey,
     chunk_size: int,
     hit_chunks: int,
@@ -344,8 +381,7 @@ def _send_retrieve(
         msgspec.msgpack.encode(_make_event_handle()),
         msgspec.msgpack.encode(0),  # skip_first_n_tokens
     ]
-    resp = _send_request(
-        sock,
+    resp = client.send_request(
         RequestType.RETRIEVE,
         payloads,
     )
@@ -359,12 +395,12 @@ def _send_retrieve(
 
 
 def _send_end_session(
-    sock: zmq.Socket,
+    client: ZmqClient,
     request_id: str,
 ) -> None:
     """END_SESSION — clean up server-side session state."""
     payloads = [msgspec.msgpack.encode(request_id)]
-    _send_request(sock, RequestType.END_SESSION, payloads)
+    client.send_request(RequestType.END_SESSION, payloads)
 
 
 # ------------------------------------------------------------------ #
@@ -410,7 +446,7 @@ def _query_checksum(
 
 
 def _process_request(
-    sock: zmq.Socket,
+    client: ZmqClient,
     seq_no: int,
     num_tokens: int,
     chunk_size: int,
@@ -442,13 +478,13 @@ def _process_request(
 
     # 1. LOOKUP
     t0 = time.monotonic()
-    job_id = _send_lookup(sock, lookup_key)
+    job_id = _send_lookup(client, lookup_key)
     if job_id is None:
         print("  [seq %d/%s] LOOKUP timeout" % (seq_no, pass_label))
         return None
 
     # 2. QUERY_PREFETCH_STATUS (poll)
-    hit_chunks = _poll_prefetch_status(sock, job_id)
+    hit_chunks = _poll_prefetch_status(client, job_id)
     if hit_chunks is None:
         hit_chunks = 0
 
@@ -489,7 +525,7 @@ def _process_request(
         )
         t1 = time.monotonic()
         status = _send_retrieve(
-            sock,
+            client,
             retrieve_key,
             chunk_size,
             hit_chunks,
@@ -523,7 +559,7 @@ def _process_request(
         t2 = time.monotonic()
         store_block_off = block_offset + (hit_tokens // block_size)
         status = _send_store(
-            sock,
+            client,
             store_key,
             block_offset=store_block_off,
             block_size=block_size,
@@ -565,7 +601,7 @@ def _process_request(
             )
 
     # 6. END_SESSION
-    _send_end_session(sock, request_id)
+    _send_end_session(client, request_id)
     return checksums
 
 
@@ -574,9 +610,9 @@ def _process_request(
 # ------------------------------------------------------------------ #
 
 
-def _get_chunk_size(sock: zmq.Socket) -> int:
+def _get_chunk_size(client: ZmqClient) -> int:
     """Query the server's chunk size."""
-    resp = _send_request(sock, RequestType.GET_CHUNK_SIZE)
+    resp = client.send_request(RequestType.GET_CHUNK_SIZE)
     if resp:
         return msgspec.msgpack.decode(resp[0], type=int)
     return 256  # fallback
@@ -687,10 +723,11 @@ class TestCacheCommand(BaseCommand):
         sock = ctx.socket(zmq.DEALER)
         sock.setsockopt(zmq.LINGER, 1000)
         sock.connect(url)
+        client = ZmqClient(sock)
 
         try:
             # Query chunk size from server
-            chunk_size = _get_chunk_size(sock)
+            chunk_size = _get_chunk_size(client)
             print("Server chunk_size = %d" % chunk_size)
 
             # Parse KV shape spec
@@ -760,7 +797,7 @@ class TestCacheCommand(BaseCommand):
 
             # Register KV cache before any store/retrieve
             ok = _send_register_kv_cache(
-                sock,
+                client,
                 layout_hints=layout_hints,
                 gpu_tensors=gpu_tensors,
             )
@@ -782,7 +819,7 @@ class TestCacheCommand(BaseCommand):
 
                 # Pass 1: cold (miss -> store)
                 cold_checksums = _process_request(
-                    sock,
+                    client,
                     seq_no,
                     num_tokens,
                     chunk_size,
@@ -796,7 +833,7 @@ class TestCacheCommand(BaseCommand):
 
                 # Pass 2: warm (hit -> retrieve)
                 warm_checksums = _process_request(
-                    sock,
+                    client,
                     seq_no,
                     num_tokens,
                     chunk_size,

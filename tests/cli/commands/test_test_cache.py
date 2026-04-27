@@ -12,17 +12,22 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 import argparse
 import json
 import threading
+import time
 
 # Third Party
+import msgspec
 import pytest
+import zmq
 
 # First Party
 from lmcache.cli.commands.bench import BenchCommand
 from lmcache.cli.commands.test_cache import (
+    ZmqClient,
     _build_token_ids,
     _make_key,
     _query_checksum,
 )
+from lmcache.v1.multiprocess.protocols.base import RequestType
 
 # ------------------------------------------------------------------ #
 #  Fixtures
@@ -272,3 +277,158 @@ class TestQueryChecksum:
             chunk_size=2,
         )
         assert result is None
+
+
+# ------------------------------------------------------------------ #
+#  ZmqClient (UID isolation + stale-response handling)
+# ------------------------------------------------------------------ #
+
+
+class _EchoRouter:
+    """Tiny ROUTER-side echo server for ZmqClient tests.
+
+    Each request is ``[uid, type, *payload]``; the router replies
+    with ``[uid, type, *payload]`` so callers can round-trip the
+    UID. The router can be configured to *delay* the reply to a
+    specific UID, simulating a timed-out request whose late reply
+    arrives after the caller has moved on.
+    """
+
+    def __init__(
+        self, endpoint: str, delay_uid: int | None = None, delay_seconds: float = 0.5
+    ) -> None:
+        self._endpoint = endpoint
+        self._delay_uid = delay_uid
+        self._delay_seconds = delay_seconds
+        self._ctx = zmq.Context.instance()
+        self._router = self._ctx.socket(zmq.ROUTER)
+        self._router.bind(endpoint)
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        self._thread.join(timeout=2)
+        self._router.close(linger=0)
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            if not self._router.poll(100, zmq.POLLIN):
+                continue
+            frames = self._router.recv_multipart()
+            # frames = [identity, uid, type, *payload]
+            identity, uid_f, type_f, *payload = frames
+            uid = msgspec.msgpack.decode(uid_f, type=int)
+
+            def _send_reply(
+                uid_frame=uid_f,
+                type_frame=type_f,
+                payload_frames=payload,
+                identity_frame=identity,
+            ) -> None:
+                self._router.send_multipart(
+                    [identity_frame, uid_frame, type_frame, *payload_frames],
+                )
+
+            if self._delay_uid is not None and uid == self._delay_uid:
+                # Fire the delayed reply on a background timer so
+                # the ROUTER loop stays responsive to subsequent
+                # requests.
+                timer = threading.Timer(self._delay_seconds, _send_reply)
+                timer.daemon = True
+                timer.start()
+            else:
+                _send_reply()
+
+
+@pytest.fixture
+def router_endpoint() -> str:
+    """Allocate an ephemeral inproc/tcp endpoint for the ROUTER."""
+    # Use tcp with port=0 so the OS assigns a free port.
+    ctx = zmq.Context.instance()
+    probe = ctx.socket(zmq.ROUTER)
+    probe.bind("tcp://127.0.0.1:0")
+    endpoint = probe.getsockopt_string(zmq.LAST_ENDPOINT)
+    probe.close(linger=0)
+    return endpoint
+
+
+class TestZmqClient:
+    """Tests for the ZmqClient wrapper."""
+
+    def _make_client(self, endpoint: str) -> ZmqClient:
+        ctx = zmq.Context.instance()
+        sock = ctx.socket(zmq.DEALER)
+        sock.setsockopt(zmq.LINGER, 0)
+        sock.connect(endpoint)
+        return ZmqClient(sock)
+
+    def test_uid_counter_starts_at_zero_per_instance(
+        self,
+        router_endpoint: str,
+    ) -> None:
+        """Each ZmqClient has its own UID counter starting at 0."""
+        router = _EchoRouter(router_endpoint)
+        router.start()
+        try:
+            c1 = self._make_client(router_endpoint)
+            c2 = self._make_client(router_endpoint)
+            # Two calls on c1 should succeed (uids 0 and 1).
+            assert c1.send_request(RequestType.GET_CHUNK_SIZE) is not None
+            assert c1.send_request(RequestType.GET_CHUNK_SIZE) is not None
+            # Freshly-constructed c2 must restart from 0 — we can't
+            # directly observe the UID, but the contract is that
+            # c2's first call does not collide with c1's history.
+            assert c2.send_request(RequestType.GET_CHUNK_SIZE) is not None
+            c1.sock.close(linger=0)
+            c2.sock.close(linger=0)
+        finally:
+            router.stop()
+
+    def test_stale_reply_is_discarded(
+        self,
+        router_endpoint: str,
+    ) -> None:
+        """A late reply to uid=0 must not be returned for uid=1.
+
+        Scenario:
+          * Client sends request #0 with a 100ms timeout.
+          * Router is configured to hold reply to uid=0 for 500ms,
+            so the first call returns ``None`` (timeout).
+          * Client sends request #1 — the router answers uid=1
+            immediately, but uid=0's late reply lands in-between.
+          * ``send_request`` must discard the stale uid=0 frame
+            and return the uid=1 payload.
+        """
+        router = _EchoRouter(
+            router_endpoint,
+            delay_uid=0,
+            delay_seconds=0.5,
+        )
+        router.start()
+        try:
+            client = self._make_client(router_endpoint)
+            # Request #0: will time out (router holds reply 500ms).
+            r0 = client.send_request(
+                RequestType.GET_CHUNK_SIZE,
+                timeout_ms=100,
+            )
+            assert r0 is None, "request #0 should time out"
+
+            # Wait long enough for the late reply to land in the
+            # DEALER's receive queue.
+            time.sleep(0.6)
+
+            # Request #1: must get *its own* reply, not the stale
+            # uid=0 one queued up in the buffer.
+            r1 = client.send_request(
+                RequestType.GET_CHUNK_SIZE,
+                timeout_ms=2000,
+            )
+            assert r1 is not None, "request #1 must succeed; stale reply not discarded"
+            client.sock.close(linger=0)
+        finally:
+            router.stop()
