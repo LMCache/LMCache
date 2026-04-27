@@ -35,6 +35,7 @@ from nixl._api import (
 import torch
 
 # First Party
+from lmcache.integration.vllm.utils import get_size_bytes
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
@@ -115,6 +116,20 @@ class NixlStorageConfig:
         corrected_device = get_correct_device(
             config.nixl_buffer_device, metadata.worker_id
         )
+
+        # align the buffer size to have the required alignment
+        align_bytes = get_size_bytes(
+            [torch.Size(metadata.kv_shape)], [metadata.kv_dtype]
+        )
+        if config.nixl_buffer_size % align_bytes != 0:
+            buffer_size = (
+                (config.nixl_buffer_size + align_bytes - 1) // align_bytes
+            ) * align_bytes
+            logger.warning(
+                f"Nixl buffer size {config.nixl_buffer_size} is not a multiple of "
+                f"align bytes {align_bytes}, auto aligned to {buffer_size}"
+            )
+            config.nixl_buffer_size = buffer_size
 
         assert NixlStorageConfig.validate_nixl_backend(
             dynamic_storage, backend, config.nixl_buffer_device
