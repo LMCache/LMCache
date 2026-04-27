@@ -9,8 +9,6 @@ from __future__ import annotations
 # Standard
 from typing import (
     TYPE_CHECKING,
-    Dict,
-    Optional,
 )
 
 if TYPE_CHECKING:
@@ -76,11 +74,11 @@ class MooncakeStoreL2AdapterConfig(L2AdapterConfigBase):
 
     def __init__(
         self,
-        setup_config: Dict[str, str],
+        setup_config: dict[str, str],
         num_workers: int = 4,
-        lookup_workers: Optional[int] = None,
-        retrieve_workers: Optional[int] = None,
-        store_workers: Optional[int] = None,
+        lookup_workers: int | None = None,
+        retrieve_workers: int | None = None,
+        store_workers: int | None = None,
     ):
         super().__init__()
         self.num_workers = self._validate_num_workers(num_workers)
@@ -89,7 +87,7 @@ class MooncakeStoreL2AdapterConfig(L2AdapterConfigBase):
             retrieve_workers,
             store_workers,
         )
-        self.setup_config: Dict[str, str] = dict(setup_config)
+        self.setup_config: dict[str, str] = dict(setup_config)
         self.lookup_workers = lookup_workers
         self.retrieve_workers = retrieve_workers
         self.store_workers = store_workers
@@ -110,7 +108,7 @@ class MooncakeStoreL2AdapterConfig(L2AdapterConfigBase):
 
         # Everything except LMCache-only keys is
         # forwarded to mooncake as str values.
-        setup: Dict[str, str] = {}
+        setup: dict[str, str] = {}
         for k, v in d.items():
             if k in _LMCACHE_ONLY_KEYS:
                 continue
@@ -126,7 +124,7 @@ class MooncakeStoreL2AdapterConfig(L2AdapterConfigBase):
         )
 
     @staticmethod
-    def _parse_optional_worker_count(d: dict[str, object], key: str) -> Optional[int]:
+    def _parse_optional_worker_count(d: dict[str, object], key: str) -> int | None:
         value = d.get(key)
         if value is None:
             return None
@@ -142,9 +140,9 @@ class MooncakeStoreL2AdapterConfig(L2AdapterConfigBase):
 
     @staticmethod
     def _validate_per_op_worker_counts(
-        lookup_workers: Optional[int],
-        retrieve_workers: Optional[int],
-        store_workers: Optional[int],
+        lookup_workers: int | None,
+        retrieve_workers: int | None,
+        store_workers: int | None,
     ) -> None:
         values = {
             "lookup_workers": lookup_workers,
@@ -185,7 +183,7 @@ class MooncakeStoreL2AdapterConfig(L2AdapterConfigBase):
 
 def _create_mooncake_store_l2_adapter(
     config: L2AdapterConfigBase,
-    l1_memory_desc: "Optional[L1MemoryDesc]" = None,
+    l1_memory_desc: "L1MemoryDesc | None" = None,
 ) -> L2AdapterInterface:
     """Create a NativeConnectorL2Adapter backed by the
     C++ Mooncake Store connector.
