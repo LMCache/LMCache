@@ -436,13 +436,22 @@ class StorageManager:
         self,
         key: CacheEngineKey,
         location: Optional[str] = None,
+        search_range: Optional[List[str]] = None,
     ) -> Optional[MemoryObj]:
         """
         Blocking function to get the memory object from the storages.
+
+        :param location: If specified, only search this exact backend name.
+        :param search_range: If specified, only search backends whose names
+            appear in this list. Mirrors ``contains()`` semantics so callers
+            holding a configured ``retrieve_locations`` list can pass it
+            directly.
         """
 
         # Search all backends for blocking get
-        for backend_name, backend in self.get_active_storage_backends(location):
+        for backend_name, backend in self.get_active_storage_backends(
+            location, search_range
+        ):
             # TODO(Jiayi): need to make sure all memory_objs returned
             # are allocated by the allocator backend.
             memory_obj = backend.get_blocking(key)

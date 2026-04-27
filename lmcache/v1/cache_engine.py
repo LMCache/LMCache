@@ -588,6 +588,12 @@ class LMCacheEngine:
             return
         if not self.is_healthy() or self.storage_manager is None or self.is_frozen():
             return
+        # Match KV store(): on multi-GPU save_only_first_rank setups, only the
+        # primary rank performs storage so non-primary ranks don't redundantly
+        # write the same hidden states.
+        if self._is_passive():
+            logger.debug("rank=%s ignore HS store", self.metadata.worker_id)
+            return
 
         request_configs = kwargs.get("request_configs")
         hs_keys: list[CacheEngineKey] = []
@@ -665,7 +671,12 @@ class LMCacheEngine:
             request_configs=request_configs,
         ):
             hs_key = key.to_hs_key()
-            memory_obj = self.storage_manager.get(hs_key)
+            # Honour configured retrieve_locations so PD deployments with
+            # asymmetric store/retrieve targets search the intended subset
+            # only, matching the existing KV retrieve path.
+            memory_obj = self.storage_manager.get(
+                hs_key, search_range=self.retrieve_locations
+            )
             if memory_obj is None:
                 logger.debug("HS chunk miss for hash %s", hs_key.chunk_hash)
                 return None
