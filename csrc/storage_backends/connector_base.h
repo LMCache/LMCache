@@ -339,8 +339,15 @@ class ConnectorBase : public IStorageConnector {
   }
   virtual void do_batch_exists(ConnectionType& conn, const Request& req) {
     for (size_t i = 0; i < req.keys.size(); ++i) {
-      bool exists = do_single_exists(conn, req.keys[i]);
-      req.batch->per_key_results[req.start_idx + i] = exists ? 1 : 0;
+      try {
+        bool exists = do_single_exists(conn, req.keys[i]);
+        req.batch->per_key_results[req.start_idx + i] = exists ? 1 : 0;
+      } catch (const std::exception& e) {
+        req.batch->per_key_results[req.start_idx + i] = 0;
+        fprintf(stderr, "[LMCache EXISTS] key %s failed: %s\n",
+                req.keys[i].c_str(), e.what());
+        req.batch->any_failed.store(true, std::memory_order_relaxed);
+      }
     }
   }
   virtual void do_batch_delete(ConnectionType& conn, const Request& req) {
