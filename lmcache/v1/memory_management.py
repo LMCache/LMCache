@@ -409,9 +409,9 @@ def _resolve_pinned_alloc_free(
         else:
             current_device_id = 0
         gpu_to_numa_mapping = numa_mapping.gpu_to_numa_mapping
-        assert current_device_id in gpu_to_numa_mapping, (
-            f"Current device {current_device_id} is not in the GPU NUMA mapping."
-        )
+        assert (
+            current_device_id in gpu_to_numa_mapping
+        ), f"Current device {current_device_id} is not in the GPU NUMA mapping."
         numa_id = gpu_to_numa_mapping[current_device_id]
         if use_hugepages:
             return PinnedAllocFree(
@@ -446,24 +446,25 @@ def _resolve_pinned_alloc_free(
 
 
 def _read_hugepage_info() -> Optional[Tuple[int, int, int]]:
-    """Read hugepage stats from /proc/meminfo.
+    """Read hugepage pool stats from sysfs.
+
+    NOTE: We only use 2 MiB hugepages, so the pool stats are taken from
+    the 2 MiB pool directly rather than the system default pool reported in
+    ``/proc/meminfo`` (which can be 1 GiB on some hosts).
 
     Returns:
-        (HugePages_Total, HugePages_Free, Hugepagesize_kB) or None on
-        failure (e.g. non-Linux).
+        ``(nr_hugepages, free_hugepages, page_size_mb)`` for the hugepage
+        pool, or ``None`` if the sysfs entries are unavailable.
     """
+    base = "/sys/kernel/mm/hugepages/hugepages-2048kB"
     try:
-        vals: dict[str, int] = {}
-        with open("/proc/meminfo") as f:
-            for line in f:
-                for key in ("HugePages_Total", "HugePages_Free", "Hugepagesize"):
-                    if line.startswith(key):
-                        vals[key] = int(line.split()[1])
-        if len(vals) == 3:
-            return vals["HugePages_Total"], vals["HugePages_Free"], vals["Hugepagesize"]
-    except OSError:
-        pass
-    return None
+        with open(f"{base}/nr_hugepages") as f:
+            total = int(f.read().strip())
+        with open(f"{base}/free_hugepages") as f:
+            free = int(f.read().strip())
+        return total, free, 2
+    except (OSError, ValueError):
+        return None
 
 
 def _allocate_cpu_memory(
@@ -488,23 +489,25 @@ def _allocate_cpu_memory(
         if use_hugepages and "mmap failed" in str(e):
             diag = _read_hugepage_info()
             if diag is not None:
-                total, free, page_kb = diag
-                needed = (size + page_kb * 1024 - 1) // (page_kb * 1024)
+                total, free, page_mb = diag
+                page_bytes = page_mb * 1024 * 1024
+                needed = (size + page_bytes - 1) // page_bytes
                 logger.error(
                     "Failed to allocate huge pages. "
-                    "System has %d huge pages (%d free, each %d kB). "
+                    "Pool has %d pages (%d free, each %d MiB). "
                     "Requested %d bytes (%d pages). "
-                    "Check `sysctl vm.nr_hugepages`.",
+                    "Please grow the %d MiB hugepage pool.",
                     total,
                     free,
-                    page_kb,
+                    page_mb,
                     size,
                     needed,
+                    page_mb,
                 )
             else:
                 logger.error(
-                    "Failed to allocate huge pages, "
-                    "please check `sysctl vm.nr_hugepages`"
+                    "Failed to allocate huge pages. "
+                    "Please grow the 2 MiB hugepage pool."
                 )
         raise
 
@@ -1976,12 +1979,12 @@ class HostMemoryAllocator(MemoryAllocatorInterface):
 
         self.allocator: MemoryAllocatorInterface
         if use_paging:
-            assert "shapes" in kwargs, (
-                "shapes must be specified for paged memory allocator"
-            )
-            assert "dtypes" in kwargs, (
-                "dtypes must be specified for paged memory allocator"
-            )
+            assert (
+                "shapes" in kwargs
+            ), "shapes must be specified for paged memory allocator"
+            assert (
+                "dtypes" in kwargs
+            ), "dtypes must be specified for paged memory allocator"
             assert "fmt" in kwargs, "fmt must be specified for paged memory allocator"
             self.allocator = PagedTensorMemoryAllocator(
                 tensor=buffer,
@@ -2055,12 +2058,12 @@ class PinMemoryAllocator(MemoryAllocatorInterface):
 
         self.allocator: MemoryAllocatorInterface
         if use_paging:
-            assert "shapes" in kwargs, (
-                "shapes must be specified for paged memory allocator"
-            )
-            assert "dtypes" in kwargs, (
-                "dtypes must be specified for paged memory allocator"
-            )
+            assert (
+                "shapes" in kwargs
+            ), "shapes must be specified for paged memory allocator"
+            assert (
+                "dtypes" in kwargs
+            ), "dtypes must be specified for paged memory allocator"
             assert "fmt" in kwargs, "fmt must be specified for paged memory allocator"
             self.allocator = PagedTensorMemoryAllocator(
                 tensor=self.buffer,
@@ -2167,12 +2170,12 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
 
         self.pin_allocator: MemoryAllocatorInterface
         if use_paging:
-            assert "shapes" in kwargs, (
-                "shapes must be specified for paged memory allocator"
-            )
-            assert "dtypes" in kwargs, (
-                "dtypes must be specified for paged memory allocator"
-            )
+            assert (
+                "shapes" in kwargs
+            ), "shapes must be specified for paged memory allocator"
+            assert (
+                "dtypes" in kwargs
+            ), "dtypes must be specified for paged memory allocator"
             assert "fmt" in kwargs, "fmt must be specified for paged memory allocator"
             self.pin_allocator = PagedTensorMemoryAllocator(
                 tensor=self.buffer,
@@ -2322,12 +2325,12 @@ class GPUMemoryAllocator(MemoryAllocatorInterface):
 
         self.allocator: MemoryAllocatorInterface
         if use_paging:
-            assert "shapes" in kwargs, (
-                "shapes must be specified for paged memory allocator"
-            )
-            assert "dtypes" in kwargs, (
-                "dtypes must be specified for paged memory allocator"
-            )
+            assert (
+                "shapes" in kwargs
+            ), "shapes must be specified for paged memory allocator"
+            assert (
+                "dtypes" in kwargs
+            ), "dtypes must be specified for paged memory allocator"
             assert "fmt" in kwargs, "fmt must be specified for paged memory allocator"
             self.allocator = PagedTensorMemoryAllocator(
                 tensor=self.tensor,
@@ -2645,12 +2648,12 @@ class XPUMemoryAllocator(MemoryAllocatorInterface):
 
         self.allocator: MemoryAllocatorInterface
         if use_paging:
-            assert "shapes" in kwargs, (
-                "shapes must be specified for paged memory allocator"
-            )
-            assert "dtypes" in kwargs, (
-                "dtypes must be specified for paged memory allocator"
-            )
+            assert (
+                "shapes" in kwargs
+            ), "shapes must be specified for paged memory allocator"
+            assert (
+                "dtypes" in kwargs
+            ), "dtypes must be specified for paged memory allocator"
             assert "fmt" in kwargs, "fmt must be specified for paged memory allocator"
             self.allocator = PagedTensorMemoryAllocator(
                 tensor=self.tensor,

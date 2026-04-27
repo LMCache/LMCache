@@ -939,7 +939,7 @@ class TestHugepageAllocation:
         """_read_hugepage_info returns valid data on Linux."""
         info = _read_hugepage_info()
         assert info is not None
-        total, free, page_kb = info
+        total, free, page_mb = info
         assert total > 0
         assert free >= 0
-        assert page_kb > 0
+        assert page_mb == 2
