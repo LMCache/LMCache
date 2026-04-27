@@ -144,11 +144,11 @@ async def kvcache_check(
 
 
 def _compute_mp_checksums(
-    kv_tensors: list,
+    kv_tensors: list[torch.Tensor],
     slot_indices: list[int],
     chunk_size: int,
     layerwise: bool,
-) -> dict:
+) -> dict[str, Any]:
     """Compute MD5 checksums over KV cache slots.
 
     Each kv_tensor shape: [2, NB, BS, NH, HS].

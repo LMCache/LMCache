@@ -88,8 +88,10 @@ def _next_uid() -> int:
     return uid
 
 
-_VOID_RESPONSE: list[bytes] = []
-"""Sentinel for a successful void response (no payload frames)."""
+_VOID_RESPONSE: tuple[bytes, ...] = ()
+"""Immutable sentinel returned when a response carries no payload
+frames (or is malformed with < 2 frames). Distinguishes a successful
+void reply from a timeout (``None``)."""
 
 
 def _send_request(
@@ -97,11 +99,11 @@ def _send_request(
     request_type: RequestType,
     payloads: list[bytes] | None = None,
     timeout_ms: int = 10000,
-) -> list[bytes] | None:
+) -> list[bytes] | tuple[bytes, ...] | None:
     """Send a request and wait for the response.
 
     Returns the raw response frames (excluding uid and type),
-    an empty list for a successful void response (no payload),
+    an empty sentinel for a successful void response (no payload),
     or *None* on timeout.
     """
     uid = _next_uid()
@@ -117,9 +119,10 @@ def _send_request(
     if sock.poll(timeout_ms, zmq.POLLIN):
         resp = sock.recv_multipart()
         # resp[0]=uid, resp[1]=type; payload starts at [2].
-        # A void response (e.g. REGISTER_KV_CACHE) has
-        # exactly 2 frames — return the empty sentinel so
-        # callers can distinguish it from a timeout (None).
+        # When there are >=2 frames we return the payload slice
+        # (may be empty); when the reply is malformed (<2 frames)
+        # we fall back to the immutable _VOID_RESPONSE sentinel so
+        # callers can still distinguish it from a timeout (None).
         return resp[2:] if len(resp) >= 2 else _VOID_RESPONSE
     return None
 

@@ -35,6 +35,13 @@ logger = init_logger(__name__)
 class BenchCommand(BaseCommand):
     """CLI command for sustained performance benchmarking."""
 
+    def __init__(self) -> None:
+        super().__init__()
+        # Stateless delegate for the ``kvcache`` sub-target.
+        # Cached once to avoid redundant instantiation across
+        # ``help()``, ``add_arguments()`` and ``execute()``.
+        self._kvcache_delegate = TestCacheCommand()
+
     def name(self) -> str:
         return "bench"
 
@@ -331,19 +338,19 @@ class BenchCommand(BaseCommand):
         """
         parser = subparsers.add_parser(
             "kvcache",
-            help=TestCacheCommand().help(),
+            help=self._kvcache_delegate.help(),
             description=(
                 "End-to-end sanity test for the LMCache MP cache server: "
                 "runs LOOKUP / STORE / RETRIEVE against a live MP server "
                 "and verifies KV cache checksums."
             ),
         )
-        TestCacheCommand().add_arguments(parser)
+        self._kvcache_delegate.add_arguments(parser)
         parser.set_defaults(func=self.execute)
 
     def _bench_kvcache(self, args: argparse.Namespace) -> None:
         """Dispatch ``lmcache bench kvcache`` to ``TestCacheCommand``."""
-        TestCacheCommand().execute(args)
+        self._kvcache_delegate.execute(args)
 
     def execute(self, args: argparse.Namespace) -> None:
         handlers = {
