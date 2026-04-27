@@ -569,7 +569,7 @@ class LMCacheEngine:
         tokens: Union[torch.Tensor, list[int]],
         mask: Optional[torch.Tensor] = None,
         hidden_states: Optional[torch.Tensor] = None,
-        **kwargs,
+        request_configs: Optional[dict] = None,
     ) -> None:
         """Store hidden states alongside KV cache using the same chunk keys.
 
@@ -582,7 +582,8 @@ class LMCacheEngine:
             mask: Boolean mask (same semantics as ``store()``).
             hidden_states: CPU tensor of shape ``[num_tokens, hidden_dim]``.
                 If ``None``, this is a no-op.
-            **kwargs: Passed to ``token_database.process_tokens()``.
+            request_configs: Forwarded to ``token_database.process_tokens()``
+                for tag-aware chunk hashing.
         """
         if hidden_states is None:
             return
@@ -594,8 +595,6 @@ class LMCacheEngine:
         if self._is_passive():
             logger.debug("rank=%s ignore HS store", self.metadata.worker_id)
             return
-
-        request_configs = kwargs.get("request_configs")
         hs_keys: list[CacheEngineKey] = []
         hs_objs: list[MemoryObj] = []
         partial = False
@@ -606,6 +605,12 @@ class LMCacheEngine:
             request_configs=request_configs,
         ):
             hs_key = key.to_hs_key()
+            # Skip chunks already in storage (mirrors KV store()).  Concurrent
+            # requests sharing a token prefix would otherwise redundantly
+            # allocate, copy, and put identical entries.
+            if self.storage_manager.contains(hs_key, self.retrieve_locations):
+                continue
+
             hs_chunk = hidden_states[start:end].contiguous()
             hs_shape = torch.Size(list(hs_chunk.shape))
             hs_dtype = hs_chunk.dtype
@@ -646,14 +651,15 @@ class LMCacheEngine:
         self,
         tokens: Union[torch.Tensor, list[int]],
         mask: Optional[torch.Tensor] = None,
-        **kwargs,
+        request_configs: Optional[dict] = None,
     ) -> Optional[torch.Tensor]:
         """Retrieve hidden states stored alongside KV cache.
 
         Args:
             tokens: Token IDs for chunk boundary computation.
             mask: Boolean mask (same semantics as ``retrieve()``).
-            **kwargs: Passed to ``token_database.process_tokens()``.
+            request_configs: Forwarded to ``token_database.process_tokens()``
+                for tag-aware chunk hashing.
 
         Returns:
             A contiguous CPU tensor of shape ``[num_tokens, hidden_dim]``,
@@ -662,7 +668,6 @@ class LMCacheEngine:
         if not self.is_healthy() or self.storage_manager is None:
             return None
 
-        request_configs = kwargs.get("request_configs")
         chunks: list[tuple[int, int, torch.Tensor]] = []
 
         for start, end, key in self.token_database.process_tokens(
