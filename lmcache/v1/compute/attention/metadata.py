@@ -152,12 +152,12 @@ class LMCTritonSparseMetadata(LMCAttnMetadata):
         device = top_indices.device
         top_k_num = len(top_indices)
 
-        # Use floor division to match flashinfer behavior — partial
-        # trailing blocks are absorbed into the last full block row,
-        # avoiding empty CSR rows that would cause NaN in the kernel.
-        num_block_row = top_k_num // self.sparse_blk_row_size
-        if num_block_row == 0:
-            num_block_row = 1
+        # Use ceiling division so all query positions are covered.
+        # The last block row may be partial (fewer than sparse_blk_row_size
+        # queries) — the kernel handles this via q_mask.
+        num_block_row = (
+            top_k_num + self.sparse_blk_row_size - 1
+        ) // self.sparse_blk_row_size
         num_block_col = (
             self.seq_len + self.sparse_blk_col_size - 1
         ) // self.sparse_blk_col_size
