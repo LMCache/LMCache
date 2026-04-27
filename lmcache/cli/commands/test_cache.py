@@ -624,7 +624,37 @@ def _get_chunk_size(client: ZmqClient) -> int:
 
 
 class TestCacheCommand(BaseCommand):
-    """End-to-end test for LMCache MP cache server."""
+    """End-to-end test for the LMCache MP cache server.
+
+    Connects to a running LMCache multiprocess (MP) server via
+    ZMQ DEALER and exercises the full KV-cache data path
+    (REGISTER → LOOKUP → QUERY_PREFETCH_STATUS → RETRIEVE →
+    STORE → optional HTTP checksum) for a sequence of synthetic
+    requests. Each sequence is replayed twice — a "cold" pass
+    (expected cache miss → STORE) followed by a "warm" pass
+    (expected hit → RETRIEVE) — and the per-chunk checksums are
+    compared to verify round-trip integrity.
+
+    The command is registered under ``lmcache bench kvcache``.
+
+    CLI arguments (see :meth:`add_arguments` for full details):
+        --rpc-url: ZMQ endpoint of the MP server.
+        --mode: Currently only ``gpu`` is supported; CPU mode is
+            a planned follow-up.
+        --num-tokens: Number of tokens per synthetic request.
+        --kvcache-shape-spec: Multi-group KV cache shape spec in
+            the form ``(shape):dtype:layers[;...]``.
+        --num-blocks / --block-size: Paged-KV allocation sizing.
+        --start / --end: Sequence number range (exclusive end).
+            When ``--end`` is omitted the loop runs forever.
+        --interval: Delay (seconds) between sub-passes.
+        --url: HTTP base URL of the cache server's checksum API.
+
+    Exit behaviour:
+        * Exits with status 1 if CUDA is unavailable in GPU mode.
+        * Ctrl-C triggers a graceful shutdown of the ZMQ socket
+          and context before returning.
+    """
 
     def name(self) -> str:
         """Return the CLI sub-command name."""

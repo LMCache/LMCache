@@ -55,11 +55,47 @@ async def kvcache_check(
 ) -> JSONResponse:
     """Compute MD5 checksums for KV cache slots.
 
+    Groups the referenced slot indices into ``chunk_size``-sized
+    chunks and returns an MD5 digest per chunk (optionally per
+    layer). Intended for diagnostics and round-trip integrity
+    verification, e.g. from the ``lmcache bench kvcache``
+    command.
+
     Args:
-        slot_mapping: Slot indices (mixed format).
-        chunk_size: Group slots into chunks.
-        instance_id: GPU context ID (default 0).
-        layerwise: Per-layer checksums if True.
+        request: FastAPI request (used to fetch the attached
+            engine / GPU contexts from ``app.state``).
+        slot_mapping: Slot indices in mixed format (comma- and
+            dash-separated, e.g. ``"0-15,32,48-63"``). Required.
+        chunk_size: Positive integer — slots are grouped into
+            contiguous chunks of this size before hashing.
+            Required.
+        instance_id: GPU context ID to look up on the engine
+            (default 0).
+        layerwise: If True, return per-layer checksums under
+            each chunk; otherwise a single aggregated checksum
+            per chunk.
+
+    Returns:
+        :class:`fastapi.responses.JSONResponse` whose body on
+        success contains::
+
+            {
+                "checksums": [...],
+                "slot_mapping_ranges": "<compressed ranges>"
+            }
+
+        Error responses carry ``{"error": "..."}`` with one of
+        the HTTP status codes listed below.
+
+    HTTP status codes:
+        200: Success; body holds the checksum result.
+        400: ``slot_mapping`` missing / malformed, or
+            ``chunk_size`` is missing or non-positive.
+        404: ``instance_id`` is not registered on the engine,
+            or the engine has no KV tensors allocated.
+        501: The attached engine type does not expose GPU
+            contexts (checksum endpoint unsupported).
+        503: Engine is not yet initialised on ``app.state``.
     """
     engine = getattr(request.app.state, "engine", None)
     if engine is None:
