@@ -129,7 +129,7 @@ contribute to histograms; counters above always count all events.
 |---|---|---|---|---|
 | `lmcache_mp.l2_store_tasks` | `lmcache_mp_l2_store_tasks_total` | Counter | `L2_STORE_SUBMITTED` | +1 per event |
 | `lmcache_mp.l2_store_keys` | `lmcache_mp_l2_store_keys_total` | Counter | `L2_STORE_SUBMITTED` | `+key_count` |
-| `lmcache_mp.l2_store_completed` | `lmcache_mp_l2_store_completed_total` | Counter | `L2_STORE_COMPLETED` | +1 per event |
+| `lmcache_mp.l2_store_completed` | `lmcache_mp_l2_store_completed_total` | Counter (attr: `l2_name`) | `L2_STORE_COMPLETED` | +1 per event |
 | `lmcache_mp.l2_store_succeeded_keys` | `lmcache_mp_l2_store_succeeded_keys_total` | Counter | `L2_STORE_COMPLETED` | `+succeeded_count` |
 | `lmcache_mp.l2_store_failed_keys` | `lmcache_mp_l2_store_failed_keys_total` | Counter | `L2_STORE_COMPLETED` | `+failed_count` |
 
@@ -148,8 +148,45 @@ contribute to histograms; counters above always count all events.
 | `lmcache_mp.l2_prefetch_load_keys` | `lmcache_mp_l2_prefetch_load_keys_total` | Counter | `L2_PREFETCH_LOAD_SUBMITTED` | `+key_count` |
 | `lmcache_mp.l2_prefetch_loaded_keys` | `lmcache_mp_l2_prefetch_loaded_keys_total` | Counter | `L2_PREFETCH_LOAD_COMPLETED` | `+loaded_count` |
 | `lmcache_mp.l2_prefetch_failed_keys` | `lmcache_mp_l2_prefetch_failed_keys_total` | Counter | `L2_PREFETCH_LOAD_COMPLETED` | `+failed_count` |
+| `lmcache_mp.l2_load_completed` | `lmcache_mp_l2_load_completed_total` | Counter (attr: `l2_name`) | `L2_LOAD_TASK_COMPLETED` | +1 per event |
 
 **What it answers:** How effective is L2 prefetching? What is the L2 hit rate? How many keys fail to load?
+
+**Per-backend IOPS.**  `lmcache_mp.l2_store_completed` (attr `l2_name`) counts
+completed L1→L2 store tasks; `lmcache_mp.l2_load_completed` (attr `l2_name`)
+counts completed per-adapter L2→L1 load tasks.  Derive per-backend ops/sec on
+the dashboard with
+`rate(lmcache_mp_l2_store_completed_total{l2_name="..."}[1m])`
+(and the equivalent for loads).  No separate `*_iops` metric is exported — the
+raw counter keeps the window choice in the dashboard.
+
+---
+
+## Lookup Hit-Rate Metrics (L1 + L2 combined)
+
+Token-level counters derived from the `MP_LOOKUP_PREFETCH_END` event.  Their
+ratio is the fraction of tokens requested by a lookup that were served from
+either L1 or L2.  L0 (GPU prefix cache) is intentionally excluded — it is
+vLLM-owned and not observable from LMCache.
+
+| OTel metric name | Prometheus name | Type | Source event | Calculation |
+|---|---|---|---|---|
+| `lmcache_mp.lookup_requested_tokens` | `lmcache_mp_lookup_requested_tokens_total` | Counter | `MP_LOOKUP_PREFETCH_END` | `+requested_tokens` |
+| `lmcache_mp.lookup_hit_tokens` | `lmcache_mp_lookup_hit_tokens_total` | Counter | `MP_LOOKUP_PREFETCH_END` | `+hit_tokens` |
+
+**What it answers:** What fraction of tokens requested by a lookup were served from cache (L1 or L2)?
+
+```promql
+rate(lmcache_mp_lookup_hit_tokens_total[5m])
+/ rate(lmcache_mp_lookup_requested_tokens_total[5m])
+```
+
+> **Note:** Both counters are driven by the *same* event, so they always
+> advance together per completed lookup.  Early-exit lookups (no GPU
+> context matches, empty `chunk_hashes`) contribute `0` to both, and
+> abandoned lookups (client never polls `query_prefetch_status`)
+> contribute to neither.  See
+> [L1_L2_HIT_RATE_PLAN.md](L1_L2_HIT_RATE_PLAN.md) for the full rationale.
 
 ---
 
@@ -170,6 +207,62 @@ per-instance and per-model Prometheus metric slicing (e.g.
 | `lmcache_mp.l0_block_reuse_gap_seconds` | `lmcache_mp_l0_block_reuse_gap_seconds` | Histogram | `MP_VLLM_BLOCK_ALLOCATION` (cache hit) | Time gaps between consecutive accesses from access history |
 
 **What it answers:** How long do GPU blocks live before eviction? How idle are they? How frequently are cached blocks reused? Which instance/model is experiencing the most churn?
+
+---
+
+## L0 ↔ L1 Throughput Histograms
+
+Sampled (default 1%) per-request throughput of GPU↔CPU copies via
+`L0L1ThroughputSubscriber`. Correlates `MP_{STORE,RETRIEVE}_START` → `MP_{STORE,RETRIEVE}_END`
+pairs by `session_id`, computes `total_bytes / (end_ts - start_ts)` in GB/s.
+START/END events fire on the GPU cupy stream (`publish_on_stream`), so
+timestamps reflect true GPU-stream copy time — not Python/lock overhead.
+
+All throughput histograms carry `engine_id` (vLLM worker instance id),
+`device` (e.g. `"cuda:3"`), and `model_name` OTel attributes, enabling
+per-worker, per-device, and per-model slicing in Prometheus (e.g.
+`lmcache_mp_l0_l1_store_throughput_gbs{engine_id="0",device="cuda:3",model_name="meta-llama/Llama-3.1-8B"}`).
+
+| OTel metric name | Prometheus name | Type | Source event | Calculation |
+|---|---|---|---|---|
+| `lmcache_mp.l0_l1_store_throughput_gbs` | `lmcache_mp_l0_l1_store_throughput_gbs` | Histogram | `MP_STORE_START` → `MP_STORE_END` | `total_bytes / (end_ts - start_ts) / 1e9` per sampled request |
+| `lmcache_mp.l0_l1_load_throughput_gbs` | `lmcache_mp_l0_l1_load_throughput_gbs` | Histogram | `MP_RETRIEVE_START` → `MP_RETRIEVE_END` | `total_bytes / (end_ts - start_ts) / 1e9` per sampled request |
+
+**What it answers:** What GPU↔CPU throughput is each vLLM worker actually
+achieving for KV store/load? Does it match the theoretical PCIe bandwidth?
+Are some workers or GPUs underperforming?
+
+---
+
+## L1 ↔ L2 Throughput Histograms
+
+Sampled (default 1%) per-task throughput of L1↔L2 transfers via
+`L2ThroughputSubscriber`. The store path correlates `L2_STORE_SUBMITTED` →
+`L2_STORE_COMPLETED` by `(adapter_index, task_id)`. The load path
+correlates the new per-adapter `L2_LOAD_TASK_SUBMITTED` →
+`L2_LOAD_TASK_COMPLETED` events by `(request_id, adapter_index)`; the
+pre-existing request-level `L2_PREFETCH_LOAD_*` events aggregate across
+adapters and cannot attribute throughput to a specific `l2_name`.
+
+Unlike the L0↔L1 histograms, these timestamps span **submit → complete**,
+so `(end_ts - start_ts)` includes adapter queue, network, and disk I/O
+time. Treat the value as *bytes / end-to-end latency*, not raw transfer
+rate — useful for comparing adapter types and tracking regressions, not
+for validating peak fabric bandwidth.
+
+All throughput histograms carry a single `l2_name` OTel attribute — the
+registered adapter type (e.g. `"fs"`, `"nixl_store"`, `"mooncake_store"`)
+— enabling per-adapter-type slicing in Prometheus (e.g.
+`lmcache_mp_l2_store_throughput_gbs{l2_name="nixl_store"}`).
+
+| OTel metric name | Prometheus name | Type | Source event | Calculation |
+|---|---|---|---|---|
+| `lmcache_mp.l2_store_throughput_gbs` | `lmcache_mp_l2_store_throughput_gbs` | Histogram | `L2_STORE_SUBMITTED` → `L2_STORE_COMPLETED` | `total_bytes / (completed_ts - submitted_ts) / 1e9` per sampled task |
+| `lmcache_mp.l2_load_throughput_gbs` | `lmcache_mp_l2_load_throughput_gbs` | Histogram | `L2_LOAD_TASK_SUBMITTED` → `L2_LOAD_TASK_COMPLETED` | `total_bytes / (completed_ts - submitted_ts) / 1e9` per sampled (request, adapter) pair |
+
+**What it answers:** What end-to-end throughput is each L2 adapter
+delivering? Which backends are keeping up with demand, and which are
+queue-bound or I/O-bound?
 
 ---
 

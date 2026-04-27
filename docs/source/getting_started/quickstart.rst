@@ -54,7 +54,7 @@ This guide helps you get LMCache running end-to-end in a couple of minutes. Use 
 
             .. code-block:: bash
 
-               vllm serve Qwen/Qwen3-8B-Instruct \
+               vllm serve Qwen/Qwen3-8B \
                    --port 8000 --kv-transfer-config \
                    '{"kv_connector":"LMCacheMPConnector", "kv_role":"kv_both"}'
 
@@ -68,7 +68,7 @@ This guide helps you get LMCache running end-to-end in a couple of minutes. Use 
                curl http://localhost:8000/v1/completions \
                  -H "Content-Type: application/json" \
                  -d '{
-                   "model": "Qwen/Qwen3-8B-Instruct",
+                   "model": "Qwen/Qwen3-8B",
                    "prompt": "Qwen3 is the latest generation of large language models in Qwen series, offering a comprehensive suite of dense and mixture-of-experts",
                    "max_tokens": 100,
                    "temperature": 0.7
@@ -81,7 +81,7 @@ This guide helps you get LMCache running end-to-end in a couple of minutes. Use 
                curl http://localhost:8000/v1/completions \
                  -H "Content-Type: application/json" \
                  -d '{
-                   "model": "Qwen/Qwen3-8B-Instruct",
+                   "model": "Qwen/Qwen3-8B",
                    "prompt": "Qwen3 is the latest generation of large language models in Qwen series, offering a comprehensive suite of dense and mixture-of-experts (MoE) models",
                    "max_tokens": 100,
                    "temperature": 0.7
@@ -123,7 +123,7 @@ This guide helps you get LMCache running end-to-end in a couple of minutes. Use 
 
                # The chunk size here is only for illustration purpose, use default one (256) later
                LMCACHE_CHUNK_SIZE=8 \
-               vllm serve Qwen/Qwen3-8B-Instruct \
+               vllm serve Qwen/Qwen3-8B \
                    --port 8000 --kv-transfer-config \
                    '{"kv_connector":"LMCacheConnectorV1", "kv_role":"kv_both"}'
 
@@ -154,7 +154,7 @@ This guide helps you get LMCache running end-to-end in a couple of minutes. Use 
                curl http://localhost:8000/v1/completions \
                  -H "Content-Type: application/json" \
                  -d '{
-                   "model": "Qwen/Qwen3-8B-Instruct",
+                   "model": "Qwen/Qwen3-8B",
                    "prompt": "Qwen3 is the latest generation of large language models in Qwen series, offering a comprehensive suite of dense and mixture-of-experts",
                    "max_tokens": 100,
                    "temperature": 0.7
@@ -167,7 +167,7 @@ This guide helps you get LMCache running end-to-end in a couple of minutes. Use 
                curl http://localhost:8000/v1/completions \
                  -H "Content-Type: application/json" \
                  -d '{
-                   "model": "Qwen/Qwen3-8B-Instruct",
+                   "model": "Qwen/Qwen3-8B",
                    "prompt": "Qwen3 is the latest generation of large language models in Qwen series, offering a comprehensive suite of dense and mixture-of-experts (MoE) models",
                    "max_tokens": 100,
                    "temperature": 0.7
@@ -221,7 +221,7 @@ This guide helps you get LMCache running end-to-end in a couple of minutes. Use 
          export LMCACHE_CONFIG_FILE=$PWD/lmc_config.yaml
 
          python -m sglang.launch_server \
-           --model-path Qwen/Qwen3-14B \
+           --model-path Qwen/Qwen3-8B \
            --host 0.0.0.0 \
            --port 30000 \
            --enable-lmcache
@@ -239,7 +239,7 @@ This guide helps you get LMCache running end-to-end in a couple of minutes. Use 
          curl http://localhost:30000/v1/chat/completions \
            -H "Content-Type: application/json" \
            -d '{
-             "model": "Qwen/Qwen3-14B",
+             "model": "Qwen/Qwen3-8B",
              "messages": [{"role": "user", "content": "Qwen3 is the latest generation of large language models in Qwen series, offering a comprehensive suite of dense and mixture-of-experts"}],
              "max_tokens": 100,
              "temperature": 0.7
@@ -252,7 +252,7 @@ This guide helps you get LMCache running end-to-end in a couple of minutes. Use 
          curl http://localhost:30000/v1/chat/completions \
            -H "Content-Type: application/json" \
            -d '{
-             "model": "Qwen/Qwen3-14B",
+             "model": "Qwen/Qwen3-8B",
              "messages": [{"role": "user", "content": "Qwen3 is the latest generation of large language models in Qwen series, offering a comprehensive suite of dense and mixture-of-experts (MoE) models"}],
              "max_tokens": 100,
              "temperature": 0.7

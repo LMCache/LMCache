@@ -272,6 +272,12 @@ Settings for disaggregated prefill functionality. The latest/default PD is imple
    * - pd_skip_proxy_notification
      - LMCACHE_PD_SKIP_PROXY_NOTIFICATION
      - When true, the sender skips ZMQ proxy notification after KV transfer and does not require pd_proxy_host/pd_proxy_port. This option is intended for external orchestrators only (e.g., vLLM Production Stack router) that manage the prefill-decode request flow via HTTP and do not rely on ZMQ notifications. It must not be used with LMCache's built-in disaggregation proxy (``disagg_proxy_server.py``), which depends on ZMQ notifications to know when KV transfer is complete before forwarding the decode request. Values: true/false. Default: false
+   * - pd_bidirectional
+     - LMCACHE_PD_BIDIRECTIONAL
+     - When true, enables bidirectional NIXL cache probe. The prefiller queries the decoder for cached KV blocks before transfer, and reads cached blocks via NIXL RDMA instead of recomputing. Values: true/false. Default: false
+   * - pd_peer_query_port
+     - LMCACHE_PD_PEER_QUERY_PORT
+     - ZMQ ports for the bidirectional cache query channel (one per TP rank). Required on both prefiller and decoder when pd_bidirectional=true. Example: [7500, 7501, 7502, 7503]
 
 P2P Backend Configurations
 --------------------------
