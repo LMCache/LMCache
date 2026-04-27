@@ -65,8 +65,8 @@ Producers:
 
 | EventType | Metadata keys | Types |
 |---|---|---|
-| `L2_STORE_SUBMITTED` | `adapter_index`, `key_count` | `int`, `int` |
-| `L2_STORE_COMPLETED` | `adapter_index`, `succeeded_count`, `failed_count` | `int`, `int`, `int` |
+| `L2_STORE_SUBMITTED` | `adapter_index`, `task_id`, `l2_name`, `key_count`, `total_bytes` | `int`, `int`, `str`, `int`, `int` |
+| `L2_STORE_COMPLETED` | `adapter_index`, `task_id`, `l2_name`, `succeeded_count`, `failed_count` | `int`, `int`, `str`, `int`, `int` |
 
 ---
 
@@ -78,6 +78,14 @@ Producers:
 | `L2_PREFETCH_LOOKUP_COMPLETED` | `request_id`, `prefix_hit_count` | `int`, `int` |
 | `L2_PREFETCH_LOAD_SUBMITTED` | `request_id`, `key_count`, `adapter_count` | `int`, `int`, `int` |
 | `L2_PREFETCH_LOAD_COMPLETED` | `request_id`, `loaded_count`, `failed_count` | `int`, `int`, `int` |
+| `L2_LOAD_TASK_SUBMITTED` | `request_id`, `adapter_index`, `task_id`, `l2_name`, `key_count`, `total_bytes` | `int`, `int`, `int`, `str`, `int`, `int` |
+| `L2_LOAD_TASK_COMPLETED` | `request_id`, `adapter_index`, `task_id`, `l2_name` | `int`, `int`, `int`, `str` |
+
+`L2_LOAD_TASK_*` events fire once per `(request_id, adapter_index)` pair
+— unlike the request-level `L2_PREFETCH_LOAD_*` events above, which
+aggregate across adapters.  Throughput subscribers that need per-adapter
+attribution (e.g. `L2ThroughputSubscriber`) consume these task-level
+events; key-count counters continue to consume the request-level events.
 
 ---
 
@@ -122,15 +130,32 @@ to correlate START/END pairs.
 
 | EventType | Metadata keys | Types |
 |---|---|---|
-| `MP_STORE_START` | `device`, `engine_id`, `gpu_id` | `str`, `int`, `int` |
-| `MP_STORE_END` | `device`, `stored_count`, `engine_id`, `gpu_id`, `total_bytes` | `str`, `int`, `int`, `int`, `int` |
-| `MP_RETRIEVE_START` | `device`, `engine_id`, `gpu_id` | `str`, `int`, `int` |
-| `MP_RETRIEVE_END` | `device`, `retrieved_count`, `engine_id`, `gpu_id`, `total_bytes` | `str`, `int`, `int`, `int`, `int` |
+| `MP_STORE_START` | `device`, `engine_id`, `model_name` | `str`, `int`, `str` |
+| `MP_STORE_END` | `device`, `stored_count`, `engine_id`, `model_name`, `total_bytes` | `str`, `int`, `int`, `str`, `int` |
+| `MP_RETRIEVE_START` | `device`, `engine_id`, `model_name` | `str`, `int`, `str` |
+| `MP_RETRIEVE_END` | `device`, `retrieved_count`, `engine_id`, `model_name`, `total_bytes` | `str`, `int`, `int`, `str`, `int` |
 | `MP_LOOKUP_PREFETCH_START` | *(none)* | — |
-| `MP_LOOKUP_PREFETCH_END` | `found_count` | `int` |
+| `MP_LOOKUP_PREFETCH_END` | `found_count`, `requested_tokens`, `hit_tokens` | `int`, `int`, `int` |
 | `MP_LOOKUP` | `request_id`, `chunk_hashes`, `model_name`, `chunk_size`, `seq_len`, `dtypes`, `shapes` | `str`, `list[str]`, `str`, `int`, `int`, `list[str]`, `list[list[int]]` |
 | `MP_VLLM_BLOCK_ALLOCATION` | `instance_id`, `model_name`, `records` | `int`, `str`, `list[BlockAllocationRecord]` (each has `req_id: str`, `new_block_ids: list[int]`, `new_token_ids: list[int]`) |
 | `MP_VLLM_END_SESSION` | `request_id` | `str` |
+
+### `MP_LOOKUP_PREFETCH_END` metadata
+
+`found_count` is the contiguous prefix hit at chunk granularity, already
+divided by `world_size` at the emit site.  `requested_tokens` and
+`hit_tokens` are denormalized token-level counts so subscribers need not
+know `chunk_size`:
+
+- `requested_tokens = len(chunk_hashes) * chunk_size` on the happy path; `0`
+  on the two early-exit paths in `lookup()` (no matching GPU context,
+  empty `chunk_hashes`).  Sub-chunk trailing tokens are excluded — they
+  cannot hit at chunk granularity.
+- `hit_tokens = found_count * chunk_size`.
+
+Together they drive the `lmcache_mp.lookup_*_tokens` counters used to
+compute the L1+L2 token-level hit rate.  See
+[L1_L2_HIT_RATE_PLAN.md](L1_L2_HIT_RATE_PLAN.md) for the design.
 
 ---
 

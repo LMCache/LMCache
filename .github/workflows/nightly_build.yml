@@ -158,6 +158,7 @@ jobs:
               releases.astral.sh:443
               download.pytorch.org:443
               download-r2.pytorch.org:443
+              pypi.nvidia.com:443
 
       - name: Login to DockerHub
         if: vars.DOCKERHUB_USERNAME != ''
@@ -174,6 +175,9 @@ jobs:
         with:
           # for setuptools-scm
           fetch-depth: 0
+
+      - name: Remove non-release tags
+        run: git tag -l | grep -vE '^v[0-9]+\.[0-9]+\.[0-9]+$' | xargs -r git tag -d
 
       - name: Free disk space
         uses: ./.github/actions/free-disk-space
