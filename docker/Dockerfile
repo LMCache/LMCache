@@ -8,7 +8,8 @@
 
 ARG CUDA_VERSION=12.9
 ARG UBUNTU_VERSION=24.04
-ARG BASE_IMAGE=nvcr.io/nvidia/cuda-dl-base:25.06-cuda${CUDA_VERSION}-devel-ubuntu${UBUNTU_VERSION}
+ARG NGC_VERSION=25.05
+ARG BASE_IMAGE=nvcr.io/nvidia/cuda-dl-base:${NGC_VERSION}-cuda${CUDA_VERSION}-devel-ubuntu${UBUNTU_VERSION}
 
 #################### BASE BUILD IMAGE ####################
 # Prepare basic build environment

@@ -464,7 +464,45 @@ class NixlChannel(BaseTransferChannel):
         buffers: Union[list[bytes], list[MemoryObj]],
         transfer_spec: Optional[dict] = None,
     ) -> int:
-        raise NotImplementedError
+        """
+        Read a batch of data from a remote peer through the nixl channel.
+
+        This is the reverse of batched_write: the local side initiates a READ
+        from the remote peer's memory into local buffers.
+
+        :param buffers: A list of MemoryObj to store the read data.
+        :param transfer_spec: Must contain 'sender_id' and 'remote_indexes'.
+
+        :return: Number of successfully transferred objects.
+        """
+        assert transfer_spec is not None
+
+        handle = self.nixl_agent.make_prepped_xfer(
+            "READ",
+            self.nixl_wrapper.xfer_handler,
+            self.get_local_mem_indices(buffers),
+            self.remote_xfer_handlers_dict[transfer_spec["sender_id"]],
+            transfer_spec["remote_indexes"],
+        )
+
+        self.nixl_agent.transfer(handle)
+
+        # Poll for completion
+        wait_time = 0.001
+        while True:
+            status = self.nixl_agent.check_xfer_state(handle)
+            logger.debug(f"Read transfer status: {status}")
+
+            if status == "ERR":
+                logger.error("Error in read operation")
+                raise RuntimeError("Failed to read objects from remote peer")
+            elif status == "PROC":
+                time.sleep(wait_time)
+                continue
+            assert status == "DONE", f"Transfer status is {status}, expected DONE"
+            break
+
+        return len(buffers)
 
     async def async_batched_write(
         self,
