@@ -16,7 +16,6 @@ The controller runs a background thread with an event-driven loop that:
 from dataclasses import dataclass, field
 from typing import Iterable
 import enum
-import os
 import select
 import threading
 
@@ -37,6 +36,10 @@ from lmcache.v1.distributed.storage_controllers.store_policy import (
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import get_event_bus
+from lmcache.v1.platform import (
+    consume_fd,
+    create_event_notifier,
+)
 
 logger = init_logger(__name__)
 
@@ -219,7 +222,7 @@ class PrefetchController(StorageControllerInterface):
             tuple[PrefetchRequestId, list[ObjectKey], MemoryLayoutDesc, int]
         ] = []
         self._next_request_id: PrefetchRequestId = 0
-        self._submission_efd = os.eventfd(0, os.EFD_NONBLOCK | os.EFD_CLOEXEC)
+        self._submission_efd = create_event_notifier()
 
         # Thread-safe lookup results (background -> external)
         self._lookup_results_lock = threading.Lock()
@@ -286,7 +289,7 @@ class PrefetchController(StorageControllerInterface):
             request_id = self._next_request_id
             self._next_request_id += 1
             self._submission_queue.append((request_id, keys, layout_desc, extra_count))
-        os.eventfd_write(self._submission_efd, 1)
+        self._submission_efd.notify()
         return request_id
 
     def query_lookup_result(self, request_id: PrefetchRequestId) -> int | None:
@@ -377,10 +380,10 @@ class PrefetchController(StorageControllerInterface):
         L2 locks) before returning.
         """
         self._stop_flag.set()
-        os.eventfd_write(self._submission_efd, 1)
+        self._submission_efd.notify()
         self._thread.join()
         self._cleanup_in_flight_requests()
-        os.close(self._submission_efd)
+        self._submission_efd.close()
 
     # =========================================================================
     # Background loop
@@ -396,7 +399,8 @@ class PrefetchController(StorageControllerInterface):
         - Each L2 adapter's load eventfd (completed loads).
         """
         poller = select.poll()
-        poller.register(self._submission_efd, select.POLLIN)
+        submission_fd = self._submission_efd.fileno()
+        poller.register(submission_fd, select.POLLIN)
         for efd in self._lookup_efd_to_adapter:
             poller.register(efd, select.POLLIN)
         for efd in self._load_efd_to_adapter:
@@ -413,12 +417,12 @@ class PrefetchController(StorageControllerInterface):
                     continue
 
                 try:
-                    os.eventfd_read(fd)
+                    consume_fd(fd)
                 except (OSError, BlockingIOError):
                     pass
 
                 try:
-                    if fd == self._submission_efd:
+                    if fd == submission_fd:
                         self._drain_submission_queue()
                     elif fd in self._lookup_efd_to_adapter:
                         signaled_adapters[PrefetchPhase.LOOKUP].add(
