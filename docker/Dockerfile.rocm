@@ -100,17 +100,12 @@ FROM base AS image-release
 
 ARG ROCM_VERSION
 
-COPY ./requirements/build.txt build.txt
-
-# Install build dependencies for HIP extension compilation
-RUN --mount=type=cache,target=/root/.cache/pip \
-    . /opt/venv/bin/activate && \
-    uv pip install -r build.txt
-
 # Install vLLM-ROCm and build LMCache from source with HIP extensions.
 # PyPI lmcache>=0.4 ships only binary wheels (no sdist), so --no-binary
 # cannot force a source build.  Cloning from git ensures HIP extensions
 # are compiled against the ROCm torch installed by vLLM.
+# Build deps are installed from the cloned source's requirements/build.txt
+# to avoid version mismatches with a local COPY.
 ARG LMCACHE_RELEASE_VERSION=dev
 RUN . /opt/venv/bin/activate && \
     ROCM_TAG=rocm$(echo ${ROCM_VERSION} | tr -d '.') && \
@@ -120,6 +115,7 @@ RUN . /opt/venv/bin/activate && \
     git clone --depth 1 -b ${LMCACHE_RELEASE_VERSION} \
         https://github.com/LMCache/LMCache.git /tmp/lmcache && \
     cd /tmp/lmcache && \
+    uv pip install -r requirements/build.txt && \
     BUILD_WITH_HIP=1 CXX=hipcc uv pip install --no-build-isolation . --verbose && \
     rm -rf /tmp/lmcache
 
