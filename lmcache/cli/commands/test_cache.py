@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""``lmcache test-cache`` — end-to-end test for LMCache MP cache server.
+"""``lmcache bench kvcache`` — end-to-end test for LMCache MP cache server.
 
 Supports **GPU** mode (``--mode gpu``).
 
@@ -18,15 +18,15 @@ This command exercises the full store / retrieve data path:
 Usage examples::
 
     # GPU mode: real CUDA tensors + IPC
-    lmcache test-cache --rpc-url tcp://localhost:5555 \\
+    lmcache bench kvcache --rpc-url tcp://localhost:5555 \\
         --num-tokens 512 --start 0 --end 3
 
     # Custom KV cache shape (multi-group spec)
-    lmcache test-cache --rpc-url tcp://localhost:5555 \\
+    lmcache bench kvcache --rpc-url tcp://localhost:5555 \\
         --kvcache-shape-spec '(2,32,1024,8,128):float16:32'
 
     # Run forever starting from sequence 0
-    lmcache test-cache --rpc-url tcp://localhost:5555
+    lmcache bench kvcache --rpc-url tcp://localhost:5555
 """
 
 # Future
@@ -696,11 +696,9 @@ class TestCacheCommand(BaseCommand):
             )
             # Use the first group to derive shape parameters
             first = layer_groups[0]
-            # shape: (kv_dim, num_blocks, block_size,
-            #         num_heads, head_size)
             num_layers = sum(g.num_layers for g in layer_groups)
-            num_heads = first.shape[3]
-            head_size = first.shape[4]
+            num_heads = first.shape_desc.nh
+            head_size = first.shape_desc.hs
             dtype = first.dtype
             dtype_str = next(
                 (k for k, v in DTYPE_MAP.items() if v == dtype),

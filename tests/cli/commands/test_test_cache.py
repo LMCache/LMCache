@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for the ``lmcache test-cache`` CLI command.
+"""Tests for the ``lmcache bench kvcache`` CLI command.
 
 Covers:
-- Command metadata (name, help)
+- Sub-command registration under ``lmcache bench``
 - Argument registration and defaults
 - Pure helper functions (_build_token_ids, _make_key, _query_checksum)
 """
@@ -17,8 +17,8 @@ import threading
 import pytest
 
 # First Party
+from lmcache.cli.commands.bench import BenchCommand
 from lmcache.cli.commands.test_cache import (
-    TestCacheCommand,
     _build_token_ids,
     _make_key,
     _query_checksum,
@@ -30,13 +30,13 @@ from lmcache.cli.commands.test_cache import (
 
 
 @pytest.fixture
-def cmd() -> TestCacheCommand:
-    return TestCacheCommand()
+def cmd() -> BenchCommand:
+    return BenchCommand()
 
 
 @pytest.fixture
-def parser(cmd: TestCacheCommand) -> argparse.ArgumentParser:
-    """Parser with test-cache subcommand registered."""
+def parser(cmd: BenchCommand) -> argparse.ArgumentParser:
+    """Parser with ``bench kvcache`` subcommand registered."""
     p = argparse.ArgumentParser()
     sub = p.add_subparsers(dest="command")
     cmd.register(sub)
@@ -49,11 +49,11 @@ def parser(cmd: TestCacheCommand) -> argparse.ArgumentParser:
 
 
 class TestCommandMetadata:
-    def test_name(self, cmd: TestCacheCommand) -> None:
-        assert cmd.name() == "test-cache"
+    def test_name(self, cmd: BenchCommand) -> None:
+        assert cmd.name() == "bench"
 
-    def test_help(self, cmd: TestCacheCommand) -> None:
-        assert "test" in cmd.help().lower()
+    def test_help(self, cmd: BenchCommand) -> None:
+        assert "benchmark" in cmd.help().lower()
 
 
 # ------------------------------------------------------------------ #
@@ -66,14 +66,15 @@ class TestCommandArguments:
         self,
         parser: argparse.ArgumentParser,
     ) -> None:
-        args = parser.parse_args(["test-cache"])
+        args = parser.parse_args(["bench", "kvcache"])
         assert hasattr(args, "func")
+        assert args.bench_target == "kvcache"
 
     def test_default_values(
         self,
         parser: argparse.ArgumentParser,
     ) -> None:
-        args = parser.parse_args(["test-cache"])
+        args = parser.parse_args(["bench", "kvcache"])
         assert args.rpc_url == "tcp://localhost:5555"
         assert args.mode == "gpu"
         assert args.num_tokens == 512
@@ -90,7 +91,8 @@ class TestCommandArguments:
     ) -> None:
         args = parser.parse_args(
             [
-                "test-cache",
+                "bench",
+                "kvcache",
                 "--rpc-url",
                 "tcp://host:9999",
                 "--num-tokens",
@@ -122,7 +124,7 @@ class TestCommandArguments:
         self,
         parser: argparse.ArgumentParser,
     ) -> None:
-        args = parser.parse_args(["test-cache"])
+        args = parser.parse_args(["bench", "kvcache"])
         assert "float16" in args.kvcache_shape_spec
 
     def test_kvcache_shape_spec_custom(
@@ -131,7 +133,8 @@ class TestCommandArguments:
     ) -> None:
         args = parser.parse_args(
             [
-                "test-cache",
+                "bench",
+                "kvcache",
                 "--kvcache-shape-spec",
                 "(2,512,8,4,64):bfloat16:16",
             ],

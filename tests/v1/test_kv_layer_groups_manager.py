@@ -5,7 +5,6 @@ import torch
 
 # First Party
 from lmcache.v1.kv_layer_groups import (
-    DEFAULT_LAYER_NAME_PREFIX,
     KVLayerGroupInfo,
     KVLayerGroupsManager,
     parse_kvcache_shape_spec,
@@ -145,11 +144,14 @@ class TestParseKvcacheShapeSpec:
         assert len(groups) == 1
         g = groups[0]
         assert g.num_layers == 32
-        assert g.shape == torch.Size([2, 1024, 16, 8, 128])
+        assert g.shape_desc.kv_size == 2
+        assert g.shape_desc.nb == 1024
+        assert g.shape_desc.bs == 16
+        assert g.shape_desc.nh == 8
+        assert g.shape_desc.hs == 128
+        assert g.shape_desc.nl == 32
         assert g.dtype == torch.float16
         assert g.layer_indices == list(range(32))
-        assert g.layer_names[0] == "%s0" % DEFAULT_LAYER_NAME_PREFIX
-        assert g.layer_names[-1] == "%s31" % DEFAULT_LAYER_NAME_PREFIX
 
     def test_multiple_groups(self):
         """Test parsing multiple groups separated by semicolons."""
@@ -165,7 +167,8 @@ class TestParseKvcacheShapeSpec:
         # Second group: 2 layers, offset by 30
         assert groups[1].num_layers == 2
         assert groups[1].dtype == torch.bfloat16
-        assert groups[1].shape == torch.Size([2, 1024, 16, 4, 64])
+        assert groups[1].shape_desc.nh == 4
+        assert groups[1].shape_desc.hs == 64
         assert groups[1].layer_indices == [30, 31]
 
     def test_empty_spec_raises(self):

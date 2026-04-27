@@ -18,7 +18,6 @@ from lmcache.cli.commands.query import QueryCommand
 from lmcache.cli.commands.server import ServerCommand
 from lmcache.cli.commands.tool import ToolCommand
 from lmcache.cli.commands.trace import TraceCommand
-from lmcache.cli.commands.test_cache import TestCacheCommand
 
 ALL_COMMANDS: list[BaseCommand] = [
     MockCommand(),
@@ -30,7 +29,6 @@ ALL_COMMANDS: list[BaseCommand] = [
     BenchCommand(),
     ToolCommand(),
     TraceCommand(),
-    TestCacheCommand(),
 ]
 
 __all__ = ["ALL_COMMANDS", "BaseCommand"]

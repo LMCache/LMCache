@@ -5,7 +5,7 @@
 import torch
 
 # First Party
-from lmcache.v1.multiprocess.http_server import _compute_mp_checksums
+from lmcache.v1.multiprocess.http_apis.cache_api import _compute_mp_checksums
 
 
 class TestComputeMpChecksums:

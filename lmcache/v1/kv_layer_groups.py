@@ -287,13 +287,25 @@ def parse_kvcache_shape_spec(
             raise ValueError("Invalid number in group spec: %s" % group_spec) from exc
         dtype = DTYPE_MAP[dtype_key]
 
+        if len(shape) != 5:
+            raise ValueError(
+                "Shape must be a 5-tuple (kv_size,nb,bs,nh,hs): %s" % group_spec
+            )
+        kv_size, nb, bs, nh, hs = shape
+        shape_desc = lmc_ops.PageBufferShapeDesc()
+        shape_desc.kv_size = kv_size
+        shape_desc.nl = layer_count
+        shape_desc.nb = nb
+        shape_desc.bs = bs
+        shape_desc.nh = nh
+        shape_desc.hs = hs
+        shape_desc.element_size = dtype.itemsize
+
         indices = list(range(layer_offset, layer_offset + layer_count))
-        names = ["%s%d" % (DEFAULT_LAYER_NAME_PREFIX, i) for i in indices]
         groups.append(
             KVLayerGroupInfo(
-                layer_names=names,
                 layer_indices=indices,
-                shape=torch.Size(shape),
+                shape_desc=shape_desc,
                 dtype=dtype,
             )
         )
