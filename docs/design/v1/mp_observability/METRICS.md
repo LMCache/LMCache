@@ -280,6 +280,65 @@ point-in-time state snapshots that do not correspond to discrete events.
 
 ---
 
+## L1 / L2 State Metrics
+
+Live state of the L1 memory pool and the in-flight L2 store / prefetch-load
+queues.  These metrics are useful for capacity planning, sizing L1, and
+spotting backpressure on individual L2 adapters.
+
+The three "in-flight" metrics are OTel `UpDownCounter` instruments — the
+controllers call `.add(+1)` on submission and `.add(-1)` on completion (or
+on shutdown cleanup), and the SDK maintains the per-attribute running total
+internally.  Prometheus renders an `UpDownCounter` as a gauge.  L1 memory
+usage is a true `ObservableGauge` because L1Manager already maintains the
+running byte total — there is no event to subscribe to.
+
+All three in-flight metrics carry two attributes that disambiguate
+adapters even when more than one is registered with the same backend type:
+
+- `l2_name` — the registered adapter type (e.g. `"fs"`, `"mock"`,
+  `"nixl_store"`).  Same string used in the existing `L2_*` counters.
+- `adapter_index` — position in the `StoreController`/`PrefetchController`
+  adapter list.  Distinguishes two adapters of the same type (e.g.
+  `fs[0]` and `fs[1]`).
+
+| OTel metric name | Prometheus name | Type | Source | Calculation |
+|---|---|---|---|---|
+| `lmcache_mp.l1_memory_usage_bytes` | `lmcache_mp_l1_memory_usage_bytes` | ObservableGauge | `L1Manager._memory_manager.get_memory_usage()[0]` | Bytes currently held in L1 at scrape time |
+| `lmcache_mp.num_inflight_l2_stores` | `lmcache_mp_num_inflight_l2_stores` | UpDownCounter (attrs: `l2_name`, `adapter_index`) | `StoreController._in_flight_tasks` add/remove sites | `+1` per submitted store task, `-1` per completion or cleanup |
+| `lmcache_mp.num_inflight_l2_loads` | `lmcache_mp_num_inflight_l2_loads` | UpDownCounter (attrs: `l2_name`, `adapter_index`) | `PrefetchController.pending_load_tasks` add/remove sites | `+1` per submitted per-adapter load task, `-1` per completion or cleanup |
+| `lmcache_mp.inflight_load_memory_usage_bytes` | `lmcache_mp_inflight_load_memory_usage_bytes` | UpDownCounter (attrs: `l2_name`, `adapter_index`) | `PrefetchController.load_bytes_by_adapter` add/remove sites | `+reserved_bytes` per submitted per-adapter load task, `-reserved_bytes` per completion or cleanup |
+
+**What `l1_memory_usage_bytes` answers:** How full is the L1 cache? Helps
+size L1 against working set and detect leaks (steadily climbing without
+plateauing).
+
+**What `num_inflight_l2_stores` answers:** Are L2 stores piling up on a
+particular adapter? Sustained non-zero values indicate the adapter cannot
+keep up with the L1 → L2 write rate.
+
+**What `num_inflight_l2_loads` answers:** Are L2 → L1 prefetch loads
+backing up? Pair with `num_inflight_l2_stores` to see whether read or
+write traffic dominates a given backend.
+
+**What `inflight_load_memory_usage_bytes` answers:** How much L1 capacity
+is currently *reserved but not yet filled* by in-flight prefetches? Rising
+in-flight bytes alongside rising `l1_memory_usage_bytes` is a signal that
+prefetch reservations are crowding out cacheable data.
+
+> **Bytes attribution.** A single prefetch request may load from multiple
+> adapters.  The byte count is split per-adapter via the request's
+> `load_plan` bitmap × per-key `MemoryObj.size` so each in-flight byte is
+> attributed to exactly one `(l2_name, adapter_index)` pair — sums across
+> adapters are not double-counted.
+
+> **Bookkeeping invariant.** Reserved bytes are recorded on the request
+> at submit time (`InFlightPrefetchRequest.load_bytes_by_adapter`) and
+> popped at completion, so the decrement always matches the increment
+> regardless of how many keys actually loaded successfully.
+
+---
+
 ## Cache Blending (CB) Metrics
 
 Metrics for Cache Blending operations use the `lmcache_blend.` prefix (distinct from the

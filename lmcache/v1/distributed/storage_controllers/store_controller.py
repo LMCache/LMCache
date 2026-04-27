@@ -17,6 +17,9 @@ import os
 import select
 import threading
 
+# Third Party
+from opentelemetry import metrics
+
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.distributed.api import ObjectKey
@@ -216,6 +219,12 @@ class StoreController(StorageControllerInterface):
         self._l1_manager.register_listener(self._listener)
         self._event_bus = get_event_bus()
 
+        meter = metrics.get_meter("lmcache.l2_store")
+        self._inflight_stores_counter = meter.create_up_down_counter(
+            "lmcache_mp.num_inflight_l2_stores",
+            description="L2 store tasks currently executing, per adapter",
+        )
+
         # (adapter_index, task_id) -> InFlightStoreTask
         # Composite key is needed because task IDs are only unique
         # within a single adapter, not across adapters.
@@ -404,6 +413,13 @@ class StoreController(StorageControllerInterface):
                 read_locked_keys=list(successful_keys),
             )
             self._status_in_flight_count += 1
+            self._inflight_stores_counter.add(
+                1,
+                {
+                    "l2_name": self._adapter_descriptors[adapter_index].type_name,
+                    "adapter_index": adapter_index,
+                },
+            )
 
             # All objects for a single store task share one layout (L1
             # allocates uniform MemoryObjs per chunk), so total bytes is
@@ -472,6 +488,13 @@ class StoreController(StorageControllerInterface):
         l1_mgr.finish_read(task.read_locked_keys)
         del self._in_flight_tasks[task_key]
         self._status_in_flight_count -= 1
+        self._inflight_stores_counter.add(
+            -1,
+            {
+                "l2_name": self._adapter_descriptors[adapter_index].type_name,
+                "adapter_index": adapter_index,
+            },
+        )
 
         l2_name = self._adapter_descriptors[adapter_index].type_name
         if success:
@@ -530,4 +553,11 @@ class StoreController(StorageControllerInterface):
                 len(task.read_locked_keys),
             )
             l1_mgr.finish_read(task.read_locked_keys)
+            self._inflight_stores_counter.add(
+                -1,
+                {
+                    "l2_name": self._adapter_descriptors[adapter_index].type_name,
+                    "adapter_index": adapter_index,
+                },
+            )
         self._in_flight_tasks.clear()

@@ -19,6 +19,7 @@ from lmcache.v1.distributed.memory_manager import L1MemoryManager
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import get_event_bus
+from lmcache.v1.mp_observability.otel_init import register_gauge
 
 logger = init_logger(__name__)
 
@@ -114,6 +115,32 @@ def _validate_extra_count(extra_count: int) -> int:
 # Main classes
 
 
+def _register_l1_memory_usage_gauge() -> None:
+    """Register the L1 memory usage gauge exactly once per process.
+
+    L1Manager is a singleton in MP mode (one per cache server process), so
+    a single OTel ObservableGauge with a single callback is the correct
+    shape.  Tests that construct multiple L1Manager instances would
+    otherwise stack multiple callbacks on the same metric name with the
+    same (empty) attribute set, leaving the reported value undefined.
+    The callback dispatches via the class-level ``_gauge_target`` so the
+    most recently constructed L1Manager owns the reported value.
+    """
+    if L1Manager._gauge_registered:
+        return
+    L1Manager._gauge_registered = True
+    register_gauge(
+        "lmcache.l1_manager",
+        "lmcache_mp.l1_memory_usage_bytes",
+        "Bytes currently held in L1 cache",
+        lambda: (
+            L1Manager._gauge_target._memory_manager.get_memory_usage()[0]
+            if L1Manager._gauge_target is not None
+            else 0
+        ),
+    )
+
+
 class L1Manager:
     """
     Object lifecycle state machine for L1 cache
@@ -157,6 +184,11 @@ class L1Manager:
     For every operation on list of keys, the operation is atomic
     """
 
+    # Class-level state for the singleton ``lmcache_mp.l1_memory_usage_bytes``
+    # gauge.  See ``_register_l1_memory_usage_gauge``.
+    _gauge_registered: bool = False
+    _gauge_target: "L1Manager | None" = None
+
     def __init__(self, config: L1ManagerConfig):
         self._lock = threading.Lock()
 
@@ -170,6 +202,9 @@ class L1Manager:
         self._registered_listeners: list[L1ManagerListener] = []
 
         self._event_bus = get_event_bus()
+
+        L1Manager._gauge_target = self
+        _register_l1_memory_usage_gauge()
 
     def register_listener(self, listener: L1ManagerListener) -> None:
         """Register a listener for L1Manager events.

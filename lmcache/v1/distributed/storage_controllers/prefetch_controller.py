@@ -20,6 +20,9 @@ import os
 import select
 import threading
 
+# Third Party
+from opentelemetry import metrics
+
 # First Party
 from lmcache.logging import init_logger
 from lmcache.native_storage_ops import Bitmap
@@ -154,6 +157,11 @@ class InFlightPrefetchRequest:
     load_plan: dict[int, Bitmap] = field(default_factory=dict)
     # Load phase: adapter_idx -> task_id (removed as results arrive)
     pending_load_tasks: dict[int, L2TaskId] = field(default_factory=dict)
+    # Load phase: adapter_idx -> reserved bytes (mirrors pending_load_tasks
+    # so the inflight_load_memory_usage_bytes counter can be decremented by
+    # the same amount it was incremented at submit time, regardless of how
+    # many keys actually load).
+    load_bytes_by_adapter: dict[int, int] = field(default_factory=dict)
     # Load phase: adapter_idx -> bitmap (populated as results arrive)
     load_results: dict[int, Bitmap] = field(default_factory=dict)
     # Load phase: keys that were write-reserved in L1
@@ -240,6 +248,17 @@ class PrefetchController(StorageControllerInterface):
             self._load_efd_to_adapter[adapter.get_load_event_fd()] = i
 
         self._event_bus = get_event_bus()
+
+        meter = metrics.get_meter("lmcache.l2_prefetch")
+        self._inflight_loads_counter = meter.create_up_down_counter(
+            "lmcache_mp.num_inflight_l2_loads",
+            description="L2 -> L1 prefetch load tasks currently executing, per adapter",
+        )
+        self._inflight_load_bytes_counter = meter.create_up_down_counter(
+            "lmcache_mp.inflight_load_memory_usage_bytes",
+            description="L1 bytes reserved by in-flight L2 -> L1 prefetch "
+            "loads, per adapter",
+        )
 
         self._stop_flag = threading.Event()
         self._thread = threading.Thread(
@@ -629,6 +648,13 @@ class PrefetchController(StorageControllerInterface):
                 if per_adapter_objs
                 else 0
             )
+            request.load_bytes_by_adapter[adapter_idx] = total_bytes
+            attrs = {
+                "l2_name": self._adapter_descriptors[adapter_idx].type_name,
+                "adapter_index": adapter_idx,
+            }
+            self._inflight_loads_counter.add(1, attrs)
+            self._inflight_load_bytes_counter.add(total_bytes, attrs)
 
             self._event_bus.publish(
                 Event(
@@ -734,6 +760,13 @@ class PrefetchController(StorageControllerInterface):
                 continue
             request.load_results[adapter_idx] = result
             del request.pending_load_tasks[adapter_idx]
+            reserved_bytes = request.load_bytes_by_adapter.pop(adapter_idx, 0)
+            attrs = {
+                "l2_name": self._adapter_descriptors[adapter_idx].type_name,
+                "adapter_index": adapter_idx,
+            }
+            self._inflight_loads_counter.add(-1, attrs)
+            self._inflight_load_bytes_counter.add(-reserved_bytes, attrs)
 
             self._event_bus.publish(
                 Event(
@@ -875,6 +908,14 @@ class PrefetchController(StorageControllerInterface):
                 self._unlock_all_plan_keys(request)
             elif request.phase == PrefetchPhase.LOOKUP:
                 self._unlock_all_lookups(request)
+            for adapter_idx, reserved_bytes in request.load_bytes_by_adapter.items():
+                attrs = {
+                    "l2_name": self._adapter_descriptors[adapter_idx].type_name,
+                    "adapter_index": adapter_idx,
+                }
+                self._inflight_loads_counter.add(-1, attrs)
+                self._inflight_load_bytes_counter.add(-reserved_bytes, attrs)
+            request.load_bytes_by_adapter.clear()
             logger.warning(
                 "Cleaning up in-flight prefetch request %d (%d keys).",
                 request.request_id,
