@@ -697,15 +697,6 @@ class LMCacheConnectorV1Impl:
         """
         return VLLM_VERSION
 
-    def _build_kv_layer_groups(self):
-        # Build KV layer groups structure if not already built
-        if self.lmcache_engine is not None:
-            assert len(self.kv_caches) > 0
-            kv_layer_groups_manager = (
-                self.lmcache_engine.metadata.kv_layer_groups_manager
-            )
-            kv_layer_groups_manager.build_kv_layer_groups(self.kv_caches)
-
     # TODO(chunxiaozheng): in the latest lmcache_connector, we use `register_kv_caches`
     #  to init self.kv_caches, we keep it in order to be compatible with old versions
     #  and will be removed in the future.
@@ -722,8 +713,6 @@ class LMCacheConnectorV1Impl:
                     forward_context.virtual_engine
                 ]
 
-        self._build_kv_layer_groups()
-
     ####################
     # Worker side APIs
     ####################
@@ -734,7 +723,6 @@ class LMCacheConnectorV1Impl:
         #  not called, we should consider removing it.
         assert len(self.kv_caches) == 0 and len(kv_caches) > 0
         self.kv_caches = kv_caches
-        self._build_kv_layer_groups()
         self._manager.post_init()
 
     @_lmcache_nvtx_annotate
@@ -745,10 +733,6 @@ class LMCacheConnectorV1Impl:
         Args:
             forward_context (ForwardContext): the forward context.
             **kwargs: additional arguments for the load operation
-
-        Note:
-            The number of elements in kv_caches and layer_names should be
-            the same.
         """
         self.current_layer = 0
 

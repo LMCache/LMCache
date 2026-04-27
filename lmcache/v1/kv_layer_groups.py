@@ -1,267 +1,212 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from collections import defaultdict
-from dataclasses import dataclass, field
-from typing import Optional
+from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 # Third Party
 import torch
 
 # First Party
 from lmcache.logging import init_logger
+import lmcache.c_ops as lmc_ops
+
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.v1.gpu_connector.utils import DiscoverableKVCache
 
 logger = init_logger(__name__)
 
 
+# The 4-tuple that uniquely identifies a set of kernel-equivalent layers:
+# ``(kv_size, num_heads, head_size, dtype)``. Two layers share a transfer-
+# kernel launch iff they share this identity — see the grouping loop in
+# :meth:`KVLayerGroupsManager.__init__` for the derivation.
+LayerGroupIdentity = tuple[int, int, int, torch.dtype]
+
+
 @dataclass
 class KVLayerGroupInfo:
-    """Information about a group of layers with the same KV cache structure.
+    """A single transfer-kernel dispatch unit: a set of KV layers that can
+    ride one kernel launch with one ``PageBufferShapeDesc``.
 
-    Layers within the same group have identical shape and dtype for their KV cache.
-    Different groups may have different shapes (especially head_size) and/or dtypes.
+    Membership is decided by :class:`KVLayerGroupsManager` according to
+    :data:`LayerGroupIdentity`; every layer referenced by
+    ``layer_indices`` shares the same ``(kv_size, num_heads, head_size,
+    dtype)`` signature. Consumers use ``layer_indices`` to pull the
+    matching device pointers out of ``kv_caches`` (via
+    :func:`~lmcache.v1.gpu_connector.utils.get_group_data_ptrs`) and feed
+    them to the kernel alongside ``shape_desc``.
+
+    ``dtype`` is carried alongside ``shape_desc`` because
+    ``PageBufferShapeDesc.element_size`` is a byte width, which cannot
+    distinguish dtypes that share a byte count (e.g. bfloat16 and
+    float16 are both 2 bytes). Kernel template instantiation keys on the
+    torch dtype, not the byte width, so we keep it explicit.
+
+    Treat instances as immutable after construction; callers may hold
+    references for the lifetime of the manager.
     """
 
-    """ List of layer names belonging to this group """
-    layer_names: list[str]
-    """ List of layer indices (0-based) belonging to this group """
     layer_indices: list[int]
-    """ Shape of the KV cache tensor for layers in this group """
-    """ For MHA: typically [2, num_blocks, block_size, num_heads, head_size] """
-    """ For MLA: typically [num_blocks, block_size, head_size] """
-    shape: torch.Size
-    """ Data type of the KV cache tensor for layers in this group """
+    """0-based layer indices belonging to this group, in the order the
+    kernel should iterate them. Fed to ``get_group_data_ptrs`` to build
+    the per-group pointer array."""
+    shape_desc: "lmc_ops.PageBufferShapeDesc"
+    """Kernel-facing shape descriptor shared by every layer in the group.
+    All seven fields (``kv_size, nl, nb, bs, nh, hs, element_size``) are
+    stamped once at construction."""
     dtype: torch.dtype
-
-    # Internal sets for fast membership checking
-    _layer_indices_set: set[int] = field(init=False, repr=False)
-    _layer_names_set: set[str] = field(init=False, repr=False)
-
-    def __post_init__(self):
-        """Initialize sets for fast membership checking."""
-        self._layer_indices_set = set(self.layer_indices)
-        self._layer_names_set = set(self.layer_names)
+    """Torch dtype of the KV cache tensors for this group. Used for
+    kernel template instantiation; see class docstring for why we keep
+    this alongside ``shape_desc.element_size``."""
 
     def __repr__(self) -> str:
         if not self.layer_indices:
             indices_repr = "[]"
         else:
             indices_repr = f"{self.layer_indices[0]}-{self.layer_indices[-1]}"
+        sd = self.shape_desc
         return (
-            f"KVLayerGroupInfo(layers={len(self.layer_names)}, "
+            f"KVLayerGroupInfo(layers={len(self.layer_indices)}, "
             f"indices={indices_repr}, "
-            f"shape={self.shape}, dtype={self.dtype})"
+            f"shape_desc=(kv={sd.kv_size}, nl={sd.nl}, nb={sd.nb}, "
+            f"bs={sd.bs}, nh={sd.nh}, hs={sd.hs}, "
+            f"element_size={sd.element_size}), dtype={self.dtype})"
         )
 
     @property
     def num_layers(self) -> int:
-        """Return the number of layers in this group."""
-        return len(self.layer_names)
+        """Number of layers in this group."""
+        return len(self.layer_indices)
 
     @property
     def hidden_dim_size(self) -> int:
-        """Return the size of the hidden dimension in this group."""
-        # hidden_dim_size = num_heads * head_size
-        if len(self.shape) == 5:
-            # MHA
-            return self.shape[3] * self.shape[4]
-        elif len(self.shape) == 3:
-            # MLA
-            return self.shape[2]
-        else:
-            raise ValueError(f"Invalid shape: {self.shape}")
-
-    def contains_layer(self, layer_idx: int) -> bool:
-        """Check if a layer index belongs to this group."""
-        return layer_idx in self._layer_indices_set
-
-    def contains_layer_name(self, layer_name: str) -> bool:
-        """Check if a layer name belongs to this group."""
-        return layer_name in self._layer_names_set
+        """Hidden dimension size (``num_heads * head_size``)."""
+        return self.shape_desc.nh * self.shape_desc.hs
 
 
-@dataclass
 class KVLayerGroupsManager:
-    """Manager for KV layer groups with the same structure.
+    """Partition a model's KV layers into transfer-kernel dispatch units.
 
-    This class encapsulates the functionality for managing groups of layers
-    that have identical KV cache structure (shape and dtype).
+    At construction time, every layer in ``kv_caches`` is bucketed by its
+    :data:`LayerGroupIdentity` (``(kv_size, num_heads, head_size,
+    dtype)``). Each bucket becomes one :class:`KVLayerGroupInfo` holding
+    the layer indices, a shared :class:`PageBufferShapeDesc`, and the
+    group's torch dtype.
+
+    Downstream consumers (``VLLMPagedMemGPUConnectorV3``,
+    ``GPUCacheContext``, the multiprocess server) iterate
+    ``self.kv_layer_groups`` and issue one transfer-kernel launch per
+    group. The manager itself is a pure metadata object — it does not
+    own any GPU buffers or perform any transfers.
+
+    Layout parsing is delegated entirely to
+    :mod:`lmcache.v1.gpu_connector.utils`; this class only drives the
+    grouping and look-up.
     """
 
-    kv_layer_groups: list[KVLayerGroupInfo] = field(default_factory=list)
+    def __init__(
+        self,
+        kv_caches: "DiscoverableKVCache",
+        gpu_kv_format: "lmc_ops.GPUKVFormat",
+        num_blocks: int,
+        block_size: int,
+    ) -> None:
+        """Partition layers into groups keyed by
+        :data:`LayerGroupIdentity`.
+
+        For each layer ``i`` in ``kv_caches``, read
+        ``(kv_size, num_heads, head_size, dtype)`` via the format-aware
+        accessors in ``utils.py``. Layers with identical identities are
+        bucketed together; each bucket becomes one
+        :class:`KVLayerGroupInfo`.
+
+        Groups are emitted in the order of their first-appearing layer,
+        so group indices are deterministic across runs.
+
+        Args:
+            kv_caches: KV cache structure accepted by
+                :func:`discover_gpu_kv_format`.
+            gpu_kv_format: Format returned by :func:`discover_gpu_kv_format`.
+            num_blocks: Number of paged blocks. Stamped into every
+                ``shape_desc.nb``.
+            block_size: Tokens per block. Stamped into every
+                ``shape_desc.bs``.
+        """
+        # Import here to break a circular import via
+        # lmcache.v1.gpu_connector.__init__ → metadata → kv_layer_groups.
+        # First Party
+        from lmcache.v1.gpu_connector.utils import (
+            get_dtype,
+            get_head_size,
+            get_num_heads,
+            get_num_layers,
+            is_mla,
+            make_page_buffer_shape_desc,
+        )
+
+        self.kv_layer_groups: list[KVLayerGroupInfo] = []
+
+        num_layers = get_num_layers(kv_caches, gpu_kv_format)
+        if num_layers == 0:
+            logger.debug("No KV caches available, skipping KV layer groups building")
+            return
+
+        # Temporary accumulator: maps each LayerGroupIdentity to the list
+        # of layer indices that share it. Built in one linear pass over
+        # all layers, then drained into KVLayerGroupInfo objects below.
+        # The index lists are passed by reference into the infos, so
+        # after __init__ returns this dict is garbage-collected while
+        # the lists stay alive on each group.
+        mla = is_mla(gpu_kv_format)
+        kv_size = 1 if mla else 2
+        groups_dict: dict[LayerGroupIdentity, list[int]] = defaultdict(list)
+        for idx in range(num_layers):
+            nh = 1 if mla else get_num_heads(kv_caches, gpu_kv_format, idx)
+            hs = get_head_size(kv_caches, gpu_kv_format, idx)
+            dt = get_dtype(kv_caches, gpu_kv_format, idx)
+            groups_dict[(kv_size, nh, hs, dt)].append(idx)
+
+        # Emit groups in order of their first-appearing layer.
+        for (_, _, _, dt), indices in sorted(
+            groups_dict.items(), key=lambda kv: kv[1][0]
+        ):
+            shape_desc = make_page_buffer_shape_desc(
+                kv_caches,
+                gpu_kv_format,
+                layer_idx=indices[0],
+                num_layers_in_group=len(indices),
+                num_blocks=num_blocks,
+                block_size=block_size,
+            )
+            self.kv_layer_groups.append(
+                KVLayerGroupInfo(
+                    layer_indices=indices,
+                    shape_desc=shape_desc,
+                    dtype=dt,
+                )
+            )
+
+        logger.info("KV layer groups: %s", self.kv_layer_groups)
 
     @property
     def num_groups(self) -> int:
-        """Return the number of KV layer groups."""
+        """Number of :class:`KVLayerGroupInfo` entries.
+
+        Zero if ``kv_caches`` had no layers at construction time.
+        """
         return len(self.kv_layer_groups)
 
-    def get_group_by_layer_idx(self, layer_idx: int) -> Optional[KVLayerGroupInfo]:
-        """Get the KVLayerGroupInfo for a given layer index.
+    def get_shape_desc(self, group_idx: int) -> "lmc_ops.PageBufferShapeDesc":
+        """Return the :class:`PageBufferShapeDesc` for *group_idx*.
+
+        Equivalent to ``self.kv_layer_groups[group_idx].shape_desc``.
 
         Args:
-            layer_idx: The 0-based index of the layer.
+            group_idx: 0-based group index.
 
-        Returns:
-            The KVLayerGroupInfo containing this layer, or None if not found.
+        Raises:
+            IndexError: If *group_idx* is out of range.
         """
-        for group in self.kv_layer_groups:
-            if group.contains_layer(layer_idx):
-                return group
-        return None
-
-    def get_group_by_layer_name(self, layer_name: str) -> Optional[KVLayerGroupInfo]:
-        """Get the KVLayerGroupInfo for a given layer name.
-
-        Args:
-            layer_name: The name of the layer.
-
-        Returns:
-            The KVLayerGroupInfo containing this layer, or None if not found.
-        """
-        for group in self.kv_layer_groups:
-            if group.contains_layer_name(layer_name):
-                return group
-        return None
-
-    def get_layer_shape(self, layer_idx: int) -> Optional[torch.Size]:
-        """Get the shape of the KV cache for a given layer index.
-
-        Args:
-            layer_idx: The 0-based index of the layer.
-
-        Returns:
-            The shape, or None if layer not found.
-        """
-        group = self.get_group_by_layer_idx(layer_idx)
-        return group.shape if group else None
-
-    def get_layer_dtype(self, layer_idx: int) -> Optional[torch.dtype]:
-        """Get the dtype of the KV cache for a given layer index.
-
-        Args:
-            layer_idx: The 0-based index of the layer.
-
-        Returns:
-            The dtype, or None if layer not found.
-        """
-        group = self.get_group_by_layer_idx(layer_idx)
-        return group.dtype if group else None
-
-    def build_kv_layer_groups(self, kv_caches: dict[str, torch.Tensor]) -> None:
-        """Build KV layer groups structure by analyzing each layer's shape and dtype.
-
-        Layers with the same shape and dtype are grouped together. This is useful
-        because different layers may have different structures (especially the
-        last dimension head_size may differ between groups), and different groups
-        may have different dtypes.
-
-        If layer groups are already built (non-empty list), this method does nothing.
-
-        Args:
-            kv_caches: Dictionary mapping layer names to KV cache tensors.
-        """
-        # Skip if already built (non-empty list)
-        if len(self.kv_layer_groups) > 0:
-            return
-
-        if len(kv_caches) == 0:
-            logger.debug("No KV caches available, skipping KV layer groups building")
-            return
-
-        # Group layers by (shape, dtype) in a single loop
-        groups_dict: dict[tuple[torch.Size, torch.dtype], list[tuple[str, int]]] = (
-            defaultdict(list)
-        )
-
-        for idx, (layer_name, kv_cache) in enumerate(kv_caches.items()):
-            # Supports two KV cache formats:
-            # - Single-tensor format: a single tensor with shape
-            #   [2, num_blocks, block_size, num_heads, head_size].
-            # - List/tuple format (e.g., TPU/HPU): [k_tensor, v_tensor],
-            #   where each tensor has shape
-            #   [num_blocks, block_size, num_heads, head_size].
-            if isinstance(kv_cache, (tuple, list)):
-                if len(kv_cache) != 2:
-                    raise ValueError(
-                        f"Expected 2 tensors (k, v) for layer {layer_name}, "
-                        f"got {len(kv_cache)}"
-                    )
-                # Prepend the count as a leading dimension to produce the
-                # same canonical shape as the single-tensor format
-                # (e.g., [2, num_blocks, ...] for k+v), so downstream
-                # indexing (e.g., hidden_dim_size) is unaffected.
-                shape = torch.Size([len(kv_cache)] + list(kv_cache[0].shape))
-                dtype = kv_cache[0].dtype
-            else:
-                shape = kv_cache.shape
-                dtype = kv_cache.dtype
-            key = (shape, dtype)
-            groups_dict[key].append((layer_name, idx))
-
-        # Build KVLayerGroupInfo list
-        # Sort groups by the first layer index to maintain order
-        def _get_first_layer_index(shape_dtype_key):
-            """Get the index of the first layer in a layer group."""
-            layer_group = groups_dict[
-                shape_dtype_key
-            ]  # list of (layer_name, layer_index) tuples
-            first_layer_info = layer_group[0]  # first (layer_name, layer_index) tuple
-            layer_index = first_layer_info[1]  # extract the layer index
-            return layer_index
-
-        sorted_keys = sorted(groups_dict.keys(), key=_get_first_layer_index)
-
-        kv_layer_groups: list[KVLayerGroupInfo] = []
-        for shape, dtype in sorted_keys:
-            layers = groups_dict[(shape, dtype)]
-            layer_names, layer_indices = zip(*layers, strict=False)
-
-            group_info = KVLayerGroupInfo(
-                layer_names=list(layer_names),
-                layer_indices=list(layer_indices),
-                shape=shape,
-                dtype=dtype,
-            )
-            kv_layer_groups.append(group_info)
-
-        # Store the built groups
-        self.kv_layer_groups = kv_layer_groups
-
-        # Print the group structure
-        logger.info("KV layer groups: %s", kv_layer_groups)
-
-    def build_kv_layer_groups_from_list(self, kv_caches: list[torch.Tensor]) -> None:
-        """Build KV layer groups from a plain list of tensors (one per layer).
-
-        Layers with the same shape and dtype are grouped together.
-        If layer groups are already built (non-empty list), this method does nothing.
-
-        Args:
-            kv_caches: List of KV cache tensors, one per layer.
-        """
-        if len(self.kv_layer_groups) > 0:
-            return
-
-        if not kv_caches:
-            logger.debug("No KV caches available, skipping KV layer groups building")
-            return
-
-        groups_dict: dict[tuple[torch.Size, torch.dtype], list[int]] = defaultdict(list)
-        for idx, tensor in enumerate(kv_caches):
-            key = (tensor.shape, tensor.dtype)
-            groups_dict[key].append(idx)
-
-        sorted_keys = sorted(groups_dict.keys(), key=lambda k: groups_dict[k][0])
-
-        kv_layer_groups: list[KVLayerGroupInfo] = []
-        for shape, dtype in sorted_keys:
-            indices = groups_dict[(shape, dtype)]
-            group_info = KVLayerGroupInfo(
-                layer_names=[str(i) for i in indices],
-                layer_indices=indices,
-                shape=shape,
-                dtype=dtype,
-            )
-            kv_layer_groups.append(group_info)
-
-        self.kv_layer_groups = kv_layer_groups
-        logger.info("KV layer groups (from list): %s", kv_layer_groups)
+        return self.kv_layer_groups[group_idx].shape_desc
