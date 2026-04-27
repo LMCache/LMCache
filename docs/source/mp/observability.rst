@@ -433,9 +433,12 @@ appear on other metrics.
      - Type
      - Description
    * - ``lmcache_mp.num_chunks_loaded``
-     - Counter (attr: ``worker_id``)
+     - Counter (attrs: ``worker_id``, ``model_name``, ``cache_salt``)
      - Total number of LMCache chunks loaded into the engine, summed
-       over all ``retrieve()`` completions and labeled per vLLM worker.
+       over all ``retrieve()`` completions.  Sliceable per worker, per
+       model, and per tenant / isolation domain (``cache_salt``).
+       ``cache_salt`` may be high-cardinality; drop it at scrape time
+       with ``metric_relabel_configs`` if storage cost matters.
 
 Observable Gauges
 ~~~~~~~~~~~~~~~~~

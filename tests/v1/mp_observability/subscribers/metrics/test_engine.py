@@ -29,6 +29,7 @@ def _retrieve_end(
     retrieved_count: int,
     engine_id: int = 0,
     model_name: str = "test-model",
+    cache_salt: str = "",
     device: str = "cuda:0",
 ) -> Event:
     return Event(
@@ -39,8 +40,24 @@ def _retrieve_end(
             "device": device,
             "engine_id": engine_id,
             "model_name": model_name,
+            "cache_salt": cache_salt,
             "total_bytes": 0,
         },
+    )
+
+
+def _attrs(
+    worker_id: str, model_name: str = "test-model", cache_salt: str = ""
+) -> tuple:
+    """Build the sorted-tuple attribute key the subscriber emits."""
+    return tuple(
+        sorted(
+            {
+                "worker_id": worker_id,
+                "model_name": model_name,
+                "cache_salt": cache_salt,
+            }.items()
+        )
     )
 
 
@@ -96,7 +113,7 @@ class TestNumChunksLoaded:
         subscriber._on_retrieve_end(_retrieve_end(retrieved_count=8, engine_id=3))
         after = _read_counter_by_attrs()
 
-        key = (("worker_id", "3"),)
+        key = _attrs(worker_id="3")
         assert after.get(key, 0) == before.get(key, 0) + 8
 
     def test_different_workers_are_independent(self, subscriber):
@@ -106,10 +123,59 @@ class TestNumChunksLoaded:
         subscriber._on_retrieve_end(_retrieve_end(retrieved_count=3, engine_id=0))
         after = _read_counter_by_attrs()
 
-        worker_0 = (("worker_id", "0"),)
-        worker_1 = (("worker_id", "1"),)
+        worker_0 = _attrs(worker_id="0")
+        worker_1 = _attrs(worker_id="1")
         assert after.get(worker_0, 0) == before.get(worker_0, 0) + 8
         assert after.get(worker_1, 0) == before.get(worker_1, 0) + 7
+
+    def test_carries_model_name_and_cache_salt(self, subscriber):
+        before = _read_counter_by_attrs()
+        subscriber._on_retrieve_end(
+            _retrieve_end(
+                retrieved_count=4,
+                engine_id=2,
+                model_name="llama-3.1-8b",
+                cache_salt="tenant-A",
+            )
+        )
+        after = _read_counter_by_attrs()
+        key = _attrs(worker_id="2", model_name="llama-3.1-8b", cache_salt="tenant-A")
+        assert after.get(key, 0) == before.get(key, 0) + 4
+
+    def test_different_models_or_salts_accumulate_independently(self, subscriber):
+        before = _read_counter_by_attrs()
+        # Same worker, different (model, salt) pairs.
+        subscriber._on_retrieve_end(
+            _retrieve_end(
+                retrieved_count=5,
+                engine_id=0,
+                model_name="model-A",
+                cache_salt="salt-1",
+            )
+        )
+        subscriber._on_retrieve_end(
+            _retrieve_end(
+                retrieved_count=3,
+                engine_id=0,
+                model_name="model-A",
+                cache_salt="salt-2",
+            )
+        )
+        subscriber._on_retrieve_end(
+            _retrieve_end(
+                retrieved_count=7,
+                engine_id=0,
+                model_name="model-B",
+                cache_salt="salt-1",
+            )
+        )
+        after = _read_counter_by_attrs()
+        a1 = _attrs(worker_id="0", model_name="model-A", cache_salt="salt-1")
+        a2 = _attrs(worker_id="0", model_name="model-A", cache_salt="salt-2")
+        b1 = _attrs(worker_id="0", model_name="model-B", cache_salt="salt-1")
+        assert after.get(a1, 0) == before.get(a1, 0) + 5
+        assert after.get(a2, 0) == before.get(a2, 0) + 3
+        assert after.get(b1, 0) == before.get(b1, 0) + 7
 
 
 # ---------------------------------------------------------------------------
@@ -122,7 +188,7 @@ class TestEdgeCases:
         before = _read_counter_by_attrs()
         subscriber._on_retrieve_end(_retrieve_end(retrieved_count=0, engine_id=4))
         after = _read_counter_by_attrs()
-        key = (("worker_id", "4"),)
+        key = _attrs(worker_id="4")
         assert after.get(key, 0) == before.get(key, 0)
 
     def test_missing_engine_id_still_records_without_attr(self, subscriber):
@@ -159,5 +225,5 @@ class TestEventBusIntegration:
         bus.stop()
         after = _read_counter_by_attrs()
 
-        key = (("worker_id", "9"),)
+        key = _attrs(worker_id="9")
         assert after.get(key, 0) == before.get(key, 0) + 12

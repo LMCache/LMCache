@@ -284,11 +284,14 @@ distinct from any scheduler-scoped id used elsewhere.
 
 | OTel metric name | Prometheus name | Type | Source event | Calculation |
 |---|---|---|---|---|
-| `lmcache_mp.num_chunks_loaded` | `lmcache_mp_num_chunks_loaded_total` | Counter (attr: `worker_id`) | `MP_RETRIEVE_END` | `+retrieved_count` per event |
+| `lmcache_mp.num_chunks_loaded` | `lmcache_mp_num_chunks_loaded_total` | Counter (attrs: `worker_id`, `model_name`, `cache_salt`) | `MP_RETRIEVE_END` | `+retrieved_count` per event |
 
 **What it answers:** How many LMCache chunks is each vLLM worker loading
 from LMCache into its engine?  Compare across workers to spot uneven
-demand or underserved ranks.
+demand or underserved ranks.  Slice by `model_name` to see per-model
+load volume in multi-model deployments, or by `cache_salt` for per-tenant
+attribution (note: `cache_salt` can be high-cardinality — drop it at
+scrape time with `metric_relabel_configs` if storage cost matters).
 
 ---
 

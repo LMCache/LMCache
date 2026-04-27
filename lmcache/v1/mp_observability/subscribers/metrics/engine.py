@@ -25,7 +25,8 @@ class EngineMetricsSubscriber(EventSubscriber):
 
     Metrics:
     - ``lmcache_mp.num_chunks_loaded`` — chunks loaded from LMCache into
-      the engine via ``retrieve()`` (attr: ``worker_id``).
+      the engine via ``retrieve()`` (attrs: ``worker_id``, ``model_name``,
+      ``cache_salt``).
 
     ``worker_id`` on this metric names the vLLM **worker** instance id and
     is distinct from any scheduler-scoped ``scheduler_id`` attribute used
@@ -55,8 +56,14 @@ class EngineMetricsSubscriber(EventSubscriber):
         # MP_RETRIEVE_END carries the worker's instance_id under the
         # ``engine_id`` key; re-emit as ``worker_id`` so the attribute
         # name disambiguates from any scheduler-side id used elsewhere.
-        engine_id = event.metadata.get("engine_id")
         attrs: dict[str, str] = {}
+        engine_id = event.metadata.get("engine_id")
         if engine_id is not None:
             attrs["worker_id"] = str(engine_id)
+        model_name = event.metadata.get("model_name")
+        if model_name is not None:
+            attrs["model_name"] = str(model_name)
+        cache_salt = event.metadata.get("cache_salt")
+        if cache_salt is not None:
+            attrs["cache_salt"] = str(cache_salt)
         self._num_chunks_loaded.add(retrieved_count, attributes=attrs)

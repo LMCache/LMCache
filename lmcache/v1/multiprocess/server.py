@@ -601,6 +601,7 @@ class MPCacheEngine:
                             "device": str(gpu_context.device),
                             "engine_id": instance_id,
                             "model_name": model_name,
+                            "cache_salt": key.cache_salt,
                             "total_bytes": total_bytes,
                         },
                     ),
