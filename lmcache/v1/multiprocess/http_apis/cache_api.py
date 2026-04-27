@@ -80,9 +80,25 @@ async def kvcache_check(
         success contains::
 
             {
-                "checksums": [...],
+                "status": "success",
+                "chunk_size": <int>,
+                "num_chunks": <int>,
+                "chunk_checksums": <see below>,
+                "layerwise": <bool>,
                 "slot_mapping_ranges": "<compressed ranges>"
             }
+
+        The type of ``chunk_checksums`` depends on the
+        ``layerwise`` query parameter — mirroring the vLLM
+        internal API contract:
+
+        * ``layerwise=false`` (default): ``list[str]`` with one
+          aggregated MD5 digest per chunk. Callers may safely
+          ``"".join`` the list.
+        * ``layerwise=true``: ``dict[str, list[str]]`` keyed by
+          ``"layer_<idx>"``; each value is the per-chunk digest
+          list for that layer. Callers that expect a flat list
+          **must** branch on ``layerwise`` before consuming.
 
         Error responses carry ``{"error": "..."}`` with one of
         the HTTP status codes listed below.

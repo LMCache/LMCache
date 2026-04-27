@@ -216,12 +216,16 @@ def _allocate_gpu_kv_cache(
     block_size: int = 16,
     dtype: torch.dtype = torch.float16,
     device: str | torch.device | None = None,
+    kv_size: int = 2,
 ) -> list[torch.Tensor]:
     """Allocate paged GPU KV cache tensors.
 
     Each layer is a tensor of shape
-    ``(2, num_blocks, block_size, num_heads, head_size)``
-    matching the vLLM NHD layout.
+    ``(kv_size, num_blocks, block_size, num_heads, head_size)``
+    matching the vLLM NHD layout. ``kv_size`` is 2 for standard
+    K/V attention; override via the ``--kvcache-shape-spec``
+    first dimension for architectures that need a different
+    leading dimension (e.g. MLA).
     """
     torch.random.manual_seed(42)
     dev = (
@@ -231,7 +235,7 @@ def _allocate_gpu_kv_cache(
     )
     return [
         torch.randn(
-            (2, num_blocks, block_size, num_heads, head_size),
+            (kv_size, num_blocks, block_size, num_heads, head_size),
             dtype=dtype,
             device=dev,
         )
@@ -414,7 +418,14 @@ def _query_checksum(
     slot_end: int,
     chunk_size: int,
 ) -> list[str] | None:
-    """Query KV cache checksums via the HTTP API."""
+    """Query KV cache checksums via the HTTP API.
+
+    This CLI pins ``layerwise=false`` so the server always
+    returns ``chunk_checksums`` as a flat ``list[str]``. We
+    still defensively validate the response type — if a future
+    endpoint variant returns a per-layer ``dict`` we log and
+    skip the comparison rather than letting ``str.join`` crash.
+    """
     slots = list(range(slot_start, slot_end))
     compressed = compress_slot_mapping(slots)
     parts: list[str] = []
@@ -424,7 +435,7 @@ def _query_checksum(
         else:
             parts.append(str(item))
     slot_mapping = ",".join(parts)
-    url = "%s/api/kvcache/check?slot_mapping=%s&chunk_size=%d" % (
+    url = ("%s/api/kvcache/check?slot_mapping=%s&chunk_size=%d&layerwise=false") % (
         http_base,
         slot_mapping,
         chunk_size,
@@ -433,8 +444,18 @@ def _query_checksum(
         req = urllib.request.Request(url)
         with urllib.request.urlopen(req, timeout=5) as resp:
             data = json.loads(resp.read().decode())
-            if data.get("status") == "success":
-                return data.get("chunk_checksums", [])
+            if data.get("status") != "success":
+                return None
+            checksums = data.get("chunk_checksums", [])
+            if not isinstance(checksums, list) or not all(
+                isinstance(c, str) for c in checksums
+            ):
+                print(
+                    "  [WARNING] unexpected chunk_checksums "
+                    "type=%s; expected list[str]" % type(checksums).__name__
+                )
+                return None
+            return checksums
     except (urllib.error.URLError, OSError) as exc:
         print("  [WARNING] Checksum query failed: %s" % exc)
     return None
@@ -764,11 +785,31 @@ class TestCacheCommand(BaseCommand):
             layer_groups = parse_kvcache_shape_spec(
                 args.kvcache_shape_spec,
             )
-            # Use the first group to derive shape parameters
+            # Use the first group to derive shape parameters.
+            # ``nb``/``bs``/``kv_size`` from the spec take
+            # precedence when set (>0); otherwise fall back
+            # to the CLI flags so existing specs that only
+            # declare ``nh``/``hs`` keep working.
             first = layer_groups[0]
             num_layers = sum(g.num_layers for g in layer_groups)
             num_heads = first.shape_desc.nh
             head_size = first.shape_desc.hs
+            spec_nb = getattr(first.shape_desc, "nb", 0) or 0
+            spec_bs = getattr(first.shape_desc, "bs", 0) or 0
+            spec_kv = getattr(first.shape_desc, "kv_size", 0) or 0
+            num_blocks = spec_nb if spec_nb > 0 else args.num_blocks
+            block_size = spec_bs if spec_bs > 0 else args.block_size
+            kv_size = spec_kv if spec_kv > 0 else 2
+            if spec_nb and spec_nb != args.num_blocks:
+                print(
+                    "  [info] spec nb=%d overrides --num-blocks=%d"
+                    % (spec_nb, args.num_blocks)
+                )
+            if spec_bs and spec_bs != args.block_size:
+                print(
+                    "  [info] spec bs=%d overrides --block-size=%d"
+                    % (spec_bs, args.block_size)
+                )
             dtype = first.dtype
             dtype_str = next(
                 (k for k, v in DTYPE_MAP.items() if v == dtype),
@@ -782,8 +823,8 @@ class TestCacheCommand(BaseCommand):
                 "num_layers": num_layers,
                 "num_heads": num_heads,
                 "head_size": head_size,
-                "num_blocks": args.num_blocks,
-                "block_size": args.block_size,
+                "num_blocks": num_blocks,
+                "block_size": block_size,
                 "dtype": dtype_str,
             }
 
@@ -797,14 +838,15 @@ class TestCacheCommand(BaseCommand):
             )
             print(
                 "KV shape: %d layers, %d heads x %d, "
-                "dtype=%s, blocks=%dx%d"
+                "dtype=%s, blocks=%dx%d, kv=%d"
                 % (
                     num_layers,
                     num_heads,
                     head_size,
                     dtype_str,
-                    args.num_blocks,
-                    args.block_size,
+                    num_blocks,
+                    block_size,
+                    kv_size,
                 )
             )
 
@@ -813,9 +855,10 @@ class TestCacheCommand(BaseCommand):
                 num_layers=num_layers,
                 num_heads=num_heads,
                 head_size=head_size,
-                num_blocks=args.num_blocks,
-                block_size=args.block_size,
+                num_blocks=num_blocks,
+                block_size=block_size,
                 dtype=dtype,
+                kv_size=kv_size,
             )
             print(
                 "Allocated %d GPU tensors on %s"
@@ -855,8 +898,8 @@ class TestCacheCommand(BaseCommand):
                     chunk_size,
                     "cold",
                     http_base=http_base,
-                    block_size=args.block_size,
-                    total_blocks=args.num_blocks,
+                    block_size=block_size,
+                    total_blocks=num_blocks,
                 )
 
                 time.sleep(args.interval)
@@ -869,8 +912,8 @@ class TestCacheCommand(BaseCommand):
                     chunk_size,
                     "warm",
                     http_base=http_base,
-                    block_size=args.block_size,
-                    total_blocks=args.num_blocks,
+                    block_size=block_size,
+                    total_blocks=num_blocks,
                 )
 
                 # Compare checksums
