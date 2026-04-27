@@ -229,14 +229,18 @@ def _allocate_gpu_kv_cache(
         if device
         else torch.device("cuda", torch.cuda.current_device())
     )
-    return [
-        torch.randn(
-            (kv_size, num_blocks, block_size, num_heads, head_size),
-            dtype=dtype,
-            device=dev,
-        )
-        for _ in range(num_layers)
-    ]
+    shape = (kv_size, num_blocks, block_size, num_heads, head_size)
+
+    def _alloc() -> torch.Tensor:
+        if dtype.is_floating_point:
+            return torch.randn(shape, dtype=dtype, device=dev)
+        # ``torch.randn`` only supports floating-point dtypes; fall
+        # back to ``randint`` for integer dtypes (e.g. ``uint8``
+        # used by FP8 quantized KV cache layouts).
+        iinfo = torch.iinfo(dtype)
+        return torch.randint(iinfo.min, iinfo.max + 1, shape, dtype=dtype, device=dev)
+
+    return [_alloc() for _ in range(num_layers)]
 
 
 def _send_register_kv_cache(

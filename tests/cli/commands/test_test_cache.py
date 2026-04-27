@@ -17,12 +17,14 @@ import time
 # Third Party
 import msgspec
 import pytest
+import torch
 import zmq
 
 # First Party
 from lmcache.cli.commands.bench import BenchCommand
 from lmcache.cli.commands.test_cache import (
     ZmqClient,
+    _allocate_gpu_kv_cache,
     _build_token_ids,
     _make_key,
     _query_checksum,
@@ -475,3 +477,48 @@ class TestZmqClient:
             client.sock.close(linger=0)
         finally:
             router.stop()
+
+
+# ------------------------------------------------------------------ #
+#  _allocate_gpu_kv_cache (dtype branching)
+# ------------------------------------------------------------------ #
+
+
+class TestAllocateKVCache:
+    """Regression tests for ``_allocate_gpu_kv_cache`` dtype handling.
+
+    ``torch.randn`` only supports floating-point dtypes, so integer
+    dtypes in ``DTYPE_MAP`` (e.g. ``uint8`` used by FP8 quantized
+    layouts) must fall back to ``torch.randint`` -- see Bugbot
+    #3147565172.
+    """
+
+    @staticmethod
+    def _alloc(dtype: torch.dtype) -> list[torch.Tensor]:
+        return _allocate_gpu_kv_cache(
+            num_layers=1,
+            num_heads=2,
+            head_size=4,
+            num_blocks=2,
+            block_size=2,
+            dtype=dtype,
+            device="cpu",
+            kv_size=2,
+        )
+
+    @pytest.mark.parametrize(
+        "dtype",
+        [torch.float16, torch.float32, torch.bfloat16],
+    )
+    def test_floating_point_dtype(self, dtype: torch.dtype) -> None:
+        tensors = self._alloc(dtype)
+        assert len(tensors) == 1
+        assert tensors[0].dtype == dtype
+        assert tensors[0].shape == (2, 2, 2, 2, 4)
+
+    def test_uint8_dtype_uses_randint(self) -> None:
+        """Regression: ``torch.randn`` crashes with integer dtypes."""
+        tensors = self._alloc(torch.uint8)
+        assert len(tensors) == 1
+        assert tensors[0].dtype == torch.uint8
+        assert tensors[0].shape == (2, 2, 2, 2, 4)
