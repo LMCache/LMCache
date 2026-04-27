@@ -36,8 +36,8 @@ these events see [METRICS.md](METRICS.md).
 
 | EventType | Metadata keys | Types |
 |---|---|---|
-| `L2_STORE_SUBMITTED` | `adapter_index`, `key_count` | `int`, `int` |
-| `L2_STORE_COMPLETED` | `adapter_index`, `succeeded_count`, `failed_count` | `int`, `int`, `int` |
+| `L2_STORE_SUBMITTED` | `adapter_index`, `task_id`, `l2_name`, `key_count`, `total_bytes` | `int`, `int`, `str`, `int`, `int` |
+| `L2_STORE_COMPLETED` | `adapter_index`, `task_id`, `l2_name`, `succeeded_count`, `failed_count` | `int`, `int`, `str`, `int`, `int` |
 
 ---
 
@@ -49,6 +49,14 @@ these events see [METRICS.md](METRICS.md).
 | `L2_PREFETCH_LOOKUP_COMPLETED` | `request_id`, `prefix_hit_count` | `int`, `int` |
 | `L2_PREFETCH_LOAD_SUBMITTED` | `request_id`, `key_count`, `adapter_count` | `int`, `int`, `int` |
 | `L2_PREFETCH_LOAD_COMPLETED` | `request_id`, `loaded_count`, `failed_count` | `int`, `int`, `int` |
+| `L2_LOAD_TASK_SUBMITTED` | `request_id`, `adapter_index`, `task_id`, `l2_name`, `key_count`, `total_bytes` | `int`, `int`, `int`, `str`, `int`, `int` |
+| `L2_LOAD_TASK_COMPLETED` | `request_id`, `adapter_index`, `task_id`, `l2_name` | `int`, `int`, `int`, `str` |
+
+`L2_LOAD_TASK_*` events fire once per `(request_id, adapter_index)` pair
+— unlike the request-level `L2_PREFETCH_LOAD_*` events above, which
+aggregate across adapters.  Throughput subscribers that need per-adapter
+attribution (e.g. `L2ThroughputSubscriber`) consume these task-level
+events; key-count counters continue to consume the request-level events.
 
 ---
 
@@ -74,10 +82,10 @@ to correlate START/END pairs.
 
 | EventType | Metadata keys | Types |
 |---|---|---|
-| `MP_STORE_START` | `device`, `engine_id`, `gpu_id` | `str`, `int`, `int` |
-| `MP_STORE_END` | `device`, `stored_count`, `engine_id`, `gpu_id`, `total_bytes` | `str`, `int`, `int`, `int`, `int` |
-| `MP_RETRIEVE_START` | `device`, `engine_id`, `gpu_id` | `str`, `int`, `int` |
-| `MP_RETRIEVE_END` | `device`, `retrieved_count`, `engine_id`, `gpu_id`, `total_bytes` | `str`, `int`, `int`, `int`, `int` |
+| `MP_STORE_START` | `device`, `engine_id`, `model_name` | `str`, `int`, `str` |
+| `MP_STORE_END` | `device`, `stored_count`, `engine_id`, `model_name`, `total_bytes` | `str`, `int`, `int`, `str`, `int` |
+| `MP_RETRIEVE_START` | `device`, `engine_id`, `model_name` | `str`, `int`, `str` |
+| `MP_RETRIEVE_END` | `device`, `retrieved_count`, `engine_id`, `model_name`, `total_bytes` | `str`, `int`, `int`, `str`, `int` |
 | `MP_LOOKUP_PREFETCH_START` | *(none)* | — |
 | `MP_LOOKUP_PREFETCH_END` | `found_count`, `requested_tokens`, `hit_tokens` | `int`, `int`, `int` |
 | `MP_LOOKUP` | `request_id`, `chunk_hashes`, `model_name`, `chunk_size`, `seq_len`, `dtypes`, `shapes` | `str`, `list[str]`, `str`, `int`, `int`, `list[str]`, `list[list[int]]` |

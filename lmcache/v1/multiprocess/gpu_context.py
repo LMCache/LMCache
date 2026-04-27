@@ -33,14 +33,15 @@ from lmcache.v1.gpu_connector.utils import (
     is_mla,
 )
 from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
-
-if torch.cuda.is_available():
-    import lmcache.c_ops as lmc_ops
-
-# First Party
 from lmcache.v1.multiprocess.custom_types import (
     KVCache,
 )
+
+# Backend selection (c_ops when CUDA is available, otherwise a pure-Python
+# fallback) is handled once in ``lmcache/__init__.py`` via ``_get_backend``,
+# which aliases the chosen module as ``lmcache.c_ops`` in ``sys.modules``.
+# Importing it here transparently works in both CUDA and CPU-only envs.
+import lmcache.c_ops as lmc_ops
 
 logger = init_logger(__name__)
 
@@ -241,6 +242,7 @@ class GPUCacheContext:
         """Returns the KV layer groups manager."""
         return self.kv_layer_groups_manager_
 
+    @property
     def gpu_kv_format_name(self) -> str:
         """Returns the GPU KV format enum name (e.g. ``'NL_X_TWO_NB_BS_NH_HS'``)."""
         return self.gpu_kv_format_.name
