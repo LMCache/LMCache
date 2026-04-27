@@ -79,12 +79,6 @@ _DEFAULT_SHAPE_SPEC = "(2,1024,16,8,128):float16:32"
 # ------------------------------------------------------------------ #
 
 
-VOID_RESPONSE: tuple[bytes, ...] = ()
-"""Immutable sentinel returned when a response carries no payload
-frames (or is malformed with < 2 frames). Distinguishes a successful
-void reply from a timeout (``None``)."""
-
-
 class ZmqClient:
     """Thin wrapper around a DEALER ``zmq.Socket``.
 
@@ -114,15 +108,17 @@ class ZmqClient:
         request_type: RequestType,
         payloads: list[bytes] | None = None,
         timeout_ms: int = 10000,
-    ) -> list[bytes] | tuple[bytes, ...] | None:
+    ) -> list[bytes] | None:
         """Send a request and wait for the matching response.
 
-        Returns the raw response frames (excluding uid and type),
-        an empty sentinel for a successful void response (no
-        payload), or *None* on timeout.
+        Returns the raw response payload frames (excluding uid and
+        type) on success -- an empty list means a successful void
+        reply -- or *None* on timeout.
 
-        Late replies from previous timed-out calls are dropped by
-        matching ``resp[0]`` against the request UID.
+        Malformed frames (``< 2`` frames or undecodable UID) and
+        late replies from previously timed-out calls are silently
+        dropped; polling continues until the matching UID arrives
+        or the overall budget expires.
         """
         uid = self._next_uid()
         b_uid = msgspec.msgpack.encode(uid)
@@ -146,15 +142,15 @@ class ZmqClient:
 
             resp = self._sock.recv_multipart()
             if len(resp) < 2:
-                # Malformed reply — treat as void sentinel so
-                # callers can still distinguish it from a
-                # timeout (None).
-                return VOID_RESPONSE
+                # Malformed reply -- drop and keep polling so a
+                # stray frame from a prior timed-out request does
+                # not fail the current one.
+                continue
 
             try:
                 resp_uid = msgspec.msgpack.decode(resp[0], type=int)
             except msgspec.DecodeError:
-                # Unparsable UID — skip and keep waiting.
+                # Unparsable UID -- skip and keep waiting.
                 continue
 
             if resp_uid != uid:

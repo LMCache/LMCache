@@ -295,11 +295,16 @@ class _EchoRouter:
     """
 
     def __init__(
-        self, endpoint: str, delay_uid: int | None = None, delay_seconds: float = 0.5
+        self,
+        endpoint: str,
+        delay_uid: int | None = None,
+        delay_seconds: float = 0.5,
+        inject_malformed_before_uid: int | None = None,
     ) -> None:
         self._endpoint = endpoint
         self._delay_uid = delay_uid
         self._delay_seconds = delay_seconds
+        self._inject_before_uid = inject_malformed_before_uid
         self._ctx = zmq.Context.instance()
         self._router = self._ctx.socket(zmq.ROUTER)
         self._router.bind(endpoint)
@@ -341,6 +346,15 @@ class _EchoRouter:
                 timer.daemon = True
                 timer.start()
             else:
+                if (
+                    self._inject_before_uid is not None
+                    and uid == self._inject_before_uid
+                ):
+                    # Emit a malformed 1-frame reply *before* the
+                    # real one, so the DEALER's recv queue sees
+                    # [bad, good] -- exercising the ``continue``
+                    # path for ``len(resp) < 2``.
+                    self._router.send_multipart([identity, b"malformed"])
                 _send_reply()
 
 
@@ -429,6 +443,35 @@ class TestZmqClient:
                 timeout_ms=2000,
             )
             assert r1 is not None, "request #1 must succeed; stale reply not discarded"
+            client.sock.close(linger=0)
+        finally:
+            router.stop()
+
+    def test_malformed_frame_is_discarded(
+        self,
+        router_endpoint: str,
+    ) -> None:
+        """A malformed (< 2 frames) reply must not fail the request.
+
+        Regression for Bugbot #3147233202: the previous code
+        returned a ``VOID_RESPONSE`` sentinel when a stray 1-frame
+        reply arrived, which callers could not distinguish from a
+        real void reply and which aborted the poll loop before the
+        genuine matching response arrived. The loop must now
+        ``continue`` and eventually return the real payload.
+        """
+        router = _EchoRouter(
+            router_endpoint,
+            inject_malformed_before_uid=0,
+        )
+        router.start()
+        try:
+            client = self._make_client(router_endpoint)
+            resp = client.send_request(
+                RequestType.GET_CHUNK_SIZE,
+                timeout_ms=2000,
+            )
+            assert resp is not None, "malformed frame must be skipped, not returned"
             client.sock.close(linger=0)
         finally:
             router.stop()
