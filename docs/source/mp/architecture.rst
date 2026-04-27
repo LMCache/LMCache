@@ -56,10 +56,13 @@ which adds CacheBlend operations (``CB_REGISTER_KV_CACHE``,
 cache reuse across document paragraphs.
 
 **``http_server.py``** -- Wraps ``run_cache_server()`` (from ``server.py``)
-inside a FastAPI application.  Adds ``/api/healthcheck`` for Kubernetes probes,
-``POST /api/clear-cache`` for clearing all KV cache data in L1 (CPU) memory,
-and ``/api/status`` for inspecting detailed internal state.
-The ZMQ server runs as part of the same process.
+inside a FastAPI application.  Endpoints are contributed by modules under
+``http_apis/`` and auto-registered via ``HTTPAPIRegistry``: ``GET /`` (basic
+liveness), ``GET /api/healthcheck`` for Kubernetes probes, ``POST /api/clear-cache``
+for clearing all KV cache data in L1 (CPU) memory, and ``GET /api/status``
+for inspecting detailed internal state.  The ZMQ server runs as part of the
+same process, and any configured runtime plugins are spawned by
+``MPRuntimePluginLauncher`` during FastAPI startup.
 
 ZMQ Protocol
 ------------
@@ -144,6 +147,9 @@ Each config module exposes a composable triple:
 
     parser = argparse.ArgumentParser(...)
     add_mp_server_args(parser)        # from multiprocess/config.py
+                                      # includes runtime-plugin args
+                                      # (--runtime-plugin-locations,
+                                      #  --runtime-plugin-config)
     add_storage_manager_args(parser)  # from distributed/config.py
       # which internally calls add_l2_adapters_args(parser)
     add_observability_args(parser)    # from mp_observability/config.py
@@ -311,13 +317,25 @@ How to Extend
 Adding a new L2 adapter
 ~~~~~~~~~~~~~~~~~~~~~~~~
 
+Create a new ``*_l2_adapter.py`` module under
+``lmcache/v1/distributed/l2_adapters/`` — ``__init__.py`` auto-discovers
+modules matching that suffix via ``pkgutil`` and imports them lazily on
+first use, so no other files need to be modified.
+
 1. Create a config class subclassing ``L2AdapterConfigBase`` with
    ``from_dict()`` and ``help()`` methods.
-2. Call ``register_l2_adapter_type("my_adapter", MyAdapterConfig)`` at module
-   level.
-3. Create an adapter class implementing ``L2AdapterInterface``.
-4. Add an ``isinstance()`` branch in ``create_l2_adapter()``
-   (``l2_adapters/__init__.py``).
+2. Create an adapter class implementing ``L2AdapterInterface``, and
+   a small factory function
+   ``(config, l1_memory_desc) -> L2AdapterInterface``.
+3. At module level, self-register both the config and the factory:
+
+   .. code-block:: python
+
+       register_l2_adapter_type("my_adapter", MyAdapterConfig)
+       register_l2_adapter_factory("my_adapter", _create_my_adapter)
+
+See ``mock_l2_adapter.py`` or ``s3_l2_adapter.py`` for reference
+implementations.
 
 Adding an observability subscriber
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -362,6 +380,14 @@ Key Source Files
      - BlendEngineV2 (extends MPCacheEngine)
    * - ``lmcache/v1/multiprocess/http_server.py``
      - FastAPI wrapper with health check and many other useful APIs
+   * - ``lmcache/v1/multiprocess/http_api_registry.py``
+     - ``HTTPAPIRegistry`` that auto-discovers routers in ``http_apis/``
+   * - ``lmcache/v1/multiprocess/http_apis/``
+     - Extensible HTTP endpoints (``/``, ``/api/healthcheck``,
+       ``/api/clear-cache``, ``/api/status``)
+   * - ``lmcache/v1/multiprocess/mp_runtime_plugin_launcher.py``
+     - ``MPRuntimePluginLauncher`` that spawns runtime plugins with the
+       full server config serialized into environment variables
    * - ``lmcache/v1/multiprocess/protocols/base.py``
      - RequestType, HandlerType, ProtocolDefinition
    * - ``lmcache/v1/distributed/storage_manager.py``

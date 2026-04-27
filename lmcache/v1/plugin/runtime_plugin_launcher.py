@@ -14,7 +14,13 @@ logger = init_logger(__name__)
 
 
 class RuntimePluginLauncher:
-    def __init__(self, config, role: str, worker_count: int, worker_id: int):
+    def __init__(
+        self,
+        config,
+        role: str | None,
+        worker_count: int,
+        worker_id: int,
+    ):
         self.config = config
         self.role = role
         self.worker_count = worker_count
@@ -50,23 +56,38 @@ class RuntimePluginLauncher:
             self._launch_plugin(file)
 
     def _should_skip_plugin(self, file: Path, parts: list[str]) -> bool:
-        """Determine if plugin should be skipped based on role/worker ID"""
+        """Determine if plugin should be skipped based on role/worker ID.
+
+        The naming convention is ROLE_WORKERID_NAME (e.g. server_0_foo.py).
+        When role is None (MP mode), this convention does not apply,
+        so both role and worker ID filtering are skipped entirely.
+        """
         if len(parts) < 2:
             return False
 
-        # Check role match
+        # When role is None, skip all role/worker-based filtering
+        # (e.g. MP mode has no role concept)
+        if self.role is None:
+            return False
+
         plugin_role = parts[0].upper()
         if plugin_role != "ALL" and plugin_role != self.role.upper():
-            logger.info("Skipping %s: requires role %s", file, plugin_role)
+            logger.info(
+                "Skipping %s: requires role %s",
+                file,
+                plugin_role,
+            )
             return True
 
-        # Check worker ID match
+        # Check worker ID match (parts[1] in ROLE_WORKERID_NAME)
         if len(parts) > 2 and parts[1].isdigit():
             plugin_worker_id = int(parts[1])
             if plugin_worker_id != self.worker_id:
                 logger.info(
-                    f"worker {self.worker_id} is skipping plugin {file}, "
-                    f"which is only for worker ID {plugin_worker_id}"
+                    "worker %d is skipping plugin %s, which is only for worker ID %d",
+                    self.worker_id,
+                    file,
+                    plugin_worker_id,
                 )
                 return True
 
@@ -86,16 +107,22 @@ class RuntimePluginLauncher:
 
             # Pass role and config as environment variables
             env = os.environ.copy()
-            env["LMCACHE_RUNTIME_PLUGIN_ROLE"] = str(self.role)
+            role_str = self.role or ""
+            env["LMCACHE_RUNTIME_PLUGIN_ROLE"] = role_str
             env["LMCACHE_RUNTIME_PLUGIN_CONFIG"] = self.config.to_json()
             env["LMCACHE_RUNTIME_PLUGIN_WORKER_COUNT"] = str(self.worker_count)
             env["LMCACHE_RUNTIME_PLUGIN_WORKER_ID"] = str(self.worker_id)
 
             # TODO: For backwards compatibility, remove when applicable
-            env["LMCACHE_PLUGIN_ROLE"] = str(self.role)
+            env["LMCACHE_PLUGIN_ROLE"] = role_str
             env["LMCACHE_PLUGIN_CONFIG"] = self.config.to_json()
             env["LMCACHE_PLUGIN_WORKER_COUNT"] = str(self.worker_count)
             env["LMCACHE_PLUGIN_WORKER_ID"] = str(self.worker_id)
+
+            # Force line-buffered stdout for Python sub-processes
+            # so that output is captured in real-time rather than
+            # being held in the block buffer until exit.
+            env["PYTHONUNBUFFERED"] = "1"
 
             proc = subprocess.Popen(
                 [interpreter, str(file)],

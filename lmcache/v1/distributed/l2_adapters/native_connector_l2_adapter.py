@@ -22,6 +22,7 @@ from __future__ import annotations
 
 # Standard
 from collections import defaultdict
+from typing import Any
 import os
 import select
 import threading
@@ -103,8 +104,8 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
     _OP_LOAD = "load"
     _OP_DELETE = "delete"
 
-    def __init__(self, native_client, max_capacity_gb: float = 0):
-        super().__init__()
+    def __init__(self, native_client: Any, max_capacity_gb: float = 0) -> None:
+        super().__init__(max_capacity_bytes=int(max_capacity_gb * (1024**3)))
         self._client = native_client
         self._client_fd: int = int(native_client.event_fd())
 
@@ -137,11 +138,14 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
         # Pending delete events for synchronous delete() calls
         self._pending_delete_events: dict[L2TaskId, threading.Event] = {}
 
-        # Client-side size tracking for get_usage()
-        self._max_capacity_bytes = int(max_capacity_gb * (1024**3))
-        self._current_size_bytes: int = 0
+        # Per-key size tracking. ``_key_sizes`` lets us look up byte sizes
+        # at delete time (the native completion only carries booleans, not
+        # sizes) so we can pass them to ``_notify_keys_deleted``. Aggregate
+        # and per-user totals live in the base class — see ``get_usage``.
         self._key_sizes: dict[ObjectKey, int] = {}
-        # Pending store sizes: native future_id -> (keys, per_key_sizes)
+        # Pending store sizes: native future_id -> (keys, per_key_sizes).
+        # Bridges the async store submit → demux completion gap so the
+        # demux thread can fire ``_notify_keys_stored(keys, sizes)``.
         self._pending_store_sizes: dict[int, tuple[list[ObjectKey], list[int]]] = {}
 
         # Task ID counter
@@ -321,14 +325,14 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
             )
             return
 
-        self._notify_keys_deleted(keys)
+        # ``_notify_keys_deleted`` is fired by the demux thread (with
+        # accurate per-key sizes drawn from ``_key_sizes``) when the
+        # backend reports per-key deletion results, so we don't notify
+        # again here.
 
-    def get_usage(self) -> tuple[float, float]:
-        if self._max_capacity_bytes <= 0:
-            return (-1.0, -1.0)
-        with self._lock:
-            usage = self._current_size_bytes / self._max_capacity_bytes
-            return (usage, usage)
+    # ``get_usage()`` is inherited from ``L2AdapterInterface``. The base
+    # class tracks aggregate + per-user totals via ``_notify_keys_*``;
+    # we feed it the byte sizes from each store/delete completion.
 
     # ---------------------------------------------------------------
     # Cleanup
@@ -378,9 +382,19 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
                 continue
 
             # Collect listener notifications to fire after
-            # releasing the lock.
+            # releasing the lock. Sizes are collected in parallel so
+            # ``_notify_keys_*`` can update the base class's byte
+            # accounting in one shot.
             keys_stored: list[ObjectKey] = []
+            sizes_stored: list[int] = []
             keys_accessed: list[ObjectKey] = []
+            keys_deleted: list[ObjectKey] = []
+            sizes_deleted: list[int] = []
+            # Events for synchronous ``delete()`` callers. We set these
+            # AFTER firing ``_notify_keys_deleted`` below so that when
+            # the caller unblocks and calls ``get_usage()``, the base
+            # class's byte counters already reflect the deletion.
+            delete_done_events: list[threading.Event] = []
 
             with self._lock:
                 for (
@@ -407,15 +421,24 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
 
                     if op_type == self._OP_STORE:
                         self._completed_stores[task_id] = ok
-                        # Update size tracking on success
                         store_info = self._pending_store_sizes.pop(fid, None)
                         if ok and store_info is not None:
                             store_keys, sizes = store_info
-                            for key, size in zip(store_keys, sizes, strict=False):
+                            for key, size in zip(store_keys, sizes, strict=True):
+                                # First-store wins for byte accounting:
+                                # a re-store of an existing key adds 0
+                                # bytes (the backend already holds it).
+                                # We still notify the listener for every
+                                # store so LRU policies can ``move_to_end``
+                                # on re-store — passing size=0 in that
+                                # case is a no-op for the base counters.
                                 if key not in self._key_sizes:
                                     self._key_sizes[key] = size
-                                    self._current_size_bytes += size
-                            keys_stored.extend(store_keys)
+                                    keys_stored.append(key)
+                                    sizes_stored.append(size)
+                                else:
+                                    keys_stored.append(key)
+                                    sizes_stored.append(0)
                         os.eventfd_write(self._store_efd, 1)
 
                     elif op_type == self._OP_LOOKUP:
@@ -450,19 +473,32 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
                         os.eventfd_write(self._load_efd, 1)
 
                     elif op_type == self._OP_DELETE:
-                        # Decrement sizes for successfully deleted keys
                         if result_bools is not None and lookup_keys is not None:
                             for i, deleted in enumerate(result_bools):
-                                if deleted:
-                                    key = lookup_keys[i]
-                                    size = self._key_sizes.pop(key, 0)
-                                    self._current_size_bytes -= size
+                                if not deleted:
+                                    continue
+                                key = lookup_keys[i]
+                                # Only notify (with size) for keys we've
+                                # actually accounted for via a prior store.
+                                if key in self._key_sizes:
+                                    sizes_deleted.append(self._key_sizes.pop(key))
+                                    keys_deleted.append(key)
                         evt = self._pending_delete_events.pop(task_id, None)
                         if evt is not None:
-                            evt.set()
+                            delete_done_events.append(evt)
 
-            # Fire listener notifications outside the lock
+            # Fire listener notifications outside the lock so a slow
+            # listener cannot stall further demux iterations.
             if keys_stored:
-                self._notify_keys_stored(keys_stored)
+                self._notify_keys_stored(keys_stored, sizes_stored)
             if keys_accessed:
                 self._notify_keys_accessed(keys_accessed)
+            if keys_deleted:
+                self._notify_keys_deleted(keys_deleted, sizes_deleted)
+            # Unblock any synchronous ``delete()`` callers only AFTER
+            # ``_notify_keys_deleted`` has updated the base class byte
+            # accounting, so ``get_usage()`` never briefly reports stale
+            # (too-high) usage in the window between ``delete()``
+            # returning and the notify running.
+            for evt in delete_done_events:
+                evt.set()

@@ -405,6 +405,9 @@ class PrefetchController(StorageControllerInterface):
         while not self._stop_flag.is_set():
             ready = poller.poll(PREFETCH_LOOP_POLL_TIMEOUT_MS)
 
+            signaled_adapters: dict[PrefetchPhase, set[int]] = {
+                phase: set() for phase in PrefetchPhase
+            }
             for fd, events in ready:
                 if not (events & select.POLLIN):
                     continue
@@ -418,16 +421,28 @@ class PrefetchController(StorageControllerInterface):
                     if fd == self._submission_efd:
                         self._drain_submission_queue()
                     elif fd in self._lookup_efd_to_adapter:
-                        self._process_lookup_completions(
+                        signaled_adapters[PrefetchPhase.LOOKUP].add(
                             self._lookup_efd_to_adapter[fd]
                         )
                     elif fd in self._load_efd_to_adapter:
-                        self._process_load_completions(self._load_efd_to_adapter[fd])
+                        signaled_adapters[PrefetchPhase.PLAN_AND_LOAD].add(
+                            self._load_efd_to_adapter[fd]
+                        )
                 except Exception:
                     logger.exception(
                         "Unexpected error in prefetch loop while processing fd %d",
                         fd,
                     )
+
+            if any(signaled_adapters.values()):
+                for request in list(self._in_flight_requests.values()):
+                    try:
+                        self._advance_request(request, signaled_adapters)
+                    except Exception:
+                        logger.exception(
+                            "Unexpected error advancing in-flight prefetch request %d",
+                            request.request_id,
+                        )
 
             try:
                 self._start_pending_requests()
@@ -497,32 +512,6 @@ class PrefetchController(StorageControllerInterface):
                 },
             )
         )
-
-    def _process_lookup_completions(self, adapter_index: int) -> None:
-        """Check all LOOKUP-phase requests for completed lookups from
-        this adapter."""
-        ready_to_transition: list[InFlightPrefetchRequest] = []
-
-        for request in list(self._in_flight_requests.values()):
-            if request.phase != PrefetchPhase.LOOKUP:
-                continue
-            if adapter_index not in request.pending_lookup_tasks:
-                continue
-
-            task_id = request.pending_lookup_tasks[adapter_index]
-            result = self._l2_adapters[adapter_index].query_lookup_and_lock_result(
-                task_id
-            )
-
-            if result is not None:
-                request.lookup_results[adapter_index] = result
-                del request.pending_lookup_tasks[adapter_index]
-
-                if request.all_lookups_done():
-                    ready_to_transition.append(request)
-
-        for request in ready_to_transition:
-            self._transition_to_load_phase(request)
 
     # =========================================================================
     # Load phase
@@ -633,6 +622,27 @@ class PrefetchController(StorageControllerInterface):
                 per_adapter_keys, per_adapter_objs
             )
             request.pending_load_tasks[adapter_idx] = task_id
+            # Per-adapter byte accounting for L2_LOAD_TASK_* throughput
+            # events.  Uniform layout per chunk -> size * count.
+            total_bytes = (
+                per_adapter_objs[0].get_size() * len(per_adapter_objs)
+                if per_adapter_objs
+                else 0
+            )
+
+            self._event_bus.publish(
+                Event(
+                    event_type=EventType.L2_LOAD_TASK_SUBMITTED,
+                    metadata={
+                        "request_id": request.request_id,
+                        "adapter_index": adapter_idx,
+                        "task_id": task_id,
+                        "l2_name": self._adapter_descriptors[adapter_idx].type_name,
+                        "key_count": len(per_adapter_keys),
+                        "total_bytes": total_bytes,
+                    },
+                )
+            )
 
         ## Step 8: update the lookup result based on the final load plan
         self._update_lookup_results(request.request_id, prefix_length)
@@ -671,28 +681,71 @@ class PrefetchController(StorageControllerInterface):
         with self._lookup_results_lock:
             self._completed_lookups[request_id] = hit_chunks
 
-    def _process_load_completions(self, adapter_index: int) -> None:
-        """Check all PLAN_AND_LOAD-phase requests for completed loads."""
-        ready_to_finalize: list[InFlightPrefetchRequest] = []
+    def _advance_request(
+        self,
+        request: InFlightPrefetchRequest,
+        signaled_adapters: dict[PrefetchPhase, set[int]],
+    ) -> None:
+        """State-transition dispatcher by phase: poll signaled adapters for
+        the request's current phase via the per-phase helper, then trigger
+        the phase transition when done."""
+        phase_adapters = signaled_adapters[request.phase]
+        if not phase_adapters:
+            return
+        if request.phase == PrefetchPhase.LOOKUP:
+            self._poll_lookup_results(request, phase_adapters)
+            if request.all_lookups_done():
+                self._transition_to_load_phase(request)
+        elif request.phase == PrefetchPhase.PLAN_AND_LOAD:
+            self._poll_load_results(request, phase_adapters)
+            if request.all_loads_done():
+                self._finalize_load(request)
 
-        for request in list(self._in_flight_requests.values()):
-            if request.phase != PrefetchPhase.PLAN_AND_LOAD:
+    def _poll_lookup_results(
+        self,
+        request: InFlightPrefetchRequest,
+        signaled_adapters: set[int],
+    ) -> None:
+        """Query pending lookup-and-lock results from signaled adapters."""
+        for adapter_idx in list(request.pending_lookup_tasks):
+            if adapter_idx not in signaled_adapters:
                 continue
-            if adapter_index not in request.pending_load_tasks:
+            task_id = request.pending_lookup_tasks[adapter_idx]
+            result = self._l2_adapters[adapter_idx].query_lookup_and_lock_result(
+                task_id
+            )
+            if result is None:
                 continue
+            request.lookup_results[adapter_idx] = result
+            del request.pending_lookup_tasks[adapter_idx]
 
-            task_id = request.pending_load_tasks[adapter_index]
-            result = self._l2_adapters[adapter_index].query_load_result(task_id)
+    def _poll_load_results(
+        self,
+        request: InFlightPrefetchRequest,
+        signaled_adapters: set[int],
+    ) -> None:
+        """Query pending load results from signaled adapters."""
+        for adapter_idx in list(request.pending_load_tasks):
+            if adapter_idx not in signaled_adapters:
+                continue
+            task_id = request.pending_load_tasks[adapter_idx]
+            result = self._l2_adapters[adapter_idx].query_load_result(task_id)
+            if result is None:
+                continue
+            request.load_results[adapter_idx] = result
+            del request.pending_load_tasks[adapter_idx]
 
-            if result is not None:
-                request.load_results[adapter_index] = result
-                del request.pending_load_tasks[adapter_index]
-
-                if request.all_loads_done():
-                    ready_to_finalize.append(request)
-
-        for request in ready_to_finalize:
-            self._finalize_load(request)
+            self._event_bus.publish(
+                Event(
+                    event_type=EventType.L2_LOAD_TASK_COMPLETED,
+                    metadata={
+                        "request_id": request.request_id,
+                        "adapter_index": adapter_idx,
+                        "task_id": task_id,
+                        "l2_name": self._adapter_descriptors[adapter_idx].type_name,
+                    },
+                )
+            )
 
     def _finalize_load(self, request: InFlightPrefetchRequest) -> None:
         """
