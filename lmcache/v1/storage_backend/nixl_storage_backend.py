@@ -1092,10 +1092,13 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
                 self.meta_shape, self.meta_dtype, self.meta_fmt
             )
             if obj is None:
-                # free previous allocated objects
-                logger.warning("Failed to allocate memory")
+                logger.warning(
+                    "Failed to allocate memory, consider increasing the "
+                    "`nixl_buffer_size` value"
+                )
                 for obj in obj_list:
-                    self.memory_allocator.free(obj)
+                    if obj is not None:
+                        obj.ref_count_down()
                 return [None] * len(keys)
 
             obj_list.append(obj)
@@ -1144,9 +1147,10 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
             )
             return obj_list
         else:
-            # Free the allocated memory and discard cache if transfer failed
+            # Release the allocated memory and discard cache if transfer failed
             for obj in obj_list:
-                self.memory_allocator.free(obj)
+                if obj is not None:
+                    obj.ref_count_down()
             for key in keys:
                 self._cache_discard(key.chunk_hash)
             return [None] * len(keys)
