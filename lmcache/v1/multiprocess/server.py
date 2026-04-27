@@ -161,6 +161,12 @@ class _PrefetchJob:
     # or chunk_hashes is empty).  Consumed at ``MP_LOOKUP_PREFETCH_END``
     # emission time in ``query_prefetch_status``.
     requested_tokens: int
+    # Captured at lookup time so the ``MP_LOOKUP_PREFETCH_END`` event can
+    # carry them as labels.  ``model_name`` lets dashboards slice hit rate
+    # per model in multi-model deployments; ``cache_salt`` slices per
+    # tenant / isolation domain (an empty string means no salt set).
+    model_name: str = ""
+    cache_salt: str = ""
 
 
 # Main class for the mp cache engine
@@ -676,6 +682,8 @@ class MPCacheEngine:
                     world_size=1,
                     request_id=key.request_id,
                     requested_tokens=0,
+                    model_name=model_name,
+                    cache_salt=key.cache_salt,
                 )
             )
             return
@@ -697,6 +705,8 @@ class MPCacheEngine:
                     world_size=1,
                     request_id=key.request_id,
                     requested_tokens=0,
+                    model_name=model_name,
+                    cache_salt=key.cache_salt,
                 )
             )
             return
@@ -748,6 +758,8 @@ class MPCacheEngine:
                 world_size=key.world_size,
                 request_id=key.request_id,
                 requested_tokens=requested_tokens,
+                model_name=model_name,
+                cache_salt=key.cache_salt,
             )
         )
 
@@ -829,6 +841,8 @@ class MPCacheEngine:
                     "found_count": found_count,
                     "requested_tokens": job.requested_tokens,
                     "hit_tokens": found_count * self.chunk_size,
+                    "model_name": job.model_name,
+                    "cache_salt": job.cache_salt,
                 },
             )
         )
