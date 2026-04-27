@@ -213,10 +213,13 @@ def _compute_mp_checksums(
         dtype=torch.long,
     )
 
-    # kv: [2, NB, BS, NH, HS] -> [2, NB*BS, NH, HS]
+    # kv: [KV, NB, BS, NH, HS] -> [KV, NB*BS, NH, HS]
+    # ``KV`` is the leading dimension (2 for standard K/V,
+    # 1 for MLA). Using ``kv.shape[0]`` lets a single call
+    # handle any architecture without reshape failures.
     layer_data: list[torch.Tensor] = []
     for kv in kv_tensors:
-        flat = kv.reshape(2, -1, *kv.shape[3:])
+        flat = kv.reshape(kv.shape[0], -1, *kv.shape[3:])
         # Move to CPU once per layer to save GPU memory
         # and avoid repeated transfers in the chunking loop
         sliced = flat[:, slot_t, ...].cpu()

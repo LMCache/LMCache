@@ -19,12 +19,18 @@ class TestComputeMpChecksums:
         num_heads: int = 2,
         head_size: int = 8,
         dtype: torch.dtype = torch.float32,
+        kv_size: int = 2,
     ) -> list[torch.Tensor]:
-        """Create deterministic CPU KV tensors."""
+        """Create deterministic CPU KV tensors.
+
+        ``kv_size`` is 2 for standard K/V layouts and 1 for
+        MLA, matching the leading dimension accepted by
+        :func:`_compute_mp_checksums`.
+        """
         torch.manual_seed(0)
         return [
             torch.randn(
-                2,
+                kv_size,
                 num_blocks,
                 block_size,
                 num_heads,
@@ -168,6 +174,34 @@ class TestComputeMpChecksums:
             layerwise=False,
         )
         assert r1["chunk_checksums"] == r2["chunk_checksums"]
+
+    def test_mla_kv_size_one(self):
+        """MLA-style tensors (kv_size=1) must not crash reshape.
+
+        Regression for Bugbot #3147088004: a hardcoded ``2`` in
+        ``kv.reshape`` used to break for MLA layouts. We now
+        derive the leading dim from ``kv.shape[0]``.
+        """
+        kv = self._make_cpu_kv_tensors(kv_size=1)
+        assert kv[0].shape[0] == 1
+        # non-layerwise path
+        result = _compute_mp_checksums(
+            kv,
+            slot_indices=[0, 1, 2, 3],
+            chunk_size=2,
+            layerwise=False,
+        )
+        assert result["status"] == "success"
+        assert len(result["chunk_checksums"]) == 2
+        # layerwise path
+        lw = _compute_mp_checksums(
+            kv,
+            slot_indices=[0, 1, 2, 3],
+            chunk_size=2,
+            layerwise=True,
+        )
+        assert lw["layerwise"] is True
+        assert "layer_0" in lw["chunk_checksums"]
 
     def test_different_dtypes_produce_different_checksums(self):
         """float32 and bfloat16 should produce different checksums."""
