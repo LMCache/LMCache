@@ -105,7 +105,7 @@ void MooncakeConnector::do_single_get(WorkerMooncakeConn& conn,
   (void)chunk_size;
   ensure_registered(buf, len);
   int64_t bytes_read = conn.client->get_into(key, buf, len);
-  if (bytes_read < 0) {
+  if (bytes_read <= 0) {
     throw std::runtime_error("Mooncake get_into failed for key: " + key);
   }
 }
@@ -152,7 +152,7 @@ void MooncakeConnector::do_batch_get(WorkerMooncakeConn& conn,
   ensure_batch_result_size(results, req.keys.size(), "batch_get_into");
 
   for (size_t i = 0; i < results.size(); ++i) {
-    if (results[i] < 0) {
+    if (results[i] <= 0) {
       req.batch->per_key_results[req.start_idx + i] = 0;
       fprintf(stderr,
               "[LMCache GET] key %s failed: Mooncake batch_get_into "
