@@ -334,13 +334,17 @@ class TestNumInflightL2Loads:
         ctrl.stop()
         adapter.close()
 
-    def test_cleanup_decrements_counters_on_shutdown(self, l1_manager):
+    def test_no_leak_after_shutdown_with_inflight_loads(self, l1_manager):
         # When the controller is stopped while a load is still in flight,
-        # ``_cleanup_in_flight_requests`` must decrement the counters so
-        # they return to baseline.  We use a slow MockL2Adapter (bandwidth
-        # set at construction, since ``_bandwidth_byte_ps`` is computed
-        # once in ``__init__``) and assert via the metric snapshot that
-        # the load is observably in-flight before calling ``stop()``.
+        # the gauges must report 0 after shutdown — the in-flight request
+        # tracking dict is cleared in ``_cleanup_in_flight_requests``, and
+        # the observable gauge callbacks read live state, so an empty
+        # tracking dict naturally yields zero observations.  We use a
+        # slow MockL2Adapter (bandwidth set at construction, since
+        # ``_bandwidth_byte_ps`` is computed once in ``__init__``) and
+        # assert via the metric snapshot that the load is observably
+        # in-flight before calling ``stop()`` — otherwise the test
+        # could pass via the normal completion path instead.
         slow_gb = 0.001  # 1 MB/s — a 200 KB key takes ~200 ms.
         adapter = make_adapter(bandwidth_gb=slow_gb)
         adapter_index = 0

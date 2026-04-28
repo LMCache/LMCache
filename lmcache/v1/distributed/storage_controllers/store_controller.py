@@ -17,9 +17,6 @@ import os
 import select
 import threading
 
-# Third Party
-from opentelemetry import metrics
-
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.distributed.api import ObjectKey
@@ -34,6 +31,7 @@ from lmcache.v1.distributed.storage_controllers.store_policy import (
 )
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import get_event_bus
+from lmcache.v1.mp_observability.otel_init import register_gauge
 
 logger = init_logger(__name__)
 
@@ -203,6 +201,11 @@ class StoreController(StorageControllerInterface):
         policy: The store policy for deciding targets and deletions.
     """
 
+    # Class-level state for the singleton ``lmcache_mp.num_inflight_l2_stores``
+    # gauge.  See ``_ensure_inflight_stores_gauge_registered``.
+    _gauge_registered: bool = False
+    _gauge_target: "StoreController | None" = None
+
     def __init__(
         self,
         l1_manager: L1Manager,
@@ -219,12 +222,6 @@ class StoreController(StorageControllerInterface):
         self._l1_manager.register_listener(self._listener)
         self._event_bus = get_event_bus()
 
-        meter = metrics.get_meter("lmcache.l2_store")
-        self._inflight_stores_counter = meter.create_up_down_counter(
-            "lmcache_mp.num_inflight_l2_stores",
-            description="L2 store tasks currently executing, per adapter",
-        )
-
         # (adapter_index, task_id) -> InFlightStoreTask
         # Composite key is needed because task IDs are only unique
         # within a single adapter, not across adapters.
@@ -232,6 +229,9 @@ class StoreController(StorageControllerInterface):
 
         # Shadow counter for status reporting (updated in background loop)
         self._status_in_flight_count: int = 0
+
+        StoreController._gauge_target = self
+        StoreController._ensure_inflight_stores_gauge_registered()
 
         # Map eventfd -> adapter index for quick lookup in poll results
         self._efd_to_adapter_index: dict[int, int] = {}
@@ -274,6 +274,86 @@ class StoreController(StorageControllerInterface):
             "in_flight_task_count": self._status_in_flight_count,
             "num_l2_adapters": len(self._l2_adapters),
         }
+
+    def get_inflight_count_by_adapter(self) -> dict[int, int]:
+        """Snapshot of in-flight L2 store tasks grouped by adapter index.
+
+        Read by the ``lmcache_mp.num_inflight_l2_stores`` observable
+        gauge callback at scrape time.  The returned dict is a fresh
+        snapshot — callers may use it freely.
+
+        Thread safety:
+            ``self._in_flight_tasks`` is mutated only on the background
+            store loop thread.  ``dict.copy()`` is implemented in C and
+            atomic under the CPython GIL, so taking a snapshot from any
+            other thread (e.g. the OTel reader thread) cannot crash even
+            though it may briefly see a stale state by one mutation.
+
+        Returns:
+            Mapping from ``adapter_index`` to the count of in-flight
+            store tasks targeting that adapter.  Adapters with no
+            in-flight work are absent from the dict.
+        """
+        snapshot = self._in_flight_tasks.copy()
+        counts: dict[int, int] = defaultdict(int)
+        for adapter_index, _ in snapshot:
+            counts[adapter_index] += 1
+        return dict(counts)
+
+    def get_inflight_stores_observations(
+        self,
+    ) -> list[tuple[int | float, dict[str, object]]]:
+        """Snapshot in the shape expected by ``register_gauge``.
+
+        Each tuple is ``(count, attributes)`` for a single adapter that
+        currently has in-flight store tasks.  Adapters with zero
+        in-flight tasks are omitted.
+        """
+        return [
+            (
+                count,
+                {
+                    "l2_name": self._adapter_descriptors[adapter_index].type_name,
+                    "adapter_index": adapter_index,
+                },
+            )
+            for adapter_index, count in self.get_inflight_count_by_adapter().items()
+        ]
+
+    @classmethod
+    def _ensure_inflight_stores_gauge_registered(cls) -> None:
+        """Register ``lmcache_mp.num_inflight_l2_stores`` exactly once per
+        process.
+
+        StoreController is a singleton in MP mode (one per cache server
+        process), so a single OTel ObservableGauge with a single callback
+        is the correct shape.  Tests that construct multiple
+        StoreController instances would otherwise stack registrations on
+        the same instrument name (the OTel SDK honors only the first), so
+        the gauge would keep reporting from a stopped controller after a
+        new one is created.  The callback dispatches via ``_gauge_target``
+        so the most recently constructed controller owns the reported
+        values.
+        """
+        if cls._gauge_registered:
+            return
+        cls._gauge_registered = True
+        register_gauge(
+            "lmcache.l2_store",
+            "lmcache_mp.num_inflight_l2_stores",
+            "L2 store tasks currently executing, per adapter",
+            cls._read_inflight_stores_observations,
+        )
+
+    @classmethod
+    def _read_inflight_stores_observations(
+        cls,
+    ) -> list[tuple[int | float, dict[str, object]]]:
+        """Gauge callback: dispatch to the current target instance."""
+        target = cls._gauge_target
+        if target is None:
+            return []
+        return target.get_inflight_stores_observations()
 
     # Private methods
 
@@ -413,13 +493,6 @@ class StoreController(StorageControllerInterface):
                 read_locked_keys=list(successful_keys),
             )
             self._status_in_flight_count += 1
-            self._inflight_stores_counter.add(
-                1,
-                {
-                    "l2_name": self._adapter_descriptors[adapter_index].type_name,
-                    "adapter_index": adapter_index,
-                },
-            )
 
             # All objects for a single store task share one layout (L1
             # allocates uniform MemoryObjs per chunk), so total bytes is
@@ -488,13 +561,6 @@ class StoreController(StorageControllerInterface):
         l1_mgr.finish_read(task.read_locked_keys)
         del self._in_flight_tasks[task_key]
         self._status_in_flight_count -= 1
-        self._inflight_stores_counter.add(
-            -1,
-            {
-                "l2_name": self._adapter_descriptors[adapter_index].type_name,
-                "adapter_index": adapter_index,
-            },
-        )
 
         l2_name = self._adapter_descriptors[adapter_index].type_name
         if success:
@@ -553,11 +619,4 @@ class StoreController(StorageControllerInterface):
                 len(task.read_locked_keys),
             )
             l1_mgr.finish_read(task.read_locked_keys)
-            self._inflight_stores_counter.add(
-                -1,
-                {
-                    "l2_name": self._adapter_descriptors[adapter_index].type_name,
-                    "adapter_index": adapter_index,
-                },
-            )
         self._in_flight_tasks.clear()

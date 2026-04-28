@@ -286,28 +286,28 @@ Live state of the L1 memory pool and the in-flight L2 store / prefetch-load
 queues.  These metrics are useful for capacity planning, sizing L1, and
 spotting backpressure on individual L2 adapters.
 
-The three "in-flight" metrics are OTel `UpDownCounter` instruments — the
-controllers call `.add(+1)` on submission and `.add(-1)` on completion (or
-on shutdown cleanup), and the SDK maintains the per-attribute running total
-internally.  Prometheus renders an `UpDownCounter` as a gauge.  L1 memory
-usage is a true `ObservableGauge` because L1Manager already maintains the
-running byte total — there is no event to subscribe to.
+All four metrics are OTel `ObservableGauge` instruments registered via the
+shared `register_gauge` helper.  At scrape time, OTel invokes the
+registered callback, which iterates the controller's live in-flight state
+and returns one observation per adapter that currently has work.
+Adapters with no in-flight work emit no datapoint for that scrape.
 
-All three in-flight metrics carry two attributes that disambiguate
-adapters even when more than one is registered with the same backend type:
+The three in-flight metrics carry two attributes that disambiguate
+adapters even when more than one is registered with the same backend type
+— same shape as the existing `lmcache_mp.l2_store_completed` counter:
 
 - `l2_name` — the registered adapter type (e.g. `"fs"`, `"mock"`,
-  `"nixl_store"`).  Same string used in the existing `L2_*` counters.
+  `"nixl_store"`).
 - `adapter_index` — position in the `StoreController`/`PrefetchController`
   adapter list.  Distinguishes two adapters of the same type (e.g.
   `fs[0]` and `fs[1]`).
 
-| OTel metric name | Prometheus name | Type | Source | Calculation |
+| OTel metric name | Prometheus name | Type | Source of truth | Calculation |
 |---|---|---|---|---|
-| `lmcache_mp.l1_memory_usage_bytes` | `lmcache_mp_l1_memory_usage_bytes` | ObservableGauge | `L1Manager._memory_manager.get_memory_usage()[0]` | Bytes currently held in L1 at scrape time |
-| `lmcache_mp.num_inflight_l2_stores` | `lmcache_mp_num_inflight_l2_stores` | UpDownCounter (attrs: `l2_name`, `adapter_index`) | `StoreController._in_flight_tasks` add/remove sites | `+1` per submitted store task, `-1` per completion or cleanup |
-| `lmcache_mp.num_inflight_l2_loads` | `lmcache_mp_num_inflight_l2_loads` | UpDownCounter (attrs: `l2_name`, `adapter_index`) | `PrefetchController.pending_load_tasks` add/remove sites | `+1` per submitted per-adapter load task, `-1` per completion or cleanup |
-| `lmcache_mp.inflight_load_memory_usage_bytes` | `lmcache_mp_inflight_load_memory_usage_bytes` | UpDownCounter (attrs: `l2_name`, `adapter_index`) | `PrefetchController.load_bytes_by_adapter` add/remove sites | `+reserved_bytes` per submitted per-adapter load task, `-reserved_bytes` per completion or cleanup |
+| `lmcache_mp.l1_memory_usage_bytes` | `lmcache_mp_l1_memory_usage_bytes` | ObservableGauge | `L1Manager.get_memory_usage()` | Bytes currently held in L1 at scrape time |
+| `lmcache_mp.num_inflight_l2_stores` | `lmcache_mp_num_inflight_l2_stores` | ObservableGauge (attrs: `l2_name`, `adapter_index`) | `StoreController.get_inflight_count_by_adapter()` | Snapshot of in-flight L2 store tasks grouped by adapter |
+| `lmcache_mp.num_inflight_l2_loads` | `lmcache_mp_num_inflight_l2_loads` | ObservableGauge (attrs: `l2_name`, `adapter_index`) | `PrefetchController.get_inflight_load_state_by_adapter()` | Per-adapter count from the same snapshot |
+| `lmcache_mp.inflight_load_memory_usage_bytes` | `lmcache_mp_inflight_load_memory_usage_bytes` | ObservableGauge (attrs: `l2_name`, `adapter_index`) | `PrefetchController.get_inflight_load_state_by_adapter()` | Per-adapter reserved bytes from the same snapshot |
 
 **What `l1_memory_usage_bytes` answers:** How full is the L1 cache? Helps
 size L1 against working set and detect leaks (steadily climbing without
@@ -328,14 +328,25 @@ prefetch reservations are crowding out cacheable data.
 
 > **Bytes attribution.** A single prefetch request may load from multiple
 > adapters.  The byte count is split per-adapter via the request's
-> `load_plan` bitmap × per-key `MemoryObj.size` so each in-flight byte is
-> attributed to exactly one `(l2_name, adapter_index)` pair — sums across
-> adapters are not double-counted.
+> `load_plan` bitmap × per-key `MemoryObj.size` (precomputed at submit
+> time and stored on `InFlightPrefetchRequest.load_bytes_by_adapter`) so
+> each in-flight byte is attributed to exactly one `(l2_name,
+> adapter_index)` pair — sums across adapters are not double-counted.
 
-> **Bookkeeping invariant.** Reserved bytes are recorded on the request
-> at submit time (`InFlightPrefetchRequest.load_bytes_by_adapter`) and
-> popped at completion, so the decrement always matches the increment
-> regardless of how many keys actually loaded successfully.
+> **Singleton dispatch.** L1Manager / StoreController / PrefetchController
+> are singletons in MP mode.  Each controller registers its gauge once
+> (guarded by a class-level `_gauge_registered` flag) and the callback
+> dispatches via a class-level `_gauge_target` so the most recently
+> constructed instance owns the reported values.  This is invisible in
+> production (one instance per process); it matters in tests that create
+> multiple controllers.
+
+> **Thread safety.** Callbacks run on the OTel reader thread and read
+> state mutated by the controller's background loop thread.  Snapshots
+> use `dict.copy()`, which is implemented in C and atomic under the
+> CPython GIL — concurrent mutation cannot crash the snapshot, though it
+> may briefly see a state that is one mutation stale.  Acceptable for a
+> 10-second scrape cadence.
 
 ---
 

@@ -13,15 +13,13 @@ The controller runs a background thread with an event-driven loop that:
 """
 
 # Standard
+from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Iterable
 import enum
 import os
 import select
 import threading
-
-# Third Party
-from opentelemetry import metrics
 
 # First Party
 from lmcache.logging import init_logger
@@ -40,6 +38,7 @@ from lmcache.v1.distributed.storage_controllers.store_policy import (
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import get_event_bus
+from lmcache.v1.mp_observability.otel_init import register_gauge
 
 logger = init_logger(__name__)
 
@@ -195,6 +194,11 @@ class PrefetchController(StorageControllerInterface):
         max_in_flight: Maximum number of concurrent prefetch requests.
     """
 
+    # Class-level state for the singleton in-flight load gauges.  See
+    # ``_ensure_inflight_load_gauges_registered``.
+    _gauges_registered: bool = False
+    _gauge_target: "PrefetchController | None" = None
+
     def __init__(
         self,
         l1_manager: L1Manager,
@@ -249,16 +253,8 @@ class PrefetchController(StorageControllerInterface):
 
         self._event_bus = get_event_bus()
 
-        meter = metrics.get_meter("lmcache.l2_prefetch")
-        self._inflight_loads_counter = meter.create_up_down_counter(
-            "lmcache_mp.num_inflight_l2_loads",
-            description="L2 -> L1 prefetch load tasks currently executing, per adapter",
-        )
-        self._inflight_load_bytes_counter = meter.create_up_down_counter(
-            "lmcache_mp.inflight_load_memory_usage_bytes",
-            description="L1 bytes reserved by in-flight L2 -> L1 prefetch "
-            "loads, per adapter",
-        )
+        PrefetchController._gauge_target = self
+        PrefetchController._ensure_inflight_load_gauges_registered()
 
         self._stop_flag = threading.Event()
         self._thread = threading.Thread(
@@ -378,6 +374,136 @@ class PrefetchController(StorageControllerInterface):
             "completed_results_count": completed_results_count,
             "num_l2_adapters": len(self._l2_adapters),
         }
+
+    def get_inflight_load_state_by_adapter(self) -> dict[int, tuple[int, int]]:
+        """Snapshot of in-flight L2 -> L1 load (count, bytes) per adapter.
+
+        Read by the ``lmcache_mp.num_inflight_l2_loads`` and
+        ``lmcache_mp.inflight_load_memory_usage_bytes`` observable gauge
+        callbacks at scrape time.
+
+        Per-adapter byte attribution follows the request's load_plan
+        bitmap: each in-flight byte is attributed to exactly the adapter
+        actually loading it, so summing across adapters never
+        double-counts.
+
+        Thread safety:
+            ``self._in_flight_requests`` and each request's
+            ``load_bytes_by_adapter`` are mutated only on the background
+            prefetch loop thread.  ``dict.copy()`` is implemented in C
+            and atomic under the CPython GIL, so taking a snapshot from
+            another thread (e.g. the OTel reader thread) cannot crash —
+            in the worst case it sees a state that is one mutation
+            stale, which is acceptable for an observability gauge polled
+            on a 10-second cadence.
+
+        Returns:
+            Mapping from ``adapter_index`` to ``(count, bytes)`` where
+            ``count`` is the number of in-flight load tasks targeting
+            that adapter and ``bytes`` is the L1 reservation pinned by
+            those loads.  Adapters with no in-flight work are absent.
+        """
+        counts: dict[int, int] = defaultdict(int)
+        bytes_by_adapter: dict[int, int] = defaultdict(int)
+        for request in self._in_flight_requests.copy().values():
+            load_bytes = request.load_bytes_by_adapter.copy()
+            for adapter_idx, reserved_bytes in load_bytes.items():
+                counts[adapter_idx] += 1
+                bytes_by_adapter[adapter_idx] += reserved_bytes
+        return {idx: (counts[idx], bytes_by_adapter[idx]) for idx in counts}
+
+    def get_inflight_loads_observations(
+        self,
+    ) -> list[tuple[int | float, dict[str, object]]]:
+        """Snapshot in the shape expected by ``register_gauge`` for the
+        ``num_inflight_l2_loads`` gauge.
+
+        Each tuple is ``(count, attributes)`` for one adapter that
+        currently has in-flight load tasks.
+        """
+        return [
+            (
+                count,
+                {
+                    "l2_name": self._adapter_descriptors[adapter_idx].type_name,
+                    "adapter_index": adapter_idx,
+                },
+            )
+            for adapter_idx, (count, _) in (
+                self.get_inflight_load_state_by_adapter().items()
+            )
+        ]
+
+    def get_inflight_load_bytes_observations(
+        self,
+    ) -> list[tuple[int | float, dict[str, object]]]:
+        """Snapshot in the shape expected by ``register_gauge`` for the
+        ``inflight_load_memory_usage_bytes`` gauge.
+
+        Each tuple is ``(reserved_bytes, attributes)`` for one adapter
+        with in-flight loads.  Adapters without in-flight loads are
+        omitted.
+        """
+        return [
+            (
+                reserved_bytes,
+                {
+                    "l2_name": self._adapter_descriptors[adapter_idx].type_name,
+                    "adapter_index": adapter_idx,
+                },
+            )
+            for adapter_idx, (_, reserved_bytes) in (
+                self.get_inflight_load_state_by_adapter().items()
+            )
+        ]
+
+    @classmethod
+    def _ensure_inflight_load_gauges_registered(cls) -> None:
+        """Register the two in-flight load gauges exactly once per process.
+
+        PrefetchController is a singleton in MP mode (one per cache server
+        process), so each gauge has a single OTel instrument with a
+        single callback.  Tests that construct multiple PrefetchController
+        instances would otherwise stack registrations on the same
+        instrument names; the callback dispatches via ``_gauge_target``
+        so the most recently constructed controller owns the reported
+        values.
+        """
+        if cls._gauges_registered:
+            return
+        cls._gauges_registered = True
+        register_gauge(
+            "lmcache.l2_prefetch",
+            "lmcache_mp.num_inflight_l2_loads",
+            "L2 -> L1 prefetch load tasks currently executing, per adapter",
+            cls._read_inflight_loads_observations,
+        )
+        register_gauge(
+            "lmcache.l2_prefetch",
+            "lmcache_mp.inflight_load_memory_usage_bytes",
+            "L1 bytes reserved by in-flight L2 -> L1 prefetch loads, per adapter",
+            cls._read_inflight_load_bytes_observations,
+        )
+
+    @classmethod
+    def _read_inflight_loads_observations(
+        cls,
+    ) -> list[tuple[int | float, dict[str, object]]]:
+        """Gauge callback: dispatch to the current target instance."""
+        target = cls._gauge_target
+        if target is None:
+            return []
+        return target.get_inflight_loads_observations()
+
+    @classmethod
+    def _read_inflight_load_bytes_observations(
+        cls,
+    ) -> list[tuple[int | float, dict[str, object]]]:
+        """Gauge callback: dispatch to the current target instance."""
+        target = cls._gauge_target
+        if target is None:
+            return []
+        return target.get_inflight_load_bytes_observations()
 
     # =========================================================================
     # Lifecycle
@@ -649,12 +775,6 @@ class PrefetchController(StorageControllerInterface):
                 else 0
             )
             request.load_bytes_by_adapter[adapter_idx] = total_bytes
-            attrs = {
-                "l2_name": self._adapter_descriptors[adapter_idx].type_name,
-                "adapter_index": adapter_idx,
-            }
-            self._inflight_loads_counter.add(1, attrs)
-            self._inflight_load_bytes_counter.add(total_bytes, attrs)
 
             self._event_bus.publish(
                 Event(
@@ -760,13 +880,7 @@ class PrefetchController(StorageControllerInterface):
                 continue
             request.load_results[adapter_idx] = result
             del request.pending_load_tasks[adapter_idx]
-            reserved_bytes = request.load_bytes_by_adapter.pop(adapter_idx, 0)
-            attrs = {
-                "l2_name": self._adapter_descriptors[adapter_idx].type_name,
-                "adapter_index": adapter_idx,
-            }
-            self._inflight_loads_counter.add(-1, attrs)
-            self._inflight_load_bytes_counter.add(-reserved_bytes, attrs)
+            request.load_bytes_by_adapter.pop(adapter_idx, None)
 
             self._event_bus.publish(
                 Event(
@@ -908,14 +1022,6 @@ class PrefetchController(StorageControllerInterface):
                 self._unlock_all_plan_keys(request)
             elif request.phase == PrefetchPhase.LOOKUP:
                 self._unlock_all_lookups(request)
-            for adapter_idx, reserved_bytes in request.load_bytes_by_adapter.items():
-                attrs = {
-                    "l2_name": self._adapter_descriptors[adapter_idx].type_name,
-                    "adapter_index": adapter_idx,
-                }
-                self._inflight_loads_counter.add(-1, attrs)
-                self._inflight_load_bytes_counter.add(-reserved_bytes, attrs)
-            request.load_bytes_by_adapter.clear()
             logger.warning(
                 "Cleaning up in-flight prefetch request %d (%d keys).",
                 request.request_id,

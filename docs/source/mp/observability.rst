@@ -412,6 +412,16 @@ Observable Gauges
 Point-in-time state snapshots registered via ``register_gauge``
 (pull-based OTel observable gauges).
 
+The three in-flight metrics carry two attributes that distinguish
+adapters even when more than one is registered with the same backend
+type — same shape as ``lmcache_mp.l2_store_completed``:
+
+- ``l2_name`` — the registered adapter type (e.g. ``"fs"``,
+  ``"nixl_store"``, ``"mooncake_store"``).
+- ``adapter_index`` — position in the controller's adapter list.
+
+Adapters with no in-flight work emit no datapoint for that scrape.
+
 .. list-table::
    :header-rows: 1
    :widths: 40 15 45
@@ -423,6 +433,29 @@ Point-in-time state snapshots registered via ``register_gauge``
      - ObservableGauge
      - Number of prefetch jobs currently in-flight. A sustained high
        value may indicate slow L2 backends or polling delays.
+   * - ``lmcache_mp.l1_memory_usage_bytes``
+     - ObservableGauge
+     - Bytes currently held in L1.  Rising without plateauing typically
+       indicates a leak; saturating at the configured ``--l1-size-gb``
+       indicates working set exceeds capacity.
+   * - ``lmcache_mp.num_inflight_l2_stores``
+     - ObservableGauge (attrs: ``l2_name``, ``adapter_index``)
+     - L2 store tasks currently executing, per adapter.  Sustained
+       non-zero values indicate the adapter cannot keep up with the
+       L1 → L2 write rate.
+   * - ``lmcache_mp.num_inflight_l2_loads``
+     - ObservableGauge (attrs: ``l2_name``, ``adapter_index``)
+     - L2 → L1 prefetch load tasks currently executing, per adapter.
+       Pair with ``num_inflight_l2_stores`` to see whether read or write
+       traffic dominates a given backend.
+   * - ``lmcache_mp.inflight_load_memory_usage_bytes``
+     - ObservableGauge (attrs: ``l2_name``, ``adapter_index``)
+     - L1 bytes reserved by in-flight L2 → L1 prefetch loads, per
+       adapter.  Rising in-flight bytes alongside rising
+       ``l1_memory_usage_bytes`` is a signal that prefetch reservations
+       are crowding out cacheable data.  Per-adapter byte attribution
+       follows each request's ``load_plan`` bitmap, so summing across
+       adapters never double-counts.
 
 Prometheus Scrape Configuration
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
