@@ -9,6 +9,7 @@ Supported Backends
 .. toctree::
    :maxdepth: 1
 
+   blkio
    cpu_ram
    custom_backend
    dax
