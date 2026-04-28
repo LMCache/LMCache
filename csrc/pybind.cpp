@@ -69,6 +69,9 @@ PYBIND11_MODULE(c_ops, m) {
         py::call_guard<py::gil_scoped_release>());
   m.def("free_shm_pinned_ptr", &free_shm_pinned_ptr,
         py::call_guard<py::gil_scoped_release>());
+  m.def("batched_memcpy", &batched_memcpy, py::arg("src_ptrs"),
+        py::arg("dst_ptrs"), py::arg("sizes"),
+        py::call_guard<py::gil_scoped_release>());
   m.def("get_gpu_pci_bus_id", &get_gpu_pci_bus_id);
   m.def("multi_layer_block_kv_transfer", &multi_layer_block_kv_transfer,
         py::arg("paged_buffer_ptrs_tensor"), py::arg("lmcache_objects_ptrs"),

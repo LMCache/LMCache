@@ -41,6 +41,7 @@ from lmcache.v1.mp_observability.config import (
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import get_event_bus
 from lmcache.v1.mp_observability.otel_init import register_gauge
+from lmcache.v1.mp_observability.trace import maybe_initialize_trace_recorder
 from lmcache.v1.multiprocess.config import (
     MPServerConfig,
     add_mp_server_args,
@@ -154,6 +155,12 @@ class _PrefetchJob:
     handle: PrefetchHandle
     world_size: int
     request_id: str
+    # Number of tokens submitted for lookup (denominator for the L1+L2
+    # token-level hit-rate metric).  Equals ``len(chunk_hashes) * chunk_size``
+    # on the happy path; 0 for early-exit paths (no GPU context matches
+    # or chunk_hashes is empty).  Consumed at ``MP_LOOKUP_PREFETCH_END``
+    # emission time in ``query_prefetch_status``.
+    requested_tokens: int
 
 
 # Main class for the mp cache engine
@@ -284,6 +291,7 @@ class MPCacheEngine:
             f"KV cache not registered for GPU ID {instance_id}"
         )
         gpu_context = self.gpu_contexts[instance_id]
+        model_name = self.gpu_context_meta[instance_id][0]
 
         blocks_per_chunk = self.chunk_size // gpu_context.block_size
 
@@ -302,73 +310,101 @@ class MPCacheEngine:
             )
             vllm_event.wait(stream=gpu_context.stream)
 
+            # CPU-synchronous sentinel: a GPU store is about to be enqueued.
+            # Must be published via publish() (not publish_on_stream) so the
+            # drain thread sees it before MP_REQUEST_END can race MP_STORE_END.
+            self._event_bus.publish(
+                Event(
+                    event_type=EventType.MP_STORE_SUBMITTED,
+                    session_id=key.request_id,
+                    metadata={"device": str(gpu_context.device)},
+                )
+            )
+
             self._event_bus.publish_on_stream(
                 gpu_context.cupy_stream,
                 Event(
                     event_type=EventType.MP_STORE_START,
                     session_id=key.request_id,
-                    metadata={"device": str(gpu_context.device)},
+                    metadata={
+                        "device": str(gpu_context.device),
+                        "engine_id": instance_id,
+                        "model_name": model_name,
+                    },
                 ),
             )
 
-            layout_desc = get_layout_desc(gpu_context, self.chunk_size)
-            reserved_dict = self.storage_manager.reserve_write(
-                obj_keys, layout_desc, "new"
-            )
-
-            # NOTE: Store is not batched because some obj_keys may be
-            # skipped (not in reserved_dict), making block_ids
-            # non-contiguous. Batching would require torch.cat to
-            # reassemble block_ids, negating the benefit.
-            num_groups = gpu_context.kv_layer_groups_manager.num_groups
-            for idx, obj_key in enumerate(obj_keys):
-                if obj_key in reserved_dict:
-                    memory_obj = reserved_dict[obj_key]
-                else:
-                    continue
-
-                chunk_block_ids_gpu = all_block_ids_gpu[
-                    idx * blocks_per_chunk : (idx + 1) * blocks_per_chunk
-                ]
-
-                # Copy from GPU paged buffer to tmp buffer, then to CPU — per group
-                for group_idx in range(num_groups):
-                    tmp_buffer = gpu_context.get_tmp_chunk_gpu_buffer(group_idx)
-                    group_kv_pointers = gpu_context.get_group_kv_pointers(group_idx)
-                    lmc_ops.multi_layer_block_kv_transfer(
-                        group_kv_pointers,
-                        [tmp_buffer.data_ptr()],
-                        chunk_block_ids_gpu,
-                        gpu_context.device,
-                        lmc_ops.TransferDirection.D2H,
-                        gpu_context.get_shape_desc(group_idx),
-                        self.chunk_size,
-                        gpu_context.gpu_kv_format_,
-                        0,
-                    )
-                # Store is not batched, so we always use chunk_idx=0 (single slot)
-                lmcache_memcpy_async_d2h(
-                    gpu_context.get_tmp_gpu_buffer_flat(chunk_idx=0), memory_obj
+            reserved_dict: dict = {}
+            try:
+                layout_desc = get_layout_desc(gpu_context, self.chunk_size)
+                reserved_dict = self.storage_manager.reserve_write(
+                    obj_keys, layout_desc, "new"
                 )
 
-            event.record()
+                # NOTE: Store is not batched because some obj_keys may be
+                # skipped (not in reserved_dict), making block_ids
+                # non-contiguous. Batching would require torch.cat to
+                # reassemble block_ids, negating the benefit.
+                num_groups = gpu_context.kv_layer_groups_manager.num_groups
+                for idx, obj_key in enumerate(obj_keys):
+                    if obj_key in reserved_dict:
+                        memory_obj = reserved_dict[obj_key]
+                    else:
+                        continue
 
-        self.gpu_contexts[instance_id].cupy_stream.launch_host_func(
-            self.storage_manager.finish_write,
-            list(reserved_dict.keys()),
-        )
+                    chunk_block_ids_gpu = all_block_ids_gpu[
+                        idx * blocks_per_chunk : (idx + 1) * blocks_per_chunk
+                    ]
 
-        self._event_bus.publish_on_stream(
-            self.gpu_contexts[instance_id].cupy_stream,
-            Event(
-                event_type=EventType.MP_STORE_END,
-                session_id=key.request_id,
-                metadata={
-                    "stored_count": len(reserved_dict),
-                    "device": str(gpu_context.device),
-                },
-            ),
-        )
+                    # Copy from GPU paged buffer to tmp buffer, then to CPU — per group
+                    for group_idx in range(num_groups):
+                        tmp_buffer = gpu_context.get_tmp_chunk_gpu_buffer(group_idx)
+                        group_kv_pointers = gpu_context.get_group_kv_pointers(group_idx)
+                        lmc_ops.multi_layer_block_kv_transfer(
+                            group_kv_pointers,
+                            [tmp_buffer.data_ptr()],
+                            chunk_block_ids_gpu,
+                            gpu_context.device,
+                            lmc_ops.TransferDirection.D2H,
+                            gpu_context.get_shape_desc(group_idx),
+                            self.chunk_size,
+                            gpu_context.gpu_kv_format_,
+                            0,
+                        )
+                    # Store is not batched, so we always use chunk_idx=0 (single slot)
+                    lmcache_memcpy_async_d2h(
+                        gpu_context.get_tmp_gpu_buffer_flat(chunk_idx=0), memory_obj
+                    )
+            except Exception:
+                logger.exception("Cannot store keys due to exception")
+            finally:
+                event.record()
+                if reserved_dict:
+                    gpu_context.cupy_stream.launch_host_func(
+                        self.storage_manager.finish_write,
+                        list(reserved_dict.keys()),
+                    )
+                # All reserved MemoryObjs share one layout_desc, so per-object
+                # size is identical — avoid summing N identical values.
+                total_bytes = (
+                    next(iter(reserved_dict.values())).get_size() * len(reserved_dict)
+                    if reserved_dict
+                    else 0
+                )
+                self._event_bus.publish_on_stream(
+                    gpu_context.cupy_stream,
+                    Event(
+                        event_type=EventType.MP_STORE_END,
+                        session_id=key.request_id,
+                        metadata={
+                            "stored_count": len(reserved_dict),
+                            "device": str(gpu_context.device),
+                            "engine_id": instance_id,
+                            "model_name": model_name,
+                            "total_bytes": total_bytes,
+                        },
+                    ),
+                )
 
         ed = time.perf_counter()
         if length := len(reserved_dict):
@@ -422,13 +458,29 @@ class MPCacheEngine:
             f"KV cache not registered for GPU ID {instance_id}"
         )
         gpu_context = self.gpu_contexts[instance_id]
+        model_name = self.gpu_context_meta[instance_id][0]
+
+        # CPU-synchronous sentinel: a GPU retrieve is about to be enqueued.
+        # Must be published via publish() (not publish_on_stream) so the
+        # drain thread sees it before MP_REQUEST_END can race MP_RETRIEVE_END.
+        self._event_bus.publish(
+            Event(
+                event_type=EventType.MP_RETRIEVE_SUBMITTED,
+                session_id=key.request_id,
+                metadata={"device": str(gpu_context.device)},
+            )
+        )
 
         self._event_bus.publish_on_stream(
             gpu_context.cupy_stream,
             Event(
                 event_type=EventType.MP_RETRIEVE_START,
                 session_id=key.request_id,
-                metadata={"device": str(gpu_context.device)},
+                metadata={
+                    "device": str(gpu_context.device),
+                    "engine_id": instance_id,
+                    "model_name": model_name,
+                },
             ),
         )
 
@@ -509,6 +561,7 @@ class MPCacheEngine:
 
             prefetched_keys: list[ObjectKey] = []
             retrieve_succeeded = False
+            total_bytes = 0
             try:
                 with self.storage_manager.read_prefetched_results(
                     obj_keys
@@ -518,6 +571,7 @@ class MPCacheEngine:
                         return event.ipc_handle(), False
 
                     prefetched_keys = obj_keys[: len(memory_objs)]
+                    total_bytes = sum(mo.get_size() for mo in memory_objs)
                     _retrieve_loop(obj_keys, memory_objs)
                 # Only set True when with-block exits normally
                 retrieve_succeeded = True
@@ -539,10 +593,12 @@ class MPCacheEngine:
                         metadata={
                             "retrieved_count": len(prefetched_keys),
                             "device": str(gpu_context.device),
+                            "engine_id": instance_id,
+                            "model_name": model_name,
+                            "total_bytes": total_bytes,
                         },
                     ),
                 )
-
         tokens_retrieved = len(obj_keys) * self.chunk_size
         ed = time.perf_counter()
         logger.info(
@@ -590,6 +646,12 @@ class MPCacheEngine:
         model_name, world_size = key.model_name, key.world_size
         self._event_bus.publish(
             Event(
+                event_type=EventType.MP_REQUEST_START,
+                session_id=key.request_id,
+            )
+        )
+        self._event_bus.publish(
+            Event(
                 event_type=EventType.MP_LOOKUP_PREFETCH_START,
                 session_id=key.request_id,
             )
@@ -613,6 +675,7 @@ class MPCacheEngine:
                     ),
                     world_size=1,
                     request_id=key.request_id,
+                    requested_tokens=0,
                 )
             )
             return
@@ -633,9 +696,44 @@ class MPCacheEngine:
                     ),
                     world_size=1,
                     request_id=key.request_id,
+                    requested_tokens=0,
                 )
             )
             return
+
+        # Total chunk-aligned tokens submitted for lookup; surfaces as the
+        # denominator of the L1+L2 token-level hit-rate via the
+        # ``requested_tokens`` field on ``MP_LOOKUP_PREFETCH_END``.  Sub-chunk
+        # trailing tokens are intentionally excluded — they cannot hit at
+        # chunk granularity.
+        requested_tokens = len(chunk_hashes) * self.chunk_size
+
+        # Publish lookup event via EventBus for observability subscribers.
+        # Guard with has_subscribers() to avoid allocating the metadata dict
+        # (including dtype/shape list comprehensions) when no subscriber is
+        # listening (e.g. lookup hash logger is disabled).
+        if self._event_bus.has_subscribers(EventType.MP_LOOKUP):
+            self._event_bus.publish(
+                Event(
+                    event_type=EventType.MP_LOOKUP,
+                    session_id=key.request_id,
+                    metadata={
+                        "request_id": key.request_id,
+                        "chunk_hashes": chunk_hashes,
+                        "model_name": model_name,
+                        "chunk_size": self.chunk_size,
+                        "seq_len": len(key.token_ids),
+                        "dtypes": [str(d) for d in layout_desc.dtypes],
+                        "shapes": [list(s) for s in layout_desc.shapes],
+                    },
+                )
+            )
+
+        # set lookup ipc key, for session manager to use and generate object keys
+        session = self.session_manager.get_or_create(key.request_id)
+        session.set_tokens(list(key.token_ids))
+        session.lookup_ipc_key = key
+
         obj_keys = ipc_key_to_object_keys(key, chunk_hashes)
 
         handle = self.storage_manager.submit_prefetch_task(
@@ -649,6 +747,7 @@ class MPCacheEngine:
                 handle=handle,
                 world_size=key.world_size,
                 request_id=key.request_id,
+                requested_tokens=requested_tokens,
             )
         )
 
@@ -726,7 +825,11 @@ class MPCacheEngine:
             Event(
                 event_type=EventType.MP_LOOKUP_PREFETCH_END,
                 session_id=job.request_id,
-                metadata={"found_count": found_count},
+                metadata={
+                    "found_count": found_count,
+                    "requested_tokens": job.requested_tokens,
+                    "hit_tokens": found_count * self.chunk_size,
+                },
             )
         )
 
@@ -801,7 +904,29 @@ class MPCacheEngine:
                 metadata={"request_id": request_id},
             )
         )
-        self.session_manager.remove(request_id)
+        session = self.session_manager.remove(request_id)
+        self._event_bus.publish(
+            Event(
+                event_type=EventType.MP_REQUEST_END,
+                session_id=request_id,
+            )
+        )
+        if session is None:
+            logger.warning("Session %s not found, skipping touch", request_id)
+            return
+        if session.lookup_ipc_key is None:
+            logger.warning(
+                "Session %s has no lookup ipc key, skipping touch", request_id
+            )
+            return
+
+        chunk_hashes = [TokenHasher.hash_to_bytes(h) for h in session.get_hashes(0)]
+        obj_keys = ipc_key_to_object_keys(session.lookup_ipc_key, chunk_hashes)
+        # unified touch of all keys, which include retrieved and stored keys
+        # TODO(chunxiaozheng): when l2 is enabled, the prefetched keys from l2 are temp
+        #  and will be deleted after finish_read_prefetched, when we touch all keys,
+        #  these keys has been deleted and will not be touched.
+        self.storage_manager.touch_l1_keys(obj_keys)
 
     def report_status(self) -> dict:
         """Return a status dict for the entire cache engine."""
@@ -842,17 +967,28 @@ class MPCacheEngine:
             "storage_manager": sm,
         }
 
-    def report_block_allocations(self, records: list[BlockAllocationRecord]) -> None:
+    def report_block_allocations(
+        self,
+        instance_id: int,
+        model_name: str,
+        records: list[BlockAllocationRecord],
+    ) -> None:
         """Publish vLLM block allocation records to the EventBus.
 
         Args:
+            instance_id: The scheduler instance ID.
+            model_name: The model name from the adapter.
             records: List of BlockAllocationRecord with per-request
                 block and token allocation deltas.
         """
         self._event_bus.publish(
             Event(
                 event_type=EventType.MP_VLLM_BLOCK_ALLOCATION,
-                metadata={"records": records},
+                metadata={
+                    "instance_id": instance_id,
+                    "model_name": model_name,
+                    "records": records,
+                },
             )
         )
 
@@ -928,6 +1064,11 @@ def run_cache_server(
         If return_engine is False: None (blocks until interrupted)
     """
     event_bus = init_observability(obs_config)
+
+    # Wire up the trace recorder (no-op when --trace-level is unset).
+    # Registered before the engine handlers are added so any
+    # storage-manager calls during engine init are captured too.
+    maybe_initialize_trace_recorder(event_bus, obs_config, storage_manager_config)
 
     # Initialize the engine (loggers self-register with the global controller)
     engine = MPCacheEngine(

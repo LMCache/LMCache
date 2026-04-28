@@ -273,6 +273,26 @@ class GPUKVFormat(IntEnum):
     NL_X_NB_TWO_NH_BS_HS = 7
 
 
+class PageBufferShapeDesc:
+    """Python stand-in for the C++ ``PageBufferShapeDesc`` struct.
+
+    Mirrors the pybind ``def_readwrite`` attributes in ``csrc/pybind.cpp``
+    so non-CUDA code paths can construct and inspect shape descriptors
+    without the compiled extension.
+    """
+
+    __slots__ = ("kv_size", "nl", "nb", "bs", "nh", "hs", "element_size")
+
+    def __init__(self) -> None:
+        self.kv_size: int = 0
+        self.nl: int = 0
+        self.nb: int = 0
+        self.bs: int = 0
+        self.nh: int = 0
+        self.hs: int = 0
+        self.element_size: int = 0
+
+
 # On XPU (Intel GPU), PyTorch 2.4+ supports pin_memory=True via SYCL USM
 # host allocation, enabling fast DMA for XPU<->CPU transfers.
 _XPU_PIN_MEMORY = hasattr(torch, "xpu") and torch.xpu.is_available()
@@ -332,6 +352,24 @@ def free_pinned_ptr(ptr: int) -> None:
 
     # Release the tensor object for that pointer reference
     _tensor_registry.pop(ptr, None)
+
+
+def batched_memcpy(src_ptrs: list[int], dst_ptrs: list[int], sizes: list[int]) -> None:
+    """Non-CUDA equivalent of the native batched memcpy helper."""
+
+    if len(src_ptrs) != len(dst_ptrs) or len(src_ptrs) != len(sizes):
+        raise ValueError(
+            "batched_memcpy expects equally sized src_ptrs, dst_ptrs, and sizes"
+        )
+
+    for src_ptr, dst_ptr, size in zip(src_ptrs, dst_ptrs, sizes, strict=True):
+        if size <= 0:
+            continue
+        ctypes.memmove(
+            ctypes.c_void_p(dst_ptr),
+            ctypes.c_void_p(src_ptr),
+            size,
+        )
 
 
 def alloc_shm_pinned_ptr(size: int, shm_name: str = "") -> int:

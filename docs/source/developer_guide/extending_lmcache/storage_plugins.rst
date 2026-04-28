@@ -149,7 +149,8 @@ A plugin adapter class **must**:
 A plugin adapter class **should**:
 
 1. Create its own asyncio event loop and background thread if it needs async I/O.
-2. Use ``os.eventfd(0, os.EFD_NONBLOCK | os.EFD_CLOEXEC)`` for the three event fds.
+2. Use ``create_event_notifier()`` from ``lmcache.v1.platform`` for the three event fds
+   (cross-platform: ``os.eventfd`` on Linux, ``os.pipe`` fallback elsewhere).
 3. Clean up all resources (event fds, threads, connections) in ``close()``.
 
 Loading Flow
@@ -192,7 +193,6 @@ Minimal Example
 
     # my_plugin/adapter.py
     import asyncio
-    import os
     import threading
 
     from lmcache.native_storage_ops import Bitmap
@@ -200,27 +200,22 @@ Minimal Example
         L2AdapterInterface,
         L2TaskId,
     )
+    from lmcache.v1.platform import create_event_notifier
 
 
     class MyL2Adapter(L2AdapterInterface):
         def __init__(self, params, **_kw):
-            self._store_efd = os.eventfd(
-                0, os.EFD_NONBLOCK | os.EFD_CLOEXEC
-            )
-            self._lookup_efd = os.eventfd(
-                0, os.EFD_NONBLOCK | os.EFD_CLOEXEC
-            )
-            self._load_efd = os.eventfd(
-                0, os.EFD_NONBLOCK | os.EFD_CLOEXEC
-            )
+            self._store_efd = create_event_notifier()
+            self._lookup_efd = create_event_notifier()
+            self._load_efd = create_event_notifier()
             # ... set up connection, background thread, etc.
 
         # implement all abstract methods ...
 
         def close(self) -> None:
-            os.close(self._store_efd)
-            os.close(self._lookup_efd)
-            os.close(self._load_efd)
+            self._store_efd.close()
+            self._lookup_efd.close()
+            self._load_efd.close()
 
 Launch via CLI:
 
