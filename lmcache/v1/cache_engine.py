@@ -1907,10 +1907,11 @@ class LMCacheEngineBuilder:
             if corrected_device == "cpu":
                 # Not all backends support cudart() for host memory pinning
                 if not hasattr(torch_dev, "cudart"):
-                    logger.warning(
-                        "Backend '%s' does not support cudart(), "
-                        "skipping host memory registration",
-                        torch_device_type,
+                    raise RuntimeError(
+                        f"Backend '{torch_device_type}' does not support "
+                        "cudart(). NIXL storage CPU buffer requires "
+                        "pinned memory via cudaHostRegister, which is "
+                        "not available on this backend."
                     )
                 else:
                     torch_dev.cudart().cudaHostRegister(

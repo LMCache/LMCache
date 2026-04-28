@@ -93,12 +93,12 @@ class LazyMemoryAllocator(MemoryAllocatorInterface):
         self._buffer: torch.Tensor
         # Not all backends support cudart() for host memory pinning (CUDA-specific)
         if not hasattr(torch_dev, "cudart"):
-            logger.warning(
-                "Backend '%s' does not support cudart(), "
-                "skipping host memory registration",
-                torch_device_type,
+            raise RuntimeError(
+                f"Backend '{torch_device_type}' does not support "
+                "cudart(). LazyMemoryAllocator requires pinned "
+                "memory via cudaHostRegister, which is not "
+                "available on this backend."
             )
-            self._cudart = None
         else:
             self._cudart = torch_dev.cudart()
 
@@ -201,8 +201,7 @@ class LazyMemoryAllocator(MemoryAllocatorInterface):
 
         # Unpin all pinned memory chunks
         for ptr, size in self._pin_record:
-            if self._cudart is not None:
-                self._cudart.cudaHostUnregister(ptr)
+            self._cudart.cudaHostUnregister(ptr)
         self._pin_record.clear()
 
         # Free the underlying buffer if using NUMA allocation
@@ -243,8 +242,7 @@ class LazyMemoryAllocator(MemoryAllocatorInterface):
 
         ptr = self._buffer.data_ptr() + offset
         # Use flag: cudaHostRegisterMapped (0x02)
-        if self._cudart is not None:
-            self._cudart.cudaHostRegister(ptr, size, 2)
+        self._cudart.cudaHostRegister(ptr, size, 2)
         self._pin_record.append((ptr, size))
 
     def _commit_expansion(self, expand_size: int):
