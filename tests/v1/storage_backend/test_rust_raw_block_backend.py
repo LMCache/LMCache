@@ -11,6 +11,7 @@ import os
 import struct
 import tempfile
 import threading
+import time
 
 # Third Party
 import pytest
@@ -1424,3 +1425,368 @@ def test_rust_raw_block_backend_warns_on_cross_rank_metadata_load(
             assert matched, "Expected cross-rank metadata warning was not emitted"
         finally:
             backend_tp1.close()
+
+
+@pytest.mark.skipif(
+    not _has_ext(), reason="lmcache_rust_raw_block_io extension not installed"
+)
+def test_rust_raw_block_backend_uring_put_get_roundtrip(
+    memory_allocator, loop_in_thread
+):
+    """Test batched write with io_uring and verify data integrity on read.
+
+    Writes 128 items asynchronously, then reads them back and verifies
+    the data matches what was written.
+    """
+    NUM_OPS = 128
+
+    with tempfile.TemporaryDirectory() as td:
+        dev_path = os.path.join(td, "dev.bin")
+        with open(dev_path, "wb") as f:
+            f.truncate(1024 * 1024 * 1024)  # 1G
+
+        config = LMCacheEngineConfig.from_defaults(
+            chunk_size=256,
+            local_cpu=True,
+            max_local_cpu_size=1,
+            lmcache_instance_id="test_rust_raw_block_uring",
+        )
+        config.storage_plugins = []
+        config.extra_config = {
+            "rust_raw_block.device_path": dev_path,
+            "rust_raw_block.block_align": 4096,
+            "rust_raw_block.header_bytes": 4096,
+            "rust_raw_block.use_uring": True,  # Enable io_uring
+            "rust_raw_block.use_odirect": True,
+        }
+        metadata = LMCacheMetadata(
+            model_name="test_model",
+            world_size=1,
+            local_world_size=1,
+            worker_id=0,
+            local_worker_id=0,
+            kv_dtype=torch.bfloat16,
+            kv_shape=(4, 2, 256, 8, 128),
+            chunk_size=256,
+        )
+
+        local_cpu = LocalCPUBackend(
+            config=config,
+            metadata=metadata,
+            dst_device="cpu",
+        )
+        backend = RustRawBlockBackend(
+            config=config,
+            metadata=metadata,
+            local_cpu_backend=local_cpu,
+            loop=loop_in_thread,
+            dst_device="cpu",
+        )
+
+        try:
+            allocator = local_cpu.memory_allocator
+
+            # Create keys and memory objects with unique data patterns
+            keys = []
+            objs = []
+            expected_data = []
+
+            for i in range(NUM_OPS):
+                key = CacheEngineKey("test_model", 1, 0, i, torch.bfloat16)
+                keys.append(key)
+
+                # Each object gets a unique fill value
+                obj = allocator.allocate(
+                    [torch.Size([2, 16, 8, 128])],
+                    [torch.bfloat16],
+                    fmt=MemoryFormat.KV_T2D,
+                )
+                assert obj is not None
+                assert obj.tensor is not None
+
+                # Use unique pattern: (i + 1) as fill value
+                obj.tensor.fill_(float(i + 1))
+                expected_data.append(bytes(obj.byte_array))
+                objs.append(obj)
+
+            # Submit all writes using io_uring batched write
+            futs = backend.batched_submit_put_task(keys, objs)
+            assert futs is not None
+            futs[0].result(timeout=10)
+
+            # Read back and verify data integrity
+            for i, key in enumerate(keys):
+                out = backend.get_blocking(key)
+                assert out is not None, f"Failed to read key {i}"
+                actual_data = bytes(out.byte_array)
+                assert actual_data == expected_data[i], (
+                    f"Data mismatch for key {i}: "
+                    f"expected first bytes {expected_data[i][:16]}, "
+                    f"got {actual_data[:16]}"
+                )
+
+        finally:
+            backend.close()
+
+
+@pytest.mark.skipif(
+    not _has_ext(), reason="lmcache_rust_raw_block_io extension not installed"
+)
+def test_rust_raw_block_backend_close_with_inflight(memory_allocator, loop_in_thread):
+    """Test that closing the backend while writes are queued / inflight
+    is handled gracefully (uring)."""
+    NUM_OPS = 128
+
+    with tempfile.TemporaryDirectory() as td:
+        dev_path = os.path.join(td, "dev.bin")
+        with open(dev_path, "wb") as f:
+            f.truncate(1024 * 1024 * 1024)  # 1G
+
+        config = LMCacheEngineConfig.from_defaults(
+            chunk_size=256,
+            local_cpu=True,
+            max_local_cpu_size=1,
+            lmcache_instance_id="test_rust_raw_block_uring",
+        )
+        config.storage_plugins = []
+        config.extra_config = {
+            "rust_raw_block.device_path": dev_path,
+            "rust_raw_block.block_align": 4096,
+            "rust_raw_block.header_bytes": 4096,
+            "rust_raw_block.use_uring": True,
+            "rust_raw_block.use_odirect": True,
+        }
+        metadata = LMCacheMetadata(
+            model_name="test_model",
+            world_size=1,
+            local_world_size=1,
+            worker_id=0,
+            local_worker_id=0,
+            kv_dtype=torch.bfloat16,
+            kv_shape=(4, 2, 256, 8, 128),
+            chunk_size=256,
+        )
+
+        local_cpu = LocalCPUBackend(
+            config=config,
+            metadata=metadata,
+            dst_device="cpu",
+        )
+        backend = RustRawBlockBackend(
+            config=config,
+            metadata=metadata,
+            local_cpu_backend=local_cpu,
+            loop=loop_in_thread,
+            dst_device="cpu",
+        )
+
+        # Dummy raw that simulates few operations.
+        class DummyRaw:
+            def __init__(self):
+                self._inner = backend._rawdev()
+
+            def batched_write(self, offsets, buffers, total_lens):
+                return self._inner.batched_write(offsets, buffers, total_lens)
+
+            def read_uring(self, offset, data, payload_len, total_len):
+                return self._inner.read_uring(offset, data, payload_len, total_len)
+
+            def wait_iouring(self, batch_id):
+                self._inner.wait_iouring(batch_id)
+
+            def __getattr__(self, name):
+                return getattr(self._inner, name)
+
+            def close(self):
+                self._inner.close()
+
+        backend._raw = DummyRaw()
+
+        try:
+            allocator = local_cpu.memory_allocator
+
+            # Create keys and memory objects with unique data patterns
+            keys = []
+            objs = []
+            expected_data = []
+            offsets = []
+            buffers = []
+            total_lens = []
+
+            for i in range(NUM_OPS):
+                key = CacheEngineKey("test_model", 1, 0, i, torch.bfloat16)
+                keys.append(key)
+
+                obj = allocator.allocate(
+                    [torch.Size([2, 16, 8, 128])],
+                    [torch.bfloat16],
+                    fmt=MemoryFormat.KV_T2D,
+                )
+                assert obj is not None
+                assert obj.tensor is not None
+
+                obj.tensor.fill_(float(i + 1))
+                expected_data.append(bytes(obj.byte_array))
+                objs.append(obj)
+
+                offset = i * len(obj.byte_array)
+                total_len = len(obj.byte_array)
+                buf = obj.byte_array
+                offsets.append(offset)
+                buffers.append(buf)
+                total_lens.append(total_len)
+            backend._raw.batched_write(offsets, buffers, total_lens)
+            time.sleep(0.001)
+            # close while writes may still be in progress.
+            backend.close()
+
+            backend = RustRawBlockBackend(
+                config=config,
+                metadata=metadata,
+                local_cpu_backend=local_cpu,
+                loop=loop_in_thread,
+                dst_device="cpu",
+            )
+            # Read back and verify data integrity
+            for i, key in enumerate(keys):
+                obj = allocator.allocate(
+                    [torch.Size([2, 16, 8, 128])],
+                    [torch.bfloat16],
+                    fmt=MemoryFormat.KV_T2D,
+                )
+                assert obj is not None
+                assert obj.tensor is not None
+
+                offset = i * len(obj.byte_array)
+                total_len = len(obj.byte_array)
+                buf = obj.byte_array
+                backend._raw.read_uring(offset, buf, total_len, total_len)
+                actual_data = bytes(obj.byte_array)
+                assert actual_data == expected_data[i], (
+                    f"Data mismatch for key {i}: "
+                    f"expected first bytes {expected_data[i][:16]}, "
+                    f"got {actual_data[:16]}"
+                )
+
+        finally:
+            try:
+                backend.close()
+            except Exception:
+                pass
+
+
+@pytest.mark.skipif(
+    not _has_ext(), reason="lmcache_rust_raw_block_io extension not installed"
+)
+def test_rust_raw_block_backend_batched_get_with_uring(
+    memory_allocator, loop_in_thread
+):
+    """Test batched_get_blocking and batched_get_non_blocking with io_uring enabled."""
+    with tempfile.TemporaryDirectory() as td:
+        dev_path = os.path.join(td, "dev.bin")
+        with open(dev_path, "wb") as f:
+            f.truncate(64 * 1024 * 1024)
+
+        config = LMCacheEngineConfig.from_defaults(
+            chunk_size=256,
+            local_cpu=True,
+            max_local_cpu_size=0.1,
+            lmcache_instance_id="test_rust_raw_block_batched_get_uring",
+        )
+        config.storage_plugins = []
+        config.extra_config = {
+            "rust_raw_block.device_path": dev_path,
+            "rust_raw_block.block_align": 4096,
+            "rust_raw_block.header_bytes": 4096,
+            "rust_raw_block.meta_total_bytes": 4 * 1024 * 1024,
+            "rust_raw_block.meta_enable_periodic": False,
+            "rust_raw_block.use_uring": True,  # Enable io_uring
+            "rust_raw_block.use_odirect": True,
+        }
+        metadata = LMCacheMetadata(
+            model_name="test_model",
+            world_size=1,
+            local_world_size=1,
+            worker_id=0,
+            local_worker_id=0,
+            kv_dtype=torch.bfloat16,
+            kv_shape=(4, 2, 256, 8, 128),
+        )
+
+        local_cpu = LocalCPUBackend(
+            config=config,
+            metadata=metadata,
+            dst_device="cpu",
+            memory_allocator=memory_allocator,
+        )
+        backend = RustRawBlockBackend(
+            config=config,
+            metadata=metadata,
+            local_cpu_backend=local_cpu,
+            loop=loop_in_thread,
+            dst_device="cpu",
+        )
+
+        try:
+            allocator = local_cpu.memory_allocator
+            key1 = CacheEngineKey("test_model", 1, 0, 4001, torch.bfloat16)
+            key2 = CacheEngineKey("test_model", 1, 0, 4002, torch.bfloat16)
+            key_miss = CacheEngineKey("test_model", 1, 0, 4003, torch.bfloat16)
+            key3 = CacheEngineKey("test_model", 1, 0, 4004, torch.bfloat16)
+
+            obj1 = allocator.allocate(
+                [torch.Size([2, 16, 8, 128])], [torch.bfloat16], fmt=MemoryFormat.KV_T2D
+            )
+            obj2 = allocator.allocate(
+                [torch.Size([2, 16, 8, 128])], [torch.bfloat16], fmt=MemoryFormat.KV_T2D
+            )
+            obj3 = allocator.allocate(
+                [torch.Size([2, 16, 8, 128])], [torch.bfloat16], fmt=MemoryFormat.KV_T2D
+            )
+            assert obj1 is not None and obj1.tensor is not None
+            assert obj2 is not None and obj2.tensor is not None
+            assert obj3 is not None and obj3.tensor is not None
+            obj1.tensor.fill_(41)
+            obj2.tensor.fill_(42)
+            obj3.tensor.fill_(43)
+            expected1 = bytes(obj1.byte_array)
+            expected2 = bytes(obj2.byte_array)
+
+            # Put keys 1, 2, and 3
+            for key, obj in ((key1, obj1), (key2, obj2), (key3, obj3)):
+                futs = backend.batched_submit_put_task([key], [obj])
+                assert futs is not None
+                futs[0].result(timeout=10)
+                obj.ref_count_down()
+
+            # Test batched_get_blocking with uring. It should stop at first miss
+            blocking_results = backend.batched_get_blocking(
+                [key1, key2, key_miss, key3]
+            )
+            assert len(blocking_results) == 4
+            assert blocking_results[0] is not None
+            assert bytes(blocking_results[0].byte_array) == expected1
+            assert blocking_results[1] is not None
+            assert bytes(blocking_results[1].byte_array) == expected2
+            assert blocking_results[2] is None  # Miss
+            assert blocking_results[3] is None  # After miss
+            blocking_results[0].ref_count_down()
+            blocking_results[1].ref_count_down()
+
+            # Test batched_get_non_blocking with uring.
+            # It should return only successful prefix
+            future = asyncio.run_coroutine_threadsafe(
+                backend.batched_get_non_blocking(
+                    "lookup-uring", [key1, key2, key_miss, key3]
+                ),
+                loop_in_thread,
+            )
+            async_results = future.result(timeout=10)
+            assert len(async_results) == 2  # Only key1 and key2
+            assert bytes(async_results[0].byte_array) == expected1
+            assert bytes(async_results[1].byte_array) == expected2
+            async_results[0].ref_count_down()
+            async_results[1].ref_count_down()
+
+        finally:
+            backend.close()

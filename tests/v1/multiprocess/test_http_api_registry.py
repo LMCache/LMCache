@@ -113,6 +113,56 @@ class TestDiscoverApiRouters:
 
         assert len(routers) == 0
 
+    def test_exclude_filters_named_modules(self, tmp_path):
+        """Modules whose base name is listed in ``exclude`` are skipped."""
+        (tmp_path / "keep_api.py").write_text(
+            "from fastapi import APIRouter\nrouter = APIRouter()\n"
+        )
+        (tmp_path / "drop_api.py").write_text(
+            "from fastapi import APIRouter\nrouter = APIRouter()\n"
+        )
+        (tmp_path / "__init__.py").write_text("")
+
+        sys.path.insert(0, str(tmp_path.parent))
+        try:
+            routers = discover_api_routers(
+                tmp_path,
+                pkg_name := tmp_path.name,
+                exclude={"drop_api"},
+            )
+        finally:
+            sys.path.pop(0)
+            for key in list(sys.modules):
+                if key.startswith(pkg_name):
+                    del sys.modules[key]
+
+        assert len(routers) == 1
+
+    def test_exclude_none_is_default(self, tmp_path):
+        """Passing ``exclude=None`` keeps all discoverable modules."""
+        (tmp_path / "a_api.py").write_text(
+            "from fastapi import APIRouter\nrouter = APIRouter()\n"
+        )
+        (tmp_path / "b_api.py").write_text(
+            "from fastapi import APIRouter\nrouter = APIRouter()\n"
+        )
+        (tmp_path / "__init__.py").write_text("")
+
+        sys.path.insert(0, str(tmp_path.parent))
+        try:
+            routers = discover_api_routers(
+                tmp_path,
+                pkg_name := tmp_path.name,
+                exclude=None,
+            )
+        finally:
+            sys.path.pop(0)
+            for key in list(sys.modules):
+                if key.startswith(pkg_name):
+                    del sys.modules[key]
+
+        assert len(routers) == 2
+
 
 # ------------------------------------------------------------------ #
 #  HTTPAPIRegistry integration

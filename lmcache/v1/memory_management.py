@@ -1811,6 +1811,16 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
     def __str__(self):
         return "PagedTensorMemoryAllocator"
 
+    def get_paged_buffers(self) -> list[torch.Tensor]:
+        """
+        Get the list of paged buffers for fixed buffer registration.
+
+        Returns:
+            List of paged buffer tensors that can be registered with io_uring
+            for true zero copy operations.
+        """
+        return self.paged_buffers
+
     def __del__(self):
         # FIXME: NIXL-related memory leak should be handled somewhere (else).
         del self.buffer
@@ -2198,6 +2208,18 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
                 self.shm_name,
             )
             self._unregistered = True
+
+    def get_paged_buffers(self) -> Optional[list[torch.Tensor]]:
+        """
+        Get the list of paged buffers for fixed buffer registration.
+
+        Returns:
+            List of paged buffer tensors if using paged allocator, None otherwise.
+            These buffers can be registered with io_uring for true zero copy operations.
+        """
+        if isinstance(self.pin_allocator, PagedTensorMemoryAllocator):
+            return self.pin_allocator.get_paged_buffers()
+        return None
 
     def __str__(self):
         return "MixedMemoryAllocator"

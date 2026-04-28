@@ -20,7 +20,6 @@ from typing import TYPE_CHECKING, Optional
 from urllib.parse import quote as url_quote
 import asyncio
 import ctypes
-import os
 import threading
 
 if TYPE_CHECKING:
@@ -47,6 +46,7 @@ from lmcache.v1.distributed.l2_adapters.factory import (
     register_l2_adapter_factory,
 )
 from lmcache.v1.memory_management import MemoryObj
+from lmcache.v1.platform import create_event_notifier
 
 logger = init_logger(__name__)
 
@@ -321,10 +321,10 @@ class S3L2Adapter(L2AdapterInterface):
             signing_config=signing_config,
         )
 
-        # 3 distinct eventfds for the L2 interface.
-        self._store_efd = os.eventfd(0, os.EFD_NONBLOCK | os.EFD_CLOEXEC)
-        self._lookup_efd = os.eventfd(0, os.EFD_NONBLOCK | os.EFD_CLOEXEC)
-        self._load_efd = os.eventfd(0, os.EFD_NONBLOCK | os.EFD_CLOEXEC)
+        # 3 distinct cross-platform notifiers for the L2 interface.
+        self._store_efd = create_event_notifier()
+        self._lookup_efd = create_event_notifier()
+        self._load_efd = create_event_notifier()
 
         self._next_task_id: L2TaskId = 0
         self._completed_store_tasks: dict[L2TaskId, bool] = {}
@@ -377,13 +377,13 @@ class S3L2Adapter(L2AdapterInterface):
     # ------------------------------------------------------------------
 
     def get_store_event_fd(self) -> int:
-        return self._store_efd
+        return self._store_efd.fileno()
 
     def get_lookup_and_lock_event_fd(self) -> int:
-        return self._lookup_efd
+        return self._lookup_efd.fileno()
 
     def get_load_event_fd(self) -> int:
-        return self._load_efd
+        return self._load_efd.fileno()
 
     # ------------------------------------------------------------------
     # Store Interface
@@ -404,7 +404,7 @@ class S3L2Adapter(L2AdapterInterface):
                 disabled = False
 
         if disabled:
-            os.eventfd_write(self._store_efd, 1)
+            self._store_efd.notify()
             return task_id
 
         asyncio.run_coroutine_threadsafe(
@@ -434,7 +434,7 @@ class S3L2Adapter(L2AdapterInterface):
                 disabled = False
 
         if disabled:
-            os.eventfd_write(self._lookup_efd, 1)
+            self._lookup_efd.notify()
             return task_id
 
         asyncio.run_coroutine_threadsafe(
@@ -476,7 +476,7 @@ class S3L2Adapter(L2AdapterInterface):
                 disabled = False
 
         if disabled:
-            os.eventfd_write(self._load_efd, 1)
+            self._load_efd.notify()
             return task_id
 
         asyncio.run_coroutine_threadsafe(
@@ -576,9 +576,9 @@ class S3L2Adapter(L2AdapterInterface):
         except Exception:
             pass
 
-        os.close(self._store_efd)
-        os.close(self._lookup_efd)
-        os.close(self._load_efd)
+        self._store_efd.close()
+        self._lookup_efd.close()
+        self._load_efd.close()
 
         # Drop awscrt references so their native event loops / host
         # resolver threads / epoll fds can be reaped immediately rather
@@ -814,7 +814,7 @@ class S3L2Adapter(L2AdapterInterface):
 
         with self._lock:
             self._completed_store_tasks[task_id] = success
-        os.eventfd_write(self._store_efd, 1)
+        self._store_efd.notify()
 
         if newly_stored_keys:
             self._notify_keys_stored(newly_stored_keys, newly_stored_sizes)
@@ -892,7 +892,7 @@ class S3L2Adapter(L2AdapterInterface):
 
         with self._lock:
             self._completed_lookup_tasks[task_id] = bitmap
-        os.eventfd_write(self._lookup_efd, 1)
+        self._lookup_efd.notify()
 
         accessed = [keys[i] for i in range(len(keys)) if bitmap.test(i)]
         if accessed:
@@ -935,7 +935,7 @@ class S3L2Adapter(L2AdapterInterface):
 
         with self._lock:
             self._completed_load_tasks[task_id] = bitmap
-        os.eventfd_write(self._load_efd, 1)
+        self._load_efd.notify()
 
     async def _execute_delete(
         self, keys: list[ObjectKey]

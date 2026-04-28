@@ -8,7 +8,6 @@ routes PUT/GET/HEAD/DELETE against a shared dict.  No network required.
 
 # Standard
 from concurrent.futures import Future as ConcurrentFuture
-import os
 import select
 import threading
 import time
@@ -31,6 +30,7 @@ from lmcache.v1.memory_management import (
     MemoryObjMetadata,
     TensorMemoryObj,
 )
+from lmcache.v1.platform import consume_fd
 
 # =============================================================================
 # Fake awscrt.s3.S3Request
@@ -266,7 +266,7 @@ def wait_for_event_fd(event_fd: int, timeout: float = 5.0) -> bool:
     events = poll.poll(timeout * 1000)
     if events:
         try:
-            os.eventfd_read(event_fd)
+            consume_fd(event_fd)
         except BlockingIOError:
             pass
         return True

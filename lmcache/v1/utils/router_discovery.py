@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from pathlib import Path
-from typing import List
+from typing import Iterable, List, Optional
 import importlib
 import pkgutil
 
@@ -18,6 +18,7 @@ def discover_api_routers(
     search_path: Path,
     package_name: str,
     suffix: str = "_api",
+    exclude: Optional[Iterable[str]] = None,
 ) -> List[APIRouter]:
     """Scan *search_path* for modules whose name ends with *suffix*
     and return every ``router`` attribute that is an
@@ -30,13 +31,20 @@ def discover_api_routers(
             :func:`importlib.import_module`).
         suffix: Only modules whose name ends with this string
             are considered.  Defaults to ``"_api"``.
+        exclude: Optional iterable of module base names to skip
+            (e.g. ``{"run_script_api"}``).  Useful when a host
+            package only wants a subset of the available routers.
 
     Returns:
         A list of discovered :class:`~fastapi.APIRouter` instances.
     """
+    excluded = set(exclude or ())
     routers: List[APIRouter] = []
     for _, module_name, _ in pkgutil.iter_modules([str(search_path)]):
         if not module_name.endswith(suffix):
+            continue
+        if module_name in excluded:
+            logger.info("Skipping excluded API module: %s", module_name)
             continue
         full_name = f"{package_name}.{module_name}"
         module = importlib.import_module(full_name)
