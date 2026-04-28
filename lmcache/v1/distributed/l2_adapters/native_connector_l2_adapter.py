@@ -770,7 +770,18 @@ class BlkioL2AdapterConfig(L2AdapterConfigBase):
         device_path: str,
         num_workers: int = 4,
         direct_io: bool = True,
-    ):
+    ) -> None:
+        """Initialize a BlkioL2AdapterConfig.
+
+        Args:
+            device_path: Path to the block device
+                (e.g. ``/dev/nvme0n1``).
+            num_workers: Number of C++ worker threads for I/O.
+                Each worker gets its own io_uring instance
+                through libblkio.  Default 4.
+            direct_io: If ``True``, bypass the page cache via
+                ``O_DIRECT``.  Default ``True``.
+        """
         super().__init__()
         self.device_path = device_path
         self.num_workers = num_workers
@@ -778,6 +789,19 @@ class BlkioL2AdapterConfig(L2AdapterConfigBase):
 
     @classmethod
     def from_dict(cls, d: dict) -> "BlkioL2AdapterConfig":
+        """Create a :class:`BlkioL2AdapterConfig` from a dictionary.
+
+        Args:
+            d: Dictionary with keys ``device_path`` (required),
+                ``num_workers`` (optional, default 4), and
+                ``direct_io`` (optional, default ``True``).
+
+        Returns:
+            A validated :class:`BlkioL2AdapterConfig` instance.
+
+        Raises:
+            ValueError: If any field has an invalid type or value.
+        """
         device_path = d.get("device_path")
         if not isinstance(device_path, str) or not device_path:
             raise ValueError(

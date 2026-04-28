@@ -7,6 +7,7 @@
 #include <cstdlib>
 #include <stdexcept>
 #include <string>
+#include <unistd.h>
 
 namespace lmcache {
 namespace connector {
@@ -42,9 +43,9 @@ void BlkioConnector::map_do_io_unmap(struct blkio* handle, struct blkioq* queue,
   // O_DIRECT and io_uring buffer registration require page-aligned
   // buffers.  When the caller's buffer is not aligned we use a
   // page-aligned bounce buffer and copy data to/from it.
-  static constexpr size_t kPageSize = 4096;
-  const bool aligned = (reinterpret_cast<uintptr_t>(buf) % kPageSize == 0) &&
-                       (len % kPageSize == 0);
+  const size_t page_size = static_cast<size_t>(sysconf(_SC_PAGESIZE));
+  const bool aligned = (reinterpret_cast<uintptr_t>(buf) % page_size == 0) &&
+                       (len % page_size == 0);
 
   void* io_buf = buf;
   void* bounce_buf = nullptr;
@@ -53,8 +54,8 @@ void BlkioConnector::map_do_io_unmap(struct blkio* handle, struct blkioq* queue,
   if (!aligned) {
     // Round len up to page boundary for the bounce allocation so
     // the region itself satisfies alignment requirements.
-    size_t alloc_len = (len + kPageSize - 1) & ~(kPageSize - 1);
-    int rc = posix_memalign(&bounce_buf, kPageSize, alloc_len);
+    size_t alloc_len = (len + page_size - 1) & ~(page_size - 1);
+    int rc = posix_memalign(&bounce_buf, page_size, alloc_len);
     if (rc != 0) {
       throw std::runtime_error(std::string("blkio: posix_memalign failed: ") +
                                strerror(rc));
@@ -67,7 +68,9 @@ void BlkioConnector::map_do_io_unmap(struct blkio* handle, struct blkioq* queue,
         std::memset(static_cast<char*>(bounce_buf) + len, 0, alloc_len - len);
       }
     }
-    // Use the padded length for the region registration and I/O.
+    // Use the padded length for the region registration.
+    // The I/O operation uses original_len so we never overwrite
+    // adjacent device data beyond what the caller requested.
     len = alloc_len;
   }
 
@@ -86,13 +89,16 @@ void BlkioConnector::map_do_io_unmap(struct blkio* handle, struct blkioq* queue,
   }
 
   // 2. Submit the I/O and wait for completion.
+  //    The memory region is registered with the padded length (len)
+  //    but the I/O uses original_len so writes never clobber
+  //    adjacent data on the device.
   struct blkio_completion comp;
   if (is_read) {
-    blkioq_read(queue, device_offset, io_buf, static_cast<uint32_t>(len), &comp,
-                0);
+    blkioq_read(queue, device_offset, io_buf,
+                static_cast<uint32_t>(original_len), &comp, 0);
   } else {
-    blkioq_write(queue, device_offset, io_buf, static_cast<uint32_t>(len),
-                 &comp, 0);
+    blkioq_write(queue, device_offset, io_buf,
+                 static_cast<uint32_t>(original_len), &comp, 0);
   }
 
   ret = blkioq_do_io(queue, &comp, 1, 1, nullptr);

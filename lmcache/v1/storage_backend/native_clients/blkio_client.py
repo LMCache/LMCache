@@ -38,7 +38,7 @@ class BlkioClient(ConnectorClientBase[LMCacheBlkioClient]):
         num_workers: int,
         direct_io: bool = True,
         loop: Optional[asyncio.AbstractEventLoop] = None,
-    ):
+    ) -> None:
         if not BLKIO_AVAILABLE:
             raise RuntimeError(
                 "BlkioClient requires the C++ libblkio extension. "

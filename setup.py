@@ -11,6 +11,42 @@ ROOT_DIR = Path(__file__).parent
 HIPIFY_DIR = os.path.join(ROOT_DIR, "csrc/")
 HIPIFY_OUT_DIR = os.path.join(ROOT_DIR, "csrc_hip/")
 
+
+def _pkgconfig(lib: str, flag: str) -> list[str]:
+    """Query pkg-config for a library and return the flags as a list.
+
+    Returns an empty list on any failure so the build falls back to
+    standard compiler/linker search paths (or user-supplied CFLAGS /
+    LDFLAGS).
+    """
+    # Standard
+    import shutil
+    import subprocess
+
+    if not shutil.which("pkg-config"):
+        return []
+    try:
+        out = subprocess.check_output(
+            ["pkg-config", flag, lib],
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).strip()
+        return out.split() if out else []
+    except subprocess.CalledProcessError:
+        return []
+
+
+def _blkio_include_dirs() -> list[str]:
+    """Return include directories for libblkio via pkg-config."""
+    flags = _pkgconfig("blkio", "--cflags-only-I")
+    return [f.removeprefix("-I") for f in flags if f.startswith("-I")]
+
+
+def _blkio_library_dirs() -> list[str]:
+    """Return library directories for libblkio via pkg-config."""
+    flags = _pkgconfig("blkio", "--libs-only-L")
+    return [f.removeprefix("-L") for f in flags if f.startswith("-L")]
+
 # python -m build --sdist
 # will run python setup.py sdist --dist-dir dist
 BUILDING_SDIST = "sdist" in sys.argv or os.environ.get("NO_CUDA_EXT", "0") == "1"
@@ -195,10 +231,10 @@ def cuda_extension() -> tuple[list, dict]:
             include_dirs=[
                 "csrc/storage_backends",
                 "csrc/storage_backends/blkio",
-                "/usr/local/include",
-            ],
+            ]
+            + _blkio_include_dirs(),
             libraries=["blkio"],
-            library_dirs=["/usr/local/lib/x86_64-linux-gnu"],
+            library_dirs=_blkio_library_dirs(),
             extra_compile_args={
                 "cxx": [flag_cxx_abi, "-O3", "-std=c++17"],
             },
@@ -312,10 +348,10 @@ def rocm_extension() -> tuple[list, dict]:
             include_dirs=[
                 "csrc/storage_backends",
                 "csrc/storage_backends/blkio",
-                "/usr/local/include",
-            ],
+            ]
+            + _blkio_include_dirs(),
             libraries=["blkio"],
-            library_dirs=["/usr/local/lib/x86_64-linux-gnu"],
+            library_dirs=_blkio_library_dirs(),
             extra_compile_args={
                 "cxx": ["-O3", "-std=c++17"],
             },
