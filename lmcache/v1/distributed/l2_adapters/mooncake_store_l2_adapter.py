@@ -129,9 +129,7 @@ class MooncakeStoreL2AdapterConfig(L2AdapterConfigBase):
         if value is None:
             return None
         if not isinstance(value, int):
-            raise TypeError(
-                f"{key} must be an integer, got {type(value).__name__}"
-            )
+            raise ValueError(f"{key} must be an integer, got {type(value).__name__}")
         return value
 
     @staticmethod
