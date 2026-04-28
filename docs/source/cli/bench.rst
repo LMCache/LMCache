@@ -1,3 +1,5 @@
+.. _lmcache-bench-engine:
+
 lmcache bench engine
 ====================
 

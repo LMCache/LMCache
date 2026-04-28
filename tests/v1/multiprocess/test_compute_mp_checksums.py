@@ -223,3 +223,192 @@ class TestComputeMpChecksums:
         # underlying data differs due to precision loss, so
         # checksums should differ.
         assert r_f32["chunk_checksums"] != r_bf16["chunk_checksums"]
+
+    @staticmethod
+    def _make_mla_3d_kv_tensors(
+        num_layers: int = 2,
+        num_blocks: int = 4,
+        block_size: int = 4,
+        head_size: int = 8,
+        dtype: torch.dtype = torch.float32,
+    ) -> list[torch.Tensor]:
+        """Create MLA-style 3D CPU tensors: ``[NB, BS, HS]``."""
+        torch.manual_seed(0)
+        return [
+            torch.randn(
+                num_blocks,
+                block_size,
+                head_size,
+                dtype=dtype,
+            )
+            for _ in range(num_layers)
+        ]
+
+    @staticmethod
+    def _make_4d_kv_tensors(
+        num_layers: int = 2,
+        num_blocks: int = 4,
+        block_size: int = 4,
+        num_heads: int = 2,
+        head_size: int = 8,
+        dtype: torch.dtype = torch.float32,
+    ) -> list[torch.Tensor]:
+        """Create 4D CPU tensors: ``[NB, BS, NH, HS]``."""
+        torch.manual_seed(0)
+        return [
+            torch.randn(
+                num_blocks,
+                block_size,
+                num_heads,
+                head_size,
+                dtype=dtype,
+            )
+            for _ in range(num_layers)
+        ]
+
+    def test_mla_3d_tensor_no_crash(self):
+        """Real MLA 3D tensors ``[NB, BS, HS]`` must not crash.
+
+        Regression for Bugbot ``#3151480582``: the old reshape
+        hard-coded a 5D layout and silently produced wrong
+        checksums for 3D MLA tensors coming from vLLM.
+        """
+        kv = self._make_mla_3d_kv_tensors()
+        assert kv[0].ndim == 3
+        result = _compute_mp_checksums(
+            kv,
+            slot_indices=[0, 1, 2, 3],
+            chunk_size=2,
+            layerwise=False,
+        )
+        assert result["status"] == "success"
+        assert result["num_chunks"] == 2
+        lw = _compute_mp_checksums(
+            kv,
+            slot_indices=[0, 1, 2, 3],
+            chunk_size=2,
+            layerwise=True,
+        )
+        assert lw["layerwise"] is True
+        assert "layer_0" in lw["chunk_checksums"]
+        assert "layer_1" in lw["chunk_checksums"]
+
+    def test_4d_tensor_no_crash(self):
+        """4D tensors ``[NB, BS, NH, HS]`` must be supported."""
+        kv = self._make_4d_kv_tensors()
+        assert kv[0].ndim == 4
+        result = _compute_mp_checksums(
+            kv,
+            slot_indices=[0, 1, 2, 3],
+            chunk_size=2,
+            layerwise=False,
+        )
+        assert result["status"] == "success"
+        assert result["num_chunks"] == 2
+
+    def test_mla_3d_matches_equivalent_5d(self):
+        """3D MLA and equivalent 5D ``kv_size=1`` yield same data.
+
+        The 5D form ``[1, NB, BS, 1, HS]`` carries the exact
+        same bytes as the 3D form ``[NB, BS, HS]``; the
+        checksum computation should therefore produce the
+        same result for matching slots.
+        """
+        torch.manual_seed(7)
+        nb, bs, hs = 4, 4, 8
+        base = torch.randn(nb, bs, hs, dtype=torch.float32)
+        kv_3d = [base.clone()]
+        kv_5d = [base.view(1, nb, bs, 1, hs).clone()]
+        r_3d = _compute_mp_checksums(
+            kv_3d,
+            slot_indices=[0, 1, 5, 7],
+            chunk_size=2,
+            layerwise=False,
+        )
+        r_5d = _compute_mp_checksums(
+            kv_5d,
+            slot_indices=[0, 1, 5, 7],
+            chunk_size=2,
+            layerwise=False,
+        )
+        assert r_3d["chunk_checksums"] == r_5d["chunk_checksums"]
+
+    def test_unsupported_ndim_raises(self):
+        """An unsupported ndim should raise ``ValueError``."""
+        bad = [torch.randn(2, 3, dtype=torch.float32)]
+        try:
+            _compute_mp_checksums(
+                bad,
+                slot_indices=[0],
+                chunk_size=1,
+                layerwise=False,
+            )
+        except ValueError:
+            return
+        raise AssertionError("expected ValueError for 2D tensor")
+
+
+class TestSlotTensorDeviceAlignment:
+    """Regression for the Bugbot review: the slot index tensor
+    passed to :func:`extract_kv_at_slots` must live on the same
+    device as the per-layer KV tensor, to avoid implicit H2D
+    copies (or failures on PyTorch/CUDA builds that forbid
+    mixed-device indexing).
+
+    The tests run on CPU; we verify the invariants via a
+    monkeypatched stub that records every ``slot_tensor.device``
+    it observes.
+    """
+
+    @staticmethod
+    def _make_kv_list(num_layers: int) -> list[torch.Tensor]:
+        # Same shape layout as TestComputeMpChecksums; small
+        # random tensors are enough for device-alignment checks.
+        kv_shape = (2, 2, 4, 2, 4)  # [2, NB, BS, NH, HS]
+        torch.manual_seed(123)
+        return [torch.randn(*kv_shape, dtype=torch.float32) for _ in range(num_layers)]
+
+    def test_slot_tensor_device_follows_kv_device(self, monkeypatch):
+        # First Party
+        from lmcache.v1.multiprocess.http_apis import cache_api as mp_api
+
+        seen_devices: list[torch.device] = []
+
+        def fake_extract(kv_tensor, slot_tensor):
+            seen_devices.append(slot_tensor.device)
+            assert slot_tensor.device == kv_tensor.device, (
+                "slot_tensor.device must match kv_tensor.device"
+            )
+            flat = kv_tensor.reshape(kv_tensor.shape[0], -1, *kv_tensor.shape[3:])
+            return flat[:, slot_tensor]
+
+        monkeypatch.setattr(mp_api, "extract_kv_at_slots", fake_extract)
+
+        kvs = self._make_kv_list(num_layers=3)
+        result = _compute_mp_checksums(
+            kvs, slot_indices=[0, 1, 2, 3], chunk_size=2, layerwise=False
+        )
+        assert result["status"] == "success"
+        assert len(seen_devices) == 3
+        assert all(d == torch.device("cpu") for d in seen_devices)
+
+    def test_slot_tensor_is_cached_per_device(self, monkeypatch):
+        """With N layers on the same device, the slot tensor is
+        built once and the same object is reused."""
+        # First Party
+        from lmcache.v1.multiprocess.http_apis import cache_api as mp_api
+
+        ids_seen: set[int] = set()
+
+        def fake_extract(kv_tensor, slot_tensor):
+            ids_seen.add(id(slot_tensor))
+            flat = kv_tensor.reshape(kv_tensor.shape[0], -1, *kv_tensor.shape[3:])
+            return flat[:, slot_tensor]
+
+        monkeypatch.setattr(mp_api, "extract_kv_at_slots", fake_extract)
+
+        kvs = self._make_kv_list(num_layers=4)
+        _compute_mp_checksums(
+            kvs, slot_indices=[0, 1, 2], chunk_size=2, layerwise=False
+        )
+        assert len(ids_seen) == 1

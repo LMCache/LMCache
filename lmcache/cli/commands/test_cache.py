@@ -9,8 +9,8 @@ Supports **GPU** mode (``--mode gpu``).
 This command exercises the full store / retrieve data path:
 
     For each request:
-      1. LOOKUP   — submit prefix lookup, get prefetch job ID
-      2. QUERY_PREFETCH_STATUS — poll until prefetch completes
+      1. LOOKUP   — submit prefix lookup (void reply)
+      2. QUERY_PREFETCH_STATUS — poll by request_id until done
       3. RETRIEVE — for the hit portion (if any)
       4. STORE    — for the miss portion
       5. CHECKSUM — verify KV cache integrity via HTTP API
@@ -33,6 +33,7 @@ Usage examples::
 from __future__ import annotations
 
 # Standard
+from typing import Any
 import argparse
 import hashlib
 import itertools
@@ -43,7 +44,6 @@ import urllib.error
 import urllib.request
 
 # Third Party
-import msgspec
 import torch
 import zmq
 
@@ -59,8 +59,9 @@ from lmcache.v1.kv_layer_groups import (
 from lmcache.v1.multiprocess.custom_types import (
     CudaIPCWrapper,
     IPCCacheEngineKey,
-    get_customized_encoder,
 )
+from lmcache.v1.multiprocess.futures import MessagingFuture
+from lmcache.v1.multiprocess.mq import MessageQueueClient
 from lmcache.v1.multiprocess.protocols.base import RequestType
 
 # ------------------------------------------------------------------ #
@@ -80,88 +81,31 @@ _DEFAULT_SHAPE_SPEC = "(2,1024,16,8,128):float16:32"
 #  Low-level helpers                                                   #
 # ------------------------------------------------------------------ #
 
+# Default RPC call timeout (seconds) for blocking request/reply
+# round-trips.
+_DEFAULT_RPC_TIMEOUT_S = 10.0
 
-class ZmqClient:
-    """Thin wrapper around a DEALER ``zmq.Socket``.
+# Unique sentinel returned by :func:`_call` on RPC timeout so callers
+# can disambiguate it from a legitimate ``None`` (void) reply.
+_TIMEOUT = object()
 
-    Encapsulates the per-connection monotonic request UID counter
-    (previously a module-level global) and adds UID-matching on
-    ``recv_multipart`` so late replies from prior timed-out requests
-    are discarded instead of being mis-interpreted as the next
-    request's response.
+
+def _call(
+    client: MessageQueueClient,
+    request_type: RequestType,
+    payloads: list,
+    timeout_s: float = _DEFAULT_RPC_TIMEOUT_S,
+) -> Any:
+    """Submit a request through ``MessageQueueClient`` and block.
+
+    Returns the decoded response (possibly ``None`` for void replies)
+    on success, or the sentinel ``_TIMEOUT`` on RPC timeout.
     """
-
-    def __init__(self, sock: zmq.Socket) -> None:
-        self._sock = sock
-        self._uid_counter = 0
-
-    @property
-    def sock(self) -> zmq.Socket:
-        """Expose the underlying socket (read-only)."""
-        return self._sock
-
-    def _next_uid(self) -> int:
-        uid = self._uid_counter
-        self._uid_counter += 1
-        return uid
-
-    def send_request(
-        self,
-        request_type: RequestType,
-        payloads: list[bytes] | None = None,
-        timeout_ms: int = 10000,
-    ) -> list[bytes] | None:
-        """Send a request and wait for the matching response.
-
-        Returns the raw response payload frames (excluding uid and
-        type) on success -- an empty list means a successful void
-        reply -- or *None* on timeout.
-
-        Malformed frames (``< 2`` frames or undecodable UID) and
-        late replies from previously timed-out calls are silently
-        dropped; polling continues until the matching UID arrives
-        or the overall budget expires.
-        """
-        uid = self._next_uid()
-        b_uid = msgspec.msgpack.encode(uid)
-        b_type = msgspec.msgpack.encode(request_type)
-
-        frames: list[bytes] = [b_uid, b_type]
-        if payloads:
-            frames.extend(payloads)
-
-        self._sock.send_multipart(frames)
-
-        # Deadline-based loop: poll & recv until we see a reply
-        # whose UID matches ours, or the overall budget expires.
-        deadline = time.monotonic() + timeout_ms / 1000.0
-        while True:
-            remaining_ms = int((deadline - time.monotonic()) * 1000)
-            if remaining_ms <= 0:
-                return None
-            if not self._sock.poll(remaining_ms, zmq.POLLIN):
-                return None
-
-            resp = self._sock.recv_multipart()
-            if len(resp) < 2:
-                # Malformed reply -- drop and keep polling so a
-                # stray frame from a prior timed-out request does
-                # not fail the current one.
-                continue
-
-            try:
-                resp_uid = msgspec.msgpack.decode(resp[0], type=int)
-            except msgspec.DecodeError:
-                # Unparsable UID -- skip and keep waiting.
-                continue
-
-            if resp_uid != uid:
-                # Stale response from a previously timed-out
-                # request. Drop and keep polling.
-                continue
-
-            # resp[0]=uid, resp[1]=type; payload starts at [2].
-            return resp[2:]
+    future: MessagingFuture[Any] = client.submit_request(request_type, payloads)
+    try:
+        return future.result(timeout=timeout_s)
+    except TimeoutError:
+        return _TIMEOUT
 
 
 # ------------------------------------------------------------------ #
@@ -264,7 +208,7 @@ def _allocate_gpu_kv_cache(
 
 
 def _send_register_kv_cache(
-    client: ZmqClient,
+    client: MessageQueueClient,
     instance_id: int = 0,
     model_name: str = _MODEL_NAME,
     world_size: int = _WORLD_SIZE,
@@ -284,69 +228,52 @@ def _send_register_kv_cache(
     if layout_hints:
         hints.update(layout_hints)
 
-    if gpu_tensors is not None:
-        kv_caches = [CudaIPCWrapper(t) for t in gpu_tensors]
-        enc = get_customized_encoder(
-            type=list[CudaIPCWrapper],
-        )
-        b_kv = enc.encode(kv_caches)
-    else:
+    if gpu_tensors is None:
         # TODO(maobaolong): support CPU mode registration
         raise NotImplementedError(
             "CPU mode is not yet supported. Please use --mode gpu."
         )
 
-    payloads = [
-        msgspec.msgpack.encode(instance_id),
-        b_kv,
-        msgspec.msgpack.encode(model_name),
-        msgspec.msgpack.encode(world_size),
-        msgspec.msgpack.encode(hints),
-    ]
-    resp = client.send_request(
-        RequestType.REGISTER_KV_CACHE,
-        payloads,
-    )
-    return resp is not None
+    kv_caches = [CudaIPCWrapper(t) for t in gpu_tensors]
+    payloads = [instance_id, kv_caches, model_name, world_size, hints]
+    result = _call(client, RequestType.REGISTER_KV_CACHE, payloads)
+    return result is not _TIMEOUT
 
 
 def _send_lookup(
-    client: ZmqClient,
+    client: MessageQueueClient,
     key: IPCCacheEngineKey,
-) -> int | None:
-    """LOOKUP — returns prefetch job ID, or None on timeout."""
-    payloads = [
-        msgspec.msgpack.encode(key),
-        msgspec.msgpack.encode(1),  # tp_size
-    ]
-    resp = client.send_request(RequestType.LOOKUP, payloads)
-    if not resp:
-        return None
-    return msgspec.msgpack.decode(resp[0], type=int)
+) -> bool:
+    """LOOKUP — submit a prefix lookup.
+
+    The server-side handler returns ``None`` (void) on success, so
+    we only distinguish RPC timeout from a completed call.
+    """
+    result = _call(client, RequestType.LOOKUP, [key, 1])
+    return result is not _TIMEOUT
 
 
 def _poll_prefetch_status(
-    client: ZmqClient,
-    job_id: int,
+    client: MessageQueueClient,
+    request_id: str,
     max_polls: int = 50,
     poll_interval: float = 0.05,
 ) -> int | None:
     """QUERY_PREFETCH_STATUS — poll until done.
 
-    Returns the hit chunk count, or None if timed out.
+    Returns the hit chunk count, or ``None`` if the polling budget
+    is exhausted. The server keys prefetch jobs by ``request_id``
+    (str), not an integer job handle.
     """
     for _ in range(max_polls):
-        payloads = [msgspec.msgpack.encode(job_id)]
-        resp = client.send_request(
+        result = _call(
+            client,
             RequestType.QUERY_PREFETCH_STATUS,
-            payloads,
+            [request_id],
         )
-        if not resp:
+        if result is _TIMEOUT:
+            # RPC timeout — treat as giving up on this poll cycle.
             return None
-        result = msgspec.msgpack.decode(
-            resp[0],
-            type=int | None,  # type: ignore[arg-type]
-        )
         if result is not None:
             return result
         time.sleep(poll_interval)
@@ -361,7 +288,7 @@ def _make_event_handle() -> bytes:
 
 
 def _send_store(
-    client: ZmqClient,
+    client: MessageQueueClient,
     key: IPCCacheEngineKey,
     block_offset: int = 0,
     block_size: int = 16,
@@ -370,24 +297,15 @@ def _send_store(
     num_tokens = key.end - key.start
     num_blocks = num_tokens // block_size
     block_ids = list(range(block_offset, block_offset + num_blocks))
-    payloads = [
-        msgspec.msgpack.encode(key),
-        msgspec.msgpack.encode(_INSTANCE_ID),
-        msgspec.msgpack.encode(block_ids),
-        msgspec.msgpack.encode(_make_event_handle()),
-    ]
-    resp = client.send_request(RequestType.STORE, payloads)
-    if not resp:
+    payloads = [key, _INSTANCE_ID, block_ids, _make_event_handle()]
+    result = _call(client, RequestType.STORE, payloads)
+    if result is _TIMEOUT:
         return "timeout"
-    result = msgspec.msgpack.decode(
-        resp[0],
-        type=tuple[bytes, bool],
-    )
     return "stored" if result[1] else "store_failed"
 
 
 def _send_retrieve(
-    client: ZmqClient,
+    client: MessageQueueClient,
     key: IPCCacheEngineKey,
     chunk_size: int,
     hit_chunks: int,
@@ -399,32 +317,24 @@ def _send_retrieve(
     num_blocks = hit_tokens // block_size
     block_ids = list(range(block_offset, block_offset + num_blocks))
     payloads = [
-        msgspec.msgpack.encode(key),
-        msgspec.msgpack.encode(_INSTANCE_ID),
-        msgspec.msgpack.encode(block_ids),
-        msgspec.msgpack.encode(_make_event_handle()),
-        msgspec.msgpack.encode(0),  # skip_first_n_tokens
+        key,
+        _INSTANCE_ID,
+        block_ids,
+        _make_event_handle(),
+        0,  # skip_first_n_tokens
     ]
-    resp = client.send_request(
-        RequestType.RETRIEVE,
-        payloads,
-    )
-    if not resp:
+    result = _call(client, RequestType.RETRIEVE, payloads)
+    if result is _TIMEOUT:
         return "timeout"
-    result = msgspec.msgpack.decode(
-        resp[0],
-        type=tuple[bytes, bool],
-    )
     return "retrieved" if result[1] else "retrieve_failed"
 
 
 def _send_end_session(
-    client: ZmqClient,
+    client: MessageQueueClient,
     request_id: str,
 ) -> None:
     """END_SESSION — clean up server-side session state."""
-    payloads = [msgspec.msgpack.encode(request_id)]
-    client.send_request(RequestType.END_SESSION, payloads)
+    _call(client, RequestType.END_SESSION, [request_id])
 
 
 # ------------------------------------------------------------------ #
@@ -487,7 +397,7 @@ def _query_checksum(
 
 
 def _process_request(
-    client: ZmqClient,
+    client: MessageQueueClient,
     seq_no: int,
     num_tokens: int,
     chunk_size: int,
@@ -519,13 +429,12 @@ def _process_request(
 
     # 1. LOOKUP
     t0 = time.monotonic()
-    job_id = _send_lookup(client, lookup_key)
-    if job_id is None:
+    if not _send_lookup(client, lookup_key):
         print("  [seq %d/%s] LOOKUP timeout" % (seq_no, pass_label))
         return None
 
-    # 2. QUERY_PREFETCH_STATUS (poll)
-    hit_chunks = _poll_prefetch_status(client, job_id)
+    # 2. QUERY_PREFETCH_STATUS (poll by request_id)
+    hit_chunks = _poll_prefetch_status(client, lookup_key.request_id)
     if hit_chunks is None:
         hit_chunks = 0
 
@@ -651,12 +560,12 @@ def _process_request(
 # ------------------------------------------------------------------ #
 
 
-def _get_chunk_size(client: ZmqClient) -> int:
+def _get_chunk_size(client: MessageQueueClient) -> int:
     """Query the server's chunk size."""
-    resp = client.send_request(RequestType.GET_CHUNK_SIZE)
-    if resp:
-        return msgspec.msgpack.decode(resp[0], type=int)
-    return 256  # fallback
+    result = _call(client, RequestType.GET_CHUNK_SIZE, [])
+    if result is _TIMEOUT or result is None:
+        return 256  # fallback
+    return int(result)
 
 
 # ------------------------------------------------------------------ #
@@ -795,10 +704,7 @@ class TestCacheCommand(BaseCommand):
         print("Connecting to LMCache MP Server at %s (mode=%s) ..." % (url, args.mode))
 
         ctx = zmq.Context()
-        sock = ctx.socket(zmq.DEALER)
-        sock.setsockopt(zmq.LINGER, 1000)
-        sock.connect(url)
-        client = ZmqClient(sock)
+        client = MessageQueueClient(url, ctx)
 
         try:
             # Query chunk size from server
@@ -999,6 +905,6 @@ class TestCacheCommand(BaseCommand):
         except KeyboardInterrupt:
             print("\nStopping...")
         finally:
-            sock.close()
+            client.close()
             ctx.term()
         print("Done.")

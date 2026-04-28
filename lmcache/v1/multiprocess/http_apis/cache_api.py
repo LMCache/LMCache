@@ -15,6 +15,10 @@ from lmcache.utils import (
     compress_slot_mapping,
     parse_mixed_slot_mapping,
 )
+from lmcache.v1.utils.kv_slot_ops import (
+    extract_kv_at_slots,
+    slice_by_slot_dim,
+)
 
 logger = init_logger(__name__)
 
@@ -203,27 +207,38 @@ def _compute_mp_checksums(
 ) -> dict[str, Any]:
     """Compute MD5 checksums over KV cache slots.
 
-    Each kv_tensor shape: [2, NB, BS, NH, HS].
-    Slots are mapped via reshape to [2, NB*BS, NH, HS].
+    This function is fully layout-agnostic: the knowledge of how
+    to gather slots out of a per-layer KV tensor is delegated to
+    :func:`extract_kv_at_slots`, and chunk-level slicing is
+    delegated to :func:`slice_by_slot_dim`. Future KV layouts
+    only need to be taught to ``lmcache.v1.utils.kv_slot_ops``
+    and this code path works unchanged.
     """
     num_slots = len(slot_indices)
     num_chunks = (num_slots + chunk_size - 1) // chunk_size
-    slot_t = torch.tensor(
-        slot_indices,
-        dtype=torch.long,
-    )
+    # Build the slot index tensor on CPU, then memoize a copy
+    # per distinct KV device. KV tensors are registered via
+    # CUDA IPC and live on GPU; indexing with a CPU slot tensor
+    # would trigger an implicit H2D copy per layer (and is
+    # rejected by some PyTorch/CUDA builds). Mirrors the
+    # device-aligned pattern used in the vLLM-side
+    # ``compute_kvcache_checksums``.
+    slot_t_cpu = torch.tensor(slot_indices, dtype=torch.long)
+    slot_t_by_device: dict[torch.device, torch.Tensor] = {
+        slot_t_cpu.device: slot_t_cpu,
+    }
 
-    # kv: [KV, NB, BS, NH, HS] -> [KV, NB*BS, NH, HS]
-    # ``KV`` is the leading dimension (2 for standard K/V,
-    # 1 for MLA). Using ``kv.shape[0]`` lets a single call
-    # handle any architecture without reshape failures.
     layer_data: list[torch.Tensor] = []
     for kv in kv_tensors:
-        flat = kv.reshape(kv.shape[0], -1, *kv.shape[3:])
-        # Move to CPU once per layer to save GPU memory
-        # and avoid repeated transfers in the chunking loop
-        sliced = flat[:, slot_t, ...].cpu()
-        # Handle BFloat16 which is not supported by numpy
+        slot_t = slot_t_by_device.get(kv.device)
+        if slot_t is None:
+            slot_t = slot_t_cpu.to(kv.device)
+            slot_t_by_device[kv.device] = slot_t
+        sliced = extract_kv_at_slots(kv, slot_t)
+        # Move to CPU once per layer to save GPU memory and avoid
+        # repeated transfers in the chunking loop below.
+        sliced = sliced.cpu()
+        # numpy() below does not support bfloat16 - upcast if needed.
         if sliced.dtype == torch.bfloat16:
             sliced = sliced.to(torch.float32)
         layer_data.append(sliced)
@@ -235,7 +250,7 @@ def _compute_mp_checksums(
             for ci in range(num_chunks):
                 s = ci * chunk_size
                 e = min(s + chunk_size, num_slots)
-                chunk = ld[:, s:e, ...].contiguous()
+                chunk = slice_by_slot_dim(ld, s, e).contiguous()
                 cks.append(hashlib.md5(chunk.numpy().tobytes()).hexdigest())
             checksums["layer_%d" % li] = cks
         return {
@@ -252,7 +267,7 @@ def _compute_mp_checksums(
         e = min(s + chunk_size, num_slots)
         md5 = hashlib.md5()
         for ld in layer_data:
-            chunk = ld[:, s:e, ...].contiguous()
+            chunk = slice_by_slot_dim(ld, s, e).contiguous()
             md5.update(chunk.numpy().tobytes())
         cks_list.append(md5.hexdigest())
     return {
