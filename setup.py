@@ -152,6 +152,9 @@ def cuda_extension() -> tuple[list, dict]:
     mooncake_sources = [
         "csrc/storage_backends/mooncake/pybind.cpp",
         "csrc/storage_backends/mooncake/connector.cpp",
+    blkio_sources = [
+        "csrc/storage_backends/blkio/pybind.cpp",
+        "csrc/storage_backends/blkio/connector.cpp",
     ]
     ext_modules = [
         cpp_extension.CUDAExtension(
@@ -182,6 +185,20 @@ def cuda_extension() -> tuple[list, dict]:
             "lmcache.lmcache_fs",
             sources=fs_sources,
             include_dirs=["csrc/storage_backends", "csrc/storage_backends/fs"],
+            extra_compile_args={
+                "cxx": [flag_cxx_abi, "-O3", "-std=c++17"],
+            },
+        ),
+        cpp_extension.CppExtension(
+            "lmcache.lmcache_blkio",
+            sources=blkio_sources,
+            include_dirs=[
+                "csrc/storage_backends",
+                "csrc/storage_backends/blkio",
+                "/usr/local/include",
+            ],
+            libraries=["blkio"],
+            library_dirs=["/usr/local/lib/x86_64-linux-gnu"],
             extra_compile_args={
                 "cxx": [flag_cxx_abi, "-O3", "-std=c++17"],
             },
@@ -230,6 +247,9 @@ def rocm_extension() -> tuple[list, dict]:
     mooncake_sources = [
         "csrc/storage_backends/mooncake/pybind.cpp",
         "csrc/storage_backends/mooncake/connector.cpp",
+    blkio_sources = [
+        "csrc/storage_backends/blkio/pybind.cpp",
+        "csrc/storage_backends/blkio/connector.cpp",
     ]
     # For HIP, we generally use CppExtension and let hipcc handle things.
     # Ensure CXX environment variable is set to hipcc when running this build.
@@ -282,6 +302,20 @@ def rocm_extension() -> tuple[list, dict]:
             "lmcache.lmcache_fs",
             sources=fs_sources,
             include_dirs=["csrc/storage_backends", "csrc/storage_backends/fs"],
+            extra_compile_args={
+                "cxx": ["-O3", "-std=c++17"],
+            },
+        ),
+        cpp_extension.CppExtension(
+            "lmcache.lmcache_blkio",
+            sources=blkio_sources,
+            include_dirs=[
+                "csrc/storage_backends",
+                "csrc/storage_backends/blkio",
+                "/usr/local/include",
+            ],
+            libraries=["blkio"],
+            library_dirs=["/usr/local/lib/x86_64-linux-gnu"],
             extra_compile_args={
                 "cxx": ["-O3", "-std=c++17"],
             },
