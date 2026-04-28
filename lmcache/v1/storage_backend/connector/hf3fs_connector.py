@@ -486,7 +486,7 @@ class Hf3fsClient:
                 bytes_read = self._read(
                     fd, buffer[offset : offset + sub_len], sub_len, offset + start
                 )
-                if bytes_read != sub_len
+                if bytes_read != sub_len:
                     break
                 total_bytes_read += bytes_read
                 offset += bytes_read
@@ -529,7 +529,7 @@ class Hf3fsClient:
                 written = self._write(
                     fd, buffer[offset : offset + sub_len], sub_len, offset + start
                 )
-                if written != sub_len
+                if written != sub_len:
                     break
                 total_bytes_written += written
                 offset += written
