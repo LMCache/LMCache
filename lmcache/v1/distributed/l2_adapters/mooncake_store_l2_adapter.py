@@ -128,8 +128,10 @@ class MooncakeStoreL2AdapterConfig(L2AdapterConfigBase):
         value = d.get(key)
         if value is None:
             return None
-        if not isinstance(value, int) or value <= 0:
-            raise ValueError(f"{key} must be a positive integer")
+        if not isinstance(value, int):
+            raise TypeError(
+                f"{key} must be an integer, got {type(value).__name__}"
+            )
         return value
 
     @staticmethod
@@ -157,6 +159,10 @@ class MooncakeStoreL2AdapterConfig(L2AdapterConfigBase):
                 "lookup_workers, retrieve_workers, and store_workers must "
                 "all be set together"
             )
+        for name in specified:
+            value = values[name]
+            if not isinstance(value, int) or value <= 0:
+                raise ValueError(f"{name} must be a positive integer")
 
     @classmethod
     def help(cls) -> str:
