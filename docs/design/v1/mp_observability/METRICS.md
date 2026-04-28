@@ -106,6 +106,28 @@ datapoints and are orthogonal to these Resource attributes.
 
 ---
 
+## L1 Failure Metrics (LM-291 health monitoring)
+
+Tagged counters covering L1 allocation and read failures. The subscriber
+groups keys by `ObjectKey.model_name` to emit a `model_name` OTel
+attribute on every data point, enabling per-model Prometheus slicing
+(e.g. `lmcache_mp_l1_allocation_failure_total{during="l1_store",model_name="llama-7b"}`).
+
+The ticket-specified `lmcache_instance_id` tag is **deferred** to a
+follow-up: threading it through `StorageManager`/`StoreController` would
+require a cross-cutting API change out of scope for this PR.
+
+| OTel metric name | Prometheus name | Type | Source event | Calculation | Tags |
+|---|---|---|---|---|---|
+| `lmcache_mp.l1_allocation_failure` | `lmcache_mp_l1_allocation_failure_total` | Counter | `L1_ALLOCATION_FAILED` | `+count` per `(during, model_name)` bucket | `during` ∈ {`l1_store`, `l2_prefetch`}, `model_name` |
+| `lmcache_mp.l1_read_failure` | `lmcache_mp_l1_read_failure_total` | Counter | `L1_READ_FAILED` | `+count` per `(during, reason, model_name)` bucket | `during` ∈ {`l2_store`, `l1_retrieve`}, `reason` ∈ {`not_found`, `write_locked`}, `model_name` |
+
+**What it answers:**
+- `l1_allocation_failure` — how often is L1 rejecting writes for lack of memory, split by whether the pressure is user stores or L2 prefetch?
+- `l1_read_failure` — a **post-lookup anomaly counter**, not a cache-miss counter. Should stay near zero in healthy operation; any non-zero value indicates a lookup/reserve race or unexpected eviction in MP mode.
+
+---
+
 ## L1 Chunk Lifecycle Histograms
 
 Sampled (default 1%) chunk-level lifecycle tracking.  Only sampled chunks
@@ -187,6 +209,20 @@ rate(lmcache_mp_lookup_hit_tokens_total[5m])
 > abandoned lookups (client never polls `query_prefetch_status`)
 > contribute to neither.  See
 > [L1_L2_HIT_RATE_PLAN.md](L1_L2_HIT_RATE_PLAN.md) for the full rationale.
+
+---
+
+## L2 Failure Metrics (LM-291 health monitoring)
+
+| OTel metric name | Prometheus name | Type | Source event | Calculation | Tags |
+|---|---|---|---|---|---|
+| `lmcache_mp.l2_prefetch_failure` | `lmcache_mp_l2_prefetch_failure_total` | Counter | `L2_PREFETCH_FAILED` | `+count` per `(reason, model_name)` bucket | `reason` ∈ {`l1_oom`, `not_found`}, `model_name` |
+
+**What it answers:** For keys L2 reported present at lookup but failed to land in L1: was L1 full (`l1_oom`), or did the adapter fail to produce the data (`not_found`)?
+
+> **Serde failures**: a third `reason=serde_failure` value will be added as an additive, non-breaking extension once the serde PR lands and L2 adapters distinguish deserialization errors from missing objects. No dashboard migration needed when that happens.
+
+> **TTL lock expiration**: `lmcache_mp.l1_ttl_lock_expire` from the ticket is deferred to a follow-up because the current `TTLLock` primitive (native) has no expiration callback; lazy detection requires a C++/Rust-side change.
 
 ---
 

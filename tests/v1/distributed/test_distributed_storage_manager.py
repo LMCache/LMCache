@@ -22,6 +22,8 @@ from lmcache.v1.distributed.l2_adapters.config import (
     L2AdaptersConfig,
 )
 from lmcache.v1.distributed.l2_adapters.mock_l2_adapter import MockL2AdapterConfig
+from lmcache.v1.mp_observability.event import Event, EventType
+from lmcache.v1.mp_observability.event_bus import EventBusConfig, init_event_bus
 
 try:
     # First Party
@@ -655,3 +657,123 @@ class TestStorageManagerL2Prefetch:
 
         sm.finish_read_prefetched(all_keys)
         sm.close()
+
+
+# =============================================================================
+# Tests for LM-291 failure event production
+# =============================================================================
+
+
+@pytest.fixture
+def captured_events():
+    """Enable the global event bus and capture all L1/L2 failure events.
+
+    Replaces the process-wide ``_global_bus`` with a fresh enabled bus,
+    subscribes a callback for the three failure event types, yields the
+    captured-events list, then resets the bus to disabled on teardown so
+    later tests don't see leftover state.
+    """
+    bus = init_event_bus(EventBusConfig(enabled=True, max_queue_size=10_000))
+    events: list[Event] = []
+
+    def _capture(event: Event) -> None:
+        events.append(event)
+
+    for et in (
+        EventType.L1_ALLOCATION_FAILED,
+        EventType.L1_READ_FAILED,
+        EventType.L2_PREFETCH_FAILED,
+    ):
+        bus.subscribe(et, _capture)
+    bus.start()
+    try:
+        yield events
+    finally:
+        bus.stop()
+        init_event_bus(EventBusConfig(enabled=False))
+
+
+def _events_of_type(events: list, event_type: EventType) -> list:
+    return [e for e in events if e.event_type == event_type]
+
+
+class TestFailureEventProduction:
+    """Verifies LM-291 health-monitoring events are published at the
+    right producer call sites with the expected metadata."""
+
+    def test_reserve_write_oom_emits_l1_allocation_failed(
+        self, small_storage_manager_config, large_layout, captured_events
+    ):
+        """OOM during user store must publish L1_ALLOCATION_FAILED with
+        during=l1_store and the OOM keys."""
+        sm = StorageManager(small_storage_manager_config)
+        try:
+            keys = [make_object_key(i) for i in range(20)]
+            sm.reserve_write(keys, large_layout, mode="new")
+
+            # Allow drain thread to deliver the event.
+            assert wait_for_condition(
+                lambda: len(
+                    _events_of_type(captured_events, EventType.L1_ALLOCATION_FAILED)
+                )
+                >= 1,
+                timeout=2.0,
+            )
+
+            alloc_events = _events_of_type(
+                captured_events, EventType.L1_ALLOCATION_FAILED
+            )
+            assert len(alloc_events) == 1
+            meta = alloc_events[0].metadata
+            assert meta["during"] == "l1_store"
+            assert len(meta["keys"]) > 0
+            # All emitted keys must be from the OOM subset of the request.
+            assert set(meta["keys"]).issubset(set(keys))
+        finally:
+            sm.close()
+
+    def test_unsafe_read_missing_key_emits_l1_read_failed(
+        self, basic_storage_manager_config, basic_layout, captured_events
+    ):
+        """Deleting a key between reserve_read and unsafe_read must publish
+        L1_READ_FAILED with during=l1_retrieve, reason=not_found."""
+        sm = StorageManager(basic_storage_manager_config)
+        try:
+            keys = [make_object_key(i) for i in range(3)]
+
+            # Write + finish_write so the keys are readable.
+            ret = sm.reserve_write(keys, basic_layout, mode="new")
+            assert len(ret) == len(keys)
+            sm.finish_write(list(ret.keys()))
+
+            # Prefetch to acquire read locks on all keys.
+            handle = sm.submit_prefetch_task(keys, basic_layout)
+            assert wait_for_prefetch_status(sm, handle) == len(keys)
+
+            # Force a mid-read race by removing the key from L1Manager's
+            # internal state dict, bypassing the lock check that
+            # ``L1Manager.delete`` enforces. This simulates the exact TOCTOU
+            # anomaly the metric is designed to catch: reserve_read acquired
+            # a lock, but the key vanished before unsafe_read.
+            del sm._l1_manager._objects[keys[1]]
+
+            # Now attempt to read — unsafe_read should find the middle key
+            # missing, emitting L1_READ_FAILED(during=l1_retrieve,
+            # reason=not_found).
+            with sm.read_prefetched_results(keys) as objs:
+                assert objs is None  # all_good=False because middle key is gone
+
+            assert wait_for_condition(
+                lambda: len(_events_of_type(captured_events, EventType.L1_READ_FAILED))
+                >= 1,
+                timeout=2.0,
+            )
+
+            read_events = _events_of_type(captured_events, EventType.L1_READ_FAILED)
+            assert len(read_events) == 1
+            meta = read_events[0].metadata
+            assert meta["during"] == "l1_retrieve"
+            assert meta["reason"] == "not_found"
+            assert keys[1] in meta["keys"]
+        finally:
+            sm.close()
