@@ -264,12 +264,7 @@ class HF3fsConnector(FSConnector):
 
     def remove_sync(self, key: CacheEngineKey) -> bool:
         file_path = self._get_file_path(key)
-        try:
-            Hf3fsFile.remove(file_path)
-            return True
-        except OSError as e:
-            logger.error(f"Failed to remove file {file_path}: {e}")
-        return False
+        return Hf3fsFile.remove(file_path)
 
     def support_batched_contains(self) -> bool:
         return False
@@ -590,17 +585,13 @@ class Hf3fsFile:
         return os.path.exists(fname)
 
     @staticmethod
-    def remove(fname: Path) -> None:
-        if not os.path.exists(fname):
-            logger.warning(f"file '{fname}' not exists, no need to remove")
-            return
-
-        logger.debug(f"file '{fname}' exists, remove it")
+    def remove(fname: Path) -> bool:
         try:
             os.remove(fname)
+            return True
         except OSError as e:
             logger.error(f"Failed to remove file {fname}: {e}")
-        return
+            return False
 
     @staticmethod
     def rename(old_fname: Path, new_fname: Path):
