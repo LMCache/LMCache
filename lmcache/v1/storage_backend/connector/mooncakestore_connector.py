@@ -270,6 +270,17 @@ class MooncakestoreConnector(RemoteConnector):
     def exists_sync(self, key: CacheEngineKey) -> bool:
         return self.store.is_exist(key.to_string())
 
+    def support_batched_contains(self) -> bool:
+        return True
+
+    def batched_contains(self, keys: List[CacheEngineKey]) -> int:
+        key_strings = [key.to_string() for key in keys]
+        rets = self.store.batch_is_exist(key_strings)
+        for i, ret in enumerate(rets):
+            if ret != 1:
+                return i
+        return len(keys)
+
     async def batched_get(
         self, keys: List[CacheEngineKey]
     ) -> List[Optional[MemoryObj]]:
@@ -297,12 +308,12 @@ class MooncakestoreConnector(RemoteConnector):
         keys: List[CacheEngineKey],
         pin: bool = False,
     ) -> int:
-        num_hit_counts = 0
-        for key in keys:
-            if not self.store.is_exist(key.to_string()):
-                break
-            num_hit_counts += 1
-        return num_hit_counts
+        key_strings = [key.to_string() for key in keys]
+        rets = self.store.batch_is_exist(key_strings)
+        for i, ret in enumerate(rets):
+            if ret != 1:
+                return i
+        return len(keys)
 
     async def _batch_get_into(
         self, keys: List[CacheEngineKey]
