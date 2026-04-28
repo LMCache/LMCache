@@ -650,7 +650,10 @@ class TestMooncakeStoreIntegration:
         )
         self.adapter = create_l2_adapter(config)
         yield
-        self.adapter.close()
+        adapter = self.adapter
+        self.adapter = None
+        if adapter is not None:
+            adapter.close()
 
     def test_event_fds_are_distinct(self):
         """Each operation should have a distinct event fd."""
@@ -826,6 +829,13 @@ class TestMooncakeStoreIntegration:
         """Store and load RDMA-preregistered objects backed by an explicit L1 buffer."""
         # First Party
         from lmcache.v1.distributed.l2_adapters import create_l2_adapter
+
+        # The class-level autouse fixture creates a default TCP adapter.
+        # Keep this RDMA-only test isolated so Mooncake master cannot allocate
+        # the object on an active TCP segment while the client has only RDMA
+        # transport installed.
+        self.adapter.close()
+        self.adapter = None
 
         page_size = 4096
         obj_size_bytes = page_size * 16
