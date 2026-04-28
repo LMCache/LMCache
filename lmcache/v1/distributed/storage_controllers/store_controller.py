@@ -376,12 +376,18 @@ class StoreController(StorageControllerInterface):
 
             successful_keys = []
             successful_objs = []
+            not_found_keys: list[ObjectKey] = []
+            write_locked_keys: list[ObjectKey] = []
             for key in target_keys:
                 result = read_results.get(key)
                 if result is None:
                     continue
                 err, obj = result
                 if err != L1Error.SUCCESS or obj is None:
+                    if err == L1Error.KEY_NOT_EXIST:
+                        not_found_keys.append(key)
+                    elif err == L1Error.KEY_NOT_READABLE:
+                        write_locked_keys.append(key)
                     logger.debug(
                         "Skipping key %s for L2 store (adapter %d): %s",
                         key,
@@ -391,6 +397,32 @@ class StoreController(StorageControllerInterface):
                     continue
                 successful_keys.append(key)
                 successful_objs.append(obj)
+
+            # L1 read-failure anomaly reporting: target_keys come from an
+            # L1_WRITE_FINISHED notification, so failing to reserve_read them
+            # immediately after means an unexpected eviction or lock race.
+            if not_found_keys:
+                self._event_bus.publish(
+                    Event(
+                        event_type=EventType.L1_READ_FAILED,
+                        metadata={
+                            "during": "l2_store",
+                            "reason": "not_found",
+                            "keys": not_found_keys,
+                        },
+                    )
+                )
+            if write_locked_keys:
+                self._event_bus.publish(
+                    Event(
+                        event_type=EventType.L1_READ_FAILED,
+                        metadata={
+                            "during": "l2_store",
+                            "reason": "write_locked",
+                            "keys": write_locked_keys,
+                        },
+                    )
+                )
 
             if not successful_keys:
                 continue

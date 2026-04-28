@@ -82,7 +82,7 @@ class _Inflight:
 class RustRawBlockBackend(StoragePluginInterface):
     """
     A storage plugin backend that stores KV chunks into a block device (raw)
-    using a Rust extension for pread/pwrite.
+    using a Rust extension for pread/pwrite or io_uring.
 
     Features:
     - High-throughput I/O via direct block device access
@@ -179,6 +179,7 @@ class RustRawBlockBackend(StoragePluginInterface):
         self.enable_zero_copy: bool = bool(
             extra.get("rust_raw_block.enable_zero_copy", True)
         )
+        self.use_uring: bool = bool(extra.get("rust_raw_block.use_uring", False))
 
         # On-device metadata region config.
         self.meta_total_bytes: int = int(
@@ -319,6 +320,10 @@ class RustRawBlockBackend(StoragePluginInterface):
             self.enable_zero_copy,
         )
 
+        # Register paged buffers with io_uring for fixed buffer support
+        if self.use_uring:
+            self._register_paged_buffers()
+
         # Load latest checkpoint from device (no JSON fallback).
         self._load_checkpoint_from_device()
 
@@ -363,8 +368,48 @@ class RustRawBlockBackend(StoragePluginInterface):
                 writable=True,
                 use_odirect=self.use_odirect,
                 alignment=self.block_align,
+                use_iouring=self.use_uring,
             )
         return self._raw
+
+    def _register_paged_buffers(self) -> None:
+        """Register paged buffers with io_uring for fixed buffer support."""
+        try:
+            assert self.local_cpu_backend is not None
+            memory_allocator = self.local_cpu_backend.get_memory_allocator()
+            paged_buffers = getattr(memory_allocator, "get_paged_buffers", None)
+
+            if paged_buffers is not None and callable(paged_buffers):
+                buffers = paged_buffers()
+                if buffers is not None and len(buffers) > 0:
+                    raw_dev = self._rawdev()
+                    # Register buffers with io_uring
+                    buffer_ptrs = [buf.data_ptr() for buf in buffers]
+                    buffer_sizes = [buf.numel() * buf.element_size() for buf in buffers]
+
+                    raw_dev.register_fixed_buffers(buffer_ptrs, buffer_sizes)
+
+                    logger.info(
+                        "RustRawBlockBackend: registered %d paged buffers with "
+                        "io_uring for fixed buffer support (true zero copy)",
+                        len(buffers),
+                    )
+                else:
+                    logger.warning(
+                        "RustRawBlockBackend: no paged buffers available for "
+                        "io_uring fixed buffer registration"
+                    )
+            else:
+                logger.warning(
+                    "RustRawBlockBackend: memory allocator does not support "
+                    "paged buffers for io_uring fixed buffer registration"
+                )
+        except Exception as e:
+            logger.warning(
+                "RustRawBlockBackend: failed to register paged buffers with "
+                "io_uring: %s. Falling back to non-fixed buffer mode.",
+                e,
+            )
 
     def _build_direct_odirect_view(
         self,
@@ -540,6 +585,19 @@ class RustRawBlockBackend(StoragePluginInterface):
                     len(self._index),
                 )
 
+        # Use io_uring path if enabled
+        if self.use_uring:
+            # TODO(Ankit): Find a better way to handle this.
+            for obj in objs:
+                obj.ref_count_up()
+
+            assert self.loop is not None
+            fut = asyncio.run_coroutine_threadsafe(
+                self._batched_submit_put_task_uring(keys, objs, on_complete_callback),
+                self.loop,
+            )
+            return [fut]
+
         futures = []
         for key, obj in zip(keys, objs, strict=False):
             with self._put_lock:
@@ -588,6 +646,166 @@ class RustRawBlockBackend(StoragePluginInterface):
             )
             futures.append(fut)
         return futures or None
+
+    async def _batched_submit_put_task_uring(
+        self,
+        keys: Sequence[CacheEngineKey],
+        objs: List[MemoryObj],
+        on_complete_callback: Optional[Callable[[CacheEngineKey], None]] = None,
+    ):
+        """Batched put using io_uring"""
+
+        # Collect all write requests
+        write_requests: list[tuple[CacheEngineKey, int, bytes, MemoryObj]] = []
+        valid_keys: list[CacheEngineKey] = []
+        valid_objs: list[MemoryObj] = []
+
+        # Track which items had inflight_io_count incremented
+        successfully_submitted: list[CacheEngineKey] = []
+
+        # Track which objects have incremented ref counts
+        objs_with_inc_ref = list(objs)
+
+        if self._raw is None:
+            raise RuntimeError("device is closed")
+
+        write_error: Optional[Exception] = None
+        try:
+            for key, obj in zip(keys, objs, strict=False):
+                with self._put_lock:
+                    if key in self._put_tasks:
+                        obj.ref_count_down()
+                        objs_with_inc_ref.remove(obj)
+                        continue
+                    self._put_tasks.add(key)
+
+                with self._lock:
+                    if key in self._index or key in self._inflight:
+                        with self._put_lock:
+                            self._put_tasks.discard(key)
+                        obj.ref_count_down()
+                        objs_with_inc_ref.remove(obj)
+                        continue
+                    while True:
+                        try:
+                            offset = self._allocate_slot()
+                            break
+                        except RuntimeError:
+                            if not self._evict_one():
+                                with self._put_lock:
+                                    self._put_tasks.discard(key)
+                                raise
+
+                    meta = DiskCacheMetadata(
+                        path=f"{self.device_path}@{offset}",
+                        size=len(obj.byte_array),
+                        shape=obj.metadata.shape,
+                        dtype=obj.metadata.dtype,
+                        cached_positions=obj.metadata.cached_positions,
+                        fmt=obj.metadata.fmt,
+                        pin_count=0,
+                    )
+                    self._inflight[key] = _Inflight(offset=offset, meta=meta)
+
+                header = self._encode_header(key, meta.size)
+                write_requests.append((key, offset, header, obj))
+                valid_keys.append(key)
+                valid_objs.append(obj)
+
+            if not write_requests:
+                return None
+
+            raw_dev = self._rawdev()
+            offsets = []
+            buffers = []
+            total_lens = []
+
+            for key, offset, header, obj in write_requests:
+                # Prepare payload with proper O_DIRECT alignment and zero-copy handling.
+                try:
+                    buf, payload_len, total_len = self._prepare_write_payload(obj)
+                    assert payload_len == total_len
+                except Exception as e:
+                    write_error = e
+                    logger.error(f"Failed to prepare payload for key {key}: {e}")
+                    raise
+
+                hdr_total = (
+                    _round_up(len(header), self.block_align)
+                    if self.use_odirect
+                    else len(header)
+                )
+                header_bytes = bytearray(header)
+                if self.use_odirect and len(header_bytes) < hdr_total:
+                    header_bytes.extend(b"\x00" * (hdr_total - len(header_bytes)))
+
+                offsets.append(offset)
+                buffers.append(header_bytes)
+                total_lens.append(hdr_total)
+                offsets.append(offset + self.header_bytes)
+                buffers.append(buf)
+                total_lens.append(total_len)
+
+                with self._lock:
+                    self._inflight_io_count += 1
+                successfully_submitted.append(key)
+
+            batch_id = raw_dev.batched_write(offsets, buffers, total_lens)
+            # Wait for headers and payloads to complete. Buffer lifetime is managed by
+            # Rust via Py_buffer views.
+            # Pass batch_id to capture any error from this batch completions.
+            # TODO(Ankit): Add a way to capture specific write failures.
+            await asyncio.to_thread(raw_dev.wait_iouring, batch_id)
+        except Exception as e:
+            if write_error is None:
+                write_error = e
+            logger.error(f"Batched write failed for keys {valid_keys}: {e}")
+        finally:
+            with self._lock:
+                for key in successfully_submitted:
+                    self._inflight_io_count -= 1
+                    self._last_io_ts = time.monotonic()
+
+            for obj in objs_with_inc_ref:
+                obj.ref_count_down()
+
+            with self._put_lock:
+                for key in valid_keys:
+                    self._put_tasks.discard(key)
+
+            if write_error is None:
+                with self._lock:
+                    for key, offset, header, obj in write_requests:
+                        inflight = self._inflight.pop(key, None)
+                        if inflight is not None and not inflight.canceled:
+                            self._index[key] = _Entry(
+                                offset=inflight.offset,
+                                size=inflight.meta.size,
+                                meta=inflight.meta,
+                            )
+                            self._touch(key)
+                            self._meta_dirty_total += 1
+
+                if on_complete_callback is not None:
+                    for key in valid_keys:
+                        try:
+                            on_complete_callback(key)
+                        except Exception as e:
+                            logger.warning(
+                                f"on_complete_callback failed for key {key}: {e}"
+                            )
+            else:
+                with self._lock:
+                    for key in valid_keys:
+                        inflight = self._inflight.pop(key, None)
+                        if inflight is not None:
+                            self._append_free_slot_locked(
+                                self._offset_to_slot(int(inflight.offset))
+                            )
+                            self._meta_dirty_total += 1
+            if write_error is not None:
+                raise write_error
+        return None
 
     def _prepare_write_payload(self, memory_obj: MemoryObj) -> tuple[Any, int, int]:
         """Prepare payload view and aligned lengths for write path."""
@@ -708,7 +926,10 @@ class RustRawBlockBackend(StoragePluginInterface):
         try:
             with self._lock:
                 self._inflight_io_count += 1
-            raw.pread_into(offset, buf, self.header_bytes, self.header_bytes)
+            if self.use_uring:
+                raw.read_uring(offset, buf, self.header_bytes, self.header_bytes)
+            else:
+                raw.pread_into(offset, buf, self.header_bytes, self.header_bytes)
             return self._decode_slot_header(buf)
         except Exception:
             return None
@@ -716,6 +937,125 @@ class RustRawBlockBackend(StoragePluginInterface):
             with self._lock:
                 self._inflight_io_count -= 1
                 self._last_io_ts = time.monotonic()
+
+    async def _batched_get_prefix_uring(
+        self, keys: Sequence[CacheEngineKey]
+    ) -> list[MemoryObj]:
+        """Batched get using io_uring"""
+        if not keys:
+            return []
+
+        if self._raw is None:
+            raise RuntimeError("device is closed")
+
+        items: list[tuple[CacheEngineKey, _Entry]] = []
+        with self._lock:
+            for key in keys:
+                entry = self._index.get(key)
+                if entry is None:
+                    break
+                items.append((key, entry))
+            if not items:
+                return []
+            self._inflight_io_count += 1
+
+        loaded: list[MemoryObj] = []
+        touched: list[CacheEngineKey] = []
+        offsets = []
+        buffers = []
+        total_lens = []
+        valid_keys = []
+        valid_objs = []
+        try:
+            raw_dev = self._rawdev()
+
+            for key, entry in items:
+                meta = entry.meta
+                assert meta.shape is not None and meta.dtype is not None
+                assert self.local_cpu_backend is not None
+                memory_obj = self.local_cpu_backend.allocate(
+                    meta.shape, meta.dtype, meta.fmt
+                )
+                if memory_obj is None:
+                    logger.error(
+                        "Failed to allocate memory for key %s",
+                        self._dbg_key_short(key),
+                    )
+
+                    for obj in valid_objs:
+                        obj.ref_count_down()
+                    return []
+
+                total_len = int(meta.size)
+                assert (total_len % self.block_align) == 0
+                if logger.isEnabledFor(10):
+                    self._dbg_get_calls += 1
+                    self._dbg_get_bytes += total_len
+                    if self._dbg_should_log(self._dbg_get_calls):
+                        logger.debug(
+                            "RustRawBlockBackend GET (uring): %s offset=%d size=%d",
+                            self._dbg_key_short(key),
+                            int(entry.offset),
+                            total_len,
+                        )
+
+                buf = memory_obj.byte_array
+                try:
+                    buf = buf.cast("B")
+                except Exception:
+                    pass
+
+                direct_view = self._build_direct_odirect_view(
+                    memory_obj=memory_obj,
+                    payload_len=total_len,
+                    total_len=total_len,
+                    buffer_len=len(buf),
+                    zero_tail=False,
+                )
+
+                if direct_view is not None:
+                    offsets.append(entry.offset + self.header_bytes)
+                    buffers.append(direct_view)
+                    total_lens.append(total_len)
+                else:
+                    offsets.append(entry.offset + self.header_bytes)
+                    buffers.append(buf)
+                    total_lens.append(total_len)
+
+                valid_keys.append(key)
+                valid_objs.append(memory_obj)
+
+            if not offsets:
+                return []
+
+            batch_id = raw_dev.batched_read(offsets, buffers, total_lens)
+            # Wait for all reads to complete.
+            # Pass batch_id to capture any error from this batch completions.
+            # TODO(Ankit): Add a way to capture specific read failures.
+            await asyncio.to_thread(raw_dev.wait_iouring, batch_id)
+
+            # Update metadata for successfully loaded items
+            for key, obj in zip(valid_keys, valid_objs, strict=False):
+                entry = next((e for k, e in items if k == key), None)
+                if entry is not None:
+                    obj.metadata.cached_positions = entry.meta.cached_positions
+                loaded.append(obj)
+                touched.append(key)
+
+        except Exception as e:
+            for memory_obj in valid_objs:
+                memory_obj.ref_count_down()
+            loaded.clear()
+            touched.clear()
+            logger.error("Batched io_uring read failed: %s", e)
+            raise
+        finally:
+            with self._lock:
+                for key in touched:
+                    self._touch(key)
+                self._inflight_io_count -= 1
+                self._last_io_ts = time.monotonic()
+        return loaded
 
     def _batched_get_prefix(self, keys: Sequence[CacheEngineKey]) -> list[MemoryObj]:
         if not keys:
@@ -820,6 +1160,13 @@ class RustRawBlockBackend(StoragePluginInterface):
         return loaded
 
     def get_blocking(self, key: CacheEngineKey) -> Optional[MemoryObj]:
+        if self.use_uring:
+            assert self.loop is not None
+            loaded = asyncio.run_coroutine_threadsafe(
+                self._batched_get_prefix_uring([key]),
+                self.loop,
+            ).result()
+            return loaded[0] if loaded else None
         loaded = self._batched_get_prefix([key])
         return loaded[0] if loaded else None
 
@@ -839,6 +1186,14 @@ class RustRawBlockBackend(StoragePluginInterface):
         """
         if not keys:
             return []
+
+        if self.use_uring:
+            assert self.loop is not None
+            loaded = asyncio.run_coroutine_threadsafe(
+                self._batched_get_prefix_uring(keys),
+                self.loop,
+            ).result()
+            return [*loaded, *([None] * (len(keys) - len(loaded)))]
 
         loaded = self._batched_get_prefix(keys)
         return [*loaded, *([None] * (len(keys) - len(loaded)))]
@@ -878,6 +1233,8 @@ class RustRawBlockBackend(StoragePluginInterface):
         :raises Exception: Propagates raw-device initialization or read failures.
         """
         del lookup_id, transfer_spec
+        if self.use_uring:
+            return await self._batched_get_prefix_uring(keys)
         return await asyncio.to_thread(self._batched_get_prefix, keys)
 
     def get_allocator_backend(self) -> "AllocatorBackendInterface":
@@ -946,7 +1303,14 @@ class RustRawBlockBackend(StoragePluginInterface):
         raw = self._rawdev()
         buf = bytearray(self.block_align)
         try:
-            raw.pread_into(container_offset, buf, self.block_align, self.block_align)
+            if self.use_uring:
+                raw.read_uring(
+                    container_offset, buf, self.block_align, self.block_align
+                )
+            else:
+                raw.pread_into(
+                    container_offset, buf, self.block_align, self.block_align
+                )
         except Exception:
             return None
 
@@ -973,7 +1337,10 @@ class RustRawBlockBackend(StoragePluginInterface):
         total_len = _round_up(payload_len, self.block_align)
         buf = bytearray(total_len)
         try:
-            raw.pread_into(payload_off, buf, payload_len, total_len)
+            if self.use_uring:
+                raw.read_uring(payload_off, buf, payload_len, total_len)
+            else:
+                raw.pread_into(payload_off, buf, payload_len, total_len)
         except Exception:
             return None
 

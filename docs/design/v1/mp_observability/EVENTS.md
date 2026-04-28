@@ -21,6 +21,35 @@ these events see [METRICS.md](METRICS.md).
 
 ---
 
+## L1 Failure Events
+
+Published at the caller of the L1 API — **not** inside `L1Manager` — so the
+caller context (`during`) can be attached without leaking caller identity
+into the manager. See LM-291 for the health-monitoring rationale.
+
+Producers split keys by `(during[, reason])` and publish one event per
+non-empty bucket; `keys` is the list of ObjectKeys that failed for that
+bucket. Subscribers bucket by `ObjectKey.model_name` to emit per-model
+counter increments.
+
+| EventType | Metadata keys | Types | Vocabulary |
+|---|---|---|---|
+| `L1_ALLOCATION_FAILED` | `during`, `keys` | `str`, `list[ObjectKey]` | `during` ∈ {`l1_store`, `l2_prefetch`} |
+| `L1_READ_FAILED` | `during`, `reason`, `keys` | `str`, `str`, `list[ObjectKey]` | `during` ∈ {`l2_store`, `l1_retrieve`}; `reason` ∈ {`not_found`, `write_locked`} |
+
+`L1_READ_FAILED` is a **post-lookup anomaly** event, not a cache-miss
+event: in MP mode every `reserve_read` / `unsafe_read` that raises one of
+these errors represents a lookup/reserve race or unexpected eviction. The
+counter should stay near zero in healthy operation.
+
+Producers:
+- `L1_ALLOCATION_FAILED(during=l1_store)` — `StorageManager.reserve_write`, on `L1Error.OUT_OF_MEMORY`.
+- `L1_ALLOCATION_FAILED(during=l2_prefetch)` — `PrefetchController._transition_to_load_phase`, on `L1Error.OUT_OF_MEMORY` from L1 reservation.
+- `L1_READ_FAILED(during=l1_retrieve)` — `StorageManager.read_prefetched_results` (`unsafe_read` failure). `not_found` = `KEY_NOT_EXIST`, `write_locked` = `KEY_NOT_READABLE` (read lock lost).
+- `L1_READ_FAILED(during=l2_store)` — `StoreController._process_new_keys` (`reserve_read` failure on keys that just finished L1 write). `not_found` = `KEY_NOT_EXIST`, `write_locked` = `KEY_NOT_READABLE`.
+
+---
+
 ## StorageManager Events
 
 | EventType | Metadata keys | Types |
@@ -57,6 +86,25 @@ these events see [METRICS.md](METRICS.md).
 aggregate across adapters.  Throughput subscribers that need per-adapter
 attribution (e.g. `L2ThroughputSubscriber`) consume these task-level
 events; key-count counters continue to consume the request-level events.
+
+---
+
+## L2 Failure Events
+
+Health-monitoring event for the L2 prefetch path. See LM-291.
+
+| EventType | Metadata keys | Types | Vocabulary |
+|---|---|---|---|
+| `L2_PREFETCH_FAILED` | `reason`, `keys` | `str`, `list[ObjectKey]` | `reason` ∈ {`l1_oom`, `not_found`} |
+
+Producers (both in `PrefetchController`):
+- `reason=l1_oom` — emitted when `reserve_write` into L1 returns `OUT_OF_MEMORY` during the transition-to-load phase. Published in parallel with `L1_ALLOCATION_FAILED(during=l2_prefetch)`.
+- `reason=not_found` — emitted in `_finalize_load` for keys reserved in L1 but missing from the adapter's load bitmap (L2 reported the key present at lookup but produced no data).
+
+The third reason `serde_failure` will be added as an additive, non-breaking
+extension once the serde PR lands and adapters can distinguish
+deserialization errors from missing objects. No dashboard migration
+needed when that happens.
 
 ---
 

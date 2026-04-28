@@ -566,18 +566,35 @@ class PrefetchController(StorageControllerInterface):
 
         # Step 4: filter to successfully reserved keys
         reserved_key_set: set[ObjectKey] = set()
+        oom_keys: list[ObjectKey] = []
         for key, (err, mem_obj) in write_results.items():
             if err == L1Error.SUCCESS and mem_obj is not None:
                 request.write_reserved_keys.append(key)
                 request.write_reserved_objs[key] = mem_obj
                 reserved_key_set.add(key)
             else:
+                if err == L1Error.OUT_OF_MEMORY:
+                    oom_keys.append(key)
                 logger.debug(
                     "Prefetch request %d: reserve write failed for %s: %s",
                     request.request_id,
                     key,
                     err,
                 )
+
+        if oom_keys:
+            self._event_bus.publish(
+                Event(
+                    event_type=EventType.L1_ALLOCATION_FAILED,
+                    metadata={"during": "l2_prefetch", "keys": oom_keys},
+                )
+            )
+            self._event_bus.publish(
+                Event(
+                    event_type=EventType.L2_PREFETCH_FAILED,
+                    metadata={"reason": "l1_oom", "keys": oom_keys},
+                )
+            )
 
         # Step 5: recompute load plan excluding failed reservations
         reserved_bitmap = Bitmap(len(request.keys))
@@ -803,6 +820,19 @@ class PrefetchController(StorageControllerInterface):
                 },
             )
         )
+
+        # L2 prefetch-failure anomaly reporting: keys were reserved in L1
+        # (expected to load from L2) but did not appear in the load bitmap.
+        # Classified as ``not_found`` — the serde_failure reason will be
+        # added once the serde PR lands and adapters can distinguish
+        # deserialization errors from missing objects.
+        if failed_keys:
+            self._event_bus.publish(
+                Event(
+                    event_type=EventType.L2_PREFETCH_FAILED,
+                    metadata={"reason": "not_found", "keys": failed_keys},
+                )
+            )
 
         # Partial load failures can create gaps in the prefix.
         # Release read locks for loaded keys beyond the prefix.
