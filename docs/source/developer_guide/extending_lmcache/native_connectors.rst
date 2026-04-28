@@ -640,3 +640,4 @@ Additional Resources
 - Design document:
   ``lmcache/v1/distributed/l2_adapters/design_docs/plugin.md``
 - RESP backend user guide: :doc:`RESP (Native Redis/Valkey) <../../kv_cache/storage_backends/resp>`
+- Blkio backend user guide: :doc:`Blkio (libblkio Block Device I/O) <../../kv_cache/storage_backends/blkio>`
