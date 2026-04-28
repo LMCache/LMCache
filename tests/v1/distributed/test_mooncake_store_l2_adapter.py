@@ -285,7 +285,13 @@ class TestMooncakeStoreL2AdapterConfig:
     @pytest.mark.parametrize("value", [0, -1, "four"])
     def test_from_dict_invalid_per_op_workers(self, field: str, value: Any):
         """Invalid per-operation worker counts should raise ValueError."""
-        d = {"type": "mooncake_store", field: value}
+        d = {
+            "type": "mooncake_store",
+            "lookup_workers": 2,
+            "retrieve_workers": 4,
+            "store_workers": 2,
+            field: value,
+        }
         with pytest.raises(ValueError, match=field):
             MooncakeStoreL2AdapterConfig.from_dict(d)
 
