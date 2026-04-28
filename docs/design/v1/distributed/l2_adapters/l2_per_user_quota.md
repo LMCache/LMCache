@@ -37,7 +37,7 @@ L1 Manager → StoreController → L2 Adapter
   │                                │
   │                    _notify_keys_stored(keys, sizes)
   │                      → base class updates _total_bytes_used
-  │                        and _per_user_size_bytes
+  │                        and _bytes_by_cache_salt
   ▼
 Listeners:  L2EvictionPolicy bridge → UserLRUEvictionPolicy
             ┌──────────────────────┐
@@ -49,7 +49,7 @@ L2EvictionController (every 1s):
   for each adapter state:
     usage = adapter.get_usage()  → AdapterUsage dataclass
     if policy.is_user_level:
-      for cache_salt, bytes in usage.per_user_bytes:
+      for cache_salt, bytes in usage.bytes_by_cache_salt:
         if bytes > watermark * quota(cache_salt):
           policy.get_eviction_actions(ratio, cache_salt=cache_salt)
     else:
@@ -399,7 +399,7 @@ class AdapterUsage:
     total_capacity_bytes: int
     """Adapter's maximum capacity. 0 means unknown/unlimited."""
 
-    per_user_bytes: dict[str, int]
+    bytes_by_cache_salt: dict[str, int]
     """Bytes used per cache_salt. Only entries with positive usage."""
 
     @property
@@ -418,11 +418,11 @@ class L2AdapterInterface(ABC):
         self._listeners: list[L2AdapterListener] = []
         self._max_capacity_bytes = max_capacity_bytes
         self._total_bytes_used: int = 0
-        self._per_user_size_bytes: dict[str, int] = {}
+        self._bytes_by_cache_salt: dict[str, int] = {}
         self._usage_lock = threading.Lock()
 
     @property
-    def supports_eviction(self) -> bool:
+    def supports_global_eviction(self) -> bool:
         """Whether this adapter supports eviction.
 
         True when the adapter declared a positive capacity via
@@ -437,8 +437,8 @@ class L2AdapterInterface(ABC):
         with self._usage_lock:
             for key, size in zip(keys, sizes, strict=True):
                 self._total_bytes_used += size
-                self._per_user_size_bytes[key.cache_salt] = (
-                    self._per_user_size_bytes.get(key.cache_salt, 0) + size
+                self._bytes_by_cache_salt[key.cache_salt] = (
+                    self._bytes_by_cache_salt.get(key.cache_salt, 0) + size
                 )
         for listener in self._listeners:
             listener.on_l2_keys_stored(keys)
@@ -449,8 +449,8 @@ class L2AdapterInterface(ABC):
         with self._usage_lock:
             for key, size in zip(keys, sizes, strict=True):
                 self._total_bytes_used -= size
-                self._per_user_size_bytes[key.cache_salt] = (
-                    self._per_user_size_bytes.get(key.cache_salt, 0) - size
+                self._bytes_by_cache_salt[key.cache_salt] = (
+                    self._bytes_by_cache_salt.get(key.cache_salt, 0) - size
                 )
         for listener in self._listeners:
             listener.on_l2_keys_deleted(keys)
@@ -460,8 +460,8 @@ class L2AdapterInterface(ABC):
             return AdapterUsage(
                 total_bytes_used=self._total_bytes_used,
                 total_capacity_bytes=self._max_capacity_bytes,
-                per_user_bytes={
-                    k: v for k, v in self._per_user_size_bytes.items()
+                bytes_by_cache_salt={
+                    k: v for k, v in self._bytes_by_cache_salt.items()
                     if v > 0
                 },
             )
@@ -487,7 +487,7 @@ sizes)`. The base class handles all byte accounting.
 - `_notify_keys_stored(stored_keys, sizes=stored_sizes)` after store
 - `_notify_keys_deleted(deleted_keys, sizes=deleted_sizes)` after delete
 
-| Adapter | `max_capacity_bytes` source | `supports_eviction` |
+| Adapter | `max_capacity_bytes` source | `supports_global_eviction` |
 |---------|-----------------------------|---------------------|
 | MockL2Adapter | `int(config.max_size_gb * 1024**3)` | `True` |
 | NixlStoreL2Adapter | Pool total size | `True` |
@@ -495,7 +495,7 @@ sizes)`. The base class handles all byte accounting.
 | FSL2Adapter | 0 | `False` |
 
 `L2AdapterEvictionState` is only created for adapters where both
-`eviction_config is not None` AND `adapter.supports_eviction` are true.
+`eviction_config is not None` AND `adapter.supports_global_eviction` are true.
 Adapters that don't support eviction are excluded from the eviction loop
 entirely — no runtime checks needed.
 
@@ -653,7 +653,7 @@ class L2EvictionController(StorageControllerInterface):
 
         if policy.is_user_level and self._quota_manager:
             # Per-user watermark check
-            for cache_salt, user_bytes in usage.per_user_bytes.items():
+            for cache_salt, user_bytes in usage.bytes_by_cache_salt.items():
                 limit = self._quota_manager.get_limit_bytes(cache_salt)
                 if user_bytes <= watermark * limit:
                     continue
@@ -673,7 +673,7 @@ class L2EvictionController(StorageControllerInterface):
 ```
 
 The controller uses `policy.is_user_level` (not `isinstance`) to branch:
-- **`is_user_level=True`**: reads `usage.per_user_bytes`, checks each user
+- **`is_user_level=True`**: reads `usage.bytes_by_cache_salt`, checks each user
   against `watermark * quota`. Unregistered users (quota=0) get ratio=1.0.
 - **`is_user_level=False`**: reads `usage.usage_fraction` for global check.
 
@@ -804,19 +804,19 @@ it through. Update serialization. No behavioral change with `cache_salt=""`.
 
 ### PR3 — LMCache: Adapter interface refactor (LMCache repo)
 
-`AdapterUsage` dataclass, `supports_eviction` property, unified
+`AdapterUsage` dataclass, `supports_global_eviction` property, unified
 `get_usage()`, `_notify_*` with `sizes`. Purely internal refactor —
 existing LRU eviction behavior unchanged.
 
 | File | Change |
 |------|--------|
-| `lmcache/v1/distributed/l2_adapters/base.py` | `AdapterUsage` dataclass; `max_capacity_bytes` + `supports_eviction`; `_notify_*` with `sizes`; unified `get_usage() -> AdapterUsage` |
+| `lmcache/v1/distributed/l2_adapters/base.py` | `AdapterUsage` dataclass; `max_capacity_bytes` + `supports_global_eviction`; `_notify_*` with `sizes`; unified `get_usage() -> AdapterUsage` |
 | `lmcache/v1/distributed/l2_adapters/mock_l2_adapter.py` | Pass `max_capacity_bytes` to super; pass `sizes` to `_notify_*`; remove `_current_size_bytes`, `get_usage()` |
 | `lmcache/v1/distributed/l2_adapters/nixl_store_l2_adapter.py` | Same |
 | `lmcache/v1/distributed/l2_adapters/native_connector_l2_adapter.py` | Same |
 | `lmcache/v1/distributed/l2_adapters/mooncake_store_l2_adapter.py` | Same (if fires `_notify_*` directly) |
 | `lmcache/v1/distributed/storage_controllers/eviction_controller.py` | Use `AdapterUsage.usage_fraction` instead of tuple |
-| `lmcache/v1/distributed/storage_manager.py` | Filter `L2AdapterEvictionState` by `adapter.supports_eviction` |
+| `lmcache/v1/distributed/storage_manager.py` | Filter `L2AdapterEvictionState` by `adapter.supports_global_eviction` |
 
 ### PR4 — LMCache: Eviction policy interface (LMCache repo)
 
@@ -841,7 +841,7 @@ The feature PR. Depends on PR1a + PR1b + PR2 + PR3 + PR4.
 | `lmcache/v1/distributed/eviction_policy/__init__.py` | Export `UserLRUEvictionPolicy` |
 | `lmcache/v1/distributed/config.py` | Add `"UserLRU"` to literal |
 | `lmcache/v1/distributed/l2_adapters/config.py` | Add `"UserLRU"` to allowed values |
-| `lmcache/v1/distributed/storage_controllers/eviction_controller.py` | `QuotaManager`; per-user branch using `is_user_level` + `per_user_bytes` |
+| `lmcache/v1/distributed/storage_controllers/eviction_controller.py` | `QuotaManager`; per-user branch using `is_user_level` + `bytes_by_cache_salt` |
 | `lmcache/v1/distributed/storage_manager.py` | Create `QuotaManager`; wire to controller + HTTP |
 | `lmcache/v1/multiprocess/http_server.py` | Quota CRUD endpoints |
 | `tests/v1/distributed/test_user_lru_eviction_policy.py` (new) | Unit tests |

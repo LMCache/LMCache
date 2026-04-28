@@ -301,8 +301,8 @@ def test_vllm_paged_connector_v3_with_gpu_and_mla(use_gpu, num_groups, gpu_kv_fo
                 )
 
     # create metadata and init kv layer groups
-    metadata = _create_metadata(use_mla, src_kv_caches)
-    metadata2 = _create_metadata(use_mla, dst_kv_caches)
+    metadata = _create_metadata(use_mla, src_kv_caches, gpu_kv_format)
+    metadata2 = _create_metadata(use_mla, dst_kv_caches, gpu_kv_format)
 
     # connector will copy with src_kv_groups
     connector = VLLMPagedMemGPUConnectorV3(
@@ -933,7 +933,11 @@ def test_sglang_connector_with_gpu_and_mla(use_gpu, use_mla):
     allocator.close()
 
 
-def _create_metadata(use_mla, kv_caches):
+def _create_metadata(use_mla, kv_caches, gpu_kv_format):
+    # First Party
+    from lmcache.v1.gpu_connector.utils import get_block_size, get_num_blocks
+    from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
+
     num_heads = 1 if use_mla else 8
     metadata = LMCacheMetadata(
         model_name="test",
@@ -945,5 +949,11 @@ def _create_metadata(use_mla, kv_caches):
         kv_shape=(32, 2, 256, num_heads, 128),
         use_mla=use_mla,
     )
-    metadata.kv_layer_groups_manager.build_kv_layer_groups(kv_caches)
+    kv_list = list(kv_caches.values())
+    metadata.kv_layer_groups_manager = KVLayerGroupsManager(
+        kv_list,
+        gpu_kv_format=gpu_kv_format,
+        num_blocks=get_num_blocks(kv_list, gpu_kv_format),
+        block_size=get_block_size(kv_list, gpu_kv_format),
+    )
     return metadata

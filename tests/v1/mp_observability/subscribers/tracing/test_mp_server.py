@@ -42,7 +42,7 @@ class TestMPServerTracingSubscriber:
         assert EventType.MP_REQUEST_START in subs
         assert EventType.MP_STORE_SUBMITTED in subs
         assert EventType.MP_RETRIEVE_SUBMITTED in subs
-        assert EventType.MP_SESSION_END in subs
+        assert EventType.MP_REQUEST_END in subs
         assert EventType.MP_STORE_START in subs
         assert EventType.MP_STORE_END in subs
         assert EventType.MP_RETRIEVE_START in subs
@@ -97,7 +97,7 @@ class TestMPServerTracingSubscriber:
         )
         bus.publish(
             Event(
-                event_type=EventType.MP_SESSION_END,
+                event_type=EventType.MP_REQUEST_END,
                 session_id="req-lookup-only",
                 timestamp=now + 0.020,
             )
@@ -135,7 +135,7 @@ class TestMPServerTracingSubscriber:
         # SESSION_END arrives before STORE_END
         bus.publish(
             Event(
-                event_type=EventType.MP_SESSION_END,
+                event_type=EventType.MP_REQUEST_END,
                 session_id=sid,
                 timestamp=now + 0.005,
             )
@@ -203,7 +203,7 @@ class TestMPServerTracingSubscriber:
         )
         bus.publish(
             Event(
-                event_type=EventType.MP_SESSION_END,
+                event_type=EventType.MP_REQUEST_END,
                 session_id=sid,
                 timestamp=now + 0.005,
             )
@@ -295,7 +295,7 @@ class TestMPServerTracingSubscriber:
         )
         bus.publish(
             Event(
-                event_type=EventType.MP_SESSION_END,
+                event_type=EventType.MP_REQUEST_END,
                 session_id=sid,
                 timestamp=now + 0.025,
             )
@@ -333,7 +333,7 @@ class TestMPServerTracingSubscriber:
         # SESSION_END arrives before RETRIEVE_END (the race condition)
         bus.publish(
             Event(
-                event_type=EventType.MP_SESSION_END,
+                event_type=EventType.MP_REQUEST_END,
                 session_id=sid,
                 timestamp=now + 0.005,
             )
@@ -400,7 +400,7 @@ class TestMPServerTracingSubscriber:
         )
         bus.publish(
             Event(
-                event_type=EventType.MP_SESSION_END,
+                event_type=EventType.MP_REQUEST_END,
                 session_id=sid,
                 timestamp=now + 0.005,
             )
