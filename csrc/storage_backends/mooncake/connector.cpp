@@ -158,7 +158,6 @@ void MooncakeConnector::do_batch_get(WorkerMooncakeConn& conn,
               "[LMCache GET] key %s failed: Mooncake batch_get_into "
               "returned %lld\n",
               req.keys[i].c_str(), static_cast<long long>(results[i]));
-      req.batch->any_failed.store(true, std::memory_order_relaxed);
       continue;
     }
     req.batch->per_key_results[req.start_idx + i] = 1;
@@ -177,15 +176,14 @@ void MooncakeConnector::do_batch_set(WorkerMooncakeConn& conn,
 
   for (size_t i = 0; i < results.size(); ++i) {
     if (results[i] != 0) {
-      req.batch->per_key_results[req.start_idx + i] = 0;
       fprintf(stderr,
               "[LMCache SET] key %s failed: Mooncake batch_put_from "
               "returned %lld\n",
               req.keys[i].c_str(), static_cast<long long>(results[i]));
-      req.batch->any_failed.store(true, std::memory_order_relaxed);
+      throw std::runtime_error("Mooncake batch_put_from failed for key: " +
+                               req.keys[i]);
       continue;
     }
-    req.batch->per_key_results[req.start_idx + i] = 1;
   }
 }
 
@@ -201,7 +199,8 @@ void MooncakeConnector::do_batch_exists(WorkerMooncakeConn& conn,
               "[LMCache EXISTS] key %s failed: Mooncake batchIsExist "
               "returned %lld\n",
               req.keys[i].c_str(), static_cast<long long>(results[i]));
-      req.batch->any_failed.store(true, std::memory_order_relaxed);
+      throw std::runtime_error("Mooncake batchIsExist failed for key: " +
+                               req.keys[i]);
       continue;
     }
     req.batch->per_key_results[req.start_idx + i] = results[i] == 1 ? 1 : 0;

@@ -110,9 +110,6 @@ class ConnectorBase : public IStorageConnector {
     auto [batch_future_id, batch_state, num_tiles, tile_size] =
         prepare_batch_operation(num_items, Op::BATCH_TILE_SET);
 
-    // pre-allocate per-key results for error tolerance
-    batch_state->per_key_results.assign(num_items, 0);
-
     // fan out work to threads
     for (size_t tile_idx = 0; tile_idx < num_tiles; ++tile_idx) {
       auto tile_req = create_tile_request(
@@ -319,35 +316,19 @@ class ConnectorBase : public IStorageConnector {
         req.batch->per_key_results[req.start_idx + i] = 0;
         fprintf(stderr, "[LMCache GET] key %s failed: %s\n",
                 req.keys[i].c_str(), e.what());
-        req.batch->any_failed.store(true, std::memory_order_relaxed);
       }
     }
   }
   virtual void do_batch_set(ConnectionType& conn, const Request& req) {
     for (size_t i = 0; i < req.keys.size(); ++i) {
-      try {
-        do_single_set(conn, req.keys[i], req.buf_ptrs[i], req.buf_lens[i],
-                      req.batch_chunk_num_bytes);
-        req.batch->per_key_results[req.start_idx + i] = 1;
-      } catch (const std::exception& e) {
-        req.batch->per_key_results[req.start_idx + i] = 0;
-        fprintf(stderr, "[LMCache SET] key %s failed: %s\n",
-                req.keys[i].c_str(), e.what());
-        req.batch->any_failed.store(true, std::memory_order_relaxed);
-      }
+      do_single_set(conn, req.keys[i], req.buf_ptrs[i], req.buf_lens[i],
+                    req.batch_chunk_num_bytes);
     }
   }
   virtual void do_batch_exists(ConnectionType& conn, const Request& req) {
     for (size_t i = 0; i < req.keys.size(); ++i) {
-      try {
-        bool exists = do_single_exists(conn, req.keys[i]);
-        req.batch->per_key_results[req.start_idx + i] = exists ? 1 : 0;
-      } catch (const std::exception& e) {
-        req.batch->per_key_results[req.start_idx + i] = 0;
-        fprintf(stderr, "[LMCache EXISTS] key %s failed: %s\n",
-                req.keys[i].c_str(), e.what());
-        req.batch->any_failed.store(true, std::memory_order_relaxed);
-      }
+      bool exists = do_single_exists(conn, req.keys[i]);
+      req.batch->per_key_results[req.start_idx + i] = exists ? 1 : 0;
     }
   }
   virtual void do_batch_delete(ConnectionType& conn, const Request& req) {
@@ -359,7 +340,6 @@ class ConnectorBase : public IStorageConnector {
         req.batch->per_key_results[req.start_idx + i] = 0;
         fprintf(stderr, "[LMCache DELETE] key %s failed: %s\n",
                 req.keys[i].c_str(), e.what());
-        req.batch->any_failed.store(true, std::memory_order_relaxed);
       }
     }
   }
