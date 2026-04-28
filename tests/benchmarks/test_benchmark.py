@@ -23,6 +23,10 @@ from tests.v1.utils import (
     generate_tokens,
 )
 
+# Optional override for tempfile root; see tests/v1/test_cache_engine.py
+# for rationale.
+_TEST_TMPDIR = os.environ.get("LMCACHE_TEST_TMPDIR") or None
+
 
 # helper functions
 def generate_random_slot_mapping(num_blocks, block_size, num_tokens, device):
@@ -91,9 +95,8 @@ def create_config():
                 print("Supported backends: 'cpu', 'disk', and 'fsconnector'")
                 raise ValueError(f"Unknown backend: {backend}")
 
-    homedir = os.environ.get("HOME", "/tmp")
     with tempfile.TemporaryDirectory(
-        dir=homedir, ignore_cleanup_errors=True
+        dir=_TEST_TMPDIR, ignore_cleanup_errors=True
     ) as temp_dir:
         print("Temp dir is:", temp_dir)
         yield partial(make_config, path=temp_dir)

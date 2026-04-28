@@ -9,9 +9,28 @@
 // Helpers
 // ---------------------------------------------------------------------------
 
+// Monotonic wall-clock reader.
+//
+// Why not just `system_clock::now()`?  `system_clock` maps to CLOCK_REALTIME,
+// which NTP / chrony can slew backward by tens of microseconds to stay synced
+// with upstream.  CUDA host callbacks fire at arbitrary wall moments, so two
+// consecutive callbacks (e.g. MP_STORE_START then MP_STORE_END on the same
+// stream) can straddle a backward slew and land with end_ts < start_ts.
+// Jaeger then renders span duration as unsigned 64-bit subtraction, producing
+// the characteristic ~213503982d span duration (= 2^64 microseconds).
+//
+// Fix: anchor once to the (system_clock, steady_clock) pair at first call.
+// Every subsequent timestamp is computed as
+//   epoch_sys + (steady_now - epoch_steady)
+// which is monotonic (steady_clock == CLOCK_MONOTONIC on Linux) while
+// remaining expressed in Unix-epoch seconds so downstream consumers don't
+// notice any change.
 static double wall_clock_time() {
-  auto now = std::chrono::system_clock::now();
-  return std::chrono::duration<double>(now.time_since_epoch()).count();
+  static const auto epoch_sys = std::chrono::system_clock::now();
+  static const auto epoch_steady = std::chrono::steady_clock::now();
+  auto now_steady = std::chrono::steady_clock::now();
+  auto since_epoch = epoch_sys.time_since_epoch() + (now_steady - epoch_steady);
+  return std::chrono::duration<double>(since_epoch).count();
 }
 
 // ---------------------------------------------------------------------------

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Standard
+from concurrent.futures import Future
 from dataclasses import dataclass
 from typing import Any, Callable, List, Optional, Sequence, Union
 import threading
@@ -64,7 +65,22 @@ class ProxyNotif(PDMsgBase):
     req_id: str  # The request UUID to notify the proxy
 
 
-PDMsg = Union[AllocRequest, AllocResponse, ProxyNotif]
+class CacheQueryRequest(PDMsgBase):
+    """Query decoder for cached block keys matching a prefix."""
+
+    keys: list[str]  # Keys to check on the decoder
+
+
+class CacheQueryResponse(PDMsgBase):
+    """Response with which keys are cached and their remote memory indices."""
+
+    cached_keys: list[str]  # Keys that exist on the decoder
+    cached_indexes: list[int]  # Remote memory indices for cached keys
+
+
+PDMsg = Union[
+    AllocRequest, AllocResponse, ProxyNotif, CacheQueryRequest, CacheQueryResponse
+]
 
 
 @dataclass
@@ -74,6 +90,7 @@ class PDConfig:
     peer_host: str
     peer_init_port: int
     peer_alloc_port: int
+    peer_query_port: Optional[int]
 
     buffer_size: int
     buffer_device: str
@@ -92,9 +109,10 @@ class PDConfig:
 
         role = config.pd_role
 
-        # TODO(Jiayi): Could be both if we want to do dynamic role switch.
-        assert role in ["sender", "receiver"], (
-            f"Invalid role: {config.pd_role}, must be either sender or receiver"
+        # Support bidirectional mode: "both" means this instance can
+        # read cached KV from peers AND write new KV to peers.
+        assert role in ["sender", "receiver", "both"], (
+            f"Invalid role: {config.pd_role}, must be sender, receiver, or both"
         )
 
         assert config.pd_buffer_size is not None
@@ -108,6 +126,14 @@ class PDConfig:
             if not config.pd_skip_proxy_notification:
                 assert config.pd_proxy_host is not None
                 assert config.pd_proxy_port is not None
+        elif role == "both":
+            # "both" role needs peer info (to read from decoder)
+            # AND proxy info (to notify after write)
+            assert config.pd_peer_host is not None
+            assert config.pd_peer_init_port is not None
+            assert config.pd_peer_alloc_port is not None
+            if config.pd_proxy_host is not None:
+                pass  # proxy notification is optional for "both"
 
         corrected_device = get_correct_device(
             config.pd_buffer_device, metadata.worker_id
@@ -123,11 +149,17 @@ class PDConfig:
         else:
             pd_peer_init_port = None
 
+        if config.pd_peer_query_port is not None:
+            pd_peer_query_port = config.pd_peer_query_port[tp_rank]
+        else:
+            pd_peer_query_port = None
+
         return PDConfig(
             role=role,
             peer_host=config.pd_peer_host,
             peer_init_port=pd_peer_init_port,
             peer_alloc_port=pd_peer_alloc_port,
+            peer_query_port=pd_peer_query_port,
             proxy_host=config.pd_proxy_host,
             proxy_port=config.pd_proxy_port,
             buffer_size=config.pd_buffer_size,
@@ -152,6 +184,7 @@ class PDBackend(AllocatorBackendInterface):
         self.running = True
 
         self.tp_rank = metadata.worker_id
+        self.config = config
 
         self.pd_config = PDConfig.from_cache_engine_config(
             config, metadata, self.tp_rank
@@ -167,6 +200,24 @@ class PDBackend(AllocatorBackendInterface):
         self.data: dict[CacheEngineKey, MemoryObj] = {}
         self.data_lock = threading.Lock()
 
+        # Async transfer support: use a dedicated NIXL worker thread with a
+        # queue so the vLLM worker thread is not blocked during KV transfer.
+        # All NIXL GPU operations run on this single thread to avoid CUDA
+        # context contention. This prevents RPC timeouts in vLLM v0.19.0's
+        # multiprocess executor.
+        # Standard
+        import queue as queue_mod
+
+        self._nixl_queue: queue_mod.Queue = queue_mod.Queue()
+        # Started after transfer_channel init
+        self._nixl_thread: threading.Thread | None = None
+        # Serializes all mutations and reads of the NIXL agent state
+        # (peer handshake, xfer handlers, batched_write, batched_read).
+        # The worker thread holds it around each GPU op; the main thread
+        # holds it around peer-connection setup so the two never touch
+        # nixl_agent concurrently.
+        self._nixl_agent_lock = threading.Lock()
+
         self.memory_allocator = self.initialize_allocator(config, metadata)
         assert isinstance(self.memory_allocator, PagedCpuGpuMemoryAllocator)
 
@@ -178,9 +229,13 @@ class PDBackend(AllocatorBackendInterface):
         # Initialize transfer channel
         peer_init_url = None
         self.local_id = ""
-        # TODO(Jiayi): both sender and receiver have to have
-        # peer_init_url if they want to do instance flip.
-        if self.pd_config.peer_init_port is not None:
+        # The receiver binds a listener on peer_init_url so senders can connect.
+        # The sender (and "both" role) connects lazily via _ensure_peer_connection,
+        # so they should NOT start a listener on the decoder's address.
+        if (
+            self.pd_config.peer_init_port is not None
+            and self.pd_config.role == "receiver"
+        ):
             peer_init_url = (
                 f"{self.pd_config.peer_host}:{self.pd_config.peer_init_port}"
             )
@@ -201,17 +256,34 @@ class PDBackend(AllocatorBackendInterface):
             buffer_size=allocator.buffer_size,
             align_bytes=allocator.align_bytes,
             tp_rank=self.tp_rank,
-            peer_init_url=peer_init_url,
+            peer_init_url=peer_init_url,  # type: ignore[arg-type]
             backends=config.nixl_backends,
             device=self.corrected_device,
         )
+        self._nixl_backends = config.nixl_backends or ["UCX"]
+
+        # Start the NIXL worker thread now that transfer_channel is ready
+        self._nixl_thread = threading.Thread(
+            target=self._nixl_worker_loop,
+            name=f"nixl-worker-tp{metadata.worker_id}",
+            daemon=True,
+        )
+        self._nixl_thread.start()
+        self.running_threads.append(self._nixl_thread)
+
+        # Shared state for sender and "both" roles
+        self.initialized_peers: set[str] = set()
+        self.mem_alloc_sockets: dict[str, zmq.Socket] = {}
+        self.cache_query_sockets: dict[str, zmq.Socket] = {}
 
         if self.pd_config.role == "sender":
             self._init_sender()
-            self.initialized_peers: set[str] = set()
-            self.mem_alloc_sockets: dict[str, zmq.Socket] = {}
         elif self.pd_config.role == "receiver":
             self._init_receiver()
+        elif self.pd_config.role == "both":
+            # Bidirectional: init sender capabilities (write to decoder)
+            # AND ability to read cached KV from decoder
+            self._init_sender()
         else:
             raise ValueError("Invalid PD role.")
 
@@ -357,10 +429,15 @@ class PDBackend(AllocatorBackendInterface):
         receiver_init_url = f"{receiver_host}:{receiver_init_port}"
         receiver_mem_alloc_url = f"{receiver_host}:{receiver_alloc_port}"
 
-        # Establish the connection with the receiver/decoder
-        self.transfer_channel.lazy_init_peer_connection(
-            local_id=self.local_id, peer_id=receiver_id, peer_init_url=receiver_init_url
-        )
+        # lazy_init_peer_connection mutates nixl_agent state
+        # (remote_xfer_handlers_dict) that the worker thread also touches,
+        # so serialize with the worker's GPU ops.
+        with self._nixl_agent_lock:
+            self.transfer_channel.lazy_init_peer_connection(
+                local_id=self.local_id,
+                peer_id=receiver_id,
+                peer_init_url=receiver_init_url,
+            )
 
         # Set up the memory allocation socket
         mem_alloc_socket = get_zmq_socket(
@@ -421,13 +498,28 @@ class PDBackend(AllocatorBackendInterface):
         memory_objs: List[MemoryObj],
         transfer_spec: Any = None,
         on_complete_callback: Optional[Callable[[CacheEngineKey], None]] = None,
-    ) -> None:
+    ) -> Optional[List[Future]]:
         """
         Submit batched put tasks to transfer KV caches to peer.
 
+        The NIXL transfer is offloaded to a background thread to avoid blocking
+        the vLLM worker thread (which would cause RPC timeouts in vLLM v0.19.0's
+        multiprocess executor).
+
         :param on_complete_callback: Optional callback invoked once per key
             after the transfer completes. Callback exceptions are caught and logged.
+        :return: A single-element list containing a Future that resolves to the
+            number of objects written once the NIXL RDMA transfer completes and
+            the proxy notification has been sent. ``result()`` raises if the
+            transfer fails. Returns ``None`` for local (no-transfer) requests.
+            Callers can ignore it for fire-and-forget semantics or ``result()``
+            it for synchronous completion.
         """
+        # Skip PD transfer for local requests (no transfer_spec).
+        # With conditional routing, direct-to-decoder requests have no disagg_spec.
+        if transfer_spec is None:
+            return None
+
         for mem_obj in memory_objs:
             mem_obj.ref_count_up()
 
@@ -457,48 +549,320 @@ class PDBackend(AllocatorBackendInterface):
             else:
                 mem_objs_to_send.append(mem_obj)
 
+        completion_future: Future = Future()
+
         if mem_objs_to_send:
-            # TODO(Jiayi): make this decoupled with transfer channel
             # Construct transfer spec
             channel_transfer_spec = {
                 "receiver_id": receiver_id,
                 "remote_indexes": remote_indexes,
             }
 
-            # TODO(Jiayi): Consider making this real async
-            # Perform the actual transfer
-            self.transfer_channel.batched_write(
-                objects=mem_objs_to_send,
-                transfer_spec=channel_transfer_spec,
+            # Submit to the dedicated NIXL worker thread via queue.
+            # The worker thread handles the blocking batched_write() call.
+            self._nixl_queue.put(
+                (
+                    "write",
+                    mem_objs_to_send,
+                    channel_transfer_spec,
+                    keys,
+                    on_complete_callback,
+                    transfer_spec,
+                    completion_future,
+                )
             )
-
-            # TODO(Jiayi): consider moving this to the transfer channel
-            # since we might want the transfer to be async.
-            for mem_obj in mem_objs_to_send:
-                mem_obj.ref_count_down()
         else:
             logger.debug(
                 "All memory objects have been already sent to the remote peer."
                 " Skipping transfer."
             )
+            # Route notification through worker thread to avoid ZMQ
+            # thread-safety issues (all socket access on one thread).
+            if transfer_spec.is_last_prefill or on_complete_callback is not None:
+                self._nixl_queue.put(
+                    (
+                        "notify_only",
+                        keys,
+                        on_complete_callback,
+                        transfer_spec,
+                        completion_future,
+                    )
+                )
+            else:
+                # Nothing to do — resolve immediately with 0 writes.
+                completion_future.set_result(0)
 
-        if transfer_spec.is_last_prefill:
-            # Notify the proxy that the transfer is done
-            if self.proxy_side_channel is not None:
-                notif_msg = ProxyNotif(req_id=transfer_spec.req_id)
-                notif_msg_bytes = msgspec.msgpack.encode(notif_msg)
-                self.proxy_side_channel.send(notif_msg_bytes)
+        return [completion_future]
 
-        # Call completion callback for all keys after transfer completes
-        if on_complete_callback is not None:
-            for key in keys:
+    def _nixl_worker_loop(self) -> None:
+        """Dedicated NIXL worker thread. Processes transfer requests from queue.
+
+        All NIXL GPU operations (batched_write, batched_read) run on this
+        single thread to avoid CUDA context contention with the vLLM worker.
+        """
+        # Standard
+        import queue as queue_mod
+
+        while self.running:
+            try:
+                item = self._nixl_queue.get(timeout=1.0)
+            except queue_mod.Empty:
+                continue
+
+            if item is None:
+                break  # Shutdown signal
+
+            op_type = item[0]
+            if op_type == "write":
+                (
+                    _,
+                    mem_objs,
+                    channel_spec,
+                    keys,
+                    callback,
+                    transfer_spec,
+                    completion_future,
+                ) = item
+                success = False
+                write_error: Optional[BaseException] = None
+                num_written = 0
                 try:
-                    on_complete_callback(key)
+                    with self._nixl_agent_lock:
+                        num_written = self.transfer_channel.batched_write(
+                            objects=mem_objs,
+                            transfer_spec=channel_spec,
+                        )
+                    success = True
                 except Exception as e:
-                    logger.warning(f"on_complete_callback failed for key {key}: {e}")
+                    write_error = e
+                    logger.error(f"NIXL write failed in worker thread: {e}")
+                finally:
+                    for mem_obj in mem_objs:
+                        mem_obj.ref_count_down()
+
+                if success and transfer_spec.is_last_prefill:
+                    if self.proxy_side_channel is not None:
+                        notif_msg = ProxyNotif(req_id=transfer_spec.req_id)
+                        notif_msg_bytes = msgspec.msgpack.encode(notif_msg)
+                        self.proxy_side_channel.send(notif_msg_bytes)
+
+                if success and callback is not None:
+                    for key in keys:
+                        try:
+                            callback(key)
+                        except Exception as e:
+                            logger.warning(
+                                f"on_complete_callback failed for key {key}: {e}"
+                            )
+
+                # Resolve the Future AFTER proxy notification + callbacks so
+                # that future.result() returning means everything downstream
+                # has observed the completion.
+                if success:
+                    completion_future.set_result(num_written)
+                else:
+                    completion_future.set_exception(
+                        write_error or RuntimeError("NIXL write failed")
+                    )
+            elif op_type == "notify_only":
+                _, keys, callback, transfer_spec, completion_future = item
+                try:
+                    if transfer_spec.is_last_prefill:
+                        if self.proxy_side_channel is not None:
+                            notif_msg = ProxyNotif(req_id=transfer_spec.req_id)
+                            notif_msg_bytes = msgspec.msgpack.encode(notif_msg)
+                            self.proxy_side_channel.send(notif_msg_bytes)
+                    if callback is not None:
+                        for key in keys:
+                            try:
+                                callback(key)
+                            except Exception as e:
+                                logger.warning(
+                                    f"on_complete_callback failed for key {key}: {e}"
+                                )
+                    completion_future.set_result(0)
+                except Exception as e:
+                    completion_future.set_exception(e)
+            elif op_type == "read":
+                _, buffers, channel_spec, completion_future = item
+                try:
+                    with self._nixl_agent_lock:
+                        num_read = self.transfer_channel.batched_read(
+                            buffers=buffers,
+                            transfer_spec=channel_spec,
+                        )
+                    completion_future.set_result(num_read)
+                except Exception as e:
+                    logger.error(f"NIXL read failed in worker thread: {e}")
+                    completion_future.set_exception(e)
 
     ############################################################
     # Prefiller functions end
+    ############################################################
+
+    ############################################################
+    # Bidirectional NIXL: Prefiller reads cached KV from decoder
+    ############################################################
+
+    def _ensure_cache_query_connection(
+        self,
+        receiver_id: str,
+        receiver_host: str,
+        receiver_query_port: int,
+    ) -> None:
+        """Set up ZMQ socket for querying decoder's cache."""
+        if receiver_id in self.cache_query_sockets:
+            return
+
+        query_url = f"{receiver_host}:{receiver_query_port}"
+        query_socket = get_zmq_socket(
+            self.zmq_context,
+            query_url,
+            "tcp",
+            zmq.REQ,
+            "connect",
+        )
+        self.cache_query_sockets[receiver_id] = query_socket
+
+    def query_remote_cache(
+        self,
+        receiver_id: str,
+        keys: Sequence[CacheEngineKey],
+    ) -> CacheQueryResponse:
+        """
+        Query the decoder for which keys are cached in its GPU memory.
+
+        Returns a CacheQueryResponse with cached_keys and cached_indexes.
+        Uses a timeout to avoid blocking the vLLM worker indefinitely.
+        On timeout, the REQ socket is closed and removed so it will be
+        recreated on the next call (REQ requires strict send/recv
+        alternation — a missed recv leaves the socket in an unusable state).
+        """
+        query_socket = self.cache_query_sockets[receiver_id]
+        str_keys = [key.to_string() for key in keys]
+        query = CacheQueryRequest(keys=str_keys)
+        query_socket.send(msgspec.msgpack.encode(query))
+        # Use poll with timeout to avoid blocking indefinitely
+        if query_socket.poll(timeout=5000):  # 5 second timeout
+            resp_bytes = query_socket.recv()
+        else:
+            logger.warning(
+                "Cache query timed out after 5s for receiver %s, resetting socket",
+                receiver_id,
+            )
+            # Close the stuck socket — REQ socket is in recv-expected
+            # state after send() without recv(), making it unusable.
+            query_socket.close()
+            del self.cache_query_sockets[receiver_id]
+            return CacheQueryResponse(cached_keys=[], cached_indexes=[])
+        resp = msgspec.msgpack.decode(resp_bytes, type=PDMsg)
+        assert isinstance(resp, CacheQueryResponse)
+        return resp
+
+    def batched_submit_read_task(
+        self,
+        keys: Sequence[CacheEngineKey],
+        local_memory_objs: List[MemoryObj],
+        transfer_spec: Any = None,
+    ) -> int:
+        """
+        Read cached KV blocks from the decoder's GPU memory into local buffers.
+
+        This is the bidirectional NIXL read path: the prefiller queries the
+        decoder for cached blocks, allocates local buffers, and reads the
+        cached KV data via NIXL READ (RDMA).
+
+        Args:
+            keys: Cache keys to check on the decoder.
+            local_memory_objs: Pre-allocated local MemoryObj buffers to read into.
+            transfer_spec: Must contain receiver_host, receiver_init_port,
+                receiver_alloc_port, and receiver_query_port.
+
+        Returns:
+            Number of blocks successfully read from the decoder.
+        """
+        # Skip read for local requests (no transfer_spec)
+        if transfer_spec is None:
+            return 0
+
+        receiver_init_port = transfer_spec.receiver_init_port[self.tp_rank]
+        receiver_alloc_port = transfer_spec.receiver_alloc_port[self.tp_rank]
+        receiver_query_port = transfer_spec.receiver_query_port[self.tp_rank]
+        receiver_id = transfer_spec.receiver_host + str(receiver_init_port)
+        receiver_host = transfer_spec.receiver_host
+
+        # Ensure NIXL peer connection is established
+        self._ensure_peer_connection(
+            receiver_id=receiver_id,
+            receiver_host=receiver_host,
+            receiver_init_port=receiver_init_port,
+            receiver_alloc_port=receiver_alloc_port,
+        )
+
+        # Ensure cache query connection
+        self._ensure_cache_query_connection(
+            receiver_id=receiver_id,
+            receiver_host=receiver_host,
+            receiver_query_port=receiver_query_port,
+        )
+
+        # Query decoder for cached blocks
+        cache_resp = self.query_remote_cache(receiver_id, keys)
+
+        if not cache_resp.cached_keys:
+            logger.debug("No cached blocks found on decoder for this prefix.")
+            return 0
+
+        # Map cached keys to local buffer indices
+        key_to_local_idx = {}
+        for idx, key in enumerate(keys):
+            key_to_local_idx[key.to_string()] = idx
+
+        local_objs_to_read = []
+        remote_indexes = []
+        for cached_key, remote_idx in zip(
+            cache_resp.cached_keys,
+            cache_resp.cached_indexes,
+            strict=False,
+        ):
+            local_idx = key_to_local_idx.get(cached_key)
+            if local_idx is not None and local_idx < len(local_memory_objs):
+                local_objs_to_read.append(local_memory_objs[local_idx])
+                remote_indexes.append(remote_idx)
+
+        if not local_objs_to_read:
+            logger.debug("No matching local buffers for cached remote blocks.")
+            return 0
+
+        # Perform NIXL READ on the worker thread so that writes, reads,
+        # and peer-handshake never touch nixl_agent concurrently.
+        channel_transfer_spec = {
+            "sender_id": receiver_id,
+            "remote_indexes": remote_indexes,
+        }
+
+        read_future: Future = Future()
+        self._nixl_queue.put(
+            (
+                "read",
+                local_objs_to_read,
+                channel_transfer_spec,
+                read_future,
+            )
+        )
+        num_read = read_future.result()
+
+        logger.info(
+            "Bidirectional NIXL: read %d/%d cached blocks from decoder %s",
+            num_read,
+            len(keys),
+            receiver_id,
+        )
+
+        return num_read
+
+    ############################################################
+    # Bidirectional NIXL end
     ############################################################
 
     ############################################################
@@ -520,6 +884,25 @@ class PDBackend(AllocatorBackendInterface):
         )
         self.mem_alloc_thread.start()
         self.running_threads.append(self.mem_alloc_thread)
+
+        # Start cache query listener if query port is configured
+        # (enables bidirectional NIXL: prefiller can query decoder's cache)
+        if self.pd_config.peer_query_port is not None:
+            query_url = f"{self.pd_config.peer_host}:{self.pd_config.peer_query_port}"
+            self.query_side_channel = get_zmq_socket(
+                self.zmq_context, query_url, "tcp", zmq.REP, "bind"
+            )
+            self.side_channels.append(self.query_side_channel)
+
+            self.cache_query_thread = threading.Thread(
+                target=self._cache_query_loop, daemon=True
+            )
+            self.cache_query_thread.start()
+            self.running_threads.append(self.cache_query_thread)
+            logger.info(
+                "Bidirectional NIXL: cache query listener started on %s",
+                query_url,
+            )
 
     def _allocate_and_put(self, alloc_request: AllocRequest) -> AllocResponse:
         total_allocs = len(alloc_request.keys)
@@ -598,6 +981,59 @@ class PDBackend(AllocatorBackendInterface):
         with self.data_lock:
             self.data[key] = mem_obj
 
+    def _cache_query_loop(self):
+        """
+        Listen for cache query requests from prefiller (bidirectional NIXL).
+        The prefiller sends a list of keys and the decoder responds with
+        which keys are cached and their memory indices.
+        """
+        while self.running:
+            try:
+                query_bytes = self.query_side_channel.recv()
+            except Exception as e:
+                if self.running:
+                    logger.error("Cache query recv failed: %s", str(e))
+                    time.sleep(0.01)
+                continue
+
+            # After recv, we MUST send a reply (ZMQ REP pattern).
+            # If processing fails, send an empty response.
+            try:
+                query = msgspec.msgpack.decode(query_bytes, type=PDMsg)
+                assert isinstance(query, CacheQueryRequest), (
+                    f"Expected CacheQueryRequest, got {type(query)}"
+                )
+
+                cached_keys = []
+                cached_indexes = []
+                with self.data_lock:
+                    for key_str in query.keys:
+                        key = CacheEngineKey.from_string(key_str)
+                        if mem_obj := self.data.get(key, None):
+                            cached_keys.append(key_str)
+                            cached_indexes.append(mem_obj.meta.address)
+
+                resp = CacheQueryResponse(
+                    cached_keys=cached_keys,
+                    cached_indexes=cached_indexes,
+                )
+                self.query_side_channel.send(msgspec.msgpack.encode(resp))
+
+                logger.info(
+                    "Cache query: %d/%d keys cached",
+                    len(cached_keys),
+                    len(query.keys),
+                )
+
+            except Exception as e:
+                logger.error("Failed to process cache query: %s", str(e))
+                # Send empty response to unblock the REP socket
+                try:
+                    empty_resp = CacheQueryResponse(cached_keys=[], cached_indexes=[])
+                    self.query_side_channel.send(msgspec.msgpack.encode(empty_resp))
+                except Exception:
+                    pass  # Socket may be broken, nothing we can do
+
     def get_blocking(self, key: CacheEngineKey) -> Optional[MemoryObj]:
         with self.data_lock:
             # NOTE(Jiayi): we assume that the key must be in local data
@@ -634,8 +1070,10 @@ class PDBackend(AllocatorBackendInterface):
         Close the storage backend.
         """
         self.running = False
+        # Signal the NIXL worker thread to exit
+        self._nixl_queue.put(None)
         for thread in self.running_threads:
-            thread.join()
+            thread.join(timeout=5.0)
         self.transfer_channel.close()
         self.zmq_context.term()
 

@@ -160,15 +160,19 @@ def _create_plugin_adapter(
     if l1_memory_desc is not None:
         kwargs["l1_memory_desc"] = l1_memory_desc
 
+    # mypy sees ``adapter_cls`` as ``type[L2AdapterInterface]`` and
+    # complains that we're passing a config object / dict where the
+    # base class expects ``max_capacity_bytes: int``. The plugin
+    # surface is intentionally dynamic, so silence both checks.
     if cfg_cls is not None:
-        return adapter_cls(  # type: ignore[call-arg]
-            cfg_cls.from_dict(config.adapter_params),
-            **kwargs,
+        return adapter_cls(
+            cfg_cls.from_dict(config.adapter_params),  # type: ignore[arg-type]
+            **kwargs,  # type: ignore[call-arg]
         )
 
-    return adapter_cls(  # type: ignore[call-arg]
-        config.adapter_params,
-        **kwargs,
+    return adapter_cls(
+        config.adapter_params,  # type: ignore[arg-type]
+        **kwargs,  # type: ignore[call-arg]
     )
 
 

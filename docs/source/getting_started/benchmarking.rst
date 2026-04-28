@@ -1,87 +1,157 @@
 Benchmarking
 ============
 
-This is a simple tutorial on how to deploy and benchmark LMCache. 
+This is a simple tutorial on how to deploy and benchmark LMCache using the
+``lmcache bench engine`` CLI.
 
-Workload Generator -- Long Doc QA:
-----------------------------------
+The ``lmcache bench engine`` command is a flexible traffic simulator that
+sends configurable workloads to your inference engine and reports TTFT,
+decoding speed, and throughput metrics. This tutorial walks through a
+long-document Q&A benchmark that exercises LMCache's CPU offloading path.
 
-Long Doc QA (found in ``benchmarks/long_doc_qa/``) is a highly flexible traffic simulator that sends long context queries ("documents") to your serving engine.
-Some configurable parameters include the number of tokens in the documents (default is 10000), the number of documents to send to the model (default is 20), the number of output tokens per request (default is 100), and the cache hit/miss ratio (e.g. 2:2 means a repeated 2 hit and 2 miss pattern through all the documents).
-You can also choose the number of times to repeat prompts and the mode of repetition (random, tile, interleave).
+For the full CLI reference -- including every flag, every workload type, and
+config-file usage -- see :doc:`/cli/bench`.
 
-LMCache provides a simple Long Doc QA Recommender that helps you deploy LMCache and generate the appropriate traffic through Long Doc QA.
-It will also help you determine the tensor parallelism and the amount of CPU RAM to deploy LMCache with based on the specifications of your hardware.
+Long Doc QA workload
+--------------------
+
+The ``long-doc-qa`` workload simulates repeated Q&A over long synthetic
+documents: a warmup round primes the KV cache with each document, then a
+benchmark round dispatches the questions. The number of documents is
+derived from ``--kv-cache-volume`` and the model's tokens-per-GB rather
+than set directly. See :doc:`/cli/bench` for the full flag list.
+
+Example
+-------
+
+To measure the benefit of LMCache, run the **same benchmark against two
+setups** and compare the results:
+
+- **Setup A (baseline)** -- vLLM alone.
+- **Setup B (with LMCache)** -- vLLM plus a standalone LMCache server.
+
+The steps below reproduce both runs on ``Qwen/Qwen3-8B``. Adjust the sizes
+to match your hardware.
+
+Setup A: vLLM alone (baseline)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 .. code-block:: bash
 
-    python benchmarks/long_doc_qa/long_doc_qa_recommender.py --model <YOUR_MODEL_NAME>
+    vllm serve Qwen/Qwen3-8B
 
-Example:
----------
+Setup B: vLLM with LMCache
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Run LMCache as a standalone service and point vLLM at it with the
+``LMCacheMPConnector``. See :doc:`/mp/quickstart` for the full MP-mode
+walkthrough.
+
+**Start the LMCache server:**
 
 .. code-block:: bash
 
-    python benchmarks/long_doc_qa/long_doc_qa_recommender.py --model Qwen/Qwen3-8B
+    lmcache server \
+        --l1-size-gb 66 --eviction-policy LRU
 
-.. code-block:: text
+The ZMQ port defaults to **5555** (used by vLLM) and the HTTP frontend
+defaults to **8080** (used by ``lmcache bench engine --lmcache-url``).
 
-    # this output is hardware specific, blindly copying it may not yield optimal results
-    # please run the recommender script yourself
-    1. vLLM Deployment: 
-    -----------------
+**Start vLLM with the MP connector in a separate terminal:**
 
-    PYTHONHASHSEED=0 \
+.. code-block:: bash
+
     vllm serve Qwen/Qwen3-8B \
-    --tensor-parallel-size 1 \
-    --load-format dummy
+        --kv-transfer-config \
+        '{"kv_connector": "LMCacheMPConnector", "kv_role": "kv_both"}'
 
+Run the benchmark
+~~~~~~~~~~~~~~~~~
 
-    2. LMCache Deployment: 
-    --------------------
+To make the comparison fair, capture the benchmark settings **once** in a
+config file, then replay the same config against both setups.
 
-    PYTHONHASHSEED=0 \
-    LMCACHE_MAX_LOCAL_CPU_SIZE=66 \
-    vllm serve Qwen/Qwen3-8B \
-    --tensor-parallel-size 1 \
-    --load-format dummy \
-    --kv-transfer-config \
-    '{"kv_connector": "LMCacheConnectorV1", "kv_role": "kv_both"}'
+**Step 1 -- export a shared config.** With the LMCache server from Setup B
+still running, launch ``lmcache bench engine`` in interactive mode:
 
+.. code-block:: bash
 
-    3. Multi-Round QA Workload Generation: 
-    ----------------------------------------
+    lmcache bench engine --lmcache-url http://localhost:8080
 
-    python benchmarks/long_doc_qa/long_doc_qa.py \
-    --model Qwen/Qwen3-8B \
-    --num-documents 46 \
-    --document-length 10000 \
-    --output-len 100 \
-    --repeat-count 1 \
-    --repeat-mode tile \
-    --max-inflight-requests 4
+Interactive mode triggers because ``--engine-url`` and ``--workload`` are
+missing, and ``--lmcache-url`` auto-detects ``tokens-per-gb-kvcache`` from
+the server. Walk through the prompts and pick:
 
-Qwen 8B vLLM Metrics:
-^^^^^^^^^^^^^^^^^^^^^
+- Engine URL: ``http://localhost:8000``
+- Workload: ``long-doc-qa``
+- Model: auto-detected from the engine (or type ``Qwen/Qwen3-8B``)
+- KV cache volume (GB): ``10``
+- ``ldqa-query-per-document``: ``1``
+- ``ldqa-shuffle-policy``: ``tile``
+- ``ldqa-num-inflight-requests``: ``4``
+- Leave the rest at their defaults.
 
-.. code-block:: text
+At the **summary** step, choose **"Export configuration for later use and
+exit"** and save to ``bench_config.json``. The file looks like:
 
-    === BENCHMARK RESULTS ===
-    Query round mean TTFT: 0.757s
-    Query round time: 23.467s
-    Query round prompt count: 46
+.. code-block:: json
 
-Qwen 8B LMCache Metrics: 
-^^^^^^^^^^^^^^^^^^^^^^^^
+    {
+      "model": "Qwen/Qwen3-8B",
+      "workload": "long-doc-qa",
+      "kv_cache_volume": 10.0,
+      "tokens_per_gb_kvcache": 46020,
+      "ldqa_document_length": 10000,
+      "ldqa_query_per_document": 1,
+      "ldqa_shuffle_policy": "tile",
+      "ldqa_num_inflight_requests": 4
+    }
 
-.. code-block:: text
+Note that the exported config stores ``tokens_per_gb_kvcache`` (resolved
+from ``--lmcache-url``) but **not** the engine URL or the LMCache URL, so
+the same file is portable across environments.
 
-    === BENCHMARK RESULTS ===
-    Query round mean TTFT: 0.185s
-    Query round time: 13.789s
-    Query round prompt count: 46
+**Step 2 -- replay against each setup.** Point ``--engine-url`` at whichever
+vLLM you want to benchmark and pass the shared config:
 
-From this example, we can see a **75%** reduction in TTFT (0.757s → 0.185s), **41%** reduction in total inference time (23.467s → 13.789s) via offloading with **LMCache**.
+.. code-block:: bash
+
+    lmcache bench engine \
+        --engine-url http://localhost:8000 \
+        --config bench_config.json
+
+Run this once against Setup A's vLLM and once against Setup B's
+vLLM-plus-LMCache, recording the metrics from each run.
+
+Results
+~~~~~~~
+
+Pull the headline numbers out of each run's
+``Engine Benchmark Result (long-doc-qa)`` summary:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 40 30 30
+
+   * - Metric
+     - Setup A (vLLM)
+     - Setup B (+ LMCache)
+   * - Successful requests
+     - 46
+     - 46
+   * - Benchmark duration (s)
+     - 23.47
+     - 13.79
+   * - Mean TTFT (ms)
+     - 757.00
+     - 185.00
+
+That's a **75%** reduction in Mean TTFT (757 ms → 185 ms) and a **41%**
+reduction in benchmark duration (23.47 s → 13.79 s) from LMCache offloading.
 
 .. note::
-   The warmup round is the first time the model sees the documents. The query round is the second time the model sees the documents. Without offloading, even with KV Cache reuse, there is no improvement in TTFT nor throughput. With offloading, we can see significant performance improvements to the query round.
+   Without LMCache, once the benchmark's working set overflows the GPU KV
+   cache the second round has to recompute every prefix, so TTFT and
+   throughput don't improve even when content repeats. LMCache keeps the
+   evicted blocks on CPU RAM and restores them on demand -- that's where
+   the speedup comes from.

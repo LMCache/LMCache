@@ -8,18 +8,71 @@ from __future__ import annotations
 
 # Standard
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING
+from dataclasses import dataclass, field
+from types import MappingProxyType
+from typing import TYPE_CHECKING, Mapping
+import threading
 
 if TYPE_CHECKING:
     # First Party
     from lmcache.native_storage_ops import Bitmap
 
 # First Party
+from lmcache.logging import init_logger
 from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.distributed.internal_api import L2AdapterListener
 from lmcache.v1.memory_management import MemoryObj
 
+logger = init_logger(__name__)
+
 L2TaskId = int
+
+
+_EMPTY_BY_CACHE_SALT: Mapping[str, int] = MappingProxyType({})
+
+
+@dataclass(frozen=True)
+class AdapterUsage:
+    """Unified usage report for an L2 adapter.
+
+    Replaces the old ``tuple[float, float]`` return shape with a structured
+    record that exposes both aggregate and per cache_salt byte counts.
+    Buckets are keyed by ``ObjectKey.cache_salt`` directly — the salt may
+    represent a user, a vLLM deployment, or any other isolation
+    granularity the caller chooses; the adapter stays agnostic.
+
+    Instances are returned as immutable snapshots:
+    ``bytes_by_cache_salt`` is a read-only ``Mapping``
+    (``MappingProxyType``) so callers cannot mutate the snapshot after
+    the fact. Each ``get_usage()`` call returns a fresh snapshot so a
+    held reference will never reflect later state.
+    """
+
+    total_bytes_used: int
+    """Aggregate bytes across all cache_salt buckets."""
+
+    total_capacity_bytes: int
+    """Adapter's maximum capacity. ``0`` means unknown / unlimited; the
+    adapter does not support aggregate (global) usage-based eviction."""
+
+    bytes_by_cache_salt: Mapping[str, int] = field(
+        default_factory=lambda: _EMPTY_BY_CACHE_SALT
+    )
+    """Bytes used per ``cache_salt``. Only entries with positive usage
+    appear; an empty mapping means no traffic has been tracked yet.
+    Read-only — wrap with ``dict(...)`` if you need a mutable copy."""
+
+    @property
+    def usage_fraction(self) -> float:
+        """Aggregate usage as a fraction in [0, 1].
+
+        Returns ``-1.0`` when capacity is unknown (``total_capacity_bytes
+        <= 0``) — matches the legacy sentinel from ``get_usage()`` so
+        callers can keep using ``< 0`` to mean "no eviction signal".
+        """
+        if self.total_capacity_bytes <= 0:
+            return -1.0
+        return self.total_bytes_used / self.total_capacity_bytes
 
 
 class L2AdapterInterface(ABC):
@@ -63,8 +116,27 @@ class L2AdapterInterface(ABC):
     and prefetch controller), therefore, it needs to be thread-safe.
     """
 
-    def __init__(self):
+    def __init__(self, max_capacity_bytes: int = 0) -> None:
+        """
+        Args:
+            max_capacity_bytes: Adapter's maximum byte capacity. ``0``
+                (default) marks the adapter as not supporting global
+                (aggregate) eviction — ``supports_global_eviction``
+                returns ``False`` and ``get_usage`` returns
+                ``usage_fraction == -1.0``. Per-cache_salt eviction
+                policies (e.g. quota-based) can still operate on the
+                per-bucket byte counts regardless of this value.
+        """
         self._listeners: list[L2AdapterListener] = []
+
+        # Centralized byte accounting. Subclasses pass ``sizes`` to
+        # ``_notify_keys_stored`` / ``_notify_keys_deleted`` and the base
+        # class maintains both aggregate and per cache_salt totals so
+        # every adapter exposes the same shape via ``get_usage()``.
+        self._max_capacity_bytes: int = max_capacity_bytes
+        self._total_bytes_used: int = 0
+        self._bytes_by_cache_salt: dict[str, int] = {}
+        self._usage_lock = threading.Lock()
 
     #####################
     # Event Fd Interface
@@ -278,21 +350,107 @@ class L2AdapterInterface(ABC):
         """Register a listener to receive L2 adapter events."""
         self._listeners.append(listener)
 
-    def _notify_keys_stored(self, keys: list[ObjectKey]) -> None:
+    def _notify_keys_stored(self, keys: list[ObjectKey], sizes: list[int]) -> None:
+        """Update byte accounting and notify listeners that ``keys`` were
+        stored. ``sizes[i]`` is the byte size of ``keys[i]``.
+
+        Accounting is held under ``_usage_lock``; listener callbacks fire
+        outside the lock so a slow listener cannot stall further notifies.
+        """
+        # Aggregate per-salt deltas before touching
+        # ``_bytes_by_cache_salt`` — one dict read/write per unique
+        # salt instead of one per key. This matters when the registry is
+        # large (10k+ salts) and keys/sizes are bulky.
+        delta: dict[str, int] = {}
+        total_delta = 0
+        for key, size in zip(keys, sizes, strict=True):
+            delta[key.cache_salt] = delta.get(key.cache_salt, 0) + size
+            total_delta += size
+
+        with self._usage_lock:
+            self._total_bytes_used += total_delta
+            for salt, d in delta.items():
+                self._bytes_by_cache_salt[salt] = (
+                    self._bytes_by_cache_salt.get(salt, 0) + d
+                )
         for listener in self._listeners:
             listener.on_l2_keys_stored(keys)
 
     def _notify_keys_accessed(self, keys: list[ObjectKey]) -> None:
+        # ``_notify_keys_accessed`` carries no byte impact — only LRU
+        # bookkeeping cares about it, so no accounting is needed here.
         for listener in self._listeners:
             listener.on_l2_keys_accessed(keys)
 
-    def _notify_keys_deleted(self, keys: list[ObjectKey]) -> None:
+    def _notify_keys_deleted(self, keys: list[ObjectKey], sizes: list[int]) -> None:
+        """Update byte accounting and notify listeners that ``keys`` were
+        deleted. ``sizes[i]`` is the byte size of ``keys[i]`` (typically
+        the same value the adapter passed to ``_notify_keys_stored``).
+
+        Per-cache_salt buckets that drop to zero are removed so the
+        ``bytes_by_cache_salt`` snapshot in ``AdapterUsage`` stays compact.
+
+        Counters are clamped at zero — a delete that would drive
+        ``_total_bytes_used`` negative indicates an accounting bug in the
+        caller (size mismatch, double-delete, etc.). Without the clamp the
+        sentinel ``usage_fraction == -1`` would silently disable eviction
+        forever; with it we log a warning and recover.
+        """
+        # Same batching rationale as ``_notify_keys_stored`` — aggregate
+        # per-salt deltas first so the hot path does one dict read/write
+        # per unique salt, not per key.
+        delta: dict[str, int] = {}
+        total_delta = 0
+        for key, size in zip(keys, sizes, strict=True):
+            delta[key.cache_salt] = delta.get(key.cache_salt, 0) + size
+            total_delta += size
+
+        with self._usage_lock:
+            self._total_bytes_used -= total_delta
+            if self._total_bytes_used < 0:
+                logger.warning(
+                    "L2 adapter byte accounting underflow: "
+                    "_total_bytes_used dropped to %d after deleting %d "
+                    "keys (total size %d). Clamping to 0; this indicates "
+                    "an accounting bug (double-delete or size mismatch) "
+                    "in the adapter.",
+                    self._total_bytes_used,
+                    len(keys),
+                    total_delta,
+                )
+                self._total_bytes_used = 0
+            for salt, d in delta.items():
+                new_total = self._bytes_by_cache_salt.get(salt, 0) - d
+                if new_total <= 0:
+                    self._bytes_by_cache_salt.pop(salt, None)
+                else:
+                    self._bytes_by_cache_salt[salt] = new_total
         for listener in self._listeners:
             listener.on_l2_keys_deleted(keys)
 
     #####################
     # Eviction Interface
     #####################
+
+    @property
+    def supports_global_eviction(self) -> bool:
+        """Whether this adapter supports **aggregate** (global) usage-driven
+        eviction.
+
+        ``True`` when the adapter declared a positive
+        ``max_capacity_bytes`` at construction time. Adapters that don't
+        track or cap aggregate byte usage (e.g. the FS adapter, which
+        assumes unbounded disk) pass ``0`` and return ``False``. The
+        storage manager skips creating an ``L2AdapterEvictionState``
+        with a global policy for these adapters even if an
+        ``eviction_config`` is otherwise present.
+
+        Per-cache_salt eviction policies (e.g. quota-based) are
+        orthogonal to this flag — they can operate on the per-bucket
+        byte counts regardless of whether aggregate capacity is
+        declared.
+        """
+        return self._max_capacity_bytes > 0
 
     def delete(self, keys: list[ObjectKey]) -> None:
         """
@@ -310,26 +468,32 @@ class L2AdapterInterface(ABC):
         """
         return None
 
-    def get_usage(self) -> tuple[float, float]:
+    def get_usage(self) -> AdapterUsage:
         """
-        Return the current L2 storage utilization.
+        Return the current L2 storage utilization as an ``AdapterUsage``.
 
-        Returns:
-            tuple[float, float]: A pair
-                ``(current_usage, usage_after_ongoing_eviction)`` where each
-                value is in the range [0.0, 1.0].
+        The default implementation returns the totals maintained by the
+        base class via ``_notify_keys_stored`` / ``_notify_keys_deleted``,
+        so adapters that pass their stored sizes through those helpers do
+        not need to override this method.
 
-                - ``current_usage``: fraction of total L2 capacity currently
-                  occupied (bytes used / total bytes).
-                - ``usage_after_ongoing_eviction``: estimated fraction once all
-                  in-flight deletes/evictions complete
-                  ((bytes used - bytes being deleted) / total bytes).
-
-            The default implementation returns ``(-1.0, -1.0)`` to indicate
-            that usage tracking is not supported. Subclasses that support
-            eviction should override this method.
+        ``AdapterUsage.usage_fraction`` returns ``-1.0`` when
+        ``max_capacity_bytes <= 0`` — the legacy "no eviction signal"
+        sentinel — so eviction-controller callers can keep the same
+        ``< 0`` short-circuit they had with the old tuple API.
         """
-        return (-1.0, -1.0)
+        with self._usage_lock:
+            per_salt_snapshot = {
+                k: v for k, v in self._bytes_by_cache_salt.items() if v > 0
+            }
+            return AdapterUsage(
+                total_bytes_used=self._total_bytes_used,
+                total_capacity_bytes=self._max_capacity_bytes,
+                # Wrap in a read-only view so callers can't mutate the
+                # snapshot. The underlying dict is a fresh copy so the
+                # view is fully detached from the adapter's live state.
+                bytes_by_cache_salt=MappingProxyType(per_salt_snapshot),
+            )
 
     #####################
     # Cleanup Interface
