@@ -724,6 +724,45 @@ class LMCacheConnectorV1Impl:
         #  not called, we should consider removing it.
         assert len(self.kv_caches) == 0 and len(kv_caches) > 0
         self.kv_caches = kv_caches
+
+        # NW-fix: eagerly initialize the GPU connector's layer-groups
+        # manager so the FIRST cache_engine.store sees the correct
+        # multi-group MLA shapes via metadata.get_shapes(). Without this,
+        # V3._initialize_kv_cache_pointers fires lazily inside from_gpu
+        # — by which time memory has already been allocated using the
+        # legacy single-group kv_shape, and lmc_ops.multi_layer_kv_transfer
+        # then trips on the hidden-dim mismatch (e.g. GLM-5.1-FP8: GPU has
+        # 2 groups with hs=132 and hs=656, allocator sized for hs=576).
+        # See PR #2951 / inference_frontend#2746.
+        if (self.lmcache_engine is not None
+                and getattr(self.lmcache_engine, "gpu_connector", None)
+                is not None):
+            connector = self.lmcache_engine.gpu_connector
+            try:
+                if hasattr(connector, "initialize_kvcaches_ptr"):
+                    connector.initialize_kvcaches_ptr(
+                        kvcaches=list(kv_caches.values())
+                    )
+                if hasattr(connector, "_initialize_kv_cache_pointers"):
+                    connector._initialize_kv_cache_pointers()
+                klg = getattr(
+                    getattr(connector, "metadata", None),
+                    "kv_layer_groups_manager",
+                    None,
+                )
+                logger.info(
+                    "Eagerly initialized GPU connector layer groups "
+                    "(num_groups=%s)",
+                    klg.num_groups if klg is not None else "?",
+                )
+            except Exception as e:
+                logger.warning(
+                    "Eager GPU connector initialization failed; falling "
+                    "back to lazy init. MLA multi-group models may fail "
+                    "their first cache_engine.store: %s",
+                    e,
+                )
+
         self._manager.post_init()
 
     @_lmcache_nvtx_annotate
