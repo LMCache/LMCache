@@ -1199,19 +1199,19 @@ class GdsBackend(AllocatorBackendInterface):
 
             async def _drain_tasks() -> None:
                 await asyncio.gather(*self.save_metadata_tasks, return_exceptions=True)
+                self.save_metadata_tasks.clear()
 
-            drain: Future = asyncio.run_coroutine_threadsafe(
-                _drain_tasks(),
-                self.loop,
-            )
             try:
+                drain: Future = asyncio.run_coroutine_threadsafe(
+                    _drain_tasks(),
+                    self.loop,
+                )
                 drain.result(timeout=30)
             except Exception as e:
                 logger.warning(
                     f"Exception while draining metadata write tasks: {e}",
                     exc_info=True,
                 )
-            self.save_metadata_tasks.clear()
         self.memory_allocator.close()
         if self._thread_pool is not None:
             self._thread_pool.shutdown(wait=True)
