@@ -1141,8 +1141,9 @@ def test_dax_backend_primary_view_reclaim_after_cycle_gc(
             backend.batched_submit_put_task([key2], [obj2])
             obj2.ref_count_down()
 
-            borrowed.cycle = borrowed
-            del borrowed
+            cycle: list[object] = [borrowed]
+            cycle.append(cycle)
+            del borrowed, cycle
             gc.collect()
 
             assert backend.remove(key2)
