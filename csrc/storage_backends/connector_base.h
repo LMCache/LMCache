@@ -631,7 +631,6 @@ class ConnectorBase : public IStorageConnector {
       // for batch exists and batch get, move per-key results
       if (req.batch->batch_op == Op::BATCH_TILE_EXISTS ||
           req.batch->batch_op == Op::BATCH_TILE_GET ||
-          req.batch->batch_op == Op::BATCH_TILE_SET ||
           req.batch->batch_op == Op::BATCH_TILE_DELETE) {
         batch_comp.result_bytes = std::move(req.batch->per_key_results);
       }

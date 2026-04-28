@@ -143,8 +143,16 @@ size_t MooncakeConnector::choose_num_tiles(Op op, size_t num_items) const {
 
 void MooncakeConnector::do_batch_get(WorkerMooncakeConn& conn,
                                      const Request& req) {
+  // Keep GET tolerant at per-key granularity: registration failures should
+  // only zero that key. Keep the no-failure path on Mooncake's batch API, and
+  // fall back to ConnectorBase's singleton-style handling on error.
   for (size_t i = 0; i < req.buf_ptrs.size(); ++i) {
-    ensure_registered(req.buf_ptrs[i], req.buf_lens[i]);
+    try {
+      ensure_registered(req.buf_ptrs[i], req.buf_lens[i]);
+    } catch (const std::exception&) {
+      ConnectorBase<WorkerMooncakeConn>::do_batch_get(conn, req);
+      return;
+    }
   }
 
   auto results =
@@ -182,7 +190,6 @@ void MooncakeConnector::do_batch_set(WorkerMooncakeConn& conn,
               req.keys[i].c_str(), static_cast<long long>(results[i]));
       throw std::runtime_error("Mooncake batch_put_from failed for key: " +
                                req.keys[i]);
-      continue;
     }
   }
 }
@@ -201,7 +208,6 @@ void MooncakeConnector::do_batch_exists(WorkerMooncakeConn& conn,
               req.keys[i].c_str(), static_cast<long long>(results[i]));
       throw std::runtime_error("Mooncake batchIsExist failed for key: " +
                                req.keys[i]);
-      continue;
     }
     req.batch->per_key_results[req.start_idx + i] = results[i] == 1 ? 1 : 0;
   }
