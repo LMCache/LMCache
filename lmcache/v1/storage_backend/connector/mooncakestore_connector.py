@@ -271,9 +271,24 @@ class MooncakestoreConnector(RemoteConnector):
         return self.store.is_exist(key.to_string())
 
     def support_batched_contains(self) -> bool:
+        """
+        Check if the connector supports batched contains
+
+        Returns:
+            True if batched contains is supported, False otherwise
+        """
         return True
 
     def batched_contains(self, keys: List[CacheEngineKey]) -> int:
+        """
+        Check how many keys exist in the remote store in batch (sync).
+
+        Args:
+            keys: List of keys to check.
+
+        Returns:
+            Number of consecutive keys that exist, starting from the first key.
+        """
         key_strings = [key.to_string() for key in keys]
         rets = self.store.batch_is_exist(key_strings)
         for i, ret in enumerate(rets):
@@ -309,7 +324,7 @@ class MooncakestoreConnector(RemoteConnector):
         pin: bool = False,
     ) -> int:
         key_strings = [key.to_string() for key in keys]
-        rets = self.store.batch_is_exist(key_strings)
+        rets = await asyncio.to_thread(self.store.batch_is_exist, key_strings)
         for i, ret in enumerate(rets):
             if ret != 1:
                 return i
