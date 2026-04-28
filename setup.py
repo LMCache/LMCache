@@ -25,12 +25,36 @@ BUILD_WITH_HIP = os.environ.get("BUILD_WITH_HIP", "0") == "1"
 ENABLE_CXX11_ABI = os.environ.get("ENABLE_CXX11_ABI", "1") == "1"
 
 
+# Minimum CUDA version that ships the cuObjClient RDMA token API
+# (cuMemObjGetRDMAToken / cuMemObjPutRDMAToken).
+_CUOBJECT_MIN_CUDA_VERSION = (13, 1)
+
+
+def _get_cuda_version(cuda_home: str) -> tuple[int, ...]:
+    """Return the CUDA toolkit version as a tuple, e.g. (13, 1, 0).
+
+    Reads ``version.json`` (CUDA 11.5+) under *cuda_home*.
+    Returns ``(0,)`` if the version cannot be determined.
+    """
+    import json
+
+    version_file = os.path.join(cuda_home, "version.json")
+    try:
+        with open(version_file) as f:
+            data = json.load(f)
+        ver_str = data["cuda"]["version"]  # e.g. "13.1.0"
+        return tuple(int(x) for x in ver_str.split("."))
+    except (OSError, KeyError, ValueError):
+        return (0,)
+
+
 def _find_cuobject_paths() -> tuple[Optional[str], Optional[str]]:
     """Locate the cuObjClient SDK (cuobjclient.h + libcuobjclient.so).
 
     Both the header and the shared library must be present; a partial
     install (header only) is treated as "not found" to avoid confusing
-    linker errors.
+    linker errors.  The CUDA toolkit must also be >= 13.1 which is
+    the first version that ships the RDMA token API required by LMCache.
 
     Returns (include_dir, lib_dir) or (None, None) if not found.
     Override with CUOBJECT_INCLUDE_DIR / CUOBJECT_LIB_DIR env vars.
@@ -48,12 +72,23 @@ def _find_cuobject_paths() -> tuple[Optional[str], Optional[str]]:
     )
     inc_dir = os.path.join(cuda_home, "include")
     lib_dir = os.path.join(cuda_home, "lib64")
-    if os.path.isfile(os.path.join(inc_dir, "cuobjclient.h")) and os.path.isfile(
-        os.path.join(lib_dir, "libcuobjclient.so")
+    if not (
+        os.path.isfile(os.path.join(inc_dir, "cuobjclient.h"))
+        and os.path.isfile(os.path.join(lib_dir, "libcuobjclient.so"))
     ):
-        return inc_dir, lib_dir
+        return None, None
 
-    return None, None
+    cuda_ver = _get_cuda_version(cuda_home)
+    if cuda_ver[:2] < _CUOBJECT_MIN_CUDA_VERSION:
+        print(
+            f"CUDA {'.'.join(str(v) for v in cuda_ver)} detected, but "
+            f"cuObject RDMA support requires >= "
+            f"{'.'.join(str(v) for v in _CUOBJECT_MIN_CUDA_VERSION)}. "
+            f"Skipping lmcache_cuobject extension."
+        )
+        return None, None
+
+    return inc_dir, lib_dir
 
 
 def _read_requirements(path: Path) -> list[str]:
@@ -248,8 +283,10 @@ def cuda_extension() -> tuple[list, dict]:
         )
     else:
         print(
-            "cuobjclient.h not found -- skipping lmcache_cuobject extension. "
-            "Set CUOBJECT_INCLUDE_DIR and CUOBJECT_LIB_DIR to override."
+            "cuObjClient SDK not found or too old (RDMA token API required) "
+            "-- skipping lmcache_cuobject extension. "
+            "Set CUOBJECT_INCLUDE_DIR and CUOBJECT_LIB_DIR to override, "
+            "or use NO_CUOBJECT=1 to silence this message."
         )
 
     # Mooncake extension is optional.
