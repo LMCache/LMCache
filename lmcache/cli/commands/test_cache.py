@@ -52,6 +52,7 @@ from lmcache.cli.commands.base import BaseCommand
 from lmcache.utils import compress_slot_mapping
 from lmcache.v1.kv_layer_groups import (
     DTYPE_MAP,
+    KVLayerGroupInfo,
     format_kvcache_shape_spec,
     parse_kvcache_shape_spec,
 )
@@ -214,6 +215,7 @@ def _allocate_gpu_kv_cache(
     dtype: torch.dtype = torch.float16,
     device: str | torch.device | None = None,
     kv_size: int = 2,
+    groups: list[KVLayerGroupInfo] | None = None,
 ) -> list[torch.Tensor]:
     """Allocate paged GPU KV cache tensors.
 
@@ -223,6 +225,12 @@ def _allocate_gpu_kv_cache(
     K/V attention; override via the ``--kvcache-shape-spec``
     first dimension for architectures that need a different
     leading dimension (e.g. MLA).
+
+    When ``groups`` is provided, tensors are allocated per-group
+    using each group's own ``(kv_size, NB, BS, NH, HS)`` / ``dtype``
+    (for heterogeneous multi-group specs). In that mode the flat
+    ``num_heads`` / ``head_size`` / ``dtype`` / ``kv_size`` kwargs
+    are ignored, and ``num_layers`` is derived from the groups.
     """
     torch.random.manual_seed(42)
     dev = (
@@ -230,18 +238,29 @@ def _allocate_gpu_kv_cache(
         if device
         else torch.device("cuda", torch.cuda.current_device())
     )
-    shape = (kv_size, num_blocks, block_size, num_heads, head_size)
 
-    def _alloc() -> torch.Tensor:
-        if dtype.is_floating_point:
-            return torch.randn(shape, dtype=dtype, device=dev)
+    def _alloc(
+        shape: tuple[int, ...],
+        a_dtype: torch.dtype,
+    ) -> torch.Tensor:
+        if a_dtype.is_floating_point:
+            return torch.randn(shape, dtype=a_dtype, device=dev)
         # ``torch.randn`` only supports floating-point dtypes; fall
         # back to ``randint`` for integer dtypes (e.g. ``uint8``
         # used by FP8 quantized KV cache layouts).
-        iinfo = torch.iinfo(dtype)
-        return torch.randint(iinfo.min, iinfo.max + 1, shape, dtype=dtype, device=dev)
+        iinfo = torch.iinfo(a_dtype)
+        return torch.randint(iinfo.min, iinfo.max + 1, shape, dtype=a_dtype, device=dev)
 
-    return [_alloc() for _ in range(num_layers)]
+    if groups:
+        tensors: list[torch.Tensor] = []
+        for g in groups:
+            sd = g.shape_desc
+            g_shape = (sd.kv_size, sd.nb, sd.bs, sd.nh, sd.hs)
+            tensors.extend(_alloc(g_shape, g.dtype) for _ in range(sd.nl))
+        return tensors
+
+    shape = (kv_size, num_blocks, block_size, num_heads, head_size)
+    return [_alloc(shape, dtype) for _ in range(num_layers)]
 
 
 def _send_register_kv_cache(
@@ -796,21 +815,26 @@ class TestCacheCommand(BaseCommand):
             print(
                 "Resolved KV shape spec: %s" % format_kvcache_shape_spec(layer_groups)
             )
-            # Use the first group to derive shape parameters.
-            # ``nb``/``bs``/``kv_size`` from the spec take
-            # precedence when set (>0); otherwise fall back
-            # to the CLI flags so existing specs that only
-            # declare ``nh``/``hs`` keep working.
+            # Paged KV demands identical ``NB`` / ``BS`` across all
+            # groups (block_id -> slot maths is shared), but
+            # ``kv_size`` / ``NH`` / ``HS`` / ``dtype`` may vary per
+            # group. ``_allocate_gpu_kv_cache(groups=...)`` honours
+            # each group's own shape; ``_process_request`` only needs
+            # a single ``block_size`` / ``total_blocks``.
             first = layer_groups[0]
+            nb_vals = {g.shape_desc.nb for g in layer_groups}
+            bs_vals = {g.shape_desc.bs for g in layer_groups}
+            if len(nb_vals) > 1 or len(bs_vals) > 1:
+                raise ValueError(
+                    "All groups must share NB and BS (paged KV "
+                    "requires uniform block geometry). Got NB=%s BS=%s"
+                    % (sorted(nb_vals), sorted(bs_vals))
+                )
             num_layers = sum(g.num_layers for g in layer_groups)
-            num_heads = first.shape_desc.nh
-            head_size = first.shape_desc.hs
             spec_nb = getattr(first.shape_desc, "nb", 0) or 0
             spec_bs = getattr(first.shape_desc, "bs", 0) or 0
-            spec_kv = getattr(first.shape_desc, "kv_size", 0) or 0
             num_blocks = spec_nb if spec_nb > 0 else args.num_blocks
             block_size = spec_bs if spec_bs > 0 else args.block_size
-            kv_size = spec_kv if spec_kv > 0 else 2
             if spec_nb and spec_nb != args.num_blocks:
                 print(
                     "  [info] spec nb=%d overrides --num-blocks=%d"
@@ -821,19 +845,41 @@ class TestCacheCommand(BaseCommand):
                     "  [info] spec bs=%d overrides --block-size=%d"
                     % (spec_bs, args.block_size)
                 )
-            dtype = first.dtype
-            dtype_str = next(
-                (k for k, v in DTYPE_MAP.items() if v == dtype),
-                "float16",
+            # For display / legacy hint fields only: collapse to the
+            # first group when homogeneous, otherwise report "mixed".
+            heads_set = {g.shape_desc.nh for g in layer_groups}
+            hs_set = {g.shape_desc.hs for g in layer_groups}
+            kv_size_set = {g.shape_desc.kv_size for g in layer_groups}
+            dtype_set = {g.dtype for g in layer_groups}
+            num_heads_disp: int | str = (
+                first.shape_desc.nh if len(heads_set) == 1 else "mixed"
             )
+            head_size_disp: int | str = (
+                first.shape_desc.hs if len(hs_set) == 1 else "mixed"
+            )
+            kv_size_disp: int | str = (
+                first.shape_desc.kv_size if len(kv_size_set) == 1 else "mixed"
+            )
+            if len(dtype_set) == 1:
+                dtype_str = next(
+                    (k for k, v in DTYPE_MAP.items() if v == first.dtype),
+                    "float16",
+                )
+            else:
+                dtype_str = "mixed"
 
             # Build layout_hints.
             # dtype is sent as a string ("float16") because
-            # torch.dtype is not msgpack-serializable.
+            # torch.dtype is not msgpack-serializable. For
+            # heterogeneous multi-group specs, per-layer fields
+            # (heads / head_size / dtype / kv_size) are reported as
+            # ``"mixed"`` — ``layout_hints`` is only consumed by the
+            # server to pick a ``kv_layout``, real per-layer shape is
+            # discovered from the tensors themselves.
             layout_hints = {
                 "num_layers": num_layers,
-                "num_heads": num_heads,
-                "head_size": head_size,
+                "num_heads": num_heads_disp,
+                "head_size": head_size_disp,
                 "num_blocks": num_blocks,
                 "block_size": block_size,
                 "dtype": dtype_str,
@@ -848,28 +894,25 @@ class TestCacheCommand(BaseCommand):
                 )
             )
             print(
-                "KV shape: %d layers, %d heads x %d, "
-                "dtype=%s, blocks=%dx%d, kv=%d"
+                "KV shape: %d layers, %s heads x %s, "
+                "dtype=%s, blocks=%dx%d, kv=%s"
                 % (
                     num_layers,
-                    num_heads,
-                    head_size,
+                    num_heads_disp,
+                    head_size_disp,
                     dtype_str,
                     num_blocks,
                     block_size,
-                    kv_size,
+                    kv_size_disp,
                 )
             )
 
-            # Allocate GPU tensors
+            # Allocate GPU tensors — one tensor per layer, shaped
+            # according to that layer's group in the spec (so
+            # heterogeneous ``nh`` / ``hs`` / ``dtype`` / ``kv_size``
+            # are honoured).
             gpu_tensors = _allocate_gpu_kv_cache(
-                num_layers=num_layers,
-                num_heads=num_heads,
-                head_size=head_size,
-                num_blocks=num_blocks,
-                block_size=block_size,
-                dtype=dtype,
-                kv_size=kv_size,
+                groups=layer_groups,
             )
             print(
                 "Allocated %d GPU tensors on %s"

@@ -522,3 +522,43 @@ class TestAllocateKVCache:
         assert len(tensors) == 1
         assert tensors[0].dtype == torch.uint8
         assert tensors[0].shape == (2, 2, 2, 2, 4)
+
+    def test_groups_honour_per_group_shape_and_dtype(self) -> None:
+        """Multi-group spec must allocate per-layer shape / dtype.
+
+        Regression for Bugbot #3150738055: previously every layer was
+        allocated with the *first* group's ``nh`` / ``hs`` / ``dtype``
+        (and the total ``num_layers`` from the sum), silently producing
+        wrong tensors for layers in later groups.
+        """
+        # Standard
+        from types import SimpleNamespace
+
+        # First Party
+        from lmcache.v1.kv_layer_groups import KVLayerGroupInfo
+
+        # Group A: 3 layers of (2, 2, 2, 8, 16), float16
+        # Group B: 2 layers of (1, 2, 2, 4, 32), bfloat16
+        # (NB / BS are intentionally identical — that's a hard
+        # requirement of paged KV, enforced in CLI execute().)
+        group_a = KVLayerGroupInfo(
+            layer_indices=[0, 1, 2],
+            shape_desc=SimpleNamespace(kv_size=2, nb=2, bs=2, nh=8, hs=16, nl=3),
+            dtype=torch.float16,
+        )
+        group_b = KVLayerGroupInfo(
+            layer_indices=[3, 4],
+            shape_desc=SimpleNamespace(kv_size=1, nb=2, bs=2, nh=4, hs=32, nl=2),
+            dtype=torch.bfloat16,
+        )
+        tensors = _allocate_gpu_kv_cache(
+            device="cpu",
+            groups=[group_a, group_b],
+        )
+        assert len(tensors) == 5
+        for t in tensors[:3]:
+            assert t.shape == (2, 2, 2, 8, 16)
+            assert t.dtype == torch.float16
+        for t in tensors[3:]:
+            assert t.shape == (1, 2, 2, 4, 32)
+            assert t.dtype == torch.bfloat16
