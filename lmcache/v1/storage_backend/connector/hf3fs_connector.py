@@ -322,15 +322,15 @@ class Hf3fsClient:
 
     def __init__(self, config: Hf3fsClientConfig):
         self.config = config
-        self.client_name = f"3FSClient_{threading.get_ident()}"
+        self.client_name = f"3FSClient_{os.getpid()}_{threading.get_ident()}"
         self._closed = False  #
         # shared memory
         try:
             self.shm_read = SharedMemory(
-                name=f"{self.client_name}_read", size=self.config.iov_size, create=True
+                name=f"{self.client_name}_rd", size=self.config.iov_size, create=True
             )
             self.shm_write = SharedMemory(
-                name=f"{self.client_name}_write", size=self.config.iov_size, create=True
+                name=f"{self.client_name}_wt", size=self.config.iov_size, create=True
             )
         except Exception as e:
             logger.error(f"{self.client_name} failed to create share memory {e}")
@@ -535,10 +535,12 @@ class Hf3fsClient:
                 offset += written
             if total_bytes_written != length:
                 logger.error(
-                    f"{self.client_name} write: requested {length}, got {total_bytes_written}"
+                    f"{self.client_name} write: requested {length}, "
+                    f"got {total_bytes_written}"
                 )
                 raise RuntimeError(
-                    f"{self.client_name} write: requested {length}, got {total_bytes_written}"
+                    f"{self.client_name} write: requested {length}, "
+                    f"got {total_bytes_written}"
                 )
 
             return total_bytes_written
