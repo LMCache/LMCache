@@ -623,7 +623,7 @@ class TestGdsBackend:
         assert gds_backend.use_thread_pool
         results = gds_backend.batched_get_blocking(keys)
         assert len(results) == len(keys)
-        for orig, result in zip(memory_objs, results):
+        for orig, result in zip(memory_objs, results, strict=False):
             assert result is not None
             assert result.metadata.shape == orig.metadata.shape
             assert result.metadata.dtype == orig.metadata.dtype
@@ -643,9 +643,7 @@ class TestGdsBackend:
         assert received == [key]
 
     @pytest.mark.asyncio
-    async def test_on_complete_callback_exception_does_not_propagate(
-        self, gds_backend
-    ):
+    async def test_on_complete_callback_exception_does_not_propagate(self, gds_backend):
         """A callback that raises must not crash the put pipeline."""
         key = create_test_key(601)
         memory_obj = create_test_memory_obj(device="cuda")
@@ -973,6 +971,7 @@ class TestGdsMultiPath:
                 async_loop,
                 gds_path_sharding="round_robin",
             )
+
 
 def test_get_extra_config_bool_valid_inputs():
     """String, uppercase string, literal bool, and missing key all parse correctly."""

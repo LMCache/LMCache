@@ -1193,10 +1193,15 @@ class GdsBackend(AllocatorBackendInterface):
                 f"Exception while waiting for metadata scan: {e}",
                 exc_info=True,
             )
-        # Drain pending metadata write tasks so the event loop can be stopped cleanly.
+        # Wait for pending metadata write tasks to finish before tearing down
+        # the allocator and thread pool..
         if self.save_metadata_tasks:
-            drain = asyncio.run_coroutine_threadsafe(
-                asyncio.gather(*self.save_metadata_tasks, return_exceptions=True),
+
+            async def _drain_tasks() -> None:
+                await asyncio.gather(*self.save_metadata_tasks, return_exceptions=True)
+
+            drain: Future = asyncio.run_coroutine_threadsafe(
+                _drain_tasks(),
                 self.loop,
             )
             try:
