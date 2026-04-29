@@ -445,7 +445,7 @@ class GdsBackend(AllocatorBackendInterface):
     ):
         shape, dtype, size, fmt, extra_metadata = self._read_metadata_info(filename)
         if extra_metadata["lmcache_version"] != str(_METADATA_VERSION):
-            raise RuntimeError("unhandled lmcache metadata")
+            raise UnsupportedMetadataVersion("unhandled lmcache metadata")
         logger.debug(
             f"Read metadata for {key} from {filename}: "
             f"shape={shape}, dtype={dtype}, size={size}, fmt={fmt}, "
