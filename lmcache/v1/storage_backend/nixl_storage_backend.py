@@ -54,6 +54,10 @@ from lmcache.v1.transfer_channel.transfer_utils import get_correct_device
 
 logger = init_logger(__name__)
 
+# POSIX permission mode for files created via ``os.open()`` with ``O_CREAT``.
+# 0o644 = rw-r--r-- (owner read/write, group/others read-only).
+DEFAULT_FILE_CREATE_MODE = 0o644
+
 
 @dataclass
 class NixlStorageConfig:
@@ -176,7 +180,7 @@ class NixlFilePool(NixlDescPool):
         for i in reversed(range(size)):
             filename = f"obj_{i}_{uuid.uuid4().hex[0:4]}.bin"
             tmp_path = os.path.join(path, filename)
-            fd = os.open(tmp_path, flags, 0o644)
+            fd = os.open(tmp_path, flags, DEFAULT_FILE_CREATE_MODE)
             self.fds.append(fd)
 
     def close(self):
@@ -1089,7 +1093,7 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
         if self.agent.mem_type == "FILE":
             flags = (os.O_CREAT | os.O_RDWR) if write else os.O_RDONLY
             flags |= self.direct_io_flag
-            mode_args = (0o644,) if write else ()
+            mode_args = (DEFAULT_FILE_CREATE_MODE,) if write else ()
             descs: List[NixlDesc] = []
             try:
                 for k in keys:
