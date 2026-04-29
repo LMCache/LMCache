@@ -274,11 +274,21 @@ def parse_args_to_observability_config(
     return config
 
 
-def init_observability(obs_config: ObservabilityConfig) -> EventBus:
+def init_observability(
+    obs_config: ObservabilityConfig,
+    *,
+    start_prometheus_http_server: bool = True,
+) -> EventBus:
     """Initialize OTel providers, EventBus, and register subscribers.
 
     This is the single entry-point that every MP server calls at startup.
     Returns a **started** EventBus.
+
+    Args:
+        obs_config: Observability configuration.
+        start_prometheus_http_server: Whether to start a standalone
+            Prometheus HTTP server.  Set to ``False`` when an
+            external HTTP framework already serves ``/metrics``.
     """
     # First Party
     from lmcache.v1.mp_observability.event_bus import (
@@ -303,6 +313,7 @@ def init_observability(obs_config: ObservabilityConfig) -> EventBus:
             otlp_endpoint=obs_config.otlp_endpoint,
             prometheus_port=obs_config.prometheus_port,
             resource_attributes=resource_attrs,
+            start_http_server=start_prometheus_http_server,
         )
 
     if obs_config.enabled and obs_config.tracing_enabled:
