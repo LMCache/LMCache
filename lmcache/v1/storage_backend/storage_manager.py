@@ -54,11 +54,9 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-# Backends whose pin state lives outside the MemoryObj (e.g. on a remote
-# server, or in a backend-internal map/set). For these, the async retrieve
-# path must explicitly call ``backend.unpin()`` since the default
-# ``memory_obj.unpin()`` cleanup only releases the in-process MemoryObj
-# pin count and would otherwise leak the external state.
+# Backends whose pin state lives outside the MemoryObj (e.g. server-side
+# RPC state). The default memory_obj.unpin() cleanup doesn't reach this
+# state, so async cleanup must call backend.unpin() explicitly for these.
 _BACKENDS_WITH_EXTERNAL_PIN_STATE: frozenset[str] = frozenset({"MaruBackend"})
 
 
@@ -274,7 +272,7 @@ class StorageManager:
         )
         self.async_serializer: Optional[AsyncSerializer] = None
 
-        # Registry for backend-level pins made during async prefetch.
+        # Backend-level pins recorded during async prefetch.
         # Only populated for backends in _BACKENDS_WITH_EXTERNAL_PIN_STATE.
         # Keyed by lookup_id -> {backend_name -> [keys]}.
         self._async_pin_registry: dict[str, dict[str, list[CacheEngineKey]]] = {}
@@ -1064,18 +1062,14 @@ class StorageManager:
     def pop_async_pins(
         self, lookup_id: str
     ) -> Optional[Dict[str, List[CacheEngineKey]]]:
-        """Pop and return async pin records for a lookup.
+        """
+        Pop and return the backend-level pin records registered during
+        `async_lookup_and_prefetch` for the given *lookup_id*.
 
-        Retrieves the backend-level pin records that were registered
-        during ``async_lookup_and_prefetch`` for the given *lookup_id*,
-        removing them from the registry.
+        :param str lookup_id: The lookup id whose pin records to pop.
 
-        Args:
-            lookup_id: The unique identifier for the lookup request.
-
-        Returns:
-            A dict mapping backend names to lists of pinned keys,
-            or ``None`` if no records exist for this *lookup_id*.
+        :return: A dict mapping backend names to lists of pinned keys,
+        or `None` if no records exist for this *lookup_id*.
         """
         with self._pin_registry_lock:
             return self._async_pin_registry.pop(lookup_id, None)
