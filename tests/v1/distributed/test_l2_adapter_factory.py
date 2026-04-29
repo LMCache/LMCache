@@ -5,7 +5,6 @@ PluginL2AdapterConfig.
 """
 
 # Standard
-import os
 import types
 
 # Third Party
@@ -22,6 +21,7 @@ from lmcache.v1.distributed.l2_adapters.factory import (
 )
 from lmcache.v1.distributed.l2_adapters.mock_l2_adapter import MockL2AdapterConfig
 from lmcache.v1.distributed.l2_adapters.plugin_l2_adapter import PluginL2AdapterConfig
+from lmcache.v1.platform import create_event_notifier
 
 # =========================================================
 # Helpers
@@ -836,11 +836,11 @@ class _FakeLMCacheFSClient:
         self.relative_tmp_dir = relative_tmp_dir
         self.use_odirect = use_odirect
         self.read_ahead_size = read_ahead_size
-        self._efd = os.eventfd(0, os.EFD_NONBLOCK | os.EFD_CLOEXEC)
+        self._efd = create_event_notifier()
         self._closed = False
 
     def event_fd(self):
-        return self._efd
+        return self._efd.fileno()
 
     def submit_batch_get(self, keys, memoryviews):
         return 0
@@ -857,7 +857,7 @@ class _FakeLMCacheFSClient:
     def close(self):
         if not self._closed:
             self._closed = True
-            os.close(self._efd)
+            self._efd.close()
 
 
 class TestFSNativeAdapterFactory:

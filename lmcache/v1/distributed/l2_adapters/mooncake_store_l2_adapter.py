@@ -87,6 +87,9 @@ class MooncakeStoreL2AdapterConfig(L2AdapterConfigBase):
             "All keys except LMCache-only keys are "
             "forwarded as-is to mooncake's "
             "setup_internal(ConfigDict).\n"
+            "When protocol=rdma, LMCache must provide "
+            "a valid L1 memory descriptor for "
+            "preregistration.\n"
             "Refer to mooncake documentation for "
             "available setup keys.\n"
             "- num_workers (int): C++ worker threads "
@@ -99,10 +102,23 @@ def _create_mooncake_store_l2_adapter(
     l1_memory_desc: "Optional[L1MemoryDesc]" = None,
 ) -> L2AdapterInterface:
     """Create a NativeConnectorL2Adapter backed by the
-    C++ Mooncake Store connector."""
+    C++ Mooncake Store connector.
+
+    When ``config.setup_config["protocol"] == "rdma"``,
+    a valid ``l1_memory_desc`` must be provided so the
+    native Mooncake client can preregister the L1 memory
+    region for RDMA access.
+
+    Raises:
+        RuntimeError: If the native C++ Mooncake extension
+            is unavailable.
+        ValueError: If RDMA protocol is requested but
+            ``l1_memory_desc`` is missing or invalid.
+    """
     try:
         # First Party
         from lmcache.lmcache_mooncake import (
+            L1RegistrationConfig,
             LMCacheMooncakeClient,
         )
     except ImportError as e:
@@ -119,13 +135,33 @@ def _create_mooncake_store_l2_adapter(
     )
 
     assert isinstance(config, MooncakeStoreL2AdapterConfig)
+    l1_registration = L1RegistrationConfig()
+    if config.setup_config.get("protocol") == "rdma":
+        if l1_memory_desc is None:
+            raise ValueError(
+                "RDMA protocol is enabled, but no L1 memory descriptor "
+                "was provided; cannot create Mooncake Store L2 adapter."
+            )
+        elif l1_memory_desc.ptr == 0 or l1_memory_desc.size <= 0:
+            raise ValueError(
+                "RDMA protocol is enabled, but the L1 memory descriptor "
+                "is invalid (ptr=%d, size=%d); cannot create Mooncake Store L2 adapter."
+                % (l1_memory_desc.ptr, l1_memory_desc.size)
+            )
+        else:
+            l1_registration.enabled = True
+            l1_registration.base = l1_memory_desc.ptr
+            l1_registration.size = l1_memory_desc.size
+
     native_client = LMCacheMooncakeClient(
         config=config.setup_config,
         num_workers=config.num_workers,
+        l1_registration=l1_registration,
     )
     logger.info(
-        "Created Mooncake Store L2 adapter (workers=%d)",
+        "Created Mooncake Store L2 adapter (workers=%d, preregister_l1_memory=%s)",
         config.num_workers,
+        l1_registration.enabled and l1_registration.size > 0,
     )
     return NativeConnectorL2Adapter(native_client)
 

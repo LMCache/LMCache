@@ -653,7 +653,12 @@ class TensorMemoryObj(MemoryObj):
         #   "byte_array only works with CPU tensors"
         # return memoryview(self.raw_data.contiguous().numpy())
 
-        num_bytes = self.raw_data.numel() * self.raw_data.element_size()
+        # Use logical size (get_size) rather than raw_data physical size.
+        # The raw_data buffer may include alignment padding (e.g. from
+        # batched_allocate) that must not be exposed to callers such as
+        # remote-backend put/get which rely on byte_array length matching
+        # the metadata length.
+        num_bytes = self.get_size()
         ptr = self.raw_data.data_ptr()
         ubyte_ptr = ctypes.cast(ptr, ctypes.POINTER(ctypes.c_ubyte))
         byte_array = (ctypes.c_ubyte * num_bytes).from_address(
@@ -1813,6 +1818,16 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
     def __str__(self):
         return "PagedTensorMemoryAllocator"
 
+    def get_paged_buffers(self) -> list[torch.Tensor]:
+        """
+        Get the list of paged buffers for fixed buffer registration.
+
+        Returns:
+            List of paged buffer tensors that can be registered with io_uring
+            for true zero copy operations.
+        """
+        return self.paged_buffers
+
     def __del__(self):
         # FIXME: NIXL-related memory leak should be handled somewhere (else).
         del self.buffer
@@ -2204,6 +2219,18 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
                 self.shm_name,
             )
             self._unregistered = True
+
+    def get_paged_buffers(self) -> Optional[list[torch.Tensor]]:
+        """
+        Get the list of paged buffers for fixed buffer registration.
+
+        Returns:
+            List of paged buffer tensors if using paged allocator, None otherwise.
+            These buffers can be registered with io_uring for true zero copy operations.
+        """
+        if isinstance(self.pin_allocator, PagedTensorMemoryAllocator):
+            return self.pin_allocator.get_paged_buffers()
+        return None
 
     def __str__(self):
         return "MixedMemoryAllocator"

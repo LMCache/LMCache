@@ -65,10 +65,28 @@ Configuration
    * - ``--prometheus-port``
      - ``9090``
      - Port for the Prometheus ``/metrics`` HTTP endpoint.
+   * - ``--service-instance-id``
+     - *(unset, default UUID v4)*
+     - Identifier for this MP server instance. Attached as the OTel
+       Resource attribute ``service.instance.id`` on every metric and
+       span. When the flag is not passed, defaults to a random UUID v4
+       minted at startup. Pass ``--service-instance-id=""`` to force an
+       explicit empty value. See :ref:`mp-observability-resource`.
    * - ``--metrics-sample-rate``
      - ``0.01``
      - Fraction of chunks/blocks to track for lifecycle histograms
        (0, 1.0]. Counters always count all events. Default is 1%.
+   * - ``--trace-level``
+     - *(none)*
+     - Enable trace recording at the given level. Currently only
+       ``storage`` is supported (records ``StorageManager`` public-API
+       calls for offline replay). When unset, trace recording is off.
+       See :ref:`trace-recording` for details.
+   * - ``--trace-output``
+     - *(none)*
+     - Path to write the trace file. If omitted while ``--trace-level``
+       is set, a timestamped file under ``$TMPDIR`` is minted
+       (``lmcache-trace-<pid>-<UTC>.lct``) and its path is logged at INFO.
 
 **Environment variables:**
 
@@ -95,6 +113,32 @@ collector.
 All metrics use the ``lmcache_mp.`` prefix (multiprocess). On Prometheus,
 dots are converted to underscores and counters get a ``_total`` suffix
 (e.g. ``lmcache_mp_l1_read_keys_total``).
+
+.. _mp-observability-resource:
+
+Global Resource Attributes
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Every metric and span exported by an MP server carries Resource-level
+attributes built at startup. These identify the process producing the
+telemetry and are orthogonal to per-metric attributes such as
+``cache_salt``.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 30 25 45
+
+   * - Attribute
+     - CLI flag / config
+     - Default when unset
+   * - ``service.instance.id``
+     - ``--service-instance-id`` / ``ObservabilityConfig.service_instance_id``
+     - Random UUID v4 minted at startup.
+
+Resource attributes attach to the ``MeterProvider`` / ``TracerProvider``
+and propagate to every exported datapoint via OTLP. On Prometheus, SDK
+resource attributes surface on the ``target_info`` series rather than
+on each time-series — this is standard OTel behavior.
 
 StorageManager Metrics
 ~~~~~~~~~~~~~~~~~~~~~~
@@ -191,8 +235,8 @@ L2 Metrics
      - Counter
      - Number of keys submitted for L2 store.
    * - ``lmcache_mp.l2_store_completed``
-     - Counter
-     - Number of L2 store tasks completed.
+     - Counter (attr: ``l2_name``)
+     - Number of L2 store tasks completed, labeled by adapter type.
    * - ``lmcache_mp.l2_store_succeeded_keys``
      - Counter
      - Number of keys successfully stored to L2.
@@ -220,14 +264,63 @@ L2 Metrics
    * - ``lmcache_mp.l2_prefetch_failed_keys``
      - Counter
      - Number of keys that failed to load from L2.
+   * - ``lmcache_mp.l2_load_completed``
+     - Counter (attr: ``l2_name``)
+     - Number of per-adapter L2 load tasks completed, labeled by adapter type.
+
+The ``l2_name``-labeled counters (``l2_store_completed`` and
+``l2_load_completed``) exist so dashboards can compute per-backend IOPS on
+demand via ``rate(lmcache_mp_l2_store_completed_total{l2_name="..."}[1m])``
+(and the equivalent for loads).  No separate ``*_iops`` metric is exported;
+keeping the raw counter lets dashboard users pick their own window.
+
+Lookup Hit-Rate Metrics
+~~~~~~~~~~~~~~~~~~~~~~~
+
+Token-level counters whose ratio gives the fraction of tokens requested by
+a lookup that were served from either L1 or L2. L0 (GPU prefix cache) is
+intentionally excluded — it is vLLM-owned and not observable from LMCache.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 40 15 45
+
+   * - Metric
+     - Type
+     - Description
+   * - ``lmcache_mp.lookup_requested_tokens``
+     - Counter
+     - Total tokens submitted for lookup (denominator of the L1+L2
+       token-level hit rate). Only chunk-aligned tokens are counted.
+   * - ``lmcache_mp.lookup_hit_tokens``
+     - Counter
+     - Total tokens found in L1 or L2 during lookup (numerator of the
+       L1+L2 token-level hit rate). Counts the contiguous prefix hit only.
+
+Both counters are driven by the same event (``MP_LOOKUP_PREFETCH_END``),
+so they always advance together per completed lookup. Early-exit lookups
+contribute ``0`` to both, and abandoned lookups contribute to neither.
+
+**PromQL for hit rate:**
+
+.. code-block:: promql
+
+    rate(lmcache_mp_lookup_hit_tokens_total[5m])
+    / rate(lmcache_mp_lookup_requested_tokens_total[5m])
 
 L0 (GPU) Block Lifecycle Histograms
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Sampled (default 1%) GPU KV cache block lifecycle tracking via
 ``L0LifecycleSubscriber``. Eviction is detected at reallocation time
-(when a block is assigned different tokens). Sampling is deterministic
-(hash-based).
+(when a block is assigned different tokens). Sampling uses random
+selection with a ``_skipped`` set (bounded by the finite number of
+physical GPU blocks).
+
+All L0 histograms are emitted with ``instance_id`` and ``model_name``
+OTel attributes, enabling per-instance and per-model metric slicing
+in Prometheus (e.g.
+``lmcache_mp_l0_block_lifetime_seconds{instance_id="12345",model_name="llama-7b"}``).
 
 .. list-table::
    :header-rows: 1
@@ -245,6 +338,73 @@ Sampled (default 1%) GPU KV cache block lifecycle tracking via
    * - ``lmcache_mp.l0_block_reuse_gap_seconds``
      - Histogram
      - Time gaps between consecutive accesses of the same GPU block.
+
+L0 ↔ L1 Throughput Histograms
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Sampled (default 1%) per-request throughput of GPU↔CPU copies via
+``L0L1ThroughputSubscriber``. Each sampled request contributes one sample
+to the appropriate histogram: ``total_bytes / (end_ts - start_ts)`` in
+GB/s. Timestamps come from ``MP_{STORE,RETRIEVE}_{START,END}`` events
+published on the GPU cupy stream, so they reflect true GPU-stream copy
+time — not Python/lock overhead.
+
+All throughput histograms are emitted with ``engine_id`` (vLLM worker
+instance id), ``device`` (e.g. ``"cuda:3"``), and ``model_name`` OTel
+attributes, enabling per-worker, per-device, and per-model slicing in
+Prometheus (e.g.
+``lmcache_mp_l0_l1_store_throughput_gbs{engine_id="0",device="cuda:3",model_name="meta-llama/Llama-3.1-8B"}``).
+
+.. list-table::
+   :header-rows: 1
+   :widths: 40 15 45
+
+   * - Metric
+     - Type
+     - Description
+   * - ``lmcache_mp.l0_l1_store_throughput_gbs``
+     - Histogram
+     - GPU→CPU (L0→L1) store throughput in GB/s per sampled request.
+   * - ``lmcache_mp.l0_l1_load_throughput_gbs``
+     - Histogram
+     - CPU→GPU (L1→L0) load throughput in GB/s per sampled request.
+
+L1 ↔ L2 Throughput Histograms
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Sampled (default 1%) per-task throughput of L1↔L2 transfers via
+``L2ThroughputSubscriber``. The store path correlates
+``L2_STORE_SUBMITTED`` → ``L2_STORE_COMPLETED`` by
+``(adapter_index, task_id)``. The load path correlates the per-adapter
+``L2_LOAD_TASK_SUBMITTED`` → ``L2_LOAD_TASK_COMPLETED`` events by
+``(request_id, adapter_index)``; the request-level
+``L2_PREFETCH_LOAD_*`` events used by the key-count counters aggregate
+across adapters and cannot be attributed to a specific ``l2_name``.
+
+Timestamps span **submit → complete**, so the duration includes adapter
+queue, network, and disk I/O — the value is *bytes / end-to-end
+latency*, not raw transfer rate. Use these histograms to compare
+adapter types and catch regressions; use the L0↔L1 histograms when you
+need pure copy-time throughput.
+
+All L1↔L2 throughput histograms carry a single ``l2_name`` OTel
+attribute — the registered adapter type (e.g. ``"fs"``, ``"nixl_store"``,
+``"mooncake_store"``) — enabling per-backend slicing in Prometheus (e.g.
+``lmcache_mp_l2_store_throughput_gbs{l2_name="nixl_store"}``).
+
+.. list-table::
+   :header-rows: 1
+   :widths: 40 15 45
+
+   * - Metric
+     - Type
+     - Description
+   * - ``lmcache_mp.l2_store_throughput_gbs``
+     - Histogram
+     - L1→L2 store throughput in GB/s per sampled task.
+   * - ``lmcache_mp.l2_load_throughput_gbs``
+     - Histogram
+     - L2→L1 load throughput in GB/s per sampled (request, adapter) pair.
 
 Observable Gauges
 ~~~~~~~~~~~~~~~~~
@@ -343,3 +503,106 @@ View traces in any OTel-compatible backend such as **Jaeger** or
     lmcache server \
         --l1-size-gb 100 --eviction-policy LRU \
         --enable-tracing --otlp-endpoint http://localhost:4317
+
+.. _trace-recording:
+
+Trace Recording
+---------------
+
+.. note::
+
+   Trace recording is **distinct from** ``--enable-tracing`` (OTel
+   spans). Trace recording captures every ``StorageManager`` public-API
+   call to a binary file so the same workload can be **replayed** later
+   for testing, regression hunting, and benchmarking — without needing
+   vLLM and (eventually) without a GPU. ``--enable-tracing`` exports
+   live OTel spans to an OTLP endpoint for online observability.
+   The two features are independent and can be used together.
+
+When ``--trace-level storage`` is set, LMCache records every call to
+``StorageManager.{reserve_write, finish_write, submit_prefetch_task,
+read_prefetched_results, finish_read_prefetched}`` to a binary file
+for later replay.
+
+Recording is **off by default** and adds near-zero overhead when off
+(a single boolean check per ``StorageManager`` call). When on,
+recording happens on the EventBus drain thread, off the request path.
+
+Capturing a trace
+~~~~~~~~~~~~~~~~~
+
+With an explicit output path:
+
+.. code-block:: bash
+
+    lmcache server \
+        --l1-size-gb 100 --eviction-policy LRU \
+        --trace-level storage --trace-output /tmp/run.lct
+
+With an implicit timestamped output path under ``$TMPDIR``:
+
+.. code-block:: bash
+
+    lmcache server \
+        --l1-size-gb 100 --eviction-policy LRU \
+        --trace-level storage
+    # → INFO log: "trace recording enabled (level=storage); no
+    #   --trace-output given, writing to
+    #   /tmp/lmcache-trace-<pid>-<UTC>.lct"
+
+The trace file is closed cleanly on shutdown (SIGTERM is handled by
+the EventBus stop path).
+
+Replay
+~~~~~~
+
+Replaying a recorded trace, plus the full set of CLI flags for
+driving, monitoring, and exporting replay results, is covered in
+its own page: :doc:`tracing_and_debugging`.
+
+What is captured (and what is not)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+**Captured:**
+
+- The fully-qualified name of every decorated ``StorageManager`` call.
+- Each call's input arguments (e.g. ``keys``, ``layout_desc``,
+  ``mode``, ``extra_count``, ``external_request_id``).
+- Wall-clock and monotonic timestamps of each call.
+- A header carrying a trace schema version, start times, and a
+  SHA-256 digest of the active ``StorageManagerConfig`` so replay can
+  detect mismatched configurations.
+
+**Not captured:**
+
+- KV tensor bytes. Replay exercises bookkeeping and controller logic;
+  payloads at replay time are zeros.
+- Calls inside the ``MPCacheEngine``, the message queue, or any
+  GPU-copy code. These layers are **out of scope** for the storage
+  trace level.
+
+File format
+~~~~~~~~~~~
+
+A length-prefixed `msgpack <https://msgpack.org/>`_ stream:
+
+::
+
+    [4-byte big-endian length][msgpack Header]
+    [4-byte big-endian length][msgpack Record]
+    [4-byte big-endian length][msgpack Record]
+    ...
+
+The ``Header`` carries a magic prefix (``LMCT``), a format version,
+the trace level (``storage`` today), a trace schema version, start
+timestamps, and the StorageManagerConfig digest. Each ``Record``
+carries a relative timestamp, a wall-clock timestamp, the
+fully-qualified call site (``qualname``), and an argument dict.
+
+The format is deliberately extensible: future trace **levels**
+(``mq``, ``gpu``) will share this layout and use the ``level`` header
+field to discriminate. Additional captured ops add new ``qualname``
+strings without bumping the format version.
+
+For the full design rationale see
+``docs/design/v1/mp_observability/trace.md`` in the source tree.
