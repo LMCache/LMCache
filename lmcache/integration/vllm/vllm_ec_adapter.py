@@ -109,7 +109,10 @@ class LMCacheECConnectorImpl:
         **kwargs: Any,
     ) -> None:
         """Load needed encoder caches from LMCache into vLLM encoder_cache."""
-        metadata = self._parent._get_connector_metadata()
+        # vLLM's ECConnectorBase exposes connector metadata only via the
+        # underscored accessor; matches the pattern used in vllm_v1_adapter.py
+        # for the KV connector.
+        metadata = self._parent._get_connector_metadata()  # noqa: SLF001
         if metadata is None:
             logger.warning(
                 "In connector.start_load_caches, but the connector metadata is None"
@@ -144,9 +147,8 @@ class LMCacheECConnectorImpl:
             return
 
         did_store = self._ec_engine.put(encoder_cache=encoder_cache, mm_hash=mm_hash)
-        if not did_store:
-            return
-        logger.debug("Saved encoder cache for mm_hash %s", mm_hash)
+        if did_store:
+            logger.debug("Saved encoder cache for mm_hash %s", mm_hash)
 
     # ------------------------------
     # Scheduler-side methods
