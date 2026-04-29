@@ -19,8 +19,6 @@ from lmcache.logging import init_logger
 from lmcache.utils import EngineType
 from lmcache.v1.gpu_connector.utils import (
     LayoutHints,
-    attempt_permute_to_contiguous_view,
-    discover_gpu_kv_format,
     get_attention_backend,
     get_block_size,
     get_concrete_gpu_kv_shape,
@@ -31,6 +29,7 @@ from lmcache.v1.gpu_connector.utils import (
     get_num_blocks,
     get_num_layers,
     is_mla,
+    normalize_kv_and_discover_format,
 )
 from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
 from lmcache.v1.multiprocess.custom_types import (
@@ -70,17 +69,15 @@ class GPUCacheContext:
         kv_caches: KVCache,
         lmcache_chunk_size: int = 256,
         layout_hints: LayoutHints | None = None,
+        engine_type: EngineType = EngineType.VLLM,
     ):
         unwrapped = unwrap_kv_cache_tensors(kv_caches)
-        self.kv_caches_ = attempt_permute_to_contiguous_view(unwrapped)
-        self.device_ = get_device(self.kv_caches_)
-
-        # TODO support creating GPUCacheContext for SGLang
-        self.gpu_kv_format_ = discover_gpu_kv_format(
-            self.kv_caches_,
-            EngineType.VLLM,
+        self.gpu_kv_format_, self.kv_caches_ = normalize_kv_and_discover_format(
+            unwrapped,
+            engine_type,
             layout_hints=layout_hints,
         )
+        self.device_ = get_device(self.kv_caches_)
         self.is_mla_ = is_mla(self.gpu_kv_format_)
         self.num_layers_ = get_num_layers(self.kv_caches_, self.gpu_kv_format_)
         self.num_blocks_ = get_num_blocks(self.kv_caches_, self.gpu_kv_format_)

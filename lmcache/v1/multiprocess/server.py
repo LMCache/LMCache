@@ -14,7 +14,7 @@ import zmq
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.utils import _lmcache_nvtx_annotate
+from lmcache.utils import EngineType, _lmcache_nvtx_annotate
 from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
     ObjectKey,
@@ -212,6 +212,7 @@ class MPCacheEngine:
         kv_caches: KVCache,
         model_name: str,
         world_size: int,
+        engine_type: EngineType,
         layout_hints: LayoutHints,
     ) -> None:
         """
@@ -219,9 +220,12 @@ class MPCacheEngine:
 
         Args:
             instance_id (int): The GPU instance ID (such as PID).
-            kv_caches (KVCache): The KV cache tensor wrappers from vLLM.
+            kv_caches (KVCache): The KV cache tensor wrappers from the
+                serving engine.
             model_name (str): The name of the model associated with this KV cache.
             world_size (int): The world size associated with this KV cache.
+            engine_type: Which serving engine produced the caches.
+                Forwarded to :class:`GPUCacheContext` for format detection.
             layout_hints: See :class:`LayoutHints`.  Forwarded to
                 :class:`GPUCacheContext` for GPU KV format detection.
         """
@@ -229,6 +233,7 @@ class MPCacheEngine:
             kv_caches,
             self.chunk_size,
             layout_hints=layout_hints or None,
+            engine_type=engine_type,
         )
         self.gpu_contexts[instance_id] = gpu_context
         self.gpu_context_meta[instance_id] = (model_name, world_size)
