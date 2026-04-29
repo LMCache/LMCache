@@ -5,10 +5,13 @@ import tempfile
 import time
 
 # Third Party
+import pytest
 import torch
 
+pytest.importorskip("vllm", reason="EC connector adapter imports vLLM at module top")
+
 # First Party
-from lmcache.integration.vllm.vllm_ec_adapter import (
+from lmcache.integration.vllm.vllm_ec_adapter import (  # noqa: E402
     LMCacheECConnectorImpl,
     LMCacheECConnectorMetadata,
     MMMeta,

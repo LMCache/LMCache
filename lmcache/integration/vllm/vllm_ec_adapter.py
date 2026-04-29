@@ -121,16 +121,17 @@ class LMCacheECConnectorImpl:
         if not isinstance(metadata, LMCacheECConnectorMetadata):
             raise TypeError(f"Unexpected metadata type: {type(metadata)}")
 
+        device = get_vllm_device_type()
         for mm_data in metadata.mm_datas:
-            # vllm cache hit, lmcache skip
-            did_retrieve = self._ec_engine.get(
-                encoder_cache=encoder_cache,
-                mm_hash=mm_data.mm_hash,
-                device=get_vllm_device_type(),
-            )
-            if not did_retrieve:
+            mm_hash = mm_data.mm_hash
+            if mm_hash in encoder_cache:
+                # vLLM already has it; don't overwrite.
                 continue
-            logger.debug("Loaded encoder cache for hash %s", mm_data.mm_hash)
+            tensor = self._ec_engine.get(mm_hash, device)
+            if tensor is None:
+                continue
+            encoder_cache[mm_hash] = tensor
+            logger.debug("Loaded encoder cache for hash %s", mm_hash)
 
     def save_caches(
         self,
@@ -146,7 +147,7 @@ class LMCacheECConnectorImpl:
         if mm_hash not in encoder_cache:
             return
 
-        did_store = self._ec_engine.put(encoder_cache=encoder_cache, mm_hash=mm_hash)
+        did_store = self._ec_engine.put(mm_hash, encoder_cache[mm_hash])
         if did_store:
             logger.debug("Saved encoder cache for mm_hash %s", mm_hash)
 
