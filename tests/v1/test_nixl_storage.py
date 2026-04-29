@@ -359,9 +359,9 @@ def run_dynamic_file(config, dtype, tmp_path):
 
         files_after_put = set(os.listdir(str(tmp_path)))
         expected_files = {nixl_backend._format_object_key(k) for k in keys}
-        assert expected_files.issubset(files_after_put), (
-            f"missing files in {tmp_path}: {expected_files - files_after_put}"
-        )
+        assert expected_files.issubset(
+            files_after_put
+        ), f"missing files in {tmp_path}: {expected_files - files_after_put}"
 
         for key, obj in zip(keys, objs, strict=False):
             returned = nixl_backend.get_blocking(key)
@@ -412,10 +412,9 @@ def _count_open_fds() -> int:
 )
 def test_nixl_dynamic_file_fd_leak_on_setup_failure(tmp_path, monkeypatch):
     """
-    Regression for Gemini G3 / Cursor C2: if any operation between the
-    per-key ``os.open`` loop and ``release_storage_handler`` raises, the
-    already-opened FDs must be closed instead of leaked. Driven in sync
-    mode so the induced exception surfaces via ``future.result()``.
+    If any operation between the per-key ``os.open`` loop and
+    ``release_storage_handler`` raises, the already-opened FDs must be
+    closed and the just-created files unlinked instead of leaked.
     """
     BASE_DIR = Path(__file__).parent
     config = LMCacheEngineConfig.from_file(BASE_DIR / "data/nixl.yaml")
@@ -450,5 +449,60 @@ def test_nixl_dynamic_file_fd_leak_on_setup_failure(tmp_path, monkeypatch):
             nixl_backend.get_blocking(keys[0])
 
         assert _count_open_fds() == baseline, "FDs leaked on transfer-setup failure"
+
+        # The put path opens the final key files with O_CREAT before
+        # registering the storage handler, so a failure here must clean
+        # up those just-created files.
+        for key in keys:
+            assert not os.path.exists(
+                os.path.join(str(tmp_path), nixl_backend._format_object_key(key))
+            ), "final key file leaked on transfer-setup failure"
+    finally:
+        _teardown_dynamic_file_backend(backends, thread_loop, thread)
+
+
+@pytest.mark.no_shared_allocator
+def test_nixl_dynamic_file_no_leak_on_transfer_failure(tmp_path, monkeypatch):
+    """
+    When the NIXL transfer itself fails after the final key
+    files have been opened with ``O_CREAT``, the backend must remove
+    those empty / partially-written files.
+    """
+    BASE_DIR = Path(__file__).parent
+    config = LMCacheEngineConfig.from_file(BASE_DIR / "data/nixl.yaml")
+
+    dtype = torch.bfloat16
+
+    config.nixl_buffer_device = "cpu"
+    config.extra_config["nixl_backend"] = "POSIX"
+    config.extra_config["nixl_pool_size"] = 0
+    config.extra_config["nixl_path"] = str(tmp_path)
+    config.extra_config["nixl_async_put"] = False
+    config.extra_config["enable_cuda"] = False
+
+    nixl_backend, backends, thread_loop, thread, keys, objs = (
+        _build_dynamic_file_backend(config, dtype)
+    )
+
+    try:
+
+        def boom(*args, **kwargs):
+            raise RuntimeError("induced post_blocking failure")
+
+        monkeypatch.setattr(nixl_backend.agent, "post_blocking", boom)
+
+        with pytest.raises(RuntimeError):
+            nixl_backend.batched_submit_put_task(keys, objs)
+
+        for key in keys:
+            final_path = os.path.join(
+                str(tmp_path), nixl_backend._format_object_key(key)
+            )
+            assert not os.path.exists(
+                final_path
+            ), f"final key file leaked on transfer failure: {final_path}"
+            assert not nixl_backend.contains(
+                key, False
+            ), "contains() reports key present after failed write"
     finally:
         _teardown_dynamic_file_backend(backends, thread_loop, thread)

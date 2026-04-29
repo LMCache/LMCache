@@ -227,6 +227,7 @@ PresenceCache = Union[SetPresenceCache]
 class NixlDesc:
     device_id: int
     meta_info: str
+    path: Optional[str] = None
 
 
 def _close_file_descs(descs: List[NixlDesc]) -> None:
@@ -234,6 +235,22 @@ def _close_file_descs(descs: List[NixlDesc]) -> None:
     for d in descs:
         try:
             os.close(d.device_id)
+        except OSError:
+            pass
+
+
+def _unlink_file_descs(descs: List[NixlDesc]) -> None:
+    """
+    Best-effort unlink of every desc whose ``path`` is set.
+
+    Called only on FILE-write failure paths to remove the (empty or
+    partially-written) file we created with ``O_CREAT``.
+    """
+    for d in descs:
+        if d.path is None:
+            continue
+        try:
+            os.unlink(d.path)
         except OSError:
             pass
 
@@ -1079,8 +1096,8 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
         """
         Build NixlDescs for ``keys``. For FILE backends this opens one fd per
         key; the caller owns FD lifetime once this method returns successfully.
-        On mid-loop ``os.open`` failure, every already-opened fd is closed
-        before the exception is re-raised.
+        On mid-loop failure, every already-opened fd is closed before the exception
+        is re-raised (for write paths, files are also unlinked).
 
         :param write: If True, opens with O_CREAT | O_RDWR (mem_to_storage).
             If False, opens with O_RDONLY (storage_to_mem).
@@ -1097,15 +1114,19 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
             descs: List[NixlDesc] = []
             try:
                 for k in keys:
-                    fd = os.open(
-                        os.path.join(self.path, self._format_object_key(k)),
-                        flags,
-                        *mode_args,
+                    path = os.path.join(self.path, self._format_object_key(k))
+                    fd = os.open(path, flags, *mode_args)
+                    descs.append(
+                        NixlDesc(
+                            device_id=fd,
+                            meta_info="",
+                            path=path if write else None,
+                        )
                     )
-                    descs.append(NixlDesc(device_id=fd, meta_info=""))
                 return descs
             except OSError:
                 _close_file_descs(descs)
+                _unlink_file_descs(descs)
                 raise
         # Already validated in validate_nixl_backend
         raise ValueError(f"unexpected mem_type: {self.agent.mem_type}")
@@ -1125,9 +1146,10 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
     ]:
         """Open FDs, register the storage handler, and build the transfer handle.
 
-        On any failure, releases everything already acquired before re-raising,
-        so the caller either gets a fully-acquired tuple or an exception with
-        no leaked FDs / NIXL state.
+        On any failure, releases everything already acquired (FDs, NIXL
+        state, and any FILE-write files created with ``O_CREAT``) before
+        re-raising, so the caller either gets a fully-acquired tuple or
+        an exception with nothing leaked.
         """
         descs = self._build_descs(keys, write=write)
         try:
@@ -1137,6 +1159,7 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
         except Exception:
             if self.agent.mem_type == "FILE":
                 _close_file_descs(descs)
+                _unlink_file_descs(descs)
             raise
 
         try:
@@ -1151,6 +1174,8 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
         except Exception:
             # release_storage_handler closes the FDs and releases the dlist.
             self.agent.release_storage_handler(reg_descs, xfer_handler, descs)
+            if self.agent.mem_type == "FILE":
+                _unlink_file_descs(descs)
             raise
 
         return descs, reg_descs, xfer_handler, handle
@@ -1258,7 +1283,12 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
         descs: List[NixlDesc],
         mem_objs: List[MemoryObj],
     ):
-        """Asynchronously wait for transfer to complete without blocking."""
+        """Asynchronously wait for transfer to complete without blocking.
+
+        On any non-DONE outcome (``ERR`` or earlier exception), unlink any
+        FILE-write files just created at the final key path so that
+        ``contains()`` does not observe them as bogus hits.
+        """
         state = ""
         try:
             state = initial_state
@@ -1280,6 +1310,8 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
                     with self.progress_lock:
                         self.progress_set.discard(key)
                     self._cache_add(key.chunk_hash)
+            elif self.agent.mem_type == "FILE":
+                _unlink_file_descs(descs)
 
             for mem_obj in mem_objs:
                 mem_obj.ref_count_down()
@@ -1319,7 +1351,8 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
         """Post the transfer and hand cleanup off to a background task.
 
         On any failure before the task is scheduled, ownership has not
-        transferred, so we release everything ourselves.
+        transferred, so we release everything ourselves -- including any
+        FILE-write files just created at the final key path.
         """
         try:
             initial_state = self.agent.post_async(handle)
@@ -1337,6 +1370,8 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
         except Exception:
             self.agent.release_handle(handle)
             self.agent.release_storage_handler(reg_descs, xfer_handler, descs)
+            if self.agent.mem_type == "FILE":
+                _unlink_file_descs(descs)
             raise
 
     def _run_sync_mem_to_storage(
@@ -1351,6 +1386,10 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
         start_time = time.time()
         try:
             self.agent.post_blocking(handle)
+        except Exception:
+            if self.agent.mem_type == "FILE":
+                _unlink_file_descs(descs)
+            raise
         finally:
             self.agent.release_handle(handle)
             self.agent.release_storage_handler(reg_descs, xfer_handler, descs)
