@@ -51,12 +51,32 @@ class LMCacheECConnectorMetadata(ECConnectorMetadata):
 
 
 class LMCacheECConnectorImpl:
+    """Worker- and scheduler-side glue between vLLM's EC connector and LMCache.
+
+    Bridges vLLM ``ECConnectorBase`` calls to an :class:`ECCacheEngine`: on the
+    worker side it saves and loads encoder tensors, and on the scheduler side
+    it tracks which multimodal hashes need to be loaded next step.
+    """
+
     def __init__(
         self,
         vllm_config: "VllmConfig",
         role: "ECConnectorRole",
         parent: "ECConnectorBase",
     ) -> None:
+        """Initialize the EC connector implementation.
+
+        Args:
+            vllm_config: vLLM engine configuration; ``ec_transfer_config`` and
+                ``model_config`` must be set.
+            role: vLLM EC connector role (worker or scheduler).
+            parent: vLLM ``ECConnectorBase`` that owns this implementation;
+                used to read connector metadata and producer/consumer state.
+
+        Raises:
+            ValueError: if ``vllm_config.ec_transfer_config`` is None, or if
+                no LMCache storage backend is configured.
+        """
         self._parent = parent
         self._vllm_config = vllm_config
         self._role = role
@@ -76,6 +96,7 @@ class LMCacheECConnectorImpl:
         self._ec_engine = ECCacheEngine(
             config=config,
             metadata=lmcache_metadata,
+            encoder_dtype=vllm_config.model_config.dtype,
         )
 
     # ------------------------------

@@ -39,17 +39,41 @@ def _stable_u64_from_str(s: str) -> int:
 
 
 class ECCacheEngine:
+    """LMCache-backed engine for vLLM encoder cache (EC) tensors.
+
+    Mirrors the KV cache engine's layering, but each EC entry is keyed by a
+    single multimodal hash and stores one tensor of shape
+    ``[num_tokens, hidden_size]``. EC does not require token chunking,
+    layerwise operations, or paged gather/scatter.
+    """
+
     def __init__(
         self,
         config: LMCacheEngineConfig,
         metadata: LMCacheMetadata,
-    ):
+        encoder_dtype: torch.dtype,
+    ) -> None:
+        """Initialize the EC cache engine.
+
+        Args:
+            config: LMCache engine configuration; supplies storage backends.
+            metadata: LMCache metadata describing model identity, parallelism,
+                and worker placement.
+            encoder_dtype: dtype of the encoder output tensors. Used as the
+                dtype field of the on-disk cache key, so it must be stable
+                across processes that share the same EC cache. Decoupled
+                from ``metadata.kv_dtype`` so that changing KV quantization
+                does not invalidate EC entries.
+
+        Raises:
+            ValueError: if no non-allocator storage backend is configured.
+        """
         self.config = config
         self.metadata = metadata
         self._model_name = metadata.model_name
         self._world_size = metadata.world_size
         self._worker_id = metadata.worker_id
-        self._dtype = metadata.kv_dtype
+        self._dtype = encoder_dtype
 
         # Mirror KV engine layering: StorageManager owns backends + allocator.
         # First Party
@@ -129,6 +153,8 @@ class ECCacheEngine:
             [key],
             [mem_obj],
         )
+        nbytes = tensor.element_size() * tensor.numel()
+        logger.info("EC put: stored %d bytes for mm_hash=%s", nbytes, mm_hash)
         return True
 
     def get(
@@ -151,7 +177,10 @@ class ECCacheEngine:
             [key],
         )
         mem_obj = mem_objs[0]
-        if mem_obj is None or mem_obj.tensor is None:
+        if mem_obj is None:
+            return False
+        if mem_obj.tensor is None:
+            mem_obj.ref_count_down()
             return False
 
         try:
