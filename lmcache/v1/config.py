@@ -1029,5 +1029,5 @@ def load_ec_engine_config(
             logger.warning("Failed to apply EC override %s=%r", key, value)
 
     _apply_ec_storage_defaults(ec_config)
-    ec_config.validate()
+    cast(Any, ec_config).validate()
     return ec_config
