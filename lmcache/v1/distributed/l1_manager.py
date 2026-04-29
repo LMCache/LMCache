@@ -158,42 +158,12 @@ class L1Manager:
     For every operation on list of keys, the operation is atomic
     """
 
-    # Class-level state for the singleton ``lmcache_mp.l1_memory_usage_bytes``
-    # gauge.  See ``_ensure_memory_usage_gauge_registered``.
+    # Singleton dispatch for ``lmcache_mp.l1_memory_usage_bytes``: tests may
+    # construct multiple L1Managers but the OTel SDK only honors the first
+    # gauge registration, so the callback reads from the most recently built
+    # instance via ``_gauge_target``.
     _gauge_registered: bool = False
     _gauge_target: "L1Manager | None" = None
-
-    @classmethod
-    def _ensure_memory_usage_gauge_registered(cls) -> None:
-        """Register ``lmcache_mp.l1_memory_usage_bytes`` exactly once per
-        process.
-
-        L1Manager is a singleton in MP mode (one per cache server
-        process), so a single OTel ObservableGauge with a single callback
-        is the correct shape.  Tests that construct multiple L1Manager
-        instances would otherwise stack multiple callbacks on the same
-        metric name with the same (empty) attribute set, leaving the
-        reported value undefined.  The callback dispatches via
-        ``_gauge_target`` so the most recently constructed L1Manager owns
-        the reported value.
-        """
-        if cls._gauge_registered:
-            return
-        cls._gauge_registered = True
-        register_gauge(
-            "lmcache.l1_manager",
-            "lmcache_mp.l1_memory_usage_bytes",
-            "Bytes currently held in L1 cache",
-            cls._read_current_memory_usage_bytes,
-        )
-
-    @classmethod
-    def _read_current_memory_usage_bytes(cls) -> int:
-        """Gauge callback: return the current L1 instance's used bytes."""
-        target = cls._gauge_target
-        if target is None:
-            return 0
-        return target.get_memory_usage()[0]
 
     def __init__(self, config: L1ManagerConfig):
         self._lock = threading.Lock()
@@ -210,7 +180,18 @@ class L1Manager:
         self._event_bus = get_event_bus()
 
         L1Manager._gauge_target = self
-        L1Manager._ensure_memory_usage_gauge_registered()
+        if not L1Manager._gauge_registered:
+            L1Manager._gauge_registered = True
+            register_gauge(
+                "lmcache.l1_manager",
+                "lmcache_mp.l1_memory_usage_bytes",
+                "Bytes currently held in L1 cache",
+                lambda: (
+                    L1Manager._gauge_target.get_memory_usage()[0]
+                    if L1Manager._gauge_target is not None
+                    else 0
+                ),
+            )
 
     def register_listener(self, listener: L1ManagerListener) -> None:
         """Register a listener for L1Manager events.

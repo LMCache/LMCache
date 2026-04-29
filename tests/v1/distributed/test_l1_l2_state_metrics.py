@@ -1,15 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
-"""
-Integration tests for the four L1/L2 state metrics:
-
-- ``lmcache_mp.l1_memory_usage_bytes`` (ObservableGauge on L1Manager)
-- ``lmcache_mp.num_inflight_l2_stores`` (UpDownCounter on StoreController)
-- ``lmcache_mp.num_inflight_l2_loads`` (UpDownCounter on PrefetchController)
-- ``lmcache_mp.inflight_load_memory_usage_bytes`` (UpDownCounter on PrefetchController)
+"""Integration tests for the four L1/L2 state metrics.
 
 Drives real controllers through real state changes and reads back values
-from a process-shared ``InMemoryMetricReader``.  Tests assert on deltas to
-remain robust against earlier tests that already exercised the meters.
+via a process-shared ``InMemoryMetricReader``.  Assertions are on deltas
+so prior tests that exercised the meters don't poison the baseline.
 """
 
 # Standard
@@ -42,9 +36,8 @@ from lmcache.v1.distributed.storage_controllers.store_policy import (
 )
 from lmcache.v1.memory_management import MemoryObjMetadata, TensorMemoryObj
 
-# Shared module-scope MeterProvider with an InMemoryMetricReader.  The
-# import itself sets the global MeterProvider; controllers constructed
-# below all bind their instruments to this reader.
+# Importing this sets the process-wide MeterProvider with an
+# InMemoryMetricReader; controllers bind their instruments to it.
 from tests.v1.mp_observability.subscribers.metrics.otel_setup import reader as _reader
 
 pytestmark = pytest.mark.skipif(
@@ -135,11 +128,7 @@ def store_keys_in_l2(
 
 
 def _read_points_by_attrs() -> dict[str, dict[tuple, float]]:
-    """Snapshot all sum/gauge data points from the shared reader.
-
-    Returns ``{metric_name: {sorted_attrs_tuple: value}}``.  Histogram
-    points are skipped (they don't have ``.value``).
-    """
+    """``{metric: {sorted_attrs_tuple: value}}`` from the shared reader."""
     data = _reader.get_metrics_data()
     result: dict[str, dict[tuple, float]] = {}
     if data is None:
@@ -335,16 +324,11 @@ class TestNumInflightL2Loads:
         adapter.close()
 
     def test_no_leak_after_shutdown_with_inflight_loads(self, l1_manager):
-        # When the controller is stopped while a load is still in flight,
-        # the gauges must report 0 after shutdown — the in-flight request
-        # tracking dict is cleared in ``_cleanup_in_flight_requests``, and
-        # the observable gauge callbacks read live state, so an empty
-        # tracking dict naturally yields zero observations.  We use a
-        # slow MockL2Adapter (bandwidth set at construction, since
-        # ``_bandwidth_byte_ps`` is computed once in ``__init__``) and
-        # assert via the metric snapshot that the load is observably
-        # in-flight before calling ``stop()`` — otherwise the test
-        # could pass via the normal completion path instead.
+        # Slow adapter so the load is still in flight when stop() runs;
+        # the gauge callback reads live state, so once cleanup clears the
+        # in-flight dict the gauges naturally report 0.  We assert via
+        # the metric that the load is observably in-flight before calling
+        # stop(), otherwise the test could pass via normal completion.
         slow_gb = 0.001  # 1 MB/s — a 200 KB key takes ~200 ms.
         adapter = make_adapter(bandwidth_gb=slow_gb)
         adapter_index = 0

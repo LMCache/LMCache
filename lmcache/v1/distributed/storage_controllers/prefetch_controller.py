@@ -159,10 +159,8 @@ class InFlightPrefetchRequest:
     load_plan: dict[int, Bitmap] = field(default_factory=dict)
     # Load phase: adapter_idx -> task_id (removed as results arrive)
     pending_load_tasks: dict[int, L2TaskId] = field(default_factory=dict)
-    # Load phase: adapter_idx -> reserved bytes (mirrors pending_load_tasks
-    # so the inflight_load_memory_usage_bytes counter can be decremented by
-    # the same amount it was incremented at submit time, regardless of how
-    # many keys actually load).
+    # Load phase: adapter_idx -> L1 bytes reserved for that adapter's
+    # in-flight load.  Read by the inflight_load_memory_usage_bytes gauge.
     load_bytes_by_adapter: dict[int, int] = field(default_factory=dict)
     # Load phase: adapter_idx -> bitmap (populated as results arrive)
     load_results: dict[int, Bitmap] = field(default_factory=dict)
@@ -197,8 +195,10 @@ class PrefetchController(StorageControllerInterface):
         max_in_flight: Maximum number of concurrent prefetch requests.
     """
 
-    # Class-level state for the singleton in-flight load gauges.  See
-    # ``_ensure_inflight_load_gauges_registered``.
+    # Singleton dispatch for the in-flight load gauges: tests may construct
+    # multiple controllers but the OTel SDK only honors the first gauge
+    # registration, so the callbacks read from the most recently built
+    # instance via ``_gauge_target``.
     _gauges_registered: bool = False
     _gauge_target: "PrefetchController | None" = None
 
@@ -257,7 +257,28 @@ class PrefetchController(StorageControllerInterface):
         self._event_bus = get_event_bus()
 
         PrefetchController._gauge_target = self
-        PrefetchController._ensure_inflight_load_gauges_registered()
+        if not PrefetchController._gauges_registered:
+            PrefetchController._gauges_registered = True
+            register_gauge(
+                "lmcache.l2_prefetch",
+                "lmcache_mp.num_inflight_l2_loads",
+                "L2 -> L1 prefetch load tasks currently executing, per adapter",
+                lambda: (
+                    PrefetchController._gauge_target.get_inflight_loads_observations()
+                    if PrefetchController._gauge_target is not None
+                    else []
+                ),
+            )
+            register_gauge(
+                "lmcache.l2_prefetch",
+                "lmcache_mp.inflight_load_memory_usage_bytes",
+                "L1 bytes reserved by in-flight L2 -> L1 prefetch loads, per adapter",
+                lambda: (
+                    PrefetchController._gauge_target.get_inflight_load_bytes_observations()
+                    if PrefetchController._gauge_target is not None
+                    else []
+                ),
+            )
 
         self._stop_flag = threading.Event()
         self._thread = threading.Thread(
@@ -378,135 +399,51 @@ class PrefetchController(StorageControllerInterface):
             "num_l2_adapters": len(self._l2_adapters),
         }
 
-    def get_inflight_load_state_by_adapter(self) -> dict[int, tuple[int, int]]:
-        """Snapshot of in-flight L2 -> L1 load (count, bytes) per adapter.
-
-        Read by the ``lmcache_mp.num_inflight_l2_loads`` and
-        ``lmcache_mp.inflight_load_memory_usage_bytes`` observable gauge
-        callbacks at scrape time.
-
-        Per-adapter byte attribution follows the request's load_plan
-        bitmap: each in-flight byte is attributed to exactly the adapter
-        actually loading it, so summing across adapters never
-        double-counts.
-
-        Thread safety:
-            ``self._in_flight_requests`` and each request's
-            ``load_bytes_by_adapter`` are mutated only on the background
-            prefetch loop thread.  ``dict.copy()`` is implemented in C
-            and atomic under the CPython GIL, so taking a snapshot from
-            another thread (e.g. the OTel reader thread) cannot crash —
-            in the worst case it sees a state that is one mutation
-            stale, which is acceptable for an observability gauge polled
-            on a 10-second cadence.
-
-        Returns:
-            Mapping from ``adapter_index`` to ``(count, bytes)`` where
-            ``count`` is the number of in-flight load tasks targeting
-            that adapter and ``bytes`` is the L1 reservation pinned by
-            those loads.  Adapters with no in-flight work are absent.
+    def _snapshot_inflight_loads(self) -> dict[int, tuple[int, int]]:
+        """``{adapter_idx: (count, reserved_bytes)}`` for in-flight L2 -> L1
+        loads, computed via GIL-atomic ``dict.copy()`` snapshots so the
+        OTel reader thread can call this concurrently with the prefetch
+        loop without locking.
         """
         counts: dict[int, int] = defaultdict(int)
         bytes_by_adapter: dict[int, int] = defaultdict(int)
         for request in self._in_flight_requests.copy().values():
-            load_bytes = request.load_bytes_by_adapter.copy()
-            for adapter_idx, reserved_bytes in load_bytes.items():
-                counts[adapter_idx] += 1
-                bytes_by_adapter[adapter_idx] += reserved_bytes
+            for idx, reserved in request.load_bytes_by_adapter.copy().items():
+                counts[idx] += 1
+                bytes_by_adapter[idx] += reserved
         return {idx: (counts[idx], bytes_by_adapter[idx]) for idx in counts}
 
     def get_inflight_loads_observations(
         self,
     ) -> list[tuple[int | float, dict[str, object]]]:
-        """Snapshot in the shape expected by ``register_gauge`` for the
-        ``num_inflight_l2_loads`` gauge.
-
-        Each tuple is ``(count, attributes)`` for one adapter that
-        currently has in-flight load tasks.
-        """
+        """Per-adapter ``(count, attributes)`` for the
+        ``lmcache_mp.num_inflight_l2_loads`` gauge."""
         return [
             (
                 count,
                 {
-                    "l2_name": self._adapter_descriptors[adapter_idx].type_name,
-                    "adapter_index": adapter_idx,
+                    "l2_name": self._adapter_descriptors[idx].type_name,
+                    "adapter_index": idx,
                 },
             )
-            for adapter_idx, (count, _) in (
-                self.get_inflight_load_state_by_adapter().items()
-            )
+            for idx, (count, _) in self._snapshot_inflight_loads().items()
         ]
 
     def get_inflight_load_bytes_observations(
         self,
     ) -> list[tuple[int | float, dict[str, object]]]:
-        """Snapshot in the shape expected by ``register_gauge`` for the
-        ``inflight_load_memory_usage_bytes`` gauge.
-
-        Each tuple is ``(reserved_bytes, attributes)`` for one adapter
-        with in-flight loads.  Adapters without in-flight loads are
-        omitted.
-        """
+        """Per-adapter ``(reserved_bytes, attributes)`` for the
+        ``lmcache_mp.inflight_load_memory_usage_bytes`` gauge."""
         return [
             (
                 reserved_bytes,
                 {
-                    "l2_name": self._adapter_descriptors[adapter_idx].type_name,
-                    "adapter_index": adapter_idx,
+                    "l2_name": self._adapter_descriptors[idx].type_name,
+                    "adapter_index": idx,
                 },
             )
-            for adapter_idx, (_, reserved_bytes) in (
-                self.get_inflight_load_state_by_adapter().items()
-            )
+            for idx, (_, reserved_bytes) in self._snapshot_inflight_loads().items()
         ]
-
-    @classmethod
-    def _ensure_inflight_load_gauges_registered(cls) -> None:
-        """Register the two in-flight load gauges exactly once per process.
-
-        PrefetchController is a singleton in MP mode (one per cache server
-        process), so each gauge has a single OTel instrument with a
-        single callback.  Tests that construct multiple PrefetchController
-        instances would otherwise stack registrations on the same
-        instrument names; the callback dispatches via ``_gauge_target``
-        so the most recently constructed controller owns the reported
-        values.
-        """
-        if cls._gauges_registered:
-            return
-        cls._gauges_registered = True
-        register_gauge(
-            "lmcache.l2_prefetch",
-            "lmcache_mp.num_inflight_l2_loads",
-            "L2 -> L1 prefetch load tasks currently executing, per adapter",
-            cls._read_inflight_loads_observations,
-        )
-        register_gauge(
-            "lmcache.l2_prefetch",
-            "lmcache_mp.inflight_load_memory_usage_bytes",
-            "L1 bytes reserved by in-flight L2 -> L1 prefetch loads, per adapter",
-            cls._read_inflight_load_bytes_observations,
-        )
-
-    @classmethod
-    def _read_inflight_loads_observations(
-        cls,
-    ) -> list[tuple[int | float, dict[str, object]]]:
-        """Gauge callback: dispatch to the current target instance."""
-        target = cls._gauge_target
-        if target is None:
-            return []
-        return target.get_inflight_loads_observations()
-
-    @classmethod
-    def _read_inflight_load_bytes_observations(
-        cls,
-    ) -> list[tuple[int | float, dict[str, object]]]:
-        """Gauge callback: dispatch to the current target instance."""
-        target = cls._gauge_target
-        if target is None:
-            return []
-        return target.get_inflight_load_bytes_observations()
 
     # =========================================================================
     # Lifecycle
