@@ -67,8 +67,29 @@ def setup_mooncake_store(
     store: Any,
     config: "MooncakeStoreConfig",
 ) -> None:
-    """Call store.setup() with dict-based API if available,
-    otherwise fall back to the legacy positional-arg API.
+    """Initialize a MooncakeDistributedStore instance.
+
+    Calls ``store.setup()`` using the dict-based API introduced
+    in Mooncake PR #1445 when available, and transparently falls
+    back to the legacy positional-arg API otherwise.  This lets
+    LMCache work with both new and old mooncake builds without
+    requiring callers to know which API is present.
+
+    Args:
+        store: A MooncakeDistributedStore instance (already
+            constructed but not yet setup).  Must expose a
+            ``setup()`` method.
+        config: A :class:`MooncakeStoreConfig` carrying the
+            setup parameters in ``config.setup_config``.
+
+    Returns:
+        None.  ``store`` is mutated in place.
+
+    Raises:
+        Exception: Any exception raised by ``store.setup()``
+            other than :class:`TypeError` is propagated to the
+            caller (``TypeError`` is caught and used as the
+            signal to fall back to the legacy API).
     """
     setup_dict = config.setup_config
     try:
