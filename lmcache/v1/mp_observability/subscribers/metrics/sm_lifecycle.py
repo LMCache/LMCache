@@ -24,7 +24,6 @@ access, sampled or not, so the chunks-gap reflects true volume.
 from __future__ import annotations
 
 # Standard
-from typing import Any
 import random
 import time
 
@@ -89,7 +88,7 @@ class SMLifecycleSubscriber(EventSubscriber):
         # is naturally bounded.
         self._salt_chunk_counter: dict[str, int] = {}
         # (cache_salt, chunk_hash) -> (last_access_time, counter_at_last_access).
-        self._reuse_track: dict[tuple[str, Any], tuple[float, int]] = {}
+        self._reuse_track: dict[tuple[str, bytes], tuple[float, int]] = {}
 
     def get_subscriptions(self) -> dict[EventType, EventCallback]:
         return {
@@ -105,7 +104,7 @@ class SMLifecycleSubscriber(EventSubscriber):
 
     def _admit_track(
         self,
-        track_key: tuple[str, Any],
+        track_key: tuple[str, bytes],
         when: float,
         counter: int,
     ) -> None:
@@ -118,7 +117,7 @@ class SMLifecycleSubscriber(EventSubscriber):
             self._reuse_track.pop(victim, None)
         self._reuse_track[track_key] = (when, counter)
 
-    def _should_sample(self, key: object) -> bool:
+    def _should_sample(self, key: tuple[str, bytes]) -> bool:
         return hash(key) % self._sample_prime < self._sample_threshold
 
     def _on_sm_read_finished(self, event: Event) -> None:
@@ -126,7 +125,7 @@ class SMLifecycleSubscriber(EventSubscriber):
         now = event.timestamp or time.time()
         # Dedupe TP fanout: one ObjectKey per kv_rank for the same logical
         # chunk should bump the per-salt counter once.
-        seen: set[tuple[str, Any]] = set()
+        seen: set[tuple[str, bytes]] = set()
         for key in event.metadata.get("succeeded_keys", []):
             chunk_hash = getattr(key, "chunk_hash", None)
             if chunk_hash is None:
@@ -150,7 +149,7 @@ class SMLifecycleSubscriber(EventSubscriber):
     def _on_sm_write_finished(self, event: Event) -> None:
         """Bump counter and update anchor; never emit a sample on write."""
         now = event.timestamp or time.time()
-        seen: set[tuple[str, Any]] = set()
+        seen: set[tuple[str, bytes]] = set()
         for key in event.metadata.get("succeeded_keys", []):
             chunk_hash = getattr(key, "chunk_hash", None)
             if chunk_hash is None:
