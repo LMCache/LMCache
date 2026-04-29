@@ -97,10 +97,7 @@ Documentation
    :maxdepth: 2
    :caption: Non-KV caching
 
-   non_kv_cache/index
-   non_kv_cache/encoder_cache/index
-   non_kv_cache/encoder_cache/benchmark
-   non_kv_cache/encoder_cache/design
+   non_kv_cache/encoder_cache
 :raw-html:`<br />`
 
 .. toctree::
