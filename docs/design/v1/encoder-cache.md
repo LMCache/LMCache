@@ -199,14 +199,25 @@ mechanism would be: pass an externally-constructed `StorageManager`
 into `ECCacheEngine.__init__` (DI), instead of having the engine
 construct one. Today no caller wants that.
 
-### Role threading on dual-role connector
+### Role pinned to `"worker"` for the storage manager
 
 vLLM's `ECConnectorBase` multiplexes scheduler-side and worker-side
-methods onto a single class with a `role` discriminator. The
-implementation forwards `role.name.lower()` to
-`create_lmcache_metadata` (the `role="worker"` hardcode that earlier
-revisions of this PR carried was a bug — the scheduler-side instance
-was masquerading as a worker for resource-sizing purposes).
+methods onto a single class with a `role` discriminator. Naively one
+would forward that role to `create_lmcache_metadata` so LMCache can
+size resources per role. **We deliberately do not** — the EC connector
+calls `create_lmcache_metadata(vllm_config, role="worker")` regardless
+of the vLLM-side role.
+
+The reason: scheduler-side `has_cache_item` calls `engine.contains()`,
+which needs a fully constructed `StorageManager` (including
+`LocalCPUBackend`, since `LocalDiskBackend` is layered on top of it).
+LMCache's `CreateStorageBackends` short-circuits the CPU backend when
+`metadata.role == "scheduler"` and then asserts on it for the disk
+backend — so threading the real role aborts startup with an
+`AssertionError`. Until LMCache grows a scheduler-friendly storage
+path (or EC splits scheduler/worker into separate engines), the
+connector keeps the role pinned to `"worker"`.
+
 `_mm_hashes_need_loads` is scheduler-only state; it is initialized on
 both roles for simplicity but only mutated/read on the scheduler side.
 

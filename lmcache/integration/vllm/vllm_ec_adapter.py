@@ -90,13 +90,17 @@ class LMCacheECConnectorImpl:
         # Build EC config from standard LMCache config + EC-prefixed overrides.
         config = create_lmcache_ec_config()
 
-        # Thread the actual role through to LMCacheMetadata so that any
-        # downstream resource sizing keyed off ``role`` (e.g. pinned-memory
-        # allocator on worker, lighter footprint on scheduler) can react to
-        # the difference instead of always seeing ``"worker"``.
-        lmcache_metadata, _ = create_lmcache_metadata(
-            vllm_config, role=role.name.lower()
-        )
+        # EC scheduler-side instances must look like workers to LMCache:
+        # ``has_cache_item`` calls ``engine.contains()``, which needs a fully
+        # constructed StorageManager (including LocalCPUBackend, since the
+        # local-disk backend is layered on top of it). LMCache's
+        # ``CreateStorageBackends`` skips the CPU backend when
+        # ``metadata.role == "scheduler"`` and then asserts on it for the
+        # disk backend — passing role="scheduler" therefore aborts startup.
+        # Until LMCache grows a scheduler-friendly storage path (or EC
+        # splits scheduler/worker into separate engines), keep role pinned
+        # to "worker" here regardless of the vLLM-side role.
+        lmcache_metadata, _ = create_lmcache_metadata(vllm_config, role="worker")
 
         self._ec_engine = ECCacheEngine(
             config=config,
