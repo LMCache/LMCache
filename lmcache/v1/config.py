@@ -62,12 +62,8 @@ _DEPRECATED_CONFIGS = {
     ),
 }
 
-_EC_ENV_PREFIXES = ("LMCACHE_EC_", "EC_")
+_EC_ENV_PREFIX = "LMCACHE_EC_"
 _EC_FILE_PREFIX = "ec_"
-_EC_COMPAT_ALIASES = {
-    "max_local_disk": "max_local_disk_size",
-    "max_local_cpu": "max_local_cpu_size",
-}
 
 # Single configuration definition center - add new config items only here
 _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
@@ -876,7 +872,6 @@ def _normalize_ec_config_key(raw_key: str, source: str) -> Optional[str]:
         logger.warning("Empty EC config key from %s", source)
         return None
 
-    key = _EC_COMPAT_ALIASES.get(key, key)
     key = _CONFIG_ALIASES.get(key, key)
     if key not in _CONFIG_DEFINITIONS:
         logger.warning("Unknown EC config key '%s' from %s", raw_key, source)
@@ -884,24 +879,13 @@ def _normalize_ec_config_key(raw_key: str, source: str) -> Optional[str]:
     return key
 
 
-def _extract_prefixed_key(
-    key: str,
-    prefixes: tuple[str, ...],
-) -> Optional[str]:
-    """Extract key suffix when one of the prefixes matches."""
-    for prefix in prefixes:
-        if key.startswith(prefix):
-            return key[len(prefix) :]
-    return None
-
-
 def _collect_ec_overrides_from_env() -> dict[str, Any]:
     """Collect EC-specific overrides from environment variables."""
     overrides: dict[str, Any] = {}
     for env_name, env_value in os.environ.items():
-        stripped = _extract_prefixed_key(env_name, _EC_ENV_PREFIXES)
-        if stripped is None:
+        if not env_name.startswith(_EC_ENV_PREFIX):
             continue
+        stripped = env_name[len(_EC_ENV_PREFIX) :]
 
         normalized_key = _normalize_ec_config_key(
             stripped,
@@ -1008,8 +992,8 @@ def load_ec_engine_config(
 
     Precedence is:
     1) base LMCache config,
-    2) YAML keys prefixed with ``ec_`` / ``EC_`` (or ``ec:`` nested map),
-    3) environment variables prefixed with ``LMCACHE_EC_`` / ``EC_``.
+    2) YAML keys prefixed with ``ec_`` (or ``ec:`` nested map),
+    3) environment variables prefixed with ``LMCACHE_EC_``.
     """
     resolved_base_config = base_config
     if resolved_base_config is None:

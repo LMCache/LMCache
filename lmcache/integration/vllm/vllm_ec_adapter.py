@@ -13,9 +13,9 @@ import torch
 
 # First Party
 from lmcache.integration.vllm.utils import (
+    create_lmcache_ec_config,
     create_lmcache_metadata,
     get_vllm_device_type,
-    lmcache_create_ec_config,
 )
 from lmcache.v1.ec_engine import ECCacheEngine
 
@@ -88,7 +88,7 @@ class LMCacheECConnectorImpl:
             raise ValueError("ec_transfer_config must be set for ECConnectorBase")
 
         # Build EC config from standard LMCache config + EC-prefixed overrides.
-        config = lmcache_create_ec_config()
+        config = create_lmcache_ec_config()
 
         # Build metadata from vLLM configuration.
         lmcache_metadata, _ = create_lmcache_metadata(vllm_config, role="worker")

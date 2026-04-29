@@ -51,7 +51,7 @@ def test_load_ec_engine_config_prefixed_file_and_env_overrides(
                 "max_local_disk_size: 2",
                 "ec_chunk_size: 1024",
                 "ec_local_disk: /tmp/ec-disk",
-                "ec_max_local_disk: 4",
+                "ec_max_local_disk_size: 4",
             ]
         ),
         encoding="utf-8",
@@ -59,7 +59,7 @@ def test_load_ec_engine_config_prefixed_file_and_env_overrides(
 
     monkeypatch.setenv("LMCACHE_CONFIG_FILE", str(config_path))
     monkeypatch.setenv("LMCACHE_EC_CHUNK_SIZE", "1536")
-    monkeypatch.setenv("EC_REMOTE_URL", "http://ec.example.com")
+    monkeypatch.setenv("LMCACHE_EC_REMOTE_URL", "http://ec.example.com")
 
     base_config = LMCacheEngineConfig.from_file(config_path)
     ec_config = cast(Any, load_ec_engine_config(base_config=base_config))

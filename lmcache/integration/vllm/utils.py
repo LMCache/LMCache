@@ -131,7 +131,7 @@ def lmcache_get_or_create_config() -> LMCacheEngineConfig:
     return _config_instance
 
 
-def lmcache_create_ec_config() -> LMCacheEngineConfig:
+def create_lmcache_ec_config() -> LMCacheEngineConfig:
     """Create EC config from LMCache config plus EC-specific overrides."""
     return load_ec_engine_config(base_config=lmcache_get_or_create_config())
 
