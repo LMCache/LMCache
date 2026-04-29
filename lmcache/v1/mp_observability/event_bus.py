@@ -38,24 +38,6 @@ logger = init_logger(__name__)
 EventCallback = Callable[[Event], None]
 
 
-def _subscriber_name(cb: EventCallback) -> str:
-    """Derive a stable label for *cb* for use as a metric tag.
-
-    For bound methods, returns the owning class name (e.g.
-    ``"L1MetricsSubscriber"``).  For free functions, returns the
-    callable's ``__qualname__``.  Falls back to ``repr(cb)`` for
-    callables that have neither — those should be rare and indicate a
-    test fixture or partial.
-    """
-    instance = getattr(cb, "__self__", None)
-    if instance is not None:
-        return type(instance).__name__
-    qualname = getattr(cb, "__qualname__", None)
-    if qualname is not None:
-        return qualname
-    return repr(cb)
-
-
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
@@ -333,7 +315,12 @@ class EventBus:
                 try:
                     cb(event)
                 except Exception:
-                    name = _subscriber_name(cb)
+                    instance = getattr(cb, "__self__", None)
+                    name = (
+                        type(instance).__name__
+                        if instance is not None
+                        else getattr(cb, "__qualname__", repr(cb))
+                    )
                     with self._lock:
                         self._subscriber_exception_counts[name] = (
                             self._subscriber_exception_counts.get(name, 0) + 1

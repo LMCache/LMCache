@@ -5,7 +5,7 @@ from lmcache.v1.mp_observability.subscribers.metrics.cb_server import (
     BlendMetricsSubscriber,
 )
 from lmcache.v1.mp_observability.subscribers.metrics.event_bus import (
-    init_event_bus_self_metrics,
+    EventBusSelfMetricsSubscriber,
 )
 from lmcache.v1.mp_observability.subscribers.metrics.l0_l1_throughput import (
     L0L1ThroughputSubscriber,
@@ -34,6 +34,7 @@ from lmcache.v1.mp_observability.subscribers.metrics.sm import SMMetricsSubscrib
 
 __all__ = [
     "BlendMetricsSubscriber",
+    "EventBusSelfMetricsSubscriber",
     "L0L1ThroughputSubscriber",
     "L0LifecycleSubscriber",
     "L1FailureMetricsSubscriber",
@@ -44,5 +45,4 @@ __all__ = [
     "L2ThroughputSubscriber",
     "LookupMetricsSubscriber",
     "SMMetricsSubscriber",
-    "init_event_bus_self_metrics",
 ]
