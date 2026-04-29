@@ -56,6 +56,12 @@ overrides with ``ec_`` in YAML or ``LMCACHE_EC_`` in the environment
 **separate** ``StorageManager`` instances so one cannot evict the
 other.
 
+If you don't set ``local_disk`` (or its EC override) the engine still
+starts, but EC entries live in CPU memory only and do not survive
+process restart. Set ``local_disk`` (or ``ec_local_disk``) to a real
+path if you want cache persistence — there is no implicit on-disk
+default location.
+
 Verifying it's working
 ----------------------
 

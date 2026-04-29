@@ -129,9 +129,15 @@ Overrides land via `load_ec_engine_config()` in `lmcache/v1/config.py`,
 which clones the base `LMCacheEngineConfig` and applies the EC-prefixed
 keys. Unknown keys are logged and dropped — EC config is best-effort.
 
-EC can run with no explicit storage configuration: the loader applies
-defaults (1 GiB local CPU, 64 GiB local disk) so the engine has somewhere
-to put data.
+EC can run with no explicit storage configuration: the loader
+unconditionally enables ``local_cpu`` and sets ``max_local_cpu_size``
+to 1 GiB if it is unset, so the engine always has somewhere to put
+data. The disk default is **conditional** — it only applies if the
+user has set a ``local_disk`` path. In that case ``max_local_disk_size``
+defaults to 64 GiB if not specified. Without an explicit ``local_disk``
+path EC entries live in CPU memory only and do not survive process
+restart; this is intentional, because picking an on-disk location for
+the user could overwrite or fill an unintended directory.
 
 ---
 
