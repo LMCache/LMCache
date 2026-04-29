@@ -272,11 +272,13 @@ class StorageManager:
         )
         self.async_serializer: Optional[AsyncSerializer] = None
 
-        # Backend-level pins recorded during async prefetch.
-        # Only populated for backends in _BACKENDS_WITH_EXTERNAL_PIN_STATE.
+        # Backend-level pins recorded during async prefetch for backends
+        # in _BACKENDS_WITH_EXTERNAL_PIN_STATE.
         # Keyed by lookup_id -> {backend_name -> [keys]}.
-        self._async_pin_registry: dict[str, dict[str, list[CacheEngineKey]]] = {}
-        self._pin_registry_lock = threading.Lock()
+        self._async_external_pin_registry: dict[
+            str, dict[str, list[CacheEngineKey]]
+        ] = {}
+        self._async_external_pin_registry_lock = threading.Lock()
 
         # The cuda stream for internal copies during put
         if is_cuda_worker(metadata):
@@ -709,10 +711,10 @@ class StorageManager:
                 continue
 
             if pin and backend_name in _BACKENDS_WITH_EXTERNAL_PIN_STATE:
-                with self._pin_registry_lock:
-                    self._async_pin_registry.setdefault(lookup_id, {})[backend_name] = (
-                        list(keys[:num_hit_chunks])
-                    )
+                with self._async_external_pin_registry_lock:
+                    self._async_external_pin_registry.setdefault(lookup_id, {})[
+                        backend_name
+                    ] = list(keys[:num_hit_chunks])
 
             num_total_hit_chunks += num_hit_chunks
             tier_expected_chunks.append(num_hit_chunks)
@@ -1059,20 +1061,22 @@ class StorageManager:
 
         return num_removed
 
-    def pop_async_pins(
-        self, lookup_id: str
-    ) -> Optional[Dict[str, List[CacheEngineKey]]]:
+    def unpin_async_external_pin_state(self, lookup_id: str) -> None:
         """
-        Pop and return the backend-level pin records registered during
-        `async_lookup_and_prefetch` for the given *lookup_id*.
+        Unpin and clear the backend-level pin records registered during
+        `async_lookup_and_prefetch` for the given *lookup_id*. Only applies
+        to backends in `_BACKENDS_WITH_EXTERNAL_PIN_STATE`.
 
-        :param str lookup_id: The lookup id whose pin records to pop.
-
-        :return: A dict mapping backend names to lists of pinned keys,
-        or `None` if no records exist for this *lookup_id*.
+        :param str lookup_id: The lookup id whose async pins to release.
         """
-        with self._pin_registry_lock:
-            return self._async_pin_registry.pop(lookup_id, None)
+        with self._async_external_pin_registry_lock:
+            async_pins = self._async_external_pin_registry.pop(lookup_id, None)
+        if not async_pins:
+            return
+        for backend_name, keys in async_pins.items():
+            backend = self.storage_backends[backend_name]
+            for key in keys:
+                backend.unpin(key)
 
     def batched_unpin(
         self,

@@ -1312,10 +1312,7 @@ class LMCacheEngine:
             # Isolated so backend failures don't skip the cleanup loop below.
             if self.storage_manager is not None:
                 try:
-                    async_pins = self.storage_manager.pop_async_pins(lookup_id)
-                    if async_pins:
-                        for location, keys in async_pins.items():
-                            self.storage_manager.batched_unpin(keys, [location])
+                    self.storage_manager.unpin_async_external_pin_state(lookup_id)
                 except Exception as e:
                     logger.error(
                         f"Error during backend-level unpin for "
