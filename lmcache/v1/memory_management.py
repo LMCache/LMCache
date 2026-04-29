@@ -409,9 +409,9 @@ def _resolve_pinned_alloc_free(
         else:
             current_device_id = 0
         gpu_to_numa_mapping = numa_mapping.gpu_to_numa_mapping
-        assert (
-            current_device_id in gpu_to_numa_mapping
-        ), f"Current device {current_device_id} is not in the GPU NUMA mapping."
+        assert current_device_id in gpu_to_numa_mapping, (
+            f"Current device {current_device_id} is not in the GPU NUMA mapping."
+        )
         numa_id = gpu_to_numa_mapping[current_device_id]
         if use_hugepages:
             return PinnedAllocFree(
@@ -1979,12 +1979,12 @@ class HostMemoryAllocator(MemoryAllocatorInterface):
 
         self.allocator: MemoryAllocatorInterface
         if use_paging:
-            assert (
-                "shapes" in kwargs
-            ), "shapes must be specified for paged memory allocator"
-            assert (
-                "dtypes" in kwargs
-            ), "dtypes must be specified for paged memory allocator"
+            assert "shapes" in kwargs, (
+                "shapes must be specified for paged memory allocator"
+            )
+            assert "dtypes" in kwargs, (
+                "dtypes must be specified for paged memory allocator"
+            )
             assert "fmt" in kwargs, "fmt must be specified for paged memory allocator"
             self.allocator = PagedTensorMemoryAllocator(
                 tensor=buffer,
@@ -2058,12 +2058,12 @@ class PinMemoryAllocator(MemoryAllocatorInterface):
 
         self.allocator: MemoryAllocatorInterface
         if use_paging:
-            assert (
-                "shapes" in kwargs
-            ), "shapes must be specified for paged memory allocator"
-            assert (
-                "dtypes" in kwargs
-            ), "dtypes must be specified for paged memory allocator"
+            assert "shapes" in kwargs, (
+                "shapes must be specified for paged memory allocator"
+            )
+            assert "dtypes" in kwargs, (
+                "dtypes must be specified for paged memory allocator"
+            )
             assert "fmt" in kwargs, "fmt must be specified for paged memory allocator"
             self.allocator = PagedTensorMemoryAllocator(
                 tensor=self.buffer,
@@ -2170,12 +2170,12 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
 
         self.pin_allocator: MemoryAllocatorInterface
         if use_paging:
-            assert (
-                "shapes" in kwargs
-            ), "shapes must be specified for paged memory allocator"
-            assert (
-                "dtypes" in kwargs
-            ), "dtypes must be specified for paged memory allocator"
+            assert "shapes" in kwargs, (
+                "shapes must be specified for paged memory allocator"
+            )
+            assert "dtypes" in kwargs, (
+                "dtypes must be specified for paged memory allocator"
+            )
             assert "fmt" in kwargs, "fmt must be specified for paged memory allocator"
             self.pin_allocator = PagedTensorMemoryAllocator(
                 tensor=self.buffer,
@@ -2325,12 +2325,12 @@ class GPUMemoryAllocator(MemoryAllocatorInterface):
 
         self.allocator: MemoryAllocatorInterface
         if use_paging:
-            assert (
-                "shapes" in kwargs
-            ), "shapes must be specified for paged memory allocator"
-            assert (
-                "dtypes" in kwargs
-            ), "dtypes must be specified for paged memory allocator"
+            assert "shapes" in kwargs, (
+                "shapes must be specified for paged memory allocator"
+            )
+            assert "dtypes" in kwargs, (
+                "dtypes must be specified for paged memory allocator"
+            )
             assert "fmt" in kwargs, "fmt must be specified for paged memory allocator"
             self.allocator = PagedTensorMemoryAllocator(
                 tensor=self.tensor,
@@ -2648,12 +2648,12 @@ class XPUMemoryAllocator(MemoryAllocatorInterface):
 
         self.allocator: MemoryAllocatorInterface
         if use_paging:
-            assert (
-                "shapes" in kwargs
-            ), "shapes must be specified for paged memory allocator"
-            assert (
-                "dtypes" in kwargs
-            ), "dtypes must be specified for paged memory allocator"
+            assert "shapes" in kwargs, (
+                "shapes must be specified for paged memory allocator"
+            )
+            assert "dtypes" in kwargs, (
+                "dtypes must be specified for paged memory allocator"
+            )
             assert "fmt" in kwargs, "fmt must be specified for paged memory allocator"
             self.allocator = PagedTensorMemoryAllocator(
                 tensor=self.tensor,
