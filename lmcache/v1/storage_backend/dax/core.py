@@ -6,7 +6,7 @@ from __future__ import annotations
 # Standard
 from collections import OrderedDict
 from dataclasses import dataclass
-from typing import Callable, Generic, Hashable, Optional, Sequence, TypeVar
+from typing import Callable, Generic, Hashable, Optional, TypeVar
 import ctypes
 import mmap
 import os
@@ -53,7 +53,7 @@ class _SlotState:
 
 @dataclass(frozen=True)
 class DaxReadReservation(Generic[KeyT]):
-    """A committed DAX entry reserved for a read/restore operation."""
+    """A committed DAX entry reserved for a read or restore operation."""
 
     result_index: int
     key: KeyT
@@ -68,7 +68,12 @@ class DaxReadReservation(Generic[KeyT]):
 
 
 class DaxCore(Generic[KeyT]):
-    """Thread-safe shared core for DAX-backed fixed-slot storage."""
+    """Thread-safe shared core for DAX-backed fixed-slot storage.
+
+    ``DaxCore`` owns the mapped arena, in-memory key index, slot allocator,
+    LRU state, external lock refcounts, and read borrow counts. It is shared
+    by the non-MP DAX storage backend and the MP DAX L2 adapter.
+    """
 
     def __init__(
         self,
@@ -77,6 +82,19 @@ class DaxCore(Generic[KeyT]):
         max_dax_size_bytes: int,
         slot_bytes: int,
     ) -> None:
+        """Open and map a DAX arena.
+
+        Args:
+            device_path: Path to the mmap-able DAX device or file.
+            max_dax_size_bytes: Number of bytes to map from the device.
+            slot_bytes: Fixed slot size used for each stored object.
+
+        Raises:
+            ValueError: If the path is empty, sizes are non-positive, or the
+                arena cannot fit at least one slot.
+            RuntimeError: If the device cannot be opened or mapped, or if
+                ``max_dax_size_bytes`` exceeds the reported device capacity.
+        """
         self._device_path = device_path
         self._arena_bytes = max_dax_size_bytes
         self._slot_bytes = slot_bytes
@@ -117,41 +135,62 @@ class DaxCore(Generic[KeyT]):
 
     @property
     def device_path(self) -> str:
+        """Return the path used to open the DAX arena."""
         return self._device_path
 
     @property
     def arena_bytes(self) -> int:
+        """Return the mapped arena size in bytes."""
         return self._arena_bytes
 
     @property
     def slot_bytes(self) -> int:
+        """Return the fixed slot size in bytes."""
         return self._slot_bytes
 
     @property
     def max_slots(self) -> int:
+        """Return the maximum number of slots in the arena."""
         return self._max_slots
 
     @property
     def fd(self) -> Optional[int]:
+        """Return the open device file descriptor, or ``None`` after close."""
         return self._fd
 
     @property
     def mmap_obj(self) -> Optional[mmap.mmap]:
+        """Return the active mmap object, or ``None`` after close."""
         return self._mmap_obj
 
     @property
     def arena_view(self) -> Optional[memoryview]:
+        """Return the active arena memoryview, or ``None`` after close."""
         return self._arena_view
 
     @property
     def base_ptr(self) -> int:
+        """Return the base virtual address of the mapped arena."""
         return self._base_ptr
 
     def is_closing(self) -> bool:
+        """Check whether the core is closing or already closed.
+
+        Returns:
+            ``True`` after close has begun, otherwise ``False``.
+        """
         with self._state_lock:
             return self._closing or self._closed
 
     def has_inflight(self, key: KeyT) -> bool:
+        """Check whether a key currently has an uncommitted write.
+
+        Args:
+            key: Key to check.
+
+        Returns:
+            ``True`` if a write reservation exists for ``key``.
+        """
         with self._state_lock:
             return key in self._inflight
 
@@ -160,6 +199,22 @@ class DaxCore(Generic[KeyT]):
         keys: list[KeyT],
         objs: list[MemoryObj],
     ) -> list[bool]:
+        """Store multiple memory objects in DAX slots.
+
+        Existing committed or in-flight keys are treated as no-op successes.
+        Unsupported multi-tensor objects, oversized objects, copy failures,
+        and closing state produce ``False`` for the affected key.
+
+        Args:
+            keys: Keys to store.
+            objs: Memory objects whose contents are copied into DAX.
+
+        Returns:
+            Per-key success flags aligned with ``keys``.
+
+        Raises:
+            ValueError: If ``keys`` and ``objs`` have different lengths.
+        """
         if len(keys) != len(objs):
             raise ValueError(
                 "keys and objs must have the same length, "
@@ -178,11 +233,57 @@ class DaxCore(Generic[KeyT]):
             )
         return results
 
+    def put_one(
+        self,
+        key: KeyT,
+        obj: MemoryObj,
+        *,
+        writer: Optional[_CopyFn] = None,
+    ) -> bool:
+        """Store one memory object in a DAX slot.
+
+        This method exists for wrappers that need the existing non-MP
+        single-object error semantics. Slot exhaustion and copy failures raise
+        ``RuntimeError``. MP code should generally use ``put_many`` to
+        preserve per-key success reporting.
+
+        Args:
+            key: Key to store.
+            obj: Memory object whose contents are copied into DAX.
+            writer: Optional copy function accepting
+                ``(dax_offset, memory_obj, size)``. If omitted, direct
+                ``ctypes.memmove`` is used.
+
+        Returns:
+            ``True`` if the key was committed or was already committed or
+            in-flight; ``False`` if the object could not be stored.
+
+        Raises:
+            RuntimeError: If no slot can be allocated or the copy fails.
+        """
+        return self._put_one(
+            key,
+            obj,
+            raise_on_full=True,
+            raise_on_write_failure=True,
+            writer=writer,
+        )
+
     def exists_many(
         self,
         keys: list[KeyT],
         lock: bool = False,
     ) -> list[bool]:
+        """Check whether keys exist, optionally acquiring external locks.
+
+        Args:
+            keys: Keys to look up.
+            lock: If ``True``, increment the external lock refcount for each
+                found key.
+
+        Returns:
+            Per-key hit flags aligned with ``keys``.
+        """
         results = [False] * len(keys)
         with self._state_lock:
             if self._closing or self._closed:
@@ -206,6 +307,19 @@ class DaxCore(Generic[KeyT]):
         keys: list[KeyT],
         objs: list[MemoryObj],
     ) -> list[bool]:
+        """Load DAX entries directly into caller-provided buffers.
+
+        Args:
+            keys: Keys to load.
+            objs: Destination memory objects. Each destination must have
+                enough capacity for the corresponding stored payload.
+
+        Returns:
+            Per-key success flags aligned with ``keys``.
+
+        Raises:
+            ValueError: If ``keys`` and ``objs`` have different lengths.
+        """
         if len(keys) != len(objs):
             raise ValueError(
                 "keys and objs must have the same length, "
@@ -242,6 +356,11 @@ class DaxCore(Generic[KeyT]):
         return results
 
     def unlock_many(self, keys: list[KeyT]) -> None:
+        """Release external locks for keys.
+
+        Args:
+            keys: Keys whose external lock refcount should be decremented.
+        """
         with self._state_lock:
             for key in keys:
                 count = self._external_lock_counts.get(key, 0)
@@ -256,6 +375,21 @@ class DaxCore(Generic[KeyT]):
         *,
         force: bool = False,
     ) -> list[bool]:
+        """Delete keys from the in-memory DAX index.
+
+        When ``force`` is ``False``, externally locked and in-flight keys are
+        skipped. Slots borrowed by active reads are marked for later reclaim
+        and become reusable after ``finalize_reads`` drains the borrow count.
+
+        Args:
+            keys: Keys to delete.
+            force: If ``True``, remove externally locked keys and cancel
+                in-flight writes. This is used by the non-MP wrapper to keep
+                its existing force-remove behavior.
+
+        Returns:
+            Per-key deletion flags aligned with ``keys``.
+        """
         results = [False] * len(keys)
         with self._state_lock:
             if self._closed:
@@ -288,6 +422,14 @@ class DaxCore(Generic[KeyT]):
         return results
 
     def usage(self) -> tuple[float, float]:
+        """Return current and post-eviction slot usage fractions.
+
+        Returns:
+            ``(current_usage, usage_after_ongoing_eviction)`` where both values
+            are fractions of total slots. The second value subtracts slots
+            already removed from the index but still waiting for read borrows
+            to drain.
+        """
         with self._state_lock:
             if self._max_slots <= 0:
                 return (0.0, 0.0)
@@ -307,6 +449,22 @@ class DaxCore(Generic[KeyT]):
         *,
         prefix_only: bool,
     ) -> tuple[list[DaxReadReservation[KeyT]], list[bool]]:
+        """Reserve committed entries for a read pipeline.
+
+        Each reservation increments the slot borrow count so eviction can
+        remove the key from the index without recycling the slot until
+        ``finalize_reads`` is called.
+
+        Args:
+            keys: Keys to reserve.
+            prefix_only: If ``True``, stop at the first missing or unreadable
+                key. If ``False``, continue and leave holes in the result
+                bitmap.
+
+        Returns:
+            A tuple of read reservations and per-key hit flags aligned with
+            ``keys``.
+        """
         reservations: list[DaxReadReservation[KeyT]] = []
         results = [False] * len(keys)
 
@@ -360,6 +518,14 @@ class DaxCore(Generic[KeyT]):
         reservations: list[DaxReadReservation[KeyT]],
         touched_keys: set[KeyT],
     ) -> None:
+        """Release read reservations and refresh LRU for touched keys.
+
+        Args:
+            reservations: Reservations previously returned by
+                ``reserve_reads``.
+            touched_keys: Subset of reservation keys whose data was
+                successfully copied and should be marked recently used.
+        """
         if not reservations:
             return
 
@@ -393,6 +559,12 @@ class DaxCore(Generic[KeyT]):
             self._state_condition.notify_all()
 
     def close(self) -> None:
+        """Close the DAX arena after active reads and writes finish.
+
+        The call is idempotent. It marks the core as closing, waits for active
+        operations to drain, clears volatile in-memory indexes, and releases
+        the mmap, memoryview, and file descriptor.
+        """
         fd = None
         mmap_obj = None
         arena_view = None
@@ -432,6 +604,13 @@ class DaxCore(Generic[KeyT]):
         self._release_arena_resources(fd, mmap_obj, arena_view)
 
     def report_status(self) -> dict:
+        """Return a status snapshot for health and observability.
+
+        Returns:
+            Dictionary containing health, capacity, slot occupancy, external
+            lock count, borrowed slot count, close state, and restart-recovery
+            support.
+        """
         with self._state_lock:
             live_slot_count = self._next_slot - len(self._free_slots)
             borrowed_slot_count = sum(
@@ -590,11 +769,7 @@ class DaxCore(Generic[KeyT]):
 
     def _get_committed_state_locked(self, entry: _Entry) -> Optional[_SlotState]:
         state = self._slot_states.get(entry.slot_id)
-        if (
-            state is None
-            or state.generation != entry.generation
-            or not state.committed
-        ):
+        if state is None or state.generation != entry.generation or not state.committed:
             return None
         return state
 
@@ -636,7 +811,10 @@ class DaxCore(Generic[KeyT]):
 
     def _evict_one_locked(self) -> bool:
         for victim in list(self._lru.keys()):
-            if self._external_lock_counts.get(victim, 0) > 0 or victim in self._inflight:
+            if (
+                self._external_lock_counts.get(victim, 0) > 0
+                or victim in self._inflight
+            ):
                 continue
 
             entry = self._index.get(victim)

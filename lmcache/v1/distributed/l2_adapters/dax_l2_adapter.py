@@ -43,6 +43,8 @@ def _parse_positive_int(value, field_name: str) -> int:
 
 
 class DaxL2AdapterConfig(L2AdapterConfigBase):
+    """Configuration for the built-in MP Device-DAX L2 adapter."""
+
     def __init__(
         self,
         *,
@@ -53,6 +55,16 @@ class DaxL2AdapterConfig(L2AdapterConfigBase):
         num_lookup_workers: int = 1,
         num_load_workers: int = min(4, os.cpu_count() or 1),
     ) -> None:
+        """Initialize a validated DAX L2 adapter config.
+
+        Args:
+            device_path: Path to the mmap-able DAX device or test file.
+            max_dax_size_gb: Number of GiB to map from ``device_path``.
+            slot_bytes: Fixed slot size for each stored object.
+            num_store_workers: Number of worker threads for store tasks.
+            num_lookup_workers: Number of worker threads for lookup tasks.
+            num_load_workers: Number of worker threads for load tasks.
+        """
         self.device_path = device_path
         self.max_dax_size_gb = max_dax_size_gb
         self.slot_bytes = slot_bytes
@@ -62,6 +74,18 @@ class DaxL2AdapterConfig(L2AdapterConfigBase):
 
     @classmethod
     def from_dict(cls, d: dict) -> "DaxL2AdapterConfig":
+        """Build a DAX L2 adapter config from CLI JSON.
+
+        Args:
+            d: Parsed ``--l2-adapter`` JSON object.
+
+        Returns:
+            A validated ``DaxL2AdapterConfig`` instance.
+
+        Raises:
+            ValueError: If a required field is missing or any numeric field
+                is not positive.
+        """
         device_path = d.get("device_path")
         if not isinstance(device_path, str) or not device_path.strip():
             raise ValueError("device_path must be a non-empty string")
@@ -102,6 +126,11 @@ class DaxL2AdapterConfig(L2AdapterConfigBase):
 
     @classmethod
     def help(cls) -> str:
+        """Return CLI help text for the DAX L2 adapter config.
+
+        Returns:
+            Human-readable field descriptions used by adapter config parsing.
+        """
         return (
             "DAX L2 adapter config fields:\n"
             "- device_path (str): mmap-able dax device or file path (required)\n"
@@ -115,7 +144,18 @@ class DaxL2AdapterConfig(L2AdapterConfigBase):
 
 
 class DaxL2Adapter(L2AdapterInterface):
+    """MP L2 adapter that stores fixed-size objects in a DAX mmap arena."""
+
     def __init__(self, config: DaxL2AdapterConfig) -> None:
+        """Initialize the DAX adapter and its worker pools.
+
+        Args:
+            config: Validated DAX adapter configuration.
+
+        Raises:
+            RuntimeError: If the DAX device cannot be opened or mapped.
+            ValueError: If the mapped arena cannot fit at least one slot.
+        """
         super().__init__(max_capacity_bytes=int(config.max_dax_size_gb * 1024**3))
         self._config = config
         self._max_dax_size_bytes = int(config.max_dax_size_gb * 1024**3)
@@ -164,12 +204,27 @@ class DaxL2Adapter(L2AdapterInterface):
             raise
 
     def get_store_event_fd(self) -> int:
+        """Return the pollable fd signaled when store tasks complete.
+
+        Returns:
+            File descriptor owned by this adapter's store notifier.
+        """
         return self._store_efd.fileno()
 
     def get_lookup_and_lock_event_fd(self) -> int:
+        """Return the pollable fd signaled when lookup tasks complete.
+
+        Returns:
+            File descriptor owned by this adapter's lookup notifier.
+        """
         return self._lookup_efd.fileno()
 
     def get_load_event_fd(self) -> int:
+        """Return the pollable fd signaled when load tasks complete.
+
+        Returns:
+            File descriptor owned by this adapter's load notifier.
+        """
         return self._load_efd.fileno()
 
     def submit_store_task(
@@ -177,6 +232,19 @@ class DaxL2Adapter(L2AdapterInterface):
         keys: list[ObjectKey],
         objects: list[MemoryObj],
     ) -> L2TaskId:
+        """Submit an asynchronous L1-to-DAX store task.
+
+        Args:
+            keys: Object keys to store.
+            objects: Caller-owned memory objects containing the payloads.
+
+        Returns:
+            Adapter-local task id for the submitted store task.
+
+        Raises:
+            ValueError: If ``keys`` and ``objects`` have different lengths.
+            RuntimeError: If the adapter is closing or already closed.
+        """
         if len(keys) != len(objects):
             raise ValueError(
                 "keys and objects must have the same length, "
@@ -198,12 +266,32 @@ class DaxL2Adapter(L2AdapterInterface):
         return task_id
 
     def pop_completed_store_tasks(self) -> dict[L2TaskId, bool]:
+        """Drain completed store task results.
+
+        Returns:
+            Mapping from task id to task-level success. Each task appears at
+            most once; subsequent calls do not return already drained tasks.
+        """
         with self._lock:
             completed = self._completed_store_tasks
             self._completed_store_tasks = {}
         return completed
 
     def submit_lookup_and_lock_task(self, keys: list[ObjectKey]) -> L2TaskId:
+        """Submit an asynchronous lookup-and-lock task.
+
+        Found keys have their DAX external lock refcount incremented until
+        ``submit_unlock`` is called.
+
+        Args:
+            keys: Object keys to look up.
+
+        Returns:
+            Adapter-local task id for the submitted lookup task.
+
+        Raises:
+            RuntimeError: If the adapter is closing or already closed.
+        """
         with self._lock:
             self._ensure_open_locked()
             task_id = self._get_next_task_id_locked()
@@ -214,10 +302,24 @@ class DaxL2Adapter(L2AdapterInterface):
         return task_id
 
     def query_lookup_and_lock_result(self, task_id: L2TaskId) -> Bitmap | None:
+        """Return and remove a completed lookup result.
+
+        Args:
+            task_id: Adapter-local lookup task id.
+
+        Returns:
+            A bitmap with bits set for keys that were found and locked, or
+            ``None`` if the task is still pending or was already queried.
+        """
         with self._lock:
             return self._completed_lookup_tasks.pop(task_id, None)
 
     def submit_unlock(self, keys: list[ObjectKey]) -> None:
+        """Release DAX external locks acquired by lookup tasks.
+
+        Args:
+            keys: Keys whose lock refcount should be decremented.
+        """
         self._core.unlock_many(keys)
 
     def submit_load_task(
@@ -225,6 +327,20 @@ class DaxL2Adapter(L2AdapterInterface):
         keys: list[ObjectKey],
         objects: list[MemoryObj],
     ) -> L2TaskId:
+        """Submit an asynchronous DAX-to-L1 load task.
+
+        Args:
+            keys: Object keys to load.
+            objects: Caller-owned destination buffers. Loaded bytes are
+                written directly into these ``MemoryObj`` instances.
+
+        Returns:
+            Adapter-local task id for the submitted load task.
+
+        Raises:
+            ValueError: If ``keys`` and ``objects`` have different lengths.
+            RuntimeError: If the adapter is closing or already closed.
+        """
         if len(keys) != len(objects):
             raise ValueError(
                 "keys and objects must have the same length, "
@@ -246,10 +362,27 @@ class DaxL2Adapter(L2AdapterInterface):
         return task_id
 
     def query_load_result(self, task_id: L2TaskId) -> Bitmap | None:
+        """Return and remove a completed load result.
+
+        Args:
+            task_id: Adapter-local load task id.
+
+        Returns:
+            A bitmap with bits set for keys that were successfully loaded, or
+            ``None`` if the task is still pending or was already queried.
+        """
         with self._lock:
             return self._completed_load_tasks.pop(task_id, None)
 
     def delete(self, keys: list[ObjectKey]) -> None:
+        """Delete unlocked keys from the DAX index.
+
+        Externally locked keys are skipped. Slots borrowed by active reads are
+        reclaimed after the read finalizes.
+
+        Args:
+            keys: Object keys to delete.
+        """
         if not keys or self._closed:
             return
 
@@ -262,6 +395,12 @@ class DaxL2Adapter(L2AdapterInterface):
             )
 
     def get_usage(self) -> AdapterUsage:
+        """Return slot-based capacity usage for this adapter.
+
+        Returns:
+            Adapter usage where ``total_bytes_used`` is derived from occupied
+            DAX slots rather than payload bytes.
+        """
         current_usage, _ = self._core.usage()
         base_usage = super().get_usage()
         total_capacity_bytes = self._config.slot_bytes * self._core.max_slots
@@ -273,6 +412,11 @@ class DaxL2Adapter(L2AdapterInterface):
         )
 
     def close(self) -> None:
+        """Stop worker pools and release DAX resources.
+
+        The call waits for already submitted worker tasks to finish before
+        closing the shared DAX core and event notifiers.
+        """
         store_executor = None
         lookup_executor = None
         load_executor = None
@@ -305,6 +449,13 @@ class DaxL2Adapter(L2AdapterInterface):
             self._closed = True
 
     def report_status(self) -> dict:
+        """Return a health and capacity snapshot for this adapter.
+
+        Returns:
+            Dictionary containing health, DAX capacity, slot occupancy,
+            lock/borrow counts, in-flight task counts, and restart-recovery
+            capability.
+        """
         core_status = self._core.report_status()
         with self._lock:
             inflight_store = self._inflight_store_tasks

@@ -100,7 +100,20 @@ class DaxBackend(StoragePluginInterface):
         loop: Optional[asyncio.AbstractEventLoop] = None,
         dst_device: str = "cpu",
     ) -> None:
-        """Initialize a DAX-backed storage backend."""
+        """Initialize a non-MP DAX storage backend.
+
+        Args:
+            config: LMCache engine config containing ``dax.*`` extra config.
+            metadata: Runtime metadata used to validate TP and KV layout.
+            local_cpu_backend: CPU allocator used for restore outputs.
+            loop: Event loop used when ``dax.async_put`` is enabled.
+            dst_device: Destination device name passed to the base backend.
+
+        Raises:
+            ValueError: If required config, metadata, local CPU backend, or
+                DAX options are missing or unsupported.
+            RuntimeError: If the DAX arena cannot be opened or mapped.
+        """
         super().__init__(
             dst_device=dst_device,
             config=config,
@@ -317,7 +330,26 @@ class DaxBackend(StoragePluginInterface):
         transfer_spec: Any = None,
         on_complete_callback: Optional[Callable[[CacheEngineKey], None]] = None,
     ) -> Optional[List[Future]]:
-        """Store a batch of memory objects in the DAX arena."""
+        """Store a batch of memory objects in the DAX arena.
+
+        Args:
+            keys: Cache keys to store.
+            objs: Memory objects whose contents are copied into DAX slots.
+            transfer_spec: Transfer hint accepted for interface compatibility
+                and ignored by this backend.
+            on_complete_callback: Optional callback invoked for each key that
+                is newly committed.
+
+        Returns:
+            Async put futures when ``dax.async_put`` schedules work on the
+            configured event loop; otherwise ``None``.
+
+        Raises:
+            ValueError: If input lengths differ or an object exceeds the slot
+                size.
+            RuntimeError: If the backend is closing or a synchronous DAX write
+                cannot be committed.
+        """
         del transfer_spec
         if len(keys) != len(objs):
             raise ValueError(
@@ -369,11 +401,9 @@ class DaxBackend(StoragePluginInterface):
                 futures.append(future)
                 continue
 
-            committed = self._core._put_one(
+            committed = self._core.put_one(
                 key,
                 obj,
-                raise_on_full=True,
-                raise_on_write_failure=True,
                 writer=lambda offset, memory_obj, copy_size: self._do_write(
                     offset,
                     memory_obj,
@@ -386,7 +416,19 @@ class DaxBackend(StoragePluginInterface):
         return futures or None
 
     def get_blocking(self, key: CacheEngineKey) -> Optional[MemoryObj]:
-        """Return the memory object for a key, or ``None`` if unavailable."""
+        """Load one key from DAX into a CPU memory object.
+
+        Args:
+            key: Cache key to retrieve.
+
+        Returns:
+            Restored ``MemoryObj`` if the key is present and can be read;
+            otherwise ``None``.
+
+        Raises:
+            RuntimeError: If CPU allocation or DAX copy fails after the key is
+                reserved.
+        """
         if self._is_closed_or_closing():
             return None
 
@@ -503,7 +545,10 @@ class DaxBackend(StoragePluginInterface):
 
         batch_keys = list(keys)
         if threading.current_thread().name.startswith("dax-restore-dispatch"):
-            return cast(List[Optional[MemoryObj]], self._restore_batch(batch_keys, False))
+            return cast(
+                List[Optional[MemoryObj]],
+                self._restore_batch(batch_keys, False),
+            )
 
         future = dispatch_executor.submit(self._restore_batch, batch_keys, False)
         return cast(List[Optional[MemoryObj]], future.result())
@@ -558,6 +603,7 @@ class DaxBackend(StoragePluginInterface):
         return self.local_cpu_backend
 
     def close(self) -> None:
+        """Release restore workers, staging buffers, and DAX resources."""
         with self._close_lock:
             if self._closed:
                 return
@@ -579,7 +625,9 @@ class DaxBackend(StoragePluginInterface):
         try:
             parsed = int(value)
         except (TypeError, ValueError) as exc:
-            raise ValueError(f"extra_config['{key}'] must be a positive integer") from exc
+            raise ValueError(
+                f"extra_config['{key}'] must be a positive integer"
+            ) from exc
         if parsed <= 0:
             raise ValueError(f"extra_config['{key}'] must be a positive integer")
         return parsed
@@ -847,9 +895,12 @@ class DaxBackend(StoragePluginInterface):
 
         self._core.finalize_reads(reservations, touched_keys)
         if prefix_only:
+            prefix_results = [
+                cast(MemoryObj, results[item.result_index]) for item in reserved_items
+            ]
             return cast(
                 list[Optional[MemoryObj]],
-                [cast(MemoryObj, results[item.result_index]) for item in reserved_items],
+                prefix_results,
             )
         return results
 
@@ -861,11 +912,9 @@ class DaxBackend(StoragePluginInterface):
     ) -> None:
         try:
             committed = await asyncio.to_thread(
-                self._core._put_one,
+                self._core.put_one,
                 key,
                 memory_obj,
-                raise_on_full=True,
-                raise_on_write_failure=True,
                 writer=lambda offset, obj, size: self._do_write(offset, obj, size),
             )
             if committed:

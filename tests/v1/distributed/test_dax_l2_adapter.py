@@ -39,6 +39,8 @@ from lmcache.v1.memory_management import (
 )
 from lmcache.v1.platform import consume_fd
 
+_DEFAULT_SHAPE = torch.Size([2, 4, 8])
+
 
 class _RecordingListener(L2AdapterListener):
     def __init__(self):
@@ -66,7 +68,7 @@ def create_object_key(chunk_id: int, model_name: str = "test_model") -> ObjectKe
 
 def create_memory_obj(
     *,
-    shape: torch.Size = torch.Size([2, 4, 8]),
+    shape: torch.Size = _DEFAULT_SHAPE,
     dtype: torch.dtype = torch.bfloat16,
     fill_value: float = 0,
     fmt: MemoryFormat = MemoryFormat.KV_2LTD,
@@ -291,7 +293,9 @@ def test_dax_adapter_close_waits_for_inflight_tasks(tmp_path, monkeypatch):
         adapter.submit_load_task([key], [target])
         assert load_started.wait(timeout=2)
 
-        closer = threading.Thread(target=lambda: (adapter.close(), close_returned.set()))
+        closer = threading.Thread(
+            target=lambda: (adapter.close(), close_returned.set())
+        )
         closer.start()
         time.sleep(0.05)
         assert not close_returned.is_set()
