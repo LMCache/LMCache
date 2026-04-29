@@ -78,10 +78,10 @@ class LMCacheECConnectorImpl:
                 no LMCache storage backend is configured.
         """
         self._parent = parent
-        self._vllm_config = vllm_config
-        self._role = role
 
-        # Scheduler-side state: set of multimodal hashes to load.
+        # Scheduler-side state: set of multimodal hashes to load. Unused on
+        # worker-side instances; kept here because vLLM's ECConnectorBase
+        # multiplexes both roles onto a single class.
         self._mm_hashes_need_loads: set[str] = set()
 
         if vllm_config.ec_transfer_config is None:
@@ -90,8 +90,13 @@ class LMCacheECConnectorImpl:
         # Build EC config from standard LMCache config + EC-prefixed overrides.
         config = create_lmcache_ec_config()
 
-        # Build metadata from vLLM configuration.
-        lmcache_metadata, _ = create_lmcache_metadata(vllm_config, role="worker")
+        # Thread the actual role through to LMCacheMetadata so that any
+        # downstream resource sizing keyed off ``role`` (e.g. pinned-memory
+        # allocator on worker, lighter footprint on scheduler) can react to
+        # the difference instead of always seeing ``"worker"``.
+        lmcache_metadata, _ = create_lmcache_metadata(
+            vllm_config, role=role.name.lower()
+        )
 
         self._ec_engine = ECCacheEngine(
             config=config,

@@ -173,6 +173,43 @@ top so it cleanly skips in environments where vLLM is not installed
 
 ---
 
+## Design Decisions
+
+### Separate StorageManager from KV
+
+KV cache and EC cache each construct their own `StorageManager`. This
+is **intentional**, not an oversight to be cleaned up:
+
+- KV and EC have very different access patterns. KV is chunked,
+  layerwise, and high-throughput; EC is single-tensor, request-scoped,
+  and far lower-volume. Mixing them in one allocator pool and
+  eviction queue lets hot KV chunks evict cold-but-valuable EC
+  entries (or vice versa) in non-obvious ways.
+- Resource budgeting becomes auditable: an operator can size local
+  CPU and disk pools per workload (`max_local_cpu_size`,
+  `max_local_disk_size` for KV; `ec_max_local_cpu_size`,
+  `ec_max_local_disk_size` for EC) without one cache cannibalizing
+  the other.
+- The price is one extra background event-loop thread per process,
+  and modest duplication of allocator metadata. Both are negligible
+  next to the determinism gain.
+
+If a future workload genuinely benefits from shared pools, the
+mechanism would be: pass an externally-constructed `StorageManager`
+into `ECCacheEngine.__init__` (DI), instead of having the engine
+construct one. Today no caller wants that.
+
+### Role threading on dual-role connector
+
+vLLM's `ECConnectorBase` multiplexes scheduler-side and worker-side
+methods onto a single class with a `role` discriminator. The
+implementation forwards `role.name.lower()` to
+`create_lmcache_metadata` (the `role="worker"` hardcode that earlier
+revisions of this PR carried was a bug — the scheduler-side instance
+was masquerading as a worker for resource-sizing purposes).
+`_mm_hashes_need_loads` is scheduler-only state; it is initialized on
+both roles for simplicity but only mutated/read on the scheduler side.
+
 ## Future Work
 
 - **Encoder dtype on metadata.** `LMCacheMetadata` does not yet carry
@@ -181,10 +218,6 @@ top so it cleanly skips in environments where vLLM is not installed
   If more producers (sglang, etc.) gain encoder caches, lifting the
   field onto `LMCacheMetadata` would let the engine become connector-
   agnostic.
-- **Shared StorageManager across KV and EC.** Each engine currently
-  builds its own `StorageManager`. They cannot share allocator pools or
-  eviction state today; consolidating would reduce memory pressure in
-  multi-tenant deployments.
 - **Public connector-metadata accessor in vLLM.** `start_load_caches`
   reaches into `self._parent._get_connector_metadata()`; once vLLM
   exposes a public method, drop the `# noqa: SLF001`.
