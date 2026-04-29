@@ -106,9 +106,9 @@ class NixlStorageConfig:
 
         dynamic_storage = pool_size == 0
         if dynamic_storage:
-            assert not config.save_unfull_chunk, (
-                "save_unfull_chunk should be set to False when using dynamic storage"
-            )
+            assert (
+                not config.save_unfull_chunk
+            ), "save_unfull_chunk should be set to False when using dynamic storage"
 
         corrected_device = get_correct_device(
             config.nixl_buffer_device, metadata.worker_id
@@ -1265,21 +1265,21 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
                 self.memory_allocator.free(obj)
             raise
 
-        if xfer_state:
+        if not xfer_state:
+            for obj in obj_list:
+                self.memory_allocator.free(obj)
             for key in keys:
-                self._cache_add(key.chunk_hash)
-            duration = time.time() - start_time
-            logger.debug(
-                f"storage_to_mem for {len(keys)} objects size "
-                f"{page_size * len(keys)} took {duration:.6f} seconds"
-            )
-            return obj_list
+                self._cache_discard(key.chunk_hash)
+            return [None] * len(keys)
 
-        for obj in obj_list:
-            self.memory_allocator.free(obj)
         for key in keys:
-            self._cache_discard(key.chunk_hash)
-        return [None] * len(keys)
+            self._cache_add(key.chunk_hash)
+        duration = time.time() - start_time
+        logger.debug(
+            f"storage_to_mem for {len(keys)} objects size "
+            f"{page_size * len(keys)} took {duration:.6f} seconds"
+        )
+        return cast(list[Optional[MemoryObj]], obj_list)
 
     async def _wait_for_transfer(
         self,
