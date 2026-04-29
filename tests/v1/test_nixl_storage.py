@@ -359,9 +359,9 @@ def run_dynamic_file(config, dtype, tmp_path):
 
         files_after_put = set(os.listdir(str(tmp_path)))
         expected_files = {nixl_backend._format_object_key(k) for k in keys}
-        assert expected_files.issubset(
-            files_after_put
-        ), f"missing files in {tmp_path}: {expected_files - files_after_put}"
+        assert expected_files.issubset(files_after_put), (
+            f"missing files in {tmp_path}: {expected_files - files_after_put}"
+        )
 
         for key, obj in zip(keys, objs, strict=False):
             returned = nixl_backend.get_blocking(key)
@@ -498,11 +498,11 @@ def test_nixl_dynamic_file_no_leak_on_transfer_failure(tmp_path, monkeypatch):
             final_path = os.path.join(
                 str(tmp_path), nixl_backend._format_object_key(key)
             )
-            assert not os.path.exists(
-                final_path
-            ), f"final key file leaked on transfer failure: {final_path}"
-            assert not nixl_backend.contains(
-                key, False
-            ), "contains() reports key present after failed write"
+            assert not os.path.exists(final_path), (
+                f"final key file leaked on transfer failure: {final_path}"
+            )
+            assert not nixl_backend.contains(key, False), (
+                "contains() reports key present after failed write"
+            )
     finally:
         _teardown_dynamic_file_backend(backends, thread_loop, thread)
