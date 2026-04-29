@@ -1059,7 +1059,10 @@ def run_cache_server(
         obs_config: Configuration for the observability stack
         return_engine: If True, return (server, engine) after starting;
                        if False, run blocking loop to keep server alive
-        start_prometheus_http_server: If True, start a Prometheus HTTP server
+        start_prometheus_http_server: Whether to start a standalone
+            Prometheus HTTP server in a background thread.  Set to
+            ``False`` when an external HTTP framework already serves
+            ``/metrics`` to avoid port conflicts or redundant servers.
 
     Returns:
         If return_engine is True: tuple of (MessageQueueServer, MPCacheEngine)
