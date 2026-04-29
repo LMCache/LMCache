@@ -505,6 +505,14 @@ class NixlDynamicStorageAgent(NixlStorageAgent):
             _close_file_descs(descs)
 
     def nixl_desc_exists(self, meta_info: str, path: str) -> bool:
+        """
+        Check whether a NIXL descriptor exists in storage.
+
+        :param meta_info: Descriptor key (file basename for FILE backends,
+            object key for OBJ backends).
+        :param path: Directory for FILE backends; ignored for OBJ.
+        :return: ``True`` if present, ``False`` otherwise.
+        """
         if self.mem_type == "FILE":
             return os.path.exists(os.path.join(path, meta_info))
 
