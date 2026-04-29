@@ -54,6 +54,14 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
+# Backends whose pin state lives outside the MemoryObj (e.g. on a remote
+# server, or in a backend-internal map/set). For these, the async retrieve
+# path must explicitly call ``backend.unpin()`` since the default
+# ``memory_obj.unpin()`` cleanup only releases the in-process MemoryObj
+# pin count and would otherwise leak the external state.
+_BACKENDS_WITH_EXTERNAL_PIN_STATE: frozenset[str] = frozenset({"MaruBackend"})
+
+
 # Helper function to get the class name of the backend
 def get_backend_cname(backend: StorageBackendInterface) -> str:
     return backend.__class__.__name__
@@ -267,7 +275,7 @@ class StorageManager:
         self.async_serializer: Optional[AsyncSerializer] = None
 
         # Registry for backend-level pins made during async prefetch.
-        # Only populated for backends with requires_backend_unpin=True.
+        # Only populated for backends in _BACKENDS_WITH_EXTERNAL_PIN_STATE.
         # Keyed by lookup_id -> {backend_name -> [keys]}.
         self._async_pin_registry: dict[str, dict[str, list[CacheEngineKey]]] = {}
         self._pin_registry_lock = threading.Lock()
@@ -702,7 +710,7 @@ class StorageManager:
             if num_hit_chunks == 0:
                 continue
 
-            if pin and backend.requires_backend_unpin:
+            if pin and backend_name in _BACKENDS_WITH_EXTERNAL_PIN_STATE:
                 with self._pin_registry_lock:
                     self._async_pin_registry.setdefault(lookup_id, {})[backend_name] = (
                         list(keys[:num_hit_chunks])
