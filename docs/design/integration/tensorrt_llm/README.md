@@ -1,14 +1,5 @@
 # TensorRT-LLM integration
 
-## Goal
-
-Land TRT-LLM as a first-class serving engine in LMCache via TRT-LLM's
-**KV Cache Connector** API. TRT-LLM 1.2.0 added a connector ABC
-(`tensorrt_llm._torch.pyexecutor.connectors.kv_cache_connector`) that
-lets external KV stores hook into the engine's lifecycle: lookup before
-scheduling, retrieve before forward, store after forward. This module
-implements those hooks.
-
 ## Adapter shape
 
 ```
