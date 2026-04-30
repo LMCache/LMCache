@@ -597,17 +597,37 @@ def mock_redis_cluster():
 def mock_hf3fs():
     """Mock hf3fs_fuse.io module for testing without 3FS filesystem.
 
-    This fixture patches the hf3fs_fuse.io functions to use mock implementations
-    that work with local filesystem instead of real 3FS.
+    This fixture creates a fake hf3fs_fuse.io module in sys.modules before
+    any imports happen, allowing tests to run without the actual package.
     """
-    with (
-        patch("hf3fs_fuse.io.extract_mount_point", MockHf3fsFuse.extract_mount_point),
-        patch("hf3fs_fuse.io.make_iovec", MockHf3fsFuse.make_iovec),
-        patch("hf3fs_fuse.io.make_ioring", MockHf3fsFuse.make_ioring),
-        patch("hf3fs_fuse.io.register_fd", MockHf3fsFuse.register_fd),
-        patch("hf3fs_fuse.io.deregister_fd", MockHf3fsFuse.deregister_fd),
-    ):
-        yield
+    # Standard
+    from types import ModuleType
+    import sys
+
+    # Create a fake hf3fs_fuse module if it doesn't exist
+    hf3fs_fuse = ModuleType("hf3fs_fuse")
+    hf3fs_fuse.__file__ = "/mock/hf3fs_fuse/__init__.py"
+
+    # Create hf3fs_fuse.io module
+    hf3fs_io = ModuleType("hf3fs_fuse.io")
+    hf3fs_io.__file__ = "/mock/hf3fs_fuse/io.py"
+
+    # Add mock functions to hf3fs_fuse.io
+    hf3fs_io.extract_mount_point = MockHf3fsFuse.extract_mount_point
+    hf3fs_io.make_iovec = MockHf3fsFuse.make_iovec
+    hf3fs_io.make_ioring = MockHf3fsFuse.make_ioring
+    hf3fs_io.register_fd = MockHf3fsFuse.register_fd
+    hf3fs_io.deregister_fd = MockHf3fsFuse.deregister_fd
+
+    # Register modules in sys.modules
+    sys.modules["hf3fs_fuse"] = hf3fs_fuse
+    sys.modules["hf3fs_fuse.io"] = hf3fs_io
+
+    yield
+
+    # Cleanup: remove the mock modules after test
+    sys.modules.pop("hf3fs_fuse", None)
+    sys.modules.pop("hf3fs_fuse.io", None)
 
 
 @pytest.fixture(scope="module")
