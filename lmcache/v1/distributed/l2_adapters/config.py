@@ -29,6 +29,21 @@ logger = init_logger(__name__)
 
 T = TypeVar("T", bound="L2AdapterConfigBase")
 
+
+@dataclass(frozen=True)
+class PersistConfig:
+    """
+    Configuration for persist on an L2 adapter.
+
+    When enabled, data files are kept on disk at shutdown instead of
+    deleted. Lookup always checks secondary storage (disk) on miss
+    regardless of this setting.
+    """
+
+    persist_enabled: bool = True
+    """ If True, data files are kept on disk at shutdown instead of deleted. """
+
+
 # -----------------------------------------------------------------------------
 # Registry: adapter type name -> config class
 # -----------------------------------------------------------------------------
@@ -132,6 +147,10 @@ class L2AdapterConfigBase(ABC):
     #: means L2 eviction is disabled for this adapter.
     eviction_config: EvictionConfig | None = None
 
+    #: Populated by ``_parse_persist_config`` after ``from_dict``.
+    #: Defaults to ``PersistConfig()`` (persist enabled).
+    persist_config: PersistConfig = PersistConfig()
+
     @staticmethod
     def _parse_eviction_config(d: dict) -> EvictionConfig | None:
         """
@@ -170,6 +189,24 @@ class L2AdapterConfigBase(ABC):
             trigger_watermark=float(eviction_dict.get("trigger_watermark", 0.8)),
             eviction_ratio=float(eviction_dict.get("eviction_ratio", 0.2)),
         )
+
+    @staticmethod
+    def _parse_persist_config(d: dict) -> PersistConfig:
+        """
+        Parse optional ``"persist_enabled"`` key from an adapter JSON spec.
+
+        Defaults to ``True``.
+
+        Expected format::
+
+            {
+                "type": "nixl_store_dynamic",
+                ...
+                "persist_enabled": true
+            }
+        """
+        persist_enabled = bool(d.get("persist_enabled", True))
+        return PersistConfig(persist_enabled=persist_enabled)
 
     @classmethod
     @abstractmethod
@@ -326,6 +363,7 @@ def parse_args_to_l2_adapters_config(args: argparse.Namespace) -> L2AdaptersConf
         try:
             adapter_cfg = config_cls.from_dict(d)
             adapter_cfg.eviction_config = L2AdapterConfigBase._parse_eviction_config(d)
+            adapter_cfg.persist_config = L2AdapterConfigBase._parse_persist_config(d)
             adapter_configs.append(adapter_cfg)
         except (TypeError, ValueError) as e:
             logger.error(

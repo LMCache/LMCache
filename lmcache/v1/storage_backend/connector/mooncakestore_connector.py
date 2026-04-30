@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from dataclasses import dataclass
-from typing import List, Optional, no_type_check
+from typing import Any, Dict, List, Optional, no_type_check
 import asyncio
 import json
 import os
@@ -21,44 +20,283 @@ from lmcache.v1.system_detection import NUMADetector
 
 logger = init_logger(__name__)
 
+# TODO(baoloongmao): Remove these in the future
+# Legacy positional-arg key order for old mooncake setup API
+_LEGACY_SETUP_KEYS = [
+    "local_hostname",
+    "metadata_server",
+    "global_segment_size",
+    "local_buffer_size",
+    "protocol",
+    "device_name",
+    "master_server_address",
+]
 
-@dataclass
+
+# Legacy keys that must be passed as ``int`` to the old
+# positional-arg ``store.setup()`` API (C++/pybind11).
+_LEGACY_INT_KEYS = {"global_segment_size", "local_buffer_size"}
+
+# Keys whose values may contain credentials and must be
+# redacted when the setup dict is logged.
+_SENSITIVE_SETUP_KEYS = {"metadata_server", "master_server_address"}
+
+
+def _sanitize_setup_config(
+    setup_config: Dict[str, str],
+) -> Dict[str, str]:
+    """Return a copy of *setup_config* with sensitive values
+    redacted, safe for logging."""
+    sanitized: Dict[str, str] = {}
+    for k, v in setup_config.items():
+        lower_k = k.lower()
+        if (
+            k in _SENSITIVE_SETUP_KEYS
+            or "password" in lower_k
+            or "token" in lower_k
+            or "secret" in lower_k
+            or "key" in lower_k
+        ):
+            sanitized[k] = "***REDACTED***"
+        else:
+            sanitized[k] = v
+    return sanitized
+
+
+def setup_mooncake_store(
+    store: Any,
+    config: "MooncakeStoreConfig",
+) -> None:
+    """Initialize a MooncakeDistributedStore instance.
+
+    Calls ``store.setup()`` using the dict-based API introduced
+    in Mooncake PR #1445 when available, and transparently falls
+    back to the legacy positional-arg API otherwise.  This lets
+    LMCache work with both new and old mooncake builds without
+    requiring callers to know which API is present.
+
+    Args:
+        store: A MooncakeDistributedStore instance (already
+            constructed but not yet setup).  Must expose a
+            ``setup()`` method.
+        config: A :class:`MooncakeStoreConfig` carrying the
+            setup parameters in ``config.setup_config``.
+
+    Returns:
+        None.  ``store`` is mutated in place.
+
+    Raises:
+        Exception: Any exception raised by ``store.setup()``
+            other than :class:`TypeError` is propagated to the
+            caller (``TypeError`` is caught and used as the
+            signal to fall back to the legacy API).
+    """
+    setup_dict = config.setup_config
+    try:
+        # New API (Mooncake PR #1445): setup(config: dict)
+        store.setup(setup_dict)
+        logger.info("Using dict-based setup API (new)")
+    except TypeError:
+        # Legacy API: setup with positional arguments.
+        # Some keys (e.g. ``global_segment_size``) must be int.
+        logger.info(
+            "Dict-based setup not available, "
+            "falling back to positional-arg API (legacy)"
+        )
+        args: List[Any] = []
+        for k in _LEGACY_SETUP_KEYS:
+            v: Any = setup_dict.get(k, "")
+            if k in _LEGACY_INT_KEYS:
+                try:
+                    v = int(v) if v != "" else 0
+                except (TypeError, ValueError):
+                    v = 0
+            args.append(v)
+        store.setup(*args)
+
+
+# Prefix for keys that should be forwarded to mooncake setup.
+# e.g. ``mooncake_local_hostname`` -> ``local_hostname``
+_MOONCAKE_PREFIX = "mooncake_"
+
+# Keys that are consumed by LMCache only (never sent to mooncake).
+_LMCACHE_ONLY_KEYS = {
+    "transfer_timeout",
+    "storage_root_dir",
+    "prefer_local_alloc",
+    "mooncake_transfer_timeout",
+    "mooncake_storage_root_dir",
+    "mooncake_prefer_local_alloc",
+}
+
+# Legacy keys that are forwarded without prefix (for compat).
+_LEGACY_PASSTHROUGH_KEYS = {
+    "local_hostname",
+    "metadata_server",
+    "global_segment_size",
+    "local_buffer_size",
+    "protocol",
+    "device_name",
+    "master_server_address",
+}
+
+# Default values for mooncake setup keys
+_SETUP_DEFAULTS: Dict[str, str] = {
+    "global_segment_size": "3355443200",
+    "local_buffer_size": "1073741824",
+    "protocol": "tcp",
+    "device_name": "",
+}
+
+
 class MooncakeStoreConfig:
-    local_hostname: str
-    metadata_server: str
-    global_segment_size: int
-    local_buffer_size: int
-    protocol: str
-    device_name: str
-    master_server_address: str
-    transfer_timeout: int
-    storage_root_dir: str
-    prefer_local_alloc: bool = False
+    """Configuration for MooncakeDistributedStore.
+
+    Mooncake setup keys are stored in ``setup_config`` dict
+    and passed through to ``store.setup()`` as-is.  This
+    means LMCache does **not** need to change when mooncake
+    adds or removes setup keys.
+
+    LMCache-only knobs (``transfer_timeout``,
+    ``storage_root_dir``, ``prefer_local_alloc``) are kept
+    as explicit attributes.
+    """
+
+    def __init__(
+        self,
+        setup_config: Dict[str, str],
+        transfer_timeout: int = 1,
+        storage_root_dir: str = "",
+        prefer_local_alloc: bool = False,
+    ):
+        self.setup_config = dict(setup_config)
+        self.transfer_timeout = transfer_timeout
+        self.storage_root_dir = storage_root_dir
+        self.prefer_local_alloc = prefer_local_alloc
+
+    def __repr__(self) -> str:
+        # Redact sensitive values to keep logs safe.
+        return (
+            "MooncakeStoreConfig("
+            "setup_config=%r, "
+            "transfer_timeout=%r, "
+            "storage_root_dir=%r, "
+            "prefer_local_alloc=%r)"
+            % (
+                _sanitize_setup_config(self.setup_config),
+                self.transfer_timeout,
+                self.storage_root_dir,
+                self.prefer_local_alloc,
+            )
+        )
+
+    # ----------------------------------------------------------
+    # Deprecated attribute-style accessors for backward compat
+    # ----------------------------------------------------------
+    def _get_setup_key(self, key: str) -> str:
+        return self.setup_config.get(key, "")
+
+    def _set_setup_key(self, key: str, value: str) -> None:
+        self.setup_config[key] = value
+
+    @property
+    def local_hostname(self) -> str:  # deprecated
+        return self._get_setup_key("local_hostname")
+
+    @property
+    def metadata_server(self) -> str:  # deprecated
+        return self._get_setup_key("metadata_server")
+
+    @property
+    def global_segment_size(self) -> str:  # deprecated
+        return self._get_setup_key("global_segment_size")
+
+    @property
+    def local_buffer_size(self) -> str:  # deprecated
+        return self._get_setup_key("local_buffer_size")
+
+    @property
+    def protocol(self) -> str:  # deprecated
+        return self._get_setup_key("protocol")
+
+    @property
+    def device_name(self) -> str:  # deprecated
+        return self._get_setup_key("device_name")
+
+    @device_name.setter
+    def device_name(self, value: str) -> None:  # deprecated
+        self._set_setup_key("device_name", value)
+
+    @property
+    def master_server_address(self) -> str:  # deprecated
+        return self._get_setup_key("master_server_address")
+
+    @master_server_address.setter
+    def master_server_address(  # deprecated
+        self, value: str
+    ) -> None:
+        self._set_setup_key("master_server_address", value)
+
+    # ----------------------------------------------------------
+    # Factory methods
+    # ----------------------------------------------------------
+    @staticmethod
+    def _build_setup_dict(
+        raw: Dict[str, Any],
+    ) -> Dict[str, str]:
+        """Extract mooncake setup keys from *raw* config dict.
+
+        Rules (evaluated in order):
+        1. Keys in ``_LMCACHE_ONLY_KEYS`` are skipped.
+        2. Keys starting with ``mooncake_`` have the prefix
+           stripped and are forwarded (highest priority).
+        3. Keys in ``_LEGACY_PASSTHROUGH_KEYS`` are forwarded
+           as-is (backward compat, lower priority).
+        4. All other keys are ignored.
+
+        Missing keys with known defaults are filled in.
+        """
+        setup: Dict[str, str] = {}
+        # Prefixed keys have higher priority than legacy keys;
+        # collect them separately and apply last.
+        prefixed_setup: Dict[str, str] = {}
+        prefix_len = len(_MOONCAKE_PREFIX)
+
+        for k, v in raw.items():
+            if k in _LMCACHE_ONLY_KEYS or v is None:
+                continue
+            if k.startswith(_MOONCAKE_PREFIX):
+                stripped = k[prefix_len:]
+                if stripped:
+                    prefixed_setup[stripped] = str(v)
+            elif k in _LEGACY_PASSTHROUGH_KEYS:
+                setup[k] = str(v)
+
+        # Prefixed keys override legacy keys on conflict.
+        setup.update(prefixed_setup)
+
+        # Apply defaults for keys not provided
+        for k, default_v in _SETUP_DEFAULTS.items():
+            setup.setdefault(k, default_v)
+        return setup
 
     @staticmethod
-    def from_file(file_path: str) -> "MooncakeStoreConfig":
+    def from_file(
+        file_path: str,
+    ) -> "MooncakeStoreConfig":
         """Load the config from a JSON file."""
         with open(file_path) as fin:
-            config = json.load(fin)
-        # Read Mooncake-specific knob
-        prefer_local_alloc = config.get("mooncake_prefer_local_alloc", False)
-
+            raw = json.load(fin)
         return MooncakeStoreConfig(
-            local_hostname=config.get("local_hostname"),
-            metadata_server=config.get("metadata_server"),
-            global_segment_size=config.get("global_segment_size", 3355443200),
-            local_buffer_size=config.get("local_buffer_size", 1073741824),
-            protocol=config.get("protocol", "tcp"),
-            device_name=config.get("device_name", ""),
-            master_server_address=config.get("master_server_address"),
-            transfer_timeout=config.get("transfer_timeout", 1),
-            storage_root_dir=config.get("storage_root_dir", ""),
-            prefer_local_alloc=prefer_local_alloc,
+            setup_config=MooncakeStoreConfig._build_setup_dict(raw),
+            transfer_timeout=raw.get("transfer_timeout", 1),
+            storage_root_dir=raw.get("storage_root_dir", ""),
+            prefer_local_alloc=raw.get("mooncake_prefer_local_alloc", False),
         )
 
     @staticmethod
     def load_from_env() -> "MooncakeStoreConfig":
-        """Load config from a file specified in the environment variable."""
+        """Load config from MOONCAKE_CONFIG_PATH env var."""
         config_file_path = os.getenv("MOONCAKE_CONFIG_PATH")
         if config_file_path is None:
             raise ValueError(
@@ -70,24 +308,15 @@ class MooncakeStoreConfig:
     def load_from_lmcache_config(
         config: "LMCacheEngineConfig",
     ) -> "MooncakeStoreConfig":
-        """Load config from a file specified in the environment variable."""
+        """Load config from LMCacheEngineConfig.extra_config."""
         extra_config = config.extra_config
         if extra_config is None:
             raise ValueError("The extra config is not set.")
-        # Read Mooncake-specific knob
-        prefer_local_alloc = extra_config.get("mooncake_prefer_local_alloc", False)
-
         return MooncakeStoreConfig(
-            local_hostname=extra_config["local_hostname"],
-            metadata_server=extra_config["metadata_server"],
-            global_segment_size=extra_config.get("global_segment_size", 3355443200),
-            local_buffer_size=extra_config.get("local_buffer_size", 1073741824),
-            protocol=extra_config.get("protocol", "tcp"),
-            device_name=extra_config.get("device_name", ""),
-            master_server_address=extra_config["master_server_address"],
+            setup_config=MooncakeStoreConfig._build_setup_dict(extra_config),
             transfer_timeout=extra_config.get("transfer_timeout", 1),
             storage_root_dir=extra_config.get("storage_root_dir", ""),
-            prefer_local_alloc=prefer_local_alloc,
+            prefer_local_alloc=extra_config.get("mooncake_prefer_local_alloc", False),
         )
 
 
@@ -129,24 +358,18 @@ class MooncakestoreConnector(RemoteConnector):
 
             logger.info("Mooncake Configuration loaded. config: %s", self.config)
 
-            # Check if storage_root_dir exists and set environment variable
-            if (
-                self.config.storage_root_dir is not None
-                and self.config.storage_root_dir != ""
-            ):
+            # Check if storage_root_dir exists and set env var
+            if self.config.storage_root_dir:
                 os.environ["MOONCAKE_STORAGE_ROOT_DIR"] = self.config.storage_root_dir
                 logger.info(
-                    "Set MOONCAKE_STORAGE_ROOT_DIR to: %s", self.config.storage_root_dir
+                    "Set MOONCAKE_STORAGE_ROOT_DIR to: %s",
+                    self.config.storage_root_dir,
                 )
 
-            logger.info("Setting up Mooncake store with parameters:")
-            logger.info(f"  local_hostname: {self.config.local_hostname}")
-            logger.info(f"  metadata_server: {self.config.metadata_server}")
-            logger.info(f"  global_segment_size: {self.config.global_segment_size}")
-            logger.info(f"  local_buffer_size: {self.config.local_buffer_size}")
-            logger.info(f"  protocol: {self.config.protocol}")
-            logger.info(f"  device_name: {self.config.device_name}")
-            logger.info(f"  master_server_address: {self.config.master_server_address}")
+            logger.info(
+                "Setting up Mooncake store with setup_config: %s",
+                _sanitize_setup_config(self.config.setup_config),
+            )
 
             try:
                 numa_mapping = getattr(
@@ -187,15 +410,7 @@ class MooncakestoreConnector(RemoteConnector):
                     f"Failed to determine NUMA mapping before Mooncake setup: {e}"
                 )
 
-            self.store.setup(
-                self.config.local_hostname,
-                self.config.metadata_server,
-                self.config.global_segment_size,
-                self.config.local_buffer_size,
-                self.config.protocol,
-                self.config.device_name,
-                self.config.master_server_address,
-            )
+            setup_mooncake_store(self.store, self.config)
             logger.info("Mooncake store setup completed successfully")
 
         except ValueError as e:
