@@ -30,6 +30,7 @@ from lmcache.v1.distributed.storage_controllers.store_policy import (
 )
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import get_event_bus
+from lmcache.v1.mp_observability.otel_init import register_gauge
 from lmcache.v1.platform import (
     consume_fd,
     create_event_notifier,
@@ -208,6 +209,13 @@ class StoreController(StorageControllerInterface):
         policy: The store policy for deciding targets and deletions.
     """
 
+    # Singleton dispatch for ``lmcache_mp.num_inflight_l2_stores``: tests may
+    # construct multiple controllers but the OTel SDK only honors the first
+    # gauge registration, so the callback reads from the most recently built
+    # instance via ``_gauge_target``.
+    _gauge_registered: bool = False
+    _gauge_target: "StoreController | None" = None
+
     def __init__(
         self,
         l1_manager: L1Manager,
@@ -231,6 +239,20 @@ class StoreController(StorageControllerInterface):
 
         # Shadow counter for status reporting (updated in background loop)
         self._status_in_flight_count: int = 0
+
+        StoreController._gauge_target = self
+        if not StoreController._gauge_registered:
+            StoreController._gauge_registered = True
+            register_gauge(
+                "lmcache.l2_store",
+                "lmcache_mp.num_inflight_l2_stores",
+                "L2 store tasks currently executing, per adapter",
+                lambda: (
+                    StoreController._gauge_target.get_inflight_stores_observations()
+                    if StoreController._gauge_target is not None
+                    else []
+                ),
+            )
 
         # Map eventfd -> adapter index for quick lookup in poll results
         self._efd_to_adapter_index: dict[int, int] = {}
@@ -273,6 +295,31 @@ class StoreController(StorageControllerInterface):
             "in_flight_task_count": self._status_in_flight_count,
             "num_l2_adapters": len(self._l2_adapters),
         }
+
+    def get_inflight_stores_observations(
+        self,
+    ) -> list[tuple[int | float, dict[str, object]]]:
+        """Per-adapter ``(count, attributes)`` snapshot for the
+        ``lmcache_mp.num_inflight_l2_stores`` gauge.
+
+        ``dict.copy()`` is GIL-atomic in CPython, so reading from the
+        OTel reader thread while the store loop mutates is safe; the
+        snapshot may be one mutation stale, which is fine at the 10 s
+        scrape cadence.
+        """
+        counts: dict[int, int] = defaultdict(int)
+        for adapter_index, _ in self._in_flight_tasks.copy():
+            counts[adapter_index] += 1
+        return [
+            (
+                count,
+                {
+                    "l2_name": self._adapter_descriptors[idx].type_name,
+                    "adapter_index": idx,
+                },
+            )
+            for idx, count in counts.items()
+        ]
 
     # Private methods
 

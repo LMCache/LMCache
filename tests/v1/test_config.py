@@ -1,13 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from pathlib import Path
+from typing import Any, cast
 import os
 
 # Third Party
 import pytest
 
 # First Party
-from lmcache.v1.config import LMCacheEngineConfig
+from lmcache.v1.config import LMCacheEngineConfig, load_ec_engine_config
 from lmcache.v1.config_base import apply_remote_configs, validate_and_set_config_value
 
 BASE_DIR = Path(__file__).parent
@@ -35,6 +36,58 @@ def check_extra_config(config: "LMCacheEngineConfig"):
     assert len(config.extra_config) == 2
     assert config.extra_config["key1"] == "value1"
     assert config.extra_config["key2"] == "value2"
+
+
+def test_load_ec_engine_config_prefixed_file_and_env_overrides(
+    tmp_path: Path,
+    monkeypatch,
+):
+    config_path = tmp_path / "lmcache.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "chunk_size: 256",
+                "local_disk: /tmp/base-disk",
+                "max_local_disk_size: 2",
+                "ec_chunk_size: 1024",
+                "ec_local_disk: /tmp/ec-disk",
+                "ec_max_local_disk_size: 4",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setenv("LMCACHE_CONFIG_FILE", str(config_path))
+    monkeypatch.setenv("LMCACHE_EC_CHUNK_SIZE", "1536")
+    monkeypatch.setenv("LMCACHE_EC_REMOTE_URL", "http://ec.example.com")
+
+    base_config = LMCacheEngineConfig.from_file(config_path)
+    ec_config = cast(Any, load_ec_engine_config(base_config=base_config))
+
+    assert base_config.chunk_size == 256
+    assert base_config.local_disk == "/tmp/base-disk"
+    assert base_config.max_local_disk_size == 2
+
+    assert ec_config.chunk_size == 1536
+    assert ec_config.local_disk == "/tmp/ec-disk"
+    assert ec_config.max_local_disk_size == 4
+    assert ec_config.remote_url == "http://ec.example.com"
+
+
+def test_load_ec_engine_config_applies_storage_defaults():
+    base_config = LMCacheEngineConfig.from_defaults(
+        enable_pd=False,
+        local_cpu=False,
+        max_local_cpu_size=0,
+        local_disk="/tmp/ec-disk",
+        max_local_disk_size=0,
+    )
+
+    ec_config = cast(Any, load_ec_engine_config(base_config=base_config))
+
+    assert ec_config.local_cpu is True
+    assert ec_config.max_local_cpu_size == 1
+    assert ec_config.max_local_disk_size == 64
 
 
 def test_update_config_from_env_basic():
