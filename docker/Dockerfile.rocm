@@ -106,6 +106,9 @@ ARG ROCM_VERSION
 # are compiled against the ROCm torch installed by vLLM.
 # Build deps are installed from the cloned source's requirements/build.txt
 # to avoid version mismatches with a local COPY.
+ARG max_jobs=2
+ENV MAX_JOBS=${max_jobs}
+
 ARG LMCACHE_RELEASE_VERSION=dev
 RUN . /opt/venv/bin/activate && \
     ROCM_TAG=rocm$(echo ${ROCM_VERSION} | tr -d '.') && \

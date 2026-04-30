@@ -15,6 +15,9 @@ ENV PYTORCH_ROCM_ARCH=${PYTORCH_ROCM_ARCH}
 # cannot force a source build.  Cloning the repo ensures HIP extensions
 # are compiled against the ROCm torch already present in the base image.
 # Build deps are installed from the cloned source to stay version-consistent.
+ARG max_jobs=2
+ENV MAX_JOBS=${max_jobs}
+
 ARG LMCACHE_VERSION=dev
 RUN git clone --depth 1 -b ${LMCACHE_VERSION} https://github.com/LMCache/LMCache.git /tmp/lmcache && \
     cd /tmp/lmcache && \
