@@ -355,8 +355,8 @@ class VLLMPagedMemXPUConnectorV3(GPUConnectorInterface):
             kv_cache_pointers_on_gpu.copy_(kv_cache_pointers)
             self.group_kv_cache_pointers_on_gpu.append(kv_cache_pointers_on_gpu)
 
-        self.gpu_kv_format, self.kv_caches = normalize_kv_and_discover_format(
-            self.kv_caches, EngineType.VLLM
+        self.gpu_kv_format, self.kvcaches = normalize_kv_and_discover_format(
+            self.kvcaches, EngineType.VLLM
         )
         self.num_blocks = get_num_blocks(self.kvcaches, self.gpu_kv_format)
         self.block_size = get_block_size(self.kvcaches, self.gpu_kv_format)
