@@ -56,6 +56,45 @@ callback for `MP_RETRIEVE_END` fires. EventBus queue becomes:
 Without `MP_RETRIEVE_SUBMITTED`, `_on_session_end` sees no in-flight work and
 closes the root span before the retrieve child span ends.
 
+## Root Span Attributes
+
+In addition to `session_id`, the root `"request"` span carries three hit rate
+attributes that are set when `MP_LOOKUP_PREFETCH_END` is processed:
+
+| Attribute | OTel type | Value |
+|-----------|-----------|-------|
+| `hit_tokens` | `int` | tokens found in L1+L2 (numerator) |
+| `requested_tokens` | `int` | chunk-aligned tokens submitted for lookup (denominator) |
+| `hit_rate` | `float` | `hit_tokens / requested_tokens`; `0.0` when denominator is zero |
+
+`hit_rate` is stored as a precomputed float because trace UIs (Tempo, Jaeger)
+cannot derive it from two integer attributes at query time.
+
+**Invariant:** these attributes are set at `MP_LOOKUP_PREFETCH_END` time, while
+the root span is still open.  `LP_END` always precedes `MP_REQUEST_END` in the
+event stream, so the root span is guaranteed to be live in the registry when the
+attributes are written.
+
+**Store-only requests** (no `lookup_prefetch_start()` call) never emit
+`MP_LOOKUP_PREFETCH_END`, so the root span will not carry these attributes.
+
+### CB path — `cb.request` span
+
+The same three attributes appear on the `"cb.request"` root span and are set
+when `CB_LOOKUP_END` is processed by `BlendTracingSubscriber`.
+
+`CB_LOOKUP_END` carries `hit_tokens` and `requested_tokens` in its metadata,
+computed at the emit site in `blend_server_v2.py`:
+
+| Field | Value |
+|-------|-------|
+| `hit_tokens` | `storage_hits * chunk_size` |
+| `requested_tokens` | `(num_tokens // chunk_size) * chunk_size` (chunk-aligned) |
+
+All three `CB_LOOKUP_END` emit sites (no-fingerprint-match, no-GPU-context,
+happy path) populate these fields, so `hit_rate` is always present on the
+`cb.request` span.
+
 ## Request Scenarios
 
 ### Scenario 1 — Full Cache Hit

@@ -54,6 +54,7 @@ from lmcache.v1.distributed.l2_adapters.nixl_store_l2_adapter import (
     NixlStoreObj,
 )
 from lmcache.v1.memory_management import MemoryObj
+from lmcache.v1.platform import create_event_notifier
 
 logger = init_logger(__name__)
 
@@ -346,9 +347,9 @@ class DynamicNixlStoreL2Adapter(L2AdapterInterface):
         super().__init__(max_capacity_bytes=int(max_capacity_gb * (1024**3)))
         self._config = config
 
-        self._store_efd = os.eventfd(0, os.EFD_NONBLOCK | os.EFD_CLOEXEC)
-        self._lookup_efd = os.eventfd(0, os.EFD_NONBLOCK | os.EFD_CLOEXEC)
-        self._load_efd = os.eventfd(0, os.EFD_NONBLOCK | os.EFD_CLOEXEC)
+        self._store_efd = create_event_notifier()
+        self._lookup_efd = create_event_notifier()
+        self._load_efd = create_event_notifier()
 
         # Cache data structures
         self._memory_objects: dict[ObjectKey, NixlStoreObj] = {}
@@ -382,13 +383,13 @@ class DynamicNixlStoreL2Adapter(L2AdapterInterface):
     # --------------------
 
     def get_store_event_fd(self) -> int:
-        return self._store_efd
+        return self._store_efd.fileno()
 
     def get_lookup_and_lock_event_fd(self) -> int:
-        return self._lookup_efd
+        return self._lookup_efd.fileno()
 
     def get_load_event_fd(self) -> int:
-        return self._load_efd
+        return self._load_efd.fileno()
 
     #####################
     # Store Interface
@@ -554,9 +555,9 @@ class DynamicNixlStoreL2Adapter(L2AdapterInterface):
 
         self.nixl_agent.close()
 
-        os.close(self._store_efd)
-        os.close(self._lookup_efd)
-        os.close(self._load_efd)
+        self._store_efd.close()
+        self._lookup_efd.close()
+        self._load_efd.close()
 
     ##################
     # Helper functions
@@ -572,13 +573,13 @@ class DynamicNixlStoreL2Adapter(L2AdapterInterface):
         return task_id
 
     def _signal_store_event(self) -> None:
-        os.eventfd_write(self._store_efd, 1)
+        self._store_efd.notify()
 
     def _signal_lookup_event(self) -> None:
-        os.eventfd_write(self._lookup_efd, 1)
+        self._lookup_efd.notify()
 
     def _signal_load_event(self) -> None:
-        os.eventfd_write(self._load_efd, 1)
+        self._load_efd.notify()
 
     async def _execute_store_in_the_loop(
         self,

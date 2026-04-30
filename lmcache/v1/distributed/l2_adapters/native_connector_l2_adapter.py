@@ -43,6 +43,7 @@ from lmcache.v1.distributed.l2_adapters.factory import (
     register_l2_adapter_factory,
 )
 from lmcache.v1.memory_management import MemoryObj
+from lmcache.v1.platform import create_event_notifier
 
 logger = init_logger(__name__)
 
@@ -116,11 +117,11 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
         self._client = native_client
         self._client_fd: int = int(native_client.event_fd())
 
-        # 3 distinct Python eventfds for the L2 adapter
+        # 3 distinct cross-platform notifiers for the L2 adapter
         # interface
-        self._store_efd = os.eventfd(0, os.EFD_NONBLOCK | os.EFD_CLOEXEC)
-        self._lookup_efd = os.eventfd(0, os.EFD_NONBLOCK | os.EFD_CLOEXEC)
-        self._load_efd = os.eventfd(0, os.EFD_NONBLOCK | os.EFD_CLOEXEC)
+        self._store_efd = create_event_notifier()
+        self._lookup_efd = create_event_notifier()
+        self._load_efd = create_event_notifier()
 
         # Pending ops: native future_id →
         #   (op_type, task_id, num_keys, keys_for_locking)
@@ -175,13 +176,13 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
     # ---------------------------------------------------------------
 
     def get_store_event_fd(self) -> int:
-        return self._store_efd
+        return self._store_efd.fileno()
 
     def get_lookup_and_lock_event_fd(self) -> int:
-        return self._lookup_efd
+        return self._lookup_efd.fileno()
 
     def get_load_event_fd(self) -> int:
-        return self._load_efd
+        return self._load_efd.fileno()
 
     # ---------------------------------------------------------------
     # Store Interface
@@ -351,9 +352,9 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
 
         self._client.close()
 
-        os.close(self._store_efd)
-        os.close(self._lookup_efd)
-        os.close(self._load_efd)
+        self._store_efd.close()
+        self._lookup_efd.close()
+        self._load_efd.close()
 
     # ---------------------------------------------------------------
     # Internal helpers
@@ -446,7 +447,7 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
                                 else:
                                     keys_stored.append(key)
                                     sizes_stored.append(0)
-                        os.eventfd_write(self._store_efd, 1)
+                        self._store_efd.notify()
 
                     elif op_type == self._OP_LOOKUP:
                         bitmap = Bitmap(num_keys)
@@ -457,7 +458,7 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
                                     if lookup_keys is not None:
                                         self._locked_keys[lookup_keys[i]] += 1
                         self._completed_lookups[task_id] = bitmap
-                        os.eventfd_write(self._lookup_efd, 1)
+                        self._lookup_efd.notify()
 
                     elif op_type == self._OP_LOAD:
                         bitmap = Bitmap(num_keys)
@@ -477,7 +478,7 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
                                 loaded_keys.extend(lookup_keys)
                         keys_accessed.extend(loaded_keys)
                         self._completed_loads[task_id] = bitmap
-                        os.eventfd_write(self._load_efd, 1)
+                        self._load_efd.notify()
 
                     elif op_type == self._OP_DELETE:
                         if result_bools is not None and lookup_keys is not None:
