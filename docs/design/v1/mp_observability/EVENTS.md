@@ -21,6 +21,35 @@ these events see [METRICS.md](METRICS.md).
 
 ---
 
+## L1 Failure Events
+
+Published at the caller of the L1 API — **not** inside `L1Manager` — so the
+caller context (`during`) can be attached without leaking caller identity
+into the manager. See LM-291 for the health-monitoring rationale.
+
+Producers split keys by `(during[, reason])` and publish one event per
+non-empty bucket; `keys` is the list of ObjectKeys that failed for that
+bucket. Subscribers bucket by `ObjectKey.model_name` to emit per-model
+counter increments.
+
+| EventType | Metadata keys | Types | Vocabulary |
+|---|---|---|---|
+| `L1_ALLOCATION_FAILED` | `during`, `keys` | `str`, `list[ObjectKey]` | `during` ∈ {`l1_store`, `l2_prefetch`} |
+| `L1_READ_FAILED` | `during`, `reason`, `keys` | `str`, `str`, `list[ObjectKey]` | `during` ∈ {`l2_store`, `l1_retrieve`}; `reason` ∈ {`not_found`, `write_locked`} |
+
+`L1_READ_FAILED` is a **post-lookup anomaly** event, not a cache-miss
+event: in MP mode every `reserve_read` / `unsafe_read` that raises one of
+these errors represents a lookup/reserve race or unexpected eviction. The
+counter should stay near zero in healthy operation.
+
+Producers:
+- `L1_ALLOCATION_FAILED(during=l1_store)` — `StorageManager.reserve_write`, on `L1Error.OUT_OF_MEMORY`.
+- `L1_ALLOCATION_FAILED(during=l2_prefetch)` — `PrefetchController._transition_to_load_phase`, on `L1Error.OUT_OF_MEMORY` from L1 reservation.
+- `L1_READ_FAILED(during=l1_retrieve)` — `StorageManager.read_prefetched_results` (`unsafe_read` failure). `not_found` = `KEY_NOT_EXIST`, `write_locked` = `KEY_NOT_READABLE` (read lock lost).
+- `L1_READ_FAILED(during=l2_store)` — `StoreController._process_new_keys` (`reserve_read` failure on keys that just finished L1 write). `not_found` = `KEY_NOT_EXIST`, `write_locked` = `KEY_NOT_READABLE`.
+
+---
+
 ## StorageManager Events
 
 | EventType | Metadata keys | Types |
@@ -36,8 +65,8 @@ these events see [METRICS.md](METRICS.md).
 
 | EventType | Metadata keys | Types |
 |---|---|---|
-| `L2_STORE_SUBMITTED` | `adapter_index`, `key_count` | `int`, `int` |
-| `L2_STORE_COMPLETED` | `adapter_index`, `succeeded_count`, `failed_count` | `int`, `int`, `int` |
+| `L2_STORE_SUBMITTED` | `adapter_index`, `task_id`, `l2_name`, `key_count`, `total_bytes` | `int`, `int`, `str`, `int`, `int` |
+| `L2_STORE_COMPLETED` | `adapter_index`, `task_id`, `l2_name`, `succeeded_count`, `failed_count` | `int`, `int`, `str`, `int`, `int` |
 
 ---
 
@@ -49,6 +78,33 @@ these events see [METRICS.md](METRICS.md).
 | `L2_PREFETCH_LOOKUP_COMPLETED` | `request_id`, `prefix_hit_count` | `int`, `int` |
 | `L2_PREFETCH_LOAD_SUBMITTED` | `request_id`, `key_count`, `adapter_count` | `int`, `int`, `int` |
 | `L2_PREFETCH_LOAD_COMPLETED` | `request_id`, `loaded_count`, `failed_count` | `int`, `int`, `int` |
+| `L2_LOAD_TASK_SUBMITTED` | `request_id`, `adapter_index`, `task_id`, `l2_name`, `key_count`, `total_bytes` | `int`, `int`, `int`, `str`, `int`, `int` |
+| `L2_LOAD_TASK_COMPLETED` | `request_id`, `adapter_index`, `task_id`, `l2_name` | `int`, `int`, `int`, `str` |
+
+`L2_LOAD_TASK_*` events fire once per `(request_id, adapter_index)` pair
+— unlike the request-level `L2_PREFETCH_LOAD_*` events above, which
+aggregate across adapters.  Throughput subscribers that need per-adapter
+attribution (e.g. `L2ThroughputSubscriber`) consume these task-level
+events; key-count counters continue to consume the request-level events.
+
+---
+
+## L2 Failure Events
+
+Health-monitoring event for the L2 prefetch path. See LM-291.
+
+| EventType | Metadata keys | Types | Vocabulary |
+|---|---|---|---|
+| `L2_PREFETCH_FAILED` | `reason`, `keys` | `str`, `list[ObjectKey]` | `reason` ∈ {`l1_oom`, `not_found`} |
+
+Producers (both in `PrefetchController`):
+- `reason=l1_oom` — emitted when `reserve_write` into L1 returns `OUT_OF_MEMORY` during the transition-to-load phase. Published in parallel with `L1_ALLOCATION_FAILED(during=l2_prefetch)`.
+- `reason=not_found` — emitted in `_finalize_load` for keys reserved in L1 but missing from the adapter's load bitmap (L2 reported the key present at lookup but produced no data).
+
+The third reason `serde_failure` will be added as an additive, non-breaking
+extension once the serde PR lands and adapters can distinguish
+deserialization errors from missing objects. No dashboard migration
+needed when that happens.
 
 ---
 
@@ -74,15 +130,32 @@ to correlate START/END pairs.
 
 | EventType | Metadata keys | Types |
 |---|---|---|
-| `MP_STORE_START` | `device` | `str` |
-| `MP_STORE_END` | `device`, `stored_count` | `str`, `int` |
-| `MP_RETRIEVE_START` | `device` | `str` |
-| `MP_RETRIEVE_END` | `device`, `retrieved_count` | `str`, `int` |
+| `MP_STORE_START` | `device`, `engine_id`, `model_name` | `str`, `int`, `str` |
+| `MP_STORE_END` | `device`, `stored_count`, `engine_id`, `model_name`, `total_bytes` | `str`, `int`, `int`, `str`, `int` |
+| `MP_RETRIEVE_START` | `device`, `engine_id`, `model_name` | `str`, `int`, `str` |
+| `MP_RETRIEVE_END` | `device`, `retrieved_count`, `engine_id`, `model_name`, `total_bytes` | `str`, `int`, `int`, `str`, `int` |
 | `MP_LOOKUP_PREFETCH_START` | *(none)* | — |
-| `MP_LOOKUP_PREFETCH_END` | `found_count` | `int` |
+| `MP_LOOKUP_PREFETCH_END` | `found_count`, `requested_tokens`, `hit_tokens` | `int`, `int`, `int` |
 | `MP_LOOKUP` | `request_id`, `chunk_hashes`, `model_name`, `chunk_size`, `seq_len`, `dtypes`, `shapes` | `str`, `list[str]`, `str`, `int`, `int`, `list[str]`, `list[list[int]]` |
 | `MP_VLLM_BLOCK_ALLOCATION` | `instance_id`, `model_name`, `records` | `int`, `str`, `list[BlockAllocationRecord]` (each has `req_id: str`, `new_block_ids: list[int]`, `new_token_ids: list[int]`) |
 | `MP_VLLM_END_SESSION` | `request_id` | `str` |
+
+### `MP_LOOKUP_PREFETCH_END` metadata
+
+`found_count` is the contiguous prefix hit at chunk granularity, already
+divided by `world_size` at the emit site.  `requested_tokens` and
+`hit_tokens` are denormalized token-level counts so subscribers need not
+know `chunk_size`:
+
+- `requested_tokens = len(chunk_hashes) * chunk_size` on the happy path; `0`
+  on the two early-exit paths in `lookup()` (no matching GPU context,
+  empty `chunk_hashes`).  Sub-chunk trailing tokens are excluded — they
+  cannot hit at chunk granularity.
+- `hit_tokens = found_count * chunk_size`.
+
+Together they drive the `lmcache_mp.lookup_*_tokens` counters used to
+compute the L1+L2 token-level hit rate.  See
+[L1_L2_HIT_RATE_PLAN.md](L1_L2_HIT_RATE_PLAN.md) for the design.
 
 ---
 

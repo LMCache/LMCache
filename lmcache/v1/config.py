@@ -214,9 +214,19 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
         "default": None,
         "env_converter": _to_int_list,
     },
+    "pd_peer_query_port": {
+        "type": Optional[list[int]],
+        "default": None,
+        "env_converter": _to_int_list,
+    },
     "pd_proxy_host": {"type": Optional[str], "default": None, "env_converter": str},
     "pd_proxy_port": {"type": Optional[int], "default": None, "env_converter": int},
     "pd_skip_proxy_notification": {
+        "type": bool,
+        "default": False,
+        "env_converter": _to_bool,
+    },
+    "pd_bidirectional": {
         "type": bool,
         "default": False,
         "env_converter": _to_bool,

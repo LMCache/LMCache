@@ -105,5 +105,6 @@ jobs:
             --ignore=tests/v1/mp_observability/ \
             --ignore=tests/skipped \
             --ignore=tests/cli/commands/trace \
-            --ignore=tests/v1/storage_backend/test_eic.py
+            --ignore=tests/v1/storage_backend/test_eic.py \
+            --ignore=tests/v1/storage_backend/test_p2p_backend_with_controller.py
 

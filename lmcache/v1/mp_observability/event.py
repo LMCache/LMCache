@@ -26,6 +26,10 @@ class EventType(Enum):
     L1_WRITE_FINISHED_AND_READ_RESERVED = "l1.write_finished_and_read_reserved"
     L1_KEYS_EVICTED = "l1.keys.evicted"
 
+    # L1 failure events (LM-291 health monitoring)
+    L1_ALLOCATION_FAILED = "l1.allocation.failed"
+    L1_READ_FAILED = "l1.read.failed"
+
     # StorageManager events
     SM_READ_PREFETCHED = "sm.read.prefetched"
     SM_READ_PREFETCHED_FINISHED = "sm.read.prefetched_finished"
@@ -41,6 +45,14 @@ class EventType(Enum):
     L2_PREFETCH_LOOKUP_COMPLETED = "l2.prefetch.lookup.completed"
     L2_PREFETCH_LOAD_SUBMITTED = "l2.prefetch.load.submitted"
     L2_PREFETCH_LOAD_COMPLETED = "l2.prefetch.load.completed"
+    # Per-adapter load task events, for throughput correlation.  Fire once
+    # per (request_id, adapter_index) pair, unlike the request-level
+    # L2_PREFETCH_LOAD_* events above which aggregate across adapters.
+    L2_LOAD_TASK_SUBMITTED = "l2.load_task.submitted"
+    L2_LOAD_TASK_COMPLETED = "l2.load_task.completed"
+
+    # L2 failure events (LM-291 health monitoring)
+    L2_PREFETCH_FAILED = "l2.prefetch.failed"
 
     # MP Server request-level events (start/end pairs)
     MP_STORE_START = "mp.store.start"
