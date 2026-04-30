@@ -2,9 +2,9 @@
 """
 Unit tests for AsyncSerdeProcessor.
 
-Verifies the async, eventfd-based contract:
+Verifies the async, notifier-based contract:
 - submit returns a task id immediately.
-- The corresponding eventfd is signaled on completion.
+- The corresponding notifier fd is signaled on completion.
 - query_result returns the bool outcome, None before completion and after
   being consumed (non-idempotent).
 - Failing serialize/deserialize produces result=False and still signals fd.
@@ -13,7 +13,6 @@ Verifies the async, eventfd-based contract:
 
 # Standard
 from typing import Callable, Optional
-import os
 import select
 import time
 
@@ -24,6 +23,7 @@ from lmcache.v1.distributed.serde import (
     Deserializer,
     Serializer,
 )
+from lmcache.v1.platform import consume_fd
 
 
 class _FakeSerializer(Serializer):
@@ -53,7 +53,7 @@ class _FakeDeserializer(Deserializer):
 
 
 def _wait_for_fd(fd: int, timeout_s: float = 2.0) -> bool:
-    """Wait until ``fd`` is readable or timeout. Drains the eventfd counter."""
+    """Wait until ``fd`` is readable or timeout. Drains the pending signal."""
     poller = select.poll()
     poller.register(fd, select.POLLIN)
     deadline = time.monotonic() + timeout_s
@@ -61,8 +61,8 @@ def _wait_for_fd(fd: int, timeout_s: float = 2.0) -> bool:
         remaining_ms = int(max(0, (deadline - time.monotonic()) * 1000))
         if poller.poll(remaining_ms):
             try:
-                os.eventfd_read(fd)
-            except (OSError, BlockingIOError):
+                consume_fd(fd)
+            except OSError:
                 pass
             return True
     return False

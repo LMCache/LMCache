@@ -5,7 +5,7 @@ so controllers see a plain ``L2AdapterInterface`` while data is
 transparently serialized on store and deserialized on load.
 
 Threading: the wrapper owns an internal poll thread that reacts to
-inner-adapter and serde eventfds and chains
+inner-adapter and serde event notifiers and chains
 
     store : caller → serialize → inner.store            → signal store_efd
     load  : caller → inner.load → deserialize           → signal load_efd
@@ -32,7 +32,6 @@ from __future__ import annotations
 # Standard
 from dataclasses import dataclass, field
 import enum
-import os
 import select
 import threading
 
@@ -55,6 +54,7 @@ from lmcache.v1.distributed.serde import (
     serialized_layout_desc,
 )
 from lmcache.v1.memory_management import MemoryObj
+from lmcache.v1.platform import consume_fd, create_event_notifier
 
 logger = init_logger(__name__)
 
@@ -113,10 +113,10 @@ class SerdeL2AdapterWrapper(L2AdapterInterface):
         self._serde = serde
         self._l1_manager = l1_manager
 
-        # Our own eventfds for store/load completion. Lookup passes the
+        # Our own notifiers for store/load completion. Lookup passes the
         # inner adapter's fd straight through (no chaining needed there).
-        self._store_efd = os.eventfd(0, os.EFD_NONBLOCK | os.EFD_CLOEXEC)
-        self._load_efd = os.eventfd(0, os.EFD_NONBLOCK | os.EFD_CLOEXEC)
+        self._store_efd = create_event_notifier()
+        self._load_efd = create_event_notifier()
 
         # Task-id space separate from inner's. Reverse maps let the
         # internal thread pair inner / serde completions back to our
@@ -147,10 +147,10 @@ class SerdeL2AdapterWrapper(L2AdapterInterface):
     # ------------------------------------------------------------------
 
     def get_store_event_fd(self) -> int:
-        return self._store_efd
+        return self._store_efd.fileno()
 
     def get_load_event_fd(self) -> int:
-        return self._load_efd
+        return self._load_efd.fileno()
 
     def get_lookup_and_lock_event_fd(self) -> int:
         # Lookup doesn't touch serde; passing through the inner adapter's
@@ -367,8 +367,8 @@ class SerdeL2AdapterWrapper(L2AdapterInterface):
                     "Serde wrapper: error releasing read-locked leftover temps"
                 )
 
-        os.close(self._store_efd)
-        os.close(self._load_efd)
+        self._store_efd.close()
+        self._load_efd.close()
 
     # ------------------------------------------------------------------
     # Internal loop
@@ -392,8 +392,8 @@ class SerdeL2AdapterWrapper(L2AdapterInterface):
                 if not (events & select.POLLIN):
                     continue
                 try:
-                    os.eventfd_read(fd)
-                except (OSError, BlockingIOError):
+                    consume_fd(fd)
+                except OSError:
                     pass
                 try:
                     if fd == serialize_efd:
@@ -612,15 +612,15 @@ class SerdeL2AdapterWrapper(L2AdapterInterface):
             self._store_tasks.pop(wrapped_id, None)
             self._completed_store[wrapped_id] = success
         try:
-            os.eventfd_write(self._store_efd, 1)
+            self._store_efd.notify()
         except OSError:
-            logger.exception("Serde wrapper: failed to signal store efd")
+            logger.exception("Serde wrapper: failed to signal store notifier")
 
     def _finalize_load(self, wrapped_id: L2TaskId, bitmap: Bitmap) -> None:
         with self._lock:
             self._load_tasks.pop(wrapped_id, None)
             self._completed_load[wrapped_id] = bitmap
         try:
-            os.eventfd_write(self._load_efd, 1)
+            self._load_efd.notify()
         except OSError:
-            logger.exception("Serde wrapper: failed to signal load efd")
+            logger.exception("Serde wrapper: failed to signal load notifier")

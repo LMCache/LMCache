@@ -1,16 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 """
 AsyncSerdeProcessor: wraps sync Serializer/Deserializer into the async
-eventfd-based SerdeProcessor interface expected by the controllers.
+SerdeProcessor interface expected by the controllers.
 
 Runs serialization/deserialization tasks in a thread pool and signals
-eventfds on completion, matching the L2 adapter async pattern.
+event notifiers on completion, matching the L2 adapter async pattern.
+The notifiers come from :mod:`lmcache.v1.platform` so the same code
+runs on Linux (eventfd) and other POSIX platforms (pipe fallback).
 """
 
 # Standard
 from concurrent.futures import ThreadPoolExecutor
 import enum
-import os
 import threading
 
 # First Party
@@ -23,6 +24,7 @@ from lmcache.v1.distributed.serde.base import (
     Serializer,
 )
 from lmcache.v1.memory_management import MemoryObj
+from lmcache.v1.platform import create_event_notifier
 
 logger = init_logger(__name__)
 
@@ -36,8 +38,8 @@ class AsyncSerdeProcessor(SerdeProcessor):
     """Wraps sync Serializer/Deserializer into async SerdeProcessor.
 
     Runs each submitted task in a thread pool. On completion, stores
-    the result and signals the appropriate eventfd so the controller's
-    poll loop wakes up.
+    the result and signals the appropriate event notifier so the
+    controller's poll loop wakes up.
 
     Args:
         serializer: Sync serializer implementation.
@@ -56,8 +58,8 @@ class AsyncSerdeProcessor(SerdeProcessor):
         self._serializer = serializer
         self._deserializer = deserializer
 
-        self._serialize_efd = os.eventfd(0, os.EFD_NONBLOCK | os.EFD_CLOEXEC)
-        self._deserialize_efd = os.eventfd(0, os.EFD_NONBLOCK | os.EFD_CLOEXEC)
+        self._serialize_efd = create_event_notifier()
+        self._deserialize_efd = create_event_notifier()
 
         self._lock = threading.Lock()
         self._next_task_id: SerdeTaskId = 0
@@ -70,12 +72,12 @@ class AsyncSerdeProcessor(SerdeProcessor):
     # ----- Event fds -----
 
     def get_serialize_event_fd(self) -> int:
-        """Return the eventfd signaled on serialize completion."""
-        return self._serialize_efd
+        """Return the fd signaled on serialize completion."""
+        return self._serialize_efd.fileno()
 
     def get_deserialize_event_fd(self) -> int:
-        """Return the eventfd signaled on deserialize completion."""
-        return self._deserialize_efd
+        """Return the fd signaled on deserialize completion."""
+        return self._deserialize_efd.fileno()
 
     # ----- Serialize -----
 
@@ -142,10 +144,10 @@ class AsyncSerdeProcessor(SerdeProcessor):
     # ----- Lifecycle -----
 
     def close(self) -> None:
-        """Shut down the thread pool and close event fds."""
+        """Shut down the thread pool and close event notifiers."""
         self._pool.shutdown(wait=True)
-        os.close(self._serialize_efd)
-        os.close(self._deserialize_efd)
+        self._serialize_efd.close()
+        self._deserialize_efd.close()
 
     # ----- Internal -----
 
@@ -165,7 +167,7 @@ class AsyncSerdeProcessor(SerdeProcessor):
         """Execute a serialize/deserialize task in the thread pool.
 
         On completion (success or failure), stores the result and
-        signals the eventfd.
+        signals the event notifier.
         """
         success = True
         try:
@@ -204,13 +206,13 @@ class AsyncSerdeProcessor(SerdeProcessor):
             else:
                 self._completed_deserialize[task_id] = success
 
-        # Signal the appropriate eventfd to wake the controller's poll loop
-        efd = (
+        # Signal the appropriate notifier to wake the controller's poll loop
+        notifier = (
             self._serialize_efd
             if task_type == _TaskType.SERIALIZE
             else self._deserialize_efd
         )
         try:
-            os.eventfd_write(efd, 1)
+            notifier.notify()
         except OSError:
-            logger.exception("Failed to signal eventfd for serde task %d", task_id)
+            logger.exception("Failed to signal notifier for serde task %d", task_id)
