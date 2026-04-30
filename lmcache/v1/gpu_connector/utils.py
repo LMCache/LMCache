@@ -33,8 +33,8 @@ import lmcache.c_ops as lmc_ops
 
 logger = init_logger(__name__)
 
-# Canonical recursive type consumed by :func:`discover_gpu_kv_format` and
-# the downstream format-aware helpers. A value is either a single
+# Canonical recursive type consumed by :func:`normalize_kv_and_discover_format`
+# and the downstream format-aware helpers. A value is either a single
 # :class:`torch.Tensor` (e.g. vLLM cross-layer, TRT-LLM) or a list of
 # nested ``DiscoverableKVCache`` values (per-layer lists, SGLang's two-list
 # MHA, deeper nesting). Engine adapters that hand us other containers
@@ -287,27 +287,40 @@ def _list_depth_tensor_dim(kv_caches: DiscoverableKVCache) -> tuple[int, int]:
     return depth, probe.ndim
 
 
-def discover_gpu_kv_format(
+def normalize_kv_and_discover_format(
     kv_caches: DiscoverableKVCache,
     serving_engine: EngineType,
     layout_hints: "LayoutHints | None" = None,
-) -> "lmc_ops.GPUKVFormat":
+) -> tuple["lmc_ops.GPUKVFormat", DiscoverableKVCache]:
     """
-    Discover the GPU KV Cache Format from the kv_caches.
+    Normalize ``kv_caches`` into the canonical form and discover its GPU KV format.
 
-    KEY: the logical view and physical views of the kv_caches should be made consistent
-    BEFORE format discovery
+    Performs (in order):
+      1. ``attempt_permute_to_contiguous_view``: stride-based dim
+         permutation so ``.shape`` reflects the physical (not
+         permuted-logical) layout — critical for HND vs NHD detection.
+         No-op if already contiguous; raises for non-permutation sources
+         of non-contiguity (slicing, ``as_strided``).
+      2. Format detection by descending list-wrapping and inspecting the
+         innermost tensor's shape.
 
-    The logic is that "external" layers are lists and there is one tensor internally.
-    We "unwrap" layers until we find the tensor.
+    The logic is that "external" layers are lists and there is one tensor
+    internally. We "unwrap" layers until we find the tensor.
 
     Args:
         kv_caches: The KV cache tensors (possibly nested lists of tensors).
         serving_engine: Which serving engine produced the caches.
         layout_hints: See :class:`~lmcache.v1.multiprocess.custom_types.LayoutHints`.
 
+    Returns:
+        ``(gpu_kv_format, normalized_kv_caches)``. Callers must use the
+        returned tensor structure for subsequent operations — it shares
+        storage with the input but may be a permuted view.
+
     Please see csrc/mem_kernels.cuh for the naming schema of the GPUKVFormat.
     """
+    kv_caches = attempt_permute_to_contiguous_view(kv_caches)
+
     # list_depth: number of external wrapping lists
     # tensor_dim: number of dimensions of the internal tensor
     list_depth, tensor_dim = _list_depth_tensor_dim(kv_caches)
@@ -317,11 +330,6 @@ def discover_gpu_kv_format(
     for _ in range(list_depth):
         list_dims.append(len(probe))
         probe = probe[0]
-    # Ensure the innermost tensor is contiguous so .shape below reflects the
-    # physical (not permuted-logical) layout — critical for HND format
-    # detection. No-op if already contiguous; raises for non-permutation
-    # sources of non-contiguity (slicing, as_strided).
-    probe = attempt_permute_to_contiguous_view(probe)
 
     tensor_dims = list(probe.shape)
     dims_str = (
@@ -374,7 +382,7 @@ def discover_gpu_kv_format(
 
     if detected_format is not None:
         legible_print_gpu_kv_format(detected_format)
-        return detected_format
+        return detected_format, kv_caches
     else:
         raise ValueError(
             "currently unsupported kv_caches format "
@@ -785,7 +793,7 @@ def get_group_data_ptrs(
 
     Args:
         kv_caches: Full kv_caches structure.
-        gpu_kv_format: Format returned by :func:`discover_gpu_kv_format`.
+        gpu_kv_format: Format returned by :func:`normalize_kv_and_discover_format`.
         layer_indices: 0-based layer indices in the group, in the order
             the kernel should iterate them. Ignored for cross-layer.
 
@@ -842,7 +850,7 @@ def make_page_buffer_shape_desc(
 
     Args:
         kv_caches: Full kv_caches structure.
-        gpu_kv_format: Format returned by :func:`discover_gpu_kv_format`.
+        gpu_kv_format: Format returned by :func:`normalize_kv_and_discover_format`.
         layer_idx: 0-based index of the representative layer.
         num_layers_in_group: Number of layers in the group (``nl``).
         num_blocks: Number of paged blocks (``nb``).

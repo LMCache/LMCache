@@ -151,28 +151,53 @@ def register_gauge(
     meter_name: str,
     gauge_name: str,
     description: str,
-    func: Callable[[], int | float],
+    func: Callable[[], int | float]
+    | Callable[[], list[tuple[int | float, dict[str, object]]]],
 ) -> None:
     """Register an OTel observable gauge with a callback.
 
     This is a convenience wrapper that hides the OTel boilerplate.
     If OTel is not available, the call is silently ignored.
 
+    Two callback shapes are accepted:
+
+    - **Single value (no attributes).** ``func`` returns ``int`` / ``float``
+      and the gauge emits one datapoint per scrape with no attributes.
+      Use this for whole-process metrics like
+      ``lmcache_mp.active_prefetch_jobs``.
+    - **Per-attribute-set values.** ``func`` returns a list of
+      ``(value, attrs)`` tuples; the gauge emits one datapoint per tuple
+      with the given attributes.  Use this for per-adapter or per-tier
+      metrics that share a name but vary by attribute.  An empty list
+      reports no datapoints (the metric simply does not appear in the
+      next scrape, which is the correct shape when there is nothing to
+      observe).
+
     Args:
         meter_name: OTel meter name (e.g. ``lmcache.mp_engine``).
         gauge_name: Metric name (e.g.
             ``lmcache_mp.active_prefetch_jobs``).
         description: Human-readable description of the gauge.
-        func: Zero-arg callable returning the current value.
+        func: Zero-arg callable.  Either a function returning the current
+            scalar value, or a function returning a list of
+            ``(value, attrs)`` tuples for tagged observations.
     """
     try:
         # Third Party
         from opentelemetry import metrics as otel_metrics
 
+        def _callback(_options):
+            result = func()
+            if isinstance(result, list):
+                return [
+                    otel_metrics.Observation(value, attrs) for value, attrs in result
+                ]
+            return [otel_metrics.Observation(result)]
+
         meter = otel_metrics.get_meter(meter_name)
         meter.create_observable_gauge(
             gauge_name,
-            callbacks=[lambda _: [otel_metrics.Observation(func())]],
+            callbacks=[_callback],
             description=description,
         )
     except ImportError:
