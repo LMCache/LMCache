@@ -77,6 +77,7 @@ make test       # Run unit tests
 kubebuilder create api --group <group> --version <version> --kind <Kind>
 ```
 
+
 ### Deploy Image Plugin (scaffold to deploy/manage ANY container image)
 
 Generate a controller that deploys and manages a container image (nginx, redis, memcached, your app, etc.):

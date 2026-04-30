@@ -79,7 +79,10 @@ class LMCacheWorker:
         # Please consider removing it.
         self.config = config
         self.lmcache_instance_id = config.lmcache_instance_id
-        assert self.lmcache_instance_id is not None
+        if self.lmcache_instance_id is None:
+            raise ValueError(
+                "lmcache_instance_id is required when enable_controller=True"
+            )
         self.lmcache_engine = lmcache_engine
         self.worker_id = metadata.worker_id
 
@@ -93,7 +96,10 @@ class LMCacheWorker:
             "worker_socket_send_timeout_ms", DEFAULT_SOCKET_SEND_TIMEOUT_MS
         )
 
-        assert config.controller_pull_url is not None
+        if config.controller_pull_url is None:
+            raise ValueError(
+                "controller_pull_url is required when enable_controller=True"
+            )
 
         controller_pull_url = config.controller_pull_url
         self.push_socket = get_zmq_socket(
@@ -131,12 +137,22 @@ class LMCacheWorker:
         if not lmcache_worker_ids:
             # start lmcache worker on all ranks;
             # need at least one port per rank (world_size)
-            assert len(config.lmcache_worker_ports) >= metadata.world_size
+            if len(config.lmcache_worker_ports) < metadata.world_size:
+                raise ValueError(
+                    f"lmcache_worker_ports must have at least {metadata.world_size} "
+                    f"port(s) (world_size), got {len(config.lmcache_worker_ports)}"
+                )
             lmcache_worker_port = config.lmcache_worker_ports[self.worker_id]
         else:
             # start lmcache worker on given worker ids;
             # need at least one port per explicitly listed worker
-            assert len(config.lmcache_worker_ports) >= len(lmcache_worker_ids)
+            if len(config.lmcache_worker_ports) < len(lmcache_worker_ids):
+                raise ValueError(
+                    f"lmcache_worker_ports must have at least "
+                    f"{len(lmcache_worker_ids)} "
+                    f"port(s) (one per lmcache worker), "
+                    f"got {len(config.lmcache_worker_ports)}"
+                )
             index = lmcache_worker_ids.index(self.worker_id)
             lmcache_worker_port = config.lmcache_worker_ports[index]
 

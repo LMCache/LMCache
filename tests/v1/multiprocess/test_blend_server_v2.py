@@ -33,6 +33,7 @@ import torch
 import zmq
 
 # First Party
+from lmcache.utils import EngineType
 from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.distributed.config import (
     EvictionConfig,
@@ -603,7 +604,14 @@ def registered_instance(
 
     future = client.submit_request(
         RequestType.REGISTER_KV_CACHE,
-        [instance_id, client_context.get_kv_cache(), "testmodel", 1, {}],
+        [
+            instance_id,
+            client_context.get_kv_cache(),
+            "testmodel",
+            1,
+            EngineType.VLLM,
+            {},
+        ],
         get_response_class(RequestType.REGISTER_KV_CACHE),
     )
     assert future.result(timeout=DEFAULT_TIMEOUT) is None
@@ -1681,17 +1689,17 @@ def test_cb_store_final_v2_then_normal_lookup(
     lookup_key = create_cb_cache_key(
         token_ids, request_id="final-norm-lookup-v2", worker_id=None
     )
-    # Phase 1: LOOKUP returns a prefetch job ID, not the chunk count
-    job_id = client.submit_request(
+    # Phase 1: LOOKUP registers the job server-side by request_id (returns None)
+    client.submit_request(
         RequestType.LOOKUP, [lookup_key, 1], get_response_class(RequestType.LOOKUP)
     ).result(timeout=DEFAULT_TIMEOUT)
 
-    # Phase 2: Poll QUERY_PREFETCH_STATUS until the result is ready
+    # Phase 2: Poll QUERY_PREFETCH_STATUS by request_id until the result is ready
     lookup_result = None
     while True:
         lookup_result = client.submit_request(
             RequestType.QUERY_PREFETCH_STATUS,
-            [job_id],
+            [lookup_key.request_id],
             get_response_class(RequestType.QUERY_PREFETCH_STATUS),
         ).result(timeout=DEFAULT_TIMEOUT)
         if lookup_result is not None:

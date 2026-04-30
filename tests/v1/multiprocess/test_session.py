@@ -9,6 +9,7 @@ import time
 import pytest
 
 # First Party
+from lmcache.v1.multiprocess.custom_types import IPCCacheEngineKey
 from lmcache.v1.multiprocess.session import Session, SessionManager
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
 
@@ -115,14 +116,17 @@ class TestSessionManager:
 
     def test_remove(self, session_manager: SessionManager) -> None:
         session_manager.get_or_create("req-1")
-        session_manager.remove("req-1")
+        removed = session_manager.remove("req-1")
+        assert removed is not None
+        assert removed.request_id == "req-1"
         # Should create a fresh session
         s = session_manager.get_or_create("req-1")
         assert s.num_chunks_processed == 0
 
     def test_remove_nonexistent(self, session_manager: SessionManager) -> None:
-        """Removing a non-existent session should not raise."""
-        session_manager.remove("does-not-exist")
+        """Removing a non-existent session should return None."""
+        result = session_manager.remove("does-not-exist")
+        assert result is None
 
     def test_cleanup_expired(self, session_manager: SessionManager) -> None:
         """Sessions older than TTL should be cleaned up."""
@@ -215,3 +219,116 @@ class TestSessionThreadSafety:
             t.join(timeout=10)
 
         assert not errors, "\n".join(errors)
+
+
+class TestSessionGetHashesOptionalEnd:
+    """
+    Tests for Session.get_hashes with optional end (auto-align to last full chunk).
+    """
+
+    def test_get_hashes_optional_end_empty(self, session: Session) -> None:
+        """get_hashes(0) should return empty list when no tokens set."""
+        assert session.get_hashes(0) == []
+
+    def test_get_hashes_optional_end_after_compute(self, session: Session) -> None:
+        """get_hashes(0) should return all computed hashes."""
+        session.set_tokens(list(range(12)))  # 3 chunks of 4
+        all_hashes = session.get_hashes(0)
+        assert len(all_hashes) == 3
+
+    def test_get_hashes_optional_end_incremental(self, session: Session) -> None:
+        """get_hashes(0) should accumulate hashes from incremental calls."""
+        session.set_tokens(list(range(12)))  # 3 chunks of 4
+        # First compute 2 chunks
+        session.get_hashes(0, 8)
+        # get_hashes(0) should now compute all 3 chunks
+        assert len(session.get_hashes(0)) == 3
+
+    def test_get_hashes_optional_end_matches_explicit(self, session: Session) -> None:
+        """get_hashes(0) should return the same as get_hashes(0, aligned_len)."""
+        session.set_tokens(list(range(12)))
+        expected = session.get_hashes(0, 12)
+        assert session.get_hashes(0) == expected
+
+    def test_get_hashes_optional_end_truncates_partial_chunk(
+        self, session: Session
+    ) -> None:
+        """get_hashes(0) should ignore trailing tokens that don't fill a chunk."""
+        # 14 tokens with chunk_size=4 -> 3 full chunks (12 tokens), 2 leftover
+        session.set_tokens(list(range(14)))
+        hashes = session.get_hashes(0)
+        assert len(hashes) == 3
+
+    def test_get_hashes_optional_end_matches_hasher(
+        self, hasher: TokenHasher, session: Session
+    ) -> None:
+        """get_hashes(0) should match standalone TokenHasher results."""
+        tokens = list(range(12))
+        session.set_tokens(tokens)
+        session_hashes = session.get_hashes(0)
+        hasher_hashes = hasher.compute_chunk_hashes(tokens)
+        # Convert session hashes to bytes for comparison
+        converted = [TokenHasher.hash_to_bytes(h) for h in session_hashes]
+        assert converted == hasher_hashes
+
+
+class TestSessionLookupIpcKey:
+    """Tests for Session.lookup_ipc_key field."""
+
+    def test_lookup_ipc_key_default_none(self, session: Session) -> None:
+        """lookup_ipc_key should default to None."""
+        assert session.lookup_ipc_key is None
+
+    def test_lookup_ipc_key_set_and_get(self, session: Session) -> None:
+        """lookup_ipc_key should be settable and retrievable."""
+        key = IPCCacheEngineKey.from_token_ids(
+            model_name="test-model",
+            world_size=1,
+            worker_id=None,
+            token_ids=list(range(8)),
+            start=0,
+            end=8,
+            request_id="req-1",
+        )
+        session.lookup_ipc_key = key
+        assert session.lookup_ipc_key is key
+        assert session.lookup_ipc_key.model_name == "test-model"
+        assert session.lookup_ipc_key.worker_id is None
+
+
+class TestSessionManagerRemoveReturnsSession:
+    """Tests for SessionManager.remove returning the removed session."""
+
+    def test_remove_returns_session_with_state(self, hasher: TokenHasher) -> None:
+        """remove() should return the session with all accumulated state."""
+        mgr = SessionManager(hasher, ttl=600)
+        session = mgr.get_or_create("req-1")
+        session.set_tokens(list(range(8)))
+        session.get_hashes(0, 8)
+
+        key = IPCCacheEngineKey.from_token_ids(
+            model_name="model",
+            world_size=1,
+            worker_id=None,
+            token_ids=list(range(8)),
+            request_id="req-1",
+        )
+        session.lookup_ipc_key = key
+
+        removed = mgr.remove("req-1")
+        assert removed is not None
+        assert removed.request_id == "req-1"
+        assert len(removed.get_hashes(0)) == 2
+        assert removed.lookup_ipc_key is key
+
+    def test_remove_clears_from_manager(self, hasher: TokenHasher) -> None:
+        """After remove(), the session should no longer be in the manager."""
+        mgr = SessionManager(hasher, ttl=600)
+        mgr.get_or_create("req-1")
+        mgr.remove("req-1")
+        assert mgr.active_count() == 0
+
+    def test_remove_nonexistent_returns_none(self, hasher: TokenHasher) -> None:
+        """remove() on a non-existent request_id should return None."""
+        mgr = SessionManager(hasher, ttl=600)
+        assert mgr.remove("no-such-id") is None
