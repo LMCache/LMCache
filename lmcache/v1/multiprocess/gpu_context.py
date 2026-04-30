@@ -33,6 +33,9 @@ from lmcache.v1.gpu_connector.utils import (
 )
 from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
 from lmcache.v1.multiprocess.custom_types import (
+    CudaIPCWrapper,
+    DeviceBufferDescriptor,
+    DeviceBufferImporter,
     KVCache,
 )
 
@@ -47,8 +50,18 @@ logger = init_logger(__name__)
 
 def unwrap_kv_cache_tensors(kv_caches: KVCache) -> list[torch.Tensor]:
     unwrapped_tensors = []
-    for ipc_wrapper in kv_caches:
-        tensor = ipc_wrapper.to_tensor()
+    for kv_cache in kv_caches:
+        if isinstance(kv_cache, dict) and "backend" in kv_cache:
+            kv_cache = DeviceBufferDescriptor(**kv_cache)
+        if isinstance(kv_cache, DeviceBufferDescriptor):
+            tensor = DeviceBufferImporter.from_descriptor(kv_cache)
+        elif isinstance(kv_cache, CudaIPCWrapper):
+            tensor = kv_cache.to_tensor()
+        else:
+            raise TypeError(
+                "Expected CudaIPCWrapper or DeviceBufferDescriptor, "
+                f"got {type(kv_cache)!r}"
+            )
         unwrapped_tensors.append(tensor)
     return unwrapped_tensors
 

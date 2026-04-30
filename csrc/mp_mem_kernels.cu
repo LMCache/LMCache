@@ -57,6 +57,12 @@ __device__ inline size_t calculate_engine_global_offset(
            layer_idx * shape_desc.kv_size * scalars_per_block +
            engine_block_idx * shape_desc.kv_size * scalars_per_block *
                shape_desc.nl;
+  } else if constexpr (format == GPUKVFormat::NB_KV_NL_BS_NH_HS) {
+    // Modular MAX cross-layer: single tensor [NB, KV, NL, BS, NH, HS]
+    return layer_idx * scalars_per_block +
+           k_or_v * shape_desc.nl * scalars_per_block +
+           engine_block_idx * shape_desc.kv_size * shape_desc.nl *
+               scalars_per_block;
   }
 }
 
@@ -173,7 +179,8 @@ __device__ void multi_layer_block_transfer_single_block(
           shape_desc);
   ScalarType* paged_buffer_layer_ptr;
   if constexpr (format == GPUKVFormat::NB_NL_TWO_BS_NH_HS ||
-                format == GPUKVFormat::NB_NL_TWO_NH_BS_HS) {
+                format == GPUKVFormat::NB_NL_TWO_NH_BS_HS ||
+                format == GPUKVFormat::NB_KV_NL_BS_NH_HS) {
     paged_buffer_layer_ptr = (ScalarType*)paged_buffer_ptrs[0];
   } else if constexpr (format == GPUKVFormat::TWO_X_NL_X_NBBS_NH_HS) {
     // SGLang MHA: ptrs[0..NL-1] = K per layer, ptrs[NL..2NL-1] = V per layer
@@ -262,6 +269,9 @@ __global__ void multi_layer_block_transfer_kernel(
       break;                                                        \
     case GPUKVFormat::NB_NL_TWO_NH_BS_HS:                           \
       LAUNCH_KERNEL(DIRECTION, GPUKVFormat::NB_NL_TWO_NH_BS_HS);    \
+      break;                                                        \
+    case GPUKVFormat::NB_KV_NL_BS_NH_HS:                             \
+      LAUNCH_KERNEL(DIRECTION, GPUKVFormat::NB_KV_NL_BS_NH_HS);      \
       break;                                                        \
     default:                                                        \
       TORCH_CHECK(false, "Unsupported GPUKVFormat: ",               \

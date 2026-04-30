@@ -49,6 +49,7 @@ FMT_FLASH_INFER = lmc_ops.GPUKVFormat.NL_X_NB_TWO_BS_NH_HS
 FMT_MLA = lmc_ops.GPUKVFormat.NL_X_NB_BS_HS
 FMT_SGLANG_MHA = lmc_ops.GPUKVFormat.TWO_X_NL_X_NBBS_NH_HS
 FMT_SGLANG_MLA = lmc_ops.GPUKVFormat.NL_X_NBBS_ONE_HS
+FMT_MAX = lmc_ops.GPUKVFormat.NB_KV_NL_BS_NH_HS
 
 # Format parameters: (gpu_kv_format, num_layers, num_heads, head_size, is_mla)
 # Use small layer counts to keep GPU memory usage low in CI
@@ -59,6 +60,7 @@ FORMAT_PARAMS = [
     (FMT_MLA, 4, 1, 576, True),
     (FMT_SGLANG_MHA, 4, 8, 128, False),
     (FMT_SGLANG_MLA, 4, 1, 576, True),
+    (FMT_MAX, 4, 8, 128, False),
 ]
 
 
@@ -91,6 +93,9 @@ def create_vllm_tensors(
     elif gpu_kv_format == FMT_SGLANG_MLA:
         shape = [nbbs, 1, hs]
         return [_create_random_tensor(shape, dtype, device) for _ in range(nl)]
+    elif gpu_kv_format == FMT_MAX:
+        shape = [nb, 2, nl, bs, nh, hs]
+        return [_create_random_tensor(shape, dtype, device)]
     raise ValueError(f"Unknown format: {gpu_kv_format}")
 
 
@@ -123,6 +128,9 @@ def create_zero_vllm_tensors(
     elif gpu_kv_format == FMT_SGLANG_MLA:
         shape = [nbbs, 1, hs]
         return [_create_zero_tensor(shape, dtype, device) for _ in range(nl)]
+    elif gpu_kv_format == FMT_MAX:
+        shape = [nb, 2, nl, bs, nh, hs]
+        return [_create_zero_tensor(shape, dtype, device)]
     raise ValueError(f"Unknown format: {gpu_kv_format}")
 
 
@@ -176,6 +184,8 @@ def get_block_data(
         elif gpu_kv_format == FMT_SGLANG_MLA:
             ts, ed = block_idx * bs, (block_idx + 1) * bs
             results.append(vllm_tensors[layer_idx][ts:ed, 0, :].clone())
+        elif gpu_kv_format == FMT_MAX:
+            results.append(vllm_tensors[0][block_idx, :, layer_idx, :, :, :].clone())
     return results
 
 
@@ -243,7 +253,15 @@ TOTAL_BLOCKS = NUM_MEMORY_OBJECTS * BLOCKS_PER_OBJECT  # 64
 @pytest.mark.parametrize(
     "gpu_kv_format,nl,nh,hs,is_mla",
     FORMAT_PARAMS,
-    ids=["normal", "cross_layer", "flash_infer", "mla", "sglang_mha", "sglang_mla"],
+    ids=[
+        "normal",
+        "cross_layer",
+        "flash_infer",
+        "mla",
+        "sglang_mha",
+        "sglang_mla",
+        "max",
+    ],
 )
 @pytest.mark.parametrize(
     "dtype", [torch.bfloat16, torch.float8_e4m3fn], ids=["bf16", "fp8"]
@@ -333,7 +351,15 @@ def test_block_transfer_roundtrip(gpu_kv_format, nl, nh, hs, is_mla, dtype, mem_
 @pytest.mark.parametrize(
     "gpu_kv_format,nl,nh,hs,is_mla",
     FORMAT_PARAMS,
-    ids=["normal", "cross_layer", "flash_infer", "mla", "sglang_mha", "sglang_mla"],
+    ids=[
+        "normal",
+        "cross_layer",
+        "flash_infer",
+        "mla",
+        "sglang_mha",
+        "sglang_mla",
+        "max",
+    ],
 )
 @pytest.mark.parametrize("dtype", [torch.bfloat16], ids=["bf16"])
 def test_block_transfer_skip_prefix(gpu_kv_format, nl, nh, hs, is_mla, dtype):
@@ -425,3 +451,50 @@ def test_block_transfer_skip_prefix(gpu_kv_format, nl, nh, hs, is_mla, dtype):
             assert block.abs().sum().item() == 0, (
                 f"Skipped block {i}, layer {layer_idx} is not zero"
             )
+
+
+def test_max_layout_d2h_memory_object_offsets():
+    """MAX [NB, KV, NL, BS, NH, HS] maps to LMCache [KV, NL, T, NH * HS]."""
+    device = torch.device("cuda")
+    dtype = torch.float32
+    nb, nl, bs, nh, hs = 8, 3, 4, 2, 3
+    block_ids = [2, 5]
+    tokens_per_object = len(block_ids) * bs
+    source = torch.arange(
+        nb * 2 * nl * bs * nh * hs,
+        dtype=dtype,
+        device=device,
+    ).reshape(nb, 2, nl, bs, nh, hs)
+    mem_objects = create_memory_objects(
+        2,
+        nl,
+        tokens_per_object,
+        nh * hs,
+        1,
+        dtype,
+        device,
+    )
+
+    call_block_kernel(
+        [source],
+        mem_objects,
+        block_ids,
+        FMT_MAX,
+        lmc_ops.TransferDirection.D2H,
+        nl,
+        nb,
+        bs,
+        nh,
+        hs,
+        False,
+        tokens_per_object,
+    )
+    torch.cuda.synchronize()
+
+    memory = mem_objects[0].reshape(2, nl, tokens_per_object, nh, hs)
+    for memory_block_idx, engine_block_idx in enumerate(block_ids):
+        token_slice = slice(memory_block_idx * bs, (memory_block_idx + 1) * bs)
+        assert torch.equal(
+            memory[:, :, token_slice, :, :],
+            source[engine_block_idx],
+        )

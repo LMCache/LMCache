@@ -92,6 +92,14 @@ enum class GPUKVFormat : int {
   - TRT-LLM cross-layer (HND layout)
   physical shape: [num_blocks, num_layers, 2, num_heads, block_size, head_size]
   */
+
+  NB_KV_NL_BS_NH_HS = 9,
+  /*
+  used by:
+  - Modular MAX cross-layer layout
+  physical shape: [num_blocks, kv_dim, num_layers, block_size, num_heads,
+  head_size]
+  */
 };
 
 void multi_layer_kv_transfer(

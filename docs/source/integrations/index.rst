@@ -10,4 +10,5 @@ isn't shared with the rest of the documentation.
 .. toctree::
    :maxdepth: 1
 
+   modular_max
    tensorrt_llm

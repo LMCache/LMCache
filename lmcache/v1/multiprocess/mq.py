@@ -17,6 +17,7 @@ from lmcache.logging import init_logger
 from lmcache.v1.multiprocess.affinity_pool import AffinityThreadPool
 from lmcache.v1.multiprocess.custom_types import (
     CudaIPCWrapper,
+    KVCache,
     get_customized_decoder,
     get_customized_encoder,
 )
@@ -86,6 +87,10 @@ _SPECIAL_ENCODER_DECODERS = {
     list[CudaIPCWrapper]: (
         get_customized_encoder(list[CudaIPCWrapper]),
         get_customized_decoder(list[CudaIPCWrapper]),
+    ),
+    KVCache: (
+        get_customized_encoder(KVCache),
+        get_customized_decoder(KVCache),
     ),
 }
 

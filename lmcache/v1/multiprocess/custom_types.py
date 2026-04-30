@@ -1,13 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Any, Callable, TypeAlias
 import pickle
 import threading
 
 # Third Party
 import msgspec
 import torch
+
+# First Party
+from lmcache.utils import EngineType
 
 """
 Defines the types and the customized encoder/decoders for inter-process
@@ -212,15 +215,215 @@ class RawCudaIPCWrapper(CudaIPCWrapper):
         return raw.view(self.dtype).reshape(self.shape)
 
 
+DeviceBufferView: TypeAlias = torch.Tensor
+
+
+@dataclass(frozen=True)
+class DeviceBufferDescriptor:
+    """Backend-neutral descriptor for a registered serving-engine KV buffer.
+
+    The descriptor is the Modular MAX / LMCache boundary object. CUDA IPC is one
+    supported backend payload, but callers must still identify the backend and
+    handle type explicitly so unsupported backends fail before touching CUDA
+    code.
+    """
+
+    engine_type: EngineType
+    backend: str
+    handle_type: str
+    handle: Any
+    device_id: int
+    dtype: str
+    shape: tuple[int, ...]
+    strides: tuple[int, ...] | None
+    nbytes: int
+    storage_offset_bytes: int
+    layout_format: str
+    layout_hints: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class DeviceEventDescriptor:
+    """Backend-neutral event descriptor for future async synchronization."""
+
+    backend: str
+    handle_type: str
+    handle: bytes | object | None
+
+
+class DeviceBufferImporter:
+    """Import backend-neutral buffer descriptors into local tensor views."""
+
+    _MAX_LAYOUT_FORMAT = "NB_KV_NL_BS_NH_HS"
+
+    @staticmethod
+    def from_descriptor(
+        desc: DeviceBufferDescriptor,
+        *,
+        allow_host_staging: bool = False,
+    ) -> DeviceBufferView:
+        """Create a tensor view from ``desc``.
+
+        Args:
+            desc: Backend-neutral buffer descriptor.
+            allow_host_staging: Whether explicit host staging fallback may be
+                used for CPU/host descriptors.
+
+        Returns:
+            A tensor view over the registered buffer.
+
+        Raises:
+            RuntimeError: If the backend is unsupported or host staging was not
+                explicitly enabled.
+            TypeError: If the descriptor handle type is invalid.
+        """
+        engine_type = DeviceBufferImporter._normalize_engine_type(desc.engine_type)
+        DeviceBufferImporter._validate_descriptor_metadata(desc, engine_type)
+        backend = desc.backend.lower()
+        handle_type = desc.handle_type.lower()
+
+        if backend == "cuda":
+            if handle_type != "cuda_ipc":
+                raise RuntimeError(
+                    "LMCache MP for Modular MAX CUDA backend requires "
+                    f"handle_type='cuda_ipc', got {desc.handle_type!r}."
+                )
+            if isinstance(desc.handle, CudaIPCWrapper):
+                tensor = desc.handle.to_tensor()
+            elif isinstance(desc.handle, bytes):
+                tensor = CudaIPCWrapper.Deserialize(desc.handle).to_tensor()
+            else:
+                raise TypeError(
+                    "CUDA DeviceBufferDescriptor handle must be bytes or "
+                    f"CudaIPCWrapper, got {type(desc.handle)!r}."
+                )
+            DeviceBufferImporter._validate_tensor_metadata(desc, tensor)
+            return tensor
+
+        if backend in ("rocm", "hip", "amd"):
+            raise RuntimeError(
+                "LMCache MP for Modular MAX does not yet support backend "
+                f"{desc.backend!r}. Implement HipIpcBufferImporter or enable "
+                "explicit host staging fallback."
+            )
+
+        if backend in ("cpu", "host"):
+            if not allow_host_staging:
+                raise RuntimeError(
+                    "LMCache MP for Modular MAX received a host buffer descriptor, "
+                    "but host staging fallback is disabled. Set "
+                    "lmcache_allow_host_staging=true to opt in."
+                )
+            raise RuntimeError(
+                "LMCache MP host staging descriptors are not implemented yet."
+            )
+
+        raise RuntimeError(
+            f"LMCache MP for Modular MAX does not yet support backend {desc.backend!r}."
+        )
+
+    @staticmethod
+    def _validate_tensor_metadata(
+        desc: DeviceBufferDescriptor,
+        tensor: torch.Tensor,
+    ) -> None:
+        if str(tensor.dtype) != desc.dtype:
+            raise RuntimeError(
+                "Imported device buffer dtype mismatch: descriptor "
+                f"{desc.dtype!r}, tensor {str(tensor.dtype)!r}."
+            )
+        if tuple(tensor.shape) != tuple(desc.shape):
+            raise RuntimeError(
+                "Imported device buffer shape mismatch: descriptor "
+                f"{desc.shape}, tensor {tuple(tensor.shape)}."
+            )
+        if desc.strides is not None and tuple(tensor.stride()) != tuple(desc.strides):
+            raise RuntimeError(
+                "Imported device buffer stride mismatch: descriptor "
+                f"{desc.strides}, tensor {tuple(tensor.stride())}."
+            )
+        nbytes = tensor.untyped_storage().nbytes()
+        if nbytes != desc.nbytes:
+            raise RuntimeError(
+                "Imported device buffer nbytes mismatch: descriptor "
+                f"{desc.nbytes}, tensor {nbytes}."
+            )
+        storage_offset_bytes = tensor.storage_offset() * tensor.element_size()
+        if storage_offset_bytes != desc.storage_offset_bytes:
+            raise RuntimeError(
+                "Imported device buffer storage offset mismatch: descriptor "
+                f"{desc.storage_offset_bytes}, tensor {storage_offset_bytes}."
+            )
+        if tensor.device.type == "cuda":
+            device_id = tensor.device.index or 0
+            if device_id != desc.device_id:
+                raise RuntimeError(
+                    "Imported device buffer device mismatch: descriptor "
+                    f"{desc.device_id}, tensor {device_id}."
+                )
+
+    @staticmethod
+    def _normalize_engine_type(engine_type: EngineType | str) -> EngineType:
+        if isinstance(engine_type, EngineType):
+            return engine_type
+        try:
+            return EngineType(engine_type)
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(
+                f"Unsupported DeviceBufferDescriptor engine_type {engine_type!r}."
+            ) from exc
+
+    @staticmethod
+    def _validate_descriptor_metadata(
+        desc: DeviceBufferDescriptor,
+        engine_type: EngineType,
+    ) -> None:
+        if not desc.backend:
+            raise RuntimeError("DeviceBufferDescriptor backend must be non-empty.")
+        if not desc.handle_type:
+            raise RuntimeError("DeviceBufferDescriptor handle_type must be non-empty.")
+        if not desc.dtype:
+            raise RuntimeError("DeviceBufferDescriptor dtype must be non-empty.")
+        if not desc.shape:
+            raise RuntimeError("DeviceBufferDescriptor shape must be non-empty.")
+        if desc.strides is not None and len(desc.strides) != len(desc.shape):
+            raise RuntimeError(
+                "DeviceBufferDescriptor strides must be None or match shape rank."
+            )
+        if desc.nbytes <= 0:
+            raise RuntimeError("DeviceBufferDescriptor nbytes must be positive.")
+        if desc.storage_offset_bytes < 0:
+            raise RuntimeError(
+                "DeviceBufferDescriptor storage_offset_bytes must be non-negative."
+            )
+        if not desc.layout_format:
+            raise RuntimeError(
+                "DeviceBufferDescriptor layout_format must be non-empty."
+            )
+        if not isinstance(desc.layout_hints, dict):
+            raise TypeError(
+                "DeviceBufferDescriptor layout_hints must be a dict, got "
+                f"{type(desc.layout_hints)!r}."
+            )
+        if (
+            engine_type == EngineType.MAX
+            and desc.layout_format != DeviceBufferImporter._MAX_LAYOUT_FORMAT
+        ):
+            raise RuntimeError(
+                "Modular MAX DeviceBufferDescriptor layout_format must be "
+                f"{DeviceBufferImporter._MAX_LAYOUT_FORMAT!r}, got "
+                f"{desc.layout_format!r}."
+            )
+
+
 @dataclass(order=True, frozen=True)
 class IPCCacheEngineKey:
     """Cache key for the IPC (multiprocess) protocol.
 
     This key type is sent by the client over ZMQ (serialized via msgspec).
 
-    The client sends token_ids, start, end, and request_id (all required).
-    The server computes chunk hashes via TokenHasher and converts to
-    ObjectKey for storage operations using ipc_key_to_object_keys().
+    The sender provides ``token_ids``, ``start``, and ``end``; the server
+    computes chunk hashes via TokenHasher.
 
     The request_id field is for session tracking and is NOT included
     in equality/hash comparisons (two keys with same content but different
@@ -265,6 +468,8 @@ class IPCCacheEngineKey:
                 f"cache_salt exceeds max length {self._SALT_MAX_LEN} "
                 f"(got {len(self.cache_salt)})"
             )
+        if not self.token_ids:
+            raise ValueError("IPCCacheEngineKey requires non-empty token_ids")
 
     # Helper function for unit tests only
     @classmethod
@@ -279,7 +484,7 @@ class IPCCacheEngineKey:
         request_id: str = "",
         cache_salt: str = "",
     ) -> "IPCCacheEngineKey":
-        """Create a key from token ids. Only used by the tests."""
+        """Create a token-mode key for MP serving-engine adapters."""
         return cls(
             model_name=model_name,
             world_size=world_size,
@@ -306,7 +511,7 @@ class IPCCacheEngineKey:
 
 
 # Type exports
-KVCache = list[CudaIPCWrapper]
+KVCache = list[Any]
 
 
 @dataclass

@@ -264,6 +264,18 @@ class MPCacheEngine:
         else:
             logger.warning("No KV cache found for GPU ID %d to unregister", instance_id)
 
+    def _chunk_hashes_for_range(self, key: IPCCacheEngineKey) -> list[bytes]:
+        """Return ObjectKey chunk hashes for STORE/RETRIEVE key ranges."""
+        session = self.session_manager.get_or_create(key.request_id)
+        session.set_tokens(list(key.token_ids))
+        return [
+            TokenHasher.hash_to_bytes(h) for h in session.get_hashes(key.start, key.end)
+        ]
+
+    def _chunk_hashes_for_lookup(self, key: IPCCacheEngineKey) -> list[bytes]:
+        """Return ObjectKey chunk hashes for a LOOKUP key."""
+        return self.token_hasher.compute_chunk_hashes(list(key.token_ids))
+
     @_lmcache_nvtx_annotate
     def store(
         self,
@@ -287,20 +299,16 @@ class MPCacheEngine:
                 that signals the completion of the store operation. The second
                 element indicates whether the store operation was successful.
         """
-        session = self.session_manager.get_or_create(key.request_id)
-        session.set_tokens(list(key.token_ids))
-        chunk_hashes = [
-            TokenHasher.hash_to_bytes(h) for h in session.get_hashes(key.start, key.end)
-        ]
+        chunk_hashes = self._chunk_hashes_for_range(key)
 
         st = time.perf_counter()
 
-        assert key.worker_id is not None, "Must store with worker_id != None"
+        if key.worker_id is None:
+            raise ValueError("Must store with worker_id != None")
         obj_keys = ipc_key_to_object_keys(key, chunk_hashes)
 
-        assert instance_id in self.gpu_contexts, (
-            f"KV cache not registered for GPU ID {instance_id}"
-        )
+        if instance_id not in self.gpu_contexts:
+            raise RuntimeError(f"KV cache not registered for GPU ID {instance_id}")
         gpu_context = self.gpu_contexts[instance_id]
         model_name = self.gpu_context_meta[instance_id][0]
 
@@ -454,20 +462,16 @@ class MPCacheEngine:
                 that signals the completion of the retrieve operation. The second
                 element indicates whether the key was successfully retrieved.
         """
-        session = self.session_manager.get_or_create(key.request_id)
-        session.set_tokens(list(key.token_ids))
-        chunk_hashes = [
-            TokenHasher.hash_to_bytes(h) for h in session.get_hashes(key.start, key.end)
-        ]
+        chunk_hashes = self._chunk_hashes_for_range(key)
 
         st = time.perf_counter()
 
-        assert key.worker_id is not None, "Must retrieve with worker_id != None"
+        if key.worker_id is None:
+            raise ValueError("Must retrieve with worker_id != None")
         obj_keys = ipc_key_to_object_keys(key, chunk_hashes)
 
-        assert instance_id in self.gpu_contexts, (
-            f"KV cache not registered for GPU ID {instance_id}"
-        )
+        if instance_id not in self.gpu_contexts:
+            raise RuntimeError(f"KV cache not registered for GPU ID {instance_id}")
         gpu_context = self.gpu_contexts[instance_id]
         model_name = self.gpu_context_meta[instance_id][0]
 
@@ -696,8 +700,8 @@ class MPCacheEngine:
 
         extra_count = compute_extra_count(tp_size, world_size)
 
-        # Compute chunk hashes for all full chunks
-        chunk_hashes = self.token_hasher.compute_chunk_hashes(list(key.token_ids))
+        # Compute chunk hashes for all full chunks from the token-mode key.
+        chunk_hashes = self._chunk_hashes_for_lookup(key)
         if not chunk_hashes:
             self._register_prefetch_job(
                 _PrefetchJob(
@@ -935,9 +939,7 @@ class MPCacheEngine:
             logger.warning("Session %s not found, skipping touch", request_id)
             return
         if session.lookup_ipc_key is None:
-            logger.warning(
-                "Session %s has no lookup ipc key, skipping touch", request_id
-            )
+            logger.debug("Session %s has no lookup ipc key, skipping touch", request_id)
             return
 
         chunk_hashes = [TokenHasher.hash_to_bytes(h) for h in session.get_hashes(0)]

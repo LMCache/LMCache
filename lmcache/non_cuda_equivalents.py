@@ -275,6 +275,9 @@ class GPUKVFormat(IntEnum):
     # used by: TRT-LLM cross-layer (HND layout)
     NB_NL_TWO_NH_BS_HS = 8
 
+    # used by: Modular MAX cross-layer layout
+    NB_KV_NL_BS_NH_HS = 9
+
 
 class PageBufferShapeDesc:
     """Python stand-in for the C++ ``PageBufferShapeDesc`` struct.

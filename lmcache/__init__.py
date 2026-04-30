@@ -3,6 +3,7 @@
 # Standard
 from typing import Any
 import importlib
+import os
 import sys
 
 # First Party
@@ -25,6 +26,9 @@ def _get_backend() -> Any:
     """
     Try backends in order, first successful import wins.
     """
+    if os.environ.get("NO_CUDA_EXT", "0") == "1":
+        return importlib.import_module("lmcache.non_cuda_equivalents")
+
     # Third Party
     import torch
 

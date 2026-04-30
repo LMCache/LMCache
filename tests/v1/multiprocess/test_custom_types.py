@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
+from dataclasses import replace
 from multiprocessing import Queue
 import multiprocessing as mp
 
@@ -9,10 +10,14 @@ import pytest
 import torch
 
 # First Party
+from lmcache.utils import EngineType
 from lmcache.v1.multiprocess.custom_types import (
     BlockAllocationRecord,
     CudaIPCWrapper,
+    DeviceBufferDescriptor,
+    DeviceBufferImporter,
     IPCCacheEngineKey,
+    KVCache,
     get_customized_decoder,
     get_customized_encoder,
 )
@@ -60,6 +65,102 @@ def test_ipc_cache_engine_key_serialization_with_cache_salt():
 
     assert original_key == decoded_key
     assert decoded_key.cache_salt == "alice"
+
+
+def test_ipc_cache_engine_key_rejects_empty_token_ids():
+    with pytest.raises(ValueError, match="requires non-empty token_ids"):
+        IPCCacheEngineKey(
+            model_name="test_model",
+            world_size=1,
+            worker_id=None,
+            token_ids=(),
+            start=0,
+            end=0,
+            request_id="req",
+        )
+
+
+def test_device_buffer_importer_rejects_unsupported_backend():
+    desc = DeviceBufferDescriptor(
+        engine_type=EngineType.MAX,
+        backend="rocm",
+        handle_type="hip_ipc",
+        handle=b"",
+        device_id=0,
+        dtype="torch.float16",
+        shape=(1,),
+        strides=None,
+        nbytes=2,
+        storage_offset_bytes=0,
+        layout_format="NB_KV_NL_BS_NH_HS",
+        layout_hints={},
+    )
+
+    with pytest.raises(RuntimeError, match="does not yet support backend 'rocm'"):
+        DeviceBufferImporter.from_descriptor(desc)
+
+
+def test_device_buffer_descriptor_kv_cache_wire_roundtrip():
+    desc = DeviceBufferDescriptor(
+        engine_type=EngineType.MAX,
+        backend="cuda",
+        handle_type="cuda_ipc",
+        handle=b"serialized-handle",
+        device_id=0,
+        dtype="torch.float16",
+        shape=(32, 2, 4, 16, 8, 64),
+        strides=None,
+        nbytes=1,
+        storage_offset_bytes=0,
+        layout_format="NB_KV_NL_BS_NH_HS",
+        layout_hints={"tokens_per_block": 16},
+    )
+
+    encoder = get_customized_encoder(KVCache)
+    decoder = get_customized_decoder(KVCache)
+    decoded = decoder.decode(encoder.encode([desc]))
+
+    assert decoded[0]["engine_type"] == "max"
+    assert decoded[0]["backend"] == "cuda"
+    assert decoded[0]["handle"] == b"serialized-handle"
+    assert decoded[0]["shape"] == [32, 2, 4, 16, 8, 64]
+
+
+def test_device_buffer_importer_validates_cuda_descriptor_metadata(monkeypatch):
+    tensor = torch.empty((2, 3), dtype=torch.float32)
+
+    class FakeCudaWrapper:
+        def to_tensor(self):
+            return tensor
+
+    monkeypatch.setattr(
+        CudaIPCWrapper,
+        "Deserialize",
+        staticmethod(lambda _payload: FakeCudaWrapper()),
+    )
+    desc = DeviceBufferDescriptor(
+        engine_type="max",
+        backend="cuda",
+        handle_type="cuda_ipc",
+        handle=b"serialized-handle",
+        device_id=0,
+        dtype=str(tensor.dtype),
+        shape=tuple(tensor.shape),
+        strides=tuple(tensor.stride()),
+        nbytes=tensor.untyped_storage().nbytes(),
+        storage_offset_bytes=tensor.storage_offset() * tensor.element_size(),
+        layout_format="NB_KV_NL_BS_NH_HS",
+        layout_hints={"tokens_per_block": 16},
+    )
+
+    assert DeviceBufferImporter.from_descriptor(desc) is tensor
+
+    with pytest.raises(RuntimeError, match="dtype mismatch"):
+        DeviceBufferImporter.from_descriptor(replace(desc, dtype=str(torch.float16)))
+    with pytest.raises(RuntimeError, match="nbytes mismatch"):
+        DeviceBufferImporter.from_descriptor(replace(desc, nbytes=1))
+    with pytest.raises(RuntimeError, match="layout_format"):
+        DeviceBufferImporter.from_descriptor(replace(desc, layout_format="unsupported"))
 
 
 @pytest.mark.skipif(

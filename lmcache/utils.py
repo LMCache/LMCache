@@ -597,6 +597,7 @@ class EngineType(Enum):
     VLLM = "vllm"
     SGLANG = "sglang"
     TRTLLM = "trtllm"
+    MAX = "max"
     MOCK = "mock"
 
 
