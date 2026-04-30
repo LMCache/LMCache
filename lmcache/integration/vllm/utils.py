@@ -335,14 +335,6 @@ def get_size_bytes(shapes: list[torch.Size], kv_dtypes: list[torch.dtype]):
     )
 
 
-def get_vllm_device_type() -> str:
-    """Return current vLLM platform device type string (e.g. cuda/xpu)."""
-    # Third Party
-    from vllm.platforms import current_platform
-
-    return current_platform.device_type
-
-
 def calculate_local_rank_and_world_size(vllm_config: "VllmConfig") -> Tuple[int, int]:
     """
     Calculate the local worker id and local world size.
