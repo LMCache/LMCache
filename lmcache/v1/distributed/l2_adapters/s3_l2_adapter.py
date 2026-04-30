@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Optional
 from urllib.parse import quote as url_quote
 import asyncio
 import ctypes
+import os
 import threading
 
 if TYPE_CHECKING:
@@ -83,6 +84,87 @@ def _format_safe_path(key_str: str) -> str:
     """Flatten slashes and URL-encode to form a safe HTTP path."""
     flat = key_str.replace("/", "_")
     return "/" + url_quote(flat)
+
+
+def _make_credentials_provider(
+    config: "S3L2AdapterConfig",
+    bootstrap: io.ClientBootstrap,
+) -> auth.AwsCredentialsProvider:
+    """Build an awscrt credentials provider for the S3 L2 adapter.
+
+    Resolution priority:
+
+    1. Static keys from ``config.aws_access_key_id`` /
+       ``config.aws_secret_access_key`` when both are set.
+    2. ``boto3``-backed delegate when ``AWS_CONTAINER_CREDENTIALS_FULL_URI``
+       is in the environment (CoreWeave CKS Pod Identity Webhook, ECS task
+       roles, and any other HTTPS container-credentials runtime). The
+       ``awscrt`` default chain in the currently shipped Python binding
+       does not expose a ``tls_ctx`` for the container-credentials provider,
+       so HTTPS handshakes to endpoints like ``api.coreweave.com`` fail
+       with ``AWS_IO_MAX_RETRIES_EXCEEDED``. ``boto3`` resolves these
+       credentials through ``botocore.credentials.RefreshableCredentials``,
+       which we re-publish to ``awscrt`` via ``new_delegate``; each sign
+       call invokes ``get_frozen_credentials()``, triggering refresh
+       before expiry.
+    3. ``awscrt`` default chain (env vars, shared profile, IMDS) for
+       everything else.
+
+    Args:
+        config: S3 L2 adapter configuration.
+        bootstrap: Client bootstrap reused by the awscrt default chain.
+
+    Returns:
+        An ``AwsCredentialsProvider`` ready to attach to ``S3Request``.
+
+    Raises:
+        ImportError: container-credentials env vars are present but
+            ``boto3`` is not installed.
+        RuntimeError: ``boto3`` returned no resolvable credentials in the
+            container-credentials branch.
+    """
+    if config.aws_access_key_id and config.aws_secret_access_key:
+        logger.info("S3L2Adapter using explicit AWS credentials")
+        return auth.AwsCredentialsProvider.new_static(
+            config.aws_access_key_id,
+            config.aws_secret_access_key,
+        )
+
+    if os.environ.get("AWS_CONTAINER_CREDENTIALS_FULL_URI"):
+        logger.info(
+            "S3L2Adapter using container credentials via boto3 delegate "
+            "(AWS_CONTAINER_CREDENTIALS_FULL_URI detected)"
+        )
+        try:
+            # Third Party
+            import boto3
+        except ImportError as e:
+            raise ImportError(
+                "S3L2Adapter detected AWS_CONTAINER_CREDENTIALS_FULL_URI but "
+                "boto3 is not installed. Install boto3 to use container "
+                "credentials, or set aws_access_key_id / aws_secret_access_key "
+                "in the adapter config."
+            ) from e
+
+        boto_creds = boto3.Session().get_credentials()
+        if boto_creds is None:
+            raise RuntimeError(
+                "S3L2Adapter: boto3 returned no credentials despite "
+                "AWS_CONTAINER_CREDENTIALS_FULL_URI being set"
+            )
+
+        def fetch() -> auth.AwsCredentials:
+            frozen = boto_creds.get_frozen_credentials()
+            return auth.AwsCredentials(
+                frozen.access_key,
+                frozen.secret_key,
+                frozen.token,
+            )
+
+        return auth.AwsCredentialsProvider.new_delegate(fetch)
+
+    logger.info("S3L2Adapter using awscrt default credentials chain")
+    return auth.AwsCredentialsProvider.new_default_chain(bootstrap)
 
 
 class MemoryViewStream:
@@ -276,17 +358,9 @@ class S3L2Adapter(L2AdapterInterface):
         host_resolver = io.DefaultHostResolver(event_loop_group)
         client_bootstrap = io.ClientBootstrap(event_loop_group, host_resolver)
 
-        if config.aws_access_key_id and config.aws_secret_access_key:
-            logger.info("Using explicit AWS credentials for S3L2Adapter")
-            self._credentials_provider = auth.AwsCredentialsProvider.new_static(
-                config.aws_access_key_id,
-                config.aws_secret_access_key,
-            )
-        else:
-            logger.info("S3L2Adapter using default AWS credentials chain")
-            self._credentials_provider = auth.AwsCredentialsProvider.new_default_chain(
-                client_bootstrap
-            )
+        self._credentials_provider = _make_credentials_provider(
+            config, client_bootstrap
+        )
 
         tls_opts = None
         if config.s3_prefer_http2:
