@@ -97,7 +97,10 @@ bool MooncakeConnector::do_single_exists(WorkerMooncakeConn& conn,
   // isExist returns: 1=exists, 0=not, -1=error
   int result = conn.client->isExist(key);
   if (result < 0) {
-    throw std::runtime_error("Mooncake isExist failed for key: " + key);
+    fprintf(stderr,
+            "[LMCache EXISTS] key %s failed: Mooncake isExist returned %d\n",
+            key.c_str(), result);
+    return false;
   }
   return result == 1;
 }
@@ -170,8 +173,12 @@ void MooncakeConnector::do_batch_exists(WorkerMooncakeConn& conn,
 
   for (size_t i = 0; i < results.size(); ++i) {
     if (results[i] < 0) {
-      throw std::runtime_error("Mooncake batchIsExist failed for key: " +
-                               req.keys[i]);
+      fprintf(stderr,
+              "[LMCache EXISTS] key %s failed: Mooncake batchIsExist "
+              "returned %d\n",
+              req.keys[i].c_str(), results[i]);
+      req.batch->per_key_results[req.start_idx + i] = 0;
+      continue;
     }
     req.batch->per_key_results[req.start_idx + i] = results[i] == 1 ? 1 : 0;
   }
