@@ -18,16 +18,29 @@ namespace connector {
 
 uint64_t BlkioConnector::key_to_offset(const std::string& key) {
   // Key format from NativeConnectorL2Adapter:
-  //   "{model}@{kv_rank:08x}@{chunk_hash_hex}"
+  //   Without cache_salt: "{model}@{kv_rank:08x}@{chunk_hash_hex}"
+  //   With cache_salt:    "{model}@{kv_rank:08x}@{chunk_hash_hex}@{cache_salt}"
   //
-  // For the blkio backend the chunk_hash_hex field encodes the
-  // byte offset on the block device (written as a hex string by
-  // the Python layer).
-  size_t last_sep = key.rfind('@');
-  if (last_sep == std::string::npos || last_sep + 1 >= key.size()) {
-    throw std::runtime_error("blkio: invalid key format (no '@'): " + key);
+  // For the blkio backend the chunk_hash_hex field (always the third field)
+  // encodes the byte offset on the block device (written as a hex string
+  // by the Python layer).  We split on '@' and take the third element to
+  // handle both with and without cache_salt correctly.
+  size_t first_sep = key.find('@');
+  size_t second_sep = key.find('@', first_sep + 1);
+  size_t third_sep = key.find('@', second_sep + 1);
+
+  // Validate we have at least 3 fields (model@rank@hash)
+  if (first_sep == std::string::npos || second_sep == std::string::npos) {
+    throw std::runtime_error("blkio: invalid key format (need at least 3 '@' separators): " + key);
   }
-  const char* hex_start = key.c_str() + last_sep + 1;
+
+  // The offset is the third field, which ends at either:
+  // - The fourth '@' if cache_salt is present
+  // - End of string if cache_salt is absent
+  size_t offset_end = (third_sep != std::string::npos) ? third_sep : key.size();
+  std::string offset_str = key.substr(second_sep + 1, offset_end - (second_sep + 1));
+
+  const char* hex_start = offset_str.c_str();
   char* end = nullptr;
   errno = 0;
   uint64_t offset = std::strtoull(hex_start, &end, 16);

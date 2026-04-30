@@ -188,6 +188,7 @@ def cuda_extension() -> tuple[list, dict]:
     mooncake_sources = [
         "csrc/storage_backends/mooncake/pybind.cpp",
         "csrc/storage_backends/mooncake/connector.cpp",
+    ]
     blkio_sources = [
         "csrc/storage_backends/blkio/pybind.cpp",
         "csrc/storage_backends/blkio/connector.cpp",
@@ -283,6 +284,7 @@ def rocm_extension() -> tuple[list, dict]:
     mooncake_sources = [
         "csrc/storage_backends/mooncake/pybind.cpp",
         "csrc/storage_backends/mooncake/connector.cpp",
+    ]
     blkio_sources = [
         "csrc/storage_backends/blkio/pybind.cpp",
         "csrc/storage_backends/blkio/connector.cpp",
