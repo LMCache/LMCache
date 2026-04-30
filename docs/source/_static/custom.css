@@ -188,6 +188,8 @@ div.highlight button.copybtn + button.copybtn {
 
 .lmcache-goblin--standing,
 .lmcache-goblin--walking,
+.lmcache-goblin--dancing,
+.lmcache-goblin--grimace,
 .lmcache-goblin--focus {
     filter: drop-shadow(0 10px 18px rgb(0 0 0 / 16%));
 }

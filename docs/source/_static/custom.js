@@ -1,3 +1,20 @@
+/**
+ * Goblin image pair and placement metadata.
+ *
+ * @typedef {Object} GoblinVariant
+ * @property {string} name The variant name used for CSS classes and session state.
+ * @property {string} image The default image filename in the Sphinx static directory.
+ * @property {string} hitImage The clicked-state image filename in the Sphinx static directory.
+ * @property {"edge" | "free" | "link"} placement The placement strategy for this variant.
+ * @property {[number, number]} size The minimum and maximum rendered size in pixels.
+ * @property {number} weight The relative selection weight for this variant.
+ */
+
+/**
+ * Get the base URL for docs static assets by locating the loaded custom.js file.
+ *
+ * @returns {string} The absolute or relative base URL for static assets.
+ */
 function getDocsStaticBaseUrl() {
   var currentScript = document.querySelector('script[src*="custom.js"]');
 
@@ -8,6 +25,11 @@ function getDocsStaticBaseUrl() {
   return new URL(".", currentScript.src).href;
 }
 
+/**
+ * Add the RunLLM assistant widget script once per page.
+ *
+ * @returns {void}
+ */
 function addRunLlmWidget() {
   if (document.getElementById("runllm-widget-script")) {
     return;
@@ -30,12 +52,24 @@ function addRunLlmWidget() {
   document.head.appendChild(script);
 }
 
+/**
+ * Remove all goblin easter egg elements from the current page.
+ *
+ * @returns {void}
+ */
 function removeGoblinEasterEgg() {
   document.querySelectorAll(".lmcache-goblin").forEach(function (goblin) {
     goblin.remove();
   });
 }
 
+/**
+ * Load an image and run a callback after the browser has loaded the source.
+ *
+ * @param {string} src The image URL to load.
+ * @param {() => void} onLoad Callback invoked when the image has loaded.
+ * @returns {void}
+ */
 function loadGoblinImage(src, onLoad) {
   var image = new Image();
 
@@ -43,14 +77,34 @@ function loadGoblinImage(src, onLoad) {
   image.src = src;
 }
 
+/**
+ * Return a random number in the half-open range [minimum, maximum).
+ *
+ * @param {number} minimum The lower bound.
+ * @param {number} maximum The upper bound.
+ * @returns {number} A random number between the provided bounds.
+ */
 function randomNumber(minimum, maximum) {
   return Math.random() * (maximum - minimum) + minimum;
 }
 
+/**
+ * Pick a random item from a non-empty array.
+ *
+ * @template T
+ * @param {T[]} items The candidate items.
+ * @returns {T} One randomly selected item.
+ */
 function pickRandomItem(items) {
   return items[Math.floor(Math.random() * items.length)];
 }
 
+/**
+ * Pick a goblin variant according to each variant's relative weight.
+ *
+ * @param {GoblinVariant[]} variants The variants to choose from.
+ * @returns {GoblinVariant} The selected variant.
+ */
 function pickWeightedGoblinVariant(variants) {
   var totalWeight = variants.reduce(function (total, variant) {
     return total + variant.weight;
@@ -67,6 +121,11 @@ function pickWeightedGoblinVariant(variants) {
   return variants[variants.length - 1];
 }
 
+/**
+ * Pick the next goblin variant while avoiding the previous session variant.
+ *
+ * @returns {GoblinVariant} The selected goblin variant.
+ */
 function pickGoblinVariant() {
   var variants = [
     {
@@ -83,12 +142,28 @@ function pickGoblinVariant() {
       hitImage: "goblin_standing_hit.png",
       placement: "free",
       size: [124, 156],
-      weight: 1.4,
+      weight: 1,
     },
     {
       name: "walking",
       image: "goblin_walking.png",
       hitImage: "goblin_walking_hit.png",
+      placement: "free",
+      size: [118, 150],
+      weight: 1,
+    },
+    {
+      name: "dancing",
+      image: "goblin_dancing.png",
+      hitImage: "goblin_dancing_hit.png",
+      placement: "free",
+      size: [130, 166],
+      weight: 1,
+    },
+    {
+      name: "grimace",
+      image: "goblin_grimace.png",
+      hitImage: "goblin_grimace_hit.png",
       placement: "free",
       size: [118, 150],
       weight: 1,
@@ -114,6 +189,11 @@ function pickGoblinVariant() {
   return nextVariant;
 }
 
+/**
+ * Pick an edge placement while avoiding the previous session placement.
+ *
+ * @returns {string} A CSS class for the selected edge placement.
+ */
 function pickEdgePlacement() {
   var positions = [
     "lmcache-goblin--bottom-left",
@@ -134,6 +214,12 @@ function pickEdgePlacement() {
   return nextPosition;
 }
 
+/**
+ * Place a goblin at a random free-floating position in the viewport.
+ *
+ * @param {HTMLButtonElement} goblinButton The goblin button element.
+ * @returns {void}
+ */
 function positionGoblinFreely(goblinButton) {
   goblinButton.classList.add("lmcache-goblin--free");
   goblinButton.style.setProperty(
@@ -146,8 +232,16 @@ function positionGoblinFreely(goblinButton) {
   );
 }
 
+/**
+ * Place a goblin near a currently visible documentation link.
+ *
+ * @param {HTMLButtonElement} goblinButton The goblin button element.
+ * @returns {void}
+ */
 function positionGoblinNearLink(goblinButton) {
-  var links = Array.from(document.querySelectorAll("main a[href], aside a[href]"));
+  var links = Array.from(
+    document.querySelectorAll("main a[href], aside a[href]"),
+  );
   var visibleLinks = links.filter(function (link) {
     var rect = link.getBoundingClientRect();
 
@@ -175,6 +269,13 @@ function positionGoblinNearLink(goblinButton) {
   goblinButton.style.setProperty("--goblin-top", top.toFixed(0) + "px");
 }
 
+/**
+ * Apply the placement strategy for a selected goblin variant.
+ *
+ * @param {HTMLButtonElement} goblinButton The goblin button element.
+ * @param {GoblinVariant} variant The selected goblin variant.
+ * @returns {void}
+ */
 function positionGoblin(goblinButton, variant) {
   if (variant.placement === "edge") {
     goblinButton.classList.add(pickEdgePlacement());
@@ -185,6 +286,11 @@ function positionGoblin(goblinButton, variant) {
   }
 }
 
+/**
+ * Add a randomized clickable goblin easter egg to the current docs page.
+ *
+ * @returns {void}
+ */
 function addGoblinEasterEgg() {
   var highVisibilityPages = [
     "/getting_started/quickstart.html",
@@ -279,15 +385,29 @@ function addGoblinEasterEgg() {
   loadGoblinImage(hitGoblinSrc, function () {});
 }
 
-document.addEventListener("DOMContentLoaded", function () {
+/**
+ * Initialize docs widgets after the DOM is ready.
+ *
+ * @returns {void}
+ */
+function initializeDocsWidgets() {
   addRunLlmWidget();
   addGoblinEasterEgg();
-});
+}
 
-window.addEventListener("pagehide", removeGoblinEasterEgg);
-
-window.addEventListener("pageshow", function (event) {
+/**
+ * Restore the goblin after returning from the browser back-forward cache.
+ *
+ * @param {PageTransitionEvent} event The page show event.
+ * @returns {void}
+ */
+function restoreGoblinFromPageCache(event) {
   if (event.persisted) {
     addGoblinEasterEgg();
   }
-});
+}
+
+document.addEventListener("DOMContentLoaded", initializeDocsWidgets);
+
+window.addEventListener("pagehide", removeGoblinEasterEgg);
+window.addEventListener("pageshow", restoreGoblinFromPageCache);
