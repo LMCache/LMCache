@@ -1896,3 +1896,291 @@ class SGLangLayerwiseGPUConnector(GPUConnectorInterface):
     def get_shape(self, num_tokens: int) -> torch.Size:
         # TODO: support MLA
         return torch.Size([num_tokens, 2, self.hidden_dim_size])
+
+
+_TRTLLM_KERNEL_BATCH_SIZE = 32
+
+
+class TRTLLMGPUConnector(GPUConnectorInterface):
+    """GPU connector for TRT-LLM's cross-layer KV pool.
+
+    TRT-LLM hands LMCache a single 4-D pool tensor with shape
+    ``[num_blocks, num_layers, 2, num_kv_heads * tokens_per_block * head_dim]``
+    (HND layout, K and V interleaved on dim 2). On
+    :meth:`register_kv_caches` the connector calls
+    :func:`normalize_kv_and_discover_format` which reshapes the trailing
+    dim into ``[num_kv_heads, tokens_per_block, head_dim]``, yielding the
+    canonical 6-D ``[NB, NL, 2, NH, BS, HS]`` form (format
+    ``NB_NL_TWO_NH_BS_HS``).
+
+    Transfers go through :func:`lmc_ops.multi_layer_block_kv_transfer` —
+    the multiprocess kernel — using the single base pointer of the pool
+    tensor. Per-chunk block ids are taken from ``kwargs['block_ids']``,
+    sliced as ``block_ids[i * blocks_per_chunk : (i+1) * blocks_per_chunk]``
+    where ``blocks_per_chunk = chunk_size // tokens_per_block``.
+
+    This is intentionally NOT a subclass of
+    :class:`VLLMPagedMemGPUConnectorV3`. V3 drives the in-process kernel
+    with ``slot_mapping`` and per-layer pointers — the wrong primitive
+    for a single cross-layer base pointer.
+    """
+
+    def __init__(
+        self,
+        num_kv_heads: int,
+        head_dim: int,
+        hidden_dim_size: int,
+        num_layers: int,
+        chunk_size: int,
+        dtype: torch.dtype,
+        device: torch.device,
+    ) -> None:
+        self.num_kv_heads = num_kv_heads
+        self.head_dim = head_dim
+        self.hidden_dim_size = hidden_dim_size
+        self.num_layers = num_layers
+        self.chunk_size = chunk_size
+        self.dtype = dtype
+        self.device = device
+        self._batch_size = _TRTLLM_KERNEL_BATCH_SIZE
+        self.load_stream = torch.cuda.Stream(device=device)
+        self.store_stream = torch.cuda.Stream(device=device)
+
+        self.kv_cache_tensor: Optional[torch.Tensor] = None
+        self.paged_buffer_ptrs: Optional[torch.Tensor] = None
+        self.shape_desc: Optional["lmc_ops.PageBufferShapeDesc"] = None
+        self._kv_format: Optional["lmc_ops.GPUKVFormat"] = None
+        self.tokens_per_block: Optional[int] = None
+        self.blocks_per_chunk: Optional[int] = None
+
+    @classmethod
+    def from_metadata(
+        cls,
+        metadata: LMCacheMetadata,
+        device: torch.device,
+    ) -> "TRTLLMGPUConnector":
+        """Create a connector from :class:`LMCacheMetadata`.
+
+        Args:
+            metadata: Metadata carrying ``kv_shape``
+                ``(num_layers, 2, chunk_size, num_kv_heads, head_size)`` and
+                ``kv_dtype``.
+            device: CUDA device for transfer streams and block-ids staging.
+        """
+        num_layers = metadata.kv_shape[0]
+        chunk_size = metadata.kv_shape[2]
+        num_kv_heads = metadata.kv_shape[3]
+        head_dim = metadata.kv_shape[4]
+        hidden_dim_size = num_kv_heads * head_dim
+        return cls(
+            num_kv_heads=num_kv_heads,
+            head_dim=head_dim,
+            hidden_dim_size=hidden_dim_size,
+            num_layers=num_layers,
+            chunk_size=chunk_size,
+            dtype=metadata.kv_dtype,
+            device=device,
+        )
+
+    def register_kv_caches(self, kv_cache_tensor: torch.Tensor) -> None:
+        """Register TRT-LLM's 4-D KV pool tensor with the connector.
+
+        Reshapes the 4-D tensor to canonical 6-D form, runs format
+        discovery, and caches the base pointer / shape descriptor used
+        by every subsequent transfer.
+
+        Called once at TRT-LLM worker init — separate from
+        :meth:`to_gpu` / :meth:`from_gpu`. Idempotent if called with the
+        same tensor; reassigning a different tensor replaces the
+        previously registered one.
+        """
+        if kv_cache_tensor.dim() != 4:
+            raise ValueError(
+                f"TRT-LLM kv_cache_tensor must be 4-D "
+                f"[NB, NL, 2, flat], got shape {tuple(kv_cache_tensor.shape)}"
+            )
+        num_blocks, num_layers, kv_factor, flat = kv_cache_tensor.shape
+        tokens_per_block = flat // (self.num_kv_heads * self.head_dim)
+        if tokens_per_block * self.num_kv_heads * self.head_dim != flat:
+            raise ValueError(
+                f"flat dim {flat} not divisible by "
+                f"num_kv_heads * head_dim ({self.num_kv_heads * self.head_dim})"
+            )
+        self.tokens_per_block = tokens_per_block
+        self.blocks_per_chunk = self.chunk_size // tokens_per_block
+
+        layout_hints: LayoutHints = {
+            "kv_layout": "HND",
+            "num_kv_heads": self.num_kv_heads,
+            "tokens_per_block": tokens_per_block,
+            "head_dim": self.head_dim,
+        }
+        kv_format, normalized = normalize_kv_and_discover_format(
+            kv_cache_tensor, EngineType.TRTLLM, layout_hints=layout_hints
+        )
+        if not isinstance(normalized, torch.Tensor):
+            raise ValueError(
+                "TRT-LLM normalize must return a bare tensor; "
+                f"got {type(normalized).__name__}"
+            )
+        self._kv_format = kv_format
+        self.kv_cache_tensor = normalized
+
+        shape_desc = lmc_ops.PageBufferShapeDesc()
+        shape_desc.kv_size = kv_factor
+        shape_desc.nl = num_layers
+        shape_desc.nb = num_blocks
+        shape_desc.bs = tokens_per_block
+        shape_desc.nh = self.num_kv_heads
+        shape_desc.hs = self.head_dim
+        shape_desc.element_size = normalized.element_size()
+        self.shape_desc = shape_desc
+
+        self.paged_buffer_ptrs = torch.tensor(
+            get_group_data_ptrs(normalized, kv_format, list(range(num_layers))),
+            dtype=torch.int64,
+            device=self.device,
+        )
+
+    def get_shape(self, num_tokens: int) -> torch.Size:
+        return torch.Size([2, self.num_layers, num_tokens, self.hidden_dim_size])
+
+    def _stage_block_ids(self, block_ids: List[int]) -> torch.Tensor:
+        return torch.tensor(block_ids, dtype=torch.int64, device=self.device)
+
+    def _get_chunk_block_ids(
+        self, block_ids: List[int], start: int
+    ) -> Optional[List[int]]:
+        assert self.blocks_per_chunk is not None
+        chunk_idx = start // self.chunk_size
+        bs = chunk_idx * self.blocks_per_chunk
+        be = bs + self.blocks_per_chunk
+        if be > len(block_ids):
+            return None
+        return block_ids[bs:be]
+
+    def _transfer(
+        self,
+        tensor_ptr: int,
+        block_ids: List[int],
+        direction: "lmc_ops.TransferDirection",
+        stream: torch.cuda.Stream,
+    ) -> None:
+        with torch.cuda.stream(stream):
+            block_ids_gpu = self._stage_block_ids(block_ids)
+            lmc_ops.multi_layer_block_kv_transfer(
+                self.paged_buffer_ptrs,
+                [tensor_ptr],
+                block_ids_gpu,
+                self.device,
+                direction,
+                self.shape_desc,
+                self.chunk_size,
+                self._kv_format,
+                0,  # skip_prefix_n_blocks
+            )
+
+    def to_gpu(self, memory_obj: MemoryObj, start: int, end: int, **kwargs) -> None:
+        if self.kv_cache_tensor is None:
+            raise RuntimeError("register_kv_caches must be called before to_gpu")
+        chunk_blocks = self._get_chunk_block_ids(kwargs.get("block_ids", []), start)
+        if chunk_blocks is None or memory_obj.tensor is None:
+            return
+        self._transfer(
+            memory_obj.tensor.data_ptr(),
+            chunk_blocks,
+            lmc_ops.TransferDirection.H2D,
+            self.load_stream,
+        )
+
+    def from_gpu(self, memory_obj: MemoryObj, start: int, end: int, **kwargs) -> None:
+        if self.kv_cache_tensor is None:
+            raise RuntimeError("register_kv_caches must be called before from_gpu")
+        chunk_blocks = self._get_chunk_block_ids(kwargs.get("block_ids", []), start)
+        if chunk_blocks is None or memory_obj.tensor is None:
+            return
+        self._transfer(
+            memory_obj.tensor.data_ptr(),
+            chunk_blocks,
+            lmc_ops.TransferDirection.D2H,
+            self.store_stream,
+        )
+
+    def _batched_transfer(
+        self,
+        memory_objs: List[MemoryObj],
+        starts: List[int],
+        block_ids: List[int],
+        direction: "lmc_ops.TransferDirection",
+        stream: torch.cuda.Stream,
+    ) -> None:
+        valid: List[Tuple[MemoryObj, List[int]]] = []
+        for memory_obj, start in zip(memory_objs, starts, strict=False):
+            if isinstance(memory_obj, list) or memory_obj.tensor is None:
+                continue
+            chunk_blocks = self._get_chunk_block_ids(block_ids, start)
+            if chunk_blocks is not None:
+                valid.append((memory_obj, chunk_blocks))
+
+        with torch.cuda.stream(stream):
+            for i in range(0, len(valid), self._batch_size):
+                batch = valid[i : i + self._batch_size]
+                all_block_ids: List[int] = []
+                ptrs: List[int] = []
+                for mo, blocks in batch:
+                    all_block_ids.extend(blocks)
+                    ptrs.append(mo.tensor.data_ptr())  # type: ignore[union-attr]
+                block_ids_gpu = self._stage_block_ids(all_block_ids)
+                lmc_ops.multi_layer_block_kv_transfer(
+                    self.paged_buffer_ptrs,
+                    ptrs,
+                    block_ids_gpu,
+                    self.device,
+                    direction,
+                    self.shape_desc,
+                    self.chunk_size,
+                    self._kv_format,
+                    0,
+                )
+
+    def batched_from_gpu(
+        self,
+        memory_objs: Union[List[List[MemoryObj]], List[MemoryObj]],
+        starts: List[int],
+        ends: List[int],
+        **kwargs,
+    ) -> None:
+        if self.kv_cache_tensor is None:
+            raise RuntimeError(
+                "register_kv_caches must be called before batched_from_gpu"
+            )
+        self._batched_transfer(
+            memory_objs,  # type: ignore[arg-type]
+            starts,
+            kwargs.get("block_ids", []),
+            lmc_ops.TransferDirection.D2H,
+            self.store_stream,
+        )
+
+    def batched_to_gpu(
+        self,
+        memory_objs: Union[
+            List[List[MemoryObj]], List[MemoryObj], List[int], None
+        ] = None,
+        starts: Optional[List[int]] = None,
+        ends: Optional[List[int]] = None,
+        **kwargs,
+    ) -> None:
+        if memory_objs is None or starts is None or ends is None:
+            return
+        if self.kv_cache_tensor is None:
+            raise RuntimeError(
+                "register_kv_caches must be called before batched_to_gpu"
+            )
+        self._batched_transfer(
+            memory_objs,  # type: ignore[arg-type]
+            starts,
+            kwargs.get("block_ids", []),
+            lmc_ops.TransferDirection.H2D,
+            self.load_stream,
+        )
