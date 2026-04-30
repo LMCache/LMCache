@@ -2,10 +2,12 @@
 
 ## Invariant
 
-> **`discover_gpu_kv_format` is the only place that parses KV-cache layout.**
-> Every other module queries KV-cache information via helpers in
-> `lmcache/v1/gpu_connector/utils.py` that accept a `GPUKVFormat`
-> argument.
+> **`normalize_kv_and_discover_format` is the only place that parses
+> KV-cache layout.** It also returns the canonical (post-permute) form
+> of the kv_caches alongside the format, so callers never need a
+> separate normalization step. Every other module queries KV-cache
+> information via helpers in `lmcache/v1/gpu_connector/utils.py` that
+> accept a `GPUKVFormat` argument.
 
 "Layout parsing" means: list-nesting depth, tensor-dimension ordering,
 HND vs NHD, MLA vs MHA, per-layer vs cross-layer. All of that is
@@ -30,11 +32,14 @@ are responsible for unwrapping to this form before calling any helper.
 ## Adding a new format
 
 1. Add the enum value in `csrc/mem_kernels.cuh` and `csrc/pybind.cpp`.
-2. Extend `discover_gpu_kv_format` to detect it. The dispatch keys off
-   `(list_depth, tensor_ndim)` — both are computed once in a single
-   descent via the private `_list_depth_tensor_dim` probe, so new
-   detection branches only need to add a shape check, not re-walk the
-   structure.
+2. Extend `normalize_kv_and_discover_format` to detect it. The dispatch
+   keys off `(list_depth, tensor_ndim)` — both are computed once in a
+   single descent via the private `_list_depth_tensor_dim` probe, so
+   new detection branches only need to add a shape check, not re-walk
+   the structure. If the engine produces a tensor whose shape needs
+   reshape-via-hints (e.g. TRT-LLM's 4-D bare tensor that must be
+   `view`'d as 6-D), put the reshape inside this function in the
+   engine-keyed branch — *before* the permute step.
 3. Add a branch in every `utils.py` helper that raises "Unknown GPU KV
    Format" — the exhaustive chain makes it mechanical.
 4. Add a row in `tests/v1/gpu_connector/test_utils_shape_desc.py`.
@@ -52,7 +57,37 @@ a `GPUKVFormat`. Nothing else may index raw shapes.
 
 | Helper | Returns |
 |---|---|
-| `discover_gpu_kv_format(kv_caches, engine, layout_hints)` | `GPUKVFormat` — the one parser. |
+| `normalize_kv_and_discover_format(kv_caches, engine, layout_hints)` | `tuple[GPUKVFormat, DiscoverableKVCache]` — the one parser. Returns the canonical (permuted-to-contiguous) kv_caches alongside the detected format; callers must use the returned tensor structure for subsequent operations. |
+
+### Format → engine map
+
+| `GPUKVFormat` | Engine | Layout | Structure |
+|---|---|---|---|
+| `NB_NL_TWO_BS_NH_HS` | vLLM cross-layer | NHD | bare 6-D tensor `[NB, NL, 2, BS, NH, HS]` |
+| `NB_NL_TWO_NH_BS_HS` | TRT-LLM cross-layer | HND | bare 6-D tensor `[NB, NL, 2, NH, BS, HS]` |
+| `NL_X_TWO_NB_BS_NH_HS` | vLLM flash-attn | NHD | `NL × [2, NB, BS, NH, HS]` |
+| `NL_X_NB_TWO_BS_NH_HS` | vLLM flash-infer | NHD | `NL × [NB, 2, BS, NH, HS]` |
+| `NL_X_TWO_NB_NH_BS_HS` | vLLM flash-attn | HND | `NL × [2, NB, NH, BS, HS]` |
+| `NL_X_NB_TWO_NH_BS_HS` | vLLM flash-infer | HND | `NL × [NB, 2, NH, BS, HS]` |
+| `NL_X_NB_BS_HS` | vLLM MLA | — | `NL × [NB, BS, HS]` |
+| `TWO_X_NL_X_NBBS_NH_HS` | SGLang MHA | NHD | `[K_list, V_list]`, each `NL × [PBS, NH, HS]` |
+| `NL_X_NBBS_ONE_HS` | SGLang MLA | — | `NL × [PBS, 1, HS]` |
+
+The two cross-layer formats (`NB_NL_TWO_*`) share a single base
+pointer, the kernel walks layers internally via `shape_desc.nl`. Use
+`is_cross_layer_format(fmt)` for that dispatch and `is_hnd(fmt)` to
+detect head-major within-block layouts.
+
+### Reshape-via-hints (TRT-LLM)
+
+TRT-LLM hands LMCache a 4-D pool tensor
+`[NB, NL, 2, num_kv_heads * tokens_per_block * head_dim]` (HND, K and V
+interleaved on dim 2). `normalize_kv_and_discover_format` reshapes it
+to canonical 6-D form *before* the contiguity check, using
+`layout_hints["num_kv_heads" | "tokens_per_block" | "head_dim"]`. The
+function also collapses a 1-element list of a 6-D tensor down to the
+bare 6-D tensor so detection lands on `list_depth == 0`. Adapters pass
+either the 4-D bare tensor or `[4-D]`; the function handles both.
 
 ### Scalar accessors
 
@@ -87,7 +122,7 @@ helper.
 
 | Helper | Returns | Notes |
 |---|---|---|
-| `attempt_permute_to_contiguous_view(kv)` | `DiscoverableKVCache` | Recursive, metadata-only. No-op if already contiguous; raises `ValueError` for non-permutation-recoverable cases (slicing, `as_strided`). **Never copies.** Walks the full structure and permutes every tensor leaf. |
+| `attempt_permute_to_contiguous_view(kv)` | `DiscoverableKVCache` | Recursive, metadata-only. No-op if already contiguous; raises `ValueError` for non-permutation-recoverable cases (slicing, `as_strided`). **Never copies.** Walks the full structure and permutes every tensor leaf. Called internally by `normalize_kv_and_discover_format`; remains public only for callers that handle a tensor *outside* the discover flow (`GPUConnectorInterface.initialize_kvcaches_ptr`, `CudaIPCWrapper.__init__`). |
 
 ## Forbidden outside `utils.py`
 
@@ -96,8 +131,9 @@ helper.
   dimensions.
 - Hand-rolled list-depth probing (`while isinstance(x, list): depth +=
   1; x = x[0]`). There is no public depth helper and there shouldn't
-  be one — `discover_gpu_kv_format` encapsulates the descent, and
-  downstream code only ever needs the resulting `GPUKVFormat`.
+  be one — `normalize_kv_and_discover_format` encapsulates the
+  descent, and downstream code only ever needs the resulting
+  `GPUKVFormat`.
 - Wrapping a tensor with `[tensor]` to adapt to a helper's list-depth
   expectation — the accessors take `layer_idx` directly.
 - Hand-rolled pointer assembly (`[t.data_ptr() for t in kv_caches]`) —
@@ -108,7 +144,9 @@ helper.
   use `attempt_permute_to_contiguous_view` which refuses to copy.
 - "Canonicalize" functions that rewrite `kv_caches` to a uniform shape
   before passing to helpers. The helpers already canonicalize by
-  accepting `GPUKVFormat`.
+  accepting `GPUKVFormat`, and any reshape/normalize step that *is*
+  needed lives inside `normalize_kv_and_discover_format` — callers
+  receive the canonical form back from that one call.
 
 ## Consumers
 
@@ -126,15 +164,16 @@ helper.
   tensors via `get_group_data_ptrs`. No parallel `shape_descs_` /
   `hidden_dim_sizes_` state.
 - **`lmcache/v1/gpu_connector/gpu_connectors.py::VLLMPagedMemGPUConnectorV3._initialize_kv_cache_pointers`**
-  — for the in-process vLLM path, discovers format (after one call to
-  `attempt_permute_to_contiguous_view` for HND support) and constructs
+  — for the in-process vLLM path, calls
+  `normalize_kv_and_discover_format` (which permutes for HND support
+  and detects the format in one step) and constructs
   `metadata.kv_layer_groups_manager` lazily on first store/retrieve.
   The adapter (`vllm_v1_adapter.py`) does not participate in format
   discovery — it only stores `self.kv_caches` at register time.
 
-Only `discover_gpu_kv_format` consumes `layout_hints`.
-`attempt_permute_to_contiguous_view` infers the permutation from
-strides and needs no hints.
+Only `normalize_kv_and_discover_format` consumes `layout_hints`.
+`attempt_permute_to_contiguous_view` (called internally) infers the
+permutation from strides and needs no hints.
 
 ## Implementation note: mypy and the recursive union
 

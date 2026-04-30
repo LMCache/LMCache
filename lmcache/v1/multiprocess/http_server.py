@@ -139,6 +139,7 @@ def run_http_server(
     _configs["storage_manager"] = storage_manager_config
     _configs["observability"] = obs_config
     _configs["http"] = http_config
+    app.state.configs = _configs
 
     config = uvicorn.Config(
         app=app,

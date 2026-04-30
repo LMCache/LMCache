@@ -1,11 +1,19 @@
 # Storage Backend I/O Benchmark
 
 This microbenchmark compares **LocalDiskBackend** vs **RustRawBlockBackend** under high write-concurrency.
+For **RustRawBlockBackend** this also supports write and read performance testing for **posix** and **io_uring** backends.
 
 ## What It Measures
 
+### Write Benchmark
 - Total time to submit and complete `num_ops` write (put) operations
 - Effective ops/sec under concurrent submission
+
+### Read Benchmark (`--backend rust_raw_block_read`)
+- Write phase: Time to write `num_ops` memory objects to the raw block device
+- Read phase: Time to read back all `num_ops` objects using concurrent batched blocking reads
+- Data integrity verification (optional with `--verify-integrity`)
+- Separate metrics for write and read performance
 
 ## Usage
 
@@ -30,7 +38,8 @@ python benchmarks/storage_backend_io/storage_backend_io_benchmark.py \
 - `--raw-odirect` should only be used with a real block device that supports O_DIRECT.
 - When `--local-disk-odirect` is enabled, the benchmark allocates **page-aligned** buffers to avoid EINVAL from O_DIRECT.
 - Local disk backend uses its internal worker pool; completion is tracked via callbacks.
-- Rust raw block benchmark uses a unique manifest path per run to avoid stale-index reuse between runs.
+- Read benchmark (`rust_raw_block_read`) performs a write phase followed by a read phase, measuring both separately.
+- Use `--verify-integrity` with read benchmark to ensure data correctness (compares read data with original written data).
 
 ## How To Compare On Real NVMe
 
@@ -94,6 +103,58 @@ print(f"rust vs local: {(rust / local - 1.0) * 100.0:+.2f}%")
 PY
 ```
 
+## Use io_uring on Real NVMe
+
+### Compare posix vs io_uring write and read performance
+
+```bash
+# Run posix write & read benchmark. To enable data integrity `--verify-integrity`
+python benchmarks/storage_backend_io/storage_backend_io_benchmark.py \
+  --num-ops 1024 \
+  --concurrency 4 \
+  --backend rust_raw_block_read \
+  --raw-device /dev/nvme1n1 \
+  --chunk-size 256 \
+  --alignement 4096 \
+  --raw-odirect \
+  --output-json /tmp/rust_raw_block_read_posix.json
+
+# Run io_uring write & read benchmark. To enable data integrity `--verify-integrity`
+python benchmarks/storage_backend_io/storage_backend_io_benchmark.py \
+  --num-ops 1024 \
+  --concurrency 4 \
+  --backend rust_raw_block_read \
+  --raw-device /dev/nvme1n1 \
+  --raw-odirect \
+  --chunk-size 256 \
+  --alignement 4096 \
+  --use-uring \
+  --output-json /tmp/rust_raw_block_read_uring.json
+
+# Compute comparison
+python - <<'PY'
+import json
+
+with open("/tmp/rust_raw_block_read_posix.json") as f:
+    posix = json.load(f)[0]
+with open("/tmp/rust_raw_block_read_uring.json") as f:
+    uring = json.load(f)[0]
+
+print(f"posix read ops/sec: {posix['read_ops_per_sec']:.2f}")
+print(f"uring read ops/sec: {uring['read_ops_per_sec']:.2f}")
+print(f"uring vs posix read: {(uring['read_ops_per_sec'] / posix['read_ops_per_sec'] - 1.0) * 100.0:+.2f}%")
+print(f"posix write ops/sec: {posix['write_ops_per_sec']:.2f}")
+print(f"uring write ops/sec: {uring['write_ops_per_sec']:.2f}")
+print(f"uring vs posix write: {(uring['write_ops_per_sec'] / posix['write_ops_per_sec'] - 1.0) * 100.0:+.2f}%")
+PY
+```
+### Notes
+
+- There is a limit on the number of fixed buffers that can be registered. For unprivileged users its 16384.
+- Buffer registration and de-registration is time consuming.
+
 ## Output
 
 The script prints a summary and optionally writes JSON results if `--output-json` is provided.
+```
+

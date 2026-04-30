@@ -25,7 +25,6 @@ from lmcache.logging import init_logger
 from lmcache.utils import EngineType
 from lmcache.v1.gpu_connector import GPUConnectorInterface
 from lmcache.v1.gpu_connector.utils import (
-    discover_gpu_kv_format,
     get_block_size,
     get_dtype,
     get_head_size,
@@ -35,6 +34,7 @@ from lmcache.v1.gpu_connector.utils import (
     get_num_layers,
     get_page_buffer_size,
     is_mla,
+    normalize_kv_and_discover_format,
 )
 from lmcache.v1.memory_management import MemoryFormat, MemoryObj
 from lmcache.v1.metadata import LMCacheMetadata
@@ -294,7 +294,9 @@ class VLLMPagedMemHPUConnectorV2(GPUConnectorInterface):
                 fake_shape,
             )
 
-        self.gpu_kv_format = discover_gpu_kv_format(kv_caches, EngineType.VLLM)
+        self.gpu_kv_format, kv_caches = normalize_kv_and_discover_format(
+            kv_caches, EngineType.VLLM
+        )
         self.num_layers = get_num_layers(kv_caches, self.gpu_kv_format)
         self.num_blocks = get_num_blocks(kv_caches, self.gpu_kv_format)
         self.block_size = get_block_size(kv_caches, self.gpu_kv_format)
