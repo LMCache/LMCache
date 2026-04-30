@@ -402,9 +402,18 @@ class GdsBackend(AllocatorBackendInterface):
                             self._read_metadata(key, fentry.path, l1_dir + l2_dir)
                         except UnsupportedMetadataVersion:
                             logger.error(
-                                "Unsupported metadata version for "
-                                f"{fentry.path}, ignoring"
+                                "Unsupported metadata version for %s; "
+                                "ignoring during GDS start",
+                                fentry.path,
                             )
+                        except Exception:
+                            logger.error(
+                                "Failed to read metadata file %s during GDS start; "
+                                "raising the error to fail startup",
+                                fentry.path,
+                                exc_info=True,
+                            )
+                            raise
 
     def _read_metadata_info(self, filename: str):
         # Use O_NOATIME to prevent updating access time and improve performance
