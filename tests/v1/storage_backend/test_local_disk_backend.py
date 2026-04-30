@@ -386,7 +386,7 @@ class TestPoolExhaustionHandling:
     pool is exhausted during disk I/O."""
 
     def test_load_bytes_from_disk_returns_none_on_pool_exhaustion(
-        self, local_disk_backend, capsys
+        self, local_disk_backend, capfd
     ):
         """load_bytes_from_disk must return None (not crash) when allocate
         returns None, and emit a warning log."""
@@ -407,8 +407,8 @@ class TestPoolExhaustionHandling:
             "Expected None when staging pool is exhausted, not an assertion error"
         )
         # LMCache uses its own logger that writes to stderr, not stdlib
-        # logging handlers, so we check capsys instead of caplog.
-        captured = capsys.readouterr()
+        # logging handlers, so we use capfd (fd-level capture) instead of caplog.
+        captured = capfd.readouterr()
         assert "CPU staging pool exhausted" in captured.err, (
             "Expected a warning about CPU staging pool exhaustion in stderr"
         )
