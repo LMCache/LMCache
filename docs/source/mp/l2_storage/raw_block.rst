@@ -8,13 +8,18 @@ caller-provided load buffers during prefetch.
 
 **Required fields:**
 
-- ``device_path``: Raw device path or pre-sized file path.
+- ``device_path`` or ``multi_device_paths``: Raw device path(s) or pre-sized
+  file path(s). Use ``device_path`` for a single device; use
+  ``multi_device_paths`` for multi-device sharding.
 - ``slot_bytes``: Fixed slot size in bytes. Must be aligned to ``block_align``.
 
 **Optional fields:**
 
+- ``device_count``: Optional validation count. If set, it must match the number
+  of paths parsed from ``multi_device_paths``.
 - ``capacity_bytes``: Optional cap on the usable device bytes. Default ``0``
-  means use the full device/file size.
+  means use the full device/file size. In multi-device mode, the same cap is
+  applied to each configured device.
 - ``use_odirect``: ``true`` or ``false`` (default ``true``).
 - ``block_align``: Device alignment in bytes (default ``4096``).
 - ``header_bytes``: Per-slot header reservation (default ``4096``).
@@ -42,12 +47,19 @@ caller-provided load buffers during prefetch.
 
 **Notes:**
 
-- ``raw_block`` is a server-owned MP adapter. It does **not** support
-  per-TP device-path mappings in MP mode.
+- ``multi_device_paths`` can be a JSON list or a comma-separated string. Paths
+  must be non-empty and unique.
+- In multi-device mode, each object is routed by
+  ``kv_rank.local_rank % len(multi_device_paths)``. Keep
+  ``multi_device_paths`` in stable local-rank order across restarts so
+  recovered metadata maps to the same raw device.
+- ``raw_block`` is a server-owned MP adapter. It supports single-node
+  multi-device sharding through ``multi_device_paths``; it does **not** support
+  ``per_tp_device_paths`` in MP mode.
 - ``raw_block`` remains ``"type": "raw_block"`` for all supported engines.
 - ``raw_block`` owns on-device slot allocation, checkpointing, and recovery
-  through ``RawBlockCore``. Slot reclamation is driven by the shared/global
-  L2 eviction controller or explicit ``delete()`` calls.
+  through one ``RawBlockCore`` per configured path. Slot reclamation is driven
+  by the shared/global L2 eviction controller or explicit ``delete()`` calls.
 - If ``use_odirect`` is enabled, the server's ``--l1-align-bytes`` should be
   at least ``block_align``.
 - ``persist_enabled`` must remain ``true`` for this adapter.
@@ -65,6 +77,12 @@ caller-provided load buffers during prefetch.
 
     # Basic raw_block with posix I/O
     --l2-adapter '{"type": "raw_block", "device_path": "/dev/nvme0n1", "slot_bytes": 1048576, "block_align": 4096, "header_bytes": 4096, "meta_total_bytes": 268435456, "use_odirect": true, "num_store_workers": 2, "num_lookup_workers": 1, "num_load_workers": 4}'
+
+    # With multi-device sharding
+    --l2-adapter '{"type": "raw_block", "multi_device_paths": ["/dev/nvme0n1", "/dev/nvme1n1", "/dev/nvme2n1", "/dev/nvme3n1"], "device_count": 4, "slot_bytes": 1048576, "block_align": 4096, "use_odirect": true}'
+
+    # With multi-device sharding from a comma-separated string
+    --l2-adapter '{"type": "raw_block", "multi_device_paths": "/dev/nvme0n1,/dev/nvme1n1", "slot_bytes": 1048576, "use_odirect": true}'
 
     # With io_uring
     --l2-adapter '{"type": "raw_block", "device_path": "/dev/nvme0n1", "slot_bytes": 1048576, "io_engine": "io_uring", "iouring_queue_depth": 256, "use_odirect": true}'

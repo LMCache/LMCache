@@ -154,6 +154,69 @@ class TestFactoryRegistry:
             get_type_name_for_config(_UnknownConfig())
 
 
+class TestRawBlockL2AdapterConfig:
+    """Tests for raw-block L2 adapter config parsing."""
+
+    SLOT_BYTES = 64 * 1024
+
+    def _config_dict(self, **overrides: object) -> dict[str, object]:
+        """Return a minimal raw-block config dict with test-specific overrides."""
+        config: dict[str, object] = {
+            "type": "raw_block",
+            "slot_bytes": self.SLOT_BYTES,
+        }
+        config.update(overrides)
+        return config
+
+    def test_multi_device_paths_from_dict(self):
+        cfg = RawBlockL2AdapterConfig.from_dict(
+            self._config_dict(
+                multi_device_paths=["/tmp/raw0", "/tmp/raw1"],
+                device_count=2,
+            )
+        )
+
+        assert cfg.multi_device_paths == ("/tmp/raw0", "/tmp/raw1")
+        assert cfg.device_path == "/tmp/raw0"
+
+    def test_multi_device_paths_from_csv(self):
+        cfg = RawBlockL2AdapterConfig.from_dict(
+            self._config_dict(multi_device_paths="/tmp/raw0,/tmp/raw1")
+        )
+
+        assert cfg.multi_device_paths == ("/tmp/raw0", "/tmp/raw1")
+
+    def test_device_count_mismatch_raises(self):
+        with pytest.raises(ValueError, match="device_count"):
+            RawBlockL2AdapterConfig.from_dict(
+                self._config_dict(
+                    multi_device_paths=["/tmp/raw0", "/tmp/raw1"],
+                    device_count=3,
+                )
+            )
+
+    def test_duplicate_device_paths_raise(self):
+        with pytest.raises(ValueError, match="unique"):
+            RawBlockL2AdapterConfig.from_dict(
+                self._config_dict(multi_device_paths=["/tmp/raw0", "/tmp/raw0"])
+            )
+
+    def test_missing_device_path_raises_missing_path_error(self):
+        with pytest.raises(
+            ValueError,
+            match="device_path or multi_device_paths must be provided",
+        ):
+            RawBlockL2AdapterConfig.from_dict(self._config_dict())
+
+    def test_non_string_device_path_raises_string_error(self):
+        with pytest.raises(ValueError, match="device_path must be a string"):
+            RawBlockL2AdapterConfig.from_dict(self._config_dict(device_path=123))
+
+    def test_empty_device_path_raises_non_empty_error(self):
+        with pytest.raises(ValueError, match="device_path must be non-empty"):
+            RawBlockL2AdapterConfig.from_dict(self._config_dict(device_path=""))
+
+
 # =========================================================
 # Tests: PluginL2AdapterConfig parsing
 # =========================================================
