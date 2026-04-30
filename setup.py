@@ -23,6 +23,9 @@ ENABLE_CXX11_ABI = os.environ.get("ENABLE_CXX11_ABI", "1") == "1"
 
 
 def _read_requirements(path: Path) -> list[str]:
+    if not path.exists():
+        return []
+
     reqs: list[str] = []
     for raw in path.read_text().splitlines():
         line = raw.strip()
@@ -411,7 +414,12 @@ if __name__ == "__main__":
     ext_modules, cmdclass = get_extension()
 
     install_requires = _read_requirements(ROOT_DIR / "requirements" / "common.txt")
-    core_file = "rocm_core.txt" if BUILD_WITH_HIP else "cuda_core.txt"
+    if BUILD_WITH_HIP:
+        core_file = "rocm_core.txt"
+    elif BUILD_WITH_SYCL:
+        core_file = "xpu_core.txt"
+    else:
+        core_file = "cuda_core.txt"
     install_requires += _read_requirements(ROOT_DIR / "requirements" / core_file)
 
     setup(
