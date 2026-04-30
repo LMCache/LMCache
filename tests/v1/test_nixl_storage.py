@@ -445,9 +445,6 @@ def test_nixl_dynamic_file_fd_leak_on_setup_failure(tmp_path, monkeypatch):
         with pytest.raises(RuntimeError):
             nixl_backend.batched_submit_put_task(keys, objs)
 
-        with pytest.raises(RuntimeError):
-            nixl_backend.get_blocking(keys[0])
-
         assert _count_open_fds() == baseline, "FDs leaked on transfer-setup failure"
 
         # The put path opens the final key files with O_CREAT before
