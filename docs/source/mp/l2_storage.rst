@@ -238,7 +238,11 @@ If the Mooncake headers are not installed in the system include path
 
 All other keys in the JSON config (except ``type``, ``num_workers``,
 and ``eviction``) are forwarded **as-is** to Mooncake's
-``setup_internal(ConfigDict)``.  Refer to the
+``store.setup(config: dict)`` API (introduced in
+`Mooncake PR #1445 <https://github.com/kvcache-ai/Mooncake/pull/1445>`_).
+Older Mooncake builds that only expose the positional-arg ``setup()``
+signature are still supported -- LMCache transparently falls back to
+the legacy form on :class:`TypeError`.  Refer to the
 `Mooncake documentation <https://github.com/kvcache-ai/Mooncake>`_
 for available setup keys (e.g., ``local_hostname``,
 ``metadata_server``, ``master_server_address``, ``protocol``,
