@@ -13,12 +13,12 @@ from lmcache.v1.compute.blend.utils import LMCBlenderBuilder
 from lmcache.v1.gpu_connector.gpu_connectors import GPUConnectorInterface
 from lmcache.v1.gpu_connector.utils import (
     assert_is_vllm_flash_attn_or_flash_infer,
-    discover_gpu_kv_format,
     get_block_size,
     get_elements_per_layer,
     get_num_blocks,
     get_page_buffer_size,
     get_tokens_per_layer,
+    normalize_kv_and_discover_format,
 )
 from lmcache.v1.memory_management import GPUMemoryAllocator  # noqa: E501
 from lmcache.v1.memory_management import MemoryFormat, MemoryObj
@@ -129,7 +129,9 @@ class VLLMPagedMemXPUConnectorV2(GPUConnectorInterface):
         )
         self.kv_cache_pointers_on_gpu[idx].copy_(self.kv_cache_pointers)
 
-        self.gpu_kv_format = discover_gpu_kv_format(kv_caches, EngineType.VLLM)
+        self.gpu_kv_format, kv_caches = normalize_kv_and_discover_format(
+            kv_caches, EngineType.VLLM
+        )
         self.num_blocks = get_num_blocks(kv_caches, self.gpu_kv_format)
         self.block_size = get_block_size(kv_caches, self.gpu_kv_format)
         self.page_buffer_size = self.num_blocks * self.block_size
@@ -353,7 +355,9 @@ class VLLMPagedMemXPUConnectorV3(GPUConnectorInterface):
             kv_cache_pointers_on_gpu.copy_(kv_cache_pointers)
             self.group_kv_cache_pointers_on_gpu.append(kv_cache_pointers_on_gpu)
 
-        self.gpu_kv_format = discover_gpu_kv_format(self.kvcaches, EngineType.VLLM)
+        self.gpu_kv_format, self.kv_caches = normalize_kv_and_discover_format(
+            self.kv_caches, EngineType.VLLM
+        )
         self.num_blocks = get_num_blocks(self.kvcaches, self.gpu_kv_format)
         self.block_size = get_block_size(self.kvcaches, self.gpu_kv_format)
         self.page_buffer_size = self.num_blocks * self.block_size
@@ -554,7 +558,9 @@ class VLLMBufferLayerwiseXPUConnector(GPUConnectorInterface):
             # is okay since fragmentation shouldn't exist in the `gpu_buffer_allocator`
             # in layerwise mode.
 
-            self.gpu_kv_format = discover_gpu_kv_format(kv_caches, EngineType.VLLM)
+            self.gpu_kv_format, kv_caches = normalize_kv_and_discover_format(
+                kv_caches, EngineType.VLLM
+            )
             assert_is_vllm_flash_attn_or_flash_infer(self.gpu_kv_format)
             self.tokens_per_layer = get_tokens_per_layer(kv_caches, self.gpu_kv_format)
             self.elements_per_layer = get_elements_per_layer(
@@ -951,7 +957,9 @@ class VLLMPagedMemLayerwiseXPUConnector(GPUConnectorInterface):
             # is okay since fragmentation shouldn't exist in the `gpu_buffer_allocator`
             # in layerwise mode.
 
-            self.gpu_kv_format = discover_gpu_kv_format(kv_caches, EngineType.VLLM)
+            self.gpu_kv_format, kv_caches = normalize_kv_and_discover_format(
+                kv_caches, EngineType.VLLM
+            )
             assert_is_vllm_flash_attn_or_flash_infer(self.gpu_kv_format)
             self.tokens_per_layer = get_tokens_per_layer(kv_caches, self.gpu_kv_format)
             self.elements_per_layer = get_elements_per_layer(
@@ -1269,7 +1277,9 @@ class SGLangXPUConnector(GPUConnectorInterface):
 
     def _initialize_pointers(self, kv_caches: List[torch.Tensor]) -> torch.Tensor:
         # Discover format first to handle flattening correctly
-        self.gpu_kv_format = discover_gpu_kv_format(kv_caches, EngineType.SGLANG)
+        self.gpu_kv_format, kv_caches = normalize_kv_and_discover_format(
+            kv_caches, EngineType.SGLANG
+        )
 
         # For TWO_X_NL_X_NBBS_NH_HS format, kv_caches is [[k_list], [v_list]]
         # We need to flatten it to [k0, k1, ..., v0, v1, ...]
@@ -1483,7 +1493,9 @@ class SGLangLayerwiseXPUConnector(GPUConnectorInterface):
         Also, the first request might be a bit slower due to buffer creation.
         """
         if self.use_gpu and self.gpu_buffer_allocator is None:
-            self.gpu_kv_format = discover_gpu_kv_format(kv_caches, EngineType.SGLANG)
+            self.gpu_kv_format, kv_caches = normalize_kv_and_discover_format(
+                kv_caches, EngineType.SGLANG
+            )
             self.tokens_per_layer = get_tokens_per_layer(kv_caches, self.gpu_kv_format)
             self.elements_per_layer = get_elements_per_layer(
                 kv_caches, self.gpu_kv_format

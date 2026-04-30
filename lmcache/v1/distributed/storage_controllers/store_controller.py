@@ -13,7 +13,6 @@ The controller runs a background thread with an event-driven loop that:
 from collections import defaultdict
 from dataclasses import dataclass
 import enum
-import os
 import select
 import threading
 
@@ -31,6 +30,11 @@ from lmcache.v1.distributed.storage_controllers.store_policy import (
 )
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import get_event_bus
+from lmcache.v1.mp_observability.otel_init import register_gauge
+from lmcache.v1.platform import (
+    consume_fd,
+    create_event_notifier,
+)
 
 logger = init_logger(__name__)
 
@@ -72,16 +76,21 @@ class StoreListener(L1ManagerListener):
     def __init__(self) -> None:
         self._pending_keys: list[ObjectKey] = []
         self._lock = threading.Lock()
-        self._event_fd = os.eventfd(0, os.EFD_NONBLOCK | os.EFD_CLOEXEC)
+        self._event_fd = create_event_notifier()
 
     def get_event_fd(self) -> int:
         """
-        Return the eventfd that is signaled when new keys are available.
+        Return the notifier fd that is signaled when new keys are
+        available.
 
         Returns:
-            int: The eventfd file descriptor.
+            int: The readable file descriptor for poller registration.
         """
-        return self._event_fd
+        return self._event_fd.fileno()
+
+    def notify(self) -> None:
+        """Signal the notifier to wake any blocked poll() waiter."""
+        self._event_fd.notify()
 
     def pop_pending_keys(self) -> list[ObjectKey]:
         """
@@ -107,7 +116,7 @@ class StoreListener(L1ManagerListener):
 
     def on_l1_keys_write_finished(self, keys: list[ObjectKey]) -> None:
         """
-        Enqueue keys and signal the eventfd.
+        Enqueue keys and signal the notifier.
 
         Called inside L1Manager's lock. Must be fast and must not
         call any L1Manager methods (would deadlock).
@@ -117,7 +126,7 @@ class StoreListener(L1ManagerListener):
         """
         with self._lock:
             self._pending_keys.extend(keys)
-        os.eventfd_write(self._event_fd, 1)
+        self._event_fd.notify()
 
     def on_l1_keys_reserved_read(self, keys: list[ObjectKey]) -> None:
         pass
@@ -140,8 +149,8 @@ class StoreListener(L1ManagerListener):
         pass
 
     def close(self) -> None:
-        """Close the eventfd."""
-        os.close(self._event_fd)
+        """Close the notifier."""
+        self._event_fd.close()
 
 
 class StorePhase(enum.Enum):
@@ -200,6 +209,13 @@ class StoreController(StorageControllerInterface):
         policy: The store policy for deciding targets and deletions.
     """
 
+    # Singleton dispatch for ``lmcache_mp.num_inflight_l2_stores``: tests may
+    # construct multiple controllers but the OTel SDK only honors the first
+    # gauge registration, so the callback reads from the most recently built
+    # instance via ``_gauge_target``.
+    _gauge_registered: bool = False
+    _gauge_target: "StoreController | None" = None
+
     def __init__(
         self,
         l1_manager: L1Manager,
@@ -223,6 +239,20 @@ class StoreController(StorageControllerInterface):
 
         # Shadow counter for status reporting (updated in background loop)
         self._status_in_flight_count: int = 0
+
+        StoreController._gauge_target = self
+        if not StoreController._gauge_registered:
+            StoreController._gauge_registered = True
+            register_gauge(
+                "lmcache.l2_store",
+                "lmcache_mp.num_inflight_l2_stores",
+                "L2 store tasks currently executing, per adapter",
+                lambda: (
+                    StoreController._gauge_target.get_inflight_stores_observations()
+                    if StoreController._gauge_target is not None
+                    else []
+                ),
+            )
 
         # Map eventfd -> adapter index for quick lookup in poll results
         self._efd_to_adapter_index: dict[int, int] = {}
@@ -250,7 +280,7 @@ class StoreController(StorageControllerInterface):
         """
         self._stop_flag.set()
         # Wake up the poll loop so it can exit promptly
-        os.eventfd_write(self._listener.get_event_fd(), 1)
+        self._listener.notify()
         self._thread.join()
         self._cleanup_in_flight_tasks()
         self._listener.close()
@@ -265,6 +295,31 @@ class StoreController(StorageControllerInterface):
             "in_flight_task_count": self._status_in_flight_count,
             "num_l2_adapters": len(self._l2_adapters),
         }
+
+    def get_inflight_stores_observations(
+        self,
+    ) -> list[tuple[int | float, dict[str, object]]]:
+        """Per-adapter ``(count, attributes)`` snapshot for the
+        ``lmcache_mp.num_inflight_l2_stores`` gauge.
+
+        ``dict.copy()`` is GIL-atomic in CPython, so reading from the
+        OTel reader thread while the store loop mutates is safe; the
+        snapshot may be one mutation stale, which is fine at the 10 s
+        scrape cadence.
+        """
+        counts: dict[int, int] = defaultdict(int)
+        for adapter_index, _ in self._in_flight_tasks.copy():
+            counts[adapter_index] += 1
+        return [
+            (
+                count,
+                {
+                    "l2_name": self._adapter_descriptors[idx].type_name,
+                    "adapter_index": idx,
+                },
+            )
+            for idx, count in counts.items()
+        ]
 
     # Private methods
 
@@ -296,9 +351,9 @@ class StoreController(StorageControllerInterface):
                 if not (events & select.POLLIN):
                     continue
 
-                # Consume the eventfd value
+                # Consume the notifier value
                 try:
-                    os.eventfd_read(fd)
+                    consume_fd(fd)
                 except (OSError, BlockingIOError):
                     pass
 
