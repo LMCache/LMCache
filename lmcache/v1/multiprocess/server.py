@@ -14,7 +14,7 @@ import zmq
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.utils import _lmcache_nvtx_annotate
+from lmcache.utils import EngineType, _lmcache_nvtx_annotate
 from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
     ObjectKey,
@@ -155,6 +155,18 @@ class _PrefetchJob:
     handle: PrefetchHandle
     world_size: int
     request_id: str
+    # Number of tokens submitted for lookup (denominator for the L1+L2
+    # token-level hit-rate metric).  Equals ``len(chunk_hashes) * chunk_size``
+    # on the happy path; 0 for early-exit paths (no GPU context matches
+    # or chunk_hashes is empty).  Consumed at ``MP_LOOKUP_PREFETCH_END``
+    # emission time in ``query_prefetch_status``.
+    requested_tokens: int
+    # Captured at lookup time so the ``MP_LOOKUP_PREFETCH_END`` event can
+    # carry them as labels.  ``model_name`` lets dashboards slice hit rate
+    # per model in multi-model deployments; ``cache_salt`` slices per
+    # tenant / isolation domain (an empty string means no salt set).
+    model_name: str = ""
+    cache_salt: str = ""
 
 
 # Main class for the mp cache engine
@@ -206,6 +218,7 @@ class MPCacheEngine:
         kv_caches: KVCache,
         model_name: str,
         world_size: int,
+        engine_type: EngineType,
         layout_hints: LayoutHints,
     ) -> None:
         """
@@ -213,9 +226,12 @@ class MPCacheEngine:
 
         Args:
             instance_id (int): The GPU instance ID (such as PID).
-            kv_caches (KVCache): The KV cache tensor wrappers from vLLM.
+            kv_caches (KVCache): The KV cache tensor wrappers from the
+                serving engine.
             model_name (str): The name of the model associated with this KV cache.
             world_size (int): The world size associated with this KV cache.
+            engine_type: Which serving engine produced the caches.
+                Forwarded to :class:`GPUCacheContext` for format detection.
             layout_hints: See :class:`LayoutHints`.  Forwarded to
                 :class:`GPUCacheContext` for GPU KV format detection.
         """
@@ -223,6 +239,7 @@ class MPCacheEngine:
             kv_caches,
             self.chunk_size,
             layout_hints=layout_hints or None,
+            engine_type=engine_type,
         )
         self.gpu_contexts[instance_id] = gpu_context
         self.gpu_context_meta[instance_id] = (model_name, world_size)
@@ -589,6 +606,7 @@ class MPCacheEngine:
                             "device": str(gpu_context.device),
                             "engine_id": instance_id,
                             "model_name": model_name,
+                            "cache_salt": key.cache_salt,
                             "total_bytes": total_bytes,
                         },
                     ),
@@ -669,6 +687,9 @@ class MPCacheEngine:
                     ),
                     world_size=1,
                     request_id=key.request_id,
+                    requested_tokens=0,
+                    model_name=model_name,
+                    cache_salt=key.cache_salt,
                 )
             )
             return
@@ -689,9 +710,19 @@ class MPCacheEngine:
                     ),
                     world_size=1,
                     request_id=key.request_id,
+                    requested_tokens=0,
+                    model_name=model_name,
+                    cache_salt=key.cache_salt,
                 )
             )
             return
+
+        # Total chunk-aligned tokens submitted for lookup; surfaces as the
+        # denominator of the L1+L2 token-level hit-rate via the
+        # ``requested_tokens`` field on ``MP_LOOKUP_PREFETCH_END``.  Sub-chunk
+        # trailing tokens are intentionally excluded — they cannot hit at
+        # chunk granularity.
+        requested_tokens = len(chunk_hashes) * self.chunk_size
 
         # Publish lookup event via EventBus for observability subscribers.
         # Guard with has_subscribers() to avoid allocating the metadata dict
@@ -732,6 +763,9 @@ class MPCacheEngine:
                 handle=handle,
                 world_size=key.world_size,
                 request_id=key.request_id,
+                requested_tokens=requested_tokens,
+                model_name=model_name,
+                cache_salt=key.cache_salt,
             )
         )
 
@@ -809,7 +843,13 @@ class MPCacheEngine:
             Event(
                 event_type=EventType.MP_LOOKUP_PREFETCH_END,
                 session_id=job.request_id,
-                metadata={"found_count": found_count},
+                metadata={
+                    "found_count": found_count,
+                    "requested_tokens": job.requested_tokens,
+                    "hit_tokens": found_count * self.chunk_size,
+                    "model_name": job.model_name,
+                    "cache_salt": job.cache_salt,
+                },
             )
         )
 

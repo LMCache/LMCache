@@ -163,6 +163,18 @@ class StorageManager:
                 },
             )
         )
+
+        oom_keys = [
+            k for k, (e, _) in reserve_result.items() if e == L1Error.OUT_OF_MEMORY
+        ]
+        if oom_keys:
+            self._event_bus.publish(
+                Event(
+                    event_type=EventType.L1_ALLOCATION_FAILED,
+                    metadata={"during": "l1_store", "keys": oom_keys},
+                )
+            )
+
         return result
 
     @enable_tracing()
@@ -232,6 +244,8 @@ class StorageManager:
         good_keys: list[ObjectKey] = []
         good_objs: list[MemoryObj] = []
         bad_keys: list[ObjectKey] = []
+        not_found_keys: list[ObjectKey] = []
+        write_locked_keys: list[ObjectKey] = []
         all_good = True
         for k, (e, o) in read_results.items():
             if o is None:
@@ -242,10 +256,40 @@ class StorageManager:
                 )
                 bad_keys.append(k)
                 all_good = False
+                if e == L1Error.KEY_NOT_EXIST:
+                    not_found_keys.append(k)
+                elif e == L1Error.KEY_NOT_READABLE:
+                    write_locked_keys.append(k)
                 continue
 
             good_keys.append(k)
             good_objs.append(o)
+
+        # L1 read-failure anomaly reporting: unsafe_read is required to be
+        # called post-reserve_read, so any failure here is a lock/eviction
+        # race, not a normal cache miss.
+        if not_found_keys:
+            self._event_bus.publish(
+                Event(
+                    event_type=EventType.L1_READ_FAILED,
+                    metadata={
+                        "during": "l1_retrieve",
+                        "reason": "not_found",
+                        "keys": not_found_keys,
+                    },
+                )
+            )
+        if write_locked_keys:
+            self._event_bus.publish(
+                Event(
+                    event_type=EventType.L1_READ_FAILED,
+                    metadata={
+                        "during": "l1_retrieve",
+                        "reason": "write_locked",
+                        "keys": write_locked_keys,
+                    },
+                )
+            )
 
         successfully_yielded = False
 
