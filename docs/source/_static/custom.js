@@ -161,9 +161,9 @@ function pickGoblinVariant() {
       weight: 1,
     },
     {
-      name: "grimace",
-      image: "goblin_grimace.png",
-      hitImage: "goblin_grimace_hit.png",
+      name: "grimace-face",
+      image: "goblin_grimace_face.png",
+      hitImage: "goblin_grimace_face_hit.png",
       placement: "free",
       size: [118, 150],
       weight: 1,
