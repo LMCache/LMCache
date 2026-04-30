@@ -17,16 +17,10 @@ eviction cycle. Only salts with an explicit quota retain cached data.
 from __future__ import annotations
 
 # Standard
-from dataclasses import dataclass
 import threading
 
-
-@dataclass(frozen=True)
-class QuotaEntry:
-    """Snapshot of a single quota registration."""
-
-    cache_salt: str
-    limit_bytes: int
+# First Party
+from lmcache.v1.distributed.internal_api import QuotaEntry
 
 
 class QuotaManager:

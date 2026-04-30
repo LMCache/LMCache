@@ -11,6 +11,7 @@ import time
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.distributed.config import EvictionConfig
 from lmcache.v1.distributed.eviction import L1EvictionPolicy, L2EvictionPolicy
 from lmcache.v1.distributed.eviction_policy import CreateEvictionPolicy
@@ -276,11 +277,21 @@ class L2EvictionController(StorageControllerInterface):
         effective limit of ``0`` and are therefore always over budget,
         so they get a full eviction (``effective_ratio=1.0``) — this
         enforces the allowlist rule: only registered salts retain data.
+
+        Per-destination keys are batched across all over-budget salts
+        before invoking the adapter — one ``adapter.delete(...)`` call
+        per destination instead of one per (salt, destination) pair.
+        Adapters with non-trivial per-call overhead (NIXL handle setup,
+        FS sync, etc.) see this as a real win when many salts go over
+        budget in the same cycle.
         """
         assert self._quota_manager is not None
         watermark = state.eviction_config.trigger_watermark
         eviction_ratio = state.eviction_config.eviction_ratio
         usage = state.adapter.get_usage()
+
+        # destination -> accumulated keys across all over-budget salts.
+        pending: dict[EvictionDestination, list[ObjectKey]] = {}
 
         for cache_salt, user_bytes in usage.bytes_by_cache_salt.items():
             if user_bytes <= 0:
@@ -308,7 +319,13 @@ class L2EvictionController(StorageControllerInterface):
                 effective_ratio, cache_salt=cache_salt
             )
             for action in actions:
-                self._execute_eviction_action(state.adapter, action)
+                pending.setdefault(action.destination, []).extend(action.keys)
+
+        for destination, keys in pending.items():
+            self._execute_eviction_action(
+                state.adapter,
+                EvictionAction(keys=keys, destination=destination),
+            )
 
     def _execute_eviction_action(
         self, adapter: L2AdapterInterface, action: EvictionAction

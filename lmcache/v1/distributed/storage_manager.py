@@ -92,13 +92,6 @@ class StorageManager:
         # policies (``IsolatedLRU``) operate on per cache_salt byte
         # counts which the base class tracks regardless of capacity,
         # so they are wired up unconditionally.
-        #
-        # CAVEAT: IsolatedLRU on an adapter whose ``_notify_keys_stored``
-        # never fires (or whose ``delete()`` is a no-op) will log
-        # "triggering eviction" each cycle but have no observable
-        # effect. The FS adapter in particular is both unbounded and
-        # delete-less; configuring IsolatedLRU there is allowed but
-        # produces zero eviction activity.
         l2_eviction_states: list[L2AdapterEvictionState] = []
         for adapter, ac in zip(
             self._l2_adapters, config.l2_adapter_config.adapters, strict=True

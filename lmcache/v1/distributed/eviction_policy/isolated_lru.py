@@ -109,7 +109,13 @@ class IsolatedLRUEvictionPolicy(EvictionPolicy):
         key_eligible_filter: Callable[[ObjectKey], bool] | None = None,
         cache_salt: str | None = None,
     ) -> list[EvictionAction]:
-        """Select victims in LRU order, optionally scoped to one salt.
+        """Select victims in LRU order, scoped to a single ``cache_salt``.
+
+        IsolatedLRU is "isolated only" by contract — callers must pass a
+        concrete ``cache_salt``. The base interface keeps ``cache_salt``
+        optional for compatibility with non-isolated policies; passing
+        ``None`` here raises ``ValueError`` rather than silently
+        falling back to a global pool.
 
         Args:
             expected_ratio: Fraction of the candidate pool to evict,
@@ -118,30 +124,26 @@ class IsolatedLRUEvictionPolicy(EvictionPolicy):
                 returned (matches ``LRUEvictionPolicy``).
             key_eligible_filter: Optional predicate — keys failing the
                 filter (e.g. locked) are skipped.
-            cache_salt: When set, only this salt's bucket is considered.
-                When ``None``, victims are taken across all buckets.
+            cache_salt: The salt whose bucket to evict from. Required.
 
         Returns:
-            A single ``EvictionAction`` covering all selected keys, or
-            an empty list if nothing is available to evict.
+            A list with at most one ``EvictionAction`` (one per
+            destination — IsolatedLRU has a single destination, so the
+            list is either empty or length 1). Empty when nothing is
+            available to evict under the current filter / ratio.
+
+        Raises:
+            ValueError: If ``cache_salt`` is ``None``.
         """
+        if cache_salt is None:
+            raise ValueError(
+                "IsolatedLRUEvictionPolicy.get_eviction_actions requires "
+                "cache_salt; this policy is per-bucket and has no global "
+                "eviction path."
+            )
         with self._lock:
-            if cache_salt is not None:
-                order = self._per_salt_order.get(cache_salt)
-                pool = list(order.keys()) if order else []
-            else:
-                # Global eviction: concatenate every bucket in
-                # dict-insertion order (i.e. first-seen-salt first).
-                # This is deterministic but NOT "oldest key first across
-                # all salts" — salts that happened to see traffic early
-                # get evicted first even if their current front is
-                # newer than another salt's. The isolated controller
-                # branch doesn't hit this path (always passes an
-                # explicit salt); global eviction here is a fallback
-                # for callers that explicitly opt in.
-                pool = []
-                for order in self._per_salt_order.values():
-                    pool.extend(order.keys())
+            order = self._per_salt_order.get(cache_salt)
+            pool = list(order.keys()) if order else []
 
             if not pool:
                 return []

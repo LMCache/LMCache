@@ -3,6 +3,9 @@
 Unit tests for :class:`IsolatedLRUEvictionPolicy`.
 """
 
+# Third Party
+import pytest
+
 # First Party
 from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.distributed.eviction_policy.isolated_lru import (
@@ -86,14 +89,14 @@ class TestScopedEviction:
         actions = p.get_eviction_actions(expected_ratio=1.0, cache_salt="bob")
         assert actions == []
 
-    def test_global_eviction_spans_all_buckets(self):
-        """``cache_salt=None`` falls back to global eviction across
-        every bucket (useful for emergency cleanup)."""
+    def test_missing_cache_salt_raises(self):
+        """``IsolatedLRU`` is per-bucket only — calling without an
+        explicit ``cache_salt`` raises ``ValueError`` rather than
+        silently falling back to a global pool."""
         p = IsolatedLRUEvictionPolicy()
-        p.on_keys_created([_key(1, "alice"), _key(2, "bob"), _key(3, "alice")])
-        actions = p.get_eviction_actions(expected_ratio=1.0, cache_salt=None)
-        assert len(actions) == 1
-        assert len(actions[0].keys) == 3
+        p.on_keys_created([_key(1, "alice")])
+        with pytest.raises(ValueError, match="cache_salt"):
+            p.get_eviction_actions(expected_ratio=1.0, cache_salt=None)
 
 
 class TestEvictionAmount:
