@@ -502,7 +502,10 @@ class TestMooncakeStoreIntegration:
         )
         self.adapter = create_l2_adapter(config)
         yield
-        self.adapter.close()
+        adapter = self.adapter
+        self.adapter = None
+        if adapter is not None:
+            adapter.close()
 
     def test_event_fds_are_distinct(self):
         """Each operation should have a distinct event fd."""
@@ -679,6 +682,13 @@ class TestMooncakeStoreIntegration:
         # First Party
         from lmcache.v1.distributed.l2_adapters import create_l2_adapter
 
+        # The class-level fixture creates a default TCP adapter. Close it before
+        # creating the RDMA adapter, otherwise Mooncake master may allocate this
+        # test object's replica on the TCP segment and the RDMA-only client will
+        # fail with NotSupportedTransport.
+        self.adapter.close()
+        self.adapter = None
+
         page_size = 4096
         obj_size_bytes = page_size * 16
         l1_buffer = torch.empty(page_size * 256, dtype=torch.uint8, device="cpu")
@@ -693,10 +703,10 @@ class TestMooncakeStoreIntegration:
                 "type": "mooncake_store",
                 "local_hostname": MOONCAKE_LOCAL_HOSTNAME,
                 "metadata_server": MOONCAKE_METADATA_SERVER,
-                "master_server_address": MOONCAKE_MASTER_SERVER_ADDRESS,
+                "master_server_addr": MOONCAKE_MASTER_SERVER_ADDRESS,
                 "num_workers": 2,
                 "protocol": "rdma",
-                "device_name": MOONCAKE_DEVICE_NAME,
+                "rdma_devices": MOONCAKE_DEVICE_NAME,
             }
         )
         adapter = create_l2_adapter(config, l1_memory_desc=l1_desc)
