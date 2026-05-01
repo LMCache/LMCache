@@ -457,42 +457,16 @@ class BlendEngineV2(MPCacheEngine):
             )
         )
 
-        # Fast local pre-filter: find which stored chunks appear in this query
-        fingerprint_results = self._token_range_matcher.match_sub_sequence(
+        # Sub-sequence fingerprint match: find CB-stored chunks anywhere in the
+        # query using polynomial rolling hashes (context-independent, so a chunk
+        # stored at position 0 is found even when it appears at CHUNK_SIZE in the
+        # query).  Only chunks registered via cb_store_pre_computed / cb_store_final
+        # are in the fingerprint table, which gives CB isolation for free — chunks
+        # stored via the normal STORE path are never registered and therefore
+        # never returned here.
+        cb_match_result = self._token_range_matcher.match_sub_sequence(
             list(key.token_ids)
         )
-
-        # Prefix probe: compute chunk hashes for the full token sequence and add
-        # CBMatchResult candidates (old_st == cur_st) for positions not already
-        # covered by a fingerprint match.  This lets the CB path benefit from
-        # chunks stored via the MP store path, which live in storage but are not
-        # in the fingerprint table.
-        #
-        # Range-overlap exclusion: fingerprint results use a sliding window and
-        # can land at non-aligned cur_st values.  Checking only cur_st equality
-        # would miss overlaps such as a fingerprint at [100, 356) blocking the
-        # aligned candidate at [256, 512).  Without this, both results enter
-        # found_cb_match_result and cb_retrieve_pre_computed writes overlapping
-        # GPU regions from different cached contexts, corrupting the KV cache.
-        prefix_hashes = self.token_hasher.compute_chunk_hashes(list(key.token_ids))
-        fingerprint_ranges = [(r.cur_st, r.cur_ed) for r in fingerprint_results]
-        prefix_candidates: list[CBMatchResult] = [
-            CBMatchResult(
-                old_st=i * self.chunk_size,
-                old_ed=(i + 1) * self.chunk_size,
-                cur_st=i * self.chunk_size,
-                cur_ed=(i + 1) * self.chunk_size,
-                hash=ph,
-            )
-            for i, ph in enumerate(prefix_hashes)
-            if not any(
-                st < (i + 1) * self.chunk_size and ed > i * self.chunk_size
-                for st, ed in fingerprint_ranges
-            )
-        ]
-
-        # Combine; early-exit only when num_tokens < chunk_size (no full chunks)
-        cb_match_result = fingerprint_results + prefix_candidates
         if not cb_match_result:
             self._event_bus.publish(
                 Event(
@@ -506,7 +480,8 @@ class BlendEngineV2(MPCacheEngine):
                         "stale_chunks": 0,
                         "no_gpu_context": False,
                         "hit_tokens": 0,
-                        "requested_tokens": 0,
+                        "requested_tokens": (num_tokens // self.chunk_size)
+                        * self.chunk_size,
                     },
                 )
             )
@@ -555,7 +530,7 @@ class BlendEngineV2(MPCacheEngine):
                     session_id=key.request_id,
                     metadata={
                         "num_tokens": num_tokens,
-                        "fingerprint_hits": len(fingerprint_results),
+                        "fingerprint_hits": 0,
                         "prefix_hits": 0,
                         "storage_hits": 0,
                         "stale_chunks": 0,
@@ -574,10 +549,9 @@ class BlendEngineV2(MPCacheEngine):
             )
             return []
 
-        # Submit prefetch for each group using CBMatchResult.hash directly.
-        # Prefix-probe candidates (old_st == cur_st) use the standard chunk hash
-        # computed by token_hasher, which matches the hash used when the MP path
-        # stored the same data, so ipc_key_to_object_keys resolves correctly.
+        # Submit prefetch for each group.  All candidates use the standard chunk
+        # hash computed by token_hasher, which matches the hash used at store
+        # time, so ipc_key_to_object_keys resolves correctly.
         for group in groups:
             chunk_hashes = [r.hash for r in group]
             obj_keys = ipc_key_to_object_keys(key, chunk_hashes)
@@ -648,46 +622,14 @@ class BlendEngineV2(MPCacheEngine):
                 )
             )
 
-        # Lazy registration: if this lookup was a pure prefix probe (no prior
-        # fingerprint matches), persist the found prefix chunks into the fingerprint
-        # table so future lookups resolve via match_sub_sequence without hitting
-        # storage.  Skipped when fingerprint results exist because on_new_token_hashes
-        # registers all chunks 0..n and would overwrite slots for already-registered
-        # chunks, creating orphaned compact-IDs.
-        prefix_hash_set = {r.hash for r in prefix_candidates}
-        found_prefix_results = [
-            r for r in found_cb_match_result if r.hash in prefix_hash_set
-        ]
-        if (
-            not fingerprint_results
-            and found_prefix_results
-            and found_prefix_results[0].cur_st == 0
-            and key.worker_id in [0, None]
-        ):
-            n = len(found_prefix_results)
-            self._token_range_matcher.on_new_token_hashes(
-                list(key.token_ids)[: n * self.chunk_size],
-                prefix_hashes[:n],
-            )
-            self._event_bus.publish(
-                Event(
-                    event_type=EventType.CB_FINGERPRINTS_REGISTERED,
-                    session_id=key.request_id,
-                    metadata={
-                        "num_chunks": n,
-                        "num_tokens": n * self.chunk_size,
-                    },
-                )
-            )
-
         self._event_bus.publish(
             Event(
                 event_type=EventType.CB_LOOKUP_END,
                 session_id=key.request_id,
                 metadata={
                     "num_tokens": num_tokens,
-                    "fingerprint_hits": len(fingerprint_results),
-                    "prefix_hits": len(found_prefix_results),
+                    "fingerprint_hits": len(found_cb_match_result),
+                    "prefix_hits": 0,
                     "storage_hits": len(found_cb_match_result),
                     "stale_chunks": len(stale_hashes),
                     "no_gpu_context": False,
@@ -767,13 +709,16 @@ class BlendEngineV2(MPCacheEngine):
                     tmp_buffer.copy_(gpu_kv_slice, non_blocking=True)
                     lmcache_memcpy_async_d2h(tmp_buffer, memory_obj)
 
+            # Enqueue finish_write before event.record() so the client's
+            # event.synchronize() cannot unblock until finish_write has committed
+            # the data to the storage index. Both calls target the same underlying
+            # CUDA stream (cupy_stream is an ExternalStream wrapping
+            # gpu_context.stream), so the ordering guarantee holds.
+            gpu_context.cupy_stream.launch_host_func(
+                self.storage_manager.finish_write,
+                list(reserved_dict.keys()),
+            )
             event.record()
-
-        # Call finish_write after the copy is done
-        gpu_context.cupy_stream.launch_host_func(
-            self.storage_manager.finish_write,
-            list(reserved_dict.keys()),
-        )
 
         return event, reserved_dict
 
