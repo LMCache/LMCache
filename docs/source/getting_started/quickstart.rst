@@ -293,7 +293,8 @@ This guide helps you get LMCache running end-to-end in a couple of minutes. Use 
 
          uv venv --python 3.12
          source .venv/bin/activate
-         uv pip install lmcache "tensorrt-llm>=1.2.0"
+         uv pip install lmcache "tensorrt_llm>=1.2.0" \
+             --extra-index-url https://pypi.nvidia.com
 
       LMCache integrates with TensorRT-LLM via TRT-LLM's
       **KV Cache Connector** API and supports two deployment modes:
@@ -342,14 +343,27 @@ This guide helps you get LMCache running end-to-end in a couple of minutes. Use 
          .. tab-item:: MP mode
             :sync: mp
 
+            ``PYTHONHASHSEED=0`` must be set in **both** terminals --
+            chunk hashing depends on a stable ``hash()``, and the
+            server and client must agree on the seed.
+
             Start the LMCache server:
 
             .. code-block:: bash
 
+               export PYTHONHASHSEED=0
                lmcache server \
                    --l1-size-gb 10 --eviction-policy LRU --chunk-size 256
 
-            Point TRT-LLM at the server via ``server_url``:
+            In a separate terminal, point TRT-LLM at the server via
+            ``server_url``:
+
+            .. code-block:: bash
+
+               export PYTHONHASHSEED=0
+               python run_trtllm.py
+
+            where ``run_trtllm.py`` contains:
 
             .. code-block:: python
 
