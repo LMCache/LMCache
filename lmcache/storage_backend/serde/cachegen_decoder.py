@@ -186,7 +186,7 @@ class CacheGenDeserializer(Deserializer):
             self.key_bins = self.key_bins.to(key.device)
 
         if self.value_bins.device != value.device:
-            self.value_bins = self.value_bins.to(torch_device_type)
+            self.value_bins = self.value_bins.to(value.device)
 
         key = do_dequantize(key, self.key_bins, encoder_output.max_tensors_key)
         value = do_dequantize(value, self.value_bins, encoder_output.max_tensors_value)

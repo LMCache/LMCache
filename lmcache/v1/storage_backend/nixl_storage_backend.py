@@ -35,7 +35,7 @@ from nixl._api import (
 import torch
 
 # First Party
-from lmcache import torch_dev, torch_device_type
+from lmcache import torch_dev
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
@@ -73,12 +73,12 @@ class NixlStorageConfig:
     def validate_nixl_backend(dynamic_storage: bool, backend: str, device: str):
         if dynamic_storage:  # For now only supports OBJ backend
             if backend in ("OBJ",):
-                return device == "cpu" or device == torch_device_type
+                return device == "cpu" or device == "cuda"
             else:
                 return False
         else:
             if backend in ("GDS", "GDS_MT", "OBJ"):
-                return device == "cpu" or device == torch_device_type
+                return device == "cpu" or device == "cuda"
             elif backend in ("POSIX", "HF3FS"):
                 return device == "cpu"
             else:
