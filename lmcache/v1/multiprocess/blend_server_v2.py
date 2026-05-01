@@ -158,11 +158,6 @@ class BlendTokenRangeMatcher:
                           (one per complete chunk of chunk_size tokens).
                           Stored as the storage key returned in CBMatchResult.hash.
         """
-        if self._lock.locked():
-            logger.error(
-                "BlendTokenRangeMatcher.on_new_token_hashes: concurrent access "
-                "detected; data corruption is possible."
-            )
         with self._lock:
             arr = np.array(token_ids, dtype=np.uint64)
             # Polynomial fingerprints for non-overlapping chunks, built from raw
@@ -184,7 +179,7 @@ class BlendTokenRangeMatcher:
                 )
                 return
             if base_id + n > int(self._TABLE_SIZE * 0.8):
-                logger.error(
+                logger.warning(
                     "BlendTokenRangeMatcher nearing capacity: %d/%d compact IDs used. "
                     "Hash collision rate is rising; hit rate will degrade.",
                     base_id + n,
@@ -225,11 +220,6 @@ class BlendTokenRangeMatcher:
                               the match was found
               hash          : token_hash bytes (from registration) for cache key lookup
         """
-        if self._lock.locked():
-            logger.error(
-                "BlendTokenRangeMatcher.match_sub_sequence: concurrent access "
-                "detected; results may be inconsistent."
-            )
         with self._lock:
             if not self._chunk_token_hash or len(token_ids) < self.chunk_size:
                 return []
@@ -285,11 +275,6 @@ class BlendTokenRangeMatcher:
         Args:
             token_hashes: Token hashes of chunks to remove from the table.
         """
-        if self._lock.locked():
-            logger.error(
-                "BlendTokenRangeMatcher.remove_chunks: concurrent access "
-                "detected; data corruption is possible."
-            )
         with self._lock:
             for th in token_hashes:
                 cid = self._token_hash_to_compact_id.get(th)
@@ -310,6 +295,50 @@ class BlendTokenRangeMatcher:
                 self._chunk_token_hash[cid] = None
                 self._token_hash_to_start.pop(th, None)
                 del self._token_hash_to_compact_id[th]
+
+    def has_chunk(self, token_hash: bytes) -> bool:
+        """Return True if token_hash is currently registered in the matcher.
+
+        Used before lazy registration to avoid creating duplicate compact-ID
+        entries for a hash that is already in the fingerprint table.
+
+        Args:
+            token_hash: The storage hash bytes for a single chunk (as returned
+                        by TokenHasher.compute_chunk_hashes).
+
+        Returns:
+            True if the chunk is registered and not evicted, False otherwise.
+        """
+        with self._lock:
+            return token_hash in self._token_hash_to_compact_id
+
+
+def _unique_token_coverage(results: list[CBMatchResult]) -> int:
+    """Return the number of unique query tokens covered by a set of CBMatchResults.
+
+    match_sub_sequence is a sliding-window probe, so two results from different
+    registered chunks can have overlapping [cur_st, cur_ed) ranges.  Summing
+    chunk_size per result would double-count the overlapping tokens and produce
+    hit_rate > 1.  This function merges the intervals first.
+
+    Args:
+        results: Found CBMatchResult objects (each covers [cur_st, cur_ed) tokens).
+
+    Returns:
+        Total number of unique query-token positions covered.
+    """
+    if not results:
+        return 0
+    intervals = sorted((r.cur_st, r.cur_ed) for r in results)
+    coverage = 0
+    cur_end = -1
+    for st, ed in intervals:
+        if st >= cur_end:
+            coverage += ed - st
+        elif ed > cur_end:
+            coverage += ed - cur_end
+        cur_end = max(cur_end, ed)
+    return coverage
 
 
 # Main class and main functions
@@ -409,9 +438,41 @@ class BlendEngineV2(MPCacheEngine):
         )
 
         # Fast local pre-filter: find which stored chunks appear in this query
-        cb_match_result = self._token_range_matcher.match_sub_sequence(
+        fingerprint_results = self._token_range_matcher.match_sub_sequence(
             list(key.token_ids)
         )
+
+        # Prefix probe: compute chunk hashes for the full token sequence and add
+        # CBMatchResult candidates (old_st == cur_st) for positions not already
+        # covered by a fingerprint match.  This lets the CB path benefit from
+        # chunks stored via the MP store path, which live in storage but are not
+        # in the fingerprint table.
+        #
+        # Range-overlap exclusion: fingerprint results use a sliding window and
+        # can land at non-aligned cur_st values.  Checking only cur_st equality
+        # would miss overlaps such as a fingerprint at [100, 356) blocking the
+        # aligned candidate at [256, 512).  Without this, both results enter
+        # found_cb_match_result and cb_retrieve_pre_computed writes overlapping
+        # GPU regions from different cached contexts, corrupting the KV cache.
+        prefix_hashes = self.token_hasher.compute_chunk_hashes(list(key.token_ids))
+        fingerprint_ranges = [(r.cur_st, r.cur_ed) for r in fingerprint_results]
+        prefix_candidates: list[CBMatchResult] = [
+            CBMatchResult(
+                old_st=i * self.chunk_size,
+                old_ed=(i + 1) * self.chunk_size,
+                cur_st=i * self.chunk_size,
+                cur_ed=(i + 1) * self.chunk_size,
+                hash=ph,
+            )
+            for i, ph in enumerate(prefix_hashes)
+            if not any(
+                st < (i + 1) * self.chunk_size and ed > i * self.chunk_size
+                for st, ed in fingerprint_ranges
+            )
+        ]
+
+        # Combine; early-exit only when num_tokens < chunk_size (no full chunks)
+        cb_match_result = fingerprint_results + prefix_candidates
         if not cb_match_result:
             self._event_bus.publish(
                 Event(
@@ -420,12 +481,12 @@ class BlendEngineV2(MPCacheEngine):
                     metadata={
                         "num_tokens": num_tokens,
                         "fingerprint_hits": 0,
+                        "prefix_hits": 0,
                         "storage_hits": 0,
                         "stale_chunks": 0,
                         "no_gpu_context": False,
                         "hit_tokens": 0,
-                        "requested_tokens": (num_tokens // self.chunk_size)
-                        * self.chunk_size,
+                        "requested_tokens": 0,
                     },
                 )
             )
@@ -474,7 +535,8 @@ class BlendEngineV2(MPCacheEngine):
                     session_id=key.request_id,
                     metadata={
                         "num_tokens": num_tokens,
-                        "fingerprint_hits": len(cb_match_result),
+                        "fingerprint_hits": len(fingerprint_results),
+                        "prefix_hits": 0,
                         "storage_hits": 0,
                         "stale_chunks": 0,
                         "no_gpu_context": True,
@@ -492,7 +554,10 @@ class BlendEngineV2(MPCacheEngine):
             )
             return []
 
-        # Submit prefetch for each group using CBMatchResult.hash directly
+        # Submit prefetch for each group using CBMatchResult.hash directly.
+        # Prefix-probe candidates (old_st == cur_st) use the standard chunk hash
+        # computed by token_hasher, which matches the hash used when the MP path
+        # stored the same data, so ipc_key_to_object_keys resolves correctly.
         for group in groups:
             chunk_hashes = [r.hash for r in group]
             obj_keys = ipc_key_to_object_keys(key, chunk_hashes)
@@ -504,7 +569,7 @@ class BlendEngineV2(MPCacheEngine):
             prefetch_handles.append(handle)
 
             logger.debug(
-                "DEBUG: Submitted prefetch for %d chunks starting at %d",
+                "Submitted prefetch for %d chunks starting at %d",
                 len(group),
                 group[0].cur_st,
             )
@@ -548,7 +613,8 @@ class BlendEngineV2(MPCacheEngine):
                     end,
                 )
 
-        # Evict stale entries from the fingerprint table
+        # Evict stale fingerprint entries; remove_chunks safely skips hashes that
+        # were never registered (e.g. prefix-probe candidates not in storage).
         if stale_hashes:
             self._token_range_matcher.remove_chunks(stale_hashes)
             logger.debug(
@@ -562,17 +628,50 @@ class BlendEngineV2(MPCacheEngine):
                 )
             )
 
+        # Lazy registration: if this lookup was a pure prefix probe (no prior
+        # fingerprint matches), persist the found prefix chunks into the fingerprint
+        # table so future lookups resolve via match_sub_sequence without hitting
+        # storage.  Skipped when fingerprint results exist because on_new_token_hashes
+        # registers all chunks 0..n and would overwrite slots for already-registered
+        # chunks, creating orphaned compact-IDs.
+        prefix_hash_set = {r.hash for r in prefix_candidates}
+        found_prefix_results = [
+            r for r in found_cb_match_result if r.hash in prefix_hash_set
+        ]
+        if (
+            not fingerprint_results
+            and found_prefix_results
+            and found_prefix_results[0].cur_st == 0
+            and key.worker_id in [0, None]
+        ):
+            n = len(found_prefix_results)
+            self._token_range_matcher.on_new_token_hashes(
+                list(key.token_ids)[: n * self.chunk_size],
+                prefix_hashes[:n],
+            )
+            self._event_bus.publish(
+                Event(
+                    event_type=EventType.CB_FINGERPRINTS_REGISTERED,
+                    session_id=key.request_id,
+                    metadata={
+                        "num_chunks": n,
+                        "num_tokens": n * self.chunk_size,
+                    },
+                )
+            )
+
         self._event_bus.publish(
             Event(
                 event_type=EventType.CB_LOOKUP_END,
                 session_id=key.request_id,
                 metadata={
                     "num_tokens": num_tokens,
-                    "fingerprint_hits": len(cb_match_result),
+                    "fingerprint_hits": len(fingerprint_results),
+                    "prefix_hits": len(found_prefix_results),
                     "storage_hits": len(found_cb_match_result),
                     "stale_chunks": len(stale_hashes),
                     "no_gpu_context": False,
-                    "hit_tokens": len(found_cb_match_result) * self.chunk_size,
+                    "hit_tokens": _unique_token_coverage(found_cb_match_result),
                     "requested_tokens": (num_tokens // self.chunk_size)
                     * self.chunk_size,
                 },
