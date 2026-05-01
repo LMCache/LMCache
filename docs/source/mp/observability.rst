@@ -605,6 +605,57 @@ View traces in any OTel-compatible backend such as **Jaeger** or
         --l1-size-gb 100 --eviction-policy LRU \
         --enable-tracing --otlp-endpoint http://localhost:4317
 
+Per-Request Hit-Rate Attributes
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Each session is wrapped in a per-request root span — ``request`` for the
+standard MP path and ``cb.request`` for the CacheBlend path — that nests
+all child spans (``mp.store``, ``mp.retrieve``, ``mp.lookup_prefetch``)
+beneath it.  When the lookup phase ends, the root span is annotated with
+three OTel attributes that summarise the request-level cache hit rate:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 25 15 60
+
+   * - Attribute
+     - OTel type
+     - Description
+   * - ``hit_tokens``
+     - ``int``
+     - Tokens served from L1+L2 (numerator).
+   * - ``requested_tokens``
+     - ``int``
+     - Chunk-aligned tokens submitted for lookup (denominator).
+   * - ``hit_rate``
+     - ``float``
+     - ``hit_tokens / requested_tokens``; ``0.0`` when the denominator is
+       zero.  Stored as a precomputed float because trace UIs (Tempo,
+       Jaeger) cannot derive it from two integer attributes at query time.
+
+The attributes are written when ``MP_LOOKUP_PREFETCH_END`` (standard MP
+path) or ``CB_LOOKUP_END`` (CacheBlend path) is processed — while the
+root span is still open.  **Store-only requests** that never call
+``lookup_prefetch_start()`` emit no end event for the lookup phase, so
+their root span will not carry these attributes.
+
+Example TraceQL queries (Grafana Tempo):
+
+.. code-block:: text
+
+    # Requests with less than 50% cache hit rate
+    { name = "request" && span.hit_rate < 0.5 }
+
+    # Full cache hits only
+    { name = "request" && span.hit_rate = 1.0 }
+
+    # Complete misses (lookup ran but nothing was cached)
+    { name = "request" && span.requested_tokens > 0 && span.hit_tokens = 0 }
+
+For the full event-to-span mapping and the registry pattern that links
+child spans back to the root see
+``docs/design/observability/request-event-span.md`` in the source tree.
+
 .. _trace-recording:
 
 Trace Recording
