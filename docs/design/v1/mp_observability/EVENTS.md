@@ -21,6 +21,35 @@ these events see [METRICS.md](METRICS.md).
 
 ---
 
+## L1 Failure Events
+
+Published at the caller of the L1 API — **not** inside `L1Manager` — so the
+caller context (`during`) can be attached without leaking caller identity
+into the manager. See LM-291 for the health-monitoring rationale.
+
+Producers split keys by `(during[, reason])` and publish one event per
+non-empty bucket; `keys` is the list of ObjectKeys that failed for that
+bucket. Subscribers bucket by `ObjectKey.model_name` to emit per-model
+counter increments.
+
+| EventType | Metadata keys | Types | Vocabulary |
+|---|---|---|---|
+| `L1_ALLOCATION_FAILED` | `during`, `keys` | `str`, `list[ObjectKey]` | `during` ∈ {`l1_store`, `l2_prefetch`} |
+| `L1_READ_FAILED` | `during`, `reason`, `keys` | `str`, `str`, `list[ObjectKey]` | `during` ∈ {`l2_store`, `l1_retrieve`}; `reason` ∈ {`not_found`, `write_locked`} |
+
+`L1_READ_FAILED` is a **post-lookup anomaly** event, not a cache-miss
+event: in MP mode every `reserve_read` / `unsafe_read` that raises one of
+these errors represents a lookup/reserve race or unexpected eviction. The
+counter should stay near zero in healthy operation.
+
+Producers:
+- `L1_ALLOCATION_FAILED(during=l1_store)` — `StorageManager.reserve_write`, on `L1Error.OUT_OF_MEMORY`.
+- `L1_ALLOCATION_FAILED(during=l2_prefetch)` — `PrefetchController._transition_to_load_phase`, on `L1Error.OUT_OF_MEMORY` from L1 reservation.
+- `L1_READ_FAILED(during=l1_retrieve)` — `StorageManager.read_prefetched_results` (`unsafe_read` failure). `not_found` = `KEY_NOT_EXIST`, `write_locked` = `KEY_NOT_READABLE` (read lock lost).
+- `L1_READ_FAILED(during=l2_store)` — `StoreController._process_new_keys` (`reserve_read` failure on keys that just finished L1 write). `not_found` = `KEY_NOT_EXIST`, `write_locked` = `KEY_NOT_READABLE`.
+
+---
+
 ## StorageManager Events
 
 | EventType | Metadata keys | Types |
@@ -60,6 +89,25 @@ events; key-count counters continue to consume the request-level events.
 
 ---
 
+## L2 Failure Events
+
+Health-monitoring event for the L2 prefetch path. See LM-291.
+
+| EventType | Metadata keys | Types | Vocabulary |
+|---|---|---|---|
+| `L2_PREFETCH_FAILED` | `reason`, `keys` | `str`, `list[ObjectKey]` | `reason` ∈ {`l1_oom`, `not_found`} |
+
+Producers (both in `PrefetchController`):
+- `reason=l1_oom` — emitted when `reserve_write` into L1 returns `OUT_OF_MEMORY` during the transition-to-load phase. Published in parallel with `L1_ALLOCATION_FAILED(during=l2_prefetch)`.
+- `reason=not_found` — emitted in `_finalize_load` for keys reserved in L1 but missing from the adapter's load bitmap (L2 reported the key present at lookup but produced no data).
+
+The third reason `serde_failure` will be added as an additive, non-breaking
+extension once the serde PR lands and adapters can distinguish
+deserialization errors from missing objects. No dashboard migration
+needed when that happens.
+
+---
+
 ## MP Server Lifecycle Sentinels
 
 CPU-synchronous sentinels published by `server.py` to bracket request scope.
@@ -85,9 +133,9 @@ to correlate START/END pairs.
 | `MP_STORE_START` | `device`, `engine_id`, `model_name` | `str`, `int`, `str` |
 | `MP_STORE_END` | `device`, `stored_count`, `engine_id`, `model_name`, `total_bytes` | `str`, `int`, `int`, `str`, `int` |
 | `MP_RETRIEVE_START` | `device`, `engine_id`, `model_name` | `str`, `int`, `str` |
-| `MP_RETRIEVE_END` | `device`, `retrieved_count`, `engine_id`, `model_name`, `total_bytes` | `str`, `int`, `int`, `str`, `int` |
+| `MP_RETRIEVE_END` | `device`, `retrieved_count`, `engine_id`, `model_name`, `cache_salt`, `total_bytes` | `str`, `int`, `int`, `str`, `str`, `int` |
 | `MP_LOOKUP_PREFETCH_START` | *(none)* | — |
-| `MP_LOOKUP_PREFETCH_END` | `found_count`, `requested_tokens`, `hit_tokens` | `int`, `int`, `int` |
+| `MP_LOOKUP_PREFETCH_END` | `found_count`, `requested_tokens`, `hit_tokens`, `model_name`, `cache_salt` | `int`, `int`, `int`, `str`, `str` |
 | `MP_LOOKUP` | `request_id`, `chunk_hashes`, `model_name`, `chunk_size`, `seq_len`, `dtypes`, `shapes` | `str`, `list[str]`, `str`, `int`, `int`, `list[str]`, `list[list[int]]` |
 | `MP_VLLM_BLOCK_ALLOCATION` | `instance_id`, `model_name`, `records` | `int`, `str`, `list[BlockAllocationRecord]` (each has `req_id: str`, `new_block_ids: list[int]`, `new_token_ids: list[int]`) |
 | `MP_VLLM_END_SESSION` | `request_id` | `str` |
@@ -104,6 +152,13 @@ know `chunk_size`:
   empty `chunk_hashes`).  Sub-chunk trailing tokens are excluded — they
   cannot hit at chunk granularity.
 - `hit_tokens = found_count * chunk_size`.
+- `model_name` and `cache_salt` are captured at lookup time from
+  `IPCCacheEngineKey` and surface as OTel attributes on the
+  `lmcache_mp.lookup_*_tokens` counters so the hit rate can be sliced
+  per model and per tenant / isolation domain on the dashboard.
+  `cache_salt` may have high cardinality (e.g. one entry per tenant);
+  operators can drop the label at scrape time with a `metric_relabel_configs`
+  rule if storage cost matters.
 
 Together they drive the `lmcache_mp.lookup_*_tokens` counters used to
 compute the L1+L2 token-level hit rate.  See

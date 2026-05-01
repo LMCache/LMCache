@@ -3,9 +3,13 @@
 """Tests for BlendTracingSubscriber."""
 
 # Standard
+from unittest.mock import patch
 import time
 
 # Third Party
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 import pytest
 
 # First Party
@@ -17,6 +21,7 @@ from lmcache.v1.mp_observability.subscribers.tracing.cb_server import (
 from lmcache.v1.mp_observability.subscribers.tracing.span_registry import (
     SpanRegistry,
 )
+import lmcache.v1.mp_observability.subscribers.tracing.cb_server as cb_server_module
 
 
 @pytest.fixture
@@ -572,3 +577,189 @@ class TestBlendTracingSubscriber:
         time.sleep(0.15)
         bus.stop()
         assert len(subscriber._pending) == 0
+
+
+class TestCBHitRateAttributes:
+    """Verify hit_tokens / requested_tokens / hit_rate are set on cb.request root span.
+
+    Uses a real OTel TracerProvider backed by InMemorySpanExporter so that span
+    attributes are actually recorded.  The module-level ``_tracer`` is patched
+    for the duration of each test; ``_HAS_OTEL`` is forced True.
+    """
+
+    @pytest.fixture
+    def exporter(self):
+        """Real OTel provider with in-memory exporter; patches module tracer."""
+        exp = InMemorySpanExporter()
+        provider = TracerProvider()
+        provider.add_span_processor(SimpleSpanProcessor(exp))
+        real_tracer = provider.get_tracer("lmcache_mp.blend")
+        with (
+            patch.object(cb_server_module, "_tracer", real_tracer),
+            patch.object(cb_server_module, "_HAS_OTEL", True),
+        ):
+            yield exp
+        exp.shutdown()
+
+    def _root_span(self, exporter: InMemorySpanExporter, sid: str):
+        """Return the finished cb.request root span for *sid*, or None."""
+        for span in exporter.get_finished_spans():
+            if span.name == "cb.request" and span.attributes.get("session_id") == sid:
+                return span
+        return None
+
+    def test_hit_rate_attrs_set_on_root_span(self, exporter):
+        """CB_LOOKUP_END with hit_tokens=512, requested_tokens=1024 → hit_rate=0.5."""
+        bus = EventBus(EventBusConfig(enabled=True, max_queue_size=100))
+        registry = SpanRegistry()
+        bus.register_subscriber(BlendTracingSubscriber(registry))
+        bus.start()
+        now = time.time()
+        sid = "cb-hr-normal"
+
+        bus.publish(
+            Event(event_type=EventType.CB_REQUEST_START, session_id=sid, timestamp=now)
+        )
+        bus.publish(
+            Event(
+                event_type=EventType.CB_LOOKUP_START,
+                session_id=sid,
+                timestamp=now + 0.001,
+                metadata={"num_tokens": 1024},
+            )
+        )
+        bus.publish(
+            Event(
+                event_type=EventType.CB_LOOKUP_END,
+                session_id=sid,
+                timestamp=now + 0.010,
+                metadata={
+                    "num_tokens": 1024,
+                    "fingerprint_hits": 4,
+                    "storage_hits": 2,
+                    "stale_chunks": 0,
+                    "no_gpu_context": False,
+                    "hit_tokens": 512,
+                    "requested_tokens": 1024,
+                },
+            )
+        )
+        bus.publish(
+            Event(
+                event_type=EventType.CB_REQUEST_END,
+                session_id=sid,
+                timestamp=now + 0.020,
+            )
+        )
+        time.sleep(0.15)
+        bus.stop()
+
+        root = self._root_span(exporter, sid)
+        assert root is not None
+        assert root.attributes["hit_tokens"] == 512
+        assert root.attributes["requested_tokens"] == 1024
+        assert abs(root.attributes["hit_rate"] - 0.5) < 1e-9
+
+    def test_hit_rate_zero_when_requested_tokens_is_zero(self, exporter):
+        """CB_LOOKUP_END with requested_tokens=0 yields hit_rate=0.0 without error."""
+        bus = EventBus(EventBusConfig(enabled=True, max_queue_size=100))
+        registry = SpanRegistry()
+        bus.register_subscriber(BlendTracingSubscriber(registry))
+        bus.start()
+        now = time.time()
+        sid = "cb-hr-zero"
+
+        bus.publish(
+            Event(event_type=EventType.CB_REQUEST_START, session_id=sid, timestamp=now)
+        )
+        bus.publish(
+            Event(
+                event_type=EventType.CB_LOOKUP_START,
+                session_id=sid,
+                timestamp=now + 0.001,
+                metadata={"num_tokens": 0},
+            )
+        )
+        bus.publish(
+            Event(
+                event_type=EventType.CB_LOOKUP_END,
+                session_id=sid,
+                timestamp=now + 0.010,
+                metadata={
+                    "num_tokens": 0,
+                    "fingerprint_hits": 0,
+                    "storage_hits": 0,
+                    "stale_chunks": 0,
+                    "no_gpu_context": False,
+                    "hit_tokens": 0,
+                    "requested_tokens": 0,
+                },
+            )
+        )
+        bus.publish(
+            Event(
+                event_type=EventType.CB_REQUEST_END,
+                session_id=sid,
+                timestamp=now + 0.020,
+            )
+        )
+        time.sleep(0.15)
+        bus.stop()
+
+        root = self._root_span(exporter, sid)
+        assert root is not None
+        assert root.attributes["hit_tokens"] == 0
+        assert root.attributes["requested_tokens"] == 0
+        assert root.attributes["hit_rate"] == 0.0
+
+    def test_total_miss_hit_rate(self, exporter):
+        """CB_LOOKUP_END with storage_hits=0 but requested_tokens>0 → hit_rate=0.0."""
+        bus = EventBus(EventBusConfig(enabled=True, max_queue_size=100))
+        registry = SpanRegistry()
+        bus.register_subscriber(BlendTracingSubscriber(registry))
+        bus.start()
+        now = time.time()
+        sid = "cb-hr-miss"
+
+        bus.publish(
+            Event(event_type=EventType.CB_REQUEST_START, session_id=sid, timestamp=now)
+        )
+        bus.publish(
+            Event(
+                event_type=EventType.CB_LOOKUP_START,
+                session_id=sid,
+                timestamp=now + 0.001,
+                metadata={"num_tokens": 1024},
+            )
+        )
+        bus.publish(
+            Event(
+                event_type=EventType.CB_LOOKUP_END,
+                session_id=sid,
+                timestamp=now + 0.010,
+                metadata={
+                    "num_tokens": 1024,
+                    "fingerprint_hits": 0,
+                    "storage_hits": 0,
+                    "stale_chunks": 0,
+                    "no_gpu_context": False,
+                    "hit_tokens": 0,
+                    "requested_tokens": 1024,
+                },
+            )
+        )
+        bus.publish(
+            Event(
+                event_type=EventType.CB_REQUEST_END,
+                session_id=sid,
+                timestamp=now + 0.020,
+            )
+        )
+        time.sleep(0.15)
+        bus.stop()
+
+        root = self._root_span(exporter, sid)
+        assert root is not None
+        assert root.attributes["hit_tokens"] == 0
+        assert root.attributes["requested_tokens"] == 1024
+        assert root.attributes["hit_rate"] == 0.0
