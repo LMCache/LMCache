@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Standard
+from unittest.mock import patch
 import tempfile
 import time
 
@@ -102,8 +103,16 @@ def test_ec_roundtrip_save_then_load():
             meta.add_mm_data(MMMeta.make_meta(mm_hash))
             parent._meta = meta
 
+            # Pin device to "cpu" for the load path: on CPU-only CI runners
+            # vLLM's UnspecifiedPlatform returns an empty device_type, which
+            # would make tensor.to(device="") raise. The test exercises the
+            # round-trip itself, not vLLM's device discovery.
             encoder_cache2 = {}
-            conn.start_load_caches(encoder_cache2)
+            with patch(
+                "lmcache.integration.vllm.vllm_ec_adapter.get_vllm_device_type",
+                return_value="cpu",
+            ):
+                conn.start_load_caches(encoder_cache2)
 
             assert mm_hash in encoder_cache2
             assert encoder_cache2[mm_hash].shape == x.shape
