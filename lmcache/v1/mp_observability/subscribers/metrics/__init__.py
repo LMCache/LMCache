@@ -4,6 +4,9 @@
 from lmcache.v1.mp_observability.subscribers.metrics.cb_server import (
     BlendMetricsSubscriber,
 )
+from lmcache.v1.mp_observability.subscribers.metrics.engine import (
+    EngineMetricsSubscriber,
+)
 from lmcache.v1.mp_observability.subscribers.metrics.l0_l1_throughput import (
     L0L1ThroughputSubscriber,
 )
@@ -28,9 +31,13 @@ from lmcache.v1.mp_observability.subscribers.metrics.lookup import (
     LookupMetricsSubscriber,
 )
 from lmcache.v1.mp_observability.subscribers.metrics.sm import SMMetricsSubscriber
+from lmcache.v1.mp_observability.subscribers.metrics.sm_lifecycle import (
+    SMLifecycleSubscriber,
+)
 
 __all__ = [
     "BlendMetricsSubscriber",
+    "EngineMetricsSubscriber",
     "L0L1ThroughputSubscriber",
     "L0LifecycleSubscriber",
     "L1FailureMetricsSubscriber",
@@ -40,5 +47,6 @@ __all__ = [
     "L2MetricsSubscriber",
     "L2ThroughputSubscriber",
     "LookupMetricsSubscriber",
+    "SMLifecycleSubscriber",
     "SMMetricsSubscriber",
 ]

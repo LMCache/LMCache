@@ -11,37 +11,7 @@ jobs:
   add_remove_labels:
     runs-on: ubuntu-latest
     steps:
-      - name: Check changed files
-        if: github.event.action == 'auto_merge_enabled'
-        id: changed-files
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const { data: files } = await github.rest.pulls.listFiles({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              pull_number: context.payload.pull_request.number,
-              per_page: 100,
-            });
-
-            // Patterns that are considered docs-or-CI-only (skip full label)
-            const docsOrCiPattern = /^(docs\/|\.github\/|\.buildkite\/(?!k3_tests\/))|.*\.md$/;
-
-            const hasCodeChanges = files.some(f => !docsOrCiPattern.test(f.filename));
-            core.setOutput('has_code_changes', hasCodeChanges.toString());
-
-      - name: Add full label
-        if: >-
-          github.event.action == 'auto_merge_enabled'
-          && steps.changed-files.outputs.has_code_changes == 'true'
-        uses: ubuntudroid/automerge-labeler@v1
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          label: 'full'
-
-      - name: Remove full label
-        if: github.event.action == 'auto_merge_disabled'
-        uses: ubuntudroid/automerge-labeler@v1
+      - uses: ubuntudroid/automerge-labeler@v1
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           label: 'full'

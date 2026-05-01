@@ -139,6 +139,8 @@ contribute to histograms; counters above always count all events.
 | `lmcache_mp.l1_chunk_idle_before_evict_seconds` | `lmcache_mp_l1_chunk_idle_before_evict_seconds` | Histogram | `L1_KEYS_EVICTED` | `eviction_time - last_access_time` per sampled chunk |
 | `lmcache_mp.l1_chunk_reuse_gap_seconds` | `lmcache_mp_l1_chunk_reuse_gap_seconds` | Histogram | `L1_READ_FINISHED`, `L1_WRITE_FINISHED`, `L1_WRITE_FINISHED_AND_READ_RESERVED` | Time gap between consecutive touches of the same chunk |
 | `lmcache_mp.l1_chunk_evict_reuse_gap_seconds` | `lmcache_mp_l1_chunk_evict_reuse_gap_seconds` | Histogram | `L1_KEYS_EVICTED` → `L1_WRITE_FINISHED` | Time from eviction to next reuse (capped at 300 s) |
+| `lmcache_mp.real_reuse_gap_seconds` | `lmcache_mp_real_reuse_gap_seconds` | Histogram (tagged `cache_salt`) | `SM_READ_PREFETCHED_FINISHED`, `SM_WRITE_FINISHED` | Time gap between a chunk's last access (read or write) and the next read.  Captures **storage cost**.  Emitted only on read events. |
+| `lmcache_mp.real_reuse_gap_chunks` | `lmcache_mp_real_reuse_gap_chunks` | Histogram (tagged `cache_salt`) | `SM_READ_PREFETCHED_FINISHED`, `SM_WRITE_FINISHED` | Per-`cache_salt` access-counter gap between two reads of the same chunk.  Counter bumps on every read and write of every chunk; histogram emitted only on read events for sampled chunks.  Captures **storage volume**. |
 
 **What it answers:** How long do L1 chunks live? How idle are they before eviction? How quickly are evicted chunks reused?
 
@@ -191,16 +193,26 @@ ratio is the fraction of tokens requested by a lookup that were served from
 either L1 or L2.  L0 (GPU prefix cache) is intentionally excluded — it is
 vLLM-owned and not observable from LMCache.
 
+Both counters carry `model_name` and `cache_salt` OTel attributes (captured
+at lookup time from `IPCCacheEngineKey`), enabling per-model and per-tenant
+slicing of the hit rate.  `cache_salt` can be high-cardinality; drop it at
+scrape time with `metric_relabel_configs` if storage cost matters.
+
 | OTel metric name | Prometheus name | Type | Source event | Calculation |
 |---|---|---|---|---|
-| `lmcache_mp.lookup_requested_tokens` | `lmcache_mp_lookup_requested_tokens_total` | Counter | `MP_LOOKUP_PREFETCH_END` | `+requested_tokens` |
-| `lmcache_mp.lookup_hit_tokens` | `lmcache_mp_lookup_hit_tokens_total` | Counter | `MP_LOOKUP_PREFETCH_END` | `+hit_tokens` |
+| `lmcache_mp.lookup_requested_tokens` | `lmcache_mp_lookup_requested_tokens_total` | Counter (attrs: `model_name`, `cache_salt`) | `MP_LOOKUP_PREFETCH_END` | `+requested_tokens` |
+| `lmcache_mp.lookup_hit_tokens` | `lmcache_mp_lookup_hit_tokens_total` | Counter (attrs: `model_name`, `cache_salt`) | `MP_LOOKUP_PREFETCH_END` | `+hit_tokens` |
 
 **What it answers:** What fraction of tokens requested by a lookup were served from cache (L1 or L2)?
 
 ```promql
+# Aggregate hit rate (all models, all salts):
 rate(lmcache_mp_lookup_hit_tokens_total[5m])
 / rate(lmcache_mp_lookup_requested_tokens_total[5m])
+
+# Per-model hit rate:
+sum(rate(lmcache_mp_lookup_hit_tokens_total[5m])) by (model_name)
+/ sum(rate(lmcache_mp_lookup_requested_tokens_total[5m])) by (model_name)
 ```
 
 > **Note:** Both counters are driven by the *same* event, so they always
@@ -302,6 +314,25 @@ queue-bound or I/O-bound?
 
 ---
 
+## Engine Counters
+
+Worker-scoped counters tied to what the MP server delivers back to each
+vLLM worker.  Labeled by `worker_id` — the vLLM worker instance id,
+distinct from any scheduler-scoped id used elsewhere.
+
+| OTel metric name | Prometheus name | Type | Source event | Calculation |
+|---|---|---|---|---|
+| `lmcache_mp.num_chunks_loaded` | `lmcache_mp_num_chunks_loaded_total` | Counter (attrs: `worker_id`, `model_name`, `cache_salt`) | `MP_RETRIEVE_END` | `+retrieved_count` per event |
+
+**What it answers:** How many LMCache chunks is each vLLM worker loading
+from LMCache into its engine?  Compare across workers to spot uneven
+demand or underserved ranks.  Slice by `model_name` to see per-model
+load volume in multi-model deployments, or by `cache_salt` for per-tenant
+attribution (note: `cache_salt` can be high-cardinality — drop it at
+scrape time with `metric_relabel_configs` if storage cost matters).
+
+---
+
 ## MPCacheEngine Observable Gauges
 
 These metrics are registered directly via `register_gauge` (pull-based OTel
@@ -313,6 +344,76 @@ point-in-time state snapshots that do not correspond to discrete events.
 | `lmcache_mp.active_prefetch_jobs` | `lmcache_mp_active_prefetch_jobs` | ObservableGauge | `MPCacheEngine._prefetch_jobs` | `len(_prefetch_jobs)` at scrape time |
 
 **What it answers:** How many prefetch jobs are currently in-flight? A sustained high value may indicate slow L2 backends or client-side polling delays.
+
+---
+
+## L1 / L2 State Metrics
+
+Live state of the L1 memory pool and the in-flight L2 store / prefetch-load
+queues.  These metrics are useful for capacity planning, sizing L1, and
+spotting backpressure on individual L2 adapters.
+
+All four metrics are OTel `ObservableGauge` instruments registered via the
+shared `register_gauge` helper.  At scrape time, OTel invokes the
+registered callback, which iterates the controller's live in-flight state
+and returns one observation per adapter that currently has work.
+Adapters with no in-flight work emit no datapoint for that scrape.
+
+The three in-flight metrics carry two attributes that disambiguate
+adapters even when more than one is registered with the same backend type
+— same shape as the existing `lmcache_mp.l2_store_completed` counter:
+
+- `l2_name` — the registered adapter type (e.g. `"fs"`, `"mock"`,
+  `"nixl_store"`).
+- `adapter_index` — position in the `StoreController`/`PrefetchController`
+  adapter list.  Distinguishes two adapters of the same type (e.g.
+  `fs[0]` and `fs[1]`).
+
+| OTel metric name | Prometheus name | Type | Source of truth | Calculation |
+|---|---|---|---|---|
+| `lmcache_mp.l1_memory_usage_bytes` | `lmcache_mp_l1_memory_usage_bytes` | ObservableGauge | `L1Manager.get_memory_usage()` | Bytes currently held in L1 at scrape time |
+| `lmcache_mp.num_inflight_l2_stores` | `lmcache_mp_num_inflight_l2_stores` | ObservableGauge (attrs: `l2_name`, `adapter_index`) | `StoreController.get_inflight_count_by_adapter()` | Snapshot of in-flight L2 store tasks grouped by adapter |
+| `lmcache_mp.num_inflight_l2_loads` | `lmcache_mp_num_inflight_l2_loads` | ObservableGauge (attrs: `l2_name`, `adapter_index`) | `PrefetchController.get_inflight_load_state_by_adapter()` | Per-adapter count from the same snapshot |
+| `lmcache_mp.inflight_load_memory_usage_bytes` | `lmcache_mp_inflight_load_memory_usage_bytes` | ObservableGauge (attrs: `l2_name`, `adapter_index`) | `PrefetchController.get_inflight_load_state_by_adapter()` | Per-adapter reserved bytes from the same snapshot |
+
+**What `l1_memory_usage_bytes` answers:** How full is the L1 cache? Helps
+size L1 against working set and detect leaks (steadily climbing without
+plateauing).
+
+**What `num_inflight_l2_stores` answers:** Are L2 stores piling up on a
+particular adapter? Sustained non-zero values indicate the adapter cannot
+keep up with the L1 → L2 write rate.
+
+**What `num_inflight_l2_loads` answers:** Are L2 → L1 prefetch loads
+backing up? Pair with `num_inflight_l2_stores` to see whether read or
+write traffic dominates a given backend.
+
+**What `inflight_load_memory_usage_bytes` answers:** How much L1 capacity
+is currently *reserved but not yet filled* by in-flight prefetches? Rising
+in-flight bytes alongside rising `l1_memory_usage_bytes` is a signal that
+prefetch reservations are crowding out cacheable data.
+
+> **Bytes attribution.** A single prefetch request may load from multiple
+> adapters.  The byte count is split per-adapter via the request's
+> `load_plan` bitmap × per-key `MemoryObj.size` (precomputed at submit
+> time and stored on `InFlightPrefetchRequest.load_bytes_by_adapter`) so
+> each in-flight byte is attributed to exactly one `(l2_name,
+> adapter_index)` pair — sums across adapters are not double-counted.
+
+> **Singleton dispatch.** L1Manager / StoreController / PrefetchController
+> are singletons in MP mode.  Each controller registers its gauge once
+> (guarded by a class-level `_gauge_registered` flag) and the callback
+> dispatches via a class-level `_gauge_target` so the most recently
+> constructed instance owns the reported values.  This is invisible in
+> production (one instance per process); it matters in tests that create
+> multiple controllers.
+
+> **Thread safety.** Callbacks run on the OTel reader thread and read
+> state mutated by the controller's background loop thread.  Snapshots
+> use `dict.copy()`, which is implemented in C and atomic under the
+> CPython GIL — concurrent mutation cannot crash the snapshot, though it
+> may briefly see a state that is one mutation stale.  Acceptable for a
+> 10-second scrape cadence.
 
 ---
 

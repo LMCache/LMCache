@@ -19,6 +19,7 @@ from lmcache.v1.distributed.memory_manager import L1MemoryManager
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import get_event_bus
+from lmcache.v1.mp_observability.otel_init import register_gauge
 
 logger = init_logger(__name__)
 
@@ -157,6 +158,13 @@ class L1Manager:
     For every operation on list of keys, the operation is atomic
     """
 
+    # Singleton dispatch for ``lmcache_mp.l1_memory_usage_bytes``: tests may
+    # construct multiple L1Managers but the OTel SDK only honors the first
+    # gauge registration, so the callback reads from the most recently built
+    # instance via ``_gauge_target``.
+    _gauge_registered: bool = False
+    _gauge_target: "L1Manager | None" = None
+
     def __init__(self, config: L1ManagerConfig):
         self._lock = threading.Lock()
 
@@ -170,6 +178,20 @@ class L1Manager:
         self._registered_listeners: list[L1ManagerListener] = []
 
         self._event_bus = get_event_bus()
+
+        L1Manager._gauge_target = self
+        if not L1Manager._gauge_registered:
+            L1Manager._gauge_registered = True
+            register_gauge(
+                "lmcache.l1_manager",
+                "lmcache_mp.l1_memory_usage_bytes",
+                "Bytes currently held in L1 cache",
+                lambda: (
+                    L1Manager._gauge_target.get_memory_usage()[0]
+                    if L1Manager._gauge_target is not None
+                    else 0
+                ),
+            )
 
     def register_listener(self, listener: L1ManagerListener) -> None:
         """Register a listener for L1Manager events.
