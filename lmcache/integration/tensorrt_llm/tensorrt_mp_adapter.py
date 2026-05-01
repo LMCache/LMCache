@@ -33,7 +33,7 @@ import zmq
 # First Party
 from lmcache import torch_dev
 from lmcache.logging import init_logger
-from lmcache.utils import EngineType
+from lmcache.utils import EngineType, check_interprocess_event_support
 from lmcache.v1.multiprocess.custom_types import (
     IPCCacheEngineKey,
     RawCudaIPCWrapper,
@@ -394,6 +394,8 @@ class LMCacheMPKvConnectorWorker(KvCacheConnectorWorker):
             return
 
         t0 = time.perf_counter()
+        # Not all backends support interprocess Events (CUDA IPC specific)
+        check_interprocess_event_support()
         event = torch_dev.Event(interprocess=True)
         event.record(stream)
 
@@ -442,6 +444,8 @@ class LMCacheMPKvConnectorWorker(KvCacheConnectorWorker):
             return
 
         t0 = time.perf_counter()
+        # Not all backends support interprocess Events (CUDA IPC specific)
+        check_interprocess_event_support()
         event = torch_dev.Event(interprocess=True)
         event.record(stream)
 

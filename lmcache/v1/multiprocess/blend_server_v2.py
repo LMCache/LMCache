@@ -48,6 +48,7 @@ import zmq
 # First Party
 from lmcache import torch_dev, torch_device_type
 from lmcache.logging import init_logger
+from lmcache.utils import check_interprocess_event_support
 from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
     ObjectKey,
@@ -575,12 +576,7 @@ class BlendEngineV2(MPCacheEngine):
             torch_dev.stream(gpu_context.stream),
         ):
             # Not all backends support interprocess Events (CUDA IPC specific)
-            if not hasattr(torch_dev, "Event"):
-                raise RuntimeError(
-                    f"Backend '{torch_device_type}' does not support interprocess "
-                    "Events (torch_dev.Event not available). "
-                    "Multiprocess IPC requires CUDA."
-                )
+            check_interprocess_event_support()
             event = torch_dev.Event(interprocess=True)
 
             # Wait for vLLM event to finish
@@ -821,12 +817,7 @@ class BlendEngineV2(MPCacheEngine):
             torch_dev.stream(gpu_context.stream),
         ):
             # Not all backends support interprocess Events (CUDA IPC specific)
-            if not hasattr(torch_dev, "Event"):
-                raise RuntimeError(
-                    f"Backend '{torch_device_type}' does not support interprocess "
-                    "Events (torch_dev.Event not available). "
-                    "Multiprocess IPC requires CUDA."
-                )
+            check_interprocess_event_support()
             event = torch_dev.Event(interprocess=True)
 
             self._event_bus.publish_on_stream(

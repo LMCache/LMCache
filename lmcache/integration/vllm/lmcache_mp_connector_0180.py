@@ -10,7 +10,7 @@ import torch
 import zmq
 from lmcache import torch_dev, torch_device_type
 from lmcache.integration.vllm.utils import mla_enabled
-from lmcache.utils import init_logger as lmcache_init_logger
+from lmcache.utils import check_interprocess_event_support, init_logger as lmcache_init_logger
 
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
@@ -562,12 +562,7 @@ class LMCacheMPConnector(KVConnectorBase_V1):
 
         with torch_dev.stream(torch_dev.current_stream()):
             # Not all backends support interprocess Events (CUDA IPC specific)
-            if not hasattr(torch_dev, "Event"):
-                raise RuntimeError(
-                    f"Backend '{torch_device_type}' does not support "
-                    "interprocess Events (torch_dev.Event not available). "
-                    "Multiprocess IPC requires CUDA."
-                )
+            check_interprocess_event_support()
             event = torch_dev.Event(interprocess=True)
             event.record()
 
@@ -631,12 +626,7 @@ class LMCacheMPConnector(KVConnectorBase_V1):
 
         with torch_dev.stream(torch_dev.current_stream()):
             # Not all backends support interprocess Events (CUDA IPC specific)
-            if not hasattr(torch_dev, "Event"):
-                raise RuntimeError(
-                    f"Backend '{torch_device_type}' does not support "
-                    "interprocess Events (torch_dev.Event not available). "
-                    "Multiprocess IPC requires CUDA."
-                )
+            check_interprocess_event_support()
             event = torch_dev.Event(interprocess=True)
             event.record()
 
