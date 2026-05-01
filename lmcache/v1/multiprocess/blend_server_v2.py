@@ -158,45 +158,63 @@ class BlendTokenRangeMatcher:
                           (one per complete chunk of chunk_size tokens).
                           Stored as the storage key returned in CBMatchResult.hash.
         """
+        arr = np.array(token_ids, dtype=np.uint64)
+        # Polynomial fingerprints for non-overlapping chunks, built from raw
+        # token IDs so they match the rolling hashes in match_sub_sequence
+        chunk_hashes = chunk_hash_windows_numba(arr, self.chunk_size, self._BASE)
+        n = int(chunk_hashes.shape[0])
+        if n == 0:
+            return
+
         with self._lock:
-            arr = np.array(token_ids, dtype=np.uint64)
-            # Polynomial fingerprints for non-overlapping chunks, built from raw
-            # token IDs so they match the rolling hashes in match_sub_sequence
-            chunk_hashes = chunk_hash_windows_numba(arr, self.chunk_size, self._BASE)
-            n = int(chunk_hashes.shape[0])
-            if n == 0:
+            # Filter chunks already registered to avoid duplicate compact-ID
+            # allocation.  When both cb_store_pre_computed and cb_store_final
+            # fire for the same token sequence they produce identical hashes;
+            # registering twice orphans the first compact ID permanently since
+            # _token_hash_to_compact_id is overwritten but the old list slot is
+            # not freed.
+            new_idxs = [
+                i
+                for i in range(n)
+                if token_hashes[i] not in self._token_hash_to_compact_id
+            ]
+            if not new_idxs:
                 return
+            n_new = len(new_idxs)
+            new_chunk_hashes = chunk_hashes[new_idxs]
 
             # Compact sequential IDs: bounded by _TABLE_SIZE, safe for seen-array sizing
+            # NOTE: base_id grows monotonically (evicted slots are not reused); the hard
+            # limit is on total chunks ever registered, not active chunks.
             base_id = len(self._chunk_token_hash)
-            if base_id + n > self._TABLE_SIZE:
+            if base_id + n_new > self._TABLE_SIZE:
                 logger.error(
                     "BlendTokenRangeMatcher compact-ID overflow: %d chunks "
                     "registered, cannot add %d more (limit %d). Skipping.",
                     base_id,
-                    n,
+                    n_new,
                     self._TABLE_SIZE,
                 )
                 return
-            if base_id + n > int(self._TABLE_SIZE * 0.8):
+            if base_id + n_new > int(self._TABLE_SIZE * 0.8):
                 logger.warning(
                     "BlendTokenRangeMatcher nearing capacity: %d/%d compact IDs used. "
                     "Hash collision rate is rising; hit rate will degrade.",
-                    base_id + n,
+                    base_id + n_new,
                     self._TABLE_SIZE,
                 )
-            compact_ids = np.arange(base_id, base_id + n, dtype=np.int64)
+            compact_ids = np.arange(base_id, base_id + n_new, dtype=np.int64)
 
             # Write table: poly_chunk_hash → compact_chunk_id
-            update_table_id_numba(chunk_hashes, self._table_id, compact_ids)
+            update_table_id_numba(new_chunk_hashes, self._table_id, compact_ids)
 
             # Persist compact_id → token_hash, token_hash → start, and reverse maps
-            for i in range(n):
-                th = token_hashes[i]
-                cid = int(compact_ids[i])
-                slot = int(chunk_hashes[i]) & int(self._mask)
+            for k, orig_i in enumerate(new_idxs):
+                th = token_hashes[orig_i]
+                cid = int(compact_ids[k])
+                slot = int(new_chunk_hashes[k]) & int(self._mask)
                 self._chunk_token_hash.append(th)
-                self._token_hash_to_start[th] = i * self.chunk_size
+                self._token_hash_to_start[th] = orig_i * self.chunk_size
                 self._compact_id_to_slot[cid] = slot
                 self._token_hash_to_compact_id[th] = cid
 
@@ -220,14 +238,16 @@ class BlendTokenRangeMatcher:
                               the match was found
               hash          : token_hash bytes (from registration) for cache key lookup
         """
+        if len(token_ids) < self.chunk_size:
+            return []
+
+        arr = np.array(token_ids, dtype=np.uint64)
+        # Sliding-window polynomial hashes over the query
+        rolling = rolling_hash_windows_numba(arr, self.chunk_size, self._BASE)
+
         with self._lock:
-            if not self._chunk_token_hash or len(token_ids) < self.chunk_size:
+            if not self._chunk_token_hash:
                 return []
-
-            arr = np.array(token_ids, dtype=np.uint64)
-
-            # Sliding-window polynomial hashes over the query
-            rolling = rolling_hash_windows_numba(arr, self.chunk_size, self._BASE)
 
             # Probe table; seen array is _TABLE_SIZE bytes (~1 MB), fixed and safe
             hit_ids = unique_hits_direct_id_numba(
