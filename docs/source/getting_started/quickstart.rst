@@ -382,6 +382,9 @@ This guide helps you get LMCache running end-to-end in a couple of minutes. Use 
                    ),
                )
 
+               out = llm.generate(["Your prompt here"], SamplingParams(max_tokens=64))
+               print(out[0].outputs[0].text)
+
       .. note::
          The TRT-LLM adapter reads :class:`LMCacheEngineConfig` the
          same way the vLLM adapter does: ``LMCACHE_CONFIG_FILE`` for
