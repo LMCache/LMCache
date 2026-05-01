@@ -62,11 +62,14 @@ expected by `RuntimePluginLauncher`:
 | `configs_dict` | `dict` | Aggregated config sections |
 | `to_json()` | `str` | Serialize `configs_dict` + `extra_config` to JSON string |
 
-### `_safe_asdict` / `_make_json_safe`
+### `safe_asdict` / `make_json_safe`
 
-Helper functions that convert dataclass instances to dicts while
-handling non-serializable fields (e.g. `pathlib.Path`) by falling
-back to `str()`.
+Public helpers in `lmcache.v1.utils.json_utils` that convert
+dataclass instances to dicts while handling non-serializable
+fields (e.g. `pathlib.Path`) by falling back to `str()`.
+`safe_asdict` operates on dataclass instances; `make_json_safe`
+recursively sanitizes arbitrary values (dicts, lists, tuples,
+primitives) and is also reused by the `/conf` HTTP endpoint.
 
 ### `RuntimePluginLauncher` (base)
 
@@ -130,7 +133,7 @@ sequenceDiagram
     participant P as Plugin Process
 
     S->>MPL: init(runtime_plugin_config, mp_config, storage_config, ...)
-    MPL->>MPL: _safe_asdict() each config
+    MPL->>MPL: safe_asdict() each config
     MPL->>MPL: Build _MPPluginConfig wrapper
     MPL->>RPL: init(config=wrapper, role=None)
 
