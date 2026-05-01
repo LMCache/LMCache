@@ -66,16 +66,28 @@ class LayoutHints(TypedDict, total=False):
             ``"NHD"`` — heads after block-size (default for most
             vLLM builds).
             ``"HND"`` — heads before block-size (``VLLM_KV_CACHE_LAYOUT=HND``).
+            ``"SGLANG_MHA"`` — SGLang MHA: caller flattens the natural
+            depth-2 ``[K_layers, V_layers]`` structure into a single
+            ``list[CudaIPCWrapper]`` (first half K layers, second half V
+            layers) so it fits the wire ``KVCache`` type. The daemon
+            reconstructs the depth-2 structure via
+            :func:`reshape_flat_kv_for_engine` before format detection.
         num_kv_heads: Number of KV heads per layer. Used by TRT-LLM to
             reshape its 4-D pool tensor into the canonical 6-D form.
         tokens_per_block: Tokens per paged block. Used by TRT-LLM (same).
         head_dim: Per-head dimension. Used by TRT-LLM (same).
+        block_size: Page/block size in tokens. SGLang's
+            ``TWO_X_NL_X_NBBS_NH_HS`` format folds ``num_blocks * block_size``
+            into a single ``page_buffer_size`` dimension, so the daemon
+            can't recover ``block_size`` from the tensor shape and the
+            engine must pass it explicitly here.
     """
 
-    kv_layout: Literal["NHD", "HND"]
+    kv_layout: Literal["NHD", "HND", "SGLANG_MHA"]
     num_kv_heads: int
     tokens_per_block: int
     head_dim: int
+    block_size: int
 
 
 def attempt_permute_to_contiguous_view(
@@ -265,8 +277,12 @@ def get_concrete_gpu_kv_shape(
         return f"{nl} x [{nb}, {bs}, {hs}]"
 
     if fmt == F.TWO_X_NL_X_NBBS_NH_HS:
-        pbs = get_page_buffer_size(kv_caches, fmt)
         nh = get_num_heads(kv_caches, fmt)
+        if kv_caches[0][0].dim() == 4:
+            nb = get_num_blocks(kv_caches, fmt)
+            bs = get_block_size(kv_caches, fmt)
+            return f"2 x {nl} x [{nb}, {bs}, {nh}, {hs}]"
+        pbs = get_page_buffer_size(kv_caches, fmt)
         return f"2 x {nl} x [{pbs}, {nh}, {hs}]"
 
     if fmt == F.NL_X_NBBS_ONE_HS:
@@ -370,6 +386,42 @@ def normalize_kv_and_discover_format(
 
     if layout_hints is None:
         layout_hints = {}
+
+    # SGLang MP hands us a flat ``list[Tensor]`` of length ``2 * num_layers``
+    # (first half K layers, second half V layers) so the wire payload fits
+    # ``KVCache = list[CudaIPCWrapper]``. Restore the canonical depth-2
+    # ``[K_layers, V_layers]`` shape, and reshape each per-layer tensor
+    # from ``(page_buffer_size, num_heads, head_size)`` to ``(num_blocks,
+    # block_size, num_heads, head_size)`` using the engine-supplied
+    # ``block_size`` so num_blocks/block_size become readable from
+    # ``shape[0]``/``shape[1]`` without a separate hint-aware path.
+    if (
+        serving_engine == EngineType.SGLANG
+        and layout_hints.get("kv_layout") == "SGLANG_MHA"
+        and isinstance(kv_caches, list)
+        and len(kv_caches) > 0
+        and len(kv_caches) % 2 == 0
+        and isinstance(kv_caches[0], torch.Tensor)
+    ):
+        block_size = layout_hints.get("block_size")
+        if block_size is None:
+            raise ValueError(
+                "SGLang MHA normalize requires layout_hints with block_size"
+            )
+        half = len(kv_caches) // 2
+        reshaped = []
+        for layers in (kv_caches[:half], kv_caches[half:]):
+            inner = []
+            for t in layers:
+                pbs = t.shape[0]
+                if pbs % block_size != 0:
+                    raise ValueError(
+                        f"SGLang KV page_buffer_size {pbs} not divisible by "
+                        f"block_size {block_size}"
+                    )
+                inner.append(t.view(pbs // block_size, block_size, *t.shape[1:]))
+            reshaped.append(inner)
+        kv_caches = reshaped
 
     # TRT-LLM hands us a 4-D pool tensor (possibly wrapped in a 1-element
     # list for adapter-side ergonomics). Reshape to the canonical 6-D
@@ -519,6 +571,13 @@ def get_num_blocks(
     elif gpu_kv_format == lmc_ops.GPUKVFormat.NL_X_NB_BS_HS:
         return kv_caches[0].shape[0]
     elif gpu_kv_format == lmc_ops.GPUKVFormat.TWO_X_NL_X_NBBS_NH_HS:
+        # SGLang MHA — when the inner tensor was reshaped to 4-D
+        # ``(num_blocks, block_size, num_heads, head_size)`` during
+        # discover (MP path with ``block_size`` layout hint), num_blocks
+        # is ``shape[0]``. The original 3-D layout folds num_blocks
+        # into ``page_buffer_size`` and is not separable.
+        if kv_caches[0][0].dim() == 4:
+            return kv_caches[0][0].shape[0]
         raise ValueError(_ATTRIBUTE_NOT_EXIST_ERROR.format(format=gpu_kv_format))
     elif gpu_kv_format == lmc_ops.GPUKVFormat.NL_X_NBBS_ONE_HS:
         raise ValueError(_ATTRIBUTE_NOT_EXIST_ERROR.format(format=gpu_kv_format))
@@ -552,6 +611,9 @@ def get_block_size(
     elif gpu_kv_format == lmc_ops.GPUKVFormat.NL_X_NB_BS_HS:
         return kv_caches[0].shape[1]
     elif gpu_kv_format == lmc_ops.GPUKVFormat.TWO_X_NL_X_NBBS_NH_HS:
+        # SGLang MHA — see ``get_num_blocks`` above for the 4-D layout.
+        if kv_caches[0][0].dim() == 4:
+            return kv_caches[0][0].shape[1]
         raise ValueError(_ATTRIBUTE_NOT_EXIST_ERROR.format(format=gpu_kv_format))
     elif gpu_kv_format == lmc_ops.GPUKVFormat.NL_X_NBBS_ONE_HS:
         raise ValueError(_ATTRIBUTE_NOT_EXIST_ERROR.format(format=gpu_kv_format))
@@ -590,7 +652,11 @@ def get_page_buffer_size(
         return kv_caches[0].shape[0] * kv_caches[0].shape[1]
     elif gpu_kv_format == lmc_ops.GPUKVFormat.TWO_X_NL_X_NBBS_NH_HS:
         # list[2] -> list[num_layers] of [page_buffer_size, num_heads, head_size]
-        return kv_caches[0][0].shape[0]
+        # OR (after MP reshape) [num_blocks, block_size, num_heads, head_size].
+        inner = kv_caches[0][0]
+        if inner.dim() == 4:
+            return inner.shape[0] * inner.shape[1]
+        return inner.shape[0]
     elif gpu_kv_format == lmc_ops.GPUKVFormat.NL_X_NBBS_ONE_HS:
         # list[num_layers] of [page_buffer_size, 1, head_size]
         return kv_caches[0].shape[0]
@@ -627,7 +693,9 @@ def get_num_heads(
         # MLA: heads are absorbed into hidden dim, so num_heads = 1
         return 1
     elif gpu_kv_format == lmc_ops.GPUKVFormat.TWO_X_NL_X_NBBS_NH_HS:
-        return kv_caches[0][layer_idx].shape[1]
+        # 3-D inner: (PBS, NH, HS); 4-D inner: (NB, BS, NH, HS).
+        # NH is the second-to-last dim either way.
+        return kv_caches[0][layer_idx].shape[-2]
     elif gpu_kv_format == lmc_ops.GPUKVFormat.NL_X_NBBS_ONE_HS:
         return kv_caches[layer_idx].shape[1]
     else:
@@ -662,7 +730,9 @@ def get_hidden_dim_size(
     elif gpu_kv_format == lmc_ops.GPUKVFormat.NL_X_NB_BS_HS:
         return kv_caches[layer_idx].shape[2]
     elif gpu_kv_format == lmc_ops.GPUKVFormat.TWO_X_NL_X_NBBS_NH_HS:
-        return kv_caches[0][layer_idx].shape[1] * kv_caches[0][layer_idx].shape[2]
+        # NH * HS — last two dims regardless of 3-D vs 4-D inner.
+        inner = kv_caches[0][layer_idx]
+        return inner.shape[-2] * inner.shape[-1]
     elif gpu_kv_format == lmc_ops.GPUKVFormat.NL_X_NBBS_ONE_HS:
         return kv_caches[layer_idx].shape[2]
     else:
@@ -693,7 +763,8 @@ def get_head_size(
     elif gpu_kv_format == lmc_ops.GPUKVFormat.NL_X_NB_BS_HS:
         return kv_caches[layer_idx].shape[2]
     elif gpu_kv_format == lmc_ops.GPUKVFormat.TWO_X_NL_X_NBBS_NH_HS:
-        return kv_caches[0][layer_idx].shape[2]
+        # HS is the last dim regardless of 3-D vs 4-D inner.
+        return kv_caches[0][layer_idx].shape[-1]
     elif gpu_kv_format == lmc_ops.GPUKVFormat.NL_X_NBBS_ONE_HS:
         return kv_caches[layer_idx].shape[2]
     else:
@@ -736,7 +807,11 @@ def get_tokens_per_layer(
         return kv_caches[0].shape[0] * kv_caches[0].shape[1]
     elif gpu_kv_format == lmc_ops.GPUKVFormat.TWO_X_NL_X_NBBS_NH_HS:
         # list[2] -> list[num_layers] of [page_buffer_size, num_heads, head_size]
-        return kv_caches[0][0].shape[0]
+        # OR (after MP reshape) [num_blocks, block_size, num_heads, head_size].
+        inner = kv_caches[0][0]
+        if inner.dim() == 4:
+            return inner.shape[0] * inner.shape[1]
+        return inner.shape[0]
     elif gpu_kv_format == lmc_ops.GPUKVFormat.NL_X_NBBS_ONE_HS:
         # list[num_layers] of [page_buffer_size, 1, head_size]
         return kv_caches[0].shape[0]
