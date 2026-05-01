@@ -17,7 +17,6 @@ from typing import Callable
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.distributed.serde.async_processor import AsyncSerdeProcessor
 from lmcache.v1.distributed.serde.base import SerdeConfig, SerdeProcessor
 
 logger = init_logger(__name__)
@@ -68,34 +67,3 @@ def create_serde_processor(config: SerdeConfig) -> SerdeProcessor:
         known = ", ".join(sorted(_SERDE_FACTORY_REGISTRY)) or "(none)"
         raise ValueError(f"Unknown serde type {config.type!r}. Registered: {known}")
     return factory(config.kwargs)
-
-
-# ---------------------------------------------------------------------------
-# Built-in factories
-# ---------------------------------------------------------------------------
-
-
-def _create_fp8_serde(kwargs: dict[str, object]) -> SerdeProcessor:
-    # Third Party
-    import torch
-
-    # First Party
-    from lmcache.v1.distributed.serde.fp8 import (
-        Fp8QuantizationDeserializer,
-        Fp8QuantizationSerializer,
-    )
-
-    dtype_name = str(kwargs.get("fp8_dtype", "float8_e4m3fn"))
-    fp8_dtype = getattr(torch, dtype_name, None)
-    if fp8_dtype is None:
-        raise ValueError(f"Unknown torch dtype: {dtype_name!r}")
-
-    max_workers = int(kwargs.get("max_workers", 1))  # type: ignore[call-overload]
-    return AsyncSerdeProcessor(
-        Fp8QuantizationSerializer(fp8_dtype),
-        Fp8QuantizationDeserializer(fp8_dtype),
-        max_workers=max_workers,
-    )
-
-
-register_serde_factory("fp8", _create_fp8_serde)

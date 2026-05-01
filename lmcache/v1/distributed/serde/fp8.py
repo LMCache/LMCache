@@ -13,7 +13,9 @@ import torch
 
 # First Party
 from lmcache.v1.distributed.api import MemoryLayoutDesc
-from lmcache.v1.distributed.serde.base import Deserializer, Serializer
+from lmcache.v1.distributed.serde.async_processor import AsyncSerdeProcessor
+from lmcache.v1.distributed.serde.base import Deserializer, SerdeProcessor, Serializer
+from lmcache.v1.distributed.serde.factory import register_serde_factory
 from lmcache.v1.memory_management import MemoryObj
 
 
@@ -82,3 +84,20 @@ class Fp8QuantizationDeserializer(Deserializer):
         fp8_bytes = src_tensor.flatten()[:n_elements]
         fp8_tensor = fp8_bytes.view(self._fp8_dtype).reshape(dst_tensor.shape)
         dst_tensor.copy_(fp8_tensor.to(dst_tensor.dtype))
+
+
+def _create_fp8_serde(kwargs: dict[str, object]) -> SerdeProcessor:
+    dtype_name = str(kwargs.get("fp8_dtype", "float8_e4m3fn"))
+    fp8_dtype = getattr(torch, dtype_name, None)
+    if fp8_dtype is None:
+        raise ValueError(f"Unknown torch dtype: {dtype_name!r}")
+
+    max_workers = int(kwargs.get("max_workers", 1))  # type: ignore[call-overload]
+    return AsyncSerdeProcessor(
+        Fp8QuantizationSerializer(fp8_dtype),
+        Fp8QuantizationDeserializer(fp8_dtype),
+        max_workers=max_workers,
+    )
+
+
+register_serde_factory("fp8", _create_fp8_serde)
