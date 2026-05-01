@@ -38,6 +38,7 @@ Workflow (example: chunk_size = 3)
 """
 
 # Standard
+import threading
 import time
 
 # Third Party
@@ -99,7 +100,6 @@ logger = init_logger(__name__)
 
 
 class BlendTokenRangeMatcher:
-    # TODO(Jiayi): Needs thread-safety for this class.
     """Fast token-range matcher using polynomial rolling/chunk hashes and a
     direct-address lookup table.
 
@@ -141,6 +141,7 @@ class BlendTokenRangeMatcher:
         self._compact_id_to_slot = np.full(self._TABLE_SIZE, -1, dtype=np.int64)
         # token_hash → compact_chunk_id (for eviction lookup)
         self._token_hash_to_compact_id: dict[bytes, int] = {}
+        self._lock = threading.Lock()
 
     def on_new_token_hashes(
         self,
@@ -157,30 +158,52 @@ class BlendTokenRangeMatcher:
                           (one per complete chunk of chunk_size tokens).
                           Stored as the storage key returned in CBMatchResult.hash.
         """
-        arr = np.array(token_ids, dtype=np.uint64)
-        # Polynomial fingerprints for non-overlapping chunks, built from raw token IDs
-        # so they match the sliding-window rolling hashes in match_sub_sequence
-        chunk_hashes = chunk_hash_windows_numba(arr, self.chunk_size, self._BASE)
-        n = int(chunk_hashes.shape[0])
-        if n == 0:
-            return
+        if self._lock.locked():
+            logger.error(
+                "BlendTokenRangeMatcher.on_new_token_hashes: concurrent access "
+                "detected; data corruption is possible."
+            )
+        with self._lock:
+            arr = np.array(token_ids, dtype=np.uint64)
+            # Polynomial fingerprints for non-overlapping chunks, built from raw
+            # token IDs so they match the rolling hashes in match_sub_sequence
+            chunk_hashes = chunk_hash_windows_numba(arr, self.chunk_size, self._BASE)
+            n = int(chunk_hashes.shape[0])
+            if n == 0:
+                return
 
-        # Compact sequential IDs: bounded by _TABLE_SIZE, safe for seen-array sizing
-        base_id = len(self._chunk_token_hash)
-        compact_ids = np.arange(base_id, base_id + n, dtype=np.int64)
+            # Compact sequential IDs: bounded by _TABLE_SIZE, safe for seen-array sizing
+            base_id = len(self._chunk_token_hash)
+            if base_id + n > self._TABLE_SIZE:
+                logger.error(
+                    "BlendTokenRangeMatcher compact-ID overflow: %d chunks "
+                    "registered, cannot add %d more (limit %d). Skipping.",
+                    base_id,
+                    n,
+                    self._TABLE_SIZE,
+                )
+                return
+            if base_id + n > int(self._TABLE_SIZE * 0.8):
+                logger.error(
+                    "BlendTokenRangeMatcher nearing capacity: %d/%d compact IDs used. "
+                    "Hash collision rate is rising; hit rate will degrade.",
+                    base_id + n,
+                    self._TABLE_SIZE,
+                )
+            compact_ids = np.arange(base_id, base_id + n, dtype=np.int64)
 
-        # Write table: poly_chunk_hash → compact_chunk_id
-        update_table_id_numba(chunk_hashes, self._table_id, compact_ids)
+            # Write table: poly_chunk_hash → compact_chunk_id
+            update_table_id_numba(chunk_hashes, self._table_id, compact_ids)
 
-        # Persist compact_id → token_hash, token_hash → start, and reverse maps
-        for i in range(n):
-            th = token_hashes[i]
-            cid = int(compact_ids[i])
-            slot = int(chunk_hashes[i]) & int(self._mask)
-            self._chunk_token_hash.append(th)
-            self._token_hash_to_start[th] = i * self.chunk_size
-            self._compact_id_to_slot[cid] = slot
-            self._token_hash_to_compact_id[th] = cid
+            # Persist compact_id → token_hash, token_hash → start, and reverse maps
+            for i in range(n):
+                th = token_hashes[i]
+                cid = int(compact_ids[i])
+                slot = int(chunk_hashes[i]) & int(self._mask)
+                self._chunk_token_hash.append(th)
+                self._token_hash_to_start[th] = i * self.chunk_size
+                self._compact_id_to_slot[cid] = slot
+                self._token_hash_to_compact_id[th] = cid
 
     def match_sub_sequence(
         self,
@@ -202,53 +225,59 @@ class BlendTokenRangeMatcher:
                               the match was found
               hash          : token_hash bytes (from registration) for cache key lookup
         """
-        if not self._chunk_token_hash or len(token_ids) < self.chunk_size:
-            return []
-
-        arr = np.array(token_ids, dtype=np.uint64)
-
-        # Sliding-window polynomial hashes over the query
-        rolling = rolling_hash_windows_numba(arr, self.chunk_size, self._BASE)
-
-        # Probe table; seen array is _TABLE_SIZE bytes (~1 MB), fixed and safe
-        hit_ids = unique_hits_direct_id_numba(
-            rolling, self._table_id, self._mask, self._TABLE_SIZE
-        )
-
-        if hit_ids.shape[0] == 0:
-            return []
-
-        # For each hit compact_id, find the first query position where it matched
-        hit_id_set = set(int(cid) for cid in hit_ids)
-        cid_to_query_pos: dict[int, int] = {}
-        for q_pos in range(rolling.shape[0]):
-            idx = int(rolling[q_pos]) & int(self._mask)
-            cid = int(self._table_id[idx])
-            if cid in hit_id_set and cid not in cid_to_query_pos:
-                cid_to_query_pos[cid] = q_pos
-                if len(cid_to_query_pos) == len(hit_id_set):
-                    break
-
-        results: list[CBMatchResult] = []
-        for cid in hit_ids:
-            cid_int = int(cid)
-            th = self._chunk_token_hash[cid_int]
-            if th is None:
-                continue
-            old_st = self._token_hash_to_start.get(th)
-            cur_st = cid_to_query_pos.get(cid_int)
-            if old_st is None or cur_st is None:
-                continue
-            results.append(
-                CBMatchResult(
-                    old_st=old_st,
-                    old_ed=old_st + self.chunk_size,
-                    cur_st=cur_st,
-                    cur_ed=cur_st + self.chunk_size,
-                    hash=th,
-                )
+        if self._lock.locked():
+            logger.error(
+                "BlendTokenRangeMatcher.match_sub_sequence: concurrent access "
+                "detected; results may be inconsistent."
             )
-        return results
+        with self._lock:
+            if not self._chunk_token_hash or len(token_ids) < self.chunk_size:
+                return []
+
+            arr = np.array(token_ids, dtype=np.uint64)
+
+            # Sliding-window polynomial hashes over the query
+            rolling = rolling_hash_windows_numba(arr, self.chunk_size, self._BASE)
+
+            # Probe table; seen array is _TABLE_SIZE bytes (~1 MB), fixed and safe
+            hit_ids = unique_hits_direct_id_numba(
+                rolling, self._table_id, self._mask, self._TABLE_SIZE
+            )
+
+            if hit_ids.shape[0] == 0:
+                return []
+
+            # For each hit compact_id, find the first query position where it matched
+            hit_id_set = set(int(cid) for cid in hit_ids)
+            cid_to_query_pos: dict[int, int] = {}
+            for q_pos in range(rolling.shape[0]):
+                idx = int(rolling[q_pos]) & int(self._mask)
+                cid = int(self._table_id[idx])
+                if cid in hit_id_set and cid not in cid_to_query_pos:
+                    cid_to_query_pos[cid] = q_pos
+                    if len(cid_to_query_pos) == len(hit_id_set):
+                        break
+
+            results: list[CBMatchResult] = []
+            for cid in hit_ids:
+                cid_int = int(cid)
+                th = self._chunk_token_hash[cid_int]
+                if th is None:
+                    continue
+                old_st = self._token_hash_to_start.get(th)
+                cur_st = cid_to_query_pos.get(cid_int)
+                if old_st is None or cur_st is None:
+                    continue
+                results.append(
+                    CBMatchResult(
+                        old_st=old_st,
+                        old_ed=old_st + self.chunk_size,
+                        cur_st=cur_st,
+                        cur_ed=cur_st + self.chunk_size,
+                        hash=th,
+                    )
+                )
+            return results
 
     def remove_chunks(self, token_hashes: list[bytes]) -> None:
         """Evict stale entries whose backing data is no longer in storage.
@@ -256,25 +285,31 @@ class BlendTokenRangeMatcher:
         Args:
             token_hashes: Token hashes of chunks to remove from the table.
         """
-        for th in token_hashes:
-            cid = self._token_hash_to_compact_id.get(th)
-            if cid is None:
-                continue
-            # Clear the table slot
-            slot = int(self._compact_id_to_slot[cid])
-            if slot < 0:
-                logger.warning(
-                    "compact_id %d has no valid table slot; "
-                    "entry may have been evicted twice",
-                    cid,
-                )
-                continue
-            self._table_id[slot] = -1
-            self._compact_id_to_slot[cid] = -1
-            # Clean up auxiliary maps
-            self._chunk_token_hash[cid] = None
-            self._token_hash_to_start.pop(th, None)
-            del self._token_hash_to_compact_id[th]
+        if self._lock.locked():
+            logger.error(
+                "BlendTokenRangeMatcher.remove_chunks: concurrent access "
+                "detected; data corruption is possible."
+            )
+        with self._lock:
+            for th in token_hashes:
+                cid = self._token_hash_to_compact_id.get(th)
+                if cid is None:
+                    continue
+                # Clear the table slot
+                slot = int(self._compact_id_to_slot[cid])
+                if slot < 0:
+                    logger.warning(
+                        "compact_id %d has no valid table slot; "
+                        "entry may have been evicted twice",
+                        cid,
+                    )
+                    continue
+                self._table_id[slot] = -1
+                self._compact_id_to_slot[cid] = -1
+                # Clean up auxiliary maps
+                self._chunk_token_hash[cid] = None
+                self._token_hash_to_start.pop(th, None)
+                del self._token_hash_to_compact_id[th]
 
 
 # Main class and main functions
@@ -963,6 +998,25 @@ class BlendEngineV2(MPCacheEngine):
                     metadata={"instance_id": instance_id, "num_tokens": num_tokens},
                 ),
             )
+
+            # Register fingerprints so future CB lookups can find these chunks.
+            # Mirrors cb_store_pre_computed; without this, chunks stored here are
+            # invisible to cb_lookup_pre_computed, causing 0% hit rate on re-requests.
+            if key.worker_id in [0, None]:
+                self._token_range_matcher.on_new_token_hashes(
+                    list(key.token_ids), list(chunk_hashes)
+                )
+                self._event_bus.publish(
+                    Event(
+                        event_type=EventType.CB_FINGERPRINTS_REGISTERED,
+                        session_id=key.request_id,
+                        metadata={
+                            "num_chunks": len(chunk_hashes),
+                            "num_tokens": len(list(key.token_ids)),
+                        },
+                    )
+                )
+
             logger.info(
                 "Stored final doc with %d tokens, num stored chunks: %d",
                 key.end - key.start,

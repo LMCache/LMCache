@@ -1741,15 +1741,14 @@ def test_cb_store_final_v2_then_normal_lookup(
     not torch.cuda.is_available(),
     reason="CB Store Final not visible to CB Lookup V2 requires CUDA",
 )
-def test_cb_store_final_v2_not_visible_to_cb_lookup_v2(
+def test_cb_store_final_v2_visible_to_cb_lookup_v2(
     client: MessageQueueClient,
     cb_client_context: CBClientContext,
     cb_registered_instance: int,
 ):
     """
-    ISOLATION: data stored via CB_STORE_FINAL must NOT be found by
-    CB_LOOKUP_PRE_COMPUTED_V2 (the BlendTokenRangeMatcher is not updated
-    by cb_store_final).
+    Data stored via CB_STORE_FINAL must be found by CB_LOOKUP_PRE_COMPUTED_V2
+    so that repeated requests through the CB path get cache hits.
     """
     token_ids = tuple(range(16000, 16000 + CHUNK_SIZE))
     cb_key = create_cb_cache_key(token_ids, request_id="final-not-cb-v2")
@@ -1770,6 +1769,6 @@ def test_cb_store_final_v2_not_visible_to_cb_lookup_v2(
     ).result(timeout=DEFAULT_TIMEOUT)
 
     assert isinstance(cb_results, list)
-    assert len(cb_results) == 0, (
-        "CB_LOOKUP_PRE_COMPUTED_V2 should NOT find data stored via CB_STORE_FINAL"
+    assert len(cb_results) == 1, (
+        "CB_LOOKUP_PRE_COMPUTED_V2 should find data stored via CB_STORE_FINAL"
     )
