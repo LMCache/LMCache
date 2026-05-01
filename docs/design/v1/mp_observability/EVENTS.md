@@ -133,9 +133,9 @@ to correlate START/END pairs.
 | `MP_STORE_START` | `device`, `engine_id`, `model_name` | `str`, `int`, `str` |
 | `MP_STORE_END` | `device`, `stored_count`, `engine_id`, `model_name`, `total_bytes` | `str`, `int`, `int`, `str`, `int` |
 | `MP_RETRIEVE_START` | `device`, `engine_id`, `model_name` | `str`, `int`, `str` |
-| `MP_RETRIEVE_END` | `device`, `retrieved_count`, `engine_id`, `model_name`, `total_bytes` | `str`, `int`, `int`, `str`, `int` |
+| `MP_RETRIEVE_END` | `device`, `retrieved_count`, `engine_id`, `model_name`, `cache_salt`, `total_bytes` | `str`, `int`, `int`, `str`, `str`, `int` |
 | `MP_LOOKUP_PREFETCH_START` | *(none)* | — |
-| `MP_LOOKUP_PREFETCH_END` | `found_count`, `requested_tokens`, `hit_tokens` | `int`, `int`, `int` |
+| `MP_LOOKUP_PREFETCH_END` | `found_count`, `requested_tokens`, `hit_tokens`, `model_name`, `cache_salt` | `int`, `int`, `int`, `str`, `str` |
 | `MP_LOOKUP` | `request_id`, `chunk_hashes`, `model_name`, `chunk_size`, `seq_len`, `dtypes`, `shapes` | `str`, `list[str]`, `str`, `int`, `int`, `list[str]`, `list[list[int]]` |
 | `MP_VLLM_BLOCK_ALLOCATION` | `instance_id`, `model_name`, `records` | `int`, `str`, `list[BlockAllocationRecord]` (each has `req_id: str`, `new_block_ids: list[int]`, `new_token_ids: list[int]`) |
 | `MP_VLLM_END_SESSION` | `request_id` | `str` |
@@ -152,6 +152,13 @@ know `chunk_size`:
   empty `chunk_hashes`).  Sub-chunk trailing tokens are excluded — they
   cannot hit at chunk granularity.
 - `hit_tokens = found_count * chunk_size`.
+- `model_name` and `cache_salt` are captured at lookup time from
+  `IPCCacheEngineKey` and surface as OTel attributes on the
+  `lmcache_mp.lookup_*_tokens` counters so the hit rate can be sliced
+  per model and per tenant / isolation domain on the dashboard.
+  `cache_salt` may have high cardinality (e.g. one entry per tenant);
+  operators can drop the label at scrape time with a `metric_relabel_configs`
+  rule if storage cost matters.
 
 Together they drive the `lmcache_mp.lookup_*_tokens` counters used to
 compute the L1+L2 token-level hit rate.  See

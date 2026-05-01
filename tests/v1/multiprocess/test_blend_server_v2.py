@@ -33,6 +33,7 @@ import torch
 import zmq
 
 # First Party
+from lmcache.utils import EngineType
 from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.distributed.config import (
     EvictionConfig,
@@ -603,7 +604,14 @@ def registered_instance(
 
     future = client.submit_request(
         RequestType.REGISTER_KV_CACHE,
-        [instance_id, client_context.get_kv_cache(), "testmodel", 1, {}],
+        [
+            instance_id,
+            client_context.get_kv_cache(),
+            "testmodel",
+            1,
+            EngineType.VLLM,
+            {},
+        ],
         get_response_class(RequestType.REGISTER_KV_CACHE),
     )
     assert future.result(timeout=DEFAULT_TIMEOUT) is None
