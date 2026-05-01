@@ -878,6 +878,12 @@ class PDBackendAsync(AllocatorBackendInterface):
                     "receiver_id": receiver_id,
                     "remote_indexes": remote_indexes,
                 }
+
+                # Track sent keys for abort cleanup.
+                if req_id:
+                    sent = self._sent_keys.setdefault(req_id, [])
+                    sent.extend(k.to_string() for k in keys)
+
                 await self.transfer_channel.async_batched_write(
                     objects=memory_objs,
                     transfer_spec=channel_transfer_spec,
@@ -899,10 +905,6 @@ class PDBackendAsync(AllocatorBackendInterface):
                     num_chunks,
                     self._get_free_chunks(),
                 )
-            # Track sent keys for abort cleanup.
-            if req_id:
-                sent = self._sent_keys.setdefault(req_id, [])
-                sent.extend(k.to_string() for k in keys)
 
             # Update per-request completion tracking.
             if req_id:
@@ -1142,10 +1144,7 @@ class PDBackendAsync(AllocatorBackendInterface):
         ``_handle_alloc_request`` only blocks the per-request coroutine, not
         the receive loop.
         """
-        # Third Party
-        import zmq.asyncio as azmq
-
-        async_ctx = azmq.Context()
+        async_ctx = zmq.asyncio.Context()
         socket = async_ctx.socket(zmq.ROUTER)
         alloc_port = self.pd_config.peer_alloc_port
         socket.bind(f"tcp://*:{alloc_port}")
