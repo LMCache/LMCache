@@ -25,6 +25,7 @@ steps:
         export CXX=hipcc
         export BUILD_WITH_HIP=1
         uv pip install torch torchvision --index-url https://download.pytorch.org/whl/rocm7.0
+        uv pip install -r requirements/rocm_core.txt
       fi
 
       uv pip install -r requirements/common.txt
