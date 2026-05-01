@@ -67,4 +67,168 @@ div.highlight button.copybtn + button.copybtn {
     border-radius: 3px;
     font-size: 10px;
   }
+
+.lmcache-goblin {
+    position: fixed;
+    z-index: 25;
+    width: var(--goblin-size, 128px);
+    height: var(--goblin-size, 128px);
+    padding: 0;
+    border: 0;
+    outline: 0;
+    box-shadow: none;
+    appearance: none;
+    background: transparent;
+    cursor: pointer;
+    --goblin-left: auto;
+    --goblin-top: auto;
+    --goblin-random-offset: 0px;
+    --goblin-random-rotation: 0deg;
+    --goblin-random-scale: 1;
+    --goblin-rest-transform: translateX(-30%) translateY(var(--goblin-random-offset)) rotate(calc(2deg + var(--goblin-random-rotation))) scale(var(--goblin-random-scale));
+    --goblin-active-transform: translateX(0) translateY(var(--goblin-random-offset)) rotate(calc(-2deg + var(--goblin-random-rotation))) scale(var(--goblin-random-scale));
+    --goblin-leaving-transform: translateX(-18%) translateY(20px) rotate(-8deg) scale(0.92);
+    transform: var(--goblin-rest-transform);
+    transition:
+        transform 180ms ease,
+        filter 180ms ease,
+        opacity 220ms ease;
+}
+
+.lmcache-goblin:hover,
+.lmcache-goblin:focus-visible {
+    transform: var(--goblin-active-transform);
+    filter: drop-shadow(0 10px 18px rgb(0 0 0 / 24%));
+}
+
+.lmcache-goblin:focus:not(:focus-visible),
+.lmcache-goblin--mouse-active,
+.lmcache-goblin--hit,
+.lmcache-goblin--leaving {
+    outline: 0;
+    box-shadow: none;
+}
+
+.lmcache-goblin:focus-visible {
+    outline: 3px solid #4a90e2;
+    outline-offset: 4px;
+    border-radius: 12px;
+}
+
+.lmcache-goblin--mouse-active:focus-visible,
+.lmcache-goblin--hit:focus-visible,
+.lmcache-goblin--leaving:focus-visible {
+    outline: 0;
+    box-shadow: none;
+}
+
+.lmcache-goblin img {
+    display: block;
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    pointer-events: none;
+    user-select: none;
+}
+
+.lmcache-goblin--hit {
+    transform: var(--goblin-active-transform);
+    filter: drop-shadow(0 10px 18px rgb(0 0 0 / 24%));
+}
+
+.lmcache-goblin--leaving {
+    cursor: pointer;
+    opacity: 0;
+    pointer-events: none;
+    transform: var(--goblin-leaving-transform);
+}
+
+.lmcache-goblin--bottom-left {
+    left: -18px;
+    bottom: 24px;
+}
+
+.lmcache-goblin--top-left {
+    top: 86px;
+    left: -18px;
+}
+
+.lmcache-goblin--middle-left {
+    top: 45vh;
+    left: -22px;
+}
+
+.lmcache-goblin--top-right {
+    top: 86px;
+    right: -18px;
+    --goblin-rest-transform: translateX(30%) translateY(var(--goblin-random-offset)) rotate(calc(-2deg + var(--goblin-random-rotation))) scale(var(--goblin-random-scale));
+    --goblin-active-transform: translateX(0) translateY(var(--goblin-random-offset)) rotate(calc(2deg + var(--goblin-random-rotation))) scale(var(--goblin-random-scale));
+    --goblin-leaving-transform: translateX(18%) translateY(20px) rotate(8deg) scale(0.92);
+}
+
+.lmcache-goblin--middle-right {
+    top: 45vh;
+    right: -22px;
+    --goblin-rest-transform: translateX(30%) translateY(var(--goblin-random-offset)) rotate(calc(-2deg + var(--goblin-random-rotation))) scale(var(--goblin-random-scale));
+    --goblin-active-transform: translateX(0) translateY(var(--goblin-random-offset)) rotate(calc(2deg + var(--goblin-random-rotation))) scale(var(--goblin-random-scale));
+    --goblin-leaving-transform: translateX(18%) translateY(20px) rotate(8deg) scale(0.92);
+}
+
+.lmcache-goblin--free {
+    left: var(--goblin-left);
+    top: var(--goblin-top);
+    --goblin-rest-transform: translate(-50%, -50%) translateY(var(--goblin-random-offset)) rotate(var(--goblin-random-rotation)) scale(var(--goblin-random-scale));
+    --goblin-active-transform: translate(-50%, -50%) translateY(var(--goblin-random-offset)) rotate(calc(var(--goblin-random-rotation) - 3deg)) scale(var(--goblin-random-scale));
+    --goblin-leaving-transform: translate(-50%, -40%) rotate(calc(var(--goblin-random-rotation) - 8deg)) scale(0.92);
+}
+
+.lmcache-goblin--focus {
+    z-index: 26;
+}
+
+.lmcache-goblin--standing,
+.lmcache-goblin--walking,
+.lmcache-goblin--dancing,
+.lmcache-goblin--grimace-face,
+.lmcache-goblin--focus {
+    filter: drop-shadow(0 10px 18px rgb(0 0 0 / 16%));
+}
+
+@media (max-width: 640px) {
+    .lmcache-goblin {
+        width: min(var(--goblin-size, 92px), 104px);
+        height: min(var(--goblin-size, 92px), 104px);
+    }
+
+    .lmcache-goblin--bottom-left {
+        left: -14px;
+        bottom: 16px;
+    }
+
+    .lmcache-goblin--top-left {
+        top: 72px;
+        left: -14px;
+    }
+
+    .lmcache-goblin--middle-left {
+        top: 48vh;
+        left: -16px;
+    }
+
+    .lmcache-goblin--top-right {
+        top: 72px;
+        right: -14px;
+    }
+
+    .lmcache-goblin--middle-right {
+        top: 48vh;
+        right: -16px;
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .lmcache-goblin {
+        transition: none;
+    }
+}
   
