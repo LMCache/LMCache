@@ -331,12 +331,21 @@ class PDBackend(AllocatorBackendInterface):
                 f"will not be allocated."
             )
 
-        init_func(
-            aligned_buffer_size,
-            shapes,
-            dtypes,
-            MemoryFormat.KV_2LTD,  # TODO: remove this hardcode
-        )
+        if self.corrected_device == "cpu":
+            init_func(
+                aligned_buffer_size,
+                shapes,
+                dtypes,
+                MemoryFormat.KV_2LTD,  # TODO: remove this hardcode
+            )
+        else:
+            init_func(
+                aligned_buffer_size,
+                shapes,
+                dtypes,
+                MemoryFormat.KV_2LTD,  # TODO: remove this hardcode
+                device=self.corrected_device,
+            )
 
         return paged_mem_allocator
 
