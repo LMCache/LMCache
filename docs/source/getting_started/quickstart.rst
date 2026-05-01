@@ -287,14 +287,30 @@ This guide helps you get LMCache running end-to-end in a couple of minutes. Use 
 
    .. tab-item:: TensorRT-LLM
 
-      **Install LMCache and TensorRT-LLM**
+      .. note::
+         This integration depends on the connector preset registry from
+         `NVIDIA/TensorRT-LLM PR #12626
+         <https://github.com/NVIDIA/TensorRT-LLM/pull/12626>`_ and the
+         matching LMCache adapter, neither of which has shipped in a
+         stable release yet. Until they do, install both from source:
 
-      .. code-block:: bash
+         .. code-block:: bash
 
-         uv venv --python 3.12
-         source .venv/bin/activate
-         uv pip install lmcache "tensorrt_llm>=1.2.0" \
-             --extra-index-url https://pypi.nvidia.com
+            uv venv --python 3.12
+            source .venv/bin/activate
+
+            # LMCache from source (dev branch)
+            uv pip install git+https://github.com/LMCache/LMCache.git@dev
+
+            # TensorRT-LLM from source — see NVIDIA's build guide:
+            # https://nvidia.github.io/TensorRT-LLM/installation/build-from-source-linux.html
+
+         Once both ship in a stable release, the install command will be:
+
+         .. code-block:: bash
+
+            uv pip install lmcache "tensorrt_llm>=<version>" \
+                --extra-index-url https://pypi.nvidia.com
 
       LMCache integrates with TensorRT-LLM via TRT-LLM's
       **KV Cache Connector** API and supports two deployment modes:
