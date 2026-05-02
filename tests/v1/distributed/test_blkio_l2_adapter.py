@@ -13,7 +13,7 @@ import pytest
 from lmcache.v1.distributed.l2_adapters.config import (
     get_registered_l2_adapter_types,
 )
-from lmcache.v1.distributed.l2_adapters.native_connector_l2_adapter import (
+from lmcache.v1.distributed.l2_adapters.blkio_l2_adapter import (
     BlkioL2AdapterConfig,
 )
 
