@@ -81,9 +81,11 @@ void BlkioConnector::map_do_io_unmap(struct blkio* handle, struct blkioq* queue,
         std::memset(static_cast<char*>(bounce_buf) + len, 0, alloc_len - len);
       }
     }
-    // Use the padded length for the region registration.
-    // The I/O operation uses original_len so we never overwrite
-    // adjacent device data beyond what the caller requested.
+    // Use the padded length for both region registration and I/O.
+    // O_DIRECT requires the I/O size to be a multiple of the
+    // device's logical block size, so we must use the aligned
+    // length.  Writes zero-fill the padding (above); reads copy
+    // back only original_len bytes to the caller's buffer (below).
     len = alloc_len;
   }
 
@@ -102,16 +104,17 @@ void BlkioConnector::map_do_io_unmap(struct blkio* handle, struct blkioq* queue,
   }
 
   // 2. Submit the I/O and wait for completion.
-  //    The memory region is registered with the padded length (len)
-  //    but the I/O uses original_len so writes never clobber
-  //    adjacent data on the device.
+  //    Both the memory region and the I/O use ``len`` (which equals
+  //    alloc_len when the bounce buffer is active).  O_DIRECT requires
+  //    the transfer size to be block-aligned; writes zero-fill the
+  //    padding, reads copy back only original_len to the caller.
   struct blkio_completion comp;
   if (is_read) {
-    blkioq_read(queue, device_offset, io_buf,
-                static_cast<uint32_t>(original_len), &comp, 0);
+    blkioq_read(queue, device_offset, io_buf, static_cast<uint32_t>(len),
+                &comp, 0);
   } else {
-    blkioq_write(queue, device_offset, io_buf,
-                 static_cast<uint32_t>(original_len), &comp, 0);
+    blkioq_write(queue, device_offset, io_buf, static_cast<uint32_t>(len),
+                 &comp, 0);
   }
 
   ret = blkioq_do_io(queue, &comp, 1, 1, nullptr);
