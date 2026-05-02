@@ -105,6 +105,67 @@ def hipify_wrapper() -> None:
     assert len(hipified_sources) == len(extra_files)
 
 
+def _blkio_available() -> bool:
+    """Check whether libblkio headers and library are available.
+
+    Returns ``True`` when ``pkg-config --exists blkio`` succeeds **or**
+    the header ``blkio.h`` is found on the default include path.
+    """
+    # Standard
+    import shutil
+    import subprocess
+
+    # Fast path: pkg-config knows about blkio.
+    if shutil.which("pkg-config"):
+        try:
+            subprocess.check_call(
+                ["pkg-config", "--exists", "blkio"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            return True
+        except subprocess.CalledProcessError:
+            pass
+
+    # Fallback: check common header locations.
+    for d in ["/usr/include", "/usr/local/include"]:
+        if os.path.isfile(os.path.join(d, "blkio.h")):
+            return True
+
+    return False
+
+
+def _blkio_extension(
+    cpp_extension,
+    blkio_sources: list[str],
+    extra_cxx_flags: list[str],
+) -> list:
+    """Build blkio CppExtension if libblkio is available.
+
+    Returns a list with zero or one Extension objects.
+    """
+    if not _blkio_available():
+        print("libblkio not found -- skipping lmcache_blkio extension")
+        return []
+
+    return [
+        cpp_extension.CppExtension(
+            "lmcache.lmcache_blkio",
+            sources=blkio_sources,
+            include_dirs=[
+                "csrc/storage_backends",
+                "csrc/storage_backends/blkio",
+            ]
+            + _blkio_include_dirs(),
+            libraries=["blkio"],
+            library_dirs=_blkio_library_dirs(),
+            extra_compile_args={
+                "cxx": extra_cxx_flags + ["-O3", "-std=c++17"],
+            },
+        ),
+    ]
+
+
 def _mooncake_extension(
     cpp_extension,
     mooncake_sources: list[str],
@@ -226,21 +287,11 @@ def cuda_extension() -> tuple[list, dict]:
                 "cxx": [flag_cxx_abi, "-O3", "-std=c++17"],
             },
         ),
-        cpp_extension.CppExtension(
-            "lmcache.lmcache_blkio",
-            sources=blkio_sources,
-            include_dirs=[
-                "csrc/storage_backends",
-                "csrc/storage_backends/blkio",
-            ]
-            + _blkio_include_dirs(),
-            libraries=["blkio"],
-            library_dirs=_blkio_library_dirs(),
-            extra_compile_args={
-                "cxx": [flag_cxx_abi, "-O3", "-std=c++17"],
-            },
-        ),
     ]
+    # Blkio extension is optional (requires libblkio-dev).
+    ext_modules.extend(
+        _blkio_extension(cpp_extension, blkio_sources, [flag_cxx_abi])
+    )
     # Mooncake extension is optional.
     ext_modules.extend(
         _mooncake_extension(cpp_extension, mooncake_sources, [flag_cxx_abi])
@@ -344,21 +395,11 @@ def rocm_extension() -> tuple[list, dict]:
                 "cxx": ["-O3", "-std=c++17"],
             },
         ),
-        cpp_extension.CppExtension(
-            "lmcache.lmcache_blkio",
-            sources=blkio_sources,
-            include_dirs=[
-                "csrc/storage_backends",
-                "csrc/storage_backends/blkio",
-            ]
-            + _blkio_include_dirs(),
-            libraries=["blkio"],
-            library_dirs=_blkio_library_dirs(),
-            extra_compile_args={
-                "cxx": ["-O3", "-std=c++17"],
-            },
-        ),
     ]
+    # Blkio extension is optional (requires libblkio-dev).
+    ext_modules.extend(
+        _blkio_extension(cpp_extension, blkio_sources, [])
+    )
     # Mooncake extension is optional.
     ext_modules.extend(_mooncake_extension(cpp_extension, mooncake_sources, []))
     cmdclass = {"build_ext": cpp_extension.BuildExtension}
