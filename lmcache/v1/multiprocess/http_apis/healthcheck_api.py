@@ -9,7 +9,7 @@ from fastapi.responses import JSONResponse
 router = APIRouter()
 
 
-@router.get("/api/healthcheck")
+@router.get("/healthcheck")
 async def healthcheck(request: Request) -> Any:
     """
     Health check endpoint for k8s liveness/readiness probes.
