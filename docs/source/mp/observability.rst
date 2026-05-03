@@ -525,6 +525,52 @@ Adapters with no in-flight work emit no datapoint for that scrape.
        follows each request's ``load_plan`` bitmap, so summing across
        adapters never double-counts.
 
+EventBus Self-Monitoring
+~~~~~~~~~~~~~~~~~~~~~~~~
+
+Health metrics for the EventBus itself, registered by
+``EventBusSelfMetricsSubscriber`` on the ``lmcache.event_bus`` OTel
+meter.  These metrics observe bus state directly via the ``EventBus``
+accessors and report on every OTel scrape — they are not driven by
+events, so dropping or failing subscribers cannot silence them.
+
+Use them to answer: is the EventBus keeping up with publishers, is
+anything being dropped, and are any subscriber callbacks raising?
+A non-zero ``dropped_events_total`` or a sustained non-zero
+``drain_lag_seconds`` indicates the bus is at ``--event-bus-queue-size``
+and tail-dropping; raise that flag or investigate slow subscribers.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 40 15 45
+
+   * - Metric
+     - Type
+     - Description
+   * - ``lmcache_mp.event_bus.queue_depth``
+     - ObservableGauge
+     - Events currently queued in the EventBus (``len(_queue)`` at
+       scrape time).
+   * - ``lmcache_mp.event_bus.drain_lag_seconds``
+     - ObservableGauge
+     - Seconds since the oldest queued event was published; ``0.0``
+       when empty.  Rising values mean the drain thread is falling
+       behind.
+   * - ``lmcache_mp.event_bus.dropped_events_total``
+     - ObservableCounter
+     - Cumulative events dropped because the EventBus queue was at
+       ``--event-bus-queue-size``.
+   * - ``lmcache_mp.event_bus.subscriber_exceptions``
+     - ObservableCounter (attr: ``subscriber_name``)
+     - Cumulative exceptions raised by subscriber callbacks during
+       EventBus dispatch, tagged by ``subscriber_name`` (the failing
+       callback's owning class for bound methods, or ``__qualname__``
+       for free functions).
+
+For the full design rationale and the in-process accessors that back
+each metric see ``docs/design/v1/mp_observability/METRICS.md`` and
+``docs/design/v1/mp_observability/event-bus.md`` in the source tree.
+
 Prometheus Scrape Configuration
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
