@@ -17,6 +17,11 @@ from lmcache.v1.distributed.serde.fp8 import (
     Fp8QuantizationDeserializer,
     Fp8QuantizationSerializer,
 )
+from lmcache.v1.distributed.serde.turboquant import (
+    TurboQuantDeserializer,
+    TurboQuantSerdeConfig,
+    TurboQuantSerializer,
+)
 from lmcache.v1.distributed.serde.utils import (
     make_temp_key,
     serialized_layout_desc,
@@ -36,4 +41,7 @@ __all__ = [
     "make_temp_key",
     "register_serde_factory",
     "serialized_layout_desc",
+    "TurboQuantDeserializer",
+    "TurboQuantSerdeConfig",
+    "TurboQuantSerializer",
 ]
