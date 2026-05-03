@@ -5,14 +5,19 @@ TurboQuant serde backend for LMCache.
 This backend is intended to compress LMCache KV tensors before L2 store and
 decompress them after L2 load.
 
-Initial scope:
-- First preset: turboquant_k8v4
-- Input KV layout: [2, num_layers, num_tokens, hidden_dim]
-- Serialized layout: [num_layers, num_blocks, block_size, num_heads, slot_size]
+Supported presets:
+- turboquant_k8v4
+- turboquant_4bit_nc
+- turboquant_k3v4_nc
+- turboquant_3bit_nc
+
+Input KV layout: [2, num_layers, num_tokens, hidden_dim]
+Serialized layout: [num_layers, num_blocks, block_size, num_heads, slot_size]
 """
 
 # Standard
 from dataclasses import dataclass
+from functools import lru_cache
 import math
 
 # Third Party
@@ -26,6 +31,32 @@ from lmcache.v1.distributed.serde.factory import register_serde_factory
 from lmcache.v1.memory_management import MemoryObj
 
 
+TQ_PRESETS: dict[str, dict[str, object]] = {
+    "turboquant_k8v4": {
+        "key_quant_bits": 8,
+        "value_quant_bits": 4,
+        "norm_correction": False,
+    },
+    "turboquant_4bit_nc": {
+        "key_quant_bits": 4,
+        "value_quant_bits": 4,
+        "norm_correction": True,
+    },
+    "turboquant_k3v4_nc": {
+        "key_quant_bits": 3,
+        "value_quant_bits": 4,
+        "norm_correction": True,
+    },
+    "turboquant_3bit_nc": {
+        "key_quant_bits": 3,
+        "value_quant_bits": 3,
+        "norm_correction": True,
+    },
+}
+
+_TQ_LAYER_SEED_STRIDE = 1337
+
+
 @dataclass(frozen=True)
 class TurboQuantSerdeConfig:
     """Configuration for TurboQuant serde."""
@@ -35,14 +66,22 @@ class TurboQuantSerdeConfig:
     block_size: int = 16
 
     @property
-    def key_fp8(self) -> bool:
-        return self.preset == "turboquant_k8v4"
+    def _preset_config(self) -> dict[str, object]:
+        if self.preset not in TQ_PRESETS:
+            valid = ", ".join(TQ_PRESETS)
+            raise ValueError(
+                f"Unsupported TurboQuant preset: {self.preset!r}. "
+                f"Valid presets: {valid}"
+            )
+        return TQ_PRESETS[self.preset]
 
     @property
     def key_quant_bits(self) -> int:
-        if self.preset == "turboquant_k8v4":
-            return 8
-        raise NotImplementedError(f"Unsupported TurboQuant preset: {self.preset}")
+        return int(self._preset_config["key_quant_bits"])
+
+    @property
+    def key_fp8(self) -> bool:
+        return self.key_quant_bits == 8
 
     @property
     def key_mse_bits(self) -> int:
@@ -52,9 +91,29 @@ class TurboQuantSerdeConfig:
 
     @property
     def value_quant_bits(self) -> int:
-        if self.preset == "turboquant_k8v4":
-            return 4
-        raise NotImplementedError(f"Unsupported TurboQuant preset: {self.preset}")
+        return int(self._preset_config["value_quant_bits"])
+
+    @property
+    def effective_value_quant_bits(self) -> int:
+        return self.value_quant_bits
+
+    @property
+    def norm_correction(self) -> bool:
+        return bool(self._preset_config["norm_correction"])
+
+    @property
+    def mse_bits(self) -> int:
+        if self.key_fp8:
+            return self.value_quant_bits
+        return self.key_quant_bits
+
+    @property
+    def centroid_bits(self) -> int:
+        return self.mse_bits
+
+    @property
+    def n_centroids(self) -> int:
+        return 2**self.mse_bits
 
     @property
     def key_packed_size(self) -> int:
@@ -152,6 +211,117 @@ def _make_block_table(num_blocks: int, device: torch.device) -> torch.Tensor:
     return torch.arange(num_blocks, device=device, dtype=torch.int32).view(1, num_blocks)
 
 
+def _generate_wht_signs(
+    head_dim: int,
+    seed: int,
+    device: torch.device,
+) -> torch.Tensor:
+    """Generate deterministic random ±1 signs for WHT rotation."""
+    gen = torch.Generator(device="cpu")
+    gen.manual_seed(seed)
+    bits = torch.randint(0, 2, (head_dim,), generator=gen, device="cpu")
+    signs = bits.float() * 2 - 1
+    return signs.to(device=device, dtype=torch.float32)
+
+
+@lru_cache(maxsize=32)
+def _solve_lloyd_max(
+    head_dim: int,
+    bits: int,
+    max_iter: int = 200,
+    tol: float = 1e-10,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Solve Lloyd-Max optimal quantizer for N(0, 1/head_dim)."""
+    n_levels = 2**bits
+    sigma2 = 1.0 / head_dim
+    sigma = math.sqrt(sigma2)
+
+    def gaussian_pdf(x: float) -> float:
+        return (1.0 / math.sqrt(2 * math.pi * sigma2)) * math.exp(
+            -x * x / (2 * sigma2)
+        )
+
+    def trapz(f, a: float, b: float, n: int = 200) -> float:
+        h = (b - a) / n
+        result = 0.5 * (f(a) + f(b))
+        for i in range(1, n):
+            result += f(a + i * h)
+        return result * h
+
+    lo, hi = -3.5 * sigma, 3.5 * sigma
+    centroids = [lo + (hi - lo) * (i + 0.5) / n_levels for i in range(n_levels)]
+
+    for _ in range(max_iter):
+        boundaries = [
+            (centroids[i] + centroids[i + 1]) / 2.0
+            for i in range(n_levels - 1)
+        ]
+        edges = [lo * 3] + boundaries + [hi * 3]
+
+        new_centroids = []
+        for i in range(n_levels):
+            a, b = edges[i], edges[i + 1]
+            num = trapz(lambda x: x * gaussian_pdf(x), a, b)
+            den = trapz(gaussian_pdf, a, b)
+            new_centroids.append(num / den if den > 1e-15 else centroids[i])
+
+        if max(abs(new_centroids[i] - centroids[i]) for i in range(n_levels)) < tol:
+            break
+        centroids = new_centroids
+
+    boundaries = [
+        (centroids[i] + centroids[i + 1]) / 2.0
+        for i in range(n_levels - 1)
+    ]
+
+    return (
+        torch.tensor(centroids, dtype=torch.float32),
+        torch.tensor(boundaries, dtype=torch.float32),
+    )
+
+
+@lru_cache(maxsize=32)
+def _build_hadamard_cpu(head_dim: int) -> torch.Tensor:
+    """Build an orthonormal Sylvester Hadamard matrix on CPU."""
+    if head_dim <= 0 or head_dim & (head_dim - 1) != 0:
+        raise ValueError(
+            "TurboQuant WHT rotation requires head_dim to be a power of two, "
+            f"got {head_dim}"
+        )
+
+    h = torch.tensor([[1.0]], dtype=torch.float32)
+    while h.shape[0] < head_dim:
+        h = torch.cat([torch.cat([h, h], 1), torch.cat([h, -h], 1)], 0)
+    return h / math.sqrt(head_dim)
+
+
+def _make_tq_tensors_for_layer(
+    cfg: TurboQuantSerdeConfig,
+    layer_idx: int,
+    device: torch.device,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Create PiT, midpoints, and centroids for one TurboQuant layer."""
+    seed = 42 + layer_idx * _TQ_LAYER_SEED_STRIDE
+    signs = _generate_wht_signs(cfg.head_dim, seed=seed, device=device)
+    hadamard = _build_hadamard_cpu(cfg.head_dim).to(device=device)
+    pi_t = (signs.unsqueeze(1) * hadamard).contiguous()
+
+    centroids_cpu, midpoints_cpu = _solve_lloyd_max(
+        cfg.head_dim,
+        cfg.centroid_bits,
+    )
+    centroids = centroids_cpu.to(device=device, dtype=torch.float32)
+    midpoints = midpoints_cpu.to(device=device, dtype=torch.float32)
+
+    if cfg.key_fp8:
+        # FP8-key store/dequant paths do not use PiT/midpoints/centroids, but
+        # keep valid tensors to satisfy kernel signatures.
+        midpoints = torch.empty((0,), device=device, dtype=torch.float32)
+        centroids = torch.empty((1,), device=device, dtype=torch.float32)
+
+    return pi_t, midpoints, centroids
+
+
 def _select_cuda_device(*tensors: torch.Tensor) -> torch.device:
     """Select a CUDA device for Triton work.
 
@@ -166,25 +336,6 @@ def _select_cuda_device(*tensors: torch.Tensor) -> torch.device:
         raise RuntimeError("TurboQuant Triton serde requires CUDA")
     return torch.device("cuda", torch.cuda.current_device())
 
-
-def _make_dummy_tq_tensors(
-    cfg: TurboQuantSerdeConfig, device: torch.device
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Create dummy PiT, midpoints, and centroids for k8v4.
-
-    For turboquant_k8v4, the store path uses FP8 keys and does not use PiT
-    or midpoints. The full-dequant path also does not use centroids when
-    KEY_FP8=True. We still pass valid tensors to match kernel signatures.
-    """
-    if cfg.preset != "turboquant_k8v4":
-        raise NotImplementedError(
-            "Only turboquant_k8v4 dummy tensors are supported for now"
-        )
-
-    pi_t = torch.empty((cfg.head_dim, cfg.head_dim), device=device, dtype=torch.float32)
-    midpoints = torch.empty((0,), device=device, dtype=torch.float32)
-    centroids = torch.empty((1,), device=device, dtype=torch.float32)
-    return pi_t, midpoints, centroids
 
 
 class TurboQuantSerializer(Serializer):
@@ -234,7 +385,6 @@ class TurboQuantSerializer(Serializer):
         dst_view = dst_work.flatten()[:n_bytes].view(*compressed_shape)
 
         slot_mapping = _make_slot_mapping(num_tokens, cuda_device)
-        pi_t, midpoints, _ = _make_dummy_tq_tensors(cfg, cuda_device)
 
         # LMCache layout: [2, L, T, hidden_dim]
         # Kernel input layout per layer: key/value [T, H, D]
@@ -246,6 +396,11 @@ class TurboQuantSerializer(Serializer):
                 num_tokens, num_heads, head_dim
             ).contiguous()
             kv_cache_layer = dst_view[layer_idx]
+            pi_t, midpoints, _ = _make_tq_tensors_for_layer(
+                cfg,
+                layer_idx,
+                cuda_device,
+            )
 
             triton_turboquant_store(
                 key,
@@ -308,7 +463,11 @@ class TurboQuantDeserializer(Deserializer):
         dst_work = (
             dst_tensor
             if dst_tensor.is_cuda
-            else torch.empty(dst_tensor.shape, dtype=dst_tensor.dtype, device=cuda_device)
+            else torch.empty(
+                dst_tensor.shape,
+                dtype=dst_tensor.dtype,
+                device=cuda_device,
+            )
         )
 
         from lmcache.v1.distributed.serde.turboquant_decode_kernel import (
@@ -326,7 +485,6 @@ class TurboQuantDeserializer(Deserializer):
         num_blocks = compressed_shape[1]
         alloc_len = num_blocks * cfg.block_size
         block_table = _make_block_table(num_blocks, cuda_device)
-        _, _, centroids = _make_dummy_tq_tensors(cfg, cuda_device)
 
         block_d = 1 << (head_dim - 1).bit_length()
         val_data_bytes = math.ceil(head_dim * cfg.value_quant_bits / 8)
@@ -338,6 +496,11 @@ class TurboQuantDeserializer(Deserializer):
 
         for layer_idx in range(num_layers):
             kv_cache_layer = src_view[layer_idx]
+            pi_t, _, centroids = _make_tq_tensors_for_layer(
+                cfg,
+                layer_idx,
+                cuda_device,
+            )
 
             k_out = torch.empty(
                 (1, num_heads, alloc_len, head_dim),
@@ -377,17 +540,24 @@ class TurboQuantDeserializer(Deserializer):
                 MSE_BITS=cfg.key_mse_bits,
                 KEY_FP8=1 if cfg.key_fp8 else 0,
                 BLOCK_D=block_d,
-                NORM_CORRECTION=0,
+                NORM_CORRECTION=1 if cfg.norm_correction else 0,
                 FP8_E4B15=_use_fp8_e4b15(cuda_device.index or 0),
                 num_warps=4,
             )
 
-            key = (
-                k_out[0, :, :num_tokens, :]
-                .transpose(0, 1)
-                .contiguous()
-                .view(num_tokens, num_heads * head_dim)
-            )
+            k_layer = k_out[0, :, :num_tokens, :].transpose(0, 1).contiguous()
+            if not cfg.key_fp8:
+                # _tq_full_dequant_kv reconstructs the rotated key vector.
+                # LMCache serde must restore the original raw KV layout, so
+                # apply inverse WHT rotation: raw = rotated @ Pi, where
+                # Pi = PiT.T for the orthonormal WHT matrix.
+                pi = pi_t.T.contiguous()
+                k_layer = torch.matmul(
+                    k_layer.to(torch.float32),
+                    pi,
+                ).to(k_out.dtype)
+
+            key = k_layer.contiguous().view(num_tokens, num_heads * head_dim)
             value = (
                 v_out[0, :, :num_tokens, :]
                 .transpose(0, 1)
@@ -413,11 +583,6 @@ def _create_turboquant_serde(kwargs: dict[str, object]) -> SerdeProcessor:
         head_dim=head_dim,
         block_size=block_size,
     )
-
-    if cfg.preset != "turboquant_k8v4":
-        raise NotImplementedError(
-            "Initial TurboQuant serde only supports preset='turboquant_k8v4'"
-        )
 
     return AsyncSerdeProcessor(
         TurboQuantSerializer(cfg),
