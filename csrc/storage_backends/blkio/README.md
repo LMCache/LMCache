@@ -223,3 +223,22 @@ docker run --security-opt seccomp=seccomp.json \
    `false`.  The Python layer must track which offsets have been written.
 3. **Single device** — the connector opens one block device.  For
    multi-device setups, create multiple connectors.
+
+## Rust Alternative: `BlkioBlockDevice`
+
+libblkio is also available as an I/O backend for the **Rust raw block**
+storage plugin (`RustRawBlockBackend`).  The Rust `BlkioBlockDevice`
+class lives in the `lmcache_rust_raw_block_io` crate and is enabled via
+the `blkio` cargo feature flag:
+
+```bash
+cd rust/raw_block
+maturin develop --release --features blkio
+```
+
+Then set `rust_raw_block.io_backend: "libblkio"` in `extra_config` to
+route all I/O through libblkio's io_uring driver instead of the default
+Rust pread/pwrite path.
+
+See `rust/raw_block/README.md` for full details, usage examples, and
+test instructions.
