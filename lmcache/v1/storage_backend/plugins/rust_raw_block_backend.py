@@ -181,6 +181,27 @@ class RustRawBlockBackend(StoragePluginInterface):
         )
         self.use_uring: bool = bool(extra.get("rust_raw_block.use_uring", False))
 
+        # I/O backend selection: "rust" (default) uses the Rust
+        # RawBlockDevice extension (pread/pwrite + optional io_uring).
+        # "libblkio" uses the Rust BlkioBlockDevice (libblkio io_uring
+        # driver), enabled via the "blkio" cargo feature.
+        self.io_backend: str = str(
+            extra.get("rust_raw_block.io_backend", "rust")
+        )
+        if self.io_backend not in ("rust", "libblkio"):
+            raise ValueError(
+                "rust_raw_block.io_backend must be 'rust' or 'libblkio'"
+            )
+        # libblkio manages its own io_uring internally; the Python-side
+        # batched io_uring path is only available with the Rust backend.
+        if self.io_backend == "libblkio" and self.use_uring:
+            logger.info(
+                "RustRawBlockBackend: io_backend='libblkio' does not "
+                "support the Python-side io_uring path; falling back "
+                "to sync I/O (libblkio uses io_uring internally)."
+            )
+            self.use_uring = False
+
         # On-device metadata region config.
         self.meta_total_bytes: int = int(
             extra.get("rust_raw_block.meta_total_bytes", 128 * 1024 * 1024)
@@ -355,21 +376,42 @@ class RustRawBlockBackend(StoragePluginInterface):
 
     def _rawdev(self):
         if self._raw is None:
-            try:
-                # Third Party
-                from lmcache_rust_raw_block_io import RawBlockDevice  # type: ignore
-            except Exception as e:
-                raise RuntimeError(
-                    "Rust raw-block extension is not installed. "
-                    "Install / build `rust_raw_block_io` and retry."
-                ) from e
-            self._raw = RawBlockDevice(
-                self.device_path,
-                writable=True,
-                use_odirect=self.use_odirect,
-                alignment=self.block_align,
-                use_iouring=self.use_uring,
-            )
+            if self.io_backend == "libblkio":
+                try:
+                    # Third Party
+                    from lmcache_rust_raw_block_io import (  # type: ignore
+                        BlkioBlockDevice,
+                    )
+                except ImportError as e:
+                    raise RuntimeError(
+                        "libblkio raw-block backend requires the Rust "
+                        "lmcache_rust_raw_block_io extension built with "
+                        "the 'blkio' feature.  Rebuild with: "
+                        "cd rust/raw_block && maturin develop --release "
+                        "--features blkio"
+                    ) from e
+                self._raw = BlkioBlockDevice(
+                    self.device_path,
+                    writable=True,
+                    use_odirect=self.use_odirect,
+                    alignment=self.block_align,
+                )
+            else:
+                try:
+                    # Third Party
+                    from lmcache_rust_raw_block_io import RawBlockDevice  # type: ignore
+                except Exception as e:
+                    raise RuntimeError(
+                        "Rust raw-block extension is not installed. "
+                        "Install / build `rust_raw_block_io` and retry."
+                    ) from e
+                self._raw = RawBlockDevice(
+                    self.device_path,
+                    writable=True,
+                    use_odirect=self.use_odirect,
+                    alignment=self.block_align,
+                    use_iouring=self.use_uring,
+                )
         return self._raw
 
     def _register_paged_buffers(self) -> None:
