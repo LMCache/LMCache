@@ -19,28 +19,28 @@ from lmcache.logging import init_logger
 from lmcache.utils import EngineType
 from lmcache.v1.gpu_connector.utils import (
     LayoutHints,
-    discover_gpu_kv_format,
     get_attention_backend,
     get_block_size,
     get_concrete_gpu_kv_shape,
+    get_device,
     get_dtype,
     get_gpu_kv_shape_description,
-    get_head_size,
-    get_hidden_dim_size,
+    get_group_data_ptrs,
     get_num_blocks,
-    get_num_heads,
     get_num_layers,
     is_mla,
+    normalize_kv_and_discover_format,
 )
 from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
-
-if torch.cuda.is_available():
-    import lmcache.c_ops as lmc_ops
-
-# First Party
 from lmcache.v1.multiprocess.custom_types import (
     KVCache,
 )
+
+# Backend selection (c_ops when CUDA is available, otherwise a pure-Python
+# fallback) is handled once in ``lmcache/__init__.py`` via ``_get_backend``,
+# which aliases the chosen module as ``lmcache.c_ops`` in ``sys.modules``.
+# Importing it here transparently works in both CUDA and CPU-only envs.
+import lmcache.c_ops as lmc_ops
 
 logger = init_logger(__name__)
 
@@ -69,65 +69,36 @@ class GPUCacheContext:
         kv_caches: KVCache,
         lmcache_chunk_size: int = 256,
         layout_hints: LayoutHints | None = None,
+        engine_type: EngineType = EngineType.VLLM,
     ):
-        self.kv_caches_ = unwrap_kv_cache_tensors(kv_caches)
-        self.device_ = self.kv_caches_[0].device
-
-        # Pointers
-        pointers_list = [t.data_ptr() for t in self.kv_caches_]
-        self.kv_cache_pointers_ = list_to_gpu_tensor(pointers_list, self.device_)
-
-        # TODO support creating GPUCacheContext for SGLang
-        self.gpu_kv_format_ = discover_gpu_kv_format(
-            self.kv_caches_,
-            EngineType.VLLM,
+        unwrapped = unwrap_kv_cache_tensors(kv_caches)
+        self.gpu_kv_format_, self.kv_caches_ = normalize_kv_and_discover_format(
+            unwrapped,
+            engine_type,
             layout_hints=layout_hints,
         )
+        self.device_ = get_device(self.kv_caches_)
         self.is_mla_ = is_mla(self.gpu_kv_format_)
         self.num_layers_ = get_num_layers(self.kv_caches_, self.gpu_kv_format_)
         self.num_blocks_ = get_num_blocks(self.kv_caches_, self.gpu_kv_format_)
         self.block_size_ = get_block_size(self.kv_caches_, self.gpu_kv_format_)
 
-        # Build per-layer KV groups (grouped by shape and dtype)
-        self.kv_layer_groups_manager_ = KVLayerGroupsManager()
-        self.kv_layer_groups_manager_.build_kv_layer_groups_from_list(self.kv_caches_)
+        # Build per-layer KV groups. The manager owns each group's
+        # PageBufferShapeDesc (kernel-facing shape); this context only
+        # retains per-group GPU resources (pointer tensors, tmp buffers).
+        self.kv_layer_groups_manager_ = KVLayerGroupsManager(
+            self.kv_caches_,
+            gpu_kv_format=self.gpu_kv_format_,
+            num_blocks=self.num_blocks_,
+            block_size=self.block_size_,
+        )
 
-        # Per-group attributes: hidden_dim_size, num_heads, head_size,
-        # shape_desc, and kv_pointers — all derived from the representative
-        # first layer of each group. MLA formats have no independent num_heads
-        # dimension; use nh=1 so the kernel thread block has a single row.
-        kv_size = 1 if self.is_mla_ else 2
-        self.hidden_dim_sizes_: list[int] = []
-        self.group_num_heads_: list[int] = []
-        self.group_head_sizes_: list[int] = []
-        self.shape_descs_: list[lmc_ops.PageBufferShapeDesc] = []
         self.group_kv_pointers_: list[torch.Tensor] = []
         for group in self.kv_layer_groups_manager_.kv_layer_groups:
-            rep = [self.kv_caches_[group.layer_indices[0]]]
-            hidden_dim = get_hidden_dim_size(rep, self.gpu_kv_format_)
-            nh = 1 if self.is_mla_ else get_num_heads(rep, self.gpu_kv_format_)
-            hs = get_head_size(rep, self.gpu_kv_format_)
-
-            self.hidden_dim_sizes_.append(hidden_dim)
-            self.group_num_heads_.append(nh)
-            self.group_head_sizes_.append(hs)
-
-            sd = lmc_ops.PageBufferShapeDesc()
-            sd.kv_size = kv_size
-            sd.nl = group.num_layers
-            sd.nb = self.num_blocks_
-            sd.bs = self.block_size_
-            sd.nh = nh
-            sd.hs = hs
-            sd.element_size = rep[0].element_size()
-            self.shape_descs_.append(sd)
-
-            self.group_kv_pointers_.append(
-                list_to_gpu_tensor(
-                    [self.kv_caches_[i].data_ptr() for i in group.layer_indices],
-                    self.device_,
-                )
+            ptrs = get_group_data_ptrs(
+                self.kv_caches_, self.gpu_kv_format_, group.layer_indices
             )
+            self.group_kv_pointers_.append(list_to_gpu_tensor(ptrs, self.device_))
 
         # Pre-allocated GPU buffer for block IDs (up to 1M elements).
         # The caller copies block_ids into this buffer before launching the
@@ -205,13 +176,6 @@ class GPUCacheContext:
         return self.kv_caches_
 
     @property
-    def kv_pointers(self) -> torch.Tensor:
-        """
-        Returns a GPU tensor of the KV cache pointers
-        """
-        return self.kv_cache_pointers_
-
-    @property
     def stream(self) -> torch.cuda.Stream:
         """
         Returns the CUDA stream for KV cache operations
@@ -261,17 +225,21 @@ class GPUCacheContext:
     @property
     def hidden_dim_sizes(self) -> list[int]:
         """Returns the hidden dimension sizes for each KV layer group."""
-        return self.hidden_dim_sizes_
+        return [
+            group.hidden_dim_size
+            for group in self.kv_layer_groups_manager_.kv_layer_groups
+        ]
 
     def get_shape_desc(self, group_idx: int) -> "lmc_ops.PageBufferShapeDesc":
         """Returns the PageBufferShapeDesc for the given KV layer group."""
-        return self.shape_descs_[group_idx]
+        return self.kv_layer_groups_manager_.get_shape_desc(group_idx)
 
     @property
     def kv_layer_groups_manager(self) -> KVLayerGroupsManager:
         """Returns the KV layer groups manager."""
         return self.kv_layer_groups_manager_
 
+    @property
     def gpu_kv_format_name(self) -> str:
         """Returns the GPU KV format enum name (e.g. ``'NL_X_TWO_NB_BS_NH_HS'``)."""
         return self.gpu_kv_format_.name
@@ -382,12 +350,10 @@ class GPUCacheContext:
             group_idx: Index of the KV layer group (default 0).
         """
         group = self.kv_layer_groups_manager_.kv_layer_groups[group_idx]
-        num_layers_in_group = group.num_layers
-        hidden_dim = self.hidden_dim_sizes[group_idx]
-        if self.is_mla_:
-            return torch.Size((1, num_layers_in_group, num_tokens, hidden_dim))
-        else:
-            return torch.Size((2, num_layers_in_group, num_tokens, hidden_dim))
+        sd = group.shape_desc
+        return torch.Size(
+            (sd.kv_size, group.num_layers, num_tokens, group.hidden_dim_size)
+        )
 
     def cache_size_per_token(self) -> int:
         """

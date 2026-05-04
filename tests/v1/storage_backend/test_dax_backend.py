@@ -16,7 +16,7 @@ import torch
 # First Party
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.kv_layer_groups import KVLayerGroupInfo, KVLayerGroupsManager
+from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
 from lmcache.v1.memory_management import AdHocMemoryAllocator, MemoryFormat, MemoryObj
 from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
@@ -51,22 +51,21 @@ def _create_metadata(
 
 
 def _create_multi_group_metadata(chunk_size: int = 16) -> LMCacheMetadata:
+    # First Party
+    import lmcache.c_ops as lmc_ops
+
     metadata = _create_metadata(chunk_size=chunk_size)
+    # Two single-layer groups whose only differing signature field is
+    # head_size (8 vs 16), exercising the multi-group code path.
+    kv_caches = [
+        torch.empty(2, 1, chunk_size, 1, 8, dtype=torch.bfloat16),
+        torch.empty(2, 1, chunk_size, 1, 16, dtype=torch.bfloat16),
+    ]
     metadata.kv_layer_groups_manager = KVLayerGroupsManager(
-        kv_layer_groups=[
-            KVLayerGroupInfo(
-                layer_names=["layer0"],
-                layer_indices=[0],
-                shape=torch.Size([2, 1, chunk_size, 1, 8]),
-                dtype=torch.bfloat16,
-            ),
-            KVLayerGroupInfo(
-                layer_names=["layer1"],
-                layer_indices=[1],
-                shape=torch.Size([2, 1, chunk_size, 1, 16]),
-                dtype=torch.bfloat16,
-            ),
-        ]
+        kv_caches,
+        lmc_ops.GPUKVFormat.NL_X_TWO_NB_BS_NH_HS,
+        num_blocks=1,
+        block_size=chunk_size,
     )
     return metadata
 
