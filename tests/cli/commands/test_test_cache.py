@@ -264,8 +264,9 @@ class TestQueryChecksum:
         base = "http://127.0.0.1:%d" % self.port
         result = _query_checksum(
             base,
-            slot_start=0,
-            slot_end=4,
+            block_offset=0,
+            num_blocks=2,
+            block_size=2,
             chunk_size=2,
         )
         assert result is not None
@@ -275,8 +276,9 @@ class TestQueryChecksum:
     def test_unreachable_returns_none(self):
         result = _query_checksum(
             "http://127.0.0.1:1",
-            slot_start=0,
-            slot_end=4,
+            block_offset=0,
+            num_blocks=2,
+            block_size=2,
             chunk_size=2,
         )
         assert result is None

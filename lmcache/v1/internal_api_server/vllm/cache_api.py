@@ -19,10 +19,6 @@ from lmcache.utils import (
     parse_mixed_slot_mapping,
 )
 from lmcache.v1.cache_engine import LMCacheEngine
-from lmcache.v1.utils.kv_slot_ops import (
-    extract_kv_at_slots,
-    slice_by_slot_dim,
-)
 
 logger = init_logger(__name__)
 
@@ -146,6 +142,79 @@ def _compute_tensor_checksum(tensor: torch.Tensor) -> str:
     return hashlib.md5(tensor_bytes).hexdigest()
 
 
+def _slice_by_slot_dim(
+    kv_at_slots: torch.Tensor, start_idx: int, end_idx: int
+) -> torch.Tensor:
+    """Slice tensor by slot dimension based on tensor ndim."""
+    if kv_at_slots.ndim == 4:
+        # MHA: [2, num_slots, num_heads, head_size]
+        return kv_at_slots[:, start_idx:end_idx, :, :]
+    elif kv_at_slots.ndim == 3:
+        # 4D format: [num_slots, num_heads, head_size]
+        return kv_at_slots[start_idx:end_idx, :, :]
+    else:
+        # MLA: [num_slots, head_size]
+        return kv_at_slots[start_idx:end_idx, :]
+
+
+def _extract_kv_at_slots(
+    kv_tensor: torch.Tensor, slot_tensor: torch.Tensor
+) -> torch.Tensor:
+    """Extract KV data at specified slot positions from kv_tensor.
+
+    Handles different kv_tensor formats:
+    - MHA (5D): [2, num_blocks, block_size, num_heads, head_size]
+    - MLA (3D): [num_blocks, block_size, head_size]
+
+    The slot_mapping is calculated as:
+        slot_idx = block_id * block_size + block_offset
+
+    This means we can reshape the tensor to flatten (num_blocks, block_size)
+    into a single slot dimension and index directly.
+
+    Args:
+        kv_tensor: The KV cache tensor for a single layer.
+        slot_tensor: Tensor of slot indices to extract.
+
+    Returns:
+        Tensor with KV data at the specified slots.
+        - MHA: shape [2, num_slots, num_heads, head_size]
+        - MLA: shape [num_slots, head_size]
+    """
+    ndim = kv_tensor.ndim
+
+    if ndim == 5:
+        # MHA format: [2, num_blocks, block_size, num_heads, head_size]
+        # Reshape to [2, num_blocks * block_size, num_heads, head_size]
+        # then index by slot_tensor on dimension 1
+        kv_2d = 2
+        num_heads = kv_tensor.shape[3]
+        head_size = kv_tensor.shape[4]
+        kv_reshaped = kv_tensor.reshape(kv_2d, -1, num_heads, head_size)
+        return kv_reshaped[:, slot_tensor, :, :]
+    elif ndim == 3:
+        # MLA format: [num_blocks, block_size, head_size]
+        # Reshape to [num_blocks * block_size, head_size]
+        head_size = kv_tensor.shape[2]
+        kv_reshaped = kv_tensor.reshape(-1, head_size)
+        return kv_reshaped[slot_tensor, :]
+    elif ndim == 4:
+        # Alternative format: [num_blocks, block_size, num_heads, head_size]
+        # (used in some test cases)
+        num_heads = kv_tensor.shape[2]
+        head_size = kv_tensor.shape[3]
+        kv_reshaped = kv_tensor.reshape(-1, num_heads, head_size)
+        return kv_reshaped[slot_tensor, :, :]
+    else:
+        # Fallback: try the original approach
+        logger.warning(
+            "Unknown kv_tensor ndim=%d, shape=%s. Using fallback indexing.",
+            ndim,
+            kv_tensor.shape,
+        )
+        return kv_tensor.view(-1, *kv_tensor.shape[2:])[slot_tensor]
+
+
 def compute_kvcache_checksums(
     lmcache_adapter,
     slot_indices: list[int],
@@ -197,7 +266,7 @@ def compute_kvcache_checksums(
             slot_tensor = torch.tensor(
                 slot_indices, dtype=torch.long, device=kv_tensor.device
             )
-            layer_data_at_slots[layer_name] = extract_kv_at_slots(
+            layer_data_at_slots[layer_name] = _extract_kv_at_slots(
                 kv_tensor, slot_tensor
             )
         except Exception as e:
@@ -215,7 +284,7 @@ def compute_kvcache_checksums(
             for chunk_idx in range(num_chunks):
                 start_idx = chunk_idx * chunk_size
                 end_idx = min(start_idx + chunk_size, num_slots)
-                chunk_data = slice_by_slot_dim(kv_at_slots, start_idx, end_idx)
+                chunk_data = _slice_by_slot_dim(kv_at_slots, start_idx, end_idx)
                 chunk_checksum_list.append(_compute_tensor_checksum(chunk_data))
             chunk_checksums[layer_name] = chunk_checksum_list
         return {
@@ -234,7 +303,7 @@ def compute_kvcache_checksums(
                 kv_at_slots = layer_data_at_slots[layer_name]
                 if kv_at_slots is None:
                     continue
-                chunk_data = slice_by_slot_dim(kv_at_slots, start_idx, end_idx)
+                chunk_data = _slice_by_slot_dim(kv_at_slots, start_idx, end_idx)
                 md5_hash.update(_compute_tensor_checksum(chunk_data).encode())
             chunk_checksums_list.append(md5_hash.hexdigest())
         return {

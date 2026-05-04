@@ -43,26 +43,67 @@ import time
 import urllib.error
 import urllib.request
 
-# Third Party
-import torch
-import zmq
-
 # First Party
 from lmcache.cli.commands.base import BaseCommand
-from lmcache.utils import compress_slot_mapping
-from lmcache.v1.kv_layer_groups import (
-    DTYPE_MAP,
-    KVLayerGroupInfo,
-    format_kvcache_shape_spec,
-    parse_kvcache_shape_spec,
-)
-from lmcache.v1.multiprocess.custom_types import (
-    CudaIPCWrapper,
-    IPCCacheEngineKey,
-)
-from lmcache.v1.multiprocess.futures import MessagingFuture
-from lmcache.v1.multiprocess.mq import MessageQueueClient
-from lmcache.v1.multiprocess.protocols.base import RequestType
+
+# ``lmcache bench kvcache`` allocates real CUDA tensors and talks to
+# the MP server via ZMQ, both of which are absent from the thin
+# ``lmcache-cli`` distribution (no torch, no zmq, no lmcache.v1.*).
+# Importing them unconditionally would kill the *entire* ``lmcache``
+# CLI at registry load time with an opaque ImportError. Wrap the
+# heavy imports and remember the error so ``add_arguments`` /
+# ``execute`` can bail out with an actionable install hint.
+_IMPORT_ERROR: ImportError | None = None
+try:
+    # Third Party
+    import torch
+    import zmq
+
+    # First Party
+    from lmcache.utils import compress_slot_mapping
+    from lmcache.v1.kv_layer_groups import (
+        DTYPE_MAP,
+        KVLayerGroupInfo,
+        format_kvcache_shape_spec,
+        parse_kvcache_shape_spec,
+    )
+    from lmcache.v1.multiprocess.custom_types import (
+        CudaIPCWrapper,
+        IPCCacheEngineKey,
+    )
+    from lmcache.v1.multiprocess.futures import MessagingFuture
+    from lmcache.v1.multiprocess.mq import MessageQueueClient
+    from lmcache.v1.multiprocess.protocols.base import RequestType
+except ImportError as _exc:
+    _IMPORT_ERROR = _exc
+    # Fallback placeholder so ``add_arguments`` can still build its
+    # help text without crashing on a CLI-only install.
+    DTYPE_MAP = {}  # type: ignore[assignment]
+
+
+def _require_full_install() -> None:
+    """Exit with an install hint if the full LMCache runtime is missing.
+
+    ``lmcache bench kvcache`` needs torch, zmq and ``lmcache.v1.*``
+    (MP client, KV layer-group parser). When those imports failed at
+    module load — almost always because the user installed
+    ``lmcache-cli`` instead of the full package — print the shortest
+    actionable message to stderr and exit with status ``2`` so
+    scripts can detect the install gap programmatically.
+    """
+    if _IMPORT_ERROR is None:
+        return
+    print(
+        "ERROR: `lmcache bench kvcache` needs the full LMCache package "
+        "(torch, zmq, MP runtime), but only the `lmcache-cli` shell "
+        "appears to be installed.\n"
+        "  Install the full package with `pip install lmcache` and try "
+        "again.\n"
+        f"  Original import error: {_IMPORT_ERROR}",
+        file=sys.stderr,
+    )
+    sys.exit(2)
+
 
 # ------------------------------------------------------------------ #
 #  Constants                                                           #
@@ -156,7 +197,7 @@ def _allocate_gpu_kv_cache(
     head_size: int = 128,
     num_blocks: int = 1024,
     block_size: int = 16,
-    dtype: torch.dtype = torch.float16,
+    dtype: torch.dtype | None = None,
     device: str | torch.device | None = None,
     kv_size: int = 2,
     groups: list[KVLayerGroupInfo] | None = None,
@@ -176,6 +217,10 @@ def _allocate_gpu_kv_cache(
     ``num_heads`` / ``head_size`` / ``dtype`` / ``kv_size`` kwargs
     are ignored, and ``num_layers`` is derived from the groups.
     """
+    # ``torch.float16`` cannot be used as a default value because the
+    # module must load on ``lmcache-cli`` (no torch) installs.
+    if dtype is None:
+        dtype = torch.float16
     torch.random.manual_seed(42)
     dev = (
         torch.device(device)
@@ -344,31 +389,48 @@ def _send_end_session(
 
 def _query_checksum(
     http_base: str,
-    slot_start: int,
-    slot_end: int,
+    block_offset: int,
+    num_blocks: int,
+    block_size: int,
     chunk_size: int,
 ) -> list[str] | None:
     """Query KV cache checksums via the HTTP API.
 
-    This CLI pins ``layerwise=false`` so the server always
-    returns ``chunk_checksums`` as a flat ``list[str]``. We
-    still defensively validate the response type — if a future
-    endpoint variant returns a per-layer ``dict`` we log and
-    skip the comparison rather than letting ``str.join`` crash.
+    Uses the MP-native ``block_ids`` + ``block_size`` addressing
+    scheme so the query matches the same block-level semantics
+    as ``STORE`` / ``RETRIEVE``. This CLI pins ``layerwise=false``
+    so the server always returns ``chunk_checksums`` as a flat
+    ``list[str]``. We still defensively validate the response
+    type — if a future endpoint variant returns a per-layer
+    ``dict`` we log and skip the comparison rather than letting
+    ``str.join`` crash.
     """
-    slots = list(range(slot_start, slot_end))
-    compressed = compress_slot_mapping(slots)
+    blocks = list(range(block_offset, block_offset + num_blocks))
+    compressed = compress_slot_mapping(blocks)
     parts: list[str] = []
     for item in compressed:
         if isinstance(item, list):
             parts.append("[%d,%d]" % (item[0], item[1]))
         else:
             parts.append(str(item))
-    slot_mapping = ",".join(parts)
-    url = ("%s/api/kvcache/check?slot_mapping=%s&chunk_size=%d&layerwise=false") % (
+    block_ids = ",".join(parts)
+    # The MP /api/kvcache/check endpoint is block-native: its
+    # chunk_size counts blocks per chunk, while our caller passes
+    # in the server-side token-level chunk_size. Convert here.
+    if chunk_size % block_size != 0:
+        print(
+            "  [WARNING] chunk_size %d not a multiple of block_size %d; "
+            "skipping checksum query" % (chunk_size, block_size)
+        )
+        return None
+    chunk_size_blocks = chunk_size // block_size
+    url = (
+        "%s/api/kvcache/check?block_ids=%s&block_size=%d&chunk_size=%d&layerwise=false"
+    ) % (
         http_base,
-        slot_mapping,
-        chunk_size,
+        block_ids,
+        block_size,
+        chunk_size_blocks,
     )
     try:
         req = urllib.request.Request(url)
@@ -530,12 +592,11 @@ def _process_request(
     # 5. Query checksums via HTTP API
     checksums = None
     if http_base and num_full_tokens > 0:
-        slot_start = block_offset * block_size
-        slot_end = slot_start + num_full_tokens
         checksums = _query_checksum(
             http_base,
-            slot_start,
-            slot_end,
+            block_offset,
+            num_blocks,
+            block_size,
             chunk_size,
         )
         if checksums:
@@ -619,6 +680,10 @@ class TestCacheCommand(BaseCommand):
         parser: argparse.ArgumentParser,
     ) -> None:
         """Register CLI arguments for the test-cache command."""
+        # When running on a ``lmcache-cli``-only install ``DTYPE_MAP``
+        # is empty; bail out early so users see an actionable error
+        # instead of an empty "Supported dtypes:" string.
+        _require_full_install()
         parser.add_argument(
             "--rpc-url",
             default="tcp://localhost:5555",
@@ -648,12 +713,22 @@ class TestCacheCommand(BaseCommand):
             type=str,
             default=_DEFAULT_SHAPE_SPEC,
             help=(
-                "KV shape spec. One or more groups separated by ';'. "
-                "Each group is '(kv_size,NB,BS,NH,HS):dtype:layers' "
-                "where NB=num_blocks, BS=block_size, NH=num_heads, "
-                "HS=head_size. Supported dtypes: %s. "
+                "KV shape spec. Describes one or more KV layer groups "
+                "separated by ';'. "
+                "Grammar: "
+                "'(kv_size,NB,BS,NH,HS):dtype:layers[;(...):dtype:layers...]'. "
+                "Fields: kv_size=2 for classical K/V or 1 for MLA, "
+                "NB=num_blocks, BS=block_size (tokens/block), "
+                "NH=num_heads, HS=head_size (elements). "
+                "dtype is the element dtype (supported: %s); 'uint8' "
+                "is used for FP8-quantized KV. 'layers' is the number "
+                "of consecutive layers sharing this group's geometry. "
+                "Multi-group example (MLA + classical attention): "
+                "'(1,1024,16,1,128):float16:4;"
+                "(2,1024,16,8,128):float16:28'. "
+                "All groups must share the same NB and BS. "
                 "See lmcache.v1.kv_layer_groups.parse_kvcache_shape_spec "
-                "for full docs. Default: '%s'"
+                "for the authoritative parser. Default: '%s'"
                 % (", ".join(DTYPE_MAP.keys()), _DEFAULT_SHAPE_SPEC)
             ),
         )
@@ -696,6 +771,7 @@ class TestCacheCommand(BaseCommand):
 
     def execute(self, args: argparse.Namespace) -> None:
         """Run the end-to-end cache test loop."""
+        _require_full_install()
         if not torch.cuda.is_available():
             print("ERROR: --mode gpu requires CUDA")
             sys.exit(1)
