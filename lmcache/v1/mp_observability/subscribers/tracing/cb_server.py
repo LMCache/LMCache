@@ -292,6 +292,19 @@ class BlendTracingSubscriber(EventSubscriber):
 
         self._registry.pop(sid, self._SPAN_DEFS[start_type])
 
+        if event.event_type == EventType.CB_LOOKUP_END:
+            root_entry = self._registry.get(sid, "cb.request")
+            if root_entry is not None:
+                root_span, _ = root_entry
+                hit_tokens = int(event.metadata.get("hit_tokens", 0))
+                requested_tokens = int(event.metadata.get("requested_tokens", 0))
+                hit_rate = (
+                    hit_tokens / requested_tokens if requested_tokens > 0 else 0.0
+                )
+                root_span.set_attribute("hit_tokens", hit_tokens)
+                root_span.set_attribute("requested_tokens", requested_tokens)
+                root_span.set_attribute("hit_rate", hit_rate)
+
         if event.event_type in self._GPU_OP_END_EVENTS:
             if (count := self._pending_gpu_ops.get(sid, 0)) > 0:
                 if count == 1:

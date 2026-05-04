@@ -285,7 +285,130 @@ This guide helps you get LMCache running end-to-end in a couple of minutes. Use 
       - **New tokens: 10**: Only 10 prompt tokens need prefill computation (40 prompt - 30 cached = 10).
       - **Stored 112 out of 140**: 24 tokens (3 full chunks) are already in LMCache and skipped. Of the remaining 116 tokens, 112 (14 full 8-token chunks) are stored.
 
-🎉 **You now have LMCache caching and reusing KV caches for both engines.**
+   .. tab-item:: TensorRT-LLM
+
+      .. note::
+         This integration depends on the connector preset registry from
+         `NVIDIA/TensorRT-LLM PR #12626
+         <https://github.com/NVIDIA/TensorRT-LLM/pull/12626>`_ and the
+         matching LMCache adapter, neither of which has shipped in a
+         stable release yet. Until they do, install both from source:
+
+         .. code-block:: bash
+
+            uv venv --python 3.12
+            source .venv/bin/activate
+
+            # LMCache from source (dev branch)
+            uv pip install git+https://github.com/LMCache/LMCache.git@dev
+
+            # TensorRT-LLM from source — see NVIDIA's build guide:
+            # https://nvidia.github.io/TensorRT-LLM/installation/build-from-source-linux.html
+
+         Once both ship in a stable release, the install command will be:
+
+         .. code-block:: bash
+
+            uv pip install lmcache "tensorrt_llm>=<version>" \
+                --extra-index-url https://pypi.nvidia.com
+
+      LMCache integrates with TensorRT-LLM via TRT-LLM's
+      **KV Cache Connector** API and supports two deployment modes:
+
+      - **In-process mode** (``connector: lmcache``) -- LMCache runs as
+        a singleton inside the TRT-LLM process. Simplest setup; no
+        extra service to manage.
+      - **MP mode** (``connector: lmcache-mp``) -- LMCache runs as a
+        standalone server. Multiple TRT-LLM workers on the same node
+        can share the cache, and the cache survives a TRT-LLM crash.
+
+      .. tab-set::
+         :sync-group: trtllm-mode
+
+         .. tab-item:: In-process mode
+            :sync: inproc
+
+            Configure LMCache via env vars:
+
+            .. code-block:: bash
+
+               export PYTHONHASHSEED=0  # required — chunk hashing depends on stable hash()
+               export LMCACHE_CHUNK_SIZE=256
+               export LMCACHE_LOCAL_CPU=True
+               export LMCACHE_MAX_LOCAL_CPU_SIZE=2.0  # GiB
+
+            Build the TRT-LLM ``LLM`` with ``connector: lmcache``:
+
+            .. code-block:: python
+
+               from tensorrt_llm import LLM, SamplingParams
+               from tensorrt_llm.llmapi.llm_args import (
+                   KvCacheConfig, KvCacheConnectorConfig,
+               )
+
+               llm = LLM(
+                   model="Qwen/Qwen2-1.5B-Instruct",
+                   backend="pytorch",
+                   kv_cache_config=KvCacheConfig(enable_block_reuse=True),
+                   kv_connector_config=KvCacheConnectorConfig(connector="lmcache"),
+               )
+
+               out = llm.generate(["Your prompt here"], SamplingParams(max_tokens=64))
+               print(out[0].outputs[0].text)
+
+         .. tab-item:: MP mode
+            :sync: mp
+
+            ``PYTHONHASHSEED=0`` must be set in **both** terminals --
+            chunk hashing depends on a stable ``hash()``, and the
+            server and client must agree on the seed.
+
+            Start the LMCache server:
+
+            .. code-block:: bash
+
+               export PYTHONHASHSEED=0
+               lmcache server \
+                   --l1-size-gb 10 --eviction-policy LRU --chunk-size 256
+
+            In a separate terminal, point TRT-LLM at the server via
+            ``server_url``:
+
+            .. code-block:: bash
+
+               export PYTHONHASHSEED=0
+               python run_trtllm.py
+
+            where ``run_trtllm.py`` contains:
+
+            .. code-block:: python
+
+               from tensorrt_llm import LLM, SamplingParams
+               from tensorrt_llm.llmapi.llm_args import (
+                   KvCacheConfig, KvCacheConnectorConfig,
+               )
+
+               llm = LLM(
+                   model="Qwen/Qwen2-1.5B-Instruct",
+                   backend="pytorch",
+                   kv_cache_config=KvCacheConfig(enable_block_reuse=True),
+                   kv_connector_config=KvCacheConnectorConfig(
+                       connector="lmcache-mp",
+                       server_url="tcp://localhost:5555",
+                   ),
+               )
+
+               out = llm.generate(["Your prompt here"], SamplingParams(max_tokens=64))
+               print(out[0].outputs[0].text)
+
+      .. note::
+         The TRT-LLM adapter reads :class:`LMCacheEngineConfig` the
+         same way the vLLM adapter does: ``LMCACHE_CONFIG_FILE`` for
+         a YAML file, otherwise individual ``LMCACHE_*`` environment
+         variables. See :doc:`../api_reference/configurations` for
+         all options.
+
+🎉 **You now have LMCache caching and reusing KV caches across all three engines.**
 
 Next Steps
 ----------

@@ -3,7 +3,6 @@
 
 # Standard
 import argparse
-import os
 import select
 import time
 
@@ -29,6 +28,7 @@ from lmcache.v1.memory_management import (
     MemoryObjMetadata,
     TensorMemoryObj,
 )
+from lmcache.v1.platform import consume_fd
 
 _POLL_TIMEOUT_MS = 100000
 
@@ -91,7 +91,7 @@ def _wait_event_fd(efd: int, timeout_ms: int = _POLL_TIMEOUT_MS) -> bool:
     events = poll.poll(timeout_ms)
     if events:
         try:
-            os.eventfd_read(efd)
+            consume_fd(efd)
         except BlockingIOError:
             pass
         return True
