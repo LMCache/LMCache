@@ -878,10 +878,10 @@ class S3L2Adapter(L2AdapterInterface):
 
         with self._lock:
             self._completed_store_tasks[task_id] = success
-        self._store_efd.notify()
 
         if newly_stored_keys:
             self._notify_keys_stored(newly_stored_keys, newly_stored_sizes)
+        self._store_efd.notify()
 
     async def _execute_lookup(
         self,
