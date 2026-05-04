@@ -58,11 +58,16 @@ class _RecordingListener(L2AdapterListener):
         self.deleted.append(list(keys))
 
 
-def create_object_key(chunk_id: int, model_name: str = "test_model") -> ObjectKey:
+def create_object_key(
+    chunk_id: int,
+    model_name: str = "test_model",
+    cache_salt: str = "",
+) -> ObjectKey:
     return ObjectKey(
         chunk_hash=ObjectKey.IntHash2Bytes(chunk_id),
         model_name=model_name,
         kv_rank=0,
+        cache_salt=cache_salt,
     )
 
 
@@ -240,6 +245,7 @@ def test_dax_adapter_usage_and_status_track_pending_free_slots(tmp_path):
     adapter, _ = make_adapter(tmp_path, slot_bytes=2048, max_slots=2)
     obj = create_memory_obj(fill_value=9)
     try:
+        assert adapter.supports_global_eviction is True
         key = create_object_key(30)
         store_and_wait(adapter, key, obj)
 
@@ -267,6 +273,82 @@ def test_dax_adapter_usage_and_status_track_pending_free_slots(tmp_path):
         assert adapter._core.usage()[1] == pytest.approx(0.0)
     finally:
         obj.ref_count_down()
+        adapter.close()
+
+
+def test_dax_adapter_full_arena_does_not_evict_internally(tmp_path):
+    adapter, _ = make_adapter(tmp_path, slot_bytes=2048, max_slots=2)
+    listener = _RecordingListener()
+    adapter.register_listener(listener)
+
+    obj0 = create_memory_obj(fill_value=1)
+    obj1 = create_memory_obj(fill_value=2)
+    obj2 = create_memory_obj(fill_value=3)
+    try:
+        key0 = create_object_key(31)
+        key1 = create_object_key(32)
+        key2 = create_object_key(33)
+
+        store_and_wait(adapter, key0, obj0)
+        store_and_wait(adapter, key1, obj1)
+
+        task_id = adapter.submit_store_task([key2], [obj2])
+        assert wait_for_event_fd(adapter.get_store_event_fd())
+        assert adapter.pop_completed_store_tasks() == {task_id: False}
+        assert listener.stored == [[key0], [key1]]
+        assert adapter.get_usage().usage_fraction == pytest.approx(1.0)
+
+        lookup_task = adapter.submit_lookup_and_lock_task([key0, key1, key2])
+        assert wait_for_event_fd(adapter.get_lookup_and_lock_event_fd())
+        bitmap = adapter.query_lookup_and_lock_result(lookup_task)
+        assert bitmap is not None
+        assert bitmap_to_bools(bitmap, 3) == [True, True, False]
+        adapter.submit_unlock([key0, key1])
+    finally:
+        obj0.ref_count_down()
+        obj1.ref_count_down()
+        obj2.ref_count_down()
+        adapter.close()
+
+
+def test_dax_adapter_usage_tracks_cache_salt_by_slot(tmp_path):
+    adapter, _ = make_adapter(tmp_path, slot_bytes=2048, max_slots=4)
+
+    obj0 = create_memory_obj(fill_value=1)
+    obj1 = create_memory_obj(fill_value=2)
+    obj2 = create_memory_obj(fill_value=3)
+    try:
+        alice0 = create_object_key(34, cache_salt="alice")
+        bob = create_object_key(35, cache_salt="bob")
+        alice1 = create_object_key(36, cache_salt="alice")
+
+        store_and_wait(adapter, alice0, obj0)
+        store_and_wait(adapter, bob, obj1)
+        store_and_wait(adapter, alice1, obj2)
+
+        usage = adapter.get_usage()
+        assert usage.total_bytes_used == 2048 * 3
+        assert dict(usage.bytes_by_cache_salt) == {
+            "alice": 2048 * 2,
+            "bob": 2048,
+        }
+
+        adapter.delete([alice0])
+        usage = adapter.get_usage()
+        assert usage.total_bytes_used == 2048 * 2
+        assert dict(usage.bytes_by_cache_salt) == {
+            "alice": 2048,
+            "bob": 2048,
+        }
+
+        adapter.delete([alice1])
+        usage = adapter.get_usage()
+        assert usage.total_bytes_used == 2048
+        assert dict(usage.bytes_by_cache_salt) == {"bob": 2048}
+    finally:
+        obj0.ref_count_down()
+        obj1.ref_count_down()
+        obj2.ref_count_down()
         adapter.close()
 
 
@@ -417,5 +499,85 @@ def test_storage_manager_dax_adapter_roundtrip(tmp_path):
 
         sm.finish_read_prefetched([key])
         assert sm._l1_manager.delete([key])[key] == L1Error.KEY_NOT_EXIST
+    finally:
+        sm.close()
+
+
+def test_storage_manager_dax_adapter_uses_global_l2_eviction(tmp_path):
+    shape = torch.Size([2, 4, 8])
+    dtype = torch.bfloat16
+    slot_bytes = shape.numel() * dtype.itemsize
+
+    device_path = tmp_path / "sm_dax_eviction.bin"
+    with open(device_path, "wb") as fout:
+        fout.truncate(slot_bytes * 2)
+
+    dax_config = DaxL2AdapterConfig(
+        device_path=str(device_path),
+        max_dax_size_gb=(slot_bytes * 2) / (1024**3),
+        slot_bytes=slot_bytes,
+    )
+    dax_config.eviction_config = EvictionConfig(
+        eviction_policy="LRU",
+        trigger_watermark=0.5,
+        eviction_ratio=0.5,
+    )
+
+    storage_config = StorageManagerConfig(
+        l1_manager_config=L1ManagerConfig(
+            memory_config=L1MemoryManagerConfig(
+                size_in_bytes=1 << 20,
+                use_lazy=False,
+                init_size_in_bytes=1 << 20,
+                align_bytes=0x1000,
+            ),
+            write_ttl_seconds=60,
+            read_ttl_seconds=60,
+        ),
+        eviction_config=EvictionConfig(eviction_policy="noop"),
+        l2_adapter_config=L2AdaptersConfig([dax_config]),
+        store_policy="skip_l1",
+    )
+
+    layout = MemoryLayoutDesc(shapes=[shape], dtypes=[dtype])
+    sm = StorageManager(storage_config)
+
+    try:
+        sm._l2_eviction_controller.stop()
+        adapter = sm._l2_adapters[0]
+        assert isinstance(adapter, DaxL2Adapter)
+        assert adapter.supports_global_eviction is True
+        assert len(sm._l2_eviction_controller._adapter_states) == 1
+
+        key0 = create_object_key(70)
+        key1 = create_object_key(71)
+        key2 = create_object_key(72)
+
+        def _write_key(key: ObjectKey, fill_value: int, usage_fraction: float) -> None:
+            reserved = sm.reserve_write([key], layout, mode="new")
+            assert key in reserved
+            assert reserved[key].tensor is not None
+            reserved[key].tensor.fill_(fill_value)
+            sm.finish_write([key])
+            assert wait_for_condition(
+                lambda: adapter.get_usage().usage_fraction
+                == pytest.approx(usage_fraction),
+                timeout=5.0,
+            )
+
+        _write_key(key0, 1, 0.5)
+        _write_key(key1, 2, 1.0)
+        assert adapter.get_usage().usage_fraction == pytest.approx(1.0)
+
+        eviction_state = sm._l2_eviction_controller._adapter_states[0]
+        sm._l2_eviction_controller._check_and_evict(eviction_state)
+        assert adapter.get_usage().usage_fraction == pytest.approx(0.5)
+
+        hits = adapter._core.exists_many([key0, key1], lock=True)
+        assert hits == [False, True]
+        adapter.submit_unlock([key1])
+
+        _write_key(key2, 3, 1.0)
+        assert adapter.get_usage().usage_fraction == pytest.approx(1.0)
     finally:
         sm.close()

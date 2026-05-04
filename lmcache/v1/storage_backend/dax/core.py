@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 # Standard
-from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Callable, Generic, Hashable, Optional, TypeVar
 import ctypes
@@ -71,8 +70,8 @@ class DaxCore(Generic[KeyT]):
     """Thread-safe shared core for DAX-backed fixed-slot storage.
 
     ``DaxCore`` owns the mapped arena, in-memory key index, slot allocator,
-    LRU state, external lock refcounts, and read borrow counts. It is shared
-    by the non-MP DAX storage backend and the MP DAX L2 adapter.
+    external lock refcounts, and read borrow counts. Eviction policy is owned
+    by LMCache controllers, not by the DAX core.
     """
 
     def __init__(
@@ -117,7 +116,6 @@ class DaxCore(Generic[KeyT]):
         self._index: dict[KeyT, _Entry] = {}
         self._external_lock_counts: dict[KeyT, int] = {}
         self._inflight: dict[KeyT, _Inflight] = {}
-        self._lru: "OrderedDict[KeyT, None]" = OrderedDict()
         self._slot_states: dict[int, _SlotState] = {}
 
         self._next_slot = 0
@@ -402,7 +400,6 @@ class DaxCore(Generic[KeyT]):
                         continue
                     inflight.canceled = True
                     self._external_lock_counts.pop(key, None)
-                    self._lru.pop(key, None)
                     results[i] = True
                     continue
 
@@ -415,7 +412,6 @@ class DaxCore(Generic[KeyT]):
 
                 self._index.pop(key, None)
                 self._external_lock_counts.pop(key, None)
-                self._lru.pop(key, None)
                 self._schedule_slot_reclaim_locked(entry.slot_id, entry.generation)
                 results[i] = True
 
@@ -518,14 +514,16 @@ class DaxCore(Generic[KeyT]):
         reservations: list[DaxReadReservation[KeyT]],
         touched_keys: set[KeyT],
     ) -> None:
-        """Release read reservations and refresh LRU for touched keys.
+        """Release read reservations.
 
         Args:
             reservations: Reservations previously returned by
                 ``reserve_reads``.
             touched_keys: Subset of reservation keys whose data was
-                successfully copied and should be marked recently used.
+                successfully copied. Kept for callers that already track
+                successful reads; DAX core does not own eviction recency.
         """
+        del touched_keys
         if not reservations:
             return
 
@@ -542,15 +540,6 @@ class DaxCore(Generic[KeyT]):
 
                 if state.borrow_count > 0:
                     state.borrow_count -= 1
-
-                if reservation.key in touched_keys:
-                    current = self._index.get(reservation.key)
-                    if (
-                        current is not None
-                        and current.slot_id == reservation.slot_id
-                        and current.generation == reservation.generation
-                    ):
-                        self._touch_locked(reservation.key)
 
                 if state.pending_free and state.borrow_count == 0:
                     state.pending_free = False
@@ -589,7 +578,6 @@ class DaxCore(Generic[KeyT]):
             self._index.clear()
             self._external_lock_counts.clear()
             self._inflight.clear()
-            self._lru.clear()
             self._slot_states.clear()
             self._free_slots.clear()
 
@@ -692,10 +680,11 @@ class DaxCore(Generic[KeyT]):
             if key in self._index or key in self._inflight:
                 return True
 
-            slot_id = self._allocate_slot_with_eviction_locked(
-                raise_on_full=raise_on_full
-            )
-            if slot_id is None:
+            try:
+                slot_id = self._allocate_slot_locked()
+            except RuntimeError:
+                if raise_on_full:
+                    raise
                 return None
 
             offset = slot_id * self._slot_bytes
@@ -728,20 +717,6 @@ class DaxCore(Generic[KeyT]):
                 logger.warning("DaxCore active write count underflow for key %s", key)
             self._state_condition.notify_all()
             return committed
-
-    def _allocate_slot_with_eviction_locked(
-        self,
-        *,
-        raise_on_full: bool,
-    ) -> Optional[int]:
-        while True:
-            try:
-                return self._allocate_slot_locked()
-            except RuntimeError:
-                if not self._evict_one_locked():
-                    if raise_on_full:
-                        raise
-                    return None
 
     def _reserve_slot_state_locked(self, slot_id: int) -> int:
         existing = self._slot_states.get(slot_id)
@@ -789,7 +764,6 @@ class DaxCore(Generic[KeyT]):
             slot_id=inflight.slot_id,
             generation=inflight.generation,
         )
-        self._touch_locked(key)
         return True
 
     def _allocate_slot_locked(self) -> int:
@@ -804,38 +778,6 @@ class DaxCore(Generic[KeyT]):
     def _free_slot_locked(self, slot_id: int) -> None:
         if slot_id >= 0:
             self._free_slots.add(slot_id)
-
-    def _touch_locked(self, key: KeyT) -> None:
-        self._lru.pop(key, None)
-        self._lru[key] = None
-
-    def _evict_one_locked(self) -> bool:
-        for victim in list(self._lru.keys()):
-            if (
-                self._external_lock_counts.get(victim, 0) > 0
-                or victim in self._inflight
-            ):
-                continue
-
-            entry = self._index.get(victim)
-            if entry is None:
-                continue
-
-            state = self._slot_states.get(entry.slot_id)
-            if (
-                state is None
-                or state.generation != entry.generation
-                or state.borrow_count > 0
-            ):
-                continue
-
-            self._index.pop(victim, None)
-            self._external_lock_counts.pop(victim, None)
-            self._lru.pop(victim, None)
-            self._schedule_slot_reclaim_locked(entry.slot_id, entry.generation)
-            return True
-
-        return False
 
     def _default_do_write(self, offset: int, memory_obj: MemoryObj, size: int) -> None:
         ctypes.memmove(
