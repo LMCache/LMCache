@@ -2128,7 +2128,10 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
             MemoryFormat.EC_TD,
         ]:
             with self.host_mem_lock:
-                return self.pin_allocator.allocate(shapes, dtypes, fmt, str(self))
+                obj = self.pin_allocator.allocate(shapes, dtypes, fmt, str(self))
+                if isinstance(obj, TensorMemoryObj):
+                    obj.parent_allocator = self
+                return obj
         else:
             raise ValueError(f"Unsupported memory format: {fmt}")
 
@@ -2153,9 +2156,14 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
             MemoryFormat.EC_TD,
         ]:
             with self.host_mem_lock:
-                return self.pin_allocator.batched_allocate(
+                objs = self.pin_allocator.batched_allocate(
                     shapes, dtypes, batch_size, fmt, str(self)
                 )
+                if objs is not None:
+                    for obj in objs:
+                        if isinstance(obj, TensorMemoryObj):
+                            obj.parent_allocator = self
+                return objs
         else:
             raise ValueError(f"Unsupported memory format: {fmt}")
 

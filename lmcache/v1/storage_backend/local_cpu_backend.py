@@ -600,6 +600,7 @@ class LocalCPUBackend(AllocatorBackendInterface):
                 num_candidates = 1
                 evict_keys = None
                 with self.cpu_lock:
+                    num_candidates = max(1, len(self.hot_cache))
                     evict_keys = self.cache_policy.get_evict_candidates(
                         self.hot_cache, num_candidates=num_candidates
                     )
@@ -718,17 +719,26 @@ class LocalCPUBackend(AllocatorBackendInterface):
                     # then the other layers are also ref_count > 1 or
                     # pinned in the cpu memory. This might not be true.
                     if evict_keys:
-                        evict_keys_count += len(evict_keys)
-                        wait_other_requests = False
                         for evict_key in evict_keys:
                             evict_key_all_layer = evict_key.split_layers(batch_size)
 
                             # TODO(Jiayi): batched allocate is not supported through
                             # `batched_remove`. Therefore, features like usage tracking
                             # is not supported.
-                            old_mem_objs = []
+                            old_mem_objs: list[MemoryObj] = []
                             for key in evict_key_all_layer:
-                                old_mem_objs.append(self.hot_cache[key])
+                                old_mem_obj = self.hot_cache.get(key)
+                                if old_mem_obj is None or not old_mem_obj.can_evict:
+                                    old_mem_objs = []
+                                    break
+                                old_mem_objs.append(old_mem_obj)
+
+                            if not old_mem_objs:
+                                continue
+
+                            wait_other_requests = False
+                            evict_keys_count += len(old_mem_objs)
+                            for key in evict_key_all_layer:
                                 self.cache_policy.update_on_force_evict(key)
                                 self.hot_cache.pop(key, None)
 
@@ -737,7 +747,7 @@ class LocalCPUBackend(AllocatorBackendInterface):
                             logger.debug(
                                 f"Evicting {len(old_mem_objs)} chunks from cpu memory"
                             )
-                    else:
+                    if wait_other_requests:
                         self.stats_monitor.update_local_cpu_evict_failed_count(
                             num_candidates
                         )
