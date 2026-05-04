@@ -3,9 +3,13 @@
 """Tests for MPServerTracingSubscriber."""
 
 # Standard
+from unittest.mock import patch
 import time
 
 # Third Party
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 import pytest
 
 # First Party
@@ -17,6 +21,7 @@ from lmcache.v1.mp_observability.subscribers.tracing import (
 from lmcache.v1.mp_observability.subscribers.tracing.span_registry import (
     SpanRegistry,
 )
+import lmcache.v1.mp_observability.subscribers.tracing.mp_server as mp_server_module
 
 
 @pytest.fixture
@@ -608,3 +613,169 @@ class TestMPServerTracingSubscriber:
         time.sleep(0.15)
         bus.stop()
         assert len(subscriber._pending) == 0
+
+
+class TestHitRateAttributes:
+    """Verify hit_tokens / requested_tokens / hit_rate are set on the root span.
+
+    Uses a real OTel TracerProvider backed by InMemorySpanExporter so that span
+    attributes are actually recorded.  The module-level ``_tracer`` is patched
+    for the duration of each test; ``_HAS_OTEL`` is forced True so that the
+    handlers don't early-return.
+    """
+
+    @pytest.fixture
+    def exporter(self):
+        """Real OTel provider with in-memory exporter; patches module tracer."""
+        exp = InMemorySpanExporter()
+        provider = TracerProvider()
+        provider.add_span_processor(SimpleSpanProcessor(exp))
+        real_tracer = provider.get_tracer("lmcache_mp.server")
+        with (
+            patch.object(mp_server_module, "_tracer", real_tracer),
+            patch.object(mp_server_module, "_HAS_OTEL", True),
+        ):
+            yield exp
+        exp.shutdown()
+
+    def _root_span(self, exporter: InMemorySpanExporter, sid: str):
+        """Return the finished root span for *sid*, or None."""
+        for span in exporter.get_finished_spans():
+            if span.name == "request" and span.attributes.get("session_id") == sid:
+                return span
+        return None
+
+    def test_hit_rate_attrs_set_on_root_span(self, exporter):
+        """LP_END with hit_tokens=512, requested_tokens=1024 → hit_rate=0.5."""
+        bus = EventBus(EventBusConfig(enabled=True, max_queue_size=100))
+        registry = SpanRegistry()
+        bus.register_subscriber(MPServerTracingSubscriber(registry))
+        bus.start()
+        now = time.time()
+        sid = "req-hr-normal"
+
+        bus.publish(
+            Event(event_type=EventType.MP_REQUEST_START, session_id=sid, timestamp=now)
+        )
+        bus.publish(
+            Event(
+                event_type=EventType.MP_LOOKUP_PREFETCH_START,
+                session_id=sid,
+                timestamp=now + 0.001,
+            )
+        )
+        bus.publish(
+            Event(
+                event_type=EventType.MP_LOOKUP_PREFETCH_END,
+                session_id=sid,
+                timestamp=now + 0.010,
+                metadata={
+                    "hit_tokens": 512,
+                    "requested_tokens": 1024,
+                    "found_count": 2,
+                },
+            )
+        )
+        bus.publish(
+            Event(
+                event_type=EventType.MP_REQUEST_END,
+                session_id=sid,
+                timestamp=now + 0.020,
+            )
+        )
+        time.sleep(0.15)
+        bus.stop()
+
+        root = self._root_span(exporter, sid)
+        assert root is not None
+        assert root.attributes["hit_tokens"] == 512
+        assert root.attributes["requested_tokens"] == 1024
+        assert abs(root.attributes["hit_rate"] - 0.5) < 1e-9
+
+    def test_hit_rate_zero_when_requested_tokens_is_zero(self, exporter):
+        """LP_END with requested_tokens=0 yields hit_rate=0.0 without error."""
+        bus = EventBus(EventBusConfig(enabled=True, max_queue_size=100))
+        registry = SpanRegistry()
+        bus.register_subscriber(MPServerTracingSubscriber(registry))
+        bus.start()
+        now = time.time()
+        sid = "req-hr-zero"
+
+        bus.publish(
+            Event(event_type=EventType.MP_REQUEST_START, session_id=sid, timestamp=now)
+        )
+        bus.publish(
+            Event(
+                event_type=EventType.MP_LOOKUP_PREFETCH_START,
+                session_id=sid,
+                timestamp=now + 0.001,
+            )
+        )
+        bus.publish(
+            Event(
+                event_type=EventType.MP_LOOKUP_PREFETCH_END,
+                session_id=sid,
+                timestamp=now + 0.010,
+                metadata={"hit_tokens": 0, "requested_tokens": 0, "found_count": 0},
+            )
+        )
+        bus.publish(
+            Event(
+                event_type=EventType.MP_REQUEST_END,
+                session_id=sid,
+                timestamp=now + 0.020,
+            )
+        )
+        time.sleep(0.15)
+        bus.stop()
+
+        root = self._root_span(exporter, sid)
+        assert root is not None
+        assert root.attributes["hit_tokens"] == 0
+        assert root.attributes["requested_tokens"] == 0
+        assert root.attributes["hit_rate"] == 0.0
+
+    def test_no_hit_rate_attrs_on_store_only_path(self, exporter):
+        """Store-only request (no LP_END) leaves root span without hit rate attrs."""
+        bus = EventBus(EventBusConfig(enabled=True, max_queue_size=100))
+        registry = SpanRegistry()
+        bus.register_subscriber(MPServerTracingSubscriber(registry))
+        bus.start()
+        now = time.time()
+        sid = "req-hr-store-only"
+
+        bus.publish(
+            Event(
+                event_type=EventType.MP_STORE_SUBMITTED, session_id=sid, timestamp=now
+            )
+        )
+        bus.publish(
+            Event(
+                event_type=EventType.MP_STORE_START,
+                session_id=sid,
+                timestamp=now + 0.001,
+                metadata={"device": "cuda:0"},
+            )
+        )
+        bus.publish(
+            Event(
+                event_type=EventType.MP_STORE_END,
+                session_id=sid,
+                timestamp=now + 0.020,
+                metadata={"stored_count": 3, "device": "cuda:0"},
+            )
+        )
+        bus.publish(
+            Event(
+                event_type=EventType.MP_REQUEST_END,
+                session_id=sid,
+                timestamp=now + 0.025,
+            )
+        )
+        time.sleep(0.15)
+        bus.stop()
+
+        root = self._root_span(exporter, sid)
+        assert root is not None
+        assert "hit_tokens" not in root.attributes
+        assert "hit_rate" not in root.attributes

@@ -425,6 +425,14 @@ in ``storage_controllers/`` and calling ``register_store_policy()`` or
 ``register_prefetch_policy()`` at import time.  See the design doc
 ``l2_adapters/design_docs/overall.md`` for details.
 
+Serde (compression / quantization)
+----------------------------------
+
+Each adapter can optionally run a **serde** (serializer / deserializer)
+that transforms data on the way in and out of L2 — e.g. fp8 quantization
+for disk backends, or encryption for remote adapters. See :doc:`serde`
+for details and configuration.
+
 Eviction
 --------
 

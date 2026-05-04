@@ -388,6 +388,9 @@ class BlendEngineV2(MPCacheEngine):
                         "storage_hits": 0,
                         "stale_chunks": 0,
                         "no_gpu_context": False,
+                        "hit_tokens": 0,
+                        "requested_tokens": (num_tokens // self.chunk_size)
+                        * self.chunk_size,
                     },
                 )
             )
@@ -440,6 +443,9 @@ class BlendEngineV2(MPCacheEngine):
                         "storage_hits": 0,
                         "stale_chunks": 0,
                         "no_gpu_context": True,
+                        "hit_tokens": 0,
+                        "requested_tokens": (num_tokens // self.chunk_size)
+                        * self.chunk_size,
                     },
                 )
             )
@@ -531,6 +537,9 @@ class BlendEngineV2(MPCacheEngine):
                     "storage_hits": len(found_cb_match_result),
                     "stale_chunks": len(stale_hashes),
                     "no_gpu_context": False,
+                    "hit_tokens": len(found_cb_match_result) * self.chunk_size,
+                    "requested_tokens": (num_tokens // self.chunk_size)
+                    * self.chunk_size,
                 },
             )
         )
