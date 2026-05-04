@@ -9,6 +9,9 @@ This module wraps ``hipfile.Driver``, ``hipfile.FileHandle``, and
 # Standard
 import ctypes
 import os
+from collections.abc import Callable
+from types import TracebackType
+from typing import Any
 
 # Third Party
 from hipfile import Buffer, Driver, FileHandle
@@ -16,7 +19,7 @@ from hipfile import Buffer, Driver, FileHandle
 
 def _os_flags(mode: str) -> int:
     """Translate a Python-style mode string to ``os.open`` flags."""
-    flags_map = {
+    flags_map: dict[str, int] = {
         "r": os.O_RDONLY,
         "r+": os.O_RDWR,
         "w": os.O_CREAT | os.O_WRONLY | os.O_TRUNC,
@@ -27,11 +30,11 @@ def _os_flags(mode: str) -> int:
     return flags_map[mode]
 
 
-def _singleton(cls):
+def _singleton(cls: type) -> Callable:
     """Decorator that turns *cls* into a singleton."""
-    _instances: dict = {}
+    _instances: dict[type, object] = {}
 
-    def wrapper(*args, **kwargs):
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
         if cls not in _instances:
             _instances[cls] = cls(*args, **kwargs)
         return _instances[cls]
@@ -96,7 +99,12 @@ class CuFile:
         self.open()
         return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
+    ) -> None:
         self.close()
 
     def __del__(self) -> None:
