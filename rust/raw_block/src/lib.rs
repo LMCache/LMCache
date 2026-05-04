@@ -15,6 +15,11 @@
 //!   submission/completion loop. All alignment checks are performed before
 //!   enqueuing; violations result in an immediate Python `ValueError`.
 
+#[cfg(feature = "blkio")]
+mod blkio_device;
+#[cfg(feature = "blkio")]
+mod blkio_ffi;
+
 use pyo3::exceptions::{PyOSError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyAny;
@@ -154,7 +159,7 @@ fn fd_size_bytes(fd: RawFd) -> Result<u64, PyErr> {
 /// Aligned buffer for O_DIRECT I/O.
 /// Allocated with posix_memalign so the pointer satisfies alignment requirements.
 /// Automatically freed on drop.
-struct AlignedBuf {
+pub(crate) struct AlignedBuf {
     ptr: *mut u8,
     #[allow(dead_code)]
     len: usize,
@@ -167,7 +172,7 @@ unsafe impl Sync for AlignedBuf {}
 
 impl AlignedBuf {
     // Allocate an aligned buffer suitable for O_DIRECT.
-    fn new(len: usize, align: usize) -> Result<Self, PyErr> {
+    pub(crate) fn new(len: usize, align: usize) -> Result<Self, PyErr> {
         let mut p: *mut libc::c_void = std::ptr::null_mut();
         // SAFETY: posix_memalign writes to p.
         let rc = unsafe { libc::posix_memalign(&mut p as *mut *mut libc::c_void, align, len) };
@@ -187,12 +192,12 @@ impl AlignedBuf {
     }
 
     // Mutable pointer for read/write syscalls.
-    fn as_mut_ptr(&self) -> *mut u8 {
+    pub(crate) fn as_mut_ptr(&self) -> *mut u8 {
         self.ptr
     }
 
     // Const pointer for write syscalls.
-    fn as_ptr(&self) -> *const u8 {
+    pub(crate) fn as_ptr(&self) -> *const u8 {
         self.ptr as *const u8
     }
 }
@@ -209,7 +214,7 @@ impl Drop for AlignedBuf {
 }
 
 // Acquire a Python buffer view with the requested mutability.
-fn get_pybuffer<'py>(
+pub(crate) fn get_pybuffer<'py>(
     py: Python<'py>,
     obj: &Bound<'py, PyAny>,
     writable: bool,
@@ -233,7 +238,7 @@ fn get_pybuffer<'py>(
 }
 
 // Release a buffer view previously acquired by get_pybuffer.
-fn release_pybuffer(mut view: pyo3::ffi::Py_buffer) {
+pub(crate) fn release_pybuffer(mut view: pyo3::ffi::Py_buffer) {
     // SAFETY: view was created by PyObject_GetBuffer.
     unsafe {
         pyo3::ffi::PyBuffer_Release(&mut view);
@@ -1376,7 +1381,7 @@ impl RawBlockDevice {
 
         // Check if the buffer is aligned for O_DIRECT
         let ptr_aligned = if self.use_odirect {
-            (ptr as usize).is_multiple_of(align)
+            (ptr as usize) % align == 0
         } else {
             true
         };
@@ -1725,7 +1730,7 @@ impl RawBlockDevice {
         let ptr_usize = ptr as usize;
         let res = py.allow_threads(move || {
             let src = ptr_usize as *const u8;
-            let src_aligned = (src as usize).is_multiple_of(align);
+            let src_aligned = (src as usize) % align == 0;
             if total_len == payload_len && !self.use_odirect {
                 // direct write without padding
                 return pwrite_from_ptr(fd, offset, src, payload_len);
@@ -1865,7 +1870,7 @@ impl RawBlockDevice {
         let dst_usize = ptr as usize;
         let res = py.allow_threads(move || {
             let dst = dst_usize as *mut u8;
-            let dst_aligned = (dst as usize).is_multiple_of(align);
+            let dst_aligned = (dst as usize) % align == 0;
             if total_len == payload_len && !self.use_odirect {
                 return pread_into(fd, offset, dst, payload_len);
             }
@@ -1989,5 +1994,7 @@ impl Drop for RawBlockDevice {
 #[pymodule]
 fn lmcache_rust_raw_block_io(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<RawBlockDevice>()?;
+    #[cfg(feature = "blkio")]
+    m.add_class::<blkio_device::BlkioBlockDevice>()?;
     Ok(())
 }
