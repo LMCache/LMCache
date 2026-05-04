@@ -107,6 +107,116 @@ No fixed numbers are included here because results are host/device/workload depe
 - O_DIRECT requires aligned offset, size, and user buffer address.
 - io_uring backend requires Linux kernel 5.1+.
 
+## libblkio I/O Backend (`BlkioBlockDevice`)
+
+The crate can optionally link against
+[libblkio](https://gitlab.com/libblkio/libblkio) to provide a second
+block-device class, `BlkioBlockDevice`.  libblkio manages its own
+`io_uring` instance internally, so the Python-side io_uring worker thread
+is not used.
+
+### When to use which backend
+
+| Backend | Class | Best for |
+|---------|-------|----------|
+| `rust` (default) | `RawBlockDevice` | Standard NVMe I/O; full io_uring batching and fixed-buffer support via the Rust worker thread |
+| `libblkio` | `BlkioBlockDevice` | Environments that already depend on libblkio (e.g. NIXL integration); single-queue synchronous I/O via the libblkio `io_uring` driver |
+
+### Prerequisites
+
+Install `libblkio` development headers (see `csrc/storage_backends/blkio/README.md`
+for detailed instructions):
+
+```bash
+# Ubuntu/Debian
+sudo apt-get install libblkio-dev
+
+# Verify
+pkg-config --exists blkio && echo "libblkio found"
+```
+
+### Building with the `blkio` feature
+
+```bash
+cd rust/raw_block
+pip install maturin
+maturin develop --release --features blkio
+```
+
+Without `--features blkio`, only `RawBlockDevice` is compiled and
+`BlkioBlockDevice` is not available.
+
+### Cargo feature flag
+
+```toml
+[features]
+default = []
+blkio = []          # links against libblkio via pkg-config
+```
+
+`build.rs` uses `pkg-config` to locate libblkio when the `blkio`
+feature is active.  If pkg-config is not available, it falls back to
+`-lblkio` in the system library path.
+
+### Usage
+
+```python
+from lmcache_rust_raw_block_io import BlkioBlockDevice
+
+dev = BlkioBlockDevice(
+    "/dev/nvme0n1",
+    writable=True,
+    use_odirect=True,
+    alignment=4096,
+)
+print(dev.size_bytes())
+
+data = bytearray(4096)
+dev.pwrite_from_buffer(offset=0, data=data, payload_len=100, total_len=4096)
+
+out = bytearray(4096)
+dev.pread_into(offset=0, out=out, payload_len=100, total_len=4096)
+
+dev.close()
+```
+
+`BlkioBlockDevice` exposes the same synchronous methods as
+`RawBlockDevice` (`pwrite_from_buffer`, `pread_into`, `size_bytes`,
+`close`) but does **not** support the async io_uring batch methods
+(`batched_write`, `batched_read`, `wait_iouring`, `register_fixed_buffers`).
+
+### Selecting the backend from `RustRawBlockBackend`
+
+Set `rust_raw_block.io_backend` in the plugin's `extra_config`:
+
+```yaml
+extra_config:
+  rust_raw_block.device_path: "/dev/nvme0n1"
+  rust_raw_block.io_backend: "libblkio"   # "rust" (default) or "libblkio"
+  rust_raw_block.use_odirect: true
+```
+
+When `io_backend` is `"libblkio"`, the Python-side `use_uring` flag is
+automatically disabled (libblkio manages io_uring internally).
+
+### Testing
+
+```bash
+# All BlkioBlockDevice tests (smoke + integration; no device needed)
+pytest -xvs tests/v1/storage_backend/test_blkio_block_device.py
+
+# With O_DIRECT on a real block device or loopback
+LMCACHE_BLKIO_TEST_DEVICE=/dev/loop0 \
+    pytest -xvs tests/v1/storage_backend/test_blkio_block_device.py
+```
+
+| Test class | Count | Coverage |
+|-----------|-------|---------|
+| `TestBlkioBlockDeviceSmoke` | 9 | Open/close, read/write roundtrip, padding, error handling |
+| `TestBlkioRawBlockBackendIntegration` | 4 | Put/get, batched get, eviction, checkpoint recovery |
+| `TestBlkioBlockDeviceODirect` | 4 | O_DIRECT roundtrip, large buffer, padding, multi-offset |
+| `TestBlkioRawBlockBackendODirect` | 1 | Full backend put/get with O_DIRECT |
+
 ## io_uring Dependencies
 
 The io_uring backend requires specific kernel configuration and versions:
