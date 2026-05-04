@@ -74,6 +74,7 @@ class NixlStorageConfig:
 
     @staticmethod
     def validate_nixl_backend(backend: str, device: str) -> bool:
+        device = device.split(":", 1)[0]
         if backend in ("GDS", "GDS_MT", "OBJ"):
             return device == "cpu" or device == "cuda"
         elif backend in ("POSIX", "HF3FS"):
@@ -167,6 +168,7 @@ class NixlFilePool(NixlDescPool):
         self.fds: List[int] = []
 
         assert path is not None
+        os.makedirs(path, exist_ok=True)
 
         flags = os.O_CREAT | os.O_RDWR
         if use_direct_io:

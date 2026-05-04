@@ -82,7 +82,7 @@ def run(config: LMCacheEngineConfig, shape, dtype):
             assert not nixl_backend.contains(key, False)
             assert not nixl_backend.exists_in_put_tasks(key)
 
-            obj = nixl_backend.memory_allocator.allocate(shape=shape, dtype=dtype)
+            obj = nixl_backend.memory_allocator.allocate(torch.Size(shape), dtype)
             assert obj is not None
             assert obj.tensor is not None
             objs.append(obj)
@@ -329,7 +329,12 @@ def _build_dynamic_file_backend(config, dtype):
     return nixl_backend, backends, thread_loop, thread, keys, objs
 
 
-def _teardown_dynamic_file_backend(backends, thread_loop, thread):
+def _teardown_dynamic_file_backend(backends, thread_loop, thread, objs=()):
+    for obj in objs:
+        if obj is None:
+            continue
+        if obj.is_valid() and obj.get_ref_count() > 0:
+            obj.ref_count_down()
     for backend in backends.values():
         backend.close()
     if thread_loop and thread_loop.is_running():
@@ -346,6 +351,8 @@ def run_dynamic_file(config, dtype, tmp_path):
     nixl_backend, backends, thread_loop, thread, keys, objs = (
         _build_dynamic_file_backend(config, dtype)
     )
+
+    retained_objs = list(objs)
 
     try:
         for key in keys:
@@ -366,6 +373,7 @@ def run_dynamic_file(config, dtype, tmp_path):
         for key, obj in zip(keys, objs, strict=False):
             returned = nixl_backend.get_blocking(key)
             assert returned is not None
+            retained_objs.append(returned)
             assert returned.get_size() == obj.get_size()
             assert returned.get_shape() == obj.get_shape()
             assert returned.get_dtype() == obj.get_dtype()
@@ -382,7 +390,7 @@ def run_dynamic_file(config, dtype, tmp_path):
         second_remove = nixl_backend.remove(keys[0])
         assert second_remove is False
     finally:
-        _teardown_dynamic_file_backend(backends, thread_loop, thread)
+        _teardown_dynamic_file_backend(backends, thread_loop, thread, retained_objs)
 
 
 @pytest.mark.no_shared_allocator
@@ -455,7 +463,7 @@ def test_nixl_dynamic_file_fd_leak_on_setup_failure(tmp_path, monkeypatch):
                 os.path.join(str(tmp_path), nixl_backend._format_object_key(key))
             ), "final key file leaked on transfer-setup failure"
     finally:
-        _teardown_dynamic_file_backend(backends, thread_loop, thread)
+        _teardown_dynamic_file_backend(backends, thread_loop, thread, objs)
 
 
 @pytest.mark.no_shared_allocator
@@ -502,4 +510,4 @@ def test_nixl_dynamic_file_no_leak_on_transfer_failure(tmp_path, monkeypatch):
                 "contains() reports key present after failed write"
             )
     finally:
-        _teardown_dynamic_file_backend(backends, thread_loop, thread)
+        _teardown_dynamic_file_backend(backends, thread_loop, thread, objs)
