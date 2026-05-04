@@ -333,6 +333,26 @@ scrape time with `metric_relabel_configs` if storage cost matters).
 
 ---
 
+## EventBus Self-Monitoring
+
+Health metrics for the EventBus itself, registered by
+`EventBusSelfMetricsSubscriber`. Unlike the other metrics subscribers,
+these are not driven by events — they observe bus state directly via the
+`EventBus` accessors and report on every OTel scrape.
+
+| OTel metric name | Prometheus name | Type | Source | Calculation |
+|---|---|---|---|---|
+| `lmcache_mp.event_bus.queue_depth` | `lmcache_mp_event_bus_queue_depth` | ObservableGauge | `EventBus.queue_depth()` | `len(_queue)` at scrape time |
+| `lmcache_mp.event_bus.drain_lag_seconds` | `lmcache_mp_event_bus_drain_lag_seconds` | ObservableGauge | `EventBus.oldest_event_lag_seconds()` | `time.time() - oldest.timestamp`, or `0.0` when empty |
+| `lmcache_mp.event_bus.dropped_events_total` | `lmcache_mp_event_bus_dropped_events_total` | ObservableCounter | `EventBus.dropped_events_count()` | cumulative `_discard_count` |
+| `lmcache_mp.event_bus.subscriber_exceptions` | `lmcache_mp_event_bus_subscriber_exceptions_total` | ObservableCounter (attr: `subscriber_name`) | `EventBus.subscriber_exception_counts()` | cumulative count per subscriber, incremented when `_drain_all` catches a callback exception |
+
+**What it answers:** Is the EventBus keeping up with publishers? Is anything being dropped? Are any subscriber callbacks raising?
+
+`subscriber_name` is derived from the failing callback: bound methods report their owning class (e.g. `L1MetricsSubscriber`); free functions report `__qualname__`.
+
+---
+
 ## MPCacheEngine Observable Gauges
 
 These metrics are registered directly via `register_gauge` (pull-based OTel
