@@ -15,6 +15,7 @@ Supported Backends
    dax
    eic
    gds
+   hfbucket
    infinistore
    local_storage
    maru
