@@ -310,10 +310,131 @@ Current Limitations
 4. **Offset-based addressing** -- keys encode a hex byte offset in the last ``@``-delimited field. The Python layer is responsible for slot allocation and metadata tracking.
 
 
+.. _blkio-rust-backend:
+
+Rust ``BlkioBlockDevice`` Backend
+---------------------------------
+
+In addition to the C++ connector described above, libblkio can also be used as
+the I/O backend for the **Rust raw block** storage plugin
+(``RustRawBlockBackend``).  This is provided by the ``BlkioBlockDevice`` class
+in the ``lmcache_rust_raw_block_io`` Rust crate, enabled via the ``blkio``
+cargo feature flag.
+
+When to use which
+~~~~~~~~~~~~~~~~~
+
+.. list-table::
+   :header-rows: 1
+   :widths: 20 25 55
+
+   * - Path
+     - Class
+     - Best for
+   * - C++ connector (above)
+     - ``LMCacheBlkioClient``
+     - Non-MP ``BlkioClient`` or MP mode ``NativeConnectorL2Adapter``.
+       Multi-worker io_uring with per-worker queue parallelism.
+   * - Rust ``io_backend="rust"``
+     - ``RawBlockDevice``
+     - Default ``RustRawBlockBackend``.  Synchronous pread/pwrite, or
+       async io_uring with batch submission and fixed-buffer zero-copy.
+   * - Rust ``io_backend="libblkio"``
+     - ``BlkioBlockDevice``
+     - ``RustRawBlockBackend`` with libblkio as the I/O driver.
+       Single-queue synchronous I/O via libblkio's io_uring.
+       Useful when libblkio is already a dependency (e.g. NIXL).
+
+Building the Rust blkio backend
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+``libblkio`` development headers must be installed (see `Installing libblkio`_
+above), then build the Rust extension with the ``blkio`` feature:
+
+.. code-block:: bash
+
+    cd rust/raw_block
+    pip install maturin
+    maturin develop --release --features blkio
+
+Without ``--features blkio``, only ``RawBlockDevice`` is compiled.
+
+Backend Configuration
+~~~~~~~~~~~~~~~~~~~~~
+
+Set ``rust_raw_block.io_backend`` in ``extra_config``:
+
+.. code-block:: yaml
+
+    extra_config:
+      rust_raw_block.device_path: "/dev/nvme0n1"
+      rust_raw_block.io_backend: "libblkio"   # "rust" (default) or "libblkio"
+      rust_raw_block.use_odirect: true
+      rust_raw_block.block_align: 4096
+
+When ``io_backend`` is ``"libblkio"``, the Python-side ``use_uring`` flag is
+automatically disabled (libblkio manages ``io_uring`` internally).
+
+Direct usage
+~~~~~~~~~~~~
+
+.. code-block:: python
+
+    from lmcache_rust_raw_block_io import BlkioBlockDevice
+
+    dev = BlkioBlockDevice(
+        "/dev/nvme0n1",
+        writable=True,
+        use_odirect=True,
+        alignment=4096,
+    )
+    print(dev.size_bytes())
+
+    data = bytearray(4096)
+    dev.pwrite_from_buffer(offset=0, data=data, payload_len=100, total_len=4096)
+
+    out = bytearray(4096)
+    dev.pread_into(offset=0, out=out, payload_len=100, total_len=4096)
+    dev.close()
+
+Testing the Rust blkio backend
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. code-block:: bash
+
+    # Smoke + integration tests (temp file, no device needed)
+    pytest -xvs tests/v1/storage_backend/test_blkio_block_device.py
+
+    # With O_DIRECT on a real block device or loopback
+    LMCACHE_BLKIO_TEST_DEVICE=/dev/loop0 \
+        pytest -xvs tests/v1/storage_backend/test_blkio_block_device.py
+
+.. list-table::
+   :header-rows: 1
+   :widths: 40 10 50
+
+   * - Test class
+     - Count
+     - Coverage
+   * - ``TestBlkioBlockDeviceSmoke``
+     - 9
+     - Open/close, read/write roundtrip, padding, error handling
+   * - ``TestBlkioRawBlockBackendIntegration``
+     - 4
+     - Put/get, batched get, eviction, checkpoint recovery
+   * - ``TestBlkioBlockDeviceODirect``
+     - 4
+     - O_DIRECT roundtrip, large buffer, padding, multi-offset
+   * - ``TestBlkioRawBlockBackendODirect``
+     - 1
+     - Full backend put/get with O_DIRECT
+
+
 Additional Resources
 --------------------
 
 - C++ source: ``csrc/storage_backends/blkio/``
 - Detailed README: ``csrc/storage_backends/blkio/README.md``
 - Python client: ``lmcache/v1/storage_backend/native_clients/blkio_client.py``
+- Rust ``BlkioBlockDevice``: ``rust/raw_block/`` (see ``rust/raw_block/README.md``)
 - Native connector architecture: :doc:`Adding Native Connectors <../../developer_guide/extending_lmcache/native_connectors>`
