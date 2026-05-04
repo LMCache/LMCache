@@ -22,7 +22,7 @@ from __future__ import annotations
 
 # Standard
 from collections import defaultdict
-from typing import TYPE_CHECKING, Any
+from typing import Any
 import select
 import threading
 

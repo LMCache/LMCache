@@ -11,42 +11,6 @@ ROOT_DIR = Path(__file__).parent
 HIPIFY_DIR = os.path.join(ROOT_DIR, "csrc/")
 HIPIFY_OUT_DIR = os.path.join(ROOT_DIR, "csrc_hip/")
 
-
-def _pkgconfig(lib: str, flag: str) -> list[str]:
-    """Query pkg-config for a library and return the flags as a list.
-
-    Returns an empty list on any failure so the build falls back to
-    standard compiler/linker search paths (or user-supplied CFLAGS /
-    LDFLAGS).
-    """
-    # Standard
-    import shutil
-    import subprocess
-
-    if not shutil.which("pkg-config"):
-        return []
-    try:
-        out = subprocess.check_output(
-            ["pkg-config", flag, lib],
-            stderr=subprocess.DEVNULL,
-            text=True,
-        ).strip()
-        return out.split() if out else []
-    except subprocess.CalledProcessError:
-        return []
-
-
-def _blkio_include_dirs() -> list[str]:
-    """Return include directories for libblkio via pkg-config."""
-    flags = _pkgconfig("blkio", "--cflags-only-I")
-    return [f.removeprefix("-I") for f in flags if f.startswith("-I")]
-
-
-def _blkio_library_dirs() -> list[str]:
-    """Return library directories for libblkio via pkg-config."""
-    flags = _pkgconfig("blkio", "--libs-only-L")
-    return [f.removeprefix("-L") for f in flags if f.startswith("-L")]
-
 # python -m build --sdist
 # will run python setup.py sdist --dist-dir dist
 BUILDING_SDIST = "sdist" in sys.argv or os.environ.get("NO_CUDA_EXT", "0") == "1"
@@ -103,67 +67,6 @@ def hipify_wrapper() -> None:
         hipified_sources.append(hipified_s_abs)
 
     assert len(hipified_sources) == len(extra_files)
-
-
-def _blkio_available() -> bool:
-    """Check whether libblkio headers and library are available.
-
-    Returns ``True`` when ``pkg-config --exists blkio`` succeeds **or**
-    the header ``blkio.h`` is found on the default include path.
-    """
-    # Standard
-    import shutil
-    import subprocess
-
-    # Fast path: pkg-config knows about blkio.
-    if shutil.which("pkg-config"):
-        try:
-            subprocess.check_call(
-                ["pkg-config", "--exists", "blkio"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-            return True
-        except subprocess.CalledProcessError:
-            pass
-
-    # Fallback: check common header locations.
-    for d in ["/usr/include", "/usr/local/include"]:
-        if os.path.isfile(os.path.join(d, "blkio.h")):
-            return True
-
-    return False
-
-
-def _blkio_extension(
-    cpp_extension,
-    blkio_sources: list[str],
-    extra_cxx_flags: list[str],
-) -> list:
-    """Build blkio CppExtension if libblkio is available.
-
-    Returns a list with zero or one Extension objects.
-    """
-    if not _blkio_available():
-        print("libblkio not found -- skipping lmcache_blkio extension")
-        return []
-
-    return [
-        cpp_extension.CppExtension(
-            "lmcache.lmcache_blkio",
-            sources=blkio_sources,
-            include_dirs=[
-                "csrc/storage_backends",
-                "csrc/storage_backends/blkio",
-            ]
-            + _blkio_include_dirs(),
-            libraries=["blkio"],
-            library_dirs=_blkio_library_dirs(),
-            extra_compile_args={
-                "cxx": extra_cxx_flags + ["-O3", "-std=c++17"],
-            },
-        ),
-    ]
 
 
 def _mooncake_extension(
@@ -250,10 +153,6 @@ def cuda_extension() -> tuple[list, dict]:
         "csrc/storage_backends/mooncake/pybind.cpp",
         "csrc/storage_backends/mooncake/connector.cpp",
     ]
-    blkio_sources = [
-        "csrc/storage_backends/blkio/pybind.cpp",
-        "csrc/storage_backends/blkio/connector.cpp",
-    ]
     ext_modules = [
         cpp_extension.CUDAExtension(
             "lmcache.c_ops",
@@ -288,10 +187,6 @@ def cuda_extension() -> tuple[list, dict]:
             },
         ),
     ]
-    # Blkio extension is optional (requires libblkio-dev).
-    ext_modules.extend(
-        _blkio_extension(cpp_extension, blkio_sources, [flag_cxx_abi])
-    )
     # Mooncake extension is optional.
     ext_modules.extend(
         _mooncake_extension(cpp_extension, mooncake_sources, [flag_cxx_abi])
@@ -335,10 +230,6 @@ def rocm_extension() -> tuple[list, dict]:
     mooncake_sources = [
         "csrc/storage_backends/mooncake/pybind.cpp",
         "csrc/storage_backends/mooncake/connector.cpp",
-    ]
-    blkio_sources = [
-        "csrc/storage_backends/blkio/pybind.cpp",
-        "csrc/storage_backends/blkio/connector.cpp",
     ]
     # For HIP, we generally use CppExtension and let hipcc handle things.
     # Ensure CXX environment variable is set to hipcc when running this build.
@@ -396,10 +287,6 @@ def rocm_extension() -> tuple[list, dict]:
             },
         ),
     ]
-    # Blkio extension is optional (requires libblkio-dev).
-    ext_modules.extend(
-        _blkio_extension(cpp_extension, blkio_sources, [])
-    )
     # Mooncake extension is optional.
     ext_modules.extend(_mooncake_extension(cpp_extension, mooncake_sources, []))
     cmdclass = {"build_ext": cpp_extension.BuildExtension}
