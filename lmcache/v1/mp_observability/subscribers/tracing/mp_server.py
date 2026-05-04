@@ -265,6 +265,19 @@ class MPServerTracingSubscriber(EventSubscriber):
         if logical:
             self._registry.pop(sid, logical)
 
+        if event.event_type == EventType.MP_LOOKUP_PREFETCH_END:
+            root_entry = self._registry.get(sid, "request")
+            if root_entry is not None:
+                root_span, _ = root_entry
+                hit_tokens = int(event.metadata.get("hit_tokens", 0))
+                requested_tokens = int(event.metadata.get("requested_tokens", 0))
+                hit_rate = (
+                    hit_tokens / requested_tokens if requested_tokens > 0 else 0.0
+                )
+                root_span.set_attribute("hit_tokens", hit_tokens)
+                root_span.set_attribute("requested_tokens", requested_tokens)
+                root_span.set_attribute("hit_rate", hit_rate)
+
         if event.event_type == EventType.MP_STORE_END:
             if (count := self._pending_store_count.get(sid, 0)) > 0:
                 self._pending_store_count[sid] = count - 1

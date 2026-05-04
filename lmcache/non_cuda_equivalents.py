@@ -272,6 +272,9 @@ class GPUKVFormat(IntEnum):
     # used by: vLLM non-MLA flash infer (HND layout)
     NL_X_NB_TWO_NH_BS_HS = 7
 
+    # used by: TRT-LLM cross-layer (HND layout)
+    NB_NL_TWO_NH_BS_HS = 8
+
 
 class PageBufferShapeDesc:
     """Python stand-in for the C++ ``PageBufferShapeDesc`` struct.
