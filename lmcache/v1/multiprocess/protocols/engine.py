@@ -13,6 +13,7 @@ This module defines the protocol for:
 """
 
 # First Party
+from lmcache.utils import EngineType
 from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.multiprocess.custom_types import (
     IPCCacheEngineKey,
@@ -47,14 +48,16 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
     return {
         # Register KV Cache
         # Payload:
-        #   - instance_id: int - Unique identifier for the vLLM instance
+        #   - instance_id: int - Unique identifier for the engine instance
         #   - kv_cache: KVCache - The KV cache configuration
         #   - model_name: str - Name of the model associated with the engine
         #   - world_size: int - World size of the engine
+        #   - engine_type: EngineType - Which serving engine produced the
+        #     caches (vLLM, SGLang, ...). Drives format detection.
         #   - layout_hints: LayoutHints - See custom_types.LayoutHints.
         # Returns: None
         "REGISTER_KV_CACHE": ProtocolDefinition(
-            payload_classes=[int, KVCache, str, int, LayoutHints],
+            payload_classes=[int, KVCache, str, int, EngineType, LayoutHints],
             response_class=None,
             handler_type=HandlerType.SYNC,
         ),

@@ -56,6 +56,8 @@ issues = "https://github.com/LMCache/LMCache"
 version_file = "lmcache/_version.py"
 # do not include +gREV local version, required for Test PyPI upload
 local_scheme = "no-local-version"
+# only treat vX.Y.Z-style tags as version anchors; ignores nightly/nightly-cu13 tags
+tag_regex = "^v?(?P<version>\\d+\\.\\d+\\.\\d+.*)$"
 
 [tool.setuptools.packages.find]
 where = [""]

@@ -28,13 +28,17 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     Args:
         subparsers: The subparsers action from the ``lmcache tool`` parser.
     """
-    # Lazy imports — keeps CLI startup fast (avoids loading matplotlib)
-    # First Party
-    from lmcache.tools.cache_simulator.gen_bench_dataset import (
-        add_gen_dataset_arguments,
-    )
-    from lmcache.tools.cache_simulator.plot_hit_rate import add_sweep_arguments
-    from lmcache.tools.cache_simulator.simulator import add_simulate_arguments
+    # Lazy imports — keeps CLI startup fast and makes cache-simulator optional.
+    # Missing sortedcontainers/matplotlib (plot extra) skips the subcommand.
+    try:
+        # First Party
+        from lmcache.tools.cache_simulator.gen_bench_dataset import (
+            add_gen_dataset_arguments,
+        )
+        from lmcache.tools.cache_simulator.plot_hit_rate import add_sweep_arguments
+        from lmcache.tools.cache_simulator.simulator import add_simulate_arguments
+    except ImportError:
+        return
 
     cs_parser = subparsers.add_parser(
         "cache-simulator",
