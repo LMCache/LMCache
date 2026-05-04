@@ -93,6 +93,7 @@ lmcache server \
     --l2-prefetch-policy default \
     --l2-adapter "$L2_ADAPTER_JSON" \
     --max-workers "$MAX_WORKERS" \
+    --metrics-sample-rate 1.0 \
     --port "$LMCACHE_PORT" \
     > "/tmp/build_${BUILD_ID}_lmcache_l2.log" 2>&1 &
 
@@ -400,6 +401,103 @@ if failed:
 else:
     print('[PASS] All data flow checks passed')
 "
+fi
+
+# ---------------------------------------------------------------------------
+# Step 5: Verify the rest of the MP observability surface
+# ---------------------------------------------------------------------------
+# The data-flow block above is L2-focused.  This block goes wider — it
+# asserts that every metric we publish from MP mode actually advances
+# during the run.  ``--metrics-sample-rate 1.0`` was set on the relaunch
+# above so the histograms record on every event (the default 0.01 would
+# leave them empty in this short workload and flake the assertions).
+
+if [ -s "$L2_METRICS_FILE" ]; then
+    echo ""
+    echo "============================================"
+    echo "=== Verifying full MP observability surface ==="
+    echo "============================================"
+
+    python3 - "$L2_METRICS_FILE" <<'PYEOF'
+import re
+import sys
+
+with open(sys.argv[1]) as f:
+    text = f.read()
+
+
+def counter_total(name: str) -> float:
+    """Sum a counter across all label combinations."""
+    total = 0.0
+    pat = re.compile(rf"^{re.escape(name)}(\{{[^}}]*\}})?\s+([0-9eE+\-.]+)\s*$", re.M)
+    for _, value in pat.findall(text):
+        try:
+            total += float(value)
+        except ValueError:
+            pass
+    return total
+
+
+def histogram_count(name: str) -> float:
+    """Sum the ``_count`` series across all label combinations.
+
+    Non-zero means the histogram observed at least one sample.
+    """
+    return counter_total(f"{name}_count")
+
+
+def has_label(name: str, label: str) -> bool:
+    """Check that at least one sample of `name` carries the named label."""
+    pat = re.compile(rf"^{re.escape(name)}\{{[^}}]*\b{re.escape(label)}=", re.M)
+    return bool(pat.search(text))
+
+
+# (kind, metric_name, optional_label_to_assert_present_or_None)
+checks = [
+    # ── Newer counters (with label dimensions) ─────────────────────
+    ("counter", "lmcache_mp_l2_store_completed_total", "l2_name"),
+    ("counter", "lmcache_mp_l2_load_completed_total", "l2_name"),
+    ("counter", "lmcache_mp_lookup_requested_tokens_total", "model_name"),
+    ("counter", "lmcache_mp_lookup_hit_tokens_total", "model_name"),
+    ("counter", "lmcache_mp_num_chunks_loaded_total", "worker_id"),
+    # ── Histograms (sample_rate=1.0, so _count must >0) ────────────
+    ("hist", "lmcache_mp_l0_l1_store_throughput_gbs", None),
+    ("hist", "lmcache_mp_l0_l1_load_throughput_gbs", None),
+    ("hist", "lmcache_mp_l2_store_throughput_gbs", "l2_name"),
+    ("hist", "lmcache_mp_l2_load_throughput_gbs", "l2_name"),
+]
+
+failed = False
+for kind, name, label in checks:
+    if kind == "counter":
+        value = counter_total(name)
+        ok = value > 0
+        detail = f"total={value:.0f}"
+    else:
+        value = histogram_count(name)
+        ok = value > 0
+        detail = f"_count={value:.0f}"
+
+    status = "PASS" if ok else "FAIL"
+    print(f"[{status}] {name}: {detail}")
+    if not ok:
+        failed = True
+        continue
+
+    if label is not None:
+        if has_label(name, label):
+            print(f"       └─ label '{label}' present")
+        else:
+            print(f"[FAIL] {name}: expected label '{label}' is missing")
+            failed = True
+
+print()
+if failed:
+    print("[FAIL] Observability metric verification FAILED")
+    print("       (some metric did not advance, or its label dimension is missing)")
+    sys.exit(1)
+print("[PASS] All observability metrics populated.")
+PYEOF
 fi
 
 echo "============================================"
