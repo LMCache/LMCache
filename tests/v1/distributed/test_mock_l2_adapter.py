@@ -7,7 +7,6 @@ Tests only use public methods and do not access private fields.
 """
 
 # Standard
-import os
 import select
 import time
 
@@ -27,6 +26,7 @@ from lmcache.v1.memory_management import (
     MemoryObjMetadata,
     TensorMemoryObj,
 )
+from lmcache.v1.platform import consume_fd
 
 
 class _RecordingListener(L2AdapterListener):
@@ -88,7 +88,7 @@ def wait_for_event_fd(event_fd: int, timeout: float = 5.0) -> bool:
     if events:
         # Read and consume the event
         try:
-            os.eventfd_read(event_fd)
+            consume_fd(event_fd)
         except BlockingIOError:
             pass
         return True

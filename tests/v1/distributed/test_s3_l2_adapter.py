@@ -8,7 +8,6 @@ routes PUT/GET/HEAD/DELETE against a shared dict.  No network required.
 
 # Standard
 from concurrent.futures import Future as ConcurrentFuture
-import os
 import select
 import threading
 import time
@@ -31,6 +30,7 @@ from lmcache.v1.memory_management import (
     MemoryObjMetadata,
     TensorMemoryObj,
 )
+from lmcache.v1.platform import consume_fd
 
 # =============================================================================
 # Fake awscrt.s3.S3Request
@@ -226,10 +226,21 @@ def patch_s3_request(monkeypatch):
 
     Also patch HttpRequest so body_stream is preserved as a plain Python
     object (real HttpRequest wraps it in an opaque awscrt InputStream).
+
+    Stubs the credentials provider so tests don't depend on boto3 or any
+    AWS credentials being present in the environment; mocked requests
+    never reach a real signer.
     """
     _BACKEND.reset()
     monkeypatch.setattr(s3mod.s3, "S3Request", _FakeS3Request)
     monkeypatch.setattr(s3mod, "HttpRequest", _FakeHttpRequest)
+    monkeypatch.setattr(
+        s3mod,
+        "_make_credentials_provider",
+        lambda _config: s3mod.auth.AwsCredentialsProvider.new_static(
+            "test-key", "test-secret"
+        ),
+    )
     yield
 
 
@@ -266,7 +277,7 @@ def wait_for_event_fd(event_fd: int, timeout: float = 5.0) -> bool:
     events = poll.poll(timeout * 1000)
     if events:
         try:
-            os.eventfd_read(event_fd)
+            consume_fd(event_fd)
         except BlockingIOError:
             pass
         return True

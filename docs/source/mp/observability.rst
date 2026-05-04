@@ -218,6 +218,40 @@ memory overhead.
      - Histogram
      - Time from eviction to next reuse (capped at 300 s).
 
+StorageManager Real-Reuse Metrics
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Workload-level reuse histograms emitted by ``SMLifecycleSubscriber``,
+driven by caller-facing StorageManager events
+(``SM_READ_PREFETCHED_FINISHED``, ``SM_WRITE_FINISHED``).  Internal
+read-lock releases by the store/prefetch controllers are excluded so
+the signal reflects user-driven access only.
+
+Both histograms are tagged with ``cache_salt`` for per-tenant
+isolation.  The per-salt access counter advances on every read and
+write of every chunk (regardless of sampling) so the chunks-gap
+reflects true storage volume; the histogram itself records gaps only
+for chunks that pass the (deterministic, hash-based) sampling gate.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 40 15 45
+
+   * - Metric
+     - Type
+     - Description
+   * - ``lmcache_mp.real_reuse_gap_seconds``
+     - Histogram (tag: ``cache_salt``)
+     - Time gap between a chunk's last access (read or write) and its
+       next read.  Captures storage cost — how long a stored chunk sat
+       between accesses.  Emitted only on read events.
+   * - ``lmcache_mp.real_reuse_gap_chunks``
+     - Histogram (tag: ``cache_salt``)
+     - Per-``cache_salt`` access-counter gap between two reads of the
+       same chunk.  Captures storage volume — how many chunk-accesses
+       occurred while this chunk waited for its next read.  Emitted on
+       read events for sampled chunks.
+
 L2 Metrics
 ~~~~~~~~~~
 
@@ -289,11 +323,11 @@ intentionally excluded — it is vLLM-owned and not observable from LMCache.
      - Type
      - Description
    * - ``lmcache_mp.lookup_requested_tokens``
-     - Counter
+     - Counter (attrs: ``model_name``, ``cache_salt``)
      - Total tokens submitted for lookup (denominator of the L1+L2
        token-level hit rate). Only chunk-aligned tokens are counted.
    * - ``lmcache_mp.lookup_hit_tokens``
-     - Counter
+     - Counter (attrs: ``model_name``, ``cache_salt``)
      - Total tokens found in L1 or L2 during lookup (numerator of the
        L1+L2 token-level hit rate). Counts the contiguous prefix hit only.
 
@@ -301,12 +335,23 @@ Both counters are driven by the same event (``MP_LOOKUP_PREFETCH_END``),
 so they always advance together per completed lookup. Early-exit lookups
 contribute ``0`` to both, and abandoned lookups contribute to neither.
 
+The ``model_name`` and ``cache_salt`` attributes are captured at lookup
+time from ``IPCCacheEngineKey`` so dashboards can compute per-model or
+per-tenant hit rate. ``cache_salt`` can be high-cardinality (one entry
+per tenant or isolation domain); drop it at scrape time with
+``metric_relabel_configs`` if storage cost matters.
+
 **PromQL for hit rate:**
 
 .. code-block:: promql
 
+    # Aggregate (all models, all salts):
     rate(lmcache_mp_lookup_hit_tokens_total[5m])
     / rate(lmcache_mp_lookup_requested_tokens_total[5m])
+
+    # Per-model:
+    sum(rate(lmcache_mp_lookup_hit_tokens_total[5m])) by (model_name)
+    / sum(rate(lmcache_mp_lookup_requested_tokens_total[5m])) by (model_name)
 
 L0 (GPU) Block Lifecycle Histograms
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -406,11 +451,44 @@ attribute — the registered adapter type (e.g. ``"fs"``, ``"nixl_store"``,
      - Histogram
      - L2→L1 load throughput in GB/s per sampled (request, adapter) pair.
 
+Engine Counters
+~~~~~~~~~~~~~~~
+
+Worker-scoped counters tied to what the MP server delivers back to each
+vLLM worker via ``retrieve()``.  Labeled by ``worker_id`` (the vLLM
+worker instance id) — distinct from any scheduler-scoped id that may
+appear on other metrics.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 40 25 35
+
+   * - Metric
+     - Type
+     - Description
+   * - ``lmcache_mp.num_chunks_loaded``
+     - Counter (attrs: ``worker_id``, ``model_name``, ``cache_salt``)
+     - Total number of LMCache chunks loaded into the engine, summed
+       over all ``retrieve()`` completions.  Sliceable per worker, per
+       model, and per tenant / isolation domain (``cache_salt``).
+       ``cache_salt`` may be high-cardinality; drop it at scrape time
+       with ``metric_relabel_configs`` if storage cost matters.
+
 Observable Gauges
 ~~~~~~~~~~~~~~~~~
 
 Point-in-time state snapshots registered via ``register_gauge``
 (pull-based OTel observable gauges).
+
+The three in-flight metrics carry two attributes that distinguish
+adapters even when more than one is registered with the same backend
+type — same shape as ``lmcache_mp.l2_store_completed``:
+
+- ``l2_name`` — the registered adapter type (e.g. ``"fs"``,
+  ``"nixl_store"``, ``"mooncake_store"``).
+- ``adapter_index`` — position in the controller's adapter list.
+
+Adapters with no in-flight work emit no datapoint for that scrape.
 
 .. list-table::
    :header-rows: 1
@@ -423,6 +501,29 @@ Point-in-time state snapshots registered via ``register_gauge``
      - ObservableGauge
      - Number of prefetch jobs currently in-flight. A sustained high
        value may indicate slow L2 backends or polling delays.
+   * - ``lmcache_mp.l1_memory_usage_bytes``
+     - ObservableGauge
+     - Bytes currently held in L1.  Rising without plateauing typically
+       indicates a leak; saturating at the configured ``--l1-size-gb``
+       indicates working set exceeds capacity.
+   * - ``lmcache_mp.num_inflight_l2_stores``
+     - ObservableGauge (attrs: ``l2_name``, ``adapter_index``)
+     - L2 store tasks currently executing, per adapter.  Sustained
+       non-zero values indicate the adapter cannot keep up with the
+       L1 → L2 write rate.
+   * - ``lmcache_mp.num_inflight_l2_loads``
+     - ObservableGauge (attrs: ``l2_name``, ``adapter_index``)
+     - L2 → L1 prefetch load tasks currently executing, per adapter.
+       Pair with ``num_inflight_l2_stores`` to see whether read or write
+       traffic dominates a given backend.
+   * - ``lmcache_mp.inflight_load_memory_usage_bytes``
+     - ObservableGauge (attrs: ``l2_name``, ``adapter_index``)
+     - L1 bytes reserved by in-flight L2 → L1 prefetch loads, per
+       adapter.  Rising in-flight bytes alongside rising
+       ``l1_memory_usage_bytes`` is a signal that prefetch reservations
+       are crowding out cacheable data.  Per-adapter byte attribution
+       follows each request's ``load_plan`` bitmap, so summing across
+       adapters never double-counts.
 
 Prometheus Scrape Configuration
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

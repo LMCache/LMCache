@@ -37,6 +37,7 @@ from lmcache.v1.memory_management import (
     MemoryObjMetadata,
     TensorMemoryObj,
 )
+from lmcache.v1.platform import consume_fd
 
 # =============================================================================
 # Helpers
@@ -118,7 +119,7 @@ def wait_for_event_fd(event_fd: int, timeout: float = 10.0) -> bool:
     events = poll.poll(timeout * 1000)
     if events:
         try:
-            os.eventfd_read(event_fd)
+            consume_fd(event_fd)
         except BlockingIOError:
             pass
         return True
