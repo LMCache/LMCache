@@ -1092,6 +1092,8 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
         self.async_mode = nixl_config.enable_async_put
         self.enable_presence_cache = nixl_config.enable_presence_cache
         self.path = nixl_config.path
+        if self.path is not None:
+            os.makedirs(self.path, exist_ok=True)
         self.direct_io_flag = 0
         if nixl_config.use_direct_io:
             if hasattr(os, "O_DIRECT"):

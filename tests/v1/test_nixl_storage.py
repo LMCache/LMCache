@@ -19,6 +19,7 @@ from lmcache.v1.memory_management import PagedTensorMemoryAllocator
 from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.storage_backend import CreateStorageBackends
 from lmcache.v1.storage_backend.nixl_storage_backend import NixlStorageBackend
+from lmcache.v1.transfer_channel.transfer_utils import get_correct_device
 
 
 def create_key(chunk_hash: str):
@@ -67,7 +68,9 @@ def run(config: LMCacheEngineConfig, shape, dtype):
             config,
             metadata,
             thread_loop,
-            dst_device=config.nixl_buffer_device,  # Pass the device directly
+            dst_device=get_correct_device(
+                config.nixl_buffer_device, metadata.worker_id
+            ),
         )
         assert len(backends) == 2  # NixlStorageBackend + LocalCPUBackend
         assert BACKEND_NAME in backends
@@ -193,9 +196,9 @@ def test_nixl_gds_mt_cuda_backend():
     config = LMCacheEngineConfig.from_file(BASE_DIR / "data/nixl.yaml")
 
     dtype = torch.bfloat16
-    shape = [2048, 2048]
+    shape = torch.Size([2048, 2048])
 
-    config.nixl_buffer_device = "cuda:0"  # Use explicit device
+    config.nixl_buffer_device = "cuda"
     config.extra_config["nixl_backend"] = "GDS_MT"
     config.extra_config["enable_cuda"] = True
 
@@ -208,7 +211,7 @@ def test_nixl_gds_mt_cpu_backend():
     config = LMCacheEngineConfig.from_file(BASE_DIR / "data/nixl.yaml")
 
     dtype = torch.bfloat16
-    shape = [2048, 2048]
+    shape = torch.Size([2048, 2048])
 
     config.nixl_buffer_device = "cpu"
     config.extra_config["nixl_backend"] = "GDS_MT"
@@ -224,9 +227,9 @@ def test_nixl_gds_cuda_backend():
     config = LMCacheEngineConfig.from_file(BASE_DIR / "data/nixl.yaml")
 
     dtype = torch.bfloat16
-    shape = [2048, 2048]
+    shape = torch.Size([2048, 2048])
 
-    config.nixl_buffer_device = "cuda:0"  # Use explicit device
+    config.nixl_buffer_device = "cuda"
     config.extra_config["nixl_backend"] = "GDS"
     config.extra_config["enable_cuda"] = True
 
@@ -239,7 +242,7 @@ def test_nixl_gds_cpu_backend():
     config = LMCacheEngineConfig.from_file(BASE_DIR / "data/nixl.yaml")
 
     dtype = torch.bfloat16
-    shape = [2048, 2048]
+    shape = torch.Size([2048, 2048])
 
     config.nixl_buffer_device = "cpu"
     config.extra_config["nixl_backend"] = "GDS"
@@ -254,7 +257,7 @@ def test_nixl_posix_backend():
     config = LMCacheEngineConfig.from_file(BASE_DIR / "data/nixl.yaml")
 
     dtype = torch.bfloat16
-    shape = [2048, 2048]
+    shape = torch.Size([2048, 2048])
 
     config.nixl_buffer_device = "cpu"
     config.extra_config["nixl_backend"] = "POSIX"
