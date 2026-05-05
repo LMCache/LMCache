@@ -104,10 +104,8 @@ jobs:
         if: |
             !failure() && !cancelled() &&
             needs.changes.outputs.lmcache == 'true' &&
-            github.repository_owner == 'LMCache' && (
-                github.event.action == 'published' ||
-                (github.event_name == 'push' && github.ref == 'refs/heads/dev')
-            )
+            github.repository_owner == 'LMCache' &&
+            github.event_name == 'push' && github.ref == 'refs/heads/dev'
         permissions:
             contents: read
             # see https://docs.pypi.org/trusted-publishers/
@@ -146,10 +144,8 @@ jobs:
         if: |
             !failure() && !cancelled() &&
             needs.changes.outputs.lmcache == 'true' &&
-            github.repository_owner == 'LMCache' && (
-                github.event.action == 'published' ||
-                (github.event_name == 'push' && github.ref == 'refs/heads/dev')
-            )
+            github.repository_owner == 'LMCache' &&
+            github.event_name == 'push' && github.ref == 'refs/heads/dev'
         permissions:
             contents: read
             id-token: write
