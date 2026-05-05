@@ -44,11 +44,11 @@ __device__ inline size_t calculate_engine_global_offset(
   } else if constexpr (format == GPUKVFormat::NL_X_NB_BS_HS) {
     // MLA: L tensors [NB, BS, HS]
     return engine_block_idx * scalars_per_block;
-  } else if constexpr (format == GPUKVFormat::TWO_X_NL_X_NBBS_NH_HS ||
-                       format == GPUKVFormat::TWO_X_NL_X_NB_BS_NH_HS) {
-    // SGLang MHA: 2L tensors, 3-D inner [NBBS, NH, HS] (in-process) or
-    // 4-D inner [NB, BS, NH, HS] (MP daemon path). Same bytes either way.
-    // K/V via separate tensor ptrs.
+  } else if constexpr (format == GPUKVFormat::TWO_X_NL_X_NBBS_NH_HS) {
+    // SGLang MHA (in-process): 2L tensors [NBBS, NH, HS]
+    return engine_block_idx * scalars_per_block;
+  } else if constexpr (format == GPUKVFormat::TWO_X_NL_X_NB_BS_NH_HS) {
+    // SGLang MHA (MP daemon): 2L tensors [NB, BS, NH, HS]
     return engine_block_idx * scalars_per_block;
   } else if constexpr (format == GPUKVFormat::NL_X_NBBS_ONE_HS) {
     // SGLang MLA: L tensors [NBBS, 1, HS]
@@ -178,10 +178,14 @@ __device__ void multi_layer_block_transfer_single_block(
   if constexpr (format == GPUKVFormat::NB_NL_TWO_BS_NH_HS ||
                 format == GPUKVFormat::NB_NL_TWO_NH_BS_HS) {
     paged_buffer_layer_ptr = (ScalarType*)paged_buffer_ptrs[0];
-  } else if constexpr (format == GPUKVFormat::TWO_X_NL_X_NBBS_NH_HS ||
-                       format == GPUKVFormat::TWO_X_NL_X_NB_BS_NH_HS) {
-    // SGLang MHA: ptrs[0..NL-1] = K per layer, ptrs[NL..2NL-1] = V per layer.
-    // 3-D and 4-D inner variants share this convention.
+  } else if constexpr (format == GPUKVFormat::TWO_X_NL_X_NBBS_NH_HS) {
+    // SGLang MHA (in-process): ptrs[0..NL-1] = K per layer, ptrs[NL..2NL-1] = V
+    // per layer
+    paged_buffer_layer_ptr =
+        (ScalarType*)paged_buffer_ptrs[k_or_v * shape_desc.nl + layer_idx];
+  } else if constexpr (format == GPUKVFormat::TWO_X_NL_X_NB_BS_NH_HS) {
+    // SGLang MHA (MP daemon): ptrs[0..NL-1] = K per layer, ptrs[NL..2NL-1] = V
+    // per layer
     paged_buffer_layer_ptr =
         (ScalarType*)paged_buffer_ptrs[k_or_v * shape_desc.nl + layer_idx];
   } else {
