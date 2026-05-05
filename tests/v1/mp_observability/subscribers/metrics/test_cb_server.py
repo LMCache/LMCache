@@ -14,6 +14,35 @@ from lmcache.v1.mp_observability.event_bus import EventBus, EventBusConfig
 from lmcache.v1.mp_observability.subscribers.metrics.cb_server import (
     BlendMetricsSubscriber,
 )
+from tests.v1.mp_observability.subscribers.metrics.otel_setup import reader as _reader
+
+_DRAIN_WAIT = 0.15
+
+
+def _read_counters() -> dict[str, int]:
+    """Snapshot counter values, summed across attribute combinations."""
+    data = _reader.get_metrics_data()
+    result: dict[str, int] = {}
+    if data is None:
+        return result
+    for resource_metrics in data.resource_metrics:
+        for scope_metrics in resource_metrics.scope_metrics:
+            for metric in scope_metrics.metrics:
+                total = 0
+                any_value = False
+                for dp in metric.data.data_points:
+                    if not hasattr(dp, "value"):
+                        continue  # skip histogram data points
+                    total += int(dp.value)
+                    any_value = True
+                if any_value:
+                    result[metric.name] = total
+    return result
+
+
+def _counter_delta(before: dict[str, int], after: dict[str, int]) -> dict[str, int]:
+    all_keys = set(before) | set(after)
+    return {k: after.get(k, 0) - before.get(k, 0) for k in all_keys}
 
 
 @pytest.fixture
@@ -26,6 +55,17 @@ def subscriber(bus):
     sub = BlendMetricsSubscriber()
     bus.register_subscriber(sub)
     return sub
+
+
+@pytest.fixture
+def snapshot():
+    """Capture counters before the test; yield a callable that returns deltas."""
+    before = _read_counters()
+
+    def get_delta() -> dict[str, int]:
+        return _counter_delta(before, _read_counters())
+
+    return get_delta
 
 
 class TestBlendMetricsSubscriber:
@@ -69,6 +109,8 @@ class TestBlendMetricsSubscriber:
                 event_type=EventType.CB_LOOKUP_END,
                 session_id="req-1",
                 metadata={
+                    "requested_tokens": 1024,
+                    "hit_tokens": 768,
                     "fingerprint_hits": 4,
                     "storage_hits": 3,
                     "stale_chunks": 1,
@@ -86,6 +128,8 @@ class TestBlendMetricsSubscriber:
                 event_type=EventType.CB_LOOKUP_END,
                 session_id="req-1",
                 metadata={
+                    "requested_tokens": 0,
+                    "hit_tokens": 0,
                     "fingerprint_hits": 0,
                     "storage_hits": 0,
                     "stale_chunks": 0,
@@ -209,6 +253,8 @@ class TestBlendMetricsSubscriber:
                     event_type=EventType.CB_LOOKUP_END,
                     session_id="req-bulk",
                     metadata={
+                        "requested_tokens": 96,
+                        "hit_tokens": 32,
                         "fingerprint_hits": 2,
                         "storage_hits": 1,
                         "stale_chunks": 1,
@@ -218,3 +264,161 @@ class TestBlendMetricsSubscriber:
             )
         time.sleep(0.15)
         bus.stop()
+
+
+# ---------------------------------------------------------------------------
+# Blend token-level hit-rate counters
+#
+# These counters expose the numerator/denominator that let dashboards compute
+# the blend hit rate identically to the L1+L2 lookup hit rate:
+#
+#     rate(lmcache_blend_lookup_hit_tokens_total[5m])
+#     / rate(lmcache_blend_lookup_requested_tokens_total[5m])
+#
+# Asserts on actual counter deltas via the InMemoryMetricReader fixture.
+# ---------------------------------------------------------------------------
+
+
+class TestBlendLookupHitTokenCounters:
+    def test_full_hit(self, bus, subscriber, snapshot):
+        """All requested tokens are served by blend."""
+        bus.start()
+        bus.publish(
+            Event(
+                event_type=EventType.CB_LOOKUP_END,
+                session_id="req-1",
+                metadata={
+                    "requested_tokens": 1024,
+                    "hit_tokens": 1024,
+                    "fingerprint_hits": 4,
+                    "storage_hits": 4,
+                    "stale_chunks": 0,
+                    "no_gpu_context": False,
+                },
+            )
+        )
+        time.sleep(_DRAIN_WAIT)
+        bus.stop()
+
+        delta = snapshot()
+        assert delta["lmcache_blend.lookup_requested_tokens"] == 1024
+        assert delta["lmcache_blend.lookup_hit_tokens"] == 1024
+
+    def test_partial_hit(self, bus, subscriber, snapshot):
+        """A subset of the requested tokens is served by blend."""
+        bus.start()
+        bus.publish(
+            Event(
+                event_type=EventType.CB_LOOKUP_END,
+                session_id="req-2",
+                metadata={
+                    "requested_tokens": 1024,
+                    "hit_tokens": 256,
+                    "fingerprint_hits": 4,
+                    "storage_hits": 1,
+                    "stale_chunks": 3,
+                    "no_gpu_context": False,
+                },
+            )
+        )
+        time.sleep(_DRAIN_WAIT)
+        bus.stop()
+
+        delta = snapshot()
+        assert delta["lmcache_blend.lookup_requested_tokens"] == 1024
+        assert delta["lmcache_blend.lookup_hit_tokens"] == 256
+
+    def test_full_miss_still_records_denominator(self, bus, subscriber, snapshot):
+        """Cold lookup: the request must still increment the denominator so
+        the running hit rate properly reflects the miss."""
+        bus.start()
+        bus.publish(
+            Event(
+                event_type=EventType.CB_LOOKUP_END,
+                session_id="req-3",
+                metadata={
+                    "requested_tokens": 512,
+                    "hit_tokens": 0,
+                    "fingerprint_hits": 0,
+                    "storage_hits": 0,
+                    "stale_chunks": 0,
+                    "no_gpu_context": False,
+                },
+            )
+        )
+        time.sleep(_DRAIN_WAIT)
+        bus.stop()
+
+        delta = snapshot()
+        assert delta["lmcache_blend.lookup_requested_tokens"] == 512
+        assert delta.get("lmcache_blend.lookup_hit_tokens", 0) == 0
+
+    def test_no_gpu_context_records_zero_tokens(self, bus, subscriber, snapshot):
+        """``no_gpu_context`` lookups emit ``hit_tokens=0`` and
+        ``requested_tokens=0`` — neither counter should move so the ratio
+        stays meaningful."""
+        bus.start()
+        bus.publish(
+            Event(
+                event_type=EventType.CB_LOOKUP_END,
+                session_id="req-4",
+                metadata={
+                    "requested_tokens": 0,
+                    "hit_tokens": 0,
+                    "fingerprint_hits": 5,
+                    "storage_hits": 0,
+                    "stale_chunks": 0,
+                    "no_gpu_context": True,
+                },
+            )
+        )
+        time.sleep(_DRAIN_WAIT)
+        bus.stop()
+
+        delta = snapshot()
+        assert delta.get("lmcache_blend.lookup_requested_tokens", 0) == 0
+        assert delta.get("lmcache_blend.lookup_hit_tokens", 0) == 0
+
+    def test_multiple_lookups_accumulate(self, bus, subscriber, snapshot):
+        """Counters accumulate across multiple completed lookups."""
+        bus.start()
+        # 3 full-hit lookups @ 256 tokens each
+        for i in range(3):
+            bus.publish(
+                Event(
+                    event_type=EventType.CB_LOOKUP_END,
+                    session_id=f"hit-{i}",
+                    metadata={
+                        "requested_tokens": 256,
+                        "hit_tokens": 256,
+                        "fingerprint_hits": 1,
+                        "storage_hits": 1,
+                        "stale_chunks": 0,
+                        "no_gpu_context": False,
+                    },
+                )
+            )
+        # 2 partial-hit lookups: 1024 requested, 128 hit
+        for i in range(2):
+            bus.publish(
+                Event(
+                    event_type=EventType.CB_LOOKUP_END,
+                    session_id=f"partial-{i}",
+                    metadata={
+                        "requested_tokens": 1024,
+                        "hit_tokens": 128,
+                        "fingerprint_hits": 4,
+                        "storage_hits": 1,
+                        "stale_chunks": 3,
+                        "no_gpu_context": False,
+                    },
+                )
+            )
+        time.sleep(_DRAIN_WAIT)
+        bus.stop()
+
+        delta = snapshot()
+        # 3*256 + 2*1024 = 768 + 2048 = 2816
+        assert delta["lmcache_blend.lookup_requested_tokens"] == 2816
+        # 3*256 + 2*128 = 768 + 256 = 1024
+        assert delta["lmcache_blend.lookup_hit_tokens"] == 1024

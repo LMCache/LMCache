@@ -448,12 +448,21 @@ MP mode `lmcache_mp.` namespace).  On Prometheus, `.` becomes `_` and counters g
 | OTel metric name | Prometheus name | Type | Source event | Calculation |
 |---|---|---|---|---|
 | `lmcache_blend.lookup_requests` | `lmcache_blend_lookup_requests_total` | Counter | `CB_LOOKUP_START` | +1 per event |
+| `lmcache_blend.lookup_requested_tokens` | `lmcache_blend_lookup_requested_tokens_total` | Counter | `CB_LOOKUP_END` | `+requested_tokens` |
+| `lmcache_blend.lookup_hit_tokens` | `lmcache_blend_lookup_hit_tokens_total` | Counter | `CB_LOOKUP_END` | `+hit_tokens` |
 | `lmcache_blend.lookup_fingerprint_hits` | `lmcache_blend_lookup_fingerprint_hits_total` | Counter | `CB_LOOKUP_END` | `+fingerprint_hits` |
 | `lmcache_blend.lookup_storage_hits` | `lmcache_blend_lookup_storage_hits_total` | Counter | `CB_LOOKUP_END` | `+storage_hits` |
 | `lmcache_blend.lookup_stale_chunks` | `lmcache_blend_lookup_stale_chunks_total` | Counter | `CB_LOOKUP_END` | `+stale_chunks` |
 | `lmcache_blend.lookup_no_gpu_context_errors` | `lmcache_blend_lookup_no_gpu_context_errors_total` | Counter | `CB_LOOKUP_END` | +1 when `no_gpu_context=True` |
 
-**What it answers:** How often does the CB server receive lookup requests? What fraction hit the fingerprint table? What fraction are confirmed in storage? How many stale evictions occur?
+**What it answers:** How often does the CB server receive lookup requests? What fraction of requested tokens are served by blend (token-level hit rate)? What fraction hit the fingerprint table? What fraction are confirmed in storage? How many stale evictions occur?
+
+**Blend token-level hit rate** (numerator and denominator co-emit on the same `CB_LOOKUP_END` event so the ratio is meaningful even under partial-failure paths):
+
+```
+rate(lmcache_blend_lookup_hit_tokens_total[5m])
+/ rate(lmcache_blend_lookup_requested_tokens_total[5m])
+```
 
 ### CB Retrieve Metrics
 
