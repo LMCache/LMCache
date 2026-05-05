@@ -55,7 +55,7 @@ The implementation is split into:
 
 - raw device open/close
 - in-memory key index
-- free-slot tracking and internal LRU
+- free-slot tracking
 - lock refcounts used by MP lookup/load/unlock
 - metadata checkpointing and recovery
 - direct reads and writes through the Rust binding
@@ -99,6 +99,9 @@ Rules:
   index
 
 The on-device format is intentionally unchanged by the MP adapter work.
+
+Recovered keys are exposed to the shared L2 eviction policy on adapter startup,
+so reclaimed slots come from global L2 eviction or explicit `delete()` calls.
 
 ## Configuration
 
