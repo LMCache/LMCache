@@ -61,7 +61,7 @@ class EvictionConfig:
     The configuration for eviction policies (L1 and optionally L2).
     """
 
-    eviction_policy: Literal["LRU", "noop"]
+    eviction_policy: Literal["LRU", "IsolatedLRU", "noop"]
     """ The eviction policy to use. """
 
     trigger_watermark: float = field(default=0.8)
@@ -176,9 +176,11 @@ def add_storage_manager_args(
     eviction_group.add_argument(
         "--eviction-policy",
         type=str,
-        choices=["LRU", "noop"],
+        choices=["LRU", "IsolatedLRU", "noop"],
         required=True,
-        help="The eviction policy to use ('LRU' or 'noop').",
+        help="The eviction policy to use ('LRU', 'IsolatedLRU', or 'noop'). "
+        "'IsolatedLRU' maintains one LRU list per cache_salt and requires "
+        "quotas keyed by cache_salt to be configured via the HTTP API.",
     )
     eviction_group.add_argument(
         "--eviction-trigger-watermark",
