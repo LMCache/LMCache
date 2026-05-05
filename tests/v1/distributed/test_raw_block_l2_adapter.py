@@ -12,10 +12,14 @@ import torch
 
 # First Party
 from lmcache.v1.distributed.api import ObjectKey
+from lmcache.v1.distributed.config import EvictionConfig
 from lmcache.v1.distributed.internal_api import L2AdapterListener
 from lmcache.v1.distributed.l2_adapters.raw_block_l2_adapter import (
     RawBlockL2Adapter,
     RawBlockL2AdapterConfig,
+)
+from lmcache.v1.distributed.storage_controllers.eviction_controller import (
+    L2AdapterEvictionState,
 )
 from lmcache.v1.memory_management import (
     MemoryFormat,
@@ -68,11 +72,16 @@ class _FailingListener(L2AdapterListener):
         raise RuntimeError("delete listener failed")
 
 
-def _create_object_key(chunk_id: int, model_name: str = "test_model") -> ObjectKey:
+def _create_object_key(
+    chunk_id: int,
+    model_name: str = "test_model",
+    cache_salt: str = "",
+) -> ObjectKey:
     return ObjectKey(
         chunk_hash=ObjectKey.IntHash2Bytes(chunk_id),
         model_name=model_name,
         kv_rank=0,
+        cache_salt=cache_salt,
     )
 
 
@@ -399,6 +408,10 @@ def test_raw_block_l2_adapter_listener_errors_do_not_block_eventfds():
             load_bitmap = adapter.query_load_result(load_task_id)
             assert load_bitmap is not None
             assert load_bitmap.get_indices_list() == [0]
+            adapter.delete([key])
+            _, after_delete = _run_lookup(adapter, [key])
+            assert after_delete is not None
+            assert after_delete.get_indices_list() == []
         finally:
             adapter.close()
 
@@ -432,6 +445,74 @@ def test_raw_block_l2_adapter_recovery_from_checkpoint():
             assert load_bitmap.get_indices_list() == [0]
             assert torch.equal(load_buffer.tensor, obj.tensor)
             adapter2.submit_unlock([key])
+        finally:
+            adapter2.close()
+
+
+@requires_raw_block_ext
+def test_raw_block_l2_adapter_recovery_seeds_usage_by_cache_salt():
+    with tempfile.TemporaryDirectory() as td:
+        dev_path = os.path.join(td, "dev.bin")
+        with open(dev_path, "wb") as f:
+            f.truncate(8 * 1024 * 1024)
+
+        slot_bytes = 64 * 1024
+        config = _make_config(dev_path, slot_bytes=slot_bytes)
+        key = _create_object_key(33, cache_salt="u1")
+        obj = _create_memory_obj(fill_value=33.0)
+
+        adapter1 = RawBlockL2Adapter(config)
+        try:
+            assert _run_store(adapter1, [key], [obj]) is True
+        finally:
+            adapter1.close()
+
+        adapter2 = RawBlockL2Adapter(config)
+        try:
+            usage = adapter2.get_usage()
+            assert usage.total_bytes_used == slot_bytes
+            assert dict(usage.bytes_by_cache_salt) == {"u1": slot_bytes}
+
+            adapter2.delete([key])
+            usage = adapter2.get_usage()
+            assert usage.total_bytes_used == 0
+            assert dict(usage.bytes_by_cache_salt) == {}
+        finally:
+            adapter2.close()
+
+
+@requires_raw_block_ext
+def test_raw_block_l2_adapter_recovered_keys_seed_l2_eviction_state():
+    with tempfile.TemporaryDirectory() as td:
+        dev_path = os.path.join(td, "dev.bin")
+        with open(dev_path, "wb") as f:
+            f.truncate(8 * 1024 * 1024)
+
+        config = _make_config(dev_path)
+        key = _create_object_key(34)
+        obj = _create_memory_obj(fill_value=34.0)
+
+        adapter1 = RawBlockL2Adapter(config)
+        try:
+            assert _run_store(adapter1, [key], [obj]) is True
+        finally:
+            adapter1.close()
+
+        adapter2 = RawBlockL2Adapter(config)
+        try:
+            state = L2AdapterEvictionState(
+                adapter2,
+                EvictionConfig(eviction_policy="LRU", eviction_ratio=1.0),
+            )
+            assert state.eviction_policy.get_eviction_candidates(1) == [key]
+
+            actions = state.eviction_policy.get_eviction_actions(1.0)
+            assert len(actions) == 1
+            assert actions[0].keys == [key]
+            adapter2.delete(actions[0].keys)
+
+            assert adapter2.get_usage().total_bytes_used == 0
+            assert state.eviction_policy.get_eviction_candidates(1) == []
         finally:
             adapter2.close()
 

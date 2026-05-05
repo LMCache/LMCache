@@ -18,7 +18,7 @@ import threading
 
 if TYPE_CHECKING:
     from lmcache.native_storage_ops import Bitmap
-    from lmcache.v1.distributed.internal_api import L1MemoryDesc
+    from lmcache.v1.distributed.internal_api import L1MemoryDesc, L2AdapterListener
 
 # First Party
 from lmcache.logging import init_logger
@@ -40,6 +40,7 @@ from lmcache.v1.storage_backend.raw_block import (
     DEFAULT_IOURING_QUEUE_DEPTH,
     RawBlockCore,
     RawBlockCoreConfig,
+    decode_object_key,
     encode_object_key,
     normalize_raw_block_io_engine,
     validate_raw_block_io_options,
@@ -318,6 +319,7 @@ class RawBlockL2Adapter(L2AdapterInterface):
             self._max_capacity_bytes = int(
                 self._core.report_status().get("usable_capacity_bytes", 0)
             )
+            self._seed_usage_from_core_snapshot()
 
             self._store_efd = create_event_notifier()
             self._lookup_efd = create_event_notifier()
@@ -505,7 +507,23 @@ class RawBlockL2Adapter(L2AdapterInterface):
             deleted_keys.append(key)
             deleted_sizes.append(0 if meta is None else int(self._core.slot_bytes))
         if deleted_keys:
-            self._notify_keys_deleted(deleted_keys, deleted_sizes)
+            try:
+                self._notify_keys_deleted(deleted_keys, deleted_sizes)
+            except Exception as e:
+                logger.warning("RawBlockL2Adapter delete notification failed: %s", e)
+
+    def register_listener(self, listener: "L2AdapterListener") -> None:
+        """Register a listener and seed it with currently indexed keys."""
+        super().register_listener(listener)
+        keys = self._snapshot_indexed_object_keys()
+        if not keys:
+            return
+        try:
+            listener.on_l2_keys_stored(keys)
+        except Exception as e:
+            logger.warning(
+                "RawBlockL2Adapter listener recovery bootstrap failed: %s", e
+            )
 
     def close(self) -> None:
         """Wait for worker pools, close the core, and close eventfds."""
@@ -559,6 +577,39 @@ class RawBlockL2Adapter(L2AdapterInterface):
         task_id = self._next_task_id
         self._next_task_id += 1
         return task_id
+
+    def _seed_usage_from_core_snapshot(self) -> None:
+        """Seed byte counters for entries recovered by RawBlockCore startup."""
+        recovered_keys = self._snapshot_indexed_object_keys()
+        if not recovered_keys:
+            return
+
+        slot_bytes = int(self._core.slot_bytes)
+        total_delta = len(recovered_keys) * slot_bytes
+        by_salt: dict[str, int] = {}
+        for key in recovered_keys:
+            by_salt[key.cache_salt] = by_salt.get(key.cache_salt, 0) + slot_bytes
+
+        with self._usage_lock:
+            self._total_bytes_used += total_delta
+            for salt, delta in by_salt.items():
+                self._bytes_by_cache_salt[salt] = (
+                    self._bytes_by_cache_salt.get(salt, 0) + delta
+                )
+
+    def _snapshot_indexed_object_keys(self) -> list[ObjectKey]:
+        """Return decoded ObjectKeys for all indexed raw-block entries."""
+        keys: list[ObjectKey] = []
+        for encoded_key in self._core.snapshot_indexed_keys():
+            try:
+                keys.append(decode_object_key(encoded_key))
+            except Exception as e:
+                logger.warning(
+                    "RawBlockL2Adapter could not decode indexed key %r: %s",
+                    encoded_key,
+                    e,
+                )
+        return keys
 
     def _run_store_task(
         self,
