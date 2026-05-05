@@ -366,6 +366,13 @@ class LMCacheMPConnector:
         )
         block_ids = [0] * prefix_pad_pages + fresh_block_ids
 
+        # Successful RETRIEVE releases its read locks via
+        # ``finish_read_prefetched`` inside the daemon. The trailing
+        # ``_free_lookup_locks`` here is only the failure path's cleanup —
+        # calling it after a successful RETRIEVE would double-release the
+        # same locks and trigger the daemon's
+        # ``finish read on non-read-locked key`` warning.
+        retrieve_succeeded = False
         try:
             future = self._submit_retrieve(
                 request_id=request_id,
@@ -379,10 +386,12 @@ class LMCacheMPConnector:
                 raise RuntimeError(
                     f"LMCache MP retrieve failed for request_id={request_id}"
                 )
+            retrieve_succeeded = True
         finally:
-            self._free_lookup_locks(
-                load_metadata.token_ids, offset, retrieve_token_num, request_id
-            )
+            if not retrieve_succeeded:
+                self._free_lookup_locks(
+                    load_metadata.token_ids, offset, retrieve_token_num, request_id
+                )
             self._end_session(request_id)
         return retrieve_token_num - offset
 
