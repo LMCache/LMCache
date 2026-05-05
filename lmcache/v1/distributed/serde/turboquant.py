@@ -19,6 +19,7 @@ Serialized layout: [num_layers, num_blocks, block_size, num_heads, slot_size]
 from dataclasses import dataclass
 from functools import lru_cache
 import math
+import subprocess
 
 # Third Party
 import torch
@@ -59,11 +60,22 @@ _TQ_LAYER_SEED_STRIDE = 1337
 
 @dataclass(frozen=True)
 class TurboQuantSerdeConfig:
-    """Configuration for TurboQuant serde."""
+    """Configuration for TurboQuant serde.
+
+    Args:
+        preset: TurboQuant compression preset.
+        head_dim: Per-head hidden dimension.
+        block_size: Token block size used by the compressed layout.
+        cuda_device: CUDA staging device used when both source and destination
+            tensors are CPU tensors. Empty string means automatically select a
+            CUDA device with sufficient free memory and the lowest GPU
+            utilization.
+    """
 
     preset: str = "turboquant_k8v4"
     head_dim: int = 128
     block_size: int = 16
+    cuda_device: str = ""
 
     @property
     def _preset_config(self) -> dict[str, object]:
@@ -322,19 +334,158 @@ def _make_tq_tensors_for_layer(
     return pi_t, midpoints, centroids
 
 
-def _select_cuda_device(*tensors: torch.Tensor) -> torch.device:
-    """Select a CUDA device for Triton work.
+def _tensor_nbytes(tensor: torch.Tensor) -> int:
+    """Return the number of bytes occupied by a tensor.
 
-    If any tensor is already on CUDA, reuse its device. Otherwise use the
-    current CUDA device. This allows StorageManager E2E paths whose L1
-    MemoryObj tensors are CPU / pinned-memory tensors.
+    Args:
+        tensor: Tensor whose storage size should be estimated.
+
+    Returns:
+        Number of bytes represented by the tensor shape and element size.
     """
-    for tensor in tensors:
-        if tensor.is_cuda:
-            return tensor.device
+    return tensor.numel() * tensor.element_size()
+
+
+def _cuda_utilization(device_index: int) -> int:
+    """Return GPU utilization percentage for a CUDA device.
+
+    Args:
+        device_index: CUDA device index.
+
+    Returns:
+        GPU utilization percentage. Returns 0 if utilization cannot be queried.
+    """
+    try:
+        out = subprocess.check_output(
+            [
+                "nvidia-smi",
+                f"--id={device_index}",
+                "--query-gpu=utilization.gpu",
+                "--format=csv,noheader,nounits",
+            ],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        )
+        return int(out.strip().splitlines()[0])
+    except Exception:
+        return 0
+
+
+def _normalize_cuda_device(cuda_device: str) -> torch.device:
+    """Normalize a configured CUDA device string.
+
+    Args:
+        cuda_device: CUDA device string, such as "0", "cuda", or "cuda:0".
+
+    Returns:
+        Normalized torch CUDA device.
+
+    Raises:
+        ValueError: If the configured device is not a CUDA device.
+    """
+    if cuda_device.isdigit():
+        return torch.device(f"cuda:{cuda_device}")
+
+    device = torch.device(cuda_device)
+    if device.type != "cuda":
+        raise ValueError(
+            f"TurboQuant cuda_device must be a CUDA device, got {cuda_device!r}"
+        )
+    if device.index is None:
+        return torch.device("cuda", torch.cuda.current_device())
+    return torch.device("cuda", device.index)
+
+
+def _auto_select_cuda_device(required_bytes: int) -> torch.device:
+    """Select a CUDA device with enough free memory and lowest utilization.
+
+    Args:
+        required_bytes: Estimated temporary CUDA memory required by the serde
+            operation.
+
+    Returns:
+        Selected CUDA device.
+
+    Raises:
+        RuntimeError: If CUDA is unavailable or no device has enough free memory.
+    """
     if not torch.cuda.is_available():
         raise RuntimeError("TurboQuant Triton serde requires CUDA")
-    return torch.device("cuda", torch.cuda.current_device())
+
+    candidates: list[tuple[int, int, int]] = []
+    for device_index in range(torch.cuda.device_count()):
+        with torch.cuda.device(device_index):
+            free_bytes, _ = torch.cuda.mem_get_info()
+
+        if int(free_bytes) < required_bytes:
+            continue
+
+        util = _cuda_utilization(device_index)
+        candidates.append((util, -int(free_bytes), device_index))
+
+    if not candidates:
+        raise RuntimeError(
+            "No CUDA device has enough free memory for TurboQuant serde staging: "
+            f"required_bytes={required_bytes}"
+        )
+
+    _, _, selected = min(candidates)
+    torch.cuda.set_device(selected)
+    return torch.device("cuda", selected)
+
+
+def _select_cuda_device(
+    required_bytes: int,
+    configured_cuda_device: str,
+    *tensors: torch.Tensor,
+) -> torch.device:
+    """Select the CUDA device for TurboQuant Triton kernels.
+
+    Args:
+        required_bytes: Estimated temporary CUDA memory required by the serde
+            operation.
+        configured_cuda_device: Explicit CUDA device from config. Empty string
+            means auto-select when CPU staging is needed.
+        tensors: Source and destination tensors participating in the serde
+            operation.
+
+    Returns:
+        CUDA device used for Triton kernels and temporary staging.
+
+    Raises:
+        RuntimeError: If CUDA is unavailable or no device has enough memory.
+        ValueError: If CUDA tensors are on different devices, or if the
+            configured CUDA device conflicts with existing CUDA tensors.
+    """
+    cuda_devices = {tensor.device for tensor in tensors if tensor.is_cuda}
+
+    if len(cuda_devices) > 1:
+        devices = ", ".join(sorted(str(device) for device in cuda_devices))
+        raise ValueError(
+            "TurboQuant serde requires all CUDA tensors in one operation "
+            f"to be on the same device, got: {devices}"
+        )
+
+    if configured_cuda_device:
+        configured = _normalize_cuda_device(configured_cuda_device)
+        if cuda_devices and configured not in cuda_devices:
+            existing = next(iter(cuda_devices))
+            raise ValueError(
+                "Configured TurboQuant cuda_device conflicts with tensor device: "
+                f"configured={configured}, tensor_device={existing}"
+            )
+        return configured
+
+    if cuda_devices:
+        selected = next(iter(cuda_devices))
+        if selected.index is None:
+            selected = torch.device("cuda", torch.cuda.current_device())
+        else:
+            selected = torch.device("cuda", selected.index)
+        torch.cuda.set_device(selected)
+        return selected
+
+    return _auto_select_cuda_device(required_bytes)
 
 
 
@@ -361,12 +512,27 @@ class TurboQuantSerializer(Serializer):
             raise ValueError(
                 f"TurboQuant serialized destination must be torch.uint8, got {dst_tensor.dtype}"
             )
-        cuda_device = _select_cuda_device(src_tensor, dst_tensor)
+        required_cuda_bytes = n_bytes
+        if not src_tensor.is_cuda:
+            required_cuda_bytes += _tensor_nbytes(src_tensor)
+        if not dst_tensor.is_cuda:
+            required_cuda_bytes += n_bytes
+
+        cuda_device = _select_cuda_device(
+            required_cuda_bytes,
+            self._cfg.cuda_device,
+            src_tensor,
+            dst_tensor,
+        )
 
         # StorageManager may provide CPU / pinned-memory MemoryObjs. Triton
         # kernels require CUDA tensors, so use temporary CUDA buffers when
         # necessary and copy the serialized bytes back to the original dst.
-        src_work = src_tensor if src_tensor.is_cuda else src_tensor.to(cuda_device)
+        src_work = (
+            src_tensor
+            if src_tensor.is_cuda
+            else src_tensor.to(device=cuda_device, non_blocking=True)
+        )
         dst_work = (
             dst_tensor
             if dst_tensor.is_cuda
@@ -450,7 +616,18 @@ class TurboQuantDeserializer(Deserializer):
             raise ValueError(
                 f"TurboQuant serialized source must be torch.uint8, got {src_tensor.dtype}"
             )
-        cuda_device = _select_cuda_device(src_tensor, dst_tensor)
+        required_cuda_bytes = n_bytes
+        if not src_tensor.is_cuda:
+            required_cuda_bytes += n_bytes
+        if not dst_tensor.is_cuda:
+            required_cuda_bytes += _tensor_nbytes(dst_tensor)
+
+        cuda_device = _select_cuda_device(
+            required_cuda_bytes,
+            self._cfg.cuda_device,
+            src_tensor,
+            dst_tensor,
+        )
 
         # StorageManager may provide CPU / pinned-memory MemoryObjs. Triton
         # kernels require CUDA tensors, so copy compressed bytes to CUDA and
@@ -458,7 +635,10 @@ class TurboQuantDeserializer(Deserializer):
         src_work = (
             src_tensor
             if src_tensor.is_cuda
-            else src_tensor.flatten()[:n_bytes].to(cuda_device)
+            else src_tensor.flatten()[:n_bytes].to(
+                device=cuda_device,
+                non_blocking=True,
+            )
         )
         dst_work = (
             dst_tensor

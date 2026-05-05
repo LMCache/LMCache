@@ -160,12 +160,23 @@ attention outputs.
 ## Device Handling
 
 TurboQuant uses Triton kernels, so tensors participating in one kernel launch
-must be on the same CUDA device. CPU / pinned-memory tensors may be staged to a
-CUDA working buffer before kernel execution and copied back afterward.
+must be on the same CUDA device.
 
-Implementations should avoid assuming `cuda:0`. Helper tensors and temporary
-buffers should follow the selected CUDA working device derived from the source
-and destination `MemoryObj` tensors.
+Device selection follows these rules:
+
+1. If any source or destination tensor is already on CUDA, all CUDA tensors in
+   the same serde operation must be on the same device. Otherwise, TurboQuant
+   serde raises `ValueError`.
+2. If `cuda_device` is configured, that device is used as the staging device.
+   If CUDA tensors already exist, the configured device must match them.
+3. If all source and destination tensors are CPU tensors and `cuda_device` is
+   not configured, TurboQuant serde selects a CUDA device with sufficient free
+   memory and the lowest GPU utilization.
+4. CPU / pinned-memory tensors are staged to the selected CUDA working device
+   before Triton kernel execution and copied back afterward.
+
+This backend does not change LMCache runtime placement policy; the automatic
+selection only applies to CPU-only serde staging.
 
 ## Relationship to vLLM TurboQuant
 
