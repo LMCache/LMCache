@@ -85,6 +85,13 @@ enum class GPUKVFormat : int {
   - vLLM non-MLA flash infer (HND layout)
   physical shape per layer: [num_blocks, 2, num_heads, block_size, head_size]
   */
+
+  NB_NL_TWO_NH_BS_HS = 8,
+  /*
+  used by:
+  - TRT-LLM cross-layer (HND layout)
+  physical shape: [num_blocks, num_layers, 2, num_heads, block_size, head_size]
+  */
 };
 
 void multi_layer_kv_transfer(

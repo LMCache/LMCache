@@ -52,16 +52,34 @@ Open **http://localhost:3000** → **Explore** → datasource **Tempo**.
 
 # Only cache-hit requests (had a retrieve)
 { name = "request" } >> { name = "mp.retrieve" }
+
+# Requests with less than 50 % cache hit rate
+{ name = "request" && span.hit_rate < 0.5 }
+
+# Full cache hits only
+{ name = "request" && span.hit_rate = 1.0 }
+
+# Complete misses (lookup ran but nothing was cached)
+{ name = "request" && span.requested_tokens > 0 && span.hit_tokens = 0 }
 ```
 
-Click any trace to open the waterfall:
+Click any trace to open the waterfall. Each root `request` span carries three
+per-request cache hit rate attributes:
+
+| Attribute | Type | Description |
+|-----------|------|-------------|
+| `hit_tokens` | int | tokens served from L1+L2 cache |
+| `requested_tokens` | int | total chunk-aligned tokens submitted for lookup |
+| `hit_rate` | float | `hit_tokens / requested_tokens` (0.0 on a total miss) |
 
 ```
-request  [══════════════════════════════════════]
+request  [══════════════════════════════════════]  hit_rate=0.75
   mp.lookup_prefetch  [════]
   mp.retrieve               [════════]
   mp.store                            [══════]
 ```
+
+Store-only requests (no lookup phase) do not carry these attributes.
 
 The pre-provisioned **LMCache** dashboard under **Dashboards** shows cache hit
 rate, StorageManager read/write rates, and the live trace panel.

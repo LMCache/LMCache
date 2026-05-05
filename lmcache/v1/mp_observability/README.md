@@ -24,6 +24,9 @@ EventBus  (async queue + drain thread)
     │
     ├──► L1MetricsSubscriber          → OTel counter.add(...)
     ├──► SMMetricsSubscriber          → OTel counter.add(...)
+    ├──► EventBusSelfMetricsSubscriber → OTel observable gauges/counters
+    │                                    (bus health: queue depth, drain
+    │                                    lag, drops, subscriber exceptions)
     ├──► L1LoggingSubscriber          → logger.debug(...)
     ├──► SMLoggingSubscriber          → logger.debug(...)
     ├──► MPServerLoggingSubscriber    → logger.debug(...)

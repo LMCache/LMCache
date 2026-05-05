@@ -127,8 +127,9 @@ class KVLayerGroupsManager:
 
         Args:
             kv_caches: KV cache structure accepted by
-                :func:`discover_gpu_kv_format`.
-            gpu_kv_format: Format returned by :func:`discover_gpu_kv_format`.
+                :func:`normalize_kv_and_discover_format`.
+            gpu_kv_format: Format returned by
+                :func:`normalize_kv_and_discover_format`.
             num_blocks: Number of paged blocks. Stamped into every
                 ``shape_desc.nb``.
             block_size: Tokens per block. Stamped into every
