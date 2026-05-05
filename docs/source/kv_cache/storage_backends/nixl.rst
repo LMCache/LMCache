@@ -169,6 +169,6 @@ Example ``lmcache-config.yaml`` for AZURE_BLOB backend with dynamic mode:
     nixl_pool_size: 0
     nixl_presence_cache: False
     nixl_async_put: False
-      nixl_backend_params:
-        account_url: https://<your_azure_storage_account_name>.blob.core.windows.net
-        container_name: <your_container_name>
+    nixl_backend_params:
+      account_url: https://<your_azure_storage_account_name>.blob.core.windows.net
+      container_name: <your_container_name>
