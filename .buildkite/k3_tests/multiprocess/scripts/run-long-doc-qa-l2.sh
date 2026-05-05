@@ -484,17 +484,34 @@ def counter_total(name: str) -> float:
     return total
 
 
-def histogram_count(name: str) -> float:
+def histogram_count(base_name: str) -> float:
     """Sum the ``_count`` series across all label combinations.
 
     Non-zero means the histogram observed at least one sample.
+
+    The OTel→Prometheus bridge appends the OTel ``unit`` to the metric
+    name (e.g. unit ``GB/s`` → ``GB_per_second``), so the actual series
+    looks like ``<base>_GB_per_second_count``.  Match that as a suffix
+    so this works whether or not the unit is present.
     """
-    return counter_total(f"{name}_count")
+    pat = re.compile(
+        rf"^{re.escape(base_name)}(?:_[A-Za-z_]+)?_count(?:\{{[^}}]*\}})?\s+"
+        rf"([0-9eE+\-.]+)\s*$",
+        re.M,
+    )
+    return sum(float(v) for v in pat.findall(text))
 
 
-def has_label(name: str, label: str) -> bool:
-    """Check that at least one sample of `name` carries the named label."""
-    pat = re.compile(rf"^{re.escape(name)}\{{[^}}]*\b{re.escape(label)}=", re.M)
+def has_label(base_name: str, label: str) -> bool:
+    """Check that at least one sample of `base_name` carries the named label.
+
+    Tolerates the OTel unit suffix that Prometheus appends to histograms.
+    """
+    pat = re.compile(
+        rf"^{re.escape(base_name)}(?:_[A-Za-z_]+)?(?:_count|_sum|_bucket)?"
+        rf"\{{[^}}]*\b{re.escape(label)}=",
+        re.M,
+    )
     return bool(pat.search(text))
 
 
@@ -506,7 +523,11 @@ checks = [
     ("counter", "lmcache_mp_lookup_requested_tokens_total", "model_name"),
     ("counter", "lmcache_mp_lookup_hit_tokens_total", "model_name"),
     ("counter", "lmcache_mp_num_chunks_loaded_total", "worker_id"),
-    # ── Histograms (sample_rate=1.0, so _count must >0) ────────────
+    # ── Histograms.  The OTel→Prometheus bridge appends the OTel
+    # ``unit`` to the series name, so a histogram declared with
+    # ``unit="GB/s"`` actually reports as
+    # ``<name>_GB_per_second_count`` / ``..._sum`` / ``..._bucket``.
+    # Match by base name and let the helper tolerate the unit suffix.
     ("hist", "lmcache_mp_l0_l1_store_throughput_gbs", None),
     ("hist", "lmcache_mp_l0_l1_load_throughput_gbs", None),
     ("hist", "lmcache_mp_l2_store_throughput_gbs", "l2_name"),
