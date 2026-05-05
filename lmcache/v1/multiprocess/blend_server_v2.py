@@ -709,16 +709,12 @@ class BlendEngineV2(MPCacheEngine):
                     tmp_buffer.copy_(gpu_kv_slice, non_blocking=True)
                     lmcache_memcpy_async_d2h(tmp_buffer, memory_obj)
 
-            # Enqueue finish_write before event.record() so the client's
-            # event.synchronize() cannot unblock until finish_write has committed
-            # the data to the storage index. Both calls target the same underlying
-            # CUDA stream (cupy_stream is an ExternalStream wrapping
-            # gpu_context.stream), so the ordering guarantee holds.
-            gpu_context.cupy_stream.launch_host_func(
-                self.storage_manager.finish_write,
-                list(reserved_dict.keys()),
-            )
             event.record()
+        # Call finish_write after the copy is done
+        gpu_context.cupy_stream.launch_host_func(
+            self.storage_manager.finish_write,
+            list(reserved_dict.keys()),
+        )
 
         return event, reserved_dict
 
