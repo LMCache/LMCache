@@ -49,6 +49,9 @@ MAX_WARMUP_OVERHEAD="${MAX_WARMUP_OVERHEAD:-2.0}"
 
 L2_RESULTS_DIR="$RESULTS_DIR/long_doc_qa_l2"
 PID_FILE="/tmp/lmcache_mp_pids_${BUILD_ID}"
+# Defined here (not just in Step 4) so the relaunch can pin LMCache's
+# Prometheus endpoint to the same port the curl scrape reads from.
+PROMETHEUS_PORT="${PROMETHEUS_PORT:-9090}"
 
 echo "=== Long Doc QA L2 Performance Test ==="
 echo "Model: $MODEL"
@@ -94,6 +97,7 @@ lmcache server \
     --l2-adapter "$L2_ADAPTER_JSON" \
     --max-workers "$MAX_WORKERS" \
     --metrics-sample-rate 1.0 \
+    --prometheus-port "$PROMETHEUS_PORT" \
     --port "$LMCACHE_PORT" \
     > "/tmp/build_${BUILD_ID}_lmcache_l2.log" 2>&1 &
 
@@ -320,9 +324,18 @@ echo "============================================"
 echo "=== Verifying L2 Data Flow (Metrics) ==="
 echo "============================================"
 
-PROMETHEUS_PORT="${PROMETHEUS_PORT:-9090}"
 L2_METRICS_FILE="$L2_RESULTS_DIR/prometheus_metrics.txt"
-curl -sf "http://localhost:${PROMETHEUS_PORT}/metrics" > "$L2_METRICS_FILE" 2>/dev/null || true
+# Retry briefly: when LMCache is relaunched on the same port as the
+# previous instance, the Prometheus socket can take a moment to come
+# back up, and a single-shot curl loses the metrics check silently.
+> "$L2_METRICS_FILE"
+for i in 1 2 3 4 5; do
+    if curl -sf "http://localhost:${PROMETHEUS_PORT}/metrics" \
+            > "$L2_METRICS_FILE" 2>/dev/null && [ -s "$L2_METRICS_FILE" ]; then
+        break
+    fi
+    sleep 2
+done
 
 if [ ! -s "$L2_METRICS_FILE" ]; then
     echo "WARNING: Could not fetch metrics from Prometheus (port $PROMETHEUS_PORT). Skipping data flow check."
