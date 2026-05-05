@@ -288,6 +288,27 @@ class TestPrefixSuffixTunerData:
         assert w1._prefixes != w2._prefixes
         assert w1._suffix != w2._suffix
 
+    def test_prefix_bodies_are_distinct_across_prefixes(self) -> None:
+        """CacheBlend-correctness invariant: prefixes must not just differ in
+        their unique-ID header — their *body* tokens must differ too, so
+        chunk-level content fingerprints don't collide across prefixes and
+        artificially inflate the blend hit rate."""
+        w, *_ = _make_workload(_make_workload_config(num_prefixes=8))
+        # Strip the unique-ID header (everything before the first space) and
+        # compare bodies — they should all be distinct.
+        bodies = [p.split(" ", 1)[1] for p in w._prefixes]
+        assert len(set(bodies)) == 8, (
+            "Prefix bodies must differ across prefixes for CacheBlend "
+            "fingerprint uniqueness; got duplicates."
+        )
+
+    def test_vocab_pool_has_correct_size(self) -> None:
+        w, *_ = _make_workload()
+        # Pool size constant in prefix_suffix_tuner.py is _VOCAB_POOL_SIZE = 8000.
+        assert len(w._vocab_pool) == 8000
+        # All entries unique (set-based generation).
+        assert len(set(w._vocab_pool)) == 8000
+
 
 # ---------------------------------------------------------------------------
 # Message construction — request structure

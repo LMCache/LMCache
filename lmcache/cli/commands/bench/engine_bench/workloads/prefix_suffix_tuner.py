@@ -196,72 +196,126 @@ class PrefixSuffixTunerConfig:
 # ---------------------------------------------------------------------------
 
 
-def _random_word_stream(rng: random.Random, count: int) -> str:
-    """Return ``count`` space-separated random tokens drawn from *rng*.
+_VOCAB_POOL_SIZE = 8000
 
-    Uses 6-digit zero-padded random integers so each token tokenizes to
-    roughly one BPE token across most tokenizers, keeping the generated
-    text close to the requested token count.
+
+def _generate_vocab_pool(size: int, seed: int) -> list[str]:
+    """Generate a deterministic pool of ``size`` unique pseudo-words.
+
+    Words follow a consonant-vowel pattern (e.g. ``"boko42"``, ``"rida71"``)
+    with a numeric uniqueness suffix.  Mirrors the approach used by
+    :mod:`long_doc_permutator` so that:
+
+    - **Token counts** are reasonably close to the configured target — each
+      pseudo-word tokenizes to ~2 BPE tokens on common tokenizers (vs. 3+
+      for raw 6-digit numbers), giving a smaller and more consistent
+      expansion factor.
+    - **CacheBlend** does not get false hits across prefixes: each prefix
+      samples a *different* random sequence from the pool, so chunk-level
+      content fingerprints virtually never collide between prefixes.
 
     Args:
+        size: Number of unique pseudo-words to generate.
+        seed: Deterministic seed for the pool.
+
+    Returns:
+        Sorted list of unique pseudo-words.
+    """
+    rng = random.Random(seed)
+    vowels = "aeiou"
+    consonants = "bcdfghjklmnpqrstvwxyz"
+    pool: set[str] = set()
+    while len(pool) < size:
+        length = rng.randint(3, 7)
+        word = "".join(
+            rng.choice(consonants) if j % 2 == 0 else rng.choice(vowels)
+            for j in range(length)
+        )
+        pool.add(f"{word}{len(pool)}")
+    return sorted(pool)
+
+
+def _sample_words(pool: list[str], rng: random.Random, count: int) -> str:
+    """Return ``count`` space-separated words sampled (with replacement) from *pool*.
+
+    Args:
+        pool: Vocabulary pool.
         rng: Seeded random source.
         count: Number of words to emit.
 
     Returns:
         A single space-joined string.
     """
-    return " ".join(f"{rng.randrange(1_000_000):06d}" for _ in range(count))
+    return " ".join(rng.choices(pool, k=count))
 
 
-def _generate_prefix(index: int, num_tokens: int, rng: random.Random) -> str:
+def _generate_prefix(
+    index: int,
+    num_tokens: int,
+    pool: list[str],
+    rng: random.Random,
+) -> str:
     """Generate a prefix that begins with a unique ID.
 
+    Each prefix samples a different random sequence from the shared vocab
+    pool; combined with the unique ID header, this makes both prefix-cache
+    chained block hashes and CacheBlend chunk fingerprints unique across
+    prefixes.
+
     Args:
-        index: Zero-based prefix index; encoded into the unique ID so the
-            prefix's tokenized hash differs from every other prefix even
-            if random bodies collide.
+        index: Zero-based prefix index; encoded into the unique ID.
         num_tokens: Approximate target token length of the full prefix.
-        rng: Seeded random source for the body.
+        pool: Shared vocab pool.
+        rng: Per-prefix seeded random source (caller passes a distinct
+            RNG state per index so bodies differ across prefixes).
 
     Returns:
         Prefix text starting with ``"PREFIX_<8-hex-digits>"``.
     """
     unique_id = f"PREFIX_{index:08x}"
     body_words = max(num_tokens - _UNIQUE_ID_TOKENS, 1)
-    body = _random_word_stream(rng, body_words)
+    body = _sample_words(pool, rng, body_words)
     return f"{unique_id} {body}"
 
 
-def _generate_suffix(num_tokens: int, rng: random.Random) -> str:
+def _generate_suffix(num_tokens: int, pool: list[str], rng: random.Random) -> str:
     """Generate the single shared suffix used by every request.
+
+    The suffix is bit-identical across all requests; its chunk fingerprints
+    are therefore the only entries CacheBlend can reuse — which is exactly
+    what the workload measures.
 
     Args:
         num_tokens: Approximate target token length.
-        rng: Seeded random source.
+        pool: Shared vocab pool.
+        rng: Seeded random source (deterministic seed produces a
+            reproducible suffix).
 
     Returns:
         Suffix text starting with ``"SUFFIX"``.
     """
-    body = _random_word_stream(rng, max(num_tokens - 1, 1))
+    body = _sample_words(pool, rng, max(num_tokens - 1, 1))
     return f"SUFFIX {body}"
 
 
-def _generate_breaker(num_tokens: int, rng: random.Random) -> str:
+def _generate_breaker(num_tokens: int, pool: list[str], rng: random.Random) -> str:
     """Generate a fresh random breaker for one request.
 
-    The breaker sits between prefix and suffix; its randomness defeats
-    ordinary prefix caching past the prefix boundary and prevents
-    non-CacheBlend reuse of the suffix.
+    Sampled fresh per request from the vocab pool, so each request has a
+    unique sequence of breaker tokens.  This (a) defeats ordinary prefix
+    caching past the prefix boundary, and (b) ensures the chained block
+    hashes leading into the suffix differ between requests, so the suffix
+    is only reachable via CacheBlend's content-based chunk lookup.
 
     Args:
         num_tokens: Approximate target token length.
-        rng: Seeded random source.  Each call advances state, so successive
-            requests get different breakers.
+        pool: Shared vocab pool.
+        rng: Seeded random source.  Each call advances state.
 
     Returns:
         A space-joined random token string.
     """
-    return _random_word_stream(rng, num_tokens)
+    return _sample_words(pool, rng, num_tokens)
 
 
 # ---------------------------------------------------------------------------
@@ -290,13 +344,29 @@ class PrefixSuffixTunerWorkload(BaseWorkload):
         self._config = config
         self._seed = seed
 
-        prefix_rng = random.Random(seed)
+        # Shared vocab pool — sampled by every prefix (with a different
+        # per-prefix RNG offset), the suffix, and per-request breakers.
+        # Same word inventory across all components, but per-component
+        # samples differ so chunk-level fingerprints don't collide.
+        self._vocab_pool = _generate_vocab_pool(_VOCAB_POOL_SIZE, seed=seed)
+
+        # Each prefix uses its own seeded RNG (seed + 1000 + i) so
+        # different prefixes produce different random sequences from the
+        # pool.  Constant offset keeps reproducibility while leaving room
+        # for the suffix (seed + 1) and breaker (seed + 2) RNGs.
         self._prefixes: list[str] = [
-            _generate_prefix(i, config.prefix_tokens, prefix_rng)
+            _generate_prefix(
+                i,
+                config.prefix_tokens,
+                self._vocab_pool,
+                random.Random(seed + 1000 + i),
+            )
             for i in range(config.num_prefixes)
         ]
         suffix_rng = random.Random(seed + 1)
-        self._suffix: str = _generate_suffix(config.suffix_tokens, suffix_rng)
+        self._suffix: str = _generate_suffix(
+            config.suffix_tokens, self._vocab_pool, suffix_rng
+        )
         self._breaker_rng = random.Random(seed + 2)
 
         self._pass2_index = 0
@@ -346,7 +416,9 @@ class PrefixSuffixTunerWorkload(BaseWorkload):
             A single-message chat list.
         """
         prefix = self._prefixes[prefix_index]
-        breaker = _generate_breaker(self._config.breaker_tokens, self._breaker_rng)
+        breaker = _generate_breaker(
+            self._config.breaker_tokens, self._vocab_pool, self._breaker_rng
+        )
         content = f"{prefix} {breaker} {self._suffix}"
         return [{"role": "user", "content": content}]
 

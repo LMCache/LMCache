@@ -487,12 +487,26 @@ other workloads that size themselves around a user-provided GB budget).
 ```
 
 - `num_prefixes` distinct prefixes — each begins with `PREFIX_<8-hex-digits>`
-  so the prefix's tokenized hash differs even if random bodies collide.
+  so the prefix's chained block hash differs from every other prefix.
 - A **fresh random breaker** per request (32 tokens by default), defeating
   ordinary prefix caching past the prefix boundary and preventing
   non-CacheBlend reuse of the suffix.
 - A **single shared suffix**, deterministic and bit-identical across every
   request — the only entry CacheBlend can reuse.
+
+**Synthetic body generation** uses a vocabulary pool of pseudo-words
+(consonant-vowel patterns + numeric suffix, e.g. `"boko42"`), shared by all
+prefixes / suffix / breakers but sampled with a *different* per-component
+RNG offset. Mirrors `long_doc_permutator`'s approach. This guarantees:
+
+- **CacheBlend correctness**: each prefix samples a different random
+  sequence, so chunk-level content fingerprints don't collide across
+  prefixes and inflate the blend hit rate. The shared suffix is the *only*
+  bit-identical chunk surface CacheBlend can reuse — which is what the
+  workload measures.
+- **Predictable token counts**: pseudo-words tokenize to ~2 BPE tokens on
+  most modern tokenizers (vs. ~3 for raw 6-digit numbers), so the actual
+  prompt length is closer to the configured `context_length`.
 
 **Config** (`PrefixSuffixTunerConfig`):
 
