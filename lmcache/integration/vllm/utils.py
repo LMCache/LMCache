@@ -16,7 +16,7 @@ import torch
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.config import LMCacheEngineConfig
+from lmcache.v1.config import LMCacheEngineConfig, load_ec_engine_config
 from lmcache.v1.config_base import apply_remote_configs, fetch_remote_config
 
 if TYPE_CHECKING:
@@ -129,6 +129,11 @@ def lmcache_get_or_create_config() -> LMCacheEngineConfig:
                             remote_config_url,
                         )
     return _config_instance
+
+
+def create_lmcache_ec_config() -> LMCacheEngineConfig:
+    """Create EC config from LMCache config plus EC-specific overrides."""
+    return load_ec_engine_config(base_config=lmcache_get_or_create_config())
 
 
 def hex_hash_to_int16(s: str) -> int:
@@ -353,6 +358,14 @@ def get_vllm_torch_dev():
     else:
         raise RuntimeError("Unsupported device platform for LMCache engine.")
     return torch_dev, dev_name
+
+
+def get_vllm_device_type() -> str:
+    """Return current vLLM platform device type string (e.g. cuda/xpu)."""
+    # Third Party
+    from vllm.platforms import current_platform
+
+    return current_platform.device_type
 
 
 def calculate_local_rank_and_world_size(vllm_config: "VllmConfig") -> Tuple[int, int]:

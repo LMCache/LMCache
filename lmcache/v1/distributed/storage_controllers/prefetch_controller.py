@@ -13,10 +13,10 @@ The controller runs a background thread with an event-driven loop that:
 """
 
 # Standard
+from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Iterable
 import enum
-import os
 import select
 import threading
 
@@ -37,6 +37,11 @@ from lmcache.v1.distributed.storage_controllers.store_policy import (
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import get_event_bus
+from lmcache.v1.mp_observability.otel_init import register_gauge
+from lmcache.v1.platform import (
+    consume_fd,
+    create_event_notifier,
+)
 
 logger = init_logger(__name__)
 
@@ -154,6 +159,9 @@ class InFlightPrefetchRequest:
     load_plan: dict[int, Bitmap] = field(default_factory=dict)
     # Load phase: adapter_idx -> task_id (removed as results arrive)
     pending_load_tasks: dict[int, L2TaskId] = field(default_factory=dict)
+    # Load phase: adapter_idx -> L1 bytes reserved for that adapter's
+    # in-flight load.  Read by the inflight_load_memory_usage_bytes gauge.
+    load_bytes_by_adapter: dict[int, int] = field(default_factory=dict)
     # Load phase: adapter_idx -> bitmap (populated as results arrive)
     load_results: dict[int, Bitmap] = field(default_factory=dict)
     # Load phase: keys that were write-reserved in L1
@@ -187,6 +195,13 @@ class PrefetchController(StorageControllerInterface):
         max_in_flight: Maximum number of concurrent prefetch requests.
     """
 
+    # Singleton dispatch for the in-flight load gauges: tests may construct
+    # multiple controllers but the OTel SDK only honors the first gauge
+    # registration, so the callbacks read from the most recently built
+    # instance via ``_gauge_target``.
+    _gauges_registered: bool = False
+    _gauge_target: "PrefetchController | None" = None
+
     def __init__(
         self,
         l1_manager: L1Manager,
@@ -219,7 +234,7 @@ class PrefetchController(StorageControllerInterface):
             tuple[PrefetchRequestId, list[ObjectKey], MemoryLayoutDesc, int]
         ] = []
         self._next_request_id: PrefetchRequestId = 0
-        self._submission_efd = os.eventfd(0, os.EFD_NONBLOCK | os.EFD_CLOEXEC)
+        self._submission_efd = create_event_notifier()
 
         # Thread-safe lookup results (background -> external)
         self._lookup_results_lock = threading.Lock()
@@ -240,6 +255,30 @@ class PrefetchController(StorageControllerInterface):
             self._load_efd_to_adapter[adapter.get_load_event_fd()] = i
 
         self._event_bus = get_event_bus()
+
+        PrefetchController._gauge_target = self
+        if not PrefetchController._gauges_registered:
+            PrefetchController._gauges_registered = True
+            register_gauge(
+                "lmcache.l2_prefetch",
+                "lmcache_mp.num_inflight_l2_loads",
+                "L2 -> L1 prefetch load tasks currently executing, per adapter",
+                lambda: (
+                    PrefetchController._gauge_target.get_inflight_loads_observations()
+                    if PrefetchController._gauge_target is not None
+                    else []
+                ),
+            )
+            register_gauge(
+                "lmcache.l2_prefetch",
+                "lmcache_mp.inflight_load_memory_usage_bytes",
+                "L1 bytes reserved by in-flight L2 -> L1 prefetch loads, per adapter",
+                lambda: (
+                    PrefetchController._gauge_target.get_inflight_load_bytes_observations()
+                    if PrefetchController._gauge_target is not None
+                    else []
+                ),
+            )
 
         self._stop_flag = threading.Event()
         self._thread = threading.Thread(
@@ -286,7 +325,7 @@ class PrefetchController(StorageControllerInterface):
             request_id = self._next_request_id
             self._next_request_id += 1
             self._submission_queue.append((request_id, keys, layout_desc, extra_count))
-        os.eventfd_write(self._submission_efd, 1)
+        self._submission_efd.notify()
         return request_id
 
     def query_lookup_result(self, request_id: PrefetchRequestId) -> int | None:
@@ -360,6 +399,52 @@ class PrefetchController(StorageControllerInterface):
             "num_l2_adapters": len(self._l2_adapters),
         }
 
+    def _snapshot_inflight_loads(self) -> dict[int, tuple[int, int]]:
+        """``{adapter_idx: (count, reserved_bytes)}`` for in-flight L2 -> L1
+        loads, computed via GIL-atomic ``dict.copy()`` snapshots so the
+        OTel reader thread can call this concurrently with the prefetch
+        loop without locking.
+        """
+        counts: dict[int, int] = defaultdict(int)
+        bytes_by_adapter: dict[int, int] = defaultdict(int)
+        for request in self._in_flight_requests.copy().values():
+            for idx, reserved in request.load_bytes_by_adapter.copy().items():
+                counts[idx] += 1
+                bytes_by_adapter[idx] += reserved
+        return {idx: (counts[idx], bytes_by_adapter[idx]) for idx in counts}
+
+    def get_inflight_loads_observations(
+        self,
+    ) -> list[tuple[int | float, dict[str, object]]]:
+        """Per-adapter ``(count, attributes)`` for the
+        ``lmcache_mp.num_inflight_l2_loads`` gauge."""
+        return [
+            (
+                count,
+                {
+                    "l2_name": self._adapter_descriptors[idx].type_name,
+                    "adapter_index": idx,
+                },
+            )
+            for idx, (count, _) in self._snapshot_inflight_loads().items()
+        ]
+
+    def get_inflight_load_bytes_observations(
+        self,
+    ) -> list[tuple[int | float, dict[str, object]]]:
+        """Per-adapter ``(reserved_bytes, attributes)`` for the
+        ``lmcache_mp.inflight_load_memory_usage_bytes`` gauge."""
+        return [
+            (
+                reserved_bytes,
+                {
+                    "l2_name": self._adapter_descriptors[idx].type_name,
+                    "adapter_index": idx,
+                },
+            )
+            for idx, (_, reserved_bytes) in self._snapshot_inflight_loads().items()
+        ]
+
     # =========================================================================
     # Lifecycle
     # =========================================================================
@@ -377,10 +462,10 @@ class PrefetchController(StorageControllerInterface):
         L2 locks) before returning.
         """
         self._stop_flag.set()
-        os.eventfd_write(self._submission_efd, 1)
+        self._submission_efd.notify()
         self._thread.join()
         self._cleanup_in_flight_requests()
-        os.close(self._submission_efd)
+        self._submission_efd.close()
 
     # =========================================================================
     # Background loop
@@ -396,7 +481,8 @@ class PrefetchController(StorageControllerInterface):
         - Each L2 adapter's load eventfd (completed loads).
         """
         poller = select.poll()
-        poller.register(self._submission_efd, select.POLLIN)
+        submission_fd = self._submission_efd.fileno()
+        poller.register(submission_fd, select.POLLIN)
         for efd in self._lookup_efd_to_adapter:
             poller.register(efd, select.POLLIN)
         for efd in self._load_efd_to_adapter:
@@ -405,29 +491,44 @@ class PrefetchController(StorageControllerInterface):
         while not self._stop_flag.is_set():
             ready = poller.poll(PREFETCH_LOOP_POLL_TIMEOUT_MS)
 
+            signaled_adapters: dict[PrefetchPhase, set[int]] = {
+                phase: set() for phase in PrefetchPhase
+            }
             for fd, events in ready:
                 if not (events & select.POLLIN):
                     continue
 
                 try:
-                    os.eventfd_read(fd)
+                    consume_fd(fd)
                 except (OSError, BlockingIOError):
                     pass
 
                 try:
-                    if fd == self._submission_efd:
+                    if fd == submission_fd:
                         self._drain_submission_queue()
                     elif fd in self._lookup_efd_to_adapter:
-                        self._process_lookup_completions(
+                        signaled_adapters[PrefetchPhase.LOOKUP].add(
                             self._lookup_efd_to_adapter[fd]
                         )
                     elif fd in self._load_efd_to_adapter:
-                        self._process_load_completions(self._load_efd_to_adapter[fd])
+                        signaled_adapters[PrefetchPhase.PLAN_AND_LOAD].add(
+                            self._load_efd_to_adapter[fd]
+                        )
                 except Exception:
                     logger.exception(
                         "Unexpected error in prefetch loop while processing fd %d",
                         fd,
                     )
+
+            if any(signaled_adapters.values()):
+                for request in list(self._in_flight_requests.values()):
+                    try:
+                        self._advance_request(request, signaled_adapters)
+                    except Exception:
+                        logger.exception(
+                            "Unexpected error advancing in-flight prefetch request %d",
+                            request.request_id,
+                        )
 
             try:
                 self._start_pending_requests()
@@ -498,32 +599,6 @@ class PrefetchController(StorageControllerInterface):
             )
         )
 
-    def _process_lookup_completions(self, adapter_index: int) -> None:
-        """Check all LOOKUP-phase requests for completed lookups from
-        this adapter."""
-        ready_to_transition: list[InFlightPrefetchRequest] = []
-
-        for request in list(self._in_flight_requests.values()):
-            if request.phase != PrefetchPhase.LOOKUP:
-                continue
-            if adapter_index not in request.pending_lookup_tasks:
-                continue
-
-            task_id = request.pending_lookup_tasks[adapter_index]
-            result = self._l2_adapters[adapter_index].query_lookup_and_lock_result(
-                task_id
-            )
-
-            if result is not None:
-                request.lookup_results[adapter_index] = result
-                del request.pending_lookup_tasks[adapter_index]
-
-                if request.all_lookups_done():
-                    ready_to_transition.append(request)
-
-        for request in ready_to_transition:
-            self._transition_to_load_phase(request)
-
     # =========================================================================
     # Load phase
     # =========================================================================
@@ -577,18 +652,35 @@ class PrefetchController(StorageControllerInterface):
 
         # Step 4: filter to successfully reserved keys
         reserved_key_set: set[ObjectKey] = set()
+        oom_keys: list[ObjectKey] = []
         for key, (err, mem_obj) in write_results.items():
             if err == L1Error.SUCCESS and mem_obj is not None:
                 request.write_reserved_keys.append(key)
                 request.write_reserved_objs[key] = mem_obj
                 reserved_key_set.add(key)
             else:
+                if err == L1Error.OUT_OF_MEMORY:
+                    oom_keys.append(key)
                 logger.debug(
                     "Prefetch request %d: reserve write failed for %s: %s",
                     request.request_id,
                     key,
                     err,
                 )
+
+        if oom_keys:
+            self._event_bus.publish(
+                Event(
+                    event_type=EventType.L1_ALLOCATION_FAILED,
+                    metadata={"during": "l2_prefetch", "keys": oom_keys},
+                )
+            )
+            self._event_bus.publish(
+                Event(
+                    event_type=EventType.L2_PREFETCH_FAILED,
+                    metadata={"reason": "l1_oom", "keys": oom_keys},
+                )
+            )
 
         # Step 5: recompute load plan excluding failed reservations
         reserved_bitmap = Bitmap(len(request.keys))
@@ -633,6 +725,28 @@ class PrefetchController(StorageControllerInterface):
                 per_adapter_keys, per_adapter_objs
             )
             request.pending_load_tasks[adapter_idx] = task_id
+            # Per-adapter byte accounting for L2_LOAD_TASK_* throughput
+            # events.  Uniform layout per chunk -> size * count.
+            total_bytes = (
+                per_adapter_objs[0].get_size() * len(per_adapter_objs)
+                if per_adapter_objs
+                else 0
+            )
+            request.load_bytes_by_adapter[adapter_idx] = total_bytes
+
+            self._event_bus.publish(
+                Event(
+                    event_type=EventType.L2_LOAD_TASK_SUBMITTED,
+                    metadata={
+                        "request_id": request.request_id,
+                        "adapter_index": adapter_idx,
+                        "task_id": task_id,
+                        "l2_name": self._adapter_descriptors[adapter_idx].type_name,
+                        "key_count": len(per_adapter_keys),
+                        "total_bytes": total_bytes,
+                    },
+                )
+            )
 
         ## Step 8: update the lookup result based on the final load plan
         self._update_lookup_results(request.request_id, prefix_length)
@@ -671,28 +785,72 @@ class PrefetchController(StorageControllerInterface):
         with self._lookup_results_lock:
             self._completed_lookups[request_id] = hit_chunks
 
-    def _process_load_completions(self, adapter_index: int) -> None:
-        """Check all PLAN_AND_LOAD-phase requests for completed loads."""
-        ready_to_finalize: list[InFlightPrefetchRequest] = []
+    def _advance_request(
+        self,
+        request: InFlightPrefetchRequest,
+        signaled_adapters: dict[PrefetchPhase, set[int]],
+    ) -> None:
+        """State-transition dispatcher by phase: poll signaled adapters for
+        the request's current phase via the per-phase helper, then trigger
+        the phase transition when done."""
+        phase_adapters = signaled_adapters[request.phase]
+        if not phase_adapters:
+            return
+        if request.phase == PrefetchPhase.LOOKUP:
+            self._poll_lookup_results(request, phase_adapters)
+            if request.all_lookups_done():
+                self._transition_to_load_phase(request)
+        elif request.phase == PrefetchPhase.PLAN_AND_LOAD:
+            self._poll_load_results(request, phase_adapters)
+            if request.all_loads_done():
+                self._finalize_load(request)
 
-        for request in list(self._in_flight_requests.values()):
-            if request.phase != PrefetchPhase.PLAN_AND_LOAD:
+    def _poll_lookup_results(
+        self,
+        request: InFlightPrefetchRequest,
+        signaled_adapters: set[int],
+    ) -> None:
+        """Query pending lookup-and-lock results from signaled adapters."""
+        for adapter_idx in list(request.pending_lookup_tasks):
+            if adapter_idx not in signaled_adapters:
                 continue
-            if adapter_index not in request.pending_load_tasks:
+            task_id = request.pending_lookup_tasks[adapter_idx]
+            result = self._l2_adapters[adapter_idx].query_lookup_and_lock_result(
+                task_id
+            )
+            if result is None:
                 continue
+            request.lookup_results[adapter_idx] = result
+            del request.pending_lookup_tasks[adapter_idx]
 
-            task_id = request.pending_load_tasks[adapter_index]
-            result = self._l2_adapters[adapter_index].query_load_result(task_id)
+    def _poll_load_results(
+        self,
+        request: InFlightPrefetchRequest,
+        signaled_adapters: set[int],
+    ) -> None:
+        """Query pending load results from signaled adapters."""
+        for adapter_idx in list(request.pending_load_tasks):
+            if adapter_idx not in signaled_adapters:
+                continue
+            task_id = request.pending_load_tasks[adapter_idx]
+            result = self._l2_adapters[adapter_idx].query_load_result(task_id)
+            if result is None:
+                continue
+            request.load_results[adapter_idx] = result
+            del request.pending_load_tasks[adapter_idx]
+            request.load_bytes_by_adapter.pop(adapter_idx, None)
 
-            if result is not None:
-                request.load_results[adapter_index] = result
-                del request.pending_load_tasks[adapter_index]
-
-                if request.all_loads_done():
-                    ready_to_finalize.append(request)
-
-        for request in ready_to_finalize:
-            self._finalize_load(request)
+            self._event_bus.publish(
+                Event(
+                    event_type=EventType.L2_LOAD_TASK_COMPLETED,
+                    metadata={
+                        "request_id": request.request_id,
+                        "adapter_index": adapter_idx,
+                        "task_id": task_id,
+                        "l2_name": self._adapter_descriptors[adapter_idx].type_name,
+                    },
+                )
+            )
 
     def _finalize_load(self, request: InFlightPrefetchRequest) -> None:
         """
@@ -750,6 +908,19 @@ class PrefetchController(StorageControllerInterface):
                 },
             )
         )
+
+        # L2 prefetch-failure anomaly reporting: keys were reserved in L1
+        # (expected to load from L2) but did not appear in the load bitmap.
+        # Classified as ``not_found`` — the serde_failure reason will be
+        # added once the serde PR lands and adapters can distinguish
+        # deserialization errors from missing objects.
+        if failed_keys:
+            self._event_bus.publish(
+                Event(
+                    event_type=EventType.L2_PREFETCH_FAILED,
+                    metadata={"reason": "not_found", "keys": failed_keys},
+                )
+            )
 
         # Partial load failures can create gaps in the prefix.
         # Release read locks for loaded keys beyond the prefix.

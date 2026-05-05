@@ -20,6 +20,9 @@ from lmcache.v1.distributed.error import L1Error, strerror
 from lmcache.v1.distributed.l1_manager import L1Manager
 from lmcache.v1.distributed.l2_adapters import create_l2_adapter
 from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface
+from lmcache.v1.distributed.l2_adapters.serde_wrapper import SerdeL2AdapterWrapper
+from lmcache.v1.distributed.quota_manager import QuotaManager
+from lmcache.v1.distributed.serde import create_serde_processor
 from lmcache.v1.distributed.storage_controllers import (
     L1EvictionController,
     L2AdapterEvictionState,
@@ -58,25 +61,62 @@ class StorageManager:
         )
         self._eviction_controller.start()
 
-        # L2 adapters and store controller
+        # L2 adapters and store controller. When an adapter config carries
+        # a ``serde_config``, the adapter is wrapped with
+        # ``SerdeL2AdapterWrapper`` so controllers see a plain L2 adapter
+        # and serde is transparent.
         l1_memory_desc = self._l1_manager.get_l1_memory_desc()
-        self._l2_adapters: list[L2AdapterInterface] = [
-            create_l2_adapter(ac, l1_memory_desc)
-            for ac in config.l2_adapter_config.adapters
-        ]
+        self._l2_adapters: list[L2AdapterInterface] = []
+        for ac in config.l2_adapter_config.adapters:
+            adapter: L2AdapterInterface = create_l2_adapter(ac, l1_memory_desc)
+            if ac.serde_config is not None:
+                adapter = SerdeL2AdapterWrapper(
+                    inner=adapter,
+                    serde=create_serde_processor(ac.serde_config),
+                    l1_manager=self._l1_manager,
+                )
+            self._l2_adapters.append(adapter)
 
-        # Unified L2 eviction controller for all adapters with eviction config
-        l2_eviction_states = [
-            L2AdapterEvictionState(
-                adapter=adapter,
-                eviction_config=ac.eviction_config,
+        # Per-cache_salt quota registry. Shared across the L2 eviction
+        # controller (reads quotas each cycle) and the HTTP quota
+        # endpoints (CRUD). Present even when no adapter uses
+        # IsolatedLRU so the HTTP layer has a stable ``quota_manager``
+        # reference. No explicit cleanup on close — the registry is
+        # just a dict protected by a lock and has no OS resources.
+        self._quota_manager = QuotaManager()
+
+        # Unified L2 eviction controller for all adapters with eviction
+        # config. Aggregate-usage policies (``LRU``, ``noop``) need
+        # ``max_capacity_bytes > 0`` to compute a usage fraction;
+        # adapters without capacity are skipped for those. Isolated
+        # policies (``IsolatedLRU``) operate on per cache_salt byte
+        # counts which the base class tracks regardless of capacity,
+        # so they are wired up unconditionally.
+        l2_eviction_states: list[L2AdapterEvictionState] = []
+        for adapter, ac in zip(
+            self._l2_adapters, config.l2_adapter_config.adapters, strict=True
+        ):
+            if ac.eviction_config is None:
+                continue
+            policy_name = ac.eviction_config.eviction_policy
+            if policy_name != "IsolatedLRU" and not adapter.supports_global_eviction:
+                logger.warning(
+                    "L2 adapter %s configured with '%s' eviction but does "
+                    "not support global eviction (max_capacity_bytes=0); "
+                    "skipping aggregate-usage eviction setup.",
+                    type(adapter).__name__,
+                    policy_name,
+                )
+                continue
+            l2_eviction_states.append(
+                L2AdapterEvictionState(
+                    adapter=adapter,
+                    eviction_config=ac.eviction_config,
+                )
             )
-            for adapter, ac in zip(
-                self._l2_adapters, config.l2_adapter_config.adapters, strict=False
-            )
-            if ac.eviction_config is not None
-        ]
-        self._l2_eviction_controller = L2EvictionController(l2_eviction_states)
+        self._l2_eviction_controller = L2EvictionController(
+            l2_eviction_states, quota_manager=self._quota_manager
+        )
         self._l2_eviction_controller.start()
 
         adapter_descriptors = [
@@ -146,6 +186,18 @@ class StorageManager:
                 },
             )
         )
+
+        oom_keys = [
+            k for k, (e, _) in reserve_result.items() if e == L1Error.OUT_OF_MEMORY
+        ]
+        if oom_keys:
+            self._event_bus.publish(
+                Event(
+                    event_type=EventType.L1_ALLOCATION_FAILED,
+                    metadata={"during": "l1_store", "keys": oom_keys},
+                )
+            )
+
         return result
 
     @enable_tracing()
@@ -215,6 +267,8 @@ class StorageManager:
         good_keys: list[ObjectKey] = []
         good_objs: list[MemoryObj] = []
         bad_keys: list[ObjectKey] = []
+        not_found_keys: list[ObjectKey] = []
+        write_locked_keys: list[ObjectKey] = []
         all_good = True
         for k, (e, o) in read_results.items():
             if o is None:
@@ -225,10 +279,40 @@ class StorageManager:
                 )
                 bad_keys.append(k)
                 all_good = False
+                if e == L1Error.KEY_NOT_EXIST:
+                    not_found_keys.append(k)
+                elif e == L1Error.KEY_NOT_READABLE:
+                    write_locked_keys.append(k)
                 continue
 
             good_keys.append(k)
             good_objs.append(o)
+
+        # L1 read-failure anomaly reporting: unsafe_read is required to be
+        # called post-reserve_read, so any failure here is a lock/eviction
+        # race, not a normal cache miss.
+        if not_found_keys:
+            self._event_bus.publish(
+                Event(
+                    event_type=EventType.L1_READ_FAILED,
+                    metadata={
+                        "during": "l1_retrieve",
+                        "reason": "not_found",
+                        "keys": not_found_keys,
+                    },
+                )
+            )
+        if write_locked_keys:
+            self._event_bus.publish(
+                Event(
+                    event_type=EventType.L1_READ_FAILED,
+                    metadata={
+                        "during": "l1_retrieve",
+                        "reason": "write_locked",
+                        "keys": write_locked_keys,
+                    },
+                )
+            )
 
         successfully_yielded = False
 
@@ -474,6 +558,31 @@ class StorageManager:
             keys (list[ObjectKey]): List of object keys to touch.
         """
         self._l1_manager.touch_keys(keys)
+
+    @property
+    def quota_manager(self) -> QuotaManager:
+        """Per-cache_salt quota registry.
+
+        Exposed so the HTTP layer can serve CRUD endpoints without
+        reaching into private state. Always non-``None`` — the
+        storage manager creates the registry at construction time.
+        """
+        return self._quota_manager
+
+    def get_usage_bytes_by_cache_salt(self) -> dict[str, int]:
+        """Aggregate ``cache_salt`` byte usage across every L2 adapter.
+
+        Used by the HTTP quota endpoints to report ``current_usage_gb``
+        alongside the configured limit. Aggregation is a simple sum:
+        each adapter tracks the same salt independently so the totals
+        are additive.
+        """
+        totals: dict[str, int] = {}
+        for adapter in self._l2_adapters:
+            snap = adapter.get_usage().bytes_by_cache_salt
+            for salt, used in snap.items():
+                totals[salt] = totals.get(salt, 0) + used
+        return totals
 
     def clear(self, force: bool = False):
         """

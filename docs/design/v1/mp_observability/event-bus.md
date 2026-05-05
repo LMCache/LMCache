@@ -100,6 +100,13 @@ Key design choices:
   unbounded memory growth without blocking producers.
 - **Exception isolation.**  A failing subscriber callback does not affect other
   subscribers or the drain thread.
+- **Self-monitoring.**  The bus exposes four read-only accessors —
+  `queue_depth()`, `oldest_event_lag_seconds()`, `dropped_events_count()`,
+  `subscriber_exception_counts()` — that surface its own health.  These
+  drive the `lmcache_mp.event_bus.*` metrics registered by
+  `EventBusSelfMetricsSubscriber` (see [METRICS.md](METRICS.md)). Keeping
+  the accessors OTel-free preserves the bus's decoupling from the metrics
+  system.
 
 ---
 

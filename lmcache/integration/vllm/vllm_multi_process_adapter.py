@@ -12,7 +12,7 @@ import zmq
 
 # First Party
 from lmcache.integration.request_telemetry.factory import RequestTelemetryFactory
-from lmcache.utils import _lmcache_nvtx_annotate, init_logger
+from lmcache.utils import EngineType, _lmcache_nvtx_annotate, init_logger
 from lmcache.v1.multiprocess.custom_types import (
     BlockAllocationRecord,
     CudaIPCWrapper,
@@ -670,18 +670,11 @@ class LMCacheMPWorkerAdapter:
         """
         # First Party
         from lmcache.integration.vllm.utils import vllm_layout_hints
-        from lmcache.v1.gpu_connector.utils import (
-            ensure_contiguous_kv_caches,
-        )
 
         # Register kv cache and send the request
         logger.info("Registering kv caches")
 
         layout_hints = vllm_layout_hints()
-        kv_caches = ensure_contiguous_kv_caches(
-            kv_caches, kv_layout=layout_hints.get("kv_layout")
-        )
-
         self.kv_caches = kv_caches
 
         future = send_lmcache_request(
@@ -692,6 +685,7 @@ class LMCacheMPWorkerAdapter:
                 wrap_kv_caches(kv_caches),
                 self.model_name,
                 self.world_size,
+                EngineType.VLLM,
                 layout_hints,
             ],
         )
