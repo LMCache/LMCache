@@ -20,7 +20,13 @@ _DRAIN_WAIT = 0.15
 
 
 def _read_counters() -> dict[str, int]:
-    """Snapshot counter values, summed across attribute combinations."""
+    """Snapshot counter values, summed across attribute combinations.
+
+    Accumulates into ``result`` rather than overwriting on duplicate
+    metric names so the snapshot stays correct when the same metric
+    appears in multiple resource/scope buckets (e.g., when other test
+    suites have populated the shared in-memory reader).
+    """
     data = _reader.get_metrics_data()
     result: dict[str, int] = {}
     if data is None:
@@ -36,7 +42,7 @@ def _read_counters() -> dict[str, int]:
                     total += int(dp.value)
                     any_value = True
                 if any_value:
-                    result[metric.name] = total
+                    result[metric.name] = result.get(metric.name, 0) + total
     return result
 
 
