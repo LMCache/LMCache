@@ -95,6 +95,50 @@ All three `CB_LOOKUP_END` emit sites (no-fingerprint-match, no-GPU-context,
 happy path) populate these fields, so `hit_rate` is always present on the
 `cb.request` span.
 
+A fourth attribute is also set on `"cb.request"` at `CB_LOOKUP_END` time:
+
+| Attribute | OTel type | Value |
+|-----------|-----------|-------|
+| `prefix_hits` | `int` | chunks found via the prefix probe (not fingerprint matching) |
+
+#### Prefix probe
+
+`cb_lookup_pre_computed` has two lookup paths:
+
+1. **Fingerprint path** — `BlendTokenRangeMatcher.match_sub_sequence` finds
+   sub-sequence matches using polynomial rolling hashes.  Covers arbitrary
+   (non-prefix) positions in the token sequence.
+2. **Prefix probe** — a fallback that runs after the fingerprint path and fills
+   in chunks at contiguous prefix positions not already covered by fingerprint
+   results.  It calls `token_hasher.compute_chunk_hashes(token_ids)` to derive
+   the same storage keys used by `cb_store_final` and `cb_store_pre_computed`,
+   then creates `CBMatchResult(old_st==cur_st)` candidates for uncovered slots.
+   These candidates flow through the same prefetch/poll/evict machinery as
+   fingerprint results.
+
+The prefix probe closes the gap between the MP and CB storage paths: chunks
+written by `cb_store_final` (which only registers fingerprints when
+`worker_id in [0, None]`) and chunks written via the MP `store()` path (which
+uses block hashes incompatible with fingerprint matching) are both visible to
+`cb_lookup_pre_computed` through the prefix probe.
+
+#### Lazy registration
+
+When `cb_lookup_pre_computed` returns results that came *entirely* from the
+prefix probe (i.e. `fingerprint_results` is empty) and the calling worker is
+rank 0 or the driver (`worker_id in [0, None]`), the found prefix chunks are
+registered into `BlendTokenRangeMatcher` so that future lookups can find them
+via the faster fingerprint path.  Registration is guarded by
+`BlendTokenRangeMatcher.has_chunk(token_hash)` to prevent overwriting existing
+compact-ID assignments when the range matcher already has entries for the same
+token sequence.
+
+`prefix_hits` counts the chunks found exclusively through the prefix probe
+(after deduplication against fingerprint results).  When `fingerprint_results`
+is non-empty and prefix candidates fill in additional positions,
+`prefix_hits` reflects only the prefix-probe portion of the total
+`storage_hits`.
+
 ## Request Scenarios
 
 ### Scenario 1 — Full Cache Hit
@@ -226,6 +270,10 @@ root "request"  [═════════════════════
 | `lmcache/v1/mp_observability/subscribers/tracing/mp_server.py` | Root span logic: `_pending_store_count`, `_pending_retrieve_count`, `_deferred_session_end_ts`; handlers `_on_request_start`, `_on_store_submitted`, `_on_retrieve_submitted`, `_on_session_end`; helpers `_get_or_create_request_span`, `_close_request_span` |
 | `lmcache/v1/mp_observability/subscribers/tracing/span_registry.py` | `SpanRegistry`: shared dict of open spans keyed by `(session_id, span_name)` for cross-subscriber parent lookup |
 | `tests/v1/mp_observability/subscribers/tracing/test_mp_server.py` | Tests for all scenarios including retrieve deferral |
+| `lmcache/v1/multiprocess/blend_server_v2.py` | Prefix probe in `cb_lookup_pre_computed`; lazy registration; `has_chunk` on `BlendTokenRangeMatcher`; `prefix_hits` in `CB_LOOKUP_END` metadata |
+| `lmcache/v1/mp_observability/subscribers/tracing/cb_server.py` | Stamp `prefix_hits` on `"cb.request"` root span from `CB_LOOKUP_END` |
+| `tests/v1/multiprocess/test_blend_server_v2.py` | `has_chunk` unit tests |
+| `tests/v1/mp_observability/subscribers/tracing/test_cb_server.py` | `prefix_hits` attribute tests |
 
 ---
 
