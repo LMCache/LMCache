@@ -180,9 +180,16 @@ Source: ``lmcache/v1/distributed/config.py``
    * - ``--eviction-policy``
      - *required*
      - Eviction policy.
-       Choices: ``LRU``, ``noop``.
+       Choices: ``LRU``, ``IsolatedLRU``, ``noop``.
        Use ``noop`` for buffer-only mode where L1 acts as a pure
        write buffer (data is deleted from L1 after L2 store).
+       ``IsolatedLRU`` maintains one LRU list per ``cache_salt``
+       and requires per-``cache_salt`` quotas to be configured at
+       runtime via the ``/api/quota`` HTTP endpoints
+       (see :ref:`mp-http-quota-api`); a ``cache_salt`` with no
+       registered quota has an effective limit of ``0`` bytes,
+       so its data is evicted at the next eviction cycle
+       (allowlist semantics).
    * - ``--eviction-trigger-watermark``
      - ``0.8``
      - Memory usage ratio (0.0--1.0) that triggers eviction.
