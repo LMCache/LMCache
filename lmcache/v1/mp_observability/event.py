@@ -25,17 +25,6 @@ class EventType(Enum):
     L1_WRITE_FINISHED = "l1.write.finished"
     L1_WRITE_FINISHED_AND_READ_RESERVED = "l1.write_finished_and_read_reserved"
     L1_KEYS_EVICTED = "l1.keys.evicted"
-
-    # L1 eviction loop tick — fires once per ``eviction_loop`` iteration,
-    # whether or not eviction was triggered.  Metadata:
-    #   ``usage``     (float): current ``used_bytes / total_bytes`` ratio
-    #   ``watermark`` (float): trigger threshold from EvictionConfig
-    #   ``triggered`` (bool):  True when usage >= watermark and the
-    #                          eviction policy ran this tick
-    # Together with ``L1_KEYS_EVICTED`` (count of keys actually evicted),
-    # this tells you how often the eviction loop ran versus how often it
-    # actually evicted — a subtle distinction that matters for debugging
-    # benchmarks that complete faster than the 1Hz polling rate.
     L1_EVICTION_LOOP_TICK = "l1.eviction.loop_tick"
 
     # L1 failure events (LM-291 health monitoring)

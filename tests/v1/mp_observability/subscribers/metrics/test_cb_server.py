@@ -14,41 +14,12 @@ from lmcache.v1.mp_observability.event_bus import EventBus, EventBusConfig
 from lmcache.v1.mp_observability.subscribers.metrics.cb_server import (
     BlendMetricsSubscriber,
 )
-from tests.v1.mp_observability.subscribers.metrics.otel_setup import reader as _reader
+from tests.v1.mp_observability.subscribers.metrics.otel_setup import (
+    counter_delta,
+    read_counters,
+)
 
 _DRAIN_WAIT = 0.15
-
-
-def _read_counters() -> dict[str, int]:
-    """Snapshot counter values, summed across attribute combinations.
-
-    Accumulates into ``result`` rather than overwriting on duplicate
-    metric names so the snapshot stays correct when the same metric
-    appears in multiple resource/scope buckets (e.g., when other test
-    suites have populated the shared in-memory reader).
-    """
-    data = _reader.get_metrics_data()
-    result: dict[str, int] = {}
-    if data is None:
-        return result
-    for resource_metrics in data.resource_metrics:
-        for scope_metrics in resource_metrics.scope_metrics:
-            for metric in scope_metrics.metrics:
-                total = 0
-                any_value = False
-                for dp in metric.data.data_points:
-                    if not hasattr(dp, "value"):
-                        continue  # skip histogram data points
-                    total += int(dp.value)
-                    any_value = True
-                if any_value:
-                    result[metric.name] = result.get(metric.name, 0) + total
-    return result
-
-
-def _counter_delta(before: dict[str, int], after: dict[str, int]) -> dict[str, int]:
-    all_keys = set(before) | set(after)
-    return {k: after.get(k, 0) - before.get(k, 0) for k in all_keys}
 
 
 @pytest.fixture
@@ -66,10 +37,10 @@ def subscriber(bus):
 @pytest.fixture
 def snapshot():
     """Capture counters before the test; yield a callable that returns deltas."""
-    before = _read_counters()
+    before = read_counters()
 
     def get_delta() -> dict[str, int]:
-        return _counter_delta(before, _read_counters())
+        return counter_delta(before, read_counters())
 
     return get_delta
 

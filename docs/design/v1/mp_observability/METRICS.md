@@ -103,20 +103,11 @@ datapoints and are orthogonal to these Resource attributes.
 | `lmcache_mp.l1_evicted_keys` | `lmcache_mp_l1_evicted_keys_total` | Counter | `L1_KEYS_EVICTED` | `+len(keys)` |
 | `lmcache_mp.l1_eviction_loop_ticks` | `lmcache_mp_l1_eviction_loop_ticks_total` | Counter | `L1_EVICTION_LOOP_TICK` | +1 per loop iteration |
 | `lmcache_mp.l1_eviction_loop_triggered` | `lmcache_mp_l1_eviction_loop_triggered_total` | Counter | `L1_EVICTION_LOOP_TICK` | +1 when `triggered=True` |
-| `lmcache_mp.l1_usage_ratio` | `lmcache_mp_l1_usage_ratio` | Histogram | `L1_EVICTION_LOOP_TICK` | sample of `usage` per tick |
+| `lmcache_mp.l1_usage_ratio` | `lmcache_mp_l1_usage_ratio` | Observable Gauge | (callback on `L1Manager`) | `used / total` at scrape time |
 
-**What it answers:** How aggressively is the eviction controller clearing L1? A high eviction rate relative to writes signals memory pressure.
+**What it answers:** How aggressively is the eviction controller clearing L1?  Is the eviction loop alive but staying below the watermark, or actively firing?  What is the current L1 fullness?
 
-**Eviction-loop liveness vs. fire rate:** the eviction loop polls L1 once per second and only triggers eviction when `usage >= watermark`.  The two new counters distinguish "the loop is alive" from "eviction actually fired":
-
-```
-rate(lmcache_mp_l1_eviction_loop_triggered_total[1m])
-/ rate(lmcache_mp_l1_eviction_loop_ticks_total[1m])
-```
-
-is the fraction of ticks that actually evicted.  This is essential for debugging short-lived benchmarks — a workload that completes in <1s never gives the loop a chance to fire even when the pool exceeds the watermark, and watching `eviction_loop_triggered_total` stay at zero during the run makes that visible immediately rather than requiring debug-log inspection.
-
-The `l1_usage_ratio` histogram captures the distribution of L1 fullness sampled at every tick — useful for spotting sawtooth fill/drain patterns versus steady-state operation.
+The two loop counters distinguish "loop is alive" from "eviction fired" — important when debugging short-lived benchmarks (a workload that completes in <1 s never gives the 1Hz polling loop a chance to fire even when usage exceeds the watermark).  `l1_usage_ratio` is registered via :func:`register_gauge` against `L1Manager`, so its value reflects current state at scrape time, not a per-tick sample.
 
 ---
 
@@ -519,86 +510,9 @@ rate(lmcache_blend_lookup_hit_tokens_total[5m])
 
 ---
 
-## Debug Recipes: separating L1 / L2 / Blend hit rates
+For derivations of L1-only / L2-only / blend hit rates from these
+counters, and a "what to send when reporting" checklist, see
+[DEBUG.md](DEBUG.md).
 
-These are derivations from existing counters — **everything below is computable from the metrics already exported**, no new instruments needed. Use them when triaging "why is hit rate low?" or "is this an L1 or L2 issue?" without code-level instrumentation.
-
-Common parameters you'll need (all from `GET <lmcache-url>/api/status`):
-
-| Field | Source | Example |
-|---|---|---|
-| `chunk_size` | `chunk_size` (top level) | 256 |
-| L1 capacity (bytes) | `storage_manager.l1_manager.memory_total_bytes` | `5 * 2**30` |
-| L1 used (bytes) | `storage_manager.l1_manager.memory_used_bytes` | varies |
-
-### Token-level hit rate (L1 + L2 combined)
-
-The headline metric, already exposed:
-
-```
-lmcache_mp_lookup_hit_tokens_total / lmcache_mp_lookup_requested_tokens_total
-```
-
-This is the fraction of chunk-aligned tokens that came back from cache *anywhere* — L1 or L2. Reported per `(model_name, cache_salt)`.
-
-### L2-only hit rate
-
-L2's prefetch lookups carry per-key counts, not per-token:
-
-```
-L2_hit_tokens_total = increase(lmcache_mp_l2_prefetch_hit_keys_total) * chunk_size
-L2_hit_rate         = L2_hit_tokens_total
-                    / increase(lmcache_mp_lookup_requested_tokens_total)
-```
-
-`chunk_size` is fixed per server (typically 256 tokens/chunk). The keys-to-tokens conversion is exact — every L2 hit is a full chunk.
-
-### L1-only hit rate (derived)
-
-Take total minus L2:
-
-```
-L1_hit_tokens_total = increase(lmcache_mp_lookup_hit_tokens_total)
-                    - increase(lmcache_mp_l2_prefetch_hit_keys_total) * chunk_size
-L1_hit_rate         = L1_hit_tokens_total
-                    / increase(lmcache_mp_lookup_requested_tokens_total)
-```
-
-Sanity check: should be `>= 0`. A sustained negative value means L2 is being credited with chunks the lookup hit metric doesn't count, which would indicate a metric-emission bug (file an issue).
-
-### Blend total hit rate
-
-```
-lmcache_blend_lookup_hit_tokens_total / lmcache_blend_lookup_requested_tokens_total
-```
-
-Reported per CacheBlend lookup (`CB_LOOKUP_END`).
-
-### Blend L1 vs L2 — *not separable today*
-
-The blend lookup path consults L1 (fingerprint table) and L2 (storage prefetch) as a single pipelined operation. The current `lmcache_blend.lookup_storage_hits` counter records "chunks confirmed in storage after prefetch" *aggregated* across L1 and L2. Splitting them requires per-chunk attribution inside the blend lookup, which would need new instrumentation in `blend_server_v2.py`. **Open follow-up** — track via a future `[Obs] Split blend storage hits by tier` PR.
-
-### Did eviction actually fire during my run?
-
-```
-ticks      = increase(lmcache_mp_l1_eviction_loop_ticks_total)
-triggered  = increase(lmcache_mp_l1_eviction_loop_triggered_total)
-fire_ratio = triggered / ticks   # 0.0 = never fired; 1.0 = fired every cycle
-```
-
-If `triggered == 0` over a thrash test, your benchmark completed faster than the 1Hz polling interval — see the `prefix-suffix-tuner` workload's Debug Guide for the recommended `--eviction-trigger-watermark` / `--eviction-ratio` settings.
-
-### Self-service debug checklist
-
-Send these and you have everything needed to root-cause a hit-rate regression:
-
-1. `GET <lmcache-url>/api/status` (config + state snapshot).
-2. `GET <lmcache-url>/metrics` taken **before** the run and again **after** (delta is the run).
-3. The bench's `bench_summary.json` and `bench_results.csv` (TTFT per request).
-4. The LMCache server's stdout/stderr (eviction trigger logs are at INFO level).
-
-(1)–(3) plus the formulas above let you compute L1, L2, blend, and combined hit rates; the eviction-loop counters confirm whether the LRU machinery engaged during the run.
-
----
-
-For event metadata contracts (what keys each `EventType` carries), see [EVENTS.md](EVENTS.md).
+For event metadata contracts (what keys each `EventType` carries), see
+[EVENTS.md](EVENTS.md).
