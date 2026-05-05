@@ -68,7 +68,12 @@ mkdir -p "$L2_RESULTS_DIR"
 # ---------------------------------------------------------------------------
 
 echo "--- Stopping existing LMCache MP server and vLLM ---"
-# PID file layout: line1=LMCache, line2=vLLM w/ LMCache, line3=vLLM baseline
+# PID file layout: line1=LMCache, line2=vLLM w/ LMCache, line3=vLLM baseline.
+# These processes were launched by an earlier script (launch-processes.sh)
+# and are not children of this shell, so ``wait $pid`` is a no-op here.
+# We instead poll until each PID actually exits, then poll until the
+# Prometheus port is free, otherwise the LMCache relaunch below would
+# fail to bind /metrics and the metrics check would fail spuriously.
 if [ -f "$PID_FILE" ]; then
     LMCACHE_PID=$(sed -n '1p' "$PID_FILE")
     VLLM_PID=$(sed -n '2p' "$PID_FILE")
@@ -76,10 +81,26 @@ if [ -f "$PID_FILE" ]; then
         if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
             echo "Killing PID $pid"
             kill "$pid" 2>/dev/null || true
-            wait "$pid" 2>/dev/null || true
+            for _ in $(seq 1 60); do
+                kill -0 "$pid" 2>/dev/null || break
+                sleep 0.5
+            done
+            # Last resort: SIGKILL if SIGTERM didn't take after 30s.
+            if kill -0 "$pid" 2>/dev/null; then
+                echo "PID $pid still alive after SIGTERM; sending SIGKILL"
+                kill -9 "$pid" 2>/dev/null || true
+            fi
         fi
     done
-    sleep 2
+    # Poll until the Prometheus port is fully released so the new server
+    # below can bind it cleanly.
+    for _ in $(seq 1 30); do
+        if ! (ss -ltn 2>/dev/null || netstat -ltn 2>/dev/null) \
+                | awk '{print $4}' | grep -qE ":${PROMETHEUS_PORT}$"; then
+            break
+        fi
+        sleep 0.5
+    done
 fi
 
 echo "--- Launching LMCache MP server with L2 config ---"
@@ -342,6 +363,13 @@ if [ ! -s "$L2_METRICS_FILE" ]; then
     echo "       /metrics being unreachable means we cannot verify the L2"
     echo "       data flow or the observability surface; failing the test"
     echo "       rather than silently skipping."
+    echo ""
+    echo "--- LMCache L2 server log (last 50 lines) ---"
+    tail -50 "/tmp/build_${BUILD_ID}_lmcache_l2.log" 2>&1 || true
+    echo ""
+    echo "--- Listening sockets on port ${PROMETHEUS_PORT} ---"
+    (ss -ltnp 2>/dev/null || netstat -ltnp 2>/dev/null || true) \
+        | awk -v p=":${PROMETHEUS_PORT}" '$0 ~ p'
     exit 1
 fi
 
