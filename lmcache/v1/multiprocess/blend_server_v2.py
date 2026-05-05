@@ -38,6 +38,7 @@ Workflow (example: chunk_size = 3)
 """
 
 # Standard
+import threading
 import time
 
 # Third Party
@@ -99,7 +100,6 @@ logger = init_logger(__name__)
 
 
 class BlendTokenRangeMatcher:
-    # TODO(Jiayi): Needs thread-safety for this class.
     """Fast token-range matcher using polynomial rolling/chunk hashes and a
     direct-address lookup table.
 
@@ -141,6 +141,7 @@ class BlendTokenRangeMatcher:
         self._compact_id_to_slot = np.full(self._TABLE_SIZE, -1, dtype=np.int64)
         # token_hash → compact_chunk_id (for eviction lookup)
         self._token_hash_to_compact_id: dict[bytes, int] = {}
+        self._lock = threading.Lock()
 
     def on_new_token_hashes(
         self,
@@ -158,29 +159,64 @@ class BlendTokenRangeMatcher:
                           Stored as the storage key returned in CBMatchResult.hash.
         """
         arr = np.array(token_ids, dtype=np.uint64)
-        # Polynomial fingerprints for non-overlapping chunks, built from raw token IDs
-        # so they match the sliding-window rolling hashes in match_sub_sequence
+        # Polynomial fingerprints for non-overlapping chunks, built from raw
+        # token IDs so they match the rolling hashes in match_sub_sequence
         chunk_hashes = chunk_hash_windows_numba(arr, self.chunk_size, self._BASE)
         n = int(chunk_hashes.shape[0])
         if n == 0:
             return
 
-        # Compact sequential IDs: bounded by _TABLE_SIZE, safe for seen-array sizing
-        base_id = len(self._chunk_token_hash)
-        compact_ids = np.arange(base_id, base_id + n, dtype=np.int64)
+        with self._lock:
+            # Filter chunks already registered to avoid duplicate compact-ID
+            # allocation.  When both cb_store_pre_computed and cb_store_final
+            # fire for the same token sequence they produce identical hashes;
+            # registering twice orphans the first compact ID permanently since
+            # _token_hash_to_compact_id is overwritten but the old list slot is
+            # not freed.
+            new_idxs = [
+                i
+                for i in range(n)
+                if token_hashes[i] not in self._token_hash_to_compact_id
+            ]
+            if not new_idxs:
+                return
+            n_new = len(new_idxs)
+            new_chunk_hashes = chunk_hashes[new_idxs]
 
-        # Write table: poly_chunk_hash → compact_chunk_id
-        update_table_id_numba(chunk_hashes, self._table_id, compact_ids)
+            # Compact sequential IDs: bounded by _TABLE_SIZE, safe for seen-array sizing
+            # NOTE: base_id grows monotonically (evicted slots are not reused); the hard
+            # limit is on total chunks ever registered, not active chunks.
+            base_id = len(self._chunk_token_hash)
+            if base_id + n_new > self._TABLE_SIZE:
+                logger.error(
+                    "BlendTokenRangeMatcher compact-ID overflow: %d chunks "
+                    "registered, cannot add %d more (limit %d). Skipping.",
+                    base_id,
+                    n_new,
+                    self._TABLE_SIZE,
+                )
+                return
+            if base_id + n_new > int(self._TABLE_SIZE * 0.8):
+                logger.warning(
+                    "BlendTokenRangeMatcher nearing capacity: %d/%d compact IDs used. "
+                    "Hash collision rate is rising; hit rate will degrade.",
+                    base_id + n_new,
+                    self._TABLE_SIZE,
+                )
+            compact_ids = np.arange(base_id, base_id + n_new, dtype=np.int64)
 
-        # Persist compact_id → token_hash, token_hash → start, and reverse maps
-        for i in range(n):
-            th = token_hashes[i]
-            cid = int(compact_ids[i])
-            slot = int(chunk_hashes[i]) & int(self._mask)
-            self._chunk_token_hash.append(th)
-            self._token_hash_to_start[th] = i * self.chunk_size
-            self._compact_id_to_slot[cid] = slot
-            self._token_hash_to_compact_id[th] = cid
+            # Write table: poly_chunk_hash → compact_chunk_id
+            update_table_id_numba(new_chunk_hashes, self._table_id, compact_ids)
+
+            # Persist compact_id → token_hash, token_hash → start, and reverse maps
+            for k, orig_i in enumerate(new_idxs):
+                th = token_hashes[orig_i]
+                cid = int(compact_ids[k])
+                slot = int(new_chunk_hashes[k]) & int(self._mask)
+                self._chunk_token_hash.append(th)
+                self._token_hash_to_start[th] = orig_i * self.chunk_size
+                self._compact_id_to_slot[cid] = slot
+                self._token_hash_to_compact_id[th] = cid
 
     def match_sub_sequence(
         self,
@@ -202,53 +238,56 @@ class BlendTokenRangeMatcher:
                               the match was found
               hash          : token_hash bytes (from registration) for cache key lookup
         """
-        if not self._chunk_token_hash or len(token_ids) < self.chunk_size:
+        if len(token_ids) < self.chunk_size:
             return []
 
         arr = np.array(token_ids, dtype=np.uint64)
-
         # Sliding-window polynomial hashes over the query
         rolling = rolling_hash_windows_numba(arr, self.chunk_size, self._BASE)
 
-        # Probe table; seen array is _TABLE_SIZE bytes (~1 MB), fixed and safe
-        hit_ids = unique_hits_direct_id_numba(
-            rolling, self._table_id, self._mask, self._TABLE_SIZE
-        )
+        with self._lock:
+            if not self._chunk_token_hash:
+                return []
 
-        if hit_ids.shape[0] == 0:
-            return []
-
-        # For each hit compact_id, find the first query position where it matched
-        hit_id_set = set(int(cid) for cid in hit_ids)
-        cid_to_query_pos: dict[int, int] = {}
-        for q_pos in range(rolling.shape[0]):
-            idx = int(rolling[q_pos]) & int(self._mask)
-            cid = int(self._table_id[idx])
-            if cid in hit_id_set and cid not in cid_to_query_pos:
-                cid_to_query_pos[cid] = q_pos
-                if len(cid_to_query_pos) == len(hit_id_set):
-                    break
-
-        results: list[CBMatchResult] = []
-        for cid in hit_ids:
-            cid_int = int(cid)
-            th = self._chunk_token_hash[cid_int]
-            if th is None:
-                continue
-            old_st = self._token_hash_to_start.get(th)
-            cur_st = cid_to_query_pos.get(cid_int)
-            if old_st is None or cur_st is None:
-                continue
-            results.append(
-                CBMatchResult(
-                    old_st=old_st,
-                    old_ed=old_st + self.chunk_size,
-                    cur_st=cur_st,
-                    cur_ed=cur_st + self.chunk_size,
-                    hash=th,
-                )
+            # Probe table; seen array is _TABLE_SIZE bytes (~1 MB), fixed and safe
+            hit_ids = unique_hits_direct_id_numba(
+                rolling, self._table_id, self._mask, self._TABLE_SIZE
             )
-        return results
+
+            if hit_ids.shape[0] == 0:
+                return []
+
+            # For each hit compact_id, find the first query position where it matched
+            hit_id_set = set(int(cid) for cid in hit_ids)
+            cid_to_query_pos: dict[int, int] = {}
+            for q_pos in range(rolling.shape[0]):
+                idx = int(rolling[q_pos]) & int(self._mask)
+                cid = int(self._table_id[idx])
+                if cid in hit_id_set and cid not in cid_to_query_pos:
+                    cid_to_query_pos[cid] = q_pos
+                    if len(cid_to_query_pos) == len(hit_id_set):
+                        break
+
+            results: list[CBMatchResult] = []
+            for cid in hit_ids:
+                cid_int = int(cid)
+                th = self._chunk_token_hash[cid_int]
+                if th is None:
+                    continue
+                old_st = self._token_hash_to_start.get(th)
+                cur_st = cid_to_query_pos.get(cid_int)
+                if old_st is None or cur_st is None:
+                    continue
+                results.append(
+                    CBMatchResult(
+                        old_st=old_st,
+                        old_ed=old_st + self.chunk_size,
+                        cur_st=cur_st,
+                        cur_ed=cur_st + self.chunk_size,
+                        hash=th,
+                    )
+                )
+            return results
 
     def remove_chunks(self, token_hashes: list[bytes]) -> None:
         """Evict stale entries whose backing data is no longer in storage.
@@ -256,25 +295,70 @@ class BlendTokenRangeMatcher:
         Args:
             token_hashes: Token hashes of chunks to remove from the table.
         """
-        for th in token_hashes:
-            cid = self._token_hash_to_compact_id.get(th)
-            if cid is None:
-                continue
-            # Clear the table slot
-            slot = int(self._compact_id_to_slot[cid])
-            if slot < 0:
-                logger.warning(
-                    "compact_id %d has no valid table slot; "
-                    "entry may have been evicted twice",
-                    cid,
-                )
-                continue
-            self._table_id[slot] = -1
-            self._compact_id_to_slot[cid] = -1
-            # Clean up auxiliary maps
-            self._chunk_token_hash[cid] = None
-            self._token_hash_to_start.pop(th, None)
-            del self._token_hash_to_compact_id[th]
+        with self._lock:
+            for th in token_hashes:
+                cid = self._token_hash_to_compact_id.get(th)
+                if cid is None:
+                    continue
+                # Clear the table slot
+                slot = int(self._compact_id_to_slot[cid])
+                if slot < 0:
+                    logger.warning(
+                        "compact_id %d has no valid table slot; "
+                        "entry may have been evicted twice",
+                        cid,
+                    )
+                    continue
+                self._table_id[slot] = -1
+                self._compact_id_to_slot[cid] = -1
+                # Clean up auxiliary maps
+                self._chunk_token_hash[cid] = None
+                self._token_hash_to_start.pop(th, None)
+                del self._token_hash_to_compact_id[th]
+
+    def has_chunk(self, token_hash: bytes) -> bool:
+        """Return True if token_hash is currently registered in the matcher.
+
+        Used before lazy registration to avoid creating duplicate compact-ID
+        entries for a hash that is already in the fingerprint table.
+
+        Args:
+            token_hash: The storage hash bytes for a single chunk (as returned
+                        by TokenHasher.compute_chunk_hashes).
+
+        Returns:
+            True if the chunk is registered and not evicted, False otherwise.
+        """
+        with self._lock:
+            return token_hash in self._token_hash_to_compact_id
+
+
+def _unique_token_coverage(results: list[CBMatchResult]) -> int:
+    """Return the number of unique query tokens covered by a set of CBMatchResults.
+
+    match_sub_sequence is a sliding-window probe, so two results from different
+    registered chunks can have overlapping [cur_st, cur_ed) ranges.  Summing
+    chunk_size per result would double-count the overlapping tokens and produce
+    hit_rate > 1.  This function merges the intervals first.
+
+    Args:
+        results: Found CBMatchResult objects (each covers [cur_st, cur_ed) tokens).
+
+    Returns:
+        Total number of unique query-token positions covered.
+    """
+    if not results:
+        return 0
+    intervals = sorted((r.cur_st, r.cur_ed) for r in results)
+    coverage = 0
+    cur_end = -1
+    for st, ed in intervals:
+        if st >= cur_end:
+            coverage += ed - st
+        elif ed > cur_end:
+            coverage += ed - cur_end
+        cur_end = max(cur_end, ed)
+    return coverage
 
 
 # Main class and main functions
@@ -373,7 +457,13 @@ class BlendEngineV2(MPCacheEngine):
             )
         )
 
-        # Fast local pre-filter: find which stored chunks appear in this query
+        # Sub-sequence fingerprint match: find CB-stored chunks anywhere in the
+        # query using polynomial rolling hashes (context-independent, so a chunk
+        # stored at position 0 is found even when it appears at CHUNK_SIZE in the
+        # query).  Only chunks registered via cb_store_pre_computed / cb_store_final
+        # are in the fingerprint table, which gives CB isolation for free — chunks
+        # stored via the normal STORE path are never registered and therefore
+        # never returned here.
         cb_match_result = self._token_range_matcher.match_sub_sequence(
             list(key.token_ids)
         )
@@ -385,6 +475,7 @@ class BlendEngineV2(MPCacheEngine):
                     metadata={
                         "num_tokens": num_tokens,
                         "fingerprint_hits": 0,
+                        "prefix_hits": 0,
                         "storage_hits": 0,
                         "stale_chunks": 0,
                         "no_gpu_context": False,
@@ -439,7 +530,8 @@ class BlendEngineV2(MPCacheEngine):
                     session_id=key.request_id,
                     metadata={
                         "num_tokens": num_tokens,
-                        "fingerprint_hits": len(cb_match_result),
+                        "fingerprint_hits": 0,
+                        "prefix_hits": 0,
                         "storage_hits": 0,
                         "stale_chunks": 0,
                         "no_gpu_context": True,
@@ -457,7 +549,9 @@ class BlendEngineV2(MPCacheEngine):
             )
             return []
 
-        # Submit prefetch for each group using CBMatchResult.hash directly
+        # Submit prefetch for each group.  All candidates use the standard chunk
+        # hash computed by token_hasher, which matches the hash used at store
+        # time, so ipc_key_to_object_keys resolves correctly.
         for group in groups:
             chunk_hashes = [r.hash for r in group]
             obj_keys = ipc_key_to_object_keys(key, chunk_hashes)
@@ -469,7 +563,7 @@ class BlendEngineV2(MPCacheEngine):
             prefetch_handles.append(handle)
 
             logger.debug(
-                "DEBUG: Submitted prefetch for %d chunks starting at %d",
+                "Submitted prefetch for %d chunks starting at %d",
                 len(group),
                 group[0].cur_st,
             )
@@ -513,7 +607,8 @@ class BlendEngineV2(MPCacheEngine):
                     end,
                 )
 
-        # Evict stale entries from the fingerprint table
+        # Evict stale fingerprint entries; remove_chunks safely skips hashes that
+        # were never registered (e.g. prefix-probe candidates not in storage).
         if stale_hashes:
             self._token_range_matcher.remove_chunks(stale_hashes)
             logger.debug(
@@ -533,11 +628,12 @@ class BlendEngineV2(MPCacheEngine):
                 session_id=key.request_id,
                 metadata={
                     "num_tokens": num_tokens,
-                    "fingerprint_hits": len(cb_match_result),
+                    "fingerprint_hits": len(found_cb_match_result),
+                    "prefix_hits": 0,
                     "storage_hits": len(found_cb_match_result),
                     "stale_chunks": len(stale_hashes),
                     "no_gpu_context": False,
-                    "hit_tokens": len(found_cb_match_result) * self.chunk_size,
+                    "hit_tokens": _unique_token_coverage(found_cb_match_result),
                     "requested_tokens": (num_tokens // self.chunk_size)
                     * self.chunk_size,
                 },
@@ -614,7 +710,6 @@ class BlendEngineV2(MPCacheEngine):
                     lmcache_memcpy_async_d2h(tmp_buffer, memory_obj)
 
             event.record()
-
         # Call finish_write after the copy is done
         gpu_context.cupy_stream.launch_host_func(
             self.storage_manager.finish_write,
@@ -963,6 +1058,25 @@ class BlendEngineV2(MPCacheEngine):
                     metadata={"instance_id": instance_id, "num_tokens": num_tokens},
                 ),
             )
+
+            # Register fingerprints so future CB lookups can find these chunks.
+            # Mirrors cb_store_pre_computed; without this, chunks stored here are
+            # invisible to cb_lookup_pre_computed, causing 0% hit rate on re-requests.
+            if key.worker_id in [0, None]:
+                self._token_range_matcher.on_new_token_hashes(
+                    list(key.token_ids), list(chunk_hashes)
+                )
+                self._event_bus.publish(
+                    Event(
+                        event_type=EventType.CB_FINGERPRINTS_REGISTERED,
+                        session_id=key.request_id,
+                        metadata={
+                            "num_chunks": len(chunk_hashes),
+                            "num_tokens": len(list(key.token_ids)),
+                        },
+                    )
+                )
+
             logger.info(
                 "Stored final doc with %d tokens, num stored chunks: %d",
                 key.end - key.start,
