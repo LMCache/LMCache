@@ -101,8 +101,22 @@ datapoints and are orthogonal to these Resource attributes.
 | OTel metric name | Prometheus name | Type | Source event | Calculation |
 |---|---|---|---|---|
 | `lmcache_mp.l1_evicted_keys` | `lmcache_mp_l1_evicted_keys_total` | Counter | `L1_KEYS_EVICTED` | `+len(keys)` |
+| `lmcache_mp.l1_eviction_loop_ticks` | `lmcache_mp_l1_eviction_loop_ticks_total` | Counter | `L1_EVICTION_LOOP_TICK` | +1 per loop iteration |
+| `lmcache_mp.l1_eviction_loop_triggered` | `lmcache_mp_l1_eviction_loop_triggered_total` | Counter | `L1_EVICTION_LOOP_TICK` | +1 when `triggered=True` |
+| `lmcache_mp.l1_usage_ratio` | `lmcache_mp_l1_usage_ratio` | Histogram | `L1_EVICTION_LOOP_TICK` | sample of `usage` per tick |
 
 **What it answers:** How aggressively is the eviction controller clearing L1? A high eviction rate relative to writes signals memory pressure.
+
+**Eviction-loop liveness vs. fire rate:** the eviction loop polls L1 once per second and only triggers eviction when `usage >= watermark`.  The two new counters distinguish "the loop is alive" from "eviction actually fired":
+
+```
+rate(lmcache_mp_l1_eviction_loop_triggered_total[1m])
+/ rate(lmcache_mp_l1_eviction_loop_ticks_total[1m])
+```
+
+is the fraction of ticks that actually evicted.  This is essential for debugging short-lived benchmarks — a workload that completes in <1s never gives the loop a chance to fire even when the pool exceeds the watermark, and watching `eviction_loop_triggered_total` stay at zero during the run makes that visible immediately rather than requiring debug-log inspection.
+
+The `l1_usage_ratio` histogram captures the distribution of L1 fullness sampled at every tick — useful for spotting sawtooth fill/drain patterns versus steady-state operation.
 
 ---
 

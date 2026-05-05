@@ -22,6 +22,8 @@ from lmcache.v1.distributed.internal_api import (
 from lmcache.v1.distributed.l1_manager import L1Manager
 from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface
 from lmcache.v1.distributed.storage_controller import StorageControllerInterface
+from lmcache.v1.mp_observability.event import Event, EventType
+from lmcache.v1.mp_observability.event_bus import get_event_bus
 
 if TYPE_CHECKING:
     # First Party
@@ -115,6 +117,7 @@ class L1EvictionController(EvictionController):
     def eviction_loop(self):
         watermark = self._eviction_config.trigger_watermark
         eviction_ratio = self._eviction_config.eviction_ratio
+        event_bus = get_event_bus()
 
         while not self._stop_flag.is_set():
             time.sleep(1)
@@ -125,6 +128,16 @@ class L1EvictionController(EvictionController):
                     "L1 memory usage %.2f below watermark %.2f; skipping eviction.",
                     usage,
                     watermark,
+                )
+                event_bus.publish(
+                    Event(
+                        event_type=EventType.L1_EVICTION_LOOP_TICK,
+                        metadata={
+                            "usage": usage,
+                            "watermark": watermark,
+                            "triggered": False,
+                        },
+                    )
                 )
                 continue
 
@@ -139,6 +152,16 @@ class L1EvictionController(EvictionController):
             )
             for action in actions:
                 self.execute_eviction_action(action)
+            event_bus.publish(
+                Event(
+                    event_type=EventType.L1_EVICTION_LOOP_TICK,
+                    metadata={
+                        "usage": usage,
+                        "watermark": watermark,
+                        "triggered": True,
+                    },
+                )
+            )
 
     def execute_eviction_action(self, action: EvictionAction):
         if action.destination == EvictionDestination.DISCARD:
