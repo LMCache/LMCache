@@ -292,22 +292,56 @@ class TestPrefixSuffixTunerData:
         b2 = w2._build_messages(0)[0]["content"]
         assert b1 != b2  # different breakers produce different prompts
 
-    def test_prefix_bodies_are_identical_filler(self) -> None:
-        """All prefix bodies are ``"hi"``-filler by design.
+    def test_prefix_bodies_use_hi_fallback_when_no_tokenizer(self) -> None:
+        """Fallback path: when no tokenizer is loadable (unit tests pass
+        ``model_name=None``), bodies use deterministic ``"hi"`` filler.
 
-        Cross-prefix uniqueness comes from the unique-ID header at the
-        start of each prefix; vLLM's chain-hashed prefix cache then makes
-        every subsequent block unique to its prefix.  CacheBlend (which
-        uses content hashing) *will* report cross-prefix hits on the body
-        chunks — that is the correct behavior for the analytical model
-        (Baseline 3 assumes full-context blend coverage).
+        Production runs with the real model name get **content-unique**
+        random bodies generated from the tokenizer's vocab; that path is
+        verified E2E (loading a real tokenizer in unit tests would be
+        slow).  See ``test_prefix_bodies_are_unique_with_mock_tokenizer``
+        for the tokenizer path under a mocked tokenizer.
         """
         w, *_ = _make_workload(_make_workload_config(num_prefixes=4))
+        # Without a tokenizer, fallback "hi" filler kicks in.
+        assert w._tokenizer is None
         bodies = [p.split(" ", 1)[1] for p in w._prefixes]
-        # All bodies identical (just "hi hi hi ...").
         assert len(set(bodies)) == 1
-        # Content is exactly the "hi"-filler.
         assert all(set(b.split(" ")) == {"hi"} for b in bodies)
+
+    def test_prefix_bodies_are_unique_with_mock_tokenizer(self) -> None:
+        """Tokenizer path: each prefix samples a different per-prefix RNG,
+        so the random token-ID sequences differ → decoded bodies differ.
+        Required for non-blend cache hit-rate metrics to be meaningful
+        (otherwise content-hash collisions across identical bodies would
+        inflate hit rates regardless of LRU eviction).
+
+        Uses a mocked tokenizer to avoid loading transformers in unit
+        tests; the real-tokenizer path is exercised in E2E runs.
+        """
+        # First Party
+        from lmcache.cli.commands.bench.engine_bench.workloads import (
+            prefix_suffix_tuner as psf,
+        )
+
+        fake_tok = MagicMock()
+        fake_tok.decode = lambda ids, **kw: " ".join(f"id{i}" for i in ids)
+        original = psf._try_load_tokenizer
+        psf._try_load_tokenizer = lambda model_name: fake_tok
+        try:
+            cfg = _make_workload_config(num_prefixes=8)
+            sender = _make_mock_sender()
+            collector = MagicMock()
+            monitor = MagicMock()
+            w = psf.PrefixSuffixTunerWorkload(
+                cfg, sender, collector, monitor, seed=42, model_name="mock"
+            )
+        finally:
+            psf._try_load_tokenizer = original
+
+        bodies = [p.split(" ", 1)[1] for p in w._prefixes]
+        # All 8 prefix bodies should be distinct token-id sequences.
+        assert len(set(bodies)) == 8
 
 
 # ---------------------------------------------------------------------------

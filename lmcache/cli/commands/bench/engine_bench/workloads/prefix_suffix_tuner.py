@@ -64,6 +64,13 @@ _MAX_OUTPUT_TOKENS = 1
 # bench-engine.md`` §4.5 for the analysis.
 _OVERFLOW_FACTOR = 1.05
 
+# Range of token-IDs to sample when generating random body content.  Skip
+# the low region (byte fallback / special tokens) and the high tail
+# (reserved / added tokens, which are rarely 1-token-clean on round-trip).
+# 256–50000 is safe across Llama, Qwen, MiniMax tokenizers.
+_TOKEN_ID_LO = 256
+_TOKEN_ID_HI = 50000
+
 
 @dataclass
 class PrefixSuffixTunerConfig:
@@ -196,77 +203,123 @@ class PrefixSuffixTunerConfig:
 # ---------------------------------------------------------------------------
 
 
-def _generate_prefix(index: int, num_tokens: int) -> str:
-    """Generate a prefix: unique ID header + ``"hi"`` filler body.
+def _try_load_tokenizer(model_name: str | None):
+    """Best-effort load of the model's tokenizer.
 
-    The body is identical across all prefixes (a stream of ``"hi"`` tokens),
-    but the **unique ID header** at the start makes the prefix's chained
-    block hash unique per ``index``.  Combined with vLLM's chain-hashed
-    prefix cache, this means:
+    Used to generate body content as random valid token-IDs, then decoded
+    back to text — guaranteeing both (a) configured token counts ≈ actual
+    tokens at the model and (b) different content per call site, so chunk
+    content-hashes don't collide across prefixes (which would inflate the
+    LMCache hit rate even in non-blend mode).
 
-    - Prefix cache does **not** false-hit across prefixes (chain hash
-      diverges from block 0).
-    - CacheBlend, which uses content hashing, *will* report cross-prefix
-      hits on the body chunks — that is exactly what blend does, and is
-      consistent with the analytical model's assumption that Baseline 3
-      achieves full-context blend coverage.
+    Returns ``None`` if ``transformers`` isn't installed or the tokenizer
+    can't be loaded; callers fall back to the deterministic ``"hi"``
+    filler in that case.
+    """
+    if model_name is None:
+        return None
+    try:
+        # Third Party
+        from transformers import AutoTokenizer
+    except ImportError:
+        logger.warning("transformers not available; falling back to 'hi' body filler")
+        return None
+    try:
+        return AutoTokenizer.from_pretrained(model_name)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            "Could not load tokenizer for %s (%s); falling back to 'hi' filler",
+            model_name,
+            e,
+        )
+        return None
 
-    Using ``"hi"`` for the body gives exact 1:1 word-to-BPE-token mapping
-    on every modern tokenizer, so the configured ``num_tokens`` matches
-    what the model actually sees within the unique-ID overhead.
+
+def _generate_random_body(num_tokens: int, tokenizer, rng: random.Random) -> str:
+    """Build a body of ``num_tokens`` BPE tokens of unique random content.
+
+    Samples random token-IDs in the safe range and decodes them.  The
+    decoded text re-tokenizes to (≈) ``num_tokens`` tokens (small drift
+    from BPE merge boundaries) and is *content-unique* per call because
+    the IDs are independent draws from ``rng``.
+
+    Falls back to ``"hi"`` filler when ``tokenizer`` is None.
+    """
+    if tokenizer is None:
+        return " ".join(["hi"] * num_tokens)
+    ids = [rng.randrange(_TOKEN_ID_LO, _TOKEN_ID_HI) for _ in range(num_tokens)]
+    return tokenizer.decode(ids, skip_special_tokens=True)
+
+
+def _generate_prefix(
+    index: int,
+    num_tokens: int,
+    tokenizer,
+    rng: random.Random,
+) -> str:
+    """Generate a prefix with unique-ID header + per-prefix random body.
+
+    The unique-ID header makes the prefix's chained block hash unique per
+    ``index`` (so vLLM's chain-hashed prefix cache distinguishes prefixes).
+    The random body uses different token-IDs per ``index`` because
+    ``rng`` is a per-prefix state, so chunk content-hashes don't collide
+    across prefixes — required for non-blend cache hit-rate metrics to be
+    meaningful.
 
     Args:
         index: Zero-based prefix index; encoded into the unique ID.
         num_tokens: Approximate target token length of the full prefix.
+        tokenizer: The model's tokenizer, or None for fallback.
+        rng: Per-prefix seeded random source.
 
     Returns:
         Prefix text starting with ``"PREFIX_<8-hex-digits>"``.
     """
     unique_id = f"PREFIX_{index:08x}"
     body_words = max(num_tokens - _UNIQUE_ID_TOKENS, 1)
-    body = " ".join(["hi"] * body_words)
+    body = _generate_random_body(body_words, tokenizer, rng)
     return f"{unique_id} {body}"
 
 
-def _generate_suffix(num_tokens: int) -> str:
+def _generate_suffix(num_tokens: int, tokenizer, rng: random.Random) -> str:
     """Generate the single shared suffix used by every request.
 
-    The suffix is bit-identical across all requests; its content-hash
-    fingerprints are what CacheBlend reuses across requests — the property
-    Baseline 3 measures.
+    The suffix is bit-identical across all requests by design — its
+    content-hash fingerprints are the only ones CacheBlend can reuse
+    across the full pool, which is exactly what Baseline 3 measures.
 
     Args:
         num_tokens: Approximate target token length.
+        tokenizer: The model's tokenizer, or None for fallback.
+        rng: Seeded random source (deterministic seed → reproducible).
 
     Returns:
         Suffix text starting with ``"SUFFIX"``.
     """
-    body = " ".join(["hi"] * max(num_tokens - 1, 1))
+    body_words = max(num_tokens - 1, 1)
+    body = _generate_random_body(body_words, tokenizer, rng)
     return f"SUFFIX {body}"
 
 
-def _generate_breaker(num_tokens: int, rng: random.Random) -> str:
-    """Generate a per-request breaker with a unique header + ``"hi"`` filler.
+def _generate_breaker(num_tokens: int, tokenizer, rng: random.Random) -> str:
+    """Generate a per-request breaker of fresh random tokens.
 
-    The breaker has a small unique random header (so the chained block
-    hash diverges between requests with the same prefix), plus ``"hi"``
-    filler for accurate token counting.  This (a) defeats ordinary prefix
-    caching past the prefix boundary, and (b) ensures the chained block
-    hashes leading into the suffix differ between requests — so the
-    suffix is only reachable via CacheBlend's content-based lookup, not
-    by chained prefix-cache.
+    Sampled fresh per request: each request's breaker tokens differ both
+    in IDs (defeats chained prefix cache past the prefix boundary) and in
+    chunk content-hash (so non-blend caches don't carry breaker hits over
+    from earlier requests).
 
     Args:
         num_tokens: Approximate target token length.
-        rng: Seeded random source.  Each call advances state, so
-            successive requests get different breaker headers.
+        tokenizer: The model's tokenizer, or None for fallback.
+        rng: Seeded random source.  Each call advances state.
 
     Returns:
-        A breaker string starting with a 4-token-ish ``"BR_<8-hex>"`` ID.
+        A breaker string with header + random body.
     """
     unique_id = f"BR_{rng.randrange(2**32):08x}"
     body_words = max(num_tokens - _UNIQUE_ID_TOKENS, 1)
-    body = " ".join(["hi"] * body_words)
+    body = _generate_random_body(body_words, tokenizer, rng)
     return f"{unique_id} {body}"
 
 
@@ -291,22 +344,36 @@ class PrefixSuffixTunerWorkload(BaseWorkload):
         stats_collector: StatsCollector,
         progress_monitor: ProgressMonitor,
         seed: int = 42,
+        model_name: str | None = None,
     ) -> None:
         super().__init__(request_sender, stats_collector, progress_monitor)
         self._config = config
         self._seed = seed
 
-        # Body filler is plain ``"hi"`` — 1 BPE token per word on every
-        # modern tokenizer, so configured token counts match what the model
-        # actually sees.  Cross-prefix uniqueness comes from the unique
-        # header injected at the start of each prefix; vLLM's prefix-cache
-        # chain hashing then makes every subsequent block of "hi"s also
-        # unique to its prefix.  See _generate_prefix docstring.
+        # Best-effort tokenizer load: when available, body content is
+        # generated as random valid token-IDs decoded back to text — that
+        # gives both (a) ~exact configured token count at the model (no
+        # tokenizer-expansion factor) and (b) content uniqueness per
+        # prefix so non-blend cache hit-rate metrics are not inflated by
+        # chunk content-hash collisions across prefixes.  Falls back to
+        # ``"hi"`` filler if transformers / the tokenizer isn't loadable.
+        self._tokenizer = _try_load_tokenizer(model_name)
+
+        # Each prefix gets its own RNG state so per-prefix bodies differ.
+        # Constant offsets keep reproducibility while leaving room for the
+        # suffix (seed + 1) and breaker (seed + 2) RNGs.
         self._prefixes: list[str] = [
-            _generate_prefix(i, config.prefix_tokens)
+            _generate_prefix(
+                i,
+                config.prefix_tokens,
+                self._tokenizer,
+                random.Random(seed + 1000 + i),
+            )
             for i in range(config.num_prefixes)
         ]
-        self._suffix: str = _generate_suffix(config.suffix_tokens)
+        self._suffix: str = _generate_suffix(
+            config.suffix_tokens, self._tokenizer, random.Random(seed + 1)
+        )
         self._breaker_rng = random.Random(seed + 2)
 
         self._pass2_index = 0
@@ -356,7 +423,9 @@ class PrefixSuffixTunerWorkload(BaseWorkload):
             A single-message chat list.
         """
         prefix = self._prefixes[prefix_index]
-        breaker = _generate_breaker(self._config.breaker_tokens, self._breaker_rng)
+        breaker = _generate_breaker(
+            self._config.breaker_tokens, self._tokenizer, self._breaker_rng
+        )
         content = f"{prefix} {breaker} {self._suffix}"
         return [{"role": "user", "content": content}]
 
