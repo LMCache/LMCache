@@ -346,14 +346,15 @@ ALL_ITEMS: list[ConfigItem] = [
     ),
     ConfigItem(
         key="psf_thrash",
-        display_name="Thrash multiplier",
+        display_name="Target tier size (GB)",
         description=(
-            "Multiplier on KV cache volume that sizes the prefix pool. "
-            "Values > 1.0 force pass-2 misses of the targeted tier; even "
-            "1.05 is sufficient with sequential dispatch and LRU."
+            "Size in GB of the KV-cache tier to overflow. The prefix pool "
+            "is sized to slightly more than this, so every pass-2 request "
+            "misses the targeted tier. Use the L0 (HBM) size for vanilla "
+            "vLLM, or the L1 (LMCache DRAM) size for tiered baselines."
         ),
         input_type="float",
-        default=1.05,
+        default=20.0,
         condition=_workload_is("prefix-suffix-tuner"),
         phase=PHASE_WORKLOAD,
     ),

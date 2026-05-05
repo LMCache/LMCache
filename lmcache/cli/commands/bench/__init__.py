@@ -285,10 +285,12 @@ class BenchCommand(BaseCommand):
         psf_group.add_argument(
             "--psf-thrash",
             type=float,
-            default=1.05,
-            help="Multiplier on --kv-cache-volume that sizes the prefix pool "
-            "(default: 1.05). Values > 1.0 force pass-2 misses of the targeted "
-            "tier; with sequential dispatch and LRU even 1.05 is sufficient.",
+            default=20.0,
+            help="Size in GB of the KV-cache tier to overflow (default: 20.0). "
+            "The workload sizes its prefix pool to slightly more than this, "
+            "so every pass-2 request misses that tier and falls through to "
+            "the next one. Use the L0 (HBM) size for vanilla vLLM baselines, "
+            "or the L1 (LMCache DRAM) size for tiered baselines.",
         )
 
         # --- Random-prefill workload args ---

@@ -26,7 +26,7 @@ class TestPrefixSuffixTunerConfig:
         cfg = PrefixSuffixTunerConfig()
         assert cfg.context_length == 8000
         assert cfg.prefix_ratio == 0.8
-        assert cfg.thrash == 1.05
+        assert cfg.thrash == 20.0
         assert cfg.num_prefixes == 1
         assert cfg.prefix_tokens == 1
         assert cfg.suffix_tokens == 1
@@ -36,7 +36,7 @@ class TestPrefixSuffixTunerConfig:
         cfg = PrefixSuffixTunerConfig(
             context_length=4000,
             prefix_ratio=0.5,
-            thrash=2.0,
+            thrash=50.0,
             num_prefixes=10,
             prefix_tokens=2000,
             suffix_tokens=1968,
@@ -44,7 +44,7 @@ class TestPrefixSuffixTunerConfig:
         )
         assert cfg.context_length == 4000
         assert cfg.prefix_ratio == 0.5
-        assert cfg.thrash == 2.0
+        assert cfg.thrash == 50.0
         assert cfg.num_prefixes == 10
 
     def test_invalid_context_length(self) -> None:
@@ -63,13 +63,18 @@ class TestPrefixSuffixTunerConfig:
         with pytest.raises(ValueError, match=r"prefix_ratio must be in \(0.0, 1.0\)"):
             PrefixSuffixTunerConfig(prefix_ratio=-0.5)
 
-    def test_invalid_thrash(self) -> None:
-        with pytest.raises(ValueError, match="thrash must be >= 1.0"):
-            PrefixSuffixTunerConfig(thrash=0.9)
+    def test_invalid_thrash_zero(self) -> None:
+        with pytest.raises(ValueError, match=r"thrash \(GB\) must be positive"):
+            PrefixSuffixTunerConfig(thrash=0.0)
 
-    def test_thrash_at_one_is_valid(self) -> None:
-        cfg = PrefixSuffixTunerConfig(thrash=1.0)
-        assert cfg.thrash == 1.0
+    def test_invalid_thrash_negative(self) -> None:
+        with pytest.raises(ValueError, match=r"thrash \(GB\) must be positive"):
+            PrefixSuffixTunerConfig(thrash=-1.0)
+
+    def test_thrash_small_positive_is_valid(self) -> None:
+        # Sub-1-GB target tier is valid for tiny test runs.
+        cfg = PrefixSuffixTunerConfig(thrash=0.5)
+        assert cfg.thrash == 0.5
 
     def test_invalid_num_prefixes(self) -> None:
         with pytest.raises(ValueError, match="num_prefixes must be >= 1"):
@@ -82,45 +87,46 @@ class TestPrefixSuffixTunerConfig:
 
 # ---------------------------------------------------------------------------
 # PrefixSuffixTunerConfig.resolve
+#
+# ``thrash`` is the target tier size in GB; the resolve() helper applies an
+# internal _OVERFLOW_FACTOR (1.05) to size the prefix pool slightly larger
+# than the targeted tier, so pass-2 misses everything in that tier.
 # ---------------------------------------------------------------------------
 
 
 class TestPrefixSuffixTunerConfigResolve:
     def test_resolve_basic(self) -> None:
         cfg = PrefixSuffixTunerConfig.resolve(
-            kv_cache_volume_gb=10.0,
             tokens_per_gb_kvcache=10000,
             context_length=4000,
             prefix_ratio=0.5,
-            thrash=1.05,
+            thrash=10.0,
         )
         # prefix_tokens = round(4000 * 0.5) = 2000
         assert cfg.prefix_tokens == 2000
         # suffix_tokens = 4000 - 2000 - 32 = 1968
         assert cfg.suffix_tokens == 1968
-        # target = 10 * 1.05 = 10.5 GB; 10.5 * 10000 / 2000 = 52.5 → 52
+        # pool_gb = 10 * 1.05 = 10.5 GB; 10.5 * 10000 / 2000 = 52.5 → 52
         assert cfg.num_prefixes == 52
 
-    def test_resolve_thrash_just_above_one(self) -> None:
+    def test_resolve_default_thrash_scaling(self) -> None:
         cfg = PrefixSuffixTunerConfig.resolve(
-            kv_cache_volume_gb=100.0,
             tokens_per_gb_kvcache=50000,
             context_length=8000,
             prefix_ratio=0.8,
-            thrash=1.05,
         )
         # prefix_tokens = round(8000 * 0.8) = 6400
         assert cfg.prefix_tokens == 6400
-        # 100 * 1.05 * 50000 / 6400 = 820.31... → 820
-        assert cfg.num_prefixes == 820
+        # default thrash = 20.0 GB; pool = 20 * 1.05 = 21 GB
+        # 21 * 50000 / 6400 = 164.06 → 164
+        assert cfg.num_prefixes == 164
 
     def test_resolve_minimum_one_prefix(self) -> None:
         cfg = PrefixSuffixTunerConfig.resolve(
-            kv_cache_volume_gb=0.0001,
             tokens_per_gb_kvcache=1,
             context_length=4000,
             prefix_ratio=0.5,
-            thrash=1.0,
+            thrash=0.0001,
         )
         assert cfg.num_prefixes == 1
 
@@ -128,17 +134,15 @@ class TestPrefixSuffixTunerConfigResolve:
         # context=200, prefix_ratio=0.95 → prefix=190, breaker=32, suffix=-22
         with pytest.raises(ValueError, match="suffix_tokens=.* below minimum 100"):
             PrefixSuffixTunerConfig.resolve(
-                kv_cache_volume_gb=10.0,
                 tokens_per_gb_kvcache=10000,
                 context_length=200,
                 prefix_ratio=0.95,
-                thrash=1.05,
+                thrash=10.0,
             )
 
     def test_resolve_suffix_at_minimum(self) -> None:
         # context = 200, prefix=68, breaker=32, suffix=100 (exactly minimum)
         cfg = PrefixSuffixTunerConfig.resolve(
-            kv_cache_volume_gb=1.0,
             tokens_per_gb_kvcache=1000,
             context_length=200,
             prefix_ratio=0.34,
@@ -146,23 +150,41 @@ class TestPrefixSuffixTunerConfigResolve:
         )
         assert cfg.suffix_tokens == 100
 
-    def test_resolve_thrash_scales_pool(self) -> None:
+    def test_resolve_thrash_scales_pool_linearly(self) -> None:
         cfg_small = PrefixSuffixTunerConfig.resolve(
-            kv_cache_volume_gb=10.0,
             tokens_per_gb_kvcache=10000,
             context_length=4000,
             prefix_ratio=0.5,
-            thrash=1.0,
+            thrash=10.0,
         )
         cfg_big = PrefixSuffixTunerConfig.resolve(
-            kv_cache_volume_gb=10.0,
             tokens_per_gb_kvcache=10000,
             context_length=4000,
             prefix_ratio=0.5,
-            thrash=2.0,
+            thrash=20.0,
         )
-        # Doubling thrash should roughly double num_prefixes
-        assert cfg_big.num_prefixes == 2 * cfg_small.num_prefixes
+        # Doubling thrash (target tier GB) should roughly double num_prefixes
+        # — within a single prefix of 2x because of integer flooring.
+        assert abs(cfg_big.num_prefixes - 2 * cfg_small.num_prefixes) <= 1
+
+    def test_resolve_applies_internal_overflow_factor(self) -> None:
+        """``thrash`` is the target tier size, not the pool size — pool is
+        ``thrash * _OVERFLOW_FACTOR``.  Verify that with a 100 GB target tier,
+        the pool genuinely overshoots."""
+        cfg = PrefixSuffixTunerConfig.resolve(
+            tokens_per_gb_kvcache=10000,
+            context_length=2000,
+            prefix_ratio=0.5,
+            thrash=100.0,
+        )
+        # prefix_tokens = 1000
+        # pool_gb = 100 * 1.05 = 105
+        # num_prefixes = 105 * 10000 / 1000 = 1050
+        assert cfg.num_prefixes == 1050
+        # Pool footprint > target tier:
+        pool_tokens = cfg.num_prefixes * cfg.prefix_tokens
+        target_tier_tokens = int(100.0 * 10000)
+        assert pool_tokens > target_tier_tokens
 
 
 # ---------------------------------------------------------------------------
@@ -174,7 +196,7 @@ def _make_workload_config(**overrides) -> PrefixSuffixTunerConfig:
     defaults = dict(
         context_length=200,
         prefix_ratio=0.5,
-        thrash=1.05,
+        thrash=10.0,  # target tier size in GB; resolve() not invoked here
         num_prefixes=4,
         prefix_tokens=100,
         suffix_tokens=68,

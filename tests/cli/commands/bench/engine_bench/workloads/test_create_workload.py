@@ -65,7 +65,7 @@ def _make_args(**overrides) -> argparse.Namespace:
         # prefix-suffix-tuner defaults
         psf_context_length=8000,
         psf_prefix_ratio=0.8,
-        psf_thrash=1.05,
+        psf_thrash=20.0,
     )
     defaults.update(overrides)
     return argparse.Namespace(**defaults)
@@ -196,9 +196,12 @@ class TestCreateWorkload:
         assert result._config.num_requests == 20
 
     def test_prefix_suffix_tuner(self) -> None:
+        # Defaults: psf_thrash=20.0 (target tier in GB).  The workload does
+        # NOT consume kv_cache_volume_gb (its sizing is independent of the
+        # general kv_cache_volume flag), so this test asserts only on the
+        # psf-* args + tokens-per-gb.
         config = _make_config(
             workload="prefix-suffix-tuner",
-            kv_cache_volume_gb=10.0,
             tokens_per_gb_kvcache=10000,
         )
         args = _make_args()
@@ -215,19 +218,19 @@ class TestCreateWorkload:
         # context=8000, ratio=0.8 → prefix=6400; suffix=8000-6400-32=1568
         assert result._config.prefix_tokens == 6400
         assert result._config.suffix_tokens == 1568
-        # 10 * 1.05 * 10000 / 6400 = 16.40... → 16
-        assert result._config.num_prefixes == 16
+        # thrash=20.0 GB; pool_gb=20.0 * 1.05 = 21.0 GB
+        # num_prefixes = 21.0 * 10000 / 6400 = 32.81... → 32
+        assert result._config.num_prefixes == 32
 
     def test_prefix_suffix_tuner_custom_args(self) -> None:
         config = _make_config(
             workload="prefix-suffix-tuner",
-            kv_cache_volume_gb=10.0,
             tokens_per_gb_kvcache=10000,
         )
         args = _make_args(
             psf_context_length=4000,
             psf_prefix_ratio=0.5,
-            psf_thrash=2.0,
+            psf_thrash=50.0,
         )
         sender, collector, monitor = _make_deps()
         result = create_workload(
@@ -240,10 +243,11 @@ class TestCreateWorkload:
         assert isinstance(result, PrefixSuffixTunerWorkload)
         assert result._config.context_length == 4000
         assert result._config.prefix_ratio == 0.5
-        assert result._config.thrash == 2.0
+        assert result._config.thrash == 50.0
         assert result._config.prefix_tokens == 2000
-        # 10 * 2.0 * 10000 / 2000 = 100
-        assert result._config.num_prefixes == 100
+        # thrash=50 GB; pool_gb=50 * 1.05 = 52.5 GB
+        # num_prefixes = 52.5 * 10000 / 2000 = 262.5 → 262
+        assert result._config.num_prefixes == 262
 
     def test_unknown_workload_raises(self) -> None:
         config = _make_config(workload="unknown-workload")

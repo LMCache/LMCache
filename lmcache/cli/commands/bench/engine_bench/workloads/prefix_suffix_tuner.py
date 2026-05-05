@@ -56,6 +56,14 @@ _MIN_SUFFIX_TOKENS = 100
 _UNIQUE_ID_TOKENS = 4  # rough token count for ``PREFIX_<8-hex-digits>``
 _MAX_OUTPUT_TOKENS = 1
 
+# Internal multiplier on ``thrash`` GB to size the prefix pool.  Set to 1.05
+# (a 5% overflow) because — with sequential pass-1/pass-2 dispatch and LRU
+# eviction — even a 5% overflow is sufficient to evict the next-needed
+# prefix on every pass-2 access, ensuring all pass-2 requests miss the
+# targeted tier.  See ``docs/design/cli/commands/bench/engine_bench/
+# bench-engine.md`` §4.5 for the analysis.
+_OVERFLOW_FACTOR = 1.05
+
 
 @dataclass
 class PrefixSuffixTunerConfig:
@@ -64,10 +72,13 @@ class PrefixSuffixTunerConfig:
     Attributes:
         context_length: Total tokens per request (prefix + breaker + suffix).
         prefix_ratio: Fraction of ``context_length`` allocated to the prefix.
-        thrash: Multiplier on ``--kv-cache-volume`` that determines the
-            total prefix-pool footprint.  Values just above 1.0 (e.g.
-            1.05) are sufficient to force pass-2 misses of the targeted
-            tier given sequential dispatch and LRU eviction.
+        thrash: Size in GB of the KV-cache tier the workload should overflow
+            (L0 / vLLM HBM for Baseline 1; L1 / LMCache DRAM for Baselines
+            2 and 3).  The prefix pool is sized to ``thrash *
+            _OVERFLOW_FACTOR`` GB internally — i.e., just barely larger than
+            the targeted tier — which is sufficient under sequential
+            dispatch and LRU to ensure every pass-2 request misses that
+            tier.
         num_prefixes: Number of distinct prefixes generated (computed by
             :meth:`resolve` from the cache budget).
         prefix_tokens: Token length of each prefix (computed).
@@ -78,7 +89,7 @@ class PrefixSuffixTunerConfig:
 
     context_length: int = 8000
     prefix_ratio: float = 0.8
-    thrash: float = 1.05
+    thrash: float = 20.0
     num_prefixes: int = 1
     prefix_tokens: int = 1
     suffix_tokens: int = 1
@@ -93,8 +104,8 @@ class PrefixSuffixTunerConfig:
             raise ValueError(
                 f"prefix_ratio must be in (0.0, 1.0), got {self.prefix_ratio}"
             )
-        if self.thrash < 1.0:
-            raise ValueError(f"thrash must be >= 1.0, got {self.thrash}")
+        if self.thrash <= 0.0:
+            raise ValueError(f"thrash (GB) must be positive, got {self.thrash}")
         if self.num_prefixes < 1:
             raise ValueError(f"num_prefixes must be >= 1, got {self.num_prefixes}")
         if self.prefix_tokens < 1:
@@ -107,33 +118,32 @@ class PrefixSuffixTunerConfig:
     @classmethod
     def resolve(
         cls,
-        kv_cache_volume_gb: float,
         tokens_per_gb_kvcache: int,
         context_length: int = 8000,
         prefix_ratio: float = 0.8,
-        thrash: float = 1.05,
+        thrash: float = 20.0,
         breaker_tokens: int = _BREAKER_TOKENS,
     ) -> "PrefixSuffixTunerConfig":
-        """Compute ``num_prefixes`` and token splits from the cache budget.
+        """Compute ``num_prefixes`` and token splits from the target tier size.
 
         ``num_prefixes`` is sized so that the total prefix-pool footprint
-        in tokens equals ``kv_cache_volume_gb * thrash * tokens_per_gb_kvcache``.
-        With ``thrash`` slightly above 1.0, the pool just barely overflows the
-        targeted KV-cache tier; with sequential dispatch and LRU eviction,
-        this is sufficient to evict the next-needed prefix on every pass-2
-        access, ensuring all pass-2 requests miss the targeted tier.
+        in tokens equals
+        ``thrash * _OVERFLOW_FACTOR * tokens_per_gb_kvcache``.  ``thrash``
+        is the **size of the targeted KV-cache tier in GB**; the internal
+        :data:`_OVERFLOW_FACTOR` (1.05) provides the small overflow needed
+        for the LRU invariant to drive every pass-2 access to a miss of
+        that tier.
 
         Args:
-            kv_cache_volume_gb: Size of the KV-cache tier the workload
-                should overflow (e.g. L0 for Baseline 1, L1 for Baselines
-                2 and 3).
             tokens_per_gb_kvcache: Tokens fitting in 1 GB of KV cache for
-                the served model.
+                the served model (auto-detected from the engine in
+                ``parse_args_to_config``; user need not supply directly).
             context_length: Total tokens per request.
             prefix_ratio: Fraction of ``context_length`` allocated to the
                 prefix.  Must be strictly between 0 and 1.
-            thrash: Multiplier on ``kv_cache_volume_gb`` for sizing the
-                prefix pool.  Defaults to 1.05.
+            thrash: Size of the targeted KV-cache tier in GB.  Defaults
+                to 20.0 GB (typical L0 size for a single H100 with low
+                ``--gpu-memory-utilization``).
             breaker_tokens: Token length of the random breaker between
                 prefix and suffix.  Defaults to 32.
 
@@ -154,17 +164,19 @@ class PrefixSuffixTunerConfig:
                 f"increase context_length"
             )
 
-        target_gb = kv_cache_volume_gb * thrash
+        pool_gb = thrash * _OVERFLOW_FACTOR
         num_prefixes = max(
-            int(target_gb * tokens_per_gb_kvcache / prefix_tokens),
+            int(pool_gb * tokens_per_gb_kvcache / prefix_tokens),
             1,
         )
         logger.debug(
-            "Computed num_prefixes=%d from kv_cache_volume_gb=%.2f, "
-            "thrash=%.3f, tokens_per_gb_kvcache=%d, prefix_tokens=%d",
+            "Computed num_prefixes=%d from thrash=%.2f GB (target tier), "
+            "_OVERFLOW_FACTOR=%.3f -> pool=%.2f GB, "
+            "tokens_per_gb_kvcache=%d, prefix_tokens=%d",
             num_prefixes,
-            kv_cache_volume_gb,
             thrash,
+            _OVERFLOW_FACTOR,
+            pool_gb,
             tokens_per_gb_kvcache,
             prefix_tokens,
         )
@@ -305,7 +317,9 @@ class PrefixSuffixTunerWorkload(BaseWorkload):
             f"  Prefix tokens:     {Y}{c.prefix_tokens}{R} (ratio={c.prefix_ratio})\n"
             f"  Breaker tokens:    {Y}{c.breaker_tokens}{R} (random per request)\n"
             f"  Suffix tokens:     {Y}{c.suffix_tokens}{R} (shared, deterministic)\n"
-            f"  Thrash multiplier: {Y}{c.thrash}{R}\n"
+            f"  Target tier:       {Y}{c.thrash:.2f} GB{R}"
+            f" (overflow x{_OVERFLOW_FACTOR:.2f} = "
+            f"{c.thrash * _OVERFLOW_FACTOR:.2f} GB)\n"
             f"  Prefix pool size:  {Y}{c.num_prefixes}{R}\n"
             f"  Pool tokens:       {Y}{pool_tokens_millions:.2f}M{R}\n"
             f"  Total measured:    {Y}{c.num_prefixes}{R} requests "

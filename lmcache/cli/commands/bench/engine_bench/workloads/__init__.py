@@ -144,7 +144,6 @@ def create_workload(
 
     if config.workload == "prefix-suffix-tuner":
         psf_workload_config = PrefixSuffixTunerConfig.resolve(
-            kv_cache_volume_gb=config.kv_cache_volume_gb,
             tokens_per_gb_kvcache=config.tokens_per_gb_kvcache,
             context_length=args.psf_context_length,
             prefix_ratio=args.psf_prefix_ratio,

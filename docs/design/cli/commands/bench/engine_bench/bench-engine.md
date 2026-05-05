@@ -39,9 +39,8 @@ lmcache bench engine --engine-url http://localhost:8000 \
 
 # Prefix-suffix tuner (tiered KV-cache demonstrator, sequential 2-pass)
 lmcache bench engine --engine-url http://localhost:8000 \
-    --workload prefix-suffix-tuner --tokens-per-gb-kvcache 6000 \
-    --kv-cache-volume 100 --psf-context-length 8000 \
-    --psf-prefix-ratio 0.8 --psf-thrash 1.05
+    --workload prefix-suffix-tuner --lmcache-url http://localhost:8080 \
+    --psf-context-length 8000 --psf-prefix-ratio 0.8 --psf-thrash 100
 ```
 
 ---
@@ -472,9 +471,14 @@ LMCache configurations to demonstrate the value of each cache tier:
 | 2 | vLLM + LMCache L1 + L2 | L1 (DRAM) | L2 prefix hits (suffix recomputed) |
 | 3 | vLLM + LMCache L1 + L2 + CacheBlend | L1 (DRAM) | L2 prefix hits + CacheBlend suffix hits |
 
-The user picks `--kv-cache-volume` to match the size of the tier they want to
+The user picks `--psf-thrash` to match the size of the tier they want to
 overflow (L0 size for Baseline 1, L1 size for Baselines 2 and 3). The
-workload itself does not need to know which baseline it is running.
+workload itself does not need to know which baseline it is running — the
+internal `_OVERFLOW_FACTOR` (1.05) sizes the pool slightly larger than the
+named target, and sequential dispatch + LRU does the rest.
+
+`--kv-cache-volume` is unused by this workload (it remains required for
+other workloads that size themselves around a user-provided GB budget).
 
 **Request layout:**
 
@@ -496,11 +500,12 @@ workload itself does not need to know which baseline it is running.
 |-------|---------|---------|-------------|
 | `context_length` | `--psf-context-length` | 8000 | Total tokens per request (prefix + breaker + suffix) |
 | `prefix_ratio` | `--psf-prefix-ratio` | 0.8 | Fraction of context allocated to the prefix; must be in (0.0, 1.0) |
-| `thrash` | `--psf-thrash` | 1.05 | Multiplier on `--kv-cache-volume` sizing the prefix pool |
-| `num_prefixes` | (computed) | — | `floor(kv_cache_volume * thrash * tokens_per_gb / prefix_tokens)` |
+| `thrash` | `--psf-thrash` | 20.0 | **Size in GB of the targeted KV-cache tier** (L0 for Baseline 1, L1 for Baselines 2 and 3). Pool footprint is `thrash * _OVERFLOW_FACTOR` GB. |
+| `num_prefixes` | (computed) | — | `floor(thrash * _OVERFLOW_FACTOR * tokens_per_gb / prefix_tokens)` |
 | `prefix_tokens` | (computed) | — | `round(context_length * prefix_ratio)` |
 | `suffix_tokens` | (computed) | — | `context_length - prefix_tokens - breaker_tokens`; errors if `< 100` |
 | `breaker_tokens` | (hardcoded) | 32 | Random breaker length |
+| `_OVERFLOW_FACTOR` | (module constant) | 1.05 | How much to overflow the targeted tier. Hardcoded at 1.05 because the LRU invariant proves that a 5% overflow is sufficient under sequential same-order replay. |
 
 **Behavior:**
 

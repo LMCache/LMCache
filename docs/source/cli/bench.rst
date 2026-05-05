@@ -373,14 +373,18 @@ fall through to the next one.
      - Fraction of context-length used by the prefix. Must be in (0.0, 1.0).
        The remainder (minus a 32-token breaker) is the shared suffix.
    * - ``--psf-thrash``
-     - 1.05
-     - Multiplier on ``--kv-cache-volume`` that sizes the prefix pool.
-       Values > 1.0 force pass-2 misses; with sequential dispatch and LRU
-       even 1.05 is sufficient.
+     - 20.0
+     - **Size in GB of the KV-cache tier to overflow.** Use the L0 (HBM)
+       size for vanilla vLLM, or the L1 (LMCache DRAM) size for tiered
+       baselines. The workload sizes its prefix pool to slightly more than
+       this (5% overflow internally), enough to drive every pass-2 request
+       to a miss of that tier under sequential dispatch + LRU.
 
 The number of pass-2 (measured) requests equals the prefix pool size,
 computed as
-``floor(kv_cache_volume * psf_thrash * tokens_per_gb / prefix_tokens)``.
+``floor(psf_thrash * 1.05 * tokens_per_gb / prefix_tokens)``.
+``--kv-cache-volume`` is unused by this workload — sizing is driven solely
+by ``--psf-thrash``.
 
 **Example:**
 
@@ -390,10 +394,9 @@ computed as
        --engine-url http://localhost:8000 \
        --workload prefix-suffix-tuner \
        --lmcache-url http://localhost:8080 \
-       --kv-cache-volume 100 \
        --psf-context-length 8000 \
        --psf-prefix-ratio 0.8 \
-       --psf-thrash 1.05
+       --psf-thrash 100
 
 
 random-prefill
