@@ -338,9 +338,14 @@ for i in 1 2 3 4 5; do
 done
 
 if [ ! -s "$L2_METRICS_FILE" ]; then
-    echo "WARNING: Could not fetch metrics from Prometheus (port $PROMETHEUS_PORT). Skipping data flow check."
-else
-    python3 -c "
+    echo "FAIL: could not fetch metrics from Prometheus (port $PROMETHEUS_PORT)."
+    echo "       /metrics being unreachable means we cannot verify the L2"
+    echo "       data flow or the observability surface; failing the test"
+    echo "       rather than silently skipping."
+    exit 1
+fi
+
+python3 -c "
 import sys
 
 with open('$L2_METRICS_FILE') as f:
@@ -414,7 +419,6 @@ if failed:
 else:
     print('[PASS] All data flow checks passed')
 "
-fi
 
 # ---------------------------------------------------------------------------
 # Step 5: Verify the rest of the MP observability surface
@@ -425,13 +429,12 @@ fi
 # above so the histograms record on every event (the default 0.01 would
 # leave them empty in this short workload and flake the assertions).
 
-if [ -s "$L2_METRICS_FILE" ]; then
-    echo ""
-    echo "============================================"
-    echo "=== Verifying full MP observability surface ==="
-    echo "============================================"
+echo ""
+echo "============================================"
+echo "=== Verifying full MP observability surface ==="
+echo "============================================"
 
-    python3 - "$L2_METRICS_FILE" <<'PYEOF'
+python3 - "$L2_METRICS_FILE" <<'PYEOF'
 import re
 import sys
 
@@ -511,7 +514,6 @@ if failed:
     sys.exit(1)
 print("[PASS] All observability metrics populated.")
 PYEOF
-fi
 
 echo "============================================"
 echo "=== L2 Long Doc QA test completed ==="
