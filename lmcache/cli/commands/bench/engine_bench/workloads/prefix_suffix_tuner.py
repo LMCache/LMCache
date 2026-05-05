@@ -31,6 +31,10 @@ with::
 
 Two passes run sequentially, one request at a time, in identical order:
 
+  - Engine warmup (single throwaway request, before pass 1): amortizes
+    first-request torch.compile / CUDA-graph / connector-handshake cost.
+    Stats discarded; the prompt is too small to occupy a chunk-aligned
+    region so it does not pollute LMCache hit-rate metrics.
   - Pass 1 (warmup): populates the cache.  Stats discarded.
   - Pass 2 (measured): repeats the same prefix order.  Because LRU evicts
     the next-needed prefix on each pass-2 access, even a 1.05× overflow of
@@ -538,6 +542,16 @@ class PrefixSuffixTunerWorkload(BaseWorkload):
     async def warmup(self) -> None:
         """Run pass 1: send each prefix once sequentially to populate cache.
 
+        Before pass 1 starts, sends a single short throwaway request to
+        amortize first-request engine overhead (torch.compile JIT-fallback
+        paths, CUDA-graph capture for novel batch shapes, vLLM/LMCache
+        connector handshake, tokenizer lazy initialization).  This keeps
+        the first request of pass 1 on a fully-warmed engine, so that the
+        cache-population pass does not include outlier latency from
+        first-request overhead.  The throwaway prompt is ~5 tokens — too
+        small to occupy a chunk-aligned region — so it does not pollute
+        the LMCache hit-rate metrics.
+
         After dispatching all warmup requests, sleeps for
         :data:`_EVICTION_SETTLE_SECONDS` so LMCache's batched-eviction LRU
         (1Hz background poll, evicts only when usage > watermark) has time
@@ -545,6 +559,20 @@ class PrefixSuffixTunerWorkload(BaseWorkload):
         L1 by a few percent may complete before any eviction fires, and
         pass 2 would then find all of pass 1's data still in cache.
         """
+        # Engine warmup: amortize first-request torch.compile / CUDA-graph
+        # / connector-handshake cost onto a throwaway request.
+        self._progress_monitor.log_message(
+            "Engine warmup (1 throwaway request before pass 1)"
+        )
+        warmup_result = await self._request_sender.send_warmup_request(
+            "engine_warmup",
+            [{"role": "user", "content": "Hello"}],
+        )
+        if not warmup_result.successful:
+            self._progress_monitor.log_message(
+                f"Engine warmup failed: {warmup_result.error}"
+            )
+
         n = self._config.num_prefixes
         self._progress_monitor.log_message(f"Pass 1 (warmup): {n} requests")
         for i in range(n):

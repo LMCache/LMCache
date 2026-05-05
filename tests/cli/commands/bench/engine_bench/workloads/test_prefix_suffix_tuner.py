@@ -399,26 +399,29 @@ class TestPrefixSuffixTunerMessages:
 
 class TestPrefixSuffixTunerWarmup:
     @pytest.mark.asyncio
-    async def test_warmup_sends_each_prefix_once(self) -> None:
+    async def test_warmup_sends_engine_warmup_then_each_prefix_once(self) -> None:
         cfg = _make_workload_config(num_prefixes=4)
         w, sender, _, _ = _make_workload(cfg)
 
         await w.warmup()
 
-        assert sender.send_warmup_request.call_count == 4
-        for i, call in enumerate(sender.send_warmup_request.call_args_list):
-            request_id = call[0][0]
-            assert request_id == f"pass1_p{i}"
+        # 1 engine warmup + 4 pass-1 prefixes = 5 total
+        assert sender.send_warmup_request.call_count == 5
+        # First call is the engine warmup (throwaway, before pass 1).
+        assert sender.send_warmup_request.call_args_list[0][0][0] == "engine_warmup"
+        # Subsequent calls are pass-1 prefixes in index order.
+        for i, call in enumerate(sender.send_warmup_request.call_args_list[1:]):
+            assert call[0][0] == f"pass1_p{i}"
 
     @pytest.mark.asyncio
-    async def test_warmup_sends_in_order(self) -> None:
+    async def test_warmup_sends_pass1_prefixes_in_order(self) -> None:
         cfg = _make_workload_config(num_prefixes=3)
         w, sender, _, _ = _make_workload(cfg)
 
         await w.warmup()
 
         ids = [call[0][0] for call in sender.send_warmup_request.call_args_list]
-        assert ids == ["pass1_p0", "pass1_p1", "pass1_p2"]
+        assert ids == ["engine_warmup", "pass1_p0", "pass1_p1", "pass1_p2"]
 
     @pytest.mark.asyncio
     async def test_warmup_uses_real_request_structure(self) -> None:
@@ -426,11 +429,15 @@ class TestPrefixSuffixTunerWarmup:
         w, sender, _, _ = _make_workload(cfg)
         await w.warmup()
 
-        # Pass 1 should send full prefix+breaker+suffix prompts (not a stub)
-        first_call_messages = sender.send_warmup_request.call_args_list[0][0][1]
-        content = first_call_messages[0]["content"]
-        assert "PREFIX_00000000" in content
-        assert w._suffix in content
+        # The engine-warmup request (call 0) sends a tiny throwaway prompt;
+        # the pass-1 requests (calls 1..N) send full prefix+breaker+suffix.
+        warmup_messages = sender.send_warmup_request.call_args_list[0][0][1]
+        warmup_content = warmup_messages[0]["content"]
+        assert "PREFIX_" not in warmup_content  # throwaway, no real prefix
+        first_pass1_messages = sender.send_warmup_request.call_args_list[1][0][1]
+        first_pass1_content = first_pass1_messages[0]["content"]
+        assert "PREFIX_00000000" in first_pass1_content
+        assert w._suffix in first_pass1_content
 
 
 # ---------------------------------------------------------------------------
@@ -496,9 +503,11 @@ class TestPrefixSuffixTunerTwoPassOrdering:
             if r < 0:
                 break
 
+        # Skip the engine-warmup throwaway call (call 0); pass-1 prefixes
+        # start at call 1.
         warmup_prefixes = [
             c[0][1][0]["content"].split()[0]
-            for c in sender.send_warmup_request.call_args_list
+            for c in sender.send_warmup_request.call_args_list[1:]
         ]
         bench_prefixes = [
             c[0][1][0]["content"].split()[0] for c in sender.send_request.call_args_list
@@ -520,7 +529,9 @@ class TestPrefixSuffixTunerTwoPassOrdering:
 
         # For prefix 0, the pass-1 and pass-2 prompts must differ
         # (same prefix and suffix, but different random breaker).
-        pass1_prefix0 = sender.send_warmup_request.call_args_list[0][0][1][0]["content"]
+        # Note: call 0 of send_warmup_request is the engine warmup; pass-1
+        # prefix 0 is at call index 1.
+        pass1_prefix0 = sender.send_warmup_request.call_args_list[1][0][1][0]["content"]
         pass2_prefix0 = sender.send_request.call_args_list[0][0][1][0]["content"]
         assert pass1_prefix0 != pass2_prefix0
 
@@ -537,8 +548,8 @@ class TestPrefixSuffixTunerFullRun:
 
         w.run()
 
-        # Pass 1: 3 warmup requests
-        assert sender.send_warmup_request.call_count == 3
+        # 1 engine warmup + 3 pass-1 prefixes = 4 warmup requests total
+        assert sender.send_warmup_request.call_count == 4
         # Pass 2: 3 measured requests
         assert sender.send_request.call_count == 3
         # Stats reset between passes (warmup discarded)
@@ -595,7 +606,11 @@ async def _capture_workload_access_order(
     pass2: list[int] = []
 
     async def capture_warmup(req_id, _msgs, **_kw):
-        # request_id format: "pass1_p<index>"
+        # request_id format: "pass1_p<index>" for cache-population requests;
+        # "engine_warmup" for the throwaway request before pass 1, which is
+        # not part of the access order under test.
+        if req_id == "engine_warmup":
+            return _make_mock_result(req_id)
         pass1.append(int(req_id.split("_p")[1]))
         return _make_mock_result(req_id)
 
