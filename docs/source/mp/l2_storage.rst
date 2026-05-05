@@ -218,12 +218,30 @@ I/O queue depth on a single Python thread.
 
 .. important::
 
-   ``O_DIRECT`` requires that I/O buffer sizes and offsets be aligned to
-   the filesystem's block size.  Choose ``--chunk-size`` so that the
-   resulting per-chunk byte size is a multiple of that block size --
-   GPFS and similar parallel filesystems often use large blocks (e.g.
-   several MiB), and a misaligned chunk will fail with ``EINVAL``.  If
-   unsure, start with ``use_odirect: false`` and confirm correctness
+   ``O_DIRECT`` has two independent alignment requirements:
+
+   1. **Length alignment.**  The transfer length must be a multiple of
+      the filesystem's block size.  The connector queries the disk block
+      size at construction time and, on each operation, checks
+      ``len % disk_block_size``.  If the length is **not** a multiple,
+      the connector silently falls back to a buffered open (no
+      ``O_DIRECT``) for that operation -- correctness is preserved but
+      you do not get true direct I/O.  To ensure ``O_DIRECT`` is
+      actually used, choose ``--chunk-size`` so that the resulting
+      per-chunk byte size is a multiple of the FS block size.  GPFS and
+      similar parallel filesystems often use large blocks (e.g. several
+      MiB).
+
+   2. **Memory-buffer alignment.**  The I/O buffer pointer itself must
+      also be aligned (typically to 4096 bytes on local disks, or to the
+      FS block size on parallel filesystems).  This is controlled by
+      ``--l1-align-bytes`` (default ``4096``) -- raise it to match the
+      FS block size when running on a filesystem with larger blocks.  If
+      the buffer is misaligned, the underlying ``read``/``write`` syscall
+      returns ``EINVAL`` (this is **not** caught by the length-fallback
+      path above and will surface as a runtime error).
+
+   If unsure, start with ``use_odirect: false`` and confirm correctness
    before enabling ``O_DIRECT``.
 
 **Configuration examples:**
