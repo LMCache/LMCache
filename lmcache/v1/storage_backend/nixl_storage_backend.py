@@ -127,7 +127,7 @@ class NixlStorageConfig:
 
         # Per-worker endpoint distribution: if nixl_endpoint_list is set,
         # override endpoint_override so each TP worker targets a different
-        # object-storage endpoint (round-robin by worker_id).
+        # object-storage endpoint (round-robin by local_worker_id).
         endpoint_list = extra_config.get("nixl_endpoint_list")
         if endpoint_list is not None and len(endpoint_list) == 0:
             raise ValueError("nixl_endpoint_list is set but empty")
@@ -138,7 +138,7 @@ class NixlStorageConfig:
                     "nixl_backend_params.endpoint_override (%s)",
                     backend_params["endpoint_override"],
                 )
-            ep = endpoint_list[metadata.worker_id % len(endpoint_list)]
+            ep = endpoint_list[metadata.local_worker_id % len(endpoint_list)]
             if not ep.startswith(("http://", "https://")):
                 raise ValueError(
                     f"nixl_endpoint_list entry {ep!r} is not a valid URL "
@@ -147,7 +147,7 @@ class NixlStorageConfig:
             backend_params["endpoint_override"] = ep
             logger.info(
                 "Worker %d using endpoint %s (from %d endpoints)",
-                metadata.worker_id,
+                metadata.local_worker_id,
                 ep,
                 len(endpoint_list),
             )

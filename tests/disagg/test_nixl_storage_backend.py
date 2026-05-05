@@ -137,13 +137,13 @@ def _make_obj_config(
     return config
 
 
-def _make_metadata(worker_id: int = 0) -> LMCacheMetadata:
-    """Create test metadata with a configurable worker_id."""
+def _make_metadata(local_worker_id: int = 0) -> LMCacheMetadata:
+    """Create test metadata with a configurable local_worker_id."""
     return LMCacheMetadata(
         model_name="test_model",
-        worker_id=worker_id,
+        worker_id=local_worker_id,
         local_world_size=1,
-        local_worker_id=0,
+        local_worker_id=local_worker_id,
         world_size=1,
         kv_dtype=torch.bfloat16,
         kv_shape=(32, 2, 256, 1024, 128),
@@ -160,10 +160,10 @@ def test_endpoint_list_round_robin():
     ]
     config = _make_obj_config({"nixl_endpoint_list": endpoints})
 
-    for worker_id in range(6):
-        metadata = _make_metadata(worker_id=worker_id)
+    for local_worker_id in range(6):
+        metadata = _make_metadata(local_worker_id=local_worker_id)
         nixl_config = NixlStorageConfig.from_cache_engine_config(config, metadata)
-        expected = endpoints[worker_id % len(endpoints)]
+        expected = endpoints[local_worker_id % len(endpoints)]
         assert nixl_config.backend_params["endpoint_override"] == expected
 
 
@@ -180,7 +180,7 @@ def test_endpoint_list_overrides_endpoint_override():
             },
         }
     )
-    metadata = _make_metadata(worker_id=0)
+    metadata = _make_metadata(local_worker_id=0)
 
     nixl_config = NixlStorageConfig.from_cache_engine_config(config, metadata)
 
@@ -199,7 +199,7 @@ def test_endpoint_list_does_not_mutate_original_config():
             "nixl_backend_params": original_params,
         }
     )
-    metadata = _make_metadata(worker_id=0)
+    metadata = _make_metadata(local_worker_id=0)
 
     NixlStorageConfig.from_cache_engine_config(config, metadata)
 
@@ -210,7 +210,7 @@ def test_endpoint_list_does_not_mutate_original_config():
 def test_endpoint_list_empty_raises():
     """nixl_endpoint_list=[] should raise ValueError before any nixl ops."""
     config = _make_obj_config({"nixl_endpoint_list": []})
-    metadata = _make_metadata(worker_id=0)
+    metadata = _make_metadata(local_worker_id=0)
 
     with pytest.raises(ValueError, match="nixl_endpoint_list is set but empty"):
         NixlStorageConfig.from_cache_engine_config(config, metadata)
@@ -220,7 +220,7 @@ def test_endpoint_list_empty_raises():
 def test_no_endpoint_list_leaves_backend_params_unchanged():
     """When nixl_endpoint_list is absent, endpoint_override must not be injected."""
     config = _make_obj_config()  # no nixl_endpoint_list key
-    metadata = _make_metadata(worker_id=0)
+    metadata = _make_metadata(local_worker_id=0)
 
     nixl_config = NixlStorageConfig.from_cache_engine_config(config, metadata)
 
@@ -231,7 +231,7 @@ def test_no_endpoint_list_leaves_backend_params_unchanged():
 def test_endpoint_list_malformed_url_raises():
     """A non-http(s) entry in nixl_endpoint_list should raise ValueError."""
     config = _make_obj_config({"nixl_endpoint_list": ["htps://typo.example.com"]})
-    metadata = _make_metadata(worker_id=0)
+    metadata = _make_metadata(local_worker_id=0)
 
     with pytest.raises(ValueError, match="is not a valid URL"):
         NixlStorageConfig.from_cache_engine_config(config, metadata)

@@ -117,7 +117,7 @@ Per-Worker Endpoint Distribution
 When using the OBJ backend with multiple tensor-parallel (TP) workers, you can
 distribute workers across multiple object-storage endpoints by providing a list of
 endpoints via ``nixl_endpoint_list``. Each worker selects an endpoint in
-round-robin order based on its ``worker_id``.
+round-robin order based on its ``local_worker_id`` (the worker ID within its host).
 
 .. code-block:: yaml
 
