@@ -106,8 +106,8 @@ class TestPrefixSuffixTunerConfigResolve:
         assert cfg.prefix_tokens == 2000
         # suffix_tokens = 4000 - 2000 - 32 = 1968
         assert cfg.suffix_tokens == 1968
-        # pool_gb = 10 * 1.05 = 10.5 GB; 10.5 * 10000 / 2000 = 52.5 → 52
-        assert cfg.num_prefixes == 52
+        # pool_gb = 10 * 1.05 = 10.5 GB; 10.5 * 10000 / 4000 = 26.25 → 26
+        assert cfg.num_prefixes == 26
 
     def test_resolve_default_thrash_scaling(self) -> None:
         cfg = PrefixSuffixTunerConfig.resolve(
@@ -118,8 +118,8 @@ class TestPrefixSuffixTunerConfigResolve:
         # prefix_tokens = round(8000 * 0.8) = 6400
         assert cfg.prefix_tokens == 6400
         # default thrash = 20.0 GB; pool = 20 * 1.05 = 21 GB
-        # 21 * 50000 / 6400 = 164.06 → 164
-        assert cfg.num_prefixes == 164
+        # 21 * 50000 / 8000 = 131.25 → 131  (sized by context_length)
+        assert cfg.num_prefixes == 131
 
     def test_resolve_minimum_one_prefix(self) -> None:
         cfg = PrefixSuffixTunerConfig.resolve(
@@ -179,10 +179,12 @@ class TestPrefixSuffixTunerConfigResolve:
         )
         # prefix_tokens = 1000
         # pool_gb = 100 * 1.05 = 105
-        # num_prefixes = 105 * 10000 / 1000 = 1050
-        assert cfg.num_prefixes == 1050
-        # Pool footprint > target tier:
-        pool_tokens = cfg.num_prefixes * cfg.prefix_tokens
+        # Sized by context_length=2000 (not prefix_tokens), so the L1
+        # footprint of the pool == thrash * _OVERFLOW_FACTOR GB:
+        # num_prefixes = 105 * 10000 / 2000 = 525
+        assert cfg.num_prefixes == 525
+        # Pool footprint (in tokens of full request) > target tier tokens:
+        pool_tokens = cfg.num_prefixes * cfg.context_length
         target_tier_tokens = int(100.0 * 10000)
         assert pool_tokens > target_tier_tokens
 

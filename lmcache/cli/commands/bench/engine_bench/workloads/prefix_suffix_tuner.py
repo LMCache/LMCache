@@ -64,6 +64,17 @@ _MAX_OUTPUT_TOKENS = 1
 # bench-engine.md`` §4.5 for the analysis.
 _OVERFLOW_FACTOR = 1.05
 
+# Seconds to sleep between pass 1 (warmup) and pass 2 (measured).  LMCache's
+# L1 eviction is a 1Hz polling thread that fires only when usage > watermark
+# (default 0.80) — meaning a fast warmup that overflows L1 by a few percent
+# may complete before any eviction has actually run.  Without this settle
+# delay, pass 2 would find all of pass 1's data still in cache, and the
+# user's analytical-model claim "thrash → 0% hit rate" would not hold.
+# 5 seconds covers several eviction polls (each evicts ``--eviction-ratio``
+# fraction of contents), letting the cache reach steady state under the
+# overflow before pass 2 measures.
+_EVICTION_SETTLE_SECONDS = 5.0
+
 # Range of token-IDs to sample when generating random body content.  Skip
 # the low region (byte fallback / special tokens) and the high tail
 # (reserved / added tokens, which are rarely 1-token-clean on round-trip).
@@ -171,21 +182,29 @@ class PrefixSuffixTunerConfig:
                 f"increase context_length"
             )
 
+        # Size by full context_length, not prefix_tokens: each request
+        # stores ``context_length`` tokens worth of KV cache (prefix +
+        # breaker + suffix), so the pool's L1 footprint is
+        # ``num_prefixes * context_length``, not ``num_prefixes *
+        # prefix_tokens``.  Earlier versions divided by prefix_tokens,
+        # which made the actual pool footprint exceed the requested target
+        # by ``1 / prefix_ratio`` — at ``prefix_ratio=0.5`` the pool was
+        # 2x the user's intended target.
         pool_gb = thrash * _OVERFLOW_FACTOR
         num_prefixes = max(
-            int(pool_gb * tokens_per_gb_kvcache / prefix_tokens),
+            int(pool_gb * tokens_per_gb_kvcache / context_length),
             1,
         )
         logger.debug(
             "Computed num_prefixes=%d from thrash=%.2f GB (target tier), "
             "_OVERFLOW_FACTOR=%.3f -> pool=%.2f GB, "
-            "tokens_per_gb_kvcache=%d, prefix_tokens=%d",
+            "tokens_per_gb_kvcache=%d, context_length=%d",
             num_prefixes,
             thrash,
             _OVERFLOW_FACTOR,
             pool_gb,
             tokens_per_gb_kvcache,
-            prefix_tokens,
+            context_length,
         )
         return cls(
             context_length=context_length,
@@ -434,7 +453,15 @@ class PrefixSuffixTunerWorkload(BaseWorkload):
     # ------------------------------------------------------------------
 
     async def warmup(self) -> None:
-        """Run pass 1: send each prefix once sequentially to populate cache."""
+        """Run pass 1: send each prefix once sequentially to populate cache.
+
+        After dispatching all warmup requests, sleeps for
+        :data:`_EVICTION_SETTLE_SECONDS` so LMCache's batched-eviction LRU
+        (1Hz background poll, evicts only when usage > watermark) has time
+        to actually run.  Without this delay, a fast warmup that overflows
+        L1 by a few percent may complete before any eviction fires, and
+        pass 2 would then find all of pass 1's data still in cache.
+        """
         n = self._config.num_prefixes
         self._progress_monitor.log_message(f"Pass 1 (warmup): {n} requests")
         for i in range(n):
@@ -451,8 +478,13 @@ class PrefixSuffixTunerWorkload(BaseWorkload):
                     f"Pass 1 {request_id} failed: {result.error}"
                 )
         self._progress_monitor.log_message(
-            f"Pass 1 complete: {n} prefixes populated",
+            f"Pass 1 complete: {n} prefixes populated; "
+            f"settling {_EVICTION_SETTLE_SECONDS:.1f}s for LMCache LRU eviction",
         )
+        # Standard
+        import asyncio as _asyncio
+
+        await _asyncio.sleep(_EVICTION_SETTLE_SECONDS)
 
     # ------------------------------------------------------------------
     # Pass 2 — measured benchmark

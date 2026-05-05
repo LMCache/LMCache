@@ -219,8 +219,9 @@ class TestCreateWorkload:
         assert result._config.prefix_tokens == 6400
         assert result._config.suffix_tokens == 1568
         # thrash=20.0 GB; pool_gb=20.0 * 1.05 = 21.0 GB
-        # num_prefixes = 21.0 * 10000 / 6400 = 32.81... → 32
-        assert result._config.num_prefixes == 32
+        # Sized by context_length=8000 (full per-request KV footprint):
+        # num_prefixes = 21.0 * 10000 / 8000 = 26.25 → 26
+        assert result._config.num_prefixes == 26
 
     def test_prefix_suffix_tuner_custom_args(self) -> None:
         config = _make_config(
@@ -246,8 +247,9 @@ class TestCreateWorkload:
         assert result._config.thrash == 50.0
         assert result._config.prefix_tokens == 2000
         # thrash=50 GB; pool_gb=50 * 1.05 = 52.5 GB
-        # num_prefixes = 52.5 * 10000 / 2000 = 262.5 → 262
-        assert result._config.num_prefixes == 262
+        # Sized by context_length=4000:
+        # num_prefixes = 52.5 * 10000 / 4000 = 131.25 → 131
+        assert result._config.num_prefixes == 131
 
     def test_unknown_workload_raises(self) -> None:
         config = _make_config(workload="unknown-workload")

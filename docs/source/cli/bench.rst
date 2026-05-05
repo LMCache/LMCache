@@ -398,6 +398,23 @@ by ``--psf-thrash``.
        --psf-prefix-ratio 0.8 \
        --psf-thrash 100
 
+.. note::
+   For the analytical-model claim "thrash ≈ L1 size → ~0% LMCache hit rate"
+   to hold empirically, the LMCache server must be started with
+   ``--eviction-ratio 0.99`` (default ``0.20`` only clears 20% per cycle,
+   leaving ~60% of pass-1 content in cache through pass 2):
+
+   .. code-block:: bash
+
+      lmcache server --l1-size-gb <SIZE> --eviction-policy LRU \
+          --eviction-trigger-watermark 0.80 \
+          --eviction-ratio 0.99
+
+   The workload itself sleeps 5 seconds between pass 1 (warmup) and pass 2
+   (measured), so LMCache's 1Hz batched-eviction polling thread has time
+   to actually run.  Without that sleep, fast benchmarks complete before
+   any eviction fires.
+
 
 random-prefill
 ~~~~~~~~~~~~~~~
