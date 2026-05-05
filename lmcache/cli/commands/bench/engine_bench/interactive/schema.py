@@ -112,6 +112,10 @@ ALL_ITEMS: list[ConfigItem] = [
             ),
             ("long-doc-qa", "Repeated Q&A over long documents (tests KV cache reuse)"),
             ("multi-round-chat", "Multi-turn chat with stateful sessions"),
+            (
+                "prefix-suffix-tuner",
+                "Two-pass sequential workload demonstrating tiered KV cache reuse",
+            ),
             ("random-prefill", "Prefill-only requests fired simultaneously"),
         ],
         phase=PHASE_REQUIRED,
@@ -315,6 +319,42 @@ ALL_ITEMS: list[ConfigItem] = [
         input_type="float",
         default=60.0,
         condition=_workload_is("multi-round-chat"),
+        phase=PHASE_WORKLOAD,
+    ),
+    # ── Phase 3: prefix-suffix-tuner ──────────────────────────────────
+    ConfigItem(
+        key="psf_context_length",
+        display_name="Context length (tokens)",
+        description="Total tokens per request (prefix + breaker + suffix).",
+        input_type="int",
+        default=8000,
+        condition=_workload_is("prefix-suffix-tuner"),
+        phase=PHASE_WORKLOAD,
+    ),
+    ConfigItem(
+        key="psf_prefix_ratio",
+        display_name="Prefix ratio",
+        description=(
+            "Fraction of context-length used by the prefix. Must be in "
+            "(0.0, 1.0). The remainder (minus a 32-token breaker) is the "
+            "shared suffix."
+        ),
+        input_type="float",
+        default=0.8,
+        condition=_workload_is("prefix-suffix-tuner"),
+        phase=PHASE_WORKLOAD,
+    ),
+    ConfigItem(
+        key="psf_thrash",
+        display_name="Thrash multiplier",
+        description=(
+            "Multiplier on KV cache volume that sizes the prefix pool. "
+            "Values > 1.0 force pass-2 misses of the targeted tier; even "
+            "1.05 is sufficient with sequential dispatch and LRU."
+        ),
+        input_type="float",
+        default=1.05,
+        condition=_workload_is("prefix-suffix-tuner"),
         phase=PHASE_WORKLOAD,
     ),
     # ── Phase 3: random-prefill ───────────────────────────────────────
