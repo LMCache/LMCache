@@ -85,14 +85,6 @@ Documentation
 
 .. toctree::
    :maxdepth: 2
-   :caption: Serving engine integrations
-
-   integrations/index
-
-:raw-html:`<br />`
-
-.. toctree::
-   :maxdepth: 2
    :caption: KV Cache offloading and sharing
 
    kv_cache/storage_backends/index

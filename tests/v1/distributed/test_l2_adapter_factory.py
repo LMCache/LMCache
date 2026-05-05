@@ -5,6 +5,8 @@ PluginL2AdapterConfig.
 """
 
 # Standard
+import os
+import tempfile
 import types
 
 # Third Party
@@ -21,7 +23,21 @@ from lmcache.v1.distributed.l2_adapters.factory import (
 )
 from lmcache.v1.distributed.l2_adapters.mock_l2_adapter import MockL2AdapterConfig
 from lmcache.v1.distributed.l2_adapters.plugin_l2_adapter import PluginL2AdapterConfig
+from lmcache.v1.distributed.l2_adapters.raw_block_l2_adapter import (
+    RawBlockL2AdapterConfig,
+)
 from lmcache.v1.platform import create_event_notifier
+
+
+def _has_raw_block_ext() -> bool:
+    try:
+        # Third Party
+        import lmcache_rust_raw_block_io  # noqa: F401
+
+        return True
+    except Exception:
+        return False
+
 
 # =========================================================
 # Helpers
@@ -70,6 +86,16 @@ class TestFactoryRegistry:
         name = get_type_name_for_config(config)
         assert name == "mock"
 
+    def test_raw_block_factory_is_registered(self):
+        config = RawBlockL2AdapterConfig(
+            device_path="/tmp/raw-block-dev",
+            slot_bytes=64 * 1024,
+            use_odirect=False,
+            meta_enable_periodic=False,
+        )
+        name = get_type_name_for_config(config)
+        assert name == "raw_block"
+
     def test_create_mock_via_registry(self):
         """create_l2_adapter_from_registry creates a
         MockL2Adapter."""
@@ -85,6 +111,32 @@ class TestFactoryRegistry:
         adapter = create_l2_adapter_from_registry(config)
         assert isinstance(adapter, MockL2Adapter)
         adapter.close()
+
+    @pytest.mark.skipif(
+        not _has_raw_block_ext(),
+        reason="lmcache_rust_raw_block_io extension not installed",
+    )
+    def test_create_raw_block_via_registry(self):
+        # First Party
+        from lmcache.v1.distributed.l2_adapters.raw_block_l2_adapter import (
+            RawBlockL2Adapter,
+        )
+
+        with tempfile.TemporaryDirectory() as td:
+            dev_path = os.path.join(td, "dev.bin")
+            with open(dev_path, "wb") as f:
+                f.truncate(8 * 1024 * 1024)
+
+            config = RawBlockL2AdapterConfig(
+                device_path=dev_path,
+                slot_bytes=64 * 1024,
+                use_odirect=False,
+                meta_total_bytes=1 * 1024 * 1024,
+                meta_enable_periodic=False,
+            )
+            adapter = create_l2_adapter_from_registry(config)
+            assert isinstance(adapter, RawBlockL2Adapter)
+            adapter.close()
 
     def test_duplicate_factory_raises(self):
         """Registering the same factory name twice should
