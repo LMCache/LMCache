@@ -113,6 +113,14 @@ class LMCacheMPConnector:
         self._heartbeat: HeartbeatThread | None = None
         self._health_event = threading.Event()
         self._health_event.set()
+        # Tracks request_ids for which we've fired a LOOKUP — so the
+        # daemon has an active session keyed by that rid. ``end_session``
+        # only sends an END_SESSION wire request for ids in this set,
+        # which avoids the daemon's "Session not found, skipping touch"
+        # warning when ``cache_finished_req`` fires end_session for
+        # requests that never had a LOOKUP (warmup, short prompts).
+        self._sessions_with_lookup: set[str] = set()
+        self._sessions_lock = threading.Lock()
 
         self.context = zmq.Context.instance()
         self.mq_client = MessageQueueClient(f"tcp://{host}:{port}", self.context)
@@ -253,17 +261,63 @@ class LMCacheMPConnector:
             ],
         )
 
+    def ensure_session(self, token_ids: list[int], request_id: str) -> None:
+        """Send a LOOKUP just to create the daemon-side session for
+        ``request_id`` with ``lookup_ipc_key`` set, then immediately
+        free the read locks reserved by that LOOKUP. Used by
+        ``LMCRadixCache.match_prefix`` on full-radix-hit paths so the
+        STORE+END_SESSION at request finish reuses this session
+        (mirroring vLLM/TRT-LLM's per-request lifecycle) instead of
+        creating a STORE-only session that would log
+        "no lookup ipc key, skipping touch" at end_session.
+
+        Idempotent in effect on the connector side via the
+        ``_sessions_with_lookup`` set; the daemon LOOKUP itself is
+        not idempotent (re-submits a prefetch job), so don't call
+        this when ``start_load_kv`` is going to fire its own LOOKUP.
+        """
+        if not self.is_healthy or not request_id:
+            return
+        aligned_end = (len(token_ids) // self._lmcache_chunk_size) * (
+            self._lmcache_chunk_size
+        )
+        if aligned_end == 0:
+            return  # too few tokens; no chunk-aligned range to LOOKUP
+
+        lookup_key = self._create_key(
+            token_ids,
+            start=0,
+            end=aligned_end,
+            request_id=request_id,
+            no_worker_id=True,
+        )
+        send_lmcache_request(
+            self.mq_client,
+            RequestType.LOOKUP,
+            [lookup_key, self.tp_size],
+        ).result(timeout=self._mq_timeout)
+        retrieve_token_num = self._wait_for_lookup(request_id)
+        with self._sessions_lock:
+            self._sessions_with_lookup.add(request_id)
+        if retrieve_token_num > 0:
+            self._free_lookup_locks(token_ids, 0, retrieve_token_num, request_id)
+
     def end_session(self, request_id: str) -> None:
         """Tell the daemon we're done with this request_id.
 
         Single per-request cleanup hook — owned by the engine's
         request-finish path (e.g., :meth:`LMCRadixCache.cache_finished_req`),
-        not bundled into ``store_kv``. This fires once per request
-        regardless of whether STORE actually ran or early-returned, so
-        the daemon-side session created by LOOKUP is always released.
+        not bundled into ``store_kv``. Skipped (no wire send) for ids
+        we never fired a LOOKUP for, so warmup and short-prompt
+        requests don't trigger the daemon's "Session not found,
+        skipping touch" warning.
         """
         if not self.is_healthy:
             return
+        with self._sessions_lock:
+            if request_id not in self._sessions_with_lookup:
+                return
+            self._sessions_with_lookup.discard(request_id)
         send_lmcache_request(self.mq_client, RequestType.END_SESSION, [request_id])
 
     def _submit_retrieve(
@@ -344,6 +398,11 @@ class LMCacheMPConnector:
         ).result(timeout=self._mq_timeout)
         retrieve_token_num = self._wait_for_lookup(request_id)
         retrieve_token_num = self._global_min_tokens(retrieve_token_num)
+        # Daemon now has a session keyed by request_id with
+        # ``lookup_ipc_key`` set. Track it so end_session knows to send
+        # END_SESSION wire for this rid.
+        with self._sessions_lock:
+            self._sessions_with_lookup.add(request_id)
 
         if retrieve_token_num <= offset:
             self._free_lookup_locks(
