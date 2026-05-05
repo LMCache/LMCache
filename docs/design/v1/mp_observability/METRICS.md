@@ -519,4 +519,86 @@ rate(lmcache_blend_lookup_hit_tokens_total[5m])
 
 ---
 
+## Debug Recipes: separating L1 / L2 / Blend hit rates
+
+These are derivations from existing counters — **everything below is computable from the metrics already exported**, no new instruments needed. Use them when triaging "why is hit rate low?" or "is this an L1 or L2 issue?" without code-level instrumentation.
+
+Common parameters you'll need (all from `GET <lmcache-url>/api/status`):
+
+| Field | Source | Example |
+|---|---|---|
+| `chunk_size` | `chunk_size` (top level) | 256 |
+| L1 capacity (bytes) | `storage_manager.l1_manager.memory_total_bytes` | `5 * 2**30` |
+| L1 used (bytes) | `storage_manager.l1_manager.memory_used_bytes` | varies |
+
+### Token-level hit rate (L1 + L2 combined)
+
+The headline metric, already exposed:
+
+```
+lmcache_mp_lookup_hit_tokens_total / lmcache_mp_lookup_requested_tokens_total
+```
+
+This is the fraction of chunk-aligned tokens that came back from cache *anywhere* — L1 or L2. Reported per `(model_name, cache_salt)`.
+
+### L2-only hit rate
+
+L2's prefetch lookups carry per-key counts, not per-token:
+
+```
+L2_hit_tokens_total = increase(lmcache_mp_l2_prefetch_hit_keys_total) * chunk_size
+L2_hit_rate         = L2_hit_tokens_total
+                    / increase(lmcache_mp_lookup_requested_tokens_total)
+```
+
+`chunk_size` is fixed per server (typically 256 tokens/chunk). The keys-to-tokens conversion is exact — every L2 hit is a full chunk.
+
+### L1-only hit rate (derived)
+
+Take total minus L2:
+
+```
+L1_hit_tokens_total = increase(lmcache_mp_lookup_hit_tokens_total)
+                    - increase(lmcache_mp_l2_prefetch_hit_keys_total) * chunk_size
+L1_hit_rate         = L1_hit_tokens_total
+                    / increase(lmcache_mp_lookup_requested_tokens_total)
+```
+
+Sanity check: should be `>= 0`. A sustained negative value means L2 is being credited with chunks the lookup hit metric doesn't count, which would indicate a metric-emission bug (file an issue).
+
+### Blend total hit rate
+
+```
+lmcache_blend_lookup_hit_tokens_total / lmcache_blend_lookup_requested_tokens_total
+```
+
+Reported per CacheBlend lookup (`CB_LOOKUP_END`).
+
+### Blend L1 vs L2 — *not separable today*
+
+The blend lookup path consults L1 (fingerprint table) and L2 (storage prefetch) as a single pipelined operation. The current `lmcache_blend.lookup_storage_hits` counter records "chunks confirmed in storage after prefetch" *aggregated* across L1 and L2. Splitting them requires per-chunk attribution inside the blend lookup, which would need new instrumentation in `blend_server_v2.py`. **Open follow-up** — track via a future `[Obs] Split blend storage hits by tier` PR.
+
+### Did eviction actually fire during my run?
+
+```
+ticks      = increase(lmcache_mp_l1_eviction_loop_ticks_total)
+triggered  = increase(lmcache_mp_l1_eviction_loop_triggered_total)
+fire_ratio = triggered / ticks   # 0.0 = never fired; 1.0 = fired every cycle
+```
+
+If `triggered == 0` over a thrash test, your benchmark completed faster than the 1Hz polling interval — see the `prefix-suffix-tuner` workload's Debug Guide for the recommended `--eviction-trigger-watermark` / `--eviction-ratio` settings.
+
+### Self-service debug checklist
+
+Send these and you have everything needed to root-cause a hit-rate regression:
+
+1. `GET <lmcache-url>/api/status` (config + state snapshot).
+2. `GET <lmcache-url>/metrics` taken **before** the run and again **after** (delta is the run).
+3. The bench's `bench_summary.json` and `bench_results.csv` (TTFT per request).
+4. The LMCache server's stdout/stderr (eviction trigger logs are at INFO level).
+
+(1)–(3) plus the formulas above let you compute L1, L2, blend, and combined hit rates; the eviction-loop counters confirm whether the LRU machinery engaged during the run.
+
+---
+
 For event metadata contracts (what keys each `EventType` carries), see [EVENTS.md](EVENTS.md).
