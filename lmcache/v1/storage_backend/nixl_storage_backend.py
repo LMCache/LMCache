@@ -143,9 +143,9 @@ class NixlStorageConfig:
 
         dynamic_storage = pool_size == 0
         if dynamic_storage:
-            assert (
-                not config.save_unfull_chunk
-            ), "save_unfull_chunk should be set to False when using dynamic storage"
+            assert not config.save_unfull_chunk, (
+                "save_unfull_chunk should be set to False when using dynamic storage"
+            )
 
         corrected_device = get_correct_device(
             config.nixl_buffer_device, metadata.worker_id
