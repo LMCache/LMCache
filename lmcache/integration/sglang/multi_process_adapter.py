@@ -4,7 +4,6 @@ from typing import Optional
 import os
 import threading
 import time
-import uuid
 
 # Third Party
 from sglang.srt.configs.model_config import ModelConfig
@@ -254,7 +253,15 @@ class LMCacheMPConnector:
             ],
         )
 
-    def _end_session(self, request_id: str) -> None:
+    def end_session(self, request_id: str) -> None:
+        """Tell the daemon we're done with this request_id.
+
+        Single per-request cleanup hook — owned by the engine's
+        request-finish path (e.g., :meth:`LMCRadixCache.cache_finished_req`),
+        not bundled into ``store_kv``. This fires once per request
+        regardless of whether STORE actually ran or early-returned, so
+        the daemon-side session created by LOOKUP is always released.
+        """
         if not self.is_healthy:
             return
         send_lmcache_request(self.mq_client, RequestType.END_SESSION, [request_id])
@@ -311,7 +318,15 @@ class LMCacheMPConnector:
                 f"{offset} and chunk_size={self._lmcache_chunk_size}"
             )
 
-        request_id = str(uuid.uuid4())
+        # The daemon's session is keyed by ``request_id``. Using SGLang's
+        # ``req.rid`` here (matching the id ``store_kv`` will use later for
+        # the same request) lets STORE+END_SESSION reuse the LOOKUP-set
+        # session and skip the "no lookup ipc key" warning. END_SESSION
+        # itself is owned by the store_kv path: a single cleanup point per
+        # request, mirroring vLLM/TRT-LLM.
+        request_id = load_metadata.request_id
+        if not request_id:
+            raise ValueError("LMCache MP load requires a non-empty request_id")
         lookup_key = self._create_key(
             load_metadata.token_ids,
             start=0,
@@ -334,7 +349,6 @@ class LMCacheMPConnector:
             self._free_lookup_locks(
                 load_metadata.token_ids, 0, retrieve_token_num, request_id
             )
-            self._end_session(request_id)
             return 0
 
         # ``slot_mapping[offset : offset + prefix_pad)`` is sentinel ``-1`` —
@@ -359,7 +373,6 @@ class LMCacheMPConnector:
             self._free_lookup_locks(
                 load_metadata.token_ids, offset, retrieve_token_num, request_id
             )
-            self._end_session(request_id)
             return retrieve_token_num - offset
         fresh_block_ids = self._slot_mapping_to_block_ids(
             load_metadata.slot_mapping[fresh_start:retrieve_token_num]
@@ -392,7 +405,6 @@ class LMCacheMPConnector:
                 self._free_lookup_locks(
                     load_metadata.token_ids, offset, retrieve_token_num, request_id
                 )
-            self._end_session(request_id)
         return retrieve_token_num - offset
 
     def load_kv_layerwise(self, layer_id: int) -> None:
@@ -414,7 +426,9 @@ class LMCacheMPConnector:
         if aligned_end == 0:
             return
 
-        request_id = str(uuid.uuid4())
+        request_id = store_metadata.request_id
+        if not request_id:
+            raise ValueError("LMCache MP store requires a non-empty request_id")
         block_ids = self._slot_mapping_to_block_ids(
             store_metadata.kv_indices[:aligned_end]
         )
@@ -439,7 +453,9 @@ class LMCacheMPConnector:
             .to_cuda_future(device=self.device)
             .result(timeout=self._mq_timeout)
         )
-        self._end_session(request_id)
+        # END_SESSION is owned by ``LMCRadixCache.cache_finished_req`` so
+        # it fires once per request, even when STORE early-returns or no
+        # STORE was needed. See ``LMCacheMPConnector.end_session``.
         if not success:
             raise RuntimeError("LMCache MP store failed")
 
