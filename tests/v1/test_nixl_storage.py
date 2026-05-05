@@ -2,15 +2,24 @@
 # Standard
 from pathlib import Path
 import asyncio
+import contextlib
+import functools
 import os
+import shutil
 import sys
+import tempfile
 import threading
+import uuid
 
 # Third Party
 import pytest
 import torch
 
 pytest.importorskip("nixl", reason="nixl package is required for nixl tests")
+
+# Third Party
+from nixl._api import nixl_agent as NixlAgent
+from nixl._api import nixl_agent_config as NixlAgentConfig
 
 # First Party
 from lmcache.utils import CacheEngineKey
@@ -20,6 +29,51 @@ from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.storage_backend import CreateStorageBackends
 from lmcache.v1.storage_backend.nixl_storage_backend import NixlStorageBackend
 from lmcache.v1.transfer_channel.transfer_utils import get_correct_device
+
+# cuFile-based backends (GDS, GDS_MT) need a GDS-capable filesystem
+_TEST_TMPDIR = os.environ.get("LMCACHE_TEST_TMPDIR") or None
+
+
+@functools.lru_cache(maxsize=None)
+def _can_register_file_with_nixl_backend(backend: str) -> bool:
+    """Probe ``cuFileHandleRegister`` via NIXL on the test scratch dir."""
+
+    probe_dir = tempfile.mkdtemp(prefix="nixl_gds_probe_", dir=_TEST_TMPDIR)
+    probe_path = os.path.join(probe_dir, "probe.bin")
+    fd = -1
+    try:
+        agent = NixlAgent(
+            f"NixlGdsProbe_{uuid.uuid4().hex}",
+            NixlAgentConfig(backends=[]),
+        )
+        agent.create_backend(backend, {})
+        fd = os.open(probe_path, os.O_CREAT | os.O_RDWR, 0o600)
+        os.write(fd, b"\x00" * 4096)
+        agent.register_memory([(0, 4096, fd, "")], mem_type="FILE")
+        return True
+    except Exception:
+        return False
+    finally:
+        if fd >= 0:
+            with contextlib.suppress(OSError):
+                os.close(fd)
+        shutil.rmtree(probe_dir, ignore_errors=True)
+
+
+_GDS_SKIP_REASON = (
+    "NIXL {backend} cannot register file handles in this environment; "
+    "set LMCACHE_TEST_TMPDIR to a GDS-capable mount (ext4/xfs) to enable."
+)
+
+
+@pytest.fixture
+def nixl_tmp_path():
+    """Per-test scratch dir, honoring ``LMCACHE_TEST_TMPDIR``."""
+    path = tempfile.mkdtemp(prefix="nixl_test_", dir=_TEST_TMPDIR)
+    try:
+        yield path
+    finally:
+        shutil.rmtree(path, ignore_errors=True)
 
 
 def create_key(chunk_hash: str):
@@ -191,7 +245,11 @@ def run(config: LMCacheEngineConfig, shape, dtype):
 
 @pytest.mark.no_shared_allocator
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA")
-def test_nixl_gds_mt_cuda_backend():
+@pytest.mark.skipif(
+    not _can_register_file_with_nixl_backend("GDS_MT"),
+    reason=_GDS_SKIP_REASON.format(backend="GDS_MT"),
+)
+def test_nixl_gds_mt_cuda_backend(nixl_tmp_path):
     BASE_DIR = Path(__file__).parent
     config = LMCacheEngineConfig.from_file(BASE_DIR / "data/nixl.yaml")
 
@@ -201,12 +259,17 @@ def test_nixl_gds_mt_cuda_backend():
     config.nixl_buffer_device = "cuda"
     config.extra_config["nixl_backend"] = "GDS_MT"
     config.extra_config["enable_cuda"] = True
+    config.extra_config["nixl_path"] = nixl_tmp_path
 
     run(config, shape, dtype)
 
 
 @pytest.mark.no_shared_allocator
-def test_nixl_gds_mt_cpu_backend():
+@pytest.mark.skipif(
+    not _can_register_file_with_nixl_backend("GDS_MT"),
+    reason=_GDS_SKIP_REASON.format(backend="GDS_MT"),
+)
+def test_nixl_gds_mt_cpu_backend(nixl_tmp_path):
     BASE_DIR = Path(__file__).parent
     config = LMCacheEngineConfig.from_file(BASE_DIR / "data/nixl.yaml")
 
@@ -216,13 +279,18 @@ def test_nixl_gds_mt_cpu_backend():
     config.nixl_buffer_device = "cpu"
     config.extra_config["nixl_backend"] = "GDS_MT"
     config.extra_config["enable_cuda"] = False
+    config.extra_config["nixl_path"] = nixl_tmp_path
 
     run(config, shape, dtype)
 
 
 @pytest.mark.no_shared_allocator
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA")
-def test_nixl_gds_cuda_backend():
+@pytest.mark.skipif(
+    not _can_register_file_with_nixl_backend("GDS"),
+    reason=_GDS_SKIP_REASON.format(backend="GDS"),
+)
+def test_nixl_gds_cuda_backend(nixl_tmp_path):
     BASE_DIR = Path(__file__).parent
     config = LMCacheEngineConfig.from_file(BASE_DIR / "data/nixl.yaml")
 
@@ -232,12 +300,17 @@ def test_nixl_gds_cuda_backend():
     config.nixl_buffer_device = "cuda"
     config.extra_config["nixl_backend"] = "GDS"
     config.extra_config["enable_cuda"] = True
+    config.extra_config["nixl_path"] = nixl_tmp_path
 
     run(config, shape, dtype)
 
 
 @pytest.mark.no_shared_allocator
-def test_nixl_gds_cpu_backend():
+@pytest.mark.skipif(
+    not _can_register_file_with_nixl_backend("GDS"),
+    reason=_GDS_SKIP_REASON.format(backend="GDS"),
+)
+def test_nixl_gds_cpu_backend(nixl_tmp_path):
     BASE_DIR = Path(__file__).parent
     config = LMCacheEngineConfig.from_file(BASE_DIR / "data/nixl.yaml")
 
@@ -247,12 +320,13 @@ def test_nixl_gds_cpu_backend():
     config.nixl_buffer_device = "cpu"
     config.extra_config["nixl_backend"] = "GDS"
     config.extra_config["enable_cuda"] = False
+    config.extra_config["nixl_path"] = nixl_tmp_path
 
     run(config, shape, dtype)
 
 
 @pytest.mark.no_shared_allocator
-def test_nixl_posix_backend():
+def test_nixl_posix_backend(nixl_tmp_path):
     BASE_DIR = Path(__file__).parent
     config = LMCacheEngineConfig.from_file(BASE_DIR / "data/nixl.yaml")
 
@@ -262,6 +336,7 @@ def test_nixl_posix_backend():
     config.nixl_buffer_device = "cpu"
     config.extra_config["nixl_backend"] = "POSIX"
     config.extra_config["enable_cuda"] = False
+    config.extra_config["nixl_path"] = nixl_tmp_path
 
     run(config, shape, dtype)
 
