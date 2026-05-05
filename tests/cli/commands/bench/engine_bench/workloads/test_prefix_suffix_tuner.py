@@ -282,32 +282,32 @@ class TestPrefixSuffixTunerData:
         assert w1._suffix == w2._suffix
 
     def test_data_differs_with_different_seed(self) -> None:
-        cfg = _make_workload_config(num_prefixes=5)
+        # Only the breaker RNG depends on seed; prefixes/suffix are seed-
+        # independent now (deterministic "hi"-filler bodies).  Verify the
+        # breaker stream differs across seeds.
+        cfg = _make_workload_config(num_prefixes=2)
         w1, *_ = _make_workload(cfg, seed=42)
         w2, *_ = _make_workload(cfg, seed=99)
-        assert w1._prefixes != w2._prefixes
-        assert w1._suffix != w2._suffix
+        b1 = w1._build_messages(0)[0]["content"]
+        b2 = w2._build_messages(0)[0]["content"]
+        assert b1 != b2  # different breakers produce different prompts
 
-    def test_prefix_bodies_are_distinct_across_prefixes(self) -> None:
-        """CacheBlend-correctness invariant: prefixes must not just differ in
-        their unique-ID header — their *body* tokens must differ too, so
-        chunk-level content fingerprints don't collide across prefixes and
-        artificially inflate the blend hit rate."""
-        w, *_ = _make_workload(_make_workload_config(num_prefixes=8))
-        # Strip the unique-ID header (everything before the first space) and
-        # compare bodies — they should all be distinct.
+    def test_prefix_bodies_are_identical_filler(self) -> None:
+        """All prefix bodies are ``"hi"``-filler by design.
+
+        Cross-prefix uniqueness comes from the unique-ID header at the
+        start of each prefix; vLLM's chain-hashed prefix cache then makes
+        every subsequent block unique to its prefix.  CacheBlend (which
+        uses content hashing) *will* report cross-prefix hits on the body
+        chunks — that is the correct behavior for the analytical model
+        (Baseline 3 assumes full-context blend coverage).
+        """
+        w, *_ = _make_workload(_make_workload_config(num_prefixes=4))
         bodies = [p.split(" ", 1)[1] for p in w._prefixes]
-        assert len(set(bodies)) == 8, (
-            "Prefix bodies must differ across prefixes for CacheBlend "
-            "fingerprint uniqueness; got duplicates."
-        )
-
-    def test_vocab_pool_has_correct_size(self) -> None:
-        w, *_ = _make_workload()
-        # Pool size constant in prefix_suffix_tuner.py is _VOCAB_POOL_SIZE = 8000.
-        assert len(w._vocab_pool) == 8000
-        # All entries unique (set-based generation).
-        assert len(set(w._vocab_pool)) == 8000
+        # All bodies identical (just "hi hi hi ...").
+        assert len(set(bodies)) == 1
+        # Content is exactly the "hi"-filler.
+        assert all(set(b.split(" ")) == {"hi"} for b in bodies)
 
 
 # ---------------------------------------------------------------------------
