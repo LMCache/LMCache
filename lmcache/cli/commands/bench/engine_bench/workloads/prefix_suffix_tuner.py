@@ -36,6 +36,89 @@ Two passes run sequentially, one request at a time, in identical order:
     the next-needed prefix on each pass-2 access, even a 1.05× overflow of
     the targeted tier is enough to ensure every pass-2 request misses that
     tier and falls through to the next one.
+
+Debug Guide
+-----------
+
+When per-pass-2 hit rates don't match the analytical model, work through
+this checklist in order — the failure modes I hit while debugging this
+workload are listed in the order they actually surfaced.
+
+**1. Disable vLLM L0 prefix caching during the measurement run.**
+   With ``--enable-prefix-caching`` on vLLM, vLLM serves chunks from its
+   own HBM cache without asking LMCache, dropping
+   ``lmcache_mp_lookup_requested_tokens_total`` for the chunks vLLM
+   already had.  This makes the LMCache hit-rate metric look artificially
+   low and obscures the actual L1 behavior.  For *measuring LMCache*,
+   start vLLM with ``--no-enable-prefix-caching``.  Re-enable it for end-
+   to-end latency runs.
+
+**2. Restart LMCache between every comparison run.**
+   Prefixes are deterministic by index (``PREFIX_<8-hex-digits>``).  If a
+   previous run stored ``prefix_0``, the next run finds it already in L1
+   at pass-1 — pass 1 hits cache instead of cold-storing, biasing the
+   pass-2 hit rate upward.  Always restart the LMCache server with a
+   fresh L1 between back-to-back runs.
+
+**3. Configure LMCache eviction aggressively for thrash tests.**
+   LMCache's L1 eviction is a 1Hz polling background thread that fires
+   only when ``usage >= --eviction-trigger-watermark`` and clears
+   ``--eviction-ratio`` of contents per cycle.  Defaults
+   (``watermark=0.80``, ``ratio=0.20``) only drop usage from 80 % to 60 %
+   per fire — leaving 60 % of pass-1 content surviving into pass 2.  For
+   tests that expect ``thrash → ~0% hit rate``, start the server with::
+
+       lmcache server --l1-size-gb <SIZE> --eviction-policy LRU \\
+           --eviction-trigger-watermark 0.80 \\
+           --eviction-ratio 0.99
+
+   The 0.99 ratio means each fire clears nearly the whole cache; combined
+   with the workload's built-in 5-second pass-1→pass-2 settle delay, this
+   approximates a strict-LRU sequential thrash.
+
+**4. Watch the right metrics.**
+   ``GET <lmcache-url>/metrics`` exposes Prometheus counters.  Snapshot
+   before and after the run, take the delta::
+
+       lmcache_mp_lookup_requested_tokens_total   # both passes
+       lmcache_mp_lookup_hit_tokens_total          # both passes (L1+L2)
+       lmcache_mp_l1_eviction_loop_ticks_total     # 1 per loop cycle
+       lmcache_mp_l1_eviction_loop_triggered_total # only when above watermark
+
+   ``triggered/ticks`` should be > 0 for any thrash test.  If it's 0, the
+   benchmark completed before any eviction fired — see (3).  For blend
+   tests, also pull ``lmcache_blend_lookup_{requested,hit}_tokens_total``.
+
+**5. Convert aggregate metrics to per-pass-2 hit rate.**
+   The Prometheus counters tally pass-1 *and* pass-2 lookups, so
+   ``hit_tokens_total / requested_tokens_total`` is roughly *half* the
+   per-pass-2 hit rate (pass 1 contributes cold misses).  The right
+   conversion is::
+
+       per_pass2_hit_rate = hit_tokens_total / (requested_tokens_total / 2)
+
+   when pass 1 has ~0 hits (the typical case for a fresh LMCache).  Use
+   ``num_prefixes`` from the workload's ``log_config`` output to verify
+   the lookup count: ``ticks_total ≈ run_duration_seconds`` and
+   ``requested_tokens_total / chunks_per_request / chunk_size_tokens
+   == 2 * num_prefixes``.
+
+**6. Check pool sizing matches L1 capacity.**
+   The workload sizes ``num_prefixes`` so the pool's *full* per-request
+   KV footprint (``num_prefixes * context_length * tokens_per_gb_kvcache``)
+   equals ``thrash * 1.05`` GB.  If this doesn't match the L1 size you
+   started LMCache with, the test is over- or under-provisioned.  Hit
+   ``GET <lmcache-url>/api/status`` and verify
+   ``storage_manager.l1_manager.memory_total_bytes / 2**30`` matches your
+   ``--psf-thrash`` value.
+
+**7. Per-request CSV breakdown.**
+   ``--output-dir <DIR>`` writes ``bench_results.csv`` with TTFT per
+   pass-2 request.  Sort by request index — under sequential thrash,
+   *early* prefix indices should miss (slow TTFT) and *late* indices
+   should hit (fast TTFT).  Uniform TTFT across all requests means the
+   pool doesn't actually thrash — usually a sign that pass 1 finished
+   before any eviction fired (see step 3 again).
 """
 
 # Standard
