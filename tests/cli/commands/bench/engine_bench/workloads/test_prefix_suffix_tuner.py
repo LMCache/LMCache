@@ -2,6 +2,7 @@
 """Tests for prefix-suffix-tuner workload config and workload generator."""
 
 # Standard
+from collections import OrderedDict
 from unittest.mock import AsyncMock, MagicMock
 import time
 
@@ -463,3 +464,208 @@ class TestPrefixSuffixTunerFullRun:
         assert sender.send_request.call_count == 3
         # Stats reset between passes (warmup discarded)
         collector.reset.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# LRU simulation — verifies the central design invariant
+#
+# The workload's value rests on a single algorithmic claim: with a sequential
+# pass-1 / pass-2 dispatch in identical order and a pool that just barely
+# overflows the targeted tier, every pass-2 access misses that tier.  These
+# tests prove that claim against an in-memory LRU model, using the access
+# order extracted from the actual workload.
+# ---------------------------------------------------------------------------
+
+
+def _simulate_lru(access_seq: list[int], capacity: int) -> tuple[int, int]:
+    """Replay *access_seq* against an LRU of *capacity*; return (hits, misses).
+
+    Args:
+        access_seq: Ordered list of cache keys to access.
+        capacity: Maximum number of entries the cache holds.
+
+    Returns:
+        Tuple of (hit_count, miss_count) over the full sequence.
+    """
+    cache: OrderedDict[int, bool] = OrderedDict()
+    hits = 0
+    misses = 0
+    for key in access_seq:
+        if key in cache:
+            cache.move_to_end(key)
+            hits += 1
+        else:
+            cache[key] = True
+            if len(cache) > capacity:
+                cache.popitem(last=False)
+            misses += 1
+    return hits, misses
+
+
+async def _capture_workload_access_order(
+    workload: PrefixSuffixTunerWorkload,
+    sender: MagicMock,
+) -> tuple[list[int], list[int]]:
+    """Run pass 1 + pass 2 and return the prefix-index access order of each.
+
+    The mocked *sender* records which prefix index it was asked to send.
+    The returned tuple lets tests assert on the order of pass 1 and pass
+    2 independently.
+    """
+    pass1: list[int] = []
+    pass2: list[int] = []
+
+    async def capture_warmup(req_id, _msgs, **_kw):
+        # request_id format: "pass1_p<index>"
+        pass1.append(int(req_id.split("_p")[1]))
+        return _make_mock_result(req_id)
+
+    async def capture_request(req_id, _msgs, **_kw):
+        pass2.append(int(req_id.split("_p")[1]))
+        return _make_mock_result(req_id)
+
+    sender.send_warmup_request = AsyncMock(side_effect=capture_warmup)
+    sender.send_request = AsyncMock(side_effect=capture_request)
+
+    await workload.warmup()
+    while True:
+        next_wake = await workload.step(0.0)
+        if next_wake < 0:
+            break
+    return pass1, pass2
+
+
+class TestLRUSimulator:
+    """Sanity checks on the LRU helper itself."""
+
+    def test_all_misses_when_no_repeats(self) -> None:
+        h, m = _simulate_lru([0, 1, 2, 3], capacity=10)
+        assert (h, m) == (0, 4)
+
+    def test_all_hits_after_repeat_within_capacity(self) -> None:
+        h, m = _simulate_lru([0, 1, 0, 1], capacity=10)
+        assert (h, m) == (2, 2)
+
+    def test_eviction_fifo_under_strict_lru(self) -> None:
+        # capacity 2; access 0, 1, 2 → evicts 0; access 0 → miss.
+        h, m = _simulate_lru([0, 1, 2, 0], capacity=2)
+        assert (h, m) == (0, 4)
+
+    def test_recent_access_promotes_to_mru(self) -> None:
+        # capacity 2; access 0, 1, 0, 2 → evicts 1 (LRU), not 0.
+        h, m = _simulate_lru([0, 1, 0, 2, 0], capacity=2)
+        # 0 (miss), 1 (miss), 0 (hit), 2 (miss; evict 1), 0 (hit)
+        assert (h, m) == (2, 3)
+
+
+class TestPrefixSuffixTunerWorkloadAccessOrder:
+    """Confirm the workload sends prefixes in identical sequential order
+    across both passes — the precondition for the LRU invariant below."""
+
+    @pytest.mark.asyncio
+    async def test_pass1_is_sequential(self) -> None:
+        cfg = _make_workload_config(num_prefixes=8)
+        w, sender, _, _ = _make_workload(cfg)
+        pass1, _ = await _capture_workload_access_order(w, sender)
+        assert pass1 == list(range(8))
+
+    @pytest.mark.asyncio
+    async def test_pass2_matches_pass1(self) -> None:
+        cfg = _make_workload_config(num_prefixes=8)
+        w, sender, _, _ = _make_workload(cfg)
+        pass1, pass2 = await _capture_workload_access_order(w, sender)
+        assert pass2 == pass1
+
+
+class TestPrefixSuffixTunerLRUInvariant:
+    """The central design claim: every pass-2 request misses the targeted
+    tier when the prefix pool is sized just larger than tier capacity."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "num_prefixes,capacity",
+        [
+            (21, 20),  # 1.05× overflow — the documented default
+            (40, 38),  # ~1.05× at a different scale
+            (100, 50),  # 2× overflow
+            (1000, 950),  # large pool, light overflow
+        ],
+    )
+    async def test_pass2_zero_hits_when_pool_overflows(
+        self, num_prefixes: int, capacity: int
+    ) -> None:
+        cfg = _make_workload_config(num_prefixes=num_prefixes)
+        w, sender, _, _ = _make_workload(cfg)
+        pass1, pass2 = await _capture_workload_access_order(w, sender)
+
+        # Pass 1 fills the cache; pass 2 must miss every entry in the
+        # targeted tier (capacity).  We measure pass-2 hits independently
+        # by replaying pass 1 first to populate the LRU, then pass 2.
+        cache: OrderedDict[int, bool] = OrderedDict()
+        for key in pass1:
+            cache[key] = True
+            if len(cache) > capacity:
+                cache.popitem(last=False)
+
+        pass2_hits = 0
+        pass2_misses = 0
+        for key in pass2:
+            if key in cache:
+                cache.move_to_end(key)
+                pass2_hits += 1
+            else:
+                cache[key] = True
+                if len(cache) > capacity:
+                    cache.popitem(last=False)
+                pass2_misses += 1
+
+        assert pass2_hits == 0, (
+            f"thrash invariant broken: {pass2_hits}/{num_prefixes} pass-2 "
+            f"requests hit a tier of capacity {capacity}"
+        )
+        assert pass2_misses == num_prefixes
+
+    @pytest.mark.asyncio
+    async def test_pass2_all_hits_when_pool_fits_in_tier(self) -> None:
+        # Counter-example: with pool ≤ capacity, pass 1 fills the cache
+        # without any eviction, so pass 2 is 100% hits.  This sanity-checks
+        # that the LRU sim correctly distinguishes "thrashing" from
+        # "cache-friendly" workloads.
+        cfg = _make_workload_config(num_prefixes=10)
+        w, sender, _, _ = _make_workload(cfg)
+        pass1, pass2 = await _capture_workload_access_order(w, sender)
+
+        cache: OrderedDict[int, bool] = OrderedDict()
+        capacity = 20  # tier larger than pool
+        for key in pass1:
+            cache[key] = True
+            if len(cache) > capacity:
+                cache.popitem(last=False)
+
+        pass2_hits = 0
+        for key in pass2:
+            if key in cache:
+                cache.move_to_end(key)
+                pass2_hits += 1
+            else:
+                cache[key] = True
+        assert pass2_hits == 10
+
+    @pytest.mark.asyncio
+    async def test_pass2_all_hits_when_pool_equals_tier(self) -> None:
+        # Boundary: pool == capacity (thrash == 1.0 exactly).  Pass 1 fills
+        # the cache to the brim, pass 2 is 100% hits.  This is why the
+        # default thrash is strictly > 1.0.
+        cfg = _make_workload_config(num_prefixes=15)
+        w, sender, _, _ = _make_workload(cfg)
+        pass1, pass2 = await _capture_workload_access_order(w, sender)
+
+        cache: OrderedDict[int, bool] = OrderedDict()
+        capacity = 15
+        for key in pass1:
+            cache[key] = True
+            if len(cache) > capacity:
+                cache.popitem(last=False)
+
+        pass2_hits = sum(1 for key in pass2 if key in cache)
+        assert pass2_hits == 15
