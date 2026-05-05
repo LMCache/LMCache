@@ -55,26 +55,26 @@ def _wrap_sglang_kv_caches(
 class LMCacheMPConnector:
     """SGLang LMCache MP connector — layerwise interface, single-shot wire.
 
-    From SGLang's POV this connector is a drop-in for ``LMCacheLayerwise-
-    Connector``: it exposes ``start_load_kv`` + ``load_kv_layerwise``,
-    so SGLang's existing ``register_layer_transfer_counter`` hook keeps
-    working unchanged. Internally:
+    Exposes the same public surface as ``LMCacheLayerwiseConnector``
+    (``start_load_kv`` + ``load_kv_layerwise``) so SGLang code that
+    selects between the two via ``--lmcache-mp-host`` can do so with
+    no further changes. Internally:
 
-    - ``start_load_kv`` issues **one** RETRIEVE that covers the full
-      prefix and host-blocks until every layer has been transferred. By
-      the time it returns, the GPU KV slots are populated.
-    - ``load_kv_layerwise(layer_id)`` is a no-op — data is already there.
+    - ``start_load_kv`` issues **one** RETRIEVE that covers the
+      chunk-aligned portion of the prefix and host-blocks until the
+      daemon has populated every layer of the GPU KV slots.
+    - ``load_kv_layerwise(layer_id)`` is a no-op — data is already
+      there. SGLang's ``LMCRadixCache`` skips registering the per-layer
+      transfer hook entirely in MP mode (no work to interleave); the
+      method is kept on the class for interface parity.
 
-    The wire protocol stays at upstream's flat 5-arg RETRIEVE / 4-arg
-    STORE, with no layer windowing. The daemon does the per-layer
-    ``single_layer_kv_transfer_sgl`` dispatch internally based on the
-    detected ``GPUKVFormat``.
-
-    Mirrors the in-process `LMCacheConnector` from SGLang's perspective: a
-    single blocking `load_kv` call drives the full retrieve and only returns
-    once every layer has been written into the GPU KV cache. Internally the
-    daemon transfers each layer sequentially because the SGLang MHA
-    `GPUKVFormat` only supports the layerwise transfer kernel.
+    Wire protocol: 5-arg RETRIEVE (key, instance_id, block_ids,
+    ipc_handle, skip_prefix_n_blocks) and 4-arg STORE (key, instance_id,
+    block_ids, ipc_handle), no layer windowing. The daemon uses the
+    upstream ``multi_layer_block_kv_transfer`` kernel which handles all
+    layers in a single launch, with per-format pointer math
+    compile-time-specialized via ``if constexpr`` on the detected
+    ``GPUKVFormat``.
     """
 
     def __init__(
@@ -146,8 +146,6 @@ class LMCacheMPConnector:
         ).result(timeout=self._mq_timeout)
         self._registered = True
         self._start_heartbeat()
-        # State for the layerwise wrapper around the single-shot wire load.
-        self._pending_load_event: torch.cuda.Event | None = None
 
     def _start_heartbeat(self) -> None:
         if self._heartbeat is not None:
@@ -290,13 +288,13 @@ class LMCacheMPConnector:
         ).to_cuda_future(device=self.device)
 
     def start_load_kv(self, load_metadata: LoadMetadata) -> int:
-        """Issue a single blocking RETRIEVE that covers the full prefix.
+        """Issue a single blocking RETRIEVE for the chunk-aligned prefix.
 
-        Returns the number of tokens actually retrieved. By the time this
-        method returns, the daemon has finished iterating
-        ``single_layer_kv_transfer_sgl`` over every layer for this chunk,
-        so the GPU KV slots are already populated. Subsequent
-        ``load_kv_layerwise`` calls are no-ops.
+        Returns the number of tokens actually retrieved (counted from
+        ``offset`` through the daemon-reported match end). By the time
+        this method returns, the daemon's
+        ``multi_layer_block_kv_transfer`` kernel has finished writing
+        every layer of the requested chunk into the GPU KV slots.
         """
         if not self.is_healthy:
             return 0
@@ -390,8 +388,10 @@ class LMCacheMPConnector:
 
     def load_kv_layerwise(self, layer_id: int) -> None:
         """No-op. ``start_load_kv`` already host-blocked until every
-        layer was transferred, so by the time SGLang's per-layer hook
-        fires the data is already in the GPU KV slots.
+        layer was transferred. SGLang's ``LMCRadixCache`` doesn't
+        register the per-layer transfer hook in MP mode, so this
+        method is normally not called; it's kept for interface parity
+        with ``LMCacheLayerwiseConnector``.
         """
         return
 
