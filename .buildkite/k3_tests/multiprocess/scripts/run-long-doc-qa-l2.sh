@@ -49,9 +49,11 @@ MAX_WARMUP_OVERHEAD="${MAX_WARMUP_OVERHEAD:-2.0}"
 
 L2_RESULTS_DIR="$RESULTS_DIR/long_doc_qa_l2"
 PID_FILE="/tmp/lmcache_mp_pids_${BUILD_ID}"
-# Defined here (not just in Step 4) so the relaunch can pin LMCache's
-# Prometheus endpoint to the same port the curl scrape reads from.
-PROMETHEUS_PORT="${PROMETHEUS_PORT:-9090}"
+# /metrics is now served by the LMCache FastAPI HTTP server (port 8080
+# by default) — the legacy ``--prometheus-port`` standalone server was
+# disabled for the ``lmcache server`` entrypoint by #3164.  Defined here
+# (not just in Step 4) so the relaunch and the curl scrape agree.
+METRICS_HTTP_PORT="${METRICS_HTTP_PORT:-8080}"
 
 echo "=== Long Doc QA L2 Performance Test ==="
 echo "Model: $MODEL"
@@ -96,7 +98,7 @@ if [ -f "$PID_FILE" ]; then
     # below can bind it cleanly.
     for _ in $(seq 1 30); do
         if ! (ss -ltn 2>/dev/null || netstat -ltn 2>/dev/null) \
-                | awk '{print $4}' | grep -qE ":${PROMETHEUS_PORT}$"; then
+                | awk '{print $4}' | grep -qE ":${METRICS_HTTP_PORT}$"; then
             break
         fi
         sleep 0.5
@@ -118,7 +120,7 @@ lmcache server \
     --l2-adapter "$L2_ADAPTER_JSON" \
     --max-workers "$MAX_WORKERS" \
     --metrics-sample-rate 1.0 \
-    --prometheus-port "$PROMETHEUS_PORT" \
+    --http-port "$METRICS_HTTP_PORT" \
     --port "$LMCACHE_PORT" \
     > "/tmp/build_${BUILD_ID}_lmcache_l2.log" 2>&1 &
 
@@ -351,7 +353,7 @@ L2_METRICS_FILE="$L2_RESULTS_DIR/prometheus_metrics.txt"
 # back up, and a single-shot curl loses the metrics check silently.
 > "$L2_METRICS_FILE"
 for i in 1 2 3 4 5; do
-    if curl -sf "http://localhost:${PROMETHEUS_PORT}/metrics" \
+    if curl -sf "http://localhost:${METRICS_HTTP_PORT}/metrics" \
             > "$L2_METRICS_FILE" 2>/dev/null && [ -s "$L2_METRICS_FILE" ]; then
         break
     fi
@@ -359,7 +361,7 @@ for i in 1 2 3 4 5; do
 done
 
 if [ ! -s "$L2_METRICS_FILE" ]; then
-    echo "FAIL: could not fetch metrics from Prometheus (port $PROMETHEUS_PORT)."
+    echo "FAIL: could not fetch /metrics from LMCache HTTP server (port $METRICS_HTTP_PORT)."
     echo "       /metrics being unreachable means we cannot verify the L2"
     echo "       data flow or the observability surface; failing the test"
     echo "       rather than silently skipping."
@@ -367,9 +369,9 @@ if [ ! -s "$L2_METRICS_FILE" ]; then
     echo "--- LMCache L2 server log (last 50 lines) ---"
     tail -50 "/tmp/build_${BUILD_ID}_lmcache_l2.log" 2>&1 || true
     echo ""
-    echo "--- Listening sockets on port ${PROMETHEUS_PORT} ---"
+    echo "--- Listening sockets on port ${METRICS_HTTP_PORT} ---"
     (ss -ltnp 2>/dev/null || netstat -ltnp 2>/dev/null || true) \
-        | awk -v p=":${PROMETHEUS_PORT}" '$0 ~ p'
+        | awk -v p=":${METRICS_HTTP_PORT}" '$0 ~ p'
     exit 1
 fi
 
