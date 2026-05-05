@@ -1068,6 +1068,7 @@ def run_cache_server(
     storage_manager_config: StorageManagerConfig,
     obs_config: ObservabilityConfig,
     return_engine: bool = False,
+    start_prometheus_http_server: bool = True,
 ):
     """
     Run the LMCache cache server with ZMQ message queue.
@@ -1078,12 +1079,18 @@ def run_cache_server(
         obs_config: Configuration for the observability stack
         return_engine: If True, return (server, engine) after starting;
                        if False, run blocking loop to keep server alive
+        start_prometheus_http_server: Whether to start a standalone
+            Prometheus HTTP server in a background thread.  Set to
+            ``False`` when an external HTTP framework already serves
+            ``/metrics`` to avoid port conflicts or redundant servers.
 
     Returns:
         If return_engine is True: tuple of (MessageQueueServer, MPCacheEngine)
         If return_engine is False: None (blocks until interrupted)
     """
-    event_bus = init_observability(obs_config)
+    event_bus = init_observability(
+        obs_config, start_prometheus_http_server=start_prometheus_http_server
+    )
 
     # Wire up the trace recorder (no-op when --trace-level is unset).
     # Registered before the engine handlers are added so any
