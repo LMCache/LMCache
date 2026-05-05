@@ -400,6 +400,11 @@ class RawBlockCore:
         with self._lock:
             return len(self._index)
 
+    def snapshot_indexed_keys(self) -> list[str]:
+        """Return a detached snapshot of encoded keys currently in the index."""
+        with self._lock:
+            return list(self._index.keys())
+
     def entry_offset(self, encoded_key: str) -> int | None:
         """Return the raw-device slot offset for an indexed key.
 
@@ -860,12 +865,19 @@ class RawBlockCore:
         if hasattr(buf, "cast"):
             buf = buf.cast("B")
         payload_len = len(memory_obj.byte_array)
+        payload_capacity = self.slot_bytes - self.header_bytes
+        if payload_len > payload_capacity:
+            raise RuntimeError(
+                f"RawBlockCore payload {payload_len} exceeds slot capacity "
+                f"{payload_capacity}"
+            )
         total_len = payload_len
         if self.use_odirect:
             total_len = round_up(payload_len, self.block_align)
-            if total_len > (self.slot_bytes - self.header_bytes):
+            if total_len > payload_capacity:
                 raise RuntimeError(
-                    f"O_DIRECT payload {total_len} exceeds slot capacity"
+                    f"O_DIRECT payload {total_len} exceeds slot capacity "
+                    f"{payload_capacity}"
                 )
             direct_view = self._build_direct_odirect_view(
                 memory_obj=memory_obj,

@@ -22,7 +22,12 @@ import torch
 # First Party
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.memory_management import AdHocMemoryAllocator, MemoryFormat
+from lmcache.v1.memory_management import (
+    AdHocMemoryAllocator,
+    MemoryFormat,
+    MemoryObjMetadata,
+    TensorMemoryObj,
+)
 from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 from lmcache.v1.storage_backend.plugins.rust_raw_block_backend import (
@@ -30,7 +35,11 @@ from lmcache.v1.storage_backend.plugins.rust_raw_block_backend import (
     _DEFAULT_META_VERSION,
     RustRawBlockBackend,
 )
-from lmcache.v1.storage_backend.raw_block import RawBlockCore, RawBlockCoreConfig
+from lmcache.v1.storage_backend.raw_block import (
+    RawBlockCore,
+    RawBlockCoreConfig,
+    RawBlockKeySpec,
+)
 
 
 def _has_ext() -> bool:
@@ -41,6 +50,75 @@ def _has_ext() -> bool:
         return True
     except Exception:
         return False
+
+
+class _FakeRawBlockDevice:
+    def __init__(self, path: str, *, size_bytes: int, **kwargs):
+        del path, kwargs
+        self._data = bytearray(size_bytes)
+
+    def size_bytes(self):
+        return len(self._data)
+
+    def pread_into(self, offset, out, payload_len, total_len=None):
+        del total_len
+        out[:payload_len] = self._data[offset : offset + payload_len]
+
+    def pwrite_from_buffer(self, offset, data, payload_len=None, total_len=None):
+        del total_len
+        length = len(data) if payload_len is None else payload_len
+        self._data[offset : offset + length] = bytes(memoryview(data)[:length])
+
+    def close(self):
+        return None
+
+
+def _install_fake_raw_block_device(monkeypatch, *, size_bytes: int = 64 * 1024):
+    def create_fake_device(path: str, **kwargs):
+        return _FakeRawBlockDevice(path, size_bytes=size_bytes, **kwargs)
+
+    monkeypatch.setitem(
+        sys.modules,
+        "lmcache_rust_raw_block_io",
+        types.SimpleNamespace(RawBlockDevice=create_fake_device),
+    )
+
+
+def _make_raw_block_core(*, use_odirect: bool = False) -> RawBlockCore:
+    return RawBlockCore(
+        RawBlockCoreConfig(
+            device_path="/tmp/raw-block-boundary-test",
+            capacity_bytes=64 * 1024,
+            block_align=4096,
+            header_bytes=4096,
+            slot_bytes=8192,
+            use_odirect=use_odirect,
+            enable_zero_copy=True,
+            meta_total_bytes=16 * 1024,
+            meta_magic=b"LMCIDX01",
+            meta_version=1,
+            meta_checkpoint_interval_sec=60,
+            meta_idle_quiet_ms=100,
+            meta_enable_periodic=False,
+            meta_verify_on_load=True,
+            io_engine="posix",
+            iouring_queue_depth=256,
+        ),
+        key_namespace="object",
+    )
+
+
+def _make_byte_obj(size: int) -> TensorMemoryObj:
+    raw_data = torch.empty(size, dtype=torch.uint8)
+    metadata = MemoryObjMetadata(
+        shape=torch.Size([size]),
+        dtype=torch.uint8,
+        address=0,
+        phy_size=size,
+        fmt=MemoryFormat.KV_2LTD,
+        ref_count=1,
+    )
+    return TensorMemoryObj(raw_data, metadata, parent_allocator=None)
 
 
 def test_raw_block_core_passes_io_engine_options_to_rust_binding(monkeypatch):
@@ -101,6 +179,52 @@ def test_raw_block_core_passes_io_engine_options_to_rust_binding(monkeypatch):
                 "iouring_queue_depth": 512,
             }
         ]
+    finally:
+        core.close()
+
+
+def test_raw_block_core_non_odirect_rejects_payload_over_slot_capacity(monkeypatch):
+    _install_fake_raw_block_device(monkeypatch)
+    core = _make_raw_block_core(use_odirect=False)
+    try:
+        payload_capacity = core.slot_bytes - core.header_bytes
+        exact_key = RawBlockKeySpec(encoded="exact", slot_identity=1)
+        too_large_key = RawBlockKeySpec(encoded="too-large", slot_identity=2)
+
+        exact = core.put_many([exact_key], [_make_byte_obj(payload_capacity)])
+        assert exact.results == [True]
+        assert core.contains_key("exact") is True
+
+        too_large = core.put_many(
+            [too_large_key],
+            [_make_byte_obj(payload_capacity + 1)],
+        )
+        assert too_large.results == [False]
+        assert core.contains_key("too-large") is False
+    finally:
+        core.close()
+
+
+def test_raw_block_core_odirect_prepare_payload_boundaries(monkeypatch):
+    _install_fake_raw_block_device(monkeypatch)
+    core = _make_raw_block_core(use_odirect=True)
+    try:
+        payload_capacity = core.slot_bytes - core.header_bytes
+
+        _, payload_len, total_len = core._prepare_write_payload(
+            _make_byte_obj(payload_capacity)
+        )
+        assert payload_len == payload_capacity
+        assert total_len == payload_capacity
+
+        _, payload_len, total_len = core._prepare_write_payload(
+            _make_byte_obj(payload_capacity - 1)
+        )
+        assert payload_len == payload_capacity - 1
+        assert total_len == payload_capacity
+
+        with pytest.raises(RuntimeError, match="slot capacity"):
+            core._prepare_write_payload(_make_byte_obj(payload_capacity + 1))
     finally:
         core.close()
 
