@@ -47,6 +47,19 @@ const O_DIRECT: i32 = libc::O_DIRECT;
 const O_DIRECT: i32 = 0;
 const RING_SIZE: usize = 256;
 
+fn parse_use_iouring(io_engine: Option<String>, use_iouring: bool) -> PyResult<bool> {
+    match io_engine {
+        Some(engine) if !engine.is_empty() => match engine.as_str() {
+            "posix" => Ok(false),
+            "io_uring" => Ok(true),
+            other => Err(PyValueError::new_err(format!(
+                "io_engine must be one of posix, io_uring; got {other}"
+            ))),
+        },
+        _ => Ok(use_iouring),
+    }
+}
+
 ///Per batch tracking for in flight I/O operation
 type BatchTracking = (Arc<AtomicU64>, Arc<Condvar>);
 
@@ -389,7 +402,11 @@ impl RawBlockDevice {
         use_odirect: bool,
         alignment: usize,
         use_iouring: bool,
+        io_engine: Option<String>,
+        iouring_queue_depth: usize,
     ) -> PyResult<Self> {
+        let use_iouring = parse_use_iouring(io_engine, use_iouring)?;
+        let iouring_queue_depth = iouring_queue_depth.max(1);
         let cpath = CString::new(path).map_err(|_| PyValueError::new_err("path contains NUL"))?;
         let mut flags = if writable {
             libc::O_RDWR
@@ -419,7 +436,7 @@ impl RawBlockDevice {
             next_batch_id_opt,
             batch_in_flight_opt,
         ) = if use_iouring {
-            let ring = IoUring::new(RING_SIZE as u32)
+            let ring = IoUring::new(iouring_queue_depth as u32)
                 .map_err(|e| PyRuntimeError::new_err(format!("io_uring init failed: {}", e)))?;
             let ring = Arc::new(Mutex::new(ring));
             let queue = Arc::new(Mutex::new(Vec::<IoSubmission>::new()));
@@ -440,6 +457,7 @@ impl RawBlockDevice {
             let in_flight_count_clone = Arc::clone(&in_flight_count);
             let in_flight_cvar_clone = Arc::clone(&in_flight_cvar);
             let batch_in_flight_clone = Arc::clone(&batch_in_flight);
+            let ring_size = iouring_queue_depth;
 
             // Worker thread that handles io_uring submissions and completions.
             //
@@ -640,7 +658,7 @@ impl RawBlockDevice {
 
                         let mut ring = ring_clone.lock().unwrap();
 
-                        let available = RING_SIZE - ring.submission().len();
+                        let available = ring_size - ring.submission().len();
                         let to_submit_count = std::cmp::min(available, batch_len);
 
                         if to_submit_count < batch_len {
@@ -948,16 +966,35 @@ impl RawBlockDevice {
 impl RawBlockDevice {
     #[new]
     #[pyo3(
-        signature = (path, writable, use_odirect = false, use_iouring = false, alignment = 4096)
+        signature = (
+            path,
+            writable,
+            use_odirect = false,
+            use_iouring = false,
+            alignment = 4096,
+            io_engine = None,
+            iouring_queue_depth = RING_SIZE
+        )
     )]
+    #[allow(clippy::too_many_arguments)]
     fn new(
         path: String,
         writable: bool,
         use_odirect: bool,
         use_iouring: bool,
         alignment: usize,
+        io_engine: Option<String>,
+        iouring_queue_depth: usize,
     ) -> PyResult<Self> {
-        Self::new_internal(path, writable, use_odirect, alignment, use_iouring)
+        Self::new_internal(
+            path,
+            writable,
+            use_odirect,
+            alignment,
+            use_iouring,
+            io_engine,
+            iouring_queue_depth,
+        )
     }
 
     // Expose cached size to Python.

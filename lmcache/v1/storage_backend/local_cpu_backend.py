@@ -406,8 +406,17 @@ class LocalCPUBackend(AllocatorBackendInterface):
             return paged_mem_allocator
         else:
             # Check if io_uring is enabled for fixed buffer support
-            use_uring = bool(
-                config.get_extra_config_value("rust_raw_block.use_uring", False)
+            io_engine = str(
+                config.get_extra_config_value("rust_raw_block.io_engine", "") or ""
+            ).lower()
+            use_uring = (
+                io_engine == "io_uring"
+                or bool(
+                    config.get_extra_config_value("rust_raw_block.use_iouring", False)
+                )
+                or bool(
+                    config.get_extra_config_value("rust_raw_block.use_uring", False)
+                )
             )
 
             # Check if lazy memory allocator should be enabled
@@ -522,7 +531,12 @@ class LocalCPUBackend(AllocatorBackendInterface):
 
         rust_device_path = extra.get("rust_raw_block.device_path")
         rust_use_odirect = bool(extra.get("rust_raw_block.use_odirect", False))
-        rust_use_uring = bool(extra.get("rust_raw_block.use_uring", False))
+        rust_io_engine = str(extra.get("rust_raw_block.io_engine", "") or "").lower()
+        rust_use_uring = (
+            rust_io_engine == "io_uring"
+            or bool(extra.get("rust_raw_block.use_iouring", False))
+            or bool(extra.get("rust_raw_block.use_uring", False))
+        )
         rust_auto_align = bool(
             extra.get("rust_raw_block.align_local_cpu_allocator", True)
         )
