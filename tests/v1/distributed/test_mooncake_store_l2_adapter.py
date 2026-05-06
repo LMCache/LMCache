@@ -697,7 +697,9 @@ class TestMooncakeStoreIntegration:
     def test_batch_delete_mixed_existing_and_missing(self):
         """Batch delete a mix of stored and non-stored keys."""
         stored_keys = [create_object_key(i + 600) for i in range(3)]
-        stored_objs = [create_memory_obj(size=64, fill_value=float(i + 1)) for i in range(3)]
+        stored_objs = [
+            create_memory_obj(size=64, fill_value=float(i + 1)) for i in range(3)
+        ]
         missing_keys = [
             create_object_key(90001),
             create_object_key(90002),
@@ -747,12 +749,10 @@ class TestMooncakeStoreIntegration:
         assert self.adapter.pop_completed_store_tasks()[store_tid] is True
 
         usage_after_store = self.adapter.get_usage().total_bytes_used
-        assert usage_after_store > usage_before, (
-            "Usage should increase after store"
-        )
+        assert usage_after_store > usage_before, "Usage should increase after store"
 
         # Confirm stored in lookup so _key_sizes is populated
-        lookup_tid = self.adapter.submit_lookup_and_lock_task([key])
+        _ = self.adapter.submit_lookup_and_lock_task([key])
         assert wait_for_event_fd(lookup_fd)
         self.adapter.submit_unlock([key])
 

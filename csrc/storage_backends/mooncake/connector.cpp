@@ -197,7 +197,7 @@ void MooncakeConnector::do_batch_exists(WorkerMooncakeConn& conn,
 }
 
 void MooncakeConnector::do_batch_delete(WorkerMooncakeConn& conn,
-                                       const Request& req) {
+                                        const Request& req) {
   auto results = conn.client->batchRemove(req.keys, /*force=*/true);
   ensure_batch_result_size(results, req.keys.size(), "batchRemove");
 
