@@ -1821,7 +1821,6 @@ class SGLangLayerwiseGPUConnector(GPUConnectorInterface):
                         self.gpu_kv_format,
                         token_major=True,
                     )
-        yield
 
         # free the buffer memory
         if self.use_gpu:
