@@ -12,6 +12,15 @@ New endpoints are registered automatically from
 exposes a module-level ``router`` (a :class:`fastapi.APIRouter`) is
 discovered at startup.
 
+A subset of routes defined under
+``lmcache/v1/internal_api_server/common/`` is also exposed on this HTTP
+server. The module
+``lmcache/v1/multiprocess/http_apis/common_api.py`` aggregates those
+routers (skipping modules listed in ``_MP_INCOMPATIBLE_MODULES``, such as
+``run_script_api``) and forwards them to the auto-discovery pipeline.
+Adding a new compatible module under ``internal_api_server/common``
+therefore requires no wiring changes on the MP side.
+
 .. contents::
    :local:
    :depth: 2
@@ -47,9 +56,15 @@ All examples below assume the server is reachable at
 Endpoints
 ---------
 
+The table below groups the routes by purpose. Paths under ``/api/`` are
+the operational surface (health, status, cache control). Routes without
+the ``/api/`` prefix are inherited from the shared
+``internal_api_server`` package and kept at their original paths for
+compatibility with the vLLM-embedded API server.
+
 .. list-table::
    :header-rows: 1
-   :widths: 10 30 60
+   :widths: 10 35 55
 
    * - Method
      - Path
@@ -66,6 +81,43 @@ Endpoints
    * - POST
      - ``/api/clear-cache``
      - Force-clear all KV data in L1 (CPU) memory.
+   * - GET
+     - ``/conf``
+     - Dump merged server configurations (mp, storage_manager,
+       observability).
+   * - GET
+     - ``/version``
+     - Full version descriptor (package version + commit id).
+   * - GET
+     - ``/lmc_version``
+     - LMCache package version string.
+   * - GET
+     - ``/commit_id``
+     - Current build commit id.
+   * - GET
+     - ``/env``
+     - Dump process environment variables (JSON, plain text).
+   * - GET
+     - ``/loglevel``
+     - List or inspect logger levels; also accepts ``level`` to mutate.
+   * - GET
+     - ``/metrics``
+     - Prometheus exposition format.
+   * - POST
+     - ``/metrics/reset``
+     - Reset all observability metrics to their initial state.
+   * - GET
+     - ``/threads``
+     - Enumerate active Python threads and their stack traces.
+   * - GET
+     - ``/periodic-threads``
+     - List registered periodic threads with summary counts.
+   * - GET
+     - ``/periodic-threads/{thread_name}``
+     - Detailed status for a single periodic thread.
+   * - GET
+     - ``/periodic-threads-health``
+     - Quick health check for critical/high-level periodic threads.
 
 ``GET /``
 ~~~~~~~~~
@@ -234,6 +286,291 @@ The request body is ignored.
 
     curl -s -X POST http://localhost:8080/api/clear-cache
 
+``GET /conf``
+~~~~~~~~~~~~~
+
+Returns every server-side configuration object registered on
+``app.state.configs`` (typically ``mp``, ``storage_manager`` and
+``observability``) as a single indented JSON document. Dataclasses are
+serialized via ``safe_asdict``; other values go through ``make_json_safe``.
+Useful for confirming what the process actually loaded — including
+environment overrides — without restarting.
+
+**Response** (``200 OK``):
+
+.. code-block:: json
+
+    {
+      "mp": {
+        "http_host": "0.0.0.0",
+        "http_port": 8080,
+        "...": "..."
+      },
+      "storage_manager": {
+        "...": "..."
+      },
+      "observability": {
+        "...": "..."
+      }
+    }
+
+**Response** (``503 Service Unavailable``) when configs are not wired
+onto ``app.state`` yet:
+
+.. code-block:: json
+
+    {
+      "error": "configs not initialized"
+    }
+
+**Example:**
+
+.. code-block:: bash
+
+    curl -s http://localhost:8080/conf | jq
+
+``GET /version``
+~~~~~~~~~~~~~~~~
+
+Returns the full version descriptor (package version combined with the
+current commit id), formatted by ``lmcache.utils.get_version()``.
+
+**Response** (``200 OK``):
+
+.. code-block:: json
+
+    "0.3.x+<commit-id>"
+
+**Example:**
+
+.. code-block:: bash
+
+    curl -s http://localhost:8080/version
+
+``GET /lmc_version``
+~~~~~~~~~~~~~~~~~~~~
+
+Returns the raw LMCache package version string (``lmcache.utils.VERSION``).
+
+**Example:**
+
+.. code-block:: bash
+
+    curl -s http://localhost:8080/lmc_version
+
+``GET /commit_id``
+~~~~~~~~~~~~~~~~~~
+
+Returns the git commit id baked into the build (``lmcache.utils.COMMIT_ID``).
+
+**Example:**
+
+.. code-block:: bash
+
+    curl -s http://localhost:8080/commit_id
+
+``GET /env``
+~~~~~~~~~~~~
+
+Dumps the process environment variables as a sorted, pretty-printed
+JSON document. Response ``Content-Type`` is ``text/plain`` so it can be
+piped directly to a terminal.
+
+.. warning::
+
+   The payload may contain secrets injected via environment
+   variables. Restrict network access to this endpoint in production.
+
+**Example:**
+
+.. code-block:: bash
+
+    curl -s http://localhost:8080/env
+
+``GET /loglevel``
+~~~~~~~~~~~~~~~~~
+
+Inspect or mutate Python logger levels at runtime. All responses are
+``text/plain``. The endpoint has three modes driven by query parameters:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 30 70
+
+   * - Query
+     - Behavior
+   * - (no params)
+     - List every logger registered with :mod:`logging` and its level.
+   * - ``?logger_name=<name>``
+     - Return the effective level of the named logger.
+   * - ``?logger_name=<name>&level=<LEVEL>``
+     - Set the named logger (and its handlers) to ``LEVEL``
+       (``DEBUG``/``INFO``/``WARNING``/``ERROR``/``CRITICAL``).
+       Returns ``400`` on an unknown level.
+
+**Examples:**
+
+.. code-block:: bash
+
+    # list everything
+    curl -s http://localhost:8080/loglevel
+
+    # read one
+    curl -s 'http://localhost:8080/loglevel?logger_name=lmcache'
+
+    # elevate to DEBUG
+    curl -s 'http://localhost:8080/loglevel?logger_name=lmcache&level=DEBUG'
+
+``GET /metrics``
+~~~~~~~~~~~~~~~~
+
+Prometheus exposition format for every metric registered on the default
+``prometheus_client`` registry. Scrape this directly from Prometheus.
+See :doc:`observability` for the list of exported metrics.
+
+**Example:**
+
+.. code-block:: bash
+
+    curl -s http://localhost:8080/metrics
+
+``POST /metrics/reset``
+~~~~~~~~~~~~~~~~~~~~~~~
+
+Resets all LMCache observability metrics to their initial state
+(``reset_observability_metrics``). Intended for test harnesses and
+benchmarks — not for production.
+
+**Response** (``200 OK``):
+
+.. code-block:: text
+
+    ok
+
+**Example:**
+
+.. code-block:: bash
+
+    curl -s -X POST http://localhost:8080/metrics/reset
+
+``GET /threads``
+~~~~~~~~~~~~~~~~
+
+Enumerate active Python threads in the server process along with their
+stack traces, plus a total-count summary. Useful for live debugging of
+hangs or runaway workers.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 30 70
+
+   * - Query
+     - Behavior
+   * - ``?name=<substr>``
+     - Keep only threads whose name contains ``<substr>``
+       (case-insensitive).
+   * - ``?thread_id=<int>``
+     - Keep only the thread with the matching ``ident``.
+
+**Example:**
+
+.. code-block:: bash
+
+    curl -s 'http://localhost:8080/threads?name=periodic'
+
+``GET /periodic-threads``
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Returns a JSON snapshot of the
+:class:`~lmcache.v1.periodic_thread.PeriodicThreadRegistry`: counts by
+level plus per-thread status (last run timestamp, latest summary, etc.).
+
+.. list-table::
+   :header-rows: 1
+   :widths: 30 70
+
+   * - Query
+     - Behavior
+   * - ``?level=critical|high|medium|low``
+     - Only include threads at the given level. ``400`` on unknown.
+   * - ``?running_only=true``
+     - Only include threads currently running.
+   * - ``?active_only=true``
+     - Only include threads considered active (recent tick).
+
+**Response** (``200 OK``):
+
+.. code-block:: json
+
+    {
+      "summary": {
+        "total_count": 4,
+        "running_count": 4,
+        "active_count": 4,
+        "by_level": {"critical": 1, "high": 2, "medium": 1, "low": 0}
+      },
+      "threads": [
+        {"name": "...", "level": "high", "is_running": true, "...": "..."}
+      ]
+    }
+
+**Example:**
+
+.. code-block:: bash
+
+    curl -s 'http://localhost:8080/periodic-threads?level=critical' | jq
+
+``GET /periodic-threads/{thread_name}``
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Detailed status for a single periodic thread (``404`` if not found).
+
+**Example:**
+
+.. code-block:: bash
+
+    curl -s http://localhost:8080/periodic-threads/storage-flush | jq
+
+``GET /periodic-threads-health``
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Fast health check covering only ``critical`` and ``high`` level periodic
+threads. A thread is flagged unhealthy when it is marked running but has
+not ticked within its expected interval.
+
+**Response** (``200 OK``):
+
+.. code-block:: json
+
+    {
+      "healthy": true,
+      "unhealthy_count": 0,
+      "unhealthy_threads": []
+    }
+
+When something is lagging:
+
+.. code-block:: json
+
+    {
+      "healthy": false,
+      "unhealthy_count": 1,
+      "unhealthy_threads": [
+        {
+          "name": "storage-flush",
+          "level": "critical",
+          "last_run_ago": 42.5,
+          "interval": 5.0
+        }
+      ]
+    }
+
+**Example:**
+
+.. code-block:: bash
+
+    curl -s http://localhost:8080/periodic-threads-health
+
 Adding New Endpoints
 --------------------
 
@@ -249,6 +586,13 @@ Endpoints are auto-discovered from
 The :class:`~lmcache.v1.multiprocess.http_api_registry.HTTPAPIRegistry`
 will pick the module up automatically at startup — no central
 registration list to edit.
+
+If the route is generic enough to be shared with the vLLM-embedded API
+server, add it under ``lmcache/v1/internal_api_server/common/`` instead.
+It will be picked up on the MP side via ``common_api.py`` unless its
+module name is listed in ``_MP_INCOMPATIBLE_MODULES`` there (used for
+modules that require vLLM-specific ``app.state`` attributes, e.g.
+``run_script_api``).
 
 When adding a new endpoint, please also add a matching section to this
 page documenting the endpoint's purpose, request/response schema, and

@@ -24,7 +24,7 @@ def CreateGPUConnector(
         config: The LMCache engine configuration.
         metadata: The LMCache metadata.
         engine: The serving engine type (EngineType.VLLM, EngineType.SGLANG,
-                or EngineType.MOCK).
+                EngineType.TRTLLM, or EngineType.MOCK).
         layout_hints: Optional hints from the serving engine about KV cache
             layout (e.g. ``{"kv_layout": "HND"}``).
     """
@@ -118,6 +118,15 @@ def CreateGPUConnector(
             return VLLMPagedMemHPUConnectorV2.from_metadata(metadata, use_gpu, device)
         else:
             raise RuntimeError("No supported connector found for the current platform.")
+
+    elif engine == EngineType.TRTLLM:
+        # First Party
+        from lmcache.v1.gpu_connector.gpu_connectors import TRTLLMGPUConnector
+
+        local_worker_id = metadata.local_worker_id
+        torch.cuda.set_device(local_worker_id)
+        device = torch.device(f"cuda:{local_worker_id}")
+        return TRTLLMGPUConnector.from_metadata(metadata, device=device)
 
     elif engine == EngineType.MOCK:
         kv_shape = metadata.kv_shape

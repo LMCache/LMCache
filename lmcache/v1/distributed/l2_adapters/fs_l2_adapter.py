@@ -42,6 +42,7 @@ from lmcache.v1.distributed.l2_adapters.factory import (
     register_l2_adapter_factory,
 )
 from lmcache.v1.memory_management import MemoryObj
+from lmcache.v1.platform import create_event_notifier
 
 logger = init_logger(__name__)
 
@@ -279,9 +280,9 @@ class FSL2Adapter(L2AdapterInterface):
             stat = os.statvfs(self._base_path)
             self._os_disk_bs = stat.f_bsize
 
-        self._store_efd = os.eventfd(0, os.EFD_NONBLOCK | os.EFD_CLOEXEC)
-        self._lookup_efd = os.eventfd(0, os.EFD_NONBLOCK | os.EFD_CLOEXEC)
-        self._load_efd = os.eventfd(0, os.EFD_NONBLOCK | os.EFD_CLOEXEC)
+        self._store_efd = create_event_notifier()
+        self._lookup_efd = create_event_notifier()
+        self._load_efd = create_event_notifier()
 
         # Task bookkeeping
         self._next_task_id: L2TaskId = 0
@@ -310,13 +311,13 @@ class FSL2Adapter(L2AdapterInterface):
     # ------------------------------------------------------------------
 
     def get_store_event_fd(self) -> int:
-        return self._store_efd
+        return self._store_efd.fileno()
 
     def get_lookup_and_lock_event_fd(self) -> int:
-        return self._lookup_efd
+        return self._lookup_efd.fileno()
 
     def get_load_event_fd(self) -> int:
-        return self._load_efd
+        return self._load_efd.fileno()
 
     # ------------------------------------------------------------------
     # Store Interface
@@ -444,9 +445,9 @@ class FSL2Adapter(L2AdapterInterface):
         self._loop_thread.join()
         self._loop.close()
 
-        os.close(self._store_efd)
-        os.close(self._lookup_efd)
-        os.close(self._load_efd)
+        self._store_efd.close()
+        self._lookup_efd.close()
+        self._load_efd.close()
         logger.info("FSL2Adapter closed")
 
     # ------------------------------------------------------------------
@@ -627,7 +628,7 @@ class FSL2Adapter(L2AdapterInterface):
 
         with self._lock:
             self._completed_store_tasks[task_id] = success
-        os.eventfd_write(self._store_efd, 1)
+        self._store_efd.notify()
 
     # ---- lookup ---------------------------------------------------------
 
@@ -644,7 +645,7 @@ class FSL2Adapter(L2AdapterInterface):
 
         with self._lock:
             self._completed_lookup_tasks[task_id] = bitmap
-        os.eventfd_write(self._lookup_efd, 1)
+        self._lookup_efd.notify()
 
     # ---- load -----------------------------------------------------------
 
@@ -731,7 +732,7 @@ class FSL2Adapter(L2AdapterInterface):
 
         with self._lock:
             self._completed_load_tasks[task_id] = bitmap
-        os.eventfd_write(self._load_efd, 1)
+        self._load_efd.notify()
 
 
 # Self-register config type and adapter factory

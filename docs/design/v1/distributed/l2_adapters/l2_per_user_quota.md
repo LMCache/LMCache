@@ -491,6 +491,7 @@ sizes)`. The base class handles all byte accounting.
 |---------|-----------------------------|---------------------|
 | MockL2Adapter | `int(config.max_size_gb * 1024**3)` | `True` |
 | NixlStoreL2Adapter | Pool total size | `True` |
+| RawBlockL2Adapter | RawBlockCore usable capacity | `True` |
 | NativeConnectorL2Adapter | `int(max_capacity_gb * 1024**3)` | `True` |
 | FSL2Adapter | 0 | `False` |
 

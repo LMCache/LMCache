@@ -85,6 +85,7 @@ class DisaggSpec:
     receiver_alloc_port: int
     is_last_prefill: bool = False
     num_transferred_tokens: int = 0
+    receiver_query_port: Optional[list[int]] = None
 
 
 tmp_disagg_tracker: dict[str, DisaggSpec] = {}
@@ -1095,6 +1096,9 @@ class LMCacheConnectorV1Impl:
 
         assert self.lmcache_engine is not None
 
+        # Probe decoder cache before store if bidirectional mode is enabled
+        bidir_enabled = getattr(self.config, "pd_bidirectional", False)
+
         for request in connector_metadata.requests:
             # unpin the kv caches according to req_id
             self.lmcache_engine.lookup_unpin(request.req_id)
@@ -1156,6 +1160,17 @@ class LMCacheConnectorV1Impl:
                     store_mask = store_mask[:aligned_token_len]
                     slot_mapping = slot_mapping[:aligned_token_len]
 
+            # Probe decoder cache before store
+            if bidir_enabled and request.disagg_spec is not None:
+                try:
+                    self._probe_decoder_cache(request, token_ids)
+                except Exception as e:
+                    logger.warning(
+                        "Bidirectional NIXL cache probe failed for %s: %s",
+                        request.req_id,
+                        e,
+                    )
+
             self.lmcache_engine.store(
                 token_ids,
                 mask=store_mask,
@@ -1167,6 +1182,21 @@ class LMCacheConnectorV1Impl:
                 req_id=request.req_id,
             )
 
+            # Probe decoder cache after store
+            if (
+                bidir_enabled
+                and request.disagg_spec is not None
+                and request.disagg_spec.receiver_query_port is not None
+            ):
+                try:
+                    self._probe_decoder_cache(request, token_ids)
+                except Exception as e:
+                    logger.warning(
+                        "Bidirectional NIXL cache probe failed for %s: %s",
+                        request.req_id,
+                        e,
+                    )
+
             # Update skip_leading_tokens only on last rank to ensure
             # each PP stage stores its own KV cache
             if get_pp_group().is_last_rank:
@@ -1174,6 +1204,83 @@ class LMCacheConnectorV1Impl:
                 save_spec.skip_leading_tokens = len(token_ids)
                 if request.disagg_spec:
                     request.disagg_spec.num_transferred_tokens = len(token_ids)
+
+    def _probe_decoder_cache(self, request: ReqMeta, token_ids: list[int]) -> None:
+        """Query the decoder's cache to check which blocks are already cached.
+
+        This is the bidirectional NIXL cache probe: the prefiller queries the
+        decoder via ZMQ to find out which KV blocks are already in the
+        decoder's GPU memory. This validates the cache query channel works
+        E2E through the real inference path.
+
+        In the future, this information can be used to skip prefill
+        computation for cached blocks.
+        """
+        sm = self.lmcache_engine.storage_manager  # type: ignore[union-attr]
+        if sm is None or sm.allocator_backend is None:
+            return
+        pd_backend = sm.allocator_backend
+        if not hasattr(pd_backend, "query_remote_cache"):
+            return
+        if not hasattr(pd_backend, "cache_query_sockets"):
+            return
+
+        # Get query port from LMCache config (pd_peer_query_port)
+        query_ports = self.config.pd_peer_query_port
+        if query_ports is None:
+            return
+
+        # Build cache keys using the token database's process_tokens
+        td = self.lmcache_engine.token_database  # type: ignore[union-attr]
+        if td is None:
+            return
+
+        chunk_keys = []
+        for _start, _end, key in td.process_tokens(
+            tokens=token_ids, mask=None, make_key=True
+        ):
+            chunk_keys.append(key)
+
+        if not chunk_keys:
+            return
+
+        # Build receiver_id from disagg_spec
+        disagg = request.disagg_spec
+        init_port = disagg.receiver_init_port  # type: ignore[union-attr]
+        if isinstance(init_port, list):
+            init_port = init_port[pd_backend.tp_rank]  # type: ignore[union-attr]
+        receiver_id = disagg.receiver_host + str(init_port)  # type: ignore[union-attr]
+
+        # Ensure peer and cache query connections
+        alloc_port = disagg.receiver_alloc_port  # type: ignore[union-attr]
+        if isinstance(alloc_port, list):
+            alloc_port = alloc_port[pd_backend.tp_rank]  # type: ignore[union-attr]
+        query_port = query_ports[pd_backend.tp_rank]  # type: ignore[union-attr]
+
+        pd_backend._ensure_peer_connection(  # type: ignore[union-attr]
+            receiver_id=receiver_id,
+            receiver_host=disagg.receiver_host,  # type: ignore[union-attr]
+            receiver_init_port=init_port,
+            receiver_alloc_port=alloc_port,
+        )
+        pd_backend._ensure_cache_query_connection(  # type: ignore[union-attr]
+            receiver_id=receiver_id,
+            receiver_host=disagg.receiver_host,  # type: ignore[union-attr]
+            receiver_query_port=query_port,
+        )
+
+        # Query decoder cache
+        cache_resp = pd_backend.query_remote_cache(receiver_id, chunk_keys)
+
+        logger.info(
+            "Bidirectional NIXL cache probe: req=%s, "
+            "queried %d chunks, decoder has %d cached "
+            "(%.0f%% hit rate)",
+            request.req_id,
+            len(chunk_keys),
+            len(cache_resp.cached_keys),
+            100.0 * len(cache_resp.cached_keys) / len(chunk_keys) if chunk_keys else 0,
+        )
 
     @_lmcache_nvtx_annotate
     def get_finished(
@@ -1366,6 +1473,7 @@ class LMCacheConnectorV1Impl:
                 receiver_host=req_disagg_spec["receiver_host"],
                 receiver_init_port=req_disagg_spec["receiver_init_port"],
                 receiver_alloc_port=req_disagg_spec["receiver_alloc_port"],
+                receiver_query_port=req_disagg_spec.get("receiver_query_port"),
             )
 
             tmp_disagg_tracker[request.request_id] = disagg_spec

@@ -20,7 +20,6 @@ from typing import TYPE_CHECKING, Optional
 from urllib.parse import quote as url_quote
 import asyncio
 import ctypes
-import os
 import threading
 
 if TYPE_CHECKING:
@@ -47,6 +46,7 @@ from lmcache.v1.distributed.l2_adapters.factory import (
     register_l2_adapter_factory,
 )
 from lmcache.v1.memory_management import MemoryObj
+from lmcache.v1.platform import create_event_notifier
 
 logger = init_logger(__name__)
 
@@ -83,6 +83,71 @@ def _format_safe_path(key_str: str) -> str:
     """Flatten slashes and URL-encode to form a safe HTTP path."""
     flat = key_str.replace("/", "_")
     return "/" + url_quote(flat)
+
+
+def _make_credentials_provider(
+    config: "S3L2AdapterConfig",
+) -> auth.AwsCredentialsProvider:
+    """Build an awscrt credentials provider for the S3 L2 adapter.
+
+    Resolution:
+
+    1. Static keys from ``config.aws_access_key_id`` /
+       ``config.aws_secret_access_key`` when both are set.
+    2. Otherwise, delegate to ``boto3``. ``botocore``'s default chain
+       covers env vars, shared profile, container credentials
+       (``AWS_CONTAINER_CREDENTIALS_FULL_URI`` /
+       ``AWS_CONTAINER_CREDENTIALS_RELATIVE_URI``), web-identity
+       (``AWS_WEB_IDENTITY_TOKEN_FILE`` / ``AWS_ROLE_ARN``), and IMDS
+       uniformly, including HTTPS endpoints that the awscrt Python
+       binding's default chain cannot reach. The resolved
+       ``RefreshableCredentials`` are republished to awscrt via
+       ``new_delegate``; every sign call invokes
+       ``get_frozen_credentials()`` so rotating short-lived OIDC
+       credentials refresh before expiry.
+
+    Args:
+        config: S3 L2 adapter configuration.
+
+    Returns:
+        An ``AwsCredentialsProvider`` ready to attach to ``S3Request``.
+
+    Raises:
+        ImportError: ``boto3`` is required but not installed.
+        RuntimeError: ``boto3`` returned no resolvable credentials.
+    """
+    if config.aws_access_key_id and config.aws_secret_access_key:
+        logger.info("S3L2Adapter using explicit AWS credentials")
+        return auth.AwsCredentialsProvider.new_static(
+            config.aws_access_key_id,
+            config.aws_secret_access_key,
+        )
+
+    logger.info("S3L2Adapter resolving AWS credentials via boto3 delegate")
+    try:
+        # Third Party
+        import boto3
+    except ImportError as e:
+        raise ImportError(
+            "S3L2Adapter requires boto3 to resolve credentials when "
+            "aws_access_key_id / aws_secret_access_key are not set. "
+            "Install boto3 or provide static credentials in the adapter "
+            "config."
+        ) from e
+
+    boto_creds = boto3.Session().get_credentials()
+    if boto_creds is None:
+        raise RuntimeError("S3L2Adapter: boto3 found no credentials in the environment")
+
+    def fetch() -> auth.AwsCredentials:
+        frozen = boto_creds.get_frozen_credentials()
+        return auth.AwsCredentials(
+            frozen.access_key,
+            frozen.secret_key,
+            frozen.token,
+        )
+
+    return auth.AwsCredentialsProvider.new_delegate(fetch)
 
 
 class MemoryViewStream:
@@ -136,14 +201,21 @@ class S3L2AdapterConfig(L2AdapterConfigBase):
     """Config for the S3 L2 adapter.
 
     Fields:
-    - s3_endpoint (str, required): bucket URL; accepts either
-      ``"s3://bucket"`` or the bare host form.
-    - s3_region (str, required): AWS region.
+    - s3_endpoint (str, required): bucket URL using **virtual-hosted**
+      style; accepts either ``"s3://<bucket>.<host>"`` or the bare
+      ``"<bucket>.<host>"`` form. The bucket name must be part of the
+      host because requests are signed and routed against this Host
+      header (path-style addressing is not supported).
+    - s3_region (str, required): AWS region used for SigV4.
     - s3_num_io_threads (int): CRT IO threads.
     - s3_prefer_http2 (bool): ALPN negotiate to HTTP/2.
     - s3_enable_s3express (bool): enable S3 Express signing.
-    - disable_tls (bool): bypass TLS (for non-AWS HTTP endpoints).
-    - aws_access_key_id / aws_secret_access_key (str): optional static creds.
+    - disable_tls (bool): bypass TLS on the bucket data plane (for
+      S3-compatible HTTP endpoints). Does not affect the credentials
+      resolver, which may still issue HTTPS calls.
+    - aws_access_key_id / aws_secret_access_key (str): optional static
+      credentials. When unset, credentials are resolved through boto3
+      (env vars, profile, container, web-identity, IMDS).
     - max_capacity_gb (float): aggregate capacity used by
       ``get_usage()``; ``0`` disables aggregate eviction
       (``usage_fraction == -1.0``).
@@ -222,13 +294,15 @@ class S3L2AdapterConfig(L2AdapterConfigBase):
     def help(cls) -> str:
         return (
             "S3 L2 adapter config fields:\n"
-            "- s3_endpoint (str, required): bucket URL ('s3://bucket' or host)\n"
-            "- s3_region (str, required): AWS region\n"
+            "- s3_endpoint (str, required): virtual-hosted bucket URL "
+            "('s3://<bucket>.<host>' or '<bucket>.<host>')\n"
+            "- s3_region (str, required): AWS region for SigV4\n"
             "- s3_num_io_threads (int): CRT IO threads (default 64)\n"
             "- s3_prefer_http2 (bool): try HTTP/2 via ALPN (default true)\n"
             "- s3_enable_s3express (bool): S3 Express signing (default false)\n"
-            "- disable_tls (bool): bypass TLS for non-AWS endpoints\n"
-            "- aws_access_key_id / aws_secret_access_key (str): static creds\n"
+            "- disable_tls (bool): bypass TLS on the bucket data plane\n"
+            "- aws_access_key_id / aws_secret_access_key (str): static creds; "
+            "when unset, boto3 resolves credentials\n"
             "- max_capacity_gb (float): capacity for get_usage (0 = disabled)\n"
             "- eviction (dict): optional, see L2AdapterConfigBase"
         )
@@ -276,17 +350,7 @@ class S3L2Adapter(L2AdapterInterface):
         host_resolver = io.DefaultHostResolver(event_loop_group)
         client_bootstrap = io.ClientBootstrap(event_loop_group, host_resolver)
 
-        if config.aws_access_key_id and config.aws_secret_access_key:
-            logger.info("Using explicit AWS credentials for S3L2Adapter")
-            self._credentials_provider = auth.AwsCredentialsProvider.new_static(
-                config.aws_access_key_id,
-                config.aws_secret_access_key,
-            )
-        else:
-            logger.info("S3L2Adapter using default AWS credentials chain")
-            self._credentials_provider = auth.AwsCredentialsProvider.new_default_chain(
-                client_bootstrap
-            )
+        self._credentials_provider = _make_credentials_provider(config)
 
         tls_opts = None
         if config.s3_prefer_http2:
@@ -321,10 +385,10 @@ class S3L2Adapter(L2AdapterInterface):
             signing_config=signing_config,
         )
 
-        # 3 distinct eventfds for the L2 interface.
-        self._store_efd = os.eventfd(0, os.EFD_NONBLOCK | os.EFD_CLOEXEC)
-        self._lookup_efd = os.eventfd(0, os.EFD_NONBLOCK | os.EFD_CLOEXEC)
-        self._load_efd = os.eventfd(0, os.EFD_NONBLOCK | os.EFD_CLOEXEC)
+        # 3 distinct cross-platform notifiers for the L2 interface.
+        self._store_efd = create_event_notifier()
+        self._lookup_efd = create_event_notifier()
+        self._load_efd = create_event_notifier()
 
         self._next_task_id: L2TaskId = 0
         self._completed_store_tasks: dict[L2TaskId, bool] = {}
@@ -377,13 +441,13 @@ class S3L2Adapter(L2AdapterInterface):
     # ------------------------------------------------------------------
 
     def get_store_event_fd(self) -> int:
-        return self._store_efd
+        return self._store_efd.fileno()
 
     def get_lookup_and_lock_event_fd(self) -> int:
-        return self._lookup_efd
+        return self._lookup_efd.fileno()
 
     def get_load_event_fd(self) -> int:
-        return self._load_efd
+        return self._load_efd.fileno()
 
     # ------------------------------------------------------------------
     # Store Interface
@@ -404,7 +468,7 @@ class S3L2Adapter(L2AdapterInterface):
                 disabled = False
 
         if disabled:
-            os.eventfd_write(self._store_efd, 1)
+            self._store_efd.notify()
             return task_id
 
         asyncio.run_coroutine_threadsafe(
@@ -434,7 +498,7 @@ class S3L2Adapter(L2AdapterInterface):
                 disabled = False
 
         if disabled:
-            os.eventfd_write(self._lookup_efd, 1)
+            self._lookup_efd.notify()
             return task_id
 
         asyncio.run_coroutine_threadsafe(
@@ -476,7 +540,7 @@ class S3L2Adapter(L2AdapterInterface):
                 disabled = False
 
         if disabled:
-            os.eventfd_write(self._load_efd, 1)
+            self._load_efd.notify()
             return task_id
 
         asyncio.run_coroutine_threadsafe(
@@ -576,9 +640,9 @@ class S3L2Adapter(L2AdapterInterface):
         except Exception:
             pass
 
-        os.close(self._store_efd)
-        os.close(self._lookup_efd)
-        os.close(self._load_efd)
+        self._store_efd.close()
+        self._lookup_efd.close()
+        self._load_efd.close()
 
         # Drop awscrt references so their native event loops / host
         # resolver threads / epoll fds can be reaped immediately rather
@@ -814,10 +878,10 @@ class S3L2Adapter(L2AdapterInterface):
 
         with self._lock:
             self._completed_store_tasks[task_id] = success
-        os.eventfd_write(self._store_efd, 1)
 
         if newly_stored_keys:
             self._notify_keys_stored(newly_stored_keys, newly_stored_sizes)
+        self._store_efd.notify()
 
     async def _execute_lookup(
         self,
@@ -892,7 +956,7 @@ class S3L2Adapter(L2AdapterInterface):
 
         with self._lock:
             self._completed_lookup_tasks[task_id] = bitmap
-        os.eventfd_write(self._lookup_efd, 1)
+        self._lookup_efd.notify()
 
         accessed = [keys[i] for i in range(len(keys)) if bitmap.test(i)]
         if accessed:
@@ -935,7 +999,7 @@ class S3L2Adapter(L2AdapterInterface):
 
         with self._lock:
             self._completed_load_tasks[task_id] = bitmap
-        os.eventfd_write(self._load_efd, 1)
+        self._load_efd.notify()
 
     async def _execute_delete(
         self, keys: list[ObjectKey]
