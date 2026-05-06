@@ -34,10 +34,9 @@ MAX_WORKERS="${MAX_WORKERS:-4}"
 
 # Bench parameters — small enough for CI but big enough to register
 # a non-trivial l1_write_keys count per round.
-NUM_REQUESTS="${RR_NUM_REQUESTS:-20}"
+NUM_REQUESTS="${RR_NUM_REQUESTS:-100}"
 REQUEST_LEN="${RR_REQUEST_LEN:-5000}"
 KV_CACHE_VOLUME="${RR_KV_CACHE_VOLUME:-5}"
-SEED="${RR_SEED:-42}"
 
 # Recovery timing
 RECOVER_TIMEOUT="${RR_RECOVER_TIMEOUT:-90}"
@@ -60,6 +59,7 @@ echo ""
 
 run_bench_round() {
     local label="$1"
+    local seed=$2
     local out_subdir="$OUT_DIR/$label"
     mkdir -p "$out_subdir"
     echo "--- bench round: $label ---"
@@ -75,7 +75,7 @@ run_bench_round() {
         --no-csv \
         --json \
         --quiet \
-        --seed "$SEED" \
+        --seed $seed \
         --output-dir "$out_subdir" \
         2>&1 | tee "$out_subdir/bench.log"; then
         echo "FAIL: bench round '$label' returned non-zero (failed requests)"
@@ -182,7 +182,6 @@ restart_lmcache() {
     sleep 10
 
     echo "Relaunching LMCache on port ${LMCACHE_PORT} / HTTP ${LMCACHE_HTTP_PORT}..."
-    CUDA_VISIBLE_DEVICES="${GPU_FOR_VLLM:-0}" \
     lmcache server \
         --l1-size-gb "$CPU_BUFFER_SIZE" \
         --eviction-policy LRU \
@@ -203,7 +202,7 @@ restart_lmcache() {
 echo "============================================"
 echo "=== Round 1: bench against original server ==="
 echo "============================================"
-if ! run_bench_round "round1"; then
+if ! run_bench_round "round1" "41"; then
     echo "FAIL: round 1 bench failed"
     exit 1
 fi
@@ -247,7 +246,7 @@ echo ""
 echo "============================================"
 echo "=== Round 2: bench against restarted server ==="
 echo "============================================"
-if ! run_bench_round "round2"; then
+if ! run_bench_round "round2" "42"; then
     echo "FAIL: round 2 bench failed"
     echo "--- vllm log (last 80 lines) ---"
     tail -80 "/tmp/build_${BUILD_ID}_vllm.log" 2>/dev/null || true

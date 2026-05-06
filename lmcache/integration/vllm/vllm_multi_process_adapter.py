@@ -764,10 +764,6 @@ class LMCacheMPWorkerAdapter:
         by the heartbeat thread itself via ``register_recover_callback``,
         so this property only reads the shared event.
         """
-        logger.info(
-            "Checking LMCache server health from the worker adapter: %s",
-            "healthy" if self._health_event.is_set() else "unhealthy",
-        )
         return self._health_event.is_set()
 
     @property
