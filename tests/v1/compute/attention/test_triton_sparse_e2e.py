@@ -13,14 +13,20 @@ import os
 import time
 
 # Third Party
-from transformers import AutoTokenizer
-from vllm import LLM, SamplingParams
-from vllm.config import KVTransferConfig
-from vllm.engine.arg_utils import EngineArgs
+import pytest
+
+# Skip entire module when vLLM is not installed (e.g. in UT environments)
+vllm = pytest.importorskip("vllm", reason="vLLM required for E2E test")
+
+# Third Party
+from transformers import AutoTokenizer  # noqa: E402
+from vllm import LLM, SamplingParams  # noqa: E402
+from vllm.config import KVTransferConfig  # noqa: E402
+from vllm.engine.arg_utils import EngineArgs  # noqa: E402
 
 # First Party
-from lmcache.integration.vllm.utils import ENGINE_NAME
-from lmcache.v1.cache_engine import LMCacheEngineBuilder
+from lmcache.integration.vllm.utils import ENGINE_NAME  # noqa: E402
+from lmcache.v1.cache_engine import LMCacheEngineBuilder  # noqa: E402
 
 
 def setup_env():
