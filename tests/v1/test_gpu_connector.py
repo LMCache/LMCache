@@ -1054,7 +1054,6 @@ def test_batched_layerwise_sglang_connector_with_gpu_and_mla(use_gpu, use_mla):
     next(mem_obj_consumer)
     for layer_id in range(num_layers):
         mem_obj_consumer.send(memory_objs[layer_id])
-    next(mem_obj_consumer)
 
     # free all mem objs
     for mem_obj_multi_layer in memory_objs:
