@@ -34,13 +34,6 @@ func BuildDaemonSet(engine *lmcachev1alpha1.LMCacheEngine) *appsv1.DaemonSet {
 	podLabels := MergeLabels(StandardLabels(engine.Name), spec.PodLabels)
 	podAnnotations := spec.PodAnnotations
 
-	// Resolve GPU vendor and the runtime class / env vars that follow from it.
-	// "nvidia" (default): runtimeClassName=nvidia + NVIDIA_VISIBLE_DEVICES /
-	// NVIDIA_DRIVER_CAPABILITIES env vars (the legacy NVIDIA container toolkit
-	// path, which the LMCache server uses to gain GPU visibility without
-	// consuming a device-plugin GPU). "amd": no runtimeClassName and no
-	// NVIDIA env vars — AMD GPUs are exposed via host devices under the
-	// default container runtime with privileged: true.
 	gpuVendor := derefString(spec.GPUVendor, lmcachev1alpha1.GPUVendorNvidia)
 	var runtimeClassName *string
 	if gpuVendor == lmcachev1alpha1.GPUVendorNvidia {
@@ -77,8 +70,6 @@ func BuildDaemonSet(engine *lmcachev1alpha1.LMCacheEngine) *appsv1.DaemonSet {
 	if gpuVendor == lmcachev1alpha1.GPUVendorNvidia {
 		// Expose all GPUs without consuming device plugin resources.
 		// LMCache needs GPU visibility for CUDA IPC, not compute ownership.
-		// These env vars are interpreted by the NVIDIA container toolkit
-		// runtime; on AMD they are no-ops, so skip them.
 		envVars = append(envVars,
 			corev1.EnvVar{
 				Name:  "NVIDIA_VISIBLE_DEVICES",

@@ -26,17 +26,13 @@ func (e *LMCacheEngine) SetDefaults() {
 		spec.LogLevel = &info
 	}
 
-	// Default gpuVendor to nvidia (belt-and-suspenders with kubebuilder default).
 	if spec.GPUVendor == nil {
 		v := GPUVendorNvidia
 		spec.GPUVendor = &v
 	}
 
-	// Default nodeSelector only for the nvidia vendor: NVIDIA exposes a
-	// universal nvidia.com/gpu.present label via the GPU Operator / device
-	// plugin. AMD has no universal equivalent (varies per platform — AMD GPU
-	// Operator uses feature.node.kubernetes.io/amd-gpu, managed platforms use
-	// vendor-specific labels), so AMD users supply nodeSelector explicitly.
+	// AMD has no universal equivalent of nvidia.com/gpu.present, so AMD users
+	// supply nodeSelector explicitly.
 	if spec.NodeSelector == nil && *spec.GPUVendor == GPUVendorNvidia {
 		spec.NodeSelector = map[string]string{
 			"nvidia.com/gpu.present": "true",

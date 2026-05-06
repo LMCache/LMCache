@@ -1091,8 +1091,6 @@ func assertNoArg(t *testing.T, args []string, flag string) {
 // --- GPUVendor tests ---
 
 func TestBuildDaemonSet_GPUVendorNvidiaDefault(t *testing.T) {
-	// Unset GPUVendor → defaults to nvidia: RuntimeClassName=nvidia,
-	// NVIDIA env vars injected.
 	engine := minimalEngine()
 	engine.SetDefaults()
 
@@ -1113,7 +1111,6 @@ func TestBuildDaemonSet_GPUVendorNvidiaDefault(t *testing.T) {
 }
 
 func TestBuildDaemonSet_GPUVendorAMD(t *testing.T) {
-	// gpuVendor=amd → no RuntimeClassName, no NVIDIA env vars.
 	engine := minimalEngine()
 	engine.Spec.GPUVendor = ptr(lmcachev1alpha1.GPUVendorAMD)
 	engine.SetDefaults()

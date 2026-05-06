@@ -1154,22 +1154,16 @@ spec:
               gpuVendor:
                 default: nvidia
                 description: |-
-                  gpuVendor selects the GPU vendor for the LMCache pods. The vendor controls
-                  the pod's RuntimeClassName, vendor-specific environment variables (e.g.
-                  NVIDIA_VISIBLE_DEVICES), and the default nodeSelector applied when the
-                  user does not supply one.
+                  gpuVendor selects the GPU vendor for the LMCache pods.
 
-                  "nvidia" (default) sets RuntimeClassName=nvidia, injects NVIDIA env vars,
-                  and defaults nodeSelector to nvidia.com/gpu.present=true. Requires the
-                  NVIDIA GPU Operator to be installed (which creates the "nvidia"
-                  RuntimeClass).
+                  "nvidia" (default): sets RuntimeClassName=nvidia, injects
+                  NVIDIA_VISIBLE_DEVICES and NVIDIA_DRIVER_CAPABILITIES, and defaults
+                  nodeSelector to nvidia.com/gpu.present=true. Requires the NVIDIA GPU
+                  Operator to be installed.
 
-                  "amd" omits RuntimeClassName, skips NVIDIA env vars, and applies no
-                  default nodeSelector. AMD GPUs are exposed via host devices under the
-                  default container runtime, so no RuntimeClass is required. AMD nodes do
-                  not have a universal label equivalent to nvidia.com/gpu.present
-                  (different platforms expose feature.node.kubernetes.io/amd-gpu,
-                  vendor-specific labels, etc.), so users supply nodeSelector explicitly.
+                  "amd": omits RuntimeClassName, skips NVIDIA env vars, and applies no
+                  default nodeSelector (AMD nodes have no universal equivalent of
+                  nvidia.com/gpu.present, so users supply nodeSelector explicitly).
                 enum:
                 - nvidia
                 - amd
