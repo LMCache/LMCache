@@ -58,7 +58,7 @@ Validated models
 
       |
 
-      **Qwen3-Coder-480B-A35B-Instruct-FP8** (8 GPUs, expert parallel):
+      **Qwen3-Coder-480B-A35B-Instruct-FP8** (8 GPUs):
 
       .. code-block:: bash
 
