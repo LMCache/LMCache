@@ -115,7 +115,8 @@ General Options
    * - ``--workload TYPE``
      - Yes
      - Workload type: ``long-doc-qa``, ``multi-round-chat``,
-       ``long-doc-permutator``, or ``random-prefill``.
+       ``long-doc-permutator``, ``prefix-suffix-tuner``, or
+       ``random-prefill``.
    * - ``--tokens-per-gb-kvcache N``
      - \*
      - Tokens per GB of KV cache. Required unless ``--lmcache-url`` is set.
@@ -308,6 +309,113 @@ dispatched with semaphore-controlled concurrency.
        --ldp-num-inflight-requests 2
 
 
+prefix-suffix-tuner
+~~~~~~~~~~~~~~~~~~~
+
+A two-pass sequential workload designed to be run **unchanged** across
+three LMCache configurations to demonstrate the value of each cache tier
+(L0 HBM, L1 DRAM, L2 disk):
+
+.. list-table::
+   :header-rows: 1
+   :widths: 15 25 30 30
+
+   * - Baseline
+     - LMCache config
+     - Targeted overflow
+     - Expected pass-2 hits
+   * - 1
+     - vanilla vLLM (L0 only)
+     - L0 (HBM)
+     - none -- every request a cold prefill
+   * - 2
+     - vLLM + LMCache L1 + L2
+     - L1 (DRAM)
+     - L2 prefix hits (suffix recomputed)
+   * - 3
+     - vLLM + LMCache L1 + L2 + CacheBlend
+     - L1 (DRAM)
+     - L2 prefix hits + CacheBlend suffix hits
+
+Set ``--kv-cache-volume`` to the size in GB of the tier you want to overflow
+(L0 size for Baseline 1, L1 size for Baselines 2 and 3). The workload itself
+is identical across baselines.
+
+Each request has the layout::
+
+   [prefix_i with unique-ID][random breaker][shared suffix]
+
+- ``num_prefixes`` distinct prefixes, each starting with ``PREFIX_<8-hex>``
+  so the prefix's tokenized hash differs across the pool.
+- A fresh random 32-token breaker per request, defeating ordinary prefix
+  caching past the prefix boundary.
+- A single shared suffix used by every request -- the only entry CacheBlend
+  can reuse.
+
+Pass 1 (warmup) sends each prefix once to populate the cache; its stats are
+discarded. Pass 2 sends them again in identical order. Because LRU evicts
+the next-needed prefix on each pass-2 access, even a 1.05x overflow of the
+targeted tier is enough to make every pass-2 request miss that tier and
+fall through to the next one.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 35 10 55
+
+   * - Flag
+     - Default
+     - Description
+   * - ``--psf-context-length``
+     - 8000
+     - Total tokens per request (prefix + breaker + suffix).
+   * - ``--psf-prefix-ratio``
+     - 0.8
+     - Fraction of context-length used by the prefix. Must be in (0.0, 1.0).
+       The remainder (minus a 32-token breaker) is the shared suffix.
+   * - ``--psf-thrash``
+     - 20.0
+     - **Size in GB of the KV-cache tier to overflow.** Use the L0 (HBM)
+       size for vanilla vLLM, or the L1 (LMCache DRAM) size for tiered
+       baselines. The workload sizes its prefix pool to slightly more than
+       this (5% overflow internally), enough to drive every pass-2 request
+       to a miss of that tier under sequential dispatch + LRU.
+
+The number of pass-2 (measured) requests equals the prefix pool size,
+computed as
+``floor(psf_thrash * 1.05 * tokens_per_gb / prefix_tokens)``.
+``--kv-cache-volume`` is unused by this workload — sizing is driven solely
+by ``--psf-thrash``.
+
+**Example:**
+
+.. code-block:: bash
+
+   lmcache bench engine \
+       --engine-url http://localhost:8000 \
+       --workload prefix-suffix-tuner \
+       --lmcache-url http://localhost:8080 \
+       --psf-context-length 8000 \
+       --psf-prefix-ratio 0.8 \
+       --psf-thrash 100
+
+.. note::
+   For the analytical-model claim "thrash ≈ L1 size → ~0% LMCache hit rate"
+   to hold empirically, the LMCache server must be started with
+   ``--eviction-ratio 0.99`` (default ``0.20`` only clears 20% per cycle,
+   leaving ~60% of pass-1 content in cache through pass 2):
+
+   .. code-block:: bash
+
+      lmcache server --l1-size-gb <SIZE> --eviction-policy LRU \
+          --eviction-trigger-watermark 0.80 \
+          --eviction-ratio 0.99
+
+   The workload itself sleeps 5 seconds between pass 1 (warmup) and pass 2
+   (measured), so LMCache's 1Hz batched-eviction polling thread has time
+   to actually run.  Without that sleep, fast benchmarks complete before
+   any eviction fires.
+
+
 random-prefill
 ~~~~~~~~~~~~~~~
 
@@ -378,6 +486,7 @@ text and number prompts accept typed input with defaults shown in brackets.
      * long-doc-qa           Repeated Q&A over long documents
        multi-round-chat       Multi-turn chat with stateful sessions
        long-doc-permutator    Permutations of context documents
+       prefix-suffix-tuner    Two-pass tiered KV-cache demonstrator
        random-prefill         Prefill-only requests fired simultaneously
 
    LMCache Server

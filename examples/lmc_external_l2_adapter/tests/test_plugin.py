@@ -15,7 +15,6 @@ Validates that:
 # Standard
 from typing import TYPE_CHECKING
 import json
-import os
 import platform
 import select
 
@@ -33,6 +32,7 @@ from lmcache.v1.distributed.l2_adapters.factory import (
 )
 from lmcache.v1.distributed.l2_adapters.plugin_l2_adapter import PluginL2AdapterConfig
 from lmcache.v1.memory_management import TensorMemoryObj
+from lmcache.v1.platform import consume_fd
 
 if TYPE_CHECKING:
     pass
@@ -139,7 +139,7 @@ def _wait_event_fd(fd: int, timeout: float = 5.0) -> bool:
     events = poll.poll(timeout * 1000)
     if events:
         try:
-            os.eventfd_read(fd)
+            consume_fd(fd)
         except BlockingIOError:
             pass
         return True

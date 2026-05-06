@@ -7,7 +7,6 @@ Tests only use public methods and do not access private fields.
 """
 
 # Standard
-import os
 import select
 import time
 
@@ -27,6 +26,7 @@ from lmcache.v1.memory_management import (
     MemoryObjMetadata,
     TensorMemoryObj,
 )
+from lmcache.v1.platform import consume_fd
 
 
 class _RecordingListener(L2AdapterListener):
@@ -88,7 +88,7 @@ def wait_for_event_fd(event_fd: int, timeout: float = 5.0) -> bool:
     if events:
         # Read and consume the event
         try:
-            os.eventfd_read(event_fd)
+            consume_fd(event_fd)
         except BlockingIOError:
             pass
         return True
@@ -736,10 +736,10 @@ class TestEvictionInterface:
 
     def test_bytes_by_cache_salt_populated_from_cache_salt(self, adapter):
         """End-to-end: storing keys with different ``cache_salt`` values
-        should drive the per-user byte buckets in ``AdapterUsage`` —
-        proves the salt actually flows through the real adapter into the
-        base-class accounting (not just verified by the stub tests)."""
-        # Two keys per user so we know the totals are summed, not
+        should drive the byte buckets in ``AdapterUsage`` — proves the
+        salt actually flows through the real adapter into the base-class
+        accounting (not just verified by the stub tests)."""
+        # Two keys per cache_salt so we know the totals are summed, not
         # just per-key-overwritten.
         alice_keys = [
             ObjectKey(

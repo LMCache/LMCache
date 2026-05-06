@@ -1,7 +1,8 @@
 Remote Storage Plugins
 ========================
 
-LMCache supports built-in remote storage connectors for Redis, InfiniStore, MooncakeStore, S3, and more.
+LMCache supports built-in remote storage connectors for Redis, InfiniStore,
+MooncakeStore, S3, Hugging Face Buckets, and more.
 The remote storage plugin system provides the ability to add custom storage connectors through dynamic loading. This enables extending remote storage capabilities without modifying core code.
 
 .. note::
@@ -31,7 +32,7 @@ A custom remote storage connector requires two classes:
    The ``create_connector`` method receives a ``ConnectorContext`` object containing the URL, event loop, local CPU backend, config, metadata, and ``plugin_name``.
 
 Plugin Naming Convention
------------------------
+-------------------------
 Plugin names follow the format ``{type}`` or ``{type}.{instance}``:
 
 - ``{type}`` — a single instance of that connector type (e.g. ``fs``, ``mooncakestore``)
@@ -41,7 +42,9 @@ The framework extracts the *type* portion (everything before the first ``.``) to
 
 Using Built-in Connectors via Plugins
 -------------------------------------
-Built-in connectors (``fs``, ``mooncakestore``, etc.) can be used directly via ``remote_storage_plugins`` without specifying ``module_path`` or ``class_name``. Their configuration is placed under ``extra_config``:
+Built-in connectors (``fs``, ``mooncakestore``, ``hfbucket``, etc.) can be used
+directly via ``remote_storage_plugins`` without specifying ``module_path`` or
+``class_name``. Their configuration is placed under ``extra_config``:
 
 .. code-block:: yaml
 
@@ -69,6 +72,15 @@ Mixing different connector types:
     extra_config:
       remote_storage_plugin.fs.local.base_path: /data/cache
       remote_storage_plugin.mooncakestore.master_server_address: "localhost:50051"
+
+Built-in Hugging Face Buckets example:
+
+.. code-block:: yaml
+
+    remote_storage_plugins: ["hfbucket"]
+    extra_config:
+      remote_storage_plugin.hfbucket.bucket_handle: hf://buckets/my-org/lmcache-kv/prod
+      remote_storage_plugin.hfbucket.token_env: HF_TOKEN
 
 How to Integrate Custom Remote Storage with LMCache
 ---------------------------------------------------

@@ -12,7 +12,7 @@ via the LMCACHE_RUNTIME_PLUGIN_CONFIG environment variable.
 """
 
 # Standard
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 import json
 
@@ -21,6 +21,7 @@ from lmcache.logging import init_logger
 from lmcache.v1.plugin.runtime_plugin_launcher import (
     RuntimePluginLauncher,
 )
+from lmcache.v1.utils.json_utils import make_json_safe, safe_asdict
 
 if TYPE_CHECKING:
     # First Party
@@ -29,28 +30,6 @@ if TYPE_CHECKING:
     )
 
 logger = init_logger(__name__)
-
-
-def _safe_asdict(obj: Any) -> dict[str, Any]:
-    """Convert a dataclass to dict, falling back to str()
-    for non-serializable fields."""
-    # Verify it's a dataclass instance at runtime
-    if not hasattr(obj, "__dataclass_fields__"):
-        raise TypeError("Expected a dataclass instance, got %s" % type(obj).__name__)
-    raw = asdict(obj)
-    return _make_json_safe(raw)  # type: ignore[return-value]
-
-
-def _make_json_safe(obj: Any) -> Any:
-    """Recursively ensure all values are JSON-serializable."""
-    if isinstance(obj, dict):
-        return {k: _make_json_safe(v) for k, v in obj.items()}
-    if isinstance(obj, (list, tuple)):
-        return [_make_json_safe(v) for v in obj]
-    if isinstance(obj, (str, int, float, bool, type(None))):
-        return obj
-    # Fallback: convert to string representation
-    return str(obj)
 
 
 @dataclass
@@ -66,7 +45,7 @@ class _MPPluginConfig:
     def to_json(self) -> str:
         merged = dict(self.configs_dict)
         if self.extra_config:
-            merged["runtime_plugin_extra_config"] = _make_json_safe(self.extra_config)
+            merged["runtime_plugin_extra_config"] = make_json_safe(self.extra_config)
         return json.dumps(merged)
 
 
@@ -106,7 +85,7 @@ class MPRuntimePluginLauncher:
         # Build the aggregated JSON dict from all configs
         aggregated: dict = {}
         for name, cfg in configs.items():
-            aggregated[name] = _safe_asdict(cfg)
+            aggregated[name] = safe_asdict(cfg)
 
         wrapper = _MPPluginConfig(
             runtime_plugin_locations=runtime_plugin_config.locations,
