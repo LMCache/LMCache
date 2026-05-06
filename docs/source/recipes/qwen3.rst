@@ -1,14 +1,15 @@
-.. _recipe_minimax_m2:
+.. _recipe_qwen3:
 
-MiniMaxM2ForCausalLM
+Qwen3MoeForCausalLM
 ====================
 
 Validated models
 ----------------
 
-- `MiniMaxAI/MiniMax-M2 <https://huggingface.co/MiniMaxAI/MiniMax-M2>`_
-- `MiniMaxAI/MiniMax-M2.5 <https://huggingface.co/MiniMaxAI/MiniMax-M2.5>`_
-- `MiniMaxAI/MiniMax-M2.7 <https://huggingface.co/MiniMaxAI/MiniMax-M2.7>`_
+- `Qwen/Qwen3-235B-A22B <https://huggingface.co/Qwen/Qwen3-235B-A22B>`_
+- `Qwen/Qwen3-30B-A3B <https://huggingface.co/Qwen/Qwen3-30B-A3B>`_
+- `Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8 <https://huggingface.co/Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8>`_
+- `Qwen/Qwen3-Coder-30B-A3B-Instruct <https://huggingface.co/Qwen/Qwen3-Coder-30B-A3B-Instruct>`_
 
 .. tab-set::
    :sync-group: engine
@@ -16,9 +17,9 @@ Validated models
    .. tab-item:: vLLM
 
       **Engine documentation:**
-      `MiniMax-M2 in vLLM supported models
+      `Qwen3 MoE in vLLM supported models
       <https://docs.vllm.ai/en/latest/models/supported_models.html#text-generation>`_
-      (architecture ``MiniMaxM2ForCausalLM``).
+      (architecture ``Qwen3MoeForCausalLM``).
 
       **Status:** Validated with LMCache.
 
@@ -30,45 +31,55 @@ Validated models
 
       |
 
-      Start vLLM with the LMCache MP connector:
-
-      **MiniMax-M2** (8 GPUs):
+      **Qwen3-235B-A22B** (4 GPUs, expert parallel):
 
       .. code-block:: bash
 
-         vllm serve MiniMaxAI/MiniMax-M2 \
+         vllm serve Qwen/Qwen3-235B-A22B \
+             --tensor-parallel-size 4 \
+             --enable-expert-parallel \
+             --enable-auto-tool-choice \
+             --tool-call-parser hermes \
+             --reasoning-parser qwen3 \
+             --kv-transfer-config \
+             '{"kv_connector":"LMCacheMPConnector", "kv_role":"kv_both"}'
+
+      |
+
+      **Qwen3-30B-A3B** (1 GPU):
+
+      .. code-block:: bash
+
+         vllm serve Qwen/Qwen3-30B-A3B \
+             --enable-auto-tool-choice \
+             --tool-call-parser hermes \
+             --reasoning-parser qwen3 \
+             --kv-transfer-config \
+             '{"kv_connector":"LMCacheMPConnector", "kv_role":"kv_both"}'
+
+      |
+
+      **Qwen3-Coder-480B-A35B-Instruct-FP8** (8 GPUs, expert parallel):
+
+      .. code-block:: bash
+
+         vllm serve Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8 \
              --tensor-parallel-size 8 \
-             --trust-remote-code \
+             --enable-expert-parallel \
+             --enable-auto-tool-choice \
+             --tool-call-parser qwen3_coder \
              --kv-transfer-config \
              '{"kv_connector":"LMCacheMPConnector", "kv_role":"kv_both"}'
 
       |
 
-      **MiniMax-M2.5** (4 GPUs):
+      **Qwen3-Coder-30B-A3B-Instruct** (1 GPU):
 
       .. code-block:: bash
 
-         vllm serve MiniMaxAI/MiniMax-M2.5 \
-             --tensor-parallel-size 4 \
-             --trust-remote-code \
+         vllm serve Qwen/Qwen3-Coder-30B-A3B-Instruct \
              --enable-auto-tool-choice \
-             --tool-call-parser minimax_m2 \
-             --reasoning-parser minimax_m2 \
-             --kv-transfer-config \
-             '{"kv_connector":"LMCacheMPConnector", "kv_role":"kv_both"}'
-
-      |
-
-      **MiniMax-M2.7** (4 GPUs):
-
-      .. code-block:: bash
-
-         vllm serve MiniMaxAI/MiniMax-M2.7 \
-             --tensor-parallel-size 4 \
-             --trust-remote-code \
-             --enable-auto-tool-choice \
-             --tool-call-parser minimax_m2 \
-             --reasoning-parser minimax_m2 \
+             --tool-call-parser qwen3_coder \
              --kv-transfer-config \
              '{"kv_connector":"LMCacheMPConnector", "kv_role":"kv_both"}'
 
@@ -83,12 +94,6 @@ Validated models
       for more details.
 
    .. tab-item:: SGLang
-
-      **Engine documentation:**
-      `MiniMax-M2 SGLang cookbook
-      <https://docs.sglang.io/cookbook/autoregressive/MiniMax/MiniMax-M2>`_,
-      `MiniMax M2.5/M2.1/M2 usage guide
-      <https://docs.sglang.io/docs/basic_usage/minimax_m2>`_.
 
       **Status:** Not validated with LMCache.
 
