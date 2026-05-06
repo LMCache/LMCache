@@ -51,6 +51,7 @@ def CreateGPUConnector(
                 chunk_size=chunk_size,
                 dtype=kv_dtype,
                 device=device,
+                use_mla=metadata.use_mla,
             )
         else:
             return SGLangGPUConnector(

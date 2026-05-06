@@ -47,6 +47,7 @@ def init_lmcache_engine(
     local_rank: int,
     global_rank: int,
     kv_dtype: torch.dtype,
+    use_mla: bool = False,
 ) -> LMCacheEngine:
     """
     Initialize LMCache engine for SGLang integration.
@@ -57,6 +58,9 @@ def init_lmcache_engine(
         local_rank: Local GPU device index (for device selection)
         global_rank: Global tensor parallel rank (for metadata)
         kv_dtype: Data type for KV cache tensors
+        use_mla: True when the served model uses MLA attention (e.g.
+            DeepSeek-V2/V3/R1). For MLA, sglang allocates a single fused
+            latent buffer per layer instead of separate K/V buffers.
     """
     if curr_engine := LMCacheEngineBuilder.get(ENGINE_NAME):
         return curr_engine
@@ -69,10 +73,18 @@ def init_lmcache_engine(
     # construct kv shape (for mem pool)
     num_layer = model_config.num_hidden_layers
     chunk_size = config.chunk_size
-    num_kv_head = model_config.get_num_kv_heads(tp_size)
-    head_dim = model_config.head_dim
+    if use_mla:
+        # MLA: single fused latent buffer per layer; head_dim = kv_lora_rank
+        # + qk_rope_head_dim, and the leading "kv" factor is 1, not 2.
+        num_kv_head = 1
+        head_dim = model_config.kv_lora_rank + model_config.qk_rope_head_dim
+        kv_factor = 1
+    else:
+        num_kv_head = model_config.get_num_kv_heads(tp_size)
+        head_dim = model_config.head_dim
+        kv_factor = 2
 
-    kv_shape = (num_layer, 2, chunk_size, num_kv_head, head_dim)
+    kv_shape = (num_layer, kv_factor, chunk_size, num_kv_head, head_dim)
 
     # Change current device using local GPU index
     # Use global rank for metadata (tensor parallel rank)
@@ -84,6 +96,7 @@ def init_lmcache_engine(
         local_worker_id=local_rank,
         kv_dtype=kv_dtype,
         kv_shape=kv_shape,
+        use_mla=use_mla,
     )
 
     gpu_connector = CreateGPUConnector(config, metadata, EngineType.SGLANG)
@@ -119,12 +132,16 @@ class LMCacheConnector:
 
         # rank is the global tensor parallel rank (tp_rank) from SGLang
         # local_rank is the local GPU device index
+        # MLA models pass v_pool=None — sglang stores K and V fused in a
+        # single latent buffer.
+        use_mla = v_pool is None
         self.lmcache_engine = init_lmcache_engine(
             sgl_config,
             tp_size,
             local_rank,
             rank,  # global_rank (tp_rank) for metadata
             kv_dtype,
+            use_mla=use_mla,
         )
         self.sgl_config = sgl_config
         self.tp_size = tp_size
