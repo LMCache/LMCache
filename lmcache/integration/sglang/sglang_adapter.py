@@ -241,6 +241,8 @@ class LMCacheLayerwiseConnector(LMCacheConnector):
                     indices_to_remove.append(i)
 
         for i in sorted(indices_to_remove, reverse=True):
+            # Drain retrieve_layer's post-yield cleanup (frees tmp_gpu_buffer_obj and unpins disk-loaded staging objects).
+            next(self.layerwise_retrievers[i])
             del self.layerwise_retrievers[i]
             del self.layer_load_layer[i]
             self.lmcache_engine.lookup_unpin(self.lookup_id_list[i])
