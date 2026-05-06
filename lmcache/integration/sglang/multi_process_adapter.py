@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
+from dataclasses import dataclass
 from typing import Optional
 import os
 import threading
@@ -51,21 +52,48 @@ def _wrap_sglang_kv_caches(
     ]
 
 
+@dataclass
+class _PendingLookup:
+    """Per-request_id state retained between ``lookup_kv`` and
+    ``retrieve_kv``.
+
+    Attributes:
+        token_ids: tokens that LOOKUP was issued for.
+        matched_token_num: number of chunk-aligned tokens the daemon
+            reported as cached (return value of LOOKUP →
+            QUERY_PREFETCH_STATUS).
+        locks_held: True iff the daemon still holds the read locks
+            reserved by this LOOKUP. RETRIEVE consumes them; explicit
+            FREE_LOOKUP_LOCKS releases them.
+    """
+
+    token_ids: list[int]
+    matched_token_num: int
+    locks_held: bool
+
+
 class LMCacheMPConnector:
-    """SGLang LMCache MP connector — layerwise interface, single-shot wire.
+    """SGLang LMCache MP connector — two-phase load aligned with HiCache.
 
-    Exposes the same public surface as ``LMCacheLayerwiseConnector``
-    (``start_load_kv`` + ``load_kv_layerwise``) so SGLang code that
-    selects between the two via ``--lmcache-mp-host`` can do so with
-    no further changes. Internally:
+    Splits the schedule-time and prefill-time work to mirror HiCache's
+    ``match_prefix → init_load_back`` pattern (and vLLM's
+    ``get_num_new_matched_tokens → start_load_kv``):
 
-    - ``start_load_kv`` issues **one** RETRIEVE that covers the
-      chunk-aligned portion of the prefix and host-blocks until the
-      daemon has populated every layer of the GPU KV slots.
-    - ``load_kv_layerwise(layer_id)`` is a no-op — data is already
-      there. SGLang's ``LMCRadixCache`` skips registering the per-layer
-      transfer hook entirely in MP mode (no work to interleave); the
-      method is kept on the class for interface parity.
+    - ``lookup_kv`` fires LOOKUP only — the daemon prefetches missing
+      chunks L2→L1 (DRAM), creates a session keyed by ``request_id``
+      with ``lookup_ipc_key`` set, returns the matched-token count.
+      Read locks stay held for the eventual RETRIEVE. **No GPU copy.**
+    - ``retrieve_kv`` consumes the cached LOOKUP result, issues
+      RETRIEVE — the daemon copies L1 (DRAM) → GPU KV pool slots via
+      ``multi_layer_block_kv_transfer`` (one CUDA launch covering all
+      layers). The RETRIEVE consumes the held read locks via the
+      daemon's ``finish_read_prefetched``.
+    - ``release_pending`` frees the held locks for an rid that won't
+      be retrieved (e.g., LMCache had nothing fresh beyond what
+      already lives in the engine's radix tree).
+    - ``end_session`` is the per-request cleanup hook. It frees any
+      still-held locks (failure paths) before sending END_SESSION so
+      we don't leak read-lock reservations on the daemon.
 
     Wire protocol: 5-arg RETRIEVE (key, instance_id, block_ids,
     ipc_handle, skip_prefix_n_blocks) and 4-arg STORE (key, instance_id,
@@ -74,6 +102,11 @@ class LMCacheMPConnector:
     layers in a single launch, with per-format pointer math
     compile-time-specialized via ``if constexpr`` on the detected
     ``GPUKVFormat``.
+
+    ``load_kv_layerwise(layer_id)`` is kept on the class for interface
+    parity with the in-process ``LMCacheLayerwiseConnector`` but is a
+    no-op — RETRIEVE is one shot in MP mode and SGLang's per-layer
+    transfer hook is not registered.
     """
 
     def __init__(
@@ -113,14 +146,16 @@ class LMCacheMPConnector:
         self._heartbeat: HeartbeatThread | None = None
         self._health_event = threading.Event()
         self._health_event.set()
-        # Tracks request_ids for which we've fired a LOOKUP — so the
-        # daemon has an active session keyed by that rid. ``end_session``
-        # only sends an END_SESSION wire request for ids in this set,
-        # which avoids the daemon's "Session not found, skipping touch"
-        # warning when ``cache_finished_req`` fires end_session for
-        # requests that never had a LOOKUP (warmup, short prompts).
-        self._sessions_with_lookup: set[str] = set()
-        self._sessions_lock = threading.Lock()
+        # Per-request_id state retained between ``lookup_kv`` and the
+        # eventual ``retrieve_kv`` / ``release_pending`` / ``end_session``
+        # call. Presence in this dict implies the daemon has an active
+        # session keyed by the same rid — which both lets ``end_session``
+        # know whether to send the END_SESSION wire request (avoids the
+        # daemon's "Session not found" warning for rids that never had a
+        # LOOKUP) and ``retrieve_kv`` know what was matched without
+        # re-issuing LOOKUP.
+        self._pending_lookups: dict[str, _PendingLookup] = {}
+        self._pending_lookups_lock = threading.Lock()
 
         self.context = zmq.Context.instance()
         self.mq_client = MessageQueueClient(f"tcp://{host}:{port}", self.context)
@@ -261,28 +296,41 @@ class LMCacheMPConnector:
             ],
         )
 
-    def ensure_session(self, token_ids: list[int], request_id: str) -> None:
-        """Send a LOOKUP just to create the daemon-side session for
-        ``request_id`` with ``lookup_ipc_key`` set, then immediately
-        free the read locks reserved by that LOOKUP. Used by
-        ``LMCRadixCache.match_prefix`` on full-radix-hit paths so the
-        STORE+END_SESSION at request finish reuses this session
-        (mirroring vLLM/TRT-LLM's per-request lifecycle) instead of
-        creating a STORE-only session that would log
-        "no lookup ipc key, skipping touch" at end_session.
+    def lookup_kv(self, token_ids: list[int], request_id: str) -> int:
+        """Phase 1 of the two-phase load — fires LOOKUP only.
 
-        Idempotent in effect on the connector side via the
-        ``_sessions_with_lookup`` set; the daemon LOOKUP itself is
-        not idempotent (re-submits a prefetch job), so don't call
-        this when ``start_load_kv`` is going to fire its own LOOKUP.
+        The daemon prefetches missing chunks L2 → L1 (DRAM), creates a
+        session keyed by ``request_id`` with ``lookup_ipc_key`` set,
+        and submits a prefetch task whose read locks stay held for the
+        eventual ``retrieve_kv``. Does **not** copy KV to GPU.
+
+        Idempotent across re-scheduling passes for the same
+        ``request_id``: a prior pending LOOKUP for the same rid has
+        its read locks released before the new LOOKUP fires, so locks
+        don't accumulate.
+
+        Returns the chunk-aligned matched-token count (0 if no
+        chunk-aligned hit, including the ``aligned_end == 0`` short-
+        prompt case).
         """
         if not self.is_healthy or not request_id:
-            return
+            return 0
+
+        # If a previous LOOKUP for this rid is still pending (e.g., a
+        # rescheduling pass or a prior partial flow), release its locks
+        # first so we don't accumulate read-lock reservations.
+        with self._pending_lookups_lock:
+            stale = self._pending_lookups.pop(request_id, None)
+        if stale is not None and stale.locks_held:
+            self._free_lookup_locks(
+                stale.token_ids, 0, stale.matched_token_num, request_id
+            )
+
         aligned_end = (len(token_ids) // self._lmcache_chunk_size) * (
             self._lmcache_chunk_size
         )
         if aligned_end == 0:
-            return  # too few tokens; no chunk-aligned range to LOOKUP
+            return 0  # too few tokens; no chunk-aligned range to LOOKUP
 
         lookup_key = self._create_key(
             token_ids,
@@ -296,11 +344,43 @@ class LMCacheMPConnector:
             RequestType.LOOKUP,
             [lookup_key, self.tp_size],
         ).result(timeout=self._mq_timeout)
-        retrieve_token_num = self._wait_for_lookup(request_id)
-        with self._sessions_lock:
-            self._sessions_with_lookup.add(request_id)
-        if retrieve_token_num > 0:
-            self._free_lookup_locks(token_ids, 0, retrieve_token_num, request_id)
+        matched = self._wait_for_lookup(request_id)
+        matched = self._global_min_tokens(matched)
+
+        # Daemon now holds read locks for the matched chunks. Record
+        # state for the eventual retrieve_kv / release_pending /
+        # end_session call. Locks are released by exactly one of those.
+        with self._pending_lookups_lock:
+            self._pending_lookups[request_id] = _PendingLookup(
+                token_ids=list(token_ids),
+                matched_token_num=matched,
+                locks_held=matched > 0,
+            )
+        return matched
+
+    def release_pending(self, request_id: str) -> None:
+        """Free the read locks held by a prior ``lookup_kv`` when
+        ``retrieve_kv`` won't run.
+
+        Called from ``LMCRadixCache.match_prefix`` when LMCache's hit
+        is entirely covered by what's already in the engine's radix
+        tree — the LOOKUP was useful only for creating the daemon
+        session (so STORE+END_SESSION pair cleanly), but no copy is
+        needed.
+
+        The pending entry stays in ``_pending_lookups`` (with
+        ``locks_held=False``) so ``end_session`` still knows to send
+        the END_SESSION wire request for this rid.
+        """
+        with self._pending_lookups_lock:
+            pending = self._pending_lookups.get(request_id)
+            if pending is None or not pending.locks_held:
+                return
+            pending.locks_held = False
+            token_ids = pending.token_ids
+            matched = pending.matched_token_num
+        if matched > 0:
+            self._free_lookup_locks(token_ids, 0, matched, request_id)
 
     def end_session(self, request_id: str) -> None:
         """Tell the daemon we're done with this request_id.
@@ -310,14 +390,20 @@ class LMCacheMPConnector:
         not bundled into ``store_kv``. Skipped (no wire send) for ids
         we never fired a LOOKUP for, so warmup and short-prompt
         requests don't trigger the daemon's "Session not found,
-        skipping touch" warning.
+        skipping touch" warning. Frees any still-held read locks
+        before sending END_SESSION (covers failure paths where
+        retrieve_kv didn't consume the locks).
         """
         if not self.is_healthy:
             return
-        with self._sessions_lock:
-            if request_id not in self._sessions_with_lookup:
-                return
-            self._sessions_with_lookup.discard(request_id)
+        with self._pending_lookups_lock:
+            pending = self._pending_lookups.pop(request_id, None)
+        if pending is None:
+            return
+        if pending.locks_held and pending.matched_token_num > 0:
+            self._free_lookup_locks(
+                pending.token_ids, 0, pending.matched_token_num, request_id
+            )
         send_lmcache_request(self.mq_client, RequestType.END_SESSION, [request_id])
 
     def _submit_retrieve(
@@ -348,66 +434,52 @@ class LMCacheMPConnector:
             ],
         ).to_cuda_future(device=self.device)
 
-    def start_load_kv(self, load_metadata: LoadMetadata) -> int:
-        """Issue a single blocking RETRIEVE for the chunk-aligned prefix.
+    def retrieve_kv(self, load_metadata: LoadMetadata) -> int:
+        """Phase 2 of the two-phase load — fires RETRIEVE only.
 
-        Returns the number of tokens actually retrieved (counted from
-        ``offset`` through the daemon-reported match end). By the time
-        this method returns, the daemon's
-        ``multi_layer_block_kv_transfer`` kernel has finished writing
-        every layer of the requested chunk into the GPU KV slots.
+        Reuses the matched-token count cached by a prior ``lookup_kv``
+        for the same ``request_id`` (no second LOOKUP wire call). The
+        daemon's RETRIEVE handler copies L1 (DRAM) → GPU KV pool slots
+        in a single ``multi_layer_block_kv_transfer`` launch and
+        consumes the held read locks via ``finish_read_prefetched`` —
+        we don't separately free them on the success path.
+
+        Failure paths free the still-held trailing read locks
+        explicitly to avoid leaking them in the daemon.
+
+        Returns ``matched - offset`` (tokens covered by the chunks
+        whose RETRIEVE was issued, equivalent to the legacy
+        ``start_load_kv`` return). Caller subtracts ``prefix_pad`` to
+        compute "newly added to radix".
         """
         if not self.is_healthy:
             return 0
 
-        aligned_end = (len(load_metadata.token_ids) // self._lmcache_chunk_size) * (
-            self._lmcache_chunk_size
-        )
+        request_id = load_metadata.request_id
+        if not request_id:
+            raise ValueError("LMCache MP retrieve requires a non-empty request_id")
+
+        with self._pending_lookups_lock:
+            pending = self._pending_lookups.get(request_id)
+        if pending is None or not pending.locks_held:
+            raise RuntimeError(
+                f"retrieve_kv called for {request_id} without a pending lookup_kv"
+            )
+
+        retrieve_token_num = pending.matched_token_num
+        token_ids = pending.token_ids
         offset = load_metadata.offset
-        if aligned_end == 0 or offset >= aligned_end:
-            return 0
         if offset % self._lmcache_chunk_size != 0:
             raise ValueError(
                 "LMCache MP mode requires chunk-aligned offsets, got "
                 f"{offset} and chunk_size={self._lmcache_chunk_size}"
             )
 
-        # The daemon's session is keyed by ``request_id``. Using SGLang's
-        # ``req.rid`` here (matching the id ``store_kv`` will use later for
-        # the same request) lets STORE+END_SESSION reuse the LOOKUP-set
-        # session and skip the "no lookup ipc key" warning. END_SESSION
-        # itself is owned by the store_kv path: a single cleanup point per
-        # request, mirroring vLLM/TRT-LLM.
-        request_id = load_metadata.request_id
-        if not request_id:
-            raise ValueError("LMCache MP load requires a non-empty request_id")
-        lookup_key = self._create_key(
-            load_metadata.token_ids,
-            start=0,
-            end=aligned_end,
-            request_id=request_id,
-            no_worker_id=True,
-        )
-        # Upstream LOOKUP is fire-and-forget: it submits a prefetch job
-        # keyed by request_id and returns None. We then poll
-        # QUERY_PREFETCH_STATUS with the same request_id.
-        send_lmcache_request(
-            self.mq_client,
-            RequestType.LOOKUP,
-            [lookup_key, self.tp_size],
-        ).result(timeout=self._mq_timeout)
-        retrieve_token_num = self._wait_for_lookup(request_id)
-        retrieve_token_num = self._global_min_tokens(retrieve_token_num)
-        # Daemon now has a session keyed by request_id with
-        # ``lookup_ipc_key`` set. Track it so end_session knows to send
-        # END_SESSION wire for this rid.
-        with self._sessions_lock:
-            self._sessions_with_lookup.add(request_id)
-
         if retrieve_token_num <= offset:
-            self._free_lookup_locks(
-                load_metadata.token_ids, 0, retrieve_token_num, request_id
-            )
+            self._free_lookup_locks(token_ids, 0, retrieve_token_num, request_id)
+            with self._pending_lookups_lock:
+                if request_id in self._pending_lookups:
+                    self._pending_lookups[request_id].locks_held = False
             return 0
 
         # ``slot_mapping[offset : offset + prefix_pad)`` is sentinel ``-1`` —
@@ -426,29 +498,29 @@ class LMCacheMPConnector:
         fresh_start = offset + prefix_pad
         prefix_pad_pages = prefix_pad // self.page_size
 
-        self._free_lookup_locks(load_metadata.token_ids, 0, offset, request_id)
+        self._free_lookup_locks(token_ids, 0, offset, request_id)
         if fresh_start >= retrieve_token_num:
             # LMCache's hit was entirely covered by what's already in radix.
-            self._free_lookup_locks(
-                load_metadata.token_ids, offset, retrieve_token_num, request_id
-            )
+            self._free_lookup_locks(token_ids, offset, retrieve_token_num, request_id)
+            with self._pending_lookups_lock:
+                if request_id in self._pending_lookups:
+                    self._pending_lookups[request_id].locks_held = False
             return retrieve_token_num - offset
         fresh_block_ids = self._slot_mapping_to_block_ids(
             load_metadata.slot_mapping[fresh_start:retrieve_token_num]
         )
         block_ids = [0] * prefix_pad_pages + fresh_block_ids
 
-        # Successful RETRIEVE releases its read locks via
+        # Successful RETRIEVE releases the trailing read locks via
         # ``finish_read_prefetched`` inside the daemon. The trailing
-        # ``_free_lookup_locks`` here is only the failure path's cleanup —
-        # calling it after a successful RETRIEVE would double-release the
-        # same locks and trigger the daemon's
-        # ``finish read on non-read-locked key`` warning.
+        # ``_free_lookup_locks`` is the failure path's cleanup — calling
+        # it after a successful RETRIEVE would double-release and trigger
+        # "finish read on non-read-locked key".
         retrieve_succeeded = False
         try:
             future = self._submit_retrieve(
                 request_id=request_id,
-                token_ids=load_metadata.token_ids,
+                token_ids=token_ids,
                 offset=offset,
                 matched_end=retrieve_token_num,
                 block_ids=block_ids,
@@ -462,8 +534,11 @@ class LMCacheMPConnector:
         finally:
             if not retrieve_succeeded:
                 self._free_lookup_locks(
-                    load_metadata.token_ids, offset, retrieve_token_num, request_id
+                    token_ids, offset, retrieve_token_num, request_id
                 )
+            with self._pending_lookups_lock:
+                if request_id in self._pending_lookups:
+                    self._pending_lookups[request_id].locks_held = False
         return retrieve_token_num - offset
 
     def load_kv_layerwise(self, layer_id: int) -> None:
