@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Standard
+from collections import OrderedDict
 from unittest.mock import MagicMock, patch
 import asyncio
 import mmap
@@ -34,6 +35,7 @@ from maru_lmcache.adapter import CxlMemoryAdapter  # noqa: E402
 
 # First Party
 from lmcache.v1.storage_backend.maru_backend import MaruBackend  # noqa: E402
+from lmcache.v1.storage_backend.storage_manager import StorageManager  # noqa: E402
 
 # =========================================================================
 # Constants
@@ -632,6 +634,21 @@ class TestMaruBackendAsyncLookup:
         result = _run_async(async_loop, backend.batched_async_contains("lookup-3", []))
         assert result == 0
 
+    def test_batched_async_contains_with_pin_calls_batch_pin(self, backend, async_loop):
+        """pin=True routes to batch_pin RPC (atomic check + server-side pin)."""
+        keys = [_make_cache_key(i) for i in range(3)]
+        backend._handler.batch_pin.return_value = [True, True, True]
+
+        result = _run_async(
+            async_loop,
+            backend.batched_async_contains("lookup-pin", keys, pin=True),
+        )
+        assert result == 3
+        backend._handler.batch_pin.assert_called_once_with(
+            [k.to_string() for k in keys]
+        )
+        backend._handler.batch_exists.assert_not_called()
+
     def test_batched_get_non_blocking_all_hit(self, backend, adapter, async_loop):
         keys = [_make_cache_key(i) for i in range(2)]
 
@@ -690,6 +707,10 @@ class TestMaruBackendAsyncLookup:
 
 
 class TestMaruBackendPinRemove:
+    def test_has_external_pin_state_is_true(self, backend):
+        """MaruBackend opts into the async-cleanup backend-level unpin path."""
+        assert backend.has_external_pin_state is True
+
     def test_pin_delegates_to_handler(self, backend):
         key = _make_cache_key()
         backend._handler.pin.return_value = True
@@ -786,3 +807,29 @@ class TestMaruBackendStoreHandle:
         assert handle.region_id == 100
         assert handle.page_index == 0
         assert handle._size == obj.metadata.phy_size
+
+
+# =========================================================================
+# Tests — Cleanup integration (StorageManager → MaruBackend → handler RPC)
+# =========================================================================
+
+
+class TestMaruBackendCleanupIntegration:
+    def test_storage_manager_unpin_dispatches_to_maru_handler(self, backend):
+        """cleanup_memory_objs's call into StorageManager.unpin_async_external_pin_state
+        reaches MaruBackend's handler.unpin RPC for each recorded key."""
+        storage_manager = StorageManager.__new__(StorageManager)
+        storage_manager.storage_backends = OrderedDict([("MaruBackend", backend)])
+        storage_manager._async_external_pin_registry = {}
+        storage_manager._async_external_pin_registry_lock = threading.Lock()
+        keys = [_make_cache_key(i) for i in range(3)]
+        storage_manager._async_external_pin_registry["lookup-cleanup"] = {
+            "MaruBackend": keys
+        }
+        backend._handler.unpin.return_value = True
+
+        storage_manager.unpin_async_external_pin_state("lookup-cleanup")
+
+        assert backend._handler.unpin.call_count == len(keys)
+        for key in keys:
+            backend._handler.unpin.assert_any_call(key.to_string())
