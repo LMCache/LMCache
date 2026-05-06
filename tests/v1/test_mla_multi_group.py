@@ -182,6 +182,7 @@ class TestMLASaveOnlyFirstRankLookup:
             pytest.skip("CUDA not available")
 
         # First Party
+        from lmcache.utils import mock_up_broadcast_fn, mock_up_broadcast_object_fn
         from lmcache.v1.cache_engine import LMCacheEngineBuilder
         from lmcache.v1.config import LMCacheEngineConfig
         from lmcache.v1.metadata import LMCacheMetadata
@@ -203,29 +204,41 @@ class TestMLASaveOnlyFirstRankLookup:
             local_cpu=True,
             max_local_cpu_size=1.0,
             chunk_size=256,
+            # Force storage_manager initialization on this non-first rank
+            # so the lookup early-return path under test is reachable.
+            lookup_server_worker_ids=[3],
         )
 
-        engine = LMCacheEngineBuilder.build(
-            config=config,
-            metadata=metadata,
-        )
+        instance_id = "test_mla_non_first_rank_lookup"
+        try:
+            engine = LMCacheEngineBuilder.get_or_create(
+                instance_id,
+                config,
+                metadata,
+                None,
+                mock_up_broadcast_fn,
+                mock_up_broadcast_object_fn,
+            )
+            engine.post_init()
 
-        # Lookup with token_ids
-        token_ids = list(range(512))
-        result = engine.lookup(tokens=token_ids)
+            # Lookup with token_ids
+            token_ids = list(range(512))
+            result = engine.lookup(tokens=token_ids)
 
-        # Non-first rank should return total tokens (512)
-        assert result == len(token_ids), (
-            f"Non-first rank lookup should return {len(token_ids)}, "
-            f"got {result}"
-        )
+            # Non-first rank should return total tokens (512)
+            assert result == len(token_ids), (
+                f"Non-first rank lookup should return {len(token_ids)}, "
+                f"got {result}"
+            )
 
-        # Lookup with hashes/offsets
-        result_hashes = engine.lookup(
-            hashes=[123, 456],
-            offsets=[256, 256],
-        )
-        assert result_hashes == 512, (
-            f"Non-first rank lookup with offsets should return 512, "
-            f"got {result_hashes}"
-        )
+            # Lookup with hashes/offsets
+            result_hashes = engine.lookup(
+                hashes=[123, 456],
+                offsets=[256, 256],
+            )
+            assert result_hashes == 512, (
+                f"Non-first rank lookup with offsets should return 512, "
+                f"got {result_hashes}"
+            )
+        finally:
+            LMCacheEngineBuilder.destroy(instance_id)
