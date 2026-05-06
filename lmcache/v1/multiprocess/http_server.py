@@ -73,6 +73,7 @@ async def lifespan(app: FastAPI):
         storage_manager_config=_configs["storage_manager"],
         obs_config=_configs["observability"],
         return_engine=True,
+        start_prometheus_http_server=False,
     )
     assert result is not None, "run_cache_server returned None with return_engine=True"
     zmq_server, engine = result
