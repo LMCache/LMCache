@@ -37,6 +37,7 @@ Validated models
 
          vllm serve Qwen/Qwen3-235B-A22B \
              --tensor-parallel-size 4 \
+             --enable-expert-parallel \
              --enable-auto-tool-choice \
              --tool-call-parser hermes \
              --reasoning-parser qwen3 \
@@ -58,12 +59,13 @@ Validated models
 
       |
 
-      **Qwen3-Coder-480B-A35B-Instruct-FP8** (8 GPUs):
+      **Qwen3-Coder-480B-A35B-Instruct-FP8** (8 GPUs, expert parallel):
 
       .. code-block:: bash
 
          vllm serve Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8 \
              --tensor-parallel-size 8 \
+             --enable-expert-parallel \
              --enable-auto-tool-choice \
              --tool-call-parser qwen3_coder \
              --kv-transfer-config \
