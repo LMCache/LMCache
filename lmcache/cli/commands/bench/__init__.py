@@ -99,6 +99,7 @@ class BenchCommand(BaseCommand):
                 "long-doc-permutator",
                 "long-doc-qa",
                 "multi-round-chat",
+                "prefix-suffix-tuner",
                 "random-prefill",
             ],
             help="Workload type.",
@@ -260,6 +261,36 @@ class BenchCommand(BaseCommand):
             type=float,
             default=60.0,
             help="Benchmark duration in seconds (default: 60).",
+        )
+
+        # --- Prefix-suffix-tuner workload args ---
+        psf_group = parser.add_argument_group(
+            "prefix-suffix-tuner workload options",
+        )
+        psf_group.add_argument(
+            "--psf-context-length",
+            type=int,
+            default=8000,
+            help="Total tokens per request (prefix + breaker + suffix) "
+            "(default: 8000).",
+        )
+        psf_group.add_argument(
+            "--psf-prefix-ratio",
+            type=float,
+            default=0.8,
+            help="Fraction of context-length used by the prefix (default: 0.8). "
+            "Must be in (0.0, 1.0). The remainder (minus a 32-token breaker) is "
+            "the shared suffix.",
+        )
+        psf_group.add_argument(
+            "--psf-thrash",
+            type=float,
+            default=20.0,
+            help="Size in GB of the KV-cache tier to overflow (default: 20.0). "
+            "The workload sizes its prefix pool to slightly more than this, "
+            "so every pass-2 request misses that tier and falls through to "
+            "the next one. Use the L0 (HBM) size for vanilla vLLM baselines, "
+            "or the L1 (LMCache DRAM) size for tiered baselines.",
         )
 
         # --- Random-prefill workload args ---

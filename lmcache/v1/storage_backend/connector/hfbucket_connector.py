@@ -277,7 +277,8 @@ class HFBucketConnector(RemoteConnector):
 
     async def close(self) -> None:
         """Release connector-local resources and remove temporary downloads."""
-        self._metadata_cache.clear()
+        with self._metadata_cache_lock:
+            self._metadata_cache.clear()
         await asyncio.to_thread(
             shutil.rmtree,
             self._download_session_dir,

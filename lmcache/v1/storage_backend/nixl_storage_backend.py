@@ -28,6 +28,20 @@ import uuid
 from nixl._api import nixl_agent as NixlAgent
 from nixl._api import nixl_agent_config as NixlAgentConfig
 from nixl._api import nixl_prepped_dlist_handle as NixlDlistHandle
+
+try:
+    # Third Party
+    from nixl._api import (
+        nixl_thread_sync_t,
+    )
+
+    _NIXL_SYNC_MODE_SUPPORTED = True
+    _NIXL_SYNC_MODE_DEFAULT = nixl_thread_sync_t.NIXL_THREAD_SYNC_STRICT
+except ImportError:
+    nixl_thread_sync_t = None  # type: ignore[assignment]
+    _NIXL_SYNC_MODE_SUPPORTED = False
+    _NIXL_SYNC_MODE_DEFAULT = None
+# Third Party
 from nixl._api import nixl_xfer_handle as NixlXferHandle
 from nixl._api import (
     nixlBind,
@@ -35,6 +49,7 @@ from nixl._api import (
 import torch
 
 # First Party
+from lmcache.integration.vllm.utils import get_size_bytes
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
@@ -67,6 +82,8 @@ class NixlStorageConfig:
     enable_async_put: bool
     use_direct_io: bool
     path: str
+    enable_prog_thread: bool
+    sync_mode: Optional[Any]  # nixl_thread_sync_t, None if unsupported
 
     @staticmethod
     def validate_nixl_backend(dynamic_storage: bool, backend: str, device: str):
@@ -101,6 +118,25 @@ class NixlStorageConfig:
         pool_size = extra_config.get("nixl_pool_size")
         backend = extra_config.get("nixl_backend")
         path = extra_config.get("nixl_path")
+        enable_prog_thread = extra_config.get("nixl_enable_prog_thread", True)
+        sync_mode_str = extra_config.get("nixl_sync_mode", None)
+        if sync_mode_str is not None and not _NIXL_SYNC_MODE_SUPPORTED:
+            raise ValueError(
+                "nixl_sync_mode is set in config but this NIXL version does not "
+                "support the sync_mode argument in NixlAgentConfig "
+                "(requires ai-dynamo/nixl#1501). Remove nixl_sync_mode from config "
+                "or upgrade NIXL."
+            )
+        sync_mode = _NIXL_SYNC_MODE_DEFAULT
+        if sync_mode_str is not None:
+            attr_name = f"NIXL_THREAD_SYNC_{sync_mode_str.upper()}"
+            if not hasattr(nixl_thread_sync_t, attr_name):
+                raise ValueError(
+                    f"Invalid nixl_sync_mode '{sync_mode_str}'. "
+                    f"Valid values are the suffixes of NIXL_THREAD_SYNC_* "
+                    f"in nixl_thread_sync_t."
+                )
+            sync_mode = getattr(nixl_thread_sync_t, attr_name)
 
         assert pool_size is not None
         assert backend is not None
@@ -115,6 +151,20 @@ class NixlStorageConfig:
         corrected_device = get_correct_device(
             config.nixl_buffer_device, metadata.worker_id
         )
+
+        # align the buffer size to have the required alignment
+        align_bytes = get_size_bytes(
+            [torch.Size(metadata.kv_shape)], [metadata.kv_dtype]
+        )
+        if config.nixl_buffer_size % align_bytes != 0:
+            buffer_size = (
+                (config.nixl_buffer_size + align_bytes - 1) // align_bytes
+            ) * align_bytes
+            logger.warning(
+                f"Nixl buffer size {config.nixl_buffer_size} is not a multiple of "
+                f"align bytes {align_bytes}, auto aligned to {buffer_size}"
+            )
+            config.nixl_buffer_size = buffer_size
 
         assert NixlStorageConfig.validate_nixl_backend(
             dynamic_storage, backend, config.nixl_buffer_device
@@ -131,6 +181,8 @@ class NixlStorageConfig:
             enable_async_put=enable_async_put,
             use_direct_io=use_direct_io,
             path=path,
+            enable_prog_thread=enable_prog_thread,
+            sync_mode=sync_mode,
         )
 
 
@@ -268,6 +320,8 @@ class NixlStorageAgent(ABC):
         device: str,
         backend: str,
         backend_params: dict[str, str],
+        enable_prog_thread: bool,
+        sync_mode: Optional[Any] = None,
     ):
         buffer_ptr = allocator.buffer_ptr
         buffer_size = allocator.buffer_size
@@ -275,7 +329,13 @@ class NixlStorageAgent(ABC):
 
         self.backend = backend
         self.agent_name = "NixlAgent_" + str(uuid.uuid4())
-        nixl_conf = NixlAgentConfig(backends=[])
+        nixl_conf_kwargs: dict[str, Any] = {
+            "backends": [],
+            "enable_prog_thread": enable_prog_thread,
+        }
+        if sync_mode is not None:
+            nixl_conf_kwargs["sync_mode"] = sync_mode
+        nixl_conf = NixlAgentConfig(**nixl_conf_kwargs)
         self.nixl_agent = NixlAgent(self.agent_name, nixl_conf)
         self.nixl_agent.create_backend(backend, backend_params)
 
@@ -333,11 +393,18 @@ class NixlStorageAgent(ABC):
     def post_blocking(self, handle: NixlXferHandle):
         state = self.nixl_agent.transfer(handle)
 
+        # time.sleep here is acceptable for now:
+        # - Dynamic backend writes: async_mode=True uses post_async + asyncio.sleep
+        #   instead, so post_blocking is only reached with async_mode=False (sync puts).
+        # - Dynamic backend reads: batched_get_non_blocking calls storage_to_mem
+        #   synchronously, but async reads are broken regardless.
         while state != "DONE" and state != "ERR":
             try:
                 state = self.nixl_agent.check_xfer_state(handle)
             except nixlBind.nixlBackendError:
                 raise
+            if state != "DONE" and state != "ERR":
+                time.sleep(0.001)
 
         if state == "ERR":
             raise RuntimeError("NIXL transfer failed")
@@ -363,8 +430,12 @@ class NixlStaticStorageAgent(NixlStorageAgent):
         device: str,
         backend: str,
         backend_params: dict[str, str],
+        enable_prog_thread: bool,
+        sync_mode: Optional[Any] = None,
     ):
-        super().__init__(allocator, device, backend, backend_params)
+        super().__init__(
+            allocator, device, backend, backend_params, enable_prog_thread, sync_mode
+        )
 
         page_size = allocator.align_bytes
 
@@ -431,8 +502,12 @@ class NixlDynamicStorageAgent(NixlStorageAgent):
         device: str,
         backend: str,
         backend_params: dict[str, str],
+        enable_prog_thread: bool,
+        sync_mode: Optional[Any] = None,
     ):
-        super().__init__(allocator, device, backend, backend_params)
+        super().__init__(
+            allocator, device, backend, backend_params, enable_prog_thread, sync_mode
+        )
 
         if backend == "OBJ":
             self.mem_type = "OBJ"
@@ -678,6 +753,8 @@ class NixlStaticStorageBackend(NixlStorageBackend):
             nixl_config.buffer_device,
             nixl_config.backend,
             nixl_config.backend_params,
+            nixl_config.enable_prog_thread,
+            nixl_config.sync_mode,
         )
 
     @staticmethod
@@ -762,10 +839,14 @@ class NixlStaticStorageBackend(NixlStorageBackend):
             assert fmt is not None
 
             obj = self.memory_allocator.allocate(shape, dtype, fmt)
-            assert obj is not None
+            if obj is None:
+                logger.warning(
+                    "Failed to allocate memory, consider increasing the "
+                    "`nixl_buffer_size` value"
+                )
+                break
 
             obj_list.append(obj)
-
             mem_indices.append(obj.meta.address)
             storage_indices.append(metadata.index)
 
@@ -863,7 +944,7 @@ class NixlStaticStorageBackend(NixlStorageBackend):
         future = asyncio.run_coroutine_threadsafe(self.storage_to_mem([key]), self.loop)
 
         obj_list = future.result()
-        return obj_list[0]
+        return obj_list[0] if obj_list else None
 
     def batched_get_blocking(
         self,
@@ -892,7 +973,12 @@ class NixlStaticStorageBackend(NixlStorageBackend):
         transfer_spec: Any = None,
     ) -> list[MemoryObj]:
         obj_list = await self.storage_to_mem(keys)
-        assert None not in obj_list
+        for i, obj in enumerate(obj_list):
+            if obj is None:
+                for tail_obj in obj_list[i + 1 :]:
+                    if tail_obj is not None:
+                        tail_obj.ref_count_down()
+                return cast(list[MemoryObj], obj_list[:i])
         return cast(list[MemoryObj], obj_list)
 
     def remove(self, key: CacheEngineKey, force: bool = True) -> bool:
@@ -974,6 +1060,8 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
             nixl_config.buffer_device,
             nixl_config.backend,
             nixl_config.backend_params,
+            nixl_config.enable_prog_thread,
+            nixl_config.sync_mode,
         )
 
     def set_presence_cache(self, cache: PresenceCache) -> None:
@@ -1068,10 +1156,13 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
                 self.meta_shape, self.meta_dtype, self.meta_fmt
             )
             if obj is None:
-                # free previous allocated objects
-                logger.warning("Failed to allocate memory")
+                logger.warning(
+                    "Failed to allocate memory, consider increasing the "
+                    "`nixl_buffer_size` value"
+                )
                 for obj in obj_list:
-                    self.memory_allocator.free(obj)
+                    if obj is not None:
+                        obj.ref_count_down()
                 return [None] * len(keys)
 
             obj_list.append(obj)
@@ -1120,9 +1211,10 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
             )
             return obj_list
         else:
-            # Free the allocated memory and discard cache if transfer failed
+            # Release the allocated memory and discard cache if transfer failed
             for obj in obj_list:
-                self.memory_allocator.free(obj)
+                if obj is not None:
+                    obj.ref_count_down()
             for key in keys:
                 self._cache_discard(key.chunk_hash)
             return [None] * len(keys)
@@ -1364,7 +1456,12 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
         :return: a list of memory objects.
         """
         obj_list = self.storage_to_mem(keys, False)
-        assert None not in obj_list
+        for i, obj in enumerate(obj_list):
+            if obj is None:
+                for tail_obj in obj_list[i + 1 :]:
+                    if tail_obj is not None:
+                        tail_obj.ref_count_down()
+                return cast(list[MemoryObj], obj_list[:i])
         return cast(list[MemoryObj], obj_list)
 
     def remove(self, key: CacheEngineKey, force: bool = True) -> bool:
