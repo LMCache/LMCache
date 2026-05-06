@@ -345,6 +345,10 @@ __init__.py
        │    ├─ register_l2_adapter_type("plugin", PluginL2AdapterConfig)
        │    └─ register_l2_adapter_factory("plugin", _create_plugin_adapter)
        │
+       ├─ raw_block_l2_adapter.py (auto-discovered)
+       │    ├─ register_l2_adapter_type("raw_block", RawBlockL2AdapterConfig)
+       │    └─ register_l2_adapter_factory("raw_block", _create_raw_block_adapter)
+       │
        └─ native_connector_l2_adapter.py (auto-discovered)
             ├─ register_l2_adapter_type("resp", ...)
             ├─ register_l2_adapter_type("fs_native", ...)

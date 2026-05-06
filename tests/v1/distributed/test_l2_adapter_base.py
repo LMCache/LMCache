@@ -128,7 +128,7 @@ class TestSupportsGlobalEviction:
 
 
 class TestBaseAccounting:
-    def test_store_increments_aggregate_and_per_user(self):
+    def test_store_increments_aggregate_and_by_cache_salt(self):
         a = _StubAdapter(max_capacity_bytes=10_000)
         k_alice = _make_key(1, salt="alice")
         k_bob = _make_key(2, salt="bob")
@@ -138,7 +138,7 @@ class TestBaseAccounting:
         assert u.total_bytes_used == 350
         assert u.bytes_by_cache_salt == {"alice": 150, "bob": 200}
 
-    def test_delete_decrements_aggregate_and_per_user(self):
+    def test_delete_decrements_aggregate_and_by_cache_salt(self):
         a = _StubAdapter(max_capacity_bytes=10_000)
         k_alice = _make_key(1, salt="alice")
         k_bob = _make_key(2, salt="bob")
@@ -148,10 +148,10 @@ class TestBaseAccounting:
         assert u.total_bytes_used == 200
         assert u.bytes_by_cache_salt == {"bob": 200}
 
-    def test_per_user_bucket_dropped_when_zero(self):
-        """Per-user bookkeeping should not retain stale ``0`` entries — it
-        keeps the snapshot compact and avoids memory growth across many
-        short-lived users."""
+    def test_cache_salt_bucket_dropped_when_zero(self):
+        """Per-``cache_salt`` bookkeeping should not retain stale ``0``
+        entries — it keeps the snapshot compact and avoids memory
+        growth across many short-lived salts."""
         a = _StubAdapter(max_capacity_bytes=10_000)
         k = _make_key(1, salt="alice")
         a._notify_keys_stored([k], [100])
@@ -203,7 +203,7 @@ class TestBaseAccounting:
         assert u.total_bytes_used == 0  # clamped, not -400
         assert u.usage_fraction == 0.0  # not the -1 sentinel
 
-    def test_get_usage_returns_immutable_per_user_view(self):
+    def test_get_usage_returns_immutable_by_cache_salt_view(self):
         """``bytes_by_cache_salt`` is a read-only ``Mapping`` so a caller
         cannot mutate the snapshot or the adapter's live state."""
         a = _StubAdapter(max_capacity_bytes=10_000)

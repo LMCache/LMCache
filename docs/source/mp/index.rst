@@ -58,6 +58,7 @@ LMCache ships three server entry points:
    quickstart
    configuration
    l2_storage
+   serde
    deployment
    operator
    http_api
