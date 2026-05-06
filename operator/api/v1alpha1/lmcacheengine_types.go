@@ -30,6 +30,12 @@ const (
 	PhaseFailed   = "Failed"
 )
 
+// GPU vendor constants for LMCacheEngineSpec.GPUVendor.
+const (
+	GPUVendorNvidia = "nvidia"
+	GPUVendorAMD    = "amd"
+)
+
 // Condition type constants.
 const (
 	ConditionAvailable         = "Available"
@@ -243,6 +249,27 @@ type RawL2AdapterSpec struct {
 
 // LMCacheEngineSpec defines the desired state of LMCacheEngine.
 type LMCacheEngineSpec struct {
+	// gpuVendor selects the GPU vendor for the LMCache pods. The vendor controls
+	// the pod's RuntimeClassName, vendor-specific environment variables (e.g.
+	// NVIDIA_VISIBLE_DEVICES), and the default nodeSelector applied when the
+	// user does not supply one.
+	//
+	// "nvidia" (default) sets RuntimeClassName=nvidia, injects NVIDIA env vars,
+	// and defaults nodeSelector to nvidia.com/gpu.present=true. Requires the
+	// NVIDIA GPU Operator to be installed (which creates the "nvidia"
+	// RuntimeClass).
+	//
+	// "amd" omits RuntimeClassName, skips NVIDIA env vars, and applies no
+	// default nodeSelector. AMD GPUs are exposed via host devices under the
+	// default container runtime, so no RuntimeClass is required. AMD nodes do
+	// not have a universal label equivalent to nvidia.com/gpu.present
+	// (different platforms expose feature.node.kubernetes.io/amd-gpu,
+	// vendor-specific labels, etc.), so users supply nodeSelector explicitly.
+	// +optional
+	// +kubebuilder:default="nvidia"
+	// +kubebuilder:validation:Enum=nvidia;amd
+	GPUVendor *string `json:"gpuVendor,omitempty"`
+
 	// image defines the container image to use.
 	// +optional
 	Image *ImageSpec `json:"image,omitempty"`
