@@ -59,6 +59,36 @@ a `GPUKVFormat`. Nothing else may index raw shapes.
 |---|---|
 | `normalize_kv_and_discover_format(kv_caches, engine, layout_hints)` | `tuple[GPUKVFormat, DiscoverableKVCache]` — the one parser. Returns the canonical (permuted-to-contiguous) kv_caches alongside the detected format; callers must use the returned tensor structure for subsequent operations. |
 
+### Format → engine map
+
+| `GPUKVFormat` | Engine | Layout | Structure |
+|---|---|---|---|
+| `NB_NL_TWO_BS_NH_HS` | vLLM cross-layer | NHD | bare 6-D tensor `[NB, NL, 2, BS, NH, HS]` |
+| `NB_NL_TWO_NH_BS_HS` | TRT-LLM cross-layer | HND | bare 6-D tensor `[NB, NL, 2, NH, BS, HS]` |
+| `NL_X_TWO_NB_BS_NH_HS` | vLLM flash-attn | NHD | `NL × [2, NB, BS, NH, HS]` |
+| `NL_X_NB_TWO_BS_NH_HS` | vLLM flash-infer | NHD | `NL × [NB, 2, BS, NH, HS]` |
+| `NL_X_TWO_NB_NH_BS_HS` | vLLM flash-attn | HND | `NL × [2, NB, NH, BS, HS]` |
+| `NL_X_NB_TWO_NH_BS_HS` | vLLM flash-infer | HND | `NL × [NB, 2, NH, BS, HS]` |
+| `NL_X_NB_BS_HS` | vLLM MLA | — | `NL × [NB, BS, HS]` |
+| `TWO_X_NL_X_NBBS_NH_HS` | SGLang MHA | NHD | `[K_list, V_list]`, each `NL × [PBS, NH, HS]` |
+| `NL_X_NBBS_ONE_HS` | SGLang MLA | — | `NL × [PBS, 1, HS]` |
+
+The two cross-layer formats (`NB_NL_TWO_*`) share a single base
+pointer, the kernel walks layers internally via `shape_desc.nl`. Use
+`is_cross_layer_format(fmt)` for that dispatch and `is_hnd(fmt)` to
+detect head-major within-block layouts.
+
+### Reshape-via-hints (TRT-LLM)
+
+TRT-LLM hands LMCache a 4-D pool tensor
+`[NB, NL, 2, num_kv_heads * tokens_per_block * head_dim]` (HND, K and V
+interleaved on dim 2). `normalize_kv_and_discover_format` reshapes it
+to canonical 6-D form *before* the contiguity check, using
+`layout_hints["num_kv_heads" | "tokens_per_block" | "head_dim"]`. The
+function also collapses a 1-element list of a 6-D tensor down to the
+bare 6-D tensor so detection lands on `list_depth == 0`. Adapters pass
+either the 4-D bare tensor or `[4-D]`; the function handles both.
+
 ### Scalar accessors
 
 All of these dispatch on `GPUKVFormat`. The ones that can vary per layer

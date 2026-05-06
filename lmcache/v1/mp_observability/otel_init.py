@@ -45,6 +45,7 @@ def init_otel_metrics(
     otlp_endpoint: str | None = None,
     prometheus_port: int | None = None,
     resource_attributes: dict[str, str] | None = None,
+    start_http_server: bool = True,
 ) -> None:
     """Set up the OpenTelemetry MeterProvider.
 
@@ -60,6 +61,9 @@ def init_otel_metrics(
             through the provider carries these attributes.  Intended for
             process-level identity (e.g. ``service.instance.id``) — never
             for per-request tags.
+        start_http_server: Whether to start a standalone Prometheus
+            HTTP server.  Set to ``False`` when metrics are already
+            served by an external HTTP framework (e.g. FastAPI).
     """
     # Third Party
     from opentelemetry import metrics
@@ -98,13 +102,21 @@ def init_otel_metrics(
         reader = PrometheusMetricReader()
         provider = MeterProvider(metric_readers=[reader], resource=resource)
         metrics.set_meter_provider(provider)
-        prometheus_client.start_http_server(prometheus_port)
-        logger.info(
-            "OTel MeterProvider initialised with Prometheus fallback "
-            "(http://0.0.0.0:%d/metrics), resource=%s",
-            prometheus_port,
-            dict(resource.attributes),
-        )
+        if start_http_server:
+            prometheus_client.start_http_server(prometheus_port)
+            logger.info(
+                "OTel MeterProvider initialised with Prometheus fallback "
+                "(http://0.0.0.0:%d/metrics), resource=%s",
+                prometheus_port,
+                dict(resource.attributes),
+            )
+        else:
+            logger.info(
+                "OTel MeterProvider initialised with Prometheus fallback "
+                "(standalone metrics HTTP server disabled; "
+                "/metrics must be exposed by the caller), resource=%s",
+                dict(resource.attributes),
+            )
 
 
 def init_otel_tracing(
