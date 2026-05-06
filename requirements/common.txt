@@ -6,6 +6,7 @@ awscrt
 cufile-python
 fastapi
 httpx
+huggingface_hub>=1.5.0
 msgspec
 # nixl uses numba which requires numpy<=2.2.6
 numpy<=2.2.6
