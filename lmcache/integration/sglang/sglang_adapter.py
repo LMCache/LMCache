@@ -33,10 +33,6 @@ class StoreMetadata:
     token_ids: List[int]
     kv_indices: torch.Tensor
     offset: int
-    # SGLang request id (``req.rid``) used as the wire ``request_id`` for
-    # the daemon-side session. Pairing this with the same id used at
-    # LOOKUP/RETRIEVE time lets STORE+END_SESSION reuse the LOOKUP-set
-    # session, matching the vLLM/TRT-LLM pattern.
     request_id: str = ""
 
 
@@ -45,12 +41,7 @@ class LoadMetadata:
     token_ids: List[int]
     slot_mapping: torch.Tensor
     offset: int
-    # Tokens in [offset, offset + prefix_pad) are already cached in the
-    # engine's radix tree. They live in the chunk-aligned LMCache range
-    # [offset, retrieve_end) but their slot_mapping entries are sentinels
-    # (-1) — the connector must not write to them.
     prefix_pad: int = 0
-    # See ``StoreMetadata.request_id``.
     request_id: str = ""
 
 
