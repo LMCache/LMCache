@@ -31,8 +31,6 @@ func (e *LMCacheEngine) SetDefaults() {
 		spec.GPUVendor = &v
 	}
 
-	// AMD has no universal equivalent of nvidia.com/gpu.present, so AMD users
-	// supply nodeSelector explicitly.
 	if spec.NodeSelector == nil && *spec.GPUVendor == GPUVendorNvidia {
 		spec.NodeSelector = map[string]string{
 			"nvidia.com/gpu.present": "true",

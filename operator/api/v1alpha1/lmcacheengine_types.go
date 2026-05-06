@@ -30,7 +30,6 @@ const (
 	PhaseFailed   = "Failed"
 )
 
-// GPU vendor constants for LMCacheEngineSpec.GPUVendor.
 const (
 	GPUVendorNvidia = "nvidia"
 	GPUVendorAMD    = "amd"
@@ -249,16 +248,9 @@ type RawL2AdapterSpec struct {
 
 // LMCacheEngineSpec defines the desired state of LMCacheEngine.
 type LMCacheEngineSpec struct {
-	// gpuVendor selects the GPU vendor for the LMCache pods.
-	//
-	// "nvidia" (default): sets RuntimeClassName=nvidia, injects
-	// NVIDIA_VISIBLE_DEVICES and NVIDIA_DRIVER_CAPABILITIES, and defaults
-	// nodeSelector to nvidia.com/gpu.present=true. Requires the NVIDIA GPU
-	// Operator to be installed.
-	//
-	// "amd": omits RuntimeClassName, skips NVIDIA env vars, and applies no
-	// default nodeSelector (AMD nodes have no universal equivalent of
-	// nvidia.com/gpu.present, so users supply nodeSelector explicitly).
+	// gpuVendor selects the GPU vendor. "nvidia" (default) requires the NVIDIA
+	// GPU Operator's "nvidia" RuntimeClass; "amd" runs on the default container
+	// runtime with privileged: true.
 	// +optional
 	// +kubebuilder:default="nvidia"
 	// +kubebuilder:validation:Enum=nvidia;amd
