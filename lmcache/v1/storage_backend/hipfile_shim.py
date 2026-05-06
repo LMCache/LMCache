@@ -7,11 +7,11 @@ This module wraps ``hipfile.Driver``, ``hipfile.FileHandle``, and
 """
 
 # Standard
-import ctypes
-import os
 from collections.abc import Callable
 from types import TracebackType
 from typing import Any
+import ctypes
+import os
 
 # Third Party
 from hipfile import Buffer, Driver, FileHandle
