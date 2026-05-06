@@ -1098,10 +1098,10 @@ def scenario_single_layer_kv_transfer_sgl(
         # 4. Execute
         ops.single_layer_kv_transfer_sgl(
             lmc_tensor,
-            sgl_k_tensor,
-            sgl_v_tensor,
+            [sgl_k_tensor, sgl_v_tensor],
             slot_mapping,
             ops.TransferDirection.D2H if direction else ops.TransferDirection.H2D,
+            ops.GPUKVFormat.NL_X_NB_TWO_BS_NH_HS,
             token_major,
         )
         device_sync(device)
