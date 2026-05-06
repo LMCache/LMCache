@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
+# Future
 from __future__ import annotations
 
+# Standard
 from typing import TYPE_CHECKING
 
 # Third Party
@@ -10,6 +12,7 @@ import torch
 from lmcache.logging import init_logger
 
 if TYPE_CHECKING:
+    # First Party
     from lmcache.v1.compute.attention.abstract import AttentionInterface
 
 logger = init_logger(__name__)
@@ -23,7 +26,9 @@ def _is_rocm() -> bool:
 def _flashinfer_available() -> bool:
     """Check if flashinfer is importable."""
     try:
+        # Third Party
         import flashinfer  # noqa: F401
+
         return True
     except ImportError:
         return False
@@ -38,6 +43,7 @@ def infer_attn_backend_from_vllm(
     if enable_sparse:
         # On ROCm or when flashinfer is unavailable, use Triton backend
         if _is_rocm() or not _flashinfer_available():
+            # Local
             from .triton_sparse import LMCTritonSparseBackend
 
             logger.info(
@@ -47,12 +53,14 @@ def infer_attn_backend_from_vllm(
             return LMCTritonSparseBackend(vllm_attn)
 
         # On CUDA with flashinfer available, use flashinfer backend
+        # Local
         from .flash_infer_sparse import LMCFlashInferSparseBackend
 
         if attn_name == "FlashInferImpl":
             return LMCFlashInferSparseBackend(vllm_attn)
         else:
             # Fallback to Triton even on CUDA if flashinfer impl doesn't match
+            # Local
             from .triton_sparse import LMCTritonSparseBackend
 
             logger.info(
@@ -62,6 +70,7 @@ def infer_attn_backend_from_vllm(
             return LMCTritonSparseBackend(vllm_attn)
 
     elif attn_name == "FlashAttentionImpl" and not enable_sparse:
+        # Local
         from .flash_attn import LMCFlashAttnBackend
 
         return LMCFlashAttnBackend(vllm_attn)

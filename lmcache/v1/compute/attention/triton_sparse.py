@@ -84,8 +84,7 @@ class LMCTritonSparseBackend(AttentionInterface):
             )
         else:
             assert attn_metadata.block_indices is not None, (
-                "Sparse metadata not initialized. "
-                "Call update_from_top_indices() first."
+                "Sparse metadata not initialized. Call update_from_top_indices() first."
             )
             output, lse = block_sparse_attention(
                 query,

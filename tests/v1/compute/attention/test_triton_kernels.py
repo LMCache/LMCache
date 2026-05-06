@@ -5,23 +5,23 @@ Tests the three kernels in isolation without requiring a model or vLLM.
 Validates correctness against a naive PyTorch reference implementation.
 """
 
+# Standard
 import math
 
+# Third Party
 import pytest
 import torch
 
-# Skip entire module when no GPU available
-pytestmark = pytest.mark.skipif(
-    not torch.cuda.is_available(), reason="GPU required"
-)
-
+# First Party
+from lmcache.v1.compute.attention.metadata import _block_mask_to_csr
 from lmcache.v1.compute.attention.triton_kernels import (
     block_sparse_attention,
     causal_prefill_attention,
     merge_attention_outputs,
 )
-from lmcache.v1.compute.attention.metadata import _block_mask_to_csr
 
+# Skip entire module when no GPU available
+pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="GPU required")
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -46,8 +46,7 @@ def _ref_attention(q, k, v, sm_scale, causal=False):
     return out.to(q.dtype)
 
 
-def _ref_sparse_attention(q, k, v, block_indices, block_indptr, sm_scale,
-                          block_size):
+def _ref_sparse_attention(q, k, v, block_indices, block_indptr, sm_scale, block_size):
     """Naive PyTorch sparse attention for reference."""
     M, H, D = q.shape
     N = k.shape[0]
@@ -55,8 +54,7 @@ def _ref_sparse_attention(q, k, v, block_indices, block_indptr, sm_scale,
     gqa_ratio = H // KV_H
 
     out = torch.zeros_like(q, dtype=torch.float32)
-    lse = torch.full((M, H), float("-inf"), dtype=torch.float32,
-                     device=q.device)
+    lse = torch.full((M, H), float("-inf"), dtype=torch.float32, device=q.device)
 
     num_q_blocks = block_indptr.shape[0] - 1
     for qb in range(num_q_blocks):
@@ -86,9 +84,8 @@ def _ref_sparse_attention(q, k, v, block_indices, block_indptr, sm_scale,
             attn = torch.softmax(scores, dim=-1)
             o = attn @ vals  # [bm, D]
             out[q_start:q_end, h, :] = o
-            lse[q_start:q_end, h] = (
-                scores.max(dim=1).values
-                + torch.log(torch.exp(scores - scores.max(dim=1, keepdim=True).values).sum(dim=1))
+            lse[q_start:q_end, h] = scores.max(dim=1).values + torch.log(
+                torch.exp(scores - scores.max(dim=1, keepdim=True).values).sum(dim=1)
             )
     return out.to(q.dtype), lse
 
@@ -143,8 +140,7 @@ class TestBlockSparseAttention:
 
     def _make_full_mask_csr(self, num_q_blocks, num_kv_blocks, device):
         """CSR for a fully dense mask (all blocks attended)."""
-        mask = torch.ones(num_q_blocks, num_kv_blocks, dtype=torch.bool,
-                          device=device)
+        mask = torch.ones(num_q_blocks, num_kv_blocks, dtype=torch.bool, device=device)
         return _block_mask_to_csr(mask, device)
 
     @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
@@ -159,11 +155,13 @@ class TestBlockSparseAttention:
 
         num_q_blocks = (M + BS - 1) // BS
         num_kv_blocks = (N + BS - 1) // BS
-        indices, indptr = self._make_full_mask_csr(num_q_blocks,
-                                                   num_kv_blocks, q.device)
+        indices, indptr = self._make_full_mask_csr(
+            num_q_blocks, num_kv_blocks, q.device
+        )
 
-        out, lse = block_sparse_attention(q, k, v, indices, indptr,
-                                          sm_scale, block_size=BS)
+        out, lse = block_sparse_attention(
+            q, k, v, indices, indptr, sm_scale, block_size=BS
+        )
         ref = _ref_attention(q, k, v, sm_scale, causal=False)
 
         torch.testing.assert_close(out, ref, atol=1e-2, rtol=1e-2)
@@ -179,12 +177,12 @@ class TestBlockSparseAttention:
         v = torch.randn(N, H, D, device="cuda", dtype=torch.float16)
 
         num_q_blocks = (M + BS - 1) // BS
-        indptr = torch.zeros(num_q_blocks + 1, dtype=torch.int32,
-                             device="cuda")
+        indptr = torch.zeros(num_q_blocks + 1, dtype=torch.int32, device="cuda")
         indices = torch.zeros(0, dtype=torch.int32, device="cuda")
 
-        out, lse = block_sparse_attention(q, k, v, indices, indptr,
-                                          1.0 / math.sqrt(D), block_size=BS)
+        out, lse = block_sparse_attention(
+            q, k, v, indices, indptr, 1.0 / math.sqrt(D), block_size=BS
+        )
         assert torch.all(out == 0)
         assert torch.all(lse == float("-inf"))
 
@@ -199,11 +197,13 @@ class TestBlockSparseAttention:
 
         num_q_blocks = (M + BS - 1) // BS
         num_kv_blocks = (N + BS - 1) // BS
-        indices, indptr = self._make_full_mask_csr(num_q_blocks,
-                                                   num_kv_blocks, q.device)
+        indices, indptr = self._make_full_mask_csr(
+            num_q_blocks, num_kv_blocks, q.device
+        )
 
-        out, lse = block_sparse_attention(q, k, v, indices, indptr,
-                                          1.0 / math.sqrt(D), block_size=BS)
+        out, lse = block_sparse_attention(
+            q, k, v, indices, indptr, 1.0 / math.sqrt(D), block_size=BS
+        )
         assert out.shape == (M, H, D)
         assert not torch.isnan(out).any()
 
@@ -217,11 +217,13 @@ class TestBlockSparseAttention:
 
         num_q_blocks = (M + BS - 1) // BS  # 4 blocks, last has 4 rows
         num_kv_blocks = (N + BS - 1) // BS
-        indices, indptr = self._make_full_mask_csr(num_q_blocks,
-                                                   num_kv_blocks, q.device)
+        indices, indptr = self._make_full_mask_csr(
+            num_q_blocks, num_kv_blocks, q.device
+        )
 
-        out, lse = block_sparse_attention(q, k, v, indices, indptr,
-                                          1.0 / math.sqrt(D), block_size=BS)
+        out, lse = block_sparse_attention(
+            q, k, v, indices, indptr, 1.0 / math.sqrt(D), block_size=BS
+        )
         assert out.shape == (M, H, D)
         assert not torch.isnan(out).any()
 
@@ -234,8 +236,7 @@ class TestMergeAttentionOutputs:
         M, H, D = 64, 4, 64
         o1 = torch.randn(M, H, D, device="cuda", dtype=torch.float16)
         o2 = torch.randn(M, H, D, device="cuda", dtype=torch.float16)
-        lse1 = torch.full((M, H), float("-inf"), dtype=torch.float32,
-                          device="cuda")
+        lse1 = torch.full((M, H), float("-inf"), dtype=torch.float32, device="cuda")
         lse2 = torch.ones(M, H, dtype=torch.float32, device="cuda")
 
         merged = merge_attention_outputs(o1, lse1, o2, lse2)
@@ -246,10 +247,8 @@ class TestMergeAttentionOutputs:
         M, H, D = 64, 4, 64
         o1 = torch.randn(M, H, D, device="cuda", dtype=torch.float16)
         o2 = torch.randn(M, H, D, device="cuda", dtype=torch.float16)
-        lse1 = torch.full((M, H), float("-inf"), dtype=torch.float32,
-                          device="cuda")
-        lse2 = torch.full((M, H), float("-inf"), dtype=torch.float32,
-                          device="cuda")
+        lse1 = torch.full((M, H), float("-inf"), dtype=torch.float32, device="cuda")
+        lse2 = torch.full((M, H), float("-inf"), dtype=torch.float32, device="cuda")
 
         merged = merge_attention_outputs(o1, lse1, o2, lse2)
         assert not torch.isnan(merged).any()

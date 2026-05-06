@@ -173,6 +173,4 @@ class LMCTritonSparseMetadata(LMCAttnMetadata):
         mask = cols < top_indices_block.unsqueeze(1)
         block_mask[: len(top_indices_block)] = mask
 
-        self.block_indices, self.block_indptr = _block_mask_to_csr(
-            block_mask, device
-        )
+        self.block_indices, self.block_indptr = _block_mask_to_csr(block_mask, device)

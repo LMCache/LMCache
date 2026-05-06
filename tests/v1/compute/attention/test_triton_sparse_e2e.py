@@ -6,16 +6,19 @@ Based on examples/blend_kv_v1/blend.py but adapted for ROCm:
 - enable_sparse routes to LMCTritonSparseBackend automatically
 """
 
+# Standard
+from dataclasses import asdict
 import contextlib
 import os
 import time
-from dataclasses import asdict
 
+# Third Party
 from transformers import AutoTokenizer
 from vllm import LLM, SamplingParams
 from vllm.config import KVTransferConfig
 from vllm.engine.arg_utils import EngineArgs
 
+# First Party
 from lmcache.integration.vllm.utils import ENGINE_NAME
 from lmcache.v1.cache_engine import LMCacheEngineBuilder
 
@@ -75,24 +78,26 @@ def timed_generate(llm, prompt, sampling_params, label):
 
 
 def main():
+    # Standard
     import argparse
+
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", default="Qwen/Qwen2.5-7B-Instruct")
     args = parser.parse_args()
 
     model = args.model
-    print(f"=== LMCache CacheBlend ROCm E2E Test ===")
+    print("=== LMCache CacheBlend ROCm E2E Test ===")
     print(f"Model: {model}")
-    print(f"Backend: Triton sparse attention (auto-detected on ROCm)")
+    print("Backend: Triton sparse attention (auto-detected on ROCm)")
 
     setup_env()
     tokenizer = AutoTokenizer.from_pretrained(model)
 
     with build_llm(model) as llm:
         # Build prompts with shared chunks (non-prefix overlap)
-        blend_sep = tokenizer.encode(
-            os.environ["LMCACHE_BLEND_SPECIAL_STR"]
-        )[1:]  # skip BOS
+        blend_sep = tokenizer.encode(os.environ["LMCACHE_BLEND_SPECIAL_STR"])[
+            1:
+        ]  # skip BOS
 
         chunk_a = tokenizer.encode("The quick brown fox jumps. " * 200)[1:]
         chunk_b = tokenizer.encode("Machine learning is exciting. " * 200)[1:]
@@ -102,34 +107,48 @@ def main():
 
         # Request 1: sys + A + B + C + question
         prompt1 = (
-            sys_tokens + blend_sep
-            + chunk_a + blend_sep
-            + chunk_b + blend_sep
-            + chunk_c + blend_sep
+            sys_tokens
+            + blend_sep
+            + chunk_a
+            + blend_sep
+            + chunk_b
+            + blend_sep
+            + chunk_c
+            + blend_sep
             + tokenizer.encode("Summarize the above.")[1:]
         )
 
         # Request 2: sys + B + A + C + question (reordered — non-prefix!)
         prompt2 = (
-            sys_tokens + blend_sep
-            + chunk_b + blend_sep
-            + chunk_a + blend_sep
-            + chunk_c + blend_sep
+            sys_tokens
+            + blend_sep
+            + chunk_b
+            + blend_sep
+            + chunk_a
+            + blend_sep
+            + chunk_c
+            + blend_sep
             + tokenizer.encode("What is the main topic?")[1:]
         )
 
         # Request 3: sys + B + A + C + different question
         prompt3 = (
-            sys_tokens + blend_sep
-            + chunk_b + blend_sep
-            + chunk_a + blend_sep
-            + chunk_c + blend_sep
+            sys_tokens
+            + blend_sep
+            + chunk_b
+            + blend_sep
+            + chunk_a
+            + blend_sep
+            + chunk_c
+            + blend_sep
             + tokenizer.encode("Tell me more about GPUs.")[1:]
         )
 
         sp = SamplingParams(temperature=0, max_tokens=32)
 
-        print(f"\nPrompt lengths: p1={len(prompt1)}, p2={len(prompt2)}, p3={len(prompt3)}")
+        print(
+            f"\nPrompt lengths: p1={len(prompt1)}, p2={len(prompt2)}, p3={len(prompt3)}"
+        )
 
         # Warmup
         warmup = tokenizer.encode("Hello world " * 100)[1:]
@@ -148,7 +167,7 @@ def main():
         # Request 3: same prefix as req2 → should be faster
         t3 = timed_generate(llm, prompt3, sp, "req3-blend")
 
-        print(f"\n=== Results ===")
+        print("\n=== Results ===")
         print(f"Cold (req1):  {t1:.2f}s")
         print(f"Blend (req2): {t2:.2f}s")
         print(f"Blend (req3): {t3:.2f}s")

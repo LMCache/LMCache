@@ -13,6 +13,7 @@ Sparse structure: block_indptr [num_q_blocks+1], block_indices [nnz_blocks]
 Output: O [M, H, D], LSE [M, H] (log-sum-exp for blending)
 """
 
+# Third Party
 import torch
 import triton
 import triton.language as tl
@@ -20,23 +21,36 @@ import triton.language as tl
 
 @triton.jit
 def _block_sparse_attn_fwd_kernel(
-    Q_ptr, K_ptr, V_ptr, O_ptr, LSE_ptr,
+    Q_ptr,
+    K_ptr,
+    V_ptr,
+    O_ptr,
+    LSE_ptr,
     block_indices_ptr,  # [nnz_blocks] int32 — which KV blocks to attend
-    block_indptr_ptr,   # [num_q_blocks+1] int32 — CSR row pointers
+    block_indptr_ptr,  # [num_q_blocks+1] int32 — CSR row pointers
     sm_scale: tl.constexpr,
-    seq_len_q,          # total query length
-    seq_len_k,          # total KV length
-    num_csr_rows,       # number of rows in CSR (may differ from grid dim 0)
-    stride_qm, stride_qh, stride_qd,
-    stride_km, stride_kh, stride_kd,
-    stride_vm, stride_vh, stride_vd,
-    stride_om, stride_oh, stride_od,
-    stride_lm, stride_lh,
+    seq_len_q,  # total query length
+    seq_len_k,  # total KV length
+    num_csr_rows,  # number of rows in CSR (may differ from grid dim 0)
+    stride_qm,
+    stride_qh,
+    stride_qd,
+    stride_km,
+    stride_kh,
+    stride_kd,
+    stride_vm,
+    stride_vh,
+    stride_vd,
+    stride_om,
+    stride_oh,
+    stride_od,
+    stride_lm,
+    stride_lh,
     NUM_HEADS: tl.constexpr,
     NUM_KV_HEADS: tl.constexpr,
     HEAD_DIM: tl.constexpr,
-    BLOCK_M: tl.constexpr,     # query block size (typically 64 or 128)
-    BLOCK_N: tl.constexpr,     # KV block size (typically 64 or 128)
+    BLOCK_M: tl.constexpr,  # query block size (typically 64 or 128)
+    BLOCK_N: tl.constexpr,  # KV block size (typically 64 or 128)
 ):
     """Block-sparse attention forward kernel.
 
@@ -63,10 +77,21 @@ def _block_sparse_attn_fwd_kernel(
     # Guard against grid blocks exceeding CSR rows (partial block case)
     if q_block_idx >= num_csr_rows:
         # No CSR entry for this block — write zeros and -inf LSE
-        o_ptrs = O_ptr + q_offs[:, None] * stride_om + head_idx * stride_oh + d_offs[None, :] * stride_od
-        tl.store(o_ptrs, tl.zeros([BLOCK_M, HEAD_DIM], dtype=Q_ptr.dtype.element_ty), mask=q_mask[:, None])
+        o_ptrs = (
+            O_ptr
+            + q_offs[:, None] * stride_om
+            + head_idx * stride_oh
+            + d_offs[None, :] * stride_od
+        )
+        tl.store(
+            o_ptrs,
+            tl.zeros([BLOCK_M, HEAD_DIM], dtype=Q_ptr.dtype.element_ty),
+            mask=q_mask[:, None],
+        )
         lse_ptrs = LSE_ptr + q_offs * stride_lm + head_idx * stride_lh
-        tl.store(lse_ptrs, tl.full([BLOCK_M], float("-inf"), dtype=tl.float32), mask=q_mask)
+        tl.store(
+            lse_ptrs, tl.full([BLOCK_M], float("-inf"), dtype=tl.float32), mask=q_mask
+        )
         return
 
     kv_block_start = tl.load(block_indptr_ptr + q_block_idx)
@@ -74,7 +99,12 @@ def _block_sparse_attn_fwd_kernel(
     num_kv_blocks = kv_block_end - kv_block_start
 
     # Load Q block: [BLOCK_M, HEAD_DIM]
-    q_ptrs = Q_ptr + q_offs[:, None] * stride_qm + head_idx * stride_qh + d_offs[None, :] * stride_qd
+    q_ptrs = (
+        Q_ptr
+        + q_offs[:, None] * stride_qm
+        + head_idx * stride_qh
+        + d_offs[None, :] * stride_qd
+    )
     q = tl.load(q_ptrs, mask=q_mask[:, None], other=0.0)
 
     # Online softmax accumulators
@@ -91,7 +121,12 @@ def _block_sparse_attn_fwd_kernel(
         kv_mask = kv_offs < seq_len_k
 
         # Load K block: [BLOCK_N, HEAD_DIM] — use kv_head_idx for GQA
-        k_ptrs = K_ptr + kv_offs[:, None] * stride_km + kv_head_idx * stride_kh + d_offs[None, :] * stride_kd
+        k_ptrs = (
+            K_ptr
+            + kv_offs[:, None] * stride_km
+            + kv_head_idx * stride_kh
+            + d_offs[None, :] * stride_kd
+        )
         k = tl.load(k_ptrs, mask=kv_mask[:, None], other=0.0)
 
         # Compute QK^T: [BLOCK_M, BLOCK_N]
@@ -117,7 +152,12 @@ def _block_sparse_attn_fwd_kernel(
         acc = acc * alpha[:, None]
 
         # Load V block: [BLOCK_N, HEAD_DIM] — use kv_head_idx for GQA
-        v_ptrs = V_ptr + kv_offs[:, None] * stride_vm + kv_head_idx * stride_vh + d_offs[None, :] * stride_vd
+        v_ptrs = (
+            V_ptr
+            + kv_offs[:, None] * stride_vm
+            + kv_head_idx * stride_vh
+            + d_offs[None, :] * stride_vd
+        )
         v = tl.load(v_ptrs, mask=kv_mask[:, None], other=0.0)
 
         # Accumulate: acc += P @ V
@@ -134,7 +174,12 @@ def _block_sparse_attn_fwd_kernel(
     lse = tl.where(l_i > 0, m_i + tl.log(l_i), float("-inf"))
 
     # Store output — use input dtype to support both fp16 and bf16
-    o_ptrs = O_ptr + q_offs[:, None] * stride_om + head_idx * stride_oh + d_offs[None, :] * stride_od
+    o_ptrs = (
+        O_ptr
+        + q_offs[:, None] * stride_om
+        + head_idx * stride_oh
+        + d_offs[None, :] * stride_od
+    )
     tl.store(o_ptrs, acc.to(Q_ptr.dtype.element_ty), mask=q_mask[:, None])
 
     # Store LSE
@@ -144,13 +189,24 @@ def _block_sparse_attn_fwd_kernel(
 
 @triton.jit
 def _causal_prefill_attention_kernel(
-    Q_ptr, K_ptr, V_ptr, O_ptr,
+    Q_ptr,
+    K_ptr,
+    V_ptr,
+    O_ptr,
     sm_scale: tl.constexpr,
     seq_len,
-    stride_qm, stride_qh, stride_qd,
-    stride_km, stride_kh, stride_kd,
-    stride_vm, stride_vh, stride_vd,
-    stride_om, stride_oh, stride_od,
+    stride_qm,
+    stride_qh,
+    stride_qd,
+    stride_km,
+    stride_kh,
+    stride_kd,
+    stride_vm,
+    stride_vh,
+    stride_vd,
+    stride_om,
+    stride_oh,
+    stride_od,
     NUM_HEADS: tl.constexpr,
     NUM_KV_HEADS: tl.constexpr,
     HEAD_DIM: tl.constexpr,
@@ -174,7 +230,12 @@ def _causal_prefill_attention_kernel(
     d_offs = tl.arange(0, HEAD_DIM)
 
     # Load Q
-    q_ptrs = Q_ptr + q_offs[:, None] * stride_qm + head_idx * stride_qh + d_offs[None, :] * stride_qd
+    q_ptrs = (
+        Q_ptr
+        + q_offs[:, None] * stride_qm
+        + head_idx * stride_qh
+        + d_offs[None, :] * stride_qd
+    )
     q = tl.load(q_ptrs, mask=q_mask[:, None], other=0.0)
 
     m_i = tl.full([BLOCK_M], float("-inf"), dtype=tl.float32)
@@ -189,7 +250,12 @@ def _causal_prefill_attention_kernel(
         kv_offs = kv_start + tl.arange(0, BLOCK_N)
         kv_mask = kv_offs < seq_len
 
-        k_ptrs = K_ptr + kv_offs[:, None] * stride_km + kv_head_idx * stride_kh + d_offs[None, :] * stride_kd
+        k_ptrs = (
+            K_ptr
+            + kv_offs[:, None] * stride_km
+            + kv_head_idx * stride_kh
+            + d_offs[None, :] * stride_kd
+        )
         k = tl.load(k_ptrs, mask=kv_mask[:, None], other=0.0)
 
         qk = tl.dot(q, tl.trans(k)) * sm_scale
@@ -206,7 +272,12 @@ def _causal_prefill_attention_kernel(
         l_new = alpha * l_i + l_ij
         acc = acc * alpha[:, None]
 
-        v_ptrs = V_ptr + kv_offs[:, None] * stride_vm + kv_head_idx * stride_vh + d_offs[None, :] * stride_vd
+        v_ptrs = (
+            V_ptr
+            + kv_offs[:, None] * stride_vm
+            + kv_head_idx * stride_vh
+            + d_offs[None, :] * stride_vd
+        )
         v = tl.load(v_ptrs, mask=kv_mask[:, None], other=0.0)
         acc += tl.dot(p.to(v.dtype), v)
 
@@ -215,16 +286,28 @@ def _causal_prefill_attention_kernel(
 
     acc = acc / l_i[:, None]
 
-    o_ptrs = O_ptr + q_offs[:, None] * stride_om + head_idx * stride_oh + d_offs[None, :] * stride_od
+    o_ptrs = (
+        O_ptr
+        + q_offs[:, None] * stride_om
+        + head_idx * stride_oh
+        + d_offs[None, :] * stride_od
+    )
     tl.store(o_ptrs, acc.to(Q_ptr.dtype.element_ty), mask=q_mask[:, None])
 
 
 @triton.jit
 def _merge_attention_kernel(
-    O1_ptr, LSE1_ptr, O2_ptr, LSE2_ptr, Out_ptr,
+    O1_ptr,
+    LSE1_ptr,
+    O2_ptr,
+    LSE2_ptr,
+    Out_ptr,
     seq_len,
-    stride_om, stride_oh, stride_od,
-    stride_lm, stride_lh,
+    stride_om,
+    stride_oh,
+    stride_od,
+    stride_lm,
+    stride_lh,
     NUM_HEADS: tl.constexpr,
     HEAD_DIM: tl.constexpr,
     BLOCK_M: tl.constexpr,
@@ -246,8 +329,16 @@ def _merge_attention_kernel(
     d_offs = tl.arange(0, HEAD_DIM)
 
     # Load LSE values
-    lse1 = tl.load(LSE1_ptr + offs * stride_lm + head_idx * stride_lh, mask=mask, other=float("-inf"))
-    lse2 = tl.load(LSE2_ptr + offs * stride_lm + head_idx * stride_lh, mask=mask, other=float("-inf"))
+    lse1 = tl.load(
+        LSE1_ptr + offs * stride_lm + head_idx * stride_lh,
+        mask=mask,
+        other=float("-inf"),
+    )
+    lse2 = tl.load(
+        LSE2_ptr + offs * stride_lm + head_idx * stride_lh,
+        mask=mask,
+        other=float("-inf"),
+    )
 
     # Numerically stable blending — guard against both-inf case
     max_lse = tl.maximum(lse1, lse2)
@@ -264,15 +355,30 @@ def _merge_attention_kernel(
     w2 = w2 / w_sum
 
     # Load and blend outputs
-    o1_ptrs = O1_ptr + offs[:, None] * stride_om + head_idx * stride_oh + d_offs[None, :] * stride_od
-    o2_ptrs = O2_ptr + offs[:, None] * stride_om + head_idx * stride_oh + d_offs[None, :] * stride_od
+    o1_ptrs = (
+        O1_ptr
+        + offs[:, None] * stride_om
+        + head_idx * stride_oh
+        + d_offs[None, :] * stride_od
+    )
+    o2_ptrs = (
+        O2_ptr
+        + offs[:, None] * stride_om
+        + head_idx * stride_oh
+        + d_offs[None, :] * stride_od
+    )
 
     o1 = tl.load(o1_ptrs, mask=mask[:, None], other=0.0)
     o2 = tl.load(o2_ptrs, mask=mask[:, None], other=0.0)
 
     out = o1 * w1[:, None] + o2 * w2[:, None]
 
-    out_ptrs = Out_ptr + offs[:, None] * stride_om + head_idx * stride_oh + d_offs[None, :] * stride_od
+    out_ptrs = (
+        Out_ptr
+        + offs[:, None] * stride_om
+        + head_idx * stride_oh
+        + d_offs[None, :] * stride_od
+    )
     tl.store(out_ptrs, out.to(O1_ptr.dtype.element_ty), mask=mask[:, None])
 
 
@@ -280,12 +386,13 @@ def _merge_attention_kernel(
 # Python wrappers
 # ============================================================
 
+
 def block_sparse_attention(
-    query: torch.Tensor,     # [M, H, D]
-    key: torch.Tensor,       # [N, H, D]
-    value: torch.Tensor,     # [N, H, D]
+    query: torch.Tensor,  # [M, H, D]
+    key: torch.Tensor,  # [N, H, D]
+    value: torch.Tensor,  # [N, H, D]
     block_indices: torch.Tensor,  # [nnz_blocks] int32
-    block_indptr: torch.Tensor,   # [num_q_blocks+1] int32
+    block_indptr: torch.Tensor,  # [num_q_blocks+1] int32
     sm_scale: float,
     block_size: int = 64,
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -318,16 +425,31 @@ def block_sparse_attention(
     grid = (num_q_blocks, H)
 
     _block_sparse_attn_fwd_kernel[grid](
-        query, key, value, output, lse,
-        block_indices, block_indptr,
+        query,
+        key,
+        value,
+        output,
+        lse,
+        block_indices,
+        block_indptr,
         sm_scale,
-        M, N,
+        M,
+        N,
         num_csr_rows,
-        query.stride(0), query.stride(1), query.stride(2),
-        key.stride(0), key.stride(1), key.stride(2),
-        value.stride(0), value.stride(1), value.stride(2),
-        output.stride(0), output.stride(1), output.stride(2),
-        lse.stride(0), lse.stride(1),
+        query.stride(0),
+        query.stride(1),
+        query.stride(2),
+        key.stride(0),
+        key.stride(1),
+        key.stride(2),
+        value.stride(0),
+        value.stride(1),
+        value.stride(2),
+        output.stride(0),
+        output.stride(1),
+        output.stride(2),
+        lse.stride(0),
+        lse.stride(1),
         NUM_HEADS=H,
         NUM_KV_HEADS=KV_H,
         HEAD_DIM=D,
@@ -339,9 +461,9 @@ def block_sparse_attention(
 
 
 def causal_prefill_attention(
-    query: torch.Tensor,   # [M, H, D]
-    key: torch.Tensor,     # [M, H, D]
-    value: torch.Tensor,   # [M, H, D]
+    query: torch.Tensor,  # [M, H, D]
+    key: torch.Tensor,  # [M, H, D]
+    value: torch.Tensor,  # [M, H, D]
     sm_scale: float,
     block_size: int = 64,
 ) -> torch.Tensor:
@@ -363,12 +485,24 @@ def causal_prefill_attention(
     grid = ((M + block_size - 1) // block_size, H)
 
     _causal_prefill_attention_kernel[grid](
-        query, key, value, output,
-        sm_scale, M,
-        query.stride(0), query.stride(1), query.stride(2),
-        key.stride(0), key.stride(1), key.stride(2),
-        value.stride(0), value.stride(1), value.stride(2),
-        output.stride(0), output.stride(1), output.stride(2),
+        query,
+        key,
+        value,
+        output,
+        sm_scale,
+        M,
+        query.stride(0),
+        query.stride(1),
+        query.stride(2),
+        key.stride(0),
+        key.stride(1),
+        key.stride(2),
+        value.stride(0),
+        value.stride(1),
+        value.stride(2),
+        output.stride(0),
+        output.stride(1),
+        output.stride(2),
         NUM_HEADS=H,
         NUM_KV_HEADS=KV_H,
         HEAD_DIM=D,
@@ -381,9 +515,9 @@ def causal_prefill_attention(
 
 def merge_attention_outputs(
     output1: torch.Tensor,  # [M, H, D]
-    lse1: torch.Tensor,     # [M, H]
+    lse1: torch.Tensor,  # [M, H]
     output2: torch.Tensor,  # [M, H, D]
-    lse2: torch.Tensor,     # [M, H]
+    lse2: torch.Tensor,  # [M, H]
     block_size: int = 128,
 ) -> torch.Tensor:
     """Merge two attention outputs using LSE-based blending.
@@ -406,10 +540,17 @@ def merge_attention_outputs(
     grid = ((M + block_size - 1) // block_size, H)
 
     _merge_attention_kernel[grid](
-        output1, lse1, output2, lse2, merged,
+        output1,
+        lse1,
+        output2,
+        lse2,
+        merged,
         M,
-        output1.stride(0), output1.stride(1), output1.stride(2),
-        lse1.stride(0), lse1.stride(1),
+        output1.stride(0),
+        output1.stride(1),
+        output1.stride(2),
+        lse1.stride(0),
+        lse1.stride(1),
         NUM_HEADS=H,
         HEAD_DIM=D,
         BLOCK_M=block_size,
