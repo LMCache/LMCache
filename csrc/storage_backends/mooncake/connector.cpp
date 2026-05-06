@@ -105,6 +105,18 @@ bool MooncakeConnector::do_single_exists(WorkerMooncakeConn& conn,
   return result == 1;
 }
 
+bool MooncakeConnector::do_single_delete(WorkerMooncakeConn& conn,
+                                         const std::string& key) {
+  int rc = conn.client->remove(key, /*force=*/true);
+  if (rc != 0) {
+    fprintf(stderr,
+            "[LMCache DELETE] key %s failed: Mooncake remove returned %d\n",
+            key.c_str(), rc);
+    return false;
+  }
+  return true;
+}
+
 void MooncakeConnector::on_workers_stopped() { unregister_all_buffers(); }
 
 size_t MooncakeConnector::choose_num_tiles(Op op, size_t num_items) const {
@@ -181,6 +193,24 @@ void MooncakeConnector::do_batch_exists(WorkerMooncakeConn& conn,
       continue;
     }
     req.batch->per_key_results[req.start_idx + i] = results[i] == 1 ? 1 : 0;
+  }
+}
+
+void MooncakeConnector::do_batch_delete(WorkerMooncakeConn& conn,
+                                       const Request& req) {
+  auto results = conn.client->batchRemove(req.keys, /*force=*/true);
+  ensure_batch_result_size(results, req.keys.size(), "batchRemove");
+
+  for (size_t i = 0; i < results.size(); ++i) {
+    if (results[i] != 0) {
+      fprintf(stderr,
+              "[LMCache DELETE] key %s failed: Mooncake batchRemove "
+              "returned %d\n",
+              req.keys[i].c_str(), results[i]);
+      req.batch->per_key_results[req.start_idx + i] = 0;
+      continue;
+    }
+    req.batch->per_key_results[req.start_idx + i] = 1;
   }
 }
 

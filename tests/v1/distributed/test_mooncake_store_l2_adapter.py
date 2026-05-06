@@ -497,6 +497,7 @@ class TestMooncakeStoreIntegration:
                 "type": "mooncake_store",
                 "local_hostname": MOONCAKE_LOCAL_HOSTNAME,
                 "metadata_server": MOONCAKE_METADATA_SERVER,
+                "master_server_addr": MOONCAKE_MASTER_SERVER_ADDRESS,
                 "num_workers": 2,
             }
         )
@@ -653,6 +654,116 @@ class TestMooncakeStoreIntegration:
         assert bitmap.test(4) is False, "Missing key should not be found"
 
         self.adapter.submit_unlock(stored_keys)
+
+    # -----------------------------------------------------------------
+    # Delete tests
+    # -----------------------------------------------------------------
+
+    def test_delete_stored_key(self):
+        """Delete a stored key, then lookup confirms it is gone."""
+        key = create_object_key(555)
+        store_obj = create_memory_obj(size=128, fill_value=7.0)
+
+        store_fd = self.adapter.get_store_event_fd()
+        lookup_fd = self.adapter.get_lookup_and_lock_event_fd()
+
+        # Store
+        store_tid = self.adapter.submit_store_task([key], [store_obj])
+        assert wait_for_event_fd(store_fd)
+        assert self.adapter.pop_completed_store_tasks()[store_tid] is True
+
+        # Confirm stored
+        lookup_tid = self.adapter.submit_lookup_and_lock_task([key])
+        assert wait_for_event_fd(lookup_fd)
+        bitmap = self.adapter.query_lookup_and_lock_result(lookup_tid)
+        assert bitmap.test(0) is True
+        self.adapter.submit_unlock([key])
+
+        # Delete
+        self.adapter.delete([key])
+
+        # Lookup again — should be gone
+        lookup_tid = self.adapter.submit_lookup_and_lock_task([key])
+        assert wait_for_event_fd(lookup_fd)
+        bitmap = self.adapter.query_lookup_and_lock_result(lookup_tid)
+        assert bitmap.test(0) is False, "Key should not exist after delete"
+
+    def test_delete_nonexistent_keys(self):
+        """Deleting keys that don't exist should not raise."""
+        keys = [create_object_key(i + 80000) for i in range(3)]
+        # Should complete without error
+        self.adapter.delete(keys)
+
+    def test_batch_delete_mixed_existing_and_missing(self):
+        """Batch delete a mix of stored and non-stored keys."""
+        stored_keys = [create_object_key(i + 600) for i in range(3)]
+        stored_objs = [create_memory_obj(size=64, fill_value=float(i + 1)) for i in range(3)]
+        missing_keys = [
+            create_object_key(90001),
+            create_object_key(90002),
+        ]
+        all_keys = stored_keys + missing_keys
+
+        store_fd = self.adapter.get_store_event_fd()
+        lookup_fd = self.adapter.get_lookup_and_lock_event_fd()
+
+        # Store the first 3
+        store_tid = self.adapter.submit_store_task(stored_keys, stored_objs)
+        assert wait_for_event_fd(store_fd)
+        assert self.adapter.pop_completed_store_tasks()[store_tid] is True
+
+        # Confirm they exist
+        lookup_tid = self.adapter.submit_lookup_and_lock_task(stored_keys)
+        assert wait_for_event_fd(lookup_fd)
+        bitmap = self.adapter.query_lookup_and_lock_result(lookup_tid)
+        for i in range(3):
+            assert bitmap.test(i) is True
+        self.adapter.submit_unlock(stored_keys)
+
+        # Batch delete mixed keys
+        self.adapter.delete(all_keys)
+
+        # Stored keys should now be gone
+        lookup_tid = self.adapter.submit_lookup_and_lock_task(stored_keys)
+        assert wait_for_event_fd(lookup_fd)
+        bitmap = self.adapter.query_lookup_and_lock_result(lookup_tid)
+        for i in range(3):
+            assert bitmap.test(i) is False, f"Key {i} should be gone after delete"
+
+    def test_delete_updates_usage_tracking(self):
+        """Deleting a stored key reduces tracked byte usage."""
+        key = create_object_key(777)
+        store_obj = create_memory_obj(size=128, fill_value=9.0)
+
+        store_fd = self.adapter.get_store_event_fd()
+        lookup_fd = self.adapter.get_lookup_and_lock_event_fd()
+
+        # Record usage before store
+        usage_before = self.adapter.get_usage().total_bytes_used
+
+        # Store
+        store_tid = self.adapter.submit_store_task([key], [store_obj])
+        assert wait_for_event_fd(store_fd)
+        assert self.adapter.pop_completed_store_tasks()[store_tid] is True
+
+        usage_after_store = self.adapter.get_usage().total_bytes_used
+        assert usage_after_store > usage_before, (
+            "Usage should increase after store"
+        )
+
+        # Confirm stored in lookup so _key_sizes is populated
+        lookup_tid = self.adapter.submit_lookup_and_lock_task([key])
+        assert wait_for_event_fd(lookup_fd)
+        self.adapter.submit_unlock([key])
+
+        # Delete
+        self.adapter.delete([key])
+
+        usage_after_delete = self.adapter.get_usage().total_bytes_used
+        assert usage_after_delete == usage_before, (
+            f"Usage should return to baseline after delete: "
+            f"before={usage_before}, after_delete={usage_after_delete}"
+        )
 
     def test_factory_creates_adapter(self):
         """Verify the factory can create a Mooncake Store L2 adapter."""
