@@ -37,14 +37,9 @@ Validated models
 
          vllm serve Qwen/Qwen3-235B-A22B \
              --tensor-parallel-size 4 \
-             --gpu-memory-utilization 0.9 \
-             --enable-prefix-caching \
-             --enable-chunked-prefill \
              --enable-auto-tool-choice \
              --tool-call-parser hermes \
              --reasoning-parser qwen3 \
-             --enable-expert-parallel \
-             --enable-prompt-tokens-details \
              --kv-transfer-config \
              '{"kv_connector":"LMCacheMPConnector", "kv_role":"kv_both"}'
 
@@ -55,13 +50,9 @@ Validated models
       .. code-block:: bash
 
          vllm serve Qwen/Qwen3-30B-A3B \
-             --gpu-memory-utilization 0.9 \
-             --enable-prefix-caching \
-             --enable-chunked-prefill \
              --enable-auto-tool-choice \
              --tool-call-parser hermes \
              --reasoning-parser qwen3 \
-             --enable-prompt-tokens-details \
              --kv-transfer-config \
              '{"kv_connector":"LMCacheMPConnector", "kv_role":"kv_both"}'
 
@@ -73,13 +64,8 @@ Validated models
 
          vllm serve Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8 \
              --tensor-parallel-size 8 \
-             --gpu-memory-utilization 0.9 \
-             --enable-prefix-caching \
-             --enable-chunked-prefill \
              --enable-auto-tool-choice \
              --tool-call-parser qwen3_coder \
-             --enable-expert-parallel \
-             --enable-prompt-tokens-details \
              --kv-transfer-config \
              '{"kv_connector":"LMCacheMPConnector", "kv_role":"kv_both"}'
 
@@ -90,12 +76,8 @@ Validated models
       .. code-block:: bash
 
          vllm serve Qwen/Qwen3-Coder-30B-A3B-Instruct \
-             --gpu-memory-utilization 0.9 \
-             --enable-prefix-caching \
-             --enable-chunked-prefill \
              --enable-auto-tool-choice \
              --tool-call-parser qwen3_coder \
-             --enable-prompt-tokens-details \
              --kv-transfer-config \
              '{"kv_connector":"LMCacheMPConnector", "kv_role":"kv_both"}'
 

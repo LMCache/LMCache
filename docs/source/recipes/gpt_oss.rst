@@ -47,12 +47,8 @@ Validated models
       .. code-block:: bash
 
          vllm serve openai/gpt-oss-20b \
-             --gpu-memory-utilization 0.9 \
-             --enable-prefix-caching \
-             --enable-chunked-prefill \
              --enable-auto-tool-choice \
              --tool-call-parser openai \
-             --enable-prompt-tokens-details \
              --kv-transfer-config \
              '{"kv_connector":"LMCacheMPConnector", "kv_role":"kv_both"}'
 
