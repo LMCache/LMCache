@@ -95,7 +95,13 @@ class BenchCommand(BaseCommand):
         parser.add_argument(
             "--workload",
             default=None,
-            choices=["long-doc-qa", "multi-round-chat", "random-prefill"],
+            choices=[
+                "long-doc-permutator",
+                "long-doc-qa",
+                "multi-round-chat",
+                "prefix-suffix-tuner",
+                "random-prefill",
+            ],
             help="Workload type.",
         )
         parser.add_argument(
@@ -152,6 +158,41 @@ class BenchCommand(BaseCommand):
                 "Export resolved configuration to a JSON file and exit. "
                 "Does not run the benchmark or enter interactive mode."
             ),
+        )
+
+        # --- Long-doc-permutator workload args ---
+        ldp_group = parser.add_argument_group("long-doc-permutator workload options")
+        ldp_group.add_argument(
+            "--ldp-num-contexts",
+            type=int,
+            default=5,
+            help="Number of unique context documents (default: 5).",
+        )
+        ldp_group.add_argument(
+            "--ldp-context-length",
+            type=int,
+            default=5000,
+            help="Token length of each context (default: 5000).",
+        )
+        ldp_group.add_argument(
+            "--ldp-system-prompt-length",
+            type=int,
+            default=1000,
+            help="Token length of the shared system prompt (default: 1000). "
+            "Use 0 for no system prompt.",
+        )
+        ldp_group.add_argument(
+            "--ldp-num-permutations",
+            type=int,
+            default=10,
+            help="Number of distinct permutations to send (default: 10). "
+            "Capped at N! where N = --ldp-num-contexts.",
+        )
+        ldp_group.add_argument(
+            "--ldp-num-inflight-requests",
+            type=int,
+            default=1,
+            help="Max concurrent in-flight requests (default: 1).",
         )
 
         # --- Long-doc-qa workload args ---
@@ -220,6 +261,36 @@ class BenchCommand(BaseCommand):
             type=float,
             default=60.0,
             help="Benchmark duration in seconds (default: 60).",
+        )
+
+        # --- Prefix-suffix-tuner workload args ---
+        psf_group = parser.add_argument_group(
+            "prefix-suffix-tuner workload options",
+        )
+        psf_group.add_argument(
+            "--psf-context-length",
+            type=int,
+            default=8000,
+            help="Total tokens per request (prefix + breaker + suffix) "
+            "(default: 8000).",
+        )
+        psf_group.add_argument(
+            "--psf-prefix-ratio",
+            type=float,
+            default=0.8,
+            help="Fraction of context-length used by the prefix (default: 0.8). "
+            "Must be in (0.0, 1.0). The remainder (minus a 32-token breaker) is "
+            "the shared suffix.",
+        )
+        psf_group.add_argument(
+            "--psf-thrash",
+            type=float,
+            default=20.0,
+            help="Size in GB of the KV-cache tier to overflow (default: 20.0). "
+            "The workload sizes its prefix pool to slightly more than this, "
+            "so every pass-2 request misses that tier and falls through to "
+            "the next one. Use the L0 (HBM) size for vanilla vLLM baselines, "
+            "or the L1 (LMCache DRAM) size for tiered baselines.",
         )
 
         # --- Random-prefill workload args ---

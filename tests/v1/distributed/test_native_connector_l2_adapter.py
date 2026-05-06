@@ -8,7 +8,6 @@ C++ IStorageConnector interface, so no Redis or C++ build is needed.
 
 # Standard
 import ctypes
-import os
 import select
 import threading
 
@@ -27,6 +26,7 @@ from lmcache.v1.memory_management import (
     MemoryObjMetadata,
     TensorMemoryObj,
 )
+from lmcache.v1.platform import consume_fd, create_event_notifier
 
 # =============================================================================
 # Mock Native Connector (simulates the pybind C++ IStorageConnector interface)
@@ -48,7 +48,7 @@ class MockNativeConnector:
     """
 
     def __init__(self):
-        self._efd = os.eventfd(0, os.EFD_NONBLOCK | os.EFD_CLOEXEC)
+        self._efd = create_event_notifier()
         self._store: dict[str, bytes] = {}
         self._next_id = 1
         self._completions: list[tuple[int, bool, str, list[bool] | None]] = []
@@ -56,7 +56,7 @@ class MockNativeConnector:
         self._closed = False
 
     def event_fd(self) -> int:
-        return self._efd
+        return self._efd.fileno()
 
     def submit_batch_set(self, keys: list[str], memoryviews: list) -> int:
         with self._lock:
@@ -108,10 +108,26 @@ class MockNativeConnector:
 
         return fid
 
+    def submit_batch_delete(self, keys: list[str]) -> int:
+        with self._lock:
+            fid = self._next_id
+            self._next_id += 1
+
+        results = []
+        for key in keys:
+            if key in self._store:
+                del self._store[key]
+                results.append(True)
+            else:
+                results.append(False)
+        self._push_completion(fid, True, "", results)
+
+        return fid
+
     def drain_completions(self) -> list[tuple[int, bool, str, list[bool] | None]]:
         # Drain the eventfd
         try:
-            os.eventfd_read(self._efd)
+            self._efd.consume()
         except BlockingIOError:
             pass
 
@@ -123,7 +139,7 @@ class MockNativeConnector:
     def close(self):
         if not self._closed:
             self._closed = True
-            os.close(self._efd)
+            self._efd.close()
 
     def _push_completion(
         self, fid: int, ok: bool, error: str, result_bools: list[bool] | None
@@ -132,7 +148,7 @@ class MockNativeConnector:
             self._completions.append((fid, ok, error, result_bools))
         # Signal the eventfd
         try:
-            os.eventfd_write(self._efd, 1)
+            self._efd.notify()
         except OSError:
             pass
 
@@ -170,7 +186,7 @@ def wait_for_event_fd(event_fd: int, timeout: float = 5.0) -> bool:
     events = poll.poll(timeout * 1000)
     if events:
         try:
-            os.eventfd_read(event_fd)
+            consume_fd(event_fd)
         except BlockingIOError:
             pass
         return True
@@ -203,6 +219,9 @@ class TestObjectKeySerialization:
         assert _object_key_to_string(k1) != _object_key_to_string(k2)
 
     def test_serialization_format(self):
+        """Unsalted keys use the 3-field shape — identical to the
+        pre-cache_salt wire format, so existing remote storage
+        stays valid."""
         key = ObjectKey(
             chunk_hash=b"\x00\x01\x02\x03",
             model_name="llama",
@@ -210,6 +229,168 @@ class TestObjectKeySerialization:
         )
         s = _object_key_to_string(key)
         assert s == "llama@000000ff@00010203"
+
+    def test_salted_serialization_format(self):
+        """Salted keys append ``@<cache_salt>`` as a 4th field."""
+        key = ObjectKey(
+            chunk_hash=b"\x00\x01\x02\x03",
+            model_name="llama",
+            kv_rank=255,
+            cache_salt="alice",
+        )
+        s = _object_key_to_string(key)
+        assert s == "llama@000000ff@00010203@alice"
+
+    def test_different_salts_produce_different_strings(self):
+        base = {
+            "chunk_hash": b"\x00\x01\x02\x03",
+            "model_name": "llama",
+            "kv_rank": 0,
+        }
+        k_empty = ObjectKey(**base)
+        k_alice = ObjectKey(**base, cache_salt="alice")
+        k_bob = ObjectKey(**base, cache_salt="bob")
+        s_empty = _object_key_to_string(k_empty)
+        s_alice = _object_key_to_string(k_alice)
+        s_bob = _object_key_to_string(k_bob)
+        assert s_empty != s_alice
+        assert s_alice != s_bob
+        # Empty salt has no trailing "@salt", salted keys do.
+        assert s_empty.count("@") == 2  # 3 fields
+        assert s_alice.endswith("@alice")
+        assert s_bob.endswith("@bob")
+
+
+class TestObjectKeyModelNameValidation:
+    """model_name must not contain ``@`` — the L2 adapters split keys
+    and filenames on ``@`` and rely on this invariant."""
+
+    def test_reject_at_in_model_name(self):
+        with pytest.raises(ValueError, match="model_name"):
+            ObjectKey(
+                chunk_hash=b"\x00",
+                model_name="ns@model",
+                kv_rank=0,
+            )
+
+    def test_slash_in_model_name_is_accepted(self):
+        # '/' is sanitized to '-SEP-' by the FS adapter; the invariant
+        # is only about '@'.
+        key = ObjectKey(
+            chunk_hash=b"\x00",
+            model_name="meta-llama/Llama-3",
+            kv_rank=0,
+        )
+        assert key.model_name == "meta-llama/Llama-3"
+
+
+class TestObjectKeyCacheSaltValidation:
+    """cache_salt must not contain ``@``, ``/``, ``\\``, or NUL, and must
+    be <= 128 chars. The invariant is enforced at construction time so
+    all downstream serializers (Python + C++) can rely on it."""
+
+    def test_reject_at_in_salt(self):
+        with pytest.raises(ValueError, match="cache_salt"):
+            ObjectKey(
+                chunk_hash=b"\x00",
+                model_name="m",
+                kv_rank=0,
+                cache_salt="alice@bob",
+            )
+
+    def test_reject_leading_at_in_salt(self):
+        with pytest.raises(ValueError, match="cache_salt"):
+            ObjectKey(
+                chunk_hash=b"\x00",
+                model_name="m",
+                kv_rank=0,
+                cache_salt="@user",
+            )
+
+    def test_reject_slash_in_salt(self):
+        with pytest.raises(ValueError, match="cache_salt"):
+            ObjectKey(
+                chunk_hash=b"\x00",
+                model_name="m",
+                kv_rank=0,
+                cache_salt="tenant/alice",
+            )
+
+    def test_reject_backslash_in_salt(self):
+        with pytest.raises(ValueError, match="cache_salt"):
+            ObjectKey(
+                chunk_hash=b"\x00",
+                model_name="m",
+                kv_rank=0,
+                cache_salt="tenant\\alice",
+            )
+
+    def test_reject_nul_in_salt(self):
+        with pytest.raises(ValueError, match="cache_salt"):
+            ObjectKey(
+                chunk_hash=b"\x00",
+                model_name="m",
+                kv_rank=0,
+                cache_salt="bad\x00salt",
+            )
+
+    def test_reject_too_long_salt(self):
+        with pytest.raises(ValueError, match="max length"):
+            ObjectKey(
+                chunk_hash=b"\x00",
+                model_name="m",
+                kv_rank=0,
+                cache_salt="x" * 129,
+            )
+
+    def test_max_length_salt_accepted(self):
+        key = ObjectKey(
+            chunk_hash=b"\x00",
+            model_name="m",
+            kv_rank=0,
+            cache_salt="x" * 128,
+        )
+        assert len(key.cache_salt) == 128
+
+    def test_empty_salt_is_accepted(self):
+        # Default (unsalted) path.
+        key = ObjectKey(chunk_hash=b"\x00", model_name="m", kv_rank=0)
+        assert key.cache_salt == ""
+
+    def test_non_salt_chars_are_accepted(self):
+        # Common identifier chars are fine.
+        key = ObjectKey(
+            chunk_hash=b"\x00",
+            model_name="m",
+            kv_rank=0,
+            cache_salt="user-abc_123.xyz:42",
+        )
+        assert key.cache_salt == "user-abc_123.xyz:42"
+
+
+class TestObjectKeyIsolation:
+    """cache_salt must participate in eq/hash so the L1/L2 caches treat
+    same-content/different-user entries as distinct."""
+
+    def test_different_salts_are_unequal(self):
+        base = {"chunk_hash": b"x", "model_name": "m", "kv_rank": 0}
+        a = ObjectKey(**base, cache_salt="alice")
+        b = ObjectKey(**base, cache_salt="bob")
+        assert a != b
+        assert hash(a) != hash(b)
+
+    def test_empty_salt_is_unequal_to_any_salted(self):
+        base = {"chunk_hash": b"x", "model_name": "m", "kv_rank": 0}
+        unsalted = ObjectKey(**base)
+        salted = ObjectKey(**base, cache_salt="alice")
+        assert unsalted != salted
+
+    def test_same_salt_are_equal(self):
+        base = {"chunk_hash": b"x", "model_name": "m", "kv_rank": 0}
+        a = ObjectKey(**base, cache_salt="alice")
+        b = ObjectKey(**base, cache_salt="alice")
+        assert a == b
+        assert hash(a) == hash(b)
 
 
 # =============================================================================
@@ -946,3 +1127,221 @@ class TestFSNativeL2AdapterConfig:
             base_path="/tmp/test",
         )
         assert get_type_name_for_config(cfg) == "fs_native"
+
+
+# =============================================================================
+# Delete Interface Tests
+# =============================================================================
+
+
+class TestDeleteInterface:
+    def test_delete_existing_key(self, adapter):
+        key = create_object_key(1)
+        obj = create_memory_obj()
+        store_fd = adapter.get_store_event_fd()
+        lookup_fd = adapter.get_lookup_and_lock_event_fd()
+
+        # Store
+        adapter.submit_store_task([key], [obj])
+        wait_for_event_fd(store_fd, timeout=5.0)
+        adapter.pop_completed_store_tasks()
+
+        # Verify exists
+        task_id = adapter.submit_lookup_and_lock_task([key])
+        wait_for_event_fd(lookup_fd, timeout=5.0)
+        bitmap = adapter.query_lookup_and_lock_result(task_id)
+        assert bitmap.test(0) is True
+        adapter.submit_unlock([key])
+
+        # Delete (synchronous)
+        adapter.delete([key])
+
+        # Verify gone
+        task_id = adapter.submit_lookup_and_lock_task([key])
+        wait_for_event_fd(lookup_fd, timeout=5.0)
+        bitmap = adapter.query_lookup_and_lock_result(task_id)
+        assert bitmap.test(0) is False
+
+    def test_delete_nonexistent_key(self, adapter):
+        key = create_object_key(999)
+        adapter.delete([key])  # should not raise
+
+    def test_delete_empty_keys(self, adapter):
+        adapter.delete([])  # should not raise
+
+    def test_delete_batch(self, adapter):
+        keys = [create_object_key(i) for i in range(5)]
+        objs = [create_memory_obj(fill_value=float(i)) for i in range(5)]
+        store_fd = adapter.get_store_event_fd()
+        lookup_fd = adapter.get_lookup_and_lock_event_fd()
+
+        # Store all
+        adapter.submit_store_task(keys, objs)
+        wait_for_event_fd(store_fd, timeout=5.0)
+        adapter.pop_completed_store_tasks()
+
+        # Delete first 3
+        adapter.delete(keys[:3])
+
+        # Verify: first 3 gone, last 2 remain
+        task_id = adapter.submit_lookup_and_lock_task(keys)
+        wait_for_event_fd(lookup_fd, timeout=5.0)
+        bitmap = adapter.query_lookup_and_lock_result(task_id)
+        for i in range(3):
+            assert bitmap.test(i) is False
+        for i in range(3, 5):
+            assert bitmap.test(i) is True
+        adapter.submit_unlock(keys[3:])
+
+
+# =============================================================================
+# Delete Backward Compatibility Tests
+# =============================================================================
+
+
+class TestDeleteBackwardCompatibility:
+    def test_delete_noop_without_submit_batch_delete(self):
+        """Connector without submit_batch_delete => delete is no-op."""
+
+        class NoDeleteConnector:
+            """Mock connector that only has the 6 original methods."""
+
+            def __init__(self):
+                self._efd = create_event_notifier()
+                self._closed = False
+
+            def event_fd(self) -> int:
+                return self._efd.fileno()
+
+            def submit_batch_get(self, keys, memoryviews):
+                return 0
+
+            def submit_batch_set(self, keys, memoryviews):
+                return 0
+
+            def submit_batch_exists(self, keys):
+                return 0
+
+            def drain_completions(self):
+                return []
+
+            def close(self):
+                if not self._closed:
+                    self._closed = True
+                    self._efd.close()
+
+        client = NoDeleteConnector()
+        adp = NativeConnectorL2Adapter(client)
+        try:
+            key = create_object_key(1)
+            adp.delete([key])  # should not raise, just no-op
+        finally:
+            adp.close()
+
+
+# =============================================================================
+# Usage Tracking Tests
+# =============================================================================
+
+
+@pytest.fixture
+def adapter_with_capacity():
+    """Adapter with max_capacity_gb set for usage tracking tests."""
+    mock_client = MockNativeConnector()
+    # 100 floats * 4 bytes = 400 bytes per obj; capacity = 2000 bytes = 2000/1024^3 GB
+    adp = NativeConnectorL2Adapter(mock_client, max_capacity_gb=2000 / (1024**3))
+    yield adp
+    adp.close()
+
+
+class TestUsageTracking:
+    def test_get_usage_without_capacity(self, adapter):
+        """Without max_capacity_bytes, usage_fraction == -1 (sentinel)."""
+        usage = adapter.get_usage()
+        assert usage.usage_fraction == -1.0
+        assert usage.total_capacity_bytes == 0
+
+    def test_get_usage_starts_at_zero(self, adapter_with_capacity):
+        usage = adapter_with_capacity.get_usage()
+        assert usage.usage_fraction == 0.0
+        assert usage.total_bytes_used == 0
+
+    def test_get_usage_after_store(self, adapter_with_capacity):
+        adp = adapter_with_capacity
+        store_fd = adp.get_store_event_fd()
+
+        key = create_object_key(1)
+        obj = create_memory_obj(size=100, fill_value=1.0)  # 100 floats = 400 bytes
+
+        adp.submit_store_task([key], [obj])
+        wait_for_event_fd(store_fd, timeout=5.0)
+        adp.pop_completed_store_tasks()
+
+        usage = adp.get_usage()
+        # 400 bytes / 2000 bytes = 0.2
+        assert usage.usage_fraction == pytest.approx(0.2)
+        assert usage.total_bytes_used == 400
+
+    def test_get_usage_after_delete(self, adapter_with_capacity):
+        adp = adapter_with_capacity
+        store_fd = adp.get_store_event_fd()
+
+        key = create_object_key(1)
+        obj = create_memory_obj(size=100, fill_value=1.0)
+
+        # Store
+        adp.submit_store_task([key], [obj])
+        wait_for_event_fd(store_fd, timeout=5.0)
+        adp.pop_completed_store_tasks()
+
+        assert adp.get_usage().usage_fraction == pytest.approx(0.2)
+
+        # Delete
+        adp.delete([key])
+
+        assert adp.get_usage().usage_fraction == pytest.approx(0.0)
+        assert adp.get_usage().total_bytes_used == 0
+
+    def test_get_usage_store_delete_cycle(self, adapter_with_capacity):
+        adp = adapter_with_capacity
+        store_fd = adp.get_store_event_fd()
+
+        # Store 3 objects (3 * 400 = 1200 bytes)
+        keys = [create_object_key(i) for i in range(3)]
+        objs = [create_memory_obj(size=100, fill_value=float(i)) for i in range(3)]
+
+        adp.submit_store_task(keys, objs)
+        wait_for_event_fd(store_fd, timeout=5.0)
+        adp.pop_completed_store_tasks()
+
+        usage = adp.get_usage()
+        assert usage.usage_fraction == pytest.approx(1200 / 2000)
+        assert usage.total_bytes_used == 1200
+
+        # Delete 2
+        adp.delete(keys[:2])
+
+        usage = adp.get_usage()
+        assert usage.usage_fraction == pytest.approx(400 / 2000)
+        assert usage.total_bytes_used == 400
+
+    def test_idempotent_store_no_double_count(self, adapter_with_capacity):
+        adp = adapter_with_capacity
+        store_fd = adp.get_store_event_fd()
+
+        key = create_object_key(1)
+        obj = create_memory_obj(size=100, fill_value=1.0)
+
+        # Store same key twice
+        adp.submit_store_task([key], [obj])
+        wait_for_event_fd(store_fd, timeout=5.0)
+        adp.pop_completed_store_tasks()
+
+        adp.submit_store_task([key], [obj])
+        wait_for_event_fd(store_fd, timeout=5.0)
+        adp.pop_completed_store_tasks()
+
+        # Should only count once
+        usage = adp.get_usage()
+        assert usage.usage_fraction == pytest.approx(0.2)
+        assert usage.total_bytes_used == 400

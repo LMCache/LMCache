@@ -12,7 +12,12 @@ import torch
 import zmq
 
 # First Party
-from lmcache.v1.multiprocess.custom_types import CudaIPCWrapper, IPCCacheEngineKey
+from lmcache.utils import EngineType
+from lmcache.v1.multiprocess.custom_types import (
+    BlockAllocationRecord,
+    CudaIPCWrapper,
+    IPCCacheEngineKey,
+)
 from lmcache.v1.multiprocess.mq import (
     BlockingRequestHandler,
     MessageQueueClient,
@@ -380,7 +385,7 @@ def test_mq_register_kv_cache():
     # Run test with REGISTER_KV_CACHE request
     helper.run_test(
         request_type=RequestType.REGISTER_KV_CACHE,
-        payloads=[gpu_id, kv_cache, "testmodel", 1, {}],
+        payloads=[gpu_id, kv_cache, "testmodel", 1, EngineType.VLLM, {}],
         expected_response=None,
         num_requests=1,
     )
@@ -488,13 +493,14 @@ def test_mq_retrieve():
 def test_mq_lookup():
     """
     Test MessageQueue with LOOKUP request type.
-    LOOKUP takes (key: KeyType) and returns int.
+    LOOKUP takes (key: KeyType, tp_size: int) and returns None.
+    The job is tracked server-side by request_id; poll via QUERY_PREFETCH_STATUS.
     """
     # Create a single test key
     key = create_cache_key(0)
 
-    # Expected response: 1 (dummy handler always returns 1)
-    expected_response = 1
+    # Expected response: None (LOOKUP no longer returns a job_id)
+    expected_response = None
 
     # Create test helper and register handler
     helper = MessageQueueTestHelper(server_url="tcp://127.0.0.1:5564")
@@ -517,8 +523,8 @@ def test_mq_lookup_with_different_key():
     # Create a different test key
     key = create_cache_key(42)
 
-    # Expected response: 1 (dummy handler always returns 1)
-    expected_response = 1
+    # Expected response: None (LOOKUP no longer returns a job_id)
+    expected_response = None
 
     # Create test helper and register handler
     helper = MessageQueueTestHelper(server_url="tcp://127.0.0.1:5565")
@@ -529,6 +535,59 @@ def test_mq_lookup_with_different_key():
         request_type=RequestType.LOOKUP,
         payloads=[key, 1],
         expected_response=expected_response,
+        num_requests=1,
+    )
+
+
+def test_mq_report_block_allocation():
+    """
+    Test MessageQueue with REPORT_BLOCK_ALLOCATION request type.
+    REPORT_BLOCK_ALLOCATION takes (instance_id, model_name, records)
+    and returns None.
+    """
+    records = [
+        BlockAllocationRecord(
+            req_id="req-1",
+            new_block_ids=[0, 1, 2],
+            new_token_ids=[100, 200, 300],
+        ),
+        BlockAllocationRecord(
+            req_id="req-2",
+            new_block_ids=[3, 4],
+            new_token_ids=[400, 500],
+        ),
+    ]
+
+    helper = MessageQueueTestHelper(server_url="tcp://127.0.0.1:5566")
+    helper.register_handler(
+        RequestType.REPORT_BLOCK_ALLOCATION,
+        test_mq_handler_helpers.report_block_allocations_handler,
+    )
+
+    helper.run_test(
+        request_type=RequestType.REPORT_BLOCK_ALLOCATION,
+        payloads=[42, "test-model", records],
+        expected_response=None,
+        num_requests=1,
+    )
+
+
+def test_mq_report_block_allocation_empty():
+    """
+    Test REPORT_BLOCK_ALLOCATION with an empty records list.
+    """
+    records: list[BlockAllocationRecord] = []
+
+    helper = MessageQueueTestHelper(server_url="tcp://127.0.0.1:5567")
+    helper.register_handler(
+        RequestType.REPORT_BLOCK_ALLOCATION,
+        test_mq_handler_helpers.report_block_allocations_handler,
+    )
+
+    helper.run_test(
+        request_type=RequestType.REPORT_BLOCK_ALLOCATION,
+        payloads=[0, "", records],
+        expected_response=None,
         num_requests=1,
     )
 

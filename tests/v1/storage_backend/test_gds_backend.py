@@ -29,13 +29,21 @@ from lmcache.v1.storage_backend.gds_backend import (
 )
 from tests.v1.utils import create_test_memory_obj, has_cufile, has_hipfile
 
+# Optional override for tempfile root. In CI we point this at a GDS-capable
+# host-backed mount (see .buildkite/k3_tests/unit/run.sh); locally, it's
+# unset and tempfile falls back to its default (usually /tmp). cuFile needs
+# direct-I/O-capable storage (ext4/xfs on real disk); overlayfs and tmpfs
+# fail with CU_FILE_IO_NOT_SUPPORTED (err=5027).
+_TEST_TMPDIR = os.environ.get("LMCACHE_TEST_TMPDIR") or None
 
-def create_test_config(gds_path: str):
+
+def create_test_config(gds_path: str, gds_path_sharding: str = "by_gpu"):
     config = LMCacheEngineConfig.from_defaults(
         chunk_size=256,
         gds_path=gds_path,
+        gds_path_sharding=gds_path_sharding,
         lmcache_instance_id="test_instance",
-        cufile_buffer_size=256,
+        gds_buffer_size=256,
         extra_config={"use_direct_io": True},
     )
     return config
@@ -67,7 +75,7 @@ def create_test_metadata():
 
 @pytest.fixture
 def temp_gds_path():
-    temp_dir = tempfile.mkdtemp()
+    temp_dir = tempfile.mkdtemp(dir=_TEST_TMPDIR)
     yield temp_dir
     if os.path.exists(temp_dir):
         shutil.rmtree(temp_dir)
@@ -442,11 +450,11 @@ class TestGdsBackend:
                     path, _, _, _ = backend._key_to_path(key)
                     assert path.endswith(".weka1")
                     assert backend.data_suffix == ".weka1"
-                    assert backend.use_cufile
+                    assert backend.use_gds
                 finally:
                     backend.close()
 
-    def test_weka_disallows_disabling_cufile(self, temp_gds_path, async_loop):
+    def test_weka_disallows_disabling_gds(self, temp_gds_path, async_loop):
         class DummyAllocator:
             def __init__(self):
                 self.base_pointer = 0
@@ -466,7 +474,7 @@ class TestGdsBackend:
             ),
         ):
             config = create_test_config(temp_gds_path)
-            config.extra_config["use_cufile"] = False
+            config.use_gds = False
             metadata = create_test_metadata()
 
             with pytest.raises(AssertionError):
@@ -492,7 +500,12 @@ class TestGdsMultiPath:
     """
 
     @staticmethod
-    def _make_backend(gds_path: str, dst_device: str, async_loop):
+    def _make_backend(
+        gds_path: str,
+        dst_device: str,
+        async_loop,
+        gds_path_sharding: str = "by_gpu",
+    ):
         """Create a GdsBackend with mocked allocator and fstype.
 
         Mocks are used so the tests run without cuFile / real NVMe.
@@ -505,7 +518,7 @@ class TestGdsMultiPath:
             def close(self):
                 pass
 
-        config = create_test_config(gds_path)
+        config = create_test_config(gds_path, gds_path_sharding=gds_path_sharding)
         metadata = create_test_metadata()
         with (
             mock.patch(
@@ -541,7 +554,7 @@ class TestGdsMultiPath:
 
     def test_multi_path_parsing(self, async_loop):
         """Comma-separated paths are split into gds_paths list."""
-        paths = [tempfile.mkdtemp() for _ in range(3)]
+        paths = [tempfile.mkdtemp(dir=_TEST_TMPDIR) for _ in range(3)]
         try:
             gds_path = ",".join(paths)
             backend = self._make_backend(gds_path, "cuda:0", async_loop)
@@ -556,7 +569,7 @@ class TestGdsMultiPath:
 
     def test_multi_path_parsing_with_spaces(self, async_loop):
         """Spaces around commas are stripped."""
-        paths = [tempfile.mkdtemp() for _ in range(2)]
+        paths = [tempfile.mkdtemp(dir=_TEST_TMPDIR) for _ in range(2)]
         try:
             gds_path = f"  {paths[0]}  ,  {paths[1]}  "
             backend = self._make_backend(gds_path, "cuda:0", async_loop)
@@ -570,7 +583,7 @@ class TestGdsMultiPath:
 
     def test_gpu_affinity_selects_path(self, async_loop):
         """Different cuda devices select different paths via modulo."""
-        paths = [tempfile.mkdtemp() for _ in range(4)]
+        paths = [tempfile.mkdtemp(dir=_TEST_TMPDIR) for _ in range(4)]
         try:
             gds_path = ",".join(paths)
             for device_id in range(8):
@@ -590,7 +603,7 @@ class TestGdsMultiPath:
 
     def test_all_directories_created(self, async_loop):
         """All paths in gds_paths get their directories created."""
-        base = tempfile.mkdtemp()
+        base = tempfile.mkdtemp(dir=_TEST_TMPDIR)
         try:
             paths = [os.path.join(base, f"nvme{i}") for i in range(3)]
             gds_path = ",".join(paths)
@@ -605,7 +618,7 @@ class TestGdsMultiPath:
 
     def test_key_to_path_uses_selected_path(self, async_loop):
         """_key_to_path builds file paths under the selected gds_path."""
-        paths = [tempfile.mkdtemp() for _ in range(2)]
+        paths = [tempfile.mkdtemp(dir=_TEST_TMPDIR) for _ in range(2)]
         try:
             gds_path = ",".join(paths)
             backend = self._make_backend(gds_path, "cuda:0", async_loop)
@@ -621,7 +634,7 @@ class TestGdsMultiPath:
 
     def test_deterministic_path_selection(self, async_loop):
         """Same device always selects the same path."""
-        paths = [tempfile.mkdtemp() for _ in range(3)]
+        paths = [tempfile.mkdtemp(dir=_TEST_TMPDIR) for _ in range(3)]
         try:
             gds_path = ",".join(paths)
             selected = set()
@@ -643,7 +656,7 @@ class TestGdsMultiPath:
         under paths[1].  The scan should still discover it because
         ``_scan_metadata`` iterates all ``gds_paths``.
         """
-        paths = [tempfile.mkdtemp() for _ in range(2)]
+        paths = [tempfile.mkdtemp(dir=_TEST_TMPDIR) for _ in range(2)]
         try:
             # chunk_hash must have >=4 decimal digits so l1/l2 dirs
             # are each 2 chars (the scanner filters on len == 2).
@@ -705,7 +718,7 @@ class TestGdsMultiPath:
         ``contains()`` falls back to ``_try_to_read_metadata`` which
         should search all ``gds_paths``, not just the affinity path.
         """
-        paths = [tempfile.mkdtemp() for _ in range(2)]
+        paths = [tempfile.mkdtemp(dir=_TEST_TMPDIR) for _ in range(2)]
         try:
             key = CacheEngineKey(
                 model_name="testmodel",
@@ -755,3 +768,34 @@ class TestGdsMultiPath:
         finally:
             for p in paths:
                 shutil.rmtree(p, ignore_errors=True)
+
+    def test_gds_path_sharding_default(self, temp_gds_path, async_loop):
+        """Default gds_path_sharding is 'by_gpu' (backend inits OK)."""
+        backend = self._make_backend(temp_gds_path, "cuda:0", async_loop)
+        try:
+            assert backend.gds_path == temp_gds_path
+        finally:
+            backend.close()
+
+    def test_gds_path_sharding_explicit_by_gpu(self, temp_gds_path, async_loop):
+        """Explicitly setting gds_path_sharding='by_gpu' works."""
+        backend = self._make_backend(
+            temp_gds_path,
+            "cuda:0",
+            async_loop,
+            gds_path_sharding="by_gpu",
+        )
+        try:
+            assert backend.gds_path == temp_gds_path
+        finally:
+            backend.close()
+
+    def test_gds_path_sharding_unsupported_raises(self, temp_gds_path, async_loop):
+        """Unsupported gds_path_sharding value raises ValueError."""
+        with pytest.raises(ValueError, match="Unsupported path sharding strategy"):
+            self._make_backend(
+                temp_gds_path,
+                "cuda:0",
+                async_loop,
+                gds_path_sharding="round_robin",
+            )

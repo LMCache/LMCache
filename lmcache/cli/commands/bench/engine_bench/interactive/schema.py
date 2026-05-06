@@ -106,8 +106,16 @@ ALL_ITEMS: list[ConfigItem] = [
         default=None,
         required=True,
         choices=[
+            (
+                "long-doc-permutator",
+                "Query the same set of long documents with different orders",
+            ),
             ("long-doc-qa", "Repeated Q&A over long documents (tests KV cache reuse)"),
             ("multi-round-chat", "Multi-turn chat with stateful sessions"),
+            (
+                "prefix-suffix-tuner",
+                "Two-pass sequential workload demonstrating tiered KV cache reuse",
+            ),
             ("random-prefill", "Prefill-only requests fired simultaneously"),
         ],
         phase=PHASE_REQUIRED,
@@ -170,6 +178,52 @@ ALL_ITEMS: list[ConfigItem] = [
         input_type="float",
         default=100.0,
         phase=PHASE_GENERAL,
+    ),
+    # ── Phase 3: long-doc-permutator ─────────────────────────────────
+    ConfigItem(
+        key="ldp_num_contexts",
+        display_name="Number of contexts",
+        description="Number of unique context documents to generate.",
+        input_type="int",
+        default=5,
+        condition=_workload_is("long-doc-permutator"),
+        phase=PHASE_WORKLOAD,
+    ),
+    ConfigItem(
+        key="ldp_context_length",
+        display_name="Context length (tokens)",
+        description="Token length of each context document.",
+        input_type="int",
+        default=5000,
+        condition=_workload_is("long-doc-permutator"),
+        phase=PHASE_WORKLOAD,
+    ),
+    ConfigItem(
+        key="ldp_system_prompt_length",
+        display_name="System prompt length (tokens)",
+        description="Token length of the shared system prompt. Use 0 for none.",
+        input_type="int",
+        default=1000,
+        condition=_workload_is("long-doc-permutator"),
+        phase=PHASE_WORKLOAD,
+    ),
+    ConfigItem(
+        key="ldp_num_permutations",
+        display_name="Number of permutations",
+        description="Distinct permutations to send. Capped at N! (N = num_contexts).",
+        input_type="int",
+        default=10,
+        condition=_workload_is("long-doc-permutator"),
+        phase=PHASE_WORKLOAD,
+    ),
+    ConfigItem(
+        key="ldp_num_inflight_requests",
+        display_name="Max inflight requests",
+        description="Maximum concurrent in-flight requests.",
+        input_type="int",
+        default=1,
+        condition=_workload_is("long-doc-permutator"),
+        phase=PHASE_WORKLOAD,
     ),
     # ── Phase 3: long-doc-qa ──────────────────────────────────────────
     ConfigItem(
@@ -265,6 +319,43 @@ ALL_ITEMS: list[ConfigItem] = [
         input_type="float",
         default=60.0,
         condition=_workload_is("multi-round-chat"),
+        phase=PHASE_WORKLOAD,
+    ),
+    # ── Phase 3: prefix-suffix-tuner ──────────────────────────────────
+    ConfigItem(
+        key="psf_context_length",
+        display_name="Context length (tokens)",
+        description="Total tokens per request (prefix + breaker + suffix).",
+        input_type="int",
+        default=8000,
+        condition=_workload_is("prefix-suffix-tuner"),
+        phase=PHASE_WORKLOAD,
+    ),
+    ConfigItem(
+        key="psf_prefix_ratio",
+        display_name="Prefix ratio",
+        description=(
+            "Fraction of context-length used by the prefix. Must be in "
+            "(0.0, 1.0). The remainder (minus a 32-token breaker) is the "
+            "shared suffix."
+        ),
+        input_type="float",
+        default=0.8,
+        condition=_workload_is("prefix-suffix-tuner"),
+        phase=PHASE_WORKLOAD,
+    ),
+    ConfigItem(
+        key="psf_thrash",
+        display_name="Target tier size (GB)",
+        description=(
+            "Size in GB of the KV-cache tier to overflow. The prefix pool "
+            "is sized to slightly more than this, so every pass-2 request "
+            "misses the targeted tier. Use the L0 (HBM) size for vanilla "
+            "vLLM, or the L1 (LMCache DRAM) size for tiered baselines."
+        ),
+        input_type="float",
+        default=20.0,
+        condition=_workload_is("prefix-suffix-tuner"),
         phase=PHASE_WORKLOAD,
     ),
     # ── Phase 3: random-prefill ───────────────────────────────────────

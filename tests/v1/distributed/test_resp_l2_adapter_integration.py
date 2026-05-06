@@ -22,6 +22,7 @@ from lmcache.v1.memory_management import (
     MemoryObjMetadata,
     TensorMemoryObj,
 )
+from lmcache.v1.platform import consume_fd
 
 REDIS_HOST = os.environ.get("REDIS_HOST", "localhost")
 REDIS_PORT = int(os.environ.get("REDIS_PORT", "6399"))
@@ -90,7 +91,7 @@ def wait_for_event_fd(event_fd: int, timeout: float = 10.0) -> bool:
     events = poll.poll(timeout * 1000)
     if events:
         try:
-            os.eventfd_read(event_fd)
+            consume_fd(event_fd)
         except BlockingIOError:
             pass
         return True
@@ -274,7 +275,7 @@ class TestRESPL2AdapterIntegration:
         """Verify the factory can create a RESP L2 adapter from config."""
         # First Party
         from lmcache.v1.distributed.l2_adapters import create_l2_adapter
-        from lmcache.v1.distributed.l2_adapters.native_connector_l2_adapter import (
+        from lmcache.v1.distributed.l2_adapters.resp_l2_adapter import (
             RESPL2AdapterConfig,
         )
 

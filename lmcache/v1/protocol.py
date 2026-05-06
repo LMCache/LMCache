@@ -96,6 +96,66 @@ def get_remote_metadata_bytes():
     return REMOTE_METADATA_BYTES
 
 
+def pad_shape_to_4d(shape: torch.Size) -> list[int]:
+    """Pad a shape with fewer than 4 dimensions to 4D using trailing
+    zeros.
+
+    Shapes that are already 4D are returned as-is.  For shapes with
+    fewer dimensions the missing trailing slots are filled with ``0``.
+    This is consistent with the convention used by
+    :class:`BinaryMemoryObj` (``[length, 0, 0, 0]``).
+
+    Args:
+        shape: The original tensor shape (1-D to 4-D).
+
+    Returns:
+        A list of exactly 4 integers representing the padded shape.
+
+    Raises:
+        AssertionError: If the shape has more than 4 dimensions.
+    """
+    assert len(shape) <= 4, (
+        f"Shape dimension must be <= 4 for serialization, got {len(shape)}"
+    )
+    if len(shape) == 4:
+        return list(shape)
+
+    padded = list(shape) + [0] * (4 - len(shape))
+    return padded
+
+
+def strip_shape_padding(
+    dims: list[int],
+    fmt: Optional[MemoryFormat] = MemoryFormat.UNDEFINED,
+) -> torch.Size:
+    """Strip trailing-zero padding that was added by
+    :func:`pad_shape_to_4d`.
+
+    Trailing zeros are removed so that the original dimensionality is
+    restored.  At least one dimension is always preserved.
+
+    For ``BINARY`` and ``BINARY_BUFFER`` formats, the shape is returned
+    as-is because these formats inherently use 4-D shapes with zero
+    padding (e.g., ``[length, 0, 0, 0]``).
+
+    Args:
+        dims: A list of 4 integers read from the serialized format.
+        fmt: The memory format of the serialized data.
+
+    Returns:
+        A :class:`torch.Size` with the padding removed.
+    """
+    if fmt in (MemoryFormat.BINARY, MemoryFormat.BINARY_BUFFER):
+        # These formats use 4D shapes with legitimate zero dimensions.
+        # Skip stripping to preserve the original shape.
+        return torch.Size(dims)
+
+    end = len(dims)
+    while end > 1 and dims[end - 1] == 0:
+        end -= 1
+    return torch.Size(dims[:end])
+
+
 @dataclass
 class RemoteMetadata:
     length: int
@@ -106,12 +166,9 @@ class RemoteMetadata:
     def _prepare_params(self):
         params = [self.length, int(self.fmt.value)]
         for shape, dtype in zip(self.shapes, self.dtypes, strict=True):
-            assert len(shape) == 4, "Shape dimension should be 4"
+            padded = pad_shape_to_4d(shape)
             params.append(DTYPE_TO_INT[dtype])
-            params.append(shape[0])
-            params.append(shape[1])
-            params.append(shape[2])
-            params.append(shape[3])
+            params.extend(padded)
         return params
 
     def serialize_into(self, buffer):
@@ -135,7 +192,8 @@ class RemoteMetadata:
         shapes = []
         dtypes = []
         for i in range(2, len(result), 5):
-            shapes.append(torch.Size(result[i + 1 : i + 5]))
+            dims = list(result[i + 1 : i + 5])
+            shapes.append(strip_shape_padding(dims, memory_fmt))
             dtypes.append(INT_TO_DTYPE[result[i]])
 
         return RemoteMetadata(
@@ -171,7 +229,7 @@ class ClientMetaMessage:
 
         # NOTE(Jiayi): 4 is the maximum dimension of memory object.
         # Pass in shape [x, 0, 0, 0] if it is a bytes memory object
-        assert len(self.shape) == 4, "Shape dimension should be 4"
+        padded = pad_shape_to_4d(self.shape)
 
         packed_bytes = struct.pack(
             f"iiiiiiiii{MAX_KEY_LENGTH}s",
@@ -180,10 +238,10 @@ class ClientMetaMessage:
             int(self.fmt.value),
             DTYPE_TO_INT[self.dtype],
             LOCATION_TO_INT[self.location],
-            self.shape[0],
-            self.shape[1],
-            self.shape[2],
-            self.shape[3],
+            padded[0],
+            padded[1],
+            padded[2],
+            padded[3],
             key_str.encode().ljust(MAX_KEY_LENGTH),
         )
         return packed_bytes
@@ -193,13 +251,14 @@ class ClientMetaMessage:
         command, length, fmt, dtype, location, shape0, shape1, shape2, shape3, key = (
             struct.unpack(f"iiiiiiiii{MAX_KEY_LENGTH}s", s)
         )
+        shape = strip_shape_padding([shape0, shape1, shape2, shape3], MemoryFormat(fmt))
         return ClientMetaMessage(
             ClientCommand(command),
             parse_cache_key(key.decode().strip()),
             length,
             MemoryFormat(fmt),
             INT_TO_DTYPE[dtype],
-            torch.Size([shape0, shape1, shape2, shape3]),
+            shape,
             INT_TO_LOCATION[location],
         )
 
@@ -223,17 +282,17 @@ class ServerMetaMessage:
     location: Optional[str] = None
 
     def serialize(self) -> bytes:
-        assert len(self.shape) == 4, "Shape dimension should be 4"
+        padded = pad_shape_to_4d(self.shape)
         packed_bytes = struct.pack(
             "iiiiiiiii",
             self.code.value,
             self.length,
             int(self.fmt.value),
             DTYPE_TO_INT[self.dtype],
-            self.shape[0],
-            self.shape[1],
-            self.shape[2],
-            self.shape[3],
+            padded[0],
+            padded[1],
+            padded[2],
+            padded[3],
             LOCATION_TO_INT[self.location],
         )
         return packed_bytes
@@ -247,11 +306,12 @@ class ServerMetaMessage:
         code, length, fmt, dtype, shape0, shape1, shape2, shape3, location = (
             struct.unpack("iiiiiiiii", s)
         )
+        shape = strip_shape_padding([shape0, shape1, shape2, shape3], MemoryFormat(fmt))
         return ServerMetaMessage(
             ServerReturnCode(code),
             length,
             MemoryFormat(fmt),
             INT_TO_DTYPE[dtype],
-            torch.Size([shape0, shape1, shape2, shape3]),
+            shape,
             INT_TO_LOCATION[location],
         )

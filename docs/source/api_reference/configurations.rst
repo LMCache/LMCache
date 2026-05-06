@@ -36,7 +36,10 @@ Basic cache settings that control the core functionality of LMCache.
      - Maximum CPU cache size in GB. Default: 5.0
    * - local_disk
      - LMCACHE_LOCAL_DISK
-     - Path to local disk cache. Format: "file:///path/to/cache".
+     - Path (or comma-separated paths) to local disk cache directories. Format: ``"file:///path/to/cache"`` or ``"/path/a,/path/b"`` for multi-device I/O. See ``local_disk_path_sharding`` for how paths are assigned to GPUs.
+   * - local_disk_path_sharding
+     - LMCACHE_LOCAL_DISK_PATH_SHARDING
+     - Strategy for selecting a path when multiple paths are provided. Currently only ``"by_gpu"`` is supported, which selects paths based on GPU device ID (default: "by_gpu").
    * - max_local_disk_size
      - LMCACHE_MAX_LOCAL_DISK_SIZE
      - Maximum disk cache size in GB. Default: 0.0
@@ -244,7 +247,7 @@ Settings for disaggregated prefill functionality. The latest/default PD is imple
      - PD role. Values: "sender" (prefiller) or "receiver" (decoder).
    * - pd_buffer_size
      - LMCACHE_PD_BUFFER_SIZE
-     - Transport buffer size for PD in bytes. Required for both senders and receivers when enable_pd=true
+     - Upper bound of PD transport buffer size (in bytes), aligned to chunk size. Required for both senders and receivers when enable_pd=true
    * - pd_buffer_device
      - LMCACHE_PD_BUFFER_DEVICE
      - Device for PD buffer. Values: "cpu", "cuda". Required for both senders and receivers when enable_pd=true
@@ -266,6 +269,15 @@ Settings for disaggregated prefill functionality. The latest/default PD is imple
    * - pd_proxy_port
      - LMCACHE_PD_PROXY_PORT
      - Port for proxy server. Required for senders to connect to inform the proxy when transfer to decoder has been completed
+   * - pd_skip_proxy_notification
+     - LMCACHE_PD_SKIP_PROXY_NOTIFICATION
+     - When true, the sender skips ZMQ proxy notification after KV transfer and does not require pd_proxy_host/pd_proxy_port. This option is intended for external orchestrators only (e.g., vLLM Production Stack router) that manage the prefill-decode request flow via HTTP and do not rely on ZMQ notifications. It must not be used with LMCache's built-in disaggregation proxy (``disagg_proxy_server.py``), which depends on ZMQ notifications to know when KV transfer is complete before forwarding the decode request. Values: true/false. Default: false
+   * - pd_bidirectional
+     - LMCACHE_PD_BIDIRECTIONAL
+     - When true, enables bidirectional NIXL cache probe. The prefiller queries the decoder for cached KV blocks before transfer, and reads cached blocks via NIXL RDMA instead of recomputing. Values: true/false. Default: false
+   * - pd_peer_query_port
+     - LMCACHE_PD_PEER_QUERY_PORT
+     - ZMQ ports for the bidirectional cache query channel (one per TP rank). Required on both prefiller and decoder when pd_bidirectional=true. Example: [7500, 7501, 7502, 7503]
 
 P2P Backend Configurations
 --------------------------
@@ -341,10 +353,19 @@ Settings for different storage backends and paths.
      - Description
    * - gds_path
      - LMCACHE_GDS_PATH
-     - Path for GDS backend. Supports comma-separated paths for multi-device I/O (e.g. ``/mnt/nvme0/cache,/mnt/nvme1/cache``). Each GPU selects a path via ``device_id % num_paths``.
-   * - cufile_buffer_size
-     - LMCACHE_CUFILE_BUFFER_SIZE
-     - Buffer size for cuFile/hipFile operations
+     - Path for GDS backend. Supports comma-separated paths for multi-device I/O (e.g. ``/mnt/nvme0/cache,/mnt/nvme1/cache``). See ``gds_path_sharding`` for how paths are assigned to GPUs.
+   * - gds_path_sharding
+     - LMCACHE_GDS_PATH_SHARDING
+     - Strategy for selecting a path when multiple paths are provided. Currently only ``"by_gpu"`` is supported, which selects paths based on GPU device ID (default: "by_gpu").
+   * - gds_buffer_size
+     - LMCACHE_GDS_BUFFER_SIZE
+     - Buffer size for GDS operations
+   * - use_gds
+     - LMCACHE_USE_GDS
+     - Enable or disable GPU Direct Storage API usage (default: true)
+   * - gds_backend
+     - LMCACHE_GDS_BACKEND
+     - GDS library backend to use (default: "cufile")
 
 Custom Prometheus Histogram Buckets
 ------------------------------------
