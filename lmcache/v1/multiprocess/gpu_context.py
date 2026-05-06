@@ -36,7 +36,7 @@ from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
 from lmcache.v1.multiprocess.custom_types import (
     KVCache,
 )
-from lmcache.v1.platform._stream_compat import (
+from lmcache.v1.platform.stream import (
     ExternalStreamLike,
     make_external_stream,
 )

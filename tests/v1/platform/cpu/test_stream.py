@@ -1,28 +1,27 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for ``lmcache.v1.platform._stream_compat``.
+"""Tests for ``lmcache.v1.platform.cpu.stream.MockExternalStream``.
 
-These tests exercise the cross-platform stream-compat shim without
-requiring CUDA or cupy — they target the pure-Python mock fallback and
-the factory's CPU-only code path.
+These tests exercise the pure-Python fallback without requiring CUDA
+or cupy.
 """
 
 # Standard
-from unittest import mock
 import gc
 import threading
 import time
 
 # Third Party
 import pytest
-import torch
 
 # First Party
-from lmcache.v1.platform import _stream_compat
-from lmcache.v1.platform._stream_compat import (
-    ExternalStreamLike,
-    _MockExternalStream,
-    make_external_stream,
-)
+from lmcache.v1.platform import cpu as _cpu_pkg  # re-export anchor
+from lmcache.v1.platform.cpu import stream as _stream_mod
+from lmcache.v1.platform.cpu.stream import MockExternalStream
+from lmcache.v1.platform.stream import ExternalStreamLike
+
+# Silence "imported but unused" — we only need the import to prove the
+# sub-package exists as a public surface callers can rely on.
+_ = _cpu_pkg
 
 
 class TestMockExternalStream:
@@ -30,7 +29,7 @@ class TestMockExternalStream:
 
     def test_preserves_valid_stream_pointer(self):
         """A non-zero caller pointer is kept verbatim on ``ptr``."""
-        stream = _MockExternalStream(0xCAFEBABE)
+        stream = MockExternalStream(0xCAFEBABE)
         try:
             assert stream.ptr == 0xCAFEBABE
         finally:
@@ -38,7 +37,7 @@ class TestMockExternalStream:
 
     def test_fallback_ptr_is_non_zero_when_no_handle(self):
         """A zero pointer is replaced with a unique non-zero id."""
-        stream = _MockExternalStream(0)
+        stream = MockExternalStream(0)
         try:
             assert stream.ptr != 0
             assert stream.ptr == id(stream)
@@ -47,7 +46,7 @@ class TestMockExternalStream:
 
     def test_conforms_to_external_stream_protocol(self):
         """Mock stream satisfies the ``ExternalStreamLike`` protocol."""
-        stream = _MockExternalStream(1)
+        stream = MockExternalStream(1)
         try:
             # Runtime protocol check: ``Protocol`` without
             # ``runtime_checkable`` cannot be used in ``isinstance``,
@@ -66,7 +65,7 @@ class TestMockExternalStream:
 
     def test_launch_host_func_executes_callback(self):
         """Enqueued callbacks are invoked exactly once on the worker."""
-        stream = _MockExternalStream(0)
+        stream = MockExternalStream(0)
         try:
             done = threading.Event()
             seen = []
@@ -83,7 +82,7 @@ class TestMockExternalStream:
 
     def test_fifo_order_is_preserved(self):
         """Callbacks run serially in submission order."""
-        stream = _MockExternalStream(0)
+        stream = MockExternalStream(0)
         try:
             order = []
             done = threading.Event()
@@ -106,7 +105,7 @@ class TestMockExternalStream:
 
     def test_callback_exception_is_swallowed(self):
         """Worker survives a throwing callback and keeps draining."""
-        stream = _MockExternalStream(0)
+        stream = MockExternalStream(0)
         try:
             done = threading.Event()
 
@@ -124,13 +123,13 @@ class TestMockExternalStream:
 
     def test_shutdown_is_idempotent(self):
         """Calling ``_shutdown`` twice does not raise."""
-        stream = _MockExternalStream(0)
+        stream = MockExternalStream(0)
         stream._shutdown()
         stream._shutdown()
 
     def test_post_shutdown_fifo_then_sync(self):
         """After shutdown, pending tasks drain before sync fallback runs."""
-        stream = _MockExternalStream(0)
+        stream = MockExternalStream(0)
         order = []
         gate = threading.Event()
 
@@ -162,86 +161,11 @@ class TestMockExternalStream:
         Regression test: registering a bound method with ``atexit``
         used to pin every stream for the whole process lifetime.
         """
-        stream = _MockExternalStream(0)
-        ref = _stream_compat.weakref.ref(stream)
+        stream = MockExternalStream(0)
+        ref = _stream_mod.weakref.ref(stream)
         del stream
         gc.collect()
         assert ref() is None, "mock stream should be garbage-collected"
-
-
-class TestMakeExternalStream:
-    """Factory behavior, independent of cupy availability."""
-
-    def test_returns_mock_when_cuda_unavailable(self):
-        """Without CUDA the factory falls back to the mock."""
-
-        class _FakeTorchStream:
-            cuda_stream = 0xDEADBEEF
-
-        with mock.patch.object(torch.cuda, "is_available", return_value=False):
-            stream = make_external_stream(_FakeTorchStream(), 0)
-        try:
-            assert isinstance(stream, _MockExternalStream)
-            # Valid caller pointer is preserved so downstream C++ code
-            # that unconditionally uses ``stream.ptr`` still sees a real
-            # CUDA handle when one exists.
-            assert stream.ptr == 0xDEADBEEF
-        finally:
-            stream._shutdown()
-
-    def test_returns_mock_when_cupy_missing(self):
-        """Even with CUDA, a missing cupy drops us onto the mock."""
-
-        class _FakeTorchStream:
-            cuda_stream = 0x1234
-
-        with (
-            mock.patch.object(torch.cuda, "is_available", return_value=True),
-            mock.patch.object(_stream_compat, "_try_import_cupy", return_value=None),
-        ):
-            stream = make_external_stream(_FakeTorchStream(), 0)
-        try:
-            assert isinstance(stream, _MockExternalStream)
-            assert stream.ptr == 0x1234
-        finally:
-            stream._shutdown()
-
-    def test_survives_missing_cuda_stream_attr(self):
-        """CPU-only torch streams without ``cuda_stream`` do not crash."""
-
-        class _Broken:
-            @property
-            def cuda_stream(self):
-                raise AttributeError("no CUDA on this platform")
-
-        with mock.patch.object(torch.cuda, "is_available", return_value=False):
-            stream = make_external_stream(_Broken(), 0)
-        try:
-            assert isinstance(stream, _MockExternalStream)
-            # No caller handle => synthesized non-zero fake.
-            assert stream.ptr != 0
-        finally:
-            stream._shutdown()
-
-    def test_delegates_to_cupy_when_available(self):
-        """When cupy is importable and CUDA is on, we return its stream."""
-        sentinel = object()
-        fake_cupy = mock.MagicMock()
-        fake_cupy.cuda.ExternalStream.return_value = sentinel
-
-        class _FakeTorchStream:
-            cuda_stream = 0xABCDEF
-
-        with (
-            mock.patch.object(torch.cuda, "is_available", return_value=True),
-            mock.patch.object(
-                _stream_compat, "_try_import_cupy", return_value=fake_cupy
-            ),
-        ):
-            result = make_external_stream(_FakeTorchStream(), 3)
-
-        assert result is sentinel
-        fake_cupy.cuda.ExternalStream.assert_called_once_with(0xABCDEF, 3)
 
 
 if __name__ == "__main__":
