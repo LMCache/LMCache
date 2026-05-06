@@ -1,9 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 # Third Party
 import torch
 
 # First Party
 from lmcache.logging import init_logger
+
+if TYPE_CHECKING:
+    from lmcache.v1.compute.attention.abstract import AttentionInterface
 
 logger = init_logger(__name__)
 
@@ -22,7 +29,10 @@ def _flashinfer_available() -> bool:
         return False
 
 
-def infer_attn_backend_from_vllm(vllm_attn, enable_sparse=False):
+def infer_attn_backend_from_vllm(
+    vllm_attn: "torch.nn.Module",
+    enable_sparse: bool = False,
+) -> "AttentionInterface":
     attn_name = type(vllm_attn.impl).__name__
 
     if enable_sparse:
