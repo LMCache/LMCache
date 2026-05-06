@@ -103,13 +103,9 @@ def _block_mask_to_csr(
     nnz_per_row = block_mask.sum(dim=1)
     block_indptr = torch.zeros(num_q_blocks + 1, dtype=torch.int32, device=device)
     torch.cumsum(nnz_per_row, dim=0, out=block_indptr[1:])
-    total_nnz = block_indptr[-1].item()
-    if total_nnz == 0:
-        return (
-            torch.zeros(0, dtype=torch.int32, device=device),
-            block_indptr,
-        )
-    # Vectorized CSR column index extraction
+    # Vectorized CSR column index extraction — torch.where naturally
+    # returns an empty tensor when the mask is all-False, so no early
+    # return is needed (and we avoid a .item() CPU-GPU sync).
     block_indices = torch.where(block_mask)[1].to(torch.int32)
     return block_indices, block_indptr
 
