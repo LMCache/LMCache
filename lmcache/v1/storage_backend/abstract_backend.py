@@ -204,6 +204,17 @@ class StorageBackendInterface(metaclass=abc.ABCMeta):
         """
         raise NotImplementedError
 
+    @property
+    def has_external_pin_state(self) -> bool:
+        """
+        Whether this backend keeps pin state outside the MemoryObj
+        (e.g. server-side RPC state). The default async cleanup only
+        releases `MemoryObj.pin_count`, so backends returning ``True``
+        get an explicit `backend.unpin(key)` call in the async path
+        to release that external state.
+        """
+        return False
+
     @abc.abstractmethod
     def unpin(
         self,

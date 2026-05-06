@@ -653,6 +653,12 @@ class MaruBackend(AllocatorBackendInterface):
             num_hit += 1
         return num_hit
 
+    @property
+    def has_external_pin_state(self) -> bool:
+        """MaruBackend keeps pin state on MaruServer via RPC, so async
+        cleanup must call ``backend.unpin(key)`` to release it."""
+        return True
+
     def pin(self, key: CacheEngineKey) -> bool:
         """Pin a key to prevent eviction on MaruServer.
 

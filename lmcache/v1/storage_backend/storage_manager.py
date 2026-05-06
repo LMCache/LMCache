@@ -54,12 +54,6 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-# Backends whose pin state lives outside the MemoryObj (e.g. server-side
-# RPC state). The default memory_obj.unpin() cleanup doesn't reach this
-# state, so async cleanup must call backend.unpin() explicitly for these.
-_BACKENDS_WITH_EXTERNAL_PIN_STATE: frozenset[str] = frozenset({"MaruBackend"})
-
-
 # Helper function to get the class name of the backend
 def get_backend_cname(backend: StorageBackendInterface) -> str:
     return backend.__class__.__name__
@@ -273,7 +267,7 @@ class StorageManager:
         self.async_serializer: Optional[AsyncSerializer] = None
 
         # Backend-level pins recorded during async prefetch for backends
-        # in _BACKENDS_WITH_EXTERNAL_PIN_STATE.
+        # whose `has_external_pin_state` is True.
         # Keyed by lookup_id -> {backend_name -> [keys]}.
         self._async_external_pin_registry: dict[
             str, dict[str, list[CacheEngineKey]]
@@ -710,7 +704,7 @@ class StorageManager:
             if num_hit_chunks == 0:
                 continue
 
-            if pin and backend_name in _BACKENDS_WITH_EXTERNAL_PIN_STATE:
+            if pin and backend.has_external_pin_state:
                 with self._async_external_pin_registry_lock:
                     self._async_external_pin_registry.setdefault(lookup_id, {})[
                         backend_name
@@ -1065,7 +1059,7 @@ class StorageManager:
         """
         Unpin and clear the backend-level pin records registered during
         `async_lookup_and_prefetch` for the given *lookup_id*. Only applies
-        to backends in `_BACKENDS_WITH_EXTERNAL_PIN_STATE`.
+        to backends whose `has_external_pin_state` is True.
 
         :param str lookup_id: The lookup id whose async pins to release.
         """
