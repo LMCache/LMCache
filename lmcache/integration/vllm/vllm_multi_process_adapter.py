@@ -237,7 +237,6 @@ class HeartbeatThread(PeriodicThread):
         self._recover_callback = callback
 
     def _execute(self) -> ThreadRunSummary:
-        logger.info("Checking healthy!")
         was_healthy = self._health_event.is_set()
         healthy = send_ping(self._mq_client, timeout=self._interval)
         need_trigger_recover = (
@@ -765,6 +764,10 @@ class LMCacheMPWorkerAdapter:
         by the heartbeat thread itself via ``register_recover_callback``,
         so this property only reads the shared event.
         """
+        logger.info(
+            "Checking LMCache server health from the worker adapter: %s",
+            "healthy" if self._health_event.is_set() else "unhealthy",
+        )
         return self._health_event.is_set()
 
     @property
@@ -882,6 +885,7 @@ class LMCacheMPWorkerAdapter:
 
         try:
             self._send_register_kv_caches_request(self.kv_caches)
+            logger.warning("Finished re-registering KV caches after server recovery")
         except ConnectionError:
             logger.exception(
                 "Failed to re-register KV caches after server recovery; "
