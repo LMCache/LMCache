@@ -7,7 +7,7 @@
 from concurrent.futures import ThreadPoolExecutor
 from enum import Enum, IntEnum
 from multiprocessing import shared_memory
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
 import ctypes
 import ctypes.util
 
@@ -764,25 +764,43 @@ def single_layer_kv_transfer(
 
 def single_layer_kv_transfer_sgl(
     lmc_key_value_cache: torch.Tensor,
-    sgl_key_cache: torch.Tensor,
-    sgl_value_cache: torch.Tensor,
+    sgl_key_value_cache: List[torch.Tensor],
     slot_mapping: torch.Tensor,
     direction: TransferDirection,
+    gpu_kv_format: GPUKVFormat,
     token_major: bool = False,
 ):
     """
     Python fallback implementation of single_layer_kv_transfer_sgl.
 
     Args:
-        lmc_key_value_cache:
-            [num_tokens, 2, num_heads*head_size] or
-            [2, num_tokens, num_heads*head_size]
-        sgl_key_cache: [num_blocks, block_size, num_heads, head_size]
-        sgl_value_cache: [num_blocks, block_size, num_heads, head_size]
-        slot_mapping: [num_tokens] - maps each token to a global slot index
-        direction: False for LMCache -> SGLang, True for SGLang -> LMCache
-        token_major: Boolean to determine the layout of lmc_key_value_cache
+        lmc_key_value_cache: For non-MLA, [num_tokens, 2, hidden_size] when
+            ``token_major`` else [2, num_tokens, hidden_size]. For MLA,
+            [num_tokens, hidden_size] (no leading "2" dim).
+        sgl_key_value_cache: List of paged buffers. Length 2 for non-MLA
+            ([key_cache, value_cache]) and length 1 for MLA ([kv_cache]),
+            each shaped [num_blocks, block_size, num_heads, head_size].
+        slot_mapping: [num_tokens] — global slot index per token; negative
+            entries are skipped.
+        direction: ``TransferDirection.H2D`` for LMCache -> SGLang,
+            ``TransferDirection.D2H`` for SGLang -> LMCache.
+        gpu_kv_format: kept for c_ops parity; not consulted by the fallback
+            since shape is derived directly from the paged buffer.
+        token_major: layout flag for ``lmc_key_value_cache`` (non-MLA only).
+
+    Raises:
+        ValueError: if ``sgl_key_value_cache`` does not have length 1 or 2.
     """
+    del gpu_kv_format  # unused in the fallback; signature parity with c_ops
+    if len(sgl_key_value_cache) not in (1, 2):
+        raise ValueError(
+            "sgl_key_value_cache must have length 1 (MLA) or 2 (non-MLA), "
+            f"got {len(sgl_key_value_cache)}"
+        )
+
+    use_mla = len(sgl_key_value_cache) == 1
+    sgl_key_cache = sgl_key_value_cache[0]
+
     kv_device = lmc_key_value_cache.device
     paged_memory_device = sgl_key_cache.device
     slots_kv = slot_mapping.to(dtype=torch.long).to(kv_device)
@@ -790,31 +808,39 @@ def single_layer_kv_transfer_sgl(
     if not valid_mask_kv.any():
         return
 
-    # 1. Get basic dimensions
     block_size = sgl_key_cache.size(1)
     num_heads = sgl_key_cache.size(2)
     head_size = sgl_key_cache.size(3)
 
-    # 2. Calculate block indices and offsets within the blocks from slot_mapping
-    # In SGLang/vLLM, slot_idx = block_idx * block_size + block_offset
     valid_slots = slots_kv[valid_mask_kv].to(paged_memory_device)
     block_indices = valid_slots // block_size
     block_offsets = valid_slots % block_size
 
-    # 3. Prepare LMCache views for K and V
+    if use_mla:
+        # MLA: single fused buffer; lmc_key_value_cache has no leading "2" dim.
+        lmc_kv = lmc_key_value_cache
+        if direction == TransferDirection.H2D:
+            src_kv_reshaped = (
+                lmc_kv[valid_mask_kv]
+                .reshape(-1, num_heads, head_size)
+                .to(paged_memory_device)
+            )
+            sgl_key_cache[block_indices, block_offsets] = src_kv_reshaped
+        else:
+            sampled_kv = sgl_key_cache[block_indices, block_offsets].to(kv_device)
+            lmc_kv[valid_mask_kv] = sampled_kv.reshape(-1, num_heads * head_size)
+        return
+
+    # Non-MLA: separate K and V paged buffers.
+    sgl_value_cache = sgl_key_value_cache[1]
     if token_major:
-        # Layout: [num_tokens, 2, hidden_size]
         lmc_k = lmc_key_value_cache[:, 0, :]
         lmc_v = lmc_key_value_cache[:, 1, :]
     else:
-        # Layout: [2, num_tokens, hidden_size]
         lmc_k = lmc_key_value_cache[0, :, :]
         lmc_v = lmc_key_value_cache[1, :, :]
 
-    # 4. Perform the transfer
     if direction == TransferDirection.H2D:
-        # --- Direction: LMCache to SGLang (Paged Buffer) ---
-        # Reshape LMC flat tensors to match SGL [num_heads, head_size]
         src_k_reshaped = (
             lmc_k[valid_mask_kv]
             .reshape(-1, num_heads, head_size)
@@ -825,18 +851,11 @@ def single_layer_kv_transfer_sgl(
             .reshape(-1, num_heads, head_size)
             .to(paged_memory_device)
         )
-
-        # Advanced indexing: update specific slots in the paged cache
         sgl_key_cache[block_indices, block_offsets] = src_k_reshaped
         sgl_value_cache[block_indices, block_offsets] = src_v_reshaped
-
     else:
-        # --- Direction: SGLang (Paged Buffer) to LMCache ---
-        # Gather tensors from paged cache based on mapping
         sampled_k = sgl_key_cache[block_indices, block_offsets].to(kv_device)
         sampled_v = sgl_value_cache[block_indices, block_offsets].to(kv_device)
-
-        # Flatten the head dimensions and copy into LMC tensors
         lmc_k[valid_mask_kv] = sampled_k.reshape(-1, num_heads * head_size)
         lmc_v[valid_mask_kv] = sampled_v.reshape(-1, num_heads * head_size)
 
