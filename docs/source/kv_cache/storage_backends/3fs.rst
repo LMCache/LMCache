@@ -53,7 +53,7 @@ Example ``config.yaml``:
         # Control with I/O depth. 0, no control
         # >0, only when io_depth requests are in queue, and issue them in one batch
         # <0, wait for at most -io_depth requests are in queue and issue them in one batch
-        # range in [128, 128], default: 0
+        # range in [-128, 128], default: 0
         hf3fs_io_depth: 0
 
         # NUMA ID for Ior shared memory, -1 for current process NUMA ID.
@@ -142,7 +142,7 @@ Installation
             # Control with I/O depth. 0, no control
             # >0, only when io_depth requests are in queue, and issue them in one batch
             # <0, wait for at most -io_depth requests are in queue and issue them in one batch
-            # range in [128, 128], default: 0
+            # range in [-128, 128], default: 0
             hf3fs_io_depth: 0
 
             # NUMA ID for Ior shared memory, -1 for current process NUMA ID.

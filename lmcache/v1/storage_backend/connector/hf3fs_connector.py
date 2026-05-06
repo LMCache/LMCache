@@ -486,11 +486,11 @@ class Hf3fsClient:
                 bytes_read = self._read(
                     fd, buffer[offset : offset + sub_len], sub_len, offset + start
                 )
+                if bytes_read > 0:
+                    total_bytes_read += bytes_read
+                    offset += bytes_read
                 if bytes_read != sub_len:
                     break
-                total_bytes_read += bytes_read
-                offset += bytes_read
-
             if total_bytes_read != length:
                 logger.warning(
                     f"{self.client_name} read: requested {length}, "
@@ -529,10 +529,11 @@ class Hf3fsClient:
                 written = self._write(
                     fd, buffer[offset : offset + sub_len], sub_len, offset + start
                 )
+                if written > 0:
+                    total_bytes_written += written
+                    offset += written
                 if written != sub_len:
                     break
-                total_bytes_written += written
-                offset += written
             if total_bytes_written != length:
                 logger.error(
                     f"{self.client_name} write: requested {length}, "
@@ -554,17 +555,24 @@ class Hf3fsFile:
         self.client = client
 
     def open(self):
-        self.fd = os.open(self.fname, self.flags)
-        logger.debug(f"Open file {self.fname} with flag {self.flags} successfully")
-        register_fd(self.fd)
+        try:
+            self.fd = os.open(self.fname, self.flags)
+            register_fd(self.fd)
+            logger.debug(f"Open file {self.fname} with flag {self.flags} successfully")
+        except Exception as e:
+            logger.error(f"Open file {self.fname} with flag {self.flags} failed {e}")
+            raise
 
     def close(self):
         if not hasattr(self, "fd") or self.fd == -1:
             return
-
-        deregister_fd(self.fd)
-        os.close(self.fd)
-        logger.debug(f"Close file ({self.fname}) successfully")
+        try:
+            deregister_fd(self.fd)
+            os.close(self.fd)
+            logger.debug(f"Close file ({self.fname}) successfully")
+        except Exception as e:
+            logger.error(f"Close file {self.fname} failed {e}")
+            raise
         self.fd = -1
         self.fname = ""
 
@@ -597,16 +605,11 @@ class Hf3fsFile:
 
     @staticmethod
     def rename(old_fname: Path, new_fname: Path):
-        if not os.path.exists(old_fname):
-            logger.warning(f"rename failed, old file{old_fname} not exist")
-            return
-
         try:
             os.rename(old_fname, new_fname)
-        except FileExistsError:
-            logger.warning(f"rename failed, new file {new_fname} already exists")
-        except PermissionError:
-            logger.warning("rename failed, permission denied")
+        except OSError as e:
+            logger.warning(f"rename {old_fname} to {new_fname} failed, {e}")
+            raise
         return
 
     def write(self, data: memoryview, length: int, file_offset: int = 0) -> int:
