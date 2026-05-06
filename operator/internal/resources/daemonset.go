@@ -60,7 +60,7 @@ func BuildDaemonSet(engine *lmcachev1alpha1.LMCacheEngine) *appsv1.DaemonSet {
 	}
 
 	// Build env vars
-	envVars := make([]corev1.EnvVar, 0, 3+len(spec.Env))
+	envVars := make([]corev1.EnvVar, 0, 5+len(spec.Env))
 	envVars = append(envVars,
 		corev1.EnvVar{
 			Name:  "LMCACHE_LOG_LEVEL",
