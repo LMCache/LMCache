@@ -143,9 +143,9 @@ class NixlStorageConfig:
 
         dynamic_storage = pool_size == 0
         if dynamic_storage:
-            assert not config.save_unfull_chunk, (
-                "save_unfull_chunk should be set to False when using dynamic storage"
-            )
+            assert (
+                not config.save_unfull_chunk
+            ), "save_unfull_chunk should be set to False when using dynamic storage"
 
         corrected_device = get_correct_device(
             config.nixl_buffer_device, metadata.worker_id
@@ -1092,8 +1092,6 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
         self.async_mode = nixl_config.enable_async_put
         self.enable_presence_cache = nixl_config.enable_presence_cache
         self.path = nixl_config.path
-        if self.path is not None:
-            os.makedirs(self.path, exist_ok=True)
         self.direct_io_flag = 0
         if nixl_config.use_direct_io:
             if hasattr(os, "O_DIRECT"):
