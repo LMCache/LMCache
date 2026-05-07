@@ -296,6 +296,9 @@ caller-provided load buffers during prefetch.
 - ``meta_checkpoint_interval_sec`` / ``meta_idle_quiet_ms`` /
   ``meta_enable_periodic`` / ``meta_verify_on_load``: Checkpoint and recovery
   controls carried over from the legacy raw-block backend.
+- ``load_checkpoint_on_init``: Load an existing on-device metadata checkpoint
+  during startup (default ``true``). Set to ``false`` to start with an empty
+  in-memory index instead.
 - ``enable_zero_copy``: Try aligned direct-buffer I/O when possible.
 - ``io_engine``: Rust raw-block I/O engine. Valid values are ``"posix"``
   (default synchronous ``pread``/``pwrite`` path), ``"io_uring"`` (direct Rust
@@ -324,7 +327,7 @@ caller-provided load buffers during prefetch.
 
     --l2-adapter '{"type": "raw_block", "device_path": "/dev/nvme0n1", "slot_bytes": 1048576, "io_engine": "io_uring", "iouring_queue_depth": 256, "use_odirect": true}'
 
-    --l2-adapter '{"type": "raw_block", "device_path": "/dev/nvme0n1", "slot_bytes": 1048576, "eviction": {"eviction_policy": "LRU", "trigger_watermark": 0.9, "eviction_ratio": 0.1}}'
+    --l2-adapter '{"type": "raw_block", "device_path": "/dev/nvme0n1", "slot_bytes": 1048576, "load_checkpoint_on_init": false, "eviction": {"eviction_policy": "LRU", "trigger_watermark": 0.9, "eviction_ratio": 0.1}}'
 
 ``mooncake_store`` -- Mooncake Store native connector
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

@@ -94,6 +94,7 @@ Rules:
 
 - metadata region reserved on the same device
 - periodic checkpointing
+- optional checkpoint load on startup
 - optional verification on load
 - recovery by loading the latest durable checkpoint and rebuilding the in-memory
   index
@@ -121,6 +122,7 @@ The MP adapter is configured through `--l2-adapter` JSON:
   "meta_version": 1,
   "meta_checkpoint_interval_sec": 60,
   "meta_enable_periodic": true,
+  "load_checkpoint_on_init": true,
   "meta_verify_on_load": true,
   "num_store_workers": 2,
   "num_lookup_workers": 1,
@@ -134,6 +136,8 @@ Important validation rules:
   `block_align`
 - `slot_bytes >= header_bytes + 1`
 - `per_tp_device_paths` is rejected in MP mode
+- `load_checkpoint_on_init=false` starts with an empty in-memory index instead
+  of loading the latest on-device metadata checkpoint
 - with `use_odirect=true`, MP L1 alignment must satisfy
   `l1_align_bytes >= block_align`
 

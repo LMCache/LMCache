@@ -48,6 +48,30 @@ Supported architectures
      - —
      - —
      - :doc:`minimax_m2`
+   * - ``Gemma4ForConditionalGeneration``
+     - ``google/gemma-4-31B-it``
+     - ✓
+     - —
+     - —
+     - :doc:`gemma4`
+   * - ``MistralForCausalLM``
+     - ``mistralai/Devstral-2-123B-Instruct-2512``
+     - ✓
+     - —
+     - —
+     - :doc:`devstral`
+   * - ``GptOssForCausalLM``
+     - ``openai/gpt-oss-120b``
+     - ✓
+     - —
+     - —
+     - :doc:`gpt_oss`
+   * - ``Qwen3MoeForCausalLM``
+     - ``Qwen/Qwen3-235B-A22B``
+     - ✓
+     - —
+     - —
+     - :doc:`qwen3`
 
 Legend: ``✓`` validated, ``—`` not validated.
 
@@ -68,3 +92,7 @@ To add a new architecture:
    :maxdepth: 1
 
    minimax_m2
+   gemma4
+   devstral
+   gpt_oss
+   qwen3

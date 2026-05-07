@@ -1,126 +1,464 @@
 {
-  "title": "LMCache",
-  "uid": "lmcache-standard",
-  "refresh": "5s",
-  "time": { "from": "now-1h", "to": "now" },
-  "schemaVersion": 38,
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "links": [],
   "panels": [
-
     {
-      "id": 1,
-      "title": "Cache Hit Rate",
-      "type": "gauge",
-      "gridPos": { "x": 0, "y": 0, "w": 6, "h": 8 },
-      "datasource": { "uid": "prometheus" },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
       "fieldConfig": {
         "defaults": {
-          "unit": "percentunit",
-          "min": 0,
-          "max": 1,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "showValues": false,
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
           "thresholds": {
+            "mode": "absolute",
             "steps": [
-              { "color": "red",    "value": 0 },
-              { "color": "yellow", "value": 0.4 },
-              { "color": "green",  "value": 0.7 }
+              {
+                "color": "green",
+                "value": 0
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
             ]
           }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 0
+      },
+      "id": 6,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "single",
+          "sort": "none"
         }
       },
+      "pluginVersion": "12.4.2",
       "targets": [
         {
-          "expr": "clamp_min(sum(lmcache_mp_sm_read_succeed_keys_total), 0) / clamp_min(sum(lmcache_mp_sm_read_succeed_keys_total) + sum(lmcache_mp_sm_read_failed_keys_total), 0.001)",
-          "legendFormat": "hit rate"
-        }
-      ]
-    },
-
-    {
-      "id": 2,
-      "title": "StorageManager — Read Hits vs Misses",
-      "type": "timeseries",
-      "gridPos": { "x": 6, "y": 0, "w": 18, "h": 8 },
-      "datasource": { "uid": "prometheus" },
-      "fieldConfig": {
-        "defaults": { "unit": "ops", "custom": { "lineWidth": 2 } }
-      },
-      "targets": [
-        {
-          "expr": "rate(lmcache_mp_sm_read_succeed_keys_total[30s])",
-          "legendFormat": "read hits/s"
-        },
-        {
-          "expr": "rate(lmcache_mp_sm_read_failed_keys_total[30s])",
-          "legendFormat": "read misses/s"
-        },
-        {
-          "expr": "rate(lmcache_mp_sm_write_succeed_keys_total[30s])",
-          "legendFormat": "writes/s"
-        }
-      ]
-    },
-
-    {
-      "id": 3,
-      "title": "L1 Cache Operations",
-      "type": "timeseries",
-      "gridPos": { "x": 0, "y": 8, "w": 12, "h": 8 },
-      "datasource": { "uid": "prometheus" },
-      "fieldConfig": {
-        "defaults": { "unit": "ops", "custom": { "lineWidth": 2 } }
-      },
-      "targets": [
-        {
-          "expr": "rate(lmcache_mp_l1_read_keys_total[30s])",
-          "legendFormat": "l1 reads/s"
-        },
-        {
-          "expr": "rate(lmcache_mp_l1_write_keys_total[30s])",
-          "legendFormat": "l1 writes/s"
-        },
-        {
-          "expr": "rate(lmcache_mp_l1_evicted_keys_total[30s])",
-          "legendFormat": "l1 evictions/s"
-        }
-      ]
-    },
-
-    {
-      "id": 4,
-      "title": "Active Prefetch Jobs",
-      "type": "timeseries",
-      "gridPos": { "x": 12, "y": 8, "w": 12, "h": 8 },
-      "datasource": { "uid": "prometheus" },
-      "fieldConfig": {
-        "defaults": { "unit": "short", "custom": { "lineWidth": 2 } }
-      },
-      "targets": [
-        {
-          "expr": "lmcache_mp_active_prefetch_jobs",
-          "legendFormat": "active prefetch jobs"
-        }
-      ]
-    },
-
-    {
-      "id": 5,
-      "title": "Request Traces",
-      "description": "Waterfall view of per-request spans. Each trace shows the root 'request' span with child spans: mp.lookup_prefetch, mp.retrieve, mp.store. Click a row to open the full waterfall in Tempo.",
-      "type": "traces",
-      "gridPos": { "x": 0, "y": 16, "w": 24, "h": 12 },
-      "datasource": { "uid": "tempo" },
-      "targets": [
-        {
-          "queryType": "traceql",
-          "query": "{ name = \"request\" }",
-          "limit": 20,
+          "editorMode": "code",
+          "expr": "lmcache_mp_l2_load_throughput_gbs_GB_per_second_sum / lmcache_mp_l2_load_throughput_gbs_GB_per_second_count",
+          "legendFormat": "{{l2_name}}",
+          "range": true,
           "refId": "A"
         }
       ],
+      "title": "L2 Read Throughput (GB/s)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "showValues": false,
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 0
+      },
+      "id": 7,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "12.4.2",
+      "targets": [
+        {
+          "editorMode": "code",
+          "expr": "lmcache_mp_l2_store_throughput_gbs_GB_per_second_sum / lmcache_mp_l2_store_throughput_gbs_GB_per_second_count",
+          "legendFormat": "{{l2_name}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "L2 Write Throughput (GB/s)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "showValues": false,
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          },
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 8
+      },
+      "id": 3,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "12.4.2",
+      "targets": [
+        {
+          "expr": "rate(lmcache_mp_l1_read_keys_total[30s])",
+          "legendFormat": "l1 reads/s",
+          "refId": "A"
+        },
+        {
+          "expr": "rate(lmcache_mp_l1_write_keys_total[30s])",
+          "legendFormat": "l1 writes/s",
+          "refId": "B"
+        },
+        {
+          "expr": "rate(lmcache_mp_l1_evicted_keys_total[30s])",
+          "legendFormat": "l1 evictions/s",
+          "refId": "C"
+        }
+      ],
+      "title": "L1 Cache Operations",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "showValues": false,
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 8
+      },
+      "id": 4,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "12.4.2",
+      "targets": [
+        {
+          "expr": "lmcache_mp_active_prefetch_jobs",
+          "legendFormat": "active prefetch jobs",
+          "refId": "A"
+        }
+      ],
+      "title": "Active Prefetch Jobs",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "uid": "tempo"
+      },
+      "description": "Waterfall view of per-request spans. Each trace shows the root 'request' span with child spans: mp.lookup_prefetch, mp.retrieve, mp.store. Click a row to open the full waterfall in Tempo.",
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 12,
+        "w": 24,
+        "x": 0,
+        "y": 16
+      },
+      "id": 5,
       "options": {
         "dedupStrategy": "none",
-        "sortBy": [{ "displayName": "Start time", "desc": true }]
-      }
+        "sortBy": [
+          {
+            "desc": true,
+            "displayName": "Start time"
+          }
+        ],
+        "spanFilters": {
+          "criticalPathOnly": false,
+          "matchesOnly": false
+        }
+      },
+      "pluginVersion": "12.4.2",
+      "targets": [
+        {
+          "limit": 20,
+          "query": "{ name = \"request\" }",
+          "queryType": "traceql",
+          "refId": "A"
+        }
+      ],
+      "title": "Request Traces",
+      "type": "traces"
     }
-
-  ]
+  ],
+  "preload": false,
+  "refresh": "5s",
+  "schemaVersion": 42,
+  "tags": [],
+  "templating": {
+    "list": []
+  },
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "LMCache",
+  "uid": "lmcache-standard",
+  "version": 1,
+  "weekStart": ""
 }
