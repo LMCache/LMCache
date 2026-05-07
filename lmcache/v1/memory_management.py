@@ -22,14 +22,7 @@ from lmcache.observability import LMCStatsMonitor
 from lmcache.utils import _lmcache_nvtx_annotate
 from lmcache.v1.pin_monitor import PinMonitor
 from lmcache.v1.system_detection import NUMAMapping
-
-if torch.cuda.is_available():
-    # First Party
-    import lmcache.c_ops as lmc_ops
-else:
-    # First Party
-    import lmcache.non_cuda_equivalents as lmc_ops
-
+import lmcache.c_ops as lmc_ops
 
 logger = init_logger(__name__)
 
@@ -77,6 +70,11 @@ class MemoryFormat(Enum):
     """[1, num_layers, num_tokens, aligned_head_size]
     """
 
+    # This is for the encoder cache (EC) tensor format
+    EC_TD = auto()
+    """[num_tokens, hidden_dim]
+    """
+
     def token_dim(self) -> int:
         if self == MemoryFormat.KV_2LTD:
             return 2
@@ -90,6 +88,8 @@ class MemoryFormat(Enum):
             return 0
         elif self == MemoryFormat.KV_MLA_FMT:
             return 2
+        elif self == MemoryFormat.EC_TD:
+            return 0
         return 0
 
 
@@ -653,7 +653,12 @@ class TensorMemoryObj(MemoryObj):
         #   "byte_array only works with CPU tensors"
         # return memoryview(self.raw_data.contiguous().numpy())
 
-        num_bytes = self.raw_data.numel() * self.raw_data.element_size()
+        # Use logical size (get_size) rather than raw_data physical size.
+        # The raw_data buffer may include alignment padding (e.g. from
+        # batched_allocate) that must not be exposed to callers such as
+        # remote-backend put/get which rely on byte_array length matching
+        # the metadata length.
+        num_bytes = self.get_size()
         ptr = self.raw_data.data_ptr()
         ubyte_ptr = ctypes.cast(ptr, ctypes.POINTER(ctypes.c_ubyte))
         byte_array = (ctypes.c_ubyte * num_bytes).from_address(
@@ -1813,6 +1818,16 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
     def __str__(self):
         return "PagedTensorMemoryAllocator"
 
+    def get_paged_buffers(self) -> list[torch.Tensor]:
+        """
+        Get the list of paged buffers for fixed buffer registration.
+
+        Returns:
+            List of paged buffer tensors that can be registered with io_uring
+            for true zero copy operations.
+        """
+        return self.paged_buffers
+
     def __del__(self):
         # FIXME: NIXL-related memory leak should be handled somewhere (else).
         del self.buffer
@@ -2110,6 +2125,7 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
             MemoryFormat.KV_2TD,
             MemoryFormat.KV_T2D,
             MemoryFormat.KV_MLA_FMT,
+            MemoryFormat.EC_TD,
         ]:
             with self.host_mem_lock:
                 return self.pin_allocator.allocate(shapes, dtypes, fmt, str(self))
@@ -2134,6 +2150,7 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
             MemoryFormat.KV_2TD,
             MemoryFormat.KV_T2D,
             MemoryFormat.KV_MLA_FMT,
+            MemoryFormat.EC_TD,
         ]:
             with self.host_mem_lock:
                 return self.pin_allocator.batched_allocate(
@@ -2152,6 +2169,7 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
             MemoryFormat.KV_2TD,
             MemoryFormat.KV_T2D,
             MemoryFormat.KV_MLA_FMT,
+            MemoryFormat.EC_TD,
         ]:
             with self.host_mem_lock:
                 self.pin_allocator.free(memory_obj)
@@ -2177,6 +2195,7 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
             MemoryFormat.KV_2TD,
             MemoryFormat.KV_T2D,
             MemoryFormat.KV_MLA_FMT,
+            MemoryFormat.EC_TD,
         ]:
             with self.host_mem_lock:
                 self.pin_allocator.batched_free(memory_objs)
@@ -2200,6 +2219,18 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
                 self.shm_name,
             )
             self._unregistered = True
+
+    def get_paged_buffers(self) -> Optional[list[torch.Tensor]]:
+        """
+        Get the list of paged buffers for fixed buffer registration.
+
+        Returns:
+            List of paged buffer tensors if using paged allocator, None otherwise.
+            These buffers can be registered with io_uring for true zero copy operations.
+        """
+        if isinstance(self.pin_allocator, PagedTensorMemoryAllocator):
+            return self.pin_allocator.get_paged_buffers()
+        return None
 
     def __str__(self):
         return "MixedMemoryAllocator"

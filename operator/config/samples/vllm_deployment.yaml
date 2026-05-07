@@ -13,11 +13,14 @@ spec:
       labels:
         app: vllm
     spec:
-      # Required for CUDA IPC between vLLM and LMCache
+      # Required for CUDA IPC between vLLM and LMCache.
+      # WARNING: Do NOT mount an emptyDir at /dev/shm — hostIPC: true shares
+      # the host's /dev/shm. An emptyDir mount would shadow it and break
+      # CUDA IPC (cudaIpcOpenMemHandle fails).
       hostIPC: true
       containers:
         - name: vllm
-          image: lmcache/vllm-openai:latest
+          image: lmcache/vllm-openai:nightly-2026-04-06
           env:
             # Deterministic hashing required by LMCache
             - name: PYTHONHASHSEED
@@ -44,4 +47,4 @@ spec:
       volumes:
         - name: kv-transfer-config
           configMap:
-            name: my-cache-connection
+            name: my-cache-with-redis-connection

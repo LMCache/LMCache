@@ -27,43 +27,59 @@ std::string FSConnector::replace_all(const std::string& str,
 
 std::string FSConnector::key_to_filename(const std::string& key) {
   // Input key format (from _object_key_to_string):
-  //   model_name@kv_rank_hex@chunk_hash_hex
-  //   e.g. "meta-llama/Llama-3@0000002a@deadbeef..."
+  //   Unsalted: <model_name>@<kv_rank_hex>@<chunk_hash_hex>
+  //   Salted  : <model_name>@<kv_rank_hex>@<chunk_hash_hex>@<cache_salt>
   //
-  // Output filename (matching _object_key_to_filename):
-  //   model_name_safe@0xkv_rank_hex@chunk_hash_hex.data
-  //   e.g. "meta-llama-SEP-Llama-3@0x0000002a@deadbeef....data"
+  // Output filename (matching fs_l2_adapter.py._object_key_to_filename):
+  //   Unsalted: <model_name_safe>@0x<kv_rank_hex>@<chunk_hash_hex>.data
+  //   Salted  :
+  //   <model_name_safe>@0x<kv_rank_hex>@<chunk_hash_hex>@<cache_salt>.data
+  //
+  // The unsalted 3-field shape is bit-identical to the pre-cache_salt
+  // format, so existing cache directories remain valid.
+  //
+  // NOTE: both model_name and cache_salt are forbidden from containing
+  // '@' (invariant enforced on the Python side), so splitting on '@'
+  // is unambiguous — no marker, no rsplit.
 
-  // Split from the right on '@' to get exactly 3 parts
-  size_t last_sep = key.rfind(KEY_SEP);
-  if (last_sep == std::string::npos) {
-    return key + FILE_EXT;
+  // Split on '@' — must yield 3 (unsalted) or 4 (salted) fields.
+  std::vector<std::string> parts;
+  size_t start = 0;
+  for (size_t pos = 0; pos <= key.size(); ++pos) {
+    if (pos == key.size() || key[pos] == KEY_SEP) {
+      parts.emplace_back(key.substr(start, pos - start));
+      start = pos + 1;
+    }
   }
-  size_t second_sep = key.rfind(KEY_SEP, last_sep - 1);
-  if (second_sep == std::string::npos) {
-    return key + FILE_EXT;
+  if (parts.size() != 3 && parts.size() != 4) {
+    throw std::runtime_error(
+        "FSConnector: malformed key (expected 3 or 4 '@'-separated fields): " +
+        key);
   }
 
-  std::string model_name = key.substr(0, second_sep);
-  std::string kv_rank_hex =
-      key.substr(second_sep + 1, last_sep - second_sep - 1);
-  std::string chunk_hash = key.substr(last_sep + 1);
+  const std::string& model_name = parts[0];
+  const std::string& kv_rank_hex = parts[1];
+  const std::string& chunk_hash = parts[2];
+  const std::string cache_salt = parts.size() == 4 ? parts[3] : std::string();
 
   // Replace '/' with '-SEP-' for filesystem safety
   std::string safe_model = replace_all(model_name, "/", PATH_SLASH_REPLACEMENT);
 
-  // Rebuild with 0x prefix to match Python's {kv_rank:#010x}
-  // Input kv_rank_hex is 8 hex chars (e.g. "0000002a")
-  // Output needs to be "0x0000002a"
+  // Emit filename. Salt is appended at the tail so the unsalted shape
+  // matches what older builds wrote to disk.
   std::string result;
   result.reserve(safe_model.size() + kv_rank_hex.size() + chunk_hash.size() +
-                 32);
+                 cache_salt.size() + 32);
   result += safe_model;
   result += KEY_SEP;
   result += "0x";
   result += kv_rank_hex;
   result += KEY_SEP;
   result += chunk_hash;
+  if (!cache_salt.empty()) {
+    result += KEY_SEP;
+    result += cache_salt;
+  }
   result += FILE_EXT;
   return result;
 }

@@ -6,7 +6,7 @@ LMCache multiprocess mode supports a two-tier storage architecture:
 - **L1 (in-memory)** -- Fast CPU memory managed by the L1 Manager.  All KV
   cache chunks live here during active use.
 - **L2 (persistent)** -- Durable storage backends (NIXL-based or plain
-  file-system).  The StoreController asynchronously pushes data from L1
+  file-system/raw-block).  The StoreController asynchronously pushes data from L1
   to L2, and the PrefetchController loads data from L2 back into L1 on
   cache misses.
 
@@ -95,6 +95,66 @@ The ``OBJ`` backend (object store) does not require ``file_path``.
     # OBJ backend
     --l2-adapter '{"type": "nixl_store", "backend": "OBJ", "backend_params": {}, "pool_size": 32}'
 
+``nixl_store_dynamic`` -- NIXL-based dynamic storage with persist/recover
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+A dynamic variant of the NIXL adapter that opens and registers files
+per-operation instead of pre-allocating them at init. This enables:
+
+- **Persist/recover** -- cached KV metadata survives restarts.
+- **No fd limits** -- files are opened and closed per transfer, so the
+  cache can grow beyond OS open-file-descriptor limits.
+
+.. note::
+
+   Only file-based backends are supported (``POSIX``, ``GDS``, ``GDS_MT``,
+   ``HF3FS``). The ``OBJ`` backend is not supported yet.
+
+**Required fields:**
+
+- ``backend``: Storage backend -- one of ``POSIX``, ``GDS``, ``GDS_MT``,
+  ``HF3FS``.
+
+**Backend-specific parameters (``backend_params``):**
+
+- ``file_path``: Directory path for storing L2 data files.
+- ``use_direct_io``: ``"true"`` or ``"false"``.
+- ``max_capacity_gb``: Maximum storage capacity in GB. The adapter
+  rejects stores when this limit is reached. Required for the eviction
+  controller to compute usage.
+
+**Optional fields (for persist):**
+
+- ``persist_enabled`` (bool, default ``true``): If ``true``, data files
+  are kept on disk at shutdown. If ``false``, all data files are deleted
+  on shutdown.
+
+Lookup always checks secondary storage (disk) on miss and lazily
+populates the in-memory index when a file is found.
+
+**Configuration examples:**
+
+.. code-block:: bash
+
+    # Basic dynamic POSIX backend (persist enabled by default)
+    --l2-adapter '{"type": "nixl_store_dynamic", "backend": "POSIX", "backend_params": {"file_path": "/data/lmcache/l2", "use_direct_io": "false", "max_capacity_gb": "10"}}'
+
+    # Explicitly disable persist
+    --l2-adapter '{"type": "nixl_store_dynamic", "backend": "POSIX", "backend_params": {"file_path": "/data/lmcache/l2", "use_direct_io": "false", "max_capacity_gb": "10"}, "persist_enabled": false}'
+
+    # With eviction
+    --l2-adapter '{"type": "nixl_store_dynamic", "backend": "GDS", "backend_params": {"file_path": "/data/nvme/l2", "use_direct_io": "true", "max_capacity_gb": "50"}, "eviction": {"eviction_policy": "LRU", "trigger_watermark": 0.9, "eviction_ratio": 0.1}}'
+
+**Persist / secondary lookup behaviour:**
+
+- On **shutdown**, the adapter keeps data files on disk by default
+  (``persist_enabled`` defaults to ``true``). If explicitly set to
+  ``false``, all data files are deleted to avoid orphaned storage.
+- On **startup**, the in-memory index is empty. Every lookup miss falls
+  through to a secondary lookup on disk: if the deterministic file
+  exists, it is treated as a hit and the in-memory index is populated
+  lazily from the file size.
+
 ``fs`` -- File-system backed storage
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -128,12 +188,159 @@ object is stored as a raw ``.data`` file whose name encodes the full
     # With O_DIRECT for bypassing page cache
     --l2-adapter '{"type": "fs", "base_path": "/data/lmcache/l2", "use_odirect": true}'
 
+``fs_native`` -- Native C++ file-system connector
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+A file-system L2 adapter backed by the native C++ ``LMCacheFSClient``
+wrapped with ``NativeConnectorL2Adapter``.  I/O is dispatched through a
+C++ worker-thread pool with eventfd-driven completions, giving a true
+I/O queue depth on a single Python thread.
+
+**Required fields:**
+
+- ``base_path``: Directory for storing KV cache files.
+
+**Optional fields:**
+
+- ``num_workers`` (int, default ``4``, > 0): Number of C++ worker threads
+  inside the connector.  This is the real I/O queue depth -- raise to
+  push throughput on filesystems whose aggregate BW exceeds per-stream
+  BW.
+- ``relative_tmp_dir`` (str, default ``""``): Relative sub-directory for
+  temporary files during writes (atomic rename on completion).
+- ``use_odirect`` (bool, default ``false``): Bypass the page cache via
+  ``O_DIRECT``.  Required to measure real disk bandwidth.  See alignment
+  caveat below.
+- ``read_ahead_size`` (int, optional): Trigger filesystem readahead by
+  issuing a warm-up read of this many bytes at open time.
+- ``max_capacity_gb`` (float, default ``0``): Maximum L2 capacity in GB
+  for client-side usage tracking.  Default ``0`` disables tracking.
+
+.. important::
+
+   ``O_DIRECT`` has two independent alignment requirements:
+
+   1. **Length alignment.**  The transfer length must be a multiple of
+      the filesystem's block size.  The connector queries the disk block
+      size at construction time and, on each operation, checks
+      ``len % disk_block_size``.  If the length is **not** a multiple,
+      the connector silently falls back to a buffered open (no
+      ``O_DIRECT``) for that operation -- correctness is preserved but
+      you do not get true direct I/O.  To ensure ``O_DIRECT`` is
+      actually used, choose ``--chunk-size`` so that the resulting
+      per-chunk byte size is a multiple of the FS block size.  GPFS and
+      similar parallel filesystems often use large blocks (e.g. several
+      MiB).
+
+   2. **Memory-buffer alignment.**  The I/O buffer pointer itself must
+      also be aligned (typically to 4096 bytes on local disks, or to the
+      FS block size on parallel filesystems).  This is controlled by
+      ``--l1-align-bytes`` (default ``4096``) -- raise it to match the
+      FS block size when running on a filesystem with larger blocks.  If
+      the buffer is misaligned, the underlying ``read``/``write`` syscall
+      returns ``EINVAL`` (this is **not** caught by the length-fallback
+      path above and will surface as a runtime error).
+
+   If unsure, start with ``use_odirect: false`` and confirm correctness
+   before enabling ``O_DIRECT``.
+
+**Configuration examples:**
+
+.. code-block:: bash
+
+    # Basic native FS adapter
+    --l2-adapter '{"type": "fs_native", "base_path": "/data/lmcache/l2"}'
+
+    # Many worker threads for a parallel filesystem (e.g. GPFS, Lustre)
+    --l2-adapter '{"type": "fs_native", "base_path": "/data/lmcache/l2", "num_workers": 32}'
+
+    # O_DIRECT for real-disk benchmarking
+    --l2-adapter '{"type": "fs_native", "base_path": "/data/lmcache/l2", "num_workers": 32, "use_odirect": true}'
+
+**Buffer-only mode example.**  L1 acts as a pure write buffer that
+absorbs the peak burst of in-flight chunks while the C++ worker pool
+drains them to disk; nothing is retained in L1 once a store completes:
+
+.. code-block:: bash
+
+    lmcache server \
+        --host 0.0.0.0 --port 5555 \
+        --max-workers 32 \
+        --l1-size-gb 32 --l1-use-lazy \
+        --eviction-policy noop \
+        --l2-store-policy skip_l1 \
+        --l2-adapter '{"type": "fs_native", "base_path": "/data/lmcache/l2", "num_workers": 32, "use_odirect": true}'
+
+``raw_block`` -- Raw block device backed persistent storage
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+A built-in L2 adapter that stores KV objects in fixed-size slots on a raw block
+device or pre-sized file using the Rust raw-device I/O bindings. It reuses the
+existing raw-block metadata checkpoint model and writes directly into the
+caller-provided load buffers during prefetch.
+
+**Required fields:**
+
+- ``device_path``: Raw device path or pre-sized file path.
+- ``slot_bytes``: Fixed slot size in bytes. Must be aligned to ``block_align``.
+
+**Optional fields:**
+
+- ``capacity_bytes``: Optional cap on the usable device bytes. Default ``0``
+  means use the full device/file size.
+- ``use_odirect``: ``true`` or ``false`` (default ``true``).
+- ``block_align``: Device alignment in bytes (default ``4096``).
+- ``header_bytes``: Per-slot header reservation (default ``4096``).
+- ``meta_total_bytes``: Reserved metadata checkpoint region (default ``256MiB``).
+- ``meta_magic`` / ``meta_version``: Metadata checkpoint identity/version knobs.
+- ``meta_checkpoint_interval_sec`` / ``meta_idle_quiet_ms`` /
+  ``meta_enable_periodic`` / ``meta_verify_on_load``: Checkpoint and recovery
+  controls carried over from the legacy raw-block backend.
+- ``load_checkpoint_on_init``: Load an existing on-device metadata checkpoint
+  during startup (default ``true``). Set to ``false`` to start with an empty
+  in-memory index instead.
+- ``enable_zero_copy``: Try aligned direct-buffer I/O when possible.
+- ``io_engine``: Rust raw-block I/O engine. Valid values are ``"posix"``
+  (default synchronous ``pread``/``pwrite`` path), ``"io_uring"`` (direct Rust
+  io_uring syscall path).
+- ``iouring_queue_depth``: Queue depth for ``io_engine="io_uring"``.
+- ``num_store_workers`` / ``num_lookup_workers`` / ``num_load_workers``:
+  Worker-thread counts for each operation type.
+
+**Notes:**
+
+- ``raw_block`` is a server-owned MP adapter. It does **not** support
+  per-TP device-path mappings in MP mode.
+- ``raw_block`` remains ``"type": "raw_block"`` for both supported engines.
+- ``raw_block`` owns on-device slot allocation, checkpointing, and recovery
+  through ``RawBlockCore``. Slot reclamation is driven by the shared/global
+  L2 eviction controller or explicit ``delete()`` calls.
+- If ``use_odirect`` is enabled, the server's ``--l1-align-bytes`` should be
+  at least ``block_align``.
+- ``persist_enabled`` must remain ``true`` for this adapter.
+
+**Configuration examples:**
+
+.. code-block:: bash
+
+    --l2-adapter '{"type": "raw_block", "device_path": "/dev/nvme0n1", "slot_bytes": 1048576, "block_align": 4096, "header_bytes": 4096, "meta_total_bytes": 268435456, "use_odirect": true, "num_store_workers": 2, "num_lookup_workers": 1, "num_load_workers": 4}'
+
+    --l2-adapter '{"type": "raw_block", "device_path": "/dev/nvme0n1", "slot_bytes": 1048576, "io_engine": "io_uring", "iouring_queue_depth": 256, "use_odirect": true}'
+
+    --l2-adapter '{"type": "raw_block", "device_path": "/dev/nvme0n1", "slot_bytes": 1048576, "load_checkpoint_on_init": false, "eviction": {"eviction_policy": "LRU", "trigger_watermark": 0.9, "eviction_ratio": 0.1}}'
+
 ``mooncake_store`` -- Mooncake Store native connector
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 An L2 adapter backed by the native C++ Mooncake Store connector.  Uses
 `Mooncake <https://github.com/kvcache-ai/Mooncake>`_ for high-performance
 distributed KV cache storage with RDMA support.
+
+When Mooncake is configured with ``"protocol": "rdma"``, LMCache must also
+have a valid contiguous L1 memory region available.  The distributed storage
+manager passes this L1 memory descriptor to the adapter factory automatically
+in MP mode.  If the descriptor is missing or invalid, adapter creation fails
+with ``ValueError`` instead of silently falling back to a non-RDMA path.
 
 **Prerequisites -- Building with Mooncake support:**
 
@@ -195,6 +402,58 @@ for available setup keys (e.g., ``local_hostname``,
 
 For full Mooncake setup instructions (master service, metadata server,
 etc.), see `Mooncake <https://github.com/kvcache-ai/Mooncake>`_ .
+
+**RDMA notes:**
+
+- ``protocol: "rdma"`` requires a valid LMCache L1 memory descriptor.
+- When using ``protocol: "rdma"``, it is recommended to disable lazy L1
+  allocation with ``--no-l1-use-lazy`` so the L1 buffer is fully allocated
+  before Mooncake registers it.
+- ``protocol: "tcp"`` does not require L1 preregistration.
+- If Mooncake RDMA initialization fails at adapter creation time, verify that
+  LMCache L1 memory is enabled and that the descriptor has a non-zero pointer
+  and size.
+
+``s3`` -- S3-compatible object store
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+An L2 adapter that stores KV cache objects as S3 objects using the AWS
+Common Runtime (CRT).  Works with AWS S3, S3 Express One Zone, and any
+S3-compatible endpoint (MinIO, Ceph RGW, etc.).
+
+**Required fields:**
+
+- ``s3_endpoint``: Bucket URL -- either ``"s3://<bucket>"`` or the bare host form
+  (used for non-AWS endpoints).
+- ``s3_region``: AWS region string (e.g. ``"us-west-2"``).
+
+**Optional fields:**
+
+- ``s3_num_io_threads`` (int, default ``64``): Number of CRT I/O threads.
+- ``s3_prefer_http2`` (bool, default ``true``): Negotiate HTTP/2 via ALPN.
+- ``s3_enable_s3express`` (bool, default ``false``): Enable S3 Express signing
+  for S3 Express One Zone buckets.
+- ``disable_tls`` (bool, default ``false``): Bypass TLS when pointing at a
+  plain-HTTP endpoint (e.g. a local MinIO).
+- ``aws_access_key_id`` / ``aws_secret_access_key`` (string): Static
+  credentials; omit both to use the AWS default credential provider chain
+  (environment, EC2 instance profile, etc.).
+- ``max_capacity_gb`` (float, default ``0.0``): Aggregate capacity used by
+  ``get_usage()``.  A value of ``0`` disables aggregate eviction
+  (``usage_fraction == -1.0``).
+
+**Configuration examples:**
+
+.. code-block:: bash
+
+    # AWS S3 with default credentials
+    --l2-adapter '{"type": "s3", "s3_endpoint": "s3://my-bucket", "s3_region": "us-west-2"}'
+
+    # Static credentials, HTTP/2 disabled
+    --l2-adapter '{"type": "s3", "s3_endpoint": "s3://my-bucket", "s3_region": "us-west-2", "s3_prefer_http2": false, "aws_access_key_id": "AKIA...", "aws_secret_access_key": "..."}'
+
+    # Local MinIO over plain HTTP
+    --l2-adapter '{"type": "s3", "s3_endpoint": "minio.local:9000", "s3_region": "us-east-1", "disable_tls": true, "aws_access_key_id": "minio", "aws_secret_access_key": "minio123"}'
 
 ``mock`` -- Mock adapter for testing
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -261,6 +520,12 @@ Select policies via CLI:
    * - ``--l2-prefetch-policy``
      - ``default``
      - For each key, pick the first (lowest-indexed) adapter that has it.
+       Prefetched keys are **temporary** (deleted after the reader finishes).
+   * - ``--l2-prefetch-policy``
+     - ``retain``
+     - Same load plan as ``default``, but prefetched keys are **retained**
+       permanently in L1.  Useful when prefetched data is likely reused
+       by subsequent requests (e.g. shared system-prompt chunks).
 
 Prefetch Concurrency
 ~~~~~~~~~~~~~~~~~~~~~
@@ -300,6 +565,14 @@ Policies are extensible -- new policies can be added by creating a file
 in ``storage_controllers/`` and calling ``register_store_policy()`` or
 ``register_prefetch_policy()`` at import time.  See the design doc
 ``l2_adapters/design_docs/overall.md`` for details.
+
+Serde (compression / quantization)
+----------------------------------
+
+Each adapter can optionally run a **serde** (serializer / deserializer)
+that transforms data on the way in and out of L2 — e.g. fp8 quantization
+for disk backends, or encryption for remote adapters. See :doc:`serde`
+for details and configuration.
 
 Eviction
 --------
@@ -400,9 +673,22 @@ drops by ``eviction_ratio``.
    * - ``nixl_store``
      - Full support. ``delete`` frees pool slots; pinned keys (in-flight
        loads) are skipped and retried on the next cycle.
+   * - ``nixl_store_dynamic``
+     - Full support. ``delete`` removes data files from disk; pinned
+       keys are skipped. ``get_usage`` is byte-based
+       (``_total_bytes / max_capacity_bytes``).
    * - ``mock``
      - Full support. Useful for testing eviction behaviour without
        real storage hardware.
+   * - ``raw_block``
+     - Full shared/global eviction support. ``delete`` recycles raw-block
+       slots; locked entries are skipped and retried on the next cycle.
+   * - ``s3``
+     - ``delete`` removes objects from the bucket and frees aggregate
+       byte accounting. ``get_usage`` reports ``usage_fraction == -1.0``
+       when ``max_capacity_gb`` is ``0`` (disabled); set a non-zero
+       ``max_capacity_gb`` to enable the watermark-triggered eviction
+       controller.
    * - ``mooncake_store``
      - No eviction support (native connector adapter).
    * - ``fs``
