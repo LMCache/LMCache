@@ -86,8 +86,24 @@ class LMCBlender:
         q, k = attn_layer.rotary_emb(self.metadata.positions, q, k)
 
         if layer_id in self.common_metadata.check_layers:
+            # Align k with old_k for diff_k. The trailing old_k.shape[0] rows
+            # of k correspond to old_k positions. imp_indices stay in old_k
+            # local space (for the writeback at later layers);
+            # q/k/v/residual/attn_metadata use global (full-k) indices = local
+            # + offset. Without this, retrieve_layer's mask-aware skip leaves
+            # old_k shorter than compute_layer's mask-blind k, causing
+            # `RuntimeError: tensor a (X) must match tensor b (Y) at
+            # non-singleton dimension 0`. (Refs #1875 / #854 / #938.)
+            if k.shape[0] > old_k.shape[0]:
+                _offset = k.shape[0] - old_k.shape[0]
+                _k_for_diff = k[_offset:]
+            else:
+                _offset = 0
+                _k_for_diff = k
+
             diff_k = torch.sum(
-                (k.to(torch.float32) - old_k.to(torch.float32)) ** 2, dim=[1]
+                (_k_for_diff.to(torch.float32) - old_k.to(torch.float32)) ** 2,
+                dim=[1],
             )
             total_len = diff_k.shape[0]
 
@@ -99,18 +115,19 @@ class LMCBlender:
 
             top_indices = torch.topk(diff_k, k=topk_num).indices
             top_indices, _ = torch.sort(top_indices)
+            _global_top_indices = top_indices + _offset
 
-            k, v = k[top_indices], v[top_indices]
-            q = q[top_indices]
-            residual = residual[top_indices]
+            k, v = k[_global_top_indices], v[_global_top_indices]
+            q = q[_global_top_indices]
+            residual = residual[_global_top_indices]
 
             logger.debug(f"Number of indices picked: {len(top_indices)}")
 
             self.metadata.imp_indices = top_indices
-            self.metadata.positions = self.metadata.positions[top_indices]
+            self.metadata.positions = self.metadata.positions[_global_top_indices]
             attn_output = attn_output[:topk_num]
 
-            attn_metadata.update_from_top_indices(top_indices)
+            attn_metadata.update_from_top_indices(_global_top_indices)
 
         if self.metadata.imp_indices is not None:
             old_k[self.metadata.imp_indices] = k
