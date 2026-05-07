@@ -592,7 +592,7 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
         "env_converter": _to_int_list,
         "description": (
             "Optional allowlist of **storage layer indices** accepted by "
-            "HiddenStateStore.put_hidden. If None (recommended default), every "
+            "HiddenStateStore.store_hidden_states. If None (recommended default), every "
             "layer index passed on store is cached. "
             "**Semantics depend on the integration:** these are not necessarily "
             "transformer layer IDs. When using vLLM-Omni's LMCacheHSBridge, "
