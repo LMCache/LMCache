@@ -526,8 +526,26 @@ class LMCacheEngine:
                     prev_key = key.chunk_hash
 
         # memory_objs might be empty, directly return to avoid sending tokens
+        deferred = kwargs.pop("deferred_sync", False)
         if not memory_objs:
             return
+
+        if deferred:
+            gpu_conn = self.gpu_connector
+            stor_mgr = self.storage_manager
+            stor_loc = self.store_location
+            with store_stats.profile_from_gpu():
+                gpu_conn.batched_from_gpu(memory_objs, starts, ends,
+                                         deferred_sync=True, **kwargs)
+            def _finish_store():
+                transfer_spec = kwargs.get("transfer_spec", None)
+                stor_mgr.batched_put(
+                    keys,
+                    memory_objs,
+                    transfer_spec=transfer_spec,
+                    location=stor_loc,
+                )
+            return _finish_store
 
         with store_stats.profile_from_gpu():
             self.gpu_connector.batched_from_gpu(memory_objs, starts, ends, **kwargs)

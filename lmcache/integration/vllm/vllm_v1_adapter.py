@@ -556,6 +556,10 @@ class LMCacheConnectorV1Impl:
 
         self._lmcache_chunk_size = config.chunk_size
 
+        self._async_d2h = os.environ.get(
+            "LMCACHE_ASYNC_WAIT_FOR_SAVE", "0") == "1"
+        self._pending_d2h_ops: list[tuple[torch.cuda.Event, callable]] = []
+
         self.skip_last_n_tokens = vllm_config.kv_transfer_config.get_from_extra_config(
             "skip_last_n_tokens", 0
         )
@@ -1082,7 +1086,15 @@ class LMCacheConnectorV1Impl:
 
     @_lmcache_nvtx_annotate
     def wait_for_save(self):
-        """Blocking until the KV cache is saved to the connector buffer."""
+        """Blocking until the KV cache is saved to the connector buffer.
+
+        When LMCACHE_ASYNC_WAIT_FOR_SAVE=1, the D2H copy is launched on
+        store_stream but we don't synchronize. Instead, we record a CUDA
+        event and store a (event, finish_fn) pair. get_finished() polls
+        the event non-blocking — when done, it calls finish_fn to run
+        batched_put(). This mirrors NIXL's async RDMA read pattern:
+        issue in round N, complete in round N+k.
+        """
 
         connector_metadata = self._parent._get_connector_metadata()
         assert isinstance(connector_metadata, LMCacheConnectorMetadata)
@@ -1168,7 +1180,7 @@ class LMCacheConnectorV1Impl:
                     store_mask = store_mask[:aligned_token_len]
                     slot_mapping = slot_mapping[:aligned_token_len]
 
-            self.lmcache_engine.store(
+            finish_fn = self.lmcache_engine.store(
                 token_ids,
                 mask=store_mask,
                 kvcaches=kvcaches,
@@ -1177,7 +1189,12 @@ class LMCacheConnectorV1Impl:
                 transfer_spec=request.disagg_spec,
                 request_configs=request.request_configs,
                 req_id=request.req_id,
+                deferred_sync=self._async_d2h,
             )
+            if self._async_d2h and finish_fn is not None:
+                event = torch.cuda.Event()
+                event.record(self.lmcache_engine.gpu_connector.store_stream)
+                self._pending_d2h_ops.append((event, finish_fn))
 
             # Update skip_leading_tokens only on last rank to ensure
             # each PP stage stores its own KV cache
@@ -1191,6 +1208,17 @@ class LMCacheConnectorV1Impl:
     def get_finished(
         self, finished_req_ids: set[str]
     ) -> tuple[Optional[set[str]], Optional[set[str]]]:
+        # Poll pending D2H ops (NIXL-style: non-blocking event query).
+        # If D2H is done on store_stream, call finish_fn (batched_put).
+        # If still in progress, keep polling next round.
+        if self._pending_d2h_ops:
+            still_pending = []
+            for event, finish_fn in self._pending_d2h_ops:
+                if event.query():
+                    finish_fn()
+                else:
+                    still_pending.append((event, finish_fn))
+            self._pending_d2h_ops = still_pending
         return None, None
 
     def get_block_ids_with_load_errors(self) -> set[int]:

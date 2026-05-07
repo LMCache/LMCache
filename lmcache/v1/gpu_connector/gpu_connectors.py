@@ -363,10 +363,8 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
                 memory_obj.tensor.copy_(tmp_gpu_buffer, non_blocking=True)
 
         if not memory_obj.tensor.is_cuda:
-            # Force a synchronize if the target buffer is NOT CUDA device
-            # NOTE: for better performance, we may not want to sync for every
-            # memory object
-            self.store_stream.synchronize()
+            if not kwargs.get("deferred_sync", False):
+                self.store_stream.synchronize()
 
         if self.use_mla:
             memory_obj.metadata.fmt = MemoryFormat.KV_MLA_FMT
@@ -547,10 +545,8 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
                     memory_obj_tensor.copy_(tmp_gpu_buffer, non_blocking=True)
 
         if not memory_obj.raw_tensor.is_cuda:
-            # Force a synchronize if the target buffer is NOT CUDA device
-            # NOTE: for better performance, we may not want to sync for every
-            # memory object
-            self.store_stream.synchronize()
+            if not kwargs.get("deferred_sync", False):
+                self.store_stream.synchronize()
 
         if self.use_mla:
             memory_obj.metadata.fmt = MemoryFormat.KV_MLA_FMT
