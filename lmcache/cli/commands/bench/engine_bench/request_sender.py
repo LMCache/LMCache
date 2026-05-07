@@ -136,6 +136,8 @@ class RequestSender:
                     tokens.append(content)
 
             finish_time = time.time()
+            if first_token_time == 0.0 and num_output_tokens > 0:
+                first_token_time = finish_time
             successful = first_token_time > 0.0
             ttft = (first_token_time - submit_time) if successful else -1.0
             request_latency = finish_time - submit_time
