@@ -43,7 +43,12 @@ __device__ inline size_t calculate_engine_global_offset(
            k_or_v * scalars_per_block;
   } else if constexpr (format == GPUKVFormat::NL_X_NB_BS_HS) {
     // MLA: L tensors [NB, BS, HS]
-    return engine_block_idx * scalars_per_block;
+    // V4 padded-block support: use scalars_per_padded_block so the jump
+    // between engine blocks matches vLLM's page_size_padded stride. For
+    // V3.2 and other MLA models with no padding, block_stride_bytes is
+    // 0 and this degenerates to scalars_per_block (original behavior).
+    return engine_block_idx *
+           shape_desc.scalars_per_padded_block<ScalarType>();
   } else if constexpr (format == GPUKVFormat::TWO_X_NL_X_NBBS_NH_HS) {
     // SGLang MHA: 2L tensors [NBBS, NH, HS] — K/V via separate tensor ptrs
     return engine_block_idx * scalars_per_block;

@@ -16,6 +16,21 @@ struct PageBufferShapeDesc {
   int hs;            // head size
   int element_size;  // bytes (1 or 2)
 
+  // Byte stride between consecutive engine blocks along the block dim of
+  // the paged buffer. When 0, the tensor is dense and the kernel uses
+  // scalars_per_block() for the block→block jump (original behavior).
+  // When > 0, the tensor has per-block tail padding (e.g. vLLM's
+  // page_size_padded case for DeepSeek-V4 MLA layers); the kernel uses
+  // this value for block→block jumps while keeping scalars_per_block()
+  // / scalars_per_token() / scalars_per_head() for within-block address
+  // math, since inner dims remain densely packed.
+  //
+  // Invariant (validated in Python, not in the kernel): either 0, OR
+  // >= bs * nh * hs * element_size AND divisible by sizeof(ScalarType)
+  // for the chosen vectorization width. The kernel does pointer
+  // arithmetic on the returned value without further validation.
+  int block_stride_bytes;
+
   template <typename ScalarType>
   __host__ __device__ inline size_t scalars_per_head() const {
     return hs * element_size / sizeof(ScalarType);
@@ -29,6 +44,17 @@ struct PageBufferShapeDesc {
   template <typename ScalarType>
   __host__ __device__ inline size_t scalars_per_block() const {
     return bs * nh * hs * element_size / sizeof(ScalarType);
+  }
+
+  // Padded block stride in ScalarType units. Returns scalars_per_block()
+  // when block_stride_bytes == 0, so non-V4 code paths that never set
+  // block_stride_bytes behave exactly as before.
+  template <typename ScalarType>
+  __host__ __device__ inline size_t scalars_per_padded_block() const {
+    if (block_stride_bytes == 0) {
+      return scalars_per_block<ScalarType>();
+    }
+    return block_stride_bytes / sizeof(ScalarType);
   }
 };
 

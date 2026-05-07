@@ -81,7 +81,8 @@ class LayoutHints(TypedDict, total=False):
 def attempt_permute_to_contiguous_view(
     kv_caches: DiscoverableKVCache,
 ) -> DiscoverableKVCache:
-    """Return a contiguous view of *kv_caches*, metadata-only (no copy).
+    """Return a contiguous-equivalent view of *kv_caches*, metadata-only
+    (no copy).
 
     For a tensor leaf: reorders the dims by stride magnitude so shape
     lines up with a contiguous layout. For a list: recurses into each
@@ -89,16 +90,23 @@ def attempt_permute_to_contiguous_view(
     freshly allocated but hold the same tensor objects (or their
     permuted views).
 
-    Recovers the vLLM HND case: tensors allocated physically as
-    ``[2, NB, NH, BS, HS]`` but exposed logically as
-    ``[2, NB, BS, NH, HS]`` via a dim permute. Sorting dims by stride
-    undoes the permute without touching storage.
+    Recovers two well-known patterns:
+
+    - vLLM HND layout: physical ``[2, NB, NH, BS, HS]`` but exposed
+      logically as ``[2, NB, BS, NH, HS]`` via a dim permute. Sorting
+      dims by stride undoes the permute without touching storage.
+    - vLLM ``page_size_padded`` layout (e.g. DeepSeek-V4 MLA): the
+      outer (block) dim stride is inflated to include per-block tail
+      padding while inner dims remain densely packed. The transfer
+      kernel's ``NL_X_NB_BS_HS`` branch consumes this via
+      :meth:`PageBufferShapeDesc.scalars_per_padded_block`, so the view
+      is kernel-addressable as-is.
 
     Raises:
-        ValueError: If a tensor leaf is non-contiguous for a reason
-            other than dim permutation (e.g. slicing, ``as_strided``).
-            We refuse to fall back to ``.contiguous()`` (which would
-            copy) so the caller's invariant is never silently violated.
+        ValueError: If a tensor leaf is non-contiguous for any other
+            reason (e.g. slicing, interior ``as_strided``). We refuse to
+            fall back to ``.contiguous()`` (which would copy) so the
+            caller's invariant is never silently violated.
     """
     if isinstance(kv_caches, torch.Tensor):
         if kv_caches.is_contiguous():
@@ -107,12 +115,67 @@ def attempt_permute_to_contiguous_view(
         perm = sorted(range(kv_caches.ndim), key=lambda i: strides[i], reverse=True)
         result = kv_caches.permute(perm)
         if not result.is_contiguous():
+            # Accept per-block tail padding. The MLA kernel branch uses
+            # scalars_per_padded_block() for block→block jumps, so a
+            # tensor with an inflated outer-dim stride but dense inner
+            # dims is addressable by the kernel without copying.
+            if _is_per_block_tail_padded(result):
+                return result
             raise ValueError(
                 "tensor is non-contiguous for reasons other than permutation "
-                "(e.g. slicing or as_strided). Cannot recover contiguous view."
+                "or per-block tail padding (e.g. slicing or interior "
+                "as_strided). Cannot recover a kernel-addressable view."
             )
         return result
     return [attempt_permute_to_contiguous_view(sub) for sub in kv_caches]
+
+
+def _is_per_block_tail_padded(t: torch.Tensor) -> bool:
+    """Return True iff *t* is non-contiguous only because its outer
+    (block) dim stride exceeds the product of the inner dims' sizes,
+    while the inner dims themselves are densely packed.
+
+    This is the exact shape of a vLLM ``page_size_padded``-style tensor
+    built by ``as_strided`` in
+    ``gpu_model_runner._reshape_kv_cache_tensors``: each block has
+    ``real_page`` bytes of data followed by ``padded − real`` bytes of
+    dead space, and the block-dim stride is the padded stride. The
+    transfer kernel can address this layout directly once it knows the
+    padded stride (see ``PageBufferShapeDesc.block_stride_bytes``).
+
+    Args:
+        t: Tensor to classify.
+
+    Returns:
+        True if *t* has per-block tail padding and dense inner dims;
+        False for contiguous tensors, tensors with interior gaps,
+        overlapping blocks, or reverse-order layouts.
+    """
+    if t.ndim < 2:
+        return False
+    strides = t.stride()
+    shape = t.shape
+    # Innermost stride must be 1 (row-major).
+    if strides[-1] != 1:
+        return False
+    # Each inner stride must equal the product of sizes of more-inner
+    # dims — i.e. inner dims are densely packed with no gaps.
+    expected = 1
+    for i in range(t.ndim - 1, 0, -1):
+        expected *= shape[i]
+        if strides[i - 1] < expected:
+            # Overlap or reverse-order layout — not tail padding.
+            return False
+        if i - 1 > 0 and strides[i - 1] != expected:
+            # An *inner* dim has a gap — more exotic than per-block
+            # tail padding; we don't support it here.
+            return False
+    # Outer (block) dim stride must be at least the dense inner-product
+    # (equal = dense case, greater = tail-padded case).
+    inner_product = 1
+    for dim in shape[1:]:
+        inner_product *= dim
+    return strides[0] >= inner_product
 
 
 def assert_contiguous(tensor: torch.Tensor) -> None:
@@ -969,7 +1032,12 @@ def make_page_buffer_shape_desc(
         block_size: Tokens per block (``bs``).
 
     Returns:
-        A populated ``PageBufferShapeDesc``.
+        A populated ``PageBufferShapeDesc``. The ``block_stride_bytes``
+        field is set to the tensor's actual block-dim stride in bytes
+        when the format is MLA (``NL_X_NB_BS_HS``) and the layer has
+        per-block tail padding; otherwise it is left at ``0``, which
+        makes the kernel fall back to ``scalars_per_block()`` for
+        block→block jumps (original behavior for all non-V4 paths).
     """
     desc = lmc_ops.PageBufferShapeDesc()
     desc.kv_size = 1 if is_mla(gpu_kv_format) else 2
@@ -983,7 +1051,64 @@ def make_page_buffer_shape_desc(
     )
     desc.hs = get_head_size(kv_caches, gpu_kv_format, layer_idx)
     desc.element_size = get_dtype(kv_caches, gpu_kv_format, layer_idx).itemsize
+    desc.block_stride_bytes = _detect_block_stride_bytes(
+        kv_caches, gpu_kv_format, layer_idx
+    )
     return desc
+
+
+def _detect_block_stride_bytes(
+    kv_caches: DiscoverableKVCache,
+    gpu_kv_format: "lmc_ops.GPUKVFormat",
+    layer_idx: int,
+) -> int:
+    """Return the per-block byte stride of the engine-side paged buffer
+    when it has per-block tail padding; otherwise ``0``.
+
+    Only ``GPUKVFormat.NL_X_NB_BS_HS`` (vLLM MLA) is supported; all
+    other formats return ``0``. When support is extended to additional
+    formats, this function must gain matching branches AND the
+    corresponding branches of ``calculate_engine_global_offset`` in
+    ``csrc/mp_mem_kernels.cu`` must be updated to use
+    ``scalars_per_padded_block`` instead of ``scalars_per_block`` at
+    the same time.
+
+    Args:
+        kv_caches: Full kv_caches structure.
+        gpu_kv_format: Format returned by :func:`discover_gpu_kv_format`.
+        layer_idx: 0-based index of the representative layer whose
+            stride is measured.
+
+    Returns:
+        Padded block stride in bytes (``stride(0) * element_size`` for
+        ``NL_X_NB_BS_HS``), or ``0`` if the tensor is dense or the
+        format is not supported for padded-block detection.
+
+    Raises:
+        ValueError: If the tensor's block-dim stride is smaller than
+            the dense ``BS * HS`` stride, which would imply overlapping
+            blocks and corrupt data. The kernel cannot recover in that
+            case, so we refuse to proceed.
+    """
+    if gpu_kv_format != lmc_ops.GPUKVFormat.NL_X_NB_BS_HS:
+        return 0
+    layers = cast(list[torch.Tensor], kv_caches)
+    tensor = layers[layer_idx]
+    # Shape = (NB, BS, HS). Dense block-dim stride in elements = BS * HS.
+    # Actual stride is whatever vLLM set via as_strided; when
+    # page_size_padded > real_page_size_bytes, this is strictly greater.
+    dense_stride_elems = tensor.shape[1] * tensor.shape[2]
+    actual_stride_elems = tensor.stride(0)
+    if actual_stride_elems == dense_stride_elems:
+        return 0
+    if actual_stride_elems < dense_stride_elems:
+        raise ValueError(
+            f"Layer {layer_idx} has block-dim stride "
+            f"{actual_stride_elems} elements, smaller than the dense "
+            f"stride {dense_stride_elems} — overlapping blocks would "
+            "corrupt data. Refusing to proceed."
+        )
+    return actual_stride_elems * tensor.element_size()
 
 
 def _split_token2d_kv(token2d: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
