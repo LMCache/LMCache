@@ -1020,6 +1020,12 @@ def _get_head_size_view(
           * Tensor [2, P, B, NH, HS]  OR
           * (k, v) tuple each [P, B, NH, HS]
         (and also supports [P, 2, B, NH, HS] as a safe extension)
+
+    .. warning::
+        HND formats return **copies** (via ``.contiguous()``), not true views.
+        Do NOT use the returned tensors with in-place writes (e.g.
+        ``index_copy_``) for HND — changes will be lost. Use a dedicated
+        scatter function for HND write-back.
     """
     # -------------------------
     # MLA
@@ -1069,6 +1075,7 @@ def _get_head_size_view(
 
         elif gpu_kv_format == lmc_ops.GPUKVFormat.NL_X_TWO_NB_NH_BS_HS:
             # per-layer: [2, NB, NH, BS, HS] (HND layout)
+            # HND: permute+contiguous produces a COPY, safe for gather only.
             if t.shape[0] != 2:
                 raise ValueError(
                     f"{gpu_kv_format} expects [2,NB,NH,BS,HS], got {t.shape}"
@@ -1078,6 +1085,7 @@ def _get_head_size_view(
 
         elif gpu_kv_format == lmc_ops.GPUKVFormat.NL_X_NB_TWO_NH_BS_HS:
             # per-layer: [NB, 2, NH, BS, HS] (HND layout)
+            # HND: permute+contiguous produces a COPY, safe for gather only.
             if t.shape[1] != 2:
                 raise ValueError(
                     f"{gpu_kv_format} expects [NB,2,NH,BS,HS], got {t.shape}"
