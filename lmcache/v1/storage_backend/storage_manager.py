@@ -558,6 +558,7 @@ class StorageManager:
         lookup_id: str,
         cum_chunk_lengths_total: list[int],
         tier_expected_chunks: list[int],
+        keys_per_chunk: int = 1,
     ) -> None:
         """
         Callback function when all prefetch tasks
@@ -614,7 +615,12 @@ class StorageManager:
         #   retrieved_length = cum_chunk_lengths_total[2] = 512
         total_retrieved_chunks = 0
         for tier_idx, tier_result in enumerate(res):
-            actual_chunks = len(tier_result)
+            # `tier_result` is a list of (key, mem_obj) pairs, one per
+            # storage key. With layerwise on, each logical chunk maps to
+            # keys_per_chunk per-layer keys, so divide to get chunk count.
+            # We round down so a partially-retrieved chunk (e.g., one
+            # layer evicted) is treated as a miss.
+            actual_chunks = len(tier_result) // keys_per_chunk
             expected_chunks = tier_expected_chunks[tier_idx]
             total_retrieved_chunks += actual_chunks
 
@@ -623,7 +629,7 @@ class StorageManager:
             if actual_chunks < expected_chunks:
                 # Release all chunks in subsequent tiers since they won't be used
                 for subsequent_tier in res[tier_idx + 1 :]:
-                    for mem_obj in subsequent_tier:
+                    for _, mem_obj in subsequent_tier:
                         mem_obj.ref_count_down()
                 break
 
@@ -641,6 +647,7 @@ class StorageManager:
         cum_chunk_lengths: list[int],
         search_range: Optional[list[str]] = None,
         pin: bool = False,
+        keys_per_chunk: int = 1,
     ) -> None:
         """
         Perform asynchronous lookup and prefetching across all storage backends.
@@ -655,11 +662,19 @@ class StorageManager:
                 - chunk 1: 256 tokens (tokens 256-511)
                 - chunk 2: 128 tokens (tokens 512-639)
             Then cum_chunk_lengths = [0, 256, 512, 640]
-            Note: len(cum_chunk_lengths) = len(keys) + 1
+            Note: len(cum_chunk_lengths) = (len(keys) // keys_per_chunk) + 1
         :param Optional[list[str]] search_range: The range of storage backends
         to search in. Should be a subset of ["LocalCPUBackend",
         "LocalDiskBackend"] for now. If None, search in all backends.
         :param bool pin: Whether to pin the keys.
+        :param int keys_per_chunk: Number of storage keys per logical chunk.
+            For non-layerwise mode this is 1 (one key per chunk). For
+            layerwise mode the caller passes num_layers, since each chunk
+            is stored as num_layers per-layer keys (LayerCacheEngineKey).
+            All chunk-level accounting below is derived from
+            num_hit_keys // keys_per_chunk so that hit counts and
+            cum_chunk_lengths indexing stay in chunk units even though the
+            backend operates on per-layer keys.
         """
 
         # NOTE(Jiayi): Currently, the retrieval pattern is always
@@ -674,7 +689,17 @@ class StorageManager:
         # chunks than its lookup result indicated. This is especially helpful
         # for P2PBackend.
 
-        num_total_chunks = len(keys)
+        # All chunk-level accounting (num_total_chunks, num_total_hit_chunks,
+        # tier_expected_chunks, cum_chunk_lengths indexing) is in *chunk*
+        # units, while raw key indexing into `keys` is in *key* units.
+        # When keys_per_chunk == 1 these are identical; when layerwise is
+        # on, each chunk corresponds to num_layers keys.
+        assert keys_per_chunk >= 1
+        assert len(keys) % keys_per_chunk == 0, (
+            f"len(keys)={len(keys)} is not a multiple of "
+            f"keys_per_chunk={keys_per_chunk}"
+        )
+        num_total_chunks = len(keys) // keys_per_chunk
         num_total_hit_chunks = 0
         # cum_chunk_lengths_total: A copy of the original cumulative chunk lengths
         # for all chunks. This is preserved to calculate the final token count
@@ -691,7 +716,13 @@ class StorageManager:
         for backend_name, backend in self.get_active_storage_backends(
             search_range=search_range
         ):
-            num_hit_chunks = await backend.batched_async_contains(lookup_id, keys, pin)
+            num_hit_keys = await backend.batched_async_contains(lookup_id, keys, pin)
+            # Round down to a whole-chunk boundary. If a backend has only
+            # some of a chunk's per-layer keys (e.g., partial eviction),
+            # we treat the chunk as a miss to keep the chunk-level
+            # invariant required by the prefix-match retrieval pattern.
+            num_hit_chunks = num_hit_keys // keys_per_chunk
+            num_hit_keys = num_hit_chunks * keys_per_chunk
 
             if num_hit_chunks == 0:
                 continue
@@ -699,7 +730,7 @@ class StorageManager:
             num_total_hit_chunks += num_hit_chunks
             tier_expected_chunks.append(num_hit_chunks)
 
-            backend_keys = keys[:num_hit_chunks]
+            backend_keys = keys[:num_hit_keys]
             loading_task_keys.append(backend_keys)
 
             assert self.async_serializer is not None, (
@@ -730,7 +761,7 @@ class StorageManager:
 
             if num_total_hit_chunks == num_total_chunks:
                 break
-            keys = keys[num_hit_chunks:]
+            keys = keys[num_hit_keys:]
 
         # If no chunks were hit across all backends, respond immediately and return.
         if num_total_hit_chunks == 0:
@@ -770,6 +801,7 @@ class StorageManager:
                 lookup_id,
                 cum_chunk_lengths_total,
                 tier_expected_chunks,
+                keys_per_chunk=keys_per_chunk,
             )
         )
 
