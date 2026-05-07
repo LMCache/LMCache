@@ -13,18 +13,19 @@
 #include <mutex>
 #include <queue>
 #include <stdexcept>
+#include <string>
 #include <thread>
 #include <tuple>
+#include <unordered_map>
 #include <vector>
 
 namespace lmcache {
 namespace connector {
 
 struct WorkerPoolConfig {
-  bool enable_separate_pools{false};
-  int lookup_workers{0};
-  int retrieve_workers{0};
-  int store_workers{0};
+  // Maps lane key (e.g. "lookup", "retrieve", "store") to worker count.
+  // Lane keys not present in this map use the shared num_workers_ pool.
+  std::unordered_map<std::string, int> per_op_workers;
 };
 
 /*
@@ -52,12 +53,15 @@ class ConnectorBase : public IStorageConnector {
     if (num_workers_ <= 0) {
       throw std::runtime_error("num_workers must be > 0");
     }
-    if (worker_pool_config_.enable_separate_pools &&
-        (worker_pool_config_.lookup_workers <= 0 ||
-         worker_pool_config_.retrieve_workers <= 0 ||
-         worker_pool_config_.store_workers <= 0)) {
-      throw std::runtime_error(
-          "separate worker pools require positive worker counts");
+    for (auto& [key, count] : worker_pool_config_.per_op_workers) {
+      if (count <= 0) {
+        throw std::runtime_error("per_op_workers count for '" + key +
+                                 "' must be positive");
+      }
+      if (lane_registry().find(key) == lane_registry().end()) {
+        throw std::runtime_error("unknown lane key in per_op_workers: '" + key +
+                                 "'");
+      }
     }
 
     // create eventfd for async notification
@@ -224,10 +228,8 @@ class ConnectorBase : public IStorageConnector {
     // Signal all worker threads to stop
     stop_.store(true, std::memory_order_release);
     req_cv_.notify_all();
-    if (worker_pool_config_.enable_separate_pools) {
-      lookup_lane_.cv.notify_all();
-      retrieve_lane_.cv.notify_all();
-      store_lane_.cv.notify_all();
+    for (auto& [key, lane] : lanes_) {
+      lane.cv.notify_all();
     }
 
     // Shutdown all connections (derived class specific)
@@ -239,10 +241,8 @@ class ConnectorBase : public IStorageConnector {
         worker.join();
       }
     }
-    if (worker_pool_config_.enable_separate_pools) {
-      join_lane_workers(lookup_lane_);
-      join_lane_workers(retrieve_lane_);
-      join_lane_workers(store_lane_);
+    for (auto& [key, lane] : lanes_) {
+      join_lane_workers(lane);
     }
 
     // Derived cleanup that must only run after workers have stopped.
@@ -261,10 +261,8 @@ class ConnectorBase : public IStorageConnector {
         requests_.pop();
       }
     }
-    if (worker_pool_config_.enable_separate_pools) {
-      clear_lane_queue(lookup_lane_);
-      clear_lane_queue(retrieve_lane_);
-      clear_lane_queue(store_lane_);
+    for (auto& [key, lane] : lanes_) {
+      clear_lane_queue(lane);
     }
     {
       std::lock_guard<std::mutex> lk(comp_mu_);
@@ -277,16 +275,26 @@ class ConnectorBase : public IStorageConnector {
  protected:
   // call this at the END of your derived class constructor
   void start_workers() {
-    if (worker_pool_config_.enable_separate_pools) {
-      start_lane_workers(lookup_lane_, worker_pool_config_.lookup_workers);
-      start_lane_workers(retrieve_lane_, worker_pool_config_.retrieve_workers);
-      start_lane_workers(store_lane_, worker_pool_config_.store_workers);
-      return;
+    // Start dedicated per-op lanes for configured keys.
+    for (auto& [key, count] : worker_pool_config_.per_op_workers) {
+      start_lane_workers(lanes_[key], count);
     }
 
-    workers_.reserve(static_cast<size_t>(num_workers_));
-    for (int i = 0; i < num_workers_; i++) {
-      workers_.emplace_back([this]() { this->worker_loop(); });
+    // Start shared pool if any lane key in the registry is not configured.
+    bool need_shared = false;
+    for (auto& [key, ops] : lane_registry()) {
+      if (worker_pool_config_.per_op_workers.find(key) ==
+          worker_pool_config_.per_op_workers.end()) {
+        need_shared = true;
+        break;
+      }
+    }
+
+    if (need_shared) {
+      workers_.reserve(static_cast<size_t>(num_workers_));
+      for (int i = 0; i < num_workers_; i++) {
+        workers_.emplace_back([this]() { this->worker_loop(); });
+      }
     }
   }
 
@@ -349,17 +357,10 @@ class ConnectorBase : public IStorageConnector {
   bool is_stopping() const { return stop_.load(std::memory_order_acquire); }
 
   int worker_count_for_op(Op op) const {
-    if (!worker_pool_config_.enable_separate_pools) {
-      return num_workers_;
-    }
-    switch (op) {
-      case Op::BATCH_TILE_EXISTS:
-        return worker_pool_config_.lookup_workers;
-      case Op::BATCH_TILE_GET:
-        return worker_pool_config_.retrieve_workers;
-      case Op::BATCH_TILE_SET:
-      case Op::BATCH_TILE_DELETE:
-        return worker_pool_config_.store_workers;
+    const std::string& key = lane_key_for_op(op);
+    auto it = worker_pool_config_.per_op_workers.find(key);
+    if (it != worker_pool_config_.per_op_workers.end()) {
+      return it->second;
     }
     return num_workers_;
   }
@@ -430,13 +431,14 @@ class ConnectorBase : public IStorageConnector {
   }
 
   void enqueue_request(Request&& req) {
-    if (worker_pool_config_.enable_separate_pools) {
-      WorkerLane& lane = lane_for_op(req.op);
+    const std::string& key = lane_key_for_op(req.op);
+    auto it = lanes_.find(key);
+    if (it != lanes_.end()) {
       {
-        std::lock_guard<std::mutex> lk(lane.mu);
-        lane.requests.push(std::move(req));
+        std::lock_guard<std::mutex> lk(it->second.mu);
+        it->second.requests.push(std::move(req));
       }
-      lane.cv.notify_one();
+      it->second.cv.notify_one();
       return;
     }
 
@@ -495,18 +497,31 @@ class ConnectorBase : public IStorageConnector {
     }
   }
 
-  WorkerLane& lane_for_op(Op op) {
-    switch (op) {
-      case Op::BATCH_TILE_EXISTS:
-        return lookup_lane_;
-      case Op::BATCH_TILE_GET:
-        return retrieve_lane_;
-      case Op::BATCH_TILE_SET:
-      case Op::BATCH_TILE_DELETE:
-        return store_lane_;
-      default:
-        throw std::runtime_error("invalid Op type");
+  static const std::unordered_map<std::string, std::vector<Op>>&
+  lane_registry() {
+    static const std::unordered_map<std::string, std::vector<Op>> registry = {
+        {"lookup", {Op::BATCH_TILE_EXISTS}},
+        {"retrieve", {Op::BATCH_TILE_GET}},
+        {"store", {Op::BATCH_TILE_SET}},
+        {"delete", {Op::BATCH_TILE_DELETE}},
+    };
+    return registry;
+  }
+
+  static const std::string& lane_key_for_op(Op op) {
+    static std::unordered_map<Op, std::string> reverse;
+    if (reverse.empty()) {
+      for (auto& [key, ops] : lane_registry()) {
+        for (Op o : ops) {
+          reverse[o] = key;
+        }
+      }
     }
+    auto it = reverse.find(op);
+    if (it == reverse.end()) {
+      throw std::runtime_error("unknown Op type");
+    }
+    return it->second;
   }
 
   void start_lane_workers(WorkerLane& lane, int num_workers) {
@@ -664,9 +679,9 @@ class ConnectorBase : public IStorageConnector {
   std::queue<Completion> completions_;
 
   std::vector<std::thread> workers_;
-  WorkerLane lookup_lane_;
-  WorkerLane retrieve_lane_;
-  WorkerLane store_lane_;
+  // Populated only during start_workers() (single-threaded construction).
+  // All subsequent accesses are reads — no lock needed in enqueue_request.
+  std::unordered_map<std::string, WorkerLane> lanes_;
 };
 
 }  // namespace connector

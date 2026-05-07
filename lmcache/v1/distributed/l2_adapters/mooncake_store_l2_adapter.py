@@ -9,6 +9,7 @@ from __future__ import annotations
 # Standard
 from typing import (
     TYPE_CHECKING,
+    cast,
 )
 
 if TYPE_CHECKING:
@@ -36,9 +37,7 @@ _LMCACHE_ONLY_KEYS = {
     "type",
     "num_workers",
     "eviction",
-    "lookup_workers",
-    "retrieve_workers",
-    "store_workers",
+    "per_op_workers",
 }
 
 
@@ -57,55 +56,59 @@ class MooncakeStoreL2AdapterConfig(L2AdapterConfigBase):
         setup_config: Mooncake SDK configuration forwarded
             as-is to ``RealClient::setup_internal()``.
         num_workers: Shared worker thread count (default 4,
-            must be > 0).  Ignored when per-operation
-            worker counts are set.
-        lookup_workers: Optional dedicated worker count
-            for EXISTS operations.  Must be set together
-            with ``retrieve_workers`` and
-            ``store_workers``.
-        retrieve_workers: Optional dedicated worker count
-            for GET/load operations.  Must be set together
-            with ``lookup_workers`` and
-            ``store_workers``.
-        store_workers: Optional dedicated worker count for
-            SET/put operations.  Must be set together with
-            ``lookup_workers`` and ``retrieve_workers``.
+            must be > 0).  Used for any op whose lane key
+            is not present in ``per_op_workers``.
+        per_op_workers: Optional dict mapping lane keys
+            (``"lookup"``, ``"retrieve"``, ``"store"``,
+            ``"delete"``) to dedicated worker counts.  Ops
+            not mentioned use the shared ``num_workers`` pool.
     """
 
     def __init__(
         self,
         setup_config: dict[str, str],
         num_workers: int = 4,
-        lookup_workers: int | None = None,
-        retrieve_workers: int | None = None,
-        store_workers: int | None = None,
+        per_op_workers: dict[str, int] | None = None,
     ):
         super().__init__()
         self.num_workers = self._validate_num_workers(num_workers)
-        self._validate_per_op_worker_counts(
-            lookup_workers,
-            retrieve_workers,
-            store_workers,
-        )
+        self.per_op_workers = self._validate_per_op_workers(per_op_workers)
         self.setup_config: dict[str, str] = dict(setup_config)
-        self.lookup_workers = lookup_workers
-        self.retrieve_workers = retrieve_workers
-        self.store_workers = store_workers
 
     @classmethod
     def from_dict(cls, d: dict[str, object]) -> "MooncakeStoreL2AdapterConfig":
-        num_workers: int = 4
-        if "num_workers" in d:
-            num_workers = cls._validate_num_workers(d["num_workers"])
-        lookup_workers = cls._parse_optional_worker_count(d, "lookup_workers")
-        retrieve_workers = cls._parse_optional_worker_count(d, "retrieve_workers")
-        store_workers = cls._parse_optional_worker_count(d, "store_workers")
-        cls._validate_per_op_worker_counts(
-            lookup_workers,
-            retrieve_workers,
-            store_workers,
-        )
+        """Construct a config from a raw configuration dict.
 
+        LMCache-only keys (``type``, ``num_workers``, ``eviction``,
+        ``per_op_workers``) are consumed locally.  All other keys are
+        forwarded to mooncake as string values.
+
+        Args:
+            d: Raw configuration dict (typically from JSON/CLI).
+
+        Returns:
+            A validated ``MooncakeStoreL2AdapterConfig``.
+
+        Raises:
+            ValueError: If ``num_workers`` or ``per_op_workers`` values
+                are invalid.
+        """
+        num_workers = cast(int, d.get("num_workers", 4))  # validated in __init__
+
+        per_op_workers: dict[str, int] | None = None
+        raw = d.get("per_op_workers")
+        if raw is not None:
+            if not isinstance(raw, dict):
+                raise ValueError("per_op_workers must be a dict")
+            per_op_workers = {}
+            for k, v in raw.items():
+                # bool is a subclass of int, so explicitly reject it.
+                if isinstance(v, bool) or not isinstance(v, int):
+                    raise ValueError(
+                        f"per_op_workers[{k!r}] must be an integer, "
+                        f"got {type(v).__name__}"
+                    )
+                per_op_workers[str(k)] = v
         # Everything except LMCache-only keys is
         # forwarded to mooncake as str values.
         setup: dict[str, str] = {}
@@ -118,49 +121,40 @@ class MooncakeStoreL2AdapterConfig(L2AdapterConfigBase):
         return cls(
             setup_config=setup,
             num_workers=num_workers,
-            lookup_workers=lookup_workers,
-            retrieve_workers=retrieve_workers,
-            store_workers=store_workers,
+            per_op_workers=per_op_workers,
         )
 
     @staticmethod
-    def _parse_optional_worker_count(d: dict[str, object], key: str) -> int | None:
-        value = d.get(key)
-        if value is None:
-            return None
-        if not isinstance(value, int):
-            raise ValueError(f"{key} must be an integer, got {type(value).__name__}")
-        return value
-
-    @staticmethod
     def _validate_num_workers(raw: object) -> int:
-        if not isinstance(raw, int) or raw <= 0:
+        """Validate and return a positive integer worker count.
+
+        Raises:
+            ValueError: If ``raw`` is not a positive integer.
+        """
+        # bool is a subclass of int, so isinstance(True, int) is True.
+        # Explicitly reject bool to prevent True/False from being accepted.
+        if isinstance(raw, bool) or not isinstance(raw, int) or raw <= 0:
             raise ValueError("num_workers must be a positive integer")
         return raw
 
     @staticmethod
-    def _validate_per_op_worker_counts(
-        lookup_workers: int | None,
-        retrieve_workers: int | None,
-        store_workers: int | None,
-    ) -> None:
-        values = {
-            "lookup_workers": lookup_workers,
-            "retrieve_workers": retrieve_workers,
-            "store_workers": store_workers,
-        }
-        specified = [name for name, value in values.items() if value is not None]
-        if not specified:
-            return
-        if len(specified) != len(values):
-            raise ValueError(
-                "lookup_workers, retrieve_workers, and store_workers must "
-                "all be set together"
-            )
-        for name in specified:
-            value = values[name]
-            if not isinstance(value, int) or value <= 0:
-                raise ValueError(f"{name} must be a positive integer")
+    def _validate_per_op_workers(
+        per_op_workers: dict[str, int] | None,
+    ) -> dict[str, int] | None:
+        """Validate per-operation worker counts (``None`` is a no-op).
+
+        Raises:
+            ValueError: If any worker count is not a positive integer.
+        """
+        if per_op_workers is None:
+            return None
+        for key, value in per_op_workers.items():
+            # bool is a subclass of int, so isinstance(True, int) is True.
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                raise ValueError(
+                    f"per_op_workers[{key!r}] must be a positive integer, got {value!r}"
+                )
+        return per_op_workers
 
     @classmethod
     def help(cls) -> str:
@@ -175,13 +169,13 @@ class MooncakeStoreL2AdapterConfig(L2AdapterConfigBase):
             "Refer to mooncake documentation for "
             "available setup keys.\n"
             "- num_workers (int): C++ worker threads "
-            "(default 4, >0)\n"
-            "- lookup_workers (int): EXISTS worker threads (>0); must be set "
-            "together with retrieve_workers and store_workers\n"
-            "- retrieve_workers (int): GET/load worker threads (>0); must be "
-            "set together with lookup_workers and store_workers\n"
-            "- store_workers (int): SET/put worker threads (>0); must be set "
-            "together with lookup_workers and retrieve_workers"
+            "(default 4, >0). Used for ops not in "
+            "per_op_workers.\n"
+            "- per_op_workers (dict[str, int]): Optional "
+            "dict mapping lane keys to dedicated worker "
+            "counts. Valid keys: lookup, retrieve, "
+            "store, delete. Ops not mentioned use the "
+            "shared num_workers pool."
         )
 
 
@@ -247,28 +241,15 @@ def _create_mooncake_store_l2_adapter(
         "num_workers": config.num_workers,
         "l1_registration": l1_registration,
     }
-    if (
-        config.lookup_workers is not None
-        or config.retrieve_workers is not None
-        or config.store_workers is not None
-    ):
-        native_client_kwargs.update(
-            {
-                "lookup_workers": config.lookup_workers,
-                "retrieve_workers": config.retrieve_workers,
-                "store_workers": config.store_workers,
-            }
-        )
+    if config.per_op_workers is not None:
+        native_client_kwargs["per_op_workers"] = config.per_op_workers
 
     native_client = LMCacheMooncakeClient(**native_client_kwargs)
     logger.info(
         "Created Mooncake Store L2 adapter "
-        "(workers=%d, lookup_workers=%s, retrieve_workers=%s, "
-        "store_workers=%s, preregister_l1_memory=%s)",
+        "(workers=%d, per_op_workers=%s, preregister_l1_memory=%s)",
         config.num_workers,
-        config.lookup_workers,
-        config.retrieve_workers,
-        config.store_workers,
+        config.per_op_workers,
         l1_registration.enabled and l1_registration.size > 0,
     )
     return NativeConnectorL2Adapter(native_client)

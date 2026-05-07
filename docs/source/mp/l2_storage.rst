@@ -429,26 +429,24 @@ If the Mooncake headers are not installed in the system include path
 **LMCache-specific fields:**
 
 - ``num_workers``: Number of C++ worker threads for the shared pool
-  (default ``4``, must be > 0).  Only used when per-operation worker
-  counts are not set.
+  (default ``4``, must be > 0).  
 
-- ``lookup_workers``, ``retrieve_workers``, ``store_workers``
-  (``int``, optional): Per-operation worker thread counts.  When set,
-  the adapter allocates three independent thread pools so that
-  different operation types cannot block each other:
+- ``per_op_workers`` (``dict[str, int]``, optional): A dict mapping lane keys
+  to dedicated worker thread counts.  Supported keys:
 
-  - ``lookup_workers`` — threads for ``EXISTS`` operations.
-  - ``retrieve_workers`` — threads for ``GET`` / load operations.
-  - ``store_workers`` — threads for ``SET`` / put operations.
+  - ``"lookup"`` — threads for ``EXISTS`` operations.
+  - ``"retrieve"`` — threads for ``GET`` / load operations.
+  - ``"store"`` — threads for ``SET`` / put operations.
+  - ``"delete"`` — threads for ``DELETE`` operations.
 
-  All three must be set together (or all left unset).  When set, the
-  shared ``num_workers`` pool is **not used**.
+  Operations whose lane key is **not** present in the dict use the
+  shared ``num_workers`` pool.  There is no requirement to set all
+  keys — you can configure only the lanes that need dedicated pools.
 
 **Mooncake fields:**
 
 All other keys in the JSON config (except ``type``, ``num_workers``,
-``lookup_workers``, ``retrieve_workers``, ``store_workers``, and
-``eviction``) are forwarded **as-is** to Mooncake's
+``per_op_workers``, and ``eviction``) are forwarded **as-is** to Mooncake's
 ``setup_internal(ConfigDict)``.  Refer to the
 `Mooncake documentation <https://github.com/kvcache-ai/Mooncake>`_
 for available setup keys (e.g., ``local_hostname``,
@@ -474,9 +472,11 @@ for available setup keys (e.g., ``local_hostname``,
     # Per-operation pools (GET-heavy workload)
     --l2-adapter '{
       "type": "mooncake_store",
-      "lookup_workers": 2,
-      "retrieve_workers": 16,
-      "store_workers": 4,
+      "per_op_workers": {
+        "lookup": 2,
+        "retrieve": 16,
+        "store": 4
+      },
       "local_hostname": "node01",
       "metadata_server": "http://localhost:8080/metadata",
       "master_server_addr": "localhost:50051",

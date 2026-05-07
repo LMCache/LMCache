@@ -12,16 +12,23 @@ namespace py = pybind11;
 
 namespace {
 
-int parse_optional_worker_count(const py::object& value, const char* arg_name) {
-  if (value.is_none()) {
-    return 0;
+lmcache::connector::WorkerPoolConfig parse_per_op_workers(
+    const py::object& obj) {
+  if (obj.is_none()) {
+    return {};
   }
-  int count = value.cast<int>();
-  if (count <= 0) {
-    throw std::runtime_error(std::string(arg_name) +
-                             " must be a positive integer or None");
+  py::dict d = obj.cast<py::dict>();
+  std::unordered_map<std::string, int> per_op;
+  for (auto& [key, value] : d) {
+    std::string key_str = key.cast<std::string>();
+    int count = value.cast<int>();
+    if (count <= 0) {
+      throw std::runtime_error("per_op_workers['" + key_str +
+                               "'] must be a positive integer");
+    }
+    per_op[key_str] = count;
   }
-  return count;
+  return {std::move(per_op)};
 }
 
 }  // namespace
@@ -38,20 +45,14 @@ PYBIND11_MODULE(lmcache_mooncake, m) {
   py::class_<lmcache::connector::MooncakeConnector>(m, "LMCacheMooncakeClient")
       .def(py::init([](lmcache::connector::ConfigDict config, int num_workers,
                        lmcache::connector::L1RegistrationConfig l1_registration,
-                       py::object lookup_workers, py::object retrieve_workers,
-                       py::object store_workers) {
+                       py::object per_op_workers) {
              return new lmcache::connector::MooncakeConnector(
                  std::move(config), num_workers, l1_registration,
-                 parse_optional_worker_count(lookup_workers, "lookup_workers"),
-                 parse_optional_worker_count(retrieve_workers,
-                                             "retrieve_workers"),
-                 parse_optional_worker_count(store_workers, "store_workers"));
+                 parse_per_op_workers(per_op_workers));
            }),
            py::arg("config"), py::arg("num_workers"),
            py::arg("l1_registration") =
                lmcache::connector::L1RegistrationConfig{},
-           py::arg("lookup_workers") = py::none(),
-           py::arg("retrieve_workers") = py::none(),
-           py::arg("store_workers") = py::none())
+           py::arg("per_op_workers") = py::none())
           LMCACHE_BIND_CONNECTOR_METHODS(lmcache::connector::MooncakeConnector);
 }

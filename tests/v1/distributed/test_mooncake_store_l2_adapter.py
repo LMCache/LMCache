@@ -173,23 +173,22 @@ class TestMooncakeStoreL2AdapterConfig:
         assert config.setup_config["local_hostname"] == "10.0.0.1"
 
     def test_from_dict_with_per_op_workers(self):
-        """Per-operation worker counts should be parsed and excluded."""
+        """Per-operation worker counts should be parsed as a dict
+        and excluded from setup_config."""
         d = {
             "type": "mooncake_store",
             "num_workers": 16,
-            "lookup_workers": 4,
-            "retrieve_workers": 16,
-            "store_workers": 4,
+            "per_op_workers": {
+                "lookup": 4,
+                "retrieve": 16,
+                "store": 4,
+            },
             "local_hostname": "10.0.0.1",
         }
         config = MooncakeStoreL2AdapterConfig.from_dict(d)
 
-        assert config.lookup_workers == 4
-        assert config.retrieve_workers == 16
-        assert config.store_workers == 4
-        assert "lookup_workers" not in config.setup_config
-        assert "retrieve_workers" not in config.setup_config
-        assert "store_workers" not in config.setup_config
+        assert config.per_op_workers == {"lookup": 4, "retrieve": 16, "store": 4}
+        assert "per_op_workers" not in config.setup_config
         assert config.setup_config["local_hostname"] == "10.0.0.1"
 
     def test_from_dict_forwards_boolean_mooncake_keys_as_strings(self):
@@ -222,9 +221,11 @@ class TestMooncakeStoreL2AdapterConfig:
             "type": "mooncake_store",
             "num_workers": 2,
             "eviction": "lru",
-            "lookup_workers": 3,
-            "retrieve_workers": 5,
-            "store_workers": 2,
+            "per_op_workers": {
+                "lookup": 3,
+                "retrieve": 5,
+                "store": 2,
+            },
             "local_hostname": "host1",
         }
         config = MooncakeStoreL2AdapterConfig.from_dict(d)
@@ -232,9 +233,7 @@ class TestMooncakeStoreL2AdapterConfig:
         assert "type" not in config.setup_config
         assert "num_workers" not in config.setup_config
         assert "eviction" not in config.setup_config
-        assert "lookup_workers" not in config.setup_config
-        assert "retrieve_workers" not in config.setup_config
-        assert "store_workers" not in config.setup_config
+        assert "per_op_workers" not in config.setup_config
         assert config.setup_config["local_hostname"] == "host1"
 
     def test_from_dict_converts_values_to_str(self):
@@ -279,59 +278,33 @@ class TestMooncakeStoreL2AdapterConfig:
         with pytest.raises(ValueError, match="num_workers"):
             MooncakeStoreL2AdapterConfig.from_dict(d)
 
-    @pytest.mark.parametrize(
-        "field",
-        ["lookup_workers", "retrieve_workers", "store_workers"],
-    )
     @pytest.mark.parametrize("value", [0, -1, "four"])
-    def test_from_dict_invalid_per_op_workers(self, field: str, value: Any):
-        """Invalid per-operation worker counts should raise ValueError."""
-        d = {
+    def test_from_dict_invalid_per_op_workers(self, value: Any):
+        """Invalid per_op_workers values should raise ValueError."""
+        d: dict[str, object] = {
             "type": "mooncake_store",
-            "lookup_workers": 2,
-            "retrieve_workers": 4,
-            "store_workers": 2,
-            field: value,
+            "per_op_workers": {
+                "lookup": 2,
+                "retrieve": value,
+                "store": 2,
+            },
         }
-        with pytest.raises(ValueError, match=field):
+        with pytest.raises(ValueError, match="per_op_workers"):
             MooncakeStoreL2AdapterConfig.from_dict(d)
 
-    @pytest.mark.parametrize(
-        "config_dict",
-        [
-            {"type": "mooncake_store", "lookup_workers": 2},
-            {"type": "mooncake_store", "retrieve_workers": 2},
-            {"type": "mooncake_store", "store_workers": 2},
-            {
-                "type": "mooncake_store",
-                "lookup_workers": 2,
-                "retrieve_workers": 4,
+    def test_from_dict_partial_per_op_workers(self):
+        """Partial per_op_workers is valid — unmentioned keys use shared pool."""
+        d = {
+            "type": "mooncake_store",
+            "per_op_workers": {
+                "lookup": 4,
+                "retrieve": 16,
             },
-            {
-                "type": "mooncake_store",
-                "lookup_workers": 2,
-                "store_workers": 4,
-            },
-            {
-                "type": "mooncake_store",
-                "retrieve_workers": 2,
-                "store_workers": 4,
-            },
-        ],
-    )
-    def test_from_dict_requires_all_per_op_workers(self, config_dict: dict):
-        """Separate worker pools require all per-operation counts."""
-        with pytest.raises(ValueError, match="must all be set together"):
-            MooncakeStoreL2AdapterConfig.from_dict(config_dict)
-
-    def test_constructor_requires_all_per_op_workers(self):
-        """Direct construction should reject partial per-operation worker counts."""
-        with pytest.raises(ValueError, match="must all be set together"):
-            MooncakeStoreL2AdapterConfig(
-                setup_config={},
-                lookup_workers=2,
-                retrieve_workers=4,
-            )
+            "local_hostname": "10.0.0.1",
+        }
+        config = MooncakeStoreL2AdapterConfig.from_dict(d)
+        assert config.per_op_workers == {"lookup": 4, "retrieve": 16}
+        assert "store" not in config.per_op_workers
 
     def test_constructor_copies_setup_config(self):
         """Constructor should copy the setup_config dict."""
@@ -522,16 +495,12 @@ class TestMooncakeStoreL1RegistrationFactory:
                 config: dict[str, str],
                 num_workers: int,
                 l1_registration,
-                lookup_workers=None,
-                retrieve_workers=None,
-                store_workers=None,
+                per_op_workers=None,
             ):
                 captured["config"] = config
                 captured["num_workers"] = num_workers
                 captured["l1_registration"] = l1_registration
-                captured["lookup_workers"] = lookup_workers
-                captured["retrieve_workers"] = retrieve_workers
-                captured["store_workers"] = store_workers
+                captured["per_op_workers"] = per_op_workers
 
         _install_fake_mooncake_extension(monkeypatch, FakeClient)
         monkeypatch.setattr(
@@ -545,9 +514,11 @@ class TestMooncakeStoreL1RegistrationFactory:
                 "type": "mooncake_store",
                 "local_hostname": "127.0.0.1",
                 "num_workers": 16,
-                "lookup_workers": 4,
-                "retrieve_workers": 16,
-                "store_workers": 4,
+                "per_op_workers": {
+                    "lookup": 4,
+                    "retrieve": 16,
+                    "store": 4,
+                },
                 "protocol": "tcp",
             }
         )
@@ -558,9 +529,7 @@ class TestMooncakeStoreL1RegistrationFactory:
         assert wrapped_adapter[0] == "wrapped"
         assert captured["config"] == config.setup_config
         assert captured["num_workers"] == 16
-        assert captured["lookup_workers"] == 4
-        assert captured["retrieve_workers"] == 16
-        assert captured["store_workers"] == 4
+        assert captured["per_op_workers"] == {"lookup": 4, "retrieve": 16, "store": 4}
 
     def test_factory_requires_l1_memory_descriptor_for_rdma(
         self, monkeypatch: pytest.MonkeyPatch
@@ -930,6 +899,7 @@ class TestMooncakeStoreIntegration:
                 "type": "mooncake_store",
                 "local_hostname": MOONCAKE_LOCAL_HOSTNAME,
                 "metadata_server": MOONCAKE_METADATA_SERVER,
+                "master_server_addr": MOONCAKE_MASTER_SERVER_ADDRESS,
                 "num_workers": 2,
             }
         )
