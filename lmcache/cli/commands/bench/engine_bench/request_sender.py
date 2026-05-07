@@ -60,6 +60,41 @@ def _extract_content(chunk: object, completions_mode: bool) -> str:
     return ""
 
 
+def _has_output_signal(chunk: object, completions_mode: bool) -> bool:
+    """Return True if *chunk* carries any model output.
+
+    The first chunk for which this is True is the bench's "first byte
+    of model output" timestamp (TTFT).  Wider than ``_extract_content``
+    because it also fires on tool-call deltas, which carry output but
+    no text content.
+
+    Engines with ``--enable-auto-tool-choice`` and a tool-call parser
+    can emit a request's entire output via ``delta.tool_calls`` rather
+    than ``delta.content`` (especially with ``max_tokens=1``, where the
+    parser never gets enough tokens to commit either way).  Without
+    this widening, every such request would be misclassified as failed
+    by ``send_request`` even though the engine completed it normally.
+    """
+    choices = getattr(chunk, "choices", None)
+    if not choices:
+        return False
+    choice = choices[0]
+    if completions_mode:
+        text = getattr(choice, "text", None)
+        return bool(text)
+    delta = getattr(choice, "delta", None)
+    if delta is None:
+        return False
+    if getattr(delta, "content", None):
+        return True
+    if getattr(delta, "tool_calls", None):
+        return True
+    for attr in ("reasoning_content", "reasoning"):
+        if getattr(delta, attr, None):
+            return True
+    return False
+
+
 class RequestSender:
     """Async streaming request sender for inference engines.
 
@@ -149,17 +184,25 @@ class RequestSender:
                     if ct:
                         num_output_tokens = ct
 
+                if not first_token_time and _has_output_signal(
+                    chunk, self._completions_mode
+                ):
+                    first_token_time = time.time()
+
                 content = _extract_content(chunk, self._completions_mode)
                 if content:
-                    if not first_token_time:
-                        first_token_time = time.time()
                     tokens.append(content)
 
             finish_time = time.time()
-            successful = first_token_time > 0.0
-            ttft = (first_token_time - submit_time) if successful else -1.0
+            # A request is successful if we observed any output: either a
+            # first-byte chunk (content / tool_calls / reasoning) or a
+            # final usage chunk reporting completion_tokens > 0.  The
+            # latter covers engines that send the model's output through
+            # a channel _has_output_signal doesn't yet recognize.
+            successful = first_token_time > 0.0 or num_output_tokens > 0
+            ttft = (first_token_time - submit_time) if first_token_time else -1.0
             request_latency = finish_time - submit_time
-            decode_time = (finish_time - first_token_time) if successful else 0.0
+            decode_time = (finish_time - first_token_time) if first_token_time else 0.0
             num_output = num_output_tokens if num_output_tokens > 0 else len(tokens)
             decode_speed = (num_output / decode_time) if decode_time > 0 else 0.0
 
