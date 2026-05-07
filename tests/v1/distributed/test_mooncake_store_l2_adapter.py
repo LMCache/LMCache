@@ -8,9 +8,11 @@ extension is not available.
 """
 
 # Standard
-from typing import Any
+from typing import Any, cast
 import os
 import select
+import sys
+import types
 
 # Third Party
 import pytest
@@ -170,6 +172,26 @@ class TestMooncakeStoreL2AdapterConfig:
         assert "num_workers" not in config.setup_config
         assert config.setup_config["local_hostname"] == "10.0.0.1"
 
+    def test_from_dict_with_per_op_workers(self):
+        """Per-operation worker counts should be parsed and excluded."""
+        d = {
+            "type": "mooncake_store",
+            "num_workers": 16,
+            "lookup_workers": 4,
+            "retrieve_workers": 16,
+            "store_workers": 4,
+            "local_hostname": "10.0.0.1",
+        }
+        config = MooncakeStoreL2AdapterConfig.from_dict(d)
+
+        assert config.lookup_workers == 4
+        assert config.retrieve_workers == 16
+        assert config.store_workers == 4
+        assert "lookup_workers" not in config.setup_config
+        assert "retrieve_workers" not in config.setup_config
+        assert "store_workers" not in config.setup_config
+        assert config.setup_config["local_hostname"] == "10.0.0.1"
+
     def test_from_dict_forwards_boolean_mooncake_keys_as_strings(self):
         """Non-LMCache boolean keys should be forwarded as strings."""
         config = MooncakeStoreL2AdapterConfig.from_dict(
@@ -194,12 +216,15 @@ class TestMooncakeStoreL2AdapterConfig:
         assert config.setup_config["experimental_key"] == "enabled"
 
     def test_from_dict_strips_lmcache_only_keys(self):
-        """LMCache-only keys (type, num_workers, eviction) should
+        """LMCache-only keys should
         not appear in setup_config."""
         d = {
             "type": "mooncake_store",
             "num_workers": 2,
             "eviction": "lru",
+            "lookup_workers": 3,
+            "retrieve_workers": 5,
+            "store_workers": 2,
             "local_hostname": "host1",
         }
         config = MooncakeStoreL2AdapterConfig.from_dict(d)
@@ -207,6 +232,9 @@ class TestMooncakeStoreL2AdapterConfig:
         assert "type" not in config.setup_config
         assert "num_workers" not in config.setup_config
         assert "eviction" not in config.setup_config
+        assert "lookup_workers" not in config.setup_config
+        assert "retrieve_workers" not in config.setup_config
+        assert "store_workers" not in config.setup_config
         assert config.setup_config["local_hostname"] == "host1"
 
     def test_from_dict_converts_values_to_str(self):
@@ -250,6 +278,60 @@ class TestMooncakeStoreL2AdapterConfig:
         d = {"type": "mooncake_store", "num_workers": "four"}
         with pytest.raises(ValueError, match="num_workers"):
             MooncakeStoreL2AdapterConfig.from_dict(d)
+
+    @pytest.mark.parametrize(
+        "field",
+        ["lookup_workers", "retrieve_workers", "store_workers"],
+    )
+    @pytest.mark.parametrize("value", [0, -1, "four"])
+    def test_from_dict_invalid_per_op_workers(self, field: str, value: Any):
+        """Invalid per-operation worker counts should raise ValueError."""
+        d = {
+            "type": "mooncake_store",
+            "lookup_workers": 2,
+            "retrieve_workers": 4,
+            "store_workers": 2,
+            field: value,
+        }
+        with pytest.raises(ValueError, match=field):
+            MooncakeStoreL2AdapterConfig.from_dict(d)
+
+    @pytest.mark.parametrize(
+        "config_dict",
+        [
+            {"type": "mooncake_store", "lookup_workers": 2},
+            {"type": "mooncake_store", "retrieve_workers": 2},
+            {"type": "mooncake_store", "store_workers": 2},
+            {
+                "type": "mooncake_store",
+                "lookup_workers": 2,
+                "retrieve_workers": 4,
+            },
+            {
+                "type": "mooncake_store",
+                "lookup_workers": 2,
+                "store_workers": 4,
+            },
+            {
+                "type": "mooncake_store",
+                "retrieve_workers": 2,
+                "store_workers": 4,
+            },
+        ],
+    )
+    def test_from_dict_requires_all_per_op_workers(self, config_dict: dict):
+        """Separate worker pools require all per-operation counts."""
+        with pytest.raises(ValueError, match="must all be set together"):
+            MooncakeStoreL2AdapterConfig.from_dict(config_dict)
+
+    def test_constructor_requires_all_per_op_workers(self):
+        """Direct construction should reject partial per-operation worker counts."""
+        with pytest.raises(ValueError, match="must all be set together"):
+            MooncakeStoreL2AdapterConfig(
+                setup_config={},
+                lookup_workers=2,
+                retrieve_workers=4,
+            )
 
     def test_constructor_copies_setup_config(self):
         """Constructor should copy the setup_config dict."""
@@ -299,19 +381,37 @@ class TestMooncakeStoreRegistration:
             create_l2_adapter_from_registry(config)
 
 
-@requires_mooncake
+def _install_fake_mooncake_extension(
+    monkeypatch: pytest.MonkeyPatch,
+    client_cls: type,
+) -> None:
+    """Install a fake lmcache_mooncake module for factory unit tests."""
+
+    class FakeL1RegistrationConfig:
+        def __init__(self):
+            self.enabled = False
+            self.base = 0
+            self.size = 0
+
+    fake_module = types.ModuleType("lmcache.lmcache_mooncake")
+    fake_module_any = cast(Any, fake_module)
+    fake_module_any.L1RegistrationConfig = FakeL1RegistrationConfig
+    fake_module_any.LMCacheMooncakeClient = client_cls
+    monkeypatch.setitem(sys.modules, "lmcache.lmcache_mooncake", fake_module)
+
+
 class TestMooncakeStoreL1RegistrationFactory:
     """Tests for Mooncake TCP/RDMA L1 registration factory behavior.
 
     RDMA creation must receive a valid L1 memory descriptor; TCP creation
     must not enable preregistration even if a descriptor is provided.
+    Uses a fake native extension so these tests do not require Mooncake.
     """
 
     def test_factory_passes_disabled_l1_registration_for_tcp(
         self, monkeypatch: pytest.MonkeyPatch
     ):
         # First Party
-        from lmcache import lmcache_mooncake
         from lmcache.v1.distributed.l2_adapters import native_connector_l2_adapter
 
         captured: dict[str, Any] = {}
@@ -327,11 +427,7 @@ class TestMooncakeStoreL1RegistrationFactory:
                 captured["num_workers"] = num_workers
                 captured["l1_registration"] = l1_registration
 
-        monkeypatch.setattr(
-            lmcache_mooncake,
-            "LMCacheMooncakeClient",
-            FakeClient,
-        )
+        _install_fake_mooncake_extension(monkeypatch, FakeClient)
         monkeypatch.setattr(
             native_connector_l2_adapter,
             "NativeConnectorL2Adapter",
@@ -367,7 +463,6 @@ class TestMooncakeStoreL1RegistrationFactory:
         self, monkeypatch: pytest.MonkeyPatch
     ):
         # First Party
-        from lmcache import lmcache_mooncake
         from lmcache.v1.distributed.l2_adapters import native_connector_l2_adapter
 
         captured: dict[str, Any] = {}
@@ -383,11 +478,7 @@ class TestMooncakeStoreL1RegistrationFactory:
                 captured["num_workers"] = num_workers
                 captured["l1_registration"] = l1_registration
 
-        monkeypatch.setattr(
-            lmcache_mooncake,
-            "LMCacheMooncakeClient",
-            FakeClient,
-        )
+        _install_fake_mooncake_extension(monkeypatch, FakeClient)
         monkeypatch.setattr(
             native_connector_l2_adapter,
             "NativeConnectorL2Adapter",
@@ -419,7 +510,65 @@ class TestMooncakeStoreL1RegistrationFactory:
         assert registration.base == l1_desc.ptr
         assert registration.size == l1_desc.size
 
-    def test_factory_requires_l1_memory_descriptor_for_rdma(self):
+    def test_factory_passes_per_op_worker_counts(self, monkeypatch: pytest.MonkeyPatch):
+        # First Party
+        from lmcache.v1.distributed.l2_adapters import native_connector_l2_adapter
+
+        captured: dict[str, Any] = {}
+
+        class FakeClient:
+            def __init__(
+                self,
+                config: dict[str, str],
+                num_workers: int,
+                l1_registration,
+                lookup_workers=None,
+                retrieve_workers=None,
+                store_workers=None,
+            ):
+                captured["config"] = config
+                captured["num_workers"] = num_workers
+                captured["l1_registration"] = l1_registration
+                captured["lookup_workers"] = lookup_workers
+                captured["retrieve_workers"] = retrieve_workers
+                captured["store_workers"] = store_workers
+
+        _install_fake_mooncake_extension(monkeypatch, FakeClient)
+        monkeypatch.setattr(
+            native_connector_l2_adapter,
+            "NativeConnectorL2Adapter",
+            lambda client: ("wrapped", client),
+        )
+
+        config = MooncakeStoreL2AdapterConfig.from_dict(
+            {
+                "type": "mooncake_store",
+                "local_hostname": "127.0.0.1",
+                "num_workers": 16,
+                "lookup_workers": 4,
+                "retrieve_workers": 16,
+                "store_workers": 4,
+                "protocol": "tcp",
+            }
+        )
+
+        adapter = mooncake_store_module._create_mooncake_store_l2_adapter(config)
+        wrapped_adapter: Any = adapter
+
+        assert wrapped_adapter[0] == "wrapped"
+        assert captured["config"] == config.setup_config
+        assert captured["num_workers"] == 16
+        assert captured["lookup_workers"] == 4
+        assert captured["retrieve_workers"] == 16
+        assert captured["store_workers"] == 4
+
+    def test_factory_requires_l1_memory_descriptor_for_rdma(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        class FakeClient:
+            pass
+
+        _install_fake_mooncake_extension(monkeypatch, FakeClient)
         config = MooncakeStoreL2AdapterConfig.from_dict(
             {
                 "type": "mooncake_store",
@@ -431,7 +580,13 @@ class TestMooncakeStoreL1RegistrationFactory:
         with pytest.raises(ValueError, match="no L1 memory descriptor"):
             mooncake_store_module._create_mooncake_store_l2_adapter(config)
 
-    def test_factory_rejects_invalid_l1_memory_descriptor_for_rdma(self):
+    def test_factory_rejects_invalid_l1_memory_descriptor_for_rdma(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        class FakeClient:
+            pass
+
+        _install_fake_mooncake_extension(monkeypatch, FakeClient)
         config = MooncakeStoreL2AdapterConfig.from_dict(
             {
                 "type": "mooncake_store",
