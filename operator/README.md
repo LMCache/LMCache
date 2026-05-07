@@ -8,11 +8,14 @@ See [DESIGN.md](DESIGN.md) for architecture details, reconciliation logic, and C
 
 - Kubernetes 1.20+
 - `kubectl` configured to access your cluster
-- NVIDIA GPU Operator with the `nvidia` RuntimeClass available on GPU nodes
+- For NVIDIA GPUs (default): NVIDIA GPU Operator with the `nvidia` RuntimeClass available on GPU nodes
+- For AMD GPUs: set `spec.gpuVendor: amd` in your `LMCacheEngine` (see [AMD GPUs (ROCm)](#amd-gpus-rocm) below)
 - (Optional) [Prometheus Operator](https://github.com/prometheus-operator/prometheus-operator) for ServiceMonitor support
 
 > [!IMPORTANT]
-> The operator runs LMCache pods with `runtimeClassName: nvidia` and `privileged: true` to gain GPU visibility without consuming GPU resources via the device plugin. This allows the serving engine (e.g., vLLM) to claim all GPUs on the node. Clusters using Pod Security Standards must allow the `privileged` profile for the LMCache namespace.
+> By default the operator runs LMCache pods with `runtimeClassName: nvidia` and `privileged: true` to gain GPU visibility without consuming GPU resources via the device plugin. This allows the serving engine (e.g., vLLM) to claim all GPUs on the node. Clusters using Pod Security Standards must allow the `privileged` profile for the LMCache namespace.
+>
+> On AMD ROCm clusters, `spec.gpuVendor: amd` omits `runtimeClassName` and skips NVIDIA-specific env vars.
 
 ## Quick Start
 
@@ -164,6 +167,25 @@ spec:
   l1:
     sizeGB: 60
 ```
+
+### AMD GPUs (ROCm)
+
+Set `spec.gpuVendor: amd` to run on AMD GPU nodes. The operator omits `runtimeClassName` from the pod spec and skips the NVIDIA env vars. AMD GPU nodes don't have a universal label equivalent to `nvidia.com/gpu.present`, so supply a `nodeSelector` that matches the label your platform exposes (e.g. `feature.node.kubernetes.io/amd-gpu: "true"` when using the [ROCm/gpu-operator](https://github.com/ROCm/gpu-operator)):
+
+```yaml
+apiVersion: lmcache.lmcache.ai/v1alpha1
+kind: LMCacheEngine
+metadata:
+  name: amd-cache
+spec:
+  gpuVendor: amd
+  nodeSelector:
+    feature.node.kubernetes.io/amd-gpu: "true"
+  l1:
+    sizeGB: 60
+```
+
+vLLM connects to LMCache via HIP IPC over `hostIPC` exactly the same way as CUDA IPC on NVIDIA — the `hostIPC: true` and `PYTHONHASHSEED=0` requirements above apply unchanged. Use a ROCm-built LMCache image for `spec.image`.
 
 ### Custom Server Port
 
