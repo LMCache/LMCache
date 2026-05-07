@@ -888,6 +888,12 @@ class LMCacheMPWorkerAdapter:
                 "will retry on next heartbeat"
             )
             return False
+        except Exception:
+            logger.exception(
+                "Unexpected error during KV cache re-registration; "
+                "will retry on next heartbeat"
+            )
+            return False
         return True
 
     @_lmcache_nvtx_annotate
