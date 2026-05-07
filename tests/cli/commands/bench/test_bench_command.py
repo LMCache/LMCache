@@ -56,6 +56,7 @@ def _make_args(**overrides) -> argparse.Namespace:
         config=None,
         no_interactive=False,
         export_config=None,
+        request_timeout=10.0,
     )
     defaults.update(overrides)
     return argparse.Namespace(**defaults)
