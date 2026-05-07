@@ -3,6 +3,9 @@
 # Future
 from __future__ import annotations
 
+# Standard
+from pathlib import Path
+
 # Third Party
 import pytest
 
@@ -32,7 +35,7 @@ from lmcache.v1.distributed.l2_adapters.raw_block_l2_adapter import (  # noqa: E
 )
 
 
-def _make_adapter(tmp_path):
+def _make_adapter(tmp_path: Path) -> RawBlockL2Adapter:
     path = make_raw_block_file(tmp_path)
     config = RawBlockL2AdapterConfig(
         device_path=str(path),

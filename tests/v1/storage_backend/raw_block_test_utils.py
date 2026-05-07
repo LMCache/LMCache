@@ -4,8 +4,9 @@
 from __future__ import annotations
 
 # Standard
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Any, cast
+from typing import TypeVar
 import importlib
 import select
 import sys
@@ -29,12 +30,22 @@ RAW_BLOCK_CI_BLOCK_ALIGN = 4096
 RAW_BLOCK_CI_HEADER_BYTES = 4096
 RAW_BLOCK_CI_SLOT_BYTES = 64 * 1024
 RAW_BLOCK_CI_META_TOTAL_BYTES = 1 * 1024 * 1024
+_T = TypeVar("_T")
 
 
 def make_raw_block_file(
     tmp_path: Path,
     size_bytes: int = RAW_BLOCK_CI_CAPACITY_BYTES,
 ) -> Path:
+    """Create a fixed-size file for raw block backend tests.
+
+    Args:
+        tmp_path: Pytest temporary directory used to place the backing file.
+        size_bytes: Size of the file to create in bytes.
+
+    Returns:
+        Path to the created backing file.
+    """
     path = tmp_path / "raw_block_ci.bin"
     with open(path, "wb") as f:
         f.truncate(size_bytes)
@@ -45,6 +56,15 @@ def make_raw_block_core_config(
     path: Path,
     capacity_bytes: int = RAW_BLOCK_CI_CAPACITY_BYTES,
 ) -> RawBlockCoreConfig:
+    """Build a small POSIX raw block core config for temp-file tests.
+
+    Args:
+        path: Backing file path for the raw block device.
+        capacity_bytes: Total capacity exposed by the raw block test file.
+
+    Returns:
+        Raw block core configuration using CI-safe defaults.
+    """
     return RawBlockCoreConfig(
         device_path=str(path),
         capacity_bytes=capacity_bytes,
@@ -66,6 +86,15 @@ def make_raw_block_core_config(
 
 
 def make_object_key(chunk_id: int, model_name: str = "raw_block_ci") -> ObjectKey:
+    """Create a deterministic object key for raw block tests.
+
+    Args:
+        chunk_id: Integer chunk identifier encoded into the object key hash.
+        model_name: Model name stored in the object key.
+
+    Returns:
+        Object key with a stable hash, model name, and KV rank.
+    """
     return ObjectKey(
         chunk_hash=ObjectKey.IntHash2Bytes(chunk_id),
         model_name=model_name,
@@ -74,8 +103,16 @@ def make_object_key(chunk_id: int, model_name: str = "raw_block_ci") -> ObjectKe
 
 
 def make_memory_obj(payload: bytes | bytearray | memoryview) -> TensorMemoryObj:
-    data = bytes(payload)
-    raw_data = torch.tensor(list(data), dtype=torch.uint8)
+    """Wrap payload bytes in a binary tensor memory object.
+
+    Args:
+        payload: Byte-compatible data to expose through TensorMemoryObj.
+
+    Returns:
+        Tensor memory object containing the payload bytes.
+    """
+    data = bytearray(payload)
+    raw_data = torch.frombuffer(data, dtype=torch.uint8)
     metadata = MemoryObjMetadata(
         shape=torch.Size([len(data)]),
         dtype=torch.uint8,
@@ -88,6 +125,14 @@ def make_memory_obj(payload: bytes | bytearray | memoryview) -> TensorMemoryObj:
 
 
 def make_empty_memory_obj(size_bytes: int) -> TensorMemoryObj:
+    """Create a zero-filled binary tensor memory object.
+
+    Args:
+        size_bytes: Number of bytes to allocate.
+
+    Returns:
+        Tensor memory object backed by a zero-filled uint8 tensor.
+    """
     raw_data = torch.zeros(size_bytes, dtype=torch.uint8)
     metadata = MemoryObjMetadata(
         shape=torch.Size([size_bytes]),
@@ -101,10 +146,27 @@ def make_empty_memory_obj(size_bytes: int) -> TensorMemoryObj:
 
 
 def memory_obj_bytes(obj: TensorMemoryObj) -> bytes:
+    """Copy a tensor memory object's byte contents into bytes.
+
+    Args:
+        obj: Tensor memory object to read.
+
+    Returns:
+        Byte copy of the object's data buffer.
+    """
     return bytes(obj.byte_array)
 
 
 def wait_for_event_fd(event_fd: int, timeout: float = 5.0) -> bool:
+    """Wait for an eventfd notification and consume it when present.
+
+    Args:
+        event_fd: Event file descriptor to poll.
+        timeout: Maximum wait time in seconds.
+
+    Returns:
+        True when an event was observed, otherwise False.
+    """
     poll = select.poll()
     poll.register(event_fd, select.POLLIN)
     events = poll.poll(timeout * 1000)
@@ -118,6 +180,14 @@ def wait_for_event_fd(event_fd: int, timeout: float = 5.0) -> bool:
 
 
 def install_native_storage_ops_fallback() -> None:
+    """Install a small native_storage_ops fallback for test environments.
+
+    Args:
+        None.
+
+    Returns:
+        None.
+    """
     try:
         native_storage_ops = importlib.import_module("lmcache.native_storage_ops")
         if hasattr(native_storage_ops, "Bitmap") and hasattr(
@@ -153,7 +223,7 @@ def install_native_storage_ops_fallback() -> None:
                 count += 1
             return count
 
-        def gather(self, values):
+        def gather(self, values: Sequence[_T]) -> list[_T]:
             return [values[i] for i in self.get_indices_list()]
 
         def __and__(self, other: "Bitmap") -> "Bitmap":
@@ -190,7 +260,6 @@ def install_native_storage_ops_fallback() -> None:
         pass
 
     fallback_module = types.ModuleType("lmcache.native_storage_ops")
-    fallback_module_any = cast(Any, fallback_module)
-    fallback_module_any.Bitmap = Bitmap
-    fallback_module_any.TTLLock = TTLLock
+    fallback_module.__dict__["Bitmap"] = Bitmap
+    fallback_module.__dict__["TTLLock"] = TTLLock
     sys.modules["lmcache.native_storage_ops"] = fallback_module
