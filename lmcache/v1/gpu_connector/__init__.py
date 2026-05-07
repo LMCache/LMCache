@@ -123,8 +123,8 @@ def CreateGPUConnector(
         from lmcache.v1.gpu_connector.gpu_connectors import TRTLLMGPUConnector
 
         local_worker_id = metadata.local_worker_id
-        torch.cuda.set_device(local_worker_id)
-        device = torch.device(f"cuda:{local_worker_id}")
+        torch_dev.set_device(local_worker_id)
+        device = torch.device(f"{torch_device_type}:{local_worker_id}")
         return TRTLLMGPUConnector.from_metadata(metadata, device=device)
 
     elif engine == EngineType.MOCK:

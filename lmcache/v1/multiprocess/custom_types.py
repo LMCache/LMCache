@@ -76,13 +76,7 @@ class CudaIPCWrapper:
         tensor = attempt_permute_to_contiguous_view(tensor)
 
         storage = tensor.untyped_storage()
-        # _share_cuda_ is a CUDA-only storage method required for IPC tensor sharing
-        if not hasattr(storage, "_share_cuda_"):
-            raise RuntimeError(
-                f"Backend '{torch_device_type}' does not support CUDA IPC "
-                "(_share_cuda_ is not available). Multiprocess IPC requires CUDA."
-            )
-        handle = storage._share_cuda_()  # noqa: SLF001
+        handle = storage._share_cuda_()
 
         self.handle = handle
         self.dtype = tensor.dtype
@@ -102,12 +96,6 @@ class CudaIPCWrapper:
         """
         device_index = CudaIPCWrapper._get_device_index_from_uuid(self.device_uuid)
 
-        # _new_shared_cuda is a CUDA-only class method for IPC tensor reconstruction
-        if not hasattr(torch.UntypedStorage, "_new_shared_cuda"):
-            raise RuntimeError(
-                f"Backend '{torch_device_type}' does not support CUDA IPC "
-                "(_new_shared_cuda is not available). Multiprocess IPC requires CUDA."
-            )
         storage = torch.UntypedStorage._new_shared_cuda(  # noqa: SLF001
             device_index, *self.handle[1:]
         )
