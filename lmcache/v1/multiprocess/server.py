@@ -6,6 +6,7 @@ from itertools import islice
 from typing import Generator
 import argparse
 import ctypes
+import math
 import threading
 import time
 
@@ -135,14 +136,16 @@ def _bytes_to_tensor(
     shape: tuple[int, int, int, int],
     dtype: torch.dtype,
 ) -> torch.Tensor:
-    """Reinterpret ``payload`` as a contiguous tensor of ``shape`` and ``dtype``.
+    """Reinterpret ``payload`` as a tensor view of ``shape`` and ``dtype``.
 
-    Works uniformly across dtypes that lack a numpy equivalent (bfloat16,
-    fp8) by going through a uint8 intermediate view. Returns a writable
-    tensor backed by a copy of the input bytes — the caller owns it.
+    Returns a **read-only** tensor view sharing memory with ``payload`` — no
+    intermediate copy is allocated. The caller is expected to read-only;
+    write attempts will succeed (PyTorch does not enforce read-only at the
+    tensor API) but would mutate the original bytes object, which is the
+    HTTP request body. Slice + ``.copy_(slice)`` into a destination tensor
+    is the intended downstream usage.
     """
-    flat_u8 = torch.frombuffer(bytearray(payload), dtype=torch.uint8)
-    return flat_u8.view(dtype).reshape(shape)
+    return torch.frombuffer(payload, dtype=dtype).reshape(shape)
 
 
 def _tensor_to_bytes(t: torch.Tensor) -> bytes:
@@ -157,20 +160,25 @@ def _tensor_to_bytes(t: torch.Tensor) -> bytes:
 
 
 def _copy_tensor_into_memory_obj(t: torch.Tensor, memory_obj: MemoryObj) -> None:
-    """Copy a contiguous tensor's bytes into ``memory_obj`` via ``data_ptr``.
+    """Copy ``t``'s elements into ``memory_obj``'s buffer.
 
-    Bypasses ``MemoryObj.byte_array`` slice assignment because the
-    ctypes-backed memoryview reports format ``<B`` and Python rejects bytes
-    assignment across that format boundary. ``ctypes.memmove`` against the
-    raw pointer avoids the issue.
+    Builds a tensor view over ``memory_obj.data_ptr`` (matching ``t``'s
+    dtype and shape) and uses ``Tensor.copy_`` to do the transfer. This
+    avoids any intermediate Python ``bytes`` allocation and lets PyTorch
+    handle non-contiguous sources internally.
+
+    Going through a tensor view also sidesteps the format mismatch on
+    ``MemoryObj.byte_array``: that property exposes a memoryview of
+    format ``<B``, which Python rejects for slice assignment from bytes.
     """
-    src = _tensor_to_bytes(t)
+    nbytes = t.numel() * t.element_size()
     expected = memory_obj.get_size()
-    if len(src) != expected:
+    if nbytes != expected:
         raise ValueError(
-            f"shard byte length {len(src)} does not match destination {expected}"
+            f"shard byte length {nbytes} does not match destination {expected}"
         )
-    ctypes.memmove(memory_obj.data_ptr, src, len(src))
+    mv = memoryview((ctypes.c_ubyte * nbytes).from_address(memory_obj.data_ptr))
+    torch.frombuffer(mv, dtype=t.dtype).reshape(t.shape).copy_(t)
 
 
 def _read_memory_obj_as_tensor(
@@ -178,15 +186,17 @@ def _read_memory_obj_as_tensor(
     shape: tuple[int, int, int, int] | torch.Size,
     dtype: torch.dtype,
 ) -> torch.Tensor:
-    """Read ``memory_obj`` bytes into a fresh tensor of ``shape``/``dtype``.
+    """Return a tensor view over ``memory_obj``'s buffer in ``shape`` / ``dtype``.
 
-    Reads the raw bytes via ``data_ptr`` to sidestep the same memoryview
-    format mismatch documented in ``_copy_tensor_into_memory_obj``.
+    No copy is made: the returned tensor aliases ``memory_obj``'s memory.
+    Callers must consume the view before ``memory_obj`` is released (e.g.
+    before exiting ``StorageManager.read_prefetched_results``). The
+    sole caller in ``retrieve_bytes`` does this — it copies the view into
+    the assembled output buffer in the same step.
     """
     nbytes = memory_obj.get_size()
-    raw = bytes((ctypes.c_ubyte * nbytes).from_address(memory_obj.data_ptr))
-    flat_u8 = torch.frombuffer(bytearray(raw), dtype=torch.uint8)
-    return flat_u8.view(dtype).reshape(tuple(int(s) for s in shape))
+    mv = memoryview((ctypes.c_ubyte * nbytes).from_address(memory_obj.data_ptr))
+    return torch.frombuffer(mv, dtype=dtype).reshape(tuple(int(s) for s in shape))
 
 
 def get_layout_desc(gpu_context: GPUCacheContext, num_tokens: int) -> MemoryLayoutDesc:
@@ -804,10 +814,7 @@ class MPCacheEngine:
 
         per_shard_shape = layout_desc.shapes[0]
         per_shard_dtype = layout_desc.dtypes[0]
-        per_shard_bytes = (
-            int(torch.tensor(list(per_shard_shape)).prod().item())
-            * per_shard_dtype.itemsize
-        )
+        per_shard_bytes = math.prod(per_shard_shape) * per_shard_dtype.itemsize
         expected = total_chunks * world_size * per_shard_bytes
         if len(payload) != expected:
             raise ValueError(
@@ -851,7 +858,7 @@ class MPCacheEngine:
                 t_end = t_start + self.chunk_size
                 d_start = worker_id * d_per_worker
                 d_end = d_start + d_per_worker
-                shard = payload_tensor[:, :, t_start:t_end, d_start:d_end].contiguous()
+                shard = payload_tensor[:, :, t_start:t_end, d_start:d_end]
                 _copy_tensor_into_memory_obj(shard, memory_obj)
                 stored_chunks_per_worker[worker_id] += 1
                 written_keys.append(obj_key)

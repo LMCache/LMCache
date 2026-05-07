@@ -81,6 +81,15 @@ compatibility with the vLLM-embedded API server.
    * - POST
      - ``/api/clear-cache``
      - Force-clear all KV data in L1 (CPU) memory.
+   * - POST
+     - ``/api/kv/store``
+     - Store opaque KV cache bytes for a token sequence.
+   * - POST
+     - ``/api/kv/retrieve``
+     - Retrieve KV cache bytes for a token sequence's longest cached prefix.
+   * - POST
+     - ``/api/kv/lookup``
+     - Probe the cached-prefix length for a token sequence (no payload).
    * - GET
      - ``/conf``
      - Dump merged server configurations (mp, storage_manager,
@@ -285,6 +294,330 @@ The request body is ignored.
 .. code-block:: bash
 
     curl -s -X POST http://localhost:8080/api/clear-cache
+
+Bytes-Level KV Cache Access
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The ``/api/kv/*`` endpoints expose direct read and write access to the
+KV cache bytes addressed by a token sequence. They are intended for ML
+developers, orchestration layers, and debugging — for example, priming
+the cache from an offline source, snapshotting a sequence's KV cache for
+inspection, or building higher-level editing workflows on top.
+
+These endpoints are **not** on the inference data path. Inference traffic
+continues to flow over the ZMQ protocol; vLLM never calls these routes.
+
+Wire format
+^^^^^^^^^^^
+
+The KV cache payload is a contiguous ``KV_2LTD`` tensor with shape:
+
+.. code-block:: text
+
+    [2, num_layers, num_tokens, hidden_dim]
+
+serialized as raw bytes in row-major order. Notes:
+
+- ``num_tokens`` is the number of complete chunks times the engine's
+  ``chunk_size``. Trailing tokens that do not form a full chunk are
+  ignored (the engine only stores chunk-aligned data).
+- ``hidden_dim`` is the **full** hidden dimension of the model — the
+  un-sharded value. The server transparently splits the bytes across
+  TP workers along ``D``; clients do not see TP topology. For MLA
+  models, ``hidden_dim`` corresponds to the single shared shard
+  (registered ``world_size`` is ``1``).
+- ``dtype`` is whatever the registered model uses (commonly
+  ``bfloat16`` or ``fp16``); the payload byte length must match exactly.
+
+Routing metadata (``model_name``, ``tokens``, optional ``cache_salt``)
+identifies which model and token sequence the payload belongs to.
+``model_name`` must match a model that has registered its KV cache with
+the MP server; you can confirm this via ``GET /api/status``.
+
+``POST /api/kv/store``
+^^^^^^^^^^^^^^^^^^^^^^
+
+Store KV cache bytes for the given token sequence.
+
+The request body is the raw KV payload in the wire format above.
+Routing metadata travels in **headers** so that the body remains a
+single binary blob — this avoids multipart parsing for large (hundreds
+of MB) payloads.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 30 15 55
+
+   * - Header
+     - Required
+     - Description
+   * - ``X-LMCache-Model-Name``
+     - yes
+     - Registered model name. Must match a model in ``/api/status``.
+   * - ``X-LMCache-Tokens``
+     - yes
+     - Comma-separated token IDs covering the payload (whole chunks).
+   * - ``X-LMCache-Cache-Salt``
+     - no
+     - Per-namespace isolation salt (forwarded to ``ObjectKey.cache_salt``).
+       Use this to run parallel cache-priming experiments without collision.
+   * - ``Content-Type``
+     - recommended
+     - ``application/x-lmcache-kv; v=1``.
+
+**Response** (``200 OK``):
+
+.. code-block:: json
+
+    {
+      "status": "ok",
+      "total_tokens": 768,
+      "total_chunks": 3,
+      "stored_tokens": 768,
+      "stored_chunks": 3
+    }
+
+``stored_chunks`` may be less than ``total_chunks`` if the L1 backend
+could not reserve some keys (e.g. capacity pressure). Trailing tokens
+that do not form a full chunk are excluded from ``total_chunks``.
+
+**Errors:**
+
+- ``400`` if a required header is missing/malformed, the model is not
+  registered, or the payload length does not match the expected
+  ``total_chunks * world_size * per_shard_byte_size``.
+- ``503`` if the engine is not yet initialized.
+
+**Example (curl, small file):**
+
+.. code-block:: bash
+
+    # Assume kv_payload.bin holds [2, L, T, D] bytes for tokens 0..T-1.
+    TOKENS=$(seq -s, 0 767)  # 768 tokens = 3 chunks @ chunk_size=256
+
+    curl -s -X POST http://localhost:8080/api/kv/store \
+        -H "Content-Type: application/x-lmcache-kv; v=1" \
+        -H "X-LMCache-Model-Name: meta-llama/Llama-3.1-8B-Instruct" \
+        -H "X-LMCache-Tokens: $TOKENS" \
+        --data-binary @kv_payload.bin
+
+**Example (Python helper):**
+
+.. code-block:: python
+
+    import torch
+    import requests
+
+    def store_kv(
+        base_url: str,
+        model_name: str,
+        tokens: list[int],
+        kv_2ltd: torch.Tensor,        # shape [2, num_layers, T, hidden_dim]
+        *,
+        cache_salt: str = "",
+    ) -> dict:
+        """Upload a KV_2LTD tensor for ``tokens`` to LMCache.
+
+        ``kv_2ltd`` must be CPU, contiguous, and its T dim must equal
+        ``len(tokens) // chunk_size * chunk_size``.
+        """
+        payload = bytes(kv_2ltd.contiguous().view(torch.uint8).numpy())
+        headers = {
+            "Content-Type": "application/x-lmcache-kv; v=1",
+            "X-LMCache-Model-Name": model_name,
+            "X-LMCache-Tokens": ",".join(str(t) for t in tokens),
+        }
+        if cache_salt:
+            headers["X-LMCache-Cache-Salt"] = cache_salt
+        r = requests.post(f"{base_url}/api/kv/store", data=payload, headers=headers)
+        r.raise_for_status()
+        return r.json()
+
+    # Example call:
+    tokens = list(range(768))
+    kv = torch.randn(2, 32, 768, 4096, dtype=torch.bfloat16)
+    print(store_kv("http://localhost:8080",
+                   "meta-llama/Llama-3.1-8B-Instruct", tokens, kv))
+
+``POST /api/kv/retrieve``
+^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Retrieve the bytes for the longest cached prefix of ``tokens``.
+
+The request body is JSON; the response body is the raw KV payload in
+the wire format above. Hit metadata is exposed in response headers
+because the body is binary.
+
+**Request body:**
+
+.. list-table::
+   :header-rows: 1
+   :widths: 25 15 60
+
+   * - Field
+     - Required
+     - Description
+   * - ``model_name``
+     - yes
+     - Registered model name.
+   * - ``tokens``
+     - yes
+     - List of token IDs to address.
+   * - ``cache_salt``
+     - no
+     - Per-namespace isolation salt; must match the salt used at store.
+
+**Response headers (always present):**
+
+.. list-table::
+   :header-rows: 1
+   :widths: 35 65
+
+   * - Header
+     - Meaning
+   * - ``X-LMCache-Hit-Tokens``
+     - Number of tokens covered by the returned bytes.
+   * - ``X-LMCache-Hit-Chunks``
+     - Number of chunks present in the response.
+   * - ``X-LMCache-Total-Tokens``
+     - Token count for the whole-chunk prefix of the input.
+   * - ``X-LMCache-Total-Chunks``
+     - Total whole-chunk count in the input.
+
+**Response codes:**
+
+- ``200`` with binary body: at least one chunk hit. The body shape is
+  ``[2, num_layers, hit_tokens, hidden_dim]``.
+- ``404`` with empty body: nothing in the requested sequence is cached.
+- ``400`` if ``model_name`` is not registered.
+- ``503`` if the engine is not yet initialized.
+
+This endpoint is **non-destructive**: the cache is unchanged regardless
+of any ``remove_after_retrieve`` engine setting.
+
+**Example (curl):**
+
+.. code-block:: bash
+
+    cat <<'EOF' > /tmp/req.json
+    {
+      "model_name": "meta-llama/Llama-3.1-8B-Instruct",
+      "tokens": [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31]
+    }
+    EOF
+
+    curl -sS -X POST http://localhost:8080/api/kv/retrieve \
+        -H "Content-Type: application/json" \
+        -D /tmp/headers.txt \
+        -o /tmp/kv_payload.bin \
+        --data-binary @/tmp/req.json
+
+    grep -i '^X-LMCache-' /tmp/headers.txt
+    ls -l /tmp/kv_payload.bin
+
+**Example (Python helper):**
+
+.. code-block:: python
+
+    import torch
+    import requests
+
+    def retrieve_kv(
+        base_url: str,
+        model_name: str,
+        tokens: list[int],
+        *,
+        num_layers: int,
+        hidden_dim: int,
+        dtype: torch.dtype,
+        cache_salt: str = "",
+    ) -> tuple[torch.Tensor | None, dict[str, int]]:
+        """Fetch the cached KV_2LTD prefix for ``tokens``.
+
+        Returns ``(tensor, meta)``: ``tensor`` has shape
+        ``[2, num_layers, meta['hit_tokens'], hidden_dim]`` when there
+        was a hit, ``None`` on a clean miss.
+        """
+        body = {"model_name": model_name, "tokens": tokens, "cache_salt": cache_salt}
+        r = requests.post(f"{base_url}/api/kv/retrieve", json=body)
+        meta = {
+            "hit_tokens": int(r.headers.get("X-LMCache-Hit-Tokens", "0")),
+            "hit_chunks": int(r.headers.get("X-LMCache-Hit-Chunks", "0")),
+            "total_tokens": int(r.headers.get("X-LMCache-Total-Tokens", "0")),
+            "total_chunks": int(r.headers.get("X-LMCache-Total-Chunks", "0")),
+        }
+        if r.status_code == 404 or not r.content:
+            return None, meta
+        r.raise_for_status()
+        flat_u8 = torch.frombuffer(bytearray(r.content), dtype=torch.uint8)
+        tensor = flat_u8.view(dtype).reshape(
+            2, num_layers, meta["hit_tokens"], hidden_dim
+        )
+        return tensor, meta
+
+    # Example call:
+    kv, meta = retrieve_kv(
+        "http://localhost:8080",
+        "meta-llama/Llama-3.1-8B-Instruct",
+        tokens=list(range(768)),
+        num_layers=32, hidden_dim=4096, dtype=torch.bfloat16,
+    )
+    if kv is None:
+        print("miss", meta)
+    else:
+        print("hit", meta, "tensor shape", tuple(kv.shape))
+
+``POST /api/kv/lookup``
+^^^^^^^^^^^^^^^^^^^^^^^
+
+Probe how much of a token sequence is currently cached, without
+materializing the payload. Useful for clients that want to decide
+whether the bandwidth cost of a full retrieve is worth it, or to
+confirm that a prior store landed.
+
+The request body matches ``/api/kv/retrieve`` (JSON with ``model_name``,
+``tokens``, optional ``cache_salt``).
+
+**Response** (``200 OK``):
+
+.. code-block:: json
+
+    {
+      "total_tokens": 768,
+      "total_chunks": 3,
+      "hit_tokens": 512,
+      "hit_chunks": 2
+    }
+
+**Errors:**
+
+- ``400`` if ``model_name`` is not registered.
+- ``503`` if the engine is not yet initialized.
+
+**Example (curl):**
+
+.. code-block:: bash
+
+    curl -sS -X POST http://localhost:8080/api/kv/lookup \
+        -H "Content-Type: application/json" \
+        --data '{"model_name":"meta-llama/Llama-3.1-8B-Instruct","tokens":[0,1,2,3,4,5,6,7]}' \
+      | jq
+
+**Example (Python):**
+
+.. code-block:: python
+
+    import requests
+
+    r = requests.post(
+        "http://localhost:8080/api/kv/lookup",
+        json={
+            "model_name": "meta-llama/Llama-3.1-8B-Instruct",
+            "tokens": list(range(768)),
+        },
+    )
+    r.raise_for_status()
+    print(r.json())   # {'total_tokens': 768, 'total_chunks': 3, 'hit_tokens': 512, 'hit_chunks': 2}
 
 ``GET /conf``
 ~~~~~~~~~~~~~
