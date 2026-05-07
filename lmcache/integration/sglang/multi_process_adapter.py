@@ -105,15 +105,6 @@ class LMCacheMPConnector:
         mq_timeout: float = DEFAULT_MQ_TIMEOUT,
         heartbeat_interval: float = DEFAULT_HEARTBEAT_INTERVAL,
     ):
-        if not k_pool or not v_pool:
-            raise ValueError("SGLang MP connector requires non-empty K/V pools")
-        if len(k_pool) != len(v_pool):
-            raise ValueError("K/V pool layer counts must match")
-        if not k_pool[0].is_cuda:
-            raise ValueError("SGLang MP connector requires CUDA KV caches")
-        if tp_size > 1 and tp_group is None:
-            raise ValueError("tp_group is required when tp_size > 1")
-
         self.tp_size = tp_size
         self.worker_id = rank
         self.page_size = page_size
@@ -421,9 +412,6 @@ class LMCacheMPConnector:
             return 0
 
         request_id = load_metadata.request_id
-        if not request_id:
-            raise ValueError("LMCache MP retrieve requires a non-empty request_id")
-
         with self._pending_lookups_lock:
             pending = self._pending_lookups.get(request_id)
         if pending is None or not pending.locks_held:
@@ -434,18 +422,6 @@ class LMCacheMPConnector:
         retrieve_token_num = pending.matched_token_num
         token_ids = pending.token_ids
         offset = load_metadata.offset
-        if offset % self._lmcache_chunk_size != 0:
-            raise ValueError(
-                "LMCache MP mode requires chunk-aligned offsets, got "
-                f"{offset} and chunk_size={self._lmcache_chunk_size}"
-            )
-
-        if retrieve_token_num <= offset:
-            raise ValueError(
-                f"retrieve_kv invariant violated: retrieve_token_num="
-                f"{retrieve_token_num} <= offset={offset}. lookup_kv should "
-                f"have ensured matched > value_numel for rid={request_id}."
-            )
 
         # ``slot_mapping[offset : offset + prefix_pad)`` is sentinel ``-1`` —
         # those tokens already live in the engine's radix tree and must not
@@ -455,20 +431,9 @@ class LMCacheMPConnector:
         # computed only from the freshly-allocated slot range; the skipped
         # blocks get harmless placeholder ids the kernel never dereferences.
         prefix_pad = load_metadata.prefix_pad
-        if prefix_pad < 0 or prefix_pad % self.page_size != 0:
-            raise ValueError(
-                f"prefix_pad must be a non-negative multiple of page_size, got "
-                f"prefix_pad={prefix_pad}, page_size={self.page_size}"
-            )
         fresh_start = offset + prefix_pad
         prefix_pad_pages = prefix_pad // self.page_size
 
-        if fresh_start >= retrieve_token_num:
-            raise ValueError(
-                f"retrieve_kv invariant violated: fresh_start={fresh_start} "
-                f">= retrieve_token_num={retrieve_token_num}. lookup_kv should "
-                f"have ensured matched > value_numel for rid={request_id}."
-            )
         self._free_lookup_locks(token_ids, 0, offset, request_id)
         fresh_block_ids = self._slot_mapping_to_block_ids(
             load_metadata.slot_mapping[fresh_start:retrieve_token_num]
@@ -516,8 +481,6 @@ class LMCacheMPConnector:
             return
 
         request_id = store_metadata.request_id
-        if not request_id:
-            raise ValueError("LMCache MP store requires a non-empty request_id")
         block_ids = self._slot_mapping_to_block_ids(
             store_metadata.kv_indices[:aligned_end]
         )
