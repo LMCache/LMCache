@@ -82,6 +82,19 @@ compatibility with the vLLM-embedded API server.
      - ``/api/clear-cache``
      - Force-clear all KV data in L1 (CPU) memory.
    * - GET
+     - ``/api/quota``
+     - List every registered ``cache_salt`` quota with live usage.
+   * - PUT
+     - ``/api/quota/{cache_salt}``
+     - Set or update the quota (in GB) for a ``cache_salt``.
+   * - GET
+     - ``/api/quota/{cache_salt}``
+     - Read the quota and live usage for a single ``cache_salt``.
+   * - DELETE
+     - ``/api/quota/{cache_salt}``
+     - Remove a ``cache_salt``'s quota entry (its data is evicted next
+       cycle).
+   * - GET
      - ``/conf``
      - Dump merged server configurations (mp, storage_manager,
        observability).
@@ -285,6 +298,109 @@ The request body is ignored.
 .. code-block:: bash
 
     curl -s -X POST http://localhost:8080/api/clear-cache
+
+.. _mp-http-quota-api:
+
+``/api/quota`` — per-``cache_salt`` quota management
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+These endpoints manage the per-``cache_salt`` storage budgets consumed by
+the ``IsolatedLRU`` eviction policy (selected via
+``--eviction-policy IsolatedLRU``). Quotas are **soft**: setting a limit
+does not reject writes — any over-budget ``cache_salt`` is evicted at
+the next eviction cycle (~1 s).
+A ``cache_salt`` with no registered quota has an effective limit of
+``0`` bytes, so its data is cleared next cycle (allowlist semantics).
+
+These endpoints are no-ops on engines that did not start with
+``--eviction-policy IsolatedLRU``: the ``QuotaManager`` is still
+present, but the LRU policy ignores the registered quotas.
+
+**URL escaping for the empty salt.** ``cache_salt=""`` (un-salted /
+anonymous traffic) cannot appear in a URL path parameter, so the API
+accepts the sentinel ``_default`` in its place. ``PUT /api/quota/_default``
+sets the quota for ``cache_salt=""``. A user that legitimately stores
+data with ``cache_salt="_default"`` cannot be managed via this HTTP API
+distinctly from anonymous traffic — both map to the same path parameter;
+pick any other value (e.g. ``"default"``) to disambiguate.
+
+``PUT /api/quota/{cache_salt}``
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Create or update a quota.
+
+**Body:** ``{"limit_gb": <float>}`` (required, finite, non-negative).
+
+**Response** (``200 OK``):
+
+.. code-block:: json
+
+    {"cache_salt": "alice", "limit_gb": 10.0, "status": "ok"}
+
+**Errors:** ``400`` for malformed JSON, missing ``limit_gb``, non-numeric
+``limit_gb``, ``nan`` / ``inf``, or negative values; ``503`` if the
+engine is not initialized.
+
+**Example:**
+
+.. code-block:: bash
+
+    curl -s -X PUT http://localhost:8080/api/quota/alice \
+        -H 'Content-Type: application/json' \
+        -d '{"limit_gb": 10.0}'
+
+``GET /api/quota/{cache_salt}``
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Read the current quota and live usage for one ``cache_salt``.
+
+**Response** (``200 OK``):
+
+.. code-block:: json
+
+    {
+      "cache_salt": "alice",
+      "limit_gb": 10.0,
+      "current_usage_gb": 2.137,
+      "exists": true
+    }
+
+``exists`` is ``false`` when no quota was ever registered for this
+``cache_salt`` (``limit_gb`` is then ``0.0`` and ``current_usage_gb``
+reflects whatever bytes are currently cached for that salt — those bytes
+will evict next cycle under ``IsolatedLRU``).
+
+``DELETE /api/quota/{cache_salt}``
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Remove a ``cache_salt``'s quota entry. Any bytes still cached under this
+``cache_salt`` become over-budget on the next eviction cycle (effective
+limit drops to ``0``) and will be evicted.
+
+**Response** (``200 OK``):
+
+.. code-block:: json
+
+    {"cache_salt": "alice", "status": "removed"}
+
+When no quota was registered for the given ``cache_salt``, the response
+is ``{"cache_salt": "...", "status": "not_found"}`` (still ``200 OK``).
+
+``GET /api/quota``
+^^^^^^^^^^^^^^^^^^
+
+List every registered quota alongside its live usage.
+
+**Response** (``200 OK``):
+
+.. code-block:: json
+
+    {
+      "users": {
+        "alice": {"limit_gb": 10.0, "current_usage_gb": 2.137},
+        "bob":   {"limit_gb":  4.0, "current_usage_gb": 0.812}
+      }
+    }
 
 ``GET /conf``
 ~~~~~~~~~~~~~
