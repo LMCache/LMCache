@@ -356,6 +356,47 @@ class BlockAllocationRecord:
     new_token_ids: list[int]
 
 
+@dataclass(frozen=True)
+class StoreBytesResult:
+    """Outcome of a bytes-level store request submitted via the HTTP API.
+
+    ``stored_chunks`` may be less than ``total_chunks`` if some keys could
+    not be reserved (e.g. write conflict or out of memory in L1).
+    """
+
+    total_tokens: int
+    total_chunks: int
+    stored_tokens: int
+    stored_chunks: int
+
+
+@dataclass(frozen=True)
+class RetrieveBytesResult:
+    """Outcome of a bytes-level retrieve request submitted via the HTTP API.
+
+    ``payload`` contains the bytes for the longest cached prefix in the
+    canonical KV_2LTD layout :math:`[2, L, hit\\_tokens, D]`. The remaining
+    tokens are not returned and the caller should treat them as cache
+    misses; ``hit_tokens`` and ``hit_chunks`` indicate the prefix length.
+    """
+
+    payload: bytes
+    total_tokens: int
+    total_chunks: int
+    hit_tokens: int
+    hit_chunks: int
+
+
+@dataclass(frozen=True)
+class LookupBytesResult:
+    """Outcome of a bytes-level lookup request submitted via the HTTP API."""
+
+    total_tokens: int
+    total_chunks: int
+    hit_tokens: int
+    hit_chunks: int
+
+
 @dataclass
 class CBMatchResult:
     """Result of a sub-sequence match from BlendTokenRangeMatcher.

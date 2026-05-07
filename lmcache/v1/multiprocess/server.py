@@ -5,6 +5,7 @@ from functools import partial
 from itertools import islice
 from typing import Generator
 import argparse
+import ctypes
 import threading
 import time
 
@@ -51,6 +52,9 @@ from lmcache.v1.multiprocess.custom_types import (
     BlockAllocationRecord,
     IPCCacheEngineKey,
     KVCache,
+    LookupBytesResult,
+    RetrieveBytesResult,
+    StoreBytesResult,
 )
 from lmcache.v1.multiprocess.gpu_context import (
     GPUCacheContext,
@@ -107,6 +111,82 @@ def compute_extra_count(
     """
     tp = tp_size if tp_size > 1 else world_size
     return tp - 1 if tp > world_size else 0
+
+
+_HTTP_BYTES_PREFETCH_POLL_INTERVAL_SEC = 0.001
+
+
+def _wait_prefetch(storage_manager: StorageManager, handle: PrefetchHandle) -> int:
+    """Block until ``handle`` finishes and return the total hit count.
+
+    Polls ``query_prefetch_status`` at a small fixed interval. The HTTP
+    bytes API is offline-style so a simple poll is acceptable; per-call
+    latency is dominated by L2 prefetch wait time, not poll granularity.
+    """
+    while True:
+        status = storage_manager.query_prefetch_status(handle)
+        if status is not None:
+            return status
+        time.sleep(_HTTP_BYTES_PREFETCH_POLL_INTERVAL_SEC)
+
+
+def _bytes_to_tensor(
+    payload: bytes,
+    shape: tuple[int, int, int, int],
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    """Reinterpret ``payload`` as a contiguous tensor of ``shape`` and ``dtype``.
+
+    Works uniformly across dtypes that lack a numpy equivalent (bfloat16,
+    fp8) by going through a uint8 intermediate view. Returns a writable
+    tensor backed by a copy of the input bytes — the caller owns it.
+    """
+    flat_u8 = torch.frombuffer(bytearray(payload), dtype=torch.uint8)
+    return flat_u8.view(dtype).reshape(shape)
+
+
+def _tensor_to_bytes(t: torch.Tensor) -> bytes:
+    """Materialize a contiguous tensor as bytes, dtype-agnostic.
+
+    Uses ``ctypes`` to read the raw buffer rather than ``numpy``, so dtypes
+    without numpy support (bfloat16, fp8) round-trip correctly.
+    """
+    t = t.contiguous()
+    nbytes = t.numel() * t.element_size()
+    return bytes((ctypes.c_ubyte * nbytes).from_address(t.data_ptr()))
+
+
+def _copy_tensor_into_memory_obj(t: torch.Tensor, memory_obj: MemoryObj) -> None:
+    """Copy a contiguous tensor's bytes into ``memory_obj`` via ``data_ptr``.
+
+    Bypasses ``MemoryObj.byte_array`` slice assignment because the
+    ctypes-backed memoryview reports format ``<B`` and Python rejects bytes
+    assignment across that format boundary. ``ctypes.memmove`` against the
+    raw pointer avoids the issue.
+    """
+    src = _tensor_to_bytes(t)
+    expected = memory_obj.get_size()
+    if len(src) != expected:
+        raise ValueError(
+            f"shard byte length {len(src)} does not match destination {expected}"
+        )
+    ctypes.memmove(memory_obj.data_ptr, src, len(src))
+
+
+def _read_memory_obj_as_tensor(
+    memory_obj: MemoryObj,
+    shape: tuple[int, int, int, int] | torch.Size,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    """Read ``memory_obj`` bytes into a fresh tensor of ``shape``/``dtype``.
+
+    Reads the raw bytes via ``data_ptr`` to sidestep the same memoryview
+    format mismatch documented in ``_copy_tensor_into_memory_obj``.
+    """
+    nbytes = memory_obj.get_size()
+    raw = bytes((ctypes.c_ubyte * nbytes).from_address(memory_obj.data_ptr))
+    flat_u8 = torch.frombuffer(bytearray(raw), dtype=torch.uint8)
+    return flat_u8.view(dtype).reshape(tuple(int(s) for s in shape))
 
 
 def get_layout_desc(gpu_context: GPUCacheContext, num_tokens: int) -> MemoryLayoutDesc:
@@ -639,6 +719,332 @@ class MPCacheEngine:
                     self.chunk_size,
                 )
         return None
+
+    def _resolve_model(
+        self,
+        model_name: str,
+    ) -> tuple[MemoryLayoutDesc, int]:
+        """Locate the layout descriptor and world size for ``model_name``.
+
+        Scans ``gpu_context_meta`` for a matching registered context. The
+        first match wins; multiple TP workers of the same model share
+        identical layout and world size, so any registered context for the
+        model produces the right answer.
+
+        Args:
+            model_name: Name of the model the caller wants to address.
+
+        Returns:
+            Tuple of (layout descriptor, world size) for the model. The
+            world size is taken from the registration metadata and reflects
+            MLA's pre-divided world size convention (1 for MLA models).
+
+        Raises:
+            KeyError: If no registered GPU context advertises ``model_name``.
+        """
+        for gpu_id, (m, w) in self.gpu_context_meta.items():
+            if m == model_name:
+                return (
+                    get_layout_desc(self.gpu_contexts[gpu_id], self.chunk_size),
+                    w,
+                )
+        raise KeyError(model_name)
+
+    def store_bytes(
+        self,
+        model_name: str,
+        tokens: list[int],
+        payload: bytes,
+        *,
+        cache_salt: str = "",
+    ) -> StoreBytesResult:
+        """Store opaque KV cache bytes for ``tokens`` under ``model_name``.
+
+        The payload is interpreted as a contiguous KV_2LTD tensor of shape
+        :math:`[2, L, T, D]`, where ``T`` is ``len(complete chunks) * chunk_size``
+        and ``D`` is the full (un-sharded) hidden dim. The method splits the
+        tensor along ``T`` into ``chunk_size`` chunks and along ``D`` into
+        ``world_size`` per-worker shards, then writes one ``MemoryObj`` per
+        ``(chunk, worker)`` pair via ``StorageManager.reserve_write`` /
+        ``finish_write``. Trailing tokens that do not form a full chunk are
+        ignored — the engine only stores chunk-aligned data, mirroring the
+        GPU store path.
+
+        For MLA models (``world_size == 1`` in the registration), only one
+        shard per chunk is written; this matches the GPU path where all TP
+        workers share the same object per chunk.
+
+        Args:
+            model_name: Name of the model. Must match a registered GPU
+                context, otherwise ``KeyError`` is raised.
+            tokens: Token sequence the bytes are keyed by.
+            payload: KV cache bytes in canonical KV_2LTD layout.
+            cache_salt: Optional per-namespace isolation salt; passed
+                through to ``ObjectKey.cache_salt`` so concurrent
+                experiments do not collide.
+
+        Returns:
+            ``StoreBytesResult`` describing how many tokens / chunks were
+            actually persisted. ``stored_chunks`` may be less than
+            ``total_chunks`` if some keys could not be reserved (for
+            example, L1 was full).
+
+        Raises:
+            KeyError: If ``model_name`` is not registered.
+            ValueError: If ``payload`` length does not match
+                ``total_chunks * world_size * per_shard_byte_size``.
+        """
+        layout_desc, world_size = self._resolve_model(model_name)
+
+        chunk_hashes = self.token_hasher.compute_chunk_hashes(tokens)
+        total_chunks = len(chunk_hashes)
+        total_tokens = total_chunks * self.chunk_size
+        if total_chunks == 0:
+            return StoreBytesResult(0, 0, 0, 0)
+
+        per_shard_shape = layout_desc.shapes[0]
+        per_shard_dtype = layout_desc.dtypes[0]
+        per_shard_bytes = (
+            int(torch.tensor(list(per_shard_shape)).prod().item())
+            * per_shard_dtype.itemsize
+        )
+        expected = total_chunks * world_size * per_shard_bytes
+        if len(payload) != expected:
+            raise ValueError(
+                f"payload length {len(payload)} does not match expected {expected} "
+                f"({total_chunks} chunks * {world_size} workers * "
+                f"{per_shard_bytes} bytes/shard)"
+            )
+
+        ipc_key = IPCCacheEngineKey(
+            model_name=model_name,
+            world_size=world_size,
+            worker_id=None,
+            token_ids=tuple(tokens[:total_tokens]),
+            start=0,
+            end=total_tokens,
+            request_id="http-store",
+            cache_salt=cache_salt,
+        )
+        obj_keys = ipc_key_to_object_keys(ipc_key, chunk_hashes)
+
+        full_shape = (
+            int(per_shard_shape[0]),
+            int(per_shard_shape[1]),
+            total_tokens,
+            int(per_shard_shape[3]) * world_size,
+        )
+        payload_tensor = _bytes_to_tensor(payload, full_shape, per_shard_dtype)
+
+        reserved = self.storage_manager.reserve_write(obj_keys, layout_desc, "all")
+
+        stored_chunks_per_worker = [0] * world_size
+        written_keys: list[ObjectKey] = []
+        d_per_worker = int(per_shard_shape[3])
+        for chunk_idx in range(total_chunks):
+            for worker_id in range(world_size):
+                obj_key = obj_keys[chunk_idx * world_size + worker_id]
+                memory_obj = reserved.get(obj_key)
+                if memory_obj is None:
+                    continue
+                t_start = chunk_idx * self.chunk_size
+                t_end = t_start + self.chunk_size
+                d_start = worker_id * d_per_worker
+                d_end = d_start + d_per_worker
+                shard = payload_tensor[:, :, t_start:t_end, d_start:d_end].contiguous()
+                _copy_tensor_into_memory_obj(shard, memory_obj)
+                stored_chunks_per_worker[worker_id] += 1
+                written_keys.append(obj_key)
+
+        self.storage_manager.finish_write(written_keys)
+
+        # A chunk is "fully stored" iff every worker shard for it landed.
+        stored_chunks = min(stored_chunks_per_worker) if stored_chunks_per_worker else 0
+        return StoreBytesResult(
+            total_tokens=total_tokens,
+            total_chunks=total_chunks,
+            stored_tokens=stored_chunks * self.chunk_size,
+            stored_chunks=stored_chunks,
+        )
+
+    def retrieve_bytes(
+        self,
+        model_name: str,
+        tokens: list[int],
+        *,
+        cache_salt: str = "",
+    ) -> RetrieveBytesResult:
+        """Retrieve KV cache bytes for the longest cached prefix of ``tokens``.
+
+        Internally submits a prefetch task for all chunk×worker keys, blocks
+        until the prefetch finishes, then reads the L1 prefix that hit and
+        reassembles a KV_2LTD :math:`[2, L, hit\\_tokens, D]` payload. The
+        returned bytes only cover the cached prefix; trailing chunks not in
+        cache are not returned and the caller should treat them as misses.
+
+        The retrieve is **always non-destructive** regardless of any
+        ``remove_after_retrieve`` engine setting — the editing-friendly
+        semantics this API targets require the cache to remain intact after
+        a read.
+
+        Args:
+            model_name: Name of the model. Must match a registered GPU
+                context, otherwise ``KeyError`` is raised.
+            tokens: Token sequence to retrieve.
+            cache_salt: Optional per-namespace isolation salt.
+
+        Returns:
+            ``RetrieveBytesResult`` carrying the prefix bytes and hit
+            metadata. ``payload`` is empty when nothing hit.
+
+        Raises:
+            KeyError: If ``model_name`` is not registered.
+        """
+        layout_desc, world_size = self._resolve_model(model_name)
+
+        chunk_hashes = self.token_hasher.compute_chunk_hashes(tokens)
+        total_chunks = len(chunk_hashes)
+        total_tokens = total_chunks * self.chunk_size
+        if total_chunks == 0:
+            return RetrieveBytesResult(b"", 0, 0, 0, 0)
+
+        ipc_key = IPCCacheEngineKey(
+            model_name=model_name,
+            world_size=world_size,
+            worker_id=None,
+            token_ids=tuple(tokens[:total_tokens]),
+            start=0,
+            end=total_tokens,
+            request_id="http-retrieve",
+            cache_salt=cache_salt,
+        )
+        obj_keys = ipc_key_to_object_keys(ipc_key, chunk_hashes)
+
+        handle = self.storage_manager.submit_prefetch_task(
+            obj_keys,
+            layout_desc,
+            extra_count=0,
+            external_request_id=ipc_key.request_id,
+        )
+        total_hit_keys = _wait_prefetch(self.storage_manager, handle)
+        hit_chunks = total_hit_keys // world_size
+        hit_tokens = hit_chunks * self.chunk_size
+        if hit_chunks == 0:
+            return RetrieveBytesResult(b"", total_tokens, total_chunks, 0, 0)
+
+        hit_obj_keys = obj_keys[: hit_chunks * world_size]
+        per_shard_shape = layout_desc.shapes[0]
+        per_shard_dtype = layout_desc.dtypes[0]
+        d_per_worker = int(per_shard_shape[3])
+        out_shape = (
+            int(per_shard_shape[0]),
+            int(per_shard_shape[1]),
+            hit_tokens,
+            d_per_worker * world_size,
+        )
+        output = torch.empty(out_shape, dtype=per_shard_dtype)
+
+        retrieved_chunks = 0
+        try:
+            with self.storage_manager.read_prefetched_results(
+                hit_obj_keys
+            ) as memory_objs:
+                if memory_objs is None:
+                    # Race: locks already released by the context.
+                    return RetrieveBytesResult(b"", total_tokens, total_chunks, 0, 0)
+                for idx, memory_obj in enumerate(memory_objs):
+                    chunk_idx = idx // world_size
+                    worker_id = idx % world_size
+                    t_start = chunk_idx * self.chunk_size
+                    t_end = t_start + self.chunk_size
+                    d_start = worker_id * d_per_worker
+                    d_end = d_start + d_per_worker
+                    shard_tensor = _read_memory_obj_as_tensor(
+                        memory_obj,
+                        per_shard_shape,
+                        per_shard_dtype,
+                    )
+                    output[:, :, t_start:t_end, d_start:d_end] = shard_tensor
+                retrieved_chunks = hit_chunks
+        finally:
+            if retrieved_chunks:
+                self.storage_manager.finish_read_prefetched(hit_obj_keys)
+
+        payload = _tensor_to_bytes(output)
+        return RetrieveBytesResult(
+            payload=payload,
+            total_tokens=total_tokens,
+            total_chunks=total_chunks,
+            hit_tokens=hit_tokens,
+            hit_chunks=hit_chunks,
+        )
+
+    def lookup_bytes(
+        self,
+        model_name: str,
+        tokens: list[int],
+        *,
+        cache_salt: str = "",
+    ) -> LookupBytesResult:
+        """Return the cached-prefix length for ``tokens`` without moving bytes.
+
+        Submits a prefetch task and blocks until it completes, then releases
+        any L1 read locks taken during prefetch. No payload is materialized,
+        so this is the cheap way for clients to probe the cache state
+        before paying the bandwidth of a full retrieve.
+
+        Args:
+            model_name: Name of the model.
+            tokens: Token sequence to probe.
+            cache_salt: Optional per-namespace isolation salt.
+
+        Returns:
+            ``LookupBytesResult`` reporting the longest chunk-aligned prefix
+            currently in cache for these tokens.
+
+        Raises:
+            KeyError: If ``model_name`` is not registered.
+        """
+        layout_desc, world_size = self._resolve_model(model_name)
+
+        chunk_hashes = self.token_hasher.compute_chunk_hashes(tokens)
+        total_chunks = len(chunk_hashes)
+        total_tokens = total_chunks * self.chunk_size
+        if total_chunks == 0:
+            return LookupBytesResult(0, 0, 0, 0)
+
+        ipc_key = IPCCacheEngineKey(
+            model_name=model_name,
+            world_size=world_size,
+            worker_id=None,
+            token_ids=tuple(tokens[:total_tokens]),
+            start=0,
+            end=total_tokens,
+            request_id="http-lookup",
+            cache_salt=cache_salt,
+        )
+        obj_keys = ipc_key_to_object_keys(ipc_key, chunk_hashes)
+
+        handle = self.storage_manager.submit_prefetch_task(
+            obj_keys,
+            layout_desc,
+            extra_count=0,
+            external_request_id=ipc_key.request_id,
+        )
+        total_hit_keys = _wait_prefetch(self.storage_manager, handle)
+        hit_chunks = total_hit_keys // world_size
+        hit_tokens = hit_chunks * self.chunk_size
+
+        # Release the read locks acquired by submit_prefetch_task.
+        if total_hit_keys:
+            self.storage_manager.finish_read_prefetched(obj_keys[:total_hit_keys])
+
+        return LookupBytesResult(
+            total_tokens=total_tokens,
+            total_chunks=total_chunks,
+            hit_tokens=hit_tokens,
+            hit_chunks=hit_chunks,
+        )
 
     def lookup(
         self,
