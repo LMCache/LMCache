@@ -42,7 +42,9 @@ struct L1RegistrationConfig {
 class MooncakeConnector : public ConnectorBase<WorkerMooncakeConn> {
  public:
   MooncakeConnector(ConfigDict config, int num_workers,
-                    L1RegistrationConfig l1_registration = {});
+                    L1RegistrationConfig l1_registration = {},
+                    int lookup_workers = 0, int retrieve_workers = 0,
+                    int store_workers = 0);
   ~MooncakeConnector() override;
 
  protected:
@@ -71,7 +73,6 @@ class MooncakeConnector : public ConnectorBase<WorkerMooncakeConn> {
   void do_batch_exists(WorkerMooncakeConn& conn, const Request& req) override;
 
   void do_batch_delete(WorkerMooncakeConn& conn, const Request& req) override;
-
  private:
   void ensure_registered(const void* buf, size_t len);
   void preregister_l1_memory(std::uintptr_t base, size_t size);

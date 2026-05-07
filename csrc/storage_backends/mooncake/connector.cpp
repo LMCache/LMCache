@@ -29,11 +29,39 @@ void ensure_batch_result_size(const std::vector<T>& results, size_t expected,
   }
 }
 
+WorkerPoolConfig make_worker_pool_config(int lookup_workers,
+                                         int retrieve_workers,
+                                         int store_workers) {
+  const bool enable_separate_pools =
+      lookup_workers != 0 || retrieve_workers != 0 || store_workers != 0;
+  if (!enable_separate_pools) {
+    return WorkerPoolConfig{};
+  }
+  if (lookup_workers < 0 || retrieve_workers < 0 || store_workers < 0) {
+    throw std::runtime_error("Mooncake worker counts must be positive");
+  }
+  if (lookup_workers == 0 || retrieve_workers == 0 || store_workers == 0) {
+    throw std::runtime_error(
+        "lookup_workers, retrieve_workers, and store_workers must all be set "
+        "together");
+  }
+
+  WorkerPoolConfig config;
+  config.enable_separate_pools = true;
+  config.lookup_workers = lookup_workers;
+  config.retrieve_workers = retrieve_workers;
+  config.store_workers = store_workers;
+  return config;
+}
 }  // namespace
 
 MooncakeConnector::MooncakeConnector(ConfigDict config, int num_workers,
-                                     L1RegistrationConfig l1_registration)
-    : ConnectorBase(num_workers),
+                                     L1RegistrationConfig l1_registration,
+                                     int lookup_workers, int retrieve_workers,
+                                     int store_workers)
+    : ConnectorBase(num_workers,
+                    make_worker_pool_config(lookup_workers, retrieve_workers,
+                                            store_workers)),
       config_(std::move(config)),
       l1_registration_(l1_registration) {
   // Create a RealClient via the static factory.
@@ -122,8 +150,11 @@ void MooncakeConnector::on_workers_stopped() { unregister_all_buffers(); }
 size_t MooncakeConnector::choose_num_tiles(Op op, size_t num_items) const {
   (void)op;
   (void)num_items;
+  // Mooncake's batch APIs already parallelize internally. Keep each LMCache
+  // batch as one tile so we do not split a single backend batch across workers.
   return 1;
 }
+
 
 void MooncakeConnector::do_batch_get(WorkerMooncakeConn& conn,
                                      const Request& req) {
