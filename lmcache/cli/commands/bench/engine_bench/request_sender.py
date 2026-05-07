@@ -73,7 +73,27 @@ class RequestSender:
         model: str,
         completions_mode: bool = False,
         on_finished: list[OnFinishedCallback] = [],  # noqa: B006
+        request_timeout: float = 10.0,
     ) -> None:
+        """Construct the request sender.
+
+        Args:
+            engine_url: Base URL of the inference engine.
+            model: Model ID to send to the engine.
+            completions_mode: If True, use the legacy completions API
+                instead of chat completions.
+            on_finished: Initial list of callbacks invoked when a request
+                finishes (also extendable via
+                :meth:`add_on_finished_callback`).
+            request_timeout: Per-request timeout in seconds.  Applies to
+                both the connect and the per-chunk read phases of the
+                streaming HTTP call, so a server that accepts the
+                connection and then stalls mid-stream raises after this
+                many seconds instead of hanging the bench indefinitely.
+                A timeout is caught by ``send_request`` and turned into a
+                failed ``RequestResult``; the workload loop continues
+                with the next request.
+        """
         self._model = model
         self._completions_mode = completions_mode
         self._on_finished = list(on_finished)
@@ -89,7 +109,7 @@ class RequestSender:
         self._client = AsyncOpenAI(
             base_url=base_url,
             api_key=api_key,
-            timeout=None,
+            timeout=request_timeout,
         )
 
     def add_on_finished_callback(self, callback: OnFinishedCallback) -> None:
@@ -160,6 +180,11 @@ class RequestSender:
 
         except Exception as e:
             finish_time = time.time()
+            # Some httpx/openai exception subclasses have empty ``str(e)``
+            # (e.g. APITimeoutError on a stalled stream) — always include
+            # the class name so timeouts are identifiable in summaries.
+            err_msg = str(e)
+            error = f"{type(e).__name__}: {err_msg}" if err_msg else type(e).__name__
             result = RequestResult(
                 request_id=request_id,
                 successful=False,
@@ -171,7 +196,7 @@ class RequestSender:
                 submit_time=submit_time,
                 first_token_time=0.0,
                 finish_time=finish_time,
-                error=str(e),
+                error=error,
             )
             response_text = ""
             logger.debug(

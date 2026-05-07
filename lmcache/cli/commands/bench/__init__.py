@@ -123,6 +123,18 @@ class BenchCommand(BaseCommand):
             help="Random seed (default: 42).",
         )
         parser.add_argument(
+            "--request-timeout",
+            type=float,
+            default=10.0,
+            help=(
+                "Per-request timeout in seconds (default: 10.0). "
+                "A request that takes longer is failed and the loop "
+                "continues with the next one. Bump this if healthy "
+                "requests are being timed out (e.g., very long prompts "
+                "on a slow setup)."
+            ),
+        )
+        parser.add_argument(
             "--output-dir",
             default=".",
             help="Directory for output files (default: current).",
@@ -364,6 +376,7 @@ class BenchCommand(BaseCommand):
                 "quiet",
                 "format",
                 "output",
+                "request_timeout",
             ):
                 cli_val = getattr(args, attr, None)
                 if cli_val is not None:
@@ -466,7 +479,11 @@ class BenchCommand(BaseCommand):
         )
 
         # 3. Create request sender (callbacks wired after workload creation)
-        request_sender = RequestSender(config.engine_url, config.model)
+        request_sender = RequestSender(
+            config.engine_url,
+            config.model,
+            request_timeout=args.request_timeout,
+        )
 
         # 4. Create workload
         workload = create_workload(

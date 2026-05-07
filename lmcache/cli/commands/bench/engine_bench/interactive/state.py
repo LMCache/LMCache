@@ -241,6 +241,7 @@ class InteractiveState:
         ns.no_csv = self._values.get("no_csv", False)
         ns.json = self._values.get("export_json", False)
         ns.quiet = self._values.get("quiet", False)
+        ns.request_timeout = self._values.get("request_timeout", 10.0)
         ns.bench_target = "engine"
 
         # Ensure format/output attrs exist for create_metrics
