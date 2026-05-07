@@ -614,7 +614,6 @@ class LocalCPUBackend(AllocatorBackendInterface):
                 num_candidates = 1
                 evict_keys = None
                 with self.cpu_lock:
-                    num_candidates = max(1, len(self.hot_cache))
                     evict_keys = self.cache_policy.get_evict_candidates(
                         self.hot_cache, num_candidates=num_candidates
                     )
@@ -721,7 +720,7 @@ class LocalCPUBackend(AllocatorBackendInterface):
             if self.use_hot:
                 # TODO(Jiayi): optimize `num_candidates` with estimation.
                 # Accurate estimation is hard due to fragmentation
-                num_candidates = 1
+                num_candidates = min(64, max(1, len(self.hot_cache)))
                 evict_keys = None
                 with self.cpu_lock:
                     evict_keys = self.cache_policy.get_evict_candidates(
@@ -761,6 +760,7 @@ class LocalCPUBackend(AllocatorBackendInterface):
                             logger.debug(
                                 f"Evicting {len(old_mem_objs)} chunks from cpu memory"
                             )
+                            break
                     if wait_other_requests:
                         self.stats_monitor.update_local_cpu_evict_failed_count(
                             num_candidates
@@ -787,7 +787,7 @@ class LocalCPUBackend(AllocatorBackendInterface):
             memory_objs = self.memory_allocator.batched_allocate(
                 shapes, dtypes, batch_size, fmt
             )
-            if memory_objs:
+            if memory_objs is not None:
                 break
 
             num_attempts += 1

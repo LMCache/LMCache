@@ -601,6 +601,60 @@ class TestLocalCPUBackendAllocatorRecovery:
             memory_obj.ref_count_down()
         allocator.close()
 
+    def test_batched_allocate_recovers_with_fully_evictable_group(self):
+        chunk_bytes = 4096
+        batch_size = 2
+        shape = torch.Size([1, chunk_bytes])
+        config = create_test_config()
+        PinMonitor.GetOrCreate(config)
+        allocator = MixedMemoryAllocator(chunk_bytes * batch_size * 2)
+        backend = LocalCPUBackend(config=config, memory_allocator=allocator)
+        pinned_group_keys = create_test_key("batched_pinned_group").split_layers(
+            batch_size
+        )
+        safe_group_keys = create_test_key("batched_safe_group").split_layers(batch_size)
+
+        pinned_group_objs = backend.batched_allocate(
+            shape,
+            torch.uint8,
+            batch_size=batch_size,
+            fmt=MemoryFormat.KV_T2D,
+            busy_loop=False,
+        )
+        safe_group_objs = backend.batched_allocate(
+            shape,
+            torch.uint8,
+            batch_size=batch_size,
+            fmt=MemoryFormat.KV_T2D,
+            busy_loop=False,
+        )
+        assert pinned_group_objs is not None
+        assert safe_group_objs is not None
+        backend.batched_submit_put_task(pinned_group_keys, pinned_group_objs)
+        backend.batched_submit_put_task(safe_group_keys, safe_group_objs)
+        for memory_obj in pinned_group_objs + safe_group_objs:
+            memory_obj.ref_count_down()
+
+        assert backend.pin(pinned_group_keys[0])
+        recovered = backend.batched_allocate(
+            shape,
+            torch.uint8,
+            batch_size=batch_size,
+            fmt=MemoryFormat.KV_T2D,
+            busy_loop=False,
+        )
+
+        assert recovered is not None
+        assert all(key in backend.hot_cache for key in pinned_group_keys)
+        assert all(key not in backend.hot_cache for key in safe_group_keys)
+
+        for memory_obj in recovered:
+            memory_obj.ref_count_down()
+        assert backend.unpin(pinned_group_keys[0])
+        backend.clear()
+        assert allocator.memcheck()
+        allocator.close()
+
 
 class TestLocalCPUBackendAllocatorAlignment:
     def test_rust_odirect_auto_alignment_for_mixed_allocator(self, monkeypatch):
