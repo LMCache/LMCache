@@ -1067,6 +1067,24 @@ def _get_head_size_view(
                 )
             k, v = t[:, 0], t[:, 1]  # [NB,BS,NH,HS]
 
+        elif gpu_kv_format == lmc_ops.GPUKVFormat.NL_X_TWO_NB_NH_BS_HS:
+            # per-layer: [2, NB, NH, BS, HS] (HND layout)
+            if t.shape[0] != 2:
+                raise ValueError(
+                    f"{gpu_kv_format} expects [2,NB,NH,BS,HS], got {t.shape}"
+                )
+            k = t[0].permute(0, 2, 1, 3).contiguous()
+            v = t[1].permute(0, 2, 1, 3).contiguous()
+
+        elif gpu_kv_format == lmc_ops.GPUKVFormat.NL_X_NB_TWO_NH_BS_HS:
+            # per-layer: [NB, 2, NH, BS, HS] (HND layout)
+            if t.shape[1] != 2:
+                raise ValueError(
+                    f"{gpu_kv_format} expects [NB,2,NH,BS,HS], got {t.shape}"
+                )
+            k = t[:, 0].permute(0, 2, 1, 3).contiguous()
+            v = t[:, 1].permute(0, 2, 1, 3).contiguous()
+
         else:
             # Other formats are either MLA-only or require upstream normalization.
             raise NotImplementedError(
