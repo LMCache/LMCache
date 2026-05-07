@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Standard
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 import os
 import threading
 
@@ -129,6 +129,52 @@ class ParallelStrategy:
     """The pipeline parallel size."""
 
 
+def _normalize_adapter_init_args(
+    vllm_block_size: int,
+    parallel_strategy: ParallelStrategy | int,
+    legacy_block_size: int | None,
+    mq_timeout: float,
+) -> tuple[int, ParallelStrategy, float]:
+    """Normalize adapter constructor args from old and new vLLM connectors.
+
+    Args:
+        vllm_block_size: The vLLM block size for the current connector API, or
+            the legacy KV world size when ``parallel_strategy`` is an int.
+        parallel_strategy: The current ``ParallelStrategy`` object, or the
+            legacy KV worker id from older vLLM MP connectors.
+        legacy_block_size: The legacy vLLM block size passed positionally by
+            older vLLM MP connectors.
+        mq_timeout: Timeout in seconds for synchronous message queue requests.
+
+    Returns:
+        A tuple of normalized ``(vllm_block_size, parallel_strategy,
+        mq_timeout)``.
+
+    Raises:
+        TypeError: If the connector argument shape is not supported.
+    """
+    if isinstance(parallel_strategy, ParallelStrategy):
+        return vllm_block_size, parallel_strategy, mq_timeout
+    if not isinstance(parallel_strategy, int) or legacy_block_size is None:
+        raise TypeError(
+            "parallel_strategy must be ParallelStrategy, or legacy "
+            "(kv_world_size, kv_worker_id, block_size) arguments"
+        )
+
+    kv_world_size = int(vllm_block_size)
+    kv_worker_id = int(parallel_strategy)
+    strategy = ParallelStrategy(
+        use_mla=False,
+        kv_world_size=kv_world_size,
+        kv_worker_id=kv_worker_id,
+        actual_world_size=kv_world_size,
+        actual_worker_id=kv_worker_id,
+        tp_size=kv_world_size,
+        pp_size=1,
+    )
+    return int(legacy_block_size), strategy, mq_timeout
+
+
 class HeartbeatThread(PeriodicThread):
     """Periodically checks server health via PING.
 
@@ -161,9 +207,49 @@ class HeartbeatThread(PeriodicThread):
         self._health_event = health_event
         self._interval = interval
 
+        # Optional callback invoked on the unhealthy->healthy edge,
+        # before the health event is set. See register_recover_callback.
+        def noop() -> bool:
+            return True
+
+        self._recover_callback: Callable[[], bool] = noop
+
+    def register_recover_callback(self, callback: Callable[[], bool]) -> None:
+        """Register a callback fired on the unhealthy->healthy transition.
+
+        The callback runs **before** the health event is set. It must
+        return ``True`` on success (event will be set) or ``False`` on
+        failure (event will stay cleared, and the next heartbeat will
+        invoke the callback again on the next successful PING).
+
+        The callback function should NEVER raise exceptions.
+
+        Intended for setup work that must complete before downstream
+        callers observe the recovery — for example, re-registering KV
+        caches with a server that just restarted.
+
+        Should be called before :meth:`start`. Only one callback is
+        supported; a second call replaces the first.
+
+        Args:
+            callback: Zero-arg callable returning a success bool.
+        """
+        self._recover_callback = callback
+
     def _execute(self) -> ThreadRunSummary:
         was_healthy = self._health_event.is_set()
         healthy = send_ping(self._mq_client, timeout=self._interval)
+        need_trigger_recover = (
+            healthy and not was_healthy and self._recover_callback is not None
+        )
+
+        # Try to call recover callback
+        if need_trigger_recover:
+            logger.warning(
+                "LMCache server is healthy again, triggering recovery callback"
+            )
+            # If the callback fails, it should not become healthy
+            healthy = self._recover_callback()
 
         if healthy:
             self._health_event.set()
@@ -216,7 +302,9 @@ class LMCacheMPSchedulerAdapter:
         context: zmq.Context,
         model_name: str,
         vllm_block_size: int,
-        parallel_strategy: ParallelStrategy,
+        parallel_strategy: ParallelStrategy | int,
+        legacy_block_size: int | None = None,
+        *,
         mq_timeout: float = DEFAULT_MQ_TIMEOUT,
         heartbeat_interval: float = DEFAULT_HEARTBEAT_INTERVAL,
     ):
@@ -228,10 +316,19 @@ class LMCacheMPSchedulerAdapter:
             vllm_block_size: The block size used in vLLM
             parallel_strategy:
                 The parallel strategy, which includes `use_mla`,
-                `kv_world_size`, `kv_worker_id` and so on
+                `kv_world_size`, `kv_worker_id` and so on. Older vLLM
+                connectors pass the KV worker id here.
+            legacy_block_size: The vLLM block size passed positionally by
+                older vLLM connectors.
             mq_timeout: Timeout in seconds for message queue requests.
             heartbeat_interval: Interval in seconds between heartbeat pings.
         """
+        vllm_block_size, parallel_strategy, mq_timeout = _normalize_adapter_init_args(
+            vllm_block_size,
+            parallel_strategy,
+            legacy_block_size,
+            mq_timeout,
+        )
         self.mq_client = MessageQueueClient(server_url, context)
         self._mq_timeout = mq_timeout
 
@@ -558,10 +655,36 @@ class LMCacheMPWorkerAdapter:
         context: zmq.Context,
         model_name: str,
         vllm_block_size: int,
-        parallel_strategy: ParallelStrategy,
+        parallel_strategy: ParallelStrategy | int,
+        legacy_block_size: int | None = None,
+        *,
         mq_timeout: float = DEFAULT_MQ_TIMEOUT,
         heartbeat_interval: float = DEFAULT_HEARTBEAT_INTERVAL,
     ):
+        """Initialize the worker adapter for current or legacy vLLM callers.
+
+        Args:
+            server_url: The server URL for the LMCache message queue.
+            context: The ZMQ context.
+            model_name: The model name used for LMCache keys.
+            vllm_block_size: The block size used in vLLM, or legacy KV world
+                size when ``parallel_strategy`` is an int.
+            parallel_strategy: Current ``ParallelStrategy`` metadata, or the
+                legacy KV worker id from older vLLM connectors.
+            legacy_block_size: The vLLM block size passed positionally by
+                older vLLM connectors.
+            mq_timeout: Timeout in seconds for message queue requests.
+            heartbeat_interval: Interval in seconds between heartbeat pings.
+
+        Raises:
+            TypeError: If the connector argument shape is unsupported.
+        """
+        vllm_block_size, parallel_strategy, mq_timeout = _normalize_adapter_init_args(
+            vllm_block_size,
+            parallel_strategy,
+            legacy_block_size,
+            mq_timeout,
+        )
         self.mq_client = MessageQueueClient(server_url, context)
         self._mq_timeout = mq_timeout
 
@@ -634,7 +757,13 @@ class LMCacheMPWorkerAdapter:
 
     @property
     def is_healthy(self) -> bool:
-        """Whether the LMCache server is healthy."""
+        """Whether the LMCache server is healthy.
+
+        Reflects the most recent heartbeat result. KV cache
+        re-registration on the unhealthy->healthy transition is handled
+        by the heartbeat thread itself via ``register_recover_callback``,
+        so this property only reads the shared event.
+        """
         return self._health_event.is_set()
 
     @property
@@ -660,23 +789,41 @@ class LMCacheMPWorkerAdapter:
             == 0
         )
 
-    def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
+    def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]) -> None:
         """
-        Register the kv caches with LMCache server
+        Register the kv caches with LMCache server.
 
         Args:
             kv_caches: A dict of kv caches to register. The keys are the
                 layer names and the values are the corresponding tensors.
+
+        Raises:
+            ConnectionError: if the server does not respond within
+                mq_timeout.
+        """
+        logger.info("Registering kv caches")
+        self.kv_caches = kv_caches
+        self._send_register_kv_caches_request(kv_caches)
+
+    def _send_register_kv_caches_request(
+        self, kv_caches: dict[str, torch.Tensor]
+    ) -> None:
+        """Submit a REGISTER_KV_CACHE request and wait for the response.
+
+        Shared by the public ``register_kv_caches`` entry point and the
+        recovery path inside ``is_healthy``.
+
+        Args:
+            kv_caches: The KV cache dict to register.
+
+        Raises:
+            ConnectionError: if the server does not respond within
+                mq_timeout.
         """
         # First Party
         from lmcache.integration.vllm.utils import vllm_layout_hints
 
-        # Register kv cache and send the request
-        logger.info("Registering kv caches")
-
         layout_hints = vllm_layout_hints()
-        self.kv_caches = kv_caches
-
         future = send_lmcache_request(
             self.mq_client,
             RequestType.REGISTER_KV_CACHE,
@@ -710,7 +857,44 @@ class LMCacheMPWorkerAdapter:
                 health_event=self._health_event,
                 interval=self._heartbeat_interval,
             )
+            self._heartbeat.register_recover_callback(
+                self._reregister_kv_caches_callback
+            )
             self._heartbeat.start()
+
+    def _reregister_kv_caches_callback(self) -> bool:
+        """Heartbeat recover callback: re-register KV caches after the
+        server returns. Runs on the heartbeat thread, before the health
+        event is set.
+
+        Returns:
+            ``True`` if there is nothing to re-register or registration
+            succeeds; ``False`` on registration failure (the heartbeat
+            will keep the health event cleared and retry on the next
+            successful PING).
+        """
+        if not self.kv_caches:
+            # Nothing was registered yet (server flapped before the
+            # very first register_kv_caches). Treat as success so the
+            # health event can be set.
+            return True
+
+        try:
+            self._send_register_kv_caches_request(self.kv_caches)
+            logger.warning("Finished re-registering KV caches after server recovery")
+        except ConnectionError:
+            logger.exception(
+                "Failed to re-register KV caches after server recovery; "
+                "will retry on next heartbeat"
+            )
+            return False
+        except Exception:
+            logger.exception(
+                "Unexpected error during KV cache re-registration; "
+                "will retry on next heartbeat"
+            )
+            return False
+        return True
 
     @_lmcache_nvtx_annotate
     def submit_store_request(

@@ -21,6 +21,7 @@ from lmcache.v1.distributed.l1_manager import L1Manager
 from lmcache.v1.distributed.l2_adapters import create_l2_adapter
 from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface
 from lmcache.v1.distributed.l2_adapters.serde_wrapper import SerdeL2AdapterWrapper
+from lmcache.v1.distributed.quota_manager import QuotaManager
 from lmcache.v1.distributed.serde import create_serde_processor
 from lmcache.v1.distributed.storage_controllers import (
     L1EvictionController,
@@ -76,26 +77,35 @@ class StorageManager:
                 )
             self._l2_adapters.append(adapter)
 
-        # Unified L2 eviction controller for all adapters with eviction config.
-        # Adapters that don't support global (aggregate) eviction
-        # (``supports_global_eviction == False``, i.e. no
-        # ``max_capacity_bytes`` declared — e.g. the FS adapter) are
-        # skipped here even if an ``eviction_config`` is present — the
-        # eviction controller has no aggregate-usage signal to act on.
-        # Per-cache_salt eviction policies (future: quota-based) would
-        # be wired up separately and don't go through this filter.
+        # Per-cache_salt quota registry. Shared across the L2 eviction
+        # controller (reads quotas each cycle) and the HTTP quota
+        # endpoints (CRUD). Present even when no adapter uses
+        # IsolatedLRU so the HTTP layer has a stable ``quota_manager``
+        # reference. No explicit cleanup on close — the registry is
+        # just a dict protected by a lock and has no OS resources.
+        self._quota_manager = QuotaManager()
+
+        # Unified L2 eviction controller for all adapters with eviction
+        # config. Aggregate-usage policies (``LRU``, ``noop``) need
+        # ``max_capacity_bytes > 0`` to compute a usage fraction;
+        # adapters without capacity are skipped for those. Isolated
+        # policies (``IsolatedLRU``) operate on per cache_salt byte
+        # counts which the base class tracks regardless of capacity,
+        # so they are wired up unconditionally.
         l2_eviction_states: list[L2AdapterEvictionState] = []
         for adapter, ac in zip(
             self._l2_adapters, config.l2_adapter_config.adapters, strict=True
         ):
             if ac.eviction_config is None:
                 continue
-            if not adapter.supports_global_eviction:
+            policy_name = ac.eviction_config.eviction_policy
+            if policy_name != "IsolatedLRU" and not adapter.supports_global_eviction:
                 logger.warning(
-                    "L2 adapter %s has eviction_config but does not support "
-                    "global eviction (max_capacity_bytes=0); skipping "
-                    "aggregate-usage eviction setup.",
+                    "L2 adapter %s configured with '%s' eviction but does "
+                    "not support global eviction (max_capacity_bytes=0); "
+                    "skipping aggregate-usage eviction setup.",
                     type(adapter).__name__,
+                    policy_name,
                 )
                 continue
             l2_eviction_states.append(
@@ -104,7 +114,9 @@ class StorageManager:
                     eviction_config=ac.eviction_config,
                 )
             )
-        self._l2_eviction_controller = L2EvictionController(l2_eviction_states)
+        self._l2_eviction_controller = L2EvictionController(
+            l2_eviction_states, quota_manager=self._quota_manager
+        )
         self._l2_eviction_controller.start()
 
         adapter_descriptors = [
@@ -546,6 +558,31 @@ class StorageManager:
             keys (list[ObjectKey]): List of object keys to touch.
         """
         self._l1_manager.touch_keys(keys)
+
+    @property
+    def quota_manager(self) -> QuotaManager:
+        """Per-cache_salt quota registry.
+
+        Exposed so the HTTP layer can serve CRUD endpoints without
+        reaching into private state. Always non-``None`` — the
+        storage manager creates the registry at construction time.
+        """
+        return self._quota_manager
+
+    def get_usage_bytes_by_cache_salt(self) -> dict[str, int]:
+        """Aggregate ``cache_salt`` byte usage across every L2 adapter.
+
+        Used by the HTTP quota endpoints to report ``current_usage_gb``
+        alongside the configured limit. Aggregation is a simple sum:
+        each adapter tracks the same salt independently so the totals
+        are additive.
+        """
+        totals: dict[str, int] = {}
+        for adapter in self._l2_adapters:
+            snap = adapter.get_usage().bytes_by_cache_salt
+            for salt, used in snap.items():
+                totals[salt] = totals.get(salt, 0) + used
+        return totals
 
     def clear(self, force: bool = False):
         """

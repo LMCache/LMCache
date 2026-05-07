@@ -304,6 +304,9 @@ class BlendTracingSubscriber(EventSubscriber):
                 root_span.set_attribute("hit_tokens", hit_tokens)
                 root_span.set_attribute("requested_tokens", requested_tokens)
                 root_span.set_attribute("hit_rate", hit_rate)
+                root_span.set_attribute(
+                    "prefix_hits", int(event.metadata.get("prefix_hits", 0))
+                )
 
         if event.event_type in self._GPU_OP_END_EVENTS:
             if (count := self._pending_gpu_ops.get(sid, 0)) > 0:

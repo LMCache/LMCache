@@ -101,8 +101,13 @@ datapoints and are orthogonal to these Resource attributes.
 | OTel metric name | Prometheus name | Type | Source event | Calculation |
 |---|---|---|---|---|
 | `lmcache_mp.l1_evicted_keys` | `lmcache_mp_l1_evicted_keys_total` | Counter | `L1_KEYS_EVICTED` | `+len(keys)` |
+| `lmcache_mp.l1_eviction_loop_ticks` | `lmcache_mp_l1_eviction_loop_ticks_total` | Counter | `L1_EVICTION_LOOP_TICK` | +1 per loop iteration |
+| `lmcache_mp.l1_eviction_loop_triggered` | `lmcache_mp_l1_eviction_loop_triggered_total` | Counter | `L1_EVICTION_LOOP_TICK` | +1 when `triggered=True` |
+| `lmcache_mp.l1_usage_ratio` | `lmcache_mp_l1_usage_ratio` | Observable Gauge | (callback on `L1Manager`) | `used / total` at scrape time |
 
-**What it answers:** How aggressively is the eviction controller clearing L1? A high eviction rate relative to writes signals memory pressure.
+**What it answers:** How aggressively is the eviction controller clearing L1?  Is the eviction loop alive but staying below the watermark, or actively firing?  What is the current L1 fullness?
+
+The two loop counters distinguish "loop is alive" from "eviction fired" — important when debugging short-lived benchmarks (a workload that completes in <1 s never gives the 1Hz polling loop a chance to fire even when usage exceeds the watermark).  `l1_usage_ratio` is registered via :func:`register_gauge` against `L1Manager`, so its value reflects current state at scrape time, not a per-tick sample.
 
 ---
 
@@ -448,12 +453,21 @@ MP mode `lmcache_mp.` namespace).  On Prometheus, `.` becomes `_` and counters g
 | OTel metric name | Prometheus name | Type | Source event | Calculation |
 |---|---|---|---|---|
 | `lmcache_blend.lookup_requests` | `lmcache_blend_lookup_requests_total` | Counter | `CB_LOOKUP_START` | +1 per event |
+| `lmcache_blend.lookup_requested_tokens` | `lmcache_blend_lookup_requested_tokens_total` | Counter | `CB_LOOKUP_END` | `+requested_tokens` |
+| `lmcache_blend.lookup_hit_tokens` | `lmcache_blend_lookup_hit_tokens_total` | Counter | `CB_LOOKUP_END` | `+hit_tokens` |
 | `lmcache_blend.lookup_fingerprint_hits` | `lmcache_blend_lookup_fingerprint_hits_total` | Counter | `CB_LOOKUP_END` | `+fingerprint_hits` |
 | `lmcache_blend.lookup_storage_hits` | `lmcache_blend_lookup_storage_hits_total` | Counter | `CB_LOOKUP_END` | `+storage_hits` |
 | `lmcache_blend.lookup_stale_chunks` | `lmcache_blend_lookup_stale_chunks_total` | Counter | `CB_LOOKUP_END` | `+stale_chunks` |
 | `lmcache_blend.lookup_no_gpu_context_errors` | `lmcache_blend_lookup_no_gpu_context_errors_total` | Counter | `CB_LOOKUP_END` | +1 when `no_gpu_context=True` |
 
-**What it answers:** How often does the CB server receive lookup requests? What fraction hit the fingerprint table? What fraction are confirmed in storage? How many stale evictions occur?
+**What it answers:** How often does the CB server receive lookup requests? What fraction of requested tokens are served by blend (token-level hit rate)? What fraction hit the fingerprint table? What fraction are confirmed in storage? How many stale evictions occur?
+
+**Blend token-level hit rate** (numerator and denominator co-emit on the same `CB_LOOKUP_END` event so the ratio is meaningful even under partial-failure paths):
+
+```
+rate(lmcache_blend_lookup_hit_tokens_total[5m])
+/ rate(lmcache_blend_lookup_requested_tokens_total[5m])
+```
 
 ### CB Retrieve Metrics
 
@@ -496,4 +510,9 @@ MP mode `lmcache_mp.` namespace).  On Prometheus, `.` becomes `_` and counters g
 
 ---
 
-For event metadata contracts (what keys each `EventType` carries), see [EVENTS.md](EVENTS.md).
+For derivations of L1-only / L2-only / blend hit rates from these
+counters, and a "what to send when reporting" checklist, see
+[DEBUG.md](DEBUG.md).
+
+For event metadata contracts (what keys each `EventType` carries), see
+[EVENTS.md](EVENTS.md).
