@@ -1839,7 +1839,6 @@ class PrometheusLogger:
             self.gauge_pinned_memory_objs_count, stats.pinned_memory_objs_count
         )
 
-    _instance = None
     _instances: Dict[tuple[tuple[str, str], ...], "PrometheusLogger"] = {}
 
     @staticmethod
@@ -1852,12 +1851,12 @@ class PrometheusLogger:
         if metadata_key in PrometheusLogger._instances:
             return PrometheusLogger._instances[metadata_key]
 
-        if PrometheusLogger._instance is None:
+        base_logger = PrometheusLogger.GetInstanceOrNone()
+        if base_logger is None:
             logger_instance = PrometheusLogger(metadata, config=config)
-            PrometheusLogger._instance = logger_instance
         else:
             logger_instance = PrometheusLogger._create_label_view(
-                PrometheusLogger._instance,
+                base_logger,
                 metadata,
             )
 
@@ -1866,18 +1865,17 @@ class PrometheusLogger:
 
     @staticmethod
     def GetInstance() -> "PrometheusLogger":
-        assert PrometheusLogger._instance is not None, (
-            "PrometheusLogger instance not created yet"
-        )
-        return PrometheusLogger._instance
+        instance = PrometheusLogger.GetInstanceOrNone()
+        assert instance is not None, "PrometheusLogger instance not created yet"
+        return instance
 
     @staticmethod
     def GetInstanceOrNone() -> Optional["PrometheusLogger"]:
         """
-        Returns the singleton instance of PrometheusLogger if it exists,
+        Returns an existing PrometheusLogger instance if any have been created,
         otherwise returns None.
         """
-        return PrometheusLogger._instance
+        return next(iter(PrometheusLogger._instances.values()), None)
 
     @thread_safe
     def reset_counters(self) -> None:

@@ -282,13 +282,11 @@ def test_zero_division_protection(stats_monitor):
 
 @pytest.fixture(scope="function")
 def _cleanup_prometheus_logger():
-    """Reset PrometheusLogger singleton and metrics between tests."""
+    """Reset PrometheusLogger instances and metrics between tests."""
     LMCStatsMonitor.unregister_all_metrics()
-    PrometheusLogger._instance = None
     PrometheusLogger._instances = {}
     yield
     LMCStatsMonitor.unregister_all_metrics()
-    PrometheusLogger._instance = None
     PrometheusLogger._instances = {}
 
 
@@ -395,7 +393,7 @@ def test_prometheus_logger_get_or_create_with_config(
 def test_prometheus_logger_get_or_create_allows_multiple_roles(
     _cleanup_prometheus_logger,
 ):
-    """Different roles should not be treated as singleton metadata conflicts."""
+    """Different roles should not be treated as global metadata conflicts."""
     worker_meta = _make_metadata()
     scheduler_meta = _make_metadata()
     scheduler_meta.role = "scheduler"
