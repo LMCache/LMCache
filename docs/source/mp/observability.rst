@@ -308,6 +308,55 @@ demand via ``rate(lmcache_mp_l2_store_completed_total{l2_name="..."}[1m])``
 (and the equivalent for loads).  No separate ``*_iops`` metric is exported;
 keeping the raw counter lets dashboard users pick their own window.
 
+Failure & Health Counters
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Health-monitoring counters emitted on the dedicated ``lmcache_mp.health``
+OTel meter. Driven by the ``L1FailureMetricsSubscriber`` and
+``L2FailureMetricsSubscriber``, which are registered automatically when
+metrics are enabled. All three counters carry ``model_name`` (extracted
+from each ``ObjectKey``) so operators can slice per-model on the
+Prometheus ``/metrics`` endpoint.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 35 15 50
+
+   * - Metric
+     - Type
+     - Description
+   * - ``lmcache_mp.l1_allocation_failure``
+     - Counter
+     - L1 memory allocation failures (OOM) during ``reserve_write``.
+       Tagged by ``during`` ∈ {``l1_store``, ``l2_prefetch``} to
+       distinguish user-initiated stores from prefetch-triggered
+       allocations, plus ``model_name``.
+   * - ``lmcache_mp.l1_read_failure``
+     - Counter
+     - L1 ``reserve_read`` failures. Tagged by ``during`` ∈
+       {``l2_store``, ``l1_retrieve``}, ``reason`` ∈ {``not_found``,
+       ``write_locked``}, plus ``model_name``. **Post-lookup anomaly
+       counter**, not a cache-miss counter — in MP mode ``reserve_read``
+       is only called after a successful lookup, so any non-zero value
+       indicates a lookup/reserve race or unexpected eviction and should
+       stay near zero in healthy operation.
+   * - ``lmcache_mp.l2_prefetch_failure``
+     - Counter
+     - Keys that L2 reported present at lookup but failed to land in L1.
+       Tagged by ``reason`` ∈ {``l1_oom``, ``not_found``} plus
+       ``model_name``. ``l1_oom`` means L1 had no room to receive the
+       prefetched object; ``not_found`` means the adapter returned no
+       data despite a positive lookup (e.g. concurrent delete).
+
+A ``reason=serde_failure`` value will be added to ``l2_prefetch_failure``
+as an additive, non-breaking extension once L2 adapters distinguish
+deserialization errors from missing objects — no dashboard migration
+needed when that lands.
+
+For the full design rationale (including which event types drive each
+counter and why ``lmcache_instance_id`` is deferred), see
+``docs/design/v1/mp_observability/METRICS.md`` in the source tree.
+
 Lookup Hit-Rate Metrics
 ~~~~~~~~~~~~~~~~~~~~~~~
 
