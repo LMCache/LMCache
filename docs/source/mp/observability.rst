@@ -188,6 +188,17 @@ L1 Metrics
    * - ``lmcache_mp.l1_evicted_keys``
      - Counter
      - Number of keys evicted by the EvictionController.
+   * - ``lmcache_mp.l1_eviction_loop_ticks``
+     - Counter
+     - L1 eviction-loop iterations (every cycle, regardless of whether
+       the watermark was crossed). Driven by ``L1_EVICTION_LOOP_TICK``.
+   * - ``lmcache_mp.l1_eviction_loop_triggered``
+     - Counter
+     - L1 eviction-loop iterations where ``usage >= watermark`` and the
+       eviction policy actually ran. The two counters distinguish "loop
+       is alive" from "eviction fired" — important when debugging
+       short-lived benchmarks that complete faster than the 1 Hz
+       polling cycle.
 
 L1 Chunk Lifecycle Histograms
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -555,6 +566,14 @@ Adapters with no in-flight work emit no datapoint for that scrape.
      - Bytes currently held in L1.  Rising without plateauing typically
        indicates a leak; saturating at the configured ``--l1-size-gb``
        indicates working set exceeds capacity.
+   * - ``lmcache_mp.l1_usage_ratio``
+     - ObservableGauge
+     - L1 used/total ratio (``0.0``–``1.0``), sampled at scrape time
+       from ``L1Manager.get_memory_usage()``. Returns ``0.0`` when the
+       gauge target is not yet wired up or ``total_bytes`` is zero, so
+       the callback never raises during a scrape. Compare against the
+       eviction watermark (default ``0.8``) to read whether the
+       eviction loop is below or above its trigger threshold.
    * - ``lmcache_mp.num_inflight_l2_stores``
      - ObservableGauge (attrs: ``l2_name``, ``adapter_index``)
      - L2 store tasks currently executing, per adapter.  Sustained

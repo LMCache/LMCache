@@ -243,7 +243,7 @@ The order of ``--l2-adapter`` arguments determines the adapter order (cascade).
 
 Registered adapter types: ``nixl_store``, ``nixl_store_dynamic``, ``fs``,
 ``fs_native``, ``mock``, ``mooncake_store``, ``s3``, ``resp``, ``plugin``,
-``native_plugin``.
+``native_plugin``, ``raw_block``, ``dax``.
 
 ``nixl_store`` -- NIXL-based persistent storage
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
