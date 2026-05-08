@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 """HTTP routes for bytes-level KV cache access.
 
-These routes expose ``MPCacheEngine.store_bytes_by_tokens / retrieve_bytes_by_tokens /
-lookup_bytes_by_tokens`` to external developers over HTTP. They are control-plane
-endpoints intended for cache priming, debugging, and future editing
-workflows — not the inference hot path.
+These routes expose the ``MPCacheEngine`` ``*_kv_bytes_by_tokens``
+methods (store / retrieve / lookup) to external developers over HTTP.
+They are control-plane endpoints intended for cache priming, debugging,
+and future editing workflows — not the inference hot path.
 
 The wire format is the canonical KV_2LTD layout (``[2, num_layers,
 num_tokens, hidden_dim]``) with all TP shards aggregated along the hidden
@@ -117,7 +117,7 @@ async def store(request: Request) -> dict[str, int | str]:
     payload = await request.body()
 
     try:
-        result = engine.store_bytes_by_tokens(
+        result = engine.store_kv_bytes_by_tokens(
             model_name=model_name,
             tokens=tokens,
             payload=payload,
@@ -150,7 +150,7 @@ async def retrieve(body: _LookupOrRetrieveBody, request: Request) -> Response:
     """
     engine = _engine_or_503(request)
     try:
-        result = engine.retrieve_bytes_by_tokens(
+        result = engine.retrieve_kv_bytes_by_tokens(
             model_name=body.model_name,
             tokens=body.tokens,
             cache_salt=body.cache_salt,
@@ -192,7 +192,7 @@ async def lookup(body: _LookupOrRetrieveBody, request: Request) -> JSONResponse:
     """
     engine = _engine_or_503(request)
     try:
-        result = engine.lookup_bytes_by_tokens(
+        result = engine.lookup_kv_bytes_by_tokens(
             model_name=body.model_name,
             tokens=body.tokens,
             cache_salt=body.cache_salt,

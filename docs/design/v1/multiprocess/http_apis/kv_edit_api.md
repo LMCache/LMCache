@@ -21,9 +21,9 @@ sequences, cache-salt namespacing, orchestration-layer version selection
 We add three new methods to `MPCacheEngine` (in `multiprocess/server.py`,
 the class instance held at `app.state.engine`):
 
-- `store_bytes_by_tokens(tokens: list[int], payload: bytes, *, model_name: str) -> StoreBytesResult`
-- `retrieve_bytes_by_tokens(tokens: list[int], *, model_name: str) -> RetrieveBytesResult`
-- `lookup_bytes_by_tokens(tokens: list[int], *, model_name: str) -> LookupBytesResult`
+- `store_kv_bytes_by_tokens(tokens: list[int], payload: bytes, *, model_name: str) -> StoreBytesResult`
+- `retrieve_kv_bytes_by_tokens(tokens: list[int], *, model_name: str) -> RetrieveBytesResult`
+- `lookup_kv_bytes_by_tokens(tokens: list[int], *, model_name: str) -> LookupBytesResult`
 
 These bypass the GPU connector entirely. They reuse the existing
 machinery `MPCacheEngine` already exposes as instance attributes:

@@ -215,12 +215,12 @@ class TestStoreRetrieveLookupBytes:
         tokens = _tokens_for(num_chunks=3)
         payload = _make_payload(num_chunks=3, world_size=world_size, seed=1)
 
-        store_result = engine.store_bytes_by_tokens("m", tokens, payload)
+        store_result = engine.store_kv_bytes_by_tokens("m", tokens, payload)
         assert store_result.total_chunks == 3
         assert store_result.stored_chunks == 3
         assert store_result.stored_tokens == 3 * CHUNK_SIZE
 
-        retrieve_result = engine.retrieve_bytes_by_tokens("m", tokens)
+        retrieve_result = engine.retrieve_kv_bytes_by_tokens("m", tokens)
         assert retrieve_result.hit_chunks == 3
         assert retrieve_result.hit_tokens == 3 * CHUNK_SIZE
         assert retrieve_result.payload == payload
@@ -233,11 +233,11 @@ class TestStoreRetrieveLookupBytes:
         # Store 2 chunks worth, query 4 chunks worth — only the first 2 hit.
         store_tokens = _tokens_for(num_chunks=2)
         store_payload = _make_payload(num_chunks=2, world_size=1, seed=2)
-        engine.store_bytes_by_tokens("m", store_tokens, store_payload)
+        engine.store_kv_bytes_by_tokens("m", store_tokens, store_payload)
 
         # The query starts with the same 2 chunks of tokens, then extends.
         full_tokens = list(store_tokens[: 2 * CHUNK_SIZE]) + list(range(99_000, 99_032))
-        result = engine.retrieve_bytes_by_tokens("m", full_tokens)
+        result = engine.retrieve_kv_bytes_by_tokens("m", full_tokens)
         assert result.total_chunks == 4
         assert result.hit_chunks == 2
         assert result.hit_tokens == 2 * CHUNK_SIZE
@@ -250,10 +250,10 @@ class TestStoreRetrieveLookupBytes:
 
         tokens = _tokens_for(num_chunks=2)
         payload = _make_payload(num_chunks=2, world_size=2, seed=3)
-        engine.store_bytes_by_tokens("m", tokens, payload)
+        engine.store_kv_bytes_by_tokens("m", tokens, payload)
 
-        first = engine.retrieve_bytes_by_tokens("m", tokens)
-        second = engine.retrieve_bytes_by_tokens("m", tokens)
+        first = engine.retrieve_kv_bytes_by_tokens("m", tokens)
+        second = engine.retrieve_kv_bytes_by_tokens("m", tokens)
         assert first.payload == payload
         assert second.payload == payload
         assert first.hit_chunks == 2
@@ -266,14 +266,14 @@ class TestStoreRetrieveLookupBytes:
 
         tokens = _tokens_for(num_chunks=2)
         payload = _make_payload(num_chunks=2, world_size=1, seed=4)
-        engine.store_bytes_by_tokens("m", tokens, payload)
+        engine.store_kv_bytes_by_tokens("m", tokens, payload)
 
         full_tokens = list(tokens[: 2 * CHUNK_SIZE]) + list(range(80_000, 80_032))
-        lookup = engine.lookup_bytes_by_tokens("m", full_tokens)
+        lookup = engine.lookup_kv_bytes_by_tokens("m", full_tokens)
         assert lookup.total_chunks == 4
         assert lookup.hit_chunks == 2
 
-        retrieve = engine.retrieve_bytes_by_tokens("m", full_tokens)
+        retrieve = engine.retrieve_kv_bytes_by_tokens("m", full_tokens)
         assert retrieve.hit_chunks == lookup.hit_chunks
 
     def test_multi_model_isolation(self) -> None:
@@ -283,15 +283,15 @@ class TestStoreRetrieveLookupBytes:
 
         tokens = _tokens_for(num_chunks=2)
         payload = _make_payload(num_chunks=2, world_size=1, seed=5)
-        engine.store_bytes_by_tokens("a", tokens, payload)
+        engine.store_kv_bytes_by_tokens("a", tokens, payload)
 
         # Same tokens, different model — should be a clean miss.
-        b_result = engine.retrieve_bytes_by_tokens("b", tokens)
+        b_result = engine.retrieve_kv_bytes_by_tokens("b", tokens)
         assert b_result.hit_chunks == 0
         assert b_result.payload == b""
 
         # Original model still hits.
-        a_result = engine.retrieve_bytes_by_tokens("a", tokens)
+        a_result = engine.retrieve_kv_bytes_by_tokens("a", tokens)
         assert a_result.payload == payload
 
     def test_unknown_model_raises(self) -> None:
@@ -299,11 +299,11 @@ class TestStoreRetrieveLookupBytes:
         engine = _make_engine()
         _install_resolver(engine, {"m": 1})
         with pytest.raises(KeyError):
-            engine.store_bytes_by_tokens("nope", _tokens_for(1), _make_payload(1, 1))
+            engine.store_kv_bytes_by_tokens("nope", _tokens_for(1), _make_payload(1, 1))
         with pytest.raises(KeyError):
-            engine.retrieve_bytes_by_tokens("nope", _tokens_for(1))
+            engine.retrieve_kv_bytes_by_tokens("nope", _tokens_for(1))
         with pytest.raises(KeyError):
-            engine.lookup_bytes_by_tokens("nope", _tokens_for(1))
+            engine.lookup_kv_bytes_by_tokens("nope", _tokens_for(1))
 
     def test_payload_length_mismatch_rejected(self) -> None:
         """Store rejects payloads that don't match the expected layout."""
@@ -313,7 +313,7 @@ class TestStoreRetrieveLookupBytes:
         payload = _make_payload(num_chunks=2, world_size=1)
         # Truncate by one byte — must raise.
         with pytest.raises(ValueError, match="payload length"):
-            engine.store_bytes_by_tokens("m", tokens, payload[:-1])
+            engine.store_kv_bytes_by_tokens("m", tokens, payload[:-1])
 
     def test_no_complete_chunks_returns_zero(self) -> None:
         """Token sequences shorter than one chunk produce empty results."""
@@ -322,14 +322,14 @@ class TestStoreRetrieveLookupBytes:
 
         # Below chunk_size — no whole chunks to hash.
         tokens = list(range(CHUNK_SIZE - 1))
-        store_result = engine.store_bytes_by_tokens("m", tokens, b"")
+        store_result = engine.store_kv_bytes_by_tokens("m", tokens, b"")
         assert store_result.stored_chunks == 0
 
-        retrieve_result = engine.retrieve_bytes_by_tokens("m", tokens)
+        retrieve_result = engine.retrieve_kv_bytes_by_tokens("m", tokens)
         assert retrieve_result.hit_chunks == 0
         assert retrieve_result.payload == b""
 
-        lookup_result = engine.lookup_bytes_by_tokens("m", tokens)
+        lookup_result = engine.lookup_kv_bytes_by_tokens("m", tokens)
         assert lookup_result.hit_chunks == 0
 
 
