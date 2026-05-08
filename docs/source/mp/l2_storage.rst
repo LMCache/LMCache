@@ -6,7 +6,7 @@ LMCache multiprocess mode supports a two-tier storage architecture:
 - **L1 (in-memory)** -- Fast CPU memory managed by the L1 Manager.  All KV
   cache chunks live here during active use.
 - **L2 (persistent)** -- Durable storage backends (NIXL-based or plain
-  file-system).  The StoreController asynchronously pushes data from L1
+  file-system/raw-block).  The StoreController asynchronously pushes data from L1
   to L2, and the PrefetchController loads data from L2 back into L1 on
   cache misses.
 
@@ -187,6 +187,203 @@ object is stored as a raw ``.data`` file whose name encodes the full
 
     # With O_DIRECT for bypassing page cache
     --l2-adapter '{"type": "fs", "base_path": "/data/lmcache/l2", "use_odirect": true}'
+
+``dax`` -- Device-DAX fixed-slot storage
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+An L2 adapter that maps a single Device-DAX path, such as ``/dev/dax1.0``,
+and stores KV cache objects in fixed-size slots.  This adapter is intended for
+byte-addressable memory devices such as persistent memory or CXL memory.
+
+The MP ``dax`` adapter is volatile in this release.  It keeps the key index in
+server memory and rebuilds an empty index on restart.  Old bytes may remain on
+the DAX device, but they are unreachable after the LMCache server restarts.
+
+**Required fields:**
+
+- ``device_path``: Path to the mmap-able DAX device or test file.
+- ``max_dax_size_gb``: Number of GiB to map from ``device_path``.
+- ``slot_bytes``: Fixed slot size in bytes. This must be large enough for one
+  full LMCache chunk because MP memory descriptors do not expose the
+  non-MP full-chunk size.
+
+**Optional fields:**
+
+- ``num_store_workers`` (int, default ``1``): Store worker threads.
+- ``num_lookup_workers`` (int, default ``1``): Lookup worker threads.
+- ``num_load_workers`` (int, default ``min(4, os.cpu_count())``): Load worker
+  threads.
+- ``persist_enabled`` (bool): Accepted by common L2 config parsing but has no
+  effect for ``dax`` because restart recovery is not implemented.
+
+**Configuration example:**
+
+.. code-block:: bash
+
+    --l2-adapter '{
+      "type": "dax",
+      "device_path": "/dev/dax1.0",
+      "max_dax_size_gb": 100,
+      "slot_bytes": 268435456,
+      "num_store_workers": 1,
+      "num_lookup_workers": 1,
+      "num_load_workers": 4,
+      "eviction": {
+        "eviction_policy": "LRU",
+        "trigger_watermark": 0.9,
+        "eviction_ratio": 0.1
+      }
+    }'
+
+**Current limits:**
+
+- Uses one server-owned mapped DAX path. Per-TP partitions and multi-device
+  striping are not implemented.
+- Only single-buffer objects are supported. Multi-tensor objects are rejected.
+- Capacity is slot-based, not payload-byte-based. L2 eviction and usage
+  metrics count occupied slots.
+- Lookups acquire DAX-side external locks. ``submit_unlock`` releases those
+  locks after load/retrieve completes, making entries evictable again.
+``fs_native`` -- Native C++ file-system connector
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+A file-system L2 adapter backed by the native C++ ``LMCacheFSClient``
+wrapped with ``NativeConnectorL2Adapter``.  I/O is dispatched through a
+C++ worker-thread pool with eventfd-driven completions, giving a true
+I/O queue depth on a single Python thread.
+
+**Required fields:**
+
+- ``base_path``: Directory for storing KV cache files.
+
+**Optional fields:**
+
+- ``num_workers`` (int, default ``4``, > 0): Number of C++ worker threads
+  inside the connector.  This is the real I/O queue depth -- raise to
+  push throughput on filesystems whose aggregate BW exceeds per-stream
+  BW.
+- ``relative_tmp_dir`` (str, default ``""``): Relative sub-directory for
+  temporary files during writes (atomic rename on completion).
+- ``use_odirect`` (bool, default ``false``): Bypass the page cache via
+  ``O_DIRECT``.  Required to measure real disk bandwidth.  See alignment
+  caveat below.
+- ``read_ahead_size`` (int, optional): Trigger filesystem readahead by
+  issuing a warm-up read of this many bytes at open time.
+- ``max_capacity_gb`` (float, default ``0``): Maximum L2 capacity in GB
+  for client-side usage tracking.  Default ``0`` disables tracking.
+
+.. important::
+
+   ``O_DIRECT`` has two independent alignment requirements:
+
+   1. **Length alignment.**  The transfer length must be a multiple of
+      the filesystem's block size.  The connector queries the disk block
+      size at construction time and, on each operation, checks
+      ``len % disk_block_size``.  If the length is **not** a multiple,
+      the connector silently falls back to a buffered open (no
+      ``O_DIRECT``) for that operation -- correctness is preserved but
+      you do not get true direct I/O.  To ensure ``O_DIRECT`` is
+      actually used, choose ``--chunk-size`` so that the resulting
+      per-chunk byte size is a multiple of the FS block size.  GPFS and
+      similar parallel filesystems often use large blocks (e.g. several
+      MiB).
+
+   2. **Memory-buffer alignment.**  The I/O buffer pointer itself must
+      also be aligned (typically to 4096 bytes on local disks, or to the
+      FS block size on parallel filesystems).  This is controlled by
+      ``--l1-align-bytes`` (default ``4096``) -- raise it to match the
+      FS block size when running on a filesystem with larger blocks.  If
+      the buffer is misaligned, the underlying ``read``/``write`` syscall
+      returns ``EINVAL`` (this is **not** caught by the length-fallback
+      path above and will surface as a runtime error).
+
+   If unsure, start with ``use_odirect: false`` and confirm correctness
+   before enabling ``O_DIRECT``.
+
+**Configuration examples:**
+
+.. code-block:: bash
+
+    # Basic native FS adapter
+    --l2-adapter '{"type": "fs_native", "base_path": "/data/lmcache/l2"}'
+
+    # Many worker threads for a parallel filesystem (e.g. GPFS, Lustre)
+    --l2-adapter '{"type": "fs_native", "base_path": "/data/lmcache/l2", "num_workers": 32}'
+
+    # O_DIRECT for real-disk benchmarking
+    --l2-adapter '{"type": "fs_native", "base_path": "/data/lmcache/l2", "num_workers": 32, "use_odirect": true}'
+
+**Buffer-only mode example.**  L1 acts as a pure write buffer that
+absorbs the peak burst of in-flight chunks while the C++ worker pool
+drains them to disk; nothing is retained in L1 once a store completes:
+
+.. code-block:: bash
+
+    lmcache server \
+        --host 0.0.0.0 --port 5555 \
+        --max-workers 32 \
+        --l1-size-gb 32 --l1-use-lazy \
+        --eviction-policy noop \
+        --l2-store-policy skip_l1 \
+        --l2-adapter '{"type": "fs_native", "base_path": "/data/lmcache/l2", "num_workers": 32, "use_odirect": true}'
+
+``raw_block`` -- Raw block device backed persistent storage
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+A built-in L2 adapter that stores KV objects in fixed-size slots on a raw block
+device or pre-sized file using the Rust raw-device I/O bindings. It reuses the
+existing raw-block metadata checkpoint model and writes directly into the
+caller-provided load buffers during prefetch.
+
+**Required fields:**
+
+- ``device_path``: Raw device path or pre-sized file path.
+- ``slot_bytes``: Fixed slot size in bytes. Must be aligned to ``block_align``.
+
+**Optional fields:**
+
+- ``capacity_bytes``: Optional cap on the usable device bytes. Default ``0``
+  means use the full device/file size.
+- ``use_odirect``: ``true`` or ``false`` (default ``true``).
+- ``block_align``: Device alignment in bytes (default ``4096``).
+- ``header_bytes``: Per-slot header reservation (default ``4096``).
+- ``meta_total_bytes``: Reserved metadata checkpoint region (default ``256MiB``).
+- ``meta_magic`` / ``meta_version``: Metadata checkpoint identity/version knobs.
+- ``meta_checkpoint_interval_sec`` / ``meta_idle_quiet_ms`` /
+  ``meta_enable_periodic`` / ``meta_verify_on_load``: Checkpoint and recovery
+  controls carried over from the legacy raw-block backend.
+- ``load_checkpoint_on_init``: Load an existing on-device metadata checkpoint
+  during startup (default ``true``). Set to ``false`` to start with an empty
+  in-memory index instead.
+- ``enable_zero_copy``: Try aligned direct-buffer I/O when possible.
+- ``io_engine``: Rust raw-block I/O engine. Valid values are ``"posix"``
+  (default synchronous ``pread``/``pwrite`` path), ``"io_uring"`` (direct Rust
+  io_uring syscall path).
+- ``iouring_queue_depth``: Queue depth for ``io_engine="io_uring"``.
+- ``num_store_workers`` / ``num_lookup_workers`` / ``num_load_workers``:
+  Worker-thread counts for each operation type.
+
+**Notes:**
+
+- ``raw_block`` is a server-owned MP adapter. It does **not** support
+  per-TP device-path mappings in MP mode.
+- ``raw_block`` remains ``"type": "raw_block"`` for both supported engines.
+- ``raw_block`` owns on-device slot allocation, checkpointing, and recovery
+  through ``RawBlockCore``. Slot reclamation is driven by the shared/global
+  L2 eviction controller or explicit ``delete()`` calls.
+- If ``use_odirect`` is enabled, the server's ``--l1-align-bytes`` should be
+  at least ``block_align``.
+- ``persist_enabled`` must remain ``true`` for this adapter.
+
+**Configuration examples:**
+
+.. code-block:: bash
+
+    --l2-adapter '{"type": "raw_block", "device_path": "/dev/nvme0n1", "slot_bytes": 1048576, "block_align": 4096, "header_bytes": 4096, "meta_total_bytes": 268435456, "use_odirect": true, "num_store_workers": 2, "num_lookup_workers": 1, "num_load_workers": 4}'
+
+    --l2-adapter '{"type": "raw_block", "device_path": "/dev/nvme0n1", "slot_bytes": 1048576, "io_engine": "io_uring", "iouring_queue_depth": 256, "use_odirect": true}'
+
+    --l2-adapter '{"type": "raw_block", "device_path": "/dev/nvme0n1", "slot_bytes": 1048576, "load_checkpoint_on_init": false, "eviction": {"eviction_policy": "LRU", "trigger_watermark": 0.9, "eviction_ratio": 0.1}}'
 
 ``mooncake_store`` -- Mooncake Store native connector
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -425,6 +622,14 @@ in ``storage_controllers/`` and calling ``register_store_policy()`` or
 ``register_prefetch_policy()`` at import time.  See the design doc
 ``l2_adapters/design_docs/overall.md`` for details.
 
+Serde (compression / quantization)
+----------------------------------
+
+Each adapter can optionally run a **serde** (serializer / deserializer)
+that transforms data on the way in and out of L2 — e.g. fp8 quantization
+for disk backends, or encryption for remote adapters. See :doc:`serde`
+for details and configuration.
+
 Eviction
 --------
 
@@ -531,12 +736,19 @@ drops by ``eviction_ratio``.
    * - ``mock``
      - Full support. Useful for testing eviction behaviour without
        real storage hardware.
+   * - ``raw_block``
+     - Full shared/global eviction support. ``delete`` recycles raw-block
+       slots; locked entries are skipped and retried on the next cycle.
    * - ``s3``
      - ``delete`` removes objects from the bucket and frees aggregate
        byte accounting. ``get_usage`` reports ``usage_fraction == -1.0``
        when ``max_capacity_gb`` is ``0`` (disabled); set a non-zero
        ``max_capacity_gb`` to enable the watermark-triggered eviction
        controller.
+   * - ``dax``
+     - Full support. ``delete`` removes unlocked keys from the in-memory
+       index immediately and recycles fixed slots once active read borrows
+       drain. Usage is slot-based.
    * - ``mooncake_store``
      - No eviction support (native connector adapter).
    * - ``fs``

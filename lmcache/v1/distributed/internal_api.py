@@ -168,3 +168,11 @@ class EvictionAction:
 
     keys: list[ObjectKey] = field(default_factory=list)
     """The key of the object to be evicted"""
+
+
+@dataclass(frozen=True)
+class QuotaEntry:
+    """Snapshot of a single quota registration."""
+
+    cache_salt: str
+    limit_bytes: int

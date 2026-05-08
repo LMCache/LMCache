@@ -1,14 +1,21 @@
 # `lmcache bench engine` — Design & Extension Guide
 
-**Status:** Implemented  |  **Date:** 2026-03-27
+**Status:** Implemented  |  **Date:** 2026-05-05
 
 ## Overview
 
 `lmcache bench engine` runs sustained benchmarks against an OpenAI-compatible
-inference engine. It supports multiple workload types that exercise different
+inference engine. It ships five workload types that exercise different
 caching patterns, each controlling its own request scheduling while shared
 modules handle request sending, stats collection, and real-time progress
 display.
+
+If required arguments (`--engine-url`, `--workload`, and either
+`--tokens-per-gb-kvcache` or `--lmcache-url`) are missing, the command drops
+into a guided **interactive TUI** to fill them in. `--config FILE` loads a
+previously-exported JSON config and skips the TUI; `--no-interactive` errors
+out instead of prompting; `--export-config FILE` writes the resolved config
+to JSON and exits without running the benchmark.
 
 ```bash
 # Long-document Q&A (semaphore-controlled concurrency)
@@ -24,6 +31,16 @@ lmcache bench engine --engine-url http://localhost:8000 \
 lmcache bench engine --engine-url http://localhost:8000 \
     --workload random-prefill --tokens-per-gb-kvcache 6000 \
     --rp-num-requests 100
+
+# Long-doc permutator (blended-prefix cache reuse stress test)
+lmcache bench engine --engine-url http://localhost:8000 \
+    --workload long-doc-permutator --tokens-per-gb-kvcache 6000 \
+    --ldp-num-contexts 5 --ldp-num-permutations 20
+
+# Prefix-suffix tuner (tiered KV-cache demonstrator, sequential 2-pass)
+lmcache bench engine --engine-url http://localhost:8000 \
+    --workload prefix-suffix-tuner --lmcache-url http://localhost:8080 \
+    --psf-context-length 8000 --psf-prefix-ratio 0.8 --psf-thrash 100
 ```
 
 ---
@@ -41,11 +58,19 @@ lmcache/cli/commands/bench/
     ├── stats.py                   # RequestResult, StatsCollector, FinalStats
     ├── request_sender.py          # RequestSender (async streaming)
     ├── progress.py                # ProgressMonitor (real-time terminal display)
+    ├── interactive/               # Guided TUI for missing-arg resolution
+    │   ├── __init__.py            # run_interactive() entry point
+    │   ├── schema.py              # Field schema + workload-specific items
+    │   ├── state.py               # InteractiveState (load/save JSON, merge CLI args)
+    │   ├── terminal.py            # Terminal rendering primitives
+    │   └── config.json            # Static schema for interactive prompts
     └── workloads/
         ├── __init__.py            # create_workload() factory
         ├── base.py                # BaseWorkload (ABC with run loop)
+        ├── long_doc_permutator.py # LongDocPermutatorConfig + LongDocPermutatorWorkload
         ├── long_doc_qa.py         # LongDocQAConfig + LongDocQAWorkload
         ├── multi_round_chat.py    # MultiRoundChatConfig + Session + MultiRoundChatWorkload
+        ├── prefix_suffix_tuner.py # PrefixSuffixTunerConfig + PrefixSuffixTunerWorkload
         └── random_prefill.py      # RandomPrefillConfig + RandomPrefillWorkload
 ```
 
@@ -247,7 +272,13 @@ instance, and returns it ready to `run()`.
 The orchestrator in `BenchCommand._bench_engine()` wires everything together:
 
 ```
+0. _resolve_args(args)            → argparse.Namespace
+     (a) --config FILE            → load InteractiveState, merge CLI overrides
+     (b) --no-interactive / --export-config → error if required args missing
+     (c) interactive TUI          → if any required arg is missing
+     (d) pass through             → if all required args present
 1. parse_args_to_config(args)     → EngineBenchConfig
+   (--export-config: write JSON and return without running)
 2. StatsCollector()
 3. ProgressMonitor(stats_collector, quiet)
 4. RequestSender(engine_url, model)
@@ -369,6 +400,159 @@ Tests raw prefill throughput by firing all requests simultaneously.
 - **`on_request_finished`:** No-op (stateless).
 - **Termination:** Returns `-1.0` when all tasks are complete.
 
+### 4.4 `long-doc-permutator` — Blended Cache-Reuse Stress Test
+
+Stresses **blended** KV cache reuse — not just prefix reuse — by sending
+permutations of a fixed set of context documents. Each request is:
+
+```
+[System Prompt] + [Doc_i1] + [Doc_i2] + ... + [Doc_iN]
+```
+
+where `(i1, …, iN)` is one permutation of the `N` contexts. Most permutations
+share *some* chunks with prior requests but rarely the same prefix, exercising
+chunk-level cache lookup and eviction.
+
+**Config** (`LongDocPermutatorConfig`):
+
+| Field | CLI arg | Default | Description |
+|-------|---------|---------|-------------|
+| `num_contexts` | `--ldp-num-contexts` | 5 | Number of unique context documents (`N`) |
+| `context_length` | `--ldp-context-length` | 5000 | Tokens per context |
+| `system_prompt_length` | `--ldp-system-prompt-length` | 1000 | Shared system prompt tokens (`0` disables) |
+| `num_permutations` | `--ldp-num-permutations` | 10 | Distinct permutations to send (capped at `N!`) |
+| `vocab_size` | (none — hardcoded in factory) | 8000 | Vocabulary pool size for synthetic context generation |
+| `num_inflight_requests` | `--ldp-num-inflight-requests` | 1 | Max concurrent in-flight requests |
+
+**Stress axes** (each config field tunes one):
+
+| Axis | Knob |
+|------|------|
+| Blended-context boundaries | `num_contexts` |
+| Eviction pressure | `num_permutations` |
+| Chunk homogeneity (hash collisions) | `vocab_size` |
+| Prefix domination | `system_prompt_length` |
+| Concurrency | `num_inflight_requests` |
+
+**Behavior:**
+
+- **Data generation:** Builds a deterministic vocab pool of pseudo-words,
+  generates `num_contexts` distinct contexts (each seeded independently so
+  token sequences truly diverge), and enumerates permutations.
+- **Permutation enumeration:** For small `N`, iterates `itertools.permutations`
+  and truncates. When `N!` is much larger than `num_permutations * 10`, samples
+  random permutations into a `set` to avoid exhausting an enormous search
+  space. Returns all `N!` permutations when `num_permutations >= N!`.
+- **Warmup:** A single dummy request (`max_tokens=1`) to prime the engine.
+- **Dispatch:** Semaphore-controlled — `step()` acquires the semaphore, fires
+  an async task with the next permutation, returns `0.0` for immediate
+  re-call. Once all permutations are dispatched, awaits remaining tasks via
+  `asyncio.wait(FIRST_COMPLETED)`.
+- **`on_request_finished`:** No-op (stateless).
+- **Termination:** Returns `-1.0` when the request list is exhausted and all
+  pending tasks have completed.
+
+**`run()` override:** Unlike the other workloads, `LongDocPermutatorWorkload`
+overrides `BaseWorkload.run()` to close `RequestSender`'s async HTTP client
+inside the same `asyncio.run()` call as the benchmark loop. `asyncio.run()`
+closes the loop on exit, which would orphan any open `httpx` connections;
+closing the client here ensures clean teardown. The orchestrator's subsequent
+`asyncio.run(request_sender.close())` then finds nothing to close and
+completes without error.
+
+### 4.5 `prefix-suffix-tuner` — Tiered KV-Cache Demonstrator
+
+A single sequential workload designed to be run **unchanged** across three
+LMCache configurations to demonstrate the value of each cache tier:
+
+| Baseline | LMCache config | Targeted overflow | Expected pass-2 hits |
+|----------|---------------|-------------------|----------------------|
+| 1 | vanilla vLLM (L0 only) | L0 (HBM) | none — every request a cold prefill |
+| 2 | vLLM + LMCache L1 + L2 | L1 (DRAM) | L2 prefix hits (suffix recomputed) |
+| 3 | vLLM + LMCache L1 + L2 + CacheBlend | L1 (DRAM) | L2 prefix hits + CacheBlend suffix hits |
+
+The user picks `--psf-thrash` to match the size of the tier they want to
+overflow (L0 size for Baseline 1, L1 size for Baselines 2 and 3). The
+workload itself does not need to know which baseline it is running — the
+internal `_OVERFLOW_FACTOR` (1.05) sizes the pool slightly larger than the
+named target, and sequential dispatch + LRU does the rest.
+
+`--kv-cache-volume` is unused by this workload (it remains required for
+other workloads that size themselves around a user-provided GB budget).
+
+**Request layout:**
+
+```
+[prefix_i with unique-ID][random breaker][shared suffix]
+```
+
+- `num_prefixes` distinct prefixes — each begins with `PREFIX_<8-hex-digits>`
+  so the prefix's chained block hash differs from every other prefix.
+- A **fresh random breaker** per request (32 tokens by default), defeating
+  ordinary prefix caching past the prefix boundary and preventing
+  non-CacheBlend reuse of the suffix.
+- A **single shared suffix**, deterministic and bit-identical across every
+  request — the only entry CacheBlend can reuse.
+
+**Synthetic body generation** uses a vocabulary pool of pseudo-words
+(consonant-vowel patterns + numeric suffix, e.g. `"boko42"`), shared by all
+prefixes / suffix / breakers but sampled with a *different* per-component
+RNG offset. Mirrors `long_doc_permutator`'s approach. This guarantees:
+
+- **CacheBlend correctness**: each prefix samples a different random
+  sequence, so chunk-level content fingerprints don't collide across
+  prefixes and inflate the blend hit rate. The shared suffix is the *only*
+  bit-identical chunk surface CacheBlend can reuse — which is what the
+  workload measures.
+- **Predictable token counts**: pseudo-words tokenize to ~2 BPE tokens on
+  most modern tokenizers (vs. ~3 for raw 6-digit numbers), so the actual
+  prompt length is closer to the configured `context_length`.
+
+**Config** (`PrefixSuffixTunerConfig`):
+
+| Field | CLI arg | Default | Description |
+|-------|---------|---------|-------------|
+| `context_length` | `--psf-context-length` | 8000 | Total tokens per request (prefix + breaker + suffix) |
+| `prefix_ratio` | `--psf-prefix-ratio` | 0.8 | Fraction of context allocated to the prefix; must be in (0.0, 1.0) |
+| `thrash` | `--psf-thrash` | 20.0 | **Size in GB of the targeted KV-cache tier** (L0 for Baseline 1, L1 for Baselines 2 and 3). Pool footprint is `thrash * _OVERFLOW_FACTOR` GB. |
+| `num_prefixes` | (computed) | — | `floor(thrash * _OVERFLOW_FACTOR * tokens_per_gb / prefix_tokens)` |
+| `prefix_tokens` | (computed) | — | `round(context_length * prefix_ratio)` |
+| `suffix_tokens` | (computed) | — | `context_length - prefix_tokens - breaker_tokens`; errors if `< 100` |
+| `breaker_tokens` | (hardcoded) | 32 | Random breaker length |
+| `_OVERFLOW_FACTOR` | (module constant) | 1.05 | How much to overflow the targeted tier. Hardcoded at 1.05 because the LRU invariant proves that a 5% overflow is sufficient under sequential same-order replay. |
+
+**Behavior:**
+
+- **Concurrency:** Strictly sequential, one in-flight request at a time —
+  `step()` awaits each request inline. No semaphore, no concurrent tasks.
+- **Pass 1 (warmup):** Sends each prefix once in pool order using
+  `send_warmup_request` (`max_tokens=1`). Stats are discarded by the base
+  class's `_run_async` after warmup.
+- **Pass 2 (measured):** Sends each prefix once **in identical pool order**
+  with `max_tokens=1`. These are the requests captured in final stats.
+- **Termination:** `step()` returns `-1.0` once `pass2_index` reaches
+  `num_prefixes`.
+
+**Why 1.05× is enough:** With sequential dispatch and LRU eviction in any
+single tier of capacity `K`:
+
+- After pass 1 of `N = 1.05K` prefixes, the `0.05K` oldest accesses have
+  been evicted; L1 holds prefixes `[0.05K..1.05K-1]` in LRU order.
+- Pass 2 access of prefix `0` misses (it was evicted), and serving it
+  evicts the LRU = prefix `0.05K` — *the very next prefix pass 2 will need*.
+- This pattern continues for the whole pass: every access misses the
+  targeted tier and the LRU it evicts is exactly the prefix needed next.
+
+So the workload does not need to overprovision by 2× or more; even a 5%
+overflow is sufficient to drive every measured request to the next tier
+down (Baseline 1 → cold prefill, Baseline 2/3 → L2).
+
+**Pass-1 vs pass-2 breakers:** The breaker is freshly randomized on every
+`_build_messages()` call, so pass 1 and pass 2 use different breakers per
+prefix. This makes the suffix unreachable by ordinary prefix caching even
+within a single benchmark run — exactly the case CacheBlend is designed to
+handle, and exactly what Baseline 3 should improve over Baseline 2.
+
 ---
 
 ## 5. Adding a New Workload
@@ -455,7 +639,7 @@ mw_group.add_argument("--mw-my-param", type=int, default=100, help="...")
 ```
 
 All workload-specific args must be prefixed with a short workload identifier
-(e.g., `ldqa-`, `mrc-`, `rp-`, `mw-`) to avoid name collisions.
+(e.g., `ldqa-`, `ldp-`, `mrc-`, `psf-`, `rp-`, `mw-`) to avoid name collisions.
 
 ### Step 4: Add tests
 
