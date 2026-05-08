@@ -229,7 +229,7 @@ class ConnectorBase : public IStorageConnector {
     stop_.store(true, std::memory_order_release);
     req_cv_.notify_all();
     for (auto& [key, lane] : lanes_) {
-      lane.cv.notify_all();
+      lane->cv.notify_all();
     }
 
     // Shutdown all connections (derived class specific)
@@ -242,7 +242,7 @@ class ConnectorBase : public IStorageConnector {
       }
     }
     for (auto& [key, lane] : lanes_) {
-      join_lane_workers(lane);
+      join_lane_workers(*lane);
     }
 
     // Derived cleanup that must only run after workers have stopped.
@@ -262,7 +262,7 @@ class ConnectorBase : public IStorageConnector {
       }
     }
     for (auto& [key, lane] : lanes_) {
-      clear_lane_queue(lane);
+      clear_lane_queue(*lane);
     }
     {
       std::lock_guard<std::mutex> lk(comp_mu_);
@@ -277,7 +277,11 @@ class ConnectorBase : public IStorageConnector {
   void start_workers() {
     // Start dedicated per-op lanes for configured keys.
     for (auto& [key, count] : worker_pool_config_.per_op_workers) {
-      start_lane_workers(lanes_[key], count);
+      auto& lane_ptr = lanes_[key];
+      if (!lane_ptr) {
+        lane_ptr = std::make_unique<WorkerLane>();
+      }
+      start_lane_workers(*lane_ptr, count);
     }
 
     // Start shared pool if any lane key in the registry is not configured.
@@ -435,10 +439,10 @@ class ConnectorBase : public IStorageConnector {
     auto it = lanes_.find(key);
     if (it != lanes_.end()) {
       {
-        std::lock_guard<std::mutex> lk(it->second.mu);
-        it->second.requests.push(std::move(req));
+        std::lock_guard<std::mutex> lk(it->second->mu);
+        it->second->requests.push(std::move(req));
       }
-      it->second.cv.notify_one();
+      it->second->cv.notify_one();
       return;
     }
 
@@ -681,7 +685,7 @@ class ConnectorBase : public IStorageConnector {
   std::vector<std::thread> workers_;
   // Populated only during start_workers() (single-threaded construction).
   // All subsequent accesses are reads — no lock needed in enqueue_request.
-  std::unordered_map<std::string, WorkerLane> lanes_;
+  std::unordered_map<std::string, std::unique_ptr<WorkerLane>> lanes_;
 };
 
 }  // namespace connector
