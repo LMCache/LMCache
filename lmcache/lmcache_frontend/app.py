@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Standard
+from importlib import resources
 from urllib.parse import unquote
 import argparse
 import asyncio
@@ -14,8 +15,19 @@ from fastapi import APIRouter, FastAPI, HTTPException, Request
 from fastapi.staticfiles import StaticFiles
 from starlette.responses import FileResponse, PlainTextResponse
 import httpx
-import pkg_resources  # type: ignore
 import uvicorn
+
+_PACKAGE = "lmcache.lmcache_frontend"
+
+
+def _package_resource_path(relative: str) -> str:
+    """Return absolute filesystem path for a file shipped inside the package.
+
+    Replacement for the deprecated ``pkg_resources.resource_filename``;
+    works for regular (non-zipped) installs, which is how LMCache ships.
+    """
+    return str(resources.files(_PACKAGE).joinpath(relative))
+
 
 try:
     # Local
@@ -279,9 +291,7 @@ def load_config(config_path: str | None = None) -> None:
             )
         else:
             # Use package resource path as default configuration
-            default_config_path = pkg_resources.resource_filename(
-                "lmcache.lmcache_frontend", "config.json"
-            )
+            default_config_path = _package_resource_path("config.json")
             with open(default_config_path, "r") as f:
                 _node_registry.replace(json.load(f))
             print(f"Loaded default configuration with {len(target_nodes)} target nodes")
@@ -816,9 +826,7 @@ async def serve_frontend():
 
     try:
         # Use package resource path
-        index_path = pkg_resources.resource_filename(
-            "lmcache.lmcache_frontend", "static/index.html"
-        )
+        index_path = _package_resource_path("static/index.html")
         return FileResponse(index_path)
     except Exception:
         # Development environment uses local files
@@ -909,9 +917,7 @@ def create_app():
 
     # Get static file path (prefer package resources)
     try:
-        static_path = pkg_resources.resource_filename(
-            "lmcache.lmcache_frontend", "static"
-        )
+        static_path = _package_resource_path("static")
     except Exception:
         static_path = os.path.join(os.path.dirname(__file__), "static")
 
