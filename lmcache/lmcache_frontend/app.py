@@ -7,6 +7,7 @@ import asyncio
 import json
 import os
 import threading
+import time
 
 # Third Party
 from fastapi import APIRouter, FastAPI, HTTPException, Request
@@ -371,6 +372,8 @@ async def refresh_proxy_nodes(proxy_name: str):
         child_nodes = await fetch_child_nodes_from_proxy(proxy)
         proxy["nodes"] = child_nodes
         return {"status": "success", "nodes": child_nodes}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e)) from e
 
@@ -413,6 +416,8 @@ async def add_proxy(request: Request):
 
         target_nodes.append(new_proxy)
         return {"status": "success", "message": "Proxy added"}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e)) from e
 
@@ -436,13 +441,20 @@ async def add_node_to_proxy(proxy_name: str, request: Request):
 
         proxy["nodes"].append(new_node)
         return {"status": "success", "message": "Node added to proxy"}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @router.put("/api/nodes/{node_name}")
 async def update_node(node_name: str, request: Request):
-    """Update an existing node"""
+    """Update a proxy or child node identified by ``node_name``.
+
+    Searches top-level proxies first, then children of every proxy,
+    so both direct proxies and supplier-discovered leaf nodes can be
+    updated through the same endpoint (mirrors ``proxy_request_by_name``).
+    """
     try:
         updated_node = await request.json()
         if not validate_node(updated_node):
@@ -450,27 +462,59 @@ async def update_node(node_name: str, request: Request):
 
         for i, node in enumerate(target_nodes):
             if node["name"] == node_name:
+                # Preserve existing children when the caller did not
+                # provide one; proxies are expected to keep ``nodes``.
+                if "nodes" not in updated_node and "nodes" in node:
+                    updated_node["nodes"] = node["nodes"]
                 target_nodes[i] = updated_node
                 return {"status": "success", "message": "Node updated"}
 
+        for proxy in target_nodes:
+            children = proxy.get("nodes", [])
+            for j, child in enumerate(children):
+                if child["name"] == node_name:
+                    children[j] = updated_node
+                    return {
+                        "status": "success",
+                        "message": "Child node updated",
+                    }
+
         raise HTTPException(status_code=404, detail="Node not found")
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @router.delete("/api/nodes/{node_name}")
 async def delete_node(node_name: str):
-    """Delete a node from the target list"""
+    """Delete a proxy or child node by ``node_name``.
+
+    Mirrors :func:`update_node`: matches top-level proxies first,
+    falls back to scanning children of each proxy.
+    """
     try:
         original_count = len(target_nodes)
         _node_registry.replace(
             [node for node in target_nodes if node["name"] != node_name]
         )
 
-        if len(target_nodes) == original_count:
-            raise HTTPException(status_code=404, detail="Node not found")
+        if len(target_nodes) != original_count:
+            return {"status": "success", "message": "Node deleted"}
 
-        return {"status": "success", "message": "Node deleted"}
+        for proxy in target_nodes:
+            children = proxy.get("nodes", [])
+            for idx, child in enumerate(children):
+                if child["name"] == node_name:
+                    del children[idx]
+                    return {
+                        "status": "success",
+                        "message": "Child node deleted",
+                    }
+
+        raise HTTPException(status_code=404, detail="Node not found")
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e)) from e
 
@@ -649,6 +693,8 @@ async def start_heartbeat_api(request: Request):
 
         heartbeat_service.start(heartbeat_url, initial_delay, interval)
         return {"status": "success", "message": "Heartbeat service started"}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e)) from e
 
@@ -727,12 +773,46 @@ async def initialize_nodes(node_supplier_url: str | None = None) -> None:
         load_config(args.config)
 
 
+# Minimum seconds between two supplier refreshes triggered by ``/``.
+# Each refresh fans out to every registered proxy's ``/api/nodes``
+# endpoint, so an unthrottled ``/`` would DOS both the supplier and
+# every proxy. 30s matches the default heartbeat interval.
+_SUPPLIER_REFRESH_INTERVAL_SEC = 30.0
+_supplier_last_refresh: float = 0.0
+_supplier_refresh_lock = asyncio.Lock()
+
+
+async def _maybe_refresh_from_supplier(node_supplier_url: str) -> None:
+    """Refresh the node registry from supplier, at most once per interval.
+
+    The first caller within the interval performs the refresh; other
+    concurrent callers return immediately (stale-on-read). This keeps
+    the homepage responsive even under high traffic.
+    """
+    global _supplier_last_refresh
+    now = time.monotonic()
+    if now - _supplier_last_refresh < _SUPPLIER_REFRESH_INTERVAL_SEC:
+        return
+    if _supplier_refresh_lock.locked():
+        return
+    async with _supplier_refresh_lock:
+        now = time.monotonic()
+        if now - _supplier_last_refresh < _SUPPLIER_REFRESH_INTERVAL_SEC:
+            return
+        await initialize_nodes(node_supplier_url)
+        _supplier_last_refresh = time.monotonic()
+
+
 @router.get("/")
 async def serve_frontend():
-    """Return frontend homepage"""
-    # Check if node supplier URL is configured
+    """Return frontend homepage.
+
+    When a node supplier URL is configured, trigger a throttled
+    background-style refresh so opening the homepage repeatedly does
+    not hammer the supplier or every proxy's ``/api/nodes``.
+    """
     if args.node_supplier_url:
-        await initialize_nodes(args.node_supplier_url)
+        await _maybe_refresh_from_supplier(args.node_supplier_url)
 
     try:
         # Use package resource path
@@ -774,20 +854,28 @@ async def _fetch_node_metrics(node):
 
 @router.get("/metrics")
 async def aggregated_metrics():
-    """Aggregate metrics from all nodes"""
+    """Aggregate /metrics from all leaf (child) nodes across every proxy.
+
+    Previously only nodes under the ``local_proxy`` entry were
+    aggregated, which silently returned nothing in supplier mode
+    (where proxy names follow the ``proxy_<host>_<port>`` pattern).
+    Now every proxy's ``nodes`` list is flattened.
+    """
     if not target_nodes:
         return PlainTextResponse("# No nodes configured\n", status_code=404)
 
-    # TODO(baoloongmao): Support gather all metrics
-    if isinstance(target_nodes, dict) and "local_proxy" in target_nodes:
-        nodes = target_nodes["local_proxy"]["nodes"]
-    elif isinstance(target_nodes, list):
-        proxy_node = next(
-            (n for n in target_nodes if n.get("name") == "local_proxy"), None
-        )
-        nodes = proxy_node["nodes"] if proxy_node else []
-    else:
-        nodes = []
+    nodes: list[dict] = []
+    seen: set[str] = set()
+    for proxy in target_nodes:
+        for child in proxy.get("nodes", []) or []:
+            # De-duplicate by name so the same leaf reported via
+            # multiple proxies is only scraped once.
+            name = child.get("name")
+            if name and name in seen:
+                continue
+            if name:
+                seen.add(name)
+            nodes.append(child)
 
     if not nodes:
         return PlainTextResponse(
