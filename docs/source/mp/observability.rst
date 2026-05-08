@@ -188,6 +188,17 @@ L1 Metrics
    * - ``lmcache_mp.l1_evicted_keys``
      - Counter
      - Number of keys evicted by the EvictionController.
+   * - ``lmcache_mp.l1_eviction_loop_ticks``
+     - Counter
+     - L1 eviction-loop iterations (every cycle, regardless of whether
+       the watermark was crossed). Driven by ``L1_EVICTION_LOOP_TICK``.
+   * - ``lmcache_mp.l1_eviction_loop_triggered``
+     - Counter
+     - L1 eviction-loop iterations where ``usage >= watermark`` and the
+       eviction policy actually ran. The two counters distinguish "loop
+       is alive" from "eviction fired" — important when debugging
+       short-lived benchmarks that complete faster than the 1 Hz
+       polling cycle.
 
 L1 Chunk Lifecycle Histograms
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -307,6 +318,55 @@ The ``l2_name``-labeled counters (``l2_store_completed`` and
 demand via ``rate(lmcache_mp_l2_store_completed_total{l2_name="..."}[1m])``
 (and the equivalent for loads).  No separate ``*_iops`` metric is exported;
 keeping the raw counter lets dashboard users pick their own window.
+
+Failure & Health Counters
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Health-monitoring counters emitted on the dedicated ``lmcache_mp.health``
+OTel meter. Driven by the ``L1FailureMetricsSubscriber`` and
+``L2FailureMetricsSubscriber``, which are registered automatically when
+metrics are enabled. All three counters carry ``model_name`` (extracted
+from each ``ObjectKey``) so operators can slice per-model on the
+Prometheus ``/metrics`` endpoint.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 35 15 50
+
+   * - Metric
+     - Type
+     - Description
+   * - ``lmcache_mp.l1_allocation_failure``
+     - Counter
+     - L1 memory allocation failures (OOM) during ``reserve_write``.
+       Tagged by ``during`` ∈ {``l1_store``, ``l2_prefetch``} to
+       distinguish user-initiated stores from prefetch-triggered
+       allocations, plus ``model_name``.
+   * - ``lmcache_mp.l1_read_failure``
+     - Counter
+     - L1 ``reserve_read`` failures. Tagged by ``during`` ∈
+       {``l2_store``, ``l1_retrieve``}, ``reason`` ∈ {``not_found``,
+       ``write_locked``}, plus ``model_name``. **Post-lookup anomaly
+       counter**, not a cache-miss counter — in MP mode ``reserve_read``
+       is only called after a successful lookup, so any non-zero value
+       indicates a lookup/reserve race or unexpected eviction and should
+       stay near zero in healthy operation.
+   * - ``lmcache_mp.l2_prefetch_failure``
+     - Counter
+     - Keys that L2 reported present at lookup but failed to land in L1.
+       Tagged by ``reason`` ∈ {``l1_oom``, ``not_found``} plus
+       ``model_name``. ``l1_oom`` means L1 had no room to receive the
+       prefetched object; ``not_found`` means the adapter returned no
+       data despite a positive lookup (e.g. concurrent delete).
+
+A ``reason=serde_failure`` value will be added to ``l2_prefetch_failure``
+as an additive, non-breaking extension once L2 adapters distinguish
+deserialization errors from missing objects — no dashboard migration
+needed when that lands.
+
+For the full design rationale (including which event types drive each
+counter and why ``lmcache_instance_id`` is deferred), see
+``docs/design/v1/mp_observability/METRICS.md`` in the source tree.
 
 Lookup Hit-Rate Metrics
 ~~~~~~~~~~~~~~~~~~~~~~~
@@ -506,6 +566,14 @@ Adapters with no in-flight work emit no datapoint for that scrape.
      - Bytes currently held in L1.  Rising without plateauing typically
        indicates a leak; saturating at the configured ``--l1-size-gb``
        indicates working set exceeds capacity.
+   * - ``lmcache_mp.l1_usage_ratio``
+     - ObservableGauge
+     - L1 used/total ratio (``0.0``–``1.0``), sampled at scrape time
+       from ``L1Manager.get_memory_usage()``. Returns ``0.0`` when the
+       gauge target is not yet wired up or ``total_bytes`` is zero, so
+       the callback never raises during a scrape. Compare against the
+       eviction watermark (default ``0.8``) to read whether the
+       eviction loop is below or above its trigger threshold.
    * - ``lmcache_mp.num_inflight_l2_stores``
      - ObservableGauge (attrs: ``l2_name``, ``adapter_index``)
      - L2 store tasks currently executing, per adapter.  Sustained
@@ -524,6 +592,52 @@ Adapters with no in-flight work emit no datapoint for that scrape.
        are crowding out cacheable data.  Per-adapter byte attribution
        follows each request's ``load_plan`` bitmap, so summing across
        adapters never double-counts.
+
+EventBus Self-Monitoring
+~~~~~~~~~~~~~~~~~~~~~~~~
+
+Health metrics for the EventBus itself, registered by
+``EventBusSelfMetricsSubscriber`` on the ``lmcache.event_bus`` OTel
+meter.  These metrics observe bus state directly via the ``EventBus``
+accessors and report on every OTel scrape — they are not driven by
+events, so dropping or failing subscribers cannot silence them.
+
+Use them to answer: is the EventBus keeping up with publishers, is
+anything being dropped, and are any subscriber callbacks raising?
+A non-zero ``dropped_events_total`` or a sustained non-zero
+``drain_lag_seconds`` indicates the bus is at ``--event-bus-queue-size``
+and tail-dropping; raise that flag or investigate slow subscribers.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 40 15 45
+
+   * - Metric
+     - Type
+     - Description
+   * - ``lmcache_mp.event_bus.queue_depth``
+     - ObservableGauge
+     - Events currently queued in the EventBus (``len(_queue)`` at
+       scrape time).
+   * - ``lmcache_mp.event_bus.drain_lag_seconds``
+     - ObservableGauge
+     - Seconds since the oldest queued event was published; ``0.0``
+       when empty.  Rising values mean the drain thread is falling
+       behind.
+   * - ``lmcache_mp.event_bus.dropped_events_total``
+     - ObservableCounter
+     - Cumulative events dropped because the EventBus queue was at
+       ``--event-bus-queue-size``.
+   * - ``lmcache_mp.event_bus.subscriber_exceptions``
+     - ObservableCounter (attr: ``subscriber_name``)
+     - Cumulative exceptions raised by subscriber callbacks during
+       EventBus dispatch, tagged by ``subscriber_name`` (the failing
+       callback's owning class for bound methods, or ``__qualname__``
+       for free functions).
+
+For the full design rationale and the in-process accessors that back
+each metric see ``docs/design/v1/mp_observability/METRICS.md`` and
+``docs/design/v1/mp_observability/event-bus.md`` in the source tree.
 
 Prometheus Scrape Configuration
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -604,6 +718,57 @@ View traces in any OTel-compatible backend such as **Jaeger** or
     lmcache server \
         --l1-size-gb 100 --eviction-policy LRU \
         --enable-tracing --otlp-endpoint http://localhost:4317
+
+Per-Request Hit-Rate Attributes
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Each session is wrapped in a per-request root span — ``request`` for the
+standard MP path and ``cb.request`` for the CacheBlend path — that nests
+all child spans (``mp.store``, ``mp.retrieve``, ``mp.lookup_prefetch``)
+beneath it.  When the lookup phase ends, the root span is annotated with
+three OTel attributes that summarise the request-level cache hit rate:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 25 15 60
+
+   * - Attribute
+     - OTel type
+     - Description
+   * - ``hit_tokens``
+     - ``int``
+     - Tokens served from L1+L2 (numerator).
+   * - ``requested_tokens``
+     - ``int``
+     - Chunk-aligned tokens submitted for lookup (denominator).
+   * - ``hit_rate``
+     - ``float``
+     - ``hit_tokens / requested_tokens``; ``0.0`` when the denominator is
+       zero.  Stored as a precomputed float because trace UIs (Tempo,
+       Jaeger) cannot derive it from two integer attributes at query time.
+
+The attributes are written when ``MP_LOOKUP_PREFETCH_END`` (standard MP
+path) or ``CB_LOOKUP_END`` (CacheBlend path) is processed — while the
+root span is still open.  **Store-only requests** that never call
+``lookup_prefetch_start()`` emit no end event for the lookup phase, so
+their root span will not carry these attributes.
+
+Example TraceQL queries (Grafana Tempo):
+
+.. code-block:: text
+
+    # Requests with less than 50% cache hit rate
+    { name = "request" && span.hit_rate < 0.5 }
+
+    # Full cache hits only
+    { name = "request" && span.hit_rate = 1.0 }
+
+    # Complete misses (lookup ran but nothing was cached)
+    { name = "request" && span.requested_tokens > 0 && span.hit_tokens = 0 }
+
+For the full event-to-span mapping and the registry pattern that links
+child spans back to the root see
+``docs/design/observability/request-event-span.md`` in the source tree.
 
 .. _trace-recording:
 

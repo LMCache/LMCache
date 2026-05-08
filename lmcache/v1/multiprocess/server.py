@@ -5,7 +5,6 @@ from functools import partial
 from itertools import islice
 from typing import Generator
 import argparse
-import ctypes
 import math
 import threading
 import time
@@ -134,41 +133,21 @@ def _bytes_to_tensor(
 
 def _tensor_to_bytes(t: torch.Tensor) -> bytes:
     """Materialize a contiguous tensor as bytes (dtype-agnostic)."""
-    t = t.contiguous()
-    nbytes = t.numel() * t.element_size()
-    return bytes((ctypes.c_ubyte * nbytes).from_address(t.data_ptr()))
+    return t.contiguous().view(torch.uint8).numpy().tobytes()
 
 
-def _copy_tensor_into_memory_obj(t: torch.Tensor, memory_obj: MemoryObj) -> None:
-    """Copy ``t``'s elements into ``memory_obj``'s buffer via ``Tensor.copy_``.
-
-    Going through a tensor view sidesteps a format mismatch on
-    ``MemoryObj.byte_array``: that property exposes a memoryview of format
-    ``<B``, which Python rejects for slice assignment from bytes.
-    """
-    nbytes = t.numel() * t.element_size()
-    expected = memory_obj.get_size()
-    if nbytes != expected:
-        raise ValueError(
-            f"shard byte length {nbytes} does not match destination {expected}"
-        )
-    mv = memoryview((ctypes.c_ubyte * nbytes).from_address(memory_obj.data_ptr))
-    torch.frombuffer(mv, dtype=t.dtype).reshape(t.shape).copy_(t)
-
-
-def _read_memory_obj_as_tensor(
+def _memory_obj_tensor(
     memory_obj: MemoryObj,
     shape: tuple[int, int, int, int] | torch.Size,
     dtype: torch.dtype,
 ) -> torch.Tensor:
-    """Return a tensor view over ``memory_obj``'s buffer (no copy).
-
-    The view aliases ``memory_obj``'s memory; the caller must consume it
-    before the underlying ``MemoryObj`` is released.
-    """
-    nbytes = memory_obj.get_size()
-    mv = memoryview((ctypes.c_ubyte * nbytes).from_address(memory_obj.data_ptr))
-    return torch.frombuffer(mv, dtype=dtype).reshape(tuple(shape))
+    """Return the shaped tensor view exposed by ``memory_obj``."""
+    tensor = memory_obj.tensor
+    if tensor is None:
+        raise ValueError("bytes-level KV access requires tensor-backed memory")
+    if tensor.dtype != dtype:
+        raise ValueError(f"memory dtype {tensor.dtype} does not match {dtype}")
+    return tensor.reshape(tuple(shape))
 
 
 def _get_single_group_layout(
@@ -337,6 +316,14 @@ class MPCacheEngine:
             layout_hints: See :class:`LayoutHints`.  Forwarded to
                 :class:`GPUCacheContext` for GPU KV format detection.
         """
+        if instance_id in self.gpu_contexts:
+            logger.warning(
+                "Instance %s's KV cache is already registered, "
+                "skipping the new registration",
+                instance_id,
+            )
+            return
+
         gpu_context = GPUCacheContext(
             kv_caches,
             self.chunk_size,
@@ -844,7 +831,11 @@ class MPCacheEngine:
                     d_start = worker_id * d_per_worker
                     d_end = d_start + d_per_worker
                     shard = payload_tensor[:, :, t_start:t_end, d_start:d_end]
-                    _copy_tensor_into_memory_obj(shard, memory_obj)
+                    _memory_obj_tensor(
+                        memory_obj,
+                        per_shard_shape,
+                        per_shard_dtype,
+                    ).copy_(shard)
                     written_keys.append(obj_key)
         finally:
             if reserved:
@@ -948,7 +939,7 @@ class MPCacheEngine:
                     t_end = t_start + self.chunk_size
                     d_start = worker_id * d_per_worker
                     d_end = d_start + d_per_worker
-                    shard_tensor = _read_memory_obj_as_tensor(
+                    shard_tensor = _memory_obj_tensor(
                         memory_obj,
                         per_shard_shape,
                         per_shard_dtype,

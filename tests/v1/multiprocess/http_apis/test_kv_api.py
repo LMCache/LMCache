@@ -19,7 +19,6 @@ along the token dim.
 
 # Standard
 from typing import cast
-import ctypes
 
 # Third Party
 from fastapi import FastAPI
@@ -148,8 +147,7 @@ def _make_payload(num_chunks: int, world_size: int, seed: int = 0) -> bytes:
         (2, NUM_LAYERS, num_chunks * CHUNK_SIZE, full_hidden),
         dtype=DTYPE,
     )
-    nbytes = t.numel() * t.element_size()
-    return bytes((ctypes.c_ubyte * nbytes).from_address(t.contiguous().data_ptr()))
+    return t.contiguous().view(torch.uint8).numpy().tobytes()
 
 
 def _tokens_for(num_chunks: int, seed: int = 0) -> list[int]:

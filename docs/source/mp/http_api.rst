@@ -91,6 +91,19 @@ compatibility with the vLLM-embedded API server.
      - ``/api/kv/lookup``
      - Probe the cached-prefix length for a token sequence (no payload).
    * - GET
+     - ``/api/quota``
+     - List every registered ``cache_salt`` quota with live usage.
+   * - PUT
+     - ``/api/quota/{cache_salt}``
+     - Set or update the quota (in GB) for a ``cache_salt``.
+   * - GET
+     - ``/api/quota/{cache_salt}``
+     - Read the quota and live usage for a single ``cache_salt``.
+   * - DELETE
+     - ``/api/quota/{cache_salt}``
+     - Remove a ``cache_salt``'s quota entry (its data is evicted next
+       cycle).
+   * - GET
      - ``/conf``
      - Dump merged server configurations (mp, storage_manager,
        observability).
@@ -298,51 +311,21 @@ The request body is ignored.
 Bytes-Level KV Cache Access
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-The ``/api/kv/*`` endpoints expose direct read and write access to the
-KV cache bytes addressed by a token sequence. They are intended for ML
-developers, orchestration layers, and debugging — for example, priming
-the cache from an offline source, snapshotting a sequence's KV cache for
-inspection, or building higher-level editing workflows on top.
+The ``/api/kv/*`` endpoints expose bytes-level KV cache access for cache
+priming, debugging, and future editing workflows. They are not on the
+inference path; vLLM continues to use the ZMQ protocol.
 
-These endpoints are **not** on the inference data path. Inference traffic
-continues to flow over the ZMQ protocol; vLLM never calls these routes.
-
-Wire format
-^^^^^^^^^^^
-
-The KV cache payload is a contiguous ``KV_2LTD`` tensor with shape:
-
-.. code-block:: text
-
-    [2, num_layers, num_tokens, hidden_dim]
-
-serialized as raw bytes in row-major order. Notes:
-
-- ``num_tokens`` is the number of complete chunks times the engine's
-  ``chunk_size``. Trailing tokens that do not form a full chunk are
-  ignored (the engine only stores chunk-aligned data).
-- ``hidden_dim`` is the **full** hidden dimension of the model — the
-  un-sharded value. The server transparently splits the bytes across
-  TP workers along ``D``; clients do not see TP topology. For MLA
-  models, ``hidden_dim`` corresponds to the single shared shard
-  (registered ``world_size`` is ``1``).
-- ``dtype`` is whatever the registered model uses (commonly
-  ``bfloat16`` or ``fp16``); the payload byte length must match exactly.
-
-Routing metadata (``model_name``, ``tokens``, optional ``cache_salt``)
-identifies which model and token sequence the payload belongs to.
-``model_name`` must match a model that has registered its KV cache with
-the MP server; you can confirm this via ``GET /api/status``.
+Payloads are raw contiguous ``KV_2LTD`` bytes with shape
+``[2, num_layers, num_tokens, hidden_dim]`` in row-major order.
+``num_tokens`` is the complete-chunk prefix only, ``hidden_dim`` is the
+full unsharded hidden dimension, and ``dtype`` is the registered model's
+KV dtype. The v1 wire format supports a single KV layer group.
 
 ``POST /api/kv/store``
 ^^^^^^^^^^^^^^^^^^^^^^
 
-Store KV cache bytes for the given token sequence.
-
-The request body is the raw KV payload in the wire format above.
-Routing metadata travels in **headers** so that the body remains a
-single binary blob — this avoids multipart parsing for large (hundreds
-of MB) payloads.
+Store KV cache bytes for a token sequence. The body is the raw KV
+payload; routing metadata is carried in headers.
 
 .. list-table::
    :header-rows: 1
@@ -377,206 +360,23 @@ of MB) payloads.
       "stored_chunks": 3
     }
 
-``stored_chunks`` may be less than ``total_chunks`` if the L1 backend
-could not reserve some keys (e.g. capacity pressure). Trailing tokens
-that do not form a full chunk are excluded from ``total_chunks``.
-
-**Errors:**
-
-- ``400`` if a required header is missing/malformed, the model is not
-  registered, or the payload length does not match the expected
-  ``total_chunks * world_size * per_shard_byte_size``.
-- ``503`` if the engine is not yet initialized.
-
-**Example (curl, small file):**
-
-.. code-block:: bash
-
-    # Assume kv_payload.bin holds [2, L, T, D] bytes for tokens 0..T-1.
-    TOKENS=$(seq -s, 0 767)  # 768 tokens = 3 chunks @ chunk_size=256
-
-    curl -s -X POST http://localhost:8080/api/kv/store \
-        -H "Content-Type: application/x-lmcache-kv; v=1" \
-        -H "X-LMCache-Model-Name: meta-llama/Llama-3.1-8B-Instruct" \
-        -H "X-LMCache-Tokens: $TOKENS" \
-        --data-binary @kv_payload.bin
-
-**Example (Python helper):**
-
-.. code-block:: python
-
-    import torch
-    import requests
-
-    def store_kv(
-        base_url: str,
-        model_name: str,
-        tokens: list[int],
-        kv_2ltd: torch.Tensor,        # shape [2, num_layers, T, hidden_dim]
-        *,
-        cache_salt: str = "",
-    ) -> dict:
-        """Upload a KV_2LTD tensor for ``tokens`` to LMCache.
-
-        ``kv_2ltd`` must be CPU, contiguous, and its T dim must equal
-        ``len(tokens) // chunk_size * chunk_size``.
-        """
-        payload = bytes(kv_2ltd.contiguous().view(torch.uint8).numpy())
-        headers = {
-            "Content-Type": "application/x-lmcache-kv; v=1",
-            "X-LMCache-Model-Name": model_name,
-            "X-LMCache-Tokens": ",".join(str(t) for t in tokens),
-        }
-        if cache_salt:
-            headers["X-LMCache-Cache-Salt"] = cache_salt
-        r = requests.post(f"{base_url}/api/kv/store", data=payload, headers=headers)
-        r.raise_for_status()
-        return r.json()
-
-    # Example call:
-    tokens = list(range(768))
-    kv = torch.randn(2, 32, 768, 4096, dtype=torch.bfloat16)
-    print(store_kv("http://localhost:8080",
-                   "meta-llama/Llama-3.1-8B-Instruct", tokens, kv))
+``stored_chunks`` is the leading complete prefix that landed; it may be
+less than ``total_chunks`` under write conflicts or capacity pressure.
 
 ``POST /api/kv/retrieve``
 ^^^^^^^^^^^^^^^^^^^^^^^^^
 
-Retrieve the bytes for the longest cached prefix of ``tokens``.
-
-The request body is JSON; the response body is the raw KV payload in
-the wire format above. Hit metadata is exposed in response headers
-because the body is binary.
-
-**Request body:**
-
-.. list-table::
-   :header-rows: 1
-   :widths: 25 15 60
-
-   * - Field
-     - Required
-     - Description
-   * - ``model_name``
-     - yes
-     - Registered model name.
-   * - ``tokens``
-     - yes
-     - List of token IDs to address.
-   * - ``cache_salt``
-     - no
-     - Per-namespace isolation salt; must match the salt used at store.
-
-**Response headers (always present):**
-
-.. list-table::
-   :header-rows: 1
-   :widths: 35 65
-
-   * - Header
-     - Meaning
-   * - ``X-LMCache-Hit-Tokens``
-     - Number of tokens covered by the returned bytes.
-   * - ``X-LMCache-Hit-Chunks``
-     - Number of chunks present in the response.
-   * - ``X-LMCache-Total-Tokens``
-     - Token count for the whole-chunk prefix of the input.
-   * - ``X-LMCache-Total-Chunks``
-     - Total whole-chunk count in the input.
-
-**Response codes:**
-
-- ``200`` with binary body: at least one chunk hit. The body shape is
-  ``[2, num_layers, hit_tokens, hidden_dim]``.
-- ``404`` with empty body: nothing in the requested sequence is cached.
-- ``400`` if ``model_name`` is not registered.
-- ``503`` if the engine is not yet initialized.
-
-This endpoint is **non-destructive**: the cache is unchanged regardless
-of any ``remove_after_retrieve`` engine setting.
-
-**Example (curl):**
-
-.. code-block:: bash
-
-    cat <<'EOF' > /tmp/req.json
-    {
-      "model_name": "meta-llama/Llama-3.1-8B-Instruct",
-      "tokens": [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31]
-    }
-    EOF
-
-    curl -sS -X POST http://localhost:8080/api/kv/retrieve \
-        -H "Content-Type: application/json" \
-        -D /tmp/headers.txt \
-        -o /tmp/kv_payload.bin \
-        --data-binary @/tmp/req.json
-
-    grep -i '^X-LMCache-' /tmp/headers.txt
-    ls -l /tmp/kv_payload.bin
-
-**Example (Python helper):**
-
-.. code-block:: python
-
-    import torch
-    import requests
-
-    def retrieve_kv(
-        base_url: str,
-        model_name: str,
-        tokens: list[int],
-        *,
-        num_layers: int,
-        hidden_dim: int,
-        dtype: torch.dtype,
-        cache_salt: str = "",
-    ) -> tuple[torch.Tensor | None, dict[str, int]]:
-        """Fetch the cached KV_2LTD prefix for ``tokens``.
-
-        Returns ``(tensor, meta)``: ``tensor`` has shape
-        ``[2, num_layers, meta['hit_tokens'], hidden_dim]`` when there
-        was a hit, ``None`` on a clean miss.
-        """
-        body = {"model_name": model_name, "tokens": tokens, "cache_salt": cache_salt}
-        r = requests.post(f"{base_url}/api/kv/retrieve", json=body)
-        meta = {
-            "hit_tokens": int(r.headers.get("X-LMCache-Hit-Tokens", "0")),
-            "hit_chunks": int(r.headers.get("X-LMCache-Hit-Chunks", "0")),
-            "total_tokens": int(r.headers.get("X-LMCache-Total-Tokens", "0")),
-            "total_chunks": int(r.headers.get("X-LMCache-Total-Chunks", "0")),
-        }
-        if r.status_code == 404 or not r.content:
-            return None, meta
-        r.raise_for_status()
-        flat_u8 = torch.frombuffer(bytearray(r.content), dtype=torch.uint8)
-        tensor = flat_u8.view(dtype).reshape(
-            2, num_layers, meta["hit_tokens"], hidden_dim
-        )
-        return tensor, meta
-
-    # Example call:
-    kv, meta = retrieve_kv(
-        "http://localhost:8080",
-        "meta-llama/Llama-3.1-8B-Instruct",
-        tokens=list(range(768)),
-        num_layers=32, hidden_dim=4096, dtype=torch.bfloat16,
-    )
-    if kv is None:
-        print("miss", meta)
-    else:
-        print("hit", meta, "tensor shape", tuple(kv.shape))
+Retrieve raw KV bytes for the longest cached prefix. The request body is
+JSON with ``model_name``, ``tokens``, and optional ``cache_salt``. A hit
+returns ``200`` with a binary body and these headers:
+``X-LMCache-Hit-Tokens``, ``X-LMCache-Hit-Chunks``,
+``X-LMCache-Total-Tokens``, and ``X-LMCache-Total-Chunks``. A miss
+returns ``404`` with the same metadata headers and an empty body.
 
 ``POST /api/kv/lookup``
 ^^^^^^^^^^^^^^^^^^^^^^^
 
-Probe how much of a token sequence is currently cached, without
-materializing the payload. Useful for clients that want to decide
-whether the bandwidth cost of a full retrieve is worth it, or to
-confirm that a prior store landed.
-
-The request body matches ``/api/kv/retrieve`` (JSON with ``model_name``,
-``tokens``, optional ``cache_salt``).
+Probe the cached-prefix length without moving payload bytes.
 
 **Response** (``200 OK``):
 
@@ -589,35 +389,111 @@ The request body matches ``/api/kv/retrieve`` (JSON with ``model_name``,
       "hit_chunks": 2
     }
 
-**Errors:**
+All ``/api/kv/*`` endpoints return ``400`` for unknown models or invalid
+metadata and ``503`` when the engine is not initialized.
 
-- ``400`` if ``model_name`` is not registered.
-- ``503`` if the engine is not yet initialized.
+.. _mp-http-quota-api:
 
-**Example (curl):**
+``/api/quota`` - per-``cache_salt`` quota management
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+These endpoints manage the per-``cache_salt`` storage budgets consumed by
+the ``IsolatedLRU`` eviction policy (selected via
+``--eviction-policy IsolatedLRU``). Quotas are **soft**: setting a limit
+does not reject writes - any over-budget ``cache_salt`` is evicted at
+the next eviction cycle (~1 s).
+A ``cache_salt`` with no registered quota has an effective limit of
+``0`` bytes, so its data is cleared next cycle (allowlist semantics).
+
+These endpoints are no-ops on engines that did not start with
+``--eviction-policy IsolatedLRU``: the ``QuotaManager`` is still
+present, but the LRU policy ignores the registered quotas.
+
+**URL escaping for the empty salt.** ``cache_salt=""`` (un-salted /
+anonymous traffic) cannot appear in a URL path parameter, so the API
+accepts the sentinel ``_default`` in its place. ``PUT /api/quota/_default``
+sets the quota for ``cache_salt=""``. A user that legitimately stores
+data with ``cache_salt="_default"`` cannot be managed via this HTTP API
+distinctly from anonymous traffic - both map to the same path parameter;
+pick any other value (e.g. ``"default"``) to disambiguate.
+
+``PUT /api/quota/{cache_salt}``
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Create or update a quota.
+
+**Body:** ``{"limit_gb": <float>}`` (required, finite, non-negative).
+
+**Response** (``200 OK``):
+
+.. code-block:: json
+
+    {"cache_salt": "alice", "limit_gb": 10.0, "status": "ok"}
+
+**Errors:** ``400`` for malformed JSON, missing ``limit_gb``, non-numeric
+``limit_gb``, ``nan`` / ``inf``, or negative values; ``503`` if the
+engine is not initialized.
+
+**Example:**
 
 .. code-block:: bash
 
-    curl -sS -X POST http://localhost:8080/api/kv/lookup \
-        -H "Content-Type: application/json" \
-        --data '{"model_name":"meta-llama/Llama-3.1-8B-Instruct","tokens":[0,1,2,3,4,5,6,7]}' \
-      | jq
+    curl -s -X PUT http://localhost:8080/api/quota/alice \
+        -H 'Content-Type: application/json' \
+        -d '{"limit_gb": 10.0}'
 
-**Example (Python):**
+``GET /api/quota/{cache_salt}``
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-.. code-block:: python
+Read the current quota and live usage for one ``cache_salt``.
 
-    import requests
+**Response** (``200 OK``):
 
-    r = requests.post(
-        "http://localhost:8080/api/kv/lookup",
-        json={
-            "model_name": "meta-llama/Llama-3.1-8B-Instruct",
-            "tokens": list(range(768)),
-        },
-    )
-    r.raise_for_status()
-    print(r.json())   # {'total_tokens': 768, 'total_chunks': 3, 'hit_tokens': 512, 'hit_chunks': 2}
+.. code-block:: json
+
+    {
+      "cache_salt": "alice",
+      "limit_gb": 10.0,
+      "current_usage_gb": 2.137,
+      "exists": true
+    }
+
+``exists`` is ``false`` when no quota was ever registered for this
+``cache_salt`` (``limit_gb`` is then ``0.0`` and ``current_usage_gb``
+reflects whatever bytes are currently cached for that salt - those bytes
+will evict next cycle under ``IsolatedLRU``).
+
+``DELETE /api/quota/{cache_salt}``
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Remove a ``cache_salt``'s quota entry. Any bytes still cached under this
+``cache_salt`` become over-budget on the next eviction cycle (effective
+limit drops to ``0``) and will be evicted.
+
+**Response** (``200 OK``):
+
+.. code-block:: json
+
+    {"cache_salt": "alice", "status": "removed"}
+
+When no quota was registered for the given ``cache_salt``, the response
+is ``{"cache_salt": "...", "status": "not_found"}`` (still ``200 OK``).
+
+``GET /api/quota``
+^^^^^^^^^^^^^^^^^^
+
+List every registered quota alongside its live usage.
+
+**Response** (``200 OK``):
+
+.. code-block:: json
+
+    {
+      "users": {
+        "alice": {"limit_gb": 10.0, "current_usage_gb": 2.137},
+        "bob":   {"limit_gb":  4.0, "current_usage_gb": 0.812}
+      }
+    }
 
 ``GET /conf``
 ~~~~~~~~~~~~~
