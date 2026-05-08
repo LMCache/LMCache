@@ -171,6 +171,46 @@ def _read_memory_obj_as_tensor(
     return torch.frombuffer(mv, dtype=dtype).reshape(tuple(shape))
 
 
+def _get_single_group_layout(
+    layout_desc: MemoryLayoutDesc,
+) -> tuple[torch.Size, torch.dtype]:
+    """Return the only supported group layout for the bytes API.
+
+    The current bytes wire format has no per-group framing. Rejecting
+    multi-group layouts before storage locks are acquired keeps the v1
+    contract small and avoids exposing partial/corrupt objects.
+    """
+    if len(layout_desc.shapes) != 1:
+        raise ValueError(
+            "bytes-level KV access currently supports a single KV layer group; "
+            f"got {len(layout_desc.shapes)}"
+        )
+    shape = layout_desc.shapes[0]
+    if len(shape) != 4:
+        raise ValueError(
+            "bytes-level KV access expects KV_2LTD tensors with 4 dimensions; "
+            f"got shape {tuple(shape)}"
+        )
+    return shape, layout_desc.dtypes[0]
+
+
+def _count_leading_complete_chunks(
+    obj_keys: list[ObjectKey],
+    written_keys: set[ObjectKey],
+    world_size: int,
+) -> int:
+    """Count leading chunks where every worker shard is present."""
+    stored_chunks = 0
+    for chunk_start in range(0, len(obj_keys), world_size):
+        chunk_keys = obj_keys[chunk_start : chunk_start + world_size]
+        if len(chunk_keys) != world_size:
+            break
+        if not all(obj_key in written_keys for obj_key in chunk_keys):
+            break
+        stored_chunks += 1
+    return stored_chunks
+
+
 def get_layout_desc(gpu_context: GPUCacheContext, num_tokens: int) -> MemoryLayoutDesc:
     """Get the memory layout description for a given GPU context and number of tokens.
 
@@ -758,8 +798,7 @@ class MPCacheEngine:
         if total_chunks == 0:
             return StoreBytesResult(0, 0, 0, 0)
 
-        per_shard_shape = layout_desc.shapes[0]
-        per_shard_dtype = layout_desc.dtypes[0]
+        per_shard_shape, per_shard_dtype = _get_single_group_layout(layout_desc)
         per_shard_bytes = math.prod(per_shard_shape) * per_shard_dtype.itemsize
         expected = total_chunks * world_size * per_shard_bytes
         if len(payload) != expected:
@@ -792,27 +831,30 @@ class MPCacheEngine:
 
         reserved = self.storage_manager.reserve_write(obj_keys, layout_desc, "all")
 
-        stored_chunks_per_worker = [0] * world_size
         written_keys: list[ObjectKey] = []
-        for chunk_idx in range(total_chunks):
-            for worker_id in range(world_size):
-                obj_key = obj_keys[chunk_idx * world_size + worker_id]
-                memory_obj = reserved.get(obj_key)
-                if memory_obj is None:
-                    continue
-                t_start = chunk_idx * self.chunk_size
-                t_end = t_start + self.chunk_size
-                d_start = worker_id * d_per_worker
-                d_end = d_start + d_per_worker
-                shard = payload_tensor[:, :, t_start:t_end, d_start:d_end]
-                _copy_tensor_into_memory_obj(shard, memory_obj)
-                stored_chunks_per_worker[worker_id] += 1
-                written_keys.append(obj_key)
+        try:
+            for chunk_idx in range(total_chunks):
+                for worker_id in range(world_size):
+                    obj_key = obj_keys[chunk_idx * world_size + worker_id]
+                    memory_obj = reserved.get(obj_key)
+                    if memory_obj is None:
+                        continue
+                    t_start = chunk_idx * self.chunk_size
+                    t_end = t_start + self.chunk_size
+                    d_start = worker_id * d_per_worker
+                    d_end = d_start + d_per_worker
+                    shard = payload_tensor[:, :, t_start:t_end, d_start:d_end]
+                    _copy_tensor_into_memory_obj(shard, memory_obj)
+                    written_keys.append(obj_key)
+        finally:
+            if reserved:
+                self.storage_manager.finish_write(list(reserved.keys()))
 
-        self.storage_manager.finish_write(written_keys)
-
-        # A chunk is "fully stored" iff every worker shard for it landed.
-        stored_chunks = min(stored_chunks_per_worker) if stored_chunks_per_worker else 0
+        stored_chunks = _count_leading_complete_chunks(
+            obj_keys,
+            set(written_keys),
+            world_size,
+        )
         return StoreBytesResult(
             total_tokens=total_tokens,
             total_chunks=total_chunks,
@@ -852,6 +894,7 @@ class MPCacheEngine:
         if total_chunks == 0:
             return RetrieveBytesResult(b"", 0, 0, 0, 0)
 
+        per_shard_shape, per_shard_dtype = _get_single_group_layout(layout_desc)
         ipc_key = IPCCacheEngineKey(
             model_name=model_name,
             world_size=world_size,
@@ -873,12 +916,14 @@ class MPCacheEngine:
         total_hit_keys = _wait_prefetch(self.storage_manager, handle)
         hit_chunks = total_hit_keys // world_size
         hit_tokens = hit_chunks * self.chunk_size
+        locked_obj_keys = obj_keys[:total_hit_keys]
         if hit_chunks == 0:
+            if locked_obj_keys:
+                self.storage_manager.finish_read_prefetched(locked_obj_keys)
             return RetrieveBytesResult(b"", total_tokens, total_chunks, 0, 0)
 
-        hit_obj_keys = obj_keys[: hit_chunks * world_size]
-        per_shard_shape = layout_desc.shapes[0]
-        per_shard_dtype = layout_desc.dtypes[0]
+        hit_obj_keys = locked_obj_keys[: hit_chunks * world_size]
+        remainder_obj_keys = locked_obj_keys[len(hit_obj_keys) :]
         d_per_worker = per_shard_shape[3]
         out_shape = (
             per_shard_shape[0],
@@ -888,7 +933,7 @@ class MPCacheEngine:
         )
         output = torch.empty(out_shape, dtype=per_shard_dtype)
 
-        retrieved_chunks = 0
+        read_succeeded = False
         try:
             with self.storage_manager.read_prefetched_results(
                 hit_obj_keys
@@ -909,10 +954,12 @@ class MPCacheEngine:
                         per_shard_dtype,
                     )
                     output[:, :, t_start:t_end, d_start:d_end] = shard_tensor
-                retrieved_chunks = hit_chunks
+                read_succeeded = True
         finally:
-            if retrieved_chunks:
-                self.storage_manager.finish_read_prefetched(hit_obj_keys)
+            if read_succeeded:
+                self.storage_manager.finish_read_prefetched(locked_obj_keys)
+            elif remainder_obj_keys:
+                self.storage_manager.finish_read_prefetched(remainder_obj_keys)
 
         payload = _tensor_to_bytes(output)
         return RetrieveBytesResult(
@@ -951,6 +998,7 @@ class MPCacheEngine:
         if total_chunks == 0:
             return LookupBytesResult(0, 0, 0, 0)
 
+        _get_single_group_layout(layout_desc)
         ipc_key = IPCCacheEngineKey(
             model_name=model_name,
             world_size=world_size,

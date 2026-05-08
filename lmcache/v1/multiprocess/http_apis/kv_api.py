@@ -160,6 +160,8 @@ async def retrieve_kv(body: _LookupOrRetrieveBody, request: Request) -> Response
             status_code=400,
             detail=f"model_name {body.model_name!r} is not registered with this engine",
         ) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     headers = {
         _HEADER_HIT_TOKENS: str(result.hit_tokens),
@@ -200,6 +202,8 @@ async def lookup_kv(body: _LookupOrRetrieveBody, request: Request) -> JSONRespon
             status_code=400,
             detail=f"model_name {body.model_name!r} is not registered with this engine",
         ) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     return JSONResponse(
         {
