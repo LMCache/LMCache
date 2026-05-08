@@ -906,17 +906,21 @@ class PrometheusLogger:
         self._histograms.append(histogram)
         return histogram
 
+    @staticmethod
+    def _ensure_multiprocess_dir() -> None:
+        multiprocess_dir = os.environ.get("PROMETHEUS_MULTIPROC_DIR")
+        if not multiprocess_dir:
+            multiprocess_dir = "/tmp/lmcache_prometheus"
+            os.environ["PROMETHEUS_MULTIPROC_DIR"] = multiprocess_dir
+        os.makedirs(multiprocess_dir, exist_ok=True)
+
     def __init__(
         self,
         metadata: LMCacheMetadata,
         config: Optional["LMCacheEngineConfig"] = None,
     ):
         # Ensure PROMETHEUS_MULTIPROC_DIR is set before any metric registration
-        if "PROMETHEUS_MULTIPROC_DIR" not in os.environ:
-            default_dir = "/tmp/lmcache_prometheus"
-            os.environ["PROMETHEUS_MULTIPROC_DIR"] = default_dir
-            if not os.path.exists(default_dir):
-                os.makedirs(default_dir, exist_ok=True)
+        PrometheusLogger._ensure_multiprocess_dir()
 
         self.metadata = metadata
         self.config = config
@@ -1484,6 +1488,7 @@ class PrometheusLogger:
         setattr(self, metric_attr, gauge.labels(**self.labels))
 
     def _bind_dynamic_metric_children(self) -> None:
+        PrometheusLogger._ensure_multiprocess_dir()
         for metric_attr, gauge in self._dynamic_gauge_collectors.items():
             setattr(self, metric_attr, gauge.labels(**self.labels))
 
