@@ -287,6 +287,21 @@ class RustRawBlockBackend(StoragePluginInterface):
             ),
             io_engine=io_engine,
             iouring_queue_depth=iouring_queue_depth,
+            meta_incremental_enabled=bool(
+                extra.get("rust_raw_block.meta_incremental_enabled", True)
+            ),
+            meta_full_checkpoint_interval_sec=int(
+                extra.get("rust_raw_block.meta_full_checkpoint_interval_sec", 600)
+            ),
+            meta_full_checkpoint_max_deltas=int(
+                extra.get("rust_raw_block.meta_full_checkpoint_max_deltas", 1024)
+            ),
+            meta_delta_high_watermark_pct=int(
+                extra.get("rust_raw_block.meta_delta_high_watermark_pct", 90)
+            ),
+            meta_base_copy_bytes=int(
+                extra.get("rust_raw_block.meta_base_copy_bytes", 0)
+            ),
         )
 
     def _warn_if_loaded_metadata_looks_cross_rank(self) -> None:

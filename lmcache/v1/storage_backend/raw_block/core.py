@@ -37,7 +37,17 @@ logger = init_logger(__name__)
 
 _DEFAULT_META_MAGIC = b"LMCIDX01"
 _DEFAULT_META_VERSION = 1
-_META_HEADER_STRUCT = struct.Struct("<8sIQQI")
+_META_VERSION_V1 = 1
+_META_VERSION_V2 = 2
+_META_HEADER_V1_STRUCT = struct.Struct("<8sIQQI")
+_META_HEADER_V2_STRUCT = struct.Struct("<8sIQQIQQ")
+_DELTA_RECORD_MAGIC = b"LMCD"
+_DELTA_RECORD_HEADER_STRUCT = struct.Struct("<4sIQQIIIII")
+_DELTA_RECORD_VERSION = 1
+# Default share of meta_total_bytes given to each base mirror in v2 layout.
+# Two mirrors plus a delta region must fit within meta_total_bytes, so this
+# defaults to 40% per mirror leaving ~20% for the delta region.
+_AUTO_BASE_FRACTION = 0.4
 RAW_BLOCK_IO_ENGINES = frozenset({"posix", "io_uring"})
 DEFAULT_IOURING_QUEUE_DEPTH = 256
 
@@ -125,6 +135,13 @@ class RawBlockCoreConfig:
     load_checkpoint_on_init: bool = True
     io_engine: str = "posix"
     iouring_queue_depth: int = DEFAULT_IOURING_QUEUE_DEPTH
+    # Incremental checkpoint controls.
+    meta_incremental_enabled: bool = True
+    meta_full_checkpoint_interval_sec: int = 600
+    meta_full_checkpoint_max_deltas: int = 1024
+    meta_delta_high_watermark_pct: int = 90
+    # 0 means "auto": v2 layout uses ~40% per base copy, ~20% delta.
+    meta_base_copy_bytes: int = 0
 
 
 @dataclass
@@ -147,6 +164,26 @@ class RawBlockPutManyResult:
 
     results: list[bool]
     stored_keys: list[str]
+
+
+@dataclass(frozen=True)
+class _MetaLayout:
+    """On-device metadata region geometry.
+
+    Two mirrored base copies are followed by an optional delta region used by
+    incremental checkpoints. ``delta_region_bytes == 0`` falls back to the
+    legacy v1 full-snapshot-only layout.
+    """
+
+    block_align: int
+    base_copy_bytes: int
+    base_copy_offsets: tuple[int, ...]
+    delta_region_off: int
+    delta_region_bytes: int
+
+    @property
+    def base_payload_capacity(self) -> int:
+        return self.base_copy_bytes - self.block_align
 
 
 class RawBlockCore:
@@ -198,6 +235,15 @@ class RawBlockCore:
         self.io_engine = normalize_raw_block_io_engine(config.io_engine)
         self.iouring_queue_depth = int(config.iouring_queue_depth)
         self.key_namespace = key_namespace
+        self.meta_incremental_enabled = bool(config.meta_incremental_enabled)
+        self.meta_full_checkpoint_interval_sec = int(
+            config.meta_full_checkpoint_interval_sec
+        )
+        self.meta_full_checkpoint_max_deltas = int(
+            config.meta_full_checkpoint_max_deltas
+        )
+        self.meta_delta_high_watermark_pct = int(config.meta_delta_high_watermark_pct)
+        self._configured_base_copy_bytes = int(config.meta_base_copy_bytes)
 
         if not self.device_path:
             raise ValueError("RawBlockCore requires a non-empty device_path")
@@ -229,15 +275,27 @@ class RawBlockCore:
             raise ValueError("meta_magic must be ASCII bytes") from e
 
         self._meta_copy_count: int = 2
-        self._meta_container_bytes: int = (
-            (self.meta_total_bytes // self._meta_copy_count) // self.block_align
-        ) * self.block_align
-        if self._meta_container_bytes <= self.block_align:
-            raise ValueError(
-                "meta_total_bytes must provide room for at least two metadata copies"
+        # If incremental mode is requested but the meta region is too small for
+        # both base mirrors and a delta region, fall back to v1 layout.
+        self._use_incremental: bool = (
+            self.meta_incremental_enabled and self._can_fit_incremental_layout()
+        )
+        self._meta_layout: _MetaLayout = self._build_meta_layout()
+        if self.meta_incremental_enabled and not self._use_incremental:
+            logger.warning(
+                "RawBlockCore: incremental checkpoint disabled — "
+                "meta_total_bytes=%d cannot host two base mirrors and a "
+                "delta region; falling back to full-snapshot layout",
+                self.meta_total_bytes,
             )
 
         self._lock = threading.Lock()
+        # Serializes checkpoint writes (full + delta) against each other so
+        # concurrent ``_checkpoint_once`` calls (background loop + manual
+        # flush + close) cannot race on the delta tail offset or mirror seq.
+        # Held only across a single checkpoint attempt; never held during
+        # put/get critical sections (those use ``self._lock`` instead).
+        self._writer_lock = threading.Lock()
         self._index: dict[str, _Entry] = {}
         self._lock_refcnt: dict[str, int] = {}
         self._inflight: dict[str, _Inflight] = {}
@@ -258,6 +316,15 @@ class RawBlockCore:
         self._last_io_ts: float = time.monotonic()
         self._meta_stop_evt = threading.Event()
         self._meta_thread: Optional[threading.Thread] = None
+
+        # Pending mutations since the last successful checkpoint write. Each
+        # entry is a JSON-serializable op dict consumed by the delta encoder.
+        self._dirty_log: list[dict[str, Any]] = []
+        self._delta_seq: int = 0
+        self._delta_tail_off: int = 0
+        self._active_base_seq: int = 0
+        self._active_base_is_v2: bool = False
+        self._last_full_ts: float = time.monotonic()
 
         try:
             self._ensure_capacity_and_layout()
@@ -499,18 +566,20 @@ class RawBlockCore:
                     results[i] = False
                     continue
                 if inflight.canceled or not success:
-                    self._append_free_slot_locked(
-                        self._offset_to_slot(int(inflight.offset))
-                    )
+                    freed_slot = self._offset_to_slot(int(inflight.offset))
+                    self._append_free_slot_locked(freed_slot)
+                    self._record_freelist_push_locked(freed_slot)
                     self._meta_dirty_total += 1
                     results[i] = False
                     continue
 
-                self._index[key.encoded] = _Entry(
+                entry = _Entry(
                     offset=inflight.offset,
                     size=inflight.meta.size,
                     meta=inflight.meta,
                 )
+                self._index[key.encoded] = entry
+                self._record_put_op_locked(key.encoded, entry)
                 self._meta_dirty_total += 1
                 results[i] = True
                 stored_keys.append(key.encoded)
@@ -682,9 +751,9 @@ class RawBlockCore:
                     inflight.canceled = True
                 self._lock_refcnt.pop(encoded_key, None)
                 if removed_entry is not None:
-                    self._append_free_slot_locked(
-                        self._offset_to_slot(int(removed_entry.offset))
-                    )
+                    freed_slot = self._offset_to_slot(int(removed_entry.offset))
+                    self._append_free_slot_locked(freed_slot)
+                    self._record_delete_op_locked(encoded_key, freed_slot)
                     self._meta_dirty_total += 1
                 deleted.append(
                     existed and (removed_entry is not None or inflight is not None)
@@ -708,7 +777,13 @@ class RawBlockCore:
             return (usage, usage)
 
     def checkpoint_now(self) -> None:
-        """Synchronously write a metadata checkpoint."""
+        """Synchronously persist pending metadata mutations.
+
+        Bypasses the idle-quiet check so callers can flush from non-quiet
+        code paths. Picks an incremental delta record when the v2 layout
+        is active and the dirty log fits; otherwise rewrites a full
+        snapshot mirror. No-op when nothing is dirty.
+        """
         self._checkpoint_once(force=True)
 
     def apply_loaded_state(self, data: dict[str, Any]) -> bool:
@@ -721,7 +796,11 @@ class RawBlockCore:
             True when the payload shape and layout match this core and all
             valid entries were applied. Invalid per-entry records are skipped.
         """
-        return self._apply_loaded_state(data)
+        if not self._apply_loaded_state(data):
+            return False
+        if self.meta_verify_on_load:
+            self._validate_loaded_entries()
+        return True
 
     def report_status(self) -> dict:
         """Return raw-block health, layout, metadata, and in-flight counters."""
@@ -747,6 +826,11 @@ class RawBlockCore:
                 "metadata_seq": self._meta_seq,
                 "metadata_dirty_total": self._meta_dirty_total,
                 "metadata_persisted": self._meta_persisted,
+                "incremental_enabled": self._use_incremental,
+                "delta_seq": self._delta_seq,
+                "delta_tail_off": self._delta_tail_off,
+                "delta_region_bytes": self._meta_layout.delta_region_bytes,
+                "active_base_seq": self._active_base_seq,
                 "inflight_io_count": self._inflight_io_count,
                 "use_odirect": self.use_odirect,
                 "enable_zero_copy": self.enable_zero_copy,
@@ -755,7 +839,13 @@ class RawBlockCore:
             }
 
     def close(self) -> None:
-        """Stop checkpointing, write a final checkpoint, and close the device."""
+        """Stop checkpointing, write a final checkpoint, and close the device.
+
+        The final write follows the same trigger logic as ``checkpoint_now``:
+        a small dirty log becomes one delta record, otherwise a full base
+        compaction. Either is sufficient for crash-consistent recovery on
+        the next mount.
+        """
         with self._lock:
             if self._closed:
                 return
@@ -1013,11 +1103,34 @@ class RawBlockCore:
         raise RuntimeError("No free slots available")
 
     def _append_free_slot_locked(self, slot: int) -> None:
-        """Add a slot to the free list while ``self._lock`` is held."""
+        """Add a slot to the free list while ``self._lock`` is held.
+
+        Fast path for trusted callers (delete, put-failure, validation drop)
+        that have just removed the entry that owned ``slot``. Skips the
+        index scan that ``_safe_append_free_slot_locked`` performs because
+        the caller already knows the slot is unowned.
+        """
         if slot < 0 or slot >= self._max_slots:
             return
         if slot in self._free_slots:
             return
+        self._free_slots.append(slot)
+
+    def _safe_append_free_slot_locked(self, slot: int) -> None:
+        """Add a slot to the free list, refusing slots an indexed entry owns.
+
+        Used when the slot index comes from external/untrusted input
+        (delta replay). Scans the live index to guard against malformed
+        ``freed_slot`` values that point at a re-allocated slot.
+        """
+        if slot < 0 or slot >= self._max_slots:
+            return
+        if slot in self._free_slots:
+            return
+        slot_offset = self._slot_to_offset(slot)
+        for entry in self._index.values():
+            if int(entry.offset) == slot_offset:
+                return
         self._free_slots.append(slot)
 
     def _checkpoint_loop(self) -> None:
@@ -1031,16 +1144,228 @@ class RawBlockCore:
 
     def _meta_payload_capacity(self) -> int:
         """Return usable bytes in one metadata checkpoint payload area."""
-        return self._meta_container_bytes - self.block_align
+        return self._meta_layout.base_payload_capacity
+
+    def _entry_to_op_payload(self, entry: "_Entry") -> dict[str, Any]:
+        """Serialize an in-memory entry into the on-disk JSON form.
+
+        Used both by full-snapshot ``entries`` and by delta ``put`` ops so
+        the field schema stays in lockstep across both encodings.
+        """
+        meta = entry.meta
+        return {
+            "offset": int(entry.offset),
+            "size": int(meta.size),
+            "shape": list(meta.shape) if meta.shape is not None else None,
+            "dtype": self._checkpoint_dtype_name(meta.dtype),
+            "fmt": (
+                meta.fmt.name
+                if meta.fmt is not None and hasattr(meta.fmt, "name")
+                else str(meta.fmt)
+                if meta.fmt is not None
+                else None
+            ),
+            "cached_positions": (
+                meta.cached_positions.tolist()
+                if meta.cached_positions is not None
+                and hasattr(meta.cached_positions, "tolist")
+                else None
+            ),
+        }
+
+    def _record_put_op_locked(self, encoded_key: str, entry: "_Entry") -> None:
+        """Append a put op to the dirty log; caller holds ``self._lock``."""
+        op: dict[str, Any] = {"op": "put", "k": str(encoded_key)}
+        op.update(self._entry_to_op_payload(entry))
+        op["next_slot"] = int(self._next_slot)
+        self._dirty_log.append(op)
+
+    def _record_delete_op_locked(
+        self, encoded_key: str, freed_slot: Optional[int]
+    ) -> None:
+        """Append a delete op to the dirty log; caller holds ``self._lock``."""
+        op: dict[str, Any] = {
+            "op": "delete",
+            "k": str(encoded_key),
+            "next_slot": int(self._next_slot),
+        }
+        if freed_slot is not None:
+            op["freed_slot"] = int(freed_slot)
+        self._dirty_log.append(op)
+
+    def _record_freelist_push_locked(self, freed_slot: int) -> None:
+        """Append a freelist_push op (put-failure path); caller holds the lock."""
+        op: dict[str, Any] = {
+            "op": "freelist_push",
+            "freed_slot": int(freed_slot),
+            "next_slot": int(self._next_slot),
+        }
+        self._dirty_log.append(op)
+
+    def _clear_dirty_log_locked(self) -> None:
+        """Drop pending ops; caller holds ``self._lock``."""
+        self._dirty_log = []
 
     def _meta_container_offsets(self) -> list[int]:
         """Return byte offsets for mirrored metadata checkpoint containers."""
-        return [
-            idx * self._meta_container_bytes for idx in range(self._meta_copy_count)
-        ]
+        return list(self._meta_layout.base_copy_offsets)
 
-    def _read_meta_header(self, container_offset: int) -> Optional[dict[str, int]]:
-        """Read and validate a metadata checkpoint header."""
+    def _build_meta_layout(self) -> _MetaLayout:
+        """Compute the on-device metadata region layout.
+
+        v1 layout reserves the whole region for two mirrored base copies. v2
+        layout carves a delta region from the same budget so incremental
+        checkpoints can append small records between full snapshots. Total
+        bytes are ``meta_total_bytes`` either way; the data slot region begins
+        at ``meta_total_bytes`` regardless of mode, preserving cross-version
+        slot offsets.
+        """
+        if self._use_incremental:
+            base_copy_bytes = self._auto_base_copy_bytes()
+            offsets = tuple(
+                idx * base_copy_bytes for idx in range(self._meta_copy_count)
+            )
+            delta_region_off = offsets[-1] + base_copy_bytes
+            delta_region_bytes = self.meta_total_bytes - delta_region_off
+            delta_region_bytes = (
+                delta_region_bytes // self.block_align
+            ) * self.block_align
+            return _MetaLayout(
+                block_align=self.block_align,
+                base_copy_bytes=base_copy_bytes,
+                base_copy_offsets=offsets,
+                delta_region_off=delta_region_off,
+                delta_region_bytes=delta_region_bytes,
+            )
+
+        copy_bytes = self._v1_base_copy_bytes()
+        if copy_bytes <= self.block_align:
+            raise ValueError(
+                "meta_total_bytes must provide room for at least two metadata copies"
+            )
+        offsets = tuple(idx * copy_bytes for idx in range(self._meta_copy_count))
+        return _MetaLayout(
+            block_align=self.block_align,
+            base_copy_bytes=copy_bytes,
+            base_copy_offsets=offsets,
+            delta_region_off=offsets[-1] + copy_bytes,
+            delta_region_bytes=0,
+        )
+
+    def _v1_base_copy_bytes(self) -> int:
+        """Return the legacy v1 50/50 base-mirror size, block-aligned."""
+        return (
+            (self.meta_total_bytes // self._meta_copy_count) // self.block_align
+        ) * self.block_align
+
+    def _proposed_base_copy_bytes(self) -> int:
+        """Return the block-aligned base-mirror size proposed for v2 layout.
+
+        Honors ``meta_base_copy_bytes`` when explicitly set, otherwise
+        targets ``_AUTO_BASE_FRACTION`` of ``meta_total_bytes`` so the
+        remainder can host the delta region. Always block-aligned.
+        """
+        if self._configured_base_copy_bytes > 0:
+            raw = self._configured_base_copy_bytes
+        else:
+            raw = int(self.meta_total_bytes * _AUTO_BASE_FRACTION)
+        return (raw // self.block_align) * self.block_align
+
+    def _auto_base_copy_bytes(self) -> int:
+        """Return the per-base-mirror size used to construct the v2 layout."""
+        base_copy_bytes = self._proposed_base_copy_bytes()
+        if base_copy_bytes <= self.block_align:
+            base_copy_bytes = 2 * self.block_align
+        return base_copy_bytes
+
+    def _can_fit_incremental_layout(self) -> bool:
+        """Check that meta_total_bytes can host two bases plus a delta region.
+
+        Each base copy needs at least 2 * block_align (header + at least one
+        payload block). The delta region needs at least one delta record block.
+        """
+        base_copy_bytes = self._proposed_base_copy_bytes()
+        if base_copy_bytes < 2 * self.block_align:
+            return False
+        bases_total = base_copy_bytes * self._meta_copy_count
+        delta_total = self.meta_total_bytes - bases_total
+        return delta_total >= self.block_align
+
+    @staticmethod
+    def _pack_base_header_v1(
+        magic: bytes, version: int, seq: int, payload_len: int, crc: int
+    ) -> bytes:
+        return _META_HEADER_V1_STRUCT.pack(
+            magic, int(version), int(seq), int(payload_len), int(crc)
+        )
+
+    @staticmethod
+    def _pack_base_header_v2(
+        magic: bytes,
+        seq: int,
+        payload_len: int,
+        crc: int,
+        delta_log_start_off: int,
+    ) -> bytes:
+        return _META_HEADER_V2_STRUCT.pack(
+            magic,
+            _META_VERSION_V2,
+            int(seq),
+            int(payload_len),
+            int(crc),
+            int(delta_log_start_off),
+            0,
+        )
+
+    @staticmethod
+    def _unpack_base_header(buf: bytes) -> Optional[dict[str, int]]:
+        """Decode a base header buffer; returns None on malformed magic/version."""
+        if len(buf) < _META_HEADER_V1_STRUCT.size:
+            return None
+        magic_v1, version, seq, payload_len, crc = _META_HEADER_V1_STRUCT.unpack(
+            buf[: _META_HEADER_V1_STRUCT.size]
+        )
+        if version == _META_VERSION_V2:
+            if len(buf) < _META_HEADER_V2_STRUCT.size:
+                return None
+            (
+                magic_v2,
+                version,
+                seq,
+                payload_len,
+                crc,
+                delta_log_start_off,
+                _reserved,
+            ) = _META_HEADER_V2_STRUCT.unpack(buf[: _META_HEADER_V2_STRUCT.size])
+            return {
+                "magic": magic_v2,
+                "version": int(version),
+                "seq": int(seq),
+                "payload_len": int(payload_len),
+                "crc": int(crc),
+                "delta_log_start_off": int(delta_log_start_off),
+            }
+        return {
+            "magic": magic_v1,
+            "version": int(version),
+            "seq": int(seq),
+            "payload_len": int(payload_len),
+            "crc": int(crc),
+            "delta_log_start_off": 0,
+        }
+
+    def _read_meta_header(
+        self,
+        container_offset: int,
+        payload_capacity: int,
+    ) -> Optional[dict[str, int]]:
+        """Read and validate a metadata checkpoint header.
+
+        ``payload_capacity`` is the maximum payload-byte length permitted for
+        this candidate offset. Different candidate layouts (active v2 vs
+        legacy v1 fallback) carry different capacities, so the caller must
+        pass the value matching the layout being probed.
+        """
         buf = bytearray(self.block_align)
         try:
             self._rawdev().pread_into(
@@ -1049,20 +1374,17 @@ class RawBlockCore:
         except Exception:
             return None
 
-        hdr = bytes(buf[: _META_HEADER_STRUCT.size])
-        magic, version, seq, payload_len, crc = _META_HEADER_STRUCT.unpack(hdr)
-        if magic != self.meta_magic or version != self.meta_version:
+        decoded = self._unpack_base_header(bytes(buf))
+        if decoded is None:
             return None
-
-        payload_cap = self._meta_payload_capacity()
-        if payload_len <= 0 or payload_len > payload_cap:
+        if decoded["magic"] != self.meta_magic:
             return None
-        return {
-            "seq": int(seq),
-            "payload_len": int(payload_len),
-            "crc": int(crc),
-            "container_offset": int(container_offset),
-        }
+        if decoded["version"] not in (_META_VERSION_V1, _META_VERSION_V2):
+            return None
+        if decoded["payload_len"] <= 0 or decoded["payload_len"] > payload_capacity:
+            return None
+        decoded["container_offset"] = int(container_offset)
+        return decoded
 
     def _load_meta_payload(self, header: dict[str, int]) -> Optional[bytes]:
         """Load and CRC-validate a checkpoint payload for a metadata header."""
@@ -1084,11 +1406,16 @@ class RawBlockCore:
     def _select_latest_checkpoint(
         self,
     ) -> tuple[Optional[dict[str, int]], Optional[bytes]]:
-        """Return the newest valid checkpoint header and payload."""
+        """Return the newest valid checkpoint header and payload.
+
+        When the active layout is v2, also probes the legacy v1 50/50
+        offsets so a freshly-mounted v2 core can pick up either v1 mirror
+        from a disk written by older code.
+        """
         best_header: Optional[dict[str, int]] = None
         best_payload: Optional[bytes] = None
-        for offset in self._meta_container_offsets():
-            header = self._read_meta_header(offset)
+        for offset, capacity in self._candidate_base_offsets():
+            header = self._read_meta_header(offset, payload_capacity=capacity)
             if header is None:
                 continue
             payload = self._load_meta_payload(header)
@@ -1098,6 +1425,34 @@ class RawBlockCore:
                 best_header = header
                 best_payload = payload
         return best_header, best_payload
+
+    def _candidate_base_offsets(self) -> list[tuple[int, int]]:
+        """Yield ``(container_offset, payload_capacity)`` candidates to probe.
+
+        Always includes the active layout. When in v2 mode, also includes
+        the legacy v1 50/50 offsets so old disks remain readable. Duplicate
+        offsets are removed (v2's base_0 always coincides with v1's mirror_0).
+        """
+        seen: set[int] = set()
+        candidates: list[tuple[int, int]] = []
+        active_capacity = self._meta_layout.base_payload_capacity
+        for off in self._meta_layout.base_copy_offsets:
+            if off in seen:
+                continue
+            seen.add(off)
+            candidates.append((off, active_capacity))
+
+        if self._use_incremental:
+            v1_copy_bytes = self._v1_base_copy_bytes()
+            if v1_copy_bytes > self.block_align:
+                v1_capacity = v1_copy_bytes - self.block_align
+                for idx in range(self._meta_copy_count):
+                    off = idx * v1_copy_bytes
+                    if off in seen:
+                        continue
+                    seen.add(off)
+                    candidates.append((off, v1_capacity))
+        return candidates
 
     def _snapshot_state(self) -> tuple[dict[str, Any], int]:
         """Build a JSON-serializable checkpoint state snapshot."""
@@ -1117,28 +1472,7 @@ class RawBlockCore:
                 "next_slot": self._next_slot,
                 "free_slots": list(self._free_slots),
                 "entries": {
-                    encoded_key: {
-                        "offset": entry.offset,
-                        "size": entry.meta.size,
-                        "shape": list(entry.meta.shape)
-                        if entry.meta.shape is not None
-                        else None,
-                        "dtype": self._checkpoint_dtype_name(entry.meta.dtype),
-                        "fmt": (
-                            entry.meta.fmt.name
-                            if entry.meta.fmt is not None
-                            and hasattr(entry.meta.fmt, "name")
-                            else str(entry.meta.fmt)
-                            if entry.meta.fmt is not None
-                            else None
-                        ),
-                        "cached_positions": (
-                            entry.meta.cached_positions.tolist()
-                            if entry.meta.cached_positions is not None
-                            and hasattr(entry.meta.cached_positions, "tolist")
-                            else None
-                        ),
-                    }
+                    encoded_key: self._entry_to_op_payload(entry)
                     for encoded_key, entry in self._index.items()
                 },
             }
@@ -1172,7 +1506,7 @@ class RawBlockCore:
 
         next_seq = self._meta_seq + 1
         target_idx = int((next_seq - 1) % self._meta_copy_count)
-        target = self._meta_container_offsets()[target_idx]
+        target = self._meta_layout.base_copy_offsets[target_idx]
 
         payload_len = len(payload)
         payload_total_len = round_up(payload_len, self.block_align)
@@ -1180,41 +1514,423 @@ class RawBlockCore:
         crc = zlib.crc32(payload) & 0xFFFFFFFF
 
         header_block = bytearray(self.block_align)
-        header_block[: _META_HEADER_STRUCT.size] = _META_HEADER_STRUCT.pack(
-            self.meta_magic,
-            self.meta_version,
-            int(next_seq),
-            int(payload_len),
-            int(crc),
-        )
+        if self._use_incremental:
+            header_bytes = self._pack_base_header_v2(
+                self.meta_magic, next_seq, payload_len, crc, delta_log_start_off=0
+            )
+        else:
+            header_bytes = self._pack_base_header_v1(
+                self.meta_magic, self.meta_version, next_seq, payload_len, crc
+            )
+        header_block[: len(header_bytes)] = header_bytes
 
         raw = self._rawdev()
         raw.pwrite_from_buffer(payload_off, payload, payload_len, payload_total_len)
         raw.pwrite_from_buffer(target, header_block, self.block_align, self.block_align)
+        # In v2 mode, invalidate any stale delta records that may still carry
+        # the new base's seq number. Replay walks ``delta_log_start_off`` first
+        # and stops on a non-magic header, so a single zeroed block is enough
+        # to cap the log without touching the rest of the region.
+        if self._use_incremental and self._meta_layout.delta_region_bytes > 0:
+            zero_block = bytes(self.block_align)
+            raw.pwrite_from_buffer(
+                self._meta_layout.delta_region_off,
+                zero_block,
+                self.block_align,
+                self.block_align,
+            )
 
         with self._lock:
             self._meta_seq = int(next_seq)
             self._meta_persisted = max(self._meta_persisted, int(dirty_total_snapshot))
+            self._clear_dirty_log_locked()
+            self._delta_seq = 0
+            self._delta_tail_off = 0
+            self._active_base_seq = int(next_seq)
+            self._active_base_is_v2 = self._use_incremental
+            self._last_full_ts = time.monotonic()
         return True
 
     def _checkpoint_once(self, force: bool) -> bool:
-        """Write a metadata checkpoint when dirty and sufficiently idle."""
+        """Write a metadata checkpoint when dirty and sufficiently idle.
+
+        v2 (incremental) path: when an active v2 base exists and the dirty
+        log fits, append a delta record. Falls back to a full snapshot when
+        compaction is needed (first checkpoint, region full, count/time
+        thresholds, oversized record, or migrating from v1).
+
+        Holds ``self._writer_lock`` for the full attempt so concurrent
+        callers cannot collide on delta tail offset or mirror seq.
+        """
+        with self._writer_lock:
+            with self._lock:
+                dirty = self._meta_dirty_total > self._meta_persisted
+                idle_ok = self._inflight_io_count == 0 and (
+                    time.monotonic() - self._last_io_ts
+                ) >= (self.meta_idle_quiet_ms / 1000.0)
+
+            if not dirty:
+                return False
+            if not force and not idle_ok:
+                return False
+
+            if self._use_incremental:
+                payload, op_count, dirty_total_snapshot = self._snapshot_dirty_log()
+                if payload is not None and not self._need_full_for_delta(payload):
+                    if self._write_delta(payload, op_count, dirty_total_snapshot):
+                        return True
+                    # Fall through to full compaction if delta append failed.
+
+            snapshot, dirty_total_snapshot = self._snapshot_state()
+            payload = json.dumps(
+                snapshot, separators=(",", ":"), ensure_ascii=True
+            ).encode("utf-8")
+            return self._write_checkpoint(payload, dirty_total_snapshot)
+
+    def _snapshot_dirty_log(
+        self,
+    ) -> tuple[Optional[bytes], int, int]:
+        """Atomically swap out the in-memory dirty log and JSON-encode it.
+
+        Returns a triple ``(payload, op_count, dirty_total_snapshot)``. When
+        no dirty ops are pending, ``payload`` is ``None``.
+        """
         with self._lock:
-            dirty = self._meta_dirty_total > self._meta_persisted
-            idle_ok = self._inflight_io_count == 0 and (
-                time.monotonic() - self._last_io_ts
-            ) >= (self.meta_idle_quiet_ms / 1000.0)
+            if not self._dirty_log:
+                return None, 0, self._meta_dirty_total
+            ops = self._dirty_log
+            self._dirty_log = []
+            dirty_total_snapshot = self._meta_dirty_total
+        try:
+            payload = json.dumps(
+                {"ops": ops}, separators=(",", ":"), ensure_ascii=True
+            ).encode("utf-8")
+        except Exception:
+            # Restore the log so a later compaction can retry.
+            with self._lock:
+                self._dirty_log = ops + self._dirty_log
+            raise
+        return payload, len(ops), dirty_total_snapshot
 
-        if not dirty:
-            return False
-        if not force and not idle_ok:
-            return False
+    def _need_full_for_delta(self, payload: bytes) -> bool:
+        """Decide whether the next checkpoint must be a full compaction."""
+        if not self._active_base_is_v2:
+            return True
+        if self._meta_seq == 0:
+            return True
+        layout = self._meta_layout
+        if layout.delta_region_bytes <= 0:
+            return True
+        record_bytes = self._delta_record_total_bytes(len(payload))
+        if record_bytes > layout.delta_region_bytes:
+            return True
+        if self._delta_tail_off + record_bytes > layout.delta_region_bytes:
+            return True
+        if self._delta_seq + 1 > self.meta_full_checkpoint_max_deltas:
+            return True
+        if (
+            time.monotonic() - self._last_full_ts
+            > self.meta_full_checkpoint_interval_sec
+        ):
+            return True
+        watermark = max(0, min(100, self.meta_delta_high_watermark_pct))
+        used_after = self._delta_tail_off + record_bytes
+        if used_after * 100 >= layout.delta_region_bytes * watermark:
+            return True
+        return False
 
-        snapshot, dirty_total_snapshot = self._snapshot_state()
-        payload = json.dumps(snapshot, separators=(",", ":"), ensure_ascii=True).encode(
-            "utf-8"
+    def _delta_record_total_bytes(self, payload_len: int) -> int:
+        """Block-aligned record size for a delta payload of ``payload_len`` bytes."""
+        return round_up(
+            _DELTA_RECORD_HEADER_STRUCT.size + int(payload_len), self.block_align
         )
-        return self._write_checkpoint(payload, dirty_total_snapshot)
+
+    def _replay_delta_log(self, start_off: int) -> int:
+        """Walk the delta region starting at ``start_off`` and apply records.
+
+        Stops at the first record that fails any check (bad magic, stale
+        ``base_seq``, non-monotonic ``delta_seq``, oversized payload, CRC
+        mismatch, or read error). Earlier records are durable and applied;
+        anything past the stop point is treated as torn or stale.
+
+        Returns the number of records successfully applied.
+        """
+        layout = self._meta_layout
+        if start_off < 0 or start_off >= layout.delta_region_bytes:
+            if start_off < 0:
+                logger.warning(
+                    "RawBlockCore: ignoring negative delta_log_start_off=%d",
+                    start_off,
+                )
+            self._delta_tail_off = 0
+            self._delta_seq = 0
+            return 0
+
+        off = start_off
+        applied = 0
+        expected_next = self._delta_seq + 1
+        while off + _DELTA_RECORD_HEADER_STRUCT.size <= layout.delta_region_bytes:
+            absolute = layout.delta_region_off + off
+            header = self._read_delta_header(absolute, expected_next, layout, off)
+            if header is None:
+                break
+            ops = self._load_delta_ops(absolute, header)
+            if ops is None:
+                break
+            if not self._apply_delta_ops(ops):
+                break
+
+            applied += 1
+            self._delta_seq = int(header["delta_seq"])
+            off += int(header["record_bytes"])
+            expected_next = self._delta_seq + 1
+
+        self._delta_tail_off = off
+        return applied
+
+    def _read_delta_header(
+        self,
+        absolute_off: int,
+        expected_next_seq: int,
+        layout: "_MetaLayout",
+        relative_off: int,
+    ) -> Optional[dict[str, int]]:
+        """Read and validate one delta record's header block.
+
+        Returns a dict with the validated fields plus the derived
+        ``record_bytes``, or None if any sanity check fails. The caller
+        treats None as "stop replay here".
+        """
+        buf = bytearray(self.block_align)
+        try:
+            self._rawdev().pread_into(
+                absolute_off, buf, self.block_align, self.block_align
+            )
+        except Exception:
+            return None
+
+        try:
+            (
+                magic,
+                rec_version,
+                base_seq,
+                delta_seq,
+                payload_len,
+                payload_crc,
+                total_blocks,
+                op_count,
+                _reserved,
+            ) = _DELTA_RECORD_HEADER_STRUCT.unpack(
+                bytes(buf[: _DELTA_RECORD_HEADER_STRUCT.size])
+            )
+        except struct.error:
+            return None
+
+        if magic != _DELTA_RECORD_MAGIC:
+            return None
+        if rec_version != _DELTA_RECORD_VERSION:
+            return None
+        if int(base_seq) != self._active_base_seq:
+            return None
+        if int(delta_seq) != expected_next_seq:
+            return None
+        if int(total_blocks) <= 0:
+            return None
+        record_bytes = int(total_blocks) * self.block_align
+        if relative_off + record_bytes > layout.delta_region_bytes:
+            return None
+        max_payload = record_bytes - _DELTA_RECORD_HEADER_STRUCT.size
+        if int(payload_len) <= 0 or int(payload_len) > max_payload:
+            return None
+        return {
+            "delta_seq": int(delta_seq),
+            "payload_len": int(payload_len),
+            "payload_crc": int(payload_crc),
+            "op_count": int(op_count),
+            "record_bytes": int(record_bytes),
+        }
+
+    def _load_delta_ops(
+        self, absolute_off: int, header: dict[str, int]
+    ) -> Optional[list[Any]]:
+        """Read, CRC-check, and decode the ops list of one delta record."""
+        record_bytes = header["record_bytes"]
+        payload_len = header["payload_len"]
+        buf = bytearray(record_bytes)
+        try:
+            self._rawdev().pread_into(absolute_off, buf, record_bytes, record_bytes)
+        except Exception:
+            return None
+        start = _DELTA_RECORD_HEADER_STRUCT.size
+        payload = bytes(buf[start : start + payload_len])
+        if (zlib.crc32(payload) & 0xFFFFFFFF) != header["payload_crc"]:
+            return None
+        try:
+            doc = json.loads(payload.decode("utf-8"))
+        except Exception:
+            return None
+        ops = doc.get("ops") if isinstance(doc, dict) else None
+        if not isinstance(ops, list):
+            return None
+        if header["op_count"] != len(ops):
+            return None
+        return ops
+
+    def _apply_delta_ops(self, ops: list[Any]) -> bool:
+        """Apply a decoded list of delta ops to the live in-memory state."""
+        with self._lock:
+            for op in ops:
+                if not isinstance(op, dict):
+                    return False
+                kind = op.get("op")
+                next_slot = op.get("next_slot")
+                if isinstance(next_slot, int) and next_slot > self._next_slot:
+                    self._next_slot = next_slot
+                if kind == "put":
+                    if not self._apply_delta_put_locked(op):
+                        return False
+                elif kind == "delete":
+                    self._apply_delta_delete_locked(op)
+                elif kind == "freelist_push":
+                    freed = op.get("freed_slot")
+                    if isinstance(freed, int):
+                        self._safe_append_free_slot_locked(int(freed))
+                else:
+                    logger.warning(
+                        "RawBlockCore: ignoring unknown delta op kind=%r", kind
+                    )
+        return True
+
+    def _apply_delta_put_locked(self, op: dict[str, Any]) -> bool:
+        """Apply a put op while ``self._lock`` is held."""
+        encoded_key = op.get("k")
+        offset = op.get("offset")
+        size = op.get("size")
+        if not isinstance(encoded_key, str):
+            return False
+        if not isinstance(offset, int) or not isinstance(size, int):
+            return False
+        if not self._is_valid_checkpoint_entry(int(offset), int(size)):
+            return False
+
+        meta = self._decode_put_op_meta(encoded_key, int(offset), int(size), op)
+        prior = self._index.get(encoded_key)
+        self._index[encoded_key] = _Entry(offset=int(offset), size=int(size), meta=meta)
+
+        slot = self._offset_to_slot(int(offset))
+        if 0 <= slot < self._max_slots and slot in self._free_slots:
+            self._free_slots = [s for s in self._free_slots if s != slot]
+        if prior is not None and int(prior.offset) != int(offset):
+            old_slot = self._offset_to_slot(int(prior.offset))
+            self._append_free_slot_locked(old_slot)
+        return True
+
+    def _decode_put_op_meta(
+        self, encoded_key: str, offset: int, size: int, op: dict[str, Any]
+    ) -> DiskCacheMetadata:
+        """Build a ``DiskCacheMetadata`` from a put-op dict's optional fields."""
+        shape_list = op.get("shape")
+        shape = torch.Size(list(shape_list)) if isinstance(shape_list, list) else None
+        fmt_name = op.get("fmt")
+        if isinstance(fmt_name, str) and fmt_name in MemoryFormat.__members__:
+            fmt = MemoryFormat[fmt_name]
+        else:
+            fmt = MemoryFormat.UNDEFINED
+        cached_positions_list = op.get("cached_positions")
+        cached_positions = (
+            torch.tensor(cached_positions_list, dtype=torch.long)
+            if isinstance(cached_positions_list, list)
+            else None
+        )
+        dtype = self._recover_checkpoint_dtype(encoded_key, op.get("dtype"))
+        return DiskCacheMetadata(
+            path=f"{self.device_path}@{offset}",
+            size=size,
+            shape=shape,
+            dtype=dtype,
+            cached_positions=cached_positions,
+            fmt=fmt,
+            pin_count=0,
+        )
+
+    def _apply_delta_delete_locked(self, op: dict[str, Any]) -> None:
+        """Apply a delete op while ``self._lock`` is held."""
+        encoded_key = op.get("k")
+        if not isinstance(encoded_key, str):
+            return
+        removed = self._index.pop(encoded_key, None)
+        self._lock_refcnt.pop(encoded_key, None)
+        freed_slot = op.get("freed_slot")
+        if isinstance(freed_slot, int):
+            self._safe_append_free_slot_locked(int(freed_slot))
+        elif removed is not None:
+            self._append_free_slot_locked(self._offset_to_slot(int(removed.offset)))
+
+    def _write_delta(
+        self,
+        payload: bytes,
+        op_count: int,
+        dirty_total_snapshot: int,
+    ) -> bool:
+        """Append a delta record to the delta log region.
+
+        Caller must hold ``self._writer_lock``: this method reads
+        ``_delta_tail_off`` / ``_delta_seq`` outside ``self._lock`` and
+        relies on the writer lock to keep concurrent checkpoints from
+        racing on those fields or on the underlying device offset.
+
+        On success, advances ``_delta_seq`` / ``_delta_tail_off`` and the
+        persisted-counter watermark. Returns ``False`` if the record cannot
+        fit; the caller should fall back to a full compaction.
+        """
+        layout = self._meta_layout
+        if layout.delta_region_bytes <= 0 or not self._active_base_is_v2:
+            return False
+        record_bytes = self._delta_record_total_bytes(len(payload))
+        if record_bytes > layout.delta_region_bytes:
+            return False
+        if self._delta_tail_off + record_bytes > layout.delta_region_bytes:
+            return False
+
+        next_delta_seq = self._delta_seq + 1
+        crc = zlib.crc32(payload) & 0xFFFFFFFF
+        total_blocks = record_bytes // self.block_align
+
+        record = bytearray(record_bytes)
+        _DELTA_RECORD_HEADER_STRUCT.pack_into(
+            record,
+            0,
+            _DELTA_RECORD_MAGIC,
+            _DELTA_RECORD_VERSION,
+            int(self._active_base_seq),
+            int(next_delta_seq),
+            int(len(payload)),
+            int(crc),
+            int(total_blocks),
+            int(op_count),
+            0,
+        )
+        record[
+            _DELTA_RECORD_HEADER_STRUCT.size : _DELTA_RECORD_HEADER_STRUCT.size
+            + len(payload)
+        ] = payload
+
+        write_off = layout.delta_region_off + self._delta_tail_off
+        try:
+            self._rawdev().pwrite_from_buffer(
+                write_off, bytes(record), record_bytes, record_bytes
+            )
+        except Exception as e:
+            logger.warning(
+                "RawBlockCore: delta write failed at off=%d: %s", write_off, e
+            )
+            return False
+
+        with self._lock:
+            self._delta_seq = next_delta_seq
+            self._delta_tail_off += record_bytes
+            self._meta_persisted = max(self._meta_persisted, int(dirty_total_snapshot))
+        return True
 
     def _is_valid_checkpoint_entry(self, offset: int, size: int) -> bool:
         """Return whether a checkpoint entry references a valid data slot."""
@@ -1233,6 +1949,11 @@ class RawBlockCore:
         if not isinstance(data, dict):
             return False
         if int(data.get("version", 0)) != 1:
+            logger.warning(
+                "Device metadata payload version mismatch (got %r, expected 1); "
+                "ignoring metadata",
+                data.get("version"),
+            )
             return False
         if data.get("device_path") and data.get("device_path") != self.device_path:
             logger.warning("Device metadata device_path mismatch; ignoring metadata")
@@ -1357,9 +2078,19 @@ class RawBlockCore:
 
             self._meta_dirty_total = 0
             self._meta_persisted = 0
-
-        if self.meta_verify_on_load:
-            self._validate_loaded_entries()
+            self._clear_dirty_log_locked()
+            self._delta_seq = 0
+            self._delta_tail_off = 0
+            # External callers may hand us an arbitrary state that does not
+            # match what's on disk. Force the next checkpoint to write a
+            # full snapshot so any stale on-disk delta records (which still
+            # carry the previous active_base_seq) cannot be replayed on top
+            # of the new state. ``_load_checkpoint_from_device`` overrides
+            # these immediately after with the values from the just-loaded
+            # base header.
+            self._meta_seq = 0
+            self._active_base_seq = 0
+            self._active_base_is_v2 = False
         return True
 
     def _recover_checkpoint_dtype(
@@ -1438,10 +2169,13 @@ class RawBlockCore:
                 removed_entry = self._index.pop(encoded_key, None)
                 self._lock_refcnt.pop(encoded_key, None)
                 if removed_entry is not None:
-                    self._append_free_slot_locked(
-                        self._offset_to_slot(int(removed_entry.offset))
-                    )
-            self._meta_dirty_total += 1
+                    freed_slot = self._offset_to_slot(int(removed_entry.offset))
+                    self._append_free_slot_locked(freed_slot)
+                    self._record_delete_op_locked(encoded_key, freed_slot)
+            # One dirty event per dropped entry, matching the per-op accounting
+            # used by put/delete so ``metadata_dirty_total`` stays in sync with
+            # the dirty-log size.
+            self._meta_dirty_total += len(to_drop)
 
         logger.warning(
             "RawBlockCore dropped %d stale metadata entries after "
@@ -1450,7 +2184,13 @@ class RawBlockCore:
         )
 
     def _load_checkpoint_from_device(self) -> None:
-        """Load the newest valid checkpoint from the raw device if present."""
+        """Load the newest valid checkpoint from the raw device if present.
+
+        Applies the base snapshot, replays any v2 delta records, and only
+        then runs slot-header validation against the final state. Validating
+        before replay would let a subsequent delta op resurrect an entry
+        that the base validation just dropped.
+        """
         header, payload = self._select_latest_checkpoint()
         if header is None:
             logger.info("RawBlockCore: no valid on-device metadata checkpoint found")
@@ -1463,14 +2203,31 @@ class RawBlockCore:
         except Exception:
             logger.warning("RawBlockCore: failed to decode metadata payload")
             return
-        if not self.apply_loaded_state(data):
+        if not self._apply_loaded_state(data):
             logger.warning("RawBlockCore: metadata payload rejected by checks")
             return
         self._meta_seq = int(header["seq"])
+        self._active_base_seq = self._meta_seq
+        version = int(header.get("version", _META_VERSION_V1))
+        self._active_base_is_v2 = version == _META_VERSION_V2
+        self._last_full_ts = time.monotonic()
+
+        delta_count = 0
+        if self._active_base_is_v2 and self._meta_layout.delta_region_bytes > 0:
+            delta_count = self._replay_delta_log(
+                int(header.get("delta_log_start_off", 0))
+            )
+
+        if self.meta_verify_on_load:
+            self._validate_loaded_entries()
+
         logger.info(
-            "RawBlockCore loaded checkpoint (entries=%d next_slot=%d seq=%d device=%s)",
+            "RawBlockCore loaded checkpoint (entries=%d next_slot=%d seq=%d "
+            "version=%d deltas_applied=%d device=%s)",
             len(self._index),
             self._next_slot,
             self._meta_seq,
+            version,
+            delta_count,
             self.device_path,
         )

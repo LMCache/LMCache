@@ -88,6 +88,11 @@ class RawBlockL2AdapterConfig(L2AdapterConfigBase):
         num_store_workers: int = 2,
         num_lookup_workers: int = 1,
         num_load_workers: int = 4,
+        meta_incremental_enabled: bool = True,
+        meta_full_checkpoint_interval_sec: int = 600,
+        meta_full_checkpoint_max_deltas: int = 1024,
+        meta_delta_high_watermark_pct: int = 90,
+        meta_base_copy_bytes: int = 0,
     ):
         """Initialize raw-block MP adapter configuration.
 
@@ -112,6 +117,18 @@ class RawBlockL2AdapterConfig(L2AdapterConfigBase):
             num_store_workers: Number of store worker threads.
             num_lookup_workers: Number of lookup worker threads.
             num_load_workers: Number of load worker threads.
+            meta_incremental_enabled: Enable v2 base+delta metadata layout.
+                When False (or when ``meta_total_bytes`` is too small for two
+                base mirrors plus a delta region), falls back to the legacy
+                v1 full-snapshot layout.
+            meta_full_checkpoint_interval_sec: Force a full base compaction
+                at least this often, regardless of delta volume.
+            meta_full_checkpoint_max_deltas: Force compaction after this many
+                delta records since the last full base.
+            meta_delta_high_watermark_pct: Force compaction once the next
+                delta record would push delta-region usage above this percent.
+            meta_base_copy_bytes: Override per-base-mirror size (bytes). Zero
+                means "auto" (~40% of ``meta_total_bytes`` per mirror).
         """
         super().__init__()
         self.device_path = device_path
@@ -137,6 +154,11 @@ class RawBlockL2AdapterConfig(L2AdapterConfigBase):
         self.num_store_workers = int(num_store_workers)
         self.num_lookup_workers = int(num_lookup_workers)
         self.num_load_workers = int(num_load_workers)
+        self.meta_incremental_enabled = bool(meta_incremental_enabled)
+        self.meta_full_checkpoint_interval_sec = int(meta_full_checkpoint_interval_sec)
+        self.meta_full_checkpoint_max_deltas = int(meta_full_checkpoint_max_deltas)
+        self.meta_delta_high_watermark_pct = int(meta_delta_high_watermark_pct)
+        self.meta_base_copy_bytes = int(meta_base_copy_bytes)
 
     @classmethod
     def from_dict(cls, d: dict) -> "RawBlockL2AdapterConfig":
@@ -217,6 +239,17 @@ class RawBlockL2AdapterConfig(L2AdapterConfigBase):
             num_store_workers=worker_counts["num_store_workers"],
             num_lookup_workers=worker_counts["num_lookup_workers"],
             num_load_workers=worker_counts["num_load_workers"],
+            meta_incremental_enabled=bool(d.get("meta_incremental_enabled", True)),
+            meta_full_checkpoint_interval_sec=int(
+                d.get("meta_full_checkpoint_interval_sec", 600)
+            ),
+            meta_full_checkpoint_max_deltas=int(
+                d.get("meta_full_checkpoint_max_deltas", 1024)
+            ),
+            meta_delta_high_watermark_pct=int(
+                d.get("meta_delta_high_watermark_pct", 90)
+            ),
+            meta_base_copy_bytes=int(d.get("meta_base_copy_bytes", 0)),
         )
 
     @classmethod
@@ -252,7 +285,17 @@ class RawBlockL2AdapterConfig(L2AdapterConfigBase):
             f"(default {DEFAULT_IOURING_QUEUE_DEPTH})\n"
             "- num_store_workers (int): store worker threads (default 2)\n"
             "- num_lookup_workers (int): lookup worker threads (default 1)\n"
-            "- num_load_workers (int): load worker threads (default 4)"
+            "- num_load_workers (int): load worker threads (default 4)\n"
+            "- meta_incremental_enabled (bool): enable v2 base+delta layout "
+            "(default true)\n"
+            "- meta_full_checkpoint_interval_sec (int): force full compaction "
+            "at least this often (default 600)\n"
+            "- meta_full_checkpoint_max_deltas (int): compact after this many "
+            "delta records (default 1024)\n"
+            "- meta_delta_high_watermark_pct (int): compact when delta region "
+            "usage would exceed this percent (default 90)\n"
+            "- meta_base_copy_bytes (int): override per-base-mirror size; "
+            "0 means auto (~40%) (default 0)"
         )
 
     def to_core_config(self) -> RawBlockCoreConfig:
@@ -275,6 +318,11 @@ class RawBlockL2AdapterConfig(L2AdapterConfigBase):
             meta_verify_on_load=self.meta_verify_on_load,
             io_engine=self.io_engine,
             iouring_queue_depth=self.iouring_queue_depth,
+            meta_incremental_enabled=self.meta_incremental_enabled,
+            meta_full_checkpoint_interval_sec=self.meta_full_checkpoint_interval_sec,
+            meta_full_checkpoint_max_deltas=self.meta_full_checkpoint_max_deltas,
+            meta_delta_high_watermark_pct=self.meta_delta_high_watermark_pct,
+            meta_base_copy_bytes=self.meta_base_copy_bytes,
         )
 
 
