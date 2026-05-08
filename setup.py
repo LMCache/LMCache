@@ -345,7 +345,7 @@ def sycl_extension() -> tuple[list, dict]:
     #       Unroll inner copy loops for better instruction packing.
     ext_modules = [
         cpp_extension.SyclExtension(
-            "lmcache.c_ops",
+            "lmcache.xpu_ops",
             sources=sycl_sources,
             include_dirs=include_dirs,
             library_dirs=library_dirs,

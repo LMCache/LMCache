@@ -3,6 +3,7 @@
 # Standard
 from typing import Any
 import importlib
+import sys
 import types
 
 # First Party
@@ -31,7 +32,7 @@ def _get_backend() -> Any:
 
     backend_candidates = [
         (
-            "lmcache.c_ops",
+            "lmcache.xpu_ops",
             "xpu_ops",
             lambda: torch.xpu.is_available(),
         ),
@@ -82,6 +83,6 @@ try:
     # in which:
     #     non_cuda_equivalents as base,
     #     use backend implementation if exists
-    c_ops = _ops
+    sys.modules["lmcache.c_ops"] = _ops
 except (ImportError, ModuleNotFoundError):
     logger.debug("No compute backend loaded; CLI-only mode (torch/numba not installed)")
