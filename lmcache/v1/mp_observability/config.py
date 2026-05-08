@@ -340,6 +340,7 @@ def init_observability(
             EventBusSelfMetricsSubscriber,
             L0L1ThroughputSubscriber,
             L0LifecycleSubscriber,
+            L1EvictionLoopSubscriber,
             L1FailureMetricsSubscriber,
             L1LifecycleSubscriber,
             L1MetricsSubscriber,
@@ -356,6 +357,7 @@ def init_observability(
         bus.register_subscriber(L1MetricsSubscriber())
         bus.register_subscriber(L1LifecycleSubscriber(sample_rate=sample_rate))
         bus.register_subscriber(L1FailureMetricsSubscriber())
+        bus.register_subscriber(L1EvictionLoopSubscriber())
         bus.register_subscriber(L0L1ThroughputSubscriber(sample_rate=sample_rate))
         bus.register_subscriber(L2MetricsSubscriber())
         bus.register_subscriber(L2FailureMetricsSubscriber())
