@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """HTTP routes for bytes-level KV cache access.
 
-These routes expose ``MPCacheEngine.store_bytes / retrieve_bytes /
-lookup_bytes`` to external developers over HTTP. They are control-plane
+These routes expose ``MPCacheEngine.store_bytes_by_tokens / retrieve_bytes_by_tokens /
+lookup_bytes_by_tokens`` to external developers over HTTP. They are control-plane
 endpoints intended for cache priming, debugging, and future editing
 workflows — not the inference hot path.
 
@@ -76,7 +76,7 @@ def _parse_int_list(header_value: str) -> list[int]:
 
 
 @router.post("/api/kv/store")
-async def store_kv(request: Request) -> dict[str, int | str]:
+async def store(request: Request) -> dict[str, int | str]:
     """Store opaque KV cache bytes for a token sequence.
 
     The request body is the raw KV cache payload in the canonical KV_2LTD
@@ -117,7 +117,7 @@ async def store_kv(request: Request) -> dict[str, int | str]:
     payload = await request.body()
 
     try:
-        result = engine.store_bytes(
+        result = engine.store_bytes_by_tokens(
             model_name=model_name,
             tokens=tokens,
             payload=payload,
@@ -141,7 +141,7 @@ async def store_kv(request: Request) -> dict[str, int | str]:
 
 
 @router.post("/api/kv/retrieve")
-async def retrieve_kv(body: _LookupOrRetrieveBody, request: Request) -> Response:
+async def retrieve(body: _LookupOrRetrieveBody, request: Request) -> Response:
     """Retrieve KV cache bytes for the longest cached prefix.
 
     Returns the binary KV payload as the response body, with hit metadata
@@ -150,7 +150,7 @@ async def retrieve_kv(body: _LookupOrRetrieveBody, request: Request) -> Response
     """
     engine = _engine_or_503(request)
     try:
-        result = engine.retrieve_bytes(
+        result = engine.retrieve_bytes_by_tokens(
             model_name=body.model_name,
             tokens=body.tokens,
             cache_salt=body.cache_salt,
@@ -184,7 +184,7 @@ async def retrieve_kv(body: _LookupOrRetrieveBody, request: Request) -> Response
 
 
 @router.post("/api/kv/lookup")
-async def lookup_kv(body: _LookupOrRetrieveBody, request: Request) -> JSONResponse:
+async def lookup(body: _LookupOrRetrieveBody, request: Request) -> JSONResponse:
     """Probe how much of ``tokens`` is currently cached, without moving bytes.
 
     Useful for clients that want to decide whether to download a large
@@ -192,7 +192,7 @@ async def lookup_kv(body: _LookupOrRetrieveBody, request: Request) -> JSONRespon
     """
     engine = _engine_or_503(request)
     try:
-        result = engine.lookup_bytes(
+        result = engine.lookup_bytes_by_tokens(
             model_name=body.model_name,
             tokens=body.tokens,
             cache_salt=body.cache_salt,

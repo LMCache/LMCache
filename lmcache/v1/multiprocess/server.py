@@ -747,7 +747,7 @@ class MPCacheEngine:
                 )
         raise KeyError(model_name)
 
-    def store_bytes(
+    def store_bytes_by_tokens(
         self,
         model_name: str,
         tokens: list[int],
@@ -853,7 +853,7 @@ class MPCacheEngine:
             stored_chunks=stored_chunks,
         )
 
-    def retrieve_bytes(
+    def retrieve_bytes_by_tokens(
         self,
         model_name: str,
         tokens: list[int],
@@ -961,7 +961,7 @@ class MPCacheEngine:
             hit_chunks=hit_chunks,
         )
 
-    def lookup_bytes(
+    def lookup_bytes_by_tokens(
         self,
         model_name: str,
         tokens: list[int],

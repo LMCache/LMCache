@@ -5,11 +5,12 @@
 
 ## Goal
 
-Expose two HTTP endpoints — `store_kv` and `retrieve_kv`, plus a cheap
-`lookup` — on the LMCache MP server, so that an external developer can
-read and write KV cache bytes keyed by a token sequence. This unblocks
-cache priming, debugging, and future editing workflows by making
-`MemoryObj`s addressable from outside the inference path.
+Expose three HTTP endpoints — `POST /api/kv/store`, `POST /api/kv/retrieve`,
+and a cheap `POST /api/kv/lookup` — on the LMCache MP server, so that an
+external developer can read and write KV cache bytes keyed by a token
+sequence. This unblocks cache priming, debugging, and future editing
+workflows by making `MemoryObj`s addressable from outside the inference
+path.
 
 V1 ships the HTTP transport only. Editing semantics — fake token
 sequences, cache-salt namespacing, orchestration-layer version selection
@@ -20,9 +21,9 @@ sequences, cache-salt namespacing, orchestration-layer version selection
 We add three new methods to `MPCacheEngine` (in `multiprocess/server.py`,
 the class instance held at `app.state.engine`):
 
-- `store_bytes(tokens: list[int], payload: bytes, *, model_name: str) -> StoreBytesResult`
-- `retrieve_bytes(tokens: list[int], *, model_name: str) -> RetrieveBytesResult`
-- `lookup_bytes(tokens: list[int], *, model_name: str) -> LookupBytesResult`
+- `store_bytes_by_tokens(tokens: list[int], payload: bytes, *, model_name: str) -> StoreBytesResult`
+- `retrieve_bytes_by_tokens(tokens: list[int], *, model_name: str) -> RetrieveBytesResult`
+- `lookup_bytes_by_tokens(tokens: list[int], *, model_name: str) -> LookupBytesResult`
 
 These bypass the GPU connector entirely. They reuse the existing
 machinery `MPCacheEngine` already exposes as instance attributes:
