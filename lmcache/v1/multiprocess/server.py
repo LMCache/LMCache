@@ -153,22 +153,36 @@ def _memory_obj_tensor(
 def _get_single_group_layout(
     layout_desc: MemoryLayoutDesc,
 ) -> tuple[torch.Size, torch.dtype]:
-    """Return the only supported group layout for the bytes API.
+    """Validate that ``layout_desc`` matches the v1 bytes-API contract.
 
-    The current bytes wire format has no per-group framing. Rejecting
-    multi-group layouts before storage locks are acquired keeps the v1
-    contract small and avoids exposing partial/corrupt objects.
+    The bytes API in v1 supports **only**:
+
+    1. **Homogeneous attention** — exactly one KV layer group. Hybrid
+       attention (e.g. sliding-window mixed with full attention,
+       producing per-layer-group differing shapes/dtypes) is rejected
+       up front because the wire format has no per-group framing.
+    2. **KV_2LTD layout** — the per-shard tensor must be 4-D with the
+       canonical ``[2, num_layers, num_tokens, hidden_dim]`` arrangement.
+       Other layouts (e.g. KV_T2D, KV_MLA_FMT) are not exposed by the
+       bytes API in v1.
+
+    Both checks happen before any storage lock is taken so a misconfigured
+    request fails cleanly with a 400 (via ``ValueError``) and never
+    leaves partial / corrupt objects in cache.
     """
     if len(layout_desc.shapes) != 1:
         raise ValueError(
-            "bytes-level KV access currently supports a single KV layer group; "
-            f"got {len(layout_desc.shapes)}"
+            "bytes-level KV access currently supports a single KV layer group "
+            "(homogeneous attention only); hybrid-attention models with "
+            f"multiple layer groups are not supported in v1 (got "
+            f"{len(layout_desc.shapes)} groups)"
         )
     shape = layout_desc.shapes[0]
     if len(shape) != 4:
         raise ValueError(
-            "bytes-level KV access expects KV_2LTD tensors with 4 dimensions; "
-            f"got shape {tuple(shape)}"
+            "bytes-level KV access requires the KV_2LTD layout "
+            "(shape [2, num_layers, num_tokens, hidden_dim]); "
+            f"got a {len(shape)}-D shape {tuple(shape)}"
         )
     return shape, layout_desc.dtypes[0]
 
@@ -763,6 +777,11 @@ class MPCacheEngine:
         ``world_size`` per-worker shards. Trailing sub-chunk tokens are
         ignored, mirroring the GPU store path.
 
+        **v1 limitations:** the registered model must use **homogeneous
+        attention** (exactly one KV layer group) and the **KV_2LTD layout**
+        (4-D ``[2, num_layers, num_tokens, hidden_dim]``). Hybrid-attention
+        models and non-2LTD layouts are rejected with ``ValueError``.
+
         Args:
             model_name: Registered model name.
             tokens: Token sequence the bytes are keyed by.
@@ -775,7 +794,8 @@ class MPCacheEngine:
 
         Raises:
             KeyError: If ``model_name`` is not registered.
-            ValueError: If ``payload`` length does not match the layout.
+            ValueError: If ``payload`` length does not match the layout, or
+                the registered model violates the v1 limitations above.
         """
         layout_desc, world_size = self._resolve_model(model_name)
 
@@ -866,6 +886,11 @@ class MPCacheEngine:
         Always non-destructive: ignores any ``remove_after_retrieve`` engine
         setting.
 
+        **v1 limitations:** the registered model must use **homogeneous
+        attention** (single KV layer group) and the **KV_2LTD layout**.
+        Hybrid-attention models and non-2LTD layouts are rejected with
+        ``ValueError``.
+
         Args:
             model_name: Registered model name.
             tokens: Token sequence to retrieve.
@@ -876,6 +901,8 @@ class MPCacheEngine:
 
         Raises:
             KeyError: If ``model_name`` is not registered.
+            ValueError: If the registered model violates the v1
+                limitations above.
         """
         layout_desc, world_size = self._resolve_model(model_name)
 
@@ -970,6 +997,11 @@ class MPCacheEngine:
     ) -> LookupBytesResult:
         """Probe the cached-prefix length for ``tokens`` without moving bytes.
 
+        **v1 limitations:** the registered model must use **homogeneous
+        attention** (single KV layer group) and the **KV_2LTD layout**.
+        Hybrid-attention models and non-2LTD layouts are rejected with
+        ``ValueError``.
+
         Args:
             model_name: Registered model name.
             tokens: Token sequence to probe.
@@ -980,6 +1012,8 @@ class MPCacheEngine:
 
         Raises:
             KeyError: If ``model_name`` is not registered.
+            ValueError: If the registered model violates the v1
+                limitations above.
         """
         layout_desc, world_size = self._resolve_model(model_name)
 

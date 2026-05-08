@@ -77,9 +77,27 @@ not initialized, and (store only) 507 on quota exhaustion.
 
 The payload is a sequence of per-chunk `MemoryObj` byte arrays,
 concatenated. Chunk size in tokens is `engine.chunk_size`; chunk size in
-bytes is fixed for a given engine (homogeneous attention assumption — see
-§6). The HTTP request and response use `Content-Type: application/x-lmcache-kv; v=1`
-so the format can evolve later without breaking clients.
+bytes is fixed for a given engine. The HTTP request and response use
+`Content-Type: application/x-lmcache-kv; v=1` so the format can evolve
+later without breaking clients.
+
+### v1 limitations (enforced)
+
+The bytes API supports **only** the following two cases; anything else
+is rejected with `HTTP 400` (`ValueError` from the engine method) before
+any storage lock is acquired:
+
+1. **Single KV layer group** — homogeneous attention only. Hybrid
+   attention (e.g. sliding-window mixed with full attention) publishes
+   multiple KV layer groups with possibly differing shapes and dtypes;
+   the v1 wire format has no per-group framing, so we reject up front.
+2. **`KV_2LTD` layout** — the per-shard tensor must be 4-D with
+   `[2, num_layers, num_tokens, hidden_dim]`. Other formats
+   (`KV_T2D`, `KV_MLA_FMT`, etc.) are not exposed by the bytes API in
+   v1.
+
+Both rules are enforced by the `_get_single_group_layout` helper in
+`server.py`. Lifting either is future work (§6).
 
 ## 4. Concurrency
 

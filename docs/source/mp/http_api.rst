@@ -319,7 +319,25 @@ Payloads are raw contiguous ``KV_2LTD`` bytes with shape
 ``[2, num_layers, num_tokens, hidden_dim]`` in row-major order.
 ``num_tokens`` is the complete-chunk prefix only, ``hidden_dim`` is the
 full unsharded hidden dimension, and ``dtype`` is the registered model's
-KV dtype. The v1 wire format supports a single KV layer group.
+KV dtype.
+
+.. warning::
+
+   **v1 limitations.** The bytes-level API supports only:
+
+   * **Homogeneous attention** — exactly one KV layer group per model.
+     **Hybrid attention is not supported in v1.** Models that publish
+     multiple KV layer groups (e.g. sliding-window mixed with full
+     attention) will reject ``store`` / ``retrieve`` / ``lookup`` with
+     ``HTTP 400``.
+   * **KV_2LTD layout** — the per-shard tensor must be a 4-D
+     ``[2, num_layers, num_tokens, hidden_dim]`` arrangement. Other
+     layouts (e.g. ``KV_T2D``, ``KV_MLA_FMT``) are not exposed by these
+     endpoints in v1; requests against models registered with such
+     layouts also return ``HTTP 400``.
+
+   Both checks happen **before** any storage lock is acquired, so a
+   misconfigured request fails cleanly without partial writes.
 
 ``POST /api/kv/store``
 ^^^^^^^^^^^^^^^^^^^^^^
