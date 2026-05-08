@@ -1851,7 +1851,7 @@ class PrometheusLogger:
         if metadata_key in PrometheusLogger._instances:
             return PrometheusLogger._instances[metadata_key]
 
-        base_logger = PrometheusLogger.GetInstanceOrNone()
+        base_logger = PrometheusLogger._get_base_logger()
         if base_logger is None:
             logger_instance = PrometheusLogger(metadata, config=config)
         else:
@@ -1864,16 +1864,9 @@ class PrometheusLogger:
         return logger_instance
 
     @staticmethod
-    def GetInstance() -> "PrometheusLogger":
-        instance = PrometheusLogger.GetInstanceOrNone()
-        assert instance is not None, "PrometheusLogger instance not created yet"
-        return instance
-
-    @staticmethod
-    def GetInstanceOrNone() -> Optional["PrometheusLogger"]:
+    def _get_base_logger() -> Optional["PrometheusLogger"]:
         """
-        Returns an existing PrometheusLogger instance if any have been created,
-        otherwise returns None.
+        Return an existing logger to reuse registered Prometheus collectors.
         """
         return next(iter(PrometheusLogger._instances.values()), None)
 
@@ -1947,7 +1940,7 @@ def reset_observability_metrics() -> None:
     Reset observability metrics to their initial state.
     """
 
-    prometheus_logger = PrometheusLogger.GetInstanceOrNone()
+    prometheus_logger = PrometheusLogger._get_base_logger()
     if prometheus_logger is not None:
         prometheus_logger.reset_counters()
         prometheus_logger.reset_histograms()
