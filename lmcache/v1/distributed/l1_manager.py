@@ -112,6 +112,20 @@ def _validate_extra_count(extra_count: int) -> int:
     return extra_count
 
 
+def _l1_usage_ratio_or_zero(target: "L1Manager | None") -> float:
+    """Return ``target.get_memory_usage()`` as a 0.0-1.0 ratio.
+
+    Returns 0.0 when ``target`` is None or ``total_bytes`` is zero so the
+    observable-gauge callback never raises during scrape.
+    """
+    if target is None:
+        return 0.0
+    used, total = target.get_memory_usage()
+    if total <= 0:
+        return 0.0
+    return used / total
+
+
 # Main classes
 
 
@@ -191,6 +205,12 @@ class L1Manager:
                     if L1Manager._gauge_target is not None
                     else 0
                 ),
+            )
+            register_gauge(
+                "lmcache.l1_manager",
+                "lmcache_mp.l1_usage_ratio",
+                "L1 used/total ratio (0.0–1.0)",
+                lambda: _l1_usage_ratio_or_zero(L1Manager._gauge_target),
             )
 
     def register_listener(self, listener: L1ManagerListener) -> None:
