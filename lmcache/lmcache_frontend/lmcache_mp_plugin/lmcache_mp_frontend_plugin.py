@@ -12,7 +12,7 @@ Config JSON structure (MP mode)::
       "mp_config": { ... },
       "storage_manager_config": { ... },
       "obs_config": { ... },
-      "http_frontend_config": {
+      "http_config": {
         "http_host": "0.0.0.0",
         "http_port": 8085,
         "http_socket_path": null
@@ -23,9 +23,10 @@ Config JSON structure (MP mode)::
       }
     }
 
-The ``http_frontend_config`` is forwarded by ``http_server.py`` so the
+The ``http_config`` block is forwarded by ``http_server.py`` so the
 plugin can automatically derive the LMCache HTTP port without any
-extra flags.
+extra flags. For backwards compatibility the plugin also accepts the
+legacy key name ``http_frontend_config``.
 """
 
 # Standard
@@ -149,6 +150,13 @@ def build_argv(config: dict, prog: str = "lmcache_mp_frontend_plugin") -> list:
 
 
 def main() -> None:
+    """Entry point for the MP-mode frontend plugin subprocess.
+
+    Registers SIGTERM/SIGINT handlers for graceful shutdown, parses
+    the aggregated config from ``LMCACHE_RUNTIME_PLUGIN_CONFIG``,
+    rewrites ``sys.argv`` via :func:`build_argv`, and delegates to
+    :func:`lmcache.lmcache_frontend.app.main`.
+    """
     signal.signal(signal.SIGTERM, _handle_exit)
     signal.signal(signal.SIGINT, _handle_exit)
 

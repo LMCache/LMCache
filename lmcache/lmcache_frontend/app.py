@@ -27,20 +27,49 @@ except ImportError:
 # Create router
 router = APIRouter()
 
-# Global variable to store proxy nodes and their target nodes
-# Example structure:
-# [
-#     {
-#         "name": "proxy1",
-#         "host": "127.0.0.1",
-#         "port": "8001",
-#         "nodes": [
-#             {"name": "node1", "host": "127.0.0.1", "port": "8002"},
-#             {"name": "node2", "host": "127.0.0.1", "port": "8003"}
-#         ]
-#     }
-# ]
-target_nodes = []
+
+class _NodeRegistry:
+    """Encapsulates the mutable proxy/node list used by the frontend.
+
+    Replacing the list is done in-place via :py:meth:`replace` so that
+    aliases (the module-level ``target_nodes`` reference and the list
+    handed to ``HeartbeatService``) stay in sync.
+    """
+
+    def __init__(self) -> None:
+        self._nodes: list[dict] = []
+
+    @property
+    def nodes(self) -> list[dict]:
+        """Return the underlying list (mutated in place)."""
+        return self._nodes
+
+    def replace(self, new_nodes: list[dict]) -> None:
+        """Swap the registry content in place with ``new_nodes``."""
+        self._nodes[:] = new_nodes
+
+    def is_allowed(self, host: str, port: str) -> bool:
+        """Return True if ``host:port`` matches any registered node.
+
+        Used by the SSRF guard in :func:`proxy_request` so the proxy
+        only forwards to pre-registered destinations.
+        """
+        port = str(port)
+        for proxy in self._nodes:
+            if str(proxy.get("host")) == host and str(proxy.get("port")) == port:
+                return True
+            for child in proxy.get("nodes", []):
+                if str(child.get("host")) == host and str(child.get("port")) == port:
+                    return True
+        return False
+
+
+_node_registry = _NodeRegistry()
+# ``target_nodes`` is a module-level alias to the list owned by the
+# registry.  External readers and in-place mutations (append / element
+# update) keep working unchanged; whole-list replacement MUST go
+# through ``_node_registry.replace`` so all aliases stay in sync.
+target_nodes = _node_registry.nodes
 
 # Initialize heartbeat service with app context
 heartbeat_service: HeartbeatService = HeartbeatService()
@@ -49,8 +78,17 @@ global args
 args = None
 
 
-async def fetch_child_nodes_from_proxy(proxy_node):
-    """Fetch child nodes from proxy node"""
+async def fetch_child_nodes_from_proxy(proxy_node: dict) -> list[dict]:
+    """Fetch child nodes from a single proxy node.
+
+    Args:
+        proxy_node: Proxy dict with ``name``/``host``/``port`` keys.
+            ``/api/nodes`` of the proxy is queried.
+
+    Returns:
+        A list of leaf node dicts discovered from the proxy.  An
+        empty list is returned when the request fails.
+    """
     try:
         url = f"http://{proxy_node['host']}:{proxy_node['port']}/api/nodes"
         async with httpx.AsyncClient(timeout=5.0) as client:
@@ -84,8 +122,18 @@ async def fetch_child_nodes_from_proxy(proxy_node):
         return []
 
 
-async def fetch_all_child_nodes_concurrently(proxy_nodes):
-    """Fetch child nodes from multiple proxy nodes concurrently"""
+async def fetch_all_child_nodes_concurrently(
+    proxy_nodes: list[dict],
+) -> list[dict]:
+    """Fetch child nodes from multiple proxy nodes concurrently.
+
+    Args:
+        proxy_nodes: Proxy dicts to query.  Each dict is mutated in
+            place with a new ``nodes`` field.
+
+    Returns:
+        The same ``proxy_nodes`` list with ``nodes`` populated.
+    """
     tasks = [fetch_child_nodes_from_proxy(proxy) for proxy in proxy_nodes]
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
@@ -129,7 +177,7 @@ async def _fetch_child_nodes_from_api_nodes(
         return []
 
 
-async def fetch_nodes_from_supplier(url):
+async def fetch_nodes_from_supplier(url: str) -> list[dict]:
     """Fetch node information from node supplier.
 
     For each discovered node, attempt to retrieve its child nodes via
@@ -185,6 +233,7 @@ async def fetch_nodes_from_supplier(url):
                     nodes = [leaf]
                 else:
                     # multiProcess mode: use discovered child nodes.
+                    assert not isinstance(children, BaseException)
                     nodes = children
                 result.append(
                     {
@@ -200,13 +249,18 @@ async def fetch_nodes_from_supplier(url):
         return []
 
 
-def load_config(config_path=None):
-    global target_nodes
+def load_config(config_path: str | None = None) -> None:
+    """Load proxy/node list from a JSON config file.
+
+    Args:
+        config_path: Optional path to the JSON file.  When ``None`` the
+            packaged ``config.json`` is used.
+    """
     try:
         # Prioritize user-specified configuration file
         if config_path:
             with open(config_path, "r") as f:
-                target_nodes = json.load(f)
+                _node_registry.replace(json.load(f))
             print(
                 f"Loaded {len(target_nodes)} target nodes from specified path: "
                 f"{config_path}"
@@ -217,15 +271,24 @@ def load_config(config_path=None):
                 "lmcache.lmcache_frontend", "config.json"
             )
             with open(default_config_path, "r") as f:
-                target_nodes = json.load(f)
+                _node_registry.replace(json.load(f))
             print(f"Loaded default configuration with {len(target_nodes)} target nodes")
     except Exception as e:
         print(f"Failed to load configuration file: {e}")
-        target_nodes = []
+        _node_registry.replace([])
 
 
-def validate_node(node, is_proxy=False):
-    """Validate a single node configuration"""
+def validate_node(node: dict, is_proxy: bool = False) -> bool:
+    """Validate a single node configuration dict.
+
+    Args:
+        node: Candidate node dict.
+        is_proxy: Reserved for future proxy-specific validation.
+
+    Returns:
+        True when ``node`` has the required ``name``/``host``/``port``
+        keys and (optionally) a string ``proxy_id``.
+    """
     if not isinstance(node, dict):
         return False
 
@@ -240,8 +303,8 @@ def validate_node(node, is_proxy=False):
     return True
 
 
-def validate_nodes(nodes):
-    """Validate list of nodes"""
+def validate_nodes(nodes: list) -> bool:
+    """Validate a list of node dicts; see :func:`validate_node`."""
     if not isinstance(nodes, list):
         return False
 
@@ -249,8 +312,13 @@ def validate_nodes(nodes):
 
 
 @router.get("/api/nodes")
-async def get_all_nodes():
-    """Get all nodes in tree structure (proxies with their child nodes)"""
+async def get_all_nodes() -> dict:
+    """Get all nodes in tree structure (proxies with their child nodes).
+
+    Returns:
+        ``{"nodes": [...]}`` where each element is a proxy dict whose
+        ``children`` list contains the leaf nodes behind it.
+    """
     all_nodes = []
     for proxy in target_nodes:
         # Create proxy node with children property
@@ -319,7 +387,6 @@ async def get_proxy_nodes(proxy_name: str):
 @router.post("/api/proxies")
 async def add_proxy(request: Request):
     """Add a new proxy node"""
-    global target_nodes
     try:
         new_proxy = await request.json()
         if not validate_node(new_proxy, is_proxy=True):
@@ -342,7 +409,6 @@ async def add_proxy(request: Request):
 @router.post("/api/proxies/{proxy_name}/nodes")
 async def add_node_to_proxy(proxy_name: str, request: Request):
     """Add child node to proxy"""
-    global target_nodes
     try:
         new_node = await request.json()
         if not validate_node(new_node):
@@ -366,7 +432,6 @@ async def add_node_to_proxy(proxy_name: str, request: Request):
 @router.put("/api/nodes/{node_name}")
 async def update_node(node_name: str, request: Request):
     """Update an existing node"""
-    global target_nodes
     try:
         updated_node = await request.json()
         if not validate_node(updated_node):
@@ -385,10 +450,11 @@ async def update_node(node_name: str, request: Request):
 @router.delete("/api/nodes/{node_name}")
 async def delete_node(node_name: str):
     """Delete a node from the target list"""
-    global target_nodes
     try:
         original_count = len(target_nodes)
-        target_nodes = [node for node in target_nodes if node["name"] != node_name]
+        _node_registry.replace(
+            [node for node in target_nodes if node["name"] != node_name]
+        )
 
         if len(target_nodes) == original_count:
             raise HTTPException(status_code=404, detail="Node not found")
@@ -440,7 +506,13 @@ async def proxy_request_by_name(request: Request, node_name: str, path: str):
 async def proxy_request(
     request: Request, target_host: str, target_port_or_socket: str | int, path: str
 ):
-    """Proxy requests to the specified target host and port or socket path"""
+    """Proxy requests to the specified target host and port or socket path.
+
+    For security, non-socket targets must match a host/port already
+    registered in :data:`_node_registry`; this prevents the endpoint
+    from being used as an open relay (SSRF).  Socket paths are
+    accepted as-is because they are local UDS endpoints.
+    """
     target_port_or_socket = unquote(str(target_port_or_socket))
     # Check if target_port_or_socket is a socket path (contains '/')
     is_socket_path = "/" in target_port_or_socket
@@ -454,6 +526,12 @@ async def proxy_request(
         transport = httpx.AsyncHTTPTransport(uds=socket_path)
     else:
         port = target_port_or_socket
+        # SSRF guard: only proxy to pre-registered destinations.
+        if not _node_registry.is_allowed(target_host, port):
+            raise HTTPException(
+                status_code=403,
+                detail=("Target %s:%s is not a registered node" % (target_host, port)),
+            )
         target_url = f"http://{target_host}:{port}/{path}"
         transport = None  # Use default transport
 
@@ -570,17 +648,22 @@ async def stop_heartbeat_api():
         raise HTTPException(status_code=500, detail=str(e)) from e
 
 
-async def load_nodes_from_supplier(node_supplier_url: str | None = None):
-    """Load node information from node supplier"""
-    global target_nodes
+async def load_nodes_from_supplier(node_supplier_url: str | None = None) -> bool:
+    """Load node information from node supplier.
 
+    Args:
+        node_supplier_url: Discovery service URL, e.g. ``/lmcache_infos``.
+
+    Returns:
+        ``True`` when a non-empty node list was retrieved and stored.
+    """
     if not node_supplier_url:
         return False
 
     print(f"Fetching nodes from supplier: {node_supplier_url}")
     nodes = await fetch_nodes_from_supplier(node_supplier_url)
     if nodes:
-        target_nodes = nodes
+        _node_registry.replace(nodes)
         print(f"Loaded {len(target_nodes)} proxy nodes from supplier")
 
         # Child nodes are already populated by fetch_nodes_from_supplier;
@@ -593,9 +676,14 @@ async def load_nodes_from_supplier(node_supplier_url: str | None = None):
         return False
 
 
-async def initialize_nodes(node_supplier_url: str | None = None):
-    """Initialize node configuration"""
-    global target_nodes
+async def initialize_nodes(node_supplier_url: str | None = None) -> None:
+    """Initialize node configuration from CLI args or supplier URL.
+
+    Args:
+        node_supplier_url: Optional discovery service URL.  When set,
+            nodes are loaded via :func:`load_nodes_from_supplier`.
+            Otherwise falls back to ``args.nodes`` / ``args.config``.
+    """
     global args
 
     if args is None:
@@ -607,14 +695,16 @@ async def initialize_nodes(node_supplier_url: str | None = None):
         try:
             nodes = json.loads(args.nodes)
             if validate_nodes(nodes):
-                target_nodes = [
-                    {
-                        "name": "local_proxy",
-                        "host": args.host,
-                        "port": args.port,
-                        "nodes": nodes,
-                    }
-                ]
+                _node_registry.replace(
+                    [
+                        {
+                            "name": "local_proxy",
+                            "host": args.host,
+                            "port": args.port,
+                            "nodes": nodes,
+                        }
+                    ]
+                )
                 print(f"Loaded {len(nodes)} target nodes from command line arguments")
         except json.JSONDecodeError:
             print("Failed to parse nodes JSON parameter")

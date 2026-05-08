@@ -24,10 +24,12 @@ class HeartbeatService:
         self.app_port = 8000
         self.target_nodes = []
 
-    def get_local_ip(self):
-        """
-        Get the local IP address of the machine using multiple methods.
-        Falls back through several approaches for maximum reliability.
+    def get_local_ip(self) -> str:
+        """Get the local IP address of the machine using multiple methods.
+
+        Returns:
+            A non-loopback IPv4 string when discoverable, otherwise
+            ``"127.0.0.1"`` as the final fallback.
         """
         # Method 1: Try UDP socket connection (works when network is available)
         try:
@@ -215,8 +217,13 @@ class HeartbeatService:
         else:
             print("Heartbeat thread is not running")
 
-    def status(self):
-        """Get current heartbeat status"""
+    def status(self) -> dict:
+        """Return a snapshot of the heartbeat thread state.
+
+        Returns:
+            Dict containing ``running`` (bool), ``local_ip``,
+            ``startup_time`` and ``current_time`` (ISO-8601 strings).
+        """
         is_running = self.thread and self.thread.is_alive()
         return {
             "running": is_running,

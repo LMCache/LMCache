@@ -111,4 +111,8 @@ def get_lmcache_infos():
 
 
 if __name__ == "__main__":
-    app.run(debug=True)
+    # Bind on all interfaces so remote peers (e.g. the MP server running
+    # on another host) can report heartbeats. ``debug=False`` avoids
+    # spawning Flask's reloader, which can double-launch the process
+    # inside containers.
+    app.run(host="0.0.0.0", port=5000, debug=False)

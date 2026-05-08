@@ -7,19 +7,22 @@ with a trivial discovery service.
 Architecture:
 
 ```
-+-----------------------------+       heartbeat (HTTP GET)
-|  LMCache MP HTTP Server     | ------------------------------> +---------------------------+
-|  (http_server.py)           |                                 |  simple_discover_service  |
-|                             | <----------------------- poll --|  (this example)           |
-|  MPRuntimePluginLauncher    |                                 +---------------------------+
-|    |                        |                                         ^
-|    +-> lmcache_mp_frontend  |                                         |
-|        _plugin.py (subproc) |                                         |
-|        -> app.main()        |                                         |
-|           - heartbeat       |--- heartbeat ---------------------------+
-|           - (optional) UI   |
++-----------------------------+
+|  LMCache MP HTTP Server     |
+|  (http_server.py)           |
+|                             |
+|  MPRuntimePluginLauncher    |                +---------------------------+
+|    |                        |                |  simple_discover_service  |
+|    +-> lmcache_mp_frontend  |   heartbeat    |  (this example)           |
+|        _plugin.py (subproc) | -------------> |                           |
+|        -> app.main()        |   (HTTP GET)   |  /lmcache_heartbeat       |
+|           - HeartbeatService|                |  /lmcache_infos           |
+|           - (--no-http)     |                +---------------------------+
 +-----------------------------+
 ```
+
+Only the frontend plugin talks to the discovery service; the MP HTTP
+server itself is never contacted by it.
 
 The real discovery service in production is expected to be provided
 by each company. `simple_discover_service.py` is only a flask-based
@@ -41,11 +44,14 @@ example so you can try the flow end-to-end.
    pip install flask httpx fastapi uvicorn
    ```
 
-2. Start the example discovery service (port 5000):
+2. Start the example discovery service (listens on ``0.0.0.0:5000``):
 
    ```bash
-   python examples/lmcache_frontend/simple_discover_service.py
+   python3 examples/lmcache_frontend/simple_discover_service.py
    ```
+
+   The service also exposes ``/heartbeat`` as an alias of
+   ``/lmcache_heartbeat`` for compatibility with older clients.
 
 3. Start the LMCache MP HTTP server with the frontend plugin:
 
@@ -53,14 +59,23 @@ example so you can try the flow end-to-end.
    bash examples/lmcache_frontend/run_mp_server_with_frontend.sh
    ```
 
-   Under the hood this passes:
+   Under the hood this runs (see the script for the full command):
 
+   ```bash
+   python3 -m lmcache.v1.multiprocess.http_server \
+       --host localhost --port 5555 \
+       --http-host 0.0.0.0 --http-port 8085 \
+       --l1-size-gb 2 \
+       --eviction-policy LRU \
+       --runtime-plugin-locations \
+           lmcache/lmcache_frontend/lmcache_mp_plugin/lmcache_mp_frontend_plugin.py \
+       --runtime-plugin-config \
+           '{"plugin.frontend.heartbeat-url": "http://localhost:5000/lmcache_heartbeat"}'
    ```
-   --runtime-plugin-locations \
-       lmcache/lmcache_frontend/lmcache_mp_plugin/lmcache_mp_frontend_plugin.py
-   --runtime-plugin-config \
-       '{"plugin.frontend.heartbeat-url": "http://localhost:5000/lmcache_heartbeat"}'
-   ```
+
+   Note: the config key is normalised internally, so both
+   ``plugin.frontend.heartbeat-url`` and
+   ``plugin.frontend.heartbeat_url`` are accepted.
 
 4. Inspect the registered nodes:
 
