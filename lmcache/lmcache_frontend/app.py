@@ -54,14 +54,25 @@ class _NodeRegistry:
         Used by the SSRF guard in :func:`proxy_request` so the proxy
         only forwards to pre-registered destinations.
         """
+        return self.resolve(host, port) is not None
+
+    def resolve(self, host: str, port: str) -> tuple[str, str] | None:
+        """Return the registry-owned ``(host, port)`` matching the input.
+
+        The returned tuple is taken from the registry itself, not from
+        the caller-supplied arguments.  Using this value to build the
+        outbound URL breaks the SSRF taint flow for static analysers.
+        """
         port = str(port)
         for proxy in self._nodes:
-            if str(proxy.get("host")) == host and str(proxy.get("port")) == port:
-                return True
+            p_host, p_port = str(proxy.get("host")), str(proxy.get("port"))
+            if p_host == host and p_port == port:
+                return p_host, p_port
             for child in proxy.get("nodes", []):
-                if str(child.get("host")) == host and str(child.get("port")) == port:
-                    return True
-        return False
+                c_host, c_port = str(child.get("host")), str(child.get("port"))
+                if c_host == host and c_port == port:
+                    return c_host, c_port
+        return None
 
 
 _node_registry = _NodeRegistry()
@@ -526,13 +537,17 @@ async def proxy_request(
         transport = httpx.AsyncHTTPTransport(uds=socket_path)
     else:
         port = target_port_or_socket
-        # SSRF guard: only proxy to pre-registered destinations.
-        if not _node_registry.is_allowed(target_host, port):
+        # SSRF guard: resolve against the registry and reuse the
+        # trusted host/port from there when building the outbound URL.
+        # This keeps user-controlled values out of the URL sink.
+        resolved = _node_registry.resolve(target_host, port)
+        if resolved is None:
             raise HTTPException(
                 status_code=403,
                 detail=("Target %s:%s is not a registered node" % (target_host, port)),
             )
-        target_url = f"http://{target_host}:{port}/{path}"
+        safe_host, safe_port = resolved
+        target_url = f"http://{safe_host}:{safe_port}/{path}"
         transport = None  # Use default transport
 
     headers = {}
