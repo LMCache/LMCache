@@ -513,17 +513,19 @@ class ConnectorBase : public IStorageConnector {
   }
 
   static const std::string& lane_key_for_op(Op op) {
-    static std::unordered_map<Op, std::string> reverse;
-    if (reverse.empty()) {
+    static const auto& reverse = []() {
+      std::unordered_map<Op, std::string> m;
       for (auto& [key, ops] : lane_registry()) {
         for (Op o : ops) {
-          reverse[o] = key;
+          m[o] = key;
         }
       }
-    }
+      return m;
+    }();
     auto it = reverse.find(op);
     if (it == reverse.end()) {
-      throw std::runtime_error("unknown Op type");
+      throw std::runtime_error("unknown Op type: " +
+                               std::to_string(static_cast<int>(op)));
     }
     return it->second;
   }
