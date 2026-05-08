@@ -114,21 +114,13 @@ def compute_extra_count(
     return tp - 1 if tp > world_size else 0
 
 
-_HTTP_BYTES_PREFETCH_POLL_INTERVAL_SEC = 0.001
-
-
 def _wait_prefetch(storage_manager: StorageManager, handle: PrefetchHandle) -> int:
-    """Block until ``handle`` finishes and return the total hit count.
-
-    Polls ``query_prefetch_status`` at a small fixed interval. The HTTP
-    bytes API is offline-style so a simple poll is acceptable; per-call
-    latency is dominated by L2 prefetch wait time, not poll granularity.
-    """
+    """Block until ``handle`` finishes and return the total hit count."""
     while True:
         status = storage_manager.query_prefetch_status(handle)
         if status is not None:
             return status
-        time.sleep(_HTTP_BYTES_PREFETCH_POLL_INTERVAL_SEC)
+        time.sleep(0.001)
 
 
 def _bytes_to_tensor(
@@ -136,40 +128,23 @@ def _bytes_to_tensor(
     shape: tuple[int, int, int, int],
     dtype: torch.dtype,
 ) -> torch.Tensor:
-    """Reinterpret ``payload`` as a tensor view of ``shape`` and ``dtype``.
-
-    Returns a **read-only** tensor view sharing memory with ``payload`` — no
-    intermediate copy is allocated. The caller is expected to read-only;
-    write attempts will succeed (PyTorch does not enforce read-only at the
-    tensor API) but would mutate the original bytes object, which is the
-    HTTP request body. Slice + ``.copy_(slice)`` into a destination tensor
-    is the intended downstream usage.
-    """
+    """Return a read-only tensor view of ``payload`` with ``shape`` / ``dtype``."""
     return torch.frombuffer(payload, dtype=dtype).reshape(shape)
 
 
 def _tensor_to_bytes(t: torch.Tensor) -> bytes:
-    """Materialize a contiguous tensor as bytes, dtype-agnostic.
-
-    Uses ``ctypes`` to read the raw buffer rather than ``numpy``, so dtypes
-    without numpy support (bfloat16, fp8) round-trip correctly.
-    """
+    """Materialize a contiguous tensor as bytes (dtype-agnostic)."""
     t = t.contiguous()
     nbytes = t.numel() * t.element_size()
     return bytes((ctypes.c_ubyte * nbytes).from_address(t.data_ptr()))
 
 
 def _copy_tensor_into_memory_obj(t: torch.Tensor, memory_obj: MemoryObj) -> None:
-    """Copy ``t``'s elements into ``memory_obj``'s buffer.
+    """Copy ``t``'s elements into ``memory_obj``'s buffer via ``Tensor.copy_``.
 
-    Builds a tensor view over ``memory_obj.data_ptr`` (matching ``t``'s
-    dtype and shape) and uses ``Tensor.copy_`` to do the transfer. This
-    avoids any intermediate Python ``bytes`` allocation and lets PyTorch
-    handle non-contiguous sources internally.
-
-    Going through a tensor view also sidesteps the format mismatch on
-    ``MemoryObj.byte_array``: that property exposes a memoryview of
-    format ``<B``, which Python rejects for slice assignment from bytes.
+    Going through a tensor view sidesteps a format mismatch on
+    ``MemoryObj.byte_array``: that property exposes a memoryview of format
+    ``<B``, which Python rejects for slice assignment from bytes.
     """
     nbytes = t.numel() * t.element_size()
     expected = memory_obj.get_size()
@@ -186,17 +161,14 @@ def _read_memory_obj_as_tensor(
     shape: tuple[int, int, int, int] | torch.Size,
     dtype: torch.dtype,
 ) -> torch.Tensor:
-    """Return a tensor view over ``memory_obj``'s buffer in ``shape`` / ``dtype``.
+    """Return a tensor view over ``memory_obj``'s buffer (no copy).
 
-    No copy is made: the returned tensor aliases ``memory_obj``'s memory.
-    Callers must consume the view before ``memory_obj`` is released (e.g.
-    before exiting ``StorageManager.read_prefetched_results``). The
-    sole caller in ``retrieve_bytes`` does this — it copies the view into
-    the assembled output buffer in the same step.
+    The view aliases ``memory_obj``'s memory; the caller must consume it
+    before the underlying ``MemoryObj`` is released.
     """
     nbytes = memory_obj.get_size()
     mv = memoryview((ctypes.c_ubyte * nbytes).from_address(memory_obj.data_ptr))
-    return torch.frombuffer(mv, dtype=dtype).reshape(tuple(int(s) for s in shape))
+    return torch.frombuffer(mv, dtype=dtype).reshape(tuple(shape))
 
 
 def get_layout_desc(gpu_context: GPUCacheContext, num_tokens: int) -> MemoryLayoutDesc:
@@ -734,20 +706,8 @@ class MPCacheEngine:
         self,
         model_name: str,
     ) -> tuple[MemoryLayoutDesc, int]:
-        """Locate the layout descriptor and world size for ``model_name``.
-
-        Scans ``gpu_context_meta`` for a matching registered context. The
-        first match wins; multiple TP workers of the same model share
-        identical layout and world size, so any registered context for the
-        model produces the right answer.
-
-        Args:
-            model_name: Name of the model the caller wants to address.
-
-        Returns:
-            Tuple of (layout descriptor, world size) for the model. The
-            world size is taken from the registration metadata and reflects
-            MLA's pre-divided world size convention (1 for MLA models).
+        """Return ``(layout_desc, world_size)`` for the first registered context
+        matching ``model_name``.
 
         Raises:
             KeyError: If no registered GPU context advertises ``model_name``.
@@ -770,39 +730,25 @@ class MPCacheEngine:
     ) -> StoreBytesResult:
         """Store opaque KV cache bytes for ``tokens`` under ``model_name``.
 
-        The payload is interpreted as a contiguous KV_2LTD tensor of shape
-        :math:`[2, L, T, D]`, where ``T`` is ``len(complete chunks) * chunk_size``
-        and ``D`` is the full (un-sharded) hidden dim. The method splits the
-        tensor along ``T`` into ``chunk_size`` chunks and along ``D`` into
-        ``world_size`` per-worker shards, then writes one ``MemoryObj`` per
-        ``(chunk, worker)`` pair via ``StorageManager.reserve_write`` /
-        ``finish_write``. Trailing tokens that do not form a full chunk are
-        ignored — the engine only stores chunk-aligned data, mirroring the
-        GPU store path.
-
-        For MLA models (``world_size == 1`` in the registration), only one
-        shard per chunk is written; this matches the GPU path where all TP
-        workers share the same object per chunk.
+        ``payload`` is interpreted as a contiguous KV_2LTD tensor of shape
+        ``[2, L, T, D]`` with full (un-sharded) hidden dim ``D``. It is split
+        along ``T`` into ``chunk_size`` chunks and along ``D`` into
+        ``world_size`` per-worker shards. Trailing sub-chunk tokens are
+        ignored, mirroring the GPU store path.
 
         Args:
-            model_name: Name of the model. Must match a registered GPU
-                context, otherwise ``KeyError`` is raised.
+            model_name: Registered model name.
             tokens: Token sequence the bytes are keyed by.
             payload: KV cache bytes in canonical KV_2LTD layout.
-            cache_salt: Optional per-namespace isolation salt; passed
-                through to ``ObjectKey.cache_salt`` so concurrent
-                experiments do not collide.
+            cache_salt: Per-namespace isolation salt.
 
         Returns:
-            ``StoreBytesResult`` describing how many tokens / chunks were
-            actually persisted. ``stored_chunks`` may be less than
-            ``total_chunks`` if some keys could not be reserved (for
-            example, L1 was full).
+            How many tokens / chunks were actually persisted; ``stored_chunks``
+            may be less than ``total_chunks`` on L1 capacity pressure.
 
         Raises:
             KeyError: If ``model_name`` is not registered.
-            ValueError: If ``payload`` length does not match
-                ``total_chunks * world_size * per_shard_byte_size``.
+            ValueError: If ``payload`` length does not match the layout.
         """
         layout_desc, world_size = self._resolve_model(model_name)
 
@@ -835,11 +781,12 @@ class MPCacheEngine:
         )
         obj_keys = ipc_key_to_object_keys(ipc_key, chunk_hashes)
 
+        d_per_worker = per_shard_shape[3]
         full_shape = (
-            int(per_shard_shape[0]),
-            int(per_shard_shape[1]),
+            per_shard_shape[0],
+            per_shard_shape[1],
             total_tokens,
-            int(per_shard_shape[3]) * world_size,
+            d_per_worker * world_size,
         )
         payload_tensor = _bytes_to_tensor(payload, full_shape, per_shard_dtype)
 
@@ -847,7 +794,6 @@ class MPCacheEngine:
 
         stored_chunks_per_worker = [0] * world_size
         written_keys: list[ObjectKey] = []
-        d_per_worker = int(per_shard_shape[3])
         for chunk_idx in range(total_chunks):
             for worker_id in range(world_size):
                 obj_key = obj_keys[chunk_idx * world_size + worker_id]
@@ -883,26 +829,17 @@ class MPCacheEngine:
     ) -> RetrieveBytesResult:
         """Retrieve KV cache bytes for the longest cached prefix of ``tokens``.
 
-        Internally submits a prefetch task for all chunk×worker keys, blocks
-        until the prefetch finishes, then reads the L1 prefix that hit and
-        reassembles a KV_2LTD :math:`[2, L, hit\\_tokens, D]` payload. The
-        returned bytes only cover the cached prefix; trailing chunks not in
-        cache are not returned and the caller should treat them as misses.
-
-        The retrieve is **always non-destructive** regardless of any
-        ``remove_after_retrieve`` engine setting — the editing-friendly
-        semantics this API targets require the cache to remain intact after
-        a read.
+        The returned bytes are a KV_2LTD ``[2, L, hit_tokens, D]`` payload.
+        Always non-destructive: ignores any ``remove_after_retrieve`` engine
+        setting.
 
         Args:
-            model_name: Name of the model. Must match a registered GPU
-                context, otherwise ``KeyError`` is raised.
+            model_name: Registered model name.
             tokens: Token sequence to retrieve.
-            cache_salt: Optional per-namespace isolation salt.
+            cache_salt: Per-namespace isolation salt.
 
         Returns:
-            ``RetrieveBytesResult`` carrying the prefix bytes and hit
-            metadata. ``payload`` is empty when nothing hit.
+            Prefix bytes plus hit metadata; ``payload`` is empty on a miss.
 
         Raises:
             KeyError: If ``model_name`` is not registered.
@@ -942,10 +879,10 @@ class MPCacheEngine:
         hit_obj_keys = obj_keys[: hit_chunks * world_size]
         per_shard_shape = layout_desc.shapes[0]
         per_shard_dtype = layout_desc.dtypes[0]
-        d_per_worker = int(per_shard_shape[3])
+        d_per_worker = per_shard_shape[3]
         out_shape = (
-            int(per_shard_shape[0]),
-            int(per_shard_shape[1]),
+            per_shard_shape[0],
+            per_shard_shape[1],
             hit_tokens,
             d_per_worker * world_size,
         )
@@ -993,21 +930,15 @@ class MPCacheEngine:
         *,
         cache_salt: str = "",
     ) -> LookupBytesResult:
-        """Return the cached-prefix length for ``tokens`` without moving bytes.
-
-        Submits a prefetch task and blocks until it completes, then releases
-        any L1 read locks taken during prefetch. No payload is materialized,
-        so this is the cheap way for clients to probe the cache state
-        before paying the bandwidth of a full retrieve.
+        """Probe the cached-prefix length for ``tokens`` without moving bytes.
 
         Args:
-            model_name: Name of the model.
+            model_name: Registered model name.
             tokens: Token sequence to probe.
-            cache_salt: Optional per-namespace isolation salt.
+            cache_salt: Per-namespace isolation salt.
 
         Returns:
-            ``LookupBytesResult`` reporting the longest chunk-aligned prefix
-            currently in cache for these tokens.
+            The longest chunk-aligned prefix currently in cache.
 
         Raises:
             KeyError: If ``model_name`` is not registered.

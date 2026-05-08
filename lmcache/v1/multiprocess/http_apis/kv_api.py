@@ -12,9 +12,6 @@ dim and all chunks concatenated along the token dim. See
 ``docs/design/v1/multiprocess/http_apis/kv_edit_api.md``.
 """
 
-# Standard
-from typing import Any
-
 # Third Party
 from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
@@ -22,6 +19,7 @@ from pydantic import BaseModel, Field
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.multiprocess.server import MPCacheEngine
 
 logger = init_logger(__name__)
 
@@ -55,7 +53,7 @@ class _LookupOrRetrieveBody(BaseModel):
     )
 
 
-def _engine_or_503(request: Request) -> Any:
+def _engine_or_503(request: Request) -> MPCacheEngine:
     """Resolve the MP engine off ``app.state`` or raise a 503 JSON error."""
     engine = getattr(request.app.state, "engine", None)
     if engine is None:
@@ -78,7 +76,7 @@ def _parse_int_list(header_value: str) -> list[int]:
 
 
 @router.post("/api/kv/store")
-async def store_kv(request: Request) -> Any:
+async def store_kv(request: Request) -> dict[str, int | str]:
     """Store opaque KV cache bytes for a token sequence.
 
     The request body is the raw KV cache payload in the canonical KV_2LTD
@@ -143,7 +141,7 @@ async def store_kv(request: Request) -> Any:
 
 
 @router.post("/api/kv/retrieve")
-async def retrieve_kv(body: _LookupOrRetrieveBody, request: Request) -> Any:
+async def retrieve_kv(body: _LookupOrRetrieveBody, request: Request) -> Response:
     """Retrieve KV cache bytes for the longest cached prefix.
 
     Returns the binary KV payload as the response body, with hit metadata
@@ -184,7 +182,7 @@ async def retrieve_kv(body: _LookupOrRetrieveBody, request: Request) -> Any:
 
 
 @router.post("/api/kv/lookup")
-async def lookup_kv(body: _LookupOrRetrieveBody, request: Request) -> Any:
+async def lookup_kv(body: _LookupOrRetrieveBody, request: Request) -> JSONResponse:
     """Probe how much of ``tokens`` is currently cached, without moving bytes.
 
     Useful for clients that want to decide whether to download a large
