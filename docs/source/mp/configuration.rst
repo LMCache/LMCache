@@ -243,14 +243,14 @@ The order of ``--l2-adapter`` arguments determines the adapter order (cascade).
 
 Registered adapter types: ``nixl_store``, ``nixl_store_dynamic``, ``fs``,
 ``fs_native``, ``mock``, ``mooncake_store``, ``s3``, ``resp``, ``plugin``,
-``native_plugin``.
+``native_plugin``, ``raw_block``, ``dax``.
 
 ``nixl_store`` -- NIXL-based persistent storage
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Fields:
 
-- ``backend`` *(required)*: One of ``POSIX``, ``GDS``, ``GDS_MT``, ``HF3FS``, ``OBJ``.
+- ``backend`` *(required)*: One of ``POSIX``, ``GDS``, ``GDS_MT``, ``HF3FS``, ``OBJ``, ``AZURE_BLOB``.
 - ``backend_params`` *(required for file-based backends)*: Dict of string
   key-value pairs.  File-based backends (``GDS``, ``GDS_MT``, ``POSIX``,
   ``HF3FS``) require ``file_path`` and ``use_direct_io``.
@@ -274,6 +274,10 @@ Examples:
 
     # OBJ backend (object store -- no file_path needed)
     --l2-adapter '{"type": "nixl_store", "backend": "OBJ", "backend_params": {}, "pool_size": 32}'
+
+    # AZURE_BLOB backend
+    --l2-adapter '{"type": "nixl_store", "backend": "AZURE_BLOB", "backend_params": {"account_url": "https://<account_name>.blob.core.windows.net", "container_name": "<container_name>"}, "pool_size": 32}'
+
 
 ``fs`` -- File-system backed storage
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

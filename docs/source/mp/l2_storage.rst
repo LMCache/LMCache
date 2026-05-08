@@ -44,7 +44,7 @@ high-performance storage I/O.
 **Required fields:**
 
 - ``backend``: Storage backend -- one of ``POSIX``, ``GDS``, ``GDS_MT``,
-  ``HF3FS``, ``OBJ``.
+  ``HF3FS``, ``OBJ``, ``AZURE_BLOB``.
 - ``pool_size``: Number of storage descriptors to pre-allocate (must be > 0).
 
 **Backend-specific parameters (``backend_params``):**
@@ -54,7 +54,7 @@ File-based backends (``GDS``, ``GDS_MT``, ``POSIX``, ``HF3FS``) require:
 - ``file_path``: Directory path for storing L2 data.
 - ``use_direct_io``: ``"true"`` or ``"false"`` -- whether to use direct I/O.
 
-The ``OBJ`` backend (object store) does not require ``file_path``.
+The ``OBJ`` and ``AZURE_BLOB`` backends (object stores) do not require ``file_path``.
 
 **Backend descriptions:**
 
@@ -75,6 +75,8 @@ The ``OBJ`` backend (object store) does not require ``file_path``.
      - Shared file system backend (e.g., for distributed/networked storage).
    * - ``OBJ``
      - Object store backend.  No local file path required.
+   * - ``AZURE_BLOB``
+     - Object store backend for Azure Blob Storage.  No local file path required.
 
 **Configuration examples:**
 
@@ -95,6 +97,9 @@ The ``OBJ`` backend (object store) does not require ``file_path``.
     # OBJ backend
     --l2-adapter '{"type": "nixl_store", "backend": "OBJ", "backend_params": {}, "pool_size": 32}'
 
+    # AZURE_BLOB backend
+    --l2-adapter '{"type": "nixl_store", "backend": "AZURE_BLOB", "backend_params": {"account_url": "https://<account_name>.blob.core.windows.net", "container_name": "<container_name>"}, "pool_size": 32}'
+
 ``nixl_store_dynamic`` -- NIXL-based dynamic storage with persist/recover
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -108,7 +113,7 @@ per-operation instead of pre-allocating them at init. This enables:
 .. note::
 
    Only file-based backends are supported (``POSIX``, ``GDS``, ``GDS_MT``,
-   ``HF3FS``). The ``OBJ`` backend is not supported yet.
+   ``HF3FS``). The ``OBJ`` and ``AZURE_BLOB`` backends are not supported yet.
 
 **Required fields:**
 
@@ -435,11 +440,15 @@ If the Mooncake headers are not installed in the system include path
 
 All other keys in the JSON config (except ``type``, ``num_workers``,
 and ``eviction``) are forwarded **as-is** to Mooncake's
-``setup_internal(ConfigDict)``.  Refer to the
+``store.setup(config: dict)`` API (introduced in
+`Mooncake PR #1445 <https://github.com/kvcache-ai/Mooncake/pull/1445>`_).
+Older Mooncake builds that only expose the positional-arg ``setup()``
+signature are still supported -- LMCache transparently falls back to
+the legacy form on :class:`TypeError`.  Refer to the
 `Mooncake documentation <https://github.com/kvcache-ai/Mooncake>`_
 for available setup keys (e.g., ``local_hostname``,
-``metadata_server``, ``master_server_address``, ``protocol``,
-``device_name``, ``global_segment_size``).
+``metadata_server``, ``master_server_addr``, ``protocol``,
+``rdma_devices``, ``global_segment_size``).
 
 **Configuration example:**
 
@@ -450,7 +459,7 @@ for available setup keys (e.g., ``local_hostname``,
       "num_workers": 4,
       "local_hostname": "node01",
       "metadata_server": "http://localhost:8080/metadata",
-      "master_server_address": "localhost:50051",
+      "master_server_addr": "localhost:50051",
       "protocol": "tcp",
       "local_buffer_size": "3221225472"
       "global_segment_size": "3221225472"
