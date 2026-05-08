@@ -368,9 +368,15 @@ class BlendEngineV2(MPCacheEngine):
         storage_manager_config: StorageManagerConfig,
         chunk_size: int = 256,
         hash_algorithm: str = "blake3",
+        reap_after_seconds: float = 30.0,
+        reaper_interval_seconds: float = 10.0,
     ):
         super().__init__(
-            storage_manager_config, chunk_size, hash_algorithm=hash_algorithm
+            storage_manager_config,
+            chunk_size,
+            hash_algorithm=hash_algorithm,
+            reap_after_seconds=reap_after_seconds,
+            reaper_interval_seconds=reaper_interval_seconds,
         )
 
         self._cb_gpu_contexts: dict[int, PlainGPUCacheContext] = {}
@@ -1165,6 +1171,8 @@ def run_cache_server(
         storage_manager_config=storage_manager_config,
         chunk_size=mp_config.chunk_size,
         hash_algorithm=mp_config.hash_algorithm,
+        reap_after_seconds=mp_config.reap_after_seconds,
+        reaper_interval_seconds=mp_config.reaper_interval_seconds,
     )
 
     # Initialize the message queue server

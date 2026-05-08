@@ -4,6 +4,7 @@
 from dataclasses import dataclass
 from typing import Any
 import os
+import random
 import threading
 
 # Third Party
@@ -21,6 +22,7 @@ from lmcache.v1.multiprocess.custom_types import (
 )
 from lmcache.v1.multiprocess.mq import MessageQueueClient, MessagingFuture
 from lmcache.v1.multiprocess.protocol import RequestType, get_response_class
+from lmcache.v1.multiprocess.protocols.controller import PING_SENTINEL_INSTANCE_ID
 from lmcache.v1.periodic_thread import PeriodicThread, ThreadLevel, ThreadRunSummary
 
 logger = init_logger(__name__)
@@ -30,6 +32,13 @@ logger = init_logger(__name__)
 DEFAULT_MQ_TIMEOUT: float = 300.0
 # Interval (seconds) between periodic heartbeat pings to the server.
 DEFAULT_HEARTBEAT_INTERVAL: float = 10.0
+
+# Number of consecutive failed pings tolerated before the heartbeat thread
+# clears `_health_event` for the *first* time on a fresh adapter. After
+# the first successful ping latches `_first_success_seen`, any single
+# steady-state failure flips immediately. Absorbs a one-off GIL stall
+# during warmup without weakening steady-state detection.
+COLD_START_FAILURE_THRESHOLD: int = 2
 
 
 def wrap_kv_caches(kv_caches: dict[str, torch.Tensor]) -> KVCache:
@@ -80,20 +89,40 @@ def get_lmcache_chunk_size(
 def send_ping(
     mq_client: MessageQueueClient,
     timeout: float,
-) -> bool:
-    """Send a PING request and return the result.
+    instance_id: int,
+) -> bool | None:
+    """Send a PING request and return a tri-state result.
+
+    The heartbeat thread needs to distinguish three outcomes — the previous
+    bool-only signature conflated transient failure with the terminal
+    "server doesn't recognize me" signal.
+
+    Args:
+        mq_client: The message queue client.
+        timeout: Seconds to wait for the server response.
+        instance_id: Sender identity. Workers pass their random
+            ``instance_id``; the scheduler adapter passes
+            ``PING_SENTINEL_INSTANCE_ID`` (no liveness tracking).
 
     Returns:
-        True if server is healthy, False on timeout or error.
+        ``True`` — the server returned True (known live worker, or
+            sentinel echo); we are healthy.
+        ``False`` — the server returned False, meaning our
+            ``instance_id`` is not in its liveness table. Terminal.
+            Caller must clear ``_health_event`` and stop pinging;
+            operator must restart vLLM.
+        ``None`` — transient: ``TimeoutError``, deserialization error,
+            or other exception. Caller treats this as a missed ping
+            (counted toward the cold-start grace).
     """
     try:
-        future = send_lmcache_request(mq_client, RequestType.PING, [])
+        future = send_lmcache_request(mq_client, RequestType.PING, [instance_id])
         return future.result(timeout=timeout)
     except TimeoutError:
-        return False
+        return None
     except Exception:
         logger.debug("Ping failed with exception", exc_info=True)
-        return False
+        return None
 
 
 @dataclass
@@ -179,14 +208,23 @@ class HeartbeatThread(PeriodicThread):
     """Periodically checks server health via PING.
 
     Manages a threading.Event that adapters use to gate operations.
-    When unhealthy, the adapter enters degraded mode; if the server
-    recovers, the adapter automatically resumes normal operation.
+    Distinguishes three outcomes from `send_ping`:
+
+    - True (healthy): set `_health_event`, latch `_first_success_seen`.
+    - None (transient — timeout/exception): count toward the cold-start
+      grace. In cold-start (no successful ping yet), require
+      `COLD_START_FAILURE_THRESHOLD` consecutive failures before clearing
+      `_health_event`. In steady-state, clear immediately.
+    - False (server doesn't know our instance_id): terminal — clear
+      `_health_event`, log ERROR, **stop the heartbeat thread**. The
+      adapter does not auto-recover; operator restarts vLLM.
     """
 
     def __init__(
         self,
         mq_client: MessageQueueClient,
         health_event: threading.Event,
+        instance_id: int,
         interval: float = DEFAULT_HEARTBEAT_INTERVAL,
     ):
         """
@@ -196,6 +234,8 @@ class HeartbeatThread(PeriodicThread):
                 Set when the server is healthy, cleared when unhealthy.
                 Adapters check this event to decide whether to proceed
                 with operations or enter degraded mode.
+            instance_id: Sender identity (worker's random `instance_id`,
+                or `PING_SENTINEL_INSTANCE_ID` for the scheduler adapter).
             interval: Seconds between heartbeat pings and ping timeout.
         """
         super().__init__(
@@ -205,27 +245,74 @@ class HeartbeatThread(PeriodicThread):
         )
         self._mq_client = mq_client
         self._health_event = health_event
+        self._instance_id = instance_id
         self._interval = interval
+        # Cold-start grace state. `_first_success_seen` latches True on
+        # the first healthy ping and is never reset, so steady-state
+        # detection (any single failure flips immediately) is restored
+        # for the rest of the thread's lifetime.
+        self._consecutive_failures: int = 0
+        self._first_success_seen: bool = False
 
     def _execute(self) -> ThreadRunSummary:
         was_healthy = self._health_event.is_set()
-        healthy = send_ping(self._mq_client, timeout=self._interval)
+        result = send_ping(
+            self._mq_client,
+            timeout=self._interval,
+            instance_id=self._instance_id,
+        )
 
-        if healthy:
+        if result is True:
+            self._consecutive_failures = 0
+            self._first_success_seen = True
             self._health_event.set()
             if not was_healthy:
                 logger.warning(
                     "LMCache server is healthy again — resuming normal operation"
                 )
-        else:
-            self._health_event.clear()
-            if was_healthy:
-                logger.warning("LMCache server is unhealthy — entering degraded mode")
+            return ThreadRunSummary(success=True, message="healthy")
 
-        return ThreadRunSummary(
-            success=True,
-            message="healthy" if healthy else "unhealthy",
-        )
+        if result is False:
+            # Terminal: server explicitly said it doesn't know us.
+            self._health_event.clear()
+            logger.error(
+                "LMCache server reports instance_id=%d unknown (likely "
+                "reaped after a network partition). Stopping heartbeat. "
+                "Operator must restart vLLM to recover.",
+                self._instance_id,
+            )
+            # Schedule self-stop. Calling `stop()` from inside `_execute`
+            # is supported by `PeriodicThread`: it sets the stop event,
+            # the loop returns after this tick, and we don't deadlock on
+            # `join()` because we don't wait on ourselves.
+            self.stop(timeout=0.0)
+            return ThreadRunSummary(success=True, message="server-rejected-instance")
+
+        # result is None: transient failure (timeout / exception).
+        self._consecutive_failures += 1
+        if not was_healthy:
+            # Already degraded; nothing to do beyond the counter bump.
+            return ThreadRunSummary(success=True, message="unhealthy")
+
+        if (
+            not self._first_success_seen
+            and self._consecutive_failures < COLD_START_FAILURE_THRESHOLD
+        ):
+            # Cold-start grace: absorb up to N-1 transient failures
+            # before flipping unhealthy on a fresh adapter that hasn't
+            # yet observed a single success.
+            return ThreadRunSummary(
+                success=True,
+                message=(
+                    f"cold-start-fail "
+                    f"({self._consecutive_failures}/"
+                    f"{COLD_START_FAILURE_THRESHOLD})"
+                ),
+            )
+
+        self._health_event.clear()
+        logger.warning("LMCache server is unhealthy — entering degraded mode")
+        return ThreadRunSummary(success=True, message="unhealthy")
 
 
 @dataclass
@@ -344,7 +431,13 @@ class LMCacheMPSchedulerAdapter:
         return self._health_event.is_set()
 
     def _ensure_heartbeat_started(self) -> None:
-        """Lazily start the heartbeat thread on first use."""
+        """Lazily start the heartbeat thread on first use.
+
+        The scheduler-side heartbeat is a server-health probe only —
+        it sends ``PING_SENTINEL_INSTANCE_ID`` so the server returns
+        True without tracking liveness. There is no reap path driven by
+        scheduler PINGs; the worker adapter is what carries liveness.
+        """
         if self._heartbeat is not None:
             return
         with self._heartbeat_lock:
@@ -353,6 +446,7 @@ class LMCacheMPSchedulerAdapter:
             self._heartbeat = HeartbeatThread(
                 mq_client=self.mq_client,
                 health_event=self._health_event,
+                instance_id=PING_SENTINEL_INSTANCE_ID,
                 interval=self._heartbeat_interval,
             )
             self._heartbeat.start()
@@ -648,8 +742,12 @@ class LMCacheMPWorkerAdapter:
         self.mq_client = MessageQueueClient(server_url, context)
         self._mq_timeout = mq_timeout
 
-        # Instance id for GPU worker
-        self.instance_id = os.getpid()
+        # Instance id for GPU worker — opaque random 63-bit int generated
+        # once at adapter construction. Replaces the previous `os.getpid()`,
+        # which collided across containerized vLLM replicas that share PID
+        # namespaces (e.g. PID 1 in every replica). The server treats this
+        # value as opaque; no code on either side parses it as a PID.
+        self.instance_id = random.getrandbits(63)
 
         # Registered kv caches from vLLM
         self.kv_caches: dict[str, torch.Tensor] = {}
@@ -745,7 +843,13 @@ class LMCacheMPWorkerAdapter:
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """
-        Register the kv caches with LMCache server
+        Register the kv caches with LMCache server.
+
+        After the REGISTER ack succeeds, the heartbeat thread is started.
+        Doing it here (rather than lazily on first store/retrieve) means
+        the server starts receiving PINGs within one heartbeat interval,
+        independent of warmup duration or whether traffic has begun. On
+        REGISTER failure, no heartbeat thread is created.
 
         Args:
             kv_caches: A dict of kv caches to register. The keys are the
@@ -781,8 +885,17 @@ class LMCacheMPWorkerAdapter:
                 f"{self._mq_timeout}s. Is the server running?"
             ) from None
 
+        # Eager-start the heartbeat now that registration is complete.
+        self._ensure_heartbeat_started()
+
     def _ensure_heartbeat_started(self) -> None:
-        """Lazily start the heartbeat thread on first use."""
+        """Start the heartbeat thread (idempotent).
+
+        Called from `register_kv_caches` after the REGISTER ack. The
+        previous lazy-start on first store/retrieve has been removed: by
+        starting here we get bounded "register-to-first-PING" latency
+        regardless of when (or whether) traffic flows.
+        """
         if self._heartbeat is not None:
             return
         with self._heartbeat_lock:
@@ -791,6 +904,7 @@ class LMCacheMPWorkerAdapter:
             self._heartbeat = HeartbeatThread(
                 mq_client=self.mq_client,
                 health_event=self._health_event,
+                instance_id=self.instance_id,
                 interval=self._heartbeat_interval,
             )
             self._heartbeat.start()
@@ -813,8 +927,6 @@ class LMCacheMPWorkerAdapter:
                 model inference step
             cache_salt: Per-user isolation salt.
         """
-        self._ensure_heartbeat_started()
-
         if not self.is_healthy:
             return
 
@@ -851,8 +963,6 @@ class LMCacheMPWorkerAdapter:
                 model inference step
             cache_salt: Per-user isolation salt.
         """
-        self._ensure_heartbeat_started()
-
         if not self.is_healthy:
             self.error_block_ids.update(op.block_ids)
             return
@@ -1070,8 +1180,14 @@ class LMCacheMPWorkerAdapter:
 
     def shutdown(self):
         """
-        Shutdown the LMCache MP worker adapter
+        Shutdown the LMCache MP worker adapter.
+
+        Stops the heartbeat thread first so it can't issue a PING on a
+        closing mq_client, then sends UNREGISTER_KV_CACHE and closes
+        the client / telemetry.
         """
+        if self._heartbeat is not None:
+            self._heartbeat.stop()
         logger.info("Unregistering kv caches")
         try:
             send_lmcache_request(

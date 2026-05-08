@@ -47,6 +47,16 @@ class MPServerConfig:
     )
     """Runtime plugin configuration (locations + extra config)."""
 
+    reap_after_seconds: float = 30.0
+    """Time without a heartbeat after which a registered worker is reaped
+    (its `gpu_contexts` entry is removed and `unregister_kv_cache` runs).
+    Operator tuning rule: keep `reap_after_seconds >= 3 *
+    adapter_heartbeat_interval` so a single missed ping never reaps."""
+
+    reaper_interval_seconds: float = 10.0
+    """How often the server-side reaper thread wakes up to scan for
+    workers whose last heartbeat exceeds `reap_after_seconds`."""
+
 
 @dataclass
 class RuntimePluginConfig:
@@ -167,6 +177,22 @@ def add_mp_server_args(
         'Example: \'{"plugin.frontend.heartbeat_url": '
         '"http://localhost:5000/heartbeat"}\'',
     )
+    mp_group.add_argument(
+        "--reap-after-seconds",
+        type=float,
+        default=30.0,
+        help="Time (s) without a heartbeat after which a worker is reaped "
+        "(its gpu_contexts entry is dropped). Default 30. Keep "
+        "reap_after_seconds >= 3 * adapter_heartbeat_interval so that a "
+        "single missed ping never reaps.",
+    )
+    mp_group.add_argument(
+        "--reaper-interval-seconds",
+        type=float,
+        default=10.0,
+        help="How often (s) the server-side reaper thread scans for stale "
+        "workers. Default 10.",
+    )
     return parser
 
 
@@ -202,6 +228,8 @@ def parse_args_to_mp_server_config(
             locations=(args.runtime_plugin_locations or []),
             extra_config=plugin_extra,
         ),
+        reap_after_seconds=args.reap_after_seconds,
+        reaper_interval_seconds=args.reaper_interval_seconds,
     )
 
 
