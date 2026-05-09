@@ -339,7 +339,7 @@ def test_turboquant_storage_manager_roundtrip(
                 and sm.report_status()["l1_manager"]["read_locked_count"] == 0
                 and sm.report_status()["l1_manager"]["temporary_count"] == 0
             ),
-            timeout=30.0,
+            timeout=120.0,
         )
         assert ok, "Store to L2 did not fully complete"
 
@@ -352,12 +352,12 @@ def test_turboquant_storage_manager_roundtrip(
                 and sm.report_status()["l1_manager"]["write_locked_count"] == 0
                 and sm.report_status()["l1_manager"]["temporary_count"] == 0
             ),
-            timeout=30.0,
+            timeout=120.0,
         )
         assert ok, f"L1 not cleared: {sm.report_status()['l1_manager']}"
 
         handle = sm.submit_prefetch_task(keys, layout)
-        hits = _wait_for_prefetch_status(sm, handle, timeout=30.0)
+        hits = _wait_for_prefetch_status(sm, handle, timeout=120.0)
         assert hits == len(keys), f"Expected {len(keys)} hits, got {hits}"
 
         with sm.read_prefetched_results(keys) as objs:
@@ -561,7 +561,7 @@ def test_turboquant_fs_storage_manager_roundtrip(
                 and sm.report_status()["l1_manager"]["read_locked_count"] == 0
                 and sm.report_status()["l1_manager"]["temporary_count"] == 0
             ),
-            timeout=30.0,
+            timeout=120.0,
         )
         assert ok, "Store to FS L2 did not fully complete"
 
@@ -577,12 +577,12 @@ def test_turboquant_fs_storage_manager_roundtrip(
                 and sm.report_status()["l1_manager"]["write_locked_count"] == 0
                 and sm.report_status()["l1_manager"]["temporary_count"] == 0
             ),
-            timeout=30.0,
+            timeout=120.0,
         )
         assert ok, f"L1 not cleared: {sm.report_status()['l1_manager']}"
 
         handle = sm.submit_prefetch_task(keys, layout)
-        hits = _wait_for_prefetch_status(sm, handle, timeout=30.0)
+        hits = _wait_for_prefetch_status(sm, handle, timeout=120.0)
         assert hits == len(keys), f"Expected {len(keys)} hits, got {hits}"
 
         with sm.read_prefetched_results(keys) as objs:

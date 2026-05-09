@@ -16,7 +16,7 @@ import torch
 
 import triton
 import triton.language as tl
-from lmcache.v1.distributed.serde.turboquant_decode_kernel import _use_fp8_e4b15
+from lmcache.v1.distributed.serde.turboquant.decode_kernel import _use_fp8_e4b15
 
 # ═══════════════════════════════════════════════════════════════════════
 # Shared: value uniform quantization + pack + scale/zero store

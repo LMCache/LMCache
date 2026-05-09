@@ -539,7 +539,7 @@ class TurboQuantSerializer(Serializer):
             else torch.empty(n_bytes, dtype=torch.uint8, device=cuda_device)
         )
 
-        from lmcache.v1.distributed.serde.turboquant_store_kernel import (
+        from lmcache.v1.distributed.serde.turboquant.store_kernel import (
             triton_turboquant_store,
         )
 
@@ -650,7 +650,7 @@ class TurboQuantDeserializer(Deserializer):
             )
         )
 
-        from lmcache.v1.distributed.serde.turboquant_decode_kernel import (
+        from lmcache.v1.distributed.serde.turboquant.decode_kernel import (
             _tq_full_dequant_kv,
             _use_fp8_e4b15,
         )
