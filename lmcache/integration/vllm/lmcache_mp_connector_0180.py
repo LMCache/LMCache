@@ -460,6 +460,9 @@ class LMCacheMPConnector(KVConnectorBase_V1):
     ):
         super().__init__(vllm_config, role, kv_cache_config)
 
+        # fast-fail if interprocess is not supported
+	check_interprocess_event_support()
+
         assert vllm_config.kv_transfer_config is not None
         server_host = vllm_config.kv_transfer_config.get_from_extra_config(
             "lmcache.mp.host", "tcp://localhost"
@@ -562,7 +565,6 @@ class LMCacheMPConnector(KVConnectorBase_V1):
 
         with torch_dev.stream(torch_dev.current_stream()):
             # Not all backends support interprocess Events (CUDA IPC specific)
-            check_interprocess_event_support()
             event = torch_dev.Event(interprocess=True)
             event.record()
 
@@ -626,7 +628,6 @@ class LMCacheMPConnector(KVConnectorBase_V1):
 
         with torch_dev.stream(torch_dev.current_stream()):
             # Not all backends support interprocess Events (CUDA IPC specific)
-            check_interprocess_event_support()
             event = torch_dev.Event(interprocess=True)
             event.record()
 

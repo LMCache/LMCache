@@ -84,6 +84,13 @@ def check_interprocess_event_support() -> None:
             "Multiprocess IPC requires CUDA."
         )
 
+    if not hasattr(torch_dev.Event, "from_ipc_handle"):
+        raise RuntimeError(
+            f"Backend '{torch_device_type}' does not support IPC event "
+            "handles (Event.from_ipc_handle not available). "
+            "Multiprocess IPC requires CUDA."
+        )
+
 
 # Math utility functions
 def cdiv(a: int, b: int) -> int:
