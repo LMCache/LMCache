@@ -708,23 +708,23 @@ class TurboQuantDeserializer(Deserializer):
             else head_dim
         )
 
+        k_out = torch.empty(
+            (1, num_heads, alloc_len, head_dim),
+            dtype=torch.float16,
+            device=cuda_device,
+        )
+        v_out = torch.empty(
+            (1, num_heads, alloc_len, head_dim),
+            dtype=torch.float16,
+            device=cuda_device,
+        )
+
         for layer_idx in range(num_layers):
             kv_cache_layer = src_view[layer_idx]
             pi_t, _, centroids = _make_tq_tensors_for_layer(
                 cfg,
                 layer_idx,
                 cuda_device,
-            )
-
-            k_out = torch.empty(
-                (1, num_heads, alloc_len, head_dim),
-                dtype=torch.float16,
-                device=cuda_device,
-            )
-            v_out = torch.empty(
-                (1, num_heads, alloc_len, head_dim),
-                dtype=torch.float16,
-                device=cuda_device,
             )
 
             grid = (alloc_len, num_heads)
