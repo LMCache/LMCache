@@ -240,9 +240,8 @@ def _create_mooncake_store_l2_adapter(
         "config": config.setup_config,
         "num_workers": config.num_workers,
         "l1_registration": l1_registration,
+        "per_op_workers" : config.per_op_workers,
     }
-    if config.per_op_workers is not None:
-        native_client_kwargs["per_op_workers"] = config.per_op_workers
 
     native_client = LMCacheMooncakeClient(**native_client_kwargs)
     logger.info(
