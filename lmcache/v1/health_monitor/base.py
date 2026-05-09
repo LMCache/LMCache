@@ -235,7 +235,7 @@ class HealthMonitor(PeriodicThread):
         cls: type[HealthCheck]
         for cls in discover_subclasses(
             "lmcache.v1.health_monitor.checks",
-            HealthCheck,
+            HealthCheck,  # type: ignore[type-abstract]
             module_filter=lambda name: not name.startswith("_"),
             include_abstract=True,
             require_defined_in_module=False,

@@ -245,7 +245,7 @@ class ConnectorManager:
         """Automatically load all builtin remote connector adapters."""
         for cls in discover_subclasses(
             "lmcache.v1.storage_backend.connector",
-            ConnectorAdapter,
+            ConnectorAdapter,  # type: ignore[type-abstract]
             module_filter=lambda name: (
                 not name.startswith("_") and name.endswith("_adapter")
             ),

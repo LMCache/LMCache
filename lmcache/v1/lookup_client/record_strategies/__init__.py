@@ -18,7 +18,7 @@ def _discover_strategies() -> Dict[str, Type[RecordStrategy]]:
     strategies: Dict[str, Type[RecordStrategy]] = {}
     for cls in discover_subclasses(
         __name__,
-        RecordStrategy,
+        RecordStrategy,  # type: ignore[type-abstract]
         include_abstract=True,
         on_import_error=lambda mod, exc: None,
     ):
