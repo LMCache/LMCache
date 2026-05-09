@@ -426,6 +426,43 @@ class BlendEngineV2(MPCacheEngine):
                 instance_id,
             )
 
+    def report_status(self) -> dict:
+        """Return a status dict for the entire cache engine.
+
+        Extends the base dict with ``registered_cb_gpu_ids`` and
+        ``cb_gpu_context_meta`` so CB-only deployments are distinguishable
+        from "no engine connected" to ``/api/status`` clients.
+        """
+        status = super().report_status()
+
+        cb_gpu_context_meta: dict[str, dict] = {}
+        for gpu_id, meta in self._cb_gpu_context_meta.items():
+            model_name, world_size = meta
+            entry: dict = {
+                "model_name": model_name,
+                "world_size": world_size,
+            }
+            ctx = self._cb_gpu_contexts.get(gpu_id)
+            if ctx is not None:
+                # bytes per token = 2 (K+V) * num_layers * hidden_dim_size *
+                # itemsize; num_tokens is the cache capacity, not a per-token
+                # cost.
+                cache_size_per_token = (
+                    2 * ctx.num_layers * ctx.hidden_dim_size * ctx.dtype.itemsize
+                )
+                entry["kv_cache_layout"] = {
+                    "num_layers": ctx.num_layers,
+                    "num_tokens": ctx.num_tokens,
+                    "hidden_dim_size": ctx.hidden_dim_size,
+                    "dtype": str(ctx.dtype),
+                    "cache_size_per_token": cache_size_per_token,
+                }
+            cb_gpu_context_meta[str(gpu_id)] = entry
+
+        status["registered_cb_gpu_ids"] = list(self._cb_gpu_contexts.keys())
+        status["cb_gpu_context_meta"] = cb_gpu_context_meta
+        return status
+
     def cb_lookup_pre_computed(self, key: IPCCacheEngineKey) -> list[CBMatchResult]:
         """
         Lookup the pre-computed chunks in the underlying storage.

@@ -43,6 +43,7 @@ from lmcache.v1.distributed.config import (
 )
 from lmcache.v1.mp_observability.config import DEFAULT_OBSERVABILITY_CONFIG
 from lmcache.v1.multiprocess.blend_server_v2 import (
+    BlendEngineV2,
     BlendTokenRangeMatcher,
     _unique_token_coverage,
 )
@@ -1908,3 +1909,137 @@ def test_cb_store_final_v2_visible_to_cb_lookup_v2(
     assert len(cb_results) == 1, (
         "CB_LOOKUP_PRE_COMPUTED_V2 should find data stored via CB_STORE_FINAL"
     )
+
+
+# ---------------------------------------------------------------------------
+# 8. report_status() – CB-extended fields
+# ---------------------------------------------------------------------------
+#
+# These tests construct a BlendEngineV2 directly in the test process because
+# report_status() is invoked in-process by the FastAPI /api/status handler,
+# not over ZMQ. CUDA IPC unwrapping is bypassed via a monkeypatched
+# unwrap_kv_cache_tensors so the public cb_register_kv_cache path can run
+# without a cross-process producer.
+
+
+@pytest.fixture(scope="function")
+def in_process_blend_engine() -> Generator[BlendEngineV2, None, None]:
+    """Build a BlendEngineV2 in-process for direct method-call tests."""
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is not available")
+
+    config = StorageManagerConfig(
+        l1_manager_config=L1ManagerConfig(
+            memory_config=L1MemoryManagerConfig(
+                size_in_bytes=int(CPU_BUFFER_SIZE * 1024**3),
+                use_lazy=True,
+            ),
+        ),
+        eviction_config=EvictionConfig(eviction_policy="LRU"),
+    )
+    engine = BlendEngineV2(
+        storage_manager_config=config,
+        chunk_size=CHUNK_SIZE,
+    )
+    try:
+        yield engine
+    finally:
+        engine.close()
+
+
+@pytest.fixture(scope="function")
+def local_kv_cache_unwrap(monkeypatch, cb_client_context: CBClientContext):
+    """Bypass CUDA IPC unwrap so PlainGPUCacheContext can be built in-process.
+
+    Returns the local tensor that will back any KVCache the test registers.
+    """
+    # First Party
+    from lmcache.v1.multiprocess import gpu_context as gpu_context_mod
+
+    local_tensor = cb_client_context.gpu_kv_cache
+
+    def _local_unwrap(_kv_caches):
+        return [local_tensor]
+
+    monkeypatch.setattr(gpu_context_mod, "unwrap_kv_cache_tensors", _local_unwrap)
+    return local_tensor
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available(), reason="report_status CB tests require CUDA"
+)
+def test_report_status_no_cb_registrations(
+    in_process_blend_engine: BlendEngineV2,
+):
+    """Without any CB registration, the new fields are present and empty."""
+    status = in_process_blend_engine.report_status()
+
+    assert "registered_cb_gpu_ids" in status
+    assert "cb_gpu_context_meta" in status
+    assert status["registered_cb_gpu_ids"] == []
+    assert status["cb_gpu_context_meta"] == {}
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available(), reason="report_status CB tests require CUDA"
+)
+def test_report_status_surfaces_cb_registration(
+    in_process_blend_engine: BlendEngineV2,
+    cb_client_context: CBClientContext,
+    local_kv_cache_unwrap,
+):
+    """A CB-registered instance shows up in both new fields with correct shape."""
+    engine = in_process_blend_engine
+    instance_id = 4242
+
+    engine.cb_register_kv_cache(
+        instance_id,
+        cb_client_context.get_kv_cache(),
+        "testmodel",
+        1,
+    )
+
+    status = engine.report_status()
+
+    assert status["registered_cb_gpu_ids"] == [instance_id]
+
+    entry = status["cb_gpu_context_meta"][str(instance_id)]
+    assert entry["model_name"] == "testmodel"
+    assert entry["world_size"] == 1
+
+    layout = entry["kv_cache_layout"]
+    assert layout["num_layers"] == cb_client_context.num_layers
+    assert layout["num_tokens"] == cb_client_context.num_tokens
+    assert layout["hidden_dim_size"] == cb_client_context.hidden_dim
+    assert layout["dtype"] == str(cb_client_context.dtype)
+
+    itemsize = torch.zeros(1, dtype=cb_client_context.dtype).element_size()
+    expected_bytes_per_token = (
+        2 * cb_client_context.num_layers * cb_client_context.hidden_dim * itemsize
+    )
+    assert layout["cache_size_per_token"] == expected_bytes_per_token
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available(), reason="report_status CB tests require CUDA"
+)
+def test_report_status_unregister_clears_cb_fields(
+    in_process_blend_engine: BlendEngineV2,
+    cb_client_context: CBClientContext,
+    local_kv_cache_unwrap,
+):
+    """Unregistering removes the entry from both new fields."""
+    engine = in_process_blend_engine
+    instance_id = 4243
+
+    engine.cb_register_kv_cache(
+        instance_id,
+        cb_client_context.get_kv_cache(),
+        "testmodel",
+        1,
+    )
+    engine.cb_unregister_kv_cache(instance_id)
+
+    status = engine.report_status()
+    assert status["registered_cb_gpu_ids"] == []
+    assert status["cb_gpu_context_meta"] == {}
