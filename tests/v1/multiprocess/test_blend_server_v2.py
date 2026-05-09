@@ -392,6 +392,92 @@ class TestUniqueTokenCoverage:
         assert hit_tokens <= requested_tokens
 
 
+class TestDedupOverlappingMatches:
+    """Greedy non-overlapping dedup applied in cb_lookup_pre_computed.
+
+    Re-implemented here because the production logic is inline (same pattern
+    as TestPrefixCandidateOverlapExclusion below).
+    """
+
+    def _make(self, ranges: list[tuple[int, int]]) -> list[CBMatchResult]:
+        return [
+            CBMatchResult(
+                old_st=st, old_ed=ed, cur_st=st, cur_ed=ed, hash=bytes([i % 256])
+            )
+            for i, (st, ed) in enumerate(ranges)
+        ]
+
+    def _dedup(self, results: list[CBMatchResult]) -> list[CBMatchResult]:
+        results = sorted(results, key=lambda r: r.cur_st)
+        deduped: list[CBMatchResult] = []
+        covered_end = -1
+        for r in results:
+            if r.cur_st >= covered_end:
+                deduped.append(r)
+                covered_end = r.cur_ed
+        return deduped
+
+    def test_empty(self):
+        assert self._dedup([]) == []
+
+    def test_single(self):
+        results = self._make([(0, 256)])
+        assert len(self._dedup(results)) == 1
+
+    def test_non_overlapping_kept(self):
+        results = self._make([(0, 256), (256, 512), (512, 768)])
+        assert len(self._dedup(results)) == 3
+
+    def test_adjacent_kept(self):
+        # cur_st >= covered_end is inclusive: [0,256) then [256,512) both kept.
+        results = self._make([(0, 256), (256, 512)])
+        deduped = self._dedup(results)
+        assert [(r.cur_st, r.cur_ed) for r in deduped] == [(0, 256), (256, 512)]
+
+    def test_fully_overlapping_dropped(self):
+        results = self._make([(100, 356), (100, 356), (100, 356)])
+        assert len(self._dedup(results)) == 1
+
+    def test_partially_overlapping_dropped(self):
+        # [(0,256), (50,306), (200,456)] — leftmost-first picks (0,256), then
+        # skips (50,306) and (200,456) since both start before covered_end=256.
+        results = self._make([(0, 256), (50, 306), (200, 456)])
+        deduped = self._dedup(results)
+        assert [(r.cur_st, r.cur_ed) for r in deduped] == [(0, 256)]
+
+    def test_chunk_aligned_duplicates_preserve_coverage(self):
+        # Realistic CB case: many fingerprint matches at the same chunk-aligned
+        # position (different stored chunks colliding on a query window). Dedup
+        # keeps one per slot and union coverage is preserved.
+        chunk_size = 256
+        num_chunks = 20
+        ranges = [
+            (i * chunk_size, (i + 1) * chunk_size)
+            for i in range(num_chunks)
+            for _ in range(3)
+        ]
+        results = self._make(ranges)
+        deduped = self._dedup(results)
+        assert len(deduped) == num_chunks
+        assert _unique_token_coverage(deduped) == _unique_token_coverage(results)
+
+    def test_overfetch_at_aligned_positions_collapses(self):
+        # Mirrors the reported 14.5x over-fetch shape, scaled down: 50 copies
+        # per slot for a 20-chunk query collapses to 20 chunks.
+        chunk_size = 256
+        num_chunks = 20
+        ranges = [
+            (i * chunk_size, (i + 1) * chunk_size)
+            for i in range(num_chunks)
+            for _ in range(50)
+        ]
+        deduped = self._dedup(self._make(ranges))
+        assert len(deduped) == num_chunks
+        assert [r.cur_st for r in deduped] == [
+            i * chunk_size for i in range(num_chunks)
+        ]
+
+
 class TestPrefixCandidateOverlapExclusion:
     """Verify that prefix candidates overlapping with fingerprint results are
     excluded, preventing overlapping writes in cb_retrieve_pre_computed."""

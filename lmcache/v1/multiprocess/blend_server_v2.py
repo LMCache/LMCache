@@ -493,8 +493,21 @@ class BlendEngineV2(MPCacheEngine):
             )
             return []
 
-        # Sort by query position and group consecutive matched chunks
+        # Sort by query position
         cb_match_result.sort(key=lambda r: r.cur_st)
+
+        # The sliding-window probe returns O(table_size) overlapping matches.
+        # Greedy leftmost-first picks one chunk per slot; lossless when matches
+        # are chunk-aligned (the CB case).
+        deduped: list[CBMatchResult] = []
+        covered_end = -1
+        for r in cb_match_result:
+            if r.cur_st >= covered_end:
+                deduped.append(r)
+                covered_end = r.cur_ed
+        cb_match_result = deduped
+
+        # Group consecutive matched chunks
         groups: list[list[CBMatchResult]] = []
         for result in cb_match_result:
             if groups and groups[-1][-1].cur_ed == result.cur_st:
