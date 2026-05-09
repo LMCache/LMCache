@@ -60,7 +60,7 @@ try:
     import zmq
 
     # First Party
-    from lmcache.utils import compress_slot_mapping
+    from lmcache.utils import EngineType, compress_slot_mapping
     from lmcache.v1.kv_layer_groups import (
         DTYPE_MAP,
         KVLayerGroupInfo,
@@ -280,7 +280,15 @@ def _send_register_kv_cache(
         )
 
     kv_caches = [CudaIPCWrapper(t) for t in gpu_tensors]
-    payloads = [instance_id, kv_caches, model_name, world_size, hints]
+    # TODO(maobaolong): Make the engine type configurable
+    payloads = [
+        instance_id,
+        kv_caches,
+        model_name,
+        world_size,
+        EngineType.VLLM,
+        hints,
+    ]
     result = _call(client, RequestType.REGISTER_KV_CACHE, payloads)
     return result is not _TIMEOUT
 
