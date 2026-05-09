@@ -496,6 +496,24 @@ class TurboQuantSerializer(Serializer):
         self._cfg = cfg
 
     def serialize(self, src: MemoryObj, dst: MemoryObj) -> int:
+        """Serialize a KV tensor into a TurboQuant-compressed byte buffer.
+
+        Args:
+            src: Source memory object containing a KV tensor with shape
+                ``[2, num_layers, num_tokens, hidden_dim]``.
+            dst: Destination memory object containing a ``torch.uint8`` tensor
+                used as the serialized byte buffer.
+
+        Returns:
+            The number of serialized bytes written to ``dst``.
+
+        Raises:
+            ValueError: If source or destination tensors are missing, if the
+                destination buffer is too small, if the destination dtype is not
+                ``torch.uint8``, or if the KV tensor layout is unsupported.
+            RuntimeError: If CUDA is unavailable or no CUDA device has enough
+                memory for TurboQuant staging.
+        """
         src_tensor = src.tensor
         dst_tensor = dst.tensor
         if src_tensor is None or dst_tensor is None:
