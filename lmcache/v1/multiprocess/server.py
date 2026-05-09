@@ -510,9 +510,47 @@ class MPCacheEngine:
 
         blocks_per_chunk = self.chunk_size // gpu_context.block_size
 
+        def _copy_batch_to_gpu(
+            memory_obj_batch: tuple[MemoryObj, ...],
+            chunk_block_ids_gpu: torch.Tensor,
+            skip_blocks_in_chunk: int,
+        ) -> None:
+            """H2D copy and KV scatter for one contiguous batch of chunks.
+
+            Args:
+                memory_obj_batch: One or more CPU memory objects to transfer,
+                    each occupying its own batch slot (chunk_idx 0, 1, …).
+                chunk_block_ids_gpu: GPU block IDs covering the full batch.
+                skip_blocks_in_chunk: Number of leading blocks to skip when
+                    scattering (APC-aligned skip).
+            """
+            batch_len = len(memory_obj_batch)
+            num_groups = gpu_context.kv_layer_groups_manager.num_groups
+            # H2D copy: each memory_obj maps to its own batch slot
+            for chunk_idx, memory_obj in enumerate(memory_obj_batch):
+                lmcache_memcpy_async_h2d(
+                    memory_obj,
+                    gpu_context.get_tmp_gpu_buffer_flat(chunk_idx=chunk_idx),
+                )
+            for group_idx in range(num_groups):
+                tmp_buffers = gpu_context.get_tmp_chunk_gpu_buffer_batched(
+                    batch_len, group_idx
+                )
+                group_kv_pointers = gpu_context.get_group_kv_pointers(group_idx)
+                lmc_ops.multi_layer_block_kv_transfer(
+                    group_kv_pointers,
+                    [tb.data_ptr() for tb in tmp_buffers],
+                    chunk_block_ids_gpu,
+                    gpu_context.device,
+                    lmc_ops.TransferDirection.H2D,
+                    gpu_context.get_shape_desc(group_idx),
+                    self.chunk_size,
+                    gpu_context.gpu_kv_format_,
+                    skip_blocks_in_chunk,
+                )
+
         def _retrieve_loop(keys: list[ObjectKey], memory_objs: list[MemoryObj]) -> None:
             _BATCH_SIZE = gpu_context.max_batch_size
-            num_groups = gpu_context.kv_layer_groups_manager.num_groups
             for batch_idx, memory_obj_batch in enumerate(
                 batched_iteration(memory_objs, batch_size=_BATCH_SIZE)
             ):
@@ -550,29 +588,9 @@ class MPCacheEngine:
                 ]
 
                 # Copy from CPU to GPU tmp buffers, then scatter to paged KV — per group
-                # H2D copy: each memory_obj maps to its own batch slot
-                for chunk_idx, memory_obj in enumerate(memory_obj_batch):
-                    lmcache_memcpy_async_h2d(
-                        memory_obj,
-                        gpu_context.get_tmp_gpu_buffer_flat(chunk_idx=chunk_idx),
-                    )
-                for group_idx in range(num_groups):
-                    tmp_buffers = gpu_context.get_tmp_chunk_gpu_buffer_batched(
-                        batch_len, group_idx
-                    )
-                    group_kv_pointers = gpu_context.get_group_kv_pointers(group_idx)
-
-                    lmc_ops.multi_layer_block_kv_transfer(
-                        group_kv_pointers,
-                        [tb.data_ptr() for tb in tmp_buffers],
-                        chunk_block_ids_gpu,
-                        gpu_context.device,
-                        lmc_ops.TransferDirection.H2D,
-                        gpu_context.get_shape_desc(group_idx),
-                        self.chunk_size,
-                        gpu_context.gpu_kv_format_,
-                        skip_blocks_in_chunk,
-                    )
+                _copy_batch_to_gpu(
+                    memory_obj_batch, chunk_block_ids_gpu, skip_blocks_in_chunk
+                )
 
         def _partial_retrieve_loop(
             good_objs: list[MemoryObj],
@@ -590,7 +608,6 @@ class MPCacheEngine:
             """
             # Partial failure path: indices are non-contiguous so process
             # each chunk individually instead of batching.
-            num_groups = gpu_context.kv_layer_groups_manager.num_groups
             for memory_obj, chunk_idx in zip(good_objs, good_indices, strict=True):
                 chunk_start_token = chunk_idx * self.chunk_size
                 effective_start = max(chunk_start_token, skip_first_n_tokens)
@@ -614,26 +631,9 @@ class MPCacheEngine:
                 block_end = block_start + blocks_per_chunk
                 chunk_block_ids_gpu = all_block_ids_gpu[block_start:block_end]
 
-                lmcache_memcpy_async_h2d(
-                    memory_obj,
-                    gpu_context.get_tmp_gpu_buffer_flat(chunk_idx=0),
+                _copy_batch_to_gpu(
+                    (memory_obj,), chunk_block_ids_gpu, skip_blocks_in_chunk
                 )
-                for group_idx in range(num_groups):
-                    tmp_buffers = gpu_context.get_tmp_chunk_gpu_buffer_batched(
-                        1, group_idx
-                    )
-                    group_kv_pointers = gpu_context.get_group_kv_pointers(group_idx)
-                    lmc_ops.multi_layer_block_kv_transfer(
-                        group_kv_pointers,
-                        [tmp_buffers[0].data_ptr()],
-                        chunk_block_ids_gpu,
-                        gpu_context.device,
-                        lmc_ops.TransferDirection.H2D,
-                        gpu_context.get_shape_desc(group_idx),
-                        self.chunk_size,
-                        gpu_context.gpu_kv_format_,
-                        skip_blocks_in_chunk,
-                    )
 
         with (
             torch.cuda.device(gpu_context.device),
@@ -670,9 +670,6 @@ class MPCacheEngine:
                         else:
                             _retrieve_loop(obj_keys, partial_result.good_objs)
 
-                    prefetched_keys = obj_keys[: len(memory_objs)]
-                    total_bytes = sum(mo.get_size() for mo in memory_objs)
-                    _retrieve_loop(obj_keys, memory_objs)
                 # Only set True when with-block exits normally
                 retrieve_succeeded = True
             except Exception:
