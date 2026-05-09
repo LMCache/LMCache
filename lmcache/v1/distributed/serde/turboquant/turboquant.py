@@ -618,6 +618,22 @@ class TurboQuantDeserializer(Deserializer):
         self._cfg = cfg
 
     def deserialize(self, src: MemoryObj, dst: MemoryObj) -> None:
+        """Deserialize a TurboQuant byte buffer into a destination KV tensor.
+
+        Args:
+            src: Source memory object containing the serialized TurboQuant
+                byte buffer as a ``torch.uint8`` tensor.
+            dst: Destination memory object containing the reconstructed KV
+                tensor with shape ``[2, num_layers, num_tokens, hidden_dim]``.
+
+        Raises:
+            ValueError: If source or destination tensors are missing, if the
+                source buffer is too small, if the source dtype is not
+                ``torch.uint8``, or if the destination KV tensor layout is
+                unsupported.
+            RuntimeError: If CUDA is unavailable or no CUDA device has enough
+                memory for TurboQuant staging.
+        """
         src_tensor = src.tensor
         dst_tensor = dst.tensor
         if src_tensor is None or dst_tensor is None:
