@@ -13,7 +13,7 @@ well-tested place so callers stay tiny and behave consistently.
 
 # Standard
 from types import ModuleType
-from typing import Callable, Iterator, Optional
+from typing import Callable, Iterator, Optional, TypeVar, Union
 import importlib
 import inspect
 import pkgutil
@@ -23,22 +23,24 @@ from lmcache.logging import init_logger
 
 logger = init_logger(__name__)
 
+T = TypeVar("T")
 
-def _resolve_package(package: "ModuleType | str") -> ModuleType:
+
+def _resolve_package(package: Union[ModuleType, str]) -> ModuleType:
     if isinstance(package, str):
         return importlib.import_module(package)
     return package
 
 
 def discover_subclasses(
-    package: "ModuleType | str",
-    base_class: type,
+    package: Union[ModuleType, str],
+    base_class: type[T],
     *,
     module_filter: Optional[Callable[[str], bool]] = None,
     include_abstract: bool = False,
     require_defined_in_module: bool = True,
     on_import_error: Optional[Callable[[str, Exception], None]] = None,
-) -> Iterator[type]:
+) -> Iterator[type[T]]:
     """Yield concrete subclasses of *base_class* found in direct
     submodules of *package*.
 
