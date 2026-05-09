@@ -173,6 +173,10 @@ def resolve_tokens_per_gb(lmcache_url: str, model_name: str) -> int:
 
     gpu_meta = data.get("gpu_context_meta", {})
     if not gpu_meta:
+        # CB-only deployments (engine_type="blend") populate
+        # cb_gpu_context_meta instead of gpu_context_meta.
+        gpu_meta = data.get("cb_gpu_context_meta", {})
+    if not gpu_meta:
         raise RuntimeError(
             "No model info returned by LMCache server; "
             "is the server running with a model loaded?"

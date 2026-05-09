@@ -174,6 +174,9 @@ class KVCacheDescriber:
         """Per-model KV cache layout sections."""
         gpu_meta = self.data.get("gpu_context_meta", {})
         if not gpu_meta:
+            # CB-only deployments populate cb_gpu_context_meta instead.
+            gpu_meta = self.data.get("cb_gpu_context_meta", {})
+        if not gpu_meta:
             return
 
         # Deduplicate by (model_name, world_size) — multiple GPU IDs
@@ -210,17 +213,21 @@ class KVCacheDescriber:
                 "GPU KV tensor shape",
                 layout.get("gpu_kv_concrete_shape"),
             )
-            sec.add("num_layers", "Num layers", layout["num_layers"])
-            sec.add("block_size", "Block size", layout["block_size"])
-            sec.add("hidden_dim_sizes", "Hidden dim sizes", layout["hidden_dim_sizes"])
-            sec.add("dtype", "Dtype", layout["dtype"])
-            sec.add("is_mla", "MLA", layout["is_mla"])
-            sec.add("num_blocks", "Num blocks", layout["num_blocks"])
-            sec.add(
-                "cache_size_per_token",
-                "Cache size per token (bytes)",
-                layout["cache_size_per_token"],
-            )
+            # CB-only contexts ship a singular ``hidden_dim_size``; wrap to
+            # match the plural list-shape used by the regular path.
+            if "hidden_dim_sizes" not in layout and "hidden_dim_size" in layout:
+                layout = dict(layout, hidden_dim_sizes=[layout["hidden_dim_size"]])
+            for _key, _label in (
+                ("num_layers", "Num layers"),
+                ("block_size", "Block size"),
+                ("hidden_dim_sizes", "Hidden dim sizes"),
+                ("dtype", "Dtype"),
+                ("is_mla", "MLA"),
+                ("num_blocks", "Num blocks"),
+                ("cache_size_per_token", "Cache size per token (bytes)"),
+            ):
+                if _key in layout:
+                    sec.add(_key, _label, layout[_key])
 
     def add_l2_adapters(self) -> None:
         """L2 adapter sections."""
