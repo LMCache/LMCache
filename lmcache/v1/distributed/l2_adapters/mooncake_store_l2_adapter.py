@@ -236,14 +236,12 @@ def _create_mooncake_store_l2_adapter(
             l1_registration.base = l1_memory_desc.ptr
             l1_registration.size = l1_memory_desc.size
 
-    native_client_kwargs = {
-        "config": config.setup_config,
-        "num_workers": config.num_workers,
-        "l1_registration": l1_registration,
-        "per_op_workers": config.per_op_workers,
-    }
-
-    native_client = LMCacheMooncakeClient(**native_client_kwargs)
+    native_client = LMCacheMooncakeClient(
+        config=config.setup_config,
+        num_workers=config.num_workers,
+        l1_registration=l1_registration,
+        per_op_workers=config.per_op_workers,
+    )
     logger.info(
         "Created Mooncake Store L2 adapter "
         "(workers=%d, per_op_workers=%s, preregister_l1_memory=%s)",
