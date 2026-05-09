@@ -395,10 +395,12 @@ class TestMooncakeStoreL1RegistrationFactory:
                 config: dict[str, str],
                 num_workers: int,
                 l1_registration,
+                per_op_workers=None,
             ):
                 captured["config"] = config
                 captured["num_workers"] = num_workers
                 captured["l1_registration"] = l1_registration
+                captured["per_op_workers"] = per_op_workers
 
         _install_fake_mooncake_extension(monkeypatch, FakeClient)
         monkeypatch.setattr(
@@ -446,10 +448,12 @@ class TestMooncakeStoreL1RegistrationFactory:
                 config: dict[str, str],
                 num_workers: int,
                 l1_registration,
+                per_op_workers=None,
             ):
                 captured["config"] = config
                 captured["num_workers"] = num_workers
                 captured["l1_registration"] = l1_registration
+                captured["per_op_workers"] = per_op_workers
 
         _install_fake_mooncake_extension(monkeypatch, FakeClient)
         monkeypatch.setattr(
