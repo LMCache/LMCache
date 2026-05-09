@@ -69,11 +69,7 @@ class LMCBaseModel(nn.Module, ABC):
         self,
         input_ids: torch.Tensor,
     ):
-<<<<<<< ww17_PR_torch_dev
         input_ids = input_ids.to(torch_device_type)
-        hidden_states = self.vllm_model.get_input_embeddings(input_ids)
-=======
-        input_ids = input_ids.cuda()
         # Compatible with both old vLLM (get_input_embeddings) and
         # new vLLM 0.18+ (embed_input_ids / model.embed_tokens)
         if hasattr(self.vllm_model, "get_input_embeddings"):
@@ -89,7 +85,6 @@ class LMCBaseModel(nn.Module, ABC):
                 f"{type(self.vllm_model).__name__} has no embedding method. "
                 f"Tried: get_input_embeddings, embed_input_ids, model.embed_tokens"
             )
->>>>>>> dev
         residual = None
 
         attn_output = None
