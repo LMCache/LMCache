@@ -30,6 +30,32 @@ logger = init_logger(__name__)
 
 NONE_HASH = 0
 
+
+def _normalize_hash_to_int(hash_value: Union[int, bytes]) -> int:
+    """Normalize hash outputs to LMCache's int chunk-hash representation.
+
+    This function is triggered when vLLM's ``sha256_cbor`` hash function is
+    used because it returns a 32-byte digest. vLLM's
+    ``kv_cache_utils.init_none_hash`` can therefore initialize ``NONE_HASH`` as
+    bytes, and direct hash calls for token chunks can also return bytes.
+
+    LMCache stores chunk hashes in ``CacheEngineKey`` and serializes them with
+    msgpack, so byte digests must be folded into uint64-compatible ints before
+    they enter the prefix hash chain. This also keeps ``NONE_HASH`` and later
+    prefix hashes using the same structural type for CBOR hashing.
+
+    Args:
+        hash_value: Hash output from vLLM or Python's builtin hash.
+
+    Returns:
+        The original int hash value, or the first eight bytes of a digest as a
+        big-endian int.
+    """
+    if isinstance(hash_value, bytes):
+        return int.from_bytes(hash_value[:8], "big")
+    return hash_value
+
+
 # Type alias for process_tokens return value
 # (start_index, end_index, cache_engine_key｜hash)
 ProcessTokensResult = Tuple[int, int, Union[CacheEngineKey, int]]
@@ -70,11 +96,7 @@ class TokenDatabase(metaclass=abc.ABCMeta):
 
             if hasattr(kv_cache_utils, "init_none_hash"):
                 kv_cache_utils.init_none_hash(self.hash_func)
-                NONE_HASH = kv_cache_utils.NONE_HASH
-                # sha256_cbor returns bytes; fold to uint64 so the entire
-                # prefix chain uses a consistent int type.
-                if isinstance(NONE_HASH, bytes):
-                    NONE_HASH = int.from_bytes(NONE_HASH[:8], "big")
+                NONE_HASH = _normalize_hash_to_int(kv_cache_utils.NONE_HASH)
                 logger.info(
                     f"Initialized NONE_HASH={NONE_HASH} from vLLM (>= PR#20511)"
                 )
@@ -267,13 +289,9 @@ class TokenDatabase(metaclass=abc.ABCMeta):
             prefix_hash, tokens_tuple, extra_keys
         )
 
-        result = self.hash_func((canon_prefix, canon_tokens, canon_extra))
-        # sha256_cbor returns a 32-byte digest; fold it into a uint64 so that
-        # downstream code (msgpack serialisation, CacheEngineKey) always works
-        # with plain ints regardless of the configured hash algorithm.
-        if isinstance(result, bytes):
-            result = int.from_bytes(result[:8], "big")
-        return result
+        return _normalize_hash_to_int(
+            self.hash_func((canon_prefix, canon_tokens, canon_extra))
+        )
 
 
 class ChunkedTokenDatabase(TokenDatabase):
