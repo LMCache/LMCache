@@ -305,12 +305,13 @@ class RawBlockL2Adapter(L2AdapterInterface):
         """
         super().__init__()
         if (
-            config.use_odirect
+            (config.use_odirect or config.io_engine == "io_uring")
             and l1_memory_desc is not None
             and l1_memory_desc.align_bytes < config.block_align
         ):
             raise ValueError(
-                "raw_block requires l1_align_bytes >= block_align when use_odirect=true"
+                "raw_block requires l1_align_bytes >= block_align when "
+                "use_odirect=true or io_engine=io_uring"
             )
 
         self._closed = False
@@ -324,6 +325,12 @@ class RawBlockL2Adapter(L2AdapterInterface):
 
         try:
             self._core = RawBlockCore(config.to_core_config(), key_namespace="object")
+            if config.io_engine == "io_uring":
+                logger.warning(
+                    "RawBlockL2Adapter: MP raw_block uses io_uring without "
+                    "fixed-buffer registration; zero-copy fixed buffers are "
+                    "disabled unless registered by a future MP allocator path"
+                )
             self._max_capacity_bytes = int(
                 self._core.report_status().get("usable_capacity_bytes", 0)
             )

@@ -298,6 +298,59 @@ class RawBlockCore:
             )
         return self._raw
 
+    def raw_device(self) -> Any:
+        """Return the lazily opened Rust raw-block device.
+
+        Returns:
+            The underlying Rust ``RawBlockDevice`` object.
+
+        Raises:
+            Exception: Propagates raw-device open errors from the Rust binding.
+        """
+        return self._rawdev()
+
+    def set_raw_device_for_testing(self, raw_device: Any) -> None:
+        """Replace the raw device handle used by this core.
+
+        Args:
+            raw_device: Object implementing the Rust raw-device methods.
+        """
+        self._raw = raw_device
+
+    def register_fixed_buffers_from_allocator(self, memory_allocator: Any) -> None:
+        """Register allocator pages with io_uring when the allocator exposes them.
+
+        Args:
+            memory_allocator: Local CPU allocator that may expose
+                ``get_paged_buffers()``.
+
+        Raises:
+            Exception: Propagates Rust registration errors after logging.
+        """
+        if self.io_engine != "io_uring":
+            return
+        paged_buffers = getattr(memory_allocator, "get_paged_buffers", None)
+        if not callable(paged_buffers):
+            logger.warning(
+                "RawBlockCore: allocator does not expose paged buffers; "
+                "io_uring fixed-buffer zero-copy is disabled"
+            )
+            return
+        buffers = paged_buffers()
+        if not buffers:
+            logger.warning(
+                "RawBlockCore: allocator returned no paged buffers; "
+                "io_uring fixed-buffer zero-copy is disabled"
+            )
+            return
+        buffer_ptrs = [buf.data_ptr() for buf in buffers]
+        buffer_sizes = [buf.numel() * buf.element_size() for buf in buffers]
+        self._rawdev().register_fixed_buffers(buffer_ptrs, buffer_sizes)
+        logger.info(
+            "RawBlockCore: registered %d paged buffers for io_uring fixed I/O",
+            len(buffers),
+        )
+
     def contains_key(self, encoded_key: str, *, lock: bool = False) -> bool:
         """Return whether one encoded key is present in the raw-block index.
 
@@ -585,7 +638,6 @@ class RawBlockCore:
 
         results = [False] * len(encoded_keys)
         try:
-            raw_dev = self._rawdev()
             for i, (encoded_key, entry) in enumerate(items):
                 if entry is None:
                     continue
@@ -610,18 +662,22 @@ class RawBlockCore:
                         zero_tail=False,
                     )
                     if direct_view is not None:
-                        raw_dev.pread_into(
-                            entry.offset + self.header_bytes,
-                            direct_view,
-                            total_len if len(direct_view) >= total_len else payload_len,
-                            total_len,
+                        self._read_buffers(
+                            [entry.offset + self.header_bytes],
+                            [direct_view],
+                            [
+                                total_len
+                                if len(direct_view) >= total_len
+                                else payload_len
+                            ],
+                            [total_len],
                         )
                     else:
-                        raw_dev.pread_into(
-                            entry.offset + self.header_bytes,
-                            buf,
-                            payload_len,
-                            total_len,
+                        self._read_buffers(
+                            [entry.offset + self.header_bytes],
+                            [buf],
+                            [payload_len],
+                            [total_len],
                         )
                     objs[i].metadata.cached_positions = entry.meta.cached_positions
                     results[i] = True
@@ -795,6 +851,39 @@ class RawBlockCore:
                 self._raw = None
         self._closed = True
 
+    def _byte_view(self, buf: Any) -> memoryview:
+        """Return a byte-addressable memoryview over a Python buffer.
+
+        Args:
+            buf: Object implementing the Python buffer protocol.
+
+        Returns:
+            A memoryview with one-byte elements.
+
+        Raises:
+            TypeError: If ``buf`` does not expose a compatible contiguous buffer.
+        """
+        view = buf if isinstance(buf, memoryview) else memoryview(buf)
+        if view.itemsize == 1 and view.format in ("B", "b", "c"):
+            return view
+        return view.cast("B")
+
+    def _is_buffer_aligned(self, buf: Any) -> bool:
+        """Check if a buffer is aligned to the block alignment boundary.
+
+        Args:
+            buf: Object implementing the Python buffer protocol.
+
+        Returns:
+            True if the buffer is aligned, False otherwise.
+        """
+        if not self.use_odirect:
+            return True
+        view = self._byte_view(buf)
+        # Check if the buffer pointer is aligned
+        ptr = ctypes.addressof((ctypes.c_byte * 1).from_buffer(view))
+        return ptr % self.block_align == 0
+
     def _build_direct_odirect_view(
         self,
         memory_obj: MemoryObj,
@@ -892,6 +981,98 @@ class RawBlockCore:
                 buf = direct_view
         return buf, payload_len, total_len
 
+    def _write_buffers(
+        self,
+        offsets: Sequence[int],
+        buffers: Sequence[Any],
+        payload_lens: Sequence[int],
+        total_lens: Sequence[int],
+    ) -> None:
+        """Write one or more buffers through the configured Rust I/O path.
+
+        Args:
+            offsets: Device offsets for each write.
+            buffers: Python buffers to write.
+            payload_lens: Logical payload lengths for each buffer.
+            total_lens: Physical I/O lengths for each buffer.
+
+        Raises:
+            RuntimeError: If the requested io_uring mode is unavailable.
+            Exception: Propagates Rust raw-device write errors.
+        """
+        raw_dev = self._rawdev()
+        if self.io_engine != "io_uring":
+            for offset, buf, payload_len, total_len in zip(
+                offsets, buffers, payload_lens, total_lens, strict=True
+            ):
+                raw_dev.pwrite_from_buffer(offset, buf, payload_len, total_len)
+            return
+
+        can_batch = all(
+            int(payload_len) == int(total_len)
+            for payload_len, total_len in zip(payload_lens, total_lens, strict=True)
+        )
+        if can_batch:
+            batch_id = raw_dev.batched_write(
+                [int(offset) for offset in offsets],
+                list(buffers),
+                [int(total_len) for total_len in total_lens],
+            )
+            raw_dev.wait_iouring(batch_id)
+            return
+
+        for offset, buf, payload_len, total_len in zip(
+            offsets, buffers, payload_lens, total_lens, strict=True
+        ):
+            raw_dev.write_uring(int(offset), buf, int(payload_len), int(total_len))
+
+    def _read_buffers(
+        self,
+        offsets: Sequence[int],
+        buffers: Sequence[Any],
+        payload_lens: Sequence[int],
+        total_lens: Sequence[int],
+    ) -> None:
+        """Read one or more buffers through the configured Rust I/O path.
+
+        Args:
+            offsets: Device offsets for each read.
+            buffers: Destination Python buffers.
+            payload_lens: Logical payload lengths to expose to callers.
+            total_lens: Physical I/O lengths for each read.
+
+        Raises:
+            RuntimeError: If the requested io_uring mode is unavailable.
+            Exception: Propagates Rust raw-device read errors.
+        """
+        raw_dev = self._rawdev()
+        if self.io_engine != "io_uring":
+            for offset, buf, payload_len, total_len in zip(
+                offsets, buffers, payload_lens, total_lens, strict=True
+            ):
+                raw_dev.pread_into(offset, buf, payload_len, total_len)
+            return
+
+        can_batch = all(
+            int(payload_len) == int(total_len)
+            for payload_len, total_len in zip(payload_lens, total_lens, strict=True)
+        )
+        # batched_read requires aligned buffers when O_DIRECT is enabled
+        # Check alignment before using batched_read
+        if can_batch and all(self._is_buffer_aligned(buf) for buf in buffers):
+            batch_id = raw_dev.batched_read(
+                [int(offset) for offset in offsets],
+                list(buffers),
+                [int(total_len) for total_len in total_lens],
+            )
+            raw_dev.wait_iouring(batch_id)
+            return
+
+        for offset, buf, payload_len, total_len in zip(
+            offsets, buffers, payload_lens, total_lens, strict=True
+        ):
+            raw_dev.read_uring(int(offset), buf, int(payload_len), int(total_len))
+
     def _write_one(
         self, key: RawBlockKeySpec, memory_obj: MemoryObj, offset: int
     ) -> bool:
@@ -912,18 +1093,24 @@ class RawBlockCore:
             with self._lock:
                 self._inflight_io_count += 1
             try:
-                raw_dev = self._rawdev()
                 hdr_total = (
                     round_up(len(header), self.block_align)
                     if self.use_odirect
                     else len(header)
                 )
-                raw_dev.pwrite_from_buffer(offset, header, len(header), hdr_total)
-                raw_dev.pwrite_from_buffer(
-                    offset + self.header_bytes,
-                    buf,
-                    payload_len,
-                    total_len,
+                header_buf: Any = header
+                if self.io_engine != "io_uring" and len(header) < hdr_total:
+                    padded_header = bytearray(header)
+                    padded_header.extend(b"\x00" * (hdr_total - len(header)))
+                    header_buf = padded_header
+                self._write_buffers(
+                    [offset, offset + self.header_bytes],
+                    [header_buf, buf],
+                    [
+                        hdr_total if self.io_engine == "io_uring" else len(header),
+                        payload_len,
+                    ],
+                    [hdr_total, total_len],
                 )
             finally:
                 with self._lock:
@@ -960,7 +1147,12 @@ class RawBlockCore:
         try:
             with self._lock:
                 self._inflight_io_count += 1
-            self._rawdev().pread_into(offset, buf, self.header_bytes, self.header_bytes)
+            self._read_buffers(
+                [offset],
+                [buf],
+                [self.header_bytes],
+                [self.header_bytes],
+            )
             return self._decode_slot_header(buf)
         except Exception:
             return None
@@ -1040,8 +1232,11 @@ class RawBlockCore:
         """Read and validate a metadata checkpoint header."""
         buf = bytearray(self.block_align)
         try:
-            self._rawdev().pread_into(
-                container_offset, buf, self.block_align, self.block_align
+            self._read_buffers(
+                [container_offset],
+                [buf],
+                [self.block_align],
+                [self.block_align],
             )
         except Exception:
             return None
@@ -1068,7 +1263,7 @@ class RawBlockCore:
         total_len = round_up(payload_len, self.block_align)
         buf = bytearray(total_len)
         try:
-            self._rawdev().pread_into(payload_off, buf, payload_len, total_len)
+            self._read_buffers([payload_off], [buf], [payload_len], [total_len])
         except Exception:
             return None
 
@@ -1185,9 +1380,12 @@ class RawBlockCore:
             int(crc),
         )
 
-        raw = self._rawdev()
-        raw.pwrite_from_buffer(payload_off, payload, payload_len, payload_total_len)
-        raw.pwrite_from_buffer(target, header_block, self.block_align, self.block_align)
+        self._write_buffers(
+            [payload_off, target],
+            [payload, header_block],
+            [payload_len, self.block_align],
+            [payload_total_len, self.block_align],
+        )
 
         with self._lock:
             self._meta_seq = int(next_seq)
