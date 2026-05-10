@@ -1742,6 +1742,143 @@ impl RawBlockDevice {
         Ok(())
     }
 
+    /// Synchronous write using io_uring.
+    #[pyo3(signature = (offset, data, payload_len, total_len = None))]
+    fn write_uring(
+        &self,
+        py: Python<'_>,
+        offset: u64,
+        data: &Bound<'_, PyAny>,
+        payload_len: usize,
+        total_len: Option<usize>,
+    ) -> PyResult<()> {
+        if !self.use_iouring {
+            return Err(PyRuntimeError::new_err("io_uring not enabled"));
+        }
+        if self.closed.load(Ordering::Relaxed) {
+            return Err(PyRuntimeError::new_err("device is closed"));
+        }
+
+        let view = get_pybuffer(py, data, false)?;
+        let ptr = view.buf as *const u8;
+        if ptr.is_null() {
+            release_pybuffer(view);
+            return Err(PyValueError::new_err("null buffer pointer"));
+        }
+
+        let cap = view.len as usize;
+        let total_len = total_len.unwrap_or(payload_len);
+        if cap < payload_len {
+            release_pybuffer(view);
+            return Err(PyValueError::new_err(format!(
+                "input buffer too small: cap={cap} need={payload_len}"
+            )));
+        }
+        if total_len < payload_len {
+            release_pybuffer(view);
+            return Err(PyValueError::new_err("total_len must be >= payload_len"));
+        }
+
+        let align = self.alignment;
+        if self.use_odirect {
+            #[allow(clippy::manual_is_multiple_of)]
+            if (offset as usize) % align != 0 {
+                release_pybuffer(view);
+                return Err(PyValueError::new_err("O_DIRECT requires aligned offset"));
+            }
+            #[allow(clippy::manual_is_multiple_of)]
+            if total_len % align != 0 {
+                release_pybuffer(view);
+                return Err(PyValueError::new_err("O_DIRECT requires aligned total_len"));
+            }
+        }
+
+        // Check if the buffer is aligned for O_DIRECT
+        let ptr_aligned = if self.use_odirect {
+            (ptr as usize).is_multiple_of(align)
+        } else {
+            true
+        };
+
+        // Fixed buffers are pre-registered with io_uring, enabling true zero-copy I/O
+        let use_fixed = self.fixed_buffers_registered.load(Ordering::Relaxed);
+        let fixed_idx = if use_fixed && ptr_aligned {
+            let map = self.fixed_buffer_map.lock().unwrap();
+            let ptr_addr = ptr as usize;
+            map.get(&ptr_addr).map(|(idx, _)| *idx)
+        } else {
+            None
+        };
+
+        // Use bounce buffer if:
+        // Buffer is not aligned (O_DIRECT requirement)
+        // Buffer capacity is less than total_len
+        let use_bounce = !ptr_aligned || cap < total_len;
+
+        let res = if !use_bounce {
+            self.in_flight_count.fetch_add(1, Ordering::Relaxed);
+            let comp = Arc::new(IoCompletion::new());
+            let sub = IoSubmission {
+                fd: self.fd,
+                offset,
+                len: total_len,
+                ptr_addr: ptr as usize,
+                is_write: true,
+                completion: comp.clone(),
+                fixed_buffer_idx: fixed_idx,
+                bounce: None,
+                original_ptr: None,
+                payload_len: None,
+                batch_id: 0,
+            };
+            {
+                let q = self.queue.as_ref().expect("queue must exist");
+                let mut q = q.lock().unwrap();
+                q.push(sub);
+            }
+            if let Some(batch_ready) = &self.batch_ready {
+                batch_ready.signal_producer();
+            }
+            py.allow_threads(move || comp.wait())
+        } else {
+            let bounce = AlignedBuf::new(total_len, align)?;
+            let bounce_arc = std::sync::Arc::new(bounce);
+            let bounce_ptr = bounce_arc.as_mut_ptr();
+            // Copy data to bounce buffer before submission
+            unsafe {
+                std::ptr::copy_nonoverlapping(ptr, bounce_ptr, payload_len);
+            }
+            self.in_flight_count.fetch_add(1, Ordering::Relaxed);
+            let comp = Arc::new(IoCompletion::new());
+            let sub = IoSubmission {
+                fd: self.fd,
+                offset,
+                len: total_len,
+                ptr_addr: bounce_ptr as usize,
+                is_write: true,
+                completion: comp.clone(),
+                fixed_buffer_idx: None,
+                bounce: Some(bounce_arc),
+                original_ptr: None,
+                payload_len: Some(payload_len),
+                batch_id: 0,
+            };
+            {
+                let q = self.queue.as_ref().expect("queue must exist");
+                let mut q = q.lock().unwrap();
+                q.push(sub);
+            }
+            if let Some(batch_ready) = &self.batch_ready {
+                batch_ready.signal_producer();
+            }
+            py.allow_threads(move || comp.wait())
+        };
+
+        release_pybuffer(view);
+        res?;
+        Ok(())
+    }
+
     /// Batched read: submit multiple reads at once via io_uring.
     /// All reads are queued to the worker thread, which processes them
     /// in batches to maximize throughput.
