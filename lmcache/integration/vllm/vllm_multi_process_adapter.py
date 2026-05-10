@@ -844,6 +844,10 @@ class LMCacheMPWorkerAdapter:
         self.retrieve_futures: dict[
             str, tuple[MessagingFuture[RetrieveResult], list[int]]
         ] = {}
+        # The IPC handle is not enough by itself; CUDA needs the exporting
+        # event object to stay alive until the consumer is done with it.
+        self.store_events: dict[str, torch.cuda.Event] = {}
+        self.retrieve_events: dict[str, torch.cuda.Event] = {}
 
         # Block IDs that failed due to retrieve timeout
         self.error_block_ids: set[int] = set()
@@ -1093,6 +1097,7 @@ class LMCacheMPWorkerAdapter:
             self.blocks_in_chunk,
         )
         self.store_futures[request_id] = future
+        self.store_events[request_id] = event
 
     @_lmcache_nvtx_annotate
     def submit_retrieve_request(
@@ -1142,6 +1147,7 @@ class LMCacheMPWorkerAdapter:
             skip_first_n_tokens=op.skip_first_n_tokens,
         )
         self.retrieve_futures[request_id] = (future, list(op.block_ids))
+        self.retrieve_events[request_id] = event
 
     @_lmcache_nvtx_annotate
     def batched_submit_store_requests(
@@ -1250,6 +1256,8 @@ class LMCacheMPWorkerAdapter:
                 self.error_block_ids.update(r_block_ids)
             self.store_futures.clear()
             self.retrieve_futures.clear()
+            self.store_events.clear()
+            self.retrieve_events.clear()
 
             ret_stores = self._process_finished_stores(
                 finished_stores, finished_req_ids_from_engine
@@ -1296,8 +1304,10 @@ class LMCacheMPWorkerAdapter:
         # Remove the finished requests from the tracking dicts
         for request_id in finished_stores:
             self.store_futures.pop(request_id, None)
+            self.store_events.pop(request_id, None)
         for request_id in finished_retrieves:
             self.retrieve_futures.pop(request_id, None)
+            self.retrieve_events.pop(request_id, None)
 
         # Update the internal states
         ret_stores = self._process_finished_stores(
