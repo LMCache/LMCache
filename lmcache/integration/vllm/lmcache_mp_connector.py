@@ -36,7 +36,9 @@ try:
 
     try:
         # First Party
-        from lmcache.v1.multiprocess.custom_types import RequestAllocationRecord
+        from lmcache.v1.multiprocess.custom_types import (  # type: ignore[attr-defined]
+            RequestAllocationRecord,
+        )
     except ImportError:
         # First Party
         from lmcache.v1.multiprocess.custom_types import (
@@ -44,7 +46,7 @@ try:
         )
 except ImportError:
     # Third Party
-    from vllm.distributed.kv_transfer.kv_connector.v1.lmcache_integration import (
+    from vllm.distributed.kv_transfer.kv_connector.v1.lmcache_integration import (  # type: ignore[no-redef]
         LMCacheMPSchedulerAdapter,
         LMCacheMPWorkerAdapter,
         LoadStoreOp,
@@ -320,7 +322,7 @@ class LMCacheMPRequestMetadata:
         # Store the blocks that has block hashes
         # NOTE: the invariant here is that `num_stored_blocks` should
         # always be a multiple of `blocks_in_chunk`
-        # TODO: This should be checked everytime we update the num_stored_blocks
+        # TODO: This should be checked every time we update the num_stored_blocks
         #
         # Why computed_blocks uses max(num_vllm_hit_blocks, num_lmcache_hit_blocks):
         #
