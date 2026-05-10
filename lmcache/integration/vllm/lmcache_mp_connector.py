@@ -76,7 +76,6 @@ if TYPE_CHECKING:
 
 logger = lmcache_init_logger(__name__)
 
-
 # Helper functions
 def reformat_block_ids(block_ids: tuple[list[int], ...] | None) -> list[int]:
     if block_ids is None:
@@ -119,29 +118,40 @@ def extract_world_size_and_kv_rank(
 
 
 def create_scheduler_adapter(
-    server_url: str,
+    server_urls: list[str],
     zmq_context: zmq.Context,
     vllm_config: VllmConfig,
     mq_timeout: float,
     heartbeat_interval: float,
 ) -> LMCacheMPSchedulerAdapter:
-    world_size, kv_rank = extract_world_size_and_kv_rank(
+    n_servers = len(server_urls)
+    actual_world_size = vllm_config.parallel_config.world_size
+    actual_rank = vllm_config.parallel_config.rank
+    tp_size = vllm_config.parallel_config.tensor_parallel_size
+    sub_world_size = actual_world_size // n_servers
+    tp_size_per_node = tp_size // n_servers
+    assert tp_size % n_servers == 0, f"tp_size ({tp_size}) must be divisible by n_servers ({n_servers})"
+
+    kv_world_size, kv_rank = extract_world_size_and_kv_rank(
         vllm_config.parallel_config.world_size,
         vllm_config.parallel_config.rank,
         vllm_config,
     )
     parallel_strategy = ParallelStrategy(
         mla_enabled(vllm_config.model_config),
-        world_size,
+        kv_world_size,
         kv_rank,
-        vllm_config.parallel_config.world_size,
-        vllm_config.parallel_config.rank,
-        vllm_config.parallel_config.tensor_parallel_size,
+        actual_world_size,   
+        actual_rank,         
+        tp_size,            
         vllm_config.parallel_config.pipeline_parallel_size,
+        sub_world_size,
+        tp_size_per_node,
+        n_servers,
     )
 
     return LMCacheMPSchedulerAdapter(
-        server_url=server_url,
+        server_urls=server_urls,
         context=zmq_context,
         model_name=vllm_config.model_config.model,
         vllm_block_size=vllm_config.cache_config.block_size,
@@ -152,29 +162,46 @@ def create_scheduler_adapter(
 
 
 def create_worker_adapter(
-    server_url: str,
+    server_urls: list[str],
     zmq_context: zmq.Context,
     vllm_config: VllmConfig,
     mq_timeout: float,
     heartbeat_interval: float,
 ) -> LMCacheMPWorkerAdapter:
-    world_size, kv_rank = extract_world_size_and_kv_rank(
+    n_servers = len(server_urls)
+    kv_world_size, kv_rank = extract_world_size_and_kv_rank(
         vllm_config.parallel_config.world_size,
         vllm_config.parallel_config.rank,
         vllm_config,
     )
+    actual_world_size = vllm_config.parallel_config.world_size
+    actual_rank = vllm_config.parallel_config.rank
+    tp_size = vllm_config.parallel_config.tensor_parallel_size
+
+    # Node routing: worker connects only to its local server.
+    # Ranks are assigned to nodes in contiguous blocks:
+    # node 0 → ranks [0, ranks_per_node), node 1 → [ranks_per_node, 2*ranks_per_node), ...
+    ranks_per_node = actual_world_size // n_servers
+    local_server_url = server_urls[actual_rank // ranks_per_node]
+    
+    sub_world_size = actual_world_size // n_servers
+    tp_size_per_node = tp_size // n_servers
+    assert tp_size % n_servers == 0, f"tp_size ({tp_size}) must be divisible by n_servers ({n_servers})"
     parallel_strategy = ParallelStrategy(
         mla_enabled(vllm_config.model_config),
-        world_size,
+        kv_world_size,
         kv_rank,
-        vllm_config.parallel_config.world_size,
-        vllm_config.parallel_config.rank,
-        vllm_config.parallel_config.tensor_parallel_size,
+        actual_world_size,
+        actual_rank,
+        tp_size,
         vllm_config.parallel_config.pipeline_parallel_size,
+        sub_world_size,
+        tp_size_per_node,
+        n_servers,
     )
 
     return LMCacheMPWorkerAdapter(
-        server_url=server_url,
+        server_url=local_server_url,
         context=zmq_context,
         model_name=vllm_config.model_config.model,
         vllm_block_size=vllm_config.cache_config.block_size,
@@ -476,14 +503,20 @@ class LMCacheMPConnector(KVConnectorBase_V1):
     """
     The connector for LMCache multi-process mode.
 
-    Extra configs (kv_transfer_config.extra_config):
-    - lmcache.mp.host: the host of the LMCache server.
-    - lmcache.mp.port: the port of the LMCache server.
+    Extra configs (kv_transfer_config.kv_connector_extra_config):
+    - lmcache.mp.server_urls: comma-separated list of LMCache server URLs,
+      e.g. "tcp://host1:6667,tcp://host2:6667". Takes priority over
+      lmcache.mp.host / lmcache.mp.port when set.
+    - lmcache.mp.n_servers: explicit server count for validation. Must match
+      the length of lmcache.mp.server_urls when both are provided.
+    - lmcache.mp.host: host of a single LMCache server (legacy, single-server
+      deployments only). Ignored when lmcache.mp.server_urls is set.
+    - lmcache.mp.port: port of a single LMCache server (legacy). Ignored when
+      lmcache.mp.server_urls is set.
     - lmcache.mp.mq_timeout: timeout (seconds) for message queue requests.
     - lmcache.mp.heartbeat_interval: interval (seconds) between server
       heartbeat pings.
     """
-
     def __init__(
         self,
         vllm_config: "VllmConfig",
@@ -493,12 +526,6 @@ class LMCacheMPConnector(KVConnectorBase_V1):
         super().__init__(vllm_config, role, kv_cache_config)
 
         assert vllm_config.kv_transfer_config is not None
-        server_host = vllm_config.kv_transfer_config.get_from_extra_config(
-            "lmcache.mp.host", "tcp://localhost"
-        )
-        server_port = vllm_config.kv_transfer_config.get_from_extra_config(
-            "lmcache.mp.port", 5555
-        )
         mq_timeout = float(
             vllm_config.kv_transfer_config.get_from_extra_config(
                 "lmcache.mp.mq_timeout", 300.0
@@ -510,11 +537,49 @@ class LMCacheMPConnector(KVConnectorBase_V1):
             )
         )
 
-        server_url = f"{server_host}:{server_port}"
+        # Multi-server: prefer lmcache.mp.server_urls (list or comma-separated
+        # string) over the legacy single-server lmcache.mp.host / lmcache.mp.port.
+        server_urls_cfg = vllm_config.kv_transfer_config.get_from_extra_config(
+            "lmcache.mp.server_urls", None
+        )
+        if server_urls_cfg:
+            if isinstance(server_urls_cfg, list):
+                server_urls = [u.strip() for u in server_urls_cfg if u.strip()]
+            else:
+                server_urls = [u.strip() for u in server_urls_cfg.split(",") if u.strip()]
+        else:
+            # Legacy single-server fallback.
+            server_host = vllm_config.kv_transfer_config.get_from_extra_config(
+                "lmcache.mp.host", "tcp://localhost"
+            )
+            server_port = vllm_config.kv_transfer_config.get_from_extra_config(
+                "lmcache.mp.port", 5555
+            )
+            server_urls = [f"{server_host}:{server_port}"]
+
+        # lmcache.mp.n_servers is the authoritative server count.
+        # If provided it must match the length of server_urls.
+        n_servers_cfg = vllm_config.kv_transfer_config.get_from_extra_config(
+            "lmcache.mp.n_servers", None
+        )
+        if n_servers_cfg is not None:
+            n_servers_cfg = int(n_servers_cfg)
+            assert n_servers_cfg == len(server_urls), (
+                f"lmcache.mp.n_servers ({n_servers_cfg}) does not match "
+                f"the number of URLs in lmcache.mp.server_urls ({len(server_urls)})"
+            )
+        n_servers = len(server_urls)
+
+        assert vllm_config.parallel_config.world_size % n_servers == 0, (
+            f"world_size ({vllm_config.parallel_config.world_size}) must be "
+            f"divisible by n_servers ({n_servers})"
+        )
+
         zmq_context = zmq.Context.instance()
+
         if self.role == KVConnectorRole.SCHEDULER:
             self.scheduler_adapter = create_scheduler_adapter(
-                server_url,
+                server_urls,
                 zmq_context,
                 vllm_config,
                 mq_timeout,
@@ -523,7 +588,7 @@ class LMCacheMPConnector(KVConnectorBase_V1):
             self.request_trackers: dict[str, LMCacheMPRequestTracker] = {}
         elif self.role == KVConnectorRole.WORKER:
             self.worker_adapter = create_worker_adapter(
-                server_url,
+                server_urls,
                 zmq_context,
                 vllm_config,
                 mq_timeout,
@@ -649,11 +714,13 @@ class LMCacheMPConnector(KVConnectorBase_V1):
 
         This prevents overwrites of paged KV buffer before saving done.
         """
-        # In MLA scenario, only the first rank of the pipeline group
-        # needs to save the KV cache.
+        # In MLA scenario, KV cache is not sharded across TP ranks, so only
+        # one rank per node needs to STORE to the local LMCache server.
+        # For single-server deployments this degenerates to rank 0 only.
+        # is_first_rank_of_node handles both cases internally.
         if (
             self.worker_adapter.use_mla
-            and not self.worker_adapter.is_first_rank_of_pp_group
+            and not self.worker_adapter.is_first_rank_of_node
         ):
             return
 
