@@ -315,11 +315,22 @@ The ``/api/kv/*`` endpoints expose bytes-level KV cache access for cache
 priming, debugging, and future editing workflows. They are not on the
 inference path; vLLM continues to use the ZMQ protocol.
 
-Payloads are raw contiguous ``KV_2LTD`` bytes with shape
-``[2, num_layers, num_tokens, hidden_dim]`` in row-major order.
+Payloads are **safetensors blobs** containing a single tensor named
+``"kv"`` with ``dtype=torch.uint8`` and shape ``[total_bytes]`` (a flat
+byte stream). The metadata dict carries ``{"format_version": "1"}``. The
+flat bytes correspond to the canonical ``KV_2LTD`` layout
+``[2, num_layers, num_tokens, hidden_dim]`` in row-major order, where
 ``num_tokens`` is the complete-chunk prefix only, ``hidden_dim`` is the
-full unsharded hidden dimension, and ``dtype`` is the registered model's
-KV dtype.
+full unsharded hidden dimension, and the per-element ``dtype`` is the
+registered model's KV dtype (clients reinterpret on their side using
+``/api/status`` info).
+
+The wire is intentionally ``uint8`` rather than the model dtype — this
+sidesteps fp8 / bfloat16 dtype-negotiation questions and matches
+LMCache's internal byte-addressed storage. Clients can use any
+safetensors implementation (``safetensors.torch.save`` /
+``safetensors.numpy.save``); the library is already a transitive LMCache
+dependency.
 
 .. warning::
 
@@ -342,8 +353,8 @@ KV dtype.
 ``POST /api/kv/store``
 ^^^^^^^^^^^^^^^^^^^^^^
 
-Store KV cache bytes for a token sequence. The body is the raw KV
-payload; routing metadata is carried in headers.
+Store KV cache bytes for a token sequence. The body is the safetensors
+blob described above; routing metadata is carried in headers.
 
 .. list-table::
    :header-rows: 1
@@ -384,10 +395,10 @@ less than ``total_chunks`` under write conflicts or capacity pressure.
 ``POST /api/kv/retrieve``
 ^^^^^^^^^^^^^^^^^^^^^^^^^
 
-Retrieve raw KV bytes for the longest cached prefix. The request body is
+Retrieve KV bytes for the longest cached prefix. The request body is
 JSON with ``model_name``, ``tokens``, and optional ``cache_salt``. A hit
-returns ``200`` with a binary body and these headers:
-``X-LMCache-Hit-Tokens``, ``X-LMCache-Hit-Chunks``,
+returns ``200`` with a safetensors body (same format as ``store``) and
+these headers: ``X-LMCache-Hit-Tokens``, ``X-LMCache-Hit-Chunks``,
 ``X-LMCache-Total-Tokens``, and ``X-LMCache-Total-Chunks``. A miss
 returns ``404`` with the same metadata headers and an empty body.
 

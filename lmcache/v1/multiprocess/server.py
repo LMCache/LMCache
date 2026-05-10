@@ -10,6 +10,8 @@ import threading
 import time
 
 # Third Party
+from safetensors.torch import load as _safetensors_load
+from safetensors.torch import save as _safetensors_save
 import torch
 import zmq
 
@@ -122,18 +124,40 @@ def _wait_prefetch(storage_manager: StorageManager, handle: PrefetchHandle) -> i
         time.sleep(0.001)
 
 
-def _bytes_to_tensor(
-    payload: bytes,
-    shape: tuple[int, int, int, int],
-    dtype: torch.dtype,
-) -> torch.Tensor:
-    """Return a read-only tensor view of ``payload`` with ``shape`` / ``dtype``."""
-    return torch.frombuffer(payload, dtype=dtype).reshape(shape)
+_KV_BYTES_SAFETENSOR_NAME = "kv"
+_KV_BYTES_FORMAT_VERSION = "1"
 
 
-def _tensor_to_bytes(t: torch.Tensor) -> bytes:
-    """Materialize a contiguous tensor as bytes (dtype-agnostic)."""
-    return t.contiguous().view(torch.uint8).numpy().tobytes()
+def _decode_kv_bytes_payload(payload: bytes) -> torch.Tensor:
+    """Decode a safetensors-wrapped 1-D ``uint8`` ``"kv"`` tensor.
+
+    The wire format is a safetensors blob containing a single tensor named
+    ``"kv"`` with dtype ``torch.uint8``. Anything else is rejected with
+    ``ValueError`` so the HTTP layer can map it to ``HTTP 400``.
+    """
+    try:
+        data = _safetensors_load(payload)
+    except Exception as exc:
+        raise ValueError(f"failed to decode safetensors payload: {exc}") from exc
+    if _KV_BYTES_SAFETENSOR_NAME not in data:
+        raise ValueError(
+            f"safetensors payload missing required tensor {_KV_BYTES_SAFETENSOR_NAME!r}"
+        )
+    kv = data[_KV_BYTES_SAFETENSOR_NAME]
+    if kv.dtype != torch.uint8:
+        raise ValueError(
+            f"safetensors {_KV_BYTES_SAFETENSOR_NAME!r} tensor must have "
+            f"dtype=torch.uint8 (got {kv.dtype})"
+        )
+    return kv.reshape(-1)
+
+
+def _encode_kv_bytes_payload(flat_uint8: torch.Tensor) -> bytes:
+    """Encode a flat ``uint8`` tensor as a safetensors blob for the wire."""
+    return _safetensors_save(
+        {_KV_BYTES_SAFETENSOR_NAME: flat_uint8.contiguous()},
+        metadata={"format_version": _KV_BYTES_FORMAT_VERSION},
+    )
 
 
 def _memory_obj_tensor(
@@ -771,9 +795,11 @@ class MPCacheEngine:
     ) -> StoreBytesResult:
         """Store opaque KV cache bytes for ``tokens`` under ``model_name``.
 
-        ``payload`` is interpreted as a contiguous KV_2LTD tensor of shape
-        ``[2, L, T, D]`` with full (un-sharded) hidden dim ``D``. It is split
-        along ``T`` into ``chunk_size`` chunks and along ``D`` into
+        ``payload`` is a safetensors blob containing one ``"kv"`` tensor of
+        dtype ``torch.uint8`` whose flat byte count equals the canonical
+        KV_2LTD shape ``[2, L, T, D]`` (with full un-sharded ``D``)
+        multiplied by the model's KV-cache element size. The bytes are
+        split along ``T`` into ``chunk_size`` chunks and along ``D`` into
         ``world_size`` per-worker shards. Trailing sub-chunk tokens are
         ignored, mirroring the GPU store path.
 
@@ -785,7 +811,7 @@ class MPCacheEngine:
         Args:
             model_name: Registered model name.
             tokens: Token sequence the bytes are keyed by.
-            payload: KV cache bytes in canonical KV_2LTD layout.
+            payload: safetensors blob (see above).
             cache_salt: Per-namespace isolation salt.
 
         Returns:
@@ -794,8 +820,10 @@ class MPCacheEngine:
 
         Raises:
             KeyError: If ``model_name`` is not registered.
-            ValueError: If ``payload`` length does not match the layout, or
-                the registered model violates the v1 limitations above.
+            ValueError: If ``payload`` cannot be decoded as a safetensors
+                blob with a single ``uint8`` ``"kv"`` tensor of the expected
+                byte count, or the registered model violates the v1
+                limitations above.
         """
         layout_desc, world_size = self._resolve_model(model_name)
 
@@ -808,9 +836,12 @@ class MPCacheEngine:
         per_shard_shape, per_shard_dtype = _get_single_group_layout(layout_desc)
         per_shard_bytes = math.prod(per_shard_shape) * per_shard_dtype.itemsize
         expected = total_chunks * world_size * per_shard_bytes
-        if len(payload) != expected:
+
+        flat_uint8 = _decode_kv_bytes_payload(payload)
+        if flat_uint8.numel() != expected:
             raise ValueError(
-                f"payload length {len(payload)} does not match expected {expected} "
+                f"safetensors {_KV_BYTES_SAFETENSOR_NAME!r} byte count "
+                f"{flat_uint8.numel()} does not match expected {expected} "
                 f"({total_chunks} chunks * {world_size} workers * "
                 f"{per_shard_bytes} bytes/shard)"
             )
@@ -834,7 +865,7 @@ class MPCacheEngine:
             total_tokens,
             d_per_worker * world_size,
         )
-        payload_tensor = _bytes_to_tensor(payload, full_shape, per_shard_dtype)
+        payload_tensor = flat_uint8.view(per_shard_dtype).reshape(full_shape)
 
         reserved = self.storage_manager.reserve_write(obj_keys, layout_desc, "all")
 
@@ -882,9 +913,12 @@ class MPCacheEngine:
     ) -> RetrieveBytesResult:
         """Retrieve KV cache bytes for the longest cached prefix of ``tokens``.
 
-        The returned bytes are a KV_2LTD ``[2, L, hit_tokens, D]`` payload.
-        Always non-destructive: ignores any ``remove_after_retrieve`` engine
-        setting.
+        ``payload`` in the returned result is a safetensors blob with one
+        ``"kv"`` tensor of dtype ``torch.uint8`` whose flat bytes
+        correspond to the canonical KV_2LTD layout
+        ``[2, L, hit_tokens, D]`` in the model's KV dtype. Empty bytes on a
+        clean miss. Always non-destructive: ignores any
+        ``remove_after_retrieve`` engine setting.
 
         **v1 limitations:** the registered model must use **homogeneous
         attention** (single KV layer group) and the **KV_2LTD layout**.
@@ -979,7 +1013,9 @@ class MPCacheEngine:
             elif remainder_obj_keys:
                 self.storage_manager.finish_read_prefetched(remainder_obj_keys)
 
-        payload = _tensor_to_bytes(output)
+        payload = _encode_kv_bytes_payload(
+            output.contiguous().view(torch.uint8).reshape(-1)
+        )
         return RetrieveBytesResult(
             payload=payload,
             total_tokens=total_tokens,

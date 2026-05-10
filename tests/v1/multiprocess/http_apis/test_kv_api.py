@@ -23,6 +23,7 @@ from typing import cast
 # Third Party
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from safetensors.torch import save as safetensors_save
 import pytest
 import torch
 
@@ -139,15 +140,28 @@ def _register_fake_layouts(
         engine.gpu_context_meta[gpu_id] = (model_name, world_size)
 
 
-def _make_payload(num_chunks: int, world_size: int, seed: int = 0) -> bytes:
-    """Generate a deterministic random KV_2LTD payload as bytes."""
+def _make_inner_uint8(num_chunks: int, world_size: int, seed: int = 0) -> torch.Tensor:
+    """Produce the deterministic 1-D ``uint8`` byte stream for ``num_chunks``."""
     torch.manual_seed(seed)
     full_hidden = HIDDEN_DIM_PER_WORKER * world_size
     t = torch.randn(
         (2, NUM_LAYERS, num_chunks * CHUNK_SIZE, full_hidden),
         dtype=DTYPE,
     )
-    return t.contiguous().view(torch.uint8).numpy().tobytes()
+    return t.contiguous().view(torch.uint8).reshape(-1)
+
+
+def _wrap_safetensors(flat_uint8: torch.Tensor) -> bytes:
+    """Wrap a flat ``uint8`` tensor in the wire-format safetensors envelope."""
+    return safetensors_save(
+        {"kv": flat_uint8.contiguous()},
+        metadata={"format_version": "1"},
+    )
+
+
+def _make_payload(num_chunks: int, world_size: int, seed: int = 0) -> bytes:
+    """Generate a deterministic safetensors-wrapped KV_2LTD payload."""
+    return _wrap_safetensors(_make_inner_uint8(num_chunks, world_size, seed))
 
 
 def _tokens_for(num_chunks: int, seed: int = 0) -> list[int]:
@@ -305,15 +319,43 @@ class TestStoreRetrieveLookupBytes:
         with pytest.raises(KeyError):
             engine.lookup_kv_bytes_by_tokens("nope", _tokens_for(1))
 
-    def test_payload_length_mismatch_rejected(self) -> None:
-        """Store rejects payloads that don't match the expected layout."""
+    def test_payload_byte_count_mismatch_rejected(self) -> None:
+        """Store rejects payloads whose inner ``"kv"`` byte count is wrong."""
         engine = _make_engine()
         _install_resolver(engine, {"m": 1})
         tokens = _tokens_for(num_chunks=2)
-        payload = _make_payload(num_chunks=2, world_size=1)
-        # Truncate by one byte — must raise.
-        with pytest.raises(ValueError, match="payload length"):
-            engine.store_kv_bytes_by_tokens("m", tokens, payload[:-1])
+        # One byte short inside the safetensors envelope.
+        truncated = _wrap_safetensors(
+            _make_inner_uint8(num_chunks=2, world_size=1)[:-1]
+        )
+        with pytest.raises(ValueError, match="byte count"):
+            engine.store_kv_bytes_by_tokens("m", tokens, truncated)
+
+    def test_malformed_safetensors_rejected(self) -> None:
+        """Store rejects payloads that cannot be decoded as safetensors."""
+        engine = _make_engine()
+        _install_resolver(engine, {"m": 1})
+        tokens = _tokens_for(num_chunks=1)
+        with pytest.raises(ValueError, match="failed to decode safetensors"):
+            engine.store_kv_bytes_by_tokens("m", tokens, b"not safetensors")
+
+    def test_missing_kv_tensor_rejected(self) -> None:
+        """Store rejects safetensors blobs that lack the ``"kv"`` tensor."""
+        engine = _make_engine()
+        _install_resolver(engine, {"m": 1})
+        tokens = _tokens_for(num_chunks=1)
+        wrong = safetensors_save({"other": torch.zeros(8, dtype=torch.uint8)})
+        with pytest.raises(ValueError, match="missing required tensor"):
+            engine.store_kv_bytes_by_tokens("m", tokens, wrong)
+
+    def test_wrong_dtype_kv_tensor_rejected(self) -> None:
+        """Store rejects safetensors ``"kv"`` tensors with non-uint8 dtype."""
+        engine = _make_engine()
+        _install_resolver(engine, {"m": 1})
+        tokens = _tokens_for(num_chunks=1)
+        wrong = safetensors_save({"kv": torch.zeros(8, dtype=torch.float32)})
+        with pytest.raises(ValueError, match="must have dtype=torch.uint8"):
+            engine.store_kv_bytes_by_tokens("m", tokens, wrong)
 
     def test_no_complete_chunks_returns_zero(self) -> None:
         """Token sequences shorter than one chunk produce empty results."""

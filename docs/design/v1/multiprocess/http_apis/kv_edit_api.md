@@ -75,11 +75,27 @@ not initialized, and (store only) 507 on quota exhaustion.
 
 ## 3. Wire format
 
-The payload is a sequence of per-chunk `MemoryObj` byte arrays,
-concatenated. Chunk size in tokens is `engine.chunk_size`; chunk size in
-bytes is fixed for a given engine. The HTTP request and response use
-`Content-Type: application/x-lmcache-kv; v=1` so the format can evolve
-later without breaking clients.
+The payload is a **safetensors** blob containing a single tensor named
+`"kv"` with `dtype=torch.uint8` and shape `[total_bytes]` (a flat byte
+stream). The total byte count must equal
+`total_chunks * world_size * per_shard_bytes`, where `per_shard_bytes`
+is the product of the registered KV_2LTD per-shard shape multiplied by
+the model's KV-cache dtype itemsize. Server-side reinterpretation
+into `[2, L, T, D]` of the model dtype happens after decode.
+
+The safetensors metadata dict carries `{"format_version": "1"}` for
+forward-compat. The HTTP layer uses
+`Content-Type: application/x-lmcache-kv; v=1` to identify the wire.
+
+Why safetensors and uint8:
+
+- **safetensors** is already a transitive LMCache dep
+  (`requirements/common.txt`), is the de-facto ML-community
+  serialization standard, and is safe (no pickle).
+- **uint8** sidesteps fp8/bfloat16 dtype questions on the wire. The
+  underlying `TensorMemoryObj.raw_data` is already `torch.uint8` —
+  the wire format mirrors that and lets the client reinterpret to the
+  model's dtype using `/api/status` info.
 
 ### v1 limitations (enforced)
 
