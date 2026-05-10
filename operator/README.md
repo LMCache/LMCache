@@ -308,12 +308,14 @@ spec:
         header_bytes: 4096
         meta_total_bytes: 268435456
         use_odirect: true
+        io_engine: io_uring
+        enable_zero_copy: true
         num_store_workers: 2
         num_lookup_workers: 1
         num_load_workers: 4
 ```
 
-Use an unmounted raw block device or a dedicated file path reserved for LMCache. With `use_odirect: true`, the LMCache server's `--l1-align-bytes` setting must be at least `block_align`.
+Use an unmounted raw block device or a dedicated file path reserved for LMCache. With `use_odirect: true`, the LMCache server's `--l1-align-bytes` setting must be at least `block_align`. With `io_engine: io_uring` and `enable_zero_copy: true`, raw_block attempts MP L1 fixed-buffer registration for payload I/O and falls back to non-fixed I/O if registration is unavailable.
 
 > [!NOTE]
 > Currently only a single L2 adapter is supported at a time. While LMCache multiprocess mode is designed to support multiple L2 adapters in cascade, this functionality is not yet fully tested. Once the multi-adapter pipeline is validated and performance is confirmed, the operator will be updated to support multiple adapters.

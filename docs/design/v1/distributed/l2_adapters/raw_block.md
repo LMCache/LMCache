@@ -23,7 +23,8 @@ StoreController / PrefetchController
                 |
                 v
          lmcache_rust_raw_block_io
-      (pwrite_from_buffer / pread_into)
+ (pwrite_from_buffer / pread_into
+  or io_uring fixed-buffer payload I/O)
                 |
                 v
          raw block device / file
@@ -59,6 +60,8 @@ The implementation is split into:
 - lock refcounts used by MP lookup/load/unlock
 - metadata checkpointing and recovery
 - direct reads and writes through the Rust binding
+- best-effort io_uring fixed-buffer payload I/O when the MP L1 arena is
+  registered and the target/source object lies inside it
 
 This avoids maintaining separate raw-block implementations for MP and non-MP
 mode.
@@ -75,6 +78,14 @@ mode.
 
 The adapter uses caller-provided `MemoryObj` buffers for load operations. It
 does not allocate destination buffers on the load path.
+
+When configured with `io_engine="io_uring"` and `enable_zero_copy=true`, the
+adapter registers the MP L1 memory descriptor once with `RawBlockCore`. If that
+registration succeeds, payload writes use `batched_write()` plus
+`wait_iouring()`, and payload reads use `read_uring()` when the object buffer is
+CPU memory inside the registered L1 arena. Headers still use the existing header
+write path, and any unsuitable payload buffer falls back to the non-fixed
+`pwrite_from_buffer` / `pread_into` path.
 
 ## Locking Model
 
@@ -101,8 +112,9 @@ Rules:
 
 The on-device format is intentionally unchanged by the MP adapter work.
 
-Recovered keys are exposed to the shared L2 eviction policy on adapter startup,
-so reclaimed slots come from global L2 eviction or explicit `delete()` calls.
+Recovered keys are exposed to this adapter's L2 eviction policy on startup, so
+reclaimed slots come from the adapter's L2 eviction controller or explicit
+`delete()` calls.
 
 ## Configuration
 
@@ -124,6 +136,9 @@ The MP adapter is configured through `--l2-adapter` JSON:
   "meta_enable_periodic": true,
   "load_checkpoint_on_init": true,
   "meta_verify_on_load": true,
+  "enable_zero_copy": true,
+  "io_engine": "io_uring",
+  "iouring_queue_depth": 256,
   "num_store_workers": 2,
   "num_lookup_workers": 1,
   "num_load_workers": 4
@@ -140,6 +155,9 @@ Important validation rules:
   of loading the latest on-device metadata checkpoint
 - with `use_odirect=true`, MP L1 alignment must satisfy
   `l1_align_bytes >= block_align`
+- fixed-buffer io_uring is only attempted when `io_engine="io_uring"` and
+  `enable_zero_copy=true`; registration failure is a warning and falls back to
+  the non-fixed path
 
 ## Relationship to Non-MP Mode
 

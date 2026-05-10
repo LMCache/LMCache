@@ -249,6 +249,7 @@ the DAX device, but they are unreachable after the LMCache server restarts.
   metrics count occupied slots.
 - Lookups acquire DAX-side external locks. ``submit_unlock`` releases those
   locks after load/retrieve completes, making entries evictable again.
+
 ``fs_native`` -- Native C++ file-system connector
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -340,6 +341,14 @@ device or pre-sized file using the Rust raw-device I/O bindings. It reuses the
 existing raw-block metadata checkpoint model and writes directly into the
 caller-provided load buffers during prefetch.
 
+When ``io_engine`` is ``"io_uring"`` and ``enable_zero_copy`` is true, the MP
+adapter registers the L1 CPU arena as an io_uring fixed-buffer region at startup.
+Payload stores and loads whose ``MemoryObj`` buffers are CPU-resident, inside
+that registered arena, and compatible with the active ``O_DIRECT`` alignment use
+``WriteFixed`` / ``ReadFixed`` through the Rust io_uring worker. Slot headers
+still use the regular header write path, and any unsuitable payload buffer falls
+back to the existing non-fixed path.
+
 **Required fields:**
 
 - ``device_path``: Raw device path or pre-sized file path.
@@ -360,7 +369,9 @@ caller-provided load buffers during prefetch.
 - ``load_checkpoint_on_init``: Load an existing on-device metadata checkpoint
   during startup (default ``true``). Set to ``false`` to start with an empty
   in-memory index instead.
-- ``enable_zero_copy``: Try aligned direct-buffer I/O when possible.
+- ``enable_zero_copy``: Try aligned direct-buffer I/O when possible. With
+  ``io_engine="io_uring"`` in MP mode, this also enables best-effort L1 arena
+  fixed-buffer registration for payload I/O.
 - ``io_engine``: Rust raw-block I/O engine. Valid values are ``"posix"``
   (default synchronous ``pread``/``pwrite`` path), ``"io_uring"`` (direct Rust
   io_uring syscall path).
@@ -374,10 +385,13 @@ caller-provided load buffers during prefetch.
   per-TP device-path mappings in MP mode.
 - ``raw_block`` remains ``"type": "raw_block"`` for both supported engines.
 - ``raw_block`` owns on-device slot allocation, checkpointing, and recovery
-  through ``RawBlockCore``. Slot reclamation is driven by the shared/global
-  L2 eviction controller or explicit ``delete()`` calls.
+  through ``RawBlockCore``. Slot reclamation is driven by this adapter's L2
+  eviction controller or explicit ``delete()`` calls.
 - If ``use_odirect`` is enabled, the server's ``--l1-align-bytes`` should be
   at least ``block_align``.
+- Fixed-buffer registration is best-effort. If the kernel, memory limits, or
+  buffer properties reject registration, ``raw_block`` logs a warning and keeps
+  serving through the non-fixed raw-block path.
 - ``persist_enabled`` must remain ``true`` for this adapter.
 
 **Configuration examples:**
@@ -386,7 +400,7 @@ caller-provided load buffers during prefetch.
 
     --l2-adapter '{"type": "raw_block", "device_path": "/dev/nvme0n1", "slot_bytes": 1048576, "block_align": 4096, "header_bytes": 4096, "meta_total_bytes": 268435456, "use_odirect": true, "num_store_workers": 2, "num_lookup_workers": 1, "num_load_workers": 4}'
 
-    --l2-adapter '{"type": "raw_block", "device_path": "/dev/nvme0n1", "slot_bytes": 1048576, "io_engine": "io_uring", "iouring_queue_depth": 256, "use_odirect": true}'
+    --l2-adapter '{"type": "raw_block", "device_path": "/dev/nvme0n1", "slot_bytes": 1048576, "io_engine": "io_uring", "iouring_queue_depth": 256, "use_odirect": true, "enable_zero_copy": true}'
 
     --l2-adapter '{"type": "raw_block", "device_path": "/dev/nvme0n1", "slot_bytes": 1048576, "load_checkpoint_on_init": false, "eviction": {"eviction_policy": "LRU", "trigger_watermark": 0.9, "eviction_ratio": 0.1}}'
 
@@ -746,7 +760,7 @@ drops by ``eviction_ratio``.
      - Full support. Useful for testing eviction behaviour without
        real storage hardware.
    * - ``raw_block``
-     - Full shared/global eviction support. ``delete`` recycles raw-block
+     - Full per-adapter L2 eviction support. ``delete`` recycles raw-block
        slots; locked entries are skipped and retried on the next cycle.
    * - ``s3``
      - ``delete`` removes objects from the bucket and frees aggregate

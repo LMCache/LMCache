@@ -7,8 +7,10 @@ PyO3. It is used by both:
 - the MP `raw_block` L2 adapter (`RawBlockL2Adapter`) via `RawBlockCore`
 
 The Rust crate intentionally stays narrow: it owns the raw device handle and
-exposes blocking `pwrite_from_buffer` / `pread_into` primitives. Slotting,
-checkpointing, recovery, and MP task orchestration all live in Python.
+exposes blocking `pwrite_from_buffer` / `pread_into` primitives plus the
+io_uring queue, fixed-buffer registration, batched submission, wait, and stats
+APIs used by `RawBlockCore`. Slotting, checkpointing, recovery, and MP task
+orchestration all live in Python.
 
 ## I/O Engines
 
@@ -44,6 +46,14 @@ StoreController / PrefetchController
 This split lets LMCache reuse the same on-device metadata and recovery model in
 both non-MP and MP mode without duplicating the raw-block implementation.
 
+When MP `raw_block` is configured with `io_engine="io_uring"` and
+`enable_zero_copy=true`, `RawBlockL2Adapter` registers the L1 CPU arena as one
+fixed-buffer region. `RawBlockCore` uses that registration for payload writes
+and reads whose `MemoryObj` buffers are CPU-resident, inside the registered
+region, and compatible with `O_DIRECT` alignment when `use_odirect=true`.
+Headers continue to use the regular header write path, and unsuitable payloads
+fall back to the non-fixed path.
+
 ## Zero-Copy Data Path
 
 ```text
@@ -60,6 +70,21 @@ RawBlockDevice::pwrite_from_buffer / pread_into
                  |
                  v
 Block device or file
+```
+
+For MP io_uring fixed buffers, the payload path is:
+
+```text
+RawBlockL2Adapter
+        |
+        | registers MP L1 arena once
+        v
+RawBlockCore
+        |
+        | payload store: batched_write(...) + wait_iouring(...)
+        | payload load:  read_uring(...)
+        v
+io_uring WriteFixed / ReadFixed when buffer range matches
 ```
 
 ## How To Compare Performance
@@ -131,6 +156,7 @@ lmcache server \
     "meta_total_bytes": 268435456,
     "use_odirect": true,
     "io_engine": "io_uring",
+    "enable_zero_copy": true,
     "num_store_workers": 2,
     "num_lookup_workers": 1,
     "num_load_workers": 4
@@ -143,7 +169,10 @@ Notes:
   file used only by LMCache.
 - With `use_odirect=true`, LMCache MP L1 alignment must be at least
   `block_align`.
+- With `io_engine="io_uring"` and `enable_zero_copy=true`, fixed-buffer
+  registration is best-effort. Registration failures log a warning in the MP
+  adapter and fall back to the non-fixed I/O path.
 - Restart recovery uses the metadata checkpoint region on the same device.
-- Raw-block slot reclamation is driven by the shared/global L2 eviction
-  controller or explicit `delete()` calls.
+- Raw-block slot reclamation is driven by the adapter's L2 eviction controller
+  or explicit `delete()` calls.
 - `raw_block` remains the adapter type for both supported engines.

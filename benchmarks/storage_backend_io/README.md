@@ -115,7 +115,7 @@ python benchmarks/storage_backend_io/storage_backend_io_benchmark.py \
   --backend rust_raw_block_read \
   --raw-device /dev/nvme1n1 \
   --chunk-size 256 \
-  --alignement 4096 \
+  --alignment 4096 \
   --raw-odirect \
   --output-json /tmp/rust_raw_block_read_posix.json
 
@@ -127,7 +127,7 @@ python benchmarks/storage_backend_io/storage_backend_io_benchmark.py \
   --raw-device /dev/nvme1n1 \
   --raw-odirect \
   --chunk-size 256 \
-  --alignement 4096 \
+  --alignment 4096 \
   --use-uring \
   --output-json /tmp/rust_raw_block_read_uring.json
 
@@ -150,11 +150,12 @@ PY
 ```
 ### Notes
 
-- There is a limit on the number of fixed buffers that can be registered. For unprivileged users its 16384.
-- Buffer registration and de-registration is time consuming.
+- `--use-uring` toggles the legacy `rust_raw_block.use_uring` backend option
+  in this non-MP benchmark.
+- MP L1 fixed-buffer registration is exercised by the `raw_block` L2 adapter
+  with `io_engine="io_uring"` and `enable_zero_copy=true`, not by this script.
 
 ## Output
 
 The script prints a summary and optionally writes JSON results if `--output-json` is provided.
 ```
-

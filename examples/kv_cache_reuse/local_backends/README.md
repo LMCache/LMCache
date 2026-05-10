@@ -11,4 +11,5 @@ LMCache should be able to reduce the generation time of the second and following
 
    # WARNING: This will erase the content of target device.
 - `python rust_backend_offload.py --disk_path=/dev/nvme0n1` - posix disk offloading
-- `python rust_backend_offload.py --disk_path=/dev/nvme0n1 --use_uring` - io_uring disk offloading
+- `python rust_backend_offload.py --disk_path=/dev/nvme0n1 --use_uring` - pass
+  the legacy raw-block `use_uring` option to the non-MP backend
