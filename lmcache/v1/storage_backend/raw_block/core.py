@@ -125,6 +125,7 @@ class RawBlockCoreConfig:
     load_checkpoint_on_init: bool = True
     io_engine: str = "posix"
     iouring_queue_depth: int = DEFAULT_IOURING_QUEUE_DEPTH
+    use_uring_cmd: bool = False
 
 
 @dataclass
@@ -197,6 +198,13 @@ class RawBlockCore:
         self.meta_verify_on_load = bool(config.meta_verify_on_load)
         self.io_engine = normalize_raw_block_io_engine(config.io_engine)
         self.iouring_queue_depth = int(config.iouring_queue_depth)
+        self.use_uring_cmd = bool(config.use_uring_cmd)
+        if self.use_uring_cmd and self.use_odirect:
+            logger.warning(
+                "RawBlockCore: use_odirect is ignored for NVMe namespace "
+                "character devices when use_uring_cmd=true"
+            )
+            self.use_odirect = False
         self.key_namespace = key_namespace
 
         if not self.device_path:
@@ -222,6 +230,8 @@ class RawBlockCore:
         validate_raw_block_io_options(
             iouring_queue_depth=self.iouring_queue_depth,
         )
+        if self.use_uring_cmd and self.io_engine != "io_uring":
+            raise ValueError("use_uring_cmd requires io_uring as io_engine")
 
         try:
             self.meta_magic_text = self.meta_magic.decode("ascii")
@@ -295,6 +305,7 @@ class RawBlockCore:
                 alignment=self.block_align,
                 io_engine=self.io_engine,
                 iouring_queue_depth=self.iouring_queue_depth,
+                use_uring_cmd=self.use_uring_cmd,
             )
         return self._raw
 
@@ -805,6 +816,7 @@ class RawBlockCore:
                 "enable_zero_copy": self.enable_zero_copy,
                 "io_engine": self.io_engine,
                 "iouring_queue_depth": self.iouring_queue_depth,
+                "use_uring_cmd": self.use_uring_cmd,
             }
 
     def close(self) -> None:

@@ -86,6 +86,7 @@ class RawBlockL2AdapterConfig(L2AdapterConfigBase):
         enable_zero_copy: bool = True,
         io_engine: str = "posix",
         iouring_queue_depth: int = DEFAULT_IOURING_QUEUE_DEPTH,
+        use_uring_cmd: bool = False,
         num_store_workers: int = 2,
         num_lookup_workers: int = 1,
         num_load_workers: int = 4,
@@ -110,6 +111,7 @@ class RawBlockL2AdapterConfig(L2AdapterConfigBase):
             enable_zero_copy: Whether to use aligned direct-buffer I/O.
             io_engine: Raw-block I/O engine: ``"posix"`` or ``"io_uring"``.
             iouring_queue_depth: Queue depth for the Rust io_uring engine.
+            use_uring_cmd: Whether to use NVMe io_uring_cmd passthrough.
             num_store_workers: Number of store worker threads.
             num_lookup_workers: Number of lookup worker threads.
             num_load_workers: Number of load worker threads.
@@ -135,6 +137,7 @@ class RawBlockL2AdapterConfig(L2AdapterConfigBase):
         validate_raw_block_io_options(
             iouring_queue_depth=self.iouring_queue_depth,
         )
+        self.use_uring_cmd = bool(use_uring_cmd)
         self.num_store_workers = int(num_store_workers)
         self.num_lookup_workers = int(num_lookup_workers)
         self.num_load_workers = int(num_load_workers)
@@ -168,6 +171,7 @@ class RawBlockL2AdapterConfig(L2AdapterConfigBase):
         iouring_queue_depth = int(
             d.get("iouring_queue_depth", DEFAULT_IOURING_QUEUE_DEPTH)
         )
+        use_uring_cmd = bool(d.get("use_uring_cmd", False))
 
         if block_align <= 0:
             raise ValueError("block_align must be > 0")
@@ -184,6 +188,8 @@ class RawBlockL2AdapterConfig(L2AdapterConfigBase):
         validate_raw_block_io_options(
             iouring_queue_depth=iouring_queue_depth,
         )
+        if use_uring_cmd and io_engine != "io_uring":
+            raise ValueError("use_uring_cmd requires io_uring io_engine")
 
         worker_defaults = {
             "num_store_workers": 2,
@@ -215,6 +221,7 @@ class RawBlockL2AdapterConfig(L2AdapterConfigBase):
             enable_zero_copy=bool(d.get("enable_zero_copy", True)),
             io_engine=io_engine,
             iouring_queue_depth=iouring_queue_depth,
+            use_uring_cmd=use_uring_cmd,
             num_store_workers=worker_counts["num_store_workers"],
             num_lookup_workers=worker_counts["num_lookup_workers"],
             num_load_workers=worker_counts["num_load_workers"],
@@ -251,6 +258,8 @@ class RawBlockL2AdapterConfig(L2AdapterConfigBase):
             "- io_engine (str): posix or io_uring (default posix)\n"
             "- iouring_queue_depth (int): Rust io_uring queue depth "
             f"(default {DEFAULT_IOURING_QUEUE_DEPTH})\n"
+            "- use_uring_cmd (bool): enable NVMe io_uring_cmd path "
+            "(default false, requires io_uring as the io_engine)\n"
             "- num_store_workers (int): store worker threads (default 2)\n"
             "- num_lookup_workers (int): lookup worker threads (default 1)\n"
             "- num_load_workers (int): load worker threads (default 4)"
@@ -276,6 +285,7 @@ class RawBlockL2AdapterConfig(L2AdapterConfigBase):
             meta_verify_on_load=self.meta_verify_on_load,
             io_engine=self.io_engine,
             iouring_queue_depth=self.iouring_queue_depth,
+            use_uring_cmd=self.use_uring_cmd,
         )
 
 

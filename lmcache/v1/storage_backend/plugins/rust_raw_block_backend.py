@@ -248,6 +248,7 @@ class RustRawBlockBackend(StoragePluginInterface):
         iouring_queue_depth = int(
             extra.get("rust_raw_block.iouring_queue_depth", DEFAULT_IOURING_QUEUE_DEPTH)
         )
+        use_uring_cmd = bool(extra.get("rust_raw_block.use_uring_cmd", False))
         validate_raw_block_io_options(
             iouring_queue_depth=iouring_queue_depth,
         )
@@ -308,6 +309,7 @@ class RustRawBlockBackend(StoragePluginInterface):
             ),
             io_engine=io_engine,
             iouring_queue_depth=iouring_queue_depth,
+            use_uring_cmd=use_uring_cmd,
         )
 
     def _warn_if_loaded_metadata_looks_cross_rank(self) -> None:
