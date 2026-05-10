@@ -1,10 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """``lmcache bench kvcache`` — end-to-end test for LMCache MP cache server.
 
-Supports **GPU** mode (``--mode gpu``).
-
-.. note::
-    CPU mode is planned but not yet implemented.
+Supports both **CPU** and **GPU** modes (``--mode cpu|gpu``).
 
 This command exercises the full store / retrieve data path:
 
@@ -16,6 +13,10 @@ This command exercises the full store / retrieve data path:
       5. CHECKSUM — verify KV cache integrity via HTTP API
 
 Usage examples::
+
+    # CPU mode: server allocates KV cache on CPU itself
+    lmcache bench kvcache --rpc-url tcp://localhost:5555 \\
+        --mode cpu --num-tokens 512 --start 0 --end 3
 
     # GPU mode: real CUDA tensors + IPC
     lmcache bench kvcache --rpc-url tcp://localhost:5555 \\
@@ -35,9 +36,11 @@ from __future__ import annotations
 # Standard
 from typing import Any
 import argparse
+import ctypes
 import hashlib
 import itertools
 import json
+import os
 import sys
 import time
 import urllib.error
@@ -70,8 +73,11 @@ try:
         parse_kvcache_shape_spec,
     )
     from lmcache.v1.multiprocess.custom_types import (
+        CpuShmTensorWrapper,
         CudaIPCWrapper,
         IPCCacheEngineKey,
+        shm_create_readwrite,
+        shm_unlink,
     )
     from lmcache.v1.multiprocess.futures import MessagingFuture
     from lmcache.v1.multiprocess.mq import MessageQueueClient
@@ -254,23 +260,82 @@ def _allocate_gpu_kv_cache(
     return [_alloc(shape, dtype) for _ in range(num_layers)]
 
 
+def _allocate_cpu_shm_kv_cache(
+    groups: list[KVLayerGroupInfo],
+    shm_prefix: str,
+) -> tuple[list[torch.Tensor], list[CpuShmTensorWrapper], list[str]]:
+    """Allocate paged CPU KV cache tensors backed by POSIX SHM.
+
+    For each (group, layer) we ``shm_open`` a fresh segment and
+    ``mmap`` it into the client process. The returned tensors share
+    storage with the SHM mapping, and the matching
+    :class:`CpuShmTensorWrapper` instances tell the LMCache mp
+    server how to map the very same physical pages — i.e. true
+    zero-copy across processes (matching the GPU CUDA-IPC path).
+
+    Returns:
+        ``(tensors, wrappers, shm_names)``. ``shm_names`` is kept
+        so the caller can ``shm_unlink`` on shutdown.
+    """
+    torch.random.manual_seed(42)
+    tensors: list[torch.Tensor] = []
+    wrappers: list[CpuShmTensorWrapper] = []
+    shm_names: list[str] = []
+    layer_idx = 0
+    for g_idx, g in enumerate(groups):
+        sd = g.shape_desc
+        g_shape = (sd.kv_size, sd.nb, sd.bs, sd.nh, sd.hs)
+        for _ in range(sd.nl):
+            n_elems = 1
+            for d in g_shape:
+                n_elems *= d
+            nbytes = n_elems * g.dtype.itemsize
+            name = "%s_%d_%d" % (shm_prefix, g_idx, layer_idx)
+            addr = shm_create_readwrite(name, nbytes)
+            buf_type = ctypes.c_uint8 * nbytes
+            buf = buf_type.from_address(addr)
+            flat = torch.frombuffer(buf, dtype=torch.uint8)
+            t = flat.view(g.dtype).reshape(g_shape)
+            # Initialise with deterministic random data so the
+            # cold/warm checksum compare in the bench loop is
+            # meaningful.
+            if g.dtype.is_floating_point:
+                t.copy_(torch.randn(g_shape, dtype=g.dtype))
+            else:
+                iinfo = torch.iinfo(g.dtype)
+                t.copy_(torch.randint(iinfo.min, iinfo.max + 1, g_shape, dtype=g.dtype))
+            tensors.append(t)
+            wrappers.append(CpuShmTensorWrapper(t, name))
+            shm_names.append(name)
+            layer_idx += 1
+    return tensors, wrappers, shm_names
+
+
 def _send_register_kv_cache(
     client: MessageQueueClient,
     instance_id: int = 0,
     model_name: str = _MODEL_NAME,
     world_size: int = _WORLD_SIZE,
     layout_hints: dict | None = None,
-    gpu_tensors: list[torch.Tensor] | None = None,
+    kv_caches: list[CudaIPCWrapper] | None = None,
 ) -> bool:
     """REGISTER_KV_CACHE — register a KV cache context.
 
-    In GPU mode real CUDA tensors are wrapped via
-    ``CudaIPCWrapper`` and sent over IPC.
+    The caller is responsible for building the wrappers:
 
-    .. note::
-        CPU mode (``gpu_tensors is None``) is not yet
-        supported.
+    * GPU mode: ``CudaIPCWrapper`` over real CUDA tensors.
+    * CPU mode: ``CpuShmTensorWrapper`` over POSIX-SHM-backed
+      tensors (see :func:`_allocate_cpu_shm_kv_cache`).
+
+    The legacy ``kv_caches=[]`` + server-side self-allocation path
+    has been removed.
     """
+    if not kv_caches:
+        raise ValueError(
+            "kv_caches must be a non-empty list of wrappers "
+            "(CudaIPCWrapper for GPU, CpuShmTensorWrapper for CPU)"
+        )
+
     hints: dict = {"kv_layout": "NHD"}
     if layout_hints:
         hints.update(layout_hints)
@@ -348,12 +413,13 @@ def _send_store(
     key: IPCCacheEngineKey,
     block_offset: int = 0,
     block_size: int = 16,
+    use_gpu: bool = True,
 ) -> str:
     """STORE — store KV cache blocks. Returns status string."""
     num_tokens = key.end - key.start
     num_blocks = num_tokens // block_size
     block_ids = list(range(block_offset, block_offset + num_blocks))
-    payloads = [key, _INSTANCE_ID, block_ids, _make_event_handle()]
+    payloads = [key, _INSTANCE_ID, block_ids, _make_event_handle(use_gpu)]
     result = _call(client, RequestType.STORE, payloads)
     if result is _TIMEOUT:
         return "timeout"
@@ -367,6 +433,7 @@ def _send_retrieve(
     hit_chunks: int,
     block_offset: int = 0,
     block_size: int = 16,
+    use_gpu: bool = True,
 ) -> str:
     """RETRIEVE — retrieve KV cache blocks. Returns status."""
     hit_tokens = hit_chunks * chunk_size
@@ -376,7 +443,7 @@ def _send_retrieve(
         key,
         _INSTANCE_ID,
         block_ids,
-        _make_event_handle(),
+        _make_event_handle(use_gpu),
         0,  # skip_first_n_tokens
     ]
     result = _call(client, RequestType.RETRIEVE, payloads)
@@ -478,6 +545,7 @@ def _process_request(
     http_base: str = "",
     block_size: int = 16,
     total_blocks: int = 1024,
+    use_gpu: bool = True,
 ) -> list[str] | None:
     """Run the full lookup -> retrieve/store flow."""
     token_ids = _build_token_ids(seq_no, num_tokens)
@@ -554,6 +622,7 @@ def _process_request(
             hit_chunks,
             block_offset=block_offset,
             block_size=block_size,
+            use_gpu=use_gpu,
         )
         retrieve_ms = (time.monotonic() - t1) * 1000
         print(
@@ -586,6 +655,7 @@ def _process_request(
             store_key,
             block_offset=store_block_off,
             block_size=block_size,
+            use_gpu=use_gpu,
         )
         store_ms = (time.monotonic() - t2) * 1000
         print(
@@ -661,8 +731,9 @@ class TestCacheCommand(BaseCommand):
 
     CLI arguments (see :meth:`add_arguments` for full details):
         --rpc-url: ZMQ endpoint of the MP server.
-        --mode: Currently only ``gpu`` is supported; CPU mode is
-            a planned follow-up.
+        --mode: Either ``gpu`` (real CUDA tensors over IPC) or
+            ``cpu`` (server-side CPU allocation; client sends an
+            empty kv_caches list).
         --num-tokens: Number of tokens per synthetic request.
         --kvcache-shape-spec: Multi-group KV cache shape spec in
             the form ``(shape):dtype:layers[;...]``.
@@ -700,13 +771,15 @@ class TestCacheCommand(BaseCommand):
             default="tcp://localhost:5555",
             help=("ZMQ endpoint of the MP server (default: tcp://localhost:5555)"),
         )
-        # TODO(maobaolong): add "cpu" choice once CPU mode is
-        # implemented.
         parser.add_argument(
             "--mode",
-            choices=["gpu"],
+            choices=["cpu", "gpu"],
             default="gpu",
-            help="Run mode (default: gpu)",
+            help=(
+                "Run mode (default: gpu). In cpu mode the client sends an "
+                "empty kv_caches list and the server allocates KV cache on "
+                "CPU based on layout_hints."
+            ),
         )
         parser.add_argument(
             "--num-tokens",
@@ -900,26 +973,39 @@ class TestCacheCommand(BaseCommand):
                 )
             )
 
-            # Allocate GPU tensors — one tensor per layer, shaped
-            # according to that layer's group in the spec (so
-            # heterogeneous ``nh`` / ``hs`` / ``dtype`` / ``kv_size``
-            # are honoured).
-            gpu_tensors = _allocate_gpu_kv_cache(
-                groups=layer_groups,
-            )
-            print(
-                "Allocated %d GPU tensors on %s"
-                % (
-                    len(gpu_tensors),
-                    gpu_tensors[0].device,
+            # Allocate KV tensors. GPU mode wraps real CUDA tensors
+            # via CUDA IPC; CPU mode allocates POSIX-SHM-backed
+            # tensors so the server can map the same physical pages.
+            kv_wrappers: list[CudaIPCWrapper]
+            shm_names: list[str] = []
+            if use_gpu:
+                allocated = _allocate_gpu_kv_cache(groups=layer_groups)
+                print(
+                    "Allocated %d GPU tensors on %s"
+                    % (len(allocated), allocated[0].device)
                 )
-            )
+                kv_wrappers = [CudaIPCWrapper(t) for t in allocated]
+                # Keep the CUDA tensors alive for the lifetime of the
+                # bench process — storage may be reclaimed otherwise.
+                _kv_keepalive = allocated  # noqa: F841
+            else:
+                shm_prefix = CpuShmTensorWrapper.SHM_NAME_PREFIX + str(os.getpid())
+                cpu_tensors, cpu_wrappers, shm_names = _allocate_cpu_shm_kv_cache(
+                    groups=layer_groups, shm_prefix=shm_prefix
+                )
+                print(
+                    "Allocated %d CPU SHM tensors (prefix=%s)"
+                    % (len(cpu_tensors), shm_prefix)
+                )
+                kv_wrappers = list(cpu_wrappers)
+                # Same keepalive note as above.
+                _kv_keepalive = cpu_tensors  # noqa: F841
 
             # Register KV cache before any store/retrieve
             ok = _send_register_kv_cache(
                 client,
                 layout_hints=layout_hints,
-                gpu_tensors=gpu_tensors,
+                kv_caches=kv_wrappers,
             )
             print("REGISTER_KV_CACHE: %s" % ("OK" if ok else "FAIL"))
             print()
@@ -947,6 +1033,7 @@ class TestCacheCommand(BaseCommand):
                     http_base=http_base,
                     block_size=block_size,
                     total_blocks=num_blocks,
+                    use_gpu=use_gpu,
                 )
 
                 time.sleep(args.interval)
@@ -961,6 +1048,7 @@ class TestCacheCommand(BaseCommand):
                     http_base=http_base,
                     block_size=block_size,
                     total_blocks=num_blocks,
+                    use_gpu=use_gpu,
                 )
 
                 # Compare checksums
@@ -994,4 +1082,10 @@ class TestCacheCommand(BaseCommand):
         finally:
             client.close()
             ctx.term()
+            # Best-effort SHM cleanup so segments don't linger in /dev/shm.
+            for _name in shm_names if "shm_names" in locals() else []:
+                try:
+                    shm_unlink(_name)
+                except OSError:
+                    pass
         print("Done.")

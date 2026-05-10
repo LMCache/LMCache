@@ -67,6 +67,12 @@ from lmcache.v1.multiprocess.protocol import (
 )
 from lmcache.v1.multiprocess.session import SessionManager
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
+from lmcache.v1.platform.cache_context import create_cache_context
+from lmcache.v1.platform.device_ctx import (
+    event_from_ipc_handle,
+    make_device_context,
+    make_interprocess_event,
+)
 import lmcache.c_ops as lmc_ops
 
 logger = init_logger(__name__)
@@ -247,7 +253,7 @@ class MPCacheEngine:
             )
             return
 
-        gpu_context = GPUCacheContext(
+        gpu_context = create_cache_context(
             kv_caches,
             self.chunk_size,
             layout_hints=layout_hints or None,
@@ -318,26 +324,14 @@ class MPCacheEngine:
 
         blocks_per_chunk = self.chunk_size // gpu_context.block_size
 
-        with (
-            torch_dev.device(gpu_context.device),
-            torch_dev.stream(gpu_context.stream),
-        ):
-            # Not all backends support interprocess Events (CUDA IPC specific)
-            check_interprocess_event_support()
-            event = torch_dev.Event(interprocess=True)
+        with make_device_context(gpu_context.device, gpu_context.stream):
+            event = make_interprocess_event(gpu_context.device)
 
             # Stage all block_ids to GPU once before the loop
             all_block_ids_gpu = gpu_context.stage_block_ids(gpu_block_ids)
 
             # Wait for vLLM to finish
-            # Not all backends support IPC event handles (CUDA IPC specific)
-            if not hasattr(torch_dev.Event, "from_ipc_handle"):
-                raise RuntimeError(
-                    f"Backend '{torch_device_type}' does not support IPC event "
-                    "handles (Event.from_ipc_handle not available). "
-                    "Multiprocess IPC requires CUDA."
-                )
-            vllm_event = torch_dev.Event.from_ipc_handle(
+            vllm_event = event_from_ipc_handle(
                 gpu_context.device, event_ipc_handle
             )
             vllm_event.wait(stream=gpu_context.stream)
@@ -582,16 +576,11 @@ class MPCacheEngine:
                         skip_blocks_in_chunk,
                     )
 
-        with (
-            torch_dev.device(gpu_context.device),
-            torch_dev.stream(gpu_context.stream),
-        ):
+        with make_device_context(gpu_context.device, gpu_context.stream):
             # Stage all block_ids to GPU once before the loop
             all_block_ids_gpu = gpu_context.stage_block_ids(gpu_block_ids)
 
-            # Not all backends support interprocess Events (CUDA IPC specific)
-            check_interprocess_event_support()
-            event = torch_dev.Event(interprocess=True)
+            event = make_interprocess_event(gpu_context.device)
 
             prefetched_keys: list[ObjectKey] = []
             retrieve_succeeded = False
@@ -1187,14 +1176,19 @@ def run_cache_server(
         mp_config.port,
     )
     # Start the ZMQ server
-    # Not all backends expose init(); some auto-initialize on first use
-    if not hasattr(torch_dev, "init"):
+    # Not all backends expose init(); on CPU-only hosts the backend may not
+    # actually be available even if ``torch_dev`` is bound, so guard the call.
+    if (
+        torch_dev is not None
+        and torch_dev.is_available()
+        and hasattr(torch_dev, "init")
+    ):
+        torch_dev.init()
+    else:
         logger.warning(
             "Backend '%s' does not support init(), skipping device init",
             torch_device_type,
         )
-    else:
-        torch_dev.init()
     server.start()
 
     logger.info("LMCache cache server is running...")
