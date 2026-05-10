@@ -1,0 +1,244 @@
+# SPDX-License-Identifier: Apache-2.0
+"""Benchmark runners for L2 adapter ops.
+
+Each round issues ``in_flight`` submits sequentially from the calling
+thread, then waits for ``in_flight`` eventfd notifications before
+recording the round duration. This matches the real-world usage pattern
+where multiple producers submit tasks and the L2 adapter's worker
+coroutine processes them.
+
+The benchmark itself is single-threaded on the producer side; the
+adapter internally is free to use threads / coroutines / async I/O.
+"""
+
+# Future
+from __future__ import annotations
+
+# Standard
+from typing import Callable
+import time
+
+# First Party
+from lmcache.native_storage_ops import Bitmap
+from lmcache.v1.distributed.api import ObjectKey
+from lmcache.v1.memory_management import MemoryObj
+
+# Local
+from .data import wait_eventfd
+from .result import BenchResult
+
+# Logger callable type: takes a single string and prints / logs it.
+LogFn = Callable[[str], None]
+
+# Provider callable signatures used by the runners. They are invoked at
+# the start of every round and must return ``in_flight`` lists, one per
+# in-flight submit, of length ``num_keys`` each.
+KeyProvider = Callable[[int], list[list[ObjectKey]]]
+ObjProvider = Callable[[int], list[list[MemoryObj]]]
+
+
+def _bitmap_count(bitmap: Bitmap | None) -> int:
+    """Count how many bits are set in *bitmap*. Returns 0 when None."""
+    if bitmap is None:
+        return 0
+    return bitmap.popcount()
+
+
+def _drain_eventfd(efd: int, count: int, timeout: float) -> bool:
+    """Wait for *count* eventfd notifications. Returns False on timeout."""
+    for _ in range(count):
+        if not wait_eventfd(efd, timeout=timeout):
+            return False
+    return True
+
+
+# ---------------------------------------------------------------------------
+# Store
+# ---------------------------------------------------------------------------
+
+
+def bench_store(
+    adapter,
+    in_flight: int,
+    num_keys: int,
+    data_size: int,
+    rounds: int,
+    keys_for_round: KeyProvider,
+    objs_for_round: ObjProvider,
+    log: LogFn,
+) -> BenchResult:
+    """Benchmark ``submit_store_task``.
+
+    For each round, ``in_flight`` independent submits are issued; the
+    round duration is the wall-clock time from the first submit until
+    every submit of that round has completed.
+    """
+    result = BenchResult(
+        operation="Store",
+        in_flight=in_flight,
+        num_keys=num_keys,
+        data_size_bytes=data_size,
+    )
+    store_efd = adapter.get_store_event_fd()
+
+    for r in range(rounds):
+        keys_batches = keys_for_round(r)
+        obj_batches = objs_for_round(r)
+        assert len(keys_batches) == in_flight
+        assert len(obj_batches) == in_flight
+
+        t0 = time.perf_counter()
+        task_ids: list[int] = []
+        for i in range(in_flight):
+            task_ids.append(adapter.submit_store_task(keys_batches[i], obj_batches[i]))
+
+        ok = _drain_eventfd(store_efd, in_flight, timeout=120.0)
+        t1 = time.perf_counter()
+        elapsed = t1 - t0
+
+        if not ok:
+            log(f"  [Store] Round {r + 1}: TIMEOUT waiting for completion")
+            result.round_durations.append(float("inf"))
+            result.success_counts.append(0)
+            continue
+
+        completed = adapter.pop_completed_store_tasks()
+        success_keys = sum(
+            len(keys_batches[i])
+            for i, tid in enumerate(task_ids)
+            if completed.get(tid, False)
+        )
+
+        result.round_durations.append(elapsed)
+        result.success_counts.append(success_keys)
+        log(
+            f"  [Store] Round {r + 1}: {elapsed * 1000:.2f} ms, "
+            f"success_keys={success_keys}/{in_flight * num_keys}"
+        )
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Lookup
+# ---------------------------------------------------------------------------
+
+
+def bench_lookup(
+    adapter,
+    in_flight: int,
+    num_keys: int,
+    rounds: int,
+    keys_for_round: KeyProvider,
+    log: LogFn,
+    expected_max_hit_rate: float = 0.0,
+    expected_hit_count: int = 0,
+) -> BenchResult:
+    """Benchmark ``submit_lookup_and_lock_task``."""
+    result = BenchResult(
+        operation="Lookup",
+        in_flight=in_flight,
+        num_keys=num_keys,
+        data_size_bytes=0,  # lookup transfers no payload
+        expected_max_hit_rate=expected_max_hit_rate,
+        expected_hit_count=expected_hit_count,
+    )
+    lookup_efd = adapter.get_lookup_and_lock_event_fd()
+
+    for r in range(rounds):
+        keys_batches = keys_for_round(r)
+        assert len(keys_batches) == in_flight
+
+        t0 = time.perf_counter()
+        task_ids: list[int] = []
+        for i in range(in_flight):
+            task_ids.append(adapter.submit_lookup_and_lock_task(keys_batches[i]))
+
+        ok = _drain_eventfd(lookup_efd, in_flight, timeout=60.0)
+        t1 = time.perf_counter()
+        elapsed = t1 - t0
+
+        if not ok:
+            log(f"  [Lookup] Round {r + 1}: TIMEOUT waiting for completion")
+            result.round_durations.append(float("inf"))
+            result.success_counts.append(0)
+            continue
+
+        total_found = 0
+        for tid in task_ids:
+            bitmap = adapter.query_lookup_and_lock_result(tid)
+            total_found += _bitmap_count(bitmap)
+
+        result.round_durations.append(elapsed)
+        result.success_counts.append(total_found)
+        log(
+            f"  [Lookup] Round {r + 1}: {elapsed * 1000:.2f} ms, "
+            f"found={total_found}/{in_flight * num_keys}"
+        )
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Load
+# ---------------------------------------------------------------------------
+
+
+def bench_load(
+    adapter,
+    in_flight: int,
+    num_keys: int,
+    data_size: int,
+    rounds: int,
+    keys_for_round: KeyProvider,
+    objs_for_round: ObjProvider,
+    log: LogFn,
+) -> BenchResult:
+    """Benchmark ``submit_load_task``."""
+    result = BenchResult(
+        operation="Load",
+        in_flight=in_flight,
+        num_keys=num_keys,
+        data_size_bytes=data_size,
+    )
+    load_efd = adapter.get_load_event_fd()
+
+    for r in range(rounds):
+        keys_batches = keys_for_round(r)
+        obj_batches = objs_for_round(r)
+        assert len(keys_batches) == in_flight
+        assert len(obj_batches) == in_flight
+
+        # Reset all load buffers before each round to ensure fresh reads.
+        for objs in obj_batches:
+            for obj in objs:
+                obj.raw_data.zero_()
+
+        t0 = time.perf_counter()
+        task_ids: list[int] = []
+        for i in range(in_flight):
+            task_ids.append(adapter.submit_load_task(keys_batches[i], obj_batches[i]))
+
+        ok = _drain_eventfd(load_efd, in_flight, timeout=120.0)
+        t1 = time.perf_counter()
+        elapsed = t1 - t0
+
+        if not ok:
+            log(f"  [Load] Round {r + 1}: TIMEOUT waiting for completion")
+            result.round_durations.append(float("inf"))
+            result.success_counts.append(0)
+            continue
+
+        total_loaded = 0
+        for tid in task_ids:
+            bitmap = adapter.query_load_result(tid)
+            total_loaded += _bitmap_count(bitmap)
+
+        result.round_durations.append(elapsed)
+        result.success_counts.append(total_loaded)
+        log(
+            f"  [Load] Round {r + 1}: {elapsed * 1000:.2f} ms, "
+            f"loaded={total_loaded}/{in_flight * num_keys}"
+        )
+
+    return result
