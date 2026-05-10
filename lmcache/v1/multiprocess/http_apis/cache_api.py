@@ -14,7 +14,7 @@ logger = init_logger(__name__)
 router = APIRouter()
 
 
-@router.post("/api/clear-cache")
+@router.post("/clear-cache")
 async def clear_cache(request: Request) -> Any:
     """
     Force-clear all KV cache data stored in L1 (CPU) memory.
