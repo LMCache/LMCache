@@ -30,10 +30,6 @@ source .buildkite/k3_harness/setup-lmcache-only-env.sh
 uv pip install -r requirements/test.txt
 
 # ── Run unit tests with coverage ─────────────────────────────
-# test_gds_backend is skipped: this CI host has no nvidia-fs kernel
-# module, so cuFileHandleRegister fails with CU_FILE_IO_NOT_SUPPORTED
-# (err=5027) regardless of compat_mode. Re-enable once the host is
-# provisioned with nvidia-fs (or migrated to a GDS-capable node).
 LMCACHE_TRACK_USAGE="false" \
 pytest --maxfail=1 --cov=lmcache \
     --cov-report term --cov-report=html:coverage-test \
@@ -41,8 +37,7 @@ pytest --maxfail=1 --cov=lmcache \
     --ignore=tests/disagg --ignore=tests/v1/test_pos_kernels.py \
     --ignore=tests/v1/test_nixl_storage.py \
     --ignore=tests/skipped \
-    --ignore=tests/v1/storage_backend/test_eic.py \
-    --ignore=tests/v1/storage_backend/test_gds_backend.py
+    --ignore=tests/v1/storage_backend/test_eic.py
 
 cat << EOF | buildkite-agent annotate --style "info"
   Read the <a href="artifact://coverage-test/index.html">uploaded coverage report</a>
