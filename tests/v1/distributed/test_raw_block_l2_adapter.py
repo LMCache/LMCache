@@ -13,7 +13,7 @@ import torch
 # First Party
 from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.distributed.config import EvictionConfig
-from lmcache.v1.distributed.internal_api import L2AdapterListener
+from lmcache.v1.distributed.internal_api import L1MemoryDesc, L2AdapterListener
 from lmcache.v1.distributed.l2_adapters.raw_block_l2_adapter import (
     RawBlockL2Adapter,
     RawBlockL2AdapterConfig,
@@ -116,6 +116,18 @@ def _create_complex_memory_obj(
     return TensorMemoryObj(raw_data, metadata, parent_allocator=None)
 
 
+def _create_memory_obj_from_tensor(raw_data: torch.Tensor) -> TensorMemoryObj:
+    metadata = MemoryObjMetadata(
+        shape=torch.Size([raw_data.numel()]),
+        dtype=raw_data.dtype,
+        address=0,
+        phy_size=raw_data.numel() * raw_data.element_size(),
+        fmt=MemoryFormat.KV_2LTD,
+        ref_count=1,
+    )
+    return TensorMemoryObj(raw_data, metadata, parent_allocator=None)
+
+
 def _wait_event_fd(event_fd: int, timeout: float = 5.0) -> bool:
     poll = select.poll()
     poll.register(event_fd, select.POLLIN)
@@ -134,6 +146,8 @@ def _make_config(
     *,
     slot_bytes: int = 64 * 1024,
     capacity_bytes: int = 0,
+    enable_zero_copy: bool = True,
+    io_engine: str = "posix",
 ) -> RawBlockL2AdapterConfig:
     return RawBlockL2AdapterConfig(
         device_path=device_path,
@@ -144,6 +158,8 @@ def _make_config(
         header_bytes=4096,
         meta_total_bytes=1 * 1024 * 1024,
         meta_enable_periodic=False,
+        enable_zero_copy=enable_zero_copy,
+        io_engine=io_engine,
         num_store_workers=2,
         num_lookup_workers=1,
         num_load_workers=2,
@@ -196,6 +212,126 @@ def test_raw_block_l2_adapter_config_explicit_io_engine_wins_over_legacy_flag():
 def test_raw_block_l2_adapter_config_validates_iouring_queue_depth():
     with pytest.raises(ValueError, match="iouring_queue_depth"):
         RawBlockL2AdapterConfig.from_dict(_config_dict(iouring_queue_depth=0))
+
+
+def test_raw_block_l2_adapter_registers_l1_region_for_iouring(monkeypatch) -> None:
+    created_cores = []
+
+    class FakeCore:
+        slot_bytes = 64 * 1024
+
+        def __init__(self, config, *, key_namespace) -> None:
+            del config, key_namespace
+            self.registered_regions: list[tuple[int, int]] = []
+            created_cores.append(self)
+
+        def register_fixed_buffer_region(self, ptr: int, size: int) -> bool:
+            self.registered_regions.append((ptr, size))
+            return True
+
+        def report_status(self) -> dict[str, object]:
+            return {
+                "is_healthy": True,
+                "usable_capacity_bytes": 0,
+                "registered_regions": list(self.registered_regions),
+            }
+
+        def snapshot_indexed_keys(self) -> list[str]:
+            return []
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(
+        "lmcache.v1.distributed.l2_adapters.raw_block_l2_adapter.RawBlockCore",
+        FakeCore,
+    )
+
+    config = RawBlockL2AdapterConfig(
+        device_path="/tmp/raw-block-test-device",
+        slot_bytes=64 * 1024,
+        use_odirect=False,
+        enable_zero_copy=True,
+        io_engine="io_uring",
+        meta_enable_periodic=False,
+    )
+    l1_desc = L1MemoryDesc(ptr=123456, size=1 << 20, align_bytes=4096)
+
+    adapter = RawBlockL2Adapter(config, l1_desc)
+    try:
+        assert created_cores[0].registered_regions == [(123456, 1 << 20)]
+        assert adapter.report_status()["core"]["registered_regions"] == [
+            (123456, 1 << 20)
+        ]
+    finally:
+        adapter.close()
+
+
+@pytest.mark.parametrize(
+    ("config_kwargs", "l1_desc"),
+    [
+        (
+            {"io_engine": "posix", "enable_zero_copy": True},
+            L1MemoryDesc(ptr=123456, size=1 << 20, align_bytes=4096),
+        ),
+        (
+            {"io_engine": "io_uring", "enable_zero_copy": False},
+            L1MemoryDesc(ptr=123456, size=1 << 20, align_bytes=4096),
+        ),
+        ({"io_engine": "io_uring", "enable_zero_copy": True}, None),
+    ],
+)
+def test_raw_block_l2_adapter_skips_l1_registration_when_disabled(
+    monkeypatch,
+    config_kwargs: dict[str, object],
+    l1_desc: L1MemoryDesc | None,
+) -> None:
+    created_cores = []
+
+    class FakeCore:
+        slot_bytes = 64 * 1024
+
+        def __init__(self, config, *, key_namespace) -> None:
+            del config, key_namespace
+            self.registered_regions: list[tuple[int, int]] = []
+            created_cores.append(self)
+
+        def register_fixed_buffer_region(self, ptr: int, size: int) -> bool:
+            self.registered_regions.append((ptr, size))
+            return True
+
+        def report_status(self) -> dict[str, object]:
+            return {
+                "is_healthy": True,
+                "usable_capacity_bytes": 0,
+                "registered_regions": list(self.registered_regions),
+            }
+
+        def snapshot_indexed_keys(self) -> list[str]:
+            return []
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(
+        "lmcache.v1.distributed.l2_adapters.raw_block_l2_adapter.RawBlockCore",
+        FakeCore,
+    )
+
+    config = RawBlockL2AdapterConfig(
+        device_path="/tmp/raw-block-test-device",
+        slot_bytes=64 * 1024,
+        use_odirect=False,
+        meta_enable_periodic=False,
+        enable_zero_copy=bool(config_kwargs["enable_zero_copy"]),
+        io_engine=str(config_kwargs["io_engine"]),
+    )
+
+    adapter = RawBlockL2Adapter(config, l1_desc)
+    try:
+        assert created_cores[0].registered_regions == []
+    finally:
+        adapter.close()
 
 
 def _run_store(adapter: RawBlockL2Adapter, keys, objects) -> bool:
@@ -261,6 +397,106 @@ def test_raw_block_l2_adapter_store_lookup_load_roundtrip():
             assert torch.count_nonzero(load_buffers[1].tensor) == 0
 
             adapter.submit_unlock([key1, key_miss, key3])
+        finally:
+            adapter.close()
+
+
+@requires_raw_block_ext
+def test_raw_block_l2_adapter_iouring_fixed_buffer_roundtrip_on_tmp_file() -> None:
+    with tempfile.TemporaryDirectory() as td:
+        dev_path = os.path.join(td, "dev.bin")
+        with open(dev_path, "wb") as f:
+            f.truncate(8 * 1024 * 1024)
+
+        arena = torch.empty(8192, dtype=torch.uint8)
+        src_tensor = arena[128:1152]
+        dst_tensor = arena[4096:5120]
+        src_tensor.copy_(torch.arange(1024, dtype=torch.uint8))
+        dst_tensor.zero_()
+        src = _create_memory_obj_from_tensor(src_tensor)
+        dst = _create_memory_obj_from_tensor(dst_tensor)
+        l1_desc = L1MemoryDesc(
+            ptr=arena.data_ptr(),
+            size=arena.numel() * arena.element_size(),
+            align_bytes=1,
+        )
+
+        try:
+            adapter = RawBlockL2Adapter(
+                _make_config(dev_path, io_engine="io_uring"),
+                l1_desc,
+            )
+        except RuntimeError as e:
+            if "io_uring" in str(e):
+                pytest.skip(f"io_uring unavailable: {e}")
+            raise
+
+        try:
+            status = adapter.report_status()
+            if not status["core"].get("fixed_buffer_registered", False):
+                pytest.skip("io_uring fixed-buffer registration unavailable")
+
+            key = _create_object_key(101)
+            assert _run_store(adapter, [key], [src]) is True
+            load_task_id, load_bitmap = _run_load(adapter, [key], [dst])
+
+            assert load_bitmap is not None
+            assert load_bitmap.get_indices_list() == [0]
+            assert adapter.query_load_result(load_task_id) is None
+            assert bytes(dst.byte_array) == bytes(src.byte_array)
+
+            stats = adapter.report_status()["core"]["io_stats"]
+            assert stats["fixed_buffers_registered"] == 1
+            assert stats["fixed_write_submissions"] >= 1
+            assert stats["fixed_read_submissions"] >= 1
+        finally:
+            adapter.close()
+
+
+@requires_raw_block_ext
+def test_raw_block_l2_adapter_iouring_load_outside_l1_region_falls_back() -> None:
+    with tempfile.TemporaryDirectory() as td:
+        dev_path = os.path.join(td, "dev.bin")
+        with open(dev_path, "wb") as f:
+            f.truncate(8 * 1024 * 1024)
+
+        arena = torch.empty(2048, dtype=torch.uint8)
+        src_tensor = arena[128:1152]
+        src_tensor.copy_(torch.arange(1024, dtype=torch.uint8))
+        src = _create_memory_obj_from_tensor(src_tensor)
+        dst = _create_memory_obj_from_tensor(torch.empty(1024, dtype=torch.uint8))
+        l1_desc = L1MemoryDesc(
+            ptr=arena.data_ptr(),
+            size=arena.numel() * arena.element_size(),
+            align_bytes=1,
+        )
+
+        try:
+            adapter = RawBlockL2Adapter(
+                _make_config(dev_path, io_engine="io_uring"),
+                l1_desc,
+            )
+        except RuntimeError as e:
+            if "io_uring" in str(e):
+                pytest.skip(f"io_uring unavailable: {e}")
+            raise
+
+        try:
+            status = adapter.report_status()
+            if not status["core"].get("fixed_buffer_registered", False):
+                pytest.skip("io_uring fixed-buffer registration unavailable")
+
+            key = _create_object_key(102)
+            assert _run_store(adapter, [key], [src]) is True
+            _, load_bitmap = _run_load(adapter, [key], [dst])
+
+            assert load_bitmap is not None
+            assert load_bitmap.get_indices_list() == [0]
+            assert bytes(dst.byte_array) == bytes(src.byte_array)
+
+            stats = adapter.report_status()["core"]["io_stats"]
+            assert stats["fixed_write_submissions"] >= 1
+            assert stats["fixed_read_submissions"] == 0
         finally:
             adapter.close()
 

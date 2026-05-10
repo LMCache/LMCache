@@ -5,8 +5,11 @@ from __future__ import annotations
 
 # Standard
 from concurrent.futures import Future
+from typing import Any
 from unittest.mock import MagicMock, patch
 import asyncio
+import ctypes
+import mmap
 import os
 import struct
 import sys
@@ -53,23 +56,99 @@ def _has_ext() -> bool:
 
 
 class _FakeRawBlockDevice:
-    def __init__(self, path: str, *, size_bytes: int, **kwargs):
+    def __init__(self, path: str, *, size_bytes: int, **kwargs: Any) -> None:
         del path, kwargs
         self._data = bytearray(size_bytes)
+        self._next_batch_id = 1
+        self.registered_buffers: list[tuple[list[int], list[int]]] = []
+        self.pwrites: list[tuple[int, int, int]] = []
+        self.preads: list[tuple[int, int, int]] = []
+        self.batched_writes: list[tuple[list[int], list[int]]] = []
+        self.read_uring_calls: list[tuple[int, int, int]] = []
+        self.waited_batches: list[int] = []
 
-    def size_bytes(self):
+    def size_bytes(self) -> int:
         return len(self._data)
 
-    def pread_into(self, offset, out, payload_len, total_len=None):
-        del total_len
-        out[:payload_len] = self._data[offset : offset + payload_len]
+    def pread_into(
+        self,
+        offset: int,
+        out: Any,
+        payload_len: int,
+        total_len: int | None = None,
+    ) -> None:
+        total_len = payload_len if total_len is None else total_len
+        view = memoryview(out)
+        try:
+            view = view.cast("B")
+        except TypeError:
+            pass
+        view[:payload_len] = self._data[offset : offset + payload_len]
+        self.preads.append((offset, payload_len, total_len))
 
-    def pwrite_from_buffer(self, offset, data, payload_len=None, total_len=None):
-        del total_len
-        length = len(data) if payload_len is None else payload_len
-        self._data[offset : offset + length] = bytes(memoryview(data)[:length])
+    def pwrite_from_buffer(
+        self,
+        offset: int,
+        data: Any,
+        payload_len: int | None = None,
+        total_len: int | None = None,
+    ) -> None:
+        data_view = memoryview(data)
+        length = len(data_view) if payload_len is None else payload_len
+        total_len = length if total_len is None else total_len
+        self._data[offset : offset + length] = bytes(data_view[:length])
+        self.pwrites.append((offset, length, total_len))
 
-    def close(self):
+    def register_fixed_buffers(
+        self,
+        buffer_ptrs: list[int],
+        buffer_sizes: list[int],
+    ) -> None:
+        self.registered_buffers.append((list(buffer_ptrs), list(buffer_sizes)))
+
+    def batched_write(
+        self,
+        offsets: list[int],
+        buffers: list[Any],
+        total_lens: list[int],
+    ) -> int:
+        for offset, data, total_len in zip(offsets, buffers, total_lens, strict=False):
+            payload = bytes(memoryview(data)[:total_len])
+            self._data[offset : offset + total_len] = payload
+        self.batched_writes.append((list(offsets), list(total_lens)))
+        batch_id = self._next_batch_id
+        self._next_batch_id += 1
+        return batch_id
+
+    def wait_iouring(self, batch_id: int) -> None:
+        self.waited_batches.append(batch_id)
+
+    def read_uring(
+        self,
+        offset: int,
+        out: Any,
+        payload_len: int,
+        total_len: int | None = None,
+    ) -> None:
+        total_len = payload_len if total_len is None else total_len
+        view = memoryview(out)
+        try:
+            view = view.cast("B")
+        except TypeError:
+            pass
+        view[:payload_len] = self._data[offset : offset + payload_len]
+        self.read_uring_calls.append((offset, payload_len, total_len))
+
+    def io_stats(self) -> dict[str, int]:
+        return {
+            "fixed_read_submissions": len(self.read_uring_calls),
+            "fixed_write_submissions": len(self.batched_writes),
+            "regular_read_submissions": len(self.preads),
+            "regular_write_submissions": len(self.pwrites),
+            "fixed_buffers_registered": int(bool(self.registered_buffers)),
+        }
+
+    def close(self) -> None:
         return None
 
 
@@ -84,7 +163,12 @@ def _install_fake_raw_block_device(monkeypatch, *, size_bytes: int = 64 * 1024):
     )
 
 
-def _make_raw_block_core(*, use_odirect: bool = False) -> RawBlockCore:
+def _make_raw_block_core(
+    *,
+    use_odirect: bool = False,
+    enable_zero_copy: bool = True,
+    io_engine: str = "posix",
+) -> RawBlockCore:
     return RawBlockCore(
         RawBlockCoreConfig(
             device_path="/tmp/raw-block-boundary-test",
@@ -93,7 +177,7 @@ def _make_raw_block_core(*, use_odirect: bool = False) -> RawBlockCore:
             header_bytes=4096,
             slot_bytes=8192,
             use_odirect=use_odirect,
-            enable_zero_copy=True,
+            enable_zero_copy=enable_zero_copy,
             meta_total_bytes=16 * 1024,
             meta_magic=b"LMCIDX01",
             meta_version=1,
@@ -102,7 +186,7 @@ def _make_raw_block_core(*, use_odirect: bool = False) -> RawBlockCore:
             meta_enable_periodic=False,
             load_checkpoint_on_init=True,
             meta_verify_on_load=True,
-            io_engine="posix",
+            io_engine=io_engine,
             iouring_queue_depth=256,
         ),
         key_namespace="object",
@@ -231,6 +315,60 @@ def test_raw_block_core_odirect_prepare_payload_boundaries(monkeypatch):
         core.close()
 
 
+def test_raw_block_core_registers_fixed_buffer_region_and_reports_status(monkeypatch):
+    _install_fake_raw_block_device(monkeypatch)
+    core = _make_raw_block_core(io_engine="io_uring")
+    try:
+        assert core.register_fixed_buffer_region(4096, 8192) is True
+
+        raw_dev = core._rawdev()
+        assert raw_dev.registered_buffers == [([4096], [8192])]
+
+        status = core.report_status()
+        assert status["fixed_buffer_registered"] is True
+        assert status["fixed_buffer_region"] == (4096, 8192)
+        assert status["io_stats"]["fixed_buffers_registered"] == 1
+    finally:
+        core.close()
+
+
+def test_raw_block_core_uses_fixed_iouring_payload_io(monkeypatch):
+    _install_fake_raw_block_device(monkeypatch)
+    core = _make_raw_block_core(io_engine="io_uring")
+    try:
+        key = RawBlockKeySpec(encoded="fixed-key", slot_identity=1)
+        src = _make_byte_obj(1024)
+        assert src.raw_tensor is not None
+        src.raw_tensor.copy_(torch.arange(1024, dtype=torch.uint8))
+
+        assert core.register_fixed_buffer_region(
+            src.data_ptr,
+            src.get_physical_size(),
+        )
+        result = core.put_many([key], [src])
+        assert result.results == [True]
+
+        raw_dev = core._rawdev()
+        assert raw_dev.batched_writes == [
+            ([core.data_base_offset() + core.header_bytes], [1024])
+        ]
+        assert raw_dev.waited_batches == [1]
+
+        dst = _make_byte_obj(1024)
+        assert core.register_fixed_buffer_region(
+            dst.data_ptr,
+            dst.get_physical_size(),
+        )
+        assert core.load_many_into([key.encoded], [dst]) == [True]
+
+        assert raw_dev.read_uring_calls == [
+            (core.data_base_offset() + core.header_bytes, 1024, 1024)
+        ]
+        assert bytes(dst.byte_array) == bytes(src.byte_array)
+    finally:
+        core.close()
+
+
 @pytest.mark.skipif(
     not _has_ext(), reason="lmcache_rust_raw_block_io extension not installed"
 )
@@ -259,6 +397,147 @@ def test_raw_block_device_all_io_engines_roundtrip_on_tmp_file(io_engine):
             dev.pread_into(4096, out, len(out), len(out))
             assert out == payload
         finally:
+            dev.close()
+
+
+@pytest.mark.skipif(
+    not _has_ext(), reason="lmcache_rust_raw_block_io extension not installed"
+)
+def test_raw_block_device_fixed_buffers_use_registered_region_on_tmp_file() -> None:
+    # Third Party
+    from lmcache_rust_raw_block_io import RawBlockDevice
+
+    with tempfile.TemporaryDirectory(dir="/tmp") as td:
+        dev_path = os.path.join(td, "raw-block-fixed-buffer.bin")
+        with open(dev_path, "wb") as f:
+            f.truncate(1024 * 1024)
+
+        try:
+            dev = RawBlockDevice(
+                dev_path,
+                writable=True,
+                use_odirect=False,
+                alignment=4096,
+                io_engine="io_uring",
+            )
+        except RuntimeError as e:
+            pytest.skip(f"io_uring unavailable: {e}")
+
+        try:
+            arena = bytearray(8192)
+            arena_view = (ctypes.c_ubyte * len(arena)).from_buffer(arena)
+            arena_ptr = ctypes.addressof(arena_view)
+            payload_len = 1024
+
+            write_view = memoryview(arena)[128 : 128 + payload_len]
+            expected = bytes((i % 251 for i in range(payload_len)))
+            write_view[:] = expected
+            read_view = memoryview(arena)[4096 : 4096 + payload_len]
+            read_view[:] = b"\x00" * payload_len
+
+            try:
+                dev.register_fixed_buffers([arena_ptr], [len(arena)])
+            except RuntimeError as e:
+                pytest.skip(f"io_uring fixed buffers unavailable: {e}")
+
+            batch_id = dev.batched_write([0], [write_view], [payload_len])
+            dev.wait_iouring(batch_id)
+            dev.read_uring(0, read_view, payload_len, payload_len)
+
+            assert read_view.tobytes() == expected
+            stats = dev.io_stats()
+            assert stats["fixed_buffers_registered"] == 1
+            assert stats["fixed_write_submissions"] >= 1
+            assert stats["fixed_read_submissions"] >= 1
+            assert stats["regular_write_submissions"] == 0
+            assert stats["regular_read_submissions"] == 0
+        finally:
+            dev.close()
+
+
+@pytest.mark.skipif(
+    not _has_ext(), reason="lmcache_rust_raw_block_io extension not installed"
+)
+def test_raw_block_device_batched_write_rejects_short_input_on_tmp_file() -> None:
+    # Third Party
+    from lmcache_rust_raw_block_io import RawBlockDevice
+
+    with tempfile.TemporaryDirectory(dir="/tmp") as td:
+        dev_path = os.path.join(td, "raw-block-short-input.bin")
+        with open(dev_path, "wb") as f:
+            f.truncate(1024 * 1024)
+
+        try:
+            dev = RawBlockDevice(
+                dev_path,
+                writable=True,
+                use_odirect=False,
+                alignment=4096,
+                io_engine="io_uring",
+            )
+        except RuntimeError as e:
+            pytest.skip(f"io_uring unavailable: {e}")
+
+        try:
+            with pytest.raises(ValueError, match="input buffer too small"):
+                dev.batched_write([0], [bytearray(8)], [16])
+        finally:
+            dev.close()
+
+
+@pytest.mark.skipif(
+    not _has_ext(), reason="lmcache_rust_raw_block_io extension not installed"
+)
+def test_raw_block_device_iouring_fixed_buffers_with_odirect_on_tmp_file() -> None:
+    # Third Party
+    from lmcache_rust_raw_block_io import RawBlockDevice
+
+    with tempfile.TemporaryDirectory(dir="/tmp") as td:
+        dev_path = os.path.join(td, "raw-block-odirect-fixed-buffer.bin")
+        with open(dev_path, "wb") as f:
+            f.truncate(1024 * 1024)
+
+        try:
+            dev = RawBlockDevice(
+                dev_path,
+                writable=True,
+                use_odirect=True,
+                alignment=4096,
+                io_engine="io_uring",
+            )
+        except (OSError, RuntimeError) as e:
+            pytest.skip(f"O_DIRECT io_uring unavailable: {e}")
+
+        arena = mmap.mmap(-1, 8192)
+        arena_view = (ctypes.c_ubyte * 8192).from_buffer(arena)
+        write_view = memoryview(arena)[:4096]
+        read_view = memoryview(arena)[4096:8192]
+        try:
+            arena_ptr = ctypes.addressof(arena_view)
+            if arena_ptr % 4096 != 0:
+                pytest.skip("mmap buffer is not 4096-byte aligned")
+
+            expected = bytes((i % 251 for i in range(4096)))
+            write_view[:] = expected
+            read_view[:] = b"\x00" * 4096
+
+            try:
+                dev.register_fixed_buffers([arena_ptr], [8192])
+                batch_id = dev.batched_write([0], [write_view], [4096])
+                dev.wait_iouring(batch_id)
+                dev.read_uring(0, read_view, 4096, 4096)
+            except (OSError, RuntimeError) as e:
+                pytest.skip(f"O_DIRECT fixed-buffer I/O unavailable: {e}")
+
+            assert read_view.tobytes() == expected
+            stats = dev.io_stats()
+            assert stats["fixed_write_submissions"] >= 1
+            assert stats["fixed_read_submissions"] >= 1
+        finally:
+            write_view.release()
+            read_view.release()
+            del arena_view
+            arena.close()
             dev.close()
 
 

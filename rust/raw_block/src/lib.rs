@@ -60,6 +60,23 @@ fn parse_use_iouring(io_engine: Option<String>, use_iouring: bool) -> PyResult<b
     }
 }
 
+fn fixed_buffer_index_for(
+    fixed_buffer_map: &HashMap<usize, (u16, usize)>,
+    ptr: usize,
+    len: usize,
+) -> Option<u16> {
+    let end = ptr.checked_add(len)?;
+
+    for (&base, &(idx, size)) in fixed_buffer_map.iter() {
+        let region_end = base.checked_add(size)?;
+        if ptr >= base && end <= region_end {
+            return Some(idx);
+        }
+    }
+
+    None
+}
+
 ///Per batch tracking for in flight I/O operation
 type BatchTracking = (Arc<AtomicU64>, Arc<Condvar>);
 
@@ -392,6 +409,30 @@ struct RawBlockDevice {
     batched_completions: Arc<Mutex<HashMap<u64, Vec<Arc<IoCompletion>>>>>,
     // Counter for generating unique batch IDs
     next_batch_id: Arc<AtomicU64>,
+    fixed_read_submissions: Arc<AtomicU64>,
+    fixed_write_submissions: Arc<AtomicU64>,
+    regular_read_submissions: Arc<AtomicU64>,
+    regular_write_submissions: Arc<AtomicU64>,
+}
+
+fn record_submission_stats(
+    sub: &IoSubmission,
+    fixed_read_submissions: &AtomicU64,
+    fixed_write_submissions: &AtomicU64,
+    regular_read_submissions: &AtomicU64,
+    regular_write_submissions: &AtomicU64,
+) {
+    if sub.is_write {
+        if sub.fixed_buffer_idx.is_some() {
+            fixed_write_submissions.fetch_add(1, Ordering::Relaxed);
+        } else {
+            regular_write_submissions.fetch_add(1, Ordering::Relaxed);
+        }
+    } else if sub.fixed_buffer_idx.is_some() {
+        fixed_read_submissions.fetch_add(1, Ordering::Relaxed);
+    } else {
+        regular_read_submissions.fetch_add(1, Ordering::Relaxed);
+    }
 }
 
 impl RawBlockDevice {
@@ -422,6 +463,10 @@ impl RawBlockDevice {
             return Err(os_err("open failed"));
         }
         let size = fd_size_bytes(fd)?;
+        let fixed_read_submissions = Arc::new(AtomicU64::new(0));
+        let fixed_write_submissions = Arc::new(AtomicU64::new(0));
+        let regular_read_submissions = Arc::new(AtomicU64::new(0));
+        let regular_write_submissions = Arc::new(AtomicU64::new(0));
 
         let (
             ring_opt,
@@ -457,6 +502,10 @@ impl RawBlockDevice {
             let in_flight_count_clone = Arc::clone(&in_flight_count);
             let in_flight_cvar_clone = Arc::clone(&in_flight_cvar);
             let batch_in_flight_clone = Arc::clone(&batch_in_flight);
+            let fixed_read_submissions_clone = Arc::clone(&fixed_read_submissions);
+            let fixed_write_submissions_clone = Arc::clone(&fixed_write_submissions);
+            let regular_read_submissions_clone = Arc::clone(&regular_read_submissions);
+            let regular_write_submissions_clone = Arc::clone(&regular_write_submissions);
             let ring_size = iouring_queue_depth;
 
             // Worker thread that handles io_uring submissions and completions.
@@ -540,6 +589,13 @@ impl RawBlockDevice {
                                         in_flight.insert(user_data, sub.clone());
                                         // Push a new SQE for the remaining data
                                         let ptr = sub.ptr_addr as *mut u8;
+                                        record_submission_stats(
+                                            &sub,
+                                            &fixed_read_submissions_clone,
+                                            &fixed_write_submissions_clone,
+                                            &regular_read_submissions_clone,
+                                            &regular_write_submissions_clone,
+                                        );
                                         let sqe = if sub.is_write {
                                             if let Some(idx) = sub.fixed_buffer_idx {
                                                 opcode::WriteFixed::new(
@@ -680,6 +736,13 @@ impl RawBlockDevice {
                             in_flight.insert(user_data, sub.clone());
 
                             let ptr = sub.ptr_addr as *mut u8;
+                            record_submission_stats(
+                                sub,
+                                &fixed_read_submissions_clone,
+                                &fixed_write_submissions_clone,
+                                &regular_read_submissions_clone,
+                                &regular_write_submissions_clone,
+                            );
                             let sqe = if sub.is_write {
                                 if let Some(idx) = sub.fixed_buffer_idx {
                                     opcode::WriteFixed::new(
@@ -958,6 +1021,10 @@ impl RawBlockDevice {
             next_batch_id: next_batch_id_opt.unwrap_or_else(|| Arc::new(AtomicU64::new(1))),
             batch_in_flight: batch_in_flight_opt
                 .unwrap_or_else(|| Arc::new(Mutex::new(HashMap::new()))),
+            fixed_read_submissions,
+            fixed_write_submissions,
+            regular_read_submissions,
+            regular_write_submissions,
         })
     }
 }
@@ -1000,6 +1067,35 @@ impl RawBlockDevice {
     // Expose cached size to Python.
     fn size_bytes(&self) -> PyResult<u64> {
         Ok(self.size)
+    }
+
+    fn io_stats(&self) -> PyResult<HashMap<String, u64>> {
+        let mut stats = HashMap::new();
+        stats.insert(
+            "fixed_read_submissions".to_string(),
+            self.fixed_read_submissions.load(Ordering::Relaxed),
+        );
+        stats.insert(
+            "fixed_write_submissions".to_string(),
+            self.fixed_write_submissions.load(Ordering::Relaxed),
+        );
+        stats.insert(
+            "regular_read_submissions".to_string(),
+            self.regular_read_submissions.load(Ordering::Relaxed),
+        );
+        stats.insert(
+            "regular_write_submissions".to_string(),
+            self.regular_write_submissions.load(Ordering::Relaxed),
+        );
+        stats.insert(
+            "fixed_buffers_registered".to_string(),
+            if self.fixed_buffers_registered.load(Ordering::Relaxed) {
+                1
+            } else {
+                0
+            },
+        );
+        Ok(stats)
     }
 
     /// Register fixed buffers for zero-copy io_uring operations.
@@ -1100,6 +1196,7 @@ impl RawBlockDevice {
 
         // Acquire buffer views to keep them alive until wait_iouring() completes
         let mut views = Vec::with_capacity(n);
+        let mut caps = Vec::with_capacity(n);
         for buffer in &buffers {
             let view = get_pybuffer(py, buffer, false)?;
             if view.buf.is_null() {
@@ -1109,6 +1206,7 @@ impl RawBlockDevice {
                 release_pybuffer(view);
                 return Err(PyValueError::new_err("null buffer pointer"));
             }
+            caps.push(view.len as usize);
             views.push(view);
         }
 
@@ -1173,11 +1271,19 @@ impl RawBlockDevice {
                 let ptr = ptrs[i] as *const u8;
                 let total_len = total_lens[i];
                 let offset = offsets[i];
+                let cap = caps[i];
+
+                if cap < total_len {
+                    return Err(PyValueError::new_err(format!(
+                        "input buffer too small: cap={} need={}",
+                        cap, total_len
+                    )));
+                }
 
                 let comp = Arc::new(IoCompletion::new());
 
                 // Fixed buffers are pre-registered with io_uring, enabling true zero-copy I/O
-                let fixed_idx = fixed_buffer_map.get(&ptrs[i]).map(|(idx, _)| *idx);
+                let fixed_idx = fixed_buffer_index_for(&fixed_buffer_map, ptrs[i], total_len);
 
                 // Ensure O_DIRECT buffers are aligned
                 let (final_ptr, bounce_opt, fixed_idx) = if use_odirect {
@@ -1423,7 +1529,7 @@ impl RawBlockDevice {
         let fixed_idx = if use_fixed && ptr_aligned {
             let map = self.fixed_buffer_map.lock().unwrap();
             let ptr_addr = ptr as usize;
-            map.get(&ptr_addr).map(|(idx, _)| *idx)
+            fixed_buffer_index_for(&map, ptr_addr, total_len)
         } else {
             None
         };
@@ -1635,7 +1741,7 @@ impl RawBlockDevice {
                 let comp = Arc::new(IoCompletion::new());
 
                 // Fixed buffers are pre-registered with io_uring, enabling true zero-copy I/O
-                let fixed_idx = fixed_buffer_map.get(&ptrs[i]).map(|(idx, _)| *idx);
+                let fixed_idx = fixed_buffer_index_for(&fixed_buffer_map, ptrs[i], total_len);
 
                 let sub = IoSubmission {
                     fd,
@@ -2020,6 +2126,25 @@ impl Drop for RawBlockDevice {
         if !self.closed.load(Ordering::Relaxed) {
             let _ = self.do_close();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fixed_buffer_index_for_matches_registered_region_ranges() {
+        let mut map = HashMap::new();
+        let base = 0x1000usize;
+        map.insert(base, (3, 8192));
+
+        assert_eq!(fixed_buffer_index_for(&map, base, 4096), Some(3));
+        assert_eq!(fixed_buffer_index_for(&map, base + 4096, 1024), Some(3));
+        assert_eq!(fixed_buffer_index_for(&map, base + 8191, 1), Some(3));
+        assert_eq!(fixed_buffer_index_for(&map, base + 8191, 2), None);
+        assert_eq!(fixed_buffer_index_for(&map, usize::MAX - 4, 8), None);
+        assert_eq!(fixed_buffer_index_for(&HashMap::new(), base, 1), None);
     }
 }
 

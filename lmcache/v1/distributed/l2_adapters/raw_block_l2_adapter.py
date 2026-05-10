@@ -323,6 +323,22 @@ class RawBlockL2Adapter(L2AdapterInterface):
 
         try:
             self._core = RawBlockCore(config.to_core_config(), key_namespace="object")
+            if (
+                l1_memory_desc is not None
+                and config.io_engine == "io_uring"
+                and config.enable_zero_copy
+            ):
+                try:
+                    self._core.register_fixed_buffer_region(
+                        int(l1_memory_desc.ptr),
+                        int(l1_memory_desc.size),
+                    )
+                except Exception as e:
+                    logger.warning(
+                        "raw_block failed to register L1 arena as io_uring "
+                        "fixed buffer; falling back to non-fixed I/O: %s",
+                        e,
+                    )
             self._max_capacity_bytes = int(
                 self._core.report_status().get("usable_capacity_bytes", 0)
             )

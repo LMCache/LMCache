@@ -250,6 +250,8 @@ class RawBlockCore:
 
         self._raw = None
         self._closed = False
+        self._fixed_buffer_region: tuple[int, int] | None = None
+        self._fixed_buffer_registered: bool = False
 
         self._meta_seq: int = 0
         self._meta_dirty_total: int = 0
@@ -297,6 +299,49 @@ class RawBlockCore:
                 iouring_queue_depth=self.iouring_queue_depth,
             )
         return self._raw
+
+    def register_fixed_buffer_region(self, ptr: int, size: int) -> bool:
+        """Register one L1 arena region for io_uring fixed-buffer payload I/O.
+
+        Args:
+            ptr: Base address of the host-memory L1 arena.
+            size: Size of the arena in bytes.
+
+        Returns:
+            True when registration succeeds. False when the core is not using
+            io_uring or zero-copy is disabled.
+
+        Raises:
+            ValueError: If ``ptr`` or ``size`` are invalid, or the pointer does
+                not satisfy O_DIRECT alignment when O_DIRECT is enabled.
+            Exception: Propagates errors raised by the Rust raw-block device
+                registration call.
+        """
+        if self.io_engine != "io_uring":
+            return False
+        if not self.enable_zero_copy:
+            return False
+
+        ptr = int(ptr)
+        size = int(size)
+        if ptr <= 0:
+            raise ValueError("fixed-buffer ptr must be positive")
+        if size <= 0:
+            raise ValueError("fixed-buffer size must be positive")
+        if self.use_odirect and ptr % self.block_align != 0:
+            raise ValueError(
+                "fixed-buffer ptr must be block-aligned when use_odirect=true"
+            )
+
+        self._rawdev().register_fixed_buffers([ptr], [size])
+        self._fixed_buffer_region = (ptr, size)
+        self._fixed_buffer_registered = True
+        logger.info(
+            "RawBlockCore registered io_uring fixed-buffer region: ptr=%#x size=%d",
+            ptr,
+            size,
+        )
+        return True
 
     def contains_key(self, encoded_key: str, *, lock: bool = False) -> bool:
         """Return whether one encoded key is present in the raw-block index.
@@ -596,33 +641,51 @@ class RawBlockCore:
                         if self.use_odirect
                         else payload_len
                     )
-                    buf = memoryview(objs[i].byte_array)
-                    try:
-                        buf = buf.cast("B")
-                    except Exception:
-                        pass
-
-                    direct_view = self._build_direct_odirect_view(
+                    fixed_view = self._build_fixed_iouring_view(
                         memory_obj=objs[i],
                         payload_len=payload_len,
                         total_len=total_len,
-                        buffer_len=len(buf),
                         zero_tail=False,
                     )
-                    if direct_view is not None:
-                        raw_dev.pread_into(
+                    if fixed_view is not None:
+                        raw_dev.read_uring(
                             entry.offset + self.header_bytes,
-                            direct_view,
-                            total_len if len(direct_view) >= total_len else payload_len,
-                            total_len,
-                        )
-                    else:
-                        raw_dev.pread_into(
-                            entry.offset + self.header_bytes,
-                            buf,
+                            fixed_view,
                             payload_len,
                             total_len,
                         )
+                    else:
+                        buf = memoryview(objs[i].byte_array)
+                        try:
+                            buf = buf.cast("B")
+                        except Exception:
+                            pass
+
+                        direct_view = self._build_direct_odirect_view(
+                            memory_obj=objs[i],
+                            payload_len=payload_len,
+                            total_len=total_len,
+                            buffer_len=len(buf),
+                            zero_tail=False,
+                        )
+                        if direct_view is not None:
+                            raw_dev.pread_into(
+                                entry.offset + self.header_bytes,
+                                direct_view,
+                                (
+                                    total_len
+                                    if len(direct_view) >= total_len
+                                    else payload_len
+                                ),
+                                total_len,
+                            )
+                        else:
+                            raw_dev.pread_into(
+                                entry.offset + self.header_bytes,
+                                buf,
+                                payload_len,
+                                total_len,
+                            )
                     objs[i].metadata.cached_positions = entry.meta.cached_positions
                     results[i] = True
                 except Exception as e:
@@ -726,7 +789,7 @@ class RawBlockCore:
     def report_status(self) -> dict:
         """Return raw-block health, layout, metadata, and in-flight counters."""
         with self._lock:
-            return {
+            status = {
                 "is_healthy": not self._closed,
                 "type": "RawBlockCore",
                 "key_namespace": self.key_namespace,
@@ -752,7 +815,16 @@ class RawBlockCore:
                 "enable_zero_copy": self.enable_zero_copy,
                 "io_engine": self.io_engine,
                 "iouring_queue_depth": self.iouring_queue_depth,
+                "fixed_buffer_registered": self._fixed_buffer_registered,
+                "fixed_buffer_region": self._fixed_buffer_region,
             }
+        raw = self._raw
+        if raw is not None and hasattr(raw, "io_stats"):
+            try:
+                status["io_stats"] = raw.io_stats()
+            except Exception as e:
+                status["io_stats_error"] = str(e)
+        return status
 
     def close(self) -> None:
         """Stop checkpointing, write a final checkpoint, and close the device."""
@@ -853,6 +925,78 @@ class RawBlockCore:
         except Exception:
             return None
 
+    def _fixed_region_contains(self, ptr: int, length: int) -> bool:
+        region = self._fixed_buffer_region
+        if region is None:
+            return False
+
+        base, size = region
+        return base <= ptr and ptr + length <= base + size
+
+    def _memory_obj_data_ptr(self, memory_obj: MemoryObj) -> int:
+        ptr_val = getattr(memory_obj, "data_ptr", None)
+        if callable(ptr_val):
+            ptr_val = ptr_val()
+
+        if ptr_val is None:
+            return 0
+
+        return int(ptr_val)
+
+    def _build_fixed_iouring_view(
+        self,
+        memory_obj: MemoryObj,
+        payload_len: int,
+        total_len: int,
+        *,
+        zero_tail: bool,
+    ) -> Optional[memoryview]:
+        """Build a total-length host-memory view inside the registered L1 arena."""
+        if self.io_engine != "io_uring":
+            return None
+        if not self.enable_zero_copy:
+            return None
+        if not self._fixed_buffer_registered:
+            return None
+
+        try:
+            raw_tensor = memory_obj.raw_tensor
+            if raw_tensor is not None and raw_tensor.device.type != "cpu":
+                return None
+        except Exception:
+            return None
+
+        try:
+            ptr = self._memory_obj_data_ptr(memory_obj)
+        except Exception:
+            return None
+
+        if ptr <= 0:
+            return None
+        if self.use_odirect:
+            if ptr % self.block_align != 0:
+                return None
+            if total_len % self.block_align != 0:
+                return None
+
+        try:
+            physical_size = int(memory_obj.get_physical_size())
+        except Exception:
+            return None
+
+        if physical_size < total_len:
+            return None
+        if not self._fixed_region_contains(ptr, total_len):
+            return None
+
+        try:
+            raw = (ctypes.c_ubyte * total_len).from_address(ptr)
+            if zero_tail and total_len > payload_len:
+                ctypes.memset(ptr + payload_len, 0, total_len - payload_len)
+            return memoryview(raw)
+        except Exception:
+            return None
+
     def _prepare_write_payload(self, memory_obj: MemoryObj) -> tuple[Any, int, int]:
         """Prepare the payload buffer and lengths for a raw-block write.
 
@@ -922,12 +1066,26 @@ class RawBlockCore:
                     else len(header)
                 )
                 raw_dev.pwrite_from_buffer(offset, header, len(header), hdr_total)
-                raw_dev.pwrite_from_buffer(
-                    offset + self.header_bytes,
-                    buf,
-                    payload_len,
-                    total_len,
+                fixed_view = self._build_fixed_iouring_view(
+                    memory_obj=memory_obj,
+                    payload_len=payload_len,
+                    total_len=total_len,
+                    zero_tail=True,
                 )
+                if fixed_view is not None:
+                    batch_id = raw_dev.batched_write(
+                        [offset + self.header_bytes],
+                        [fixed_view],
+                        [total_len],
+                    )
+                    raw_dev.wait_iouring(batch_id)
+                else:
+                    raw_dev.pwrite_from_buffer(
+                        offset + self.header_bytes,
+                        buf,
+                        payload_len,
+                        total_len,
+                    )
             finally:
                 with self._lock:
                     self._inflight_io_count -= 1
