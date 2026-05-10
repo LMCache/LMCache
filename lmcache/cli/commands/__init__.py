@@ -20,7 +20,7 @@ def _discover_commands() -> list[BaseCommand]:
         cls()
         for cls in discover_subclasses(
             __name__,
-            BaseCommand,
+            BaseCommand,  # type: ignore[type-abstract]
             module_filter=lambda name: name != "base",
         )
     ]
