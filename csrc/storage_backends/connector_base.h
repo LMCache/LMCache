@@ -7,11 +7,14 @@
 #include <unistd.h>
 #include <algorithm>
 #include <atomic>
+#include <cerrno>
 #include <condition_variable>
+#include <cstdio>
 #include <mutex>
 #include <queue>
 #include <stdexcept>
 #include <thread>
+#include <tuple>
 #include <vector>
 
 namespace lmcache {
@@ -260,6 +263,47 @@ class ConnectorBase : public IStorageConnector {
     (void)key;
     return false;  // no-op default for backward compat with plugins
   }
+  virtual size_t choose_num_tiles(Op op, size_t num_items) const {
+    (void)op;
+    return std::min<size_t>(num_workers_, num_items);
+  }
+  virtual void do_batch_get(ConnectionType& conn, const Request& req) {
+    for (size_t i = 0; i < req.keys.size(); ++i) {
+      try {
+        do_single_get(conn, req.keys[i], req.buf_ptrs[i], req.buf_lens[i],
+                      req.batch_chunk_num_bytes);
+        req.batch->per_key_results[req.start_idx + i] = 1;
+      } catch (const std::exception& e) {
+        req.batch->per_key_results[req.start_idx + i] = 0;
+        fprintf(stderr, "[LMCache GET] key %s failed: %s\n",
+                req.keys[i].c_str(), e.what());
+      }
+    }
+  }
+  virtual void do_batch_set(ConnectionType& conn, const Request& req) {
+    for (size_t i = 0; i < req.keys.size(); ++i) {
+      do_single_set(conn, req.keys[i], req.buf_ptrs[i], req.buf_lens[i],
+                    req.batch_chunk_num_bytes);
+    }
+  }
+  virtual void do_batch_exists(ConnectionType& conn, const Request& req) {
+    for (size_t i = 0; i < req.keys.size(); ++i) {
+      bool exists = do_single_exists(conn, req.keys[i]);
+      req.batch->per_key_results[req.start_idx + i] = exists ? 1 : 0;
+    }
+  }
+  virtual void do_batch_delete(ConnectionType& conn, const Request& req) {
+    for (size_t i = 0; i < req.keys.size(); ++i) {
+      try {
+        bool deleted = do_single_delete(conn, req.keys[i]);
+        req.batch->per_key_results[req.start_idx + i] = deleted ? 1 : 0;
+      } catch (const std::exception& e) {
+        req.batch->per_key_results[req.start_idx + i] = 0;
+        fprintf(stderr, "[LMCache DELETE] key %s failed: %s\n",
+                req.keys[i].c_str(), e.what());
+      }
+    }
+  }
   virtual void shutdown_connections() {}
   virtual void on_workers_stopped() {}
 
@@ -280,9 +324,11 @@ class ConnectorBase : public IStorageConnector {
   // returns: (batch_future_id, batch_state, num_tiles, tile_size)
   std::tuple<uint64_t, std::shared_ptr<BatchState>, size_t, size_t>
   prepare_batch_operation(size_t num_items, Op op) {
-    // divide work evenly between workers into tiles
-    size_t num_tiles =
-        std::min<size_t>(num_workers_, num_items);  // avoid empty tiles
+    size_t num_tiles = choose_num_tiles(op, num_items);
+    if (num_tiles == 0 || num_tiles > num_items) {
+      throw std::runtime_error(
+          "choose_num_tiles must return a value in [1, num_items]");
+    }
     size_t tile_size = (num_items + num_tiles - 1) / num_tiles;  // round up
 
     // create shared batch state
@@ -405,54 +451,22 @@ class ConnectorBase : public IStorageConnector {
         try {
           switch (req.op) {
             case Op::BATCH_TILE_GET:
-              for (size_t i = 0; i < req.keys.size(); ++i) {
-                try {
-                  do_single_get(conn, req.keys[i], req.buf_ptrs[i],
-                                req.buf_lens[i], req.batch_chunk_num_bytes);
-                  // 1 = success (key loaded OK)
-                  req.batch->per_key_results[req.start_idx + i] = 1;
-                } catch (const std::exception& e) {
-                  // Per-key error tolerance: record failure
-                  // but continue processing remaining keys
-                  req.batch->per_key_results[req.start_idx + i] = 0;
-                  fprintf(stderr, "[LMCache GET] key %s failed: %s\n",
-                          req.keys[i].c_str(), e.what());
-                }
-              }
+              do_batch_get(conn, req);
               comp.ok = true;
               break;
 
             case Op::BATCH_TILE_SET:
-              for (size_t i = 0; i < req.keys.size(); ++i) {
-                do_single_set(conn, req.keys[i], req.buf_ptrs[i],
-                              req.buf_lens[i], req.batch_chunk_num_bytes);
-              }
+              do_batch_set(conn, req);
               comp.ok = true;
               break;
 
             case Op::BATCH_TILE_EXISTS:
-              for (size_t i = 0; i < req.keys.size(); ++i) {
-                bool exists = do_single_exists(conn, req.keys[i]);
-                // Write result as uint8_t (0/1) to avoid vector<bool> data race
-                req.batch->per_key_results[req.start_idx + i] = exists ? 1 : 0;
-              }
+              do_batch_exists(conn, req);
               comp.ok = true;
               break;
 
             case Op::BATCH_TILE_DELETE:
-              for (size_t i = 0; i < req.keys.size(); ++i) {
-                try {
-                  bool deleted = do_single_delete(conn, req.keys[i]);
-                  req.batch->per_key_results[req.start_idx + i] =
-                      deleted ? 1 : 0;
-                } catch (const std::exception& e) {
-                  // Per-key error tolerance: record failure
-                  // but continue processing remaining keys
-                  req.batch->per_key_results[req.start_idx + i] = 0;
-                  fprintf(stderr, "[LMCache DELETE] key %s failed: %s\n",
-                          req.keys[i].c_str(), e.what());
-                }
-              }
+              do_batch_delete(conn, req);
               comp.ok = true;
               break;
           }
