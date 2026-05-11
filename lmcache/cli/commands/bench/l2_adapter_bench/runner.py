@@ -44,12 +44,47 @@ def _bitmap_count(bitmap: Bitmap | None) -> int:
     return bitmap.popcount()
 
 
-def _drain_eventfd(efd: int, count: int, timeout: float) -> bool:
-    """Wait for *count* eventfd notifications. Returns False on timeout."""
-    for _ in range(count):
+def _wait_store_finished(adapter, task_ids: list[int], timeout: float) -> bool:
+    finished: int = 0
+    count = len(task_ids)
+    efd = adapter.get_store_event_fd()
+    while True:
         if not wait_eventfd(efd, timeout=timeout):
             return False
-    return True
+        completed = adapter.pop_completed_store_tasks()
+        finished += len(completed)
+        if finished == count:
+            return True
+
+
+def _wait_load_finished(adapter, task_ids: list[int], timeout: float) -> bool:
+    finished: int = 0
+    count = len(task_ids)
+    efd = adapter.get_load_event_fd()
+    while True:
+        if not wait_eventfd(efd, timeout=timeout):
+            return False
+        for task_id in task_ids:
+            load_result = adapter.query_load_result(task_id)
+            if load_result is not None:
+                finished += 1
+        if finished == count:
+            return True
+
+
+def _wait_lookup_finished(adapter, task_ids: list[int], timeout: float) -> bool:
+    finished: int = 0
+    count = len(task_ids)
+    efd = adapter.get_lookup_and_lock_event_fd()
+    while True:
+        if not wait_eventfd(efd, timeout=timeout):
+            return False
+        for task_id in task_ids:
+            load_result = adapter.query_lookup_and_lock_result(task_id)
+            if load_result is not None:
+                finished += 1
+        if finished == count:
+            return True
 
 
 # ---------------------------------------------------------------------------
@@ -79,7 +114,6 @@ def bench_store(
         num_keys=num_keys,
         data_size_bytes=data_size,
     )
-    store_efd = adapter.get_store_event_fd()
 
     for r in range(rounds):
         keys_batches = keys_for_round(r)
@@ -92,7 +126,7 @@ def bench_store(
         for i in range(in_flight):
             task_ids.append(adapter.submit_store_task(keys_batches[i], obj_batches[i]))
 
-        ok = _drain_eventfd(store_efd, in_flight, timeout=120.0)
+        ok = _wait_store_finished(adapter, task_ids, 120.0)
         t1 = time.perf_counter()
         elapsed = t1 - t0
 
@@ -143,7 +177,6 @@ def bench_lookup(
         expected_max_hit_rate=expected_max_hit_rate,
         expected_hit_count=expected_hit_count,
     )
-    lookup_efd = adapter.get_lookup_and_lock_event_fd()
 
     for r in range(rounds):
         keys_batches = keys_for_round(r)
@@ -154,7 +187,7 @@ def bench_lookup(
         for i in range(in_flight):
             task_ids.append(adapter.submit_lookup_and_lock_task(keys_batches[i]))
 
-        ok = _drain_eventfd(lookup_efd, in_flight, timeout=60.0)
+        ok = _wait_lookup_finished(adapter, task_ids, 60.0)
         t1 = time.perf_counter()
         elapsed = t1 - t0
 
@@ -201,7 +234,6 @@ def bench_load(
         num_keys=num_keys,
         data_size_bytes=data_size,
     )
-    load_efd = adapter.get_load_event_fd()
 
     for r in range(rounds):
         keys_batches = keys_for_round(r)
@@ -219,7 +251,7 @@ def bench_load(
         for i in range(in_flight):
             task_ids.append(adapter.submit_load_task(keys_batches[i], obj_batches[i]))
 
-        ok = _drain_eventfd(load_efd, in_flight, timeout=120.0)
+        ok = _wait_load_finished(adapter, task_ids, 120.0)
         t1 = time.perf_counter()
         elapsed = t1 - t0
 
