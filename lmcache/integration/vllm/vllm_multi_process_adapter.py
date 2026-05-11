@@ -642,6 +642,15 @@ class LMCacheMPSchedulerAdapter:
         self._finished_lookup_results.pop(request_id, None)
         self._per_server_hits.pop(request_id, None)   
 
+    def shutdown(self) -> None:
+        """Shutdown the scheduler adapter and its resources."""
+        self._executor.shutdown(wait=True)
+        for client in self.mq_clients.values():
+            client.close()
+        with self._heartbeat_lock:
+            for hb in self._heartbeats.values():
+                hb.stop()
+                
     def free_lookup_locks(
         self,
         token_ids: list[int],

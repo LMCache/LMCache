@@ -796,6 +796,8 @@ class LMCacheMPConnector(KVConnectorBase_V1):
         """
         if hasattr(self, "worker_adapter"):
             self.worker_adapter.shutdown()
+        if hasattr(self, "scheduler_adapter"):
+            self.scheduler_adapter.shutdown()
         return None
 
     def get_kv_connector_stats(self) -> "KVConnectorStats | None":
