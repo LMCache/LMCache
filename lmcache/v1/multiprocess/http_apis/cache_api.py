@@ -60,7 +60,7 @@ async def clear_cache(request: Request) -> Any:
     return {"status": "ok"}
 
 
-@router.get("/api/kvcache/check")
+@router.get("/kvcache/check")
 async def kvcache_check(
     request: Request,
     block_ids: Optional[str] = None,

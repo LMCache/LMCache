@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for the /api/kvcache/check endpoint on the MP HTTP server."""
+"""Tests for the /kvcache/check endpoint on the MP HTTP server."""
 
 # Standard
 from unittest.mock import MagicMock, PropertyMock
@@ -78,12 +78,12 @@ def client_no_engine():
 
 
 class TestKVCacheCheckEndpoint:
-    """Tests for GET /api/kvcache/check."""
+    """Tests for GET /kvcache/check."""
 
     def test_success_basic(self, client_with_engine):
         """Basic successful checksum request."""
         # chunk_size is in blocks; 1 block + chunk_size=1 -> 1 chunk.
-        resp = client_with_engine.get("/api/kvcache/check?block_ids=0&chunk_size=1")
+        resp = client_with_engine.get("/kvcache/check?block_ids=0&chunk_size=1")
         assert resp.status_code == 200
         data = resp.json()
         assert data["status"] == "success"
@@ -95,7 +95,7 @@ class TestKVCacheCheckEndpoint:
     def test_success_layerwise(self, client_with_engine):
         """Layerwise mode returns per-layer checksums."""
         resp = client_with_engine.get(
-            "/api/kvcache/check?block_ids=0&chunk_size=1&layerwise=true"
+            "/kvcache/check?block_ids=0&chunk_size=1&layerwise=true"
         )
         assert resp.status_code == 200
         data = resp.json()
@@ -106,14 +106,14 @@ class TestKVCacheCheckEndpoint:
 
     def test_deterministic(self, client_with_engine):
         """Same request produces identical checksums."""
-        url = "/api/kvcache/check?block_ids=0&chunk_size=1"
+        url = "/kvcache/check?block_ids=0&chunk_size=1"
         d1 = client_with_engine.get(url).json()
         d2 = client_with_engine.get(url).json()
         assert d1["chunk_checksums"] == d2["chunk_checksums"]
 
     def test_range_block_ids(self, client_with_engine):
         """Range format [0,1] is accepted for block_ids."""
-        resp = client_with_engine.get("/api/kvcache/check?block_ids=[0,1]&chunk_size=1")
+        resp = client_with_engine.get("/kvcache/check?block_ids=[0,1]&chunk_size=1")
         assert resp.status_code == 200
         data = resp.json()
         # 2 blocks, chunk_size=1 block -> 2 chunks
@@ -121,9 +121,7 @@ class TestKVCacheCheckEndpoint:
 
     def test_mixed_block_ids(self, client_with_engine):
         """Mixed format 0,[1,2] is accepted for block_ids."""
-        resp = client_with_engine.get(
-            "/api/kvcache/check?block_ids=0,[1,2]&chunk_size=1"
-        )
+        resp = client_with_engine.get("/kvcache/check?block_ids=0,[1,2]&chunk_size=1")
         assert resp.status_code == 200
         data = resp.json()
         # 3 blocks, chunk_size=1 block -> 3 chunks
@@ -135,43 +133,43 @@ class TestKVCacheCheckEndpoint:
 
     def test_no_engine(self, client_no_engine):
         """503 when engine is not initialized."""
-        resp = client_no_engine.get("/api/kvcache/check?block_ids=0&chunk_size=1")
+        resp = client_no_engine.get("/kvcache/check?block_ids=0&chunk_size=1")
         assert resp.status_code == 503
 
     def test_no_gpu_contexts(self, client_with_engine, mock_engine):
         """501 when engine has no gpu_contexts attribute."""
         mock_engine.gpu_contexts = None
-        resp = client_with_engine.get("/api/kvcache/check?block_ids=0&chunk_size=1")
+        resp = client_with_engine.get("/kvcache/check?block_ids=0&chunk_size=1")
         assert resp.status_code == 501
 
     def test_unknown_instance_id(self, client_with_engine):
         """404 when instance_id is not registered."""
         resp = client_with_engine.get(
-            "/api/kvcache/check?block_ids=0&chunk_size=1&instance_id=99"
+            "/kvcache/check?block_ids=0&chunk_size=1&instance_id=99"
         )
         assert resp.status_code == 404
 
     def test_missing_block_ids(self, client_with_engine):
         """400 when block_ids is not supplied."""
-        resp = client_with_engine.get("/api/kvcache/check?chunk_size=1")
+        resp = client_with_engine.get("/kvcache/check?chunk_size=1")
         assert resp.status_code == 400
         err = resp.json()["error"]
         assert "block_ids" in err
 
     def test_missing_chunk_size(self, client_with_engine):
         """400 when chunk_size is missing."""
-        resp = client_with_engine.get("/api/kvcache/check?block_ids=0")
+        resp = client_with_engine.get("/kvcache/check?block_ids=0")
         assert resp.status_code == 400
         assert "chunk_size" in resp.json()["error"]
 
     def test_zero_chunk_size(self, client_with_engine):
         """400 when chunk_size is zero."""
-        resp = client_with_engine.get("/api/kvcache/check?block_ids=0&chunk_size=0")
+        resp = client_with_engine.get("/kvcache/check?block_ids=0&chunk_size=0")
         assert resp.status_code == 400
 
     def test_negative_chunk_size(self, client_with_engine):
         """400 when chunk_size is negative."""
-        resp = client_with_engine.get("/api/kvcache/check?block_ids=0&chunk_size=-1")
+        resp = client_with_engine.get("/kvcache/check?block_ids=0&chunk_size=-1")
         assert resp.status_code == 400
 
     def test_empty_kv_caches(self, client_with_engine, mock_gpu_ctx):
@@ -179,7 +177,7 @@ class TestKVCacheCheckEndpoint:
         type(mock_gpu_ctx).kv_tensors = PropertyMock(
             return_value=[],
         )
-        resp = client_with_engine.get("/api/kvcache/check?block_ids=0&chunk_size=1")
+        resp = client_with_engine.get("/kvcache/check?block_ids=0&chunk_size=1")
         assert resp.status_code == 404
 
     # ------------------------------------------------------------------
@@ -188,14 +186,14 @@ class TestKVCacheCheckEndpoint:
 
     def test_partial_last_chunk(self, client_with_engine):
         """3 blocks with chunk_size=2 blocks -> 2 chunks (2+1)."""
-        resp = client_with_engine.get("/api/kvcache/check?block_ids=0,1,2&chunk_size=2")
+        resp = client_with_engine.get("/kvcache/check?block_ids=0,1,2&chunk_size=2")
         data = resp.json()
         assert data["num_chunks"] == 2
         assert len(data["chunk_checksums"]) == 2
 
     def test_single_block_single_chunk(self, client_with_engine):
         """Single block with chunk_size=1 block produces one chunk."""
-        resp = client_with_engine.get("/api/kvcache/check?block_ids=0&chunk_size=1")
+        resp = client_with_engine.get("/kvcache/check?block_ids=0&chunk_size=1")
         data = resp.json()
         assert data["num_chunks"] == 1
 
@@ -206,7 +204,7 @@ class TestKVCacheCheckEndpoint:
     def test_checksums_are_valid_md5(self, client_with_engine):
         """All checksums are 32-char hex strings."""
         # 2 blocks, chunk_size=1 block -> 2 md5 digests.
-        resp = client_with_engine.get("/api/kvcache/check?block_ids=0,1&chunk_size=1")
+        resp = client_with_engine.get("/kvcache/check?block_ids=0,1&chunk_size=1")
         data = resp.json()
         for cksum in data["chunk_checksums"]:
             assert len(cksum) == 32
@@ -217,7 +215,7 @@ class TestKVCacheCheckEndpoint:
         client_with_engine,
     ):
         """Response includes compressed block_id_ranges."""
-        resp = client_with_engine.get("/api/kvcache/check?block_ids=0&chunk_size=1")
+        resp = client_with_engine.get("/kvcache/check?block_ids=0&chunk_size=1")
         data = resp.json()
         assert "block_id_ranges" in data
         # Single block id is kept as-is (no range compression).
@@ -230,7 +228,7 @@ class TestKVCacheCheckEndpoint:
     def test_block_ids_basic(self, client_with_engine):
         """block_ids with explicit block_size + block-level chunk_size."""
         # 2 blocks, chunk_size=1 block -> 2 chunks.
-        resp = client_with_engine.get("/api/kvcache/check?block_ids=0,1&chunk_size=1")
+        resp = client_with_engine.get("/kvcache/check?block_ids=0,1&chunk_size=1")
         assert resp.status_code == 200
         data = resp.json()
         assert data["status"] == "success"
@@ -239,7 +237,7 @@ class TestKVCacheCheckEndpoint:
 
     def test_block_ids_invalid_format(self, client_with_engine):
         """400 when block_ids cannot be parsed."""
-        resp = client_with_engine.get("/api/kvcache/check?block_ids=abc&chunk_size=1")
+        resp = client_with_engine.get("/kvcache/check?block_ids=abc&chunk_size=1")
         assert resp.status_code == 400
         assert "Invalid" in resp.json()["error"]
 
@@ -260,7 +258,7 @@ class TestHealthAndMiscEndpoints:
 
     def test_healthcheck_no_engine(self, client_no_engine):
         """503 when engine is not set."""
-        resp = client_no_engine.get("/api/healthcheck")
+        resp = client_no_engine.get("/healthcheck")
         assert resp.status_code == 503
 
     def test_healthcheck_with_engine(
@@ -268,13 +266,13 @@ class TestHealthAndMiscEndpoints:
         client_with_engine,
     ):
         """200 when engine is available."""
-        resp = client_with_engine.get("/api/healthcheck")
+        resp = client_with_engine.get("/healthcheck")
         assert resp.status_code == 200
         assert resp.json()["status"] == "healthy"
 
     def test_clear_cache_no_engine(self, client_no_engine):
         """503 when engine is not set."""
-        resp = client_no_engine.post("/api/clear-cache")
+        resp = client_no_engine.post("/clear-cache")
         assert resp.status_code == 503
 
     def test_clear_cache_success(
@@ -283,13 +281,13 @@ class TestHealthAndMiscEndpoints:
         mock_engine,
     ):
         """200 and engine.clear() called."""
-        resp = client_with_engine.post("/api/clear-cache")
+        resp = client_with_engine.post("/clear-cache")
         assert resp.status_code == 200
         mock_engine.clear.assert_called_once()
 
     def test_status_no_engine(self, client_no_engine):
         """503 when engine is not set."""
-        resp = client_no_engine.get("/api/status")
+        resp = client_no_engine.get("/status")
         assert resp.status_code == 503
 
     def test_status_success(
@@ -299,6 +297,6 @@ class TestHealthAndMiscEndpoints:
     ):
         """200 and engine.report_status() called."""
         mock_engine.report_status.return_value = {"ok": True}
-        resp = client_with_engine.get("/api/status")
+        resp = client_with_engine.get("/status")
         assert resp.status_code == 200
         assert resp.json()["ok"] is True
