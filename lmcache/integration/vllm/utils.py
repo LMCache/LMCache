@@ -101,6 +101,10 @@ def lmcache_get_or_create_config() -> LMCacheEngineConfig:
                         "the environment variable: LMCACHE_CONFIG_FILE"
                     )
                     _config_instance = LMCacheEngineConfig.from_env()
+                    # from_env() doesn't call validate(); the file path
+                    # gets it via update_config_from_env() below, but the
+                    # env-only path needs an explicit call.
+                    _config_instance.validate()
                 else:
                     config_file = os.environ["LMCACHE_CONFIG_FILE"]
                     logger.info(f"Loading LMCache config file {config_file}")

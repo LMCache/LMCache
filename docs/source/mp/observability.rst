@@ -447,12 +447,13 @@ in Prometheus (e.g.
 L0 ↔ L1 Throughput Histograms
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Sampled (default 1%) per-request throughput of GPU↔CPU copies via
-``L0L1ThroughputSubscriber``. Each sampled request contributes one sample
-to the appropriate histogram: ``total_bytes / (end_ts - start_ts)`` in
-GB/s. Timestamps come from ``MP_{STORE,RETRIEVE}_{START,END}`` events
-published on the GPU cupy stream, so they reflect true GPU-stream copy
-time — not Python/lock overhead.
+Per-request throughput of GPU↔CPU copies via
+``L0L1ThroughputSubscriber``. Every store/retrieve request contributes
+one sample to the appropriate histogram:
+``total_bytes / (end_ts - start_ts)`` in GB/s. Timestamps come from
+``MP_{STORE,RETRIEVE}_{START,END}`` events published on the GPU cupy
+stream, so they reflect true GPU-stream copy time — not Python/lock
+overhead.
 
 All throughput histograms are emitted with ``engine_id`` (vLLM worker
 instance id), ``device`` (e.g. ``"cuda:3"``), and ``model_name`` OTel
@@ -469,15 +470,15 @@ Prometheus (e.g.
      - Description
    * - ``lmcache_mp.l0_l1_store_throughput_gbs``
      - Histogram
-     - GPU→CPU (L0→L1) store throughput in GB/s per sampled request.
+     - GPU→CPU (L0→L1) store throughput in GB/s per request.
    * - ``lmcache_mp.l0_l1_load_throughput_gbs``
      - Histogram
-     - CPU→GPU (L1→L0) load throughput in GB/s per sampled request.
+     - CPU→GPU (L1→L0) load throughput in GB/s per request.
 
 L1 ↔ L2 Throughput Histograms
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Sampled (default 1%) per-task throughput of L1↔L2 transfers via
+Per-task throughput of L1↔L2 transfers via
 ``L2ThroughputSubscriber``. The store path correlates
 ``L2_STORE_SUBMITTED`` → ``L2_STORE_COMPLETED`` by
 ``(adapter_index, task_id)``. The load path correlates the per-adapter
@@ -506,10 +507,10 @@ attribute — the registered adapter type (e.g. ``"fs"``, ``"nixl_store"``,
      - Description
    * - ``lmcache_mp.l2_store_throughput_gbs``
      - Histogram
-     - L1→L2 store throughput in GB/s per sampled task.
+     - L1→L2 store throughput in GB/s per task.
    * - ``lmcache_mp.l2_load_throughput_gbs``
      - Histogram
-     - L2→L1 load throughput in GB/s per sampled (request, adapter) pair.
+     - L2→L1 load throughput in GB/s per (request, adapter) pair.
 
 Engine Counters
 ~~~~~~~~~~~~~~~

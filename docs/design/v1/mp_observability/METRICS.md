@@ -265,9 +265,10 @@ per-instance and per-model Prometheus metric slicing (e.g.
 
 ## L0 ↔ L1 Throughput Histograms
 
-Sampled (default 1%) per-request throughput of GPU↔CPU copies via
+Per-request throughput of GPU↔CPU copies via
 `L0L1ThroughputSubscriber`. Correlates `MP_{STORE,RETRIEVE}_START` → `MP_{STORE,RETRIEVE}_END`
 pairs by `session_id`, computes `total_bytes / (end_ts - start_ts)` in GB/s.
+Every request contributes one sample (no sampling).
 START/END events fire on the GPU cupy stream (`publish_on_stream`), so
 timestamps reflect true GPU-stream copy time — not Python/lock overhead.
 
@@ -278,8 +279,8 @@ per-worker, per-device, and per-model slicing in Prometheus (e.g.
 
 | OTel metric name | Prometheus name | Type | Source event | Calculation |
 |---|---|---|---|---|
-| `lmcache_mp.l0_l1_store_throughput_gbs` | `lmcache_mp_l0_l1_store_throughput_gbs` | Histogram | `MP_STORE_START` → `MP_STORE_END` | `total_bytes / (end_ts - start_ts) / 1e9` per sampled request |
-| `lmcache_mp.l0_l1_load_throughput_gbs` | `lmcache_mp_l0_l1_load_throughput_gbs` | Histogram | `MP_RETRIEVE_START` → `MP_RETRIEVE_END` | `total_bytes / (end_ts - start_ts) / 1e9` per sampled request |
+| `lmcache_mp.l0_l1_store_throughput_gbs` | `lmcache_mp_l0_l1_store_throughput_gbs` | Histogram | `MP_STORE_START` → `MP_STORE_END` | `total_bytes / (end_ts - start_ts) / 1e9` per request |
+| `lmcache_mp.l0_l1_load_throughput_gbs` | `lmcache_mp_l0_l1_load_throughput_gbs` | Histogram | `MP_RETRIEVE_START` → `MP_RETRIEVE_END` | `total_bytes / (end_ts - start_ts) / 1e9` per request |
 
 **What it answers:** What GPU↔CPU throughput is each vLLM worker actually
 achieving for KV store/load? Does it match the theoretical PCIe bandwidth?
@@ -289,13 +290,14 @@ Are some workers or GPUs underperforming?
 
 ## L1 ↔ L2 Throughput Histograms
 
-Sampled (default 1%) per-task throughput of L1↔L2 transfers via
+Per-task throughput of L1↔L2 transfers via
 `L2ThroughputSubscriber`. The store path correlates `L2_STORE_SUBMITTED` →
 `L2_STORE_COMPLETED` by `(adapter_index, task_id)`. The load path
 correlates the new per-adapter `L2_LOAD_TASK_SUBMITTED` →
 `L2_LOAD_TASK_COMPLETED` events by `(request_id, adapter_index)`; the
 pre-existing request-level `L2_PREFETCH_LOAD_*` events aggregate across
 adapters and cannot attribute throughput to a specific `l2_name`.
+Every task contributes one sample (no sampling).
 
 Unlike the L0↔L1 histograms, these timestamps span **submit → complete**,
 so `(end_ts - start_ts)` includes adapter queue, network, and disk I/O
@@ -310,8 +312,8 @@ registered adapter type (e.g. `"fs"`, `"nixl_store"`, `"mooncake_store"`)
 
 | OTel metric name | Prometheus name | Type | Source event | Calculation |
 |---|---|---|---|---|
-| `lmcache_mp.l2_store_throughput_gbs` | `lmcache_mp_l2_store_throughput_gbs` | Histogram | `L2_STORE_SUBMITTED` → `L2_STORE_COMPLETED` | `total_bytes / (completed_ts - submitted_ts) / 1e9` per sampled task |
-| `lmcache_mp.l2_load_throughput_gbs` | `lmcache_mp_l2_load_throughput_gbs` | Histogram | `L2_LOAD_TASK_SUBMITTED` → `L2_LOAD_TASK_COMPLETED` | `total_bytes / (completed_ts - submitted_ts) / 1e9` per sampled (request, adapter) pair |
+| `lmcache_mp.l2_store_throughput_gbs` | `lmcache_mp_l2_store_throughput_gbs` | Histogram | `L2_STORE_SUBMITTED` → `L2_STORE_COMPLETED` | `total_bytes / (completed_ts - submitted_ts) / 1e9` per task |
+| `lmcache_mp.l2_load_throughput_gbs` | `lmcache_mp_l2_load_throughput_gbs` | Histogram | `L2_LOAD_TASK_SUBMITTED` → `L2_LOAD_TASK_COMPLETED` | `total_bytes / (completed_ts - submitted_ts) / 1e9` per (request, adapter) pair |
 
 **What it answers:** What end-to-end throughput is each L2 adapter
 delivering? Which backends are keeping up with demand, and which are
