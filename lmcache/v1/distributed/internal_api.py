@@ -99,6 +99,16 @@ class L1ManagerListener(EventListener):
         """
         pass
 
+    @abstractmethod
+    def on_l1_keys_accessed(self, keys: list[ObjectKey]):
+        """
+        Notify the listener that keys have been accessed on L1.
+
+        Args:
+            keys (list[ObjectKey]): The keys that have been accessed
+        """
+        pass
+
 
 class L2AdapterListener(EventListener):
     """Listener for L2 adapter events, analogous to L1ManagerListener."""
@@ -158,3 +168,11 @@ class EvictionAction:
 
     keys: list[ObjectKey] = field(default_factory=list)
     """The key of the object to be evicted"""
+
+
+@dataclass(frozen=True)
+class QuotaEntry:
+    """Snapshot of a single quota registration."""
+
+    cache_salt: str
+    limit_bytes: int

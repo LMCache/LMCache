@@ -7,7 +7,6 @@ Tests only use public methods and do not access private fields.
 """
 
 # Standard
-import os
 import select
 import shutil
 import tempfile
@@ -55,6 +54,7 @@ from lmcache.v1.memory_management import (  # noqa: E402
     MemoryObjMetadata,
     TensorMemoryObj,
 )
+from lmcache.v1.platform import consume_fd  # noqa: E402
 
 # =============================================================================
 # Constants
@@ -121,7 +121,7 @@ def wait_for_event_fd(event_fd: int, timeout: float = 5.0) -> bool:
     events = poll.poll(timeout * 1000)  # timeout in milliseconds
     if events:
         try:
-            os.eventfd_read(event_fd)
+            consume_fd(event_fd)
         except BlockingIOError:
             pass
         return True

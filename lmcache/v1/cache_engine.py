@@ -861,7 +861,12 @@ class LMCacheEngine:
             if self.remove_after_retrieve and not self._is_passive():
                 assert self.storage_manager is not None
                 self.storage_manager.remove(key, self.retrieve_locations)
-            if not self.async_loading:
+                # Sync PDBackend.remove() does NOT call ref_count_down() internally
+                # (unlike async PD and other backends), so we must call it manually.
+                # See pd_backend.py line 605 TODO comment.
+                if self._is_sync_pd_backend():
+                    memory_obj.ref_count_down()
+            elif not self.async_loading:
                 memory_obj.ref_count_down()
 
         retrieved_tokens = torch.sum(ret_mask)
@@ -1658,6 +1663,7 @@ class LMCacheEngine:
                 location=location,
             )
 
+            used_keys: set[CacheEngineKey] = set()
             for (key, start, end), memory_obj in zip(blocks, memory_objs, strict=False):
                 if memory_obj is None:
                     logger.warning(
@@ -1665,22 +1671,51 @@ class LMCacheEngine:
                     )
                     if (
                         last_failed_block_start is None
-                        or last_failed_block_start < start
+                        # The minimum value should be taken here to ensure that
+                        # the prefix keys are all consecutive successful.
+                        or last_failed_block_start > start
                     ):
                         last_failed_block_start = start
                     break
                 reordered_chunks.append((key, memory_obj, start, end))
                 tot_kv_size += memory_obj.get_size()
                 ret_mask[start:end] = True
+                used_keys.add(key)
+
+            for (key, _, _), memory_obj in zip(blocks, memory_objs, strict=False):
+                if memory_obj is not None and key not in used_keys:
+                    logger.debug(
+                        "ref_count_down for %s of %s as the previous key failed",
+                        key,
+                        location,
+                    )
+                    memory_obj.ref_count_down()
 
         if last_failed_block_start is not None:
             ret_mask[last_failed_block_start:] = False
 
-            reordered_chunks = [
-                (key, memory_obj, start, end)
-                for key, memory_obj, start, end in reordered_chunks
-                if end < last_failed_block_start
-            ]
+            kept_chunks: List[ProcessedChunk] = []
+            for key, memory_obj, start, end in reordered_chunks:
+                if end <= last_failed_block_start:
+                    kept_chunks.append((key, memory_obj, start, end))
+                else:
+                    tot_kv_size -= memory_obj.get_size()
+                    # This chunk will not be used. If the engine is configured
+                    # to remove-after-retrieve, the caller would normally call
+                    # remove (which frees the block), but since we are dropping
+                    # these chunks here, we must free them ourselves to avoid
+                    # leaking PD buffer pool memory.
+                    if self.remove_after_retrieve:
+                        assert self.storage_manager is not None
+                        self.storage_manager.remove(key, self.retrieve_locations)
+                        # Sync PDBackend.remove() does NOT call ref_count_down()
+                        # internally (unlike async PD and other backends), so we
+                        # must call it manually. See pd_backend.py line 605.
+                        if self._is_sync_pd_backend():
+                            memory_obj.ref_count_down()
+                    else:
+                        memory_obj.ref_count_down()
+            reordered_chunks = kept_chunks
         return reordered_chunks, tot_kv_size
 
     def _broadcast_or_receive_memory_objs(
@@ -1770,6 +1805,14 @@ class LMCacheEngine:
         the data directly, but from the "active" worker (i.e., rank 0 in MLA)
         """
         return self.save_only_first_rank and not self.metadata.is_first_rank()
+
+    def _is_sync_pd_backend(self) -> bool:
+        """Check if the PD backend is the sync variant.
+
+        :return: True when PD is enabled and ``pd_backend_mode`` is ``"sync"``.
+        :rtype: bool
+        """
+        return self.config.enable_pd and self.config.pd_backend_mode == "sync"
 
     def _get_slot_mapping_list(
         self,
@@ -1893,8 +1936,8 @@ class LMCacheEngineBuilder:
             )
 
         if config.gds_path is not None:
-            assert config.cufile_buffer_size is not None
-            return CuFileMemoryAllocator(config.cufile_buffer_size * 1024**2)
+            assert config.gds_buffer_size is not None
+            return CuFileMemoryAllocator(config.gds_buffer_size * 1024**2)
 
         max_local_cpu_size = config.max_local_cpu_size
         # save_only_first_rank only works when use mla

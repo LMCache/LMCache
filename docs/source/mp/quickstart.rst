@@ -150,16 +150,16 @@ The HTTP server listens on ``0.0.0.0:8080`` by default (configurable with
      - Path
      - Description
    * - GET
-     - ``/api/healthcheck``
+     - ``/healthcheck``
      - Returns ``{"status": "healthy"}`` when the engine is initialized and
        memory checks pass. Suitable for Kubernetes liveness/readiness probes.
    * - POST
-     - ``/api/clear-cache``
+     - ``/clear-cache``
      - Force-clears all KV cache data stored in L1 (CPU) memory, including
        objects with active read/write locks. Returns ``{"status": "ok"}`` on
        success.
    * - GET
-     - ``/api/status``
+     - ``/status``
      - Returns detailed internal state of all MP components including L1 cache,
        L2 adapters, controllers, registered GPUs, and active sessions.
 
@@ -168,15 +168,15 @@ Examples:
 .. code-block:: bash
 
     # Health check
-    curl http://localhost:8080/api/healthcheck
+    curl http://localhost:8080/healthcheck
     # {"status": "healthy"}
 
     # Clear all KV cache data in L1 (CPU) memory
-    curl -X POST http://localhost:8080/api/clear-cache
+    curl -X POST http://localhost:8080/clear-cache
     # {"status": "ok"}
 
     # Inspect detailed internal state
-    curl http://localhost:8080/api/status
+    curl http://localhost:8080/status
 
 The ZMQ server runs on the same default port (5555) and accepts vLLM
 connections exactly as in the local quick start.

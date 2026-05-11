@@ -3,8 +3,13 @@
 Event-driven observability for LMCache's multiprocess (MP) mode, built on
 [OpenTelemetry](https://opentelemetry.io/).
 
-For metrics, see [METRICS.md](METRICS.md).  For event metadata contracts,
-see [EVENTS.md](EVENTS.md).
+For metrics, see [METRICS.md](../../../docs/design/v1/mp_observability/METRICS.md).
+For event metadata contracts, see
+[EVENTS.md](../../../docs/design/v1/mp_observability/EVENTS.md).
+For design rationale, see
+[event-bus.md](../../../docs/design/v1/mp_observability/event-bus.md).
+For the trace recording subsystem (`lmcache trace`), see
+[trace.md](../../../docs/design/v1/mp_observability/trace.md).
 
 ---
 
@@ -19,6 +24,9 @@ EventBus  (async queue + drain thread)
     │
     ├──► L1MetricsSubscriber          → OTel counter.add(...)
     ├──► SMMetricsSubscriber          → OTel counter.add(...)
+    ├──► EventBusSelfMetricsSubscriber → OTel observable gauges/counters
+    │                                    (bus health: queue depth, drain
+    │                                    lag, drops, subscriber exceptions)
     ├──► L1LoggingSubscriber          → logger.debug(...)
     ├──► SMLoggingSubscriber          → logger.debug(...)
     ├──► MPServerLoggingSubscriber    → logger.debug(...)
@@ -50,6 +58,7 @@ CLI, pass the flags below; when embedding programmatically, construct an
 | `--event-bus-queue-size N` | `10000` | Maximum number of events in the EventBus queue before tail-drop. |
 | `--otlp-endpoint URL` | *(none)* | OTLP gRPC endpoint (e.g. `http://localhost:4317`). When set, metrics and traces are pushed to an OTel collector. When unset, metrics fall back to Prometheus pull mode. |
 | `--prometheus-port PORT` | `9090` | Port for the Prometheus `/metrics` endpoint. Only used when `--otlp-endpoint` is not set. |
+| `--service-instance-id ID` | *unset* (default random UUID v4) | Identifier for this MP server instance.  Attached as the OTel Resource attribute `service.instance.id` on every metric and span.  When the flag is not passed, defaults to a random UUID v4 minted at startup.  Pass `--service-instance-id=""` to force an explicit empty value. |
 
 ### `ObservabilityConfig` fields
 
@@ -62,6 +71,7 @@ CLI, pass the flags below; when embedding programmatically, construct an
 | `tracing_enabled` | `bool` | `False` | Register tracing subscribers (OTel spans). |
 | `otlp_endpoint` | `str \| None` | `None` | OTLP gRPC endpoint. When set, metrics and traces are pushed. When `None`, metrics use Prometheus pull fallback. |
 | `prometheus_port` | `int` | `9090` | Port for the Prometheus `/metrics` endpoint (pull fallback only). |
+| `service_instance_id` | `str \| None` | `None` (default random UUID v4) | Identifier for this MP server instance; attached as the OTel Resource attribute `service.instance.id` on every metric and span.  `None` defaults to a random UUID v4 at `init_observability` time.  An explicit `""` is preserved. |
 
 ### Metrics export modes
 
@@ -178,7 +188,8 @@ if obs_config.metrics_enabled:
 
 ### Step 6 — Document the metadata contract
 
-Add a row to the metadata contracts table in [EVENTS.md](EVENTS.md) so
+Add a row to the metadata contracts table in
+[EVENTS.md](../../../docs/design/v1/mp_observability/EVENTS.md) so
 subscribers can rely on the schema:
 
 ```markdown
@@ -193,6 +204,6 @@ subscribers can rely on the schema:
 |---|---|
 | Create meters and counters in `__init__()`, not at module level | `MeterProvider` must be set before `get_meter()` is called. Module-level calls happen at import time, before setup. |
 | Prefix OTel metric names with `lmcache_mp.` | Keeps the MP namespace separate from `lmcache.` (the single-process engine namespace). |
-| Use `metadata: dict[str, Any]` for event payloads | Flexible, no coupling between producers and subscribers. See metadata contracts in [EVENTS.md](EVENTS.md). |
+| Use `metadata: dict[str, Any]` for event payloads | Flexible, no coupling between producers and subscribers. See metadata contracts in [EVENTS.md](../../../docs/design/v1/mp_observability/EVENTS.md). |
 | Separate metrics, logging, and tracing subscribers | Single responsibility. Can enable/disable independently via config. |
 | Store `self._event_bus = get_event_bus()` in `__init__` | Avoids calling the singleton getter on every publish. |

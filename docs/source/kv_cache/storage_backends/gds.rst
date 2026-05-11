@@ -24,8 +24,8 @@ Ways to configure LMCache GDS Backend
     export LMCACHE_CHUNK_SIZE=256
     # Path to store files
     export LMCACHE_GDS_PATH="/mnt/gds/cache"
-    # CuFile Buffer Size in MiB
-    export LMCACHE_CUFILE_BUFFER_SIZE="8192"
+    # GDS Buffer Size in MiB
+    export LMCACHE_GDS_BUFFER_SIZE="8192"
     # Disabling CPU RAM offload is sometimes recommended as the
     # CPU can get in the way of GPUDirect operations
     export LMCACHE_LOCAL_CPU=False
@@ -44,8 +44,8 @@ Example ``config.yaml``:
     local_cpu: false
     # Path to file system, local, remote or GDS-enabled mount
     gds_path: "/mnt/gds/cache"
-    # CuFile Buffer Size in MiB
-    cufile_buffer_size: 8192
+    # GDS Buffer Size in MiB
+    gds_buffer_size: 8192
 
 
 Multi-Path (Multi-Device) Support
@@ -106,10 +106,10 @@ prior run.  Writes, however, always go to the single affinity-selected path.
                           the entry lives on
 
 
-CuFile Buffer Size Explanation
-------------------------------
+GDS Buffer Size Explanation
+---------------------------
 
-The backend currently pre-registers buffer space to speed up cuFile operations. This buffer space
+The backend currently pre-registers buffer space to speed up GDS operations. This buffer space
 is registered in VRAM so options like ``--gpu-memory-utilization`` from ``vllm`` should be considered
 when setting it. For example, a good rule of thumb for H100 which generally has 80GiBs of VRAM would
 be to start with 8GiB and set ``--gpu-memory-utilization 0.85`` and depending on your workflow fine-tune
@@ -154,22 +154,21 @@ Successful output will show ``True`` for ``Kernel P2PDMA support``, ``HIP runtim
 
 **LMCache configuration:**
 
-To use AMD hipFile instead of NVIDIA cuFile, add the following to your configuration:
+To use AMD hipFile instead of NVIDIA cuFile, set the GDS backend:
 
 **Environment Variables:**
 
 .. code-block:: bash
 
-    export LMCACHE_EXTRA_CONFIG='{"use_hipfile": true}'
+    export LMCACHE_GDS_BACKEND=hipfile
 
 **Configuration File:**
 
 .. code-block:: yaml
 
-    extra_config:
-        use_hipfile: true
+    gds_backend: "hipfile"
 
-Note: The ``cufile_buffer_size`` configuration is used for both cuFile and hipFile buffers.
+Note: The ``gds_buffer_size`` configuration is used for both cuFile and hipFile buffers.
 
 
 Setup Example
@@ -222,7 +221,7 @@ Create a an lmcache configuration file called: ``gds-backend.yaml``
     local_cpu: false
     chunk_size: 256
     gds_path: "/mnt/gds/cache"
-    cufile_buffer_size: 8192
+    gds_buffer_size: 8192
 
 If you don't want to use a config file, uncomment the first three environment variables
 and then comment out the ``LMCACHE_CONFIG_FILE`` below:
@@ -232,7 +231,7 @@ and then comment out the ``LMCACHE_CONFIG_FILE`` below:
     # LMCACHE_LOCAL_CPU=False \
     # LMCACHE_CHUNK_SIZE=256 \
     # LMCACHE_GDS_PATH="/mnt/gds/cache" \
-    # LMCACHE_CUFILE_BUFFER_SIZE=8192 \
+    # LMCACHE_GDS_BUFFER_SIZE=8192 \
     LMCACHE_CONFIG_FILE="gds-backend.yaml" \
     vllm serve \
         meta-llama/Llama-3.1-8B-Instruct \
@@ -246,13 +245,26 @@ POSIX fallback
 
 In some cases, libcufile implements its own internal POSIX fallback without `GdsBackend` being aware.
 In others, an error such as `RuntimeError: cuFileHandleRegister failed (cuFile err=5030, cuda_err=0)` may be throwned.
-Thus, backend can be configured to fallback to its own POSIX implementation when the usage of the libcufile APIs is not successful.
+Thus, backend can be configured to fallback to its own POSIX implementation when the usage of the GDS APIs is not successful.
 
-To force `GdsBackend` not use libcufile APIs for any reason, you can override its behavior via `extra_config`,
-e.g:
+To force `GdsBackend` not use GDS APIs for any reason, you can override its behavior via configuration:
 
 .. code-block:: yaml
 
-    LMCACHE_EXTRA_CONFIG='{"use_cufile": false}'
+    use_gds: false
+
+Or via environment variable:
+
+.. code-block:: bash
+
+    LMCACHE_USE_GDS=False
+
+The ``gds_backend`` field (default: ``cufile``) selects which GDS library to use. Supported
+backends are ``cufile`` (NVIDIA cuFile) and ``hipfile`` (AMD hipFile):
+
+.. code-block:: yaml
+
+    use_gds: true
+    gds_backend: "cufile"   # or "hipfile"
 
 Note that under this mode it would still use CUDA APIs to map and do operations the pre-registered GPU memory.

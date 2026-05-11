@@ -62,7 +62,7 @@ def main() -> None:
     parser.add_argument(
         "--url",
         type=str,
-        default="http://localhost:8000/api/status",
+        default="http://localhost:8000/status",
         help="URL of the status endpoint",
     )
     parser.add_argument(

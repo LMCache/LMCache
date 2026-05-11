@@ -33,6 +33,7 @@ import torch
 import zmq
 
 # First Party
+from lmcache.utils import EngineType
 from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.distributed.config import (
     EvictionConfig,
@@ -41,7 +42,11 @@ from lmcache.v1.distributed.config import (
     StorageManagerConfig,
 )
 from lmcache.v1.mp_observability.config import DEFAULT_OBSERVABILITY_CONFIG
-from lmcache.v1.multiprocess.blend_server_v2 import BlendTokenRangeMatcher
+from lmcache.v1.multiprocess.blend_server_v2 import (
+    BlendEngineV2,
+    BlendTokenRangeMatcher,
+    _unique_token_coverage,
+)
 from lmcache.v1.multiprocess.custom_types import (
     CBMatchResult,
     CudaIPCWrapper,
@@ -320,6 +325,225 @@ class TestBlendTokenRangeMatcher:
         results = matcher.match_sub_sequence([10, 20, 30, 40])
         assert len(results) == 1
         assert results[0].hash == hash_b
+
+    def test_has_chunk_false_before_registration(self):
+        """has_chunk returns False for a hash that has not been registered."""
+        matcher = BlendTokenRangeMatcher(chunk_size=4)
+        unknown = ObjectKey.IntHash2Bytes(9001)
+        assert matcher.has_chunk(unknown) is False
+
+    def test_has_chunk_true_after_registration(self):
+        """has_chunk returns True once the chunk is registered."""
+        matcher = BlendTokenRangeMatcher(chunk_size=4)
+        token_hash = ObjectKey.IntHash2Bytes(9002)
+        matcher.on_new_token_hashes([1, 2, 3, 4], [token_hash])
+        assert matcher.has_chunk(token_hash) is True
+
+    def test_has_chunk_false_after_eviction(self):
+        """has_chunk returns False after the chunk has been evicted."""
+        matcher = BlendTokenRangeMatcher(chunk_size=4)
+        token_hash = ObjectKey.IntHash2Bytes(9003)
+        matcher.on_new_token_hashes([1, 2, 3, 4], [token_hash])
+        assert matcher.has_chunk(token_hash) is True
+        matcher.remove_chunks([token_hash])
+        assert matcher.has_chunk(token_hash) is False
+
+
+class TestUniqueTokenCoverage:
+    """Unit tests for _unique_token_coverage — the interval-merge helper that
+    prevents hit_rate > 1 when match_sub_sequence returns overlapping results."""
+
+    def _make(self, ranges: list[tuple[int, int]]) -> list[CBMatchResult]:
+        """Build minimal CBMatchResult objects from (cur_st, cur_ed) pairs."""
+        return [
+            CBMatchResult(old_st=st, old_ed=ed, cur_st=st, cur_ed=ed, hash=b"\x00")
+            for st, ed in ranges
+        ]
+
+    def test_empty(self):
+        assert _unique_token_coverage([]) == 0
+
+    def test_single(self):
+        results = self._make([(0, 256)])
+        assert _unique_token_coverage(results) == 256
+
+    def test_non_overlapping(self):
+        results = self._make([(0, 256), (256, 512)])
+        assert _unique_token_coverage(results) == 512
+
+    def test_fully_overlapping(self):
+        """Two results at the same position count as one chunk."""
+        results = self._make([(100, 356), (100, 356)])
+        assert _unique_token_coverage(results) == 256
+
+    def test_partially_overlapping(self):
+        """Results at cur_st=100 and cur_st=200 overlap from 200 to 356."""
+        results = self._make([(100, 356), (200, 456)])
+        assert _unique_token_coverage(results) == 356  # [100, 456)
+
+    def test_hit_rate_cannot_exceed_one(self):
+        """Simulates the reported bug: 46 overlapping fingerprint matches for a
+        9216-token (36-chunk) query must not produce hit_tokens > 9216."""
+        chunk_size = 256
+        requested_tokens = 36 * chunk_size  # 9216
+        # 46 matches at sliding-window positions (non-aligned, overlapping)
+        ranges = [(i * 50, i * 50 + chunk_size) for i in range(46)]
+        results = self._make(ranges)
+        hit_tokens = _unique_token_coverage(results)
+        assert hit_tokens <= requested_tokens
+
+
+class TestDedupOverlappingMatches:
+    """Greedy non-overlapping dedup applied in cb_lookup_pre_computed.
+
+    Re-implemented here because the production logic is inline (same pattern
+    as TestPrefixCandidateOverlapExclusion below).
+    """
+
+    def _make(self, ranges: list[tuple[int, int]]) -> list[CBMatchResult]:
+        return [
+            CBMatchResult(
+                old_st=st, old_ed=ed, cur_st=st, cur_ed=ed, hash=bytes([i % 256])
+            )
+            for i, (st, ed) in enumerate(ranges)
+        ]
+
+    def _dedup(self, results: list[CBMatchResult]) -> list[CBMatchResult]:
+        results = sorted(results, key=lambda r: r.cur_st)
+        deduped: list[CBMatchResult] = []
+        covered_end = -1
+        for r in results:
+            if r.cur_st >= covered_end:
+                deduped.append(r)
+                covered_end = r.cur_ed
+        return deduped
+
+    def test_empty(self):
+        assert self._dedup([]) == []
+
+    def test_single(self):
+        results = self._make([(0, 256)])
+        assert len(self._dedup(results)) == 1
+
+    def test_non_overlapping_kept(self):
+        results = self._make([(0, 256), (256, 512), (512, 768)])
+        assert len(self._dedup(results)) == 3
+
+    def test_adjacent_kept(self):
+        # cur_st >= covered_end is inclusive: [0,256) then [256,512) both kept.
+        results = self._make([(0, 256), (256, 512)])
+        deduped = self._dedup(results)
+        assert [(r.cur_st, r.cur_ed) for r in deduped] == [(0, 256), (256, 512)]
+
+    def test_fully_overlapping_dropped(self):
+        results = self._make([(100, 356), (100, 356), (100, 356)])
+        assert len(self._dedup(results)) == 1
+
+    def test_partially_overlapping_dropped(self):
+        # [(0,256), (50,306), (200,456)] — leftmost-first picks (0,256), then
+        # skips (50,306) and (200,456) since both start before covered_end=256.
+        results = self._make([(0, 256), (50, 306), (200, 456)])
+        deduped = self._dedup(results)
+        assert [(r.cur_st, r.cur_ed) for r in deduped] == [(0, 256)]
+
+    def test_chunk_aligned_duplicates_preserve_coverage(self):
+        # Realistic CB case: many fingerprint matches at the same chunk-aligned
+        # position (different stored chunks colliding on a query window). Dedup
+        # keeps one per slot and union coverage is preserved.
+        chunk_size = 256
+        num_chunks = 20
+        ranges = [
+            (i * chunk_size, (i + 1) * chunk_size)
+            for i in range(num_chunks)
+            for _ in range(3)
+        ]
+        results = self._make(ranges)
+        deduped = self._dedup(results)
+        assert len(deduped) == num_chunks
+        assert _unique_token_coverage(deduped) == _unique_token_coverage(results)
+
+    def test_overfetch_at_aligned_positions_collapses(self):
+        # Mirrors the reported 14.5x over-fetch shape, scaled down: 50 copies
+        # per slot for a 20-chunk query collapses to 20 chunks.
+        chunk_size = 256
+        num_chunks = 20
+        ranges = [
+            (i * chunk_size, (i + 1) * chunk_size)
+            for i in range(num_chunks)
+            for _ in range(50)
+        ]
+        deduped = self._dedup(self._make(ranges))
+        assert len(deduped) == num_chunks
+        assert [r.cur_st for r in deduped] == [
+            i * chunk_size for i in range(num_chunks)
+        ]
+
+
+class TestPrefixCandidateOverlapExclusion:
+    """Verify that prefix candidates overlapping with fingerprint results are
+    excluded, preventing overlapping writes in cb_retrieve_pre_computed."""
+
+    # We test the overlap-exclusion logic by directly instantiating the
+    # relevant building blocks used inside cb_lookup_pre_computed.
+
+    def _make_fingerprint(self, cur_st: int, chunk_size: int) -> CBMatchResult:
+        return CBMatchResult(
+            old_st=0,
+            old_ed=chunk_size,
+            cur_st=cur_st,
+            cur_ed=cur_st + chunk_size,
+            hash=b"\xaa",
+        )
+
+    def _prefix_candidates(
+        self,
+        num_chunks: int,
+        chunk_size: int,
+        fingerprint_results: list[CBMatchResult],
+    ) -> list[CBMatchResult]:
+        """Re-implement the production overlap-exclusion logic for testing."""
+        fingerprint_ranges = [(r.cur_st, r.cur_ed) for r in fingerprint_results]
+        return [
+            CBMatchResult(
+                old_st=i * chunk_size,
+                old_ed=(i + 1) * chunk_size,
+                cur_st=i * chunk_size,
+                cur_ed=(i + 1) * chunk_size,
+                hash=bytes([i]),
+            )
+            for i in range(num_chunks)
+            if not any(
+                st < (i + 1) * chunk_size and ed > i * chunk_size
+                for st, ed in fingerprint_ranges
+            )
+        ]
+
+    def test_aligned_fingerprint_blocks_same_position(self):
+        """Fingerprint at [256,512) blocks the prefix candidate at position 1."""
+        chunk_size = 256
+        fp = [self._make_fingerprint(256, chunk_size)]
+        candidates = self._prefix_candidates(4, chunk_size, fp)
+        candidate_starts = {c.cur_st for c in candidates}
+        assert 256 not in candidate_starts  # blocked
+        assert 0 in candidate_starts  # not blocked
+        assert 512 in candidate_starts  # not blocked
+
+    def test_non_aligned_fingerprint_blocks_overlapping_positions(self):
+        """Fingerprint at [100,356) overlaps [0,256) and [256,512) — both blocked."""
+        chunk_size = 256
+        fp = [self._make_fingerprint(100, chunk_size)]
+        candidates = self._prefix_candidates(4, chunk_size, fp)
+        candidate_starts = {c.cur_st for c in candidates}
+        assert 0 not in candidate_starts  # [0,256) overlaps [100,356)
+        assert 256 not in candidate_starts  # [256,512) overlaps [100,356)
+        assert 512 in candidate_starts  # [512,768) does not overlap [100,356)
+
+    def test_no_fingerprints_all_candidates_included(self):
+        """With no fingerprint results all prefix positions are candidates."""
+        chunk_size = 256
+        candidates = self._prefix_candidates(4, chunk_size, [])
+        assert len(candidates) == 4
+        assert [c.cur_st for c in candidates] == [0, 256, 512, 768]
 
 
 # =============================================================================
@@ -603,7 +827,14 @@ def registered_instance(
 
     future = client.submit_request(
         RequestType.REGISTER_KV_CACHE,
-        [instance_id, client_context.get_kv_cache(), "testmodel", 1, {}],
+        [
+            instance_id,
+            client_context.get_kv_cache(),
+            "testmodel",
+            1,
+            EngineType.VLLM,
+            {},
+        ],
         get_response_class(RequestType.REGISTER_KV_CACHE),
     )
     assert future.result(timeout=DEFAULT_TIMEOUT) is None
@@ -1681,17 +1912,17 @@ def test_cb_store_final_v2_then_normal_lookup(
     lookup_key = create_cb_cache_key(
         token_ids, request_id="final-norm-lookup-v2", worker_id=None
     )
-    # Phase 1: LOOKUP returns a prefetch job ID, not the chunk count
-    job_id = client.submit_request(
+    # Phase 1: LOOKUP registers the job server-side by request_id (returns None)
+    client.submit_request(
         RequestType.LOOKUP, [lookup_key, 1], get_response_class(RequestType.LOOKUP)
     ).result(timeout=DEFAULT_TIMEOUT)
 
-    # Phase 2: Poll QUERY_PREFETCH_STATUS until the result is ready
+    # Phase 2: Poll QUERY_PREFETCH_STATUS by request_id until the result is ready
     lookup_result = None
     while True:
         lookup_result = client.submit_request(
             RequestType.QUERY_PREFETCH_STATUS,
-            [job_id],
+            [lookup_key.request_id],
             get_response_class(RequestType.QUERY_PREFETCH_STATUS),
         ).result(timeout=DEFAULT_TIMEOUT)
         if lookup_result is not None:
@@ -1733,15 +1964,14 @@ def test_cb_store_final_v2_then_normal_lookup(
     not torch.cuda.is_available(),
     reason="CB Store Final not visible to CB Lookup V2 requires CUDA",
 )
-def test_cb_store_final_v2_not_visible_to_cb_lookup_v2(
+def test_cb_store_final_v2_visible_to_cb_lookup_v2(
     client: MessageQueueClient,
     cb_client_context: CBClientContext,
     cb_registered_instance: int,
 ):
     """
-    ISOLATION: data stored via CB_STORE_FINAL must NOT be found by
-    CB_LOOKUP_PRE_COMPUTED_V2 (the BlendTokenRangeMatcher is not updated
-    by cb_store_final).
+    Data stored via CB_STORE_FINAL must be found by CB_LOOKUP_PRE_COMPUTED_V2
+    so that repeated requests through the CB path get cache hits.
     """
     token_ids = tuple(range(16000, 16000 + CHUNK_SIZE))
     cb_key = create_cb_cache_key(token_ids, request_id="final-not-cb-v2")
@@ -1762,6 +1992,140 @@ def test_cb_store_final_v2_not_visible_to_cb_lookup_v2(
     ).result(timeout=DEFAULT_TIMEOUT)
 
     assert isinstance(cb_results, list)
-    assert len(cb_results) == 0, (
-        "CB_LOOKUP_PRE_COMPUTED_V2 should NOT find data stored via CB_STORE_FINAL"
+    assert len(cb_results) == 1, (
+        "CB_LOOKUP_PRE_COMPUTED_V2 should find data stored via CB_STORE_FINAL"
     )
+
+
+# ---------------------------------------------------------------------------
+# 8. report_status() – CB-extended fields
+# ---------------------------------------------------------------------------
+#
+# These tests construct a BlendEngineV2 directly in the test process because
+# report_status() is invoked in-process by the FastAPI /api/status handler,
+# not over ZMQ. CUDA IPC unwrapping is bypassed via a monkeypatched
+# unwrap_kv_cache_tensors so the public cb_register_kv_cache path can run
+# without a cross-process producer.
+
+
+@pytest.fixture(scope="function")
+def in_process_blend_engine() -> Generator[BlendEngineV2, None, None]:
+    """Build a BlendEngineV2 in-process for direct method-call tests."""
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is not available")
+
+    config = StorageManagerConfig(
+        l1_manager_config=L1ManagerConfig(
+            memory_config=L1MemoryManagerConfig(
+                size_in_bytes=int(CPU_BUFFER_SIZE * 1024**3),
+                use_lazy=True,
+            ),
+        ),
+        eviction_config=EvictionConfig(eviction_policy="LRU"),
+    )
+    engine = BlendEngineV2(
+        storage_manager_config=config,
+        chunk_size=CHUNK_SIZE,
+    )
+    try:
+        yield engine
+    finally:
+        engine.close()
+
+
+@pytest.fixture(scope="function")
+def local_kv_cache_unwrap(monkeypatch, cb_client_context: CBClientContext):
+    """Bypass CUDA IPC unwrap so PlainGPUCacheContext can be built in-process.
+
+    Returns the local tensor that will back any KVCache the test registers.
+    """
+    # First Party
+    from lmcache.v1.multiprocess import gpu_context as gpu_context_mod
+
+    local_tensor = cb_client_context.gpu_kv_cache
+
+    def _local_unwrap(_kv_caches):
+        return [local_tensor]
+
+    monkeypatch.setattr(gpu_context_mod, "unwrap_kv_cache_tensors", _local_unwrap)
+    return local_tensor
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available(), reason="report_status CB tests require CUDA"
+)
+def test_report_status_no_cb_registrations(
+    in_process_blend_engine: BlendEngineV2,
+):
+    """Without any CB registration, the new fields are present and empty."""
+    status = in_process_blend_engine.report_status()
+
+    assert "registered_cb_gpu_ids" in status
+    assert "cb_gpu_context_meta" in status
+    assert status["registered_cb_gpu_ids"] == []
+    assert status["cb_gpu_context_meta"] == {}
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available(), reason="report_status CB tests require CUDA"
+)
+def test_report_status_surfaces_cb_registration(
+    in_process_blend_engine: BlendEngineV2,
+    cb_client_context: CBClientContext,
+    local_kv_cache_unwrap,
+):
+    """A CB-registered instance shows up in both new fields with correct shape."""
+    engine = in_process_blend_engine
+    instance_id = 4242
+
+    engine.cb_register_kv_cache(
+        instance_id,
+        cb_client_context.get_kv_cache(),
+        "testmodel",
+        1,
+    )
+
+    status = engine.report_status()
+
+    assert status["registered_cb_gpu_ids"] == [instance_id]
+
+    entry = status["cb_gpu_context_meta"][str(instance_id)]
+    assert entry["model_name"] == "testmodel"
+    assert entry["world_size"] == 1
+
+    layout = entry["kv_cache_layout"]
+    assert layout["num_layers"] == cb_client_context.num_layers
+    assert layout["num_tokens"] == cb_client_context.num_tokens
+    assert layout["hidden_dim_size"] == cb_client_context.hidden_dim
+    assert layout["dtype"] == str(cb_client_context.dtype)
+
+    itemsize = torch.zeros(1, dtype=cb_client_context.dtype).element_size()
+    expected_bytes_per_token = (
+        2 * cb_client_context.num_layers * cb_client_context.hidden_dim * itemsize
+    )
+    assert layout["cache_size_per_token"] == expected_bytes_per_token
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available(), reason="report_status CB tests require CUDA"
+)
+def test_report_status_unregister_clears_cb_fields(
+    in_process_blend_engine: BlendEngineV2,
+    cb_client_context: CBClientContext,
+    local_kv_cache_unwrap,
+):
+    """Unregistering removes the entry from both new fields."""
+    engine = in_process_blend_engine
+    instance_id = 4243
+
+    engine.cb_register_kv_cache(
+        instance_id,
+        cb_client_context.get_kv_cache(),
+        "testmodel",
+        1,
+    )
+    engine.cb_unregister_kv_cache(instance_id)
+
+    status = engine.report_status()
+    assert status["registered_cb_gpu_ids"] == []
+    assert status["cb_gpu_context_meta"] == {}

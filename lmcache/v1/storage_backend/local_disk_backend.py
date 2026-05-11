@@ -32,6 +32,7 @@ from lmcache.v1.storage_backend.job_executor.pq_executor import (
     AsyncPQThreadPoolExecutor,
 )
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
+from lmcache.v1.storage_backend.path_sharder import PathSharder
 
 if TYPE_CHECKING:
     # First Party
@@ -332,34 +333,19 @@ class LocalDiskBackend(StorageBackendInterface):
 
         assert config.local_disk is not None
 
-        # Multi-path support: parse comma-separated paths and select one
-        # based on the configured sharding strategy.
-        paths = [p.strip() for p in config.local_disk.split(",") if p.strip()]
-        assert len(paths) > 0, "At least one disk path must be provided"
-
-        self.local_disk_path_sharding = config.local_disk_path_sharding
-        assert self.local_disk_path_sharding == "by_gpu", (
-            f"Unsupported local_disk_path_sharding "
-            f"'{self.local_disk_path_sharding}'. "
-            "Only 'by_gpu' is supported currently."
+        sharder = PathSharder(
+            raw_csv=config.local_disk,
+            strategy=config.local_disk_path_sharding,
+            dst_device=dst_device,
+            create_dirs=True,
         )
+        self.path: str = sharder.selected
 
-        # Extract device index from dst_device (e.g. "cuda:2" -> 2)
-        device_id = (
-            int(dst_device.split(":")[1])
-            if ":" in dst_device
-            else (torch.cuda.current_device() if torch.cuda.is_available() else 0)
-        )
-        self.path: str = paths[device_id % len(paths)]
-
-        # Create all directories (not just the selected one)
-        for p in paths:
-            os.makedirs(p, exist_ok=True)
         logger.info(
             "Local disk cache path: %s (device %s, %d path(s) configured)",
             self.path,
             dst_device,
-            len(paths),
+            len(sharder.all_paths),
         )
 
         self.loop = loop
@@ -706,26 +692,33 @@ class LocalDiskBackend(StorageBackendInterface):
         key: CacheEngineKey,
     ) -> Optional[MemoryObj]:
         """
-        Blocking get function.
+        Load a cached KV chunk from disk synchronously.
+
+        The cache policy is updated only after a successful load so that a
+        failed load (``load_bytes_from_disk`` returning ``None``) does not
+        record a phantom cache hit and skew future eviction decisions.
+
+        :param key: The cache key identifying the KV chunk.
+        :returns: A ``MemoryObj`` containing the loaded KV data, or ``None``
+            if the key is not present or the load fails.
         """
-        self.disk_lock.acquire()
-        if key not in self.dict:
-            self.disk_lock.release()
-            return None
+        with self.disk_lock:
+            if key not in self.dict:
+                return None
 
-        # Update cache recency
-        self.cache_policy.update_on_hit(key, self.dict)
+            disk_meta = self.dict[key]
+            path = disk_meta.path
+            dtype = disk_meta.dtype
+            shape = disk_meta.shape
+            fmt = disk_meta.fmt
+            cached_positions = disk_meta.cached_positions
+            assert dtype is not None
+            assert shape is not None
 
-        disk_meta = self.dict[key]
-        path = disk_meta.path
-        dtype = disk_meta.dtype
-        shape = disk_meta.shape
-        fmt = disk_meta.fmt
-        cached_positions = disk_meta.cached_positions
-        assert dtype is not None
-        assert shape is not None
-
-        self.disk_lock.release()
+        # Load is performed outside the lock: it can block for a non-trivial
+        # amount of time (CPU staging pool allocation + memcpy from disk) and
+        # must not hold disk_lock while waiting, or concurrent insert/evict
+        # operations would deadlock.
         memory_obj = self.load_bytes_from_disk(
             key,
             path,
@@ -734,6 +727,15 @@ class LocalDiskBackend(StorageBackendInterface):
             fmt=fmt,
             cached_positions=cached_positions,
         )
+
+        if memory_obj is not None:
+            # Re-acquire the lock to update the eviction policy.  The key
+            # membership check guards against the entry being evicted between
+            # the two lock regions — in that case the policy state is already
+            # consistent and no update is needed.
+            with self.disk_lock:
+                if key in self.dict:
+                    self.cache_policy.update_on_hit(key, self.dict)
 
         return memory_obj
 

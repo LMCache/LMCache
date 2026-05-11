@@ -70,6 +70,37 @@ func TestSetDefaults_NodeSelectorPreserved(t *testing.T) {
 	}
 }
 
+func TestSetDefaults_GPUVendorDefaultNvidia(t *testing.T) {
+	e := &LMCacheEngine{Spec: LMCacheEngineSpec{L1: L1BackendSpec{SizeGB: 10}}}
+	e.SetDefaults()
+	if e.Spec.GPUVendor == nil || *e.Spec.GPUVendor != GPUVendorNvidia {
+		t.Fatalf("expected GPUVendor=nvidia, got %v", e.Spec.GPUVendor)
+	}
+}
+
+func TestSetDefaults_GPUVendorAMDSkipsNodeSelectorDefault(t *testing.T) {
+	e := &LMCacheEngine{Spec: LMCacheEngineSpec{
+		L1:        L1BackendSpec{SizeGB: 10},
+		GPUVendor: ptr(GPUVendorAMD),
+	}}
+	e.SetDefaults()
+	if e.Spec.NodeSelector != nil {
+		t.Fatalf("expected nil NodeSelector for AMD vendor, got %v", e.Spec.NodeSelector)
+	}
+}
+
+func TestSetDefaults_GPUVendorAMDPreservesUserNodeSelector(t *testing.T) {
+	e := &LMCacheEngine{Spec: LMCacheEngineSpec{
+		L1:           L1BackendSpec{SizeGB: 10},
+		GPUVendor:    ptr(GPUVendorAMD),
+		NodeSelector: map[string]string{"feature.node.kubernetes.io/amd-gpu": "true"},
+	}}
+	e.SetDefaults()
+	if e.Spec.NodeSelector["feature.node.kubernetes.io/amd-gpu"] != "true" {
+		t.Fatalf("expected user-supplied AMD NodeSelector preserved, got %v", e.Spec.NodeSelector)
+	}
+}
+
 // --- ValidateSpec tests ---
 
 func TestValidateSpec_ValidMinimal(t *testing.T) {
