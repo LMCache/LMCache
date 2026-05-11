@@ -15,10 +15,7 @@ from lmcache.utils import (
     compress_slot_mapping,
     parse_mixed_slot_mapping,
 )
-from lmcache.v1.utils.kv_slot_ops import (
-    extract_kv_at_slots,
-    slice_by_slot_dim,
-)
+import lmcache.c_ops as lmc_ops
 
 logger = init_logger(__name__)
 
