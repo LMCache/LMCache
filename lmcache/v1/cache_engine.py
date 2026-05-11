@@ -67,8 +67,8 @@ logger = init_logger(__name__)
 # Type aliases for processed chunks
 # (cache_key, memory_obj, start_index, end_index)
 ProcessedChunk = Tuple[CacheEngineKey, MemoryObj, int, int]
-# (list of processed chunks, total kv size)
-ProcessTokensInternalResult = Tuple[List[ProcessedChunk], int]
+# (list of processed chunks, total kv size, apc-skipped keys for pd_buffer cleanup)
+ProcessTokensInternalResult = Tuple[List[ProcessedChunk], int, List[CacheEngineKey]]
 
 
 class CacheEngineEndSignal:
@@ -819,12 +819,12 @@ class LMCacheEngine:
                         ret_mask,
                         **kwargs,
                     )
+                    apc_skipped_keys: List[
+                        CacheEngineKey
+                    ] = []  # async path: cleanup not yet implemented
                 else:
-                    reordered_chunks, tot_kv_size = self._process_tokens_internal(
-                        tokens,
-                        mask,
-                        ret_mask,
-                        **kwargs,
+                    reordered_chunks, tot_kv_size, apc_skipped_keys = (
+                        self._process_tokens_internal(tokens, mask, ret_mask, **kwargs)
                     )
 
         if self.save_only_first_rank:
@@ -863,6 +863,47 @@ class LMCacheEngine:
                 self.storage_manager.remove(key, self.retrieve_locations)
             if not self.async_loading:
                 memory_obj.ref_count_down()
+
+        # Free pd_buffer pages for APC-skipped chunks.
+        if (
+            self.remove_after_retrieve
+            and not self._is_passive()
+            and self.storage_manager is not None
+            and apc_skipped_keys
+        ):
+            # Search each configured retrieve location in order; break on first
+            # hit.  Explicit enumeration over retrieve_locations makes the
+            # backend set clear (e.g. ["PDBackend"] on a PD receiver,
+            # ["LocalCPUBackend"] on a CPU-only node, or a GPU-Direct backend).
+            # Falls back to all registered backends when retrieve_locations is
+            # not configured (None).
+            apc_mem_objs: List[Optional[MemoryObj]] = [None] * len(apc_skipped_keys)
+            search_locs = (
+                self.retrieve_locations or self.storage_manager.get_all_backend_names()
+            )
+            for loc in search_locs:
+                candidate = self.storage_manager.batched_get(
+                    keys=apc_skipped_keys, location=loc
+                )
+                if any(obj is not None for obj in candidate):
+                    apc_mem_objs = candidate
+                    break
+            freed = 0
+            for apc_key, apc_mem_obj in zip(
+                apc_skipped_keys, apc_mem_objs, strict=False
+            ):
+                if apc_mem_obj is not None:
+                    self.storage_manager.remove(apc_key, self.retrieve_locations)
+                    if not self.async_loading:
+                        apc_mem_obj.ref_count_down()
+                    freed += 1
+            logger.debug(
+                "APC pd_buffer cleanup: freed %d/%d APC-skipped chunks "
+                "(search_locs=%s)",
+                freed,
+                len(apc_skipped_keys),
+                search_locs,
+            )
 
         retrieved_tokens = torch.sum(ret_mask)
         self.stats_monitor.on_retrieve_finished(
@@ -989,6 +1030,7 @@ class LMCacheEngine:
 
             ret_mask[start:end] = True
 
+        to_count_down: List[MemoryObj] = []
         if keys:
             # Transpose the keys into layer major format
             keys_layer_major = [list(row) for row in zip(*keys, strict=False)]
@@ -1003,7 +1045,6 @@ class LMCacheEngine:
             mem_obj_consumer = self.gpu_connector.batched_to_gpu(starts, ends, **kwargs)
             next(mem_obj_consumer)
 
-            to_count_down = []
             for layer_id in range(self.num_layers):
                 task = next(get_generator)
 
@@ -1021,6 +1062,8 @@ class LMCacheEngine:
                 to_count_down.extend(mem_objs_layer)
 
             for mem_obj in to_count_down:
+                # Defer unpin until after GPU sync below; the pin keeps the
+                # allocator from freeing staging memory while GPU still reads it.
                 mem_obj.ref_count_down()
         else:
             # If no cache are found, we still need to yield to avoid
@@ -1033,10 +1076,9 @@ class LMCacheEngine:
         # synchronize the last layer
         next(mem_obj_consumer)
 
-        # Unpin any disk-loaded staging objects now that the device-side sync
-        # has been enqueued (mem_obj_consumer advanced past its sync point).
-        # Without this, pin_count stays at 1 forever and the CPU staging pool
-        # fills up, causing the next retrieve to deadlock inside allocate().
+        # Unpin staging objects only after GPU sync: between ref_count_down()
+        # above and this sync point the GPU may still be reading staging memory.
+        # The pin prevents the allocator from freeing it prematurely.
         for mem_obj in to_count_down:
             if mem_obj.is_pinned:
                 mem_obj.unpin()
@@ -1546,7 +1588,7 @@ class LMCacheEngine:
         mask,
         ret_mask,
         **kwargs,
-    ) -> ProcessTokensInternalResult:
+    ) -> Tuple[List[ProcessedChunk], int]:
         """
         This function is used to get the memory objects from the event manager.
 
@@ -1630,14 +1672,32 @@ class LMCacheEngine:
         if request_configs is not None and len(request_configs) != 0:
             assert isinstance(request_configs, dict)
 
+        # Compute how many prefix tokens are APC-masked so we can split in one pass.
+        _num_falses = 0
+        if mask is not None:
+            _num_falses = int(mask.numel() - mask.long().sum().item())
+
+        # Call process_tokens with mask=None so ALL chunks are yielded in a single
+        # hash pass.  We manually filter into:
+        #   - apc_skipped_keys : APC-covered prefix chunks (for free pd_buffer cleanup)
+        #   - chunk_infos       : chunks that actually need to be retrieved
+        # This avoids a second, redundant process_tokens call in retrieve().
+        apc_skipped_keys: List[CacheEngineKey] = []
         chunk_infos = []
         for start, end, key in self.token_database.process_tokens(
             tokens=tokens,
-            mask=mask,
+            mask=None,
             request_configs=request_configs,
         ):
             assert isinstance(key, CacheEngineKey)
-            chunk_infos.append((key, start, end))
+            # Contiguous-prefix assumption: the token mask is always FFFFFTTTTT
+            # so APC-masked chunks (start < _num_falses) always precede retrievable
+            # chunks.  Chunk boundaries are aligned to chunk_size, so no chunk
+            # straddles the APC boundary.
+            if start < _num_falses:
+                apc_skipped_keys.append(key)  # free — hashed in this same loop
+            else:
+                chunk_infos.append((key, start, end))
 
         # block_mapping: location -> [(CacheEngineKey, start, end)]
         if (
@@ -1705,7 +1765,7 @@ class LMCacheEngine:
                 for key, memory_obj, start, end in reordered_chunks
                 if end <= last_failed_block_start
             ]
-        return reordered_chunks, tot_kv_size
+        return reordered_chunks, tot_kv_size, apc_skipped_keys
 
     def _broadcast_or_receive_memory_objs(
         self,
