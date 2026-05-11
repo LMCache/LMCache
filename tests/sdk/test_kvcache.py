@@ -9,10 +9,10 @@ from typing import cast
 
 # Third Party
 import httpx
+import pytest
 import torch
 
 # First Party
-import lmcache.sdk as lmc_sdk
 from lmcache.v1.multiprocess.http_apis.kv_protocol import (
     RetrieveManifest,
     decode_store_chunk,
@@ -21,6 +21,7 @@ from lmcache.v1.multiprocess.http_apis.kv_protocol import (
     encode_retrieve_shard,
     iter_decode_frames,
 )
+import lmcache.sdk as lmc_sdk
 
 CHUNK_SIZE = 16
 DTYPE = torch.float32
@@ -157,6 +158,56 @@ def test_retrieve_assembles_shards_into_output_file(
     assert torch.equal(loaded["kv"], tensor)
     assert loaded["model_name"] == "m"
     assert loaded["tokens"] == tokens
+
+
+def test_retrieve_rejects_missing_shard(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """``lmc_sdk.retrieve`` rejects incomplete retrieve streams."""
+    tensor = _make_tensor()[:, :, :CHUNK_SIZE, :].contiguous()
+    output_path = tmp_path / "missing.pt"
+    tokens = list(range(CHUNK_SIZE))
+    response_body = b"".join(
+        [
+            encode_retrieve_manifest(
+                RetrieveManifest(
+                    model_name="m",
+                    total_tokens=CHUNK_SIZE,
+                    total_chunks=1,
+                    hit_tokens=CHUNK_SIZE,
+                    hit_chunks=1,
+                    chunk_size=CHUNK_SIZE,
+                    world_size=2,
+                    shape=_shape4(tensor),
+                    shard_shape=(2, 2, CHUNK_SIZE, 4),
+                    dtype=str(tensor.dtype),
+                )
+            ),
+            _retrieve_shard_frames(tensor, world_size=2)[0],
+        ]
+    )
+
+    @contextmanager
+    def fake_stream(
+        method: str,
+        url: str,
+        content: bytes,
+        headers: dict[str, str],
+        timeout: float,
+    ) -> Iterator[httpx.Response]:
+        yield _response(method, url, content=response_body)
+
+    monkeypatch.setattr(httpx, "stream", fake_stream)
+
+    with pytest.raises(lmc_sdk.KVCacheSDKError, match="missing 1 shard"):
+        lmc_sdk.retrieve(
+            output_path,
+            "http://localhost:8080",
+            model_name="m",
+            tokens=tokens,
+        )
+    assert not output_path.exists()
 
 
 def test_lookup_returns_server_metadata(monkeypatch) -> None:

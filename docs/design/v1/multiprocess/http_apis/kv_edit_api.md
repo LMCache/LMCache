@@ -26,6 +26,11 @@ There is no separate engine lookup method. The HTTP lookup endpoint calls
 the lazy result immediately. This keeps the new `MPCacheEngine` surface
 minimal while preserving a cheap public lookup route.
 
+The storage implementation lives in `lmcache/v1/multiprocess/kv_bytes.py`
+and the `MPCacheEngine` methods are thin wrappers. This keeps the server
+integration point small while still exposing the engine-owned dependencies
+needed for token hashing, model layout resolution, and storage access.
+
 Both methods bypass the GPU connector and reuse existing MP engine
 machinery:
 

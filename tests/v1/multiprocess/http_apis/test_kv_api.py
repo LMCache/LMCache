@@ -24,7 +24,7 @@ from lmcache.v1.distributed.config import (
     L1MemoryManagerConfig,
     StorageManagerConfig,
 )
-from lmcache.v1.multiprocess.custom_types import IPCCacheEngineKey, RetrieveBytesResult
+from lmcache.v1.multiprocess.custom_types import IPCCacheEngineKey
 from lmcache.v1.multiprocess.gpu_context import GPUCacheContext
 from lmcache.v1.multiprocess.http_apis.kv_api import router as kv_router
 from lmcache.v1.multiprocess.http_apis.kv_protocol import (
@@ -36,6 +36,7 @@ from lmcache.v1.multiprocess.http_apis.kv_protocol import (
     encode_store_manifest,
     iter_decode_frames,
 )
+from lmcache.v1.multiprocess.kv_bytes import RetrieveBytesResult
 from lmcache.v1.multiprocess.server import MPCacheEngine
 
 CHUNK_SIZE = 16
@@ -361,6 +362,34 @@ class TestStoreRetrieveBytes:
         second = engine.retrieve_kv_bytes_by_tokens("m", tokens)
         assert torch.equal(_tensor_from_engine_result(first), tensor)
         assert torch.equal(_tensor_from_engine_result(second), tensor)
+
+    def test_retrieve_close_releases_started_iterator(self) -> None:
+        engine = _make_engine()
+        _install_resolver(engine, {"m": 2})
+        tokens = _tokens_for(num_chunks=1)
+        tensor = _make_tensor(num_chunks=1, world_size=2, seed=4)
+        asyncio.run(
+            engine.store_kv_bytes_by_tokens(
+                "m",
+                tokens,
+                _async_chunks(_chunk_payloads(tensor)),
+                full_shape=_shape4(tensor),
+                dtype=tensor.dtype,
+            )
+        )
+
+        result = engine.retrieve_kv_bytes_by_tokens("m", tokens)
+        shards = result.iter_shards()
+        first_shard = next(shards)
+        assert first_shard.chunk_index == 0
+        result.close()
+
+        keys = _object_keys_for(engine, "m", tokens, world_size=2)
+        reserved = engine.storage_manager.reserve_write(keys, _layout_for(2), "all")
+        try:
+            assert set(reserved) == set(keys)
+        finally:
+            engine.storage_manager.finish_write(list(reserved))
 
     def test_unknown_model_raises(self) -> None:
         engine = _make_engine()

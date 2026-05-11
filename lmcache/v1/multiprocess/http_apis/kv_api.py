@@ -12,7 +12,6 @@ import torch
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.multiprocess.custom_types import RetrieveBytesResult
 from lmcache.v1.multiprocess.http_apis.kv_protocol import (
     PROTOCOL_VERSION,
     STREAM_MEDIA_TYPE,
@@ -24,6 +23,7 @@ from lmcache.v1.multiprocess.http_apis.kv_protocol import (
     encode_retrieve_manifest,
     encode_retrieve_shard,
 )
+from lmcache.v1.multiprocess.kv_bytes import RetrieveBytesResult
 from lmcache.v1.multiprocess.server import MPCacheEngine
 
 logger = init_logger(__name__)

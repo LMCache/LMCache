@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
 import json
+import math
 
 # Third Party
 from safetensors import safe_open
@@ -174,8 +175,31 @@ def retrieve(
             ) from exc
         dtype = _dtype_from_name(manifest.dtype)
         kv = torch.empty(manifest.shape, dtype=dtype)
+        expected_shards = {
+            (chunk_index, worker_id)
+            for chunk_index in range(manifest.hit_chunks)
+            for worker_id in range(manifest.world_size)
+        }
+        seen_shards: set[tuple[int, int]] = set()
+        expected_payload_bytes = math.prod(manifest.shard_shape) * dtype.itemsize
         for frame in frames:
             chunk_index, worker_id, payload = decode_retrieve_shard(frame)
+            shard_key = (chunk_index, worker_id)
+            if shard_key not in expected_shards:
+                raise KVCacheSDKError(
+                    "retrieve response included unexpected shard "
+                    f"chunk={chunk_index}, worker={worker_id}"
+                )
+            if shard_key in seen_shards:
+                raise KVCacheSDKError(
+                    "retrieve response included duplicate shard "
+                    f"chunk={chunk_index}, worker={worker_id}"
+                )
+            if len(payload) != expected_payload_bytes:
+                raise KVCacheSDKError(
+                    f"retrieve shard {shard_key} has {len(payload)} bytes, "
+                    f"expected {expected_payload_bytes}"
+                )
             shard = torch.frombuffer(
                 bytearray(payload),
                 dtype=dtype,
@@ -186,6 +210,12 @@ def retrieve(
             d_start = worker_id * d_per_worker
             d_end = d_start + d_per_worker
             kv[:, :, t_start:t_end, d_start:d_end] = shard
+            seen_shards.add(shard_key)
+        missing_shards = expected_shards - seen_shards
+        if missing_shards:
+            raise KVCacheSDKError(
+                f"retrieve response missing {len(missing_shards)} shard frames"
+            )
 
     path = Path(output_path)
     _save_package(
@@ -388,11 +418,7 @@ def _iter_store_frames(package: _KVPackage, chunk_size: int) -> Iterable[bytes]:
         start = chunk_index * chunk_size
         end = start + chunk_size
         payload = (
-            kv[:, :, start:end, :]
-            .contiguous()
-            .view(torch.uint8)
-            .numpy()
-            .tobytes()
+            kv[:, :, start:end, :].contiguous().view(torch.uint8).numpy().tobytes()
         )
         yield encode_store_chunk(chunk_index, payload)
 

@@ -279,8 +279,7 @@ def _decode_header(header_bytes: bytes, payload_length: int) -> FrameHeader:
     version = _require_int(header, "version")
     if version != PROTOCOL_VERSION:
         raise ValueError(
-            f"unsupported KV protocol version {version}; "
-            f"expected {PROTOCOL_VERSION}"
+            f"unsupported KV protocol version {version}; expected {PROTOCOL_VERSION}"
         )
     declared_payload_length = _require_int(header, "payload_length")
     if declared_payload_length != payload_length:

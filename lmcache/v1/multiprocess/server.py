@@ -6,7 +6,6 @@ from functools import partial
 from itertools import islice
 from typing import Generator
 import argparse
-import math
 import threading
 import time
 
@@ -52,13 +51,20 @@ from lmcache.v1.multiprocess.config import (
 from lmcache.v1.multiprocess.custom_types import (
     BlockAllocationRecord,
     IPCCacheEngineKey,
-    KVBytesShard,
     KVCache,
-    RetrieveBytesResult,
-    StoreBytesResult,
 )
 from lmcache.v1.multiprocess.gpu_context import (
     GPUCacheContext,
+)
+from lmcache.v1.multiprocess.kv_bytes import (
+    RetrieveBytesResult,
+    StoreBytesResult,
+)
+from lmcache.v1.multiprocess.kv_bytes import (
+    retrieve_kv_bytes_by_tokens as _retrieve_kv_bytes_by_tokens,
+)
+from lmcache.v1.multiprocess.kv_bytes import (
+    store_kv_bytes_by_tokens as _store_kv_bytes_by_tokens,
 )
 from lmcache.v1.multiprocess.mq import MessageQueueServer
 from lmcache.v1.multiprocess.protocol import (
@@ -112,88 +118,6 @@ def compute_extra_count(
     """
     tp = tp_size if tp_size > 1 else world_size
     return tp - 1 if tp > world_size else 0
-
-
-def _wait_prefetch(storage_manager: StorageManager, handle: PrefetchHandle) -> int:
-    """Block until ``handle`` finishes and return the total hit count."""
-    while True:
-        status = storage_manager.query_prefetch_status(handle)
-        if status is not None:
-            return status
-        time.sleep(0.001)
-
-
-def _tensor_to_bytes(tensor: torch.Tensor) -> bytes:
-    """Materialize a tensor as dtype-preserving raw bytes."""
-    return tensor.contiguous().view(torch.uint8).numpy().tobytes()
-
-
-def _memory_obj_tensor(
-    memory_obj: MemoryObj,
-    shape: tuple[int, int, int, int] | torch.Size,
-    dtype: torch.dtype,
-) -> torch.Tensor:
-    """Return the shaped tensor view exposed by ``memory_obj``."""
-    tensor = memory_obj.tensor
-    if tensor is None:
-        raise ValueError("bytes-level KV access requires tensor-backed memory")
-    if tensor.dtype != dtype:
-        raise ValueError(f"memory dtype {tensor.dtype} does not match {dtype}")
-    return tensor.reshape(tuple(shape))
-
-
-def _get_single_group_layout(
-    layout_desc: MemoryLayoutDesc,
-) -> tuple[tuple[int, int, int, int], torch.dtype]:
-    """Validate that ``layout_desc`` matches the v1 bytes-API contract.
-
-    The bytes API in v1 supports **only**:
-
-    1. **Homogeneous attention** — exactly one KV layer group. Hybrid
-       attention (e.g. sliding-window mixed with full attention,
-       producing per-layer-group differing shapes/dtypes) is rejected
-       up front because the wire format has no per-group framing.
-    2. **KV_2LTD layout** — the per-shard tensor must be 4-D with the
-       canonical ``[2, num_layers, num_tokens, hidden_dim]`` arrangement.
-       Other layouts (e.g. KV_T2D, KV_MLA_FMT) are not exposed by the
-       bytes API in v1.
-
-    Both checks happen before any storage lock is taken so a misconfigured
-    request fails cleanly with a 400 (via ``ValueError``) and never
-    leaves partial / corrupt objects in cache.
-    """
-    if len(layout_desc.shapes) != 1:
-        raise ValueError(
-            "bytes-level KV access currently supports a single KV layer group "
-            "(homogeneous attention only); hybrid-attention models with "
-            f"multiple layer groups are not supported in v1 (got "
-            f"{len(layout_desc.shapes)} groups)"
-        )
-    shape = layout_desc.shapes[0]
-    if len(shape) != 4:
-        raise ValueError(
-            "bytes-level KV access requires the KV_2LTD layout "
-            "(shape [2, num_layers, num_tokens, hidden_dim]); "
-            f"got a {len(shape)}-D shape {tuple(shape)}"
-        )
-    return (shape[0], shape[1], shape[2], shape[3]), layout_desc.dtypes[0]
-
-
-def _count_leading_complete_chunks(
-    obj_keys: list[ObjectKey],
-    written_keys: set[ObjectKey],
-    world_size: int,
-) -> int:
-    """Count leading chunks where every worker shard is present."""
-    stored_chunks = 0
-    for chunk_start in range(0, len(obj_keys), world_size):
-        chunk_keys = obj_keys[chunk_start : chunk_start + world_size]
-        if len(chunk_keys) != world_size:
-            break
-        if not all(obj_key in written_keys for obj_key in chunk_keys):
-            break
-        stored_chunks += 1
-    return stored_chunks
 
 
 def get_layout_desc(gpu_context: GPUCacheContext, num_tokens: int) -> MemoryLayoutDesc:
@@ -797,111 +721,17 @@ class MPCacheEngine:
             ValueError: If the chunk stream, shape, dtype, or registered model
                 layout violates the v1 contract.
         """
-        layout_desc, world_size = self._resolve_model(model_name)
-
-        chunk_hashes = self.token_hasher.compute_chunk_hashes(tokens)
-        total_chunks = len(chunk_hashes)
-        total_tokens = total_chunks * self.chunk_size
-        if total_chunks == 0:
-            return StoreBytesResult(0, 0, 0, 0)
-
-        per_shard_shape, per_shard_dtype = _get_single_group_layout(layout_desc)
-        per_shard_bytes = math.prod(per_shard_shape) * per_shard_dtype.itemsize
-        expected_chunk_bytes = world_size * per_shard_bytes
-        if dtype != per_shard_dtype:
-            raise ValueError(
-                f"payload dtype {dtype} does not match registered KV dtype "
-                f"{per_shard_dtype}"
-            )
-
-        ipc_key = IPCCacheEngineKey(
+        return await _store_kv_bytes_by_tokens(
             model_name=model_name,
-            world_size=world_size,
-            worker_id=None,
-            token_ids=tuple(tokens[:total_tokens]),
-            start=0,
-            end=total_tokens,
-            request_id="http-store",
+            tokens=tokens,
+            chunks=chunks,
+            full_shape=full_shape,
+            dtype=dtype,
             cache_salt=cache_salt,
-        )
-        obj_keys = ipc_key_to_object_keys(ipc_key, chunk_hashes)
-
-        d_per_worker = per_shard_shape[3]
-        expected_full_shape = (
-            per_shard_shape[0],
-            per_shard_shape[1],
-            total_tokens,
-            d_per_worker * world_size,
-        )
-        if full_shape != expected_full_shape:
-            raise ValueError(
-                f"payload shape {full_shape} does not match expected "
-                f"{expected_full_shape}"
-            )
-
-        written_keys: list[ObjectKey] = []
-        seen_chunks = 0
-        async for chunk_payload in chunks:
-            if seen_chunks >= total_chunks:
-                raise ValueError(f"received more chunks than expected ({total_chunks})")
-            if len(chunk_payload) != expected_chunk_bytes:
-                raise ValueError(
-                    f"chunk {seen_chunks} byte length {len(chunk_payload)} "
-                    f"does not match expected {expected_chunk_bytes}"
-                )
-
-            chunk_tensor = torch.frombuffer(
-                bytearray(chunk_payload),
-                dtype=per_shard_dtype,
-            ).reshape(
-                (
-                    per_shard_shape[0],
-                    per_shard_shape[1],
-                    self.chunk_size,
-                    d_per_worker * world_size,
-                )
-            )
-            chunk_keys = obj_keys[
-                seen_chunks * world_size : (seen_chunks + 1) * world_size
-            ]
-            reserved = self.storage_manager.reserve_write(
-                chunk_keys,
-                layout_desc,
-                "all",
-            )
-            try:
-                for worker_id in range(world_size):
-                    obj_key = chunk_keys[worker_id]
-                    memory_obj = reserved.get(obj_key)
-                    if memory_obj is None:
-                        continue
-                    d_start = worker_id * d_per_worker
-                    d_end = d_start + d_per_worker
-                    shard = chunk_tensor[:, :, :, d_start:d_end]
-                    _memory_obj_tensor(
-                        memory_obj,
-                        per_shard_shape,
-                        per_shard_dtype,
-                    ).copy_(shard)
-                    written_keys.append(obj_key)
-            finally:
-                if reserved:
-                    self.storage_manager.finish_write(list(reserved.keys()))
-            seen_chunks += 1
-
-        if seen_chunks != total_chunks:
-            raise ValueError(f"expected {total_chunks} chunks, got {seen_chunks}")
-
-        stored_chunks = _count_leading_complete_chunks(
-            obj_keys,
-            set(written_keys),
-            world_size,
-        )
-        return StoreBytesResult(
-            total_tokens=total_tokens,
-            total_chunks=total_chunks,
-            stored_tokens=stored_chunks * self.chunk_size,
-            stored_chunks=stored_chunks,
+            chunk_size=self.chunk_size,
+            token_hasher=self.token_hasher,
+            storage_manager=self.storage_manager,
+            resolve_model=self._resolve_model,
         )
 
     def retrieve_kv_bytes_by_tokens(
@@ -939,119 +769,14 @@ class MPCacheEngine:
             ValueError: If the registered model violates the v1
                 limitations above.
         """
-        layout_desc, world_size = self._resolve_model(model_name)
-
-        chunk_hashes = self.token_hasher.compute_chunk_hashes(tokens)
-        total_chunks = len(chunk_hashes)
-        total_tokens = total_chunks * self.chunk_size
-        if total_chunks == 0:
-            return RetrieveBytesResult(
-                total_tokens=0,
-                total_chunks=0,
-                hit_tokens=0,
-                hit_chunks=0,
-                world_size=world_size,
-                per_shard_shape=(0, 0, 0, 0),
-                dtype=torch.uint8,
-                shard_iter_factory=lambda: iter(()),
-                close_callback=lambda: None,
-            )
-
-        per_shard_shape, per_shard_dtype = _get_single_group_layout(layout_desc)
-        ipc_key = IPCCacheEngineKey(
+        return _retrieve_kv_bytes_by_tokens(
             model_name=model_name,
-            world_size=world_size,
-            worker_id=None,
-            token_ids=tuple(tokens[:total_tokens]),
-            start=0,
-            end=total_tokens,
-            request_id="http-retrieve",
+            tokens=tokens,
             cache_salt=cache_salt,
-        )
-        obj_keys = ipc_key_to_object_keys(ipc_key, chunk_hashes)
-
-        handle = self.storage_manager.submit_prefetch_task(
-            obj_keys,
-            layout_desc,
-            extra_count=0,
-            external_request_id=ipc_key.request_id,
-        )
-        total_hit_keys = _wait_prefetch(self.storage_manager, handle)
-        hit_chunks = total_hit_keys // world_size
-        hit_tokens = hit_chunks * self.chunk_size
-        locked_obj_keys = obj_keys[:total_hit_keys]
-        if hit_chunks == 0:
-            if locked_obj_keys:
-                self.storage_manager.finish_read_prefetched(locked_obj_keys)
-            return RetrieveBytesResult(
-                total_tokens=total_tokens,
-                total_chunks=total_chunks,
-                hit_tokens=0,
-                hit_chunks=0,
-                world_size=world_size,
-                per_shard_shape=per_shard_shape,
-                dtype=per_shard_dtype,
-                shard_iter_factory=lambda: iter(()),
-                close_callback=lambda: None,
-            )
-
-        hit_obj_keys = locked_obj_keys[: hit_chunks * world_size]
-        remainder_obj_keys = locked_obj_keys[len(hit_obj_keys) :]
-
-        started = False
-        closed = False
-
-        def close_unstarted() -> None:
-            nonlocal closed
-            if closed:
-                return
-            if not started and locked_obj_keys:
-                self.storage_manager.finish_read_prefetched(locked_obj_keys)
-            closed = True
-
-        def iter_shards() -> Generator[KVBytesShard, None, None]:
-            nonlocal closed, started
-            if closed:
-                return
-            started = True
-            read_succeeded = False
-            try:
-                with self.storage_manager.read_prefetched_results(
-                    hit_obj_keys
-                ) as memory_objs:
-                    if memory_objs is None:
-                        return
-                    for idx, memory_obj in enumerate(memory_objs):
-                        chunk_idx = idx // world_size
-                        worker_id = idx % world_size
-                        shard_tensor = _memory_obj_tensor(
-                            memory_obj,
-                            per_shard_shape,
-                            per_shard_dtype,
-                        )
-                        yield KVBytesShard(
-                            chunk_index=chunk_idx,
-                            worker_id=worker_id,
-                            data=_tensor_to_bytes(shard_tensor),
-                        )
-                    read_succeeded = True
-            finally:
-                if read_succeeded:
-                    self.storage_manager.finish_read_prefetched(locked_obj_keys)
-                elif remainder_obj_keys:
-                    self.storage_manager.finish_read_prefetched(remainder_obj_keys)
-                closed = True
-
-        return RetrieveBytesResult(
-            total_tokens=total_tokens,
-            total_chunks=total_chunks,
-            hit_tokens=hit_tokens,
-            hit_chunks=hit_chunks,
-            world_size=world_size,
-            per_shard_shape=per_shard_shape,
-            dtype=per_shard_dtype,
-            shard_iter_factory=iter_shards,
-            close_callback=close_unstarted,
+            chunk_size=self.chunk_size,
+            token_hasher=self.token_hasher,
+            storage_manager=self.storage_manager,
+            resolve_model=self._resolve_model,
         )
 
     def lookup(
