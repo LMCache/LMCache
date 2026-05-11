@@ -45,46 +45,42 @@ def _bitmap_count(bitmap: Bitmap | None) -> int:
 
 
 def _wait_store_finished(adapter, task_ids: list[int], timeout: float) -> bool:
-    finished: int = 0
-    count = len(task_ids)
+    unfinished = len(task_ids)
     efd = adapter.get_store_event_fd()
-    while True:
+    while unfinished > 0:
         if not wait_eventfd(efd, timeout=timeout):
             return False
         completed = adapter.pop_completed_store_tasks()
-        finished += len(completed)
-        if finished == count:
-            return True
+        unfinished -= len(completed)
+    return True
 
 
 def _wait_load_finished(adapter, task_ids: list[int], timeout: float) -> bool:
-    finished: int = 0
-    count = len(task_ids)
+    pending = set(task_ids)
     efd = adapter.get_load_event_fd()
-    while True:
+    while pending:
         if not wait_eventfd(efd, timeout=timeout):
             return False
-        for task_id in task_ids:
-            load_result = adapter.query_load_result(task_id)
-            if load_result is not None:
-                finished += 1
-        if finished == count:
-            return True
+        # Only query tasks that are still pending; remove finished ones
+        # so subsequent wakeups don't re-query them.
+        for task_id in list(pending):
+            if adapter.query_load_result(task_id) is not None:
+                pending.remove(task_id)
+    return True
 
 
 def _wait_lookup_finished(adapter, task_ids: list[int], timeout: float) -> bool:
-    finished: int = 0
-    count = len(task_ids)
+    pending = set(task_ids)
     efd = adapter.get_lookup_and_lock_event_fd()
-    while True:
+    while pending:
         if not wait_eventfd(efd, timeout=timeout):
             return False
-        for task_id in task_ids:
-            load_result = adapter.query_lookup_and_lock_result(task_id)
-            if load_result is not None:
-                finished += 1
-        if finished == count:
-            return True
+        # Only query tasks that are still pending; remove finished ones
+        # so subsequent wakeups don't re-query them.
+        for task_id in list(pending):
+            if adapter.query_lookup_and_lock_result(task_id) is not None:
+                pending.remove(task_id)
+    return True
 
 
 # ---------------------------------------------------------------------------
