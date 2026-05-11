@@ -120,8 +120,16 @@ class LMCacheLookupClient(LookupClientInterface):
                 request_configs_str,
             ]
         else:
+            # Convert token_ids to a plain list for msgpack serialization
+            # (vLLM 0.18+ may pass ConstantList which msgspec can't encode)
+            if isinstance(token_ids, torch.Tensor):
+                serializable_ids = token_ids.tolist()
+            elif not isinstance(token_ids, list):
+                serializable_ids = list(token_ids)
+            else:
+                serializable_ids = token_ids
             msg_buf = [
-                token_ids,
+                serializable_ids,
                 lookup_id,
                 request_configs_str,
             ]

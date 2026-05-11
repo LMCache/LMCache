@@ -81,7 +81,7 @@ server's health endpoint. No ZMQ client is needed.
 
 | Target | Server process | Endpoint | Healthy | Unhealthy |
 |--------|---------------|----------|---------|-----------|
-| `kvcache` | LMCache MP server | `GET /api/healthcheck` | 200 `{"status": "healthy"}` | 503 `{"status": "unhealthy", "reason": "..."}` |
+| `kvcache` | LMCache MP server | `GET /healthcheck` | 200 `{"status": "healthy"}` | 503 `{"status": "unhealthy", "reason": "..."}` |
 | `engine` | vLLM server | `GET /health` | 200 (empty body) | 503 (empty body) |
 
 ### 3. `--url` defaults
@@ -138,7 +138,7 @@ class PingCommand(BaseCommand):
     execute(args):
         url = args.url or DEFAULT_URLS[args.target]
         url = normalize_url(url)
-        endpoint = HEALTH_ENDPOINTS[args.target]  # "/api/healthcheck" or "/health"
+        endpoint = HEALTH_ENDPOINTS[args.target]  # "/healthcheck" or "/health"
         title = TITLES[args.target]               # "Ping KV Cache" or "Ping Engine"
 
         status, rtt_ms, error = ping(f"{url}{endpoint}")
@@ -156,7 +156,7 @@ class PingCommand(BaseCommand):
 Module-level helper:
 
 ```python
-HEALTH_ENDPOINTS = {"kvcache": "/api/healthcheck", "engine": "/health"}
+HEALTH_ENDPOINTS = {"kvcache": "/healthcheck", "engine": "/health"}
 DEFAULT_URLS = {"kvcache": "http://localhost:8080", "engine": "http://localhost:8000"}
 TITLES = {"kvcache": "Ping KV Cache", "engine": "Ping Engine"}
 

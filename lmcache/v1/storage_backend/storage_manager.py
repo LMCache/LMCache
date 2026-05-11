@@ -1313,6 +1313,19 @@ class StorageManager:
 
             return created
 
+    def cancel_request(self, req_id: str) -> None:
+        """
+        Cancel an in-flight or pending request.
+
+        Delegates to all storage backends. Backends that track per-request
+        state will cancel the request; others will no-op.
+
+        :param str req_id: The request identifier to cancel.
+        :return: None
+        """
+        for backend in self.storage_backends.values():
+            backend.cancel_request(req_id)
+
     def close(self):
         logger.info("Closing StorageManager...")
 

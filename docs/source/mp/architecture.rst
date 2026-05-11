@@ -58,8 +58,8 @@ cache reuse across document paragraphs.
 **``http_server.py``** -- Wraps ``run_cache_server()`` (from ``server.py``)
 inside a FastAPI application.  Endpoints are contributed by modules under
 ``http_apis/`` and auto-registered via ``HTTPAPIRegistry``: ``GET /`` (basic
-liveness), ``GET /api/healthcheck`` for Kubernetes probes, ``POST /api/clear-cache``
-for clearing all KV cache data in L1 (CPU) memory, and ``GET /api/status``
+liveness), ``GET /healthcheck`` for Kubernetes probes, ``POST /clear-cache``
+for clearing all KV cache data in L1 (CPU) memory, and ``GET /status``
 for inspecting detailed internal state.  The ZMQ server runs as part of the
 same process, and any configured runtime plugins are spawned by
 ``MPRuntimePluginLauncher`` during FastAPI startup.
@@ -413,8 +413,8 @@ Key Source Files
    * - ``lmcache/v1/multiprocess/http_api_registry.py``
      - ``HTTPAPIRegistry`` that auto-discovers routers in ``http_apis/``
    * - ``lmcache/v1/multiprocess/http_apis/``
-     - Extensible HTTP endpoints (``/``, ``/api/healthcheck``,
-       ``/api/clear-cache``, ``/api/status``)
+     - Extensible HTTP endpoints (``/``, ``/healthcheck``,
+       ``/clear-cache``, ``/status``)
    * - ``lmcache/v1/multiprocess/mp_runtime_plugin_launcher.py``
      - ``MPRuntimePluginLauncher`` that spawns runtime plugins with the
        full server config serialized into environment variables
