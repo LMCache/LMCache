@@ -2088,7 +2088,18 @@ impl RawBlockDevice {
                 // Fixed buffers are pre-registered with io_uring, enabling true zero-copy I/O
                 let fixed_idx = fixed_buffer_map.get(&ptrs[i]).map(|(idx, _)| *idx);
 
-                // Ensure O_DIRECT buffers are aligned
+                if use_odirect {
+                    #[allow(clippy::manual_is_multiple_of)]
+                    if (offset as usize) % alignment != 0 {
+                        return Err(PyValueError::new_err("O_DIRECT requires aligned offset"));
+                    }
+                    #[allow(clippy::manual_is_multiple_of)]
+                    if total_len % alignment != 0 {
+                        return Err(PyValueError::new_err("O_DIRECT requires aligned total_len"));
+                    }
+                }
+
+                // Misaligned pointer is handled via bounce buffer for writes
                 let (final_ptr, bounce_opt, fixed_idx) = if use_odirect {
                     let align = alignment;
                     #[allow(clippy::manual_is_multiple_of)]
