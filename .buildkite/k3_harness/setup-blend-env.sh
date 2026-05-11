@@ -66,8 +66,14 @@ export FLASHINFER_DISABLE_VERSION_CHECK=1
 VLLM_WHEEL_URL="https://wheels.vllm.ai/8189a15914ca48461acf106f126c58ef7e41c9ee/vllm-0.20.2rc1.dev112%2Bg8189a1591.cu129-cp38-abi3-manylinux_2_34_x86_64.whl"
 echo "--- :python: Installing vLLM (pinned wheel: ${VLLM_WHEEL_URL})"
 
+# --index-strategy unsafe-best-match is needed so uv considers PyPI for vLLM's
+# transitive deps (setuptools>=77 specifically — the PyTorch cu129 index only
+# carries setuptools<=70.2.0, and uv's default first-index would refuse to
+# look at PyPI for it). Safe here because vLLM itself is pinned by URL, so
+# resolver strategy can't influence which vLLM gets installed.
 "${UV_BIN}" pip install -p "${TEST_VENV_BIN}/python" -U "${VLLM_WHEEL_URL}" \
-    --extra-index-url "https://download.pytorch.org/whl/cu129"
+    --extra-index-url "https://download.pytorch.org/whl/cu129" \
+    --index-strategy unsafe-best-match
 
 
 "${DEFAULT_VENV_BIN}/python" -c 'import vllm; print(f"default venv vllm={vllm.__version__}")'
