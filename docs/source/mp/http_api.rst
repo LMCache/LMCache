@@ -56,10 +56,10 @@ All examples below assume the server is reachable at
 Endpoints
 ---------
 
-The table below groups the routes by purpose. Paths under ``/api/`` are
-the operational surface (health, status, cache control). Routes without
-the ``/api/`` prefix are inherited from the shared
-``internal_api_server`` package and kept at their original paths for
+The table below groups the routes by purpose. The operational surface
+(health, status, cache control) is exposed at top-level paths. Routes
+inherited from the shared
+``internal_api_server`` package are kept at their original paths for
 compatibility with the vLLM-embedded API server.
 
 .. list-table::
@@ -73,13 +73,13 @@ compatibility with the vLLM-embedded API server.
      - ``/``
      - Basic liveness ping.
    * - GET
-     - ``/api/healthcheck``
+     - ``/healthcheck``
      - K8s liveness/readiness probe.
    * - GET
-     - ``/api/status``
+     - ``/status``
      - Detailed engine status for inspection and debugging.
    * - POST
-     - ``/api/clear-cache``
+     - ``/clear-cache``
      - Force-clear all KV data in L1 (CPU) memory.
    * - GET
      - ``/api/quota``
@@ -136,7 +136,7 @@ compatibility with the vLLM-embedded API server.
 ~~~~~~~~~
 
 Basic liveness check. Returns a static payload indicating the HTTP server
-is running. Use ``/api/healthcheck`` instead for probes that also verify
+is running. Use ``/healthcheck`` instead for probes that also verify
 the cache engine is initialized.
 
 **Response** (``200 OK``):
@@ -154,8 +154,8 @@ the cache engine is initialized.
 
     curl -s http://localhost:8080/
 
-``GET /api/healthcheck``
-~~~~~~~~~~~~~~~~~~~~~~~~
+``GET /healthcheck``
+~~~~~~~~~~~~~~~~~~~~
 
 Health check endpoint suitable for Kubernetes liveness and readiness
 probes. A ``200`` response implies the HTTP server is alive **and** the
@@ -183,7 +183,7 @@ is not yet ready (still initializing, or failed to initialize).
 
 .. code-block:: bash
 
-    curl -s http://localhost:8080/api/healthcheck
+    curl -s http://localhost:8080/healthcheck
 
 **Kubernetes probe snippet:**
 
@@ -191,19 +191,19 @@ is not yet ready (still initializing, or failed to initialize).
 
     livenessProbe:
       httpGet:
-        path: /api/healthcheck
+        path: /healthcheck
         port: 8080
       initialDelaySeconds: 10
       periodSeconds: 10
     readinessProbe:
       httpGet:
-        path: /api/healthcheck
+        path: /healthcheck
         port: 8080
       initialDelaySeconds: 5
       periodSeconds: 5
 
-``GET /api/status``
-~~~~~~~~~~~~~~~~~~~
+``GET /status``
+~~~~~~~~~~~~~~~
 
 Returns a detailed snapshot of the MP engine's internal state: L1 cache,
 L2 adapters, registered GPU contexts, active sessions, and in-flight
@@ -261,10 +261,10 @@ been initialized:
 
 .. code-block:: bash
 
-    curl -s http://localhost:8080/api/status | jq
+    curl -s http://localhost:8080/status | jq
 
-``POST /api/clear-cache``
-~~~~~~~~~~~~~~~~~~~~~~~~~
+``POST /clear-cache``
+~~~~~~~~~~~~~~~~~~~~~
 
 Force-clears **all** KV cache data currently held in L1 (CPU) memory.
 
@@ -297,7 +297,7 @@ The request body is ignored.
 
 .. code-block:: bash
 
-    curl -s -X POST http://localhost:8080/api/clear-cache
+    curl -s -X POST http://localhost:8080/clear-cache
 
 .. _mp-http-quota-api:
 
