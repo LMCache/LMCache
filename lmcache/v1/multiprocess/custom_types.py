@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Any, cast
 import pickle
 import threading
 
@@ -70,7 +71,7 @@ class CudaIPCWrapper:
         # Permute any non-contiguous view (e.g. vLLM's NHD-over-HND) so the
         # shape/stride we encode across IPC reflects the physical layout.
         # Offset is preserved by the wrapper's storage_offset field.
-        tensor = attempt_permute_to_contiguous_view(tensor)
+        tensor = cast(torch.Tensor, attempt_permute_to_contiguous_view(tensor))
 
         storage = tensor.untyped_storage()
         handle = storage._share_cuda_()
@@ -371,20 +372,69 @@ class StoreBytesResult:
 
 
 @dataclass(frozen=True)
-class RetrieveBytesResult:
-    """Outcome of a bytes-level retrieve request submitted via the HTTP API.
+class KVBytesShard:
+    """One retrieved KV cache worker shard.
 
-    ``payload`` contains the bytes for the longest cached prefix in the
-    canonical KV_2LTD layout :math:`[2, L, hit\\_tokens, D]`. The remaining
-    tokens are not returned and the caller should treat them as cache
-    misses; ``hit_tokens`` and ``hit_chunks`` indicate the prefix length.
+    Attributes:
+        chunk_index: Zero-based token chunk index in the retrieved prefix.
+        worker_id: Tensor-parallel worker shard index within the chunk.
+        data: Raw bytes for the shard's ``MemoryObj``.
     """
 
-    payload: bytes
-    total_tokens: int
-    total_chunks: int
-    hit_tokens: int
-    hit_chunks: int
+    chunk_index: int
+    worker_id: int
+    data: bytes
+
+
+class RetrieveBytesResult:
+    """Lazy result of a bytes-level retrieve request.
+
+    The result describes the longest cached prefix and exposes shard bytes
+    through :meth:`iter_shards`. Callers must either consume
+    :meth:`iter_shards` to completion or call :meth:`close` to release read
+    locks held by the storage manager.
+
+    Args:
+        total_tokens: Whole-chunk token count represented by the request.
+        total_chunks: Whole-chunk count represented by the request.
+        hit_tokens: Whole-chunk token count available in cache.
+        hit_chunks: Whole-chunk count available in cache.
+        world_size: Tensor-parallel world size used by the stored shards.
+        per_shard_shape: Shape of each retrieved worker shard.
+        dtype: Dtype of each retrieved shard.
+        shard_iter_factory: Factory that yields retrieved shard bytes.
+        close_callback: Idempotent callback that releases unread locks.
+    """
+
+    def __init__(
+        self,
+        total_tokens: int,
+        total_chunks: int,
+        hit_tokens: int,
+        hit_chunks: int,
+        world_size: int,
+        per_shard_shape: tuple[int, int, int, int],
+        dtype: torch.dtype,
+        shard_iter_factory: Callable[[], Iterator[KVBytesShard]],
+        close_callback: Callable[[], None],
+    ) -> None:
+        self.total_tokens = total_tokens
+        self.total_chunks = total_chunks
+        self.hit_tokens = hit_tokens
+        self.hit_chunks = hit_chunks
+        self.world_size = world_size
+        self.per_shard_shape = per_shard_shape
+        self.dtype = dtype
+        self._shard_iter_factory = shard_iter_factory
+        self._close_callback = close_callback
+
+    def iter_shards(self) -> Iterator[KVBytesShard]:
+        """Yield retrieved worker shards and release locks when exhausted."""
+        yield from self._shard_iter_factory()
+
+    def close(self) -> None:
+        """Release read locks if the shard iterator was not consumed."""
+        self._close_callback()
 
 
 @dataclass(frozen=True)

@@ -315,22 +315,28 @@ The ``/api/kv/*`` endpoints expose bytes-level KV cache access for cache
 priming, debugging, and future editing workflows. They are not on the
 inference path; vLLM continues to use the ZMQ protocol.
 
-Payloads are **safetensors blobs** containing a single tensor named
-``"kv"`` with ``dtype=torch.uint8`` and shape ``[total_bytes]`` (a flat
-byte stream). The metadata dict carries ``{"format_version": "1"}``. The
-flat bytes correspond to the canonical ``KV_2LTD`` layout
-``[2, num_layers, num_tokens, hidden_dim]`` in row-major order, where
-``num_tokens`` is the complete-chunk prefix only, ``hidden_dim`` is the
-full unsharded hidden dimension, and the per-element ``dtype`` is the
-registered model's KV dtype (clients reinterpret on their side using
-``/api/status`` info).
+The recommended client interface is the Python SDK:
 
-The wire is intentionally ``uint8`` rather than the model dtype — this
-sidesteps fp8 / bfloat16 dtype-negotiation questions and matches
-LMCache's internal byte-addressed storage. Clients can use any
-safetensors implementation (``safetensors.torch.save`` /
-``safetensors.numpy.save``); the library is already a transitive LMCache
-dependency.
+.. code-block:: python
+
+    import lmcache.sdk as lmc_sdk
+
+    lmc_sdk.store("kv.pt", "http://localhost:8080")
+    lmc_sdk.retrieve(
+        "kv-hit.pt",
+        "http://localhost:8080",
+        model_name="meta-llama/Llama-3.1-8B-Instruct",
+        tokens=[1, 2, 3],
+    )
+
+The direct HTTP wire is a versioned binary frame stream implemented by
+``lmcache.v1.multiprocess.http_apis.kv_protocol``. V1 uses
+``Content-Type: application/x-lmcache-kv-stream; v=1`` and frame headers
+with ``version: 1``. Store requests send one manifest frame followed by
+ordered full-token chunk frames. Retrieve responses send one manifest
+frame followed by one worker-shard frame per cached ``MemoryObj``. The
+client assembles retrieve shards into the full
+``[2, num_layers, hit_tokens, hidden_dim]`` tensor.
 
 .. warning::
 
@@ -353,8 +359,10 @@ dependency.
 ``POST /api/kv/store``
 ^^^^^^^^^^^^^^^^^^^^^^
 
-Store KV cache bytes for a token sequence. The body is the safetensors
-blob described above; routing metadata is carried in headers.
+Store KV cache bytes for a token sequence. The body is a v1 frame stream:
+the first frame is ``store_manifest`` and all following frames are ordered
+``store_chunk`` payloads. Each chunk payload represents one complete token
+chunk with full unsharded hidden dimension.
 
 .. list-table::
    :header-rows: 1
@@ -363,19 +371,28 @@ blob described above; routing metadata is carried in headers.
    * - Header
      - Required
      - Description
-   * - ``X-LMCache-Model-Name``
-     - yes
-     - Registered model name. Must match a model in ``/api/status``.
-   * - ``X-LMCache-Tokens``
-     - yes
-     - Comma-separated token IDs covering the payload (whole chunks).
-   * - ``X-LMCache-Cache-Salt``
-     - no
-     - Per-namespace isolation salt (forwarded to ``ObjectKey.cache_salt``).
-       Use this to run parallel cache-priming experiments without collision.
    * - ``Content-Type``
-     - recommended
-     - ``application/x-lmcache-kv; v=1``.
+     - yes
+     - ``application/x-lmcache-kv-stream; v=1``.
+
+``store_manifest`` fields:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 25 75
+
+   * - Field
+     - Description
+   * - ``model_name``
+     - Registered model name. Must match a model in ``/api/status``.
+   * - ``tokens``
+     - Token IDs for the complete-token prefix being stored.
+   * - ``cache_salt``
+     - Per-namespace isolation salt.
+   * - ``shape``
+     - Full tensor shape ``[2, num_layers, total_tokens, hidden_dim]``.
+   * - ``dtype``
+     - Torch dtype string, for example ``torch.bfloat16``.
 
 **Response** (``200 OK``):
 
@@ -396,22 +413,40 @@ less than ``total_chunks`` under write conflicts or capacity pressure.
 ^^^^^^^^^^^^^^^^^^^^^^^^^
 
 Retrieve KV bytes for the longest cached prefix. The request body is
-JSON with ``model_name``, ``tokens``, and optional ``cache_salt``. A hit
-returns ``200`` with a safetensors body (same format as ``store``) and
-these headers: ``X-LMCache-Hit-Tokens``, ``X-LMCache-Hit-Chunks``,
-``X-LMCache-Total-Tokens``, and ``X-LMCache-Total-Chunks``. A miss
-returns ``404`` with the same metadata headers and an empty body.
+JSON with ``model_name``, ``tokens``, optional ``cache_salt``, and
+optional ``protocol_version`` (default ``1``):
+
+.. code-block:: json
+
+    {
+      "model_name": "meta-llama/Llama-3.1-8B-Instruct",
+      "tokens": [1, 2, 3],
+      "cache_salt": "",
+      "protocol_version": 1
+    }
+
+The response is ``200 OK`` with
+``Content-Type: application/x-lmcache-kv-stream; v=1``. The first frame is
+``retrieve_manifest`` and the remaining frames are ``retrieve_shard``
+payloads. A miss still returns ``200 OK``; the manifest reports
+``hit_chunks: 0`` and an empty full shape.
+
+``retrieve_manifest`` fields include ``total_tokens``, ``total_chunks``,
+``hit_tokens``, ``hit_chunks``, ``chunk_size``, ``world_size``, full hit
+``shape``, per-worker ``shard_shape``, and ``dtype``.
 
 ``POST /api/kv/lookup``
 ^^^^^^^^^^^^^^^^^^^^^^^
 
-Probe the cached-prefix length without moving payload bytes.
+Probe the cached-prefix length without moving payload bytes. The request
+body is the same JSON object used by retrieve.
 
 **Response** (``200 OK``):
 
 .. code-block:: json
 
     {
+      "protocol_version": 1,
       "total_tokens": 768,
       "total_chunks": 3,
       "hit_tokens": 512,

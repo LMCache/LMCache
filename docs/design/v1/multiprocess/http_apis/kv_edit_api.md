@@ -5,138 +5,227 @@
 
 ## Goal
 
-Expose three HTTP endpoints — `POST /api/kv/store`, `POST /api/kv/retrieve`,
-and a cheap `POST /api/kv/lookup` — on the LMCache MP server, so that an
-external developer can read and write KV cache bytes keyed by a token
-sequence. This unblocks cache priming, debugging, and future editing
-workflows by making `MemoryObj`s addressable from outside the inference
-path.
+Expose three HTTP endpoints - `POST /api/kv/store`,
+`POST /api/kv/retrieve`, and `POST /api/kv/lookup` - on the LMCache MP
+server so an external client can store, retrieve, and inspect KV cache
+bytes keyed by a token sequence.
 
-V1 ships the HTTP transport only. Editing semantics — fake token
-sequences, cache-salt namespacing, orchestration-layer version selection
-— are explicitly deferred (see §6).
+V1 keeps the server transport as HTTP. The client-facing interface added
+by this PR is the Python SDK (`lmcache.sdk`); a CLI can be layered on the
+same protocol later without changing the server contract.
 
-## 1. Plumbing
+## 1. Engine Surface
 
-We add three new methods to `MPCacheEngine` (in `multiprocess/server.py`,
-the class instance held at `app.state.engine`):
+The HTTP API uses two bytes-level `MPCacheEngine` methods:
 
-- `store_kv_bytes_by_tokens(tokens: list[int], payload: bytes, *, model_name: str) -> StoreBytesResult`
-- `retrieve_kv_bytes_by_tokens(tokens: list[int], *, model_name: str) -> RetrieveBytesResult`
-- `lookup_kv_bytes_by_tokens(tokens: list[int], *, model_name: str) -> LookupBytesResult`
+- `store_kv_bytes_by_tokens(...) -> StoreBytesResult`
+- `retrieve_kv_bytes_by_tokens(...) -> RetrieveBytesResult`
 
-These bypass the GPU connector entirely. They reuse the existing
-machinery `MPCacheEngine` already exposes as instance attributes:
-`self.token_hasher.compute_chunk_hashes` for chunking and key derivation;
-`self.storage_manager.allocate / put / get` for storage; and
-`self.gpu_context_meta` (mapping `instance_id` → `(model_name,
-world_size)`) for routing. The only new work is copying bytes into / out
-of `MemoryObj.byte_array` and looping over worker shards.
+There is no separate engine lookup method. The HTTP lookup endpoint calls
+`retrieve_kv_bytes_by_tokens`, reads only the prefix metadata, and closes
+the lazy result immediately. This keeps the new `MPCacheEngine` surface
+minimal while preserving a cheap public lookup route.
 
-Each method takes `model_name` and uses it to pick a matching registered
-GPU context — the layout, dtype, and `world_size` come from that context.
-Today only one model registers per server in practice, but the API and
-internal routing are written so that adding multi-model support later is
-purely a deployment / config change, with no method-signature breakage.
+Both methods bypass the GPU connector and reuse existing MP engine
+machinery:
 
-Layout: shards are `MemoryFormat.KV_2LTD` — `[2, num_layers, num_tokens, hidden_dim]`.
-Aggregation across the full TP group concatenates shards along the
-hidden dim (`D`), and chunks along the token dim (`T`). For MLA models,
-all TP workers already share one object per chunk (see
-`compute_extra_count` at `server.py:75`), so HTTP store / retrieve
-operate only on rank 0's shard for those models.
+- `token_hasher.compute_chunk_hashes` for chunking and key derivation.
+- `storage_manager.reserve_write`, `finish_write`, prefetch, and read-lock
+  APIs for storage.
+- `gpu_context_meta` and `gpu_contexts` to resolve the registered model
+  layout, dtype, and tensor-parallel `world_size`.
 
-We considered a CPU `GPUConnector` subclass and a ZMQ protocol op for
-this layer; the engine-method path was chosen for the smallest blast
-radius, lowest risk to the GPU path, and maximum reuse of code already
-present in `MPCacheEngine`.
+Layout: v1 supports one homogeneous KV layer group in `KV_2LTD` layout,
+`[2, num_layers, num_tokens, hidden_dim]`. The full hidden dimension is
+split across tensor-parallel workers along `D`. MLA models already share
+one object per chunk across TP workers, so the existing layout metadata is
+used to decide what is valid for the registered model.
 
-## 2. HTTP surface
+## 2. Streaming Behavior
 
-Three POST endpoints, served from a new
-`lmcache/v1/multiprocess/http_apis/kv_api.py`. POST is used throughout
-because token sequences are too large for URL parameters.
+### Store
 
-**`POST /api/kv/store`** takes `model_name`, `tokens`, and `kv_payload` in
-the request body and returns `{status, stored_tokens, stored_chunks}`.
+The client streams one full-token chunk at a time. Each chunk payload has
+shape `[2, num_layers, chunk_size, full_hidden_dim]` in row-major order
+and the registered model KV dtype.
 
-**`POST /api/kv/retrieve`** takes `model_name` and `tokens`, returns the
-binary body of whatever the engine had cached, with partial-hit metadata
-in `X-LMCache-Hit-Tokens`, `X-LMCache-Hit-Chunks`, and
-`X-LMCache-Total-Tokens` response headers. It returns 404 with an empty
-body if no chunks hit. Retrieve is **always non-destructive** and ignores
-the engine's `remove_after_retrieve` setting.
+The server validates the stream metadata once, then processes each chunk
+independently:
 
-**`POST /api/kv/lookup`** takes the same body as retrieve and returns
-`{hit_tokens, hit_chunks}` without moving payload bytes.
+1. Reserve the object keys for that chunk.
+2. Reinterpret the chunk bytes as a CPU tensor.
+3. Split along `D` into one shard per TP worker.
+4. Copy each shard directly into its reserved `MemoryObj`.
+5. Finish the write reservation for that chunk.
 
-All endpoints return 400 on `model_name` mismatch, 503 if the engine is
-not initialized, and (store only) 507 on quota exhaustion.
+The server never concatenates the full `[2, L, T, D]` request tensor.
 
-## 3. Wire format
+### Retrieve
 
-The payload is a **safetensors** blob containing a single tensor named
-`"kv"` with `dtype=torch.uint8` and shape `[total_bytes]` (a flat byte
-stream). The total byte count must equal
-`total_chunks * world_size * per_shard_bytes`, where `per_shard_bytes`
-is the product of the registered KV_2LTD per-shard shape multiplied by
-the model's KV-cache dtype itemsize. Server-side reinterpretation
-into `[2, L, T, D]` of the model dtype happens after decode.
+The engine returns a `RetrieveBytesResult` with prefix metadata plus a
+lazy iterator over `KVBytesShard` objects. The HTTP layer first sends a
+manifest frame, then sends one shard frame per cached `MemoryObj`.
 
-The safetensors metadata dict carries `{"format_version": "1"}` for
-forward-compat. The HTTP layer uses
-`Content-Type: application/x-lmcache-kv; v=1` to identify the wire.
+The client is responsible for assembling the returned shard frames into
+the full `[2, L, hit_tokens, full_hidden_dim]` tensor. This keeps memory
+pressure on the LMCache server bounded by a single stored shard payload
+during response generation.
 
-Why safetensors and uint8:
+Retrieve is non-destructive and ignores the engine's
+`remove_after_retrieve` setting. Callers must consume the shard iterator
+or call `RetrieveBytesResult.close()` so storage read locks are released.
 
-- **safetensors** is already a transitive LMCache dep
-  (`requirements/common.txt`), is the de-facto ML-community
-  serialization standard, and is safe (no pickle).
-- **uint8** sidesteps fp8/bfloat16 dtype questions on the wire. The
-  underlying `TensorMemoryObj.raw_data` is already `torch.uint8` —
-  the wire format mirrors that and lets the client reinterpret to the
-  model's dtype using `/api/status` info.
+### Lookup
 
-### v1 limitations (enforced)
+Lookup returns the same prefix metadata as retrieve but no payload. It is
+implemented by immediately closing the retrieve result after reading
+`total_tokens`, `total_chunks`, `hit_tokens`, and `hit_chunks`.
 
-The bytes API supports **only** the following two cases; anything else
-is rejected with `HTTP 400` (`ValueError` from the engine method) before
-any storage lock is acquired:
+## 3. Versioned Wire Protocol
 
-1. **Single KV layer group** — homogeneous attention only. Hybrid
-   attention (e.g. sliding-window mixed with full attention) publishes
-   multiple KV layer groups with possibly differing shapes and dtypes;
-   the v1 wire format has no per-group framing, so we reject up front.
-2. **`KV_2LTD` layout** — the per-shard tensor must be 4-D with
-   `[2, num_layers, num_tokens, hidden_dim]`. Other formats
-   (`KV_T2D`, `KV_MLA_FMT`, etc.) are not exposed by the bytes API in
-   v1.
+The wire protocol is isolated in
+`lmcache/v1/multiprocess/http_apis/kv_protocol.py`.
 
-Both rules are enforced by the `_get_single_group_layout` helper in
-`server.py`. Lifting either is future work (§6).
+V1 constants:
 
-## 4. Concurrency
+- `PROTOCOL_VERSION = 1`
+- `STREAM_MEDIA_TYPE = "application/x-lmcache-kv-stream; v=1"`
 
-Same model as `/api/clear-cache`: last-writer-wins on store, no
-transactional guarantees. A multi-chunk store interrupted mid-way may
-leave a partial new prefix in cache. This is acceptable for v1 and
-documented; the use cases this API enables (priming, debugging) tolerate
-it.
+Each binary frame is:
 
-## 5. Rollout
+```text
+uint32_be header_length
+uint64_be payload_length
+header_length bytes of UTF-8 JSON header
+payload_length bytes of binary payload
+```
 
-Single end-to-end PR: `MPCacheEngine` bytes methods, `kv_api.py` HTTP
-routes, and tests at both layers. If the diff turns out too large for
-review, split out the engine methods as a prior PR.
+Every header contains:
 
-## 6. Future work (not in this PR)
+- `version`: protocol version, currently `1`.
+- `type`: one of the frame type strings below.
+- `payload_length`: binary payload length repeated for validation.
 
-- Editing convention: fake token sequences, orchestration-layer
-  virtualization between original and edited caches, `cache_salt` exposed
-  as a request field.
-- Multi-model serving on a single MP server. The internal routing
-  already keys by `model_name`, so this is a deployment change rather
-  than an interface change.
-- Hybrid-attention payload format with per-layer shape headers.
-- Streaming uploads / downloads for very large payloads.
-- Auth on the mutating endpoints.
+Frame types:
+
+- `store_manifest`: first frame in a store request. Carries `model_name`,
+  `tokens`, `cache_salt`, full tensor `shape`, and `dtype`.
+- `store_chunk`: store payload frame. Carries `chunk_index` and one full
+  token chunk payload.
+- `retrieve_manifest`: first frame in a retrieve response. Carries prefix
+  metadata, chunk size, TP world size, full hit shape, shard shape, and
+  dtype.
+- `retrieve_shard`: retrieve payload frame. Carries `chunk_index`,
+  `worker_id`, and one worker shard payload.
+
+Protocol evolution should add new frame types or a new version in this
+module. HTTP handlers and SDK code should depend on the typed encode/decode
+helpers rather than open-coding frame JSON.
+
+## 4. HTTP Surface
+
+Three POST endpoints are served from
+`lmcache/v1/multiprocess/http_apis/kv_api.py`. POST is used because token
+sequences are too large for URL parameters.
+
+`POST /api/kv/store` consumes
+`Content-Type: application/x-lmcache-kv-stream; v=1`. The request body is
+one `store_manifest` frame followed by ordered `store_chunk` frames. The
+response is JSON:
+
+```json
+{
+  "status": "ok",
+  "total_tokens": 768,
+  "total_chunks": 3,
+  "stored_tokens": 768,
+  "stored_chunks": 3
+}
+```
+
+`stored_chunks` is the leading complete prefix that landed. It can be less
+than `total_chunks` under write conflicts or capacity pressure.
+
+`POST /api/kv/retrieve` consumes JSON:
+
+```json
+{
+  "model_name": "meta-llama/Llama-3.1-8B-Instruct",
+  "tokens": [1, 2, 3],
+  "cache_salt": "",
+  "protocol_version": 1
+}
+```
+
+It returns `Content-Type: application/x-lmcache-kv-stream; v=1` with one
+`retrieve_manifest` frame followed by zero or more `retrieve_shard` frames.
+A miss still returns `200 OK`; the manifest reports `hit_chunks: 0` and an
+empty full shape.
+
+`POST /api/kv/lookup` consumes the same JSON body as retrieve and returns
+JSON metadata without payload bytes:
+
+```json
+{
+  "protocol_version": 1,
+  "total_tokens": 768,
+  "total_chunks": 3,
+  "hit_tokens": 512,
+  "hit_chunks": 2
+}
+```
+
+All endpoints return `400` for unknown models, unsupported protocol
+versions, invalid metadata, or unsupported registered layouts, and `503`
+when the engine is not initialized.
+
+## 5. Client SDK
+
+This PR adds `lmcache.sdk` as the supported client interface:
+
+```python
+import lmcache.sdk as lmc_sdk
+
+lmc_sdk.store("kv.pt", "http://localhost:8080")
+lmc_sdk.retrieve(
+    "kv-hit.pt",
+    "http://localhost:8080",
+    model_name="meta-llama/Llama-3.1-8B-Instruct",
+    tokens=[1, 2, 3],
+)
+```
+
+The SDK owns file packaging and client-side assembly. It loads `.pt` or
+`.safetensors` files, streams store chunks to the server, decodes retrieve
+frames, concatenates returned worker shards into the full tensor, and saves
+the result.
+
+## 6. Concurrency
+
+Store uses chunk-scoped write reservations. A multi-chunk store interrupted
+mid-way may leave a partial new prefix in cache. This is acceptable for v1:
+the intended workflows are cache priming, debugging, and offline editing,
+which can tolerate prefix-granularity partial success.
+
+Retrieve holds read locks while the lazy shard iterator is active. The HTTP
+handler releases those locks when the stream finishes or is closed.
+
+## 7. V1 Limitations
+
+V1 rejects unsupported layouts before acquiring storage locks:
+
+1. Exactly one KV layer group is required. Hybrid attention with multiple
+   KV layer groups needs a future protocol with per-group framing.
+2. The registered layout must be `KV_2LTD`.
+3. Store input must cover complete token chunks. Partial trailing tokens are
+   ignored for keying and must not be present in the payload tensor.
+
+## 8. Future Work
+
+- CLI on top of the same SDK/protocol, for example
+  `lmcache kvcache store -i kv.pt --url http://localhost:8080`.
+- Editing conventions: fake token sequences, orchestration-layer
+  virtualization between original and edited caches, and version selection.
+- Hybrid-attention payload format with per-layer-group frame metadata.
+- Authentication and authorization for mutating endpoints.
+- Protocol v2 when a compatibility break is worth the migration cost.

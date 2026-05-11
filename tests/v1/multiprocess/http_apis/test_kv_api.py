@@ -1,29 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
-"""End-to-end tests for the bytes-level KV cache HTTP API.
-
-The tests exercise both layers in one file:
-
-- ``TestStoreRetrieveLookupBytes`` drives the ``MPCacheEngine``
-  ``*_bytes_by_tokens`` methods directly. ``MPCacheEngine`` is built
-  in-process with a small CPU L1 storage manager and fake registered GPU
-  contexts, so the tests do not require CUDA.
-- ``TestKVApiHTTP`` mounts ``kv_api.py`` on a FastAPI test client and
-  verifies the HTTP envelope, headers, error paths, and regression cases
-  through ``TestClient.post`` calls.
-
-Wire format invariant exercised by every round-trip test: the payload is
-canonical KV_2LTD ``[2, num_layers, num_tokens, hidden_dim]`` with
-all-TP-shards aggregated along the hidden dim and all chunks concatenated
-along the token dim.
-"""
+"""End-to-end tests for the chunk-streamed KV cache HTTP API."""
 
 # Standard
+from collections.abc import AsyncIterator
 from typing import cast
+import asyncio
 
 # Third Party
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from safetensors.torch import save as safetensors_save
 import pytest
 import torch
 
@@ -39,15 +24,24 @@ from lmcache.v1.distributed.config import (
     L1MemoryManagerConfig,
     StorageManagerConfig,
 )
-from lmcache.v1.multiprocess.custom_types import IPCCacheEngineKey
+from lmcache.v1.multiprocess.custom_types import IPCCacheEngineKey, RetrieveBytesResult
 from lmcache.v1.multiprocess.gpu_context import GPUCacheContext
 from lmcache.v1.multiprocess.http_apis.kv_api import router as kv_router
+from lmcache.v1.multiprocess.http_apis.kv_protocol import (
+    STREAM_MEDIA_TYPE,
+    StoreManifest,
+    decode_retrieve_manifest,
+    decode_retrieve_shard,
+    encode_store_chunk,
+    encode_store_manifest,
+    iter_decode_frames,
+)
 from lmcache.v1.multiprocess.server import MPCacheEngine
 
 CHUNK_SIZE = 16
 NUM_LAYERS = 2
 HIDDEN_DIM_PER_WORKER = 8
-DTYPE = torch.float32  # picked for byte-level comparison ergonomics
+DTYPE = torch.float32
 
 
 class _FakeKVLayerGroup:
@@ -112,13 +106,7 @@ def _layout_for(world_size: int) -> MemoryLayoutDesc:
 
 
 def _install_resolver(engine: MPCacheEngine, models: dict[str, int]) -> None:
-    """Register fake GPU contexts for models under test.
-
-    ``models`` maps model_name → world_size. All models share the same
-    per-shard shape so the aggregated full hidden dim equals
-    ``HIDDEN_DIM_PER_WORKER * world_size``.
-    """
-
+    """Register fake GPU contexts for models under test."""
     _register_fake_layouts(
         engine,
         {
@@ -140,33 +128,125 @@ def _register_fake_layouts(
         engine.gpu_context_meta[gpu_id] = (model_name, world_size)
 
 
-def _make_inner_uint8(num_chunks: int, world_size: int, seed: int = 0) -> torch.Tensor:
-    """Produce the deterministic 1-D ``uint8`` byte stream for ``num_chunks``."""
+def _make_tensor(num_chunks: int, world_size: int, seed: int = 0) -> torch.Tensor:
+    """Generate a deterministic canonical KV_2LTD tensor."""
     torch.manual_seed(seed)
-    full_hidden = HIDDEN_DIM_PER_WORKER * world_size
-    t = torch.randn(
-        (2, NUM_LAYERS, num_chunks * CHUNK_SIZE, full_hidden),
+    return torch.randn(
+        (
+            2,
+            NUM_LAYERS,
+            num_chunks * CHUNK_SIZE,
+            HIDDEN_DIM_PER_WORKER * world_size,
+        ),
         dtype=DTYPE,
     )
-    return t.contiguous().view(torch.uint8).reshape(-1)
 
 
-def _wrap_safetensors(flat_uint8: torch.Tensor) -> bytes:
-    """Wrap a flat ``uint8`` tensor in the wire-format safetensors envelope."""
-    return safetensors_save(
-        {"kv": flat_uint8.contiguous()},
-        metadata={"format_version": "1"},
-    )
-
-
-def _make_payload(num_chunks: int, world_size: int, seed: int = 0) -> bytes:
-    """Generate a deterministic safetensors-wrapped KV_2LTD payload."""
-    return _wrap_safetensors(_make_inner_uint8(num_chunks, world_size, seed))
+def _shape4(tensor: torch.Tensor) -> tuple[int, int, int, int]:
+    """Return a tensor shape typed as the KV_2LTD 4-D contract."""
+    return cast(tuple[int, int, int, int], tuple(tensor.shape))
 
 
 def _tokens_for(num_chunks: int, seed: int = 0) -> list[int]:
-    """Tokens covering ``num_chunks`` whole chunks (plus a stable trailing partial)."""
+    """Tokens covering ``num_chunks`` whole chunks plus a stable partial tail."""
     return list(range(seed, seed + num_chunks * CHUNK_SIZE + 3))
+
+
+def _chunk_payloads(tensor: torch.Tensor) -> list[bytes]:
+    """Split a canonical KV tensor into full-token-chunk byte payloads."""
+    return [
+        tensor[:, :, start : start + CHUNK_SIZE, :]
+        .contiguous()
+        .view(torch.uint8)
+        .numpy()
+        .tobytes()
+        for start in range(0, tensor.shape[2], CHUNK_SIZE)
+    ]
+
+
+async def _async_chunks(chunks: list[bytes]) -> AsyncIterator[bytes]:
+    """Yield byte chunks through the async interface used by the engine."""
+    for chunk in chunks:
+        yield chunk
+
+
+def _store_stream(
+    model_name: str,
+    tokens: list[int],
+    tensor: torch.Tensor,
+    *,
+    cache_salt: str = "",
+) -> bytes:
+    """Encode a complete HTTP store stream for ``tensor``."""
+    shape = tuple(int(dim) for dim in tensor.shape)
+    if len(shape) != 4:
+        raise ValueError("test tensor must be 4-D")
+    frames = [
+        encode_store_manifest(
+            StoreManifest(
+                model_name=model_name,
+                tokens=tokens,
+                cache_salt=cache_salt,
+                shape=(shape[0], shape[1], shape[2], shape[3]),
+                dtype=str(tensor.dtype),
+            )
+        )
+    ]
+    frames.extend(
+        encode_store_chunk(chunk_index, payload)
+        for chunk_index, payload in enumerate(_chunk_payloads(tensor))
+    )
+    return b"".join(frames)
+
+
+def _tensor_from_engine_result(result: RetrieveBytesResult) -> torch.Tensor:
+    """Assemble a retrieved tensor from the engine's public shard iterator."""
+    try:
+        if result.hit_chunks == 0:
+            return torch.empty((0,), dtype=result.dtype)
+        shard_shape = result.per_shard_shape
+        output = torch.empty(
+            (
+                shard_shape[0],
+                shard_shape[1],
+                result.hit_tokens,
+                shard_shape[3] * result.world_size,
+            ),
+            dtype=result.dtype,
+        )
+        for shard in result.iter_shards():
+            t_start = shard.chunk_index * CHUNK_SIZE
+            t_end = t_start + CHUNK_SIZE
+            d_start = shard.worker_id * shard_shape[3]
+            d_end = d_start + shard_shape[3]
+            shard_tensor = torch.frombuffer(
+                bytearray(shard.data),
+                dtype=result.dtype,
+            ).reshape(shard_shape)
+            output[:, :, t_start:t_end, d_start:d_end] = shard_tensor
+        return output
+    finally:
+        result.close()
+
+
+def _tensor_from_retrieve_stream(content: bytes) -> tuple[int, int, torch.Tensor]:
+    """Decode an HTTP retrieve stream into hit metadata and a tensor."""
+    frames = iter_decode_frames([content])
+    manifest = decode_retrieve_manifest(next(frames))
+    dtype = getattr(torch, manifest.dtype.removeprefix("torch."))
+    output = torch.empty(manifest.shape, dtype=dtype)
+    for frame in frames:
+        chunk_index, worker_id, payload = decode_retrieve_shard(frame)
+        shard = torch.frombuffer(
+            bytearray(payload),
+            dtype=dtype,
+        ).reshape(manifest.shard_shape)
+        t_start = chunk_index * manifest.chunk_size
+        t_end = t_start + manifest.chunk_size
+        d_start = worker_id * manifest.shard_shape[3]
+        d_end = d_start + manifest.shard_shape[3]
+        output[:, :, t_start:t_end, d_start:d_end] = shard
+    return manifest.hit_tokens, manifest.hit_chunks, output
 
 
 def _object_keys_for(
@@ -210,169 +290,127 @@ def _make_http_harness(
     """Build a FastAPI test client backed by a real CPU engine."""
     engine = _make_engine()
     _register_fake_layouts(engine, models)
-
     app = FastAPI()
     app.state.engine = engine
     app.include_router(kv_router)
     return TestClient(app), engine
 
 
-class TestStoreRetrieveLookupBytes:
-    """Direct ``MPCacheEngine`` round-trip tests for the bytes API."""
+class TestStoreRetrieveBytes:
+    """Direct ``MPCacheEngine`` round-trip tests for chunk streaming."""
 
     @pytest.mark.parametrize("world_size", [1, 2, 4])
     def test_round_trip_byte_identity(self, world_size: int) -> None:
-        """Store then retrieve must return byte-identical payload."""
         engine = _make_engine()
         _install_resolver(engine, {"m": world_size})
-
         tokens = _tokens_for(num_chunks=3)
-        payload = _make_payload(num_chunks=3, world_size=world_size, seed=1)
+        tensor = _make_tensor(num_chunks=3, world_size=world_size, seed=1)
 
-        store_result = engine.store_kv_bytes_by_tokens("m", tokens, payload)
-        assert store_result.total_chunks == 3
+        store_result = asyncio.run(
+            engine.store_kv_bytes_by_tokens(
+                "m",
+                tokens,
+                _async_chunks(_chunk_payloads(tensor)),
+                full_shape=_shape4(tensor),
+                dtype=tensor.dtype,
+            )
+        )
         assert store_result.stored_chunks == 3
-        assert store_result.stored_tokens == 3 * CHUNK_SIZE
 
         retrieve_result = engine.retrieve_kv_bytes_by_tokens("m", tokens)
         assert retrieve_result.hit_chunks == 3
-        assert retrieve_result.hit_tokens == 3 * CHUNK_SIZE
-        assert retrieve_result.payload == payload
+        assert torch.equal(_tensor_from_engine_result(retrieve_result), tensor)
 
     def test_partial_hit(self) -> None:
-        """Retrieve with a longer token sequence returns only the cached prefix."""
         engine = _make_engine()
         _install_resolver(engine, {"m": 1})
-
-        # Store 2 chunks worth, query 4 chunks worth — only the first 2 hit.
         store_tokens = _tokens_for(num_chunks=2)
-        store_payload = _make_payload(num_chunks=2, world_size=1, seed=2)
-        engine.store_kv_bytes_by_tokens("m", store_tokens, store_payload)
+        tensor = _make_tensor(num_chunks=2, world_size=1, seed=2)
+        asyncio.run(
+            engine.store_kv_bytes_by_tokens(
+                "m",
+                store_tokens,
+                _async_chunks(_chunk_payloads(tensor)),
+                full_shape=_shape4(tensor),
+                dtype=tensor.dtype,
+            )
+        )
 
-        # The query starts with the same 2 chunks of tokens, then extends.
         full_tokens = list(store_tokens[: 2 * CHUNK_SIZE]) + list(range(99_000, 99_032))
         result = engine.retrieve_kv_bytes_by_tokens("m", full_tokens)
         assert result.total_chunks == 4
         assert result.hit_chunks == 2
-        assert result.hit_tokens == 2 * CHUNK_SIZE
-        assert result.payload == store_payload
+        assert torch.equal(_tensor_from_engine_result(result), tensor)
 
     def test_retrieve_is_non_destructive(self) -> None:
-        """Two retrievals in a row both succeed; the cache is not consumed."""
         engine = _make_engine()
         _install_resolver(engine, {"m": 2})
-
         tokens = _tokens_for(num_chunks=2)
-        payload = _make_payload(num_chunks=2, world_size=2, seed=3)
-        engine.store_kv_bytes_by_tokens("m", tokens, payload)
+        tensor = _make_tensor(num_chunks=2, world_size=2, seed=3)
+        asyncio.run(
+            engine.store_kv_bytes_by_tokens(
+                "m",
+                tokens,
+                _async_chunks(_chunk_payloads(tensor)),
+                full_shape=_shape4(tensor),
+                dtype=tensor.dtype,
+            )
+        )
 
         first = engine.retrieve_kv_bytes_by_tokens("m", tokens)
         second = engine.retrieve_kv_bytes_by_tokens("m", tokens)
-        assert first.payload == payload
-        assert second.payload == payload
-        assert first.hit_chunks == 2
-        assert second.hit_chunks == 2
-
-    def test_lookup_matches_retrieve(self) -> None:
-        """``lookup_*`` reports the same hit count as ``retrieve_*``."""
-        engine = _make_engine()
-        _install_resolver(engine, {"m": 1})
-
-        tokens = _tokens_for(num_chunks=2)
-        payload = _make_payload(num_chunks=2, world_size=1, seed=4)
-        engine.store_kv_bytes_by_tokens("m", tokens, payload)
-
-        full_tokens = list(tokens[: 2 * CHUNK_SIZE]) + list(range(80_000, 80_032))
-        lookup = engine.lookup_kv_bytes_by_tokens("m", full_tokens)
-        assert lookup.total_chunks == 4
-        assert lookup.hit_chunks == 2
-
-        retrieve = engine.retrieve_kv_bytes_by_tokens("m", full_tokens)
-        assert retrieve.hit_chunks == lookup.hit_chunks
-
-    def test_multi_model_isolation(self) -> None:
-        """Storing under model A must not surface under model B."""
-        engine = _make_engine()
-        _install_resolver(engine, {"a": 1, "b": 1})
-
-        tokens = _tokens_for(num_chunks=2)
-        payload = _make_payload(num_chunks=2, world_size=1, seed=5)
-        engine.store_kv_bytes_by_tokens("a", tokens, payload)
-
-        # Same tokens, different model — should be a clean miss.
-        b_result = engine.retrieve_kv_bytes_by_tokens("b", tokens)
-        assert b_result.hit_chunks == 0
-        assert b_result.payload == b""
-
-        # Original model still hits.
-        a_result = engine.retrieve_kv_bytes_by_tokens("a", tokens)
-        assert a_result.payload == payload
+        assert torch.equal(_tensor_from_engine_result(first), tensor)
+        assert torch.equal(_tensor_from_engine_result(second), tensor)
 
     def test_unknown_model_raises(self) -> None:
-        """``KeyError`` propagates so the HTTP layer can map it to 400."""
         engine = _make_engine()
         _install_resolver(engine, {"m": 1})
+        tensor = _make_tensor(num_chunks=1, world_size=1)
         with pytest.raises(KeyError):
-            engine.store_kv_bytes_by_tokens("nope", _tokens_for(1), _make_payload(1, 1))
+            asyncio.run(
+                engine.store_kv_bytes_by_tokens(
+                    "nope",
+                    _tokens_for(1),
+                    _async_chunks(_chunk_payloads(tensor)),
+                    full_shape=_shape4(tensor),
+                    dtype=tensor.dtype,
+                )
+            )
         with pytest.raises(KeyError):
             engine.retrieve_kv_bytes_by_tokens("nope", _tokens_for(1))
-        with pytest.raises(KeyError):
-            engine.lookup_kv_bytes_by_tokens("nope", _tokens_for(1))
 
-    def test_payload_byte_count_mismatch_rejected(self) -> None:
-        """Store rejects payloads whose inner ``"kv"`` byte count is wrong."""
+    def test_payload_shape_mismatch_rejected(self) -> None:
         engine = _make_engine()
         _install_resolver(engine, {"m": 1})
-        tokens = _tokens_for(num_chunks=2)
-        # One byte short inside the safetensors envelope.
-        truncated = _wrap_safetensors(
-            _make_inner_uint8(num_chunks=2, world_size=1)[:-1]
-        )
-        with pytest.raises(ValueError, match="byte count"):
-            engine.store_kv_bytes_by_tokens("m", tokens, truncated)
-
-    def test_malformed_safetensors_rejected(self) -> None:
-        """Store rejects payloads that cannot be decoded as safetensors."""
-        engine = _make_engine()
-        _install_resolver(engine, {"m": 1})
-        tokens = _tokens_for(num_chunks=1)
-        with pytest.raises(ValueError, match="failed to decode safetensors"):
-            engine.store_kv_bytes_by_tokens("m", tokens, b"not safetensors")
-
-    def test_missing_kv_tensor_rejected(self) -> None:
-        """Store rejects safetensors blobs that lack the ``"kv"`` tensor."""
-        engine = _make_engine()
-        _install_resolver(engine, {"m": 1})
-        tokens = _tokens_for(num_chunks=1)
-        wrong = safetensors_save({"other": torch.zeros(8, dtype=torch.uint8)})
-        with pytest.raises(ValueError, match="missing required tensor"):
-            engine.store_kv_bytes_by_tokens("m", tokens, wrong)
-
-    def test_wrong_dtype_kv_tensor_rejected(self) -> None:
-        """Store rejects safetensors ``"kv"`` tensors with non-uint8 dtype."""
-        engine = _make_engine()
-        _install_resolver(engine, {"m": 1})
-        tokens = _tokens_for(num_chunks=1)
-        wrong = safetensors_save({"kv": torch.zeros(8, dtype=torch.float32)})
-        with pytest.raises(ValueError, match="must have dtype=torch.uint8"):
-            engine.store_kv_bytes_by_tokens("m", tokens, wrong)
+        tensor = _make_tensor(num_chunks=1, world_size=1)
+        with pytest.raises(ValueError, match="payload shape"):
+            asyncio.run(
+                engine.store_kv_bytes_by_tokens(
+                    "m",
+                    _tokens_for(1),
+                    _async_chunks(_chunk_payloads(tensor)),
+                    full_shape=(2, NUM_LAYERS, CHUNK_SIZE, 999),
+                    dtype=tensor.dtype,
+                )
+            )
 
     def test_no_complete_chunks_returns_zero(self) -> None:
-        """Token sequences shorter than one chunk produce empty results."""
         engine = _make_engine()
         _install_resolver(engine, {"m": 1})
-
-        # Below chunk_size — no whole chunks to hash.
         tokens = list(range(CHUNK_SIZE - 1))
-        store_result = engine.store_kv_bytes_by_tokens("m", tokens, b"")
-        assert store_result.stored_chunks == 0
-
+        result = asyncio.run(
+            engine.store_kv_bytes_by_tokens(
+                "m",
+                tokens,
+                _async_chunks([]),
+                full_shape=(2, NUM_LAYERS, 0, HIDDEN_DIM_PER_WORKER),
+                dtype=DTYPE,
+            )
+        )
+        assert result.stored_chunks == 0
         retrieve_result = engine.retrieve_kv_bytes_by_tokens("m", tokens)
         assert retrieve_result.hit_chunks == 0
-        assert retrieve_result.payload == b""
-
-        lookup_result = engine.lookup_kv_bytes_by_tokens("m", tokens)
-        assert lookup_result.hit_chunks == 0
+        retrieve_result.close()
 
 
 @pytest.fixture
@@ -400,78 +438,68 @@ class TestKVApiHTTP:
 
     def test_store_retrieve_round_trip(self, http_client: TestClient) -> None:
         tokens = _tokens_for(num_chunks=2)
-        payload = _make_payload(num_chunks=2, world_size=1, seed=10)
+        tensor = _make_tensor(num_chunks=2, world_size=1, seed=10)
 
         store = http_client.post(
             "/api/kv/store",
-            content=payload,
-            headers={
-                "X-LMCache-Model-Name": "m",
-                "X-LMCache-Tokens": ",".join(str(t) for t in tokens),
-                "Content-Type": "application/x-lmcache-kv; v=1",
-            },
+            content=_store_stream("m", tokens, tensor),
+            headers={"Content-Type": STREAM_MEDIA_TYPE},
         )
         assert store.status_code == 200, store.text
-        body = store.json()
-        assert body["status"] == "ok"
-        assert body["stored_chunks"] == 2
+        assert store.json()["stored_chunks"] == 2
 
         retrieve = http_client.post(
             "/api/kv/retrieve",
             json={"model_name": "m", "tokens": tokens},
         )
         assert retrieve.status_code == 200
-        assert retrieve.headers["X-LMCache-Hit-Tokens"] == str(2 * CHUNK_SIZE)
-        assert retrieve.headers["X-LMCache-Hit-Chunks"] == "2"
-        assert retrieve.headers["X-LMCache-Total-Chunks"] == "2"
-        assert retrieve.content == payload
+        hit_tokens, hit_chunks, retrieved = _tensor_from_retrieve_stream(
+            retrieve.content
+        )
+        assert hit_tokens == 2 * CHUNK_SIZE
+        assert hit_chunks == 2
+        assert torch.equal(retrieved, tensor)
 
-    def test_retrieve_miss_returns_404_with_headers(
-        self, http_client: TestClient
+    def test_retrieve_miss_returns_empty_manifest(
+        self,
+        http_client: TestClient,
     ) -> None:
-        # Nothing has been stored; retrieve must miss cleanly.
         tokens = _tokens_for(num_chunks=2, seed=999)
         retrieve = http_client.post(
             "/api/kv/retrieve",
             json={"model_name": "m", "tokens": tokens},
         )
-        assert retrieve.status_code == 404
-        assert retrieve.headers["X-LMCache-Hit-Tokens"] == "0"
-        assert retrieve.headers["X-LMCache-Total-Chunks"] == "2"
-        assert retrieve.content == b""
+        assert retrieve.status_code == 200
+        hit_tokens, hit_chunks, retrieved = _tensor_from_retrieve_stream(
+            retrieve.content
+        )
+        assert hit_tokens == 0
+        assert hit_chunks == 0
+        assert retrieved.numel() == 0
 
     def test_lookup_returns_hit_metadata(self, http_client: TestClient) -> None:
         tokens = _tokens_for(num_chunks=2, seed=20)
-        payload = _make_payload(num_chunks=2, world_size=1, seed=20)
+        tensor = _make_tensor(num_chunks=2, world_size=1, seed=20)
         http_client.post(
             "/api/kv/store",
-            content=payload,
-            headers={
-                "X-LMCache-Model-Name": "m",
-                "X-LMCache-Tokens": ",".join(str(t) for t in tokens),
-            },
+            content=_store_stream("m", tokens, tensor),
+            headers={"Content-Type": STREAM_MEDIA_TYPE},
         )
         lookup = http_client.post(
             "/api/kv/lookup",
             json={"model_name": "m", "tokens": tokens},
         )
         assert lookup.status_code == 200
-        body = lookup.json()
-        assert body["hit_chunks"] == 2
-        assert body["total_chunks"] == 2
+        assert lookup.json()["hit_chunks"] == 2
 
     def test_store_reports_only_leading_complete_chunks(
         self,
         http_harness: tuple[TestClient, MPCacheEngine],
     ) -> None:
-        """A sparse reservation success must not overstate the stored prefix."""
         client, engine = http_harness
         layout = _layout_for(world_size=1)
         tokens = _tokens_for(num_chunks=3)
         obj_keys = _object_keys_for(engine, "m", tokens, world_size=1)
-
-        # Pre-create chunk 1 and keep a read lock on it. An HTTP store of
-        # chunks 0..2 can update chunks 0 and 2, but chunk 1 is not writable.
         locked_middle_key = obj_keys[1]
         _store_empty_object(engine, locked_middle_key, layout)
         handle = engine.storage_manager.submit_prefetch_task(
@@ -483,20 +511,14 @@ class TestKVApiHTTP:
         assert engine.storage_manager.query_prefetch_status(handle) == 1
 
         try:
-            payload = _make_payload(num_chunks=3, world_size=1, seed=6)
+            tensor = _make_tensor(num_chunks=3, world_size=1, seed=6)
             store = client.post(
                 "/api/kv/store",
-                content=payload,
-                headers={
-                    "X-LMCache-Model-Name": "m",
-                    "X-LMCache-Tokens": ",".join(str(t) for t in tokens),
-                },
+                content=_store_stream("m", tokens, tensor),
+                headers={"Content-Type": STREAM_MEDIA_TYPE},
             )
             assert store.status_code == 200, store.text
-            body = store.json()
-            assert body["total_chunks"] == 3
-            assert body["stored_chunks"] == 1
-            assert body["stored_tokens"] == CHUNK_SIZE
+            assert store.json()["stored_chunks"] == 1
         finally:
             engine.storage_manager.finish_read_prefetched([locked_middle_key])
 
@@ -504,7 +526,6 @@ class TestKVApiHTTP:
         self,
         http_harness: tuple[TestClient, MPCacheEngine],
     ) -> None:
-        """A sub-chunk TP hit that returns 404 must release its read lock."""
         client, engine = http_harness
         layout = _layout_for(world_size=2)
         tokens = _tokens_for(num_chunks=1)
@@ -515,8 +536,9 @@ class TestKVApiHTTP:
             "/api/kv/retrieve",
             json={"model_name": "other", "tokens": tokens},
         )
-        assert retrieve.status_code == 404
-        assert retrieve.content == b""
+        assert retrieve.status_code == 200
+        hit_tokens, _, _ = _tensor_from_retrieve_stream(retrieve.content)
+        assert hit_tokens == 0
 
         reserved = engine.storage_manager.reserve_write(
             [partial_key],
@@ -530,20 +552,15 @@ class TestKVApiHTTP:
         self,
         http_harness: tuple[TestClient, MPCacheEngine],
     ) -> None:
-        """A partial next chunk must be unlocked even when an earlier chunk hits."""
         client, engine = http_harness
         layout = _layout_for(world_size=2)
         tokens = _tokens_for(num_chunks=2)
         chunk0_tokens = tokens[:CHUNK_SIZE]
-        chunk0_payload = _make_payload(num_chunks=1, world_size=2, seed=7)
-
+        chunk0_tensor = _make_tensor(num_chunks=1, world_size=2, seed=7)
         store = client.post(
             "/api/kv/store",
-            content=chunk0_payload,
-            headers={
-                "X-LMCache-Model-Name": "other",
-                "X-LMCache-Tokens": ",".join(str(t) for t in chunk0_tokens),
-            },
+            content=_store_stream("other", chunk0_tokens, chunk0_tensor),
+            headers={"Content-Type": STREAM_MEDIA_TYPE},
         )
         assert store.status_code == 200, store.text
 
@@ -556,8 +573,9 @@ class TestKVApiHTTP:
             json={"model_name": "other", "tokens": tokens},
         )
         assert retrieve.status_code == 200
-        assert retrieve.headers["X-LMCache-Hit-Chunks"] == "1"
-        assert retrieve.content == chunk0_payload
+        _, hit_chunks, retrieved = _tensor_from_retrieve_stream(retrieve.content)
+        assert hit_chunks == 1
+        assert torch.equal(retrieved, chunk0_tensor)
 
         reserved = engine.storage_manager.reserve_write(
             [partial_next_chunk_key],
@@ -568,7 +586,6 @@ class TestKVApiHTTP:
         engine.storage_manager.finish_write([partial_next_chunk_key])
 
     def test_multi_group_store_rejection_does_not_leave_write_lock(self) -> None:
-        """Unsupported multi-group layouts should fail before reserving writes."""
         single_group_layout = _layout_for(world_size=1)
         multi_group_layout = MemoryLayoutDesc(
             shapes=[
@@ -578,16 +595,13 @@ class TestKVApiHTTP:
             dtypes=[DTYPE, DTYPE],
         )
         client, engine = _make_http_harness({"m": (multi_group_layout, 1)})
-
         tokens = _tokens_for(num_chunks=1)
-        payload = _make_payload(num_chunks=1, world_size=1, seed=8)
+        tensor = _make_tensor(num_chunks=1, world_size=1, seed=8)
+
         rejected = client.post(
             "/api/kv/store",
-            content=payload,
-            headers={
-                "X-LMCache-Model-Name": "m",
-                "X-LMCache-Tokens": ",".join(str(t) for t in tokens),
-            },
+            content=_store_stream("m", tokens, tensor),
+            headers={"Content-Type": STREAM_MEDIA_TYPE},
         )
         assert rejected.status_code == 400
         assert "single KV layer group" in rejected.text
@@ -595,14 +609,10 @@ class TestKVApiHTTP:
         _register_fake_layouts(engine, {"m": (single_group_layout, 1)})
         stored = client.post(
             "/api/kv/store",
-            content=payload,
-            headers={
-                "X-LMCache-Model-Name": "m",
-                "X-LMCache-Tokens": ",".join(str(t) for t in tokens),
-            },
+            content=_store_stream("m", tokens, tensor),
+            headers={"Content-Type": STREAM_MEDIA_TYPE},
         )
         assert stored.status_code == 200, stored.text
-        assert stored.json()["stored_chunks"] == 1
 
     def test_unknown_model_returns_400(self, http_client: TestClient) -> None:
         retrieve = http_client.post(
@@ -629,7 +639,6 @@ class TestKVApiHTTP:
         assert "cache_salt" in r.text
 
     def test_engine_not_initialized_returns_503(self) -> None:
-        """If the engine is missing from app.state, the route returns 503."""
         app = FastAPI()
         app.include_router(kv_router)
         client = TestClient(app)
@@ -639,29 +648,42 @@ class TestKVApiHTTP:
         )
         assert r.status_code == 503
 
-    def test_store_missing_headers_returns_400(self, http_client: TestClient) -> None:
-        """Missing model_name / tokens headers must cleanly reject."""
-        # No headers at all.
+    def test_store_missing_manifest_returns_400(self, http_client: TestClient) -> None:
         r = http_client.post("/api/kv/store", content=b"")
         assert r.status_code == 400
 
-        # Has model name but no tokens header.
+    def test_store_out_of_order_chunk_returns_400(
+        self,
+        http_client: TestClient,
+    ) -> None:
+        tokens = _tokens_for(num_chunks=1)
+        tensor = _make_tensor(num_chunks=1, world_size=1)
+        shape = tuple(int(dim) for dim in tensor.shape)
+        body = b"".join(
+            [
+                encode_store_manifest(
+                    StoreManifest(
+                        model_name="m",
+                        tokens=tokens,
+                        cache_salt="",
+                        shape=(shape[0], shape[1], shape[2], shape[3]),
+                        dtype=str(tensor.dtype),
+                    )
+                ),
+                encode_store_chunk(1, _chunk_payloads(tensor)[0]),
+            ]
+        )
         r = http_client.post(
             "/api/kv/store",
-            content=b"",
-            headers={"X-LMCache-Model-Name": "m"},
+            content=body,
+            headers={"Content-Type": STREAM_MEDIA_TYPE},
         )
         assert r.status_code == 400
+        assert "expected store chunk" in r.text
 
-    def test_store_malformed_tokens_header_returns_400(
-        self, http_client: TestClient
+    def test_store_malformed_stream_returns_400(
+        self,
+        http_client: TestClient,
     ) -> None:
-        r = http_client.post(
-            "/api/kv/store",
-            content=b"",
-            headers={
-                "X-LMCache-Model-Name": "m",
-                "X-LMCache-Tokens": "1,abc,3",
-            },
-        )
+        r = http_client.post("/api/kv/store", content=b"not a kv stream")
         assert r.status_code == 400
