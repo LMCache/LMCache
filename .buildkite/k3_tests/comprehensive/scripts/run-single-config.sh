@@ -135,12 +135,12 @@ if [[ "$feature_type" == "pd" ]]; then
     # Prefiller needs UCX_TLS for NIXL transport
     prefiller_docker=$(echo "$prefiller_docker" | yq -y ". + {\"env\": (.env + [\"UCX_TLS=cuda_ipc,cuda_copy,tcp\"])}")
     start_single_server "$prefiller_docker" "$prefiller_vllm" "$PORT1" "0" \
-        "/tmp/build_${BUILD_ID}_${CFG_NAME%.yaml}_prefiller.log"
+        "${REPO_ROOT}/${CFG_NAME%.yaml}-prefiller.log"
 
     echo "--- Starting decoder on port $PORT2 (GPU 1)"
     decoder_docker=$(echo "$decoder_docker" | yq -y ". + {\"env\": (.env + [\"UCX_TLS=cuda_ipc,cuda_copy,tcp\"])}")
     start_single_server "$decoder_docker" "$decoder_vllm" "$PORT2" "1" \
-        "/tmp/build_${BUILD_ID}_${CFG_NAME%.yaml}_decoder.log"
+        "${REPO_ROOT}/${CFG_NAME%.yaml}-decoder.log"
 
     # Start disagg proxy
     echo "--- Starting PD proxy on port $PORT"
@@ -151,7 +151,7 @@ if [[ "$feature_type" == "pd" ]]; then
         --decoder-init-port "$init" \
         --decoder-alloc-port "$alloc" \
         --proxy-port "$proxy" \
-        > "/tmp/build_${BUILD_ID}_${CFG_NAME%.yaml}_proxy.log" 2>&1 &
+        > "${REPO_ROOT}/${CFG_NAME%.yaml}-proxy.log" 2>&1 &
     PIDS+=($!)
     sleep 10
 

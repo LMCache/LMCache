@@ -94,7 +94,7 @@ def safe_get(data: dict, *keys, default=None):  # type: ignore[type-arg]
 
 
 class KVCacheDescriber:
-    """Builds the ``describe kvcache`` output from a ``/api/status`` response.
+    """Builds the ``describe kvcache`` output from a ``/status`` response.
 
     Each ``add_*`` method populates one logical section. The orchestrating
     :meth:`describe` calls them in order and emits the result.  Adding a
@@ -301,7 +301,7 @@ class DescribeCommand(BaseCommand):
     def _describe_kvcache(self, args: argparse.Namespace) -> None:
         base_url = normalize_url(args.url)
         try:
-            data = fetch_json(f"{base_url}/api/status")
+            data = fetch_json(f"{base_url}/status")
         except DescribeError as exc:
             print(str(exc), file=sys.stderr)
             sys.exit(1)

@@ -861,7 +861,12 @@ class LMCacheEngine:
             if self.remove_after_retrieve and not self._is_passive():
                 assert self.storage_manager is not None
                 self.storage_manager.remove(key, self.retrieve_locations)
-            if not self.async_loading:
+                # Sync PDBackend.remove() does NOT call ref_count_down() internally
+                # (unlike async PD and other backends), so we must call it manually.
+                # See pd_backend.py line 605 TODO comment.
+                if self._is_sync_pd_backend():
+                    memory_obj.ref_count_down()
+            elif not self.async_loading:
                 memory_obj.ref_count_down()
 
         retrieved_tokens = torch.sum(ret_mask)
@@ -1689,22 +1694,28 @@ class LMCacheEngine:
         if last_failed_block_start is not None:
             ret_mask[last_failed_block_start:] = False
 
-            for key, memory_obj, _, end in reordered_chunks:
-                if end > last_failed_block_start:
-                    logger.debug(
-                        "ref_count_down for %s as it is truncated by "
-                        "last_failed_block_start %d",
-                        key,
-                        last_failed_block_start,
-                    )
+            kept_chunks: List[ProcessedChunk] = []
+            for key, memory_obj, start, end in reordered_chunks:
+                if end <= last_failed_block_start:
+                    kept_chunks.append((key, memory_obj, start, end))
+                else:
                     tot_kv_size -= memory_obj.get_size()
-                    memory_obj.ref_count_down()
-
-            reordered_chunks = [
-                (key, memory_obj, start, end)
-                for key, memory_obj, start, end in reordered_chunks
-                if end <= last_failed_block_start
-            ]
+                    # This chunk will not be used. If the engine is configured
+                    # to remove-after-retrieve, the caller would normally call
+                    # remove (which frees the block), but since we are dropping
+                    # these chunks here, we must free them ourselves to avoid
+                    # leaking PD buffer pool memory.
+                    if self.remove_after_retrieve:
+                        assert self.storage_manager is not None
+                        self.storage_manager.remove(key, self.retrieve_locations)
+                        # Sync PDBackend.remove() does NOT call ref_count_down()
+                        # internally (unlike async PD and other backends), so we
+                        # must call it manually. See pd_backend.py line 605.
+                        if self._is_sync_pd_backend():
+                            memory_obj.ref_count_down()
+                    else:
+                        memory_obj.ref_count_down()
+            reordered_chunks = kept_chunks
         return reordered_chunks, tot_kv_size
 
     def _broadcast_or_receive_memory_objs(
@@ -1794,6 +1805,14 @@ class LMCacheEngine:
         the data directly, but from the "active" worker (i.e., rank 0 in MLA)
         """
         return self.save_only_first_rank and not self.metadata.is_first_rank()
+
+    def _is_sync_pd_backend(self) -> bool:
+        """Check if the PD backend is the sync variant.
+
+        :return: True when PD is enabled and ``pd_backend_mode`` is ``"sync"``.
+        :rtype: bool
+        """
+        return self.config.enable_pd and self.config.pd_backend_mode == "sync"
 
     def _get_slot_mapping_list(
         self,

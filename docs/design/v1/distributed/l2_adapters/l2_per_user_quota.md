@@ -217,22 +217,22 @@ policy — no special "disable" flag is needed.
 ### 4. HTTP API for Quota Management
 
 The existing FastAPI HTTP server (`lmcache/v1/multiprocess/http_server.py`)
-already serves `/api/healthcheck`, `/api/status`, and `/api/clear-cache`.
+already serves `/healthcheck`, `/status`, and `/clear-cache`.
 Add quota management endpoints:
 
 ```
-PUT    /api/quota/{cache_salt}          Set/update quota for a user
-GET    /api/quota/{cache_salt}          Get quota and current usage for a user
-DELETE /api/quota/{cache_salt}          Remove quota (user's data evicted next cycle)
-GET    /api/quota                    List all quotas and per-user usage
+PUT    /quota/{cache_salt}          Set/update quota for a user
+GET    /quota/{cache_salt}          Get quota and current usage for a user
+DELETE /quota/{cache_salt}          Remove quota (user's data evicted next cycle)
+GET    /quota                    List all quotas and per-user usage
 ```
 
 **`_default` sentinel:** Empty strings cannot be URL path parameters. Use
 `_default` as the `cache_salt` in the URL to refer to the `cache_salt=""`
 namespace (anonymous / un-isolated traffic). For example,
-`PUT /api/quota/_default` sets the quota for `cache_salt=""`.
+`PUT /quota/_default` sets the quota for `cache_salt=""`.
 
-**`PUT /api/quota/{cache_salt}`** — Set or update a user's quota.
+**`PUT /quota/{cache_salt}`** — Set or update a user's quota.
 `limit_gb` is required.
 
 ```json
@@ -243,7 +243,7 @@ namespace (anonymous / un-isolated traffic). For example,
 {"cache_salt": "alice", "limit_gb": 2.0, "status": "ok"}
 ```
 
-**`GET /api/quota/{cache_salt}`** — Get quota and current usage.
+**`GET /quota/{cache_salt}`** — Get quota and current usage.
 
 ```json
 // Response
@@ -255,7 +255,7 @@ namespace (anonymous / un-isolated traffic). For example,
 }
 ```
 
-**`DELETE /api/quota/{cache_salt}`** — Remove quota entry. The user's cached
+**`DELETE /quota/{cache_salt}`** — Remove quota entry. The user's cached
 data will be evicted at the next eviction cycle (effective limit becomes 0).
 
 ```json
@@ -263,7 +263,7 @@ data will be evicted at the next eviction cycle (effective limit becomes 0).
 {"cache_salt": "alice", "status": "removed"}
 ```
 
-**`GET /api/quota`** — List all registered quotas with per-user usage.
+**`GET /quota`** — List all registered quotas with per-user usage.
 
 ```json
 // Response
@@ -710,11 +710,11 @@ curl -X POST http://vllm:8000/v1/chat/completions \
   -d '{"model": "llama-3-8b", "messages": [...], "cache_salt": "alice"}'
 
 # Manage quotas at runtime
-curl -X PUT http://localhost:8000/api/quota/alice \
+curl -X PUT http://localhost:8000/quota/alice \
   -H "Content-Type: application/json" -d '{"limit_gb": 2.0}'
-curl http://localhost:8000/api/quota/alice
-curl -X DELETE http://localhost:8000/api/quota/alice
-curl http://localhost:8000/api/quota
+curl http://localhost:8000/quota/alice
+curl -X DELETE http://localhost:8000/quota/alice
+curl http://localhost:8000/quota
 ```
 
 ## Behavioral Notes
