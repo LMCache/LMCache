@@ -361,7 +361,7 @@ def init_observability(
         bus.register_subscriber(L0L1ThroughputSubscriber(sample_rate=sample_rate))
         bus.register_subscriber(L2MetricsSubscriber())
         bus.register_subscriber(L2FailureMetricsSubscriber())
-        bus.register_subscriber(L2ThroughputSubscriber(sample_rate=sample_rate))
+        bus.register_subscriber(L2ThroughputSubscriber())
         bus.register_subscriber(LookupMetricsSubscriber())
         bus.register_subscriber(SMMetricsSubscriber())
         bus.register_subscriber(SMLifecycleSubscriber(sample_rate=sample_rate))
