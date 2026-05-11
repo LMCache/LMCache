@@ -3,6 +3,7 @@
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Generator, Optional, Union
+import math
 import os
 
 # Third Party
@@ -85,6 +86,7 @@ class DisaggSpec:
     receiver_alloc_port: int
     is_last_prefill: bool = False
     num_transferred_tokens: int = 0
+    total_chunks: int = 0
     receiver_query_port: Optional[list[int]] = None
 
 
@@ -412,6 +414,12 @@ class ReqMeta:
                 load_spec.vllm_cached_tokens,
                 tracker.req_id,
             )
+
+        # For disagg requests, compute total_chunks for sender admission control.
+        if tracker.disagg_spec is not None and tracker.disagg_spec.total_chunks == 0:
+            # Only compute once (on first batch)
+            total_chunks_for_req = math.ceil(tracker.prompt_len / lmcache_chunk_size)
+            tracker.disagg_spec.total_chunks = total_chunks_for_req
 
         # Note: We keep load_spec even when can_load=False to pass metrics to worker
         return ReqMeta(
@@ -1766,11 +1774,18 @@ class LMCacheConnectorV1Impl:
             self._layerwise_save_storers.pop(request.request_id, None)
 
         # Cleanup if request was aborted
-        if request.status == RequestStatus.FINISHED_ABORTED and self.async_loading:
-            # Cancel any ongoing async lookup and prefetch tasks on workers
-            lookup_id = request.request_id
-            assert self.lookup_client is not None
-            self.lookup_client.cancel_lookup(lookup_id)  # type: ignore[attr-defined]
+        if request.status == RequestStatus.FINISHED_ABORTED:
+            # Notify storage backends of aborted requests
+            assert self.lmcache_engine is not None
+            sm = self.lmcache_engine.storage_manager
+            if sm is not None:
+                sm.cancel_request(request.request_id)
+
+            if self.async_loading:
+                # Cancel any ongoing async lookup and prefetch tasks on workers
+                lookup_id = request.request_id
+                assert self.lookup_client is not None
+                self.lookup_client.cancel_lookup(lookup_id)  # type: ignore[attr-defined]
 
         params = (
             request.kv_transfer_params
