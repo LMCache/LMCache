@@ -177,8 +177,10 @@ class RawBlockL2AdapterConfig(L2AdapterConfigBase):
         use_uring_cmd = bool(d.get("use_uring_cmd", False))
         max_data_transfer_size = int(d.get("max_data_transfer_size", 0))
 
-        if block_align <= 0:
-            raise ValueError("block_align must be > 0")
+        if block_align <= 0 or (block_align & (block_align - 1)) != 0:
+            raise ValueError(
+                f"block_align must be a positive power of 2, got {block_align}"
+            )
         if slot_bytes % block_align != 0:
             raise ValueError("slot_bytes must be a multiple of block_align")
         if header_bytes % block_align != 0:
