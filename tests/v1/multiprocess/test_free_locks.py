@@ -228,6 +228,7 @@ def test_adapter_free_lookup_locks_key_matches_lookup():
     adapter._heartbeats = {}
     adapter._heartbeat_lock = threading.Lock()
     adapter._heartbeat_interval = 5.0
+    adapter._mq_timeout = 30.0
     adapter._executor = ThreadPoolExecutor(max_workers=1)
 
     mock_client = MagicMock(spec=MessageQueueClient)
