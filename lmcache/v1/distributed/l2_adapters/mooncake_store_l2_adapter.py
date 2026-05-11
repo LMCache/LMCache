@@ -71,8 +71,10 @@ class MooncakeStoreL2AdapterConfig(L2AdapterConfigBase):
         per_op_workers: dict[str, int] | None = None,
     ):
         super().__init__()
-        self.num_workers = self._validate_num_workers(num_workers)
-        self.per_op_workers = self._validate_per_op_workers(per_op_workers)
+        self.num_workers = L2AdapterConfigBase._validate_num_workers(num_workers)
+        self.per_op_workers = L2AdapterConfigBase._validate_per_op_workers(
+            per_op_workers
+        )
         self.setup_config: dict[str, str] = dict(setup_config)
 
     @classmethod
@@ -95,20 +97,7 @@ class MooncakeStoreL2AdapterConfig(L2AdapterConfigBase):
         """
         num_workers = cast(int, d.get("num_workers", 4))  # validated in __init__
 
-        per_op_workers: dict[str, int] | None = None
-        raw = d.get("per_op_workers")
-        if raw is not None:
-            if not isinstance(raw, dict):
-                raise ValueError("per_op_workers must be a dict")
-            per_op_workers = {}
-            for k, v in raw.items():
-                # bool is a subclass of int, so explicitly reject it.
-                if isinstance(v, bool) or not isinstance(v, int):
-                    raise ValueError(
-                        f"per_op_workers[{k!r}] must be an integer, "
-                        f"got {type(v).__name__}"
-                    )
-                per_op_workers[str(k)] = v
+        per_op_workers = L2AdapterConfigBase._parse_per_op_workers_from_dict(d)
         # Everything except LMCache-only keys is
         # forwarded to mooncake as str values.
         setup: dict[str, str] = {}
@@ -123,38 +112,6 @@ class MooncakeStoreL2AdapterConfig(L2AdapterConfigBase):
             num_workers=num_workers,
             per_op_workers=per_op_workers,
         )
-
-    @staticmethod
-    def _validate_num_workers(raw: object) -> int:
-        """Validate and return a positive integer worker count.
-
-        Raises:
-            ValueError: If ``raw`` is not a positive integer.
-        """
-        # bool is a subclass of int, so isinstance(True, int) is True.
-        # Explicitly reject bool to prevent True/False from being accepted.
-        if isinstance(raw, bool) or not isinstance(raw, int) or raw <= 0:
-            raise ValueError("num_workers must be a positive integer")
-        return raw
-
-    @staticmethod
-    def _validate_per_op_workers(
-        per_op_workers: dict[str, int] | None,
-    ) -> dict[str, int] | None:
-        """Validate per-operation worker counts (``None`` is a no-op).
-
-        Raises:
-            ValueError: If any worker count is not a positive integer.
-        """
-        if per_op_workers is None:
-            return None
-        for key, value in per_op_workers.items():
-            # bool is a subclass of int, so isinstance(True, int) is True.
-            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
-                raise ValueError(
-                    f"per_op_workers[{key!r}] must be a positive integer, got {value!r}"
-                )
-        return per_op_workers
 
     @classmethod
     def help(cls) -> str:
