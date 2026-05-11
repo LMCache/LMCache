@@ -5,6 +5,7 @@
 #include "mem_kernels.cuh"
 #include <ATen/ATen.h>
 #include <ATen/cuda/CUDAContext.h>
+#include <algorithm>
 #ifdef USE_ROCM
   #include <hip/hip_fp8.h>
 #else
@@ -1073,7 +1074,10 @@ void lmcache_memcpy_async(uintptr_t dest, uintptr_t src, size_t nbytes,
 
     size_t aligned_area_end =
         ((offset + host_buffer_offset) & ~mask) + host_buffer_alignments;
-    size_t real_end = min(host_buffer_offset + nbytes, aligned_area_end);
+    // Use std::min<size_t> so HIP's overload set cannot silently narrow
+    // these values to int and produce a garbage length past the 2 GB mark.
+    size_t real_end =
+        std::min<size_t>(host_buffer_offset + nbytes, aligned_area_end);
     size_t max_nbytes = real_end - offset - host_buffer_offset;
 
     CHECK_CUDA_CALL(cudaMemcpyAsync(reinterpret_cast<void*>(current_dest),

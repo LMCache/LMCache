@@ -1,5 +1,7 @@
 # Common project dependencies
 -r common.txt
+# Vendor-specific runtime deps (cupy, nixl) baked into install_requires
+-r cuda_core.txt
 
 # Dependencies for NVIDIA GPUs
 ray >= 2.9

@@ -306,6 +306,20 @@ class StorageBackendInterface(metaclass=abc.ABCMeta):
         """
         raise NotImplementedError
 
+    def cancel_request(self, req_id: str) -> None:
+        """
+        Cancel an in-flight or pending request.
+
+        This method is used by backends that track per-request state
+        (e.g., PDBackendAsync for disaggregation). For backends that
+        do not track request state, this method is a no-op.
+
+        :param str req_id: The request identifier to cancel.
+        :return: None
+        """
+        # Default implementation is no-op
+        return
+
 
 class AllocatorBackendInterface(StorageBackendInterface):
     """

@@ -135,9 +135,16 @@ def CreateStorageBackends(
 
     if config.enable_pd and "PDBackend" not in _skip:
         # First Party
-        from lmcache.v1.storage_backend.pd_backend import PDBackend
+        if config.pd_backend_mode == "async":
+            # First Party
+            from lmcache.v1.storage_backend.pd_backend_async import PDBackendAsync
 
-        storage_backends["PDBackend"] = PDBackend(config, metadata)
+            storage_backends["PDBackend"] = PDBackendAsync(config, metadata)
+        else:
+            # First Party
+            from lmcache.v1.storage_backend.pd_backend import PDBackend
+
+            storage_backends["PDBackend"] = PDBackend(config, metadata)
 
     # TODO(Jiayi): The hierarchy is fixed for now
     # NOTE(Jiayi): The local_cpu backend is always created because

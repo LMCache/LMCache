@@ -10,10 +10,11 @@ import torch
 # First Party
 from lmcache.v1.memory_management import PinMemoryAllocator
 
-pytest.importorskip(
-    "lmcache.c_ops",
-    reason="TODO: require non CUDA implementations for CUDA enhanced functions",
-)
+if not torch.cuda.is_available():
+    pytest.skip(
+        "CUDA is not available, skipping the test",
+        allow_module_level=True,
+    )
 
 # First Party
 if torch.cuda.is_available():

@@ -52,6 +52,51 @@ Source: ``lmcache/v1/multiprocess/config.py``
        ``default`` uses MPCacheEngine; ``blend`` uses BlendEngineV2
        for cross-request KV reuse.
        Choices: ``default``, ``blend``.
+   * - ``--runtime-plugin-locations``
+     - ``[]``
+     - Zero or more paths to runtime plugin scripts or directories to
+       launch alongside the server. Plugins are spawned by
+       ``MPRuntimePluginLauncher`` and receive the full server config
+       via the ``LMCACHE_RUNTIME_PLUGIN_CONFIG`` environment variable.
+   * - ``--runtime-plugin-config``
+     - ``"{}"``
+     - JSON string of extra key-value config forwarded to runtime
+       plugins via ``LMCACHE_RUNTIME_PLUGIN_EXTRA_CONFIG``. Example:
+       ``'{"plugin.frontend.heartbeat_url": "http://localhost:5000/heartbeat"}'``.
+
+Lookup Hash Logging
+-------------------
+
+Source: ``lmcache/v1/mp_observability/subscribers/logging/lookup_hash.py``
+
+When enabled, the server publishes chunk hashes computed during ``lookup()``
+as ``MP_LOOKUP`` events on the EventBus.  The
+``LookupHashLoggingSubscriber`` writes these to rotating JSONL files for
+offline analysis.  Disabled by default.  These arguments are part of the
+Observability group.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 30 15 55
+
+   * - Argument
+     - Default
+     - Description
+   * - ``--lookup-hash-log-dir``
+     - ``""`` (disabled)
+     - Directory to write lookup hash JSONL files.
+       An empty string disables logging.
+   * - ``--lookup-hash-log-rotation-interval``
+     - ``21600`` (6 h)
+     - Time interval in seconds before rotating to a new log file.
+   * - ``--lookup-hash-log-rotation-max-size``
+     - ``104857600`` (100 MB)
+     - Max file size in bytes before rotating even if the time
+       interval has not elapsed.
+   * - ``--lookup-hash-log-max-files``
+     - ``100``
+     - Max number of log files to keep.  Oldest files are deleted
+       when this limit is exceeded.
 
 HTTP Frontend
 -------------
@@ -135,9 +180,16 @@ Source: ``lmcache/v1/distributed/config.py``
    * - ``--eviction-policy``
      - *required*
      - Eviction policy.
-       Choices: ``LRU``, ``noop``.
+       Choices: ``LRU``, ``IsolatedLRU``, ``noop``.
        Use ``noop`` for buffer-only mode where L1 acts as a pure
        write buffer (data is deleted from L1 after L2 store).
+       ``IsolatedLRU`` maintains one LRU list per ``cache_salt``
+       and requires per-``cache_salt`` quotas to be configured at
+       runtime via the ``/api/quota`` HTTP endpoints
+       (see :ref:`mp-http-quota-api`); a ``cache_salt`` with no
+       registered quota has an effective limit of ``0`` bytes,
+       so its data is evicted at the next eviction cycle
+       (allowlist semantics).
    * - ``--eviction-trigger-watermark``
      - ``0.8``
      - Memory usage ratio (0.0--1.0) that triggers eviction.
@@ -170,6 +222,10 @@ Source: ``lmcache/v1/distributed/config.py``
      - L2 prefetch policy.  Determines which adapter loads each key
        when multiple adapters have it.
        The ``default`` policy picks the first adapter (lowest index).
+       Prefetched keys are temporary (deleted after the reader finishes).
+       The ``retain`` policy uses the same load plan but keeps
+       prefetched keys permanently in L1.
+       Choices: ``default``, ``retain``.
    * - ``--l2-prefetch-max-in-flight``
      - ``8``
      - Maximum number of concurrent prefetch (L2 load) requests.
@@ -185,14 +241,16 @@ L2 adapters are configured via repeatable ``--l2-adapter <JSON>`` arguments.
 Each JSON object must include a ``"type"`` field that selects the adapter type.
 The order of ``--l2-adapter`` arguments determines the adapter order (cascade).
 
-Registered adapter types: ``nixl_store``, ``fs``, ``mock``.
+Registered adapter types: ``nixl_store``, ``nixl_store_dynamic``, ``fs``,
+``fs_native``, ``mock``, ``mooncake_store``, ``s3``, ``resp``, ``plugin``,
+``native_plugin``, ``raw_block``, ``dax``.
 
 ``nixl_store`` -- NIXL-based persistent storage
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Fields:
 
-- ``backend`` *(required)*: One of ``POSIX``, ``GDS``, ``GDS_MT``, ``HF3FS``, ``OBJ``.
+- ``backend`` *(required)*: One of ``POSIX``, ``GDS``, ``GDS_MT``, ``HF3FS``, ``OBJ``, ``AZURE_BLOB``.
 - ``backend_params`` *(required for file-based backends)*: Dict of string
   key-value pairs.  File-based backends (``GDS``, ``GDS_MT``, ``POSIX``,
   ``HF3FS``) require ``file_path`` and ``use_direct_io``.
@@ -216,6 +274,10 @@ Examples:
 
     # OBJ backend (object store -- no file_path needed)
     --l2-adapter '{"type": "nixl_store", "backend": "OBJ", "backend_params": {}, "pool_size": 32}'
+
+    # AZURE_BLOB backend
+    --l2-adapter '{"type": "nixl_store", "backend": "AZURE_BLOB", "backend_params": {"account_url": "https://<account_name>.blob.core.windows.net", "container_name": "<container_name>"}, "pool_size": 32}'
+
 
 ``fs`` -- File-system backed storage
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -252,6 +314,34 @@ Example:
 .. code-block:: bash
 
     --l2-adapter '{"type": "mock", "max_size_gb": 256, "mock_bandwidth_gb": 10}'
+
+``s3`` -- S3-compatible object store
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+S3-backed L2 adapter using the AWS CRT (Common Runtime) for high-throughput
+transfers to AWS S3 or any S3-compatible endpoint. See
+:doc:`l2_storage` for details.
+
+Fields:
+
+- ``s3_endpoint`` *(required)*: Bucket URL, either ``"s3://<bucket>"`` or
+  the bare host form.
+- ``s3_region`` *(required)*: AWS region string.
+- ``s3_num_io_threads`` *(optional, default ``64``)*: CRT I/O threads.
+- ``s3_prefer_http2`` *(optional, default ``true``)*: Negotiate HTTP/2 via ALPN.
+- ``s3_enable_s3express`` *(optional, default ``false``)*: Enable S3 Express signing.
+- ``disable_tls`` *(optional, default ``false``)*: Bypass TLS (for
+  non-AWS HTTP endpoints).
+- ``aws_access_key_id`` / ``aws_secret_access_key`` *(optional)*:
+  Static credentials; omit to use the default credential provider chain.
+- ``max_capacity_gb`` *(optional, default ``0.0``)*: Aggregate capacity
+  used by ``get_usage()``. A value of ``0`` disables aggregate eviction.
+
+Example:
+
+.. code-block:: bash
+
+    --l2-adapter '{"type": "s3", "s3_endpoint": "s3://my-bucket", "s3_region": "us-west-2"}'
 
 Multiple adapters (cascade)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -299,6 +389,12 @@ logging, tracing).
    * - ``--prometheus-port``
      - ``9090``
      - Port for the Prometheus ``/metrics`` endpoint.
+   * - ``--service-instance-id``
+     - *(unset, default UUID v4)*
+     - Identifier for this MP server instance, attached as the OTel
+       Resource attribute ``service.instance.id`` on every metric and
+       span. When the flag is not passed, defaults to a random UUID v4.
+       Pass ``--service-instance-id=""`` to force an empty value.
 
 vLLM Client Configuration
 --------------------------
@@ -341,6 +437,10 @@ Full Example
         --max-gpu-workers 2 \
         --hash-algorithm blake3 \
         --engine-type default \
+        --lookup-hash-log-dir /data/lmcache/lookup_hashes \
+        --lookup-hash-log-rotation-interval 21600 \
+        --lookup-hash-log-rotation-max-size 104857600 \
+        --lookup-hash-log-max-files 100 \
         --l1-size-gb 100 \
         --l1-use-lazy \
         --l1-init-size-gb 20 \
@@ -355,6 +455,6 @@ Full Example
         --l2-prefetch-max-in-flight 8 \
         --l2-adapter '{"type": "nixl_store", "backend": "POSIX", "backend_params": {"file_path": "/data/lmcache/l2", "use_direct_io": "false"}, "pool_size": 64}' \
         --prometheus-port 9090 \
-        --prometheus-log-interval 10 \
-        --enable-telemetry \
-        --telemetry-processor '{"type": "logging", "log_level": "DEBUG"}'
+        --metrics-sample-rate 0.01 \
+        --enable-tracing \
+        --otlp-endpoint http://localhost:4317
