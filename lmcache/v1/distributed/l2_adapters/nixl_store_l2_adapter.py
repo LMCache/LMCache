@@ -158,7 +158,7 @@ class NixlStorageAgent:
         Args:
             device: Device type of the L1 memory buffer (e.g. "cpu", "cuda").
             backend: Nixl storage backend to use. One of: GDS, GDS_MT, POSIX,
-                HF3FS (file-based) or OBJ (object-based).
+                HF3FS (file-based) or OBJ, AZURE_BLOB (object-based).
             backend_params: Backend-specific parameters. File-based backends
                 require "file_path" and "use_direct_io" keys.
             pool_size: Number of storage descriptor slots to pre-allocate.
@@ -200,7 +200,7 @@ class NixlStorageAgent:
                 use_direct_io=str(self.backend_params["use_direct_io"]).lower()
                 == "true",
             )
-        elif self.backend in ["OBJ"]:
+        elif self.backend in ["OBJ", "AZURE_BLOB"]:
             self.pool = NixlObjPool(num_total_objs=self.pool_size)
             self.init_storage_handlers_object(
                 page_size=l1_memory_desc.align_bytes,
@@ -902,6 +902,7 @@ _VALID_NIXL_BACKENDS = (
     "POSIX",
     "HF3FS",
     "OBJ",
+    "AZURE_BLOB",
 )
 _FILE_BACKENDS = ("GDS", "GDS_MT", "POSIX", "HF3FS")
 
@@ -912,7 +913,7 @@ class NixlStoreL2AdapterConfig(L2AdapterConfigBase):
 
     Fields:
     - backend: Nixl storage backend
-      (GDS, GDS_MT, POSIX, HF3FS, OBJ).
+      (GDS, GDS_MT, POSIX, HF3FS, OBJ, AZURE_BLOB).
     - backend_params: Backend-specific parameters as a
       dict of string key-value pairs. For file-based
       backends (GDS, GDS_MT, POSIX, HF3FS), must include

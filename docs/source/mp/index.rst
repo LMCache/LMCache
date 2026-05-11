@@ -41,8 +41,8 @@ LMCache ships three server entry points:
    * - Entry Point
      - Description
    * - ``lmcache server``
-     - **Recommended.** ZMQ + FastAPI HTTP frontend (adds ``/api/healthcheck``
-       for K8s probes, ``/api/clear-cache``, ``/api/status`` — see
+     - **Recommended.** ZMQ + FastAPI HTTP frontend (adds ``/healthcheck``
+       for K8s probes, ``/clear-cache``, ``/status`` — see
        :doc:`http_api`). Use ``--engine-type blend`` to enable BlendEngineV2
        for cross-request KV reuse.
    * - ``python3 -m lmcache.v1.multiprocess.server``

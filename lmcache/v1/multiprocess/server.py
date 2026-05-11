@@ -235,6 +235,14 @@ class MPCacheEngine:
             layout_hints: See :class:`LayoutHints`.  Forwarded to
                 :class:`GPUCacheContext` for GPU KV format detection.
         """
+        if instance_id in self.gpu_contexts:
+            logger.warning(
+                "Instance %s's KV cache is already registered, "
+                "skipping the new registration",
+                instance_id,
+            )
+            return
+
         gpu_context = GPUCacheContext(
             kv_caches,
             self.chunk_size,
