@@ -21,8 +21,6 @@ Implementation:
   - ``(end_ts - start_ts)`` spans submit -> complete and therefore
     includes adapter queue, network, and disk time — not just transfer.
     The histogram is "bytes / end-to-end latency", not raw transfer rate.
-  - Sampling decision is made at SUBMITTED time; unsampled tasks leave
-    zero state.
 """
 
 # Future
@@ -30,7 +28,6 @@ from __future__ import annotations
 
 # Standard
 from typing import Any
-import random
 
 # Third Party
 from opentelemetry import metrics
@@ -41,25 +38,12 @@ from lmcache.v1.mp_observability.event_bus import EventCallback, EventSubscriber
 
 
 class L2ThroughputSubscriber(EventSubscriber):
-    """Records L1↔L2 throughput by correlating SUBMITTED→COMPLETED pairs.
+    """Records L1↔L2 throughput by correlating SUBMITTED→COMPLETED pairs."""
 
-    Parameters:
-        sample_rate: Fraction of tasks to track (0, 1.0].  Default 0.01
-            (1%), matching other lifecycle subscribers.
-    """
-
-    def __init__(self, sample_rate: float = 0.01) -> None:
-        assert 0 < sample_rate <= 1.0, (
-            f"sample_rate must be in (0, 1.0], got {sample_rate}"
-        )
-        self._sample_rate = sample_rate
-
-        # (adapter_index, task_id) -> (t_start, total_bytes).  Populated
-        # only for sampled store tasks; bytes are read from SUBMITTED and
-        # retrieved at COMPLETED time.
+    def __init__(self) -> None:
+        # (adapter_index, task_id) -> (t_start, total_bytes).
         self._pending_store: dict[tuple[int, int], tuple[float, int]] = {}
-        # (request_id, adapter_index) -> (t_start, total_bytes).  Populated
-        # only for sampled load tasks.
+        # (request_id, adapter_index) -> (t_start, total_bytes).
         self._pending_load: dict[tuple[int, int], tuple[float, int]] = {}
 
         meter = metrics.get_meter("lmcache_mp.perf")
@@ -67,7 +51,7 @@ class L2ThroughputSubscriber(EventSubscriber):
             "lmcache_mp.l2_store_throughput_gbs",
             description=(
                 "Histogram of L1->L2 store throughput in GB/s, measured "
-                "per sampled task as total_bytes / (completed_ts - "
+                "per task as total_bytes / (completed_ts - "
                 "submitted_ts).  Spans adapter queue + network/disk I/O, "
                 "so this is end-to-end latency-based throughput."
             ),
@@ -77,7 +61,7 @@ class L2ThroughputSubscriber(EventSubscriber):
             "lmcache_mp.l2_load_throughput_gbs",
             description=(
                 "Histogram of L2->L1 load throughput in GB/s, measured "
-                "per sampled (request, adapter) pair as total_bytes / "
+                "per (request, adapter) pair as total_bytes / "
                 "(completed_ts - submitted_ts).  Spans adapter queue + "
                 "network/disk I/O."
             ),
@@ -97,8 +81,6 @@ class L2ThroughputSubscriber(EventSubscriber):
     # -- Store path (L1->L2) -----------------------------------------------
 
     def _on_store_submitted(self, event: Event) -> None:
-        if random.random() >= self._sample_rate:
-            return
         key = self._store_key(event)
         if key is not None:
             total_bytes = int(event.metadata.get("total_bytes", 0))
@@ -118,8 +100,6 @@ class L2ThroughputSubscriber(EventSubscriber):
     # -- Load path (L2->L1) ------------------------------------------------
 
     def _on_load_submitted(self, event: Event) -> None:
-        if random.random() >= self._sample_rate:
-            return
         key = self._load_key(event)
         if key is not None:
             total_bytes = int(event.metadata.get("total_bytes", 0))
@@ -173,7 +153,7 @@ class L2ThroughputSubscriber(EventSubscriber):
     ) -> None:
         pending_entry = pending.pop(correlation_key, None)
         if pending_entry is None:
-            return  # task wasn't sampled
+            return  # no matching SUBMITTED event;
         t_start, total_bytes = pending_entry
 
         if total_bytes <= 0:
