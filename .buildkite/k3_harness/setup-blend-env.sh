@@ -53,9 +53,13 @@ TEST_VENV_BIN="/workspace/.venv/bin"
 # When flashinfer and flashinfer-cubin resolve to different patch versions, skip strict check.
 export FLASHINFER_DISABLE_VERSION_CHECK=1
 
+# vLLM resolution: cu129 channel is the primary index so uv picks the
+# cu129-tagged nightly (CUDA-12 build) over PyPI's final release (CUDA-13 build),
+# which the container's CUDA-12 runtime can't load (libcudart.so.13 missing).
 "${UV_BIN}" pip install -p "${TEST_VENV_BIN}/python" -U vllm --pre \
-    --extra-index-url "https://wheels.vllm.ai/nightly/cu129" \
+    --index-url       "https://wheels.vllm.ai/nightly/cu129" \
     --extra-index-url "https://download.pytorch.org/whl/cu129" \
+    --extra-index-url "https://pypi.org/simple" \
     --index-strategy unsafe-best-match
 
 
