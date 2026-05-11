@@ -563,6 +563,10 @@ class StorageManager:
         """
         Callback function when all prefetch tasks
         (i.e., prefetching from all backends for the entire request) are done.
+
+        :param int keys_per_chunk: Number of storage keys per logical chunk
+            (``num_layers`` for layerwise mode, ``1`` otherwise). Used to
+            convert each tier's per-key result count back to chunk units.
         """
         assert self.async_lookup_server is not None
         self.event_manager.update_event_status(
@@ -694,11 +698,13 @@ class StorageManager:
         # units, while raw key indexing into `keys` is in *key* units.
         # When keys_per_chunk == 1 these are identical; when layerwise is
         # on, each chunk corresponds to num_layers keys.
-        assert keys_per_chunk >= 1
-        assert len(keys) % keys_per_chunk == 0, (
-            f"len(keys)={len(keys)} is not a multiple of "
-            f"keys_per_chunk={keys_per_chunk}"
-        )
+        if keys_per_chunk < 1:
+            raise ValueError(f"keys_per_chunk must be >= 1, got {keys_per_chunk}")
+        if len(keys) % keys_per_chunk != 0:
+            raise ValueError(
+                f"len(keys)={len(keys)} is not a multiple of "
+                f"keys_per_chunk={keys_per_chunk}"
+            )
         num_total_chunks = len(keys) // keys_per_chunk
         num_total_hit_chunks = 0
         # cum_chunk_lengths_total: A copy of the original cumulative chunk lengths
@@ -716,13 +722,23 @@ class StorageManager:
         for backend_name, backend in self.get_active_storage_backends(
             search_range=search_range
         ):
-            num_hit_keys = await backend.batched_async_contains(lookup_id, keys, pin)
+            num_hit_keys_raw = await backend.batched_async_contains(
+                lookup_id, keys, pin
+            )
             # Round down to a whole-chunk boundary. If a backend has only
             # some of a chunk's per-layer keys (e.g., partial eviction),
             # we treat the chunk as a miss to keep the chunk-level
             # invariant required by the prefix-match retrieval pattern.
-            num_hit_chunks = num_hit_keys // keys_per_chunk
+            num_hit_chunks = num_hit_keys_raw // keys_per_chunk
             num_hit_keys = num_hit_chunks * keys_per_chunk
+
+            # `pin=True` pins every matching key inside batched_async_contains.
+            # The rounded-off tail (keys[num_hit_keys:num_hit_keys_raw]) is
+            # dropped from backend_keys and never retrieved, so release those
+            # pins here to avoid leaking refcount budget.
+            if pin and num_hit_keys < num_hit_keys_raw:
+                for k in keys[num_hit_keys:num_hit_keys_raw]:
+                    backend.unpin(k)
 
             if num_hit_chunks == 0:
                 continue
