@@ -90,19 +90,61 @@ Rules:
 
 ## Persistence and Recovery
 
-`RawBlockCore` keeps the existing metadata checkpoint model:
+`RawBlockCore` checkpoints its in-memory state into a fixed metadata region at
+the head of the device. The model is:
 
-- metadata region reserved on the same device
-- periodic checkpointing
-- optional checkpoint load on startup
-- optional verification on load
-- recovery by loading the latest durable checkpoint and rebuilding the in-memory
-  index
-
-The on-device format is intentionally unchanged by the MP adapter work.
+- metadata region reserved on the same device, sized by `meta_total_bytes`
+- periodic checkpointing from a background thread, plus on-`close` flush
+- optional checkpoint load on startup (`load_checkpoint_on_init`)
+- optional per-slot header verification on load (`meta_verify_on_load`)
+- recovery rebuilds the in-memory index from the latest durable base plus any
+  durable delta records that follow it
 
 Recovered keys are exposed to the shared L2 eviction policy on adapter startup,
 so reclaimed slots come from global L2 eviction or explicit `delete()` calls.
+
+### On-device checkpoint format
+
+The metadata region is split into two equal-size mirrors. Within each mirror::
+
+    [ header (one block) ][ payload (round_up to block_align) ][ delta tail ]
+
+The delta tail starts implicitly at the block-aligned end of the base payload
+and runs to the mirror's end. There is no separate delta region.
+
+- Base header (`_META_HEADER_STRUCT`, 32 B): magic, version, monotonic seq,
+  payload length, and CRC32 over the payload. The two mirrors are read on
+  startup and the higher-seq valid one wins, giving a torn-write-safe ping-pong
+  flip.
+- Delta record header (`_DELTA_RECORD_HEADER_STRUCT`, 52 B): magic `LMCD`,
+  record version, parent `base_seq`, parent `base_crc`, monotonic
+  `delta_seq`, `prev_record_crc`, payload length and CRC32, op count, flags,
+  total blocks, reserved. Each record is block-aligned and binds itself to its
+  base via both `base_seq` *and* `base_crc`, so a stale tail surviving a mirror
+  flip is rejected even when the seq number happens to collide.
+  `prev_record_crc` chains records together and is anchored at `base_crc` for
+  the first record, catching tail bytes that look valid in isolation.
+- Compaction is a mirror flip: write a fresh full base into the inactive
+  mirror, zero the new mirror's tail head so it is unambiguously empty, then
+  commit the new header. A torn compaction leaves the previous active mirror
+  untouched as the durable winner.
+- Compaction triggers: tail full, oversized record, more than
+  `meta_full_checkpoint_max_deltas` deltas accumulated, or more than
+  `meta_full_checkpoint_interval_sec` since the last full base.
+- Backwards compatibility: a disk written by older code that has no delta
+  records reads naturally as "zero deltas applied" -- the tail bytes do not
+  carry the `LMCD` magic, replay stops on the first record, and the loaded
+  state matches the base alone.
+
+### Replay
+
+On open, the active mirror is selected by valid header with the higher
+`base_seq`. Its base payload is decoded into the in-memory index, then the
+delta tail is walked record-by-record. Replay stops at the first record that
+fails any check (bad magic, mismatched `base_seq` or `base_crc`, broken hash
+chain, non-monotonic `delta_seq`, oversized payload, CRC mismatch, or read
+error); everything earlier is durable and applied, everything after is treated
+as torn or stale.
 
 ## Configuration
 
@@ -122,6 +164,8 @@ The MP adapter is configured through `--l2-adapter` JSON:
   "meta_version": 1,
   "meta_checkpoint_interval_sec": 60,
   "meta_enable_periodic": true,
+  "meta_full_checkpoint_interval_sec": 600,
+  "meta_full_checkpoint_max_deltas": 1024,
   "load_checkpoint_on_init": true,
   "meta_verify_on_load": true,
   "num_store_workers": 2,
@@ -140,6 +184,11 @@ Important validation rules:
   of loading the latest on-device metadata checkpoint
 - with `use_odirect=true`, MP L1 alignment must satisfy
   `l1_align_bytes >= block_align`
+- `meta_full_checkpoint_max_deltas` bounds worst-case replay cost; raising it
+  reduces compaction frequency at the cost of more delta records to apply on
+  recovery
+- `meta_full_checkpoint_interval_sec` bounds worst-case staleness of the base
+  payload independent of mutation rate
 
 ## Relationship to Non-MP Mode
 

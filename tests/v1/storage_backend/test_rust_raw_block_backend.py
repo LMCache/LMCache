@@ -1134,6 +1134,147 @@ def test_rust_raw_block_backend_device_checkpoint_roundtrip(
 @pytest.mark.skipif(
     not _has_ext(), reason="lmcache_rust_raw_block_io extension not installed"
 )
+def test_rust_raw_block_backend_incremental_multi_key_recovery(
+    memory_allocator, loop_in_thread
+):
+    """End-to-end: incremental checkpoint recovers multi-key state with
+    real Rust raw-block IO.
+
+    Stores several keys across multiple checkpoint forms (full base + delta
+    records), then restarts the backend. Both the metadata index and the
+    on-disk payload bytes must match what was written.
+    """
+    with tempfile.TemporaryDirectory() as td:
+        dev_path = os.path.join(td, "dev.bin")
+        with open(dev_path, "wb") as f:
+            f.truncate(64 * 1024 * 1024)
+
+        base_cfg = LMCacheEngineConfig.from_defaults(
+            chunk_size=256,
+            local_cpu=True,
+            max_local_cpu_size=0.1,
+            lmcache_instance_id="test_rust_raw_block_multi_key_recovery",
+        )
+        base_cfg.extra_config = {
+            "rust_raw_block.device_path": dev_path,
+            "rust_raw_block.block_align": 4096,
+            "rust_raw_block.header_bytes": 4096,
+            "rust_raw_block.meta_total_bytes": 4 * 1024 * 1024,
+            "rust_raw_block.meta_enable_periodic": False,
+            # Loose enough thresholds to keep all checkpoints below as deltas.
+            "rust_raw_block.meta_full_checkpoint_max_deltas": 1024,
+        }
+        metadata = LMCacheMetadata(
+            model_name="test_model",
+            world_size=1,
+            local_world_size=1,
+            worker_id=0,
+            local_worker_id=0,
+            kv_dtype=torch.bfloat16,
+            kv_shape=(4, 2, 256, 8, 128),
+        )
+
+        local_cpu = LocalCPUBackend(
+            config=base_cfg,
+            metadata=metadata,
+            dst_device="cpu",
+            memory_allocator=memory_allocator,
+        )
+
+        backend1 = RustRawBlockBackend(
+            config=base_cfg,
+            metadata=metadata,
+            local_cpu_backend=local_cpu,
+            loop=loop_in_thread,
+            dst_device="cpu",
+        )
+        alloc = AdHocMemoryAllocator(device="cpu")
+        keys: list[CacheEngineKey] = []
+        expected: dict[CacheEngineKey, bytes] = {}
+        try:
+            # First write -> forced full base.
+            for chunk_hash in (101, 202, 303, 404, 505, 606):
+                key = CacheEngineKey("test_model", 1, 0, chunk_hash, torch.bfloat16)
+                obj = alloc.allocate(
+                    [torch.Size([2, 16, 8, 128])],
+                    [torch.bfloat16],
+                    fmt=MemoryFormat.KV_T2D,
+                )
+                assert obj is not None and obj.tensor is not None
+                obj.tensor.fill_(chunk_hash & 0xFF)
+                expected[key] = bytes(obj.byte_array)
+                keys.append(key)
+
+                fut = backend1.batched_submit_put_task([key], [obj])[0]
+                fut.result(timeout=10)
+                # Force a checkpoint between every put so each commit lands as
+                # its own delta record (after the very first full base).
+                backend1._core.checkpoint_now()
+
+            assert backend1._core._meta_seq >= 1
+            assert backend1._core._delta_seq >= 1, (
+                "expected at least one delta record after the initial full"
+            )
+        finally:
+            backend1.close()
+
+        # Mount a fresh backend; recovery must restore every key and payload.
+        backend2 = RustRawBlockBackend(
+            config=base_cfg,
+            metadata=metadata,
+            local_cpu_backend=local_cpu,
+            loop=loop_in_thread,
+            dst_device="cpu",
+        )
+        try:
+            for key, payload in expected.items():
+                assert backend2.contains(key), f"missing after recovery: {key}"
+                out = backend2.get_blocking(key)
+                assert out is not None
+                assert bytes(out.byte_array) == payload, (
+                    f"recovered payload mismatch for {key}"
+                )
+
+            # A second close + mount cycle exercises another full+delta path
+            # and confirms recovery is idempotent across restarts.
+            extra_key = CacheEngineKey("test_model", 1, 0, 707, torch.bfloat16)
+            extra_obj = alloc.allocate(
+                [torch.Size([2, 16, 8, 128])],
+                [torch.bfloat16],
+                fmt=MemoryFormat.KV_T2D,
+            )
+            assert extra_obj is not None and extra_obj.tensor is not None
+            extra_obj.tensor.fill_(0x77)
+            expected_extra = bytes(extra_obj.byte_array)
+            fut = backend2.batched_submit_put_task([extra_key], [extra_obj])[0]
+            fut.result(timeout=10)
+        finally:
+            backend2.close()
+
+        backend3 = RustRawBlockBackend(
+            config=base_cfg,
+            metadata=metadata,
+            local_cpu_backend=local_cpu,
+            loop=loop_in_thread,
+            dst_device="cpu",
+        )
+        try:
+            for key, payload in expected.items():
+                assert backend3.contains(key)
+                out = backend3.get_blocking(key)
+                assert out is not None
+                assert bytes(out.byte_array) == payload
+            assert backend3.contains(extra_key)
+            extra_out = backend3.get_blocking(extra_key)
+            assert extra_out is not None
+            assert bytes(extra_out.byte_array) == expected_extra
+        finally:
+            backend3.close()
+
+
+@pytest.mark.skipif(
+    not _has_ext(), reason="lmcache_rust_raw_block_io extension not installed"
+)
 def test_rust_raw_block_backend_skips_checkpoint_on_init(
     memory_allocator, loop_in_thread
 ):

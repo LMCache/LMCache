@@ -40,7 +40,20 @@ logger = init_logger(__name__)
 
 _DEFAULT_META_MAGIC = b"LMCIDX01"
 _DEFAULT_META_VERSION = 1
+# Single base-header version. Each mirror is laid out as
+# ``[ header (one block) ][ payload (rounded up to block_align) ][ delta tail ]``;
+# the tail starts implicitly at ``align_up(header + payload, block_align)`` and
+# extends to the mirror end. Disks written by older code with no tail bytes
+# read as "zero deltas" naturally, so no separate version is needed.
 _META_HEADER_STRUCT = struct.Struct("<8sIQQI")
+_DELTA_RECORD_MAGIC = b"LMCD"
+# Delta record header bound to its base via ``base_seq`` and ``base_crc`` so a
+# stale tail surviving from a previous base (after a mirror flip) is rejected
+# even when the seq number is reused. ``prev_record_crc`` chains records and
+# is anchored at ``base_crc`` for the first record, catching tail bytes that
+# happen to look valid in isolation.
+_DELTA_RECORD_HEADER_STRUCT = struct.Struct("<4sIQIQIIIHHII")
+_DELTA_RECORD_VERSION = 1
 RAW_BLOCK_IO_ENGINES = frozenset({"posix", "io_uring"})
 DEFAULT_IOURING_QUEUE_DEPTH = 256
 
@@ -149,6 +162,11 @@ class RawBlockCoreConfig:
     io_engine: str = "posix"
     iouring_queue_depth: int = DEFAULT_IOURING_QUEUE_DEPTH
     use_uring_cmd: bool = False
+    # Incremental checkpoint controls. Bound replay cost (max_deltas) and
+    # worst-case staleness (interval_sec); other compaction triggers come for
+    # free from the per-mirror tail filling up.
+    meta_full_checkpoint_interval_sec: int = 600
+    meta_full_checkpoint_max_deltas: int = 1024
 
 
 @dataclass
@@ -171,6 +189,29 @@ class RawBlockPutManyResult:
 
     results: list[bool]
     stored_keys: list[str]
+
+
+@dataclass(frozen=True)
+class _MetaLayout:
+    """On-device metadata region geometry.
+
+    The metadata region is split into ``len(base_copy_offsets)`` equal-size
+    mirrors. Within each mirror the layout is::
+
+        [ header (one block) ][ payload (round_up to block_align) ][ delta tail ]
+
+    The delta tail starts implicitly at the block-aligned end of the base
+    payload and extends to the mirror's end, so its size depends on the
+    current base payload length. There is no separate region.
+    """
+
+    block_align: int
+    base_copy_bytes: int
+    base_copy_offsets: tuple[int, ...]
+
+    @property
+    def base_payload_capacity(self) -> int:
+        return self.base_copy_bytes - self.block_align
 
 
 class RawBlockCore:
@@ -229,6 +270,12 @@ class RawBlockCore:
             )
             self.use_odirect = False
         self.key_namespace = key_namespace
+        self.meta_full_checkpoint_interval_sec = int(
+            config.meta_full_checkpoint_interval_sec
+        )
+        self.meta_full_checkpoint_max_deltas = int(
+            config.meta_full_checkpoint_max_deltas
+        )
 
         if not self.device_path:
             raise ValueError("RawBlockCore requires a non-empty device_path")
@@ -292,15 +339,15 @@ class RawBlockCore:
             raise ValueError("meta_magic must be ASCII bytes") from e
 
         self._meta_copy_count: int = 2
-        self._meta_container_bytes: int = (
-            (self.meta_total_bytes // self._meta_copy_count) // self.block_align
-        ) * self.block_align
-        if self._meta_container_bytes <= self.block_align:
-            raise ValueError(
-                "meta_total_bytes must provide room for at least two metadata copies"
-            )
+        self._meta_layout: _MetaLayout = self._build_meta_layout()
 
         self._lock = threading.Lock()
+        # Serializes checkpoint writes (full + delta) against each other so
+        # concurrent ``_checkpoint_once`` calls (background loop + manual
+        # flush + close) cannot race on the delta tail offset or mirror seq.
+        # Held only across a single checkpoint attempt; never held during
+        # put/get critical sections (those use ``self._lock`` instead).
+        self._writer_lock = threading.Lock()
         self._index: dict[str, _Entry] = {}
         self._lock_refcnt: dict[str, int] = {}
         self._inflight: dict[str, _Inflight] = {}
@@ -321,6 +368,26 @@ class RawBlockCore:
         self._last_io_ts: float = time.monotonic()
         self._meta_stop_evt = threading.Event()
         self._meta_thread: Optional[threading.Thread] = None
+
+        # Pending mutations since the last successful checkpoint write. Each
+        # entry is a JSON-serializable op dict consumed by the delta encoder.
+        self._dirty_log: list[dict[str, Any]] = []
+        # Tail-append state. ``_active_mirror_idx`` is the mirror that holds
+        # the current authoritative base; deltas append after its base
+        # payload. ``_active_base_payload_total`` is ``round_up(payload_len)``
+        # for that base, so the tail starts at ``block_align +
+        # _active_base_payload_total`` within the mirror.
+        self._delta_seq: int = 0
+        self._delta_tail_off: int = 0
+        self._active_base_seq: int = 0
+        self._active_base_crc: int = 0
+        self._active_mirror_idx: int = 0
+        self._active_base_payload_total: int = 0
+        # CRC32 of the most recent successfully written/replayed delta record.
+        # Anchors the per-record hash chain used during replay; ``None`` means
+        # "next record chains from active_base_crc".
+        self._last_record_crc: Optional[int] = None
+        self._last_full_ts: float = time.monotonic()
 
         try:
             self._ensure_capacity_and_layout()
@@ -679,18 +746,20 @@ class RawBlockCore:
                     results[i] = False
                     continue
                 if inflight.canceled or not success:
-                    self._append_free_slot_locked(
-                        self._offset_to_slot(int(inflight.offset))
-                    )
+                    freed_slot = self._offset_to_slot(int(inflight.offset))
+                    self._append_free_slot_locked(freed_slot)
+                    self._record_freelist_push_locked(freed_slot)
                     self._meta_dirty_total += 1
                     results[i] = False
                     continue
 
-                self._index[key.encoded] = _Entry(
+                entry = _Entry(
                     offset=inflight.offset,
                     size=inflight.meta.size,
                     meta=inflight.meta,
                 )
+                self._index[key.encoded] = entry
+                self._record_put_op_locked(key.encoded, entry)
                 self._meta_dirty_total += 1
                 results[i] = True
                 stored_keys.append(key.encoded)
@@ -864,9 +933,9 @@ class RawBlockCore:
                     inflight.canceled = True
                 self._lock_refcnt.pop(encoded_key, None)
                 if removed_entry is not None:
-                    self._append_free_slot_locked(
-                        self._offset_to_slot(int(removed_entry.offset))
-                    )
+                    freed_slot = self._offset_to_slot(int(removed_entry.offset))
+                    self._append_free_slot_locked(freed_slot)
+                    self._record_delete_op_locked(encoded_key, freed_slot)
                     self._meta_dirty_total += 1
                 deleted.append(removed_entry is not None or inflight is not None)
         return deleted
@@ -888,7 +957,13 @@ class RawBlockCore:
             return (usage, usage)
 
     def checkpoint_now(self) -> None:
-        """Synchronously write a metadata checkpoint."""
+        """Synchronously persist pending metadata mutations.
+
+        Bypasses the idle-quiet check so callers can flush from non-quiet
+        code paths. Appends one delta record to the active mirror's tail
+        when the dirty log fits; otherwise compacts by writing a fresh full
+        base into the other mirror. No-op when nothing is dirty.
+        """
         self._checkpoint_once(force=True)
 
     def apply_loaded_state(self, data: dict[str, Any]) -> bool:
@@ -901,7 +976,11 @@ class RawBlockCore:
             True when the payload shape and layout match this core and all
             valid entries were applied. Invalid per-entry records are skipped.
         """
-        return self._apply_loaded_state(data)
+        if not self._apply_loaded_state(data):
+            return False
+        if self.meta_verify_on_load:
+            self._validate_loaded_entries()
+        return True
 
     def report_status(self) -> dict:
         """Return raw-block health, layout, metadata, and in-flight counters."""
@@ -927,6 +1006,11 @@ class RawBlockCore:
                 "metadata_seq": self._meta_seq,
                 "metadata_dirty_total": self._meta_dirty_total,
                 "metadata_persisted": self._meta_persisted,
+                "delta_seq": self._delta_seq,
+                "delta_tail_off": self._delta_tail_off,
+                "delta_tail_capacity": self._delta_tail_capacity_locked(),
+                "active_base_seq": self._active_base_seq,
+                "active_mirror_idx": self._active_mirror_idx,
                 "inflight_io_count": self._inflight_io_count,
                 "use_odirect": self.use_odirect,
                 "enable_zero_copy": self.enable_zero_copy,
@@ -936,7 +1020,13 @@ class RawBlockCore:
             }
 
     def close(self) -> None:
-        """Stop checkpointing, write a final checkpoint, and close the device."""
+        """Stop checkpointing, write a final checkpoint, and close the device.
+
+        The final write follows the same trigger logic as ``checkpoint_now``:
+        a small dirty log becomes one delta record, otherwise a full base
+        compaction. Either is sufficient for crash-consistent recovery on
+        the next mount.
+        """
         with self._lock:
             if self._closed:
                 return
@@ -1476,11 +1566,50 @@ class RawBlockCore:
         raise RuntimeError("No free slots available")
 
     def _append_free_slot_locked(self, slot: int) -> None:
-        """Add a slot to the free list while ``self._lock`` is held."""
+        """Add a slot to the free list while ``self._lock`` is held.
+
+        Fast path for trusted callers (delete, put-failure, validation drop)
+        that have just removed the entry that owned ``slot``. Skips the
+        index scan that ``_safe_append_free_slot_locked`` performs because
+        the caller already knows the slot is unowned.
+        """
         if slot < 0 or slot >= self._max_slots:
             return
         if slot in self._free_slots:
             return
+        self._free_slots.append(slot)
+
+    def _safe_append_free_slot_locked(
+        self, slot: int, active_offsets: set[int] | None = None
+    ) -> None:
+        """Add a slot to the free list, refusing slots an indexed entry owns.
+
+        Used when the slot index comes from external/untrusted input
+        (delta replay). Guards against malformed ``freed_slot`` values
+        that point at a re-allocated slot.
+
+        Args:
+            slot: Candidate free-list slot index.
+            active_offsets: Optional set of currently-indexed entry
+                offsets, kept in sync with put/delete ops by the
+                caller. When provided, the ownership check is O(1)
+                against the set instead of an O(N) scan over
+                ``self._index``. Used by the delta-replay loop to keep
+                recovery cost linear in the number of ops; pass None
+                from any other caller.
+        """
+        if slot < 0 or slot >= self._max_slots:
+            return
+        if slot in self._free_slots:
+            return
+        slot_offset = self._slot_to_offset(slot)
+        if active_offsets is not None:
+            if slot_offset in active_offsets:
+                return
+        else:
+            for entry in self._index.values():
+                if int(entry.offset) == slot_offset:
+                    return
         self._free_slots.append(slot)
 
     def _checkpoint_loop(self) -> None:
@@ -1494,16 +1623,125 @@ class RawBlockCore:
 
     def _meta_payload_capacity(self) -> int:
         """Return usable bytes in one metadata checkpoint payload area."""
-        return self._meta_container_bytes - self.block_align
+        return self._meta_layout.base_payload_capacity
+
+    def _entry_to_op_payload(self, entry: "_Entry") -> dict[str, Any]:
+        """Serialize an in-memory entry into the on-disk JSON form.
+
+        Used both by full-snapshot ``entries`` and by delta ``put`` ops so
+        the field schema stays in lockstep across both encodings.
+        """
+        meta = entry.meta
+        return {
+            "offset": int(entry.offset),
+            "size": int(meta.size),
+            "shape": list(meta.shape) if meta.shape is not None else None,
+            "dtype": self._checkpoint_dtype_name(meta.dtype),
+            "fmt": (
+                meta.fmt.name
+                if meta.fmt is not None and hasattr(meta.fmt, "name")
+                else str(meta.fmt)
+                if meta.fmt is not None
+                else None
+            ),
+            "cached_positions": (
+                meta.cached_positions.tolist()
+                if meta.cached_positions is not None
+                and hasattr(meta.cached_positions, "tolist")
+                else None
+            ),
+        }
+
+    def _record_put_op_locked(self, encoded_key: str, entry: "_Entry") -> None:
+        """Append a put op to the dirty log; caller holds ``self._lock``."""
+        op: dict[str, Any] = {"op": "put", "k": str(encoded_key)}
+        op.update(self._entry_to_op_payload(entry))
+        op["next_slot"] = int(self._next_slot)
+        self._dirty_log.append(op)
+
+    def _record_delete_op_locked(
+        self, encoded_key: str, freed_slot: Optional[int]
+    ) -> None:
+        """Append a delete op to the dirty log; caller holds ``self._lock``."""
+        op: dict[str, Any] = {
+            "op": "delete",
+            "k": str(encoded_key),
+            "next_slot": int(self._next_slot),
+        }
+        if freed_slot is not None:
+            op["freed_slot"] = int(freed_slot)
+        self._dirty_log.append(op)
+
+    def _record_freelist_push_locked(self, freed_slot: int) -> None:
+        """Append a freelist_push op (put-failure path); caller holds the lock."""
+        op: dict[str, Any] = {
+            "op": "freelist_push",
+            "freed_slot": int(freed_slot),
+            "next_slot": int(self._next_slot),
+        }
+        self._dirty_log.append(op)
+
+    def _clear_dirty_log_locked(self) -> None:
+        """Drop pending ops; caller holds ``self._lock``."""
+        self._dirty_log = []
 
     def _meta_container_offsets(self) -> list[int]:
         """Return byte offsets for mirrored metadata checkpoint containers."""
-        return [
-            idx * self._meta_container_bytes for idx in range(self._meta_copy_count)
-        ]
+        return list(self._meta_layout.base_copy_offsets)
+
+    def _build_meta_layout(self) -> _MetaLayout:
+        """Compute the on-device metadata region layout.
+
+        The metadata region is split evenly between two mirrors. Within each
+        mirror, deltas append after the base payload's block-aligned end, so
+        no separate region is needed and ``meta_total_bytes`` is split 50/50.
+        The data slot region begins at ``meta_total_bytes`` regardless,
+        preserving cross-version slot offsets.
+        """
+        copy_bytes = self._mirror_bytes()
+        if copy_bytes <= self.block_align:
+            raise ValueError(
+                "meta_total_bytes must provide room for at least two metadata copies"
+            )
+        offsets = tuple(idx * copy_bytes for idx in range(self._meta_copy_count))
+        return _MetaLayout(
+            block_align=self.block_align,
+            base_copy_bytes=copy_bytes,
+            base_copy_offsets=offsets,
+        )
+
+    def _mirror_bytes(self) -> int:
+        """Return the per-mirror size in bytes, block-aligned."""
+        return (
+            (self.meta_total_bytes // self._meta_copy_count) // self.block_align
+        ) * self.block_align
+
+    @staticmethod
+    def _pack_base_header(
+        magic: bytes, version: int, seq: int, payload_len: int, crc: int
+    ) -> bytes:
+        return _META_HEADER_STRUCT.pack(
+            magic, int(version), int(seq), int(payload_len), int(crc)
+        )
+
+    @staticmethod
+    def _unpack_base_header(buf: bytes) -> Optional[dict[str, int]]:
+        """Decode a base header buffer; returns None on malformed bytes."""
+        if len(buf) < _META_HEADER_STRUCT.size:
+            return None
+        magic, version, seq, payload_len, crc = _META_HEADER_STRUCT.unpack(
+            buf[: _META_HEADER_STRUCT.size]
+        )
+        return {
+            "magic": magic,
+            "version": int(version),
+            "seq": int(seq),
+            "payload_len": int(payload_len),
+            "crc": int(crc),
+        }
 
     def _read_meta_header(self, container_offset: int) -> Optional[dict[str, int]]:
-        """Read and validate a metadata checkpoint header."""
+        """Read and validate a metadata checkpoint header at ``container_offset``."""
         buf = bytearray(self.block_align)
         try:
             self._read_buffers(
@@ -1515,20 +1753,18 @@ class RawBlockCore:
         except Exception:
             return None
 
-        hdr = bytes(buf[: _META_HEADER_STRUCT.size])
-        magic, version, seq, payload_len, crc = _META_HEADER_STRUCT.unpack(hdr)
-        if magic != self.meta_magic or version != self.meta_version:
+        decoded = self._unpack_base_header(bytes(buf))
+        if decoded is None:
             return None
-
-        payload_cap = self._meta_payload_capacity()
-        if payload_len <= 0 or payload_len > payload_cap:
+        if decoded["magic"] != self.meta_magic:
             return None
-        return {
-            "seq": int(seq),
-            "payload_len": int(payload_len),
-            "crc": int(crc),
-            "container_offset": int(container_offset),
-        }
+        if decoded["version"] != self.meta_version:
+            return None
+        capacity = self._meta_layout.base_payload_capacity
+        if decoded["payload_len"] <= 0 or decoded["payload_len"] > capacity:
+            return None
+        decoded["container_offset"] = int(container_offset)
+        return decoded
 
     def _load_meta_payload(self, header: dict[str, int]) -> Optional[bytes]:
         """Load and CRC-validate a checkpoint payload for a metadata header."""
@@ -1549,11 +1785,17 @@ class RawBlockCore:
 
     def _select_latest_checkpoint(
         self,
-    ) -> tuple[Optional[dict[str, int]], Optional[bytes]]:
-        """Return the newest valid checkpoint header and payload."""
+    ) -> tuple[Optional[dict[str, int]], Optional[bytes], int]:
+        """Return the newest valid checkpoint header, payload, and mirror index.
+
+        Picks the mirror with the highest ``seq`` whose base payload validates.
+        Tail (delta) replay is performed by the caller against the selected
+        mirror.
+        """
         best_header: Optional[dict[str, int]] = None
         best_payload: Optional[bytes] = None
-        for offset in self._meta_container_offsets():
+        best_idx: int = 0
+        for idx, offset in enumerate(self._meta_layout.base_copy_offsets):
             header = self._read_meta_header(offset)
             if header is None:
                 continue
@@ -1563,7 +1805,8 @@ class RawBlockCore:
             if best_header is None or int(header["seq"]) > int(best_header["seq"]):
                 best_header = header
                 best_payload = payload
-        return best_header, best_payload
+                best_idx = idx
+        return best_header, best_payload, best_idx
 
     def _snapshot_state(self) -> tuple[dict[str, Any], int]:
         """Build a JSON-serializable checkpoint state snapshot."""
@@ -1583,28 +1826,7 @@ class RawBlockCore:
                 "next_slot": self._next_slot,
                 "free_slots": list(self._free_slots),
                 "entries": {
-                    encoded_key: {
-                        "offset": entry.offset,
-                        "size": entry.meta.size,
-                        "shape": list(entry.meta.shape)
-                        if entry.meta.shape is not None
-                        else None,
-                        "dtype": self._checkpoint_dtype_name(entry.meta.dtype),
-                        "fmt": (
-                            entry.meta.fmt.name
-                            if entry.meta.fmt is not None
-                            and hasattr(entry.meta.fmt, "name")
-                            else str(entry.meta.fmt)
-                            if entry.meta.fmt is not None
-                            else None
-                        ),
-                        "cached_positions": (
-                            entry.meta.cached_positions.tolist()
-                            if entry.meta.cached_positions is not None
-                            and hasattr(entry.meta.cached_positions, "tolist")
-                            else None
-                        ),
-                    }
+                    encoded_key: self._entry_to_op_payload(entry)
                     for encoded_key, entry in self._index.items()
                 },
             }
@@ -1625,7 +1847,33 @@ class RawBlockCore:
         return TORCH_DTYPE_TO_STR_DTYPE.get(dtype, str(dtype))
 
     def _write_checkpoint(self, payload: bytes, dirty_total_snapshot: int) -> bool:
-        """Write one checkpoint copy and advance persisted metadata counters."""
+        """Compact: write a fresh full base into the inactive mirror.
+
+        Order on disk:
+
+        1. Write the base payload to ``inactive_mirror + block_align``.
+        2. Zero the first block of the new mirror's delta tail so any
+           stale tail bytes from a previous incarnation cannot replay
+           against the new base. ``base_crc`` already filters them, but
+           the explicit zero makes recovery stop cleanly without scanning
+           the whole tail.
+        3. Commit the base header to ``inactive_mirror`` — the mirror
+           now holds the highest ``seq`` and becomes authoritative.
+
+        A crash before step 3 leaves the previous mirror authoritative.
+        A crash between steps 2 and 3 leaves the new payload on disk but
+        no header points at it, so it is ignored.
+
+        Args:
+            payload: Base snapshot bytes to persist.
+            dirty_total_snapshot: ``_meta_dirty_total`` value captured
+                when ``payload`` was built; used to advance
+                ``_meta_persisted``.
+
+        Returns:
+            True when the checkpoint committed; False when the payload
+            exceeds the per-mirror capacity.
+        """
         payload_cap = self._meta_payload_capacity()
         if len(payload) > payload_cap:
             logger.warning(
@@ -1638,7 +1886,7 @@ class RawBlockCore:
 
         next_seq = self._meta_seq + 1
         target_idx = int((next_seq - 1) % self._meta_copy_count)
-        target = self._meta_container_offsets()[target_idx]
+        target = self._meta_layout.base_copy_offsets[target_idx]
 
         payload_len = len(payload)
         payload_total_len = round_up(payload_len, self.block_align)
@@ -1646,44 +1894,539 @@ class RawBlockCore:
         crc = zlib.crc32(payload) & 0xFFFFFFFF
 
         header_block = bytearray(self.block_align)
-        header_block[: _META_HEADER_STRUCT.size] = _META_HEADER_STRUCT.pack(
-            self.meta_magic,
-            self.meta_version,
-            int(next_seq),
-            int(payload_len),
-            int(crc),
+        header_bytes = self._pack_base_header(
+            self.meta_magic, self.meta_version, next_seq, payload_len, crc
         )
+        header_block[: len(header_bytes)] = header_bytes
 
+        # Steps 1+2: write the base payload, and zero the first block of the
+        # new mirror's delta tail so stale tail bytes from a previous
+        # incarnation cannot replay against the new base. Routed through
+        # ``_write_buffers`` so it honours the configured io_engine (posix /
+        # io_uring / uring_cmd); the call blocks until the writes complete,
+        # so both are durable before the header is committed.
+        tail_start = target + self.block_align + payload_total_len
+        if tail_start + self.block_align <= target + self._meta_layout.base_copy_bytes:
+            zero_block = bytes(self.block_align)
+            self._write_buffers(
+                [payload_off, tail_start],
+                [payload, zero_block],
+                [payload_len, self.block_align],
+                [payload_total_len, self.block_align],
+            )
+        else:
+            self._write_buffers(
+                [payload_off],
+                [payload],
+                [payload_len],
+                [payload_total_len],
+            )
+
+        # Step 3: commit the base header last (a separate, ordered write).
+        # The mirror becomes authoritative only once this lands; a crash
+        # before it leaves the previous mirror authoritative.
         self._write_buffers(
-            [payload_off, target],
-            [payload, header_block],
-            [payload_len, self.block_align],
-            [payload_total_len, self.block_align],
+            [target],
+            [header_block],
+            [self.block_align],
+            [self.block_align],
         )
 
         with self._lock:
             self._meta_seq = int(next_seq)
             self._meta_persisted = max(self._meta_persisted, int(dirty_total_snapshot))
+            self._clear_dirty_log_locked()
+            self._delta_seq = 0
+            self._delta_tail_off = 0
+            self._active_base_seq = int(next_seq)
+            self._active_base_crc = int(crc)
+            self._active_mirror_idx = target_idx
+            self._active_base_payload_total = payload_total_len
+            self._last_record_crc = None
+            self._last_full_ts = time.monotonic()
         return True
 
     def _checkpoint_once(self, force: bool) -> bool:
-        """Write a metadata checkpoint when dirty and sufficiently idle."""
+        """Write a metadata checkpoint when dirty and sufficiently idle.
+
+        Tries to append one delta record after the active mirror's base
+        payload. Falls back to a full compaction (new base in the inactive
+        mirror) when the dirty log does not fit, when count/time thresholds
+        fire, or when no active base exists yet.
+
+        Holds ``self._writer_lock`` for the full attempt so concurrent
+        callers cannot collide on the tail offset or mirror seq.
+        """
+        with self._writer_lock:
+            with self._lock:
+                dirty = self._meta_dirty_total > self._meta_persisted
+                idle_ok = self._inflight_io_count == 0 and (
+                    time.monotonic() - self._last_io_ts
+                ) >= (self.meta_idle_quiet_ms / 1000.0)
+
+            if not dirty:
+                return False
+            if not force and not idle_ok:
+                return False
+
+            payload, op_count, dirty_total_snapshot = self._snapshot_dirty_log()
+            if payload is not None and not self._need_full_for_delta(payload):
+                if self._write_delta(payload, op_count, dirty_total_snapshot):
+                    return True
+                # Fall through to full compaction if delta append failed.
+
+            snapshot, dirty_total_snapshot = self._snapshot_state()
+            payload = json.dumps(
+                snapshot, separators=(",", ":"), ensure_ascii=True
+            ).encode("utf-8")
+            return self._write_checkpoint(payload, dirty_total_snapshot)
+
+    def _snapshot_dirty_log(
+        self,
+    ) -> tuple[Optional[bytes], int, int]:
+        """Atomically swap out the in-memory dirty log and JSON-encode it.
+
+        Returns a triple ``(payload, op_count, dirty_total_snapshot)``. When
+        no dirty ops are pending, ``payload`` is ``None``.
+        """
         with self._lock:
-            dirty = self._meta_dirty_total > self._meta_persisted
-            idle_ok = self._inflight_io_count == 0 and (
-                time.monotonic() - self._last_io_ts
-            ) >= (self.meta_idle_quiet_ms / 1000.0)
+            if not self._dirty_log:
+                return None, 0, self._meta_dirty_total
+            ops = self._dirty_log
+            self._dirty_log = []
+            dirty_total_snapshot = self._meta_dirty_total
+        try:
+            payload = json.dumps(
+                {"ops": ops}, separators=(",", ":"), ensure_ascii=True
+            ).encode("utf-8")
+        except Exception:
+            # Restore the log so a later compaction can retry.
+            with self._lock:
+                self._dirty_log = ops + self._dirty_log
+            raise
+        return payload, len(ops), dirty_total_snapshot
 
-        if not dirty:
-            return False
-        if not force and not idle_ok:
-            return False
+    def _need_full_for_delta(self, payload: bytes) -> bool:
+        """Decide whether the next checkpoint must be a full compaction."""
+        if self._meta_seq == 0:
+            return True
+        capacity = self._delta_tail_capacity_locked()
+        if capacity <= 0:
+            return True
+        record_bytes = self._delta_record_total_bytes(len(payload))
+        if record_bytes > capacity:
+            return True
+        if self._delta_tail_off + record_bytes > capacity:
+            return True
+        if self._delta_seq + 1 > self.meta_full_checkpoint_max_deltas:
+            return True
+        if (
+            time.monotonic() - self._last_full_ts
+            > self.meta_full_checkpoint_interval_sec
+        ):
+            return True
+        return False
 
-        snapshot, dirty_total_snapshot = self._snapshot_state()
-        payload = json.dumps(snapshot, separators=(",", ":"), ensure_ascii=True).encode(
-            "utf-8"
+    def _delta_record_total_bytes(self, payload_len: int) -> int:
+        """Block-aligned record size for a delta payload of ``payload_len`` bytes."""
+        return round_up(
+            _DELTA_RECORD_HEADER_STRUCT.size + int(payload_len), self.block_align
         )
-        return self._write_checkpoint(payload, dirty_total_snapshot)
+
+    def _delta_tail_start_off(self, mirror_idx: int, payload_total: int) -> int:
+        """Absolute offset where the active mirror's delta tail begins."""
+        mirror_off = self._meta_layout.base_copy_offsets[mirror_idx]
+        return mirror_off + self.block_align + int(payload_total)
+
+    def _delta_tail_capacity_locked(self) -> int:
+        """Return bytes available in the active mirror's delta tail."""
+        if self._meta_seq == 0:
+            return 0
+        used_by_base = self.block_align + self._active_base_payload_total
+        return max(0, self._meta_layout.base_copy_bytes - used_by_base)
+
+    def _replay_delta_log(self) -> int:
+        """Walk the active mirror's delta tail and apply each valid record.
+
+        Stops at the first record that fails any check (bad magic, stale
+        ``base_seq`` / ``base_crc``, broken hash chain, non-monotonic
+        ``delta_seq``, oversized payload, CRC mismatch, or read error).
+        Earlier records are durable and applied; anything past the stop
+        point is treated as torn or stale.
+
+        Returns the number of records successfully applied. Updates
+        ``self._delta_tail_off``, ``self._delta_seq`` and
+        ``self._last_record_crc``.
+        """
+        capacity = self._meta_layout.base_copy_bytes - (
+            self.block_align + self._active_base_payload_total
+        )
+        if capacity <= 0:
+            self._delta_tail_off = 0
+            self._delta_seq = 0
+            self._last_record_crc = None
+            return 0
+
+        tail_base = self._delta_tail_start_off(
+            self._active_mirror_idx, self._active_base_payload_total
+        )
+        off = 0
+        applied = 0
+        expected_next = self._delta_seq + 1
+        prev_crc = (
+            self._last_record_crc
+            if self._last_record_crc is not None
+            else self._active_base_crc
+        )
+
+        while off + _DELTA_RECORD_HEADER_STRUCT.size <= capacity:
+            absolute = tail_base + off
+            header = self._read_delta_header(absolute, expected_next, capacity, off)
+            if header is None:
+                break
+            if int(header["prev_record_crc"]) != int(prev_crc) & 0xFFFFFFFF:
+                break
+            record_bytes = int(header["record_bytes"])
+            buf = bytearray(record_bytes)
+            try:
+                self._rawdev().pread_into(absolute, buf, record_bytes, record_bytes)
+            except Exception:
+                break
+            ops = self._load_delta_ops(buf, header)
+            if ops is None:
+                break
+            if not self._apply_delta_ops(ops):
+                break
+
+            applied += 1
+            prev_crc = zlib.crc32(bytes(buf)) & 0xFFFFFFFF
+            self._delta_seq = int(header["delta_seq"])
+            off += record_bytes
+            expected_next = self._delta_seq + 1
+
+        self._delta_tail_off = off
+        if applied > 0:
+            self._last_record_crc = int(prev_crc) & 0xFFFFFFFF
+        return applied
+
+    def _read_delta_header(
+        self,
+        absolute_off: int,
+        expected_next_seq: int,
+        tail_capacity: int,
+        relative_off: int,
+    ) -> Optional[dict[str, int]]:
+        """Read and validate one delta record's header block.
+
+        Returns a dict with the validated fields plus the derived
+        ``record_bytes``, or None if any sanity check fails. The caller
+        treats None as "stop replay here".
+        """
+        buf = bytearray(self.block_align)
+        try:
+            self._rawdev().pread_into(
+                absolute_off, buf, self.block_align, self.block_align
+            )
+        except Exception:
+            return None
+
+        try:
+            (
+                magic,
+                rec_version,
+                base_seq,
+                base_crc,
+                delta_seq,
+                prev_record_crc,
+                payload_len,
+                payload_crc,
+                op_count,
+                flags,
+                total_blocks,
+                _reserved,
+            ) = _DELTA_RECORD_HEADER_STRUCT.unpack(
+                bytes(buf[: _DELTA_RECORD_HEADER_STRUCT.size])
+            )
+        except struct.error:
+            return None
+
+        if magic != _DELTA_RECORD_MAGIC:
+            return None
+        if rec_version != _DELTA_RECORD_VERSION:
+            return None
+        if int(base_seq) != self._active_base_seq:
+            return None
+        if int(base_crc) != int(self._active_base_crc) & 0xFFFFFFFF:
+            return None
+        if int(delta_seq) != expected_next_seq:
+            return None
+        if int(flags) != 0:
+            # Unknown flag bits => stop replay; future writers may add bits.
+            return None
+        if int(total_blocks) <= 0:
+            return None
+        record_bytes = int(total_blocks) * self.block_align
+        if relative_off + record_bytes > tail_capacity:
+            return None
+        max_payload = record_bytes - _DELTA_RECORD_HEADER_STRUCT.size
+        if int(payload_len) <= 0 or int(payload_len) > max_payload:
+            return None
+        if int(op_count) <= 0:
+            return None
+        return {
+            "delta_seq": int(delta_seq),
+            "prev_record_crc": int(prev_record_crc),
+            "payload_len": int(payload_len),
+            "payload_crc": int(payload_crc),
+            "op_count": int(op_count),
+            "record_bytes": int(record_bytes),
+        }
+
+    def _load_delta_ops(
+        self, record_buf: bytes | bytearray, header: dict[str, int]
+    ) -> Optional[list[Any]]:
+        """CRC-check and decode the ops list inside an already-read record."""
+        payload_len = header["payload_len"]
+        start = _DELTA_RECORD_HEADER_STRUCT.size
+        payload = bytes(record_buf[start : start + payload_len])
+        if (zlib.crc32(payload) & 0xFFFFFFFF) != header["payload_crc"]:
+            return None
+        try:
+            doc = json.loads(payload.decode("utf-8"))
+        except Exception:
+            return None
+        ops = doc.get("ops") if isinstance(doc, dict) else None
+        if not isinstance(ops, list):
+            return None
+        if header["op_count"] != len(ops):
+            return None
+        return ops
+
+    def _apply_delta_ops(self, ops: list[Any]) -> bool:
+        """Apply a decoded list of delta ops to the live in-memory state.
+
+        Builds a transient set of currently-indexed entry offsets and
+        keeps it in sync with put/delete ops as they apply, so the
+        slot-ownership check inside ``_safe_append_free_slot_locked``
+        runs in O(1) instead of scanning the whole index for every
+        ``freelist_push`` and explicit-``freed_slot`` ``delete`` op.
+        Recovery cost stays linear in the number of ops even when the
+        index already holds many keys.
+        """
+        with self._lock:
+            active_offsets: set[int] = {
+                int(entry.offset) for entry in self._index.values()
+            }
+            for op in ops:
+                if not isinstance(op, dict):
+                    return False
+                kind = op.get("op")
+                next_slot = op.get("next_slot")
+                if isinstance(next_slot, int) and next_slot > self._next_slot:
+                    self._next_slot = next_slot
+                if kind == "put":
+                    if not self._apply_delta_put_locked(op, active_offsets):
+                        return False
+                elif kind == "delete":
+                    self._apply_delta_delete_locked(op, active_offsets)
+                elif kind == "freelist_push":
+                    freed = op.get("freed_slot")
+                    if isinstance(freed, int):
+                        self._safe_append_free_slot_locked(int(freed), active_offsets)
+                else:
+                    logger.warning(
+                        "RawBlockCore: ignoring unknown delta op kind=%r", kind
+                    )
+        return True
+
+    def _apply_delta_put_locked(
+        self, op: dict[str, Any], active_offsets: set[int] | None = None
+    ) -> bool:
+        """Apply a put op while ``self._lock`` is held.
+
+        Args:
+            op: Decoded put-op dict with ``k``, ``offset``, ``size`` and
+                optional metadata fields.
+            active_offsets: Optional set of currently-indexed entry
+                offsets, kept in sync by the replay loop so subsequent
+                ``_safe_append_free_slot_locked`` calls can reject
+                slot reuse in O(1). When provided, this method updates
+                the set to reflect the put (adding the new offset and
+                discarding the prior offset on overwrite).
+
+        Returns:
+            True when the op applied; False on a malformed payload or
+            invalid checkpoint entry, in which case replay aborts at
+            the caller.
+        """
+        encoded_key = op.get("k")
+        offset = op.get("offset")
+        size = op.get("size")
+        if not isinstance(encoded_key, str):
+            return False
+        if not isinstance(offset, int) or not isinstance(size, int):
+            return False
+        if not self._is_valid_checkpoint_entry(int(offset), int(size)):
+            return False
+
+        meta = self._decode_put_op_meta(encoded_key, int(offset), int(size), op)
+        prior = self._index.get(encoded_key)
+        self._index[encoded_key] = _Entry(offset=int(offset), size=int(size), meta=meta)
+        if active_offsets is not None:
+            active_offsets.add(int(offset))
+
+        slot = self._offset_to_slot(int(offset))
+        if 0 <= slot < self._max_slots:
+            try:
+                self._free_slots.remove(slot)
+            except ValueError:
+                pass
+        if prior is not None and int(prior.offset) != int(offset):
+            old_slot = self._offset_to_slot(int(prior.offset))
+            if active_offsets is not None:
+                active_offsets.discard(int(prior.offset))
+            self._append_free_slot_locked(old_slot)
+        return True
+
+    def _decode_put_op_meta(
+        self, encoded_key: str, offset: int, size: int, op: dict[str, Any]
+    ) -> DiskCacheMetadata:
+        """Build a ``DiskCacheMetadata`` from a put-op dict's optional fields."""
+        shape_list = op.get("shape")
+        shape = torch.Size(list(shape_list)) if isinstance(shape_list, list) else None
+        fmt_name = op.get("fmt")
+        if isinstance(fmt_name, str) and fmt_name in MemoryFormat.__members__:
+            fmt = MemoryFormat[fmt_name]
+        else:
+            fmt = MemoryFormat.UNDEFINED
+        cached_positions_list = op.get("cached_positions")
+        cached_positions = (
+            torch.tensor(cached_positions_list, dtype=torch.long)
+            if isinstance(cached_positions_list, list)
+            else None
+        )
+        dtype = self._recover_checkpoint_dtype(encoded_key, op.get("dtype"))
+        return DiskCacheMetadata(
+            path=f"{self.device_path}@{offset}",
+            size=size,
+            shape=shape,
+            dtype=dtype,
+            cached_positions=cached_positions,
+            fmt=fmt,
+            pin_count=0,
+        )
+
+    def _apply_delta_delete_locked(
+        self, op: dict[str, Any], active_offsets: set[int] | None = None
+    ) -> None:
+        """Apply a delete op while ``self._lock`` is held.
+
+        Args:
+            op: Decoded delete-op dict with ``k`` and optional
+                ``freed_slot``.
+            active_offsets: Optional set of currently-indexed entry
+                offsets maintained by the replay loop. When provided,
+                the removed entry's offset is discarded from the set
+                so subsequent ``_safe_append_free_slot_locked`` calls
+                see the correct ownership view.
+        """
+        encoded_key = op.get("k")
+        if not isinstance(encoded_key, str):
+            return
+        removed = self._index.pop(encoded_key, None)
+        self._lock_refcnt.pop(encoded_key, None)
+        if removed is not None and active_offsets is not None:
+            active_offsets.discard(int(removed.offset))
+        freed_slot = op.get("freed_slot")
+        if isinstance(freed_slot, int):
+            self._safe_append_free_slot_locked(int(freed_slot), active_offsets)
+        elif removed is not None:
+            self._append_free_slot_locked(self._offset_to_slot(int(removed.offset)))
+
+    def _write_delta(
+        self,
+        payload: bytes,
+        op_count: int,
+        dirty_total_snapshot: int,
+    ) -> bool:
+        """Append a delta record to the active mirror's tail.
+
+        Caller must hold ``self._writer_lock``: this method reads
+        ``_delta_tail_off`` / ``_delta_seq`` / ``_last_record_crc`` outside
+        ``self._lock`` and relies on the writer lock to keep concurrent
+        checkpoints from racing on those fields or on the underlying device
+        offset.
+
+        On success, advances ``_delta_seq`` / ``_delta_tail_off`` /
+        ``_last_record_crc`` and the persisted-counter watermark. Returns
+        ``False`` if the record cannot fit; the caller should fall back to a
+        full compaction.
+        """
+        if self._meta_seq == 0:
+            return False
+        capacity = self._delta_tail_capacity_locked()
+        if capacity <= 0:
+            return False
+        record_bytes = self._delta_record_total_bytes(len(payload))
+        if record_bytes > capacity:
+            return False
+        if self._delta_tail_off + record_bytes > capacity:
+            return False
+
+        next_delta_seq = self._delta_seq + 1
+        payload_crc = zlib.crc32(payload) & 0xFFFFFFFF
+        total_blocks = record_bytes // self.block_align
+        prev_crc = (
+            self._last_record_crc
+            if self._last_record_crc is not None
+            else self._active_base_crc
+        )
+
+        record = bytearray(record_bytes)
+        _DELTA_RECORD_HEADER_STRUCT.pack_into(
+            record,
+            0,
+            _DELTA_RECORD_MAGIC,
+            _DELTA_RECORD_VERSION,
+            int(self._active_base_seq),
+            int(self._active_base_crc) & 0xFFFFFFFF,
+            int(next_delta_seq),
+            int(prev_crc) & 0xFFFFFFFF,
+            int(len(payload)),
+            int(payload_crc),
+            int(op_count),
+            0,
+            int(total_blocks),
+            0,
+        )
+        record[
+            _DELTA_RECORD_HEADER_STRUCT.size : _DELTA_RECORD_HEADER_STRUCT.size
+            + len(payload)
+        ] = payload
+
+        record_crc = zlib.crc32(bytes(record)) & 0xFFFFFFFF
+        write_off = (
+            self._delta_tail_start_off(
+                self._active_mirror_idx, self._active_base_payload_total
+            )
+            + self._delta_tail_off
+        )
+        try:
+            self._rawdev().pwrite_from_buffer(
+                write_off, bytes(record), record_bytes, record_bytes
+            )
+        except Exception as e:
+            logger.warning(
+                "RawBlockCore: delta write failed at off=%d: %s", write_off, e
+            )
+            return False
+
+        with self._lock:
+            self._delta_seq = next_delta_seq
+            self._delta_tail_off += record_bytes
+            self._last_record_crc = int(record_crc)
+            self._meta_persisted = max(self._meta_persisted, int(dirty_total_snapshot))
+        return True
 
     def _is_valid_checkpoint_entry(self, offset: int, size: int) -> bool:
         """Return whether a checkpoint entry references a valid data slot."""
@@ -1698,10 +2441,26 @@ class RawBlockCore:
         return 0 < size <= (self.slot_bytes - self.header_bytes)
 
     def _apply_loaded_state(self, data: dict[str, Any]) -> bool:
-        """Apply decoded checkpoint state after validating layout fields."""
+        """Apply decoded checkpoint state after validating layout fields.
+
+        Resets the active-base trackers; the device-load path overrides
+        them after this returns with values from the just-loaded base
+        header. External callers (``apply_loaded_state``) leave them
+        cleared so the next checkpoint writes a fresh full base — any
+        residual delta records on either mirror's tail are filtered by
+        ``base_seq`` / ``base_crc`` mismatch on the next mount.
+
+        Args:
+            data: Decoded checkpoint dictionary.
+        """
         if not isinstance(data, dict):
             return False
         if int(data.get("version", 0)) != 1:
+            logger.warning(
+                "Device metadata payload version mismatch (got %r, expected 1); "
+                "ignoring metadata",
+                data.get("version"),
+            )
             return False
         checkpoint_device_path = data.get("device_path")
         if checkpoint_device_path and checkpoint_device_path != self.device_path:
@@ -1827,9 +2586,23 @@ class RawBlockCore:
 
             self._meta_dirty_total = 0
             self._meta_persisted = 0
-
-        if self.meta_verify_on_load:
-            self._validate_loaded_entries()
+            self._clear_dirty_log_locked()
+            self._delta_seq = 0
+            self._delta_tail_off = 0
+            self._last_record_crc = None
+            # External callers may hand us an arbitrary state that does not
+            # match what's on disk. Reset the active-base trackers so the
+            # next checkpoint writes a fresh full base; any delta records
+            # still on disk under either mirror's tail will be filtered by
+            # ``base_seq`` / ``base_crc`` mismatch and skipped on the next
+            # mount. ``_load_checkpoint_from_device`` overrides these
+            # immediately after with the values from the just-loaded base
+            # header for the internal load path.
+            self._meta_seq = 0
+            self._active_base_seq = 0
+            self._active_base_crc = 0
+            self._active_base_payload_total = 0
+            self._active_mirror_idx = 0
         return True
 
     def _recover_checkpoint_dtype(
@@ -1908,10 +2681,13 @@ class RawBlockCore:
                 removed_entry = self._index.pop(encoded_key, None)
                 self._lock_refcnt.pop(encoded_key, None)
                 if removed_entry is not None:
-                    self._append_free_slot_locked(
-                        self._offset_to_slot(int(removed_entry.offset))
-                    )
-            self._meta_dirty_total += 1
+                    freed_slot = self._offset_to_slot(int(removed_entry.offset))
+                    self._append_free_slot_locked(freed_slot)
+                    self._record_delete_op_locked(encoded_key, freed_slot)
+            # One dirty event per dropped entry, matching the per-op accounting
+            # used by put/delete so ``metadata_dirty_total`` stays in sync with
+            # the dirty-log size.
+            self._meta_dirty_total += len(to_drop)
 
         logger.warning(
             "RawBlockCore dropped %d stale metadata entries after "
@@ -1920,8 +2696,14 @@ class RawBlockCore:
         )
 
     def _load_checkpoint_from_device(self) -> None:
-        """Load the newest valid checkpoint from the raw device if present."""
-        header, payload = self._select_latest_checkpoint()
+        """Load the newest valid checkpoint from the raw device if present.
+
+        Applies the base snapshot, replays the active mirror's delta tail,
+        then runs slot-header validation against the final state. Validating
+        before replay would let a subsequent delta op resurrect an entry
+        that the base validation just dropped.
+        """
+        header, payload, mirror_idx = self._select_latest_checkpoint()
         if header is None:
             logger.info("RawBlockCore: no valid on-device metadata checkpoint found")
             return
@@ -1933,14 +2715,31 @@ class RawBlockCore:
         except Exception:
             logger.warning("RawBlockCore: failed to decode metadata payload")
             return
-        if not self.apply_loaded_state(data):
+        if not self._apply_loaded_state(data):
             logger.warning("RawBlockCore: metadata payload rejected by checks")
             return
         self._meta_seq = int(header["seq"])
+        self._active_base_seq = self._meta_seq
+        self._active_base_crc = int(header["crc"]) & 0xFFFFFFFF
+        self._active_mirror_idx = int(mirror_idx)
+        self._active_base_payload_total = round_up(
+            int(header["payload_len"]), self.block_align
+        )
+        self._last_record_crc = None
+        self._last_full_ts = time.monotonic()
+
+        delta_count = self._replay_delta_log()
+
+        if self.meta_verify_on_load:
+            self._validate_loaded_entries()
+
         logger.info(
-            "RawBlockCore loaded checkpoint (entries=%d next_slot=%d seq=%d device=%s)",
+            "RawBlockCore loaded checkpoint (entries=%d next_slot=%d seq=%d "
+            "mirror=%d deltas_applied=%d device=%s)",
             len(self._index),
             self._next_slot,
             self._meta_seq,
+            mirror_idx,
+            delta_count,
             self.device_path,
         )

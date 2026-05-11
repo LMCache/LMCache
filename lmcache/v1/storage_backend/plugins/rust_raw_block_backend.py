@@ -314,6 +314,12 @@ class RustRawBlockBackend(StoragePluginInterface):
             io_engine=io_engine,
             iouring_queue_depth=iouring_queue_depth,
             use_uring_cmd=use_uring_cmd,
+            meta_full_checkpoint_interval_sec=int(
+                extra.get("rust_raw_block.meta_full_checkpoint_interval_sec", 600)
+            ),
+            meta_full_checkpoint_max_deltas=int(
+                extra.get("rust_raw_block.meta_full_checkpoint_max_deltas", 1024)
+            ),
         )
 
     def _warn_if_loaded_metadata_looks_cross_rank(self) -> None:
