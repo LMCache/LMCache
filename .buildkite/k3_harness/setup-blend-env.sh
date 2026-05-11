@@ -53,17 +53,21 @@ TEST_VENV_BIN="/workspace/.venv/bin"
 # When flashinfer and flashinfer-cubin resolve to different patch versions, skip strict check.
 export FLASHINFER_DISABLE_VERSION_CHECK=1
 
-# vLLM resolution: pin to the cu129 nightly channel. vLLM's stable PyPI release
-# is now built against CUDA 13 and needs libcudart.so.13, which this container
-# (CUDA 12) cannot load. Using --index-url makes cu129 primary; dropping
-# unsafe-best-match leaves uv in default first-index mode so it stops at the
-# first index that has vLLM (cu129) instead of comparing versions across PyPI.
-# A belt-and-suspenders version cap excludes the CUDA-13 0.20.2 final in case
-# resolution ever leaks. Other deps still resolve from PyPI via --extra-index-url.
-"${UV_BIN}" pip install -p "${TEST_VENV_BIN}/python" -U "vllm<0.20.2" --pre \
-    --index-url       "https://wheels.vllm.ai/nightly/cu129" \
-    --extra-index-url "https://download.pytorch.org/whl/cu129" \
-    --extra-index-url "https://pypi.org/simple"
+# vLLM: pinned to a known-good cu129 nightly wheel as a temporary workaround.
+# Background: vLLM's PyPI stable is now built against CUDA 13 (libcudart.so.13)
+# which this CUDA-12 container can't load. The cu129 nightly channel auto-rolls
+# on every upstream commit and resolver-based installs have proven fragile
+# during the cu12/cu13 split (unsafe-best-match picks PyPI stable; first-index
+# with a version cap backtracked all the way to vllm 0.2.5). Pinning a wheel
+# URL bypasses resolution for vLLM; transitive deps still resolve from PyPI +
+# PyTorch cu129.
+# TODO: bump the URL when this pinned build goes stale, or revert to dynamic
+# selection once the cu12/cu13 transition settles.
+VLLM_WHEEL_URL="https://wheels.vllm.ai/8189a15914ca48461acf106f126c58ef7e41c9ee/vllm-0.20.2rc1.dev112%2Bg8189a1591.cu129-cp38-abi3-manylinux_2_34_x86_64.whl"
+echo "--- :python: Installing vLLM (pinned wheel: ${VLLM_WHEEL_URL})"
+
+"${UV_BIN}" pip install -p "${TEST_VENV_BIN}/python" -U "${VLLM_WHEEL_URL}" \
+    --extra-index-url "https://download.pytorch.org/whl/cu129"
 
 
 "${DEFAULT_VENV_BIN}/python" -c 'import vllm; print(f"default venv vllm={vllm.__version__}")'
