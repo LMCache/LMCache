@@ -204,6 +204,15 @@ def test_raw_block_l2_adapter_config_validates_iouring_queue_depth():
         RawBlockL2AdapterConfig.from_dict(_config_dict(iouring_queue_depth=0))
 
 
+@pytest.mark.parametrize("block_align", [0, -1, 3, 4095])
+def test_raw_block_l2_adapter_config_rejects_non_power_of_2_block_align(
+    block_align: int,
+) -> None:
+    """from_dict rejects block_align values that are not a positive power of 2."""
+    with pytest.raises(ValueError, match="block_align"):
+        RawBlockL2AdapterConfig.from_dict(_config_dict(block_align=block_align))
+
+
 def _run_store(adapter: RawBlockL2Adapter, keys, objects) -> bool:
     task_id = adapter.submit_store_task(keys, objects)
     assert _wait_event_fd(adapter.get_store_event_fd())

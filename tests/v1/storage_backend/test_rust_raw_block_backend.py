@@ -111,6 +111,36 @@ def _make_raw_block_core(*, use_odirect: bool = False) -> RawBlockCore:
     )
 
 
+
+@pytest.mark.parametrize("block_align", [0, -1, 3, 4095])
+def test_raw_block_core_rejects_non_power_of_2_block_align(block_align: int) -> None:
+    """RawBlockCore rejects invalid block_align values."""
+    with pytest.raises(ValueError, match="block_align"):
+        RawBlockCore(
+            RawBlockCoreConfig(
+                device_path="/tmp/dummy-does-not-need-to-exist",
+                capacity_bytes=64 * 1024,
+                block_align=block_align,
+                header_bytes=4096,
+                slot_bytes=8192,
+                use_odirect=False,
+                enable_zero_copy=True,
+                meta_total_bytes=16 * 1024,
+                meta_magic=b"LMCIDX01",
+                meta_version=1,
+                meta_checkpoint_interval_sec=60,
+                meta_idle_quiet_ms=100,
+                meta_enable_periodic=False,
+                load_checkpoint_on_init=False,
+                meta_verify_on_load=False,
+                io_engine="posix",
+                iouring_queue_depth=256,
+            ),
+            key_namespace="object",
+        )
+
+
+
 def _make_byte_obj(size: int) -> TensorMemoryObj:
     raw_data = torch.empty(size, dtype=torch.uint8)
     metadata = MemoryObjMetadata(
