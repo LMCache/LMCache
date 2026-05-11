@@ -44,43 +44,81 @@ def _bitmap_count(bitmap: Bitmap | None) -> int:
     return bitmap.popcount()
 
 
-def _wait_store_finished(adapter, task_ids: list[int], timeout: float) -> bool:
+def _wait_store_finished(
+    adapter, task_ids: list[int], timeout: float
+) -> dict[int, bool]:
+    """Wait for all store tasks to finish.
+
+    Returns the accumulated ``{task_id: success}`` dict.
+    ``pop_completed_store_tasks`` consumes the adapter's completion
+    dict, so we must accumulate the results here for the caller to
+    use. On timeout, returns whatever was harvested so far (possibly
+    empty or partial); the caller can detect timeout by comparing
+    ``len(returned_dict)`` against ``len(task_ids)``.
+    """
     unfinished = len(task_ids)
     efd = adapter.get_store_event_fd()
+    completed: dict[int, bool] = {}
     while unfinished > 0:
         if not wait_eventfd(efd, timeout=timeout):
-            return False
-        completed = adapter.pop_completed_store_tasks()
-        unfinished -= len(completed)
-    return True
+            return completed
+        batch = adapter.pop_completed_store_tasks()
+        completed.update(batch)
+        unfinished -= len(batch)
+    return completed
 
 
-def _wait_load_finished(adapter, task_ids: list[int], timeout: float) -> bool:
+def _wait_load_finished(
+    adapter, task_ids: list[int], timeout: float
+) -> dict[int, Bitmap]:
+    """Wait for all load tasks to finish.
+
+    Returns ``{task_id: bitmap}``. ``query_load_result`` consumes the
+    per-task result, so we cache the bitmaps here for the caller.
+    Already-finished tasks are removed from the pending set so
+    subsequent wakeups don't re-query them. On timeout, returns
+    whatever was harvested so far; the caller can detect timeout by
+    comparing ``len(returned_dict)`` against ``len(task_ids)``.
+    """
     pending = set(task_ids)
     efd = adapter.get_load_event_fd()
+    results: dict[int, Bitmap] = {}
     while pending:
         if not wait_eventfd(efd, timeout=timeout):
-            return False
-        # Only query tasks that are still pending; remove finished ones
-        # so subsequent wakeups don't re-query them.
+            return results
         for task_id in list(pending):
-            if adapter.query_load_result(task_id) is not None:
+            bitmap = adapter.query_load_result(task_id)
+            if bitmap is not None:
+                results[task_id] = bitmap
                 pending.remove(task_id)
-    return True
+    return results
 
 
-def _wait_lookup_finished(adapter, task_ids: list[int], timeout: float) -> bool:
+def _wait_lookup_finished(
+    adapter, task_ids: list[int], timeout: float
+) -> dict[int, Bitmap]:
+    """Wait for all lookup-and-lock tasks to finish.
+
+    Returns ``{task_id: bitmap}``. ``query_lookup_and_lock_result``
+    consumes the per-task result, so we cache the bitmaps here for
+    the caller. Already-finished tasks are removed from the pending
+    set so subsequent wakeups don't re-query them. On timeout,
+    returns whatever was harvested so far; the caller can detect
+    timeout by comparing ``len(returned_dict)`` against
+    ``len(task_ids)``.
+    """
     pending = set(task_ids)
     efd = adapter.get_lookup_and_lock_event_fd()
+    results: dict[int, Bitmap] = {}
     while pending:
         if not wait_eventfd(efd, timeout=timeout):
-            return False
-        # Only query tasks that are still pending; remove finished ones
-        # so subsequent wakeups don't re-query them.
+            return results
         for task_id in list(pending):
-            if adapter.query_lookup_and_lock_result(task_id) is not None:
+            bitmap = adapter.query_lookup_and_lock_result(task_id)
+            if bitmap is not None:
+                results[task_id] = bitmap
                 pending.remove(task_id)
-    return True
+    return results
 
 
 # ---------------------------------------------------------------------------
@@ -122,22 +160,26 @@ def bench_store(
         for i in range(in_flight):
             task_ids.append(adapter.submit_store_task(keys_batches[i], obj_batches[i]))
 
-        ok = _wait_store_finished(adapter, task_ids, 120.0)
+        completed = _wait_store_finished(adapter, task_ids, 120.0)
         t1 = time.perf_counter()
         elapsed = t1 - t0
+        timed_out = len(completed) < len(task_ids)
 
-        if not ok:
-            log(f"  [Store] Round {r + 1}: TIMEOUT waiting for completion")
-            result.round_durations.append(float("inf"))
-            result.success_counts.append(0)
-            continue
-
-        completed = adapter.pop_completed_store_tasks()
         success_keys = sum(
             len(keys_batches[i])
             for i, tid in enumerate(task_ids)
             if completed.get(tid, False)
         )
+
+        if timed_out:
+            log(
+                f"  [Store] Round {r + 1}: TIMEOUT "
+                f"({len(completed)}/{len(task_ids)} tasks completed, "
+                f"success_keys={success_keys}/{in_flight * num_keys})"
+            )
+            result.round_durations.append(float("inf"))
+            result.success_counts.append(success_keys)
+            continue
 
         result.round_durations.append(elapsed)
         result.success_counts.append(success_keys)
@@ -183,20 +225,22 @@ def bench_lookup(
         for i in range(in_flight):
             task_ids.append(adapter.submit_lookup_and_lock_task(keys_batches[i]))
 
-        ok = _wait_lookup_finished(adapter, task_ids, 60.0)
+        results = _wait_lookup_finished(adapter, task_ids, 60.0)
         t1 = time.perf_counter()
         elapsed = t1 - t0
+        timed_out = len(results) < len(task_ids)
 
-        if not ok:
-            log(f"  [Lookup] Round {r + 1}: TIMEOUT waiting for completion")
+        total_found = sum(_bitmap_count(results.get(tid)) for tid in task_ids)
+
+        if timed_out:
+            log(
+                f"  [Lookup] Round {r + 1}: TIMEOUT "
+                f"({len(results)}/{len(task_ids)} tasks completed, "
+                f"found={total_found}/{in_flight * num_keys})"
+            )
             result.round_durations.append(float("inf"))
-            result.success_counts.append(0)
+            result.success_counts.append(total_found)
             continue
-
-        total_found = 0
-        for tid in task_ids:
-            bitmap = adapter.query_lookup_and_lock_result(tid)
-            total_found += _bitmap_count(bitmap)
 
         result.round_durations.append(elapsed)
         result.success_counts.append(total_found)
@@ -247,20 +291,22 @@ def bench_load(
         for i in range(in_flight):
             task_ids.append(adapter.submit_load_task(keys_batches[i], obj_batches[i]))
 
-        ok = _wait_load_finished(adapter, task_ids, 120.0)
+        results = _wait_load_finished(adapter, task_ids, 120.0)
         t1 = time.perf_counter()
         elapsed = t1 - t0
+        timed_out = len(results) < len(task_ids)
 
-        if not ok:
-            log(f"  [Load] Round {r + 1}: TIMEOUT waiting for completion")
+        total_loaded = sum(_bitmap_count(results.get(tid)) for tid in task_ids)
+
+        if timed_out:
+            log(
+                f"  [Load] Round {r + 1}: TIMEOUT "
+                f"({len(results)}/{len(task_ids)} tasks completed, "
+                f"loaded={total_loaded}/{in_flight * num_keys})"
+            )
             result.round_durations.append(float("inf"))
-            result.success_counts.append(0)
+            result.success_counts.append(total_loaded)
             continue
-
-        total_loaded = 0
-        for tid in task_ids:
-            bitmap = adapter.query_load_result(tid)
-            total_loaded += _bitmap_count(bitmap)
 
         result.round_durations.append(elapsed)
         result.success_counts.append(total_loaded)
