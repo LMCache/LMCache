@@ -1,7 +1,9 @@
 # KV Cache SDK Examples
 
 These examples show how to use the Python SDK to store, look up, and retrieve
-KV cache packages through the LMCache MP HTTP API.
+KV cache tensors through the LMCache MP HTTP API. The SDK path is memory-first:
+applications can retrieve a tensor package, edit its metadata, and store it
+again without writing the tensor through a local storage format.
 
 ## End-to-end vLLM flow
 
@@ -9,7 +11,8 @@ KV cache packages through the LMCache MP HTTP API.
 end-to-end KV remapping experiment:
 
 1. Send a source prompt to vLLM so the normal connector stores KV in LMCache.
-2. Retrieve the source KV cache with `lmcache.sdk.retrieve`.
+2. Retrieve the source KV cache into an in-memory `KVCachePackage` with
+   `lmcache.sdk.retrieve`.
 3. Build a target token-ID prompt with different synthetic leading tokens, the
    same length as the source prompt, and identical cache-covered trailing
    tokens.
@@ -43,57 +46,46 @@ CHUNK_SIZE=256 \
 MIN_PROMPT_TOKENS=512 \
 FAKE_PREFIX_TOKENS=32 \
 MAX_TOKENS=32 \
+VLLM_BATCH_INVARIANT=1 \
 examples/kvcache_sdk/run_e2e_kv_edit.sh
 ```
 
-Logs and the retrieved KV package are written under
-`/tmp/lmcache_kvcache_sdk_e2e` by default. Override with `TMP_DIR=...`.
+Logs are written under `/tmp/lmcache_kvcache_sdk_e2e` by default. Override with
+`TMP_DIR=...`.
 
-## SDK-only file flow
-
-The example script can create a small `.pt` package with the metadata expected
-by `lmcache.sdk.store`, then call the public SDK helpers:
+The core SDK pattern used by the end-to-end example is:
 
 ```python
 import lmcache.sdk as lmc_sdk
 
-lmc_sdk.store("kv.pt", "http://localhost:8080")
-lmc_sdk.lookup("http://localhost:8080", model_name="...", tokens=[...])
-lmc_sdk.retrieve("kv-hit.pt", "http://localhost:8080", model_name="...", tokens=[...])
+result = lmc_sdk.retrieve(
+    "http://localhost:8080",
+    model_name="...",
+    tokens=source_tokens,
+)
+
+lmc_sdk.store(
+    result.package,
+    "http://localhost:8080",
+    tokens=target_tokens,
+)
 ```
 
-### Requirements
+## Memory-first standalone flow
 
-- An LMCache MP server running with HTTP enabled.
-- A model already registered with that server. Check `/api/status` for the
-  registered `model_name`, `chunk_size`, layer count, dtype, and hidden dim.
-- A homogeneous `KV_2LTD` layout. Hybrid attention is rejected by the v1 API.
-
-The toy package generated below is useful for checking the SDK path, but its
-shape and dtype must match the registered server model.
-
-### Run
-
-Create a toy package. Set the shape fields to match `/api/status` for your
-server:
+The standalone example can also generate a toy tensor in memory and store it
+without writing a KV package file. Set the shape fields to match `/api/status`
+for your server:
 
 ```bash
-python examples/kvcache_sdk/store_retrieve.py make-package \
-  --output /tmp/lmcache-kv.pt \
+python examples/kvcache_sdk/store_retrieve.py store-generated \
+  --url http://localhost:8080 \
   --model-name meta-llama/Llama-3.1-8B-Instruct \
   --chunk-size 256 \
   --num-chunks 1 \
   --num-layers 32 \
   --hidden-dim 4096 \
   --dtype bfloat16
-```
-
-Store it:
-
-```bash
-python examples/kvcache_sdk/store_retrieve.py store \
-  --url http://localhost:8080 \
-  --input /tmp/lmcache-kv.pt
 ```
 
 Probe the cached prefix:
@@ -105,15 +97,24 @@ python examples/kvcache_sdk/store_retrieve.py lookup \
   --num-tokens 256
 ```
 
-Retrieve the hit prefix:
+Retrieve the hit prefix into memory and print only metadata about the returned
+tensor. The SDK intentionally avoids file helpers; applications that want
+durability can serialize their own `KVCachePackage` fields outside
+`lmcache.sdk`.
 
 ```bash
 python examples/kvcache_sdk/store_retrieve.py retrieve \
   --url http://localhost:8080 \
-  --output /tmp/lmcache-kv-hit.pt \
   --model-name meta-llama/Llama-3.1-8B-Instruct \
   --num-tokens 256
 ```
+
+### Requirements
+
+- An LMCache MP server running with HTTP enabled.
+- A model already registered with that server. Check `/api/status` for the
+  registered `model_name`, `chunk_size`, layer count, dtype, and hidden dim.
+- A homogeneous `KV_2LTD` layout. Hybrid attention is rejected by the v1 API.
 
 Use `--cache-salt` on all commands when storing and retrieving from a
 non-default namespace.

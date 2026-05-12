@@ -31,6 +31,7 @@ FAKE_PREFIX_TOKENS="${FAKE_PREFIX_TOKENS:-32}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-4096}"
 MAX_TOKENS="${MAX_TOKENS:-32}"
 GPU_MEM_UTIL="${GPU_MEM_UTIL:-0.6}"
+VLLM_BATCH_INVARIANT="${VLLM_BATCH_INVARIANT:-1}"
 L1_SIZE_GB="${L1_SIZE_GB:-8}"
 REQUEST_TIMEOUT="${REQUEST_TIMEOUT:-120}"
 STORE_WAIT_TIMEOUT="${STORE_WAIT_TIMEOUT:-120}"
@@ -171,7 +172,8 @@ echo "LMCache HTTP port:  ${LMCACHE_HTTP_PORT}"
 echo "vLLM port:          ${VLLM_PORT}"
 echo "Chunk size:         ${CHUNK_SIZE}"
 echo "Fake prefix tokens: ${FAKE_PREFIX_TOKENS}"
-echo "Work dir:           ${TMP_DIR}"
+echo "Batch invariant:   ${VLLM_BATCH_INVARIANT}"
+echo "Log dir:            ${TMP_DIR}"
 
 echo ""
 echo "=== Step 1: starting LMCache MP server ==="
@@ -216,6 +218,7 @@ start_logged_process "${TMP_DIR}/vllm.log" \
     env -u VLLM_PORT \
     CUDA_VISIBLE_DEVICES="${GPU_DEVICE}" \
     VLLM_ENABLE_V1_MULTIPROCESSING=0 \
+    VLLM_BATCH_INVARIANT="${VLLM_BATCH_INVARIANT}" \
     PYTHONHASHSEED=0 \
     vllm serve "${MODEL}" \
     --port "${VLLM_PORT}" \
@@ -256,7 +259,6 @@ python "${SCRIPT_DIR}/e2e_kv_edit.py" \
     --vllm-model-name "${VLLM_MODEL_NAME}" \
     --lmcache-url "http://localhost:${LMCACHE_HTTP_PORT}" \
     --vllm-url "http://localhost:${VLLM_PORT}" \
-    --work-dir "${TMP_DIR}" \
     --chunk-size "${CHUNK_SIZE}" \
     --min-prompt-tokens "${MIN_PROMPT_TOKENS}" \
     --fake-prefix-tokens "${FAKE_PREFIX_TOKENS}" \
@@ -268,4 +270,4 @@ python "${SCRIPT_DIR}/e2e_kv_edit.py" \
     "${TRUST_REMOTE_CODE_DRIVER_ARGS[@]}"
 
 echo ""
-echo "Logs and retrieved KV package are under ${TMP_DIR}"
+echo "Logs are under ${TMP_DIR}"

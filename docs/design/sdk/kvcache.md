@@ -4,18 +4,22 @@
 
 ## Goal
 
-Provide a small Python SDK surface for moving KV cache files into and out
-of an LMCache MP server:
+Provide a small Python SDK surface for moving KV cache tensors into and out
+of an LMCache MP server without forcing applications through local storage:
 
 ```python
 import lmcache.sdk as lmc_sdk
 
-lmc_sdk.store("kv.pt", "http://localhost:8080")
-lmc_sdk.retrieve(
-    "kv-hit.pt",
+result = lmc_sdk.retrieve(
     "http://localhost:8080",
     model_name="meta-llama/Llama-3.1-8B-Instruct",
     tokens=[1, 2, 3],
+)
+
+lmc_sdk.store(
+    result.package,
+    "http://localhost:8080",
+    tokens=[4, 5, 6],
 )
 lmc_sdk.lookup(
     "http://localhost:8080",
@@ -27,24 +31,21 @@ lmc_sdk.lookup(
 This PR intentionally does not add a CLI. A future CLI should call these
 SDK functions rather than duplicate protocol code.
 
-## File Contract
+## Memory Contract
 
-`store` accepts `.pt` or `.safetensors` packages. The package must contain
-a 4-D tensor named `kv` in canonical `KV_2LTD` layout:
+The primary SDK payload is `KVCachePackage`, an in-memory object containing:
 
-```text
-[2, num_layers, total_tokens, hidden_dim]
-```
+- `kv`: a 4-D tensor in canonical `KV_2LTD` layout
+  `[2, num_layers, total_tokens, hidden_dim]`.
+- `model_name`: registered LMCache model name.
+- `tokens`: token IDs addressed by the tensor.
+- `cache_salt`: optional namespace salt.
 
-The SDK also needs `model_name`, `tokens`, and optional `cache_salt`.
-Callers can pass those values explicitly, or store them in file metadata:
-
-- `.pt`: a mapping with `kv`, `model_name`, `tokens`, and `cache_salt`.
-- `.safetensors`: tensor `kv`, with string metadata for `model_name`,
-  JSON-encoded `tokens`, and `cache_salt`.
-
-Retrieve writes the same package shape and metadata. The saved token list
-is truncated to the retrieved hit prefix.
+`retrieve` returns the assembled package in `result.package`. `store` accepts
+that package directly and streams its tensor bytes to the server. This keeps
+edit workflows in memory and avoids an unnecessary `torch.save` / `torch.load`
+round trip. Callers that need durability or offline interchange should serialize
+their own `KVCachePackage` fields outside the SDK.
 
 ## Protocol Ownership
 
@@ -55,7 +56,7 @@ one protocol definition.
 
 Store flow:
 
-1. Load and validate the local package.
+1. Resolve metadata overrides and validate the in-memory package.
 2. Read `/api/status` to learn `chunk_size`.
 3. Send a `store_manifest` frame.
 4. Stream one `store_chunk` frame per complete token chunk.
@@ -67,7 +68,7 @@ Retrieve flow:
 3. Allocate the full hit-prefix tensor on CPU.
 4. Copy each `retrieve_shard` payload into the correct token and
    tensor-parallel hidden-dimension slice.
-5. Save the assembled package.
+5. Return the assembled package in memory.
 
 Lookup sends the same JSON request as retrieve and returns the metadata
 JSON directly as a typed result.

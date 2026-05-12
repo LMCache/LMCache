@@ -191,19 +191,23 @@ This PR adds `lmcache.sdk` as the supported client interface:
 ```python
 import lmcache.sdk as lmc_sdk
 
-lmc_sdk.store("kv.pt", "http://localhost:8080")
-lmc_sdk.retrieve(
-    "kv-hit.pt",
+result = lmc_sdk.retrieve(
     "http://localhost:8080",
     model_name="meta-llama/Llama-3.1-8B-Instruct",
     tokens=[1, 2, 3],
 )
+lmc_sdk.store(
+    result.package,
+    "http://localhost:8080",
+    tokens=[4, 5, 6],
+)
 ```
 
-The SDK owns file packaging and client-side assembly. It loads `.pt` or
-`.safetensors` files, streams store chunks to the server, decodes retrieve
-frames, concatenates returned worker shards into the full tensor, and saves
-the result.
+The SDK owns protocol framing and client-side assembly, but not file storage.
+It accepts an in-memory `KVCachePackage`, streams store chunks to the server,
+decodes retrieve frames, and concatenates returned worker shards into an
+in-memory `KVCachePackage`. Callers that need files can serialize their own
+package fields outside `lmcache.sdk`.
 
 ## 6. Concurrency
 
@@ -227,8 +231,8 @@ V1 rejects unsupported layouts before acquiring storage locks:
 
 ## 8. Future Work
 
-- CLI on top of the same SDK/protocol, for example
-  `lmcache kvcache store -i kv.pt --url http://localhost:8080`.
+- CLI on top of the same protocol. A future CLI can own its file format and
+  feed an in-memory `KVCachePackage` into the SDK.
 - Editing conventions: fake token sequences, orchestration-layer
   virtualization between original and edited caches, and version selection.
 - Hybrid-attention payload format with per-layer-group frame metadata.

@@ -1,17 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
-"""SDK helpers for storing and retrieving KV cache files over HTTP."""
+"""SDK helpers for storing and retrieving KV cache tensors over HTTP."""
 
 # Standard
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from pathlib import Path
 from typing import cast
-import json
 import math
 
 # Third Party
-from safetensors import safe_open
-from safetensors.torch import save_file as safetensors_save_file
 import httpx
 import torch
 
@@ -35,6 +31,24 @@ class KVCacheSDKError(RuntimeError):
 
 
 @dataclass(frozen=True)
+class KVCachePackage:
+    """In-memory KV cache tensor plus routing metadata.
+
+    Args:
+        kv: 4-D KV tensor in canonical ``[2, num_layers, num_tokens, hidden_dim]``
+            layout.
+        model_name: Registered LMCache model name for the KV tensor.
+        tokens: Token IDs addressed by ``kv``.
+        cache_salt: Optional per-namespace isolation salt.
+    """
+
+    kv: torch.Tensor
+    model_name: str
+    tokens: list[int]
+    cache_salt: str = ""
+
+
+@dataclass(frozen=True)
 class StoreResult:
     """Result returned by :func:`store`."""
 
@@ -52,7 +66,7 @@ class RetrieveResult:
     total_chunks: int
     hit_tokens: int
     hit_chunks: int
-    output_path: Path
+    package: KVCachePackage
 
 
 @dataclass(frozen=True)
@@ -65,18 +79,8 @@ class LookupResult:
     hit_chunks: int
 
 
-@dataclass(frozen=True)
-class _KVPackage:
-    """Loaded KV cache file plus routing metadata."""
-
-    kv: torch.Tensor
-    model_name: str
-    tokens: list[int]
-    cache_salt: str
-
-
 def store(
-    input_path: str | Path,
+    package: KVCachePackage,
     url: str,
     *,
     model_name: str = "",
@@ -84,33 +88,32 @@ def store(
     cache_salt: str = "",
     timeout: float = 60.0,
 ) -> StoreResult:
-    """Store a local KV cache file into an LMCache HTTP server.
+    """Store an in-memory KV cache package into an LMCache HTTP server.
 
     Args:
-        input_path: Path to a ``.pt`` or ``.safetensors`` KV package. The
-            package must contain a 4-D tensor named ``"kv"`` in canonical
-            KV_2LTD layout ``[2, num_layers, num_tokens, hidden_dim]``.
+        package: In-memory KV package. The tensor must use canonical KV_2LTD
+            layout ``[2, num_layers, num_tokens, hidden_dim]``.
         url: Base URL of the LMCache MP HTTP server.
         model_name: Optional model-name override. If empty, the value is read
-            from file metadata.
+            from the package metadata.
         tokens: Optional token sequence override. If empty, the sequence is
-            read from file metadata.
+            read from the package metadata.
         cache_salt: Optional cache-salt override. If empty, the value is read
-            from file metadata when present.
+            from the package metadata when present.
         timeout: HTTP timeout in seconds.
 
     Returns:
         Store result metadata reported by the server.
 
     Raises:
-        KVCacheSDKError: If the file, metadata, or HTTP request is invalid.
+        KVCacheSDKError: If the tensor, metadata, or HTTP request is invalid.
     """
-    package = _load_package(input_path, model_name, tokens, cache_salt)
+    resolved_package = _resolve_package(package, model_name, tokens, cache_salt)
     chunk_size = _fetch_chunk_size(url, timeout)
-    _validate_store_package(package, chunk_size)
+    _validate_store_package(resolved_package, chunk_size)
     response = httpx.post(
         f"{_normalize_url(url)}/api/kv/store",
-        content=_iter_store_frames(package, chunk_size),
+        content=_iter_store_frames(resolved_package, chunk_size),
         headers={"Content-Type": STREAM_MEDIA_TYPE},
         timeout=timeout,
     )
@@ -125,7 +128,6 @@ def store(
 
 
 def retrieve(
-    output_path: str | Path,
     url: str,
     *,
     model_name: str,
@@ -133,10 +135,9 @@ def retrieve(
     cache_salt: str = "",
     timeout: float = 60.0,
 ) -> RetrieveResult:
-    """Retrieve KV cache bytes from an LMCache HTTP server into a file.
+    """Retrieve KV cache bytes from an LMCache HTTP server into memory.
 
     Args:
-        output_path: Destination ``.pt`` or ``.safetensors`` package path.
         url: Base URL of the LMCache MP HTTP server.
         model_name: Registered model name to retrieve from.
         tokens: Token sequence to retrieve.
@@ -144,7 +145,7 @@ def retrieve(
         timeout: HTTP timeout in seconds.
 
     Returns:
-        Retrieve metadata and the destination path.
+        Retrieve metadata and the assembled in-memory KV package.
 
     Raises:
         KVCacheSDKError: If the HTTP request or stream is invalid.
@@ -217,22 +218,18 @@ def retrieve(
                 f"retrieve response missing {len(missing_shards)} shard frames"
             )
 
-    path = Path(output_path)
-    _save_package(
-        path,
-        _KVPackage(
-            kv=kv,
-            model_name=model_name,
-            tokens=list(tokens)[: manifest.hit_tokens],
-            cache_salt=cache_salt,
-        ),
+    package = KVCachePackage(
+        kv=kv,
+        model_name=manifest.model_name,
+        tokens=list(tokens)[: manifest.hit_tokens],
+        cache_salt=cache_salt,
     )
     return RetrieveResult(
         total_tokens=manifest.total_tokens,
         total_chunks=manifest.total_chunks,
         hit_tokens=manifest.hit_tokens,
         hit_chunks=manifest.hit_chunks,
-        output_path=path,
+        package=package,
     )
 
 
@@ -289,27 +286,23 @@ def _normalize_url(url: str) -> str:
     return stripped.rstrip("/")
 
 
-def _load_package(
-    input_path: str | Path,
+def _resolve_package(
+    package: KVCachePackage,
     model_name: str,
     tokens: Sequence[int],
     cache_salt: str,
-) -> _KVPackage:
-    """Load a KV package and apply explicit metadata overrides."""
-    path = Path(input_path)
-    if path.suffix == ".safetensors":
-        package = _load_safetensors_package(path)
-    else:
-        package = _load_pt_package(path)
-
+) -> KVCachePackage:
+    """Apply metadata overrides to an in-memory package."""
+    if not isinstance(package, KVCachePackage):
+        raise KVCacheSDKError("package must be a KVCachePackage")
     resolved_model_name = model_name or package.model_name
     resolved_tokens = list(tokens) if tokens else package.tokens
     resolved_cache_salt = cache_salt or package.cache_salt
     if not resolved_model_name:
-        raise KVCacheSDKError("model_name must be provided or stored in the file")
+        raise KVCacheSDKError("model_name must be provided or stored in the package")
     if not resolved_tokens:
-        raise KVCacheSDKError("tokens must be provided or stored in the file")
-    return _KVPackage(
+        raise KVCacheSDKError("tokens must be provided or stored in the package")
+    return KVCachePackage(
         kv=package.kv.detach().cpu(),
         model_name=resolved_model_name,
         tokens=resolved_tokens,
@@ -317,72 +310,7 @@ def _load_package(
     )
 
 
-def _load_pt_package(path: Path) -> _KVPackage:
-    """Load a ``torch.save`` KV package."""
-    try:
-        loaded: object = torch.load(path, map_location="cpu", weights_only=True)
-    except TypeError:
-        loaded = torch.load(path, map_location="cpu")
-    if isinstance(loaded, torch.Tensor):
-        return _KVPackage(kv=loaded, model_name="", tokens=[], cache_salt="")
-    if not isinstance(loaded, Mapping):
-        raise KVCacheSDKError("PT package must be a tensor or a mapping")
-    mapping = cast(Mapping[object, object], loaded)
-    kv_obj = mapping.get("kv")
-    if not isinstance(kv_obj, torch.Tensor):
-        raise KVCacheSDKError("PT package mapping must contain a tensor named 'kv'")
-    return _KVPackage(
-        kv=kv_obj,
-        model_name=_coerce_str(mapping.get("model_name", ""), "model_name"),
-        tokens=_coerce_tokens(mapping.get("tokens", []), "tokens"),
-        cache_salt=_coerce_str(mapping.get("cache_salt", ""), "cache_salt"),
-    )
-
-
-def _load_safetensors_package(path: Path) -> _KVPackage:
-    """Load a safetensors KV package."""
-    with safe_open(path, framework="pt", device="cpu") as handle:
-        keys = list(handle.keys())
-        if "kv" in keys:
-            kv = handle.get_tensor("kv")
-        elif len(keys) == 1:
-            kv = handle.get_tensor(keys[0])
-        else:
-            raise KVCacheSDKError("safetensors package must contain a 'kv' tensor")
-        metadata = handle.metadata() or {}
-    return _KVPackage(
-        kv=kv,
-        model_name=metadata.get("model_name", ""),
-        tokens=_tokens_from_metadata(metadata.get("tokens", "")),
-        cache_salt=metadata.get("cache_salt", ""),
-    )
-
-
-def _save_package(path: Path, package: _KVPackage) -> None:
-    """Save a KV package as ``.pt`` or ``.safetensors``."""
-    if path.suffix == ".safetensors":
-        safetensors_save_file(
-            {"kv": package.kv.contiguous()},
-            path,
-            metadata={
-                "model_name": package.model_name,
-                "tokens": json.dumps(package.tokens),
-                "cache_salt": package.cache_salt,
-            },
-        )
-        return
-    torch.save(
-        {
-            "kv": package.kv,
-            "model_name": package.model_name,
-            "tokens": package.tokens,
-            "cache_salt": package.cache_salt,
-        },
-        path,
-    )
-
-
-def _validate_store_package(package: _KVPackage, chunk_size: int) -> None:
+def _validate_store_package(package: KVCachePackage, chunk_size: int) -> None:
     """Validate tensor shape against token metadata and server chunk size."""
     if package.kv.ndim != 4:
         raise KVCacheSDKError(
@@ -398,7 +326,7 @@ def _validate_store_package(package: _KVPackage, chunk_size: int) -> None:
         )
 
 
-def _iter_store_frames(package: _KVPackage, chunk_size: int) -> Iterable[bytes]:
+def _iter_store_frames(package: KVCachePackage, chunk_size: int) -> Iterable[bytes]:
     """Yield protocol frames for storing a KV package."""
     kv = package.kv.contiguous()
     shape = tuple(int(dim) for dim in kv.shape)
@@ -467,37 +395,3 @@ def _dtype_from_name(dtype_name: str) -> torch.dtype:
     if not isinstance(dtype, torch.dtype):
         raise KVCacheSDKError(f"unsupported KV dtype {dtype_name!r}")
     return dtype
-
-
-def _tokens_from_metadata(raw_tokens: str) -> list[int]:
-    """Parse token metadata from a safetensors metadata string."""
-    if not raw_tokens:
-        return []
-    try:
-        decoded: object = json.loads(raw_tokens)
-    except json.JSONDecodeError as exc:
-        raise KVCacheSDKError("safetensors token metadata must be JSON") from exc
-    return _coerce_tokens(decoded, "tokens")
-
-
-def _coerce_tokens(value: object, field_name: str) -> list[int]:
-    """Coerce a token metadata value to ``list[int]``."""
-    if isinstance(value, torch.Tensor):
-        raw_values = value.reshape(-1).tolist()
-    elif isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
-        raw_values = list(value)
-    else:
-        raise KVCacheSDKError(f"{field_name} must be a sequence of ints")
-    tokens: list[int] = []
-    for item in raw_values:
-        if isinstance(item, bool) or not isinstance(item, int):
-            raise KVCacheSDKError(f"{field_name} must be a sequence of ints")
-        tokens.append(item)
-    return tokens
-
-
-def _coerce_str(value: object, field_name: str) -> str:
-    """Coerce a metadata value to ``str``."""
-    if not isinstance(value, str):
-        raise KVCacheSDKError(f"{field_name} must be a string")
-    return value

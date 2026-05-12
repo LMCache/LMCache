@@ -3,7 +3,6 @@
 
 # Standard
 from dataclasses import dataclass
-from pathlib import Path
 from typing import cast
 import argparse
 import json
@@ -214,9 +213,6 @@ def run(args: argparse.Namespace) -> None:
         fake_prefix_tokens=args.fake_prefix_tokens,
     )
 
-    args.work_dir.mkdir(parents=True, exist_ok=True)
-    source_kv_path = args.work_dir / "source-kv.pt"
-
     print("== Step 1: source inference stores KV under source token IDs ==")
     source_completion = _post_completion(
         vllm_url=args.vllm_url,
@@ -239,9 +235,8 @@ def run(args: argparse.Namespace) -> None:
         timeout=args.store_wait_timeout,
     )
 
-    print("== Step 2: retrieve source KV through lmcache.sdk ==")
+    print("== Step 2: retrieve source KV into memory through lmcache.sdk ==")
     retrieve_result = lmc_sdk.retrieve(
-        source_kv_path,
         args.lmcache_url,
         model_name=lmcache_model_name,
         tokens=source_tokens,
@@ -276,7 +271,7 @@ def run(args: argparse.Namespace) -> None:
 
     print("== Step 3: store source KV under different target token IDs ==")
     store_result = lmc_sdk.store(
-        source_kv_path,
+        retrieve_result.package,
         args.lmcache_url,
         model_name=lmcache_model_name,
         tokens=target_prefix_tokens,
@@ -363,7 +358,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--tokenizer", default="", help="Optional tokenizer override.")
     parser.add_argument("--lmcache-url", required=True)
     parser.add_argument("--vllm-url", required=True)
-    parser.add_argument("--work-dir", type=Path, required=True)
     parser.add_argument("--chunk-size", type=int, default=256)
     parser.add_argument("--min-prompt-tokens", type=int, default=512)
     parser.add_argument("--fake-prefix-tokens", type=int, default=32)

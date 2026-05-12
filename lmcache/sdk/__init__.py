@@ -3,6 +3,7 @@
 
 # First Party
 from lmcache.sdk.kvcache import (
+    KVCachePackage,
     KVCacheSDKError,
     LookupResult,
     RetrieveResult,
@@ -13,6 +14,7 @@ from lmcache.sdk.kvcache import (
 )
 
 __all__ = [
+    "KVCachePackage",
     "KVCacheSDKError",
     "LookupResult",
     "RetrieveResult",

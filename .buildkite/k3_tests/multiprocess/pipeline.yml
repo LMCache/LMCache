@@ -64,3 +64,10 @@ steps:
         agents: { queue: "k8s" }
         plugins: [{ kubernetes: { podSpec: *pod-2gpu } }]
         artifact_paths: ["*.log"]
+
+      - label: ":compression: kvcache_sdk"
+        command: .buildkite/k3_tests/multiprocess/run.sh kvcache_sdk
+        timeout_in_minutes: 30
+        agents: { queue: "k8s" }
+        plugins: [{ kubernetes: { podSpec: *pod-2gpu } }]
+        artifact_paths: ["*.log"]

@@ -4,7 +4,6 @@
 # Standard
 from collections.abc import Iterator
 from contextlib import contextmanager
-from pathlib import Path
 from typing import cast
 
 # Third Party
@@ -52,15 +51,15 @@ def _response(
     return httpx.Response(200, content=content, request=request)
 
 
-def test_store_streams_chunked_protocol(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
+def test_store_streams_chunked_protocol(monkeypatch) -> None:
     """``lmc_sdk.store`` streams one manifest and one frame per chunk."""
     tensor = _make_tensor()
     tokens = list(range(CHUNK_SIZE * 2 + 3))
-    input_path = tmp_path / "kv.pt"
-    torch.save({"kv": tensor, "model_name": "m", "tokens": tokens}, input_path)
+    package = lmc_sdk.KVCachePackage(
+        kv=tensor,
+        model_name="m",
+        tokens=tokens,
+    )
 
     captured_frames: list[bytes] = []
 
@@ -89,7 +88,7 @@ def test_store_streams_chunked_protocol(
     monkeypatch.setattr(httpx, "get", fake_get)
     monkeypatch.setattr(httpx, "post", fake_post)
 
-    result = lmc_sdk.store(input_path, "localhost:8080")
+    result = lmc_sdk.store(package, "localhost:8080")
 
     frames = iter_decode_frames(captured_frames)
     manifest = decode_store_manifest(next(frames))
@@ -105,13 +104,55 @@ def test_store_streams_chunked_protocol(
     assert chunk1_payload == _chunk_payload(tensor, 1)
 
 
-def test_retrieve_assembles_shards_into_output_file(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    """``lmc_sdk.retrieve`` assembles streamed worker shards into one tensor."""
+def test_store_accepts_in_memory_package(monkeypatch) -> None:
+    """``lmc_sdk.store`` applies token overrides to an in-memory package."""
     tensor = _make_tensor()
-    output_path = tmp_path / "retrieved.pt"
+    source_tokens = list(range(CHUNK_SIZE * 2 + 3))
+    target_tokens = list(range(1000, 1000 + CHUNK_SIZE * 2 + 3))
+    package = lmc_sdk.KVCachePackage(
+        kv=tensor,
+        model_name="m",
+        tokens=source_tokens,
+    )
+    captured_frames: list[bytes] = []
+
+    def fake_get(url: str, timeout: float) -> httpx.Response:
+        return _response("GET", url, json_body={"chunk_size": CHUNK_SIZE})
+
+    def fake_post(
+        url: str,
+        content: Iterator[bytes],
+        headers: dict[str, str],
+        timeout: float,
+    ) -> httpx.Response:
+        captured_frames.extend(content)
+        return _response(
+            "POST",
+            url,
+            json_body={
+                "status": "ok",
+                "total_tokens": CHUNK_SIZE * 2,
+                "total_chunks": 2,
+                "stored_tokens": CHUNK_SIZE * 2,
+                "stored_chunks": 2,
+            },
+        )
+
+    monkeypatch.setattr(httpx, "get", fake_get)
+    monkeypatch.setattr(httpx, "post", fake_post)
+
+    result = lmc_sdk.store(package, "localhost:8080", tokens=target_tokens)
+
+    frames = iter_decode_frames(captured_frames)
+    manifest = decode_store_manifest(next(frames))
+    assert result.stored_chunks == 2
+    assert manifest.model_name == "m"
+    assert manifest.tokens == target_tokens
+
+
+def test_retrieve_assembles_shards_into_memory(monkeypatch) -> None:
+    """``lmc_sdk.retrieve`` assembles streamed worker shards into memory."""
+    tensor = _make_tensor()
     tokens = list(range(CHUNK_SIZE * 2))
     response_body = b"".join(
         [
@@ -146,27 +187,22 @@ def test_retrieve_assembles_shards_into_output_file(
     monkeypatch.setattr(httpx, "stream", fake_stream)
 
     result = lmc_sdk.retrieve(
-        output_path,
         "http://localhost:8080",
         model_name="m",
         tokens=tokens,
     )
 
-    loaded = torch.load(output_path, map_location="cpu", weights_only=True)
     assert result.hit_chunks == 2
-    assert isinstance(loaded, dict)
-    assert torch.equal(loaded["kv"], tensor)
-    assert loaded["model_name"] == "m"
-    assert loaded["tokens"] == tokens
+    assert torch.equal(result.package.kv, tensor)
+    assert result.package.model_name == "m"
+    assert result.package.tokens == tokens
 
 
 def test_retrieve_rejects_missing_shard(
-    tmp_path: Path,
     monkeypatch,
 ) -> None:
     """``lmc_sdk.retrieve`` rejects incomplete retrieve streams."""
     tensor = _make_tensor()[:, :, :CHUNK_SIZE, :].contiguous()
-    output_path = tmp_path / "missing.pt"
     tokens = list(range(CHUNK_SIZE))
     response_body = b"".join(
         [
@@ -202,12 +238,10 @@ def test_retrieve_rejects_missing_shard(
 
     with pytest.raises(lmc_sdk.KVCacheSDKError, match="missing 1 shard"):
         lmc_sdk.retrieve(
-            output_path,
             "http://localhost:8080",
             model_name="m",
             tokens=tokens,
         )
-    assert not output_path.exists()
 
 
 def test_lookup_returns_server_metadata(monkeypatch) -> None:

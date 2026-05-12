@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Example client for the LMCache KV-cache SDK."""
+"""Example in-memory client for the LMCache KV-cache SDK."""
 
 # Standard
-from pathlib import Path
 import argparse
 import json
 
@@ -28,8 +27,8 @@ def _tokens(token_start: int, num_tokens: int) -> list[int]:
     return list(range(token_start, token_start + num_tokens))
 
 
-def _make_package(args: argparse.Namespace) -> None:
-    """Create a toy KV package that can be passed to ``lmc_sdk.store``."""
+def _make_kv_package(args: argparse.Namespace) -> lmc_sdk.KVCachePackage:
+    """Create a toy in-memory KV package for SDK calls."""
     num_tokens = args.chunk_size * args.num_chunks
     tokens = _tokens(args.token_start, num_tokens)
     dtype = _dtype_from_name(args.dtype)
@@ -38,24 +37,19 @@ def _make_package(args: argparse.Namespace) -> None:
         (2, args.num_layers, num_tokens, args.hidden_dim),
         dtype=dtype,
     )
-    torch.save(
-        {
-            "kv": kv,
-            "model_name": args.model_name,
-            "tokens": tokens,
-            "cache_salt": args.cache_salt,
-        },
-        args.output,
-    )
-    print(f"wrote {args.output} with shape {tuple(kv.shape)} and dtype {kv.dtype}")
-
-
-def _store(args: argparse.Namespace) -> None:
-    """Store a KV package through the SDK."""
-    result = lmc_sdk.store(
-        args.input,
-        args.url,
+    return lmc_sdk.KVCachePackage(
+        kv=kv,
+        model_name=args.model_name,
+        tokens=tokens,
         cache_salt=args.cache_salt,
+    )
+
+
+def _store_generated(args: argparse.Namespace) -> None:
+    """Generate a KV package in memory and store it through the SDK."""
+    result = lmc_sdk.store(
+        _make_kv_package(args),
+        args.url,
         timeout=args.timeout,
     )
     print(json.dumps(result.__dict__, indent=2, default=str))
@@ -74,16 +68,24 @@ def _lookup(args: argparse.Namespace) -> None:
 
 
 def _retrieve(args: argparse.Namespace) -> None:
-    """Retrieve a cached prefix through the SDK."""
+    """Retrieve a cached prefix into memory through the SDK."""
     result = lmc_sdk.retrieve(
-        args.output,
         args.url,
         model_name=args.model_name,
         tokens=_tokens(args.token_start, args.num_tokens),
         cache_salt=args.cache_salt,
         timeout=args.timeout,
     )
-    print(json.dumps(result.__dict__, indent=2, default=str))
+    output = {
+        "total_tokens": result.total_tokens,
+        "total_chunks": result.total_chunks,
+        "hit_tokens": result.hit_tokens,
+        "hit_chunks": result.hit_chunks,
+        "package_shape": tuple(result.package.kv.shape),
+        "package_dtype": str(result.package.kv.dtype),
+        "package_tokens": len(result.package.tokens),
+    }
+    print(json.dumps(output, indent=2, default=str))
 
 
 def _add_common_http_args(parser: argparse.ArgumentParser) -> None:
@@ -99,32 +101,32 @@ def _add_token_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--num-tokens", type=int, required=True)
 
 
-def build_parser() -> argparse.ArgumentParser:
-    """Build the command-line parser for the example script."""
-    parser = argparse.ArgumentParser(
-        description="Store, look up, and retrieve KV cache packages via lmcache.sdk."
-    )
-    subparsers = parser.add_subparsers(dest="command", required=True)
-
-    make_package = subparsers.add_parser("make-package")
-    make_package.add_argument("--output", type=Path, required=True)
-    make_package.add_argument("--model-name", required=True)
-    make_package.add_argument("--cache-salt", default="")
-    make_package.add_argument("--chunk-size", type=int, required=True)
-    make_package.add_argument("--num-chunks", type=int, required=True)
-    make_package.add_argument("--num-layers", type=int, required=True)
-    make_package.add_argument("--hidden-dim", type=int, required=True)
-    make_package.add_argument(
+def _add_package_args(parser: argparse.ArgumentParser) -> None:
+    """Add arguments for constructing a toy KV package."""
+    parser.add_argument("--model-name", required=True)
+    parser.add_argument("--chunk-size", type=int, required=True)
+    parser.add_argument("--num-chunks", type=int, required=True)
+    parser.add_argument("--num-layers", type=int, required=True)
+    parser.add_argument("--hidden-dim", type=int, required=True)
+    parser.add_argument(
         "--dtype",
         choices=["float32", "float16", "bfloat16"],
         default="bfloat16",
     )
-    make_package.add_argument("--token-start", type=int, default=0)
-    make_package.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--token-start", type=int, default=0)
+    parser.add_argument("--seed", type=int, default=0)
 
-    store = subparsers.add_parser("store")
-    _add_common_http_args(store)
-    store.add_argument("--input", type=Path, required=True)
+
+def build_parser() -> argparse.ArgumentParser:
+    """Build the command-line parser for the example script."""
+    parser = argparse.ArgumentParser(
+        description="Store, look up, and retrieve KV cache tensors via lmcache.sdk."
+    )
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    store_generated = subparsers.add_parser("store-generated")
+    _add_common_http_args(store_generated)
+    _add_package_args(store_generated)
 
     lookup = subparsers.add_parser("lookup")
     _add_common_http_args(lookup)
@@ -135,7 +137,6 @@ def build_parser() -> argparse.ArgumentParser:
     _add_common_http_args(retrieve)
     _add_token_args(retrieve)
     retrieve.add_argument("--model-name", required=True)
-    retrieve.add_argument("--output", type=Path, required=True)
 
     return parser
 
@@ -143,10 +144,8 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> None:
     """Run the selected example command."""
     args = build_parser().parse_args()
-    if args.command == "make-package":
-        _make_package(args)
-    elif args.command == "store":
-        _store(args)
+    if args.command == "store-generated":
+        _store_generated(args)
     elif args.command == "lookup":
         _lookup(args)
     elif args.command == "retrieve":

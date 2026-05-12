@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Orchestrator for a single multiprocessing test (native, no Docker).
 # Usage: run-single-test.sh <test_name>
-#   test_name: lm_eval | vllm_bench | long_doc_qa | long_doc_qa_l2 | fault_tolerance
+#   test_name: lm_eval | vllm_bench | long_doc_qa | long_doc_qa_l2 |
+#              fault_tolerance | deadlock | restart_recovery | kvcache_sdk
 #
 # Each invocation is self-contained: launches servers, runs one test, cleans up.
 # This mirrors the comprehensive tests' run-single-config.sh pattern.
@@ -43,7 +44,7 @@ echo "Results dir: $RESULTS_DIR"
 echo ""
 
 # Tests that handle their own server lifecycle (different GPU/model config)
-SELF_CONTAINED_TESTS=" deadlock "
+SELF_CONTAINED_TESTS=" deadlock kvcache_sdk "
 
 if [[ "$SELF_CONTAINED_TESTS" != *" $TEST_NAME "* ]]; then
     # ── Step 1: Launch native processes ──────────────────────────
@@ -94,9 +95,12 @@ case "$TEST_NAME" in
     restart_recovery)
         exec_script="${SCRIPT_DIR}/run-restart-recovery.sh"
         ;;
+    kvcache_sdk)
+        exec_script="${SCRIPT_DIR}/run-kvcache-sdk.sh"
+        ;;
     *)
         echo "Unknown test: $TEST_NAME"
-        echo "Valid tests: lm_eval, vllm_bench, long_doc_qa, long_doc_qa_l2, fault_tolerance, deadlock, restart_recovery"
+        echo "Valid tests: lm_eval, vllm_bench, long_doc_qa, long_doc_qa_l2, fault_tolerance, deadlock, restart_recovery, kvcache_sdk"
         exit 1
         ;;
 esac
