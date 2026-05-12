@@ -1,0 +1,181 @@
+#!/usr/bin/env bash
+#
+# End-to-end example for the LMCache KV-cache SDK:
+#   1. Start an LMCache MP server with HTTP enabled.
+#   2. Start vLLM connected to that server via LMCacheMPConnector.
+#   3. Run one source inference so vLLM stores KV cache in LMCache.
+#   4. Retrieve the source KV cache with lmcache.sdk.
+#   5. Store that KV cache under different target token IDs.
+#   6. Send a target request to vLLM and print evaluation results.
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+if [ -d "${REPO_ROOT}/.venv/bin" ]; then
+    export PATH="${REPO_ROOT}/.venv/bin:${PATH}"
+fi
+
+MODEL="${MODEL:-Qwen/Qwen2.5-0.5B-Instruct}"
+TOKENIZER="${TOKENIZER:-}"
+VLLM_MODEL_NAME="${VLLM_MODEL_NAME:-${MODEL}}"
+LMCACHE_MODEL_NAME="${LMCACHE_MODEL_NAME:-}"
+GPU_DEVICE="${GPU_DEVICE:-0}"
+
+LMCACHE_PORT="${LMCACHE_PORT:-6555}"
+LMCACHE_HTTP_PORT="${LMCACHE_HTTP_PORT:-8080}"
+VLLM_PORT="${VLLM_PORT:-8000}"
+
+CHUNK_SIZE="${CHUNK_SIZE:-256}"
+MIN_PROMPT_TOKENS="${MIN_PROMPT_TOKENS:-$((CHUNK_SIZE * 2))}"
+MAX_MODEL_LEN="${MAX_MODEL_LEN:-4096}"
+MAX_TOKENS="${MAX_TOKENS:-32}"
+GPU_MEM_UTIL="${GPU_MEM_UTIL:-0.6}"
+L1_SIZE_GB="${L1_SIZE_GB:-8}"
+REQUEST_TIMEOUT="${REQUEST_TIMEOUT:-120}"
+STORE_WAIT_TIMEOUT="${STORE_WAIT_TIMEOUT:-120}"
+TRUST_REMOTE_CODE="${TRUST_REMOTE_CODE:-true}"
+TMP_DIR="${TMP_DIR:-/tmp/lmcache_kvcache_sdk_e2e}"
+
+mkdir -p "${TMP_DIR}"
+
+LMCACHE_PID=""
+VLLM_PID=""
+
+cleanup() {
+    echo "--- Cleaning up ---"
+    [ -n "${VLLM_PID}" ] && kill "${VLLM_PID}" 2>/dev/null || true
+    [ -n "${LMCACHE_PID}" ] && kill "${LMCACHE_PID}" 2>/dev/null || true
+    wait 2>/dev/null || true
+}
+trap cleanup EXIT INT TERM
+
+wait_for_url() {
+    local url="$1"
+    local timeout="${2:-300}"
+    local elapsed=0
+    while ! curl -sf "${url}" >/dev/null 2>&1; do
+        sleep 2
+        elapsed=$((elapsed + 2))
+        if [ "${elapsed}" -ge "${timeout}" ]; then
+            echo "Timed out waiting for ${url}" >&2
+            return 1
+        fi
+    done
+}
+
+require_command() {
+    local command_name="$1"
+    if ! command -v "${command_name}" >/dev/null 2>&1; then
+        echo "Required command not found: ${command_name}" >&2
+        exit 1
+    fi
+}
+
+require_command lmcache
+require_command vllm
+require_command curl
+
+echo "============================================"
+echo "=== LMCache KV SDK end-to-end example ==="
+echo "============================================"
+echo "Model:              ${MODEL}"
+echo "vLLM model name:    ${VLLM_MODEL_NAME}"
+echo "LMCache ZMQ port:   ${LMCACHE_PORT}"
+echo "LMCache HTTP port:  ${LMCACHE_HTTP_PORT}"
+echo "vLLM port:          ${VLLM_PORT}"
+echo "Chunk size:         ${CHUNK_SIZE}"
+echo "Work dir:           ${TMP_DIR}"
+
+echo ""
+echo "=== Step 1: starting LMCache MP server ==="
+lmcache server \
+    --l1-size-gb "${L1_SIZE_GB}" \
+    --eviction-policy LRU \
+    --chunk-size "${CHUNK_SIZE}" \
+    --port "${LMCACHE_PORT}" \
+    --http-port "${LMCACHE_HTTP_PORT}" \
+    2>&1 | tee "${TMP_DIR}/lmcache.log" &
+LMCACHE_PID=$!
+
+wait_for_url "http://localhost:${LMCACHE_HTTP_PORT}/api/healthcheck" 60 || {
+    tail -80 "${TMP_DIR}/lmcache.log" || true
+    exit 1
+}
+echo "LMCache server is ready."
+
+echo ""
+echo "=== Step 2: starting vLLM ==="
+KV_TRANSFER_CONFIG=$(cat <<EOF
+{
+  "kv_connector": "LMCacheMPConnector",
+  "kv_role": "kv_both",
+  "kv_load_failure_policy": "recompute",
+  "kv_connector_extra_config": {
+    "lmcache.mp.host": "tcp://localhost",
+    "lmcache.mp.port": ${LMCACHE_PORT},
+    "lmcache.mp.mq_timeout": 10
+  }
+}
+EOF
+)
+
+TRUST_REMOTE_CODE_ARGS=()
+if [ "${TRUST_REMOTE_CODE}" = "true" ]; then
+    TRUST_REMOTE_CODE_ARGS+=(--trust-remote-code)
+fi
+
+env -u VLLM_PORT \
+    CUDA_VISIBLE_DEVICES="${GPU_DEVICE}" \
+    VLLM_ENABLE_V1_MULTIPROCESSING=0 \
+    PYTHONHASHSEED=0 \
+vllm serve "${MODEL}" \
+    --port "${VLLM_PORT}" \
+    --served-model-name "${VLLM_MODEL_NAME}" \
+    --no-enable-prefix-caching \
+    --enforce-eager \
+    --max-model-len "${MAX_MODEL_LEN}" \
+    --gpu-memory-utilization "${GPU_MEM_UTIL}" \
+    --kv-transfer-config "${KV_TRANSFER_CONFIG}" \
+    "${TRUST_REMOTE_CODE_ARGS[@]}" \
+    ${EXTRA_VLLM_ARGS:-} \
+    2>&1 | tee "${TMP_DIR}/vllm.log" &
+VLLM_PID=$!
+
+wait_for_url "http://localhost:${VLLM_PORT}/v1/models" 600 || {
+    tail -120 "${TMP_DIR}/vllm.log" || true
+    exit 1
+}
+echo "vLLM is ready."
+
+echo ""
+echo "=== Step 3: running KV retrieve/remap/store evaluation ==="
+TOKENIZER_ARGS=()
+if [ -n "${TOKENIZER}" ]; then
+    TOKENIZER_ARGS+=(--tokenizer "${TOKENIZER}")
+fi
+LMCACHE_MODEL_ARGS=()
+if [ -n "${LMCACHE_MODEL_NAME}" ]; then
+    LMCACHE_MODEL_ARGS+=(--lmcache-model-name "${LMCACHE_MODEL_NAME}")
+fi
+TRUST_REMOTE_CODE_DRIVER_ARGS=()
+if [ "${TRUST_REMOTE_CODE}" = "true" ]; then
+    TRUST_REMOTE_CODE_DRIVER_ARGS+=(--trust-remote-code)
+fi
+
+python "${SCRIPT_DIR}/e2e_kv_edit.py" \
+    --model "${MODEL}" \
+    --vllm-model-name "${VLLM_MODEL_NAME}" \
+    --lmcache-url "http://localhost:${LMCACHE_HTTP_PORT}" \
+    --vllm-url "http://localhost:${VLLM_PORT}" \
+    --work-dir "${TMP_DIR}" \
+    --chunk-size "${CHUNK_SIZE}" \
+    --min-prompt-tokens "${MIN_PROMPT_TOKENS}" \
+    --max-tokens "${MAX_TOKENS}" \
+    --timeout "${REQUEST_TIMEOUT}" \
+    --store-wait-timeout "${STORE_WAIT_TIMEOUT}" \
+    "${TOKENIZER_ARGS[@]}" \
+    "${LMCACHE_MODEL_ARGS[@]}" \
+    "${TRUST_REMOTE_CODE_DRIVER_ARGS[@]}"
+
+echo ""
+echo "Logs and retrieved KV package are under ${TMP_DIR}"
