@@ -27,6 +27,7 @@ VLLM_PORT="${VLLM_PORT:-8000}"
 
 CHUNK_SIZE="${CHUNK_SIZE:-256}"
 MIN_PROMPT_TOKENS="${MIN_PROMPT_TOKENS:-$((CHUNK_SIZE * 2))}"
+FAKE_PREFIX_TOKENS="${FAKE_PREFIX_TOKENS:-32}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-4096}"
 MAX_TOKENS="${MAX_TOKENS:-32}"
 GPU_MEM_UTIL="${GPU_MEM_UTIL:-0.6}"
@@ -40,12 +41,97 @@ mkdir -p "${TMP_DIR}"
 
 LMCACHE_PID=""
 VLLM_PID=""
+CLEANED_UP="false"
+USE_SETSID="false"
+if command -v setsid >/dev/null 2>&1; then
+    USE_SETSID="true"
+fi
+
+start_logged_process() {
+    local log_file="$1"
+    shift
+    if [ "${USE_SETSID}" = "true" ]; then
+        setsid "$@" >"${log_file}" 2>&1 &
+    else
+        "$@" >"${log_file}" 2>&1 &
+    fi
+    STARTED_PID=$!
+}
+
+process_group_id() {
+    local pid="$1"
+    ps -o pgid= -p "${pid}" 2>/dev/null | tr -d '[:space:]'
+}
+
+process_running() {
+    local pid="$1"
+    if [ -z "${pid}" ]; then
+        return 1
+    fi
+    if [ "${USE_SETSID}" = "true" ]; then
+        local pgid
+        pgid="$(process_group_id "${pid}")"
+        if [ -n "${pgid}" ]; then
+            kill -0 -- "-${pgid}" 2>/dev/null || kill -0 "${pid}" 2>/dev/null
+        else
+            kill -0 -- "-${pid}" 2>/dev/null || kill -0 "${pid}" 2>/dev/null
+        fi
+    else
+        kill -0 "${pid}" 2>/dev/null
+    fi
+}
+
+signal_process() {
+    local signal="$1"
+    local pid="$2"
+    if [ -z "${pid}" ]; then
+        return 0
+    fi
+    if [ "${USE_SETSID}" = "true" ]; then
+        local pgid
+        pgid="$(process_group_id "${pid}")"
+        if [ -n "${pgid}" ]; then
+            kill "-${signal}" -- "-${pgid}" 2>/dev/null || true
+        else
+            kill "-${signal}" -- "-${pid}" 2>/dev/null \
+                || kill "-${signal}" "${pid}" 2>/dev/null \
+                || true
+        fi
+    else
+        kill "-${signal}" "${pid}" 2>/dev/null || true
+    fi
+}
+
+stop_process() {
+    local name="$1"
+    local pid="$2"
+    if ! process_running "${pid}"; then
+        return 0
+    fi
+
+    echo "Stopping ${name}..."
+    signal_process TERM "${pid}"
+    for _ in $(seq 1 20); do
+        if ! process_running "${pid}"; then
+            return 0
+        fi
+        sleep 0.5
+    done
+
+    echo "Force stopping ${name}..."
+    signal_process KILL "${pid}"
+}
 
 cleanup() {
+    if [ "${CLEANED_UP}" = "true" ]; then
+        return
+    fi
+    CLEANED_UP="true"
+    trap - EXIT INT TERM
     echo "--- Cleaning up ---"
-    [ -n "${VLLM_PID}" ] && kill "${VLLM_PID}" 2>/dev/null || true
-    [ -n "${LMCACHE_PID}" ] && kill "${LMCACHE_PID}" 2>/dev/null || true
-    wait 2>/dev/null || true
+    stop_process "vLLM" "${VLLM_PID}"
+    stop_process "LMCache" "${LMCACHE_PID}"
+    wait "${VLLM_PID}" "${LMCACHE_PID}" 2>/dev/null || true
 }
 trap cleanup EXIT INT TERM
 
@@ -84,18 +170,20 @@ echo "LMCache ZMQ port:   ${LMCACHE_PORT}"
 echo "LMCache HTTP port:  ${LMCACHE_HTTP_PORT}"
 echo "vLLM port:          ${VLLM_PORT}"
 echo "Chunk size:         ${CHUNK_SIZE}"
+echo "Fake prefix tokens: ${FAKE_PREFIX_TOKENS}"
 echo "Work dir:           ${TMP_DIR}"
 
 echo ""
 echo "=== Step 1: starting LMCache MP server ==="
-lmcache server \
+start_logged_process "${TMP_DIR}/lmcache.log" \
+    lmcache server \
     --l1-size-gb "${L1_SIZE_GB}" \
     --eviction-policy LRU \
     --chunk-size "${CHUNK_SIZE}" \
     --port "${LMCACHE_PORT}" \
-    --http-port "${LMCACHE_HTTP_PORT}" \
-    2>&1 | tee "${TMP_DIR}/lmcache.log" &
-LMCACHE_PID=$!
+    --http-port "${LMCACHE_HTTP_PORT}"
+LMCACHE_PID="${STARTED_PID}"
+echo "LMCache log: ${TMP_DIR}/lmcache.log"
 
 wait_for_url "http://localhost:${LMCACHE_HTTP_PORT}/api/healthcheck" 60 || {
     tail -80 "${TMP_DIR}/lmcache.log" || true
@@ -124,11 +212,12 @@ if [ "${TRUST_REMOTE_CODE}" = "true" ]; then
     TRUST_REMOTE_CODE_ARGS+=(--trust-remote-code)
 fi
 
-env -u VLLM_PORT \
+start_logged_process "${TMP_DIR}/vllm.log" \
+    env -u VLLM_PORT \
     CUDA_VISIBLE_DEVICES="${GPU_DEVICE}" \
     VLLM_ENABLE_V1_MULTIPROCESSING=0 \
     PYTHONHASHSEED=0 \
-vllm serve "${MODEL}" \
+    vllm serve "${MODEL}" \
     --port "${VLLM_PORT}" \
     --served-model-name "${VLLM_MODEL_NAME}" \
     --no-enable-prefix-caching \
@@ -137,9 +226,9 @@ vllm serve "${MODEL}" \
     --gpu-memory-utilization "${GPU_MEM_UTIL}" \
     --kv-transfer-config "${KV_TRANSFER_CONFIG}" \
     "${TRUST_REMOTE_CODE_ARGS[@]}" \
-    ${EXTRA_VLLM_ARGS:-} \
-    2>&1 | tee "${TMP_DIR}/vllm.log" &
-VLLM_PID=$!
+    ${EXTRA_VLLM_ARGS:-}
+VLLM_PID="${STARTED_PID}"
+echo "vLLM log: ${TMP_DIR}/vllm.log"
 
 wait_for_url "http://localhost:${VLLM_PORT}/v1/models" 600 || {
     tail -120 "${TMP_DIR}/vllm.log" || true
@@ -170,6 +259,7 @@ python "${SCRIPT_DIR}/e2e_kv_edit.py" \
     --work-dir "${TMP_DIR}" \
     --chunk-size "${CHUNK_SIZE}" \
     --min-prompt-tokens "${MIN_PROMPT_TOKENS}" \
+    --fake-prefix-tokens "${FAKE_PREFIX_TOKENS}" \
     --max-tokens "${MAX_TOKENS}" \
     --timeout "${REQUEST_TIMEOUT}" \
     --store-wait-timeout "${STORE_WAIT_TIMEOUT}" \

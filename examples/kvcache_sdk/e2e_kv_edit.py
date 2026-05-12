@@ -22,11 +22,7 @@ SOURCE_PARAGRAPH = (
     "attention keys, attention values, memory tiers, token chunks, and the "
     "careful measurement of cold and warm requests."
 )
-TARGET_PARAGRAPH = (
-    "A travel writer is drafting a field guide about coastal architecture, "
-    "harbor markets, lighthouse repairs, regional food, and interviews with "
-    "families who maintain old boats through stormy winters."
-)
+PromptPayload = str | list[int]
 
 
 @dataclass(frozen=True)
@@ -37,31 +33,92 @@ class CompletionResult:
     elapsed_seconds: float
 
 
-def _token_ids(tokenizer: PreTrainedTokenizerBase, prompt: str) -> list[int]:
-    """Tokenize a prompt the same way this example expects vLLM to tokenize it."""
-    token_ids = tokenizer.encode(prompt, add_special_tokens=True)
+def _token_ids_without_special_tokens(
+    tokenizer: PreTrainedTokenizerBase, prompt: str
+) -> list[int]:
+    """Tokenize text for a suffix that will be embedded in a token-ID prompt."""
+    token_ids = tokenizer.encode(prompt, add_special_tokens=False)
     return [int(token_id) for token_id in token_ids]
 
 
-def _prompt_with_min_tokens(
+def _suffix_with_min_tokens(
     tokenizer: PreTrainedTokenizerBase,
     paragraph: str,
     min_tokens: int,
-) -> tuple[str, list[int]]:
-    """Repeat ``paragraph`` until the prompt reaches ``min_tokens`` tokens."""
+) -> list[int]:
+    """Repeat ``paragraph`` and return exactly ``min_tokens`` trailing tokens."""
     prompt = paragraph
-    token_ids = _token_ids(tokenizer, prompt)
+    token_ids = _token_ids_without_special_tokens(tokenizer, prompt)
     while len(token_ids) < min_tokens:
         prompt = f"{prompt}\n\n{paragraph}"
-        token_ids = _token_ids(tokenizer, prompt)
-    return prompt, token_ids
+        token_ids = _token_ids_without_special_tokens(tokenizer, prompt)
+    return token_ids[-min_tokens:]
+
+
+def _cache_token_count(
+    *,
+    min_prompt_tokens: int,
+    chunk_size: int,
+    fake_prefix_tokens: int,
+) -> int:
+    """Return the full-chunk prefix length expected to be cached."""
+    if chunk_size <= 0:
+        raise ValueError(f"chunk_size must be positive, got {chunk_size}")
+    if fake_prefix_tokens <= 0:
+        raise ValueError(
+            f"fake_prefix_tokens must be positive, got {fake_prefix_tokens}"
+        )
+    if fake_prefix_tokens >= chunk_size:
+        raise ValueError(
+            "fake_prefix_tokens must be smaller than chunk_size so the synthetic "
+            "prefix still leaves only a partial tail after the cached full chunks"
+        )
+    min_cache_tokens = max(1, min_prompt_tokens - fake_prefix_tokens)
+    return ((min_cache_tokens + chunk_size - 1) // chunk_size) * chunk_size
+
+
+def _regular_token_id(
+    tokenizer: PreTrainedTokenizerBase,
+    *,
+    start: int,
+    excluded_token_ids: set[int],
+) -> int:
+    """Pick a valid non-special token ID for the synthetic prompt prefix."""
+    special_token_ids = {int(token_id) for token_id in tokenizer.all_special_ids}
+    vocab_size = int(tokenizer.vocab_size)
+    if vocab_size <= 0:
+        raise ValueError(f"tokenizer vocab_size must be positive, got {vocab_size}")
+    for token_id in range(min(start, vocab_size - 1), vocab_size):
+        if token_id not in special_token_ids and token_id not in excluded_token_ids:
+            return token_id
+    for token_id in range(vocab_size):
+        if token_id not in special_token_ids and token_id not in excluded_token_ids:
+            return token_id
+    raise ValueError("could not find a usable non-special token ID")
+
+
+def _source_and_target_tokens(
+    tokenizer: PreTrainedTokenizerBase,
+    *,
+    cache_tokens: int,
+    fake_prefix_tokens: int,
+) -> tuple[list[int], list[int]]:
+    """Build equal-length prompts with different lead IDs and a shared suffix."""
+    source_lead_id = _regular_token_id(tokenizer, start=1000, excluded_token_ids=set())
+    target_lead_id = _regular_token_id(
+        tokenizer, start=source_lead_id + 1, excluded_token_ids={source_lead_id}
+    )
+    common_suffix = _suffix_with_min_tokens(tokenizer, SOURCE_PARAGRAPH, cache_tokens)
+    source_tokens = [source_lead_id] * fake_prefix_tokens + common_suffix
+    target_tokens = [target_lead_id] * fake_prefix_tokens + common_suffix
+    return source_tokens, target_tokens
 
 
 def _post_completion(
     *,
     vllm_url: str,
     model_name: str,
-    prompt: str,
+    prompt: PromptPayload,
     max_tokens: int,
     timeout: float,
 ) -> CompletionResult:
@@ -71,6 +128,7 @@ def _post_completion(
         "prompt": prompt,
         "max_tokens": max_tokens,
         "temperature": 0,
+        "seed": 0,
     }
     start = time.perf_counter()
     response = httpx.post(
@@ -145,15 +203,15 @@ def run(args: argparse.Namespace) -> None:
         tokenizer_name,
         trust_remote_code=args.trust_remote_code,
     )
-    source_prompt, source_tokens = _prompt_with_min_tokens(
-        tokenizer,
-        SOURCE_PARAGRAPH,
-        args.min_prompt_tokens,
+    cache_tokens = _cache_token_count(
+        min_prompt_tokens=args.min_prompt_tokens,
+        chunk_size=args.chunk_size,
+        fake_prefix_tokens=args.fake_prefix_tokens,
     )
-    target_prompt, target_tokens = _prompt_with_min_tokens(
+    source_tokens, target_tokens = _source_and_target_tokens(
         tokenizer,
-        TARGET_PARAGRAPH,
-        args.min_prompt_tokens,
+        cache_tokens=cache_tokens,
+        fake_prefix_tokens=args.fake_prefix_tokens,
     )
 
     args.work_dir.mkdir(parents=True, exist_ok=True)
@@ -163,7 +221,7 @@ def run(args: argparse.Namespace) -> None:
     source_completion = _post_completion(
         vllm_url=args.vllm_url,
         model_name=args.vllm_model_name,
-        prompt=source_prompt,
+        prompt=source_tokens,
         max_tokens=args.max_tokens,
         timeout=args.timeout,
     )
@@ -177,7 +235,7 @@ def run(args: argparse.Namespace) -> None:
         lmcache_url=args.lmcache_url,
         model_name=lmcache_model_name,
         tokens=source_tokens,
-        expected_tokens=args.chunk_size,
+        expected_tokens=cache_tokens,
         timeout=args.store_wait_timeout,
     )
 
@@ -192,17 +250,22 @@ def run(args: argparse.Namespace) -> None:
     if retrieve_result.hit_tokens <= 0:
         raise RuntimeError("source retrieve did not return any KV cache tokens")
 
-    if len(target_tokens) < retrieve_result.hit_tokens:
-        target_prompt, target_tokens = _prompt_with_min_tokens(
-            tokenizer,
-            TARGET_PARAGRAPH,
-            retrieve_result.hit_tokens,
-        )
-
     target_prefix_tokens = target_tokens[: retrieve_result.hit_tokens]
     source_prefix_tokens = source_tokens[: retrieve_result.hit_tokens]
     if source_prefix_tokens == target_prefix_tokens:
         raise RuntimeError("source and target token prefixes unexpectedly match")
+    if len(source_tokens) != len(target_tokens):
+        raise RuntimeError(
+            "source and target prompt token lengths must match: "
+            f"{len(source_tokens)} != {len(target_tokens)}"
+        )
+    if (
+        source_tokens[-retrieve_result.hit_tokens :]
+        != target_tokens[-retrieve_result.hit_tokens :]
+    ):
+        raise RuntimeError(
+            "source and target prompts must share the cache-covered trailing tokens"
+        )
 
     target_lookup_before = lmc_sdk.lookup(
         args.lmcache_url,
@@ -241,22 +304,31 @@ def run(args: argparse.Namespace) -> None:
     target_completion = _post_completion(
         vllm_url=args.vllm_url,
         model_name=args.vllm_model_name,
-        prompt=target_prompt,
+        prompt=target_tokens,
         max_tokens=args.max_tokens,
         timeout=args.timeout,
     )
+    outputs_match = source_completion.text == target_completion.text
 
     evaluation = {
         "lmcache_model_name": lmcache_model_name,
         "vllm_model_name": args.vllm_model_name,
+        "cache_tokens": cache_tokens,
+        "fake_prefix_tokens": args.fake_prefix_tokens,
         "source_prompt_tokens": len(source_tokens),
         "target_prompt_tokens": len(target_tokens),
         "retrieved_hit_tokens": retrieve_result.hit_tokens,
         "retrieved_hit_chunks": retrieve_result.hit_chunks,
         "target_lookup_before_hit_tokens": target_lookup_before.hit_tokens,
         "target_lookup_after_hit_tokens": target_lookup_after.hit_tokens,
+        "source_target_same_length": len(source_tokens) == len(target_tokens),
+        "source_target_last_hit_tokens_match": source_tokens[
+            -retrieve_result.hit_tokens :
+        ]
+        == target_tokens[-retrieve_result.hit_tokens :],
         "target_prefix_ids_differ_from_source": source_prefix_tokens
         != target_prefix_tokens,
+        "outputs_match": outputs_match,
         "store_result": store_result.__dict__,
         "source_lookup_after_inference": source_lookup.__dict__,
         "target_lookup_after_remap": target_lookup_after.__dict__,
@@ -267,6 +339,11 @@ def run(args: argparse.Namespace) -> None:
     }
     print("== Evaluation ==")
     print(json.dumps(cast(dict[str, object], evaluation), indent=2, default=str))
+    if not outputs_match:
+        raise RuntimeError(
+            "target output did not match source output after KV remap; see "
+            "source_output_preview and target_output_preview above"
+        )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -289,6 +366,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--work-dir", type=Path, required=True)
     parser.add_argument("--chunk-size", type=int, default=256)
     parser.add_argument("--min-prompt-tokens", type=int, default=512)
+    parser.add_argument("--fake-prefix-tokens", type=int, default=32)
     parser.add_argument("--max-tokens", type=int, default=32)
     parser.add_argument("--timeout", type=float, default=120.0)
     parser.add_argument("--store-wait-timeout", type=float, default=120.0)

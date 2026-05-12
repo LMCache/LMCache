@@ -10,14 +10,18 @@ end-to-end KV remapping experiment:
 
 1. Send a source prompt to vLLM so the normal connector stores KV in LMCache.
 2. Retrieve the source KV cache with `lmcache.sdk.retrieve`.
-3. Store that same KV cache under a different target token prefix with
-   `lmcache.sdk.store`.
-4. Send the target prompt to vLLM so the target token IDs hit the remapped KV.
-5. Print lookup counts, hit counts, latencies, and response previews.
+3. Build a target token-ID prompt with different synthetic leading tokens, the
+   same length as the source prompt, and identical cache-covered trailing
+   tokens.
+4. Store the source KV under the target prefix with `lmcache.sdk.store`.
+5. Send the target token IDs to vLLM so the target prefix hits the remapped KV.
+6. Print lookup counts, hit counts, latencies, response previews, and whether
+   the source and target outputs match.
 
-This intentionally associates KV from one prompt with different token IDs. It
-is meant to demonstrate the SDK and editing workflow, not to produce a
-semantically correct generation.
+The target prompt starts with different token IDs, so it does not rely on a
+serving-engine local prefix match. Because the prompts have identical trailing
+tokens after the remapped prefix, the target request reconstructs the same final
+context as the source request and should produce the same deterministic output.
 
 Run:
 
@@ -37,6 +41,7 @@ LMCACHE_HTTP_PORT=8080 \
 VLLM_PORT=8000 \
 CHUNK_SIZE=256 \
 MIN_PROMPT_TOKENS=512 \
+FAKE_PREFIX_TOKENS=32 \
 MAX_TOKENS=32 \
 examples/kvcache_sdk/run_e2e_kv_edit.sh
 ```
