@@ -6,6 +6,7 @@ import argparse
 import asyncio
 import json
 import os
+import secrets
 import sys
 import uuid
 
@@ -18,7 +19,7 @@ sys.path.insert(
 )
 
 # Third Party
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -210,7 +211,6 @@ def create_app(
     @app.post("/clear", response_model=ClearResponse)
     async def clear(req: ClearRequest, request: Request):
         # Role-based access control: verify admin privileges
-        import os
         expected_admin_key = os.environ.get("LMCACHE_ADMIN_KEY")
         
         # Check if admin authentication is configured
@@ -222,7 +222,7 @@ def create_app(
         
         # Verify admin credentials from request headers
         provided_admin_key = request.headers.get("x-admin-key")
-        if not provided_admin_key or provided_admin_key != expected_admin_key:
+        if not provided_admin_key or not secrets.compare_digest(provided_admin_key, expected_admin_key):
             raise HTTPException(
                 status_code=403,
                 detail="Forbidden: Administrative privileges required for this operation"
