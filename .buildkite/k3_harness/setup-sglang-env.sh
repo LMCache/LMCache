@@ -28,6 +28,16 @@ fi
 . "${HOME}/.cargo/env"
 rustc --version
 
+# ── protoc (for sglang-grpc's prost-build) ──────────────────
+# sglang-grpc's build.rs invokes prost-build, which shells out to protoc
+# to compile the .proto files into Rust. Pod runs as root.
+echo "--- :package: Installing protoc"
+if ! command -v protoc >/dev/null 2>&1; then
+    apt-get update
+    apt-get install -y --no-install-recommends protobuf-compiler
+fi
+protoc --version
+
 # ── LMCache (CI checkout) ───────────────────────────────────
 echo "--- :python: Installing LMCache from source"
 export SETUPTOOLS_SCM_PRETEND_VERSION_FOR_LMCACHE="${SETUPTOOLS_SCM_PRETEND_VERSION_FOR_LMCACHE:-0.0.0+ci}"
