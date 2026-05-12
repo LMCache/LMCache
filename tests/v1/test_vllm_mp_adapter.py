@@ -77,7 +77,9 @@ def fake_adapter(monkeypatch):
 def test_register_kv_caches_updates_kv_caches_and_submits(fake_adapter):
     """Public register_kv_caches stores the dict and submits one request."""
     adapter, send_mock, _ = fake_adapter
-    new_caches = {"layer.0": object(), "layer.1": object()}
+    fake_tensor = MagicMock()
+    fake_tensor.device.type = "cuda"
+    new_caches = {"layer.0": fake_tensor, "layer.1": fake_tensor}
 
     adapter.register_kv_caches(new_caches)
 
@@ -93,4 +95,6 @@ def test_register_kv_caches_raises_connection_error_on_timeout(fake_adapter):
     future.result.side_effect = TimeoutError("server down")
 
     with pytest.raises(ConnectionError, match="did not respond"):
-        adapter.register_kv_caches({"layer.0": object()})
+        fake_tensor = MagicMock()
+        fake_tensor.device.type = "cuda"
+        adapter.register_kv_caches({"layer.0": fake_tensor})
