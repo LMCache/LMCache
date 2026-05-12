@@ -28,13 +28,21 @@ fi
 . "${HOME}/.cargo/env"
 rustc --version
 
-# ── protoc (for sglang-grpc's prost-build) ──────────────────
-# sglang-grpc's build.rs invokes prost-build, which shells out to protoc
-# to compile the .proto files into Rust. Pod runs as root.
-echo "--- :package: Installing protoc"
-if ! command -v protoc >/dev/null 2>&1; then
+# ── apt packages (system libs sglang needs at runtime) ─────
+# - protobuf-compiler: sglang-grpc's build.rs invokes prost-build which
+#   shells out to protoc to compile .proto files into Rust.
+# - libnuma1: sgl_kernel's sm100/common_ops.abi3.so dynamically links to
+#   libnuma.so.1 (NUMA-aware allocation). The nvidia/cuda base image
+#   doesn't ship it; without it, every sglang launch dies with
+#   `ImportError: libnuma.so.1: cannot open shared object file`.
+# Pod runs as root.
+echo "--- :package: Installing apt deps (protoc + libnuma1)"
+NEEDED=()
+command -v protoc >/dev/null 2>&1 || NEEDED+=("protobuf-compiler")
+[[ -e /usr/lib/x86_64-linux-gnu/libnuma.so.1 || -e /lib/x86_64-linux-gnu/libnuma.so.1 ]] || NEEDED+=("libnuma1")
+if [[ ${#NEEDED[@]} -gt 0 ]]; then
     apt-get update
-    apt-get install -y --no-install-recommends protobuf-compiler
+    apt-get install -y --no-install-recommends "${NEEDED[@]}"
 fi
 protoc --version
 
