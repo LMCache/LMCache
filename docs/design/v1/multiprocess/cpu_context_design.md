@@ -27,7 +27,7 @@ provides a generic protocol where workers:
 ## Protocol additions
 
 Three request types are used for non-CUDA mode (unchanged from the original
-bounce-buffer design):
+cpu context design):
 
 - `REGISTER_KV_CACHE_BOUNCE`
 - `STORE_CPU_CHUNKS`
@@ -129,7 +129,7 @@ Supported KV formats in CPU gather/scatter:
 by tensor `device.type`:
 
 - all CUDA → existing CUDA IPC registration and store/retrieve path
-- all non-CUDA → bounce registration and CPU context store/retrieve path
+- all non-CUDA → cpu context registration and CPU context store/retrieve path
 
 The adapter holds a `cpu_context: CPUContext` instance and uses the uniform
 `prepare/commit` interface for both store and retrieve.
@@ -173,7 +173,7 @@ needs a `if self._use_cpu_context:` branch for retrieve futures.
   `(model_name, world_size)` for layout resolution.
 
 Server-side handler methods are unchanged:
-- `register_kv_cache_bounce` — stores `CPUContextMetadata` in `cpu_contexts`.
+- `register_kv_cache_cpu_context` — stores `CPUContextMetadata` in `cpu_contexts`.
 - `store_cpu_chunks` — unpickles payload, copies tensors into storage.
 - `retrieve_cpu_chunks` — reads from storage, pickles tensors, returns bytes.
 
@@ -261,7 +261,7 @@ back to pickle when SHM is unavailable.
 
 `tests/v1/multiprocess/test_cpu_context.py` covers:
 
-- CPU wrapper behavior (`wrap_kv_caches` with bounce mode)
+- CPU wrapper behavior (`wrap_kv_caches` with cpu context mode)
 - NHD and MLA gather/scatter round-trip
 - HND round-trip for both HND formats
 - `skip_first_n_tokens` behavior

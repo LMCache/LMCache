@@ -18,7 +18,7 @@ def _make_kv_caches(
     num_heads: int = 2,
     head_size: int = 8,
 ) -> dict[str, torch.Tensor]:
-    """Build per-layer NHD KV tensors for CPU bounce-buffer tests."""
+    """Build per-layer NHD KV tensors for CPU cpu context tests."""
     kv_caches = {}
     for i in range(num_layers):
         kv_caches[f"layer_{i}"] = torch.randn(
@@ -33,7 +33,7 @@ def _make_mla_kv_caches(
     block_size: int = 4,
     hidden_size: int = 16,
 ) -> dict[str, torch.Tensor]:
-    """Build per-layer MLA KV tensors for CPU bounce-buffer tests.
+    """Build per-layer MLA KV tensors for CPU cpu context tests.
 
     Args:
         num_layers: Number of KV layers to generate.
@@ -58,7 +58,7 @@ def _make_hnd_kv_caches(
     num_heads: int = 2,
     head_size: int = 8,
 ) -> dict[str, torch.Tensor]:
-    """Build per-layer HND KV tensors for CPU bounce-buffer tests."""
+    """Build per-layer HND KV tensors for CPU cpu context tests."""
     kv_caches = {}
     for i in range(num_layers):
         kv_caches[f"layer_{i}"] = torch.randn(
@@ -74,7 +74,7 @@ def _make_hnd_flashinfer_kv_caches(
     num_heads: int = 2,
     head_size: int = 8,
 ) -> dict[str, torch.Tensor]:
-    """Build per-layer HND flash-infer KV tensors for CPU bounce-buffer tests."""
+    """Build per-layer HND flash-infer KV tensors for CPU cpu context tests."""
     kv_caches = {}
     for i in range(num_layers):
         kv_caches[f"layer_{i}"] = torch.randn(
@@ -83,8 +83,8 @@ def _make_hnd_flashinfer_kv_caches(
     return kv_caches
 
 
-def test_wrap_kv_caches_bounce_returns_empty() -> None:
-    """Verify wrap_kv_caches returns no IPC wrappers in bounce-buffer mode."""
+def test_wrap_kv_caches_cpu_context_returns_empty() -> None:
+    """Verify wrap_kv_caches returns no IPC wrappers in cpu context mode."""
     # First Party
     from lmcache.integration.vllm.vllm_multi_process_adapter import wrap_kv_caches
 
@@ -331,8 +331,10 @@ def stub_native_storage_ops() -> Any:
         yield
 
 
-def test_server_register_and_find_bounce_layout(stub_native_storage_ops: Any) -> None:
-    """Ensure bounce registration stores metadata and lookup finds its layout."""
+def test_server_register_and_find_cpu_context_layout(
+    stub_native_storage_ops: Any,
+) -> None:
+    """Ensure cpu context registration stores metadata and lookup finds its layout."""
     # First Party
     from lmcache.v1.multiprocess.server import MPCacheEngine
 
@@ -343,7 +345,7 @@ def test_server_register_and_find_bounce_layout(stub_native_storage_ops: Any) ->
         patch("lmcache.v1.multiprocess.server.get_event_bus"),
     ):
         engine = MPCacheEngine(storage_manager_config=MagicMock(), chunk_size=16)
-    engine.register_kv_cache_bounce(
+    engine.register_kv_cache_cpu_context(
         instance_id=1,
         model_name="m",
         world_size=1,
@@ -396,7 +398,7 @@ def test_server_store_and_retrieve_cpu_chunks(stub_native_storage_ops: Any) -> N
         session_cls.return_value.get_or_create.return_value = mock_session
         engine = MPCacheEngine(storage_manager_config=MagicMock(), chunk_size=8)
 
-    engine.register_kv_cache_bounce(
+    engine.register_kv_cache_cpu_context(
         instance_id=2,
         model_name="m",
         world_size=1,

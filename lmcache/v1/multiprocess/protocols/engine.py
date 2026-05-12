@@ -32,7 +32,7 @@ REQUEST_NAMES = [
     "QUERY_PREFETCH_LOOKUP_HITS",
     "FREE_LOOKUP_LOCKS",
     "END_SESSION",
-    "REGISTER_KV_CACHE_BOUNCE",
+    "REGISTER_KV_CACHE_CPU_CONTEXT",
     "STORE_CPU_CHUNKS",
     "RETRIEVE_CPU_CHUNKS",
 ]
@@ -149,7 +149,7 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
             response_class=None,
             handler_type=HandlerType.BLOCKING,
         ),
-        "REGISTER_KV_CACHE_BOUNCE": ProtocolDefinition(
+        "REGISTER_KV_CACHE_CPU_CONTEXT": ProtocolDefinition(
             payload_classes=[
                 int,
                 str,

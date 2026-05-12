@@ -284,7 +284,7 @@ class MPCacheEngine:
         else:
             logger.warning("No KV cache found for GPU ID %d to unregister", instance_id)
 
-    def register_kv_cache_bounce(
+    def register_kv_cache_cpu_context(
         self,
         instance_id: int,
         model_name: str,
@@ -297,7 +297,7 @@ class MPCacheEngine:
         dtype_str: str,
         use_mla: bool,
     ) -> None:
-        """Register non-CUDA KV layout metadata for CPU bounce-buffer mode.
+        """Register non-CUDA KV layout metadata for CPU context mode.
 
         Args:
             instance_id: Worker instance identifier (typically PID).
@@ -352,7 +352,7 @@ class MPCacheEngine:
         instance_id: int,
         cpu_data: bytes,
     ) -> bool:
-        """Store worker-provided CPU chunks for non-CUDA bounce-buffer mode.
+        """Store worker-provided CPU chunks for non-CUDA cpu context mode.
 
         Args:
             key: Cache key for the token range to store.
@@ -363,7 +363,7 @@ class MPCacheEngine:
             ``True`` when all reserved objects are written, otherwise ``False``.
 
         Raises:
-            ValueError: If the instance has no registered bounce context.
+            ValueError: If the instance has no registered cpu context.
         """
         # Third Party
         import torch
@@ -424,7 +424,7 @@ class MPCacheEngine:
             list of CPU chunk tensors.
 
         Raises:
-            ValueError: If the instance has no registered bounce context.
+            ValueError: If the instance has no registered cpu context.
         """
         session = self.session_manager.get_or_create(key.request_id)
         session.set_tokens(list(key.token_ids))
@@ -1337,7 +1337,9 @@ def run_cache_server(
     )
     add_handler_helper(server, RequestType.STORE, engine.store)
     add_handler_helper(
-        server, RequestType.REGISTER_KV_CACHE_BOUNCE, engine.register_kv_cache_bounce
+        server,
+        RequestType.REGISTER_KV_CACHE_CPU_CONTEXT,
+        engine.register_kv_cache_cpu_context,
     )
     add_handler_helper(server, RequestType.STORE_CPU_CHUNKS, engine.store_cpu_chunks)
     add_handler_helper(server, RequestType.LOOKUP, engine.lookup)

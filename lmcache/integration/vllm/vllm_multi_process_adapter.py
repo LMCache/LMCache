@@ -712,13 +712,13 @@ class LMCacheMPWorkerAdapter:
             str, tuple[MessagingFuture[RetrieveResult], list[int]]
         ] = {}
 
-        # Non-CUDA (bounce-buffer) mode state
+        # Non-CUDA (cpu context) mode state
         self._use_cpu_context: bool = False
         self._device_type: str = "cuda"
-        # CPU context for non-CUDA (bounce-buffer) mode
+        # CPU context for non-CUDA (cpu context) mode
         self.cpu_context: CPUContext | None = None
-        self._bounce_layout_hints: Any = None
-        self._bounce_gpu_kv_format: Any = None
+        self._cpu_layout_hints: Any = None
+        self._cpu_gpu_kv_format: Any = None
         # Completed synchronous CPU store/retrieve results, keyed by request_id
         self._cpu_store_done: dict[str, bool] = {}
         self._cpu_retrieve_done: dict[str, tuple[bool, list[int]]] = {}
@@ -858,7 +858,7 @@ class LMCacheMPWorkerAdapter:
         self._device_type = next(iter(device_types))
         self._use_cpu_context = self._device_type != "cuda"
         logger.info(
-            "Registering kv caches (device_type=%s, bounce=%s)",
+            "Registering kv caches (device_type=%s, use_cpu_context=%s)",
             self._device_type,
             self._use_cpu_context,
         )
@@ -879,11 +879,11 @@ class LMCacheMPWorkerAdapter:
                 dtype_str,
                 gpu_kv_format,
             ) = compute_kv_layout(kv_caches, layout_hints=layout_hints)
-            self._bounce_layout_hints = layout_hints
-            self._bounce_gpu_kv_format = gpu_kv_format
+            self._cpu_layout_hints = layout_hints
+            self._cpu_gpu_kv_format = gpu_kv_format
             future = send_lmcache_request(
                 self.mq_client,
-                RequestType.REGISTER_KV_CACHE_BOUNCE,
+                RequestType.REGISTER_KV_CACHE_CPU_CONTEXT,
                 [
                     self.instance_id,
                     self.model_name,
@@ -1028,8 +1028,8 @@ class LMCacheMPWorkerAdapter:
                 self.kv_caches,
                 op.block_ids,
                 self.blocks_in_chunk,
-                layout_hints=self._bounce_layout_hints,
-                gpu_kv_format=self._bounce_gpu_kv_format,
+                layout_hints=self._cpu_layout_hints,
+                gpu_kv_format=self._cpu_gpu_kv_format,
             )
             handle = self.cpu_context.prepare_store(key, self.instance_id, cpu_chunks)
             ok = self.cpu_context.commit_store(handle)
@@ -1086,8 +1086,8 @@ class LMCacheMPWorkerAdapter:
                         chunks,
                         self.blocks_in_chunk,
                         skip_first_n_tokens=op.skip_first_n_tokens,
-                        layout_hints=self._bounce_layout_hints,
-                        gpu_kv_format=self._bounce_gpu_kv_format,
+                        layout_hints=self._cpu_layout_hints,
+                        gpu_kv_format=self._cpu_gpu_kv_format,
                     )
                 except Exception:
                     logger.exception("Failed to scatter retrieved CPU context chunks")
