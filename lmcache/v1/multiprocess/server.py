@@ -316,7 +316,16 @@ class MPCacheEngine:
         gpu_context = self.gpu_contexts[instance_id]
         model_name = self.gpu_context_meta[instance_id][0]
 
-        blocks_per_chunk = self.chunk_size // gpu_context.block_size
+        # ``blocks_per_chunk`` is counted in inference-engine-side
+        # blocks (each block addresses
+        # ``inference_engine_logical_block_size`` *logical* tokens).
+        # For compressed groups the per-group physical slot count
+        # differs, but the block-id indexing is shared with the engine
+        # and therefore uses the engine logical block size here.
+        blocks_per_chunk = (
+            self.chunk_size
+            // gpu_context.kv_layer_groups_manager.inference_engine_logical_block_size
+        )
 
         with (
             torch_dev.device(gpu_context.device),
@@ -392,6 +401,12 @@ class MPCacheEngine:
                     for group_idx in range(num_groups):
                         tmp_buffer = gpu_context.get_tmp_chunk_gpu_buffer(group_idx)
                         group_kv_pointers = gpu_context.get_group_kv_pointers(group_idx)
+                        # Kernel contract: ``group_lmcache_chunk_size`` here is the
+                        # number of *physical* slots per chunk for this group
+                        # (= logical chunk_size // compress_ratio).
+                        group_lmcache_chunk_size = gpu_context.get_physical_chunk_size(
+                            group_idx
+                        )
                         lmc_ops.multi_layer_block_kv_transfer(
                             group_kv_pointers,
                             [tmp_buffer.data_ptr()],
@@ -399,7 +414,7 @@ class MPCacheEngine:
                             gpu_context.device,
                             lmc_ops.TransferDirection.D2H,
                             gpu_context.get_shape_desc(group_idx),
-                            self.chunk_size,
+                            group_lmcache_chunk_size,
                             gpu_context.gpu_kv_format_,
                             0,
                         )
@@ -516,7 +531,14 @@ class MPCacheEngine:
             ),
         )
 
-        blocks_per_chunk = self.chunk_size // gpu_context.block_size
+        # ``skip_*_in_chunk`` is expressed in engine-block units
+        # (logical tokens), which is what the kernel's
+        # ``skip_blocks_in_chunk`` argument expects regardless
+        # of per-group compression.
+        ie_logical_block_size = (
+            gpu_context.kv_layer_groups_manager.inference_engine_logical_block_size
+        )
+        blocks_per_chunk = self.chunk_size // ie_logical_block_size
 
         def _retrieve_loop(keys: list[ObjectKey], memory_objs: list[MemoryObj]) -> None:
             _BATCH_SIZE = gpu_context.max_batch_size
@@ -540,16 +562,17 @@ class MPCacheEngine:
                         self.chunk_size * batch_len - 1,
                     ),
                 )
-                if skip_tokens_in_chunk % gpu_context.block_size != 0:
+                if skip_tokens_in_chunk % ie_logical_block_size != 0:
                     logger.error(
-                        "skip_first_n_tokens (%d) is not aligned to block_size (%d), "
+                        "skip_first_n_tokens (%d) is not aligned to "
+                        "inference_engine_logical_block_size (%d), "
                         "rounding down from %d tokens to %d blocks",
                         skip_first_n_tokens,
-                        gpu_context.block_size,
+                        ie_logical_block_size,
                         skip_tokens_in_chunk,
-                        skip_tokens_in_chunk // gpu_context.block_size,
+                        skip_tokens_in_chunk // ie_logical_block_size,
                     )
-                skip_blocks_in_chunk = skip_tokens_in_chunk // gpu_context.block_size
+                skip_blocks_in_chunk = skip_tokens_in_chunk // ie_logical_block_size
 
                 start_chunk_id = batch_idx * _BATCH_SIZE
                 end_chunk_id = start_chunk_id + batch_len
@@ -569,6 +592,9 @@ class MPCacheEngine:
                         batch_len, group_idx
                     )
                     group_kv_pointers = gpu_context.get_group_kv_pointers(group_idx)
+                    group_lmcache_chunk_size = gpu_context.get_physical_chunk_size(
+                        group_idx
+                    )
 
                     lmc_ops.multi_layer_block_kv_transfer(
                         group_kv_pointers,
@@ -577,7 +603,7 @@ class MPCacheEngine:
                         gpu_context.device,
                         lmc_ops.TransferDirection.H2D,
                         gpu_context.get_shape_desc(group_idx),
-                        self.chunk_size,
+                        group_lmcache_chunk_size,
                         gpu_context.gpu_kv_format_,
                         skip_blocks_in_chunk,
                     )
@@ -985,7 +1011,11 @@ class MPCacheEngine:
             if ctx is not None:
                 entry["kv_cache_layout"] = {
                     "num_layers": ctx.num_layers,
-                    "block_size": ctx.block_size,
+                    "inference_engine_logical_block_size": (
+                        ctx.kv_layer_groups_manager.inference_engine_logical_block_size
+                    ),
+                    "group_physical_block_sizes": ctx.group_physical_block_sizes,
+                    "group_compress_ratios": ctx.group_compress_ratios,
                     "hidden_dim_sizes": str(ctx.hidden_dim_sizes),
                     "dtype": str(ctx.dtype),
                     "is_mla": ctx.is_mla,
