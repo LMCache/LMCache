@@ -3,7 +3,10 @@
 # Source from each scripts/run-*.sh.
 
 # ── Fixed test configuration ────────────────────────────────
-MODEL="${MODEL:-Qwen/Qwen2.5-1.5B-Instruct}"
+# 7B model gives a robust TTFT differential between LMCache hit and full
+# prefill (~45ms on Blackwell). The 1.5B model's differential is ~4ms,
+# inside CI noise.
+MODEL="${MODEL:-Qwen/Qwen2.5-7B-Instruct}"
 DAEMON_PORT="${DAEMON_PORT:-6200}"
 DAEMON_HTTP_PORT="${DAEMON_HTTP_PORT:-7200}"
 
@@ -157,7 +160,8 @@ count_retrievals() {
 # Two deterministic ~2500-token prompts (A and B). Each fits within
 # --max-total-tokens 4096 after chat-template + max_tokens overhead, but
 # together they exceed the pool — so after A→B, A's radix entry is evicted
-# and a follow-up A becomes a radix miss / LMCache hit.
+# and a follow-up A becomes a radix miss / LMCache hit. Used by the
+# correctness test.
 generate_prompt() {
     local variant="${1:-a}"
     python3 -c "
@@ -168,4 +172,26 @@ sentences = {
 }
 print(sentences[sys.argv[1]] * 80 + 'Summarize the scene above in one short sentence.')
 " "${variant}"
+}
+
+# Run long_doc_qa.py against a server and echo the Query-round mean TTFT
+# in seconds. The workload is 4 distinct ~1500-token docs × 2 tiles —
+# combined KV (~6000 tokens) exceeds --max-total-tokens 4096, so during
+# the warmup round SGLang's radix evicts older entries; the query round
+# re-queries them. With LMCache, the radix misses are served by RETRIEVE;
+# without LMCache they fall back to full prefills. Repeating the test
+# script directly is simpler than the connector's manual A→B→A pattern.
+run_long_doc_qa_query_ttft() {
+    local port="$1"
+    local repo_root
+    repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
+    python3 "${repo_root}/benchmarks/long_doc_qa/long_doc_qa.py" \
+        --num-documents 4 --document-length 1500 --output-len 100 \
+        --repeat-count 2 --repeat-mode tile --max-inflight-requests 1 \
+        --host 127.0.0.1 --port "${port}" \
+        --model "${MODEL}" \
+        2>&1 \
+        | tee "/tmp/perf_bench_${port}.log" \
+        | grep -oE "Query round mean TTFT: [0-9.]+" \
+        | awk '{print $NF}'
 }
