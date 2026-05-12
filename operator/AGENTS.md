@@ -1,5 +1,66 @@
 # operator - AI Agent Guide
 
+## Smoke Test Suite
+
+The smoke suite under `test/e2e/` validates the operator end-to-end against
+a real Kubernetes cluster. It is all-Go, built on Ginkgo/Gomega, and gated
+by Go build tags so unit tests run without it.
+
+### Targets (M1, no-GPU)
+
+```bash
+make test-e2e            # ~5 min on Kind, no GPU required
+```
+
+The `test-e2e` target builds the manager image, loads it into a dedicated
+Kind cluster (`operator-test-e2e` by default), installs CRDs, deploys the
+controller, and runs every `//go:build e2e` spec under `test/e2e/`.
+
+### Specs included in M1
+
+| Spec file | Coverage |
+|---|---|
+| `crd_smoke_test.go` | TMOP-18 harness sanity check + TMOP-19 / S-1 (minimal CR shape) + S-2 (custom port) |
+| `lifecycle_smoke_test.go` | TMOP-20 / S-6 (port update propagation), S-7 (delete + finalizer GC), S-10 (invalid sizeGB rejection) |
+| `field_coverage_smoke_test.go` | TMOP-21 / S-3 (ServiceMonitor — auto-skipped if CRD absent), S-4 (extraArgs override), S-5 (resourceOverrides) |
+| `auth_smoke_test.go` | TMOP-22 / S-9 (cross-namespace authSecretRef mirroring + env-var injection) |
+
+### Prerequisites
+
+- **Kind** on `$PATH`, or `KIND=<path>` set in the environment.
+- **kubectl** on `$PATH` (used for port-forward and namespace-label fallbacks).
+- A docker daemon reachable for `make docker-build`.
+
+CertManager installs automatically if absent; set
+`CERT_MANAGER_INSTALL_SKIP=true` to skip when it's already on the cluster.
+
+### Helper library (`test/utils/`)
+
+| File | Purpose |
+|---|---|
+| `lmc.go` | `ApplyLMC`, `WaitLMCReconciled`, `WaitLMCPhase`, `WaitLMCReady`, `GetConnectionConfig` (typed parser), `PatchLMCSpec`, `DeleteLMCAndWaitGC` |
+| `portforward.go` | `PortForward(spec, ports...)` — wraps `kubectl port-forward`, waits for the local port to accept TCP |
+| `fixtures.go` | `go:embed`-backed fixture/golden loader |
+| `runner.go` | `RunMake` / `RunFromOperator` — runs commands from the operator/ root **without** `os.Chdir` |
+| `utils.go` | Legacy exec helpers retained for the kubebuilder-template Manager spec |
+
+### Adding a new smoke spec
+
+1. Drop the YAML under `test/utils/fixtures/<name>.yaml`.
+2. Use `utils.NewLMCFromFixture(...)` to load and override `name`/`namespace`.
+3. Call the helpers above; do **not** call `os.Chdir` or read paths
+   relative to the working directory — fixtures resolve via `go:embed`,
+   and shell commands accept their working directory through `cmd.Dir`.
+4. Wrap the spec body with `recordOnFailure(nsName)` in `AfterEach` so
+   failures dump controller logs, events, pod descriptions, and the CR yaml.
+
+### GPU tier (M2/M3)
+
+`make test-e2e-gpu` and the `e2e_gpu` build tag arrive in TMOP-23/24/25/26/27.
+The no-GPU specs ignore the tag and continue to run on a bare Kind cluster.
+
+---
+
 ## Project Structure
 
 **Single-group layout (default):**
