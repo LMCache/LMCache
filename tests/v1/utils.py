@@ -4,10 +4,13 @@ from typing import Optional
 from unittest.mock import MagicMock
 import asyncio
 import ctypes
+import functools
 import inspect
+import os
 import random
 import socket
 import string
+import tempfile
 import threading
 import uuid
 
@@ -49,11 +52,71 @@ if lmc_ops is None:
     lmc_ops = MockCOps()
 
 
+def _probe_cufile_register() -> bool:
+    """
+    Try to actually register a cuFile handle on a real file in the test
+    scratch dir. Returns True iff cuFileHandleRegister succeeds.
+
+    Importability of cufile / libcufile.so is necessary but not sufficient:
+    on hosts without nvidia-fs (or on a non-GDS-capable filesystem),
+    cuFileHandleRegister fails at runtime with CU_FILE_IO_NOT_SUPPORTED
+    (err=5027). This probe matches the exact path tests will exercise.
+    """
+    try:
+        # Third Party
+        import cufile
+    except Exception:
+        return False
+
+    probe_dir = os.environ.get("LMCACHE_TEST_TMPDIR") or tempfile.gettempdir()
+    if not os.path.isdir(probe_dir):
+        return False
+
+    try:
+        fd, probe_path = tempfile.mkstemp(dir=probe_dir, prefix="cufile-probe-")
+    except OSError:
+        return False
+
+    try:
+        try:
+            os.write(fd, b"\0" * 4096)
+        finally:
+            os.close(fd)
+        # Mirror production: GdsBackend opens with mode "r+" and
+        # use_direct_io=True (see gds_backend.py:950). If the FS doesn't
+        # support GDS+O_DIRECT, register fails here exactly as in tests.
+        cu = cufile.CuFile(probe_path, "r+", use_direct_io=True)
+        try:
+            cu.open()
+        except Exception:
+            # Register failed. cu._handle may hold the raw fd from os.open
+            # without a registered cuFile handle; close it ourselves and
+            # null the state so __del__ doesn't try to deregister None.
+            raw_fd = getattr(cu, "_handle", None)
+            if raw_fd is not None:
+                try:
+                    os.close(raw_fd)
+                except OSError:
+                    pass
+                cu._handle = None
+            return False
+        cu.close()
+        return True
+    finally:
+        try:
+            os.unlink(probe_path)
+        except OSError:
+            pass
+
+
+@functools.lru_cache(maxsize=1)
 def has_cufile() -> bool:
     """
-    True only when NVIDIA cuFile is available:
+    True only when NVIDIA cuFile is usable on this host's test scratch dir:
     - python package `cufile` importable
     - dynamic library `libcufile.so` loadable
+    - cuFileHandleRegister succeeds on a real file in LMCACHE_TEST_TMPDIR
+      (or the system tmpdir as a fallback)
     """
     try:
         # Third Party
@@ -66,7 +129,7 @@ def has_cufile() -> bool:
     except OSError:
         return False
 
-    return True
+    return _probe_cufile_register()
 
 
 def has_hipfile() -> bool:

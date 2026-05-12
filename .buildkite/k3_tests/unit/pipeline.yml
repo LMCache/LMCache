@@ -5,7 +5,7 @@ steps:
   - label: ":test_tube: Unit Tests"
     command: .buildkite/k3_tests/unit/run.sh
     timeout_in_minutes: 60
-    agents: { queue: "k3-h200-local" }
+    agents: { queue: "k8s" }
     plugins:
       - kubernetes:
           podSpec:

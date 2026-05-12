@@ -8,6 +8,7 @@ This module provides GPU-side KV cache management functionality, including:
 """
 
 # Standard
+from typing import Any
 import array
 
 # Third Party
@@ -15,6 +16,7 @@ import cupy
 import torch
 
 # First Party
+from lmcache import torch_dev
 from lmcache.logging import init_logger
 from lmcache.utils import EngineType
 from lmcache.v1.gpu_connector.utils import (
@@ -141,14 +143,14 @@ class GPUCacheContext:
             device=self.device_,
         )
 
-        # Cuda streams
-        self.cuda_stream_ = torch.cuda.Stream(device=self.device_)
+        # GPU streams
+        self.cuda_stream_ = torch_dev.Stream(device=self.device_)
         self.cupy_stream_ = cupy.cuda.ExternalStream(
             self.cuda_stream_.cuda_stream, self.device_.index
         )
 
-        _, high_priority = torch.cuda.Stream.priority_range()
-        self.high_priority_cuda_stream_ = torch.cuda.Stream(
+        _, high_priority = torch_dev.Stream.priority_range()
+        self.high_priority_cuda_stream_ = torch_dev.Stream(
             device=self.device_, priority=high_priority
         )
         self.high_priority_cupy_stream_ = cupy.cuda.ExternalStream(
@@ -176,9 +178,9 @@ class GPUCacheContext:
         return self.kv_caches_
 
     @property
-    def stream(self) -> torch.cuda.Stream:
+    def stream(self) -> Any:
         """
-        Returns the CUDA stream for KV cache operations
+        Returns the GPU stream for KV cache operations
         """
         return self.cuda_stream_
 
@@ -187,7 +189,7 @@ class GPUCacheContext:
         return self.cupy_stream_
 
     @property
-    def high_priority_stream(self) -> torch.cuda.Stream:
+    def high_priority_stream(self) -> Any:
         return self.high_priority_cuda_stream_
 
     @property
@@ -396,14 +398,14 @@ class PlainGPUCacheContext:
             tmp_buffer_shape, dtype=self.dtype, device=self.device
         )
 
-        # Cuda streams
-        self._cuda_stream = torch.cuda.Stream(device=self._device)
+        # GPU streams
+        self._cuda_stream = torch_dev.Stream(device=self._device)
         self._cupy_stream = cupy.cuda.ExternalStream(
             self._cuda_stream.cuda_stream, self._device.index
         )
 
-        _, high_priority = torch.cuda.Stream.priority_range()
-        self._high_priority_cuda_stream = torch.cuda.Stream(
+        _, high_priority = torch_dev.Stream.priority_range()
+        self._high_priority_cuda_stream = torch_dev.Stream(
             device=self._device, priority=high_priority
         )
         self._high_priority_cupy_stream = cupy.cuda.ExternalStream(
@@ -445,7 +447,8 @@ class PlainGPUCacheContext:
         return self._device
 
     @property
-    def stream(self) -> torch.cuda.Stream:
+    def stream(self) -> Any:
+        """Returns the device-specific GPU stream (e.g., torch_dev.Stream)."""
         return self._cuda_stream
 
     @property
@@ -453,7 +456,7 @@ class PlainGPUCacheContext:
         return self._cupy_stream
 
     @property
-    def high_priority_stream(self) -> torch.cuda.Stream:
+    def high_priority_stream(self) -> Any:
         return self._high_priority_cuda_stream
 
     @property
