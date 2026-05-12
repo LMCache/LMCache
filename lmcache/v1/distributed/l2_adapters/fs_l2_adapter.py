@@ -287,6 +287,11 @@ class FSL2Adapter(L2AdapterInterface):
         # Task bookkeeping
         self._next_task_id: L2TaskId = 0
         self._completed_store_tasks: dict[L2TaskId, bool] = {}
+        # Bytes actually written per completed store task.  Excludes
+        # duplicate-key fast-paths (see ``_execute_store``).  Reported to
+        # the L2 throughput subscriber via ``pop_completed_store_task_bytes``
+        # so the histogram reflects real disk I/O, not skipped no-ops.
+        self._completed_store_task_bytes: dict[L2TaskId, int] = {}
         self._completed_lookup_tasks: dict[L2TaskId, Bitmap] = {}
         self._completed_load_tasks: dict[L2TaskId, Bitmap] = {}
         self._lock = threading.Lock()
@@ -344,6 +349,12 @@ class FSL2Adapter(L2AdapterInterface):
             completed = self._completed_store_tasks
             self._completed_store_tasks = {}
         return completed
+
+    def pop_completed_store_task_bytes(self) -> dict[L2TaskId, int]:
+        with self._lock:
+            completed_bytes = self._completed_store_task_bytes
+            self._completed_store_task_bytes = {}
+        return completed_bytes
 
     # ------------------------------------------------------------------
     # Lookup and Lock Interface
@@ -568,6 +579,7 @@ class FSL2Adapter(L2AdapterInterface):
         task_id: L2TaskId,
     ) -> None:
         success = True
+        bytes_written = 0
         try:
             for key, obj in zip(keys, objects, strict=True):
                 file_path, tmp_path = self._key_to_file_and_tmp_path(key)
@@ -606,6 +618,7 @@ class FSL2Adapter(L2AdapterInterface):
                             await f.write(buf)
 
                     await aiofiles.os.replace(tmp_path, file_path)
+                    bytes_written += size
                     logger.debug(
                         "FSL2Adapter stored key %s (%d bytes)",
                         file_path.name,
@@ -628,6 +641,7 @@ class FSL2Adapter(L2AdapterInterface):
 
         with self._lock:
             self._completed_store_tasks[task_id] = success
+            self._completed_store_task_bytes[task_id] = bytes_written
         self._store_efd.notify()
 
     # ---- lookup ---------------------------------------------------------

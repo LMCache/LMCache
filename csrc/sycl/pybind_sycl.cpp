@@ -3,7 +3,7 @@
 //
 // Python bindings for the SYCL/XPU memory kernels.
 // This module (lmcache.xpu_ops) mirrors the mem-kernel subset of
-// lmcache.c_ops but targets Intel XPU via SYCL.
+// lmcache.xpu_ops but targets Intel XPU via SYCL.
 //
 #include <pybind11/pybind11.h>
 #include <torch/torch.h>
@@ -11,7 +11,7 @@
 
 namespace py = pybind11;
 
-PYBIND11_MODULE(c_ops, m) {
+PYBIND11_MODULE(xpu_ops, m) {
   py::enum_<TransferDirection>(m, "TransferDirection")
       .value("H2D", TransferDirection::H2D)
       .value("D2H", TransferDirection::D2H)

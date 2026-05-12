@@ -659,7 +659,18 @@ class NixlAgentWrapper:
         # The four fields are (base_addr, length, dev_id, meta_info)
         # https://github.com/ai-dynamo/nixl/blob/main/src/api/cpp/nixl_descriptors.h#L152
         memory_desc = [(buffer_ptr, buffer_size, tp_rank, "")]
-        mem_type = "cpu" if device == "cpu" else "cuda"
+        _VRAM_DEVICE_TYPES = {"cuda", "xpu", "hpu"}
+
+        device_type = str(device).split(":")[0]
+        if device_type == "cpu":
+            mem_type = "cpu"
+        elif device_type in _VRAM_DEVICE_TYPES:
+            mem_type = "VRAM"
+        else:
+            raise ValueError(
+                f"Unsupported device type '{device_type}' for NIXL. "
+                f"Supported accelerators: {_VRAM_DEVICE_TYPES}"
+            )
 
         reg_descs = nixl_agent.get_reg_descs(memory_desc, mem_type=mem_type)
         nixl_agent.register_memory(reg_descs)
