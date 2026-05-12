@@ -11,6 +11,10 @@ from lmcache import torch_dev, torch_device_type
 from lmcache.integration.vllm.utils import mla_enabled
 from lmcache.utils import init_logger as lmcache_init_logger
 from lmcache.utils import check_interprocess_event_support
+from lmcache.v1.platform import (
+    make_device_context,
+    make_interprocess_event,
+)
 
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
@@ -68,6 +72,19 @@ logger = lmcache_init_logger(__name__)
 
 
 # Helper functions
+def _pick_current_device() -> torch.device:
+    """Pick a concrete device for IPC event creation.
+
+    On machines with a working accelerator return a device of the active
+    backend (``torch_device_type`` is e.g. ``cuda``/``xpu``); otherwise
+    fall back to ``cpu`` so CPU-only hosts can still exercise the code
+    path via the platform mocks.
+    """
+    if torch_dev is not None and torch_dev.is_available():
+        return torch.device(torch_device_type)
+    return torch.device("cpu")
+
+
 def reformat_block_ids(block_ids: tuple[list[int], ...] | None) -> list[int]:
     if block_ids is None:
         return []
@@ -592,8 +609,9 @@ class LMCacheMPConnector(KVConnectorBase_V1):
         if len(request_ids) == 0:
             return
 
-        with torch_dev.stream(torch_dev.current_stream()):
-            event = torch_dev.Event(interprocess=True)
+        device = _pick_current_device()
+        with make_device_context(device, None):
+            event = make_interprocess_event(device)
             event.record()
 
         self.worker_adapter.batched_submit_retrieve_requests(
@@ -666,8 +684,9 @@ class LMCacheMPConnector(KVConnectorBase_V1):
         if len(request_ids) == 0:
             return
 
-        with torch_dev.stream(torch_dev.current_stream()):
-            event = torch_dev.Event(interprocess=True)
+        device = _pick_current_device()
+        with make_device_context(device, None):
+            event = make_interprocess_event(device)
             event.record()
 
         self.worker_adapter.batched_submit_store_requests(
