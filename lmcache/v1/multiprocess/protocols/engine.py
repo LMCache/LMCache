@@ -32,6 +32,9 @@ REQUEST_NAMES = [
     "QUERY_PREFETCH_LOOKUP_HITS",
     "FREE_LOOKUP_LOCKS",
     "END_SESSION",
+    "REGISTER_KV_CACHE_BOUNCE",
+    "STORE_CPU_CHUNKS",
+    "RETRIEVE_CPU_CHUNKS",
 ]
 
 # Type alias for cache keys
@@ -144,6 +147,32 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
         "END_SESSION": ProtocolDefinition(
             payload_classes=[str],
             response_class=None,
+            handler_type=HandlerType.BLOCKING,
+        ),
+        "REGISTER_KV_CACHE_BOUNCE": ProtocolDefinition(
+            payload_classes=[
+                int,
+                str,
+                int,
+                EngineType,
+                LayoutHints,
+                int,
+                int,
+                int,
+                str,
+                bool,
+            ],
+            response_class=None,
+            handler_type=HandlerType.SYNC,
+        ),
+        "STORE_CPU_CHUNKS": ProtocolDefinition(
+            payload_classes=[KeyType, int, bytes],
+            response_class=bool,
+            handler_type=HandlerType.BLOCKING,
+        ),
+        "RETRIEVE_CPU_CHUNKS": ProtocolDefinition(
+            payload_classes=[KeyType, int],
+            response_class=tuple[bool, bytes],
             handler_type=HandlerType.BLOCKING,
         ),
     }

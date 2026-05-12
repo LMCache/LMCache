@@ -11,8 +11,15 @@ import torch
 import zmq
 
 # First Party
+from lmcache import torch_dev
 from lmcache.integration.request_telemetry.factory import RequestTelemetryFactory
 from lmcache.utils import EngineType, _lmcache_nvtx_annotate, init_logger
+from lmcache.v1.multiprocess.cpu_context import (
+    CPUContext,
+    compute_kv_layout,
+    gather_chunks_to_cpu,
+    scatter_cpu_chunks_to_kv,
+)
 from lmcache.v1.multiprocess.custom_types import (
     BlockAllocationRecord,
     CudaIPCWrapper,
@@ -32,7 +39,11 @@ DEFAULT_MQ_TIMEOUT: float = 300.0
 DEFAULT_HEARTBEAT_INTERVAL: float = 10.0
 
 
-def wrap_kv_caches(kv_caches: dict[str, torch.Tensor]) -> KVCache:
+def wrap_kv_caches(
+    kv_caches: dict[str, torch.Tensor], use_cpu_context: bool = False
+) -> KVCache:
+    if use_cpu_context:
+        return []
     logger.info("KV caches keys are %s", list(kv_caches.keys()))
     return [CudaIPCWrapper(tensor) for tensor in kv_caches.values()]
 
@@ -701,6 +712,17 @@ class LMCacheMPWorkerAdapter:
             str, tuple[MessagingFuture[RetrieveResult], list[int]]
         ] = {}
 
+        # Non-CUDA (bounce-buffer) mode state
+        self._use_cpu_context: bool = False
+        self._device_type: str = "cuda"
+        # CPU context for non-CUDA (bounce-buffer) mode
+        self.cpu_context: CPUContext | None = None
+        self._bounce_layout_hints: Any = None
+        self._bounce_gpu_kv_format: Any = None
+        # Completed synchronous CPU store/retrieve results, keyed by request_id
+        self._cpu_store_done: dict[str, bool] = {}
+        self._cpu_retrieve_done: dict[str, tuple[bool, list[int]]] = {}
+
         # Block IDs that failed due to retrieve timeout
         self.error_block_ids: set[int] = set()
 
@@ -824,18 +846,90 @@ class LMCacheMPWorkerAdapter:
         from lmcache.integration.vllm.utils import vllm_layout_hints
 
         layout_hints = vllm_layout_hints()
-        future = send_lmcache_request(
-            self.mq_client,
-            RequestType.REGISTER_KV_CACHE,
-            [
-                self.instance_id,
-                wrap_kv_caches(kv_caches),
-                self.model_name,
-                self.world_size,
-                EngineType.VLLM,
-                layout_hints,
-            ],
+        self.kv_caches = kv_caches
+
+        if not kv_caches:
+            raise ValueError("kv_caches is empty")
+        device_types = {tensor.device.type for tensor in kv_caches.values()}
+        if len(device_types) != 1:
+            raise ValueError(
+                f"All KV cache tensors must share one device type, got {device_types}"
+            )
+        self._device_type = next(iter(device_types))
+        self._use_cpu_context = self._device_type != "cuda"
+        logger.info(
+            "Registering kv caches (device_type=%s, bounce=%s)",
+            self._device_type,
+            self._use_cpu_context,
         )
+
+        if self._use_cpu_context:
+            # First Party
+            from lmcache.v1.distributed.api import MemoryLayoutDesc
+            from lmcache.v1.gpu_connector.utils import is_mla
+            from lmcache.v1.multiprocess.cpu_context import (
+                CPUContextMetadata,
+                create_cpu_context,
+            )
+
+            (
+                block_size,
+                num_layers,
+                hidden_dim_size,
+                dtype_str,
+                gpu_kv_format,
+            ) = compute_kv_layout(kv_caches, layout_hints=layout_hints)
+            self._bounce_layout_hints = layout_hints
+            self._bounce_gpu_kv_format = gpu_kv_format
+            future = send_lmcache_request(
+                self.mq_client,
+                RequestType.REGISTER_KV_CACHE_BOUNCE,
+                [
+                    self.instance_id,
+                    self.model_name,
+                    self.world_size,
+                    EngineType.VLLM,
+                    layout_hints,
+                    block_size,
+                    num_layers,
+                    hidden_dim_size,
+                    dtype_str,
+                    is_mla(gpu_kv_format),
+                ],
+            )
+            # Build the layout descriptor so we can construct the CPUContext.
+            use_mla_flag = is_mla(gpu_kv_format)
+            shape = (
+                torch.Size(
+                    [num_layers, self.blocks_in_chunk * block_size, hidden_dim_size]
+                )
+                if use_mla_flag
+                else torch.Size(
+                    [2, num_layers, self.blocks_in_chunk * block_size, hidden_dim_size]
+                )
+            )
+            dtype = getattr(torch, dtype_str)
+            metadata = CPUContextMetadata(
+                layout_desc=MemoryLayoutDesc(shapes=[shape], dtypes=[dtype]),
+                block_size=block_size,
+                use_mla=use_mla_flag,
+            )
+            self.cpu_context = create_cpu_context(
+                metadata, self.mq_client, self._mq_timeout
+            )
+        else:
+            future = send_lmcache_request(
+                self.mq_client,
+                RequestType.REGISTER_KV_CACHE,
+                [
+                    self.instance_id,
+                    wrap_kv_caches(kv_caches),
+                    self.model_name,
+                    self.world_size,
+                    EngineType.VLLM,
+                    layout_hints,
+                ],
+            )
         try:
             future.result(timeout=self._mq_timeout)
         except TimeoutError:
@@ -927,12 +1021,26 @@ class LMCacheMPWorkerAdapter:
             request_id=request_id,
             cache_salt=cache_salt,
         )
-        future = send_lmcache_request(
-            self.mq_client,
-            RequestType.STORE,
-            [key, self.instance_id, op.block_ids, event.ipc_handle()],
-        ).to_cuda_future()
-        self.store_futures[request_id] = future
+        if self._use_cpu_context:
+            assert self.cpu_context is not None
+            torch_dev.synchronize()
+            cpu_chunks = gather_chunks_to_cpu(
+                self.kv_caches,
+                op.block_ids,
+                self.blocks_in_chunk,
+                layout_hints=self._bounce_layout_hints,
+                gpu_kv_format=self._bounce_gpu_kv_format,
+            )
+            handle = self.cpu_context.prepare_store(key, self.instance_id, cpu_chunks)
+            ok = self.cpu_context.commit_store(handle)
+            self._cpu_store_done[request_id] = ok
+        else:
+            future = send_lmcache_request(
+                self.mq_client,
+                RequestType.STORE,
+                [key, self.instance_id, op.block_ids, event.ipc_handle()],
+            ).to_cuda_future()
+            self.store_futures[request_id] = future
 
     @_lmcache_nvtx_annotate
     def submit_retrieve_request(
@@ -966,18 +1074,39 @@ class LMCacheMPWorkerAdapter:
             request_id=request_id,
             cache_salt=cache_salt,
         )
-        future = send_lmcache_request(
-            self.mq_client,
-            RequestType.RETRIEVE,
-            [
-                key,
-                self.instance_id,
-                op.block_ids,
-                event.ipc_handle(),
-                op.skip_first_n_tokens,
-            ],
-        ).to_cuda_future()
-        self.retrieve_futures[request_id] = (future, list(op.block_ids))
+        if self._use_cpu_context:
+            assert self.cpu_context is not None
+            handle, chunks = self.cpu_context.prepare_retrieve(key, self.instance_id)
+            ok = chunks is not None
+            if chunks is not None:
+                try:
+                    scatter_cpu_chunks_to_kv(
+                        self.kv_caches,
+                        op.block_ids,
+                        chunks,
+                        self.blocks_in_chunk,
+                        skip_first_n_tokens=op.skip_first_n_tokens,
+                        layout_hints=self._bounce_layout_hints,
+                        gpu_kv_format=self._bounce_gpu_kv_format,
+                    )
+                except Exception:
+                    logger.exception("Failed to scatter retrieved CPU context chunks")
+                    ok = False
+            self.cpu_context.commit_retrieve(handle)
+            self._cpu_retrieve_done[request_id] = (ok, list(op.block_ids))
+        else:
+            future = send_lmcache_request(
+                self.mq_client,
+                RequestType.RETRIEVE,
+                [
+                    key,
+                    self.instance_id,
+                    op.block_ids,
+                    event.ipc_handle(),
+                    op.skip_first_n_tokens,
+                ],
+            ).to_cuda_future()
+            self.retrieve_futures[request_id] = (future, list(op.block_ids))
 
     @_lmcache_nvtx_annotate
     def batched_submit_store_requests(
@@ -1076,7 +1205,9 @@ class LMCacheMPWorkerAdapter:
         """
         # If unhealthy, drain all pending futures immediately
         if not self.is_healthy:
-            finished_stores = set(self.store_futures.keys())
+            finished_stores = set(self.store_futures.keys()) | set(
+                self._cpu_store_done.keys()
+            )
             finished_retrieves = set()
             for request_id, (
                 _r_future,
@@ -1084,8 +1215,14 @@ class LMCacheMPWorkerAdapter:
             ) in self.retrieve_futures.items():
                 finished_retrieves.add(request_id)
                 self.error_block_ids.update(r_block_ids)
+            for request_id, (ok, r_block_ids) in self._cpu_retrieve_done.items():
+                finished_retrieves.add(request_id)
+                if not ok:
+                    self.error_block_ids.update(r_block_ids)
             self.store_futures.clear()
             self.retrieve_futures.clear()
+            self._cpu_store_done.clear()
+            self._cpu_retrieve_done.clear()
 
             ret_stores = self._process_finished_stores(
                 finished_stores, finished_req_ids_from_engine
@@ -1100,6 +1237,31 @@ class LMCacheMPWorkerAdapter:
 
         finished_stores = set()
         finished_retrieves = set()
+
+        # Drain completed synchronous CPU store results
+        for request_id, ok in list(self._cpu_store_done.items()):
+            finished_stores.add(request_id)
+            if not ok:
+                logger.error(
+                    "Something went wrong when processing the "
+                    "store request for request_id=%s",
+                    request_id,
+                )
+        self._cpu_store_done.clear()
+
+        # Drain completed synchronous CPU retrieve results
+        for request_id, (ok, r_block_ids) in list(self._cpu_retrieve_done.items()):
+            finished_retrieves.add(request_id)
+            if not ok:
+                logger.error(
+                    "Something went wrong when processing the "
+                    "retrieve request for request_id=%s, result=%s",
+                    request_id,
+                    ok,
+                )
+                self.error_block_ids.update(r_block_ids)
+        self._cpu_retrieve_done.clear()
+
         for request_id, s_future in self.store_futures.items():
             if not s_future.query():
                 continue
@@ -1114,7 +1276,7 @@ class LMCacheMPWorkerAdapter:
                     request_id,
                 )
 
-        for request_id, (r_future, _) in self.retrieve_futures.items():
+        for request_id, (r_future, r_block_ids) in self.retrieve_futures.items():
             if not r_future.query():
                 continue
 
