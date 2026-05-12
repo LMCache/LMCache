@@ -12,7 +12,7 @@ from __future__ import annotations
 
 # Standard
 from collections.abc import Callable, Sequence
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from functools import partial
 from typing import TYPE_CHECKING, Any, Optional
 import threading
@@ -444,6 +444,7 @@ class RawBlockL2Adapter(L2AdapterInterface):
         self._store_pool: ThreadPoolExecutor
         self._lookup_pool: ThreadPoolExecutor
         self._load_pool: ThreadPoolExecutor
+        self._shard_pool: ThreadPoolExecutor
 
         try:
             if config.io_engine == "io_uring":
@@ -481,6 +482,10 @@ class RawBlockL2Adapter(L2AdapterInterface):
             self._load_pool = ThreadPoolExecutor(
                 max_workers=config.num_load_workers,
                 thread_name_prefix="rawblk-load",
+            )
+            self._shard_pool = ThreadPoolExecutor(
+                max_workers=max(1, len(self._cores)),
+                thread_name_prefix="rawblk-shard",
             )
         except Exception:
             self._cleanup_after_init_failure()
@@ -695,6 +700,7 @@ class RawBlockL2Adapter(L2AdapterInterface):
         self._store_pool.shutdown(wait=True)
         self._lookup_pool.shutdown(wait=True)
         self._load_pool.shutdown(wait=True)
+        self._shard_pool.shutdown(wait=True)
 
         for core in self._cores:
             core.close()
@@ -798,12 +804,22 @@ class RawBlockL2Adapter(L2AdapterInterface):
             - raw-block slot byte charges aligned with the newly stored keys
         """
         specs = [encode_object_key(key) for key in keys]
+
+        def _store_shard(
+            core: RawBlockCore, indices: list[int]
+        ) -> tuple[list[int], Any]:
+            return indices, core.put_many(
+                [specs[i] for i in indices], [objects[i] for i in indices]
+            )
+
+        shard_futs = [
+            self._shard_pool.submit(_store_shard, core, indices)
+            for core, indices in self._group_key_indices(keys).items()
+        ]
         results = [False] * len(keys)
         stored_encoded: set[str] = set()
-        for core, indices in self._group_key_indices(keys).items():
-            core_specs = [specs[i] for i in indices]
-            core_objects = [objects[i] for i in indices]
-            put_result = core.put_many(core_specs, core_objects)
+        for fut in as_completed(shard_futs):
+            indices, put_result = fut.result()
             for local_idx, ok in zip(indices, put_result.results, strict=True):
                 results[local_idx] = ok
             stored_encoded.update(put_result.stored_keys)
@@ -846,9 +862,21 @@ class RawBlockL2Adapter(L2AdapterInterface):
 
     def _run_lookup_task(self, keys: list[ObjectKey]) -> Bitmap:
         specs = [encode_object_key(key) for key in keys]
+
+        def _lookup_shard(
+            core: RawBlockCore, indices: list[int]
+        ) -> tuple[list[int], list[bool]]:
+            return indices, core.exists_many(
+                [specs[i].encoded for i in indices], lock=True
+            )
+
+        shard_futs = [
+            self._shard_pool.submit(_lookup_shard, core, indices)
+            for core, indices in self._group_key_indices(keys).items()
+        ]
         bitmap = _make_bitmap(len(keys))
-        for core, indices in self._group_key_indices(keys).items():
-            exists = core.exists_many([specs[i].encoded for i in indices], lock=True)
+        for fut in as_completed(shard_futs):
+            indices, exists = fut.result()
             for local_idx, ok in zip(indices, exists, strict=True):
                 if ok:
                     bitmap.set(local_idx)
@@ -874,17 +902,26 @@ class RawBlockL2Adapter(L2AdapterInterface):
         objects: list[MemoryObj],
     ) -> tuple[Bitmap, list[ObjectKey]]:
         specs = [encode_object_key(key) for key in keys]
-        bitmap = _make_bitmap(len(keys))
-        accessed_keys: list[ObjectKey] = []
-        for core, indices in self._group_key_indices(keys).items():
-            results = core.load_many_into(
+
+        def _load_shard(
+            core: RawBlockCore, indices: list[int]
+        ) -> tuple[list[int], list[bool]]:
+            return indices, core.load_many_into(
                 [specs[i].encoded for i in indices],
                 [objects[i] for i in indices],
             )
+
+        shard_futs = [
+            self._shard_pool.submit(_load_shard, core, indices)
+            for core, indices in self._group_key_indices(keys).items()
+        ]
+        bitmap = _make_bitmap(len(keys))
+        for fut in as_completed(shard_futs):
+            indices, results = fut.result()
             for local_idx, ok in zip(indices, results, strict=True):
                 if ok:
                     bitmap.set(local_idx)
-                    accessed_keys.append(keys[local_idx])
+        accessed_keys = [keys[i] for i in range(len(keys)) if bitmap.test(i)]
         return bitmap, accessed_keys
 
     def _group_key_indices(
@@ -922,7 +959,7 @@ class RawBlockL2Adapter(L2AdapterInterface):
             logger.debug("event notifier was closed before signaling")
 
     def _cleanup_after_init_failure(self) -> None:
-        for pool_name in ("_store_pool", "_lookup_pool", "_load_pool"):
+        for pool_name in ("_store_pool", "_lookup_pool", "_load_pool", "_shard_pool"):
             pool = getattr(self, pool_name, None)
             if pool is not None:
                 pool.shutdown(wait=False, cancel_futures=True)
