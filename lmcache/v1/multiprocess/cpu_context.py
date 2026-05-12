@@ -253,8 +253,9 @@ def gather_chunks_to_cpu(
         ]
         if use_mla:
             mla_layers: list[torch.Tensor] = []
+            idx = torch.tensor(chunk_block_ids, dtype=torch.long)
             for layer in layer_tensors:
-                layer_blocks = layer[torch.tensor(chunk_block_ids, dtype=torch.long)]
+                layer_blocks = layer[idx]
                 mla_layers.append(
                     layer_blocks.reshape(
                         len(chunk_block_ids) * block_size, layer_blocks.shape[-1]
@@ -386,13 +387,14 @@ def scatter_cpu_chunks_to_kv(
         chunk_device = chunk_cpu.to(device)
 
         if use_mla:
+            eff_idx = torch.tensor(effective_block_ids, dtype=torch.long)
             for layer_idx, layer in enumerate(layer_tensors):
                 mla_src = chunk_device[layer_idx, skip_tokens:]
                 hidden_size = layer.shape[-1]
                 mla_src_3d = mla_src.reshape(
                     len(effective_block_ids), block_size, hidden_size
                 )
-                layer[effective_block_ids] = mla_src_3d
+                layer[eff_idx] = mla_src_3d
         elif is_hnd:
             for layer_idx, layer in enumerate(layer_tensors):
                 k_src = chunk_device[0, layer_idx, skip_tokens:]
