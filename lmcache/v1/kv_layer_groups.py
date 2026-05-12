@@ -17,6 +17,23 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+# ------------------------------------------------------------------ #
+#  Constants                                                           #
+# ------------------------------------------------------------------ #
+
+DEFAULT_LAYER_NAME_PREFIX = "model.layers."
+
+# ------------------------------------------------------------------ #
+#  dtype mapping                                                       #
+# ------------------------------------------------------------------ #
+
+DTYPE_MAP: dict[str, torch.dtype] = {
+    "float16": torch.float16,
+    "float32": torch.float32,
+    "bfloat16": torch.bfloat16,
+    "uint8": torch.uint8,
+}
+
 
 # The 4-tuple that uniquely identifies a set of kernel-equivalent layers:
 # ``(kv_size, num_heads, head_size, dtype)``. Two layers share a transfer-
@@ -211,3 +228,178 @@ class KVLayerGroupsManager:
             IndexError: If *group_idx* is out of range.
         """
         return self.kv_layer_groups[group_idx].shape_desc
+
+
+# ------------------------------------------------------------------ #
+#  CLI shape-spec parser                                               #
+# ------------------------------------------------------------------ #
+
+
+def parse_kvcache_shape_spec(
+    spec_str: str,
+) -> list[KVLayerGroupInfo]:
+    """Parse a ``--kvcache-shape-spec`` string into layer groups.
+
+    **Grammar** (EBNF-ish)::
+
+        spec        := group { ";" group }
+        group       := "(" shape ")" ":" dtype ":" layer_count
+        shape       := kv_size "," NB "," BS "," NH "," HS
+        dtype       := "float16" | "float32" | "bfloat16" | "uint8"
+        layer_count := positive integer
+
+    **Field semantics** (names aligned with ``GPUKVFormat``; see
+    :func:`lmcache.v1.gpu_connector.utils.get_gpu_kv_shape_description`):
+
+    * ``kv_size`` -- leading dim (``2`` for standard K/V, ``1`` for MLA).
+    * ``NB`` -- ``num_blocks``: paged-KV block count.
+    * ``BS`` -- ``block_size``: tokens per paged-KV block.
+    * ``NH`` -- ``num_heads``: attention heads per layer.
+    * ``HS`` -- ``head_size``: per-head hidden dim.
+    * ``dtype`` -- element dtype (case-insensitive). ``uint8`` is used
+      by FP8-quantized layouts.
+    * ``layer_count`` -- number of consecutive layers sharing this
+      group's geometry. Groups are concatenated in declaration order;
+      ``layer_indices`` are assigned sequentially starting from 0.
+
+    When consumed by the ``lmcache bench kvcache`` CLI, ``NB``/``BS``
+    from the spec take precedence over ``--num-blocks`` / ``--block-size``
+    CLI flags when set to a positive value.
+
+    **Examples**::
+
+        # Single homogeneous group: 32 layers of standard K/V
+        (2,1024,16,8,128):float16:32
+
+        # Heterogeneous model: 30 dense layers + 2 MLA-ish layers
+        (2,1024,16,8,128):float16:30;(1,1024,16,4,64):bfloat16:2
+
+        # FP8-quantized KV cache
+        (2,1024,16,8,128):uint8:32
+
+    See also :func:`format_kvcache_shape_spec` for the inverse -- it
+    turns a parsed group list back into a human-readable spec string
+    (handy for CLI echo-back / debug logging).
+
+    Returns:
+        A list of :class:`KVLayerGroupInfo`, one per group.
+
+    Raises:
+        ValueError: Malformed spec, unknown dtype, or a shape with a
+            wrong number of dimensions.
+    """
+    if not spec_str:
+        raise ValueError("KV shape specification cannot be empty")
+
+    groups: list[KVLayerGroupInfo] = []
+    layer_offset = 0
+
+    for group_spec in spec_str.split(";"):
+        group_spec = group_spec.strip()
+        if not group_spec:
+            continue
+
+        if not (group_spec.startswith("(") and "):" in group_spec):
+            raise ValueError("Invalid group spec format: %s" % group_spec)
+
+        shape_end = group_spec.find(")")
+        shape_str = group_spec[1:shape_end]
+
+        remaining = group_spec[shape_end + 2 :]  # Skip "):"
+        parts = remaining.split(":")
+        if len(parts) != 2:
+            raise ValueError("Invalid group spec format: %s" % group_spec)
+
+        dtype_str = parts[0].strip()
+        layer_count_str = parts[1].strip()
+
+        dtype_key = dtype_str.lower()
+        if dtype_key not in DTYPE_MAP:
+            raise ValueError(
+                "Unrecognized dtype '%s' in group spec: %s. "
+                "Supported: %s" % (dtype_str, group_spec, list(DTYPE_MAP.keys()))
+            )
+        try:
+            shape = tuple(int(p.strip()) for p in shape_str.split(","))
+            layer_count = int(layer_count_str)
+        except ValueError as exc:
+            raise ValueError("Invalid number in group spec: %s" % group_spec) from exc
+        dtype = DTYPE_MAP[dtype_key]
+
+        if len(shape) != 5:
+            raise ValueError(
+                "Shape must be a 5-tuple (kv_size,nb,bs,nh,hs): %s" % group_spec
+            )
+        kv_size, nb, bs, nh, hs = shape
+        shape_desc = lmc_ops.PageBufferShapeDesc()
+        shape_desc.kv_size = kv_size
+        shape_desc.nl = layer_count
+        shape_desc.nb = nb
+        shape_desc.bs = bs
+        shape_desc.nh = nh
+        shape_desc.hs = hs
+        shape_desc.element_size = dtype.itemsize
+
+        indices = list(range(layer_offset, layer_offset + layer_count))
+        groups.append(
+            KVLayerGroupInfo(
+                layer_indices=indices,
+                shape_desc=shape_desc,
+                dtype=dtype,
+            )
+        )
+        layer_offset += layer_count
+
+    if not groups:
+        raise ValueError("No valid layer groups found in spec")
+
+    return groups
+
+
+def format_kvcache_shape_spec(groups: list[KVLayerGroupInfo]) -> str:
+    """Format layer groups back into a ``--kvcache-shape-spec`` string.
+
+    This is the inverse of :func:`parse_kvcache_shape_spec`; the
+    result is round-trip safe (i.e. ``parse(format(x)) == x`` for any
+    ``x`` that ``parse`` would produce).
+
+    The returned string is also human-readable and is used by the
+    ``lmcache bench kvcache`` CLI to echo the resolved KV cache
+    geometry at startup, so operators can verify that their spec was
+    interpreted as intended.
+
+    Example::
+
+        >>> groups = parse_kvcache_shape_spec(
+        ...     "(2,1024,16,8,128):float16:30;"
+        ...     "(1,1024,16,4,64):bfloat16:2"
+        ... )
+        >>> format_kvcache_shape_spec(groups)
+        '(2,1024,16,8,128):float16:30;(1,1024,16,4,64):bfloat16:2'
+
+    Args:
+        groups: Layer groups as returned by
+            :func:`parse_kvcache_shape_spec`.
+
+    Raises:
+        ValueError: If *groups* is empty or contains an unsupported
+            dtype (one that is not present in :data:`DTYPE_MAP`).
+    """
+    if not groups:
+        raise ValueError("Cannot format an empty layer group list")
+
+    # Invert DTYPE_MAP once: torch.dtype -> canonical string name.
+    dtype_names = {v: k for k, v in DTYPE_MAP.items()}
+
+    parts: list[str] = []
+    for g in groups:
+        sd = g.shape_desc
+        try:
+            dtype_str = dtype_names[g.dtype]
+        except KeyError as exc:
+            raise ValueError("dtype %s is not present in DTYPE_MAP" % g.dtype) from exc
+        parts.append(
+            "(%d,%d,%d,%d,%d):%s:%d"
+            % (sd.kv_size, sd.nb, sd.bs, sd.nh, sd.hs, dtype_str, sd.nl)
+        )
+    return ";".join(parts)

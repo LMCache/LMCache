@@ -56,19 +56,25 @@ def _store_completed(
     t: float,
     adapter_index: int = 0,
     l2_name: str = "fs",
+    bytes_transferred: int | None = None,
 ) -> Event:
-    # L2_STORE_COMPLETED does not carry total_bytes; the subscriber
-    # looks up the bytes it cached at SUBMITTED time.
+    # ``bytes_transferred`` is populated by fast-path-aware adapters (see
+    # ``store_controller._finalize_store``).  Absence means the subscriber
+    # falls back to the submitted-bytes accounting it cached at SUBMITTED
+    # time.
+    metadata: dict = {
+        "adapter_index": adapter_index,
+        "task_id": task_id,
+        "l2_name": l2_name,
+        "succeeded_count": 1,
+        "failed_count": 0,
+    }
+    if bytes_transferred is not None:
+        metadata["bytes_transferred"] = bytes_transferred
     return Event(
         event_type=EventType.L2_STORE_COMPLETED,
         timestamp=t,
-        metadata={
-            "adapter_index": adapter_index,
-            "task_id": task_id,
-            "l2_name": l2_name,
-            "succeeded_count": 1,
-            "failed_count": 0,
-        },
+        metadata=metadata,
     )
 
 
@@ -333,6 +339,68 @@ class TestEdgeCases:
         assert (0, 5) not in subscriber._pending_store
         # Load pending dict untouched — different key space (request_id).
         assert (5, 0) in subscriber._pending_load
+
+
+# ---------------------------------------------------------------------------
+# bytes_transferred override (fast-path-aware adapters)
+# ---------------------------------------------------------------------------
+
+
+class TestStoreBytesTransferred:
+    """Store path prefers ``bytes_transferred`` from the COMPLETED event
+    over the submitted-bytes cache when the adapter populates it."""
+
+    def test_uses_bytes_transferred_when_present(self, subscriber):
+        count_before = _total_count(_STORE_METRIC)
+        sum_before = _sum(_STORE_METRIC)
+
+        # Submitted = 10 GB but adapter actually transferred only 1 GB
+        # (rest were fast-pathed duplicates).  Over 0.25 s -> 4 GB/s,
+        # not 40 GB/s.
+        subscriber._on_store_submitted(
+            _store_submitted(task_id=10, t=0.0, total_bytes=10_000_000_000)
+        )
+        subscriber._on_store_completed(
+            _store_completed(task_id=10, t=0.25, bytes_transferred=1_000_000_000)
+        )
+
+        assert _total_count(_STORE_METRIC) == count_before + 1
+        assert _sum(_STORE_METRIC) - sum_before == pytest.approx(4.0, rel=1e-6)
+
+    def test_zero_bytes_transferred_drops_sample(self, subscriber):
+        count_before = _total_count(_STORE_METRIC)
+        sum_before = _sum(_STORE_METRIC)
+
+        # Adapter fast-pathed every key -- no real work, drop the sample
+        # even though submitted bytes and dt look reasonable.
+        subscriber._on_store_submitted(
+            _store_submitted(task_id=11, t=0.0, total_bytes=10_000_000_000)
+        )
+        subscriber._on_store_completed(
+            _store_completed(task_id=11, t=0.1, bytes_transferred=0)
+        )
+
+        assert _total_count(_STORE_METRIC) == count_before
+        assert _sum(_STORE_METRIC) == sum_before
+        # Pending dict still drained even when sample dropped.
+        assert (0, 11) not in subscriber._pending_store
+
+    def test_absent_field_falls_back_to_submitted_bytes(self, subscriber):
+        # Adapters that don't track per-task transfer bytes omit the
+        # field; behavior matches the load path -- submitted bytes / dt.
+        count_before = _total_count(_STORE_METRIC)
+        sum_before = _sum(_STORE_METRIC)
+
+        # 2 GB in 0.1 s -> 20 GB/s
+        subscriber._on_store_submitted(
+            _store_submitted(task_id=12, t=0.0, total_bytes=2_000_000_000)
+        )
+        subscriber._on_store_completed(
+            _store_completed(task_id=12, t=0.1)  # no bytes_transferred
+        )
+
+        assert _total_count(_STORE_METRIC) == count_before + 1
+        assert _sum(_STORE_METRIC) - sum_before == pytest.approx(20.0, rel=1e-6)
 
 
 # ---------------------------------------------------------------------------

@@ -21,6 +21,17 @@ Implementation:
   - ``(end_ts - start_ts)`` spans submit -> complete and therefore
     includes adapter queue, network, and disk time — not just transfer.
     The histogram is "bytes / end-to-end latency", not raw transfer rate.
+
+Fast-path adapters:
+  Some adapters (``mock``, ``fs``, ``nixl_store``) skip writes for keys
+  that are already present, which makes ``dt`` collapse to near-zero and
+  inflates store throughput (the controller asked to store N bytes but
+  the adapter actually transferred 0).  When ``L2_STORE_COMPLETED``
+  carries ``bytes_transferred``, the store path uses it instead of the
+  submitted bytes; if ``bytes_transferred == 0`` the sample is dropped
+  (no work, no useful throughput data).  When the field is absent
+  (adapter doesn't track it), behavior matches the load path -- submitted
+  bytes / dt.
 """
 
 # Future
@@ -90,11 +101,16 @@ class L2ThroughputSubscriber(EventSubscriber):
         key = self._store_key(event)
         if key is None:
             return
+        # If the adapter reports per-task transfer bytes, prefer that
+        # over submitted bytes.  ``None`` means "adapter doesn't track" ->
+        # fall back to submitted-bytes accounting (the load-path code).
+        bytes_transferred = event.metadata.get("bytes_transferred")
         self._record(
             event=event,
             correlation_key=key,
             pending=self._pending_store,
             hist=self._store_hist,
+            override_bytes=bytes_transferred,
         )
 
     # -- Load path (L2->L1) ------------------------------------------------
@@ -150,13 +166,19 @@ class L2ThroughputSubscriber(EventSubscriber):
         correlation_key: tuple[int, int],
         pending: dict[tuple[int, int], tuple[float, int]],
         hist: Any,
+        override_bytes: int | None = None,
     ) -> None:
         pending_entry = pending.pop(correlation_key, None)
         if pending_entry is None:
             return  # no matching SUBMITTED event;
         t_start, total_bytes = pending_entry
 
-        if total_bytes <= 0:
+        # ``override_bytes`` carries the adapter-reported transfer bytes
+        # for fast-path-aware adapters.  ``None`` -> use submitted bytes
+        # (current behavior).  ``0`` -> adapter fast-pathed everything,
+        # there is no real throughput to record -- drop the sample.
+        effective_bytes = total_bytes if override_bytes is None else override_bytes
+        if effective_bytes <= 0:
             return
 
         dt = event.timestamp - t_start
@@ -168,4 +190,4 @@ class L2ThroughputSubscriber(EventSubscriber):
         if l2_name is not None:
             attrs["l2_name"] = str(l2_name)
 
-        hist.record(total_bytes / dt / 1e9, attributes=attrs)
+        hist.record(effective_bytes / dt / 1e9, attributes=attrs)

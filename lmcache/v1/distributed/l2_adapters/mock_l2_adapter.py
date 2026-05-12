@@ -125,6 +125,7 @@ class MockL2Adapter(L2AdapterInterface):
         # Task ID management
         self._next_task_id: L2TaskId = 0
         self._completed_store_tasks: dict[L2TaskId, bool] = {}
+        self._completed_store_task_bytes: dict[L2TaskId, int] = {}
         self._completed_lookup_tasks: dict[L2TaskId, Bitmap] = {}
         self._completed_load_tasks: dict[L2TaskId, Bitmap] = {}
         self._lock = threading.Lock()  # lock for all shared state
@@ -195,6 +196,12 @@ class MockL2Adapter(L2AdapterInterface):
             completed = self._completed_store_tasks
             self._completed_store_tasks = {}
         return completed
+
+    def pop_completed_store_task_bytes(self) -> dict[L2TaskId, int]:
+        with self._lock:
+            completed_bytes = self._completed_store_task_bytes
+            self._completed_store_task_bytes = {}
+        return completed_bytes
 
     def submit_lookup_and_lock_task(self, keys: list[ObjectKey]) -> L2TaskId:
         with self._lock:
@@ -434,6 +441,11 @@ class MockL2Adapter(L2AdapterInterface):
         await asyncio.sleep(delay_seconds)
         with self._lock:
             self._completed_store_tasks[task_id] = success
+            # ``total_bytes`` counts only objects actually written into
+            # ``self._memory_objects`` — duplicates and capacity-skipped
+            # keys are excluded.  Reporting this lets the L2 throughput
+            # subscriber distinguish real I/O from fast-pathed no-ops.
+            self._completed_store_task_bytes[task_id] = total_bytes
 
         if stored_keys:
             self._notify_keys_stored(stored_keys, stored_sizes)
