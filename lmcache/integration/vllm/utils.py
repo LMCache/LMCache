@@ -339,39 +339,6 @@ def get_size_bytes(shapes: list[torch.Size], kv_dtypes: list[torch.dtype]):
     )
 
 
-def get_vllm_torch_dev():
-    """
-    Returns the torch device and device name for the vLLM engine.
-    e.g. (torch.cuda, "cuda") or (torch.xpu, "xpu")
-    """
-    # Third Party
-    from vllm.platforms import current_platform
-
-    if current_platform.is_cuda_alike():
-        logger.info("CUDA device is available. Using CUDA for LMCache engine.")
-        torch_dev = torch.cuda
-        dev_name = "cuda"
-    elif current_platform.is_xpu():
-        logger.info("XPU device is available. Using XPU for LMCache engine.")
-        torch_dev = torch.xpu
-        dev_name = "xpu"
-    elif hasattr(torch, "hpu") and torch.hpu.is_available():
-        logger.info("HPU device is available. Using HPU for LMCache engine.")
-        torch_dev = torch.hpu
-        dev_name = "hpu"
-    else:
-        raise RuntimeError("Unsupported device platform for LMCache engine.")
-    return torch_dev, dev_name
-
-
-def get_vllm_device_type() -> str:
-    """Return current vLLM platform device type string (e.g. cuda/xpu)."""
-    # Third Party
-    from vllm.platforms import current_platform
-
-    return current_platform.device_type
-
-
 def calculate_local_rank_and_world_size(vllm_config: "VllmConfig") -> Tuple[int, int]:
     """
     Calculate the local worker id and local world size.
@@ -383,10 +350,12 @@ def calculate_local_rank_and_world_size(vllm_config: "VllmConfig") -> Tuple[int,
     Returns:
         Tuple[int, int]: (local_worker_id, local_world_size)
     """
+    # First Party
+    from lmcache import torch_dev
+
     parallel_config = vllm_config.parallel_config
     global_rank = parallel_config.rank
     global_world_size = parallel_config.world_size
-    torch_dev, dev_name = get_vllm_torch_dev()
     num_gpus = torch_dev.device_count()
     if global_world_size <= num_gpus:
         # single node case

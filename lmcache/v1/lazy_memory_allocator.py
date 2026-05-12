@@ -8,6 +8,7 @@ import threading
 import torch
 
 # First Party
+from lmcache import torch_dev, torch_device_type
 from lmcache.logging import init_logger
 from lmcache.v1.memory_management import (
     AddressManager,
@@ -36,7 +37,7 @@ def get_numa_id(numa_mapping: NUMAMapping) -> int:
     Raises:
         KeyError: If GPU id is not detected in the numa mapping.
     """
-    gpu_id = torch.cuda.current_device() if torch.cuda.is_available() else 0
+    gpu_id = torch_dev.current_device() if torch_dev.is_available() else 0
     return numa_mapping.gpu_to_numa_mapping[gpu_id]
 
 
@@ -90,8 +91,16 @@ class LazyMemoryAllocator(MemoryAllocatorInterface):
         self._final_size = align_to(final_size, self.PIN_CHUNK_SIZE)
         # Underlying buffer for the memory allocation
         self._buffer: torch.Tensor
-        # CUDA runtime API
-        self._cudart = torch.cuda.cudart()
+        # Not all backends support cudart() for host memory pinning (CUDA-specific)
+        if not hasattr(torch_dev, "cudart"):
+            raise RuntimeError(
+                f"Backend '{torch_device_type}' does not support "
+                "cudart(). LazyMemoryAllocator requires pinned "
+                "memory via cudaHostRegister, which is not "
+                "available on this backend."
+            )
+        else:
+            self._cudart = torch_dev.cudart()
 
         # List of (ptr, size) for pinned memory chunks
         self._pin_record: list[tuple[int, int]] = []

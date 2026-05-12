@@ -23,6 +23,7 @@ import threading
 import torch
 
 # First Party
+from lmcache import torch_dev, torch_device_type
 from lmcache.logging import init_logger
 from lmcache.observability import PrometheusLogger
 from lmcache.utils import (
@@ -64,7 +65,7 @@ def allocate_and_copy_objects(
     allocator_backend: AllocatorBackendInterface,
     keys: Sequence[CacheEngineKey],
     src_memory_objs: list[MemoryObj],
-    stream: torch.cuda.Stream,
+    stream: Any,
 ) -> tuple[Sequence[CacheEngineKey], list[MemoryObj]]:
     """
     Allocate the memory objects and copy the data from src_memory_objs to
@@ -75,7 +76,8 @@ def allocate_and_copy_objects(
           objects
         keys: the cache engine keys corresponding to the memory objects
         src_memory_objs: the memory objects to copy from
-        stream: the cuda stream to run the copy in
+        stream: the device-specific GPU stream to run the copy in
+            (e.g., torch_dev.Stream on CUDA or XPU)
 
     Returns:
         - list of cache engine keys that corresponds to the memory objects
@@ -107,7 +109,7 @@ def allocate_and_copy_objects(
             memory_obj.ref_count_down()
             break
 
-        with torch.cuda.stream(stream):
+        with torch_dev.stream(stream):
             memory_obj.tensor.copy_(src_memory_obj.tensor, non_blocking=True)
         allocated_objects.append(memory_obj)
 
@@ -266,9 +268,9 @@ class StorageManager:
         )
         self.async_serializer: Optional[AsyncSerializer] = None
 
-        # The cuda stream for internal copies during put
+        # The GPU stream for internal copies during put
         if is_cuda_worker(metadata):
-            self.internal_copy_stream = torch.cuda.Stream()
+            self.internal_copy_stream = torch_dev.Stream()
         else:
             self.internal_copy_stream = None
 
@@ -1225,7 +1227,9 @@ class StorageManager:
                 self.config,
                 self.metadata,
                 self.loop,
-                dst_device=("cuda" if is_cuda_worker(self.metadata) else "cpu"),
+                dst_device=(
+                    torch_device_type if is_cuda_worker(self.metadata) else "cpu"
+                ),
                 lmcache_worker=self.lmcache_worker,
                 skip_backends=existing_names,
                 existing_backends=self.storage_backends,
@@ -1287,7 +1291,9 @@ class StorageManager:
                 self.config,
                 self.metadata,
                 self.loop,
-                dst_device=("cuda" if is_cuda_worker(self.metadata) else "cpu"),
+                dst_device=(
+                    torch_device_type if is_cuda_worker(self.metadata) else "cpu"
+                ),
                 lmcache_worker=self.lmcache_worker,
                 skip_backends=existing_names,
                 existing_backends=self.storage_backends,

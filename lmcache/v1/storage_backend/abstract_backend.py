@@ -9,6 +9,7 @@ import asyncio
 import torch
 
 # First Party
+from lmcache import torch_device_type
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_management import (
@@ -26,7 +27,7 @@ if TYPE_CHECKING:
 class StorageBackendInterface(metaclass=abc.ABCMeta):
     def __init__(
         self,
-        dst_device: str = "cuda",
+        dst_device: str = torch_device_type,
     ):
         """
         Initialize the storage backend.
@@ -427,7 +428,7 @@ class StoragePluginInterface(StorageBackendInterface):
 
     def __init__(
         self,
-        dst_device: str = "cuda",
+        dst_device: str = torch_device_type,
         config: Optional[LMCacheEngineConfig] = None,
         metadata: Optional[LMCacheMetadata] = None,
         local_cpu_backend: Optional["LocalCPUBackend"] = None,

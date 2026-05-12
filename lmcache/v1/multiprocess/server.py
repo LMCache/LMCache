@@ -9,12 +9,16 @@ import threading
 import time
 
 # Third Party
-import torch
 import zmq
 
 # First Party
+from lmcache import torch_dev, torch_device_type
 from lmcache.logging import init_logger
-from lmcache.utils import EngineType, _lmcache_nvtx_annotate
+from lmcache.utils import (
+    EngineType,
+    _lmcache_nvtx_annotate,
+    check_interprocess_event_support,
+)
 from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
     ObjectKey,
@@ -268,7 +272,7 @@ class MPCacheEngine:
             del self.gpu_contexts[instance_id]
             del self.gpu_context_meta[instance_id]
             logger.info("Unregistered KV cache for GPU ID %d", instance_id)
-            torch.cuda.empty_cache()
+            torch_dev.empty_cache()
         else:
             logger.warning("No KV cache found for GPU ID %d to unregister", instance_id)
 
@@ -315,16 +319,25 @@ class MPCacheEngine:
         blocks_per_chunk = self.chunk_size // gpu_context.block_size
 
         with (
-            torch.cuda.device(gpu_context.device),
-            torch.cuda.stream(gpu_context.stream),
+            torch_dev.device(gpu_context.device),
+            torch_dev.stream(gpu_context.stream),
         ):
-            event = torch.cuda.Event(interprocess=True)
+            # Not all backends support interprocess Events (CUDA IPC specific)
+            check_interprocess_event_support()
+            event = torch_dev.Event(interprocess=True)
 
             # Stage all block_ids to GPU once before the loop
             all_block_ids_gpu = gpu_context.stage_block_ids(gpu_block_ids)
 
             # Wait for vLLM to finish
-            vllm_event = torch.cuda.Event.from_ipc_handle(
+            # Not all backends support IPC event handles (CUDA IPC specific)
+            if not hasattr(torch_dev.Event, "from_ipc_handle"):
+                raise RuntimeError(
+                    f"Backend '{torch_device_type}' does not support IPC event "
+                    "handles (Event.from_ipc_handle not available). "
+                    "Multiprocess IPC requires CUDA."
+                )
+            vllm_event = torch_dev.Event.from_ipc_handle(
                 gpu_context.device, event_ipc_handle
             )
             vllm_event.wait(stream=gpu_context.stream)
@@ -570,13 +583,15 @@ class MPCacheEngine:
                     )
 
         with (
-            torch.cuda.device(gpu_context.device),
-            torch.cuda.stream(gpu_context.stream),
+            torch_dev.device(gpu_context.device),
+            torch_dev.stream(gpu_context.stream),
         ):
             # Stage all block_ids to GPU once before the loop
             all_block_ids_gpu = gpu_context.stage_block_ids(gpu_block_ids)
 
-            event = torch.cuda.Event(interprocess=True)
+            # Not all backends support interprocess Events (CUDA IPC specific)
+            check_interprocess_event_support()
+            event = torch_dev.Event(interprocess=True)
 
             prefetched_keys: list[ObjectKey] = []
             retrieve_succeeded = False
@@ -1172,7 +1187,14 @@ def run_cache_server(
         mp_config.port,
     )
     # Start the ZMQ server
-    torch.cuda.init()
+    # Not all backends expose init(); some auto-initialize on first use
+    if not hasattr(torch_dev, "init"):
+        logger.warning(
+            "Backend '%s' does not support init(), skipping device init",
+            torch_device_type,
+        )
+    else:
+        torch_dev.init()
     server.start()
 
     logger.info("LMCache cache server is running...")
