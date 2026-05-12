@@ -225,6 +225,9 @@ class LMCacheMPConnector:
         and-forget call and keys the prefetch job by request_id (a string);
         the result is the number of matched chunks once available.
         """
+        # TODO(Shaoting): busy poll. No effect when using L1 only. A real fix
+        # needs a blocking QUERY_PREFETCH_STATUS variant on the daemon side
+        # (new RequestType + PrefetchController completion Event).
         deadline = time.monotonic() + self._mq_timeout
         while True:
             matched_chunks = send_lmcache_request(
