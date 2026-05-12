@@ -234,7 +234,7 @@ class RawBlockCore:
             raise ValueError("RawBlockCore requires a non-empty device_path")
         if self.block_align <= 0 or (self.block_align & (self.block_align - 1)) != 0:
             raise ValueError(
-                f"block_align must be a positive power of 2, got {self.block_align}"
+                f"block_align must be a power of 2, got {self.block_align}"
             )
         if self.header_bytes < 24:
             raise ValueError("header_bytes must be >= 24")
