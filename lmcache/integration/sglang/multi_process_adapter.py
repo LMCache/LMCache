@@ -13,6 +13,7 @@ import torch.distributed as dist
 import zmq
 
 # First Party
+from lmcache import torch_dev
 from lmcache.integration.sglang.sglang_adapter import (
     LoadMetadata,
     StoreMetadata,
@@ -371,8 +372,8 @@ class LMCacheMPConnector:
         block_ids: list[int],
         skip_prefix_n_blocks: int = 0,
     ):
-        event = torch.cuda.Event(interprocess=True)
-        event.record(torch.cuda.current_stream())
+        event = torch_dev.Event(interprocess=True)
+        event.record(torch_dev.current_stream())
         return send_lmcache_request(
             self.mq_client,
             RequestType.RETRIEVE,
@@ -484,8 +485,8 @@ class LMCacheMPConnector:
         block_ids = self._slot_mapping_to_block_ids(
             store_metadata.kv_indices[:aligned_end]
         )
-        event = torch.cuda.Event(interprocess=True)
-        event.record(torch.cuda.current_stream())
+        event = torch_dev.Event(interprocess=True)
+        event.record(torch_dev.current_stream())
         success = (
             send_lmcache_request(
                 self.mq_client,
