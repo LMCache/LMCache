@@ -231,6 +231,27 @@ class L2AdapterInterface(ABC):
         """
         pass
 
+    def pop_completed_store_task_bytes(self) -> dict[L2TaskId, int]:
+        """Report bytes actually transferred per completed store task.
+
+        Optional. Default returns ``{}``, which leaves the L2 throughput
+        subscriber to fall back on submitted-bytes accounting.
+
+        Adapters that fast-path duplicate keys (e.g. skip the write when
+        the key already exists in the backend) SHOULD override this so
+        the throughput histogram reflects real work, not skipped no-ops.
+        A task with all keys fast-pathed reports ``0`` here, which the
+        subscriber treats as "no useful sample" and skips.
+
+        Returns:
+            dict[L2TaskId, int]: task id -> bytes actually written. Keys
+            present here MUST also appear in the next
+            ``pop_completed_store_tasks`` call (they share the same
+            per-task completion record), and the returned dict should be
+            cleared on read, mirroring ``pop_completed_store_tasks``.
+        """
+        return {}
+
     #####################
     # Lookup and Lock Interface
     #####################

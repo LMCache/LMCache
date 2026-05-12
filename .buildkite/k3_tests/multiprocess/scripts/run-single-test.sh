@@ -91,9 +91,12 @@ case "$TEST_NAME" in
     deadlock)
         exec_script="${SCRIPT_DIR}/run-deadlock.sh"
         ;;
+    restart_recovery)
+        exec_script="${SCRIPT_DIR}/run-restart-recovery.sh"
+        ;;
     *)
         echo "Unknown test: $TEST_NAME"
-        echo "Valid tests: lm_eval, vllm_bench, long_doc_qa, long_doc_qa_l2, fault_tolerance, deadlock"
+        echo "Valid tests: lm_eval, vllm_bench, long_doc_qa, long_doc_qa_l2, fault_tolerance, deadlock, restart_recovery"
         exit 1
         ;;
 esac

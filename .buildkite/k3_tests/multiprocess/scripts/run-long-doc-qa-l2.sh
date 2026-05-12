@@ -49,6 +49,11 @@ MAX_WARMUP_OVERHEAD="${MAX_WARMUP_OVERHEAD:-2.0}"
 
 L2_RESULTS_DIR="$RESULTS_DIR/long_doc_qa_l2"
 PID_FILE="/tmp/lmcache_mp_pids_${BUILD_ID}"
+# /metrics is now served by the LMCache FastAPI HTTP server (port 8080
+# by default) — the legacy ``--prometheus-port`` standalone server was
+# disabled for the ``lmcache server`` entrypoint by #3164.  Defined here
+# (not just in Step 4) so the relaunch and the curl scrape agree.
+METRICS_HTTP_PORT="${METRICS_HTTP_PORT:-8080}"
 
 echo "=== Long Doc QA L2 Performance Test ==="
 echo "Model: $MODEL"
@@ -65,7 +70,12 @@ mkdir -p "$L2_RESULTS_DIR"
 # ---------------------------------------------------------------------------
 
 echo "--- Stopping existing LMCache MP server and vLLM ---"
-# PID file layout: line1=LMCache, line2=vLLM w/ LMCache, line3=vLLM baseline
+# PID file layout: line1=LMCache, line2=vLLM w/ LMCache, line3=vLLM baseline.
+# These processes were launched by an earlier script (launch-processes.sh)
+# and are not children of this shell, so ``wait $pid`` is a no-op here.
+# We instead poll until each PID actually exits, then poll until the
+# Prometheus port is free, otherwise the LMCache relaunch below would
+# fail to bind /metrics and the metrics check would fail spuriously.
 if [ -f "$PID_FILE" ]; then
     LMCACHE_PID=$(sed -n '1p' "$PID_FILE")
     VLLM_PID=$(sed -n '2p' "$PID_FILE")
@@ -73,10 +83,26 @@ if [ -f "$PID_FILE" ]; then
         if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
             echo "Killing PID $pid"
             kill "$pid" 2>/dev/null || true
-            wait "$pid" 2>/dev/null || true
+            for _ in $(seq 1 60); do
+                kill -0 "$pid" 2>/dev/null || break
+                sleep 0.5
+            done
+            # Last resort: SIGKILL if SIGTERM didn't take after 30s.
+            if kill -0 "$pid" 2>/dev/null; then
+                echo "PID $pid still alive after SIGTERM; sending SIGKILL"
+                kill -9 "$pid" 2>/dev/null || true
+            fi
         fi
     done
-    sleep 2
+    # Poll until the Prometheus port is fully released so the new server
+    # below can bind it cleanly.
+    for _ in $(seq 1 30); do
+        if ! (ss -ltn 2>/dev/null || netstat -ltn 2>/dev/null) \
+                | awk '{print $4}' | grep -qE ":${METRICS_HTTP_PORT}$"; then
+            break
+        fi
+        sleep 0.5
+    done
 fi
 
 echo "--- Launching LMCache MP server with L2 config ---"
@@ -93,6 +119,8 @@ lmcache server \
     --l2-prefetch-policy default \
     --l2-adapter "$L2_ADAPTER_JSON" \
     --max-workers "$MAX_WORKERS" \
+    --metrics-sample-rate 1.0 \
+    --http-port "$METRICS_HTTP_PORT" \
     --port "$LMCACHE_PORT" \
     > "/tmp/build_${BUILD_ID}_lmcache_l2.log" 2>&1 &
 
@@ -319,14 +347,35 @@ echo "============================================"
 echo "=== Verifying L2 Data Flow (Metrics) ==="
 echo "============================================"
 
-PROMETHEUS_PORT="${PROMETHEUS_PORT:-9090}"
 L2_METRICS_FILE="$L2_RESULTS_DIR/prometheus_metrics.txt"
-curl -sf "http://localhost:${PROMETHEUS_PORT}/metrics" > "$L2_METRICS_FILE" 2>/dev/null || true
+# Retry briefly: when LMCache is relaunched on the same port as the
+# previous instance, the Prometheus socket can take a moment to come
+# back up, and a single-shot curl loses the metrics check silently.
+> "$L2_METRICS_FILE"
+for i in 1 2 3 4 5; do
+    if curl -sf "http://localhost:${METRICS_HTTP_PORT}/metrics" \
+            > "$L2_METRICS_FILE" 2>/dev/null && [ -s "$L2_METRICS_FILE" ]; then
+        break
+    fi
+    sleep 2
+done
 
 if [ ! -s "$L2_METRICS_FILE" ]; then
-    echo "WARNING: Could not fetch metrics from Prometheus (port $PROMETHEUS_PORT). Skipping data flow check."
-else
-    python3 -c "
+    echo "FAIL: could not fetch /metrics from LMCache HTTP server (port $METRICS_HTTP_PORT)."
+    echo "       /metrics being unreachable means we cannot verify the L2"
+    echo "       data flow or the observability surface; failing the test"
+    echo "       rather than silently skipping."
+    echo ""
+    echo "--- LMCache L2 server log (last 50 lines) ---"
+    tail -50 "/tmp/build_${BUILD_ID}_lmcache_l2.log" 2>&1 || true
+    echo ""
+    echo "--- Listening sockets on port ${METRICS_HTTP_PORT} ---"
+    (ss -ltnp 2>/dev/null || netstat -ltnp 2>/dev/null || true) \
+        | awk -v p=":${METRICS_HTTP_PORT}" '$0 ~ p'
+    exit 1
+fi
+
+python3 -c "
 import sys
 
 with open('$L2_METRICS_FILE') as f:
@@ -400,7 +449,122 @@ if failed:
 else:
     print('[PASS] All data flow checks passed')
 "
-fi
+
+# ---------------------------------------------------------------------------
+# Step 5: Verify the rest of the MP observability surface
+# ---------------------------------------------------------------------------
+# The data-flow block above is L2-focused.  This block goes wider — it
+# asserts that every metric we publish from MP mode actually advances
+# during the run.  ``--metrics-sample-rate 1.0`` was set on the relaunch
+# above so the histograms record on every event (the default 0.01 would
+# leave them empty in this short workload and flake the assertions).
+
+echo ""
+echo "============================================"
+echo "=== Verifying full MP observability surface ==="
+echo "============================================"
+
+python3 - "$L2_METRICS_FILE" <<'PYEOF'
+import re
+import sys
+
+with open(sys.argv[1]) as f:
+    text = f.read()
+
+
+def counter_total(name: str) -> float:
+    """Sum a counter across all label combinations."""
+    total = 0.0
+    pat = re.compile(rf"^{re.escape(name)}(\{{[^}}]*\}})?\s+([0-9eE+\-.]+)\s*$", re.M)
+    for _, value in pat.findall(text):
+        try:
+            total += float(value)
+        except ValueError:
+            pass
+    return total
+
+
+def histogram_count(base_name: str) -> float:
+    """Sum the ``_count`` series across all label combinations.
+
+    Non-zero means the histogram observed at least one sample.
+
+    The OTel→Prometheus bridge appends the OTel ``unit`` to the metric
+    name (e.g. unit ``GB/s`` → ``GB_per_second``), so the actual series
+    looks like ``<base>_GB_per_second_count``.  Match that as a suffix
+    so this works whether or not the unit is present.
+    """
+    pat = re.compile(
+        rf"^{re.escape(base_name)}(?:_[A-Za-z_]+)?_count(?:\{{[^}}]*\}})?\s+"
+        rf"([0-9eE+\-.]+)\s*$",
+        re.M,
+    )
+    return sum(float(v) for v in pat.findall(text))
+
+
+def has_label(base_name: str, label: str) -> bool:
+    """Check that at least one sample of `base_name` carries the named label.
+
+    Tolerates the OTel unit suffix that Prometheus appends to histograms.
+    """
+    pat = re.compile(
+        rf"^{re.escape(base_name)}(?:_[A-Za-z_]+)?(?:_count|_sum|_bucket)?"
+        rf"\{{[^}}]*\b{re.escape(label)}=",
+        re.M,
+    )
+    return bool(pat.search(text))
+
+
+# (kind, metric_name, optional_label_to_assert_present_or_None)
+checks = [
+    # ── Newer counters (with label dimensions) ─────────────────────
+    ("counter", "lmcache_mp_l2_store_completed_total", "l2_name"),
+    ("counter", "lmcache_mp_l2_load_completed_total", "l2_name"),
+    ("counter", "lmcache_mp_lookup_requested_tokens_total", "model_name"),
+    ("counter", "lmcache_mp_lookup_hit_tokens_total", "model_name"),
+    ("counter", "lmcache_mp_num_chunks_loaded_total", "worker_id"),
+    # ── Histograms.  The OTel→Prometheus bridge appends the OTel
+    # ``unit`` to the series name, so a histogram declared with
+    # ``unit="GB/s"`` actually reports as
+    # ``<name>_GB_per_second_count`` / ``..._sum`` / ``..._bucket``.
+    # Match by base name and let the helper tolerate the unit suffix.
+    ("hist", "lmcache_mp_l0_l1_store_throughput_gbs", None),
+    ("hist", "lmcache_mp_l0_l1_load_throughput_gbs", None),
+    ("hist", "lmcache_mp_l2_store_throughput_gbs", "l2_name"),
+    ("hist", "lmcache_mp_l2_load_throughput_gbs", "l2_name"),
+]
+
+failed = False
+for kind, name, label in checks:
+    if kind == "counter":
+        value = counter_total(name)
+        ok = value > 0
+        detail = f"total={value:.0f}"
+    else:
+        value = histogram_count(name)
+        ok = value > 0
+        detail = f"_count={value:.0f}"
+
+    status = "PASS" if ok else "FAIL"
+    print(f"[{status}] {name}: {detail}")
+    if not ok:
+        failed = True
+        continue
+
+    if label is not None:
+        if has_label(name, label):
+            print(f"       └─ label '{label}' present")
+        else:
+            print(f"[FAIL] {name}: expected label '{label}' is missing")
+            failed = True
+
+print()
+if failed:
+    print("[FAIL] Observability metric verification FAILED")
+    print("       (some metric did not advance, or its label dimension is missing)")
+    sys.exit(1)
+print("[PASS] All observability metrics populated.")
+PYEOF
 
 echo "============================================"
 echo "=== L2 Long Doc QA test completed ==="

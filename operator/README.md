@@ -8,11 +8,14 @@ See [DESIGN.md](DESIGN.md) for architecture details, reconciliation logic, and C
 
 - Kubernetes 1.20+
 - `kubectl` configured to access your cluster
-- NVIDIA GPU Operator with the `nvidia` RuntimeClass available on GPU nodes
+- For NVIDIA GPUs (default): NVIDIA GPU Operator with the `nvidia` RuntimeClass available on GPU nodes
+- For AMD GPUs: set `spec.gpuVendor: amd` in your `LMCacheEngine` (see [AMD GPUs (ROCm)](#amd-gpus-rocm) below)
 - (Optional) [Prometheus Operator](https://github.com/prometheus-operator/prometheus-operator) for ServiceMonitor support
 
 > [!IMPORTANT]
-> The operator runs LMCache pods with `runtimeClassName: nvidia` and `privileged: true` to gain GPU visibility without consuming GPU resources via the device plugin. This allows the serving engine (e.g., vLLM) to claim all GPUs on the node. Clusters using Pod Security Standards must allow the `privileged` profile for the LMCache namespace.
+> By default the operator runs LMCache pods with `runtimeClassName: nvidia` and `privileged: true` to gain GPU visibility without consuming GPU resources via the device plugin. This allows the serving engine (e.g., vLLM) to claim all GPUs on the node. Clusters using Pod Security Standards must allow the `privileged` profile for the LMCache namespace.
+>
+> On AMD ROCm clusters, `spec.gpuVendor: amd` omits `runtimeClassName` and skips NVIDIA-specific env vars.
 
 ## Quick Start
 
@@ -165,6 +168,25 @@ spec:
     sizeGB: 60
 ```
 
+### AMD GPUs (ROCm)
+
+Set `spec.gpuVendor: amd` to run on AMD GPU nodes. The operator omits `runtimeClassName` from the pod spec and skips the NVIDIA env vars. AMD GPU nodes don't have a universal label equivalent to `nvidia.com/gpu.present`, so supply a `nodeSelector` that matches the label your platform exposes (e.g. `feature.node.kubernetes.io/amd-gpu: "true"` when using the [ROCm/gpu-operator](https://github.com/ROCm/gpu-operator)):
+
+```yaml
+apiVersion: lmcache.lmcache.ai/v1alpha1
+kind: LMCacheEngine
+metadata:
+  name: amd-cache
+spec:
+  gpuVendor: amd
+  nodeSelector:
+    feature.node.kubernetes.io/amd-gpu: "true"
+  l1:
+    sizeGB: 60
+```
+
+vLLM connects to LMCache via HIP IPC over `hostIPC` exactly the same way as CUDA IPC on NVIDIA — the `hostIPC: true` and `PYTHONHASHSEED=0` requirements above apply unchanged. Use a ROCm-built LMCache image for `spec.image`.
+
 ### Custom Server Port
 
 If the default port (5555) conflicts with other services:
@@ -257,7 +279,7 @@ spec:
 
 ### L2 Storage: Other Adapters (Raw Escape Hatch)
 
-For adapter types not yet natively supported by the operator (e.g. `nixl_store`, `fs`, `mock`), use the `raw` escape hatch. The JSON is passed through to `--l2-adapter` as-is:
+For adapter types not yet natively supported by the operator (e.g. `nixl_store`, `fs`, `mock`, `raw_block`), use the `raw` escape hatch. The JSON is passed through to `--l2-adapter` as-is:
 
 ```yaml
 spec:
@@ -271,6 +293,27 @@ spec:
           use_direct_io: "false"
         pool_size: 64
 ```
+
+Example `raw_block` configuration via the same escape hatch:
+
+```yaml
+spec:
+  l2Backend:
+    raw:
+      type: raw_block
+      config:
+        device_path: "/dev/nvme0n1"
+        slot_bytes: 1048576
+        block_align: 4096
+        header_bytes: 4096
+        meta_total_bytes: 268435456
+        use_odirect: true
+        num_store_workers: 2
+        num_lookup_workers: 1
+        num_load_workers: 4
+```
+
+Use an unmounted raw block device or a dedicated file path reserved for LMCache. With `use_odirect: true`, the LMCache server's `--l1-align-bytes` setting must be at least `block_align`.
 
 > [!NOTE]
 > Currently only a single L2 adapter is supported at a time. While LMCache multiprocess mode is designed to support multiple L2 adapters in cascade, this functionality is not yet fully tested. Once the multi-adapter pipeline is validated and performance is confirmed, the operator will be updated to support multiple adapters.

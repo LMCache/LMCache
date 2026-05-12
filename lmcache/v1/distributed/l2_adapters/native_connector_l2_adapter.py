@@ -104,10 +104,18 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
     _OP_LOAD = "load"
     _OP_DELETE = "delete"
 
-    def __init__(self, native_client: Any, max_capacity_gb: float = 0) -> None:
+    def __init__(
+        self,
+        native_client: Any,
+        max_capacity_gb: float = 0,
+        type_name: str = "",
+        extra_status: dict[str, Any] | None = None,
+    ) -> None:
         super().__init__(max_capacity_bytes=int(max_capacity_gb * (1024**3)))
         self._client = native_client
         self._client_fd: int = int(native_client.event_fd())
+        self._type_name: str = type_name or type(native_client).__name__
+        self._extra_status: dict[str, Any] = dict(extra_status or {})
 
         # 3 distinct cross-platform notifiers for the L2 adapter
         # interface
@@ -333,6 +341,29 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
     # ``get_usage()`` is inherited from ``L2AdapterInterface``. The base
     # class tracks aggregate + per-user totals via ``_notify_keys_*``;
     # we feed it the byte sizes from each store/delete completion.
+
+    # ---------------------------------------------------------------
+    # Status Interface
+    # ---------------------------------------------------------------
+
+    def report_status(self) -> dict[str, Any]:
+        """Return a status dict for this native-connector L2 adapter.
+
+        Returns:
+            A dict with at minimum:
+              * ``is_healthy`` (bool): ``True`` while the background demux
+                thread is alive and not stopping.
+              * ``type`` (str): Stable adapter type label, supplied by the
+                factory or derived from the native client class name.
+            Plus any caller-supplied ``extra_status`` fields (e.g. backend
+            configuration like ``base_path``, ``num_workers``).
+        """
+        status: dict[str, Any] = {
+            "is_healthy": (self._demux_thread.is_alive() and not self._stop.is_set()),
+            "type": self._type_name,
+        }
+        status.update(self._extra_status)
+        return status
 
     # ---------------------------------------------------------------
     # Cleanup

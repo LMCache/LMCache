@@ -332,6 +332,21 @@ class BlendTokenRangeMatcher:
         with self._lock:
             return token_hash in self._token_hash_to_compact_id
 
+    def clear(self) -> int:
+        """Drop every registered chunk and reset compact-ID allocation.
+
+        Returns:
+            Number of live (non-evicted) chunks removed.
+        """
+        with self._lock:
+            num_live = len(self._token_hash_to_compact_id)
+            self._table_id.fill(-1)
+            self._compact_id_to_slot.fill(-1)
+            self._chunk_token_hash = []
+            self._token_hash_to_start = {}
+            self._token_hash_to_compact_id = {}
+            return num_live
+
 
 def _unique_token_coverage(results: list[CBMatchResult]) -> int:
     """Return the number of unique query tokens covered by a set of CBMatchResults.
@@ -409,6 +424,24 @@ class BlendEngineV2(MPCacheEngine):
             gpu_context.num_layers,
         )
 
+    def clear(self) -> None:
+        """Clear the CB fingerprint table, then storage.
+
+        Matcher is cleared first so any concurrent CB store that completes
+        between the two steps leaves a stale matcher entry (self-healed by
+        the lazy-eviction path in cb_lookup_pre_computed) rather than an
+        orphaned chunk in storage.
+        """
+        num_dropped = self._token_range_matcher.clear()
+        super().clear()
+        if num_dropped:
+            self._event_bus.publish(
+                Event(
+                    event_type=EventType.CB_CHUNKS_EVICTED,
+                    metadata={"num_chunks": num_dropped},
+                )
+            )
+
     def cb_unregister_kv_cache(self, instance_id: int) -> None:
         """
         Unregister the KV cache buffer for the given instance_id
@@ -425,6 +458,43 @@ class BlendEngineV2(MPCacheEngine):
                 "Attempted to unregister non-existent CB KV cache for instance_id %d",
                 instance_id,
             )
+
+    def report_status(self) -> dict:
+        """Return a status dict for the entire cache engine.
+
+        Extends the base dict with ``registered_cb_gpu_ids`` and
+        ``cb_gpu_context_meta`` so CB-only deployments are distinguishable
+        from "no engine connected" to ``/api/status`` clients.
+        """
+        status = super().report_status()
+
+        cb_gpu_context_meta: dict[str, dict] = {}
+        for gpu_id, meta in self._cb_gpu_context_meta.items():
+            model_name, world_size = meta
+            entry: dict = {
+                "model_name": model_name,
+                "world_size": world_size,
+            }
+            ctx = self._cb_gpu_contexts.get(gpu_id)
+            if ctx is not None:
+                # bytes per token = 2 (K+V) * num_layers * hidden_dim_size *
+                # itemsize; num_tokens is the cache capacity, not a per-token
+                # cost.
+                cache_size_per_token = (
+                    2 * ctx.num_layers * ctx.hidden_dim_size * ctx.dtype.itemsize
+                )
+                entry["kv_cache_layout"] = {
+                    "num_layers": ctx.num_layers,
+                    "num_tokens": ctx.num_tokens,
+                    "hidden_dim_size": ctx.hidden_dim_size,
+                    "dtype": str(ctx.dtype),
+                    "cache_size_per_token": cache_size_per_token,
+                }
+            cb_gpu_context_meta[str(gpu_id)] = entry
+
+        status["registered_cb_gpu_ids"] = list(self._cb_gpu_contexts.keys())
+        status["cb_gpu_context_meta"] = cb_gpu_context_meta
+        return status
 
     def cb_lookup_pre_computed(self, key: IPCCacheEngineKey) -> list[CBMatchResult]:
         """
@@ -493,8 +563,21 @@ class BlendEngineV2(MPCacheEngine):
             )
             return []
 
-        # Sort by query position and group consecutive matched chunks
+        # Sort by query position
         cb_match_result.sort(key=lambda r: r.cur_st)
+
+        # The sliding-window probe returns O(table_size) overlapping matches.
+        # Greedy leftmost-first picks one chunk per slot; lossless when matches
+        # are chunk-aligned (the CB case).
+        deduped: list[CBMatchResult] = []
+        covered_end = -1
+        for r in cb_match_result:
+            if r.cur_st >= covered_end:
+                deduped.append(r)
+                covered_end = r.cur_ed
+        cb_match_result = deduped
+
+        # Group consecutive matched chunks
         groups: list[list[CBMatchResult]] = []
         for result in cb_match_result:
             if groups and groups[-1][-1].cur_ed == result.cur_st:

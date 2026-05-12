@@ -58,8 +58,8 @@ cache reuse across document paragraphs.
 **``http_server.py``** -- Wraps ``run_cache_server()`` (from ``server.py``)
 inside a FastAPI application.  Endpoints are contributed by modules under
 ``http_apis/`` and auto-registered via ``HTTPAPIRegistry``: ``GET /`` (basic
-liveness), ``GET /api/healthcheck`` for Kubernetes probes, ``POST /api/clear-cache``
-for clearing all KV cache data in L1 (CPU) memory, and ``GET /api/status``
+liveness), ``GET /healthcheck`` for Kubernetes probes, ``POST /clear-cache``
+for clearing all KV cache data in L1 (CPU) memory, and ``GET /status``
 for inspecting detailed internal state.  The ZMQ server runs as part of the
 same process, and any configured runtime plugins are spawned by
 ``MPRuntimePluginLauncher`` during FastAPI startup.
@@ -92,22 +92,40 @@ Communication between vLLM and LMCache uses ZMQ (DEALER/ROUTER pattern).
      - Copy KV cache chunks from L1 (CPU) back to GPU.
    * - ``LOOKUP``
      - BLOCKING
-     - Check prefix cache hits and submit prefetch tasks.
+     - Submit a prefix lookup; the prefetch job is tracked server-side by
+       request_id.
+   * - ``QUERY_PREFETCH_STATUS``
+     - BLOCKING
+     - Poll a prefetch job by request_id. Returns the loaded chunk count
+       when done, or ``None`` while the prefetch is still in progress.
+   * - ``QUERY_PREFETCH_LOOKUP_HITS``
+     - BLOCKING
+     - Query the lookup-phase hit chunk count by request_id, before the
+       prefetch finishes. Returns ``None`` while the lookup is still
+       running.
    * - ``FREE_LOOKUP_LOCKS``
-     - SYNC
-     - Release read locks from a cancelled lookup.
+     - BLOCKING
+     - Release read locks from a cancelled lookup without doing a full
+       RETRIEVE.
    * - ``END_SESSION``
-     - SYNC
+     - BLOCKING
      - Remove session state for a finished request.
    * - ``CLEAR``
-     - SYNC
+     - BLOCKING
      - Clear all cached data.
    * - ``GET_CHUNK_SIZE``
      - SYNC
      - Return the server's chunk size.
+   * - ``PING``
+     - BLOCKING
+     - Liveness ping; the handler always returns ``True``.
+   * - ``REPORT_BLOCK_ALLOCATION``
+     - BLOCKING
+     - Fire-and-forget channel for the vLLM scheduler to report GPU block
+       allocation events to the observability subsystem.
    * - ``NOOP``
      - SYNC
-     - Debug ping -- returns "OK".
+     - Debug heartbeat -- returns a confirmation string.
    * - ``CB_REGISTER_KV_CACHE``
      - SYNC
      - (Blend) Register CacheBlend KV buffer.
@@ -126,6 +144,15 @@ Communication between vLLM and LMCache uses ZMQ (DEALER/ROUTER pattern).
    * - ``CB_STORE_FINAL``
      - BLOCKING
      - (Blend) Store final blended chunks.
+   * - ``CB_LOOKUP_PRE_COMPUTED_V2``
+     - BLOCKING
+     - (Blend V2) Lookup pre-computed chunks; returns
+       ``CBMatchResult`` entries (with old/cur ranges and per-chunk hashes)
+       so the retrieve step can skip re-hashing.
+   * - ``CB_RETRIEVE_PRE_COMPUTED_V2``
+     - BLOCKING
+     - (Blend V2) Retrieve pre-computed chunks using the
+       ``CBMatchResult`` list returned by ``CB_LOOKUP_PRE_COMPUTED_V2``.
 
 **Handler types:**
 
@@ -223,8 +250,10 @@ the ``StorePolicy``.
 
 **EvictionController** (``storage_controllers/eviction_controller.py``):
 Periodically checks L1 memory usage against the watermark threshold.  When
-triggered, evicts objects using the configured policy (LRU) until usage drops
-below the target.
+triggered, evicts objects using the configured policy (``LRU``,
+``IsolatedLRU``, or ``noop``) until usage drops below the target.
+``IsolatedLRU`` evicts per ``cache_salt`` against limits registered through
+the ``/api/quota`` HTTP endpoints; see :ref:`mp-http-quota-api`.
 
 **PrefetchController** (``storage_controllers/prefetch_controller.py``):
 Handles L2 lookup and load requests submitted by ``StorageManager`` during
@@ -359,8 +388,9 @@ Adding a new request type
 
 1. Add a new member to ``RequestType`` in ``protocols/base.py``.
 2. Create a ``ProtocolDefinition`` in the appropriate ``protocols/*.py`` file
-   (engine, controller, or debug).
-3. Implement the handler method on ``MPCacheEngine`` (or ``BlendEngine``).
+   (``engine``, ``controller``, ``observability``, ``debug``, ``blend``, or
+   ``blend_v2``) and add the request name to that module's ``REQUEST_NAMES``.
+3. Implement the handler method on ``MPCacheEngine`` (or ``BlendEngineV2``).
 4. Register the handler in ``run_cache_server()`` via ``add_handler_helper()``.
 
 Key Source Files
@@ -383,8 +413,8 @@ Key Source Files
    * - ``lmcache/v1/multiprocess/http_api_registry.py``
      - ``HTTPAPIRegistry`` that auto-discovers routers in ``http_apis/``
    * - ``lmcache/v1/multiprocess/http_apis/``
-     - Extensible HTTP endpoints (``/``, ``/api/healthcheck``,
-       ``/api/clear-cache``, ``/api/status``)
+     - Extensible HTTP endpoints (``/``, ``/healthcheck``,
+       ``/clear-cache``, ``/status``)
    * - ``lmcache/v1/multiprocess/mp_runtime_plugin_launcher.py``
      - ``MPRuntimePluginLauncher`` that spawns runtime plugins with the
        full server config serialized into environment variables
