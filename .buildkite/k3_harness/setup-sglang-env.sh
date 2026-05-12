@@ -38,15 +38,23 @@ if ! command -v protoc >/dev/null 2>&1; then
 fi
 protoc --version
 
-# ── LMCache (CI checkout) ───────────────────────────────────
-echo "--- :python: Installing LMCache from source"
-export SETUPTOOLS_SCM_PRETEND_VERSION_FOR_LMCACHE="${SETUPTOOLS_SCM_PRETEND_VERSION_FOR_LMCACHE:-0.0.0+ci}"
-uv pip install -e . --no-build-isolation
-
-# ── SGLang (pre-merge fork) ─────────────────────────────────
+# ── SGLang (pre-merge fork) FIRST so it pins torch ─────────
+# SGLang's pyproject.toml pins torch==2.9.1+cu130 via [tool.uv.sources].
+# Install it BEFORE LMCache so the c_ops extension compiled by LMCache's
+# editable install in the next step links against the final torch ABI.
+# Reversing this order (the prior bug) leaves LMCache's c_ops.so built
+# against the base image's pre-installed torch, then sglang upgrades torch,
+# and at runtime c_ops fails with `undefined symbol: _ZN3c104cuda29c10_cuda
+# _check_implementation...`. The same ABI mismatch also breaks sglang's
+# sgl_kernel architecture-specific common_ops load on Blackwell SM 12.0.
 echo "--- :python: Installing SGLang from pre-merge fork"
 SGLANG_FORK_URL="git+https://github.com/Shaoting-Feng/sglang.git@shaoting/sglang-lmcache-mp-nonlayerwise#subdirectory=python"
 uv pip install "${SGLANG_FORK_URL}"
+
+# ── LMCache (CI checkout) AFTER torch is pinned ────────────
+echo "--- :python: Installing LMCache from source"
+export SETUPTOOLS_SCM_PRETEND_VERSION_FOR_LMCACHE="${SETUPTOOLS_SCM_PRETEND_VERSION_FOR_LMCACHE:-0.0.0+ci}"
+uv pip install -e . --no-build-isolation
 
 echo "--- :white_check_mark: Environment ready"
 python -c "import lmcache, sglang; print(f'sglang={sglang.__version__}; lmcache installed from source')"
