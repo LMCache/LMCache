@@ -93,7 +93,16 @@ class CUDAMessagingFuture(MessagingFuture[T]):
         self.raw_future_ = raw_future
         self.event_: Any | None = None
         self.result_: T | None = None
-        self.device_ = device if device is not None else torch_dev.current_device()
+        # On hosts without a working accelerator (e.g. macOS CPU), skip
+        # device-specific calls and treat this future as a thin wrapper
+        # around the raw future.
+        self.cpu_only_ = torch_dev is None or not torch_dev.is_available()
+        if self.cpu_only_:
+            self.device_ = device
+        else:
+            self.device_ = (
+                device if device is not None else torch_dev.current_device()
+            )
 
     def _on_raw_future_complete(self):
         """
@@ -101,6 +110,12 @@ class CUDAMessagingFuture(MessagingFuture[T]):
         """
         event_bytes, result = self.raw_future_.result()
         self.result_ = result
+
+        if self.cpu_only_:
+            # No real GPU event to fence on; mark completion via the raw
+            # future itself.
+            self.event_ = None
+            return
 
         # Not all backends support interprocess Events (CUDA IPC specific)
         if not hasattr(torch_dev, "Event") or not hasattr(
@@ -141,6 +156,9 @@ class CUDAMessagingFuture(MessagingFuture[T]):
             return False
 
         self._on_raw_future_complete()
+
+        if self.cpu_only_:
+            return True
 
         assert self.event_ is not None
         self.event_.synchronize()
@@ -184,6 +202,8 @@ class CUDAMessagingFuture(MessagingFuture[T]):
 
         if self.raw_future_.query():
             self._on_raw_future_complete()
+            if self.cpu_only_:
+                return True
             assert self.event_ is not None
             return self.event_.query()
 

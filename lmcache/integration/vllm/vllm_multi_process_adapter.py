@@ -31,10 +31,54 @@ DEFAULT_MQ_TIMEOUT: float = 300.0
 # Interval (seconds) between periodic heartbeat pings to the server.
 DEFAULT_HEARTBEAT_INTERVAL: float = 10.0
 
+# Per-process registry of SHM segments we have created, so the same
+# tensor object is only migrated to SHM once even if wrap_kv_caches is
+# called multiple times. Maps id(tensor) -> shm_name.
+_CPU_SHM_NAMES: dict[int, str] = {}
+
+
+def _wrap_one_kv_cache(tensor):
+    # Standard
+    import ctypes
+    import os
+
+    # First Party
+    from lmcache.v1.multiprocess.custom_types import (
+        CpuShmTensorWrapper,
+        shm_create_readwrite,
+    )
+
+    if tensor.device.type == "cuda":
+        return CudaIPCWrapper(tensor)
+
+    if tensor.device.type != "cpu":
+        raise ValueError("Unsupported device for KV cache: %s" % tensor.device)
+
+    # CPU path: re-point the tensor's storage at a POSIX SHM segment so
+    # the LMCache mp server can mmap the same physical pages.
+    tid = id(tensor)
+    shm_name = _CPU_SHM_NAMES.get(tid)
+    if shm_name is None:
+        nbytes = tensor.untyped_storage().nbytes()
+        shm_name = "/lmcache_kv_%d_%d" % (os.getpid(), tid)
+        addr = shm_create_readwrite(shm_name, nbytes)
+        buf_type = ctypes.c_uint8 * nbytes
+        buf = buf_type.from_address(addr)
+        shm_storage = torch.frombuffer(buf, dtype=torch.uint8).untyped_storage()
+        tensor.set_(shm_storage, tensor.storage_offset(), tensor.shape, tensor.stride())
+        _CPU_SHM_NAMES[tid] = shm_name
+        logger.info(
+            "Migrated CPU KV cache tensor (nbytes=%d) to SHM %s",
+            nbytes,
+            shm_name,
+        )
+
+    return CpuShmTensorWrapper(tensor, shm_name)
+
 
 def wrap_kv_caches(kv_caches: dict[str, torch.Tensor]) -> KVCache:
     logger.info("KV caches keys are %s", list(kv_caches.keys()))
-    return [CudaIPCWrapper(tensor) for tensor in kv_caches.values()]
+    return [_wrap_one_kv_cache(tensor) for tensor in kv_caches.values()]
 
 
 def send_lmcache_request(
