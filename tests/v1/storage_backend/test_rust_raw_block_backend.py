@@ -2305,6 +2305,7 @@ def test_rust_raw_block_backend_batched_get_with_uring(
 )
 def test_batched_write_rejects_misaligned_offset():
     """batched_write raises ValueError for a misaligned offset when use_odirect=True."""
+    # Third Party
     from lmcache_rust_raw_block_io import RawBlockDevice
 
     align = 4096
@@ -2333,6 +2334,7 @@ def test_batched_write_rejects_misaligned_offset():
 )
 def test_batched_write_rejects_misaligned_total_len():
     """batched_write rejects misaligned total_len with O_DIRECT enabled."""
+    # Third Party
     from lmcache_rust_raw_block_io import RawBlockDevice
 
     align = 4096
