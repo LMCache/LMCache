@@ -44,7 +44,9 @@ import urllib.error
 import urllib.request
 
 # First Party
+from lmcache import torch_dev, torch_device_type
 from lmcache.cli.commands.base import BaseCommand
+from lmcache.utils import check_interprocess_event_support
 
 # ``lmcache bench kvcache`` allocates real CUDA tensors and talks to
 # the MP server via ZMQ, both of which are absent from the thin
@@ -225,7 +227,7 @@ def _allocate_gpu_kv_cache(
     dev = (
         torch.device(device)
         if device
-        else torch.device("cuda", torch.cuda.current_device())
+        else torch.device(torch_device_type, torch_dev.current_device())
     )
 
     def _alloc(
@@ -335,7 +337,8 @@ def _poll_prefetch_status(
 
 def _make_event_handle() -> bytes:
     """Create a CUDA event IPC handle for GPU mode."""
-    event = torch.cuda.Event(interprocess=True)
+    check_interprocess_event_support()
+    event = torch_dev.Event(interprocess=True)
     event.record()
     return event.ipc_handle()
 
@@ -780,7 +783,7 @@ class TestCacheCommand(BaseCommand):
     def execute(self, args: argparse.Namespace) -> None:
         """Run the end-to-end cache test loop."""
         _require_full_install()
-        if not torch.cuda.is_available():
+        if not torch_dev.is_available():
             print("ERROR: --mode gpu requires CUDA")
             sys.exit(1)
 
