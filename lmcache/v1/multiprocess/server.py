@@ -12,7 +12,7 @@ import time
 import zmq
 
 # First Party
-from lmcache import torch_dev, torch_device_type
+from lmcache import torch_dev
 from lmcache.logging import init_logger
 from lmcache.utils import (
     EngineType,
@@ -1176,19 +1176,7 @@ def run_cache_server(
         mp_config.port,
     )
     # Start the ZMQ server
-    # Not all backends expose init(); on CPU-only hosts the backend may not
-    # actually be available even if ``torch_dev`` is bound, so guard the call.
-    if (
-        torch_dev is not None
-        and torch_dev.is_available()
-        and hasattr(torch_dev, "init")
-    ):
-        torch_dev.init()
-    else:
-        logger.warning(
-            "Backend '%s' does not support init(), skipping device init",
-            torch_device_type,
-        )
+    torch_dev.init()
     server.start()
 
     logger.info("LMCache cache server is running...")
