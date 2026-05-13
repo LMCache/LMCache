@@ -124,44 +124,56 @@ Supported KV formats in CPU gather/scatter:
 
 ## Worker adapter integration
 
-`lmcache/integration/vllm/vllm_multi_process_adapter.py` chooses the path
-by tensor `device.type`:
+The adapter now delegates transport behavior to
+`lmcache/v1/multiprocess/transfer_context.py`.
+
+`create_transfer_context(kv_caches)` centralizes device dispatch:
 
 - all CUDA → existing CUDA IPC registration and store/retrieve path
-- all non-CUDA → cpu context registration and CPU context store/retrieve path
+- all non-CUDA → `CPUTransferContext` with cpu context registration and CPU context store/retrieve path
 
-The adapter holds a `cpu_context: CPUContext` instance and uses the uniform
-`prepare/commit` interface for both store and retrieve.
+`LMCacheMPSchedulerAdapter` now holds `self.transfer_ctx: TransferContext | None`
+and calls:
+
+- `transfer_ctx.register(...)`
+- `transfer_ctx.submit_store(...)`
+- `transfer_ctx.submit_retrieve(...)`
+- `transfer_ctx.poll_finished()` (healthy) or `transfer_ctx.drain_all()` (unhealthy)
 
 ### Store path (non-CUDA)
 
 ```python
-# submit_store_request
+# CPUTransferContext.submit_store
 cpu_chunks = gather_paged_kv_to_cpu(kv_caches, block_ids, blocks_in_chunk, ...)
-handle = self.cpu_context.prepare_store(key, instance_id, cpu_chunks)
-ok = self.cpu_context.commit_store(handle)   # synchronous; blocks for server ack
-self._cpu_store_done[request_id] = ok
+handle = self._cpu_context.prepare_store(key, instance_id, cpu_chunks)
+ok = self._cpu_context.commit_store(handle)   # synchronous; blocks for server ack
+self._store_done[request_id] = ok
 ```
 
-`get_finished` drains `_cpu_store_done` on each call.
+`CPUTransferContext.poll_finished()` drains `_store_done` on each call.
 
 ### Retrieve path (non-CUDA)
 
 ```python
-# submit_retrieve_request
-handle, chunks = self.cpu_context.prepare_retrieve(key, instance_id)  # synchronous
+# CPUTransferContext.submit_retrieve
+handle, chunks = self._cpu_context.prepare_retrieve(key, instance_id)  # synchronous
+ok = chunks is not None
 if chunks is not None:
-    scatter_cpu_to_paged_kv(kv_caches, block_ids, chunks, blocks_in_chunk,
-                             skip_first_n_tokens=op.skip_first_n_tokens, ...)
-self.cpu_context.commit_retrieve(handle)
-self._cpu_retrieve_done[request_id] = (chunks is not None, block_ids)
+    try:
+        scatter_cpu_to_paged_kv(kv_caches, block_ids, chunks, blocks_in_chunk,
+                                skip_first_n_tokens=skip_first_n_tokens, ...)
+    except (RuntimeError, ValueError, TypeError, IndexError):
+        ok = False
+self._cpu_context.commit_retrieve(handle)
+self._retrieve_done[request_id] = (ok, block_ids)
 ```
 
-`get_finished` drains `_cpu_retrieve_done` on each call.
+`CPUTransferContext.poll_finished()` drains `_retrieve_done` on each call.
+The adapter passes `op.skip_first_n_tokens` into
+`transfer_ctx.submit_retrieve(..., skip_first_n_tokens=...)`.
 
-The retrieve is now **synchronous in `submit_retrieve_request`**; there is no
-separate future to poll.  This simplifies `get_finished` which no longer
-needs a `if self._use_cpu_context:` branch for retrieve futures.
+The retrieve is **synchronous inside `CPUTransferContext.submit_retrieve`**;
+`poll_finished()` just drains request ids recorded by submit methods.
 
 ## Server integration
 
@@ -190,7 +202,7 @@ Additional integration points:
                            register_kv_caches()
                                       |
                                       v
-                             [Inspect device.type]
+                    create_transfer_context(kv_caches)
                                       |
                      +----------------+----------------+
                      |                                 |
@@ -198,7 +210,8 @@ Additional integration points:
               [device == cuda]                 [device != cuda]
                      |                                 |
                      v                                 v
-       REGISTER_KV_CACHE (CUDA IPC)      REGISTER_KV_CACHE_CPU_CONTEXT (CPU metadata)
+      CudaTransferContext.register()      CPUTransferContext.register()
+      REGISTER_KV_CACHE (CUDA IPC)        REGISTER_KV_CACHE_CPU_CONTEXT (CPU metadata)
                      |                         + create_cpu_context()
                      +----------------+----------------+
                                       |
@@ -208,26 +221,26 @@ Additional integration points:
                      +----------------+----------------+
                      |                                 |
                      v                                 v
-                submit_store()                    submit_store()
+        transfer_ctx.submit_store()       transfer_ctx.submit_store()
                      |                                 |
                      v                                 v
-            STORE (GPU -> L1)           gather_paged_kv_to_cpu()
-                     |                 + cpu_context.prepare_store()
-                     v                 + cpu_context.commit_store()  [sync]
-                 [READY]                    _cpu_store_done[id] = ok
+             STORE (GPU -> L1)           gather_paged_kv_to_cpu()
+                      |                 + _cpu_context.prepare_store()
+                      v                 + _cpu_context.commit_store()  [sync]
+                  [READY]                       _store_done[id] = ok
                      |                                 |
                      +----------------+----------------+
                                       |
                                       v
-                submit_retrieve() + get_finished()
+      transfer_ctx.submit_retrieve() + get_finished()
                                       |
                      +----------------+----------------+
                      |                                 |
                      v                                 v
-          RETRIEVE (L1 -> GPU)    cpu_context.prepare_retrieve()  [sync]
-          [async future]          + scatter_cpu_to_paged_kv()
-                                  + cpu_context.commit_retrieve()
-                                  _cpu_retrieve_done[id] = (ok, block_ids)
+           RETRIEVE (L1 -> GPU)    _cpu_context.prepare_retrieve()  [sync]
+           [async future]          + scatter_cpu_to_paged_kv()
+                                   + _cpu_context.commit_retrieve()
+                                   _retrieve_done[id] = (ok, block_ids)
                      |                                 |
                      +----------------+----------------+
                                       |
@@ -265,6 +278,10 @@ back to pickle when SHM is unavailable.
 - HND round-trip for both HND formats
 - `skip_first_n_tokens` behavior
 - Server-side register/store/retrieve flow
+
+`tests/v1/test_vllm_mp_adapter.py` covers transfer-context integration,
+including CPU registration path (`REGISTER_KV_CACHE_CPU_CONTEXT`) and
+store/retrieve submit delegation.
 
 ## Non-goals
 

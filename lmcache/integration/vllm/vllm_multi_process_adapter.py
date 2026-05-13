@@ -11,15 +11,8 @@ import torch
 import zmq
 
 # First Party
-from lmcache import torch_dev
 from lmcache.integration.request_telemetry.factory import RequestTelemetryFactory
-from lmcache.utils import EngineType, _lmcache_nvtx_annotate, init_logger
-from lmcache.v1.multiprocess.cpu_context import (
-    CPUContext,
-    compute_kv_layout,
-    gather_paged_kv_to_cpu,
-    scatter_cpu_to_paged_kv,
-)
+from lmcache.utils import _lmcache_nvtx_annotate, init_logger
 from lmcache.v1.multiprocess.custom_types import (
     BlockAllocationRecord,
     CudaIPCWrapper,
@@ -28,6 +21,10 @@ from lmcache.v1.multiprocess.custom_types import (
 )
 from lmcache.v1.multiprocess.mq import MessageQueueClient, MessagingFuture
 from lmcache.v1.multiprocess.protocol import RequestType, get_response_class
+from lmcache.v1.multiprocess.transfer_context import (
+    TransferContext,
+    create_transfer_context,
+)
 from lmcache.v1.periodic_thread import PeriodicThread, ThreadLevel, ThreadRunSummary
 
 logger = init_logger(__name__)
@@ -705,23 +702,10 @@ class LMCacheMPWorkerAdapter:
         # Registered kv caches from vLLM
         self.kv_caches: dict[str, torch.Tensor] = {}
 
-        # Request futures
-        self.store_futures: dict[str, MessagingFuture[StoreResult]] = {}
-        # request_id -> (future, block_ids)
-        self.retrieve_futures: dict[
-            str, tuple[MessagingFuture[RetrieveResult], list[int]]
-        ] = {}
-
-        # Non-CUDA (cpu context) mode state
-        self._use_cpu_context: bool = False
-        self._device_type: str = "cuda"
-        # CPU context for non-CUDA (cpu context) mode
-        self.cpu_context: CPUContext | None = None
-        self._cpu_layout_hints: Any = None
-        self._cpu_gpu_kv_format: Any = None
-        # Completed synchronous CPU store/retrieve results, keyed by request_id
-        self._cpu_store_done: dict[str, bool] = {}
-        self._cpu_retrieve_done: dict[str, tuple[bool, list[int]]] = {}
+        # Transport context for transfer operations.
+        self.transfer_ctx: TransferContext | None = None
+        # Store requests submitted but not yet finished by transfer context.
+        self._pending_store_request_ids: set[str] = set()
 
         # Block IDs that failed due to retrieve timeout
         self.error_block_ids: set[int] = set()
@@ -842,96 +826,19 @@ class LMCacheMPWorkerAdapter:
             ConnectionError: if the server does not respond within
                 mq_timeout.
         """
-        # First Party
-        from lmcache.integration.vllm.utils import vllm_layout_hints
-
-        layout_hints = vllm_layout_hints()
         self.kv_caches = kv_caches
-
-        if not kv_caches:
-            raise ValueError("kv_caches is empty")
-        device_types = {tensor.device.type for tensor in kv_caches.values()}
-        if len(device_types) != 1:
-            raise ValueError(
-                f"All KV cache tensors must share one device type, got {device_types}"
-            )
-        self._device_type = next(iter(device_types))
-        self._use_cpu_context = self._device_type != "cuda"
-        logger.info(
-            "Registering kv caches (device_type=%s, use_cpu_context=%s)",
-            self._device_type,
-            self._use_cpu_context,
-        )
-
-        if self._use_cpu_context:
-            # First Party
-            from lmcache.v1.distributed.api import MemoryLayoutDesc
-            from lmcache.v1.gpu_connector.utils import is_mla
-            from lmcache.v1.multiprocess.cpu_context import (
-                CPUContextMetadata,
-                create_cpu_context,
-            )
-
-            (
-                block_size,
-                num_layers,
-                hidden_dim_size,
-                dtype_str,
-                gpu_kv_format,
-            ) = compute_kv_layout(kv_caches, layout_hints=layout_hints)
-            self._cpu_layout_hints = layout_hints
-            self._cpu_gpu_kv_format = gpu_kv_format
-            future = send_lmcache_request(
-                self.mq_client,
-                RequestType.REGISTER_KV_CACHE_CPU_CONTEXT,
-                [
-                    self.instance_id,
-                    self.model_name,
-                    self.world_size,
-                    EngineType.VLLM,
-                    layout_hints,
-                    block_size,
-                    num_layers,
-                    hidden_dim_size,
-                    dtype_str,
-                    is_mla(gpu_kv_format),
-                ],
-            )
-            # Build the layout descriptor so we can construct the CPUContext.
-            use_mla_flag = is_mla(gpu_kv_format)
-            shape = (
-                torch.Size(
-                    [num_layers, self.blocks_in_chunk * block_size, hidden_dim_size]
-                )
-                if use_mla_flag
-                else torch.Size(
-                    [2, num_layers, self.blocks_in_chunk * block_size, hidden_dim_size]
-                )
-            )
-            dtype = getattr(torch, dtype_str)
-            metadata = CPUContextMetadata(
-                layout_desc=MemoryLayoutDesc(shapes=[shape], dtypes=[dtype]),
-                block_size=block_size,
-                use_mla=use_mla_flag,
-            )
-            self.cpu_context = create_cpu_context(
-                metadata, self.mq_client, self._mq_timeout
-            )
-        else:
-            future = send_lmcache_request(
-                self.mq_client,
-                RequestType.REGISTER_KV_CACHE,
-                [
-                    self.instance_id,
-                    wrap_kv_caches(kv_caches),
-                    self.model_name,
-                    self.world_size,
-                    EngineType.VLLM,
-                    layout_hints,
-                ],
-            )
+        self.transfer_ctx = create_transfer_context(kv_caches)
         try:
-            future.result(timeout=self._mq_timeout)
+            self.transfer_ctx.register(
+                self.instance_id,
+                kv_caches,
+                self.model_name,
+                self.world_size,
+                self.blocks_in_chunk,
+                self.mq_client,
+                self._mq_timeout,
+                send_request=send_lmcache_request,
+            )
         except TimeoutError:
             raise ConnectionError(
                 "LMCache server did not respond to "
@@ -1021,26 +928,21 @@ class LMCacheMPWorkerAdapter:
             request_id=request_id,
             cache_salt=cache_salt,
         )
-        if self._use_cpu_context:
-            assert self.cpu_context is not None
-            torch_dev.synchronize()
-            cpu_chunks = gather_paged_kv_to_cpu(
-                self.kv_caches,
-                op.block_ids,
-                self.blocks_in_chunk,
-                layout_hints=self._cpu_layout_hints,
-                gpu_kv_format=self._cpu_gpu_kv_format,
+        if self.transfer_ctx is None:
+            raise RuntimeError(
+                "Transfer context is not initialized. "
+                "Call register_kv_caches() before submitting store requests."
             )
-            handle = self.cpu_context.prepare_store(key, self.instance_id, cpu_chunks)
-            ok = self.cpu_context.commit_store(handle)
-            self._cpu_store_done[request_id] = ok
-        else:
-            future = send_lmcache_request(
-                self.mq_client,
-                RequestType.STORE,
-                [key, self.instance_id, op.block_ids, event.ipc_handle()],
-            ).to_cuda_future()
-            self.store_futures[request_id] = future
+        self.transfer_ctx.submit_store(
+            request_id,
+            key,
+            self.instance_id,
+            self.kv_caches,
+            op.block_ids,
+            event,
+            self.blocks_in_chunk,
+        )
+        self._pending_store_request_ids.add(request_id)
 
     @_lmcache_nvtx_annotate
     def submit_retrieve_request(
@@ -1074,39 +976,21 @@ class LMCacheMPWorkerAdapter:
             request_id=request_id,
             cache_salt=cache_salt,
         )
-        if self._use_cpu_context:
-            assert self.cpu_context is not None
-            handle, chunks = self.cpu_context.prepare_retrieve(key, self.instance_id)
-            ok = chunks is not None
-            if chunks is not None:
-                try:
-                    scatter_cpu_to_paged_kv(
-                        self.kv_caches,
-                        op.block_ids,
-                        chunks,
-                        self.blocks_in_chunk,
-                        skip_first_n_tokens=op.skip_first_n_tokens,
-                        layout_hints=self._cpu_layout_hints,
-                        gpu_kv_format=self._cpu_gpu_kv_format,
-                    )
-                except Exception:
-                    logger.exception("Failed to scatter retrieved CPU context chunks")
-                    ok = False
-            self.cpu_context.commit_retrieve(handle)
-            self._cpu_retrieve_done[request_id] = (ok, list(op.block_ids))
-        else:
-            future = send_lmcache_request(
-                self.mq_client,
-                RequestType.RETRIEVE,
-                [
-                    key,
-                    self.instance_id,
-                    op.block_ids,
-                    event.ipc_handle(),
-                    op.skip_first_n_tokens,
-                ],
-            ).to_cuda_future()
-            self.retrieve_futures[request_id] = (future, list(op.block_ids))
+        if self.transfer_ctx is None:
+            raise RuntimeError(
+                "Transfer context is not initialized. "
+                "Call register_kv_caches() before submitting retrieve requests."
+            )
+        self.transfer_ctx.submit_retrieve(
+            request_id,
+            key,
+            self.instance_id,
+            self.kv_caches,
+            op.block_ids,
+            event,
+            self.blocks_in_chunk,
+            skip_first_n_tokens=op.skip_first_n_tokens,
+        )
 
     @_lmcache_nvtx_annotate
     def batched_submit_store_requests(
@@ -1171,7 +1055,10 @@ class LMCacheMPWorkerAdapter:
         for req_id in finished_req_ids_from_engine:
             if req_id in self._returned_finished:
                 continue
-            if req_id in self.finished_stores or req_id in self.store_futures:
+            if (
+                req_id in self.finished_stores
+                or req_id in self._pending_store_request_ids
+            ):
                 self.previously_finished.add(req_id)
             else:
                 ret_stores.add(req_id)
@@ -1203,105 +1090,34 @@ class LMCacheMPWorkerAdapter:
             take care of deduplicating the request IDs and only return the request
             IDs that have not been returned before.
         """
-        # If unhealthy, drain all pending futures immediately
-        if not self.is_healthy:
-            finished_stores = set(self.store_futures.keys()) | set(
-                self._cpu_store_done.keys()
+        if self.transfer_ctx is None:
+            return set(), set()
+
+        unhealthy = not self.is_healthy
+        if unhealthy:
+            finished_stores, finished_retrieves, error_block_ids = (
+                self.transfer_ctx.drain_all()
             )
-            finished_retrieves = set()
-            for request_id, (
-                _r_future,
-                r_block_ids,
-            ) in self.retrieve_futures.items():
-                finished_retrieves.add(request_id)
-                self.error_block_ids.update(r_block_ids)
-            for request_id, (ok, r_block_ids) in self._cpu_retrieve_done.items():
-                finished_retrieves.add(request_id)
-                if not ok:
-                    self.error_block_ids.update(r_block_ids)
-            self.store_futures.clear()
-            self.retrieve_futures.clear()
-            self._cpu_store_done.clear()
-            self._cpu_retrieve_done.clear()
-
-            ret_stores = self._process_finished_stores(
-                finished_stores, finished_req_ids_from_engine
+        else:
+            finished_stores, finished_retrieves, error_block_ids = (
+                self.transfer_ctx.poll_finished()
             )
-            # A request may have a pending retrieve AND appear in
-            # finished_req_ids_from_engine (it ran without loading KV after
-            # the server died).  The scheduler processes finished_recving
-            # first and deletes the request, so we must not also report it
-            # in finished_sending.
-            ret_stores -= finished_retrieves
-            return ret_stores, finished_retrieves
 
-        finished_stores = set()
-        finished_retrieves = set()
-
-        # Drain completed synchronous CPU store results
-        for request_id, ok in list(self._cpu_store_done.items()):
-            finished_stores.add(request_id)
-            if not ok:
-                logger.error(
-                    "Something went wrong when processing the "
-                    "store request for request_id=%s",
-                    request_id,
-                )
-        self._cpu_store_done.clear()
-
-        # Drain completed synchronous CPU retrieve results
-        for request_id, (ok, r_block_ids) in list(self._cpu_retrieve_done.items()):
-            finished_retrieves.add(request_id)
-            if not ok:
-                logger.error(
-                    "Something went wrong when processing the "
-                    "retrieve request for request_id=%s, result=%s",
-                    request_id,
-                    ok,
-                )
-                self.error_block_ids.update(r_block_ids)
-        self._cpu_retrieve_done.clear()
-
-        for request_id, s_future in self.store_futures.items():
-            if not s_future.query():
-                continue
-
-            s_result = s_future.result()
-            finished_stores.add(request_id)
-
-            if not s_result:
-                logger.error(
-                    "Something went wrong when processing the "
-                    "store request for request_id=%s",
-                    request_id,
-                )
-
-        for request_id, (r_future, r_block_ids) in self.retrieve_futures.items():
-            if not r_future.query():
-                continue
-
-            r_result = r_future.result()
-            finished_retrieves.add(request_id)
-
-            if not r_result:
-                logger.error(
-                    "Something went wrong when processing the "
-                    "retrieve request for request_id=%s, result=%s",
-                    request_id,
-                    r_result,
-                )
-                self.error_block_ids.update(r_block_ids)
-
-        # Remove the finished requests from the tracking dicts
-        for request_id in finished_stores:
-            self.store_futures.pop(request_id, None)
-        for request_id in finished_retrieves:
-            self.retrieve_futures.pop(request_id, None)
+        self.error_block_ids.update(error_block_ids)
+        self._pending_store_request_ids.difference_update(finished_stores)
 
         # Update the internal states
         ret_stores = self._process_finished_stores(
             finished_stores, finished_req_ids_from_engine
         )
+
+        if unhealthy:
+            # A request may have a pending retrieve AND appear in
+            # finished_req_ids_from_engine (it ran without loading KV after
+            # the server died). The scheduler processes finished_recving
+            # first and deletes the request, so we must not also report it
+            # in finished_sending.
+            ret_stores -= finished_retrieves
 
         # the invocation of `get_finished` means that
         # these requests' KV caches are already fully stored.
@@ -1349,6 +1165,10 @@ class LMCacheMPWorkerAdapter:
                 "Proceeding with shutdown.",
                 self._mq_timeout,
             )
+
+        if self.transfer_ctx is not None:
+            self.transfer_ctx.close()
+            self.transfer_ctx = None
 
         self.mq_client.close()
         self.request_telemetry.close()
