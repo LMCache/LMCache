@@ -20,6 +20,7 @@ use pyo3::prelude::*;
 use pyo3::types::PyAny;
 use std::collections::HashMap;
 use std::ffi::CString;
+use std::io;
 use std::os::unix::io::RawFd;
 use std::slice;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -297,6 +298,178 @@ impl IoCompletion {
     }
 }
 
+/// Manages io_uring worker thread notification, using one `epoll` instance
+/// over two eventfds to wait on two event sources at once: a producer-side
+/// eventfd signalled when Python pushes a new submission, and a CQ-side
+/// eventfd signalled by the kernel when a completion is posted.
+struct UringNotify {
+    /// Epoll instance watching both `producer_efd` and `cq_efd`. A single
+    /// `epoll_wait` on this fd blocks until either eventfd becomes readable,
+    /// so the worker can react to user-space queue pushes and kernel CQE
+    /// posts from the same call site.
+    epoll_fd: RawFd,
+    /// Eventfd written by Python producer threads after pushing into the
+    /// submission queue. Replaces the `Condvar::notify_one` used in the
+    /// pre-eventfd design. Also written by `do_close` so the worker can
+    /// break out of `epoll_wait` and observe the shutdown flag.
+    producer_efd: RawFd,
+    /// Eventfd registered with the io_uring instance via
+    /// `Submitter::register_eventfd`. The kernel writes to it whenever a
+    /// CQE is posted, so the worker is woken without having to drain the
+    /// completion queue speculatively.
+    cq_efd: RawFd,
+}
+
+impl UringNotify {
+    /// Builds the three fds (two eventfds + one epoll) and wires the
+    /// eventfds into the epoll instance. Cleans up partially-built state
+    /// on any error path so no fd leaks if construction fails midway.
+    fn new() -> io::Result<Self> {
+        // Producer-side eventfd. Counter starts at 0 (no pending events).
+        // EFD_CLOEXEC prevents leaking the fd into a child process via
+        // execve. EFD_NONBLOCK makes read() return EAGAIN (instead of
+        // blocking) when the counter is already 0; wait() relies on this
+        // non-blocking behaviour to drain safely without hanging.
+        let producer_efd = unsafe {
+            libc::eventfd(0, libc::EFD_CLOEXEC | libc::EFD_NONBLOCK)
+        };
+        if producer_efd < 0 {
+            // Nothing else has been allocated yet -- just bubble the error.
+            return Err(io::Error::last_os_error());
+        }
+
+        // CQ-side eventfd. The kernel writes to this one after
+        // register_eventfd() is called on the io_uring instance.
+        let cq_efd = unsafe {
+            libc::eventfd(0, libc::EFD_CLOEXEC | libc::EFD_NONBLOCK)
+        };
+        if cq_efd < 0 {
+            // producer_efd is live -- close it before bubbling the error.
+            let e = io::Error::last_os_error();
+            unsafe { libc::close(producer_efd) };
+            return Err(e);
+        }
+
+        // Epoll instance fd. EPOLL_CLOEXEC for the same hygiene reason as
+        // EFD_CLOEXEC above.
+        let epoll_fd = unsafe { libc::epoll_create1(libc::EPOLL_CLOEXEC) };
+        if epoll_fd < 0 {
+            // Both eventfds are live; close them before returning.
+            let e = io::Error::last_os_error();
+            unsafe {
+                libc::close(producer_efd);
+                libc::close(cq_efd);
+            }
+            return Err(e);
+        }
+
+        // Register both eventfds with the epoll instance so epoll_wait
+        // can block on either source.
+        //
+        // We use EPOLLIN: wake when the counter becomes non-zero
+        // (someone signalled). Alternatives we deliberately don't use:
+        //   - EPOLLOUT (writable): pointless -- eventfd is effectively
+        //     always writable, so it would just busy-loop epoll_wait.
+        //   - EPOLLET (edge-triggered): would require fully draining
+        //     every wake-up in one go to avoid missing edges. Default
+        //     level-triggered fits our drain pattern in wait().
+        //   - EPOLLONESHOT: would auto-disarm after each fire and force
+        //     us to re-register; not worth the complexity.
+        // u64 stores the fd value itself so wait() can identify which
+        // fd fired without keeping a side map.
+        for fd in [producer_efd, cq_efd] {
+            let mut ev = libc::epoll_event {
+                events: libc::EPOLLIN as u32,
+                u64: fd as u64,
+            };
+            let rc = unsafe {
+                libc::epoll_ctl(epoll_fd, libc::EPOLL_CTL_ADD, fd, &mut ev)
+            };
+            if rc < 0 {
+                // All three fds are live; clean up all of them.
+                let e = io::Error::last_os_error();
+                unsafe {
+                    libc::close(epoll_fd);
+                    libc::close(producer_efd);
+                    libc::close(cq_efd);
+                }
+                return Err(e);
+            }
+        }
+
+        // Ownership of all three fds moves into Self; Drop handles the
+        // happy-path close.
+        Ok(Self { epoll_fd, producer_efd, cq_efd })
+    }
+
+    /// Wakes the worker thread by writing 1 to `producer_efd`. Called by
+    /// producers after pushing a submission into the queue and by `do_close`
+    /// to break the worker out of `epoll_wait` for shutdown.
+    fn signal_producer(&self) {
+        let v: u64 = 1;
+        // Given EFD_NONBLOCK and counter < u64::MAX - 1, the 8-byte write
+        // always succeeds, so the return value is intentionally ignored.
+        unsafe {
+            libc::write(
+                self.producer_efd,
+                &v as *const u64 as *const libc::c_void,
+                8,
+            );
+        }
+    }
+
+    /// Blocks the worker until either eventfd is readable, then drains
+    /// each fired fd. Drain is required because epoll is level-triggered:
+    /// without consuming the counter, the next epoll_wait would return
+    /// immediately on the same already-handled signal.
+    fn wait(&self) {
+        // A capacity of 2 is enough: only two fds are registered with this
+        // epoll instance, so at most two events can come back per call.
+        let mut events = [libc::epoll_event { events: 0, u64: 0 }; 2];
+
+        // Timeout = -1 means "block indefinitely". Shutdown wakes us by
+        // writing producer_efd from do_close, so we never need a timeout.
+        let n = unsafe {
+            libc::epoll_wait(self.epoll_fd, events.as_mut_ptr(), 2, -1)
+        };
+
+        // n < 0 is usually EINTR (signal interruption); we just return and
+        // the worker's outer loop will call wait() again. n == 0 should
+        // not happen with timeout=-1 but is handled defensively.
+        if n <= 0 {
+            return;
+        }
+
+        // For each event reported, read 8 bytes from the corresponding
+        // eventfd to reset its counter to 0. The fd value was stashed in
+        // ev.u64 during epoll_ctl registration. We discard the read value
+        // (we only care that a signal arrived, not how many).
+        let mut buf = [0u8; 8];
+        for ev in &events[..n as usize] {
+            let fd = ev.u64 as RawFd;
+            // Discard the result. The wake-up was already delivered by
+            // epoll_wait; this read only exists to reset the eventfd
+            // counter so epoll stops reporting the fd as readable. If it
+            // fails, the worst case is one spurious wake-up next
+            // iteration. No work is lost, because the real submissions
+            // live in the queue and CQ, not in the bytes we just read.
+            unsafe {
+                libc::read(fd, buf.as_mut_ptr() as *mut libc::c_void, 8);
+            }
+        }
+    }
+}
+
+impl Drop for UringNotify {
+    fn drop(&mut self) {
+        unsafe {
+            libc::close(self.epoll_fd);
+            libc::close(self.producer_efd);
+            libc::close(self.cq_efd);
+        }
+    }
+}
+
 /// Represents a single I/O submission to io_uring.
 ///
 /// This struct is sent from Python threads to the worker thread via a queue.
@@ -381,8 +554,10 @@ struct RawBlockDevice {
     // Per-batch in-flight count tracking
     // Maps batch_id -> (in_flight_count, condition_variable)
     batch_in_flight: Arc<Mutex<HashMap<u64, BatchTracking>>>,
-    // Signal to wake up worker when new requests are available
-    batch_ready: Option<Arc<Condvar>>,
+    // Worker wake-up: producer eventfd + ring CQ eventfd, both polled via
+    // a single epoll_fd. Replaces the previous `Arc<Condvar>` which couldn't
+    // be signaled from the kernel-side completion queue.
+    batch_ready: Option<Arc<UringNotify>>,
     // Store Python buffer objects for writes, reads to keep them alive until they complete
     // This prevents premature garbage collection while io_uring is using the buffers
     // Keyed by batch_id to isolate concurrent batches
@@ -438,10 +613,24 @@ impl RawBlockDevice {
         ) = if use_iouring {
             let ring = IoUring::new(iouring_queue_depth as u32)
                 .map_err(|e| PyRuntimeError::new_err(format!("io_uring init failed: {}", e)))?;
+            let notify = UringNotify::new().map_err(|e| {
+                PyRuntimeError::new_err(format!("UringNotify init failed: {}", e))
+            })?;
+            // Register the CQ eventfd with the ring so the kernel writes to it
+            // whenever a CQE is posted. Must happen before the ring is wrapped
+            // in a Mutex / handed to the worker.
+            ring.submitter()
+                .register_eventfd(notify.cq_efd)
+                .map_err(|e| {
+                    PyRuntimeError::new_err(format!(
+                        "register_eventfd failed: {}",
+                        e
+                    ))
+                })?;
             let ring = Arc::new(Mutex::new(ring));
             let queue = Arc::new(Mutex::new(Vec::<IoSubmission>::new()));
             let shutdown = Arc::new(AtomicBool::new(false));
-            let batch_ready = Arc::new(Condvar::new());
+            let batch_ready = Arc::new(notify);
             let in_flight_count = Arc::new(AtomicU64::new(0));
             let in_flight_cvar = Arc::new(Condvar::new());
             let batched_buffer_objs = Arc::new(Mutex::new(HashMap::<u64, Vec<Py<PyAny>>>::new()));
@@ -476,7 +665,9 @@ impl RawBlockDevice {
             // - Reads from the submission queue
             // - Submits to io_uring
             // - Processes completions
-            let worker = thread::spawn(move || {
+            let worker = thread::Builder::new()
+                .name("rust-rawblock-uring".into())
+                .spawn(move || {
                 let mut in_flight: HashMap<u64, IoSubmission> = HashMap::new();
                 let mut next_user_data: u64 = 1;
 
@@ -625,19 +816,18 @@ impl RawBlockDevice {
                         ring.submission().sync();
                     }
 
-                    // We use a condition variable with a short timeout (10 microseconds).
-                    // This allows us to:
-                    //   - Quickly respond to new requests (batched from Python)
-                    //   - Periodically check for shutdown signal
-                    //   - Not spin aggressively (which would waste CPU)
-                    let timeout = Duration::from_micros(10);
-                    let q = queue_clone.lock().unwrap();
-                    let (mut q, _) = batch_ready_clone
-                        .wait_timeout_while(q, timeout, |q| {
-                            q.is_empty() && !shutdown_clone.load(Ordering::Relaxed)
-                        })
-                        .unwrap();
+                    // Block on epoll only if there's truly nothing pending. The empty +
+                    // shutdown checks short-circuit so we don't sleep when a producer or
+                    // do_close() already left work for us. Race-free against a late
+                    // signal_producer(): eventfd is a counter, so a wake-up between the
+                    // check and wait() is buffered, not lost.
+                    if !shutdown_clone.load(Ordering::Relaxed)
+                        && queue_clone.lock().unwrap().is_empty()
+                    {
+                        batch_ready_clone.wait();
+                    }
 
+                    let mut q = queue_clone.lock().unwrap();
                     if !q.is_empty() {
                         // Take all pending requests from our queue and submit them to io_uring.
                         //
@@ -914,7 +1104,8 @@ impl RawBlockDevice {
 
                 // Final notification in case any thread is waiting on in_flight_count
                 in_flight_cvar_clone.notify_all();
-            });
+            })
+            .expect("spawn rust-rawblock-uring worker");
 
             (
                 Some(ring),
@@ -1235,7 +1426,7 @@ impl RawBlockDevice {
                     let mut q = queue.lock().unwrap();
                     q.push(sub);
                 }
-                batch_ready.notify_one();
+                batch_ready.signal_producer();
 
                 // Store completion for error checking in wait_iouring
                 {
@@ -1455,7 +1646,7 @@ impl RawBlockDevice {
                 q.push(sub);
             }
             if let Some(batch_ready) = &self.batch_ready {
-                batch_ready.notify_one();
+                batch_ready.signal_producer();
             }
             py.allow_threads(move || comp.wait())
         } else {
@@ -1483,7 +1674,7 @@ impl RawBlockDevice {
                 q.push(sub);
             }
             if let Some(batch_ready) = &self.batch_ready {
-                batch_ready.notify_one();
+                batch_ready.signal_producer();
             }
             py.allow_threads(move || comp.wait())
         };
@@ -1671,7 +1862,7 @@ impl RawBlockDevice {
                     let mut q = queue.lock().unwrap();
                     q.push(sub);
                 }
-                batch_ready.notify_one();
+                batch_ready.signal_producer();
 
                 // Store completion for error checking in wait_iouring
                 {
@@ -1971,7 +2162,7 @@ impl RawBlockDevice {
                 shutdown.store(true, Ordering::Relaxed);
             }
             if let Some(batch_ready) = &self.batch_ready {
-                batch_ready.notify_all();
+                batch_ready.signal_producer();
             }
 
             let mutex = Mutex::new(());
