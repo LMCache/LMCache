@@ -208,7 +208,7 @@ def test_raw_block_l2_adapter_config_validates_iouring_queue_depth():
 def test_raw_block_l2_adapter_config_rejects_non_power_of_2_block_align(
     block_align: int,
 ) -> None:
-    """from_dict rejects block_align values that are not a positive power of 2."""
+    """from_dict rejects invalid block_align values."""
     with pytest.raises(ValueError, match="block_align"):
         RawBlockL2AdapterConfig.from_dict(_config_dict(block_align=block_align))
 
