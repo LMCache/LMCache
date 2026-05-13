@@ -14,6 +14,46 @@ import sys
 LOCALE_DIR = Path("docs/source/locale/zh_CN/LC_MESSAGES")
 MAX_ENTRIES = int(os.environ.get("TRANSLATION_MAX_ENTRIES", "500"))
 
+SYSTEM_PROMPT = (
+    "Translate LMCache documentation from English to Simplified Chinese. "
+    "Return only the translated document. Do not add notes, explanations, "
+    "summaries, or comments. "
+    "Preserve all reStructuredText/Sphinx formatting exactly, including "
+    "headings, indentation, directives, roles, labels, anchors, references, "
+    "admonitions, lists, tables, and cross-references. "
+    "Do not translate or change code blocks, inline code, shell commands, "
+    "configuration snippets, Python/JSON/YAML/TOML, API signatures, "
+    "environment variables, file paths, URLs, placeholders, package names, "
+    "class names, function names, method names, parameter names, CLI flags, "
+    "model names, feature names, product names, or values inside backticks. "
+    "Preserve Sphinx roles exactly, such as :ref:`...`, :doc:`...`, "
+    ":class:`...`, :func:`...`, :meth:`...`, :mod:`...`, :attr:`...`, "
+    ":obj:`...`, and :term:`...`. "
+    "Translate only normal explanatory prose. "
+    "Use natural Simplified Chinese for developer documentation. "
+    "Use these terms consistently: "
+    "KV cache -> KV Cache; KV Cache -> KV Cache; "
+    "inference -> 推理; serving -> 服务; "
+    "prefill -> Prefill; decode -> 解码; decoding -> 解码; "
+    "offload -> 卸载; offloading -> 卸载; "
+    "prefetch -> 预取; prefetch module -> 预取模块; "
+    "evict -> 逐出; eviction -> 逐出; "
+    "recompute -> 重计算; recomputation -> 重计算; "
+    "throughput -> 吞吐量; latency -> 延迟; "
+    "GPU memory -> 显存; VRAM -> 显存; CPU memory -> CPU 内存; "
+    "backend -> 后端; connector -> 连接器; storage -> 存储; "
+    "cache hit -> 缓存命中; cache miss -> 缓存未命中; lookup -> 查找; "
+    "chunk -> 块; layerwise -> 逐层; compression -> 压缩; "
+    "quantization -> 量化; "
+    "serialization -> 序列化; deserialization -> 反序列化; "
+    "disaggregated prefill -> 分离式 Prefill; multi-tenant -> 多租户. "
+    "Keep these terms unchanged: LMCache, vLLM, SGLang, TensorRT-LLM, NIXL, "
+    "CUDA, ROCm, Redis, S3, GDS, POSIX, Hugging Face, CacheBlend, cache_salt, "
+    "TTFT, LLM, GPU, CPU, API, token, prompt, system prompt, Attention. "
+    "If unsure whether something is syntax, code, an identifier, or a "
+    "product name, keep it unchanged."
+)
+
 
 class PoEntry:
     """One translatable message read from a ``.po`` translation file.
@@ -46,9 +86,11 @@ class PoEntry:
         self.msgid = msgid
         self.msgstr = msgstr
 
+
 def decode_po_string(value: str) -> str:
     """Unwrap one quoted ``.po`` line into a plain Python string."""
     return json.loads(value)
+
 
 def encode_po_string(value: str) -> list[str]:
     """Convert a Python string into one or more quoted ``.po`` lines."""
@@ -60,6 +102,7 @@ def encode_po_string(value: str) -> list[str]:
     for part in parts:
         lines.append(json.dumps(part, ensure_ascii=False))
     return lines
+
 
 def collect_field(lines: list[str], index: int) -> tuple[str, int]:
     """Read one ``msgid``/``msgstr`` value plus any continuation lines.
@@ -76,6 +119,7 @@ def collect_field(lines: list[str], index: int) -> tuple[str, int]:
         index += 1
 
     return "".join(values), index
+
 
 def parse_entries(lines: list[str]) -> list[PoEntry]:
     """Parse a ``.po`` file into one :class:`PoEntry` per message."""
@@ -111,8 +155,9 @@ def parse_entries(lines: list[str]) -> list[PoEntry]:
 
     return entries
 
+
 def replace_msgstr(lines: list[str], entry: PoEntry, translation: str) -> None:
-    """Write a new Chinese translation into one message, modifying ``lines`` in place."""
+    """Replace one entry's ``msgstr`` in ``lines``, in place."""
     msgstr_index = entry.start
     while msgstr_index < entry.end and not lines[msgstr_index].startswith("msgstr "):
         msgstr_index += 1
@@ -123,6 +168,7 @@ def replace_msgstr(lines: list[str], entry: PoEntry, translation: str) -> None:
 
     encoded = encode_po_string(translation)
     lines[msgstr_index:msgstr_end] = ["msgstr " + encoded[0], *encoded[1:]]
+
 
 def clean_fuzzy_flag(lines: list[str], entry: PoEntry) -> None:
     """Remove the ``"fuzzy"`` marker from a message, modifying ``lines`` in place."""
@@ -137,8 +183,9 @@ def clean_fuzzy_flag(lines: list[str], entry: PoEntry) -> None:
             lines.pop(index)
         return
 
+
 def should_translate(entry: PoEntry) -> bool:
-    """Return True if the message has English content AND (no Chinese yet OR is fuzzy)."""
+    """Return True if the entry has English content and is empty or fuzzy."""
     return bool(entry.msgid.strip()) and (
         not entry.msgstr.strip() or "fuzzy" in entry.flags
     )
@@ -151,6 +198,7 @@ def endpoint_url() -> str:
         return base_url
     return base_url + "/chat/completions"
 
+
 def translate_text(text: str) -> str:
     """Translate one English string to Chinese via the model endpoint.
 
@@ -160,42 +208,7 @@ def translate_text(text: str) -> str:
     payload = {
         "model": os.environ["TRANSLATION_MODEL"],
         "messages": [
-            {
-                "role": "system",
-                "content": (
-                    "Translate LMCache documentation from English to Simplified Chinese. "
-                    "Return only the translated document. Do not add notes, explanations, summaries, or comments. "
-                    "Preserve all reStructuredText/Sphinx formatting exactly, including headings, indentation, directives, "
-                    "roles, labels, anchors, references, admonitions, lists, tables, and cross-references. "
-                    "Do not translate or change code blocks, inline code, shell commands, configuration snippets, "
-                    "Python/JSON/YAML/TOML, API signatures, environment variables, file paths, URLs, placeholders, "
-                    "package names, class names, function names, method names, parameter names, CLI flags, model names, "
-                    "feature names, product names, or values inside backticks. "
-                    "Preserve Sphinx roles exactly, such as :ref:`...`, :doc:`...`, :class:`...`, :func:`...`, "
-                    ":meth:`...`, :mod:`...`, :attr:`...`, :obj:`...`, and :term:`...`. "
-                    "Translate only normal explanatory prose. "
-                    "Use natural Simplified Chinese for developer documentation. "
-                    "Use these terms consistently: "
-                    "KV cache -> KV Cache; KV Cache -> KV Cache; "
-                    "inference -> 推理; serving -> 服务; "
-                    "prefill -> Prefill; decode -> 解码; decoding -> 解码; "
-                    "offload -> 卸载; offloading -> 卸载; "
-                    "prefetch -> 预取; prefetch module -> 预取模块; "
-                    "evict -> 逐出; eviction -> 逐出; "
-                    "recompute -> 重计算; recomputation -> 重计算; "
-                    "throughput -> 吞吐量; latency -> 延迟; "
-                    "GPU memory -> 显存; VRAM -> 显存; CPU memory -> CPU 内存; "
-                    "backend -> 后端; connector -> 连接器; storage -> 存储; "
-                    "cache hit -> 缓存命中; cache miss -> 缓存未命中; lookup -> 查找; "
-                    "chunk -> 块; layerwise -> 逐层; compression -> 压缩; quantization -> 量化; "
-                    "serialization -> 序列化; deserialization -> 反序列化; "
-                    "disaggregated prefill -> 分离式 Prefill; multi-tenant -> 多租户. "
-                    "Keep these terms unchanged: LMCache, vLLM, SGLang, TensorRT-LLM, NIXL, CUDA, ROCm, Redis, S3, "
-                    "GDS, POSIX, Hugging Face, CacheBlend, cache_salt, TTFT, LLM, GPU, CPU, API, token, prompt, "
-                    "system prompt, Attention. "
-                    "If unsure whether something is syntax, code, an identifier, or a product name, keep it unchanged."
-                ),
-            },
+            {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": text},
         ],
         "temperature": 0.2,
@@ -219,6 +232,7 @@ def translate_text(text: str) -> str:
     except (KeyError, IndexError) as exc:
         raise RuntimeError("Translation endpoint returned no message content") from exc
 
+
 def validate_environment() -> None:
     """Exit with an error if any required API env var is unset.
 
@@ -238,6 +252,7 @@ def validate_environment() -> None:
     if missing:
         joined = ", ".join(missing)
         raise SystemExit(f"Missing required translation secret(s): {joined}")
+
 
 def update_file(path: Path, remaining_budget: int) -> int:
     """Translate up to ``remaining_budget`` empty/fuzzy messages in one ``.po`` file.
@@ -265,6 +280,7 @@ def update_file(path: Path, remaining_budget: int) -> int:
         path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
     return translated
+
 
 def main() -> int:
     """Translate up to ``MAX_ENTRIES`` messages across all Chinese ``.po`` files."""
@@ -294,6 +310,7 @@ def main() -> int:
 
     print(f"Translated {translated} Chinese documentation entries.")
     return 0
+
 
 if __name__ == "__main__":
     sys.exit(main())
