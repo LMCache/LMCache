@@ -12,10 +12,10 @@ from vllm.v1.core.sched.output import SchedulerOutput
 import torch
 
 # First Party
+from lmcache import torch_device_type
 from lmcache.integration.vllm.utils import (
     create_lmcache_ec_config,
     create_lmcache_metadata,
-    get_vllm_device_type,
 )
 from lmcache.v1.ec_engine import ECCacheEngine
 
@@ -130,7 +130,7 @@ class LMCacheECConnectorImpl:
         if not isinstance(metadata, LMCacheECConnectorMetadata):
             raise TypeError(f"Unexpected metadata type: {type(metadata)}")
 
-        device = get_vllm_device_type()
+        device = torch_device_type
         for mm_data in metadata.mm_datas:
             mm_hash = mm_data.mm_hash
             if mm_hash in encoder_cache:

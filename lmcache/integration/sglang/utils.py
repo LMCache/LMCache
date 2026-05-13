@@ -36,4 +36,6 @@ def lmcache_get_config() -> LMCacheEngineConfig:
         logger.info(f"Loading LMCache config file {config_file}")
         config = LMCacheEngineConfig.from_file(config_file)
 
+    config.validate()
+
     return config

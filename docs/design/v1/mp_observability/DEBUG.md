@@ -8,7 +8,7 @@ a hit-rate regression.
 
 ## Common parameters
 
-All from `GET <lmcache-url>/api/status`:
+All from `GET <lmcache-url>/status`:
 
 | Field | Source | Example |
 |---|---|---|
@@ -83,7 +83,7 @@ engage.
 
 Attach these four artifacts when reporting a hit-rate regression:
 
-1. `GET <lmcache-url>/api/status` (config + state snapshot).
+1. `GET <lmcache-url>/status` (config + state snapshot).
 2. `GET <lmcache-url>/metrics` snapshots taken **before** and **after** the run.
 3. The bench's `bench_summary.json` and `bench_results.csv` (TTFT per request).
 4. The LMCache server's stdout/stderr (eviction-trigger logs are at INFO level).
