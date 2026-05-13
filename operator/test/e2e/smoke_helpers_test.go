@@ -40,10 +40,27 @@ import (
 // running spec's text to make failing-spec dumps easier to attribute.
 // The deferred AfterEach is wired up by the caller via DeferCleanup so
 // each spec gets per-test isolation without relying on package state.
+//
+// The namespace is pre-labeled with the `privileged` PodSecurity profile
+// because the LMCache DaemonSet's pod template sets hostIPC=true and
+// privileged=true. On clusters that enforce PodSecurity admission (OCP
+// in particular), a `restricted` namespace would reject the DaemonSet at
+// creation time, which the smokes need to succeed even though they never
+// wait for pods to schedule. The label is a no-op on clusters that don't
+// enforce PodSecurity.
 func createTestNamespace(ctx context.Context) string {
 	GinkgoHelper()
 	name := uniqueNamespaceName()
-	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: name}}
+	ns := &corev1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: name,
+			Labels: map[string]string{
+				"pod-security.kubernetes.io/enforce": "privileged",
+				"pod-security.kubernetes.io/audit":   "privileged",
+				"pod-security.kubernetes.io/warn":    "privileged",
+			},
+		},
+	}
 	Expect(k8sClient.Create(ctx, ns)).To(Succeed(), "Failed to create test namespace %q", name)
 	DeferCleanup(func(ctx SpecContext) {
 		deleteNamespace(ctx, name)

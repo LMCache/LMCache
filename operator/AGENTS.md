@@ -9,12 +9,75 @@ by Go build tags so unit tests run without it.
 ### Targets (M1, no-GPU)
 
 ```bash
-make test-e2e            # ~5 min on Kind, no GPU required
+make test-e2e                                                                       # local Kind, ~5 min
+make test-e2e-cluster IMG=<registry>/<repo>:<tag>                                   # existing cluster
 ```
 
-The `test-e2e` target builds the manager image, loads it into a dedicated
-Kind cluster (`operator-test-e2e` by default), installs CRDs, deploys the
-controller, and runs every `//go:build e2e` spec under `test/e2e/`.
+#### `test-e2e` — local Kind run
+
+Builds the manager image, loads it into a dedicated Kind cluster
+(`operator-test-e2e` by default), installs CRDs, deploys the controller,
+runs every `//go:build e2e` spec under `test/e2e/`, then tears the
+cluster down. No prereqs beyond Kind + Docker on `$PATH`.
+
+#### `test-e2e-cluster` — existing cluster (OpenShift, EKS, k3s, …)
+
+For when you already have a cluster running and just want the suite to
+install/deploy → test → undeploy against it. Prereqs:
+
+1. **Image pushed to a reachable registry.** The cluster nodes must be
+   able to `docker pull` `$IMG`. On OpenShift the simplest path is the
+   internal registry — see *Pushing to OpenShift's internal registry*
+   below.
+2. **`KUBECONFIG` / current-context** points at the target cluster.
+3. Pass the in-cluster pull URL via `IMG=`. The target fails fast if
+   `IMG` is missing or still the default `controller:latest`.
+
+```bash
+oc config use-context admin                                                          # or kubectl config use-context <name>
+export IMG=image-registry.openshift-image-registry.svc:5000/lmcache-operator-system/operator:v0.0.1
+make test-e2e-cluster IMG=$IMG
+```
+
+Under the hood this sets `SMOKE_SKIP_IMAGE_LOAD=true` (so the suite
+neither rebuilds nor `kind load`s) and `CERT_MANAGER_INSTALL_SKIP=true`
+(no smoke spec depends on cert-manager). The cluster is left intact
+after the run.
+
+#### Pushing to OpenShift's internal registry
+
+```bash
+# One-time per cluster: expose the registry on a default route
+oc patch configs.imageregistry.operator.openshift.io/cluster \
+  --type merge -p '{"spec":{"defaultRoute":true}}'
+
+# Log Docker into the registry using your oc session
+oc registry login --to=$HOME/.docker/config.json --skip-check
+
+# Build, tag, push
+oc create namespace lmcache-operator-system --dry-run=client -o yaml | oc apply -f -
+export OCP_REGISTRY=$(oc get route default-route -n openshift-image-registry -o jsonpath='{.spec.host}')
+make docker-build IMG=controller:latest
+docker tag controller:latest $OCP_REGISTRY/lmcache-operator-system/operator:v0.0.1
+docker push                  $OCP_REGISTRY/lmcache-operator-system/operator:v0.0.1
+```
+
+The push uses the external route; pods inside the cluster pull via the
+in-cluster service name (`image-registry.openshift-image-registry.svc:5000/...`).
+Both names point at the same image; only the hostnames differ.
+
+#### OpenShift caveats
+
+- **PodSecurity admission**: test namespaces are pre-labeled
+  `pod-security.kubernetes.io/enforce=privileged` so the operator's
+  DaemonSet (which sets `hostIPC=true` + `privileged=true`) is accepted
+  at admission time. Harmless on clusters that don't enforce PodSecurity.
+- **SCC (Security Context Constraints)**: M1 smokes never wait for
+  DaemonSet pods to schedule, so SCC isn't a blocker. If you need pods
+  to actually run later (M2/M3 GPU tier), grant the LMCache
+  ServiceAccount the `privileged` SCC explicitly.
+- **cert-manager**: not required by any smoke spec; `test-e2e-cluster`
+  short-circuits the install/teardown.
 
 ### Specs included in M1
 

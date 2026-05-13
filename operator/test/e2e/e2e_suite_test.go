@@ -41,8 +41,15 @@ import (
 )
 
 var (
-	// managerImage is the manager image to be built and loaded for testing.
-	managerImage = "example.com/operator:v0.0.1"
+	// managerImage is the manager image used by build / load / deploy.
+	// Honors the IMG env var so test-e2e-cluster can point at an image
+	// already pushed to a registry the target cluster pulls from.
+	managerImage = envDefault("IMG", "example.com/operator:v0.0.1")
+	// skipImageLoad disables the Kind-only docker-build + kind-load
+	// steps. Set SMOKE_SKIP_IMAGE_LOAD=true when running against an
+	// existing cluster (OpenShift, EKS, k3s, etc.) where the image has
+	// already been pushed to a reachable registry.
+	skipImageLoad = os.Getenv("SMOKE_SKIP_IMAGE_LOAD") == "true"
 	// shouldCleanupCertManager tracks whether CertManager was installed by this suite.
 	shouldCleanupCertManager = false
 	// k8sClient is the typed controller-runtime client used by smoke specs.
@@ -50,6 +57,15 @@ var (
 	// read it directly without rebuilding their own client.
 	k8sClient client.Client
 )
+
+// envDefault returns os.Getenv(key) or def if the env var is unset/empty.
+// Pulled out as a helper so package-level var initialisers stay readable.
+func envDefault(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
+}
 
 // TestE2E runs the e2e test suite to validate the solution in an isolated environment.
 // The default setup requires Kind and CertManager.
@@ -62,20 +78,30 @@ func TestE2E(t *testing.T) {
 }
 
 var _ = BeforeSuite(func() {
-	By("building the manager image")
-	_, err := utils.RunMake("docker-build", fmt.Sprintf("IMG=%s", managerImage))
-	Expect(err).NotTo(HaveOccurred(), "Failed to build the manager image")
+	_, _ = fmt.Fprintf(GinkgoWriter, "manager image: %s (skipImageLoad=%v)\n",
+		managerImage, skipImageLoad)
 
-	// TODO(user): If you want to change the e2e test vendor from Kind,
-	// ensure the image is built and available, then remove the following block.
-	By("loading the manager image on Kind")
-	err = utils.LoadImageToKindClusterWithName(managerImage)
-	Expect(err).NotTo(HaveOccurred(), "Failed to load the manager image into Kind")
+	if skipImageLoad {
+		// Existing-cluster path: the user pushed the image to a
+		// registry before invoking the suite. We can't sideload, and
+		// we don't rebuild because rebuilds wouldn't propagate to the
+		// pushed copy anyway. The deploy step below uses managerImage
+		// as the registry URL.
+		By("skipping docker-build + kind-load (SMOKE_SKIP_IMAGE_LOAD=true)")
+	} else {
+		By("building the manager image")
+		_, err := utils.RunMake("docker-build", fmt.Sprintf("IMG=%s", managerImage))
+		Expect(err).NotTo(HaveOccurred(), "Failed to build the manager image")
+
+		By("loading the manager image on Kind")
+		err = utils.LoadImageToKindClusterWithName(managerImage)
+		Expect(err).NotTo(HaveOccurred(), "Failed to load the manager image into Kind")
+	}
 
 	setupCertManager()
 
 	By("installing CRDs")
-	_, err = utils.RunMake("install")
+	_, err := utils.RunMake("install")
 	Expect(err).NotTo(HaveOccurred(), "Failed to install CRDs")
 
 	By("deploying the controller-manager")

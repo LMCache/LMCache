@@ -83,12 +83,34 @@ setup-test-e2e: ## Set up a Kind cluster for e2e tests if it does not exist
 
 .PHONY: test-e2e
 test-e2e: setup-test-e2e manifests generate fmt vet ## Run the e2e tests. Expected an isolated environment using Kind.
-	KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) go test -tags=e2e ./test/e2e/ -v -ginkgo.v
+	KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) go test -tags=e2e ./test/e2e/ -v -ginkgo.v -timeout 30m
 	$(MAKE) cleanup-test-e2e
 
 .PHONY: cleanup-test-e2e
 cleanup-test-e2e: ## Tear down the Kind cluster used for e2e tests
 	@$(KIND) delete cluster --name $(KIND_CLUSTER)
+
+# Run the smoke suite against an already-configured cluster (no Kind setup).
+# Prerequisites:
+#   1. KUBECONFIG / current-context points at the target cluster
+#      (OpenShift, EKS, k3s, an existing Kind cluster, ...).
+#   2. The operator image has already been built and pushed to a
+#      registry the cluster can pull from. Pass that image as IMG=<url>:
+#        make test-e2e-cluster IMG=image-registry.openshift-image-registry.svc:5000/lmcache-operator-system/operator:v0.0.1
+#   3. cert-manager is *not* installed by this flow (CERT_MANAGER_INSTALL_SKIP=true).
+#      If you need cert-manager for some other reason, install it separately.
+#
+# The suite will: install CRDs, deploy the controller, run every smoke
+# spec, then undeploy + uninstall. The cluster itself is left intact.
+.PHONY: test-e2e-cluster
+test-e2e-cluster: manifests generate fmt vet ## Run smoke against the currently-configured cluster (no Kind).
+	@if [ -z "$(IMG)" ] || [ "$(IMG)" = "controller:latest" ]; then \
+		echo "ERROR: pass IMG=<registry/image:tag> pointing at an image the cluster can pull"; \
+		exit 1; \
+	fi
+	@echo "Running smoke suite against $$(kubectl config current-context) using IMG=$(IMG)"
+	IMG=$(IMG) SMOKE_SKIP_IMAGE_LOAD=true CERT_MANAGER_INSTALL_SKIP=true \
+		go test -tags=e2e ./test/e2e/ -v -ginkgo.v -timeout 30m
 
 .PHONY: install-hooks
 install-hooks: golangci-lint ## Install git pre-commit hooks (requires pre-commit: pip install pre-commit).
