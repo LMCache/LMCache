@@ -91,7 +91,7 @@ Validated models
              --trust-remote-code \
              --enable-auto-tool-choice \
              --tool-call-parser llama3_json \
-             --chat-template examples/tool_chat_template_llama3.1_json.jinja \
+             --chat-template <path_to_llama3.1_json_template> \
              --kv-transfer-config \
              '{"kv_connector":"LMCacheMPConnector", "kv_role":"kv_both"}'
 
