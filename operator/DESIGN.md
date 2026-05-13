@@ -340,7 +340,19 @@ OnEvent(LMCacheEngine create/update/delete):
 
 **Secondary watches:** DaemonSet, Pods (readiness changes → update endpoints), Nodes (new GPU node → DaemonSet auto-schedules)
 
-**Finalizer** `lmcache.ai/cleanup`: on CR deletion, cascading delete of owned resources.
+**Deletion / cleanup**: every child resource the operator creates
+(DaemonSet, lookup Service, metrics Service, connection ConfigMap,
+managed RESP auth Secret, optional ServiceMonitor) carries an
+`ownerReference` to the LMCacheEngine, so Kubernetes garbage
+collection cascade-deletes them when the CR goes away. **No finalizer
+is used.** An earlier design added a `lmcache.ai/cleanup` finalizer
+to mirror that GC behavior, but it was a no-op that only created
+deadlocks when the controller pod was not running (e.g. during
+cluster issues or a single-step `kubectl delete -k config/default`).
+The reconciler now actively strips that legacy finalizer from any CR
+it sees, so migration from older operator versions is automatic.
+Finalizers will return when we need to clean up state K8s GC cannot
+reach (Redis L2 keys, federation deregistration, etc.).
 
 ---
 
