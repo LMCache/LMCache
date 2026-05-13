@@ -118,12 +118,14 @@ RUN . /opt/venv/bin/activate && \
 WORKDIR /workspace
 ENTRYPOINT ["/opt/venv/bin/vllm", "serve"]
 
-#################### vLLM IMAGE & LMCache (Release, cu12) #######################
-# Installs stable vLLM with cu12 index and lmcache from the v{tag}-cu12 GitHub Release.
+#################### vLLM IMAGE & LMCache (Release, cu129) ######################
+# Installs stable vLLM with cu129 index and lmcache from the v{tag}-cu129 GitHub Release.
 
-FROM base AS image-release-cu12
+FROM base AS image-release-cu129
 
-ARG CUDA_VERSION
+# Override the global CUDA_VERSION default (13.0) for this cu12.9 stage so local
+# builds that omit --build-arg CUDA_VERSION still resolve the correct torch index.
+ARG CUDA_VERSION=12.9
 ARG LMCACHE_VERSION
 
 RUN . /opt/venv/bin/activate && \
@@ -135,7 +137,7 @@ RUN . /opt/venv/bin/activate && \
         --index-strategy unsafe-best-match && \
     uv pip install lmcache==${VER} \
         --extra-index-url https://download.pytorch.org/whl/${CUDA_TAG} \
-        --find-links https://github.com/LMCache/LMCache/releases/expanded_assets/v${VER}-cu12 \
+        --find-links https://github.com/LMCache/LMCache/releases/expanded_assets/v${VER}-cu129 \
         --index-strategy unsafe-best-match --verbose
 
 WORKDIR /workspace

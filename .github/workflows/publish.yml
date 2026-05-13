@@ -305,7 +305,7 @@ jobs:
               env:
                   GITHUB_TOKEN: ${{ github.token }}
               run: |
-                  gh release create "${{ github.ref_name }}-cu12" \
+                  gh release create "${{ github.ref_name }}-cu129" \
                     --repo ${{ github.repository }} \
                     --latest=false \
                     --title "Release ${{ github.ref_name }} · CUDA 12.9" \
@@ -315,7 +315,7 @@ jobs:
                   VERSION=${{ github.ref_name }}
                   uv pip install lmcache==${VERSION#v} \\
                     --extra-index-url https://download.pytorch.org/whl/cu129 \\
-                    --find-links https://github.com/${{ github.repository }}/releases/expanded_assets/${VERSION}-cu12 \\
+                    --find-links https://github.com/${{ github.repository }}/releases/expanded_assets/${VERSION}-cu129 \\
                     --index-strategy unsafe-best-match
                   \`\`\`" \
                     dist/*.whl
@@ -444,15 +444,15 @@ jobs:
                 --build-arg BASE_IMAGE=nvcr.io/nvidia/cuda-dl-base:25.05-cuda12.9-devel-ubuntu24.04 \
                 --build-arg CUDA_VERSION=12.9 \
                 --build-arg LMCACHE_VERSION=${{ env.LATEST_TAG }} \
-                --target image-release-cu12 \
-                --tag lmcache/vllm-openai:latest-cu12 --tag lmcache/vllm-openai:${{ env.LATEST_TAG }}-cu12 \
+                --target image-release-cu129 \
+                --tag lmcache/vllm-openai:latest-cu129 --tag lmcache/vllm-openai:${{ env.LATEST_TAG }}-cu129 \
                 --file docker/Dockerfile .
 
-            - name: Push lmcache/vllm-openai cu12 container image to DockerHub
+            - name: Push lmcache/vllm-openai cu129 container image to DockerHub
               if: needs.publish-cu129-github-release.result == 'success'
               run: |
-                docker push lmcache/vllm-openai:latest-cu12
-                docker push lmcache/vllm-openai:${{ env.LATEST_TAG }}-cu12
+                docker push lmcache/vllm-openai:latest-cu129
+                docker push lmcache/vllm-openai:${{ env.LATEST_TAG }}-cu129
 
             - name: Clean up Docker layers and cache
               run: |
@@ -466,11 +466,11 @@ jobs:
                 --build-arg BASE_IMAGE=nvcr.io/nvidia/cuda-dl-base:25.05-cuda12.9-devel-ubuntu24.04 \
                 --build-arg CUDA_VERSION=12.9 \
                 --target lmcache-final \
-                --tag lmcache/standalone:latest-cu12 --tag lmcache/standalone:${{ env.LATEST_TAG }}-cu12 \
+                --tag lmcache/standalone:latest-cu129 --tag lmcache/standalone:${{ env.LATEST_TAG }}-cu129 \
                 --file docker/Dockerfile.standalone .
 
-            - name: Push lmcache/standalone cu12 container image to DockerHub
+            - name: Push lmcache/standalone cu129 container image to DockerHub
               if: needs.publish-cu129-github-release.result == 'success'
               run: |
-                docker push lmcache/standalone:latest-cu12
-                docker push lmcache/standalone:${{ env.LATEST_TAG }}-cu12
+                docker push lmcache/standalone:latest-cu129
+                docker push lmcache/standalone:${{ env.LATEST_TAG }}-cu129

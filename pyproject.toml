@@ -167,7 +167,7 @@ build = "cp3*-manylinux_x86_64"
 # 10.0: GB200, B200
 # 12.0: RTX 50-series (PTX)
 # CUDA 13 dropped support for compute capability 7.0 (Volta).
-environment = {TORCH_CUDA_ARCH_LIST = "8.0;8.6;8.9;9.0;10.0;12.0", ENABLE_CXX11_ABI = "1", PIP_EXTRA_INDEX_URL = "https://download.pytorch.org/whl/cu130"}
+environment = {TORCH_CUDA_ARCH_LIST = "7.5;8.0;8.6;8.9;9.0;10.0;12.0", ENABLE_CXX11_ABI = "1", PIP_EXTRA_INDEX_URL = "https://download.pytorch.org/whl/cu130"}
 
 # Use the PyTorch manylinux image version '2_28' that contains CUDA 13.0
 manylinux-x86_64-image = "docker.io/pytorch/manylinux2_28-builder:cuda13.0"

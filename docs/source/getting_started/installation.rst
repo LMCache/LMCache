@@ -43,7 +43,7 @@ Install LMCache
                             VERSION=0.4.3  # replace with target release
                             uv pip install lmcache==${VERSION} \
                                 --extra-index-url https://download.pytorch.org/whl/cu129 \
-                                --find-links https://github.com/LMCache/LMCache/releases/expanded_assets/v${VERSION}-cu12 \
+                                --find-links https://github.com/LMCache/LMCache/releases/expanded_assets/v${VERSION}-cu129 \
                                 --index-strategy unsafe-best-match
 
                         .. note::
@@ -143,7 +143,7 @@ Install LMCache
 
                         .. code-block:: bash
 
-                            docker pull lmcache/vllm-openai:latest-cu12
+                            docker pull lmcache/vllm-openai:latest-cu129
 
             .. tab-item:: Nightly
 
