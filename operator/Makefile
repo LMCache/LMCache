@@ -63,32 +63,53 @@ test: manifests generate fmt vet setup-envtest ## Run tests.
 
 # TODO(user): To use a different vendor for e2e tests, modify the setup under 'tests/e2e'.
 # The default setup assumes Kind is pre-installed and builds/loads the Manager Docker image locally.
-# CertManager is installed by default; skip with:
-# - CERT_MANAGER_INSTALL_SKIP=true
-KIND_CLUSTER ?= operator-test-e2e
+# Generate a unique Kind cluster name per `make test-e2e` invocation
+# so concurrent test runs can never collide and so cleanup can safely
+# `kind delete` without risk of touching someone else's cluster — by
+# construction, the name belongs to this run.
+#
+# Set KIND_CLUSTER explicitly (env or command line) to use a stable
+# name for debugging or to target an already-existing cluster; in
+# that case the caller is responsible for cleanup of any leftover.
+ifndef KIND_CLUSTER
+KIND_CLUSTER := operator-test-e2e-$(shell date +%s%N | tail -c 9)
+endif
 
 .PHONY: setup-test-e2e
-setup-test-e2e: ## Set up a Kind cluster for e2e tests if it does not exist
+setup-test-e2e: ## Create a fresh, uniquely-named Kind cluster for e2e tests
 	@command -v $(KIND) >/dev/null 2>&1 || { \
 		echo "Kind is not installed. Please install Kind manually."; \
 		exit 1; \
 	}
-	@case "$$($(KIND) get clusters)" in \
-		*"$(KIND_CLUSTER)"*) \
-			echo "Kind cluster '$(KIND_CLUSTER)' already exists. Skipping creation." ;; \
-		*) \
-			echo "Creating Kind cluster '$(KIND_CLUSTER)'..."; \
-			$(KIND) create cluster --name $(KIND_CLUSTER) ;; \
-	esac
+	@echo "Creating Kind cluster '$(KIND_CLUSTER)'..."
+	@$(KIND) create cluster --name $(KIND_CLUSTER)
 
+# Wrap go test in a single shell with a trap so cleanup-test-e2e fires
+# on success, on test failure, and on Ctrl-C / SIGTERM. The exit
+# status of go test is preserved as the recipe's exit status.
+#
+# SIGKILL is uncatchable; on that rare path the cluster leaks under
+# its unique name and can be reaped manually (`kind get clusters` then
+# `kind delete cluster --name ...`).
+#
+# KIND_CLUSTER is passed explicitly to the trap's sub-make so the
+# sub-make targets THIS run's cluster — without it, the sub-make's
+# ifndef block would compute a new unique name and the cleanup would
+# no-op against an unrelated cluster name.
 .PHONY: test-e2e
 test-e2e: setup-test-e2e manifests generate fmt vet ## Run the e2e tests. Expected an isolated environment using Kind.
-	KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) go test -tags=e2e ./test/e2e/ -v -ginkgo.v -timeout 30m
-	$(MAKE) cleanup-test-e2e
+	@echo "==> Using Kind cluster: $(KIND_CLUSTER) (auto-deleted after the run)"
+	@trap '$(MAKE) --no-print-directory cleanup-test-e2e KIND_CLUSTER=$(KIND_CLUSTER)' EXIT INT TERM; \
+	 KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) go test -tags=e2e ./test/e2e/ -v -ginkgo.v -timeout 30m
 
 .PHONY: cleanup-test-e2e
-cleanup-test-e2e: ## Tear down the Kind cluster used for e2e tests
-	@$(KIND) delete cluster --name $(KIND_CLUSTER)
+cleanup-test-e2e: ## Delete the Kind cluster used for e2e tests (idempotent)
+	@if $(KIND) get clusters 2>/dev/null | grep -qx "$(KIND_CLUSTER)"; then \
+		echo "Deleting Kind cluster '$(KIND_CLUSTER)'..."; \
+		$(KIND) delete cluster --name $(KIND_CLUSTER); \
+	else \
+		echo "Kind cluster '$(KIND_CLUSTER)' does not exist; nothing to delete."; \
+	fi
 
 # Run the smoke suite against an already-configured cluster (no Kind setup).
 # Prerequisites:
@@ -97,8 +118,6 @@ cleanup-test-e2e: ## Tear down the Kind cluster used for e2e tests
 #   2. The operator image has already been built and pushed to a
 #      registry the cluster can pull from. Pass that image as IMG=<url>:
 #        make test-e2e-cluster IMG=image-registry.openshift-image-registry.svc:5000/lmcache-operator-system/operator:v0.0.1
-#   3. cert-manager is *not* installed by this flow (CERT_MANAGER_INSTALL_SKIP=true).
-#      If you need cert-manager for some other reason, install it separately.
 #
 # The suite will: install CRDs, deploy the controller, run every smoke
 # spec, then undeploy + uninstall. The cluster itself is left intact.
@@ -109,7 +128,7 @@ test-e2e-cluster: manifests generate fmt vet ## Run smoke against the currently-
 		exit 1; \
 	fi
 	@echo "Running smoke suite against $$(kubectl config current-context) using IMG=$(IMG)"
-	IMG=$(IMG) SMOKE_SKIP_IMAGE_LOAD=true CERT_MANAGER_INSTALL_SKIP=true \
+	IMG=$(IMG) SMOKE_SKIP_IMAGE_LOAD=true \
 		go test -tags=e2e ./test/e2e/ -v -ginkgo.v -timeout 30m
 
 .PHONY: install-hooks

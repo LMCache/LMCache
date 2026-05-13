@@ -23,6 +23,8 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
+	"sync/atomic"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2" //nolint:revive,staticcheck
 	. "github.com/onsi/gomega"    //nolint:revive,staticcheck
@@ -35,6 +37,14 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
+
+// nsCounter is a process-wide monotonic counter appended to every
+// generated namespace name. CurrentSpecReport().StartTime alone is not
+// enough — specs that call createTestNamespace twice in a single
+// BeforeEach (e.g. TMOP-22 / S-9, which needs both an engine namespace
+// and a source-Secret namespace) would otherwise compute the same name
+// twice and collide on AlreadyExists.
+var nsCounter atomic.Int64
 
 // createTestNamespace creates a fresh namespace whose name embeds the
 // running spec's text to make failing-spec dumps easier to attribute.
@@ -68,16 +78,17 @@ func createTestNamespace(ctx context.Context) string {
 	return name
 }
 
-// uniqueNamespaceName produces a DNS-1123-safe namespace name derived
-// from the current Ginkgo spec, falling back to a counter if the spec
-// text is empty (e.g. before a spec block has fully entered scope).
+// uniqueNamespaceName produces a DNS-1123-safe namespace name that's
+// unique within the test process. The time component disambiguates
+// across runs / Kind-cluster restarts; the counter disambiguates
+// multiple calls inside a single spec.
 func uniqueNamespaceName() string {
-	report := CurrentSpecReport()
-	hash := fmt.Sprintf("%x", report.StartTime.UnixNano())
+	n := nsCounter.Add(1)
+	hash := fmt.Sprintf("%x", time.Now().UnixNano())
 	if len(hash) > 8 {
 		hash = hash[len(hash)-8:]
 	}
-	return "lmc-smoke-" + hash
+	return fmt.Sprintf("lmc-smoke-%s-%d", hash, n)
 }
 
 // deleteNamespace tears down a test namespace. We tolerate NotFound so

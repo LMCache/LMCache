@@ -39,10 +39,9 @@ export IMG=image-registry.openshift-image-registry.svc:5000/lmcache-operator-sys
 make test-e2e-cluster IMG=$IMG
 ```
 
-Under the hood this sets `SMOKE_SKIP_IMAGE_LOAD=true` (so the suite
-neither rebuilds nor `kind load`s) and `CERT_MANAGER_INSTALL_SKIP=true`
-(no smoke spec depends on cert-manager). The cluster is left intact
-after the run.
+Under the hood this sets `SMOKE_SKIP_IMAGE_LOAD=true` so the suite
+neither rebuilds nor `kind load`s. The cluster is left intact after
+the run.
 
 #### Pushing to OpenShift's internal registry
 
@@ -76,15 +75,13 @@ Both names point at the same image; only the hostnames differ.
   DaemonSet pods to schedule, so SCC isn't a blocker. If you need pods
   to actually run later (M2/M3 GPU tier), grant the LMCache
   ServiceAccount the `privileged` SCC explicitly.
-- **cert-manager**: not required by any smoke spec; `test-e2e-cluster`
-  short-circuits the install/teardown.
 
 ### Specs included in M1
 
 | Spec file | Coverage |
 |---|---|
 | `crd_smoke_test.go` | TMOP-18 harness sanity check + TMOP-19 / S-1 (minimal CR shape) + S-2 (custom port) |
-| `lifecycle_smoke_test.go` | TMOP-20 / S-6 (port update propagation), S-7 (delete + finalizer GC), S-10 (invalid sizeGB rejection) |
+| `lifecycle_smoke_test.go` | TMOP-20 / S-6 (port update propagation), S-7 (delete + ownerRef GC), S-10 (invalid sizeGB rejection) |
 | `field_coverage_smoke_test.go` | TMOP-21 / S-3 (ServiceMonitor — auto-skipped if CRD absent), S-4 (extraArgs override), S-5 (resourceOverrides) |
 | `auth_smoke_test.go` | TMOP-22 / S-9 (cross-namespace authSecretRef mirroring + env-var injection) |
 
@@ -93,9 +90,6 @@ Both names point at the same image; only the hostnames differ.
 - **Kind** on `$PATH`, or `KIND=<path>` set in the environment.
 - **kubectl** on `$PATH` (used for port-forward and namespace-label fallbacks).
 - A docker daemon reachable for `make docker-build`.
-
-CertManager installs automatically if absent; set
-`CERT_MANAGER_INSTALL_SKIP=true` to skip when it's already on the cluster.
 
 ### Helper library (`test/utils/`)
 
