@@ -1320,6 +1320,11 @@ class LMCacheConnectorV1Impl:
         """
         Check for external KV cache hit.
 
+        On preempt re-admission, the returned external hit count is clamped to
+        ``request.num_cached_tokens`` (the value vLLM recorded at first
+        admission) so that the vLLM metric invariant
+        ``num_external_computed_tokens <= num_cached_tokens`` is preserved.
+
         Args:
             request (Request): the request object.
             num_computed_tokens (int): the number of locally
@@ -1393,6 +1398,26 @@ class LMCacheConnectorV1Impl:
                 num_computed_tokens,
             )
             return None
+
+        # vLLM sets request.num_cached_tokens once on first admission and never
+        # updates it; the prompt-token metric in vllm>=0.18 assumes
+        # num_external_computed_tokens <= num_cached_tokens. On preempt
+        # re-admission, the LMCache lookup may legitimately find more hits
+        # than the first admission did (the request's own decoded KVs got
+        # saved during its previous run), but reporting more than the recorded
+        # ceiling violates the invariant and crashes the metric counter
+        # (issue #2912). Clamp here so external never exceeds the first-
+        # admission value.
+        prior_cached = getattr(request, "num_cached_tokens", -1)
+        if prior_cached >= 0 and num_external_hit_tokens > prior_cached:
+            logger.debug(
+                "Clamping LMCache hit tokens %d -> %d for request %s "
+                "(vLLM num_cached_tokens ceiling on preempt re-admission).",
+                num_external_hit_tokens,
+                prior_cached,
+                req_id,
+            )
+            num_external_hit_tokens = prior_cached
 
         # When prompt length is divisible by the block size and all
         # blocks are cached, we need to recompute the last token.
