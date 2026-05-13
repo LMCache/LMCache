@@ -6,9 +6,9 @@
 # docs/source/getting_started/installation.rst
 # docs/production/docker_deployment.rst
 
-ARG CUDA_VERSION=12.9
+ARG CUDA_VERSION=13.0
 ARG UBUNTU_VERSION=24.04
-ARG NGC_VERSION=25.05
+ARG NGC_VERSION=25.09
 ARG BASE_IMAGE=nvcr.io/nvidia/cuda-dl-base:${NGC_VERSION}-cuda${CUDA_VERSION}-devel-ubuntu${UBUNTU_VERSION}
 
 #################### BASE BUILD IMAGE ####################
@@ -40,7 +40,7 @@ RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
 WORKDIR /workspace
 
 # CUDA arch list used by torch
-ARG torch_cuda_arch_list='7.0 7.5 8.0 8.6 8.9 9.0 10.0 12.0+PTX'
+ARG torch_cuda_arch_list='7.5 8.0 8.6 8.9 9.0 10.0 12.0+PTX'
 ENV TORCH_CUDA_ARCH_LIST=${torch_cuda_arch_list}
 
 #################### vLLM IMAGE & LMCache (Build) ##########################
@@ -96,25 +96,32 @@ RUN --mount=type=cache,target=/root/.cache/ccache,id=ccache \
 WORKDIR /workspace
 ENTRYPOINT ["/opt/venv/bin/vllm", "serve"]
 
-#################### vLLM IMAGE & LMCache (Release, cu12) #######################
-# Integrate vLLM and LMCache stable releases, and expose vLLM OpenAI API
+#################### vLLM IMAGE & LMCache (Release, cu13) #######################
+# Integrate vLLM and LMCache stable releases, and expose vLLM OpenAI API.
+# The default lmcache wheel on PyPI is built against cu13; the cu13 torch
+# index is hinted explicitly so vLLM also resolves to its cu13 build.
 
 FROM base AS image-release
 
-# Install LMCache and vLLM stable releases.
-# It is imperative that LMCache uses the same torch version as the
-# vLLM stable release.
+ARG CUDA_VERSION
+
 RUN . /opt/venv/bin/activate && \
-    uv pip install --prerelease=allow vllm[runai,tensorizer,flashinfer] && \
-    uv pip install lmcache --verbose
+    CUDA_TAG=cu$(echo ${CUDA_VERSION} | tr -d '.') && \
+    uv pip install --prerelease=allow \
+        vllm[runai,tensorizer,flashinfer] \
+        --extra-index-url https://download.pytorch.org/whl/${CUDA_TAG} \
+        --index-strategy unsafe-best-match && \
+    uv pip install lmcache \
+        --extra-index-url https://download.pytorch.org/whl/${CUDA_TAG} \
+        --index-strategy unsafe-best-match --verbose
 
 WORKDIR /workspace
 ENTRYPOINT ["/opt/venv/bin/vllm", "serve"]
 
-#################### vLLM IMAGE & LMCache (Release, cu13) #######################
-# Installs stable vLLM with cu13 index and lmcache from the v{tag}-cu13 GitHub Release.
+#################### vLLM IMAGE & LMCache (Release, cu12) #######################
+# Installs stable vLLM with cu12 index and lmcache from the v{tag}-cu12 GitHub Release.
 
-FROM base AS image-release-cu13
+FROM base AS image-release-cu12
 
 ARG CUDA_VERSION
 ARG LMCACHE_VERSION
@@ -128,7 +135,7 @@ RUN . /opt/venv/bin/activate && \
         --index-strategy unsafe-best-match && \
     uv pip install lmcache==${VER} \
         --extra-index-url https://download.pytorch.org/whl/${CUDA_TAG} \
-        --find-links https://github.com/LMCache/LMCache/releases/expanded_assets/v${VER}-cu13 \
+        --find-links https://github.com/LMCache/LMCache/releases/expanded_assets/v${VER}-cu12 \
         --index-strategy unsafe-best-match --verbose
 
 WORKDIR /workspace

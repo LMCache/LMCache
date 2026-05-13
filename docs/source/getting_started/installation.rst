@@ -18,7 +18,7 @@ Install LMCache
 
                 .. tab-set::
 
-                    .. tab-item:: CUDA 12.9  
+                    .. tab-item:: CUDA 13.0
 
                         .. code-block:: bash
 
@@ -31,9 +31,9 @@ Install LMCache
                             You're all set! You can now start using LMCache. For hands-on guides and more
                             usage examples, see the :ref:`quickstart_examples` section.
 
-                    .. tab-item:: CUDA 13.0
+                    .. tab-item:: CUDA 12.9
 
-                        The CUDA 13.0 wheel is published to a dedicated
+                        The CUDA 12.9 wheel is published to a dedicated
                         `GitHub Release <https://github.com/LMCache/LMCache/releases>`__ rather than PyPI.
 
                         .. code-block:: bash
@@ -42,13 +42,13 @@ Install LMCache
                             source .venv/bin/activate
                             VERSION=0.4.3  # replace with target release
                             uv pip install lmcache==${VERSION} \
-                                --extra-index-url https://download.pytorch.org/whl/cu130 \
-                                --find-links https://github.com/LMCache/LMCache/releases/expanded_assets/v${VERSION}-cu13 \
+                                --extra-index-url https://download.pytorch.org/whl/cu129 \
+                                --find-links https://github.com/LMCache/LMCache/releases/expanded_assets/v${VERSION}-cu12 \
                                 --index-strategy unsafe-best-match
 
                         .. note::
 
-                            ``--extra-index-url https://download.pytorch.org/whl/cu130`` ensures the CUDA 13.0
+                            ``--extra-index-url https://download.pytorch.org/whl/cu129`` ensures the CUDA 12.9
                             build of PyTorch is resolved. Without it, pip may select a mismatched CUDA variant.
 
             .. tab-item:: Nightly
@@ -59,17 +59,6 @@ Install LMCache
 
                 .. tab-set::
 
-                    .. tab-item:: CUDA 12.9
-
-                        .. code-block:: bash
-
-                            uv venv --python 3.12
-                            source .venv/bin/activate
-                            uv pip install lmcache --pre \
-                                --extra-index-url https://download.pytorch.org/whl/cu129 \
-                                --find-links https://github.com/LMCache/LMCache/releases/expanded_assets/nightly \
-                                --index-strategy unsafe-best-match
-
                     .. tab-item:: CUDA 13.0
 
                         .. code-block:: bash
@@ -78,7 +67,18 @@ Install LMCache
                             source .venv/bin/activate
                             uv pip install lmcache --pre \
                                 --extra-index-url https://download.pytorch.org/whl/cu130 \
-                                --find-links https://github.com/LMCache/LMCache/releases/expanded_assets/nightly-cu13 \
+                                --find-links https://github.com/LMCache/LMCache/releases/expanded_assets/nightly \
+                                --index-strategy unsafe-best-match
+
+                    .. tab-item:: CUDA 12.9
+
+                        .. code-block:: bash
+
+                            uv venv --python 3.12
+                            source .venv/bin/activate
+                            uv pip install lmcache --pre \
+                                --extra-index-url https://download.pytorch.org/whl/cu129 \
+                                --find-links https://github.com/LMCache/LMCache/releases/expanded_assets/nightly-cu129 \
                                 --index-strategy unsafe-best-match
 
             .. tab-item:: From Source
@@ -133,33 +133,33 @@ Install LMCache
 
                 .. tab-set::
 
-                    .. tab-item:: CUDA 12.9
+                    .. tab-item:: CUDA 13.0
 
                         .. code-block:: bash
 
                             docker pull lmcache/vllm-openai
 
-                    .. tab-item:: CUDA 13.0
+                    .. tab-item:: CUDA 12.9
 
                         .. code-block:: bash
 
-                            docker pull lmcache/vllm-openai:latest-cu13
+                            docker pull lmcache/vllm-openai:latest-cu12
 
             .. tab-item:: Nightly
 
                 .. tab-set::
 
-                    .. tab-item:: CUDA 12.9
+                    .. tab-item:: CUDA 13.0
 
                         .. code-block:: bash
 
                             docker pull lmcache/vllm-openai:latest-nightly
 
-                    .. tab-item:: CUDA 13.0
+                    .. tab-item:: CUDA 12.9
 
                         .. code-block:: bash
 
-                            docker pull lmcache/vllm-openai:latest-nightly-cu13
+                            docker pull lmcache/vllm-openai:latest-nightly-cu129
 
             .. tab-item:: ROCm
 
