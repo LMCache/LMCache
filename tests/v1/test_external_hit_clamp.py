@@ -266,3 +266,51 @@ class TestExternalHitClamp:
         # invariant were violated.
         connector.update_state_after_alloc(request, num_external_tokens=ext)
         assert load_spec.can_load is True
+
+    def test_local_hit_exceeds_clamp_ceiling_is_safe(self):
+        """
+        Regression guard for the 'local cache outgrew the frozen ceiling'
+        edge case raised in PR review.
+
+        If vLLM's local prefix-cache hit (``num_computed_tokens``) somehow
+        grew past the first-admission ceiling (``request.num_cached_tokens``)
+        between preempt and re-admission -- e.g., because another request
+        populated vLLM's prefix cache for a shared prefix in between -- the
+        clamp still clamps to ``prior_cached``, and ``need_to_allocate``
+        becomes negative. ``get_num_new_matched_tokens`` returns 0, and
+        ``update_state_after_alloc`` early-returns at the
+        ``num_external_tokens == 0`` branch (before the consistency
+        assertion), so neither the metric invariant nor the internal
+        invariant is broken. Asserting this explicitly so future refactors
+        don't silently flip the behavior.
+        """
+        connector, _ = _make_connector(hit_tokens=8448)
+        request = _make_request(
+            "req-local-grew",
+            prompt_token_ids=list(range(17050)),
+            num_cached_tokens=768,
+        )
+
+        ext = connector.get_num_new_matched_tokens(request, num_computed_tokens=800)
+
+        # Returns 0: nothing new to load past what vLLM already has locally.
+        assert ext == 0
+        # LoadSpec records the clamped (768) lmcache value and vLLM's local
+        # hit (800). It stays in this inconsistent-looking state but is never
+        # consulted because can_load remains False.
+        load_spec = connector.load_specs[request.request_id]
+        assert load_spec.lmcache_cached_tokens == 768
+        assert load_spec.vllm_cached_tokens == 800
+        assert load_spec.can_load is False
+
+        # update_state_after_alloc is given 0 (vLLM passes back the returned
+        # value). It must short-circuit at the ``num_external_tokens == 0``
+        # branch and NOT hit the strict consistency assertion below, which
+        # would otherwise fail (768 != 768 - 800 - 0 = -32).
+        connector.update_state_after_alloc(request, num_external_tokens=0)
+        assert load_spec.can_load is False
+
+        # And the metric formula stays non-negative:
+        # local_cache_hit = num_cached_tokens + recomputed - external = 768 + r - 0
+        # which is >= 0 for any non-negative recomputed.
+        assert request.num_cached_tokens - ext == 768
