@@ -129,8 +129,9 @@ A plugin adapter class **should**:
 1. Create its own asyncio event loop and background thread if it needs
    async I/O (the framework does **not** provide a loop to L2 adapters,
    unlike the old Connector-based architecture).
-2. Use `os.eventfd(0, os.EFD_NONBLOCK | os.EFD_CLOEXEC)` for the three
-   event fds.
+2. Use `create_event_notifier()` from `lmcache.v1.platform` for the
+   three event fds (cross-platform: `os.eventfd` on Linux,
+   `os.pipe` fallback elsewhere).
 3. Clean up all resources (event fds, threads, connections) in `close()`.
 
 ---
@@ -172,17 +173,18 @@ This pattern is identical to the one used by `MockL2Adapter` and
 
 ```python
 # my_plugin/adapter.py
-import asyncio, os, threading
+import asyncio, threading
 from lmcache.native_storage_ops import Bitmap
 from lmcache.v1.distributed.l2_adapters.base import (
     L2AdapterInterface, L2TaskId,
 )
+from lmcache.v1.platform import create_event_notifier
 
 class MyL2Adapter(L2AdapterInterface):
     def __init__(self, host="localhost", **_kw):
-        self._store_efd = os.eventfd(0, os.EFD_NONBLOCK | os.EFD_CLOEXEC)
-        self._lookup_efd = os.eventfd(0, os.EFD_NONBLOCK | os.EFD_CLOEXEC)
-        self._load_efd = os.eventfd(0, os.EFD_NONBLOCK | os.EFD_CLOEXEC)
+        self._store_efd = create_event_notifier()
+        self._lookup_efd = create_event_notifier()
+        self._load_efd = create_event_notifier()
         # ... set up connection to `host`, background thread, etc.
 
     # implement all abstract methods ...
@@ -342,6 +344,10 @@ __init__.py
        ├─ plugin_l2_adapter.py (auto-discovered)
        │    ├─ register_l2_adapter_type("plugin", PluginL2AdapterConfig)
        │    └─ register_l2_adapter_factory("plugin", _create_plugin_adapter)
+       │
+       ├─ raw_block_l2_adapter.py (auto-discovered)
+       │    ├─ register_l2_adapter_type("raw_block", RawBlockL2AdapterConfig)
+       │    └─ register_l2_adapter_factory("raw_block", _create_raw_block_adapter)
        │
        └─ native_connector_l2_adapter.py (auto-discovered)
             ├─ register_l2_adapter_type("resp", ...)

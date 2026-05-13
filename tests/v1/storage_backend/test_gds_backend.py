@@ -25,9 +25,18 @@ from lmcache.v1.storage_backend.gds_backend import (
     _METADATA_VERSION,
     GdsBackend,
     UnsupportedMetadataVersion,
+    get_extra_config_bool,
     pack_metadata,
+    unpack_metadata,
 )
 from tests.v1.utils import create_test_memory_obj, has_cufile, has_hipfile
+
+# Optional override for tempfile root. In CI we point this at a GDS-capable
+# host-backed mount (see .buildkite/k3_tests/unit/run.sh); locally, it's
+# unset and tempfile falls back to its default (usually /tmp). cuFile needs
+# direct-I/O-capable storage (ext4/xfs on real disk); overlayfs and tmpfs
+# fail with CU_FILE_IO_NOT_SUPPORTED (err=5027).
+_TEST_TMPDIR = os.environ.get("LMCACHE_TEST_TMPDIR") or None
 
 
 def create_test_config(gds_path: str, gds_path_sharding: str = "by_gpu"):
@@ -68,7 +77,7 @@ def create_test_metadata():
 
 @pytest.fixture
 def temp_gds_path():
-    temp_dir = tempfile.mkdtemp()
+    temp_dir = tempfile.mkdtemp(dir=_TEST_TMPDIR)
     yield temp_dir
     if os.path.exists(temp_dir):
         shutil.rmtree(temp_dir)
@@ -384,13 +393,6 @@ class TestGdsBackend:
         assert not gds_backend.unpin(key)
 
     def test_weka_initialization_suffix(self, temp_gds_path, async_loop):
-        class DummyAllocator:
-            def __init__(self):
-                self.base_pointer = 0
-
-            def close(self):
-                pass
-
         class DummyCuFileDriver:
             def __init__(self):
                 pass
@@ -426,7 +428,7 @@ class TestGdsBackend:
                 mock.patch.object(
                     GdsBackend,
                     "initialize_allocator",
-                    return_value=DummyAllocator(),
+                    return_value=TestGdsBackend._DummyAllocator(),
                 ),
             ):
                 config = create_test_config(temp_gds_path)
@@ -477,6 +479,183 @@ class TestGdsBackend:
                     metadata=metadata,
                     dst_device="cuda:0",
                 )
+
+    class _DummyAllocator:
+        def __init__(self) -> None:
+            self.base_pointer: int = 0
+
+        def close(self) -> None:
+            pass
+
+        def allocate(self, *args, **kwargs):
+            return None
+
+        def batched_allocate(self, *args, **kwargs):
+            return None
+
+        def memcheck(self) -> bool:
+            return True
+
+    @staticmethod
+    def _make_mocked_backend(
+        temp_gds_path: str,
+        async_loop: asyncio.AbstractEventLoop,
+        allocator=None,
+    ) -> GdsBackend:
+        """Return a GdsBackend with tmpfs mocked so GDS is auto-disabled."""
+        eff_allocator = allocator or TestGdsBackend._DummyAllocator()
+        config = create_test_config(temp_gds_path)
+        metadata = create_test_metadata()
+        with (
+            mock.patch(
+                "lmcache.v1.storage_backend.gds_backend.get_fstype",
+                return_value="tmpfs",
+            ),
+            mock.patch.object(
+                GdsBackend, "initialize_allocator", return_value=eff_allocator
+            ),
+            mock.patch(
+                "lmcache.v1.storage_backend.gds_backend.ctypes.CDLL",
+                return_value=mock.MagicMock(),
+            ),
+        ):
+            return GdsBackend(
+                config=config,
+                loop=async_loop,
+                metadata=metadata,
+                dst_device="cuda:0",
+            )
+
+    def test_allocate_retry_then_succeed(self, temp_gds_path, async_loop):
+        """allocate retries on None and returns the obj once the allocator succeeds."""
+        sentinel = object()
+        allocator = self._DummyAllocator()
+        allocator.allocate = mock.MagicMock(side_effect=[None, None, sentinel])
+        backend = self._make_mocked_backend(temp_gds_path, async_loop, allocator)
+        try:
+            backend.alloc_attempt_delay_secs = 0
+            backend.max_alloc_attempts = 5
+            result = backend.allocate(
+                torch.Size([2, 16, 8, 128]), torch.bfloat16, busy_loop=True
+            )
+            assert result is sentinel
+            assert allocator.allocate.call_count == 3
+        finally:
+            backend.close()
+
+    def test_allocate_busy_loop_false_single_attempt(self, temp_gds_path, async_loop):
+        """allocate with busy_loop=False makes exactly one attempt."""
+        allocator = self._DummyAllocator()
+        allocator.allocate = mock.MagicMock(return_value=None)
+        backend = self._make_mocked_backend(temp_gds_path, async_loop, allocator)
+        try:
+            backend.alloc_attempt_delay_secs = 0
+            backend.max_alloc_attempts = 10
+            backend.allocate(
+                torch.Size([2, 16, 8, 128]), torch.bfloat16, busy_loop=False
+            )
+            assert allocator.allocate.call_count == 1
+        finally:
+            backend.close()
+
+    def test_batched_allocate_retry_then_succeed(self, temp_gds_path, async_loop):
+        """batched_allocate retries on None and returns the list once it succeeds."""
+        sentinel = [object(), object()]
+        allocator = self._DummyAllocator()
+        allocator.batched_allocate = mock.MagicMock(side_effect=[None, sentinel])
+        backend = self._make_mocked_backend(temp_gds_path, async_loop, allocator)
+        try:
+            backend.alloc_attempt_delay_secs = 0
+            backend.max_alloc_attempts = 5
+            result = backend.batched_allocate(
+                torch.Size([2, 16, 8, 128]),
+                torch.bfloat16,
+                batch_size=2,
+                busy_loop=True,
+            )
+            assert result is sentinel
+            assert allocator.batched_allocate.call_count == 2
+        finally:
+            backend.close()
+
+    def test_batched_allocate_busy_loop_false_single_attempt(
+        self, temp_gds_path, async_loop
+    ):
+        """batched_allocate with busy_loop=False makes exactly one attempt."""
+        allocator = self._DummyAllocator()
+        allocator.batched_allocate = mock.MagicMock(return_value=None)
+        backend = self._make_mocked_backend(temp_gds_path, async_loop, allocator)
+        try:
+            backend.alloc_attempt_delay_secs = 0
+            backend.max_alloc_attempts = 10
+            backend.batched_allocate(
+                torch.Size([2, 16, 8, 128]),
+                torch.bfloat16,
+                batch_size=2,
+                busy_loop=False,
+            )
+            assert allocator.batched_allocate.call_count == 1
+        finally:
+            backend.close()
+
+    def test_batched_get_blocking_no_thread_pool(self, temp_gds_path, async_loop):
+        """batched_get_blocking returns None per missing key when thread pool is off."""
+        backend = self._make_mocked_backend(temp_gds_path, async_loop)
+        try:
+            assert not backend.use_thread_pool
+            keys = [create_test_key(i) for i in range(3)]
+            results = backend.batched_get_blocking(keys)
+            assert results == [None, None, None]
+        finally:
+            backend.close()
+
+    @pytest.mark.asyncio
+    async def test_batched_get_blocking_thread_pool(self, gds_backend):
+        """batched_get_blocking returns correct results via the thread pool."""
+        keys = [create_test_key(i) for i in range(700, 703)]
+        memory_objs = [create_test_memory_obj(device="cuda") for _ in keys]
+
+        futures = gds_backend.batched_submit_put_task(keys, memory_objs)
+        assert futures is not None
+        for f in futures:
+            f.result(timeout=10)
+
+        assert gds_backend.use_thread_pool
+        results = gds_backend.batched_get_blocking(keys)
+        assert len(results) == len(keys)
+        for orig, result in zip(memory_objs, results, strict=False):
+            assert result is not None
+            assert result.metadata.shape == orig.metadata.shape
+            assert result.metadata.dtype == orig.metadata.dtype
+
+    @pytest.mark.asyncio
+    async def test_on_complete_callback_invoked(self, gds_backend):
+        """on_complete_callback is called with the key after the write finishes."""
+        key = create_test_key(600)
+        memory_obj = create_test_memory_obj(device="cuda")
+        received: list = []
+
+        future = gds_backend.submit_put_task(
+            key, memory_obj, on_complete_callback=lambda k: received.append(k)
+        )
+        future.result(timeout=10)
+
+        assert received == [key]
+
+    @pytest.mark.asyncio
+    async def test_on_complete_callback_exception_does_not_propagate(self, gds_backend):
+        """A callback that raises must not crash the put pipeline."""
+        key = create_test_key(601)
+        memory_obj = create_test_memory_obj(device="cuda")
+
+        def bad_callback(k: CacheEngineKey) -> None:
+            raise RuntimeError("intentional callback error")
+
+        future = gds_backend.submit_put_task(
+            key, memory_obj, on_complete_callback=bad_callback
+        )
+        future.result(timeout=10)
+        assert gds_backend.contains(key)
 
 
 @pytest.mark.skipif(
@@ -547,7 +726,7 @@ class TestGdsMultiPath:
 
     def test_multi_path_parsing(self, async_loop):
         """Comma-separated paths are split into gds_paths list."""
-        paths = [tempfile.mkdtemp() for _ in range(3)]
+        paths = [tempfile.mkdtemp(dir=_TEST_TMPDIR) for _ in range(3)]
         try:
             gds_path = ",".join(paths)
             backend = self._make_backend(gds_path, "cuda:0", async_loop)
@@ -562,7 +741,7 @@ class TestGdsMultiPath:
 
     def test_multi_path_parsing_with_spaces(self, async_loop):
         """Spaces around commas are stripped."""
-        paths = [tempfile.mkdtemp() for _ in range(2)]
+        paths = [tempfile.mkdtemp(dir=_TEST_TMPDIR) for _ in range(2)]
         try:
             gds_path = f"  {paths[0]}  ,  {paths[1]}  "
             backend = self._make_backend(gds_path, "cuda:0", async_loop)
@@ -576,7 +755,7 @@ class TestGdsMultiPath:
 
     def test_gpu_affinity_selects_path(self, async_loop):
         """Different cuda devices select different paths via modulo."""
-        paths = [tempfile.mkdtemp() for _ in range(4)]
+        paths = [tempfile.mkdtemp(dir=_TEST_TMPDIR) for _ in range(4)]
         try:
             gds_path = ",".join(paths)
             for device_id in range(8):
@@ -596,7 +775,7 @@ class TestGdsMultiPath:
 
     def test_all_directories_created(self, async_loop):
         """All paths in gds_paths get their directories created."""
-        base = tempfile.mkdtemp()
+        base = tempfile.mkdtemp(dir=_TEST_TMPDIR)
         try:
             paths = [os.path.join(base, f"nvme{i}") for i in range(3)]
             gds_path = ",".join(paths)
@@ -611,7 +790,7 @@ class TestGdsMultiPath:
 
     def test_key_to_path_uses_selected_path(self, async_loop):
         """_key_to_path builds file paths under the selected gds_path."""
-        paths = [tempfile.mkdtemp() for _ in range(2)]
+        paths = [tempfile.mkdtemp(dir=_TEST_TMPDIR) for _ in range(2)]
         try:
             gds_path = ",".join(paths)
             backend = self._make_backend(gds_path, "cuda:0", async_loop)
@@ -627,7 +806,7 @@ class TestGdsMultiPath:
 
     def test_deterministic_path_selection(self, async_loop):
         """Same device always selects the same path."""
-        paths = [tempfile.mkdtemp() for _ in range(3)]
+        paths = [tempfile.mkdtemp(dir=_TEST_TMPDIR) for _ in range(3)]
         try:
             gds_path = ",".join(paths)
             selected = set()
@@ -649,7 +828,7 @@ class TestGdsMultiPath:
         under paths[1].  The scan should still discover it because
         ``_scan_metadata`` iterates all ``gds_paths``.
         """
-        paths = [tempfile.mkdtemp() for _ in range(2)]
+        paths = [tempfile.mkdtemp(dir=_TEST_TMPDIR) for _ in range(2)]
         try:
             # chunk_hash must have >=4 decimal digits so l1/l2 dirs
             # are each 2 chars (the scanner filters on len == 2).
@@ -711,7 +890,7 @@ class TestGdsMultiPath:
         ``contains()`` falls back to ``_try_to_read_metadata`` which
         should search all ``gds_paths``, not just the affinity path.
         """
-        paths = [tempfile.mkdtemp() for _ in range(2)]
+        paths = [tempfile.mkdtemp(dir=_TEST_TMPDIR) for _ in range(2)]
         try:
             key = CacheEngineKey(
                 model_name="testmodel",
@@ -792,3 +971,40 @@ class TestGdsMultiPath:
                 async_loop,
                 gds_path_sharding="round_robin",
             )
+
+
+def test_get_extra_config_bool_valid_inputs():
+    """String, uppercase string, literal bool, and missing key all parse correctly."""
+    config = create_test_config("/tmp")
+    config.extra_config = {
+        "str_true": "true",
+        "str_false": "FALSE",
+        "lit_true": True,
+        "lit_false": False,
+    }
+    assert get_extra_config_bool("str_true", config) is True
+    assert get_extra_config_bool("str_false", config) is False
+    assert get_extra_config_bool("lit_true", config) is True
+    assert get_extra_config_bool("lit_false", config) is False
+    assert get_extra_config_bool("missing", config) is None
+
+
+def test_get_extra_config_bool_invalid_value_raises():
+    """Non-bool non-string value raises RuntimeError."""
+    config = create_test_config("/tmp")
+    config.extra_config = {"flag": 42}
+    with pytest.raises(RuntimeError, match="Invalid value"):
+        get_extra_config_bool("flag", config)
+
+
+def test_pack_unpack_metadata_multiple_dtypes():
+    """pack_metadata / unpack_metadata roundtrip is correct for several dtypes."""
+    for dtype in [torch.float32, torch.float16, torch.bfloat16, torch.int8]:
+        tensor = torch.zeros(4, 8, dtype=dtype)
+        packed = pack_metadata(tensor, fmt=MemoryFormat.KV_2LTD, tag="test")
+        shape, out_dtype, nbytes, fmt, extra = unpack_metadata(packed)
+        assert shape == tensor.shape
+        assert out_dtype == dtype
+        assert nbytes == tensor.numel() * tensor.element_size()
+        assert fmt == MemoryFormat.KV_2LTD
+        assert extra["tag"] == "test"

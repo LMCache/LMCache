@@ -9,6 +9,9 @@ import threading
 import msgspec
 import torch
 
+# First Party
+from lmcache import torch_dev, torch_device_type
+
 """
 Defines the types and the customized encoder/decoders for inter-process
 communications.
@@ -27,17 +30,17 @@ class CudaIPCWrapper:
     @staticmethod
     def _get_device_uuid(device_index: int) -> str:
         """Get the UUID of a GPU device given its index."""
-        return str(torch.cuda.get_device_properties(device_index).uuid)
+        return str(torch_dev.get_device_properties(device_index).uuid)
 
     @staticmethod
     def _discover_gpu_devices():
         """Discover all available GPU devices and map their UUIDs to
         the physical device ordinals.
         """
-        if not torch.cuda.is_available():
+        if not torch_dev.is_available():
             return
 
-        num_devices = torch.cuda.device_count()
+        num_devices = torch_dev.device_count()
         with CudaIPCWrapper._device_mapping_lock:
             if CudaIPCWrapper._discovered_device_mapping:
                 return  # Already discovered
@@ -65,9 +68,12 @@ class CudaIPCWrapper:
 
     def __init__(self, tensor: torch.Tensor):
         # First Party
-        from lmcache.v1.gpu_connector.utils import assert_contiguous
+        from lmcache.v1.gpu_connector.utils import attempt_permute_to_contiguous_view
 
-        assert_contiguous(tensor)
+        # Permute any non-contiguous view (e.g. vLLM's NHD-over-HND) so the
+        # shape/stride we encode across IPC reflects the physical layout.
+        # Offset is preserved by the wrapper's storage_offset field.
+        tensor = attempt_permute_to_contiguous_view(tensor)
 
         storage = tensor.untyped_storage()
         handle = storage._share_cuda_()
@@ -84,8 +90,9 @@ class CudaIPCWrapper:
     def to_tensor(self) -> torch.Tensor:
         """
         Note:
-            This function may break if torch cuda is not initialized.
-            We should call `torch.cuda.init()` before using this function.
+            This function may break if the accelerator is not initialized.
+            We should call `torch_dev.init()` before using this function
+            (guarded by hasattr since not all backends expose init()).
         """
         device_index = CudaIPCWrapper._get_device_index_from_uuid(self.device_uuid)
 
@@ -93,7 +100,9 @@ class CudaIPCWrapper:
             device_index, *self.handle[1:]
         )
 
-        t = torch.empty((), device=f"cuda:{device_index}", dtype=self.dtype)
+        t = torch.empty(
+            (), device=f"{torch_device_type}:{device_index}", dtype=self.dtype
+        )
         t.set_(storage, self.storage_offset, self.shape, self.stride)
         return t
 
@@ -116,6 +125,97 @@ class CudaIPCWrapper:
     @staticmethod
     def Deserialize(data: bytes) -> "CudaIPCWrapper":
         return pickle.loads(data)
+
+
+class RawCudaIPCWrapper(CudaIPCWrapper):
+    """IPC wrapper for CUDA tensors allocated outside PyTorch's caching
+    allocator.
+
+    PyTorch's ``UntypedStorage._share_cuda_()`` only works for tensors
+    backed by its own caching allocator. TRT-LLM publishes its KV pool
+    via ``at::for_blob`` over a ``cudaMalloc``'d buffer, which raises in
+    ``_share_cuda_()``. This subclass bypasses that path: it calls
+    ``cudaIpcGetMemHandle`` on the raw data pointer, then reconstructs
+    the tensor on the receiving side via ``cudaIpcOpenMemHandle`` plus
+    a CuPy ``UnownedMemory`` → DLPack → ``torch`` round-trip.
+
+    Subclassing (rather than introducing a parallel class with its own
+    msgspec ext code) is load-bearing — msgspec does not support unions
+    of custom ext-encoded types. With subclassing, ``KVCache =
+    list[CudaIPCWrapper]`` continues to type-check, the existing ext
+    code 1 round-trips both wrappers, and pickle preserves the subclass
+    identity through the wire so ``to_tensor`` dispatches correctly.
+    """
+
+    def __init__(self, tensor: torch.Tensor) -> None:
+        # First Party
+        from lmcache.v1.gpu_connector.utils import assert_contiguous
+
+        assert_contiguous(tensor)
+
+        try:
+            # Third Party
+            from cuda.bindings import runtime as cudart
+        except ImportError:
+            # Third Party
+            from cuda import cudart
+
+        data_ptr = tensor.data_ptr()
+        err, ipc_handle = cudart.cudaIpcGetMemHandle(data_ptr)
+        if err != cudart.cudaError_t.cudaSuccess:
+            raise RuntimeError(
+                f"cudaIpcGetMemHandle failed: {err} (ptr=0x{data_ptr:x})"
+            )
+
+        # Store only what's needed for reconstruction.
+        self._ipc_handle_reserved = bytes(ipc_handle.reserved)
+        self._nbytes = tensor.untyped_storage().nbytes()
+
+        # CudaIPCWrapper interface fields. ``handle`` is unused —
+        # ``to_tensor`` is overridden to bypass it — but kept for
+        # equality/identity checks against the parent class.
+        self.handle = None
+        self.dtype = tensor.dtype
+        self.shape = tuple(tensor.shape)
+        self.stride = tuple(tensor.stride())
+        self.storage_offset = int(tensor.storage_offset())
+
+        device_index = tensor.device.index
+        self.device_uuid = CudaIPCWrapper._get_device_uuid(device_index)
+
+    def to_tensor(self) -> torch.Tensor:
+        """Reconstruct the tensor in this process via raw CUDA IPC."""
+        # Third Party
+        import cupy
+
+        try:
+            # Third Party
+            from cuda.bindings import runtime as cudart
+        except ImportError:
+            # Third Party
+            from cuda import cudart
+
+        device_index = CudaIPCWrapper._get_device_index_from_uuid(self.device_uuid)
+
+        handle = cudart.cudaIpcMemHandle_t()
+        handle.reserved = self._ipc_handle_reserved
+        err, ptr = cudart.cudaIpcOpenMemHandle(
+            handle, cudart.cudaIpcMemLazyEnablePeerAccess
+        )
+        if err != cudart.cudaError_t.cudaSuccess:
+            raise RuntimeError(f"cudaIpcOpenMemHandle failed: {err}")
+
+        # Wrap as a flat ``uint8`` CuPy array, DLPack to torch, then view
+        # as the original dtype/shape. ``uint8`` avoids dtype-conversion
+        # gaps (bfloat16, fp8 have no direct CuPy/NumPy equivalent without
+        # ml_dtypes).
+        with cupy.cuda.Device(device_index):
+            mem = cupy.cuda.UnownedMemory(ptr, self._nbytes, owner=self)
+            memptr = cupy.cuda.MemoryPointer(mem, 0)
+            cp_flat = cupy.ndarray(self._nbytes, dtype=cupy.uint8, memptr=memptr)
+
+        raw = torch.from_dlpack(cp_flat)
+        return raw.view(self.dtype).reshape(self.shape)
 
 
 @dataclass(order=True, frozen=True)

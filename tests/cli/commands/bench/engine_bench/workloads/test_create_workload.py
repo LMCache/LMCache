@@ -20,6 +20,9 @@ from lmcache.cli.commands.bench.engine_bench.workloads.long_doc_qa import (
 from lmcache.cli.commands.bench.engine_bench.workloads.multi_round_chat import (
     MultiRoundChatWorkload,
 )
+from lmcache.cli.commands.bench.engine_bench.workloads.prefix_suffix_tuner import (
+    PrefixSuffixTunerWorkload,
+)
 from lmcache.cli.commands.bench.engine_bench.workloads.random_prefill import (
     RandomPrefillWorkload,
 )
@@ -59,6 +62,10 @@ def _make_args(**overrides) -> argparse.Namespace:
         mrc_output_length=200,
         mrc_qps=1.0,
         mrc_duration=60.0,
+        # prefix-suffix-tuner defaults
+        psf_context_length=8000,
+        psf_prefix_ratio=0.8,
+        psf_thrash=20.0,
     )
     defaults.update(overrides)
     return argparse.Namespace(**defaults)
@@ -187,6 +194,62 @@ class TestCreateWorkload:
         assert isinstance(result, RandomPrefillWorkload)
         assert result._config.request_length == 5000
         assert result._config.num_requests == 20
+
+    def test_prefix_suffix_tuner(self) -> None:
+        # Defaults: psf_thrash=20.0 (target tier in GB).  The workload does
+        # NOT consume kv_cache_volume_gb (its sizing is independent of the
+        # general kv_cache_volume flag), so this test asserts only on the
+        # psf-* args + tokens-per-gb.
+        config = _make_config(
+            workload="prefix-suffix-tuner",
+            tokens_per_gb_kvcache=10000,
+        )
+        args = _make_args()
+        sender, collector, monitor = _make_deps()
+        result = create_workload(
+            config,
+            args,
+            sender,
+            collector,
+            monitor,
+        )
+        assert isinstance(result, BaseWorkload)
+        assert isinstance(result, PrefixSuffixTunerWorkload)
+        # context=8000, ratio=0.8 → prefix=6400; suffix=8000-6400-32=1568
+        assert result._config.prefix_tokens == 6400
+        assert result._config.suffix_tokens == 1568
+        # thrash=20.0 GB; pool_gb=20.0 * 1.05 = 21.0 GB
+        # Sized by context_length=8000 (full per-request KV footprint):
+        # num_prefixes = 21.0 * 10000 / 8000 = 26.25 → 26
+        assert result._config.num_prefixes == 26
+
+    def test_prefix_suffix_tuner_custom_args(self) -> None:
+        config = _make_config(
+            workload="prefix-suffix-tuner",
+            tokens_per_gb_kvcache=10000,
+        )
+        args = _make_args(
+            psf_context_length=4000,
+            psf_prefix_ratio=0.5,
+            psf_thrash=50.0,
+        )
+        sender, collector, monitor = _make_deps()
+        result = create_workload(
+            config,
+            args,
+            sender,
+            collector,
+            monitor,
+        )
+        assert isinstance(result, PrefixSuffixTunerWorkload)
+        assert result._config.context_length == 4000
+        assert result._config.prefix_ratio == 0.5
+        assert result._config.thrash == 50.0
+        assert result._config.prefix_tokens == 2000
+        # thrash=50 GB; pool_gb=50 * 1.05 = 52.5 GB
+        # Sized by context_length=4000:
+        # num_prefixes = 52.5 * 10000 / 4000 = 131.25 → 131
+        assert result._config.num_prefixes == 131
 
     def test_unknown_workload_raises(self) -> None:
         config = _make_config(workload="unknown-workload")

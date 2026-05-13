@@ -19,6 +19,7 @@ from lmcache.v1.distributed.memory_manager import L1MemoryManager
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import get_event_bus
+from lmcache.v1.mp_observability.otel_init import register_gauge
 
 logger = init_logger(__name__)
 
@@ -111,6 +112,20 @@ def _validate_extra_count(extra_count: int) -> int:
     return extra_count
 
 
+def _l1_usage_ratio_or_zero(target: "L1Manager | None") -> float:
+    """Return ``target.get_memory_usage()`` as a 0.0-1.0 ratio.
+
+    Returns 0.0 when ``target`` is None or ``total_bytes`` is zero so the
+    observable-gauge callback never raises during scrape.
+    """
+    if target is None:
+        return 0.0
+    used, total = target.get_memory_usage()
+    if total <= 0:
+        return 0.0
+    return used / total
+
+
 # Main classes
 
 
@@ -157,6 +172,13 @@ class L1Manager:
     For every operation on list of keys, the operation is atomic
     """
 
+    # Singleton dispatch for ``lmcache_mp.l1_memory_usage_bytes``: tests may
+    # construct multiple L1Managers but the OTel SDK only honors the first
+    # gauge registration, so the callback reads from the most recently built
+    # instance via ``_gauge_target``.
+    _gauge_registered: bool = False
+    _gauge_target: "L1Manager | None" = None
+
     def __init__(self, config: L1ManagerConfig):
         self._lock = threading.Lock()
 
@@ -170,6 +192,26 @@ class L1Manager:
         self._registered_listeners: list[L1ManagerListener] = []
 
         self._event_bus = get_event_bus()
+
+        L1Manager._gauge_target = self
+        if not L1Manager._gauge_registered:
+            L1Manager._gauge_registered = True
+            register_gauge(
+                "lmcache.l1_manager",
+                "lmcache_mp.l1_memory_usage_bytes",
+                "Bytes currently held in L1 cache",
+                lambda: (
+                    L1Manager._gauge_target.get_memory_usage()[0]
+                    if L1Manager._gauge_target is not None
+                    else 0
+                ),
+            )
+            register_gauge(
+                "lmcache.l1_manager",
+                "lmcache_mp.l1_usage_ratio",
+                "L1 used/total ratio (0.0–1.0)",
+                lambda: _l1_usage_ratio_or_zero(L1Manager._gauge_target),
+            )
 
     def register_listener(self, listener: L1ManagerListener) -> None:
         """Register a listener for L1Manager events.

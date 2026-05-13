@@ -11,6 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 import argparse
+import uuid
 
 if TYPE_CHECKING:
     # First Party
@@ -71,6 +72,16 @@ class ObservabilityConfig:
     """Path to write the trace file.  When :attr:`trace_level` is set
     but this is ``None``, a timestamped path under ``$TMPDIR`` is
     minted and logged at INFO."""
+
+    service_instance_id: str | None = None
+    """Identifier for this MP server instance.  Attached as the OTel
+    Resource attribute ``service.instance.id`` on every metric and span.
+    One MP server has exactly one instance id.
+
+    ``None`` (the default, also the state when the CLI flag is not
+    passed) falls back to a random UUID v4 at ``init_observability``
+    time.  An explicit empty string is preserved verbatim so operators
+    who want the attribute to report ``""`` can ask for it."""
 
 
 DEFAULT_OBSERVABILITY_CONFIG = ObservabilityConfig(enabled=False)
@@ -149,6 +160,18 @@ def add_observability_args(
         help=(
             "Fraction of chunks/blocks to track for lifecycle histograms "
             "(0, 1.0]. Counters always count all events. Default is 0.01 (1%%)."
+        ),
+    )
+    group.add_argument(
+        "--service-instance-id",
+        type=str,
+        default=None,
+        help=(
+            "Identifier for this MP server instance. Attached as the OTel "
+            "Resource attribute 'service.instance.id' on every metric and "
+            "span. When the flag is not passed, defaults to a random "
+            "UUID v4 minted at startup. Pass --service-instance-id='' to "
+            "force an empty attribute value."
         ),
     )
 
@@ -239,6 +262,7 @@ def parse_args_to_observability_config(
         ),
         trace_level=args.trace_level,
         trace_output=args.trace_output,
+        service_instance_id=args.service_instance_id,
     )
 
     if config.tracing_enabled and config.otlp_endpoint is None:
@@ -250,11 +274,21 @@ def parse_args_to_observability_config(
     return config
 
 
-def init_observability(obs_config: ObservabilityConfig) -> EventBus:
+def init_observability(
+    obs_config: ObservabilityConfig,
+    *,
+    start_prometheus_http_server: bool = True,
+) -> EventBus:
     """Initialize OTel providers, EventBus, and register subscribers.
 
     This is the single entry-point that every MP server calls at startup.
     Returns a **started** EventBus.
+
+    Args:
+        obs_config: Observability configuration.
+        start_prometheus_http_server: Whether to start a standalone
+            Prometheus HTTP server.  Set to ``False`` when an
+            external HTTP framework already serves ``/metrics``.
     """
     # First Party
     from lmcache.v1.mp_observability.event_bus import (
@@ -264,6 +298,13 @@ def init_observability(obs_config: ObservabilityConfig) -> EventBus:
 
     # Set up OTel providers BEFORE creating subscribers so that
     # module-level get_meter()/get_tracer() calls bind to the real provider
+    instance_id = (
+        obs_config.service_instance_id
+        if obs_config.service_instance_id is not None
+        else str(uuid.uuid4())
+    )
+    resource_attrs = {"service.instance.id": instance_id}
+
     if obs_config.enabled and obs_config.metrics_enabled:
         # First Party
         from lmcache.v1.mp_observability.otel_init import init_otel_metrics
@@ -271,13 +312,18 @@ def init_observability(obs_config: ObservabilityConfig) -> EventBus:
         init_otel_metrics(
             otlp_endpoint=obs_config.otlp_endpoint,
             prometheus_port=obs_config.prometheus_port,
+            resource_attributes=resource_attrs,
+            start_http_server=start_prometheus_http_server,
         )
 
     if obs_config.enabled and obs_config.tracing_enabled:
         # First Party
         from lmcache.v1.mp_observability.otel_init import init_otel_tracing
 
-        init_otel_tracing(otlp_endpoint=obs_config.otlp_endpoint)
+        init_otel_tracing(
+            otlp_endpoint=obs_config.otlp_endpoint,
+            resource_attributes=resource_attrs,
+        )
 
     bus = init_event_bus(
         EventBusConfig(
@@ -289,10 +335,20 @@ def init_observability(obs_config: ObservabilityConfig) -> EventBus:
     if obs_config.metrics_enabled:
         # First Party
         from lmcache.v1.mp_observability.subscribers.metrics import (
+            BlendMetricsSubscriber,
+            EngineMetricsSubscriber,
+            EventBusSelfMetricsSubscriber,
+            L0L1ThroughputSubscriber,
             L0LifecycleSubscriber,
+            L1EvictionLoopSubscriber,
+            L1FailureMetricsSubscriber,
             L1LifecycleSubscriber,
             L1MetricsSubscriber,
+            L2FailureMetricsSubscriber,
             L2MetricsSubscriber,
+            L2ThroughputSubscriber,
+            LookupMetricsSubscriber,
+            SMLifecycleSubscriber,
             SMMetricsSubscriber,
         )
 
@@ -300,12 +356,23 @@ def init_observability(obs_config: ObservabilityConfig) -> EventBus:
         bus.register_subscriber(L0LifecycleSubscriber(sample_rate=sample_rate))
         bus.register_subscriber(L1MetricsSubscriber())
         bus.register_subscriber(L1LifecycleSubscriber(sample_rate=sample_rate))
+        bus.register_subscriber(L1FailureMetricsSubscriber())
+        bus.register_subscriber(L1EvictionLoopSubscriber())
+        bus.register_subscriber(L0L1ThroughputSubscriber())
         bus.register_subscriber(L2MetricsSubscriber())
+        bus.register_subscriber(L2FailureMetricsSubscriber())
+        bus.register_subscriber(L2ThroughputSubscriber())
+        bus.register_subscriber(LookupMetricsSubscriber())
         bus.register_subscriber(SMMetricsSubscriber())
+        bus.register_subscriber(SMLifecycleSubscriber(sample_rate=sample_rate))
+        bus.register_subscriber(BlendMetricsSubscriber())
+        bus.register_subscriber(EngineMetricsSubscriber())
+        bus.register_subscriber(EventBusSelfMetricsSubscriber(bus))
 
     if obs_config.logging_enabled:
         # First Party
         from lmcache.v1.mp_observability.subscribers.logging import (
+            BlendLoggingSubscriber,
             L1LoggingSubscriber,
             L2LoggingSubscriber,
             MPServerLoggingSubscriber,
@@ -316,15 +383,19 @@ def init_observability(obs_config: ObservabilityConfig) -> EventBus:
         bus.register_subscriber(L1LoggingSubscriber())
         bus.register_subscriber(L2LoggingSubscriber())
         bus.register_subscriber(SMLoggingSubscriber())
+        bus.register_subscriber(BlendLoggingSubscriber())
 
     if obs_config.tracing_enabled:
         # First Party
         from lmcache.v1.mp_observability.subscribers.tracing import (
+            BlendTracingSubscriber,
             MPServerTracingSubscriber,
             get_span_registry,
         )
 
-        bus.register_subscriber(MPServerTracingSubscriber(get_span_registry()))
+        registry = get_span_registry()
+        bus.register_subscriber(MPServerTracingSubscriber(registry))
+        bus.register_subscriber(BlendTracingSubscriber(registry))
 
     # Lookup hash file logging (independent of the logging_enabled flag —
     # it has its own enable gate via output_dir).

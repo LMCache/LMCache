@@ -42,6 +42,7 @@ from lmcache.v1.distributed.l2_adapters.factory import (
     register_l2_adapter_factory,
 )
 from lmcache.v1.memory_management import MemoryObj
+from lmcache.v1.platform import create_event_notifier
 
 logger = init_logger(__name__)
 
@@ -279,13 +280,18 @@ class FSL2Adapter(L2AdapterInterface):
             stat = os.statvfs(self._base_path)
             self._os_disk_bs = stat.f_bsize
 
-        self._store_efd = os.eventfd(0, os.EFD_NONBLOCK | os.EFD_CLOEXEC)
-        self._lookup_efd = os.eventfd(0, os.EFD_NONBLOCK | os.EFD_CLOEXEC)
-        self._load_efd = os.eventfd(0, os.EFD_NONBLOCK | os.EFD_CLOEXEC)
+        self._store_efd = create_event_notifier()
+        self._lookup_efd = create_event_notifier()
+        self._load_efd = create_event_notifier()
 
         # Task bookkeeping
         self._next_task_id: L2TaskId = 0
         self._completed_store_tasks: dict[L2TaskId, bool] = {}
+        # Bytes actually written per completed store task.  Excludes
+        # duplicate-key fast-paths (see ``_execute_store``).  Reported to
+        # the L2 throughput subscriber via ``pop_completed_store_task_bytes``
+        # so the histogram reflects real disk I/O, not skipped no-ops.
+        self._completed_store_task_bytes: dict[L2TaskId, int] = {}
         self._completed_lookup_tasks: dict[L2TaskId, Bitmap] = {}
         self._completed_load_tasks: dict[L2TaskId, Bitmap] = {}
         self._lock = threading.Lock()
@@ -310,13 +316,13 @@ class FSL2Adapter(L2AdapterInterface):
     # ------------------------------------------------------------------
 
     def get_store_event_fd(self) -> int:
-        return self._store_efd
+        return self._store_efd.fileno()
 
     def get_lookup_and_lock_event_fd(self) -> int:
-        return self._lookup_efd
+        return self._lookup_efd.fileno()
 
     def get_load_event_fd(self) -> int:
-        return self._load_efd
+        return self._load_efd.fileno()
 
     # ------------------------------------------------------------------
     # Store Interface
@@ -343,6 +349,12 @@ class FSL2Adapter(L2AdapterInterface):
             completed = self._completed_store_tasks
             self._completed_store_tasks = {}
         return completed
+
+    def pop_completed_store_task_bytes(self) -> dict[L2TaskId, int]:
+        with self._lock:
+            completed_bytes = self._completed_store_task_bytes
+            self._completed_store_task_bytes = {}
+        return completed_bytes
 
     # ------------------------------------------------------------------
     # Lookup and Lock Interface
@@ -411,9 +423,11 @@ class FSL2Adapter(L2AdapterInterface):
         # Not implemented for the filesystem adapter.
         pass
 
-    def get_usage(self) -> tuple[float, float]:
-        # Not implemented for the filesystem adapter.
-        return (-1.0, -1.0)
+    # ``get_usage()`` is inherited from ``L2AdapterInterface``. The FS
+    # adapter declares no max capacity (default 0) so ``supports_global_eviction``
+    # returns ``False`` and ``usage_fraction == -1.0`` — the eviction
+    # controller treats this as "no eviction signal" and skips the
+    # adapter entirely.
 
     # ------------------------------------------------------------------
     # Cleanup
@@ -442,9 +456,9 @@ class FSL2Adapter(L2AdapterInterface):
         self._loop_thread.join()
         self._loop.close()
 
-        os.close(self._store_efd)
-        os.close(self._lookup_efd)
-        os.close(self._load_efd)
+        self._store_efd.close()
+        self._lookup_efd.close()
+        self._load_efd.close()
         logger.info("FSL2Adapter closed")
 
     # ------------------------------------------------------------------
@@ -565,6 +579,7 @@ class FSL2Adapter(L2AdapterInterface):
         task_id: L2TaskId,
     ) -> None:
         success = True
+        bytes_written = 0
         try:
             for key, obj in zip(keys, objects, strict=True):
                 file_path, tmp_path = self._key_to_file_and_tmp_path(key)
@@ -603,6 +618,7 @@ class FSL2Adapter(L2AdapterInterface):
                             await f.write(buf)
 
                     await aiofiles.os.replace(tmp_path, file_path)
+                    bytes_written += size
                     logger.debug(
                         "FSL2Adapter stored key %s (%d bytes)",
                         file_path.name,
@@ -625,7 +641,8 @@ class FSL2Adapter(L2AdapterInterface):
 
         with self._lock:
             self._completed_store_tasks[task_id] = success
-        os.eventfd_write(self._store_efd, 1)
+            self._completed_store_task_bytes[task_id] = bytes_written
+        self._store_efd.notify()
 
     # ---- lookup ---------------------------------------------------------
 
@@ -642,7 +659,7 @@ class FSL2Adapter(L2AdapterInterface):
 
         with self._lock:
             self._completed_lookup_tasks[task_id] = bitmap
-        os.eventfd_write(self._lookup_efd, 1)
+        self._lookup_efd.notify()
 
     # ---- load -----------------------------------------------------------
 
@@ -729,7 +746,7 @@ class FSL2Adapter(L2AdapterInterface):
 
         with self._lock:
             self._completed_load_tasks[task_id] = bitmap
-        os.eventfd_write(self._load_efd, 1)
+        self._load_efd.notify()
 
 
 # Self-register config type and adapter factory

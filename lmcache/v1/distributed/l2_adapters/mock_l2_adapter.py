@@ -8,7 +8,6 @@ from collections import defaultdict
 from typing import TYPE_CHECKING, Optional
 import asyncio
 import copy
-import os
 import threading
 import time
 
@@ -30,6 +29,7 @@ from lmcache.v1.distributed.l2_adapters.factory import (
     register_l2_adapter_factory,
 )
 from lmcache.v1.memory_management import MemoryObj, TensorMemoryObj
+from lmcache.v1.platform import create_event_notifier
 
 logger = init_logger(__name__)
 
@@ -109,14 +109,14 @@ class MockL2Adapter(L2AdapterInterface):
     """
 
     def __init__(self, config: MockL2AdapterConfig):
-        super().__init__()
+        max_capacity_bytes = int(config.max_size_gb * (1024**3))
+        super().__init__(max_capacity_bytes=max_capacity_bytes)
         self._config = config
-        self._max_capacity_bytes = int(config.max_size_gb * (1024**3))
         self._bandwidth_byte_ps = int(config.mock_bandwidth_gb * (1024**3))
 
-        self._store_efd = os.eventfd(0, os.EFD_NONBLOCK | os.EFD_CLOEXEC)
-        self._lookup_efd = os.eventfd(0, os.EFD_NONBLOCK | os.EFD_CLOEXEC)
-        self._load_efd = os.eventfd(0, os.EFD_NONBLOCK | os.EFD_CLOEXEC)
+        self._store_efd = create_event_notifier()
+        self._lookup_efd = create_event_notifier()
+        self._load_efd = create_event_notifier()
 
         self._memory_objects: dict[ObjectKey, MemoryObj] = {}
         self._locked_keys: dict[ObjectKey, int] = defaultdict(int)
@@ -125,6 +125,7 @@ class MockL2Adapter(L2AdapterInterface):
         # Task ID management
         self._next_task_id: L2TaskId = 0
         self._completed_store_tasks: dict[L2TaskId, bool] = {}
+        self._completed_store_task_bytes: dict[L2TaskId, int] = {}
         self._completed_lookup_tasks: dict[L2TaskId, Bitmap] = {}
         self._completed_load_tasks: dict[L2TaskId, Bitmap] = {}
         self._lock = threading.Lock()  # lock for all shared state
@@ -139,13 +140,13 @@ class MockL2Adapter(L2AdapterInterface):
     # --------------------
 
     def get_store_event_fd(self) -> int:
-        return self._store_efd
+        return self._store_efd.fileno()
 
     def get_lookup_and_lock_event_fd(self) -> int:
-        return self._lookup_efd
+        return self._lookup_efd.fileno()
 
     def get_load_event_fd(self) -> int:
-        return self._load_efd
+        return self._load_efd.fileno()
 
     # --------------------
     # Store Interface
@@ -195,6 +196,12 @@ class MockL2Adapter(L2AdapterInterface):
             completed = self._completed_store_tasks
             self._completed_store_tasks = {}
         return completed
+
+    def pop_completed_store_task_bytes(self) -> dict[L2TaskId, int]:
+        with self._lock:
+            completed_bytes = self._completed_store_task_bytes
+            self._completed_store_task_bytes = {}
+        return completed_bytes
 
     def submit_lookup_and_lock_task(self, keys: list[ObjectKey]) -> L2TaskId:
         with self._lock:
@@ -268,9 +275,9 @@ class MockL2Adapter(L2AdapterInterface):
         self._loop_thread.join()
         self._loop.close()
 
-        os.close(self._store_efd)
-        os.close(self._lookup_efd)
-        os.close(self._load_efd)
+        self._store_efd.close()
+        self._lookup_efd.close()
+        self._load_efd.close()
 
     ##################
     # Debug / test-only functions
@@ -349,27 +356,28 @@ class MockL2Adapter(L2AdapterInterface):
     def delete(self, keys: list[ObjectKey]) -> None:
         """Delete a batch of objects from the mock adapter."""
         deleted_keys: list[ObjectKey] = []
+        deleted_sizes: list[int] = []
         with self._lock:
             for key in keys:
                 if key not in self._memory_objects:
                     continue
                 obj = self._memory_objects.pop(key)
-                self._current_size_bytes -= obj.get_size()
+                size = obj.get_size()
+                self._current_size_bytes -= size
                 deleted_keys.append(key)
+                deleted_sizes.append(size)
         if deleted_keys:
-            self._notify_keys_deleted(deleted_keys)
+            self._notify_keys_deleted(deleted_keys, deleted_sizes)
 
-    def get_usage(self) -> tuple[float, float]:
-        """Return (current_usage, usage_after_ongoing_eviction) in [0, 1]."""
-        with self._lock:
-            if self._max_capacity_bytes == 0:
-                return (0.0, 0.0)
-            usage = self._current_size_bytes / self._max_capacity_bytes
-            return (usage, usage)
+    # ``get_usage()`` is inherited from ``L2AdapterInterface``, which derives
+    # the report from the byte counters maintained by ``_notify_keys_*``.
+    # ``_current_size_bytes`` above is a local within-batch accumulator
+    # used for the synchronous capacity check inside the store loop and is
+    # NOT the source of truth for external reporting.
 
     def _signal_store_event(self) -> None:
         """Signal the store event fd to notify completion."""
-        os.eventfd_write(self._store_efd, 1)
+        self._store_efd.notify()
 
     async def _execute_store_in_the_loop(
         self,
@@ -386,8 +394,9 @@ class MockL2Adapter(L2AdapterInterface):
         start = time.perf_counter()
 
         stored_keys: list[ObjectKey] = []
+        stored_sizes: list[int] = []
         try:
-            for key, obj in zip(keys, objects, strict=False):
+            for key, obj in zip(keys, objects, strict=True):
                 obj_size = obj.get_size()
 
                 # If the object is larger than max capacity, skip it
@@ -416,6 +425,7 @@ class MockL2Adapter(L2AdapterInterface):
                 self._current_size_bytes += obj_size
                 total_bytes += obj_size
                 stored_keys.append(key)
+                stored_sizes.append(obj_size)
         except Exception:
             success = False
 
@@ -431,14 +441,19 @@ class MockL2Adapter(L2AdapterInterface):
         await asyncio.sleep(delay_seconds)
         with self._lock:
             self._completed_store_tasks[task_id] = success
+            # ``total_bytes`` counts only objects actually written into
+            # ``self._memory_objects`` — duplicates and capacity-skipped
+            # keys are excluded.  Reporting this lets the L2 throughput
+            # subscriber distinguish real I/O from fast-pathed no-ops.
+            self._completed_store_task_bytes[task_id] = total_bytes
 
         if stored_keys:
-            self._notify_keys_stored(stored_keys)
+            self._notify_keys_stored(stored_keys, stored_sizes)
         self._signal_store_event()
 
     def _signal_lookup_event(self) -> None:
         """Signal the lookup event fd to notify completion."""
-        os.eventfd_write(self._lookup_efd, 1)
+        self._lookup_efd.notify()
 
     def _execute_lookup_in_the_loop(
         self, keys: list[ObjectKey], task_id: L2TaskId
@@ -455,7 +470,7 @@ class MockL2Adapter(L2AdapterInterface):
 
     def _signal_load_event(self) -> None:
         """Signal the load event fd to notify completion."""
-        os.eventfd_write(self._load_efd, 1)
+        self._load_efd.notify()
 
     async def _execute_load_in_loop(
         self,

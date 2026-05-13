@@ -16,7 +16,7 @@ import torch
 # First Party
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.kv_layer_groups import KVLayerGroupInfo, KVLayerGroupsManager
+from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
 from lmcache.v1.memory_management import AdHocMemoryAllocator, MemoryFormat, MemoryObj
 from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
@@ -51,22 +51,21 @@ def _create_metadata(
 
 
 def _create_multi_group_metadata(chunk_size: int = 16) -> LMCacheMetadata:
+    # First Party
+    import lmcache.c_ops as lmc_ops
+
     metadata = _create_metadata(chunk_size=chunk_size)
+    # Two single-layer groups whose only differing signature field is
+    # head_size (8 vs 16), exercising the multi-group code path.
+    kv_caches = [
+        torch.empty(2, 1, chunk_size, 1, 8, dtype=torch.bfloat16),
+        torch.empty(2, 1, chunk_size, 1, 16, dtype=torch.bfloat16),
+    ]
     metadata.kv_layer_groups_manager = KVLayerGroupsManager(
-        kv_layer_groups=[
-            KVLayerGroupInfo(
-                layer_names=["layer0"],
-                layer_indices=[0],
-                shape=torch.Size([2, 1, chunk_size, 1, 8]),
-                dtype=torch.bfloat16,
-            ),
-            KVLayerGroupInfo(
-                layer_names=["layer1"],
-                layer_indices=[1],
-                shape=torch.Size([2, 1, chunk_size, 1, 16]),
-                dtype=torch.bfloat16,
-            ),
-        ]
+        kv_caches,
+        lmc_ops.GPUKVFormat.NL_X_TWO_NB_BS_NH_HS,
+        num_blocks=1,
+        block_size=chunk_size,
     )
     return metadata
 
@@ -1286,7 +1285,7 @@ def test_dax_backend_get_read_failure_releases_cpu_memory_obj(
             backend.close()
 
 
-def test_dax_backend_allocator_exhaustion_triggers_eviction(
+def test_dax_backend_allocator_exhaustion_fails_without_internal_eviction(
     memory_allocator,
     loop_in_thread,
 ):
@@ -1327,7 +1326,7 @@ def test_dax_backend_allocator_exhaustion_triggers_eviction(
                 CacheEngineKey("test_model", 1, 0, 103, torch.bfloat16),
             ]
 
-            for i, key in enumerate(keys):
+            for i, key in enumerate(keys[:2]):
                 obj = alloc.allocate(
                     [torch.Size([2, 256, 8])],
                     [torch.bfloat16],
@@ -1342,18 +1341,30 @@ def test_dax_backend_allocator_exhaustion_triggers_eviction(
                         fut.result(timeout=5)
                 obj.ref_count_down()
 
-            assert backend.get_blocking(keys[0]) is None
+            obj3 = alloc.allocate(
+                [torch.Size([2, 256, 8])],
+                [torch.bfloat16],
+                fmt=MemoryFormat.KV_T2D,
+            )
+            assert obj3 is not None
+            with pytest.raises(RuntimeError, match="No free slots available"):
+                backend.batched_submit_put_task([keys[2]], [obj3])
+            obj3.ref_count_down()
+
+            out0 = backend.get_blocking(keys[0])
+            assert out0 is not None
+            out0.ref_count_down()
             out1 = backend.get_blocking(keys[1])
             assert out1 is not None
             out1.ref_count_down()
-            out2 = backend.get_blocking(keys[2])
-            assert out2 is not None
-            out2.ref_count_down()
+            assert backend.get_blocking(keys[2]) is None
         finally:
             backend.close()
 
 
-def test_dax_backend_pinned_key_is_not_evicted(memory_allocator, loop_in_thread):
+def test_dax_backend_full_arena_does_not_evict_pinned_or_unpinned_keys(
+    memory_allocator, loop_in_thread
+):
     with tempfile.TemporaryDirectory() as td:
         dev_path = os.path.join(td, "dax.bin")
         with open(dev_path, "wb") as fout:
@@ -1412,19 +1423,20 @@ def test_dax_backend_pinned_key_is_not_evicted(memory_allocator, loop_in_thread)
                 fmt=MemoryFormat.KV_T2D,
             )
             assert obj3 is not None
-            futs = backend.batched_submit_put_task([keys[2]], [obj3])
-            if futs:
-                for fut in futs:
-                    fut.result(timeout=5)
+            with pytest.raises(RuntimeError, match="No free slots available"):
+                futs = backend.batched_submit_put_task([keys[2]], [obj3])
+                if futs:
+                    for fut in futs:
+                        fut.result(timeout=5)
             obj3.ref_count_down()
 
             out0 = backend.get_blocking(keys[0])
             assert out0 is not None
             out0.ref_count_down()
-            assert backend.get_blocking(keys[1]) is None
-            out2 = backend.get_blocking(keys[2])
-            assert out2 is not None
-            out2.ref_count_down()
+            out1 = backend.get_blocking(keys[1])
+            assert out1 is not None
+            out1.ref_count_down()
+            assert backend.get_blocking(keys[2]) is None
         finally:
             backend.close()
 
@@ -1490,7 +1502,11 @@ def test_dax_backend_overlapping_pin_unpin(memory_allocator, loop_in_thread):
             # Unpin key A once — pin_count should still be 1
             backend.unpin(keys[0])
 
-            # Store key C — forces eviction; key A must survive (still pinned)
+            # Key A still has one outstanding pin and cannot be removed
+            # by non-forced eviction-controller delete calls.
+            assert not backend.remove(keys[0], force=False)
+            assert backend.remove(keys[1], force=False)
+
             obj_c = alloc.allocate(
                 [torch.Size([2, 256, 8])],
                 [torch.bfloat16],
@@ -1503,18 +1519,16 @@ def test_dax_backend_overlapping_pin_unpin(memory_allocator, loop_in_thread):
                     fut.result(timeout=5)
             obj_c.ref_count_down()
 
-            # Key A is still retrievable (protected by remaining pin)
             assert backend.contains(keys[0]), (
-                "key A should survive eviction (pin_count=1)"
+                "key A should survive non-forced delete while pin_count=1"
             )
+            assert not backend.contains(keys[1]), "key B should be deleted"
+            assert backend.contains(keys[2])
 
-            # Key B was evicted (unpinned)
-            assert not backend.contains(keys[1]), "key B should be evicted"
-
-            # Unpin key A a second time — pin_count → 0
+            # Unpin key A a second time; non-forced delete can now reclaim it.
             backend.unpin(keys[0])
+            assert backend.remove(keys[0], force=False)
 
-            # Store key D — forces eviction; key A can now be evicted
             obj_d = alloc.allocate(
                 [torch.Size([2, 256, 8])],
                 [torch.bfloat16],
@@ -1527,10 +1541,10 @@ def test_dax_backend_overlapping_pin_unpin(memory_allocator, loop_in_thread):
                     fut.result(timeout=5)
             obj_d.ref_count_down()
 
-            # Key A should now be evicted
             assert not backend.contains(keys[0]), (
-                "key A should be evictable after full unpin"
+                "key A should be removable after full unpin"
             )
+            assert backend.contains(keys[3])
         finally:
             backend.close()
 

@@ -9,12 +9,16 @@ import threading
 import time
 
 # Third Party
-import torch
 import zmq
 
 # First Party
+from lmcache import torch_dev, torch_device_type
 from lmcache.logging import init_logger
-from lmcache.utils import _lmcache_nvtx_annotate
+from lmcache.utils import (
+    EngineType,
+    _lmcache_nvtx_annotate,
+    check_interprocess_event_support,
+)
 from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
     ObjectKey,
@@ -155,6 +159,18 @@ class _PrefetchJob:
     handle: PrefetchHandle
     world_size: int
     request_id: str
+    # Number of tokens submitted for lookup (denominator for the L1+L2
+    # token-level hit-rate metric).  Equals ``len(chunk_hashes) * chunk_size``
+    # on the happy path; 0 for early-exit paths (no GPU context matches
+    # or chunk_hashes is empty).  Consumed at ``MP_LOOKUP_PREFETCH_END``
+    # emission time in ``query_prefetch_status``.
+    requested_tokens: int
+    # Captured at lookup time so the ``MP_LOOKUP_PREFETCH_END`` event can
+    # carry them as labels.  ``model_name`` lets dashboards slice hit rate
+    # per model in multi-model deployments; ``cache_salt`` slices per
+    # tenant / isolation domain (an empty string means no salt set).
+    model_name: str = ""
+    cache_salt: str = ""
 
 
 # Main class for the mp cache engine
@@ -206,6 +222,7 @@ class MPCacheEngine:
         kv_caches: KVCache,
         model_name: str,
         world_size: int,
+        engine_type: EngineType,
         layout_hints: LayoutHints,
     ) -> None:
         """
@@ -213,16 +230,28 @@ class MPCacheEngine:
 
         Args:
             instance_id (int): The GPU instance ID (such as PID).
-            kv_caches (KVCache): The KV cache tensor wrappers from vLLM.
+            kv_caches (KVCache): The KV cache tensor wrappers from the
+                serving engine.
             model_name (str): The name of the model associated with this KV cache.
             world_size (int): The world size associated with this KV cache.
+            engine_type: Which serving engine produced the caches.
+                Forwarded to :class:`GPUCacheContext` for format detection.
             layout_hints: See :class:`LayoutHints`.  Forwarded to
                 :class:`GPUCacheContext` for GPU KV format detection.
         """
+        if instance_id in self.gpu_contexts:
+            logger.warning(
+                "Instance %s's KV cache is already registered, "
+                "skipping the new registration",
+                instance_id,
+            )
+            return
+
         gpu_context = GPUCacheContext(
             kv_caches,
             self.chunk_size,
             layout_hints=layout_hints or None,
+            engine_type=engine_type,
         )
         self.gpu_contexts[instance_id] = gpu_context
         self.gpu_context_meta[instance_id] = (model_name, world_size)
@@ -243,7 +272,7 @@ class MPCacheEngine:
             del self.gpu_contexts[instance_id]
             del self.gpu_context_meta[instance_id]
             logger.info("Unregistered KV cache for GPU ID %d", instance_id)
-            torch.cuda.empty_cache()
+            torch_dev.empty_cache()
         else:
             logger.warning("No KV cache found for GPU ID %d to unregister", instance_id)
 
@@ -285,27 +314,37 @@ class MPCacheEngine:
             f"KV cache not registered for GPU ID {instance_id}"
         )
         gpu_context = self.gpu_contexts[instance_id]
+        model_name = self.gpu_context_meta[instance_id][0]
 
         blocks_per_chunk = self.chunk_size // gpu_context.block_size
 
         with (
-            torch.cuda.device(gpu_context.device),
-            torch.cuda.stream(gpu_context.stream),
+            torch_dev.device(gpu_context.device),
+            torch_dev.stream(gpu_context.stream),
         ):
-            event = torch.cuda.Event(interprocess=True)
+            # Not all backends support interprocess Events (CUDA IPC specific)
+            check_interprocess_event_support()
+            event = torch_dev.Event(interprocess=True)
 
             # Stage all block_ids to GPU once before the loop
             all_block_ids_gpu = gpu_context.stage_block_ids(gpu_block_ids)
 
             # Wait for vLLM to finish
-            vllm_event = torch.cuda.Event.from_ipc_handle(
+            # Not all backends support IPC event handles (CUDA IPC specific)
+            if not hasattr(torch_dev.Event, "from_ipc_handle"):
+                raise RuntimeError(
+                    f"Backend '{torch_device_type}' does not support IPC event "
+                    "handles (Event.from_ipc_handle not available). "
+                    "Multiprocess IPC requires CUDA."
+                )
+            vllm_event = torch_dev.Event.from_ipc_handle(
                 gpu_context.device, event_ipc_handle
             )
             vllm_event.wait(stream=gpu_context.stream)
 
             # CPU-synchronous sentinel: a GPU store is about to be enqueued.
             # Must be published via publish() (not publish_on_stream) so the
-            # drain thread sees it before MP_SESSION_END can race MP_STORE_END.
+            # drain thread sees it before MP_REQUEST_END can race MP_STORE_END.
             self._event_bus.publish(
                 Event(
                     event_type=EventType.MP_STORE_SUBMITTED,
@@ -319,7 +358,11 @@ class MPCacheEngine:
                 Event(
                     event_type=EventType.MP_STORE_START,
                     session_id=key.request_id,
-                    metadata={"device": str(gpu_context.device)},
+                    metadata={
+                        "device": str(gpu_context.device),
+                        "engine_id": instance_id,
+                        "model_name": model_name,
+                    },
                 ),
             )
 
@@ -373,6 +416,13 @@ class MPCacheEngine:
                         self.storage_manager.finish_write,
                         list(reserved_dict.keys()),
                     )
+                # All reserved MemoryObjs share one layout_desc, so per-object
+                # size is identical — avoid summing N identical values.
+                total_bytes = (
+                    next(iter(reserved_dict.values())).get_size() * len(reserved_dict)
+                    if reserved_dict
+                    else 0
+                )
                 self._event_bus.publish_on_stream(
                     gpu_context.cupy_stream,
                     Event(
@@ -381,6 +431,9 @@ class MPCacheEngine:
                         metadata={
                             "stored_count": len(reserved_dict),
                             "device": str(gpu_context.device),
+                            "engine_id": instance_id,
+                            "model_name": model_name,
+                            "total_bytes": total_bytes,
                         },
                     ),
                 )
@@ -437,10 +490,11 @@ class MPCacheEngine:
             f"KV cache not registered for GPU ID {instance_id}"
         )
         gpu_context = self.gpu_contexts[instance_id]
+        model_name = self.gpu_context_meta[instance_id][0]
 
         # CPU-synchronous sentinel: a GPU retrieve is about to be enqueued.
         # Must be published via publish() (not publish_on_stream) so the
-        # drain thread sees it before MP_SESSION_END can race MP_RETRIEVE_END.
+        # drain thread sees it before MP_REQUEST_END can race MP_RETRIEVE_END.
         self._event_bus.publish(
             Event(
                 event_type=EventType.MP_RETRIEVE_SUBMITTED,
@@ -454,7 +508,11 @@ class MPCacheEngine:
             Event(
                 event_type=EventType.MP_RETRIEVE_START,
                 session_id=key.request_id,
-                metadata={"device": str(gpu_context.device)},
+                metadata={
+                    "device": str(gpu_context.device),
+                    "engine_id": instance_id,
+                    "model_name": model_name,
+                },
             ),
         )
 
@@ -525,16 +583,19 @@ class MPCacheEngine:
                     )
 
         with (
-            torch.cuda.device(gpu_context.device),
-            torch.cuda.stream(gpu_context.stream),
+            torch_dev.device(gpu_context.device),
+            torch_dev.stream(gpu_context.stream),
         ):
             # Stage all block_ids to GPU once before the loop
             all_block_ids_gpu = gpu_context.stage_block_ids(gpu_block_ids)
 
-            event = torch.cuda.Event(interprocess=True)
+            # Not all backends support interprocess Events (CUDA IPC specific)
+            check_interprocess_event_support()
+            event = torch_dev.Event(interprocess=True)
 
             prefetched_keys: list[ObjectKey] = []
             retrieve_succeeded = False
+            total_bytes = 0
             try:
                 with self.storage_manager.read_prefetched_results(
                     obj_keys
@@ -544,6 +605,7 @@ class MPCacheEngine:
                         return event.ipc_handle(), False
 
                     prefetched_keys = obj_keys[: len(memory_objs)]
+                    total_bytes = sum(mo.get_size() for mo in memory_objs)
                     _retrieve_loop(obj_keys, memory_objs)
                 # Only set True when with-block exits normally
                 retrieve_succeeded = True
@@ -565,6 +627,10 @@ class MPCacheEngine:
                         metadata={
                             "retrieved_count": len(prefetched_keys),
                             "device": str(gpu_context.device),
+                            "engine_id": instance_id,
+                            "model_name": model_name,
+                            "cache_salt": key.cache_salt,
+                            "total_bytes": total_bytes,
                         },
                     ),
                 )
@@ -644,6 +710,9 @@ class MPCacheEngine:
                     ),
                     world_size=1,
                     request_id=key.request_id,
+                    requested_tokens=0,
+                    model_name=model_name,
+                    cache_salt=key.cache_salt,
                 )
             )
             return
@@ -664,9 +733,19 @@ class MPCacheEngine:
                     ),
                     world_size=1,
                     request_id=key.request_id,
+                    requested_tokens=0,
+                    model_name=model_name,
+                    cache_salt=key.cache_salt,
                 )
             )
             return
+
+        # Total chunk-aligned tokens submitted for lookup; surfaces as the
+        # denominator of the L1+L2 token-level hit-rate via the
+        # ``requested_tokens`` field on ``MP_LOOKUP_PREFETCH_END``.  Sub-chunk
+        # trailing tokens are intentionally excluded — they cannot hit at
+        # chunk granularity.
+        requested_tokens = len(chunk_hashes) * self.chunk_size
 
         # Publish lookup event via EventBus for observability subscribers.
         # Guard with has_subscribers() to avoid allocating the metadata dict
@@ -707,6 +786,9 @@ class MPCacheEngine:
                 handle=handle,
                 world_size=key.world_size,
                 request_id=key.request_id,
+                requested_tokens=requested_tokens,
+                model_name=model_name,
+                cache_salt=key.cache_salt,
             )
         )
 
@@ -784,7 +866,13 @@ class MPCacheEngine:
             Event(
                 event_type=EventType.MP_LOOKUP_PREFETCH_END,
                 session_id=job.request_id,
-                metadata={"found_count": found_count},
+                metadata={
+                    "found_count": found_count,
+                    "requested_tokens": job.requested_tokens,
+                    "hit_tokens": found_count * self.chunk_size,
+                    "model_name": job.model_name,
+                    "cache_salt": job.cache_salt,
+                },
             )
         )
 
@@ -862,7 +950,7 @@ class MPCacheEngine:
         session = self.session_manager.remove(request_id)
         self._event_bus.publish(
             Event(
-                event_type=EventType.MP_SESSION_END,
+                event_type=EventType.MP_REQUEST_END,
                 session_id=request_id,
             )
         )
@@ -1003,6 +1091,7 @@ def run_cache_server(
     storage_manager_config: StorageManagerConfig,
     obs_config: ObservabilityConfig,
     return_engine: bool = False,
+    start_prometheus_http_server: bool = True,
 ):
     """
     Run the LMCache cache server with ZMQ message queue.
@@ -1013,12 +1102,18 @@ def run_cache_server(
         obs_config: Configuration for the observability stack
         return_engine: If True, return (server, engine) after starting;
                        if False, run blocking loop to keep server alive
+        start_prometheus_http_server: Whether to start a standalone
+            Prometheus HTTP server in a background thread.  Set to
+            ``False`` when an external HTTP framework already serves
+            ``/metrics`` to avoid port conflicts or redundant servers.
 
     Returns:
         If return_engine is True: tuple of (MessageQueueServer, MPCacheEngine)
         If return_engine is False: None (blocks until interrupted)
     """
-    event_bus = init_observability(obs_config)
+    event_bus = init_observability(
+        obs_config, start_prometheus_http_server=start_prometheus_http_server
+    )
 
     # Wire up the trace recorder (no-op when --trace-level is unset).
     # Registered before the engine handlers are added so any
@@ -1092,7 +1187,14 @@ def run_cache_server(
         mp_config.port,
     )
     # Start the ZMQ server
-    torch.cuda.init()
+    # Not all backends expose init(); some auto-initialize on first use
+    if not hasattr(torch_dev, "init"):
+        logger.warning(
+            "Backend '%s' does not support init(), skipping device init",
+            torch_device_type,
+        )
+    else:
+        torch_dev.init()
     server.start()
 
     logger.info("LMCache cache server is running...")

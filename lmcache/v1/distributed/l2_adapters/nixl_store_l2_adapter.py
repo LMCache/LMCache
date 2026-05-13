@@ -34,6 +34,7 @@ from lmcache.v1.distributed.l2_adapters.factory import (
     register_l2_adapter_factory,
 )
 from lmcache.v1.memory_management import MemoryObj
+from lmcache.v1.platform import create_event_notifier
 
 logger = init_logger(__name__)
 
@@ -85,6 +86,11 @@ class NixlObjPool:
         self._total = num_total_objs
         self._lock = threading.Lock()
 
+    @property
+    def total_objs(self) -> int:
+        """Total number of storage slots this pool manages (allocated + free)."""
+        return self._total
+
     def batched_allocate(self, num_objs: int) -> list[int]:
         """
         Allocate a batch of storage slot indices.
@@ -116,9 +122,12 @@ class NixlObjPool:
         with self._lock:
             self.indices.extend(obj_indices)
 
-    def get_usage(self) -> tuple[float, float]:
+    def get_slot_usage(self) -> tuple[float, float]:
         """
-        Return (current_usage, usage_after_ongoing_eviction) in [0, 1].
+        Return (current_usage, usage_after_ongoing_eviction) in [0, 1] for
+        the slot pool. Renamed from ``get_usage`` to avoid colliding with
+        the byte-based ``L2AdapterInterface.get_usage`` shape — this is
+        an internal pool helper, not the adapter-level usage report.
 
         Both values are identical because slot frees are synchronous.
         """
@@ -149,7 +158,7 @@ class NixlStorageAgent:
         Args:
             device: Device type of the L1 memory buffer (e.g. "cpu", "cuda").
             backend: Nixl storage backend to use. One of: GDS, GDS_MT, POSIX,
-                HF3FS (file-based) or OBJ (object-based).
+                HF3FS (file-based) or OBJ, AZURE_BLOB (object-based).
             backend_params: Backend-specific parameters. File-based backends
                 require "file_path" and "use_direct_io" keys.
             pool_size: Number of storage descriptor slots to pre-allocate.
@@ -191,7 +200,7 @@ class NixlStorageAgent:
                 use_direct_io=str(self.backend_params["use_direct_io"]).lower()
                 == "true",
             )
-        elif self.backend in ["OBJ"]:
+        elif self.backend in ["OBJ", "AZURE_BLOB"]:
             self.pool = NixlObjPool(num_total_objs=self.pool_size)
             self.init_storage_handlers_object(
                 page_size=l1_memory_desc.align_bytes,
@@ -422,12 +431,26 @@ class NixlStoreL2Adapter(L2AdapterInterface):
             l1_memory_desc: Descriptor of the L1 memory buffer to register with the
                 Nixl backend for DMA transfers.
         """
-        super().__init__()
+        # Initialize Nixl agent first so we know the actual page count the
+        # backend allocated; we then forward the byte capacity to the base
+        # class so ``get_usage()`` / ``supports_global_eviction`` reflect the real
+        # storage size.
+        self.nixl_agent = NixlStorageAgent(
+            device="cpu",
+            backend=config.backend,
+            backend_params=config.backend_params,
+            pool_size=config.pool_size,
+            l1_memory_desc=l1_memory_desc,
+        )
+        max_capacity_bytes = (
+            self.nixl_agent.pool.total_objs * l1_memory_desc.align_bytes
+        )
+        super().__init__(max_capacity_bytes=max_capacity_bytes)
         self._config = config
 
-        self._store_efd = os.eventfd(0, os.EFD_NONBLOCK | os.EFD_CLOEXEC)
-        self._lookup_efd = os.eventfd(0, os.EFD_NONBLOCK | os.EFD_CLOEXEC)
-        self._load_efd = os.eventfd(0, os.EFD_NONBLOCK | os.EFD_CLOEXEC)
+        self._store_efd = create_event_notifier()
+        self._lookup_efd = create_event_notifier()
+        self._load_efd = create_event_notifier()
 
         # Cache data structures
         self._memory_objects: dict[ObjectKey, NixlStoreObj] = {}
@@ -435,6 +458,12 @@ class NixlStoreL2Adapter(L2AdapterInterface):
         # Task ID management
         self._next_task_id: L2TaskId = 0
         self._completed_store_tasks: dict[L2TaskId, bool] = {}
+        # Bytes actually transferred per completed store task.  Excludes
+        # keys that were fast-pathed (already present in
+        # ``_memory_objects``) and any pool-exhaustion fallouts.  Surfaces
+        # to the L2 throughput subscriber so its histogram reflects real
+        # NIXL transfers, not skipped no-ops.
+        self._completed_store_task_bytes: dict[L2TaskId, int] = {}
         self._completed_lookup_tasks: dict[L2TaskId, Bitmap] = {}
         self._completed_load_tasks: dict[L2TaskId, Bitmap] = {}
         self._lock = threading.Lock()  # lock for all shared state
@@ -444,27 +473,18 @@ class NixlStoreL2Adapter(L2AdapterInterface):
         self._loop_thread = threading.Thread(target=self._run_event_loop, daemon=True)
         self._loop_thread.start()
 
-        # Initialize Nixl agent
-        self.nixl_agent = NixlStorageAgent(
-            device="cpu",
-            backend=config.backend,
-            backend_params=config.backend_params,
-            pool_size=config.pool_size,
-            l1_memory_desc=l1_memory_desc,
-        )
-
     # --------------------
     # Event Fd Interface
     # --------------------
 
     def get_store_event_fd(self) -> int:
-        return self._store_efd
+        return self._store_efd.fileno()
 
     def get_lookup_and_lock_event_fd(self) -> int:
-        return self._lookup_efd
+        return self._lookup_efd.fileno()
 
     def get_load_event_fd(self) -> int:
-        return self._load_efd
+        return self._load_efd.fileno()
 
     #####################
     # Store Interface
@@ -511,6 +531,12 @@ class NixlStoreL2Adapter(L2AdapterInterface):
             completed = self._completed_store_tasks
             self._completed_store_tasks = {}
         return completed
+
+    def pop_completed_store_task_bytes(self) -> dict[L2TaskId, int]:
+        with self._lock:
+            completed_bytes = self._completed_store_task_bytes
+            self._completed_store_task_bytes = {}
+        return completed_bytes
 
     #####################
     # Lookup and Lock Interface
@@ -586,9 +612,9 @@ class NixlStoreL2Adapter(L2AdapterInterface):
         self._loop_thread.join()
         self._loop.close()
 
-        os.close(self._store_efd)
-        os.close(self._lookup_efd)
-        os.close(self._load_efd)
+        self._store_efd.close()
+        self._lookup_efd.close()
+        self._load_efd.close()
 
     #####################
     # Eviction Interface
@@ -604,6 +630,7 @@ class NixlStoreL2Adapter(L2AdapterInterface):
         """
         # TODO(Jiayi): Optimize lock usage here
         deleted_keys: list[ObjectKey] = []
+        deleted_sizes: list[int] = []
         with self._lock:
             for key in keys:
                 obj = self._memory_objects.get(key)
@@ -619,14 +646,16 @@ class NixlStoreL2Adapter(L2AdapterInterface):
                 del self._memory_objects[key]
                 self.nixl_agent.pool.batched_free(obj.page_indices)
                 deleted_keys.append(key)
+                deleted_sizes.append(obj.size)
         if deleted_keys:
-            self._notify_keys_deleted(deleted_keys)
+            self._notify_keys_deleted(deleted_keys, deleted_sizes)
 
-    def get_usage(self) -> tuple[float, float]:
-        """
-        Return (current_usage, usage_after_ongoing_eviction) based on pool slots.
-        """
-        return self.nixl_agent.pool.get_usage()
+    # ``get_usage()`` is inherited from ``L2AdapterInterface``. The base
+    # class derives the report from ``_notify_keys_*`` totals which we
+    # update with the byte sizes from each store/delete. The Nixl pool's
+    # own slot-based ``get_usage()`` is still used internally for
+    # capacity-check style decisions but is no longer exposed via the
+    # adapter interface.
 
     #####################
     # Status Interface
@@ -682,7 +711,7 @@ class NixlStoreL2Adapter(L2AdapterInterface):
 
     def _signal_store_event(self) -> None:
         """Signal the store event fd to notify completion."""
-        os.eventfd_write(self._store_efd, 1)
+        self._store_efd.notify()
 
     async def _execute_store_in_the_loop(
         self,
@@ -749,6 +778,7 @@ class NixlStoreL2Adapter(L2AdapterInterface):
                 # Nothing to store (all keys already existed or pool empty)
                 with self._lock:
                     self._completed_store_tasks[task_id] = True
+                    self._completed_store_task_bytes[task_id] = 0
                 self._signal_store_event()
                 return
 
@@ -764,24 +794,32 @@ class NixlStoreL2Adapter(L2AdapterInterface):
                 for key, storage_obj in zip(stored_keys, storage_objs, strict=False):
                     self._memory_objects[key] = storage_obj
                     storage_obj.decrease_pin_count()
-            self._notify_keys_stored(stored_keys)
+            # ``stored_keys`` and ``storage_objs`` are built together in the
+            # pre-alloc loop above, so the size lists stay aligned even
+            # when the pool ran out of slots mid-batch.
+            if stored_keys:
+                stored_sizes = [obj.size for obj in storage_objs]
+                self._notify_keys_stored(stored_keys, stored_sizes)
+            bytes_transferred = sum(obj.size for obj in storage_objs)
 
         # success is only set to false for transfer failures
         except Exception:
             logger.exception("NIXL store task %d failed", task_id)
             success = False
+            bytes_transferred = 0
 
             # free storage indices if transfer fails
             self.nixl_agent.pool.batched_free(storage_indices_flat)
 
         with self._lock:
             self._completed_store_tasks[task_id] = success
+            self._completed_store_task_bytes[task_id] = bytes_transferred
 
         self._signal_store_event()
 
     def _signal_lookup_event(self) -> None:
         """Signal the lookup event fd to notify completion."""
-        os.eventfd_write(self._lookup_efd, 1)
+        self._lookup_efd.notify()
 
     def _execute_lookup_in_the_loop(
         self, keys: list[ObjectKey], task_id: L2TaskId
@@ -810,7 +848,7 @@ class NixlStoreL2Adapter(L2AdapterInterface):
 
     def _signal_load_event(self) -> None:
         """Signal the load event fd to notify completion."""
-        os.eventfd_write(self._load_efd, 1)
+        self._load_efd.notify()
 
     async def _execute_load_in_loop(
         self,
@@ -880,6 +918,7 @@ _VALID_NIXL_BACKENDS = (
     "POSIX",
     "HF3FS",
     "OBJ",
+    "AZURE_BLOB",
 )
 _FILE_BACKENDS = ("GDS", "GDS_MT", "POSIX", "HF3FS")
 
@@ -890,7 +929,7 @@ class NixlStoreL2AdapterConfig(L2AdapterConfigBase):
 
     Fields:
     - backend: Nixl storage backend
-      (GDS, GDS_MT, POSIX, HF3FS, OBJ).
+      (GDS, GDS_MT, POSIX, HF3FS, OBJ, AZURE_BLOB).
     - backend_params: Backend-specific parameters as a
       dict of string key-value pairs. For file-based
       backends (GDS, GDS_MT, POSIX, HF3FS), must include

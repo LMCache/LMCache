@@ -157,22 +157,34 @@ _store_loop: poll wakes up
   ▼
 _process_new_keys(keys)
   │
-  ├─ 1. StorePolicy.select_store_targets(keys, adapters)
-  │     → dict[adapter_index, list[ObjectKey]]
+  ├─ 1. Group keys by shape (today: (model_name, kv_rank); L1 is a shared
+  │     pool so one drain may span models/parallelism configs with different
+  │     KV shapes, and each submit_store_task must see uniform (shape, dtype)).
   │
-  ├─ 2. For each adapter target:
+  ├─ 2. For each per-shape group:
+  │     StorePolicy.select_store_targets(group_keys, adapters)
+  │       → dict[adapter_index, list[ObjectKey]]
+  │
+  ├─ 3. For each adapter target:
   │     L1Manager.reserve_read(target_keys)  → get MemoryObj + read lock
   │     adapter.submit_store_task(keys, objs)
   │     Track as InFlightStoreTask
   │
-  ▼ (later, when adapter signals store_efd)
-_process_completed_tasks(adapter_index)
+  ▼ (later, for each adapter whose store_efd signaled)
+_drain_l2_store_completions(signaled_adapters)
+  │  adapter.pop_completed_store_tasks() → deposit success/failure
+  │  on each InFlightStoreTask.l2_store_result
   │
-  ├─ 3. adapter.pop_completed_store_tasks()
+  ▼
+_advance_request(task_key, task)  [state transition]
+  │  skip if l2_store_result still None
   │
-  ├─ 4. For each completed task:
-  │     L1Manager.finish_read(read_locked_keys)  → release read locks
-  │     If success: StorePolicy.select_l1_deletions(keys) → delete from L1
+  ▼
+_finalize_store(task_key, task)  [terminal execution]
+  │
+  ├─ 4. L1Manager.finish_read(read_locked_keys)  → release read locks
+  │
+  ├─ 5. If success: StorePolicy.select_l1_deletions(keys) → delete from L1
   │     If failure: log warning (best-effort, no retry)
   │
   ▼
@@ -291,8 +303,8 @@ _start_lookup_phase(request_id, keys, layout_desc)
   ├─ Submit lookup_and_lock_task(keys) to EVERY adapter
   │
   ▼ (wait for all adapter lookups to complete)
-_process_lookup_completions(adapter_index)
-  │  query each adapter's lookup result
+_advance_request(request, signaled_adapters)  [LOOKUP branch]
+  │  _poll_lookup_results(request, signaled_adapters[LOOKUP])
   │  when all_lookups_done():
   │
   ▼
@@ -314,7 +326,8 @@ _transition_to_load_phase(request)
   ├─ 6. Submit load_task(keys, objs) per adapter
   │
   ▼ (wait for all adapter loads to complete)
-_process_load_completions(adapter_index)
+_advance_request(request, signaled_adapters)  [PLAN_AND_LOAD branch]
+  │  _poll_load_results(request, signaled_adapters[PLAN_AND_LOAD])
   │  when all_loads_done():
   │
   ▼
@@ -480,9 +493,11 @@ class PrefetchHandle:
 ### Pure-Python Adapters
 
 Implement `L2AdapterInterface` directly. See `mock_l2_adapter.py` for a
-reference implementation. **No existing files need to be modified.** Create a
-new module (e.g., `my_l2_adapter.py`) in the `l2_adapters/` package and
-self-register at module level:
+reference implementation for an in-memory adapter, or
+[`raw_block.md`](raw_block.md) for a durable local-device adapter.
+**No existing files need to be modified.** Create a new module
+(e.g., `my_l2_adapter.py`) in the `l2_adapters/` package and self-register at
+module level:
 
 ```python
 # At the bottom of your module:

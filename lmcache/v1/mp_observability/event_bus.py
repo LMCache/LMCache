@@ -116,6 +116,7 @@ class EventBus:
         self._registered_subscribers: list[EventSubscriber] = []
         self._discard_count: int = 0
         self._last_discard_warning: float = 0.0
+        self._subscriber_exception_counts: dict[str, int] = {}
 
     # -- Public API --------------------------------------------------------
 
@@ -237,6 +238,46 @@ class EventBus:
                     type(sub).__name__,
                 )
 
+    # -- Self-monitoring ---------------------------------------------------
+
+    def queue_depth(self) -> int:
+        """Number of events currently queued waiting for dispatch.
+
+        Reads ``len`` on the underlying deque, which is atomic in CPython,
+        so callers can poll this from a metrics scrape callback without
+        holding the bus lock.
+        """
+        return len(self._queue)
+
+    def oldest_event_lag_seconds(self) -> float:
+        """Wall-clock age of the oldest queued event, or 0.0 when empty.
+
+        Used as a drain-lag gauge: a rising value means the drain thread
+        is not keeping up with publish rate.  Read without the lock; if
+        the deque is concurrently popped during the peek, returns 0.0.
+        """
+        try:
+            oldest = self._queue[0]
+        except IndexError:
+            return 0.0
+        return max(0.0, time.time() - oldest.timestamp)
+
+    def dropped_events_count(self) -> int:
+        """Cumulative count of events dropped because the queue was full."""
+        return self._discard_count
+
+    def subscriber_exception_counts(self) -> dict[str, int]:
+        """Snapshot of per-subscriber callback exception counts.
+
+        Maps ``subscriber_name`` (the owning class name for bound methods,
+        ``__qualname__`` for free functions) to the cumulative count of
+        exceptions raised by that subscriber's callbacks during dispatch.
+        Returns a copy that callers may iterate without holding the bus
+        lock.
+        """
+        with self._lock:
+            return dict(self._subscriber_exception_counts)
+
     # -- Internal ----------------------------------------------------------
 
     def _run(self) -> None:
@@ -274,8 +315,19 @@ class EventBus:
                 try:
                     cb(event)
                 except Exception:
+                    instance = getattr(cb, "__self__", None)
+                    name = (
+                        type(instance).__name__
+                        if instance is not None
+                        else getattr(cb, "__qualname__", repr(cb))
+                    )
+                    with self._lock:
+                        self._subscriber_exception_counts[name] = (
+                            self._subscriber_exception_counts.get(name, 0) + 1
+                        )
                     logger.exception(
-                        "EventBus: error in callback for %s",
+                        "EventBus: error in callback %s for %s",
+                        name,
                         event.event_type.value,
                     )
 

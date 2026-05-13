@@ -1,21 +1,48 @@
 # LMCache Rust Raw Block I/O
 
-This crate provides raw block I/O for LMCache via Rust + PyO3.
+This crate provides the low-level raw device I/O layer for LMCache via Rust +
+PyO3. It is used by both:
 
-## What Changed vs `origin/dev`
+- the legacy non-MP `RustRawBlockBackend`
+- the MP `raw_block` L2 adapter (`RawBlockL2Adapter`) via `RawBlockCore`
 
-1. `RustRawBlockBackend` can use aligned Python buffer memory directly in O_DIRECT paths (no extra Python-side payload copy on the fast path).
-2. O_DIRECT tail handling uses a hybrid path:
-   - direct write/read for aligned prefix
-   - bounce buffer only for the final padded tail block
-3. `LocalCPUBackend` alignment can be auto-driven by rust raw block config for O_DIRECT compatibility:
-   - `rust_raw_block.block_align`
-   - `rust_raw_block.align_local_cpu_allocator`
-   - `local_cpu.pinned_align_bytes` (explicit override)
-4. Benchmark harness reliability improvements:
-   - skip `truncate()` for real block devices (`/dev/...`)
-   - unique manifest per run (avoid stale-index reuse)
-   - timeout guard for local disk completion waits (scales with `num_ops`)
+The Rust crate intentionally stays narrow: it owns the raw device handle and
+exposes blocking `pwrite_from_buffer` / `pread_into` primitives. Slotting,
+checkpointing, recovery, and MP task orchestration all live in Python.
+
+## I/O Engines
+
+`RawBlockDevice` accepts `io_engine`:
+
+- `posix` (default): synchronous Linux `pread` / `pwrite`.
+- `io_uring`: direct Rust io_uring syscall path using the existing worker,
+  batch, and `wait_iouring` machinery.
+
+`use_iouring=True` remains accepted for backward compatibility. If `io_engine`
+is explicitly set, it wins over the legacy flag.
+
+## MP Mode Integration
+
+In MP mode, the stack looks like this:
+
+```text
+StoreController / PrefetchController
+                |
+                v
+        RawBlockL2Adapter
+                |
+                v
+           RawBlockCore
+                |
+                v
+         lmcache_rust_raw_block_io
+                |
+                v
+         raw device / file
+```
+
+This split lets LMCache reuse the same on-device metadata and recovery model in
+both non-MP and MP mode without duplicating the raw-block implementation.
 
 ## Zero-Copy Data Path
 
@@ -50,7 +77,6 @@ No fixed numbers are included here because results are host/device/workload depe
 ## Limitations
 
 - Linux only (`pread` / `pwrite`, O_DIRECT semantics).
-- Synchronous I/O only (no async kernel interface, no `io_uring` in this crate).
 - O_DIRECT requires aligned offset, size, and user buffer address.
 
 ## Build
@@ -72,3 +98,52 @@ dev.pwrite_from_buffer(offset=0, data=b"hello", total_len=4096)
 buf = bytearray(4096)
 dev.pread_into(offset=0, out=buf, payload_len=5, total_len=4096)
 ```
+
+io_uring:
+
+```python
+dev = RawBlockDevice(
+    "/dev/nvme0n1",
+    True,
+    use_odirect=True,
+    alignment=4096,
+    io_engine="io_uring",
+    iouring_queue_depth=256,
+)
+```
+
+## MP Adapter Example
+
+To use the MP adapter from `lmcache server`, pass a `raw_block` L2 adapter
+config:
+
+```bash
+lmcache server \
+  --l1-size-gb 10 \
+  --eviction-policy LRU \
+  --l1-align-bytes 4096 \
+  --l2-adapter '{
+    "type": "raw_block",
+    "device_path": "/dev/nvme0n1",
+    "slot_bytes": 1048576,
+    "block_align": 4096,
+    "header_bytes": 4096,
+    "meta_total_bytes": 268435456,
+    "use_odirect": true,
+    "io_engine": "io_uring",
+    "num_store_workers": 2,
+    "num_lookup_workers": 1,
+    "num_load_workers": 4
+  }'
+```
+
+Notes:
+
+- `device_path` should point to an unmounted raw block device or a dedicated
+  file used only by LMCache.
+- With `use_odirect=true`, LMCache MP L1 alignment must be at least
+  `block_align`.
+- Restart recovery uses the metadata checkpoint region on the same device.
+- Raw-block slot reclamation is driven by the shared/global L2 eviction
+  controller or explicit `delete()` calls.
+- `raw_block` remains the adapter type for both supported engines.

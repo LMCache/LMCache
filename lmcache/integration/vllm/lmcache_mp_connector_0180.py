@@ -1,13 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-# Standard
+import enum
+import inspect
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
-import enum
-import inspect
 
-# Third Party
+import torch
+import zmq
+from lmcache import torch_dev, torch_device_type
+from lmcache.integration.vllm.utils import mla_enabled
+from lmcache.utils import check_interprocess_event_support, init_logger as lmcache_init_logger
+
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
@@ -19,22 +23,14 @@ from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import RequestStatus
 from vllm.v1.utils import ConstantList
-import torch
-import zmq
-
-# First Party
-from lmcache.integration.vllm.utils import mla_enabled
-from lmcache.utils import init_logger as lmcache_init_logger
 
 try:
-    # First Party
     from lmcache.integration.vllm.vllm_multi_process_adapter import (
         LMCacheMPSchedulerAdapter,
         LMCacheMPWorkerAdapter,
         LoadStoreOp,
     )
 except ImportError:
-    # Third Party
     from vllm.distributed.kv_transfer.kv_connector.v1.lmcache_integration import (
         LMCacheMPSchedulerAdapter,
         LMCacheMPWorkerAdapter,
@@ -42,7 +38,6 @@ except ImportError:
     )
 
 if TYPE_CHECKING:
-    # Third Party
     from vllm.distributed.kv_events import KVCacheEvent
     from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
         KVConnectorPromMetrics,
@@ -465,6 +460,9 @@ class LMCacheMPConnector(KVConnectorBase_V1):
     ):
         super().__init__(vllm_config, role, kv_cache_config)
 
+        # fast-fail if interprocess is not supported
+        check_interprocess_event_support()
+
         assert vllm_config.kv_transfer_config is not None
         server_host = vllm_config.kv_transfer_config.get_from_extra_config(
             "lmcache.mp.host", "tcp://localhost"
@@ -549,11 +547,6 @@ class LMCacheMPConnector(KVConnectorBase_V1):
         Args:
             forward_context (ForwardContext): the forward context.
             **kwargs: additional arguments for the load operation
-
-        Note:
-            The number of elements in kv_caches and layer_names should be
-            the same.
-
         """
         metadata = self._get_connector_metadata()
         assert isinstance(metadata, LMCacheMPConnectorMetadata)
@@ -570,8 +563,9 @@ class LMCacheMPConnector(KVConnectorBase_V1):
         if len(request_ids) == 0:
             return
 
-        with torch.cuda.stream(torch.cuda.current_stream()):
-            event = torch.cuda.Event(interprocess=True)
+        with torch_dev.stream(torch_dev.current_stream()):
+            # Not all backends support interprocess Events (CUDA IPC specific)
+            event = torch_dev.Event(interprocess=True)
             event.record()
 
         self.worker_adapter.batched_submit_retrieve_requests(request_ids, ops, event)
@@ -632,8 +626,9 @@ class LMCacheMPConnector(KVConnectorBase_V1):
         if len(request_ids) == 0:
             return
 
-        with torch.cuda.stream(torch.cuda.current_stream()):
-            event = torch.cuda.Event(interprocess=True)
+        with torch_dev.stream(torch_dev.current_stream()):
+            # Not all backends support interprocess Events (CUDA IPC specific)
+            event = torch_dev.Event(interprocess=True)
             event.record()
 
         self.worker_adapter.batched_submit_store_requests(request_ids, ops, event)

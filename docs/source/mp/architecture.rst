@@ -37,7 +37,7 @@ High-Level Architecture
          |--- EvictionController ----> L1Manager (watermark-triggered eviction)
          |
          v
-    PrometheusController + TelemetryController (observability)
+    EventBus + OTel providers (observability)
 
 Server Variants
 ---------------
@@ -56,10 +56,13 @@ which adds CacheBlend operations (``CB_REGISTER_KV_CACHE``,
 cache reuse across document paragraphs.
 
 **``http_server.py``** -- Wraps ``run_cache_server()`` (from ``server.py``)
-inside a FastAPI application.  Adds ``/api/healthcheck`` for Kubernetes probes,
-``POST /api/clear-cache`` for clearing all KV cache data in L1 (CPU) memory,
-and ``/api/status`` for inspecting detailed internal state.
-The ZMQ server runs as part of the same process.
+inside a FastAPI application.  Endpoints are contributed by modules under
+``http_apis/`` and auto-registered via ``HTTPAPIRegistry``: ``GET /`` (basic
+liveness), ``GET /healthcheck`` for Kubernetes probes, ``POST /clear-cache``
+for clearing all KV cache data in L1 (CPU) memory, and ``GET /status``
+for inspecting detailed internal state.  The ZMQ server runs as part of the
+same process, and any configured runtime plugins are spawned by
+``MPRuntimePluginLauncher`` during FastAPI startup.
 
 ZMQ Protocol
 ------------
@@ -89,22 +92,40 @@ Communication between vLLM and LMCache uses ZMQ (DEALER/ROUTER pattern).
      - Copy KV cache chunks from L1 (CPU) back to GPU.
    * - ``LOOKUP``
      - BLOCKING
-     - Check prefix cache hits and submit prefetch tasks.
+     - Submit a prefix lookup; the prefetch job is tracked server-side by
+       request_id.
+   * - ``QUERY_PREFETCH_STATUS``
+     - BLOCKING
+     - Poll a prefetch job by request_id. Returns the loaded chunk count
+       when done, or ``None`` while the prefetch is still in progress.
+   * - ``QUERY_PREFETCH_LOOKUP_HITS``
+     - BLOCKING
+     - Query the lookup-phase hit chunk count by request_id, before the
+       prefetch finishes. Returns ``None`` while the lookup is still
+       running.
    * - ``FREE_LOOKUP_LOCKS``
-     - SYNC
-     - Release read locks from a cancelled lookup.
+     - BLOCKING
+     - Release read locks from a cancelled lookup without doing a full
+       RETRIEVE.
    * - ``END_SESSION``
-     - SYNC
+     - BLOCKING
      - Remove session state for a finished request.
    * - ``CLEAR``
-     - SYNC
+     - BLOCKING
      - Clear all cached data.
    * - ``GET_CHUNK_SIZE``
      - SYNC
      - Return the server's chunk size.
+   * - ``PING``
+     - BLOCKING
+     - Liveness ping; the handler always returns ``True``.
+   * - ``REPORT_BLOCK_ALLOCATION``
+     - BLOCKING
+     - Fire-and-forget channel for the vLLM scheduler to report GPU block
+       allocation events to the observability subsystem.
    * - ``NOOP``
      - SYNC
-     - Debug ping -- returns "OK".
+     - Debug heartbeat -- returns a confirmation string.
    * - ``CB_REGISTER_KV_CACHE``
      - SYNC
      - (Blend) Register CacheBlend KV buffer.
@@ -123,6 +144,15 @@ Communication between vLLM and LMCache uses ZMQ (DEALER/ROUTER pattern).
    * - ``CB_STORE_FINAL``
      - BLOCKING
      - (Blend) Store final blended chunks.
+   * - ``CB_LOOKUP_PRE_COMPUTED_V2``
+     - BLOCKING
+     - (Blend V2) Lookup pre-computed chunks; returns
+       ``CBMatchResult`` entries (with old/cur ranges and per-chunk hashes)
+       so the retrieve step can skip re-hashing.
+   * - ``CB_RETRIEVE_PRE_COMPUTED_V2``
+     - BLOCKING
+     - (Blend V2) Retrieve pre-computed chunks using the
+       ``CBMatchResult`` list returned by ``CB_LOOKUP_PRE_COMPUTED_V2``.
 
 **Handler types:**
 
@@ -144,10 +174,12 @@ Each config module exposes a composable triple:
 
     parser = argparse.ArgumentParser(...)
     add_mp_server_args(parser)        # from multiprocess/config.py
+                                      # includes runtime-plugin args
+                                      # (--runtime-plugin-locations,
+                                      #  --runtime-plugin-config)
     add_storage_manager_args(parser)  # from distributed/config.py
       # which internally calls add_l2_adapters_args(parser)
-    add_prometheus_args(parser)       # from mp_observability/config.py
-    add_telemetry_args(parser)        # from mp_observability/telemetry/config.py
+    add_observability_args(parser)    # from mp_observability/config.py
 
 Both ``blend_server_v2.py`` and ``http_server.py`` reuse this pattern, adding
 ``add_http_frontend_args()`` for the HTTP variant.
@@ -218,8 +250,10 @@ the ``StorePolicy``.
 
 **EvictionController** (``storage_controllers/eviction_controller.py``):
 Periodically checks L1 memory usage against the watermark threshold.  When
-triggered, evicts objects using the configured policy (LRU) until usage drops
-below the target.
+triggered, evicts objects using the configured policy (``LRU``,
+``IsolatedLRU``, or ``noop``) until usage drops below the target.
+``IsolatedLRU`` evicts per ``cache_salt`` against limits registered through
+the ``/quota`` HTTP endpoints; see :ref:`mp-http-quota-api`.
 
 **PrefetchController** (``storage_controllers/prefetch_controller.py``):
 Handles L2 lookup and load requests submitted by ``StorageManager`` during
@@ -285,15 +319,26 @@ RETRIEVE Flow
 Observability Internals
 -----------------------
 
-**PrometheusController** is a global singleton (initialized at server startup).
-It runs a daemon thread that periodically calls ``log_prometheus()`` on all
-registered loggers (``StorageManagerStatsLogger``, ``L1ManagerStatsLogger``).
-Each logger atomically snapshots its stats, resets to zero, and pushes values
-to Prometheus counters.
+**EventBus** (``lmcache/v1/mp_observability/event_bus.py``) is a global
+singleton initialized at server startup by ``init_observability()``.
+Producers (L1Manager, StorageManager, MPCacheEngine) publish ``Event``
+objects to a bounded queue (``--event-bus-queue-size``, default 10000,
+tail-drop on overflow).  A background drain thread dispatches each
+event to all registered subscribers.
 
-**TelemetryController** is also a global singleton.  It maintains an in-memory
-event queue (bounded by ``--telemetry-max-queue-size``).  A drain thread reads
-events and dispatches them to registered processors (e.g., ``LoggingProcessor``).
+**Subscribers** live under ``lmcache/v1/mp_observability/subscribers/``
+and are grouped by concern: ``metrics/`` (OTel counters and lifecycle
+histograms), ``logging/`` (Python logging handlers, lookup-hash JSONL),
+and ``tracing/`` (OTel spans built from START/END event pairs).
+``init_observability()`` registers the set selected by CLI flags
+(``--disable-metrics``, ``--disable-logging``, ``--enable-tracing``).
+
+**OTel providers** are set up via ``otel_init.py`` before subscribers
+are constructed, so module-level ``get_meter()`` / ``get_tracer()``
+calls bind to the real provider. Metrics are exported both to an
+in-process Prometheus ``/metrics`` endpoint (``--prometheus-port``,
+default 9090) and, when ``--otlp-endpoint`` is set, pushed to an OTel
+collector.
 
 How to Extend
 -------------
@@ -301,32 +346,51 @@ How to Extend
 Adding a new L2 adapter
 ~~~~~~~~~~~~~~~~~~~~~~~~
 
+Create a new ``*_l2_adapter.py`` module under
+``lmcache/v1/distributed/l2_adapters/`` — ``__init__.py`` auto-discovers
+modules matching that suffix via ``pkgutil`` and imports them lazily on
+first use, so no other files need to be modified.
+
 1. Create a config class subclassing ``L2AdapterConfigBase`` with
    ``from_dict()`` and ``help()`` methods.
-2. Call ``register_l2_adapter_type("my_adapter", MyAdapterConfig)`` at module
-   level.
-3. Create an adapter class implementing ``L2AdapterInterface``.
-4. Add an ``isinstance()`` branch in ``create_l2_adapter()``
-   (``l2_adapters/__init__.py``).
+2. Create an adapter class implementing ``L2AdapterInterface``, and
+   a small factory function
+   ``(config, l1_memory_desc) -> L2AdapterInterface``.
+3. At module level, self-register both the config and the factory:
 
-Adding a telemetry processor
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+   .. code-block:: python
 
-1. Create a config class subclassing ``TelemetryProcessorConfig`` with
-   ``from_dict()`` and ``help()`` methods.
-2. Call ``register_telemetry_processor_type("my_proc", MyProcConfig)`` at
-   module level.
-3. Create a processor class implementing ``TelemetryProcessor``
-   (``on_new_event()``, ``shutdown()``).
-4. Add a factory branch in the telemetry controller's processor creation code.
+       register_l2_adapter_type("my_adapter", MyAdapterConfig)
+       register_l2_adapter_factory("my_adapter", _create_my_adapter)
+
+See ``mock_l2_adapter.py`` or ``s3_l2_adapter.py`` for reference
+implementations.
+
+Adding an observability subscriber
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+1. Create a subscriber class subclassing ``EventSubscriber`` (defined
+   in ``lmcache/v1/mp_observability/event_bus.py``): implement
+   ``get_subscriptions()`` to return an ``{EventType: callback}``
+   mapping; optionally override ``shutdown()`` for cleanup.
+2. Place the class under the appropriate concern group
+   (``subscribers/metrics/``, ``subscribers/logging/``, or
+   ``subscribers/tracing/``) and export it from that package's
+   ``__init__.py``.
+3. Register the subscriber in ``init_observability()``
+   (``lmcache/v1/mp_observability/config.py``) via
+   ``bus.register_subscriber(...)`` inside the branch matching its
+   concern (metrics / logging / tracing), gated on the corresponding
+   CLI flag if needed.
 
 Adding a new request type
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 1. Add a new member to ``RequestType`` in ``protocols/base.py``.
 2. Create a ``ProtocolDefinition`` in the appropriate ``protocols/*.py`` file
-   (engine, controller, or debug).
-3. Implement the handler method on ``MPCacheEngine`` (or ``BlendEngine``).
+   (``engine``, ``controller``, ``observability``, ``debug``, ``blend``, or
+   ``blend_v2``) and add the request name to that module's ``REQUEST_NAMES``.
+3. Implement the handler method on ``MPCacheEngine`` (or ``BlendEngineV2``).
 4. Register the handler in ``run_cache_server()`` via ``add_handler_helper()``.
 
 Key Source Files
@@ -346,6 +410,14 @@ Key Source Files
      - BlendEngineV2 (extends MPCacheEngine)
    * - ``lmcache/v1/multiprocess/http_server.py``
      - FastAPI wrapper with health check and many other useful APIs
+   * - ``lmcache/v1/multiprocess/http_api_registry.py``
+     - ``HTTPAPIRegistry`` that auto-discovers routers in ``http_apis/``
+   * - ``lmcache/v1/multiprocess/http_apis/``
+     - Extensible HTTP endpoints (``/``, ``/healthcheck``,
+       ``/clear-cache``, ``/status``)
+   * - ``lmcache/v1/multiprocess/mp_runtime_plugin_launcher.py``
+     - ``MPRuntimePluginLauncher`` that spawns runtime plugins with the
+       full server config serialized into environment variables
    * - ``lmcache/v1/multiprocess/protocols/base.py``
      - RequestType, HandlerType, ProtocolDefinition
    * - ``lmcache/v1/distributed/storage_manager.py``
@@ -365,10 +437,14 @@ Key Source Files
    * - ``lmcache/v1/distributed/storage_controllers/prefetch_controller.py``
      - PrefetchController (L2->L1 on miss)
    * - ``lmcache/v1/mp_observability/config.py``
-     - PrometheusConfig
-   * - ``lmcache/v1/mp_observability/prometheus_controller.py``
-     - PrometheusController singleton
-   * - ``lmcache/v1/mp_observability/telemetry/config.py``
-     - TelemetryConfig
-   * - ``lmcache/v1/mp_observability/telemetry/controller.py``
-     - TelemetryController singleton
+     - ObservabilityConfig + ``init_observability()`` entry point
+   * - ``lmcache/v1/mp_observability/event_bus.py``
+     - EventBus singleton and ``EventSubscriber`` base class
+   * - ``lmcache/v1/mp_observability/event.py``
+     - ``Event`` / ``EventType`` definitions
+   * - ``lmcache/v1/mp_observability/otel_init.py``
+     - OTel metrics / tracing provider setup
+   * - ``lmcache/v1/mp_observability/subscribers/``
+     - Metrics, logging, and tracing subscribers
+   * - ``lmcache/v1/mp_observability/trace/``
+     - Trace recording (``--trace-level storage``) capture stack
