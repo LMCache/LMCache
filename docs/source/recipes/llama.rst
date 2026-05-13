@@ -41,6 +41,8 @@ Validated models
 
       |
 
+      Get the chat templates for tool calling by following the `Llama tool calling guide <https://docs.vllm.ai/en/v0.11.2/features/tool_calling/#llama-models-llama3_json>`_ from vLLM.
+
       Start vLLM with the LMCache MP connector:
 
       **Meta-Llama-3.1-8B** (1 GPU):
@@ -89,6 +91,7 @@ Validated models
              --trust-remote-code \
              --enable-auto-tool-choice \
              --tool-call-parser llama3_json \
+             --chat-template examples/tool_chat_template_llama3.1_json.jinja \
              --kv-transfer-config \
              '{"kv_connector":"LMCacheMPConnector", "kv_role":"kv_both"}'
 
