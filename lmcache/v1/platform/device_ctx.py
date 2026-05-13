@@ -22,6 +22,18 @@ factories so callers stay device-agnostic:
 Backend implementations live under ``platform/<device>/device_ctx.py``
 so each accelerator can evolve independently — same convention as
 ``platform/stream.py``.
+
+Routing strategy:
+
+* The active backend is selected via ``lmcache.torch_device_type`` and
+  the table maintained in :mod:`lmcache.v1.platform._registry`.
+* When no concrete factory is registered for the active accelerator
+  (e.g. an ``xpu``/``hpu`` host without its own platform sub-package
+  yet) and ``torch_dev`` exposes the matching primitive, we use
+  ``torch_dev`` directly.  This honours :doc:`docs/design/
+  ARCHITECTURE_MULTI_HARDWARE` "use ``torch_dev`` as the unified
+  middle-layer entry, fall back to per-device backends below" rule.
+* Anything still unresolved falls through to the CPU stub.
 """
 
 # Future
@@ -35,8 +47,29 @@ import torch
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.platform._registry import (
+    get_device_ctx_factory,
+    get_event_factory,
+    get_ipc_event_factory,
+)
 
 logger = init_logger(__name__)
+
+
+def _torch_dev_type() -> str:
+    """Lazy import to avoid the ``lmcache`` -> ``platform`` cycle."""
+    # First Party
+    from lmcache import torch_device_type
+
+    return torch_device_type
+
+
+def _torch_dev() -> Any:
+    """Lazy import to avoid the ``lmcache`` -> ``platform`` cycle."""
+    # First Party
+    from lmcache import torch_dev
+
+    return torch_dev
 
 
 class InterprocessEventLike(Protocol):
@@ -55,31 +88,35 @@ def make_device_context(
 ) -> ContextManager[None]:
     """Return a context manager that activates ``device`` and ``stream``.
 
-    Dispatch order:
+    Routing order:
 
-    1. On CUDA-capable hosts, return the real
-       ``torch.cuda.device`` + ``torch.cuda.stream`` combo.
-    2. Otherwise fall back to the CPU no-op context manager.
+    1. Backend factory registered for the running ``torch_device_type``.
+    2. CPU fallback (always-registered ``NoopDeviceContext``).
     """
-    if torch.cuda.is_available() and device.type == "cuda":
+    factory = get_device_ctx_factory(_torch_dev_type())
+    if factory is None:
         # First Party
-        from lmcache.v1.platform.cuda.device_ctx import (
-            make_cuda_device_context,
-        )
+        from lmcache.v1.platform.cpu.device_ctx import NoopDeviceContext
 
-        return make_cuda_device_context(device, stream)
-
-    # First Party
-    from lmcache.v1.platform.cpu.device_ctx import NoopDeviceContext
-
-    return NoopDeviceContext()
+        return NoopDeviceContext()
+    return factory(device, stream)
 
 
 def make_interprocess_event(device: torch.device) -> InterprocessEventLike:
     """Build an interprocess-capable Event for the given device."""
-    if torch.cuda.is_available() and device.type == "cuda":
-        # Third Party
-        return torch.cuda.Event(interprocess=True)
+    device_type = _torch_dev_type()
+    factory = get_event_factory(device_type)
+    if factory is not None:
+        return factory(device)
+
+    # Generic ``torch_dev`` path: lets xpu/hpu hosts reuse the abstraction
+    # before they ship their own platform sub-package.
+    torch_dev = _torch_dev()
+    if torch_dev is not None and hasattr(torch_dev, "Event"):
+        try:
+            return torch_dev.Event(interprocess=True)
+        except Exception as exc:  # pragma: no cover - platform dependent
+            logger.debug("torch_dev.Event(interprocess=True) failed: %s", exc)
 
     # First Party
     from lmcache.v1.platform.cpu.device_ctx import MockInterprocessEvent
@@ -89,8 +126,21 @@ def make_interprocess_event(device: torch.device) -> InterprocessEventLike:
 
 def event_from_ipc_handle(device: torch.device, handle: bytes) -> InterprocessEventLike:
     """Rebuild an Event from a peer process IPC handle."""
-    if torch.cuda.is_available() and device.type == "cuda":
-        return torch.cuda.Event.from_ipc_handle(device, handle)
+    device_type = _torch_dev_type()
+    factory = get_ipc_event_factory(device_type)
+    if factory is not None:
+        return factory(device, handle)
+
+    torch_dev = _torch_dev()
+    if (
+        torch_dev is not None
+        and hasattr(torch_dev, "Event")
+        and hasattr(torch_dev.Event, "from_ipc_handle")
+    ):
+        try:
+            return torch_dev.Event.from_ipc_handle(device, handle)
+        except Exception as exc:  # pragma: no cover - platform dependent
+            logger.debug("torch_dev.Event.from_ipc_handle failed: %s", exc)
 
     # First Party
     from lmcache.v1.platform.cpu.device_ctx import MockInterprocessEvent

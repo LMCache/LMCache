@@ -148,9 +148,20 @@ def install_cuda_compat() -> None:
     """Monkey-patch ``torch.cuda`` when CUDA is unavailable.
 
     Must be called exactly once, at platform package init time.
+
+    The patch is restricted to hosts where the detected accelerator is
+    the CPU fallback so accelerator-specific code paths (``xpu``,
+    ``hpu``, ...) keep their authentic ``torch.cuda`` shape — see
+    :doc:`docs/design/ARCHITECTURE_MULTI_HARDWARE` for the per-layer
+    contract.
     """
     global _cuda_compat_installed  # noqa: PLW0603
     if _cuda_compat_installed or HAS_CUDA:
+        return
+    # First Party
+    from lmcache import torch_device_type
+
+    if torch_device_type != "cpu":
         return
     _cuda_compat_installed = True
 

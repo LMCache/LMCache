@@ -39,6 +39,13 @@ from lmcache.v1.platform.event_notifier import (
 from lmcache.v1.platform.stream import ExternalStreamLike as ExternalStreamLike
 from lmcache.v1.platform.stream import make_external_stream as make_external_stream
 
+# Trigger backend self-registration with :mod:`_registry`.  The default
+# (``cpu``) backend must register first so accelerator backends can
+# transparently fall back to it.  Both imports are kept side-effect-only
+# so callers never need to know which sub-package is active.
+import lmcache.v1.platform.cpu  # noqa: F401,E402  pylint: disable=wrong-import-position
+import lmcache.v1.platform.cuda  # noqa: F401,E402  pylint: disable=wrong-import-position
+
 # Note: torch.cuda / cupy monkey-patching has been replaced by the
 # explicit strategy-dispatch helpers in :mod:`device_ctx` and
 # :mod:`stream` so no global patching is required at import time.

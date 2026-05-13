@@ -47,9 +47,18 @@ def install_cupy_compat() -> None:
     """Inject a fake ``cupy`` when CUDA is unavailable.
 
     Must be called exactly once, at platform package init time.
+
+    Restricted to the CPU fallback platform so accelerator-specific
+    deployments (``xpu``, ``hpu``, ...) keep whatever ``cupy``-shaped
+    binding they ship without being shadowed by the no-op stub.
     """
     global _cupy_compat_installed  # noqa: PLW0603
     if _cupy_compat_installed or HAS_CUDA:
+        return
+    # First Party
+    from lmcache import torch_device_type
+
+    if torch_device_type != "cpu":
         return
     if "cupy" in sys.modules:
         # Real cupy already loaded — nothing to do.
