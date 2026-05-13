@@ -9,6 +9,7 @@ Uses Triton kernels instead of flashinfer for block-sparse attention.
 import torch
 
 # First Party
+from lmcache import torch_dev, torch_device_type
 from lmcache.logging import init_logger
 from lmcache.v1.compute.attention.abstract import AttentionInterface
 from lmcache.v1.compute.attention.metadata import (
@@ -49,8 +50,8 @@ class LMCTritonSparseBackend(AttentionInterface):
         self.k_scale = getattr(impl, "k_scale", None)
         self.v_scale = getattr(impl, "v_scale", None)
 
-        idx = torch.cuda.current_device()
-        self.device = torch.device(f"cuda:{idx}")
+        idx = torch_dev.current_device()
+        self.device = torch.device(f"{torch_device_type}:{idx}")
 
         logger.info(
             f"Initialized LMCTritonSparseBackend: "

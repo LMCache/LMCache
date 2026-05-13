@@ -49,6 +49,7 @@ from nixl._api import (
 import torch
 
 # First Party
+from lmcache import torch_dev
 from lmcache.integration.vllm.utils import get_size_bytes
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey
@@ -341,7 +342,7 @@ class NixlStorageAgent(ABC):
         self.nixl_agent = NixlAgent(self.agent_name, nixl_conf)
         self.nixl_agent.create_backend(backend, backend_params)
 
-        device_id = torch.cuda.current_device()
+        device_id = torch_dev.current_device()
         self.init_mem_handlers(device, buffer_ptr, buffer_size, page_size, device_id)
 
     def init_mem_handlers(self, device, buffer_ptr, buffer_size, page_size, device_id):
@@ -614,7 +615,7 @@ class NixlStorageBackend(AllocatorBackendInterface, ABC):
             base_buffer, self.buffer = _allocate_gpu_memory(
                 config.nixl_buffer_size, corrected_device
             )
-            torch.cuda.set_device(corrected_device)
+            torch_dev.set_device(corrected_device)
             self.base_buffer = base_buffer  # Prevents early GC of the aligned tensor.
             self.free_pinned_buffer = False
 

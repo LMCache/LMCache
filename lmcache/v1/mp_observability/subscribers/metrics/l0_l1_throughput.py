@@ -17,8 +17,6 @@ Implementation:
   - START/END events fire on the GPU cupy stream (``publish_on_stream``),
     so their timestamps reflect true GPU-stream time for the D2H/H2D
     copies — not Python/lock overhead.
-  - Sampling decision made at START time via ``random.random() <
-    sample_rate``.  Unsampled sessions leave zero state.
 """
 
 # Future
@@ -26,7 +24,6 @@ from __future__ import annotations
 
 # Standard
 from typing import Any
-import random
 
 # Third Party
 from opentelemetry import metrics
@@ -37,21 +34,11 @@ from lmcache.v1.mp_observability.event_bus import EventCallback, EventSubscriber
 
 
 class L0L1ThroughputSubscriber(EventSubscriber):
-    """Records L0↔L1 throughput by correlating MP_*_START→MP_*_END pairs.
+    """Records L0↔L1 throughput by correlating MP_*_START→MP_*_END pairs."""
 
-    Parameters:
-        sample_rate: Fraction of requests to track (0, 1.0].  Default 0.01
-            (1%), matching other lifecycle subscribers.
-    """
-
-    def __init__(self, sample_rate: float = 0.01) -> None:
-        assert 0 < sample_rate <= 1.0, (
-            f"sample_rate must be in (0, 1.0], got {sample_rate}"
-        )
-        self._sample_rate = sample_rate
-
-        # (session_id, device) -> t_start. Populated only for sampled
-        # sessions. Compound key avoids collisions when one MP server
+    def __init__(self) -> None:
+        # (session_id, device) -> t_start.
+        # Compound key avoids collisions when one MP server
         # handles the same request_id from multiple GPUs (TP/PP).
         self._pending_store: dict[tuple[str, str], float] = {}
         self._pending_load: dict[tuple[str, str], float] = {}
@@ -89,8 +76,6 @@ class L0L1ThroughputSubscriber(EventSubscriber):
     # -- Store path (L0→L1, GPU→CPU) ---------------------------------------
 
     def _on_store_start(self, event: Event) -> None:
-        if random.random() >= self._sample_rate:
-            return
         key = self._correlation_key(event)
         if key is not None:
             self._pending_store[key] = event.timestamp
@@ -105,8 +90,6 @@ class L0L1ThroughputSubscriber(EventSubscriber):
     # -- Retrieve path (L1→L0, CPU→GPU) ------------------------------------
 
     def _on_retrieve_start(self, event: Event) -> None:
-        if random.random() >= self._sample_rate:
-            return
         key = self._correlation_key(event)
         if key is not None:
             self._pending_load[key] = event.timestamp
@@ -144,7 +127,7 @@ class L0L1ThroughputSubscriber(EventSubscriber):
             return
         t_start = pending.pop(key, None)
         if t_start is None:
-            return  # session wasn't sampled
+            return  # No matching START event
 
         total_bytes = event.metadata.get("total_bytes", 0)
         if total_bytes <= 0:

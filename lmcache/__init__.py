@@ -15,7 +15,43 @@ except ImportError:
     __version__ = "unknown"
 
 logger = init_logger(__name__)
-__all__ = ["__version__"]
+# Standard
+
+__all__ = ["__version__", "torch_dev", "torch_device_type"]
+
+
+# --------------------------
+# Device detection
+# --------------------------
+def _detect_device() -> tuple[Any, str]:
+    """
+    Detect the available accelerator and return the corresponding torch
+    device module and device type string.
+
+    Returns:
+        tuple[Any, str]: A tuple of (torch_device_module, device_type_string),
+            e.g. ``(torch.cuda, "cuda")`` or ``(torch.xpu, "xpu")``.
+
+    Raises:
+        RuntimeError: If no supported accelerator is found (checked CUDA, XPU, HPU).
+    """
+    try:
+        # Third Party
+        import torch
+    except ImportError:
+        return None, "cpu"  # fallback，CLI-only
+
+    if hasattr(torch, "xpu") and torch.xpu.is_available():
+        return torch.xpu, "xpu"
+    elif hasattr(torch, "hpu") and torch.hpu.is_available():
+        return torch.hpu, "hpu"
+    else:
+        # Fallback: always return torch.cuda for backward compatibility
+        # with existing tests and code paths that assume CUDA is the default.
+        return torch.cuda, "cuda"
+
+
+torch_dev, torch_device_type = _detect_device()
 
 
 # --------------------------

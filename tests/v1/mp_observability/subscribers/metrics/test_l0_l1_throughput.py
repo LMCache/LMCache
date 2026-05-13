@@ -8,7 +8,6 @@ deterministic; the end-to-end test drives through ``EventBus``.
 """
 
 # Standard
-from unittest.mock import patch
 import time
 
 # Third Party
@@ -108,7 +107,7 @@ def _attrs_of_nonzero_dps(name: str) -> list[dict]:
 
 @pytest.fixture
 def subscriber():
-    return L0L1ThroughputSubscriber(sample_rate=1.0)
+    return L0L1ThroughputSubscriber()
 
 
 # ---------------------------------------------------------------------------
@@ -128,12 +127,6 @@ class TestSubscriptions:
         subs = subscriber.get_subscriptions()
         assert EventType.L1_WRITE_RESERVED not in subs
         assert EventType.L1_READ_RESERVED not in subs
-
-    def test_rejects_invalid_sample_rate(self):
-        with pytest.raises(AssertionError):
-            L0L1ThroughputSubscriber(sample_rate=0.0)
-        with pytest.raises(AssertionError):
-            L0L1ThroughputSubscriber(sample_rate=1.5)
 
 
 # ---------------------------------------------------------------------------
@@ -224,42 +217,6 @@ class TestLoadThroughput:
             and a.get("model_name") == "test-model"
             for a in attrs
         )
-
-
-# ---------------------------------------------------------------------------
-# Sampling behavior
-# ---------------------------------------------------------------------------
-
-
-class TestSampling:
-    def test_unsampled_session_leaves_no_state(self):
-        # Force "random" to always fail the sample gate.
-        sub = L0L1ThroughputSubscriber(sample_rate=0.01)
-        with patch(
-            "lmcache.v1.mp_observability.subscribers.metrics."
-            "l0_l1_throughput.random.random",
-            return_value=0.99,
-        ):
-            sub._on_store_start(_start_event(EventType.MP_STORE_START, "req-skip", 0.0))
-
-        assert ("req-skip", "cuda:0") not in sub._pending_store
-
-    def test_unsampled_session_does_not_record(self):
-        sub = L0L1ThroughputSubscriber(sample_rate=0.01)
-        count_before = _total_count(_STORE_METRIC)
-
-        with patch(
-            "lmcache.v1.mp_observability.subscribers.metrics."
-            "l0_l1_throughput.random.random",
-            return_value=0.99,
-        ):
-            sub._on_store_start(_start_event(EventType.MP_STORE_START, "req-u", 0.0))
-        # END arrives but START wasn't tracked → no record.
-        sub._on_store_end(
-            _end_event(EventType.MP_STORE_END, "req-u", 0.1, total_bytes=10**9)
-        )
-
-        assert _total_count(_STORE_METRIC) == count_before
 
 
 # ---------------------------------------------------------------------------
@@ -399,7 +356,7 @@ class TestEdgeCases:
 class TestEventBusIntegration:
     def test_store_pair_via_bus_records_metric(self):
         bus = EventBus(EventBusConfig(enabled=True, max_queue_size=100))
-        sub = L0L1ThroughputSubscriber(sample_rate=1.0)
+        sub = L0L1ThroughputSubscriber()
         bus.register_subscriber(sub)
 
         count_before = _total_count(_STORE_METRIC)

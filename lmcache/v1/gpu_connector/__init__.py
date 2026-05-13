@@ -3,6 +3,7 @@
 import torch
 
 # First Party
+from lmcache import torch_dev, torch_device_type
 from lmcache.utils import EngineType
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.gpu_connector.gpu_connectors import GPUConnectorInterface
@@ -40,8 +41,8 @@ def CreateGPUConnector(
         num_layer, _, chunk_size, num_kv_head, head_dim = metadata.kv_shape
         hidden_dim_size = num_kv_head * head_dim
         local_worker_id = metadata.local_worker_id
-        torch.cuda.device(local_worker_id)
-        device = torch.device(f"cuda:{local_worker_id}")
+        torch_dev.set_device(local_worker_id)
+        device = torch.device(f"{torch_device_type}:{local_worker_id}")
         kv_dtype = metadata.kv_dtype
         if config.use_layerwise:
             return SGLangLayerwiseGPUConnector(
@@ -63,7 +64,6 @@ def CreateGPUConnector(
             )
     elif engine == EngineType.VLLM:
         # First Party
-        from lmcache.integration.vllm.utils import get_vllm_torch_dev
         from lmcache.v1.gpu_connector.gpu_connectors import (
             VLLMBufferLayerwiseGPUConnector,
             VLLMPagedMemGPUConnectorV2,
@@ -72,11 +72,10 @@ def CreateGPUConnector(
         )
 
         local_worker_id = metadata.local_worker_id
-        torch_dev, dev_name = get_vllm_torch_dev()
         torch_dev.set_device(local_worker_id)
-        device = torch.device(f"{dev_name}:{local_worker_id}")
+        device = torch.device(f"{torch_device_type}:{local_worker_id}")
 
-        if dev_name == "xpu":
+        if torch_device_type == "xpu":
             # First Party
             from lmcache.v1.gpu_connector.xpu_connectors import (
                 VLLMPagedMemLayerwiseXPUConnector,
@@ -99,7 +98,7 @@ def CreateGPUConnector(
                     metadata, use_gpu, device, layout_hints=layout_hints
                 )
 
-        elif dev_name == "cuda":
+        elif torch_device_type == "cuda":
             if config.use_gpu_connector_v3:
                 return VLLMPagedMemGPUConnectorV3.from_metadata(
                     metadata, use_gpu, device, layout_hints=layout_hints
@@ -109,7 +108,7 @@ def CreateGPUConnector(
                     metadata, use_gpu, device, layout_hints=layout_hints
                 )
 
-        elif dev_name == "hpu":
+        elif torch_device_type == "hpu":
             # First Party
             from lmcache.v1.gpu_connector.hpu_connector import (
                 VLLMPagedMemHPUConnectorV2,
@@ -124,8 +123,8 @@ def CreateGPUConnector(
         from lmcache.v1.gpu_connector.gpu_connectors import TRTLLMGPUConnector
 
         local_worker_id = metadata.local_worker_id
-        torch.cuda.set_device(local_worker_id)
-        device = torch.device(f"cuda:{local_worker_id}")
+        torch_dev.set_device(local_worker_id)
+        device = torch.device(f"{torch_device_type}:{local_worker_id}")
         return TRTLLMGPUConnector.from_metadata(metadata, device=device)
 
     elif engine == EngineType.MOCK:
