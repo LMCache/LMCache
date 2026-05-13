@@ -291,7 +291,8 @@ class LoadStoreOp:
 
 
 StoreResult = bool
-RetrieveResult = bool
+# (success, failed_block_ids): failed_block_ids is empty on full success.
+RetrieveResult = tuple[bool, list[int]]
 LookupResult = int
 
 
@@ -1114,20 +1115,30 @@ class LMCacheMPWorkerAdapter:
                     request_id,
                 )
 
-        for request_id, (r_future, _) in self.retrieve_futures.items():
+        for request_id, (r_future, r_block_ids) in self.retrieve_futures.items():
             if not r_future.query():
                 continue
 
             r_result = r_future.result()
             finished_retrieves.add(request_id)
 
-            if not r_result:
-                logger.error(
-                    "Something went wrong when processing the "
-                    "retrieve request for request_id=%s, result=%s",
-                    request_id,
-                    r_result,
-                )
+            success, failed_block_ids = r_result
+            if failed_block_ids:
+                if not success:
+                    logger.error(
+                        "Retrieve for request_id=%s failed entirely; "
+                        "%d block(s) marked as failed",
+                        request_id,
+                        len(failed_block_ids),
+                    )
+                else:
+                    logger.warning(
+                        "Retrieve for request_id=%s: %d/%d block(s) failed",
+                        request_id,
+                        len(failed_block_ids),
+                        len(r_block_ids),
+                    )
+                self.error_block_ids.update(failed_block_ids)
 
         # Remove the finished requests from the tracking dicts
         for request_id in finished_stores:

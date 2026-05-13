@@ -210,8 +210,11 @@ def retrieve_keys(
     gpu_block_ids: list[int],
     event: torch.cuda.Event,
     timeout: float = DEFAULT_TIMEOUT,
-) -> list[bool]:
-    """Retrieve keys one at a time using the single-key API."""
+) -> list[tuple[bool, list[int]]]:
+    """Retrieve keys one at a time using the single-key API.
+
+    Returns a list of (success, failed_block_ids) tuples, one per key.
+    """
     results = []
     for i, key in enumerate(keys):
         start = i * BLOCKS_PER_KEY
@@ -480,7 +483,9 @@ def test_store_retrieve_verify(
     )
 
     assert len(retrieve_result) == num_keys
-    assert all(retrieve_result), "All keys should be retrieved successfully"
+    assert all(success for success, _ in retrieve_result), (
+        "All keys should be retrieved successfully"
+    )
 
     # Verify correctness by comparing tensors
     for i in range(num_keys):
@@ -511,7 +516,8 @@ def test_retrieve_partial_miss(
 ):
     """
     Test retrieving when some keys exist and some don't.
-    The retrieve should return ALL FALSE if any key is missing.
+    Keys that exist should be retrieved successfully (success=True, no failed blocks).
+    Keys that don't exist should report failed block IDs.
     """
     # Store first 30 keys (480 pages)
     num_stored = 30
@@ -544,11 +550,13 @@ def test_retrieve_partial_miss(
     )
 
     assert len(retrieve_result) == num_requested
-    # First 30 keys exist, remaining 30 don't
-    assert all(retrieve_result[:num_stored]), "Stored keys should be retrieved"
-    assert not any(retrieve_result[num_stored:]), (
-        "Non-existent keys should fail to retrieve"
-    )
+    # First 30 keys exist: success=True, no failed blocks.
+    for success, failed_blocks in retrieve_result[:num_stored]:
+        assert success, "Stored keys should be retrieved successfully"
+        assert failed_blocks == [], "Stored keys should have no failed blocks"
+    # Remaining 30 keys don't exist: should report failed block IDs.
+    for success, failed_blocks in retrieve_result[num_stored:]:
+        assert failed_blocks, "Non-existent keys should report failed block IDs"
 
     # Doing look up again to ensure data is ready
     lookup_result_2 = lookup_all(client, stored_keys)
@@ -562,7 +570,9 @@ def test_retrieve_partial_miss(
         client, stored_keys, registered_instance, retrieve_block_ids_2, event
     )
     assert len(retrieve_result_2) == num_stored
-    assert all(retrieve_result_2), "All stored keys should be retrieved successfully"
+    assert all(success for success, _ in retrieve_result_2), (
+        "All stored keys should be retrieved successfully"
+    )
 
 
 @pytest.mark.skipif(
@@ -636,7 +646,9 @@ def test_multiple_retrieve_operations(
             client, keys, registered_instance, blocks, event
         )
         assert len(retrieve_result) == keys_per_batch
-        assert all(retrieve_result), "All keys should be retrieved successfully"
+        assert all(success for success, _ in retrieve_result), (
+            "All keys should be retrieved successfully"
+        )
 
     # Verify correctness
     for layer in range(client_context.num_layers):

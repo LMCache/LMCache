@@ -27,7 +27,7 @@ from lmcache.v1.mp_observability.event_bus import EventBusConfig, init_event_bus
 
 try:
     # First Party
-    from lmcache.v1.distributed.storage_manager import StorageManager
+    from lmcache.v1.distributed.storage_manager import PartialReadResult, StorageManager
 except ImportError:
     # Skip tests if L1Manager cannot be imported
     pytest.skip(
@@ -713,10 +713,12 @@ class TestFailureEventProduction:
 
             # Allow drain thread to deliver the event.
             assert wait_for_condition(
-                lambda: len(
-                    _events_of_type(captured_events, EventType.L1_ALLOCATION_FAILED)
-                )
-                >= 1,
+                lambda: (
+                    len(
+                        _events_of_type(captured_events, EventType.L1_ALLOCATION_FAILED)
+                    )
+                    >= 1
+                ),
                 timeout=2.0,
             )
 
@@ -764,8 +766,9 @@ class TestFailureEventProduction:
                 assert objs is None  # all_good=False because middle key is gone
 
             assert wait_for_condition(
-                lambda: len(_events_of_type(captured_events, EventType.L1_READ_FAILED))
-                >= 1,
+                lambda: (
+                    len(_events_of_type(captured_events, EventType.L1_READ_FAILED)) >= 1
+                ),
                 timeout=2.0,
             )
 
@@ -777,3 +780,148 @@ class TestFailureEventProduction:
             assert keys[1] in meta["keys"]
         finally:
             sm.close()
+
+
+# =============================================================================
+# Tests for read_prefetched_results_partial (partial-recovery path)
+# =============================================================================
+
+
+class TestReadPrefetchedResultsPartial:
+    """Tests for StorageManager.read_prefetched_results_partial.
+
+    Verifies that the partial-read context manager correctly separates
+    good and bad chunks, returns the right indices, and manages read locks
+    without leaks on all exit paths.
+    """
+
+    def _write_and_prefetch(
+        self,
+        sm: StorageManager,
+        keys: list,
+        layout: MemoryLayoutDesc,
+    ) -> None:
+        """Helper: write keys into L1 then reserve read locks via prefetch."""
+        ret = sm.reserve_write(keys, layout, mode="new")
+        for key in keys:
+            assert key in ret
+        sm.finish_write(list(ret.keys()))
+        handle = sm.submit_prefetch_task(keys, layout)
+        hit_count = sm.query_prefetch_status(handle)
+        assert hit_count == len(keys)
+
+    def test_all_keys_present_returns_full_result(
+        self, basic_storage_manager_config, basic_layout
+    ):
+        """When all keys are in L1 the result has no bad indices."""
+        sm = StorageManager(basic_storage_manager_config)
+        keys = [make_object_key(i) for i in range(4)]
+        self._write_and_prefetch(sm, keys, basic_layout)
+
+        with sm.read_prefetched_results_partial(keys) as result:
+            assert isinstance(result, PartialReadResult)
+            assert len(result.good_objs) == 4
+            assert result.good_indices == list(range(4))
+            assert result.bad_indices == []
+
+        sm.finish_read_prefetched(keys)
+        sm.close()
+
+    def test_all_keys_missing_returns_empty_good(
+        self, basic_storage_manager_config, basic_layout
+    ):
+        """When no key is in L1 the result has no good objects."""
+        sm = StorageManager(basic_storage_manager_config)
+        keys = [make_object_key(i + 1000) for i in range(3)]
+        # Do NOT write or prefetch — keys are completely absent.
+
+        with sm.read_prefetched_results_partial(keys) as result:
+            assert isinstance(result, PartialReadResult)
+            assert result.good_objs == []
+            assert result.good_indices == []
+            assert result.bad_indices == list(range(3))
+
+        sm.close()
+
+    def test_partial_failure_correct_indices(
+        self, basic_storage_manager_config, basic_layout
+    ):
+        """When the middle key is missing, indices reflect the exact positions.
+
+        keys = [key0, key1, key2, key3]
+        Only key0, key2, key3 are in L1 (key1 is absent).
+        Expected: good_indices=[0,2,3], bad_indices=[1]
+        """
+        sm = StorageManager(basic_storage_manager_config)
+        all_keys = [make_object_key(i + 2000) for i in range(4)]
+        present_keys = [all_keys[0], all_keys[2], all_keys[3]]
+
+        # Write and prefetch only the present keys.
+        self._write_and_prefetch(sm, present_keys, basic_layout)
+
+        with sm.read_prefetched_results_partial(all_keys) as result:
+            assert isinstance(result, PartialReadResult)
+            assert len(result.good_objs) == 3
+            assert result.good_indices == [0, 2, 3]
+            assert result.bad_indices == [1]
+
+        sm.finish_read_prefetched(present_keys)
+        sm.close()
+
+    def test_read_locks_released_on_caller_exception(
+        self, basic_storage_manager_config, basic_layout
+    ):
+        """On caller exception the context manager releases all read locks.
+
+        After the exception the good keys must be writable again (i.e., no
+        dangling read locks).
+        """
+        sm = StorageManager(basic_storage_manager_config)
+        keys = [make_object_key(i + 3000) for i in range(3)]
+        self._write_and_prefetch(sm, keys, basic_layout)
+
+        with pytest.raises(RuntimeError, match="simulated error"):
+            with sm.read_prefetched_results_partial(keys) as result:
+                assert len(result.good_objs) == 3
+                raise RuntimeError("simulated error")
+
+        # Keys should be writable again — no dangling read locks.
+        ret = sm.reserve_write(keys, basic_layout, mode="update")
+        for key in keys:
+            assert key in ret, f"Key {key} should be writable after lock release"
+
+        sm.close()
+
+    def test_no_lock_leak_when_all_keys_missing(
+        self, basic_storage_manager_config, basic_layout
+    ):
+        """No lock leak when good_objs is empty (nothing to release)."""
+        sm = StorageManager(basic_storage_manager_config)
+        keys = [make_object_key(i + 4000) for i in range(3)]
+        # Keys are not in L1, so no read locks are ever acquired.
+
+        with sm.read_prefetched_results_partial(keys) as result:
+            assert result.good_objs == []
+
+        # No exception and no assertion error means no lock leak.
+        sm.close()
+
+    def test_good_indices_order_matches_input_keys(
+        self, basic_storage_manager_config, basic_layout
+    ):
+        """good_indices must be ordered by position in the original keys list.
+
+        keys = [key3, key1, key0, key2] — non-sequential hashes but all present.
+        good_indices should be [0, 1, 2, 3] (positions, not hash values).
+        """
+        sm = StorageManager(basic_storage_manager_config)
+        # Deliberately non-sequential order to test index tracking.
+        keys = [make_object_key(h + 5000) for h in [3, 1, 0, 2]]
+        self._write_and_prefetch(sm, keys, basic_layout)
+
+        with sm.read_prefetched_results_partial(keys) as result:
+            assert result.good_indices == [0, 1, 2, 3]
+            assert result.bad_indices == []
+
+        sm.finish_read_prefetched(keys)
+        sm.close()

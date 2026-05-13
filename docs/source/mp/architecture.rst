@@ -198,8 +198,12 @@ methods:
 - ``reserve_write()`` / ``finish_write()`` -- Two-phase write into L1.
 - ``submit_prefetch_task()`` / ``query_prefetch_status()`` -- Async lookup +
   L2 prefetch.
-- ``read_prefetched_results()`` / ``finish_read_prefetched()`` -- Read
-  prefetched data from L1 with automatic lock management.
+- ``read_prefetched_results()`` -- Read prefetched data from L1 with
+  all-or-nothing semantics.
+- ``read_prefetched_results_partial()`` -- Read partial prefetched data from
+  L1 with per-key success and failure indices.
+- ``finish_read_prefetched()`` -- Release read locks after prefetched data has
+  been consumed.
 
 L1Manager
 ~~~~~~~~~

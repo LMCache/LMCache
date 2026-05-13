@@ -467,7 +467,7 @@ def test_mq_retrieve():
     """
     Test MessageQueue with RETRIEVE request type.
     RETRIEVE takes (key: KeyType, gpu_id: int, gpu_block_ids: list[int],
-    event_ipc_handle: bytes) and returns (bytes, bool).
+    event_ipc_handle: bytes) and returns (bytes, (bool, list[int])).
     """
     # Create test key
     key = create_cache_key(0)
@@ -485,7 +485,7 @@ def test_mq_retrieve():
     helper.run_test(
         request_type=RequestType.RETRIEVE,
         payloads=[key, gpu_id, gpu_block_ids, test_handle, 0],
-        expected_response=(b"\x01" * 64, True),
+        expected_response=(b"\x01" * 64, (True, [])),
         num_requests=1,
     )
 

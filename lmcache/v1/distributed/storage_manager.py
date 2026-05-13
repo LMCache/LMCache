@@ -5,6 +5,7 @@ Distributed multi-tier storage manager for MP mode
 
 # Standard
 from contextlib import contextmanager
+from dataclasses import dataclass
 from typing import Iterator, Literal
 import time
 
@@ -47,6 +48,46 @@ from lmcache.v1.mp_observability.trace.decorator import (
 )
 
 logger = init_logger(__name__)
+
+
+@dataclass(frozen=True)
+class PartialReadResult:
+    """Outcome of a partial L1 read where some keys may be missing."""
+
+    good_objs: list[MemoryObj]
+    """Memory objects found in L1 storage."""
+
+    good_indices: list[int]
+    """Positions of the found keys in the original keys list."""
+
+    bad_indices: list[int]
+    """Positions of the missing keys in the original keys list."""
+
+
+@dataclass(frozen=True)
+class _ReadClassification:
+    """Classified outcome of a single unsafe_read call."""
+
+    good_keys: list[ObjectKey]
+    """Keys whose objects were successfully read."""
+
+    good_objs: list[MemoryObj]
+    """Memory objects corresponding to good_keys, in the same order."""
+
+    good_indices: list[int]
+    """Positions of good_keys in the original keys list."""
+
+    bad_keys: list[ObjectKey]
+    """Keys whose read failed for any reason."""
+
+    bad_indices: list[int]
+    """Positions of bad_keys in the original keys list."""
+
+    not_found_keys: list[ObjectKey]
+    """Subset of bad_keys that were absent from L1 (KEY_NOT_EXIST)."""
+
+    write_locked_keys: list[ObjectKey]
+    """Subset of bad_keys that were write-locked (KEY_NOT_READABLE)."""
 
 
 class StorageManager:
@@ -263,61 +304,39 @@ class StorageManager:
                 "StorageManager.read_prefetched_results.__enter__",
                 {"keys": keys},
             )
-        read_results = self._l1_manager.unsafe_read(keys)
-        good_keys: list[ObjectKey] = []
-        good_objs: list[MemoryObj] = []
-        bad_keys: list[ObjectKey] = []
-        not_found_keys: list[ObjectKey] = []
-        write_locked_keys: list[ObjectKey] = []
-        all_good = True
-        for k, (e, o) in read_results.items():
-            if o is None:
-                logger.error(
-                    "Failed to read prefetched object %s from L1 storage: %s",
-                    k,
-                    strerror(e),
-                )
-                bad_keys.append(k)
-                all_good = False
-                if e == L1Error.KEY_NOT_EXIST:
-                    not_found_keys.append(k)
-                elif e == L1Error.KEY_NOT_READABLE:
-                    write_locked_keys.append(k)
-                continue
-
-            good_keys.append(k)
-            good_objs.append(o)
+        cls = self._classify_unsafe_read(keys)
 
         # L1 read-failure anomaly reporting: unsafe_read is required to be
         # called post-reserve_read, so any failure here is a lock/eviction
         # race, not a normal cache miss.
-        if not_found_keys:
+        if cls.not_found_keys:
             self._event_bus.publish(
                 Event(
                     event_type=EventType.L1_READ_FAILED,
                     metadata={
                         "during": "l1_retrieve",
                         "reason": "not_found",
-                        "keys": not_found_keys,
+                        "keys": cls.not_found_keys,
                     },
                 )
             )
-        if write_locked_keys:
+        if cls.write_locked_keys:
             self._event_bus.publish(
                 Event(
                     event_type=EventType.L1_READ_FAILED,
                     metadata={
                         "during": "l1_retrieve",
                         "reason": "write_locked",
-                        "keys": write_locked_keys,
+                        "keys": cls.write_locked_keys,
                     },
                 )
             )
 
+        all_good = not cls.bad_keys
         successfully_yielded = False
 
         try:
-            yield good_objs if all_good else None
+            yield cls.good_objs if all_good else None
             successfully_yielded = True
         except Exception:
             logger.exception(
@@ -328,13 +347,13 @@ class StorageManager:
             # Decrease the read lock for all successfully read memory objects
             # if None is yielded or exception occurs during caller's processing
             if not all_good or not successfully_yielded:
-                self._l1_manager.finish_read(good_keys)
+                self._l1_manager.finish_read(cls.good_keys)
                 self._event_bus.publish(
                     Event(
                         event_type=EventType.SM_READ_PREFETCHED_FINISHED,
                         metadata={
-                            "succeeded_keys": good_keys,
-                            "failed_keys": bad_keys,
+                            "succeeded_keys": cls.good_keys,
+                            "failed_keys": cls.bad_keys,
                         },
                     )
                 )
@@ -343,6 +362,62 @@ class StorageManager:
                     "lmcache.v1.distributed.storage_manager."
                     "StorageManager.read_prefetched_results.__exit__",
                     {"keys": keys},
+                )
+
+    @contextmanager
+    def read_prefetched_results_partial(
+        self,
+        keys: list[ObjectKey],
+    ) -> Iterator[PartialReadResult]:
+        """
+        Like read_prefetched_results, but yields partial results instead of
+        aborting when some keys are missing.
+
+        Always yields a PartialReadResult with the objects that were found and
+        the indices of both hits and misses in the original keys list.
+
+        Args:
+            keys (list[ObjectKey]): List of object keys to read from L1.
+
+        Yields:
+            PartialReadResult: Found memory objects and their positions, plus
+                the positions of every key that was not found.
+
+        Note:
+            On the normal exit path the caller is responsible for calling
+            finish_read_prefetched() with the good keys once done.
+
+            On exception, read locks for successfully-read objects are released
+            automatically and the corresponding event is published.
+
+            Keys that were not found never acquired a read lock.
+        """
+        cls = self._classify_unsafe_read(keys)
+
+        successfully_yielded = False
+        try:
+            yield PartialReadResult(
+                good_objs=cls.good_objs,
+                good_indices=cls.good_indices,
+                bad_indices=cls.bad_indices,
+            )
+            successfully_yielded = True
+        except Exception:
+            logger.exception(
+                "Exception occurred while processing read prefetched results",
+            )
+            raise
+        finally:
+            if not successfully_yielded:
+                self._l1_manager.finish_read(cls.good_keys)
+                self._event_bus.publish(
+                    Event(
+                        event_type=EventType.SM_READ_PREFETCHED_FINISHED,
+                        metadata={
+                            "succeeded_keys": cls.good_keys,
+                            "failed_keys": cls.bad_keys,
+                        },
+                    )
                 )
 
     @enable_tracing()
@@ -639,3 +714,52 @@ class StorageManager:
             True if memory is consistent, False otherwise.
         """
         return self._l1_manager.memcheck()
+
+    def _classify_unsafe_read(self, keys: list[ObjectKey]) -> _ReadClassification:
+        """Call L1 unsafe_read and split results into typed good/bad buckets.
+
+        Args:
+            keys: Ordered list of object keys to read from L1.
+
+        Returns:
+            _ReadClassification with all success/failure buckets populated,
+            preserving the original key order in good_indices and bad_indices.
+        """
+        read_results = self._l1_manager.unsafe_read(keys)
+
+        good_keys: list[ObjectKey] = []
+        good_objs: list[MemoryObj] = []
+        good_indices: list[int] = []
+        bad_keys: list[ObjectKey] = []
+        bad_indices: list[int] = []
+        not_found_keys: list[ObjectKey] = []
+        write_locked_keys: list[ObjectKey] = []
+
+        for idx, k in enumerate(keys):
+            e, o = read_results[k]
+            if o is None:
+                logger.error(
+                    "Failed to read prefetched object %s from L1 storage: %s",
+                    k,
+                    strerror(e),
+                )
+                bad_keys.append(k)
+                bad_indices.append(idx)
+                if e == L1Error.KEY_NOT_EXIST:
+                    not_found_keys.append(k)
+                elif e == L1Error.KEY_NOT_READABLE:
+                    write_locked_keys.append(k)
+            else:
+                good_keys.append(k)
+                good_objs.append(o)
+                good_indices.append(idx)
+
+        return _ReadClassification(
+            good_keys=good_keys,
+            good_objs=good_objs,
+            good_indices=good_indices,
+            bad_keys=bad_keys,
+            bad_indices=bad_indices,
+            not_found_keys=not_found_keys,
+            write_locked_keys=write_locked_keys,
+        )

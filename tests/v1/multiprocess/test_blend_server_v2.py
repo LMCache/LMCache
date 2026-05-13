@@ -1985,7 +1985,7 @@ def test_cb_store_final_v2_then_normal_lookup(
         .to_cuda_future()
         .result(timeout=DEFAULT_TIMEOUT)
     )
-    assert retrieve_result is True
+    assert retrieve_result == (True, [])
 
     torch.cuda.synchronize()
     for layer in range(client_context.num_layers):
