@@ -18,10 +18,10 @@ The CUDA path uses IPC wrappers around GPU tensors and the existing
 For non-CUDA tensors, CUDA IPC is not available.  The CPU context path
 provides a generic protocol where workers:
 
-1. Gather KV blocks into CPU chunk tensors.
+1. Gather KV blocks into CPU chunk(or memory obj) tensors.
 2. Transport those CPU chunks to the server storage through a concrete
    `CPUContext` implementation.
-3. Retrieve CPU chunks from the server and scatter them back into device KV
+3. Retrieve CPU chunks(or memory obj) from the server and scatter them back into device KV
    tensors.
 
 ## Protocol additions
@@ -29,7 +29,7 @@ provides a generic protocol where workers:
 Three request types are used for non-CUDA mode (unchanged from the original
 cpu context design):
 
-- `REGISTER_KV_CACHE_BOUNCE`
+- `REGISTER_KV_CACHE_CPU_CONTEXT`
 - `STORE_CPU_CHUNKS`
 - `RETRIEVE_CPU_CHUNKS`
 
@@ -48,8 +48,7 @@ lmcache/v1/multiprocess/
 
 Provides:
 
-- **`CPUContextMetadata`** dataclass — layout metadata (replaces the old
-  `CPUBounceContext` dataclass):
+- **`CPUContextMetadata`** dataclass — layout metadata:
 
   ```python
   @dataclass
@@ -86,9 +85,9 @@ Provides:
 - **Shared utility functions** used by all concrete implementations:
   - `compute_kv_layout` — extract block size, layer count, hidden dim and
     dtype from live KV tensors.
-  - `gather_chunks_to_cpu` — gather paged KV blocks into a list of CPU
+  - `gather_paged_kv_to_cpu` — gather paged KV blocks into a list of CPU
     tensors (one per LMCache chunk).
-  - `scatter_cpu_chunks_to_kv` — scatter CPU chunk tensors back into paged
+  - `scatter_cpu_to_paged_kv` — scatter CPU chunk tensors back into paged
     KV tensors.
 
 ### `cpu_context_pickle.py`
@@ -138,7 +137,7 @@ The adapter holds a `cpu_context: CPUContext` instance and uses the uniform
 
 ```python
 # submit_store_request
-cpu_chunks = gather_chunks_to_cpu(kv_caches, block_ids, blocks_in_chunk, ...)
+cpu_chunks = gather_paged_kv_to_cpu(kv_caches, block_ids, blocks_in_chunk, ...)
 handle = self.cpu_context.prepare_store(key, instance_id, cpu_chunks)
 ok = self.cpu_context.commit_store(handle)   # synchronous; blocks for server ack
 self._cpu_store_done[request_id] = ok
@@ -152,7 +151,7 @@ self._cpu_store_done[request_id] = ok
 # submit_retrieve_request
 handle, chunks = self.cpu_context.prepare_retrieve(key, instance_id)  # synchronous
 if chunks is not None:
-    scatter_cpu_chunks_to_kv(kv_caches, block_ids, chunks, blocks_in_chunk,
+    scatter_cpu_to_paged_kv(kv_caches, block_ids, chunks, blocks_in_chunk,
                              skip_first_n_tokens=op.skip_first_n_tokens, ...)
 self.cpu_context.commit_retrieve(handle)
 self._cpu_retrieve_done[request_id] = (chunks is not None, block_ids)
@@ -199,7 +198,7 @@ Additional integration points:
               [device == cuda]                 [device != cuda]
                      |                                 |
                      v                                 v
-       REGISTER_KV_CACHE (CUDA IPC)      REGISTER_KV_CACHE_BOUNCE (CPU metadata)
+       REGISTER_KV_CACHE (CUDA IPC)      REGISTER_KV_CACHE_CPU_CONTEXT (CPU metadata)
                      |                         + create_cpu_context()
                      +----------------+----------------+
                                       |
@@ -212,7 +211,7 @@ Additional integration points:
                 submit_store()                    submit_store()
                      |                                 |
                      v                                 v
-            STORE (GPU -> L1)           gather_chunks_to_cpu()
+            STORE (GPU -> L1)           gather_paged_kv_to_cpu()
                      |                 + cpu_context.prepare_store()
                      v                 + cpu_context.commit_store()  [sync]
                  [READY]                    _cpu_store_done[id] = ok
@@ -226,7 +225,7 @@ Additional integration points:
                      |                                 |
                      v                                 v
           RETRIEVE (L1 -> GPU)    cpu_context.prepare_retrieve()  [sync]
-          [async future]          + scatter_cpu_chunks_to_kv()
+          [async future]          + scatter_cpu_to_paged_kv()
                                   + cpu_context.commit_retrieve()
                                   _cpu_retrieve_done[id] = (ok, block_ids)
                      |                                 |

@@ -17,8 +17,8 @@ from lmcache.utils import EngineType, _lmcache_nvtx_annotate, init_logger
 from lmcache.v1.multiprocess.cpu_context import (
     CPUContext,
     compute_kv_layout,
-    gather_chunks_to_cpu,
-    scatter_cpu_chunks_to_kv,
+    gather_paged_kv_to_cpu,
+    scatter_cpu_to_paged_kv,
 )
 from lmcache.v1.multiprocess.custom_types import (
     BlockAllocationRecord,
@@ -1024,7 +1024,7 @@ class LMCacheMPWorkerAdapter:
         if self._use_cpu_context:
             assert self.cpu_context is not None
             torch_dev.synchronize()
-            cpu_chunks = gather_chunks_to_cpu(
+            cpu_chunks = gather_paged_kv_to_cpu(
                 self.kv_caches,
                 op.block_ids,
                 self.blocks_in_chunk,
@@ -1080,7 +1080,7 @@ class LMCacheMPWorkerAdapter:
             ok = chunks is not None
             if chunks is not None:
                 try:
-                    scatter_cpu_chunks_to_kv(
+                    scatter_cpu_to_paged_kv(
                         self.kv_caches,
                         op.block_ids,
                         chunks,

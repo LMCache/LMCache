@@ -96,8 +96,8 @@ def test_compute_kv_layout_and_gather_scatter_roundtrip() -> None:
     # First Party
     from lmcache.integration.vllm.vllm_multi_process_adapter import (
         compute_kv_layout,
-        gather_chunks_to_cpu,
-        scatter_cpu_chunks_to_kv,
+        gather_paged_kv_to_cpu,
+        scatter_cpu_to_paged_kv,
     )
 
     source = _make_kv_caches(num_layers=2, num_blocks=8, block_size=4)
@@ -115,9 +115,9 @@ def test_compute_kv_layout_and_gather_scatter_roundtrip() -> None:
     assert detected_kv_format is not None
 
     blocks_per_chunk = 2
-    gathered = gather_chunks_to_cpu(source, [0, 1], blocks_per_chunk)
+    gathered = gather_paged_kv_to_cpu(source, [0, 1], blocks_per_chunk)
     destination = {name: torch.zeros_like(tensor) for name, tensor in source.items()}
-    scatter_cpu_chunks_to_kv(destination, [4, 5], gathered, blocks_per_chunk)
+    scatter_cpu_to_paged_kv(destination, [4, 5], gathered, blocks_per_chunk)
 
     for name in source:
         assert torch.allclose(source[name][:, 0], destination[name][:, 4])
@@ -139,8 +139,8 @@ def test_gather_scatter_roundtrip_hnd_layout(
     # First Party
     from lmcache.integration.vllm.vllm_multi_process_adapter import (
         compute_kv_layout,
-        gather_chunks_to_cpu,
-        scatter_cpu_chunks_to_kv,
+        gather_paged_kv_to_cpu,
+        scatter_cpu_to_paged_kv,
     )
     import lmcache.c_ops as lmc_ops
 
@@ -160,7 +160,7 @@ def test_gather_scatter_roundtrip_hnd_layout(
     assert detected_kv_format == getattr(lmc_ops.GPUKVFormat, expected_format)
 
     blocks_per_chunk = 2
-    gathered = gather_chunks_to_cpu(
+    gathered = gather_paged_kv_to_cpu(
         source,
         [0, 1],
         blocks_per_chunk,
@@ -168,7 +168,7 @@ def test_gather_scatter_roundtrip_hnd_layout(
         gpu_kv_format=detected_kv_format,
     )
     destination = {name: torch.zeros_like(tensor) for name, tensor in source.items()}
-    scatter_cpu_chunks_to_kv(
+    scatter_cpu_to_paged_kv(
         destination,
         [4, 5],
         gathered,
@@ -190,16 +190,16 @@ def test_scatter_respects_skip_first_n_tokens() -> None:
     """Ensure scatter honors skip_first_n_tokens and preserves skipped blocks."""
     # First Party
     from lmcache.integration.vllm.vllm_multi_process_adapter import (
-        gather_chunks_to_cpu,
-        scatter_cpu_chunks_to_kv,
+        gather_paged_kv_to_cpu,
+        scatter_cpu_to_paged_kv,
     )
 
     source = _make_kv_caches(num_layers=2, num_blocks=8, block_size=4)
     destination = {
         name: torch.full_like(tensor, 999.0) for name, tensor in source.items()
     }
-    gathered = gather_chunks_to_cpu(source, [0, 1, 2, 3], blocks_per_chunk=4)
-    scatter_cpu_chunks_to_kv(
+    gathered = gather_paged_kv_to_cpu(source, [0, 1, 2, 3], blocks_per_chunk=4)
+    scatter_cpu_to_paged_kv(
         destination,
         [0, 1, 2, 3],
         gathered,
@@ -219,8 +219,8 @@ def test_compute_kv_layout_and_gather_scatter_roundtrip_mla() -> None:
     # First Party
     from lmcache.integration.vllm.vllm_multi_process_adapter import (
         compute_kv_layout,
-        gather_chunks_to_cpu,
-        scatter_cpu_chunks_to_kv,
+        gather_paged_kv_to_cpu,
+        scatter_cpu_to_paged_kv,
     )
 
     source = _make_mla_kv_caches(
@@ -240,9 +240,9 @@ def test_compute_kv_layout_and_gather_scatter_roundtrip_mla() -> None:
     assert detected_kv_format is not None
 
     blocks_per_chunk = 2
-    gathered = gather_chunks_to_cpu(source, [0, 1], blocks_per_chunk)
+    gathered = gather_paged_kv_to_cpu(source, [0, 1], blocks_per_chunk)
     destination = {name: torch.zeros_like(tensor) for name, tensor in source.items()}
-    scatter_cpu_chunks_to_kv(destination, [4, 5], gathered, blocks_per_chunk)
+    scatter_cpu_to_paged_kv(destination, [4, 5], gathered, blocks_per_chunk)
 
     for name in source:
         assert torch.allclose(source[name][0], destination[name][4])
@@ -262,8 +262,8 @@ def test_scatter_mla_respects_skip_first_n_tokens() -> None:
     """Ensure MLA scatter honors skip_first_n_tokens and preserves skipped blocks."""
     # First Party
     from lmcache.integration.vllm.vllm_multi_process_adapter import (
-        gather_chunks_to_cpu,
-        scatter_cpu_chunks_to_kv,
+        gather_paged_kv_to_cpu,
+        scatter_cpu_to_paged_kv,
     )
 
     source = _make_mla_kv_caches(
@@ -272,8 +272,8 @@ def test_scatter_mla_respects_skip_first_n_tokens() -> None:
     destination = {
         name: torch.full_like(tensor, 999.0) for name, tensor in source.items()
     }
-    gathered = gather_chunks_to_cpu(source, [0, 1, 2, 3], blocks_per_chunk=4)
-    scatter_cpu_chunks_to_kv(
+    gathered = gather_paged_kv_to_cpu(source, [0, 1, 2, 3], blocks_per_chunk=4)
+    scatter_cpu_to_paged_kv(
         destination,
         [0, 1, 2, 3],
         gathered,
@@ -292,8 +292,8 @@ def test_scatter_mla_skip_past_chunk_keeps_destination_unchanged() -> None:
     """Ensure MLA scatter is a no-op when skip_first_n_tokens exceeds chunk tokens."""
     # First Party
     from lmcache.integration.vllm.vllm_multi_process_adapter import (
-        gather_chunks_to_cpu,
-        scatter_cpu_chunks_to_kv,
+        gather_paged_kv_to_cpu,
+        scatter_cpu_to_paged_kv,
     )
 
     source = _make_mla_kv_caches(
@@ -302,8 +302,8 @@ def test_scatter_mla_skip_past_chunk_keeps_destination_unchanged() -> None:
     destination = {
         name: torch.full_like(tensor, 123.0) for name, tensor in source.items()
     }
-    gathered = gather_chunks_to_cpu(source, [0, 1, 2, 3], blocks_per_chunk=4)
-    scatter_cpu_chunks_to_kv(
+    gathered = gather_paged_kv_to_cpu(source, [0, 1, 2, 3], blocks_per_chunk=4)
+    scatter_cpu_to_paged_kv(
         destination,
         [0, 1, 2, 3],
         gathered,

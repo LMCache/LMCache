@@ -8,7 +8,7 @@ This module provides:
   ``CPUContextPickle``) each decide *how* data is serialised and transported.
 - ``create_cpu_context()``: factory that returns the appropriate
   ``CPUContext`` subclass (currently always ``CPUContextPickle``).
-- ``compute_kv_layout``, ``gather_chunks_to_cpu``, ``scatter_cpu_chunks_to_kv``:
+- ``compute_kv_layout``, ``gather_paged_kv_to_cpu``, ``scatter_cpu_to_paged_kv``:
   shared gather/scatter utilities used by all concrete implementations.
 """
 
@@ -197,7 +197,7 @@ def compute_kv_layout(
     return block_size, num_layers, hidden_dim_size, dtype_str, gpu_kv_format
 
 
-def gather_chunks_to_cpu(
+def gather_paged_kv_to_cpu(
     kv_caches: dict[str, torch.Tensor],
     block_ids: list[int],
     blocks_per_chunk: int,
@@ -314,7 +314,7 @@ def gather_chunks_to_cpu(
     return chunks
 
 
-def scatter_cpu_chunks_to_kv(
+def scatter_cpu_to_paged_kv(
     kv_caches: dict[str, torch.Tensor],
     block_ids: list[int],
     chunks: list[torch.Tensor],
@@ -329,7 +329,7 @@ def scatter_cpu_chunks_to_kv(
         kv_caches: Per-layer KV tensor mapping to write into.
         block_ids: Flattened destination block IDs for all chunks.
         chunks: List of CPU chunk tensors (as returned by
-            :func:`gather_chunks_to_cpu`).
+            :func:`gather_paged_kv_to_cpu`).
         blocks_per_chunk: Number of paged blocks in one LMCache chunk.
         skip_first_n_tokens: Token prefix to skip when scattering.
         layout_hints: Optional engine layout hints.
